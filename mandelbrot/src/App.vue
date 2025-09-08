@@ -1,10 +1,10 @@
 <script setup lang="ts">
 import WebGpuSurface from "./components/WebGpuSurface.vue";
 import {onMounted} from "vue";
-import HelloWorld from "./components/HelloWorld.vue";
+
 onMounted(() => {
-  const elem = document.getElementById("fullscreen");
-    elem.webkitRequestFullscreen()
+
+
 })
 </script>
 
@@ -14,17 +14,16 @@ onMounted(() => {
   </div>
 </template>
 
-<style scoped>
-.logo {
-  height: 6em;
-  padding: 1.5em;
-  will-change: filter;
-  transition: filter 300ms;
+<style>
+#fullscreen {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100%;
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  overflow: hidden;
 }
-.logo:hover {
-  filter: drop-shadow(0 0 2em #646cffaa);
-}
-.logo.vue:hover {
-  filter: drop-shadow(0 0 2em #42b883aa);
-}
+
 </style>

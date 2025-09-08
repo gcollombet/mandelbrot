@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, ref} from 'vue'
+import {onMounted} from 'vue'
 
 import {run_web} from "mandelbrot"
 
@@ -10,6 +10,8 @@ onMounted(() => {
 })
 
 function resize() {
+  const canvas = document.getElementById('canvas') as HTMLCanvasElement
+  if (!canvas || !canvas.parentElement) return
   canvas.height = canvas.parentElement.clientHeight
   canvas.width = canvas.parentElement.clientWidth
 }
