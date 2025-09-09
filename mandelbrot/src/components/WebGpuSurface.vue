@@ -3,7 +3,8 @@ import {onMounted, ref} from 'vue'
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 
-const antialiasLevel = 4; // Change à 2 ou 4 pour x2 ou x4
+const antialiasLevel = 1; // Peut être 1, 2 ou 4
+const palettePeriod = 128; // Nombre d'itérations avant répétition de la palette
 
 function drawMandelbrot(
     ctx: GPUCanvasContext,
@@ -15,17 +16,18 @@ function drawMandelbrot(
     cy: number,
     scale: number,
     antialiasLevel: number,
-    angle: number // Ajout de l'angle
+    angle: number
 ) {
-  // Shader WGSL Mandelbrot avec supersampling et rotation
+  // Shader WGSL Mandelbrot avec palette cyclique et lissage des itérations
   const shaderCode = `
     struct Uniforms {
       cx: f32,
       cy: f32,
       scale: f32,
       aspect: f32,
-      aa: i32,
+      antialiasLevel: i32,
       angle: f32,
+      palettePeriod: f32,
     };
     @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
@@ -50,22 +52,41 @@ function drawMandelbrot(
       return out;
     }
 
-    fn mandelbrot(x0: f32, y0: f32) -> vec3<f32> {
-      let max_iter: i32 = 256;
+    fn palette(v: f32, dx: f32, dy: f32) -> vec3<f32> {
+      let t = abs(v * 2.0 - 1.0);
+      let r = 0.5 + 0.5 * cos(1.0 + t * 6.28 - dx / 2.0);
+      let g = 0.5 + 0.5 * sin(2.0 + t * 5.88 - dy / 4.0);
+      let b = 0.5 + 0.5 * cos(t * 3.14 + ((dx * dy) / 8.0));
+      return vec3<f32>(r, g, b);
+    }
+
+    fn mandelbrot(x0: f32, y0: f32, dx: f32, dy: f32) -> vec3<f32> {
+      // Calcul dynamique du nombre d'itérations optimal selon le zoom
+      let max_iter_f: f32 = clamp(80.0 + 40.0 * log2(1.0 / uniforms.scale), 128.0, 4096.0);
+      let max_iter: i32 = i32(max_iter_f);
       var x: f32 = 0.0;
       var y: f32 = 0.0;
       var iter: i32 = 0;
-      while (x*x + y*y <= 4.0 && iter < max_iter) {
+      var x2: f32 = 0.0;
+      var y2: f32 = 0.0;
+      while (x2 + y2 <= 1000.0 && iter < max_iter) {
         let xtemp = x*x - y*y + x0;
         y = 2.0*x*y + y0;
         x = xtemp;
+        x2 = x*x;
+        y2 = y*y;
         iter = iter + 1;
       }
       if (iter == max_iter) {
         return vec3<f32>(0.0, 0.0, 0.0);
       }
-      let t = f32(iter) / f32(max_iter);
-      return vec3<f32>(t, t*t, 0.5 + 0.5*t);
+      // Lissage des itérations
+      let log_zn = log(x2 + y2) / 2.0;
+      let nu = f32(iter) + 1.0 - log(log_zn / log(2.0)) / log(2.0);
+      // Palette cyclique lissée
+      let period = uniforms.palettePeriod;
+      let v = nu % period / period;
+      return palette(v, dx, dy);
     }
 
     fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
@@ -77,21 +98,21 @@ function drawMandelbrot(
     @fragment
     fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       var color = vec3<f32>(0.0, 0.0, 0.0);
-      let aa = uniforms.aa;
-      if (aa == 2) {
-        let offsets = array<vec2<f32>, 2>(
-          vec2<f32>(0.25, 0.25),
-          vec2<f32>(0.75, 0.75)
-        );
-        for (var i = 0; i < 2; i = i + 1) {
-          let uv = fragCoord + (offsets[i] - vec2<f32>(0.5, 0.5)) / f32(${width});
-          var xy = rotate((uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (uv.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
-          let x0 = xy.x + uniforms.cx;
-          let y0 = xy.y + uniforms.cy;
-          color = color + mandelbrot(x0, y0);
-        }
-        color = color / 2.0;
-      } else if (aa == 4) {
+      let aa = uniforms.antialiasLevel;
+       if (aa == 2) {
+         let offsets = array<vec2<f32>, 2>(
+           vec2<f32>(0.25, 0.25),
+           vec2<f32>(0.75, 0.75)
+         );
+         for (var i = 0; i < 2; i = i + 1) {
+           let uv = fragCoord + (offsets[i] - vec2<f32>(0.5, 0.5)) / f32(${width});
+           var xy = rotate((uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (uv.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
+           let x0 = xy.x + uniforms.cx;
+           let y0 = xy.y + uniforms.cy;
+           color = color + mandelbrot(x0, y0, fragCoord.x, fragCoord.y);
+         }
+         color = color / 2.0;
+       } else if (aa == 4) {
         let offsets = array<vec2<f32>, 4>(
           vec2<f32>(0.25, 0.25),
           vec2<f32>(0.75, 0.25),
@@ -103,14 +124,14 @@ function drawMandelbrot(
           var xy = rotate((uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (uv.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
           let x0 = xy.x + uniforms.cx;
           let y0 = xy.y + uniforms.cy;
-          color = color + mandelbrot(x0, y0);
+          color = color + mandelbrot(x0, y0, fragCoord.x, fragCoord.y);
         }
         color = color / 4.0;
-      } else {
+       } else {
         var xy = rotate((fragCoord.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (fragCoord.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
         let x0 = xy.x + uniforms.cx;
         let y0 = xy.y + uniforms.cy;
-        color = mandelbrot(x0, y0);
+        color = mandelbrot(x0, y0, fragCoord.x, fragCoord.y);
       }
       return vec4<f32>(color, 1.0);
     }
@@ -123,7 +144,8 @@ function drawMandelbrot(
     scale,
     width / height,
     antialiasLevel,
-    angle // Ajout de l'angle
+    angle,
+    palettePeriod,
   ]);
   const uniformBuffer = device.createBuffer({
     size: uniformData.byteLength,
@@ -233,14 +255,18 @@ async function initWebGPU() {
     { cx: -0.743643887037158704752191506114774, cy: 0.131825904205311970493132056385139 }, // Deep zoom
     { cx: -1.749705768080503, cy: -6.13369029080495e-05 }, // Zoom sur une autre région intéressante
     { cx: -0.5503295086752807, cy:-0.6259346555912755 }, // Zoom sur une autre région intéressante
-    { cx: 1.9854527029227764, cy:0.00019009159314173224}, // Zoom sur une autre région intéressante
     { cx: -0.19569582393630502, cy: 1.1000276413181806}, // Zoom sur une autre région intéressante
   ];
   let currentInterestIndex = 0;
   function resize() {
-    if(!canvas) return;
-    canvas.height = canvas.parentElement?.clientHeight || 0;
-    canvas.width = canvas.parentElement?.clientWidth || 0;
+    if (!canvas) return;
+    const dpr = window.devicePixelRatio || 1;
+    const width = canvas.parentElement?.clientWidth || 0;
+    const height = canvas.parentElement?.clientHeight || 0;
+    canvas.width = Math.round(width * dpr);
+    canvas.height = Math.round(height * dpr);
+    canvas.style.width = width + 'px';
+    canvas.style.height = height + 'px';
   }
 
   function animate() {
