@@ -36,6 +36,9 @@ function drawMandelbrot(
   });
   device.queue.writeBuffer(mandelbrotBuffer, 0, mandelbrotBufferData.buffer);
 
+  // TODO : c'est vraiment n'importe quoi, il faut mettre des créer les pipeline et tout ce qui peut être réutilisé en dehors de cette fonction
+
+
   // --- Première passe : calcul des itérations et dérivée ---
   const shaderCodePass1 = `
     struct MandelbrotStep {
