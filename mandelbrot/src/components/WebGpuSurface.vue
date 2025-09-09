@@ -1,10 +1,12 @@
 <script setup lang="ts">
 import {onMounted, ref} from 'vue'
+import {mandelbrot, MandelbrotStep} from "mandelbrot"
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 
 const antialiasLevel = 1; // Peut être 1, 2 ou 4
 const palettePeriod = 128; // Nombre d'itérations avant répétition de la palette
+const orbit: MandelbrotStep[] = mandelbrot(0, 0, 1000000);
 
 function drawMandelbrot(
     ctx: GPUCanvasContext,
@@ -18,8 +20,30 @@ function drawMandelbrot(
     antialiasLevel: number,
     angle: number
 ) {
+
+  // --- Création du buffer d'orbite sous forme de structure ---
+  const mandelbrotBufferData = new Float32Array(orbit.length * 4);
+  for (let i = 0; i < orbit.length; i++) {
+    mandelbrotBufferData[i * 4] = orbit[i].zx;
+    mandelbrotBufferData[i * 4 + 1] = orbit[i].zy;
+    mandelbrotBufferData[i * 4 + 2] = orbit[i].dx;
+    mandelbrotBufferData[i * 4 + 3] = orbit[i].dy;
+  }
+  // Correction : utiliser STORAGE au lieu de UNIFORM
+  const mandelbrotBuffer = device.createBuffer({
+    size: mandelbrotBufferData.byteLength,
+    usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+  });
+  device.queue.writeBuffer(mandelbrotBuffer, 0, mandelbrotBufferData.buffer);
+
   // --- Première passe : calcul des itérations et dérivée ---
   const shaderCodePass1 = `
+    struct MandelbrotStep {
+      zx: f32,
+      zy: f32,
+      dx: f32,
+      dy: f32,
+    };
     struct Uniforms {
       cx: f32,
       cy: f32,
@@ -30,6 +54,8 @@ function drawMandelbrot(
       palettePeriod: f32,
     };
     @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+    // Correction : utiliser storage buffer
+    @group(0) @binding(1) var<storage, read> mandelbrot: array<MandelbrotStep>;
     struct VertexOutput {
       @builtin(position) position : vec4<f32>,
       @location(0) fragCoord : vec2<f32>
@@ -49,8 +75,12 @@ function drawMandelbrot(
       out.fragCoord = (pos[VertexIndex] + vec2<f32>(1.0, 1.0)) * 0.5;
       return out;
     }
-    fn mandelbrot(x0: f32, y0: f32) -> vec2<f32> {
-      let max_iter_f: f32 = clamp(80.0 + 40.0 * log2(1.0 / uniforms.scale), 128.0, 4096.0);
+    fn get_orbit_step(iter: i32) -> MandelbrotStep {
+      let idx = clamp(iter, 0, i32(arrayLength(&mandelbrot)) - 1);
+      return mandelbrot[idx];
+    }
+    fn mandelbrot_func(x0: f32, y0: f32) -> vec2<f32> {
+      let max_iter_f: f32 = clamp(80.0 + 40.0 * log2(1.0 / uniforms.scale), 128.0, f32(arrayLength(&mandelbrot)));
       let max_iter: i32 = i32(max_iter_f);
       var x: f32 = 0.0;
       var y: f32 = 0.0;
@@ -66,10 +96,10 @@ function drawMandelbrot(
         x = xtemp;
         x2 = x*x;
         y2 = y*y;
-        // Dérivée simple (approximation)
         d = 2.0 * sqrt(x2 + y2);
         iter = iter + 1;
       }
+      let step = get_orbit_step(iter);
       let log_zn = log(x2 + y2) / 2.0;
       let nu = f32(iter) + 1.0 - log(log_zn / log(2.0)) / log(2.0);
       return vec2<f32>(nu, d);
@@ -84,15 +114,19 @@ function drawMandelbrot(
       var xy = rotate((fragCoord.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (fragCoord.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
       let x0 = xy.x + uniforms.cx;
       let y0 = xy.y + uniforms.cy;
-      let res = mandelbrot(x0, y0);
+      let res = mandelbrot_func(x0, y0);
       return vec4<f32>(res.x, res.y, 0.0, 1.0);
     }
   `;
 
-  // --- Deuxième passe : coloration ---
+  // --- Deuxième passe : coloration + bloom ---
+  const bloomRadius = 2; // rayon du bloom (pixels)
+  const bloomStrength = 0.7; // force du bloom
   const shaderCodePass2 = `
     struct Uniforms {
       palettePeriod: f32,
+      bloomRadius: i32,
+      bloomStrength: f32,
     };
     @group(0) @binding(0) var<uniform> uniforms: Uniforms;
     @group(0) @binding(1) var tex: texture_2d<f32>;
@@ -122,8 +156,7 @@ function drawMandelbrot(
       let b = 0.5 + 0.5 * cos(t * 3.14 + ((dx) / 8.0));
       let baseColor = vec3<f32>(r, g, b);
       // Blinn-Phong shading
-      let lightDir = normalize(vec3<f32>(-0.5, 0.7, 1.0)); // direction de la lumière
-      // Estimation de la normale à partir de d (plus d = plus de relief)
+      let lightDir = normalize(vec3<f32>(-0.5, 0.7, 1.0));
       let normal = normalize(vec3<f32>(0.0, 0.0, 1.0 + d * 0.2));
       let viewDir = normalize(vec3<f32>(0.0, 0.0, 1.0));
       let halfDir = normalize(lightDir + viewDir);
@@ -133,18 +166,54 @@ function drawMandelbrot(
       let color = baseColor * (ambient + 0.7 * diffuse) + vec3<f32>(1.0, 1.0, 1.0) * 0.3 * specular;
       return color;
     }
+    fn luminance(c: vec3<f32>) -> f32 {
+      return dot(c, vec3<f32>(0.299, 0.587, 0.114));
+    }
+    fn bloom(uv: vec2<f32>, texSize: vec2<i32>, baseColor: vec3<f32>) -> vec3<f32> {
+      var sum: vec3<f32> = vec3<f32>(0.0, 0.0, 0.0);
+      var count: f32 = 0.0;
+      let radius = uniforms.bloomRadius;
+      let strength = uniforms.bloomStrength;
+      let pixelCoord = vec2<i32>(uv * vec2<f32>(texSize));
+      for (var dx = -radius; dx <= radius; dx = dx + 1) {
+        for (var dy = -radius; dy <= radius; dy = dy + 1) {
+          let coord = pixelCoord + vec2<i32>(dx, dy);
+          if (coord.x >= 0 && coord.y >= 0 && coord.x < texSize.x && coord.y < texSize.y) {
+            let data = textureLoad(tex, coord, 0);
+            let nu = data.x;
+            let d = data.y;
+            let v = nu % uniforms.palettePeriod / uniforms.palettePeriod;
+            let c = palette(v, d, f32(coord.x)/f32(texSize.x), f32(coord.y)/f32(texSize.y));
+            if (luminance(c) > 0.7) { // seuil de luminosité
+              sum = sum + c;
+              count = count + 1.0;
+            }
+          }
+        }
+      }
+      if (count > 0.0) {
+        return baseColor + sum / count * strength;
+      } else {
+        return baseColor;
+      }
+    }
     @fragment
     fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       let uv = fragCoord;
       let texSize = vec2<i32>(textureDimensions(tex, 0));
-      let pixelCoord = vec2<i32>(uv * vec2<f32>(texSize));
+      // Correction de la conversion de types pour pixelCoord
+      let pixelCoord = vec2<i32>(
+        i32(uv.x * f32(texSize.x)),
+        i32((1.0 - uv.y) * f32(texSize.y))
+      );
       let data = textureLoad(tex, pixelCoord, 0);
       let nu = data.x;
       let d = data.y;
       let period = uniforms.palettePeriod;
       let v = nu % period / period;
-      let color = palette(v, d, fragCoord.x, fragCoord.y);
-      return vec4<f32>(color, 1.0);
+      let baseColor = palette(v, d, fragCoord.x, fragCoord.y);
+      //let color = bloom(uv, texSize, baseColor);
+      return vec4<f32>(baseColor, 1.0);
     }
   `;
 
@@ -166,6 +235,8 @@ function drawMandelbrot(
 
   const uniformData2 = new Float32Array([
     palettePeriod,
+    bloomRadius,
+    bloomStrength,
   ]);
   const uniformBuffer2 = device.createBuffer({
     size: uniformData2.byteLength,
@@ -191,7 +262,10 @@ function drawMandelbrot(
   });
   const bindGroup1 = device.createBindGroup({
     layout: pipeline1.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: uniformBuffer1 } }]
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer1 } },
+      { binding: 1, resource: { buffer: mandelbrotBuffer } }
+    ]
   });
 
   // --- Pipeline deuxième passe ---
@@ -263,7 +337,6 @@ async function initWebGPU() {
   let cx = -0.743643887037158704752191506114774;
   let cy = 0.131825904205311970493132056385139;
   let scale = 2.5;
-  let isUserZooming = false;
   let moveStep = 0.04; // déplacement relatif à scale
 
   // Variables pour navigation fluide
@@ -304,8 +377,7 @@ async function initWebGPU() {
 
   function handleWheel(e: WheelEvent) {
     e.preventDefault();
-    isUserZooming = true;
-    const zoomFactor = 0.9;
+    const zoomFactor = 0.8;
     if (e.deltaY < 0) {
       targetScale *= zoomFactor;
     } else {
@@ -365,18 +437,13 @@ async function initWebGPU() {
     scale += velocityScale;
     angle += velocityAngle;
     drawMandelbrot(ctx, device, format, canvas.width, canvas.height, cx, cy, scale, antialiasLevel, angle);
-    // Zoom auto si pas d'interaction utilisateur
-    if (!isUserZooming && scale > 0.0001) {
-      targetScale *= 0.985;
-    }
-    if (scale < 0.00001) {
+    if (scale < 0.0000001) {
       currentInterestIndex = (currentInterestIndex + 1) % interestPointCollection.length;
       const point = interestPointCollection[currentInterestIndex];
       targetCx = cx = point.cx;
       targetCy = cy = point.cy;
       targetScale = scale = 2.5;
       velocityCx = velocityCy = velocityScale = 0;
-      isUserZooming = false;
       targetAngle = angle = 0.0;
       velocityAngle = 0.0;
     }

@@ -5,8 +5,10 @@ use winit::{
     application::ApplicationHandler, event::*, event_loop::{ActiveEventLoop, EventLoop}, keyboard::{KeyCode, PhysicalKey}, window::Window
 };
 
+
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
+use malachite_float::Float;
 
 // This will store the state of our game
 pub struct State {
@@ -308,6 +310,56 @@ pub fn run() -> anyhow::Result<()> {
     event_loop.run_app(&mut app)?;
 
     Ok(())
+}
+
+#[wasm_bindgen]
+pub struct MandelbrotStep {
+    pub zx: f32,
+    pub zy: f32,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub fn mandelbrot(cx: f32, cy: f32, max_iter: u32) -> Vec<MandelbrotStep>  {
+    let cx = Float::from(cx);
+    let cy = Float::from(cy);
+
+    let mut zx = Float::from(0.0);
+    let mut zy = Float::from(0.0);
+    let mut dx = Float::from(0.0);
+    let mut dy = Float::from(0.0);
+
+    let two = Float::from(2.0);
+    let one = Float::from(1.0);
+
+    let mut result = Vec::with_capacity(max_iter as usize);
+
+    for _ in 0..max_iter {
+        // Calcul de la dérivée
+        let dx_new = zx.clone() * dx.clone() * two.clone() + one.clone();
+        let dy_new = zy.clone() * dy.clone() * two.clone();
+
+        // Calcul de la prochaine itération
+        let zx_new = zx.clone() * zx.clone() - zy.clone() * zy.clone() + cx.clone();
+        let zy_new = two.clone() * zx.clone() * zy.clone() + cy.clone();
+
+        zx = zx_new;
+        zy = zy_new;
+        dx = dx_new;
+        dy = dy_new;
+
+        result.push(MandelbrotStep {
+            zx: zx.clone().to_string().parse::<f32>().unwrap(),
+            zy : zy.clone().to_string().parse::<f32>().unwrap(),
+            dx : dx.clone().to_string().parse::<f32>().unwrap(),
+            dy : dy.clone().to_string().parse::<f32>().unwrap(),
+        });
+    }
+
+    result
 }
 
 #[cfg(target_arch = "wasm32")]

@@ -36,6 +36,7 @@ log = "0.4.27"
 anyhow = "1.0.99"
 env_logger = "0.11.8"
 winit = "0.30.12"
+malachite-float = "0.6.1"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.13"
