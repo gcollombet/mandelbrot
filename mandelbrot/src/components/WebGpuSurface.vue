@@ -115,12 +115,23 @@ function drawMandelbrot(
       out.fragCoord = (pos[VertexIndex] + vec2<f32>(1.0, 1.0)) * 0.5;
       return out;
     }
-    fn palette(v: f32, dx: f32, dy: f32) -> vec3<f32> {
+    fn palette(v: f32, d: f32, dx: f32, dy: f32) -> vec3<f32> {
       let t = abs(v * 2.0 - 1.0);
       let r = 0.5 + 0.5 * cos(1.0 + t * 6.28 - dx / 2.0);
       let g = 0.5 + 0.5 * sin(2.0 + t * 5.88 - dy / 4.0);
       let b = 0.5 + 0.5 * cos(t * 3.14 + ((dx) / 8.0));
-      return vec3<f32>(r, g, b);
+      let baseColor = vec3<f32>(r, g, b);
+      // Blinn-Phong shading
+      let lightDir = normalize(vec3<f32>(-0.5, 0.7, 1.0)); // direction de la lumière
+      // Estimation de la normale à partir de d (plus d = plus de relief)
+      let normal = normalize(vec3<f32>(0.0, 0.0, 1.0 + d * 0.2));
+      let viewDir = normalize(vec3<f32>(0.0, 0.0, 1.0));
+      let halfDir = normalize(lightDir + viewDir);
+      let diffuse = max(dot(normal, lightDir), 0.0);
+      let specular = pow(max(dot(normal, halfDir), 0.0), 32.0);
+      let ambient = 0.25;
+      let color = baseColor * (ambient + 0.7 * diffuse) + vec3<f32>(1.0, 1.0, 1.0) * 0.3 * specular;
+      return color;
     }
     @fragment
     fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
@@ -132,7 +143,7 @@ function drawMandelbrot(
       let d = data.y;
       let period = uniforms.palettePeriod;
       let v = nu % period / period;
-      let color = palette(v, fragCoord.x, fragCoord.y);
+      let color = palette(v, d, fragCoord.x, fragCoord.y);
       return vec4<f32>(color, 1.0);
     }
   `;
