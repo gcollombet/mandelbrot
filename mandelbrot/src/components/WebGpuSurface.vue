@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import {onMounted, ref} from 'vue'
 
 const canvasRef = ref<HTMLCanvasElement | null>(null)
 
@@ -14,9 +14,10 @@ function drawMandelbrot(
     cx: number,
     cy: number,
     scale: number,
-    antialiasLevel: number
+    antialiasLevel: number,
+    angle: number // Ajout de l'angle
 ) {
-  // Shader WGSL Mandelbrot avec supersampling
+  // Shader WGSL Mandelbrot avec supersampling et rotation
   const shaderCode = `
     struct Uniforms {
       cx: f32,
@@ -24,6 +25,7 @@ function drawMandelbrot(
       scale: f32,
       aspect: f32,
       aa: i32,
+      angle: f32,
     };
     @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 
@@ -66,6 +68,12 @@ function drawMandelbrot(
       return vec3<f32>(t, t*t, 0.5 + 0.5*t);
     }
 
+    fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
+      let s = sin(angle);
+      let c = cos(angle);
+      return vec2<f32>(c * x - s * y, s * x + c * y);
+    }
+
     @fragment
     fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       var color = vec3<f32>(0.0, 0.0, 0.0);
@@ -77,8 +85,9 @@ function drawMandelbrot(
         );
         for (var i = 0; i < 2; i = i + 1) {
           let uv = fragCoord + (offsets[i] - vec2<f32>(0.5, 0.5)) / f32(${width});
-          let x0 = (uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect + uniforms.cx;
-          let y0 = (uv.y * 2.0 - 1.0) * uniforms.scale + uniforms.cy;
+          var xy = rotate((uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (uv.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
+          let x0 = xy.x + uniforms.cx;
+          let y0 = xy.y + uniforms.cy;
           color = color + mandelbrot(x0, y0);
         }
         color = color / 2.0;
@@ -91,14 +100,16 @@ function drawMandelbrot(
         );
         for (var i = 0; i < 4; i = i + 1) {
           let uv = fragCoord + (offsets[i] - vec2<f32>(0.5, 0.5)) / f32(${width});
-          let x0 = (uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect + uniforms.cx;
-          let y0 = (uv.y * 2.0 - 1.0) * uniforms.scale + uniforms.cy;
+          var xy = rotate((uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (uv.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
+          let x0 = xy.x + uniforms.cx;
+          let y0 = xy.y + uniforms.cy;
           color = color + mandelbrot(x0, y0);
         }
         color = color / 4.0;
       } else {
-        let x0 = (fragCoord.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect + uniforms.cx;
-        let y0 = (fragCoord.y * 2.0 - 1.0) * uniforms.scale + uniforms.cy;
+        var xy = rotate((fragCoord.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (fragCoord.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
+        let x0 = xy.x + uniforms.cx;
+        let y0 = xy.y + uniforms.cy;
         color = mandelbrot(x0, y0);
       }
       return vec4<f32>(color, 1.0);
@@ -111,7 +122,8 @@ function drawMandelbrot(
     cy,
     scale,
     width / height,
-    antialiasLevel
+    antialiasLevel,
+    angle // Ajout de l'angle
   ]);
   const uniformBuffer = device.createBuffer({
     size: uniformData.byteLength,
@@ -168,7 +180,7 @@ async function initWebGPU() {
   let cy = 0.131825904205311970493132056385139;
   let scale = 2.5;
   let isUserZooming = false;
-  let moveStep = 0.05; // déplacement relatif à scale
+  let moveStep = 0.04; // déplacement relatif à scale
 
   // Variables pour navigation fluide
   let targetCx = cx;
@@ -177,20 +189,33 @@ async function initWebGPU() {
   let velocityCx = 0;
   let velocityCy = 0;
   let velocityScale = 0;
-  const accel = 0.15; // accélération
-  const damping = 0.0; // amortissement
+  const accel = 0.05; // accélération
+  const damping = 0.7; // amortissement
+
+  // Variables pour la rotation
+  let angle = 0.0;
+  let targetAngle = 0.0;
+  let velocityAngle = 0.0;
+  const angleStep = 0.025; // vitesse de rotation
+
+  function moveInCanvasAxis(dx: number, dy: number) {
+    // Applique la rotation directe (angle) pour déplacer dans l'axe du canvas
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    const dxComplex = cosA * dx - sinA * dy;
+    const dyComplex = sinA * dx + cosA * dy;
+    targetCx += dxComplex;
+    targetCy += dyComplex;
+  }
+
+  const pressedKeys: Record<string, boolean> = {};
 
   function handleKeydown(e: KeyboardEvent) {
-    // ZQSD
-    if (e.key === 'z' || e.key === 'Z') {
-      targetCy += moveStep * targetScale;
-    } else if (e.key === 's' || e.key === 'S') {
-      targetCy -= moveStep * targetScale;
-    } else if (e.key === 'q' || e.key === 'Q') {
-      targetCx -= moveStep * targetScale;
-    } else if (e.key === 'd' || e.key === 'D') {
-      targetCx += moveStep * targetScale;
-    }
+    pressedKeys[e.key.toLowerCase()] = true;
+  }
+
+  function handleKeyup(e: KeyboardEvent) {
+    pressedKeys[e.key.toLowerCase()] = false;
   }
 
   function handleWheel(e: WheelEvent) {
@@ -221,19 +246,42 @@ async function initWebGPU() {
   function animate() {
     resize();
     if (!canvas) return;
+
+    // Mouvement fluide selon les touches maintenues
+    if (pressedKeys['z']) {
+      moveInCanvasAxis(0, moveStep * targetScale);
+    }
+    if (pressedKeys['s']) {
+      moveInCanvasAxis(0, -moveStep * targetScale);
+    }
+    if (pressedKeys['q']) {
+      moveInCanvasAxis(-moveStep * targetScale, 0);
+    }
+    if (pressedKeys['d']) {
+      moveInCanvasAxis(moveStep * targetScale, 0);
+    }
+    if (pressedKeys['a']) {
+      targetAngle += angleStep;
+    }
+    if (pressedKeys['e']) {
+      targetAngle -= angleStep;
+    }
+
     // Animation fluide vers la cible
     velocityCx = (targetCx - cx) * accel + velocityCx * damping;
     velocityCy = (targetCy - cy) * accel + velocityCy * damping;
     velocityScale = (targetScale - scale) * accel + velocityScale * damping;
+    velocityAngle = (targetAngle - angle) * accel + velocityAngle * damping;
     cx += velocityCx;
     cy += velocityCy;
     scale += velocityScale;
-    drawMandelbrot(ctx, device, format, canvas.width, canvas.height, cx, cy, scale, antialiasLevel);
+    angle += velocityAngle;
+    drawMandelbrot(ctx, device, format, canvas.width, canvas.height, cx, cy, scale, antialiasLevel, angle);
     // Zoom auto si pas d'interaction utilisateur
     if (!isUserZooming && scale > 0.0001) {
       targetScale *= 0.985;
     }
-    if (scale < 0.0001) {
+    if (scale < 0.00001) {
       currentInterestIndex = (currentInterestIndex + 1) % interestPointCollection.length;
       const point = interestPointCollection[currentInterestIndex];
       targetCx = cx = point.cx;
@@ -241,11 +289,14 @@ async function initWebGPU() {
       targetScale = scale = 2.5;
       velocityCx = velocityCy = velocityScale = 0;
       isUserZooming = false;
+      targetAngle = angle = 0.0;
+      velocityAngle = 0.0;
     }
     requestAnimationFrame(animate);
   }
 
   let isDragging = false;
+  let isRotating = false;
   let startX = 0;
   let startY = 0;
   let startCx = 0;
@@ -264,31 +315,59 @@ async function initWebGPU() {
   }
 
   function handleMouseDown(e: MouseEvent) {
-    isDragging = true;
-    const coords = getCanvasCoords(e);
-    startX = coords.x;
-    startY = coords.y;
-    startCx = targetCx;
-    startCy = targetCy;
+    if (e.button === 2) {
+      isRotating = true;
+    } else {
+      isDragging = true;
+      const coords = getCanvasCoords(e);
+      startX = coords.x;
+      startY = coords.y;
+      startCx = targetCx;
+      startCy = targetCy;
+    }
   }
 
   function handleMouseMove(e: MouseEvent) {
-    if (!isDragging) return;
     const coords = getCanvasCoords(e);
+    if (isRotating) {
+      // Rotation continue tant que le bouton droit est enfoncé
+      const rect = canvasRef.value?.getBoundingClientRect();
+      if (!rect) return;
+      const centerX = rect.width / 2;
+      const centerY = rect.height / 2;
+      const mouseX = coords.x;
+      const mouseY = coords.y;
+      targetAngle = Math.atan2(mouseY - centerY, mouseX - centerX);
+      return;
+    }
+    if (!isDragging) return;
     const dx = coords.x - startX;
     const dy = coords.y - startY;
-    targetCx = startCx - dx * targetScale * 2 / coords.width * (coords.width / coords.height);
-    targetCy = startCy + dy * targetScale * 2 / coords.height;
+    // Déplacement dans l'axe du canvas, mais appliqué dans le plan complexe selon la rotation
+    const moveX = -dx * targetScale * 2 / coords.width * (coords.width / coords.height);
+    const moveY = dy * targetScale * 2 / coords.height;
+    const cosA = Math.cos(angle);
+    const sinA = Math.sin(angle);
+    const dxComplex = cosA * moveX - sinA * moveY;
+    const dyComplex = sinA * moveX + cosA * moveY;
+    targetCx = startCx + dxComplex;
+    targetCy = startCy + dyComplex;
   }
 
-  function handleMouseUp() {
-    isDragging = false;
+  function handleMouseUp(e: MouseEvent) {
+    if (e.button === 2) {
+      isRotating = false;
+    } else {
+      isDragging = false;
+    }
   }
 
   // Ajout des listeners
   window.addEventListener('keydown', handleKeydown);
+  window.addEventListener('keyup', handleKeyup);
   canvas.addEventListener('wheel', handleWheel, { passive: false });
   canvas.addEventListener('mousedown', handleMouseDown);
+  canvas.addEventListener('contextmenu', function(e) { e.preventDefault(); });
   window.addEventListener('mousemove', handleMouseMove);
   window.addEventListener('mouseup', handleMouseUp);
 
