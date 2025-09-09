@@ -18,8 +18,8 @@ function drawMandelbrot(
     antialiasLevel: number,
     angle: number
 ) {
-  // Shader WGSL Mandelbrot avec palette cyclique et lissage des itérations
-  const shaderCode = `
+  // --- Première passe : calcul des itérations et dérivée ---
+  const shaderCodePass1 = `
     struct Uniforms {
       cx: f32,
       cy: f32,
@@ -30,12 +30,10 @@ function drawMandelbrot(
       palettePeriod: f32,
     };
     @group(0) @binding(0) var<uniform> uniforms: Uniforms;
-
     struct VertexOutput {
       @builtin(position) position : vec4<f32>,
       @location(0) fragCoord : vec2<f32>
     };
-
     @vertex
     fn vs_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
       var pos = array<vec2<f32>, 6>(
@@ -51,17 +49,7 @@ function drawMandelbrot(
       out.fragCoord = (pos[VertexIndex] + vec2<f32>(1.0, 1.0)) * 0.5;
       return out;
     }
-
-    fn palette(v: f32, dx: f32, dy: f32) -> vec3<f32> {
-      let t = abs(v * 2.0 - 1.0);
-      let r = 0.5 + 0.5 * cos(1.0 + t * 6.28 - dx / 2.0);
-      let g = 0.5 + 0.5 * sin(2.0 + t * 5.88 - dy / 4.0);
-      let b = 0.5 + 0.5 * cos(t * 3.14 + ((dx * dy) / 8.0));
-      return vec3<f32>(r, g, b);
-    }
-
-    fn mandelbrot(x0: f32, y0: f32, dx: f32, dy: f32) -> vec3<f32> {
-      // Calcul dynamique du nombre d'itérations optimal selon le zoom
+    fn mandelbrot(x0: f32, y0: f32) -> vec2<f32> {
       let max_iter_f: f32 = clamp(80.0 + 40.0 * log2(1.0 / uniforms.scale), 128.0, 4096.0);
       let max_iter: i32 = i32(max_iter_f);
       var x: f32 = 0.0;
@@ -69,76 +57,88 @@ function drawMandelbrot(
       var iter: i32 = 0;
       var x2: f32 = 0.0;
       var y2: f32 = 0.0;
+      var dx: f32 = 0.0;
+      var dy: f32 = 0.0;
+      var d: f32 = 1.0;
       while (x2 + y2 <= 1000.0 && iter < max_iter) {
         let xtemp = x*x - y*y + x0;
         y = 2.0*x*y + y0;
         x = xtemp;
         x2 = x*x;
         y2 = y*y;
+        // Dérivée simple (approximation)
+        d = 2.0 * sqrt(x2 + y2);
         iter = iter + 1;
       }
-      if (iter == max_iter) {
-        return vec3<f32>(0.0, 0.0, 0.0);
-      }
-      // Lissage des itérations
       let log_zn = log(x2 + y2) / 2.0;
       let nu = f32(iter) + 1.0 - log(log_zn / log(2.0)) / log(2.0);
-      // Palette cyclique lissée
-      let period = uniforms.palettePeriod;
-      let v = nu % period / period;
-      return palette(v, dx, dy);
+      return vec2<f32>(nu, d);
     }
-
     fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
       let s = sin(angle);
       let c = cos(angle);
       return vec2<f32>(c * x - s * y, s * x + c * y);
     }
-
     @fragment
     fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
-      var color = vec3<f32>(0.0, 0.0, 0.0);
-      let aa = uniforms.antialiasLevel;
-       if (aa == 2) {
-         let offsets = array<vec2<f32>, 2>(
-           vec2<f32>(0.25, 0.25),
-           vec2<f32>(0.75, 0.75)
-         );
-         for (var i = 0; i < 2; i = i + 1) {
-           let uv = fragCoord + (offsets[i] - vec2<f32>(0.5, 0.5)) / f32(${width});
-           var xy = rotate((uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (uv.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
-           let x0 = xy.x + uniforms.cx;
-           let y0 = xy.y + uniforms.cy;
-           color = color + mandelbrot(x0, y0, fragCoord.x, fragCoord.y);
-         }
-         color = color / 2.0;
-       } else if (aa == 4) {
-        let offsets = array<vec2<f32>, 4>(
-          vec2<f32>(0.25, 0.25),
-          vec2<f32>(0.75, 0.25),
-          vec2<f32>(0.25, 0.75),
-          vec2<f32>(0.75, 0.75)
-        );
-        for (var i = 0; i < 4; i = i + 1) {
-          let uv = fragCoord + (offsets[i] - vec2<f32>(0.5, 0.5)) / f32(${width});
-          var xy = rotate((uv.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (uv.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
-          let x0 = xy.x + uniforms.cx;
-          let y0 = xy.y + uniforms.cy;
-          color = color + mandelbrot(x0, y0, fragCoord.x, fragCoord.y);
-        }
-        color = color / 4.0;
-       } else {
-        var xy = rotate((fragCoord.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (fragCoord.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
-        let x0 = xy.x + uniforms.cx;
-        let y0 = xy.y + uniforms.cy;
-        color = mandelbrot(x0, y0, fragCoord.x, fragCoord.y);
-      }
+      var xy = rotate((fragCoord.x * 2.0 - 1.0) * uniforms.scale * uniforms.aspect, (fragCoord.y * 2.0 - 1.0) * uniforms.scale, uniforms.angle);
+      let x0 = xy.x + uniforms.cx;
+      let y0 = xy.y + uniforms.cy;
+      let res = mandelbrot(x0, y0);
+      return vec4<f32>(res.x, res.y, 0.0, 1.0);
+    }
+  `;
+
+  // --- Deuxième passe : coloration ---
+  const shaderCodePass2 = `
+    struct Uniforms {
+      palettePeriod: f32,
+    };
+    @group(0) @binding(0) var<uniform> uniforms: Uniforms;
+    @group(0) @binding(1) var tex: texture_2d<f32>;
+    struct VertexOutput {
+      @builtin(position) position : vec4<f32>,
+      @location(0) fragCoord : vec2<f32>
+    };
+    @vertex
+    fn vs_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
+      var pos = array<vec2<f32>, 6>(
+        vec2<f32>(-1.0, -1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>(-1.0,  1.0),
+        vec2<f32>( 1.0, -1.0),
+        vec2<f32>( 1.0,  1.0)
+      );
+      var out : VertexOutput;
+      out.position = vec4<f32>(pos[VertexIndex], 0.0, 1.0);
+      out.fragCoord = (pos[VertexIndex] + vec2<f32>(1.0, 1.0)) * 0.5;
+      return out;
+    }
+    fn palette(v: f32, dx: f32, dy: f32) -> vec3<f32> {
+      let t = abs(v * 2.0 - 1.0);
+      let r = 0.5 + 0.5 * cos(1.0 + t * 6.28 - dx / 2.0);
+      let g = 0.5 + 0.5 * sin(2.0 + t * 5.88 - dy / 4.0);
+      let b = 0.5 + 0.5 * cos(t * 3.14 + ((dx) / 8.0));
+      return vec3<f32>(r, g, b);
+    }
+    @fragment
+    fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
+      let uv = fragCoord;
+      let texSize = vec2<i32>(textureDimensions(tex, 0));
+      let pixelCoord = vec2<i32>(uv * vec2<f32>(texSize));
+      let data = textureLoad(tex, pixelCoord, 0);
+      let nu = data.x;
+      let d = data.y;
+      let period = uniforms.palettePeriod;
+      let v = nu % period / period;
+      let color = palette(v, fragCoord.x, fragCoord.y);
       return vec4<f32>(color, 1.0);
     }
   `;
 
-  // Création du buffer uniform
-  const uniformData = new Float32Array([
+  // --- Création des buffers et textures ---
+  const uniformData1 = new Float32Array([
     cx,
     cy,
     scale,
@@ -147,28 +147,78 @@ function drawMandelbrot(
     angle,
     palettePeriod,
   ]);
-  const uniformBuffer = device.createBuffer({
-    size: uniformData.byteLength,
+  const uniformBuffer1 = device.createBuffer({
+    size: uniformData1.byteLength,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
   });
-  device.queue.writeBuffer(uniformBuffer, 0, uniformData.buffer);
+  device.queue.writeBuffer(uniformBuffer1, 0, uniformData1.buffer);
 
-  const shaderModule = device.createShaderModule({ code: shaderCode });
-  const pipeline = device.createRenderPipeline({
+  const uniformData2 = new Float32Array([
+    palettePeriod,
+  ]);
+  const uniformBuffer2 = device.createBuffer({
+    size: uniformData2.byteLength,
+    usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST
+  });
+  device.queue.writeBuffer(uniformBuffer2, 0, uniformData2.buffer);
+
+  // Texture intermédiaire pour la première passe
+  const intermediateTexture = device.createTexture({
+    size: { width, height, depthOrArrayLayers: 1 },
+    format: 'rgba32float',
+    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+  });
+  const intermediateView = intermediateTexture.createView();
+
+  // --- Pipeline première passe ---
+  const shaderModule1 = device.createShaderModule({ code: shaderCodePass1 });
+  const pipeline1 = device.createRenderPipeline({
     layout: 'auto',
-    vertex: { module: shaderModule, entryPoint: 'vs_main' },
-    fragment: { module: shaderModule, entryPoint: 'fs_main', targets: [{ format }] },
+    vertex: { module: shaderModule1, entryPoint: 'vs_main' },
+    fragment: { module: shaderModule1, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
     primitive: { topology: 'triangle-list' }
   });
-
-  const bindGroup = device.createBindGroup({
-    layout: pipeline.getBindGroupLayout(0),
-    entries: [{ binding: 0, resource: { buffer: uniformBuffer } }]
+  const bindGroup1 = device.createBindGroup({
+    layout: pipeline1.getBindGroupLayout(0),
+    entries: [{ binding: 0, resource: { buffer: uniformBuffer1 } }]
   });
 
+  // --- Pipeline deuxième passe ---
+  const shaderModule2 = device.createShaderModule({ code: shaderCodePass2 });
+  const pipeline2 = device.createRenderPipeline({
+    layout: 'auto',
+    vertex: { module: shaderModule2, entryPoint: 'vs_main' },
+    fragment: { module: shaderModule2, entryPoint: 'fs_main', targets: [{ format }] },
+    primitive: { topology: 'triangle-list' }
+  });
+  const bindGroup2 = device.createBindGroup({
+    layout: pipeline2.getBindGroupLayout(0),
+    entries: [
+      { binding: 0, resource: { buffer: uniformBuffer2 } },
+      { binding: 1, resource: intermediateView }
+    ]
+  });
+
+  // --- Commandes GPU ---
   const commandEncoder = device.createCommandEncoder();
+
+  // Première passe : calcul des itérations et dérivée
+  const renderPass1 = commandEncoder.beginRenderPass({
+    colorAttachments: [{
+      view: intermediateView,
+      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+      loadOp: 'clear',
+      storeOp: 'store',
+    }]
+  });
+  renderPass1.setPipeline(pipeline1);
+  renderPass1.setBindGroup(0, bindGroup1);
+  renderPass1.draw(6, 1, 0, 0);
+  renderPass1.end();
+
+  // Deuxième passe : coloration
   const textureView = ctx.getCurrentTexture().createView();
-  const renderPass = commandEncoder.beginRenderPass({
+  const renderPass2 = commandEncoder.beginRenderPass({
     colorAttachments: [{
       view: textureView,
       clearValue: { r: 1, g: 1, b: 1, a: 1 },
@@ -176,10 +226,11 @@ function drawMandelbrot(
       storeOp: 'store',
     }]
   });
-  renderPass.setPipeline(pipeline);
-  renderPass.setBindGroup(0, bindGroup);
-  renderPass.draw(6, 1, 0, 0);
-  renderPass.end();
+  renderPass2.setPipeline(pipeline2);
+  renderPass2.setBindGroup(0, bindGroup2);
+  renderPass2.draw(6, 1, 0, 0);
+  renderPass2.end();
+
   device.queue.submit([commandEncoder.finish()]);
 }
 
