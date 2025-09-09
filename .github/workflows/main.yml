@@ -20,13 +20,14 @@ jobs:
 
       - name: Install dependencies
         run: npm install
+        working-directory: mandelbrot
 
       - name: Build
         run: npm run build
+        working-directory: mandelbrot
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
         with:
           github_token: ${{ secrets.GITHUB_TOKEN }}
-          publish_dir: ./dist
-
+          publish_dir: mandelbrot/dist
