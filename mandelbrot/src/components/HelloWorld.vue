@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import {onMounted} from 'vue'
 
-import {run_web} from "mandelbrot"
+// import {run_web} from "mandelbrot"
 
 onMounted(() => {
   window.addEventListener('resize', resize)
   resize()
-  run_web()
+  // run_web()
 })
 
 function resize() {
