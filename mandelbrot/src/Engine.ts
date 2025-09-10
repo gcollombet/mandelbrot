@@ -55,6 +55,7 @@ export class Engine {
 
     previousMandelbrot: Mandelbrot;
     needRender = true;
+    extraFrames: number = 0;
 
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas;
@@ -200,7 +201,13 @@ export class Engine {
 
     update(mandelbrot : Mandelbrot, renderOptions : RenderOptions) {
         if(this.previousMandelbrot) {
+            const wasNeedRender = this.needRender;
             this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
+            if (this.needRender) {
+                this.extraFrames = 2;
+            } else if (wasNeedRender && !this.needRender) {
+                // Si on vient de passer à false, on ne touche pas à extraFrames
+            }
         }
         const aspect = (this.width / Math.max(1, this.height));
         const mandelbrotShaderUniformData = new Float32Array([
@@ -261,8 +268,11 @@ export class Engine {
         // }
     }
     render() {
-        if(!this.needRender) {
+        if(!this.needRender && this.extraFrames <= 0) {
             return;
+        }
+        if (!this.needRender && this.extraFrames > 0) {
+            this.extraFrames--;
         }
         console.count("Rendering");
         if (!this.pipeline1 || !this.pipeline2) return;
