@@ -70,6 +70,6 @@ wasm-pack publish
 
 ```
 wasm-pack build
-cd mandelbrot
-npm link ../pkg
+cd mandelbrot && npm link ../pkg && npm run build && npm run preview
+
 ```
