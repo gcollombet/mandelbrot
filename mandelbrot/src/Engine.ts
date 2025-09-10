@@ -1,0 +1,295 @@
+// Engine.ts: implémente une classe Engine pour gérer le pipeline WebGPU
+
+import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
+import colorShader from './assets/color.wgsl?raw'
+// import {mandelbrot} from "mandelbrot";
+
+export type RenderOptions = {
+    antialiasLevel: number,
+    palettePeriod: number,
+}
+
+export type Mandelbrot = {
+    maxIterations: number,
+    cx: number,
+    cy: number,
+    scale: number,
+    angle: number,
+    epsilon: number,
+}
+
+
+export class Engine {
+    canvas: HTMLCanvasElement;
+    device!: GPUDevice;
+    queue!: GPUQueue;
+    adapter!: GPUAdapter | null;
+    ctx!: GPUCanvasContext;
+    format!: GPUTextureFormat;
+
+    // resources
+    intermediateTexture?: GPUTexture;
+    intermediateView?: GPUTextureView;
+    sampler?: GPUSampler;
+
+    // buffers
+    uniformBufferMandelbrot?: GPUBuffer; // passe 1 uniforms
+    uniformBufferColor?: GPUBuffer; // passe 2 uniforms
+    mandelbrotBuffer?: GPUBuffer; // storage buffer contenant l'orbite
+
+    // pipelines / bindgroups
+    pipeline1?: GPURenderPipeline;
+    pipeline2?: GPURenderPipeline;
+    bindGroup1?: GPUBindGroup;
+    bindGroup2?: GPUBindGroup;
+
+    // shader sources (optionnellement remplaçables)
+    shaderPass1: string;
+    shaderPass2: string;
+
+    // config
+    width = 0;
+    height = 0;
+    antialiasLevel: number;
+    palettePeriod: number;
+
+    previousMandelbrot: Mandelbrot;
+    needRender = true;
+
+    constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
+        this.canvas = canvas;
+        this.shaderPass1 = mandelbrotShader;
+        this.shaderPass2 = colorShader;
+        this.antialiasLevel = options.antialiasLevel;
+        this.palettePeriod = options.palettePeriod;
+        this.previousMandelbrot = {
+            maxIterations: 1,
+            epsilon: 0,
+            angle: 0,
+            scale: 1,
+            cy: 0,
+            cx: 0
+        }
+    }
+
+    async initialize(): Promise<void> {
+        if (!navigator.gpu) throw new Error('WebGPU non supporté');
+        this.adapter = await navigator.gpu.requestAdapter();
+        if (!this.adapter) throw new Error('Adapter WebGPU introuvable');
+        this.device = await this.adapter.requestDevice();
+        this.device.label = 'Engine Device';
+        this.queue = this.device.queue;
+        this.queue.label = 'Engine Queue';
+
+        this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext;
+        this.format = navigator.gpu.getPreferredCanvasFormat();
+        this.ctx.configure({device: this.device, format: this.format, alphaMode: 'opaque'});
+
+        this.sampler = this.device.createSampler({magFilter: 'linear', minFilter: 'linear', mipmapFilter: 'nearest'});
+        this.sampler.label = 'Engine Sampler';
+
+        // uniform buffers (placeholders)
+        this.uniformBufferMandelbrot = this.device.createBuffer({
+            size: 4 * 8,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: 'Engine UniformBuffer Mandelbrot',
+        });
+        this.uniformBufferColor = this.device.createBuffer({
+            size: 4 * 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: 'Engine UniformBuffer Color'
+        });
+        this.mandelbrotBuffer = this.device.createBuffer({
+            size: 4 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Orbit Storage Buffer',
+        });
+
+        await this._createPipelines();
+
+        this.resize();
+    }
+
+    private async _createPipelines() {
+        const module1 = this.device.createShaderModule({code: this.shaderPass1, label: 'Engine ShaderModule Pass1'});
+        const module2 = this.device.createShaderModule({code: this.shaderPass2, label: 'Engine ShaderModule Pass2'});
+
+        this.pipeline1 = this.device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {module: module1, entryPoint: 'vs_main'},
+            fragment: {module: module1, entryPoint: 'fs_main', targets: [{format: 'rgba16float'}]},
+            primitive: {topology: 'triangle-list'},
+            label: 'Engine RenderPipeline Pass Mandelbrot'
+        });
+
+        this.pipeline2 = this.device.createRenderPipeline({
+            layout: 'auto',
+            vertex: {module: module2, entryPoint: 'vs_main'},
+            fragment: {module: module2, entryPoint: 'fs_main', targets: [{format: this.format}]},
+            primitive: {topology: 'triangle-list'},
+            label: 'Engine RenderPipeline Pass Color'
+        });
+
+        const layout1 = this.pipeline1.getBindGroupLayout(0);
+        layout1.label = 'Engine RenderPipeline Mandelbrot';
+        this.bindGroup1 = this.device.createBindGroup({
+            layout: layout1,
+            entries: [
+                {binding: 0, resource: {buffer: this.uniformBufferMandelbrot!}},
+                // {binding: 1, resource: {buffer: this.mandelbrotBuffer!}}
+            ],
+            label: 'Engine BindGroup Pass Mandelbrot'
+        });
+
+        this.bindGroup2 = undefined;
+    }
+
+    resize() {
+        const dpr = window.devicePixelRatio || 1;
+        const parent = this.canvas.parentElement;
+        const widthCSS = parent?.clientWidth ?? this.canvas.clientWidth;
+        const heightCSS = parent?.clientHeight ?? this.canvas.clientHeight;
+        this.width = Math.max(1, Math.round(widthCSS * dpr));
+        this.height = Math.max(1, Math.round(heightCSS * dpr));
+
+        this.canvas.width = this.width;
+        this.canvas.height = this.height;
+        this.canvas.style.width = widthCSS + 'px';
+        this.canvas.style.height = heightCSS + 'px';
+
+        this.ctx.configure({
+            device: this.device,
+            format: this.format,
+            alphaMode: 'opaque'
+        })
+
+        if (this.intermediateTexture) this.intermediateTexture.destroy?.();
+        this.intermediateTexture = this.device.createTexture({
+            size: {
+                width: this.width,
+                height: this.height,
+                depthOrArrayLayers: 1
+            },
+            format: 'rgba16float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'Engine IntermediateTexture'
+        });
+        this.intermediateView = this.intermediateTexture.createView();
+        this.intermediateView.label = 'Engine IntermediateTextureView';
+
+        if (this.pipeline2) {
+            const layout2 = this.pipeline2.getBindGroupLayout(0);
+            layout2.label = 'Engine IntermediateTextureView';
+            const entries: GPUBindGroupEntry[] = [
+                {binding: 0, resource: {buffer: this.uniformBufferColor!}},
+                {binding: 1, resource: this.intermediateView!}
+            ];
+            this.bindGroup2 = this.device.createBindGroup({layout: layout2, entries, label: 'Engine BindGroup Color Pass'});
+        }
+    }
+
+    areObjectsEqual(obj1: any, obj2: any): boolean {
+        const keys1 = Object.keys(obj1);
+        const keys2 = Object.keys(obj2);
+        if (keys1.length !== keys2.length) return false;
+        for (const key of keys1) {
+            if (obj1[key] !== obj2[key]) return false;
+        }
+        return true;
+    }
+
+    update(mandelbrot : Mandelbrot, renderOptions : RenderOptions) {
+        if(this.previousMandelbrot) {
+            this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
+        }
+        this.previousMandelbrot = mandelbrot;
+        const aspect = (this.width / Math.max(1, this.height));
+        const mandelbrotShaderUniformData = new Float32Array([
+            mandelbrot.cx,
+            mandelbrot.cy,
+            mandelbrot.scale,
+            aspect,
+            mandelbrot.angle,
+            mandelbrot.maxIterations,
+            mandelbrot.epsilon,
+            renderOptions.antialiasLevel
+        ]);
+        this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformData.buffer);
+        const colorShaderData = new Float32Array([renderOptions.palettePeriod, 0, 0, 0]);
+        this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer);
+
+        // if (params.orbit && params.orbit.length > 0) {
+        //     const orbit = params.orbit;
+        //     const data = new Float32Array(orbit.length * 4);
+        //     for (let i = 0; i < orbit.length; i++) {
+        //         data[i * 4 + 0] = orbit[i].zx;
+        //         data[i * 4 + 1] = orbit[i].zy;
+        //         data[i * 4 + 2] = orbit[i].dx;
+        //         data[i * 4 + 3] = orbit[i].dy;
+        //     }
+        //     const byteLength = data.byteLength;
+        //     if (!this.mandelbrotBuffer || (this.mandelbrotBuffer as any).size < byteLength) {
+        //         this.mandelbrotBuffer?.destroy?.();
+        //         this.mandelbrotBuffer = this.device.createBuffer({
+        //             size: byteLength,
+        //             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
+        //         });
+        //     }
+        //     this.device.queue.writeBuffer(this.mandelbrotBuffer, 0, data.buffer);
+        //
+        //     if (this.pipeline1) {
+        //         const layout1 = this.pipeline1.getBindGroupLayout(0);
+        //         this.bindGroup1 = this.device.createBindGroup({
+        //             layout: layout1,
+        //             entries: [{binding: 0, resource: {buffer: this.uniformBuffer1!}}, {
+        //                 binding: 1,
+        //                 resource: {buffer: this.mandelbrotBuffer!}
+        //             }]
+        //         });
+        //     }
+        // }
+    }
+
+    render() {
+        if(!this.needRender) {
+            return;
+        }
+        console.count("Rendering");
+        if (!this.pipeline1 || !this.pipeline2) return;
+        const commandEncoder = this.device.createCommandEncoder();
+
+        const rpass1 = commandEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: this.intermediateView!,
+                clearValue: {r: 0, g: 0, b: 0, a: 1},
+                loadOp: 'clear',
+                storeOp: 'store'
+            }]
+        });
+        rpass1.setPipeline(this.pipeline1);
+        if (this.bindGroup1) rpass1.setBindGroup(0, this.bindGroup1);
+        rpass1.draw(6, 1, 0, 0);
+        rpass1.end();
+
+        const swapView = this.ctx.getCurrentTexture().createView();
+        const rpass2 = commandEncoder.beginRenderPass({
+            colorAttachments: [{
+                view: swapView,
+                clearValue: {r: 1, g: 1, b: 1, a: 1},
+                loadOp: 'clear',
+                storeOp: 'store'
+            }]
+        });
+        rpass2.setPipeline(this.pipeline2);
+        if (this.bindGroup2) rpass2.setBindGroup(0, this.bindGroup2);
+        rpass2.draw(6, 1, 0, 0);
+        rpass2.end();
+
+        this.device.queue.submit([commandEncoder.finish()]);
+    }
+
+    destroy() {
+        this.intermediateTexture?.destroy?.();
+        this.mandelbrotBuffer?.destroy?.();
+    }
+}
