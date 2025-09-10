@@ -1,6 +1,5 @@
 struct Uniforms {
   palettePeriod: f32,
-  bloomRadius: f32,
   bloomStrength: f32,
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
@@ -53,25 +52,40 @@ fn tunnel(coord: vec2<f32>) -> vec2<f32> {
 
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
-
-   let uv = fragCoord;
+  let uv = fragCoord;
   let texSize = vec2<i32>(textureDimensions(tex, 0));
-  let pixelCoord = vec2<i32>(
-    i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
-    i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
-  );
-  let data = textureLoad(tex, pixelCoord, 0);
-  let nu = data.x;
-  let d = data.y;
-  let period = uniforms.palettePeriod;
-  if (nu <= 0.0) {
-    // Glow color (par exemple bleu)
-    let glowColor = vec3<f32>(0.2, 0.4, 1.0);
-    // Intensité du glow selon la distance
-    let glow = exp(-d * 3.0);
-    return vec4<f32>(glowColor * glow, 1.0);
+  let center = vec2<f32>(0.5, 0.5);
+  let blurStrength = uniforms.bloomStrength; // Utilisé comme force du blur radial
+  let blurSamples = 8; // Nombre d'échantillons pour le blur
+  var color = vec3<f32>(0.0, 0.0, 0.0);
+  var total = 0.0;
+  // Blur radial : on échantillonne le long du rayon centre -> pixel
+  for (var i = 0; i < blurSamples; i = i + 1) {
+    let t = f32(i) / f32(blurSamples - 1);
+    // t = 0 (centre), t = 1 (pixel courant)
+    let sampleUV = mix(center, uv, t * blurStrength + (1.0 - blurStrength));
+    let sampleCoord = vec2<i32>(
+      i32(clamp(sampleUV.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
+      i32(clamp((1.0 - sampleUV.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
+    );
+    let data = textureLoad(tex, sampleCoord, 0);
+    let nu = data.x;
+    let d = data.y;
+    let period = uniforms.palettePeriod;
+    var sampleColor: vec3<f32>;
+    if (nu <= 0.0) {
+      let glowColor = vec3<f32>(0.2, 0.4, 1.0);
+      let glow = exp(-d * 3.0);
+      sampleColor = glowColor * glow;
+    } else {
+      let v = fract(nu / period);
+      sampleColor = palette(v, d, sampleUV.x, sampleUV.y);
+    }
+    // Poids : plus proche du pixel courant = plus fort
+    let weight = 0.5 + 0.5 * t;
+    color = color + sampleColor * weight;
+    total = total + weight;
   }
-  let v = fract(nu / period);
-  let baseColor = palette(v, d, fragCoord.x, fragCoord.y);
-  return vec4<f32>(baseColor, 1.0);
+  color = color / total;
+  return vec4<f32>(color, 1.0);
 }

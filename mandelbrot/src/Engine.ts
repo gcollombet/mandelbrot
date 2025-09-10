@@ -202,7 +202,6 @@ export class Engine {
         if(this.previousMandelbrot) {
             this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
         }
-        this.previousMandelbrot = mandelbrot;
         const aspect = (this.width / Math.max(1, this.height));
         const mandelbrotShaderUniformData = new Float32Array([
             mandelbrot.cx,
@@ -215,9 +214,21 @@ export class Engine {
             renderOptions.antialiasLevel
         ]);
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformData.buffer);
-        const colorShaderData = new Float32Array([renderOptions.palettePeriod, 0, 0, 0]);
-        this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer);
 
+        let scaleFactor = this.previousMandelbrot.scale / mandelbrot.scale;
+        if(scaleFactor < 1.0) {
+            scaleFactor = 1.0 / scaleFactor;
+        }
+        scaleFactor -= 1;
+        const colorShaderData = new Float32Array([
+            renderOptions.palettePeriod,
+            scaleFactor * 2,
+            0,
+            0
+        ]);
+
+        this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer);
+        this.previousMandelbrot = mandelbrot;
         // if (params.orbit && params.orbit.length > 0) {
         //     const orbit = params.orbit;
         //     const data = new Float32Array(orbit.length * 4);
@@ -249,7 +260,6 @@ export class Engine {
         //     }
         // }
     }
-
     render() {
         if(!this.needRender) {
             return;
