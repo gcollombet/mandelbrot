@@ -56,9 +56,9 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let texSize = vec2<i32>(textureDimensions(tex, 0));
   let center = vec2<f32>(0.5, 0.5);
   let blurStrength = uniforms.bloomStrength; // Utilisé comme force du blur radial
-  let blurSamples = 16; // Nombre d'échantillons pour le blur
+  let blurSamples = 8; // Nombre d'échantillons pour le blur
   var color = vec3<f32>(0.0, 0.0, 0.0);
-  let glowColor = vec3<f32>(0.2, 0.4, 1.0);
+  let glowColor = vec3<f32>(0.2, 0.3, 0.8);
   var total = 0.0;
   // Blur radial : on échantillonne le long du rayon centre -> pixel
   for (var i = 0; i < blurSamples; i = i + 1) {
@@ -75,8 +75,8 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     let period = uniforms.palettePeriod;
     var sampleColor: vec3<f32>;
     if (nu <= 0.0) {
-      let glow = exp(-d * 0.1);
-      sampleColor = glowColor * glow;
+      let glow = exp(-d * 1.0);
+      sampleColor = glowColor * (1.0 - glow);
     } else {
       let v = fract(nu / period);
       sampleColor = palette(v, d, sampleUV.x, sampleUV.y);

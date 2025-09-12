@@ -2,7 +2,9 @@
 
 import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
- import {MandelbrotNavigator} from "mandelbrot";
+import {MandelbrotNavigator} from "mandelbrot";
+import { memory as wasmMemory } from 'mandelbrot/mandelbrot_bg.wasm';
+
 
 export type RenderOptions = {
     antialiasLevel: number,
@@ -13,6 +15,7 @@ export type Mandelbrot = {
     maxIterations: number,
     cx: number,
     cy: number,
+    mu: number,
     scale: number,
     angle: number,
     epsilon: number,
@@ -93,7 +96,7 @@ export class Engine {
 
         // uniform buffers (placeholders)
         this.uniformBufferMandelbrot = this.device.createBuffer({
-            size: 4 * 8,
+            size: 4 * 9,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Mandelbrot',
         });
@@ -225,10 +228,15 @@ export class Engine {
                 // Si on vient de passer à false, on ne touche pas à extraFrames
             }
         }
+        // if(!this.needRender && this.extraFrames <= 0) {
+        //     return;
+        // }
         const aspect = (this.width / Math.max(1, this.height));
+
         const mandelbrotShaderUniformData = new Float32Array([
-            mandelbrot.cx,
-            mandelbrot.cy,
+            100.0, //mandelbrot.cx,
+            100.0, //mandelbrot.cy,
+            mandelbrot.mu,
             mandelbrot.scale,
             aspect,
             mandelbrot.angle,
@@ -252,28 +260,30 @@ export class Engine {
 
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer);
 
-        // si cx ou cy ont changé
-        if (this.previousMandelbrot) {
-            if (
-                this.previousMandelbrot.cx !== mandelbrot.cx
-                || this.previousMandelbrot.cy !== mandelbrot.cy
-                || this.previousMandelbrot.maxIterations !== mandelbrot.maxIterations
-            ) {
-                console.log("Calcul de l'orbite");
-                let data = this.mandelbrotNavigator.compute_reference_orbit(
-                    1000000
-                );
-                data.forEach((v, i) => {
-                    this.mandelbrotReference[i  * 4] = v.zx;
-                    this.mandelbrotReference[i  * 4 + 1] = v.zy;
-                    this.mandelbrotReference[i  * 4 + 2] = v.dx;
-                    this.mandelbrotReference[i  * 4 + 3] = v.dy;
-                });
-            }
-            this.previousMandelbrot = mandelbrot;
+        const maxIterations = Math.ceil(mandelbrot.maxIterations);
+        let prtInfo = this.mandelbrotNavigator.compute_reference_orbit_ptr(
+            maxIterations
+        );
+        const buffer = new Float32Array(wasmMemory.buffer, prtInfo.ptr, prtInfo.count * 4); // 4 floats par MandelbrotStep
+
+
+        if(prtInfo.offset < maxIterations) {
+            console.log(
+                "Calcul de l'orbite de référence, nombre de points :", prtInfo.count,
+                " maxIterations =", maxIterations,
+                "offset =", prtInfo.offset,
+                "length =", buffer.length / 4
+            );
+            this.device.queue.writeBuffer(
+                this.mandelbrotReferenceBuffer!,
+                0,
+                buffer,
+                0
+            );
         }
 
-        this.device.queue.writeBuffer(this.mandelbrotReferenceBuffer!, 0, this.mandelbrotReference.buffer);
+        this.previousMandelbrot = mandelbrot;
+
     }
     render() {
         if(!this.needRender && this.extraFrames <= 0) {

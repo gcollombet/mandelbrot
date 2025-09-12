@@ -6,9 +6,10 @@ dx: f32,
 dy: f32,
 };
 
-struct Uniforms {
+struct Mandelbrot {
 cx: f32,
 cy: f32,
+mu: f32,
 scale: f32,
 aspect: f32,
 angle: f32,
@@ -17,7 +18,7 @@ epsilon: f32,
 antialiasLevel: f32,
 };
 
-@group(0) @binding(0) var<uniform> mandelbrot: Uniforms;
+@group(0) @binding(0) var<uniform> mandelbrot: Mandelbrot;
 @group(0) @binding(1) var<storage, read> mandelbrotOrbitPointSuite: array<MandelbrotStep>;
 
 struct VertexOutput {
@@ -64,6 +65,13 @@ fn getOrbit(index: i32) -> vec2<f32> {
     );
 }
 
+fn getOrbitD(index: i32) -> vec2<f32> {
+    return vec2<f32>(
+        mandelbrotOrbitPointSuite[index].dx,
+        mandelbrotOrbitPointSuite[index].dy,
+    );
+}
+
 fn mandelbrot_func(x0: f32, y0: f32) -> vec2<f32> {
     var dc = vec2<f32>(x0, y0);
 //  let max_iter_f: f32 = clamp(80.0 + 40.0 * log2(1.0 / uniforms.scale), 128.0, 1000000.0);
@@ -75,10 +83,10 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec2<f32> {
     var distance = 0.0;
     var i = 0.0;
     var ref_i = 0;
-    var max = 100000.0;
+    var max = mandelbrot.mu;
     var d = vec2<f32>(1.0, 0.0);
     // create an epsilon var that is smaller when the zoom is bigger
-    var epsilon = 0.00001;
+    var epsilon = mandelbrot.epsilon;
     // calculate the iteration
     while (i < max_iteration) {
         z = getOrbit(ref_i);
@@ -120,7 +128,8 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec2<f32> {
             i += (1.0 - nu) ;
         }
     }
-    return vec2<f32>(i, 0.0);;
+    let mod_der = length(der);
+    return vec2<f32>(i, mod_der);
 
 
 //  var x: f32 = 0.0;
@@ -157,8 +166,8 @@ fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   var xy = rotate((fragCoord.x * 2.0 - 1.0)  * mandelbrot.aspect * mandelbrot.scale, (fragCoord.y * 2.0 - 1.0) * mandelbrot.scale, mandelbrot.angle);
-  let x0 = xy.x + mandelbrot.cx;
-  let y0 = xy.y + mandelbrot.cy;
+  let x0 = xy.x ; //+ mandelbrot.cx;
+  let y0 = xy.y ; //+ mandelbrot.cy;
   var dc = vec2<f32>(
        xy.x,
        xy.y

@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import {onMounted, ref} from 'vue';
+import {onMounted, ref, onUnmounted, watch} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
-import {MandelbrotNavigator} from "mandelbrot";
-
+import {MandelbrotNavigator, MandelbrotStep} from "mandelbrot";
+import type {MandelbrotParams} from "../Mandelbrot.ts";
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const antialiasLevel = 1;
@@ -13,14 +13,15 @@ let engine: Engine;
 let navigator: any;
 const moveStep = 0.04;
 const angleStep = 0.025;
-const mandelbrotParams = ref({
-  cx: -0.749208775,
-  cy: -0.0798967515,
+const mandelbrotParams = ref(<MandelbrotParams>{
+  cx: -1.5,
+  cy: 0.0,
+  mu: 10000.0,
   scale: 2.5,
   angle: 0.0,
   maxIterations: 1000,
   antialiasLevel: antialiasLevel,
-  palettePeriod: palettePeriod
+  palettePeriod: palettePeriod,
 });
 
 function handleKeydown(e: KeyboardEvent) {
@@ -83,9 +84,15 @@ function handleMouseMove(e: MouseEvent) {
     return;
   }
   if (!isDragging) return;
-  const dx = (coords.x - prevX) / coords.width;
-  const dy = (coords.y - prevY) / coords.height;
-  navigator.translate_direct(-dx, dy);
+  const width = coords.width;
+  const height = coords.height;
+  const aspect = width / height;
+  const dx = (coords.x - prevX) / width * 2;
+  const dy = (coords.y - prevY) / height * 2 ;
+  // Correction aspect ratio et échelle
+  const dx_complex = -dx * aspect;
+  const dy_complex = dy ;
+  navigator.translate_direct(dx_complex, dy_complex);
   prevX = coords.x;
   prevY = coords.y;
 }
@@ -102,7 +109,7 @@ async function initWebGPU() {
   if (!canvasRef.value) return;
   canvas = canvasRef.value;
 
-  navigator = new MandelbrotNavigator(-0.749208775, -0.0798967515, 2.5, 0.0);
+  navigator = new MandelbrotNavigator(-0.749208775, -0.0798967515, 10000.0,2.5, 0.0);
   engine = new Engine(canvas, {
     antialiasLevel: 1,
     palettePeriod: 128
@@ -124,23 +131,52 @@ async function initWebGPU() {
     if (pressedKeys['d']) navigator.translate(moveStep, 0);
     if (pressedKeys['a']) navigator.rotate(angleStep);
     if (pressedKeys['e']) navigator.rotate(-angleStep);
-    const epsilon = 0.0001;
+    const epsilon = mandelbrotParams.value.epsilon;
     const [cx, cy, scale, angle] = navigator.step();
+    const mu = mandelbrotParams.value.mu;
     mandelbrotParams.value.cx = cx;
     mandelbrotParams.value.cy = cy;
     mandelbrotParams.value.scale = scale;
     mandelbrotParams.value.angle = angle;
     const maxIterations = Math.min(Math.max(100, 80 + 30 * Math.log2(1.0 / scale)), 1000000);
-    engine.update({ cx, cy, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
+    engine.update({ cx, cy, mu, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
     engine.render();
     requestAnimationFrame(animate);
   }
   animate();
 }
 
+function handleResize() {
+  if (!canvasRef.value || !engine) return;
+  const rect = canvasRef.value.getBoundingClientRect();
+  canvasRef.value.width = rect.width;
+  canvasRef.value.height = rect.height;
+  if (engine.resize) {
+    engine.resize();
+  }
+  engine.render();
+}
+
+
+
+watch(mandelbrotParams, (newParams) => {
+  if (!navigator) return;
+  navigator.scale(newParams.scale);
+  navigator.angle(newParams.angle);
+  navigator.origin(newParams.cx, newParams.cy);
+}, {deep: true});
+
+
 onMounted(() => {
   initWebGPU();
-})
+  window.addEventListener('resize', handleResize);
+  // Appel initial pour s'assurer que la taille est correcte
+  // handleResize();
+});
+
+onUnmounted(() => {
+  window.removeEventListener('resize', handleResize);
+});
 
 
 </script>

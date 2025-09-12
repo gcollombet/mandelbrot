@@ -313,7 +313,8 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 #[wasm_bindgen]
-#[derive(Clone)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq)]
 pub struct MandelbrotStep {
     pub zx: f32,
     pub zy: f32,
@@ -395,6 +396,7 @@ use wasm_bindgen::prelude::*;
 pub struct MandelbrotNavigator {
     cx: Box<Float>,
     cy: Box<Float>,
+    mu: f64,
     scale: Box<Float>,
     angle: f64,
     target_cx: Box<Float>,
@@ -404,16 +406,21 @@ pub struct MandelbrotNavigator {
     result: Box<Vec<MandelbrotStep>>, // Vecteur pré-alloué
     last_iter: usize, // Dernière itération calculée
     previous_c: (Float, Float), // Dernier C vu
+    last_zx: Box<Float>,
+    last_zy: Box<Float>,
+    last_dx: Box<Float>,
+    last_dy: Box<Float>,
 }
 
 #[wasm_bindgen]
 impl MandelbrotNavigator {
 
     #[wasm_bindgen(constructor)]
-    pub fn new(cx: f64, cy: f64, scale: f64, angle: f64) -> MandelbrotNavigator {
+    pub fn new(cx: f64, cy: f64, mu: f64, scale: f64, angle: f64) -> MandelbrotNavigator {
         MandelbrotNavigator {
             cx: Box::new(Float::from(cx)),
             cy: Box::new(Float::from(cy)),
+            mu,
             scale: Box::new(Float::from(scale)),
             angle,
             target_cx: Box::new(Float::from(cx)),
@@ -423,6 +430,10 @@ impl MandelbrotNavigator {
             result: Box::new(Vec::with_capacity(1_000_000)),
             last_iter: 0,
             previous_c: (Float::from(cx), Float::from(cy)),
+            last_zx: Box::new(Float::from(0.0)),
+            last_zy: Box::new(Float::from(0.0)),
+            last_dx: Box::new(Float::from(0.0)),
+            last_dy: Box::new(Float::from(0.0)),
         }
     }
 
@@ -465,26 +476,26 @@ impl MandelbrotNavigator {
 
     pub fn step(&mut self) -> Vec<f64> {
         // Animation simple vers la cible
-        let speed = Float::from(0.5);
-        let dcx = (&*self.target_cx - &*self.cx) * &speed;
-        let dcy = (&*self.target_cy - &*self.cy) * &speed;
-        if(dcx.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
-            self.cx = self.target_cx.clone();
-        } else {
+        //let speed = Float::from(1.0);
+        let dcx = (&*self.target_cx - &*self.cx); // * &speed;
+        let dcy = (&*self.target_cy - &*self.cy); // * &speed;
+        //if(dcx.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
+        //    self.cx = self.target_cx.clone();
+        //} else {
             self.cx = Box::new(&*self.cx + &dcx);
-        }
-        if(dcy.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
-            self.cy = self.target_cy.clone();
-        } else {
+        //}
+        //if(dcy.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
+        //    self.cy = self.target_cy.clone();
+        //} else {
             self.cy = Box::new(&*self.cy + &dcy);
-        }
-        let dscale = (&*self.target_scale - &*self.scale) * &speed;
-        if(dscale.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
-            self.scale = self.target_scale.clone();
-        } else {
+        //}
+        let dscale = (&*self.target_scale - &*self.scale); // * &speed;
+        // if(dscale.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
+        //     self.scale = self.target_scale.clone();
+        // } else {
             self.scale = Box::new(&*self.scale + &dscale);
-        }
-        let dangle = (self.target_angle - self.angle) * 0.1;
+        //}
+        let dangle = (self.target_angle - self.angle) ;
         self.angle += dangle;
         vec![
             self.cx.to_string().parse::<f64>().unwrap(),
@@ -503,45 +514,105 @@ impl MandelbrotNavigator {
         ]
     }
 
-    pub fn compute_reference_orbit(&mut self, max_iter: u32) -> Vec<MandelbrotStep> {
+    /// Retourne un tuple (ptr, offset, count) pour accès direct JS
+    pub fn compute_reference_orbit_ptr(&mut self, max_iter: u32) -> OrbitBufferInfo {
         let cx = &*self.cx;
         let cy = &*self.cy;
-        // Si C a changé, on reset le compteur et le vecteur
-        if &self.previous_c.0 != cx || &self.previous_c.1 != cy {
+        if self.previous_c.0.ne(cx) || self.previous_c.1.ne(cy) {
             self.result.clear();
             self.last_iter = 0;
             self.previous_c = (cx.clone(), cy.clone());
+            self.last_zx = Box::new(Float::from(0.0));
+            self.last_zy = Box::new(Float::from(0.0));
+            self.last_dx = Box::new(Float::from(0.0));
+            self.last_dy = Box::new(Float::from(0.0));
         }
-        let mut zx = if self.last_iter == 0 { Float::from(0.0) } else { Float::from(self.result[self.last_iter-1].zx) };
-        let mut zy = if self.last_iter == 0 { Float::from(0.0) } else { Float::from(self.result[self.last_iter-1].zy) };
-        let mut dx = if self.last_iter == 0 { Float::from(0.0) } else { Float::from(self.result[self.last_iter-1].dx) };
-        let mut dy = if self.last_iter == 0 { Float::from(0.0) } else { Float::from(self.result[self.last_iter-1].dy) };
+        let offset = self.result.len() ;
+        let mut zx = self.last_zx.as_ref().clone();
+        let mut zy = self.last_zy.as_ref().clone();
+        let mut dx = self.last_dx.as_ref().clone();
+        let mut dy = self.last_dy.as_ref().clone();
         let two = Float::from(2.0);
         let one = Float::from(1.0);
-        let total_iter: usize = max_iter.min(1_000_000) as usize;
+        let total_iter: usize = 1_000_000.min(max_iter as usize);
         let mut computed = 0;
-        while self.last_iter < total_iter && computed < 1000 {
-            self.result.push(MandelbrotStep {
-                zx: zx.clone().to_string().parse::<f32>().unwrap(),
-                zy: zy.clone().to_string().parse::<f32>().unwrap(),
-                dx: dx.clone().to_string().parse::<f32>().unwrap(),
-                dy: dy.clone().to_string().parse::<f32>().unwrap(),
-            });
-            let dx_new = zx.clone() * dx.clone() * two.clone() + one.clone();
-            let dy_new = zy.clone() * dy.clone() * two.clone();
-            let zx_new = zx.clone() * zx.clone() - zy.clone() * zy.clone() + cx.clone();
-            let zy_new = two.clone() * zx.clone() * zy.clone() + cy.clone();
-            zx = zx_new;
-            zy = zy_new;
-            dx = dx_new;
-            dy = dy_new;
+        while self.last_iter < total_iter { //&& computed < 1000
+            if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(self.mu) {
+                self.result.push(MandelbrotStep {
+                    zx: 0.0,
+                    zy: 0.0,
+                    dx: 0.0,
+                    dy: 0.0,
+                });
+            } else {
+                self.result.push(MandelbrotStep {
+                    zx: zx.clone().to_string().parse::<f32>().unwrap(),
+                    zy: zy.clone().to_string().parse::<f32>().unwrap(),
+                    dx: dx.clone().to_string().parse::<f32>().unwrap(),
+                    dy: dy.clone().to_string().parse::<f32>().unwrap(),
+                });
+                let dx_new = zx.clone() * dx.clone() * two.clone() + one.clone();
+                let dy_new = zy.clone() * dy.clone() * two.clone();
+                let zx_new = zx.clone() * zx.clone() - zy.clone() * zy.clone() + cx.clone();
+                let zy_new = two.clone() * zx.clone() * zy.clone() + cy.clone();
+                zx = zx_new;
+                zy = zy_new;
+                dx = dx_new;
+                dy = dy_new;
+            }
             self.last_iter += 1;
             computed += 1;
-            if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(100000.0) {
-                break;
-            }
         }
-        // Retourne le slice calculé
-        self.result[0..self.last_iter].to_vec()
+        // Stocker la dernière valeur exacte
+        self.last_zx = Box::new(zx);
+        self.last_zy = Box::new(zy);
+        self.last_dx = Box::new(dx);
+        self.last_dy = Box::new(dy);
+        let ptr = self.result.as_ptr() as usize;
+        let count = self.last_iter;
+        OrbitBufferInfo {
+            ptr,
+            offset,
+            count,
+        }
+    }
+    /// Retourne la taille du buffer en nombre de MandelbrotStep
+    pub fn get_reference_orbit_len(&self) -> usize {
+        self.last_iter
+    }
+    /// Retourne la capacité max du buffer
+    pub fn get_reference_orbit_capacity(&self) -> usize {
+        self.result.capacity()
+    }
+
+
+
+    pub fn scale(&mut self, value: f64) {
+        let new_scale = Box::new(Float::from(value));
+        self.scale = new_scale.clone();
+        self.target_scale = new_scale;
+    }
+
+    pub fn angle(&mut self, value: f64) {
+        self.angle = value;
+        self.target_angle = value;
+    }
+
+    pub fn origin(&mut self, cx: f64, cy: f64) {
+        let new_cx = Box::new(Float::from(cx));
+        let new_cy = Box::new(Float::from(cy));
+        self.cx = new_cx.clone();
+        self.cy = new_cy.clone();
+        self.target_cx = new_cx;
+        self.target_cy = new_cy;
     }
 }
+
+
+#[wasm_bindgen]
+pub struct OrbitBufferInfo {
+    pub ptr: usize,
+    pub offset: usize,
+    pub count: usize,
+}
+

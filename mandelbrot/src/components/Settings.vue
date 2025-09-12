@@ -71,6 +71,19 @@ function selectPreset(name: string) {
   }
 }
 
+const muSlider = computed({
+  get: () => Math.log10(props.modelValue.mu ?? 1.0),
+  set: (val: number) => {
+    props.modelValue.mu = Math.pow(10, val);
+  }
+});
+const epsilonSlider = computed({
+  get: () => Math.log10(props.modelValue.epsilon ?? 1e-8),
+  set: (val: number) => {
+    props.modelValue.epsilon = Math.pow(10, val);
+  }
+});
+
 onMounted(() => {
   loadPresets();
 });
@@ -84,6 +97,7 @@ onMounted(() => {
       <span class="math-display">
         Échelle&nbsp;:
         <span v-html="scaleSci" />
+        <button class="button is-small" style="margin-left:0.7em;" @click="props.modelValue.scale = 2.5">Réinitialiser</button>
       </span>
     </div>
     <div class="panel-block compact-block">
@@ -99,6 +113,30 @@ onMounted(() => {
         Angle&nbsp;:
         <span>{{ angleDeg }}°</span>
       </span>
+    </div>
+    <div class="panel-block compact-block">
+      <label class="compact-label">Mu (log)</label>
+      <input
+          type="range"
+          min="0"
+          max="5"
+          step="0.01"
+          v-model="muSlider"
+          style="width: 100%;"
+      />
+      <span class="math-display">{{ (props.modelValue.mu ?? 1.0).toFixed(1) }}</span>
+    </div>
+    <div class="panel-block compact-block">
+      <label class="compact-label">Epsilon (log)</label>
+      <input
+          type="range"
+          min="-12"
+          max="0"
+          step="0.01"
+          v-model="epsilonSlider"
+          style="width: 100%;"
+      />
+      <span class="math-display">{{ (props.modelValue.epsilon ?? 1e-8).toExponential(2) }}</span>
     </div>
     <div class="panel-block compact-block">
       <label class="compact-label">Presets enregistrés</label>

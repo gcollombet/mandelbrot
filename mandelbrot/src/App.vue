@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import WebGpuSurface from "./components/WebGpuSurface.vue";
+import MandelbrotNavigator from "./components/MandelbrotNavigator.vue";
 import {onMounted} from "vue";
 
 onMounted(() => {
@@ -10,7 +10,7 @@ onMounted(() => {
 
 <template>
   <div id="fullscreen">
-    <WebGpuSurface/>
+    <MandelbrotNavigator/>
   </div>
 </template>
 
