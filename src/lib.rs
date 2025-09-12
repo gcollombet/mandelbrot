@@ -313,6 +313,7 @@ pub fn run() -> anyhow::Result<()> {
 }
 
 #[wasm_bindgen]
+#[derive(Clone)]
 pub struct MandelbrotStep {
     pub zx: f32,
     pub zy: f32,
@@ -380,50 +381,6 @@ pub unsafe fn moveMandelbrot(
 }
 
 #[cfg(target_arch = "wasm32")]
-#[wasm_bindgen]
-pub unsafe fn mandelbrot(max_iter: u32) -> Vec<MandelbrotStep>  {
-    let cc = c.clone().unwrap();
-    let cx = cc.cx;
-    let cy = cc.cy;
-
-    let mut zx = Float::from(0.0);
-    let mut zy = Float::from(0.0);
-    let mut dx = Float::from(0.0);
-    let mut dy = Float::from(0.0);
-
-    let two = Float::from(2.0);
-    let one = Float::from(1.0);
-
-    let mut result = Vec::with_capacity(max_iter as usize);
-    for _ in 0..max_iter {
-        result.push(MandelbrotStep {
-            zx: zx.clone().to_string().parse::<f32>().unwrap(),
-            zy : zy.clone().to_string().parse::<f32>().unwrap(),
-            dx : dx.clone().to_string().parse::<f32>().unwrap(),
-            dy : dy.clone().to_string().parse::<f32>().unwrap(),
-        });
-        // Calcul de la dérivée
-        let dx_new = zx.clone() * dx.clone() * two.clone() + one.clone();
-        let dy_new = zy.clone() * dy.clone() * two.clone();
-
-        // Calcul de la prochaine itération
-        let zx_new = zx.clone() * zx.clone() - zy.clone() * zy.clone() + cx.clone();
-        let zy_new = two.clone() * zx.clone() * zy.clone() + cy.clone();
-
-        zx = zx_new;
-        zy = zy_new;
-        dx = dx_new;
-        dy = dy_new;
-
-        if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(100000.0) {
-            break;
-        }
-    }
-
-    result
-}
-
-#[cfg(target_arch = "wasm32")]
 #[wasm_bindgen()]
 pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
     console_error_panic_hook::set_once();
@@ -436,102 +393,155 @@ use wasm_bindgen::prelude::*;
 
 #[wasm_bindgen]
 pub struct MandelbrotNavigator {
-    cx: f32,
-    cy: f32,
-    scale: f32,
-    angle: f32,
-    target_cx: f32,
-    target_cy: f32,
-    target_scale: f32,
-    target_angle: f32,
-    velocity_cx: f32,
-    velocity_cy: f32,
-    velocity_scale: f32,
-    velocity_angle: f32,
-    accel: f32,
-    damping: f32,
+    cx: Box<Float>,
+    cy: Box<Float>,
+    scale: Box<Float>,
+    angle: f64,
+    target_cx: Box<Float>,
+    target_cy: Box<Float>,
+    target_scale: Box<Float>,
+    target_angle: f64,
+    result: Box<Vec<MandelbrotStep>>, // Vecteur pré-alloué
+    last_iter: usize, // Dernière itération calculée
+    previous_c: (Float, Float), // Dernier C vu
 }
 
 #[wasm_bindgen]
 impl MandelbrotNavigator {
+
     #[wasm_bindgen(constructor)]
-    pub fn new(cx: f32, cy: f32, scale: f32, angle: f32) -> MandelbrotNavigator {
+    pub fn new(cx: f64, cy: f64, scale: f64, angle: f64) -> MandelbrotNavigator {
         MandelbrotNavigator {
-            cx,
-            cy,
-            scale,
+            cx: Box::new(Float::from(cx)),
+            cy: Box::new(Float::from(cy)),
+            scale: Box::new(Float::from(scale)),
             angle,
-            target_cx: cx,
-            target_cy: cy,
-            target_scale: scale,
+            target_cx: Box::new(Float::from(cx)),
+            target_cy: Box::new(Float::from(cy)),
+            target_scale: Box::new(Float::from(scale)),
             target_angle: angle,
-            velocity_cx: 0.0,
-            velocity_cy: 0.0,
-            velocity_scale: 0.0,
-            velocity_angle: 0.0,
-            accel: 0.05,
-            damping: 0.7,
+            result: Box::new(Vec::with_capacity(1_000_000)),
+            last_iter: 0,
+            previous_c: (Float::from(cx), Float::from(cy)),
         }
     }
 
-    pub fn set_target(&mut self, cx: f32, cy: f32, scale: f32, angle: f32) {
-        self.target_cx = cx;
-        self.target_cy = cy;
-        self.target_scale = scale;
-        self.target_angle = angle;
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        // dx/dy sont des valeurs entre 0 et 1 (écran)
+        // On convertit en déplacement complexe selon l'échelle et l'angle
+        let scale = &*self.scale;
+        let angle = self.angle;
+        let delta_x = Float::from(dx) * scale * Float::from(angle.cos()) - Float::from(dy) * scale * Float::from(angle.sin());
+        let delta_y = Float::from(dx) * scale * Float::from(angle.sin()) + Float::from(dy) * scale * Float::from(angle.cos());
+        self.target_cx = Box::new(&*self.cx + delta_x);
+        self.target_cy = Box::new(&*self.cy + delta_y);
     }
 
-    pub fn navigate(&mut self, dx: f32, dy: f32) {
-        let cos_a = self.angle.cos();
-        let sin_a = self.angle.sin();
-        let dx_complex = cos_a * dx - sin_a * dy;
-        let dy_complex = sin_a * dx + cos_a * dy;
-        self.target_cx += dx_complex;
-        self.target_cy += dy_complex;
+    pub fn rotate(&mut self, delta_angle: f64) {
+        self.target_angle = self.angle + delta_angle;
     }
 
-    pub fn zoom(&mut self, factor: f32) {
-        self.target_scale *= factor;
+    pub fn translate_direct(&mut self, dx: f32, dy: f32) {
+        let scale = &*self.scale;
+        let angle = self.angle;
+        let delta_x = Float::from(dx as f64) * scale * Float::from(angle.cos()) - Float::from(dy as f64) * scale * Float::from(angle.sin());
+        let delta_y = Float::from(dx as f64) * scale * Float::from(angle.sin()) + Float::from(dy as f64) * scale * Float::from(angle.cos());
+        self.cx = Box::new(&*self.cx + delta_x);
+        self.cy = Box::new(&*self.cy + delta_y);
+        self.target_cx = self.cx.clone();
+        self.target_cy = self.cy.clone();
     }
 
-    pub fn rotate(&mut self, delta_angle: f32) {
-        self.target_angle += delta_angle;
+    pub fn rotate_direct(&mut self, delta_angle: f64) {
+        self.angle += delta_angle;
+        self.target_angle = self.angle;
     }
 
-    pub fn step(&mut self) -> Vec<f32> {
-        if unsafe { c.is_none() } {
-            unsafe {
-                c = Some(Box::new(Mandelbrot {
-                    cx: Float::from(-0.8005649172439378601652614980060010776762),
-                    cy: Float::from(0.1766690913194066364854892309438271746385),
-                    scale: Float::from(1.0),
-                    angle: Float::from(0.0),
-                }));
+    pub fn zoom(&mut self, factor: f64) {
+        // Animation du zoom vers la nouvelle échelle cible
+        let new_scale = &*self.scale * Float::from(factor);
+        self.target_scale = Box::new(new_scale);
+    }
+
+    pub fn step(&mut self) -> Vec<f64> {
+        // Animation simple vers la cible
+        let speed = Float::from(0.5);
+        let dcx = (&*self.target_cx - &*self.cx) * &speed;
+        let dcy = (&*self.target_cy - &*self.cy) * &speed;
+        if(dcx.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
+            self.cx = self.target_cx.clone();
+        } else {
+            self.cx = Box::new(&*self.cx + &dcx);
+        }
+        if(dcy.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
+            self.cy = self.target_cy.clone();
+        } else {
+            self.cy = Box::new(&*self.cy + &dcy);
+        }
+        let dscale = (&*self.target_scale - &*self.scale) * &speed;
+        if(dscale.clone().to_string().parse::<f64>().unwrap().abs() < 1e-5) {
+            self.scale = self.target_scale.clone();
+        } else {
+            self.scale = Box::new(&*self.scale + &dscale);
+        }
+        let dangle = (self.target_angle - self.angle) * 0.1;
+        self.angle += dangle;
+        vec![
+            self.cx.to_string().parse::<f64>().unwrap(),
+            self.cy.to_string().parse::<f64>().unwrap(),
+            self.scale.to_string().parse::<f64>().unwrap(),
+            self.angle,
+        ]
+    }
+
+    pub fn get_params(&self) -> Vec<f64> {
+        vec![
+            self.cx.clone().to_string().parse::<f64>().unwrap(),
+            self.cy.clone().to_string().parse::<f64>().unwrap(),
+            self.scale.clone().to_string().parse::<f64>().unwrap(),
+            self.angle
+        ]
+    }
+
+    pub fn compute_reference_orbit(&mut self, max_iter: u32) -> Vec<MandelbrotStep> {
+        let cx = &*self.cx;
+        let cy = &*self.cy;
+        // Si C a changé, on reset le compteur et le vecteur
+        if &self.previous_c.0 != cx || &self.previous_c.1 != cy {
+            self.result.clear();
+            self.last_iter = 0;
+            self.previous_c = (cx.clone(), cy.clone());
+        }
+        let mut zx = if self.last_iter == 0 { Float::from(0.0) } else { Float::from(self.result[self.last_iter-1].zx) };
+        let mut zy = if self.last_iter == 0 { Float::from(0.0) } else { Float::from(self.result[self.last_iter-1].zy) };
+        let mut dx = if self.last_iter == 0 { Float::from(0.0) } else { Float::from(self.result[self.last_iter-1].dx) };
+        let mut dy = if self.last_iter == 0 { Float::from(0.0) } else { Float::from(self.result[self.last_iter-1].dy) };
+        let two = Float::from(2.0);
+        let one = Float::from(1.0);
+        let total_iter: usize = max_iter.min(1_000_000) as usize;
+        let mut computed = 0;
+        while self.last_iter < total_iter && computed < 1000 {
+            self.result.push(MandelbrotStep {
+                zx: zx.clone().to_string().parse::<f32>().unwrap(),
+                zy: zy.clone().to_string().parse::<f32>().unwrap(),
+                dx: dx.clone().to_string().parse::<f32>().unwrap(),
+                dy: dy.clone().to_string().parse::<f32>().unwrap(),
+            });
+            let dx_new = zx.clone() * dx.clone() * two.clone() + one.clone();
+            let dy_new = zy.clone() * dy.clone() * two.clone();
+            let zx_new = zx.clone() * zx.clone() - zy.clone() * zy.clone() + cx.clone();
+            let zy_new = two.clone() * zx.clone() * zy.clone() + cy.clone();
+            zx = zx_new;
+            zy = zy_new;
+            dx = dx_new;
+            dy = dy_new;
+            self.last_iter += 1;
+            computed += 1;
+            if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(100000.0) {
+                break;
             }
         }
-        // Animation fluide vers la cible
-        self.velocity_cx = (self.target_cx - self.cx) * self.accel + self.velocity_cx * self.damping;
-        self.velocity_cy = (self.target_cy - self.cy) * self.accel + self.velocity_cy * self.damping;
-        self.velocity_scale = (self.target_scale - self.scale) * self.accel + self.velocity_scale * self.damping;
-        self.velocity_angle = (self.target_angle - self.angle) * self.accel + self.velocity_angle * self.damping;
-
-        if self.velocity_angle.abs() < 0.001 { self.velocity_angle = 0.0; }
-        if self.velocity_cy.abs() < self.scale / 1000.0 * 2.0 { self.velocity_cy = 0.0; }
-        if self.velocity_cx.abs() < self.scale / 1000.0 * 2.0 { self.velocity_cx = 0.0; }
-        if self.velocity_scale.abs() < self.scale / 100.0 { self.velocity_scale = 0.0; }
-
-        self.cx += self.velocity_cx;
-        self.cy += self.velocity_cy;
-        self.scale += self.velocity_scale;
-        self.angle += self.velocity_angle;
-
-        let dcx = self.cx - self.cx.round();
-        let dcy = self.cy - self.cy.round();
-
-        vec![dcx, dcy, self.scale, self.angle]
-    }
-
-    pub fn get_params(&self) -> Vec<f32> {
-        vec![self.cx, self.cy, self.scale, self.angle]
+        // Retourne le slice calculé
+        self.result[0..self.last_iter].to_vec()
     }
 }

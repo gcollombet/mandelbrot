@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import {onMounted, ref} from 'vue';
+import {onMounted, ref, watch} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
-import { MandelbrotNavigator } from "mandelbrot";
+import {MandelbrotNavigator} from "mandelbrot";
+
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const antialiasLevel = 1;
@@ -12,6 +13,15 @@ let engine: Engine;
 let navigator: any;
 const moveStep = 0.04;
 const angleStep = 0.025;
+const mandelbrotParams = ref({
+  cx: -0.749208775,
+  cy: -0.0798967515,
+  scale: 2.5,
+  angle: 0.0,
+  maxIterations: 1000,
+  antialiasLevel: antialiasLevel,
+  palettePeriod: palettePeriod
+});
 
 function handleKeydown(e: KeyboardEvent) {
   pressedKeys[e.key.toLowerCase()] = true;
@@ -34,7 +44,9 @@ let isDragging = false;
 let isRotating = false;
 let startX = 0;
 let startY = 0;
-let startParams: number[] = [];
+let prevX = 0;
+let prevY = 0;
+
 
 function getCanvasCoords(e: MouseEvent) {
   const canvas = canvasRef.value;
@@ -54,9 +66,8 @@ function handleMouseDown(e: MouseEvent) {
   } else {
     isDragging = true;
     const coords = getCanvasCoords(e);
-    startX = coords.x;
-    startY = coords.y;
-    startParams = navigator.get_params();
+    prevX = coords.x;
+    prevY = coords.y;
   }
 }
 
@@ -70,15 +81,15 @@ function handleMouseMove(e: MouseEvent) {
     const mouseX = coords.x;
     const mouseY = coords.y;
     const angle = Math.atan2(mouseY - centerY, mouseX - centerX);
-    navigator.set_target(startParams[0], startParams[1], startParams[2], angle);
+    navigator.rotate(angle - navigator.get_params()[3]);
     return;
   }
   if (!isDragging) return;
-  const dx = coords.x - startX;
-  const dy = coords.y - startY;
-  const moveX = -dx * 2 / coords.width * (coords.width / coords.height);
-  const moveY = dy * 2 / coords.height;
-  navigator.set_target(startParams[0] + moveX, startParams[1] + moveY, startParams[2], startParams[3]);
+  const dx = (coords.x - prevX) / coords.width;
+  const dy = (coords.y - prevY) / coords.height;
+  navigator.translate_direct(-dx, dy);
+  prevX = coords.x;
+  prevY = coords.y;
 }
 
 function handleMouseUp(e: MouseEvent) {
@@ -92,12 +103,13 @@ function handleMouseUp(e: MouseEvent) {
 async function initWebGPU() {
   if (!canvasRef.value) return;
   canvas = canvasRef.value;
+
+  navigator = new MandelbrotNavigator(-0.749208775, -0.0798967515, 2.5, 0.0);
   engine = new Engine(canvas, {
     antialiasLevel: 1,
     palettePeriod: 128
   });
-  await engine.initialize();
-  navigator = new MandelbrotNavigator(-0.749208775, -0.0798967515, 2.5, 0.0);
+  await engine.initialize(navigator);
 
   window.addEventListener('keydown', handleKeydown);
   window.addEventListener('keyup', handleKeyup);
@@ -108,16 +120,20 @@ async function initWebGPU() {
   window.addEventListener('mouseup', handleMouseUp);
 
   function animate() {
-    if (pressedKeys['z']) navigator.navigate(0, moveStep);
-    if (pressedKeys['s']) navigator.navigate(0, -moveStep);
-    if (pressedKeys['q']) navigator.navigate(-moveStep, 0);
-    if (pressedKeys['d']) navigator.navigate(moveStep, 0);
+    if (pressedKeys['z']) navigator.translate(0, moveStep);
+    if (pressedKeys['s']) navigator.translate(0, -moveStep);
+    if (pressedKeys['q']) navigator.translate(-moveStep, 0);
+    if (pressedKeys['d']) navigator.translate(moveStep, 0);
     if (pressedKeys['a']) navigator.rotate(angleStep);
     if (pressedKeys['e']) navigator.rotate(-angleStep);
     const epsilon = 0.0001;
-    const [dcx, dcy, scale, angle] = navigator.step();
-    const maxIterations = Math.min(Math.max(100, 80 + 120 * Math.log2(1.0 / scale)), 1000000);
-    engine.update({ dcx, dcy, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
+    const [cx, cy, scale, angle] = navigator.step();
+    mandelbrotParams.value.cx = cx;
+    mandelbrotParams.value.cy = cy;
+    mandelbrotParams.value.scale = scale;
+    mandelbrotParams.value.angle = angle;
+    const maxIterations = Math.min(Math.max(100, 80 + 30 * Math.log2(1.0 / scale)), 1000000);
+    engine.update({ cx, cy, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
     engine.render();
     requestAnimationFrame(animate);
   }
@@ -135,7 +151,7 @@ onMounted(() => {
   <div style="position: relative; height: 100vh; width: 100vw;">
     <canvas ref="canvasRef" style="width: 100%; height: 100%; display: block;"></canvas>
     <div style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
-<!--      <Settings v-model="targetMandelbrot" />-->
+      <Settings v-model="mandelbrotParams" />
     </div>
   </div>
 </template>

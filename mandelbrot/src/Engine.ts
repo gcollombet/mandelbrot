@@ -2,7 +2,7 @@
 
 import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
- import {mandelbrot as rustMandelbrot} from "mandelbrot";
+ import {MandelbrotNavigator} from "mandelbrot";
 
 export type RenderOptions = {
     antialiasLevel: number,
@@ -25,6 +25,7 @@ export class Engine {
     adapter!: GPUAdapter | null;
     ctx!: GPUCanvasContext;
     format!: GPUTextureFormat;
+    mandelbrotNavigator!: MandelbrotNavigator;
 
     // resources
     intermediateTexture?: GPUTexture;
@@ -73,7 +74,8 @@ export class Engine {
         }
     }
 
-    async initialize(): Promise<void> {
+    async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
+        this.mandelbrotNavigator = mandelbrotNavigator;
         if (!navigator.gpu) throw new Error('WebGPU non supporté');
         this.adapter = await navigator.gpu.requestAdapter();
         if (!this.adapter) throw new Error('Adapter WebGPU introuvable');
@@ -255,11 +257,10 @@ export class Engine {
             if (
                 this.previousMandelbrot.cx !== mandelbrot.cx
                 || this.previousMandelbrot.cy !== mandelbrot.cy
-          //      || this.previousMandelbrot.maxIterations !== mandelbrot.maxIterations
+                || this.previousMandelbrot.maxIterations !== mandelbrot.maxIterations
             ) {
                 console.log("Calcul de l'orbite");
-                let data = rustMandelbrot(
-                    // mandelbrot.maxIterations
+                let data = this.mandelbrotNavigator.compute_reference_orbit(
                     1000000
                 );
                 data.forEach((v, i) => {
