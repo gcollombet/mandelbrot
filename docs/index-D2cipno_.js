@@ -3132,7 +3132,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
   color = color / total;
   return vec4<f32>(color, 1.0);
-}`, kc = "/assets/mandelbrot_bg-Y7XQRtnM.wasm", Yc = async (e = {}, t) => {
+}`, kc = "mandelbrot_bg-Y7XQRtnM.wasm", Yc = async (e = {}, t) => {
         let n;
         if (t.startsWith("data:")) {
           const r = t.replace(/^data:.*?base64,/, "");
