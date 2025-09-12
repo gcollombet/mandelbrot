@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, ref, watch} from 'vue';
+import {onMounted, ref} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
 import {MandelbrotNavigator} from "mandelbrot";
@@ -42,8 +42,6 @@ function handleWheel(e: WheelEvent) {
 const pressedKeys: Record<string, boolean> = {};
 let isDragging = false;
 let isRotating = false;
-let startX = 0;
-let startY = 0;
 let prevX = 0;
 let prevY = 0;
 
