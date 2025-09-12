@@ -45,7 +45,7 @@ fn tunnel(coord: vec2<f32>) -> vec2<f32> {
   let delta = coord - center;
   let angle = atan2(delta.y, delta.x);
   let radius = length(delta);
-  // Effet tunnel : on replie le rayon pour créer des anneaux
+  // Effet tunnel : on replie le rayon pour créer des anneaux
   let tunnelRadius = fract(radius * 4.0); // 4.0 = nombre d’anneaux
   return center + vec2<f32>(cos(angle), sin(angle)) * tunnelRadius;
 }
@@ -58,6 +58,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let blurStrength = uniforms.bloomStrength; // Utilisé comme force du blur radial
   let blurSamples = 8; // Nombre d'échantillons pour le blur
   var color = vec3<f32>(0.0, 0.0, 0.0);
+  let glowColor = vec3<f32>(0.2, 0.4, 1.0);
   var total = 0.0;
   // Blur radial : on échantillonne le long du rayon centre -> pixel
   for (var i = 0; i < blurSamples; i = i + 1) {
@@ -74,8 +75,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     let period = uniforms.palettePeriod;
     var sampleColor: vec3<f32>;
     if (nu <= 0.0) {
-      let glowColor = vec3<f32>(0.2, 0.4, 1.0);
-      let glow = exp(-d * 3.0);
+      let glow = exp(-d * 0.1);
       sampleColor = glowColor * glow;
     } else {
       let v = fract(nu / period);

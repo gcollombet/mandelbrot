@@ -2,7 +2,7 @@
 
 import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
-// import {mandelbrot} from "mandelbrot";
+ import {mandelbrot as rustMandelbrot} from "mandelbrot";
 
 export type RenderOptions = {
     antialiasLevel: number,
@@ -17,7 +17,6 @@ export type Mandelbrot = {
     angle: number,
     epsilon: number,
 }
-
 
 export class Engine {
     canvas: HTMLCanvasElement;
@@ -35,7 +34,7 @@ export class Engine {
     // buffers
     uniformBufferMandelbrot?: GPUBuffer; // passe 1 uniforms
     uniformBufferColor?: GPUBuffer; // passe 2 uniforms
-    mandelbrotBuffer?: GPUBuffer; // storage buffer contenant l'orbite
+    mandelbrotReferenceBuffer?: GPUBuffer; // storage buffer contenant l'orbite
 
     // pipelines / bindgroups
     pipeline1?: GPURenderPipeline;
@@ -56,6 +55,7 @@ export class Engine {
     previousMandelbrot: Mandelbrot;
     needRender = true;
     extraFrames: number = 0;
+    mandelbrotReference = new Float32Array(1000000);
 
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas;
@@ -100,12 +100,11 @@ export class Engine {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color'
         });
-        this.mandelbrotBuffer = this.device.createBuffer({
-            size: 4 * 4,
+        this.mandelbrotReferenceBuffer = this.device.createBuffer({
+            size: 4 * 1000000,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
-            label: 'Engine Mandelbrot Orbit Storage Buffer',
+            label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         });
-
         await this._createPipelines();
 
         this.resize();
@@ -115,8 +114,25 @@ export class Engine {
         const module1 = this.device.createShaderModule({code: this.shaderPass1, label: 'Engine ShaderModule Pass1'});
         const module2 = this.device.createShaderModule({code: this.shaderPass2, label: 'Engine ShaderModule Pass2'});
 
+        // Layout explicite pour le bind group Mandelbrot
+        const layout1 = this.device.createBindGroupLayout({
+            entries: [
+                {
+                    binding: 0,
+                    visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+                    buffer: { type: 'uniform' }
+                },
+                {
+                    binding: 1,
+                    visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX,
+                    buffer: { type: 'read-only-storage' }
+                }
+            ],
+            label: 'Engine RenderPipeline Mandelbrot'
+        });
+
         this.pipeline1 = this.device.createRenderPipeline({
-            layout: 'auto',
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout1] }),
             vertex: {module: module1, entryPoint: 'vs_main'},
             fragment: {module: module1, entryPoint: 'fs_main', targets: [{format: 'rgba16float'}]},
             primitive: {topology: 'triangle-list'},
@@ -131,13 +147,11 @@ export class Engine {
             label: 'Engine RenderPipeline Pass Color'
         });
 
-        const layout1 = this.pipeline1.getBindGroupLayout(0);
-        layout1.label = 'Engine RenderPipeline Mandelbrot';
         this.bindGroup1 = this.device.createBindGroup({
             layout: layout1,
             entries: [
                 {binding: 0, resource: {buffer: this.uniformBufferMandelbrot!}},
-                // {binding: 1, resource: {buffer: this.mandelbrotBuffer!}}
+                {binding: 1, resource: {buffer: this.mandelbrotReferenceBuffer!}}
             ],
             label: 'Engine BindGroup Pass Mandelbrot'
         });
@@ -235,37 +249,31 @@ export class Engine {
         ]);
 
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer);
-        this.previousMandelbrot = mandelbrot;
-        // if (params.orbit && params.orbit.length > 0) {
-        //     const orbit = params.orbit;
-        //     const data = new Float32Array(orbit.length * 4);
-        //     for (let i = 0; i < orbit.length; i++) {
-        //         data[i * 4 + 0] = orbit[i].zx;
-        //         data[i * 4 + 1] = orbit[i].zy;
-        //         data[i * 4 + 2] = orbit[i].dx;
-        //         data[i * 4 + 3] = orbit[i].dy;
-        //     }
-        //     const byteLength = data.byteLength;
-        //     if (!this.mandelbrotBuffer || (this.mandelbrotBuffer as any).size < byteLength) {
-        //         this.mandelbrotBuffer?.destroy?.();
-        //         this.mandelbrotBuffer = this.device.createBuffer({
-        //             size: byteLength,
-        //             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST
-        //         });
-        //     }
-        //     this.device.queue.writeBuffer(this.mandelbrotBuffer, 0, data.buffer);
-        //
-        //     if (this.pipeline1) {
-        //         const layout1 = this.pipeline1.getBindGroupLayout(0);
-        //         this.bindGroup1 = this.device.createBindGroup({
-        //             layout: layout1,
-        //             entries: [{binding: 0, resource: {buffer: this.uniformBuffer1!}}, {
-        //                 binding: 1,
-        //                 resource: {buffer: this.mandelbrotBuffer!}
-        //             }]
-        //         });
-        //     }
-        // }
+
+        // si cx ou cy ont changé
+        if (this.previousMandelbrot) {
+            if (
+                this.previousMandelbrot.cx !== mandelbrot.cx
+                || this.previousMandelbrot.cy !== mandelbrot.cy
+                || this.previousMandelbrot.maxIterations !== mandelbrot.maxIterations
+            ) {
+                console.log("Calcul de l'orbite");
+                let data = rustMandelbrot(
+                    mandelbrot.cx,
+                    mandelbrot.cy,
+                    mandelbrot.maxIterations
+                );
+                data.forEach((v, i) => {
+                    this.mandelbrotReference[i  * 4] = v.zx;
+                    this.mandelbrotReference[i  * 4 + 1] = v.zy;
+                    this.mandelbrotReference[i  * 4 + 2] = v.dx;
+                    this.mandelbrotReference[i  * 4 + 3] = v.dy;
+                });
+            }
+            this.previousMandelbrot = mandelbrot;
+        }
+
+        this.device.queue.writeBuffer(this.mandelbrotReferenceBuffer!, 0, this.mandelbrotReference.buffer);
     }
     render() {
         if(!this.needRender && this.extraFrames <= 0) {
@@ -310,6 +318,6 @@ export class Engine {
 
     destroy() {
         this.intermediateTexture?.destroy?.();
-        this.mandelbrotBuffer?.destroy?.();
+        this.mandelbrotReferenceBuffer?.destroy?.();
     }
 }

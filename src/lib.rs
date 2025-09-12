@@ -323,9 +323,9 @@ pub struct MandelbrotStep {
 
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn mandelbrot(cx: f32, cy: f32, max_iter: u32) -> Vec<MandelbrotStep>  {
-    let cx = Float::from(cx);
-    let cy = Float::from(cy);
+pub fn mandelbrot(cxx: f32, cyy: f32, max_iter: u32) -> Vec<MandelbrotStep>  {
+    let cx = Float::from(cxx);
+    let cy = Float::from(cyy);
 
     let mut zx = Float::from(0.0);
     let mut zy = Float::from(0.0);
@@ -336,8 +336,13 @@ pub fn mandelbrot(cx: f32, cy: f32, max_iter: u32) -> Vec<MandelbrotStep>  {
     let one = Float::from(1.0);
 
     let mut result = Vec::with_capacity(max_iter as usize);
-
     for _ in 0..max_iter {
+        result.push(MandelbrotStep {
+            zx: zx.clone().to_string().parse::<f32>().unwrap(),
+            zy : zy.clone().to_string().parse::<f32>().unwrap(),
+            dx : dx.clone().to_string().parse::<f32>().unwrap(),
+            dy : dy.clone().to_string().parse::<f32>().unwrap(),
+        });
         // Calcul de la dérivée
         let dx_new = zx.clone() * dx.clone() * two.clone() + one.clone();
         let dy_new = zy.clone() * dy.clone() * two.clone();
@@ -351,12 +356,10 @@ pub fn mandelbrot(cx: f32, cy: f32, max_iter: u32) -> Vec<MandelbrotStep>  {
         dx = dx_new;
         dy = dy_new;
 
-        result.push(MandelbrotStep {
-            zx: zx.clone().to_string().parse::<f32>().unwrap(),
-            zy : zy.clone().to_string().parse::<f32>().unwrap(),
-            dx : dx.clone().to_string().parse::<f32>().unwrap(),
-            dy : dy.clone().to_string().parse::<f32>().unwrap(),
-        });
+
+        if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(100000.0) {
+            break;
+        }
     }
 
     result
