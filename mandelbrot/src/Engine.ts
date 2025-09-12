@@ -255,13 +255,12 @@ export class Engine {
             if (
                 this.previousMandelbrot.cx !== mandelbrot.cx
                 || this.previousMandelbrot.cy !== mandelbrot.cy
-                || this.previousMandelbrot.maxIterations !== mandelbrot.maxIterations
+          //      || this.previousMandelbrot.maxIterations !== mandelbrot.maxIterations
             ) {
                 console.log("Calcul de l'orbite");
                 let data = rustMandelbrot(
-                    mandelbrot.cx,
-                    mandelbrot.cy,
-                    mandelbrot.maxIterations
+                    // mandelbrot.maxIterations
+                    1000000
                 );
                 data.forEach((v, i) => {
                     this.mandelbrotReference[i  * 4] = v.zx;

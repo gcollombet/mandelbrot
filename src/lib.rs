@@ -321,11 +321,70 @@ pub struct MandelbrotStep {
 }
 
 
+#[derive(Clone)]
+pub struct Mandelbrot {
+    pub cx: Float,
+    pub cy: Float,
+    pub scale: Float,
+    pub angle: Float,
+}
+
+static mut c: Option<Box<Mandelbrot>> = None;
+
 #[cfg(target_arch = "wasm32")]
 #[wasm_bindgen]
-pub fn mandelbrot(cxx: f32, cyy: f32, max_iter: u32) -> Vec<MandelbrotStep>  {
-    let cx = Float::from(cxx);
-    let cy = Float::from(cyy);
+pub unsafe fn moveMandelbrot(
+    velocityCx: f32,
+    velocityCy: f32,
+    velocityAngle: f32,
+    velocityScale: f32,
+) -> Vec<f32>  {
+    if unsafe { c.is_none() } {
+        unsafe {
+            c = Some(Box::new(Mandelbrot {
+                cx: Float::from(0.0),
+                cy: Float::from(0.0),
+                scale: Float::from(1.0),
+                angle: Float::from(0.0),
+            }));
+        }
+    }
+
+    let mandelbrot = c.as_mut().unwrap();
+
+    let velocityAngle =  Float::from(velocityAngle) * mandelbrot.scale.clone();
+    let velocityCx =  Float::from(velocityCx) * mandelbrot.scale.clone();
+    let velocityCy =  Float::from(velocityCy) * mandelbrot.scale.clone();
+    let velocityScale =  Float::from(velocityScale);
+
+    mandelbrot.cx += velocityCx;
+    mandelbrot.cy += velocityCy;
+    mandelbrot.scale += velocityScale;
+    mandelbrot.angle += velocityAngle;
+
+    // Calcul du f32 le plus proche
+    let fcx = Float::from(mandelbrot.cx.clone().to_string().parse::<f32>().unwrap());
+    let fcy = Float::from(mandelbrot.cy.clone().to_string().parse::<f32>().unwrap());
+
+    // Calcul de la différence entre le Float et le f32
+    let dcx = mandelbrot.cx.clone() - fcx.clone();
+    let dcy = mandelbrot.cy.clone() - fcy.clone();
+
+    vec![
+        dcx.clone().to_string().parse::<f32>().unwrap(),
+        dcy.clone().to_string().parse::<f32>().unwrap(),
+        mandelbrot.scale.clone().to_string().parse::<f32>().unwrap(),
+        mandelbrot.angle.clone().to_string().parse::<f32>().unwrap(),
+    ]
+
+}
+
+#[cfg(target_arch = "wasm32")]
+#[wasm_bindgen]
+pub unsafe fn mandelbrot(max_iter: u32) -> Vec<MandelbrotStep>  {
+    let cc = c.clone().unwrap();
+    let cx = cc.cx;
+    let cy = cc.cy;
 
     let mut zx = Float::from(0.0);
     let mut zy = Float::from(0.0);
@@ -356,7 +415,6 @@ pub fn mandelbrot(cxx: f32, cyy: f32, max_iter: u32) -> Vec<MandelbrotStep>  {
         dx = dx_new;
         dy = dy_new;
 
-
         if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(100000.0) {
             break;
         }
@@ -371,4 +429,109 @@ pub fn run_web() -> Result<(), wasm_bindgen::JsValue> {
     console_error_panic_hook::set_once();
     run().unwrap_throw();
     Ok(())
+}
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+
+#[wasm_bindgen]
+pub struct MandelbrotNavigator {
+    cx: f32,
+    cy: f32,
+    scale: f32,
+    angle: f32,
+    target_cx: f32,
+    target_cy: f32,
+    target_scale: f32,
+    target_angle: f32,
+    velocity_cx: f32,
+    velocity_cy: f32,
+    velocity_scale: f32,
+    velocity_angle: f32,
+    accel: f32,
+    damping: f32,
+}
+
+#[wasm_bindgen]
+impl MandelbrotNavigator {
+    #[wasm_bindgen(constructor)]
+    pub fn new(cx: f32, cy: f32, scale: f32, angle: f32) -> MandelbrotNavigator {
+        MandelbrotNavigator {
+            cx,
+            cy,
+            scale,
+            angle,
+            target_cx: cx,
+            target_cy: cy,
+            target_scale: scale,
+            target_angle: angle,
+            velocity_cx: 0.0,
+            velocity_cy: 0.0,
+            velocity_scale: 0.0,
+            velocity_angle: 0.0,
+            accel: 0.05,
+            damping: 0.7,
+        }
+    }
+
+    pub fn set_target(&mut self, cx: f32, cy: f32, scale: f32, angle: f32) {
+        self.target_cx = cx;
+        self.target_cy = cy;
+        self.target_scale = scale;
+        self.target_angle = angle;
+    }
+
+    pub fn navigate(&mut self, dx: f32, dy: f32) {
+        let cos_a = self.angle.cos();
+        let sin_a = self.angle.sin();
+        let dx_complex = cos_a * dx - sin_a * dy;
+        let dy_complex = sin_a * dx + cos_a * dy;
+        self.target_cx += dx_complex;
+        self.target_cy += dy_complex;
+    }
+
+    pub fn zoom(&mut self, factor: f32) {
+        self.target_scale *= factor;
+    }
+
+    pub fn rotate(&mut self, delta_angle: f32) {
+        self.target_angle += delta_angle;
+    }
+
+    pub fn step(&mut self) -> Vec<f32> {
+        if unsafe { c.is_none() } {
+            unsafe {
+                c = Some(Box::new(Mandelbrot {
+                    cx: Float::from(-0.8005649172439378601652614980060010776762),
+                    cy: Float::from(0.1766690913194066364854892309438271746385),
+                    scale: Float::from(1.0),
+                    angle: Float::from(0.0),
+                }));
+            }
+        }
+        // Animation fluide vers la cible
+        self.velocity_cx = (self.target_cx - self.cx) * self.accel + self.velocity_cx * self.damping;
+        self.velocity_cy = (self.target_cy - self.cy) * self.accel + self.velocity_cy * self.damping;
+        self.velocity_scale = (self.target_scale - self.scale) * self.accel + self.velocity_scale * self.damping;
+        self.velocity_angle = (self.target_angle - self.angle) * self.accel + self.velocity_angle * self.damping;
+
+        if self.velocity_angle.abs() < 0.001 { self.velocity_angle = 0.0; }
+        if self.velocity_cy.abs() < self.scale / 1000.0 * 2.0 { self.velocity_cy = 0.0; }
+        if self.velocity_cx.abs() < self.scale / 1000.0 * 2.0 { self.velocity_cx = 0.0; }
+        if self.velocity_scale.abs() < self.scale / 100.0 { self.velocity_scale = 0.0; }
+
+        self.cx += self.velocity_cx;
+        self.cy += self.velocity_cy;
+        self.scale += self.velocity_scale;
+        self.angle += self.velocity_angle;
+
+        let dcx = self.cx - self.cx.round();
+        let dcy = self.cy - self.cy.round();
+
+        vec![dcx, dcy, self.scale, self.angle]
+    }
+
+    pub fn get_params(&self) -> Vec<f32> {
+        vec![self.cx, self.cy, self.scale, self.angle]
+    }
 }
