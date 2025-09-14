@@ -70,6 +70,7 @@ export class Engine {
         this.previousMandelbrot = {
             maxIterations: 1,
             epsilon: 0,
+            mu: 1000,
             angle: 0,
             scale: 1,
             cy: 0,
@@ -228,9 +229,9 @@ export class Engine {
                 // Si on vient de passer à false, on ne touche pas à extraFrames
             }
         }
-        // if(!this.needRender && this.extraFrames <= 0) {
-        //     return;
-        // }
+        if(!this.needRender && this.extraFrames <= 0) {
+            return;
+        }
         const aspect = (this.width / Math.max(1, this.height));
 
         const mandelbrotShaderUniformData = new Float32Array([

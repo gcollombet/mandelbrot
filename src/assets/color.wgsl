@@ -75,8 +75,10 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     let period = uniforms.palettePeriod;
     var sampleColor: vec3<f32>;
     if (nu <= 0.0) {
-      let glow = exp(-d * 1.0);
-      sampleColor = glowColor * (1.0 - glow);
+        // Noir pour l’intérieur du Mandelbrot
+        sampleColor = vec3<f32>(0.0, 0.0, 0.0);
+      //let glow = exp(-d * 1.0);
+      //sampleColor = glowColor * (1.0 - glow);
     } else {
       let v = fract(nu / period);
       sampleColor = palette(v, d, sampleUV.x, sampleUV.y);

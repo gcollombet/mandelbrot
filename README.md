@@ -1,75 +1,45 @@
-<div align="center">
+# Realtime Online Mandelbrot set explorer
 
-  <h1><code>wasm-pack-template</code></h1>
+Use WGPU optimized pipeline to render the mandelbrot set in real time, 
+even at high zoom level, around $10^{-38}$, while performing calculations 
+in 32 bits floating point in GPU.
 
-  <strong>A template for kick starting a Rust and WebAssembly project using <a href="https://github.com/rustwasm/wasm-pack">wasm-pack</a>.</strong>
+To achieve this, a reference point is computed in CPU with arbitrary precision.
+Then perturbation theory is used to compute the other points around the reference point.
 
-  <p>
-    <a href="https://travis-ci.org/rustwasm/wasm-pack-template"><img src="https://img.shields.io/travis/rustwasm/wasm-pack-template.svg?style=flat-square" alt="Build Status" /></a>
-  </p>
+$$
+Z_{n+1} = Z_n^2 + C
+$$
+$$
+Z_{n+1} + \delta Z_{n+1} = (Z_n + \delta Z_n)^2 + (C + \delta C)
+$$
+$$\delta Z_{n+1} = 2 * Z_n * \delta Z_n + \delta Z_n^2 + \delta C$$
 
-  <h3>
-    <a href="https://rustwasm.github.io/docs/wasm-pack/tutorials/npm-browser-packages/index.html">Tutorial</a>
-    <span> | </span>
-    <a href="https://discordapp.com/channels/442252698964721669/443151097398296587">Chat</a>
-  </h3>
+Where $Z_n$ and $C$ are the reference point computed in CPU, and $\delta Z_n$ and $\delta C$ are the small deltas computed in GPU.
 
-  <sub>Built with 🦀🕸 by <a href="https://rustwasm.github.io/">The Rust and WebAssembly Working Group</a></sub>
-</div>
+Reference points with arbitrary precision are computed in WebAssembly.
 
-## About
+The WebAssembly part is done in Rust, using AstroFloat crate and compiled to WebAssembly with wasm-pack.
 
-[**📚 Read this template tutorial! 📚**][template-docs]
+## Live demo
 
-This template is designed for compiling Rust libraries into WebAssembly and
-publishing the resulting package to NPM.
+https://gcollombet.github.io/mandelbrot/
 
-Be sure to check out [other `wasm-pack` tutorials online][tutorials] for other
-templates and usages of `wasm-pack`.
+Use mouse to navigate and mouse wheel to zoom.
 
-[tutorials]: https://rustwasm.github.io/docs/wasm-pack/tutorials/index.html
-[template-docs]: https://rustwasm.github.io/docs/wasm-pack/tutorials/npm-browser-packages/index.html
+You can also use keyboard: ZQSD to move, A and E to rotate
 
-## 🚴 Usage
+## Run it
 
-### 🐑 Use `cargo generate` to Clone this Template
+Rust and wasm-pack are required as well as nodejs.
 
-[Learn more about `cargo generate` here.](https://github.com/ashleygwilliams/cargo-generate)
-
-```
-cargo generate --git https://github.com/rustwasm/wasm-pack-template.git --name my-project
-cd my-project
-```
-
-### 🛠️ Build with `wasm-pack build`
-
-```
-wasm-pack build
+```bash
+cd reference_calculus/pkg
+npm link
+cd ../..
+npm link mandelbrot
+npm install
+npm run dev
 ```
 
-### 🔬 Test in Headless Browsers with `wasm-pack test`
-
-```
-wasm-pack test --headless --firefox
-```
-
-### 🎁 Publish to NPM with `wasm-pack publish`
-
-```
-wasm-pack publish
-```
-
-## 🔋 Batteries Included
-
-* [`wasm-bindgen`](https://github.com/rustwasm/wasm-bindgen) for communicating
-  between WebAssembly and JavaScript.
-* [`console_error_panic_hook`](https://github.com/rustwasm/console_error_panic_hook)
-  for logging panic messages to the developer console.
-* [`wee_alloc`](https://github.com/rustwasm/wee_alloc), an allocator optimized
-  for small code size.
-
-```
-wasm-pack build
-cd mandelbrot && npm link ../pkg && npm run build && npm run preview
-
-```
+Then open http://localhost:5173 in your browser.

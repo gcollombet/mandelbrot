@@ -2,7 +2,7 @@
 import {onMounted, ref, onUnmounted, watch} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
-import {MandelbrotNavigator, MandelbrotStep} from "mandelbrot";
+import {MandelbrotNavigator} from "mandelbrot";
 import type {MandelbrotParams} from "../Mandelbrot.ts";
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -13,7 +13,7 @@ let engine: Engine;
 let navigator: any;
 const moveStep = 0.04;
 const angleStep = 0.025;
-const mandelbrotParams = ref(<MandelbrotParams>{
+const mandelbrotParams = ref({
   cx: -1.5,
   cy: 0.0,
   mu: 10000.0,
@@ -22,7 +22,7 @@ const mandelbrotParams = ref(<MandelbrotParams>{
   maxIterations: 1000,
   antialiasLevel: antialiasLevel,
   palettePeriod: palettePeriod,
-});
+} as MandelbrotParams);
 
 function handleKeydown(e: KeyboardEvent) {
   pressedKeys[e.key.toLowerCase()] = true;
