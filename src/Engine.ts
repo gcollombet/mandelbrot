@@ -222,7 +222,7 @@ export class Engine {
     update(mandelbrot : Mandelbrot, renderOptions : RenderOptions) {
         if(this.previousMandelbrot) {
             const wasNeedRender = this.needRender;
-            this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
+            this.needRender = true; // !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
             if (this.needRender) {
                 this.extraFrames = 2;
             } else if (wasNeedRender && !this.needRender) {
