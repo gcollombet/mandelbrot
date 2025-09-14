@@ -2,7 +2,7 @@
 import {onMounted, ref, onUnmounted, watch} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
-import {MandelbrotNavigator, MandelbrotStep} from "mandelbrot";
+import {MandelbrotNavigator} from "mandelbrot";
 import type {MandelbrotParams} from "../Mandelbrot.ts";
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
