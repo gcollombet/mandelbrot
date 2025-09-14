@@ -1,0 +1,219 @@
+use log::{Level};
+
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+use malachite_float::Float;
+
+#[wasm_bindgen]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MandelbrotStep {
+    pub zx: f32,
+    pub zy: f32,
+    pub dx: f32,
+    pub dy: f32,
+}
+
+#[derive(Clone)]
+pub struct Mandelbrot {
+    pub cx: Float,
+    pub cy: Float,
+    pub scale: Float,
+    pub angle: Float,
+}
+
+#[wasm_bindgen]
+pub struct MandelbrotNavigator {
+    cx: Float,
+    cy: Float,
+    mu: f64,
+    scale: Float,
+    angle: f64,
+    target_cx: Float,
+    target_cy: Float,
+    target_scale: Float,
+    target_angle: f64,
+    result: Box<Vec<MandelbrotStep>>, // Vecteur pré-alloué
+    last_iter: usize, // Dernière itération calculée
+    previous_c: (Float, Float), // Dernier C vu
+    last_zx: Float,
+    last_zy: Float,
+    last_dx: Float,
+    last_dy: Float,
+}
+
+#[wasm_bindgen]
+impl MandelbrotNavigator {
+
+    #[wasm_bindgen(constructor)]
+    pub fn new(cx: f64, cy: f64, mu: f64, scale: f64, angle: f64) -> MandelbrotNavigator {
+        console_log::init_with_level(Level::Debug).expect("Problème d'initialisation du logger");
+        MandelbrotNavigator {
+            cx: Float::from_primitive_float_prec(cx, 100).0,
+            cy: Float::from_primitive_float_prec(cy, 100).0,
+            mu,
+            scale: Float::from_primitive_float_prec(scale, 100).0,
+            angle,
+            target_cx: Float::from_primitive_float_prec(cx, 100).0,
+            target_cy: Float::from_primitive_float_prec(cy, 100).0,
+            target_scale: Float::from_primitive_float_prec(scale, 100).0,
+            target_angle: angle,
+            result: Box::new(Vec::with_capacity(10_000)),
+            last_iter: 0,
+            previous_c: (Float::from_primitive_float_prec(cx, 100).0, Float::from_primitive_float_prec(cy, 100).0),
+            last_zx: Float::from(0.0),
+            last_zy: Float::from(0.0),
+            last_dx: Float::from(0.0),
+            last_dy: Float::from(0.0),
+        }
+    }
+
+    pub fn translate(&mut self, dx: f64, dy: f64) {
+        // dx/dy sont des valeurs entre 0 et 1 (écran)
+        // On convertit en déplacement complexe selon l'échelle et l'angle
+        let angle = self.angle;
+        let delta_x = (Float::from(dx) * Float::from(angle.cos()) - Float::from(dy) * Float::from(angle.sin())) * self.scale.clone();
+        let delta_y = (Float::from(dx) * Float::from(angle.sin()) + Float::from(dy) * Float::from(angle.cos())) * self.scale.clone();
+        self.target_cx = self.cx.clone() + delta_x.clone();
+        self.target_cy = self.cy.clone() + delta_y.clone();
+    }
+
+    pub fn rotate(&mut self, delta_angle: f64) {
+        self.target_angle = self.angle + delta_angle;
+    }
+
+    pub fn translate_direct(&mut self, dx: f64, dy: f64) {
+        self.translate(dx, dy);
+        self.cx = self.target_cx.clone();
+        self.cy = self.target_cy.clone();
+    }
+
+    pub fn rotate_direct(&mut self, delta_angle: f64) {
+        self.angle += delta_angle;
+        self.target_angle = self.angle;
+    }
+
+    pub fn zoom(&mut self, factor: f64) {
+        self.target_scale = self.scale.clone() * Float::from(factor);
+    }
+
+    pub fn step(&mut self) -> Vec<f64> {
+        self.cx = self.target_cx.clone();
+        self.cy = self.target_cy.clone();
+        self.scale = self.target_scale.clone();
+        self.angle = self.target_angle;
+        vec![
+            self.cx.to_string().parse::<f64>().unwrap(),
+            self.cy.to_string().parse::<f64>().unwrap(),
+            self.scale.to_string().parse::<f64>().unwrap(),
+            self.angle,
+        ]
+    }
+
+    pub fn get_params(&self) -> Vec<f64> {
+        vec![
+            self.cx.clone().to_string().parse::<f64>().unwrap(),
+            self.cy.clone().to_string().parse::<f64>().unwrap(),
+            self.scale.clone().to_string().parse::<f64>().unwrap(),
+            self.angle
+        ]
+    }
+
+    /// Retourne un tuple (ptr, offset, count) pour accès direct JS
+    pub fn compute_reference_orbit_ptr(&mut self, max_iter: u32) -> OrbitBufferInfo {
+        if self.previous_c.0.ne(&self.cx) || self.previous_c.1.ne(&self.cy) {
+            self.result.clear();
+            self.last_iter = 0;
+            self.previous_c = (self.cx.clone(), self.cy.clone());
+            self.last_zx = Float::from(0.0);
+            self.last_zy = Float::from(0.0);
+            self.last_dx = Float::from(0.0);
+            self.last_dy = Float::from(0.0);
+        }
+        let offset = self.result.len() ;
+        let mut zx = self.last_zx.clone();
+        let mut zy = self.last_zy.clone();
+        let mut dx = self.last_dx.clone();
+        let mut dy = self.last_dy.clone();
+        let two = Float::from(2.0);
+        let one = Float::from(1.0);
+        let total_iter: usize = 10_000.min(max_iter as usize);
+        //let mut computed = 0;
+        while self.last_iter < total_iter { //&& computed < 1000
+            if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(self.mu) {
+                self.result.push(MandelbrotStep {
+                    zx: 0.0,
+                    zy: 0.0,
+                    dx: 0.0,
+                    dy: 0.0,
+                });
+            } else {
+                self.result.push(MandelbrotStep {
+                    zx: zx.clone().to_string().parse::<f32>().unwrap(),
+                    zy: zy.clone().to_string().parse::<f32>().unwrap(),
+                    dx: dx.clone().to_string().parse::<f32>().unwrap(),
+                    dy: dy.clone().to_string().parse::<f32>().unwrap(),
+                });
+                let dx_new = zx.clone() * dx.clone() * two.clone() + one.clone();
+                let dy_new = zy.clone() * dy.clone() * two.clone();
+                let zx_new = zx.clone() * zx.clone() - zy.clone() * zy.clone() + self.cx.clone();
+                let zy_new = two.clone() * zx.clone() * zy.clone() + self.cy.clone();
+                zx = zx_new;
+                zy = zy_new;
+                dx = dx_new;
+                dy = dy_new;
+            }
+            self.last_iter += 1;
+            //computed += 1;
+        }
+        // Stocker la dernière valeur exacte
+        self.last_zx = zx.clone();
+        self.last_zy = zy.clone();
+        self.last_dx = dx.clone();
+        self.last_dy = dy.clone();
+        let ptr = self.result.as_ptr() as usize;
+        let count = self.last_iter;
+        OrbitBufferInfo {
+            ptr,
+            offset,
+            count,
+        }
+    }
+    /// Retourne la taille du buffer en nombre de MandelbrotStep
+    pub fn get_reference_orbit_len(&self) -> usize {
+        self.last_iter
+    }
+    /// Retourne la capacité max du buffer
+    pub fn get_reference_orbit_capacity(&self) -> usize {
+        self.result.capacity()
+    }
+
+    pub fn scale(&mut self, value: f64) {
+        let new_scale = Float::from(value);
+        self.scale = new_scale.clone();
+        self.target_scale = new_scale;
+    }
+
+    pub fn angle(&mut self, value: f64) {
+        self.angle = value;
+        self.target_angle = value;
+    }
+
+    pub fn origin(&mut self, cx: f64, cy: f64) {
+        let new_cx = Float::from(cx);
+        let new_cy = Float::from(cy);
+        self.cx = new_cx.clone();
+        self.cy = new_cy.clone();
+        self.target_cx = new_cx;
+        self.target_cy = new_cy;
+    }
+}
+
+
+#[wasm_bindgen]
+pub struct OrbitBufferInfo {
+    pub ptr: usize,
+    pub offset: usize,
+    pub count: usize,
+}
+

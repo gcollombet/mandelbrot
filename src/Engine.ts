@@ -70,6 +70,7 @@ export class Engine {
         this.previousMandelbrot = {
             maxIterations: 1,
             epsilon: 0,
+            mu: 1000,
             angle: 0,
             scale: 1,
             cy: 0,
@@ -221,7 +222,7 @@ export class Engine {
     update(mandelbrot : Mandelbrot, renderOptions : RenderOptions) {
         if(this.previousMandelbrot) {
             const wasNeedRender = this.needRender;
-            this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
+            this.needRender = true; // !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
             if (this.needRender) {
                 this.extraFrames = 2;
             } else if (wasNeedRender && !this.needRender) {
