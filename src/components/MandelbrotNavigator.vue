@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, ref, onUnmounted, watch} from 'vue';
+import {onMounted, ref, onUnmounted} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
 import {MandelbrotNavigator} from "mandelbrot";
@@ -14,11 +14,11 @@ let navigator: any;
 const moveStep = 0.04;
 const angleStep = 0.025;
 const mandelbrotParams = ref({
-  cx: -1.5,
-  cy: 0.0,
+  cx: "-1.5",
+  cy: "0.0",
   mu: 10000.0,
-  scale: 2.5,
-  angle: 0.0,
+  scale: "2.5",
+  angle: "0.0",
   maxIterations: 1000,
   antialiasLevel: antialiasLevel,
   palettePeriod: palettePeriod,
@@ -80,7 +80,7 @@ function handleMouseMove(e: MouseEvent) {
     const mouseX = coords.x;
     const mouseY = coords.y;
     const angle = Math.atan2(mouseY - centerY, mouseX - centerX);
-    navigator.rotate(angle - navigator.get_params()[3]);
+    navigator.angle(angle);
     return;
   }
   if (!isDragging) return;
@@ -132,14 +132,15 @@ async function initWebGPU() {
     if (pressedKeys['a']) navigator.rotate(angleStep);
     if (pressedKeys['e']) navigator.rotate(-angleStep);
     const epsilon = mandelbrotParams.value.epsilon;
-    const [cx, cy, scale, angle] = navigator.step();
+    const [dx, dy, scale, angle] = navigator.step();
+    const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
     const mu = mandelbrotParams.value.mu;
-    mandelbrotParams.value.cx = cx;
-    mandelbrotParams.value.cy = cy;
-    mandelbrotParams.value.scale = scale;
-    mandelbrotParams.value.angle = angle;
+    mandelbrotParams.value.cx = cx_string;
+    mandelbrotParams.value.cy = cy_string;
+    mandelbrotParams.value.scale = scale_string;
+    mandelbrotParams.value.angle = angle_string;
     const maxIterations = Math.min(Math.max(100, 80 + 30 * Math.log2(1.0 / scale)), 1000000);
-    engine.update({ cx, cy, mu, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
+    engine.update({ cx: dx, cy: dy, mu, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
     engine.render();
     requestAnimationFrame(animate);
   }
@@ -157,16 +158,6 @@ function handleResize() {
   engine.render();
 }
 
-
-
-watch(mandelbrotParams, (newParams) => {
-  if (!navigator) return;
-  navigator.scale(newParams.scale);
-  navigator.angle(newParams.angle);
-  navigator.origin(newParams.cx, newParams.cy);
-}, {deep: true});
-
-
 onMounted(() => {
   initWebGPU();
   window.addEventListener('resize', handleResize);
@@ -177,7 +168,6 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('resize', handleResize);
 });
-
 
 </script>
 

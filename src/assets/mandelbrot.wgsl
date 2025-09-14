@@ -166,11 +166,11 @@ fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   var xy = rotate((fragCoord.x * 2.0 - 1.0)  * mandelbrot.aspect * mandelbrot.scale, (fragCoord.y * 2.0 - 1.0) * mandelbrot.scale, mandelbrot.angle);
-  let x0 = xy.x ; //+ mandelbrot.cx;
-  let y0 = xy.y ; //+ mandelbrot.cy;
+  let x0 = xy.x + mandelbrot.cx;
+  let y0 = xy.y + mandelbrot.cy;
   var dc = vec2<f32>(
-       xy.x,
-       xy.y
+       x0,
+       y0
   );
   let res = mandelbrot_func(dc.x, dc.y);
   return vec4<f32>(res.x, res.y, 0.0, 1.0);

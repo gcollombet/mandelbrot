@@ -4,31 +4,13 @@ import type { MandelbrotParams } from "../Mandelbrot.ts";
 
 const props = defineProps<{ modelValue: MandelbrotParams }>();
 
-function formatScientific(val: number, digits = 8) {
-  if (val === 0) return '0';
-  const exp = Math.floor(Math.log10(Math.abs(val)));
-  const coeff = val / Math.pow(10, exp);
-  // Utilise l'exposant unicode
-  const expStr = exp === 0 ? '' : `×10${toSuperscript(exp)}`;
-  return `${coeff.toFixed(digits)}${expStr}`;
-}
-
-function toSuperscript(n: number) {
-  // Convertit un nombre en exposant unicode
-  const sup = {
-    '-': '⁻', '0': '⁰', '1': '¹', '2': '²', '3': '³', '4': '⁴', '5': '⁵', '6': '⁶', '7': '⁷', '8': '⁸', '9': '⁹'
-  };
-  // @ts-ignore
-  return String(n).split('').map(c => sup[c] ?? c).join('');
-}
-
-const angleDeg = computed(() => (props.modelValue.angle * 180 / Math.PI).toFixed(2));
-const scaleSci = computed(() => formatScientific(props.modelValue.scale));
-const cxSci = computed(() => formatScientific(props.modelValue.cx));
-const cySci = computed(() => formatScientific(props.modelValue.cy));
+const angleDeg = computed(() => (Number.parseFloat(props.modelValue.angle)  * 180 / Math.PI).toFixed(2));
+const scaleSci = computed(() => props.modelValue.scale);
+const cxSci = computed(() => props.modelValue.cx);
+const cySci = computed(() => props.modelValue.cy);
 
 const presetName = ref('');
-const presets = ref<{ name: string, cx: number, cy: number, scale: number, angle: number }[]>([]);
+const presets = ref<{ name: string, cx: string, cy: string, scale: string, angle: string }[]>([]);
 const selectedPreset = ref('');
 const STORAGE_KEY = 'mandelbrot_presets';
 
@@ -97,7 +79,7 @@ onMounted(() => {
       <span class="math-display">
         Échelle&nbsp;:
         <span v-html="scaleSci" />
-        <button class="button is-small" style="margin-left:0.7em;" @click="props.modelValue.scale = 2.5">Réinitialiser</button>
+        <button class="button is-small" style="margin-left:0.7em;" @click="props.modelValue.scale = '2.5'">Réinitialiser</button>
       </span>
     </div>
     <div class="panel-block compact-block">

@@ -222,7 +222,7 @@ export class Engine {
     update(mandelbrot : Mandelbrot, renderOptions : RenderOptions) {
         if(this.previousMandelbrot) {
             const wasNeedRender = this.needRender;
-            this.needRender = true; // !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
+            this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
             if (this.needRender) {
                 this.extraFrames = 2;
             } else if (wasNeedRender && !this.needRender) {
@@ -235,8 +235,8 @@ export class Engine {
         const aspect = (this.width / Math.max(1, this.height));
 
         const mandelbrotShaderUniformData = new Float32Array([
-            100.0, //mandelbrot.cx,
-            100.0, //mandelbrot.cy,
+            mandelbrot.cx,
+            mandelbrot.cy,
             mandelbrot.mu,
             mandelbrot.scale,
             aspect,
@@ -266,7 +266,6 @@ export class Engine {
             maxIterations
         );
         const buffer = new Float32Array(wasmMemory.buffer, prtInfo.ptr, prtInfo.count * 4); // 4 floats par MandelbrotStep
-
 
         if(prtInfo.offset < maxIterations) {
             console.log(

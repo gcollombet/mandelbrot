@@ -1,10 +1,10 @@
 export interface MandelbrotParams {
-    scale: number;
-    cx: number;
-    cy: number;
+    scale: string;
+    cx: string;
+    cy: string;
     mu: number;
     epsilon: number;
-    angle: number;
+    angle: string;
     maxIterations: number,
     antialiasLevel: number,
     palettePeriod: number,
