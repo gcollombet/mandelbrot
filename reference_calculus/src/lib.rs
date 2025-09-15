@@ -1,3 +1,4 @@
+use malachite_base::num::conversion::traits::FromStringBase;
 use log::{info, Level};
 
 #[cfg(target_arch = "wasm32")]
@@ -203,8 +204,8 @@ impl MandelbrotNavigator {
         self.result.capacity()
     }
 
-    pub fn scale(&mut self, value: f64) {
-        let new_scale = Float::from_primitive_float_prec(value, 128).0;
+    pub fn scale(&mut self, value: &str) {
+        let new_scale = Float::from_string_base(10, value).unwrap();
         self.scale = new_scale.clone();
         self.target_scale = new_scale;
     }
@@ -214,9 +215,12 @@ impl MandelbrotNavigator {
         self.target_angle = value;
     }
 
-    pub fn origin(&mut self, cx: f64, cy: f64) {
-        let new_cx = Float::from(cx);
-        let new_cy = Float::from(cy);
+
+    pub fn origin(&mut self, cx: &str, cy: &str) {
+        info!("new cx: {}, cy: {}", cx, cy);
+        let new_cx = Float::from_string_base(16, cx).unwrap_throw();
+        let new_cy = Float::from_string_base(16, cy).unwrap_throw();
+        info!("new cx: {}, cy: {}", new_cx, new_cy);
         self.cx = new_cx.clone();
         self.cy = new_cy.clone();
         self.target_cx = new_cx;

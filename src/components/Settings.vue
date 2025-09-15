@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { defineProps, computed, ref, onMounted } from 'vue';
+import { defineProps, computed, ref, onMounted, defineEmits } from 'vue';
 import type { MandelbrotParams } from "../Mandelbrot.ts";
 
 const props = defineProps<{ modelValue: MandelbrotParams }>();
+const emit = defineEmits(['load']);
 
 const angleDeg = computed(() => (Number.parseFloat(props.modelValue.angle)  * 180 / Math.PI).toFixed(2));
 const scaleSci = computed(() => props.modelValue.scale);
@@ -50,6 +51,7 @@ function selectPreset(name: string) {
     props.modelValue.scale = preset.scale;
     props.modelValue.angle = preset.angle;
     selectedPreset.value = name;
+    emit('load', { ...preset });
   }
 }
 

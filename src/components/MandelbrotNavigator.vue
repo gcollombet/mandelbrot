@@ -24,6 +24,13 @@ const mandelbrotParams = ref({
   palettePeriod: palettePeriod,
 } as MandelbrotParams);
 
+function onLoadParams(params: { cx: string, cy: string, scale: string, angle: string }) {
+  if (!navigator) return;
+  navigator.origin(String(params.cx), String(params.cy));
+  navigator.scale(String(params.scale));
+  navigator.angle(Number(params.angle));
+}
+
 function handleKeydown(e: KeyboardEvent) {
   pressedKeys[e.key.toLowerCase()] = true;
 }
@@ -45,7 +52,19 @@ let isDragging = false;
 let isRotating = false;
 let prevX = 0;
 let prevY = 0;
+const isMobile = ref(false);
+let pinchStartDist = 0;
+let pinchStartAngle = 0;
+let pinchStartAngleView = 0;
+let isPinching = false;
 
+function detectMobile() {
+  if (typeof window !== 'undefined' && window.navigator) {
+    isMobile.value = /Mobi|Android|iPhone|iPad|iPod|Opera Mini|IEMobile|WPDesktop/i.test(window.navigator.userAgent);
+  } else {
+    isMobile.value = false;
+  }
+}
 
 function getCanvasCoords(e: MouseEvent) {
   const canvas = canvasRef.value;
@@ -105,6 +124,60 @@ function handleMouseUp(e: MouseEvent) {
   }
 }
 
+function handleTouchStart(e: TouchEvent) {
+  if (e.touches.length === 1) {
+    isDragging = true;
+    const touch = e.touches[0];
+    const rect = canvasRef.value?.getBoundingClientRect();
+    if (!rect) return;
+    prevX = touch.clientX - rect.left;
+    prevY = touch.clientY - rect.top;
+  } else if (e.touches.length === 2) {
+    isDragging = false;
+    isPinching = true;
+    const [t1, t2] = e.touches;
+    pinchStartDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    pinchStartAngle = Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
+    pinchStartScale = parseFloat(mandelbrotParams.value.scale);
+    pinchStartAngleView = parseFloat(mandelbrotParams.value.angle);
+  }
+}
+
+function handleTouchMove(e: TouchEvent) {
+  if (isDragging && e.touches.length === 1) {
+    const touch = e.touches[0];
+    const rect = canvasRef.value?.getBoundingClientRect();
+    if (!rect) return;
+    const x = touch.clientX - rect.left;
+    const y = touch.clientY - rect.top;
+    const width = rect.width;
+    const height = rect.height;
+    const aspect = width / height;
+    const dx = (x - prevX) / width * 2;
+    const dy = (y - prevY) / height * 2;
+    navigator.translate_direct(-dx * aspect, dy);
+    prevX = x;
+    prevY = y;
+  } else if (isPinching && e.touches.length === 2) {
+    const [t1, t2] = e.touches;
+    const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    const angle = Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
+    // Zoom
+    const zoomRatio = pinchStartDist / dist;
+    navigator.zoom(zoomRatio);
+    // Rotation
+    const angleDelta = angle - pinchStartAngle;
+    navigator.angle(pinchStartAngleView + angleDelta);
+  }
+}
+
+function handleTouchEnd(e: TouchEvent) {
+  if (e.touches.length === 0) {
+    isDragging = false;
+    isPinching = false;
+  }
+}
+
 async function initWebGPU() {
   if (!canvasRef.value) return;
   canvas = canvasRef.value;
@@ -131,6 +204,10 @@ async function initWebGPU() {
     if (pressedKeys['d']) navigator.translate(moveStep, 0);
     if (pressedKeys['a']) navigator.rotate(angleStep);
     if (pressedKeys['e']) navigator.rotate(-angleStep);
+    // Ajout des touches R et F pour zoomer
+    const zoomFactor = 0.8;
+    if (pressedKeys['r']) navigator.zoom(zoomFactor);
+    if (pressedKeys['f']) navigator.zoom(1 / zoomFactor);
     const epsilon = mandelbrotParams.value.epsilon;
     const [dx, dy, scale, angle] = navigator.step();
     const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
@@ -159,8 +236,14 @@ function handleResize() {
 }
 
 onMounted(() => {
+  detectMobile();
   initWebGPU();
   window.addEventListener('resize', handleResize);
+  if (canvasRef.value) {
+    canvasRef.value.addEventListener('touchstart', handleTouchStart, { passive: false });
+    canvasRef.value.addEventListener('touchmove', handleTouchMove, { passive: false });
+    canvasRef.value.addEventListener('touchend', handleTouchEnd, { passive: false });
+  }
   // Appel initial pour s'assurer que la taille est correcte
   // handleResize();
 });
@@ -174,8 +257,8 @@ onUnmounted(() => {
 <template>
   <div style="position: relative; height: 100vh; width: 100vw;">
     <canvas ref="canvasRef" style="width: 100%; height: 100%; display: block;"></canvas>
-    <div style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
-      <Settings v-model="mandelbrotParams" />
+    <div v-if="!isMobile" style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
+      <Settings v-model="mandelbrotParams" @load="onLoadParams" />
     </div>
   </div>
 </template>
