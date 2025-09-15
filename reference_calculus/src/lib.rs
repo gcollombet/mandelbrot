@@ -129,11 +129,8 @@ impl MandelbrotNavigator {
         };
 
         // Paramètres d'accélération et d'amortissement dépendants du temps
-        let base_accel = 12.0;
-        let base_damping = 0.9;
-        let accel = Float::from_primitive_float_prec(base_accel * delta_time.min(1.0), 128).0;
-        // let damping = Float::from(1.0 - (1.0 - base_damping));
-
+        let base_accel = 16.0;
+        let accel = Float::from_primitive_float_prec(base_accel * delta_time, 180).0;
         // Calcul des écarts
         let dx = self.target_cx.clone() - self.cx.clone();
         let dy = self.target_cy.clone() - self.cy.clone();
@@ -142,20 +139,48 @@ impl MandelbrotNavigator {
 
         // Mise à jour des vitesses
         self.vx = dx.clone() * accel.clone() * Float::from_primitive_float_prec(4.0, 128).0;
-        if (self.vx.clone() / self.scale.clone()).abs() > Float::from_primitive_float_prec(0.001, 128).0 {
+        // si vx est plus grand que l'écart restant, on le ramène à l'écart restant
+        if self.vx.clone().abs() > dx.clone().abs() {
+            self.vx = dx.clone();
+        }
+        if dx.clone().abs() > self.scale.clone() / Float::from_primitive_float_prec(1000.0, 180).0 {
             self.cx = self.cx.clone() + self.vx.clone();
+        } else {
+            self.cx = self.target_cx.clone();
+            self.vx = Float::from_primitive_float_prec(0.0, 128).0;
         }
         self.vy = dy.clone() * accel.clone() * Float::from_primitive_float_prec(4.0, 128).0;
-        if (self.vy.clone() / self.scale.clone()).abs() > Float::from_primitive_float_prec(0.001, 128).0 {
+        // si vy est plus grand que l'écart restant, on le ramène à l'écart restant
+        if self.vy.clone().abs() > dy.clone().abs() {
+            self.vy = dy.clone();
+        }
+        if dy.clone().abs() > self.scale.clone() / Float::from_primitive_float_prec(1000.0, 180).0 {
             self.cy = self.cy.clone() + self.vy.clone();
+        } else {
+            self.cy = self.target_cy.clone();
+            self.vy = Float::from_primitive_float_prec(0.0, 128).0;
         }
         self.vscale = dscale.clone() * accel.clone();
-        if (self.vscale.clone() / self.scale.clone()).abs() > Float::from_primitive_float_prec(0.001, 128).0 {
+        // si vscale est plus grand que l'écart restant, on le ramène à l'écart restant
+        if self.vscale.clone().abs() > dscale.clone().abs() {
+            self.vscale = dscale.clone();
+        }
+        if dscale.clone().abs() > self.scale.clone() / Float::from_primitive_float_prec(1000.0, 180).0 {
             self.scale = self.scale.clone() + self.vscale.clone();
+        } else {
+            self.scale = self.target_scale.clone();
+            self.vscale = Float::from_primitive_float_prec(0.0, 180).0;
         }
         self.vangle = dangle * accel.to_string().parse::<f64>().unwrap() * 4.0;
-        if self.vangle.abs() > 0.001 {
+        // si vangle est plus grand que l'écart restant, on le ramène à l'écart restant
+        if self.vangle.abs() > dangle.abs() {
+            self.vangle = dangle;
+        }
+        if (self.vangle - self.target_angle).abs() > 0.001 {
             self.angle += self.vangle;
+        } else {
+            self.angle = self.target_angle;
+            self.vangle = 0.0;
         }
 
         // Calcul du delta par rapport à la référence
