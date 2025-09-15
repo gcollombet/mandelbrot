@@ -34,7 +34,6 @@ pub struct MandelbrotNavigator {
     scale: Float,
     angle: f64,
     target_scale: Float,
-    // target_angle: f64, // Suppression de target_angle
     result: Box<Vec<MandelbrotStep>>, // Vecteur pré-alloué
     last_iter: usize, // Dernière itération calculée
     previous_c: (Float, Float), // Dernier C vu
