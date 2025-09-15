@@ -44,6 +44,12 @@ pub struct MandelbrotNavigator {
     last_zy: Float,
     last_dx: Float,
     last_dy: Float,
+    // Ajout des vitesses pour l'animation
+    vx: Float,
+    vy: Float,
+    vscale: Float,
+    vangle: f64,
+    last_step_time: Option<f64>, // timestamp en ms
 }
 
 #[wasm_bindgen]
@@ -71,6 +77,12 @@ impl MandelbrotNavigator {
             last_zy: Float::from_primitive_float_prec(0.0, 128).0,
             last_dx: Float::from_primitive_float_prec(0.0, 128).0,
             last_dy: Float::from_primitive_float_prec(0.0, 128).0,
+            // Initialisation des vitesses à zéro
+            vx: Float::from_primitive_float_prec(0.0, 128).0,
+            vy: Float::from_primitive_float_prec(0.0, 128).0,
+            vscale: Float::from_primitive_float_prec(0.0, 128).0,
+            vangle: 0.0,
+            last_step_time: None,
         }
     }
 
@@ -82,7 +94,6 @@ impl MandelbrotNavigator {
         let delta_y = (Float::from_primitive_float_prec(dx, 128).0 * Float::from(angle.sin()) + Float::from_primitive_float_prec(dy, 128).0 * Float::from(angle.cos())) * self.scale.clone();
         self.target_cx = self.cx.clone() + delta_x.clone();
         self.target_cy = self.cy.clone() + delta_y.clone();
-        info!("Problème de précision sur dy {:?}, cy {:?}, delta y {:?}, target_y {:?}", dy, self.cy, delta_y, self.target_cy);
     }
 
     pub fn rotate(&mut self, delta_angle: f64) {
@@ -105,12 +116,52 @@ impl MandelbrotNavigator {
     }
 
     pub fn step(&mut self) -> Vec<f64> {
-        self.cx = self.target_cx.clone();
-        self.cy = self.target_cy.clone();
-        self.scale = self.target_scale.clone();
-        self.angle = self.target_angle;
+        // Calcul du temps écoulé depuis le dernier appel
+        let delta_time = {
+            let now = js_sys::Date::now(); // ms
+            let dt = if let Some(last) = self.last_step_time {
+                (now - last) / 1000.0
+            } else {
+                1.0 / 60.0
+            };
+            self.last_step_time = Some(now);
+            dt
+        };
+
+        // Paramètres d'accélération et d'amortissement dépendants du temps
+        let base_accel = 12.0;
+        let base_damping = 0.9;
+        let accel = Float::from_primitive_float_prec(base_accel * delta_time.min(1.0), 128).0;
+        // let damping = Float::from(1.0 - (1.0 - base_damping));
+
+        // Calcul des écarts
+        let dx = self.target_cx.clone() - self.cx.clone();
+        let dy = self.target_cy.clone() - self.cy.clone();
+        let dscale = self.target_scale.clone() - self.scale.clone();
+        let dangle: f64 = self.target_angle - self.angle;
+
+        // Mise à jour des vitesses
+        self.vx = dx.clone() * accel.clone() * Float::from_primitive_float_prec(4.0, 128).0;
+        if (self.vx.clone() / self.scale.clone()).abs() > Float::from_primitive_float_prec(0.001, 128).0 {
+            self.cx = self.cx.clone() + self.vx.clone();
+        }
+        self.vy = dy.clone() * accel.clone() * Float::from_primitive_float_prec(4.0, 128).0;
+        if (self.vy.clone() / self.scale.clone()).abs() > Float::from_primitive_float_prec(0.001, 128).0 {
+            self.cy = self.cy.clone() + self.vy.clone();
+        }
+        self.vscale = dscale.clone() * accel.clone();
+        if (self.vscale.clone() / self.scale.clone()).abs() > Float::from_primitive_float_prec(0.001, 128).0 {
+            self.scale = self.scale.clone() + self.vscale.clone();
+        }
+        self.vangle = dangle * accel.to_string().parse::<f64>().unwrap() * 4.0;
+        if self.vangle.abs() > 0.001 {
+            self.angle += self.vangle;
+        }
+
+        // Calcul du delta par rapport à la référence
         let delta_x = self.cx.clone() - self.reference_cx.clone();
         let delta_y = self.cy.clone() - self.reference_cy.clone();
+
         vec![
             delta_x.to_string().parse::<f64>().unwrap(),
             delta_y.to_string().parse::<f64>().unwrap(),
@@ -118,6 +169,7 @@ impl MandelbrotNavigator {
             self.angle,
         ]
     }
+
 
     pub fn get_params(&self) -> Vec<JsValue> {
         vec![
@@ -235,4 +287,3 @@ pub struct OrbitBufferInfo {
     pub offset: usize,
     pub count: usize,
 }
-

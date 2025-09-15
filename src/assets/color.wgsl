@@ -56,7 +56,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let texSize = vec2<i32>(textureDimensions(tex, 0));
   let center = vec2<f32>(0.5, 0.5);
   let blurStrength = uniforms.bloomStrength; // Utilisé comme force du blur radial
-  let blurSamples = 8; // Nombre d'échantillons pour le blur
+  let blurSamples = 4; // Nombre d'échantillons pour le blur
   var color = vec3<f32>(0.0, 0.0, 0.0);
   let glowColor = vec3<f32>(0.2, 0.3, 0.8);
   var total = 0.0;

@@ -40,6 +40,7 @@ malachite-float = "0.6.1"
 astro-float =  "0.9"
 getrandom = { version = "0.2", features = ["js"] }
 malachite-base = "0.6.1"
+js-sys = "0.3.78"
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.13"

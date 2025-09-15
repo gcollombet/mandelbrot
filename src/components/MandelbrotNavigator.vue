@@ -138,7 +138,7 @@ function handleTouchStart(e: TouchEvent) {
     const [t1, t2] = e.touches;
     pinchStartDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
     pinchStartAngle = Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
-    pinchStartScale = parseFloat(mandelbrotParams.value.scale);
+    //pinchStartScale = parseFloat(mandelbrotParams.value.scale);
     pinchStartAngleView = parseFloat(mandelbrotParams.value.angle);
   }
 }
@@ -182,7 +182,14 @@ async function initWebGPU() {
   if (!canvasRef.value) return;
   canvas = canvasRef.value;
 
-  navigator = new MandelbrotNavigator(-0.749208775, -0.0798967515, 10000.0,2.5, 0.0);
+  navigator = new MandelbrotNavigator(
+      -0.5572506229492064091994520833394481793049,
+      0.6355989165839159099969652617613951003226,
+      10000.0,
+      2.5,
+      0.0
+  )
+  ;
   engine = new Engine(canvas, {
     antialiasLevel: 1,
     palettePeriod: 128
@@ -216,7 +223,7 @@ async function initWebGPU() {
     mandelbrotParams.value.cy = cy_string;
     mandelbrotParams.value.scale = scale_string;
     mandelbrotParams.value.angle = angle_string;
-    const maxIterations = Math.min(Math.max(100, 80 + 30 * Math.log2(1.0 / scale)), 1000000);
+    const maxIterations = Math.min(Math.max(100, 80 + 20 * Math.log2(1.0 / scale)), 1000000);
     engine.update({ cx: dx, cy: dy, mu, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
     engine.render();
     requestAnimationFrame(animate);
@@ -257,7 +264,7 @@ onUnmounted(() => {
 <template>
   <div style="position: relative; height: 100vh; width: 100vw;">
     <canvas ref="canvasRef" style="width: 100%; height: 100%; display: block;"></canvas>
-    <div v-if="!isMobile" style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
+    <div v-if="false" style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
       <Settings v-model="mandelbrotParams" @load="onLoadParams" />
     </div>
   </div>

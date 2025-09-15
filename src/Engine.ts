@@ -251,10 +251,10 @@ export class Engine {
         if(scaleFactor < 1.0) {
             scaleFactor = 1.0 / scaleFactor;
         }
-        scaleFactor -= 1;
+        scaleFactor = Math.sqrt(scaleFactor) - 1.0;
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,
-            scaleFactor * 2,
+            scaleFactor,
             0,
             0
         ]);
@@ -268,12 +268,6 @@ export class Engine {
         const buffer = new Float32Array(wasmMemory.buffer, prtInfo.ptr, prtInfo.count * 4); // 4 floats par MandelbrotStep
 
         if(prtInfo.offset < maxIterations) {
-            console.log(
-                "Calcul de l'orbite de référence, nombre de points :", prtInfo.count,
-                " maxIterations =", maxIterations,
-                "offset =", prtInfo.offset,
-                "length =", buffer.length / 4
-            );
             this.device.queue.writeBuffer(
                 this.mandelbrotReferenceBuffer!,
                 0,
