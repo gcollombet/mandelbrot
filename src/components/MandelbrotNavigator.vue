@@ -204,7 +204,8 @@ async function initWebGPU() {
   window.addEventListener('mousemove', handleMouseMove);
   window.addEventListener('mouseup', handleMouseUp);
 
-  function animate() {
+
+  function update() {
     if (pressedKeys['z']) navigator.translate(0, moveStep);
     if (pressedKeys['s']) navigator.translate(0, -moveStep);
     if (pressedKeys['q']) navigator.translate(-moveStep, 0);
@@ -215,6 +216,12 @@ async function initWebGPU() {
     const zoomFactor = 0.8;
     if (pressedKeys['r']) navigator.zoom(zoomFactor);
     if (pressedKeys['f']) navigator.zoom(1 / zoomFactor);
+    setTimeout(update, 16)
+  }
+
+  update();
+  function animate() {
+
     const epsilon = mandelbrotParams.value.epsilon;
     const [dx, dy, scale, angle] = navigator.step();
     const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
@@ -228,6 +235,7 @@ async function initWebGPU() {
     engine.render();
     requestAnimationFrame(animate);
   }
+
   animate();
 }
 
