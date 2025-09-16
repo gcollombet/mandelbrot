@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, ref, onUnmounted} from 'vue';
+import {onMounted, ref, onUnmounted, nextTick} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
 import {MandelbrotNavigator} from "mandelbrot";
@@ -185,8 +185,8 @@ async function initWebGPU() {
   navigator = new MandelbrotNavigator(
       -0.5572506229492064091994520833394481793049,
       0.6355989165839159099969652617613951003226,
-      10000.0,
-      2.5,
+      5000.0,
+      1000,
       0.0
   )
   ;
@@ -250,17 +250,44 @@ function handleResize() {
   engine.render();
 }
 
-onMounted(() => {
+const showUI = ref(false);
+
+async function playIntroAnimation() {
+  // Animation d'intro : zoom et rotation
+  if (!navigator) return;
+  await nextTick();
+  // attendre 0.5s
+  await new Promise(resolve => setTimeout(resolve, 500));
+  // Animation sur 1.5s
+  const duration = 3500;
+  const start = performance.now();
+  function animateIntro(now: number) {
+    const t = Math.min((now - start) / duration, 1) ;
+    // Interpolation lissée
+    const ease = t < 0.5 ? 2*t*t : -1+(4-2*t)*t;
+    const angle =(Math.PI / 2) * ease;
+    navigator.zoom(ease);
+    navigator.angle(angle);
+    if (t < 1) {
+      requestAnimationFrame(animateIntro);
+    } else {
+      showUI.value = true;
+    }
+  }
+  requestAnimationFrame(animateIntro);
+}
+
+onMounted(async () => {
   detectMobile();
-  initWebGPU();
+  await initWebGPU();
   window.addEventListener('resize', handleResize);
   if (canvasRef.value) {
     canvasRef.value.addEventListener('touchstart', handleTouchStart, { passive: false });
     canvasRef.value.addEventListener('touchmove', handleTouchMove, { passive: false });
     canvasRef.value.addEventListener('touchend', handleTouchEnd, { passive: false });
   }
-  // Appel initial pour s'assurer que la taille est correcte
-  // handleResize();
+  await nextTick();
+  await playIntroAnimation();
 });
 
 onUnmounted(() => {
@@ -271,7 +298,12 @@ onUnmounted(() => {
 
 <template>
   <div style="position: relative; height: 100vh; width: 100vw;">
-    <button class="menu-hamburger tag is-light is-medium" aria-label="Menu">
+    <button
+      class="menu-hamburger tag is-light is-medium animate__animated"
+      :class="showUI ? 'animate__fadeInDown' : ''"
+      aria-label="Menu"
+      v-show="showUI"
+    >
       <span class="hamburger-bar"></span>
       <span class="hamburger-bar"></span>
       <span class="hamburger-bar"></span>
@@ -281,7 +313,11 @@ onUnmounted(() => {
          style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
       <Settings v-model="mandelbrotParams" @load="onLoadParams" />
     </div>
-    <div class="shortcut-hint tag is-light is-medium is-hidden-touch">
+    <div
+      class="shortcut-hint tag is-light is-medium is-hidden-touch animate__animated"
+      :class="showUI ? 'animate__fadeInUp' : ''"
+      v-show="showUI"
+    >
       Déplacer&nbsp;
       <span class="tag is-black">Clic gauche</span>&nbsp;
       <span class="tag is-black">Z</span>&nbsp;
@@ -297,21 +333,29 @@ onUnmounted(() => {
       <span class="tag is-black">R</span>&nbsp;
       <span class="tag is-black">F</span>
     </div>
-    <div class="footer-love tag is-light is-medium is-hidden-touch">
+    <div
+      class="footer-love tag is-light is-medium is-hidden-touch animate__animated"
+      :class="showUI ? 'animate__fadeInUp' : ''"
+      v-show="showUI"
+    >
       <small>
-        <small>
-          Made with ❤️ <small>by Guillaume Collombet</small>&nbsp;|&nbsp;
-        </small>
+        Made with ❤️ <span>by Guillaume Collombet</span>&nbsp;|&nbsp;
       </small>
       <small>
         <a href="https://github.com/gcollombet/mandelbrot"
            target="_blank"
            rel="noopener"
-           class=""
+           class="footer-link"
            aria-label="GitHub">
           <svg class="github-logo" height="20" viewBox="0 0 16 16" width="20" fill="currentColor" style="vertical-align:middle; margin-right:4px;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>GitHub
         </a>
       </small>
+    </div>
+    <div v-if="!showUI" class="intro-title-container">
+      <div class=" animate__animated animate__fadeIn">
+        <h1 class="intro-title animate__animated animate__fadeInDown">Realtime Mandelbrot Viewer</h1>
+        <h2 class="intro-sub animate__animated animate__fadeInUp animate__delay-1s">deep zoom</h2>
+      </div>
     </div>
   </div>
 </template>
@@ -409,5 +453,87 @@ canvas {
   display: inline-block;
   vertical-align: middle;
   margin-bottom: 2px;
+}
+.loading-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.8);
+  z-index: 100;
+  display: flex;
+  justify-content: center;
+  align-items: center;
+}
+.spinner {
+  width: 40px;
+  height: 40px;
+  border: 4px solid rgba(0, 0, 0, 0.1);
+  border-top: 4px solid #007bff;
+  border-radius: 50%;
+  animation: spin 1s linear infinite;
+}
+.ui-overlay {
+  position: fixed;
+  top: 0;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  background: rgba(255, 255, 255, 0.9);
+  z-index: 50;
+  opacity: 0.9;
+}
+.intro-title-container {
+  position: fixed;
+  top: 0;
+  left: 0;
+  width: 100vw;
+  height: 100vh;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  z-index: 200;
+  pointer-events: none;
+  background: none;
+}
+.intro-title-bg {
+  background: rgba(255,255,255,0.25);
+  backdrop-filter: blur(12px);
+  border-radius: 32px;
+  padding: 2.5rem 3.5rem 2.2rem 3.5rem;
+  box-shadow: 0 8px 48px 0 rgba(0,0,0,0.10);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+.intro-title {
+  font-size: 6rem;
+  font-weight: bold;
+  font-family: "hilde-sharp", sans-serif;
+  font-weight: 400;
+  font-style: normal;
+  color: #111;
+  margin: 0 0 0.5em 0;
+  letter-spacing: 0.04em;
+  text-align: center;
+  text-shadow: 0 2px 16px rgba(0,0,0,0.08),
+  0 0 2px #fff, 0 0 2px #fff, 0 0 2px #fff, 0 0 2px #fff;
+  line-height: 1.1;
+}
+.intro-sub {
+  font-size: 2rem;
+  color: #000000;
+  font-weight: 500;
+  margin: 0;
+  letter-spacing: 0.12em;
+  text-align: center;
+  text-shadow: 0 2px 16px rgba(0,0,0,0.08),
+               0 0 2px #fff, 0 0 2px #fff, 0 0 2px #fff, 0 0 2px #fff;
+}
+@keyframes spin {
+  0% { transform: rotate(0deg); }
+  100% { transform: rotate(360deg); }
 }
 </style>

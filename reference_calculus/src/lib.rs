@@ -268,7 +268,7 @@ impl MandelbrotNavigator {
     }
 
     pub fn scale(&mut self, value: &str) {
-        let new_scale = Float::from_string_base(10, value).unwrap();
+        let new_scale = Float::from_string_base(16, value).unwrap();
         self.scale = new_scale.clone();
         self.target_scale = new_scale;
     }
