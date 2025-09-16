@@ -82,9 +82,7 @@ impl MandelbrotNavigator {
         }
     }
 
-    pub fn translate(&mut self, mut dx: f64, mut dy: f64) {
-        dx *= 5.0;
-        dy *= 5.0;
+    pub fn translate(&mut self, dx: f64, dy: f64) {
         // dx/dy sont des valeurs entre 0 et 1 (écran)
         // On convertit en déplacement complexe selon l'échelle et l'angle
         let angle = self.angle;
@@ -97,7 +95,7 @@ impl MandelbrotNavigator {
 
     pub fn rotate(&mut self, delta_angle: f64) {
         // On ajoute à la vitesse angulaire
-        self.vangle += delta_angle * 5.0;
+        self.vangle += delta_angle * 2.0;
     }
 
     pub fn translate_direct(&mut self, dx: f64, dy: f64) {
@@ -134,7 +132,7 @@ impl MandelbrotNavigator {
         };
 
         // Paramètres d'accélération et d'amortissement dépendants du temps
-        let base_accel = 16.0;
+        let base_accel = 8.0;
         let accel = Float::from_primitive_float_prec(base_accel * delta_time, 128).0;
         // // Calcul des écarts
         let dscale = self.target_scale.clone() - self.scale.clone();
@@ -150,11 +148,13 @@ impl MandelbrotNavigator {
             self.vscale = Float::from_primitive_float_prec(0.0, 180).0;
         }
         // Animation translation avec vitesse et damping
-        let damping = Float::from(0.7);
-        self.cx += self.vtx.clone() * Float::from_primitive_float_prec(delta_time, 128).0;
-        self.cy += self.vty.clone() * Float::from_primitive_float_prec(delta_time, 128).0;
-        self.vtx = self.vtx.clone() * damping.clone();
-        self.vty = self.vty.clone() * damping.clone();
+        let damping_base = 0.5_f64.powf(delta_time * 60.0);
+        let damping = Float::from(damping_base);
+        // Rendre damping dépendant du temps
+        self.cx += self.vtx.clone();
+        self.cy += self.vty.clone();
+        self.vtx *= damping.clone() * Float::from(delta_time);
+        self.vty *= damping.clone() * Float::from(delta_time);
         if self.vtx.clone().abs() < self.scale.clone() / Float::from_primitive_float_prec(1e6, 128).0 {
             self.vtx = Float::from_primitive_float_prec(0.0, 128).0;
         }
@@ -162,16 +162,16 @@ impl MandelbrotNavigator {
             self.vty = Float::from_primitive_float_prec(0.0, 128).0;
         }
         // On anime l'angle avec la vitesse angulaire et damping
-        self.angle += self.vangle * delta_time;
-        self.vangle *= 0.9;
+        self.angle += self.vangle;
+        self.vangle *= damping_base * delta_time;
         if self.vangle.abs() < 0.005 {
             self.vangle = 0.0;
         }
 
+
         // Calcul du delta par rapport à la référence
         let delta_x = self.cx.clone() - self.reference_cx.clone();
         let delta_y = self.cy.clone() - self.reference_cy.clone();
-
         vec![
             delta_x.to_string().parse::<f64>().unwrap(),
             delta_y.to_string().parse::<f64>().unwrap(),
@@ -257,6 +257,7 @@ impl MandelbrotNavigator {
             count,
         }
     }
+
     /// Retourne la taille du buffer en nombre de MandelbrotStep
     pub fn get_reference_orbit_len(&self) -> usize {
         self.last_iter
@@ -275,7 +276,6 @@ impl MandelbrotNavigator {
     pub fn angle(&mut self, value: f64) {
         self.angle = value;
     }
-
 
     pub fn origin(&mut self, cx: &str, cy: &str) {
         info!("new cx: {}, cy: {}", cx, cy);

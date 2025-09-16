@@ -5,7 +5,6 @@ import colorShader from './assets/color.wgsl?raw'
 import {MandelbrotNavigator} from "mandelbrot";
 import { memory as wasmMemory } from 'mandelbrot/mandelbrot_bg.wasm';
 
-
 export type RenderOptions = {
     antialiasLevel: number,
     palettePeriod: number,

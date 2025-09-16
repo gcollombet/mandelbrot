@@ -271,17 +271,143 @@ onUnmounted(() => {
 
 <template>
   <div style="position: relative; height: 100vh; width: 100vw;">
+    <button class="menu-hamburger tag is-light is-medium" aria-label="Menu">
+      <span class="hamburger-bar"></span>
+      <span class="hamburger-bar"></span>
+      <span class="hamburger-bar"></span>
+    </button>
     <canvas ref="canvasRef" style="width: 100%; height: 100%; display: block;"></canvas>
-    <div v-if="false" style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
+    <div v-if="false"
+         style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
       <Settings v-model="mandelbrotParams" @load="onLoadParams" />
+    </div>
+    <div class="shortcut-hint tag is-light is-medium is-hidden-touch">
+      Déplacer&nbsp;
+      <span class="tag is-black">Clic gauche</span>&nbsp;
+      <span class="tag is-black">Z</span>&nbsp;
+      <span class="tag is-black">Q</span>&nbsp;
+      <span class="tag is-black">S</span>&nbsp;
+      <span class="tag is-black">D</span>&nbsp;
+      |&nbsp;Tourner&nbsp;
+      <span class="tag is-black">Clic droit</span>&nbsp;
+      <span class="tag is-black">A</span>&nbsp;
+      <span class="tag is-black">E</span>&nbsp;
+       |&nbsp;Zoomer&nbsp;
+      <span class="tag is-black">Molette</span>&nbsp;
+      <span class="tag is-black">R</span>&nbsp;
+      <span class="tag is-black">F</span>
+    </div>
+    <div class="footer-love tag is-light is-medium is-hidden-touch">
+      <small>
+        <small>
+          Made with ❤️ <small>by Guillaume Collombet</small>&nbsp;|&nbsp;
+        </small>
+      </small>
+      <small>
+        <a href="https://github.com/gcollombet/mandelbrot"
+           target="_blank"
+           rel="noopener"
+           class=""
+           aria-label="GitHub">
+          <svg class="github-logo" height="20" viewBox="0 0 16 16" width="20" fill="currentColor" style="vertical-align:middle; margin-right:4px;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>GitHub
+        </a>
+      </small>
     </div>
   </div>
 </template>
 
-<style scoped>
+<style>
+:root {
+  --bulma-link-text: #111;
+}
 canvas {
   width: 100%;
   height: 100%;
   display: block;
+}
+.shortcut-hint {
+  position: absolute;
+  right: 24px;
+  bottom: 16px;
+  padding: 6px 18px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.35);
+  backdrop-filter: blur(8px);
+  color: #111;
+  font-size: 1rem;
+  font-family: inherit;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
+  pointer-events: none;
+  user-select: none;
+  opacity: 0.85;
+  letter-spacing: 0.01em;
+  z-index: 20;
+}
+.menu-hamburger {
+  position: fixed;
+  top: 24px;
+  right: 24px;
+  z-index: 30;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  align-items: center;
+  width: 48px;
+  height: 48px;
+  background: rgba(255,255,255,0.35);
+  backdrop-filter: blur(8px);
+  border: none;
+  border-radius: 16px;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
+  cursor: pointer;
+  padding: 0;
+  transition: background 0.2s;
+}
+.menu-hamburger:active,
+.menu-hamburger:focus {
+  background: rgba(255,255,255,0.6);
+}
+.hamburger-bar {
+  display: block;
+  width: 28px;
+  height: 4px;
+  margin: 3px 0;
+  background: #111;
+  border-radius: 2px;
+  transition: all 0.2s;
+}
+.footer-love {
+  position: absolute;
+  left: 24px;
+  bottom: 16px;
+  padding: 6px 18px;
+  border-radius: 16px;
+  background: rgba(255,255,255,0.35);
+  backdrop-filter: blur(8px);
+  color: #111;
+  font-size: 1rem;
+  font-family: inherit;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
+  pointer-events: auto;
+  user-select: none;
+  opacity: 0.85;
+  letter-spacing: 0.01em;
+  z-index: 20;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.footer-link {
+  color: #111;
+  text-decoration: underline;
+  transition: color 0.2s;
+}
+.footer-link:hover {
+  color: #e25555;
+}
+.github-logo {
+  display: inline-block;
+  vertical-align: middle;
+  margin-bottom: 2px;
 }
 </style>
