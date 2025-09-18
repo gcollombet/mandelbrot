@@ -247,7 +247,7 @@ function handleResize() {
   if (engine.resize) {
     engine.resize();
   }
-  engine.render();
+  engine.render(true);
 }
 
 const showUI = ref(false);
