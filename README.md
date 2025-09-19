@@ -1,4 +1,5 @@
 # Realtime Online Mandelbrot set explorer
+<img align="right" width="20%" src="public/mandelbrot.svg">
 
 Use WGPU optimized pipeline to render the mandelbrot set in real time, 
 even at high zoom level, around $10^{-38}$, while performing calculations 
@@ -9,9 +10,6 @@ Then perturbation theory is used to compute the other points around the referenc
 
 $$
 Z_{n+1} = Z_n^2 + C
-$$
-$$
-Z_{n+1} + \delta Z_{n+1} = (Z_n + \delta Z_n)^2 + (C + \delta C)
 $$
 $$\delta Z_{n+1} = 2 * Z_n * \delta Z_n + \delta Z_n^2 + \delta C$$
 
