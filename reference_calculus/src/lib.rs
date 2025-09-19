@@ -5,6 +5,7 @@ use log::{info, Level};
 use wasm_bindgen::prelude::*;
 use malachite_float::Float;
 use malachite_base::num::arithmetic::traits::Abs;
+use malachite_base::strings::{ToLowerHexString, ToUpperHexString};
 
 #[wasm_bindgen]
 #[repr(C)]
@@ -183,9 +184,10 @@ impl MandelbrotNavigator {
 
     pub fn get_params(&self) -> Vec<JsValue> {
         vec![
-            self.cx.clone().to_string().into(),
-            self.cy.clone().to_string().into(),
-            self.scale.clone().to_string().into(),
+            format!("0x{}", self.cx.clone().to_lower_hex_string()).into(),
+            format!("0x{}", self.cx.clone().to_lower_hex_string()).into(),
+            format!("0x{}", self.cy.clone().to_lower_hex_string()).into(),
+            format!("0x{}", self.scale.clone().to_lower_hex_string()).into(),
             self.angle.to_string().into(),
         ]
     }

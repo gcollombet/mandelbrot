@@ -50,10 +50,10 @@ export class Engine {
     uniformBufferReproject?: GPUBuffer; // uniforms reprojection
 
     // pipelines / bindgroups
-    pipeline1?: GPURenderPipeline;
-    pipeline2?: GPURenderPipeline;
-    bindGroup1?: GPUBindGroup;
-    bindGroup2?: GPUBindGroup;
+    pipelineComputeIteration?: GPURenderPipeline;
+    pipelineColor?: GPURenderPipeline;
+    bindGroupComputeIteration?: GPUBindGroup;
+    bindGroupColor?: GPUBindGroup;
     pipelineReproject?: GPURenderPipeline;
     bindGroupReproject?: GPUBindGroup;
 
@@ -171,7 +171,7 @@ export class Engine {
             label: 'Engine RenderPipeline Reproject'
         });
 
-        this.pipeline1 = this.device.createRenderPipeline({
+        this.pipelineComputeIteration = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout1] }),
             vertex: {module: module1, entryPoint: 'vs_main'},
             fragment: {module: module1, entryPoint: 'fs_main', targets: [{format: 'rgba16float'}]},
@@ -179,7 +179,7 @@ export class Engine {
             label: 'Engine RenderPipeline Pass Mandelbrot'
         });
 
-        this.pipeline2 = this.device.createRenderPipeline({
+        this.pipelineColor = this.device.createRenderPipeline({
             layout: 'auto',
             vertex: {module: module2, entryPoint: 'vs_main'},
             fragment: {module: module2, entryPoint: 'fs_main', targets: [{format: this.format}]},
@@ -196,8 +196,8 @@ export class Engine {
             });
         }
         // bind groups seront (ré)créés dans resize car dépend des textures
-        this.bindGroup1 = undefined;
-        this.bindGroup2 = undefined;
+        this.bindGroupComputeIteration = undefined;
+        this.bindGroupColor = undefined;
         this.bindGroupReproject = undefined;
     }
 
@@ -244,15 +244,15 @@ export class Engine {
             size: { width: this.width, height: this.height, depthOrArrayLayers: 1},
             format: 'rgba16float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-            label: 'Engine ReprojectTexture'
+            label: 'Engine ReprojectTexture',
         });
         this.reprojectView = this.reprojectTexture.createView();
 
         // Re-création des bind groups dépendant des textures
         if (this.pipelineReproject) {
-            const layoutR = this.pipelineReproject.getBindGroupLayout(0);
+            const layoutReproject = this.pipelineReproject.getBindGroupLayout(0);
             this.bindGroupReproject = this.device.createBindGroup({
-                layout: layoutR,
+                layout: layoutReproject,
                 entries: [
                     {binding: 0, resource: {buffer: this.uniformBufferReproject!}},
                     {binding: 1, resource: this.historyView!},
@@ -261,10 +261,10 @@ export class Engine {
                 label: 'Engine BindGroup Reproject'
             });
         }
-        if (this.pipeline1) {
-            const layout1 = this.pipeline1.getBindGroupLayout(0);
-            this.bindGroup1 = this.device.createBindGroup({
-                layout: layout1,
+        if (this.pipelineComputeIteration) {
+            const layoutComputeIteration = this.pipelineComputeIteration.getBindGroupLayout(0);
+            this.bindGroupComputeIteration = this.device.createBindGroup({
+                layout: layoutComputeIteration,
                 entries: [
                     {binding: 0, resource: {buffer: this.uniformBufferMandelbrot!}},
                     {binding: 1, resource: {buffer: this.mandelbrotReferenceBuffer!}},
@@ -274,13 +274,17 @@ export class Engine {
                 label: 'Engine BindGroup Pass Mandelbrot'
             });
         }
-        if (this.pipeline2) {
-            const layout2 = this.pipeline2.getBindGroupLayout(0);
+        if (this.pipelineColor) {
+            const layoutColor = this.pipelineColor.getBindGroupLayout(0);
             const entries: GPUBindGroupEntry[] = [
                 {binding: 0, resource: {buffer: this.uniformBufferColor!}},
                 {binding: 1, resource: this.intermediateView!}
             ];
-            this.bindGroup2 = this.device.createBindGroup({layout: layout2, entries, label: 'Engine BindGroup Color Pass'});
+            this.bindGroupColor = this.device.createBindGroup({
+                layout: layoutColor,
+                entries,
+                label: 'Engine BindGroup Color Pass'
+            });
         }
     }
 
@@ -370,7 +374,10 @@ export class Engine {
         const data = new Float32Array([
             prev.cx, prev.cy, prev.scale, prev.angle,
             curr.cx, curr.cy, curr.scale, curr.angle,
-            aspect, 0, 0, 0
+            aspect,
+            0,
+            0,
+            0
         ]);
         this.device.queue.writeBuffer(this.uniformBufferReproject!, 0, data.buffer);
     }
@@ -382,17 +389,16 @@ export class Engine {
         if (!this.needRender && this.extraFrames > 0) {
             this.extraFrames--;
         }
-        if (!this.pipeline1 || !this.pipeline2 || !this.pipelineReproject) return;
+        if (!this.pipelineComputeIteration || !this.pipelineColor || !this.pipelineReproject) return;
 
         // écrire uniforms reprojection
         this._writeReprojectUniforms();
 
         const commandEncoder = this.device.createCommandEncoder();
 
-
         // Pass 0: reprojection -> reprojectTexture
         if (this.bindGroupReproject) {
-            const rpassR = commandEncoder.beginRenderPass({
+            const rpassReproject = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: this.reprojectView!,
                     clearValue: {r: -1, g: -1, b: -1, a: 1},
@@ -400,16 +406,16 @@ export class Engine {
                     storeOp: 'store'
                 }]
             });
-            if (this.prevFrameMandelbrot) { // uniquement après première frame
-                rpassR.setPipeline(this.pipelineReproject);
-                rpassR.setBindGroup(0, this.bindGroupReproject);
-                rpassR.draw(6,1,0,0);
+            if (this.prevFrameMandelbrot && !forceRender) { // uniquement après première frame
+                rpassReproject.setPipeline(this.pipelineReproject);
+                rpassReproject.setBindGroup(0, this.bindGroupReproject);
+                rpassReproject.draw(6,1,0,0);
             }
-            rpassR.end();
+            rpassReproject.end();
         }
 
         // Pass 1: calcul mandelbrot (ne calcule que les pixels sentinelle)
-        const rpass1 = commandEncoder.beginRenderPass({
+        const rpassComputeIteration = commandEncoder.beginRenderPass({
             colorAttachments: [{
                 view: this.intermediateView!,
                 clearValue: {r: 0, g: 0, b: 0, a: 1},
@@ -417,14 +423,14 @@ export class Engine {
                 storeOp: 'store'
             }]
         });
-        rpass1.setPipeline(this.pipeline1);
-        if (this.bindGroup1) rpass1.setBindGroup(0, this.bindGroup1);
-        rpass1.draw(6, 1, 0, 0);
-        rpass1.end();
+        rpassComputeIteration.setPipeline(this.pipelineComputeIteration);
+        if (this.bindGroupComputeIteration) rpassComputeIteration.setBindGroup(0, this.bindGroupComputeIteration);
+        rpassComputeIteration.draw(6, 1, 0, 0);
+        rpassComputeIteration.end();
 
         // Pass 2: colorisation vers écran
         const swapView = this.ctx.getCurrentTexture().createView();
-        const rpass2 = commandEncoder.beginRenderPass({
+        const rpassColor = commandEncoder.beginRenderPass({
             colorAttachments: [{
                 view: swapView,
                 clearValue: {r: 1, g: 1, b: 1, a: 1},
@@ -432,10 +438,10 @@ export class Engine {
                 storeOp: 'store'
             }]
         });
-        rpass2.setPipeline(this.pipeline2);
-        if (this.bindGroup2) rpass2.setBindGroup(0, this.bindGroup2);
-        rpass2.draw(6, 1, 0, 0);
-        rpass2.end();
+        rpassColor.setPipeline(this.pipelineColor);
+        if (this.bindGroupColor) rpassColor.setBindGroup(0, this.bindGroupColor);
+        rpassColor.draw(6, 1, 0, 0);
+        rpassColor.end();
 
         // Copie résultat courant -> history pour prochaine frame
         if (this.historyTexture && this.intermediateTexture) {

@@ -34,7 +34,6 @@ function onLoadParams(params: { cx: string, cy: string, scale: string, angle: st
 const pressedKeys: Record<string, boolean> = {};
 
 function handleKeydown(e: KeyboardEvent) {
-
   pressedKeys[e.code] = true;
 }
 function handleKeyup(e: KeyboardEvent) {
@@ -180,6 +179,46 @@ function handleTouchEnd(e: TouchEvent) {
   }
 }
 
+function update() {
+  // Z (AZERTY) ou W (QWERTY) : KeyW
+  if (pressedKeys['KeyW']) navigator.translate(0, moveStep);
+  // S : KeyS
+  if (pressedKeys['KeyS']) navigator.translate(0, -moveStep);
+  // Q (AZERTY) ou A (QWERTY) :  KeyA
+  if (pressedKeys['KeyA']) navigator.translate(-moveStep, 0);
+  // D : KeyD
+  if (pressedKeys['KeyD']) navigator.translate(moveStep, 0);
+  // A (AZERTY) ou Q (QWERTY) pour rotation :  KeyQ
+  if (pressedKeys['KeyQ']) navigator.rotate(angleStep);
+  // E : KeyE
+  if (pressedKeys['KeyE']) navigator.rotate(-angleStep);
+  // R : KeyR
+  const zoomFactor = 0.7;
+  if (pressedKeys['KeyR']) navigator.zoom(zoomFactor);
+  // F : KeyF
+  if (pressedKeys['KeyF']) navigator.zoom(1 / zoomFactor);
+  setTimeout(update, 16);
+}
+
+function animate() {
+  draw();
+  requestAnimationFrame(animate);
+}
+
+function draw(force: boolean = false) {
+  const epsilon = mandelbrotParams.value.epsilon;
+  const [dx, dy, scale, angle] = navigator.step();
+  const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
+  const mu = mandelbrotParams.value.mu;
+  mandelbrotParams.value.cx = cx_string;
+  mandelbrotParams.value.cy = cy_string;
+  mandelbrotParams.value.scale = scale_string;
+  mandelbrotParams.value.angle = angle_string;
+  const maxIterations = Math.min(Math.max(100, 80 + 20 * Math.log2(1.0 / scale)), 1000000);
+  engine.update({ cx: dx, cy: dy, mu, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
+  engine.render(force);
+}
+
 async function initWebGPU() {
   if (!canvasRef.value) return;
   canvas = canvasRef.value;
@@ -197,7 +236,6 @@ async function initWebGPU() {
     palettePeriod: 128
   });
   await engine.initialize(navigator);
-
   window.addEventListener('keydown', handleKeydown);
   window.addEventListener('keyup', handleKeyup);
   canvas.addEventListener('wheel', handleWheel, {passive: false});
@@ -205,46 +243,7 @@ async function initWebGPU() {
   canvas.addEventListener('contextmenu', function (e) { e.preventDefault(); });
   window.addEventListener('mousemove', handleMouseMove);
   window.addEventListener('mouseup', handleMouseUp);
-
-
-  function update() {
-    // Z (AZERTY) ou W (QWERTY) : KeyZ ou KeyW
-    if (pressedKeys['KeyW']) navigator.translate(0, moveStep);
-    // S : KeyS
-    if (pressedKeys['KeyS']) navigator.translate(0, -moveStep);
-    // Q (AZERTY) ou A (QWERTY) : KeyQ ou KeyA
-    if (pressedKeys['KeyA']) navigator.translate(-moveStep, 0);
-    // D : KeyD
-    if (pressedKeys['KeyD']) navigator.translate(moveStep, 0);
-    // A (AZERTY) ou Q (QWERTY) pour rotation : KeyA ou KeyQ
-    if (pressedKeys['KeyQ']) navigator.rotate(angleStep);
-    // E : KeyE
-    if (pressedKeys['KeyE']) navigator.rotate(-angleStep);
-    // R : KeyR
-    const zoomFactor = 0.7;
-    if (pressedKeys['KeyR']) navigator.zoom(zoomFactor);
-    // F : KeyF
-    if (pressedKeys['KeyF']) navigator.zoom(1 / zoomFactor);
-    setTimeout(update, 16);
-  }
-
   update();
-  function animate() {
-
-    const epsilon = mandelbrotParams.value.epsilon;
-    const [dx, dy, scale, angle] = navigator.step();
-    const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
-    const mu = mandelbrotParams.value.mu;
-    mandelbrotParams.value.cx = cx_string;
-    mandelbrotParams.value.cy = cy_string;
-    mandelbrotParams.value.scale = scale_string;
-    mandelbrotParams.value.angle = angle_string;
-    const maxIterations = Math.min(Math.max(100, 80 + 20 * Math.log2(1.0 / scale)), 1000000);
-    engine.update({ cx: dx, cy: dy, mu, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
-    engine.render();
-    requestAnimationFrame(animate);
-  }
-
   animate();
 }
 
@@ -253,10 +252,8 @@ function handleResize() {
   const rect = canvasRef.value.getBoundingClientRect();
   canvasRef.value.width = rect.width;
   canvasRef.value.height = rect.height;
-  if (engine.resize) {
-    engine.resize();
-  }
-  engine.render(true);
+  engine.resize();
+  draw(true);
 }
 
 const showUI = ref(false);
