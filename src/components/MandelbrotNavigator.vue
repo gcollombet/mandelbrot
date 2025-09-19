@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, ref, onUnmounted, nextTick} from 'vue';
+import {onMounted, ref, onUnmounted, nextTick, computed} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
 import {MandelbrotNavigator} from "mandelbrot";
@@ -31,11 +31,14 @@ function onLoadParams(params: { cx: string, cy: string, scale: string, angle: st
   navigator.angle(Number(params.angle));
 }
 
+const pressedKeys: Record<string, boolean> = {};
+
 function handleKeydown(e: KeyboardEvent) {
-  pressedKeys[e.key.toLowerCase()] = true;
+
+  pressedKeys[e.code] = true;
 }
 function handleKeyup(e: KeyboardEvent) {
-  pressedKeys[e.key.toLowerCase()] = false;
+  pressedKeys[e.code] = false;
 }
 function handleWheel(e: WheelEvent) {
   e.preventDefault();
@@ -47,7 +50,6 @@ function handleWheel(e: WheelEvent) {
   }
 }
 
-const pressedKeys: Record<string, boolean> = {};
 let isDragging = false;
 let isRotating = false;
 let prevX = 0;
@@ -206,17 +208,24 @@ async function initWebGPU() {
 
 
   function update() {
-    if (pressedKeys['z']) navigator.translate(0, moveStep);
-    if (pressedKeys['s']) navigator.translate(0, -moveStep);
-    if (pressedKeys['q']) navigator.translate(-moveStep, 0);
-    if (pressedKeys['d']) navigator.translate(moveStep, 0);
-    if (pressedKeys['a']) navigator.rotate(angleStep);
-    if (pressedKeys['e']) navigator.rotate(-angleStep);
-    // Ajout des touches R et F pour zoomer
-    const zoomFactor = 0.8;
-    if (pressedKeys['r']) navigator.zoom(zoomFactor);
-    if (pressedKeys['f']) navigator.zoom(1 / zoomFactor);
-    setTimeout(update, 16)
+    // Z (AZERTY) ou W (QWERTY) : KeyZ ou KeyW
+    if (pressedKeys['KeyW']) navigator.translate(0, moveStep);
+    // S : KeyS
+    if (pressedKeys['KeyS']) navigator.translate(0, -moveStep);
+    // Q (AZERTY) ou A (QWERTY) : KeyQ ou KeyA
+    if (pressedKeys['KeyA']) navigator.translate(-moveStep, 0);
+    // D : KeyD
+    if (pressedKeys['KeyD']) navigator.translate(moveStep, 0);
+    // A (AZERTY) ou Q (QWERTY) pour rotation : KeyA ou KeyQ
+    if (pressedKeys['KeyQ']) navigator.rotate(angleStep);
+    // E : KeyE
+    if (pressedKeys['KeyE']) navigator.rotate(-angleStep);
+    // R : KeyR
+    const zoomFactor = 0.7;
+    if (pressedKeys['KeyR']) navigator.zoom(zoomFactor);
+    // F : KeyF
+    if (pressedKeys['KeyF']) navigator.zoom(1 / zoomFactor);
+    setTimeout(update, 16);
   }
 
   update();
@@ -277,6 +286,45 @@ async function playIntroAnimation() {
   requestAnimationFrame(animateIntro);
 }
 
+// Détection dynamique de la disposition du clavier
+function getKeyboardLayout() {
+  const lang = window.navigator.language || window.navigator.languages?.[0] || 'en';
+  if (lang.startsWith('fr')) return 'azerty';
+  if (lang.startsWith('be')) return 'azerty';
+  if (lang.startsWith('en')) return 'qwerty';
+  if (lang.startsWith('us')) return 'qwerty';
+  // Ajoute d'autres cas si besoin
+  return 'qwerty';
+}
+const keyboardLayout = getKeyboardLayout();
+
+const shortcutLabels = computed(() => {
+  if (keyboardLayout === 'azerty') {
+    return {
+      up: 'Z',
+      down: 'S',
+      left: 'Q',
+      right: 'D',
+      rotateLeft: 'A',
+      rotateRight: 'E',
+      zoomIn: 'R',
+      zoomOut: 'F',
+    };
+  } else {
+    // QWERTY par défaut
+    return {
+      up: 'W',
+      down: 'S',
+      left: 'A',
+      right: 'D',
+      rotateLeft: 'Q',
+      rotateRight: 'E',
+      zoomIn: 'R',
+      zoomOut: 'F',
+    };
+  }
+});
+
 onMounted(async () => {
   detectMobile();
   await initWebGPU();
@@ -318,20 +366,20 @@ onUnmounted(() => {
       :class="showUI ? 'animate__fadeInUp' : ''"
       v-show="showUI"
     >
-      Déplacer&nbsp;
-      <span class="tag is-black">Clic gauche</span>&nbsp;
-      <span class="tag is-black">Z</span>&nbsp;
-      <span class="tag is-black">Q</span>&nbsp;
-      <span class="tag is-black">S</span>&nbsp;
-      <span class="tag is-black">D</span>&nbsp;
-      |&nbsp;Tourner&nbsp;
-      <span class="tag is-black">Clic droit</span>&nbsp;
-      <span class="tag is-black">A</span>&nbsp;
-      <span class="tag is-black">E</span>&nbsp;
-       |&nbsp;Zoomer&nbsp;
-      <span class="tag is-black">Molette</span>&nbsp;
-      <span class="tag is-black">R</span>&nbsp;
-      <span class="tag is-black">F</span>
+      Move&nbsp;
+      <span class="tag is-black">Left clic</span>&nbsp;
+      <span class="tag is-black">{{ shortcutLabels.up }}</span>&nbsp;
+      <span class="tag is-black">{{ shortcutLabels.left }}</span>&nbsp;
+      <span class="tag is-black">{{ shortcutLabels.down }}</span>&nbsp;
+      <span class="tag is-black">{{ shortcutLabels.right }}</span>&nbsp;
+      |&nbsp;Rotate&nbsp;
+      <span class="tag is-black">Right clic</span>&nbsp;
+      <span class="tag is-black">{{ shortcutLabels.rotateLeft }}</span>&nbsp;
+      <span class="tag is-black">{{ shortcutLabels.rotateRight }}</span>&nbsp;
+       |&nbsp;Zoom&nbsp;
+      <span class="tag is-black">Wheel</span>&nbsp;
+      <span class="tag is-black">{{ shortcutLabels.zoomIn }}</span>&nbsp;
+      <span class="tag is-black">{{ shortcutLabels.zoomOut }}</span>
     </div>
     <div
       class="footer-love tag is-light is-medium is-hidden-touch animate__animated"
@@ -339,15 +387,26 @@ onUnmounted(() => {
       v-show="showUI"
     >
       <small>
-        Made with ❤️ <span>by Guillaume Collombet</span>&nbsp;|&nbsp;
+        <a href="https://wgpu.rs/"
+            target="_blank"
+            rel="noopener"
+            class="footer-link"
+            aria-label="wGPU">
+          Made with
+            <img src="https://raw.githubusercontent.com/gfx-rs/wgpu/refs/heads/trunk/logo.png"
+                 alt="wGPU logo"
+                 style="height: 24px; width: 24px; vertical-align: middle;"/>
+        </a>
       </small>
+      &nbsp;|&nbsp;
       <small>
         <a href="https://github.com/gcollombet/mandelbrot"
            target="_blank"
            rel="noopener"
            class="footer-link"
            aria-label="GitHub">
-          <svg class="github-logo" height="20" viewBox="0 0 16 16" width="20" fill="currentColor" style="vertical-align:middle; margin-right:4px;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>GitHub
+          <svg class="github-logo" height="20" viewBox="0 0 16 16" width="20" fill="currentColor" style="vertical-align:middle; margin-right:4px;"><path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path></svg>
+          GitHub
         </a>
       </small>
     </div>

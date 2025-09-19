@@ -202,7 +202,7 @@ export class Engine {
     }
 
     resize() {
-        const dpr = window.devicePixelRatio || 1;
+        const dpr = (window.devicePixelRatio || 1)  ;
         const parent = this.canvas.parentElement;
         const widthCSS = parent?.clientWidth ?? this.canvas.clientWidth;
         const heightCSS = parent?.clientHeight ?? this.canvas.clientHeight;
