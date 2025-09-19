@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg width="192" height="192" viewBox="0 0 192 192" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="jb-gradient" x1="0" y1="0" x2="192" y2="192" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#FF4598"/>
+      <stop offset="50%" stop-color="#9B5CF6"/>
+      <stop offset="100%" stop-color="#10EFFF"/>
+    </linearGradient>
+  </defs>
+  <rect width="192" height="192" rx="48" fill="#111111"/>
+  <g transform="rotate(0 96 96)">
+    <ellipse cx="96" cy="120" rx="48" ry="36" fill="url(#jb-gradient)"/>
+    <ellipse cx="96" cy="72" rx="24" ry="18" fill="url(#jb-gradient)"/>
+    <ellipse cx="96" cy="48" rx="8" ry="6" fill="url(#jb-gradient)"/>
+    <circle cx="96" cy="120" r="32" fill="#111111"/>
+    <circle cx="96" cy="72" r="12" fill="#111111"/>
+    <circle cx="96" cy="48" r="3" fill="#111111"/>
+  </g>
+</svg>

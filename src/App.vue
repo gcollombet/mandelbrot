@@ -39,5 +39,7 @@ onMounted(() => {
   padding: 0;
   overflow: hidden;
 }
-
+html, body {
+  overscroll-behavior-y: contain;
+}
 </style>
