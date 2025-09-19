@@ -1,13 +1,13 @@
 {
   "name": "Realtime Mandelbrot Viewer",
   "short_name": "Mandelbrot",
-  "start_url": ".",
+  "start_url": "/",
   "display": "standalone",
   "background_color": "#ffffff",
   "theme_color": "#111111",
   "icons": [
     {
-      "src": "/vite.svg",
+      "src": "/mandelbrot.svg",
       "sizes": "192x192",
       "type": "image/svg+xml"
     }
