@@ -57,7 +57,7 @@ fn palette(v: f32, len: f32, d: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
   let center = vec2<f32>(0.5, 0.5);
   let dist = distance(vec2<f32>(dx, dy), center);
   // Tesselation avec tileTex basée sur v et la distance au centre
-  let tessColor = tile_tessellation(sqrt(v), dx * dy * dist, 10.0);
+  let tessColor = tile_tessellation(sqrt(v), dx * dy * dist, 2.0);
   // Mélange la couleur fractale avec la tesselation (modulation)
   let color =  tessColor;
 
