@@ -7,7 +7,7 @@ import type {MandelbrotParams} from "../Mandelbrot.ts";
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const antialiasLevel = 1;
-const palettePeriod = 128;
+const palettePeriod = 256;
 let canvas: HTMLCanvasElement;
 let engine: Engine;
 let navigator: any;
@@ -214,7 +214,7 @@ function draw(force: boolean = false) {
   mandelbrotParams.value.cy = cy_string;
   mandelbrotParams.value.scale = scale_string;
   mandelbrotParams.value.angle = angle_string;
-  const maxIterations = Math.min(Math.max(100, 80 + 20 * Math.log2(1.0 / scale)), 1000000);
+  const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / scale)), 1000000);
   engine.update({ cx: dx, cy: dy, mu, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
   engine.render(force);
 }

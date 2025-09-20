@@ -73,7 +73,7 @@ fn getOrbitD(index: i32) -> vec2<f32> {
     );
 }
 
-fn mandelbrot_func(x0: f32, y0: f32) -> vec2<f32> {
+fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
     var dc = vec2<f32>(x0, y0);
 //  let max_iter_f: f32 = clamp(80.0 + 40.0 * log2(1.0 / uniforms.scale), 128.0, 1000000.0);
     let max_iteration = mandelbrot.maxIteration;
@@ -106,6 +106,7 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec2<f32> {
             break;
         }
         der = cmul(der * 2.0, z);
+
         let dot_dz = dot(dz, dz);
         if (dot_z < dot_dz || f32(ref_i) == max_iteration) {
             dz = z;
@@ -126,17 +127,20 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec2<f32> {
             // add the rest to i to get a smooth color gradient
             let log_zn = log(dz.x * dz.x + dz.y * dz.y) / 2.0;
             var nu = log(log_zn / log(2.0)) / log(2.0);
+            i = i % min(256, max_iteration) + 1.0;
             i += (1.0 - nu) ;
         }
     }
-    let mod_der = length(der);
-    return vec2<f32>(i, mod_der);
+//    let normalized_der
+    let normalized_der = normalize(d);
+    return vec4<f32>(i, 0.0, normalized_der.x, normalized_der.y);
 }
 fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
   let s = sin(angle);
   let c = cos(angle);
   return vec2<f32>(c * x - s * y, s * x + c * y);
 }
+
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let prev = textureSample(prevReprojectTex, prevSampler, vec2<f32>(fragCoord.x, fragCoord.y)); // inversion axe X pour corriger l'orientation
@@ -151,6 +155,5 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
        x0,
        y0
   );
-  let res = mandelbrot_func(dc.x, dc.y);
-  return vec4<f32>(res.x, res.y, 0.0, 1.0);
+  return mandelbrot_func(dc.x, dc.y);
 }

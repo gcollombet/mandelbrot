@@ -4,6 +4,8 @@ struct Uniforms {
 };
 @group(0) @binding(0) var<uniform> uniforms: Uniforms;
 @group(0) @binding(1) var tex: texture_2d<f32>;
+@group(0) @binding(2) var tileTex: texture_2d<f32>;
+@group(0) @binding(3) var skyboxTex: texture_2d<f32>;
 struct VertexOutput {
   @builtin(position) position : vec4<f32>,
   @location(0) fragCoord : vec2<f32>
@@ -23,32 +25,58 @@ fn vs_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
   out.fragCoord = (pos[VertexIndex] + vec2<f32>(1.0, 1.0)) * 0.5;
   return out;
 }
-fn palette(v: f32, d: f32, dx: f32, dy: f32) -> vec3<f32> {
+
+// Conversion d'une direction 3D en coordonnées UV pour une skybox equirectangulaire
+fn dir_to_skybox_uv(dir: vec3<f32>) -> vec2<f32> {
+  let d = normalize(dir);
+  let u = 0.5 + atan2(d.z, d.x) / (2.0 * 3.14159265);
+  let v = 0.5 - asin(d.y) / 3.14159265;
+  return vec2<f32>(u, v);
+}
+
+fn tile_tessellation(v: f32, dy: f32, repeat: f32) -> vec3<f32> {
+  // Utilise v pour la position sur la fractale, et dy (coordonnée écran) pour la coordonnée y
+  let tileUV = vec2<f32>(fract(v * repeat), fract(dy * repeat));
+  let texSize = vec2<i32>(textureDimensions(tileTex, 0));
+  let coord = vec2<i32>(
+    i32(clamp(tileUV.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
+    i32(clamp((1.0 - tileUV.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
+  );
+  return textureLoad(tileTex, coord, 0).rgb;
+}
+
+fn palette(v: f32, d: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
+  // Couleur de base
   let t = abs(v * 2.0 - 1.0);
   let r = 0.5 + 0.5 * cos(1.0 + t * 6.28 - dx / 2.0);
   let g = 0.5 + 0.5 * sin(2.0 + t * 5.88 - dy / 4.0);
   let b = 0.5 + 0.5 * cos(t * 3.14 + ((dx) / 8.0));
-  return vec3<f32>(r, g, b);
+  var baseColor = vec3<f32>(r, g, b);
+
+  // Tesselation avec tileTex basée sur v et dy (coordonnée écran)
+  let tessColor = tile_tessellation(v, dy, 1.0);
+  // Mélange la couleur fractale avec la tesselation (modulation)
+  let color =  tessColor;
+
+  // --- Phong shading corrigé ---
+  let normal = normalize(vec3<f32>(d.y, d.x, -1.0));
+  let lightDir = normalize(vec3<f32>(0.2, 0.3, 0.9));
+  let viewDir = vec3<f32>(0.0, 0.6, 1.0);
+  let diff = max(dot(normal, lightDir), 0.0);
+  let ambient = 0.3;
+  let reflectDir = reflect(-lightDir, normal);
+  let skyboxUV = dir_to_skybox_uv(reflectDir);
+  let skyboxSize = vec2<i32>(textureDimensions(skyboxTex, 0));
+  let skyboxCoord = vec2<i32>(
+    i32(clamp(skyboxUV.x * f32(skyboxSize.x), 0.0, f32(skyboxSize.x - 1))),
+    i32(clamp((1.0 - skyboxUV.y) * f32(skyboxSize.y), 0.0, f32(skyboxSize.y - 1)))
+  );
+  let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb;
+  let phong = ambient + 0.9 * diff;
+  let finalColor = color;//mix(color, color * phong * 1.0 + skyboxColor * 0.0, 1.0);
+  return clamp(finalColor, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
-fn kaleidoscope(coord: vec2<f32>, sides: f32) -> vec2<f32> {
-  let angle = atan2(coord.y - 0.5, coord.x - 0.5);
-  let radius = length(coord - vec2<f32>(0.5, 0.5));
-  let sector = floor(angle / (3.1415926 / sides));
-  let mirrored = abs(fract(angle / (2.0 * 3.1415926 / sides)) * 2.0 - 1.0);
-  let newAngle = mirrored * (3.1415926 / sides) + sector * (3.1415926 / sides);
-  return vec2<f32>(cos(newAngle), sin(newAngle)) * radius + vec2<f32>(0.5, 0.5);
-}
-
-fn tunnel(coord: vec2<f32>) -> vec2<f32> {
-  let center = vec2<f32>(0.5, 0.5);
-  let delta = coord - center;
-  let angle = atan2(delta.y, delta.x);
-  let radius = length(delta);
-  // Effet tunnel : on replie le rayon pour créer des anneaux
-  let tunnelRadius = fract(radius * 4.0); // 4.0 = nombre d’anneaux
-  return center + vec2<f32>(cos(angle), sin(angle)) * tunnelRadius;
-}
 
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
@@ -58,7 +86,6 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let blurStrength = uniforms.bloomStrength; // Utilisé comme force du blur radial
   let blurSamples = 4; // Nombre d'échantillons pour le blur
   var color = vec3<f32>(0.0, 0.0, 0.0);
-  let glowColor = vec3<f32>(0.2, 0.3, 0.8);
   var total = 0.0;
   // Blur radial : on échantillonne le long du rayon centre -> pixel
   for (var i = 0; i < blurSamples; i = i + 1) {
@@ -75,13 +102,10 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     let period = uniforms.palettePeriod;
     var sampleColor: vec3<f32>;
     if (nu <= 0.0) {
-        // Noir pour l’intérieur du Mandelbrot
-        sampleColor = vec3<f32>(0.0, 0.0, 0.0);
-      //let glow = exp(-d * 1.0);
-      //sampleColor = glowColor * (1.0 - glow);
+      sampleColor = vec3<f32>(0.0, 0.0, 0.0);
     } else {
       let v = fract(nu / period);
-      sampleColor = palette(v, d, sampleUV.x, sampleUV.y);
+      sampleColor = palette(v, vec2<f32>(data.z, data.w), sampleUV.x, sampleUV.y);
     }
     // Poids : plus proche du pixel courant = plus fort
     let weight = 0.5 + 0.5 * t;
@@ -90,4 +114,5 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
   color = color / total;
   return vec4<f32>(color, 1.0);
+
 }

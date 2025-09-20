@@ -41,8 +41,6 @@ export class Engine {
     mandelbrotReferenceBuffer?: GPUBuffer; // storage buffer contenant l'orbite
 
     // nouvelles textures pour reprojection
-    historyTexture?: GPUTexture;
-    historyView?: GPUTextureView;
     reprojectTexture?: GPUTexture;
     reprojectView?: GPUTextureView;
 
@@ -76,6 +74,12 @@ export class Engine {
 
     // flag pour indiquer si l'historique doit être effacé au prochain rendu
     clearHistoryNextFrame: boolean = false;
+
+    // textures additionnelles
+    tileTexture?: GPUTexture;
+    tileTextureView?: GPUTextureView;
+    skyboxTexture?: GPUTexture;
+    skyboxTextureView?: GPUTextureView;
 
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas;
@@ -116,6 +120,12 @@ export class Engine {
             });
         this.sampler.label = 'Engine Sampler';
 
+        // Chargement des textures additionnelles
+        this.tileTexture = await this._loadTexture('./tile.jpeg');
+        this.tileTextureView = this.tileTexture.createView();
+        this.skyboxTexture = await this._loadTexture('./skybox.jpeg');
+        this.skyboxTextureView = this.skyboxTexture.createView();
+
         // uniform buffers (placeholders)
         this.uniformBufferMandelbrot = this.device.createBuffer({
             size: 4 * 9,
@@ -153,7 +163,7 @@ export class Engine {
         });
 
         // Layout Mandelbrot (ajout texture reprojetée + sampler)
-        const layout1 = this.device.createBindGroupLayout({
+        const layoutComputeIteration = this.device.createBindGroupLayout({
             entries: [
                 {binding: 0, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX, buffer: { type: 'uniform' }},
                 {binding: 1, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX, buffer: { type: 'read-only-storage' }},
@@ -161,6 +171,17 @@ export class Engine {
                 {binding: 3, visibility: GPUShaderStage.FRAGMENT, sampler: {type: 'filtering'}},
             ],
             label: 'Engine RenderPipeline Mandelbrot'
+        });
+
+        // Layout Color (4 bindings)
+        const layoutColor = this.device.createBindGroupLayout({
+            entries: [
+                {binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {type: 'uniform'}},
+                {binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
+                {binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
+                {binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
+            ],
+            label: 'Engine BindGroupLayout Color'
         });
 
         this.pipelineReproject = this.device.createRenderPipeline({
@@ -172,7 +193,7 @@ export class Engine {
         });
 
         this.pipelineComputeIteration = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layout1] }),
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutComputeIteration] }),
             vertex: {module: module1, entryPoint: 'vs_main'},
             fragment: {module: module1, entryPoint: 'fs_main', targets: [{format: 'rgba16float'}]},
             primitive: {topology: 'triangle-list'},
@@ -180,7 +201,7 @@ export class Engine {
         });
 
         this.pipelineColor = this.device.createRenderPipeline({
-            layout: 'auto',
+            layout: this.device.createPipelineLayout({bindGroupLayouts: [layoutColor]}),
             vertex: {module: module2, entryPoint: 'vs_main'},
             fragment: {module: module2, entryPoint: 'fs_main', targets: [{format: this.format}]},
             primitive: {topology: 'triangle-list'},
@@ -230,15 +251,6 @@ export class Engine {
         this.intermediateView = this.intermediateTexture.createView();
         this.intermediateView.label = 'Engine IntermediateTextureView';
 
-        if (this.historyTexture) this.historyTexture.destroy?.();
-        this.historyTexture = this.device.createTexture({
-            size: { width: this.width, height: this.height, depthOrArrayLayers: 1},
-            format: 'rgba16float',
-            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.COPY_SRC,
-            label: 'Engine HistoryTexture'
-        });
-        this.historyView = this.historyTexture.createView();
-
         if (this.reprojectTexture) this.reprojectTexture.destroy?.();
         this.reprojectTexture = this.device.createTexture({
             size: { width: this.width, height: this.height, depthOrArrayLayers: 1},
@@ -255,7 +267,7 @@ export class Engine {
                 layout: layoutReproject,
                 entries: [
                     {binding: 0, resource: {buffer: this.uniformBufferReproject!}},
-                    {binding: 1, resource: this.historyView!},
+                    {binding: 1, resource: this.intermediateView!},
                     {binding: 2, resource: this.sampler!},
                 ],
                 label: 'Engine BindGroup Reproject'
@@ -278,7 +290,9 @@ export class Engine {
             const layoutColor = this.pipelineColor.getBindGroupLayout(0);
             const entries: GPUBindGroupEntry[] = [
                 {binding: 0, resource: {buffer: this.uniformBufferColor!}},
-                {binding: 1, resource: this.intermediateView!}
+                {binding: 1, resource: this.intermediateView!},
+                {binding: 2, resource: this.tileTextureView!},
+                {binding: 3, resource: this.skyboxTextureView!}
             ];
             this.bindGroupColor = this.device.createBindGroup({
                 layout: layoutColor,
@@ -443,15 +457,6 @@ export class Engine {
         rpassColor.draw(6, 1, 0, 0);
         rpassColor.end();
 
-        // Copie résultat courant -> history pour prochaine frame
-        if (this.historyTexture && this.intermediateTexture) {
-            commandEncoder.copyTextureToTexture(
-                {texture: this.intermediateTexture},
-                {texture: this.historyTexture},
-                {width: this.width, height: this.height, depthOrArrayLayers: 1}
-            );
-        }
-
         this.device.queue.submit([commandEncoder.finish()]);
 
         // marque mise à jour des paramètres frame précédente pour prochaine reprojection
@@ -463,8 +468,32 @@ export class Engine {
     destroy() {
         this.intermediateTexture?.destroy?.();
         this.mandelbrotReferenceBuffer?.destroy?.();
-        this.historyTexture?.destroy?.();
         this.reprojectTexture?.destroy?.();
         this.uniformBufferReproject?.destroy?.();
+    }
+
+    // Méthode utilitaire pour charger une image et la convertir en GPUTexture
+    private async _loadTexture(url: string): Promise<GPUTexture> {
+        const img = new Image();
+        img.src = url;
+        try {
+            await img.decode();
+        } catch (e) {
+            console.warn('Échec du chargement de la texture : ' + url, e);
+            throw e;
+        }
+        const bitmap = await createImageBitmap(img);
+        const texture = this.device.createTexture({
+            size: [bitmap.width, bitmap.height, 1],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+            label: 'Engine LoadedTexture ' + url
+        });
+        this.device.queue.copyExternalImageToTexture(
+            { source: bitmap },
+            { texture: texture },
+            [bitmap.width, bitmap.height]
+        );
+        return texture;
     }
 }
