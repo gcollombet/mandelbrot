@@ -81,7 +81,7 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
     var z = getOrbit(0);
     var dz = vec2<f32>(0.0, 0.0);
     var der = vec2<f32>(1.0, 0.0);
-    var distance = 0.0;
+//    var distance = 0.0;
     var i = 0.0;
     var ref_i = 0;
     var max = mandelbrot.mu;
@@ -133,7 +133,15 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
     }
 //    let normalized_der
     let normalized_der = normalize(d);
-    return vec4<f32>(i, 0.0, normalized_der.x, normalized_der.y);
+    // length of d
+//    let length_d = 1 / length(d);
+    //let distance = 0.5 * log(dot_z) * dot_z / dot(d, d);
+
+    // d = 0.5*sqrt(lz2/ld2)*(1.0-pow(lz2,-k))/k;
+
+   // distance = 0.5 * sqrt(dot_z / dot(d,d)) * log(dot_z);
+   	let distance = 0.5*sqrt(dot(dz,dz)/dot(d,d))*log(dot(dz,dz));
+    return vec4<f32>(i, distance, normalized_der.x, normalized_der.y);
 }
 fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
   let s = sin(angle);
