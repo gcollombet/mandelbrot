@@ -5,7 +5,7 @@ import App from './App.vue'
 
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/sw.js');
+    navigator.serviceWorker.register('/mandelbrot/sw.js');
   });
 }
 

@@ -3,9 +3,13 @@ import MandelbrotNavigator from "./components/MandelbrotNavigator.vue";
 import { ref, onMounted } from "vue";
 
 const isWebGPUSupported = ref(false);
+const isFrench = ref(true);
 
 onMounted(() => {
   isWebGPUSupported.value = typeof navigator !== "undefined" && "gpu" in navigator;
+  if (typeof navigator !== "undefined") {
+    isFrench.value = navigator.language.startsWith("fr");
+  }
 });
 </script>
 
@@ -18,11 +22,21 @@ onMounted(() => {
       <span class="icon is-large has-text-danger">
         <i class="fas fa-exclamation-triangle fa-2x"></i>
       </span>
-      <h1 class="title is-4 mt-3">WebGPU non supporté</h1>
-      <p>Ce navigateur ne supporte pas WebGPU.<br>
-      Veuillez utiliser un navigateur compatible WebGPU.</p>
+      <h1 class="title is-4 mt-3">
+        {{ isFrench ? "WebGPU non supporté" : "WebGPU not supported" }}
+      </h1>
+      <p>
+        <span v-if="isFrench">
+          Ce navigateur ne supporte pas WebGPU.<br>
+          Veuillez utiliser un navigateur compatible WebGPU.
+        </span>
+        <span v-else>
+          This browser does not support WebGPU.<br>
+          Please use a WebGPU-compatible browser.
+        </span>
+      </p>
       <a class="button is-link mt-4" href="https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API#browser_compatibility" target="_blank">
-        Liste des navigateurs compatibles WebGPU
+        {{ isFrench ? "Liste des navigateurs compatibles WebGPU" : "List of WebGPU-compatible browsers" }}
       </a>
     </div>
   </div>
