@@ -5,6 +5,7 @@ import colorShader from './assets/color.wgsl?raw'
 import reprojectShader from './assets/reproject.wgsl?raw'
 import {MandelbrotNavigator} from "mandelbrot";
 import { memory as wasmMemory } from 'mandelbrot/mandelbrot_bg.wasm';
+import { WebcamTexture } from './WebcamTexture';
 
 export type RenderOptions = {
     antialiasLevel: number,
@@ -81,6 +82,11 @@ export class Engine {
     skyboxTexture?: GPUTexture;
     skyboxTextureView?: GPUTextureView;
 
+    // Webcam
+    webcamTexture?: WebcamTexture;
+    webcamTileTexture?: GPUTexture;
+    webcamEnabled: boolean = false;
+
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas;
         this.shaderPass1 = mandelbrotShader;
@@ -126,6 +132,13 @@ export class Engine {
         this.skyboxTexture = await this._loadTexture('./skybox.jpeg');
         this.skyboxTextureView = this.skyboxTexture.createView();
 
+        // Webcam : initialisation (optionnel, activer webcamEnabled pour l'utiliser)
+        if (this.webcamEnabled) {
+            this.webcamTexture = new WebcamTexture(1024, 1024);
+            await this.webcamTexture.openWebcam();
+            this.webcamTileTexture = await this.webcamTexture.createWebGPUTexture(this.device);
+        }
+
         // uniform buffers (placeholders)
         this.uniformBufferMandelbrot = this.device.createBuffer({
             size: 4 * 9,
@@ -143,7 +156,6 @@ export class Engine {
             label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         });
         await this._createPipelines();
-
         this.resize();
     }
 
@@ -288,10 +300,13 @@ export class Engine {
         }
         if (this.pipelineColor) {
             const layoutColor = this.pipelineColor.getBindGroupLayout(0);
+            const tileView = this.webcamEnabled && this.webcamTileTexture
+                ? this.webcamTileTexture.createView()
+                : this.tileTextureView!;
             const entries: GPUBindGroupEntry[] = [
                 {binding: 0, resource: {buffer: this.uniformBufferColor!}},
                 {binding: 1, resource: this.intermediateView!},
-                {binding: 2, resource: this.tileTextureView!},
+                {binding: 2, resource: tileView},
                 {binding: 3, resource: this.skyboxTextureView!}
             ];
             this.bindGroupColor = this.device.createBindGroup({
@@ -396,7 +411,28 @@ export class Engine {
         this.device.queue.writeBuffer(this.uniformBufferReproject!, 0, data.buffer);
     }
 
-    render(forceRender = false) {
+    async render(forceRender = false) {
+        if (this.webcamEnabled && this.webcamTexture) {
+            await this.updateWebcamTexture();
+            // Recrée le bind group color pour utiliser la nouvelle texture
+            if (this.pipelineColor) {
+                const layoutColor = this.pipelineColor.getBindGroupLayout(0);
+                const tileView = this.webcamTileTexture
+                    ? this.webcamTileTexture.createView()
+                    : this.tileTextureView!;
+                const entries: GPUBindGroupEntry[] = [
+                    {binding: 0, resource: {buffer: this.uniformBufferColor!}},
+                    {binding: 1, resource: this.intermediateView!},
+                    {binding: 2, resource: tileView},
+                    {binding: 3, resource: this.skyboxTextureView!}
+                ];
+                this.bindGroupColor = this.device.createBindGroup({
+                    layout: layoutColor,
+                    entries,
+                    label: 'Engine BindGroup Color Pass'
+                });
+            }
+        }
         if(!forceRender && !this.needRender && this.extraFrames <= 0) {
             return;
         }
@@ -495,5 +531,12 @@ export class Engine {
             [bitmap.width, bitmap.height]
         );
         return texture;
+    }
+
+    // Met à jour la texture GPU à partir de la webcam (à appeler à chaque frame si webcamEnabled)
+    async updateWebcamTexture() {
+        if (this.webcamEnabled && this.webcamTexture) {
+            this.webcamTileTexture = await this.webcamTexture.createWebGPUTexture(this.device);
+        }
     }
 }

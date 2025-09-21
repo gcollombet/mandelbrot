@@ -23,6 +23,12 @@ const mandelbrotParams = ref({
   antialiasLevel: antialiasLevel,
   palettePeriod: palettePeriod,
 } as MandelbrotParams);
+// Ajoutez ceci dans la section <script setup lang="ts">
+const showSettings = ref(false);
+
+function toggleSettings() {
+  showSettings.value = !showSettings.value;
+}
 
 function onLoadParams(params: { cx: string, cy: string, scale: string, angle: string }) {
   if (!navigator) return;
@@ -201,7 +207,7 @@ function update() {
 }
 
 function animate() {
-  draw();
+  draw(false);
   requestAnimationFrame(animate);
 }
 
@@ -224,8 +230,8 @@ async function initWebGPU() {
   canvas = canvasRef.value;
 
   navigator = new MandelbrotNavigator(
-      -0.5572506229492064091994520833394481793049,
-      0.6355989165839159099969652617613951003226,
+      -1.8425,
+      0.0,
       5000.0,
       1000,
       0.0
@@ -348,14 +354,17 @@ onUnmounted(() => {
       :class="showUI ? 'animate__fadeInDown' : ''"
       aria-label="Menu"
       v-show="showUI"
+      @click="toggleSettings"
     >
       <span class="hamburger-bar"></span>
       <span class="hamburger-bar"></span>
       <span class="hamburger-bar"></span>
     </button>
     <canvas ref="canvasRef" style="width: 100%; height: 100%; display: block;"></canvas>
-    <div v-if="false"
-         style="position: absolute; top: 0; left: 0; z-index: 10; width: 320px; pointer-events: auto;">
+    <div
+      v-if="showSettings"
+        style="position: absolute; top: 0; left: 0;  z-index: 10; pointer-events: auto; height: 100vh;"
+    >
       <Settings v-model="mandelbrotParams" @load="onLoadParams" />
     </div>
     <div

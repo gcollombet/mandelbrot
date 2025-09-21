@@ -71,101 +71,112 @@ const epsilonSlider = computed({
 onMounted(() => {
   loadPresets();
 });
+
+const activeTab = ref('navigation');
 </script>
 
 <template>
-  <nav class="panel compact-panel">
-    <p class="panel-heading compact-heading">Paramètres</p>
-    <!-- Affichage mathématique -->
-    <div class="panel-block compact-block">
-      <span class="math-display">
-        Échelle&nbsp;:
-        <span v-html="scaleSci" />
-        <button class="button is-small" style="margin-left:0.7em;" @click="props.modelValue.scale = '2.5'">Réinitialiser</button>
-      </span>
+  <div class="block bulma-settings-block">
+    <div class="tabs is-toggle is-fullwidth">
+      <ul>
+        <li :class="{ 'is-active': activeTab === 'navigation' }">
+          <a @click="activeTab = 'navigation'">Navigation</a>
+        </li>
+        <li :class="{ 'is-active': activeTab === 'color' }">
+          <a @click="activeTab = 'color'">Color</a>
+        </li>
+        <li :class="{ 'is-active': activeTab === 'performance' }">
+          <a @click="activeTab = 'performance'">Performance</a>
+        </li>
+      </ul>
     </div>
-    <div class="panel-block compact-block">
-      <p>
-        <span class="math-display">Cx&nbsp;:<span v-html="cxSci" /></span>
-      </p>
-      <p>
-        <span class="math-display">Cy&nbsp;:<span class="math-i">i</span><span v-html="cySci" /></span>
-      </p>
-    </div>
-    <div class="panel-block compact-block">
-      <span class="math-display">
-        Angle&nbsp;:
-        <span>{{ angleDeg }}°</span>
-      </span>
-    </div>
-    <div class="panel-block compact-block">
-      <label class="compact-label">Mu (log)</label>
-      <input
-          type="range"
-          min="0"
-          max="5"
-          step="0.01"
-          v-model="muSlider"
-          style="width: 100%;"
-      />
-      <span class="math-display">{{ (props.modelValue.mu ?? 1.0).toFixed(1) }}</span>
-    </div>
-    <div class="panel-block compact-block">
-      <label class="compact-label">Epsilon (log)</label>
-      <input
-          type="range"
-          min="-12"
-          max="0"
-          step="0.01"
-          v-model="epsilonSlider"
-          style="width: 100%;"
-      />
-      <span class="math-display">{{ (props.modelValue.epsilon ?? 1e-8).toExponential(2) }}</span>
-    </div>
-    <div class="panel-block compact-block">
-      <label class="compact-label">Presets enregistrés</label>
-      <div style="display: flex; flex-direction: column; gap: 0.3em;">
-        <select class="select compact-select" v-model="selectedPreset" @change="selectPreset(selectedPreset)" style="width: 100%;">
-          <option value="" disabled>Choisir un preset...</option>
-          <option v-for="preset in presets" :key="preset.name" :value="preset.name">{{ preset.name }}</option>
-        </select>
+    <div v-if="activeTab === 'navigation'">
+      <div class="mb-3">
+        <span class="math-display">
+          Échelle&nbsp;:
+          <span v-html="scaleSci" />
+          <button class="button is-small" style="margin-left:0.7em;" @click="props.modelValue.scale = '2.5'">Réinitialiser</button>
+        </span>
+      </div>
+      <div class="mb-3">
+        <p>
+          <span class="math-display">Cx&nbsp;:<span v-html="cxSci" /></span>
+        </p>
+        <p>
+          <span class="math-display">Cy&nbsp;:<span class="math-i">i</span><span v-html="cySci" /></span>
+        </p>
+      </div>
+      <div class="mb-3">
+        <span class="math-display">
+          Angle&nbsp;:
+          <span>{{ angleDeg }}°</span>
+        </span>
+      </div>
+      <div class="mb-3">
+        <label class="compact-label">Presets enregistrés</label>
+        <div style="display: flex; flex-direction: column; gap: 0.3em;">
+          <select class="select compact-select" v-model="selectedPreset" @change="selectPreset(selectedPreset)" style="width: 100%;">
+            <option value="" disabled>Choisir un preset...</option>
+            <option v-for="preset in presets" :key="preset.name" :value="preset.name">{{ preset.name }}</option>
+          </select>
+        </div>
+      </div>
+      <div class="mb-3">
+        <label class="compact-label">Nom du preset</label>
+        <div style="display: flex; gap: 0.5em; align-items: center;">
+          <input class="input compact-input" v-model="presetName" type="text" placeholder="Nom..." style="width: 8em;" />
+          <button class="button is-link is-small" @click="savePreset">Enregistrer</button>
+        </div>
       </div>
     </div>
-    <!-- Gestion des presets -->
-    <div class="panel-block compact-block">
-      <label class="compact-label">Nom du preset</label>
-      <div style="display: flex; gap: 0.5em; align-items: center;">
-        <input class="input compact-input" v-model="presetName" type="text" placeholder="Nom..." style="width: 8em;" />
-        <button class="button is-link is-small" @click="savePreset">Enregistrer</button>
+    <div v-else-if="activeTab === 'color'">
+      <div class="mb-3">
+        <p>À compléter : paramètres de couleur</p>
       </div>
     </div>
-  </nav>
+    <div v-else-if="activeTab === 'performance'">
+      <div class="mb-3">
+        <label class="compact-label">Mu (log)</label>
+        <input
+            type="range"
+            min="0"
+            max="5"
+            step="0.01"
+            v-model="muSlider"
+            style="width: 100%;"
+        />
+        <span class="math-display">{{ (props.modelValue.mu ?? 1.0).toFixed(1) }}</span>
+      </div>
+      <div class="mb-3">
+        <label class="compact-label">Epsilon (log)</label>
+        <input
+            type="range"
+            min="-12"
+            max="0"
+            step="0.01"
+            v-model="epsilonSlider"
+            style="width: 100%;"
+        />
+        <span class="math-display">{{ (props.modelValue.epsilon ?? 1e-8).toExponential(2) }}</span>
+      </div>
+    </div>
+  </div>
 </template>
 
 <style scoped>
-.compact-panel {
-  color: #000 !important;
-  max-width: 320px;
-  margin: 0.5em;
-  background: rgba(255,255,255,0.50);
-  backdrop-filter: blur(12px);
-  -webkit-backdrop-filter: blur(12px);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-  border-radius: 0.7em;
-  padding: 0.5em 0.7em;
-}
-.compact-heading {
-  color: #000;
-  font-size: 1.1em;
+.bulma-settings-block {
   background: rgba(255,255,255,0.15);
-  padding: 0.3em 0.2em;
+  backdrop-filter: blur(8px);
+  -webkit-backdrop-filter: blur(8px);
+  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
+  border-radius: 8px;
+  padding: 1.2em 1.5em;
+  width: 420px;
+  max-width: 100vw;
+  margin: 1.5em auto;
 }
-.compact-block {
-  color: #000;
-  margin-bottom: 0.3em;
-  padding: 0.2em 0;
-  display: flex;
-  flex-direction: column;
+.mb-3 {
+  margin-bottom: 1.2em;
 }
 .math-display {
   color: #000;

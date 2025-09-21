@@ -35,12 +35,20 @@ fn dir_to_skybox_uv(dir: vec3<f32>) -> vec2<f32> {
 }
 
 fn tile_tessellation(v: f32, dist: f32, repeat: f32) -> vec3<f32> {
-  // Utilise v pour la position sur la fractale, et la distance au centre pour la coordonnée y
   let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
+  let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
+
+  // Inversion en miroir sur x et/ou y selon la parité de l'index
+  let mirrorX = (tileIndex.x % 2) == 1;
+  let mirrorY = (tileIndex.y % 2) == 1;
+let uv = vec2<f32>(
+  select(tileUV.x, 1.0 - tileUV.x, mirrorX),
+  select(tileUV.y, 1.0 - tileUV.y, mirrorY)
+);
   let texSize = vec2<i32>(textureDimensions(tileTex, 0));
   let coord = vec2<i32>(
-    i32(clamp(tileUV.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
-    i32(clamp((1.0 - tileUV.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
+    i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
+    i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
   );
   return textureLoad(tileTex, coord, 0).rgb;
 }
@@ -57,7 +65,8 @@ fn palette(v: f32, len: f32, d: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
   let center = vec2<f32>(0.5, 0.5);
   let dist = distance(vec2<f32>(dx, dy), center);
   // Tesselation avec tileTex basée sur v et la distance au centre
-  let tessColor = tile_tessellation(sqrt(v), dx * dy * dist, 2.0);
+  let tessColor = tile_tessellation(sqrt(v) * 3.0 + dx, dy , 1.0);
+//  let tessColor = tile_tessellation(sqrt(v) * 2.0,  (dy + 0.5) * (dx + 0.5) , 2.0);
   // Mélange la couleur fractale avec la tesselation (modulation)
   let color =  tessColor;
 
@@ -76,8 +85,10 @@ fn palette(v: f32, len: f32, d: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
     i32(clamp((1.0 - skyboxUV.y) * f32(skyboxSize.y), 0.0, f32(skyboxSize.y - 1)))
   );
   let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb;
-  let phong = ambient + 1.0 * diff + 1.0 * specular;
-  let finalColor = mix(color, skyboxColor * phong , 0.0);
+  let phong = ambient + 1.0 * diff + 1.0 * specular * skyboxColor;
+  let finalColor = color / phong * 2.0 ;
+//  let finalColor = color * skyboxColor * phong ;
+//  let finalColor = mix(color, skyboxColor * phong , 0.5);
   // invert finalColor for a more "spacey" look
 //  finalColor = vec3<f32>(1.0) - finalColor;
   return clamp(finalColor, vec3<f32>(0.0), vec3<f32>(1.0));
