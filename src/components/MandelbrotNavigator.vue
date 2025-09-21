@@ -230,7 +230,7 @@ async function initWebGPU() {
   canvas = canvasRef.value;
 
   navigator = new MandelbrotNavigator(
-      -1.8425,
+      -1.87003,
       0.0,
       5000.0,
       1000,
@@ -362,7 +362,7 @@ onUnmounted(() => {
     </button>
     <canvas ref="canvasRef" style="width: 100%; height: 100%; display: block;"></canvas>
     <div
-      v-if="showSettings"
+      v-if="false"
         style="position: absolute; top: 0; left: 0;  z-index: 10; pointer-events: auto; height: 100vh;"
     >
       <Settings v-model="mandelbrotParams" @load="onLoadParams" />
