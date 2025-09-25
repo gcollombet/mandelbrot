@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import { defineProps, computed, ref, onMounted, defineEmits } from 'vue';
 import type { MandelbrotParams } from "../Mandelbrot.ts";
+import PaletteEditor from './PaletteEditor.vue';
 
 const props = defineProps<{ modelValue: MandelbrotParams }>();
-const emit = defineEmits(['load']);
+const emit = defineEmits(['update:ModelValue']);
 
 const angleDeg = computed(() => (Number.parseFloat(props.modelValue.angle)  * 180 / Math.PI).toFixed(2));
 const scaleSci = computed(() => props.modelValue.scale);
@@ -11,7 +12,7 @@ const cxSci = computed(() => props.modelValue.cx);
 const cySci = computed(() => props.modelValue.cy);
 
 const presetName = ref('');
-const presets = ref<{ name: string, cx: string, cy: string, scale: string, angle: string }[]>([]);
+const presets = ref<{ name: string, value: MandelbrotParams }[]>([]);
 const selectedPreset = ref('');
 const STORAGE_KEY = 'mandelbrot_presets';
 
@@ -19,10 +20,7 @@ function savePreset() {
   if (!presetName.value.trim()) return;
   const preset = {
     name: presetName.value.trim(),
-    cx: props.modelValue.cx,
-    cy: props.modelValue.cy,
-    scale: props.modelValue.scale,
-    angle: props.modelValue.angle,
+    value: props.modelValue
   };
   const idx = presets.value.findIndex(p => p.name === preset.name);
   if (idx >= 0) {
@@ -46,12 +44,8 @@ function loadPresets() {
 function selectPreset(name: string) {
   const preset = presets.value.find(p => p.name === name);
   if (preset) {
-    props.modelValue.cx = preset.cx;
-    props.modelValue.cy = preset.cy;
-    props.modelValue.scale = preset.scale;
-    props.modelValue.angle = preset.angle;
     selectedPreset.value = name;
-    emit('load', { ...preset });
+    emit('update:ModelValue', preset.value );
   }
 }
 
@@ -76,17 +70,20 @@ const activeTab = ref('navigation');
 </script>
 
 <template>
-  <div class="block bulma-settings-block">
-    <div class="tabs is-toggle is-fullwidth">
+  <div class="block bulma-settings-block" style="color: black !important;">
+    <div class="tabs is-toggle is-fullwidth is-small">
       <ul>
         <li :class="{ 'is-active': activeTab === 'navigation' }">
           <a @click="activeTab = 'navigation'">Navigation</a>
         </li>
         <li :class="{ 'is-active': activeTab === 'color' }">
-          <a @click="activeTab = 'color'">Color</a>
+          <a @click="activeTab = 'color'">Palette</a>
         </li>
         <li :class="{ 'is-active': activeTab === 'performance' }">
-          <a @click="activeTab = 'performance'">Performance</a>
+          <a @click="activeTab = 'performance'">Graphics</a>
+        </li>
+        <li :class="{ 'is-active': activeTab === 'presets' }">
+          <a @click="activeTab = 'presets'">Presets</a>
         </li>
       </ul>
     </div>
@@ -112,52 +109,114 @@ const activeTab = ref('navigation');
           <span>{{ angleDeg }}°</span>
         </span>
       </div>
-      <div class="mb-3">
-        <label class="compact-label">Presets enregistrés</label>
-        <div style="display: flex; flex-direction: column; gap: 0.3em;">
-          <select class="select compact-select" v-model="selectedPreset" @change="selectPreset(selectedPreset)" style="width: 100%;">
-            <option value="" disabled>Choisir un preset...</option>
-            <option v-for="preset in presets" :key="preset.name" :value="preset.name">{{ preset.name }}</option>
-          </select>
-        </div>
-      </div>
-      <div class="mb-3">
-        <label class="compact-label">Nom du preset</label>
-        <div style="display: flex; gap: 0.5em; align-items: center;">
-          <input class="input compact-input" v-model="presetName" type="text" placeholder="Nom..." style="width: 8em;" />
-          <button class="button is-link is-small" @click="savePreset">Enregistrer</button>
-        </div>
-      </div>
     </div>
     <div v-else-if="activeTab === 'color'">
       <div class="mb-3">
-        <p>À compléter : paramètres de couleur</p>
+        <PaletteEditor :color-stops="props.modelValue.colorStops" />
       </div>
     </div>
     <div v-else-if="activeTab === 'performance'">
-      <div class="mb-3">
-        <label class="compact-label">Mu (log)</label>
-        <input
-            type="range"
-            min="0"
-            max="5"
-            step="0.01"
-            v-model="muSlider"
-            style="width: 100%;"
-        />
+      <div class="field">
+        <label class="label">Mu (log)</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
+        </div>
         <span class="math-display">{{ (props.modelValue.mu ?? 1.0).toFixed(1) }}</span>
       </div>
-      <div class="mb-3">
-        <label class="compact-label">Epsilon (log)</label>
-        <input
-            type="range"
-            min="-12"
-            max="0"
-            step="0.01"
-            v-model="epsilonSlider"
-            style="width: 100%;"
-        />
+      <div class="field">
+        <label class="label">Epsilon (log)</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="-12" max="0" step="0.01" v-model="epsilonSlider" />
+        </div>
         <span class="math-display">{{ (props.modelValue.epsilon ?? 1e-8).toExponential(2) }}</span>
+      </div>
+      <!--     <div class="field">
+           <label class="label">Max iterations</label>
+           <div class="control">
+             <input class="slider is-fullwidth" type="range" min="10" max="5000" step="1" v-model.number="props.modelValue.maxIterations" />
+           </div>
+           <span class="math-display">{{ props.modelValue.maxIterations }}</span>
+         </div>
+       <div class="field">
+           <label class="label">Antialias level</label>
+           <div class="control">
+             <input class="slider is-fullwidth" type="range" min="1" max="8" step="1" v-model.number="props.modelValue.antialiasLevel" />
+           </div>
+           <span class="math-display">{{ props.modelValue.antialiasLevel }}</span>
+         </div>-->
+      <div class="field">
+        <label class="label">Palette period</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="props.modelValue.palettePeriod" />
+        </div>
+        <span class="math-display">{{ props.modelValue.palettePeriod }}</span>
+      </div>
+      <div class="field">
+        <label class="label">Tesselation</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="props.modelValue.tessellationLevel" />
+        </div>
+        <span class="math-display">{{ props.modelValue.tessellationLevel }}</span>
+      </div>
+<!--      <div class="field">
+        <label class="label">Shading level</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="1" max="100" step="1" v-model.number="props.modelValue.shadingLevel" />
+        </div>
+        <span class="math-display">{{ props.modelValue.shadingLevel }}</span>
+      </div>-->
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="props.modelValue.activateWebcam" />
+          &nbsp;Activer la webcam
+        </label>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="props.modelValue.activateTessellation" />
+          &nbsp;Tessellation GPU
+        </label>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="props.modelValue.activateShading" />
+          &nbsp;Shading avancé
+        </label>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="props.modelValue.activateSkybox" />
+          &nbsp;Skybox
+        </label>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="props.modelValue.activatePalette" />
+          &nbsp;Palette
+        </label>
+      </div>
+    </div>
+    <div v-else-if="activeTab === 'presets'">
+      <div class="mb-3">
+        <div class="field">
+          <label class="label">Presets enregistrés</label>
+          <div class="control">
+            <div class="select is-fullwidth">
+              <select v-model="selectedPreset" @change="selectPreset(selectedPreset)">
+                <option value="" disabled>Choisir un preset...</option>
+                <option v-for="preset in presets" :key="preset.name" :value="preset.name">{{ preset.name }}</option>
+              </select>
+            </div>
+          </div>
+        </div>
+        <div class="field is-grouped">
+          <div class="control is-expanded">
+            <input class="input" v-model="presetName" type="text" placeholder="Nom..." />
+          </div>
+          <div class="control">
+            <button class="button is-link is-small" @click="savePreset">Enregistrer</button>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -165,15 +224,15 @@ const activeTab = ref('navigation');
 
 <style scoped>
 .bulma-settings-block {
-  background: rgba(255,255,255,0.15);
-  backdrop-filter: blur(8px);
+  background: rgba(255,255,255,0.05);
+  backdrop-filter: blur(8px) contrast(110%);
   -webkit-backdrop-filter: blur(8px);
   box-shadow: 0 2px 8px rgba(0,0,0,0.08);
   border-radius: 8px;
   padding: 1.2em 1.5em;
   width: 420px;
+  height: 100%;
   max-width: 100vw;
-  margin: 1.5em auto;
 }
 .mb-3 {
   margin-bottom: 1.2em;

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, ref, onUnmounted, nextTick, computed} from 'vue';
+import {onMounted, ref, onUnmounted, nextTick, computed, type Ref} from 'vue';
 import {Engine} from "../Engine.ts";
 import Settings from './Settings.vue';
 import {MandelbrotNavigator} from "mandelbrot";
@@ -7,13 +7,13 @@ import type {MandelbrotParams} from "../Mandelbrot.ts";
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const antialiasLevel = 1;
-const palettePeriod = 256;
+const palettePeriod = 1;
 let canvas: HTMLCanvasElement;
 let engine: Engine;
 let navigator: any;
 const moveStep = 0.04;
 const angleStep = 0.025;
-const mandelbrotParams = ref({
+const mandelbrotParams: Ref<MandelbrotParams> = ref({
   cx: "-1.5",
   cy: "0.0",
   mu: 10000.0,
@@ -22,7 +22,24 @@ const mandelbrotParams = ref({
   maxIterations: 1000,
   antialiasLevel: antialiasLevel,
   palettePeriod: palettePeriod,
-} as MandelbrotParams);
+  shadingLevel: 1,
+  tessellationLevel: 2,
+  epsilon: 0.00001,
+  colorStops: [
+    { color: '#0f0130', position: 0.0 },
+    { color: '#206bcb', position: 0.16 },
+    { color: '#ffceb6', position: 0.26 },
+    { color: '#edffff', position: 0.42 },
+    { color: '#ffaa00', position: 0.6425 },
+    { color: '#300200', position: 0.8575 },
+    { color: '#100000', position: 1.0 },
+  ],
+  activateShading: true,
+  activateTessellation: true,
+  activateWebcam: false,
+  activatePalette: false,
+  activateSkybox: false,
+});
 // Ajoutez ceci dans la section <script setup lang="ts">
 const showSettings = ref(false);
 
@@ -30,11 +47,8 @@ function toggleSettings() {
   showSettings.value = !showSettings.value;
 }
 
-function onLoadParams(params: { cx: string, cy: string, scale: string, angle: string }) {
+function onLoadParams(params: { name: string, value: MandelbrotParams }) {
   if (!navigator) return;
-  navigator.origin(String(params.cx), String(params.cy));
-  navigator.scale(String(params.scale));
-  navigator.angle(Number(params.angle));
 }
 
 const pressedKeys: Record<string, boolean> = {};
@@ -206,12 +220,12 @@ function update() {
   setTimeout(update, 16);
 }
 
-function animate() {
-  draw(false);
+async function animate() {
+  await draw(false);
   requestAnimationFrame(animate);
 }
 
-function draw(force: boolean = false) {
+async function draw(force: boolean = false) {
   const epsilon = mandelbrotParams.value.epsilon;
   const [dx, dy, scale, angle] = navigator.step();
   const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
@@ -221,8 +235,20 @@ function draw(force: boolean = false) {
   mandelbrotParams.value.scale = scale_string;
   mandelbrotParams.value.angle = angle_string;
   const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / scale)), 1000000);
-  engine.update({ cx: dx, cy: dy, mu, scale, angle, maxIterations, epsilon }, { antialiasLevel, palettePeriod });
-  engine.render(force);
+  await engine.update({ cx: dx, cy: dy, mu, scale, angle, maxIterations, epsilon },
+      {
+        shadingLevel: mandelbrotParams.value.shadingLevel,
+        tessellationLevel: mandelbrotParams.value.tessellationLevel,
+        antialiasLevel: mandelbrotParams.value.antialiasLevel,
+        palettePeriod: mandelbrotParams.value.palettePeriod,
+        colorStops: mandelbrotParams.value.colorStops,
+        activateShading: mandelbrotParams.value.activateShading,
+        activateTessellation: mandelbrotParams.value.activateTessellation,
+        activateWebcam: mandelbrotParams.value.activateWebcam,
+        activatePalette : mandelbrotParams.value.activatePalette,
+        activateSkybox : mandelbrotParams.value.activateSkybox,
+      });
+  await engine.render();
 }
 
 async function initWebGPU() {
@@ -233,13 +259,22 @@ async function initWebGPU() {
       -1.87003,
       0.0,
       5000.0,
-      1000,
+      //0.00005,
+       1000,
       0.0
   )
   ;
   engine = new Engine(canvas, {
-    antialiasLevel: 1,
-    palettePeriod: 128
+    activatePalette: true,
+    activateSkybox: true,
+    shadingLevel: mandelbrotParams.value.shadingLevel,
+    tessellationLevel: mandelbrotParams.value.tessellationLevel,
+    antialiasLevel: mandelbrotParams.value.antialiasLevel,
+    palettePeriod: mandelbrotParams.value.palettePeriod,
+    colorStops: mandelbrotParams.value.colorStops,
+    activateShading: mandelbrotParams.value.activateShading,
+    activateTessellation: mandelbrotParams.value.activateTessellation,
+    activateWebcam: mandelbrotParams.value.activateWebcam
   });
   await engine.initialize(navigator);
   window.addEventListener('keydown', handleKeydown);
@@ -362,7 +397,7 @@ onUnmounted(() => {
     </button>
     <canvas ref="canvasRef" style="width: 100%; height: 100%; display: block;"></canvas>
     <div
-      v-if="false"
+      v-if="showSettings"
         style="position: absolute; top: 0; left: 0;  z-index: 10; pointer-events: auto; height: 100vh;"
     >
       <Settings v-model="mandelbrotParams" @load="onLoadParams" />

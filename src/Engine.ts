@@ -6,10 +6,20 @@ import reprojectShader from './assets/reproject.wgsl?raw'
 import {MandelbrotNavigator} from "mandelbrot";
 import { memory as wasmMemory } from 'mandelbrot/mandelbrot_bg.wasm';
 import { WebcamTexture } from './WebcamTexture';
+import {Palette} from "./Palette.ts";
+import type {ColorStop} from "./ColorStop.ts";
 
 export type RenderOptions = {
     antialiasLevel: number,
     palettePeriod: number,
+    colorStops: ColorStop[],
+    activateWebcam: boolean,
+    activateTessellation: boolean,
+    activateShading: boolean,
+    activateSkybox: boolean,
+    activatePalette: boolean,
+    tessellationLevel: number,
+    shadingLevel: number,
 }
 
 export type Mandelbrot = {
@@ -67,6 +77,7 @@ export class Engine {
     palettePeriod: number;
 
     previousMandelbrot: Mandelbrot;
+    previousRenderOptions?: RenderOptions;
     needRender = true;
     extraFrames: number = 0;
     mandelbrotReference = new Float32Array(1000000);
@@ -81,11 +92,18 @@ export class Engine {
     tileTextureView?: GPUTextureView;
     skyboxTexture?: GPUTexture;
     skyboxTextureView?: GPUTextureView;
+    paletteTexture?: GPUTexture;
+    paletteTextureView?: GPUTextureView;
 
     // Webcam
     webcamTexture?: WebcamTexture;
     webcamTileTexture?: GPUTexture;
-    webcamEnabled: boolean = false;
+    webcamTextureView?: GPUTextureView;
+    webcamEnabled: boolean = true;
+
+    // temps en secondes
+    time: number = 0;
+    private lastUpdateTime: number = 0; // timestamp ms de la dernière update
 
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas;
@@ -93,6 +111,7 @@ export class Engine {
         this.shaderPass2 = colorShader;
         this.antialiasLevel = options.antialiasLevel;
         this.palettePeriod = options.palettePeriod;
+        this.time = 0;
         this.previousMandelbrot = {
             maxIterations: 1,
             epsilon: 0,
@@ -102,6 +121,7 @@ export class Engine {
             cy: 0,
             cx: 0
         }
+        this.previousRenderOptions = {...options};
     }
 
     async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
@@ -131,13 +151,38 @@ export class Engine {
         this.tileTextureView = this.tileTexture.createView();
         this.skyboxTexture = await this._loadTexture('./skybox.jpeg');
         this.skyboxTextureView = this.skyboxTexture.createView();
+        let palette = new Palette([
+            {position: 0.0, color: '#000764'},
+            {position: 0.16, color: '#206bcb'},
+            {position: 0.42, color: '#edffff'},
+            {position: 0.6425, color: '#ffaa00'},
+            {position: 0.8575, color: '#000200'},
+            {position: 1.0, color: '#000764'},
+        ]);
+        const paletteImageData = palette.generateTexture();
+        this.paletteTexture = this.device.createTexture({
+            size: [paletteImageData.width, paletteImageData.height, 1],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+            label: 'Engine PaletteTexture'
+        });
+        this.device.queue.writeTexture(
+            { texture: this.paletteTexture },
+            paletteImageData.data,
+            { bytesPerRow: paletteImageData.width * 4 },
+            [paletteImageData.width, paletteImageData.height]
+        );
+        this.paletteTextureView = this.paletteTexture.createView();
 
         // Webcam : initialisation (optionnel, activer webcamEnabled pour l'utiliser)
-        if (this.webcamEnabled) {
-            this.webcamTexture = new WebcamTexture(1024, 1024);
-            await this.webcamTexture.openWebcam();
-            this.webcamTileTexture = await this.webcamTexture.createWebGPUTexture(this.device);
-        }
+        this.webcamTexture = new WebcamTexture(1920, 1080);
+        await this.webcamTexture.openWebcam();
+        this.webcamTileTexture = this.device.createTexture({
+            size: [1920, 1080, 1],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+        });
+        this.webcamTextureView = this.webcamTileTexture.createView();
 
         // uniform buffers (placeholders)
         this.uniformBufferMandelbrot = this.device.createBuffer({
@@ -146,7 +191,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         });
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 4,
+            size: 4 * 10,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color'
         });
@@ -185,13 +230,15 @@ export class Engine {
             label: 'Engine RenderPipeline Mandelbrot'
         });
 
-        // Layout Color (4 bindings)
+        // Layout Color (6 bindings)
         const layoutColor = this.device.createBindGroupLayout({
             entries: [
                 {binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: {type: 'uniform'}},
                 {binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
                 {binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
                 {binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
+                {binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
+                {binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: {sampleType: 'float'}},
             ],
             label: 'Engine BindGroupLayout Color'
         });
@@ -300,14 +347,13 @@ export class Engine {
         }
         if (this.pipelineColor) {
             const layoutColor = this.pipelineColor.getBindGroupLayout(0);
-            const tileView = this.webcamEnabled && this.webcamTileTexture
-                ? this.webcamTileTexture.createView()
-                : this.tileTextureView!;
             const entries: GPUBindGroupEntry[] = [
                 {binding: 0, resource: {buffer: this.uniformBufferColor!}},
                 {binding: 1, resource: this.intermediateView!},
-                {binding: 2, resource: tileView},
-                {binding: 3, resource: this.skyboxTextureView!}
+                {binding: 2, resource: this.tileTextureView!},
+                {binding: 3, resource: this.skyboxTextureView!},
+                {binding: 4, resource: this.webcamTextureView!},
+                {binding: 5, resource: this.paletteTexture!},
             ];
             this.bindGroupColor = this.device.createBindGroup({
                 layout: layoutColor,
@@ -315,6 +361,8 @@ export class Engine {
                 label: 'Engine BindGroup Color Pass'
             });
         }
+        this.prevFrameMandelbrot = undefined; // plus de frame précédente après resize
+        this.needRender = true;
     }
 
     areObjectsEqual(obj1: any, obj2: any): boolean {
@@ -327,19 +375,32 @@ export class Engine {
         return true;
     }
 
-    update(mandelbrot : Mandelbrot, renderOptions : RenderOptions) {
+    async update(mandelbrot : Mandelbrot, renderOptions : RenderOptions) {
+        // Calcul du temps écoulé depuis la dernière frame
+        const now = performance.now();
+        if (this.lastUpdateTime === 0) {
+            this.lastUpdateTime = now;
+        }
+        const delta = (now - this.lastUpdateTime) / 1000; // en secondes
+        this.time += delta;
+        this.lastUpdateTime = now;
+
         if(this.previousMandelbrot) {
-            const wasNeedRender = this.needRender;
             this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
             if (this.needRender) {
                 this.extraFrames = 2;
-            } else if (wasNeedRender && !this.needRender) {
-                // Si on vient de passer à false, on ne touche pas à extraFrames
             }
         }
-        if(!this.needRender && this.extraFrames <= 0) {
-            return;
+
+        if(renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam
+            await this.updateWebcamTexture();
+            this.needRender = true;
         }
+
+        if(renderOptions.activateTessellation) {
+            this.needRender = true;
+        }
+
         const aspect = (this.width / Math.max(1, this.height));
 
         const mandelbrotShaderUniformData = new Float32Array([
@@ -360,14 +421,49 @@ export class Engine {
             scaleFactor = 1.0 / scaleFactor;
         }
         scaleFactor = Math.sqrt(scaleFactor) - 1.0;
+        // Créer un float qui contient en fait un u32 avec les bits de l'entier
+        //   let useTessellation = (flags & 0x1u) != 0u;
+        //   let useShading = (flags & 0x2u) != 0u;
+        //   let useWebcam = (flags & 0x4u) != 0u;
+        //   let usePalette = (flags & 0x8u) != 0u;
+        //   let useSkybox = (flags & 0x10u) != 0u;
+        let flags = 0;
+        if (renderOptions.activateTessellation) flags |= 0x1;
+        if (renderOptions.activateShading) flags |= 0x2;
+        if (renderOptions.activateWebcam) flags |= 0x4;
+        if (renderOptions.activatePalette) flags |= 0x8;
+        if (renderOptions.activateSkybox) flags |= 0x10;
+
+        // Si la palette a changé, on la recalcule
+        //if (!this.areObjectsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops)){
+            const palette = new Palette(renderOptions.colorStops);
+            const paletteImageData = palette.generateTexture();
+            this.device.queue.writeTexture(
+                { texture: this.paletteTexture },
+                paletteImageData.data,
+                { bytesPerRow: paletteImageData.width * 4 },
+                [paletteImageData.width, paletteImageData.height]
+            );
+            this.needRender = true;
+        //}
+
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,
+            renderOptions.tessellationLevel,
+            renderOptions.shadingLevel,
             scaleFactor,
-            0,
-            0
+            this.time,
+            renderOptions.activateTessellation ? 1 : 0,
+            renderOptions.activateShading ? 1 : 0,
+            renderOptions.activateWebcam ? 1 : 0,
+            renderOptions.activatePalette ? 1 : 0,
+            renderOptions.activateSkybox ? 1 : 0,
         ]);
-
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer);
+
+        if(!this.needRender && this.extraFrames <= 0) {
+            return;
+        }
 
         const maxIterations = Math.ceil(mandelbrot.maxIterations);
         let prtInfo = this.mandelbrotNavigator.compute_reference_orbit_ptr(
@@ -383,16 +479,17 @@ export class Engine {
                 0
             );
         }
-
+        this.clearHistoryNextFrame = false;
         // capture frame précédente pour reprojection avant écrasement
         if(!this.prevFrameMandelbrot) {
-            this.prevFrameMandelbrot = {...mandelbrot}; // init la première fois
+            this.clearHistoryNextFrame = true;
         }
         // Détection de changement de zoom
         if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.scale !== mandelbrot.scale) {
             this.clearHistoryNextFrame = true;
         }
-        this.previousMandelbrot = mandelbrot; // conserve current pour utilisation future
+        this.previousMandelbrot = {...mandelbrot}; // conserve current pour utilisation future
+        this.previousRenderOptions = {...renderOptions};
     }
 
     private _writeReprojectUniforms() {
@@ -411,29 +508,10 @@ export class Engine {
         this.device.queue.writeBuffer(this.uniformBufferReproject!, 0, data.buffer);
     }
 
-    async render(forceRender = false) {
-        if (this.webcamEnabled && this.webcamTexture) {
-            await this.updateWebcamTexture();
-            // Recrée le bind group color pour utiliser la nouvelle texture
-            if (this.pipelineColor) {
-                const layoutColor = this.pipelineColor.getBindGroupLayout(0);
-                const tileView = this.webcamTileTexture
-                    ? this.webcamTileTexture.createView()
-                    : this.tileTextureView!;
-                const entries: GPUBindGroupEntry[] = [
-                    {binding: 0, resource: {buffer: this.uniformBufferColor!}},
-                    {binding: 1, resource: this.intermediateView!},
-                    {binding: 2, resource: tileView},
-                    {binding: 3, resource: this.skyboxTextureView!}
-                ];
-                this.bindGroupColor = this.device.createBindGroup({
-                    layout: layoutColor,
-                    entries,
-                    label: 'Engine BindGroup Color Pass'
-                });
-            }
-        }
-        if(!forceRender && !this.needRender && this.extraFrames <= 0) {
+    async render() {
+        if( !this.needRender
+            && this.extraFrames <= 0
+        ) {
             return;
         }
         if (!this.needRender && this.extraFrames > 0) {
@@ -456,7 +534,7 @@ export class Engine {
                     storeOp: 'store'
                 }]
             });
-            if (this.prevFrameMandelbrot && !forceRender) { // uniquement après première frame
+            if (!this.clearHistoryNextFrame) { // uniquement après première frame
                 rpassReproject.setPipeline(this.pipelineReproject);
                 rpassReproject.setBindGroup(0, this.bindGroupReproject);
                 rpassReproject.draw(6,1,0,0);
@@ -506,6 +584,11 @@ export class Engine {
         this.mandelbrotReferenceBuffer?.destroy?.();
         this.reprojectTexture?.destroy?.();
         this.uniformBufferReproject?.destroy?.();
+        this.uniformBufferMandelbrot?.destroy?.();
+        this.uniformBufferColor?.destroy?.();
+        this.webcamTexture?.closeWebcam();
+        this.webcamTileTexture?.destroy?.();
+        this.paletteTexture?.destroy?.();
     }
 
     // Méthode utilitaire pour charger une image et la convertir en GPUTexture
@@ -535,8 +618,6 @@ export class Engine {
 
     // Met à jour la texture GPU à partir de la webcam (à appeler à chaque frame si webcamEnabled)
     async updateWebcamTexture() {
-        if (this.webcamEnabled && this.webcamTexture) {
-            this.webcamTileTexture = await this.webcamTexture.createWebGPUTexture(this.device);
-        }
+        await this.webcamTexture?.drawWebGPUTexture(this.webcamTileTexture!, this.device);
     }
 }

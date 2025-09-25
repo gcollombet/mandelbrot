@@ -1,4 +1,8 @@
+import type {ColorStop} from "./ColorStop.ts";
+
 export interface MandelbrotParams {
+    tessellationLevel: number;
+    shadingLevel: number;
     scale: string;
     cx: string;
     cy: string;
@@ -11,4 +15,7 @@ export interface MandelbrotParams {
     activateWebcam: boolean,
     activateTessellation: boolean,
     activateShading: boolean,
+    activatePalette: boolean,
+    activateSkybox: boolean,
+    colorStops: ColorStop[],
 }

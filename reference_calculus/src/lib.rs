@@ -142,11 +142,11 @@ impl MandelbrotNavigator {
         if self.vscale.clone().abs() > dscale.clone().abs() {
             self.vscale = dscale.clone();
         }
-        if dscale.clone().abs() > self.scale.clone() / Float::from_primitive_float_prec(1000.0, 180).0 {
+        if dscale.clone().abs() > self.scale.clone() / Float::from_primitive_float_prec(1000.0, 128).0 {
             self.scale = self.scale.clone() + self.vscale.clone();
         } else {
             self.scale = self.target_scale.clone();
-            self.vscale = Float::from_primitive_float_prec(0.0, 180).0;
+            self.vscale = Float::from_primitive_float_prec(0.0, 128).0;
         }
         // Animation translation avec vitesse et damping
         let damping_base = 0.5_f64.powf(delta_time * 60.0);
