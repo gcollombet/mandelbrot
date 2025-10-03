@@ -98,18 +98,18 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
         d = cdiv(der,z);
         let dot_z = dot(z, z);
          // if is bigger than a max value, then we are out of the mandelbrot set
-        if (dot_z >= max) {
+        if (dot_z > max) {
             break;
         }
         if (dot(der, der) < epsilon) {
-            i = 0.0;
+            i = -1.0;
             break;
         }
         der = cmul(der * 2.0, z);
 
         let dot_dz = dot(dz, dz);
         if (dot_z < dot_dz || f32(ref_i) == max_iteration) {
-            dz = z;
+            dz = z ;
             ref_i = 0;
         } else {
 //   /* bivariate linear approximation */
@@ -123,12 +123,13 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
     if(i >= max_iteration ) {
         i = 0.0;
     } else {
-        if( i > 0.0) {
+        if( i >= 0.0) {
             // add the rest to i to get a smooth color gradient
             let log_zn = log(dz.x * dz.x + dz.y * dz.y) / 2.0;
             var nu = log(log_zn / log(2.0)) / log(2.0);
-            i = i % min(256, max_iteration) + 1.0;
-            i += (1.0 - nu) ;
+            i = i + 1 - nu;
+            i = abs(i) % 200;
+
         }
     }
 //    let normalized_der
@@ -140,8 +141,9 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
     // d = 0.5*sqrt(lz2/ld2)*(1.0-pow(lz2,-k))/k;
 
    // distance = 0.5 * sqrt(dot_z / dot(d,d)) * log(dot_z);
-   	let distance = 0.5*sqrt(dot(dz,dz)/dot(d,d))*log(dot(dz,dz));
-    return vec4<f32>(i, distance, normalized_der.x, normalized_der.y);
+   	//let distance = 0.5*sqrt(dot(dz,dz)/dot(d,d))*log(dot(dz,dz));
+   	let distance = dot(z,z) * 2.0 * log(dot(z,z)) / dot(d,d);
+    return vec4<f32>(i, distance / (mandelbrot.scale * 1000.0), normalized_der.x, normalized_der.y);
 }
 fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
   let s = sin(angle);

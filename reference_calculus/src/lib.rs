@@ -56,7 +56,6 @@ impl MandelbrotNavigator {
 
     #[wasm_bindgen(constructor)]
     pub fn new(cx: f64, cy: f64, mu: f64, scale: f64, angle: f64) -> MandelbrotNavigator {
-        console_log::init_with_level(Level::Debug).expect("Problème d'initialisation du logger");
         MandelbrotNavigator {
             cx: Float::from_primitive_float_prec(cx, 128).0,
             cy: Float::from_primitive_float_prec(cy, 128).0,
@@ -196,8 +195,8 @@ impl MandelbrotNavigator {
     pub fn compute_reference_orbit_ptr(&mut self, max_iter: u32) -> OrbitBufferInfo {
         if self.scale.clone() > Float::from(f32::MIN_POSITIVE * 10.0)
         && (
-            ((self.reference_cx.clone() - self.cx.clone()) > self.scale.clone() * Float::from(20.0)
-            || (self.reference_cy.clone() - self.cy.clone()).abs() > self.scale.clone() * Float::from(20.0))
+            ((self.reference_cx.clone() - self.cx.clone()) > self.scale.clone() * Float::from(4.0)
+            || (self.reference_cy.clone() - self.cy.clone()).abs() > self.scale.clone() * Float::from(4.0))
         )
         {
             self.result.clear();
@@ -220,7 +219,7 @@ impl MandelbrotNavigator {
         let total_iter: usize = 10_000.min(max_iter as usize);
         //let mut computed = 0;
         while self.last_iter < total_iter { //&& computed < 1000
-            if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(self.mu) {
+            if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(1000000000) {
                 self.result.push(MandelbrotStep {
                     zx: 0.0,
                     zy: 0.0,

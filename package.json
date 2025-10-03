@@ -6,7 +6,10 @@
   "scripts": {
     "dev": "vite",
     "build": "cd reference_calculus && wasm-pack build && cd .. && vue-tsc -b && vite build && git add docs",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "docs:dev": "vitepress dev docs",
+    "docs:build": "vitepress build docs",
+    "docs:preview": "vitepress preview docs"
   },
   "dependencies": {
     "d3": "^7.9.0",
@@ -25,10 +28,15 @@
     "@vue/tsconfig": "^0.7.0",
     "@webgpu/types": "^0.1.64",
     "autoprefixer": "^10.4.21",
+    "markdown-it-mathjax3": "^4.3.2",
+    "mathjax-full": "^3.2.2",
     "postcss": "^8.5.6",
+    "sass-embedded": "^1.93.2",
     "tailwindcss": "^4.1.11",
     "typescript": "~5.8.3",
     "vite": "^7.0.4",
-    "vue-tsc": "^2.2.12"
+    "vitepress": "^2.0.0-alpha.12",
+    "vue-tsc": "^2.2.12",
+    "vuepress": "^2.0.0-rc.24"
   }
 }

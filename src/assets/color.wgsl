@@ -40,8 +40,8 @@ fn vs_main(@builtin(vertex_index) VertexIndex : u32) -> VertexOutput {
 fn dir_to_skybox_uv(dir: vec3<f32>, dx: f32, dy: f32) -> vec2<f32> {
 
   let d = normalize(dir);
-  let u = abs((dx + atan2(d.z, d.x) / (2.0 * 3.14159265)) % 2.0 - 1.0) ;
-  let v = abs((dy - asin(d.y) / 3.14159265) % 2.0 - 1.0) ;
+  let u = abs((dx + atan2(d.z, d.x) / (2.0 * 3.14159265)) % 2.0 - 1.0) / 2.0 ;
+  let v = abs((dy + asin(d.y) / 3.14159265) % 2.0 - 1.0) / 2.0 ;
   return vec2<f32>(u, v);
 }
 
@@ -80,6 +80,41 @@ fn hsv2rgb(c: vec3<f32>) -> vec3<f32> {
   return c.z * mix(K.xxx, clamp(p - K.xxx, vec3<f32>(0.0), vec3<f32>(1.0)), c.y);
 }
 
+fn paletteHeight(h: f32, uv: vec2<f32>) -> vec3<f32> {
+let cameraPos = vec3<f32>(0.5, 0.5, 2.0); // camZ à ajuster selon la scène
+let surfacePos = vec3<f32>(uv.x, uv.y, h);
+let viewDir = normalize(cameraPos - surfacePos);
+
+  let texSize = vec2<f32>(textureDimensions(tex, 0));
+  let eps = 1.0 / f32(texSize.x);
+  // Calcul des dérivées pour la normale
+  let h_dx = textureLoad(tex, vec2<i32>(
+    i32(clamp((uv.x + eps) * f32(texSize.x), 0.0, f32(texSize.x - 1))),
+    i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
+  ), 0).r - h;
+  let h_dy = textureLoad(tex, vec2<i32>(
+    i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
+    i32(clamp((1.0 - (uv.y + eps)) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
+  ), 0).r - h;
+  let normal = normalize(vec3<f32>(-h_dx, -h_dy, 0.0)) + vec3<f32>(0.5, 0.5, 0.5);
+
+// 3. Échantillonnage du skybox avec le vecteur de réflexion
+let reflectDir = reflect(-viewDir, normal);
+let skyboxUV = dir_to_skybox_uv(reflectDir, 0.0, 0.0);
+let skyboxSize= vec2<i32>(textureDimensions(skyboxTex, 0));
+let skyBoxCoord = vec2<i32>(
+  i32(clamp(skyboxUV.x * f32(skyboxSize.x), 0.0, f32(skyboxSize.x - 1))),
+  i32(clamp((1.0 - skyboxUV.y) * f32(skyboxSize.y), 0.0, f32(skyboxSize.y - 1)))
+);
+let reflectionColor = textureLoad(skyboxTex, skyBoxCoord, 0).rgb;
+let reflectStrength = 0.5; // Contrôle de l'intensité de la réflexion
+let diffuseColor = vec3<f32>(0.5, 0.5, 0.5);
+// Mélange avec la couleur diffuse
+let finalColor = reflectionColor;
+return normal;
+}
+
+
 fn palette(v: f32, len: f32, d: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
 
   // Calcul de la distance au centre de l'écran (coordonnées normalisées 0..1)
@@ -88,7 +123,12 @@ fn palette(v: f32, len: f32, d: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
   let deep = sqrt(v) * 2.0;
   // Tesselation avec tileTex basée sur v et la distance au centre
   let tessColor =  tile_tessellation(tileTex, deep + dx, deep + dy, parameters.tessellationLevel );
-  let webCamColor = tile_tessellation(webcamTex, deep + dx + cos(parameters.time * 0.1), deep + dy + sin(parameters.time * 0.15)  , parameters.tessellationLevel + sin(parameters.time * 0.05) );
+  let webCamColor = tile_tessellation(
+    webcamTex,
+    deep + dx + cos(parameters.time * 0.1),
+    deep + dy + sin(parameters.time * 0.15),
+    parameters.tessellationLevel + sin(parameters.time * 0.05)
+  );
   let paletteColor = tile_tessellation(paletteTex, deep, 1.0, parameters.palettePeriod );
   var color = vec3<f32>(0.0, 0.0, 0.0);
 
@@ -133,29 +173,15 @@ fn palette(v: f32, len: f32, d: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
             i32(clamp(skyboxUV.x * f32(skyboxSize.x), 0.0, f32(skyboxSize.x - 1))),
             i32(clamp((1.0 - skyboxUV.y) * f32(skyboxSize.y), 0.0, f32(skyboxSize.y - 1)))
           );
+
         let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb * phong ;
         color = color / phong * skyboxColor * 1.0 ;
-
-//              let skyboxUV = dir_to_skybox_uv(reflectDir);
-//              let skyboxSize = vec2<i32>(textureDimensions(skyboxTex, 0));
-//              let skyboxCoord = vec2<i32>(
-//                i32(clamp(skyboxUV.x * f32(skyboxSize.x), 0.0, f32(skyboxSize.x - 1))),
-//                i32(clamp((1.0 - skyboxUV.y) * f32(skyboxSize.y), 0.0, f32(skyboxSize.y - 1)))
-//              );
-//              let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb;
       } else {
-              color = color / phong * 2.0 ;
+        color = color / phong * 2.0 ;
       }
-
     }
-
-//  let finalColor = color * skyboxColor * phong ;
-//  let finalColor = mix(color, skyboxColor * phong , 0.5);
-  // invert finalColor for a more "spacey" look
-//  finalColor = vec3<f32>(1.0) - finalColor;
-  return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
-  //return vec3<f32>(0.0,  1.0 - len , 0.0);
-
+    //return vec3<f32>(0.0,  len , 0.0);
+    return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
 
@@ -168,20 +194,21 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let blurSamples = 8; // Nombre d'échantillons pour le blur
   var color = vec3<f32>(0.0, 0.0, 0.0);
   var total = 0.0;
-      let sampleCoord = vec2<i32>(
-        i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
-        i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
-      );
-    let data = textureLoad(tex, sampleCoord, 0);
-    let nu = data.x;
-    let d = data.y;
-      if (nu <= 0.0) {
-        return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-      } else {
-        let v = nu / f32(256.0);
-        let color = palette(v, data.y, vec2<f32>(data.z, data.w), uv.x, uv.y);
-        return vec4<f32>(color, 1.0);
-      }
+  let sampleCoord = vec2<i32>(
+    i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
+    i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
+  );
+  let data = textureLoad(tex, sampleCoord, 0);
+  let nu = data.x;
+  let d = data.y;
+  if (nu <= 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  } else {
+    let v = nu / f32(256.0);
+    let color = palette(v, data.y, vec2<f32>(data.z, data.w), uv.x, uv.y);
+    //let color = paletteHeight(nu, uv);
+    return vec4<f32>(color, 1.0);
+  }
 
 //  // Blur radial : on échantillonne le long du rayon centre -> pixel
 //  for (var i = 0; i < blurSamples; i = i + 1) {

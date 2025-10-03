@@ -96,11 +96,12 @@ function picker(
       // Emettre l'événement d'input immédiatement
       onInput({ ...current }, false, d.name);
     });
-  channel.each(function(d: Channel, i: number) {
+  channel.each(function(d: Channel) {
     const node = this as HTMLElement;
     d3.select(node).select('canvas').call(
+        //@ts-ignore
       d3.drag<HTMLCanvasElement, Channel>()
-        .subject(function(event) {
+        .subject(function() {
           // Commencer le drag exactement à la position du curseur
           return { x: d.x ?? 0, y: 0 };
         })

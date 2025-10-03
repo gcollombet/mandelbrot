@@ -19,7 +19,7 @@ const mandelbrotParams: Ref<MandelbrotParams> = ref({
   mu: 10000.0,
   scale: "2.5",
   angle: "0.0",
-  maxIterations: 1000,
+  maxIterations: 1,
   antialiasLevel: antialiasLevel,
   palettePeriod: palettePeriod,
   shadingLevel: 1,
@@ -35,9 +35,9 @@ const mandelbrotParams: Ref<MandelbrotParams> = ref({
     { color: '#100000', position: 1.0 },
   ],
   activateShading: true,
-  activateTessellation: true,
+  activateTessellation: false,
   activateWebcam: false,
-  activatePalette: false,
+  activatePalette: true,
   activateSkybox: false,
 });
 // Ajoutez ceci dans la section <script setup lang="ts">
@@ -47,7 +47,7 @@ function toggleSettings() {
   showSettings.value = !showSettings.value;
 }
 
-function onLoadParams(params: { name: string, value: MandelbrotParams }) {
+function onLoadParams() {
   if (!navigator) return;
 }
 
@@ -221,11 +221,11 @@ function update() {
 }
 
 async function animate() {
-  await draw(false);
+  await draw();
   requestAnimationFrame(animate);
 }
 
-async function draw(force: boolean = false) {
+async function draw() {
   const epsilon = mandelbrotParams.value.epsilon;
   const [dx, dy, scale, angle] = navigator.step();
   const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
@@ -258,8 +258,7 @@ async function initWebGPU() {
   navigator = new MandelbrotNavigator(
       -1.87003,
       0.0,
-      5000.0,
-      //0.00005,
+      100000000.0,
        1000,
       0.0
   )
@@ -294,7 +293,7 @@ function handleResize() {
   canvasRef.value.width = rect.width;
   canvasRef.value.height = rect.height;
   engine.resize();
-  draw(true);
+  draw();
 }
 
 const showUI = ref(false);
@@ -383,7 +382,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div style="position: relative; height: 100vh; width: 100vw;">
+  <div >
     <button
       class="menu-hamburger tag is-light is-medium animate__animated"
       :class="showUI ? 'animate__fadeInDown' : ''"

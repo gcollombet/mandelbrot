@@ -67,8 +67,8 @@ export class Engine {
     bindGroupReproject?: GPUBindGroup;
 
     // shader sources (optionnellement remplaçables)
-    shaderPass1: string;
-    shaderPass2: string;
+    shaderPassCompute: string;
+    shaderPassColor: string;
 
     // config
     width = 0;
@@ -107,8 +107,8 @@ export class Engine {
 
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas;
-        this.shaderPass1 = mandelbrotShader;
-        this.shaderPass2 = colorShader;
+        this.shaderPassCompute = mandelbrotShader;
+        this.shaderPassColor = colorShader;
         this.antialiasLevel = options.antialiasLevel;
         this.palettePeriod = options.palettePeriod;
         this.time = 0;
@@ -149,7 +149,10 @@ export class Engine {
         // Chargement des textures additionnelles
         this.tileTexture = await this._loadTexture('./tile.jpeg');
         this.tileTextureView = this.tileTexture.createView();
-        this.skyboxTexture = await this._loadTexture('./skybox.jpeg');
+
+        // this.tileTexture = await this._loadTexture('./tile.jpeg');
+        // this.tileTextureView = this.tileTexture.createView();
+        this.skyboxTexture = await this._loadTexture('./abstract-3d-gold-background.jpg');
         this.skyboxTextureView = this.skyboxTexture.createView();
         let palette = new Palette([
             {position: 0.0, color: '#000764'},
@@ -206,8 +209,8 @@ export class Engine {
 
     private async _createPipelines() {
         const moduleReproject = this.device.createShaderModule({code: reprojectShader, label: 'Engine ShaderModule Reproject'});
-        const module1 = this.device.createShaderModule({code: this.shaderPass1, label: 'Engine ShaderModule Pass1'});
-        const module2 = this.device.createShaderModule({code: this.shaderPass2, label: 'Engine ShaderModule Pass2'});
+        const moduleCompute = this.device.createShaderModule({code: this.shaderPassCompute, label: 'Engine ShaderModule Compute'});
+        const moduleColor = this.device.createShaderModule({code: this.shaderPassColor, label: 'Engine ShaderModule Color'});
 
         // Layout reprojection
         const layoutReproject = this.device.createBindGroupLayout({
@@ -253,16 +256,16 @@ export class Engine {
 
         this.pipelineComputeIteration = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutComputeIteration] }),
-            vertex: {module: module1, entryPoint: 'vs_main'},
-            fragment: {module: module1, entryPoint: 'fs_main', targets: [{format: 'rgba16float'}]},
+            vertex: {module: moduleCompute, entryPoint: 'vs_main'},
+            fragment: {module: moduleCompute, entryPoint: 'fs_main', targets: [{format: 'rgba16float'}]},
             primitive: {topology: 'triangle-list'},
             label: 'Engine RenderPipeline Pass Mandelbrot'
         });
 
         this.pipelineColor = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({bindGroupLayouts: [layoutColor]}),
-            vertex: {module: module2, entryPoint: 'vs_main'},
-            fragment: {module: module2, entryPoint: 'fs_main', targets: [{format: this.format}]},
+            vertex: {module: moduleColor, entryPoint: 'vs_main'},
+            fragment: {module: moduleColor, entryPoint: 'fs_main', targets: [{format: this.format}]},
             primitive: {topology: 'triangle-list'},
             label: 'Engine RenderPipeline Pass Color'
         });
@@ -283,9 +286,9 @@ export class Engine {
 
     resize() {
         const dpr = (window.devicePixelRatio || 1)  ;
-        const parent = this.canvas.parentElement;
-        const widthCSS = parent?.clientWidth ?? this.canvas.clientWidth;
-        const heightCSS = parent?.clientHeight ?? this.canvas.clientHeight;
+        //const parent = this.canvas.parentElement;
+        const widthCSS = this.canvas.clientWidth;
+        const heightCSS = this.canvas.clientHeight;
         this.width = Math.max(1, Math.round(widthCSS * dpr));
         this.height = Math.max(1, Math.round(heightCSS * dpr));
 
@@ -421,12 +424,7 @@ export class Engine {
             scaleFactor = 1.0 / scaleFactor;
         }
         scaleFactor = Math.sqrt(scaleFactor) - 1.0;
-        // Créer un float qui contient en fait un u32 avec les bits de l'entier
-        //   let useTessellation = (flags & 0x1u) != 0u;
-        //   let useShading = (flags & 0x2u) != 0u;
-        //   let useWebcam = (flags & 0x4u) != 0u;
-        //   let usePalette = (flags & 0x8u) != 0u;
-        //   let useSkybox = (flags & 0x10u) != 0u;
+
         let flags = 0;
         if (renderOptions.activateTessellation) flags |= 0x1;
         if (renderOptions.activateShading) flags |= 0x2;
@@ -435,17 +433,17 @@ export class Engine {
         if (renderOptions.activateSkybox) flags |= 0x10;
 
         // Si la palette a changé, on la recalcule
-        //if (!this.areObjectsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops)){
+        if (!this.areObjectsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops)){
             const palette = new Palette(renderOptions.colorStops);
             const paletteImageData = palette.generateTexture();
             this.device.queue.writeTexture(
-                { texture: this.paletteTexture },
+                { texture: this.paletteTexture! },
                 paletteImageData.data,
                 { bytesPerRow: paletteImageData.width * 4 },
                 [paletteImageData.width, paletteImageData.height]
             );
             this.needRender = true;
-        //}
+        }
 
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,
