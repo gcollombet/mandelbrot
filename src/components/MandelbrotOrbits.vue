@@ -8,6 +8,8 @@ const props = defineProps<{
   cx?: string;
   cy?: string;
   showMandelbrot?: boolean;
+  showOrbitLabels?: boolean;
+  orbitIterations?: number;
 }>();
 
 const containerRef = ref<HTMLDivElement | null>(null);
@@ -67,7 +69,8 @@ function complexToPixel(re: number, im: number) {
 function computeOrbit(c: { re: number, im: number }) {
   const points = [];
   let z = { re: 0, im: 0 };
-  for (let i = 0; i < 50; i++) {
+  const iterations = props.orbitIterations ?? 50;
+  for (let i = 0; i < iterations; i++) {
     points.push({ re: z.re, im: z.im });
     const re2 = z.re * z.re - z.im * z.im + c.re;
     const im2 = 2 * z.re * z.im + c.im;
@@ -133,8 +136,35 @@ function drawOverlay() {
       ctx.lineTo(B.x, B.y);
       ctx.stroke();
     }
+    // Affichage du texte et du point jaune pour z0, z1, z2, ... si showOrbitLabels
+    if (props.showOrbitLabels) {
+      ctx.font = '12px monospace';
+      ctx.fillStyle = 'yellow';
+      ctx.textAlign = 'left';
+      ctx.textBaseline = 'top';
+      const maxLabels = Math.min(10, orbit.value.length); // Limite à 10 points pour la lisibilité
+      for (let i = 0; i < maxLabels; i++) {
+        const pt = orbit.value[i];
+        const pos = complexToPixel(pt.re, pt.im);
+        // Dessine un petit point jaune à chaque z
+        ctx.beginPath();
+        ctx.arc(pos.x, pos.y, 4, 0, 2 * Math.PI);
+        ctx.fillStyle = 'yellow';
+        ctx.fill();
+        let label = `z${i}: (${pt.re.toFixed(3)}, ${pt.im.toFixed(3)})`;
+        let lx = pos.x + 8;
+        let ly = pos.y + 2;
+        // Si trop près du bord droit, décale à gauche
+        if (lx + 120 > width.value) lx = pos.x - 120;
+        // Si trop près du bas, décale au-dessus
+        if (ly + 16 > height.value) ly = pos.y - 16;
+        ctx.fillText(label, lx, ly);
+      }
+    }
   }
-  ctx.fillText(cText, textX, textY);
+  if (!props.showOrbitLabels) {
+    ctx.fillText(cText, textX, textY);
+  }
 }
 
 function handleMouseMove(e: MouseEvent) {
