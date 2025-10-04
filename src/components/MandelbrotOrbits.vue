@@ -102,7 +102,7 @@ function drawOverlay() {
   ctx.fill();
   // Affichage de la valeur de c à côté du curseur
   ctx.font = '16px sans-serif';
-  ctx.fillStyle = 'white';
+  ctx.fillStyle = 'orange';
   ctx.textAlign = 'left';
   ctx.textBaseline = 'top';
   const cText = `c = ${c.value.re.toFixed(4)} + i·${c.value.im.toFixed(4)}`;
@@ -139,7 +139,7 @@ function drawOverlay() {
     // Affichage du texte et du point jaune pour z0, z1, z2, ... si showOrbitLabels
     if (props.showOrbitLabels) {
       ctx.font = '12px monospace';
-      ctx.fillStyle = 'yellow';
+      ctx.fillStyle = 'orange';
       ctx.textAlign = 'left';
       ctx.textBaseline = 'top';
       const maxLabels = Math.min(10, orbit.value.length); // Limite à 10 points pour la lisibilité
@@ -149,7 +149,7 @@ function drawOverlay() {
         // Dessine un petit point jaune à chaque z
         ctx.beginPath();
         ctx.arc(pos.x, pos.y, 4, 0, 2 * Math.PI);
-        ctx.fillStyle = 'yellow';
+        ctx.fillStyle = 'orange';
         ctx.fill();
         let label = `z${i}: (${pt.re.toFixed(3)}, ${pt.im.toFixed(3)})`;
         let lx = pos.x + 8;

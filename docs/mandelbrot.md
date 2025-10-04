@@ -2,7 +2,7 @@
 import Mandelbrot from '../src/components/Mandelbrot.vue'
 import ClassicMandelbrot from '../src/components/ClassicMandelbrot.vue'
 import MandelbrotOrbits from '../src/components/MandelbrotOrbits.vue'
-
+import ComplexDemo from '../src/components/ComplexDemo.vue'
 </script>
 
 # WebAssembly, WebGPU, Rust, fractales et autres trucs cools.
@@ -49,6 +49,8 @@ Pour rappel, quand on élève un nombre complexe au carré, on élève sa norme 
 Plus généralement, la multiplication de deux nombres complexes revient à multiplier leurs normes et additionner leurs arguments.
 
 Tandis que l'addition de deux nombres complexes revient à additionner leurs parties réelles et leurs parties imaginaires.
+
+<ComplexDemo />
 
 On peut continuer à itérer la suite et observer ce qu'il se passe. Voici ce que ça donne pour 10 itérations.
 
