@@ -9,6 +9,8 @@ struct Uniforms {
   activateWebcam : f32,
   activatePalette : f32,
   activateSkybox : f32,
+  activateSmoothness : f32,
+  activateZebra: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d<f32>;
@@ -199,11 +201,17 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
   );
   let data = textureLoad(tex, sampleCoord, 0);
-  let nu = data.x;
+  var nu = data.x;
   let d = data.y;
+  if(parameters.activateZebra == 1.0 && floor(nu) % 2 == 0.0) {
+    nu = -1.0;
+  }
   if (nu <= 0.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   } else {
+    if(parameters.activateSmoothness == 0.0) {
+      nu = floor(nu);
+    }
     let v = nu / f32(256.0);
     let color = palette(v, data.y, vec2<f32>(data.z, data.w), uv.x, uv.y);
     //let color = paletteHeight(nu, uv);

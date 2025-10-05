@@ -18,9 +18,11 @@ export class WebcamTexture {
     }
 
     async openWebcam(): Promise<void> {
-        this.stream = await navigator.mediaDevices.getUserMedia({ video: { width: this.width, height: this.height } });
-        this.video.srcObject = this.stream;
-        await this.video.play();
+        if(!this.stream) {
+            this.stream = await navigator.mediaDevices.getUserMedia({ video: { width: this.width, height: this.height } });
+            this.video.srcObject = this.stream;
+            await this.video.play();
+        }
     }
 
     // Crée une texture WebGPU à partir de l'image courante

@@ -18,6 +18,8 @@ export type RenderOptions = {
     activateShading: boolean,
     activateSkybox: boolean,
     activatePalette: boolean,
+    activateSmoothness: boolean,
+    activateZebra: boolean,
     tessellationLevel: number,
     shadingLevel: number,
 }
@@ -105,6 +107,14 @@ export class Engine {
     time: number = 0;
     private lastUpdateTime: number = 0; // timestamp ms de la dernière update
 
+    // Propriétés statiques pour le cache des textures
+    static _tileTexture?: GPUTexture;
+    static _tileTextureView?: GPUTextureView;
+    static _skyboxTexture?: GPUTexture;
+    static _skyboxTextureView?: GPUTextureView;
+    static _paletteTexture?: GPUTexture;
+    static _paletteTextureView?: GPUTextureView;
+
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas;
         this.shaderPassCompute = mandelbrotShader;
@@ -133,27 +143,29 @@ export class Engine {
         this.device.label = 'Engine Device';
         this.queue = this.device.queue;
         this.queue.label = 'Engine Queue';
-
         this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext;
         this.format = navigator.gpu.getPreferredCanvasFormat();
         this.ctx.configure({device: this.device, format: this.format, alphaMode: 'opaque'});
-
-        this.sampler = this.device.createSampler(
-            {
-                magFilter: 'nearest',
-                minFilter: 'nearest',
-                mipmapFilter: 'nearest'
-            });
+        this.sampler = this.device.createSampler({
+            magFilter: 'nearest',
+            minFilter: 'nearest',
+            mipmapFilter: 'nearest'
+        });
         this.sampler.label = 'Engine Sampler';
 
-        // Chargement des textures additionnelles
-        this.tileTexture = await this._loadTexture('./tile.jpeg');
+        // Chargement statique des textures additionnelles
+        if (!Engine._tileTexture) {
+            Engine._tileTexture = await this._loadTexture('./colored_tiles.jpg');
+        }
+        this.tileTexture =  await this._loadTexture('./colored_tiles.jpg');
         this.tileTextureView = this.tileTexture.createView();
 
-        // this.tileTexture = await this._loadTexture('./tile.jpeg');
-        // this.tileTextureView = this.tileTexture.createView();
-        this.skyboxTexture = await this._loadTexture('./abstract-3d-gold-background.jpg');
+        if (!Engine._skyboxTexture) {
+            Engine._skyboxTexture = await this._loadTexture('./gold.jpg');
+        }
+        this.skyboxTexture = await this._loadTexture('./gold.jpg');
         this.skyboxTextureView = this.skyboxTexture.createView();
+
         let palette = new Palette([
             {position: 0.0, color: '#000764'},
             {position: 0.16, color: '#206bcb'},
@@ -179,7 +191,7 @@ export class Engine {
 
         // Webcam : initialisation (optionnel, activer webcamEnabled pour l'utiliser)
         this.webcamTexture = new WebcamTexture(1920, 1080);
-        await this.webcamTexture.openWebcam();
+
         this.webcamTileTexture = this.device.createTexture({
             size: [1920, 1080, 1],
             format: 'rgba8unorm',
@@ -194,7 +206,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         });
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 10,
+            size: 4 * 12,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color'
         });
@@ -378,6 +390,17 @@ export class Engine {
         return true;
     }
 
+    areColorStopsEqual(a: Array<{ color: string, position: number }>, b: Array<{ color: string, position: number }>): boolean {
+        if (a.length !== b.length) return false;
+        for (let i = 0; i < a.length; i++) {
+            if (a[i].color !== b[i].color || a[i].position !== b[i].position) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+
     async update(mandelbrot : Mandelbrot, renderOptions : RenderOptions) {
         // Calcul du temps écoulé depuis la dernière frame
         const now = performance.now();
@@ -398,6 +421,8 @@ export class Engine {
         if(renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam
             await this.updateWebcamTexture();
             this.needRender = true;
+        } else {
+            this.webcamTexture?.closeWebcam();
         }
 
         if(renderOptions.activateTessellation) {
@@ -433,7 +458,7 @@ export class Engine {
         if (renderOptions.activateSkybox) flags |= 0x10;
 
         // Si la palette a changé, on la recalcule
-        if (!this.areObjectsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops)){
+        if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])) {
             const palette = new Palette(renderOptions.colorStops);
             const paletteImageData = palette.generateTexture();
             this.device.queue.writeTexture(
@@ -456,6 +481,8 @@ export class Engine {
             renderOptions.activateWebcam ? 1 : 0,
             renderOptions.activatePalette ? 1 : 0,
             renderOptions.activateSkybox ? 1 : 0,
+            renderOptions.activateSmoothness ? 1 : 0,
+            renderOptions.activateZebra ? 1 : 0,
         ]);
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer);
 
@@ -616,6 +643,7 @@ export class Engine {
 
     // Met à jour la texture GPU à partir de la webcam (à appeler à chaque frame si webcamEnabled)
     async updateWebcamTexture() {
+        await this.webcamTexture?.openWebcam();
         await this.webcamTexture?.drawWebGPUTexture(this.webcamTileTexture!, this.device);
     }
 }

@@ -1,6 +1,8 @@
 import type {ColorStop} from "./ColorStop.ts";
 
 export interface MandelbrotParams {
+    activateSmoothness: boolean;
+    activateZebra: boolean;
     tessellationLevel: number;
     shadingLevel: number;
     scale: string;

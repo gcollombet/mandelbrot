@@ -10,6 +10,8 @@ const props = defineProps<{
   showMandelbrot?: boolean;
   showOrbitLabels?: boolean;
   orbitIterations?: number;
+  showOrbitVectors?: boolean;
+  showPalette?: boolean; // nouvelle prop
 }>();
 
 const containerRef = ref<HTMLDivElement | null>(null);
@@ -127,6 +129,10 @@ function drawOverlay() {
     }
     ctx.strokeStyle = isInSet ? 'green' : 'blue';
     for (let i = 0; i < orbit.value.length - 1; i++) {
+      // si |z_n| > 2, arrête le tracé
+      const norm = Math.hypot(orbit.value[i].re, orbit.value[i].im);
+      if (norm > 2 && props.showOrbitVectors) break;
+      // Trace le segment entre z_n et z_{n+1}
       const ptA = orbit.value[i];
       const ptB = orbit.value[i + 1];
       const A = complexToPixel(ptA.re, ptA.im);
@@ -135,6 +141,20 @@ function drawOverlay() {
       ctx.moveTo(A.x, A.y);
       ctx.lineTo(B.x, B.y);
       ctx.stroke();
+    }
+    // Tracé des vecteurs (0,0) → zₙ en cyan ou rouge, arrêt au premier rouge
+    if (props.showOrbitVectors) {
+      for (let i = 1; i < orbit.value.length; i++) {
+        const norm = Math.hypot(orbit.value[i].re, orbit.value[i].im);
+        ctx.strokeStyle = norm <= 2 ? 'cyan' : 'red';
+        const A = complexToPixel(0, 0);
+        const B = complexToPixel(orbit.value[i].re, orbit.value[i].im);
+        ctx.beginPath();
+        ctx.moveTo(A.x, A.y);
+        ctx.lineTo(B.x, B.y);
+        ctx.stroke();
+        if (norm > 2) break;
+      }
     }
     // Affichage du texte et du point jaune pour z0, z1, z2, ... si showOrbitLabels
     if (props.showOrbitLabels) {
@@ -223,16 +243,17 @@ watch(() => [props.scale, props.angle, props.cx, props.cy], () => {
 <template>
   <div ref="containerRef" style="position: relative; width: 100%; height: 500px;">
     <Mandelbrot
-      v-if="props.showMandelbrot !== false"
+      v-if="props.showMandelbrot"
       :scale="props.scale ?? '1'"
       :angle="props.angle ?? '0.0'"
       :cx="props.cx ?? '0.0'"
       :cy="props.cy ?? '0.0'"
-      :activatePalette="false"
+      :activatePalette="props.showPalette"
       :activateSkybox="false"
       :activateTessellation="false"
       :activateWebcam="false"
       :activateShading="false"
+      :colorStops="[{ position: 0, color: '#000000' }, { position: 0.5, color: '#ffffff' }]"
       style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 1;"
     />
     <canvas ref="canvasRef" :width="width" :height="height" style="position: absolute; left: 0; top: 0; z-index: 2; pointer-events: auto; width: 100%; height: 100%;"></canvas>

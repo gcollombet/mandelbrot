@@ -13,12 +13,12 @@ interface MandelbrotPoint {
 
 const points: MandelbrotPoint[] = [
   {
-    name: "Bord complexe 2",
+    name: "Broderies",
     cx: "-0.7746806106269039",
     cy: "-0.1374168856037867",
     scale: "0.000000000001",
     angle: "0.0",
-    description: "Un autre point sur le bord, zoom extrême."
+    description: "Un point sur le bord, beaucoup d'itération et fort niveau de zoom"
   },
   {
     name: "Ile de Julia",
@@ -29,66 +29,53 @@ const points: MandelbrotPoint[] = [
     description: "Un point dans une île de Julia."
   },
   {
-    name: 'Centre',
-    cx: '-0.75',
-    cy: '0.0',
-    scale: '1.1',
-    angle: '0.0',
-    description: "Le centre de l'ensemble, typiquement stable et noir."
-  },
-  {
-    name: 'Cuspide',
-    cx: '0.25',
-    cy: '0.0',
-    scale: '1.1',
-    angle: '0.0',
-    description: "La pointe droite, limite de stabilité."
-  },
-  {
-    name: 'Bulbe secondaire',
-    cx: '-1.0',
-    cy: '0.0',
-    scale: '1.1',
-    angle: '0.0',
-    description: "Un bulbe secondaire, typiquement stable."
-  },
-  {
-    name: "Bord complexe 1",
-    cx: "-0.743643887037151",
-    cy: "0.13182590420533",
-    scale: "0.00001",
+    name: "Vallée des hippocampes",
+    cx: "-0.7457978898549",
+    cy: "-0.164195216032",
+    scale: "0.0003399",
     angle: "0.0",
-    description: "Un point sur le bord, zone de complexité maximale."
+    description: "Cet endroit est souvent nommé la vallée des hippocampes"
+  },
+  {
+    name: "Vallé des spirales",
+    cx: "-1.257369977593720294",
+    cy: "0.03801433143232926",
+    scale: "0.000000000000009898691265604",
+    angle: "0.0",
+    description: "Un minibrot niché dans la vallée des spirales."
+  },
+  {
+    name: "Tourbillons",
+    cx: "-1.749615506227909595",
+    cy: "0.00000000148994828809554127",
+    scale: "0.000000111597126685994161",
+    angle: "0.0",
+    description: "Un joli motif qui se trouve vers la pointe du mandelbrot"
   },
 
-  {
-    name: "Hors ensemble",
-    cx: "1.0",
-    cy: "1.0",
-    scale: "1.1",
-    angle: "0.0",
-    description: "Un point clairement hors de l'ensemble, divergence rapide."
-  }
 ];
 
 const selectedIndex = ref(0);
 const selectedPoint = ref(points[0]);
+const mandelbrotRef = ref(null);
 
 function onSelectChange(e: Event) {
   const idx = Number((e.target as HTMLSelectElement).value);
   selectedIndex.value = idx;
   selectedPoint.value = points[idx];
+  mandelbrotRef.value?.drawOnce();
 }
 </script>
 
 <template>
   <div>
-    <label for="mandelbrot-select">Choisissez un point classique :</label>
+    <label for="mandelbrot-select">Vous pouvez observez cette variété en parcours ces exemples :&nbsp;</label>
     <select id="mandelbrot-select" @change="onSelectChange" :value="selectedIndex">
       <option v-for="(pt, idx) in points" :key="pt.name" :value="idx">{{ pt.name }}</option>
     </select>
     <p>{{ selectedPoint.description }}</p>
     <Mandelbrot
+      ref="mandelbrotRef"
       :scale="selectedPoint.scale"
       :angle="selectedPoint.angle"
       :cx="selectedPoint.cx"
@@ -98,7 +85,7 @@ function onSelectChange(e: Event) {
       :activateTessellation="false"
       :activateWebcam="false"
       :activateShading="false"
+      :activateSmoothness="true"
     />
   </div>
 </template>
-

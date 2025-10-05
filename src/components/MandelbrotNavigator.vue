@@ -39,6 +39,8 @@ const mandelbrotParams: Ref<MandelbrotParams> = ref({
   activateWebcam: false,
   activatePalette: true,
   activateSkybox: false,
+  activateSmoothness: true,
+  activateZebra: false,
 });
 // Ajoutez ceci dans la section <script setup lang="ts">
 const showSettings = ref(false);
@@ -247,6 +249,8 @@ async function draw() {
         activateWebcam: mandelbrotParams.value.activateWebcam,
         activatePalette : mandelbrotParams.value.activatePalette,
         activateSkybox : mandelbrotParams.value.activateSkybox,
+        activateSmoothness : mandelbrotParams.value.activateSmoothness,
+        activateZebra : mandelbrotParams.value.activateZebra,
       });
   await engine.render();
 }
@@ -382,7 +386,7 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <div >
+  <div style="position: relative; height: 100vh; width: 100vw;">
     <button
       class="menu-hamburger tag is-light is-medium animate__animated"
       :class="showUI ? 'animate__fadeInDown' : ''"
