@@ -4,8 +4,9 @@ import ClassicMandelbrot from '../src/components/ClassicMandelbrot.vue'
 import MandelbrotOrbits from '../src/components/MandelbrotOrbits.vue'
 import ComplexDemo from '../src/components/ComplexDemo.vue'
 import MandelbrotController from '../src/components/MandelbrotController.vue'
+import IframeMandelbrotLowPrecision from '../src/components/IframeMandelbrotLowPrecision.vue'
 </script>
-
+<link rel="stylesheet" href="https://use.typekit.net/fnz7ojs.css">
 # WebAssembly, WebGPU, Rust, fractales et autres trucs cools.
 
 
@@ -285,14 +286,61 @@ Sinon, on se retrouve avec une image entièrement noire car on n'a pas itéré a
 A des niveaux de zoom très élevés, là où les motifs sont les plus intéressants,
 il peut être nécessaire d'effectuer des milliers, voire des millions d'itérations par pixel.
 
+Voici un exemple de rendu typique que l'on peut obtenir avec des calculs en double précision côté CPU en JavaScript.
+
+<IframeMandelbrotLowPrecision />
+
 ## Précision numérique
 
 Un autre défi majeur dans le rendu à des niveaux de zoom élevés est la précision numérique.
 
 Les calculs sont effectués en utilisant des nombres à virgule flottante, qui ont une précision limitée.
 
-Les flottants simple précision (32 bits) offrent environ 7 chiffres significatifs (en base 10), 
+### Rappel sur les nombres flottants
+
+Les flottants de simple précision (32 bits) offrent environ 7 chiffres significatifs (en base 10),
 tandis que les flottants double précision (64 bits) en offrent environ 15.
+
+Exemple de représentation en simple précision (32 bits) selon la norme IEEE 754 :
+
+| Signe (1 bit)  | Exposant (8 bits) | Mantisse (23 bits)      |
+|----------------|-------------------|-------------------------|
+| S              | EEEEEEEE          | MMMMMMMMMMMMMMMMMMMMMMM |
+
+ - **La mantisse** représente la partie significative du nombre. 
+23 bits permet de représenter environ 7 chiffres significatifs.
+ - **L'exposant** détermine l'échelle du nombre. 
+8 bits permet de représenter des exposants allant de -126 à +127.
+ - **Le signe** indique si le nombre est positif ou négatif.
+
+C'est-à-dire, que l'on peut représenter des nombres allant d'environ $10^{-38}$ à $10^{38}$, mais avec une précision d'environ $7$ chiffres significatifs.
+
+Par exemple, le nombre $12345.67$ peut être représenté avec une précision suffisante.
+
+Il s'agit de $1.234567 \times 10^4$. Ou une mantisse de $1.234567$ et un exposant de $4$.
+
+Sur le même principe, on peut représenter des nombres très grands comme $3.402823 \times 10^{38}$ 
+ou très petits comme $1.175494 \times 10^{-38}$.
+
+Bien sûr, les flottants ne sont pas représentés en base 10, mais en base 2, mais le principe est le même.
+
+On pourra donc représenter des nombres très grands ou très petits, mais avec une précision limitée.
+
+On dit que la virgule "flotte" car la position de la virgule varie en fonction de l'exposant.
+
+Cela implique que l'on a plus de valeur représentable très proche de $0$. Les flottant suivent en effet une distribution logarithmique.
+
+Cela implique aussi que l'on ne peut pas additionner deux nombres de manière fiable si leur ordre de grandeur est très différent.
+
+Par exemple, si l'on ajoute $4.2 \times 10^{-3}$ à $4.2 \times 10^7$, le résultat sera  $4.2 \times 10^7$.
+
+En effet, le résultat réel demanderait une précision de $10$ chiffres significatifs : $4200000.0042$.
+
+Ce qui correspond à la différence entre leurs exposants respectifs : $7 - (-3) = 10$.
+
+Un flottant en simple précision ne peut donc pas représenter ce nombre avec une précision suffisante.
+
+### Perte de précision lors du zoom
 
 Lorsque qu'on calcule chaque point, on utilise une valeur de $c$ qui correspond à la position du pixel dans le plan complexe.
 Quand on est à un niveau de zoom élevé, la différence entre les coordonnées des pixels devient très petite.
@@ -306,15 +354,125 @@ Pour du simple précision, on pourra atteindre un zoom d'environ $10^{-7}$ et po
 On ne se le représente peut-être pas comme ça, mais en réalité $10^{-7}$ c'est assez vite atteint 
 et l'on se sent vite frustré de ne pas pouvoir zoomer plus.
 
+Voici ce que ça donne avec des calculs en simple précision, 32 bit.
+
+<iframe 
+width="688" height="500" 
+frameborder="0"
+style="border-radius: 10px;"
+src="https://www.shadertoy.com/embed/tXfyDM?gui=false&t=10&paused=false&muted=false" 
+allowfullscreen></iframe>
+
+Même avec du double précision, on se retrouve vite limité.
+
 ## Solutions
+
+Pour améliorer les performances et la précision, plusieurs solutions existent.
 
 ### Gagner en performance
 
-#### Parallélisation CPU
+#### Le choix du langage
 
-#### Parallélisation GPU
+Pour améliorer les performances, on pourrait déjà utiliser un langage compilé comme *Rust* ou *C++*.
+Mais pour de l'algorithmique pure, on ne gagnerait pas énormément.
+Cela peut permettre pas exemple au compilateur de vectorisé certains calculs grâce à des instructions SIMD bien que ce ne soit pas garanti.
+De plus le gain serait limité à un facteur 2 ou 4.
+
+#### La parallelisation
+
+On peut tirer parti de la parallélisation.
+L'algorithme de dessin est entièrement parallélisable puisque le calcul de chaque pixel est indépendant des autres.
+On peut donc utiliser plusieurs cœurs de CPU pour effectuer les calculs en parallèle.
+Cela permet de gagner environ un ordre de grandeur en performance.
+Cependant, le gain est limité au nombre de cœurs disponibles sur la machine, souvent entre 4 et 16.
+
+On peut aussi utiliser des techniques de vectorisation pour traiter plusieurs pixels en une seule opération.
+On peut en particulier utiliser les instructions SIMD (Single Instruction, Multiple Data) disponibles sur les processeurs modernes.
+On peut espérer un gain de performance supplémentaire d'un facteur 4.
+Mais cela demande un peu plus de travail pour écrire du code qui utilise ces instructions.
+
+Le meilleur moyen, et de loin, est en fait d'utiliser le GPU (Graphics Processing Unit) qui est exactement fait pour ce genre de tâches parallèles.
+
+Les GPU modernes disposent de milliers de cœurs qui peuvent effectuer des calculs en parallèle. 
+Ça nous donne cette fois-ci trois ordres de grandeur en performance.
+
+En revanche, cela vient avec un inconvénient : seuls les flottants en simple précision sont supportés de manière efficace.
 
 #### WebGPU
+
+WebGPU est une API web moderne qui permet d'accéder aux capacités de calcul des GPU.
+
+Il existe une implémentation de l'API WebGPU web, appelée *WGPU*, qui peut être décorrélée du navigateur.
+Cela permet d'écrire des applications natives en Rust, C++ ou autres langages en utilisant l'API de WebGPU.
+
+En effet, l'avantage de l'API de WebGPU est qu'elle permet d'apporter une couche d'abstraction au-dessus des différentes
+SDKs des fabricants de GPU (DirectX, Metal, Vulkan) tout en offrant des fonctionnalités modernes et bas niveau, ce qui manque à OpenGL/WebGL.
+Elle est donc intéressante en dehors du contexte web, par exemple pour la construction d'un moteur graphique d'une application native sans dépendre d'une API graphique spécifique.
+
+Vous connaissez peut-être *WebGL*, qui est une API web pour le rendu 3D basée sur OpenGL ES 2.0.
+WebGL est largement supporté par les navigateurs, mais il est assez ancien et limité en fonctionnalités.
+
+WebGPU offre plusieurs avantages par rapport à WebGL, il permet notamment :
+
+ - de faire des calculs généraux sur le GPU (GPGPU), pas seulement du rendu graphique, en utilisant des *compute shaders*.
+ - d'accéder à une gestion mémoire plus flexible et performante (buffers, textures, bind groups).
+ - d'utiliser des commandes asynchrones et des promesses pour gérer les opérations GPU. En permettant de mieux contrôler le flux de données entre le CPU et le GPU.
+ - d'avoir une API plus moderne et plus proche des API graphiques natives (Vulkan, DirectX 12, Metal).
+ - de précompiler les shaders
+
+Au global, on peut dire qu'il permet de mieux exploiter les capacités des GPU.
+L'API est plus bas niveau et plus proche du matériel. 
+Cela implique aussi que l'API est un peu plus complexe à utiliser que WebGL.
+
+Une bonne ressource pour comparer WebGL et WebGPU est disponible ici : https://webgpufundamentals.org/webgpu/lessons/webgpu-from-webgl.html
+
+Voici un exemple de code source *TypeScript* qui initialise un contexte WebGPU et crée un buffer pour stocker les données des pixels.
+
+```typescript
+async function initWebGPU(canvas: HTMLCanvasElement) {
+    if (!navigator.gpu) {
+        throw new Error("WebGPU is not supported on this browser.");
+    }
+    const adapter = await navigator.gpu.requestAdapter();
+    const device = await adapter.requestDevice();
+    const context = canvas.getContext('webgpu') as GPUCanvasContext;
+    const format = navigator.gpu.getPreferredCanvasFormat();
+    context.configure({
+        device: device,
+        format: format,
+        alphaMode: 'opaque',
+    });
+    const width = canvas.width;
+    const height = canvas.height;
+    const pixelBuffer = device.createBuffer({
+        size: width * height * 4, // 4 bytes per pixel (RGBA)
+        usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC,
+    });
+    return { device, context, format, pixelBuffer };
+}
+```
+
+Une bonne ressource : https://thesyntaxdiaries.com/webgpu-complete-guide-next-generation-graphics-computing-2025
+
+Définir les éléments de base pour utiliser WebGPU.
+
+Adapter
+Device
+Queue
+Buffer
+Texture
+Sampler
+Bind Group
+Pipeline
+Context
+Bind group layout
+Shader module
+Command encoder
+Render pass
+Command buffer
+
+
+
 
 #### Shaders
 

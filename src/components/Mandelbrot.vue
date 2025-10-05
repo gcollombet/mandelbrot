@@ -179,6 +179,7 @@ defineExpose({
 
 <style>
 canvas {
+  border-radius: 10px;
   width: 100%;
   height: 500px;
   display: block;

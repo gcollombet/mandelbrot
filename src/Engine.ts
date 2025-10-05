@@ -274,6 +274,7 @@ export class Engine {
             label: 'Engine RenderPipeline Pass Mandelbrot'
         });
 
+
         this.pipelineColor = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({bindGroupLayouts: [layoutColor]}),
             vertex: {module: moduleColor, entryPoint: 'vs_main'},
@@ -449,13 +450,6 @@ export class Engine {
             scaleFactor = 1.0 / scaleFactor;
         }
         scaleFactor = Math.sqrt(scaleFactor) - 1.0;
-
-        let flags = 0;
-        if (renderOptions.activateTessellation) flags |= 0x1;
-        if (renderOptions.activateShading) flags |= 0x2;
-        if (renderOptions.activateWebcam) flags |= 0x4;
-        if (renderOptions.activatePalette) flags |= 0x8;
-        if (renderOptions.activateSkybox) flags |= 0x10;
 
         // Si la palette a changé, on la recalcule
         if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])) {
