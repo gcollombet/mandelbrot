@@ -73,6 +73,35 @@ fn getOrbitD(index: i32) -> vec2<f32> {
     );
 }
 
+fn mandelbrot_func_simple(x0: f32, y0: f32) -> vec4<f32> {
+    var z = vec2<f32>(0.0, 0.0);
+    var c = vec2<f32>(x0, y0);
+    var i = 0.0;
+    let max_iteration = mandelbrot.maxIteration;
+    let escape_radius = mandelbrot.mu;
+
+    while (i < max_iteration) {
+        // z = z^2 + c
+        z = vec2<f32>(z.x * z.x - z.y * z.y + c.x, 2.0 * z.x * z.y + c.y);
+        if (dot(z, z) > escape_radius) {
+            break;
+        }
+        i += 1.0;
+    }
+
+    // Colorisation lissée
+    if (i < max_iteration) {
+        let log_zn = log(z.x * z.x + z.y * z.y) / 2.0;
+        let nu = log(log_zn / log(2.0)) / log(2.0);
+        i = i + 1.0 - nu;
+    } else {
+        i = 0.0; // Inside the Mandelbrot set
+    }
+
+    return vec4<f32>(i, 0.0, 0.0, 1.0);
+}
+
+
 fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
     var dc = vec2<f32>(x0, y0);
 //  let max_iter_f: f32 = clamp(80.0 + 40.0 * log2(1.0 / uniforms.scale), 128.0, 1000000.0);

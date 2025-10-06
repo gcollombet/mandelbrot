@@ -843,39 +843,304 @@ L'écran serait tout noir.
 
 C'est à ce moment qu'on peut faire intervenir la théorie de la perturbation.
 
+Il s'agit d'une technique de calcul qui permet de calculer une fonction en utilisant 
+une approximation autour d'un point de référence.
+
+La théorie explique que l'on peut calculer avec un bon degré de précision un phénomène physique,
+dans notre cas une formule mathématique abstraite, en utilisant le résultat d'un calcul 
+proche de la situation que l'on cherche à modéliser, appelé le point de référence,
+et en ajoutant une petite perturbation, c'est-à-dire une petite différence entre le point de référence 
+et le point que l'on cherche à calculer.
+
+Cette technique est très utilisée en physique quantique, car elle permet de calculer des résultats qui seraient
+parfaitement incalculables autrement.
+Dans le cas de la physique quantique, le calcul est rendu bien plus simple grâce à la formule approximée.
+L'enjeu de la technique dans ce cas est de trouver un point de référence lequel le calcul est simple 
+et proche de la situation que l'on cherche à modéliser.
+Les perturbations sont souvent très petites et également simples à calculer.
+
+Dans notre cas, l'idée générale d'utiliser cette méthode d'approximation est d'obtenir une formule avec des valeurs de $c$ petites.
+
+Ça tombe bien, c'est exactement ce qu'il se passe quand on applique la technique 
+de la théorie de la perturbation à la formule du fractal de Mandelbrot !
+
+Il existe d'ailleurs plusieurs façons d'obtenir une approximation de la formule avec cette méthode.
+Dans tous les cas, l'idée est que la valeur $c$ utilisée dans la formule se transforme en une valeur 
+qui est égale au $\delta c$ entre la valeur une valeur de référence et le point que l'on cherche à calculer, appeler une perturbation.
+Si notre référence est proche du point calculé, ou perturbation, alors cette valeur $\delta c$ sera petite.
+
+Je passe les détails mathématiques, ou de la technique pour obtenir cette formule.
+Car ce n'est pas l'objet de ce document et en dehors de ma comprehension très honnêtement.
+
+Vous trouverez un détail de la formule dans [cet article](https://fractalforums.org/index.php?topic=4360.0.).
+
+De même qu'un cours sur la théorie de la perturbation appliquée en général [ici](https://www.youtube.com/watch?v=_OZXEb8FxZQ&list=PLGnwB2JrAgt6ciUkQk1rAGcWKpHTrxWQr).
+
+Avec cette technique, seul le point de référence doit être calculé précisément. 
+On peut donc envisager de le faire avec une bibliothèque de calcul en précision arbitraire sur le CPU.
+
 #### Précision arbitraire
+
+Javascript ne dispose pas nativement de nombres en précision arbitraire avec des flottants.
+Il existe cependant des bibliothèques qui permettent de faire des calculs en précision arbitraire.
+Cependant, ce genre de calcul est très couteux.
+
+Afin de gagner en performance, il pourrait cette fois-ci être utile d'utiliser un langage de bas niveau.
 
 #### Rust + WebAssembly
 
+Une idée peut être d'utiliser un langage de bas niveau performant tel que Rust et de le compiler en WebAssembly.
+
+C'est donc exactement ce que l'on va faire !
+
+Rust supporte nativement la cible de compilation WebAssembly 
+et dispose d'un écosystème complet pour faire du WebAssembly et de l'interfacer avec du Javascript et même du TypeScript.
+
+Voici un exemple de code source Rust qui calcule la valeur de $z$ pour un point $c$ donné avec une précision arbitraire.
+
+```rust
+#[cfg(target_arch = "wasm32")]
+use wasm_bindgen::prelude::*;
+use malachite_float::Float;
+use malachite_base::num::arithmetic::traits::Abs;
+
+#[wasm_bindgen]
+pub struct Mandelbrot {
+    reference_cx: Float,
+    reference_cy: Float,
+    result: Box<Vec<MandelbrotStep>>, // Vecteur pré-alloué
+}
+
+#[wasm_bindgen]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MandelbrotStep {
+    pub zx: f32,
+    pub zy: f32,
+}
+
+#[wasm_bindgen]
+pub struct OrbitBufferInfo {
+    pub ptr: usize,
+    pub offset: usize,
+    pub count: usize,
+}
+
+pub fn compute_reference_orbit_ptr(&mut self, max_iter: u32) -> OrbitBufferInfo {
+    let offset = self.result.len() ;
+    let mut zx = Float::from_primitive_float_prec(0.0, 128).0;
+    let mut zy = Float::from_primitive_float_prec(0.0, 128).0;
+    let one = Float::from_primitive_float_prec(1.0, 128).0;
+    let max_iteration: usize = 10_000.min(max_iter as usize);
+    while self.iter < max_iteration { 
+        if zx.clone() * zx.clone() + zy.clone() * zy.clone() > Float::from(1000000000) {
+            self.result.push(MandelbrotStep {
+                zx: 0.0,
+                zy: 0.0,
+                dx: 0.0,
+                dy: 0.0,
+            });
+        } else {
+            self.result.push(MandelbrotStep {
+                zx: zx.clone().to_string().parse::<f32>().unwrap(),
+                zy: zy.clone().to_string().parse::<f32>().unwrap(),
+            });
+            let zx_new = zx.clone() * zx.clone() - zy.clone() * zy.clone() + self.reference_cx.clone();
+            let zy_new = two.clone() * zx.clone() * zy.clone() + self.reference_cy.clone();
+            zx = zx_new;
+            zy = zy_new;
+        }
+        self.iter += 1;
+    }
+    let ptr = self.result.as_ptr() as usize;
+    let count = self.last_iter;
+    OrbitBufferInfo {
+        ptr,
+        offset,
+        count,
+    }
+}
+```
+
+On utilise ici la bibliothèque `malachite-float` qui permet de faire des calculs en précision arbitraire avec des flottants.
+
+On utilise également `wasm-bindgen` qui permet de générer des bindings entre Rust et Javascript avec le typage TypeScript.
+
+Pour compiler ce code en WebAssembly, on utilise `wasm-pack` qui est un outil de la communauté Rust pour faire du WebAssembly.
+
+Voici la commande pour compiler le code :
+
+```bash
+# Installe wasm-pack
+cargo install wasm-pack
+# Compile le code en WebAssembly avec les bindings TypeScript
+wasm-pack build
+```
+
+#### Bilan de la technique
+
+Avec cette technique seule, on peut approcher des valeurs de zoom proche de valeur possible avec un flottant en simple précision. 
+C'est-à-dire environ $10^{-38}$. 
+Puisque ce n'est plus la précision qui limite le calcul, mais la taille de l'exposant.
+
+C'est déjà bien plus que ce que l'on pourrait faire même avec des flottants en double précision, 
+puisque la précision est conservée jusqu'à environ $10^{-15}$.
+
+#### Piste d'amélioration
+
+Il existe plusieurs pistes d'amélioration pour aller encore plus loin.
+
+##### Combinaison avec les floatExp
+
+Mais on peut faire encore mieux en combinant cette technique avec celle des floatExp.
+Avec ces derniers, on peut espérer atteindre des valeurs de zoom de l'ordre de $10^{-1300}$.
+
+La pénalité de performance est d'environ un facteur 10 par rapport à un calcul en simple précision, ce qui est très raisonnable.
+
+Cette fonctionnalité peut être activée à la volée en fonction du niveau de zoom.
+
+Par ailleurs, il faut noter qu'à de tels niveaux de zoom, c'est vraiment le nombre d'itérations qui devient le facteur limitant.
+
+##### Amélioration de la performance grâce à d'autres techniques d'approximation
+
+Il existe une autre technique d'approximation complémentaire qui permettent de gagner en performance.
+
+Cette méthode qui permet de calculer $\mathcal{O}(\log{n})$ itérations au lieu de $\mathcal{O}(n)$ dans la plupart des cas.
+
+Cette technique se base également sur les itérations pré-calculées du point de référence. 
+Sauf que plutot que ce calculer les valeurs de $z$, on calcule les coefficients d'une approximation linéaire bivariée
+qui est une approximation linéaire de la fonction $f(z) = z^2 + c$ autour du point de référence.
+
+Voir [cet article](https://philthompson.me/2023/Faster-Mandelbrot-Set-Rendering-with-BLA-Bivariate-Linear-Approximation.html).
+
 ### Astuce de rendu, vers le temps réel
+
+Jusqu'ici, on a vu comment calculer la fractale de Mandelbrot avec une bonne précision et de bonnes performances.
+Mais cela ne s'applique que pour une image fixe.
+Pour faire du temps réel, faire un rendu à au moins dix images par seconde, pour une expérience convenable.
 
 #### Ne recalculer que ce qui a changé
 
+Une première astuce est de ne recalculer que ce qui a changé entre deux images.
+Nous verrons que c'est plus ou moins facile selon le type de transformation appliquée.
+
 ##### Le cas de la translation
+
+C'est le cas le plus simple.
+On peut simplement décaler l'image précédente et ne recalculer que les nouvelles lignes ou colonnes de pixels qui apparaissent.
+Le plus dur est finalement de créer les pipelines et les passes de rendu qui permettent de faire cela efficacement.
 
 ##### Le cas de la rotation
 
+Pour ce cas de la rotation, c'est un peu plus compliqué.
+On ne peut pas simplement faire tourner l'image précédente et n'ajouter que les pixels manquants,
+car des artéfacts apparaissent à cause des erreurs de précision cumulées des une dizaine de transformations.
+
+La technique qui évite ces erreurs est en faite très simple. 
+Il suffit de calculer une image plus grande que l'écran.
+Suffisamment grande pour que l'on puisse faire une rotation de l'image sans que des pixels manquent à l'appel.
+On peut alors ne calculer que les pixels qui apparaissent sur les bords de l'image. 
+L'astuce, c'est de toujours calculer les pixels à partir du même angle et de faire la rotation de l'image ensuite.
+Ainsi, on évite les erreurs de précision cumulées et on évite également de calculer 
+plus que nécessaire dans le cas où il n'y a pas de rotation.
+
 ##### Le cas du zoom
+
+Dans le cas du zoom, l'astuce est d'avoir deux images.
+La première image prend tout l'écran.
+La seconde image est calculée au centre de l'écran sur la moitié de la taille de l'écran,
+mais avec la même résolution que la première.
+Ainsi, quand on zoom, on peut simplement afficher progressivement la seconde image.
+Quand la seconde image a complètement remplacé la première, on inverse les rôles des deux images.
+
+On peut même optimiser encore plus en ne recalculant que les pixels qui n'ont pas été calculés dans la seconde image. 
+Soit 75% des pixels.
 
 #### Le rendu progressif
 
+Une autre astuce pour améliorer la performance est de faire un rendu progressif.
+L'idée est de privilégier la fluidité de l'animation au détriment de la qualité de l'image, le temps de finir le calcul.
+Cela fonctionne très bien dans la mesure où notre œil n'a pas le temps de percevoir 
+les détails fins de l'image lorsque celle-ci est en mouvement.
+
 #### Améliorer la qualité du rendu avec l'anti-aliasing adaptatif
+
+L'anti-aliasing adaptatif est une technique qui permet d'améliorer la qualité du rendu en réduisant les effets de crénelage.
+L'idée est de détecter les zones de l'image où il y a des transitions brusques d'itérations,
+et de faire un sur-échantillonnage de ces zones pour lisser les transitions.
 
 ## Techniques de rendu avancées
 
 ### Ajout de la dérivée
 
+On peut calculer la dérivée de la fonction $f(z) = z^2 + c$ en même temps que l'on calcule les itérations.
+Cela permet d'obtenir des informations supplémentaires sur la vitesse de divergence de la fonction.
+On peut utiliser cette information pour faire un rendu plus intéressant.
+
 #### Blinn-Phong
 
-#### Gouraud
+Sans couleur
+
+<MandelbrotController
+:scale="'1.1'"
+:angle="'0.0'"
+:cx="'-0.75'"
+:cy="'0.0'"
+:activatePalette="false"
+:activateSkybox="false"
+:activateTessellation="false"
+:activateWebcam="false"
+:activateSmoothness="true"
+:activateShading="true"
+/>
+
+Avec coloration
+
+<MandelbrotController
+:scale="'1.1'"
+:angle="'0.0'"
+:cx="'-0.75'"
+:cy="'0.0'"
+:activatePalette="true"
+:activateSkybox="false"
+:activateTessellation="false"
+:activateWebcam="false"
+:activateSmoothness="true"
+:activateShading="true"
+/>
+
 
 #### Projection de texture
+
+<MandelbrotController
+:scale="'1.1'"
+:angle="'0.0'"
+:cx="'-0.75'"
+:cy="'0.0'"
+:activatePalette="false"
+:activateSkybox="true"
+:activateTessellation="false"
+:activateWebcam="false"
+:activateSmoothness="true"
+:activateShading="true"
+/>
 
 ### Tessellation
 
 #### Avec la valeur de l'itération
 
-#### Avec la valeur de $z$
+<MandelbrotController
+:scale="'1.1'"
+:angle="'0.0'"
+:cx="'-0.75'"
+:cy="'0.0'"
+:activatePalette="false"
+:activateSkybox="false"
+:activateTessellation="true"
+:activateWebcam="false"
+:activateSmoothness="true"
+:activateShading="false"
+/>
 
 ### Un mot sur les couleurs
 
@@ -1016,27 +1281,3 @@ C'est à ce moment qu'on peut faire intervenir la théorie de la perturbation.
 
 [//]: # (/>)
 
-## TODO 
-
-Expliquer ce que sont les fractales.
-
-Présentation de la formule
-
-Démonstration intéractive.
-
-Expliquer que c'est facile à coder.
-
-Montrer les limitations : calcul intensif et limite de précision.
-
-Objectif : faire tourner en temps réél et pourquoi pas sur un navigateur
-
-JS lent. Faire du natif ? Multithread, c'est lent aussi. Calcul sur GPU, limite de précision.
-
-Expliquer le modèle de parallélisation des GPU. Pourquoi c'est plus rapide, quels sont les compromis (modèle de mémoire, etc.)
-
-Comment obtenir le meilleur des deux mondes ?
-
-Expliquer d'où vient le problème de précision.
-
-Expliquer comment fonctionne les flottant et ce qui permettrait de conserver de la précision.
-C'est-à-dire faire des calculs avec des nombres de même ordre de grandeur.
