@@ -86,10 +86,6 @@ function draw() {
     ctx.beginPath();
     // Arc centré sur (0,0), rayon r, de 0 à theta (sens horaire)
     const center = zeroPx;
-    const arcRadius = Math.min(
-        complexToPixel(r, 0).x - center.x,
-        complexToPixel(0, r).y - center.y
-    );
     let endAngle = theta;
     if (endAngle < 0) endAngle += 2 * Math.PI;
     ctx.arc(center.x, center.y, 30,  -endAngle, 0, false);

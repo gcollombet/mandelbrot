@@ -1,2 +1,7 @@
-[build]
-target = "wasm32-unknown-unknown"
+# Le projet définissait une cible par défaut (wasm32-unknown-unknown) dans ce fichier,
+# ce qui forçait `cargo test` à exécuter un binaire wasm (non exécutable sur la machine hôte).
+# Commenter la directive pour permettre les builds natifs. Pour compiler pour wasm, lancer
+# explicitement `cargo build --target wasm32-unknown-unknown` ou décommenter la ligne ci-dessous.
+
+# [build]
+# target = "wasm32-unknown-unknown"

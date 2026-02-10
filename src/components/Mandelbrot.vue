@@ -1,18 +1,54 @@
 <script setup lang="ts">
-import { onMounted, ref, onUnmounted, nextTick, defineProps, defineExpose, watch } from 'vue';
-import { Engine } from '../Engine.ts';
-import { MandelbrotNavigator } from 'mandelbrot';
-import type { MandelbrotParams } from '../Mandelbrot.ts';
+import {defineExpose, defineProps, nextTick, onMounted, onUnmounted, ref} from 'vue';
+import {Engine} from '../Engine.ts';
+import {MandelbrotNavigator} from 'mandelbrot';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
+let canvas: HTMLCanvasElement | null = null;
+let engine: Engine | null = null;
+let navigator: MandelbrotNavigator | null = null;
 
-const props = defineProps<{
-  scale?: string,
-  angle?: string,
-  cx?: string,
-  cy?: string,
-  mu?: string | number,
+const cx = defineModel<string>('cx', {
+  default: '-1.5',
+/*  set: (val) => {
+    if (navigator) {
+      navigator.origin(val, cy.value ?? '0.0');
+    }
+  }*/
+})
+const cy = defineModel<string>('cy', {
+  default: '0.0',
+/*  set: (val) => {
+    if (navigator) {
+      navigator.origin(cx.value ?? '0.0', val);
+    }
+  }*/
+})
+const scale = defineModel<string>('scale', {
+  default: '2.5',
+/*  set: (val) => {
+    if (navigator) {
+      navigator.scale(val);
+    }
+  }*/
+})
+const angle = defineModel<number>('angle', {
+  default: 0,
+/*  set: (val) => {
+    if (navigator) {
+      navigator.angle(val);
+    }
+  }*/
+})
+
+const props = withDefaults(defineProps<{
+  mu?: number,
+  epsilon?: number,
   colorStops?: Array<{ color: string, position: number }>,
+  palettePeriod?: number,
+  antialiasLevel?: number,
+  tessellationLevel?: number,
+  shadingLevel?: number,
   activatePalette?: boolean,
   activateSkybox?: boolean,
   activateTessellation?: boolean,
@@ -20,64 +56,63 @@ const props = defineProps<{
   activateShading?: boolean,
   activateZebra?: boolean,
   activateSmoothness?: boolean,
-}>();
+}>(),
+    {
+       mu: 1000000.0,
+       epsilon: 0.00001,
+       colorStops: () => [
+         { color: '#0f0130', position: 0.0 },
+         { color: '#206bcb', position: 0.16 },
+         { color: '#ffceb6', position: 0.26 },
+         { color: '#edffff', position: 0.42 },
+         { color: '#ffaa00', position: 0.6425 },
+         { color: '#300200', position: 0.8575 },
+         { color: '#100000', position: 1.0 },
+       ],
+       palettePeriod: 1,
+       antialiasLevel: 1,
+       tessellationLevel: 2,
+       shadingLevel: 1,
+       activatePalette: true,
+       activateSkybox: false,
+       activateTessellation: false,
+       activateWebcam: false,
+       activateShading: true,
+       activateZebra: false,
+       activateSmoothness: true,
+    }
+);
 
-const antialiasLevel = 1;
-const palettePeriod = 1;
-
-let canvas: HTMLCanvasElement | null = null;
-let engine: Engine | null = null;
-let navigator: MandelbrotNavigator | null = null;
-
-const initialParams: MandelbrotParams = {
-  cx: props.cx ?? '-1.5',
-  cy: props.cy ?? '0.0',
-  mu: typeof props.mu === 'string' ? parseFloat(props.mu) : (props.mu ?? 10000.0 as number),
-  scale: props.scale ?? '2.5',
-  angle: props.angle ?? '0.0',
-  maxIterations: 1000,
-  antialiasLevel,
-  palettePeriod,
-  shadingLevel: 1,
-  tessellationLevel: 2,
-  epsilon: 0.00001,
-  colorStops: props.colorStops ?? [],
-  activateShading: props.activateShading ?? true,
-  activateTessellation: props.activateTessellation ?? true,
-  activateWebcam: props.activateWebcam ?? false,
-  activatePalette: props.activatePalette ?? false,
-  activateSkybox: props.activateSkybox ?? false,
-  activateSmoothness: props.activateSmoothness ?? true,
-  activateZebra: props.activateZebra ?? false,
-};
-
-const mandelbrotParams = ref<MandelbrotParams>(initialParams);
 
 async function draw() {
   if (!engine || !navigator) return;
-  const epsilon = mandelbrotParams.value.epsilon;
-  const [dx, dy, scale, angle] = navigator.step();
+  const [dx, dy] = navigator.step();
   const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
-  const mu = mandelbrotParams.value.mu;
-  mandelbrotParams.value.cx = cx_string;
-  mandelbrotParams.value.cy = cy_string;
-  mandelbrotParams.value.scale = scale_string;
-  mandelbrotParams.value.angle = angle_string;
-  const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / scale)), 1000000);
-  await engine.update({ cx: dx, cy: dy, mu, scale, angle, maxIterations, epsilon },
+  cx.value = cx_string;
+  cy.value = cy_string;
+  scale.value = scale_string;
+  angle.value = parseFloat(angle_string);
+  const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / parseFloat(scale_string)), 1000000));
+  await engine.update({
+        cx: parseFloat(dx),
+        cy: parseFloat(dy),
+        mu: props.mu,
+        scale: parseFloat(scale_string),
+        angle: parseFloat(angle_string),
+        maxIterations, epsilon: props.epsilon },
     {
-      shadingLevel: mandelbrotParams.value.shadingLevel,
-      tessellationLevel: mandelbrotParams.value.tessellationLevel,
-      antialiasLevel: mandelbrotParams.value.antialiasLevel,
-      palettePeriod: mandelbrotParams.value.palettePeriod,
-      colorStops: mandelbrotParams.value.colorStops,
-      activateShading: mandelbrotParams.value.activateShading,
-      activateTessellation: mandelbrotParams.value.activateTessellation,
-      activateWebcam: mandelbrotParams.value.activateWebcam,
-      activatePalette: mandelbrotParams.value.activatePalette,
-      activateSkybox: mandelbrotParams.value.activateSkybox,
-      activateSmoothness: mandelbrotParams.value.activateSmoothness,
-      activateZebra: mandelbrotParams.value.activateZebra,
+      shadingLevel: props.shadingLevel,
+      tessellationLevel: props.tessellationLevel,
+      antialiasLevel: props.antialiasLevel,
+      palettePeriod: props.palettePeriod,
+      colorStops: props.colorStops,
+      activateShading: props.activateShading,
+      activateTessellation: props.activateTessellation,
+      activateWebcam: props.activateWebcam,
+      activatePalette: props.activatePalette,
+      activateSkybox: props.activateSkybox,
+      activateSmoothness: props.activateSmoothness,
+      activateZebra: props.activateZebra,
     }
   );
   await engine.render();
@@ -86,27 +121,25 @@ async function draw() {
 async function initWebGPU() {
   if (!canvasRef.value) return;
   canvas = canvasRef.value;
-
   navigator = new MandelbrotNavigator(
-    parseFloat(props.cx ?? '-0.75'),
-    parseFloat(props.cy ?? '0.0'),
-    1000000.0,
-    parseFloat(props.scale ?? '1.0'),
-    parseFloat(props.angle ?? '0.0')
+      cx.value,
+      cy.value,
+      scale.value,
+      angle.value
   );
   engine = new Engine(canvas, {
-    activatePalette: props.activatePalette ?? true,
-    activateSkybox: props.activateSkybox ?? true,
-    shadingLevel: mandelbrotParams.value.shadingLevel,
-    tessellationLevel: mandelbrotParams.value.tessellationLevel,
-    antialiasLevel: mandelbrotParams.value.antialiasLevel,
-    palettePeriod: mandelbrotParams.value.palettePeriod,
-    colorStops: [],
-    activateShading: props.activateShading ?? mandelbrotParams.value.activateShading,
-    activateTessellation: props.activateTessellation ?? mandelbrotParams.value.activateTessellation,
-    activateWebcam: props.activateWebcam ?? mandelbrotParams.value.activateWebcam,
-    activateSmoothness: props.activateSmoothness ?? mandelbrotParams.value.activateSmoothness,
-    activateZebra: props.activateZebra ?? mandelbrotParams.value.activateZebra,
+    activatePalette: props.activatePalette,
+    activateSkybox: props.activateSkybox,
+    shadingLevel: props.shadingLevel,
+    tessellationLevel: props.tessellationLevel,
+    antialiasLevel: props.antialiasLevel,
+    palettePeriod: props.palettePeriod,
+    colorStops: props.colorStops,
+    activateShading: props.activateShading,
+    activateTessellation: props.activateTessellation,
+    activateWebcam: props.activateWebcam,
+    activateSmoothness: props.activateSmoothness,
+    activateZebra: props.activateZebra,
   });
   await engine.initialize(navigator);
 }
@@ -119,30 +152,6 @@ function handleResize() {
   engine.resize();
   draw();
 }
-
-// Watch sur cx, cy, scale, angle pour déplacer l'origine, changer l'angle et l'échelle, puis redessiner
-watch([
-  () => props.cx,
-  () => props.cy,
-  () => props.scale,
-  () => props.angle
-], async ([newCx, newCy, newScale, newAngle]) => {
-  if (navigator) {
-    if (typeof newScale !== 'undefined') {
-      navigator.scale(Number(newScale));
-    }
-    if (typeof newCx !== 'undefined'
-        && typeof newCy !== 'undefined') {
-      navigator.origin(Number(newCx), Number(newCy));
-    }
-    if (typeof newAngle !== 'undefined') {
-      navigator.angle(Number(newAngle));
-    }
-
-    await draw();
-    await draw();
-  }
-});
 
 onMounted(async () => {
   await initWebGPU();

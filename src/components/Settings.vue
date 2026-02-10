@@ -1,12 +1,12 @@
 <script setup lang="ts">
-import { defineProps, computed, ref, onMounted, defineEmits } from 'vue';
-import type { MandelbrotParams } from "../Mandelbrot.ts";
+import {computed, defineEmits, defineProps, onMounted, ref} from 'vue';
+import type {MandelbrotParams} from "../Mandelbrot.ts";
 import PaletteEditor from './PaletteEditor.vue';
 
 const props = defineProps<{ modelValue: MandelbrotParams }>();
 const emit = defineEmits(['update:ModelValue']);
 
-const angleDeg = computed(() => (Number.parseFloat(props.modelValue.angle)  * 180 / Math.PI).toFixed(2));
+const angleDeg = computed(() => (props.modelValue.angle  * 180 / Math.PI).toFixed(2));
 const scaleSci = computed(() => props.modelValue.scale);
 const cxSci = computed(() => props.modelValue.cx);
 const cySci = computed(() => props.modelValue.cy);
@@ -64,6 +64,7 @@ const epsilonSlider = computed({
 
 onMounted(() => {
   loadPresets();
+  activeTab.value = 'performance'; // Toujours sélectionner l'onglet navigation par défaut
 });
 
 const activeTab = ref('navigation');
@@ -152,7 +153,7 @@ const activeTab = ref('navigation');
         <span class="math-display">{{ props.modelValue.palettePeriod }}</span>
       </div>
       <div class="field">
-        <label class="label">Tesselation</label>
+        <label class="label">Tessellation</label>
         <div class="control">
           <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="props.modelValue.tessellationLevel" />
         </div>
@@ -224,7 +225,7 @@ const activeTab = ref('navigation');
 
 <style scoped>
 .bulma-settings-block {
-  background: rgba(255,255,255,0.05);
+  background: rgba(255,255,255,0.55);
   backdrop-filter: blur(8px) contrast(110%);
   -webkit-backdrop-filter: blur(8px);
   box-shadow: 0 2px 8px rgba(0,0,0,0.08);

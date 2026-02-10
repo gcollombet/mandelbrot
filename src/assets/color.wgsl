@@ -117,13 +117,16 @@ return normal;
 }
 
 
-fn palette(v: f32, len: f32, d: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
+fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
 
+   // the vec2 from than angle zd.x
+    let d = vec2<f32>(cos(zd.x), sin(zd.x));
+    let z = vec2<f32>(cos(zd.y), sin(zd.y));
   // Calcul de la distance au centre de l'écran (coordonnées normalisées 0..1)
   let center = vec2<f32>(0.5, 0.5);
   let dist = distance(vec2<f32>(dx, dy), center);
   let deep = sqrt(v) * 2.0;
-  // Tesselation avec tileTex basée sur v et la distance au centre
+  // Tessellation avec tileTex basée sur v et la distance au centre
   let tessColor =  tile_tessellation(tileTex, deep + dx, deep + dy, parameters.tessellationLevel );
   let webCamColor = tile_tessellation(
     webcamTex,
@@ -214,7 +217,6 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     }
     let v = nu / f32(256.0);
     let color = palette(v, data.y, vec2<f32>(data.z, data.w), uv.x, uv.y);
-    //let color = paletteHeight(nu, uv);
     return vec4<f32>(color, 1.0);
   }
 

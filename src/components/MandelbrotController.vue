@@ -1,15 +1,21 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, nextTick, ref, defineProps } from 'vue';
+import {defineProps, nextTick, onMounted, onUnmounted, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
+
+const cx = defineModel<string>('cx')
+const cy = defineModel<string>('cy')
+const scale = defineModel<string>('scale')
+const angle = defineModel<number>('angle')
 
 // Props pass-through pour initialiser Mandelbrot
 const props = defineProps<{
-  scale?: string,
-  angle?: string,
-  cx?: string,
-  cy?: string,
-  mu?: string | number,
+  mu?: number,
+  epsilon?: number,
   colorStops?: Array<{ color: string, position: number }>,
+  antialiasLevel?: number,
+  tessellationLevel?: number,
+  shadingLevel?: number,
+  palettePeriod?: number,
   activatePalette?: boolean,
   activateSkybox?: boolean,
   activateTessellation?: boolean,
@@ -230,7 +236,7 @@ onMounted(async () => {
 
   // boucles
   updateLoop();
-  animate();
+  await animate();
 });
 
 onUnmounted(() => {
@@ -259,12 +265,16 @@ onUnmounted(() => {
 <template>
   <Mandelbrot
     ref="mandelbrotRef"
-    :externalControl="true"
-    :scale="props.scale"
-    :angle="props.angle"
-    :cx="props.cx"
-    :cy="props.cy"
+    v-model:scale="scale"
+    v-model:angle="angle"
+    v-model:cx="cx"
+    v-model:cy="cy"
     :mu="props.mu"
+    :epsilon="props.epsilon"
+    :antialiasLevel="props.antialiasLevel"
+    :shadingLevel="props.shadingLevel"
+    :palettePeriod="props.palettePeriod"
+    :tessellationLevel="props.tessellationLevel"
     :colorStops="props.colorStops"
     :activatePalette="props.activatePalette"
     :activateSkybox="props.activateSkybox"

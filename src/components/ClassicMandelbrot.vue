@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { ref } from 'vue';
+import {type Ref, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
 
 interface MandelbrotPoint {
@@ -57,7 +57,7 @@ const points: MandelbrotPoint[] = [
 
 const selectedIndex = ref(0);
 const selectedPoint = ref(points[0]);
-const mandelbrotRef = ref(null);
+const mandelbrotRef: Ref<null | typeof Mandelbrot> = ref(null);
 
 function onSelectChange(e: Event) {
   const idx = Number((e.target as HTMLSelectElement).value);
@@ -77,7 +77,7 @@ function onSelectChange(e: Event) {
     <Mandelbrot
       ref="mandelbrotRef"
       :scale="selectedPoint.scale"
-      :angle="selectedPoint.angle"
+      :angle="parseFloat(selectedPoint.angle)"
       :cx="selectedPoint.cx"
       :cy="selectedPoint.cy"
       :activatePalette="true"

@@ -10,7 +10,7 @@ export interface MandelbrotParams {
     cy: string;
     mu: number;
     epsilon: number;
-    angle: string;
+    angle: number;
     maxIterations: number,
     antialiasLevel: number,
     palettePeriod: number,

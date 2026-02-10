@@ -1,10 +1,10 @@
 <script setup lang="ts">
-import { ref, onMounted, watch, nextTick } from 'vue';
+import {nextTick, onMounted, ref, watch} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
 
 const props = defineProps<{
   scale?: string;
-  angle?: string;
+  angle?: number;
   cx?: string;
   cy?: string;
   showMandelbrot?: boolean;
@@ -25,7 +25,7 @@ const orbit = ref<{ re: number, im: number }[]>([]);
 
 function pixelToComplex(x: number, y: number) {
   const s = parseFloat(props.scale ?? '1');
-  const a = parseFloat(props.angle ?? '0.0');
+  const a = props.angle ?? 0.0;
   const centerRe = parseFloat(props.cx ?? '0.0');
   const centerIm = parseFloat(props.cy ?? '0.0');
   const aspect = width.value / Math.max(1, height.value);
@@ -47,7 +47,7 @@ function pixelToComplex(x: number, y: number) {
 
 function complexToPixel(re: number, im: number) {
   const s = parseFloat(props.scale ?? '1');
-  const a = parseFloat(props.angle ?? '0.0');
+  const a = props.angle ?? 0.0;
   const centerRe = parseFloat(props.cx ?? '0.0');
   const centerIm = parseFloat(props.cy ?? '0.0');
   const aspect = width.value / Math.max(1, height.value);
@@ -245,9 +245,11 @@ watch(() => [props.scale, props.angle, props.cx, props.cy], () => {
     <Mandelbrot
       v-if="props.showMandelbrot"
       :scale="props.scale ?? '1'"
-      :angle="props.angle ?? '0.0'"
+      :angle="props.angle ?? 0.0"
       :cx="props.cx ?? '0.0'"
       :cy="props.cy ?? '0.0'"
+      :activateSmoothness="false"
+      :palettePeriod="1"
       :activatePalette="props.showPalette"
       :activateSkybox="false"
       :activateTessellation="false"

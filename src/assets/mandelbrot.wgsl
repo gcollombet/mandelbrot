@@ -157,12 +157,15 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
             let log_zn = log(dz.x * dz.x + dz.y * dz.y) / 2.0;
             var nu = log(log_zn / log(2.0)) / log(2.0);
             i = i + 1 - nu;
-            i = abs(i) % 200;
+            i = abs(i);
 
         }
     }
 //    let normalized_der
-    let normalized_der = normalize(d);
+    //let normalized_der = normalize(d);
+    // angle of der
+    let angle_der = atan2(d.y, d.x);
+    let angle_z = atan2(dz.y, dz.x);
     // length of d
 //    let length_d = 1 / length(d);
     //let distance = 0.5 * log(dot_z) * dot_z / dot(d, d);
@@ -172,7 +175,8 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
    // distance = 0.5 * sqrt(dot_z / dot(d,d)) * log(dot_z);
    	//let distance = 0.5*sqrt(dot(dz,dz)/dot(d,d))*log(dot(dz,dz));
    	let distance = dot(z,z) * 2.0 * log(dot(z,z)) / dot(d,d);
-    return vec4<f32>(i, distance / (mandelbrot.scale * 1000.0), normalized_der.x, normalized_der.y);
+
+    return vec4<f32>(i, distance / (mandelbrot.scale * 1000.0), angle_der, length(dz));
 }
 fn rotate(x: f32, y: f32, angle: f32) -> vec2<f32> {
   let s = sin(angle);

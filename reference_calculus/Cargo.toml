@@ -4,12 +4,16 @@ version = "0.1.0"
 authors = ["Collombet Guillaume <guillaume.collombet@orange.com>"]
 edition = "2018"
 
+[package.metadata.wasm-pack.profile.dev.wasm-bindgen]
+dwarf-debug-info = true
+
 [lib]
 crate-type = ["cdylib", "rlib"]
 
 [features]
 default = ["console_error_panic_hook"]
 console_error_panic_hook = ["dep:console_error_panic_hook"]
+alloc = []
 
 [dependencies]
 wasm-bindgen = "0.2.63"
@@ -25,22 +29,15 @@ console_error_panic_hook = { version = "0.1.6", optional = true }
 # allocator, however.
 #
 # Unfortunately, `wee_alloc` requires nightly Rust when targeting wasm for now.
-wee_alloc = { version = "0.4.5", optional = true }
-wgpu = "26.0.1"
-pollster = "0.4.0"
-bytemuck = "1.23.2"
-web-sys =  { version = "0.3", features = ["Document", "Window", "Element"] }
-wasm-bindgen-futures = "0.4.51"
-console_log = "1.0.0"
 log = "0.4.27"
-anyhow = "1.0.99"
-env_logger = "0.11.8"
-winit = "0.30.12"
 malachite-float = "0.6.1"
-astro-float =  "0.9"
+astro-float =  { version = "0.9"  }
+dashu-float = "0.4.x"
 getrandom = { version = "0.2", features = ["js"] }
 malachite-base = "0.6.1"
+spin = "0.9"
 js-sys = "0.3.78"
+web-sys = { version = "0.3.78", features = ["console"] }
 
 [dev-dependencies]
 wasm-bindgen-test = "0.3.13"
