@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {defineExpose, defineProps, nextTick, onMounted, onUnmounted, ref} from 'vue';
+import {onMounted, onUnmounted, ref} from 'vue';
 import {Engine} from '../Engine.ts';
 import {MandelbrotNavigator} from 'mandelbrot';
 
@@ -92,14 +92,16 @@ async function draw() {
   cy.value = cy_string;
   scale.value = scale_string;
   angle.value = parseFloat(angle_string);
-  const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / parseFloat(scale_string)), 1000000));
+  const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / parseFloat(scale_string)), 1000));
   await engine.update({
         cx: parseFloat(dx),
         cy: parseFloat(dy),
         mu: props.mu,
         scale: parseFloat(scale_string),
         angle: parseFloat(angle_string),
-        maxIterations, epsilon: props.epsilon },
+        maxIterations,
+        epsilon: props.epsilon
+      },
     {
       shadingLevel: props.shadingLevel,
       tessellationLevel: props.tessellationLevel,
@@ -144,20 +146,18 @@ async function initWebGPU() {
   await engine.initialize(navigator);
 }
 
-function handleResize() {
+async function handleResize() {
   if (!canvasRef.value || !engine) return;
   const rect = canvasRef.value.getBoundingClientRect();
   canvasRef.value.width = rect.width;
   canvasRef.value.height = rect.height;
   engine.resize();
-  draw();
+  await draw();
 }
 
 onMounted(async () => {
   await initWebGPU();
-  await nextTick();
-  handleResize();
-  await draw();
+  await handleResize();
 });
 
 onUnmounted(() => {
@@ -176,9 +176,9 @@ defineExpose({
   zoom: (f: number) => navigator?.zoom(f),
   step: () => navigator?.step(),
   getParams: () => navigator?.get_params(),
-  drawOnce: async () => { await draw(); },
-  resize: () => handleResize(),
-  initialize: async () => { await initWebGPU(); },
+  drawOnce: async () => draw(),
+  resize: async () => handleResize(),
+  initialize: async () => initWebGPU(),
 });
 </script>
 

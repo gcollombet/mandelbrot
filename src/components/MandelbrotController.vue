@@ -37,7 +37,7 @@ type MandelbrotExposed = {
   step: () => [number, number, number, number] | undefined,
   getParams: () => [string, string, string, string] | undefined,
   drawOnce: () => Promise<void>,
-  resize: () => void,
+  resize: () => Promise<void>,
   initialize: () => Promise<void>,
 };
 
@@ -203,9 +203,8 @@ async function animate() {
   rafId = requestAnimationFrame(animate);
 }
 
-function handleResize() {
-  mandelbrotRef.value?.resize();
-  mandelbrotRef.value?.drawOnce();
+async function handleResize() {
+  await mandelbrotRef.value?.resize();
 }
 
 onMounted(async () => {

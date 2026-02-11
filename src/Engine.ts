@@ -4,8 +4,8 @@ import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
 import reprojectShader from './assets/reproject.wgsl?raw'
 import {MandelbrotNavigator} from "mandelbrot";
-import { memory as wasmMemory } from 'mandelbrot/mandelbrot_bg.wasm';
-import { WebcamTexture } from './WebcamTexture';
+import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm';
+import {WebcamTexture} from './WebcamTexture';
 import {Palette} from "./Palette.ts";
 import type {ColorStop} from "./ColorStop.ts";
 
@@ -165,7 +165,6 @@ export class Engine {
         }
         this.skyboxTexture = await this._loadTexture('./gold.jpg');
         this.skyboxTextureView = this.skyboxTexture.createView();
-
         let palette = new Palette([
             {position: 0.0, color: '#000764'},
             {position: 0.16, color: '#206bcb'},
@@ -452,7 +451,7 @@ export class Engine {
         scaleFactor = Math.sqrt(scaleFactor) - 1.0;
 
         // Si la palette a changé, on la recalcule
-        if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])) {
+        //if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])) {
             const palette = new Palette(renderOptions.colorStops);
             const paletteImageData = palette.generateTexture();
             this.device.queue.writeTexture(
@@ -462,7 +461,7 @@ export class Engine {
                 [paletteImageData.width, paletteImageData.height]
             );
             this.needRender = true;
-        }
+        //}
 
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,
