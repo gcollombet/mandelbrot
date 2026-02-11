@@ -1,44 +1,24 @@
 <script setup lang="ts">
-import {onMounted, onUnmounted, ref} from 'vue';
+import {onMounted, onUnmounted, ref, toRaw} from 'vue';
 import {Engine} from '../Engine.ts';
 import {MandelbrotNavigator} from 'mandelbrot';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let canvas: HTMLCanvasElement | null = null;
 let engine: Engine | null = null;
-let navigator: MandelbrotNavigator | null = null;
+let navigator: MandelbrotNavigator | undefined;
 
 const cx = defineModel<string>('cx', {
   default: '-1.5',
-/*  set: (val) => {
-    if (navigator) {
-      navigator.origin(val, cy.value ?? '0.0');
-    }
-  }*/
 })
 const cy = defineModel<string>('cy', {
   default: '0.0',
-/*  set: (val) => {
-    if (navigator) {
-      navigator.origin(cx.value ?? '0.0', val);
-    }
-  }*/
 })
 const scale = defineModel<string>('scale', {
   default: '2.5',
-/*  set: (val) => {
-    if (navigator) {
-      navigator.scale(val);
-    }
-  }*/
 })
 const angle = defineModel<number>('angle', {
   default: 0,
-/*  set: (val) => {
-    if (navigator) {
-      navigator.angle(val);
-    }
-  }*/
 })
 
 const props = withDefaults(defineProps<{
@@ -94,8 +74,10 @@ async function draw() {
   angle.value = parseFloat(angle_string);
   const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / parseFloat(scale_string)), 1000));
   await engine.update({
-        cx: parseFloat(dx),
-        cy: parseFloat(dy),
+        cx: cx_string,
+        cy: cy_string,
+        dx: parseFloat(dx),
+        dy: parseFloat(dy),
         mu: props.mu,
         scale: parseFloat(scale_string),
         angle: parseFloat(angle_string),
@@ -107,7 +89,7 @@ async function draw() {
       tessellationLevel: props.tessellationLevel,
       antialiasLevel: props.antialiasLevel,
       palettePeriod: props.palettePeriod,
-      colorStops: props.colorStops,
+      colorStops: toRaw(props.colorStops),
       activateShading: props.activateShading,
       activateTessellation: props.activateTessellation,
       activateWebcam: props.activateWebcam,
@@ -116,8 +98,8 @@ async function draw() {
       activateSmoothness: props.activateSmoothness,
       activateZebra: props.activateZebra,
     }
-  );
-  await engine.render();
+  )
+  return engine.render()
 }
 
 async function initWebGPU() {
@@ -143,7 +125,7 @@ async function initWebGPU() {
     activateSmoothness: props.activateSmoothness,
     activateZebra: props.activateZebra,
   });
-  await engine.initialize(navigator);
+  return engine.initialize(navigator)
 }
 
 async function handleResize() {
@@ -151,13 +133,13 @@ async function handleResize() {
   const rect = canvasRef.value.getBoundingClientRect();
   canvasRef.value.width = rect.width;
   canvasRef.value.height = rect.height;
-  engine.resize();
-  await draw();
+  engine.resize()
+  return await draw()
 }
 
 onMounted(async () => {
   await initWebGPU();
-  await handleResize();
+  return handleResize()
 });
 
 onUnmounted(() => {

@@ -26,8 +26,10 @@ export type RenderOptions = {
 
 export type Mandelbrot = {
     maxIterations: number,
-    cx: number,
-    cy: number,
+    cx: string,
+    cy: string,
+    dx: number,
+    dy: number,
     mu: number,
     scale: number,
     angle: number,
@@ -128,10 +130,11 @@ export class Engine {
             mu: 1000,
             angle: 0,
             scale: 1,
-            cy: 0,
-            cx: 0
+            dy: 0,
+            dx: 0,
+            cx: "0.0",
+            cy: "0.0",
         }
-        this.previousRenderOptions = {...options};
     }
 
     async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
@@ -165,14 +168,7 @@ export class Engine {
         }
         this.skyboxTexture = await this._loadTexture('./gold.jpg');
         this.skyboxTextureView = this.skyboxTexture.createView();
-        let palette = new Palette([
-            {position: 0.0, color: '#000764'},
-            {position: 0.16, color: '#206bcb'},
-            {position: 0.42, color: '#edffff'},
-            {position: 0.6425, color: '#ffaa00'},
-            {position: 0.8575, color: '#000200'},
-            {position: 1.0, color: '#000764'},
-        ]);
+        let palette = new Palette([]);
         const paletteImageData = palette.generateTexture();
         this.paletteTexture = this.device.createTexture({
             size: [paletteImageData.width, paletteImageData.height, 1],
@@ -390,8 +386,13 @@ export class Engine {
         return true;
     }
 
-    areColorStopsEqual(a: Array<{ color: string, position: number }>, b: Array<{ color: string, position: number }>): boolean {
-        if (a.length !== b.length) return false;
+    areColorStopsEqual(
+        a: Array<{ color: string, position: number }>,
+        b: Array<{ color: string, position: number }>
+    ): boolean {
+        if (a.length !== b.length) {
+            return false;
+        }
         for (let i = 0; i < a.length; i++) {
             if (a[i].color !== b[i].color || a[i].position !== b[i].position) {
                 return false;
@@ -432,8 +433,8 @@ export class Engine {
         const aspect = (this.width / Math.max(1, this.height));
 
         const mandelbrotShaderUniformData = new Float32Array([
-            mandelbrot.cx,
-            mandelbrot.cy,
+            mandelbrot.dx,
+            mandelbrot.dy,
             mandelbrot.mu,
             mandelbrot.scale,
             aspect,
@@ -451,7 +452,7 @@ export class Engine {
         scaleFactor = Math.sqrt(scaleFactor) - 1.0;
 
         // Si la palette a changé, on la recalcule
-        //if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])) {
+        if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])) {
             const palette = new Palette(renderOptions.colorStops);
             const paletteImageData = palette.generateTexture();
             this.device.queue.writeTexture(
@@ -461,7 +462,7 @@ export class Engine {
                 [paletteImageData.width, paletteImageData.height]
             );
             this.needRender = true;
-        //}
+        }
 
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,
@@ -506,8 +507,8 @@ export class Engine {
         if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.scale !== mandelbrot.scale) {
             this.clearHistoryNextFrame = true;
         }
-        this.previousMandelbrot = {...mandelbrot}; // conserve current pour utilisation future
-        this.previousRenderOptions = {...renderOptions};
+        this.previousMandelbrot = structuredClone(mandelbrot); // conserve current pour utilisation future
+        this.previousRenderOptions = structuredClone(renderOptions)
     }
 
     private _writeReprojectUniforms() {
@@ -516,8 +517,8 @@ export class Engine {
         const prev = this.prevFrameMandelbrot;
         const curr = this.previousMandelbrot;
         const data = new Float32Array([
-            prev.cx, prev.cy, prev.scale, prev.angle,
-            curr.cx, curr.cy, curr.scale, curr.angle,
+            prev.dx, prev.dy, prev.scale, prev.angle,
+            curr.dx, curr.dy, curr.scale, curr.angle,
             aspect,
             0,
             0,

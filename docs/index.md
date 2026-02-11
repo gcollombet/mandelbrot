@@ -3,8 +3,6 @@ import Mandelbrot from '../src/components/Mandelbrot.vue'
 import ClassicMandelbrot from '../src/components/ClassicMandelbrot.vue'
 import MandelbrotOrbits from '../src/components/MandelbrotOrbits.vue'
 import ComplexDemo from '../src/components/ComplexDemo.vue'
-import MandelbrotController from '../src/components/MandelbrotController.vue'
-import IframeMandelbrotLowPrecision from '../src/components/IframeMandelbrotLowPrecision.vue'
 </script>
 <link rel="stylesheet" href="https://use.typekit.net/fnz7ojs.css">
 # WebAssembly, WebGPU, Rust, fractales et autres trucs cools.

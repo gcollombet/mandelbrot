@@ -95,10 +95,10 @@ const shortcutLabels = computed(() => {
     <!-- Composant MandelbrotController avec tous les paramètres -->
     <MandelbrotController
       style="width: 100%; height: 100%; display: block;"
-      :scale="mandelbrotParams.scale"
-      :angle="mandelbrotParams.angle"
-      :cx="mandelbrotParams.cx"
-      :cy="mandelbrotParams.cy"
+      v-model:scale="mandelbrotParams.scale"
+      v-model:angle="mandelbrotParams.angle"
+      v-model:cx="mandelbrotParams.cx"
+      v-model:cy="mandelbrotParams.cy"
       :mu="mandelbrotParams.mu"
       :shadingLevel="mandelbrotParams.shadingLevel"
       :antialiasLevel="mandelbrotParams.antialiasLevel"

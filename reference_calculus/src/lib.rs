@@ -1,6 +1,6 @@
 use core::convert::TryFrom;
 use core::str::FromStr;
-use dashu_float::ops::{Abs, SquareRoot};
+use dashu_float::ops::Abs;
 use dashu_float::DBig;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
@@ -217,7 +217,6 @@ impl MandelbrotNavigator {
     }
 
     pub fn get_params(&self) -> Vec<String> {
-        // Conversion sûre en utilisant les fonctions utilitaires
         vec![
             self.cx.to_string(),
             self.cy.to_string(),
