@@ -44,16 +44,16 @@ Then open http://localhost:5173 in your browser.
 
 TODO
 
- - make preset loadable (fix bug)
- - deffered orbit computation to webworker in rust part and use promise. then use that promise in the render loop to get the reference orbit when ready
- - make settings persistent in localstorage
- - better navigation panel in settings
- - shortcut for settings
- - make color palettes presets and possibility to save custom palettes
- - better settings that screenshot an image of the current view and a selectable image with label instead of setting name
- - make zoom reuse last image
- - make rotation with bigger image, compute missing pixel always in reference angle and then rotate the image in order to avoid artifacts
- - modify color and render to give all info in uniform
- - use a different texture to store the iteration count
- - use bivariate linear approximation to render
- - use expflo
+1. [x] make preset loadable (fix bug)
+2. [ ] deffered orbit computation to webworker in rust part and use promise. then use that promise in the render loop to get the reference orbit when ready
+3. [x] make settings persistent in localstorage
+4. [ ] better navigation panel in settings
+5. [ ] shortcut for settings
+6. [ ] make color palettes presets and possibility to save custom palettes
+7. [ ] better settings that screenshot an image of the current view and a selectable image with label instead of setting name
+8. [ ] make zoom reuse last image
+9. [ ] make rotation with bigger image, compute missing pixel always in reference angle and then rotate the image in order to avoid artifacts
+10. [ ] modify color and render to give all info in uniform
+11. [ ] use a different texture to store the iteration count
+12. [ ] use bivariate linear approximation to render
+13. [ ] use expfloat

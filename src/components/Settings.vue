@@ -1,15 +1,35 @@
 <script setup lang="ts">
-import {computed, defineEmits, defineProps, onMounted, ref} from 'vue';
+import {computed, onMounted, ref, toRaw} from 'vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
 import PaletteEditor from './PaletteEditor.vue';
 
-const props = defineProps<{ modelValue: MandelbrotParams }>();
-const emit = defineEmits(['update:ModelValue']);
+const model =  defineModel<MandelbrotParams>({
+  default: {
+    angle: 0,
+    cx: "0.0",
+    cy: "0.0",
+    scale: "2.5",
+    mu: 1000000.0,
+    epsilon: 0.00001,
+    colorStops: [],
+    palettePeriod: 1,
+    antialiasLevel: 1,
+    tessellationLevel: 2,
+    shadingLevel: 1,
+    activatePalette: true,
+    activateSkybox: false,
+    activateTessellation: false,
+    activateWebcam: false,
+    activateShading: true,
+    activateZebra: false,
+    activateSmoothness: true,
+  }
+});
 
-const angleDeg = computed(() => (props.modelValue.angle  * 180 / Math.PI).toFixed(2));
-const scaleSci = computed(() => props.modelValue.scale);
-const cxSci = computed(() => props.modelValue.cx);
-const cySci = computed(() => props.modelValue.cy);
+const angleDeg = computed(() => (model.value.angle  * 180 / Math.PI).toFixed(2));
+const scaleSci = computed(() => model.value.scale);
+const cxSci = computed(() => model.value.cx);
+const cySci = computed(() => model.value.cy);
 
 const presetName = ref('');
 const presets = ref<{ name: string, value: MandelbrotParams }[]>([]);
@@ -20,7 +40,7 @@ function savePreset() {
   if (!presetName.value.trim()) return;
   const preset = {
     name: presetName.value.trim(),
-    value: props.modelValue
+    value: model.value
   };
   const idx = presets.value.findIndex(p => p.name === preset.name);
   if (idx >= 0) {
@@ -44,21 +64,21 @@ function loadPresets() {
 function selectPreset(name: string) {
   const preset = presets.value.find(p => p.name === name);
   if (preset) {
-    selectedPreset.value = name;
-    emit('update:ModelValue', preset.value );
+    selectedPreset.value = name
+    model.value =  structuredClone(toRaw(preset.value))
   }
 }
 
 const muSlider = computed({
-  get: () => Math.log10(props.modelValue.mu ?? 1.0),
+  get: () => Math.log10(model.value.mu ?? 1.0),
   set: (val: number) => {
-    props.modelValue.mu = Math.pow(10, val);
+    model.value.mu = Math.pow(10, val);
   }
 });
 const epsilonSlider = computed({
-  get: () => Math.log10(props.modelValue.epsilon ?? 1e-8),
+  get: () => Math.log10(model.value.epsilon ?? 1e-8),
   set: (val: number) => {
-    props.modelValue.epsilon = Math.pow(10, val);
+    model.value.epsilon = Math.pow(10, val);
   }
 });
 
@@ -90,22 +110,22 @@ const activeTab = ref('navigation');
     </div>
     <div v-if="activeTab === 'navigation'">
       <div class="mb-3">
-        <span class="math-display">
+        <span>
           Échelle&nbsp;:
           <span v-html="scaleSci" />
-          <button class="button is-small" style="margin-left:0.7em;" @click="props.modelValue.scale = '2.5'">Réinitialiser</button>
+          <button class="button is-small" style="margin-left:0.7em;" @click="model.scale = '2.5'">Réinitialiser</button>
         </span>
       </div>
       <div class="mb-3">
         <p>
-          <span class="math-display">Cx&nbsp;:<span v-html="cxSci" /></span>
+          <span>Cx&nbsp;:<span v-html="cxSci" /></span>
         </p>
         <p>
-          <span class="math-display">Cy&nbsp;:<span class="math-i">i</span><span v-html="cySci" /></span>
+          <span>Cy&nbsp;:<span class="math-i">i</span><span v-html="cySci" /></span>
         </p>
       </div>
       <div class="mb-3">
-        <span class="math-display">
+        <span>
           Angle&nbsp;:
           <span>{{ angleDeg }}°</span>
         </span>
@@ -113,7 +133,7 @@ const activeTab = ref('navigation');
     </div>
     <div v-else-if="activeTab === 'color'">
       <div class="mb-3">
-        <PaletteEditor :color-stops="props.modelValue.colorStops" />
+        <PaletteEditor :color-stops="model.colorStops" />
       </div>
     </div>
     <div v-else-if="activeTab === 'performance'">
@@ -122,77 +142,56 @@ const activeTab = ref('navigation');
         <div class="control">
           <input class="slider is-fullwidth" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
         </div>
-        <span class="math-display">{{ (props.modelValue.mu ?? 1.0).toFixed(1) }}</span>
+        <span>{{ (model.mu ?? 1.0).toFixed(1) }}</span>
       </div>
       <div class="field">
         <label class="label">Epsilon (log)</label>
         <div class="control">
           <input class="slider is-fullwidth" type="range" min="-12" max="0" step="0.01" v-model="epsilonSlider" />
         </div>
-        <span class="math-display">{{ (props.modelValue.epsilon ?? 1e-8).toExponential(2) }}</span>
+        <span>{{ (model.epsilon ?? 1e-8).toExponential(2) }}</span>
       </div>
-      <!--     <div class="field">
-           <label class="label">Max iterations</label>
-           <div class="control">
-             <input class="slider is-fullwidth" type="range" min="10" max="5000" step="1" v-model.number="props.modelValue.maxIterations" />
-           </div>
-           <span class="math-display">{{ props.modelValue.maxIterations }}</span>
-         </div>
-       <div class="field">
-           <label class="label">Antialias level</label>
-           <div class="control">
-             <input class="slider is-fullwidth" type="range" min="1" max="8" step="1" v-model.number="props.modelValue.antialiasLevel" />
-           </div>
-           <span class="math-display">{{ props.modelValue.antialiasLevel }}</span>
-         </div>-->
       <div class="field">
         <label class="label">Palette period</label>
         <div class="control">
-          <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="props.modelValue.palettePeriod" />
+          <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="model.palettePeriod" />
         </div>
-        <span class="math-display">{{ props.modelValue.palettePeriod }}</span>
+        <span>{{ model.palettePeriod }}</span>
       </div>
       <div class="field">
         <label class="label">Tessellation</label>
         <div class="control">
-          <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="props.modelValue.tessellationLevel" />
+          <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
         </div>
-        <span class="math-display">{{ props.modelValue.tessellationLevel }}</span>
+        <span>{{ model.tessellationLevel }}</span>
       </div>
-<!--      <div class="field">
-        <label class="label">Shading level</label>
-        <div class="control">
-          <input class="slider is-fullwidth" type="range" min="1" max="100" step="1" v-model.number="props.modelValue.shadingLevel" />
-        </div>
-        <span class="math-display">{{ props.modelValue.shadingLevel }}</span>
-      </div>-->
       <div class="field">
         <label class="checkbox">
-          <input type="checkbox" v-model="props.modelValue.activateWebcam" />
+          <input type="checkbox" v-model="model.activateWebcam" />
           &nbsp;Activer la webcam
         </label>
       </div>
       <div class="field">
         <label class="checkbox">
-          <input type="checkbox" v-model="props.modelValue.activateTessellation" />
+          <input type="checkbox" v-model="model.activateTessellation" />
           &nbsp;Tessellation GPU
         </label>
       </div>
       <div class="field">
         <label class="checkbox">
-          <input type="checkbox" v-model="props.modelValue.activateShading" />
+          <input type="checkbox" v-model="model.activateShading" />
           &nbsp;Shading avancé
         </label>
       </div>
       <div class="field">
         <label class="checkbox">
-          <input type="checkbox" v-model="props.modelValue.activateSkybox" />
+          <input type="checkbox" v-model="model.activateSkybox" />
           &nbsp;Skybox
         </label>
       </div>
       <div class="field">
         <label class="checkbox">
-          <input type="checkbox" v-model="props.modelValue.activatePalette" />
+          <input type="checkbox" v-model="model.activatePalette" />
           &nbsp;Palette
         </label>
       </div>

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, onUnmounted, ref, toRaw} from 'vue';
+import {onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import {Engine} from '../Engine.ts';
 import {MandelbrotNavigator} from 'mandelbrot';
 
@@ -7,19 +7,33 @@ const canvasRef = ref<HTMLCanvasElement | null>(null);
 let canvas: HTMLCanvasElement | null = null;
 let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
+let isUpdating = false;
 
-const cx = defineModel<string>('cx', {
-  default: '-1.5',
-})
-const cy = defineModel<string>('cy', {
-  default: '0.0',
-})
-const scale = defineModel<string>('scale', {
-  default: '2.5',
-})
-const angle = defineModel<number>('angle', {
-  default: 0,
-})
+const cx = defineModel<string>('cx', { default: '-1.5' })
+const cy = defineModel<string>('cy', { default: '0.0' })
+const scale = defineModel<string>('scale', { default: '2.5' })
+const angle = defineModel<number>('angle', { default: 0 })
+
+// Applique les paramètres venant du parent au navigator.
+// On ignore quand c'est le navigator qui met à jour les models (voir draw()).
+watch(
+  () => [cx.value, cy.value, scale.value, angle.value] as const,
+  ([nextCx, nextCy, nextScale, nextAngle], [prevCx, prevCy, prevScale, prevAngle]) => {
+    if (isUpdating) return;
+    if (!navigator) return;
+    // Évite les appels inutiles si rien n'a vraiment changé
+    if (nextCx !== prevCx || nextCy !== prevCy) {
+      navigator.origin(nextCx, nextCy);
+    }
+    if (nextScale !== prevScale) {
+      navigator.scale(nextScale);
+    }
+    if (nextAngle !== prevAngle) {
+      navigator.angle(nextAngle);
+    }
+  },
+  { flush: 'sync' }
+);
 
 const props = withDefaults(defineProps<{
   mu?: number,
@@ -66,12 +80,16 @@ const props = withDefaults(defineProps<{
 
 async function draw() {
   if (!engine || !navigator) return;
-  const [dx, dy] = navigator.step();
+  const step = navigator.step();
+  if (!step) return;
+  const [dx, dy] = step;
   const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
+  isUpdating = true;
   cx.value = cx_string;
   cy.value = cy_string;
   scale.value = scale_string;
   angle.value = parseFloat(angle_string);
+  isUpdating = false;
   const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / parseFloat(scale_string)), 1000));
   await engine.update({
         cx: cx_string,
@@ -111,6 +129,11 @@ async function initWebGPU() {
       scale.value,
       angle.value
   );
+  // Si des props ont déjà changé avant l'init, on s'assure que le navigator est aligné.
+  // (Le watch ci-dessus ne pouvait rien faire tant que navigator était undefined.)
+  navigator.origin(cx.value, cy.value);
+  navigator.scale(scale.value);
+  navigator.angle(angle.value);
   engine = new Engine(canvas, {
     activatePalette: props.activatePalette,
     activateSkybox: props.activateSkybox,
