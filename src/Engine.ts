@@ -80,7 +80,7 @@ export class Engine {
     antialiasLevel: number;
     palettePeriod: number;
 
-    previousMandelbrot: Mandelbrot;
+    previousMandelbrot?: Mandelbrot;
     previousRenderOptions?: RenderOptions;
     needRender = true;
     extraFrames: number = 0;
@@ -124,17 +124,6 @@ export class Engine {
         this.antialiasLevel = options.antialiasLevel;
         this.palettePeriod = options.palettePeriod;
         this.time = 0;
-        this.previousMandelbrot = {
-            maxIterations: 1,
-            epsilon: 0,
-            mu: 1000,
-            angle: 0,
-            scale: 1,
-            dy: 0,
-            dx: 0,
-            cx: "0.0",
-            cy: "0.0",
-        }
     }
 
     async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
@@ -377,6 +366,9 @@ export class Engine {
     }
 
     areObjectsEqual(obj1: any, obj2: any): boolean {
+        if(obj1 === undefined || obj2 === undefined) {
+            return false
+        }
         const keys1 = Object.keys(obj1);
         const keys2 = Object.keys(obj2);
         if (keys1.length !== keys2.length) return false;
@@ -412,11 +404,9 @@ export class Engine {
         this.time += delta;
         this.lastUpdateTime = now;
 
-        if(this.previousMandelbrot) {
-            this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot));
-            if (this.needRender) {
-                this.extraFrames = 2;
-            }
+        this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot) && this.areObjectsEqual(renderOptions, this.previousRenderOptions));
+        if (this.needRender) {
+            this.extraFrames = 2;
         }
 
         if(renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam
@@ -445,7 +435,7 @@ export class Engine {
         ]);
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformData.buffer);
 
-        let scaleFactor = this.previousMandelbrot.scale / mandelbrot.scale;
+        let scaleFactor = this.previousMandelbrot?.scale || 1.0 / mandelbrot.scale;
         if(scaleFactor < 1.0) {
             scaleFactor = 1.0 / scaleFactor;
         }

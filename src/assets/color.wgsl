@@ -180,7 +180,7 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
           );
 
         let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb * phong ;
-        color = color / phong * skyboxColor * 0.5 ;
+        color = color / phong * skyboxColor * 1.0 ;
       } else {
         color = color / phong * 2.0 ;
       }
