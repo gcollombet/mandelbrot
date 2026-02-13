@@ -2,6 +2,7 @@ use core::convert::TryFrom;
 use core::str::FromStr;
 use dashu_float::ops::Abs;
 use dashu_float::DBig;
+use js_sys::Math::exp;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -89,8 +90,8 @@ impl MandelbrotNavigator {
     pub fn translate(&mut self, dx: f64, dy: f64) {
         // dx/dy sont des valeurs entre 0 et 1 (écran)
         // On convertit en déplacement complexe selon l'échelle et l'angle
-        let dx_big = DBig::from_str(&(dx * 60.0).to_string()).unwrap();
-        let dy_big = DBig::from_str(&(dy * 60.0).to_string()).unwrap();
+        let dx_big = DBig::from_str(&(dx * 20.0).to_string()).unwrap();
+        let dy_big = DBig::from_str(&(dy * 20.0).to_string()).unwrap();
         let angle = self.angle;
         let cos_a = DBig::from_str(&angle.cos().to_string()).unwrap();
         let sin_a = DBig::from_str(&angle.sin().to_string()).unwrap();
@@ -103,7 +104,7 @@ impl MandelbrotNavigator {
 
     pub fn rotate(&mut self, delta_angle: f64) {
         // On ajoute à la vitesse angulaire
-        self.vangle += delta_angle * 60.0;
+        self.vangle += delta_angle * 20.0;
     }
 
     pub fn translate_direct(&mut self, dx: f64, dy: f64) {
@@ -163,7 +164,7 @@ impl MandelbrotNavigator {
         };
 
         // Animation translation avec vitesse et damping
-        let damping_base = (1.0 - 25.0 * delta_time).max(0.01);
+        let damping_base = exp(-std::f64::consts::LN_2 * delta_time / 0.05 );// // (1.0 - 25.0 * delta_time).max(0.01);
         let damping = DBig::from_str(&damping_base.to_string()).unwrap();
         let delta_time_big = DBig::from_str(&delta_time.to_string()).unwrap();
 
@@ -185,6 +186,14 @@ impl MandelbrotNavigator {
             self.vscale = DBig::try_from(0).unwrap();
         }
 
+        // Clamp vitesse plus gros que scale
+        if(self.vtx.clone().abs() > self.scale) {
+          self.vtx = self.scale.clone() * self.vtx.clone().signum();
+        }
+        if(self.vty.clone().abs() > self.scale) {
+          self.vty = self.scale.clone() * self.vty.clone().signum();
+        }
+
         // Rendre damping dépendant du temps
         self.cx = &self.cx + &self.vtx * &delta_time_big;
         self.cy = &self.cy + &self.vty * &delta_time_big;
@@ -202,7 +211,7 @@ impl MandelbrotNavigator {
         self.angle += self.vangle * delta_time;
         self.vangle *= damping_base;
         if self.vangle.abs() < 0.005 {
-            self.vangle = 0.0;
+          self.vangle = 0.0;
         }
 
         // Calcul du delta par rapport à la référence

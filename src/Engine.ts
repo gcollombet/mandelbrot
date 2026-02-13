@@ -283,9 +283,9 @@ export class Engine {
 
     resize() {
         const dpr = (window.devicePixelRatio || 1)  ;
-        //const parent = this.canvas.parentElement;
-        const widthCSS = this.canvas.clientWidth;
-        const heightCSS = this.canvas.clientHeight;
+        const parent = this.canvas.parentElement;
+        const widthCSS = parent?.clientWidth || 1;
+        const heightCSS = parent?.clientHeight || 1;
         this.width = Math.max(1, Math.round(widthCSS * dpr));
         this.height = Math.max(1, Math.round(heightCSS * dpr));
 
@@ -300,9 +300,10 @@ export class Engine {
             alphaMode: 'opaque'
         })
 
+        let textureSize = Math.max(this.width, this.height) * Math.sqrt(2.0);
         if (this.intermediateTexture) this.intermediateTexture.destroy?.();
         this.intermediateTexture = this.device.createTexture({
-            size: { width: this.width, height: this.height, depthOrArrayLayers: 1 },
+            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
             format: 'rgba16float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC,
             label: 'Engine IntermediateTexture'
@@ -312,7 +313,7 @@ export class Engine {
 
         if (this.reprojectTexture) this.reprojectTexture.destroy?.();
         this.reprojectTexture = this.device.createTexture({
-            size: { width: this.width, height: this.height, depthOrArrayLayers: 1},
+            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1},
             format: 'rgba16float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             label: 'Engine ReprojectTexture',
@@ -486,12 +487,12 @@ export class Engine {
             );
         }
         this.clearHistoryNextFrame = false;
-        // capture frame précédente pour reprojection avant écrasement
+        // Capture frame précédente pour reprojection avant écrasement
         if(!this.prevFrameMandelbrot) {
             this.clearHistoryNextFrame = true;
         }
-        // Détection de changement de zoom
-        if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.scale !== mandelbrot.scale) {
+        // Détection de changement de paramètre nécessitant un reset de l'historique
+        if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.mu !== mandelbrot.mu) {
             this.clearHistoryNextFrame = true;
         }
         this.previousMandelbrot = structuredClone(mandelbrot); // conserve current pour utilisation future
@@ -577,7 +578,13 @@ export class Engine {
         rpassColor.draw(6, 1, 0, 0);
         rpassColor.end();
 
+
+
+        // soumission des commandes
         this.device.queue.submit([commandEncoder.finish()]);
+
+        // attendre la fin du rendu précédent avant de soumettre pour éviter accumulation de frames
+        await this.device.queue.onSubmittedWorkDone();
 
         // marque mise à jour des paramètres frame précédente pour prochaine reprojection
         if (this.previousMandelbrot) {

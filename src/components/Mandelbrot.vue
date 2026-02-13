@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
+import {nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import {Engine} from '../Engine.ts';
 import {MandelbrotNavigator} from 'mandelbrot';
 
@@ -19,7 +19,9 @@ const angle = defineModel<number>('angle', { default: 0 })
 watch(
   () => [cx.value, cy.value, scale.value, angle.value] as const,
   ([nextCx, nextCy, nextScale, nextAngle], [prevCx, prevCy, prevScale, prevAngle]) => {
-    if (isUpdating) return;
+    if (isUpdating) {
+      return;
+    }
     if (!navigator) return;
     // Évite les appels inutiles si rien n'a vraiment changé
     if (nextCx !== prevCx || nextCy !== prevCy) {
@@ -89,6 +91,7 @@ async function draw() {
   cy.value = cy_string;
   scale.value = scale_string;
   angle.value = parseFloat(angle_string);
+  await nextTick();
   isUpdating = false;
   const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / parseFloat(scale_string)), 1000));
   await engine.update({
@@ -157,11 +160,12 @@ async function handleResize() {
   canvasRef.value.width = rect.width;
   canvasRef.value.height = rect.height;
   engine.resize()
-  return await draw()
+  await draw()
 }
 
 onMounted(async () => {
   await initWebGPU();
+  window.addEventListener('resize', handleResize);
   return handleResize()
 });
 

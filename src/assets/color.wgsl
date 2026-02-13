@@ -165,9 +165,9 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
       let lightDir = normalize(vec3<f32>(0.2, 0.3, 0.9 ));
       let viewDir = vec3<f32>(0.0, 0.6, 1.0);
       let diff = max(dot(normal, lightDir), 0.0);
-      let ambient = 1.0;
+      let ambient = 2.0;
       let reflectDir = reflect(-lightDir, normal);
-      let specular = pow(max(dot(viewDir, reflectDir), 0.0), 16.0);
+      let specular = pow(max(dot(viewDir, reflectDir), 0.0), 1.0);
       var phong = ambient + 2.0 * diff + 1.0 * specular;
       if(parameters.activateSkybox == 1.0) {
         // --- Skybox ---
@@ -182,7 +182,7 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
         let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb * phong ;
         color = color / phong * skyboxColor * 1.0 ;
       } else {
-        color = color / phong * 2.0 ;
+        color = color / phong * 3.0 ;
       }
     }
     //return vec3<f32>(0.0,  len , 0.0);

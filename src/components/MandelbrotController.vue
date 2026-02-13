@@ -192,7 +192,7 @@ function updateLoop() {
   if (pressedKeys['KeyD']) mandelbrotRef.value?.translate(moveStep, 0);
   if (pressedKeys['KeyQ']) mandelbrotRef.value?.rotate(angleStep);
   if (pressedKeys['KeyE']) mandelbrotRef.value?.rotate(-angleStep);
-  const zoomFactor = 0.7;
+  const zoomFactor = 0.9;
   if (pressedKeys['KeyR']) mandelbrotRef.value?.zoom(zoomFactor);
   if (pressedKeys['KeyF']) mandelbrotRef.value?.zoom(1 / zoomFactor);
   updateTimer = window.setTimeout(updateLoop, 16);
@@ -201,10 +201,6 @@ function updateLoop() {
 async function animate() {
   await mandelbrotRef.value?.drawOnce();
   rafId = requestAnimationFrame(animate);
-}
-
-async function handleResize() {
-  await mandelbrotRef.value?.resize();
 }
 
 onMounted(async () => {
@@ -230,9 +226,6 @@ onMounted(async () => {
   canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
   canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
 
-  // resize
-  window.addEventListener('resize', handleResize);
-
   // boucles
   updateLoop();
   await animate();
@@ -249,7 +242,6 @@ onUnmounted(() => {
   window.removeEventListener('keyup', handleKeyup);
   window.removeEventListener('mousemove', handleMouseMove);
   window.removeEventListener('mouseup', handleMouseUp);
-  window.removeEventListener('resize', handleResize);
   if (canvas) {
     canvas.removeEventListener('wheel', handleWheel as EventListener);
     canvas.removeEventListener('mousedown', handleMouseDown as EventListener);

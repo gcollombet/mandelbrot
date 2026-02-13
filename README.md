@@ -32,11 +32,11 @@ You can also use keyboard: ZQSD to move, A and E to rotate
 Rust and wasm-pack are required as well as nodejs.
 
 ```bash
+npm install
 cd reference_calculus/pkg
 npm link
 cd ../..
 npm link mandelbrot
-npm install
 npm run dev
 ```
 
