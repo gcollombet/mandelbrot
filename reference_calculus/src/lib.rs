@@ -182,7 +182,7 @@ impl MandelbrotNavigator {
       }
 
         let epsilon = &self.scale / DBig::try_from(1000000).unwrap();
-        if self.vscale.clone().abs() < DBig::from_str("0.00001").unwrap() {
+        if self.vscale.clone().abs() < DBig::from_str("0.01").unwrap() {
             self.vscale = DBig::try_from(0).unwrap();
         }
 
