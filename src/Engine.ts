@@ -299,8 +299,8 @@ export class Engine {
             format: this.format,
             alphaMode: 'opaque'
         })
-
-        let textureSize = Math.max(this.width, this.height) * Math.sqrt(2.0);
+        // taille suffisante pour contenir la diagonale de l'écran après rotation
+        let textureSize = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height) / 2) ;
         if (this.intermediateTexture) this.intermediateTexture.destroy?.();
         this.intermediateTexture = this.device.createTexture({
             size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
@@ -577,8 +577,6 @@ export class Engine {
         if (this.bindGroupColor) rpassColor.setBindGroup(0, this.bindGroupColor);
         rpassColor.draw(6, 1, 0, 0);
         rpassColor.end();
-
-
 
         // soumission des commandes
         this.device.queue.submit([commandEncoder.finish()]);

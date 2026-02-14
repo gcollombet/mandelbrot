@@ -179,8 +179,13 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
             i32(clamp((1.0 - skyboxUV.y) * f32(skyboxSize.y), 0.0, f32(skyboxSize.y - 1)))
           );
 
-        let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb * phong ;
-        color = color / phong * skyboxColor * 1.0 ;
+        //let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb * phong;
+
+        let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb;
+        // utiliser la luminosité de la skybox pour éclairer la surface
+        let lum = 0.2126 * skyboxColor.r + 0.7152 * skyboxColor.g + 0.0722 * skyboxColor.b;
+        phong = phong * lum * 1.0; // Amplifier l'effet de la
+        color = color / phong * 1.0 ;
       } else {
         color = color / phong * 3.0 ;
       }
