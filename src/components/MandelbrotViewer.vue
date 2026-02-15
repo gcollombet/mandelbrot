@@ -8,7 +8,6 @@ import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
 const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
 const mandelbrotEngine = computed(() => mandelbrotCtrlRef.value?.getEngine() ?? null);
-const mandelbrotCanvas = computed(() => mandelbrotCtrlRef.value?.getCanvas() ?? null);
 
 const showSettings = ref(false);
 const shortcutsSuspended = ref(false);
@@ -160,7 +159,7 @@ const shortcutLabels = computed(() => {
       v-if="showSettings"
       style="position: absolute; top: 0; left: 0; z-index: 10; pointer-events: auto; height: 100vh;"
     >
-      <Settings v-model="mandelbrotParams" :engine="mandelbrotEngine" :suspend-shortcuts="val => { shortcutsSuspended.value = val }" />
+      <Settings v-model="mandelbrotParams" :engine="mandelbrotEngine" :suspend-shortcuts="val => { shortcutsSuspended = val }" />
     </div>
 
     <!-- Raccourcis clavier (masqué sur mobile) -->

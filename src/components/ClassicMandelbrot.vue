@@ -74,13 +74,13 @@ async function onSelectChange(e: Event) {
     <select id="mandelbrot-select" @change="onSelectChange" :value="selectedIndex">
       <option v-for="(pt, idx) in points" :key="pt.name" :value="idx">{{ pt.name }}</option>
     </select>
-    <p>{{ selectedPoint.description }}</p>
+    <p>{{ selectedPoint?.description }}</p>
     <Mandelbrot
       ref="mandelbrotRef"
-      v-model:scale="selectedPoint.scale"
-      v-model:angle="selectedPoint.angle"
-      v-model:cx="selectedPoint.cx"
-      v-model:cy="selectedPoint.cy"
+      v-model:scale="selectedPoint?.scale"
+      v-model:angle="selectedPoint?.angle"
+      v-model:cx="selectedPoint?.cx"
+      v-model:cy="selectedPoint?.cy"
       :activatePalette="true"
       :activateSkybox="false"
       :activateTessellation="false"

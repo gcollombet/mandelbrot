@@ -1,9 +1,9 @@
 <script setup lang="ts">
-import { ref, computed, watch, onMounted, nextTick, defineProps, defineEmits } from 'vue';
+import {computed, defineEmits, defineProps, nextTick, onMounted, ref, watch} from 'vue';
 import GlissiereHandle from './GlissiereHandle.vue';
 import LchPicker from './LchPicker.vue';
-import { Palette } from '../Palette';
-import { rgb as d3rgb, lch as d3lch } from 'd3-color';
+import {Palette} from '../Palette';
+import {lch as d3lch, rgb as d3rgb} from 'd3-color';
 import type {ColorStop} from "../ColorStop.ts";
 
 const props = defineProps<{ colorStops: ColorStop[] }>();
@@ -57,7 +57,7 @@ function onCanvasDblClick(event: MouseEvent) {
   let t = (event.clientX - rect.left) / rect.width;
   t = Math.max(0, Math.min(1, t));
   // Utilise la couleur actuellement sélectionnée comme base
-  const baseColor = selectedIdx.value !== null ? props.colorStops[selectedIdx.value].color : '#ffffff';
+  const baseColor = selectedIdx.value !== null ? props.colorStops[selectedIdx.value]?.color || '#ffffff' : '#ffffff';
   // On clone le tableau pour respecter l'immuabilité
   props.colorStops.push({ color: baseColor, position: t });
   emit('update:colorStops', props.colorStops);
@@ -90,11 +90,12 @@ function lchToHex(lchObj: { l: number, c: number, h: number }) {
 const selectedColor = computed({
   get() {
     if (selectedIdx.value === null || props.colorStops.length === 0) return { l: 100, c: 0, h: 0 };
-    return hexToLch(props.colorStops[selectedIdx.value].color);
+    return hexToLch(props.colorStops[selectedIdx.value]?.color || '#ffffff');
   },
   set(val: { l: number, c: number, h: number }) {
     if (selectedIdx.value !== null && props.colorStops[selectedIdx.value]) {
       // On clone le tableau pour respecter l'immuabilité
+      //@ts-ignore
       props.colorStops[selectedIdx.value] = {
         ...props.colorStops[selectedIdx.value],
         color: lchToHex(val)

@@ -1,0 +1,51 @@
+---
+config:
+  layout: elk
+  theme: redux
+---
+flowchart TD
+subgraph CANVAS["Canvas"]
+CTX["GPUCanvasContext"]
+C["HTMLCanvasElement"]
+CF["Configured Surface"]
+CUR["GPUTexture"]
+RTV["GPUTextureView"]
+end
+subgraph RES["Ressources GPU"]
+SHD["GPUShaderModule"]
+BGL["GPUBindGroupLayout"]
+BGL_E["GPUBindGroupLayoutEntry"]
+PLY["GPUPipelineLayout"]
+RPL["GPURenderPipeline"]
+CPL["GPUComputePipeline"]
+BUF_V["GPUBuffer (vertex/index)"]
+BUF_U["GPUBuffer (uniform/storage)"]
+TEX["GPUTexture"]
+SMP["GPUSampler"]
+BND["GPUBindGroup"]
+BND_E["GPUBindGroupEntry"]
+end
+CPU["CPU"] --> RA["navigator.gpu.requestAdapter()"]
+RA --> AD["GPUAdapter"]
+AD --> RD["requestDevice()"]
+RD --> DEV["GPUDevice"]
+DEV --> QUE["GPUQueue"] & SHD & BGL & PLY & RPL & CPL & BUF_V & BUF_U & TEX & SMP & BND & ENC["GPUCommandEncoder"]
+C --> CTX
+CTX -- configure(device, format) --> CF
+CTX -- getCurrentTexture() --> CUR
+CUR --> RTV
+PLY -. compose .-> BGL
+BGL -. has entries .-> BGL_E
+RPL -. uses .-> PLY & SHD
+CPL -. uses .-> PLY & SHD
+BND -. has entries .-> BND_E
+BND -. conforms t .-> BGL
+ENC --> RPASS["GPURenderPassEncoder"] & CPASS["GPUComputePassEncoder"] & CMB["GPUCommandBuffer"]
+QUE -- submit --> CMB
+RPASS -- setPipeline --> RPL
+RPASS -- setBindGroup --> BND
+RPASS -- setVertex/IndexBuffer --> BUF_V
+RPASS -- colorAttachment --> RTV
+CPASS -- setPipeline --> CPL
+CPASS -- setBindGroup --> BND
+BND_E --> BUF_U & TEX & SMP
