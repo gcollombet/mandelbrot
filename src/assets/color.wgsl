@@ -1,5 +1,6 @@
 struct Uniforms {
   palettePeriod: f32,
+  paletteOffset: f32,
   tessellationLevel: f32,
   shadingLevel: f32,
   bloomStrength: f32,
@@ -15,6 +16,8 @@ struct Uniforms {
   angle: f32,
   pad0: f32,
   pad1: f32,
+  pad2: f32,
+  pad3: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d<f32>; // resolved neutral texture
@@ -78,7 +81,7 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
 
 fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
   let d = vec2<f32>(cos(zd.x), sin(zd.x));
-  let deep = sqrt(v) * 2.0;
+  let deep = v * 2.0;
 
   let tessColor = tile_tessellation(tileTex, deep + dx, deep + dy, parameters.tessellationLevel);
   let webCamColor = tile_tessellation(
@@ -87,7 +90,9 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
     deep + dy + sin(parameters.time * 0.15),
     parameters.tessellationLevel + sin(parameters.time * 0.05)
   );
-  let paletteColor = tile_tessellation(paletteTex, deep, 1.0, parameters.palettePeriod);
+  let paletteRepeat = max(parameters.palettePeriod, 0.0001);
+  let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
+  let paletteColor = tile_tessellation(paletteTex, palettePhase, 1.0, 1.0);
 
   var color = vec3<f32>(0.0, 0.0, 0.0);
 

@@ -13,7 +13,7 @@ import type {ColorStop} from './ColorStop.ts'
 // Progressive refinement settings.
 // Start step for the sentinel grid; must be a power-of-two.
 // Examples: 16, 32, 64, 128...
-const SENTINEL_SEED_STEP_POW2 = 16
+const SENTINEL_SEED_STEP_POW2 = 64
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -23,6 +23,7 @@ function floorPowerOfTwo(value: number): number {
 export type RenderOptions = {
     antialiasLevel: number,
     palettePeriod: number,
+    paletteOffset: number,
     colorStops: ColorStop[],
     activateWebcam: boolean,
     activateTessellation: boolean,
@@ -48,6 +49,9 @@ export type Mandelbrot = {
 }
 
 export class Engine {
+    private snapshotCallback?: (png: string) => void;
+    private snapshotDestWidth?: number;
+
     canvas: HTMLCanvasElement
     device!: GPUDevice
     queue!: GPUQueue
@@ -198,7 +202,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 16,
+            size: 4 * 20,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -316,9 +320,8 @@ export class Engine {
         })
 
         // taille suffisante pour contenir la diagonale de l'écran après rotation
-        this.neutralSize = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height) * 2)
+        this.neutralSize = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height) * 1.0)
         const textureSize = this.neutralSize
-
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.resolvedTexture?.destroy?.()
@@ -495,6 +498,7 @@ export class Engine {
 
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,
+            renderOptions.paletteOffset,
             renderOptions.tessellationLevel,
             renderOptions.shadingLevel,
             scaleFactor,
@@ -508,6 +512,8 @@ export class Engine {
             renderOptions.activateZebra ? 1 : 0,
             aspect,
             mandelbrot.angle,
+            0,
+            0,
             0,
             0,
         ])
@@ -669,10 +675,86 @@ export class Engine {
         this.device.queue.submit([commandEncoder.finish()])
 
         // attendre la fin du rendu précédent avant de soumettre pour éviter accumulation de frames
-        await this.device.queue.onSubmittedWorkDone()
+            //await this.device.queue.onSubmittedWorkDone()
 
         // marque mise à jour des paramètres frame précédente pour prochaine frame
         this.prevFrameMandelbrot = { ...this.previousMandelbrot }
+
+        // Passe snapshot PNG écran (optionnelle, si demandée)
+        if (this.snapshotCallback) {
+            try {
+                const targetWidth = this.snapshotDestWidth ?? 256;
+                const targetHeight = Math.round(targetWidth * 9 / 16);
+                // SNAPSHOT dans une texture dédiée
+                const snapshotTex = this.device.createTexture({
+                  size: [targetWidth, targetHeight, 1],
+                  format: this.format,
+                  usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC
+                });
+                {
+                  const encoder = this.device.createCommandEncoder();
+                  const renderPass = encoder.beginRenderPass({
+                    colorAttachments: [{
+                      view: snapshotTex.createView(),
+                      clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                      loadOp: 'clear',
+                      storeOp: 'store',
+                    }]
+                  });
+                  renderPass.setPipeline(this.pipelineColor!);
+                  renderPass.setBindGroup(0, this.bindGroupColor!);
+                  renderPass.draw(6, 1, 0, 0);
+                  renderPass.end();
+                  this.device.queue.submit([encoder.finish()]);
+                }
+                // GPUBuffer aligné
+                const align256 = n => ((n + 255) & ~255);
+                const rowBytes = targetWidth * 4;
+                const bytesPerRow = align256(rowBytes);
+                const bufferSize = bytesPerRow * targetHeight;
+                const gpuBuffer = this.device.createBuffer({
+                  size: bufferSize,
+                  usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ
+                });
+                {
+                  const encoder = this.device.createCommandEncoder();
+                  encoder.copyTextureToBuffer(
+                    { texture: snapshotTex },
+                    { buffer: gpuBuffer, offset: 0, bytesPerRow },
+                    { width: targetWidth, height: targetHeight, depthOrArrayLayers: 1 }
+                  );
+                  this.device.queue.submit([encoder.finish()]);
+                }
+                await this.device.queue.onSubmittedWorkDone();
+                await gpuBuffer.mapAsync(GPUMapMode.READ);
+                const arrayBuffer = gpuBuffer.getMappedRange();
+                // Extraire ligne par ligne, ignorer le padding
+                const pixelArray = new Uint8ClampedArray(targetWidth * targetHeight * 4);
+                const src = new Uint8Array(arrayBuffer);
+                for (let y = 0; y < targetHeight; ++y) {
+                  for (let x = 0; x < targetWidth; ++x) {
+                    const srcIdx = y * bytesPerRow + x * 4;
+                    const dstIdx = (y * targetWidth + x) * 4;
+                    // BGRA -> RGBA
+                    pixelArray[dstIdx + 0] = src[srcIdx + 2]; // Rouge
+                    pixelArray[dstIdx + 1] = src[srcIdx + 1]; // Vert
+                    pixelArray[dstIdx + 2] = src[srcIdx + 0]; // Bleu
+                    pixelArray[dstIdx + 3] = src[srcIdx + 3]; // Alpha
+                  }
+                }
+                const canvas = document.createElement('canvas');
+                canvas.width = targetWidth;
+                canvas.height = targetHeight;
+                canvas.getContext('2d')!.putImageData(new ImageData(pixelArray, targetWidth, targetHeight), 0, 0);
+                gpuBuffer.unmap();
+                this.snapshotCallback(canvas.toDataURL('image/png'));
+
+            } catch {
+                this.snapshotCallback('');
+            }
+            this.snapshotCallback = undefined;
+            this.snapshotDestWidth = undefined;
+        }
     }
 
     destroy() {
@@ -718,4 +800,15 @@ export class Engine {
         await this.webcamTexture?.openWebcam()
         await this.webcamTexture?.drawWebGPUTexture(this.webcamTileTexture!, this.device)
     }
+
+    // Capture l'image de l'écran final sous PNG 16:9 à la largeur demandée
+    async getSnapshotPng(destWidth: number = 256): Promise<string> {
+        return await new Promise<string>(resolve => {
+            this.snapshotCallback = resolve;
+            this.snapshotDestWidth = destWidth;
+            this.needRender = true;
+        });
+    }
+
 }
+

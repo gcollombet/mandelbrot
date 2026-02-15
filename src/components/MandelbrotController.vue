@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {defineProps, nextTick, onMounted, onUnmounted, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
+import type {MandelbrotExposed} from "../types/MandelbrotExposed.ts";
 
 const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
@@ -16,6 +17,7 @@ const props = defineProps<{
   tessellationLevel?: number,
   shadingLevel?: number,
   palettePeriod?: number,
+  paletteOffset?: number,
   activatePalette?: boolean,
   activateSkybox?: boolean,
   activateTessellation?: boolean,
@@ -25,26 +27,15 @@ const props = defineProps<{
   activateSmoothness?: boolean,
 }>();
 
-type MandelbrotExposed = {
-  getCanvas: () => HTMLCanvasElement | null,
-  getEngine: () => any,
-  getNavigator: () => any,
-  translate: (dx: number, dy: number) => void,
-  translateDirect: (dx: number, dy: number) => void,
-  rotate: (da: number) => void,
-  angle: (a: number) => void,
-  zoom: (f: number) => void,
-  step: () => [number, number, number, number] | undefined,
-  getParams: () => [string, string, string, string] | undefined,
-  drawOnce: () => Promise<void>,
-  resize: () => Promise<void>,
-  initialize: () => Promise<void>,
-};
-
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
 
 // Etats d'interaction et navigation
 const pressedKeys: Record<string, boolean> = {};
+
+defineExpose({
+  getCanvas,
+  getEngine: () => mandelbrotRef.value?.getEngine() ?? null
+});
 let isDragging = false;
 let isRotating = false;
 let prevX = 0;
@@ -274,6 +265,7 @@ onUnmounted(() => {
     :activateShading="props.activateShading"
     :activateZebra="props.activateZebra"
     :activateSmoothness="props.activateSmoothness"
+    :paletteOffset="props.paletteOffset"
   />
 </template>
 

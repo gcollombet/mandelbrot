@@ -3,6 +3,8 @@ import {computed, onMounted, ref, toRaw} from 'vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
 import PaletteEditor from './PaletteEditor.vue';
 
+import type { Engine } from '../Engine.ts';
+const props = defineProps<{ engine: Engine | null; suspendShortcuts?: (suspend: boolean) => void }>();
 const model =  defineModel<MandelbrotParams>({
   default: {
     angle: 0,
@@ -13,6 +15,7 @@ const model =  defineModel<MandelbrotParams>({
     epsilon: 0.00001,
     colorStops: [],
     palettePeriod: 1,
+    paletteOffset: 0,
     antialiasLevel: 1,
     tessellationLevel: 2,
     shadingLevel: 1,
@@ -26,24 +29,100 @@ const model =  defineModel<MandelbrotParams>({
   }
 });
 
-const angleDeg = computed(() => (model.value.angle  * 180 / Math.PI).toFixed(2));
-const scaleSci = computed(() => model.value.scale);
-const cxSci = computed(() => model.value.cx);
-const cySci = computed(() => model.value.cy);
 
+const angleDeg = computed(() => (((model.value.angle * 180 / Math.PI) % 360 + 360) % 360).toFixed(2));
+// Slider rotation : angle en ° mod 360 (wrapping)
+const angleSlider = computed({
+  get: () => (((model.value.angle * 180 / Math.PI) % 360 + 360) % 360),
+  set: (deg: number) => {
+    // [0, 360) vers radian
+    model.value.angle = (deg % 360) * Math.PI / 180;
+  },
+});
+// Slider palette period : logarithmique, 0–1 ↔ 1–100
+const sliderPalettePeriod = computed({
+  get: () => (Math.log10(model.value.palettePeriod || 0.01) + 2) / 5,
+  set: val => {
+    model.value.palettePeriod = Number((10 ** (val * 5 - 2)).toPrecision(6));
+  }
+});
+// Slider log2(scale) : valeurs de slider 1 à 126 —> scale de 2^-1 à 2^-126
+const scaleSlider = computed({
+  get: () => {
+    // Clamp la scale, éviter NaN si vide
+    const s = Number(model.value.scale);
+    const slider = s > 0 ? -Math.log2(s) : 126;
+    if (!isFinite(slider)) return 1;
+    return Math.min(Math.max(Math.round(slider), 1), 126); // Entre 1 et 126
+  },
+  set: (val: number) => {
+    // Clamp entre 1 et 126
+    const v = Math.min(Math.max(Math.round(val), 1), 126);
+    model.value.scale = (2 ** -v).toPrecision(10);
+  }
+});
+
+function truncateDecimal(str: string, digits: number): string {
+  const [intPart, decPart] = str.split(".");
+  if (!decPart) return intPart;
+  return intPart + "." + decPart.slice(0, digits);
+}
+
+const navigationPreview = ref<string | null>(null);
 const presetName = ref('');
-const presets = ref<{ name: string, value: MandelbrotParams }[]>([]);
+const presets = ref<{ name: string, value: MandelbrotParams, thumbnail?: string, date?: string }[]>([]);
+
+function deletePreset() {
+  const name = presetName.value.trim();
+  if (!name) return;
+  if (window.confirm(`Supprimer le preset "${name}" ? Cette action est irréversible.`)) {
+    const idx = presets.value.findIndex(p => p.name === name);
+    if (idx >= 0) {
+      presets.value.splice(idx, 1);
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(presets.value));
+      selectedPreset.value = '';
+      presetName.value = '';
+    }
+  }
+}
+
+async function refreshNavigationPreview() {
+  if (props.engine) {
+    navigationPreview.value = await props.engine.getSnapshotPng(256);
+  }
+}
+
 const selectedPreset = ref('');
+const showPresetDropdown = ref(false);
+
+const currentPresetObj = computed(() => presets.value.find(p => p.name === selectedPreset.value));
+const currentPresetThumbnail = computed(() => currentPresetObj.value?.thumbnail);
+
+function selectPresetFromDropdown(preset: { name: string, value: MandelbrotParams, thumbnail?:string, date?:string }) {
+  selectPreset(preset.name);
+  showPresetDropdown.value = false;
+}
+
 const STORAGE_KEY = 'mandelbrot_presets';
 
-function savePreset() {
+async function savePreset() {
   if (!presetName.value.trim()) return;
+  let thumbnail: string | undefined = undefined;
+  let now = new Date().toISOString();
+  try {
+    if (props.engine) {
+      thumbnail = await props.engine.getSnapshotPng(256);
+    }
+  } catch { /* ignore errors, no thumbnail */ }
   const preset = {
     name: presetName.value.trim(),
-    value: model.value
+    value: model.value,
+    thumbnail,
+    date: now
   };
   const idx = presets.value.findIndex(p => p.name === preset.name);
   if (idx >= 0) {
+    // on écrase tout, y compris la miniature et la date !
     presets.value[idx] = preset;
   } else {
     presets.value.push(preset);
@@ -51,6 +130,7 @@ function savePreset() {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(presets.value));
   presetName.value = '';
 }
+
 
 function loadPresets() {
   const raw = localStorage.getItem(STORAGE_KEY);
@@ -64,8 +144,9 @@ function loadPresets() {
 function selectPreset(name: string) {
   const preset = presets.value.find(p => p.name === name);
   if (preset) {
-    selectedPreset.value = name
-    model.value =  structuredClone(toRaw(preset.value))
+    selectedPreset.value = name;
+    presetName.value = preset.name; // Remplit pour écrasement rapide
+    model.value = structuredClone(toRaw(preset.value));
   }
 }
 
@@ -83,11 +164,21 @@ const epsilonSlider = computed({
 });
 
 onMounted(() => {
+  // Recharge l'état courant depuis le localStorage
   loadPresets();
-  activeTab.value = 'performance'; // Toujours sélectionner l'onglet navigation par défaut
 });
 
+
 const activeTab = ref('navigation');
+
+import { watch } from 'vue';
+
+watch([activeTab, () => props.engine], async ([tab]) => {
+  if (tab === 'navigation') {
+    await refreshNavigationPreview();
+  }
+}, { immediate: true });
+
 </script>
 
 <template>
@@ -97,44 +188,92 @@ const activeTab = ref('navigation');
         <li :class="{ 'is-active': activeTab === 'navigation' }">
           <a @click="activeTab = 'navigation'">Navigation</a>
         </li>
-        <li :class="{ 'is-active': activeTab === 'color' }">
-          <a @click="activeTab = 'color'">Palette</a>
-        </li>
         <li :class="{ 'is-active': activeTab === 'performance' }">
           <a @click="activeTab = 'performance'">Graphics</a>
-        </li>
-        <li :class="{ 'is-active': activeTab === 'presets' }">
-          <a @click="activeTab = 'presets'">Presets</a>
         </li>
       </ul>
     </div>
     <div v-if="activeTab === 'navigation'">
-      <div class="mb-3">
-        <span>
-          Échelle&nbsp;:
-          <span v-html="scaleSci" />
-          <button class="button is-small" style="margin-left:0.7em;" @click="model.scale = '2.5'">Réinitialiser</button>
+
+      <div class="mb-3" style="font-family: monospace; word-break: break-all; white-space: pre-line;">
+        <span>Cx: <span>{{ truncateDecimal(model.cx, 38) }}</span></span><br />
+        <span>Cy: <span>{{ truncateDecimal(model.cy, 38) }}</span></span>
+      </div>
+
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <span>Échelle&nbsp;:
+          <span style="font-family: monospace; min-width:7.5em; display:inline-block;">{{ Number(model.scale).toExponential(2) }}</span>
         </span>
+        <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="1" max="126" step="1" v-model.number="scaleSlider" />
       </div>
-      <div class="mb-3">
-        <p>
-          <span>Cx&nbsp;:<span v-html="cxSci" /></span>
-        </p>
-        <p>
-          <span>Cy&nbsp;:<span class="math-i">i</span><span v-html="cySci" /></span>
-        </p>
-      </div>
-      <div class="mb-3">
-        <span>
-          Angle&nbsp;:
-          <span>{{ angleDeg }}°</span>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <span>Angle&nbsp;:
+          <span style="font-family: monospace; min-width:5em; display:inline-block;">{{ angleDeg }}°</span>
         </span>
+        <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="0" max="359" step="1" v-model.number="angleSlider" />
       </div>
-    </div>
-    <div v-else-if="activeTab === 'color'">
+
+      <hr class="section-sep"/>
+
       <div class="mb-3">
         <PaletteEditor :color-stops="model.colorStops" />
       </div>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
+        <label style="white-space: nowrap;">Période :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
+      </div>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
+        <label style="white-space: nowrap;">Décalage :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
+      </div>
+
+      <hr class="section-sep"/>
+
+      <div class="mb-3">
+        <label class="label">Presets enregistrés</label>
+        <!-- Dropdown enrichie Bulma -->
+        <div class="dropdown" :class="{ 'is-active': showPresetDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth" @click="showPresetDropdown = !showPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-presets" type="button">
+              <span style="display:flex; align-items:center; min-height:36px;">
+                <img v-if="currentPresetThumbnail" :src="currentPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ presetName || 'Choisir un preset...' }}</span>
+                <span class="icon is-small" style="margin-left:5px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-presets" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:210px; overflow-y:auto;">
+              <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
+                @click.prevent="selectPresetFromDropdown(preset)"
+                :class="{ 'is-active': selectedPreset === preset.name }"
+                style="display:flex; align-items:center; gap:0.75em;">
+                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ preset.name }}</span>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="field is-grouped" style="margin-top:0.8em;">
+          <div class="control is-expanded">
+            <input class="input" v-model="presetName" type="text" placeholder="Nom..."
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+            />
+          </div>
+          <div class="control">
+            <button class="button is-link is-small" @click="savePreset">Enregistrer</button>
+          </div>
+          <div class="control">
+            <button class="button is-danger is-small" @click="deletePreset" :disabled="!presetName">Supprimer</button>
+          </div>
+        </div>
+      </div>
+
+      <hr class="section-sep"/>
     </div>
     <div v-else-if="activeTab === 'performance'">
       <div class="field">
@@ -150,13 +289,6 @@ const activeTab = ref('navigation');
           <input class="slider is-fullwidth" type="range" min="-12" max="0" step="0.01" v-model="epsilonSlider" />
         </div>
         <span>{{ (model.epsilon ?? 1e-8).toExponential(2) }}</span>
-      </div>
-      <div class="field">
-        <label class="label">Palette period</label>
-        <div class="control">
-          <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="model.palettePeriod" />
-        </div>
-        <span>{{ model.palettePeriod }}</span>
       </div>
       <div class="field">
         <label class="label">Tessellation</label>
@@ -195,31 +327,21 @@ const activeTab = ref('navigation');
           &nbsp;Palette
         </label>
       </div>
-    </div>
-    <div v-else-if="activeTab === 'presets'">
-      <div class="mb-3">
-        <div class="field">
-          <label class="label">Presets enregistrés</label>
-          <div class="control">
-            <div class="select is-fullwidth">
-              <select v-model="selectedPreset" @change="selectPreset(selectedPreset)">
-                <option value="" disabled>Choisir un preset...</option>
-                <option v-for="preset in presets" :key="preset.name" :value="preset.name">{{ preset.name }}</option>
-              </select>
-            </div>
-          </div>
-        </div>
-        <div class="field is-grouped">
-          <div class="control is-expanded">
-            <input class="input" v-model="presetName" type="text" placeholder="Nom..." />
-          </div>
-          <div class="control">
-            <button class="button is-link is-small" @click="savePreset">Enregistrer</button>
-          </div>
-        </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="model.activateSmoothness" />
+          &nbsp;Smoothness
+        </label>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="model.activateZebra" />
+          &nbsp;Zebra
+        </label>
       </div>
     </div>
-  </div>
+
+    </div>
 </template>
 
 <style scoped>
@@ -257,5 +379,15 @@ const activeTab = ref('navigation');
 }
 .compact-input, .compact-select {
   font-size: 0.9em;
+}
+.preview-mandelbrot-thumb img {
+  margin-top: 0.1em;
+  margin-bottom: 0.1em;
+  border: 1px solid #bbb;
+}
+.section-sep {
+  border: none;
+  border-top: 1.5px solid #AAA;
+  margin: 1.2em 0 1.2em 0;
 }
 </style>

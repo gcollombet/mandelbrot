@@ -23,6 +23,7 @@ watch(
       return;
     }
     if (!navigator) return;
+    if (!nextCx || !nextCy || !nextScale) return;
     // Évite les appels inutiles si rien n'a vraiment changé
     if (nextCx !== prevCx || nextCy !== prevCy) {
       navigator.origin(nextCx, nextCy);
@@ -42,6 +43,7 @@ const props = withDefaults(defineProps<{
   epsilon?: number,
   colorStops?: Array<{ color: string, position: number }>,
   palettePeriod?: number,
+  paletteOffset?: number,
   antialiasLevel?: number,
   tessellationLevel?: number,
   shadingLevel?: number,
@@ -52,7 +54,8 @@ const props = withDefaults(defineProps<{
   activateShading?: boolean,
   activateZebra?: boolean,
   activateSmoothness?: boolean,
-}>(),
+ }>(),
+
     {
        mu: 1000000.0,
        epsilon: 0.00001,
@@ -66,6 +69,7 @@ const props = withDefaults(defineProps<{
          { color: '#100000', position: 1.0 },
        ],
        palettePeriod: 1,
+       paletteOffset: 0,
        antialiasLevel: 1,
        tessellationLevel: 2,
        shadingLevel: 1,
@@ -84,7 +88,7 @@ async function draw() {
   if (!engine || !navigator) return;
   const step = navigator.step();
   if (!step) return;
-  const [dx, dy] = step;
+  const [dx, dy] = step as [string, string];
   const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
   isUpdating = true;
   cx.value = cx_string;
@@ -93,7 +97,7 @@ async function draw() {
   angle.value = parseFloat(angle_string);
   await nextTick();
   isUpdating = false;
-  const maxIterations = Math.min(Math.max(100, 80 + 60 * Math.log2(1.0 / parseFloat(scale_string)), 1000));
+  const maxIterations = Math.min(Math.max(100, 200 * Math.log2(1.0 / parseFloat(scale_string))),100_000);
   await engine.update({
         cx: cx_string,
         cy: cy_string,
@@ -110,6 +114,7 @@ async function draw() {
       tessellationLevel: props.tessellationLevel,
       antialiasLevel: props.antialiasLevel,
       palettePeriod: props.palettePeriod,
+      paletteOffset: props.paletteOffset,
       colorStops: toRaw(props.colorStops),
       activateShading: props.activateShading,
       activateTessellation: props.activateTessellation,
@@ -119,6 +124,7 @@ async function draw() {
       activateSmoothness: props.activateSmoothness,
       activateZebra: props.activateZebra,
     }
+
   )
   return engine.render()
 }
@@ -144,6 +150,7 @@ async function initWebGPU() {
     tessellationLevel: props.tessellationLevel,
     antialiasLevel: props.antialiasLevel,
     palettePeriod: props.palettePeriod,
+    paletteOffset: props.paletteOffset,
     colorStops: props.colorStops,
     activateShading: props.activateShading,
     activateTessellation: props.activateTessellation,

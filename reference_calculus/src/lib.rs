@@ -179,12 +179,14 @@ impl MandelbrotNavigator {
           self.scale = &self.scale * self.vscale.powf(&(&delta_time_big * DBig::try_from(10).unwrap()));
         }
         self.vscale = DBig::try_from(1).unwrap() + ((&self.vscale - DBig::try_from(1).unwrap()) * &damping);
+        if self.vscale.clone().abs() < DBig::from_str("0.92").unwrap()
+          || self.vscale.clone().abs() > DBig::from_str("1.08").unwrap()  {
+          self.vscale = DBig::try_from(0).unwrap();
+        }
       }
 
         let epsilon = &self.scale / DBig::try_from(1000000).unwrap();
-        if self.vscale.clone().abs() < DBig::from_str("0.01").unwrap() {
-            self.vscale = DBig::try_from(0).unwrap();
-        }
+
 
         // Clamp vitesse plus gros que scale
         if(self.vtx.clone().abs() > self.scale) {

@@ -14,6 +14,7 @@ export interface MandelbrotParams {
     maxIterations: number,
     antialiasLevel: number,
     palettePeriod: number,
+    paletteOffset: number,
     activateWebcam: boolean,
     activateTessellation: boolean,
     activateShading: boolean,

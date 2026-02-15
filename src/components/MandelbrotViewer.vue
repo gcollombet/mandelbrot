@@ -1,13 +1,22 @@
 <script setup lang="ts">
-import {computed, ref} from 'vue';
+import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
 
+import type {MandelbrotExposed} from '../types/MandelbrotExposed';
+
+const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
+const mandelbrotEngine = computed(() => mandelbrotCtrlRef.value?.getEngine() ?? null);
+const mandelbrotCanvas = computed(() => mandelbrotCtrlRef.value?.getCanvas() ?? null);
+
 const showSettings = ref(false);
+const shortcutsSuspended = ref(false);
+
 const showUI = ref(true);
 
 // Paramètres Mandelbrot avec valeurs par défaut
+const LOCAL_STORAGE_CURRENT_KEY = 'mandelbrot_last_settings';
 const mandelbrotParams = ref<MandelbrotParams>({
   cx: "-0.743643887037158704752191506114774",
   cy: "0.131825904205311970493132056385139",
@@ -17,6 +26,7 @@ const mandelbrotParams = ref<MandelbrotParams>({
   maxIterations: 1000,
   antialiasLevel: 1,
   palettePeriod: 1,
+  paletteOffset: 0,
   shadingLevel: 1,
   tessellationLevel: 2,
   epsilon: 0.00001,
@@ -38,8 +48,36 @@ const mandelbrotParams = ref<MandelbrotParams>({
   activateZebra: false,
 });
 
+// Restore paramètres à partir du localStorage puis surveille et persiste à chaque changement
+onMounted(() => {
+  window.addEventListener('keydown', handleSettingsHotkey);
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_CURRENT_KEY);
+    if (raw) {
+      Object.assign(mandelbrotParams.value, JSON.parse(raw));
+    }
+  } catch {}
+});
+onUnmounted(() => {
+  window.removeEventListener('keydown', handleSettingsHotkey);
+});
+watch(mandelbrotParams, (params) => {
+  localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(params));
+}, { deep: true });
+
 function toggleSettings() {
   showSettings.value = !showSettings.value;
+}
+
+// Gestion du raccourci clavier "W" pour ouvrir/fermer les settings
+function handleSettingsHotkey(e: KeyboardEvent) {
+  if (shortcutsSuspended.value) return;
+  const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) return;
+  if ((e.key === 'w' || e.key === 'W') && !e.repeat) {
+    e.preventDefault();
+    toggleSettings();
+  }
 }
 
 // Détection de la disposition du clavier
@@ -94,6 +132,7 @@ const shortcutLabels = computed(() => {
 
     <!-- Composant MandelbrotController avec tous les paramètres -->
     <MandelbrotController
+      ref="mandelbrotCtrlRef"
       style="width: 100%; height: 100%; display: block;"
       v-model:scale="mandelbrotParams.scale"
       v-model:angle="mandelbrotParams.angle"
@@ -105,6 +144,7 @@ const shortcutLabels = computed(() => {
       :tessellationLevel="mandelbrotParams.tessellationLevel"
       :epsilon="mandelbrotParams.epsilon"
       :palettePeriod="mandelbrotParams.palettePeriod"
+      :paletteOffset="mandelbrotParams.paletteOffset"
       :colorStops="mandelbrotParams.colorStops"
       :activatePalette="mandelbrotParams.activatePalette"
       :activateSkybox="mandelbrotParams.activateSkybox"
@@ -120,7 +160,7 @@ const shortcutLabels = computed(() => {
       v-if="showSettings"
       style="position: absolute; top: 0; left: 0; z-index: 10; pointer-events: auto; height: 100vh;"
     >
-      <Settings v-model="mandelbrotParams" />
+      <Settings v-model="mandelbrotParams" :engine="mandelbrotEngine" :suspend-shortcuts="val => { shortcutsSuspended.value = val }" />
     </div>
 
     <!-- Raccourcis clavier (masqué sur mobile) -->
