@@ -2,6 +2,7 @@
 import {computed, onMounted, ref, toRaw} from 'vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
 import PaletteEditor from './PaletteEditor.vue';
+import { Palette } from '../Palette.ts';
 
 import type { Engine } from '../Engine.ts';
 const props = defineProps<{ engine: Engine | null; suspendShortcuts?: (suspend: boolean) => void }>();
@@ -68,9 +69,48 @@ function truncateDecimal(str: string, digits: number): string {
   return intPart + "." + decPart.slice(0, digits);
 }
 
+function generatePaletteThumbnail(colorStops: any[]): string {
+  // Génère une image de la palette sous forme de data URL (format horizontal)
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 40;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+  
+  if (colorStops.length === 0) {
+    // Palette vide : fond noir
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/png');
+  }
+  
+  // Utilise la classe Palette pour générer le gradient
+  const palette = new Palette(colorStops);
+  const imageData = palette.generateTexture();
+  
+  // Crée un canvas temporaire pour l'ImageData
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = imageData.width;
+  tempCanvas.height = 1;
+  const tempCtx = tempCanvas.getContext('2d');
+  if (!tempCtx) return '';
+  tempCtx.putImageData(imageData, 0, 0);
+  
+  // Étire l'image sur toute la hauteur du canvas
+  ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
+  
+  return canvas.toDataURL('image/png');
+}
+
 const navigationPreview = ref<string | null>(null);
 const presetName = ref('');
 const presets = ref<{ name: string, value: MandelbrotParams, thumbnail?: string, date?: string }[]>([]);
+
+// Palette management
+const paletteName = ref('');
+const palettes = ref<{ name: string, colorStops: any[], thumbnail?: string, date?: string }[]>([]);
+const selectedPalette = ref('');
+const showPaletteDropdown = ref(false);
 
 function deletePreset() {
   const name = presetName.value.trim();
@@ -104,6 +144,7 @@ function selectPresetFromDropdown(preset: { name: string, value: MandelbrotParam
 }
 
 const STORAGE_KEY = 'mandelbrot_presets';
+const PALETTE_STORAGE_KEY = 'mandelbrot_palettes';
 
 async function savePreset() {
   if (!presetName.value.trim()) return;
@@ -141,6 +182,67 @@ function loadPresets() {
   }
 }
 
+function loadPalettes() {
+  const raw = localStorage.getItem(PALETTE_STORAGE_KEY);
+  if (raw) {
+    try {
+      palettes.value = JSON.parse(raw);
+    } catch {}
+  }
+}
+
+async function savePalette() {
+  if (!paletteName.value.trim()) return;
+  let thumbnail: string | undefined = undefined;
+  let now = new Date().toISOString();
+  try {
+    // Génère une miniature de la palette (gradient) au lieu du fractal
+    thumbnail = generatePaletteThumbnail(model.value.colorStops);
+  } catch { /* ignore errors, no thumbnail */ }
+  const palette = {
+    name: paletteName.value.trim(),
+    colorStops: structuredClone(toRaw(model.value.colorStops)),
+    thumbnail,
+    date: now
+  };
+  const idx = palettes.value.findIndex(p => p.name === palette.name);
+  if (idx >= 0) {
+    palettes.value[idx] = palette;
+  } else {
+    palettes.value.push(palette);
+  }
+  localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(palettes.value));
+  paletteName.value = '';
+}
+
+function selectPalette(name: string) {
+  const palette = palettes.value.find(p => p.name === name);
+  if (palette) {
+    selectedPalette.value = name;
+    paletteName.value = palette.name;
+    model.value.colorStops = structuredClone(toRaw(palette.colorStops));
+  }
+}
+
+function selectPaletteFromDropdown(palette: { name: string, colorStops: any[], thumbnail?: string, date?: string }) {
+  selectPalette(palette.name);
+  showPaletteDropdown.value = false;
+}
+
+function deletePalette() {
+  const name = paletteName.value.trim();
+  if (!name) return;
+  if (window.confirm(`Supprimer la palette "${name}" ? Cette action est irréversible.`)) {
+    const idx = palettes.value.findIndex(p => p.name === name);
+    if (idx >= 0) {
+      palettes.value.splice(idx, 1);
+      localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(palettes.value));
+      selectedPalette.value = '';
+      paletteName.value = '';
+    }
+  }
+}
+
 function selectPreset(name: string) {
   const preset = presets.value.find(p => p.name === name);
   if (preset) {
@@ -166,10 +268,13 @@ const epsilonSlider = computed({
 onMounted(() => {
   // Recharge l'état courant depuis le localStorage
   loadPresets();
+  loadPalettes();
 });
 
 
 const activeTab = ref('navigation');
+const currentPaletteObj = computed(() => palettes.value.find(p => p.name === selectedPalette.value));
+const currentPaletteThumbnail = computed(() => currentPaletteObj.value?.thumbnail);
 
 import { watch } from 'vue';
 
@@ -188,11 +293,18 @@ watch([activeTab, () => props.engine], async ([tab]) => {
         <li :class="{ 'is-active': activeTab === 'navigation' }">
           <a @click="activeTab = 'navigation'">Navigation</a>
         </li>
+        <li :class="{ 'is-active': activeTab === 'presets' }">
+          <a @click="activeTab = 'presets'">Presets</a>
+        </li>
+        <li :class="{ 'is-active': activeTab === 'palettes' }">
+          <a @click="activeTab = 'palettes'">Palettes</a>
+        </li>
         <li :class="{ 'is-active': activeTab === 'performance' }">
           <a @click="activeTab = 'performance'">Graphics</a>
         </li>
       </ul>
     </div>
+    <div class="tab-content">
     <div v-if="activeTab === 'navigation'">
 
       <div class="mb-3" style="font-family: monospace; word-break: break-all; white-space: pre-line;">
@@ -212,23 +324,8 @@ watch([activeTab, () => props.engine], async ([tab]) => {
         </span>
         <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="0" max="359" step="1" v-model.number="angleSlider" />
       </div>
-
-      <hr class="section-sep"/>
-
-      <div class="mb-3">
-        <PaletteEditor :color-stops="model.colorStops" />
-      </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
-        <label style="white-space: nowrap;">Période :</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
-      </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
-        <label style="white-space: nowrap;">Décalage :</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
-      </div>
-
-      <hr class="section-sep"/>
-
+    </div>
+    <div v-else-if="activeTab === 'presets'">
       <div class="mb-3">
         <label class="label">Presets enregistrés</label>
         <!-- Dropdown enrichie Bulma -->
@@ -245,7 +342,7 @@ watch([activeTab, () => props.engine], async ([tab]) => {
             </button>
           </div>
           <div class="dropdown-menu" id="dropdown-menu-presets" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:210px; overflow-y:auto;">
+            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
               <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
                 @click.prevent="selectPresetFromDropdown(preset)"
                 :class="{ 'is-active': selectedPreset === preset.name }"
@@ -272,8 +369,67 @@ watch([activeTab, () => props.engine], async ([tab]) => {
           </div>
         </div>
       </div>
+    </div>
+    <div v-else-if="activeTab === 'palettes'">
+      <div class="mb-3">
+        <PaletteEditor :color-stops="model.colorStops" />
+      </div>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
+        <label style="white-space: nowrap;">Période :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
+      </div>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
+        <label style="white-space: nowrap;">Décalage :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
+      </div>
 
       <hr class="section-sep"/>
+
+      <div class="mb-3">
+        <label class="label">Palettes enregistrées</label>
+        <!-- Dropdown enrichie Bulma -->
+        <div class="dropdown" :class="{ 'is-active': showPaletteDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth" @click="showPaletteDropdown = !showPaletteDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palettes" type="button">
+              <span style="display:flex; align-items:center; flex-direction:column; gap:0.5em; padding:0.4em 0;">
+                <img v-if="currentPaletteThumbnail" :src="currentPaletteThumbnail" alt="miniature" style="height:24px; width:100%; max-width:280px; object-fit:cover; border-radius:3px; background:#888; box-shadow:0 1px 3px rgba(0,0,0,0.2);" />
+                <span style="width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; justify-content:center; gap:0.3em;">
+                  <span style="flex:1 1 auto; text-align:center;">{{ paletteName || 'Choisir une palette...' }}</span>
+                  <span class="icon is-small">
+                    <i class="fas fa-angle-down" aria-hidden="true"></i>
+                  </span>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-palettes" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
+              <a v-for="palette in palettes" :key="palette.name" class="dropdown-item"
+                @click.prevent="selectPaletteFromDropdown(palette)"
+                :class="{ 'is-active': selectedPalette === palette.name }"
+                style="display:flex; flex-direction:column; gap:0.5em; padding:0.75em;">
+                <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="miniature"
+                  style="height:32px; width:100%; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; text-align:center;">{{ palette.name }}</span>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="field is-grouped" style="margin-top:0.8em;">
+          <div class="control is-expanded">
+            <input class="input" v-model="paletteName" type="text" placeholder="Nom..."
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+            />
+          </div>
+          <div class="control">
+            <button class="button is-link is-small" @click="savePalette">Enregistrer</button>
+          </div>
+          <div class="control">
+            <button class="button is-danger is-small" @click="deletePalette" :disabled="!paletteName">Supprimer</button>
+          </div>
+        </div>
+      </div>
     </div>
     <div v-else-if="activeTab === 'performance'">
       <div class="field">
@@ -340,8 +496,8 @@ watch([activeTab, () => props.engine], async ([tab]) => {
         </label>
       </div>
     </div>
-
     </div>
+  </div>
 </template>
 
 <style scoped>
@@ -355,6 +511,8 @@ watch([activeTab, () => props.engine], async ([tab]) => {
   width: 420px;
   height: 100%;
   max-width: 100vw;
+  display: flex;
+  flex-direction: column;
 }
 .mb-3 {
   margin-bottom: 1.2em;
@@ -389,5 +547,11 @@ watch([activeTab, () => props.engine], async ([tab]) => {
   border: none;
   border-top: 1.5px solid #AAA;
   margin: 1.2em 0 1.2em 0;
+}
+.tab-content {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding-right: 0.5em;
+  min-height: 0;
 }
 </style>

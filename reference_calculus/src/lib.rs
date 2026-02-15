@@ -90,8 +90,8 @@ impl MandelbrotNavigator {
     pub fn translate(&mut self, dx: f64, dy: f64) {
         // dx/dy sont des valeurs entre 0 et 1 (écran)
         // On convertit en déplacement complexe selon l'échelle et l'angle
-        let dx_big = DBig::from_str(&(dx * 20.0).to_string()).unwrap();
-        let dy_big = DBig::from_str(&(dy * 20.0).to_string()).unwrap();
+        let dx_big = DBig::from_str(&(dx * 40.0).to_string()).unwrap();
+        let dy_big = DBig::from_str(&(dy * 40.0).to_string()).unwrap();
         let angle = self.angle;
         let cos_a = DBig::from_str(&angle.cos().to_string()).unwrap();
         let sin_a = DBig::from_str(&angle.sin().to_string()).unwrap();
@@ -189,10 +189,10 @@ impl MandelbrotNavigator {
 
 
         // Clamp vitesse plus gros que scale
-        if(self.vtx.clone().abs() > self.scale) {
+        if self.vtx.clone().abs() > self.scale {
           self.vtx = self.scale.clone() * self.vtx.clone().signum();
         }
-        if(self.vty.clone().abs() > self.scale) {
+        if self.vty.clone().abs() > self.scale {
           self.vty = self.scale.clone() * self.vty.clone().signum();
         }
 

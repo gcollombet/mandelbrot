@@ -183,7 +183,7 @@ function updateLoop() {
   if (pressedKeys['KeyD']) mandelbrotRef.value?.translate(moveStep, 0);
   if (pressedKeys['KeyQ']) mandelbrotRef.value?.rotate(angleStep);
   if (pressedKeys['KeyE']) mandelbrotRef.value?.rotate(-angleStep);
-  const zoomFactor = 0.9;
+  const zoomFactor = 0.8;
   if (pressedKeys['KeyR']) mandelbrotRef.value?.zoom(zoomFactor);
   if (pressedKeys['KeyF']) mandelbrotRef.value?.zoom(1 / zoomFactor);
   updateTimer = window.setTimeout(updateLoop, 16);
