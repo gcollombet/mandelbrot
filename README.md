@@ -47,12 +47,12 @@ TODO
 1. [x] make preset loadable (fix bug)
 2. [ ] deffered orbit computation to webworker in rust part and use promise. then use that promise in the render loop to get the reference orbit when ready
 3. [x] make settings persistent in localstorage
-4. [ ] better navigation panel in settings
-5. [ ] shortcut for settings
-6. [ ] make color palettes presets and possibility to save custom palettes
-7. [ ] better settings that screenshot an image of the current view and a selectable image with label instead of setting name
+4. [x] better navigation panel in settings
+5. [x] shortcut for settings
+6. [x] make color palettes presets and possibility to save custom palettes
+7. [x] better settings that screenshot an image of the current view and a selectable image with label instead of setting name
 8. [ ] make zoom reuse last image
-9. [ ] make rotation with bigger image, compute missing pixel always in reference angle and then rotate the image in order to avoid artifacts
+9. [x] make rotation with bigger image, compute missing pixel always in reference angle and then rotate the image in order to avoid artifacts
 10. [ ] modify color and render to give all info in uniform
 11. [ ] use a different texture to store the iteration count
 12. [ ] use bivariate linear approximation to render
