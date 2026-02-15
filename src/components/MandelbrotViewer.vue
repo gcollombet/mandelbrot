@@ -181,7 +181,9 @@ const shortcutLabels = computed(() => {
       |&nbsp;Zoom&nbsp;
       <span class="tag is-black">Wheel</span>&nbsp;
       <span class="tag is-black">{{ shortcutLabels.zoomIn }}</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.zoomOut }}</span>
+      <span class="tag is-black">{{ shortcutLabels.zoomOut }}</span>&nbsp;
+      |&nbsp;Settings&nbsp;
+      <span class="tag is-black">W</span>
     </div>
 
     <!-- Footer avec liens -->

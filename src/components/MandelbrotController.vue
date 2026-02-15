@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {defineProps, nextTick, onMounted, onUnmounted, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
+import MobileNavigationControls from './MobileNavigationControls.vue';
 import type {MandelbrotExposed} from "../types/MandelbrotExposed.ts";
 
 const cx = defineModel<string>('cx')
@@ -76,7 +77,7 @@ function handleKeyup(e: KeyboardEvent) {
 
 function handleWheel(e: WheelEvent) {
   e.preventDefault();
-  const zoomFactor = 0.8;
+  const zoomFactor = 0.6;
   if (e.deltaY < 0) mandelbrotRef.value?.zoom(zoomFactor);
   else mandelbrotRef.value?.zoom(1 / zoomFactor);
 }
@@ -183,7 +184,7 @@ function updateLoop() {
   if (pressedKeys['KeyD']) mandelbrotRef.value?.translate(moveStep, 0);
   if (pressedKeys['KeyQ']) mandelbrotRef.value?.rotate(angleStep);
   if (pressedKeys['KeyE']) mandelbrotRef.value?.rotate(-angleStep);
-  const zoomFactor = 0.8;
+  const zoomFactor = 0.6;
   if (pressedKeys['KeyR']) mandelbrotRef.value?.zoom(zoomFactor);
   if (pressedKeys['KeyF']) mandelbrotRef.value?.zoom(1 / zoomFactor);
   updateTimer = window.setTimeout(updateLoop, 16);
@@ -245,28 +246,33 @@ onUnmounted(() => {
 </script>
 
 <template>
-  <Mandelbrot
-    ref="mandelbrotRef"
-    v-model:scale="scale"
-    v-model:angle="angle"
-    v-model:cx="cx"
-    v-model:cy="cy"
-    :mu="props.mu"
-    :epsilon="props.epsilon"
-    :antialiasLevel="props.antialiasLevel"
-    :shadingLevel="props.shadingLevel"
-    :palettePeriod="props.palettePeriod"
-    :tessellationLevel="props.tessellationLevel"
-    :colorStops="props.colorStops"
-    :activatePalette="props.activatePalette"
-    :activateSkybox="props.activateSkybox"
-    :activateTessellation="props.activateTessellation"
-    :activateWebcam="props.activateWebcam"
-    :activateShading="props.activateShading"
-    :activateZebra="props.activateZebra"
-    :activateSmoothness="props.activateSmoothness"
-    :paletteOffset="props.paletteOffset"
-  />
+  <div style="position: relative; width: 100%; height: 100%;">
+    <Mandelbrot
+      ref="mandelbrotRef"
+      v-model:scale="scale"
+      v-model:angle="angle"
+      v-model:cx="cx"
+      v-model:cy="cy"
+      :mu="props.mu"
+      :epsilon="props.epsilon"
+      :antialiasLevel="props.antialiasLevel"
+      :shadingLevel="props.shadingLevel"
+      :palettePeriod="props.palettePeriod"
+      :tessellationLevel="props.tessellationLevel"
+      :colorStops="props.colorStops"
+      :activatePalette="props.activatePalette"
+      :activateSkybox="props.activateSkybox"
+      :activateTessellation="props.activateTessellation"
+      :activateWebcam="props.activateWebcam"
+      :activateShading="props.activateShading"
+      :activateZebra="props.activateZebra"
+      :activateSmoothness="props.activateSmoothness"
+      :paletteOffset="props.paletteOffset"
+    />
+    
+    <!-- Contrôles de navigation mobile -->
+    <MobileNavigationControls :mandelbrot-ref="mandelbrotRef" />
+  </div>
 </template>
 
 <style scoped>

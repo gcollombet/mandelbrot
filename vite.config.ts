@@ -13,7 +13,7 @@ export default defineConfig({
       topLevelAwait()
   ],
   build: {
-    outDir: 'dist',
+    outDir: 'docs',
     assetsDir: ''  // Met les assets à la racine au lieu de assets/
   }
 })
