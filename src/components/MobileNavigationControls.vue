@@ -36,7 +36,7 @@ const stopAllActions = () => {
 // Actions de navigation
 const startMoving = (direction: 'north' | 'south' | 'east' | 'west') => {
   activeButton.value = direction;
-  const moveStep = 0.04;
+  const moveStep = 0.1;
   
   const performMove = () => {
     if (!props.mandelbrotRef) return;
@@ -91,7 +91,7 @@ const startZooming = (direction: 'in' | 'out') => {
   };
   
   performZoom();
-  intervalId = window.setInterval(performZoom, 100);
+  intervalId = window.setInterval(performZoom, 16);
 };
 
 // Gestionnaires d'événements tactiles

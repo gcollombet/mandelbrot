@@ -90,11 +90,11 @@ impl MandelbrotNavigator {
     pub fn translate(&mut self, dx: f64, dy: f64) {
         // dx/dy sont des valeurs entre 0 et 1 (écran)
         // On convertit en déplacement complexe selon l'échelle et l'angle
-        let dx_big = DBig::from_str(&(dx * 40.0).to_string()).unwrap();
-        let dy_big = DBig::from_str(&(dy * 40.0).to_string()).unwrap();
         let angle = self.angle;
         let cos_a = DBig::from_str(&angle.cos().to_string()).unwrap();
         let sin_a = DBig::from_str(&angle.sin().to_string()).unwrap();
+        let dx_big = DBig::from_str(&(dx * 40.0).to_string()).unwrap();
+        let dy_big = DBig::from_str(&(dy * 40.0).to_string()).unwrap();
         let scale = &self.scale;
         let delta_x = (&dx_big * &cos_a - &dy_big * &sin_a) * scale;
         let delta_y = (&dx_big * &sin_a + &dy_big * &cos_a) * scale;
@@ -173,14 +173,23 @@ impl MandelbrotNavigator {
         //let delta_scale = DBig::try_from(1).unwrap() + &self.vscale * (DBig::try_from(1).unwrap() + &delta_time_big).ln();
         //self.scale = self.scale.powf(&(&self.vscale * &delta_time_big));
 
-        // 2 en une seconde,< je veux que le scale soit divisé par deux, en 2 par 4, en trois par 8, etc.
+        // 2 en une seconde, je veux que le scale soit divisé par deux, en 2 par 4, en trois par 8, etc.
         // si 0.5 en une seconde, alors en delta_time, on fait scale * (0.5)^(delta_time)
         if delta_time_big > DBig::try_from(0).unwrap() {
           self.scale = &self.scale * self.vscale.powf(&(&delta_time_big * DBig::try_from(10).unwrap()));
         }
         self.vscale = DBig::try_from(1).unwrap() + ((&self.vscale - DBig::try_from(1).unwrap()) * &damping);
-        if self.vscale.clone().abs() < DBig::from_str("0.92").unwrap()
-          || self.vscale.clone().abs() > DBig::from_str("1.08").unwrap()  {
+
+        // si vsclale plus petit que 0.5 ou plus grand que 2, on le clamp à 0.5 ou 2 pour éviter les valeurs extrêmes
+        if self.vscale.clone() > DBig::from_str("2").unwrap() {
+          self.vscale = DBig::from_str("2").unwrap();
+        }
+        if self.vscale.clone() < DBig::from_str("0.5").unwrap() {
+          self.vscale = DBig::from_str("0.5").unwrap();
+        }
+        
+        if self.vscale.clone().abs() >DBig::from_str("0.999").unwrap()
+          || self.vscale.clone().abs() < DBig::from_str("1.001").unwrap()  {
           self.vscale = DBig::try_from(0).unwrap();
         }
       }
