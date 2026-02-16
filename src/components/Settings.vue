@@ -27,6 +27,9 @@ const model =  defineModel<MandelbrotParams>({
     activateShading: true,
     activateZebra: false,
     activateSmoothness: true,
+    activateMotionBlur: false,
+    motionBlurStrength: 0.5,
+    motionBlurSamples: 8,
   }
 });
 
@@ -494,6 +497,27 @@ watch([activeTab, () => props.engine], async ([tab]) => {
           <input type="checkbox" v-model="model.activateZebra" />
           &nbsp;Zebra
         </label>
+      </div>
+      <hr class="section-sep"/>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="model.activateMotionBlur" />
+          &nbsp;Motion Blur
+        </label>
+      </div>
+      <div class="field">
+        <label class="label">Motion Blur Strength</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="0" max="1" step="0.05" v-model.number="model.motionBlurStrength" :disabled="!model.activateMotionBlur" />
+        </div>
+        <span>{{ model.motionBlurStrength.toFixed(2) }}</span>
+      </div>
+      <div class="field">
+        <label class="label">Motion Blur Samples</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="4" max="32" step="1" v-model.number="model.motionBlurSamples" :disabled="!model.activateMotionBlur" />
+        </div>
+        <span>{{ model.motionBlurSamples }}</span>
       </div>
     </div>
     </div>

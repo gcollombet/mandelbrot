@@ -26,6 +26,9 @@ const props = defineProps<{
   activateShading?: boolean,
   activateZebra?: boolean,
   activateSmoothness?: boolean,
+  activateMotionBlur?: boolean,
+  motionBlurStrength?: number,
+  motionBlurSamples?: number,
 }>();
 
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
@@ -268,6 +271,9 @@ onUnmounted(() => {
       :activateZebra="props.activateZebra"
       :activateSmoothness="props.activateSmoothness"
       :paletteOffset="props.paletteOffset"
+      :activateMotionBlur="props.activateMotionBlur"
+      :motionBlurStrength="props.motionBlurStrength"
+      :motionBlurSamples="props.motionBlurSamples"
     />
     
     <!-- Contrôles de navigation mobile -->

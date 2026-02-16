@@ -4,6 +4,8 @@ import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
 import brushShader from './assets/reproject.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
+import motionBlurShader from './assets/motionblur.wgsl?raw'
+import copyShader from './assets/copy.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import {WebcamTexture} from './WebcamTexture'
@@ -32,8 +34,11 @@ export type RenderOptions = {
     activatePalette: boolean,
     activateSmoothness: boolean,
     activateZebra: boolean,
+    activateMotionBlur: boolean,
     tessellationLevel: number,
     shadingLevel: number,
+    motionBlurStrength: number,
+    motionBlurSamples: number,
 }
 
 export type Mandelbrot = {
@@ -67,11 +72,16 @@ export class Engine {
     rawBrushView?: GPUTextureView
     resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles
     resolvedView?: GPUTextureView
+    coloredTexture?: GPUTexture // texture après colorisation (avant motion blur)
+    coloredView?: GPUTextureView
+    blurredTexture?: GPUTexture // texture après motion blur (ou copie si désactivé)
+    blurredView?: GPUTextureView
 
     // buffers
     uniformBufferMandelbrot?: GPUBuffer // passe Mandelbrot (calc -1)
     uniformBufferColor?: GPUBuffer // passe color (écran)
     uniformBufferBrush?: GPUBuffer // passe pinceau (sentinelles)
+    uniformBufferMotionBlur?: GPUBuffer // passe motion blur
     mandelbrotReferenceBuffer?: GPUBuffer // storage buffer contenant l'orbite
 
     // pipelines / bindgroups
@@ -81,6 +91,10 @@ export class Engine {
     bindGroupMandelbrot?: GPUBindGroup
     pipelineResolve?: GPURenderPipeline
     bindGroupResolve?: GPUBindGroup
+    pipelineMotionBlur?: GPURenderPipeline
+    bindGroupMotionBlur?: GPUBindGroup
+    pipelineCopy?: GPURenderPipeline // pipeline de copie simple (colored -> swapchain)
+    bindGroupCopy?: GPUBindGroup
     pipelineColor?: GPURenderPipeline
     bindGroupColor?: GPUBindGroup
 
@@ -104,6 +118,7 @@ export class Engine {
     mandelbrotReference = new Float32Array(1000000)
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
+    prevPrevFrameMandelbrot?: Mandelbrot // paramètres de la frame N-2 (pour calcul de vitesse)
 
     // flag pour indiquer si l'historique doit être effacé au prochain rendu
     clearHistoryNextFrame = false
@@ -211,6 +226,11 @@ export class Engine {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
+        this.uniformBufferMotionBlur = this.device.createBuffer({
+            size: 4 * 12,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: 'Engine UniformBuffer MotionBlur',
+        })
         this.mandelbrotReferenceBuffer = this.device.createBuffer({
             size: 4 * 1000000,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -225,7 +245,9 @@ export class Engine {
         const moduleBrush = this.device.createShaderModule({ code: brushShader, label: 'Engine ShaderModule Brush' })
         const moduleCompute = this.device.createShaderModule({ code: this.shaderPassCompute, label: 'Engine ShaderModule Compute' })
         const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
+        const moduleMotionBlur = this.device.createShaderModule({ code: motionBlurShader, label: 'Engine ShaderModule MotionBlur' })
         const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
+        const moduleCopy = this.device.createShaderModule({ code: copyShader, label: 'Engine ShaderModule Copy' })
 
         const layoutBrush = this.device.createBindGroupLayout({
             entries: [
@@ -249,6 +271,14 @@ export class Engine {
             label: 'Engine BindGroupLayout Resolve',
         })
 
+        const layoutMotionBlur = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+            ],
+            label: 'Engine BindGroupLayout MotionBlur',
+        })
+
         const layoutColor = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
@@ -259,6 +289,11 @@ export class Engine {
                 { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
             ],
             label: 'Engine BindGroupLayout Color',
+        })
+
+        const layoutCopy = this.device.createBindGroupLayout({
+            entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }],
+            label: 'Engine BindGroupLayout Copy',
         })
 
         this.pipelineBrush = this.device.createRenderPipeline({
@@ -285,19 +320,37 @@ export class Engine {
             label: 'Engine RenderPipeline Resolve',
         })
 
+        this.pipelineMotionBlur = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMotionBlur] }),
+            vertex: { module: moduleMotionBlur, entryPoint: 'vs_main' },
+            fragment: { module: moduleMotionBlur, entryPoint: 'fs_main', targets: [{ format: this.format }] },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline MotionBlur',
+        })
+
         this.pipelineColor = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
             vertex: { module: moduleColor, entryPoint: 'vs_main' },
-            fragment: { module: moduleColor, entryPoint: 'fs_main', targets: [{ format: this.format }] },
+            fragment: { module: moduleColor, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Color',
+        })
+
+        this.pipelineCopy = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutCopy] }),
+            vertex: { module: moduleCopy, entryPoint: 'vs_main' },
+            fragment: { module: moduleCopy, entryPoint: 'fs_main', targets: [{ format: this.format }] },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline Copy',
         })
 
         // bind groups seront (ré)créés dans resize car dépend des textures
         this.bindGroupBrush = undefined
         this.bindGroupMandelbrot = undefined
         this.bindGroupResolve = undefined
+        this.bindGroupMotionBlur = undefined
         this.bindGroupColor = undefined
+        this.bindGroupCopy = undefined
     }
 
     resize() {
@@ -350,6 +403,22 @@ export class Engine {
         })
         this.resolvedView = this.resolvedTexture.createView()
 
+        this.coloredTexture = this.device.createTexture({
+            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
+            format: 'rgba16float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'Engine ColoredTexture',
+        })
+        this.coloredView = this.coloredTexture.createView()
+
+        this.blurredTexture = this.device.createTexture({
+            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
+            format: 'rgba16float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'Engine BlurredTexture',
+        })
+        this.blurredView = this.blurredTexture.createView()
+
         // Re-création des bind groups dépendant des textures
         if (this.pipelineBrush) {
             const layout = this.pipelineBrush.getBindGroupLayout(0)
@@ -385,6 +454,27 @@ export class Engine {
             })
         }
 
+        if (this.pipelineCopy) {
+            const layout = this.pipelineCopy.getBindGroupLayout(0)
+            this.bindGroupCopy = this.device.createBindGroup({
+                layout,
+                entries: [{ binding: 0, resource: this.coloredView! }],
+                label: 'Engine BindGroup Copy',
+            })
+        }
+
+        if (this.pipelineMotionBlur) {
+            const layout = this.pipelineMotionBlur.getBindGroupLayout(0)
+            this.bindGroupMotionBlur = this.device.createBindGroup({
+                layout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.uniformBufferMotionBlur! } },
+                    { binding: 1, resource: this.coloredView! },
+                ],
+                label: 'Engine BindGroup MotionBlur',
+            })
+        }
+
         if (this.pipelineColor) {
             const layout = this.pipelineColor.getBindGroupLayout(0)
             const entries: GPUBindGroupEntry[] = [
@@ -403,6 +493,7 @@ export class Engine {
         }
 
         this.prevFrameMandelbrot = undefined // plus de frame précédente après resize
+        this.prevPrevFrameMandelbrot = undefined
         this.needRender = true
     }
 
@@ -567,12 +658,14 @@ export class Engine {
             || !this.pipelineMandelbrot
             || !this.pipelineResolve
             || !this.pipelineColor
+            || !this.pipelineColor
         ) {
             return
         }
         if (!this.bindGroupBrush
             || !this.bindGroupMandelbrot
             || !this.bindGroupResolve
+            || !this.bindGroupColor
             || !this.bindGroupColor
         ) {
             return
@@ -611,6 +704,44 @@ export class Engine {
             0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
+
+        // Calcul des paramètres du motion blur
+        const prevAngle = this.prevFrameMandelbrot?.angle ?? this.previousMandelbrot.angle
+        const prevScale = this.prevFrameMandelbrot?.scale ?? this.previousMandelbrot.scale
+        const currScale = this.previousMandelbrot.scale
+        const currAngle = this.previousMandelbrot.angle
+        
+        // Calculer la vitesse de translation en pixels normalisés (dans l'espace du plan complexe)
+        let velocityX = 0
+        let velocityY = 0
+        if (this.prevFrameMandelbrot && !this.clearHistoryNextFrame) {
+            const deltaDx = this.previousMandelbrot.dx - this.prevFrameMandelbrot.dx
+            const deltaDy = this.previousMandelbrot.dy - this.prevFrameMandelbrot.dy
+            const texSize = this.neutralSize
+            const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
+            
+            // Convertir le déplacement du plan complexe en pixels normalisés
+            // Ces valeurs sont dans l'espace du plan complexe, pas en espace écran
+            // La rotation sera appliquée dans le shader
+            velocityX = (deltaDx * texSize) / (2 * this.previousMandelbrot.scale * neutralExtent) / texSize
+            velocityY = -(deltaDy * texSize) / (2 * this.previousMandelbrot.scale * neutralExtent) / texSize
+        }
+
+        const motionBlurUniforms = new Float32Array([
+            aspect,
+            currAngle,
+            prevAngle,
+            prevScale,
+            currScale,
+            this.previousRenderOptions?.motionBlurStrength ?? 0.5,
+            velocityX,
+            velocityY,
+            this.previousRenderOptions?.motionBlurSamples ?? 8,
+            0,
+            0,
+            0,
+        ])
+        this.device.queue.writeBuffer(this.uniformBufferMotionBlur!, 0, motionBlurUniforms.buffer)
 
         const commandEncoder = this.device.createCommandEncoder()
 
@@ -656,12 +787,11 @@ export class Engine {
         rpassResolve.draw(6, 1, 0, 0)
         rpassResolve.end()
 
-        // Pass 3: colorisation vers écran (resolved -> swapchain)
-        const swapView = this.ctx.getCurrentTexture().createView()
+        // Pass 3: colorisation (resolved -> colored)
         const rpassColor = commandEncoder.beginRenderPass({
             colorAttachments: [{
-                view: swapView,
-                clearValue: { r: 1, g: 1, b: 1, a: 1 },
+                view: this.coloredView!,
+                clearValue: { r: 0, g: 0, b: 0, a: 1 },
                 loadOp: 'clear',
                 storeOp: 'store',
             }],
@@ -671,6 +801,37 @@ export class Engine {
         rpassColor.draw(6, 1, 0, 0)
         rpassColor.end()
 
+        // Pass 4: motion blur (colored -> swapchain) - seulement si activé et pipeline disponible
+        const swapView = this.ctx.getCurrentTexture().createView()
+        if (this.previousRenderOptions?.activateMotionBlur && this.pipelineMotionBlur && this.bindGroupMotionBlur) {
+            const rpassMotionBlur = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: swapView,
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            })
+            rpassMotionBlur.setPipeline(this.pipelineMotionBlur)
+            rpassMotionBlur.setBindGroup(0, this.bindGroupMotionBlur)
+            rpassMotionBlur.draw(6, 1, 0, 0)
+            rpassMotionBlur.end()
+        } else {
+            // Si motion blur désactivé, copier colored -> swapchain sans traitement
+            const rpassCopy = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: swapView,
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            })
+            rpassCopy.setPipeline(this.pipelineCopy!)
+            rpassCopy.setBindGroup(0, this.bindGroupCopy!)
+            rpassCopy.draw(6, 1, 0, 0)
+            rpassCopy.end()
+        }
+
         // soumission des commandes
         this.device.queue.submit([commandEncoder.finish()])
 
@@ -678,6 +839,7 @@ export class Engine {
             //await this.device.queue.onSubmittedWorkDone()
 
         // marque mise à jour des paramètres frame précédente pour prochaine frame
+        this.prevPrevFrameMandelbrot = this.prevFrameMandelbrot ? { ...this.prevFrameMandelbrot } : undefined
         this.prevFrameMandelbrot = { ...this.previousMandelbrot }
 
         // Passe snapshot PNG écran (optionnelle, si demandée)
@@ -761,10 +923,12 @@ export class Engine {
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.resolvedTexture?.destroy?.()
+        this.blurredTexture?.destroy?.()
         this.mandelbrotReferenceBuffer?.destroy?.()
         this.uniformBufferMandelbrot?.destroy?.()
         this.uniformBufferColor?.destroy?.()
         this.uniformBufferBrush?.destroy?.()
+        this.uniformBufferMotionBlur?.destroy?.()
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()
         this.paletteTexture?.destroy?.()

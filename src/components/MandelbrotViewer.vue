@@ -45,6 +45,9 @@ const mandelbrotParams = ref<MandelbrotParams>({
   activateSkybox: false,
   activateSmoothness: true,
   activateZebra: false,
+  activateMotionBlur: false,
+  motionBlurStrength: 0.5,
+  motionBlurSamples: 8,
 });
 
 // Restore paramètres à partir du localStorage puis surveille et persiste à chaque changement
@@ -152,6 +155,9 @@ const shortcutLabels = computed(() => {
       :activateShading="mandelbrotParams.activateShading"
       :activateZebra="mandelbrotParams.activateZebra"
       :activateSmoothness="mandelbrotParams.activateSmoothness"
+      :activateMotionBlur="mandelbrotParams.activateMotionBlur"
+      :motionBlurStrength="mandelbrotParams.motionBlurStrength"
+      :motionBlurSamples="mandelbrotParams.motionBlurSamples"
     />
 
     <!-- Panel Settings -->

@@ -54,6 +54,9 @@ const props = withDefaults(defineProps<{
   activateShading?: boolean,
   activateZebra?: boolean,
   activateSmoothness?: boolean,
+  activateMotionBlur?: boolean,
+  motionBlurStrength?: number,
+  motionBlurSamples?: number,
  }>(),
 
     {
@@ -80,6 +83,9 @@ const props = withDefaults(defineProps<{
        activateShading: true,
        activateZebra: false,
        activateSmoothness: true,
+       activateMotionBlur: false,
+       motionBlurStrength: 0.5,
+       motionBlurSamples: 8,
     }
 );
 
@@ -123,6 +129,9 @@ async function draw() {
       activateSkybox: props.activateSkybox,
       activateSmoothness: props.activateSmoothness,
       activateZebra: props.activateZebra,
+      activateMotionBlur: props.activateMotionBlur,
+      motionBlurStrength: props.motionBlurStrength,
+      motionBlurSamples: props.motionBlurSamples,
     }
 
   )
@@ -157,6 +166,9 @@ async function initWebGPU() {
     activateWebcam: props.activateWebcam,
     activateSmoothness: props.activateSmoothness,
     activateZebra: props.activateZebra,
+    activateMotionBlur: props.activateMotionBlur,
+    motionBlurStrength: props.motionBlurStrength,
+    motionBlurSamples: props.motionBlurSamples,
   });
   return engine.initialize(navigator)
 }
