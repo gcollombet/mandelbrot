@@ -32,6 +32,7 @@ export type RenderOptions = {
     activatePalette: boolean,
     activateSmoothness: boolean,
     activateZebra: boolean,
+    activateAnimate: boolean,
     tessellationLevel: number,
     shadingLevel: number,
 }
@@ -230,7 +231,7 @@ export class Engine {
         const layoutBrush = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
             ],
             label: 'Engine BindGroupLayout Brush',
         })
@@ -239,20 +240,20 @@ export class Engine {
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
             ],
             label: 'Engine BindGroupLayout Mandelbrot',
         })
 
         const layoutResolve = this.device.createBindGroupLayout({
-            entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } }],
+            entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } }],
             label: 'Engine BindGroupLayout Resolve',
         })
 
         const layoutColor = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float'  } },
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -264,7 +265,7 @@ export class Engine {
         this.pipelineBrush = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutBrush] }),
             vertex: { module: moduleBrush, entryPoint: 'vs_main' },
-            fragment: { module: moduleBrush, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
+            fragment: { module: moduleBrush, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Brush',
         })
@@ -272,7 +273,7 @@ export class Engine {
         this.pipelineMandelbrot = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMandelbrot] }),
             vertex: { module: moduleCompute, entryPoint: 'vs_main' },
-            fragment: { module: moduleCompute, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
+            fragment: { module: moduleCompute, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Mandelbrot',
         })
@@ -280,7 +281,7 @@ export class Engine {
         this.pipelineResolve = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
             vertex: { module: moduleResolve, entryPoint: 'vs_main' },
-            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
+            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Resolve',
         })
@@ -328,7 +329,7 @@ export class Engine {
 
         this.rawTexture = this.device.createTexture({
             size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
-            format: 'rgba16float',
+            format: 'rgba32float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             label: 'Engine RawTexture (A)',
         })
@@ -336,7 +337,7 @@ export class Engine {
 
         this.rawBrushTexture = this.device.createTexture({
             size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
-            format: 'rgba16float',
+            format: 'rgba32float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             label: 'Engine RawBrushTexture (B)',
         })
@@ -344,7 +345,7 @@ export class Engine {
 
         this.resolvedTexture = this.device.createTexture({
             size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
-            format: 'rgba16float',
+            format: 'rgba32float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             label: 'Engine ResolvedTexture',
         })
@@ -459,6 +460,10 @@ export class Engine {
             this.needRender = true
         }
 
+        if (renderOptions.activateAnimate) {
+            this.needRender = true
+        }
+
         const aspect = (this.width / Math.max(1, this.height))
 
         const mandelbrotShaderUniformData = new Float32Array([
@@ -512,8 +517,7 @@ export class Engine {
             renderOptions.activateZebra ? 1 : 0,
             aspect,
             mandelbrot.angle,
-            0,
-            0,
+            renderOptions.activateAnimate ? 1 : 0,
             0,
             0,
         ])

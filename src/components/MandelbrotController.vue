@@ -26,6 +26,7 @@ const props = defineProps<{
   activateShading?: boolean,
   activateZebra?: boolean,
   activateSmoothness?: boolean,
+  activateAnimate?: boolean,
 }>();
 
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
@@ -267,6 +268,7 @@ onUnmounted(() => {
       :activateShading="props.activateShading"
       :activateZebra="props.activateZebra"
       :activateSmoothness="props.activateSmoothness"
+      :activateAnimate="props.activateAnimate"
       :paletteOffset="props.paletteOffset"
     />
     

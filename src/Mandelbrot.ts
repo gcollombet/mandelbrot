@@ -20,5 +20,6 @@ export interface MandelbrotParams {
     activateShading: boolean,
     activatePalette: boolean,
     activateSkybox: boolean,
+    activateAnimate: boolean,
     colorStops: ColorStop[],
 }

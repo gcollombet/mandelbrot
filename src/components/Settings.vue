@@ -27,6 +27,7 @@ const model =  defineModel<MandelbrotParams>({
     activateShading: true,
     activateZebra: false,
     activateSmoothness: true,
+    activateAnimate: false,
   }
 });
 
@@ -493,6 +494,12 @@ watch([activeTab, () => props.engine], async ([tab]) => {
         <label class="checkbox">
           <input type="checkbox" v-model="model.activateZebra" />
           &nbsp;Zebra
+        </label>
+      </div>
+      <div class="field">
+        <label class="checkbox">
+          <input type="checkbox" v-model="model.activateAnimate" />
+          &nbsp;Animate
         </label>
       </div>
     </div>

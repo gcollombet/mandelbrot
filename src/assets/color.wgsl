@@ -14,10 +14,10 @@ struct Uniforms {
   activateZebra: f32,
   aspect: f32,
   angle: f32,
+  animate: f32,
   pad0: f32,
   pad1: f32,
   pad2: f32,
-  pad3: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d<f32>; // resolved neutral texture
@@ -91,7 +91,7 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
     parameters.tessellationLevel + sin(parameters.time * 0.05)
   );
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-  let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
+  let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset );
   let paletteColor = tile_tessellation(paletteTex, palettePhase, 1.0, 1.0);
 
   var color = vec3<f32>(0.0, 0.0, 0.0);
@@ -120,9 +120,9 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
   }
 
   if (parameters.activateShading == 1.0) {
-    let normal = normalize(vec3<f32>(d.y, d.x, 1.0));
-    let lightDir = normalize(vec3<f32>(0.2, 0.3, 0.9));
-    let viewDir = vec3<f32>(0.0, 0.6, 1.0);
+    let normal = normalize(vec3<f32>(d.y, d.x, 0.5));
+    let lightDir = normalize(vec3<f32>(0.2, 0.3, 0.5));
+    let viewDir = vec3<f32>(0.7, 0.8, 0.5);
     let diff = max(dot(normal, lightDir), 0.0);
     let ambient = 2.0;
     let reflectDir = reflect(-lightDir, normal);
@@ -143,7 +143,7 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
       phong = phong * lum * 1.0;
       color = color / phong * 1.0;
     } else {
-      color = color / phong * 3.0;
+      color = color / phong * 2.0;
     }
   }
 
@@ -198,6 +198,8 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   let v = nu / 256.0;
-  let color = palette(v, data.y, vec2<f32>(data.z, data.w), uv_neutral.x, uv_neutral.y);
+  var color = palette(v, data.y, vec2<f32>(data.z, data.w), uv_neutral.x, uv_neutral.y);
+
   return vec4<f32>(color, 1.0);
 }
+

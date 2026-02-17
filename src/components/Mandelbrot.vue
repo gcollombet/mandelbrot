@@ -54,6 +54,7 @@ const props = withDefaults(defineProps<{
   activateShading?: boolean,
   activateZebra?: boolean,
   activateSmoothness?: boolean,
+  activateAnimate?: boolean,
  }>(),
 
     {
@@ -80,6 +81,7 @@ const props = withDefaults(defineProps<{
        activateShading: true,
        activateZebra: false,
        activateSmoothness: true,
+       activateAnimate: false,
     }
 );
 
@@ -123,6 +125,7 @@ async function draw() {
       activateSkybox: props.activateSkybox,
       activateSmoothness: props.activateSmoothness,
       activateZebra: props.activateZebra,
+      activateAnimate: props.activateAnimate,
     }
 
   )
@@ -157,6 +160,7 @@ async function initWebGPU() {
     activateWebcam: props.activateWebcam,
     activateSmoothness: props.activateSmoothness,
     activateZebra: props.activateZebra,
+    activateAnimate: props.activateAnimate,
   });
   return engine.initialize(navigator)
 }
