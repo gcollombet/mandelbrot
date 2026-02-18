@@ -118,7 +118,7 @@ fn mandelbrot_func(x0: f32, y0: f32) -> vec4<f32> {
 
   let angle_der = atan2(d.y, d.x);
   let distance = dot(z, z) * 2.0 * log(dot(z, z)) / dot(d, d);
-  return vec4<f32>(i, distance / (mandelbrot.scale * 1000.0), angle_der, length(dz));
+  return vec4<f32>(i, z.x ,z.y, angle_der);
 }
 
 @fragment

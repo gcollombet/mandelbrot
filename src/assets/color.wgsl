@@ -79,8 +79,7 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
   return textureLoad(tex_, coord, 0).rgb;
 }
 
-fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
-  let d = vec2<f32>(cos(zd.x), sin(zd.x));
+fn palette(v: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
   let deep = v * 2.0;
 
   let tessColor = tile_tessellation(tileTex, deep + dx, deep + dy, parameters.tessellationLevel);
@@ -120,7 +119,7 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
   }
 
   if (parameters.activateShading == 1.0) {
-    let normal = normalize(vec3<f32>(d.y, d.x, 0.5));
+    let normal = normalize(vec3<f32>(cos(d), sin(d), 0.5));
     let lightDir = normalize(vec3<f32>(0.2, 0.3, 0.5));
     let viewDir = vec3<f32>(0.7, 0.8, 0.5);
     let diff = max(dot(normal, lightDir), 0.0);
@@ -130,7 +129,7 @@ fn palette(v: f32, len: f32, zd: vec2<f32>, dx: f32, dy: f32) -> vec3<f32> {
     var phong = ambient + 2.0 * diff + 1.0 * specular;
 
     if (parameters.activateSkybox == 1.0) {
-      let skyboxDir = normalize(vec3<f32>(d.x, d.y, 1.0));
+      let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0));
       let skyboxUV = dir_to_skybox_uv(skyboxDir, dx, dy);
       let skyboxSize = vec2<i32>(textureDimensions(skyboxTex, 0));
       let skyboxCoord = vec2<i32>(
@@ -198,7 +197,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   let v = nu / 256.0;
-  var color = palette(v, data.y, vec2<f32>(data.z, data.w), uv_neutral.x, uv_neutral.y);
+  var color = palette(v, vec2<f32>(data.y, data.z), data.w, uv_neutral.x, uv_neutral.y);
 
   return vec4<f32>(color, 1.0);
 }
