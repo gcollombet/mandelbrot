@@ -20,7 +20,7 @@ struct Uniforms {
   pad2: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
-@group(0) @binding(1) var tex: texture_2d<f32>; // resolved neutral texture
+@group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
 @group(0) @binding(2) var tileTex: texture_2d<f32>;
 @group(0) @binding(3) var skyboxTex: texture_2d<f32>;
 @group(0) @binding(4) var webcamTex: texture_2d<f32>;
@@ -168,28 +168,46 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let xy_neutral = local_rot / neutralExtent;
   let uv_neutral = xy_neutral * 0.5 + vec2<f32>(0.5, 0.5);
 
-  let texSize = vec2<i32>(textureDimensions(tex, 0));
+  let texSize = vec2<i32>(textureDimensions(tex));
   let sampleCoord = vec2<i32>(
     i32(clamp(uv_neutral.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
     i32(clamp((1.0 - uv_neutral.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
   );
 
-  let data = textureLoad(tex, sampleCoord, 0);
-  var nu = data.x;
+  // Read individual layers from the texture array.
+  let iter_val  = textureLoad(tex, sampleCoord, 0, 0).r; // layer 0: integer iter count / sentinel
+  let mu_val    = textureLoad(tex, sampleCoord, 1, 0).r; // layer 1: smooth fractional part
+  let zx_val    = textureLoad(tex, sampleCoord, 2, 0).r; // layer 2: z.x
+  let zy_val    = textureLoad(tex, sampleCoord, 3, 0).r; // layer 3: z.y
+  let angle_der = textureLoad(tex, sampleCoord, 6, 0).r; // layer 6: angle_der
 
-  if (parameters.activateZebra == 1.0 && floor(nu) % 2.0 == 0.0) {
-    // Zebra is a display option; keep negative reserved for sentinels.
-    nu = 0.0;
-  }
+  // Combine integer + fractional parts for smooth iteration value.
+  var nu = iter_val + mu_val;
 
-  // Distinguish "uncomputed" (sentinels) from the set interior (nu == 0).
-  if (nu < 0.0) {
-    let t = clamp((-nu) / 64.0, 0.0, 1.0);
+  // Sentinel: iter_val < 0 => uncomputed pixel.
+  if (iter_val < 0.0) {
+    let t = clamp((-iter_val) / 64.0, 0.0, 1.0);
     return vec4<f32>(0.15 + 0.35 * t, 0.0, 0.0, 1.0);
   }
 
-  if (nu == 0.0) {
+  // Budget exhausted: iter > 0 but z hasn't escaped (|z|² < 4).
+  // Render as green (debug) until continuation completes.
+  if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < 4.0) {
+    return vec4<f32>(0.0, 0.5, 0.0, 1.0);
+  }
+
+  // Inside the set: iter_val == 0 and mu >= 0.
+  if (iter_val == 0.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  }
+
+  if (parameters.activateZebra == 1.0 && floor(nu) % 2.0 == 0.0) {
+    nu = 0.0;
+  }
+
+  // Edge case: nu <= 0 after combination (shouldn't happen for escaped points).
+  if (nu <= 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.5, 1.0);
   }
 
   if (parameters.activateSmoothness == 0.0) {
@@ -197,7 +215,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   let v = nu / 256.0;
-  var color = palette(v, vec2<f32>(data.y, data.z), data.w, uv_neutral.x, uv_neutral.y);
+  var color = palette(v, vec2<f32>(zx_val, zy_val), angle_der, uv_neutral.x, uv_neutral.y);
 
   return vec4<f32>(color, 1.0);
 }

@@ -13,7 +13,7 @@ import type {ColorStop} from './ColorStop.ts'
 // Progressive refinement settings.
 // Start step for the sentinel grid; must be a power-of-two.
 // Examples: 16, 32, 64, 128...
-const SENTINEL_SEED_STEP_POW2 = 64
+const SENTINEL_SEED_STEP_POW2 = 256
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -61,13 +61,19 @@ export class Engine {
     format!: GPUTextureFormat
     mandelbrotNavigator!: MandelbrotNavigator
 
+    // Number of r32float layers per texture array
+    static readonly LAYER_COUNT = 7
+
     // resources
-    rawTexture?: GPUTexture // texture "neutre" (A)
-    rawView?: GPUTextureView
-    rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B)
-    rawBrushView?: GPUTextureView
-    resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles
-    resolvedView?: GPUTextureView
+    rawTexture?: GPUTexture // texture "neutre" (A) — 7-layer r32float array
+    rawArrayView?: GPUTextureView // full 2d-array view for sampling
+    rawLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
+    rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B) — 7-layer r32float array
+    rawBrushArrayView?: GPUTextureView // full 2d-array view for sampling
+    rawBrushLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
+    resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 7-layer r32float array
+    resolvedArrayView?: GPUTextureView // full 2d-array view for sampling
+    resolvedLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
 
     // buffers
     uniformBufferMandelbrot?: GPUBuffer // passe Mandelbrot (calc -1)
@@ -108,6 +114,9 @@ export class Engine {
 
     // flag pour indiquer si l'historique doit être effacé au prochain rendu
     clearHistoryNextFrame = false
+
+    // Progressive iteration state
+    static readonly ITERATION_BATCH_SIZE = 10
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -208,7 +217,7 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 8,
+            size: 4 * 8, // 7 floats + 4-byte padding for 16-byte alignment
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
@@ -231,7 +240,7 @@ export class Engine {
         const layoutBrush = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
             ],
             label: 'Engine BindGroupLayout Brush',
         })
@@ -240,20 +249,20 @@ export class Engine {
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
             ],
             label: 'Engine BindGroupLayout Mandelbrot',
         })
 
         const layoutResolve = this.device.createBindGroupLayout({
-            entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } }],
+            entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }],
             label: 'Engine BindGroupLayout Resolve',
         })
 
         const layoutColor = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float'  } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -262,10 +271,13 @@ export class Engine {
             label: 'Engine BindGroupLayout Color',
         })
 
+        // 7 MRT targets for the layered r32float texture array
+        const mrtTargets: GPUColorTargetState[] = Array.from({ length: Engine.LAYER_COUNT }, () => ({ format: 'r32float' as GPUTextureFormat }))
+
         this.pipelineBrush = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutBrush] }),
             vertex: { module: moduleBrush, entryPoint: 'vs_main' },
-            fragment: { module: moduleBrush, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
+            fragment: { module: moduleBrush, entryPoint: 'fs_main', targets: mrtTargets },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Brush',
         })
@@ -273,7 +285,7 @@ export class Engine {
         this.pipelineMandelbrot = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMandelbrot] }),
             vertex: { module: moduleCompute, entryPoint: 'vs_main' },
-            fragment: { module: moduleCompute, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
+            fragment: { module: moduleCompute, entryPoint: 'fs_main', targets: mrtTargets },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Mandelbrot',
         })
@@ -281,7 +293,7 @@ export class Engine {
         this.pipelineResolve = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
             vertex: { module: moduleResolve, entryPoint: 'vs_main' },
-            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: [{ format: 'rgba32float' }] },
+            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: mrtTargets },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Resolve',
         })
@@ -302,7 +314,7 @@ export class Engine {
     }
 
     resize() {
-        const dpr = (window.devicePixelRatio || 1)
+        const dpr = (window.devicePixelRatio || 1) * 1.0
         const parent = this.canvas.parentElement
         const widthCSS = parent?.clientWidth || 1
         const heightCSS = parent?.clientHeight || 1
@@ -327,29 +339,52 @@ export class Engine {
         this.rawBrushTexture?.destroy?.()
         this.resolvedTexture?.destroy?.()
 
-        this.rawTexture = this.device.createTexture({
-            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
-            format: 'rgba32float',
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-            label: 'Engine RawTexture (A)',
-        })
-        this.rawView = this.rawTexture.createView()
+        const layerCount = Engine.LAYER_COUNT
 
-        this.rawBrushTexture = this.device.createTexture({
-            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
-            format: 'rgba32float',
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-            label: 'Engine RawBrushTexture (B)',
-        })
-        this.rawBrushView = this.rawBrushTexture.createView()
+        // Helper: create a 7-layer r32float texture array + per-layer 2d views + full 2d-array view
+        const createLayeredTexture = (label: string): {
+            texture: GPUTexture,
+            arrayView: GPUTextureView,
+            layerViews: GPUTextureView[],
+        } => {
+            const texture = this.device.createTexture({
+                size: { width: textureSize, height: textureSize, depthOrArrayLayers: layerCount },
+                format: 'r32float',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+                label,
+            })
+            const arrayView = texture.createView({
+                dimension: '2d-array',
+                baseArrayLayer: 0,
+                arrayLayerCount: layerCount,
+                label: label + ' ArrayView',
+            })
+            const layerViews: GPUTextureView[] = []
+            for (let i = 0; i < layerCount; i++) {
+                layerViews.push(texture.createView({
+                    dimension: '2d',
+                    baseArrayLayer: i,
+                    arrayLayerCount: 1,
+                    label: label + ` Layer${i}`,
+                }))
+            }
+            return { texture, arrayView, layerViews }
+        }
 
-        this.resolvedTexture = this.device.createTexture({
-            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
-            format: 'rgba32float',
-            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
-            label: 'Engine ResolvedTexture',
-        })
-        this.resolvedView = this.resolvedTexture.createView()
+        const rawResult = createLayeredTexture('Engine RawTexture (A)')
+        this.rawTexture = rawResult.texture
+        this.rawArrayView = rawResult.arrayView
+        this.rawLayerViews = rawResult.layerViews
+
+        const brushResult = createLayeredTexture('Engine RawBrushTexture (B)')
+        this.rawBrushTexture = brushResult.texture
+        this.rawBrushArrayView = brushResult.arrayView
+        this.rawBrushLayerViews = brushResult.layerViews
+
+        const resolvedResult = createLayeredTexture('Engine ResolvedTexture')
+        this.resolvedTexture = resolvedResult.texture
+        this.resolvedArrayView = resolvedResult.arrayView
+        this.resolvedLayerViews = resolvedResult.layerViews
 
         // Re-création des bind groups dépendant des textures
         if (this.pipelineBrush) {
@@ -358,7 +393,7 @@ export class Engine {
                 layout,
                 entries: [
                     { binding: 0, resource: { buffer: this.uniformBufferBrush! } },
-                    { binding: 1, resource: this.rawView! },
+                    { binding: 1, resource: this.rawArrayView! },
                 ],
                 label: 'Engine BindGroup Brush',
             })
@@ -371,7 +406,7 @@ export class Engine {
                 entries: [
                     { binding: 0, resource: { buffer: this.uniformBufferMandelbrot! } },
                     { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer! } },
-                    { binding: 2, resource: this.rawBrushView! },
+                    { binding: 2, resource: this.rawBrushArrayView! },
                 ],
                 label: 'Engine BindGroup Mandelbrot',
             })
@@ -381,7 +416,7 @@ export class Engine {
             const layout = this.pipelineResolve.getBindGroupLayout(0)
             this.bindGroupResolve = this.device.createBindGroup({
                 layout,
-                entries: [{ binding: 0, resource: this.rawView! }],
+                entries: [{ binding: 0, resource: this.rawArrayView! }],
                 label: 'Engine BindGroup Resolve',
             })
         }
@@ -390,7 +425,7 @@ export class Engine {
             const layout = this.pipelineColor.getBindGroupLayout(0)
             const entries: GPUBindGroupEntry[] = [
                 { binding: 0, resource: { buffer: this.uniformBufferColor! } },
-                { binding: 1, resource: this.resolvedView! },
+                { binding: 1, resource: this.resolvedArrayView! },
                 { binding: 2, resource: this.tileTextureView! },
                 { binding: 3, resource: this.skyboxTextureView! },
                 { binding: 4, resource: this.webcamTextureView! },
@@ -446,7 +481,7 @@ export class Engine {
         this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
             && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
         if (this.needRender) {
-            this.extraFrames = 10
+            this.extraFrames = 100
         }
 
         if (renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam
@@ -473,11 +508,11 @@ export class Engine {
             mandelbrot.scale,
             aspect,
             mandelbrot.angle,
-            mandelbrot.maxIterations,
+            100,            // maxIteration: iterations to compute THIS pass
             mandelbrot.epsilon,
             renderOptions.antialiasLevel,
-            0,
-            0,
+            0,  // iterationOffset: iterations already completed
+            mandelbrot.maxIterations,              // globalMaxIter: total iteration target for the view
             0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformData.buffer)
@@ -523,7 +558,7 @@ export class Engine {
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
-        if (!this.needRender && this.extraFrames <= 0) {
+        if (!this.needRender && this.extraFrames <= 0 && !this.progressiveInProgress) {
             return
         }
 
@@ -612,20 +647,23 @@ export class Engine {
             baseSentinel,
             shiftTexX,
             shiftTexY,
-            0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
         const commandEncoder = this.device.createCommandEncoder()
 
+        // Helper: build 7 MRT color attachments from per-layer views
+        const makeMrtAttachments = (layerViews: GPUTextureView[]): GPURenderPassColorAttachment[] =>
+            layerViews.map(view => ({
+                view,
+                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                loadOp: 'clear' as GPULoadOp,
+                storeOp: 'store' as GPUStoreOp,
+            }))
+
         // Pass 0: brush des sentinelles (A -> B)
         const rpassBrush = commandEncoder.beginRenderPass({
-            colorAttachments: [{
-                view: this.rawBrushView!,
-                clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                loadOp: 'clear',
-                storeOp: 'store',
-            }],
+            colorAttachments: makeMrtAttachments(this.rawBrushLayerViews),
         })
         rpassBrush.setPipeline(this.pipelineBrush)
         rpassBrush.setBindGroup(0, this.bindGroupBrush)
@@ -634,12 +672,7 @@ export class Engine {
 
         // Pass 1: Mandelbrot (B -> A), calcule uniquement les pixels == -1
         const rpassMandelbrot = commandEncoder.beginRenderPass({
-            colorAttachments: [{
-                view: this.rawView!,
-                clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                loadOp: 'clear',
-                storeOp: 'store',
-            }],
+            colorAttachments: makeMrtAttachments(this.rawLayerViews),
         })
         rpassMandelbrot.setPipeline(this.pipelineMandelbrot)
         rpassMandelbrot.setBindGroup(0, this.bindGroupMandelbrot)
@@ -648,12 +681,7 @@ export class Engine {
 
         // Pass 2: resolve des sentinelles (A -> resolved)
         const rpassResolve = commandEncoder.beginRenderPass({
-            colorAttachments: [{
-                view: this.resolvedView!,
-                clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                loadOp: 'clear',
-                storeOp: 'store',
-            }],
+            colorAttachments: makeMrtAttachments(this.resolvedLayerViews),
         })
         rpassResolve.setPipeline(this.pipelineResolve)
         rpassResolve.setBindGroup(0, this.bindGroupResolve)

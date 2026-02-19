@@ -1,13 +1,31 @@
 // Brush pass: updates sentinel levels in the neutral square texture.
 //
-// Sentinels are stored in the red channel as negative integers:
-//   -1  : needs Mandelbrot computation
+// Uses a texture_2d_array<f32> with 7 r32float layers.
+//
+// Layer layout:
+//   0 : sentinel / iteration count (integer part)
+//   1 : mu – fractional smooth part (cosmetic only, used for coloring).
+//       mu > 0  => pixel escaped; smooth coloring = iter + mu.
+//       State logic uses iter + |z|² instead of mu.
+//   2 : z.x
+//   3 : z.y
+//   4 : dz.x (derivative real)
+//   5 : dz.y (derivative imag)
+//   6 : angle_der
+//
+// Sentinels are stored in layer 0 as negative integers:
+//   -1  : needs Mandelbrot computation (or continuation)
 //   -2  : needs resolve with step=2
 //   -4  : needs resolve with step=4
 //   ...
-// We keep the rest of the pixel data unchanged for already-computed pixels.
 //
-// This pass outputs a new raw texture (ping-pong A -> B).
+// Pixel state convention (iter-only, no mu in state logic):
+//   iter == -1                     : sentinel, needs computation
+//   iter == 0                      : confirmed inside the set (or exhausted at globalMaxIter)
+//   iter > 0  AND  |z|² >= 4      : escaped → color with iter + mu
+//   iter > 0  AND  |z|² < 4       : budget exhausted mid-progress → needs continuation
+//   The mandelbrot pass handles continuations directly; the brush does NOT
+//   convert budget-exhausted pixels to sentinels.
 
 struct BrushUniforms {
   aspect: f32,
@@ -17,11 +35,10 @@ struct BrushUniforms {
   baseSentinel: f32,
   shiftTexX: f32,
   shiftTexY: f32,
-  pad0: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;
-@group(0) @binding(1) var prevRaw: texture_2d<f32>;
+@group(0) @binding(1) var prevRaw: texture_2d_array<f32>;
 
 struct VSOut {
   @builtin(position) position: vec4<f32>,
@@ -51,12 +68,6 @@ fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
 }
 
 fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
-  // Neutral texture uses a square domain large enough to contain the rotated screen.
-  // We work in "local" coordinates where the screen rectangle is:
-  //   local.x in [-aspect, +aspect]
-  //   local.y in [-1, +1]
-  // The neutral square corresponds to the half-diagonal extent:
-  //   neutralExtent = sqrt(aspect^2 + 1)
   let neutralExtent = sqrt(uni.aspect * uni.aspect + 1.0);
   let local_rot = xy_neutral * neutralExtent;
   let local = rotate(local_rot, -uni.angle);
@@ -65,18 +76,48 @@ fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
   return inside_x && inside_y;
 }
 
+// ── output struct (7 render targets) ──────────────────────────────
+struct FragOut {
+  @location(0) iter:      vec4<f32>,
+  @location(1) mu:        vec4<f32>,
+  @location(2) zx:        vec4<f32>,
+  @location(3) zy:        vec4<f32>,
+  @location(4) dzx:       vec4<f32>,
+  @location(5) dzy:       vec4<f32>,
+  @location(6) angle_der: vec4<f32>,
+};
+
+fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
+
+fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
+  return textureLoad(prevRaw, coord, layer, 0).r;
+}
+
+fn loadAllLayers(coord: vec2<i32>) -> FragOut {
+  var o: FragOut;
+  o.iter      = pack(loadLayer(coord, 0));
+  o.mu        = pack(loadLayer(coord, 1));
+  o.zx        = pack(loadLayer(coord, 2));
+  o.zy        = pack(loadLayer(coord, 3));
+  o.dzx       = pack(loadLayer(coord, 4));
+  o.dzy       = pack(loadLayer(coord, 5));
+  o.angle_der = pack(loadLayer(coord, 6));
+  return o;
+}
+
+fn makeCleared(sentinel: f32) -> FragOut {
+  var o: FragOut;
+  o.iter      = pack(sentinel);
+  o.mu        = pack(0.0);
+  o.zx        = pack(0.0);
+  o.zy        = pack(0.0);
+  o.dzx       = pack(0.0);
+  o.dzy       = pack(0.0);
+  o.angle_der = pack(0.0);
+  return o;
+}
+
 fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
-  // Progressively refine the neutral texture by creating new "anchor" points.
-  //
-  // Convention:
-  //   s == -step (step is power-of-two)
-  // Meaning:
-  //   - the pixel is not computed yet
-  //   - the resolve pass will snap to the parent at multiples of `step`
-  //
-  // To make resolve work at each refinement level, we must ensure the parent pixels
-  // are themselves computed. We do that by turning pixels aligned with `step/2`
-  // into -1 (compute request), while the others become -(step/2).
   let si = i32(round(s));
   if (si >= 0) {
     return s;
@@ -91,52 +132,53 @@ fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
   }
 
   let next_step = max(1, step / 2);
-  // For step==2, `next_step` becomes 1, which makes everything an anchor.
   let is_anchor = (coord_out.x % next_step == 0) && (coord_out.y % next_step == 0);
   return select(-f32(next_step), -1.0, is_anchor);
 }
 
 @fragment
-fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
-  let dims = vec2<i32>(textureDimensions(prevRaw, 0));
+fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
+  let dims = vec2<i32>(textureDimensions(prevRaw));
   let coord_out = vec2<i32>(
     i32(clamp(uv.x * f32(dims.x), 0.0, f32(dims.x - 1))),
     i32(clamp((1.0 - uv.y) * f32(dims.y), 0.0, f32(dims.y - 1)))
   );
 
-  // Full reset when needed: seed base sentinel everywhere,
-  // and create anchors with -1 on a regular grid.
+  // Full reset when needed.
   if (uni.clearHistory >= 0.5) {
     let step = i32(max(1.0, uni.seedStep));
     let is_anchor = (coord_out.x % step == 0) && (coord_out.y % step == 0);
     let sentinel = select(-uni.baseSentinel, -1.0, is_anchor);
-    return vec4<f32>(sentinel, 0.0, 0.0, 1.0);
+    return makeCleared(sentinel);
   }
 
-  // Translation reprojection: sample the previous texture at a shifted coordinate.
-  // shiftTexX / shiftTexY are in texel units.
+  // Translation reprojection.
   let shift = vec2<i32>(i32(round(uni.shiftTexX)), i32(round(uni.shiftTexY)));
   let coord_in = coord_out - shift;
 
-  // Outside previous texture: newly exposed area -> seed at -baseSentinel.
-  // We keep processing it (ROI test + refinement) so we can create anchors immediately.
-  var prev = vec4<f32>(-uni.baseSentinel, 0.0, 0.0, 1.0);
-  if (!(coord_in.x < 0 || coord_in.y < 0 || coord_in.x >= dims.x || coord_in.y >= dims.y)) {
-    prev = textureLoad(prevRaw, coord_in, 0);
+  var prev: FragOut;
+  if (coord_in.x < 0 || coord_in.y < 0 || coord_in.x >= dims.x || coord_in.y >= dims.y) {
+    prev = makeCleared(-uni.baseSentinel);
+  } else {
+    prev = loadAllLayers(coord_in);
   }
 
-  // Outside ROI: keep reprojected previous as-is.
-  let xy_neutral = vec2<f32>(uv.x * 2.0 - 1.0, (uv.y * 2.0 - 1.0));
+  // Outside ROI: keep as-is.
+  let xy_neutral = vec2<f32>(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0);
   if (!is_inside_rotated_screen(xy_neutral)) {
     return prev;
   }
 
-  // Inside ROI: if it's a sentinel, refine it and schedule new anchors.
-  if (prev.x < 0.0) {
-    let refined = refine_sentinel(prev.x, coord_out);
-    return vec4<f32>(refined, prev.y, prev.z, prev.w);
+  let iter_val = prev.iter.r;
+
+  // Sentinel refinement.
+  if (iter_val < 0.0) {
+    let refined = refine_sentinel(iter_val, coord_out);
+    var out = prev;
+    out.iter = pack(refined);
+    return out;
   }
 
-  // Already computed.
+  // Already computed and escaped (iter > 0, mu > 0) or inside (iter == 0, mu >= 0).
   return prev;
 }
