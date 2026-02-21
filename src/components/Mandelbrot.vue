@@ -99,7 +99,7 @@ async function draw() {
   angle.value = parseFloat(angle_string);
   await nextTick();
   isUpdating = false;
-  const maxIterations = Math.min(Math.max(100, 1000 * Math.log2(1.0 / parseFloat(scale_string))),1_000_000);
+  const maxIterations = Math.min(Math.max(100, 200 * Math.log2(1.0 / parseFloat(scale_string))),100_000);
   await engine.update({
         cx: cx_string,
         cy: cy_string,
