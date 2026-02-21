@@ -13,7 +13,7 @@ import type {ColorStop} from './ColorStop.ts'
 // Progressive refinement settings.
 // Start step for the sentinel grid; must be a power-of-two.
 // Examples: 16, 32, 64, 128...
-const SENTINEL_SEED_STEP_POW2 = 256
+const SENTINEL_SEED_STEP_POW2 = 64
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -117,7 +117,7 @@ export class Engine {
     clearHistoryNextFrame = false
 
     // Progressive iteration state
-    static readonly ITERATION_BATCH_SIZE = 1000
+    static readonly ITERATION_BATCH_SIZE = 100
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -493,7 +493,7 @@ export class Engine {
         this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
             && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
         if (this.needRender) {
-            this.extraFrames = 150
+            this.extraFrames = 100
         }
 
         if (renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam

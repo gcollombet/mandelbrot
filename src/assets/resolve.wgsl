@@ -12,8 +12,9 @@
 //   6 : angle_der
 //
 // Sentinel convention:
-//   If layer0 == -step (step is power-of-two > 1), resolve by sampling
-//   the parent at (x & ~(step-1), y & ~(step-1)) for ALL 7 layers.
+//   If layer0 == -step (step is power-of-two > 1), resolve by testing
+//   all 4 corner anchors of the grid cell and using the first finished
+//   one.  This ensures correct resolve regardless of pan direction.
 
 struct ResolveUniforms {
   mu: f32,
@@ -138,34 +139,55 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     }
 
     let mask = ~(step_u - 1u);
-    let px = x & mask;
-    let py = y & mask;
-    let parent_coord = vec2<i32>(i32(px), i32(py));
+    let base_x = x & mask;
+    let base_y = y & mask;
 
-    let parent_iter = loadLayer(parent_coord, 0);
+    // Test 4 candidate anchors (all corners of the grid cell) so that
+    // resolve works regardless of the navigation direction.
+    var candidates = array<vec2<u32>, 4>(
+      vec2<u32>(base_x,          base_y),
+      vec2<u32>(base_x + step_u, base_y),
+      vec2<u32>(base_x,          base_y + step_u),
+      vec2<u32>(base_x + step_u, base_y + step_u)
+    );
 
-    // Parent is a sentinel itself — climb further.
-    if (parent_iter < 0.0) {
-      step_u = step_u * 2u;
-      continue;
+    for (var i = 0u; i < 4u; i = i + 1u) {
+      let cx = candidates[i].x;
+      let cy = candidates[i].y;
+
+      // Bounds check: skip candidates that fall outside the texture.
+      if (cx >= dims.x || cy >= dims.y) {
+        continue;
+      }
+
+      let ccoord = vec2<i32>(i32(cx), i32(cy));
+      let citer = loadLayer(ccoord, 0);
+
+      // Sentinel — this candidate is not computed yet.
+      if (citer < 0.0) {
+        continue;
+      }
+
+      // Inside set (iter == 0): use it.
+      if (citer == 0.0) {
+        return loadAllLayers(ccoord);
+      }
+
+      // iter > 0: check whether pixel actually escaped or is budget-exhausted.
+      let zx = loadLayer(ccoord, 2);
+      let zy = loadLayer(ccoord, 3);
+      let z_sq = zx * zx + zy * zy;
+
+      if (z_sq >= uni.mu) {
+        // Escaped — use this pixel.
+        return loadAllLayers(ccoord);
+      }
+
+      // Budget-exhausted: skip this candidate, try the others.
     }
 
-    // Inside set (iter == 0): use it.
-    if (parent_iter == 0.0) {
-      return loadAllLayers(parent_coord);
-    }
-
-    // iter > 0: check whether pixel actually escaped or is budget-exhausted.
-    let zx = loadLayer(parent_coord, 2);
-    let zy = loadLayer(parent_coord, 3);
-    let z_sq = zx * zx + zy * zy;
-
-    if (z_sq >= uni.mu) {
-      // Escaped — use this pixel.
-      return loadAllLayers(parent_coord);
-    }
-
-    // Budget-exhausted (still iterating): climb to the next coarser step.
+    // None of the 4 candidates had a finished pixel — climb to the next
+    // coarser grid level.
     step_u = step_u * 2u;
   }
 

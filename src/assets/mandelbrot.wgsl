@@ -164,10 +164,12 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_nu: f32, prev_zx: f
   let total_iter = prev_iter + i; // running total across all passes
 
   if (escaped) {
-    // Smooth colouring: compute fractional part (nu).
-    let log_zn = log(dz.x * dz.x + dz.y * dz.y) / 2.0;
-    let nu = log(log_zn / log(2.0)) / log(2.0);
-    let smooth_frac = max(1.0 - nu, 0.0);
+    // Smooth colouring: fractional correction normalised by the bailout radius.
+    // Formula: nu = log2( log(|z|²) / log(mu) )
+    //          smooth_frac = 1 - nu   (in [0,1] when |z|² is between mu and mu²)
+    let log_z2 = log(z.x * z.x + z.y * z.y);  // = log(|z|²)
+    let nu = log(log_z2 / log(muLimit)) / log(2.0);
+    let smooth_frac = clamp(1.0 - nu, 0.0, 1.0);
     let angle_der = atan2(d.y, d.x);
 
     out.iter      = pack(total_iter);
@@ -196,10 +198,10 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_nu: f32, prev_zx: f
     return out;
   }
 
-    // Smooth colouring: compute fractional part (nu).
-    let log_zn = log(dz.x * dz.x + dz.y * dz.y) / 2.0;
-    let nu = log(log_zn / log(2.0)) / log(2.0);
-    let smooth_frac = max(1.0 - nu, 0.0);
+    // Smooth colouring: fractional correction normalised by the bailout radius.
+    let log_z2 = log(z.x * z.x + z.y * z.y);
+    let nu = log(log_z2 / log(muLimit)) / log(2.0);
+    let smooth_frac = clamp(1.0 - nu, 0.0, 1.0);
     let angle_der = atan2(d.y, d.x);
   // Budget exhausted below globalMaxIter: store iter = total_iter, keep z/dz
   // for resumption.  |z|² < 4 distinguishes this from escaped pixels.
