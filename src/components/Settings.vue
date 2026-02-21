@@ -26,8 +26,10 @@ const model =  defineModel<MandelbrotParams>({
     activateWebcam: false,
     activateShading: true,
     activateZebra: false,
-    activateSmoothness: true,
+     activateSmoothness: true,
     activateAnimate: false,
+    dprMultiplier: 1.0,
+    maxIterationMultiplier: 1.0,
   }
 });
 
@@ -263,6 +265,13 @@ const epsilonSlider = computed({
   get: () => Math.log10(model.value.epsilon ?? 1e-8),
   set: (val: number) => {
     model.value.epsilon = Math.pow(10, val);
+  }
+});
+// Slider max iteration multiplier : logarithmique, 0.1–10
+const maxIterMultSlider = computed({
+  get: () => Math.log10(model.value.maxIterationMultiplier ?? 1.0),
+  set: (val: number) => {
+    model.value.maxIterationMultiplier = Number(Math.pow(10, val).toPrecision(3));
   }
 });
 
@@ -501,6 +510,18 @@ watch([activeTab, () => props.engine], async ([tab]) => {
           <input type="checkbox" v-model="model.activateAnimate" />
           &nbsp;Animate
         </label>
+      </div>
+      <div class="field">
+        <label class="label">R&eacute;solution (DPR &times; {{ model.dprMultiplier?.toFixed(3) ?? '1.000' }})</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="0.125" max="2" step="0.125" v-model.number="model.dprMultiplier" />
+        </div>
+      </div>
+      <div class="field">
+        <label class="label">It&eacute;rations (&times; {{ (model.maxIterationMultiplier ?? 1.0).toPrecision(3) }})</label>
+        <div class="control">
+          <input class="slider is-fullwidth" type="range" min="-1" max="1" step="0.01" v-model="maxIterMultSlider" />
+        </div>
       </div>
     </div>
     </div>

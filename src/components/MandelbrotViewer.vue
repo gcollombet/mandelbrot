@@ -46,6 +46,8 @@ const mandelbrotParams = ref<MandelbrotParams>({
   activateSmoothness: true,
   activateZebra: false,
   activateAnimate: false,
+  dprMultiplier: 1.0,
+  maxIterationMultiplier: 1.0,
 });
 
 // Restore paramètres à partir du localStorage puis surveille et persiste à chaque changement
@@ -154,6 +156,8 @@ const shortcutLabels = computed(() => {
       :activateZebra="mandelbrotParams.activateZebra"
       :activateSmoothness="mandelbrotParams.activateSmoothness"
       :activateAnimate="mandelbrotParams.activateAnimate"
+      :dprMultiplier="mandelbrotParams.dprMultiplier"
+      :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
     />
 
     <!-- Panel Settings -->

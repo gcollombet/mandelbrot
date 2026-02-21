@@ -55,6 +55,8 @@ const props = withDefaults(defineProps<{
   activateZebra?: boolean,
   activateSmoothness?: boolean,
   activateAnimate?: boolean,
+  dprMultiplier?: number,
+  maxIterationMultiplier?: number,
  }>(),
 
     {
@@ -82,7 +84,19 @@ const props = withDefaults(defineProps<{
        activateZebra: false,
        activateSmoothness: true,
        activateAnimate: false,
+        dprMultiplier: 1.0,
+        maxIterationMultiplier: 1.0,
     }
+);
+
+// Quand le multiplicateur DPR change, mettre à jour l'engine et redimensionner.
+watch(
+  () => props.dprMultiplier,
+  (val) => {
+    if (!engine) return;
+    engine.dprMultiplier = val;
+    handleResize();
+  }
 );
 
 
@@ -99,7 +113,7 @@ async function draw() {
   angle.value = parseFloat(angle_string);
   await nextTick();
   isUpdating = false;
-  const maxIterations = Math.min(Math.max(100, 200 * Math.log2(1.0 / parseFloat(scale_string))),100_000);
+  const maxIterations = Math.min(Math.max(100, 1000 * props.maxIterationMultiplier * Math.log2(1.0 / parseFloat(scale_string))),100_000);
   await engine.update({
         cx: cx_string,
         cy: cy_string,

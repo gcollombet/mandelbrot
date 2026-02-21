@@ -12,9 +12,11 @@ export interface MandelbrotParams {
     epsilon: number;
     angle: number;
     maxIterations: number,
+    maxIterationMultiplier: number,
     antialiasLevel: number,
     palettePeriod: number,
     paletteOffset: number,
+    dprMultiplier: number,
     activateWebcam: boolean,
     activateTessellation: boolean,
     activateShading: boolean,

@@ -27,6 +27,8 @@ const props = defineProps<{
   activateZebra?: boolean,
   activateSmoothness?: boolean,
   activateAnimate?: boolean,
+  dprMultiplier?: number,
+  maxIterationMultiplier?: number,
 }>();
 
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
@@ -270,6 +272,8 @@ onUnmounted(() => {
       :activateSmoothness="props.activateSmoothness"
       :activateAnimate="props.activateAnimate"
       :paletteOffset="props.paletteOffset"
+      :dprMultiplier="props.dprMultiplier"
+      :maxIterationMultiplier="props.maxIterationMultiplier"
     />
     
     <!-- Contrôles de navigation mobile -->

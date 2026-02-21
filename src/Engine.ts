@@ -116,8 +116,12 @@ export class Engine {
     // flag pour indiquer si l'historique doit être effacé au prochain rendu
     clearHistoryNextFrame = false
 
-    // Progressive iteration state
-    static readonly ITERATION_BATCH_SIZE = 100
+    // Progressive iteration state – adaptive batch sizing
+    // The batch size auto-adjusts each frame to target ~16ms GPU time.
+    static readonly MIN_BATCH_SIZE = 10
+    static readonly MAX_BATCH_SIZE = 10000
+    static readonly TARGET_FRAME_MS = 16
+    private iterationBatchSize = 10000
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -136,6 +140,9 @@ export class Engine {
     // temps en secondes
     time = 0
     private lastUpdateTime = 0 // timestamp ms de la dernière update
+
+    // DPR multiplier (adjustable from UI, default 1.0)
+    dprMultiplier = 1.0
 
     // Propriétés statiques pour le cache des textures
     static _tileTexture?: GPUTexture
@@ -323,7 +330,7 @@ export class Engine {
     }
 
     resize() {
-        const dpr = (window.devicePixelRatio || 1) * 1.0
+        const dpr = (window.devicePixelRatio || 1) * this.dprMultiplier
         const parent = this.canvas.parentElement
         const widthCSS = parent?.clientWidth || 1
         const heightCSS = parent?.clientHeight || 1
@@ -493,7 +500,7 @@ export class Engine {
         this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
             && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
         if (this.needRender) {
-            this.extraFrames = 100
+            this.extraFrames = 1000
         }
 
         if (renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam
@@ -520,7 +527,7 @@ export class Engine {
             mandelbrot.scale,
             aspect,
             mandelbrot.angle,
-            Engine.ITERATION_BATCH_SIZE,            // maxIteration: iterations to compute THIS pass
+            this.iterationBatchSize,            // maxIteration: iterations to compute THIS pass
             mandelbrot.epsilon,
             renderOptions.antialiasLevel,
             0,  // iterationOffset: iterations already completed
@@ -721,10 +728,27 @@ export class Engine {
         rpassColor.end()
 
         // soumission des commandes
+        const submitStartMs = performance.now()
         this.device.queue.submit([commandEncoder.finish()])
 
-        // attendre la fin du rendu précédent avant de soumettre pour éviter accumulation de frames
-            //await this.device.queue.onSubmittedWorkDone()
+        // Adaptive batch sizing: measure GPU completion time and adjust
+        this.device.queue.onSubmittedWorkDone().then(() => {
+            const elapsed = performance.now() - submitStartMs
+            if (elapsed > 0) {
+                // Scale batch size proportionally: if frame took 32ms with batch=100,
+                // target 16ms -> new batch ≈ 100 * 16/32 = 50.
+                // Use exponential smoothing (alpha=0.3) to avoid oscillation.
+                const ratio = Engine.TARGET_FRAME_MS / elapsed
+                const ideal = this.iterationBatchSize * ratio
+                this.iterationBatchSize = Math.round(
+                    Math.min(Engine.MAX_BATCH_SIZE,
+                        Math.max(Engine.MIN_BATCH_SIZE,
+                            this.iterationBatchSize * 0.7 + ideal * 0.3
+                        )
+                    )
+                )
+            }
+        })
 
         // marque mise à jour des paramètres frame précédente pour prochaine frame
         this.prevFrameMandelbrot = { ...this.previousMandelbrot }
