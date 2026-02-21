@@ -92,7 +92,7 @@ struct FragOut {
   @location(3) zy:        vec4<f32>,  // .r = z.y
   @location(4) dzx:       vec4<f32>,  // .r = derivative x
   @location(5) dzy:       vec4<f32>,  // .r = derivative y
-  @location(6) angle_der: vec4<f32>,  // .r = atan2 of distance-estimation
+  @location(6) ref_iter:       vec4<f32>,  // .r = atan2 of distance-estimation
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -102,40 +102,25 @@ fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
 }
 
 // ── core computation ──────────────────────────────────────────────
-fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_nu: f32, prev_zx: f32, prev_zy: f32, prev_dzx: f32, prev_dzy: f32) -> FragOut {
+fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_nu: f32, prev_zx: f32, prev_zy: f32, prev_dzx: f32, prev_dzy: f32, prev_ref_iter: f32) -> FragOut {
   let dc = vec2<f32>(x0, y0);
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
   let epsilon = mandelbrot.epsilon;
 
   // Resume state: if prev_iter > 0 we are continuing a previous pass.
-  var dz: vec2<f32>;
-  var der: vec2<f32>;
-  var i: f32;
-  var ref_i: i32;
 
-  let resuming = prev_iter > 0.0;
-  if (resuming) {
-    // Continue from stored z/dz.  z here is the *full* z (orbit + dz), so
-    // we restart perturbation from ref_i=0 with dz = stored_z.
-    dz = vec2<f32>(prev_zx, prev_zy);
-    der = vec2<f32>(prev_dzx, prev_dzy);
-    i = 0.0;
-    ref_i = i32(prev_nu)  ;
-  } else {
-    dz = vec2<f32>(0.0, 0.0);
-    der = vec2<f32>(1.0, 0.0);
-    i = 0.0;
-    ref_i = 0;
-  }
-
-  var z = getOrbit(0);
+  var i: f32 = 0.0;
+  var dz = vec2<f32>(prev_zx, prev_zy);
+  var der = vec2<f32>(prev_dzx, prev_dzy);
+  var ref_i = i32(prev_ref_iter)  ;
+  var z = getOrbit(ref_i);
   var d = vec2<f32>(1.0, 0.0);
 
   var escaped = false;
   var inside = false;
 
-  while (i < max_iteration) {
+  while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
     z = getOrbit(ref_i);
     dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
     ref_i += 1;
@@ -155,7 +140,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_nu: f32, prev_zx: f
     der = cmul(der * 2.0, z);
 
     let dot_dz = dot(dz, dz);
-    if (dot_z < dot_dz || f32(ref_i) >= mandelbrot.globalMaxIter) {
+    if (dot_z < dot_dz || f32(ref_i) == mandelbrot.globalMaxIter) {
       dz = z;
       ref_i = 0;
     }
@@ -172,7 +157,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_nu: f32, prev_zx: f
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
     out.dzy       = pack(der.y);
-    out.angle_der = pack(0.0);
+    out.ref_iter = pack(0.0);
     return out;
   }
 
@@ -183,17 +168,15 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_nu: f32, prev_zx: f
     let log_zn = log(dz.x * dz.x + dz.y * dz.y) / 2.0;
     let nu = log(log_zn / log(2.0)) / log(2.0);
     let smooth_frac = max(1.0 - nu, 0.0);
-    let iter_int = total_iter; // integer iteration count
-
     let angle_der = atan2(d.y, d.x);
 
-    out.iter      = pack(iter_int);
+    out.iter      = pack(total_iter);
     out.mu        = pack(smooth_frac);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
     out.dzy       = pack(der.y);
-    out.angle_der = pack(angle_der);
+    out.ref_iter = pack(angle_der);
     return out;
   }
 
@@ -209,19 +192,24 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_nu: f32, prev_zx: f
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
     out.dzy       = pack(der.y);
-    out.angle_der = pack(0.0);
+    out.ref_iter = pack(0.0);
     return out;
   }
 
+    // Smooth colouring: compute fractional part (nu).
+    let log_zn = log(dz.x * dz.x + dz.y * dz.y) / 2.0;
+    let nu = log(log_zn / log(2.0)) / log(2.0);
+    let smooth_frac = max(1.0 - nu, 0.0);
+    let angle_der = atan2(d.y, d.x);
   // Budget exhausted below globalMaxIter: store iter = total_iter, keep z/dz
   // for resumption.  |z|² < 4 distinguishes this from escaped pixels.
   out.iter      = pack(total_iter);
-  out.mu        = pack(f32(ref_i));
-  out.zx        = pack(z.x);
-  out.zy        = pack(z.y);
+  out.mu        = pack(smooth_frac);
+  out.zx        = pack(dz.x);
+  out.zy        = pack(dz.y);
   out.dzx       = pack(der.x);
   out.dzy       = pack(der.y);
-  out.angle_der = pack(0.0);
+  out.ref_iter = pack(f32(ref_i));
   return out;
 }
 
@@ -238,6 +226,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let prev_mu = loadLayer(coord, 1);
   let prev_zx   = loadLayer(coord, 2);
   let prev_zy   = loadLayer(coord, 3);
+  let prev_ref_iter = loadLayer(coord, 6);
 
   // Determine pixel state (iter-only convention, no mu in state logic):
   //   iter == -1                     : sentinel, needs fresh computation
@@ -252,12 +241,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // Pass through all 7 layers unchanged.
     var out: FragOut;
     out.iter      = pack(prev_iter);
-    out.mu        = pack(loadLayer(coord, 1));
+    out.mu        = pack(prev_mu);
     out.zx        = pack(prev_zx);
     out.zy        = pack(prev_zy);
     out.dzx       = pack(loadLayer(coord, 4));
     out.dzy       = pack(loadLayer(coord, 5));
-    out.angle_der = pack(loadLayer(coord, 6));
+    out.ref_iter = pack(loadLayer(coord, 6));
     return out;
   }
 
@@ -273,9 +262,9 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // Resume from stored state: iter > 0, |z|² < 4.
     let stored_dzx = loadLayer(coord, 4);
     let stored_dzy = loadLayer(coord, 5);
-    return mandelbrot_compute(x0, y0, prev_iter, prev_mu, prev_zx, prev_zy, stored_dzx, stored_dzy);
+    return mandelbrot_compute(x0, y0, prev_iter, prev_mu, prev_zx, prev_zy, stored_dzx, stored_dzy, prev_ref_iter);
   }
 
   // Fresh computation (sentinel == -1).
-  return mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+  return mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
 }

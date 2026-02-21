@@ -77,10 +77,10 @@ async function onSelectChange(e: Event) {
     <p>{{ selectedPoint?.description }}</p>
     <Mandelbrot
       ref="mandelbrotRef"
-      v-model:scale="selectedPoint?.scale"
-      v-model:angle="selectedPoint?.angle"
-      v-model:cx="selectedPoint?.cx"
-      v-model:cy="selectedPoint?.cy"
+      :scale="selectedPoint?.scale"
+      :angle="selectedPoint?.angle"
+      :cx="selectedPoint?.cx"
+      :cy="selectedPoint?.cy"
       :activatePalette="true"
       :activateSkybox="false"
       :activateTessellation="false"

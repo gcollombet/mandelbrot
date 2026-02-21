@@ -116,7 +116,7 @@ export class Engine {
     clearHistoryNextFrame = false
 
     // Progressive iteration state
-    static readonly ITERATION_BATCH_SIZE = 10
+    static readonly ITERATION_BATCH_SIZE = 10000
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -508,7 +508,7 @@ export class Engine {
             mandelbrot.scale,
             aspect,
             mandelbrot.angle,
-            100,            // maxIteration: iterations to compute THIS pass
+            Engine.ITERATION_BATCH_SIZE,            // maxIteration: iterations to compute THIS pass
             mandelbrot.epsilon,
             renderOptions.antialiasLevel,
             0,  // iterationOffset: iterations already completed
@@ -558,7 +558,7 @@ export class Engine {
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
-        if (!this.needRender && this.extraFrames <= 0 && !this.progressiveInProgress) {
+        if (!this.needRender && this.extraFrames <= 0) {
             return
         }
 

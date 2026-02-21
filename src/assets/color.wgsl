@@ -192,9 +192,9 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 
   // Budget exhausted: iter > 0 but z hasn't escaped (|z|² < 4).
   // Render as green (debug) until continuation completes.
-  if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < 4.0) {
-    return vec4<f32>(0.0, 0.5, 0.0, 1.0);
-  }
+//  if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < 999999.0) { //TODO use real mu
+//    return vec4<f32>(0.0, 0.5, 0.0, 1.0);
+//  }
 
   // Inside the set: iter_val == 0 and mu >= 0.
   if (iter_val == 0.0) {
@@ -206,12 +206,12 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   // Edge case: nu <= 0 after combination (shouldn't happen for escaped points).
-  if (nu <= 0.0) {
+  if (nu < 0.0) {
     return vec4<f32>(0.0, 0.0, 0.5, 1.0);
   }
 
   if (parameters.activateSmoothness == 0.0) {
-    nu = floor(nu);
+    nu = iter_val;
   }
 
   let v = nu / 256.0;

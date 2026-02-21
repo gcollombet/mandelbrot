@@ -198,11 +198,17 @@ impl MandelbrotNavigator {
 
 
         // Clamp vitesse plus gros que scale
-        if self.vtx.clone().abs() > self.scale {
-          self.vtx = self.scale.clone() * self.vtx.clone().signum();
-        }
-        if self.vty.clone().abs() > self.scale {
-          self.vty = self.scale.clone() * self.vty.clone().signum();
+
+        let norm = self.vtx.clone() * self.vtx.clone()
+                  + self.vty.clone() * self.vty.clone() ;
+        if norm.clone() > DBig::try_from(0).unwrap() {
+          let norm = norm.clone().sqr();
+          let threshold = self.scale.clone() * DBig::from_str("2.0").unwrap();
+          if norm.clone() > threshold {
+            let factor = norm.clone() / threshold.clone();
+            self.vtx = self.vtx.clone() / factor.clone();
+            self.vty = self.vty.clone() / factor.clone();
+          }
         }
 
         // Rendre damping dépendant du temps
@@ -419,4 +425,3 @@ mod tests {
         );
     }
 }
-
