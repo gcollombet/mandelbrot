@@ -116,7 +116,7 @@ export class Engine {
     clearHistoryNextFrame = false
 
     // Progressive iteration state
-    static readonly ITERATION_BATCH_SIZE = 10000
+    static readonly ITERATION_BATCH_SIZE = 1000
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -553,7 +553,7 @@ export class Engine {
             aspect,
             mandelbrot.angle,
             renderOptions.activateAnimate ? 1 : 0,
-            0,
+            mandelbrot.mu,
             0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
@@ -647,6 +647,7 @@ export class Engine {
             baseSentinel,
             shiftTexX,
             shiftTexY,
+            this.previousMandelbrot.mu,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 

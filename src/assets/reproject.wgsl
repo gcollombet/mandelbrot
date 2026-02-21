@@ -35,6 +35,7 @@ struct BrushUniforms {
   baseSentinel: f32,
   shiftTexX: f32,
   shiftTexY: f32,
+  mu: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;
@@ -129,6 +130,24 @@ fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
   let step = -si;
   if (step <= 1) {
     return -1.0;
+  }
+
+  // Before refining, check the anchor pixel at the current step level.
+  // If it is still mid-computation (iter > 0 && |z|² < mu), block
+  // refinement so resolution doesn't advance ahead of iteration progress.
+  let anchor = vec2<i32>(
+    coord_out.x & ~(step - 1),
+    coord_out.y & ~(step - 1)
+  );
+  let anchor_iter = loadLayer(anchor, 0);
+  if (anchor_iter > 0.0) {
+    let anchor_zx = loadLayer(anchor, 2);
+    let anchor_zy = loadLayer(anchor, 3);
+    let z_sq = anchor_zx * anchor_zx + anchor_zy * anchor_zy;
+    if (z_sq < uni.mu) {
+      // Anchor pixel still computing — don't refine yet.
+      return s;
+    }
   }
 
   let next_step = max(1, step / 2);
