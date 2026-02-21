@@ -15,7 +15,12 @@
 //   If layer0 == -step (step is power-of-two > 1), resolve by sampling
 //   the parent at (x & ~(step-1), y & ~(step-1)) for ALL 7 layers.
 
-@group(0) @binding(0) var rawTex: texture_2d_array<f32>;
+struct ResolveUniforms {
+  mu: f32,
+};
+
+@group(0) @binding(0) var<uniform> uni: ResolveUniforms;
+@group(0) @binding(1) var rawTex: texture_2d_array<f32>;
 
 struct VSOut {
   @builtin(position) position: vec4<f32>,
@@ -96,12 +101,53 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     return loadAllLayers(coord);
   }
 
-  // Snap to parent anchor for all 7 layers.
-  let step_u = floor_power_of_two(u32(step_f));
-  let mask = ~(step_u - 1u);
-  let px = x & mask;
-  let py = y & mask;
+  // Snap to parent anchor, climbing to coarser steps if the anchor is
+  // budget-exhausted (iter > 0 AND |z|² < mu).  This eliminates the
+  // Sierpinski-triangle artifact that appeared when the resolve pass
+  // blindly copied unfinished pixels.
+  var step_u = floor_power_of_two(u32(step_f));
 
-  let parent_coord = vec2<i32>(i32(px), i32(py));
-  return loadAllLayers(parent_coord);
+  loop {
+    let mask = ~(step_u - 1u);
+    let px = x & mask;
+    let py = y & mask;
+    let parent_coord = vec2<i32>(i32(px), i32(py));
+
+    let parent_iter = loadLayer(parent_coord, 0);
+
+    // Parent is a sentinel itself — climb further.
+    if (parent_iter < 0.0) {
+      step_u = step_u * 2u;
+      continue;
+    }
+
+    // Parent is finished (escaped or inside): use it.
+    // Escaped: iter > 0 AND |z|² >= mu.
+    // Inside set: iter == 0.
+    if (parent_iter == 0.0) {
+      return loadAllLayers(parent_coord);
+    }
+
+    // iter > 0: check whether pixel actually escaped or is budget-exhausted.
+    let zx = loadLayer(parent_coord, 2);
+    let zy = loadLayer(parent_coord, 3);
+    let z_sq = zx * zx + zy * zy;
+
+    if (z_sq >= uni.mu) {
+      // Escaped — use this pixel.
+      return loadAllLayers(parent_coord);
+    }
+
+    // Budget-exhausted (still iterating): climb to the next coarser step.
+    step_u = step_u * 2u;
+
+    // Safety: if step exceeds texture size, stop climbing and use whatever
+    // we have (prevents infinite loop on pathological inputs).
+    if (step_u >= dims.x || step_u >= dims.y) {
+      return loadAllLayers(parent_coord);
+    }
+  }
+
+  // Unreachable, but WGSL requires a return after the loop.
+  return loadAllLayers(coord);
 }

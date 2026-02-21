@@ -137,36 +137,6 @@ fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
   return select(-f32(next_step), -1.0, is_anchor);
 }
 
-// Check whether the anchor pixel at the current sentinel step level is still
-// mid-computation (budget exhausted: iter > 0 && |z|² < mu).
-// Uses coord_in (the source coordinate in prevRaw) so that the lookup is in
-// the correct coordinate space even when a translation shift is applied.
-fn anchor_still_computing(sentinel: f32, coord_in: vec2<i32>) -> bool {
-  let step = i32(round(-sentinel));
-  if (step <= 1) {
-    return false;
-  }
-  let anchor = vec2<i32>(
-    coord_in.x & ~(step - 1),
-    coord_in.y & ~(step - 1)
-  );
-  let dims = vec2<i32>(textureDimensions(prevRaw));
-  // Guard: if anchor is out of bounds, don't block refinement.
-  if (anchor.x < 0 || anchor.y < 0 || anchor.x >= dims.x || anchor.y >= dims.y) {
-    return false;
-  }
-  let anchor_iter = loadLayer(anchor, 0);
-  if (anchor_iter > 0.0) {
-    let anchor_zx = loadLayer(anchor, 2);
-    let anchor_zy = loadLayer(anchor, 3);
-    let z_sq = anchor_zx * anchor_zx + anchor_zy * anchor_zy;
-    if (z_sq < uni.mu) {
-      return true;
-    }
-  }
-  return false;
-}
-
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let dims = vec2<i32>(textureDimensions(prevRaw));
@@ -202,11 +172,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
   let iter_val = prev.iter.r;
 
-  // Sentinel refinement – block if the anchor pixel hasn't finished iterating.
+  // Sentinel refinement.
   if (iter_val < 0.0) {
-    if (anchor_still_computing(iter_val, coord_in)) {
-      return prev;
-    }
     let refined = refine_sentinel(iter_val, coord_out);
     var out = prev;
     out.iter = pack(refined);

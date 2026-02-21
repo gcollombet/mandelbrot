@@ -79,6 +79,7 @@ export class Engine {
     uniformBufferMandelbrot?: GPUBuffer // passe Mandelbrot (calc -1)
     uniformBufferColor?: GPUBuffer // passe color (écran)
     uniformBufferBrush?: GPUBuffer // passe pinceau (sentinelles)
+    uniformBufferResolve?: GPUBuffer // passe resolve (sentinel snapping)
     mandelbrotReferenceBuffer?: GPUBuffer // storage buffer contenant l'orbite
 
     // pipelines / bindgroups
@@ -221,6 +222,11 @@ export class Engine {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
+        this.uniformBufferResolve = this.device.createBuffer({
+            size: 4 * 4, // 1 float (mu) padded to 16-byte alignment
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: 'Engine UniformBuffer Resolve',
+        })
         this.mandelbrotReferenceBuffer = this.device.createBuffer({
             size: 4 * 1000000,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -255,7 +261,10 @@ export class Engine {
         })
 
         const layoutResolve = this.device.createBindGroupLayout({
-            entries: [{ binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } }],
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+            ],
             label: 'Engine BindGroupLayout Resolve',
         })
 
@@ -416,7 +425,10 @@ export class Engine {
             const layout = this.pipelineResolve.getBindGroupLayout(0)
             this.bindGroupResolve = this.device.createBindGroup({
                 layout,
-                entries: [{ binding: 0, resource: this.rawArrayView! }],
+                entries: [
+                    { binding: 0, resource: { buffer: this.uniformBufferResolve! } },
+                    { binding: 1, resource: this.rawArrayView! },
+                ],
                 label: 'Engine BindGroup Resolve',
             })
         }
@@ -481,7 +493,7 @@ export class Engine {
         this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
             && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
         if (this.needRender) {
-            this.extraFrames = 100
+            this.extraFrames = 150
         }
 
         if (renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam
@@ -651,6 +663,10 @@ export class Engine {
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
+        // Write resolve uniforms (mu for budget-exhaustion detection)
+        const resolveUniforms = new Float32Array([this.previousMandelbrot.mu])
+        this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
+
         const commandEncoder = this.device.createCommandEncoder()
 
         // Helper: build 7 MRT color attachments from per-layer views
@@ -798,6 +814,7 @@ export class Engine {
         this.uniformBufferMandelbrot?.destroy?.()
         this.uniformBufferColor?.destroy?.()
         this.uniformBufferBrush?.destroy?.()
+        this.uniformBufferResolve?.destroy?.()
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()
         this.paletteTexture?.destroy?.()
