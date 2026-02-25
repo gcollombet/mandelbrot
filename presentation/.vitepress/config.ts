@@ -13,14 +13,25 @@ export default defineConfig({
         plugins: [
             wasm(),
             topLevelAwait()
-        ]
+        ],
+        ssr: {
+            noExternal: ['mandelbrot']
+        }
     },
     themeConfig: {
         // https://vitepress.dev/reference/default-theme-config
         nav: [
             {text: 'Home', link: '/'},
+            {text: 'Optimisations', link: '/optimisation'},
         ],
-        sidebar: [],
+        sidebar: [
+            {
+                items: [
+                    {text: 'Présentation', link: '/'},
+                    {text: 'Optimisations de rendu', link: '/optimisation'},
+                ]
+            }
+        ],
         socialLinks: [
             {icon: 'github', link: 'https://github.com/vuejs/vitepress'}
         ]

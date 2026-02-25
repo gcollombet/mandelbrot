@@ -164,51 +164,54 @@ impl MandelbrotNavigator {
         };
 
         // Animation translation avec vitesse et damping
-        let damping_base = exp(-std::f64::consts::LN_2 * delta_time / 0.05 );// // (1.0 - 25.0 * delta_time).max(0.01);
+        let damping_base = exp(-std::f64::consts::LN_2 * delta_time / 0.05); // // (1.0 - 25.0 * delta_time).max(0.01);
         let damping = DBig::from_str(&damping_base.to_string()).unwrap();
         let delta_time_big = DBig::from_str(&delta_time.to_string()).unwrap();
 
         // On anime l'échelle avec la vitesse et damping
-      if self.vscale != DBig::try_from(0).unwrap() {
-        //let delta_scale = DBig::try_from(1).unwrap() + &self.vscale * (DBig::try_from(1).unwrap() + &delta_time_big).ln();
-        //self.scale = self.scale.powf(&(&self.vscale * &delta_time_big));
+        if self.vscale != DBig::try_from(0).unwrap() {
+            //let delta_scale = DBig::try_from(1).unwrap() + &self.vscale * (DBig::try_from(1).unwrap() + &delta_time_big).ln();
+            //self.scale = self.scale.powf(&(&self.vscale * &delta_time_big));
 
-        // 2 en une seconde, je veux que le scale soit divisé par deux, en 2 par 4, en trois par 8, etc.
-        // si 0.5 en une seconde, alors en delta_time, on fait scale * (0.5)^(delta_time)
-        if delta_time_big > DBig::try_from(0).unwrap() {
-          self.scale = &self.scale * self.vscale.powf(&(&delta_time_big * DBig::try_from(10).unwrap()));
-        }
-        self.vscale = DBig::try_from(1).unwrap() + ((&self.vscale - DBig::try_from(1).unwrap()) * &damping);
+            // 2 en une seconde, je veux que le scale soit divisé par deux, en 2 par 4, en trois par 8, etc.
+            // si 0.5 en une seconde, alors en delta_time, on fait scale * (0.5)^(delta_time)
+            if delta_time_big > DBig::try_from(0).unwrap() {
+                self.scale = &self.scale
+                    * self
+                        .vscale
+                        .powf(&(&delta_time_big * DBig::try_from(10).unwrap()));
+            }
+            self.vscale = DBig::try_from(1).unwrap()
+                + ((&self.vscale - DBig::try_from(1).unwrap()) * &damping);
 
-        // si vsclale plus petit que 0.5 ou plus grand que 2, on le clamp à 0.5 ou 2 pour éviter les valeurs extrêmes
-        if self.vscale.clone() > DBig::from_str("2").unwrap() {
-          self.vscale = DBig::from_str("2").unwrap();
+            // si vsclale plus petit que 0.5 ou plus grand que 2, on le clamp à 0.5 ou 2 pour éviter les valeurs extrêmes
+            if self.vscale.clone() > DBig::from_str("2").unwrap() {
+                self.vscale = DBig::from_str("2").unwrap();
+            }
+            if self.vscale.clone() < DBig::from_str("0.5").unwrap() {
+                self.vscale = DBig::from_str("0.5").unwrap();
+            }
+
+            if self.vscale.clone().abs() > DBig::from_str("0.999").unwrap()
+                || self.vscale.clone().abs() < DBig::from_str("1.001").unwrap()
+            {
+                self.vscale = DBig::try_from(0).unwrap();
+            }
         }
-        if self.vscale.clone() < DBig::from_str("0.5").unwrap() {
-          self.vscale = DBig::from_str("0.5").unwrap();
-        }
-        
-        if self.vscale.clone().abs() >DBig::from_str("0.999").unwrap()
-          || self.vscale.clone().abs() < DBig::from_str("1.001").unwrap()  {
-          self.vscale = DBig::try_from(0).unwrap();
-        }
-      }
 
         let epsilon = &self.scale / DBig::try_from(1000000).unwrap();
 
-
         // Clamp vitesse plus gros que scale
 
-        let norm = self.vtx.clone() * self.vtx.clone()
-                  + self.vty.clone() * self.vty.clone() ;
+        let norm = self.vtx.clone() * self.vtx.clone() + self.vty.clone() * self.vty.clone();
         if norm.clone() > DBig::try_from(0).unwrap() {
-          let norm = norm.clone().sqr();
-          let threshold = self.scale.clone() * DBig::from_str("2.0").unwrap();
-          if norm.clone() > threshold {
-            let factor = norm.clone() / threshold.clone();
-            self.vtx = self.vtx.clone() / factor.clone();
-            self.vty = self.vty.clone() / factor.clone();
-          }
+            let norm = norm.clone().sqr();
+            let threshold = self.scale.clone() * DBig::from_str("2.0").unwrap();
+            if norm.clone() > threshold {
+                let factor = norm.clone() / threshold.clone();
+                self.vtx = self.vtx.clone() / factor.clone();
+                self.vty = self.vty.clone() / factor.clone();
+            }
         }
 
         // Rendre damping dépendant du temps
@@ -228,7 +231,7 @@ impl MandelbrotNavigator {
         self.angle += self.vangle * delta_time;
         self.vangle *= damping_base;
         if self.vangle.abs() < 0.005 {
-          self.vangle = 0.0;
+            self.vangle = 0.0;
         }
 
         // Calcul du delta par rapport à la référence
@@ -236,10 +239,7 @@ impl MandelbrotNavigator {
         let delta_y = &self.cy - &self.reference_cy;
 
         // Conversion sûre en f64 en utilisant la fonction utilitaire
-        vec![
-            delta_x.to_string(),
-            delta_y.to_string(),
-        ]
+        vec![delta_x.to_string(), delta_y.to_string()]
     }
 
     pub fn get_params(&self) -> Vec<String> {
@@ -253,6 +253,26 @@ impl MandelbrotNavigator {
 
     /// Retourne un tuple (ptr, offset, count) pour accès direct JS
     pub fn compute_reference_orbit_ptr(&mut self, max_iter: u32) -> OrbitBufferInfo {
+        self.compute_reference_orbit_inner(max_iter as usize)
+    }
+
+    /// Compute at most `chunk_size` additional orbit steps, up to `max_iter` total.
+    /// Returns early once the chunk is done, allowing the caller to yield to the
+    /// browser between chunks for responsive rendering.
+    pub fn compute_reference_orbit_chunk(
+        &mut self,
+        chunk_size: u32,
+        max_iter: u32,
+    ) -> OrbitBufferInfo {
+        // Cap iteration target to last_iter + chunk_size so we only do a bounded
+        // amount of work, while still respecting the global max_iter ceiling.
+        let target = (self.last_iter + chunk_size as usize).min(max_iter as usize);
+        self.compute_reference_orbit_inner(target)
+    }
+
+    /// Shared implementation: computes orbit steps from `last_iter` up to `target`
+    /// (capped at 10 000).  Handles re-anchoring when the view centre drifts.
+    fn compute_reference_orbit_inner(&mut self, target: usize) -> OrbitBufferInfo {
         let min_positive = DBig::from_str(&(f32::MIN_POSITIVE * 10.0).to_string()).unwrap();
         let twenty = DBig::try_from(20).unwrap();
 
@@ -280,7 +300,7 @@ impl MandelbrotNavigator {
         let two = DBig::try_from(2).unwrap();
         let one = DBig::try_from(1).unwrap();
         let threshold = DBig::try_from(1_000_000).unwrap();
-        let total_iter: usize = 10_000.min(max_iter as usize);
+        let total_iter: usize = 10_000.min(target);
 
         let reference_cx = &self.reference_cx;
         let reference_cy = &self.reference_cy;
@@ -365,9 +385,9 @@ pub struct OrbitBufferInfo {
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+    use super::*;
 
-  #[test]
+    #[test]
     fn construct_and_compute_orbit_simple() {
         // Construire le navigator avec des valeurs simples
         let mut nav = MandelbrotNavigator::new("0.0", "0.0", "1.0", 0.0);
@@ -385,16 +405,16 @@ mod tests {
     #[test]
     fn test_string_to_dbig_to_string() {
         let s = "3.141592653589793238462643383279502884197169399375105820974944592307816406286208998628034825342117";
-      #[cfg(target_arch = "wasm32")]
-      {
-          log_1(&format!("Converting string to DBig and back: {}", s).into());
-      }
-      let bf = DBig::from_str(s).unwrap();
-      #[cfg(target_arch = "wasm32")]
-      {
-          log_1(&format!("Converting string to DBig and back: {}", bf).into());
-      }
-      let result = bf.to_string();
+        #[cfg(target_arch = "wasm32")]
+        {
+            log_1(&format!("Converting string to DBig and back: {}", s).into());
+        }
+        let bf = DBig::from_str(s).unwrap();
+        #[cfg(target_arch = "wasm32")]
+        {
+            log_1(&format!("Converting string to DBig and back: {}", bf).into());
+        }
+        let result = bf.to_string();
         // dashu peut formater différemment, on vérifie juste que ça parse
         assert!(!result.is_empty());
     }
@@ -419,9 +439,6 @@ mod tests {
         let _params = nav.step();
         let new_scale = nav.scale.clone().to_string().parse::<f64>().unwrap();
         // On attend que l'échelle ait augmenté
-        assert!(
-            1 == 1,
-            "scale should have increased after zoom+step"
-        );
+        assert!(1 == 1, "scale should have increased after zoom+step");
     }
 }

@@ -2,7 +2,8 @@
 import Mandelbrot from '../src/components/Mandelbrot.vue'
 import ClassicMandelbrot from '../src/components/ClassicMandelbrot.vue'
 import MandelbrotOrbits from '../src/components/MandelbrotOrbits.vue'
-import ComplexDemo from '../src/components/ComplexDemo.vue'
+import MandelbrotController from '../src/components/MandelbrotController.vue'
+import MandelbrotViewer from '../src/components/MandelbrotViewer.vue'
 </script>
 <link rel="stylesheet" href="https://use.typekit.net/fnz7ojs.css">
 # WebAssembly, WebGPU, Rust, fractales et autres trucs cools.
@@ -20,8 +21,6 @@ z_{n+1}=z_n^2+c
 \end{cases}
 $$
 
-
-
 Nous pouvons visualiser ce qu'il se passe avec cette suite sur un diagramme.
 Le diagramme représente le plan complexe en 2D, l'axe horizontal représentant la partie réelle et l'axe vertical la partie imaginaire.
 Le point $c$ est représenté en rouge et il prend la valeur pointé par le curseur sur le diagramme.
@@ -35,14 +34,16 @@ En effet $z_1=z_0^2+c$ or comme $z_0=0$, $z_0^2=0$ donc $z_1=c$.
 
 Le troisième est $z_2=z_1^2+c$.
 
+<ClientOnly>
 <MandelbrotOrbits
   :cx="'-0.5'"
   :cy="'0.0'"
   :scale="'1'"
-  :angle="'0.0'"
+  :angle="0.0"
     :showOrbitLabels="true"
     :orbitIterations="3"
 />
+</ClientOnly>
 
 Pour rappel, quand on élève un nombre complexe au carré, on élève sa norme au carré et on double son argument.
 
@@ -54,14 +55,16 @@ Tandis que l'addition de deux nombres complexes revient à additionner leurs par
 
 On peut continuer à itérer la suite et observer ce qu'il se passe. Voici ce que ça donne pour 10 itérations.
 
+<ClientOnly>
 <MandelbrotOrbits
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1'"
-:angle="'0.0'"
+:angle="0.0"
 :showOrbitLabels="false"
 :orbitIterations="10"
 />
+</ClientOnly>
 
 On commence à observer que la suite semble converger vers un point fixe ou bien diverger vers l'infini.
 
@@ -71,15 +74,17 @@ Quand la suite diverge, on dit que le point $c$ n'appartient pas à l'ensemble d
 
 Voici maintenant ce que ça donne si on colorie en noir les points qui appartiennent à l'ensemble de Mandelbrot et en gris ceux qui n'y appartiennent pas.
 
+<ClientOnly>
 <MandelbrotOrbits
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1'"
-:angle="'0.0'"
+:angle="0.0"
 :showMandelbrot="true"
 :showOrbitLabels="false"
 :orbitIterations="20"
 />
+</ClientOnly>
 
 En noir, vous visualisez donc l'ensemble de Mandelbrot.
 
@@ -103,17 +108,19 @@ celui coloriés en rouge a une norme supérieure à $2$.
 
 Le calcul s'arrête dès que la norme dépasse $2$ ou bien que le nombre maximum d'itérations est atteint.
 
+<ClientOnly>
 <MandelbrotOrbits
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
-:angle="'0.0'"
+:angle="0.0"
 :showMandelbrot="true"
 :showOrbitLabels="false"
 :showPalette="false"
 :showOrbitVectors="true"
 :orbitIterations="100"
 />
+</ClientOnly>
 
 Voici un exemple de code source en *TypeScript* qui calcule le nombre 
 d'itérations nécessaires pour que la norme de $z_n$ dépasse $2$ pour un point $c$ donné.
@@ -135,17 +142,19 @@ Voici ce que ça donne en coloriant les points en fonction du nombre d'itératio
 
 Plus le nombre d'itérations est grand, plus la couleur est clair.
 
+<ClientOnly>
 <MandelbrotOrbits
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
-:angle="'0.0'"
+:angle="0.0"
 :showMandelbrot="true"
 :showOrbitLabels="false"
 :showPalette="true"
 :showOrbitVectors="true"
 :orbitIterations="100"
 />
+</ClientOnly>
 
 Voilà un exemple simple code source en *TypeScript* qui dessine l'ensemble de Mandelbrot dans un canvas HTML, en utilisant la fonction `mandelbrotEscapeTime` définie précédemment.
 
@@ -178,11 +187,12 @@ function drawMandelbrot(canvas: HTMLCanvasElement, maxIterations: number) {
 
 Voici ce que ça donne avec une palette de couleurs cyclique.
 
+<ClientOnly>
 <Mandelbrot
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
-:angle="'0.0'"
+:angle="0.0"
 :activatePalette="true"
 :activateSkybox="false"
 :activateTessellation="false"
@@ -190,16 +200,18 @@ Voici ce que ça donne avec une palette de couleurs cyclique.
 :activateShading="false"
 :activateZebra="false"
 />
+</ClientOnly>
 
 Vous noterez qu'il y a un effet de bandes dû au fait que le nombre d'itérations est un entier.
 
 On peut le faire ressortir en ne coloriant que les itérations impaires.
 
+<ClientOnly>
 <Mandelbrot
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
-:angle="'0.0'"
+:angle="0.0"
 :activatePalette="true"
 :activateSkybox="false"
 :activateTessellation="false"
@@ -207,6 +219,7 @@ On peut le faire ressortir en ne coloriant que les itérations impaires.
 :activateShading="false"
 :activateZebra="true"
 />
+</ClientOnly>
 
 On peut également lisser les couleurs en utilisant la valeur de $\|z_n\|$.
 
@@ -220,11 +233,12 @@ On se sert du nombre entier d'itérations $n$ et on ajoute un $\delta$ calculé 
 
 Voici ce que ça donne avec un lissage.
 
+<ClientOnly>
 <Mandelbrot
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
-:angle="'0.0'"
+:angle="0.0"
 :activatePalette="true"
 :activateSkybox="false"
 :activateTessellation="false"
@@ -233,6 +247,7 @@ Voici ce que ça donne avec un lissage.
 :activateZebra="false"
 :activateSmoothness="true"
 />
+</ClientOnly>
 
 ## Quelques caractéristiques intéressantes
 
@@ -244,17 +259,20 @@ Dans le cas de l'ensemble de Mandelbrot, on retrouve des mini-Mandelbrots un peu
 Contrairement à d'autres fractales, l'ensemble de Mandelbrot n'est pas strictement auto-similaire, 
 c'est aussi ce qui le rend intéressant, car il présente une grande variété de formes et de structures.
 
+<ClientOnly>
 <ClassicMandelbrot />
+</ClientOnly>
 
 Ce sont là quelques exemples choisis parmi une infinité de possibilités.
 
 Ce qui est intéressant finalement, c'est plutôt de naviguer librement dans l'ensemble et découvrir ses structures.
 
+<ClientOnly>
 <MandelbrotController
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
-:angle="'0.0'"
+:angle="0.0"
 :activatePalette="true"
 :activateSkybox="false"
 :activateTessellation="false"
@@ -263,6 +281,7 @@ Ce qui est intéressant finalement, c'est plutôt de naviguer librement dans l'e
 :activateZebra="false"
 :activateSmoothness="true"
 />
+</ClientOnly>
 
 ## Performance
 
@@ -1079,9 +1098,10 @@ On peut utiliser cette information pour faire un rendu plus intéressant.
 
 Sans couleur
 
+<ClientOnly>
 <MandelbrotController
 :scale="'1.1'"
-:angle="'0.0'"
+:angle="0.0"
 :cx="'-0.75'"
 :cy="'0.0'"
 :activatePalette="false"
@@ -1091,12 +1111,14 @@ Sans couleur
 :activateSmoothness="true"
 :activateShading="true"
 />
+</ClientOnly>
 
 Avec coloration
 
+<ClientOnly>
 <MandelbrotController
 :scale="'1.1'"
-:angle="'0.0'"
+:angle="0.0"
 :cx="'-0.75'"
 :cy="'0.0'"
 :activatePalette="true"
@@ -1106,13 +1128,15 @@ Avec coloration
 :activateSmoothness="true"
 :activateShading="true"
 />
+</ClientOnly>
 
 
 #### Projection de texture
 
+<ClientOnly>
 <MandelbrotController
 :scale="'1.1'"
-:angle="'0.0'"
+:angle="0.0"
 :cx="'-0.75'"
 :cy="'0.0'"
 :activatePalette="false"
@@ -1122,14 +1146,16 @@ Avec coloration
 :activateSmoothness="true"
 :activateShading="true"
 />
+</ClientOnly>
 
 ### Tessellation
 
 #### Avec la valeur de l'itération
 
+<ClientOnly>
 <MandelbrotController
 :scale="'1.1'"
-:angle="'0.0'"
+:angle="0.0"
 :cx="'-0.75'"
 :cy="'0.0'"
 :activatePalette="false"
@@ -1139,6 +1165,7 @@ Avec coloration
 :activateSmoothness="true"
 :activateShading="false"
 />
+</ClientOnly>
 
 ### Un mot sur les couleurs
 
@@ -1157,7 +1184,7 @@ Avec coloration
 
 [//]: # (:scale="'1.1'")
 
-[//]: # (:angle="'0.0'")
+[//]: # (:angle="0.0")
 
 [//]: # (:cx="'-0.75'")
 
@@ -1183,7 +1210,7 @@ Avec coloration
 
 [//]: # (:scale="'1.1'")
 
-[//]: # (:angle="'0.0'")
+[//]: # (:angle="0.0")
 
 [//]: # (:cx="'-0.75'")
 
@@ -1209,7 +1236,7 @@ Avec coloration
 
 [//]: # (:scale="'1.1'")
 
-[//]: # (:angle="'0.0'")
+[//]: # (:angle="0.0")
 
 [//]: # (:cx="'-0.75'")
 
@@ -1235,7 +1262,7 @@ Avec coloration
 
 [//]: # (:scale="'1.1'")
 
-[//]: # (:angle="'0.0'")
+[//]: # (:angle="0.0")
 
 [//]: # (:cx="'-0.75'")
 
@@ -1261,7 +1288,7 @@ Avec coloration
 
 [//]: # (:scale="'1.1'")
 
-[//]: # (:angle="'0.0'")
+[//]: # (:angle="0.0")
 
 [//]: # (:cx="'-0.75'")
 

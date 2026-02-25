@@ -9,11 +9,13 @@ import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
+import coloredTilesUrl from './assets/colored_tiles.jpg'
+import goldUrl from './assets/gold.jpg'
 
 // Progressive refinement settings.
 // Start step for the sentinel grid; must be a power-of-two.
 // Examples: 16, 32, 64, 128...
-const SENTINEL_SEED_STEP_POW2 = 64
+const SENTINEL_SEED_STEP_POW2 = 1
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -121,7 +123,12 @@ export class Engine {
     static readonly MIN_BATCH_SIZE = 10
     static readonly MAX_BATCH_SIZE = 10000
     static readonly TARGET_FRAME_MS = 16
-    private iterationBatchSize = 10000
+    private iterationBatchSize = 100
+
+    // Orbit chunking: compute reference orbit incrementally to avoid blocking.
+    // Each frame computes at most ORBIT_CHUNK_SIZE iterations of arbitrary-
+    // precision math, then yields so the browser stays responsive.
+    static readonly ORBIT_CHUNK_SIZE = 10000
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -176,15 +183,15 @@ export class Engine {
 
         // Chargement statique des textures additionnelles
         if (!Engine._tileTexture) {
-            Engine._tileTexture = await this._loadTexture('./colored_tiles.jpg')
+            Engine._tileTexture = await this._loadTexture(coloredTilesUrl)
         }
-        this.tileTexture = await this._loadTexture('./colored_tiles.jpg')
+        this.tileTexture = await this._loadTexture(coloredTilesUrl)
         this.tileTextureView = this.tileTexture.createView()
 
         if (!Engine._skyboxTexture) {
-            Engine._skyboxTexture = await this._loadTexture('./gold.jpg')
+            Engine._skyboxTexture = await this._loadTexture(goldUrl)
         }
-        this.skyboxTexture = await this._loadTexture('./gold.jpg')
+        this.skyboxTexture = await this._loadTexture(goldUrl)
         this.skyboxTextureView = this.skyboxTexture.createView()
 
         const palette = new Palette([])
@@ -331,11 +338,16 @@ export class Engine {
 
     resize() {
         const dpr = (window.devicePixelRatio || 1) * this.dprMultiplier
-        const parent = this.canvas.parentElement
-        const widthCSS = parent?.clientWidth || 1
-        const heightCSS = parent?.clientHeight || 1
+        // Lire la taille CSS du canvas (pas du parent) pour respecter les contraintes CSS
+        const widthCSS = this.canvas.clientWidth || 1
+        const heightCSS = this.canvas.clientHeight || 1
         this.width = Math.max(1, Math.round(widthCSS * dpr))
         this.height = Math.max(1, Math.round(heightCSS * dpr))
+
+        // Clamper aux limites GPU (maxTextureDimension2D, typiquement 8192 ou 16384)
+        const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
+        this.width = Math.min(this.width, maxDim)
+        this.height = Math.min(this.height, maxDim)
 
         this.canvas.width = this.width
         this.canvas.height = this.height
@@ -349,7 +361,7 @@ export class Engine {
         })
 
         // taille suffisante pour contenir la diagonale de l'écran après rotation
-        this.neutralSize = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height) * 1.0)
+        this.neutralSize = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height))
         const textureSize = this.neutralSize
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
@@ -520,22 +532,6 @@ export class Engine {
 
         const aspect = (this.width / Math.max(1, this.height))
 
-        const mandelbrotShaderUniformData = new Float32Array([
-            mandelbrot.dx,
-            mandelbrot.dy,
-            mandelbrot.mu,
-            mandelbrot.scale,
-            aspect,
-            mandelbrot.angle,
-            this.iterationBatchSize,            // maxIteration: iterations to compute THIS pass
-            mandelbrot.epsilon,
-            renderOptions.antialiasLevel,
-            0,  // iterationOffset: iterations already completed
-            mandelbrot.maxIterations,              // globalMaxIter: total iteration target for the view
-            0,
-        ])
-        this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformData.buffer)
-
         let scaleFactor = this.previousMandelbrot?.scale || 1.0 / mandelbrot.scale
         if (scaleFactor < 1.0) {
             scaleFactor = 1.0 / scaleFactor
@@ -582,7 +578,15 @@ export class Engine {
         }
 
         const maxIterations = Math.ceil(mandelbrot.maxIterations)
-        const prtInfo = this.mandelbrotNavigator.compute_reference_orbit_ptr(maxIterations)
+
+        // Compute one chunk of the reference orbit (bounded CPU work per frame).
+        // The WASM side resumes from where it left off; re-anchoring is handled
+        // internally when the view centre drifts too far from the reference.
+        const prtInfo = this.mandelbrotNavigator.compute_reference_orbit_chunk(
+            Engine.ORBIT_CHUNK_SIZE,
+            maxIterations,
+        )
+        const availableIter = prtInfo.count
         const buffer = new Float32Array(wasmMemory.buffer, prtInfo.ptr, prtInfo.count * 4) // 4 floats par MandelbrotStep
 
         if (prtInfo.offset < maxIterations) {
@@ -592,6 +596,33 @@ export class Engine {
                 buffer,
                 0
             )
+        }
+
+        // Guard the shader: globalMaxIter must never exceed the orbit steps
+        // we have actually computed, or the shader would read uninitialised memory.
+        const guardedMaxIter = Math.min(maxIterations, availableIter)
+
+        // Re-write the mandelbrot uniform with the guarded globalMaxIter
+        const mandelbrotShaderUniformDataGuarded = new Float32Array([
+            mandelbrot.dx,
+            mandelbrot.dy,
+            mandelbrot.mu,
+            mandelbrot.scale,
+            aspect,
+            mandelbrot.angle,
+            this.iterationBatchSize,
+            mandelbrot.epsilon,
+            renderOptions.antialiasLevel,
+            0,  // iterationOffset
+            guardedMaxIter,
+            0,
+        ])
+        this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)
+
+        // If the orbit is still being built, keep the render loop alive so the
+        // next frame computes the next chunk and the fractal progressively refines.
+        if (availableIter < maxIterations) {
+            this.extraFrames = Math.max(this.extraFrames, 1)
         }
 
         // When the navigator re-anchors its reference orbit, `dx/dy` jump back to ~0.

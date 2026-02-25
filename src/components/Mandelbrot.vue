@@ -32,7 +32,7 @@ watch(
       navigator.scale(nextScale);
     }
     if (nextAngle !== prevAngle) {
-      navigator.angle(nextAngle);
+      navigator.angle(Number(nextAngle));
     }
   },
   { flush: 'sync' }
@@ -153,13 +153,13 @@ async function initWebGPU() {
       cx.value,
       cy.value,
       scale.value,
-      angle.value
+      Number(angle.value)
   );
   // Si des props ont déjà changé avant l'init, on s'assure que le navigator est aligné.
   // (Le watch ci-dessus ne pouvait rien faire tant que navigator était undefined.)
   navigator.origin(cx.value, cy.value);
   navigator.scale(scale.value);
-  navigator.angle(angle.value);
+  navigator.angle(Number(angle.value));
   engine = new Engine(canvas, {
     activatePalette: props.activatePalette,
     activateSkybox: props.activateSkybox,
