@@ -100,7 +100,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     let zx = loadLayer(coord, 2);
     let zy = loadLayer(coord, 3);
     let z_sq = zx * zx + zy * zy;
-    if (z_sq >= uni.mu) {
+    if (z_sq > uni.mu) {
       // Escaped — finished, pass through.
       return loadAllLayers(coord);
     }
@@ -130,9 +130,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   // Sierpinski-triangle artifact that appeared when the resolve pass
   // blindly copied unfinished pixels.
 
-  loop {
+  // Climb through coarser grid levels. The maximum number of doublings
+  // before step_u exceeds the texture size is bounded by log2(max(dims)).
+  // Using 20 iterations covers textures up to 2^20 = 1M pixels per side.
+  for (var level = 0u; level < 6u; level = level + 1u) {
     // Safety: if step exceeds texture size, stop climbing and fall back
-    // to the pixel itself (prevents infinite loop on pathological inputs
+    // to the pixel itself (prevents runaway on pathological inputs
     // or when all ancestors are unfinished sentinels).
     if (step_u >= dims.x || step_u >= dims.y) {
       return loadAllLayers(coord);
@@ -191,6 +194,6 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     step_u = step_u * 2u;
   }
 
-  // Unreachable, but WGSL requires a return after the loop.
+  // Fallback after exhausting all grid levels.
   return loadAllLayers(coord);
 }

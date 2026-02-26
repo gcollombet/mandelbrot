@@ -51,6 +51,13 @@ const points: MandelbrotPoint[] = [
     scale: "0.000000111597126685994161",
     angle: 0.0,
     description: "Un joli motif qui se trouve vers la pointe du mandelbrot"
+  },  {
+    name: "Serpents",
+    cx: "-1.2554695710024208988",
+    cy: "0.031668017689534857142",
+    scale: "0.00000020483403832458672",
+    angle: 2.673711625670128,
+    description: "Un joli motif qui se trouve vers la pointe du mandelbrot"
   },
 
 ];

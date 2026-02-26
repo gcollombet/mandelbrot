@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {defineProps, nextTick, onMounted, onUnmounted, ref} from 'vue';
+import {defineProps, onMounted, onUnmounted, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
 import MobileNavigationControls from './MobileNavigationControls.vue';
 import type {MandelbrotExposed} from "../types/MandelbrotExposed.ts";
@@ -49,10 +49,9 @@ let pinchStartAngle = 0;
 let pinchStartAngleView = 0;
 let isPinching = false;
 
-const moveStep = 0.04;
+const moveStep = 0.01;
 const angleStep = 0.025;
 
-let rafId: number | null = null;
 let updateTimer: number | null = null;
 
 function getCanvas(): HTMLCanvasElement | null {
@@ -193,15 +192,7 @@ function updateLoop() {
   updateTimer = window.setTimeout(updateLoop, 16);
 }
 
-async function animate() {
-  await mandelbrotRef.value?.drawOnce();
-  rafId = requestAnimationFrame(animate);
-}
-
 onMounted(async () => {
-  await nextTick();
-  await mandelbrotRef.value?.initialize();
-
   const canvas = getCanvas();
   if (!canvas) return;
 
@@ -221,14 +212,12 @@ onMounted(async () => {
   canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
   canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
 
-  // boucles
+  // boucle clavier (la boucle de rendu est gérée par l'engine via Mandelbrot.vue)
   updateLoop();
-  await animate();
 });
 
 onUnmounted(() => {
-  // stop loops
-  if (rafId !== null) cancelAnimationFrame(rafId);
+  // stop keyboard loop
   if (updateTimer !== null) clearTimeout(updateTimer);
 
   const canvas = getCanvas();

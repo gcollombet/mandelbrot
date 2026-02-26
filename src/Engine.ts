@@ -4,6 +4,7 @@ import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
 import brushShader from './assets/reproject.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
+import countShader from './assets/count_unfinished.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import {WebcamTexture} from './WebcamTexture'
@@ -15,7 +16,7 @@ import goldUrl from './assets/gold.jpg'
 // Progressive refinement settings.
 // Start step for the sentinel grid; must be a power-of-two.
 // Examples: 16, 32, 64, 128...
-const SENTINEL_SEED_STEP_POW2 = 1
+const SENTINEL_SEED_STEP_POW2 = 512
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -94,6 +95,29 @@ export class Engine {
     pipelineColor?: GPURenderPipeline
     bindGroupColor?: GPUBindGroup
 
+    // GPU pixel counter (replaces blanket extraFrames = 1000)
+    private pipelineCount?: GPUComputePipeline
+    private counterBuffer?: GPUBuffer
+    private counterReadBuffer?: GPUBuffer
+    private counterBindGroup?: GPUBindGroup
+    private uniformBufferCount?: GPUBuffer
+    /** Number of pixels still needing work. -1 = not yet known, 0 = fully converged. */
+    unfinishedPixelCount = -1
+
+    // Self-managing render loop
+    private _rafId: number | null = null
+    private _drawFn: (() => Promise<void>) | null = null
+
+    // FPS / rendering-active tracking
+    /** Current frames-per-second (updated once per second). */
+    fps = 0
+    /** True when the engine is actively doing GPU work (not idle). */
+    isRendering = false
+    /** Last measured GPU frame time in milliseconds. */
+    gpuFrameTimeMs = 0
+    private _fpsFrameCount = 0
+    private _fpsLastTime = 0
+
     // tailles
     neutralSize = 0 // coté en pixels de la texture neutre (D)
 
@@ -110,7 +134,8 @@ export class Engine {
     previousMandelbrot?: Mandelbrot
     previousRenderOptions?: RenderOptions
     needRender = true
-    extraFrames = 0
+    /** Whether the reference orbit is still being computed incrementally. */
+    orbitIncomplete = false
     mandelbrotReference = new Float32Array(1000000)
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
@@ -120,7 +145,7 @@ export class Engine {
 
     // Progressive iteration state – adaptive batch sizing
     // The batch size auto-adjusts each frame to target ~16ms GPU time.
-    static readonly MIN_BATCH_SIZE = 10
+    static readonly MIN_BATCH_SIZE = 100
     static readonly MAX_BATCH_SIZE = 10000
     static readonly TARGET_FRAME_MS = 16
     private iterationBatchSize = 100
@@ -128,7 +153,7 @@ export class Engine {
     // Orbit chunking: compute reference orbit incrementally to avoid blocking.
     // Each frame computes at most ORBIT_CHUNK_SIZE iterations of arbitrary-
     // precision math, then yields so the browser stays responsive.
-    static readonly ORBIT_CHUNK_SIZE = 10000
+    static readonly ORBIT_CHUNK_SIZE = 100
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -247,6 +272,23 @@ export class Engine {
             label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         })
 
+        // Counter buffers for GPU pixel-completion readback
+        this.counterBuffer = this.device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            label: 'Engine Counter Storage',
+        })
+        this.counterReadBuffer = this.device.createBuffer({
+            size: 4,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            label: 'Engine Counter Readback',
+        })
+        this.uniformBufferCount = this.device.createBuffer({
+            size: 4 * 4, // 3 floats (mu, aspect, angle) padded to 16-byte alignment
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: 'Engine UniformBuffer Count',
+        })
+
         await this._createPipelines()
         this.resize()
     }
@@ -256,6 +298,7 @@ export class Engine {
         const moduleCompute = this.device.createShaderModule({ code: this.shaderPassCompute, label: 'Engine ShaderModule Compute' })
         const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
         const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
+        const moduleCount = this.device.createShaderModule({ code: countShader, label: 'Engine ShaderModule Count' })
 
         const layoutBrush = this.device.createBindGroupLayout({
             entries: [
@@ -329,18 +372,35 @@ export class Engine {
             label: 'Engine RenderPipeline Color',
         })
 
+        // Compute pipeline for counting unfinished pixels
+        const layoutCount = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+            label: 'Engine BindGroupLayout Count',
+        })
+        this.pipelineCount = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutCount] }),
+            compute: { module: moduleCount, entryPoint: 'count_unfinished' },
+            label: 'Engine ComputePipeline Count',
+        })
+
         // bind groups seront (ré)créés dans resize car dépend des textures
         this.bindGroupBrush = undefined
         this.bindGroupMandelbrot = undefined
         this.bindGroupResolve = undefined
         this.bindGroupColor = undefined
+        this.counterBindGroup = undefined
     }
 
     resize() {
         const dpr = (window.devicePixelRatio || 1) * this.dprMultiplier
         // Lire la taille CSS du canvas (pas du parent) pour respecter les contraintes CSS
-        const widthCSS = this.canvas.clientWidth || 1
-        const heightCSS = this.canvas.clientHeight || 1
+        const parent = this.canvas.parentElement
+        const widthCSS = parent?.clientWidth || 1
+        const heightCSS = parent?.clientHeight || 1
         this.width = Math.max(1, Math.round(widthCSS * dpr))
         this.height = Math.max(1, Math.round(heightCSS * dpr))
 
@@ -469,8 +529,25 @@ export class Engine {
             })
         }
 
+        // Counter compute pass bind group (reads rawTexture A after mandelbrot pass)
+        if (this.pipelineCount && this.counterBuffer && this.uniformBufferCount) {
+            const layout = this.pipelineCount.getBindGroupLayout(0)
+            this.counterBindGroup = this.device.createBindGroup({
+                layout,
+                entries: [
+                    { binding: 0, resource: this.rawArrayView! },
+                    { binding: 1, resource: { buffer: this.counterBuffer } },
+                    { binding: 2, resource: { buffer: this.uniformBufferCount } },
+                ],
+                label: 'Engine BindGroup Count',
+            })
+        }
+
         this.prevFrameMandelbrot = undefined // plus de frame précédente après resize
+        this.previousMandelbrot = undefined  // force update() to re-write all uniforms
+        this.previousRenderOptions = undefined
         this.needRender = true
+        this.unfinishedPixelCount = -1 // reset: not yet known after resize
     }
 
     areObjectsEqual(obj1: any, obj2: any): boolean {
@@ -511,9 +588,9 @@ export class Engine {
 
         this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
             && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
-        if (this.needRender) {
-            this.extraFrames = 1000
-        }
+        // if (!this.needsMoreFrames()) {
+        //     this.unfinishedPixelCount = -1 // unknown — new params, GPU counter not read yet
+        // }
 
         if (renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam
             await this.updateWebcamTexture()
@@ -573,7 +650,7 @@ export class Engine {
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
-        if (!this.needRender && this.extraFrames <= 0) {
+        if (!this.needsMoreFrames()) {
             return
         }
 
@@ -619,11 +696,8 @@ export class Engine {
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)
 
-        // If the orbit is still being built, keep the render loop alive so the
-        // next frame computes the next chunk and the fractal progressively refines.
-        if (availableIter < maxIterations) {
-            this.extraFrames = Math.max(this.extraFrames, 1)
-        }
+        // Track whether the orbit is still being built (used by needsMoreFrames).
+        this.orbitIncomplete = availableIter < maxIterations
 
         // When the navigator re-anchors its reference orbit, `dx/dy` jump back to ~0.
         // Reprojecting history across that discontinuity would be nonsense, so we clear.
@@ -645,11 +719,8 @@ export class Engine {
     }
 
     async render() {
-        if (!this.needRender && this.extraFrames <= 0) {
+        if (!this.needsMoreFrames()) {
             return
-        }
-        if (!this.needRender && this.extraFrames > 0) {
-            this.extraFrames--
         }
 
         if (!this.pipelineBrush
@@ -734,6 +805,31 @@ export class Engine {
         rpassMandelbrot.draw(6, 1, 0, 0)
         rpassMandelbrot.end()
 
+        // Pass 1.5: count unfinished pixels (compute pass, reads A)
+        if (
+            this.pipelineCount
+            && this.counterBindGroup
+            && this.counterBuffer
+            && this.counterReadBuffer
+            && this.uniformBufferCount
+        ) {
+            // Write count-shader uniforms (mu, aspect, angle)
+            const muValue = this.previousMandelbrot.mu
+            this.device.queue.writeBuffer(this.uniformBufferCount, 0, new Float32Array([muValue, aspect, this.previousMandelbrot.angle]))
+            // Reset atomic counter to 0
+            commandEncoder.clearBuffer(this.counterBuffer, 0, 4)
+            const computePass = commandEncoder.beginComputePass()
+            computePass.setPipeline(this.pipelineCount)
+            computePass.setBindGroup(0, this.counterBindGroup)
+            computePass.dispatchWorkgroups(
+                Math.ceil(this.neutralSize / 16),
+                Math.ceil(this.neutralSize / 16),
+            )
+            computePass.end()
+            // Copy result to staging buffer for async readback
+            commandEncoder.copyBufferToBuffer(this.counterBuffer, 0, this.counterReadBuffer, 0, 4)
+        }
+
         // Pass 2: resolve des sentinelles (A -> resolved)
         const rpassResolve = commandEncoder.beginRenderPass({
             colorAttachments: makeMrtAttachments(this.resolvedLayerViews),
@@ -762,9 +858,11 @@ export class Engine {
         const submitStartMs = performance.now()
         this.device.queue.submit([commandEncoder.finish()])
 
-        // Adaptive batch sizing: measure GPU completion time and adjust
-        this.device.queue.onSubmittedWorkDone().then(() => {
+        // Adaptive batch sizing: measure GPU completion time and adjust.
+        // Also read back the unfinished pixel count asynchronously.
+        await this.device.queue.onSubmittedWorkDone()
             const elapsed = performance.now() - submitStartMs
+            this.gpuFrameTimeMs = elapsed
             if (elapsed > 0) {
                 // Scale batch size proportionally: if frame took 32ms with batch=100,
                 // target 16ms -> new batch ≈ 100 * 16/32 = 50.
@@ -779,7 +877,11 @@ export class Engine {
                     )
                 )
             }
-        })
+
+        await this.counterReadBuffer!.mapAsync(GPUMapMode.READ)
+        const data = new Uint32Array(this.counterReadBuffer!.getMappedRange())
+        this.unfinishedPixelCount = data[0]
+        this.counterReadBuffer!.unmap()
 
         // marque mise à jour des paramètres frame précédente pour prochaine frame
         this.prevFrameMandelbrot = { ...this.previousMandelbrot }
@@ -862,6 +964,7 @@ export class Engine {
     }
 
     destroy() {
+        this.stopRenderLoop()
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.resolvedTexture?.destroy?.()
@@ -870,9 +973,84 @@ export class Engine {
         this.uniformBufferColor?.destroy?.()
         this.uniformBufferBrush?.destroy?.()
         this.uniformBufferResolve?.destroy?.()
+        this.counterBuffer?.destroy?.()
+        this.counterReadBuffer?.destroy?.()
+        this.uniformBufferCount?.destroy?.()
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()
         this.paletteTexture?.destroy?.()
+    }
+
+    // ── Self-managing render loop ─────────────────────────────────────
+
+    /**
+     * Returns true if the engine has work to do (parameter change,
+     * unfinished pixels, incomplete orbit, or continuous-render mode).
+     */
+    needsMoreFrames(): boolean {
+        if (this.needRender) return true
+        // unfinishedPixelCount: -1 = not yet known (treat as "yes"),
+        // 0 = fully converged, >0 = pixels still need work
+        if (this.unfinishedPixelCount !== 0) {
+            return true
+        }
+        // The orbit may still be incomplete (availableIter < maxIterations),
+        // but if all visible pixels have converged (unfinishedPixelCount == 0)
+        // there is no point continuing: no pixel needs more iterations.
+        return false
+    }
+
+    /** Current GPU iteration batch size (auto-adjusted to target ~16ms/frame). */
+    getIterationBatchSize(): number {
+        return this.iterationBatchSize
+    }
+
+    /**
+     * Start the self-managing render loop. The provided callback is
+     * called every animation frame; the engine's early-exit guards
+     * skip GPU work when idle.
+     */
+    startRenderLoop(drawFn: () => Promise<void>) {
+        this._drawFn = drawFn
+        if (this._rafId === null) {
+            this._rafId = requestAnimationFrame(async () => this._loop())
+        }
+    }
+
+    /** Stop the render loop and release the callback. */
+    stopRenderLoop() {
+        if (this._rafId !== null) {
+            cancelAnimationFrame(this._rafId)
+            this._rafId = null
+        }
+        this._drawFn = null
+    }
+
+    private async _loop() {
+        if (this._drawFn) {
+            const active = this.needsMoreFrames()
+            this.isRendering = active
+
+            await this._drawFn()
+
+            // FPS counter: count only frames that did real GPU work
+            if (active) {
+                this._fpsFrameCount++
+            }
+            const now = performance.now()
+            if (this._fpsLastTime === 0) this._fpsLastTime = now
+            const elapsed = now - this._fpsLastTime
+            if (elapsed >= 1000) {
+                this.fps = Math.round((this._fpsFrameCount * 1000) / elapsed)
+                this._fpsFrameCount = 0
+                this._fpsLastTime = now
+            }
+
+            this._rafId = requestAnimationFrame(async () => this._loop())
+        } else {
+            this._rafId = null
+            return
+        }
     }
 
     // Méthode utilitaire pour charger une image et la convertir en GPUTexture

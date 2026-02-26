@@ -102,48 +102,49 @@ watch(
 
 async function draw() {
   if (!engine || !navigator) return;
-  const step = navigator.step();
-  if (!step) return;
-  const [dx, dy] = step as [string, string];
-  const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
-  isUpdating = true;
-  cx.value = cx_string;
-  cy.value = cy_string;
-  scale.value = scale_string;
-  angle.value = parseFloat(angle_string);
-  await nextTick();
-  isUpdating = false;
-  const maxIterations = Math.min(Math.max(100, 1000 * props.maxIterationMultiplier * Math.log2(1.0 / parseFloat(scale_string))),100_000);
-  await engine.update({
-        cx: cx_string,
-        cy: cy_string,
-        dx: parseFloat(dx),
-        dy: parseFloat(dy),
-        mu: props.mu,
-        scale: parseFloat(scale_string),
-        angle: parseFloat(angle_string),
-        maxIterations,
-        epsilon: props.epsilon
-      },
-    {
-      shadingLevel: props.shadingLevel,
-      tessellationLevel: props.tessellationLevel,
-      antialiasLevel: props.antialiasLevel,
-      palettePeriod: props.palettePeriod,
-      paletteOffset: props.paletteOffset,
-      colorStops: toRaw(props.colorStops),
-      activateShading: props.activateShading,
-      activateTessellation: props.activateTessellation,
-      activateWebcam: props.activateWebcam,
-      activatePalette: props.activatePalette,
-      activateSkybox: props.activateSkybox,
-      activateSmoothness: props.activateSmoothness,
-      activateZebra: props.activateZebra,
-      activateAnimate: props.activateAnimate,
-    }
 
-  )
-  return engine.render()
+    const step = navigator.step();
+    if (!step) return;
+    const [dx, dy] = step as [string, string];
+    const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
+    isUpdating = true;
+    cx.value = cx_string;
+    cy.value = cy_string;
+    scale.value = scale_string;
+    angle.value = parseFloat(angle_string);
+    await nextTick();
+    isUpdating = false;
+    const maxIterations = Math.min(Math.max(100, 1000 * props.maxIterationMultiplier * Math.log2(1.0 / parseFloat(scale_string))),100_000);
+    await engine.update({
+          cx: cx_string,
+          cy: cy_string,
+          dx: parseFloat(dx),
+          dy: parseFloat(dy),
+          mu: props.mu,
+          scale: parseFloat(scale_string),
+          angle: parseFloat(angle_string),
+          maxIterations,
+          epsilon: props.epsilon
+        },
+      {
+        shadingLevel: props.shadingLevel,
+        tessellationLevel: props.tessellationLevel,
+        antialiasLevel: props.antialiasLevel,
+        palettePeriod: props.palettePeriod,
+        paletteOffset: props.paletteOffset,
+        colorStops: toRaw(props.colorStops),
+        activateShading: props.activateShading,
+        activateTessellation: props.activateTessellation,
+        activateWebcam: props.activateWebcam,
+        activatePalette: props.activatePalette,
+        activateSkybox: props.activateSkybox,
+        activateSmoothness: props.activateSmoothness,
+        activateZebra: props.activateZebra,
+        activateAnimate: props.activateAnimate,
+      }
+    )
+    await engine.render()
+
 }
 
 async function initWebGPU() {
@@ -184,17 +185,26 @@ async function handleResize() {
   const rect = canvasRef.value.getBoundingClientRect();
   canvasRef.value.width = rect.width;
   canvasRef.value.height = rect.height;
+  // Engine reads clientWidth/clientHeight and applies DPR itself.
   engine.resize()
-  await draw()
+  // Render immediately with new dimensions so the canvas is never stale.
+  //await draw()
 }
 
 onMounted(async () => {
   await initWebGPU();
   window.addEventListener('resize', handleResize);
-  return handleResize()
+  // First resize + draw — produces the initial image immediately.
+  await handleResize()
+  // Start the render loop for progressive refinement after the first
+  // frame is already on screen.
+  if (engine) {
+    engine.startRenderLoop(draw);
+  }
 });
 
 onUnmounted(() => {
+  engine?.stopRenderLoop();
   window.removeEventListener('resize', handleResize);
 });
 

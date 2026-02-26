@@ -2,6 +2,7 @@
 import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
+import RenderStats from './RenderStats.vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
@@ -131,6 +132,15 @@ const shortcutLabels = computed(() => {
       <span class="hamburger-bar"></span>
       <span class="hamburger-bar"></span>
     </button>
+
+    <!-- Render status indicator (top-left) -->
+    <div
+      class="render-stats-wrapper animate__animated"
+      :class="showUI ? 'animate__fadeInDown' : ''"
+      v-show="showUI"
+    >
+      <RenderStats :engine="mandelbrotEngine" />
+    </div>
 
     <!-- Composant MandelbrotController avec tous les paramètres -->
     <MandelbrotController
@@ -319,6 +329,14 @@ const shortcutLabels = computed(() => {
   display: inline-block;
   vertical-align: middle;
   margin-bottom: 2px;
+}
+
+.render-stats-wrapper {
+  position: fixed;
+  top: 24px;
+  left: 24px;
+  z-index: 20;
+  pointer-events: auto;
 }
 </style>
 
