@@ -36,6 +36,8 @@ struct BrushUniforms {
   shiftTexX: f32,
   shiftTexY: f32,
   mu: f32,
+  gridOffsetX: f32,
+  gridOffsetY: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;
@@ -133,7 +135,10 @@ fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
   }
 
   let next_step = max(1, step / 2);
-  let is_anchor = (coord_out.x % next_step == 0) && (coord_out.y % next_step == 0);
+  let gx = i32(uni.gridOffsetX);
+  let gy = i32(uni.gridOffsetY);
+  let is_anchor = (((coord_out.x - gx) % next_step + next_step) % next_step == 0)
+               && (((coord_out.y - gy) % next_step + next_step) % next_step == 0);
   return select(-f32(next_step), -1.0, is_anchor);
 }
 

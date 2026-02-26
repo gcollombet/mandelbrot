@@ -18,6 +18,8 @@
 
 struct ResolveUniforms {
   mu: f32,
+  gridOffsetX: f32,
+  gridOffsetY: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: ResolveUniforms;
@@ -130,10 +132,14 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   // Sierpinski-triangle artifact that appeared when the resolve pass
   // blindly copied unfinished pixels.
 
+  // Grid offset for sentinel alignment after translation.
+  let gx = i32(uni.gridOffsetX);
+  let gy = i32(uni.gridOffsetY);
+
   // Climb through coarser grid levels. The maximum number of doublings
   // before step_u exceeds the texture size is bounded by log2(max(dims)).
   // Using 20 iterations covers textures up to 2^20 = 1M pixels per side.
-  for (var level = 0u; level < 6u; level = level + 1u) {
+  for (var level = 0u; level < 10u; level = level + 1u) {
     // Safety: if step exceeds texture size, stop climbing and fall back
     // to the pixel itself (prevents runaway on pathological inputs
     // or when all ancestors are unfinished sentinels).
@@ -141,9 +147,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       return loadAllLayers(coord);
     }
 
-    let mask = ~(step_u - 1u);
-    let base_x = x & mask;
-    let base_y = y & mask;
+    let step_i = i32(step_u);
+    // Snap to grid-aligned anchor, accounting for cumulative shift offset.
+    let sx = i32(x) - gx;
+    let sy = i32(y) - gy;
+    let base_x = u32(sx - ((sx % step_i + step_i) % step_i) + gx);
+    let base_y = u32(sy - ((sy % step_i + step_i) % step_i) + gy);
 
     // Test 4 candidate anchors (all corners of the grid cell) so that
     // resolve works regardless of the navigation direction.

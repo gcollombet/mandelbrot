@@ -16,7 +16,7 @@ import goldUrl from './assets/gold.jpg'
 // Progressive refinement settings.
 // Start step for the sentinel grid; must be a power-of-two.
 // Examples: 16, 32, 64, 128...
-const SENTINEL_SEED_STEP_POW2 = 512
+const SENTINEL_SEED_STEP_POW2 = 2048
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -143,6 +143,11 @@ export class Engine {
     // flag pour indiquer si l'historique doit être effacé au prochain rendu
     clearHistoryNextFrame = false
 
+    // Cumulative texel shift since last clearHistory – used to keep the
+    // sentinel grid aligned after translation reprojection (Option B).
+    cumulativeShiftX = 0
+    cumulativeShiftY = 0
+
     // Progressive iteration state – adaptive batch sizing
     // The batch size auto-adjusts each frame to target ~16ms GPU time.
     static readonly MIN_BATCH_SIZE = 100
@@ -257,12 +262,12 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 8, // 7 floats + 4-byte padding for 16-byte alignment
+            size: 4 * 12, // 10 floats + padding to 16-byte alignment (48 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
         this.uniformBufferResolve = this.device.createBuffer({
-            size: 4 * 4, // 1 float (mu) padded to 16-byte alignment
+            size: 4 * 4, // 3 floats (mu, gridOffsetX, gridOffsetY) padded to 16-byte alignment
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Resolve',
         })
@@ -760,6 +765,22 @@ export class Engine {
             shiftTexY = (deltaDy * texSize) / (2 * this.previousMandelbrot.scale * neutralExtent)
         }
 
+        // Accumulate cumulative texel shift for sentinel grid alignment.
+        // We accumulate the *rounded* shift (what the shader actually applies)
+        // to avoid drift between the JS cumulative total and the GPU reality.
+        if (this.clearHistoryNextFrame) {
+            this.cumulativeShiftX = 0
+            this.cumulativeShiftY = 0
+        } else {
+            this.cumulativeShiftX += Math.round(shiftTexX)
+            this.cumulativeShiftY += Math.round(shiftTexY)
+        }
+
+        // Grid offset passed to the shader: cumulative shift mod baseSentinel,
+        // using WGSL-friendly positive modular arithmetic.
+        const gridOffsetX = ((this.cumulativeShiftX % baseSentinel) + baseSentinel) % baseSentinel
+        const gridOffsetY = ((this.cumulativeShiftY % baseSentinel) + baseSentinel) % baseSentinel
+
         const brushUniforms = new Float32Array([
             aspect,
             this.previousMandelbrot.angle,
@@ -769,11 +790,13 @@ export class Engine {
             shiftTexX,
             shiftTexY,
             this.previousMandelbrot.mu,
+            gridOffsetX,
+            gridOffsetY,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
-        // Write resolve uniforms (mu for budget-exhaustion detection)
-        const resolveUniforms = new Float32Array([this.previousMandelbrot.mu])
+        // Write resolve uniforms (mu for budget-exhaustion detection + grid offset)
+        const resolveUniforms = new Float32Array([this.previousMandelbrot.mu, gridOffsetX, gridOffsetY])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
         const commandEncoder = this.device.createCommandEncoder()
