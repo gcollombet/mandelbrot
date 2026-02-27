@@ -450,23 +450,33 @@ function applyAllShifts() {
 
     // Apply LCH shifts first
     const lch = d3lch(rgbC);
-    let l = (lch.l || 0) + lightShift.value;
+    const baseL = isNaN(lch.l) ? 0 : lch.l;
+    const baseC = isNaN(lch.c) ? 0 : lch.c;
+    const baseH = isNaN(lch.h) ? 0 : lch.h;
+    let l = baseL + lightShift.value;
     l = Math.max(0, Math.min(150, l));
-    let c = (lch.c || 0) + chromaShift.value;
+    let c = baseC + chromaShift.value;
     c = Math.max(0, c);
-    let h = (lch.h || 0) + hueShift.value;
+    let h = baseH + hueShift.value;
     h = ((h % 360) + 360) % 360;
-    const afterLch = d3rgb(d3lch(l, c, h));
+    // If original was achromatic and no chroma is being added, keep hue undefined
+    // to avoid pulling grays toward a specific hue
+    const afterLch = d3rgb(d3lch(l, c, (c === 0) ? NaN : h));
 
     // Apply HSL shifts on the result
     const hslC = d3hsl(afterLch);
-    let hslH = (hslC.h || 0) + hslHueShift.value;
+    const baseHslH = isNaN(hslC.h) ? 0 : hslC.h;
+    const baseHslS = isNaN(hslC.s) ? 0 : hslC.s;
+    const baseHslL = isNaN(hslC.l) ? 0 : hslC.l;
+    let hslH = baseHslH + hslHueShift.value;
     hslH = ((hslH % 360) + 360) % 360;
-    let sat = (hslC.s || 0) + satShift.value / 100;
+    let sat = baseHslS + satShift.value / 100;
     sat = Math.max(0, Math.min(1, sat));
-    let lum = (hslC.l || 0) + lumShift.value / 100;
+    let lum = baseHslL + lumShift.value / 100;
     lum = Math.max(0, Math.min(1, lum));
-    const final = d3hsl(hslH, sat, lum);
+    // If resulting saturation is zero, keep hue undefined to avoid color artifacts
+    const finalH = (sat === 0) ? NaN : hslH;
+    const final = d3hsl(finalH, sat, lum);
     return { color: d3rgb(final).formatHex(), position: stop.position };
   });
 }
@@ -553,6 +563,17 @@ function distributeEvenly() {
     color: s.color,
     position: Number((i * step).toFixed(6)),
   }));
+  resetLchBase();
+}
+
+/** Négatif : invert each color to its RGB complement */
+function negatePalette() {
+  if (model.value.colorStops.length === 0) return;
+  model.value.colorStops = model.value.colorStops.map(s => {
+    const c = d3rgb(s.color);
+    const inv = d3rgb(255 - (c.r || 0), 255 - (c.g || 0), 255 - (c.b || 0));
+    return { color: inv.formatHex(), position: s.position };
+  });
   resetLchBase();
 }
 
@@ -760,6 +781,7 @@ function generateRandom() {
         <label class="label">Outils palette</label>
         <div class="buttons" style="flex-wrap: wrap; gap: 0.4em;">
           <button class="button is-small is-light" @click="invertPalette" title="Inverser l'ordre des couleurs">Inverser</button>
+          <button class="button is-small is-light" @click="negatePalette" title="Négatif (inverser les couleurs RGB)">Négatif</button>
           <button class="button is-small is-light" @click="duplicatePalette" title="Comprimer et répéter 2x">Dupliquer</button>
           <button class="button is-small is-light" @click="mirrorPalette" title="Effet miroir (palindrome)">Miroir</button>
           <button class="button is-small is-light" @click="distributeEvenly" title="Répartir les stops uniformément">Distribuer</button>

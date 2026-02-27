@@ -79,6 +79,8 @@ export class Engine {
     resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 7-layer r32float array
     resolvedArrayView?: GPUTextureView // full 2d-array view for sampling
     resolvedLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
+    frozenTexture?: GPUTexture // frozen snapshot of resolved texture for zoom reprojection
+    frozenArrayView?: GPUTextureView // full 2d-array view for sampling the frozen snapshot
 
     // buffers
     uniformBufferMandelbrot?: GPUBuffer // passe Mandelbrot (calc -1)
@@ -149,6 +151,29 @@ export class Engine {
     // sentinel grid aligned after translation reprojection (Option B).
     cumulativeShiftX = 0
     cumulativeShiftY = 0
+
+    // ── Zoom reprojection state ──────────────────────────────────────
+    /** Configurable magnification threshold before swapping (default ×2). */
+    zoomMagnificationThreshold = 2.0
+    /** Current visual zoom factor: frozenScale / displayScale.
+     *  For zoom-in: < 1 (frozen covers larger area), trending towards 1/threshold.
+     *  For zoom-out: > 1 (frozen covers smaller area), trending towards threshold. */
+    private zoomFactor = 1.0
+    /** Target zoom for the current cycle: zoomMagnificationThreshold for zoom-in,
+     *  1/zoomMagnificationThreshold for zoom-out, or 1.0 when idle. */
+    private zoomTarget = 1.0
+    /** Scale at which the snapshot was frozen. */
+    private frozenScale = 0
+    /** Scale at which the live texture is being computed (fixed for the duration of a cycle). */
+    private liveScale = 0
+    /** Live zoom factor: liveScale / displayScale. Passed to color shader for UV rescaling. */
+    private liveZoomFactor = 1.0
+    /** True when we are in an active zoom reprojection cycle. */
+    private zoomReprojectionActive = false
+    /** Set to true when we need to GPU-copy resolved → frozen at the start of next render. */
+    private needFreezeSnapshot = false
+    /** True when zoom direction is "in" (scale decreasing). */
+    private zoomingIn = true
 
     // Progressive iteration state – adaptive batch sizing
     // The batch size auto-adjusts each frame to target ~16ms GPU time.
@@ -340,6 +365,7 @@ export class Engine {
                 { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
@@ -433,6 +459,7 @@ export class Engine {
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.resolvedTexture?.destroy?.()
+        this.frozenTexture?.destroy?.()
 
         const layerCount = Engine.LAYER_COUNT
 
@@ -445,7 +472,7 @@ export class Engine {
             const texture = this.device.createTexture({
                 size: { width: textureSize, height: textureSize, depthOrArrayLayers: layerCount },
                 format: 'r32float',
-                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
                 label,
             })
             const arrayView = texture.createView({
@@ -480,6 +507,19 @@ export class Engine {
         this.resolvedTexture = resolvedResult.texture
         this.resolvedArrayView = resolvedResult.arrayView
         this.resolvedLayerViews = resolvedResult.layerViews
+
+        const frozenResult = createLayeredTexture('Engine FrozenTexture')
+        this.frozenTexture = frozenResult.texture
+        this.frozenArrayView = frozenResult.arrayView
+        // frozenTexture doesn't need per-layer views (never used as MRT target)
+
+        // Reset zoom reprojection state on resize
+        this.zoomReprojectionActive = false
+        this.zoomFactor = 1.0
+        this.zoomTarget = 1.0
+        this.liveZoomFactor = 1.0
+        this.frozenScale = 0
+        this.liveScale = 0
 
         // Re-création des bind groups dépendant des textures
         if (this.pipelineBrush) {
@@ -528,6 +568,7 @@ export class Engine {
                 { binding: 3, resource: this.skyboxTextureView! },
                 { binding: 4, resource: this.webcamTextureView! },
                 { binding: 5, resource: this.paletteTextureView! },
+                { binding: 6, resource: this.frozenArrayView! },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,
@@ -622,6 +663,76 @@ export class Engine {
         }
         scaleFactor = Math.sqrt(scaleFactor) - 1.0
 
+        // ── Zoom reprojection state update (before uniform write) ─────
+        // Detect scale changes and manage the zoom reprojection cycle.
+        // During a cycle, the live texture is computed at a fixed `liveScale`
+        // while the display zoom interpolates from frozenScale towards liveScale.
+        // The color shader rescales both textures to match the current display.
+        {
+            const scaleChanged = this.prevFrameMandelbrot
+                && this.prevFrameMandelbrot.scale !== mandelbrot.scale
+
+            if (scaleChanged && !this.zoomReprojectionActive) {
+                // Start a new zoom reprojection cycle.
+                this.zoomReprojectionActive = true
+                this.frozenScale = this.prevFrameMandelbrot!.scale
+                this.zoomingIn = mandelbrot.scale < this.frozenScale
+                // Compute target live scale: one threshold step ahead
+                this.liveScale = this.zoomingIn
+                    ? this.frozenScale / this.zoomMagnificationThreshold
+                    : this.frozenScale * this.zoomMagnificationThreshold
+                this.needFreezeSnapshot = true
+                this.clearHistoryNextFrame = true
+            }
+
+            // Update zoom factors during an active cycle
+            if (this.zoomReprojectionActive && this.frozenScale > 0) {
+                this.zoomFactor = this.frozenScale / mandelbrot.scale
+                this.liveZoomFactor = this.liveScale / mandelbrot.scale
+                this.zoomTarget = this.zoomingIn
+                    ? this.zoomMagnificationThreshold
+                    : 1.0 / this.zoomMagnificationThreshold
+
+                // Check if we've reached the swap threshold.
+                // zoomFactor = frozenScale / displayScale.
+                // For zoom-in:  displayScale decreases → zoomFactor rises from ~1 to threshold.
+                // For zoom-out: displayScale increases → zoomFactor drops from ~1 to 1/threshold.
+                const shouldSwap = this.zoomingIn
+                    ? this.zoomFactor >= this.zoomMagnificationThreshold
+                    : this.zoomFactor <= 1.0 / this.zoomMagnificationThreshold
+
+                if (shouldSwap) {
+                    // Swap: the live texture becomes the new frozen snapshot,
+                    // start a new cycle at the next threshold step.
+                    this.needFreezeSnapshot = true
+                    this.clearHistoryNextFrame = true
+                    this.frozenScale = this.liveScale
+                    this.liveScale = this.zoomingIn
+                        ? this.frozenScale / this.zoomMagnificationThreshold
+                        : this.frozenScale * this.zoomMagnificationThreshold
+                    this.zoomFactor = 1.0
+                    this.liveZoomFactor = this.liveScale / mandelbrot.scale
+                }
+            } else if (!this.zoomReprojectionActive) {
+                this.zoomFactor = 1.0
+                this.zoomTarget = 1.0
+                this.liveZoomFactor = 1.0
+            }
+
+            // If zoom has completely stopped, deactivate and recompute at
+            // the actual display scale (the live texture was at liveScale).
+            if (this.zoomReprojectionActive && !scaleChanged
+                && this.prevFrameMandelbrot
+                && this.prevFrameMandelbrot.scale === mandelbrot.scale) {
+                this.zoomReprojectionActive = false
+                this.zoomFactor = 1.0
+                this.zoomTarget = 1.0
+                this.liveZoomFactor = 1.0
+                this.liveScale = 0
+                this.clearHistoryNextFrame = true
+            }
+        }
+
         // Si la palette a changé (stops ou mode d'interpolation), on la recalcule
         if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])
             || renderOptions.interpolationMode !== this.previousRenderOptions?.interpolationMode) {
@@ -654,7 +765,9 @@ export class Engine {
             mandelbrot.angle,
             renderOptions.activateAnimate ? 1 : 0,
             mandelbrot.mu,
-            0,
+            this.zoomFactor,
+            this.zoomTarget,
+            this.liveZoomFactor,
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -687,12 +800,17 @@ export class Engine {
         // we have actually computed, or the shader would read uninitialised memory.
         const guardedMaxIter = Math.min(maxIterations, availableIter)
 
-        // Re-write the mandelbrot uniform with the guarded globalMaxIter
+        // Re-write the mandelbrot uniform with the guarded globalMaxIter.
+        // During zoom reprojection, override scale with liveScale so the GPU
+        // computes at the fixed target scale for this cycle.
+        const computeScale = (this.zoomReprojectionActive && this.liveScale > 0)
+            ? this.liveScale
+            : mandelbrot.scale
         const mandelbrotShaderUniformDataGuarded = new Float32Array([
             mandelbrot.dx,
             mandelbrot.dy,
             mandelbrot.mu,
-            mandelbrot.scale,
+            computeScale,
             aspect,
             mandelbrot.angle,
             this.iterationBatchSize,
@@ -711,15 +829,24 @@ export class Engine {
         // Reprojecting history across that discontinuity would be nonsense, so we clear.
         const orbitWasReset = prtInfo.offset === 0 && !!this.prevFrameMandelbrot
 
-        this.clearHistoryNextFrame = false
+        // clearHistoryNextFrame may already be true from the zoom reprojection
+        // block above. These additional checks handle non-zoom resets.
         if (!this.prevFrameMandelbrot || orbitWasReset) {
             this.clearHistoryNextFrame = true
+            // Hard reset: also kill any active zoom reprojection cycle
+            this.zoomReprojectionActive = false
+            this.zoomFactor = 1.0
+            this.zoomTarget = 1.0
+            this.liveZoomFactor = 1.0
+            this.liveScale = 0
         }
         if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.mu !== mandelbrot.mu) {
             this.clearHistoryNextFrame = true
-        }
-        if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.scale !== mandelbrot.scale) {
-            this.clearHistoryNextFrame = true
+            this.zoomReprojectionActive = false
+            this.zoomFactor = 1.0
+            this.zoomTarget = 1.0
+            this.liveZoomFactor = 1.0
+            this.liveScale = 0
         }
 
         this.previousMandelbrot = structuredClone(mandelbrot) // conserve current pour utilisation future
@@ -750,7 +877,11 @@ export class Engine {
         }
 
         const aspect = (this.width / Math.max(1, this.height))
-        const seedStep = floorPowerOfTwo(SENTINEL_SEED_STEP_POW2)
+        // During zoom reprojection the frozen snapshot covers visual gaps,
+        // so seed every pixel (step=1) for fastest live-texture fill.
+        const seedStep = this.zoomReprojectionActive
+            ? 1
+            : floorPowerOfTwo(SENTINEL_SEED_STEP_POW2)
         const baseSentinel = seedStep
         const clearFlag = this.clearHistoryNextFrame ? 1 : 0
 
@@ -762,10 +893,15 @@ export class Engine {
 
             // Convert Mandelbrot translation (complex-plane units) -> texture texel shift.
             // See `src/assets/reproject.wgsl` translation reprojection logic.
+            // During zoom reprojection, use liveScale (the scale at which the
+            // live texture is computed) instead of the display scale.
             const texSize = this.neutralSize
             const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
-            shiftTexX = -(deltaDx * texSize) / (2 * this.previousMandelbrot.scale * neutralExtent)
-            shiftTexY = (deltaDy * texSize) / (2 * this.previousMandelbrot.scale * neutralExtent)
+            const scaleForShift = (this.zoomReprojectionActive && this.liveScale > 0)
+                ? this.liveScale
+                : this.previousMandelbrot.scale
+            shiftTexX = -(deltaDx * texSize) / (2 * scaleForShift * neutralExtent)
+            shiftTexY = (deltaDy * texSize) / (2 * scaleForShift * neutralExtent)
         }
 
         // Accumulate cumulative texel shift for sentinel grid alignment.
@@ -803,6 +939,18 @@ export class Engine {
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
         const commandEncoder = this.device.createCommandEncoder()
+
+        // ── Zoom reprojection: copy resolved → frozen snapshot ────────
+        if (this.needFreezeSnapshot && this.resolvedTexture && this.frozenTexture) {
+            const layerCount = Engine.LAYER_COUNT
+            const texSize = this.neutralSize
+            commandEncoder.copyTextureToTexture(
+                { texture: this.resolvedTexture },
+                { texture: this.frozenTexture },
+                { width: texSize, height: texSize, depthOrArrayLayers: layerCount },
+            )
+            this.needFreezeSnapshot = false
+        }
 
         // Helper: build 7 MRT color attachments from per-layer views
         const makeMrtAttachments = (layerViews: GPUTextureView[]): GPURenderPassColorAttachment[] =>
@@ -909,6 +1057,9 @@ export class Engine {
         this.unfinishedPixelCount = data[0]
         this.counterReadBuffer!.unmap()
 
+        // Reset the clear flag now that it has been consumed by the GPU passes.
+        this.clearHistoryNextFrame = false
+
         // marque mise à jour des paramètres frame précédente pour prochaine frame
         this.prevFrameMandelbrot = { ...this.previousMandelbrot }
 
@@ -994,6 +1145,7 @@ export class Engine {
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.resolvedTexture?.destroy?.()
+        this.frozenTexture?.destroy?.()
         this.mandelbrotReferenceBuffer?.destroy?.()
         this.uniformBufferMandelbrot?.destroy?.()
         this.uniformBufferColor?.destroy?.()
@@ -1015,6 +1167,8 @@ export class Engine {
      */
     needsMoreFrames(): boolean {
         if (this.needRender) return true
+        // Active zoom reprojection needs continuous rendering
+        if (this.zoomReprojectionActive) return true
         // unfinishedPixelCount: -1 = not yet known (treat as "yes"),
         // 0 = fully converged, >0 = pixels still need work
         if (this.unfinishedPixelCount !== 0) {

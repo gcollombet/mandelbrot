@@ -16,8 +16,9 @@ struct Uniforms {
   angle: f32,
   animate: f32,
   mu: f32,
-  pad1: f32,
-  pad2: f32,
+  zoomFactor: f32,       // frozenScale / displayScale
+  zoomTarget: f32,
+  liveZoomFactor: f32,   // liveScale / displayScale (for UV rescaling of live texture)
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -25,6 +26,7 @@ struct Uniforms {
 @group(0) @binding(3) var skyboxTex: texture_2d<f32>;
 @group(0) @binding(4) var webcamTex: texture_2d<f32>;
 @group(0) @binding(5) var paletteTex: texture_2d<f32>;
+@group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -155,6 +157,58 @@ fn palette(v: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+// ── Colorize a single pixel from its raw layer values ──────────────
+// Returns vec4: rgb color + alpha. Alpha = 0 means "no valid data" (sentinel/uncomputed).
+fn colorize_pixel(
+  iter_val: f32, zx_val: f32, zy_val: f32,
+  der_x: f32, der_y: f32,
+  uv_neutral: vec2<f32>
+) -> vec4<f32> {
+  // Sentinel: iter_val < 0 => uncomputed pixel.
+  if (iter_val < 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0); // alpha=0: no valid data
+  }
+
+  // Budget exhausted: iter > 0 but z hasn't escaped (|z|² < mu).
+  if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
+    return vec4<f32>(0.0, 0.5, 0.0, 1.0);
+  }
+
+  // Inside the set: iter_val == 0. Solid black.
+  if (iter_val == 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  }
+
+  // ── Escaped pixel: recalculate mu and angle_der from stored z and der ──
+  let z_sq = zx_val * zx_val + zy_val * zy_val;
+  let log_z2 = log(z_sq);
+  let mu_val = clamp(1.0 - log(log_z2 / log(parameters.mu)) / log(2.0), 0.0, 1.0);
+
+  var nu = iter_val + mu_val;
+
+  if (nu < 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.5, 1.0);
+  }
+
+  if (parameters.activateSmoothness == 0.0) {
+    nu = iter_val;
+  }
+
+  if (parameters.activateZebra == 1.0 && floor(iter_val) % 2.0 == 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  }
+
+  let z = vec2<f32>(zx_val, zy_val);
+  let der = vec2<f32>(der_x, der_y);
+  let d = cdiv(der, z);
+  let angle_der = atan2(d.y, d.x);
+
+  let v = nu / 256.0;
+  var color = palette(v, z, angle_der, uv_neutral.x, uv_neutral.y);
+
+  return vec4<f32>(color, 1.0);
+}
+
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   // Screen uv in [0,1]
@@ -175,67 +229,118 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let uv_neutral = xy_neutral * 0.5 + vec2<f32>(0.5, 0.5);
 
   let texSize = vec2<i32>(textureDimensions(tex));
-  let sampleCoord = vec2<i32>(
-    i32(clamp(uv_neutral.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
-    i32(clamp((1.0 - uv_neutral.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
+  let texSizeF = vec2<f32>(f32(texSize.x), f32(texSize.y));
+
+  // ── Zoom reprojection: dual-texture sampling with UV rescaling ───
+  // During a zoom cycle the live texture is computed at a fixed target
+  // scale (liveScale) while the display interpolates between frozen and
+  // live scales.  Both textures need UV rescaling to match the display.
+  //
+  //   zoomFactor     = frozenScale / displayScale
+  //   liveZoomFactor = liveScale   / displayScale
+  //
+  // UV transform:  uv_tex = (uv_neutral - 0.5) / texZoomFactor + 0.5
+  //   This "zooms" into or out of the texture to match the display scale.
+
+  let zf  = parameters.zoomFactor;
+  let lzf = parameters.liveZoomFactor;
+  let isZooming = (zf != 1.0) || (lzf != 1.0);
+
+  // Debug: set to 1 to invert live pixels, 2 to invert frozen pixels.
+  const DEBUG_INVERT: i32 = 0;
+
+  if (!isZooming) {
+    // ── No zoom active: sample live texture directly at uv_neutral ──
+    let coord = vec2<i32>(
+      i32(clamp(uv_neutral.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
+      i32(clamp((1.0 - uv_neutral.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
+    );
+    let iter_val = textureLoad(tex, coord, 0, 0).r;
+
+    // Sentinel debug color
+    if (iter_val < 0.0) {
+      let t = clamp((-iter_val) / 64.0, 0.0, 1.0);
+      return vec4<f32>(0.15 + 0.35 * t, 0.0, 0.0, 1.0);
+    }
+
+    let c = colorize_pixel(
+      iter_val,
+      textureLoad(tex, coord, 2, 0).r,
+      textureLoad(tex, coord, 3, 0).r,
+      textureLoad(tex, coord, 4, 0).r,
+      textureLoad(tex, coord, 5, 0).r,
+      uv_neutral
+    );
+    return vec4<f32>(c.rgb, 1.0);
+  }
+
+  // ── Zooming: try live texture first (rescaled), fall back to frozen ──
+
+  // Live texture UV: the live texture is at liveScale, display is at displayScale.
+  let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf + vec2<f32>(0.5, 0.5);
+
+  // Check if the live UV is in bounds (the live texture may cover a different area)
+  let liveInBounds = uv_live.x >= 0.0 && uv_live.x <= 1.0
+                  && uv_live.y >= 0.0 && uv_live.y <= 1.0;
+
+  if (liveInBounds) {
+    let liveCoord = vec2<i32>(
+      i32(clamp(uv_live.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
+      i32(clamp((1.0 - uv_live.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
+    );
+    let live_iter = textureLoad(tex, liveCoord, 0, 0).r;
+
+    // Only use the live pixel if it has valid (non-sentinel) data
+    if (live_iter >= 0.0) {
+      let liveColor = colorize_pixel(
+        live_iter,
+        textureLoad(tex, liveCoord, 2, 0).r,
+        textureLoad(tex, liveCoord, 3, 0).r,
+        textureLoad(tex, liveCoord, 4, 0).r,
+        textureLoad(tex, liveCoord, 5, 0).r,
+        uv_live
+      );
+      if (liveColor.a > 0.0) {
+        if (DEBUG_INVERT == 1) {
+          return vec4<f32>(1.0 - liveColor.rgb, 1.0);
+        }
+        return vec4<f32>(liveColor.rgb, 1.0);
+      }
+    }
+  }
+
+  // Live texture has no data for this pixel — fall back to frozen snapshot.
+  // The frozen texture is at frozenScale; rescale UV accordingly.
+  let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5);
+
+  if (uv_frozen.x < 0.0 || uv_frozen.x > 1.0 || uv_frozen.y < 0.0 || uv_frozen.y > 1.0) {
+    // Outside frozen texture bounds (new area revealed by zoom-out)
+    return vec4<f32>(0.05, 0.05, 0.05, 1.0);
+  }
+
+  let frozenCoord = vec2<i32>(
+    i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
+    i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
   );
 
-  // Read individual layers from the texture array.
-  let iter_val  = textureLoad(tex, sampleCoord, 0, 0).r; // layer 0: integer iter count / sentinel
-  let zx_val    = textureLoad(tex, sampleCoord, 2, 0).r; // layer 2: z.x
-  let zy_val    = textureLoad(tex, sampleCoord, 3, 0).r; // layer 3: z.y
-  let der_x     = textureLoad(tex, sampleCoord, 4, 0).r; // layer 4: derivative x
-  let der_y     = textureLoad(tex, sampleCoord, 5, 0).r; // layer 5: derivative y
+  let frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
+  let frozenColor = colorize_pixel(
+    frozen_iter,
+    textureLoad(texFrozen, frozenCoord, 2, 0).r,
+    textureLoad(texFrozen, frozenCoord, 3, 0).r,
+    textureLoad(texFrozen, frozenCoord, 4, 0).r,
+    textureLoad(texFrozen, frozenCoord, 5, 0).r,
+    uv_frozen
+  );
 
-  // Sentinel: iter_val < 0 => uncomputed pixel.
-  if (iter_val < 0.0) {
-    let t = clamp((-iter_val) / 64.0, 0.0, 1.0);
-    return vec4<f32>(0.15 + 0.35 * t, 0.0, 0.0, 1.0);
+  if (frozenColor.a > 0.0) {
+    if (DEBUG_INVERT == 2) {
+      return vec4<f32>(1.0 - frozenColor.rgb, 1.0);
+    }
+    return vec4<f32>(frozenColor.rgb, 1.0);
   }
 
-  // Budget exhausted: iter > 0 but z hasn't escaped (|z|² < mu).
-  // Render as green (debug) until continuation completes.
-  if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
-    return vec4<f32>(0.0, 0.5, 0.0, 1.0);
-  }
-
-  // Inside the set: iter_val == 0. Solid black.
-  if (iter_val == 0.0) {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-  }
-
-  // ── Escaped pixel: recalculate mu and angle_der from stored z and der ──
-
-  // Smooth fractional part: mu = clamp(1 - log2(log(|z|²) / log(mu_limit)), 0, 1)
-  let z_sq = zx_val * zx_val + zy_val * zy_val;
-  let log_z2 = log(z_sq);
-  let mu_val = clamp(1.0 - log(log_z2 / log(parameters.mu)) / log(2.0), 0.0, 1.0);
-
-  var nu = iter_val + mu_val;
-
-  // Edge case: nu <= 0 after combination (shouldn't happen for escaped points).
-  if (nu < 0.0) {
-    return vec4<f32>(0.0, 0.0, 0.5, 1.0);
-  }
-
-  if (parameters.activateSmoothness == 0.0) {
-    nu = iter_val;
-  }
-
-  // Zebra: use integer iteration count so it works with or without smoothness.
-  if (parameters.activateZebra == 1.0 && floor(iter_val) % 2.0 == 0.0) {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
-  }
-
-  // Recalculate angle_der = atan2(cdiv(der, z)) for shading.
-  let z = vec2<f32>(zx_val, zy_val);
-  let der = vec2<f32>(der_x, der_y);
-  let d = cdiv(der, z);
-  let angle_der = atan2(d.y, d.x);
-
-  let v = nu / 256.0;
-  var color = palette(v, z, angle_der, uv_neutral.x, uv_neutral.y);
-
-  return vec4<f32>(color, 1.0);
+  // Neither texture has data — dark placeholder
+  return vec4<f32>(0.05, 0.05, 0.05, 1.0);
 }
 
