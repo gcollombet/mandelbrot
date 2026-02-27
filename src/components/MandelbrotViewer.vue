@@ -20,6 +20,87 @@ const popupRefs = ref<Record<string, HTMLElement | null>>({});
 
 const showUI = ref(true);
 
+// --- HUD hide during navigation ---
+const isNavigating = ref(false);
+let navigationTimeout: number | null = null;
+
+function onNavigationStart() {
+  isNavigating.value = true;
+  if (navigationTimeout !== null) clearTimeout(navigationTimeout);
+}
+
+function onNavigationEnd() {
+  if (navigationTimeout !== null) clearTimeout(navigationTimeout);
+  navigationTimeout = window.setTimeout(() => {
+    isNavigating.value = false;
+  }, 300);
+}
+
+// --- Auto-hide bottom bar (shortcuts + made with) after 10s ---
+const bottomBarVisible = ref(true);
+let bottomHideTimer: number | null = null;
+
+function startBottomHideTimer() {
+  if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
+  bottomHideTimer = window.setTimeout(() => {
+    bottomBarVisible.value = false;
+  }, 10000);
+}
+
+function showBottomBar() {
+  bottomBarVisible.value = true;
+  startBottomHideTimer();
+}
+
+function handleMouseMove(e: MouseEvent) {
+  // Show bottom bar when mouse is in the bottom 100px of the screen
+  if (e.clientY >= window.innerHeight - 100) {
+    if (!bottomBarVisible.value) {
+      showBottomBar();
+    }
+  }
+}
+
+// Navigation events from keyboard/mouse/touch
+function handleNavKeydown(e: KeyboardEvent) {
+  const navKeys = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyR', 'KeyF'];
+  if (navKeys.includes(e.code)) {
+    onNavigationStart();
+  }
+}
+
+function handleNavKeyup(e: KeyboardEvent) {
+  const navKeys = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyR', 'KeyF'];
+  if (navKeys.includes(e.code)) {
+    onNavigationEnd();
+  }
+}
+
+function handleNavMousedown(e: MouseEvent) {
+  // Only treat canvas interactions as navigation (not menu clicks)
+  const target = e.target as HTMLElement;
+  if (target.tagName === 'CANVAS') {
+    onNavigationStart();
+  }
+}
+
+function handleNavMouseup() {
+  onNavigationEnd();
+}
+
+function handleNavWheel() {
+  onNavigationStart();
+  onNavigationEnd();
+}
+
+function handleNavTouchstart() {
+  onNavigationStart();
+}
+
+function handleNavTouchend() {
+  onNavigationEnd();
+}
+
 // Mobile navigation expanded state (from MobileNavigationControls)
 const mobileNavExpanded = ref(false);
 
@@ -60,10 +141,21 @@ const mandelbrotParams = ref<MandelbrotParams>({
   interpolationMode: 'lab',
 });
 
-// Restore paramètres à partir du localStorage puis surveille et persiste à chaque changement
+// Restore parametres a partir du localStorage puis surveille et persiste a chaque changement
 onMounted(() => {
   window.addEventListener('keydown', handleGlobalKeydown);
   window.addEventListener('pointerdown', handleOutsidePointerDown);
+  // Navigation detection listeners for HUD hide
+  window.addEventListener('keydown', handleNavKeydown);
+  window.addEventListener('keyup', handleNavKeyup);
+  window.addEventListener('mousedown', handleNavMousedown);
+  window.addEventListener('mouseup', handleNavMouseup);
+  window.addEventListener('wheel', handleNavWheel, { passive: true });
+  window.addEventListener('touchstart', handleNavTouchstart, { passive: true });
+  window.addEventListener('touchend', handleNavTouchend, { passive: true });
+  // Bottom bar auto-hide
+  window.addEventListener('mousemove', handleMouseMove, { passive: true });
+  startBottomHideTimer();
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_CURRENT_KEY);
     if (raw) {
@@ -74,6 +166,16 @@ onMounted(() => {
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown);
   window.removeEventListener('pointerdown', handleOutsidePointerDown);
+  window.removeEventListener('keydown', handleNavKeydown);
+  window.removeEventListener('keyup', handleNavKeyup);
+  window.removeEventListener('mousedown', handleNavMousedown);
+  window.removeEventListener('mouseup', handleNavMouseup);
+  window.removeEventListener('wheel', handleNavWheel);
+  window.removeEventListener('touchstart', handleNavTouchstart);
+  window.removeEventListener('touchend', handleNavTouchend);
+  window.removeEventListener('mousemove', handleMouseMove);
+  if (navigationTimeout !== null) clearTimeout(navigationTimeout);
+  if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
 });
 watch(mandelbrotParams, (params) => {
   localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(params));
@@ -267,10 +369,10 @@ const shortcutLabels = computed(() => {
 
 <template>
   <div style="position: relative; height: 100vh; width: 100vw;">
-    <!-- Barre de navigation en haut, centrée, 4 boutons on/off -->
+    <!-- Barre de navigation en haut, centree, 4 boutons on/off -->
     <div
-      class="top-settings-bar animate__animated"
-      :class="showUI ? 'animate__fadeInDown' : ''"
+      class="top-settings-bar"
+      :class="{ 'hud-hidden': isNavigating }"
       v-show="showUI && !mobileNavExpanded"
     >
       <div class="top-settings-bar-inner">
@@ -288,14 +390,14 @@ const shortcutLabels = computed(() => {
 
     <!-- Render status indicator (bottom-center, hidden on mobile) -->
     <div
-      class="render-stats-wrapper is-hidden-touch animate__animated"
-      :class="showUI ? 'animate__fadeInUp' : ''"
+      class="render-stats-wrapper is-hidden-touch"
+      :class="{ 'hud-hidden': isNavigating }"
       v-show="showUI"
     >
       <RenderStats :engine="mandelbrotEngine" />
     </div>
 
-    <!-- Composant MandelbrotController avec tous les paramètres -->
+    <!-- Composant MandelbrotController avec tous les parametres -->
     <MandelbrotController
       ref="mandelbrotCtrlRef"
       style="width: 100%; height: 100%; display: block;"
@@ -350,34 +452,45 @@ const shortcutLabels = computed(() => {
       </div>
     </template>
 
-    <!-- Raccourcis clavier (masqué sur mobile) -->
+    <!-- Raccourcis clavier (masque sur mobile) — responsive stacked layout -->
     <div
-      class="shortcut-hint tag is-light is-medium is-hidden-touch animate__animated"
-      :class="showUI ? 'animate__fadeInUp' : ''"
+      class="shortcut-hint is-hidden-touch"
+      :class="{ 'hud-hidden': isNavigating, 'bottom-bar-hidden': !bottomBarVisible }"
       v-show="showUI"
     >
-      Move&nbsp;
-      <span class="tag is-black">Left clic</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.up }}</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.left }}</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.down }}</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.right }}</span>&nbsp;
-      |&nbsp;Rotate&nbsp;
-      <span class="tag is-black">Right clic</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.rotateLeft }}</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.rotateRight }}</span>&nbsp;
-      |&nbsp;Zoom&nbsp;
-      <span class="tag is-black">Wheel</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.zoomIn }}</span>&nbsp;
-      <span class="tag is-black">{{ shortcutLabels.zoomOut }}</span>&nbsp;
-      |&nbsp;Settings&nbsp;
-      <span class="tag is-black">W</span>
+      <div class="shortcut-group">
+        <span class="shortcut-label">Move</span>
+        <span class="tag is-black">Left clic</span>
+        <span class="tag is-black">{{ shortcutLabels.up }}</span>
+        <span class="tag is-black">{{ shortcutLabels.left }}</span>
+        <span class="tag is-black">{{ shortcutLabels.down }}</span>
+        <span class="tag is-black">{{ shortcutLabels.right }}</span>
+      </div>
+      <span class="shortcut-separator">|</span>
+      <div class="shortcut-group">
+        <span class="shortcut-label">Rotate</span>
+        <span class="tag is-black">Right clic</span>
+        <span class="tag is-black">{{ shortcutLabels.rotateLeft }}</span>
+        <span class="tag is-black">{{ shortcutLabels.rotateRight }}</span>
+      </div>
+      <span class="shortcut-separator">|</span>
+      <div class="shortcut-group">
+        <span class="shortcut-label">Zoom</span>
+        <span class="tag is-black">Wheel</span>
+        <span class="tag is-black">{{ shortcutLabels.zoomIn }}</span>
+        <span class="tag is-black">{{ shortcutLabels.zoomOut }}</span>
+      </div>
+      <span class="shortcut-separator">|</span>
+      <div class="shortcut-group">
+        <span class="shortcut-label">Settings</span>
+        <span class="tag is-black">W</span>
+      </div>
     </div>
 
     <!-- Footer avec liens -->
     <div
-      class="footer-love tag is-light is-medium is-hidden-touch animate__animated"
-      :class="showUI ? 'animate__fadeInUp' : ''"
+      class="footer-love is-hidden-touch"
+      :class="{ 'hud-hidden': isNavigating, 'bottom-bar-hidden': !bottomBarVisible }"
       v-show="showUI"
     >
       <small>
@@ -392,7 +505,7 @@ const shortcutLabels = computed(() => {
                style="height: 24px; width: 24px; vertical-align: middle;"/>
         </a>
       </small>
-      &nbsp;|&nbsp;
+      <span class="footer-separator">|</span>
       <small>
         <a href="https://github.com/gcollombet/mandelbrot"
            target="_blank"
@@ -410,7 +523,42 @@ const shortcutLabels = computed(() => {
 </template>
 
 <style scoped>
-/* Barre de boutons centrée sur l'écran */
+/* === HUD animation: fade out during navigation === */
+.top-settings-bar,
+.render-stats-wrapper,
+.shortcut-hint,
+.footer-love {
+  transition: opacity 0.4s ease, transform 0.4s ease;
+}
+
+.top-settings-bar.hud-hidden {
+  opacity: 0;
+  transform: translateY(-20px);
+  pointer-events: none;
+}
+
+.render-stats-wrapper.hud-hidden {
+  opacity: 0;
+  transform: translateX(-50%) translateY(20px);
+  pointer-events: none;
+}
+
+.shortcut-hint.hud-hidden,
+.footer-love.hud-hidden {
+  opacity: 0;
+  transform: translateY(20px);
+  pointer-events: none;
+}
+
+/* === Bottom bar auto-hide === */
+.shortcut-hint.bottom-bar-hidden,
+.footer-love.bottom-bar-hidden {
+  opacity: 0;
+  transform: translateY(20px);
+  pointer-events: none;
+}
+
+/* Barre de boutons centree sur l'ecran */
 .top-settings-bar {
   position: fixed;
   top: 16px;
@@ -426,10 +574,10 @@ const shortcutLabels = computed(() => {
 .top-settings-bar-inner {
   display: flex;
   gap: 0;
-  background: rgba(255,255,255,0.35);
-  backdrop-filter: blur(8px);
+  background: rgba(255,255,255,0.65);
+  backdrop-filter: blur(12px);
   border-radius: 16px;
-  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
+  box-shadow: 0 2px 12px 0 rgba(0,0,0,0.08);
   overflow: hidden;
   pointer-events: auto;
 }
@@ -494,17 +642,17 @@ const shortcutLabels = computed(() => {
   min-height: 0;
 }
 
-/* Shortcut hint bar */
+/* === Shortcut hint bar — responsive === */
 .shortcut-hint {
   position: absolute;
   right: 24px;
   bottom: 16px;
-  padding: 6px 18px;
-  border-radius: 16px;
+  padding: 8px 16px;
+  border-radius: 0;
   background: rgba(255,255,255,0.35);
   backdrop-filter: blur(8px);
   color: #111;
-  font-size: 1rem;
+  font-size: 0.9rem;
   font-family: inherit;
   box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
   pointer-events: none;
@@ -512,6 +660,40 @@ const shortcutLabels = computed(() => {
   opacity: 0.85;
   letter-spacing: 0.01em;
   z-index: 20;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 12px;
+  max-width: 700px;
+}
+
+.shortcut-group {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
+}
+
+.shortcut-label {
+  font-weight: 500;
+  margin-right: 2px;
+}
+
+.shortcut-separator {
+  opacity: 0.4;
+  margin: 0 2px;
+  user-select: none;
+}
+
+/* On narrower screens, stack groups vertically and hide separators */
+@media (max-width: 1200px) {
+  .shortcut-hint {
+    flex-direction: column;
+    gap: 4px;
+    max-width: 320px;
+  }
+  .shortcut-separator {
+    display: none;
+  }
 }
 
 .footer-love {
@@ -519,7 +701,7 @@ const shortcutLabels = computed(() => {
   left: 24px;
   bottom: 16px;
   padding: 6px 18px;
-  border-radius: 16px;
+  border-radius: 0;
   background: rgba(255,255,255,0.35);
   backdrop-filter: blur(8px);
   color: #111;
@@ -534,6 +716,11 @@ const shortcutLabels = computed(() => {
   display: flex;
   align-items: center;
   gap: 4px;
+}
+
+.footer-separator {
+  margin: 0 4px;
+  opacity: 0.5;
 }
 
 .footer-link {

@@ -56,6 +56,13 @@ const angleStep = 0.025;
 
 let updateTimer: number | null = null;
 
+// Double-tap detection for mobile
+let lastTapTime = 0;
+let lastTapX = 0;
+let lastTapY = 0;
+const DOUBLE_TAP_DELAY = 300;
+const DOUBLE_TAP_DISTANCE = 30;
+
 function getCanvas(): HTMLCanvasElement | null {
   return mandelbrotRef.value?.getCanvas() ?? null;
 }
@@ -85,9 +92,53 @@ function handleKeyup(e: KeyboardEvent) {
 
 function handleWheel(e: WheelEvent) {
   e.preventDefault();
-  const zoomFactor = 0.8;
+  const zoomFactor = 0.95;
   if (e.deltaY < 0) mandelbrotRef.value?.zoom(zoomFactor);
   else mandelbrotRef.value?.zoom(1 / zoomFactor);
+}
+
+// Center the view on a specific canvas point
+function centerOnCanvasPoint(clientX: number, clientY: number) {
+  const canvas = getCanvas();
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const x = clientX - rect.left;
+  const y = clientY - rect.top;
+  const width = rect.width;
+  const height = rect.height;
+  const aspect = width / height;
+  // Delta from canvas center to the clicked point, normalized
+  const dx = (x - width / 2) / width * 2;
+  const dy = (y - height / 2) / height * 2;
+  mandelbrotRef.value?.translateDirect(dx * aspect, -dy);
+}
+
+function handleDblClick(e: MouseEvent) {
+  e.preventDefault();
+  centerOnCanvasPoint(e.clientX, e.clientY);
+}
+
+function handleTouchEndForDoubleTap(e: TouchEvent) {
+  if (e.touches.length !== 0) return;
+  const now = Date.now();
+  const touch = e.changedTouches[0];
+  if (!touch) return;
+  const tapX = touch.clientX;
+  const tapY = touch.clientY;
+
+  if (
+    now - lastTapTime < DOUBLE_TAP_DELAY &&
+    Math.hypot(tapX - lastTapX, tapY - lastTapY) < DOUBLE_TAP_DISTANCE
+  ) {
+    // Double tap detected — center on that point
+    e.preventDefault();
+    centerOnCanvasPoint(tapX, tapY);
+    lastTapTime = 0; // reset to avoid triple-tap
+  } else {
+    lastTapTime = now;
+    lastTapX = tapX;
+    lastTapY = tapY;
+  }
 }
 
 function handleMouseDown(e: MouseEvent) {
@@ -192,7 +243,7 @@ function updateLoop() {
   if (pressedKeys['KeyD']) mandelbrotRef.value?.translate(moveStep, 0);
   if (pressedKeys['KeyQ']) mandelbrotRef.value?.rotate(angleStep);
   if (pressedKeys['KeyE']) mandelbrotRef.value?.rotate(-angleStep);
-  const zoomFactor = 0.8;
+  const zoomFactor = 0.95;
   if (pressedKeys['KeyR']) mandelbrotRef.value?.zoom(zoomFactor);
   if (pressedKeys['KeyF']) mandelbrotRef.value?.zoom(1 / zoomFactor);
   updateTimer = window.setTimeout(updateLoop, 16);
@@ -209,6 +260,7 @@ onMounted(async () => {
   // souris / touchpad
   canvas.addEventListener('wheel', handleWheel, { passive: false });
   canvas.addEventListener('mousedown', handleMouseDown);
+  canvas.addEventListener('dblclick', handleDblClick);
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
   window.addEventListener('mousemove', handleMouseMove);
   window.addEventListener('mouseup', handleMouseUp);
@@ -217,6 +269,7 @@ onMounted(async () => {
   canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
   canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
   canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
+  canvas.addEventListener('touchend', handleTouchEndForDoubleTap, { passive: false });
 
   // boucle clavier (la boucle de rendu est gérée par l'engine via Mandelbrot.vue)
   updateLoop();
@@ -235,10 +288,12 @@ onUnmounted(() => {
   if (canvas) {
     canvas.removeEventListener('wheel', handleWheel as EventListener);
     canvas.removeEventListener('mousedown', handleMouseDown as EventListener);
+    canvas.removeEventListener('dblclick', handleDblClick as EventListener);
     canvas.removeEventListener('contextmenu', (e) => e.preventDefault());
     canvas.removeEventListener('touchstart', handleTouchStart as EventListener);
     canvas.removeEventListener('touchmove', handleTouchMove as EventListener);
     canvas.removeEventListener('touchend', handleTouchEnd as EventListener);
+    canvas.removeEventListener('touchend', handleTouchEndForDoubleTap as EventListener);
   }
 });
 </script>

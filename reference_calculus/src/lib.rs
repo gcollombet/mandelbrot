@@ -79,7 +79,7 @@ impl MandelbrotNavigator {
             last_zy: zero.clone(),
             last_dx: zero.clone(),
             last_dy: zero.clone(),
-            vscale: zero.clone(),
+            vscale: DBig::try_from(1).unwrap(),
             vangle: 0.0,
             vtx: zero.clone(),
             vty: zero.clone(),
@@ -129,7 +129,9 @@ impl MandelbrotNavigator {
     }
 
     pub fn zoom(&mut self, factor: f64) {
-        self.vscale = DBig::from_str(factor.to_string().as_str()).unwrap()
+        // Accumulate zoom velocity (multiplicative — neutral value is 1.0)
+        let factor_big = DBig::from_str(factor.to_string().as_str()).unwrap();
+        self.vscale = &self.vscale * factor_big;
     }
 
     pub fn step(&mut self) -> Vec<String> {
@@ -169,7 +171,7 @@ impl MandelbrotNavigator {
         let delta_time_big = DBig::from_str(&delta_time.to_string()).unwrap();
 
         // On anime l'échelle avec la vitesse et damping
-        if self.vscale != DBig::try_from(0).unwrap() {
+        if self.vscale != DBig::try_from(1).unwrap() {
             //let delta_scale = DBig::try_from(1).unwrap() + &self.vscale * (DBig::try_from(1).unwrap() + &delta_time_big).ln();
             //self.scale = self.scale.powf(&(&self.vscale * &delta_time_big));
 
@@ -193,9 +195,9 @@ impl MandelbrotNavigator {
             }
 
             if self.vscale.clone().abs() > DBig::from_str("0.999").unwrap()
-                || self.vscale.clone().abs() < DBig::from_str("1.001").unwrap()
+                && self.vscale.clone().abs() < DBig::from_str("1.001").unwrap()
             {
-                self.vscale = DBig::try_from(0).unwrap();
+                self.vscale = DBig::try_from(1).unwrap();
             }
         }
 
@@ -215,8 +217,13 @@ impl MandelbrotNavigator {
         }
 
         // Rendre damping dépendant du temps
-        self.cx = &self.cx + &self.vtx * &delta_time_big;
-        self.cy = &self.cy + &self.vty * &delta_time_big;
+        // Use exact integral instead of Euler: for v(t) = v0*e^(-k*t),
+        // displacement = v0 * (1 - e^(-k*dt)) / k = v0 * (1 - damping) / k
+        let k = std::f64::consts::LN_2 / 0.05;
+        let displacement_factor_f64 = (1.0 - damping_base) / k;
+        let displacement_factor = DBig::from_str(&displacement_factor_f64.to_string()).unwrap();
+        self.cx = &self.cx + &self.vtx * &displacement_factor;
+        self.cy = &self.cy + &self.vty * &displacement_factor;
         self.vtx = &self.vtx * &damping;
         self.vty = &self.vty * &damping;
 
@@ -360,7 +367,7 @@ impl MandelbrotNavigator {
 
     pub fn scale(&mut self, value: &str) {
         self.scale = DBig::from_str(value).unwrap();
-        self.vscale = DBig::from_str("0").unwrap();
+        self.vscale = DBig::try_from(1).unwrap();
     }
 
     pub fn angle(&mut self, value: f64) {

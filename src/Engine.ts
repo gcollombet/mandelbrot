@@ -21,11 +21,11 @@ const SENTINEL_SEED_STEP_POW2 = 2048
 
 // During zoom reprojection the frozen snapshot covers visual gaps, so we
 // use a much smaller grid for faster fill.  Must be a power-of-two.
-const ZOOM_SENTINEL_SEED_STEP = 16
+const ZOOM_SENTINEL_SEED_STEP = 8
 
 // Number of consecutive no-scale-change frames before we consider the zoom
 // truly stopped. Wheel events often have 1-2 frame gaps between ticks.
-const ZOOM_IDLE_GRACE_FRAMES = 10
+const ZOOM_IDLE_GRACE_FRAMES = 4
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -162,7 +162,7 @@ export class Engine {
 
     // ── Zoom reprojection state ──────────────────────────────────────
     /** Configurable magnification threshold before swapping (default ×2). */
-    zoomMagnificationThreshold = 10.0
+    zoomMagnificationThreshold = 32.0
     /** Current visual zoom factor: frozenScale / displayScale.
      *  For zoom-in: < 1 (frozen covers larger area), trending towards 1/threshold.
      *  For zoom-out: > 1 (frozen covers smaller area), trending towards threshold. */
