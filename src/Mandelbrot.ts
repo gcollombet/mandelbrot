@@ -1,5 +1,7 @@
 import type {ColorStop} from "./ColorStop.ts";
 
+export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
+
 export interface MandelbrotParams {
     activateSmoothness: boolean;
     activateZebra: boolean;
@@ -24,4 +26,5 @@ export interface MandelbrotParams {
     activateSkybox: boolean,
     activateAnimate: boolean,
     colorStops: ColorStop[],
+    interpolationMode: InterpolationMode,
 }

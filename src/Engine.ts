@@ -10,6 +10,7 @@ import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
+import type {InterpolationMode} from './Mandelbrot.ts'
 import coloredTilesUrl from './assets/colored_tiles.jpg'
 import goldUrl from './assets/gold.jpg'
 
@@ -28,6 +29,7 @@ export type RenderOptions = {
     palettePeriod: number,
     paletteOffset: number,
     colorStops: ColorStop[],
+    interpolationMode: InterpolationMode,
     activateWebcam: boolean,
     activateTessellation: boolean,
     activateShading: boolean,
@@ -620,9 +622,10 @@ export class Engine {
         }
         scaleFactor = Math.sqrt(scaleFactor) - 1.0
 
-        // Si la palette a changé, on la recalcule
-        if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])) {
-            const palette = new Palette(renderOptions.colorStops)
+        // Si la palette a changé (stops ou mode d'interpolation), on la recalcule
+        if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])
+            || renderOptions.interpolationMode !== this.previousRenderOptions?.interpolationMode) {
+            const palette = new Palette(renderOptions.colorStops, renderOptions.interpolationMode)
             const paletteImageData = palette.generateTexture()
             this.device.queue.writeTexture(
                 { texture: this.paletteTexture! },

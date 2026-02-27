@@ -29,6 +29,7 @@ const props = defineProps<{
   activateAnimate?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
+  interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
 }>();
 
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
@@ -71,9 +72,13 @@ function getCanvasCoords(e: MouseEvent) {
 }
 
 function handleKeydown(e: KeyboardEvent) {
+  // Ne pas capturer les touches quand un champ de saisie est actif
+  const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
+  if (tag === 'input' || tag === 'textarea' || tag === 'select' || (e.target as HTMLElement)?.isContentEditable) return;
   pressedKeys[e.code] = true;
 }
 function handleKeyup(e: KeyboardEvent) {
+  // Toujours relâcher la touche pour éviter les touches "collées"
   pressedKeys[e.code] = false;
 }
 
@@ -263,6 +268,7 @@ onUnmounted(() => {
       :paletteOffset="props.paletteOffset"
       :dprMultiplier="props.dprMultiplier"
       :maxIterationMultiplier="props.maxIterationMultiplier"
+      :interpolationMode="props.interpolationMode"
     />
     
     <!-- Contrôles de navigation mobile -->

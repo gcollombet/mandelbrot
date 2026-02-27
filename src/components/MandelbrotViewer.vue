@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
+import {computed, onMounted, onUnmounted, reactive, ref, watch} from 'vue';
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
@@ -10,8 +10,13 @@ import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
 const mandelbrotEngine = computed(() => mandelbrotCtrlRef.value?.getEngine() ?? null);
 
-const showSettings = ref(false);
+// Multi-window support: set of open tabs, each with its own popup position
+const openTabs = reactive(new Set<string>());
 const shortcutsSuspended = ref(false);
+
+// Per-tab popup positions and refs
+const popupPositions = reactive<Record<string, { x: number; y: number }>>({});
+const popupRefs = ref<Record<string, HTMLElement | null>>({});
 
 const showUI = ref(true);
 
@@ -49,11 +54,12 @@ const mandelbrotParams = ref<MandelbrotParams>({
   activateAnimate: false,
   dprMultiplier: 1.0,
   maxIterationMultiplier: 1.0,
+  interpolationMode: 'lab',
 });
 
 // Restore paramètres à partir du localStorage puis surveille et persiste à chaque changement
 onMounted(() => {
-  window.addEventListener('keydown', handleSettingsHotkey);
+  window.addEventListener('keydown', handleGlobalKeydown);
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_CURRENT_KEY);
     if (raw) {
@@ -62,25 +68,140 @@ onMounted(() => {
   } catch {}
 });
 onUnmounted(() => {
-  window.removeEventListener('keydown', handleSettingsHotkey);
+  window.removeEventListener('keydown', handleGlobalKeydown);
 });
 watch(mandelbrotParams, (params) => {
   localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(params));
 }, { deep: true });
 
-function toggleSettings() {
-  showSettings.value = !showSettings.value;
+// Tabs du menu
+const settingsTabs = [
+  { key: 'navigation', label: 'Navigation' },
+  { key: 'presets', label: 'Presets' },
+  { key: 'palettes', label: 'Palettes' },
+  { key: 'performance', label: 'Graphics' },
+];
+
+function toggleTab(tabKey: string) {
+  if (openTabs.has(tabKey)) {
+    openTabs.delete(tabKey);
+    delete popupPositions[tabKey];
+  } else {
+    openTabs.add(tabKey);
+    // Initialize centered position for new popup
+    popupPositions[tabKey] = { x: -1, y: -1 };
+  }
 }
 
-// Gestion du raccourci clavier "W" pour ouvrir/fermer les settings
-function handleSettingsHotkey(e: KeyboardEvent) {
+function closeTab(tabKey: string) {
+  openTabs.delete(tabKey);
+  delete popupPositions[tabKey];
+}
+
+function closeAllSettings() {
+  openTabs.clear();
+  for (const key of Object.keys(popupPositions)) {
+    delete popupPositions[key];
+  }
+}
+
+// Gestion clavier globale (W pour settings, Escape pour fermer)
+function handleGlobalKeydown(e: KeyboardEvent) {
+  if (e.key === 'Escape' && openTabs.size > 0) {
+    e.preventDefault();
+    closeAllSettings();
+    return;
+  }
   if (shortcutsSuspended.value) return;
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) return;
   if ((e.key === 'w' || e.key === 'W') && !e.repeat) {
     e.preventDefault();
-    toggleSettings();
+    if (openTabs.size > 0) {
+      closeAllSettings();
+    } else {
+      toggleTab('navigation');
+    }
   }
+}
+
+// Draggable popup — per-tab
+const isDragging = ref(false);
+const dragOffset = ref({ x: 0, y: 0 });
+const draggingTab = ref<string | null>(null);
+// Z-index tracking: bring focused popup to front
+const tabZOrder = reactive<Record<string, number>>({});
+let nextZ = 51;
+
+function bringToFront(tabKey: string) {
+  tabZOrder[tabKey] = nextZ++;
+}
+
+function setPopupRef(tabKey: string, el: HTMLElement | null) {
+  popupRefs.value[tabKey] = el;
+}
+
+function startDrag(tabKey: string, e: MouseEvent) {
+  const el = popupRefs.value[tabKey];
+  if (!el) return;
+  isDragging.value = true;
+  draggingTab.value = tabKey;
+  const rect = el.getBoundingClientRect();
+  dragOffset.value = { x: e.clientX - rect.left, y: e.clientY - rect.top };
+  // If first drag, initialize from center
+  if ((popupPositions[tabKey]?.x ?? -1) < 0) {
+    popupPositions[tabKey] = { x: rect.left, y: rect.top };
+  }
+  bringToFront(tabKey);
+  window.addEventListener('mousemove', onDrag);
+  window.addEventListener('mouseup', stopDrag);
+}
+
+function onDrag(e: MouseEvent) {
+  if (!isDragging.value || !draggingTab.value) return;
+  popupPositions[draggingTab.value] = {
+    x: e.clientX - dragOffset.value.x,
+    y: e.clientY - dragOffset.value.y,
+  };
+}
+
+function stopDrag() {
+  isDragging.value = false;
+  draggingTab.value = null;
+  window.removeEventListener('mousemove', onDrag);
+  window.removeEventListener('mouseup', stopDrag);
+}
+
+function popupStyle(tabKey: string) {
+  const pos = popupPositions[tabKey] ?? { x: -1, y: -1 };
+  const z = tabZOrder[tabKey] ?? 50;
+  // Palette popup is wider; presets popup is taller
+  const w = tabKey === 'palettes' ? '860px' : '460px';
+  const mh = tabKey === 'presets' ? '92vh' : '80vh';
+  if (pos.x < 0) {
+    // Stagger multiple popups so they don't overlap perfectly
+    const tabKeys = Array.from(openTabs);
+    const idx = tabKeys.indexOf(tabKey);
+    const offsetPx = idx * 30;
+    return {
+      position: 'fixed' as const,
+      top: `calc(50% + ${offsetPx}px)`,
+      left: `calc(50% + ${offsetPx}px)`,
+      transform: 'translate(-50%, -50%)',
+      zIndex: z,
+      width: w,
+      maxHeight: mh,
+    };
+  }
+  return {
+    position: 'fixed' as const,
+    top: `${pos.y}px`,
+    left: `${pos.x}px`,
+    transform: 'none',
+    zIndex: z,
+    width: w,
+    maxHeight: mh,
+  };
 }
 
 // Détection de la disposition du clavier
@@ -120,18 +241,22 @@ const shortcutLabels = computed(() => {
 
 <template>
   <div style="position: relative; height: 100vh; width: 100vw;">
-    <!-- Bouton hamburger pour ouvrir les settings -->
-    <button
-      class="menu-hamburger tag is-light is-medium animate__animated"
+    <!-- Barre de navigation en haut, centrée, 4 boutons on/off -->
+    <div
+      class="top-settings-bar animate__animated"
       :class="showUI ? 'animate__fadeInDown' : ''"
-      aria-label="Menu"
       v-show="showUI"
-      @click="toggleSettings"
     >
-      <span class="hamburger-bar"></span>
-      <span class="hamburger-bar"></span>
-      <span class="hamburger-bar"></span>
-    </button>
+      <button
+        v-for="tab in settingsTabs"
+        :key="tab.key"
+        class="top-tab-btn"
+        :class="{ 'is-active': openTabs.has(tab.key) }"
+        @click="toggleTab(tab.key)"
+      >
+        {{ tab.label }}
+      </button>
+    </div>
 
     <!-- Render status indicator (top-left) -->
     <div
@@ -168,15 +293,33 @@ const shortcutLabels = computed(() => {
       :activateAnimate="mandelbrotParams.activateAnimate"
       :dprMultiplier="mandelbrotParams.dprMultiplier"
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
+      :interpolationMode="mandelbrotParams.interpolationMode"
     />
 
-    <!-- Panel Settings -->
-    <div
-      v-if="showSettings"
-      style="position: absolute; top: 0; left: 0; z-index: 10; pointer-events: auto; height: 100vh;"
-    >
-      <Settings v-model="mandelbrotParams" :engine="mandelbrotEngine" :suspend-shortcuts="val => { shortcutsSuspended = val }" />
-    </div>
+    <!-- Popup Settings — one per open tab (multi-window) -->
+    <template v-for="tab in settingsTabs" :key="'popup-' + tab.key">
+      <div
+        v-if="openTabs.has(tab.key)"
+        :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
+        class="settings-popup"
+        :style="popupStyle(tab.key)"
+        @mousedown="bringToFront(tab.key)"
+      >
+        <!-- Barre de titre draggable -->
+        <div class="settings-popup-header" @mousedown.prevent="startDrag(tab.key, $event)">
+          <span class="settings-popup-title">{{ tab.label }}</span>
+          <button class="delete is-medium" aria-label="Fermer" @click="closeTab(tab.key)"></button>
+        </div>
+        <div class="settings-popup-body">
+          <Settings
+            v-model="mandelbrotParams"
+            :engine="mandelbrotEngine"
+            :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
+            :active-tab="tab.key"
+          />
+        </div>
+      </div>
+    </template>
 
     <!-- Raccourcis clavier (masqué sur mobile) -->
     <div
@@ -238,6 +381,84 @@ const shortcutLabels = computed(() => {
 </template>
 
 <style scoped>
+/* Barre de boutons en haut, centrée */
+.top-settings-bar {
+  position: fixed;
+  top: 16px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 30;
+  display: flex;
+  gap: 0;
+  background: rgba(255,255,255,0.35);
+  backdrop-filter: blur(8px);
+  border-radius: 16px;
+  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
+  overflow: hidden;
+  user-select: none;
+}
+
+.top-tab-btn {
+  background: transparent;
+  border: none;
+  padding: 8px 18px;
+  font-size: 0.92rem;
+  font-weight: 500;
+  color: #222;
+  cursor: pointer;
+  transition: background 0.2s, color 0.2s;
+  white-space: nowrap;
+  letter-spacing: 0.01em;
+}
+
+.top-tab-btn:hover {
+  background: rgba(255,255,255,0.45);
+}
+
+.top-tab-btn.is-active {
+  background: rgba(50, 115, 220, 0.85);
+  color: #fff;
+}
+
+/* Popup Settings */
+.settings-popup {
+  max-width: 96vw;
+  background: rgba(255,255,255,0.75);
+  backdrop-filter: blur(12px) contrast(110%);
+  -webkit-backdrop-filter: blur(12px);
+  border-radius: 12px;
+  box-shadow: 0 8px 32px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.08);
+  display: flex;
+  flex-direction: column;
+  overflow: hidden;
+  pointer-events: auto;
+}
+
+.settings-popup-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px 16px;
+  background: rgba(255,255,255,0.5);
+  cursor: move;
+  user-select: none;
+  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+
+.settings-popup-title {
+  font-weight: 600;
+  font-size: 1rem;
+  color: #222;
+}
+
+.settings-popup-body {
+  flex: 1 1 auto;
+  overflow-y: auto;
+  padding: 16px;
+  min-height: 0;
+}
+
+/* Shortcut hint bar */
 .shortcut-hint {
   position: absolute;
   right: 24px;
@@ -255,42 +476,6 @@ const shortcutLabels = computed(() => {
   opacity: 0.85;
   letter-spacing: 0.01em;
   z-index: 20;
-}
-
-.menu-hamburger {
-  position: fixed;
-  top: 24px;
-  right: 24px;
-  z-index: 30;
-  display: flex;
-  flex-direction: column;
-  justify-content: center;
-  align-items: center;
-  width: 48px;
-  height: 48px;
-  background: rgba(255,255,255,0.35);
-  backdrop-filter: blur(8px);
-  border: none;
-  border-radius: 16px;
-  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
-  cursor: pointer;
-  padding: 0;
-  transition: background 0.2s;
-}
-
-.menu-hamburger:active,
-.menu-hamburger:focus {
-  background: rgba(255,255,255,0.6);
-}
-
-.hamburger-bar {
-  display: block;
-  width: 28px;
-  height: 4px;
-  margin: 3px 0;
-  background: #111;
-  border-radius: 2px;
-  transition: all 0.2s;
 }
 
 .footer-love {
@@ -339,4 +524,3 @@ const shortcutLabels = computed(() => {
   pointer-events: auto;
 }
 </style>
-

@@ -1,13 +1,23 @@
-import { interpolateLab } from 'd3-interpolate';
+import { interpolateLab, interpolateRgb, interpolateHcl, interpolateHsl, interpolateCubehelix } from 'd3-interpolate';
 import { rgb } from 'd3-color';
-import type {ColorStop} from "./ColorStop.ts";
+import type { ColorStop } from "./ColorStop.ts";
+import type { InterpolationMode } from "./Mandelbrot.ts";
 
+const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: number) => string> = {
+  lab: interpolateLab,
+  rgb: interpolateRgb,
+  hcl: interpolateHcl,
+  hsl: interpolateHsl,
+  cubehelix: interpolateCubehelix,
+};
 
 export class Palette {
   points: ColorStop[];
+  private interpolate: (a: string, b: string) => (t: number) => string;
 
-  constructor(points: ColorStop[]) {
+  constructor(points: ColorStop[], mode: InterpolationMode = 'lab') {
     this.points = points.slice().sort((a, b) => a.position - b.position);
+    this.interpolate = interpolators[mode] ?? interpolateLab;
   }
 
   getColorAt(t: number): string {
@@ -19,7 +29,7 @@ export class Palette {
       const b = this.points[i + 1];
       if (t >= a.position && t <= b.position) {
         const localT = (t - a.position) / (b.position - a.position);
-        const interp = interpolateLab(a.color, b.color);
+        const interp = this.interpolate(a.color, b.color);
         return rgb(interp(localT)).formatHex();
       }
     }
@@ -42,4 +52,3 @@ export class Palette {
     return imageData;
   }
 }
-

@@ -1,12 +1,14 @@
 <script setup lang="ts">
 import {computed, defineEmits, defineProps, nextTick, onMounted, ref, watch} from 'vue';
 import GlissiereHandle from './GlissiereHandle.vue';
-import LchPicker from './LchPicker.vue';
 import {Palette} from '../Palette';
-import {lch as d3lch, rgb as d3rgb} from 'd3-color';
+import {rgb as d3rgb} from 'd3-color';
 import type {ColorStop} from "../ColorStop.ts";
+import type {InterpolationMode} from "../Mandelbrot.ts";
 
-const props = defineProps<{ colorStops: ColorStop[] }>();
+const props = withDefaults(defineProps<{ colorStops: ColorStop[]; interpolationMode?: InterpolationMode }>(), {
+  interpolationMode: 'lab',
+});
 const emit = defineEmits<(e: 'update:colorStops', value: ColorStop[]) => void>();
 
 const MAX_COLORS = 12;
@@ -15,7 +17,7 @@ const canvasRef = ref<HTMLCanvasElement|null>(null);
 
 // Texture générée à partir de la palette courante
 const texture = computed(() => {
-  const pal = new Palette(props.colorStops);
+  const pal = new Palette(props.colorStops, props.interpolationMode);
   return pal.generateTexture(); // ImageData
 });
 
@@ -24,7 +26,6 @@ watch(texture, (img) => {
   const ctx = canvasRef.value.getContext('2d');
   if (!ctx) return;
   ctx.clearRect(0, 0, 4096, 32);
-  // On étire verticalement la bande 4096x1 sur 4096x32 pour la visibilité
   const tmp = document.createElement('canvas');
   tmp.width = img.width;
   tmp.height = img.height;
@@ -33,14 +34,12 @@ watch(texture, (img) => {
 });
 
 onMounted(() => {
-  // Ajout d'une glissière par défaut si aucune couleur
   nextTick(() => {
     const img = texture.value;
     if (!canvasRef.value || !img) return;
     const ctx = canvasRef.value.getContext('2d');
     if (!ctx) return;
     ctx.clearRect(0, 0, 4096, 32);
-    // On étire verticalement la bande 4096x1 sur 4096x32 pour la visibilité
     const tmp = document.createElement('canvas');
     tmp.width = img.width;
     tmp.height = img.height;
@@ -56,12 +55,9 @@ function onCanvasDblClick(event: MouseEvent) {
   const rect = canvas.getBoundingClientRect();
   let t = (event.clientX - rect.left) / rect.width;
   t = Math.max(0, Math.min(1, t));
-  // Utilise la couleur actuellement sélectionnée comme base
   const baseColor = selectedIdx.value !== null ? props.colorStops[selectedIdx.value]?.color || '#ffffff' : '#ffffff';
-  // On clone le tableau pour respecter l'immuabilité
   props.colorStops.push({ color: baseColor, position: t });
   emit('update:colorStops', props.colorStops);
-  // Sélectionne la nouvelle couleur
   selectedIdx.value = props.colorStops.length - 1;
 }
 
@@ -72,33 +68,24 @@ function selectColor(idx: number) {
   selectedIdx.value = idx;
 }
 
-// Conversion hex -> LCH
-function hexToLch(hex: string) {
-  const rgb = d3rgb(hex);
-  if (!rgb) return { l: 100, c: 0, h: 0 };
-  const lch = d3lch(rgb);
-  return { l: lch.l, c: lch.c, h: lch.h };
-}
-// Conversion LCH -> hex
-function lchToHex(lchObj: { l: number, c: number, h: number }) {
-  const lch = d3lch(lchObj.l, lchObj.c, lchObj.h);
-  const rgb = d3rgb(lch);
-  return rgb.formatHex();
-}
-
-// Pour LchPicker : getter/setter sur la couleur du colorStop sélectionné
-const selectedColor = computed({
+// Hex color of the selected stop (for the native color picker)
+const selectedHex = computed({
   get() {
-    if (selectedIdx.value === null || props.colorStops.length === 0) return { l: 100, c: 0, h: 0 };
-    return hexToLch(props.colorStops[selectedIdx.value]?.color || '#ffffff');
+    if (selectedIdx.value === null || props.colorStops.length === 0) return '#ffffff';
+    const c = props.colorStops[selectedIdx.value]?.color || '#ffffff';
+    // Ensure it's a valid 7-char hex for the input
+    try {
+      return d3rgb(c).formatHex();
+    } catch {
+      return '#ffffff';
+    }
   },
-  set(val: { l: number, c: number, h: number }) {
+  set(hex: string) {
     if (selectedIdx.value !== null && props.colorStops[selectedIdx.value]) {
-      // On clone le tableau pour respecter l'immuabilité
       //@ts-ignore
       props.colorStops[selectedIdx.value] = {
         ...props.colorStops[selectedIdx.value],
-        color: lchToHex(val)
+        color: hex
       };
       emit('update:colorStops', props.colorStops);
     }
@@ -120,14 +107,20 @@ const selectedColor = computed({
           :stop="stop"
           :index="idx"
           @update:position="t => colorStops[idx].position = t"
-          @click.native="selectColor(idx)"
+          @select="selectColor(idx)"
         />
       </div>
     </div>
-    <LchPicker
-      v-model="selectedColor"
-      :width="450"
-    />
+    <!-- Native color picker -->
+    <div class="color-picker-row">
+      <input
+        type="color"
+        :value="selectedHex"
+        @input="selectedHex = ($event.target as HTMLInputElement).value"
+        class="native-color-input"
+      />
+      <span class="color-hex-label">{{ selectedHex }}</span>
+    </div>
   </div>
 </template>
 
@@ -137,17 +130,6 @@ const selectedColor = computed({
   flex-direction: column;
   align-items: stretch;
   gap: 1em;
-}
-input[type="color"] {
-  width: 1.8em;
-  height: 1.8em;
-  border: none;
-  background: none;
-  padding: 0;
-  cursor: pointer;
-}
-input[type="range"] {
-  width: 4em;
 }
 .canvas-row {
   margin-top: 1em;
@@ -161,5 +143,24 @@ input[type="range"] {
   right: 0;
   height: 100%;
   pointer-events: none;
+}
+.color-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.8em;
+}
+.native-color-input {
+  width: 48px;
+  height: 36px;
+  border: 1px solid #ccc;
+  border-radius: 6px;
+  padding: 2px;
+  cursor: pointer;
+  background: none;
+}
+.color-hex-label {
+  font-family: monospace;
+  font-size: 0.95em;
+  color: #333;
 }
 </style>

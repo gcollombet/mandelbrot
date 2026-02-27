@@ -1,11 +1,17 @@
 <script setup lang="ts">
-import {computed, onMounted, ref, toRaw} from 'vue';
+import {computed, onMounted, ref, toRaw, watch} from 'vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
 import PaletteEditor from './PaletteEditor.vue';
 import { Palette } from '../Palette.ts';
+import { lch as d3lch, rgb as d3rgb, hsl as d3hsl } from 'd3-color';
+import type { InterpolationMode } from '../Mandelbrot.ts';
 
 import type { Engine } from '../Engine.ts';
-const props = defineProps<{ engine: Engine | null; suspendShortcuts?: (suspend: boolean) => void }>();
+const props = defineProps<{
+  engine: Engine | null;
+  suspendShortcuts?: (suspend: boolean) => void;
+  activeTab: string;
+}>();
 const model =  defineModel<MandelbrotParams>({
   default: {
     angle: 0,
@@ -30,12 +36,13 @@ const model =  defineModel<MandelbrotParams>({
     activateAnimate: false,
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
+    interpolationMode: 'lab',
   }
 });
 
 
 const angleDeg = computed(() => (((model.value.angle * 180 / Math.PI) % 360 + 360) % 360).toFixed(2));
-// Slider rotation : angle en ° mod 360 (wrapping)
+// Slider rotation : angle en ° mod 360 (wrapping)
 const angleSlider = computed({
   get: () => (((model.value.angle * 180 / Math.PI) % 360 + 360) % 360),
   set: (deg: number) => {
@@ -43,14 +50,14 @@ const angleSlider = computed({
     model.value.angle = (deg % 360) * Math.PI / 180;
   },
 });
-// Slider palette period : logarithmique, 0–1 ↔ 1–100
+// Slider palette period : logarithmique, 0–1 ↔ 1–100
 const sliderPalettePeriod = computed({
   get: () => (Math.log10(model.value.palettePeriod || 0.01) + 2) / 5,
   set: val => {
     model.value.palettePeriod = Number((10 ** (val * 5 - 2)).toPrecision(6));
   }
 });
-// Slider log2(scale) : valeurs de slider 1 à 126 —> scale de 2^-1 à 2^-126
+// Slider log2(scale) : valeurs de slider 1 à 126 —> scale de 2^-1 à 2^-126
 const scaleSlider = computed({
   get: () => {
     // Clamp la scale, éviter NaN si vide
@@ -72,36 +79,29 @@ function truncateDecimal(str: string, digits: number): string {
   return intPart + "." + decPart.slice(0, digits);
 }
 
-function generatePaletteThumbnail(colorStops: any[]): string {
-  // Génère une image de la palette sous forme de data URL (format horizontal)
+function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = 'lab'): string {
   const canvas = document.createElement('canvas');
   canvas.width = 320;
   canvas.height = 40;
   const ctx = canvas.getContext('2d');
   if (!ctx) return '';
-  
+
   if (colorStops.length === 0) {
-    // Palette vide : fond noir
     ctx.fillStyle = '#000';
     ctx.fillRect(0, 0, canvas.width, canvas.height);
     return canvas.toDataURL('image/png');
   }
-  
-  // Utilise la classe Palette pour générer le gradient
-  const palette = new Palette(colorStops);
+
+  const palette = new Palette(colorStops, mode);
   const imageData = palette.generateTexture();
-  
-  // Crée un canvas temporaire pour l'ImageData
+
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = imageData.width;
   tempCanvas.height = 1;
   const tempCtx = tempCanvas.getContext('2d');
   if (!tempCtx) return '';
   tempCtx.putImageData(imageData, 0, 0);
-  
-  // Étire l'image sur toute la hauteur du canvas
   ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
-  
   return canvas.toDataURL('image/png');
 }
 
@@ -166,7 +166,6 @@ async function savePreset() {
   };
   const idx = presets.value.findIndex(p => p.name === preset.name);
   if (idx >= 0) {
-    // on écrase tout, y compris la miniature et la date !
     presets.value[idx] = preset;
   } else {
     presets.value.push(preset);
@@ -199,8 +198,7 @@ async function savePalette() {
   let thumbnail: string | undefined = undefined;
   let now = new Date().toISOString();
   try {
-    // Génère une miniature de la palette (gradient) au lieu du fractal
-    thumbnail = generatePaletteThumbnail(model.value.colorStops);
+    thumbnail = generatePaletteThumbnail(model.value.colorStops, model.value.interpolationMode);
   } catch { /* ignore errors, no thumbnail */ }
   const palette = {
     name: paletteName.value.trim(),
@@ -250,7 +248,7 @@ function selectPreset(name: string) {
   const preset = presets.value.find(p => p.name === name);
   if (preset) {
     selectedPreset.value = name;
-    presetName.value = preset.name; // Remplit pour écrasement rapide
+    presetName.value = preset.name;
     model.value = structuredClone(toRaw(preset.value));
   }
 }
@@ -276,47 +274,366 @@ const maxIterMultSlider = computed({
 });
 
 onMounted(() => {
-  // Recharge l'état courant depuis le localStorage
   loadPresets();
   loadPalettes();
 });
 
-
-const activeTab = ref('navigation');
 const currentPaletteObj = computed(() => palettes.value.find(p => p.name === selectedPalette.value));
 const currentPaletteThumbnail = computed(() => currentPaletteObj.value?.thumbnail);
 
-import { watch } from 'vue';
-
-watch([activeTab, () => props.engine], async ([tab]) => {
+watch([() => props.activeTab, () => props.engine], async ([tab]) => {
   if (tab === 'navigation') {
     await refreshNavigationPreview();
   }
 }, { immediate: true });
 
+// =====================================================
+// Import / Export Presets
+// =====================================================
+function exportPresets() {
+  const data = JSON.stringify(presets.value, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'mandelbrot-presets.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+const presetFileInput = ref<HTMLInputElement | null>(null);
+function triggerImportPresets() {
+  presetFileInput.value?.click();
+}
+function importPresets(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const imported = JSON.parse(reader.result as string);
+      if (Array.isArray(imported)) {
+        // Merge: ajoute les nouveaux, écrase ceux de même nom
+        for (const preset of imported) {
+          if (!preset.name || !preset.value) continue;
+          const idx = presets.value.findIndex(p => p.name === preset.name);
+          if (idx >= 0) {
+            presets.value[idx] = preset;
+          } else {
+            presets.value.push(preset);
+          }
+        }
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(presets.value));
+      }
+    } catch {
+      window.alert('Format de fichier invalide.');
+    }
+  };
+  reader.readAsText(file);
+  // Reset pour pouvoir réimporter le même fichier
+  input.value = '';
+}
+
+// =====================================================
+// Import / Export Palettes
+// =====================================================
+function exportPalettes() {
+  const data = JSON.stringify(palettes.value, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = 'mandelbrot-palettes.json';
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+const paletteFileInput = ref<HTMLInputElement | null>(null);
+function triggerImportPalettes() {
+  paletteFileInput.value?.click();
+}
+function importPalettes(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const imported = JSON.parse(reader.result as string);
+      if (Array.isArray(imported)) {
+        for (const palette of imported) {
+          if (!palette.name || !palette.colorStops) continue;
+          const idx = palettes.value.findIndex(p => p.name === palette.name);
+          if (idx >= 0) {
+            palettes.value[idx] = palette;
+          } else {
+            palettes.value.push(palette);
+          }
+        }
+        localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(palettes.value));
+      }
+    } catch {
+      window.alert('Format de fichier invalide.');
+    }
+  };
+  reader.readAsText(file);
+  input.value = '';
+}
+
+// =====================================================
+// LCH Global Adjustment Sliders (perceptually uniform)
+// =====================================================
+// Stores the baseline colorStops for LCH adjustments
+const lchBaseStops = ref<{ color: string, position: number }[] | null>(null);
+const hueShift = ref(0);    // Hue rotation in degrees (-180..180)
+const chromaShift = ref(0);  // Chroma shift (-100..100)
+const lightShift = ref(0);   // Lightness shift (-100..100)
+const satShift = ref(0);     // HSL saturation shift (-100..100)
+const lumShift = ref(0);     // HSL luminosity shift (-100..100)
+const hslHueShift = ref(0); // HSL hue shift in degrees (-180..180)
+
+// When user starts adjusting, save the current stops as baseline
+function ensureLchBase() {
+  if (lchBaseStops.value === null) {
+    lchBaseStops.value = structuredClone(toRaw(model.value.colorStops));
+  }
+}
+
+function resetLchBase() {
+  lchBaseStops.value = null;
+  hueShift.value = 0;
+  chromaShift.value = 0;
+  lightShift.value = 0;
+  satShift.value = 0;
+  lumShift.value = 0;
+  hslHueShift.value = 0;
+}
+
+function onHueInput(val: number) {
+  ensureLchBase();
+  hueShift.value = val;
+  applyAllShifts();
+}
+
+function onChromaInput(val: number) {
+  ensureLchBase();
+  chromaShift.value = val;
+  applyAllShifts();
+}
+
+function onLightInput(val: number) {
+  ensureLchBase();
+  lightShift.value = val;
+  applyAllShifts();
+}
+
+function applyAllShifts() {
+  if (!lchBaseStops.value) return;
+  model.value.colorStops = lchBaseStops.value.map(stop => {
+    const rgbC = d3rgb(stop.color);
+    if (rgbC === null || rgbC === undefined) return { ...stop };
+
+    // Apply LCH shifts first
+    const lch = d3lch(rgbC);
+    let l = (lch.l || 0) + lightShift.value;
+    l = Math.max(0, Math.min(150, l));
+    let c = (lch.c || 0) + chromaShift.value;
+    c = Math.max(0, c);
+    let h = (lch.h || 0) + hueShift.value;
+    h = ((h % 360) + 360) % 360;
+    const afterLch = d3rgb(d3lch(l, c, h));
+
+    // Apply HSL shifts on the result
+    const hslC = d3hsl(afterLch);
+    let hslH = (hslC.h || 0) + hslHueShift.value;
+    hslH = ((hslH % 360) + 360) % 360;
+    let sat = (hslC.s || 0) + satShift.value / 100;
+    sat = Math.max(0, Math.min(1, sat));
+    let lum = (hslC.l || 0) + lumShift.value / 100;
+    lum = Math.max(0, Math.min(1, lum));
+    const final = d3hsl(hslH, sat, lum);
+    return { color: d3rgb(final).formatHex(), position: stop.position };
+  });
+}
+
+function onSatInput(val: number) {
+  ensureLchBase();
+  satShift.value = val;
+  applyAllShifts();
+}
+
+function onLumInput(val: number) {
+  ensureLchBase();
+  lumShift.value = val;
+  applyAllShifts();
+}
+
+function onHslHueInput(val: number) {
+  ensureLchBase();
+  hslHueShift.value = val;
+  applyAllShifts();
+}
+
+// =====================================================
+// Interpolation Modes
+// =====================================================
+const interpolationModes: { key: InterpolationMode; label: string }[] = [
+  { key: 'lab', label: 'Lab' },
+  { key: 'rgb', label: 'RGB' },
+  { key: 'hcl', label: 'HCL' },
+  { key: 'hsl', label: 'HSL' },
+  { key: 'cubehelix', label: 'Cubehelix' },
+];
+
+// =====================================================
+// Palette Manipulation Tools
+// =====================================================
+
+/** Inverser : reverse stop order (position 0→1 becomes 1→0) */
+function invertPalette() {
+  if (model.value.colorStops.length === 0) return;
+  model.value.colorStops = model.value.colorStops.map(s => ({
+    color: s.color,
+    position: 1 - s.position,
+  })).sort((a, b) => a.position - b.position);
+  resetLchBase();
+}
+
+/** Dupliquer : compress palette to first half and repeat it in the second half */
+function duplicatePalette() {
+  if (model.value.colorStops.length === 0) return;
+  const first = model.value.colorStops.map(s => ({
+    color: s.color,
+    position: s.position * 0.5,
+  }));
+  const second = model.value.colorStops.map(s => ({
+    color: s.color,
+    position: 0.5 + s.position * 0.5,
+  }));
+  model.value.colorStops = [...first, ...second].sort((a, b) => a.position - b.position);
+  resetLchBase();
+}
+
+/** Miroir : palette goes 0→0.5 then mirrors back 0.5→1 (palindrome) */
+function mirrorPalette() {
+  if (model.value.colorStops.length === 0) return;
+  const first = model.value.colorStops.map(s => ({
+    color: s.color,
+    position: s.position * 0.5,
+  }));
+  const second = model.value.colorStops.map(s => ({
+    color: s.color,
+    position: 1 - s.position * 0.5,
+  }));
+  model.value.colorStops = [...first, ...second].sort((a, b) => a.position - b.position);
+  resetLchBase();
+}
+
+/** Distribuer : space all stops evenly across [0, 1] while keeping color order */
+function distributeEvenly() {
+  const stops = model.value.colorStops.slice().sort((a, b) => a.position - b.position);
+  if (stops.length < 2) return;
+  const step = 1 / (stops.length - 1);
+  model.value.colorStops = stops.map((s, i) => ({
+    color: s.color,
+    position: Number((i * step).toFixed(6)),
+  }));
+  resetLchBase();
+}
+
+// =====================================================
+// Palette Construction Helper Tools
+// =====================================================
+
+/** Generate a monochromatic palette from a base color */
+function generateMonochromatic() {
+  const base = d3lch(d3rgb(model.value.colorStops[0]?.color || '#3273dc'));
+  const h = base.h || 0;
+  const c = base.c || 50;
+  const stops: { color: string; position: number }[] = [];
+  const count = 5;
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
+    const l = 15 + t * 85; // lightness from 15 to 100
+    const col = d3lch(l, c * (0.5 + 0.5 * Math.sin(t * Math.PI)), h);
+    stops.push({ color: d3rgb(col).formatHex(), position: t });
+  }
+  model.value.colorStops = stops;
+  resetLchBase();
+}
+
+/** Generate a complementary palette (base + opposite hue) */
+function generateComplementary() {
+  const base = d3lch(d3rgb(model.value.colorStops[0]?.color || '#3273dc'));
+  const h1 = base.h || 0;
+  const h2 = (h1 + 180) % 360;
+  const c = base.c || 60;
+  model.value.colorStops = [
+    { color: d3rgb(d3lch(25, c, h1)).formatHex(), position: 0 },
+    { color: d3rgb(d3lch(60, c, h1)).formatHex(), position: 0.25 },
+    { color: d3rgb(d3lch(90, c * 0.3, h1)).formatHex(), position: 0.5 },
+    { color: d3rgb(d3lch(60, c, h2)).formatHex(), position: 0.75 },
+    { color: d3rgb(d3lch(25, c, h2)).formatHex(), position: 1.0 },
+  ];
+  resetLchBase();
+}
+
+/** Generate an analogous palette (adjacent hues) */
+function generateAnalogous() {
+  const base = d3lch(d3rgb(model.value.colorStops[0]?.color || '#3273dc'));
+  const h = base.h || 0;
+  const c = base.c || 60;
+  const spread = 60; // total hue range
+  const count = 6;
+  const stops: { color: string; position: number }[] = [];
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
+    const hue = ((h - spread / 2 + t * spread) % 360 + 360) % 360;
+    const l = 30 + t * 55;
+    stops.push({ color: d3rgb(d3lch(l, c, hue)).formatHex(), position: t });
+  }
+  model.value.colorStops = stops;
+  resetLchBase();
+}
+
+/** Generate a triadic palette (3 hues 120° apart) */
+function generateTriadic() {
+  const base = d3lch(d3rgb(model.value.colorStops[0]?.color || '#3273dc'));
+  const h = base.h || 0;
+  const c = base.c || 60;
+  model.value.colorStops = [
+    { color: d3rgb(d3lch(30, c, h)).formatHex(), position: 0 },
+    { color: d3rgb(d3lch(70, c, h)).formatHex(), position: 0.17 },
+    { color: d3rgb(d3lch(70, c, (h + 120) % 360)).formatHex(), position: 0.33 },
+    { color: d3rgb(d3lch(90, c * 0.3, (h + 180) % 360)).formatHex(), position: 0.5 },
+    { color: d3rgb(d3lch(70, c, (h + 240) % 360)).formatHex(), position: 0.67 },
+    { color: d3rgb(d3lch(30, c, (h + 240) % 360)).formatHex(), position: 1.0 },
+  ];
+  resetLchBase();
+}
+
+/** Generate a random palette */
+function generateRandom() {
+  const count = 4 + Math.floor(Math.random() * 4); // 4 to 7 stops
+  const stops: { color: string; position: number }[] = [];
+  for (let i = 0; i < count; i++) {
+    const t = i / (count - 1);
+    const h = Math.random() * 360;
+    const c = 30 + Math.random() * 80;
+    const l = 15 + Math.random() * 80;
+    stops.push({ color: d3rgb(d3lch(l, c, h)).formatHex(), position: t });
+  }
+  model.value.colorStops = stops;
+  resetLchBase();
+}
+
 </script>
 
 <template>
-  <div class="block bulma-settings-block" style="color: black !important;">
-    <div class="tabs is-toggle is-fullwidth is-small">
-      <ul>
-        <li :class="{ 'is-active': activeTab === 'navigation' }">
-          <a @click="activeTab = 'navigation'">Navigation</a>
-        </li>
-        <li :class="{ 'is-active': activeTab === 'presets' }">
-          <a @click="activeTab = 'presets'">Presets</a>
-        </li>
-        <li :class="{ 'is-active': activeTab === 'palettes' }">
-          <a @click="activeTab = 'palettes'">Palettes</a>
-        </li>
-        <li :class="{ 'is-active': activeTab === 'performance' }">
-          <a @click="activeTab = 'performance'">Graphics</a>
-        </li>
-      </ul>
-    </div>
-    <div class="tab-content">
+  <div style="color: black !important;">
+    <!-- Navigation tab -->
     <div v-if="activeTab === 'navigation'">
-
       <div class="mb-3" style="font-family: monospace; word-break: break-all; white-space: pre-line;">
         <span>Cx: <span>{{ truncateDecimal(model.cx, 38) }}</span></span><br />
         <span>Cy: <span>{{ truncateDecimal(model.cy, 38) }}</span></span>
@@ -335,6 +652,8 @@ watch([activeTab, () => props.engine], async ([tab]) => {
         <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="0" max="359" step="1" v-model.number="angleSlider" />
       </div>
     </div>
+
+    <!-- Presets tab -->
     <div v-else-if="activeTab === 'presets'">
       <div class="mb-3">
         <label class="label">Presets enregistrés</label>
@@ -378,12 +697,77 @@ watch([activeTab, () => props.engine], async ([tab]) => {
             <button class="button is-danger is-small" @click="deletePreset" :disabled="!presetName">Supprimer</button>
           </div>
         </div>
+
+        <!-- Import / Export Presets -->
+        <hr class="section-sep"/>
+        <label class="label">Import / Export</label>
+        <div class="field is-grouped">
+          <div class="control">
+            <button class="button is-info is-small" @click="exportPresets" :disabled="presets.length === 0">
+              Exporter
+            </button>
+          </div>
+          <div class="control">
+            <button class="button is-warning is-small" @click="triggerImportPresets">
+              Importer
+            </button>
+            <input ref="presetFileInput" type="file" accept=".json" style="display:none;" @change="importPresets" />
+          </div>
+        </div>
       </div>
     </div>
+
+    <!-- Palettes tab -->
     <div v-else-if="activeTab === 'palettes'">
       <div class="mb-3">
-        <PaletteEditor :color-stops="model.colorStops" />
+        <PaletteEditor :color-stops="model.colorStops" :interpolation-mode="model.interpolationMode" />
       </div>
+
+      <!-- Interpolation mode -->
+      <div class="mb-3">
+        <label class="label">Interpolation</label>
+        <div class="buttons toggle-buttons">
+          <button
+            v-for="mode in interpolationModes"
+            :key="mode.key"
+            class="button is-small"
+            :class="model.interpolationMode === mode.key ? 'is-link' : 'is-light'"
+            @click="model.interpolationMode = mode.key"
+          >
+            {{ mode.label }}
+          </button>
+        </div>
+      </div>
+
+      <hr class="section-sep"/>
+
+      <!-- Palette manipulation tools -->
+      <div class="mb-3">
+        <label class="label">Outils palette</label>
+        <div class="buttons" style="flex-wrap: wrap; gap: 0.4em;">
+          <button class="button is-small is-light" @click="invertPalette" title="Inverser l'ordre des couleurs">Inverser</button>
+          <button class="button is-small is-light" @click="duplicatePalette" title="Comprimer et répéter 2x">Dupliquer</button>
+          <button class="button is-small is-light" @click="mirrorPalette" title="Effet miroir (palindrome)">Miroir</button>
+          <button class="button is-small is-light" @click="distributeEvenly" title="Répartir les stops uniformément">Distribuer</button>
+        </div>
+      </div>
+
+      <hr class="section-sep"/>
+
+      <!-- Palette construction helpers -->
+      <div class="mb-3">
+        <label class="label">Générer une palette</label>
+        <p style="font-size: 0.85em; color: #555; margin-bottom: 0.5em;">Basé sur la 1ère couleur actuelle</p>
+        <div class="buttons" style="flex-wrap: wrap; gap: 0.4em;">
+          <button class="button is-small is-info is-light" @click="generateMonochromatic">Monochromatique</button>
+          <button class="button is-small is-info is-light" @click="generateComplementary">Complémentaire</button>
+          <button class="button is-small is-info is-light" @click="generateAnalogous">Analogique</button>
+          <button class="button is-small is-info is-light" @click="generateTriadic">Triadique</button>
+          <button class="button is-small is-warning is-light" @click="generateRandom">Aléatoire</button>
+        </div>
+      </div>
+
+      <hr class="section-sep"/>
       <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
         <label style="white-space: nowrap;">Période :</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
@@ -391,6 +775,63 @@ watch([activeTab, () => props.engine], async ([tab]) => {
       <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
         <label style="white-space: nowrap;">Décalage :</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
+      </div>
+
+      <hr class="section-sep"/>
+
+      <!-- Global color adjustment sliders -->
+      <label class="label">Ajustement global</label>
+
+      <!-- LCH sliders -->
+      <p style="font-size: 0.82em; color: #666; margin-bottom: 0.4em; font-weight: 600;">LCH (perceptuel)</p>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Teinte :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-180" max="180" step="1"
+          :value="hueShift"
+          @input="onHueInput(Number(($event.target as HTMLInputElement).value))" />
+        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ hueShift }}°</span>
+      </div>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Chroma :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
+          :value="chromaShift"
+          @input="onChromaInput(Number(($event.target as HTMLInputElement).value))" />
+        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ chromaShift }}</span>
+      </div>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Clarté :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
+          :value="lightShift"
+          @input="onLightInput(Number(($event.target as HTMLInputElement).value))" />
+        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ lightShift }}</span>
+      </div>
+
+      <!-- HSL sliders -->
+      <p style="font-size: 0.82em; color: #666; margin-bottom: 0.4em; margin-top: 0.6em; font-weight: 600;">HSL (classique)</p>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Teinte :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-180" max="180" step="1"
+          :value="hslHueShift"
+          @input="onHslHueInput(Number(($event.target as HTMLInputElement).value))" />
+        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ hslHueShift }}°</span>
+      </div>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Saturation :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
+          :value="satShift"
+          @input="onSatInput(Number(($event.target as HTMLInputElement).value))" />
+        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ satShift }}</span>
+      </div>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Luminosité :</label>
+        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
+          :value="lumShift"
+          @input="onLumInput(Number(($event.target as HTMLInputElement).value))" />
+        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ lumShift }}</span>
+      </div>
+
+      <div class="mb-3">
+        <button class="button is-small is-light" @click="resetLchBase">Réinitialiser</button>
       </div>
 
       <hr class="section-sep"/>
@@ -439,18 +880,38 @@ watch([activeTab, () => props.engine], async ([tab]) => {
             <button class="button is-danger is-small" @click="deletePalette" :disabled="!paletteName">Supprimer</button>
           </div>
         </div>
+
+        <!-- Import / Export Palettes -->
+        <hr class="section-sep"/>
+        <label class="label">Import / Export</label>
+        <div class="field is-grouped">
+          <div class="control">
+            <button class="button is-info is-small" @click="exportPalettes" :disabled="palettes.length === 0">
+              Exporter
+            </button>
+          </div>
+          <div class="control">
+            <button class="button is-warning is-small" @click="triggerImportPalettes">
+              Importer
+            </button>
+            <input ref="paletteFileInput" type="file" accept=".json" style="display:none;" @change="importPalettes" />
+          </div>
+        </div>
       </div>
     </div>
+
+    <!-- Performance/Graphics tab -->
     <div v-else-if="activeTab === 'performance'">
       <div class="field">
-        <label class="label">Mu (log)</label>
-        <div class="control">
-          <input class="slider is-fullwidth" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
+        <label class="label">Mu</label>
+        <div class="control" style="display: flex; align-items: center; gap: 0.5em;">
+          <input class="slider is-fullwidth" style="flex: 1;" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
+          <button class="button is-small is-light" @click="model.mu = 4" title="Mu = 4">4</button>
         </div>
         <span>{{ (model.mu ?? 1.0).toFixed(1) }}</span>
       </div>
       <div class="field">
-        <label class="label">Epsilon (log)</label>
+        <label class="label">Epsilon</label>
         <div class="control">
           <input class="slider is-fullwidth" type="range" min="-12" max="0" step="0.01" v-model="epsilonSlider" />
         </div>
@@ -464,52 +925,49 @@ watch([activeTab, () => props.engine], async ([tab]) => {
         <span>{{ model.tessellationLevel }}</span>
       </div>
       <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" v-model="model.activateWebcam" />
-          &nbsp;Activer la webcam
-        </label>
-      </div>
-      <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" v-model="model.activateTessellation" />
-          &nbsp;Tessellation GPU
-        </label>
-      </div>
-      <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" v-model="model.activateShading" />
-          &nbsp;Shading avancé
-        </label>
-      </div>
-      <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" v-model="model.activateSkybox" />
-          &nbsp;Skybox
-        </label>
-      </div>
-      <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" v-model="model.activatePalette" />
-          &nbsp;Palette
-        </label>
-      </div>
-      <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" v-model="model.activateSmoothness" />
-          &nbsp;Smoothness
-        </label>
-      </div>
-      <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" v-model="model.activateZebra" />
-          &nbsp;Zebra
-        </label>
-      </div>
-      <div class="field">
-        <label class="checkbox">
-          <input type="checkbox" v-model="model.activateAnimate" />
-          &nbsp;Animate
-        </label>
+        <label class="label">Options de rendu</label>
+        <div class="buttons toggle-buttons">
+          <button class="button is-small"
+            :class="model.activateShading ? 'is-link' : 'is-light'"
+            @click="model.activateShading = !model.activateShading">
+            Shading
+          </button>
+          <button class="button is-small"
+            :class="model.activatePalette ? 'is-link' : 'is-light'"
+            @click="model.activatePalette = !model.activatePalette">
+            Palette
+          </button>
+          <button class="button is-small"
+            :class="model.activateSmoothness ? 'is-link' : 'is-light'"
+            @click="model.activateSmoothness = !model.activateSmoothness">
+            Smoothness
+          </button>
+          <button class="button is-small"
+            :class="model.activateTessellation ? 'is-link' : 'is-light'"
+            @click="model.activateTessellation = !model.activateTessellation">
+            Tessellation
+          </button>
+          <button class="button is-small"
+            :class="model.activateSkybox ? 'is-link' : 'is-light'"
+            @click="model.activateSkybox = !model.activateSkybox">
+            Skybox
+          </button>
+          <button class="button is-small"
+            :class="model.activateWebcam ? 'is-link' : 'is-light'"
+            @click="model.activateWebcam = !model.activateWebcam">
+            Webcam
+          </button>
+          <button class="button is-small"
+            :class="model.activateZebra ? 'is-link' : 'is-light'"
+            @click="model.activateZebra = !model.activateZebra">
+            Zebra
+          </button>
+          <button class="button is-small"
+            :class="model.activateAnimate ? 'is-link' : 'is-light'"
+            @click="model.activateAnimate = !model.activateAnimate">
+            Animate
+          </button>
+        </div>
       </div>
       <div class="field">
         <label class="label">R&eacute;solution (DPR &times; {{ model.dprMultiplier?.toFixed(3) ?? '1.000' }})</label>
@@ -520,28 +978,14 @@ watch([activeTab, () => props.engine], async ([tab]) => {
       <div class="field">
         <label class="label">It&eacute;rations (&times; {{ (model.maxIterationMultiplier ?? 1.0).toPrecision(3) }})</label>
         <div class="control">
-          <input class="slider is-fullwidth" type="range" min="-1" max="1" step="0.01" v-model="maxIterMultSlider" />
+          <input class="slider is-fullwidth" type="range" min="-2" max="1" step="0.01" v-model="maxIterMultSlider" />
         </div>
       </div>
-    </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.bulma-settings-block {
-  background: rgba(255,255,255,0.55);
-  backdrop-filter: blur(8px) contrast(110%);
-  -webkit-backdrop-filter: blur(8px);
-  box-shadow: 0 2px 8px rgba(0,0,0,0.08);
-  border-radius: 8px;
-  padding: 1.2em 1.5em;
-  width: 420px;
-  height: 100%;
-  max-width: 100vw;
-  display: flex;
-  flex-direction: column;
-}
 .mb-3 {
   margin-bottom: 1.2em;
 }
@@ -576,10 +1020,12 @@ watch([activeTab, () => props.engine], async ([tab]) => {
   border-top: 1.5px solid #AAA;
   margin: 1.2em 0 1.2em 0;
 }
-.tab-content {
-  flex: 1 1 auto;
-  overflow-y: auto;
-  padding-right: 0.5em;
-  min-height: 0;
+.toggle-buttons {
+  flex-wrap: wrap;
+  gap: 0.4em;
+}
+.toggle-buttons .button {
+  margin-bottom: 0 !important;
+  transition: background 0.15s, color 0.15s, box-shadow 0.15s;
 }
 </style>

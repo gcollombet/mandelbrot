@@ -6,7 +6,7 @@ const props = defineProps<{
   stop: ColorStop;
 }>();
 
-const emit = defineEmits(['update:position']);
+const emit = defineEmits(['update:position', 'select']);
 
 const svgRef = ref<SVGSVGElement|null>(null);
 
@@ -23,6 +23,7 @@ const borderColor = computed(() => luminance(props.stop.color) > 0.5 ? '#222' : 
 
 function onDown(e: MouseEvent) {
   e.preventDefault();
+  emit('select');
   const startX = e.clientX;
   const startVal = props.stop.position;
   const svg = svgRef.value;
@@ -41,6 +42,35 @@ function onDown(e: MouseEvent) {
   }
   window.addEventListener('mousemove', onMove);
   window.addEventListener('mouseup', onUp);
+}
+
+function onTouchStart(e: TouchEvent) {
+  e.preventDefault();
+  emit('select');
+  const touch = e.touches[0];
+  if (!touch) return;
+  const startX = touch.clientX;
+  const startVal = props.stop.position;
+  const svg = svgRef.value;
+  if (!svg) return;
+  const parent = svg.parentElement as HTMLElement;
+  const rect = parent.getBoundingClientRect();
+  function onTouchMove(ev: TouchEvent) {
+    const t0 = ev.touches[0];
+    if (!t0) return;
+    const dx = t0.clientX - startX;
+    let t = startVal + dx / rect.width;
+    t = Math.max(0, Math.min(1, t));
+    emit('update:position', t);
+  }
+  function onTouchEnd() {
+    window.removeEventListener('touchmove', onTouchMove);
+    window.removeEventListener('touchend', onTouchEnd);
+    window.removeEventListener('touchcancel', onTouchEnd);
+  }
+  window.addEventListener('touchmove', onTouchMove, { passive: false });
+  window.addEventListener('touchend', onTouchEnd);
+  window.addEventListener('touchcancel', onTouchEnd);
 }
 </script>
 
@@ -61,6 +91,7 @@ function onDown(e: MouseEvent) {
   }"
     viewBox="0 0 22 64"
     @mousedown="onDown"
+    @touchstart="onTouchStart"
   >
     <!-- Rectangle vertical -->
     <rect x="6" y="0" width="12" height="64" rx="8" :fill="props.stop.color" :stroke="borderColor" stroke-width="2"/>

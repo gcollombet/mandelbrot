@@ -57,6 +57,7 @@ const props = withDefaults(defineProps<{
   activateAnimate?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
+  interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
  }>(),
 
     {
@@ -86,6 +87,7 @@ const props = withDefaults(defineProps<{
        activateAnimate: false,
         dprMultiplier: 1.0,
         maxIterationMultiplier: 1.0,
+        interpolationMode: 'lab',
     }
 );
 
@@ -133,6 +135,7 @@ async function draw() {
         palettePeriod: props.palettePeriod,
         paletteOffset: props.paletteOffset,
         colorStops: toRaw(props.colorStops),
+        interpolationMode: props.interpolationMode,
         activateShading: props.activateShading,
         activateTessellation: props.activateTessellation,
         activateWebcam: props.activateWebcam,
@@ -170,6 +173,7 @@ async function initWebGPU() {
     palettePeriod: props.palettePeriod,
     paletteOffset: props.paletteOffset,
     colorStops: props.colorStops,
+    interpolationMode: props.interpolationMode,
     activateShading: props.activateShading,
     activateTessellation: props.activateTessellation,
     activateWebcam: props.activateWebcam,
