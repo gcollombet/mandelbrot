@@ -6,6 +6,7 @@ import TranslationReprojectionDemo from '../src/components/TranslationReprojecti
 import RotationDemo from '../src/components/RotationDemo.vue'
 import SentinelProgressionDemo from '../src/components/SentinelProgressionDemo.vue'
 import AdaptiveBatchDemo from '../src/components/AdaptiveBatchDemo.vue'
+import ZoomReprojectionDemo from '../src/components/ZoomReprojectionDemo.vue'
 </script>
 <link rel="stylesheet" href="https://use.typekit.net/fnz7ojs.css">
 
@@ -489,17 +490,168 @@ if (availableIter < maxIterations) {
 Cela évite de bloquer l'interface pendant le calcul de l'orbite, qui peut prendre
 des centaines de milliers de pas en précision arbitraire.
 
+## Reprojection du zoom : ne plus tout recalculer
+
+### Le problème actuel
+
+Actuellement, tout changement de zoom déclenche un **reset complet** de l'historique :
+
+```typescript
+// Engine.ts:721-723
+if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.scale !== mandelbrot.scale) {
+    this.clearHistoryNextFrame = true
+}
+```
+
+Tous les pixels sont ré-ensemencés avec des sentinelles et le rendu progressif repart de zéro.
+C'est le seul mouvement (avec le ré-ancrage) qui n'est pas reprojeté.
+Pour la translation, on décale. Pour la rotation, on calcule sans rotation et on affiche avec.
+Mais pour le zoom ? On jette tout.
+
+C'est coûteux : pendant toute la durée du zoom, l'image se reconstruit de grossier à fin,
+ce qui crée un clignotement visible.
+
+### Le principe : figer, zoomer visuellement, calculer en parallèle
+
+L'idée est d'appliquer au zoom une stratégie analogue à la translation, mais en utilisant **deux textures** simultanées :
+
+1. **Figer** la texture résolue actuelle comme snapshot de référence
+2. **Lancer immédiatement** le calcul à l'échelle cible (facteur ×2 pour un zoom, ×0.5 pour un dézoom)
+3. **Afficher les deux** au bon niveau de zoom, en fusionnant
+
+Le zoom visuel interpole continuellement de ×1 à ×2. Quand il atteint ×2, la nouvelle texture
+(maintenant complète ou quasi-complète) remplace la snapshot, et un nouveau cycle peut démarrer.
+
+### Les deux textures dans la passe Color
+
+Le shader `color.wgsl` devrait échantillonner **deux textures** au lieu d'une :
+
+| Texture | Contenu | Transformation à l'affichage |
+|---------|---------|------------------------------|
+| **Snapshot** (figée) | L'image résolue au moment du dernier step | Agrandie par le facteur de zoom courant $z \in [1, 2]$ |
+| **En cours** (live) | La texture en train d'être calculée à la nouvelle échelle | Rétrécie par $2/z$ (zoom in) ou agrandie par $z \cdot 2$ (zoom out) |
+
+Pour chaque pixel de l'écran, la passe Color fait :
+
+```
+pixel = si nouveau_calcul_disponible(uv_live)
+            → couleur du nouveau calcul
+        sinon
+            → couleur de la snapshot (étirée/réduite)
+```
+
+En pseudo-WGSL, cela donnerait :
+
+```wgsl
+// Coordonnées dans la snapshot figée (inversement zoomée)
+let uv_frozen = (uv_neutral - 0.5) / zoomFactor + 0.5;
+
+// Coordonnées dans la texture live (inversement zoomée dans l'autre sens)
+let uv_live = (uv_neutral - 0.5) * (zoomFactor / targetZoom) + 0.5;
+
+// Lire la nouvelle texture (live)
+let live_iter = textureLoad(texLive, coord_from(uv_live), 0, 0).r;
+
+if (live_iter >= 0.0) {
+    // Pixel résolu dans le nouveau calcul → l'utiliser
+    return colorize(texLive, coord_from(uv_live));
+} else {
+    // Pas encore calculé → fallback sur la snapshot étirée
+    return colorize(texFrozen, coord_from(uv_frozen));
+}
+```
+
+### Le cycle de zoom par paliers de ×2
+
+Le zoom est décomposé en **paliers discrets** de facteur 2 :
+
+```
+┌─────────────────────────────────────────────────────┐
+│  zoomFactor = 1.0                                   │
+│  ► Figer la texture résolue actuelle (snapshot)     │
+│  ► Lancer le calcul à scale / 2                     │
+│                                                     │
+│  zoomFactor ∈ ]1.0, 2.0[                            │
+│  ► Zoom visuel progressif                           │
+│  ► Color rend les 2 textures :                      │
+│       • Snapshot ×zoomFactor (grandit)               │
+│       • Live ×(zoomFactor/2) (grandit aussi)         │
+│  ► Sentinelles se raffinent en parallèle             │
+│                                                     │
+│  zoomFactor = 2.0                                   │
+│  ► La live remplace la snapshot                      │
+│  ► zoomFactor reset à 1.0                           │
+│  ► Nouveau cycle si zoom continue                   │
+└─────────────────────────────────────────────────────┘
+```
+
+Pour le **dézoom**, le même mécanisme fonctionne en miroir :
+- On fige la texture actuelle
+- On lance le calcul à `scale × 2`
+- Le zoom visuel va de ×1.0 à ×0.5
+- La snapshot rétrécit, la live grandit
+- À ×0.5, on swape et on reset à ×1.0
+
+### Ce qui change dans le pipeline
+
+| Composant | Modification |
+|-----------|-------------|
+| **Engine.ts** | Maintenir deux jeux de textures (A/B/Resolved × 2). Sur changement de scale, copier Resolved → Frozen au lieu de `clearHistory`. Interpoler `zoomFactor` chaque frame. |
+| **color.wgsl** | Recevoir un 2e texture array binding (`texFrozen`). Ajouter `zoomFactor` et `targetZoom` aux uniforms. Implémenter le double échantillonnage avec fallback. |
+| **reproject.wgsl** | Inchangé : la texture live est ensemencée normalement avec `clearHistory`. La snapshot n'est pas touchée par cette passe. |
+| **mandelbrot.wgsl** | Inchangé : calcule sur la texture live. |
+| **resolve.wgsl** | Inchangé : résout la texture live. |
+| **Rust navigator** | Inchangé : fournit l'orbite de référence pour la nouvelle échelle. |
+| **CPU (uniforms)** | Calculer `zoomFactor` à chaque frame. Détecter quand `zoomFactor ≥ 2.0` (ou `≤ 0.5`) pour déclencher le swap. |
+
+### Coût mémoire
+
+Doubler les textures n'est pas anodin. Actuellement, chaque texture fait :
+
+$$
+\text{neutralSize}^2 \times 7 \times 4\text{ octets} = \text{neutralSize}^2 \times 28\text{ octets}
+$$
+
+Pour un écran 1920×1080 : neutralSize ≈ 2203, soit environ **135 Mo** pour les 3 textures (A, B, Resolved).
+Ajouter un snapshot Resolved doublerait la texture Resolved (+45 Mo), portant le total à ~180 Mo de VRAM.
+
+C'est raisonnable pour un GPU moderne, mais il faudrait le rendre optionnel pour les petites configs.
+
+### Avantage : le zoom ne flashe plus
+
+Avec cette technique :
+- L'utilisateur voit **toujours** une image nette (la snapshot zoomée) pendant la transition
+- La nouvelle image apparaît **progressivement par-dessus**, pixel par pixel
+- Il n'y a **aucune frame noire** ni aucun clignotement grossier→fin
+- Le zoom continu (molette maintenue) enchaîne les cycles ×2 de manière fluide
+
+::: info Illustration
+
+<ZoomReprojectionDemo />
+
+:::
+
+### Détails d'implémentation restants
+
+1. **Interpolation du zoom** : linéaire ou exponentielle ? L'exponentiel ($z(t) = 2^t$) donne une sensation de vitesse constante en espace logarithmique, plus naturelle pour l'exploration fractale.
+
+2. **Seuil de swap** : ne pas attendre que le calcul live soit à 100%. Swaper dès que `zoomFactor` atteint 2.0, même si des sentinelles subsistent. Les trous seront résolus par snapping, comme pour le rendu progressif normal.
+
+3. **Pan + zoom simultanés** : si l'utilisateur translate pendant un zoom, la snapshot doit aussi être reprojetée avec le shift. Cela nécessite d'appliquer le décalage de translation aux deux textures dans `color.wgsl`.
+
+4. **Rotation + zoom** : pas de problème particulier, la rotation est déjà appliquée uniquement dans `color.wgsl` et s'appliquerait identiquement aux deux textures.
+
 ## Quand tout recalculer ?
 
 Toutes ces optimisations reposent sur la **réutilisation** des données de la frame précédente.
 Mais dans certains cas, cette réutilisation n'est pas possible et un reset complet est nécessaire :
 
-| Événement | Pourquoi ? |
-|-----------|------------|
-| Changement de zoom | Les coordonnées de tous les pixels changent |
-| Changement de $\mu$ (rayon d'échappement) | Les calculs précédents sont invalides |
-| Ré-ancrage de l'orbite de référence | Le repère de perturbation change brutalement |
-| Premier affichage | Pas de données précédentes |
+| Événement | Pourquoi ? | Statut |
+|-----------|------------|--------|
+| Changement de zoom | Les coordonnées de tous les pixels changent | **Reprojetable** (cf. section ci-dessus) |
+| Changement de $\mu$ (rayon d'échappement) | Les calculs précédents sont invalides | Reset nécessaire |
+| Ré-ancrage de l'orbite de référence | Le repère de perturbation change brutalement | Reset nécessaire |
+| Premier affichage | Pas de données précédentes | Reset nécessaire |
 
 Le ré-ancrage se produit automatiquement quand le centre de la vue s'éloigne de plus de 
 $20 \times$ l'échelle courante par rapport au centre de l'orbite de référence.
@@ -542,3 +694,4 @@ Et à tout moment, le framerate reste stable grâce à l'ajustement automatique 
 | **Batch adaptatif** | Feedback temps GPU → taille du batch (EMA $\alpha = 0.3$, cible 16ms) | Framerate constant |
 | **Continuation d'itérations** | État complet par pixel dans 7 couches texture | Itérations profondes sans blocage |
 | **Chunking orbite** | WASM calcule 500 pas max par frame | UI jamais bloquée |
+| **Reprojection zoom** *(proposé)* | Snapshot figée + calcul live en parallèle, double texture dans Color | Zoom sans flash ni recalcul visible |

@@ -3,7 +3,6 @@ import Mandelbrot from '../src/components/Mandelbrot.vue'
 import ClassicMandelbrot from '../src/components/ClassicMandelbrot.vue'
 import MandelbrotOrbits from '../src/components/MandelbrotOrbits.vue'
 import MandelbrotController from '../src/components/MandelbrotController.vue'
-import MandelbrotViewer from '../src/components/MandelbrotViewer.vue'
 </script>
 <link rel="stylesheet" href="https://use.typekit.net/fnz7ojs.css">
 # WebAssembly, WebGPU, Rust, fractales et autres trucs cools.
@@ -188,7 +187,7 @@ function drawMandelbrot(canvas: HTMLCanvasElement, maxIterations: number) {
 Voici ce que ça donne avec une palette de couleurs cyclique.
 
 <ClientOnly>
-<Mandelbrot
+<MandelbrotController
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
@@ -207,7 +206,7 @@ Vous noterez qu'il y a un effet de bandes dû au fait que le nombre d'itération
 On peut le faire ressortir en ne coloriant que les itérations impaires.
 
 <ClientOnly>
-<Mandelbrot
+<MandelbrotController
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
@@ -234,7 +233,7 @@ On se sert du nombre entier d'itérations $n$ et on ajoute un $\delta$ calculé 
 Voici ce que ça donne avec un lissage.
 
 <ClientOnly>
-<Mandelbrot
+<MandelbrotController
 :cx="'-0.5'"
 :cy="'0.0'"
 :scale="'1.5'"
@@ -1171,7 +1170,40 @@ Avec coloration
 
 #### Palettes cycliques
 
+La coloration de l'ensemble de Mandelbrot repose sur une palette de couleurs qui est appliquée de manière cyclique.
+
+Une palette est définie par une série de *color stops* : des paires `(couleur, position)` réparties le long d'un axe allant de $0$ à $1$.
+Entre chaque stop, les couleurs sont interpolées pour former un dégradé continu.
+
+Côté code, la classe `Palette` (dans `Palette.ts`) prend un tableau de color stops, les trie par position, puis utilise une fonction d'interpolation de la bibliothèque *d3-interpolate* pour calculer la couleur en n'importe quel point $t \in [0,1]$.
+
+La méthode `generateTexture()` échantillonne ce dégradé en $4096$ points et produit une `ImageData` de $4096 \times 1$ pixels (RGBA). Cette image est ensuite envoyée au GPU sous forme de texture 1D.
+
+Côté shader (dans `color.wgsl`), la palette est échantillonnée de manière cyclique grâce à la formule :
+
+$$\text{palettePhase} = \text{fract}\left(\frac{\nu}{\text{palettePeriod}} + \text{paletteOffset}\right)$$
+
+où $\nu$ est la valeur lissée du nombre d'itérations (normalisée par $256$). La fonction `fract` ne conserve que la partie fractionnaire, ce qui rend la palette cyclique : elle se répète naturellement quelle que soit l'étendue des valeurs d'itération.
+
+Le paramètre `palettePeriod` contrôle la fréquence de répétition : une petite valeur fait cycler la palette très rapidement (beaucoup de bandes de couleur), une grande valeur l'étire. Le paramètre `paletteOffset` décale le point de départ de la palette, permettant d'animer les couleurs.
+
 #### Des dégradés agréables grâce à la science des couleurs
+
+Un point crucial pour obtenir de beaux rendus est le choix du mode d'interpolation entre les color stops.
+
+L'interpolation naïve en RGB produit souvent des dégradés ternes ou désaturés au niveau des transitions. Par exemple, interpoler entre du bleu et du jaune en RGB donne un gris peu attrayant au milieu.
+
+Pour éviter cela, la palette supporte plusieurs espaces colorimétriques d'interpolation :
+
+- **Lab** (par défaut) : espace perceptuellement uniforme. Les distances dans cet espace correspondent mieux à la perception humaine des différences de couleur, ce qui produit des dégradés naturels et réguliers.
+- **HCL** (Hue-Chroma-Lightness) : similaire à Lab mais en coordonnées cylindriques, ce qui facilite les rotations de teinte.
+- **HSL** (Hue-Saturation-Lightness) : espace classique, mais moins fidèle à la perception.
+- **Cubehelix** : conçu spécifiquement pour produire des dégradés dont la luminosité perçue varie de manière monotone, idéal pour les visualisations scientifiques.
+- **RGB** : interpolation linéaire classique, fournie pour comparaison.
+
+L'interpolation se fait via les fonctions de *d3-interpolate* (`interpolateLab`, `interpolateHcl`, etc.). Le mode Lab est le défaut car il donne les résultats les plus agréables dans la majorité des cas.
+
+Côté interface, des outils de génération automatique de palettes (monochromatique, complémentaire, analogue, triadique, aléatoire) opèrent dans l'espace **LCH** (via *d3-color*), garantissant des harmonies de couleurs cohérentes d'un point de vue perceptuel. Des ajustements globaux (rotation de teinte, chroma, luminosité) sont également disponibles, toujours dans cet espace perceptuellement uniforme.
 
 [//]: # (https://www.shadertoy.com/view/ttscWn)
 [//]: # (https://www.shadertoy.com/view/7ly3Wh)
