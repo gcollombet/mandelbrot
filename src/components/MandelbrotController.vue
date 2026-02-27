@@ -8,6 +8,7 @@ const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
 const scale = defineModel<string>('scale')
 const angle = defineModel<number>('angle')
+const mobileNavExpanded = defineModel<boolean>('mobileNavExpanded', { default: false })
 
 // Props pass-through pour initialiser Mandelbrot
 const props = defineProps<{
@@ -272,7 +273,7 @@ onUnmounted(() => {
     />
     
     <!-- Contrôles de navigation mobile -->
-    <MobileNavigationControls :mandelbrot-ref="mandelbrotRef" />
+    <MobileNavigationControls :mandelbrot-ref="mandelbrotRef" v-model:expanded="mobileNavExpanded" />
   </div>
 </template>
 

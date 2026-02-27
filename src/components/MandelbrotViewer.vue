@@ -20,6 +20,9 @@ const popupRefs = ref<Record<string, HTMLElement | null>>({});
 
 const showUI = ref(true);
 
+// Mobile navigation expanded state (from MobileNavigationControls)
+const mobileNavExpanded = ref(false);
+
 // Paramètres Mandelbrot avec valeurs par défaut
 const LOCAL_STORAGE_CURRENT_KEY = 'mandelbrot_last_settings';
 const mandelbrotParams = ref<MandelbrotParams>({
@@ -73,6 +76,13 @@ onUnmounted(() => {
 watch(mandelbrotParams, (params) => {
   localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(params));
 }, { deep: true });
+
+// When mobile nav expands, close all settings popups
+watch(mobileNavExpanded, (expanded) => {
+  if (expanded) {
+    closeAllSettings();
+  }
+});
 
 // Tabs du menu
 const settingsTabs = [
@@ -245,23 +255,25 @@ const shortcutLabels = computed(() => {
     <div
       class="top-settings-bar animate__animated"
       :class="showUI ? 'animate__fadeInDown' : ''"
-      v-show="showUI"
+      v-show="showUI && !mobileNavExpanded"
     >
-      <button
-        v-for="tab in settingsTabs"
-        :key="tab.key"
-        class="top-tab-btn"
-        :class="{ 'is-active': openTabs.has(tab.key) }"
-        @click="toggleTab(tab.key)"
-      >
-        {{ tab.label }}
-      </button>
+      <div class="top-settings-bar-inner">
+        <button
+          v-for="tab in settingsTabs"
+          :key="tab.key"
+          class="top-tab-btn"
+          :class="{ 'is-active': openTabs.has(tab.key) }"
+          @click="toggleTab(tab.key)"
+        >
+          {{ tab.label }}
+        </button>
+      </div>
     </div>
 
-    <!-- Render status indicator (top-left) -->
+    <!-- Render status indicator (bottom-center, hidden on mobile) -->
     <div
-      class="render-stats-wrapper animate__animated"
-      :class="showUI ? 'animate__fadeInDown' : ''"
+      class="render-stats-wrapper is-hidden-touch animate__animated"
+      :class="showUI ? 'animate__fadeInUp' : ''"
       v-show="showUI"
     >
       <RenderStats :engine="mandelbrotEngine" />
@@ -275,6 +287,7 @@ const shortcutLabels = computed(() => {
       v-model:angle="mandelbrotParams.angle"
       v-model:cx="mandelbrotParams.cx"
       v-model:cy="mandelbrotParams.cy"
+      v-model:mobileNavExpanded="mobileNavExpanded"
       :mu="mandelbrotParams.mu"
       :shadingLevel="mandelbrotParams.shadingLevel"
       :antialiasLevel="mandelbrotParams.antialiasLevel"
@@ -381,13 +394,20 @@ const shortcutLabels = computed(() => {
 </template>
 
 <style scoped>
-/* Barre de boutons en haut, centrée */
+/* Barre de boutons centrée sur l'écran */
 .top-settings-bar {
   position: fixed;
   top: 16px;
-  left: 50%;
-  transform: translateX(-50%);
+  left: 0;
+  right: 0;
   z-index: 30;
+  display: flex;
+  justify-content: center;
+  pointer-events: none;
+  user-select: none;
+}
+
+.top-settings-bar-inner {
   display: flex;
   gap: 0;
   background: rgba(255,255,255,0.35);
@@ -395,7 +415,7 @@ const shortcutLabels = computed(() => {
   border-radius: 16px;
   box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
   overflow: hidden;
-  user-select: none;
+  pointer-events: auto;
 }
 
 .top-tab-btn {
@@ -518,8 +538,9 @@ const shortcutLabels = computed(() => {
 
 .render-stats-wrapper {
   position: fixed;
-  top: 24px;
-  left: 24px;
+  bottom: 16px;
+  left: 50%;
+  transform: translateX(-50%);
   z-index: 20;
   pointer-events: auto;
 }

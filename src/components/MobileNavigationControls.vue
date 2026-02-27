@@ -6,15 +6,15 @@ const props = defineProps<{
   mandelbrotRef: MandelbrotExposed | null;
 }>();
 
-const isExpanded = ref(false);
+const expanded = defineModel<boolean>('expanded', { default: false });
 const activeButton = ref<string | null>(null);
 
 // Intervalles pour les actions répétées
 let intervalId: number | null = null;
 
 const toggleExpanded = () => {
-  isExpanded.value = !isExpanded.value;
-  if (!isExpanded.value) {
+  expanded.value = !expanded.value;
+  if (!expanded.value) {
     stopAllActions();
   }
 };
@@ -111,7 +111,7 @@ const handleTouchEnd = (e: TouchEvent) => {
     <!-- Bouton central boussole -->
     <button
       class="nav-button compass-button"
-      :class="{ active: isExpanded }"
+      :class="{ active: expanded }"
       @click="toggleExpanded"
       @touchend="handleCompassTouch"
       aria-label="Toggle navigation"
@@ -129,7 +129,7 @@ const handleTouchEnd = (e: TouchEvent) => {
 
     <!-- Chevrons directionnels -->
     <transition name="fade">
-      <div v-if="isExpanded" class="directional-controls">
+      <div v-if="expanded" class="directional-controls">
         <!-- Nord -->
         <button
           class="nav-button direction-button north"
