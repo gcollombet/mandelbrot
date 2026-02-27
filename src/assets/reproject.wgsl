@@ -4,14 +4,12 @@
 //
 // Layer layout:
 //   0 : sentinel / iteration count (integer part)
-//   1 : mu – fractional smooth part (cosmetic only, used for coloring).
-//       mu > 0  => pixel escaped; smooth coloring = iter + mu.
-//       State logic uses iter + |z|² instead of mu.
+//   1 : (unused – reserved for MRT alignment)
 //   2 : z.x
 //   3 : z.y
 //   4 : dz.x (derivative real)
 //   5 : dz.y (derivative imag)
-//   6 : angle_der
+//   6 : ref_i (reference orbit index, for resuming perturbation)
 //
 // Sentinels are stored in layer 0 as negative integers:
 //   -1  : needs Mandelbrot computation (or continuation)
@@ -22,7 +20,7 @@
 // Pixel state convention (iter-only, no mu in state logic):
 //   iter == -1                     : sentinel, needs computation
 //   iter == 0                      : confirmed inside the set (or exhausted at globalMaxIter)
-//   iter > 0  AND  |z|² >= 4      : escaped → color with iter + mu
+//   iter > 0  AND  |z|² >= 4      : escaped → color with iter + mu (mu recomputed in color shader)
 //   iter > 0  AND  |z|² < 4       : budget exhausted mid-progress → needs continuation
 //   The mandelbrot pass handles continuations directly; the brush does NOT
 //   convert budget-exhausted pixels to sentinels.
@@ -82,12 +80,12 @@ fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
 // ── output struct (7 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,
-  @location(1) mu:        vec4<f32>,
+  @location(1) unused1:   vec4<f32>,
   @location(2) zx:        vec4<f32>,
   @location(3) zy:        vec4<f32>,
   @location(4) dzx:       vec4<f32>,
   @location(5) dzy:       vec4<f32>,
-  @location(6) angle_der: vec4<f32>,
+  @location(6) ref_i:     vec4<f32>,
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -99,24 +97,24 @@ fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
 fn loadAllLayers(coord: vec2<i32>) -> FragOut {
   var o: FragOut;
   o.iter      = pack(loadLayer(coord, 0));
-  o.mu        = pack(loadLayer(coord, 1));
+  o.unused1   = pack(loadLayer(coord, 1));
   o.zx        = pack(loadLayer(coord, 2));
   o.zy        = pack(loadLayer(coord, 3));
   o.dzx       = pack(loadLayer(coord, 4));
   o.dzy       = pack(loadLayer(coord, 5));
-  o.angle_der = pack(loadLayer(coord, 6));
+  o.ref_i     = pack(loadLayer(coord, 6));
   return o;
 }
 
 fn makeCleared(sentinel: f32) -> FragOut {
   var o: FragOut;
   o.iter      = pack(sentinel);
-  o.mu        = pack(0.0);
+  o.unused1   = pack(0.0);
   o.zx        = pack(0.0);
   o.zy        = pack(0.0);
   o.dzx       = pack(0.0);
   o.dzy       = pack(0.0);
-  o.angle_der = pack(0.0);
+  o.ref_i     = pack(0.0);
   return o;
 }
 

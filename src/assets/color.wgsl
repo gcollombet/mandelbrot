@@ -53,6 +53,12 @@ fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
   return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
 }
 
+fn cdiv(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+  let d = b.x * b.x + b.y * b.y;
+  return vec2<f32>((a.x * b.x + a.y * b.y) / d,
+                   (a.y * b.x - a.x * b.y) / d);
+}
+
 // Conversion d'une direction 3D en coordonne9es UV pour une skybox equirectangulaire
 fn dir_to_skybox_uv(dir: vec3<f32>, dx: f32, dy: f32) -> vec2<f32> {
   let d = normalize(dir);
@@ -176,13 +182,10 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 
   // Read individual layers from the texture array.
   let iter_val  = textureLoad(tex, sampleCoord, 0, 0).r; // layer 0: integer iter count / sentinel
-  let mu_val    = textureLoad(tex, sampleCoord, 1, 0).r; // layer 1: smooth fractional part
   let zx_val    = textureLoad(tex, sampleCoord, 2, 0).r; // layer 2: z.x
   let zy_val    = textureLoad(tex, sampleCoord, 3, 0).r; // layer 3: z.y
-  let angle_der = textureLoad(tex, sampleCoord, 6, 0).r; // layer 6: angle_der
-
-  // Combine integer + fractional parts for smooth iteration value.
-  var nu = iter_val + mu_val;
+  let der_x     = textureLoad(tex, sampleCoord, 4, 0).r; // layer 4: derivative x
+  let der_y     = textureLoad(tex, sampleCoord, 5, 0).r; // layer 5: derivative y
 
   // Sentinel: iter_val < 0 => uncomputed pixel.
   if (iter_val < 0.0) {
@@ -196,14 +199,19 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     return vec4<f32>(0.0, 0.5, 0.0, 1.0);
   }
 
-  // Inside the set: iter_val == 0 and mu >= 0.
+  // Inside the set: iter_val == 0. Solid black.
   if (iter_val == 0.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 1.0);
   }
 
-  if (parameters.activateZebra == 1.0 && floor(nu) % 2.0 == 0.0) {
-    nu = 0.0;
-  }
+  // ── Escaped pixel: recalculate mu and angle_der from stored z and der ──
+
+  // Smooth fractional part: mu = clamp(1 - log2(log(|z|²) / log(mu_limit)), 0, 1)
+  let z_sq = zx_val * zx_val + zy_val * zy_val;
+  let log_z2 = log(z_sq);
+  let mu_val = clamp(1.0 - log(log_z2 / log(parameters.mu)) / log(2.0), 0.0, 1.0);
+
+  var nu = iter_val + mu_val;
 
   // Edge case: nu <= 0 after combination (shouldn't happen for escaped points).
   if (nu < 0.0) {
@@ -214,8 +222,19 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     nu = iter_val;
   }
 
+  // Zebra: use integer iteration count so it works with or without smoothness.
+  if (parameters.activateZebra == 1.0 && floor(iter_val) % 2.0 == 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+  }
+
+  // Recalculate angle_der = atan2(cdiv(der, z)) for shading.
+  let z = vec2<f32>(zx_val, zy_val);
+  let der = vec2<f32>(der_x, der_y);
+  let d = cdiv(der, z);
+  let angle_der = atan2(d.y, d.x);
+
   let v = nu / 256.0;
-  var color = palette(v, vec2<f32>(zx_val, zy_val), angle_der, uv_neutral.x, uv_neutral.y);
+  var color = palette(v, z, angle_der, uv_neutral.x, uv_neutral.y);
 
   return vec4<f32>(color, 1.0);
 }

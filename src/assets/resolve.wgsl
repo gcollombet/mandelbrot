@@ -4,12 +4,12 @@
 //
 // Layer layout:
 //   0 : sentinel / iteration count (integer part)
-//   1 : mu (smooth fractional part for escaped pixels; cosmetic only)
+//   1 : (unused – reserved for MRT alignment)
 //   2 : z.x
 //   3 : z.y
 //   4 : dz.x (derivative real)
 //   5 : dz.y (derivative imag)
-//   6 : angle_der
+//   6 : ref_i (reference orbit index, for resuming perturbation)
 //
 // Sentinel convention:
 //   If layer0 == -step (step is power-of-two > 1), resolve by testing
@@ -49,12 +49,12 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
 // ── output struct (7 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,
-  @location(1) mu:        vec4<f32>,
+  @location(1) unused1:   vec4<f32>,
   @location(2) zx:        vec4<f32>,
   @location(3) zy:        vec4<f32>,
   @location(4) dzx:       vec4<f32>,
   @location(5) dzy:       vec4<f32>,
-  @location(6) angle_der: vec4<f32>,
+  @location(6) ref_i:     vec4<f32>,
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -66,12 +66,12 @@ fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
 fn loadAllLayers(coord: vec2<i32>) -> FragOut {
   var o: FragOut;
   o.iter      = pack(loadLayer(coord, 0));
-  o.mu        = pack(loadLayer(coord, 1));
+  o.unused1   = pack(loadLayer(coord, 1));
   o.zx        = pack(loadLayer(coord, 2));
   o.zy        = pack(loadLayer(coord, 3));
   o.dzx       = pack(loadLayer(coord, 4));
   o.dzy       = pack(loadLayer(coord, 5));
-  o.angle_der = pack(loadLayer(coord, 6));
+  o.ref_i     = pack(loadLayer(coord, 6));
   return o;
 }
 

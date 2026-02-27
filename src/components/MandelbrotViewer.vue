@@ -63,6 +63,7 @@ const mandelbrotParams = ref<MandelbrotParams>({
 // Restore paramètres à partir du localStorage puis surveille et persiste à chaque changement
 onMounted(() => {
   window.addEventListener('keydown', handleGlobalKeydown);
+  window.addEventListener('pointerdown', handleOutsidePointerDown);
   try {
     const raw = localStorage.getItem(LOCAL_STORAGE_CURRENT_KEY);
     if (raw) {
@@ -72,6 +73,7 @@ onMounted(() => {
 });
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown);
+  window.removeEventListener('pointerdown', handleOutsidePointerDown);
 });
 watch(mandelbrotParams, (params) => {
   localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(params));
@@ -112,6 +114,20 @@ function closeAllSettings() {
   openTabs.clear();
   for (const key of Object.keys(popupPositions)) {
     delete popupPositions[key];
+  }
+}
+
+// Close popups when tapping outside on mobile
+function handleOutsidePointerDown(e: PointerEvent) {
+  if (openTabs.size === 0) return;
+  const target = e.target as HTMLElement;
+  // Check if click was inside any open popup or the top settings bar
+  const insidePopup = Object.values(popupRefs.value).some(
+    el => el && el.contains(target)
+  );
+  const insideBar = target.closest('.top-settings-bar');
+  if (!insidePopup && !insideBar) {
+    closeAllSettings();
   }
 }
 

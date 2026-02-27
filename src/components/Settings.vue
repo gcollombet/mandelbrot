@@ -5,6 +5,8 @@ import PaletteEditor from './PaletteEditor.vue';
 import { Palette } from '../Palette.ts';
 import { lch as d3lch, rgb as d3rgb, hsl as d3hsl } from 'd3-color';
 import type { InterpolationMode } from '../Mandelbrot.ts';
+import defaultPresetsJson from '../assets/default-presets.json';
+import defaultPalettesJson from '../assets/default-palettes.json';
 
 import type { Engine } from '../Engine.ts';
 const props = defineProps<{
@@ -180,7 +182,13 @@ function loadPresets() {
   if (raw) {
     try {
       presets.value = JSON.parse(raw);
+      return;
     } catch {}
+  }
+  // Bootstrap from bundled defaults when localStorage is empty
+  if (defaultPresetsJson.length > 0) {
+    presets.value = structuredClone(defaultPresetsJson) as typeof presets.value;
+    localStorage.setItem(STORAGE_KEY, JSON.stringify(presets.value));
   }
 }
 
@@ -189,7 +197,13 @@ function loadPalettes() {
   if (raw) {
     try {
       palettes.value = JSON.parse(raw);
+      return;
     } catch {}
+  }
+  // Bootstrap from bundled defaults when localStorage is empty
+  if (defaultPalettesJson.length > 0) {
+    palettes.value = structuredClone(defaultPalettesJson) as typeof palettes.value;
+    localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(palettes.value));
   }
 }
 
