@@ -108,7 +108,13 @@ fn palette(v: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
   }
 
   if (parameters.activateTessellation == 1.0) {
-    color = mix(color, tessColor, 1.0 - color);
+    if (parameters.activatePalette == 1.0) {
+      // Multiply blend: tessellation modulates the palette color
+      // This preserves the palette hues while adding tessellation detail
+      color = color * (0.5 + 0.5 * tessColor);
+    } else {
+      color = mix(color, tessColor, 1.0 - color);
+    }
   }
 
   if (parameters.activateWebcam == 1.0) {
@@ -129,15 +135,19 @@ fn palette(v: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
   if (parameters.activateShading == 1.0) {
     let normal = normalize(vec3<f32>(cos(d), sin(d), 0.5));
     let lightDir = normalize(vec3<f32>(0.2, 0.3, 0.5));
-    let viewDir = vec3<f32>(0.7, 0.8, 0.5);
+    let viewDir = normalize(vec3<f32>(0.7, 0.8, 0.5));
     let diff = max(dot(normal, lightDir), 0.0);
-    let ambient = 2.0;
     let reflectDir = reflect(-lightDir, normal);
-    let specular = pow(max(dot(viewDir, reflectDir), 0.0), 1.0);
-    var phong = ambient + 2.0 * diff + 1.0 * specular;
+    let specular = pow(max(dot(viewDir, reflectDir), 0.0), 4.0);
+    // Raw Phong value: diff in [0,1], specular in [0,1]
+    // Remap so that average lighting maps to 1.0, shadows go below, highlights above
+    let raw = 0.4 * diff + 0.6 * specular;
+    // raw is roughly 0..1 with average ~0.3-0.5
+    // Map to a shading factor centered around 1.0: range ~[0.8, 2.0]
+    var shading = 0.8 + 1.2 * raw;
 
     if (parameters.activateSkybox == 1.0) {
-      let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0)) ;
+      let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0));
       let skyboxUV = dir_to_skybox_uv(skyboxDir, dx, dy);
       let skyboxSize = vec2<i32>(textureDimensions(skyboxTex, 0));
       let skyboxCoord = vec2<i32>(
@@ -147,11 +157,11 @@ fn palette(v: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
 
       let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb;
       let lum = 0.2126 * skyboxColor.r + 0.7152 * skyboxColor.g + 0.0722 * skyboxColor.b;
-      phong = phong * lum * 1.0;
-      color = color / phong * 1.0;
-    } else {
-      color = color / phong * 2.0;
+      // Skybox modulates shading: bright skybox regions brighten, dark ones darken
+      shading = 0.5 + (shading - 0.5) * (0.5 + lum);
     }
+
+    color = color * shading;
   }
 
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));

@@ -954,7 +954,7 @@ function generateRandom() {
         <span>{{ (model.epsilon ?? 1e-8).toExponential(2) }}</span>
       </div>
       <div class="field">
-        <label class="label">Tessellation</label>
+        <label class="label">Texture</label>
         <div class="control">
           <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
         </div>
@@ -965,8 +965,8 @@ function generateRandom() {
         <div class="buttons toggle-buttons">
           <button class="button is-small"
             :class="model.activateShading ? 'is-link' : 'is-light'"
-            @click="model.activateShading = !model.activateShading">
-            Shading
+            @click="model.activateShading = !model.activateShading; if (!model.activateShading) { model.activateSkybox = false; }">
+            Relief
           </button>
           <button class="button is-small"
             :class="model.activatePalette ? 'is-link' : 'is-light'"
@@ -981,12 +981,12 @@ function generateRandom() {
           <button class="button is-small"
             :class="model.activateTessellation ? 'is-link' : 'is-light'"
             @click="model.activateTessellation = !model.activateTessellation">
-            Tessellation
+            Textur&eacute;
           </button>
           <button class="button is-small"
             :class="model.activateSkybox ? 'is-link' : 'is-light'"
-            @click="model.activateSkybox = !model.activateSkybox">
-            Skybox
+            @click="model.activateSkybox = !model.activateSkybox; if (model.activateSkybox) { model.activateShading = true; }">
+            Metalis&eacute;
           </button>
           <button class="button is-small"
             :class="model.activateWebcam ? 'is-link' : 'is-light'"

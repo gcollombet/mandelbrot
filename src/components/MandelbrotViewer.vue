@@ -188,13 +188,13 @@ watch(mobileNavExpanded, (expanded) => {
   }
 });
 
-// Tabs du menu
-const settingsTabs = [
-  { key: 'navigation', label: 'Navigation' },
-  { key: 'presets', label: 'Presets' },
-  { key: 'palettes', label: 'Palettes' },
-  { key: 'performance', label: 'Graphics' },
-];
+// Tabs du menu — raccourcis adaptés au layout clavier
+const settingsTabs = computed(() => [
+  { key: 'navigation', label: 'Navigation', shortcut: keyboardLayout === 'azerty' ? 'w' : 'z' },
+  { key: 'presets', label: 'Presets', shortcut: 'x' },
+  { key: 'palettes', label: 'Palettes', shortcut: 'c' },
+  { key: 'performance', label: 'Graphics', shortcut: 'v' },
+]);
 
 function toggleTab(tabKey: string) {
   if (openTabs.has(tabKey)) {
@@ -243,13 +243,11 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   if (shortcutsSuspended.value) return;
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) return;
-  if ((e.key === 'w' || e.key === 'W') && !e.repeat) {
+  const key = e.key.toLowerCase();
+  const tab = settingsTabs.value.find(t => t.shortcut === key);
+  if (tab && !e.repeat) {
     e.preventDefault();
-    if (openTabs.size > 0) {
-      closeAllSettings();
-    } else {
-      toggleTab('navigation');
-    }
+    toggleTab(tab.key);
   }
 }
 
@@ -383,7 +381,7 @@ const shortcutLabels = computed(() => {
           :class="{ 'is-active': openTabs.has(tab.key) }"
           @click="toggleTab(tab.key)"
         >
-          {{ tab.label }}
+          {{ tab.label }} <span class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
         </button>
       </div>
     </div>
@@ -452,7 +450,7 @@ const shortcutLabels = computed(() => {
       </div>
     </template>
 
-    <!-- Raccourcis clavier (masque sur mobile) — responsive stacked layout -->
+    <!-- Raccourcis clavier (masque sur mobile) — vertical stacked layout, left side -->
     <div
       class="shortcut-hint is-hidden-touch"
       :class="{ 'hud-hidden': isNavigating, 'bottom-bar-hidden': !bottomBarVisible }"
@@ -460,30 +458,35 @@ const shortcutLabels = computed(() => {
     >
       <div class="shortcut-group">
         <span class="shortcut-label">Move</span>
-        <span class="tag is-black">Left clic</span>
-        <span class="tag is-black">{{ shortcutLabels.up }}</span>
-        <span class="tag is-black">{{ shortcutLabels.left }}</span>
-        <span class="tag is-black">{{ shortcutLabels.down }}</span>
-        <span class="tag is-black">{{ shortcutLabels.right }}</span>
+        <div class="shortcut-keys">
+          <span class="tag is-black is-rounded">Left clic</span>
+          <span class="tag is-black is-rounded">{{ shortcutLabels.up }}</span>
+          <span class="tag is-black is-rounded">{{ shortcutLabels.left }}</span>
+          <span class="tag is-black is-rounded">{{ shortcutLabels.down }}</span>
+          <span class="tag is-black is-rounded">{{ shortcutLabels.right }}</span>
+        </div>
       </div>
-      <span class="shortcut-separator">|</span>
       <div class="shortcut-group">
         <span class="shortcut-label">Rotate</span>
-        <span class="tag is-black">Right clic</span>
-        <span class="tag is-black">{{ shortcutLabels.rotateLeft }}</span>
-        <span class="tag is-black">{{ shortcutLabels.rotateRight }}</span>
+        <div class="shortcut-keys">
+          <span class="tag is-black is-rounded">Right clic</span>
+          <span class="tag is-black is-rounded">{{ shortcutLabels.rotateLeft }}</span>
+          <span class="tag is-black is-rounded">{{ shortcutLabels.rotateRight }}</span>
+        </div>
       </div>
-      <span class="shortcut-separator">|</span>
       <div class="shortcut-group">
         <span class="shortcut-label">Zoom</span>
-        <span class="tag is-black">Wheel</span>
-        <span class="tag is-black">{{ shortcutLabels.zoomIn }}</span>
-        <span class="tag is-black">{{ shortcutLabels.zoomOut }}</span>
+        <div class="shortcut-keys">
+          <span class="tag is-black is-rounded">Wheel</span>
+          <span class="tag is-black is-rounded">{{ shortcutLabels.zoomIn }}</span>
+          <span class="tag is-black is-rounded">{{ shortcutLabels.zoomOut }}</span>
+        </div>
       </div>
-      <span class="shortcut-separator">|</span>
       <div class="shortcut-group">
         <span class="shortcut-label">Settings</span>
-        <span class="tag is-black">W</span>
+        <div class="shortcut-keys">
+          <span v-for="tab in settingsTabs" :key="tab.key" class="tag is-black is-rounded">{{ tab.shortcut.toUpperCase() }}</span>
+        </div>
       </div>
     </div>
 
@@ -604,6 +607,12 @@ const shortcutLabels = computed(() => {
   color: #fff;
 }
 
+.tab-shortcut-hint {
+  opacity: 0.5;
+  font-size: 0.82em;
+  font-weight: 400;
+}
+
 /* Popup Settings */
 .settings-popup {
   max-width: 96vw;
@@ -642,70 +651,72 @@ const shortcutLabels = computed(() => {
   min-height: 0;
 }
 
-/* === Shortcut hint bar — responsive === */
+/* === Shortcut hint bar — vertical stacked, left side === */
 .shortcut-hint {
   position: absolute;
-  right: 24px;
+  left: 24px;
   bottom: 16px;
-  padding: 8px 16px;
-  border-radius: 0;
-  background: rgba(255,255,255,0.35);
+  padding: 10px 14px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.25);
   backdrop-filter: blur(8px);
   color: #111;
-  font-size: 0.9rem;
+  font-size: 0.85rem;
   font-family: inherit;
-  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
+  box-shadow: 0 2px 12px 0 rgba(0,0,0,0.06);
   pointer-events: none;
   user-select: none;
   opacity: 0.85;
   letter-spacing: 0.01em;
   z-index: 20;
   display: flex;
-  flex-wrap: wrap;
-  gap: 6px 12px;
-  max-width: 700px;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 260px;
 }
 
 .shortcut-group {
   display: flex;
   align-items: center;
-  gap: 4px;
+  gap: 6px;
   white-space: nowrap;
 }
 
 .shortcut-label {
-  font-weight: 500;
-  margin-right: 2px;
+  font-weight: 600;
+  min-width: 4.5em;
+  font-size: 0.82rem;
+  color: #333;
+}
+
+.shortcut-keys {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.shortcut-hint .tag.is-rounded {
+  font-size: 0.72rem;
+  padding: 2px 8px;
+  height: auto;
+  line-height: 1.5;
 }
 
 .shortcut-separator {
-  opacity: 0.4;
-  margin: 0 2px;
-  user-select: none;
-}
-
-/* On narrower screens, stack groups vertically and hide separators */
-@media (max-width: 1200px) {
-  .shortcut-hint {
-    flex-direction: column;
-    gap: 4px;
-    max-width: 320px;
-  }
-  .shortcut-separator {
-    display: none;
-  }
+  display: none;
 }
 
 .footer-love {
   position: absolute;
-  left: 24px;
+  right: 24px;
   bottom: 16px;
-  padding: 6px 18px;
-  border-radius: 0;
-  background: rgba(255,255,255,0.35);
+  padding: 6px 14px;
+  border-radius: 10px;
+  background: rgba(255,255,255,0.25);
   backdrop-filter: blur(8px);
   color: #111;
-  font-size: 1rem;
+  font-size: 0.85rem;
   font-family: inherit;
   box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
   pointer-events: auto;
