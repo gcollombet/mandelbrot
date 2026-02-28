@@ -254,6 +254,18 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   // UV transform:  uv_tex = (uv_neutral - 0.5) / texZoomFactor + 0.5
   //   This "zooms" into or out of the texture to match the display scale.
 
+  // Screen-visible rectangle in neutral UV space.
+  // The neutral texture is a square covering the screen diagonal; only the
+  // central rectangle is actually on screen.  When zoom UV rescaling maps a
+  // screen pixel to the rotation margins of the source texture, we must
+  // reject that sample (the margin data is coarse / not fully refined).
+  //
+  //   In xy_neutral space the screen spans [-aspect/ne, +aspect/ne] × [-1/ne, +1/ne].
+  //   Converting to UV: uv = xy_neutral * 0.5 + 0.5, so half-extents are
+  //   aspect/(2*ne) and 1/(2*ne).
+  let screenHalfU = parameters.aspect / (2.0 * neutralExtent);
+  let screenHalfV = 1.0 / (2.0 * neutralExtent);
+
   let zf  = parameters.zoomFactor;
   let lzf = parameters.liveZoomFactor;
   let isZooming = (zf != 1.0) || (lzf != 1.0);
@@ -291,9 +303,18 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   // Live texture UV: the live texture is at liveScale, display is at displayScale.
   let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf + vec2<f32>(0.5, 0.5);
 
-  // Check if the live UV is in bounds (the live texture may cover a different area)
-  let liveInBounds = uv_live.x >= 0.0 && uv_live.x <= 1.0
-                  && uv_live.y >= 0.0 && uv_live.y <= 1.0;
+  // Check if the live UV is in bounds.  When lzf < 1 (zoom-in), the UV
+  // expands into the rotation margins — clamp to the screen rectangle.
+  // When lzf >= 1 (zoom-out), the UV shrinks — full texture bounds suffice.
+  let liveOffCenter = abs(uv_live - vec2<f32>(0.5, 0.5));
+  var liveInBounds: bool;
+  if (lzf < 1.0) {
+    liveInBounds = liveOffCenter.x <= screenHalfU
+                && liveOffCenter.y <= screenHalfV;
+  } else {
+    liveInBounds = uv_live.x >= 0.0 && uv_live.x <= 1.0
+                && uv_live.y >= 0.0 && uv_live.y <= 1.0;
+  }
 
   if (liveInBounds) {
     let liveCoord = vec2<i32>(
@@ -329,8 +350,18 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
                   - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
-  if (uv_frozen.x < 0.0 || uv_frozen.x > 1.0 || uv_frozen.y < 0.0 || uv_frozen.y > 1.0) {
-    // Outside frozen texture bounds (new area revealed by zoom-out)
+  // Reject frozen samples outside valid bounds.  When zf < 1 (zoom-out),
+  // the UV expands into the rotation margins — clamp to screen rectangle.
+  // When zf >= 1 (zoom-in), the UV shrinks — full texture bounds suffice.
+  let frozenOffCenter = abs(uv_frozen - vec2<f32>(0.5, 0.5));
+  var frozenOutOfBounds: bool;
+  if (zf < 1.0) {
+    frozenOutOfBounds = frozenOffCenter.x > screenHalfU || frozenOffCenter.y > screenHalfV;
+  } else {
+    frozenOutOfBounds = uv_frozen.x < 0.0 || uv_frozen.x > 1.0
+                     || uv_frozen.y < 0.0 || uv_frozen.y > 1.0;
+  }
+  if (frozenOutOfBounds) {
     return vec4<f32>(0.05, 0.05, 0.05, 1.0);
   }
 

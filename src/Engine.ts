@@ -200,7 +200,7 @@ export class Engine {
     // Orbit chunking: compute reference orbit incrementally to avoid blocking.
     // Each frame computes at most ORBIT_CHUNK_SIZE iterations of arbitrary-
     // precision math, then yields so the browser stays responsive.
-    static readonly ORBIT_CHUNK_SIZE = 100
+    static readonly ORBIT_CHUNK_SIZE = 10
 
     // textures additionnelles
     tileTexture?: GPUTexture
