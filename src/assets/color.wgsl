@@ -98,7 +98,7 @@ fn palette(v: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
     parameters.tessellationLevel + sin(parameters.time * 0.05)
   );
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-  let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset );
+  let palettePhase = fract( deep / paletteRepeat + parameters.paletteOffset );
   let paletteColor = tile_tessellation(paletteTex, palettePhase, 1.0, 1.0);
 
   var color = vec3<f32>(0.0, 0.0, 0.0);
@@ -137,7 +137,7 @@ fn palette(v: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
     var phong = ambient + 2.0 * diff + 1.0 * specular;
 
     if (parameters.activateSkybox == 1.0) {
-      let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0));
+      let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0)) ;
       let skyboxUV = dir_to_skybox_uv(skyboxDir, dx, dy);
       let skyboxSize = vec2<i32>(textureDimensions(skyboxTex, 0));
       let skyboxCoord = vec2<i32>(

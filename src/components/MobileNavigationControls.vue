@@ -36,7 +36,7 @@ const stopAllActions = () => {
 // Actions de navigation
 const startMoving = (direction: 'north' | 'south' | 'east' | 'west') => {
   activeButton.value = direction;
-  const moveStep = 0.1;
+  const moveStep = 0.01;
   
   const performMove = () => {
     if (!props.mandelbrotRef) return;
@@ -79,7 +79,7 @@ const startRotating = (direction: 'left' | 'right') => {
 
 const startZooming = (direction: 'in' | 'out') => {
   activeButton.value = `zoom-${direction}`;
-  const zoomFactor = 0.6;
+  const zoomFactor = 0.95;
   
   const performZoom = () => {
     if (!props.mandelbrotRef) return;
