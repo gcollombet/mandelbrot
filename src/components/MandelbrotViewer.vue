@@ -303,7 +303,7 @@ function popupStyle(tabKey: string) {
   const z = tabZOrder[tabKey] ?? 50;
   // Palette popup is wider; presets popup is taller
   const w = tabKey === 'palettes' ? '860px' : '460px';
-  const mh = tabKey === 'presets' ? '92vh' : '80vh';
+  const mh = (tabKey === 'presets' || tabKey === 'navigation') ? '92vh' : '80vh';
   if (pos.x < 0) {
     // Stagger multiple popups so they don't overlap perfectly
     const tabKeys = Array.from(openTabs);

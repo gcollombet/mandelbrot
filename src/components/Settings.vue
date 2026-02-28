@@ -7,6 +7,17 @@ import { lch as d3lch, rgb as d3rgb, hsl as d3hsl } from 'd3-color';
 import type { InterpolationMode } from '../Mandelbrot.ts';
 import defaultPresetsJson from '../assets/default-presets.json';
 import defaultPalettesJson from '../assets/default-palettes.json';
+import coloredTilesUrl from '../assets/colored_tiles.jpg';
+import {
+  getAllTextureEntries,
+  getTextureBlob,
+  saveTextureEntry,
+  deleteTextureEntry,
+  renameTextureEntry,
+  migrateFromLocalStorage,
+  getTextureCount,
+} from '../textureStore';
+import type { TextureMetadata } from '../textureStore';
 
 import type { Engine } from '../Engine.ts';
 const props = defineProps<{
@@ -148,6 +159,29 @@ function selectPresetFromDropdown(preset: { name: string, value: MandelbrotParam
   showPresetDropdown.value = false;
 }
 
+// Navigation tab: load only location (cx, cy, scale, angle) from a preset
+const selectedNavPreset = ref('');
+const showNavPresetDropdown = ref(false);
+
+const currentNavPresetObj = computed(() => presets.value.find(p => p.name === selectedNavPreset.value));
+const currentNavPresetThumbnail = computed(() => currentNavPresetObj.value?.thumbnail);
+
+function selectPresetLocation(name: string) {
+  const preset = presets.value.find(p => p.name === name);
+  if (preset) {
+    selectedNavPreset.value = name;
+    model.value.cx = preset.value.cx;
+    model.value.cy = preset.value.cy;
+    model.value.scale = preset.value.scale;
+    model.value.angle = preset.value.angle;
+  }
+}
+
+function selectNavPresetFromDropdown(preset: { name: string, value: MandelbrotParams, thumbnail?:string, date?:string }) {
+  selectPresetLocation(preset.name);
+  showNavPresetDropdown.value = false;
+}
+
 const STORAGE_KEY = 'mandelbrot_presets';
 const PALETTE_STORAGE_KEY = 'mandelbrot_palettes';
 
@@ -160,9 +194,14 @@ async function savePreset() {
       thumbnail = await props.engine.getSnapshotPng(256);
     }
   } catch { /* ignore errors, no thumbnail */ }
+  // Clone and strip performance fields before saving
+  const savedValue = structuredClone(toRaw(model.value));
+  delete (savedValue as any).dprMultiplier;
+  delete (savedValue as any).maxIterationMultiplier;
+  delete (savedValue as any).antialiasLevel;
   const preset = {
     name: presetName.value.trim(),
-    value: model.value,
+    value: savedValue,
     thumbnail,
     date: now
   };
@@ -244,6 +283,63 @@ function selectPaletteFromDropdown(palette: { name: string, colorStops: any[], t
   showPaletteDropdown.value = false;
 }
 
+// Palette tab: extract palette from a preset
+const selectedPalettePreset = ref('');
+const showPalettePresetDropdown = ref(false);
+
+const currentPalettePresetObj = computed(() => presets.value.find(p => p.name === selectedPalettePreset.value));
+const currentPalettePresetThumbnail = computed(() => currentPalettePresetObj.value?.thumbnail);
+
+function selectPaletteFromPreset(name: string) {
+  const preset = presets.value.find(p => p.name === name);
+  if (preset) {
+    selectedPalettePreset.value = name;
+    model.value.colorStops = structuredClone(toRaw(preset.value.colorStops));
+    model.value.interpolationMode = preset.value.interpolationMode;
+    model.value.palettePeriod = preset.value.palettePeriod;
+    model.value.paletteOffset = preset.value.paletteOffset;
+  }
+}
+
+function selectPalettePresetFromDropdown(preset: { name: string, value: MandelbrotParams, thumbnail?: string, date?: string }) {
+  selectPaletteFromPreset(preset.name);
+  showPalettePresetDropdown.value = false;
+}
+
+// Graphics tab: extract all rendering params (except location & perf) from a preset
+const selectedGraphicsPreset = ref('');
+const showGraphicsPresetDropdown = ref(false);
+
+const currentGraphicsPresetObj = computed(() => presets.value.find(p => p.name === selectedGraphicsPreset.value));
+const currentGraphicsPresetThumbnail = computed(() => currentGraphicsPresetObj.value?.thumbnail);
+
+/** Location fields — not copied in graphics extraction */
+const LOCATION_FIELDS: (keyof MandelbrotParams)[] = ['cx', 'cy', 'scale', 'angle'];
+/** Performance fields — never copied from presets */
+const PERF_FIELDS: (keyof MandelbrotParams)[] = ['dprMultiplier', 'maxIterationMultiplier', 'antialiasLevel'];
+
+function selectGraphicsFromPreset(name: string) {
+  const preset = presets.value.find(p => p.name === name);
+  if (!preset) return;
+  selectedGraphicsPreset.value = name;
+  const excluded = new Set<string>([...LOCATION_FIELDS, ...PERF_FIELDS]);
+  const src = preset.value;
+  for (const key of Object.keys(src) as (keyof MandelbrotParams)[]) {
+    if (excluded.has(key)) continue;
+    if (key === 'colorStops') {
+      model.value.colorStops = structuredClone(toRaw(src.colorStops));
+    } else {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      (model.value as any)[key] = (src as any)[key];
+    }
+  }
+}
+
+function selectGraphicsPresetFromDropdown(preset: { name: string, value: MandelbrotParams, thumbnail?: string, date?: string }) {
+  selectGraphicsFromPreset(preset.name);
+  showGraphicsPresetDropdown.value = false;
+}
+
 function deletePalette() {
   const name = paletteName.value.trim();
   if (!name) return;
@@ -263,7 +359,13 @@ function selectPreset(name: string) {
   if (preset) {
     selectedPreset.value = name;
     presetName.value = preset.name;
-    model.value = structuredClone(toRaw(preset.value));
+    // Restore all fields except performance params
+    const saved = structuredClone(toRaw(preset.value));
+    const current = model.value;
+    for (const key of PERF_FIELDS) {
+      (saved as any)[key] = (current as any)[key];
+    }
+    model.value = saved;
   }
 }
 
@@ -287,9 +389,29 @@ const maxIterMultSlider = computed({
   }
 });
 
-onMounted(() => {
+onMounted(async () => {
   loadPresets();
   loadPalettes();
+  await loadTextures();
+  // Apply persisted texture to engine if it's not the default
+  if (selectedTexture.value !== 'Colored Tiles' && props.engine) {
+    try {
+      await applyTextureToEngine(selectedTexture.value, props.engine);
+    } catch (e) {
+      console.warn('Failed to restore tile texture:', e);
+    }
+  }
+});
+
+// Apply persisted texture when engine becomes available (may arrive after mount)
+watch(() => props.engine, async (engine) => {
+  if (engine && selectedTexture.value !== 'Colored Tiles') {
+    try {
+      await applyTextureToEngine(selectedTexture.value, engine);
+    } catch (e) {
+      console.warn('Failed to restore tile texture:', e);
+    }
+  }
 });
 
 const currentPaletteObj = computed(() => palettes.value.find(p => p.name === selectedPalette.value));
@@ -663,6 +785,207 @@ function generateRandom() {
   resetLchBase();
 }
 
+// =====================================================
+// Tessellation Texture Library
+// =====================================================
+const TEXTURE_SELECTED_KEY = 'mandelbrot_selected_texture';
+const MAX_TEXTURE_SIZE = 4096;
+
+const textureName = ref('');
+const textures = ref<TextureMetadata[]>([]);
+const selectedTexture = ref('Colored Tiles');
+const showTextureDropdown = ref(false);
+
+const currentTextureObj = computed(() => textures.value.find(t => t.name === selectedTexture.value));
+const currentTextureThumbnail = computed(() => currentTextureObj.value?.thumbnail);
+
+/** Active blob URL — must be revoked when changed to avoid memory leaks. */
+let activeBlobUrl: string | null = null;
+
+function revokeActiveBlobUrl() {
+  if (activeBlobUrl) {
+    URL.revokeObjectURL(activeBlobUrl);
+    activeBlobUrl = null;
+  }
+}
+
+/** Generate a small thumbnail (256px wide) from a blob URL or data URL */
+function generateThumbnailFromUrl(url: string, maxWidth = 256): Promise<string> {
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      const ratio = Math.min(maxWidth / img.width, maxWidth / img.height);
+      const w = Math.round(img.width * ratio);
+      const h = Math.round(img.height * ratio);
+      const canvas = document.createElement('canvas');
+      canvas.width = w;
+      canvas.height = h;
+      const ctx = canvas.getContext('2d');
+      if (!ctx) { resolve(''); return; }
+      ctx.drawImage(img, 0, 0, w, h);
+      resolve(canvas.toDataURL('image/jpeg', 0.8));
+    };
+    img.onerror = () => resolve('');
+    img.src = url;
+  });
+}
+
+/** Fetch the built-in colored_tiles.jpg asset as a Blob */
+async function fetchDefaultTextureBlob(): Promise<Blob> {
+  const resp = await fetch(coloredTilesUrl);
+  return resp.blob();
+}
+
+async function loadTextures() {
+  // 1. Migrate legacy localStorage data (if any)
+  await migrateFromLocalStorage();
+
+  // 2. Bootstrap with built-in texture if DB is empty
+  const count = await getTextureCount();
+  if (count === 0) {
+    const blob = await fetchDefaultTextureBlob();
+    const thumbUrl = URL.createObjectURL(blob);
+    const thumbnail = await generateThumbnailFromUrl(thumbUrl);
+    URL.revokeObjectURL(thumbUrl);
+    await saveTextureEntry('Colored Tiles', blob, thumbnail);
+  }
+
+  // 3. Load metadata list
+  textures.value = await getAllTextureEntries();
+
+  // 4. Restore persisted selection
+  const savedName = localStorage.getItem(TEXTURE_SELECTED_KEY);
+  if (savedName && textures.value.some(t => t.name === savedName)) {
+    selectedTexture.value = savedName;
+    textureName.value = savedName;
+  }
+}
+
+async function applyTextureToEngine(name: string, engine: import('../Engine').Engine) {
+  const blob = await getTextureBlob(name);
+  if (!blob) return;
+  revokeActiveBlobUrl();
+  activeBlobUrl = URL.createObjectURL(blob);
+  await engine.updateTileTexture(activeBlobUrl);
+}
+
+async function selectTexture(name: string) {
+  const tex = textures.value.find(t => t.name === name);
+  if (!tex) return;
+  selectedTexture.value = name;
+  textureName.value = tex.name;
+  showTextureDropdown.value = false;
+  // Persist selection
+  localStorage.setItem(TEXTURE_SELECTED_KEY, name);
+  // Apply to engine
+  if (props.engine) {
+    try {
+      await applyTextureToEngine(name, props.engine);
+    } catch (e) {
+      console.warn('Failed to update tile texture:', e);
+    }
+  }
+}
+
+function selectTextureFromDropdown(tex: TextureMetadata) {
+  selectTexture(tex.name);
+}
+
+async function deleteTexture() {
+  const name = textureName.value.trim();
+  if (!name) return;
+  if (name === 'Colored Tiles') {
+    window.alert('La texture par défaut ne peut pas être supprimée.');
+    return;
+  }
+  if (window.confirm(`Supprimer la texture "${name}" ? Cette action est irréversible.`)) {
+    const idx = textures.value.findIndex(t => t.name === name);
+    if (idx >= 0) {
+      textures.value.splice(idx, 1);
+      await deleteTextureEntry(name);
+      selectedTexture.value = 'Colored Tiles';
+      textureName.value = '';
+      // Revert to default texture
+      await selectTexture('Colored Tiles');
+    }
+  }
+}
+
+const textureFileInput = ref<HTMLInputElement | null>(null);
+function triggerImportTexture() {
+  textureFileInput.value?.click();
+}
+
+async function importTexture(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  // Validate file type
+  if (!file.type.startsWith('image/')) {
+    window.alert('Veuillez sélectionner un fichier image (JPG, PNG, WebP, etc.).');
+    input.value = '';
+    return;
+  }
+  // Validate dimensions via a temporary blob URL (no base64 needed)
+  const tmpUrl = URL.createObjectURL(file);
+  const img = new Image();
+  img.onload = async () => {
+    URL.revokeObjectURL(tmpUrl);
+    if (img.width > MAX_TEXTURE_SIZE || img.height > MAX_TEXTURE_SIZE) {
+      window.alert(`Image trop grande (${img.width}×${img.height}). Taille maximale : ${MAX_TEXTURE_SIZE}×${MAX_TEXTURE_SIZE}.`);
+      input.value = '';
+      return;
+    }
+    // Use filename (without extension) as default name
+    const baseName = file.name.replace(/\.[^/.]+$/, '') || 'Texture';
+    let name = baseName;
+    let counter = 1;
+    while (textures.value.some(t => t.name === name)) {
+      name = `${baseName} (${counter++})`;
+    }
+    // Generate thumbnail from the blob
+    const thumbUrl = URL.createObjectURL(file);
+    const thumbnail = await generateThumbnailFromUrl(thumbUrl);
+    URL.revokeObjectURL(thumbUrl);
+
+    // Store blob in IndexedDB
+    await saveTextureEntry(name, file, thumbnail);
+
+    // Refresh metadata list
+    textures.value = await getAllTextureEntries();
+
+    // Auto-select the newly imported texture
+    await selectTexture(name);
+    textureName.value = name;
+    input.value = '';
+  };
+  img.onerror = () => {
+    URL.revokeObjectURL(tmpUrl);
+    window.alert('Impossible de charger l\u2019image.');
+    input.value = '';
+  };
+  img.src = tmpUrl;
+}
+
+async function renameAndSaveTexture() {
+  const name = textureName.value.trim();
+  if (!name) return;
+  // If a texture is selected and we're renaming it
+  const current = textures.value.find(t => t.name === selectedTexture.value);
+  if (current && current.name !== name) {
+    // Check name collision
+    if (textures.value.some(t => t.name === name)) {
+      window.alert(`Une texture nommée "${name}" existe déjà.`);
+      return;
+    }
+    await renameTextureEntry(current.name, name);
+    // Refresh metadata list
+    textures.value = await getAllTextureEntries();
+    selectedTexture.value = name;
+    localStorage.setItem(TEXTURE_SELECTED_KEY, name);
+  }
+}
+
 </script>
 
 <template>
@@ -685,6 +1008,38 @@ function generateRandom() {
           <span style="font-family: monospace; min-width:5em; display:inline-block;">{{ angleDeg }}°</span>
         </span>
         <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="0" max="359" step="1" v-model.number="angleSlider" />
+      </div>
+
+      <hr class="section-sep"/>
+
+      <div class="mb-3">
+        <label class="label">Charger une localisation</label>
+        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applique uniquement la position (Cx, Cy, échelle, angle) d'un preset.</p>
+        <div class="dropdown" :class="{ 'is-active': showNavPresetDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth" @click="showNavPresetDropdown = !showNavPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-nav-presets" type="button">
+              <span style="display:flex; align-items:center; min-height:36px;">
+                <img v-if="currentNavPresetThumbnail" :src="currentNavPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ selectedNavPreset || 'Choisir un preset...' }}</span>
+                <span class="icon is-small" style="margin-left:5px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-nav-presets" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
+              <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
+                @click.prevent="selectNavPresetFromDropdown(preset)"
+                :class="{ 'is-active': selectedNavPreset === preset.name }"
+                style="display:flex; align-items:center; gap:0.75em;">
+                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ preset.name }}</span>
+              </a>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -872,6 +1227,39 @@ function generateRandom() {
 
       <hr class="section-sep"/>
 
+      <!-- Extract palette from a preset -->
+      <div class="mb-3">
+        <label class="label">Extraire depuis un preset</label>
+        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applique les couleurs, l'interpolation, la période et le décalage d'un preset.</p>
+        <div class="dropdown" :class="{ 'is-active': showPalettePresetDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth" @click="showPalettePresetDropdown = !showPalettePresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palette-presets" type="button">
+              <span style="display:flex; align-items:center; min-height:36px;">
+                <img v-if="currentPalettePresetThumbnail" :src="currentPalettePresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ selectedPalettePreset || 'Choisir un preset...' }}</span>
+                <span class="icon is-small" style="margin-left:5px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-palette-presets" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
+              <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
+                @click.prevent="selectPalettePresetFromDropdown(preset)"
+                :class="{ 'is-active': selectedPalettePreset === preset.name }"
+                style="display:flex; align-items:center; gap:0.75em;">
+                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ preset.name }}</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <hr class="section-sep"/>
+
       <div class="mb-3">
         <label class="label">Palettes enregistrées</label>
         <!-- Dropdown enrichie Bulma -->
@@ -938,6 +1326,40 @@ function generateRandom() {
 
     <!-- Performance/Graphics tab -->
     <div v-else-if="activeTab === 'performance'">
+
+      <!-- Extract rendering settings from a preset -->
+      <div class="mb-3">
+        <label class="label">Charger les réglages d'un preset</label>
+        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applique tous les paramètres sauf la localisation et les réglages de performance.</p>
+        <div class="dropdown" :class="{ 'is-active': showGraphicsPresetDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth" @click="showGraphicsPresetDropdown = !showGraphicsPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-graphics-presets" type="button">
+              <span style="display:flex; align-items:center; min-height:36px;">
+                <img v-if="currentGraphicsPresetThumbnail" :src="currentGraphicsPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ selectedGraphicsPreset || 'Choisir un preset...' }}</span>
+                <span class="icon is-small" style="margin-left:5px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-graphics-presets" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
+              <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
+                @click.prevent="selectGraphicsPresetFromDropdown(preset)"
+                :class="{ 'is-active': selectedGraphicsPreset === preset.name }"
+                style="display:flex; align-items:center; gap:0.75em;">
+                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ preset.name }}</span>
+              </a>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <hr class="section-sep"/>
+
       <div class="field">
         <label class="label">Mu</label>
         <div class="control" style="display: flex; align-items: center; gap: 0.5em;">
@@ -960,6 +1382,58 @@ function generateRandom() {
         </div>
         <span>{{ model.tessellationLevel }}</span>
       </div>
+
+      <!-- Tessellation Texture Library -->
+      <hr class="section-sep"/>
+      <div class="mb-3">
+        <label class="label">Texture de tessellation</label>
+        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Texture appliqu&eacute;e en mode Textur&eacute;. Max 4K.</p>
+        <div class="dropdown" :class="{ 'is-active': showTextureDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth" @click="showTextureDropdown = !showTextureDropdown" aria-haspopup="true" aria-controls="dropdown-menu-textures" type="button">
+              <span style="display:flex; align-items:center; min-height:36px;">
+                <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ selectedTexture || 'Choisir une texture...' }}</span>
+                <span class="icon is-small" style="margin-left:5px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-textures" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
+              <a v-for="tex in textures" :key="tex.name" class="dropdown-item"
+                @click.prevent="selectTextureFromDropdown(tex)"
+                :class="{ 'is-active': selectedTexture === tex.name }"
+                style="display:flex; align-items:center; gap:0.75em;">
+                <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="miniature"
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ tex.name }}</span>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="field is-grouped" style="margin-top:0.8em;">
+          <div class="control is-expanded">
+            <input class="input" v-model="textureName" type="text" placeholder="Nom..."
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+              @keyup.enter="renameAndSaveTexture"
+            />
+          </div>
+          <div class="control">
+            <button class="button is-warning is-small" @click="triggerImportTexture">
+              Importer
+            </button>
+            <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
+          </div>
+          <div class="control">
+            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || textureName === 'Colored Tiles'">Supprimer</button>
+          </div>
+        </div>
+      </div>
+      <hr class="section-sep"/>
+
       <div class="field">
         <label class="label">Options de rendu</label>
         <div class="buttons toggle-buttons">

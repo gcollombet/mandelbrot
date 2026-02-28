@@ -36,6 +36,7 @@ struct BrushUniforms {
   mu: f32,
   gridOffsetX: f32,
   gridOffsetY: f32,
+  minBrushStep: f32,    // minimum sentinel refinement step (0 = no limit)
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;
@@ -132,7 +133,15 @@ fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
     return -1.0;
   }
 
-  let next_step = max(1, step / 2);
+  // Clamp minimum refinement step during zoom (0 = no limit).
+  let minStep = i32(uni.minBrushStep);
+  let next_step = max(max(1, minStep), step / 2);
+
+  // If clamped step equals current step, stop refining — already at minimum.
+  if (next_step >= step) {
+    return s;
+  }
+
   let gx = i32(uni.gridOffsetX);
   let gy = i32(uni.gridOffsetY);
   let is_anchor = (((coord_out.x - gx) % next_step + next_step) % next_step == 0)

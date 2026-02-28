@@ -14,18 +14,42 @@ import type {InterpolationMode} from './Mandelbrot.ts'
 import coloredTilesUrl from './assets/colored_tiles.jpg'
 import goldUrl from './assets/gold.jpg'
 
-// Progressive refinement settings.
-// Start step for the sentinel grid; must be a power-of-two.
-// Examples: 16, 32, 64, 128...
+// ── Constants ────────────────────────────────────────────────────────
+
+// Number of r32float layers per texture array.
+const LAYER_COUNT = 7
+
+// Progressive refinement start step for the sentinel grid; must be a power-of-two.
 const SENTINEL_SEED_STEP_POW2 = 2048
 
 // During zoom reprojection the frozen snapshot covers visual gaps, so we
 // use a much smaller grid for faster fill.  Must be a power-of-two.
 const ZOOM_SENTINEL_SEED_STEP = 64
 
+// Minimum brush refinement step during zoom.  The sentinel grid will not
+// subdivide below this value while zooming, avoiding wasted GPU work on
+// pixels that will be rescaled away.  Must be a power-of-two.
+const ZOOM_MIN_BRUSH_STEP = 2
+
+// After zoom ends, the first recompute frame uses this step instead of
+// the full progressive grid — avoids overlaying coarser data on the
+// already-refined image while still being fast.  Must be a power-of-two.
+const POST_ZOOM_SEED_STEP = 32
+
 // Number of consecutive no-scale-change frames before we consider the zoom
-// truly stopped. Wheel events often have 1-2 frame gaps between ticks.
-const ZOOM_IDLE_GRACE_FRAMES = 4
+// truly stopped.  Wheel events often have 1-2 frame gaps between ticks.
+const ZOOM_IDLE_GRACE_FRAMES = 10
+
+// Adaptive iteration batch sizing — the batch auto-adjusts each frame
+// to target TARGET_FRAME_MS of GPU time.
+const MIN_BATCH_SIZE = 100
+const MAX_BATCH_SIZE = 10000
+const TARGET_FRAME_MS = 16
+
+// Orbit chunking: compute reference orbit incrementally to avoid blocking.
+// Each frame computes at most this many iterations of arbitrary-precision
+// math, then yields so the browser stays responsive.
+const ORBIT_CHUNK_SIZE = 10
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -73,9 +97,6 @@ export class Engine {
     ctx!: GPUCanvasContext
     format!: GPUTextureFormat
     mandelbrotNavigator!: MandelbrotNavigator
-
-    // Number of r32float layers per texture array
-    static readonly LAYER_COUNT = 7
 
     // resources
     rawTexture?: GPUTexture // texture "neutre" (A) — 7-layer r32float array
@@ -162,7 +183,7 @@ export class Engine {
 
     // ── Zoom reprojection state ──────────────────────────────────────
     /** Configurable magnification threshold before swapping (default ×2). */
-    zoomMagnificationThreshold = 32.0
+    zoomMagnificationThreshold = 16.0
     /** Current visual zoom factor: frozenScale / displayScale.
      *  For zoom-in: < 1 (frozen covers larger area), trending towards 1/threshold.
      *  For zoom-out: > 1 (frozen covers smaller area), trending towards threshold. */
@@ -187,20 +208,11 @@ export class Engine {
      *  wheel events can have gaps of 1-2 frames between ticks. */
     private zoomIdleFrames = 0
     /** Set to true for one frame after zoom reprojection ends, so the
-     *  post-zoom recompute uses seedStep=1 (full resolution, no progressive grid). */
+     *  post-zoom recompute uses POST_ZOOM_SEED_STEP instead of the full progressive grid. */
     private postZoomFullRecompute = false
 
     // Progressive iteration state – adaptive batch sizing
-    // The batch size auto-adjusts each frame to target ~16ms GPU time.
-    static readonly MIN_BATCH_SIZE = 100
-    static readonly MAX_BATCH_SIZE = 10000
-    static readonly TARGET_FRAME_MS = 16
-    private iterationBatchSize = 100
-
-    // Orbit chunking: compute reference orbit incrementally to avoid blocking.
-    // Each frame computes at most ORBIT_CHUNK_SIZE iterations of arbitrary-
-    // precision math, then yields so the browser stays responsive.
-    static readonly ORBIT_CHUNK_SIZE = 10
+    private iterationBatchSize = MIN_BATCH_SIZE
 
     // textures additionnelles
     tileTexture?: GPUTexture
@@ -386,7 +398,7 @@ export class Engine {
         })
 
         // 7 MRT targets for the layered r32float texture array
-        const mrtTargets: GPUColorTargetState[] = Array.from({ length: Engine.LAYER_COUNT }, () => ({ format: 'r32float' as GPUTextureFormat }))
+        const mrtTargets: GPUColorTargetState[] = Array.from({ length: LAYER_COUNT }, () => ({ format: 'r32float' as GPUTextureFormat }))
 
         this.pipelineBrush = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutBrush] }),
@@ -476,7 +488,7 @@ export class Engine {
         this.resolvedTexture?.destroy?.()
         this.frozenTexture?.destroy?.()
 
-        const layerCount = Engine.LAYER_COUNT
+        const layerCount = LAYER_COUNT
 
         // Helper: create a 7-layer r32float texture array + per-layer 2d views + full 2d-array view
         const createLayeredTexture = (label: string): {
@@ -663,10 +675,6 @@ export class Engine {
             this.webcamTexture?.closeWebcam()
         }
 
-        if (renderOptions.activateTessellation) {
-            this.needRender = true
-        }
-
         if (renderOptions.activateAnimate) {
             this.needRender = true
         }
@@ -824,7 +832,7 @@ export class Engine {
         // The WASM side resumes from where it left off; re-anchoring is handled
         // internally when the view centre drifts too far from the reference.
         const prtInfo = this.mandelbrotNavigator.compute_reference_orbit_chunk(
-            Engine.ORBIT_CHUNK_SIZE,
+            ORBIT_CHUNK_SIZE,
             maxIterations,
         )
         const availableIter = prtInfo.count
@@ -925,11 +933,11 @@ export class Engine {
         // During zoom reprojection the frozen snapshot covers visual gaps,
         // so use a small step (ZOOM_SENTINEL_SEED_STEP) for fast live-texture
         // fill without going all the way to step=1 (which would skip refinement).
-        // When zoom just ended (postZoomFullRecompute), use step=1 so we don't
-        // overlay a coarser progressive grid on the already-refined image.
+        // When zoom just ended (postZoomFullRecompute), use POST_ZOOM_SEED_STEP
+        // so we don't overlay a coarser progressive grid on the already-refined image.
         let seedStep: number
         if (this.postZoomFullRecompute) {
-            seedStep = 1
+            seedStep = POST_ZOOM_SEED_STEP
             this.postZoomFullRecompute = false
         } else if (this.zoomReprojectionActive) {
             seedStep = ZOOM_SENTINEL_SEED_STEP
@@ -985,6 +993,7 @@ export class Engine {
             this.previousMandelbrot.mu,
             gridOffsetX,
             gridOffsetY,
+            this.zoomReprojectionActive ? ZOOM_MIN_BRUSH_STEP : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
@@ -996,7 +1005,7 @@ export class Engine {
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
         if (this.needFreezeSnapshot && this.resolvedTexture && this.frozenTexture) {
-            const layerCount = Engine.LAYER_COUNT
+            const layerCount = LAYER_COUNT
             const texSize = this.neutralSize
             commandEncoder.copyTextureToTexture(
                 { texture: this.resolvedTexture },
@@ -1095,11 +1104,11 @@ export class Engine {
                 // Scale batch size proportionally: if frame took 32ms with batch=100,
                 // target 16ms -> new batch ≈ 100 * 16/32 = 50.
                 // Use exponential smoothing (alpha=0.3) to avoid oscillation.
-                const ratio = Engine.TARGET_FRAME_MS / elapsed
+                const ratio = TARGET_FRAME_MS / elapsed
                 const ideal = this.iterationBatchSize * ratio
                 this.iterationBatchSize = Math.round(
-                    Math.min(Engine.MAX_BATCH_SIZE,
-                        Math.max(Engine.MIN_BATCH_SIZE,
+                    Math.min(MAX_BATCH_SIZE,
+                        Math.max(MIN_BATCH_SIZE,
                             this.iterationBatchSize * 0.7 + ideal * 0.3
                         )
                     )
@@ -1287,6 +1296,36 @@ export class Engine {
             this._rafId = null
             return
         }
+    }
+
+    /**
+     * Replace the tile (tessellation) texture at runtime from a data URL or blob URL.
+     * The new texture replaces the current one and the color bind group is rebuilt.
+     * Max supported size: 4096×4096.
+     */
+    async updateTileTexture(url: string): Promise<void> {
+        const newTexture = await this._loadTexture(url)
+        this.tileTexture?.destroy?.()
+        this.tileTexture = newTexture
+        this.tileTextureView = this.tileTexture.createView()
+        // Rebuild the color bind group so it references the new texture view
+        if (this.pipelineColor && this.resolvedArrayView && this.frozenArrayView) {
+            const layout = this.pipelineColor.getBindGroupLayout(0)
+            this.bindGroupColor = this.device.createBindGroup({
+                layout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.uniformBufferColor! } },
+                    { binding: 1, resource: this.resolvedArrayView! },
+                    { binding: 2, resource: this.tileTextureView! },
+                    { binding: 3, resource: this.skyboxTextureView! },
+                    { binding: 4, resource: this.webcamTextureView! },
+                    { binding: 5, resource: this.paletteTextureView! },
+                    { binding: 6, resource: this.frozenArrayView! },
+                ],
+                label: 'Engine BindGroup Color',
+            })
+        }
+        this.needRender = true
     }
 
     // Méthode utilitaire pour charger une image et la convertir en GPUTexture

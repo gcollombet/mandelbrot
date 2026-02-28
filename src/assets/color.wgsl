@@ -57,6 +57,16 @@ fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
   return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
 }
 
+// Check whether a neutral-UV coordinate falls inside the screen-visible
+// rectangle (accounting for rotation).  Reverses the neutral UV mapping:
+//   uv → xy_neutral → local_rot → local   then tests |local| vs screen bounds.
+fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, angle: f32) -> bool {
+  let xy_neutral = (uv - vec2<f32>(0.5, 0.5)) * 2.0;
+  let local_rot  = xy_neutral * neutralExtent;
+  let local      = rotate(local_rot, -angle);   // inverse rotation
+  return abs(local.x) <= aspect && abs(local.y) <= 1.0;
+}
+
 fn cdiv(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
   let d = b.x * b.x + b.y * b.y;
   return vec2<f32>((a.x * b.x + a.y * b.y) / d,
@@ -89,14 +99,17 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
   return textureLoad(tex_, coord, 0).rgb;
 }
 
-fn palette(v: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
+fn palette(v: f32, v_smooth: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
+  // v_smooth: always smoothed iteration value (for tessellation displacement)
+  // v: iteration value respecting the smoothness setting (for palette lookup)
+  let deep_smooth = v_smooth * 2.0;
   let deep = v * 2.0;
 
-  let tessColor = tile_tessellation(tileTex, deep + dx, deep + dy, parameters.tessellationLevel);
+  let tessColor = tile_tessellation(tileTex, deep_smooth * 2.0 + dx, deep_smooth * 2.0 + dy, parameters.tessellationLevel);
   let webCamColor = tile_tessellation(
     webcamTex,
-    deep + dx + cos(parameters.time * 0.1),
-    deep + dy + sin(parameters.time * 0.15),
+    deep_smooth + dx + cos(parameters.time * 0.1),
+    deep_smooth + dy + sin(parameters.time * 0.15),
     parameters.tessellationLevel + sin(parameters.time * 0.05)
   );
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
@@ -202,6 +215,10 @@ fn colorize_pixel(
     return vec4<f32>(0.0, 0.0, 0.5, 1.0);
   }
 
+  // nu_smooth: always uses smoothed iterations (for tessellation displacement)
+  let nu_smooth = nu;
+
+  // nu: respects the smoothness setting (for palette lookup)
   if (parameters.activateSmoothness == 0.0) {
     nu = iter_val;
   }
@@ -216,7 +233,8 @@ fn colorize_pixel(
   let angle_der = atan2(d.y, d.x);
 
   let v = nu / 256.0;
-  var color = palette(v, z, angle_der, uv_neutral.x, uv_neutral.y);
+  let v_smooth = nu_smooth / 256.0;
+  var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y);
 
   return vec4<f32>(color, 1.0);
 }
@@ -254,17 +272,15 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   // UV transform:  uv_tex = (uv_neutral - 0.5) / texZoomFactor + 0.5
   //   This "zooms" into or out of the texture to match the display scale.
 
-  // Screen-visible rectangle in neutral UV space.
-  // The neutral texture is a square covering the screen diagonal; only the
-  // central rectangle is actually on screen.  When zoom UV rescaling maps a
-  // screen pixel to the rotation margins of the source texture, we must
-  // reject that sample (the margin data is coarse / not fully refined).
+  // Screen-visible rectangle check for source-texture UVs during zoom.
+  // The neutral texture is a square covering the screen diagonal; only a
+  // (possibly rotated) rectangle is on screen.  When zoom UV rescaling
+  // expands into the rotation margins we must reject those samples.
   //
-  //   In xy_neutral space the screen spans [-aspect/ne, +aspect/ne] × [-1/ne, +1/ne].
-  //   Converting to UV: uv = xy_neutral * 0.5 + 0.5, so half-extents are
-  //   aspect/(2*ne) and 1/(2*ne).
-  let screenHalfU = parameters.aspect / (2.0 * neutralExtent);
-  let screenHalfV = 1.0 / (2.0 * neutralExtent);
+  // To test: convert source UV back to screen-local space (undo the
+  // neutral mapping and rotation) and check |local.x| <= aspect, |local.y| <= 1.
+  let aspect = parameters.aspect;
+  let angle  = parameters.angle;
 
   let zf  = parameters.zoomFactor;
   let lzf = parameters.liveZoomFactor;
@@ -304,13 +320,11 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf + vec2<f32>(0.5, 0.5);
 
   // Check if the live UV is in bounds.  When lzf < 1 (zoom-in), the UV
-  // expands into the rotation margins — clamp to the screen rectangle.
+  // expands into the rotation margins — use rotation-aware screen test.
   // When lzf >= 1 (zoom-out), the UV shrinks — full texture bounds suffice.
-  let liveOffCenter = abs(uv_live - vec2<f32>(0.5, 0.5));
   var liveInBounds: bool;
   if (lzf < 1.0) {
-    liveInBounds = liveOffCenter.x <= screenHalfU
-                && liveOffCenter.y <= screenHalfV;
+    liveInBounds = isInsideScreen(uv_live, aspect, neutralExtent, angle);
   } else {
     liveInBounds = uv_live.x >= 0.0 && uv_live.x <= 1.0
                 && uv_live.y >= 0.0 && uv_live.y <= 1.0;
@@ -351,12 +365,11 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
                   - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
   // Reject frozen samples outside valid bounds.  When zf < 1 (zoom-out),
-  // the UV expands into the rotation margins — clamp to screen rectangle.
+  // the UV expands into the rotation margins — use rotation-aware screen test.
   // When zf >= 1 (zoom-in), the UV shrinks — full texture bounds suffice.
-  let frozenOffCenter = abs(uv_frozen - vec2<f32>(0.5, 0.5));
   var frozenOutOfBounds: bool;
   if (zf < 1.0) {
-    frozenOutOfBounds = frozenOffCenter.x > screenHalfU || frozenOffCenter.y > screenHalfV;
+    frozenOutOfBounds = !isInsideScreen(uv_frozen, aspect, neutralExtent, angle);
   } else {
     frozenOutOfBounds = uv_frozen.x < 0.0 || uv_frozen.x > 1.0
                      || uv_frozen.y < 0.0 || uv_frozen.y > 1.0;
