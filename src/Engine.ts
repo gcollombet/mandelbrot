@@ -21,7 +21,7 @@ const SENTINEL_SEED_STEP_POW2 = 2048
 
 // During zoom reprojection the frozen snapshot covers visual gaps, so we
 // use a much smaller grid for faster fill.  Must be a power-of-two.
-const ZOOM_SENTINEL_SEED_STEP = 8
+const ZOOM_SENTINEL_SEED_STEP = 64
 
 // Number of consecutive no-scale-change frames before we consider the zoom
 // truly stopped. Wheel events often have 1-2 frame gaps between ticks.
