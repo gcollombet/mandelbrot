@@ -19,6 +19,8 @@ struct Uniforms {
   zoomFactor: f32,       // frozenScale / displayScale
   zoomTarget: f32,
   liveZoomFactor: f32,   // liveScale / displayScale (for UV rescaling of live texture)
+  frozenShiftU: f32,     // cumulative pan shift of frozen texture (normalized UV)
+  frozenShiftV: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -321,7 +323,11 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 
   // Live texture has no data for this pixel — fall back to frozen snapshot.
   // The frozen texture is at frozenScale; rescale UV accordingly.
-  let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5);
+  // Also apply the cumulative pan shift so the frozen texture follows panning.
+  // The shift is subtracted (same convention as the reproject shader: "where
+  // does the data for this pixel come from in the frozen texture").
+  let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
+                  - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
   if (uv_frozen.x < 0.0 || uv_frozen.x > 1.0 || uv_frozen.y < 0.0 || uv_frozen.y > 1.0) {
     // Outside frozen texture bounds (new area revealed by zoom-out)

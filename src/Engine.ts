@@ -186,6 +186,9 @@ export class Engine {
      *  Used as a grace period before deactivating zoom reprojection, because
      *  wheel events can have gaps of 1-2 frames between ticks. */
     private zoomIdleFrames = 0
+    /** Set to true for one frame after zoom reprojection ends, so the
+     *  post-zoom recompute uses seedStep=1 (full resolution, no progressive grid). */
+    private postZoomFullRecompute = false
 
     // Progressive iteration state – adaptive batch sizing
     // The batch size auto-adjusts each frame to target ~16ms GPU time.
@@ -296,7 +299,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 20,
+            size: 4 * 22,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -697,7 +700,6 @@ export class Engine {
                 this.needFreezeSnapshot = true
                 this.clearHistoryNextFrame = true
                 this.zoomIdleFrames = 0
-                console.log(`[ZOOM] START cycle | zoomingIn=${this.zoomingIn} displayScale=${mandelbrot.scale} frozenScale=${this.frozenScale} liveScale=${this.liveScale} threshold=${this.zoomMagnificationThreshold}`)
             }
 
             // Reset idle counter whenever scale changes during an active cycle
@@ -721,8 +723,6 @@ export class Engine {
                     ? this.zoomFactor >= this.zoomMagnificationThreshold
                     : this.zoomFactor <= 1.0 / this.zoomMagnificationThreshold
 
-                console.log(`[ZOOM] frame | zoomFactor=${this.zoomFactor.toFixed(4)} liveZoomFactor=${this.liveZoomFactor.toFixed(4)} displayScale=${mandelbrot.scale} frozenScale=${this.frozenScale} liveScale=${this.liveScale} shouldSwap=${shouldSwap} idle=${this.zoomIdleFrames}`)
-
                 if (shouldSwap) {
                     // Swap: the live texture becomes the new frozen snapshot,
                     // start a new cycle at the next threshold step.
@@ -739,7 +739,6 @@ export class Engine {
                     this.zoomFactor = this.frozenScale / mandelbrot.scale
                     this.liveZoomFactor = this.liveScale / mandelbrot.scale
                     this.zoomIdleFrames = 0
-                    console.log(`[ZOOM] SWAP | new frozenScale=${this.frozenScale} new liveScale=${this.liveScale} new zoomFactor=${this.zoomFactor.toFixed(4)} new liveZoomFactor=${this.liveZoomFactor.toFixed(4)}`)
                 }
             } else if (!this.zoomReprojectionActive) {
                 this.zoomFactor = 1.0
@@ -762,7 +761,7 @@ export class Engine {
                     this.liveScale = 0
                     this.zoomIdleFrames = 0
                     this.clearHistoryNextFrame = true
-                    console.log(`[ZOOM] STOP | displayScale=${mandelbrot.scale}`)
+                    this.postZoomFullRecompute = true
                 }
             }
         }
@@ -802,6 +801,16 @@ export class Engine {
             this.zoomFactor,
             this.zoomTarget,
             this.liveZoomFactor,
+            // Frozen shift derived from the live texture's actual cumulative
+            // shift (in rounded texels at liveScale), rescaled to frozen UV.
+            // This ensures the frozen texture follows the exact same pan drift
+            // as the live texture, without independent accumulation errors.
+            (this.zoomReprojectionActive && this.frozenScale > 0)
+                ? this.cumulativeShiftX * (this.liveScale / this.frozenScale) / this.neutralSize
+                : 0,
+            (this.zoomReprojectionActive && this.frozenScale > 0)
+                ? -this.cumulativeShiftY * (this.liveScale / this.frozenScale) / this.neutralSize
+                : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -914,11 +923,19 @@ export class Engine {
 
         const aspect = (this.width / Math.max(1, this.height))
         // During zoom reprojection the frozen snapshot covers visual gaps,
-        // so use a small step (ZOOM_SENTINEL_SEED_STEP=2) for fast live-texture
+        // so use a small step (ZOOM_SENTINEL_SEED_STEP) for fast live-texture
         // fill without going all the way to step=1 (which would skip refinement).
-        const seedStep = this.zoomReprojectionActive
-            ? ZOOM_SENTINEL_SEED_STEP
-            : floorPowerOfTwo(SENTINEL_SEED_STEP_POW2)
+        // When zoom just ended (postZoomFullRecompute), use step=1 so we don't
+        // overlay a coarser progressive grid on the already-refined image.
+        let seedStep: number
+        if (this.postZoomFullRecompute) {
+            seedStep = 1
+            this.postZoomFullRecompute = false
+        } else if (this.zoomReprojectionActive) {
+            seedStep = ZOOM_SENTINEL_SEED_STEP
+        } else {
+            seedStep = floorPowerOfTwo(SENTINEL_SEED_STEP_POW2)
+        }
         const baseSentinel = seedStep
         const clearFlag = this.clearHistoryNextFrame ? 1 : 0
 
@@ -1206,6 +1223,8 @@ export class Engine {
         if (this.needRender) return true
         // Active zoom reprojection needs continuous rendering
         if (this.zoomReprojectionActive) return true
+        // A pending clear means we must run at least one more compute pass
+        if (this.clearHistoryNextFrame) return true
         // unfinishedPixelCount: -1 = not yet known (treat as "yes"),
         // 0 = fully converged, >0 = pixels still need work
         if (this.unfinishedPixelCount !== 0) {
