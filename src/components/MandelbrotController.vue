@@ -18,6 +18,9 @@ const props = defineProps<{
   antialiasLevel?: number,
   tessellationLevel?: number,
   shadingLevel?: number,
+  lightAngle?: number,
+  displacementAmount?: number,
+  specularPower?: number,
   palettePeriod?: number,
   paletteOffset?: number,
   activatePalette?: boolean,
@@ -310,6 +313,9 @@ onUnmounted(() => {
       :epsilon="props.epsilon"
       :antialiasLevel="props.antialiasLevel"
       :shadingLevel="props.shadingLevel"
+      :lightAngle="props.lightAngle"
+      :displacementAmount="props.displacementAmount"
+      :specularPower="props.specularPower"
       :palettePeriod="props.palettePeriod"
       :tessellationLevel="props.tessellationLevel"
       :colorStops="props.colorStops"

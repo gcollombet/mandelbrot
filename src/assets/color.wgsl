@@ -21,6 +21,9 @@ struct Uniforms {
   liveZoomFactor: f32,   // liveScale / displayScale (for UV rescaling of live texture)
   frozenShiftU: f32,     // cumulative pan shift of frozen texture (normalized UV)
   frozenShiftV: f32,
+  lightAngle: f32,       // light direction angle in radians (0 = right, pi/2 = top)
+  displacementAmount: f32, // tessellation displacement multiplier
+  specularPower: f32,    // specular exponent for Phong shading
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -105,7 +108,8 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> ve
   let deep_smooth = v_smooth * 2.0;
   let deep = v * 2.0;
 
-  let tessColor = tile_tessellation(tileTex, deep_smooth * 2.0 + dx, deep_smooth * 2.0 + dy, parameters.tessellationLevel);
+  let disp = parameters.displacementAmount;
+  let tessColor = tile_tessellation(tileTex, deep_smooth * 2.0 * disp + dx, deep_smooth * 2.0 * disp + dy, parameters.tessellationLevel);
   let webCamColor = tile_tessellation(
     webcamTex,
     deep_smooth + dx + cos(parameters.time * 0.1),
@@ -149,17 +153,20 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> ve
 
   if (parameters.activateShading == 1.0) {
     let normal = normalize(vec3<f32>(cos(d), sin(d), 0.5));
-    let lightDir = normalize(vec3<f32>(0.2, 0.3, 0.5));
-    let viewDir = normalize(vec3<f32>(0.7, 0.8, 0.5));
+    let la = parameters.lightAngle;
+    let lightDir = normalize(vec3<f32>(cos(la), sin(la), 0.5));
+    let viewDir = normalize(vec3<f32>(cos(la + 0.5), sin(la + 0.5), 0.5));
     let diff = max(dot(normal, lightDir), 0.0);
     let reflectDir = reflect(-lightDir, normal);
-    let specular = pow(max(dot(viewDir, reflectDir), 0.0), 4.0);
+    let specular = pow(max(dot(viewDir, reflectDir), 0.0), parameters.specularPower);
     // Raw Phong value: diff in [0,1], specular in [0,1]
     // Remap so that average lighting maps to 1.0, shadows go below, highlights above
     let raw = 0.4 * diff + 0.6 * specular;
     // raw is roughly 0..1 with average ~0.3-0.5
     // Map to a shading factor centered around 1.0: range ~[0.8, 2.0]
-    var shading = 0.8 + 1.2 * raw;
+    // shadingLevel controls the intensity of the relief effect (1.0 = default)
+    let brightness = parameters.shadingLevel;
+    var shading = 1.0 - brightness * 0.2 + brightness * 1.2 * raw;
 
     if (parameters.activateSkybox == 1.0) {
       let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0));

@@ -7,6 +7,9 @@ export interface MandelbrotParams {
     activateZebra: boolean;
     tessellationLevel: number;
     shadingLevel: number;
+    lightAngle: number;
+    displacementAmount: number;
+    specularPower: number;
     scale: string;
     cx: string;
     cy: string;

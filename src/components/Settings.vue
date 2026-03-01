@@ -39,6 +39,9 @@ const model =  defineModel<MandelbrotParams>({
     antialiasLevel: 1,
     tessellationLevel: 2,
     shadingLevel: 1,
+    lightAngle: 3.927,
+    displacementAmount: 1,
+    specularPower: 4,
     activatePalette: true,
     activateSkybox: false,
     activateTessellation: false,
@@ -386,6 +389,14 @@ const maxIterMultSlider = computed({
   get: () => Math.log10(model.value.maxIterationMultiplier ?? 1.0),
   set: (val: number) => {
     model.value.maxIterationMultiplier = Number(Math.pow(10, val).toPrecision(3));
+  }
+});
+
+// Slider light angle : degrees (0-360) <-> radians
+const lightAngleSlider = computed({
+  get: () => (((model.value.lightAngle ?? 3.927) * 180 / Math.PI) % 360 + 360) % 360,
+  set: (deg: number) => {
+    model.value.lightAngle = (deg % 360) * Math.PI / 180;
   }
 });
 
@@ -1325,12 +1336,12 @@ async function renameAndSaveTexture() {
     </div>
 
     <!-- Performance/Graphics tab -->
-    <div v-else-if="activeTab === 'performance'">
+    <div v-else-if="activeTab === 'performance'" class="graphics-tab">
 
       <!-- Extract rendering settings from a preset -->
       <div class="mb-3">
-        <label class="label">Charger les réglages d'un preset</label>
-        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applique tous les paramètres sauf la localisation et les réglages de performance.</p>
+        <label class="gfx-section-title">Charger les r&eacute;glages d'un preset</label>
+        <p class="gfx-hint">Applique tous les param&egrave;tres sauf la localisation et la performance.</p>
         <div class="dropdown" :class="{ 'is-active': showGraphicsPresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showGraphicsPresetDropdown = !showGraphicsPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-graphics-presets" type="button">
@@ -1360,71 +1371,123 @@ async function renameAndSaveTexture() {
 
       <hr class="section-sep"/>
 
-      <div class="field">
-        <label class="label">Mu</label>
-        <div class="control" style="display: flex; align-items: center; gap: 0.5em;">
-          <input class="slider is-fullwidth" style="flex: 1;" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
-          <button class="button is-small is-light" @click="model.mu = 4" title="Mu = 4">4</button>
-        </div>
-        <span>{{ (model.mu ?? 1.0).toFixed(1) }}</span>
-      </div>
-      <div class="field">
-        <label class="label">Epsilon</label>
-        <div class="control">
-          <input class="slider is-fullwidth" type="range" min="-12" max="0" step="0.01" v-model="epsilonSlider" />
-        </div>
-        <span>{{ (model.epsilon ?? 1e-8).toExponential(2) }}</span>
-      </div>
-      <div class="field">
-        <label class="label">Texture</label>
-        <div class="control">
-          <input class="slider is-fullwidth" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
-        </div>
-        <span>{{ model.tessellationLevel }}</span>
+      <!-- ═══ OPTIONS DE RENDU ═══ -->
+      <label class="gfx-section-title">Options de rendu</label>
+      <div class="buttons toggle-buttons" style="margin-bottom: 0.8em;">
+        <button class="button is-small"
+          :class="model.activateShading ? 'is-link' : 'is-light'"
+          @click="model.activateShading = !model.activateShading; if (!model.activateShading) { model.activateSkybox = false; }">
+          Relief
+        </button>
+        <button class="button is-small"
+          :class="model.activatePalette ? 'is-link' : 'is-light'"
+          @click="model.activatePalette = !model.activatePalette">
+          Palette
+        </button>
+        <button class="button is-small"
+          :class="model.activateSmoothness ? 'is-link' : 'is-light'"
+          @click="model.activateSmoothness = !model.activateSmoothness">
+          Smoothness
+        </button>
+        <button class="button is-small"
+          :class="model.activateTessellation ? 'is-link' : 'is-light'"
+          @click="model.activateTessellation = !model.activateTessellation">
+          Textur&eacute;
+        </button>
+        <button class="button is-small"
+          :class="model.activateSkybox ? 'is-link' : 'is-light'"
+          @click="model.activateSkybox = !model.activateSkybox; if (model.activateSkybox) { model.activateShading = true; }">
+          M&eacute;talis&eacute;
+        </button>
+        <button class="button is-small"
+          :class="model.activateWebcam ? 'is-link' : 'is-light'"
+          @click="model.activateWebcam = !model.activateWebcam">
+          Webcam
+        </button>
+        <button class="button is-small"
+          :class="model.activateZebra ? 'is-link' : 'is-light'"
+          @click="model.activateZebra = !model.activateZebra">
+          Zebra
+        </button>
+        <button class="button is-small"
+          :class="model.activateAnimate ? 'is-link' : 'is-light'"
+          @click="model.activateAnimate = !model.activateAnimate">
+          Animate
+        </button>
       </div>
 
-      <!-- Tessellation Texture Library -->
       <hr class="section-sep"/>
-      <div class="mb-3">
-        <label class="label">Texture de tessellation</label>
-        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Texture appliqu&eacute;e en mode Textur&eacute;. Max 4K.</p>
+
+      <!-- ═══ ÉCLAIRAGE ═══ -->
+      <label class="gfx-section-title">&Eacute;clairage</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Direction</span>
+        <input class="slider" type="range" min="0" max="359" step="1" v-model.number="lightAngleSlider" />
+        <span class="gfx-slider-value">{{ Math.round(lightAngleSlider) }}&deg;</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Brillance</span>
+        <input class="slider" type="range" min="0" max="3" step="0.05" v-model.number="model.shadingLevel" />
+        <span class="gfx-slider-value">&times;{{ (model.shadingLevel ?? 1.0).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Sp&eacute;culaire</span>
+        <input class="slider" type="range" min="1" max="64" step="0.5" v-model.number="model.specularPower" />
+        <span class="gfx-slider-value">{{ (model.specularPower ?? 4).toFixed(1) }}</span>
+      </div>
+
+      <hr class="section-sep"/>
+
+      <!-- ═══ TEXTURE ═══ -->
+      <label class="gfx-section-title">Texture</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">R&eacute;p&eacute;tition</span>
+        <input class="slider" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
+        <span class="gfx-slider-value">{{ model.tessellationLevel }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">D&eacute;placement</span>
+        <input class="slider" type="range" min="0" max="10" step="0.1" v-model.number="model.displacementAmount" />
+        <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(1) }}</span>
+      </div>
+
+      <!-- Tessellation Texture Library (compact) -->
+      <div class="mb-3" style="margin-top: 0.6em;">
         <div class="dropdown" :class="{ 'is-active': showTextureDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth" @click="showTextureDropdown = !showTextureDropdown" aria-haspopup="true" aria-controls="dropdown-menu-textures" type="button">
-              <span style="display:flex; align-items:center; min-height:36px;">
-                <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ selectedTexture || 'Choisir une texture...' }}</span>
-                <span class="icon is-small" style="margin-left:5px;">
+            <button class="button is-fullwidth is-small" @click="showTextureDropdown = !showTextureDropdown" aria-haspopup="true" aria-controls="dropdown-menu-textures" type="button">
+              <span style="display:flex; align-items:center; min-height:28px;">
+                <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="miniature" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedTexture || 'Texture...' }}</span>
+                <span class="icon is-small" style="margin-left:4px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
               </span>
             </button>
           </div>
           <div class="dropdown-menu" id="dropdown-menu-textures" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
+            <div class="dropdown-content" style="max-height:350px; overflow-y:auto;">
               <a v-for="tex in textures" :key="tex.name" class="dropdown-item"
                 @click.prevent="selectTextureFromDropdown(tex)"
                 :class="{ 'is-active': selectedTexture === tex.name }"
-                style="display:flex; align-items:center; gap:0.75em;">
+                style="display:flex; align-items:center; gap:0.5em;">
                 <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="miniature"
-                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ tex.name }}</span>
+                  style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
               </a>
             </div>
           </div>
         </div>
-        <div class="field is-grouped" style="margin-top:0.8em;">
+        <div class="field is-grouped" style="margin-top:0.5em;">
           <div class="control is-expanded">
-            <input class="input" v-model="textureName" type="text" placeholder="Nom..."
+            <input class="input is-small" v-model="textureName" type="text" placeholder="Nom..."
               @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
               @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
               @keyup.enter="renameAndSaveTexture"
             />
           </div>
           <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportTexture">
-              Importer
-            </button>
+            <button class="button is-warning is-small" @click="triggerImportTexture">Importer</button>
             <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
           </div>
           <div class="control">
@@ -1432,64 +1495,36 @@ async function renameAndSaveTexture() {
           </div>
         </div>
       </div>
+
       <hr class="section-sep"/>
 
-      <div class="field">
-        <label class="label">Options de rendu</label>
-        <div class="buttons toggle-buttons">
-          <button class="button is-small"
-            :class="model.activateShading ? 'is-link' : 'is-light'"
-            @click="model.activateShading = !model.activateShading; if (!model.activateShading) { model.activateSkybox = false; }">
-            Relief
-          </button>
-          <button class="button is-small"
-            :class="model.activatePalette ? 'is-link' : 'is-light'"
-            @click="model.activatePalette = !model.activatePalette">
-            Palette
-          </button>
-          <button class="button is-small"
-            :class="model.activateSmoothness ? 'is-link' : 'is-light'"
-            @click="model.activateSmoothness = !model.activateSmoothness">
-            Smoothness
-          </button>
-          <button class="button is-small"
-            :class="model.activateTessellation ? 'is-link' : 'is-light'"
-            @click="model.activateTessellation = !model.activateTessellation">
-            Textur&eacute;
-          </button>
-          <button class="button is-small"
-            :class="model.activateSkybox ? 'is-link' : 'is-light'"
-            @click="model.activateSkybox = !model.activateSkybox; if (model.activateSkybox) { model.activateShading = true; }">
-            Metalis&eacute;
-          </button>
-          <button class="button is-small"
-            :class="model.activateWebcam ? 'is-link' : 'is-light'"
-            @click="model.activateWebcam = !model.activateWebcam">
-            Webcam
-          </button>
-          <button class="button is-small"
-            :class="model.activateZebra ? 'is-link' : 'is-light'"
-            @click="model.activateZebra = !model.activateZebra">
-            Zebra
-          </button>
-          <button class="button is-small"
-            :class="model.activateAnimate ? 'is-link' : 'is-light'"
-            @click="model.activateAnimate = !model.activateAnimate">
-            Animate
-          </button>
-        </div>
+      <!-- ═══ CALCUL ═══ -->
+      <label class="gfx-section-title">Calcul</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Mu</span>
+        <input class="slider" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
+        <span class="gfx-slider-value">{{ (model.mu ?? 1.0).toFixed(1) }}</span>
+        <button class="button is-small is-light" style="padding: 0 6px; height: 22px; font-size: 0.75em;" @click="model.mu = 4" title="Mu = 4">4</button>
       </div>
-      <div class="field">
-        <label class="label">R&eacute;solution (DPR &times; {{ model.dprMultiplier?.toFixed(3) ?? '1.000' }})</label>
-        <div class="control">
-          <input class="slider is-fullwidth" type="range" min="0.125" max="2" step="0.125" v-model.number="model.dprMultiplier" />
-        </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Epsilon</span>
+        <input class="slider" type="range" min="-12" max="0" step="0.01" v-model="epsilonSlider" />
+        <span class="gfx-slider-value">{{ (model.epsilon ?? 1e-8).toExponential(1) }}</span>
       </div>
-      <div class="field">
-        <label class="label">It&eacute;rations (&times; {{ (model.maxIterationMultiplier ?? 1.0).toPrecision(3) }})</label>
-        <div class="control">
-          <input class="slider is-fullwidth" type="range" min="-2" max="1" step="0.01" v-model="maxIterMultSlider" />
-        </div>
+
+      <hr class="section-sep"/>
+
+      <!-- ═══ PERFORMANCE ═══ -->
+      <label class="gfx-section-title">Performance</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">R&eacute;solution</span>
+        <input class="slider" type="range" min="0.125" max="2" step="0.125" v-model.number="model.dprMultiplier" />
+        <span class="gfx-slider-value">DPR &times;{{ model.dprMultiplier?.toFixed(2) ?? '1.00' }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">It&eacute;rations</span>
+        <input class="slider" type="range" min="-2" max="1" step="0.01" v-model="maxIterMultSlider" />
+        <span class="gfx-slider-value">&times;{{ (model.maxIterationMultiplier ?? 1.0).toPrecision(3) }}</span>
       </div>
     </div>
   </div>
@@ -1537,5 +1572,60 @@ async function renameAndSaveTexture() {
 .toggle-buttons .button {
   margin-bottom: 0 !important;
   transition: background 0.15s, color 0.15s, box-shadow 0.15s;
+}
+
+/* ── Force dark text across all tabs ── */
+:deep(.label),
+:deep(.checkbox),
+:deep(.help),
+:deep(.control-label),
+:deep(.title),
+:deep(.subtitle) {
+  color: #111 !important;
+}
+
+/* ── Graphics tab layout ── */
+.graphics-tab {
+  color: #111;
+}
+.gfx-section-title {
+  display: block;
+  font-weight: 700;
+  font-size: 0.92em;
+  color: #111;
+  margin-bottom: 0.35em;
+  letter-spacing: 0.02em;
+  text-transform: uppercase;
+}
+.gfx-hint {
+  font-size: 0.82em;
+  color: #555;
+  margin-bottom: 0.4em;
+  line-height: 1.3;
+}
+.gfx-slider-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  margin-bottom: 0.35em;
+}
+.gfx-slider-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.gfx-slider-label {
+  flex: 0 0 auto;
+  min-width: 5.5em;
+  font-size: 0.88em;
+  color: #222;
+  font-weight: 500;
+}
+.gfx-slider-value {
+  flex: 0 0 auto;
+  min-width: 4em;
+  text-align: right;
+  font-size: 0.84em;
+  color: #333;
+  font-variant-numeric: tabular-nums;
 }
 </style>

@@ -117,6 +117,9 @@ const mandelbrotParams = ref<MandelbrotParams>({
   palettePeriod: 1,
   paletteOffset: 0,
   shadingLevel: 1,
+  lightAngle: 3.927,
+  displacementAmount: 1,
+  specularPower: 4,
   tessellationLevel: 2,
   epsilon: 0.00001,
   colorStops: [
@@ -406,6 +409,9 @@ const shortcutLabels = computed(() => {
       v-model:mobileNavExpanded="mobileNavExpanded"
       :mu="mandelbrotParams.mu"
       :shadingLevel="mandelbrotParams.shadingLevel"
+      :lightAngle="mandelbrotParams.lightAngle"
+      :displacementAmount="mandelbrotParams.displacementAmount"
+      :specularPower="mandelbrotParams.specularPower"
       :antialiasLevel="mandelbrotParams.antialiasLevel"
       :tessellationLevel="mandelbrotParams.tessellationLevel"
       :epsilon="mandelbrotParams.epsilon"

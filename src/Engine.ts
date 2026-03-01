@@ -72,6 +72,9 @@ export type RenderOptions = {
     activateAnimate: boolean,
     tessellationLevel: number,
     shadingLevel: number,
+    lightAngle: number,
+    displacementAmount: number,
+    specularPower: number,
 }
 
 export type Mandelbrot = {
@@ -311,7 +314,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 22,
+            size: 4 * 28,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -819,6 +822,9 @@ export class Engine {
             (this.zoomReprojectionActive && this.frozenScale > 0)
                 ? -this.cumulativeShiftY * (this.liveScale / this.frozenScale) / this.neutralSize
                 : 0,
+            renderOptions.lightAngle,
+            renderOptions.displacementAmount,
+            renderOptions.specularPower,
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
