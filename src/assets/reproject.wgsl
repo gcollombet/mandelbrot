@@ -36,8 +36,7 @@ struct BrushUniforms {
   mu: f32,
   gridOffsetX: f32,
   gridOffsetY: f32,
-  minBrushStep: f32,    // minimum sentinel refinement step (0 = no limit)
-  allowRefinement: f32, // 1.0 = refine sentinels normally, 0.0 = freeze grid (GPU under pressure)
+  minBrushStep: f32,    // minimum sentinel refinement step (0 = no limit, dynamically set by CPU)
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;
@@ -134,15 +133,10 @@ fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
     return -1.0;
   }
 
-  // Adaptive refinement gating: when the GPU is under pressure the CPU
-  // sets allowRefinement to 0, freezing the sentinel grid at its current
-  // resolution.  This prevents a 4× pixel-count spike at each step
-  // transition, giving the iteration-batch controller time to adapt.
-  if (uni.allowRefinement < 0.5) {
-    return s;
-  }
-
-  // Clamp minimum refinement step during zoom (0 = no limit).
+  // Dynamic minimum step: the CPU computes minBrushStep based on GPU load.
+  // When the GPU is fast, minBrushStep = 0 (no floor, full refinement).
+  // Under pressure, minBrushStep rises (e.g. 8, 16, 32, 64) to block
+  // finer levels from refining, preventing pixel-count spikes.
   let minStep = i32(uni.minBrushStep);
   let next_step = max(max(1, minStep), step / 2);
 

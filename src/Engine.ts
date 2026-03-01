@@ -26,11 +26,6 @@ const SENTINEL_SEED_STEP_POW2 = 2048
 // use a much smaller grid for faster fill.  Must be a power-of-two.
 const ZOOM_SENTINEL_SEED_STEP = 64
 
-// Minimum brush refinement step during zoom.  The sentinel grid will not
-// subdivide below this value while zooming, avoiding wasted GPU work on
-// pixels that will be rescaled away.  Must be a power-of-two.
-const ZOOM_MIN_BRUSH_STEP = 2
-
 // After zoom ends, the first recompute frame uses this step instead of
 // the full progressive grid — avoids overlaying coarser data on the
 // already-refined image while still being fast.  Must be a power-of-two.
@@ -46,13 +41,16 @@ const MIN_BATCH_SIZE = 100
 const MAX_BATCH_SIZE = 10000
 const TARGET_FRAME_MS = 16
 
-// Adaptive refinement gating: sentinel grid refinement (halving the step
-// each frame) is paused when the smoothed GPU time exceeds this threshold.
-// This prevents the pixel count from quadrupling (step N → N/2) while the
-// GPU is already struggling, giving the batch-size controller time to adapt.
-const REFINEMENT_GATE_MS = TARGET_FRAME_MS * 1.5
 // EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
 const GPU_TIME_EMA_ALPHA = 0.25
+
+// Adaptive minBrushStep: number of frames to wait after each descent before
+// allowing the next one.  This gives the batch-size controller time to adapt
+// to the ×4 pixel-count increase at each step transition.
+const MIN_BRUSH_STEP_COOLDOWN_FRAMES = 15
+// Threshold above which we consider the GPU "under pressure" and may raise
+// minBrushStep immediately (no cooldown for upward moves).
+const MIN_BRUSH_STEP_PRESSURE_MS = TARGET_FRAME_MS * 1.5
 
 // Orbit chunking: compute reference orbit incrementally to avoid blocking.
 // Each frame computes at most this many iterations of arbitrary-precision
@@ -159,10 +157,13 @@ export class Engine {
     isRendering = false
     /** Last measured GPU frame time in milliseconds. */
     gpuFrameTimeMs = 0
-    /** Exponentially smoothed GPU frame time (for adaptive refinement gating). */
+    /** Exponentially smoothed GPU frame time (for adaptive minBrushStep). */
     smoothedGpuTimeMs = 0
-    /** Whether refinement was gated (blocked) on the previous frame. */
-    private refinementWasGated = false
+    /** Current minimum sentinel refinement step (0 = no floor). Stateful — only
+     *  descends one tier at a time with a cooldown, but rises immediately. */
+    private currentMinBrushStep = 0
+    /** Frames remaining before the next minBrushStep descent is allowed. */
+    private minBrushStepCooldown = 0
     private _fpsFrameCount = 0
     private _fpsLastTime = 0
 
@@ -331,7 +332,7 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 12, // 10 floats + padding to 16-byte alignment (48 bytes)
+            size: 4 * 12, // 11 floats + padding to 16-byte alignment (48 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
@@ -1000,29 +1001,57 @@ export class Engine {
         const gridOffsetX = ((this.cumulativeShiftX % baseSentinel) + baseSentinel) % baseSentinel
         const gridOffsetY = ((this.cumulativeShiftY % baseSentinel) + baseSentinel) % baseSentinel
 
-        // Adaptive refinement gating: pause sentinel halving when the GPU
-        // is under pressure, preventing a 4× pixel-count spike at step
-        // transitions.  Always allow on the very first frame (smoothed == 0)
-        // and when clearing history (the grid needs seeding).
-        // During active zoom reprojection the ZOOM_MIN_BRUSH_STEP floor
-        // already caps spatial resolution, so the gate is not needed —
-        // blocking refinement would starve the live texture.
-        const gateOpen =
-            this.clearHistoryNextFrame
-            || this.smoothedGpuTimeMs === 0
-            || this.zoomReprojectionActive
-            || this.smoothedGpuTimeMs < REFINEMENT_GATE_MS
+        // ── Dynamic minBrushStep: adaptive refinement throttling ──────
+        // Stateful step floor that controls how deep sentinel refinement goes.
+        //
+        // UPWARD (pressure spike): immediate.  If the GPU is struggling,
+        // raise minBrushStep right away to stop bleeding pixels.
+        //
+        // DOWNWARD (convergence): one tier at a time with a cooldown.
+        // After each descent (e.g. 32→16), wait MIN_BRUSH_STEP_COOLDOWN_FRAMES
+        // so the batch controller can absorb the ×4 pixel increase.
+        // This guarantees convergence even on slow GPUs — we always
+        // eventually reach minBrushStep = 0, just more slowly.
+        //
+        // On clearHistory: reset to 0 (fresh grid needs full seeding).
+        if (this.clearHistoryNextFrame) {
+            this.currentMinBrushStep = 0
+            this.minBrushStepCooldown = 0
+        } else if (this.smoothedGpuTimeMs > 0) {
+            const t = this.smoothedGpuTimeMs
 
-        // When the gate reopens after being closed, the next refinement step
-        // will ~4× the pixel count.  Pre-emptively drop the iteration batch
-        // size to MIN so the combined cost stays manageable.  The batch
-        // controller will ramp it back up over the following frames.
-        if (gateOpen && this.refinementWasGated) {
-            this.iterationBatchSize = MIN_BATCH_SIZE
+            // Compute the "desired" floor based on current GPU pressure.
+            // This is the level we'd jump to if we had no cooldown.
+            let desired = 0
+            if (t >= TARGET_FRAME_MS * 3) {
+                desired = 64
+            } else if (t >= TARGET_FRAME_MS * 2) {
+                desired = 32
+            } else if (t >= MIN_BRUSH_STEP_PRESSURE_MS) {
+                desired = 16
+            } else if (t >= TARGET_FRAME_MS * 1.2) {
+                desired = 8
+            }
+
+            if (desired > this.currentMinBrushStep) {
+                // Upward: immediate — GPU is under pressure, stop the bleeding.
+                this.currentMinBrushStep = desired
+                this.minBrushStepCooldown = MIN_BRUSH_STEP_COOLDOWN_FRAMES
+            } else if (desired < this.currentMinBrushStep) {
+                // Downward: one tier at a time with cooldown.
+                if (this.minBrushStepCooldown > 0) {
+                    this.minBrushStepCooldown--
+                } else {
+                    // Descend one tier: halve the current floor.
+                    // 64→32→16→8→4→2→1→0
+                    this.currentMinBrushStep = this.currentMinBrushStep <= 1
+                        ? 0
+                        : this.currentMinBrushStep >> 1
+                    this.minBrushStepCooldown = MIN_BRUSH_STEP_COOLDOWN_FRAMES
+                }
+            }
+            // desired === current: hold, no cooldown change
         }
-        this.refinementWasGated = !gateOpen
-
-        const allowRefinement = gateOpen ? 1 : 0
 
         const brushUniforms = new Float32Array([
             aspect,
@@ -1035,8 +1064,7 @@ export class Engine {
             this.previousMandelbrot.mu,
             gridOffsetX,
             gridOffsetY,
-            this.zoomReprojectionActive ? ZOOM_MIN_BRUSH_STEP : 0,
-            allowRefinement,
+            this.currentMinBrushStep,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
