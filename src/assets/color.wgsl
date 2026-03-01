@@ -202,8 +202,23 @@ fn colorize_pixel(
   }
 
   // Budget exhausted: iter > 0 but z hasn't escaped (|z|² < mu).
+  // Show a dimmed approximate color based on the partial iteration count,
+  // giving a preview while computation continues (especially during orbit building).
   if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
-    return vec4<f32>(0.0, 0.5, 0.0, 1.0);
+    // Use iter_val as a rough "fake escape" to generate approximate colors.
+    // Dim the result to visually distinguish from fully converged pixels.
+    let z_sq = zx_val * zx_val + zy_val * zy_val;
+    let fake_log = max(log(z_sq + 1.0), 0.001);
+    let mu_approx = clamp(1.0 - log(fake_log / log(parameters.mu)) / log(2.0), 0.0, 1.0);
+    let nu = iter_val + mu_approx;
+    let v = nu / 256.0;
+    let z = vec2<f32>(zx_val, zy_val);
+    let der = vec2<f32>(der_x, der_y);
+    let d = cdiv(der, z);
+    let angle_der = atan2(d.y, d.x);
+    var color = palette(v, v, z, angle_der, uv_neutral.x, uv_neutral.y);
+    // Dim to 40% to signal "still computing"
+    return vec4<f32>(color * 0.4, 1.0);
   }
 
   // Inside the set: iter_val == 0. Solid black.

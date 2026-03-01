@@ -41,7 +41,7 @@ struct Mandelbrot {
   antialiasLevel: f32,
   iterationOffset: f32, // iterations already completed in previous passes
   globalMaxIter: f32,   // total iteration target for the current view
-  pad2: f32,
+  orbitComplete: f32,   // 1.0 = orbit fully built, 0.0 = still building
 };
 
 @group(0) @binding(0) var<uniform> mandelbrot: Mandelbrot;
@@ -182,9 +182,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   // Not escaped, not inside — budget exhausted for this pass.
   let globalMax = mandelbrot.globalMaxIter;
 
-  if (total_iter >= globalMax) {
-    // Reached the global iteration target without escaping.
-    // Mark as "inside for now" (iter = 0).
+  if (total_iter >= globalMax && mandelbrot.orbitComplete >= 0.5) {
+    // Reached the global iteration target without escaping AND the orbit
+    // is fully built.  Mark as "inside for now" (iter = 0).
     out.iter      = pack(0.0);
     out.unused1   = pack(0.0);
     out.zx        = pack(z.x);
@@ -220,6 +220,22 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let prev_zx   = loadLayer(coord, 2);
   let prev_zy   = loadLayer(coord, 3);
   let prev_ref_i = loadLayer(coord, 6);
+
+  // When the reference orbit has no data yet (globalMaxIter == 0),
+  // pass through all pixels unchanged — including sentinels.
+  // This avoids marking uncomputed pixels as "inside the set" (iter = 0)
+  // when no orbit steps are available to iterate.
+  if (mandelbrot.globalMaxIter <= 0.0) {
+    var out: FragOut;
+    out.iter      = pack(prev_iter);
+    out.unused1   = pack(0.0);
+    out.zx        = pack(prev_zx);
+    out.zy        = pack(prev_zy);
+    out.dzx       = pack(loadLayer(coord, 4));
+    out.dzy       = pack(loadLayer(coord, 5));
+    out.ref_i     = pack(loadLayer(coord, 6));
+    return out;
+  }
 
   // Determine pixel state (iter-only convention):
   //   iter == -1                     : sentinel, needs fresh computation

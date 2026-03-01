@@ -12,6 +12,7 @@ const fps = ref(0);
 const isRendering = ref(false);
 const gpuFrameTimeMs = ref(0);
 const unfinishedPixels = ref(-1);
+const activePixels = ref(-1);
 const totalPixels = ref(0);
 const batchSize = ref(0);
 
@@ -19,6 +20,8 @@ const batchSize = ref(0);
 const HISTORY_LENGTH = 200;
 const unfinishedHistory: number[] = [];
 const fpsHistory: number[] = [];
+const activePixelsHistory: number[] = [];
+const opsHistory: number[] = [];
 
 // --- Canvas ref ---
 const graphCanvas = ref<HTMLCanvasElement | null>(null);
@@ -33,6 +36,7 @@ function poll() {
   isRendering.value = e.isRendering ?? false;
   gpuFrameTimeMs.value = e.gpuFrameTimeMs ?? 0;
   unfinishedPixels.value = e.unfinishedPixelCount ?? -1;
+  activePixels.value = e.activePixelCount ?? -1;
   const ns = e.neutralSize ?? 0;
   totalPixels.value = ns * ns;
   batchSize.value = typeof e.getIterationBatchSize === 'function' ? e.getIterationBatchSize() : 0;
@@ -42,6 +46,11 @@ function poll() {
   if (unfinishedHistory.length > HISTORY_LENGTH) unfinishedHistory.shift();
   fpsHistory.push(fps.value);
   if (fpsHistory.length > HISTORY_LENGTH) fpsHistory.shift();
+  activePixelsHistory.push(activePixels.value >= 0 ? activePixels.value : 0);
+  if (activePixelsHistory.length > HISTORY_LENGTH) activePixelsHistory.shift();
+  const ops = opsPerFrame();
+  opsHistory.push(ops >= 0 ? ops : 0);
+  if (opsHistory.length > HISTORY_LENGTH) opsHistory.shift();
 
   if (expanded.value) {
     drawGraph();
@@ -75,6 +84,19 @@ function formatPixelCount(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
   return String(n);
+}
+
+function formatOps(n: number): string {
+  if (n < 0) return '--';
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + 'G';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function opsPerFrame(): number {
+  if (activePixels.value < 0 || batchSize.value <= 0) return -1;
+  return activePixels.value * batchSize.value;
 }
 
 // --- Canvas graph drawing ---
@@ -141,6 +163,36 @@ function drawGraph() {
     }
     ctx.stroke();
   }
+
+  // Draw active pixels line (cyan, dashed)
+  if (activePixelsHistory.length > 1) {
+    const maxActive = Math.max(...activePixelsHistory, 1);
+    ctx.strokeStyle = 'rgba(0,180,220,0.9)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([4, 3]);
+    ctx.beginPath();
+    for (let i = 0; i < activePixelsHistory.length; i++) {
+      const x = (i / (HISTORY_LENGTH - 1)) * w;
+      const y = graphY + graphH - (activePixelsHistory[i] / maxActive) * graphH;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+    ctx.setLineDash([]);
+  }
+
+  // Draw ops/frame line (purple)
+  if (opsHistory.length > 1) {
+    const maxOps = Math.max(...opsHistory, 1);
+    ctx.strokeStyle = 'rgba(180,80,220,0.8)';
+    ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    for (let i = 0; i < opsHistory.length; i++) {
+      const x = (i / (HISTORY_LENGTH - 1)) * w;
+      const y = graphY + graphH - (opsHistory[i] / maxOps) * graphH;
+      if (i === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+    }
+    ctx.stroke();
+  }
 }
 
 function toggle() {
@@ -168,6 +220,8 @@ defineExpose({ expanded });
       <div class="stats-legend">
         <span class="legend-item"><span class="legend-swatch legend-swatch--green"></span>Pixels restants</span>
         <span class="legend-item"><span class="legend-swatch legend-swatch--orange"></span>FPS</span>
+        <span class="legend-item"><span class="legend-swatch legend-swatch--cyan"></span>Pixels actifs</span>
+        <span class="legend-item"><span class="legend-swatch legend-swatch--purple"></span>Ops/frame</span>
       </div>
       <div class="stats-grid">
         <div class="stats-row">
@@ -177,6 +231,10 @@ defineExpose({ expanded });
         <div class="stats-row">
           <span class="stats-label">Pixels restants</span>
           <span class="stats-value">{{ formatPixelCount(unfinishedPixels) }}</span>
+        </div>
+        <div class="stats-row">
+          <span class="stats-label">Pixels actifs</span>
+          <span class="stats-value">{{ formatPixelCount(activePixels) }}</span>
         </div>
         <div class="stats-row">
           <span class="stats-label">Total pixels</span>
@@ -189,6 +247,10 @@ defineExpose({ expanded });
         <div class="stats-row">
           <span class="stats-label">Batch size</span>
           <span class="stats-value">{{ batchSize }}</span>
+        </div>
+        <div class="stats-row">
+          <span class="stats-label">Ops/frame</span>
+          <span class="stats-value">{{ formatOps(opsPerFrame()) }}</span>
         </div>
       </div>
     </div>
@@ -303,6 +365,14 @@ defineExpose({ expanded });
 
 .legend-swatch--orange {
   background: rgba(255,170,0,0.8);
+}
+
+.legend-swatch--cyan {
+  background: rgba(0,180,220,0.8);
+}
+
+.legend-swatch--purple {
+  background: rgba(180,80,220,0.8);
 }
 
 .stats-grid {

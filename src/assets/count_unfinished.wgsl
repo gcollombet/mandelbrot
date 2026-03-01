@@ -9,6 +9,11 @@
 //   iter < 0               : sentinel (any level), needs refinement + computation
 //   iter > 0  AND  |z|² < mu : budget exhausted mid-progress, needs continuation
 //
+// Two counters are maintained:
+//   count        : all pixels needing work (sentinels + continuations) — for needsMoreFrames()
+//   active_count : pixels that mandelbrot.wgsl actually processes this frame
+//                  (iter == -1 OR continuation) — for adaptive refinement gating
+//
 // Only pixels inside the rotated viewport are counted; pixels outside
 // the projected frame on the neutral texture are ignored.
 //
@@ -23,6 +28,7 @@ struct Params {
 
 struct CounterBuffer {
   count: atomic<u32>,
+  active_count: atomic<u32>,
 };
 
 @group(0) @binding(0) var rawTex: texture_2d_array<f32>;
@@ -72,8 +78,12 @@ fn count_unfinished(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let is_sentinel        = (iter < 0.0);
   let needs_continuation = (iter > 0.0) && ((zx * zx + zy * zy) < params.mu);
+  let is_active          = (iter == -1.0) || needs_continuation;
 
   if (is_sentinel || needs_continuation) {
     atomicAdd(&counter.count, 1u);
+  }
+  if (is_active) {
+    atomicAdd(&counter.active_count, 1u);
   }
 }

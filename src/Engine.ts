@@ -34,23 +34,30 @@ const ZOOM_MIN_BRUSH_STEP = 2
 // After zoom ends, the first recompute frame uses this step instead of
 // the full progressive grid — avoids overlaying coarser data on the
 // already-refined image while still being fast.  Must be a power-of-two.
-const POST_ZOOM_SEED_STEP = 32
+const POST_ZOOM_SEED_STEP = 2048
 
 // Number of consecutive no-scale-change frames before we consider the zoom
 // truly stopped.  Wheel events often have 1-2 frame gaps between ticks.
-const ZOOM_IDLE_GRACE_FRAMES = 10
+const ZOOM_IDLE_GRACE_FRAMES = 0
 
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
 // to target TARGET_FRAME_MS of GPU time.
-const MIN_BATCH_SIZE = 100
+const MIN_BATCH_SIZE = 10
 const MAX_BATCH_SIZE = 10000
 const TARGET_FRAME_MS = 16
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
-// each frame) is paused when the smoothed GPU time exceeds this threshold.
-// This prevents the pixel count from quadrupling (step N → N/2) while the
-// GPU is already struggling, giving the batch-size controller time to adapt.
-const REFINEMENT_GATE_MS = TARGET_FRAME_MS * 1.5
+// each frame) is paused when the batch controller is at its minimum AND
+// the number of active pixels (those mandelbrot.wgsl actually processes:
+// iter == -1 or continuations) exceeds this threshold.  This prevents
+// pixel-count avalanches while still guaranteeing convergence — the gate
+// only closes when the GPU truly cannot absorb more work.
+const ACTIVE_PIXEL_GATE_THRESHOLD = 300_000
+// Minimum number of unfinished pixels below which we consider the image
+// fully converged.  A few stray pixels can linger indefinitely due to
+// floating-point rounding at the sentinel boundaries — not worth spinning
+// the GPU for.
+const UNFINISHED_PIXEL_DONE_THRESHOLD = 10
 // EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
 const GPU_TIME_EMA_ALPHA = 0.25
 
@@ -147,6 +154,9 @@ export class Engine {
     private uniformBufferCount?: GPUBuffer
     /** Number of pixels still needing work. -1 = not yet known, 0 = fully converged. */
     unfinishedPixelCount = -1
+    /** Number of pixels that mandelbrot.wgsl actually processes (iter == -1 + continuations).
+     *  Used for adaptive refinement gating. -1 = not yet known. */
+    activePixelCount = -1
 
     // Self-managing render loop
     private _rafId: number | null = null
@@ -184,6 +194,10 @@ export class Engine {
     needRender = true
     /** Whether the reference orbit is still being computed incrementally. */
     orbitIncomplete = false
+    /** guardedMaxIter from the previous frame (for detecting orbit growth). */
+    prevGuardedMaxIter = 0
+    /** Current guardedMaxIter — shared between prepareFrame and render. */
+    currentGuardedMaxIter = 0
     mandelbrotReference = new Float32Array(1000000)
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
@@ -346,14 +360,14 @@ export class Engine {
             label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         })
 
-        // Counter buffers for GPU pixel-completion readback
+        // Counter buffers for GPU pixel-completion readback (2 × u32: total unfinished + active)
         this.counterBuffer = this.device.createBuffer({
-            size: 4,
+            size: 8,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
         this.counterReadBuffer = this.device.createBuffer({
-            size: 4,
+            size: 8,
             usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
             label: 'Engine Counter Readback',
         })
@@ -639,6 +653,7 @@ export class Engine {
         this.previousRenderOptions = undefined
         this.needRender = true
         this.unfinishedPixelCount = -1 // reset: not yet known after resize
+        this.activePixelCount = -1
     }
 
     areObjectsEqual(obj1: any, obj2: any): boolean {
@@ -868,6 +883,11 @@ export class Engine {
         // Guard the shader: globalMaxIter must never exceed the orbit steps
         // we have actually computed, or the shader would read uninitialised memory.
         const guardedMaxIter = Math.min(maxIterations, availableIter)
+        this.currentGuardedMaxIter = guardedMaxIter
+
+        // Track whether the orbit is still being built (used by needsMoreFrames).
+        this.orbitIncomplete = availableIter < maxIterations
+        const orbitComplete = availableIter >= maxIterations
 
         // Re-write the mandelbrot uniform with the guarded globalMaxIter.
         // During zoom reprojection, override scale with liveScale so the GPU
@@ -887,12 +907,9 @@ export class Engine {
             renderOptions.antialiasLevel,
             0,  // iterationOffset
             guardedMaxIter,
-            0,
+            orbitComplete ? 1 : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)
-
-        // Track whether the orbit is still being built (used by needsMoreFrames).
-        this.orbitIncomplete = availableIter < maxIterations
 
         // When the navigator re-anchors its reference orbit, `dx/dy` jump back to ~0.
         // Reprojecting history across that discontinuity would be nonsense, so we clear.
@@ -919,6 +936,14 @@ export class Engine {
             this.liveScale = 0
             this.zoomIdleFrames = 0
         }
+
+        // When the orbit just became complete, clear history once so that
+        // pixels which were stored as budget-exhausted continuations (during
+        // orbit building) get a fresh recompute with the full orbit available.
+        if (orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
+            this.clearHistoryNextFrame = true
+        }
+        this.prevGuardedMaxIter = guardedMaxIter
 
         this.previousMandelbrot = structuredClone(mandelbrot) // conserve current pour utilisation future
         this.previousRenderOptions = structuredClone(renderOptions)
@@ -1000,18 +1025,18 @@ export class Engine {
         const gridOffsetX = ((this.cumulativeShiftX % baseSentinel) + baseSentinel) % baseSentinel
         const gridOffsetY = ((this.cumulativeShiftY % baseSentinel) + baseSentinel) % baseSentinel
 
-        // Adaptive refinement gating: pause sentinel halving when the GPU
-        // is under pressure, preventing a 4× pixel-count spike at step
-        // transitions.  Always allow on the very first frame (smoothed == 0)
-        // and when clearing history (the grid needs seeding).
-        // During active zoom reprojection the ZOOM_MIN_BRUSH_STEP floor
-        // already caps spatial resolution, so the gate is not needed —
-        // blocking refinement would starve the live texture.
+        // Adaptive refinement gating: pause sentinel halving only when the
+        // batch controller is already at its minimum AND there are too many
+        // active pixels (those mandelbrot.wgsl actually processes).  This
+        // prevents pixel-count avalanches while guaranteeing convergence:
+        // if the batch has room to shrink, the gate stays open and the batch
+        // controller absorbs the ×4 spike.  A structurally slow GPU (high DPR)
+        // will stabilise its batch above MIN, so refinement always proceeds.
         const gateOpen =
             this.clearHistoryNextFrame
-            || this.smoothedGpuTimeMs === 0
-            || this.zoomReprojectionActive
-            || this.smoothedGpuTimeMs < REFINEMENT_GATE_MS
+            || this.activePixelCount < 0
+            || this.iterationBatchSize > MIN_BATCH_SIZE
+            || this.activePixelCount < ACTIVE_PIXEL_GATE_THRESHOLD
 
         // When the gate reopens after being closed, the next refinement step
         // will ~4× the pixel count.  Pre-emptively drop the iteration batch
@@ -1077,6 +1102,8 @@ export class Engine {
         rpassBrush.end()
 
         // Pass 1: Mandelbrot (B -> A), calcule uniquement les pixels == -1
+        // When globalMaxIter = 0 (no orbit data), the shader acts as a pure
+        // pass-through (sentinels stay as-is) — see mandelbrot.wgsl.
         const rpassMandelbrot = commandEncoder.beginRenderPass({
             colorAttachments: makeMrtAttachments(this.rawLayerViews),
         })
@@ -1096,8 +1123,8 @@ export class Engine {
             // Write count-shader uniforms (mu, aspect, angle)
             const muValue = this.previousMandelbrot.mu
             this.device.queue.writeBuffer(this.uniformBufferCount, 0, new Float32Array([muValue, aspect, this.previousMandelbrot.angle]))
-            // Reset atomic counter to 0
-            commandEncoder.clearBuffer(this.counterBuffer, 0, 4)
+            // Reset atomic counters to 0
+            commandEncoder.clearBuffer(this.counterBuffer, 0, 8)
             const computePass = commandEncoder.beginComputePass()
             computePass.setPipeline(this.pipelineCount)
             computePass.setBindGroup(0, this.counterBindGroup)
@@ -1106,8 +1133,8 @@ export class Engine {
                 Math.ceil(this.neutralSize / 16),
             )
             computePass.end()
-            // Copy result to staging buffer for async readback
-            commandEncoder.copyBufferToBuffer(this.counterBuffer, 0, this.counterReadBuffer, 0, 4)
+            // Copy results to staging buffer for async readback
+            commandEncoder.copyBufferToBuffer(this.counterBuffer, 0, this.counterReadBuffer, 0, 8)
         }
 
         // Pass 2: resolve des sentinelles (A -> resolved)
@@ -1171,6 +1198,7 @@ export class Engine {
         await this.counterReadBuffer!.mapAsync(GPUMapMode.READ)
         const data = new Uint32Array(this.counterReadBuffer!.getMappedRange())
         this.unfinishedPixelCount = data[0]
+        this.activePixelCount = data[1]
         this.counterReadBuffer!.unmap()
 
         // Reset the clear flag now that it has been consumed by the GPU passes.
@@ -1287,9 +1315,17 @@ export class Engine {
         if (this.zoomReprojectionActive) return true
         // A pending clear means we must run at least one more compute pass
         if (this.clearHistoryNextFrame) return true
+        // The reference orbit is still being built incrementally — keep
+        // rendering so prepareFrame() can compute further chunks and
+        // eventually trigger a clear when enough orbit data is available.
+        if (this.orbitIncomplete) return true
         // unfinishedPixelCount: -1 = not yet known (treat as "yes"),
-        // 0 = fully converged, >0 = pixels still need work
-        if (this.unfinishedPixelCount !== 0) {
+        // 0 = fully converged, >0 = pixels still need work.
+        // A few stray pixels may linger indefinitely due to floating-point
+        // rounding at sentinel boundaries — treat counts below the threshold
+        // as converged to avoid spinning the GPU for no visible gain.
+        if (this.unfinishedPixelCount < 0
+            || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD) {
             return true
         }
         // The orbit may still be incomplete (availableIter < maxIterations),
