@@ -46,6 +46,14 @@ const MIN_BATCH_SIZE = 100
 const MAX_BATCH_SIZE = 10000
 const TARGET_FRAME_MS = 16
 
+// Adaptive refinement gating: sentinel grid refinement (halving the step
+// each frame) is paused when the smoothed GPU time exceeds this threshold.
+// This prevents the pixel count from quadrupling (step N → N/2) while the
+// GPU is already struggling, giving the batch-size controller time to adapt.
+const REFINEMENT_GATE_MS = TARGET_FRAME_MS * 1.5
+// EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
+const GPU_TIME_EMA_ALPHA = 0.25
+
 // Orbit chunking: compute reference orbit incrementally to avoid blocking.
 // Each frame computes at most this many iterations of arbitrary-precision
 // math, then yields so the browser stays responsive.
@@ -151,6 +159,10 @@ export class Engine {
     isRendering = false
     /** Last measured GPU frame time in milliseconds. */
     gpuFrameTimeMs = 0
+    /** Exponentially smoothed GPU frame time (for adaptive refinement gating). */
+    smoothedGpuTimeMs = 0
+    /** Whether refinement was gated (blocked) on the previous frame. */
+    private refinementWasGated = false
     private _fpsFrameCount = 0
     private _fpsLastTime = 0
 
@@ -988,6 +1000,30 @@ export class Engine {
         const gridOffsetX = ((this.cumulativeShiftX % baseSentinel) + baseSentinel) % baseSentinel
         const gridOffsetY = ((this.cumulativeShiftY % baseSentinel) + baseSentinel) % baseSentinel
 
+        // Adaptive refinement gating: pause sentinel halving when the GPU
+        // is under pressure, preventing a 4× pixel-count spike at step
+        // transitions.  Always allow on the very first frame (smoothed == 0)
+        // and when clearing history (the grid needs seeding).
+        // During active zoom reprojection the ZOOM_MIN_BRUSH_STEP floor
+        // already caps spatial resolution, so the gate is not needed —
+        // blocking refinement would starve the live texture.
+        const gateOpen =
+            this.clearHistoryNextFrame
+            || this.smoothedGpuTimeMs === 0
+            || this.zoomReprojectionActive
+            || this.smoothedGpuTimeMs < REFINEMENT_GATE_MS
+
+        // When the gate reopens after being closed, the next refinement step
+        // will ~4× the pixel count.  Pre-emptively drop the iteration batch
+        // size to MIN so the combined cost stays manageable.  The batch
+        // controller will ramp it back up over the following frames.
+        if (gateOpen && this.refinementWasGated) {
+            this.iterationBatchSize = MIN_BATCH_SIZE
+        }
+        this.refinementWasGated = !gateOpen
+
+        const allowRefinement = gateOpen ? 1 : 0
+
         const brushUniforms = new Float32Array([
             aspect,
             this.previousMandelbrot.angle,
@@ -1000,6 +1036,7 @@ export class Engine {
             gridOffsetX,
             gridOffsetY,
             this.zoomReprojectionActive ? ZOOM_MIN_BRUSH_STEP : 0,
+            allowRefinement,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
@@ -1106,6 +1143,16 @@ export class Engine {
         await this.device.queue.onSubmittedWorkDone()
             const elapsed = performance.now() - submitStartMs
             this.gpuFrameTimeMs = elapsed
+
+            // Update smoothed GPU time (EMA) for refinement gating.
+            if (this.smoothedGpuTimeMs === 0) {
+                this.smoothedGpuTimeMs = elapsed // seed on first frame
+            } else {
+                this.smoothedGpuTimeMs =
+                    this.smoothedGpuTimeMs * (1 - GPU_TIME_EMA_ALPHA)
+                    + elapsed * GPU_TIME_EMA_ALPHA
+            }
+
             if (elapsed > 0) {
                 // Scale batch size proportionally: if frame took 32ms with batch=100,
                 // target 16ms -> new batch ≈ 100 * 16/32 = 50.
