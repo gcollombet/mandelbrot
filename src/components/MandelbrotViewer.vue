@@ -9,6 +9,7 @@ import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
 const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
 const mandelbrotEngine = computed(() => mandelbrotCtrlRef.value?.getEngine() ?? null);
+const renderStatsRef = ref<InstanceType<typeof RenderStats> | null>(null);
 
 // Multi-window support: set of open tabs, each with its own popup position
 const openTabs = reactive(new Set<string>());
@@ -374,7 +375,7 @@ const shortcutLabels = computed(() => {
     <div
       class="top-settings-bar"
       :class="{ 'hud-hidden': isNavigating }"
-      v-show="showUI && !mobileNavExpanded"
+      v-show="showUI"
     >
       <div class="top-settings-bar-inner">
         <button
@@ -389,13 +390,13 @@ const shortcutLabels = computed(() => {
       </div>
     </div>
 
-    <!-- Render status indicator (bottom-center, hidden on mobile) -->
+    <!-- Render status indicator (bottom-center) -->
     <div
-      class="render-stats-wrapper is-hidden-touch"
-      :class="{ 'hud-hidden': isNavigating }"
+      class="render-stats-wrapper"
+      :class="{ 'hud-hidden': isNavigating && !renderStatsRef?.expanded }"
       v-show="showUI"
     >
-      <RenderStats :engine="mandelbrotEngine" />
+      <RenderStats ref="renderStatsRef" :engine="mandelbrotEngine" />
     </div>
 
     <!-- Composant MandelbrotController avec tous les parametres -->

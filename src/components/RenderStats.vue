@@ -146,6 +146,8 @@ function drawGraph() {
 function toggle() {
   expanded.value = !expanded.value;
 }
+
+defineExpose({ expanded });
 </script>
 
 <template>
