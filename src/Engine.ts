@@ -34,7 +34,7 @@ const ZOOM_MIN_BRUSH_STEP = 2
 // After zoom ends, the first recompute frame uses this step instead of
 // the full progressive grid — avoids overlaying coarser data on the
 // already-refined image while still being fast.  Must be a power-of-two.
-const POST_ZOOM_SEED_STEP = 2048
+const POST_ZOOM_SEED_STEP = 32
 
 // Number of consecutive no-scale-change frames before we consider the zoom
 // truly stopped.  Wheel events often have 1-2 frame gaps between ticks.
@@ -42,7 +42,7 @@ const ZOOM_IDLE_GRACE_FRAMES = 0
 
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
 // to target TARGET_FRAME_MS of GPU time.
-const MIN_BATCH_SIZE = 10
+const MIN_BATCH_SIZE = 100
 const MAX_BATCH_SIZE = 10000
 const TARGET_FRAME_MS = 16
 
