@@ -22,6 +22,8 @@ export interface MandelbrotParams {
     palettePeriod: number,
     paletteOffset: number,
     dprMultiplier: number,
+    targetFps: number,
+    gpuLoadMultiplier: number,
     activateWebcam: boolean,
     activateTessellation: boolean,
     activateShading: boolean,

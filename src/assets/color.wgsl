@@ -308,9 +308,6 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let lzf = parameters.liveZoomFactor;
   let isZooming = (zf != 1.0) || (lzf != 1.0);
 
-  // Debug: set to 1 to invert live pixels, 2 to invert frozen pixels.
-  const DEBUG_INVERT: i32 = 0;
-
   if (!isZooming) {
     // ── No zoom active: sample live texture directly at uv_neutral ──
     let coord = vec2<i32>(
@@ -370,9 +367,6 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         uv_live
       );
       if (liveColor.a > 0.0) {
-        if (DEBUG_INVERT == 1) {
-          return vec4<f32>(1.0 - liveColor.rgb, 1.0);
-        }
         return vec4<f32>(liveColor.rgb, 1.0);
       }
     }
@@ -416,9 +410,6 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   );
 
   if (frozenColor.a > 0.0) {
-    if (DEBUG_INVERT == 2) {
-      return vec4<f32>(1.0 - frozenColor.rgb, 1.0);
-    }
     return vec4<f32>(frozenColor.rgb, 1.0);
   }
 

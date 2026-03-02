@@ -53,6 +53,8 @@ const model =  defineModel<MandelbrotParams>({
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
     interpolationMode: 'lab',
+    targetFps: 60,
+    gpuLoadMultiplier: 1.0,
   }
 });
 
@@ -202,6 +204,8 @@ async function savePreset() {
   delete (savedValue as any).dprMultiplier;
   delete (savedValue as any).maxIterationMultiplier;
   delete (savedValue as any).antialiasLevel;
+  delete (savedValue as any).targetFps;
+  delete (savedValue as any).gpuLoadMultiplier;
   const preset = {
     name: presetName.value.trim(),
     value: savedValue,
@@ -319,7 +323,7 @@ const currentGraphicsPresetThumbnail = computed(() => currentGraphicsPresetObj.v
 /** Location fields — not copied in graphics extraction */
 const LOCATION_FIELDS: (keyof MandelbrotParams)[] = ['cx', 'cy', 'scale', 'angle'];
 /** Performance fields — never copied from presets */
-const PERF_FIELDS: (keyof MandelbrotParams)[] = ['dprMultiplier', 'maxIterationMultiplier', 'antialiasLevel'];
+const PERF_FIELDS: (keyof MandelbrotParams)[] = ['dprMultiplier', 'maxIterationMultiplier', 'antialiasLevel', 'targetFps', 'gpuLoadMultiplier'];
 
 function selectGraphicsFromPreset(name: string) {
   const preset = presets.value.find(p => p.name === name);
@@ -1525,6 +1529,16 @@ async function renameAndSaveTexture() {
         <span class="gfx-slider-label">It&eacute;rations</span>
         <input class="slider" type="range" min="-2" max="1" step="0.01" v-model="maxIterMultSlider" />
         <span class="gfx-slider-value">&times;{{ (model.maxIterationMultiplier ?? 1.0).toPrecision(3) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Target FPS</span>
+        <input class="slider" type="range" min="10" max="60" step="1" v-model.number="model.targetFps" />
+        <span class="gfx-slider-value">{{ model.targetFps ?? 60 }} fps</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Charge GPU max.</span>
+        <input class="slider" type="range" min="0.25" max="4" step="0.25" v-model.number="model.gpuLoadMultiplier" />
+        <span class="gfx-slider-value">&times;{{ (model.gpuLoadMultiplier ?? 1.0).toFixed(2) }}</span>
       </div>
     </div>
   </div>

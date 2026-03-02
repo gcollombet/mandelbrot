@@ -142,6 +142,8 @@ const mandelbrotParams = ref<MandelbrotParams>({
   activateAnimate: false,
   dprMultiplier: 1.0,
   maxIterationMultiplier: 1.0,
+  targetFps: 60,
+  gpuLoadMultiplier: 1.0,
   interpolationMode: 'lab',
 });
 
@@ -429,6 +431,8 @@ const shortcutLabels = computed(() => {
       :activateAnimate="mandelbrotParams.activateAnimate"
       :dprMultiplier="mandelbrotParams.dprMultiplier"
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
+      :targetFps="mandelbrotParams.targetFps"
+      :gpuLoadMultiplier="mandelbrotParams.gpuLoadMultiplier"
       :interpolationMode="mandelbrotParams.interpolationMode"
     />
 
@@ -764,5 +768,11 @@ const shortcutLabels = computed(() => {
   transform: translateX(-50%);
   z-index: 20;
   pointer-events: auto;
+}
+
+@media (max-width: 1023px) {
+  .render-stats-wrapper {
+    bottom: 100px;
+  }
 }
 </style>

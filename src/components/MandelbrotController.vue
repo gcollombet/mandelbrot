@@ -33,6 +33,8 @@ const props = defineProps<{
   activateAnimate?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
+  targetFps?: number,
+  gpuLoadMultiplier?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
 }>();
 
@@ -53,6 +55,7 @@ let pinchStartDist = 0;
 let pinchStartAngle = 0;
 let pinchStartAngleView = 0;
 let isPinching = false;
+let pinchPrevDist = 0;
 
 const moveStep = 0.01;
 const angleStep = 0.025;
@@ -199,6 +202,7 @@ function handleTouchStart(e: TouchEvent) {
     isPinching = true;
     const [t1, t2] = e.touches;
     pinchStartDist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
+    pinchPrevDist = pinchStartDist;
     pinchStartAngle = Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
     const params = mandelbrotRef.value?.getParams();
     pinchStartAngleView = params ? parseFloat(params[3]) : 0;
@@ -225,7 +229,9 @@ function handleTouchMove(e: TouchEvent) {
     const [t1, t2] = e.touches;
     const dist = Math.hypot(t2.clientX - t1.clientX, t2.clientY - t1.clientY);
     const angle = Math.atan2(t2.clientY - t1.clientY, t2.clientX - t1.clientX);
-    const zoomRatio = pinchStartDist / dist;
+    // Incremental zoom: ratio between previous and current finger distance
+    const zoomRatio = pinchPrevDist / dist;
+    pinchPrevDist = dist;
     mandelbrotRef.value?.zoom(zoomRatio);
     const angleDelta = angle - pinchStartAngle;
     mandelbrotRef.value?.angle(pinchStartAngleView + angleDelta);
@@ -330,6 +336,8 @@ onUnmounted(() => {
       :paletteOffset="props.paletteOffset"
       :dprMultiplier="props.dprMultiplier"
       :maxIterationMultiplier="props.maxIterationMultiplier"
+      :targetFps="props.targetFps"
+      :gpuLoadMultiplier="props.gpuLoadMultiplier"
       :interpolationMode="props.interpolationMode"
     />
     

@@ -79,7 +79,7 @@ const startRotating = (direction: 'left' | 'right') => {
 
 const startZooming = (direction: 'in' | 'out') => {
   activeButton.value = `zoom-${direction}`;
-  const zoomFactor = 0.95;
+  const zoomFactor = 0.97;
   
   const performZoom = () => {
     if (!props.mandelbrotRef) return;

@@ -307,7 +307,7 @@ impl MandelbrotNavigator {
         let two = DBig::try_from(2).unwrap();
         let one = DBig::try_from(1).unwrap();
         let threshold = DBig::try_from(1_000_000).unwrap();
-        let total_iter: usize = 10_000.min(target);
+        let total_iter: usize = target;
 
         let reference_cx = &self.reference_cx;
         let reference_cy = &self.reference_cy;

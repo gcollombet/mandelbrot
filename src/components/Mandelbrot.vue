@@ -60,6 +60,8 @@ const props = withDefaults(defineProps<{
   activateAnimate?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
+  targetFps?: number,
+  gpuLoadMultiplier?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
  }>(),
 
@@ -92,8 +94,10 @@ const props = withDefaults(defineProps<{
        activateSmoothness: true,
        activateAnimate: false,
         dprMultiplier: 1.0,
-        maxIterationMultiplier: 1.0,
-        interpolationMode: 'lab',
+         maxIterationMultiplier: 1.0,
+         targetFps: 60,
+         gpuLoadMultiplier: 1.0,
+         interpolationMode: 'lab',
     }
 );
 
@@ -104,6 +108,24 @@ watch(
     if (!engine) return;
     engine.dprMultiplier = val;
     handleResize();
+  }
+);
+
+// Quand le target FPS change, mettre à jour l'engine.
+watch(
+  () => props.targetFps,
+  (val) => {
+    if (!engine) return;
+    engine.targetFps = val;
+  }
+);
+
+// Quand le multiplicateur de charge GPU change, mettre à jour l'engine.
+watch(
+  () => props.gpuLoadMultiplier,
+  (val) => {
+    if (!engine) return;
+    engine.gpuLoadMultiplier = val;
   }
 );
 

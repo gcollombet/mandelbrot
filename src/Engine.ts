@@ -34,17 +34,16 @@ const ZOOM_MIN_BRUSH_STEP = 2
 // After zoom ends, the first recompute frame uses this step instead of
 // the full progressive grid — avoids overlaying coarser data on the
 // already-refined image while still being fast.  Must be a power-of-two.
-const POST_ZOOM_SEED_STEP = 32
+const POST_ZOOM_SEED_STEP = 2048
 
 // Number of consecutive no-scale-change frames before we consider the zoom
 // truly stopped.  Wheel events often have 1-2 frame gaps between ticks.
-const ZOOM_IDLE_GRACE_FRAMES = 3
+const ZOOM_IDLE_GRACE_FRAMES = 0
 
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
 // to target TARGET_FRAME_MS of GPU time.
 const MIN_BATCH_SIZE = 100
-const MAX_BATCH_SIZE = 1000
-const TARGET_FRAME_MS = 16
+const MAX_BATCH_SIZE = 10_000
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
 // each frame) is paused when the batch controller is at its minimum AND
@@ -52,7 +51,7 @@ const TARGET_FRAME_MS = 16
 // iter == -1 or continuations) exceeds this threshold.  This prevents
 // pixel-count avalanches while still guaranteeing convergence — the gate
 // only closes when the GPU truly cannot absorb more work.
-const ACTIVE_PIXEL_GATE_THRESHOLD = 300_000
+const ACTIVE_PIXEL_GATE_THRESHOLD = 5_000_000
 // Minimum number of unfinished pixels below which we consider the image
 // fully converged.  A few stray pixels can linger indefinitely due to
 // floating-point rounding at the sentinel boundaries — not worth spinning
@@ -64,7 +63,7 @@ const GPU_TIME_EMA_ALPHA = 0.25
 // Orbit chunking: compute reference orbit incrementally to avoid blocking.
 // Each frame computes at most this many iterations of arbitrary-precision
 // math, then yields so the browser stays responsive.
-const ORBIT_CHUNK_SIZE = 10
+const ORBIT_CHUNK_SIZE = 100
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -198,6 +197,8 @@ export class Engine {
     prevGuardedMaxIter = 0
     /** Current guardedMaxIter — shared between prepareFrame and render. */
     currentGuardedMaxIter = 0
+    /** Target maxIterations for the current frame. */
+    currentMaxIterations = 0
     mandelbrotReference = new Float32Array(1000000)
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
@@ -263,6 +264,12 @@ export class Engine {
 
     // DPR multiplier (adjustable from UI, default 1.0)
     dprMultiplier = 1.0
+
+    // Target FPS for the adaptive batch controller (adjustable from UI, default 60)
+    targetFps = 60
+
+    // GPU load multiplier: scales the active-pixel gate threshold (default 1.0)
+    gpuLoadMultiplier = 1.0
 
     // Propriétés statiques pour le cache des textures
     static _tileTexture?: GPUTexture
@@ -860,6 +867,7 @@ export class Engine {
         }
 
         const maxIterations = Math.ceil(mandelbrot.maxIterations)
+        this.currentMaxIterations = maxIterations
 
         // Compute one chunk of the reference orbit (bounded CPU work per frame).
         // The WASM side resumes from where it left off; re-anchoring is handled
@@ -940,7 +948,11 @@ export class Engine {
         // When the orbit just became complete, clear history once so that
         // pixels which were stored as budget-exhausted continuations (during
         // orbit building) get a fresh recompute with the full orbit available.
-        if (orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
+        // During an active zoom reprojection cycle, skip this: maxIterations
+        // grows every frame with scale, so the condition fires perpetually.
+        // The ZOOM_STOP clear will trigger a full recompute when zoom ends.
+        if (!this.zoomReprojectionActive
+            && orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
             this.clearHistoryNextFrame = true
         }
         this.prevGuardedMaxIter = guardedMaxIter
@@ -1036,7 +1048,7 @@ export class Engine {
             this.clearHistoryNextFrame
             || this.activePixelCount < 0
             || this.iterationBatchSize > MIN_BATCH_SIZE
-            || this.activePixelCount < ACTIVE_PIXEL_GATE_THRESHOLD
+            || this.activePixelCount < ACTIVE_PIXEL_GATE_THRESHOLD * this.gpuLoadMultiplier
 
         // When the gate reopens after being closed, the next refinement step
         // will ~4× the pixel count.  Pre-emptively drop the iteration batch
@@ -1184,7 +1196,7 @@ export class Engine {
                 // Scale batch size proportionally: if frame took 32ms with batch=100,
                 // target 16ms -> new batch ≈ 100 * 16/32 = 50.
                 // Use exponential smoothing (alpha=0.3) to avoid oscillation.
-                const ratio = TARGET_FRAME_MS / elapsed
+                const ratio = (1000 / this.targetFps) / elapsed
                 const ideal = this.iterationBatchSize * ratio
                 this.iterationBatchSize = Math.round(
                     Math.min(MAX_BATCH_SIZE,
@@ -1310,28 +1322,16 @@ export class Engine {
      * unfinished pixels, incomplete orbit, or continuous-render mode).
      */
     needsMoreFrames(): boolean {
-        if (this.needRender) return true
-        // Active zoom reprojection needs continuous rendering
-        if (this.zoomReprojectionActive) return true
-        // A pending clear means we must run at least one more compute pass
-        if (this.clearHistoryNextFrame) return true
-        // The reference orbit is still being built incrementally — keep
-        // rendering so prepareFrame() can compute further chunks and
-        // eventually trigger a clear when enough orbit data is available.
-        if (this.orbitIncomplete) return true
-        // unfinishedPixelCount: -1 = not yet known (treat as "yes"),
-        // 0 = fully converged, >0 = pixels still need work.
-        // A few stray pixels may linger indefinitely due to floating-point
-        // rounding at sentinel boundaries — treat counts below the threshold
-        // as converged to avoid spinning the GPU for no visible gain.
-        if (this.unfinishedPixelCount < 0
+        let reason = ''
+        if (this.needRender) reason = 'needRender'
+        else if (this.zoomReprojectionActive) reason = 'zoomActive'
+        else if (this.clearHistoryNextFrame) reason = 'clearHistory'
+        else if (this.orbitIncomplete) reason = 'orbitIncomplete'
+        else if (this.unfinishedPixelCount < 0
             || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD) {
-            return true
+            reason = `unfinished=${this.unfinishedPixelCount}`
         }
-        // The orbit may still be incomplete (availableIter < maxIterations),
-        // but if all visible pixels have converged (unfinishedPixelCount == 0)
-        // there is no point continuing: no pixel needs more iterations.
-        return false
+        return reason !== ''
     }
 
     /** Current GPU iteration batch size (auto-adjusted to target ~16ms/frame). */
