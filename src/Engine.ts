@@ -38,12 +38,12 @@ const POST_ZOOM_SEED_STEP = 32
 
 // Number of consecutive no-scale-change frames before we consider the zoom
 // truly stopped.  Wheel events often have 1-2 frame gaps between ticks.
-const ZOOM_IDLE_GRACE_FRAMES = 0
+const ZOOM_IDLE_GRACE_FRAMES = 3
 
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
 // to target TARGET_FRAME_MS of GPU time.
 const MIN_BATCH_SIZE = 100
-const MAX_BATCH_SIZE = 10000
+const MAX_BATCH_SIZE = 1000
 const TARGET_FRAME_MS = 16
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
