@@ -249,13 +249,12 @@ watch(() => [props.scale, props.angle, props.cx, props.cy], () => {
       :cx="props.cx ?? '0.0'"
       :cy="props.cy ?? '0.0'"
       :activateSmoothness="false"
-      :palettePeriod="1"
       :activatePalette="props.showPalette"
       :activateSkybox="false"
       :activateTessellation="false"
       :activateWebcam="false"
       :activateShading="false"
-      :colorStops="() => [{ position: 0, color: '#000000' }, { position: 0.5, color: '#ffffff' }]"
+      :colorStops="[{ position: 0, color: '#000000' }, { position: 0.5, color: '#ffffff' }]"
       style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 1;"
     />
     <canvas ref="canvasRef" :width="width" :height="height" style="position: absolute; left: 0; top: 0; z-index: 2; pointer-events: auto; width: 100%; height: 100%;"></canvas>
