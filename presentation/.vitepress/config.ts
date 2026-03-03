@@ -27,6 +27,7 @@ export default defineConfig({
         nav: [
             {text: 'Home', link: '/'},
             {text: 'Optimisations', link: '/optimisation'},
+            {text: 'Explorer', link: '/mandelbrot/'},
         ],
         sidebar: [
             {
