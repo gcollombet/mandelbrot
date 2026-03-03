@@ -486,6 +486,8 @@ const shortcutLabels = computed(() => {
       class="render-stats-wrapper"
       :class="{ 'hud-hidden': isNavigating && !renderStatsRef?.expanded }"
       v-show="showUI"
+      @touchstart.stop
+      @touchend.stop
     >
       <RenderStats ref="renderStatsRef" :engine="mandelbrotEngine" />
     </div>
@@ -556,10 +558,10 @@ const shortcutLabels = computed(() => {
       </div>
     </template>
 
-    <!-- Cursor coordinate tooltip -->
+    <!-- Cursor coordinate tooltip (masqué sur mobile) -->
     <div
       v-if="cursorTooltip.visible"
-      class="cursor-tooltip"
+      class="cursor-tooltip is-hidden-touch"
       :style="{
         left: cursorTooltip.clientX + 16 + 'px',
         top: cursorTooltip.clientY - 8 + 'px',

@@ -280,6 +280,8 @@ defineExpose({ expanded });
   letter-spacing: 0.01em;
   overflow: hidden;
   transition: width 0.25s ease, box-shadow 0.25s ease;
+  /* Assure la réactivité des taps sur mobile */
+  touch-action: manipulation;
 }
 
 .render-stats--expanded {

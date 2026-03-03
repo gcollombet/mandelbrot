@@ -103,6 +103,13 @@ const handleTouchEnd = (e: TouchEvent) => {
   e.preventDefault();
   stopAllActions();
 };
+
+/** Navigue vers la page Présentation (relative à l'URL courante). */
+function goToPresentation(e: TouchEvent | MouseEvent) {
+  e.preventDefault();
+  e.stopPropagation();
+  window.location.href = new URL('./presentation/', window.location.href).href;
+}
 </script>
 
 
@@ -264,6 +271,21 @@ const handleTouchEnd = (e: TouchEvent) => {
             <path d="M8 11 L14 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
           </svg>
         </button>
+
+        <!-- Bouton Présentation (lien vers la doc VitePress) -->
+        <button
+          class="presentation-button"
+          @touchend.prevent.stop="goToPresentation"
+          @click="goToPresentation"
+          aria-label="Présentation"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle; margin-right:4px;">
+            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
+            <line x1="8" y1="21" x2="16" y2="21"/>
+            <line x1="12" y1="17" x2="12" y2="21"/>
+          </svg>
+          Présentation
+        </button>
       </div>
     </transition>
   </div>
@@ -422,5 +444,39 @@ const handleTouchEnd = (e: TouchEvent) => {
   .mobile-nav-controls {
     display: none;
   }
+}
+
+/* Bouton Présentation — pilule en bas à droite, au-dessus du zoom-in */
+.presentation-button {
+  position: absolute;
+  bottom: 96px;
+  right: 24px;
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 14px;
+  border: none;
+  border-radius: 20px;
+  background: rgba(226, 85, 85, 0.85);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  pointer-events: auto;
+  touch-action: manipulation;
+  user-select: none;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
+  transition: background 0.2s, transform 0.15s;
+}
+
+.presentation-button:active {
+  background: rgba(226, 85, 85, 1);
+  transform: scale(0.95);
+}
+
+.presentation-button svg {
+  color: #fff;
+  flex-shrink: 0;
 }
 </style>
