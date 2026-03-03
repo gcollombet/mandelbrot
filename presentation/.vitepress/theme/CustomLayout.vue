@@ -4,7 +4,8 @@ import DefaultTheme from 'vitepress/theme-without-fonts'
 const { Layout } = DefaultTheme
 
 function goToExplorer() {
-  window.location.href = '/mandelbrot/'
+  // Remonte d'un niveau : /mandelbrot/presentation/ → /mandelbrot/
+  window.location.href = new URL('../', window.location.href).href
 }
 </script>
 
