@@ -1130,7 +1130,7 @@ Avec coloration
 </ClientOnly>
 
 
-#### Projection de texture
+#### Effet métalisé
 
 <ClientOnly>
 <MandelbrotController
@@ -1138,7 +1138,7 @@ Avec coloration
 :angle="0.0"
 :cx="'-0.75'"
 :cy="'0.0'"
-:activatePalette="false"
+:activatePalette="true"
 :activateSkybox="true"
 :activateTessellation="false"
 :activateWebcam="false"
@@ -1147,7 +1147,7 @@ Avec coloration
 />
 </ClientOnly>
 
-### Tessellation
+### Proejction de texture
 
 #### Avec la valeur de l'itération
 
@@ -1165,6 +1165,27 @@ Avec coloration
 :activateShading="false"
 />
 </ClientOnly>
+
+#### On combine les techniques
+
+<ClientOnly>
+<MandelbrotController
+:scale="'0.000000000000000000642'"
+:angle="0.0"
+:cx="'-1.96073372544489379646644117402733286402'"
+:cy="'0.00000000000000000000012522204221311455'"
+:mu="'4.0'"
+:palettePeriod="'10'"
+:activatePalette="true"
+:activateZebra="true"
+:activateSkybox="true"
+:activateTessellation="false"
+:activateWebcam="false"
+:activateSmoothness="false"
+:activateShading="true"
+/>
+</ClientOnly>
+
 
 ### Un mot sur les couleurs
 

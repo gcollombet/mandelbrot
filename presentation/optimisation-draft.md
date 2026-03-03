@@ -204,10 +204,9 @@ var candidates = array<vec2<u32>, 4>(
 Chaque passe de rendu ne calcule qu'un **nombre limité d'itérations** par pixel (le "batch").
 
 ```typescript
-// Engine.ts:119-124
-static readonly MIN_BATCH_SIZE = 10
-static readonly MAX_BATCH_SIZE = 10000
-static readonly TARGET_FRAME_MS = 16
+// Engine.ts:44-46
+const MIN_BATCH_SIZE = 100
+const MAX_BATCH_SIZE = 10_000
 private iterationBatchSize = 10000
 ```
 
@@ -215,16 +214,16 @@ private iterationBatchSize = 10000
 
 Après chaque soumission, le temps GPU réel est mesuré et le batch est ajusté avec un lissage exponentiel (alpha = 0.3) pour viser 16ms :
 
-`Engine.ts:758-775` :
+`Engine.ts:1190-1218` :
 ```typescript
 this.device.queue.onSubmittedWorkDone().then(() => {
     const elapsed = performance.now() - submitStartMs
     if (elapsed > 0) {
-        const ratio = Engine.TARGET_FRAME_MS / elapsed
+        const ratio = (1000 / this.targetFps) / elapsed
         const ideal = this.iterationBatchSize * ratio
         this.iterationBatchSize = Math.round(
-            Math.min(Engine.MAX_BATCH_SIZE,
-                Math.max(Engine.MIN_BATCH_SIZE,
+            Math.min(MAX_BATCH_SIZE,
+                Math.max(MIN_BATCH_SIZE,
                     this.iterationBatchSize * 0.7 + ideal * 0.3
                 )
             )
@@ -234,6 +233,8 @@ this.device.queue.onSubmittedWorkDone().then(() => {
 ```
 
 **Exemple** : Si une frame prend 32ms avec batch=100, ratio = 16/32 = 0.5, ideal = 50, nouveau batch ≈ 100×0.7 + 50×0.3 = 85.
+
+Le FPS cible est configurable via `targetFps` (par défaut 60).
 
 ### Continuation multi-frame
 
@@ -265,11 +266,11 @@ Plus le zoom est profond, plus d'itérations sont nécessaires. La formule croî
 
 ### Chunking de l'orbite de référence
 
-L'orbite de référence (calcul en précision arbitraire, WASM/Rust) est aussi construite incrémentalement, 500 pas par frame :
+L'orbite de référence (calcul en précision arbitraire, WASM/Rust) est aussi construite incrémentalement, 100 pas par frame :
 
 ```typescript
-// Engine.ts:126-129
-static readonly ORBIT_CHUNK_SIZE = 500
+// Engine.ts:66
+static readonly ORBIT_CHUNK_SIZE = 100
 ```
 
 ```rust
@@ -293,9 +294,51 @@ L'historique (reprojection) est effacé (reset complet) quand :
 | Pas de frame précédente | `Engine.ts:626` |
 | L'orbite de référence a été ré-ancrée | `Engine.ts:623` |
 | `mu` a changé | `Engine.ts:629` |
-| `scale` a changé (zoom) | `Engine.ts:632` |
+| `scale` a changé (zoom) | **Reprojeté** (cf. section 6) |
 
 Le ré-ancrage se produit quand le centre de vue dérive de plus de 20× l'échelle par rapport au centre de référence (`lib.rs:279-292`).
+
+---
+
+## 6. Reprojection du zoom
+
+Au lieu de réinitialiser la texture à chaque changement de zoom, le moteur fige la texture résolue (`frozenTexture`) et lance le calcul à l'échelle cible dans la texture live. Les deux textures sont combinées dans la passe Color.
+
+**Cycle par paliers de ×16** (configurable via `zoomMagnificationThreshold`) :
+1. Copie GPU `resolvedTexture → frozenTexture`
+2. Calcul live à `frozenScale / 16` (zoom-in) ou `frozenScale × 16` (zoom-out)
+3. La passe Color échantillonne live (prioritaire si pixel calculé) puis frozen (fallback)
+4. Quand `zoomFactor ≥ 16` : swap (live → frozen), nouveau cycle
+
+Variables d'état dans `Engine.ts:214-242` : `zoomFactor`, `frozenScale`, `liveScale`, `liveZoomFactor`, `zoomReprojectionActive`, `needFreezeSnapshot`, `zoomingIn`, `zoomIdleFrames`, `postZoomFullRecompute`.
+
+**Pan + zoom** : le décalage cumulé live est converti en UV frozen (`Engine.ts:863-868`) via `cumulativeShiftX * (liveScale / frozenScale) / neutralSize`.
+
+**Sentinelles adaptées** : `ZOOM_MIN_BRUSH_STEP = 2` (pas minimum), `ZOOM_SENTINEL_SEED_STEP = 64` (grille initiale live), `POST_ZOOM_SEED_STEP = 2048` (recompute post-zoom).
+
+---
+
+## 7. Compteur de pixels GPU
+
+Un compute shader (`count_unfinished.wgsl`) parcourt la texture A après la passe Mandelbrot et maintient deux compteurs atomiques :
+- `count` : tous les pixels non terminés → détermine `needsMoreFrames()` (seuil: 10 pixels)
+- `active_count` : pixels traités par la passe Mandelbrot → pilote le gating adaptatif
+
+Dispatch en workgroups 16×16. Readback asynchrone via `mapAsync`.
+
+---
+
+## 8. Gating adaptatif du raffinement
+
+Le raffinement des sentinelles (halving du pas) est **gelé** quand le batch est au minimum ET `activePixelCount > ACTIVE_PIXEL_GATE_THRESHOLD (5 000 000)`. Cela empêche les avalanches de pixels ×4 à chaque étape.
+
+Quand la porte se rouvre, le batch est préventivement réduit au minimum (`Engine.ts:1067-1069`). Le flag `allowRefinement` est transmis au shader `reproject.wgsl:141-143`.
+
+---
+
+## 9. Sampling bilinéaire de la palette
+
+La palette (4096×1 `rgba8unorm`) utilise un `GPUSampler` avec filtrage linéaire et `addressModeU: 'repeat'`. Le shader utilise `textureSampleLevel` (compatible contrôle non-uniforme) au lieu de `textureLoad`.
 
 ---
 
@@ -307,6 +350,10 @@ Le ré-ancrage se produit quand le centre de vue dérive de plus de 20× l'éche
 | Rotation sans recalcul | Texture neutre surdimensionnée (diagonale) ; rotation uniquement à l'affichage | Zéro recalcul lors d'une rotation |
 | Sentinelles hiérarchiques | Grille puissance-de-2 subdivisée frame par frame (64 → 32 → ... → 1) | Raffinement progressif grossier → fin |
 | Resolve avec escalade | Test des 4 coins + escalade vers parent si budget épuisé | Affichage sans artefact à toute résolution |
-| Batch adaptatif | Boucle de feedback temps GPU → batch size (EMA α=0.3, cible 16ms) | Framerate constant quel que soit le matériel |
+| Batch adaptatif | Boucle de feedback temps GPU → batch size (EMA α=0.3, cible configurable) | Framerate constant quel que soit le matériel |
 | Continuation d'itérations | État complet par pixel (z, dz) sauvegardé dans 7 couches | Itérations arbitrairement profondes sans blocage |
-| Chunking orbite | WASM calcule 500 pas max par frame | Pas de blocage UI sur zooms profonds |
+| Chunking orbite | WASM calcule 100 pas max par frame | Pas de blocage UI sur zooms profonds |
+| Reprojection zoom | Snapshot figée + live en parallèle, double texture dans Color, paliers ×16 | Zoom sans flash ni recalcul visible |
+| Compteur GPU | Compute pass atomique + readback asynchrone | Arrêt automatique du rendu, zéro gaspillage |
+| Gating adaptatif | Gel du raffinement quand GPU saturé, drop préventif du batch | Pas d'avalanche de pixels, framerate stable |
+| Palette bilinéaire | `textureSampleLevel` + sampler linéaire repeat | Dégradés lisses, pas de banding |

@@ -1,0 +1,15 @@
+export type MandelbrotExposed = {
+  getCanvas: () => HTMLCanvasElement | null,
+  getEngine: () => any,
+  getNavigator: () => any,
+  translate: (dx: number, dy: number) => void,
+  translateDirect: (dx: number, dy: number) => void,
+  rotate: (da: number) => void,
+  angle: (a: number) => void,
+  zoom: (f: number) => void,
+  step: () => [number, number, number, number] | undefined,
+  getParams: () => [string, string, string, string] | undefined,
+  drawOnce: () => Promise<void>,
+  resize: () => Promise<void>,
+  initialize: () => Promise<void>,
+};

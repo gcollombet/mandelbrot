@@ -366,10 +366,9 @@ Chaque frame, le Mandelbrot pass n'exécute qu'un **nombre limité d'itérations
 Ce nombre, appelé `iterationBatchSize`, est ajusté dynamiquement.
 
 ```typescript
-// Engine.ts:119-124
-static readonly MIN_BATCH_SIZE = 10
-static readonly MAX_BATCH_SIZE = 10000
-static readonly TARGET_FRAME_MS = 16
+// Engine.ts:44-46
+const MIN_BATCH_SIZE = 100
+const MAX_BATCH_SIZE = 10_000
 private iterationBatchSize = 10000
 ```
 
@@ -396,17 +395,17 @@ Le total d'itérations s'accumule : $\text{iter}_{total} = \text{iter}_{précéd
 ### L'ajustement automatique du budget
 
 Le budget d'itérations par frame est ajusté **automatiquement** pour maintenir un temps GPU
-proche de 16ms (soit ~60 FPS).
+proche de la cible (configurable via `targetFps`, par défaut 60 FPS soit ~16ms).
 
 Après chaque soumission de commandes GPU, le moteur mesure le temps réel d'exécution
 et ajuste le batch avec un **lissage exponentiel** (coefficient $\alpha = 0.3$) :
 
 ```typescript
-// Engine.ts:758-775
+// Engine.ts:1190-1218 (simplifié)
 this.device.queue.onSubmittedWorkDone().then(() => {
     const elapsed = performance.now() - submitStartMs
     if (elapsed > 0) {
-        const ratio = TARGET_FRAME_MS / elapsed
+        const ratio = (1000 / this.targetFps) / elapsed
         const ideal = this.iterationBatchSize * ratio
         this.iterationBatchSize = Math.round(
             Math.min(MAX_BATCH_SIZE,
@@ -470,11 +469,11 @@ Par exemple :
 L'orbite de référence (calcul en précision arbitraire, exécuté en Rust compilé en WebAssembly)
 est elle aussi construite **incrémentalement**.
 
-Chaque frame, au maximum **500 pas** de l'orbite sont calculés :
+Chaque frame, au maximum **100 pas** de l'orbite sont calculés :
 
 ```typescript
-// Engine.ts:126-129
-static readonly ORBIT_CHUNK_SIZE = 500
+// Engine.ts:66
+static readonly ORBIT_CHUNK_SIZE = 100
 ```
 
 Tant que l'orbite n'est pas complète (c'est-à-dire tant que le nombre de pas disponibles
@@ -492,154 +491,234 @@ des centaines de milliers de pas en précision arbitraire.
 
 ## Reprojection du zoom : ne plus tout recalculer
 
-### Le problème actuel
+### Le problème
 
-Actuellement, tout changement de zoom déclenche un **reset complet** de l'historique :
-
-```typescript
-// Engine.ts:721-723
-if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.scale !== mandelbrot.scale) {
-    this.clearHistoryNextFrame = true
-}
-```
-
-Tous les pixels sont ré-ensemencés avec des sentinelles et le rendu progressif repart de zéro.
+Sans reprojection, tout changement de zoom déclenche un **reset complet** de l'historique :
+tous les pixels sont ré-ensemencés avec des sentinelles et le rendu progressif repart de zéro.
 C'est le seul mouvement (avec le ré-ancrage) qui n'est pas reprojeté.
 Pour la translation, on décale. Pour la rotation, on calcule sans rotation et on affiche avec.
-Mais pour le zoom ? On jette tout.
-
-C'est coûteux : pendant toute la durée du zoom, l'image se reconstruit de grossier à fin,
-ce qui crée un clignotement visible.
+Mais pour le zoom ? On jetait tout — et pendant toute la durée du zoom, l'image se reconstruisait
+de grossier à fin, créant un clignotement visible.
 
 ### Le principe : figer, zoomer visuellement, calculer en parallèle
 
-L'idée est d'appliquer au zoom une stratégie analogue à la translation, mais en utilisant **deux textures** simultanées :
+La solution applique au zoom une stratégie analogue à la translation, en utilisant **deux textures** simultanées :
 
-1. **Figer** la texture résolue actuelle comme snapshot de référence
-2. **Lancer immédiatement** le calcul à l'échelle cible (facteur ×2 pour un zoom, ×0.5 pour un dézoom)
+1. **Figer** la texture résolue actuelle comme snapshot de référence (`frozenTexture`)
+2. **Lancer immédiatement** le calcul à l'échelle cible dans la texture live
 3. **Afficher les deux** au bon niveau de zoom, en fusionnant
 
-Le zoom visuel interpole continuellement de ×1 à ×2. Quand il atteint ×2, la nouvelle texture
-(maintenant complète ou quasi-complète) remplace la snapshot, et un nouveau cycle peut démarrer.
+### Le cycle de zoom par paliers de ×16
 
-### Les deux textures dans la passe Color
-
-Le shader `color.wgsl` devrait échantillonner **deux textures** au lieu d'une :
-
-| Texture | Contenu | Transformation à l'affichage |
-|---------|---------|------------------------------|
-| **Snapshot** (figée) | L'image résolue au moment du dernier step | Agrandie par le facteur de zoom courant $z \in [1, 2]$ |
-| **En cours** (live) | La texture en train d'être calculée à la nouvelle échelle | Rétrécie par $2/z$ (zoom in) ou agrandie par $z \cdot 2$ (zoom out) |
-
-Pour chaque pixel de l'écran, la passe Color fait :
-
-```
-pixel = si nouveau_calcul_disponible(uv_live)
-            → couleur du nouveau calcul
-        sinon
-            → couleur de la snapshot (étirée/réduite)
-```
-
-En pseudo-WGSL, cela donnerait :
-
-```wgsl
-// Coordonnées dans la snapshot figée (inversement zoomée)
-let uv_frozen = (uv_neutral - 0.5) / zoomFactor + 0.5;
-
-// Coordonnées dans la texture live (inversement zoomée dans l'autre sens)
-let uv_live = (uv_neutral - 0.5) * (zoomFactor / targetZoom) + 0.5;
-
-// Lire la nouvelle texture (live)
-let live_iter = textureLoad(texLive, coord_from(uv_live), 0, 0).r;
-
-if (live_iter >= 0.0) {
-    // Pixel résolu dans le nouveau calcul → l'utiliser
-    return colorize(texLive, coord_from(uv_live));
-} else {
-    // Pas encore calculé → fallback sur la snapshot étirée
-    return colorize(texFrozen, coord_from(uv_frozen));
-}
-```
-
-### Le cycle de zoom par paliers de ×2
-
-Le zoom est décomposé en **paliers discrets** de facteur 2 :
+Le zoom est décomposé en **paliers discrets**. Le seuil de magnification est configurable
+(par défaut ×16, stocké dans `zoomMagnificationThreshold`) :
 
 ```
 ┌─────────────────────────────────────────────────────┐
-│  zoomFactor = 1.0                                   │
-│  ► Figer la texture résolue actuelle (snapshot)     │
-│  ► Lancer le calcul à scale / 2                     │
+│  Début de cycle                                     │
+│  ► Copier resolvedTexture → frozenTexture (GPU)     │
+│  ► Enregistrer frozenScale = scale courante         │
+│  ► Calculer liveScale = frozenScale / threshold     │
+│  ► Relancer le calcul (clearHistory) à liveScale    │
 │                                                     │
-│  zoomFactor ∈ ]1.0, 2.0[                            │
-│  ► Zoom visuel progressif                           │
+│  Pendant le cycle                                   │
+│  ► zoomFactor = frozenScale / displayScale          │
+│  ► liveZoomFactor = liveScale / displayScale        │
 │  ► Color rend les 2 textures :                      │
-│       • Snapshot ×zoomFactor (grandit)               │
-│       • Live ×(zoomFactor/2) (grandit aussi)         │
-│  ► Sentinelles se raffinent en parallèle             │
+│       • Live (prioritaire si pixel calculé)         │
+│       • Frozen (fallback, étirée/réduite)           │
+│  ► Sentinelles se raffinent en parallèle            │
 │                                                     │
-│  zoomFactor = 2.0                                   │
-│  ► La live remplace la snapshot                      │
-│  ► zoomFactor reset à 1.0                           │
-│  ► Nouveau cycle si zoom continue                   │
+│  Quand zoomFactor ≥ threshold (zoom in)             │
+│  ou zoomFactor ≤ 1/threshold (zoom out)             │
+│  ► La live remplace la frozen (nouveau snapshot)    │
+│  ► Nouveau cycle avec nouveau liveScale             │
 └─────────────────────────────────────────────────────┘
 ```
 
-Pour le **dézoom**, le même mécanisme fonctionne en miroir :
-- On fige la texture actuelle
-- On lance le calcul à `scale × 2`
-- Le zoom visuel va de ×1.0 à ×0.5
-- La snapshot rétrécit, la live grandit
-- À ×0.5, on swape et on reset à ×1.0
+### Gestion du cycle côté CPU
 
-### Ce qui change dans le pipeline
+L'état du zoom est maintenu par plusieurs variables dans `Engine.ts` :
 
-| Composant | Modification |
-|-----------|-------------|
-| **Engine.ts** | Maintenir deux jeux de textures (A/B/Resolved × 2). Sur changement de scale, copier Resolved → Frozen au lieu de `clearHistory`. Interpoler `zoomFactor` chaque frame. |
-| **color.wgsl** | Recevoir un 2e texture array binding (`texFrozen`). Ajouter `zoomFactor` et `targetZoom` aux uniforms. Implémenter le double échantillonnage avec fallback. |
-| **reproject.wgsl** | Inchangé : la texture live est ensemencée normalement avec `clearHistory`. La snapshot n'est pas touchée par cette passe. |
-| **mandelbrot.wgsl** | Inchangé : calcule sur la texture live. |
-| **resolve.wgsl** | Inchangé : résout la texture live. |
-| **Rust navigator** | Inchangé : fournit l'orbite de référence pour la nouvelle échelle. |
-| **CPU (uniforms)** | Calculer `zoomFactor` à chaque frame. Détecter quand `zoomFactor ≥ 2.0` (ou `≤ 0.5`) pour déclencher le swap. |
+```typescript
+// Engine.ts:214-242
+zoomMagnificationThreshold = 16.0   // seuil configurable (×16 par défaut)
+private zoomFactor = 1.0            // frozenScale / displayScale
+private zoomTarget = 1.0
+private frozenScale = 0             // échelle au moment du freeze
+private liveScale = 0               // échelle cible du calcul en cours
+private liveZoomFactor = 1.0        // liveScale / displayScale
+private zoomReprojectionActive = false
+private needFreezeSnapshot = false   // demande de copie resolved → frozen
+private zoomingIn = true             // direction du zoom
+private zoomIdleFrames = 0           // frames consécutives sans changement de scale
+private postZoomFullRecompute = false // recompute final après fin du zoom
+```
+
+La méthode `update()` gère la détection du changement d'échelle et le swap :
+
+```typescript
+// Engine.ts:746-797 (simplifié)
+if (scaleChanged && !this.zoomReprojectionActive) {
+    // Démarrer un nouveau cycle
+    this.zoomReprojectionActive = true
+    this.frozenScale = this.prevFrameMandelbrot!.scale
+    this.zoomingIn = mandelbrot.scale < this.frozenScale
+    this.liveScale = this.zoomingIn
+        ? this.frozenScale / this.zoomMagnificationThreshold
+        : this.frozenScale * this.zoomMagnificationThreshold
+    this.needFreezeSnapshot = true
+    this.clearHistoryNextFrame = true
+}
+
+// Vérifier si on a atteint le seuil de swap
+const shouldSwap = this.zoomingIn
+    ? this.zoomFactor >= this.zoomMagnificationThreshold
+    : this.zoomFactor <= 1.0 / this.zoomMagnificationThreshold
+
+if (shouldSwap) {
+    // Swap : la live devient la nouvelle frozen
+    this.needFreezeSnapshot = true
+    this.clearHistoryNextFrame = true
+    this.frozenScale = this.liveScale
+    this.liveScale = this.zoomingIn
+        ? mandelbrot.scale / this.zoomMagnificationThreshold
+        : mandelbrot.scale * this.zoomMagnificationThreshold
+}
+```
+
+### La copie GPU resolved → frozen
+
+Au début de chaque cycle, la texture résolue est copiée dans la texture figée en une seule commande GPU :
+
+```typescript
+// Engine.ts:1096-1106
+if (this.needFreezeSnapshot && this.resolvedTexture && this.frozenTexture) {
+    commandEncoder.copyTextureToTexture(
+        { texture: this.resolvedTexture },
+        { texture: this.frozenTexture },
+        { width: texSize, height: texSize, depthOrArrayLayers: layerCount },
+    )
+    this.needFreezeSnapshot = false
+}
+```
+
+### Le double échantillonnage dans la passe Color
+
+Le shader `color.wgsl` reçoit **deux texture arrays** et les uniforms de zoom :
+
+```wgsl
+// color.wgsl:29-35
+@group(0) @binding(1) var tex: texture_2d_array<f32>;        // live (resolved)
+@group(0) @binding(6) var texFrozen: texture_2d_array<f32>;  // frozen snapshot
+
+// Uniforms de zoom
+zoomFactor: f32,       // frozenScale / displayScale
+liveZoomFactor: f32,   // liveScale / displayScale
+frozenShiftU: f32,     // décalage pan cumulé (UV normalisé)
+frozenShiftV: f32,
+```
+
+Pour chaque pixel, la passe Color tente d'abord la texture live, puis se rabat sur la frozen :
+
+```wgsl
+// color.wgsl:339-376 — Texture live (prioritaire)
+let uv_live = (uv_neutral - 0.5) / lzf + 0.5;
+
+if (liveInBounds) {
+    let live_iter = textureLoad(tex, liveCoord, 0, 0).r;
+    if (live_iter >= 0.0) {
+        // Pixel calculé dans la live → l'utiliser
+        return vec4<f32>(colorize_pixel(...).rgb, 1.0);
+    }
+}
+
+// color.wgsl:378-417 — Fallback sur la frozen (étirée + décalée par le pan)
+let uv_frozen = (uv_neutral - 0.5) / zf + 0.5
+                - vec2<f32>(frozenShiftU, frozenShiftV);
+
+let frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
+return vec4<f32>(colorize_pixel(...).rgb, 1.0);
+```
+
+La vérification des bornes est **rotation-aware** : quand le facteur de zoom provoque une expansion UV
+dans les marges de rotation de la texture neutre, les pixels sont rejetés via un test de visibilité
+écran (`isInsideScreen`).
+
+### Pan + zoom simultanés
+
+Si l'utilisateur translate pendant un zoom, la snapshot doit suivre le mouvement.
+Le décalage de pan cumulé de la texture live (en texels arrondis) est converti en UV normalisé
+dans l'espace de la frozen :
+
+```typescript
+// Engine.ts:863-868
+(this.zoomReprojectionActive && this.frozenScale > 0)
+    ? this.cumulativeShiftX * (this.liveScale / this.frozenScale) / this.neutralSize
+    : 0,
+```
+
+Ce décalage est soustrait dans le shader lors de l'échantillonnage de la frozen texture,
+ce qui élimine les erreurs d'accumulation indépendante.
+
+### Sentinelles adaptées au zoom
+
+Pendant un zoom, deux ajustements sont appliqués au système de sentinelles :
+
+1. **Pas minimum de raffinement** (`ZOOM_MIN_BRUSH_STEP = 2`) : empêche la grille de descendre
+   en dessous de 2 pixels pendant le zoom, évitant le gaspillage GPU sur des pixels
+   qui seront redimensionnés au prochain cycle.
+
+2. **Ensemencement plus rapide** (`ZOOM_SENTINEL_SEED_STEP = 64`) : la texture live utilise
+   une grille initiale plus fine pour remplir rapidement l'image.
+
+3. **Post-zoom** (`POST_ZOOM_SEED_STEP = 2048`) : quand le zoom s'arrête, le recompute final
+   utilise un pas très grossier pour éviter de superposer des données grossières
+   sur l'image déjà raffinée par la reprojection.
+
+### Fin de zoom et recompute
+
+Quand l'utilisateur arrête de zoomer (aucun changement de scale pendant `ZOOM_IDLE_GRACE_FRAMES` frames),
+le cycle de reprojection se termine :
+
+```typescript
+// Engine.ts:807-821
+if (this.zoomIdleFrames >= ZOOM_IDLE_GRACE_FRAMES) {
+    this.zoomReprojectionActive = false
+    this.zoomFactor = 1.0
+    this.liveZoomFactor = 1.0
+    this.clearHistoryNextFrame = true
+    this.postZoomFullRecompute = true
+}
+```
+
+Un recompute final est lancé à l'échelle exacte d'affichage, cette fois sans reprojection.
 
 ### Coût mémoire
 
-Doubler les textures n'est pas anodin. Actuellement, chaque texture fait :
+La texture frozen a les mêmes dimensions que la resolved :
 
 $$
 \text{neutralSize}^2 \times 7 \times 4\text{ octets} = \text{neutralSize}^2 \times 28\text{ octets}
 $$
 
-Pour un écran 1920×1080 : neutralSize ≈ 2203, soit environ **135 Mo** pour les 3 textures (A, B, Resolved).
-Ajouter un snapshot Resolved doublerait la texture Resolved (+45 Mo), portant le total à ~180 Mo de VRAM.
+Pour un écran 1920×1080 : neutralSize $\approx$ 2203, soit environ **+45 Mo** de VRAM
+pour la frozen texture, portant le total à ~180 Mo pour les 4 textures (A, B, Resolved, Frozen).
 
-C'est raisonnable pour un GPU moderne, mais il faudrait le rendre optionnel pour les petites configs.
-
-### Avantage : le zoom ne flashe plus
+### Résultat
 
 Avec cette technique :
 - L'utilisateur voit **toujours** une image nette (la snapshot zoomée) pendant la transition
 - La nouvelle image apparaît **progressivement par-dessus**, pixel par pixel
 - Il n'y a **aucune frame noire** ni aucun clignotement grossier→fin
-- Le zoom continu (molette maintenue) enchaîne les cycles ×2 de manière fluide
+- Le zoom continu (molette maintenue) enchaîne les cycles de manière fluide
+- Le pan et la rotation fonctionnent simultanément avec le zoom sans artefact
 
 ::: info Illustration
 
 <ZoomReprojectionDemo />
 
 :::
-
-### Détails d'implémentation restants
-
-1. **Interpolation du zoom** : linéaire ou exponentielle ? L'exponentiel ($z(t) = 2^t$) donne une sensation de vitesse constante en espace logarithmique, plus naturelle pour l'exploration fractale.
-
-2. **Seuil de swap** : ne pas attendre que le calcul live soit à 100%. Swaper dès que `zoomFactor` atteint 2.0, même si des sentinelles subsistent. Les trous seront résolus par snapping, comme pour le rendu progressif normal.
-
-3. **Pan + zoom simultanés** : si l'utilisateur translate pendant un zoom, la snapshot doit aussi être reprojetée avec le shift. Cela nécessite d'appliquer le décalage de translation aux deux textures dans `color.wgsl`.
-
-4. **Rotation + zoom** : pas de problème particulier, la rotation est déjà appliquée uniquement dans `color.wgsl` et s'appliquerait identiquement aux deux textures.
 
 ## Quand tout recalculer ?
 
@@ -648,7 +727,7 @@ Mais dans certains cas, cette réutilisation n'est pas possible et un reset comp
 
 | Événement | Pourquoi ? | Statut |
 |-----------|------------|--------|
-| Changement de zoom | Les coordonnées de tous les pixels changent | **Reprojetable** (cf. section ci-dessus) |
+| Changement de zoom | Les coordonnées de tous les pixels changent | **Reprojeté** (cf. section ci-dessus) |
 | Changement de $\mu$ (rayon d'échappement) | Les calculs précédents sont invalides | Reset nécessaire |
 | Ré-ancrage de l'orbite de référence | Le repère de perturbation change brutalement | Reset nécessaire |
 | Premier affichage | Pas de données précédentes | Reset nécessaire |
@@ -656,6 +735,214 @@ Mais dans certains cas, cette réutilisation n'est pas possible et un reset comp
 Le ré-ancrage se produit automatiquement quand le centre de la vue s'éloigne de plus de 
 $20 \times$ l'échelle courante par rapport au centre de l'orbite de référence.
 À ce moment, l'orbite est recalculée depuis le nouveau centre.
+
+## Le compteur de pixels GPU
+
+### Le problème
+
+Comment savoir quand le rendu progressif est terminé ? Sans compteur, le moteur devrait
+soit tourner indéfiniment (gaspillage), soit utiliser un nombre de frames fixe (imprécis).
+
+### La solution : un compute pass dédié
+
+Après la passe Mandelbrot (passe 1) et avant la passe Resolve (passe 2), un **compute shader**
+parcourt la texture et compte les pixels qui nécessitent encore du travail.
+
+Le shader `count_unfinished.wgsl` distingue deux catégories de pixels via deux compteurs atomiques :
+
+| Compteur | Contenu | Utilisé pour |
+|----------|---------|-------------|
+| `count` | Tous les pixels non terminés (sentinelles + continuations) | Déterminer si le rendu est terminé |
+| `active_count` | Les pixels que `mandelbrot.wgsl` traite réellement (iter == -1 ou continuation) | Le gating adaptatif du raffinement |
+
+```wgsl
+// count_unfinished.wgsl:79-88
+let is_sentinel        = (iter < 0.0);
+let needs_continuation = (iter > 0.0) && ((zx * zx + zy * zy) < params.mu);
+let is_active          = (iter == -1.0) || needs_continuation;
+
+if (is_sentinel || needs_continuation) {
+    atomicAdd(&counter.count, 1u);
+}
+if (is_active) {
+    atomicAdd(&counter.active_count, 1u);
+}
+```
+
+Seuls les pixels **à l'intérieur du viewport roté** sont comptés — les pixels dans les marges
+de rotation de la texture neutre sont ignorés :
+
+```wgsl
+// count_unfinished.wgsl:70-72
+if (!is_inside_rotated_screen(xy_neutral)) {
+    return;
+}
+```
+
+### Dispatch et readback asynchrone
+
+Le dispatch utilise des workgroups de 16×16, couvrant toute la texture neutre :
+
+```typescript
+// Engine.ts:1137-1160
+commandEncoder.clearBuffer(this.counterBuffer, 0, 8)   // reset les 2 compteurs
+const computePass = commandEncoder.beginComputePass()
+computePass.setPipeline(this.pipelineCount)
+computePass.setBindGroup(0, this.counterBindGroup)
+computePass.dispatchWorkgroups(
+    Math.ceil(this.neutralSize / 16),
+    Math.ceil(this.neutralSize / 16),
+)
+computePass.end()
+// Copier vers un buffer mappable pour lecture CPU
+commandEncoder.copyBufferToBuffer(
+    this.counterBuffer, 0, this.counterReadBuffer, 0, 8
+)
+```
+
+La lecture CPU est **asynchrone** pour ne pas bloquer le pipeline :
+
+```typescript
+// Engine.ts:1220-1224
+await this.counterReadBuffer!.mapAsync(GPUMapMode.READ)
+const data = new Uint32Array(this.counterReadBuffer!.getMappedRange())
+this.unfinishedPixelCount = data[0]
+this.activePixelCount = data[1]
+this.counterReadBuffer!.unmap()
+```
+
+### Convergence et arrêt automatique
+
+La méthode `needsMoreFrames()` utilise le compteur pour décider si le rendu doit continuer :
+
+```typescript
+// Engine.ts:1334-1345
+needsMoreFrames(): boolean {
+    if (this.needRender) ...
+    else if (this.zoomReprojectionActive) ...
+    else if (this.clearHistoryNextFrame) ...
+    else if (this.orbitIncomplete) ...
+    else if (this.unfinishedPixelCount < 0
+        || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD) ...
+    return reason !== ''
+}
+```
+
+Le seuil `UNFINISHED_PIXEL_DONE_THRESHOLD = 10` tolère quelques pixels résiduels
+(dus aux arrondis flottants aux frontières des sentinelles) plutôt que de tourner indéfiniment.
+Quand le compteur descend en dessous de ce seuil, le moteur s'arrête et économise du GPU.
+
+## Le gating adaptatif du raffinement
+
+### Le problème
+
+À chaque étape de raffinement des sentinelles, le nombre de pixels à calculer est multiplié
+par environ **4** (la grille passe de pas $n$ à $n/2$, soit 4× plus de points).
+Si le GPU est déjà saturé (batch au minimum), cette avalanche de pixels peut provoquer
+des frames très longues.
+
+### La solution : geler la grille sous pression
+
+Le moteur **gèle le raffinement** des sentinelles quand deux conditions sont réunies :
+1. Le batch d'itérations est au minimum (`MIN_BATCH_SIZE = 100`)
+2. Le nombre de pixels actifs dépasse un seuil (`ACTIVE_PIXEL_GATE_THRESHOLD = 5 000 000`)
+
+```typescript
+// Engine.ts:1057-1072
+const gateOpen =
+    this.clearHistoryNextFrame
+    || this.activePixelCount < 0
+    || this.iterationBatchSize > MIN_BATCH_SIZE
+    || this.activePixelCount < ACTIVE_PIXEL_GATE_THRESHOLD * this.gpuLoadMultiplier
+
+if (gateOpen && this.refinementWasGated) {
+    // Quand la porte se rouvre, baisser le batch préventivement
+    this.iterationBatchSize = MIN_BATCH_SIZE
+}
+this.refinementWasGated = !gateOpen
+```
+
+Le flag `allowRefinement` est transmis au shader `reproject.wgsl`, qui gèle la grille :
+
+```wgsl
+// reproject.wgsl:141-143
+if (uni.allowRefinement < 0.5) {
+    return s;  // Pas de raffinement : garder la sentinelle telle quelle
+}
+```
+
+### Pourquoi ça fonctionne
+
+- Si le batch a de la marge (au-dessus de `MIN_BATCH_SIZE`), la porte reste ouverte :
+  le contrôleur de batch absorbera le pic en réduisant le nombre d'itérations par pixel.
+- Si le batch est déjà au minimum, la porte se ferme : on attend que les pixels actuels
+  terminent avant d'en injecter de nouveaux.
+- Quand la porte se rouvre, le batch est préventivement réduit au minimum pour absorber
+  le pic ×4 de la prochaine étape de raffinement.
+
+Ce mécanisme garantit la convergence tout en maintenant un framerate stable,
+même sur des GPU lents ou des écrans haute résolution.
+
+## Le sampling bilinéaire de la palette
+
+### Le problème
+
+La palette de couleurs est une texture 1D de 4096 pixels (`rgba8unorm`).
+Avec un échantillonnage discret (`textureLoad`, nearest-neighbor), les dégradés subtils
+présentent un **banding** visible — des bandes de couleur unie séparées par des transitions brutales.
+
+### La solution : un sampler linéaire
+
+Un `GPUSampler` avec filtrage bilinéaire est créé et passé au shader de coloration :
+
+```typescript
+// Engine.ts:334-339
+this.paletteSampler = this.device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+    addressModeU: 'repeat',    // la palette boucle naturellement
+    addressModeV: 'clamp-to-edge',
+})
+```
+
+Dans le shader, `textureSampleLevel` remplace `textureLoad` pour l'accès à la palette :
+
+```wgsl
+// color.wgsl:124
+let paletteColor = textureSampleLevel(
+    paletteTex, paletteSampler,
+    vec2<f32>(palettePhase, 0.5), 0.0
+).rgb;
+```
+
+::: tip Pourquoi `textureSampleLevel` et non `textureSample` ?
+`textureSample` exige un **contrôle de flux uniforme** (tous les pixels d'un workgroup
+doivent suivre le même chemin). Or, la fonction `colorize_pixel` est appelée depuis
+des branches qui dépendent des données par pixel (sentinelle, itération...).
+`textureSampleLevel` prend un niveau de mip explicite (0.0) et n'a pas cette restriction,
+tout en produisant exactement la même interpolation bilinéaire.
+:::
+
+Le mode `repeat` sur l'axe U est important : la palette boucle naturellement
+(phase 0.999 → 0.001), et le filtrage linéaire doit pouvoir interpoler correctement
+à travers cette frontière.
+
+## HUD de statistiques de rendu
+
+Un composant `RenderStats.vue` affiche en temps réel les métriques de performance
+sous forme de HUD superposé au rendu :
+
+- **FPS** avec indicateur actif/inactif (point vert/gris)
+- **Pourcentage de complétion** : $(totalPixels - unfinishedPixels) / totalPixels \times 100$
+- **Pixels non terminés** et **pixels actifs**
+- **Temps GPU par frame** (en ms)
+- **Taille du batch d'itérations** courant
+- **Progression de l'orbite** : `currentGuardedMaxIter / currentMaxIterations`
+- **Opérations par frame** : $activePixels \times batchSize$
+- **Graphique temporel** avec historique de 200 échantillons (pixels non terminés, FPS, pixels actifs, ops/frame)
+
+Ce HUD est dépliable d'un clic et met à jour ses données toutes les 150ms
+en interrogeant les propriétés publiques de l'Engine (`unfinishedPixelCount`, `activePixelCount`, `iterationBatchSize`...).
 
 ## Résultat : une navigation fluide
 
@@ -680,8 +967,10 @@ Voici un rendu interactif qui utilise toutes les optimisations décrites :
 </ClientOnly>
 
 Essayez de naviguer : vous observerez que lors d'un pan rapide, les bords de l'image se remplissent
-progressivement (sentinelles). Lors d'un zoom, l'image entière se raffine de grossier à fin.
-Et à tout moment, le framerate reste stable grâce à l'ajustement automatique du budget d'itérations.
+progressivement (sentinelles). Lors d'un zoom, la snapshot figée reste visible pendant que la nouvelle
+image se calcule en parallèle — sans clignotement ni frame noire.
+Et à tout moment, le framerate reste stable grâce à l'ajustement automatique du budget d'itérations
+et au gating adaptatif du raffinement.
 
 ## Résumé
 
@@ -691,7 +980,11 @@ Et à tout moment, le framerate reste stable grâce à l'ajustement automatique 
 | **Rotation sans recalcul** | Texture neutre surdimensionnée ; rotation uniquement à l'affichage | Zéro recalcul |
 | **Sentinelles hiérarchiques** | Grille puissance de 2, subdivisée frame par frame (64 → 32 → ... → 1) | Raffinement progressif grossier → fin |
 | **Resolve avec escalade** | Test des 4 coins + escalade si budget épuisé | Affichage sans artefact |
-| **Batch adaptatif** | Feedback temps GPU → taille du batch (EMA $\alpha = 0.3$, cible 16ms) | Framerate constant |
+| **Batch adaptatif** | Feedback temps GPU → taille du batch (EMA $\alpha = 0.3$, cible configurable) | Framerate constant |
 | **Continuation d'itérations** | État complet par pixel dans 7 couches texture | Itérations profondes sans blocage |
-| **Chunking orbite** | WASM calcule 500 pas max par frame | UI jamais bloquée |
-| **Reprojection zoom** *(proposé)* | Snapshot figée + calcul live en parallèle, double texture dans Color | Zoom sans flash ni recalcul visible |
+| **Chunking orbite** | WASM calcule 100 pas max par frame | UI jamais bloquée |
+| **Reprojection zoom** | Snapshot figée + calcul live en parallèle, double texture dans Color, paliers ×16 | Zoom sans flash ni recalcul visible |
+| **Compteur GPU** | Compute pass atomique + readback asynchrone | Arrêt automatique du rendu, zéro gaspillage |
+| **Gating adaptatif** | Gel du raffinement quand GPU saturé, drop préventif du batch | Pas d'avalanche de pixels, framerate stable |
+| **Palette bilinéaire** | `textureSampleLevel` avec sampler linéaire + repeat | Dégradés lisses, pas de banding |
+| **HUD statistiques** | Compteurs temps réel + graphique historique 200 échantillons | Monitoring visuel de la convergence |
