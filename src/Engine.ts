@@ -251,6 +251,7 @@ export class Engine {
     skyboxTextureView?: GPUTextureView
     paletteTexture?: GPUTexture
     paletteTextureView?: GPUTextureView
+    paletteSampler?: GPUSampler
 
     // Webcam
     webcamTexture?: WebcamTexture
@@ -329,6 +330,13 @@ export class Engine {
             [paletteImageData.width, paletteImageData.height]
         )
         this.paletteTextureView = this.paletteTexture.createView()
+        // Sampler linéaire pour interpolation douce de la palette
+        this.paletteSampler = this.device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear',
+            addressModeU: 'repeat',
+            addressModeV: 'clamp-to-edge',
+        })
 
         // Webcam : initialisation (optionnel, activer webcamEnabled pour l'utiliser)
         this.webcamTexture = new WebcamTexture(1920, 1080)
@@ -429,6 +437,7 @@ export class Engine {
                 { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
@@ -633,6 +642,7 @@ export class Engine {
                 { binding: 4, resource: this.webcamTextureView! },
                 { binding: 5, resource: this.paletteTextureView! },
                 { binding: 6, resource: this.frozenArrayView! },
+                { binding: 7, resource: this.paletteSampler! },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,
@@ -1410,6 +1420,7 @@ export class Engine {
                     { binding: 4, resource: this.webcamTextureView! },
                     { binding: 5, resource: this.paletteTextureView! },
                     { binding: 6, resource: this.frozenArrayView! },
+                    { binding: 7, resource: this.paletteSampler! },
                 ],
                 label: 'Engine BindGroup Color',
             })
@@ -1440,6 +1451,115 @@ export class Engine {
             [bitmap.width, bitmap.height]
         )
         return texture
+    }
+
+    // ── Readback d'un pixel d'itération depuis la texture resolved ────
+    // Convertit les coordonnées écran (CSS) en coordonnées texture neutre,
+    // lit les couches 0 (iter), 2 (zx), 3 (zy), 4 (der_x), 5 (der_y)
+    // et renvoie les données brutes nécessaires au calcul de la phase palette.
+
+    /** Données d'itération lues depuis le GPU pour un pixel. */
+    static readonly ITER_PIXEL_LAYERS = [0, 2, 3, 4, 5] as const
+
+    /**
+     * Lit les données d'itération en un point écran (coordonnées CSS, relatives au canvas).
+     * Renvoie null si le pixel est hors cadre ou n'a pas de données valides.
+     *
+     * @param cssX – position X relative au canvas (getBoundingClientRect)
+     * @param cssY – position Y relative au canvas (getBoundingClientRect)
+     * @param canvasWidth  – largeur CSS du canvas
+     * @param canvasHeight – hauteur CSS du canvas
+     */
+    async readIterationDataAt(
+        cssX: number,
+        cssY: number,
+        canvasWidth: number,
+        canvasHeight: number,
+    ): Promise<{ iter: number; zx: number; zy: number; derX: number; derY: number } | null> {
+        if (!this.resolvedTexture || !this.device) return null
+
+        const aspect = this.width / Math.max(1, this.height)
+        const angle = this.previousMandelbrot?.angle ?? 0
+
+        // Écran CSS → UV écran [0,1]
+        // Note : en CSS, y=0 est en haut ; dans le shader (clip-space → UV),
+        // fragCoord.y=0 est en bas. On inverse donc Y pour correspondre.
+        const uvX = cssX / Math.max(1, canvasWidth)
+        const uvY = 1 - cssY / Math.max(1, canvasHeight)
+
+        // UV écran → coordonnées locales (même calcul que color.wgsl)
+        const xyScreenX = uvX * 2 - 1
+        const xyScreenY = uvY * 2 - 1
+        const localX = xyScreenX * aspect
+        const localY = xyScreenY
+
+        // Rotation par +angle
+        const sinA = Math.sin(angle)
+        const cosA = Math.cos(angle)
+        const localRotX = cosA * localX - sinA * localY
+        const localRotY = sinA * localX + cosA * localY
+
+        // Normalisation par l'étendue neutre
+        const neutralExtent = Math.sqrt(aspect * aspect + 1)
+        const xyNeutralX = localRotX / neutralExtent
+        const xyNeutralY = localRotY / neutralExtent
+
+        // UV neutre [0,1]
+        const uvNeutralX = xyNeutralX * 0.5 + 0.5
+        const uvNeutralY = xyNeutralY * 0.5 + 0.5
+
+        // Coordonnées texel (attention: Y inversé dans le shader — 1-uv.y)
+        const texSize = this.neutralSize
+        const texelX = Math.floor(Math.max(0, Math.min(texSize - 1, uvNeutralX * texSize)))
+        const texelY = Math.floor(Math.max(0, Math.min(texSize - 1, (1 - uvNeutralY) * texSize)))
+
+        // Lecture GPU: copier les 5 couches nécessaires (1 texel chacune) dans un buffer
+        const layerIndices = Engine.ITER_PIXEL_LAYERS
+        const floatsPerLayer = 1
+        const bytesPerFloat = 4
+        const align256 = (n: number) => ((n + 255) & ~255)
+        const bytesPerRow = align256(floatsPerLayer * bytesPerFloat) // 256 minimum pour WebGPU
+        const totalBytes = bytesPerRow * layerIndices.length
+
+        const readBuffer = this.device.createBuffer({
+            size: totalBytes,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            label: 'Engine IterPixel Readback',
+        })
+
+        const encoder = this.device.createCommandEncoder()
+        for (let i = 0; i < layerIndices.length; i++) {
+            encoder.copyTextureToBuffer(
+                {
+                    texture: this.resolvedTexture,
+                    origin: { x: texelX, y: texelY, z: layerIndices[i] },
+                },
+                {
+                    buffer: readBuffer,
+                    offset: bytesPerRow * i,
+                    bytesPerRow,
+                },
+                { width: 1, height: 1, depthOrArrayLayers: 1 },
+            )
+        }
+        this.device.queue.submit([encoder.finish()])
+
+        await readBuffer.mapAsync(GPUMapMode.READ)
+        const mapped = new Float32Array(readBuffer.getMappedRange())
+        // Extraire les valeurs depuis chaque couche (séparées par bytesPerRow/4 floats)
+        const stride = bytesPerRow / bytesPerFloat
+        const iter = mapped[0 * stride]
+        const zx   = mapped[1 * stride]
+        const zy   = mapped[2 * stride]
+        const derX = mapped[3 * stride]
+        const derY = mapped[4 * stride]
+        readBuffer.unmap()
+        readBuffer.destroy()
+
+        // Pixel sentinelle ou non calculé
+        if (iter < 0) return null
+
+        return { iter, zx, zy, derX, derY }
     }
 
     // Met à jour la texture GPU à partir de la webcam (à appeler à chaque frame si webcamEnabled)

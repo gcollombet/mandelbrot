@@ -99,12 +99,12 @@ const handleTouchStart = (e: TouchEvent, action: () => void) => {
   e.preventDefault();
   action();
 };
-
 const handleTouchEnd = (e: TouchEvent) => {
   e.preventDefault();
   stopAllActions();
 };
 </script>
+
 
 <template>
   <div class="mobile-nav-controls">

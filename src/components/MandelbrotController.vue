@@ -3,6 +3,8 @@ import {defineProps, onMounted, onUnmounted, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
 import MobileNavigationControls from './MobileNavigationControls.vue';
 import type {MandelbrotExposed} from "../types/MandelbrotExposed.ts";
+import type {ComplexCoordStr} from "../CursorCoordinate.ts";
+import type {IterationData} from "../CursorCoordinate.ts";
 
 const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
@@ -36,9 +38,46 @@ const props = defineProps<{
   targetFps?: number,
   gpuLoadMultiplier?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
+  pickerMode?: boolean,
+}>();
+
+const emit = defineEmits<{
+  cursorCoord: [coord: ComplexCoordStr | null, clientX: number, clientY: number];
+  palettePick: [data: IterationData, clientX: number, clientY: number];
 }>();
 
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
+
+// --- Cursor coordinate tracking ---
+let cursorOnCanvas = false;
+let lastClientX = 0;
+let lastClientY = 0;
+
+/** Recompute and emit cursor complex coords from the last known pixel position. */
+function refreshCursorCoord() {
+  if (!cursorOnCanvas) return;
+  const canvas = getCanvas();
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const px = lastClientX - rect.left;
+  const py = lastClientY - rect.top;
+  const nav = mandelbrotRef.value?.getNavigator();
+  if (!nav) return;
+  const result: string[] = nav.pixel_to_complex(px, py, rect.width, rect.height);
+  if (!result || result.length < 2) return;
+  emit('cursorCoord', { re: result[0], im: result[1] }, lastClientX, lastClientY);
+}
+
+function handleCanvasEnter(e: MouseEvent) {
+  cursorOnCanvas = true;
+  lastClientX = e.clientX;
+  lastClientY = e.clientY;
+}
+
+function handleCanvasLeave() {
+  cursorOnCanvas = false;
+  emit('cursorCoord', null, 0, 0);
+}
 
 // Etats d'interaction et navigation
 const pressedKeys: Record<string, boolean> = {};
@@ -97,10 +136,13 @@ function handleKeyup(e: KeyboardEvent) {
 }
 
 function handleWheel(e: WheelEvent) {
+  // En mode pipette, bloquer le zoom
+  if (props.pickerMode) { e.preventDefault(); return; }
   e.preventDefault();
   const zoomFactor = 0.95;
   if (e.deltaY < 0) mandelbrotRef.value?.zoom(zoomFactor);
   else mandelbrotRef.value?.zoom(1 / zoomFactor);
+  refreshCursorCoord();
 }
 
 // Center the view on a specific canvas point
@@ -120,11 +162,14 @@ function centerOnCanvasPoint(clientX: number, clientY: number) {
 }
 
 function handleDblClick(e: MouseEvent) {
+  // En mode pipette, bloquer le double-clic
+  if (props.pickerMode) { e.preventDefault(); return; }
   e.preventDefault();
   centerOnCanvasPoint(e.clientX, e.clientY);
 }
 
 function handleTouchEndForDoubleTap(e: TouchEvent) {
+  if (props.pickerMode) return;
   if (e.touches.length !== 0) return;
   const now = Date.now();
   const touch = e.changedTouches[0];
@@ -148,6 +193,12 @@ function handleTouchEndForDoubleTap(e: TouchEvent) {
 }
 
 function handleMouseDown(e: MouseEvent) {
+  // En mode pipette, bloquer drag/rotation et déclencher la lecture GPU
+  if (props.pickerMode) {
+    e.preventDefault();
+    handlePickerClick(e);
+    return;
+  }
   if (e.button === 2) {
     isRotating = true;
   } else {
@@ -158,7 +209,29 @@ function handleMouseDown(e: MouseEvent) {
   }
 }
 
+/** Lecture GPU au clic en mode pipette. */
+async function handlePickerClick(e: MouseEvent) {
+  const engine = mandelbrotRef.value?.getEngine();
+  if (!engine) return;
+  const canvas = getCanvas();
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  const cssX = e.clientX - rect.left;
+  const cssY = e.clientY - rect.top;
+  const data = await engine.readIterationDataAt(cssX, cssY, rect.width, rect.height);
+  if (!data) return;
+  emit('palettePick', data, e.clientX, e.clientY);
+}
+
 function handleMouseMove(e: MouseEvent) {
+  // Track cursor position for continuous coordinate refresh
+  lastClientX = e.clientX;
+  lastClientY = e.clientY;
+  refreshCursorCoord();
+
+  // En mode pipette, pas de drag/rotation
+  if (props.pickerMode) return;
+
   const coords = getCanvasCoords(e);
   if (isRotating) {
     const canvas = getCanvas();
@@ -184,11 +257,13 @@ function handleMouseMove(e: MouseEvent) {
 }
 
 function handleMouseUp(e: MouseEvent) {
+  if (props.pickerMode) return;
   if (e.button === 2) isRotating = false;
   else isDragging = false;
 }
 
 function handleTouchStart(e: TouchEvent) {
+  if (props.pickerMode) return;
   const canvas = getCanvas();
   if (!canvas) return;
   if (e.touches.length === 1) {
@@ -210,6 +285,7 @@ function handleTouchStart(e: TouchEvent) {
 }
 
 function handleTouchMove(e: TouchEvent) {
+  if (props.pickerMode) return;
   const canvas = getCanvas();
   if (!canvas) return;
   if (isDragging && e.touches.length === 1) {
@@ -246,15 +322,20 @@ function handleTouchEnd(e: TouchEvent) {
 }
 
 function updateLoop() {
-  if (pressedKeys['KeyW']) mandelbrotRef.value?.translate(0, moveStep);
-  if (pressedKeys['KeyS']) mandelbrotRef.value?.translate(0, -moveStep);
-  if (pressedKeys['KeyA']) mandelbrotRef.value?.translate(-moveStep, 0);
-  if (pressedKeys['KeyD']) mandelbrotRef.value?.translate(moveStep, 0);
-  if (pressedKeys['KeyQ']) mandelbrotRef.value?.rotate(angleStep);
-  if (pressedKeys['KeyE']) mandelbrotRef.value?.rotate(-angleStep);
-  const zoomFactor = 0.95;
-  if (pressedKeys['KeyR']) mandelbrotRef.value?.zoom(zoomFactor);
-  if (pressedKeys['KeyF']) mandelbrotRef.value?.zoom(1 / zoomFactor);
+  // En mode pipette, pas de navigation clavier
+  if (!props.pickerMode) {
+    if (pressedKeys['KeyW']) mandelbrotRef.value?.translate(0, moveStep);
+    if (pressedKeys['KeyS']) mandelbrotRef.value?.translate(0, -moveStep);
+    if (pressedKeys['KeyA']) mandelbrotRef.value?.translate(-moveStep, 0);
+    if (pressedKeys['KeyD']) mandelbrotRef.value?.translate(moveStep, 0);
+    if (pressedKeys['KeyQ']) mandelbrotRef.value?.rotate(angleStep);
+    if (pressedKeys['KeyE']) mandelbrotRef.value?.rotate(-angleStep);
+    const zoomFactor = 0.95;
+    if (pressedKeys['KeyR']) mandelbrotRef.value?.zoom(zoomFactor);
+    if (pressedKeys['KeyF']) mandelbrotRef.value?.zoom(1 / zoomFactor);
+  }
+  // Refresh cursor tooltip coords each frame (view may have moved under the cursor)
+  refreshCursorCoord();
   updateTimer = window.setTimeout(updateLoop, 16);
 }
 
@@ -271,6 +352,8 @@ onMounted(async () => {
   canvas.addEventListener('mousedown', handleMouseDown);
   canvas.addEventListener('dblclick', handleDblClick);
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  canvas.addEventListener('mouseenter', handleCanvasEnter);
+  canvas.addEventListener('mouseleave', handleCanvasLeave);
   window.addEventListener('mousemove', handleMouseMove);
   window.addEventListener('mouseup', handleMouseUp);
 
@@ -299,6 +382,8 @@ onUnmounted(() => {
     canvas.removeEventListener('mousedown', handleMouseDown as EventListener);
     canvas.removeEventListener('dblclick', handleDblClick as EventListener);
     canvas.removeEventListener('contextmenu', (e) => e.preventDefault());
+    canvas.removeEventListener('mouseenter', handleCanvasEnter);
+    canvas.removeEventListener('mouseleave', handleCanvasLeave);
     canvas.removeEventListener('touchstart', handleTouchStart as EventListener);
     canvas.removeEventListener('touchmove', handleTouchMove as EventListener);
     canvas.removeEventListener('touchend', handleTouchEnd as EventListener);

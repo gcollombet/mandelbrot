@@ -32,6 +32,7 @@ struct Uniforms {
 @group(0) @binding(4) var webcamTex: texture_2d<f32>;
 @group(0) @binding(5) var paletteTex: texture_2d<f32>;
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
+@group(0) @binding(7) var paletteSampler: sampler; // sampler bilinéaire pour la palette
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -105,20 +106,22 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
 fn palette(v: f32, v_smooth: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> vec3<f32> {
   // v_smooth: always smoothed iteration value (for tessellation displacement)
   // v: iteration value respecting the smoothness setting (for palette lookup)
-  let deep_smooth = v_smooth * 2.0;
+  let paletteRepeat = max(parameters.palettePeriod, 0.0001);
+  // deep / paletteRepeat : coordonnée normalisée par la période (pour palette et tessellation)
+  let deep_norm = v_smooth * 2.0 / paletteRepeat;
   let deep = v * 2.0;
 
   let disp = parameters.displacementAmount;
-  let tessColor = tile_tessellation(tileTex, deep_smooth * 2.0 * disp + dx, deep_smooth * 2.0 * disp + dy, parameters.tessellationLevel);
+  let tessColor = tile_tessellation(tileTex, deep_norm * 2.0 * disp + dx, deep_norm * 2.0 * disp + dy, parameters.tessellationLevel);
   let webCamColor = tile_tessellation(
     webcamTex,
-    deep_smooth + dx + cos(parameters.time * 0.1),
-    deep_smooth + dy + sin(parameters.time * 0.15),
+    deep_norm + dx + cos(parameters.time * 0.1),
+    deep_norm + dy + sin(parameters.time * 0.15),
     parameters.tessellationLevel + sin(parameters.time * 0.05)
   );
-  let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let palettePhase = fract( deep / paletteRepeat + parameters.paletteOffset );
-  let paletteColor = tile_tessellation(paletteTex, palettePhase, 1.0, 1.0);
+  // Sampling bilinéaire de la palette (texture 1D, hauteur 1px)
+  let paletteColor = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.5), 0.0).rgb;
 
   var color = vec3<f32>(0.0, 0.0, 0.0);
 
@@ -211,7 +214,7 @@ fn colorize_pixel(
     let fake_log = max(log(z_sq + 1.0), 0.001);
     let mu_approx = clamp(1.0 - log(fake_log / log(parameters.mu)) / log(2.0), 0.0, 1.0);
     let nu = iter_val + mu_approx;
-    let v = nu / 256.0;
+    let v = nu;
     let z = vec2<f32>(zx_val, zy_val);
     let der = vec2<f32>(der_x, der_y);
     let d = cdiv(der, z);
@@ -254,8 +257,8 @@ fn colorize_pixel(
   let d = cdiv(der, z);
   let angle_der = atan2(d.y, d.x);
 
-  let v = nu / 256.0;
-  let v_smooth = nu_smooth / 256.0;
+  let v = nu;
+  let v_smooth = nu_smooth;
   var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y);
 
   return vec4<f32>(color, 1.0);

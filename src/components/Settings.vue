@@ -18,12 +18,28 @@ import {
   getTextureCount,
 } from '../textureStore';
 import type { TextureMetadata } from '../textureStore';
+import {
+  getAllPresetEntries,
+  getPresetById,
+  savePresetEntry,
+  deletePresetEntry,
+  getPresetCount,
+   migratePresetsFromLocalStorage,
+  migratePalettePeriod,
+  computeScaleExponent,
+} from '../presetStore';
+import type { PresetMetadata, PresetRecord } from '../presetStore';
 
 import type { Engine } from '../Engine.ts';
 const props = defineProps<{
   engine: Engine | null;
   suspendShortcuts?: (suspend: boolean) => void;
   activeTab: string;
+  pickerMode?: boolean;
+}>();
+
+const emit = defineEmits<{
+  'toggle-picker': [];
 }>();
 const model =  defineModel<MandelbrotParams>({
   default: {
@@ -34,7 +50,7 @@ const model =  defineModel<MandelbrotParams>({
     mu: 1000000.0,
     epsilon: 0.00001,
     colorStops: [],
-    palettePeriod: 1,
+     palettePeriod: 256,
     paletteOffset: 0,
     antialiasLevel: 1,
     tessellationLevel: 2,
@@ -68,11 +84,11 @@ const angleSlider = computed({
     model.value.angle = (deg % 360) * Math.PI / 180;
   },
 });
-// Slider palette period : logarithmique, 0–1 ↔ 1–100
+// Slider palette period : logarithmique, 0–1 ↔ 1–1000000
 const sliderPalettePeriod = computed({
-  get: () => (Math.log10(model.value.palettePeriod || 0.01) + 2) / 5,
+  get: () => Math.log10(model.value.palettePeriod || 1) / 6,
   set: val => {
-    model.value.palettePeriod = Number((10 ** (val * 5 - 2)).toPrecision(6));
+    model.value.palettePeriod = Number((10 ** (val * 6)).toPrecision(6));
   }
 });
 // Slider log2(scale) : valeurs de slider 1 à 126 —> scale de 2^-1 à 2^-126
@@ -125,7 +141,9 @@ function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = '
 
 const navigationPreview = ref<string | null>(null);
 const presetName = ref('');
-const presets = ref<{ name: string, value: MandelbrotParams, thumbnail?: string, date?: string }[]>([]);
+const presets = ref<PresetMetadata[]>([]);
+/** Full record cache: loaded on demand when a preset is selected. */
+const presetCache = new Map<number, PresetRecord>();
 
 // Palette management
 const paletteName = ref('');
@@ -133,17 +151,16 @@ const palettes = ref<{ name: string, colorStops: any[], thumbnail?: string, date
 const selectedPalette = ref('');
 const showPaletteDropdown = ref(false);
 
-function deletePreset() {
-  const name = presetName.value.trim();
-  if (!name) return;
-  if (window.confirm(`Supprimer le preset "${name}" ? Cette action est irréversible.`)) {
-    const idx = presets.value.findIndex(p => p.name === name);
-    if (idx >= 0) {
-      presets.value.splice(idx, 1);
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(presets.value));
-      selectedPreset.value = '';
-      presetName.value = '';
-    }
+async function deletePresetById(id: number) {
+  const meta = presets.value.find(p => p.id === id);
+  const label = meta?.name || formatPresetDate(meta?.date ?? '');
+  if (!window.confirm(`Supprimer le preset "${label}" ? Cette action est irréversible.`)) return;
+  await deletePresetEntry(id);
+  presetCache.delete(id);
+  presets.value = await getAllPresetEntries();
+  if (selectedPreset.value === id) {
+    selectedPreset.value = null;
+    presetName.value = '';
   }
 }
 
@@ -153,47 +170,69 @@ async function refreshNavigationPreview() {
   }
 }
 
-const selectedPreset = ref('');
+const selectedPreset = ref<number | null>(null);
 const showPresetDropdown = ref(false);
 
-const currentPresetObj = computed(() => presets.value.find(p => p.name === selectedPreset.value));
-const currentPresetThumbnail = computed(() => currentPresetObj.value?.thumbnail);
+const currentPresetMeta = computed(() => presets.value.find(p => p.id === selectedPreset.value));
+const currentPresetThumbnail = computed(() => currentPresetMeta.value?.thumbnail);
 
-function selectPresetFromDropdown(preset: { name: string, value: MandelbrotParams, thumbnail?:string, date?:string }) {
-  selectPreset(preset.name);
+async function selectPresetFromDropdown(preset: PresetMetadata) {
+  await selectPreset(preset.id);
   showPresetDropdown.value = false;
 }
 
+/** Format an ISO date string for display. */
+function formatPresetDate(iso: string): string {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })
+      + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  } catch { return iso; }
+}
+
+/** Format scale exponent for display, e.g. "10^42". */
+function formatZoom(exp: number): string {
+  if (exp <= 0) return '1\u00d7';
+  return '10^' + exp;
+}
+
 // Navigation tab: load only location (cx, cy, scale, angle) from a preset
-const selectedNavPreset = ref('');
+const selectedNavPreset = ref<number | null>(null);
 const showNavPresetDropdown = ref(false);
 
-const currentNavPresetObj = computed(() => presets.value.find(p => p.name === selectedNavPreset.value));
-const currentNavPresetThumbnail = computed(() => currentNavPresetObj.value?.thumbnail);
+const currentNavPresetMeta = computed(() => presets.value.find(p => p.id === selectedNavPreset.value));
+const currentNavPresetThumbnail = computed(() => currentNavPresetMeta.value?.thumbnail);
 
-function selectPresetLocation(name: string) {
-  const preset = presets.value.find(p => p.name === name);
-  if (preset) {
-    selectedNavPreset.value = name;
-    model.value.cx = preset.value.cx;
-    model.value.cy = preset.value.cy;
-    model.value.scale = preset.value.scale;
-    model.value.angle = preset.value.angle;
+async function selectPresetLocation(id: number) {
+  const record = await getCachedPreset(id);
+  if (record) {
+    selectedNavPreset.value = id;
+    model.value.cx = record.value.cx;
+    model.value.cy = record.value.cy;
+    model.value.scale = record.value.scale;
+    model.value.angle = record.value.angle;
   }
 }
 
-function selectNavPresetFromDropdown(preset: { name: string, value: MandelbrotParams, thumbnail?:string, date?:string }) {
-  selectPresetLocation(preset.name);
+async function selectNavPresetFromDropdown(preset: PresetMetadata) {
+  await selectPresetLocation(preset.id);
   showNavPresetDropdown.value = false;
 }
 
-const STORAGE_KEY = 'mandelbrot_presets';
 const PALETTE_STORAGE_KEY = 'mandelbrot_palettes';
 
+/** Fetch a preset record, using cache to avoid repeated IDB reads. */
+async function getCachedPreset(id: number): Promise<PresetRecord | null> {
+  if (presetCache.has(id)) return presetCache.get(id)!;
+  const record = await getPresetById(id);
+  if (record) presetCache.set(id, record);
+  return record;
+}
+
 async function savePreset() {
-  if (!presetName.value.trim()) return;
-  let thumbnail: string | undefined = undefined;
-  let now = new Date().toISOString();
+  let thumbnail = '';
+  const now = new Date().toISOString();
   try {
     if (props.engine) {
       thumbnail = await props.engine.getSnapshotPng(256);
@@ -206,36 +245,78 @@ async function savePreset() {
   delete (savedValue as any).antialiasLevel;
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
-  const preset = {
-    name: presetName.value.trim(),
+  const name = presetName.value.trim();
+  const id = await savePresetEntry(savedValue, thumbnail, name || undefined, now);
+  presets.value = await getAllPresetEntries();
+  // Cache the new record
+  presetCache.set(id, {
+    id,
+    name: name || '',
     value: savedValue,
     thumbnail,
-    date: now
-  };
-  const idx = presets.value.findIndex(p => p.name === preset.name);
-  if (idx >= 0) {
-    presets.value[idx] = preset;
-  } else {
-    presets.value.push(preset);
-  }
-  localStorage.setItem(STORAGE_KEY, JSON.stringify(presets.value));
+    date: now,
+    scaleExponent: computeScaleExponent(savedValue.scale),
+  });
   presetName.value = '';
 }
 
+/**
+ * Quick snapshot: save the current state without requiring a name.
+ * Can be called from a keyboard shortcut via the parent component.
+ */
+async function quickSnapshot() {
+  let thumbnail = '';
+  try {
+    if (props.engine) {
+      thumbnail = await props.engine.getSnapshotPng(256);
+    }
+  } catch { /* ignore */ }
+  const savedValue = structuredClone(toRaw(model.value));
+  delete (savedValue as any).dprMultiplier;
+  delete (savedValue as any).maxIterationMultiplier;
+  delete (savedValue as any).antialiasLevel;
+  delete (savedValue as any).targetFps;
+  delete (savedValue as any).gpuLoadMultiplier;
+  const now = new Date().toISOString();
+  const id = await savePresetEntry(savedValue, thumbnail, undefined, now);
+  presets.value = await getAllPresetEntries();
+  presetCache.set(id, {
+    id,
+    name: '',
+    value: savedValue,
+    thumbnail,
+    date: now,
+    scaleExponent: computeScaleExponent(savedValue.scale),
+  });
+}
 
-function loadPresets() {
-  const raw = localStorage.getItem(STORAGE_KEY);
-  if (raw) {
-    try {
-      presets.value = JSON.parse(raw);
-      return;
-    } catch {}
+// Expose quickSnapshot and refreshPresets so parent can call them via ref
+defineExpose({ quickSnapshot, refreshPresets: async () => { presets.value = await getAllPresetEntries(); } });
+
+
+async function loadPresets() {
+  // 1. Migrate legacy localStorage data (if any)
+  await migratePresetsFromLocalStorage();
+
+  // 1b. Migrate palettePeriod ×256 (removal of /256 divisor in shader)
+  await migratePalettePeriod();
+
+  // 2. Bootstrap with defaults when DB is empty
+  const count = await getPresetCount();
+  if (count === 0 && defaultPresetsJson.length > 0) {
+    for (const legacy of defaultPresetsJson as any[]) {
+      if (!legacy.value) continue;
+      await savePresetEntry(
+        legacy.value,
+        legacy.thumbnail ?? '',
+        legacy.name ?? '',
+        legacy.date,
+      );
+    }
   }
-  // Bootstrap from bundled defaults when localStorage is empty
-  if (defaultPresetsJson.length > 0) {
-    presets.value = structuredClone(defaultPresetsJson) as typeof presets.value;
-    localStorage.setItem(STORAGE_KEY, JSON.stringify(presets.value));
-  }
+
+  // 3. Load metadata list
+  presets.value = await getAllPresetEntries();
 }
 
 function loadPalettes() {
@@ -291,46 +372,46 @@ function selectPaletteFromDropdown(palette: { name: string, colorStops: any[], t
 }
 
 // Palette tab: extract palette from a preset
-const selectedPalettePreset = ref('');
+const selectedPalettePreset = ref<number | null>(null);
 const showPalettePresetDropdown = ref(false);
 
-const currentPalettePresetObj = computed(() => presets.value.find(p => p.name === selectedPalettePreset.value));
-const currentPalettePresetThumbnail = computed(() => currentPalettePresetObj.value?.thumbnail);
+const currentPalettePresetMeta = computed(() => presets.value.find(p => p.id === selectedPalettePreset.value));
+const currentPalettePresetThumbnail = computed(() => currentPalettePresetMeta.value?.thumbnail);
 
-function selectPaletteFromPreset(name: string) {
-  const preset = presets.value.find(p => p.name === name);
-  if (preset) {
-    selectedPalettePreset.value = name;
-    model.value.colorStops = structuredClone(toRaw(preset.value.colorStops));
-    model.value.interpolationMode = preset.value.interpolationMode;
-    model.value.palettePeriod = preset.value.palettePeriod;
-    model.value.paletteOffset = preset.value.paletteOffset;
+async function selectPaletteFromPreset(id: number) {
+  const record = await getCachedPreset(id);
+  if (record) {
+    selectedPalettePreset.value = id;
+    model.value.colorStops = structuredClone(toRaw(record.value.colorStops));
+    model.value.interpolationMode = record.value.interpolationMode;
+    model.value.palettePeriod = record.value.palettePeriod;
+    model.value.paletteOffset = record.value.paletteOffset;
   }
 }
 
-function selectPalettePresetFromDropdown(preset: { name: string, value: MandelbrotParams, thumbnail?: string, date?: string }) {
-  selectPaletteFromPreset(preset.name);
+async function selectPalettePresetFromDropdown(preset: PresetMetadata) {
+  await selectPaletteFromPreset(preset.id);
   showPalettePresetDropdown.value = false;
 }
 
 // Graphics tab: extract all rendering params (except location & perf) from a preset
-const selectedGraphicsPreset = ref('');
+const selectedGraphicsPreset = ref<number | null>(null);
 const showGraphicsPresetDropdown = ref(false);
 
-const currentGraphicsPresetObj = computed(() => presets.value.find(p => p.name === selectedGraphicsPreset.value));
-const currentGraphicsPresetThumbnail = computed(() => currentGraphicsPresetObj.value?.thumbnail);
+const currentGraphicsPresetMeta = computed(() => presets.value.find(p => p.id === selectedGraphicsPreset.value));
+const currentGraphicsPresetThumbnail = computed(() => currentGraphicsPresetMeta.value?.thumbnail);
 
 /** Location fields — not copied in graphics extraction */
 const LOCATION_FIELDS: (keyof MandelbrotParams)[] = ['cx', 'cy', 'scale', 'angle'];
 /** Performance fields — never copied from presets */
 const PERF_FIELDS: (keyof MandelbrotParams)[] = ['dprMultiplier', 'maxIterationMultiplier', 'antialiasLevel', 'targetFps', 'gpuLoadMultiplier'];
 
-function selectGraphicsFromPreset(name: string) {
-  const preset = presets.value.find(p => p.name === name);
-  if (!preset) return;
-  selectedGraphicsPreset.value = name;
+async function selectGraphicsFromPreset(id: number) {
+  const record = await getCachedPreset(id);
+  if (!record) return;
+  selectedGraphicsPreset.value = id;
   const excluded = new Set<string>([...LOCATION_FIELDS, ...PERF_FIELDS]);
-  const src = preset.value;
+  const src = record.value;
   for (const key of Object.keys(src) as (keyof MandelbrotParams)[]) {
     if (excluded.has(key)) continue;
     if (key === 'colorStops') {
@@ -342,8 +423,8 @@ function selectGraphicsFromPreset(name: string) {
   }
 }
 
-function selectGraphicsPresetFromDropdown(preset: { name: string, value: MandelbrotParams, thumbnail?: string, date?: string }) {
-  selectGraphicsFromPreset(preset.name);
+async function selectGraphicsPresetFromDropdown(preset: PresetMetadata) {
+  await selectGraphicsFromPreset(preset.id);
   showGraphicsPresetDropdown.value = false;
 }
 
@@ -361,13 +442,13 @@ function deletePalette() {
   }
 }
 
-function selectPreset(name: string) {
-  const preset = presets.value.find(p => p.name === name);
-  if (preset) {
-    selectedPreset.value = name;
-    presetName.value = preset.name;
+async function selectPreset(id: number) {
+  const record = await getCachedPreset(id);
+  if (record) {
+    selectedPreset.value = id;
+    presetName.value = record.name;
     // Restore all fields except performance params
-    const saved = structuredClone(toRaw(preset.value));
+    const saved = structuredClone(toRaw(record.value));
     const current = model.value;
     for (const key of PERF_FIELDS) {
       (saved as any)[key] = (current as any)[key];
@@ -405,7 +486,7 @@ const lightAngleSlider = computed({
 });
 
 onMounted(async () => {
-  loadPresets();
+  await loadPresets();
   loadPalettes();
   await loadTextures();
   // Apply persisted texture to engine if it's not the default
@@ -441,8 +522,20 @@ watch([() => props.activeTab, () => props.engine], async ([tab]) => {
 // =====================================================
 // Import / Export Presets
 // =====================================================
-function exportPresets() {
-  const data = JSON.stringify(presets.value, null, 2);
+async function exportPresets() {
+  // Build full records for export (legacy-compatible format)
+  const allRecords: PresetRecord[] = [];
+  for (const meta of presets.value) {
+    const record = await getCachedPreset(meta.id);
+    if (record) allRecords.push(record);
+  }
+  const exportData = allRecords.map(r => ({
+    name: r.name,
+    value: r.value,
+    thumbnail: r.thumbnail,
+    date: r.date,
+  }));
+  const data = JSON.stringify(exportData, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
@@ -461,21 +554,20 @@ function importPresets(event: Event) {
   const file = input.files?.[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const imported = JSON.parse(reader.result as string);
       if (Array.isArray(imported)) {
-        // Merge: ajoute les nouveaux, écrase ceux de même nom
         for (const preset of imported) {
-          if (!preset.name || !preset.value) continue;
-          const idx = presets.value.findIndex(p => p.name === preset.name);
-          if (idx >= 0) {
-            presets.value[idx] = preset;
-          } else {
-            presets.value.push(preset);
-          }
+          if (!preset.value) continue;
+          await savePresetEntry(
+            preset.value,
+            preset.thumbnail ?? '',
+            preset.name ?? '',
+            preset.date,
+          );
         }
-        localStorage.setItem(STORAGE_KEY, JSON.stringify(presets.value));
+        presets.value = await getAllPresetEntries();
       }
     } catch {
       window.alert('Format de fichier invalide.');
@@ -1035,7 +1127,7 @@ async function renameAndSaveTexture() {
             <button class="button is-fullwidth" @click="showNavPresetDropdown = !showNavPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-nav-presets" type="button">
               <span style="display:flex; align-items:center; min-height:36px;">
                 <img v-if="currentNavPresetThumbnail" :src="currentNavPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ selectedNavPreset || 'Choisir un preset...' }}</span>
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentNavPresetMeta?.name || (selectedNavPreset ? formatPresetDate(currentNavPresetMeta?.date ?? '') : 'Choisir un preset...') }}</span>
                 <span class="icon is-small" style="margin-left:5px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1044,13 +1136,19 @@ async function renameAndSaveTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-nav-presets" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
+              <a v-for="preset in presets" :key="preset.id" class="dropdown-item"
                 @click.prevent="selectNavPresetFromDropdown(preset)"
-                :class="{ 'is-active': selectedNavPreset === preset.name }"
+                :class="{ 'is-active': selectedNavPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
-                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ preset.name }}</span>
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
+                  <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
+                  <span style="font-size:0.78em; color:#666; display:flex; gap:0.6em;">
+                    <span>{{ formatPresetDate(preset.date) }}</span>
+                    <span v-if="preset.scaleExponent > 0" style="font-family:monospace;">{{ formatZoom(preset.scaleExponent) }}</span>
+                  </span>
+                </div>
               </a>
             </div>
           </div>
@@ -1068,7 +1166,7 @@ async function renameAndSaveTexture() {
             <button class="button is-fullwidth" @click="showPresetDropdown = !showPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-presets" type="button">
               <span style="display:flex; align-items:center; min-height:36px;">
                 <img v-if="currentPresetThumbnail" :src="currentPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ presetName || 'Choisir un preset...' }}</span>
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentPresetMeta?.name || (selectedPreset ? formatPresetDate(currentPresetMeta?.date ?? '') : 'Choisir un preset...') }}</span>
                 <span class="icon is-small" style="margin-left:5px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1077,29 +1175,35 @@ async function renameAndSaveTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-presets" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
+              <a v-for="preset in presets" :key="preset.id" class="dropdown-item"
                 @click.prevent="selectPresetFromDropdown(preset)"
-                :class="{ 'is-active': selectedPreset === preset.name }"
+                :class="{ 'is-active': selectedPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
-                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ preset.name }}</span>
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
+                  <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
+                  <span style="font-size:0.78em; color:#666; display:flex; gap:0.6em;">
+                    <span>{{ formatPresetDate(preset.date) }}</span>
+                    <span v-if="preset.scaleExponent > 0" style="font-family:monospace;">{{ formatZoom(preset.scaleExponent) }}</span>
+                  </span>
+                </div>
+                <button class="delete is-small" style="flex-shrink:0;"
+                  @click.stop.prevent="deletePresetById(preset.id)"
+                  title="Supprimer ce preset"></button>
               </a>
             </div>
           </div>
         </div>
         <div class="field is-grouped" style="margin-top:0.8em;">
           <div class="control is-expanded">
-            <input class="input" v-model="presetName" type="text" placeholder="Nom..."
+            <input class="input" v-model="presetName" type="text" placeholder="Nom (facultatif)..."
               @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
               @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
             />
           </div>
           <div class="control">
             <button class="button is-link is-small" @click="savePreset">Enregistrer</button>
-          </div>
-          <div class="control">
-            <button class="button is-danger is-small" @click="deletePreset" :disabled="!presetName">Supprimer</button>
           </div>
         </div>
 
@@ -1125,7 +1229,12 @@ async function renameAndSaveTexture() {
     <!-- Palettes tab -->
     <div v-else-if="activeTab === 'palettes'">
       <div class="mb-3">
-        <PaletteEditor :color-stops="model.colorStops" :interpolation-mode="model.interpolationMode" />
+        <PaletteEditor
+          :color-stops="model.colorStops"
+          :interpolation-mode="model.interpolationMode"
+          :picker-mode="props.pickerMode"
+          @toggle-picker="emit('toggle-picker')"
+        />
       </div>
 
       <!-- Interpolation mode -->
@@ -1251,7 +1360,7 @@ async function renameAndSaveTexture() {
             <button class="button is-fullwidth" @click="showPalettePresetDropdown = !showPalettePresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palette-presets" type="button">
               <span style="display:flex; align-items:center; min-height:36px;">
                 <img v-if="currentPalettePresetThumbnail" :src="currentPalettePresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ selectedPalettePreset || 'Choisir un preset...' }}</span>
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentPalettePresetMeta?.name || (selectedPalettePreset ? formatPresetDate(currentPalettePresetMeta?.date ?? '') : 'Choisir un preset...') }}</span>
                 <span class="icon is-small" style="margin-left:5px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1260,13 +1369,19 @@ async function renameAndSaveTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-palette-presets" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
+              <a v-for="preset in presets" :key="preset.id" class="dropdown-item"
                 @click.prevent="selectPalettePresetFromDropdown(preset)"
-                :class="{ 'is-active': selectedPalettePreset === preset.name }"
+                :class="{ 'is-active': selectedPalettePreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
-                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ preset.name }}</span>
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
+                  <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
+                  <span style="font-size:0.78em; color:#666; display:flex; gap:0.6em;">
+                    <span>{{ formatPresetDate(preset.date) }}</span>
+                    <span v-if="preset.scaleExponent > 0" style="font-family:monospace;">{{ formatZoom(preset.scaleExponent) }}</span>
+                  </span>
+                </div>
               </a>
             </div>
           </div>
@@ -1351,7 +1466,7 @@ async function renameAndSaveTexture() {
             <button class="button is-fullwidth" @click="showGraphicsPresetDropdown = !showGraphicsPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-graphics-presets" type="button">
               <span style="display:flex; align-items:center; min-height:36px;">
                 <img v-if="currentGraphicsPresetThumbnail" :src="currentGraphicsPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ selectedGraphicsPreset || 'Choisir un preset...' }}</span>
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentGraphicsPresetMeta?.name || (selectedGraphicsPreset ? formatPresetDate(currentGraphicsPresetMeta?.date ?? '') : 'Choisir un preset...') }}</span>
                 <span class="icon is-small" style="margin-left:5px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1360,13 +1475,19 @@ async function renameAndSaveTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-graphics-presets" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in presets" :key="preset.name" class="dropdown-item"
+              <a v-for="preset in presets" :key="preset.id" class="dropdown-item"
                 @click.prevent="selectGraphicsPresetFromDropdown(preset)"
-                :class="{ 'is-active': selectedGraphicsPreset === preset.name }"
+                :class="{ 'is-active': selectedGraphicsPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
-                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; margin-right:0.75em; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.11em;">{{ preset.name }}</span>
+                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
+                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
+                  <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
+                  <span style="font-size:0.78em; color:#666; display:flex; gap:0.6em;">
+                    <span>{{ formatPresetDate(preset.date) }}</span>
+                    <span v-if="preset.scaleExponent > 0" style="font-family:monospace;">{{ formatZoom(preset.scaleExponent) }}</span>
+                  </span>
+                </div>
               </a>
             </div>
           </div>

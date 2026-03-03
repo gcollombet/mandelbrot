@@ -4,6 +4,7 @@ import type {ColorStop} from "../ColorStop.ts";
 
 const props = defineProps<{
   stop: ColorStop;
+  selected?: boolean;
 }>();
 
 const emit = defineEmits(['update:position', 'select']);
@@ -82,19 +83,30 @@ function onTouchStart(e: TouchEvent) {
     left: props.stop.position * 100 + '%',
     top: 0,
     height: '100%',
-    width: '32px',
+    width: props.selected ? '38px' : '32px',
     transform: 'translateX(-50%)',
-     zIndex: 1,
+     zIndex: props.selected ? 10 : 1,
      cursor: 'ew-resize',
      pointerEvents: 'auto',
-     background: 'transparent'
+     background: 'transparent',
+     filter: props.selected ? 'drop-shadow(0 0 4px rgba(255,255,255,0.9)) drop-shadow(0 0 8px rgba(100,150,255,0.7))' : 'none',
+     transition: 'filter 0.15s, width 0.15s',
   }"
-    viewBox="0 0 22 64"
+    :viewBox="props.selected ? '0 0 26 64' : '0 0 22 64'"
     @mousedown="onDown"
     @touchstart="onTouchStart"
   >
-    <!-- Rectangle vertical -->
-    <rect x="6" y="0" width="12" height="64" rx="8" :fill="props.stop.color" :stroke="borderColor" stroke-width="2"/>
+    <!-- Rectangle vertical (plus large si sélectionné) -->
+    <rect
+      :x="props.selected ? 5 : 6"
+      y="0"
+      :width="props.selected ? 16 : 12"
+      height="64"
+      :rx="props.selected ? 10 : 8"
+      :fill="props.stop.color"
+      :stroke="props.selected ? '#fff' : borderColor"
+      :stroke-width="props.selected ? 3 : 2"
+    />
   </svg>
 </template>
 

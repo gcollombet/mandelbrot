@@ -1,15 +1,20 @@
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, reactive, ref, watch} from 'vue';
+import {computed, onMounted, onUnmounted, reactive, ref, toRaw, watch} from 'vue';
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
+import { savePresetEntry } from '../presetStore';
+import { truncateCoord, computePalettePhase } from '../CursorCoordinate';
+import type { ComplexCoordStr, IterationData } from '../CursorCoordinate';
+import { Palette } from '../Palette';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
 const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
 const mandelbrotEngine = computed(() => mandelbrotCtrlRef.value?.getEngine() ?? null);
 const renderStatsRef = ref<InstanceType<typeof RenderStats> | null>(null);
+const settingsRefs = ref<Record<string, InstanceType<typeof Settings> | null>>({});
 
 // Multi-window support: set of open tabs, each with its own popup position
 const openTabs = reactive(new Set<string>());
@@ -20,6 +25,49 @@ const popupPositions = reactive<Record<string, { x: number; y: number }>>({});
 const popupRefs = ref<Record<string, HTMLElement | null>>({});
 
 const showUI = ref(true);
+
+// --- Mode pipette palette ---
+const pickerMode = ref(false);
+
+function togglePickerMode() {
+  pickerMode.value = !pickerMode.value;
+}
+
+/** Gère le clic en mode pipette : calcule la phase et ajoute directement le curseur. */
+function onPalettePick(data: IterationData, _clientX: number, _clientY: number) {
+  const p = mandelbrotParams.value;
+  const result = computePalettePhase(
+    data, p.mu, p.palettePeriod, p.paletteOffset, p.activateSmoothness,
+  );
+  if (result.isInSet) return; // pas de curseur pour les points dans l'ensemble
+  const stops = p.colorStops;
+  if (stops.length >= 200) return; // max 200 stops
+  // Obtenir la couleur de la palette à cette phase
+  const palette = new Palette(p.colorStops, p.interpolationMode);
+  const colorHex = palette.getColorAt(result.phase);
+  stops.push({ color: colorHex, position: result.phase });
+}
+
+// --- Cursor tooltip ---
+const cursorTooltip = reactive({
+  visible: false,
+  cx: '',
+  cy: '',
+  clientX: 0,
+  clientY: 0,
+});
+
+function onCursorCoord(coord: ComplexCoordStr | null, clientX: number, clientY: number) {
+  if (!coord) {
+    cursorTooltip.visible = false;
+    return;
+  }
+  cursorTooltip.cx = truncateCoord(coord.re);
+  cursorTooltip.cy = truncateCoord(coord.im);
+  cursorTooltip.clientX = clientX;
+  cursorTooltip.clientY = clientY;
+  cursorTooltip.visible = true;
+}
 
 // --- HUD hide during navigation ---
 const isNavigating = ref(false);
@@ -115,7 +163,7 @@ const mandelbrotParams = ref<MandelbrotParams>({
   angle: 0.0,
   maxIterations: 1000,
   antialiasLevel: 1,
-  palettePeriod: 1,
+  palettePeriod: 256,
   paletteOffset: 0,
   shadingLevel: 1,
   lightAngle: 3.927,
@@ -228,6 +276,8 @@ function closeAllSettings() {
 // Close popups when tapping outside on mobile
 function handleOutsidePointerDown(e: PointerEvent) {
   if (openTabs.size === 0) return;
+  // En mode pipette, ne pas fermer les Settings au clic sur le canvas
+  if (pickerMode.value) return;
   const target = e.target as HTMLElement;
   // Check if click was inside any open popup or the top settings bar
   const insidePopup = Object.values(popupRefs.value).some(
@@ -241,19 +291,56 @@ function handleOutsidePointerDown(e: PointerEvent) {
 
 // Gestion clavier globale (W pour settings, Escape pour fermer)
 function handleGlobalKeydown(e: KeyboardEvent) {
-  if (e.key === 'Escape' && openTabs.size > 0) {
-    e.preventDefault();
-    closeAllSettings();
-    return;
+  if (e.key === 'Escape') {
+    // Quitter le mode pipette en priorité
+    if (pickerMode.value) {
+      e.preventDefault();
+      pickerMode.value = false;
+      return;
+    }
+    if (openTabs.size > 0) {
+      e.preventDefault();
+      closeAllSettings();
+      return;
+    }
   }
   if (shortcutsSuspended.value) return;
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) return;
   const key = e.key.toLowerCase();
+  // Quick snapshot shortcut (P)
+  if (key === 'p' && !e.repeat) {
+    e.preventDefault();
+    triggerQuickSnapshot();
+    return;
+  }
   const tab = settingsTabs.value.find(t => t.shortcut === key);
   if (tab && !e.repeat) {
     e.preventDefault();
     toggleTab(tab.key);
+  }
+}
+
+/** Trigger a quick snapshot — saves current state to IndexedDB without a name. */
+async function triggerQuickSnapshot() {
+  let thumbnail = '';
+  try {
+    const engine = mandelbrotEngine.value;
+    if (engine) {
+      thumbnail = await engine.getSnapshotPng(256);
+    }
+  } catch { /* ignore */ }
+  const savedValue = structuredClone(toRaw(mandelbrotParams.value));
+  // Strip performance fields
+  delete (savedValue as any).dprMultiplier;
+  delete (savedValue as any).maxIterationMultiplier;
+  delete (savedValue as any).antialiasLevel;
+  delete (savedValue as any).targetFps;
+  delete (savedValue as any).gpuLoadMultiplier;
+  await savePresetEntry(savedValue, thumbnail);
+  // Refresh any open Settings component's preset list
+  for (const ref of Object.values(settingsRefs.value)) {
+    if (ref?.refreshPresets) ref.refreshPresets();
   }
 }
 
@@ -307,9 +394,11 @@ function stopDrag() {
 function popupStyle(tabKey: string) {
   const pos = popupPositions[tabKey] ?? { x: -1, y: -1 };
   const z = tabZOrder[tabKey] ?? 50;
-  // Palette popup is wider; presets popup is taller
-  const w = tabKey === 'palettes' ? '860px' : '460px';
-  const mh = (tabKey === 'presets' || tabKey === 'navigation') ? '92vh' : '80vh';
+  // Palette popup is wider; presets/navigation wider to fit dropdown lists
+  const w = tabKey === 'palettes' ? '860px'
+          : (tabKey === 'presets' || tabKey === 'navigation') ? '560px'
+          : '460px';
+  const mh = (tabKey === 'presets' || tabKey === 'navigation') ? '94vh' : '80vh';
   if (pos.x < 0) {
     // Stagger multiple popups so they don't overlap perfectly
     const tabKeys = Array.from(openTabs);
@@ -372,7 +461,7 @@ const shortcutLabels = computed(() => {
 </script>
 
 <template>
-  <div style="position: relative; height: 100vh; width: 100vw;">
+  <div style="position: relative; height: 100vh; width: 100vw;" :class="{ 'picker-cursor': pickerMode }">
     <!-- Barre de navigation en haut, centree, 4 boutons on/off -->
     <div
       class="top-settings-bar"
@@ -410,6 +499,9 @@ const shortcutLabels = computed(() => {
       v-model:cx="mandelbrotParams.cx"
       v-model:cy="mandelbrotParams.cy"
       v-model:mobileNavExpanded="mobileNavExpanded"
+      @cursor-coord="onCursorCoord"
+      @palette-pick="onPalettePick"
+      :pickerMode="pickerMode"
       :mu="mandelbrotParams.mu"
       :shadingLevel="mandelbrotParams.shadingLevel"
       :lightAngle="mandelbrotParams.lightAngle"
@@ -452,14 +544,30 @@ const shortcutLabels = computed(() => {
         </div>
         <div class="settings-popup-body">
           <Settings
+            :ref="(el: any) => { settingsRefs[tab.key] = el }"
             v-model="mandelbrotParams"
             :engine="mandelbrotEngine"
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
             :active-tab="tab.key"
+            :pickerMode="pickerMode"
+            @toggle-picker="togglePickerMode"
           />
         </div>
       </div>
     </template>
+
+    <!-- Cursor coordinate tooltip -->
+    <div
+      v-if="cursorTooltip.visible"
+      class="cursor-tooltip"
+      :style="{
+        left: cursorTooltip.clientX + 16 + 'px',
+        top: cursorTooltip.clientY - 8 + 'px',
+      }"
+    >
+      <span class="cursor-tooltip-label">cx</span> {{ cursorTooltip.cx }}<br/>
+      <span class="cursor-tooltip-label">cy</span> {{ cursorTooltip.cy }}
+    </div>
 
     <!-- Raccourcis clavier (masque sur mobile) — vertical stacked layout, left side -->
     <div
@@ -497,6 +605,12 @@ const shortcutLabels = computed(() => {
         <span class="shortcut-label">Settings</span>
         <div class="shortcut-keys">
           <span v-for="tab in settingsTabs" :key="tab.key" class="tag is-black is-rounded">{{ tab.shortcut.toUpperCase() }}</span>
+        </div>
+      </div>
+      <div class="shortcut-group">
+        <span class="shortcut-label">Snapshot</span>
+        <div class="shortcut-keys">
+          <span class="tag is-black is-rounded">P</span>
         </div>
       </div>
     </div>
@@ -775,4 +889,35 @@ const shortcutLabels = computed(() => {
     bottom: 100px;
   }
 }
+
+/* === Cursor coordinate tooltip === */
+.cursor-tooltip {
+  position: fixed;
+  z-index: 100;
+  pointer-events: none;
+  user-select: none;
+  padding: 4px 8px;
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.70);
+  backdrop-filter: blur(6px);
+  color: #eee;
+  font-size: 0.78rem;
+  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
+  line-height: 1.45;
+  white-space: nowrap;
+  letter-spacing: 0.02em;
+}
+
+.cursor-tooltip-label {
+  color: rgba(255, 255, 255, 0.5);
+  margin-right: 4px;
+  font-weight: 500;
+}
+
+/* === Mode pipette : curseur crosshair === */
+.picker-cursor,
+.picker-cursor * {
+  cursor: crosshair !important;
+}
+
 </style>

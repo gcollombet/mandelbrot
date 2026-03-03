@@ -381,6 +381,47 @@ impl MandelbrotNavigator {
         self.vtx = DBig::from_str("0").unwrap();
         self.vty = DBig::from_str("0").unwrap();
     }
+
+    /// Convert a canvas pixel position to complex-plane coordinates (arbitrary precision).
+    ///
+    /// `px`, `py`: pixel coordinates on the canvas (top-left origin)
+    /// `canvas_width`, `canvas_height`: canvas dimensions in CSS pixels
+    ///
+    /// Returns `[re, im]` as strings with full precision.
+    pub fn pixel_to_complex(
+        &self,
+        px: f64,
+        py: f64,
+        canvas_width: f64,
+        canvas_height: f64,
+    ) -> Vec<String> {
+        let w = canvas_width.max(1.0);
+        let h = canvas_height.max(1.0);
+        let aspect = w / h;
+
+        // Normalise pixel → [-1, 1]
+        let nx = (px / w) * 2.0 - 1.0;
+        let ny = (1.0 - py / h) * 2.0 - 1.0; // y inverted (y↑ = im↑)
+
+        // Apply scale and aspect ratio
+        let xr = nx * aspect;
+        let yr = ny;
+
+        // Rotate by +angle
+        let sin_a = self.angle.sin();
+        let cos_a = self.angle.cos();
+        let rx = cos_a * xr - sin_a * yr;
+        let ry = sin_a * xr + cos_a * yr;
+
+        // Scale by view scale (arbitrary precision) and add center
+        let rx_big = DBig::from_str(&rx.to_string()).unwrap();
+        let ry_big = DBig::from_str(&ry.to_string()).unwrap();
+
+        let re = &self.cx + &rx_big * &self.scale;
+        let im = &self.cy + &ry_big * &self.scale;
+
+        vec![re.to_string(), im.to_string()]
+    }
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -447,5 +488,36 @@ mod tests {
         let new_scale = nav.scale.clone().to_string().parse::<f64>().unwrap();
         // On attend que l'échelle ait augmenté
         assert!(1 == 1, "scale should have increased after zoom+step");
+    }
+
+    #[test]
+    fn pixel_to_complex_center_returns_origin() {
+        // Center pixel of a 800×600 canvas should return the navigator's center
+        let nav = MandelbrotNavigator::new(
+            "-0.743643887037158704752191506114774",
+            "0.131825904205311970493132056385139",
+            "2.5",
+            0.0,
+        );
+        let result = nav.pixel_to_complex(400.0, 300.0, 800.0, 600.0);
+        assert_eq!(result.len(), 2);
+        // Center pixel maps to cx, cy exactly
+        let re: f64 = result[0].parse().unwrap();
+        let im: f64 = result[1].parse().unwrap();
+        assert!((re - (-0.7436438870371587)).abs() < 1e-10, "re={}", re);
+        assert!((im - 0.1318259042053120).abs() < 1e-10, "im={}", im);
+    }
+
+    #[test]
+    fn pixel_to_complex_preserves_precision() {
+        // A very deep zoom: center has 50+ digits. The result should preserve them.
+        let cx = "-0.7436438870371587047521915061147741580450975735832";
+        let cy = "0.1318259042053119704931320563851394419890674940124";
+        let nav = MandelbrotNavigator::new(cx, cy, "1e-40", 0.0);
+        // Center pixel should return exact center
+        let result = nav.pixel_to_complex(500.0, 500.0, 1000.0, 1000.0);
+        // The result strings should be long (not truncated to 15 digits)
+        assert!(result[0].len() > 20, "re string too short: {}", result[0]);
+        assert!(result[1].len() > 20, "im string too short: {}", result[1]);
     }
 }
