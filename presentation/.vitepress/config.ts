@@ -6,6 +6,10 @@ import topLevelAwait from "vite-plugin-top-level-await";
 export default defineConfig({
     title: "Mandelbrot",
     description: "Realtime Online Mandelbrot set explorer",
+    // Sous-chemin correspondant à GitHub Pages : gcollombet.github.io/mandelbrot/presentation/
+    base: '/mandelbrot/presentation/',
+    // Sortie directement dans docs/presentation/ pour cohabiter avec le viewer
+    outDir: '../docs/presentation',
     markdown: {
         math: true
     },
@@ -33,7 +37,7 @@ export default defineConfig({
             }
         ],
         socialLinks: [
-            {icon: 'github', link: 'https://github.com/vuejs/vitepress'}
+            {icon: 'github', link: 'https://github.com/gcollombet/mandelbrot'}
         ]
     }
 })
