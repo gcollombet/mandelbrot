@@ -8,6 +8,7 @@ pnpm-debug.log*
 lerna-debug.log*
 
 node_modules
+dist
 dist-ssr
 *.local
 
@@ -21,6 +22,12 @@ dist-ssr
 *.njsproj
 *.sln
 *.sw?
+
+# Build artifacts (VitePress dist, Rust target)
+presentation/.vitepress/dist
+presentation/.vitepress/cache
+target
+
 /docs/5798481.jpg
 /docs/6880904.jpg
 /docs/abstract-3d-gold-background.jpg
