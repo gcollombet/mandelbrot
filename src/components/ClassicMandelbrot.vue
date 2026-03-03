@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {nextTick, type Ref, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
+import MandelbrotController from "./MandelbrotController.vue";
 
 interface MandelbrotPoint {
   name: string;
@@ -82,7 +83,7 @@ async function onSelectChange(e: Event) {
       <option v-for="(pt, idx) in points" :key="pt.name" :value="idx">{{ pt.name }}</option>
     </select>
     <p>{{ selectedPoint?.description }}</p>
-    <Mandelbrot
+    <MandelbrotController
       ref="mandelbrotRef"
       :scale="selectedPoint?.scale"
       :angle="selectedPoint?.angle"
