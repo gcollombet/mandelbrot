@@ -7,12 +7,12 @@ import { lch as d3lch, rgb as d3rgb, hsl as d3hsl } from 'd3-color';
 import type { InterpolationMode } from '../Mandelbrot.ts';
 import defaultPresetsJson from '../assets/default-presets.json';
 import defaultPalettesJson from '../assets/default-palettes.json';
-import coloredTilesUrl from '../assets/colored_tiles.jpg';
+import coloredTilesUrl from '../assets/colored_tiles.webp';
 import goldUrl from '../assets/gold.jpg';
-import zelligeUrl from '../assets/zellige.png';
-import bronzeUrl from '../assets/bronze.png';
-import mercureUrl from '../assets/mercure.png';
-import honeyUrl from '../assets/honey.png';
+import zelligeUrl from '../assets/zellige.webp';
+import bronzeUrl from '../assets/bronze.webp';
+import mercureUrl from '../assets/mercure.webp';
+import honeyUrl from '../assets/honey.webp';
 
 /** Built-in textures: single source of truth for bootstrap, deletion protection, and UI. */
 const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
@@ -973,10 +973,8 @@ async function loadTextures() {
   // 1. Migrate legacy localStorage data (if any)
   await migrateFromLocalStorage();
 
-  // 2. Bootstrap built-in default textures (added if missing)
-  for (const t of BUILT_IN_TEXTURES) {
-    await ensureDefaultTexture(t.name, t.url);
-  }
+  // 2. Bootstrap built-in default textures in parallel (added if missing)
+  await Promise.all(BUILT_IN_TEXTURES.map(t => ensureDefaultTexture(t.name, t.url)));
 
   // 3. Load metadata list
   textures.value = await getAllTextureEntries();

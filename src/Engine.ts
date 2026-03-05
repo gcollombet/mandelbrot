@@ -12,7 +12,7 @@ import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import goldUrl from './assets/gold.jpg'
-import bronzeUrl from './assets/bronze.png'
+import bronzeUrl from './assets/bronze.webp'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -301,17 +301,20 @@ export class Engine {
         this.format = navigator.gpu.getPreferredCanvasFormat()
         this.ctx.configure({ device: this.device, format: this.format, alphaMode: 'opaque' })
 
-        // Chargement statique des textures additionnelles
-        if (!Engine._tileTexture) {
-            Engine._tileTexture = await this._loadTexture(bronzeUrl)
-        }
-        this.tileTexture = await this._loadTexture(bronzeUrl)
+        // Chargement parallèle des textures additionnelles (tile + skybox)
+        const [tileTexture, skyboxTexture] = await Promise.all([
+            Engine._tileTexture
+                ? Promise.resolve(Engine._tileTexture)
+                : this._loadTexture(bronzeUrl),
+            Engine._skyboxTexture
+                ? Promise.resolve(Engine._skyboxTexture)
+                : this._loadTexture(goldUrl),
+        ])
+        Engine._tileTexture = tileTexture
+        this.tileTexture = tileTexture
         this.tileTextureView = this.tileTexture.createView()
-
-        if (!Engine._skyboxTexture) {
-            Engine._skyboxTexture = await this._loadTexture(goldUrl)
-        }
-        this.skyboxTexture = await this._loadTexture(goldUrl)
+        Engine._skyboxTexture = skyboxTexture
+        this.skyboxTexture = skyboxTexture
         this.skyboxTextureView = this.skyboxTexture.createView()
 
         const palette = new Palette([])

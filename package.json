@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "cd reference_calculus && wasm-pack build --dev && cd .. && vue-tsc -b && vite build && vitepress build presentation && git add docs",
+    "build": "cd reference_calculus && wasm-pack build && cd .. && vue-tsc -b && vite build && vitepress build presentation && git add docs",
     "preview": "vite preview",
     "docs:dev": "vitepress dev presentation",
     "docs:build": "vitepress build presentation",
