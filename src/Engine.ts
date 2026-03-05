@@ -12,7 +12,7 @@ import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import goldUrl from './assets/gold.jpg'
-
+import bronzeUrl from './assets/bronze.png'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -303,9 +303,9 @@ export class Engine {
 
         // Chargement statique des textures additionnelles
         if (!Engine._tileTexture) {
-            Engine._tileTexture = await this._loadTexture(goldUrl)
+            Engine._tileTexture = await this._loadTexture(bronzeUrl)
         }
-        this.tileTexture = await this._loadTexture(goldUrl)
+        this.tileTexture = await this._loadTexture(bronzeUrl)
         this.tileTextureView = this.tileTexture.createView()
 
         if (!Engine._skyboxTexture) {

@@ -169,7 +169,7 @@ const mandelbrotParams = ref<MandelbrotParams>({
   maxIterations: 100,
   displacementAmount: 0.033,
   specularPower: 1,
-  tessellationLevel: 4,
+  tessellationLevel: 1,
   epsilon: 0.00001,
   colorStops: [
     {
