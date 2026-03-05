@@ -11,7 +11,6 @@ import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
-import coloredTilesUrl from './assets/colored_tiles.jpg'
 import goldUrl from './assets/gold.jpg'
 
 // ── Constants ────────────────────────────────────────────────────────
@@ -29,7 +28,7 @@ const ZOOM_SENTINEL_SEED_STEP = 64
 // Minimum brush refinement step during zoom.  The sentinel grid will not
 // subdivide below this value while zooming, avoiding wasted GPU work on
 // pixels that will be rescaled away.  Must be a power-of-two.
-const ZOOM_MIN_BRUSH_STEP = 2
+const ZOOM_MIN_BRUSH_STEP = 1
 
 // After zoom ends, the first recompute frame uses this step instead of
 // the full progressive grid — avoids overlaying coarser data on the
@@ -304,9 +303,9 @@ export class Engine {
 
         // Chargement statique des textures additionnelles
         if (!Engine._tileTexture) {
-            Engine._tileTexture = await this._loadTexture(coloredTilesUrl)
+            Engine._tileTexture = await this._loadTexture(goldUrl)
         }
-        this.tileTexture = await this._loadTexture(coloredTilesUrl)
+        this.tileTexture = await this._loadTexture(goldUrl)
         this.tileTextureView = this.tileTexture.createView()
 
         if (!Engine._skyboxTexture) {
@@ -709,7 +708,7 @@ export class Engine {
         this.time += delta
         this.lastUpdateTime = now
 
-        this.needRender = !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
+        this.needRender = this.needRender || !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
             && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
         // if (!this.needsMoreFrames()) {
         //     this.unfinishedPixelCount = -1 // unknown — new params, GPU counter not read yet
@@ -1334,6 +1333,7 @@ export class Engine {
     needsMoreFrames(): boolean {
         let reason = ''
         if (this.needRender) reason = 'needRender'
+        else if (this.snapshotCallback) reason = 'snapshot'
         else if (this.zoomReprojectionActive) reason = 'zoomActive'
         else if (this.clearHistoryNextFrame) reason = 'clearHistory'
         else if (this.orbitIncomplete) reason = 'orbitIncomplete'

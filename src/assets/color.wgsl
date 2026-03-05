@@ -107,16 +107,16 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>,  d: f32, dx: f32, dy: f32) -> ve
   // v_smooth: always smoothed iteration value (for tessellation displacement)
   // v: iteration value respecting the smoothness setting (for palette lookup)
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-  // deep / paletteRepeat : coordonnée normalisée par la période (pour palette et tessellation)
-  let deep_norm = v_smooth * 2.0 / paletteRepeat;
   let deep = v * 2.0;
 
+  // Tessellation depth: based on smooth iterations only, independent of palette period
+  let tess_depth = v_smooth * 2.0;
   let disp = parameters.displacementAmount;
-  let tessColor = tile_tessellation(tileTex, deep_norm * 2.0 * disp + dx, deep_norm * 2.0 * disp + dy, parameters.tessellationLevel);
+  let tessColor = tile_tessellation(tileTex, tess_depth * 2.0 * disp + dx, tess_depth * 2.0 * disp + dy, parameters.tessellationLevel);
   let webCamColor = tile_tessellation(
     webcamTex,
-    deep_norm + dx + cos(parameters.time * 0.1),
-    deep_norm + dy + sin(parameters.time * 0.15),
+    tess_depth + dx + cos(parameters.time * 0.1),
+    tess_depth + dy + sin(parameters.time * 0.15),
     parameters.tessellationLevel + sin(parameters.time * 0.05)
   );
   let palettePhase = fract( deep / paletteRepeat + parameters.paletteOffset );
@@ -367,7 +367,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         textureLoad(tex, liveCoord, 3, 0).r,
         textureLoad(tex, liveCoord, 4, 0).r,
         textureLoad(tex, liveCoord, 5, 0).r,
-        uv_live
+        uv_neutral
       );
       if (liveColor.a > 0.0) {
         return vec4<f32>(liveColor.rgb, 1.0);
@@ -409,7 +409,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     textureLoad(texFrozen, frozenCoord, 3, 0).r,
     textureLoad(texFrozen, frozenCoord, 4, 0).r,
     textureLoad(texFrozen, frozenCoord, 5, 0).r,
-    uv_frozen
+    uv_neutral
   );
 
   if (frozenColor.a > 0.0) {

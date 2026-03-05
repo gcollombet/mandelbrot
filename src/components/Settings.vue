@@ -8,6 +8,22 @@ import type { InterpolationMode } from '../Mandelbrot.ts';
 import defaultPresetsJson from '../assets/default-presets.json';
 import defaultPalettesJson from '../assets/default-palettes.json';
 import coloredTilesUrl from '../assets/colored_tiles.jpg';
+import goldUrl from '../assets/gold.jpg';
+import zelligeUrl from '../assets/zellige.png';
+import bronzeUrl from '../assets/bronze.png';
+import mercureUrl from '../assets/mercure.png';
+import honeyUrl from '../assets/honey.png';
+
+/** Built-in textures: single source of truth for bootstrap, deletion protection, and UI. */
+const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
+  { name: 'Colored Tiles', url: coloredTilesUrl },
+  { name: 'Gold', url: goldUrl },
+  { name: 'Zellige', url: zelligeUrl },
+  { name: 'Bronze', url: bronzeUrl },
+  { name: 'Mercure', url: mercureUrl },
+  { name: 'Honey', url: honeyUrl },
+] as const;
+const BUILT_IN_TEXTURE_NAMES: ReadonlySet<string> = new Set(BUILT_IN_TEXTURES.map(t => t.name));
 import {
   getAllTextureEntries,
   getTextureBlob,
@@ -15,7 +31,6 @@ import {
   deleteTextureEntry,
   renameTextureEntry,
   migrateFromLocalStorage,
-  getTextureCount,
 } from '../textureStore';
 import type { TextureMetadata } from '../textureStore';
 import {
@@ -56,7 +71,7 @@ const model =  defineModel<MandelbrotParams>({
     tessellationLevel: 2,
     shadingLevel: 1,
     lightAngle: 3.927,
-    displacementAmount: 1,
+    displacementAmount: 0.01,
     specularPower: 4,
     activatePalette: true,
     activateSkybox: false,
@@ -490,7 +505,7 @@ onMounted(async () => {
   loadPalettes();
   await loadTextures();
   // Apply persisted texture to engine if it's not the default
-  if (selectedTexture.value !== 'Colored Tiles' && props.engine) {
+  if (selectedTexture.value !== 'Gold' && props.engine) {
     try {
       await applyTextureToEngine(selectedTexture.value, props.engine);
     } catch (e) {
@@ -501,7 +516,7 @@ onMounted(async () => {
 
 // Apply persisted texture when engine becomes available (may arrive after mount)
 watch(() => props.engine, async (engine) => {
-  if (engine && selectedTexture.value !== 'Colored Tiles') {
+  if (engine && selectedTexture.value !== 'Gold') {
     try {
       await applyTextureToEngine(selectedTexture.value, engine);
     } catch (e) {
@@ -900,7 +915,7 @@ const MAX_TEXTURE_SIZE = 4096;
 
 const textureName = ref('');
 const textures = ref<TextureMetadata[]>([]);
-const selectedTexture = ref('Colored Tiles');
+const selectedTexture = ref('Gold');
 const showTextureDropdown = ref(false);
 
 const currentTextureObj = computed(() => textures.value.find(t => t.name === selectedTexture.value));
@@ -937,24 +952,30 @@ function generateThumbnailFromUrl(url: string, maxWidth = 256): Promise<string> 
   });
 }
 
-/** Fetch the built-in colored_tiles.jpg asset as a Blob */
-async function fetchDefaultTextureBlob(): Promise<Blob> {
-  const resp = await fetch(coloredTilesUrl);
+/** Fetch an asset URL as a Blob */
+async function fetchAssetBlob(url: string): Promise<Blob> {
+  const resp = await fetch(url);
   return resp.blob();
+}
+
+/** Ensure a built-in default texture exists in the DB; add it if missing. */
+async function ensureDefaultTexture(name: string, assetUrl: string): Promise<void> {
+  const existing = await getTextureBlob(name);
+  if (existing) return;
+  const blob = await fetchAssetBlob(assetUrl);
+  const thumbUrl = URL.createObjectURL(blob);
+  const thumbnail = await generateThumbnailFromUrl(thumbUrl);
+  URL.revokeObjectURL(thumbUrl);
+  await saveTextureEntry(name, blob, thumbnail);
 }
 
 async function loadTextures() {
   // 1. Migrate legacy localStorage data (if any)
   await migrateFromLocalStorage();
 
-  // 2. Bootstrap with built-in texture if DB is empty
-  const count = await getTextureCount();
-  if (count === 0) {
-    const blob = await fetchDefaultTextureBlob();
-    const thumbUrl = URL.createObjectURL(blob);
-    const thumbnail = await generateThumbnailFromUrl(thumbUrl);
-    URL.revokeObjectURL(thumbUrl);
-    await saveTextureEntry('Colored Tiles', blob, thumbnail);
+  // 2. Bootstrap built-in default textures (added if missing)
+  for (const t of BUILT_IN_TEXTURES) {
+    await ensureDefaultTexture(t.name, t.url);
   }
 
   // 3. Load metadata list
@@ -1001,7 +1022,7 @@ function selectTextureFromDropdown(tex: TextureMetadata) {
 async function deleteTexture() {
   const name = textureName.value.trim();
   if (!name) return;
-  if (name === 'Colored Tiles') {
+  if (BUILT_IN_TEXTURE_NAMES.has(name)) {
     window.alert('La texture par défaut ne peut pas être supprimée.');
     return;
   }
@@ -1010,10 +1031,10 @@ async function deleteTexture() {
     if (idx >= 0) {
       textures.value.splice(idx, 1);
       await deleteTextureEntry(name);
-      selectedTexture.value = 'Colored Tiles';
+      selectedTexture.value = 'Gold';
       textureName.value = '';
       // Revert to default texture
-      await selectTexture('Colored Tiles');
+      await selectTexture('Gold');
     }
   }
 }
@@ -1572,8 +1593,8 @@ async function renameAndSaveTexture() {
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">D&eacute;placement</span>
-        <input class="slider" type="range" min="0" max="10" step="0.1" v-model.number="model.displacementAmount" />
-        <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(1) }}</span>
+        <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
+        <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
       </div>
 
       <!-- Tessellation Texture Library (compact) -->
@@ -1616,7 +1637,7 @@ async function renameAndSaveTexture() {
             <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
           </div>
           <div class="control">
-            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || textureName === 'Colored Tiles'">Supprimer</button>
+            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)">Supprimer</button>
           </div>
         </div>
       </div>

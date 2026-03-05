@@ -9,7 +9,7 @@ let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
 
-const cx = defineModel<string>('cx', { default: '-1.5' })
+const cx = defineModel<string>('cx', { default: '-1.9771995110313272619112808106831597' })
 const cy = defineModel<string>('cy', { default: '0.0' })
 const scale = defineModel<string>('scale', { default: '2.5' })
 const angle = defineModel<number>('angle', { default: 0 })
@@ -66,16 +66,37 @@ const props = withDefaults(defineProps<{
  }>(),
 
     {
-       mu: 1000000.0,
+       mu: 4.0,
        epsilon: 0.00001,
        colorStops: () => [
-         { color: '#0f0130', position: 0.0 },
-         { color: '#206bcb', position: 0.16 },
-         { color: '#ffceb6', position: 0.26 },
-         { color: '#edffff', position: 0.42 },
-         { color: '#ffaa00', position: 0.6425 },
-         { color: '#300200', position: 0.8575 },
-         { color: '#100000', position: 1.0 },
+         {
+           "color": "#002500",
+           "position": 0
+         },
+         {
+           "color": "#175b3d",
+           "position": 0.16
+         },
+         {
+           "color": "#ffceb6",
+           "position": 0.26
+         },
+         {
+           "color": "#edffff",
+           "position": 0.42
+         },
+         {
+           "color": "#ff8fbc",
+           "position": 0.7016397849462366
+         },
+         {
+           "color": "#a6003e",
+           "position": 0.8575
+         },
+         {
+           "color": "#100000",
+           "position": 1
+         }
        ],
        palettePeriod: 100.0,
        paletteOffset: 0,
@@ -83,7 +104,7 @@ const props = withDefaults(defineProps<{
        tessellationLevel: 2.0,
        shadingLevel: 1,
        lightAngle: 3.927, // ~225° in radians
-       displacementAmount: 1.0,
+       displacementAmount: 0.01,
        specularPower: 4,
        activatePalette: true,
        activateSkybox: false,

@@ -4,10 +4,10 @@ import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
-import { savePresetEntry } from '../presetStore';
-import { truncateCoord, computePalettePhase } from '../CursorCoordinate';
-import type { ComplexCoordStr, IterationData } from '../CursorCoordinate';
-import { Palette } from '../Palette';
+import {savePresetEntry} from '../presetStore';
+import type {ComplexCoordStr, IterationData} from '../CursorCoordinate';
+import {computePalettePhase, truncateCoord} from '../CursorCoordinate';
+import {Palette} from '../Palette';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
@@ -156,41 +156,62 @@ const mobileNavExpanded = ref(false);
 // Paramètres Mandelbrot avec valeurs par défaut
 const LOCAL_STORAGE_CURRENT_KEY = 'mandelbrot_last_settings';
 const mandelbrotParams = ref<MandelbrotParams>({
-  cx: "-0.743643887037158704752191506114774",
-  cy: "0.131825904205311970493132056385139",
-  mu: 10000.0,
+  cx: '-1.9771995110313272619112808106831596467',
+  cy: "0.0",
+  mu: 4.0,
   scale: "2.5",
   angle: 0.0,
-  maxIterations: 1000,
-  antialiasLevel: 1,
-  palettePeriod: 256,
-  paletteOffset: 0,
-  shadingLevel: 1,
+  palettePeriod: 7.37,
+  paletteOffset: 0.0,
+  shadingLevel: 0.3,
   lightAngle: 3.927,
-  displacementAmount: 1,
-  specularPower: 4,
-  tessellationLevel: 2,
+  antialiasLevel: 1,
+  maxIterations: 100,
+  displacementAmount: 0.033,
+  specularPower: 1,
+  tessellationLevel: 4,
   epsilon: 0.00001,
   colorStops: [
-    { color: '#0f0130', position: 0.0 },
-    { color: '#206bcb', position: 0.16 },
-    { color: '#ffceb6', position: 0.26 },
-    { color: '#edffff', position: 0.42 },
-    { color: '#ffaa00', position: 0.6425 },
-    { color: '#300200', position: 0.8575 },
-    { color: '#100000', position: 1.0 },
+    {
+      "color": "#ffffff",
+      "position": 0
+    },
+    {
+      "color": "#ffffff",
+      "position": 0.16
+    },
+    {
+      "color": "#2cd2ff",
+      "position": 0.26
+    },
+    {
+      "color": "#000000",
+      "position": 0.49242990654205604
+    },
+    {
+      "color": "#ffffff",
+      "position": 0.7016397849462366
+    },
+    {
+      "color": "#ffaf27",
+      "position": 0.8575
+    },
+    {
+      "color": "#ffa03b",
+      "position": 1
+    }
   ],
   activateShading: true,
-  activateTessellation: false,
+  activateTessellation: true,
   activateWebcam: false,
   activatePalette: true,
-  activateSkybox: false,
-  activateSmoothness: true,
+  activateSkybox: true,
+  activateSmoothness: false,
   activateZebra: false,
   activateAnimate: false,
   dprMultiplier: 1.0,
-  maxIterationMultiplier: 1.0,
-  targetFps: 60,
+  maxIterationMultiplier: 0.01,
+  targetFps: 30,
   gpuLoadMultiplier: 1.0,
   interpolationMode: 'lab',
 });
