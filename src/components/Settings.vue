@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {computed, onMounted, ref, toRaw, watch} from 'vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
+import type { EffectFieldName } from '../ColorStop.ts';
+import { COLOR_STOP_DEFAULTS } from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
 import { Palette } from '../Palette.ts';
 import { lch as d3lch, rgb as d3rgb, hsl as d3hsl } from 'd3-color';
@@ -144,12 +146,25 @@ function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = '
   const palette = new Palette(colorStops, mode);
   const imageData = palette.generateTexture();
 
+  // The palette texture is 4096×4; row 0 holds RGB + palette-weight alpha.
+  // For the thumbnail we only need the color row with alpha forced to 255
+  // so the preview is always opaque regardless of the palette activation weight.
+  const rowData = new ImageData(imageData.width, 1);
+  const src = imageData.data;
+  const dst = rowData.data;
+  const stride = imageData.width * 4;
+  for (let i = 0; i < stride; i += 4) {
+    dst[i]     = src[i];     // R
+    dst[i + 1] = src[i + 1]; // G
+    dst[i + 2] = src[i + 2]; // B
+    dst[i + 3] = 255;        // force opaque
+  }
   const tempCanvas = document.createElement('canvas');
   tempCanvas.width = imageData.width;
   tempCanvas.height = 1;
   const tempCtx = tempCanvas.getContext('2d');
   if (!tempCtx) return '';
-  tempCtx.putImageData(imageData, 0, 0);
+  tempCtx.putImageData(rowData, 0, 0);
   ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL('image/png');
 }
@@ -499,6 +514,101 @@ const lightAngleSlider = computed({
     model.value.lightAngle = (deg % 360) * Math.PI / 180;
   }
 });
+
+// =====================================================
+// Sync UI toggle/slider values → per-stop effect fields
+// =====================================================
+// When a global toggle or slider changes, propagate the value to ALL stops.
+// This is the bridge between legacy UI controls and the per-stop palette texture.
+
+/**
+ * Set an effect field on every color stop in the model.
+ * Mutates the stops in place (Vue reactivity tracks this).
+ */
+function setEffectOnAllStops(field: EffectFieldName, value: number) {
+  for (const stop of model.value.colorStops) {
+    stop[field] = value;
+  }
+}
+
+/**
+ * Apply ALL current legacy toggle/slider values to every stop.
+ * Called after preset load and on initial mount to ensure stops are in sync.
+ * If a legacy field is undefined, the stop field is left untouched (falls
+ * back to COLOR_STOP_DEFAULTS at texture-generation time).
+ */
+function syncAllLegacyToStops() {
+  const m = model.value;
+  const stops = m.colorStops;
+  if (!stops || stops.length === 0) return;
+
+  // Activation toggles
+  if (m.activateShading !== undefined)      setEffectOnAllStops('shading',      m.activateShading      ? 1.0 : 0.0);
+  if (m.activatePalette !== undefined)      setEffectOnAllStops('palette',      m.activatePalette      ? 1.0 : 0.0);
+  if (m.activateSmoothness !== undefined)   setEffectOnAllStops('smoothness',   m.activateSmoothness   ? 1.0 : 0.0);
+  if (m.activateTessellation !== undefined) setEffectOnAllStops('tessellation', m.activateTessellation ? 1.0 : 0.0);
+  if (m.activateSkybox !== undefined)       setEffectOnAllStops('skybox',       m.activateSkybox       ? 1.0 : 0.0);
+  if (m.activateWebcam !== undefined)       setEffectOnAllStops('webcam',       m.activateWebcam       ? 1.0 : 0.0);
+  if (m.activateZebra !== undefined)        setEffectOnAllStops('zebra',        m.activateZebra        ? 1.0 : 0.0);
+
+  // Continuous sliders
+  if (m.shadingLevel !== undefined)       setEffectOnAllStops('shadingLevel',       m.shadingLevel);
+  if (m.specularPower !== undefined)      setEffectOnAllStops('specularPower',      m.specularPower);
+  if (m.lightAngle !== undefined)         setEffectOnAllStops('lightAngle',         m.lightAngle);
+  if (m.tessellationLevel !== undefined)  setEffectOnAllStops('tessellationLevel',  m.tessellationLevel);
+  if (m.displacementAmount !== undefined) setEffectOnAllStops('displacementAmount', m.displacementAmount);
+}
+
+// ── Activation toggles → stop weights ──
+// Map: legacy boolean field → stop effect field name
+const TOGGLE_TO_EFFECT: Array<[keyof MandelbrotParams, EffectFieldName, number]> = [
+  ['activateShading',      'shading',      COLOR_STOP_DEFAULTS.shading],
+  ['activatePalette',      'palette',      COLOR_STOP_DEFAULTS.palette],
+  ['activateSmoothness',   'smoothness',   COLOR_STOP_DEFAULTS.smoothness],
+  ['activateTessellation',  'tessellation', COLOR_STOP_DEFAULTS.tessellation],
+  ['activateSkybox',        'skybox',       COLOR_STOP_DEFAULTS.skybox],
+  ['activateWebcam',        'webcam',       COLOR_STOP_DEFAULTS.webcam],
+  ['activateZebra',         'zebra',        COLOR_STOP_DEFAULTS.zebra],
+];
+
+for (const [toggleField, effectField] of TOGGLE_TO_EFFECT) {
+  watch(
+    () => model.value[toggleField] as boolean | undefined,
+    (val) => {
+      if (val === undefined) return;
+      setEffectOnAllStops(effectField, val ? 1.0 : 0.0);
+    },
+  );
+}
+
+// ── Continuous sliders → stop parameters ──
+// Map: legacy slider field → stop effect field name
+const SLIDER_TO_EFFECT: Array<[keyof MandelbrotParams, EffectFieldName]> = [
+  ['shadingLevel',       'shadingLevel'],
+  ['specularPower',      'specularPower'],
+  ['lightAngle',         'lightAngle'],
+  ['tessellationLevel',  'tessellationLevel'],
+  ['displacementAmount', 'displacementAmount'],
+];
+
+for (const [sliderField, effectField] of SLIDER_TO_EFFECT) {
+  watch(
+    () => model.value[sliderField] as number | undefined,
+    (val) => {
+      if (val === undefined) return;
+      setEffectOnAllStops(effectField, val);
+    },
+  );
+}
+
+// When colorStops is replaced wholesale (palette selection, LCH generation, etc.),
+// stamp the current legacy toggle/slider values onto all new stops.
+// `immediate: true` also handles the initial mount.
+watch(
+  () => model.value.colorStops,
+  () => { syncAllLegacyToStops(); },
+  { immediate: true },
+);
 
 onMounted(async () => {
   await loadPresets();

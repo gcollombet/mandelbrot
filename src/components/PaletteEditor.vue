@@ -4,6 +4,8 @@ import GlissiereHandle from './GlissiereHandle.vue';
 import {Palette} from '../Palette';
 import {rgb as d3rgb} from 'd3-color';
 import type {ColorStop} from "../ColorStop.ts";
+import { COLOR_STOP_DEFAULTS, EFFECT_FIELD_NAMES, getEffectValue } from '../ColorStop.ts';
+import type { EffectFieldName } from '../ColorStop.ts';
 import type {InterpolationMode} from "../Mandelbrot.ts";
 
 const props = withDefaults(defineProps<{
@@ -26,33 +28,44 @@ const canvasRef = ref<HTMLCanvasElement|null>(null);
 // Texture générée à partir de la palette courante
 const texture = computed(() => {
   const pal = new Palette(props.colorStops, props.interpolationMode);
-  return pal.generateTexture(); // ImageData
+  return pal.generateTexture(); // ImageData (4096×4)
 });
+
+/**
+ * Extract row 0 RGB from the 4096×4 texture and force alpha to 255
+ * so the gradient preview is always opaque regardless of palette weight.
+ */
+function drawTextureToCanvas(img: ImageData, canvas: HTMLCanvasElement) {
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return;
+  ctx.clearRect(0, 0, 4096, 32);
+  const rowData = new ImageData(img.width, 1);
+  const src = img.data;
+  const dst = rowData.data;
+  const stride = img.width * 4;
+  for (let i = 0; i < stride; i += 4) {
+    dst[i]     = src[i];     // R
+    dst[i + 1] = src[i + 1]; // G
+    dst[i + 2] = src[i + 2]; // B
+    dst[i + 3] = 255;        // force opaque
+  }
+  const tmp = document.createElement('canvas');
+  tmp.width = img.width;
+  tmp.height = 1;
+  tmp.getContext('2d')!.putImageData(rowData, 0, 0);
+  ctx.drawImage(tmp, 0, 0, 4096, 32);
+}
 
 watch(texture, (img) => {
   if (!canvasRef.value || !img) return;
-  const ctx = canvasRef.value.getContext('2d');
-  if (!ctx) return;
-  ctx.clearRect(0, 0, 4096, 32);
-  const tmp = document.createElement('canvas');
-  tmp.width = img.width;
-  tmp.height = img.height;
-  tmp.getContext('2d')!.putImageData(img, 0, 0);
-  ctx.drawImage(tmp, 0, 0, 4096, 1, 0, 0, 4096, 32);
+  drawTextureToCanvas(img, canvasRef.value);
 });
 
 onMounted(() => {
   nextTick(() => {
     const img = texture.value;
     if (!canvasRef.value || !img) return;
-    const ctx = canvasRef.value.getContext('2d');
-    if (!ctx) return;
-    ctx.clearRect(0, 0, 4096, 32);
-    const tmp = document.createElement('canvas');
-    tmp.width = img.width;
-    tmp.height = img.height;
-    tmp.getContext('2d')!.putImageData(img, 0, 0);
-    ctx.drawImage(tmp, 0, 0, 4096, 1, 0, 0, 4096, 32);
+    drawTextureToCanvas(img, canvasRef.value);
   });
 });
 
@@ -121,6 +134,48 @@ const selectedHex = computed({
   }
 });
 
+// ── Per-stop effect editing ──
+
+/** Whether the per-stop effect panel is expanded. */
+const showEffects = ref(false);
+
+/** The currently selected stop (reactive). */
+const selectedStop = computed(() => {
+  if (selectedIdx.value === null) return null;
+  return props.colorStops[selectedIdx.value] ?? null;
+});
+
+/** UI metadata for effect fields: label, min, max, step, unit. */
+const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: number; step: number; unit: string }> = {
+  palette:            { label: 'Palette',       min: 0, max: 1,     step: 0.01, unit: '' },
+  zebra:              { label: 'Zebra',         min: 0, max: 1,     step: 0.01, unit: '' },
+  tessellation:       { label: 'Texture',       min: 0, max: 1,     step: 0.01, unit: '' },
+  shading:            { label: 'Relief',        min: 0, max: 1,     step: 0.01, unit: '' },
+  skybox:             { label: 'Metal',         min: 0, max: 1,     step: 0.01, unit: '' },
+  webcam:             { label: 'Webcam',        min: 0, max: 1,     step: 0.01, unit: '' },
+  smoothness:         { label: 'Smoothness',    min: 0, max: 1,     step: 0.01, unit: '' },
+  shadingLevel:       { label: 'Brillance',     min: 0, max: 3,     step: 0.05, unit: '' },
+  specularPower:      { label: 'Speculaire',    min: 1, max: 64,    step: 0.5,  unit: '' },
+  lightAngle:         { label: 'Light Angle',   min: 0, max: 6.283, step: 0.01, unit: 'rad' },
+  tessellationLevel:  { label: 'Repetition',    min: 0, max: 10,    step: 0.1,  unit: '' },
+  displacementAmount: { label: 'Deplacement',   min: 0, max: 0.1,   step: 0.001, unit: '' },
+};
+
+/** Get the effective value of a field on the selected stop. */
+function getStopEffect(field: EffectFieldName): number {
+  if (!selectedStop.value) return COLOR_STOP_DEFAULTS[field];
+  return getEffectValue(selectedStop.value, field);
+}
+
+/** Set a field on the selected stop. */
+function setStopEffect(field: EffectFieldName, value: number) {
+  if (selectedIdx.value === null) return;
+  const stop = props.colorStops[selectedIdx.value];
+  if (!stop) return;
+  stop[field] = value;
+  emit('update:colorStops', props.colorStops);
+}
+
 </script>
 
 <template>
@@ -175,6 +230,33 @@ const selectedHex = computed({
       />
       <span class="color-hex-label">{{ selectedHex }}</span>
       <span v-if="props.pickerMode" class="picker-hint">Cliquez sur le fractal…</span>
+    </div>
+    <!-- Per-stop effect channels (collapsible) -->
+    <div v-if="selectedStop" class="effects-panel">
+      <button class="effects-toggle" @click="showEffects = !showEffects">
+        <span class="effects-toggle-icon">{{ showEffects ? '&#9660;' : '&#9654;' }}</span>
+        Effets du stop #{{ (selectedIdx ?? 0) + 1 }}
+      </button>
+      <div v-if="showEffects" class="effects-grid">
+        <template v-for="field in EFFECT_FIELD_NAMES" :key="field">
+          <div class="effect-row">
+            <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
+            <input
+              class="slider effect-slider"
+              type="range"
+              :min="EFFECT_UI[field].min"
+              :max="EFFECT_UI[field].max"
+              :step="EFFECT_UI[field].step"
+              :value="getStopEffect(field)"
+              @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
+            />
+            <span class="effect-value">
+              {{ getStopEffect(field).toFixed(EFFECT_UI[field].step < 0.01 ? 3 : 2) }}
+              {{ EFFECT_UI[field].unit }}
+            </span>
+          </div>
+        </template>
+      </div>
     </div>
   </div>
 </template>
@@ -273,6 +355,64 @@ const selectedHex = computed({
   font-family: monospace;
   font-size: 0.95em;
   color: #333;
+}
+
+/* ── Per-stop effect editing ── */
+.effects-panel {
+  margin-top: 0.2em;
+}
+.effects-toggle {
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 0.82em;
+  color: #666;
+  padding: 2px 0;
+  display: flex;
+  align-items: center;
+  gap: 0.4em;
+}
+.effects-toggle:hover {
+  color: #333;
+}
+.effects-toggle-icon {
+  font-size: 0.7em;
+}
+.effects-grid {
+  display: flex;
+  flex-direction: column;
+  gap: 0.25em;
+  margin-top: 0.4em;
+  padding: 0.5em;
+  background: #f8f8f8;
+  border-radius: 6px;
+  border: 1px solid #e8e8e8;
+}
+.effect-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+.effect-label {
+  font-size: 0.78em;
+  color: #555;
+  width: 80px;
+  flex-shrink: 0;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.effect-slider {
+  flex: 1;
+  min-width: 60px;
+}
+.effect-value {
+  font-family: monospace;
+  font-size: 0.75em;
+  color: #666;
+  width: 52px;
+  text-align: right;
+  flex-shrink: 0;
 }
 
 </style>

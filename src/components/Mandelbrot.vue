@@ -2,6 +2,7 @@
 import {nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import {Engine} from '../Engine.ts';
 import {MandelbrotNavigator} from 'mandelbrot';
+import type {ColorStop} from '../ColorStop.ts';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let canvas: HTMLCanvasElement | null = null;
@@ -41,22 +42,10 @@ watch(
 const props = withDefaults(defineProps<{
   mu?: number,
   epsilon?: number,
-  colorStops?: Array<{ color: string, position: number }>,
+  colorStops?: ColorStop[],
   palettePeriod?: number,
   paletteOffset?: number,
   antialiasLevel?: number,
-  tessellationLevel?: number,
-  shadingLevel?: number,
-  lightAngle?: number,
-  displacementAmount?: number,
-  specularPower?: number,
-  activatePalette?: boolean,
-  activateSkybox?: boolean,
-  activateTessellation?: boolean,
-  activateWebcam?: boolean,
-  activateShading?: boolean,
-  activateZebra?: boolean,
-  activateSmoothness?: boolean,
   activateAnimate?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
@@ -101,24 +90,12 @@ const props = withDefaults(defineProps<{
        palettePeriod: 100.0,
        paletteOffset: 0,
        antialiasLevel: 1,
-       tessellationLevel: 2.0,
-       shadingLevel: 1,
-       lightAngle: 3.927, // ~225° in radians
-       displacementAmount: 0.01,
-       specularPower: 4,
-       activatePalette: true,
-       activateSkybox: false,
-       activateTessellation: false,
-       activateWebcam: false,
-       activateShading: true,
-       activateZebra: false,
-       activateSmoothness: true,
        activateAnimate: false,
-         dprMultiplier: 0.5,
-         maxIterationMultiplier: 0.1,
-         targetFps: 60,
-         gpuLoadMultiplier: 1.0,
-         interpolationMode: 'lab',
+       dprMultiplier: 0.5,
+       maxIterationMultiplier: 0.1,
+       targetFps: 60,
+       gpuLoadMultiplier: 1.0,
+       interpolationMode: 'lab',
     }
 );
 
@@ -178,23 +155,11 @@ async function draw() {
           epsilon: props.epsilon
         },
       {
-        shadingLevel: props.shadingLevel,
-        tessellationLevel: props.tessellationLevel,
-        lightAngle: props.lightAngle,
-        displacementAmount: props.displacementAmount,
-        specularPower: props.specularPower,
         antialiasLevel: props.antialiasLevel,
         palettePeriod: props.palettePeriod,
         paletteOffset: props.paletteOffset,
         colorStops: toRaw(props.colorStops),
         interpolationMode: props.interpolationMode,
-        activateShading: props.activateShading,
-        activateTessellation: props.activateTessellation,
-        activateWebcam: props.activateWebcam,
-        activatePalette: props.activatePalette,
-        activateSkybox: props.activateSkybox,
-        activateSmoothness: props.activateSmoothness,
-        activateZebra: props.activateZebra,
         activateAnimate: props.activateAnimate,
       }
     )
@@ -217,23 +182,11 @@ async function initWebGPU() {
   navigator.scale(scale.value);
   navigator.angle(Number(angle.value));
   engine = new Engine(canvas, {
-    activatePalette: props.activatePalette,
-    activateSkybox: props.activateSkybox,
-    shadingLevel: props.shadingLevel,
-    tessellationLevel: props.tessellationLevel,
-    lightAngle: props.lightAngle,
-    displacementAmount: props.displacementAmount,
-    specularPower: props.specularPower,
     antialiasLevel: props.antialiasLevel,
     palettePeriod: props.palettePeriod,
     paletteOffset: props.paletteOffset,
     colorStops: props.colorStops,
     interpolationMode: props.interpolationMode,
-    activateShading: props.activateShading,
-    activateTessellation: props.activateTessellation,
-    activateWebcam: props.activateWebcam,
-    activateSmoothness: props.activateSmoothness,
-    activateZebra: props.activateZebra,
     activateAnimate: props.activateAnimate,
   });
   return engine.initialize(navigator)

@@ -5,6 +5,7 @@ import MobileNavigationControls from './MobileNavigationControls.vue';
 import type {MandelbrotExposed} from "../types/MandelbrotExposed.ts";
 import type {ComplexCoordStr} from "../CursorCoordinate.ts";
 import type {IterationData} from "../CursorCoordinate.ts";
+import type {ColorStop} from "../ColorStop.ts";
 
 const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
@@ -16,22 +17,10 @@ const mobileNavExpanded = defineModel<boolean>('mobileNavExpanded', { default: f
 const props = defineProps<{
   mu?: number,
   epsilon?: number,
-  colorStops?: Array<{ color: string, position: number }>,
+  colorStops?: ColorStop[],
   antialiasLevel?: number,
-  tessellationLevel?: number,
-  shadingLevel?: number,
-  lightAngle?: number,
-  displacementAmount?: number,
-  specularPower?: number,
   palettePeriod?: number,
   paletteOffset?: number,
-  activatePalette?: boolean,
-  activateSkybox?: boolean,
-  activateTessellation?: boolean,
-  activateWebcam?: boolean,
-  activateShading?: boolean,
-  activateZebra?: boolean,
-  activateSmoothness?: boolean,
   activateAnimate?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
@@ -403,20 +392,8 @@ onUnmounted(() => {
       :mu="props.mu"
       :epsilon="props.epsilon"
       :antialiasLevel="props.antialiasLevel"
-      :shadingLevel="props.shadingLevel"
-      :lightAngle="props.lightAngle"
-      :displacementAmount="props.displacementAmount"
-      :specularPower="props.specularPower"
       :palettePeriod="props.palettePeriod"
-      :tessellationLevel="props.tessellationLevel"
       :colorStops="props.colorStops"
-      :activatePalette="props.activatePalette"
-      :activateSkybox="props.activateSkybox"
-      :activateTessellation="props.activateTessellation"
-      :activateWebcam="props.activateWebcam"
-      :activateShading="props.activateShading"
-      :activateZebra="props.activateZebra"
-      :activateSmoothness="props.activateSmoothness"
       :activateAnimate="props.activateAnimate"
       :paletteOffset="props.paletteOffset"
       :dprMultiplier="props.dprMultiplier"

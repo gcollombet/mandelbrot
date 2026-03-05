@@ -75,19 +75,7 @@ export type RenderOptions = {
     paletteOffset: number,
     colorStops: ColorStop[],
     interpolationMode: InterpolationMode,
-    activateWebcam: boolean,
-    activateTessellation: boolean,
-    activateShading: boolean,
-    activateSkybox: boolean,
-    activatePalette: boolean,
-    activateSmoothness: boolean,
-    activateZebra: boolean,
     activateAnimate: boolean,
-    tessellationLevel: number,
-    shadingLevel: number,
-    lightAngle: number,
-    displacementAmount: number,
-    specularPower: number,
 }
 
 export type Mandelbrot = {
@@ -357,7 +345,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 28,
+            size: 4 * 16, // 13 floats padded to 16-byte alignment (64 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -683,8 +671,8 @@ export class Engine {
     }
 
     areColorStopsEqual(
-        a: Array<{ color: string, position: number }>,
-        b: Array<{ color: string, position: number }>
+        a: ColorStop[],
+        b: ColorStop[]
     ): boolean {
         if (a.length !== b.length) {
             return false
@@ -694,7 +682,8 @@ export class Engine {
             if (!bStop) {
                 return false
             }
-            if (aStop.color !== bStop.color || aStop.position !== bStop.position) {
+            // Compare all fields via JSON (includes color, position, and all effect fields)
+            if (JSON.stringify(aStop) !== JSON.stringify(bStop)) {
                 return false
             }
         }
@@ -717,7 +706,9 @@ export class Engine {
         //     this.unfinishedPixelCount = -1 // unknown — new params, GPU counter not read yet
         // }
 
-        if (renderOptions.activateWebcam) { // limite à ~30fps la mise à jour webcam
+        // Check if any stop has webcam > 0 to decide whether to capture webcam frames
+        const hasWebcam = renderOptions.colorStops.some(s => (s.webcam ?? 0) > 0)
+        if (hasWebcam) { // limite à ~30fps la mise à jour webcam
             await this.updateWebcamTexture()
             this.needRender = true
         } else {
@@ -838,39 +829,28 @@ export class Engine {
         }
 
         const colorShaderData = new Float32Array([
-            renderOptions.palettePeriod,
-            renderOptions.paletteOffset,
-            renderOptions.tessellationLevel,
-            renderOptions.shadingLevel,
-            scaleFactor,
-            this.time,
-            renderOptions.activateTessellation ? 1 : 0,
-            renderOptions.activateShading ? 1 : 0,
-            renderOptions.activateWebcam ? 1 : 0,
-            renderOptions.activatePalette ? 1 : 0,
-            renderOptions.activateSkybox ? 1 : 0,
-            renderOptions.activateSmoothness ? 1 : 0,
-            renderOptions.activateZebra ? 1 : 0,
-            aspect,
-            mandelbrot.angle,
-            renderOptions.activateAnimate ? 1 : 0,
-            mandelbrot.mu,
-            this.zoomFactor,
-            this.zoomTarget,
-            this.liveZoomFactor,
+            renderOptions.palettePeriod,    // 0: palettePeriod
+            renderOptions.paletteOffset,    // 1: paletteOffset
+            scaleFactor,                    // 2: bloomStrength (scaleFactor)
+            this.time,                      // 3: time
+            aspect,                         // 4: aspect
+            mandelbrot.angle,               // 5: angle
+            renderOptions.activateAnimate ? 1 : 0, // 6: animate
+            mandelbrot.mu,                  // 7: mu
+            this.zoomFactor,                // 8: zoomFactor
+            this.zoomTarget,                // 9: zoomTarget
+            this.liveZoomFactor,            // 10: liveZoomFactor
             // Frozen shift derived from the live texture's actual cumulative
             // shift (in rounded texels at liveScale), rescaled to frozen UV.
             // This ensures the frozen texture follows the exact same pan drift
             // as the live texture, without independent accumulation errors.
             (this.zoomReprojectionActive && this.frozenScale > 0)
                 ? this.cumulativeShiftX * (this.liveScale / this.frozenScale) / this.neutralSize
-                : 0,
+                : 0,                        // 11: frozenShiftU
             (this.zoomReprojectionActive && this.frozenScale > 0)
                 ? -this.cumulativeShiftY * (this.liveScale / this.frozenScale) / this.neutralSize
-                : 0,
-            renderOptions.lightAngle,
-            renderOptions.displacementAmount,
-            renderOptions.specularPower,
+                : 0,                        // 12: frozenShiftV
+            0, 0, 0,                        // 13-15: padding to 16 floats
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

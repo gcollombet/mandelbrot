@@ -36,8 +36,9 @@ function togglePickerMode() {
 /** Gère le clic en mode pipette : calcule la phase et ajoute directement le curseur. */
 function onPalettePick(data: IterationData, _clientX: number, _clientY: number) {
   const p = mandelbrotParams.value;
+  // Always use smooth=true for picking — per-stop smoothness is baked in the texture
   const result = computePalettePhase(
-    data, p.mu, p.palettePeriod, p.paletteOffset, p.activateSmoothness,
+    data, p.mu, p.palettePeriod, p.paletteOffset, true,
   );
   if (result.isInSet) return; // pas de curseur pour les points dans l'ensemble
   const stops = p.colorStops;
@@ -526,23 +527,11 @@ const shortcutLabels = computed(() => {
       @palette-pick="onPalettePick"
       :pickerMode="pickerMode"
       :mu="mandelbrotParams.mu"
-      :shadingLevel="mandelbrotParams.shadingLevel"
-      :lightAngle="mandelbrotParams.lightAngle"
-      :displacementAmount="mandelbrotParams.displacementAmount"
-      :specularPower="mandelbrotParams.specularPower"
       :antialiasLevel="mandelbrotParams.antialiasLevel"
-      :tessellationLevel="mandelbrotParams.tessellationLevel"
       :epsilon="mandelbrotParams.epsilon"
       :palettePeriod="mandelbrotParams.palettePeriod"
       :paletteOffset="mandelbrotParams.paletteOffset"
       :colorStops="mandelbrotParams.colorStops"
-      :activatePalette="mandelbrotParams.activatePalette"
-      :activateSkybox="mandelbrotParams.activateSkybox"
-      :activateTessellation="mandelbrotParams.activateTessellation"
-      :activateWebcam="mandelbrotParams.activateWebcam"
-      :activateShading="mandelbrotParams.activateShading"
-      :activateZebra="mandelbrotParams.activateZebra"
-      :activateSmoothness="mandelbrotParams.activateSmoothness"
       :activateAnimate="mandelbrotParams.activateAnimate"
       :dprMultiplier="mandelbrotParams.dprMultiplier"
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
