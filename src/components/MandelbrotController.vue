@@ -28,6 +28,8 @@ const props = defineProps<{
   gpuLoadMultiplier?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   pickerMode?: boolean,
+  tessellationLevel?: number,
+  displacementAmount?: number,
 }>();
 
 const emit = defineEmits<{
@@ -401,6 +403,8 @@ onUnmounted(() => {
       :targetFps="props.targetFps"
       :gpuLoadMultiplier="props.gpuLoadMultiplier"
       :interpolationMode="props.interpolationMode"
+      :tessellationLevel="props.tessellationLevel"
+      :displacementAmount="props.displacementAmount"
     />
     
     <!-- Contrôles de navigation mobile -->

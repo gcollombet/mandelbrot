@@ -538,6 +538,8 @@ const shortcutLabels = computed(() => {
       :targetFps="mandelbrotParams.targetFps"
       :gpuLoadMultiplier="mandelbrotParams.gpuLoadMultiplier"
       :interpolationMode="mandelbrotParams.interpolationMode"
+      :tessellationLevel="mandelbrotParams.tessellationLevel"
+      :displacementAmount="mandelbrotParams.displacementAmount"
     />
 
     <!-- Popup Settings — one per open tab (multi-window) -->

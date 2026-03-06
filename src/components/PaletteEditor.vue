@@ -1,6 +1,7 @@
 <script setup lang="ts">
-import {computed, defineEmits, defineProps, nextTick, onMounted, ref, watch} from 'vue';
+import {computed, defineEmits, defineProps, ref, watch} from 'vue';
 import GlissiereHandle from './GlissiereHandle.vue';
+import PalettePreview from './PalettePreview.vue';
 import {Palette} from '../Palette';
 import {rgb as d3rgb} from 'd3-color';
 import type {ColorStop} from "../ColorStop.ts";
@@ -12,9 +13,15 @@ const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
   interpolationMode?: InterpolationMode;
   pickerMode?: boolean;
+  tileTextureUrl?: string | null;
+  tessellationLevel?: number;
+  displacementAmount?: number;
 }>(), {
   interpolationMode: 'lab',
   pickerMode: false,
+  tileTextureUrl: null,
+  tessellationLevel: 2,
+  displacementAmount: 0.01,
 });
 const emit = defineEmits<{
   (e: 'update:colorStops', value: ColorStop[]): void;
@@ -23,60 +30,15 @@ const emit = defineEmits<{
 
 const MAX_COLORS = 200;
 
-const canvasRef = ref<HTMLCanvasElement|null>(null);
+const previewRef = ref<InstanceType<typeof PalettePreview> | null>(null);
 
-// Texture générée à partir de la palette courante
-const texture = computed(() => {
-  const pal = new Palette(props.colorStops, props.interpolationMode);
-  return pal.generateTexture(); // ImageData (4096×4)
-});
-
-/**
- * Extract row 0 RGB from the 4096×4 texture and force alpha to 255
- * so the gradient preview is always opaque regardless of palette weight.
- */
-function drawTextureToCanvas(img: ImageData, canvas: HTMLCanvasElement) {
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return;
-  ctx.clearRect(0, 0, 4096, 32);
-  const rowData = new ImageData(img.width, 1);
-  const src = img.data;
-  const dst = rowData.data;
-  const stride = img.width * 4;
-  for (let i = 0; i < stride; i += 4) {
-    dst[i]     = src[i];     // R
-    dst[i + 1] = src[i + 1]; // G
-    dst[i + 2] = src[i + 2]; // B
-    dst[i + 3] = 255;        // force opaque
-  }
-  const tmp = document.createElement('canvas');
-  tmp.width = img.width;
-  tmp.height = 1;
-  tmp.getContext('2d')!.putImageData(rowData, 0, 0);
-  ctx.drawImage(tmp, 0, 0, 4096, 32);
-}
-
-watch(texture, (img) => {
-  if (!canvasRef.value || !img) return;
-  drawTextureToCanvas(img, canvasRef.value);
-});
-
-onMounted(() => {
-  nextTick(() => {
-    const img = texture.value;
-    if (!canvasRef.value || !img) return;
-    drawTextureToCanvas(img, canvasRef.value);
-  });
-});
-
-function onCanvasDblClick(event: MouseEvent) {
+function onPreviewDblClick(event: MouseEvent) {
   if (props.colorStops.length >= MAX_COLORS) return;
-  const canvas = canvasRef.value;
+  const canvas = previewRef.value?.canvasRef;
   if (!canvas) return;
   const rect = canvas.getBoundingClientRect();
   let t = (event.clientX - rect.left) / rect.width;
   t = Math.max(0, Math.min(1, t));
-  // Sampler la couleur de la palette à cette position (ajout non-destructif)
   const pal = new Palette(props.colorStops, props.interpolationMode);
   const sampledColor = pal.getColorAt(t);
   props.colorStops.push({ color: sampledColor, position: t });
@@ -137,7 +99,7 @@ const selectedHex = computed({
 // ── Per-stop effect editing ──
 
 /** Whether the per-stop effect panel is expanded. */
-const showEffects = ref(false);
+const showEffects = ref(true);
 
 /** The currently selected stop (reactive). */
 const selectedStop = computed(() => {
@@ -157,8 +119,6 @@ const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: numb
   shadingLevel:       { label: 'Brillance',     min: 0, max: 3,     step: 0.05, unit: '' },
   specularPower:      { label: 'Speculaire',    min: 1, max: 64,    step: 0.5,  unit: '' },
   lightAngle:         { label: 'Light Angle',   min: 0, max: 6.283, step: 0.01, unit: 'rad' },
-  tessellationLevel:  { label: 'Repetition',    min: 0, max: 10,    step: 0.1,  unit: '' },
-  displacementAmount: { label: 'Deplacement',   min: 0, max: 0.1,   step: 0.001, unit: '' },
 };
 
 /** Get the effective value of a field on the selected stop. */
@@ -180,10 +140,16 @@ function setStopEffect(field: EffectFieldName, value: number) {
 
 <template>
   <div class="palette-editor">
-    <div class="canvas-row" style="position:relative;" @dblclick="onCanvasDblClick">
-      <canvas ref="canvasRef" width="4096" height="32"
-              style="width:100%;max-width:100%;height:32px;border-radius:2px;box-shadow:0 1px 4px #0001;">
-      </canvas>
+    <!-- WebGPU preview with handles overlaid -->
+    <div class="canvas-row" style="position:relative;" @dblclick="onPreviewDblClick">
+      <PalettePreview
+        ref="previewRef"
+        :colorStops="colorStops"
+        :interpolationMode="interpolationMode"
+        :tileTextureUrl="tileTextureUrl"
+        :tessellationLevel="tessellationLevel"
+        :displacementAmount="displacementAmount"
+      />
       <div class="handles-overlay">
         <GlissiereHandle
           v-for="(stop, idx) in colorStops"

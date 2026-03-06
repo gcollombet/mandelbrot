@@ -52,6 +52,8 @@ const props = withDefaults(defineProps<{
   targetFps?: number,
   gpuLoadMultiplier?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
+  tessellationLevel?: number,
+  displacementAmount?: number,
  }>(),
 
     {
@@ -96,6 +98,8 @@ const props = withDefaults(defineProps<{
        targetFps: 60,
        gpuLoadMultiplier: 1.0,
        interpolationMode: 'lab',
+       tessellationLevel: 2,
+       displacementAmount: 0.01,
     }
 );
 
@@ -161,6 +165,8 @@ async function draw() {
         colorStops: toRaw(props.colorStops),
         interpolationMode: props.interpolationMode,
         activateAnimate: props.activateAnimate,
+        tessellationLevel: props.tessellationLevel,
+        displacementAmount: props.displacementAmount,
       }
     )
     await engine.render()
@@ -188,6 +194,8 @@ async function initWebGPU() {
     colorStops: props.colorStops,
     interpolationMode: props.interpolationMode,
     activateAnimate: props.activateAnimate,
+    tessellationLevel: props.tessellationLevel,
+    displacementAmount: props.displacementAmount,
   });
   return engine.initialize(navigator)
 }

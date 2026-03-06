@@ -15,6 +15,7 @@ import zelligeUrl from '../assets/zellige.webp';
 import bronzeUrl from '../assets/bronze.webp';
 import mercureUrl from '../assets/mercure.webp';
 import honeyUrl from '../assets/honey.webp';
+import waterUrl from '../assets/water.png';
 
 /** Built-in textures: single source of truth for bootstrap, deletion protection, and UI. */
 const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
@@ -24,6 +25,7 @@ const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
   { name: 'Bronze', url: bronzeUrl },
   { name: 'Mercure', url: mercureUrl },
   { name: 'Honey', url: honeyUrl },
+  { name: 'Water', url: waterUrl },
 ] as const;
 const BUILT_IN_TEXTURE_NAMES: ReadonlySet<string> = new Set(BUILT_IN_TEXTURES.map(t => t.name));
 import {
@@ -144,23 +146,10 @@ function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = '
   }
 
   const palette = new Palette(colorStops, mode);
-  const imageData = palette.generateTexture();
+  const rowData = palette.generateThumbnailRow(); // ImageData (4096×1, always opaque)
 
-  // The palette texture is 4096×4; row 0 holds RGB + palette-weight alpha.
-  // For the thumbnail we only need the color row with alpha forced to 255
-  // so the preview is always opaque regardless of the palette activation weight.
-  const rowData = new ImageData(imageData.width, 1);
-  const src = imageData.data;
-  const dst = rowData.data;
-  const stride = imageData.width * 4;
-  for (let i = 0; i < stride; i += 4) {
-    dst[i]     = src[i];     // R
-    dst[i + 1] = src[i + 1]; // G
-    dst[i + 2] = src[i + 2]; // B
-    dst[i + 3] = 255;        // force opaque
-  }
   const tempCanvas = document.createElement('canvas');
-  tempCanvas.width = imageData.width;
+  tempCanvas.width = rowData.width;
   tempCanvas.height = 1;
   const tempCtx = tempCanvas.getContext('2d');
   if (!tempCtx) return '';
@@ -532,31 +521,42 @@ function setEffectOnAllStops(field: EffectFieldName, value: number) {
 }
 
 /**
- * Apply ALL current legacy toggle/slider values to every stop.
- * Called after preset load and on initial mount to ensure stops are in sync.
- * If a legacy field is undefined, the stop field is left untouched (falls
- * back to COLOR_STOP_DEFAULTS at texture-generation time).
+ * Set an effect field only on stops that don't already have it defined.
+ * Used for migration/initialization — does NOT overwrite per-stop values.
+ */
+function fillMissingEffectOnStops(field: EffectFieldName, value: number) {
+  for (const stop of model.value.colorStops) {
+    if (stop[field] === undefined) {
+      stop[field] = value;
+    }
+  }
+}
+
+/**
+ * Fill in missing effect fields on all stops using current legacy toggle/slider
+ * values. Only writes to stops where the field is `undefined` — existing per-stop
+ * values are preserved. Called when colorStops are replaced (palette selection,
+ * preset load, etc.) and on initial mount.
  */
 function syncAllLegacyToStops() {
   const m = model.value;
   const stops = m.colorStops;
   if (!stops || stops.length === 0) return;
 
-  // Activation toggles
-  if (m.activateShading !== undefined)      setEffectOnAllStops('shading',      m.activateShading      ? 1.0 : 0.0);
-  if (m.activatePalette !== undefined)      setEffectOnAllStops('palette',      m.activatePalette      ? 1.0 : 0.0);
-  if (m.activateSmoothness !== undefined)   setEffectOnAllStops('smoothness',   m.activateSmoothness   ? 1.0 : 0.0);
-  if (m.activateTessellation !== undefined) setEffectOnAllStops('tessellation', m.activateTessellation ? 1.0 : 0.0);
-  if (m.activateSkybox !== undefined)       setEffectOnAllStops('skybox',       m.activateSkybox       ? 1.0 : 0.0);
-  if (m.activateWebcam !== undefined)       setEffectOnAllStops('webcam',       m.activateWebcam       ? 1.0 : 0.0);
-  if (m.activateZebra !== undefined)        setEffectOnAllStops('zebra',        m.activateZebra        ? 1.0 : 0.0);
+  // Activation toggles — only fill missing
+  if (m.activateShading !== undefined)      fillMissingEffectOnStops('shading',      m.activateShading      ? 1.0 : 0.0);
+  if (m.activatePalette !== undefined)      fillMissingEffectOnStops('palette',      m.activatePalette      ? 1.0 : 0.0);
+  if (m.activateSmoothness !== undefined)   fillMissingEffectOnStops('smoothness',   m.activateSmoothness   ? 1.0 : 0.0);
+  if (m.activateTessellation !== undefined) fillMissingEffectOnStops('tessellation', m.activateTessellation ? 1.0 : 0.0);
+  if (m.activateSkybox !== undefined)       fillMissingEffectOnStops('skybox',       m.activateSkybox       ? 1.0 : 0.0);
+  if (m.activateWebcam !== undefined)       fillMissingEffectOnStops('webcam',       m.activateWebcam       ? 1.0 : 0.0);
+  if (m.activateZebra !== undefined)        fillMissingEffectOnStops('zebra',        m.activateZebra        ? 1.0 : 0.0);
 
-  // Continuous sliders
-  if (m.shadingLevel !== undefined)       setEffectOnAllStops('shadingLevel',       m.shadingLevel);
-  if (m.specularPower !== undefined)      setEffectOnAllStops('specularPower',      m.specularPower);
-  if (m.lightAngle !== undefined)         setEffectOnAllStops('lightAngle',         m.lightAngle);
-  if (m.tessellationLevel !== undefined)  setEffectOnAllStops('tessellationLevel',  m.tessellationLevel);
-  if (m.displacementAmount !== undefined) setEffectOnAllStops('displacementAmount', m.displacementAmount);
+  // Continuous sliders — only fill missing
+  // Note: tessellationLevel and displacementAmount are now global uniforms, not per-stop.
+  if (m.shadingLevel !== undefined)       fillMissingEffectOnStops('shadingLevel',       m.shadingLevel);
+  if (m.specularPower !== undefined)      fillMissingEffectOnStops('specularPower',      m.specularPower);
+  if (m.lightAngle !== undefined)         fillMissingEffectOnStops('lightAngle',         m.lightAngle);
 }
 
 // ── Activation toggles → stop weights ──
@@ -583,12 +583,11 @@ for (const [toggleField, effectField] of TOGGLE_TO_EFFECT) {
 
 // ── Continuous sliders → stop parameters ──
 // Map: legacy slider field → stop effect field name
+// Note: tessellationLevel and displacementAmount are now global uniforms, not per-stop.
 const SLIDER_TO_EFFECT: Array<[keyof MandelbrotParams, EffectFieldName]> = [
   ['shadingLevel',       'shadingLevel'],
   ['specularPower',      'specularPower'],
   ['lightAngle',         'lightAngle'],
-  ['tessellationLevel',  'tessellationLevel'],
-  ['displacementAmount', 'displacementAmount'],
 ];
 
 for (const [sliderField, effectField] of SLIDER_TO_EFFECT) {
@@ -872,7 +871,7 @@ const interpolationModes: { key: InterpolationMode; label: string }[] = [
 function invertPalette() {
   if (model.value.colorStops.length === 0) return;
   model.value.colorStops = model.value.colorStops.map(s => ({
-    color: s.color,
+    ...s,
     position: 1 - s.position,
   })).sort((a, b) => a.position - b.position);
   resetLchBase();
@@ -882,11 +881,11 @@ function invertPalette() {
 function duplicatePalette() {
   if (model.value.colorStops.length === 0) return;
   const first = model.value.colorStops.map(s => ({
-    color: s.color,
+    ...s,
     position: s.position * 0.5,
   }));
   const second = model.value.colorStops.map(s => ({
-    color: s.color,
+    ...s,
     position: 0.5 + s.position * 0.5,
   }));
   model.value.colorStops = [...first, ...second].sort((a, b) => a.position - b.position);
@@ -897,11 +896,11 @@ function duplicatePalette() {
 function mirrorPalette() {
   if (model.value.colorStops.length === 0) return;
   const first = model.value.colorStops.map(s => ({
-    color: s.color,
+    ...s,
     position: s.position * 0.5,
   }));
   const second = model.value.colorStops.map(s => ({
-    color: s.color,
+    ...s,
     position: 1 - s.position * 0.5,
   }));
   model.value.colorStops = [...first, ...second].sort((a, b) => a.position - b.position);
@@ -914,19 +913,19 @@ function distributeEvenly() {
   if (stops.length < 2) return;
   const step = 1 / (stops.length - 1);
   model.value.colorStops = stops.map((s, i) => ({
-    color: s.color,
+    ...s,
     position: Number((i * step).toFixed(6)),
   }));
   resetLchBase();
 }
 
-/** Négatif : invert each color to its RGB complement */
+/** Négatif : invert each color to its RGB complement (preserves effect fields) */
 function negatePalette() {
   if (model.value.colorStops.length === 0) return;
   model.value.colorStops = model.value.colorStops.map(s => {
     const c = d3rgb(s.color);
     const inv = d3rgb(255 - (c.r || 0), 255 - (c.g || 0), 255 - (c.b || 0));
-    return { color: inv.formatHex(), position: s.position };
+    return { ...s, color: inv.formatHex() };
   });
   resetLchBase();
 }
@@ -1032,12 +1031,12 @@ const currentTextureObj = computed(() => textures.value.find(t => t.name === sel
 const currentTextureThumbnail = computed(() => currentTextureObj.value?.thumbnail);
 
 /** Active blob URL — must be revoked when changed to avoid memory leaks. */
-let activeBlobUrl: string | null = null;
+const activeBlobUrl = ref<string | null>(null);
 
 function revokeActiveBlobUrl() {
-  if (activeBlobUrl) {
-    URL.revokeObjectURL(activeBlobUrl);
-    activeBlobUrl = null;
+  if (activeBlobUrl.value) {
+    URL.revokeObjectURL(activeBlobUrl.value);
+    activeBlobUrl.value = null;
   }
 }
 
@@ -1101,8 +1100,8 @@ async function applyTextureToEngine(name: string, engine: import('../Engine').En
   const blob = await getTextureBlob(name);
   if (!blob) return;
   revokeActiveBlobUrl();
-  activeBlobUrl = URL.createObjectURL(blob);
-  await engine.updateTileTexture(activeBlobUrl);
+  activeBlobUrl.value = URL.createObjectURL(blob);
+  await engine.updateTileTexture(activeBlobUrl.value);
 }
 
 async function selectTexture(name: string) {
@@ -1362,6 +1361,9 @@ async function renameAndSaveTexture() {
           :color-stops="model.colorStops"
           :interpolation-mode="model.interpolationMode"
           :picker-mode="props.pickerMode"
+          :tile-texture-url="activeBlobUrl"
+          :tessellation-level="model.tessellationLevel"
+          :displacement-amount="model.displacementAmount"
           @toggle-picker="emit('toggle-picker')"
         />
       </div>

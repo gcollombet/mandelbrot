@@ -12,13 +12,15 @@ struct Uniforms {
   liveZoomFactor: f32,   // liveScale / displayScale (for UV rescaling of live texture)
   frozenShiftU: f32,     // cumulative pan shift of frozen texture (normalized UV)
   frozenShiftV: f32,
+  tessellationLevel: f32, // global [0, 10]
+  displacementAmount: f32, // global [0, 0.1]
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
 @group(0) @binding(2) var tileTex: texture_2d<f32>;
 @group(0) @binding(3) var skyboxTex: texture_2d<f32>;
 @group(0) @binding(4) var webcamTex: texture_2d<f32>;
-@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 4 rgba8unorm
+@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 4 rgba16float
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
 
@@ -44,8 +46,6 @@ struct EffectParams {
   specularPower: f32,   // [1, 64]
   // Row 3
   lightAngle: f32,      // [0, 2pi]
-  tessellationLevel: f32, // [0, 10]
-  displacementAmount: f32, // [0, 0.1]
 };
 
 fn sampleEffects(palettePhase: f32) -> EffectParams {
@@ -63,18 +63,16 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   e.wShading = row1.b;
   e.wSkybox = row1.a;
 
-  // Row 2 (y = 0.625): webcam, smoothness, shadingLevel/3, specularPower/64
+  // Row 2 (y = 0.625): webcam, smoothness, shadingLevel [0,3], specularPower [1,64]
   let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.625), 0.0);
   e.wWebcam = row2.r;
   e.wSmoothness = row2.g;
-  e.shadingLevel = row2.b * 3.0;
-  e.specularPower = max(row2.a * 64.0, 1.0);
+  e.shadingLevel = row2.b;       // direct: natural range [0, 3]
+  e.specularPower = max(row2.a, 1.0); // direct: natural range [1, 64]
 
-  // Row 3 (y = 0.875): lightAngle/2pi, tessellationLevel/10, displacementAmount/0.1, reserved
+  // Row 3 (y = 0.875): lightAngle [0,2pi], reserved, reserved, reserved
   let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.875), 0.0);
-  e.lightAngle = row3.r * 2.0 * 3.14159265;
-  e.tessellationLevel = row3.g * 10.0;
-  e.displacementAmount = row3.b * 0.1;
+  e.lightAngle = row3.r;          // direct: radians [0, 2pi]
 
   return e;
 }
@@ -149,42 +147,24 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32) -> vec
 
   // ── Tessellation depth: always smooth, independent of palette period ──
   let tess_depth = v_smooth * 2.0;
-  let disp = fx.displacementAmount;
-  let tessColor = tile_tessellation(tileTex, tess_depth * 2.0 * disp + dx, tess_depth * 2.0 * disp + dy, fx.tessellationLevel);
+  let disp = parameters.displacementAmount;
+  let tessColor = tile_tessellation(tileTex, tess_depth * 2.0 * disp + dx, tess_depth * 2.0 * disp + dy, parameters.tessellationLevel);
   let webCamColor = tile_tessellation(
     webcamTex,
     tess_depth + dx + cos(parameters.time * 0.1),
     tess_depth + dy + sin(parameters.time * 0.15),
-    fx.tessellationLevel + sin(parameters.time * 0.05)
+    parameters.tessellationLevel + sin(parameters.time * 0.05)
   );
 
-  // ── Blend color sources using continuous weights ──
-  // Weighted screen blend: each source is blended in proportion to its weight.
-  // Total weight is used to normalize; fallback to gray if no sources active.
-  let totalSourceWeight = fx.wPalette + fx.wTessellation + fx.wWebcam;
-  var color: vec3<f32>;
+  // ── Blend color sources using overlay/opacity model ──
+  // Palette is always the base. Other sources overlay on top with their weight as opacity.
+  var color = fx.paletteColor * fx.wPalette;
 
-  if (totalSourceWeight < 0.001) {
-    // No sources active — use neutral gray (or white if skybox active)
-    color = mix(vec3<f32>(0.5), vec3<f32>(1.0), fx.wSkybox);
-  } else {
-    let invTotal = 1.0 / totalSourceWeight;
+  // Tessellation: overlay on top of palette color
+  color = mix(color, tessColor, fx.wTessellation);
 
-    // Start with palette color (weighted)
-    color = fx.paletteColor * (fx.wPalette * invTotal);
-
-    // Tessellation: when palette is also active, multiply-blend for detail;
-    // otherwise additive-blend like the old screen-blend behavior
-    let tessWeight = fx.wTessellation * invTotal;
-    let tessAdditive = tessColor * tessWeight;
-    let tessMultiply = color * (0.5 + 0.5 * tessColor);
-    // Smoothly transition between additive and multiply based on palette weight
-    let paletteFrac = fx.wPalette * invTotal;
-    color = mix(color + tessAdditive, tessMultiply + tessAdditive * (1.0 - paletteFrac), paletteFrac * step(0.001, tessWeight));
-
-    // Webcam: additive screen blend
-    color = color + webCamColor * (fx.wWebcam * invTotal) * (vec3<f32>(1.0) - color);
-  }
+  // Webcam: overlay on top of current result
+  color = mix(color, webCamColor, fx.wWebcam);
 
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (fx.wShading > 0.001) {
