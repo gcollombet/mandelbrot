@@ -117,6 +117,7 @@ export type RenderOptions = {
     activateAnimate: boolean,
     tessellationLevel: number,
     displacementAmount: number,
+    animationSpeed: number,
 }
 
 export type Mandelbrot = {
@@ -895,7 +896,7 @@ export class Engine {
                 : 0,                        // 12: frozenShiftV
             renderOptions.tessellationLevel, // 13: tessellationLevel
             renderOptions.displacementAmount, // 14: displacementAmount
-            0,                              // 15: padding to 16 floats
+            renderOptions.animationSpeed,   // 15: animationSpeed
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
