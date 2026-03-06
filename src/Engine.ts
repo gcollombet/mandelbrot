@@ -69,6 +69,45 @@ function floorPowerOfTwo(value: number): number {
     return 2 ** Math.floor(Math.log2(v))
 }
 
+// ── Float32 → Float16 conversion ──────────────────────────────────
+// Converts a Float32Array to a Uint16Array of IEEE 754 half-precision floats.
+// Used to upload palette data to an `rgba16float` GPU texture.
+const _f32 = new Float32Array(1)
+const _u32 = new Uint32Array(_f32.buffer)
+
+function float32ToFloat16(v: number): number {
+    _f32[0] = v
+    const f = _u32[0]
+    const sign = (f >>> 16) & 0x8000
+    const exponent = ((f >>> 23) & 0xff) - 127
+    const mantissa = f & 0x7fffff
+
+    if (exponent >= 16) {
+        // Overflow → ±Inf
+        return sign | 0x7c00
+    }
+    if (exponent >= -14) {
+        // Normal range
+        const e16 = exponent + 15
+        return sign | (e16 << 10) | (mantissa >>> 13)
+    }
+    if (exponent >= -24) {
+        // Subnormal
+        const shift = -14 - exponent
+        return sign | ((mantissa | 0x800000) >>> (13 + shift))
+    }
+    // Too small → ±0
+    return sign
+}
+
+function float32ArrayToFloat16(src: Float32Array): Uint16Array {
+    const dst = new Uint16Array(src.length)
+    for (let i = 0; i < src.length; ++i) {
+        dst[i] = float32ToFloat16(src[i])
+    }
+    return dst
+}
+
 export type RenderOptions = {
     antialiasLevel: number,
     palettePeriod: number,
@@ -76,6 +115,8 @@ export type RenderOptions = {
     colorStops: ColorStop[],
     interpolationMode: InterpolationMode,
     activateAnimate: boolean,
+    tessellationLevel: number,
+    displacementAmount: number,
 }
 
 export type Mandelbrot = {
@@ -306,18 +347,19 @@ export class Engine {
         this.skyboxTextureView = this.skyboxTexture.createView()
 
         const palette = new Palette([])
-        const paletteImageData = palette.generateTexture()
+        const paletteTex = palette.generateTexture()
+        const paletteF16 = float32ArrayToFloat16(paletteTex.data)
         this.paletteTexture = this.device.createTexture({
-            size: [paletteImageData.width, paletteImageData.height, 1],
-            format: 'rgba8unorm',
+            size: [paletteTex.width, paletteTex.height, 1],
+            format: 'rgba16float',
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
             label: 'Engine PaletteTexture',
         })
         this.device.queue.writeTexture(
             { texture: this.paletteTexture },
-            paletteImageData.data,
-            { bytesPerRow: paletteImageData.width * 4 },
-            [paletteImageData.width, paletteImageData.height]
+            paletteF16.buffer as ArrayBuffer,
+            { bytesPerRow: paletteTex.width * 8 },  // 4 channels × 2 bytes (float16)
+            [paletteTex.width, paletteTex.height]
         )
         this.paletteTextureView = this.paletteTexture.createView()
         // Sampler linéaire pour interpolation douce de la palette
@@ -818,12 +860,13 @@ export class Engine {
         if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])
             || renderOptions.interpolationMode !== this.previousRenderOptions?.interpolationMode) {
             const palette = new Palette(renderOptions.colorStops, renderOptions.interpolationMode)
-            const paletteImageData = palette.generateTexture()
+            const paletteTex = palette.generateTexture()
+            const paletteF16 = float32ArrayToFloat16(paletteTex.data)
             this.device.queue.writeTexture(
                 { texture: this.paletteTexture! },
-                paletteImageData.data,
-                { bytesPerRow: paletteImageData.width * 4 },
-                [paletteImageData.width, paletteImageData.height]
+                paletteF16.buffer as ArrayBuffer,
+                { bytesPerRow: paletteTex.width * 8 },  // 4 channels × 2 bytes (float16)
+                [paletteTex.width, paletteTex.height]
             )
             this.needRender = true
         }
@@ -850,7 +893,9 @@ export class Engine {
             (this.zoomReprojectionActive && this.frozenScale > 0)
                 ? -this.cumulativeShiftY * (this.liveScale / this.frozenScale) / this.neutralSize
                 : 0,                        // 12: frozenShiftV
-            0, 0, 0,                        // 13-15: padding to 16 floats
+            renderOptions.tessellationLevel, // 13: tessellationLevel
+            renderOptions.displacementAmount, // 14: displacementAmount
+            0,                              // 15: padding to 16 floats
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

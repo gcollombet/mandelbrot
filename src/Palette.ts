@@ -1,7 +1,7 @@
 import { interpolateLab, interpolateRgb, interpolateHcl, interpolateHsl, interpolateCubehelix } from 'd3-interpolate';
 import { rgb } from 'd3-color';
 import type { ColorStop } from './ColorStop.ts';
-import { COLOR_STOP_DEFAULTS, PARAM_DIVISORS, getEffectValue } from './ColorStop.ts';
+import { COLOR_STOP_DEFAULTS, getEffectValue } from './ColorStop.ts';
 import type { InterpolationMode } from './Mandelbrot.ts';
 
 const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: number) => string> = {
@@ -25,13 +25,6 @@ function lerpEffect(a: ColorStop, b: ColorStop, field: keyof typeof COLOR_STOP_D
   const va = getEffectValue(a, field);
   const vb = getEffectValue(b, field);
   return va + (vb - va) * t;
-}
-
-/**
- * Clamp a value to [0, 255] and round to nearest integer.
- */
-function toByte(v: number): number {
-  return Math.max(0, Math.min(255, Math.round(v)));
 }
 
 export class Palette {
@@ -85,18 +78,22 @@ export class Palette {
   }
 
   /**
-   * Generate a 4096 x 4 rgba8unorm ImageData encoding both colors and effects.
+   * Generate a 4096 x 4 float texture as a Float32Array.
+   * All values are stored in their natural ranges — no normalization.
+   * The Engine will encode these as float16 for the GPU texture.
    *
-   * Row 0 (y=0.125): R, G, B, palette (weight of RGB source)
-   * Row 1 (y=0.375): zebra, tessellation, shading, skybox
-   * Row 2 (y=0.625): webcam, smoothness, shadingLevel/3, specularPower/64
-   * Row 3 (y=0.875): lightAngle/2pi, tessellationLevel/10, displacementAmount/0.1, 0 (reserved)
+   * Layout (4 rows of 4096 RGBA texels):
+   *   Row 0 (y=0.125): R [0,1], G [0,1], B [0,1], palette weight [0,1]
+   *   Row 1 (y=0.375): zebra [0,1], tessellation [0,1], shading [0,1], skybox [0,1]
+   *   Row 2 (y=0.625): webcam [0,1], smoothness [0,1], shadingLevel [0,3], specularPower [1,64]
+   *   Row 3 (y=0.875): lightAngle [0,2pi], tessellationLevel [0,10], displacementAmount [0,0.1], 0 (reserved)
+   *
+   * @returns {{ data: Float32Array, width: number, height: number }}
    */
-  generateTexture(): ImageData {
+  generateTexture(): { data: Float32Array; width: number; height: number } {
     const width = TEXTURE_WIDTH;
     const height = TEXTURE_HEIGHT;
-    const imageData = new ImageData(width, height);
-    const data = imageData.data;
+    const data = new Float32Array(width * height * 4);
 
     for (let x = 0; x < width; ++x) {
       const t = x / (width - 1);
@@ -104,33 +101,53 @@ export class Palette {
 
       // ── Row 0: R, G, B, palette weight ──
       const row0 = (0 * width + x) * 4;
-      data[row0]     = toByte(color.r);
-      data[row0 + 1] = toByte(color.g);
-      data[row0 + 2] = toByte(color.b);
-      data[row0 + 3] = toByte(this.getEffectAt(t, 'palette') * 255);
+      data[row0]     = (color.r ?? 0) / 255;
+      data[row0 + 1] = (color.g ?? 0) / 255;
+      data[row0 + 2] = (color.b ?? 0) / 255;
+      data[row0 + 3] = this.getEffectAt(t, 'palette');
 
       // ── Row 1: zebra, tessellation, shading, skybox ──
       const row1 = (1 * width + x) * 4;
-      data[row1]     = toByte(this.getEffectAt(t, 'zebra') * 255);
-      data[row1 + 1] = toByte(this.getEffectAt(t, 'tessellation') * 255);
-      data[row1 + 2] = toByte(this.getEffectAt(t, 'shading') * 255);
-      data[row1 + 3] = toByte(this.getEffectAt(t, 'skybox') * 255);
+      data[row1]     = this.getEffectAt(t, 'zebra');
+      data[row1 + 1] = this.getEffectAt(t, 'tessellation');
+      data[row1 + 2] = this.getEffectAt(t, 'shading');
+      data[row1 + 3] = this.getEffectAt(t, 'skybox');
 
-      // ── Row 2: webcam, smoothness, shadingLevel/3, specularPower/64 ──
+      // ── Row 2: webcam, smoothness, shadingLevel, specularPower ──
       const row2 = (2 * width + x) * 4;
-      data[row2]     = toByte(this.getEffectAt(t, 'webcam') * 255);
-      data[row2 + 1] = toByte(this.getEffectAt(t, 'smoothness') * 255);
-      data[row2 + 2] = toByte((this.getEffectAt(t, 'shadingLevel') / PARAM_DIVISORS.shadingLevel) * 255);
-      data[row2 + 3] = toByte((this.getEffectAt(t, 'specularPower') / PARAM_DIVISORS.specularPower) * 255);
+      data[row2]     = this.getEffectAt(t, 'webcam');
+      data[row2 + 1] = this.getEffectAt(t, 'smoothness');
+      data[row2 + 2] = this.getEffectAt(t, 'shadingLevel');
+      data[row2 + 3] = this.getEffectAt(t, 'specularPower');
 
-      // ── Row 3: lightAngle/2pi, tessellationLevel/10, displacementAmount/0.1, reserved ──
+      // ── Row 3: lightAngle, reserved, reserved, reserved ──
       const row3 = (3 * width + x) * 4;
-      data[row3]     = toByte((this.getEffectAt(t, 'lightAngle') / PARAM_DIVISORS.lightAngle) * 255);
-      data[row3 + 1] = toByte((this.getEffectAt(t, 'tessellationLevel') / PARAM_DIVISORS.tessellationLevel) * 255);
-      data[row3 + 2] = toByte((this.getEffectAt(t, 'displacementAmount') / PARAM_DIVISORS.displacementAmount) * 255);
+      data[row3]     = this.getEffectAt(t, 'lightAngle');
+      data[row3 + 1] = 0; // reserved (tessellationLevel is now a global uniform)
+      data[row3 + 2] = 0; // reserved (displacementAmount is now a global uniform)
       data[row3 + 3] = 0; // reserved
     }
 
+    return { data, width, height };
+  }
+
+  /**
+   * Generate a 1-row ImageData (4096 x 1) containing only the RGB color row.
+   * Used for palette thumbnails in the UI (always opaque).
+   */
+  generateThumbnailRow(): ImageData {
+    const width = TEXTURE_WIDTH;
+    const imageData = new ImageData(width, 1);
+    const dst = imageData.data;
+    for (let x = 0; x < width; ++x) {
+      const t = x / (width - 1);
+      const color = rgb(this.getColorAt(t));
+      const i = x * 4;
+      dst[i]     = Math.max(0, Math.min(255, Math.round(color.r ?? 0)));
+      dst[i + 1] = Math.max(0, Math.min(255, Math.round(color.g ?? 0)));
+      dst[i + 2] = Math.max(0, Math.min(255, Math.round(color.b ?? 0)));
+      dst[i + 3] = 255;
+    }
     return imageData;
   }
 }
