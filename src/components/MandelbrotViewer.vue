@@ -215,6 +215,8 @@ const mandelbrotParams = ref<MandelbrotParams>({
   targetFps: 30,
   gpuLoadMultiplier: 1.0,
   interpolationMode: 'lab',
+  animationSpeed: 1.0,
+  textureName: 'Gold',
 });
 
 // Restore parametres a partir du localStorage puis surveille et persiste a chaque changement
@@ -540,6 +542,7 @@ const shortcutLabels = computed(() => {
       :interpolationMode="mandelbrotParams.interpolationMode"
       :tessellationLevel="mandelbrotParams.tessellationLevel"
       :displacementAmount="mandelbrotParams.displacementAmount"
+      :animationSpeed="mandelbrotParams.animationSpeed"
     />
 
     <!-- Popup Settings — one per open tab (multi-window) -->

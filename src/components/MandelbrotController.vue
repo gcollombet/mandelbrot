@@ -30,6 +30,7 @@ const props = defineProps<{
   pickerMode?: boolean,
   tessellationLevel?: number,
   displacementAmount?: number,
+  animationSpeed?: number,
 }>();
 
 const emit = defineEmits<{
@@ -405,6 +406,7 @@ onUnmounted(() => {
       :interpolationMode="props.interpolationMode"
       :tessellationLevel="props.tessellationLevel"
       :displacementAmount="props.displacementAmount"
+      :animationSpeed="props.animationSpeed"
     />
     
     <!-- Contrôles de navigation mobile -->

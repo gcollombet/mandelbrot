@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import {computed, onMounted, ref, toRaw, watch} from 'vue';
+import {computed, nextTick, onMounted, ref, toRaw, watch} from 'vue';
 import type {MandelbrotParams} from "../Mandelbrot.ts";
-import type { EffectFieldName } from '../ColorStop.ts';
+import type { ColorStop, EffectFieldName } from '../ColorStop.ts';
 import { COLOR_STOP_DEFAULTS } from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
 import { Palette } from '../Palette.ts';
@@ -16,6 +16,12 @@ import bronzeUrl from '../assets/bronze.webp';
 import mercureUrl from '../assets/mercure.webp';
 import honeyUrl from '../assets/honey.webp';
 import waterUrl from '../assets/water.png';
+import woodUrl from '../assets/wood.png';
+import marbleUrl from '../assets/marble.png';
+import satinUrl from '../assets/satin.png';
+import dentelleUrl from '../assets/dentelle.png';
+import bismuteUrl from '../assets/bismute.png';
+import graniteUrl from '../assets/granite.png';
 
 /** Built-in textures: single source of truth for bootstrap, deletion protection, and UI. */
 const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
@@ -26,6 +32,12 @@ const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
   { name: 'Mercure', url: mercureUrl },
   { name: 'Honey', url: honeyUrl },
   { name: 'Water', url: waterUrl },
+  { name: 'Wood', url: woodUrl },
+  { name: 'Marble', url: marbleUrl },
+  { name: 'Satin', url: satinUrl },
+  { name: 'Dentelle', url: dentelleUrl },
+  { name: 'Bismute', url: bismuteUrl },
+  { name: 'Granite', url: graniteUrl },
 ] as const;
 const BUILT_IN_TEXTURE_NAMES: ReadonlySet<string> = new Set(BUILT_IN_TEXTURES.map(t => t.name));
 import {
@@ -85,6 +97,8 @@ const model =  defineModel<MandelbrotParams>({
     activateZebra: false,
      activateSmoothness: true,
     activateAnimate: false,
+    animationSpeed: 1.0,
+    textureName: 'Gold',
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
     interpolationMode: 'lab',
@@ -166,7 +180,8 @@ const presetCache = new Map<number, PresetRecord>();
 
 // Palette management
 const paletteName = ref('');
-const palettes = ref<{ name: string, colorStops: any[], thumbnail?: string, date?: string }[]>([]);
+const paletteEditorRef = ref<InstanceType<typeof PaletteEditor> | null>(null);
+const palettes = ref<{ name: string, colorStops: any[], thumbnail?: string, date?: string, textureName?: string, interpolationMode?: InterpolationMode, palettePeriod?: number, paletteOffset?: number }[]>([]);
 const selectedPalette = ref('');
 const showPaletteDropdown = ref(false);
 
@@ -264,6 +279,7 @@ async function savePreset() {
   delete (savedValue as any).antialiasLevel;
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
+  savedValue.textureName = selectedTexture.value;
   const name = presetName.value.trim();
   const id = await savePresetEntry(savedValue, thumbnail, name || undefined, now);
   presets.value = await getAllPresetEntries();
@@ -296,6 +312,7 @@ async function quickSnapshot() {
   delete (savedValue as any).antialiasLevel;
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
+  savedValue.textureName = selectedTexture.value;
   const now = new Date().toISOString();
   const id = await savePresetEntry(savedValue, thumbnail, undefined, now);
   presets.value = await getAllPresetEntries();
@@ -357,14 +374,24 @@ async function savePalette() {
   if (!paletteName.value.trim()) return;
   let thumbnail: string | undefined = undefined;
   let now = new Date().toISOString();
+  // Try WebGPU snapshot first (shows effects), fall back to CPU gradient strip
   try {
-    thumbnail = generatePaletteThumbnail(model.value.colorStops, model.value.interpolationMode);
+    const snap = paletteEditorRef.value?.getSnapshot?.();
+    if (snap) {
+      thumbnail = snap;
+    } else {
+      thumbnail = generatePaletteThumbnail(model.value.colorStops, model.value.interpolationMode);
+    }
   } catch { /* ignore errors, no thumbnail */ }
   const palette = {
     name: paletteName.value.trim(),
     colorStops: structuredClone(toRaw(model.value.colorStops)),
     thumbnail,
-    date: now
+    date: now,
+    textureName: selectedTexture.value,
+    interpolationMode: model.value.interpolationMode,
+    palettePeriod: model.value.palettePeriod,
+    paletteOffset: model.value.paletteOffset,
   };
   const idx = palettes.value.findIndex(p => p.name === palette.name);
   if (idx >= 0) {
@@ -382,10 +409,18 @@ function selectPalette(name: string) {
     selectedPalette.value = name;
     paletteName.value = palette.name;
     model.value.colorStops = structuredClone(toRaw(palette.colorStops));
+    // Restore interpolation mode and palette params if present
+    if (palette.interpolationMode) model.value.interpolationMode = palette.interpolationMode;
+    if (palette.palettePeriod != null) model.value.palettePeriod = palette.palettePeriod;
+    if (palette.paletteOffset != null) model.value.paletteOffset = palette.paletteOffset;
+    // Restore texture if present
+    if (palette.textureName) {
+      selectTexture(palette.textureName);
+    }
   }
 }
 
-function selectPaletteFromDropdown(palette: { name: string, colorStops: any[], thumbnail?: string, date?: string }) {
+function selectPaletteFromDropdown(palette: { name: string, colorStops: any[], thumbnail?: string, date?: string, textureName?: string, interpolationMode?: InterpolationMode, palettePeriod?: number, paletteOffset?: number }) {
   selectPalette(palette.name);
   showPaletteDropdown.value = false;
 }
@@ -431,15 +466,17 @@ async function selectGraphicsFromPreset(id: number) {
   selectedGraphicsPreset.value = id;
   const excluded = new Set<string>([...LOCATION_FIELDS, ...PERF_FIELDS]);
   const src = record.value;
-  for (const key of Object.keys(src) as (keyof MandelbrotParams)[]) {
-    if (excluded.has(key)) continue;
-    if (key === 'colorStops') {
-      model.value.colorStops = structuredClone(toRaw(src.colorStops));
-    } else {
-      // eslint-disable-next-line @typescript-eslint/no-explicit-any
-      (model.value as any)[key] = (src as any)[key];
+  withSuppressedSync(() => {
+    for (const key of Object.keys(src) as (keyof MandelbrotParams)[]) {
+      if (excluded.has(key)) continue;
+      if (key === 'colorStops') {
+        model.value.colorStops = structuredClone(toRaw(src.colorStops));
+      } else {
+        // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        (model.value as any)[key] = (src as any)[key];
+      }
     }
-  }
+  });
 }
 
 async function selectGraphicsPresetFromDropdown(preset: PresetMetadata) {
@@ -472,7 +509,12 @@ async function selectPreset(id: number) {
     for (const key of PERF_FIELDS) {
       (saved as any)[key] = (current as any)[key];
     }
-    model.value = saved;
+    withSuppressedSync(() => { model.value = saved; });
+    // Restore texture if saved with the preset
+    const texName = saved.textureName;
+    if (texName && textures.value.some(t => t.name === texName)) {
+      selectTexture(texName);
+    }
   }
 }
 
@@ -509,6 +551,21 @@ const lightAngleSlider = computed({
 // =====================================================
 // When a global toggle or slider changes, propagate the value to ALL stops.
 // This is the bridge between legacy UI controls and the per-stop palette texture.
+
+/**
+ * Guard flag: when true, legacy toggle/slider watchers skip their
+ * `setEffectOnAllStops` calls so they don't overwrite per-stop values
+ * that were just loaded from a preset or palette.
+ * Cleared automatically on the next tick via `withSuppressedSync`.
+ */
+let suppressLegacySync = false;
+
+/** Run `fn` with legacy sync suppressed; flag is cleared after Vue flushes watchers. */
+function withSuppressedSync(fn: () => void) {
+  suppressLegacySync = true;
+  fn();
+  void nextTick().then(() => { suppressLegacySync = false; });
+}
 
 /**
  * Set an effect field on every color stop in the model.
@@ -575,6 +632,7 @@ for (const [toggleField, effectField] of TOGGLE_TO_EFFECT) {
   watch(
     () => model.value[toggleField] as boolean | undefined,
     (val) => {
+      if (suppressLegacySync) return;
       if (val === undefined) return;
       setEffectOnAllStops(effectField, val ? 1.0 : 0.0);
     },
@@ -594,6 +652,7 @@ for (const [sliderField, effectField] of SLIDER_TO_EFFECT) {
   watch(
     () => model.value[sliderField] as number | undefined,
     (val) => {
+      if (suppressLegacySync) return;
       if (val === undefined) return;
       setEffectOnAllStops(effectField, val);
     },
@@ -613,25 +672,6 @@ onMounted(async () => {
   await loadPresets();
   loadPalettes();
   await loadTextures();
-  // Apply persisted texture to engine if it's not the default
-  if (selectedTexture.value !== 'Gold' && props.engine) {
-    try {
-      await applyTextureToEngine(selectedTexture.value, props.engine);
-    } catch (e) {
-      console.warn('Failed to restore tile texture:', e);
-    }
-  }
-});
-
-// Apply persisted texture when engine becomes available (may arrive after mount)
-watch(() => props.engine, async (engine) => {
-  if (engine && selectedTexture.value !== 'Gold') {
-    try {
-      await applyTextureToEngine(selectedTexture.value, engine);
-    } catch (e) {
-      console.warn('Failed to restore tile texture:', e);
-    }
-  }
 });
 
 const currentPaletteObj = computed(() => palettes.value.find(p => p.name === selectedPalette.value));
@@ -752,7 +792,7 @@ function importPalettes(event: Event) {
 // LCH Global Adjustment Sliders (perceptually uniform)
 // =====================================================
 // Stores the baseline colorStops for LCH adjustments
-const lchBaseStops = ref<{ color: string, position: number }[] | null>(null);
+const lchBaseStops = ref<ColorStop[] | null>(null);
 const hueShift = ref(0);    // Hue rotation in degrees (-180..180)
 const chromaShift = ref(0);  // Chroma shift (-100..100)
 const lightShift = ref(0);   // Lightness shift (-100..100)
@@ -830,7 +870,8 @@ function applyAllShifts() {
     // If resulting saturation is zero, keep hue undefined to avoid color artifacts
     const finalH = (sat === 0) ? NaN : hslH;
     const final = d3hsl(finalH, sat, lum);
-    return { color: d3rgb(final).formatHex(), position: stop.position };
+    // Preserve all effect fields, only update color
+    return { ...stop, color: d3rgb(final).formatHex() };
   });
 }
 
@@ -1001,19 +1042,76 @@ function generateTriadic() {
   resetLchBase();
 }
 
-/** Generate a random palette */
+/** Generate a random palette and randomize all graphics parameters */
 function generateRandom() {
   const count = 4 + Math.floor(Math.random() * 4); // 4 to 7 stops
-  const stops: { color: string; position: number }[] = [];
+  const rRange = (min: number, max: number) => min + Math.random() * (max - min);
+  const rStep = (min: number, max: number, step: number) => {
+    const steps = Math.round((max - min) / step);
+    return min + Math.round(Math.random() * steps) * step;
+  };
+
+  // Build stops with per-stop random effect fields (continuous values, different per stop)
+  const stops: ColorStop[] = [];
   for (let i = 0; i < count; i++) {
     const t = i / (count - 1);
     const h = Math.random() * 360;
     const c = 30 + Math.random() * 80;
     const l = 15 + Math.random() * 80;
-    stops.push({ color: d3rgb(d3lch(l, c, h)).formatHex(), position: t });
+    stops.push({
+      color: d3rgb(d3lch(l, c, h)).formatHex(),
+      position: t,
+      // Activation weights — continuous [0, 1]
+      palette: rRange(0.3, 1.0),
+      zebra: rRange(0, 0.8),
+      tessellation: rRange(0, 1.0),
+      shading: rRange(0, 1.0),
+      skybox: rRange(0, 0.6),
+      webcam: 0,  // don't randomly enable webcam (requires permission)
+      smoothness: rRange(0.2, 1.0),
+      // Continuous effect parameters — per-stop variation
+      shadingLevel: rRange(0.2, 2.5),
+      specularPower: rRange(1, 40),
+      lightAngle: rRange(0, 2 * Math.PI),
+    });
   }
-  model.value.colorStops = stops;
-  resetLchBase();
+
+  withSuppressedSync(() => {
+    model.value.colorStops = stops;
+    resetLchBase();
+
+    // Randomize global parameters
+    const m = model.value;
+
+    // Palette
+    m.palettePeriod = rStep(4, 512, 1);
+    m.paletteOffset = rStep(0, 1000, 1);
+    m.interpolationMode = interpolationModes[Math.floor(Math.random() * interpolationModes.length)].key;
+
+    // Global toggles (derived from whether any stop has significant weight)
+    m.activatePalette = true;
+    m.activateShading = stops.some(s => (s.shading ?? 0) > 0.3);
+    m.activateTessellation = stops.some(s => (s.tessellation ?? 0) > 0.3);
+    m.activateSkybox = m.activateShading && stops.some(s => (s.skybox ?? 0) > 0.2);
+    m.activateWebcam = false;
+    m.activateZebra = stops.some(s => (s.zebra ?? 0) > 0.3);
+    m.activateSmoothness = stops.some(s => (s.smoothness ?? 0) > 0.3);
+    m.activateAnimate = Math.random() < 0.5;
+
+    // Global continuous sliders
+    m.shadingLevel = rRange(0.2, 2.5);
+    m.specularPower = rRange(1, 40);
+    m.lightAngle = rRange(0, 2 * Math.PI);
+    m.tessellationLevel = rStep(1, 8, 1);
+    m.displacementAmount = rRange(0.001, 0.05);
+    m.animationSpeed = rStep(0.1, 3.0, 0.1);
+  });
+
+  // Random texture
+  if (textures.value.length > 0) {
+    const tex = textures.value[Math.floor(Math.random() * textures.value.length)];
+    selectTexture(tex.name);
+  }
 }
 
 // =====================================================
@@ -1088,12 +1186,18 @@ async function loadTextures() {
   // 3. Load metadata list
   textures.value = await getAllTextureEntries();
 
-  // 4. Restore persisted selection
+  // 4. Restore persisted selection:
+  //    Priority: model.textureName (from parent/preset) > localStorage > default 'Gold'
+  const modelName = model.value.textureName;
   const savedName = localStorage.getItem(TEXTURE_SELECTED_KEY);
-  if (savedName && textures.value.some(t => t.name === savedName)) {
-    selectedTexture.value = savedName;
-    textureName.value = savedName;
-  }
+  const restoredName = (modelName && textures.value.some(t => t.name === modelName))
+    ? modelName
+    : (savedName && textures.value.some(t => t.name === savedName))
+      ? savedName
+      : 'Gold';
+  selectedTexture.value = restoredName;
+  model.value.textureName = restoredName;
+  textureName.value = restoredName;
 }
 
 async function applyTextureToEngine(name: string, engine: import('../Engine').Engine) {
@@ -1104,10 +1208,23 @@ async function applyTextureToEngine(name: string, engine: import('../Engine').En
   await engine.updateTileTexture(activeBlobUrl.value);
 }
 
+// Apply texture to engine whenever selectedTexture or engine changes.
+// This covers: initial load, tab re-mount, preset change, random, manual selection.
+watch([selectedTexture, () => props.engine] as const, async ([name, engine]) => {
+  if (engine && name) {
+    try {
+      await applyTextureToEngine(name, engine);
+    } catch (e) {
+      console.warn('Failed to apply tile texture:', e);
+    }
+  }
+});
+
 async function selectTexture(name: string) {
   const tex = textures.value.find(t => t.name === name);
   if (!tex) return;
   selectedTexture.value = name;
+  model.value.textureName = name;
   textureName.value = tex.name;
   showTextureDropdown.value = false;
   // Persist selection
@@ -1358,6 +1475,7 @@ async function renameAndSaveTexture() {
     <div v-else-if="activeTab === 'palettes'">
       <div class="mb-3">
         <PaletteEditor
+          ref="paletteEditorRef"
           :color-stops="model.colorStops"
           :interpolation-mode="model.interpolationMode"
           :picker-mode="props.pickerMode"
@@ -1670,6 +1788,11 @@ async function renameAndSaveTexture() {
           @click="model.activateAnimate = !model.activateAnimate">
           Animate
         </button>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Vitesse anim.</span>
+        <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
+        <span class="gfx-slider-value">&times;{{ (model.animationSpeed ?? 1.0).toFixed(1) }}</span>
       </div>
 
       <hr class="section-sep"/>

@@ -14,6 +14,7 @@ struct Uniforms {
   frozenShiftV: f32,
   tessellationLevel: f32, // global [0, 10]
   displacementAmount: f32, // global [0, 0.1]
+  animationSpeed: f32,    // global multiplier on drift frequencies [0.1, 5.0]
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -148,12 +149,26 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32) -> vec
   // ── Tessellation depth: always smooth, independent of palette period ──
   let tess_depth = v_smooth * 2.0;
   let disp = parameters.displacementAmount;
-  let tessColor = tile_tessellation(tileTex, tess_depth * 2.0 * disp + dx, tess_depth * 2.0 * disp + dy, parameters.tessellationLevel);
+  let tess_u = tess_depth * 2.0 * disp + dx;
+  let tess_v = tess_depth * 2.0 * disp + dy;
+
+  // ── Gentle sinusoidal animation (only when animate is on) ──
+  let anim = parameters.animate;
+  let t = parameters.time;
+  // Tile texture: slow organic drift
+  let spd = parameters.animationSpeed;
+  let tile_drift_u = anim * 0.03 * sin(t * 0.4 * spd);
+  let tile_drift_v = anim * 0.03 * sin(t * 0.3 * spd + 1.2);
+  let tessColor = tile_tessellation(tileTex, tess_u + tile_drift_u, tess_v + tile_drift_v, parameters.tessellationLevel);
+
+  // Webcam texture: same tessellation coords as tile, slightly different animation phase
+  let cam_drift_u = anim * 0.04 * sin(t * 0.35 * spd + 0.7);
+  let cam_drift_v = anim * 0.04 * sin(t * 0.25 * spd + 2.0);
   let webCamColor = tile_tessellation(
     webcamTex,
-    tess_depth + dx + cos(parameters.time * 0.1),
-    tess_depth + dy + sin(parameters.time * 0.15),
-    parameters.tessellationLevel + sin(parameters.time * 0.05)
+    tess_u + cam_drift_u,
+    tess_v + cam_drift_v,
+    parameters.tessellationLevel
   );
 
   // ── Blend color sources using overlay/opacity model ──
@@ -181,8 +196,11 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32) -> vec
 
     // Skybox modulates shading (continuous blend via wSkybox)
     if (fx.wSkybox > 0.001) {
+      // Animated drift on skybox UVs (same animate gate as tile/webcam)
+      let sky_drift_u = anim * 0.02 * sin(t * 0.25 * spd + 3.5);
+      let sky_drift_v = anim * 0.02 * sin(t * 0.2 * spd + 4.8);
       let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0));
-      let skyboxUV = dir_to_skybox_uv(skyboxDir, dx, dy);
+      let skyboxUV = dir_to_skybox_uv(skyboxDir, dx + sky_drift_u, dy + sky_drift_v);
       let skyboxSize = vec2<i32>(textureDimensions(skyboxTex, 0));
       let skyboxCoord = vec2<i32>(
         i32(clamp(skyboxUV.x * f32(skyboxSize.x), 0.0, f32(skyboxSize.x - 1))),

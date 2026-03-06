@@ -136,6 +136,13 @@ function setStopEffect(field: EffectFieldName, value: number) {
   emit('update:colorStops', props.colorStops);
 }
 
+/** Forward snapshot capture from the underlying PalettePreview. */
+function getSnapshot(): string | null {
+  return previewRef.value?.getSnapshot?.() ?? null;
+}
+
+defineExpose({ getSnapshot });
+
 </script>
 
 <template>

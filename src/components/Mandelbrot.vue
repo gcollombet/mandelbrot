@@ -54,6 +54,7 @@ const props = withDefaults(defineProps<{
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   tessellationLevel?: number,
   displacementAmount?: number,
+  animationSpeed?: number,
  }>(),
 
     {
@@ -100,6 +101,7 @@ const props = withDefaults(defineProps<{
        interpolationMode: 'lab',
        tessellationLevel: 2,
        displacementAmount: 0.01,
+       animationSpeed: 1.0,
     }
 );
 
@@ -167,6 +169,7 @@ async function draw() {
         activateAnimate: props.activateAnimate,
         tessellationLevel: props.tessellationLevel,
         displacementAmount: props.displacementAmount,
+        animationSpeed: props.animationSpeed,
       }
     )
     await engine.render()
@@ -196,6 +199,7 @@ async function initWebGPU() {
     activateAnimate: props.activateAnimate,
     tessellationLevel: props.tessellationLevel,
     displacementAmount: props.displacementAmount,
+    animationSpeed: props.animationSpeed,
   });
   return engine.initialize(navigator)
 }
