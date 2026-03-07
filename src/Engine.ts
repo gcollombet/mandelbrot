@@ -745,9 +745,9 @@ export class Engine {
 
         this.needRender = this.needRender || !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
             && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
-        // if (!this.needsMoreFrames()) {
-        //     this.unfinishedPixelCount = -1 // unknown — new params, GPU counter not read yet
-        // }
+        if (this.needRender) {
+            this.unfinishedPixelCount = -1 // unknown — new params, GPU counter not read yet
+        }
 
         // Check if any stop has webcam > 0 to decide whether to capture webcam frames
         const hasWebcam = renderOptions.colorStops.some(s => (s.webcam ?? 0) > 0)
@@ -1256,6 +1256,10 @@ export class Engine {
 
         // marque mise à jour des paramètres frame précédente pour prochaine frame
         this.prevFrameMandelbrot = { ...this.previousMandelbrot }
+
+        // Parameters have been consumed — clear the flag so the engine can go idle
+        // once all other conditions (orbit, unfinished pixels, etc.) are satisfied.
+        this.needRender = false
 
         // Passe snapshot PNG écran (optionnelle, si demandée)
         if (this.snapshotCallback) {

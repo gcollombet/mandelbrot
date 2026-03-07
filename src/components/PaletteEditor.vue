@@ -9,14 +9,6 @@ import { COLOR_STOP_DEFAULTS, getEffectValue } from '../ColorStop.ts';
 import type { EffectFieldName } from '../ColorStop.ts';
 import type {InterpolationMode} from "../Mandelbrot.ts";
 
-const interpolationModes: { key: InterpolationMode; label: string }[] = [
-  { key: 'lab', label: 'Lab' },
-  { key: 'rgb', label: 'RGB' },
-  { key: 'hcl', label: 'HCL' },
-  { key: 'hsl', label: 'HSL' },
-  { key: 'cubehelix', label: 'Cubehelix' },
-];
-
 const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
   interpolationMode?: InterpolationMode;
@@ -36,8 +28,13 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'update:colorStops', value: ColorStop[]): void;
   (e: 'update:applyToAll', value: boolean): void;
-  (e: 'update:interpolationMode', value: InterpolationMode): void;
   (e: 'toggle-picker'): void;
+  (e: 'invert'): void;
+  (e: 'negate'): void;
+  (e: 'duplicate'): void;
+  (e: 'mirror'): void;
+  (e: 'distribute'): void;
+  (e: 'clear'): void;
 }>();
 
 const MAX_COLORS = 200;
@@ -162,6 +159,34 @@ defineExpose({ getSnapshot });
 
 <template>
   <div class="palette-editor">
+    <!-- ═══ Pipette + outils compact ═══ -->
+    <div class="top-bar">
+      <div class="color-picker-row">
+        <button
+          class="pipette-btn"
+          :class="{ 'is-active': props.pickerMode }"
+          :title="props.pickerMode ? 'Quitter le mode pipette (\u00c9chap)' : 'Pipette : cliquer sur le fractal'"
+          @click="emit('toggle-picker')"
+        >
+          <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 22l1-1h3l9-9"/>
+            <path d="M3 21l9-9"/>
+            <path d="M15 6l3-3 3 3-3 3"/>
+            <path d="M12 9l3 3"/>
+          </svg>
+        </button>
+        <span v-if="props.pickerMode" class="picker-hint">Cliquez sur le fractal&hellip;</span>
+      </div>
+      <div class="outils-bar">
+        <button class="button is-small is-light outils-btn" @click="emit('invert')" title="Inverser l'ordre">Inv</button>
+        <button class="button is-small is-light outils-btn" @click="emit('negate')" title="N&eacute;gatif RGB">N&eacute;g</button>
+        <button class="button is-small is-light outils-btn" @click="emit('duplicate')" title="Dupliquer 2x">Dup</button>
+        <button class="button is-small is-light outils-btn" @click="emit('mirror')" title="Miroir (palindrome)">Mir</button>
+        <button class="button is-small is-light outils-btn" @click="emit('distribute')" title="R&eacute;partir uniform&eacute;ment">Dist</button>
+        <button class="button is-small is-danger is-light outils-btn" @click="emit('clear')" title="Supprimer toute la palette">Sup</button>
+      </div>
+    </div>
+
     <!-- WebGPU preview with handles overlaid -->
     <div class="canvas-row" style="position:relative;" @dblclick="onPreviewDblClick">
       <PalettePreview
@@ -195,22 +220,6 @@ defineExpose({ getSnapshot });
       </div>
     </div>
 
-    <!-- ═══ Interpolation (attached button group) ═══ -->
-    <div class="interpolation-bar">
-      <span class="interpolation-label">Interpolation</span>
-      <div class="field has-addons interpolation-addons">
-        <p v-for="mode in interpolationModes" :key="mode.key" class="control">
-          <button
-            class="button is-small"
-            :class="interpolationMode === mode.key ? 'is-link' : 'is-light'"
-            @click="emit('update:interpolationMode', mode.key)"
-          >
-            {{ mode.label }}
-          </button>
-        </p>
-      </div>
-    </div>
-
     <!-- ═══ Effets par point ═══ -->
     <div v-if="selectedStop" class="effects-panel">
 
@@ -229,7 +238,7 @@ defineExpose({ getSnapshot });
 
       <!-- ── Couleur ── -->
       <label class="effects-group-title">Couleur</label>
-      <div class="color-picker-row">
+      <div class="color-picker-inline">
         <input
           type="color"
           :value="selectedHex"
@@ -237,20 +246,6 @@ defineExpose({ getSnapshot });
           class="native-color-input"
         />
         <span class="color-hex-label">{{ selectedHex }}</span>
-        <button
-          class="pipette-btn"
-          :class="{ 'is-active': props.pickerMode }"
-          :title="props.pickerMode ? 'Quitter le mode pipette (\u00c9chap)' : 'Pipette : cliquer sur le fractal pour ajouter un curseur'"
-          @click="emit('toggle-picker')"
-        >
-          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-            <path d="M2 22l1-1h3l9-9"/>
-            <path d="M3 21l9-9"/>
-            <path d="M15 6l3-3 3 3-3 3"/>
-            <path d="M12 9l3 3"/>
-          </svg>
-        </button>
-        <span v-if="props.pickerMode" class="picker-hint">Cliquez sur le fractal&hellip;</span>
       </div>
       <template v-for="field in (['palette'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
@@ -333,10 +328,33 @@ defineExpose({ getSnapshot });
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 1em;
+  gap: 0.5em;
 }
+
+/* ── Top bar: color picker + outils ── */
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+  flex-wrap: wrap;
+}
+.color-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+.outils-bar {
+  display: flex;
+  gap: 0.2em;
+}
+.outils-btn {
+  font-size: 0.72em !important;
+  padding: 0.2em 0.5em !important;
+  min-width: 0 !important;
+}
+
 .canvas-row {
-  margin-top: 1.5em;
   display: flex;
   justify-content: center;
   overflow: visible;
@@ -376,26 +394,6 @@ defineExpose({ getSnapshot });
   color: #fff;
 }
 
-/* ── Interpolation bar ── */
-.interpolation-bar {
-  display: flex;
-  align-items: center;
-  gap: 0.6em;
-  margin-top: 0.3em;
-}
-.interpolation-label {
-  font-size: 0.82em;
-  font-weight: 600;
-  color: #222;
-  white-space: nowrap;
-}
-.interpolation-addons {
-  margin-bottom: 0 !important;
-}
-.interpolation-addons .button {
-  font-size: 0.78em !important;
-}
-
 /* ── Per-point effect editing ── */
 .effects-panel {
   margin-top: 0.2em;
@@ -428,17 +426,11 @@ defineExpose({ getSnapshot });
   margin-bottom: 0.25em;
   display: block;
 }
-.color-picker-row {
-  display: flex;
-  align-items: center;
-  gap: 0.8em;
-  margin-bottom: 0.3em;
-}
 .pipette-btn {
-  width: 36px;
-  height: 36px;
+  width: 30px;
+  height: 30px;
   border: 1px solid #ccc;
-  border-radius: 6px;
+  border-radius: 5px;
   background: #f5f5f5;
   color: #333;
   cursor: pointer;
@@ -464,10 +456,10 @@ defineExpose({ getSnapshot });
   white-space: nowrap;
 }
 .native-color-input {
-  width: 48px;
-  height: 36px;
+  width: 36px;
+  height: 30px;
   border: 1px solid #ccc;
-  border-radius: 6px;
+  border-radius: 5px;
   padding: 2px;
   cursor: pointer;
   background: none;
@@ -476,6 +468,12 @@ defineExpose({ getSnapshot });
   font-family: monospace;
   font-size: 0.95em;
   color: #111;
+}
+.color-picker-inline {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  margin-bottom: 0.3em;
 }
 .effect-row {
   display: flex;

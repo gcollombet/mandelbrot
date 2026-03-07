@@ -5,7 +5,7 @@ import type {ColorStop, EffectFieldName} from '../ColorStop.ts';
 import {COLOR_STOP_DEFAULTS} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
 import {Palette} from '../Palette.ts';
-import {hsl as d3hsl, lch as d3lch, rgb as d3rgb} from 'd3-color';
+import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
 import defaultPresetsJson from '../assets/default-presets.json';
 import defaultPalettesJson from '../assets/default-palettes.json';
 import coloredTilesUrl from '../assets/colored_tiles.webp';
@@ -752,11 +752,8 @@ function importPalettes(event: Event) {
 // =====================================================
 // LCH Global Adjustment Sliders (perceptually uniform)
 // =====================================================
-// Stores the baseline colorStops for LCH adjustments
+// Stores the baseline colorStops for color adjustments
 const lchBaseStops = ref<ColorStop[] | null>(null);
-const hueShift = ref(0);    // Hue rotation in degrees (-180..180)
-const chromaShift = ref(0);  // Chroma shift (-100..100)
-const lightShift = ref(0);   // Lightness shift (-100..100)
 const satShift = ref(0);     // HSL saturation shift (-100..100)
 const lumShift = ref(0);     // HSL luminosity shift (-100..100)
 const hslHueShift = ref(0); // HSL hue shift in degrees (-180..180)
@@ -770,30 +767,9 @@ function ensureLchBase() {
 
 function resetLchBase() {
   lchBaseStops.value = null;
-  hueShift.value = 0;
-  chromaShift.value = 0;
-  lightShift.value = 0;
   satShift.value = 0;
   lumShift.value = 0;
   hslHueShift.value = 0;
-}
-
-function onHueInput(val: number) {
-  ensureLchBase();
-  hueShift.value = val;
-  applyAllShifts();
-}
-
-function onChromaInput(val: number) {
-  ensureLchBase();
-  chromaShift.value = val;
-  applyAllShifts();
-}
-
-function onLightInput(val: number) {
-  ensureLchBase();
-  lightShift.value = val;
-  applyAllShifts();
 }
 
 function applyAllShifts() {
@@ -802,23 +778,8 @@ function applyAllShifts() {
     const rgbC = d3rgb(stop.color);
     if (rgbC === null || rgbC === undefined) return { ...stop };
 
-    // Apply LCH shifts first
-    const lch = d3lch(rgbC);
-    const baseL = isNaN(lch.l) ? 0 : lch.l;
-    const baseC = isNaN(lch.c) ? 0 : lch.c;
-    const baseH = isNaN(lch.h) ? 0 : lch.h;
-    let l = baseL + lightShift.value;
-    l = Math.max(0, Math.min(150, l));
-    let c = baseC + chromaShift.value;
-    c = Math.max(0, c);
-    let h = baseH + hueShift.value;
-    h = ((h % 360) + 360) % 360;
-    // If original was achromatic and no chroma is being added, keep hue undefined
-    // to avoid pulling grays toward a specific hue
-    const afterLch = d3rgb(d3lch(l, c, (c === 0) ? NaN : h));
-
-    // Apply HSL shifts on the result
-    const hslC = d3hsl(afterLch);
+    // Apply HSL shifts
+    const hslC = d3hsl(rgbC);
     const baseHslH = isNaN(hslC.h) ? 0 : hslC.h;
     const baseHslS = isNaN(hslC.s) ? 0 : hslC.s;
     const baseHslL = isNaN(hslC.l) ? 0 : hslC.l;
@@ -932,148 +893,16 @@ function negatePalette() {
   resetLchBase();
 }
 
-// =====================================================
-// Palette Construction Helper Tools
-// =====================================================
-
-/** Generate a monochromatic palette from a base color */
-function generateMonochromatic() {
-  const base = d3lch(d3rgb(model.value.colorStops[0]?.color || '#3273dc'));
-  const h = base.h || 0;
-  const c = base.c || 50;
-  const stops: { color: string; position: number }[] = [];
-  const count = 5;
-  for (let i = 0; i < count; i++) {
-    const t = i / (count - 1);
-    const l = 15 + t * 85; // lightness from 15 to 100
-    const col = d3lch(l, c * (0.5 + 0.5 * Math.sin(t * Math.PI)), h);
-    stops.push({ color: d3rgb(col).formatHex(), position: t });
-  }
-  model.value.colorStops = stops;
-  resetLchBase();
-}
-
-/** Generate a complementary palette (base + opposite hue) */
-function generateComplementary() {
-  const base = d3lch(d3rgb(model.value.colorStops[0]?.color || '#3273dc'));
-  const h1 = base.h || 0;
-  const h2 = (h1 + 180) % 360;
-  const c = base.c || 60;
+/** Supprimer toute la palette : reset to 2 default stops (black → white) */
+function clearPalette() {
   model.value.colorStops = [
-    { color: d3rgb(d3lch(25, c, h1)).formatHex(), position: 0 },
-    { color: d3rgb(d3lch(60, c, h1)).formatHex(), position: 0.25 },
-    { color: d3rgb(d3lch(90, c * 0.3, h1)).formatHex(), position: 0.5 },
-    { color: d3rgb(d3lch(60, c, h2)).formatHex(), position: 0.75 },
-    { color: d3rgb(d3lch(25, c, h2)).formatHex(), position: 1.0 },
+    { color: '#000000', position: 0 },
+    { color: '#ffffff', position: 1 },
   ];
   resetLchBase();
 }
 
-/** Generate an analogous palette (adjacent hues) */
-function generateAnalogous() {
-  const base = d3lch(d3rgb(model.value.colorStops[0]?.color || '#3273dc'));
-  const h = base.h || 0;
-  const c = base.c || 60;
-  const spread = 60; // total hue range
-  const count = 6;
-  const stops: { color: string; position: number }[] = [];
-  for (let i = 0; i < count; i++) {
-    const t = i / (count - 1);
-    const hue = ((h - spread / 2 + t * spread) % 360 + 360) % 360;
-    const l = 30 + t * 55;
-    stops.push({ color: d3rgb(d3lch(l, c, hue)).formatHex(), position: t });
-  }
-  model.value.colorStops = stops;
-  resetLchBase();
-}
 
-/** Generate a triadic palette (3 hues 120° apart) */
-function generateTriadic() {
-  const base = d3lch(d3rgb(model.value.colorStops[0]?.color || '#3273dc'));
-  const h = base.h || 0;
-  const c = base.c || 60;
-  model.value.colorStops = [
-    { color: d3rgb(d3lch(30, c, h)).formatHex(), position: 0 },
-    { color: d3rgb(d3lch(70, c, h)).formatHex(), position: 0.17 },
-    { color: d3rgb(d3lch(70, c, (h + 120) % 360)).formatHex(), position: 0.33 },
-    { color: d3rgb(d3lch(90, c * 0.3, (h + 180) % 360)).formatHex(), position: 0.5 },
-    { color: d3rgb(d3lch(70, c, (h + 240) % 360)).formatHex(), position: 0.67 },
-    { color: d3rgb(d3lch(30, c, (h + 240) % 360)).formatHex(), position: 1.0 },
-  ];
-  resetLchBase();
-}
-
-/** Generate a random palette and randomize all graphics parameters */
-function generateRandom() {
-  const count = 4 + Math.floor(Math.random() * 4); // 4 to 7 stops
-  const rRange = (min: number, max: number) => min + Math.random() * (max - min);
-  const rStep = (min: number, max: number, step: number) => {
-    const steps = Math.round((max - min) / step);
-    return min + Math.round(Math.random() * steps) * step;
-  };
-
-  // Build stops with per-stop random effect fields (continuous values, different per stop)
-  const stops: ColorStop[] = [];
-  for (let i = 0; i < count; i++) {
-    const t = i / (count - 1);
-    const h = Math.random() * 360;
-    const c = 30 + Math.random() * 80;
-    const l = 15 + Math.random() * 80;
-    stops.push({
-      color: d3rgb(d3lch(l, c, h)).formatHex(),
-      position: t,
-      // Activation weights — continuous [0, 1]
-      palette: rRange(0.3, 1.0),
-      zebra: rRange(0, 0.8),
-      tessellation: rRange(0, 1.0),
-      shading: rRange(0, 1.0),
-      skybox: rRange(0, 0.6),
-      webcam: 0,  // don't randomly enable webcam (requires permission)
-      smoothness: rRange(0.2, 1.0),
-      // Continuous effect parameters — per-stop variation
-      shadingLevel: rRange(0.2, 2.5),
-      specularPower: rRange(1, 40),
-      lightAngle: rRange(0, 2 * Math.PI),
-    });
-  }
-
-  withSuppressedSync(() => {
-    model.value.colorStops = stops;
-    resetLchBase();
-
-    // Randomize global parameters
-    const m = model.value;
-
-    // Palette
-    m.palettePeriod = rStep(4, 512, 1);
-    m.paletteOffset = rStep(0, 1000, 1);
-    m.interpolationMode = interpolationModes[Math.floor(Math.random() * interpolationModes.length)].key;
-
-    // Global toggles (derived from whether any stop has significant weight)
-    m.activatePalette = true;
-    m.activateShading = stops.some(s => (s.shading ?? 0) > 0.3);
-    m.activateTessellation = stops.some(s => (s.tessellation ?? 0) > 0.3);
-    m.activateSkybox = m.activateShading && stops.some(s => (s.skybox ?? 0) > 0.2);
-    m.activateWebcam = false;
-    m.activateZebra = stops.some(s => (s.zebra ?? 0) > 0.3);
-    m.activateSmoothness = stops.some(s => (s.smoothness ?? 0) > 0.3);
-    m.activateAnimate = Math.random() < 0.5;
-
-    // Global continuous sliders
-    m.shadingLevel = rRange(0.2, 2.5);
-    m.specularPower = rRange(1, 40);
-    m.lightAngle = rRange(0, 2 * Math.PI);
-    m.tessellationLevel = rStep(1, 8, 1);
-    m.displacementAmount = rRange(0.001, 0.05);
-    m.animationSpeed = rStep(0.1, 3.0, 0.1);
-  });
-
-  // Random texture
-  if (textures.value.length > 0) {
-    const tex = textures.value[Math.floor(Math.random() * textures.value.length)];
-    selectTexture(tex.name);
-  }
-}
 
 // =====================================================
 // Tessellation Texture Library
@@ -1438,86 +1267,51 @@ async function renameAndSaveTexture() {
         <PaletteEditor
           ref="paletteEditorRef"
           :color-stops="model.colorStops"
-          v-model:interpolation-mode="model.interpolationMode"
+          :interpolation-mode="model.interpolationMode"
           :picker-mode="props.pickerMode"
           :tile-texture-url="activeBlobUrl"
           :tessellation-level="model.tessellationLevel"
           :displacement-amount="model.displacementAmount"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
+          @invert="invertPalette"
+          @negate="negatePalette"
+          @duplicate="duplicatePalette"
+          @mirror="mirrorPalette"
+          @distribute="distributeEvenly"
+          @clear="clearPalette"
         />
       </div>
 
       <hr class="section-sep"/>
 
-      <!-- Palette manipulation tools -->
-      <div class="mb-3">
-        <label class="label">Outils palette</label>
-        <div class="buttons" style="flex-wrap: wrap; gap: 0.4em;">
-          <button class="button is-small is-light" @click="invertPalette" title="Inverser l'ordre des couleurs">Inverser</button>
-          <button class="button is-small is-light" @click="negatePalette" title="Négatif (inverser les couleurs RGB)">Négatif</button>
-          <button class="button is-small is-light" @click="duplicatePalette" title="Comprimer et répéter 2x">Dupliquer</button>
-          <button class="button is-small is-light" @click="mirrorPalette" title="Effet miroir (palindrome)">Miroir</button>
-          <button class="button is-small is-light" @click="distributeEvenly" title="Répartir les stops uniformément">Distribuer</button>
+      <!-- ═══ COULEUR ═══ -->
+      <label class="label">Couleur</label>
+
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Interpolation</label>
+        <div class="field has-addons" style="margin-bottom: 0 !important;">
+          <p v-for="mode in interpolationModes" :key="mode.key" class="control">
+            <button
+              class="button is-small"
+              :class="model.interpolationMode === mode.key ? 'is-link' : 'is-light'"
+              @click="model.interpolationMode = mode.key"
+            >
+              {{ mode.label }}
+            </button>
+          </p>
         </div>
       </div>
 
-      <hr class="section-sep"/>
-
-      <!-- Palette construction helpers -->
-      <div class="mb-3">
-        <label class="label">Générer une palette</label>
-        <p style="font-size: 0.85em; color: #555; margin-bottom: 0.5em;">Basé sur la 1ère couleur actuelle</p>
-        <div class="buttons" style="flex-wrap: wrap; gap: 0.4em;">
-          <button class="button is-small is-info is-light" @click="generateMonochromatic">Monochromatique</button>
-          <button class="button is-small is-info is-light" @click="generateComplementary">Complémentaire</button>
-          <button class="button is-small is-info is-light" @click="generateAnalogous">Analogique</button>
-          <button class="button is-small is-info is-light" @click="generateTriadic">Triadique</button>
-          <button class="button is-small is-warning is-light" @click="generateRandom">Aléatoire</button>
-        </div>
-      </div>
-
-      <hr class="section-sep"/>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
-        <label style="white-space: nowrap;">Période :</label>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Période :</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
       </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 1em;">
-        <label style="white-space: nowrap;">Décalage :</label>
+      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
+        <label style="white-space: nowrap; min-width: 5.5em;">Décalage :</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
       </div>
 
-      <hr class="section-sep"/>
-
-      <!-- Global color adjustment sliders -->
-      <label class="label">Ajustement global</label>
-
-      <!-- LCH sliders -->
-      <p style="font-size: 0.82em; color: #666; margin-bottom: 0.4em; font-weight: 600;">LCH (perceptuel)</p>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Teinte :</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-180" max="180" step="1"
-          :value="hueShift"
-          @input="onHueInput(Number(($event.target as HTMLInputElement).value))" />
-        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ hueShift }}°</span>
-      </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Chroma :</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
-          :value="chromaShift"
-          @input="onChromaInput(Number(($event.target as HTMLInputElement).value))" />
-        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ chromaShift }}</span>
-      </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Clarté :</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
-          :value="lightShift"
-          @input="onLightInput(Number(($event.target as HTMLInputElement).value))" />
-        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ lightShift }}</span>
-      </div>
-
-      <!-- HSL sliders -->
-      <p style="font-size: 0.82em; color: #666; margin-bottom: 0.4em; margin-top: 0.6em; font-weight: 600;">HSL (classique)</p>
       <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
         <label style="white-space: nowrap; min-width: 5.5em;">Teinte :</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-180" max="180" step="1"
