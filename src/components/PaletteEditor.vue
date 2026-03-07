@@ -1,13 +1,21 @@
 <script setup lang="ts">
-import {computed, defineEmits, defineProps, ref, watch} from 'vue';
+import {computed, ref, watch} from 'vue';
 import GlissiereHandle from './GlissiereHandle.vue';
 import PalettePreview from './PalettePreview.vue';
 import {Palette} from '../Palette';
 import {rgb as d3rgb} from 'd3-color';
 import type {ColorStop} from "../ColorStop.ts";
-import { COLOR_STOP_DEFAULTS, EFFECT_FIELD_NAMES, getEffectValue } from '../ColorStop.ts';
+import { COLOR_STOP_DEFAULTS, getEffectValue } from '../ColorStop.ts';
 import type { EffectFieldName } from '../ColorStop.ts';
 import type {InterpolationMode} from "../Mandelbrot.ts";
+
+const interpolationModes: { key: InterpolationMode; label: string }[] = [
+  { key: 'lab', label: 'Lab' },
+  { key: 'rgb', label: 'RGB' },
+  { key: 'hcl', label: 'HCL' },
+  { key: 'hsl', label: 'HSL' },
+  { key: 'cubehelix', label: 'Cubehelix' },
+];
 
 const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
@@ -16,15 +24,19 @@ const props = withDefaults(defineProps<{
   tileTextureUrl?: string | null;
   tessellationLevel?: number;
   displacementAmount?: number;
+  applyToAll?: boolean;
 }>(), {
   interpolationMode: 'lab',
   pickerMode: false,
   tileTextureUrl: null,
   tessellationLevel: 2,
   displacementAmount: 0.01,
+  applyToAll: false,
 });
 const emit = defineEmits<{
   (e: 'update:colorStops', value: ColorStop[]): void;
+  (e: 'update:applyToAll', value: boolean): void;
+  (e: 'update:interpolationMode', value: InterpolationMode): void;
   (e: 'toggle-picker'): void;
 }>();
 
@@ -98,9 +110,6 @@ const selectedHex = computed({
 
 // ── Per-stop effect editing ──
 
-/** Whether the per-stop effect panel is expanded. */
-const showEffects = ref(true);
-
 /** The currently selected stop (reactive). */
 const selectedStop = computed(() => {
   if (selectedIdx.value === null) return null;
@@ -111,14 +120,14 @@ const selectedStop = computed(() => {
 const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: number; step: number; unit: string }> = {
   palette:            { label: 'Palette',       min: 0, max: 1,     step: 0.01, unit: '' },
   zebra:              { label: 'Zebra',         min: 0, max: 1,     step: 0.01, unit: '' },
-  tessellation:       { label: 'Texture',       min: 0, max: 1,     step: 0.01, unit: '' },
+  tessellation:       { label: 'Tessellation',  min: 0, max: 1,     step: 0.01, unit: '' },
   shading:            { label: 'Relief',        min: 0, max: 1,     step: 0.01, unit: '' },
-  skybox:             { label: 'Metal',         min: 0, max: 1,     step: 0.01, unit: '' },
+  skybox:             { label: 'Métal',          min: 0, max: 1,     step: 0.01, unit: '' },
   webcam:             { label: 'Webcam',        min: 0, max: 1,     step: 0.01, unit: '' },
   smoothness:         { label: 'Smoothness',    min: 0, max: 1,     step: 0.01, unit: '' },
   shadingLevel:       { label: 'Brillance',     min: 0, max: 3,     step: 0.05, unit: '' },
-  specularPower:      { label: 'Speculaire',    min: 1, max: 64,    step: 0.5,  unit: '' },
-  lightAngle:         { label: 'Light Angle',   min: 0, max: 6.283, step: 0.01, unit: 'rad' },
+  specularPower:      { label: 'Spéculaire',    min: 1, max: 64,    step: 0.5,  unit: '' },
+  lightAngle:         { label: 'Direction',     min: 0, max: 6.283, step: 0.01, unit: 'rad' },
 };
 
 /** Get the effective value of a field on the selected stop. */
@@ -127,12 +136,18 @@ function getStopEffect(field: EffectFieldName): number {
   return getEffectValue(selectedStop.value, field);
 }
 
-/** Set a field on the selected stop. */
+/** Set a field on the selected stop, or all stops if applyToAll is true. */
 function setStopEffect(field: EffectFieldName, value: number) {
-  if (selectedIdx.value === null) return;
-  const stop = props.colorStops[selectedIdx.value];
-  if (!stop) return;
-  stop[field] = value;
+  if (props.applyToAll) {
+    for (const stop of props.colorStops) {
+      stop[field] = value;
+    }
+  } else {
+    if (selectedIdx.value === null) return;
+    const stop = props.colorStops[selectedIdx.value];
+    if (!stop) return;
+    stop[field] = value;
+  }
   emit('update:colorStops', props.colorStops);
 }
 
@@ -171,7 +186,7 @@ defineExpose({ getSnapshot });
           v-if="selectedIdx !== null && colorStops.length > 2"
           class="floating-delete-btn"
           :style="{ left: colorStops[selectedIdx]?.position * 100 + '%' }"
-          :title="'Supprimer ce stop'"
+          title="Supprimer ce point"
           @mousedown.stop
           @click.stop="deleteSelectedStop"
         >
@@ -179,57 +194,136 @@ defineExpose({ getSnapshot });
         </button>
       </div>
     </div>
-    <!-- Couleur sélectionnée + pipette -->
-    <div class="color-picker-row">
-      <button
-        class="pipette-btn"
-        :class="{ 'is-active': props.pickerMode }"
-        :title="props.pickerMode ? 'Quitter le mode pipette (Échap)' : 'Pipette : cliquer sur le fractal pour ajouter un curseur'"
-        @click="emit('toggle-picker')"
-      >
-        <!-- Icône pipette SVG -->
-        <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
-          <path d="M2 22l1-1h3l9-9"/>
-          <path d="M3 21l9-9"/>
-          <path d="M15 6l3-3 3 3-3 3"/>
-          <path d="M12 9l3 3"/>
-        </svg>
-      </button>
-      <input
-        type="color"
-        :value="selectedHex"
-        @input="selectedHex = ($event.target as HTMLInputElement).value"
-        class="native-color-input"
-      />
-      <span class="color-hex-label">{{ selectedHex }}</span>
-      <span v-if="props.pickerMode" class="picker-hint">Cliquez sur le fractal…</span>
-    </div>
-    <!-- Per-stop effect channels (collapsible) -->
-    <div v-if="selectedStop" class="effects-panel">
-      <button class="effects-toggle" @click="showEffects = !showEffects">
-        <span class="effects-toggle-icon">{{ showEffects ? '&#9660;' : '&#9654;' }}</span>
-        Effets du stop #{{ (selectedIdx ?? 0) + 1 }}
-      </button>
-      <div v-if="showEffects" class="effects-grid">
-        <template v-for="field in EFFECT_FIELD_NAMES" :key="field">
-          <div class="effect-row">
-            <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
-            <input
-              class="slider effect-slider"
-              type="range"
-              :min="EFFECT_UI[field].min"
-              :max="EFFECT_UI[field].max"
-              :step="EFFECT_UI[field].step"
-              :value="getStopEffect(field)"
-              @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
-            />
-            <span class="effect-value">
-              {{ getStopEffect(field).toFixed(EFFECT_UI[field].step < 0.01 ? 3 : 2) }}
-              {{ EFFECT_UI[field].unit }}
-            </span>
-          </div>
-        </template>
+
+    <!-- ═══ Interpolation (attached button group) ═══ -->
+    <div class="interpolation-bar">
+      <span class="interpolation-label">Interpolation</span>
+      <div class="field has-addons interpolation-addons">
+        <p v-for="mode in interpolationModes" :key="mode.key" class="control">
+          <button
+            class="button is-small"
+            :class="interpolationMode === mode.key ? 'is-link' : 'is-light'"
+            @click="emit('update:interpolationMode', mode.key)"
+          >
+            {{ mode.label }}
+          </button>
+        </p>
       </div>
+    </div>
+
+    <!-- ═══ Effets par point ═══ -->
+    <div v-if="selectedStop" class="effects-panel">
+
+      <!-- Toggle global + titre -->
+      <div class="effects-header">
+        <label class="effects-section-title">
+          Point #{{ (selectedIdx ?? 0) + 1 }}
+        </label>
+        <button class="button is-small apply-all-btn"
+          :class="applyToAll ? 'is-link' : 'is-light'"
+          @click="emit('update:applyToAll', !applyToAll)"
+        >
+          {{ applyToAll ? 'Tous les points' : 'Ce point' }}
+        </button>
+      </div>
+
+      <!-- ── Couleur ── -->
+      <label class="effects-group-title">Couleur</label>
+      <div class="color-picker-row">
+        <input
+          type="color"
+          :value="selectedHex"
+          @input="selectedHex = ($event.target as HTMLInputElement).value"
+          class="native-color-input"
+        />
+        <span class="color-hex-label">{{ selectedHex }}</span>
+        <button
+          class="pipette-btn"
+          :class="{ 'is-active': props.pickerMode }"
+          :title="props.pickerMode ? 'Quitter le mode pipette (\u00c9chap)' : 'Pipette : cliquer sur le fractal pour ajouter un curseur'"
+          @click="emit('toggle-picker')"
+        >
+          <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <path d="M2 22l1-1h3l9-9"/>
+            <path d="M3 21l9-9"/>
+            <path d="M15 6l3-3 3 3-3 3"/>
+            <path d="M12 9l3 3"/>
+          </svg>
+        </button>
+        <span v-if="props.pickerMode" class="picker-hint">Cliquez sur le fractal&hellip;</span>
+      </div>
+      <template v-for="field in (['palette'] as EffectFieldName[])" :key="field">
+        <div class="effect-row">
+          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
+          <input
+            class="slider effect-slider"
+            type="range"
+            :min="EFFECT_UI[field].min"
+            :max="EFFECT_UI[field].max"
+            :step="EFFECT_UI[field].step"
+            :value="getStopEffect(field)"
+            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
+          />
+          <span class="effect-value">{{ getStopEffect(field).toFixed(2) }}</span>
+        </div>
+      </template>
+
+      <!-- ── Itération ── -->
+      <label class="effects-group-title">Itération</label>
+      <template v-for="field in (['smoothness','zebra'] as EffectFieldName[])" :key="field">
+        <div class="effect-row">
+          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
+          <input
+            class="slider effect-slider"
+            type="range"
+            :min="EFFECT_UI[field].min"
+            :max="EFFECT_UI[field].max"
+            :step="EFFECT_UI[field].step"
+            :value="getStopEffect(field)"
+            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
+          />
+          <span class="effect-value">{{ getStopEffect(field).toFixed(2) }}</span>
+        </div>
+      </template>
+
+      <!-- ── Éclairage ── -->
+      <label class="effects-group-title">&Eacute;clairage</label>
+      <template v-for="field in (['shading','skybox','shadingLevel','specularPower','lightAngle'] as EffectFieldName[])" :key="field">
+        <div class="effect-row">
+          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
+          <input
+            class="slider effect-slider"
+            type="range"
+            :min="EFFECT_UI[field].min"
+            :max="EFFECT_UI[field].max"
+            :step="EFFECT_UI[field].step"
+            :value="getStopEffect(field)"
+            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
+          />
+          <span class="effect-value">
+            {{ getStopEffect(field).toFixed(EFFECT_UI[field].step < 0.01 ? 3 : 2) }}
+            {{ EFFECT_UI[field].unit }}
+          </span>
+        </div>
+      </template>
+
+      <!-- ── Texture ── -->
+      <label class="effects-group-title">Texture</label>
+      <template v-for="field in (['tessellation','webcam'] as EffectFieldName[])" :key="field">
+        <div class="effect-row">
+          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
+          <input
+            class="slider effect-slider"
+            type="range"
+            :min="EFFECT_UI[field].min"
+            :max="EFFECT_UI[field].max"
+            :step="EFFECT_UI[field].step"
+            :value="getStopEffect(field)"
+            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
+          />
+          <span class="effect-value">{{ getStopEffect(field).toFixed(2) }}</span>
+        </div>
+      </template>
     </div>
   </div>
 </template>
@@ -281,10 +375,64 @@ defineExpose({ getSnapshot });
   background: #c44;
   color: #fff;
 }
+
+/* ── Interpolation bar ── */
+.interpolation-bar {
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+  margin-top: 0.3em;
+}
+.interpolation-label {
+  font-size: 0.82em;
+  font-weight: 600;
+  color: #222;
+  white-space: nowrap;
+}
+.interpolation-addons {
+  margin-bottom: 0 !important;
+}
+.interpolation-addons .button {
+  font-size: 0.78em !important;
+}
+
+/* ── Per-point effect editing ── */
+.effects-panel {
+  margin-top: 0.2em;
+}
+.effects-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.5em;
+}
+.effects-section-title {
+  font-size: 0.92em;
+  font-weight: 700;
+  color: #111;
+  display: flex;
+  align-items: center;
+  gap: 0.6em;
+}
+.apply-all-btn {
+  font-size: 0.78em !important;
+  min-width: 7em;
+}
+.effects-group-title {
+  font-size: 0.78em;
+  font-weight: 700;
+  color: #111;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+  margin-top: 0.6em;
+  margin-bottom: 0.25em;
+  display: block;
+}
 .color-picker-row {
   display: flex;
   align-items: center;
   gap: 0.8em;
+  margin-bottom: 0.3em;
 }
 .pipette-btn {
   width: 36px;
@@ -292,7 +440,7 @@ defineExpose({ getSnapshot });
   border: 1px solid #ccc;
   border-radius: 6px;
   background: #f5f5f5;
-  color: #555;
+  color: #333;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -327,39 +475,7 @@ defineExpose({ getSnapshot });
 .color-hex-label {
   font-family: monospace;
   font-size: 0.95em;
-  color: #333;
-}
-
-/* ── Per-stop effect editing ── */
-.effects-panel {
-  margin-top: 0.2em;
-}
-.effects-toggle {
-  background: none;
-  border: none;
-  cursor: pointer;
-  font-size: 0.82em;
-  color: #666;
-  padding: 2px 0;
-  display: flex;
-  align-items: center;
-  gap: 0.4em;
-}
-.effects-toggle:hover {
-  color: #333;
-}
-.effects-toggle-icon {
-  font-size: 0.7em;
-}
-.effects-grid {
-  display: flex;
-  flex-direction: column;
-  gap: 0.25em;
-  margin-top: 0.4em;
-  padding: 0.5em;
-  background: #f8f8f8;
-  border-radius: 6px;
-  border: 1px solid #e8e8e8;
+  color: #111;
 }
 .effect-row {
   display: flex;
@@ -367,8 +483,8 @@ defineExpose({ getSnapshot });
   gap: 0.5em;
 }
 .effect-label {
-  font-size: 0.78em;
-  color: #555;
+  font-size: 0.82em;
+  color: #222;
   width: 80px;
   flex-shrink: 0;
   white-space: nowrap;
@@ -381,8 +497,8 @@ defineExpose({ getSnapshot });
 }
 .effect-value {
   font-family: monospace;
-  font-size: 0.75em;
-  color: #666;
+  font-size: 0.78em;
+  color: #222;
   width: 52px;
   text-align: right;
   flex-shrink: 0;

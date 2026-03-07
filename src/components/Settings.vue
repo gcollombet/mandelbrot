@@ -1,12 +1,11 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, ref, toRaw, watch} from 'vue';
-import type {MandelbrotParams} from "../Mandelbrot.ts";
-import type { ColorStop, EffectFieldName } from '../ColorStop.ts';
-import { COLOR_STOP_DEFAULTS } from '../ColorStop.ts';
+import type {InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
+import type {ColorStop, EffectFieldName} from '../ColorStop.ts';
+import {COLOR_STOP_DEFAULTS} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
-import { Palette } from '../Palette.ts';
-import { lch as d3lch, rgb as d3rgb, hsl as d3hsl } from 'd3-color';
-import type { InterpolationMode } from '../Mandelbrot.ts';
+import {Palette} from '../Palette.ts';
+import {hsl as d3hsl, lch as d3lch, rgb as d3rgb} from 'd3-color';
 import defaultPresetsJson from '../assets/default-presets.json';
 import defaultPalettesJson from '../assets/default-palettes.json';
 import coloredTilesUrl from '../assets/colored_tiles.webp';
@@ -22,6 +21,29 @@ import satinUrl from '../assets/satin.png';
 import dentelleUrl from '../assets/dentelle.png';
 import bismuteUrl from '../assets/bismute.png';
 import graniteUrl from '../assets/granite.png';
+import lavaUrl from '../assets/lava.png';
+import type {TextureMetadata} from '../textureStore';
+import {
+  deleteTextureEntry,
+  getAllTextureEntries,
+  getTextureBlob,
+  migrateFromLocalStorage,
+  renameTextureEntry,
+  saveTextureEntry,
+} from '../textureStore';
+import type {PresetMetadata, PresetRecord} from '../presetStore';
+import {
+  computeScaleExponent,
+  deletePresetEntry,
+  getAllPresetEntries,
+  getPresetById,
+  getPresetCount,
+  migratePalettePeriod,
+  migratePresetsFromLocalStorage,
+  savePresetEntry,
+} from '../presetStore';
+
+import type {Engine} from '../Engine.ts';
 
 /** Built-in textures: single source of truth for bootstrap, deletion protection, and UI. */
 const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
@@ -38,30 +60,9 @@ const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
   { name: 'Dentelle', url: dentelleUrl },
   { name: 'Bismute', url: bismuteUrl },
   { name: 'Granite', url: graniteUrl },
+  { name: 'Lava', url: lavaUrl },
 ] as const;
 const BUILT_IN_TEXTURE_NAMES: ReadonlySet<string> = new Set(BUILT_IN_TEXTURES.map(t => t.name));
-import {
-  getAllTextureEntries,
-  getTextureBlob,
-  saveTextureEntry,
-  deleteTextureEntry,
-  renameTextureEntry,
-  migrateFromLocalStorage,
-} from '../textureStore';
-import type { TextureMetadata } from '../textureStore';
-import {
-  getAllPresetEntries,
-  getPresetById,
-  savePresetEntry,
-  deletePresetEntry,
-  getPresetCount,
-   migratePresetsFromLocalStorage,
-  migratePalettePeriod,
-  computeScaleExponent,
-} from '../presetStore';
-import type { PresetMetadata, PresetRecord } from '../presetStore';
-
-import type { Engine } from '../Engine.ts';
 const props = defineProps<{
   engine: Engine | null;
   suspendShortcuts?: (suspend: boolean) => void;
@@ -184,6 +185,7 @@ const paletteEditorRef = ref<InstanceType<typeof PaletteEditor> | null>(null);
 const palettes = ref<{ name: string, colorStops: any[], thumbnail?: string, date?: string, textureName?: string, interpolationMode?: InterpolationMode, palettePeriod?: number, paletteOffset?: number }[]>([]);
 const selectedPalette = ref('');
 const showPaletteDropdown = ref(false);
+const applyToAll = ref(false);
 
 async function deletePresetById(id: number) {
   const meta = presets.value.find(p => p.id === id);
@@ -448,41 +450,8 @@ async function selectPalettePresetFromDropdown(preset: PresetMetadata) {
   showPalettePresetDropdown.value = false;
 }
 
-// Graphics tab: extract all rendering params (except location & perf) from a preset
-const selectedGraphicsPreset = ref<number | null>(null);
-const showGraphicsPresetDropdown = ref(false);
-
-const currentGraphicsPresetMeta = computed(() => presets.value.find(p => p.id === selectedGraphicsPreset.value));
-const currentGraphicsPresetThumbnail = computed(() => currentGraphicsPresetMeta.value?.thumbnail);
-
-/** Location fields — not copied in graphics extraction */
-const LOCATION_FIELDS: (keyof MandelbrotParams)[] = ['cx', 'cy', 'scale', 'angle'];
 /** Performance fields — never copied from presets */
 const PERF_FIELDS: (keyof MandelbrotParams)[] = ['dprMultiplier', 'maxIterationMultiplier', 'antialiasLevel', 'targetFps', 'gpuLoadMultiplier'];
-
-async function selectGraphicsFromPreset(id: number) {
-  const record = await getCachedPreset(id);
-  if (!record) return;
-  selectedGraphicsPreset.value = id;
-  const excluded = new Set<string>([...LOCATION_FIELDS, ...PERF_FIELDS]);
-  const src = record.value;
-  withSuppressedSync(() => {
-    for (const key of Object.keys(src) as (keyof MandelbrotParams)[]) {
-      if (excluded.has(key)) continue;
-      if (key === 'colorStops') {
-        model.value.colorStops = structuredClone(toRaw(src.colorStops));
-      } else {
-        // eslint-disable-next-line @typescript-eslint/no-explicit-any
-        (model.value as any)[key] = (src as any)[key];
-      }
-    }
-  });
-}
-
-async function selectGraphicsPresetFromDropdown(preset: PresetMetadata) {
-  await selectGraphicsFromPreset(preset.id);
-  showGraphicsPresetDropdown.value = false;
-}
 
 function deletePalette() {
   const name = paletteName.value.trim();
@@ -535,14 +504,6 @@ const maxIterMultSlider = computed({
   get: () => Math.log10(model.value.maxIterationMultiplier ?? 1.0),
   set: (val: number) => {
     model.value.maxIterationMultiplier = Number(Math.pow(10, val).toPrecision(3));
-  }
-});
-
-// Slider light angle : degrees (0-360) <-> radians
-const lightAngleSlider = computed({
-  get: () => (((model.value.lightAngle ?? 3.927) * 180 / Math.PI) % 360 + 360) % 360,
-  set: (deg: number) => {
-    model.value.lightAngle = (deg % 360) * Math.PI / 180;
   }
 });
 
@@ -1477,29 +1438,14 @@ async function renameAndSaveTexture() {
         <PaletteEditor
           ref="paletteEditorRef"
           :color-stops="model.colorStops"
-          :interpolation-mode="model.interpolationMode"
+          v-model:interpolation-mode="model.interpolationMode"
           :picker-mode="props.pickerMode"
           :tile-texture-url="activeBlobUrl"
           :tessellation-level="model.tessellationLevel"
           :displacement-amount="model.displacementAmount"
+          v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
         />
-      </div>
-
-      <!-- Interpolation mode -->
-      <div class="mb-3">
-        <label class="label">Interpolation</label>
-        <div class="buttons toggle-buttons">
-          <button
-            v-for="mode in interpolationModes"
-            :key="mode.key"
-            class="button is-small"
-            :class="model.interpolationMode === mode.key ? 'is-link' : 'is-light'"
-            @click="model.interpolationMode = mode.key"
-          >
-            {{ mode.label }}
-          </button>
-        </div>
       </div>
 
       <hr class="section-sep"/>
@@ -1596,6 +1542,82 @@ async function renameAndSaveTexture() {
 
       <div class="mb-3">
         <button class="button is-small is-light" @click="resetLchBase">Réinitialiser</button>
+      </div>
+
+      <hr class="section-sep"/>
+
+      <!-- ═══ ANIMATION ═══ -->
+      <label class="gfx-section-title">Animation</label>
+      <div class="buttons toggle-buttons" style="margin-bottom: 0.8em;">
+        <button class="button is-small"
+          :class="model.activateAnimate ? 'is-link' : 'is-light'"
+          @click="model.activateAnimate = !model.activateAnimate">
+          Animate
+        </button>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Vitesse anim.</span>
+        <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
+        <span class="gfx-slider-value">&times;{{ (model.animationSpeed ?? 1.0).toFixed(1) }}</span>
+      </div>
+
+      <hr class="section-sep"/>
+
+      <!-- ═══ TEXTURE ═══ -->
+      <label class="gfx-section-title">Texture</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">R&eacute;p&eacute;tition</span>
+        <input class="slider" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
+        <span class="gfx-slider-value">{{ model.tessellationLevel }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">D&eacute;placement</span>
+        <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
+        <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
+      </div>
+      <!-- Tessellation Texture Library (compact) -->
+      <div class="mb-3" style="margin-top: 0.6em;">
+        <div class="dropdown" :class="{ 'is-active': showTextureDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth is-small" @click="showTextureDropdown = !showTextureDropdown" aria-haspopup="true" aria-controls="dropdown-menu-textures" type="button">
+              <span style="display:flex; align-items:center; min-height:28px;">
+                <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="miniature" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedTexture || 'Texture...' }}</span>
+                <span class="icon is-small" style="margin-left:4px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-textures" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:350px; overflow-y:auto;">
+              <a v-for="tex in textures" :key="tex.name" class="dropdown-item"
+                @click.prevent="selectTextureFromDropdown(tex)"
+                :class="{ 'is-active': selectedTexture === tex.name }"
+                style="display:flex; align-items:center; gap:0.5em;">
+                <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="miniature"
+                  style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="field is-grouped" style="margin-top:0.5em;">
+          <div class="control is-expanded">
+            <input class="input is-small" v-model="textureName" type="text" placeholder="Nom..."
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+              @keyup.enter="renameAndSaveTexture"
+            />
+          </div>
+          <div class="control">
+            <button class="button is-warning is-small" @click="triggerImportTexture">Importer</button>
+            <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
+          </div>
+          <div class="control">
+            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)">Supprimer</button>
+          </div>
+        </div>
       </div>
 
       <hr class="section-sep"/>
@@ -1705,177 +1727,6 @@ async function renameAndSaveTexture() {
 
     <!-- Performance/Graphics tab -->
     <div v-else-if="activeTab === 'performance'" class="graphics-tab">
-
-      <!-- Extract rendering settings from a preset -->
-      <div class="mb-3">
-        <label class="gfx-section-title">Charger les r&eacute;glages d'un preset</label>
-        <p class="gfx-hint">Applique tous les param&egrave;tres sauf la localisation et la performance.</p>
-        <div class="dropdown" :class="{ 'is-active': showGraphicsPresetDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth" @click="showGraphicsPresetDropdown = !showGraphicsPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-graphics-presets" type="button">
-              <span style="display:flex; align-items:center; min-height:36px;">
-                <img v-if="currentGraphicsPresetThumbnail" :src="currentGraphicsPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentGraphicsPresetMeta?.name || (selectedGraphicsPreset ? formatPresetDate(currentGraphicsPresetMeta?.date ?? '') : 'Choisir un preset...') }}</span>
-                <span class="icon is-small" style="margin-left:5px;">
-                  <i class="fas fa-angle-down" aria-hidden="true"></i>
-                </span>
-              </span>
-            </button>
-          </div>
-          <div class="dropdown-menu" id="dropdown-menu-graphics-presets" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in presets" :key="preset.id" class="dropdown-item"
-                @click.prevent="selectGraphicsPresetFromDropdown(preset)"
-                :class="{ 'is-active': selectedGraphicsPreset === preset.id }"
-                style="display:flex; align-items:center; gap:0.75em;">
-                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
-                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
-                  <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
-                  <span style="font-size:0.78em; color:#666; display:flex; gap:0.6em;">
-                    <span>{{ formatPresetDate(preset.date) }}</span>
-                    <span v-if="preset.scaleExponent > 0" style="font-family:monospace;">{{ formatZoom(preset.scaleExponent) }}</span>
-                  </span>
-                </div>
-              </a>
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <hr class="section-sep"/>
-
-      <!-- ═══ OPTIONS DE RENDU ═══ -->
-      <label class="gfx-section-title">Options de rendu</label>
-      <div class="buttons toggle-buttons" style="margin-bottom: 0.8em;">
-        <button class="button is-small"
-          :class="model.activateShading ? 'is-link' : 'is-light'"
-          @click="model.activateShading = !model.activateShading; if (!model.activateShading) { model.activateSkybox = false; }">
-          Relief
-        </button>
-        <button class="button is-small"
-          :class="model.activatePalette ? 'is-link' : 'is-light'"
-          @click="model.activatePalette = !model.activatePalette">
-          Palette
-        </button>
-        <button class="button is-small"
-          :class="model.activateSmoothness ? 'is-link' : 'is-light'"
-          @click="model.activateSmoothness = !model.activateSmoothness">
-          Smoothness
-        </button>
-        <button class="button is-small"
-          :class="model.activateTessellation ? 'is-link' : 'is-light'"
-          @click="model.activateTessellation = !model.activateTessellation">
-          Textur&eacute;
-        </button>
-        <button class="button is-small"
-          :class="model.activateSkybox ? 'is-link' : 'is-light'"
-          @click="model.activateSkybox = !model.activateSkybox; if (model.activateSkybox) { model.activateShading = true; }">
-          M&eacute;talis&eacute;
-        </button>
-        <button class="button is-small"
-          :class="model.activateWebcam ? 'is-link' : 'is-light'"
-          @click="model.activateWebcam = !model.activateWebcam">
-          Webcam
-        </button>
-        <button class="button is-small"
-          :class="model.activateZebra ? 'is-link' : 'is-light'"
-          @click="model.activateZebra = !model.activateZebra">
-          Zebra
-        </button>
-        <button class="button is-small"
-          :class="model.activateAnimate ? 'is-link' : 'is-light'"
-          @click="model.activateAnimate = !model.activateAnimate">
-          Animate
-        </button>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Vitesse anim.</span>
-        <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
-        <span class="gfx-slider-value">&times;{{ (model.animationSpeed ?? 1.0).toFixed(1) }}</span>
-      </div>
-
-      <hr class="section-sep"/>
-
-      <!-- ═══ ÉCLAIRAGE ═══ -->
-      <label class="gfx-section-title">&Eacute;clairage</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Direction</span>
-        <input class="slider" type="range" min="0" max="359" step="1" v-model.number="lightAngleSlider" />
-        <span class="gfx-slider-value">{{ Math.round(lightAngleSlider) }}&deg;</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Brillance</span>
-        <input class="slider" type="range" min="0" max="3" step="0.05" v-model.number="model.shadingLevel" />
-        <span class="gfx-slider-value">&times;{{ (model.shadingLevel ?? 1.0).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Sp&eacute;culaire</span>
-        <input class="slider" type="range" min="1" max="64" step="0.5" v-model.number="model.specularPower" />
-        <span class="gfx-slider-value">{{ (model.specularPower ?? 4).toFixed(1) }}</span>
-      </div>
-
-      <hr class="section-sep"/>
-
-      <!-- ═══ TEXTURE ═══ -->
-      <label class="gfx-section-title">Texture</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">R&eacute;p&eacute;tition</span>
-        <input class="slider" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
-        <span class="gfx-slider-value">{{ model.tessellationLevel }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">D&eacute;placement</span>
-        <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
-        <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
-      </div>
-
-      <!-- Tessellation Texture Library (compact) -->
-      <div class="mb-3" style="margin-top: 0.6em;">
-        <div class="dropdown" :class="{ 'is-active': showTextureDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth is-small" @click="showTextureDropdown = !showTextureDropdown" aria-haspopup="true" aria-controls="dropdown-menu-textures" type="button">
-              <span style="display:flex; align-items:center; min-height:28px;">
-                <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="miniature" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedTexture || 'Texture...' }}</span>
-                <span class="icon is-small" style="margin-left:4px;">
-                  <i class="fas fa-angle-down" aria-hidden="true"></i>
-                </span>
-              </span>
-            </button>
-          </div>
-          <div class="dropdown-menu" id="dropdown-menu-textures" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:350px; overflow-y:auto;">
-              <a v-for="tex in textures" :key="tex.name" class="dropdown-item"
-                @click.prevent="selectTextureFromDropdown(tex)"
-                :class="{ 'is-active': selectedTexture === tex.name }"
-                style="display:flex; align-items:center; gap:0.5em;">
-                <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="miniature"
-                  style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
-              </a>
-            </div>
-          </div>
-        </div>
-        <div class="field is-grouped" style="margin-top:0.5em;">
-          <div class="control is-expanded">
-            <input class="input is-small" v-model="textureName" type="text" placeholder="Nom..."
-              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-              @keyup.enter="renameAndSaveTexture"
-            />
-          </div>
-          <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportTexture">Importer</button>
-            <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
-          </div>
-          <div class="control">
-            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)">Supprimer</button>
-          </div>
-        </div>
-      </div>
-
-      <hr class="section-sep"/>
 
       <!-- ═══ CALCUL ═══ -->
       <label class="gfx-section-title">Calcul</label>
