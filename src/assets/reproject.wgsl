@@ -4,7 +4,7 @@
 //
 // Layer layout:
 //   0 : sentinel / iteration count (integer part)
-//   1 : (unused – reserved for MRT alignment)
+//   1 : genuinely-computed flag (1.0 = real pixel, 0.0 = resolve-copied)
 //   2 : z.x
 //   3 : z.y
 //   4 : dz.x (derivative real)
@@ -82,7 +82,7 @@ fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
 // ── output struct (7 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,
-  @location(1) unused1:   vec4<f32>,
+  @location(1) genuine:   vec4<f32>,
   @location(2) zx:        vec4<f32>,
   @location(3) zy:        vec4<f32>,
   @location(4) dzx:       vec4<f32>,
@@ -99,7 +99,7 @@ fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
 fn loadAllLayers(coord: vec2<i32>) -> FragOut {
   var o: FragOut;
   o.iter      = pack(loadLayer(coord, 0));
-  o.unused1   = pack(loadLayer(coord, 1));
+  o.genuine   = pack(loadLayer(coord, 1));
   o.zx        = pack(loadLayer(coord, 2));
   o.zy        = pack(loadLayer(coord, 3));
   o.dzx       = pack(loadLayer(coord, 4));
@@ -111,7 +111,7 @@ fn loadAllLayers(coord: vec2<i32>) -> FragOut {
 fn makeCleared(sentinel: f32) -> FragOut {
   var o: FragOut;
   o.iter      = pack(sentinel);
-  o.unused1   = pack(0.0);
+  o.genuine   = pack(0.0);
   o.zx        = pack(0.0);
   o.zy        = pack(0.0);
   o.dzx       = pack(0.0);

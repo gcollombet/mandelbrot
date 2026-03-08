@@ -4,7 +4,7 @@
 //
 // Layer layout:
 //   0 : sentinel / iteration count (integer part)
-//   1 : (unused – reserved for MRT alignment)
+//   1 : genuinely-computed flag (1.0 = real pixel, 0.0 = resolve-copied)
 //   2 : z.x
 //   3 : z.y
 //   4 : dz.x (derivative real)
@@ -49,7 +49,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
 // ── output struct (7 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,
-  @location(1) unused1:   vec4<f32>,
+  @location(1) genuine:   vec4<f32>,
   @location(2) zx:        vec4<f32>,
   @location(3) zy:        vec4<f32>,
   @location(4) dzx:       vec4<f32>,
@@ -66,7 +66,20 @@ fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
 fn loadAllLayers(coord: vec2<i32>) -> FragOut {
   var o: FragOut;
   o.iter      = pack(loadLayer(coord, 0));
-  o.unused1   = pack(loadLayer(coord, 1));
+  o.genuine   = pack(loadLayer(coord, 1));
+  o.zx        = pack(loadLayer(coord, 2));
+  o.zy        = pack(loadLayer(coord, 3));
+  o.dzx       = pack(loadLayer(coord, 4));
+  o.dzy       = pack(loadLayer(coord, 5));
+  o.ref_i     = pack(loadLayer(coord, 6));
+  return o;
+}
+
+// Like loadAllLayers but forces the genuine flag to 0.0 (resolve-copied pixel).
+fn loadAllLayersAsCopy(coord: vec2<i32>) -> FragOut {
+  var o: FragOut;
+  o.iter      = pack(loadLayer(coord, 0));
+  o.genuine   = pack(0.0);
   o.zx        = pack(loadLayer(coord, 2));
   o.zy        = pack(loadLayer(coord, 3));
   o.dzx       = pack(loadLayer(coord, 4));
@@ -182,7 +195,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
       // Inside set (iter == 0): use it.
       if (citer == 0.0) {
-        return loadAllLayers(ccoord);
+        return loadAllLayersAsCopy(ccoord);
       }
 
       // iter > 0: check whether pixel actually escaped or is budget-exhausted.
@@ -192,7 +205,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
       if (z_sq >= uni.mu) {
         // Escaped — use this pixel.
-        return loadAllLayers(ccoord);
+        return loadAllLayersAsCopy(ccoord);
       }
 
       // Budget-exhausted: skip this candidate, try the others.

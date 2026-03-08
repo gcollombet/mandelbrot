@@ -5,7 +5,7 @@
 //       Negative  => sentinel (brush/resolve system).  -1 = compute request.
 //       0         => inside the set (confirmed), or budget fully exhausted at globalMaxIter.
 //       > 0       => escaped (|z|² >= 4) or budget-exhausted mid-progress (|z|² < 4).
-//   1 : (unused – reserved for MRT alignment)
+//   1 : genuinely-computed flag (1.0 = real pixel, 0.0 = resolve-copied)
 //   2 : z.x   (real part of current z, for resuming / coloring)
 //   3 : z.y   (imag part of current z, for resuming / coloring)
 //   4 : dz.x  (real part of derivative, for resuming / shading)
@@ -90,7 +90,7 @@ fn getOrbit(index: i32) -> vec2<f32> {
 // ── output struct (7 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,  // .r = integer iteration count (or sentinel)
-  @location(1) unused1:   vec4<f32>,  // .r = (unused, reserved for MRT alignment)
+  @location(1) genuine:   vec4<f32>,  // .r = genuinely-computed flag (1.0 = real, 0.0 = copied)
   @location(2) zx:        vec4<f32>,  // .r = z.x
   @location(3) zy:        vec4<f32>,  // .r = z.y
   @location(4) dzx:       vec4<f32>,  // .r = derivative x
@@ -155,7 +155,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   if (inside) {
     // Confirmed inside the set.
     out.iter      = pack(0.0);
-    out.unused1   = pack(0.0);
+    out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
@@ -170,7 +170,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     // Escaped: store final z and der for color-shader recomputation
     // of mu (smooth frac) and angle_der (shading). No need for ref_i.
     out.iter      = pack(total_iter);
-    out.unused1   = pack(0.0);
+    out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
@@ -186,7 +186,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     // Reached the global iteration target without escaping AND the orbit
     // is fully built.  Mark as "inside for now" (iter = 0).
     out.iter      = pack(0.0);
-    out.unused1   = pack(0.0);
+    out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
@@ -198,7 +198,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   // Budget exhausted below globalMaxIter: store iter = total_iter, keep dz/der
   // for resumption.  |z|² < 4 distinguishes this from escaped pixels.
   out.iter      = pack(total_iter);
-  out.unused1   = pack(0.0);
+  out.genuine   = pack(1.0);
   out.zx        = pack(dz.x);
   out.zy        = pack(dz.y);
   out.dzx       = pack(der.x);
@@ -228,7 +228,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   if (mandelbrot.globalMaxIter <= 0.0) {
     var out: FragOut;
     out.iter      = pack(prev_iter);
-    out.unused1   = pack(0.0);
+    out.genuine   = pack(loadLayer(coord, 1));
     out.zx        = pack(prev_zx);
     out.zy        = pack(prev_zy);
     out.dzx       = pack(loadLayer(coord, 4));
@@ -250,7 +250,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // Pass through all 7 layers unchanged.
     var out: FragOut;
     out.iter      = pack(prev_iter);
-    out.unused1   = pack(0.0);
+    out.genuine   = pack(loadLayer(coord, 1));
     out.zx        = pack(prev_zx);
     out.zy        = pack(prev_zy);
     out.dzx       = pack(loadLayer(coord, 4));

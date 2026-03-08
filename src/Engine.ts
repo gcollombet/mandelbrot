@@ -23,7 +23,7 @@ const SENTINEL_SEED_STEP_POW2 = 2048
 
 // During zoom reprojection the frozen snapshot covers visual gaps, so we
 // use a much smaller grid for faster fill.  Must be a power-of-two.
-const ZOOM_SENTINEL_SEED_STEP = 64
+const ZOOM_SENTINEL_SEED_STEP = 2048
 
 // Minimum brush refinement step during zoom.  The sentinel grid will not
 // subdivide below this value while zooming, avoiding wasted GPU work on

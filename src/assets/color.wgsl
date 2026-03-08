@@ -293,6 +293,11 @@ fn colorize_pixel(
   return vec4<f32>(color, 1.0);
 }
 
+// ── Debug flag ──
+// Set to true to visualize the live texture as a negative image during zoom,
+// with genuine pixels tinted green and resolve-copied pixels tinted red.
+const DEBUG_SHOW_LIVE_NEGATIVE: bool = false;
+
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let uv_screen = fragCoord;
@@ -337,7 +342,8 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     return vec4<f32>(c.rgb, 1.0);
   }
 
-  // ── Zooming: try live texture first, fall back to frozen ──
+  // ── Zooming: genuine-live-first, frozen-fallback, copied-live-last ──
+  // Priority: genuine live > frozen > resolve-copied live > gray
   let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf + vec2<f32>(0.5, 0.5);
 
   var liveInBounds: bool;
@@ -348,15 +354,19 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
                 && uv_live.y >= 0.0 && uv_live.y <= 1.0;
   }
 
+  var live_iter = -1.0;
+  var liveGenuine = false;
+  var liveColor = vec4<f32>(0.0);
   if (liveInBounds) {
     let liveCoord = vec2<i32>(
       i32(clamp(uv_live.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
       i32(clamp((1.0 - uv_live.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
     );
-    let live_iter = textureLoad(tex, liveCoord, 0, 0).r;
+    live_iter = textureLoad(tex, liveCoord, 0, 0).r;
+    liveGenuine = textureLoad(tex, liveCoord, 1, 0).r >= 1.0;
 
     if (live_iter >= 0.0) {
-      let liveColor = colorize_pixel(
+      liveColor = colorize_pixel(
         live_iter,
         textureLoad(tex, liveCoord, 2, 0).r,
         textureLoad(tex, liveCoord, 3, 0).r,
@@ -364,12 +374,21 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         textureLoad(tex, liveCoord, 5, 0).r,
         uv_neutral
       );
-      if (liveColor.a > 0.0) {
-        return vec4<f32>(liveColor.rgb, 1.0);
-      }
     }
   }
 
+  let liveValid = live_iter >= 0.0 && liveColor.a > 0.0;
+
+  // 1) Genuine live pixel → display immediately
+  if (liveValid && liveGenuine) {
+    if (DEBUG_SHOW_LIVE_NEGATIVE) {
+      let neg = vec3<f32>(1.0) - liveColor.rgb;
+      return vec4<f32>(neg.r * 0.3, neg.g, neg.b * 0.3, 1.0);
+    }
+    return vec4<f32>(liveColor.rgb, 1.0);
+  }
+
+  // 2) Try frozen texture
   let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
                   - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
@@ -380,27 +399,33 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     frozenOutOfBounds = uv_frozen.x < 0.0 || uv_frozen.x > 1.0
                      || uv_frozen.y < 0.0 || uv_frozen.y > 1.0;
   }
-  if (frozenOutOfBounds) {
-    return vec4<f32>(0.05, 0.05, 0.05, 1.0);
+
+  if (!frozenOutOfBounds) {
+    let frozenCoord = vec2<i32>(
+      i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
+      i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
+    );
+    let frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
+    let frozenColor = colorize_pixel(
+      frozen_iter,
+      textureLoad(texFrozen, frozenCoord, 2, 0).r,
+      textureLoad(texFrozen, frozenCoord, 3, 0).r,
+      textureLoad(texFrozen, frozenCoord, 4, 0).r,
+      textureLoad(texFrozen, frozenCoord, 5, 0).r,
+      uv_neutral
+    );
+    if (frozenColor.a > 0.0) {
+      return vec4<f32>(frozenColor.rgb, 1.0);
+    }
   }
 
-  let frozenCoord = vec2<i32>(
-    i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
-    i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
-  );
-
-  let frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
-  let frozenColor = colorize_pixel(
-    frozen_iter,
-    textureLoad(texFrozen, frozenCoord, 2, 0).r,
-    textureLoad(texFrozen, frozenCoord, 3, 0).r,
-    textureLoad(texFrozen, frozenCoord, 4, 0).r,
-    textureLoad(texFrozen, frozenCoord, 5, 0).r,
-    uv_neutral
-  );
-
-  if (frozenColor.a > 0.0) {
-    return vec4<f32>(frozenColor.rgb, 1.0);
+  // 3) Last resort: resolve-copied live pixel (better than gray)
+  if (liveValid) {
+    if (DEBUG_SHOW_LIVE_NEGATIVE) {
+      let neg = vec3<f32>(1.0) - liveColor.rgb;
+      return vec4<f32>(neg.r, neg.g * 0.3, neg.b * 0.3, 1.0);
+    }
+    return vec4<f32>(liveColor.rgb, 1.0);
   }
 
   return vec4<f32>(0.05, 0.05, 0.05, 1.0);
