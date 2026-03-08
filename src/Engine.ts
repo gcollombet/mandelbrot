@@ -21,7 +21,7 @@ const LAYER_COUNT = 7
 
 // Progressive refinement start step for the sentinel grid; must be a power-of-two.
 // Used uniformly for normal rendering, zoom reprojection, and post-zoom recompute.
-const SENTINEL_SEED_STEP = 2048
+const SENTINEL_SEED_STEP = 4096
 
 // Minimum brush refinement step during zoom.  The sentinel grid will not
 // subdivide below this value while zooming, avoiding wasted GPU work on

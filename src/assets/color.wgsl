@@ -405,12 +405,18 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 
   // ── Pick the best pixel: smallest positive step wins ──
   // step > 0 means the pixel has data; step = 0 means no data.
+  // The frozen and live textures live at different scales, so their raw step
+  // values are not directly comparable. A frozen genuine pixel (step=1) at
+  // frozenScale is zf/lzf times coarser per axis than a live genuine pixel
+  // (step=1) at liveScale.  Scale the frozen step to live-resolution units.
+  let scaleRatio = select(1.0, zf / lzf, lzf > 0.0);
+  let effectiveFrozenStep = frozenStep * scaleRatio;
   let liveHasData   = liveValid && liveStep > 0.0;
   let frozenHasData = frozenValid && frozenStep > 0.0;
 
   if (liveHasData && frozenHasData) {
     // Both have data — pick the one with finer resolution (smaller step).
-    if (liveStep <= frozenStep) {
+    if (liveStep <= effectiveFrozenStep) {
       if (DEBUG_SHOW_LIVE_NEGATIVE) {
         let neg = vec3<f32>(1.0) - liveColor.rgb;
         return vec4<f32>(neg.r * 0.3, neg.g, neg.b * 0.3, 1.0);
