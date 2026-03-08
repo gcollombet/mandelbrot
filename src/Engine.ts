@@ -5,6 +5,7 @@ import colorShader from './assets/color.wgsl?raw'
 import brushShader from './assets/reproject.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
 import countShader from './assets/count_unfinished.wgsl?raw'
+import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import {WebcamTexture} from './WebcamTexture'
@@ -28,7 +29,7 @@ const ZOOM_SENTINEL_SEED_STEP = 2048
 // Minimum brush refinement step during zoom.  The sentinel grid will not
 // subdivide below this value while zooming, avoiding wasted GPU work on
 // pixels that will be rescaled away.  Must be a power-of-two.
-const ZOOM_MIN_BRUSH_STEP = 1
+const ZOOM_MIN_BRUSH_STEP = 2
 
 // After zoom ends, the first recompute frame uses this step instead of
 // the full progressive grid — avoids overlaying coarser data on the
@@ -156,6 +157,12 @@ export class Engine {
     resolvedLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
     frozenTexture?: GPUTexture // frozen snapshot of resolved texture for zoom reprojection
     frozenArrayView?: GPUTextureView // full 2d-array view for sampling the frozen snapshot
+    frozenLayerViews: GPUTextureView[] = [] // per-layer 2d views for merge MRT
+
+    // merge pass (fuse resolved + frozen at zoom stop)
+    pipelineMerge?: GPURenderPipeline
+    bindGroupMerge?: GPUBindGroup
+    uniformBufferMerge?: GPUBuffer
 
     // buffers
     uniformBufferMandelbrot?: GPUBuffer // passe Mandelbrot (calc -1)
@@ -260,6 +267,10 @@ export class Engine {
     private zoomReprojectionActive = false
     /** Set to true when we need to GPU-copy resolved → frozen at the start of next render. */
     private needFreezeSnapshot = false
+    /** Set to true when we need to run the merge pass (resolved+frozen→frozen) at zoom stop. */
+    private needMergeSnapshot = false
+    /** Saved merge uniform values captured at zoom stop (before state is reset). */
+    private mergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0 }
     /** True when zoom direction is "in" (scale decreasing). */
     private zoomingIn = true
     /** Number of consecutive frames with no scale change while zoom is active.
@@ -424,6 +435,11 @@ export class Engine {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Count',
         })
+        this.uniformBufferMerge = this.device.createBuffer({
+            size: 4 * 8, // 6 floats (zf, lzf, frozenShiftU, frozenShiftV, aspect, angle) padded to 32 bytes
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: 'Engine UniformBuffer Merge',
+        })
 
         await this._createPipelines()
         this.resize()
@@ -525,12 +541,31 @@ export class Engine {
             label: 'Engine ComputePipeline Count',
         })
 
+        // ── Merge pipeline (resolved + frozen → frozen via MRT) ──────────
+        const moduleMerge = this.device.createShaderModule({ code: mergeFrozenShader, label: 'Engine ShaderModule Merge' })
+        const layoutMerge = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+            ],
+            label: 'Engine BindGroupLayout Merge',
+        })
+        this.pipelineMerge = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMerge] }),
+            vertex: { module: moduleMerge, entryPoint: 'vs_main' },
+            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: mrtTargets },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline Merge',
+        })
+
         // bind groups seront (ré)créés dans resize car dépend des textures
         this.bindGroupBrush = undefined
         this.bindGroupMandelbrot = undefined
         this.bindGroupResolve = undefined
         this.bindGroupColor = undefined
         this.counterBindGroup = undefined
+        this.bindGroupMerge = undefined
     }
 
     resize() {
@@ -616,7 +651,7 @@ export class Engine {
         const frozenResult = createLayeredTexture('Engine FrozenTexture')
         this.frozenTexture = frozenResult.texture
         this.frozenArrayView = frozenResult.arrayView
-        // frozenTexture doesn't need per-layer views (never used as MRT target)
+        this.frozenLayerViews = frozenResult.layerViews
 
         // Reset zoom reprojection state on resize
         this.zoomReprojectionActive = false
@@ -695,6 +730,22 @@ export class Engine {
                     { binding: 2, resource: { buffer: this.uniformBufferCount } },
                 ],
                 label: 'Engine BindGroup Count',
+            })
+        }
+
+        // Merge pass bind group: reads resolved (binding 1) + rawBrushTexture as
+        // frozen-copy (binding 2).  At zoom stop we copyTexture(frozen→rawBrush)
+        // first so the merge can safely read frozen data while writing to frozen.
+        if (this.pipelineMerge && this.uniformBufferMerge) {
+            const layout = this.pipelineMerge.getBindGroupLayout(0)
+            this.bindGroupMerge = this.device.createBindGroup({
+                layout,
+                entries: [
+                    { binding: 0, resource: { buffer: this.uniformBufferMerge } },
+                    { binding: 1, resource: this.resolvedArrayView! },
+                    { binding: 2, resource: this.rawBrushArrayView! },
+                ],
+                label: 'Engine BindGroup Merge',
             })
         }
 
@@ -845,6 +896,22 @@ export class Engine {
                 && this.prevFrameMandelbrot.scale === mandelbrot.scale) {
                 this.zoomIdleFrames++
                 if (this.zoomIdleFrames >= ZOOM_IDLE_GRACE_FRAMES) {
+                    // Capture merge uniforms BEFORE resetting zoom state.
+                    const aspect = (this.width / Math.max(1, this.height))
+                    this.mergeUniforms = {
+                        zf: this.zoomFactor,
+                        lzf: this.liveZoomFactor,
+                        frozenShiftU: (this.frozenScale > 0)
+                            ? this.cumulativeShiftX * (this.liveScale / this.frozenScale) / this.neutralSize
+                            : 0,
+                        frozenShiftV: (this.frozenScale > 0)
+                            ? -this.cumulativeShiftY * (this.liveScale / this.frozenScale) / this.neutralSize
+                            : 0,
+                        aspect,
+                        angle: mandelbrot.angle,
+                    }
+                    this.needMergeSnapshot = true
+
                     this.zoomReprojectionActive = false
                     this.zoomFactor = 1.0
                     this.zoomTarget = 1.0
@@ -991,6 +1058,7 @@ export class Engine {
         // The ZOOM_STOP clear will trigger a full recompute when zoom ends.
         if (!this.zoomReprojectionActive
             && orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
+            this.needFreezeSnapshot = true
             this.clearHistoryNextFrame = true
         }
         this.prevGuardedMaxIter = guardedMaxIter
@@ -1121,6 +1189,51 @@ export class Engine {
 
         const commandEncoder = this.device.createCommandEncoder()
 
+        // ── Zoom stop: merge resolved + frozen → frozen via MRT ──────────
+        // The two textures live in different coordinate spaces (live at liveScale,
+        // frozen at frozenScale). The merge shader reprojects both into display
+        // space and keeps the finest-resolution pixel (min-step-wins).
+        // We copy frozen → rawBrushTexture first so the merge can read it while
+        // writing to frozen. rawBrushTexture will be overwritten by the brush pass.
+        if (this.needMergeSnapshot
+            && this.pipelineMerge && this.bindGroupMerge
+            && this.resolvedTexture && this.frozenTexture && this.rawBrushTexture) {
+            const texSize = this.neutralSize
+            // 1) Copy frozen → rawBrushTexture (temp read-only copy of frozen)
+            commandEncoder.copyTextureToTexture(
+                { texture: this.frozenTexture },
+                { texture: this.rawBrushTexture },
+                { width: texSize, height: texSize, depthOrArrayLayers: LAYER_COUNT },
+            )
+            // 2) Write merge uniforms (captured at zoom stop before state reset)
+            const mergeData = new Float32Array([
+                this.mergeUniforms.zf,
+                this.mergeUniforms.lzf,
+                this.mergeUniforms.frozenShiftU,
+                this.mergeUniforms.frozenShiftV,
+                this.mergeUniforms.aspect,
+                this.mergeUniforms.angle,
+            ])
+            this.device.queue.writeBuffer(this.uniformBufferMerge!, 0, mergeData.buffer)
+            // 3) MRT render pass: reads resolved + rawBrushTexture(frozen copy),
+            //    writes directly into frozen's 7 layer views.
+            const mergeAttachments: GPURenderPassColorAttachment[] =
+                this.frozenLayerViews.map(view => ({
+                    view,
+                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                    loadOp: 'clear' as GPULoadOp,
+                    storeOp: 'store' as GPUStoreOp,
+                }))
+            const rpassMerge = commandEncoder.beginRenderPass({
+                colorAttachments: mergeAttachments,
+            })
+            rpassMerge.setPipeline(this.pipelineMerge)
+            rpassMerge.setBindGroup(0, this.bindGroupMerge)
+            rpassMerge.draw(6, 1, 0, 0)
+            rpassMerge.end()
+            this.needMergeSnapshot = false
+        }
+
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
         if (this.needFreezeSnapshot && this.resolvedTexture && this.frozenTexture) {
             const layerCount = LAYER_COUNT
@@ -1247,9 +1360,19 @@ export class Engine {
 
         await this.counterReadBuffer!.mapAsync(GPUMapMode.READ)
         const data = new Uint32Array(this.counterReadBuffer!.getMappedRange())
+        const prevUnfinished = this.unfinishedPixelCount
         this.unfinishedPixelCount = data[0]
         this.activePixelCount = data[1]
         this.counterReadBuffer!.unmap()
+
+        // When progressive computation just finished (unfinished count dropped
+        // to the done threshold), snapshot resolved→frozen so the unified color
+        // path always has a valid frozen fallback for future clear cycles.
+        if (prevUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
+            && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
+            && !this.zoomReprojectionActive) {
+            this.needFreezeSnapshot = true
+        }
 
         // Reset the clear flag now that it has been consumed by the GPU passes.
         this.clearHistoryNextFrame = false
@@ -1352,6 +1475,7 @@ export class Engine {
         this.counterBuffer?.destroy?.()
         this.counterReadBuffer?.destroy?.()
         this.uniformBufferCount?.destroy?.()
+        this.uniformBufferMerge?.destroy?.()
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()
         this.paletteTexture?.destroy?.()
@@ -1369,6 +1493,8 @@ export class Engine {
         else if (this.snapshotCallback) reason = 'snapshot'
         else if (this.zoomReprojectionActive) reason = 'zoomActive'
         else if (this.clearHistoryNextFrame) reason = 'clearHistory'
+        else if (this.needFreezeSnapshot) reason = 'freezeSnapshot'
+        else if (this.needMergeSnapshot) reason = 'mergeSnapshot'
         else if (this.orbitIncomplete) reason = 'orbitIncomplete'
         else if (this.unfinishedPixelCount < 0
             || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD) {

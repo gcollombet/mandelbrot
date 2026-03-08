@@ -5,7 +5,7 @@
 //       Negative  => sentinel (brush/resolve system).  -1 = compute request.
 //       0         => inside the set (confirmed), or budget fully exhausted at globalMaxIter.
 //       > 0       => escaped (|z|² >= 4) or budget-exhausted mid-progress (|z|² < 4).
-//   1 : genuinely-computed flag (1.0 = real pixel, 0.0 = resolve-copied)
+//   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied from grid step)
 //   2 : z.x   (real part of current z, for resuming / coloring)
 //   3 : z.y   (imag part of current z, for resuming / coloring)
 //   4 : dz.x  (real part of derivative, for resuming / shading)
@@ -90,7 +90,7 @@ fn getOrbit(index: i32) -> vec2<f32> {
 // ── output struct (7 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,  // .r = integer iteration count (or sentinel)
-  @location(1) genuine:   vec4<f32>,  // .r = genuinely-computed flag (1.0 = real, 0.0 = copied)
+  @location(1) genuine:   vec4<f32>,  // .r = resolution step (1 = genuine, >= 2 = copied)
   @location(2) zx:        vec4<f32>,  // .r = z.x
   @location(3) zy:        vec4<f32>,  // .r = z.y
   @location(4) dzx:       vec4<f32>,  // .r = derivative x

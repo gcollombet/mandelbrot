@@ -153,7 +153,7 @@ function buildSyntheticData(w: number, h: number, mu: number): Float32Array[] {
       const derY = derMag * Math.sin(derAngle);
 
       layers[0][idx] = iterFloat;  // iter
-      layers[1][idx] = 0;          // sentinel
+      layers[1][idx] = 1;          // genuine flag (1.0 = genuinely computed)
       layers[2][idx] = zx;
       layers[3][idx] = zy;
       layers[4][idx] = derX;

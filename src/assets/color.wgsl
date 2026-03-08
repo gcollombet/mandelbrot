@@ -317,33 +317,16 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 
   let zf  = parameters.zoomFactor;
   let lzf = parameters.liveZoomFactor;
-  let isZooming = (zf != 1.0) || (lzf != 1.0);
 
-  if (!isZooming) {
-    let coord = vec2<i32>(
-      i32(clamp(uv_neutral.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
-      i32(clamp((1.0 - uv_neutral.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
-    );
-    let iter_val = textureLoad(tex, coord, 0, 0).r;
+  // ── Unified path: min-step-wins compositing ──────────────────────
+  // Layer 1 stores the resolution step: 1 = genuine pixel (best),
+  // >= 2 = resolve-copied from a grid neighbor (coarser = worse),
+  // 0 = no data (sentinel / uncomputed).
+  // The pixel with the smallest positive step wins.
+  // When not zooming (zf=1, lzf=1), UV math reduces to identity, so the
+  // same logic works seamlessly for both zoom and non-zoom rendering.
 
-    if (iter_val < 0.0) {
-      let t = clamp((-iter_val) / 64.0, 0.0, 1.0);
-      return vec4<f32>(0.15 + 0.35 * t, 0.0, 0.0, 1.0);
-    }
-
-    let c = colorize_pixel(
-      iter_val,
-      textureLoad(tex, coord, 2, 0).r,
-      textureLoad(tex, coord, 3, 0).r,
-      textureLoad(tex, coord, 4, 0).r,
-      textureLoad(tex, coord, 5, 0).r,
-      uv_neutral
-    );
-    return vec4<f32>(c.rgb, 1.0);
-  }
-
-  // ── Zooming: genuine-live-first, frozen-fallback, copied-live-last ──
-  // Priority: genuine live > frozen > resolve-copied live > gray
+  // ── Sample live texture ──
   let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf + vec2<f32>(0.5, 0.5);
 
   var liveInBounds: bool;
@@ -355,7 +338,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   var live_iter = -1.0;
-  var liveGenuine = false;
+  var liveStep = 0.0;  // 0 = no data
   var liveColor = vec4<f32>(0.0);
   if (liveInBounds) {
     let liveCoord = vec2<i32>(
@@ -363,7 +346,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       i32(clamp((1.0 - uv_live.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
     );
     live_iter = textureLoad(tex, liveCoord, 0, 0).r;
-    liveGenuine = textureLoad(tex, liveCoord, 1, 0).r >= 1.0;
+    liveStep = textureLoad(tex, liveCoord, 1, 0).r;
 
     if (live_iter >= 0.0) {
       liveColor = colorize_pixel(
@@ -376,57 +359,77 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       );
     }
   }
-
   let liveValid = live_iter >= 0.0 && liveColor.a > 0.0;
 
-  // 1) Genuine live pixel → display immediately
-  if (liveValid && liveGenuine) {
-    if (DEBUG_SHOW_LIVE_NEGATIVE) {
-      let neg = vec3<f32>(1.0) - liveColor.rgb;
-      return vec4<f32>(neg.r * 0.3, neg.g, neg.b * 0.3, 1.0);
-    }
-    return vec4<f32>(liveColor.rgb, 1.0);
-  }
-
-  // 2) Try frozen texture
+  // ── Sample frozen texture ──
   let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
                   - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
-  var frozenOutOfBounds: bool;
+  var frozenInBounds: bool;
   if (zf < 1.0) {
-    frozenOutOfBounds = !isInsideScreen(uv_frozen, aspect, neutralExtent, angle);
+    frozenInBounds = isInsideScreen(uv_frozen, aspect, neutralExtent, angle);
   } else {
-    frozenOutOfBounds = uv_frozen.x < 0.0 || uv_frozen.x > 1.0
-                     || uv_frozen.y < 0.0 || uv_frozen.y > 1.0;
+    frozenInBounds = uv_frozen.x >= 0.0 && uv_frozen.x <= 1.0
+                  && uv_frozen.y >= 0.0 && uv_frozen.y <= 1.0;
   }
 
-  if (!frozenOutOfBounds) {
+  var frozenStep = 0.0;  // 0 = no data
+  var frozenColor = vec4<f32>(0.0);
+  if (frozenInBounds) {
     let frozenCoord = vec2<i32>(
       i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
       i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
     );
     let frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
-    let frozenColor = colorize_pixel(
-      frozen_iter,
-      textureLoad(texFrozen, frozenCoord, 2, 0).r,
-      textureLoad(texFrozen, frozenCoord, 3, 0).r,
-      textureLoad(texFrozen, frozenCoord, 4, 0).r,
-      textureLoad(texFrozen, frozenCoord, 5, 0).r,
-      uv_neutral
-    );
-    if (frozenColor.a > 0.0) {
+    frozenStep = textureLoad(texFrozen, frozenCoord, 1, 0).r;
+
+    if (frozen_iter >= 0.0) {
+      frozenColor = colorize_pixel(
+        frozen_iter,
+        textureLoad(texFrozen, frozenCoord, 2, 0).r,
+        textureLoad(texFrozen, frozenCoord, 3, 0).r,
+        textureLoad(texFrozen, frozenCoord, 4, 0).r,
+        textureLoad(texFrozen, frozenCoord, 5, 0).r,
+        uv_neutral
+      );
+    }
+  }
+  let frozenValid = frozenColor.a > 0.0;
+
+  // ── Pick the best pixel: smallest positive step wins ──
+  // step > 0 means the pixel has data; step = 0 means no data.
+  let liveHasData   = liveValid && liveStep > 0.0;
+  let frozenHasData = frozenValid && frozenStep > 0.0;
+
+  if (liveHasData && frozenHasData) {
+    // Both have data — pick the one with finer resolution (smaller step).
+    if (liveStep <= frozenStep) {
+      if (DEBUG_SHOW_LIVE_NEGATIVE) {
+        let neg = vec3<f32>(1.0) - liveColor.rgb;
+        return vec4<f32>(neg.r * 0.3, neg.g, neg.b * 0.3, 1.0);
+      }
+      return vec4<f32>(liveColor.rgb, 1.0);
+    } else {
       return vec4<f32>(frozenColor.rgb, 1.0);
     }
   }
 
-  // 3) Last resort: resolve-copied live pixel (better than gray)
-  if (liveValid) {
+  if (liveHasData) {
     if (DEBUG_SHOW_LIVE_NEGATIVE) {
       let neg = vec3<f32>(1.0) - liveColor.rgb;
-      return vec4<f32>(neg.r, neg.g * 0.3, neg.b * 0.3, 1.0);
+      if (liveStep <= 1.0) {
+        return vec4<f32>(neg.r * 0.3, neg.g, neg.b * 0.3, 1.0);
+      } else {
+        return vec4<f32>(neg.r, neg.g * 0.3, neg.b * 0.3, 1.0);
+      }
     }
     return vec4<f32>(liveColor.rgb, 1.0);
   }
 
+  if (frozenHasData) {
+    return vec4<f32>(frozenColor.rgb, 1.0);
+  }
+
+  // No valid pixel from either source.
   return vec4<f32>(0.05, 0.05, 0.05, 1.0);
 }

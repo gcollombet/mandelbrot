@@ -4,7 +4,7 @@
 //
 // Layer layout:
 //   0 : sentinel / iteration count (integer part)
-//   1 : genuinely-computed flag (1.0 = real pixel, 0.0 = resolve-copied)
+//   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied, 0.0 = no data)
 //   2 : z.x
 //   3 : z.y
 //   4 : dz.x (derivative real)

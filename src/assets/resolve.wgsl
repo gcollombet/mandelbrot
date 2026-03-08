@@ -4,7 +4,7 @@
 //
 // Layer layout:
 //   0 : sentinel / iteration count (integer part)
-//   1 : genuinely-computed flag (1.0 = real pixel, 0.0 = resolve-copied)
+//   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied from grid step)
 //   2 : z.x
 //   3 : z.y
 //   4 : dz.x (derivative real)
@@ -75,11 +75,13 @@ fn loadAllLayers(coord: vec2<i32>) -> FragOut {
   return o;
 }
 
-// Like loadAllLayers but forces the genuine flag to 0.0 (resolve-copied pixel).
-fn loadAllLayersAsCopy(coord: vec2<i32>) -> FragOut {
+// Like loadAllLayers but writes the resolve grid step into layer 1.
+// step = grid distance to the source pixel (higher = coarser / less accurate).
+// Genuine pixels have step = 1; resolve-copied pixels have step >= 2.
+fn loadAllLayersAsCopy(coord: vec2<i32>, step: u32) -> FragOut {
   var o: FragOut;
   o.iter      = pack(loadLayer(coord, 0));
-  o.genuine   = pack(0.0);
+  o.genuine   = pack(f32(step));
   o.zx        = pack(loadLayer(coord, 2));
   o.zy        = pack(loadLayer(coord, 3));
   o.dzx       = pack(loadLayer(coord, 4));
@@ -195,7 +197,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
       // Inside set (iter == 0): use it.
       if (citer == 0.0) {
-        return loadAllLayersAsCopy(ccoord);
+        return loadAllLayersAsCopy(ccoord, step_u);
       }
 
       // iter > 0: check whether pixel actually escaped or is budget-exhausted.
@@ -205,7 +207,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
       if (z_sq >= uni.mu) {
         // Escaped — use this pixel.
-        return loadAllLayersAsCopy(ccoord);
+        return loadAllLayersAsCopy(ccoord, step_u);
       }
 
       // Budget-exhausted: skip this candidate, try the others.
