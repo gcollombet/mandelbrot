@@ -8,7 +8,7 @@ struct Uniforms {
   animate: f32,
   mu: f32,
   zoomFactor: f32,       // frozenScale / displayScale
-  zoomTarget: f32,
+  frozenAligned: f32,    // 1.0 when frozen texture is aligned with live (zoom or post-zoom), 0.0 otherwise
   liveZoomFactor: f32,   // liveScale / displayScale (for UV rescaling of live texture)
   frozenShiftU: f32,     // cumulative pan shift of frozen texture (normalized UV)
   frozenShiftV: f32,
@@ -362,36 +362,43 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let liveValid = live_iter >= 0.0 && liveColor.a > 0.0;
 
   // ── Sample frozen texture ──
-  let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
-                  - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
-
-  var frozenInBounds: bool;
-  if (zf < 1.0) {
-    frozenInBounds = isInsideScreen(uv_frozen, aspect, neutralExtent, angle);
-  } else {
-    frozenInBounds = uv_frozen.x >= 0.0 && uv_frozen.x <= 1.0
-                  && uv_frozen.y >= 0.0 && uv_frozen.y <= 1.0;
-  }
+  // The frozen texture is only usable when it is aligned with the live texture
+  // (during zoom reprojection, or post-zoom before any translation occurs).
+  // The CPU sets frozenAligned = 1.0 in those cases, 0.0 otherwise.
+  let useFrozen = parameters.frozenAligned > 0.5;
 
   var frozenStep = 0.0;  // 0 = no data
   var frozenColor = vec4<f32>(0.0);
-  if (frozenInBounds) {
-    let frozenCoord = vec2<i32>(
-      i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
-      i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
-    );
-    let frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
-    frozenStep = textureLoad(texFrozen, frozenCoord, 1, 0).r;
+  if (useFrozen) {
+    let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
+                    - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
-    if (frozen_iter >= 0.0) {
-      frozenColor = colorize_pixel(
-        frozen_iter,
-        textureLoad(texFrozen, frozenCoord, 2, 0).r,
-        textureLoad(texFrozen, frozenCoord, 3, 0).r,
-        textureLoad(texFrozen, frozenCoord, 4, 0).r,
-        textureLoad(texFrozen, frozenCoord, 5, 0).r,
-        uv_neutral
+    var frozenInBounds: bool;
+    if (zf < 1.0) {
+      frozenInBounds = isInsideScreen(uv_frozen, aspect, neutralExtent, angle);
+    } else {
+      frozenInBounds = uv_frozen.x >= 0.0 && uv_frozen.x <= 1.0
+                    && uv_frozen.y >= 0.0 && uv_frozen.y <= 1.0;
+    }
+
+    if (frozenInBounds) {
+      let frozenCoord = vec2<i32>(
+        i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
+        i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
       );
+      let frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
+      frozenStep = textureLoad(texFrozen, frozenCoord, 1, 0).r;
+
+      if (frozen_iter >= 0.0) {
+        frozenColor = colorize_pixel(
+          frozen_iter,
+          textureLoad(texFrozen, frozenCoord, 2, 0).r,
+          textureLoad(texFrozen, frozenCoord, 3, 0).r,
+          textureLoad(texFrozen, frozenCoord, 4, 0).r,
+          textureLoad(texFrozen, frozenCoord, 5, 0).r,
+          uv_neutral
+        );
+      }
     }
   }
   let frozenValid = frozenColor.a > 0.0;

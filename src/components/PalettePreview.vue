@@ -323,7 +323,7 @@ async function init() {
     0,            // animate
     mu,           // mu
     1,            // zoomFactor (no zoom)
-    0,            // zoomTarget
+    0,            // frozenAligned (no frozen texture)
     1,            // liveZoomFactor (no zoom)
     0,            // frozenShiftU
     0,            // frozenShiftV

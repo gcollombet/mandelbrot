@@ -20,25 +20,13 @@ import bronzeUrl from './assets/bronze.webp'
 const LAYER_COUNT = 7
 
 // Progressive refinement start step for the sentinel grid; must be a power-of-two.
-const SENTINEL_SEED_STEP_POW2 = 2048
-
-// During zoom reprojection the frozen snapshot covers visual gaps, so we
-// use a much smaller grid for faster fill.  Must be a power-of-two.
-const ZOOM_SENTINEL_SEED_STEP = 2048
+// Used uniformly for normal rendering, zoom reprojection, and post-zoom recompute.
+const SENTINEL_SEED_STEP = 2048
 
 // Minimum brush refinement step during zoom.  The sentinel grid will not
 // subdivide below this value while zooming, avoiding wasted GPU work on
 // pixels that will be rescaled away.  Must be a power-of-two.
 const ZOOM_MIN_BRUSH_STEP = 2
-
-// After zoom ends, the first recompute frame uses this step instead of
-// the full progressive grid — avoids overlaying coarser data on the
-// already-refined image while still being fast.  Must be a power-of-two.
-const POST_ZOOM_SEED_STEP = 2048
-
-// Number of consecutive no-scale-change frames before we consider the zoom
-// truly stopped.  Wheel events often have 1-2 frame gaps between ticks.
-const ZOOM_IDLE_GRACE_FRAMES = 0
 
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
 // to target TARGET_FRAME_MS of GPU time.
@@ -254,9 +242,6 @@ export class Engine {
      *  For zoom-in: < 1 (frozen covers larger area), trending towards 1/threshold.
      *  For zoom-out: > 1 (frozen covers smaller area), trending towards threshold. */
     private zoomFactor = 1.0
-    /** Target zoom for the current cycle: zoomMagnificationThreshold for zoom-in,
-     *  1/zoomMagnificationThreshold for zoom-out, or 1.0 when idle. */
-    private zoomTarget = 1.0
     /** Scale at which the snapshot was frozen. */
     private frozenScale = 0
     /** Scale at which the live texture is being computed (fixed for the duration of a cycle). */
@@ -271,15 +256,11 @@ export class Engine {
     private needMergeSnapshot = false
     /** Saved merge uniform values captured at zoom stop (before state is reset). */
     private mergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0 }
+    /** True when the frozen texture is spatially aligned with the live texture.
+     *  Set to true after a freeze snapshot or merge pass. Set to false on translation. */
+    private frozenAligned = false
     /** True when zoom direction is "in" (scale decreasing). */
     private zoomingIn = true
-    /** Number of consecutive frames with no scale change while zoom is active.
-     *  Used as a grace period before deactivating zoom reprojection, because
-     *  wheel events can have gaps of 1-2 frames between ticks. */
-    private zoomIdleFrames = 0
-    /** Set to true for one frame after zoom reprojection ends, so the
-     *  post-zoom recompute uses POST_ZOOM_SEED_STEP instead of the full progressive grid. */
-    private postZoomFullRecompute = false
 
     // Progressive iteration state – adaptive batch sizing
     private iterationBatchSize = MIN_BATCH_SIZE
@@ -656,11 +637,9 @@ export class Engine {
         // Reset zoom reprojection state on resize
         this.zoomReprojectionActive = false
         this.zoomFactor = 1.0
-        this.zoomTarget = 1.0
         this.liveZoomFactor = 1.0
         this.frozenScale = 0
         this.liveScale = 0
-        this.zoomIdleFrames = 0
 
         // Re-création des bind groups dépendant des textures
         if (this.pipelineBrush) {
@@ -841,21 +820,12 @@ export class Engine {
                     : this.frozenScale * this.zoomMagnificationThreshold
                 this.needFreezeSnapshot = true
                 this.clearHistoryNextFrame = true
-                this.zoomIdleFrames = 0
-            }
-
-            // Reset idle counter whenever scale changes during an active cycle
-            if (scaleChanged && this.zoomReprojectionActive) {
-                this.zoomIdleFrames = 0
             }
 
             // Update zoom factors during an active cycle
             if (this.zoomReprojectionActive && this.frozenScale > 0) {
                 this.zoomFactor = this.frozenScale / mandelbrot.scale
                 this.liveZoomFactor = this.liveScale / mandelbrot.scale
-                this.zoomTarget = this.zoomingIn
-                    ? this.zoomMagnificationThreshold
-                    : 1.0 / this.zoomMagnificationThreshold
 
                 // Check if we've reached the swap threshold.
                 // zoomFactor = frozenScale / displayScale.
@@ -880,22 +850,18 @@ export class Engine {
                         : mandelbrot.scale * this.zoomMagnificationThreshold
                     this.zoomFactor = this.frozenScale / mandelbrot.scale
                     this.liveZoomFactor = this.liveScale / mandelbrot.scale
-                    this.zoomIdleFrames = 0
                 }
             } else if (!this.zoomReprojectionActive) {
                 this.zoomFactor = 1.0
-                this.zoomTarget = 1.0
-                this.liveZoomFactor = 1.0
-            }
+            this.liveZoomFactor = 1.0
+            this.liveScale = 0
+        }
 
-            // If zoom has stopped (no scale change for several consecutive frames),
-            // deactivate and recompute at the actual display scale.
-            // We use a grace period because wheel events often have 1-2 frame gaps.
+            // If zoom has stopped (no scale change), deactivate and recompute
+            // at the actual display scale.
             if (this.zoomReprojectionActive && !scaleChanged
                 && this.prevFrameMandelbrot
                 && this.prevFrameMandelbrot.scale === mandelbrot.scale) {
-                this.zoomIdleFrames++
-                if (this.zoomIdleFrames >= ZOOM_IDLE_GRACE_FRAMES) {
                     // Capture merge uniforms BEFORE resetting zoom state.
                     const aspect = (this.width / Math.max(1, this.height))
                     this.mergeUniforms = {
@@ -914,13 +880,9 @@ export class Engine {
 
                     this.zoomReprojectionActive = false
                     this.zoomFactor = 1.0
-                    this.zoomTarget = 1.0
                     this.liveZoomFactor = 1.0
                     this.liveScale = 0
-                    this.zoomIdleFrames = 0
                     this.clearHistoryNextFrame = true
-                    this.postZoomFullRecompute = true
-                }
             }
         }
 
@@ -949,7 +911,7 @@ export class Engine {
             renderOptions.activateAnimate ? 1 : 0, // 6: animate
             mandelbrot.mu,                  // 7: mu
             this.zoomFactor,                // 8: zoomFactor
-            this.zoomTarget,                // 9: zoomTarget
+            (this.zoomReprojectionActive || this.frozenAligned) ? 1.0 : 0.0, // 9: frozenAligned
             this.liveZoomFactor,            // 10: liveZoomFactor
             // Frozen shift derived from the live texture's actual cumulative
             // shift (in rounded texels at liveScale), rescaled to frozen UV.
@@ -1035,19 +997,15 @@ export class Engine {
             // Hard reset: also kill any active zoom reprojection cycle
             this.zoomReprojectionActive = false
             this.zoomFactor = 1.0
-            this.zoomTarget = 1.0
             this.liveZoomFactor = 1.0
             this.liveScale = 0
-            this.zoomIdleFrames = 0
         }
         if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.mu !== mandelbrot.mu) {
             this.clearHistoryNextFrame = true
             this.zoomReprojectionActive = false
             this.zoomFactor = 1.0
-            this.zoomTarget = 1.0
             this.liveZoomFactor = 1.0
             this.liveScale = 0
-            this.zoomIdleFrames = 0
         }
 
         // When the orbit just became complete, clear history once so that
@@ -1091,20 +1049,8 @@ export class Engine {
         }
 
         const aspect = (this.width / Math.max(1, this.height))
-        // During zoom reprojection the frozen snapshot covers visual gaps,
-        // so use a small step (ZOOM_SENTINEL_SEED_STEP) for fast live-texture
-        // fill without going all the way to step=1 (which would skip refinement).
-        // When zoom just ended (postZoomFullRecompute), use POST_ZOOM_SEED_STEP
-        // so we don't overlay a coarser progressive grid on the already-refined image.
-        let seedStep: number
-        if (this.postZoomFullRecompute) {
-            seedStep = POST_ZOOM_SEED_STEP
-            this.postZoomFullRecompute = false
-        } else if (this.zoomReprojectionActive) {
-            seedStep = ZOOM_SENTINEL_SEED_STEP
-        } else {
-            seedStep = floorPowerOfTwo(SENTINEL_SEED_STEP_POW2)
-        }
+        // All paths now use the same seed step for progressive refinement.
+        const seedStep = floorPowerOfTwo(SENTINEL_SEED_STEP)
         const baseSentinel = seedStep
         const clearFlag = this.clearHistoryNextFrame ? 1 : 0
 
@@ -1136,6 +1082,11 @@ export class Engine {
         } else {
             this.cumulativeShiftX += Math.round(shiftTexX)
             this.cumulativeShiftY += Math.round(shiftTexY)
+            // Translation shifts the live texture but not the frozen texture,
+            // so any non-zero shift desynchronizes them.
+            if (Math.round(shiftTexX) !== 0 || Math.round(shiftTexY) !== 0) {
+                this.frozenAligned = false
+            }
         }
 
         // Grid offset passed to the shader: cumulative shift mod baseSentinel,
@@ -1232,6 +1183,7 @@ export class Engine {
             rpassMerge.draw(6, 1, 0, 0)
             rpassMerge.end()
             this.needMergeSnapshot = false
+            this.frozenAligned = true
         }
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
@@ -1244,6 +1196,7 @@ export class Engine {
                 { width: texSize, height: texSize, depthOrArrayLayers: layerCount },
             )
             this.needFreezeSnapshot = false
+            this.frozenAligned = true
         }
 
         // Helper: build 7 MRT color attachments from per-layer views
