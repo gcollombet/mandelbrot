@@ -380,7 +380,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 16, // 13 floats padded to 16-byte alignment (64 bytes)
+            size: 4 * 20, // 17 floats padded to 16-byte alignment (80 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -926,6 +926,7 @@ export class Engine {
             renderOptions.tessellationLevel, // 13: tessellationLevel
             renderOptions.displacementAmount, // 14: displacementAmount
             renderOptions.animationSpeed,   // 15: animationSpeed
+            mandelbrot.epsilon,             // 16: epsilon
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

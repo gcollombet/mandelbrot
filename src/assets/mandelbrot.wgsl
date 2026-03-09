@@ -87,6 +87,9 @@ fn getOrbit(index: i32) -> vec2<f32> {
   );
 }
 
+// Set to true to disable epsilon-based interior detection (for debugging).
+const IGNORE_EPSILON: bool = false;
+
 // ── output struct (7 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,  // .r = integer iteration count (or sentinel)
@@ -136,7 +139,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       escaped = true;
       break;
     }
-    if (dot(der, der) < epsilon) {
+    if (!IGNORE_EPSILON && dot(der, der) < epsilon) {
       inside = true;
       break;
     }
@@ -153,14 +156,14 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var out: FragOut;
 
   if (inside) {
-    // Confirmed inside the set.
+    // Confirmed inside the set. Store iteration count in ref_i for interior coloring.
     out.iter      = pack(0.0);
     out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
     out.dzy       = pack(der.y);
-    out.ref_i     = pack(0.0);
+    out.ref_i     = pack(prev_iter + i);
     return out;
   }
 
@@ -185,13 +188,14 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   if (total_iter >= globalMax && mandelbrot.orbitComplete >= 0.5) {
     // Reached the global iteration target without escaping AND the orbit
     // is fully built.  Mark as "inside for now" (iter = 0).
+    // Store iteration count in ref_i for interior coloring.
     out.iter      = pack(0.0);
     out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
     out.dzy       = pack(der.y);
-    out.ref_i     = pack(0.0);
+    out.ref_i     = pack(total_iter);
     return out;
   }
 

@@ -1532,7 +1532,7 @@ async function renameAndSaveTexture() {
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Epsilon</span>
-        <input class="slider" type="range" min="-12" max="0" step="0.01" v-model="epsilonSlider" />
+        <input class="slider" type="range" min="-30" max="0" step="0.01" v-model="epsilonSlider" />
         <span class="gfx-slider-value">{{ (model.epsilon ?? 1e-8).toExponential(1) }}</span>
       </div>
 

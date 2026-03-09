@@ -15,6 +15,7 @@ struct Uniforms {
   tessellationLevel: f32, // global [0, 10]
   displacementAmount: f32, // global [0, 0.1]
   animationSpeed: f32,    // global multiplier on drift frequencies [0.1, 5.0]
+  epsilon: f32,           // interior detection threshold (|der|² < epsilon)
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -138,13 +139,18 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
   return textureLoad(tex_, coord, 0).rgb;
 }
 
-fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32) -> vec3<f32> {
+fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32, isInterior: bool) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
 
   // ── Sample all effect channels from the palette texture ──
   let fx = sampleEffects(palettePhase);
+
+  // Interior pixels use pure palette color only — no tessellation, webcam, or shading.
+  let effTess    = select(fx.wTessellation, 0.0, isInterior);
+  let effWebcam  = select(fx.wWebcam,       0.0, isInterior);
+  let effShading = select(fx.wShading,      0.0, isInterior);
 
   // ── Tessellation depth: always smooth, independent of palette period ──
   let tess_depth = v_smooth * 2.0;
@@ -176,13 +182,13 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32) -> vec
   var color = fx.paletteColor * fx.wPalette;
 
   // Tessellation: overlay on top of palette color
-  color = mix(color, tessColor, fx.wTessellation);
+  color = mix(color, tessColor, effTess);
 
   // Webcam: overlay on top of current result
-  color = mix(color, webCamColor, fx.wWebcam);
+  color = mix(color, webCamColor, effWebcam);
 
   // ── Shading (always computed, applied proportionally to wShading) ──
-  if (fx.wShading > 0.001) {
+  if (effShading > 0.001) {
     let normal = normalize(vec3<f32>(cos(d), sin(d), 0.5));
     let la = fx.lightAngle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 0.5));
@@ -213,7 +219,7 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32) -> vec
     }
 
     // Apply shading proportionally to wShading
-    color = color * mix(1.0, shading, fx.wShading);
+    color = color * mix(1.0, shading, effShading);
   }
 
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -223,6 +229,7 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32) -> vec
 fn colorize_pixel(
   iter_val: f32, zx_val: f32, zy_val: f32,
   der_x: f32, der_y: f32,
+  ref_i_val: f32,
   uv_neutral: vec2<f32>
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
@@ -230,24 +237,39 @@ fn colorize_pixel(
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
-  // Budget exhausted: z hasn't escaped.
+  // Budget exhausted: z hasn't escaped. Treat as interior — same coloring.
   if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
-    let z_sq = zx_val * zx_val + zy_val * zy_val;
-    let fake_log = max(log(z_sq + 1.0), 0.001);
-    let mu_approx = clamp(1.0 - log(fake_log / log(parameters.mu)) / log(2.0), 0.0, 1.0);
-    let nu = iter_val + mu_approx;
-    let v = nu;
+    let z_mag = sqrt(zx_val * zx_val + zy_val * zy_val);
+    let mu_interior = clamp(z_mag * 0.5, 0.0, 1.0);
+    let nu = log(1.0 + iter_val + mu_interior);
+    let paletteRepeat = max(parameters.palettePeriod, 0.0001);
+    let v = nu / 6.0 * paletteRepeat * 0.5;
     let z = vec2<f32>(zx_val, zy_val);
     let der = vec2<f32>(der_x, der_y);
-    let dd = cdiv(der, z);
+    let dd = cdiv(der, z + vec2<f32>(1e-20, 0.0));
     let angle_der = atan2(dd.y, dd.x);
-    var color = palette(v, v, z, angle_der, uv_neutral.x, uv_neutral.y);
+    var color = palette(v, v, z, angle_der, uv_neutral.x, uv_neutral.y, true);
     return vec4<f32>(color * 0.4, 1.0);
   }
 
-  // Inside the set: iter_val == 0. Solid black.
+  // Inside the set: iter_val == 0. Color by smooth iteration count (stored in ref_i_val).
+  // Smoothing with |z_n|: works regardless of epsilon detection.
+  // Palette cycling uses a fixed ratio (independent of palettePeriod).
   if (iter_val == 0.0) {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);
+    let z_mag = sqrt(zx_val * zx_val + zy_val * zy_val);
+    // |z| in [0, 2) for interior points → fraction in [0, 1)
+    let mu_interior = clamp(z_mag * 0.5, 0.0, 1.0);
+    let nu = log(1.0 + ref_i_val + mu_interior);
+    // Fixed interior cycling: 1 full palette cycle every ~6 log-units.
+    // Reverse-engineer v so palette() produces palettePhase = fract(nu / 6.0 + offset).
+    let paletteRepeat = max(parameters.palettePeriod, 0.0001);
+    let v = nu / 6.0 * paletteRepeat * 0.5;
+    let z = vec2<f32>(zx_val, zy_val);
+    let der = vec2<f32>(der_x, der_y);
+    let dd = cdiv(der, z + vec2<f32>(1e-20, 0.0));
+    let angle_der = atan2(dd.y, dd.x);
+    let color = palette(v, v, z, angle_der, uv_neutral.x, uv_neutral.y, true);
+    return vec4<f32>(color, 1.0);
   }
 
   // ── Escaped pixel ──
@@ -285,7 +307,7 @@ fn colorize_pixel(
 
   let v = nu;
   let v_smooth = nu_smooth;
-  var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y);
+  var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y, false);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -355,6 +377,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         textureLoad(tex, liveCoord, 3, 0).r,
         textureLoad(tex, liveCoord, 4, 0).r,
         textureLoad(tex, liveCoord, 5, 0).r,
+        textureLoad(tex, liveCoord, 6, 0).r,
         uv_neutral
       );
     }
@@ -396,6 +419,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
           textureLoad(texFrozen, frozenCoord, 3, 0).r,
           textureLoad(texFrozen, frozenCoord, 4, 0).r,
           textureLoad(texFrozen, frozenCoord, 5, 0).r,
+          textureLoad(texFrozen, frozenCoord, 6, 0).r,
           uv_neutral
         );
       }
