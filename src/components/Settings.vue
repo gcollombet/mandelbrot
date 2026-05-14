@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, ref, toRaw, watch} from 'vue';
-import type {InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
+import type {ApproximationMode, InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import type {ColorStop, EffectFieldName} from '../ColorStop.ts';
 import {COLOR_STOP_DEFAULTS} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
@@ -110,9 +110,10 @@ const model =  defineModel<MandelbrotParams>({
     textureName: 'Gold',
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
-    interpolationMode: 'lab',
-    targetFps: 60,
-    gpuLoadMultiplier: 1.0,
+     interpolationMode: 'lab',
+     approximationMode: 'perturbation',
+     targetFps: 60,
+     gpuLoadMultiplier: 1.0,
   }
 });
 
@@ -647,6 +648,17 @@ watch([() => props.activeTab, () => props.engine], async ([tab]) => {
     await refreshNavigationPreview();
   }
 }, { immediate: true });
+
+watch(
+  [() => props.engine, () => model.value.approximationMode, () => model.value.epsilon] as const,
+  ([engine, approximationMode, epsilon]) => {
+    if (!engine) return;
+    const mode: ApproximationMode = approximationMode === 'bla' ? 'bla' : 'perturbation';
+    engine.setApproximationMode(mode);
+    engine.setBlaEpsilon(epsilon ?? 1e-6);
+  },
+  { immediate: true },
+);
 
 // =====================================================
 // Import / Export Presets
@@ -1531,6 +1543,26 @@ async function renameAndSaveTexture() {
         <span class="gfx-slider-label">Epsilon</span>
         <input class="slider" type="range" min="-30" max="0" step="0.01" v-model="epsilonSlider" />
         <span class="gfx-slider-value">{{ (model.epsilon ?? 1e-8).toExponential(1) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Approximation</span>
+        <div class="buttons has-addons toggle-buttons" style="margin-bottom:0;">
+          <button
+            class="button is-small"
+            :class="model.approximationMode !== 'bla' ? 'is-link' : 'is-light'"
+            @click="model.approximationMode = 'perturbation'"
+          >
+            Perturbation
+          </button>
+          <button
+            class="button is-small"
+            :class="model.approximationMode === 'bla' ? 'is-link' : 'is-light'"
+            @click="model.approximationMode = 'bla'"
+          >
+            BLA
+          </button>
+        </div>
+        <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : 'Classic' }}</span>
       </div>
 
       <hr class="section-sep"/>

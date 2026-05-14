@@ -247,6 +247,11 @@ defineExpose({
   drawOnce: async () => draw(),
   resize: async () => handleResize(),
   initialize: async () => initWebGPU(),
+  useBla: () => engine?.setApproximationMode('bla'),
+  usePerturbation: () => engine?.setApproximationMode('perturbation'),
+  setApproximationMode: (mode: 'bla' | 'perturbation') => engine?.setApproximationMode(mode),
+  getApproximationMode: () => engine?.getApproximationMode(),
+  setBlaEpsilon: (epsilon: number) => engine?.setBlaEpsilon(epsilon),
 });
 </script>
 

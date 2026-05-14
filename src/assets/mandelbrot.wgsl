@@ -42,11 +42,33 @@ struct Mandelbrot {
   iterationOffset: f32, // iterations already completed in previous passes
   globalMaxIter: f32,   // total iteration target for the current view
   orbitComplete: f32,   // 1.0 = orbit fully built, 0.0 = still building
+  approximationMode: f32,
+  blaLevelCount: f32,
+  blaEpsilon: f32,
+  _padding0: f32,
+};
+
+struct BlaStep {
+  ax: f32,
+  ay: f32,
+  bx: f32,
+  by: f32,
+  radius_alpha: f32,
+  radius_beta: f32,
+};
+
+struct BlaLevel {
+  offset: u32,
+  count: u32,
+  skip: u32,
+  _padding: u32,
 };
 
 @group(0) @binding(0) var<uniform> mandelbrot: Mandelbrot;
 @group(0) @binding(1) var<storage, read> mandelbrotOrbitPointSuite: array<MandelbrotStep>;
-@group(0) @binding(2) var rawIn: texture_2d_array<f32>;
+@group(0) @binding(2) var<storage, read> mandelbrotBlaSuite: array<BlaStep>;
+@group(0) @binding(3) var<storage, read> mandelbrotBlaLevels: array<BlaLevel>;
+@group(0) @binding(4) var rawIn: texture_2d_array<f32>;
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -87,6 +109,40 @@ fn getOrbit(index: i32) -> vec2<f32> {
   );
 }
 
+fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: ptr<function, vec2<f32>>, dc: vec2<f32>) -> i32 {
+  if (mandelbrot.approximationMode < 0.5 || mandelbrot.orbitComplete < 0.5 || mandelbrot.blaLevelCount < 1.0) {
+    return 0;
+  }
+
+  let dcMag = sqrt(max(0.0, dot(dc, dc)));
+  var level = i32(mandelbrot.blaLevelCount) - 1;
+  let max_iter = i32(mandelbrot.globalMaxIter);
+  while (level >= 0) {
+    let levelInfo = mandelbrotBlaLevels[level];
+    let skip = i32(levelInfo.skip);
+    if ((*ref_i % skip) == 0 && *ref_i + skip <= max_iter) {
+      let slot = *ref_i / skip;
+      if (u32(slot) < levelInfo.count) {
+        let entryIndex = i32(levelInfo.offset) + slot;
+        let bla = mandelbrotBlaSuite[entryIndex];
+        let a = vec2<f32>(bla.ax, bla.ay);
+        let b = vec2<f32>(bla.bx, bla.by);
+        let candidate = cmul(a, *dz) + cmul(b, dc);
+        let radius = max(0.0, bla.radius_alpha - bla.radius_beta * dcMag);
+        if (dot(candidate, candidate) <= radius * radius) {
+          *dz = candidate;
+          *der = cmul(a, *der);
+          *ref_i += skip;
+          return skip;
+        }
+      }
+    }
+    level -= 1;
+  }
+
+  return 0;
+}
+
 // Set to true to disable epsilon-based interior detection (for debugging).
 const IGNORE_EPSILON: bool = false;
 
@@ -121,18 +177,25 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var der = vec2<f32>(prev_dzx, prev_dzy);
   var ref_i = i32(prev_ref_i)  ;
   var z = getOrbit(ref_i);
-  var d = vec2<f32>(1.0, 0.0);
 
   var escaped = false;
   var inside = false;
 
   while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
-    z = getOrbit(ref_i);
-    dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
-    ref_i += 1;
-
-    z = getOrbit(ref_i) + dz;
-    d = cdiv(der, z);
+    var next_der = der;
+    let skipped = try_apply_bla(&ref_i, &dz, &der, dc);
+    if (skipped > 0) {
+      z = getOrbit(ref_i) + dz;
+      next_der = der;
+      i += f32(skipped);
+    } else {
+      z = getOrbit(ref_i);
+      dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
+      ref_i += 1;
+      z = getOrbit(ref_i) + dz;
+      next_der = cmul(der * 2.0, z);
+      i += 1.0;
+    }
 
     let dot_z = dot(z, z);
     if (dot_z > muLimit) {
@@ -143,14 +206,14 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       inside = true;
       break;
     }
-    der = cmul(der * 2.0, z);
 
     let dot_dz = dot(dz, dz);
     if (dot_z < dot_dz || f32(ref_i) == mandelbrot.globalMaxIter) {
       dz = z;
       ref_i = 0;
     }
-    i += 1.0;
+
+    der = next_der;
   }
 
   var out: FragOut;

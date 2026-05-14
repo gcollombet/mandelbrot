@@ -13,7 +13,7 @@ import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import bronzeUrl from './assets/bronze.webp'
-import skyboxUrl from './assets/skybox.png'
+import skyboxUrl from './assets/gold.jpg'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -109,6 +109,8 @@ export type RenderOptions = {
     animationSpeed: number,
 }
 
+export type ApproximationMode = 'perturbation' | 'bla'
+
 export type Mandelbrot = {
     maxIterations: number,
     cx: string,
@@ -158,6 +160,10 @@ export class Engine {
     uniformBufferBrush?: GPUBuffer // passe pinceau (sentinelles)
     uniformBufferResolve?: GPUBuffer // passe resolve (sentinel snapping)
     mandelbrotReferenceBuffer?: GPUBuffer // storage buffer contenant l'orbite
+    mandelbrotBlaBuffer?: GPUBuffer // storage buffer contenant les sauts BLA
+    mandelbrotBlaLevelBuffer?: GPUBuffer // storage buffer contenant les metadonnees BLA
+    private mandelbrotBlaBufferCapacity = 0
+    private mandelbrotBlaLevelBufferCapacity = 0
 
     // pipelines / bindgroups
     pipelineBrush?: GPURenderPipeline
@@ -223,7 +229,10 @@ export class Engine {
     currentGuardedMaxIter = 0
     /** Target maxIterations for the current frame. */
     currentMaxIterations = 0
+    currentBlaLevelCount = 0
     mandelbrotReference = new Float32Array(1000000)
+    private approximationMode: ApproximationMode = 'perturbation'
+    private blaEpsilon = 1e-6
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
 
@@ -313,6 +322,8 @@ export class Engine {
 
     async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
         this.mandelbrotNavigator = mandelbrotNavigator
+        this.approximationMode = this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation'
+        this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
         this.adapter = await navigator.gpu.requestAdapter()
         if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
@@ -382,7 +393,7 @@ export class Engine {
 
         // uniform buffers
         this.uniformBufferMandelbrot = this.device.createBuffer({
-            size: 4 * 12,
+            size: 4 * 16,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Mandelbrot',
         })
@@ -406,6 +417,18 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         })
+        this.mandelbrotBlaBuffer = this.device.createBuffer({
+            size: 4 * 6,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot BLA Storage Buffer',
+        })
+        this.mandelbrotBlaLevelBuffer = this.device.createBuffer({
+            size: 4 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot BLA Level Storage Buffer',
+        })
+        this.mandelbrotBlaBufferCapacity = 1
+        this.mandelbrotBlaLevelBufferCapacity = 1
 
         // Counter buffers for GPU pixel-completion readback (2 × u32: total unfinished + active)
         this.counterBuffer = this.device.createBuffer({
@@ -452,7 +475,9 @@ export class Engine {
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
             ],
             label: 'Engine BindGroupLayout Mandelbrot',
         })
@@ -555,6 +580,58 @@ export class Engine {
         this.bindGroupColor = undefined
         this.counterBindGroup = undefined
         this.bindGroupMerge = undefined
+    }
+
+    private rebuildMandelbrotBindGroup() {
+        if (!this.pipelineMandelbrot || !this.rawBrushArrayView || !this.uniformBufferMandelbrot
+            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer) {
+            return
+        }
+
+        const layout = this.pipelineMandelbrot.getBindGroupLayout(0)
+        this.bindGroupMandelbrot = this.device.createBindGroup({
+            layout,
+            entries: [
+                { binding: 0, resource: { buffer: this.uniformBufferMandelbrot } },
+                { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
+                { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
+                { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
+                { binding: 4, resource: this.rawBrushArrayView },
+            ],
+            label: 'Engine BindGroup Mandelbrot',
+        })
+    }
+
+    private ensureBlaBufferCapacity(requiredEntries: number) {
+        const safeRequiredEntries = Math.max(1, Math.ceil(requiredEntries))
+        if (safeRequiredEntries <= this.mandelbrotBlaBufferCapacity) {
+            return
+        }
+
+        this.mandelbrotBlaBuffer?.destroy?.()
+        this.mandelbrotBlaBuffer = this.device.createBuffer({
+            size: safeRequiredEntries * 4 * 6,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot BLA Storage Buffer',
+        })
+        this.mandelbrotBlaBufferCapacity = safeRequiredEntries
+        this.rebuildMandelbrotBindGroup()
+    }
+
+    private ensureBlaLevelBufferCapacity(requiredEntries: number) {
+        const safeRequiredEntries = Math.max(1, Math.ceil(requiredEntries))
+        if (safeRequiredEntries <= this.mandelbrotBlaLevelBufferCapacity) {
+            return
+        }
+
+        this.mandelbrotBlaLevelBuffer?.destroy?.()
+        this.mandelbrotBlaLevelBuffer = this.device.createBuffer({
+            size: safeRequiredEntries * 4 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot BLA Level Storage Buffer',
+        })
+        this.mandelbrotBlaLevelBufferCapacity = safeRequiredEntries
+        this.rebuildMandelbrotBindGroup()
     }
 
     resize() {
@@ -663,16 +740,7 @@ export class Engine {
         }
 
         if (this.pipelineMandelbrot) {
-            const layout = this.pipelineMandelbrot.getBindGroupLayout(0)
-            this.bindGroupMandelbrot = this.device.createBindGroup({
-                layout,
-                entries: [
-                    { binding: 0, resource: { buffer: this.uniformBufferMandelbrot! } },
-                    { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer! } },
-                    { binding: 2, resource: this.rawBrushArrayView! },
-                ],
-                label: 'Engine BindGroup Mandelbrot',
-            })
+            this.rebuildMandelbrotBindGroup()
         }
 
         if (this.pipelineResolve) {
@@ -772,6 +840,40 @@ export class Engine {
         return true
     }
 
+    setApproximationMode(mode: ApproximationMode) {
+        if (mode === this.approximationMode) {
+            return
+        }
+
+        if (mode === 'bla') {
+            this.mandelbrotNavigator.use_bla()
+        } else {
+            this.mandelbrotNavigator.use_perturbation()
+        }
+
+        this.approximationMode = mode
+        this.currentBlaLevelCount = 0
+        this.clearHistoryNextFrame = true
+        this.needRender = true
+        this.unfinishedPixelCount = -1
+    }
+
+    getApproximationMode(): ApproximationMode {
+        return this.approximationMode
+    }
+
+    setBlaEpsilon(epsilon: number) {
+        const next = Math.max(Number.MIN_VALUE, epsilon)
+        this.mandelbrotNavigator.set_bla_epsilon(next)
+        this.blaEpsilon = next
+        if (this.approximationMode === 'bla') {
+            this.currentBlaLevelCount = 0
+            this.clearHistoryNextFrame = true
+            this.needRender = true
+            this.unfinishedPixelCount = -1
+        }
+    }
+
     async update(mandelbrot: Mandelbrot, renderOptions: RenderOptions) {
         // Calcul du temps écoulé depuis la dernière frame
         const now = performance.now()
@@ -781,6 +883,17 @@ export class Engine {
         const delta = (now - this.lastUpdateTime) / 1000 // en secondes
         this.time += delta
         this.lastUpdateTime = now
+
+        const navigatorApproximationMode = this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation'
+        const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
+        if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
+            this.approximationMode = navigatorApproximationMode
+            this.blaEpsilon = navigatorBlaEpsilon
+            this.currentBlaLevelCount = 0
+            this.clearHistoryNextFrame = true
+            this.needRender = true
+            this.unfinishedPixelCount = -1
+        }
 
         this.needRender = this.needRender || !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
             && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
@@ -953,7 +1066,7 @@ export class Engine {
             ORBIT_CHUNK_SIZE,
             maxIterations,
         )
-        const availableIter = prtInfo.count
+        const availableOrbitLen = prtInfo.count
         const buffer = new Float32Array(wasmMemory.buffer, prtInfo.ptr, prtInfo.count * 4) // 4 floats par MandelbrotStep
 
         if (prtInfo.offset < maxIterations) {
@@ -967,12 +1080,32 @@ export class Engine {
 
         // Guard the shader: globalMaxIter must never exceed the orbit steps
         // we have actually computed, or the shader would read uninitialised memory.
+        const availableIter = Math.max(0, availableOrbitLen - 1)
         const guardedMaxIter = Math.min(maxIterations, availableIter)
         this.currentGuardedMaxIter = guardedMaxIter
 
         // Track whether the orbit is still being built (used by needsMoreFrames).
         this.orbitIncomplete = availableIter < maxIterations
         const orbitComplete = availableIter >= maxIterations
+
+        let approximationModeFlag = 0
+        let blaLevelCount = 0
+        if (this.approximationMode === 'bla' && orbitComplete) {
+            const blaInfo = this.mandelbrotNavigator.compute_bla_reference_ptr(guardedMaxIter)
+            this.ensureBlaBufferCapacity(blaInfo.count)
+            this.ensureBlaLevelBufferCapacity(blaInfo.level_count)
+            if (blaInfo.count > 0) {
+                const blaBuffer = new Float32Array(wasmMemory.buffer, blaInfo.ptr, blaInfo.count * 6)
+                this.device.queue.writeBuffer(this.mandelbrotBlaBuffer!, 0, blaBuffer, 0)
+            }
+            if (blaInfo.level_count > 0) {
+                const blaLevelBuffer = new Uint32Array(wasmMemory.buffer, blaInfo.levels_ptr, blaInfo.level_count * 4)
+                this.device.queue.writeBuffer(this.mandelbrotBlaLevelBuffer!, 0, blaLevelBuffer, 0)
+            }
+            approximationModeFlag = 1
+            blaLevelCount = blaInfo.level_count
+        }
+        this.currentBlaLevelCount = blaLevelCount
 
         // Re-write the mandelbrot uniform with the guarded globalMaxIter.
         // During zoom reprojection, override scale with liveScale so the GPU
@@ -993,6 +1126,10 @@ export class Engine {
             0,  // iterationOffset
             guardedMaxIter,
             orbitComplete ? 1 : 0,
+            approximationModeFlag,
+            blaLevelCount,
+            this.blaEpsilon,
+            0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)
 
@@ -1431,6 +1568,8 @@ export class Engine {
         this.resolvedTexture?.destroy?.()
         this.frozenTexture?.destroy?.()
         this.mandelbrotReferenceBuffer?.destroy?.()
+        this.mandelbrotBlaBuffer?.destroy?.()
+        this.mandelbrotBlaLevelBuffer?.destroy?.()
         this.uniformBufferMandelbrot?.destroy?.()
         this.uniformBufferColor?.destroy?.()
         this.uniformBufferBrush?.destroy?.()
@@ -1701,4 +1840,3 @@ export class Engine {
     }
 
 }
-

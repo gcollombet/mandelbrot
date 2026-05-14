@@ -210,6 +210,7 @@ const mandelbrotParams = ref<MandelbrotParams>({
   activateSmoothness: false,
   activateZebra: false,
   activateAnimate: false,
+  approximationMode: 'perturbation',
   dprMultiplier: 1.0,
   maxIterationMultiplier: 0.01,
   targetFps: 30,

@@ -122,6 +122,10 @@ fn dir_to_skybox_uv(dir: vec3<f32>, dx: f32, dy: f32) -> vec2<f32> {
   return vec2<f32>(u, v);
 }
 
+fn mandelbrot_normal(angle_der: f32) -> vec3<f32> {
+  return normalize(vec3<f32>(cos(angle_der), sin(angle_der), 0.5));
+}
+
 fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec3<f32> {
   let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
   let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
@@ -140,7 +144,7 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
   return textureLoad(tex_, coord, 0).rgb;
 }
 
-fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32, isInterior: bool) -> vec3<f32> {
+fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32, isInterior: bool) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
@@ -190,7 +194,7 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32, isInte
 
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
-    let normal = normalize(vec3<f32>(cos(d), sin(d), 0.5));
+    let normal = mandelbrot_normal(angle_der);
     let la = fx.lightAngle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 0.5));
     let viewDir = normalize(vec3<f32>(cos(la + 0.5), sin(la + 0.5), 0.5));
@@ -206,12 +210,12 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32, isInte
       // Animated drift on skybox UVs (same animate gate as tile/webcam)
       let sky_drift_u = anim * 0.02 * sin(t * 0.25 * spd + 3.5);
       let sky_drift_v = anim * 0.02 * sin(t * 0.2 * spd + 4.8);
-      let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0));
+      let skyboxDir = reflect(-viewDir, normal);
       let skyboxUV = dir_to_skybox_uv(skyboxDir, dx + sky_drift_u, dy + sky_drift_v);
       let skyboxColor = textureSampleLevel(skyboxTex, skyboxSampler, skyboxUV, 0.0).rgb;
       let lum = 0.2126 * skyboxColor.r + 0.7152 * skyboxColor.g + 0.0722 * skyboxColor.b;
-      let shading_with_sky = 0.5 + (shading - 0.5) * (0.0 + lum);
-      color = mix(color, skyboxColor, fx.wSkybox * 0.5) * mix(1.0, shading_with_sky, fx.wSkybox);
+      let shading_with_sky = 0.5 + (shading - 0.5) * (0.5 + lum);
+      shading = mix(shading, shading_with_sky, fx.wSkybox);
     }
 
     // Apply shading proportionally to wShading
@@ -235,18 +239,7 @@ fn colorize_pixel(
 
   // Budget exhausted: z hasn't escaped. Treat as interior — same coloring.
   if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
-  return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    let z_mag = sqrt(zx_val * zx_val + zy_val * zy_val);
-    let mu_interior = clamp(z_mag * 0.5, 0.0, 1.0);
-    let nu = log(1.0 + iter_val + mu_interior);
-    let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-    let v = nu / 6.0 * paletteRepeat * 0.5;
-    let z = vec2<f32>(zx_val, zy_val);
-    let der = vec2<f32>(der_x, der_y);
-    let dd = cdiv(der, z + vec2<f32>(1e-20, 0.0));
-    let angle_der = atan2(dd.y, dd.x);
-    var color = palette(v, v, z, angle_der, uv_neutral.x, uv_neutral.y, true);
-    return vec4<f32>(color * 0.4, 1.0);
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
   // Inside the set: iter_val == 0. Color by smooth iteration count (stored in ref_i_val).
@@ -254,20 +247,6 @@ fn colorize_pixel(
   // Palette cycling uses a fixed ratio (independent of palettePeriod).
   if (iter_val == 0.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
-    let z_mag = sqrt(zx_val * zx_val + zy_val * zy_val);
-    // |z| in [0, 2) for interior points → fraction in [0, 1)
-    let mu_interior = clamp(z_mag * 0.5, 0.0, 1.0);
-    let nu = log(1.0 + ref_i_val + mu_interior);
-    // Fixed interior cycling: 1 full palette cycle every ~6 log-units.
-    // Reverse-engineer v so palette() produces palettePhase = fract(nu / 6.0 + offset).
-    let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-    let v = nu / 6.0 * paletteRepeat * 0.5;
-    let z = vec2<f32>(zx_val, zy_val);
-    let der = vec2<f32>(der_x, der_y);
-    let dd = cdiv(der, z + vec2<f32>(1e-20, 0.0));
-    let angle_der = atan2(dd.y, dd.x);
-    let color = palette(v, v, z, angle_der, uv_neutral.x, uv_neutral.y, true);
-    return vec4<f32>(color, 1.0);
   }
 
   // ── Escaped pixel ──

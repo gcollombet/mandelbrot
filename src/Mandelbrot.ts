@@ -1,6 +1,7 @@
 import type {ColorStop} from "./ColorStop.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
+export type ApproximationMode = 'perturbation' | 'bla';
 
 export interface MandelbrotParams {
     scale: string;
@@ -20,6 +21,7 @@ export interface MandelbrotParams {
     activateAnimate: boolean;
     colorStops: ColorStop[];
     interpolationMode: InterpolationMode;
+    approximationMode?: ApproximationMode;
 
     // ── Legacy / UI convenience fields ──
     // These are kept for backward compatibility with saved presets and as

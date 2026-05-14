@@ -12,4 +12,9 @@ export type MandelbrotExposed = {
   drawOnce: () => Promise<void>,
   resize: () => Promise<void>,
   initialize: () => Promise<void>,
+  useBla: () => void,
+  usePerturbation: () => void,
+  setApproximationMode: (mode: 'bla' | 'perturbation') => void,
+  getApproximationMode: () => 'bla' | 'perturbation' | undefined,
+  setBlaEpsilon: (epsilon: number) => void,
 };

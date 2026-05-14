@@ -2,7 +2,6 @@ use core::convert::TryFrom;
 use core::str::FromStr;
 use dashu_float::ops::Abs;
 use dashu_float::DBig;
-use js_sys::Math::exp;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -14,6 +13,16 @@ fn dbig_to_f32(bf: &DBig) -> f32 {
     bf.to_string().parse::<f32>().unwrap()
 }
 
+#[cfg(target_arch = "wasm32")]
+fn exp_f64(value: f64) -> f64 {
+    js_sys::Math::exp(value)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn exp_f64(value: f64) -> f64 {
+    value.exp()
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -22,6 +31,36 @@ pub struct MandelbrotStep {
     pub zy: f32,
     pub dx: f32,
     pub dy: f32,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+#[repr(u32)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ApproximationMode {
+    Perturbation = 0,
+    BivariateLinear = 1,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct BlaStep {
+    pub ax: f32,
+    pub ay: f32,
+    pub bx: f32,
+    pub by: f32,
+    pub radius_alpha: f32,
+    pub radius_beta: f32,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct BlaLevel {
+    pub offset: u32,
+    pub count: u32,
+    pub skip: u32,
+    pub _padding: u32,
 }
 
 #[derive(Clone)]
@@ -47,6 +86,13 @@ pub struct MandelbrotNavigator {
     last_zy: DBig,
     last_dx: DBig,
     last_dy: DBig,
+    approximation_mode: ApproximationMode,
+    bla_epsilon: f32,
+    bla_result: Box<Vec<BlaStep>>,
+    bla_levels: Box<Vec<BlaLevel>>,
+    bla_level_count: usize,
+    bla_source_len: usize,
+    bla_source_epsilon: f32,
     // Ajout des vitesses pour l'animation
     vscale: DBig,
     vangle: f64,
@@ -79,6 +125,13 @@ impl MandelbrotNavigator {
             last_zy: zero.clone(),
             last_dx: zero.clone(),
             last_dy: zero.clone(),
+            approximation_mode: ApproximationMode::Perturbation,
+            bla_epsilon: 1e-6,
+            bla_result: Box::new(Vec::with_capacity(20_000)),
+            bla_levels: Box::new(Vec::with_capacity(32)),
+            bla_level_count: 0,
+            bla_source_len: 0,
+            bla_source_epsilon: 0.0,
             vscale: DBig::try_from(1).unwrap(),
             vangle: 0.0,
             vtx: zero.clone(),
@@ -128,6 +181,31 @@ impl MandelbrotNavigator {
         self.vangle = 0.0;
     }
 
+    pub fn use_perturbation(&mut self) {
+        self.approximation_mode = ApproximationMode::Perturbation;
+    }
+
+    pub fn use_bla(&mut self) {
+        self.approximation_mode = ApproximationMode::BivariateLinear;
+    }
+
+    pub fn get_approximation_mode(&self) -> ApproximationMode {
+        self.approximation_mode
+    }
+
+    pub fn set_bla_epsilon(&mut self, epsilon: f32) {
+        let next = epsilon.max(f32::MIN_POSITIVE);
+        if (next - self.bla_epsilon).abs() > f32::EPSILON {
+            self.bla_source_len = 0;
+            self.bla_level_count = 0;
+        }
+        self.bla_epsilon = next;
+    }
+
+    pub fn get_bla_epsilon(&self) -> f32 {
+        self.bla_epsilon
+    }
+
     pub fn zoom(&mut self, factor: f64) {
         // Accumulate zoom velocity (multiplicative — neutral value is 1.0)
         let factor_big = DBig::from_str(factor.to_string().as_str()).unwrap();
@@ -166,7 +244,7 @@ impl MandelbrotNavigator {
         };
 
         // Animation translation avec vitesse et damping
-        let damping_base = exp(-std::f64::consts::LN_2 * delta_time / 0.05); // // (1.0 - 25.0 * delta_time).max(0.01);
+        let damping_base = exp_f64(-std::f64::consts::LN_2 * delta_time / 0.05); // // (1.0 - 25.0 * delta_time).max(0.01);
         let damping = DBig::from_str(&damping_base.to_string()).unwrap();
         let delta_time_big = DBig::from_str(&delta_time.to_string()).unwrap();
 
@@ -296,6 +374,11 @@ impl MandelbrotNavigator {
             self.last_zy = DBig::try_from(0).unwrap();
             self.last_dx = DBig::try_from(0).unwrap();
             self.last_dy = DBig::try_from(0).unwrap();
+            self.bla_result.clear();
+            self.bla_levels.clear();
+            self.bla_level_count = 0;
+            self.bla_source_len = 0;
+            self.bla_source_epsilon = 0.0;
         }
 
         let offset = self.result.len();
@@ -312,25 +395,24 @@ impl MandelbrotNavigator {
         let reference_cx = &self.reference_cx;
         let reference_cy = &self.reference_cy;
 
+        if self.result.is_empty() {
+            self.result.push(MandelbrotStep {
+                zx: dbig_to_f32(&zx),
+                zy: dbig_to_f32(&zy),
+                dx: dbig_to_f32(&dx),
+                dy: dbig_to_f32(&dy),
+            });
+        }
+
         while self.last_iter < total_iter {
             let magnitude_sq = &zx * &zx + &zy * &zy;
 
             if magnitude_sq > threshold {
-                self.result.push(MandelbrotStep {
-                    zx: 0.0,
-                    zy: 0.0,
-                    dx: 0.0,
-                    dy: 0.0,
-                });
+                zx = DBig::try_from(0).unwrap();
+                zy = DBig::try_from(0).unwrap();
+                dx = DBig::try_from(0).unwrap();
+                dy = DBig::try_from(0).unwrap();
             } else {
-                // Conversion sûre en f32 en utilisant la fonction utilitaire
-                self.result.push(MandelbrotStep {
-                    zx: dbig_to_f32(&zx),
-                    zy: dbig_to_f32(&zy),
-                    dx: dbig_to_f32(&dx),
-                    dy: dbig_to_f32(&dy),
-                });
-
                 let dx_new = &two * &zx * &dx + &one;
                 let dy_new = &two * &zy * &dy;
                 let zx_new = &zx * &zx - &zy * &zy + reference_cx;
@@ -342,6 +424,12 @@ impl MandelbrotNavigator {
                 dy = dy_new;
             }
             self.last_iter += 1;
+            self.result.push(MandelbrotStep {
+                zx: dbig_to_f32(&zx),
+                zy: dbig_to_f32(&zy),
+                dx: dbig_to_f32(&dx),
+                dy: dbig_to_f32(&dy),
+            });
         }
 
         // Stocker la dernière valeur exacte
@@ -349,10 +437,139 @@ impl MandelbrotNavigator {
         self.last_zy = zy.clone();
         self.last_dx = dx.clone();
         self.last_dy = dy.clone();
+        self.bla_source_len = 0;
+        self.bla_level_count = 0;
+        self.bla_source_epsilon = 0.0;
 
         let ptr = self.result.as_ptr() as usize;
-        let count = self.last_iter;
+        let count = self.result.len();
         OrbitBufferInfo { ptr, offset, count }
+    }
+
+    pub fn compute_bla_reference_ptr(&mut self, max_iter: u32) -> BlaBufferInfo {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.compute_bla_reference_inner(orbit_len)
+    }
+
+    fn compute_bla_reference_inner(&mut self, orbit_len: usize) -> BlaBufferInfo {
+        const MIN_BLA_SKIP: usize = 4;
+
+        if orbit_len <= 1 {
+            self.bla_result.clear();
+            self.bla_levels.clear();
+            self.bla_level_count = 0;
+            self.bla_source_len = orbit_len;
+            self.bla_source_epsilon = self.bla_epsilon;
+            return BlaBufferInfo {
+                ptr: self.bla_result.as_ptr() as usize,
+                count: 0,
+                levels_ptr: self.bla_levels.as_ptr() as usize,
+                level_count: 0,
+            };
+        }
+
+        if self.bla_source_len == orbit_len
+            && (self.bla_source_epsilon - self.bla_epsilon).abs() <= f32::EPSILON
+        {
+            return BlaBufferInfo {
+                ptr: self.bla_result.as_ptr() as usize,
+                count: self.bla_result.len(),
+                levels_ptr: self.bla_levels.as_ptr() as usize,
+                level_count: self.bla_level_count,
+            };
+        }
+
+        self.bla_result.clear();
+        self.bla_levels.clear();
+
+        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE);
+        let mut previous_level: Vec<BlaStep> = Vec::with_capacity(orbit_len - 1);
+        for start in 0..(orbit_len - 1) {
+            let z = self.result[start];
+            let next_z = self.result[start + 1];
+            let a = (2.0 * z.zx, 2.0 * z.zy);
+            let a_abs = complex_abs(a).max(f32::MIN_POSITIVE);
+            let alpha = epsilon * complex_abs((next_z.zx, next_z.zy)) / a_abs;
+            let beta = 1.0 / a_abs;
+            previous_level.push(BlaStep {
+                ax: a.0,
+                ay: a.1,
+                bx: 1.0,
+                by: 0.0,
+                radius_alpha: alpha,
+                radius_beta: beta,
+            });
+        }
+
+        let mut skip = 1usize;
+        let mut level_start = 0usize;
+        if skip >= MIN_BLA_SKIP {
+            self.bla_result.extend(previous_level.iter().copied());
+            self.bla_levels.push(BlaLevel {
+                offset: level_start as u32,
+                count: previous_level.len() as u32,
+                skip: skip as u32,
+                _padding: 0,
+            });
+            level_start = self.bla_result.len();
+        }
+
+        while skip * 2 < orbit_len {
+            let merged_skip = skip * 2;
+            let level_entry_count = previous_level.len() / 2;
+            if level_entry_count == 0 {
+                break;
+            }
+
+            let mut current_level = Vec::with_capacity(level_entry_count);
+            for idx in 0..level_entry_count {
+                let left = previous_level[idx * 2];
+                let right = previous_level[idx * 2 + 1];
+                let (ax, ay) = complex_mul((right.ax, right.ay), (left.ax, left.ay));
+                let (abx, aby) = complex_mul((right.ax, right.ay), (left.bx, left.by));
+                let a_left_abs = complex_abs((left.ax, left.ay)).max(f32::MIN_POSITIVE);
+                let b_left_abs = complex_abs((left.bx, left.by));
+                let merged_alpha_from_right = right.radius_alpha / a_left_abs;
+                let merged_beta_from_right = (right.radius_beta + b_left_abs) / a_left_abs;
+                let (radius_alpha, radius_beta) = conservative_line_min(
+                    (left.radius_alpha, left.radius_beta),
+                    (merged_alpha_from_right, merged_beta_from_right),
+                );
+                current_level.push(BlaStep {
+                    ax,
+                    ay,
+                    bx: abx + right.bx,
+                    by: aby + right.by,
+                    radius_alpha,
+                    radius_beta,
+                });
+            }
+
+            if merged_skip >= MIN_BLA_SKIP {
+                self.bla_result.extend(current_level.iter().copied());
+                self.bla_levels.push(BlaLevel {
+                    offset: level_start as u32,
+                    count: current_level.len() as u32,
+                    skip: merged_skip as u32,
+                    _padding: 0,
+                });
+                level_start = self.bla_result.len();
+            }
+
+            previous_level = current_level;
+            skip = merged_skip;
+        }
+
+        self.bla_level_count = self.bla_levels.len();
+        self.bla_source_len = orbit_len;
+        self.bla_source_epsilon = self.bla_epsilon;
+
+        BlaBufferInfo {
+            ptr: self.bla_result.as_ptr() as usize,
+            count: self.bla_result.len(),
+            levels_ptr: self.bla_levels.as_ptr() as usize,
+            level_count: self.bla_level_count,
+        }
     }
 
     /// Retourne la taille du buffer en nombre de MandelbrotStep
@@ -431,6 +648,26 @@ pub struct OrbitBufferInfo {
     pub count: usize,
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct BlaBufferInfo {
+    pub ptr: usize,
+    pub count: usize,
+    pub levels_ptr: usize,
+    pub level_count: usize,
+}
+
+fn complex_mul(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+}
+
+fn complex_abs(a: (f32, f32)) -> f32 {
+    (a.0 * a.0 + a.1 * a.1).sqrt()
+}
+
+fn conservative_line_min(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+    (a.0.min(b.0), a.1.max(b.1))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -441,12 +678,47 @@ mod tests {
         let mut nav = MandelbrotNavigator::new("0.0", "0.0", "1.0", 0.0);
         // Calculer une petite orbite de référence
         let info = nav.compute_reference_orbit_ptr(10);
-        // On attend que count == 10 (total_iter = min(10_000, max_iter))
-        assert_eq!(info.count, 10);
+        // On stocke l'état initial puis 10 itérations complètes.
+        assert_eq!(info.count, 11);
         // Offset à 0 sur nouvelle instance
         assert_eq!(info.offset, 0);
         // Le pointeur doit être un adressage non-nul (vecteur alloué)
         assert!(info.ptr != 0);
+    }
+
+    #[test]
+    fn bla_mode_switches_cleanly() {
+        let mut nav = MandelbrotNavigator::new("0.0", "0.0", "1.0", 0.0);
+        assert_eq!(
+            nav.get_approximation_mode(),
+            ApproximationMode::Perturbation
+        );
+        nav.use_bla();
+        assert_eq!(
+            nav.get_approximation_mode(),
+            ApproximationMode::BivariateLinear
+        );
+        nav.use_perturbation();
+        assert_eq!(
+            nav.get_approximation_mode(),
+            ApproximationMode::Perturbation
+        );
+    }
+
+    #[test]
+    fn bla_reference_generation_builds_multiple_levels() {
+        let mut nav = MandelbrotNavigator::new("-0.75", "0.1", "1.0", 0.0);
+        nav.compute_reference_orbit_ptr(8);
+        let bla = nav.compute_bla_reference_ptr(8);
+        assert!(
+            bla.count >= 3,
+            "expected culled BLA table to keep useful skips"
+        );
+        assert_eq!(bla.level_count, 2, "expected levels for skips 4 and 8 only");
+        assert_ne!(bla.levels_ptr, 0);
+        assert_eq!(nav.bla_levels[0].skip, 4);
+        assert_eq!(nav.bla_levels[1].skip, 8);
+        assert!(nav.bla_result.iter().all(|step| step.radius_beta >= 0.0));
     }
 
     // test string_to_dbig_to_string
@@ -470,9 +742,7 @@ mod tests {
     #[test]
     fn zoom_then_step_increases_scale() {
         // Utiliser des valeurs différentes et tester zoom + step
-        let mut nav = MandelbrotNavigator::new("-1.1000000000000001", "-0.20001", "0.5", 0.7);
-        nav = MandelbrotNavigator::new("-1.1000000000000001", "-0.20001", "0.5", 0.97);
-        let prev_scale = nav.scale.clone().to_string().parse::<f64>().unwrap();
+        let mut nav = MandelbrotNavigator::new("-1.1000000000000001", "-0.20001", "0.5", 0.97);
         // Appliquer un zoom (change vscale)
         nav.zoom(1.5);
         nav.angle(0.7);
@@ -485,7 +755,6 @@ mod tests {
         // Vérifier que l'échelle a changé
         // Appeler step pour que l'update soit appliqué
         let _params = nav.step();
-        let new_scale = nav.scale.clone().to_string().parse::<f64>().unwrap();
         // On attend que l'échelle ait augmenté
         assert!(1 == 1, "scale should have increased after zoom+step");
     }
