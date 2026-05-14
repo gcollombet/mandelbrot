@@ -79,6 +79,7 @@ let format: GPUTextureFormat = 'bgra8unorm';
 let bindGroupLayout: GPUBindGroupLayout | null = null;
 let tileTextureGpu: GPUTexture | null = null;
 let skyboxTextureGpu: GPUTexture | null = null;
+let skyboxSampler: GPUSampler | null = null;
 let webcamTextureGpu: GPUTexture | null = null;
 let frozenTextureGpu: GPUTexture | null = null;
 
@@ -203,7 +204,7 @@ function render() {
 function rebuildBindGroup() {
   if (!device || !bindGroupLayout || !uniformBuffer || !syntheticArrayView
       || !tileTextureGpu || !skyboxTextureGpu || !webcamTextureGpu
-      || !paletteTextureView || !frozenTextureGpu || !paletteSampler) return;
+      || !paletteTextureView || !frozenTextureGpu || !paletteSampler || !skyboxSampler) return;
   const frozenView = frozenTextureGpu.createView({
     dimension: '2d-array',
     baseArrayLayer: 0,
@@ -220,6 +221,7 @@ function rebuildBindGroup() {
       { binding: 5, resource: paletteTextureView },
       { binding: 6, resource: frozenView },
       { binding: 7, resource: paletteSampler },
+      { binding: 8, resource: skyboxSampler },
     ],
     label: 'PalettePreview BindGroup',
   });
@@ -295,6 +297,12 @@ async function init() {
     addressModeU: 'repeat',
     addressModeV: 'clamp-to-edge',
   });
+  skyboxSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+    addressModeU: 'repeat',
+    addressModeV: 'repeat',
+  });
   uploadPalette();
 
   // ── Frozen texture placeholder (same size, dummy) ──
@@ -305,9 +313,9 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (16 floats = 64 bytes) ──
+  // ── Uniform buffer (17 floats, padded to 80 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
-    size: 4 * 16,
+    size: 4 * 20,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
@@ -330,6 +338,7 @@ async function init() {
     props.tessellationLevel ?? 2, // tessellationLevel
     props.displacementAmount ?? 0.01, // displacementAmount
     1.0,          // animationSpeed
+    1e-10,        // epsilon (interior detection, not relevant for preview)
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -344,6 +353,7 @@ async function init() {
       { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
       { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
     ],
     label: 'PalettePreview BindGroupLayout',
   });

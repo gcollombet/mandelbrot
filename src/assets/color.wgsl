@@ -25,6 +25,7 @@ struct Uniforms {
 @group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 4 rgba16float
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
+@group(0) @binding(8) var skyboxSampler: sampler;  // bilinear sampler for skybox
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -207,15 +208,10 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, d: f32, dx: f32, dy: f32, isInte
       let sky_drift_v = anim * 0.02 * sin(t * 0.2 * spd + 4.8);
       let skyboxDir = normalize(vec3<f32>(cos(d), sin(d), 1.0));
       let skyboxUV = dir_to_skybox_uv(skyboxDir, dx + sky_drift_u, dy + sky_drift_v);
-      let skyboxSize = vec2<i32>(textureDimensions(skyboxTex, 0));
-      let skyboxCoord = vec2<i32>(
-        i32(clamp(skyboxUV.x * f32(skyboxSize.x), 0.0, f32(skyboxSize.x - 1))),
-        i32(clamp((1.0 - skyboxUV.y) * f32(skyboxSize.y), 0.0, f32(skyboxSize.y - 1)))
-      );
-      let skyboxColor = textureLoad(skyboxTex, skyboxCoord, 0).rgb;
+      let skyboxColor = textureSampleLevel(skyboxTex, skyboxSampler, skyboxUV, 0.0).rgb;
       let lum = 0.2126 * skyboxColor.r + 0.7152 * skyboxColor.g + 0.0722 * skyboxColor.b;
-      let shading_with_sky = 0.5 + (shading - 0.5) * (0.5 + lum);
-      shading = mix(shading, shading_with_sky, fx.wSkybox);
+      let shading_with_sky = 0.5 + (shading - 0.5) * (0.0 + lum);
+      color = mix(color, skyboxColor, fx.wSkybox * 0.5) * mix(1.0, shading_with_sky, fx.wSkybox);
     }
 
     // Apply shading proportionally to wShading
@@ -239,6 +235,7 @@ fn colorize_pixel(
 
   // Budget exhausted: z hasn't escaped. Treat as interior — same coloring.
   if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
+  return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     let z_mag = sqrt(zx_val * zx_val + zy_val * zy_val);
     let mu_interior = clamp(z_mag * 0.5, 0.0, 1.0);
     let nu = log(1.0 + iter_val + mu_interior);
@@ -256,6 +253,7 @@ fn colorize_pixel(
   // Smoothing with |z_n|: works regardless of epsilon detection.
   // Palette cycling uses a fixed ratio (independent of palettePeriod).
   if (iter_val == 0.0) {
+    return vec4<f32>(0.0, 0.0, 0.0, 0.0);
     let z_mag = sqrt(zx_val * zx_val + zy_val * zy_val);
     // |z| in [0, 2) for interior points → fraction in [0, 1)
     let mu_interior = clamp(z_mag * 0.5, 0.0, 1.0);

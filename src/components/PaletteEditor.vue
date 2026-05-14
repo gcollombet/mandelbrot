@@ -119,11 +119,11 @@ const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: numb
   zebra:              { label: 'Zebra',         min: 0, max: 1,     step: 0.01, unit: '' },
   tessellation:       { label: 'Tessellation',  min: 0, max: 1,     step: 0.01, unit: '' },
   shading:            { label: 'Relief',        min: 0, max: 1,     step: 0.01, unit: '' },
-  skybox:             { label: 'Métal',          min: 0, max: 1,     step: 0.01, unit: '' },
+  skybox:             { label: 'Metal',          min: 0, max: 1,     step: 0.01, unit: '' },
   webcam:             { label: 'Webcam',        min: 0, max: 1,     step: 0.01, unit: '' },
   smoothness:         { label: 'Smoothness',    min: 0, max: 1,     step: 0.01, unit: '' },
-  shadingLevel:       { label: 'Brillance',     min: 0, max: 3,     step: 0.05, unit: '' },
-  specularPower:      { label: 'Spéculaire',    min: 1, max: 64,    step: 0.5,  unit: '' },
+  shadingLevel:       { label: 'Brilliance',     min: 0, max: 3,     step: 0.05, unit: '' },
+  specularPower:      { label: 'Specular',    min: 1, max: 64,    step: 0.5,  unit: '' },
   lightAngle:         { label: 'Direction',     min: 0, max: 6.283, step: 0.01, unit: 'rad' },
 };
 
@@ -165,7 +165,7 @@ defineExpose({ getSnapshot });
         <button
           class="pipette-btn"
           :class="{ 'is-active': props.pickerMode }"
-          :title="props.pickerMode ? 'Quitter le mode pipette (\u00c9chap)' : 'Pipette : cliquer sur le fractal'"
+          :title="props.pickerMode ? 'Exit pipette mode (Escape)' : 'Pipette: click on the fractal'"
           @click="emit('toggle-picker')"
         >
           <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -175,20 +175,32 @@ defineExpose({ getSnapshot });
             <path d="M12 9l3 3"/>
           </svg>
         </button>
-        <span v-if="props.pickerMode" class="picker-hint">Cliquez sur le fractal&hellip;</span>
+        <span v-if="props.pickerMode" class="picker-hint">Click on the fractal&hellip;</span>
       </div>
       <div class="outils-bar">
-        <button class="button is-small is-light outils-btn" @click="emit('invert')" title="Inverser l'ordre">Inv</button>
-        <button class="button is-small is-light outils-btn" @click="emit('negate')" title="N&eacute;gatif RGB">N&eacute;g</button>
-        <button class="button is-small is-light outils-btn" @click="emit('duplicate')" title="Dupliquer 2x">Dup</button>
-        <button class="button is-small is-light outils-btn" @click="emit('mirror')" title="Miroir (palindrome)">Mir</button>
-        <button class="button is-small is-light outils-btn" @click="emit('distribute')" title="R&eacute;partir uniform&eacute;ment">Dist</button>
-        <button class="button is-small is-danger is-light outils-btn" @click="emit('clear')" title="Supprimer toute la palette">Sup</button>
+        <button class="button is-small is-light outils-btn" @click="emit('invert')" title="Reverse order">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="17 1 21 5 17 9"/><path d="M3 11V9a4 4 0 0 1 4-4h14"/><polyline points="7 23 3 19 7 15"/><path d="M21 13v2a4 4 0 0 1-4 4H3"/></svg>
+        </button>
+        <button class="button is-small is-light outils-btn" @click="emit('negate')" title="Negate RGB">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M12 2v20"/><path d="M2 12h10" stroke-dasharray="2 2"/></svg>
+        </button>
+        <button class="button is-small is-light outils-btn" @click="emit('duplicate')" title="Duplicate 2x">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+        </button>
+        <button class="button is-small is-light outils-btn" @click="emit('mirror')" title="Mirror (palindrome)">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2v20" stroke-dasharray="2 3"/><polyline points="4 8 8 4 8 12"/><polyline points="20 8 16 4 16 12"/></svg>
+        </button>
+        <button class="button is-small is-light outils-btn" @click="emit('distribute')" title="Distribute evenly">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="3" y1="12" x2="21" y2="12"/><line x1="3" y1="6" x2="3" y2="18"/><line x1="9" y1="6" x2="9" y2="18"/><line x1="15" y1="6" x2="15" y2="18"/><line x1="21" y1="6" x2="21" y2="18"/></svg>
+        </button>
+        <button class="button is-small is-danger is-light outils-btn" @click="emit('clear')" title="Clear entire palette">
+          <svg viewBox="0 0 24 24" width="14" height="14" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="3 6 5 6 21 6"/><path d="M19 6l-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/><path d="M10 11v6"/><path d="M14 11v6"/><path d="M9 6V4a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2"/></svg>
+        </button>
       </div>
     </div>
 
     <!-- WebGPU preview with handles overlaid -->
-    <div class="canvas-row" style="position:relative;" @dblclick="onPreviewDblClick">
+    <div class="canvas-row" style="position:relative;" @dblclick="onPreviewDblClick" title="Double-click to add a color stop">
       <PalettePreview
         ref="previewRef"
         :colorStops="colorStops"
@@ -211,7 +223,7 @@ defineExpose({ getSnapshot });
           v-if="selectedIdx !== null && colorStops.length > 2"
           class="floating-delete-btn"
           :style="{ left: colorStops[selectedIdx]?.position * 100 + '%' }"
-          title="Supprimer ce point"
+          title="Delete this stop"
           @mousedown.stop
           @click.stop="deleteSelectedStop"
         >
@@ -226,18 +238,20 @@ defineExpose({ getSnapshot });
       <!-- Toggle global + titre -->
       <div class="effects-header">
         <label class="effects-section-title">
-          Point #{{ (selectedIdx ?? 0) + 1 }}
+          Stop #{{ (selectedIdx ?? 0) + 1 }}
         </label>
         <button class="button is-small apply-all-btn"
-          :class="applyToAll ? 'is-link' : 'is-light'"
+          :class="applyToAll ? 'is-warning' : 'is-light'"
           @click="emit('update:applyToAll', !applyToAll)"
+          :title="applyToAll ? 'Currently editing ALL stops. Click to edit only this stop.' : 'Currently editing this stop only. Click to apply changes to all stops.'"
         >
-          {{ applyToAll ? 'Tous les points' : 'Ce point' }}
+          <span v-if="applyToAll" style="font-weight:700;">&#9888; All stops</span>
+          <span v-else>This stop</span>
         </button>
       </div>
 
-      <!-- ── Couleur ── -->
-      <label class="effects-group-title">Couleur</label>
+      <!-- ── Color ── -->
+      <label class="effects-group-title">Color</label>
       <div class="color-picker-inline">
         <input
           type="color"
@@ -263,8 +277,8 @@ defineExpose({ getSnapshot });
         </div>
       </template>
 
-      <!-- ── Itération ── -->
-      <label class="effects-group-title">Itération</label>
+      <!-- ── Iteration ── -->
+      <label class="effects-group-title">Iteration</label>
       <template v-for="field in (['smoothness','zebra'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
@@ -281,8 +295,8 @@ defineExpose({ getSnapshot });
         </div>
       </template>
 
-      <!-- ── Éclairage ── -->
-      <label class="effects-group-title">&Eacute;clairage</label>
+      <!-- ── Lighting ── -->
+      <label class="effects-group-title">Lighting</label>
       <template v-for="field in (['shading','skybox','shadingLevel','specularPower','lightAngle'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>

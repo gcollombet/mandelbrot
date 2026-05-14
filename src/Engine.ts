@@ -12,8 +12,8 @@ import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
-import goldUrl from './assets/gold.jpg'
 import bronzeUrl from './assets/bronze.webp'
+import skyboxUrl from './assets/skybox.png'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -273,6 +273,7 @@ export class Engine {
     paletteTexture?: GPUTexture
     paletteTextureView?: GPUTextureView
     paletteSampler?: GPUSampler
+    skyboxSampler?: GPUSampler
 
     // Webcam
     webcamTexture?: WebcamTexture
@@ -330,7 +331,7 @@ export class Engine {
                 : this._loadTexture(bronzeUrl),
             Engine._skyboxTexture
                 ? Promise.resolve(Engine._skyboxTexture)
-                : this._loadTexture(goldUrl),
+                : this._loadTexture(skyboxUrl),
         ])
         Engine._tileTexture = tileTexture
         this.tileTexture = tileTexture
@@ -361,6 +362,12 @@ export class Engine {
             minFilter: 'linear',
             addressModeU: 'repeat',
             addressModeV: 'clamp-to-edge',
+        })
+        this.skyboxSampler = this.device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear',
+            addressModeU: 'repeat',
+            addressModeV: 'repeat',
         })
 
         // Webcam : initialisation (optionnel, activer webcamEnabled pour l'utiliser)
@@ -468,6 +475,7 @@ export class Engine {
                 { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+                { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
@@ -690,6 +698,7 @@ export class Engine {
                 { binding: 5, resource: this.paletteTextureView! },
                 { binding: 6, resource: this.frozenArrayView! },
                 { binding: 7, resource: this.paletteSampler! },
+                { binding: 8, resource: this.skyboxSampler! },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,
@@ -1534,6 +1543,7 @@ export class Engine {
                     { binding: 5, resource: this.paletteTextureView! },
                     { binding: 6, resource: this.frozenArrayView! },
                     { binding: 7, resource: this.paletteSampler! },
+                    { binding: 8, resource: this.skyboxSampler! },
                 ],
                 label: 'Engine BindGroup Color',
             })

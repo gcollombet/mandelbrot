@@ -42,6 +42,14 @@ import {
   migratePresetsFromLocalStorage,
   savePresetEntry,
 } from '../presetStore';
+import type {PaletteRecord} from '../paletteStore';
+import {
+  deletePaletteEntry,
+  getAllPaletteEntries,
+  getPaletteCount,
+  migratePalettesFromLocalStorage,
+  savePaletteEntry,
+} from '../paletteStore';
 
 import type {Engine} from '../Engine.ts';
 
@@ -125,6 +133,14 @@ const sliderPalettePeriod = computed({
     model.value.palettePeriod = Number((10 ** (val * 6)).toPrecision(6));
   }
 });
+
+/** Format palettePeriod for display: use K/M suffixes for large values. */
+function formatPalettePeriod(val: number): string {
+  if (val >= 1_000_000) return (val / 1_000_000).toPrecision(3) + 'M';
+  if (val >= 1_000) return (val / 1_000).toPrecision(3) + 'K';
+  if (val >= 10) return val.toFixed(0);
+  return val.toPrecision(3);
+}
 // Slider log2(scale) : valeurs de slider 1 à 126 —> scale de 2^-1 à 2^-126
 const scaleSlider = computed({
   get: () => {
@@ -182,7 +198,7 @@ const presetCache = new Map<number, PresetRecord>();
 // Palette management
 const paletteName = ref('');
 const paletteEditorRef = ref<InstanceType<typeof PaletteEditor> | null>(null);
-const palettes = ref<{ name: string, colorStops: any[], thumbnail?: string, date?: string, textureName?: string, interpolationMode?: InterpolationMode, palettePeriod?: number, paletteOffset?: number }[]>([]);
+const palettes = ref<PaletteRecord[]>([]);
 const selectedPalette = ref('');
 const showPaletteDropdown = ref(false);
 const applyToAll = ref(false);
@@ -190,7 +206,7 @@ const applyToAll = ref(false);
 async function deletePresetById(id: number) {
   const meta = presets.value.find(p => p.id === id);
   const label = meta?.name || formatPresetDate(meta?.date ?? '');
-  if (!window.confirm(`Supprimer le preset "${label}" ? Cette action est irréversible.`)) return;
+  if (!window.confirm(`Delete preset "${label}"? This cannot be undone.`)) return;
   await deletePresetEntry(id);
   presetCache.delete(id);
   presets.value = await getAllPresetEntries();
@@ -256,7 +272,6 @@ async function selectNavPresetFromDropdown(preset: PresetMetadata) {
   showNavPresetDropdown.value = false;
 }
 
-const PALETTE_STORAGE_KEY = 'mandelbrot_palettes';
 
 /** Fetch a preset record, using cache to avoid repeated IDB reads. */
 async function getCachedPreset(id: number): Promise<PresetRecord | null> {
@@ -357,19 +372,16 @@ async function loadPresets() {
   presets.value = await getAllPresetEntries();
 }
 
-function loadPalettes() {
-  const raw = localStorage.getItem(PALETTE_STORAGE_KEY);
-  if (raw) {
-    try {
-      palettes.value = JSON.parse(raw);
-      return;
-    } catch {}
+async function loadPalettes() {
+  await migratePalettesFromLocalStorage();
+  const count = await getPaletteCount();
+  if (count === 0 && defaultPalettesJson.length > 0) {
+    // Bootstrap from bundled defaults when store is empty
+    for (const p of defaultPalettesJson as PaletteRecord[]) {
+      await savePaletteEntry(structuredClone(p));
+    }
   }
-  // Bootstrap from bundled defaults when localStorage is empty
-  if (defaultPalettesJson.length > 0) {
-    palettes.value = structuredClone(defaultPalettesJson) as typeof palettes.value;
-    localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(palettes.value));
-  }
+  palettes.value = await getAllPaletteEntries();
 }
 
 async function savePalette() {
@@ -385,7 +397,7 @@ async function savePalette() {
       thumbnail = generatePaletteThumbnail(model.value.colorStops, model.value.interpolationMode);
     }
   } catch { /* ignore errors, no thumbnail */ }
-  const palette = {
+  const palette: PaletteRecord = {
     name: paletteName.value.trim(),
     colorStops: structuredClone(toRaw(model.value.colorStops)),
     thumbnail,
@@ -395,13 +407,8 @@ async function savePalette() {
     palettePeriod: model.value.palettePeriod,
     paletteOffset: model.value.paletteOffset,
   };
-  const idx = palettes.value.findIndex(p => p.name === palette.name);
-  if (idx >= 0) {
-    palettes.value[idx] = palette;
-  } else {
-    palettes.value.push(palette);
-  }
-  localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(palettes.value));
+  await savePaletteEntry(palette);
+  palettes.value = await getAllPaletteEntries();
   paletteName.value = '';
 }
 
@@ -422,7 +429,7 @@ function selectPalette(name: string) {
   }
 }
 
-function selectPaletteFromDropdown(palette: { name: string, colorStops: any[], thumbnail?: string, date?: string, textureName?: string, interpolationMode?: InterpolationMode, palettePeriod?: number, paletteOffset?: number }) {
+function selectPaletteFromDropdown(palette: PaletteRecord) {
   selectPalette(palette.name);
   showPaletteDropdown.value = false;
 }
@@ -453,17 +460,14 @@ async function selectPalettePresetFromDropdown(preset: PresetMetadata) {
 /** Performance fields — never copied from presets */
 const PERF_FIELDS: (keyof MandelbrotParams)[] = ['dprMultiplier', 'maxIterationMultiplier', 'antialiasLevel', 'targetFps', 'gpuLoadMultiplier'];
 
-function deletePalette() {
+async function deletePalette() {
   const name = paletteName.value.trim();
   if (!name) return;
-  if (window.confirm(`Supprimer la palette "${name}" ? Cette action est irréversible.`)) {
-    const idx = palettes.value.findIndex(p => p.name === name);
-    if (idx >= 0) {
-      palettes.value.splice(idx, 1);
-      localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(palettes.value));
-      selectedPalette.value = '';
-      paletteName.value = '';
-    }
+  if (window.confirm(`Delete palette "${name}"? This cannot be undone.`)) {
+    await deletePaletteEntry(name);
+    palettes.value = await getAllPaletteEntries();
+    selectedPalette.value = '';
+    paletteName.value = '';
   }
 }
 
@@ -631,7 +635,7 @@ watch(
 
 onMounted(async () => {
   await loadPresets();
-  loadPalettes();
+  await loadPalettes();
   await loadTextures();
 });
 
@@ -695,7 +699,7 @@ function importPresets(event: Event) {
         presets.value = await getAllPresetEntries();
       }
     } catch {
-      window.alert('Format de fichier invalide.');
+      window.alert('Invalid file format.');
     }
   };
   reader.readAsText(file);
@@ -726,23 +730,18 @@ function importPalettes(event: Event) {
   const file = input.files?.[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = () => {
+  reader.onload = async () => {
     try {
       const imported = JSON.parse(reader.result as string);
       if (Array.isArray(imported)) {
         for (const palette of imported) {
           if (!palette.name || !palette.colorStops) continue;
-          const idx = palettes.value.findIndex(p => p.name === palette.name);
-          if (idx >= 0) {
-            palettes.value[idx] = palette;
-          } else {
-            palettes.value.push(palette);
-          }
+          await savePaletteEntry(palette as PaletteRecord);
         }
-        localStorage.setItem(PALETTE_STORAGE_KEY, JSON.stringify(palettes.value));
+        palettes.value = await getAllPaletteEntries();
       }
     } catch {
-      window.alert('Format de fichier invalide.');
+      window.alert('Invalid file format.');
     }
   };
   reader.readAsText(file);
@@ -1037,10 +1036,10 @@ async function deleteTexture() {
   const name = textureName.value.trim();
   if (!name) return;
   if (BUILT_IN_TEXTURE_NAMES.has(name)) {
-    window.alert('La texture par défaut ne peut pas être supprimée.');
+    window.alert('Built-in textures cannot be deleted.');
     return;
   }
-  if (window.confirm(`Supprimer la texture "${name}" ? Cette action est irréversible.`)) {
+   if (window.confirm(`Delete texture "${name}"? This cannot be undone.`)) {
     const idx = textures.value.findIndex(t => t.name === name);
     if (idx >= 0) {
       textures.value.splice(idx, 1);
@@ -1064,7 +1063,7 @@ async function importTexture(event: Event) {
   if (!file) return;
   // Validate file type
   if (!file.type.startsWith('image/')) {
-    window.alert('Veuillez sélectionner un fichier image (JPG, PNG, WebP, etc.).');
+    window.alert('Please select an image file (JPG, PNG, WebP, etc.).');
     input.value = '';
     return;
   }
@@ -1103,7 +1102,7 @@ async function importTexture(event: Event) {
   };
   img.onerror = () => {
     URL.revokeObjectURL(tmpUrl);
-    window.alert('Impossible de charger l\u2019image.');
+    window.alert('Failed to load image.');
     input.value = '';
   };
   img.src = tmpUrl;
@@ -1117,7 +1116,7 @@ async function renameAndSaveTexture() {
   if (current && current.name !== name) {
     // Check name collision
     if (textures.value.some(t => t.name === name)) {
-      window.alert(`Une texture nommée "${name}" existe déjà.`);
+      window.alert(`A texture named "${name}" already exists.`);
       return;
     }
     await renameTextureEntry(current.name, name);
@@ -1140,7 +1139,7 @@ async function renameAndSaveTexture() {
       </div>
 
       <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <span>Échelle&nbsp;:
+        <span>Scale&nbsp;:
           <span style="font-family: monospace; min-width:7.5em; display:inline-block;">{{ Number(model.scale).toExponential(2) }}</span>
         </span>
         <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="1" max="126" step="1" v-model.number="scaleSlider" />
@@ -1155,14 +1154,14 @@ async function renameAndSaveTexture() {
       <hr class="section-sep"/>
 
       <div class="mb-3">
-        <label class="label">Charger une localisation</label>
-        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applique uniquement la position (Cx, Cy, échelle, angle) d'un preset.</p>
+        <label class="label">Load a location</label>
+        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applies only the location (Cx, Cy, scale, angle) from a preset.</p>
         <div class="dropdown" :class="{ 'is-active': showNavPresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showNavPresetDropdown = !showNavPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-nav-presets" type="button">
               <span style="display:flex; align-items:center; min-height:36px;">
-                <img v-if="currentNavPresetThumbnail" :src="currentNavPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentNavPresetMeta?.name || (selectedNavPreset ? formatPresetDate(currentNavPresetMeta?.date ?? '') : 'Choisir un preset...') }}</span>
+                <img v-if="currentNavPresetThumbnail" :src="currentNavPresetThumbnail" alt="thumbnail" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentNavPresetMeta?.name || (selectedNavPreset ? formatPresetDate(currentNavPresetMeta?.date ?? '') : 'Choose a preset...') }}</span>
                 <span class="icon is-small" style="margin-left:5px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1175,7 +1174,7 @@ async function renameAndSaveTexture() {
                 @click.prevent="selectNavPresetFromDropdown(preset)"
                 :class="{ 'is-active': selectedNavPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
-                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
+                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
                   <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
@@ -1194,14 +1193,14 @@ async function renameAndSaveTexture() {
     <!-- Presets tab -->
     <div v-else-if="activeTab === 'presets'">
       <div class="mb-3">
-        <label class="label">Presets enregistrés</label>
+        <label class="label">Saved presets</label>
         <!-- Dropdown enrichie Bulma -->
         <div class="dropdown" :class="{ 'is-active': showPresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showPresetDropdown = !showPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-presets" type="button">
               <span style="display:flex; align-items:center; min-height:36px;">
-                <img v-if="currentPresetThumbnail" :src="currentPresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentPresetMeta?.name || (selectedPreset ? formatPresetDate(currentPresetMeta?.date ?? '') : 'Choisir un preset...') }}</span>
+                <img v-if="currentPresetThumbnail" :src="currentPresetThumbnail" alt="thumbnail" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentPresetMeta?.name || (selectedPreset ? formatPresetDate(currentPresetMeta?.date ?? '') : 'Choose a preset...') }}</span>
                 <span class="icon is-small" style="margin-left:5px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1214,7 +1213,7 @@ async function renameAndSaveTexture() {
                 @click.prevent="selectPresetFromDropdown(preset)"
                 :class="{ 'is-active': selectedPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
-                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
+                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
                   <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
@@ -1225,20 +1224,20 @@ async function renameAndSaveTexture() {
                 </div>
                 <button class="delete is-small" style="flex-shrink:0;"
                   @click.stop.prevent="deletePresetById(preset.id)"
-                  title="Supprimer ce preset"></button>
+                  title="Delete this preset"></button>
               </a>
             </div>
           </div>
         </div>
         <div class="field is-grouped" style="margin-top:0.8em;">
           <div class="control is-expanded">
-            <input class="input" v-model="presetName" type="text" placeholder="Nom (facultatif)..."
+            <input class="input" v-model="presetName" type="text" placeholder="Name (optional)..."
               @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
               @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
             />
           </div>
           <div class="control">
-            <button class="button is-link is-small" @click="savePreset">Enregistrer</button>
+            <button class="button is-link is-small" @click="savePreset">Save</button>
           </div>
         </div>
 
@@ -1248,12 +1247,12 @@ async function renameAndSaveTexture() {
         <div class="field is-grouped">
           <div class="control">
             <button class="button is-info is-small" @click="exportPresets" :disabled="presets.length === 0">
-              Exporter
+              Export
             </button>
           </div>
           <div class="control">
             <button class="button is-warning is-small" @click="triggerImportPresets">
-              Importer
+              Import
             </button>
             <input ref="presetFileInput" type="file" accept=".json" style="display:none;" @change="importPresets" />
           </div>
@@ -1285,8 +1284,8 @@ async function renameAndSaveTexture() {
 
       <hr class="section-sep"/>
 
-      <!-- ═══ COULEUR ═══ -->
-      <label class="label">Couleur</label>
+      <!-- ═══ COLOR ═══ -->
+      <label class="label">Color</label>
 
       <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
         <label style="white-space: nowrap; min-width: 5.5em;">Interpolation</label>
@@ -1304,38 +1303,36 @@ async function renameAndSaveTexture() {
       </div>
 
       <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Période :</label>
+        <label style="white-space: nowrap; min-width: 5.5em;">Period:</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
+        <span style="font-family: monospace; min-width: 4.5em; text-align: right; font-size: 0.85em;">{{ formatPalettePeriod(model.palettePeriod) }}</span>
       </div>
       <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Décalage :</label>
+        <label style="white-space: nowrap; min-width: 5.5em;">Offset:</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
+        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
       </div>
 
       <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Teinte :</label>
+        <label style="white-space: nowrap; min-width: 5.5em;">Hue:</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-180" max="180" step="1"
           :value="hslHueShift"
           @input="onHslHueInput(Number(($event.target as HTMLInputElement).value))" />
         <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ hslHueShift }}°</span>
       </div>
       <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Saturation :</label>
+        <label style="white-space: nowrap; min-width: 5.5em;">Saturation:</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
           :value="satShift"
           @input="onSatInput(Number(($event.target as HTMLInputElement).value))" />
         <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ satShift }}</span>
       </div>
       <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Luminosité :</label>
+        <label style="white-space: nowrap; min-width: 5.5em;">Lightness:</label>
         <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
           :value="lumShift"
           @input="onLumInput(Number(($event.target as HTMLInputElement).value))" />
         <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ lumShift }}</span>
-      </div>
-
-      <div class="mb-3">
-        <button class="button is-small is-light" @click="resetLchBase">Réinitialiser</button>
       </div>
 
       <hr class="section-sep"/>
@@ -1350,7 +1347,7 @@ async function renameAndSaveTexture() {
         </button>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Vitesse anim.</span>
+        <span class="gfx-slider-label">Anim. speed</span>
         <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
         <span class="gfx-slider-value">&times;{{ (model.animationSpeed ?? 1.0).toFixed(1) }}</span>
       </div>
@@ -1360,12 +1357,12 @@ async function renameAndSaveTexture() {
       <!-- ═══ TEXTURE ═══ -->
       <label class="gfx-section-title">Texture</label>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">R&eacute;p&eacute;tition</span>
+        <span class="gfx-slider-label">Repetition</span>
         <input class="slider" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
         <span class="gfx-slider-value">{{ model.tessellationLevel }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">D&eacute;placement</span>
+        <span class="gfx-slider-label">Displacement</span>
         <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
         <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
       </div>
@@ -1375,7 +1372,7 @@ async function renameAndSaveTexture() {
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth is-small" @click="showTextureDropdown = !showTextureDropdown" aria-haspopup="true" aria-controls="dropdown-menu-textures" type="button">
               <span style="display:flex; align-items:center; min-height:28px;">
-                <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="miniature" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
+                <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="thumbnail" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
                 <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedTexture || 'Texture...' }}</span>
                 <span class="icon is-small" style="margin-left:4px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
@@ -1389,7 +1386,7 @@ async function renameAndSaveTexture() {
                 @click.prevent="selectTextureFromDropdown(tex)"
                 :class="{ 'is-active': selectedTexture === tex.name }"
                 style="display:flex; align-items:center; gap:0.5em;">
-                <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="miniature"
+                <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail"
                   style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
                 <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
               </a>
@@ -1405,11 +1402,11 @@ async function renameAndSaveTexture() {
             />
           </div>
           <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportTexture">Importer</button>
+            <button class="button is-warning is-small" @click="triggerImportTexture">Import</button>
             <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
           </div>
           <div class="control">
-            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)">Supprimer</button>
+            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)">Delete</button>
           </div>
         </div>
       </div>
@@ -1418,14 +1415,14 @@ async function renameAndSaveTexture() {
 
       <!-- Extract palette from a preset -->
       <div class="mb-3">
-        <label class="label">Extraire depuis un preset</label>
-        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applique les couleurs, l'interpolation, la période et le décalage d'un preset.</p>
+        <label class="label">Extract from preset</label>
+        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applies the colors, interpolation, period, and offset from a preset.</p>
         <div class="dropdown" :class="{ 'is-active': showPalettePresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showPalettePresetDropdown = !showPalettePresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palette-presets" type="button">
               <span style="display:flex; align-items:center; min-height:36px;">
-                <img v-if="currentPalettePresetThumbnail" :src="currentPalettePresetThumbnail" alt="miniature" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentPalettePresetMeta?.name || (selectedPalettePreset ? formatPresetDate(currentPalettePresetMeta?.date ?? '') : 'Choisir un preset...') }}</span>
+                <img v-if="currentPalettePresetThumbnail" :src="currentPalettePresetThumbnail" alt="thumbnail" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentPalettePresetMeta?.name || (selectedPalettePreset ? formatPresetDate(currentPalettePresetMeta?.date ?? '') : 'Choose a preset...') }}</span>
                 <span class="icon is-small" style="margin-left:5px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1438,7 +1435,7 @@ async function renameAndSaveTexture() {
                 @click.prevent="selectPalettePresetFromDropdown(preset)"
                 :class="{ 'is-active': selectedPalettePreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
-                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="miniature"
+                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
                   <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
@@ -1456,15 +1453,15 @@ async function renameAndSaveTexture() {
       <hr class="section-sep"/>
 
       <div class="mb-3">
-        <label class="label">Palettes enregistrées</label>
+        <label class="label">Saved palettes</label>
         <!-- Dropdown enrichie Bulma -->
         <div class="dropdown" :class="{ 'is-active': showPaletteDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showPaletteDropdown = !showPaletteDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palettes" type="button">
               <span style="display:flex; align-items:center; flex-direction:column; gap:0.5em; padding:0.4em 0;">
-                <img v-if="currentPaletteThumbnail" :src="currentPaletteThumbnail" alt="miniature" style="height:24px; width:100%; max-width:280px; object-fit:cover; border-radius:3px; background:#888; box-shadow:0 1px 3px rgba(0,0,0,0.2);" />
+                <img v-if="currentPaletteThumbnail" :src="currentPaletteThumbnail" alt="thumbnail" style="height:24px; width:100%; max-width:280px; object-fit:cover; border-radius:3px; background:#888; box-shadow:0 1px 3px rgba(0,0,0,0.2);" />
                 <span style="width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; justify-content:center; gap:0.3em;">
-                  <span style="flex:1 1 auto; text-align:center;">{{ paletteName || 'Choisir une palette...' }}</span>
+                   <span style="flex:1 1 auto; text-align:center;">{{ paletteName || 'Choose a palette...' }}</span>
                   <span class="icon is-small">
                     <i class="fas fa-angle-down" aria-hidden="true"></i>
                   </span>
@@ -1478,7 +1475,7 @@ async function renameAndSaveTexture() {
                 @click.prevent="selectPaletteFromDropdown(palette)"
                 :class="{ 'is-active': selectedPalette === palette.name }"
                 style="display:flex; flex-direction:column; gap:0.5em; padding:0.75em;">
-                <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="miniature"
+                <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail"
                   style="height:32px; width:100%; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; text-align:center;">{{ palette.name }}</span>
               </a>
@@ -1487,16 +1484,16 @@ async function renameAndSaveTexture() {
         </div>
         <div class="field is-grouped" style="margin-top:0.8em;">
           <div class="control is-expanded">
-            <input class="input" v-model="paletteName" type="text" placeholder="Nom..."
+            <input class="input" v-model="paletteName" type="text" placeholder="Name..."
               @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
               @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
             />
           </div>
           <div class="control">
-            <button class="button is-link is-small" @click="savePalette">Enregistrer</button>
+            <button class="button is-link is-small" @click="savePalette">Save</button>
           </div>
           <div class="control">
-            <button class="button is-danger is-small" @click="deletePalette" :disabled="!paletteName">Supprimer</button>
+            <button class="button is-danger is-small" @click="deletePalette" :disabled="!paletteName">Delete</button>
           </div>
         </div>
 
@@ -1506,12 +1503,12 @@ async function renameAndSaveTexture() {
         <div class="field is-grouped">
           <div class="control">
             <button class="button is-info is-small" @click="exportPalettes" :disabled="palettes.length === 0">
-              Exporter
+              Export
             </button>
           </div>
           <div class="control">
             <button class="button is-warning is-small" @click="triggerImportPalettes">
-              Importer
+              Import
             </button>
             <input ref="paletteFileInput" type="file" accept=".json" style="display:none;" @change="importPalettes" />
           </div>
@@ -1523,7 +1520,7 @@ async function renameAndSaveTexture() {
     <div v-else-if="activeTab === 'performance'" class="graphics-tab">
 
       <!-- ═══ CALCUL ═══ -->
-      <label class="gfx-section-title">Calcul</label>
+      <label class="gfx-section-title">Computation</label>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Mu</span>
         <input class="slider" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
@@ -1541,12 +1538,12 @@ async function renameAndSaveTexture() {
       <!-- ═══ PERFORMANCE ═══ -->
       <label class="gfx-section-title">Performance</label>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">R&eacute;solution</span>
+        <span class="gfx-slider-label">Resolution</span>
         <input class="slider" type="range" min="0.125" max="2" step="0.125" v-model.number="model.dprMultiplier" />
         <span class="gfx-slider-value">DPR &times;{{ model.dprMultiplier?.toFixed(2) ?? '1.00' }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">It&eacute;rations</span>
+        <span class="gfx-slider-label">Iterations</span>
         <input class="slider" type="range" min="-2" max="1" step="0.01" v-model="maxIterMultSlider" />
         <span class="gfx-slider-value">&times;{{ (model.maxIterationMultiplier ?? 1.0).toPrecision(3) }}</span>
       </div>
@@ -1556,7 +1553,7 @@ async function renameAndSaveTexture() {
         <span class="gfx-slider-value">{{ model.targetFps ?? 60 }} fps</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Charge GPU max.</span>
+        <span class="gfx-slider-label">Max GPU load</span>
         <input class="slider" type="range" min="0.25" max="4" step="0.25" v-model.number="model.gpuLoadMultiplier" />
         <span class="gfx-slider-value">&times;{{ (model.gpuLoadMultiplier ?? 1.0).toFixed(2) }}</span>
       </div>

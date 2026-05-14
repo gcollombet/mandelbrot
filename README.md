@@ -51,7 +51,7 @@ TODO
 5. [x] shortcut for settings
 6. [x] make color palettes presets and possibility to save custom palettes
 7. [x] better settings that screenshot an image of the current view and a selectable image with label instead of setting name
-8. [ ] make zoom reuse last image
+8. [x] make zoom reuse last image
 9. [x] make rotation with bigger image, compute missing pixel always in reference angle and then rotate the image in order to avoid artifacts
 10. [ ] modify color and render to give all info in uniform
 11. [ ] use a different texture to store the iteration count
