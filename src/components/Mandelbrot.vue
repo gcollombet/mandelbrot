@@ -58,6 +58,7 @@ const props = withDefaults(defineProps<{
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
   clearcoatStrength?: number,
+  subsurfaceStrength?: number,
  }>(),
 
     {
@@ -108,6 +109,7 @@ const props = withDefaults(defineProps<{
         ambientOcclusionStrength: 0.5,
         microBumpStrength: 0.25,
         clearcoatStrength: 0.7,
+        subsurfaceStrength: 0.0,
      }
 );
 
@@ -179,6 +181,7 @@ async function draw() {
         ambientOcclusionStrength: props.ambientOcclusionStrength,
         microBumpStrength: props.microBumpStrength,
         clearcoatStrength: props.clearcoatStrength,
+        subsurfaceStrength: props.subsurfaceStrength,
       }
     )
     await engine.render()
@@ -212,6 +215,7 @@ async function initWebGPU() {
     ambientOcclusionStrength: props.ambientOcclusionStrength,
     microBumpStrength: props.microBumpStrength,
     clearcoatStrength: props.clearcoatStrength,
+    subsurfaceStrength: props.subsurfaceStrength,
   });
   return engine.initialize(navigator)
 }

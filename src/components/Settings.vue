@@ -112,6 +112,7 @@ const model =  defineModel<MandelbrotParams>({
      ambientOcclusionStrength: 0.5,
      microBumpStrength: 0.25,
      clearcoatStrength: 0.7,
+     subsurfaceStrength: 0.0,
      textureName: 'Gold',
      skyboxName: 'Skybox',
     dprMultiplier: 1.0,
@@ -1426,6 +1427,7 @@ async function renameAndSaveSkyboxTexture() {
           :ambient-occlusion-strength="model.ambientOcclusionStrength"
           :micro-bump-strength="model.microBumpStrength"
           :clearcoat-strength="model.clearcoatStrength"
+          :subsurface-strength="model.subsurfaceStrength"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
           @invert="invertPalette"
@@ -1755,7 +1757,7 @@ async function renameAndSaveSkyboxTexture() {
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Ambient Occlusion</span>
-        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.ambientOcclusionStrength" />
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.ambientOcclusionStrength" />
         <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
@@ -1765,8 +1767,13 @@ async function renameAndSaveSkyboxTexture() {
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Clearcoat</span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.clearcoatStrength" />
+        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.clearcoatStrength" />
         <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0.7).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Subsurface</span>
+        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.subsurfaceStrength" />
+        <span class="gfx-slider-value">{{ (model.subsurfaceStrength ?? 0).toFixed(2) }}</span>
       </div>
 
       <hr class="section-sep"/>

@@ -19,6 +19,7 @@ struct Uniforms {
   ambientOcclusionStrength: f32,
   microBumpStrength: f32,
   clearcoatStrength: f32,
+  subsurfaceStrength: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -182,7 +183,7 @@ fn pseudo_ambient_occlusion(normal: vec3<f32>, v_smooth: f32, z: vec2<f32>) -> f
   let cavity = pow(clamp(1.0 - normal.z, 0.0, 1.0), 1.35);
   let depthMask = clamp(1.0 - exp(-v_smooth * 0.035), 0.0, 1.0);
   let basinMask = clamp(length(z) / 2.5, 0.0, 1.0);
-  let strength = clamp(parameters.ambientOcclusionStrength, 0.0, 10.0);
+  let strength = clamp(parameters.ambientOcclusionStrength, 0.0, 2.0);
   let ao = 1.0 - (0.55 * cavity + 0.25 * depthMask + 0.20 * basinMask) * 0.45 * strength;
   return clamp(ao, 0.08, 1.0);
 }
@@ -212,6 +213,17 @@ fn curvature_edge_wear(angle_der: f32, v_smooth: f32) -> f32 {
   let directionalRidge = pow(abs(sin(angle_der * 2.0 + v_smooth * 0.035)), 6.0);
   let iterationRidge = pow(1.0 - abs(fract(v_smooth * 0.125) * 2.0 - 1.0), 3.0);
   return clamp(directionalRidge * 0.65 + iterationRidge * 0.35, 0.0, 1.0);
+}
+
+fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32) -> vec3<f32> {
+  let backLight = pow(max(dot(normal, -lightDir), 0.0), 1.35);
+  let rimScatter = pow(clamp(1.0 - nDotV, 0.0, 1.0), 2.15);
+  let wrapLight = pow(clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0), 2.0);
+  let thickness = clamp((1.0 - ao) * 0.35 + edgeWear * 0.65, 0.0, 1.0);
+  let mask = (backLight * 0.45 + rimScatter * 0.35 + wrapLight * 0.20) * thickness;
+  let warmScatter = vec3<f32>(1.0, 0.42, 0.16);
+  let scatterColor = mix(color * color, warmScatter, 0.25);
+  return scatterColor * mask * clamp(strength, 0.0, 10.0) * (1.0 - metallic);
 }
 
 fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec3<f32> {
@@ -336,8 +348,19 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     let brightness = max(fx.shadingLevel, 0.0);
     var materialColor = diffuseLight + directSpecular * ao;
 
+    materialColor += fake_subsurface_scattering(
+      color,
+      normal,
+      lightDir,
+      nDotV,
+      ao,
+      edgeWear,
+      metallic,
+      parameters.subsurfaceStrength
+    );
+
     // Thin clearcoat layer: a sharp white lobe sitting above the base material.
-    let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 2.0) * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
+    let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 10.0) * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
     let clearcoatD = ggx_distribution(nDotH, 0.08);
     let clearcoatG = ggx_geometry_smith(nDotV, nDotL, 0.08);
     let clearcoatF = fresnel_schlick(vDotH, vec3<f32>(0.04));

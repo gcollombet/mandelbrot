@@ -33,6 +33,7 @@ const props = defineProps<{
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
   clearcoatStrength?: number,
+  subsurfaceStrength?: number,
 }>();
 
 const emit = defineEmits<{
@@ -412,6 +413,7 @@ onUnmounted(() => {
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :microBumpStrength="props.microBumpStrength"
       :clearcoatStrength="props.clearcoatStrength"
+      :subsurfaceStrength="props.subsurfaceStrength"
     />
     
     <!-- Contrôles de navigation mobile -->

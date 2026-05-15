@@ -48,6 +48,7 @@ const props = defineProps<{
   ambientOcclusionStrength?: number;
   microBumpStrength?: number;
   clearcoatStrength?: number;
+  subsurfaceStrength?: number;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -316,9 +317,9 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (20 floats, padded to 80 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (21 floats, padded to 96 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
-    size: 4 * 20,
+    size: 4 * 24,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
@@ -345,6 +346,7 @@ async function init() {
     props.ambientOcclusionStrength ?? 0.5, // ambientOcclusionStrength
     props.microBumpStrength ?? 0.25, // microBumpStrength
     props.clearcoatStrength ?? 0.7, // clearcoatStrength
+    props.subsurfaceStrength ?? 0.0, // subsurfaceStrength
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -393,7 +395,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.clearcoatStrength],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.clearcoatStrength, () => props.subsurfaceStrength],
   () => {
     if (!device || !uniformBuffer) return;
     const patch = new Float32Array([
@@ -404,6 +406,7 @@ watch(
       props.ambientOcclusionStrength ?? 0.5,
       props.microBumpStrength ?? 0.25,
       props.clearcoatStrength ?? 0.7,
+      props.subsurfaceStrength ?? 0.0,
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
     render();

@@ -220,6 +220,7 @@ const mandelbrotParams = ref<MandelbrotParams>({
   ambientOcclusionStrength: 0.5,
   microBumpStrength: 0.25,
   clearcoatStrength: 0.7,
+  subsurfaceStrength: 0.0,
   textureName: 'Gold',
 });
 
@@ -550,6 +551,7 @@ const shortcutLabels = computed(() => {
       :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
       :microBumpStrength="mandelbrotParams.microBumpStrength"
       :clearcoatStrength="mandelbrotParams.clearcoatStrength"
+      :subsurfaceStrength="mandelbrotParams.subsurfaceStrength"
     />
 
     <!-- Popup Settings — one per open tab (multi-window) -->

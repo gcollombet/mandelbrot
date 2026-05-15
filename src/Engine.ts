@@ -110,6 +110,7 @@ export type RenderOptions = {
     ambientOcclusionStrength: number,
     microBumpStrength: number,
     clearcoatStrength: number,
+    subsurfaceStrength: number,
 }
 
 export type ApproximationMode = 'perturbation' | 'bla'
@@ -401,7 +402,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 20, // 20 floats padded to 16-byte alignment (80 bytes)
+            size: 4 * 24, // 21 floats padded to 16-byte alignment (96 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1055,6 +1056,7 @@ export class Engine {
             renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
             renderOptions.microBumpStrength, // 18: microBumpStrength
             renderOptions.clearcoatStrength, // 19: clearcoatStrength
+            renderOptions.subsurfaceStrength, // 20: subsurfaceStrength
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
