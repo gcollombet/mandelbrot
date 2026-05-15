@@ -30,6 +30,7 @@ const props = defineProps<{
   tessellationLevel?: number,
   displacementAmount?: number,
   animationSpeed?: number,
+  ambientOcclusionStrength?: number,
 }>();
 
 const emit = defineEmits<{
@@ -406,6 +407,7 @@ onUnmounted(() => {
       :tessellationLevel="props.tessellationLevel"
       :displacementAmount="props.displacementAmount"
       :animationSpeed="props.animationSpeed"
+      :ambientOcclusionStrength="props.ambientOcclusionStrength"
     />
     
     <!-- Contrôles de navigation mobile -->
@@ -416,4 +418,3 @@ onUnmounted(() => {
 <style scoped>
 /* Le style reste dans Mandelbrot.vue (canvas). Le wrapper peut rester neutre. */
 </style>
-

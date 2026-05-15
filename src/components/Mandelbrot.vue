@@ -55,6 +55,7 @@ const props = withDefaults(defineProps<{
   tessellationLevel?: number,
   displacementAmount?: number,
   animationSpeed?: number,
+  ambientOcclusionStrength?: number,
  }>(),
 
     {
@@ -99,10 +100,11 @@ const props = withDefaults(defineProps<{
        targetFps: 60,
        gpuLoadMultiplier: 1.0,
        interpolationMode: 'lab',
-       tessellationLevel: 2,
-       displacementAmount: 0.01,
-       animationSpeed: 1.0,
-    }
+        tessellationLevel: 2,
+        displacementAmount: 0.01,
+        animationSpeed: 1.0,
+        ambientOcclusionStrength: 0.5,
+     }
 );
 
 // Quand le multiplicateur DPR change, mettre à jour l'engine et redimensionner.
@@ -170,6 +172,7 @@ async function draw() {
         tessellationLevel: props.tessellationLevel,
         displacementAmount: props.displacementAmount,
         animationSpeed: props.animationSpeed,
+        ambientOcclusionStrength: props.ambientOcclusionStrength,
       }
     )
     await engine.render()
@@ -200,6 +203,7 @@ async function initWebGPU() {
     tessellationLevel: props.tessellationLevel,
     displacementAmount: props.displacementAmount,
     animationSpeed: props.animationSpeed,
+    ambientOcclusionStrength: props.ambientOcclusionStrength,
   });
   return engine.initialize(navigator)
 }

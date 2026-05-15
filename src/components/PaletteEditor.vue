@@ -16,6 +16,7 @@ const props = withDefaults(defineProps<{
   tileTextureUrl?: string | null;
   tessellationLevel?: number;
   displacementAmount?: number;
+  ambientOcclusionStrength?: number;
   applyToAll?: boolean;
 }>(), {
   interpolationMode: 'lab',
@@ -23,6 +24,7 @@ const props = withDefaults(defineProps<{
   tileTextureUrl: null,
   tessellationLevel: 2,
   displacementAmount: 0.01,
+  ambientOcclusionStrength: 0.5,
   applyToAll: false,
 });
 const emit = defineEmits<{
@@ -208,6 +210,7 @@ defineExpose({ getSnapshot });
         :tileTextureUrl="tileTextureUrl"
         :tessellationLevel="tessellationLevel"
         :displacementAmount="displacementAmount"
+        :ambientOcclusionStrength="ambientOcclusionStrength"
       />
       <div class="handles-overlay">
         <GlissiereHandle

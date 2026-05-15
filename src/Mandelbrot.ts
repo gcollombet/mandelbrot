@@ -41,5 +41,6 @@ export interface MandelbrotParams {
     displacementAmount?: number;
     specularPower?: number;
     animationSpeed?: number;
+    ambientOcclusionStrength?: number;
     textureName?: string;
 }

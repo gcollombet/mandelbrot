@@ -105,9 +105,10 @@ const model =  defineModel<MandelbrotParams>({
     activateShading: true,
     activateZebra: false,
      activateSmoothness: true,
-    activateAnimate: false,
-    animationSpeed: 1.0,
-    textureName: 'Gold',
+     activateAnimate: false,
+     animationSpeed: 1.0,
+     ambientOcclusionStrength: 0.5,
+     textureName: 'Gold',
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
      interpolationMode: 'lab',
@@ -1283,6 +1284,7 @@ async function renameAndSaveTexture() {
           :tile-texture-url="activeBlobUrl"
           :tessellation-level="model.tessellationLevel"
           :displacement-amount="model.displacementAmount"
+          :ambient-occlusion-strength="model.ambientOcclusionStrength"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
           @invert="invertPalette"
@@ -1563,6 +1565,11 @@ async function renameAndSaveTexture() {
           </button>
         </div>
         <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : 'Classic' }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Ambient Occlusion</span>
+        <input class="slider" type="range" min="0" max="1" step="0.01" v-model.number="model.ambientOcclusionStrength" />
+        <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
       </div>
 
       <hr class="section-sep"/>

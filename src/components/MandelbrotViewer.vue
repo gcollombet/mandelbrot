@@ -217,6 +217,7 @@ const mandelbrotParams = ref<MandelbrotParams>({
   gpuLoadMultiplier: 1.0,
   interpolationMode: 'lab',
   animationSpeed: 1.0,
+  ambientOcclusionStrength: 0.5,
   textureName: 'Gold',
 });
 
@@ -544,6 +545,7 @@ const shortcutLabels = computed(() => {
       :tessellationLevel="mandelbrotParams.tessellationLevel"
       :displacementAmount="mandelbrotParams.displacementAmount"
       :animationSpeed="mandelbrotParams.animationSpeed"
+      :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
     />
 
     <!-- Popup Settings — one per open tab (multi-window) -->

@@ -16,6 +16,7 @@ struct Uniforms {
   displacementAmount: f32, // global [0, 0.1]
   animationSpeed: f32,    // global multiplier on drift frequencies [0.1, 5.0]
   epsilon: f32,           // interior detection threshold (|der|² < epsilon)
+  ambientOcclusionStrength: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -150,6 +151,15 @@ fn ggx_geometry_smith(nDotV: f32, nDotL: f32, roughness: f32) -> f32 {
   return ggx_geometry_schlick(nDotV, roughness) * ggx_geometry_schlick(nDotL, roughness);
 }
 
+fn pseudo_ambient_occlusion(normal: vec3<f32>, v_smooth: f32, z: vec2<f32>) -> f32 {
+  let cavity = pow(clamp(1.0 - normal.z, 0.0, 1.0), 1.35);
+  let depthMask = clamp(1.0 - exp(-v_smooth * 0.035), 0.0, 1.0);
+  let basinMask = clamp(length(z) / 2.5, 0.0, 1.0);
+  let strength = clamp(parameters.ambientOcclusionStrength, 0.0, 1.0);
+  let ao = 1.0 - (0.55 * cavity + 0.25 * depthMask + 0.20 * basinMask) * 0.45 * strength;
+  return clamp(ao, 0.55, 1.0);
+}
+
 fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec3<f32> {
   let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
   let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
@@ -219,6 +229,7 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
     let normal = mandelbrot_normal(angle_der);
+    let ao = pseudo_ambient_occlusion(normal, v_smooth, z);
     let la = fx.lightAngle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 0.5));
     let viewDir = normalize(vec3<f32>(cos(la + 0.5), sin(la + 0.5), 0.5));
@@ -235,7 +246,7 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
     let specular = ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0) * specularTerm;
     let diffuse = nDotL * (1.0 - 0.35 * ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0));
-    let raw = 0.55 * diffuse + 0.85 * specular;
+    let raw = (0.55 * diffuse + 0.85 * specular) * ao;
     let brightness = fx.shadingLevel;
     var shading = 1.0 - brightness * 0.2 + brightness * 1.2 * raw;
 
@@ -250,13 +261,13 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
       let lum = 0.2126 * skyboxColor.r + 0.7152 * skyboxColor.g + 0.0722 * skyboxColor.b;
       let fresnel = fresnel_schlick(nDotV, mix(vec3<f32>(0.04), color, fx.wSkybox * 0.35));
       let reflectionStrength = fx.wSkybox * clamp((fresnel.r + fresnel.g + fresnel.b) / 3.0, 0.0, 1.0);
-      let shading_with_sky = 0.5 + (shading - 0.5) * (0.5 + lum);
+      let shading_with_sky = 0.5 + (shading - 0.5) * (0.5 + lum * ao);
       shading = mix(shading, shading_with_sky, reflectionStrength);
       color = mix(color, skyboxColor, reflectionStrength * 0.35);
     }
 
     // Apply shading proportionally to wShading
-    color = color * mix(1.0, shading, effShading);
+    color = color * mix(ao, shading, effShading);
   }
 
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
