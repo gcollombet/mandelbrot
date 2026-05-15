@@ -46,6 +46,8 @@ const props = defineProps<{
   tessellationLevel?: number;
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
+  microBumpStrength?: number;
+  clearcoatStrength?: number;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -314,7 +316,7 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (18 floats, padded to 80 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (20 floats, padded to 80 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
     size: 4 * 20,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -341,6 +343,8 @@ async function init() {
     1.0,          // animationSpeed
     1e-10,        // epsilon (interior detection, not relevant for preview)
     props.ambientOcclusionStrength ?? 0.5, // ambientOcclusionStrength
+    props.microBumpStrength ?? 0.25, // microBumpStrength
+    props.clearcoatStrength ?? 0.7, // clearcoatStrength
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -389,7 +393,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.clearcoatStrength],
   () => {
     if (!device || !uniformBuffer) return;
     const patch = new Float32Array([
@@ -398,6 +402,8 @@ watch(
       1.0,
       1e-10,
       props.ambientOcclusionStrength ?? 0.5,
+      props.microBumpStrength ?? 0.25,
+      props.clearcoatStrength ?? 0.7,
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
     render();

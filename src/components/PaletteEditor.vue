@@ -25,6 +25,8 @@ const props = withDefaults(defineProps<{
   tessellationLevel?: number;
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
+  microBumpStrength?: number;
+  clearcoatStrength?: number;
   applyToAll?: boolean;
 }>(), {
   interpolationMode: 'lab',
@@ -33,6 +35,8 @@ const props = withDefaults(defineProps<{
   tessellationLevel: 2,
   displacementAmount: 0.01,
   ambientOcclusionStrength: 0.5,
+  microBumpStrength: 0.25,
+  clearcoatStrength: 0.7,
   applyToAll: false,
 });
 const emit = defineEmits<{
@@ -278,6 +282,8 @@ defineExpose({ getSnapshot });
         :tessellationLevel="tessellationLevel"
         :displacementAmount="displacementAmount"
         :ambientOcclusionStrength="ambientOcclusionStrength"
+        :microBumpStrength="microBumpStrength"
+        :clearcoatStrength="clearcoatStrength"
       />
       <div class="handles-overlay">
         <GlissiereHandle

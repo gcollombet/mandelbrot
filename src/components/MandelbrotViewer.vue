@@ -218,6 +218,8 @@ const mandelbrotParams = ref<MandelbrotParams>({
   interpolationMode: 'lab',
   animationSpeed: 1.0,
   ambientOcclusionStrength: 0.5,
+  microBumpStrength: 0.25,
+  clearcoatStrength: 0.7,
   textureName: 'Gold',
 });
 
@@ -546,6 +548,8 @@ const shortcutLabels = computed(() => {
       :displacementAmount="mandelbrotParams.displacementAmount"
       :animationSpeed="mandelbrotParams.animationSpeed"
       :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
+      :microBumpStrength="mandelbrotParams.microBumpStrength"
+      :clearcoatStrength="mandelbrotParams.clearcoatStrength"
     />
 
     <!-- Popup Settings — one per open tab (multi-window) -->

@@ -17,6 +17,8 @@ struct Uniforms {
   animationSpeed: f32,    // global multiplier on drift frequencies [0.1, 5.0]
   epsilon: f32,           // interior detection threshold (|der|² < epsilon)
   ambientOcclusionStrength: f32,
+  microBumpStrength: f32,
+  clearcoatStrength: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -230,6 +232,18 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
   return textureLoad(tex_, coord, 0).rgb;
 }
 
+fn texture_bump_normal(tex_: texture_2d<f32>, normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, v: f32, dist: f32, repeat: f32, strength: f32) -> vec3<f32> {
+  let safeRepeat = max(repeat, 0.1);
+  let stepSize = 1.0 / (safeRepeat * 96.0);
+  let lpx = luminance(tile_tessellation(tex_, v + stepSize, dist, repeat));
+  let lnx = luminance(tile_tessellation(tex_, v - stepSize, dist, repeat));
+  let lpy = luminance(tile_tessellation(tex_, v, dist + stepSize, repeat));
+  let lny = luminance(tile_tessellation(tex_, v, dist - stepSize, repeat));
+  let grad = vec2<f32>(lpx - lnx, lpy - lny);
+  let bump = (tangent * grad.x + bitangent * grad.y) * clamp(strength, 0.0, 2.0) * 0.85;
+  return normalize(normal - bump);
+}
+
 fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32, isInterior: bool) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
@@ -281,7 +295,19 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
 
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
-    let normal = mandelbrot_normal(angle_der);
+    let baseNormal = mandelbrot_normal(angle_der);
+    let baseTangent = mandelbrot_tangent(angle_der, baseNormal);
+    let baseBitangent = normalize(cross(baseNormal, baseTangent));
+    let normal = texture_bump_normal(
+      tileTex,
+      baseNormal,
+      baseTangent,
+      baseBitangent,
+      tess_u + tile_drift_u,
+      tess_v + tile_drift_v,
+      parameters.tessellationLevel,
+      parameters.microBumpStrength * effTess
+    );
     let ao = pseudo_ambient_occlusion(normal, v_smooth, z);
     let la = fx.lightAngle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 0.5));
@@ -311,7 +337,7 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     var materialColor = diffuseLight + directSpecular * ao;
 
     // Thin clearcoat layer: a sharp white lobe sitting above the base material.
-    let clearcoatStrength = effShading * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
+    let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 2.0) * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
     let clearcoatD = ggx_distribution(nDotH, 0.08);
     let clearcoatG = ggx_geometry_smith(nDotV, nDotL, 0.08);
     let clearcoatF = fresnel_schlick(vDotH, vec3<f32>(0.04));

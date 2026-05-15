@@ -110,6 +110,8 @@ const model =  defineModel<MandelbrotParams>({
      activateAnimate: false,
      animationSpeed: 1.0,
      ambientOcclusionStrength: 0.5,
+     microBumpStrength: 0.25,
+     clearcoatStrength: 0.7,
      textureName: 'Gold',
      skyboxName: 'Skybox',
     dprMultiplier: 1.0,
@@ -1422,6 +1424,8 @@ async function renameAndSaveSkyboxTexture() {
           :tessellation-level="model.tessellationLevel"
           :displacement-amount="model.displacementAmount"
           :ambient-occlusion-strength="model.ambientOcclusionStrength"
+          :micro-bump-strength="model.microBumpStrength"
+          :clearcoat-strength="model.clearcoatStrength"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
           @invert="invertPalette"
@@ -1753,6 +1757,16 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-label">Ambient Occlusion</span>
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.ambientOcclusionStrength" />
         <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Micro Bump</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
+        <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0.25).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Clearcoat</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.clearcoatStrength" />
+        <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0.7).toFixed(2) }}</span>
       </div>
 
       <hr class="section-sep"/>
