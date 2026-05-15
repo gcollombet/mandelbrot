@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, ref, watch} from 'vue';
+import {computed, onMounted, ref, watch} from 'vue';
 import GlissiereHandle from './GlissiereHandle.vue';
 import PalettePreview from './PalettePreview.vue';
 import {Palette} from '../Palette';
@@ -8,6 +8,14 @@ import type {ColorStop} from "../ColorStop.ts";
 import { COLOR_STOP_DEFAULTS, getEffectValue } from '../ColorStop.ts';
 import type { EffectFieldName } from '../ColorStop.ts';
 import type {InterpolationMode} from "../Mandelbrot.ts";
+import {
+  applyStopPresetValues,
+  deleteStopPresetEntry,
+  getAllStopPresetEntries,
+  saveStopPresetEntry,
+  valuesFromStop,
+} from '../stopPresetStore.ts';
+import type {StopPresetRecord} from '../stopPresetStore.ts';
 
 const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
@@ -115,6 +123,18 @@ const selectedStop = computed(() => {
   return props.colorStops[selectedIdx.value] ?? null;
 });
 
+const stopPresetName = ref('');
+const selectedStopPresetName = ref('');
+const stopPresets = ref<StopPresetRecord[]>([]);
+
+function refreshStopPresets() {
+  stopPresets.value = getAllStopPresetEntries();
+}
+
+onMounted(() => {
+  refreshStopPresets();
+});
+
 /** UI metadata for effect fields: label, min, max, step, unit. */
 const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: number; step: number; unit: string }> = {
   palette:            { label: 'Palette',       min: 0, max: 1,     step: 0.01, unit: '' },
@@ -151,6 +171,50 @@ function setStopEffect(field: EffectFieldName, value: number) {
     stop[field] = value;
   }
   emit('update:colorStops', props.colorStops);
+}
+
+function saveCurrentStopPreset() {
+  const stop = selectedStop.value;
+  const name = stopPresetName.value.trim();
+  if (!stop || !name) return;
+  saveStopPresetEntry({
+    name,
+    values: valuesFromStop(stop),
+    date: new Date().toISOString(),
+  });
+  selectedStopPresetName.value = name;
+  stopPresetName.value = '';
+  refreshStopPresets();
+}
+
+function applySelectedStopPreset() {
+  const preset = stopPresets.value.find(item => item.name === selectedStopPresetName.value);
+  if (!preset) return;
+
+  if (props.applyToAll) {
+    for (let i = 0; i < props.colorStops.length; i += 1) {
+      const stop = props.colorStops[i];
+      if (stop) {
+        props.colorStops[i] = applyStopPresetValues(stop, preset.values);
+      }
+    }
+  } else {
+    if (selectedIdx.value === null) return;
+    const stop = props.colorStops[selectedIdx.value];
+    if (!stop) return;
+    props.colorStops[selectedIdx.value] = applyStopPresetValues(stop, preset.values);
+  }
+
+  emit('update:colorStops', props.colorStops);
+}
+
+function deleteSelectedStopPreset() {
+  const name = selectedStopPresetName.value;
+  if (!name) return;
+  if (!window.confirm(`Delete stop preset "${name}"? This cannot be undone.`)) return;
+  deleteStopPresetEntry(name);
+  selectedStopPresetName.value = '';
+  refreshStopPresets();
 }
 
 /** Forward snapshot capture from the underlying PalettePreview. */
@@ -254,6 +318,37 @@ defineExpose({ getSnapshot });
           <span v-if="applyToAll" style="font-weight:700;">&#9888; All stops</span>
           <span v-else>This stop</span>
         </button>
+      </div>
+
+      <!-- ── Stop presets ── -->
+      <div class="stop-presets-panel">
+        <label class="effects-group-title">Stop Presets</label>
+        <div class="preset-row">
+          <select class="select-input" v-model="selectedStopPresetName">
+            <option value="">Choose preset...</option>
+            <option v-for="preset in stopPresets" :key="preset.name" :value="preset.name">
+              {{ preset.name }}
+            </option>
+          </select>
+          <button class="button is-small is-link" :disabled="!selectedStopPresetName" @click="applySelectedStopPreset">
+            Apply
+          </button>
+          <button class="button is-small is-danger is-light" :disabled="!selectedStopPresetName" @click="deleteSelectedStopPreset">
+            Delete
+          </button>
+        </div>
+        <div class="preset-row">
+          <input
+            class="input is-small"
+            v-model="stopPresetName"
+            type="text"
+            placeholder="New preset name..."
+            @keyup.enter="saveCurrentStopPreset"
+          />
+          <button class="button is-small is-light" :disabled="!stopPresetName.trim()" @click="saveCurrentStopPreset">
+            Save
+          </button>
+        </div>
       </div>
 
       <!-- ── Color ── -->
@@ -435,6 +530,30 @@ defineExpose({ getSnapshot });
 .apply-all-btn {
   font-size: 0.78em !important;
   min-width: 7em;
+}
+.stop-presets-panel {
+  margin-bottom: 0.55em;
+  padding: 0.45em;
+  border: 1px solid rgba(0, 0, 0, 0.08);
+  border-radius: 6px;
+  background: rgba(0, 0, 0, 0.025);
+}
+.preset-row {
+  display: flex;
+  align-items: center;
+  gap: 0.35em;
+  margin-top: 0.35em;
+}
+.select-input {
+  flex: 1;
+  min-width: 0;
+  height: 28px;
+  border: 1px solid #ccc;
+  border-radius: 4px;
+  background: #fff;
+  color: #111;
+  font-size: 0.82em;
+  padding: 0 0.4em;
 }
 .effects-group-title {
   font-size: 0.78em;
