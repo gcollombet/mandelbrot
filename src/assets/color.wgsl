@@ -17,7 +17,6 @@ struct Uniforms {
   animationSpeed: f32,    // global multiplier on drift frequencies [0.1, 5.0]
   epsilon: f32,           // interior detection threshold (|der|² < epsilon)
   ambientOcclusionStrength: f32,
-  roughness: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -51,6 +50,9 @@ struct EffectParams {
   specularPower: f32,   // [1, 64]
   // Row 3
   lightAngle: f32,      // [0, 2pi]
+  metallic: f32,        // [0, 1]
+  roughness: f32,       // [0.02, 1]
+  anisotropy: f32,      // [0, 1]
 };
 
 fn sampleEffects(palettePhase: f32) -> EffectParams {
@@ -75,9 +77,12 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   e.shadingLevel = row2.b;       // direct: natural range [0, 3]
   e.specularPower = max(row2.a, 1.0); // direct: natural range [1, 64]
 
-  // Row 3 (y = 0.875): lightAngle [0,2pi], reserved, reserved, reserved
+  // Row 3 (y = 0.875): lightAngle [0,2pi], metallic, roughness, anisotropy
   let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.875), 0.0);
   e.lightAngle = row3.r;          // direct: radians [0, 2pi]
+  e.metallic = clamp(row3.g, 0.0, 1.0);
+  e.roughness = clamp(row3.b, 0.02, 1.0);
+  e.anisotropy = clamp(row3.a, 0.0, 1.0);
 
   return e;
 }
@@ -180,6 +185,33 @@ fn pseudo_ambient_occlusion(normal: vec3<f32>, v_smooth: f32, z: vec2<f32>) -> f
   return clamp(ao, 0.08, 1.0);
 }
 
+fn luminance(color: vec3<f32>) -> f32 {
+  return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
+}
+
+fn sample_skybox(dir: vec3<f32>, dx: f32, dy: f32) -> vec3<f32> {
+  return textureSampleLevel(skyboxTex, skyboxSampler, dir_to_skybox_uv(dir, dx, dy), 0.0).rgb;
+}
+
+fn rough_skybox_reflection(dir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, roughness: f32, dx: f32, dy: f32) -> vec3<f32> {
+  let center = sample_skybox(dir, dx, dy);
+  let spread = roughness * roughness * 0.45;
+  let blur = (
+    center * 2.0
+    + sample_skybox(normalize(dir + tangent * spread), dx, dy)
+    + sample_skybox(normalize(dir - tangent * spread), dx, dy)
+    + sample_skybox(normalize(dir + bitangent * spread), dx, dy)
+    + sample_skybox(normalize(dir - bitangent * spread), dx, dy)
+  ) / 6.0;
+  return mix(center, blur, clamp(roughness * 1.25, 0.0, 1.0));
+}
+
+fn curvature_edge_wear(angle_der: f32, v_smooth: f32) -> f32 {
+  let directionalRidge = pow(abs(sin(angle_der * 2.0 + v_smooth * 0.035)), 6.0);
+  let iterationRidge = pow(1.0 - abs(fract(v_smooth * 0.125) * 2.0 - 1.0), 3.0);
+  return clamp(directionalRidge * 0.65 + iterationRidge * 0.35, 0.0, 1.0);
+}
+
 fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec3<f32> {
   let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
   let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
@@ -245,6 +277,7 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
 
   // Webcam: overlay on top of current result
   color = mix(color, webCamColor, effWebcam);
+  let edgeWear = curvature_edge_wear(angle_der, v_smooth);
 
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
@@ -260,39 +293,49 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     let nDotV = max(dot(normal, viewDir), 0.0);
     let nDotH = max(dot(normal, halfDir), 0.0);
     let vDotH = max(dot(viewDir, halfDir), 0.0);
-    let roughness = clamp(parameters.roughness, 0.02, 1.0);
-    let anisotropy = clamp(1.0 - roughness * 0.75, 0.0, 1.0);
+    let metallic = clamp(fx.metallic, 0.0, 1.0);
+    let roughness = clamp(fx.roughness, 0.02, 1.0);
+    let anisotropy = clamp(fx.anisotropy, 0.0, 1.0);
     let specularGain = clamp(fx.specularPower / 16.0, 0.15, 4.0);
-    let f0 = mix(vec3<f32>(0.04), color, effShading * 0.2 + fx.wSkybox * 0.15);
+    let f0 = mix(vec3<f32>(0.04), color, metallic);
     let fresnelSpec = fresnel_schlick(vDotH, f0);
     let distribution = ggx_distribution(nDotH, roughness);
     let geometry = ggx_geometry_smith(nDotV, nDotL, roughness);
     let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
     let anisotropicTerm = anisotropic_highlight(normal, tangent, bitangent, halfDir, nDotL, nDotV, roughness);
-    let specular = ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0) * mix(specularTerm, anisotropicTerm, anisotropy * 0.65) * specularGain;
-    let diffuse = nDotL * (1.0 - 0.35 * ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0));
-    let raw = (0.55 * diffuse + 0.85 * specular) * ao;
-    let brightness = fx.shadingLevel;
-    var shading = 1.0 - brightness * 0.2 + brightness * 1.2 * raw;
+    let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
+    let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL;
+    let diffuseColor = color * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
+    let diffuseLight = diffuseColor * (0.14 + 0.86 * nDotL) * ao;
+    let brightness = max(fx.shadingLevel, 0.0);
+    var materialColor = diffuseLight + directSpecular * ao;
 
-    // Skybox modulates shading (continuous blend via wSkybox)
+    // Thin clearcoat layer: a sharp white lobe sitting above the base material.
+    let clearcoatStrength = effShading * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
+    let clearcoatD = ggx_distribution(nDotH, 0.08);
+    let clearcoatG = ggx_geometry_smith(nDotV, nDotL, 0.08);
+    let clearcoatF = fresnel_schlick(vDotH, vec3<f32>(0.04));
+    materialColor += clearcoatF * (clearcoatD * clearcoatG / max(4.0 * nDotV * nDotL, 1e-5)) * nDotL * clearcoatStrength;
+
+    var envColor = vec3<f32>(0.0);
     if (fx.wSkybox > 0.001) {
-      // Animated drift on skybox UVs (same animate gate as tile/webcam)
       let sky_drift_u = anim * 0.02 * sin(t * 0.25 * spd + 3.5);
       let sky_drift_v = anim * 0.02 * sin(t * 0.2 * spd + 4.8);
       let skyboxDir = reflect(-viewDir, normal);
-      let skyboxUV = dir_to_skybox_uv(skyboxDir, dx + sky_drift_u, dy + sky_drift_v);
-      let skyboxColor = textureSampleLevel(skyboxTex, skyboxSampler, skyboxUV, 0.0).rgb;
-      let lum = 0.2126 * skyboxColor.r + 0.7152 * skyboxColor.g + 0.0722 * skyboxColor.b;
-      let fresnel = fresnel_schlick(nDotV, mix(vec3<f32>(0.04), color, fx.wSkybox * 0.35));
-      let reflectionStrength = fx.wSkybox * clamp((fresnel.r + fresnel.g + fresnel.b) / 3.0, 0.0, 1.0);
-      let shading_with_sky = 0.5 + (shading - 0.5) * (0.5 + lum * ao);
-      shading = mix(shading, shading_with_sky, reflectionStrength);
-      color = mix(color, skyboxColor, reflectionStrength * 0.35);
+      let skyboxColor = rough_skybox_reflection(skyboxDir, tangent, bitangent, roughness, dx + sky_drift_u, dy + sky_drift_v);
+      let fresnelEnv = fresnel_schlick(nDotV, f0);
+      let reflectionStrength = fx.wSkybox * clamp(luminance(fresnelEnv), 0.0, 1.0);
+      envColor = skyboxColor * fresnelEnv * reflectionStrength * mix(0.55, 1.25, metallic);
     }
 
-    // Apply shading proportionally to wShading
-    color = color * mix(ao, shading, effShading);
+    let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading;
+    let rimColor = mix(color, vec3<f32>(1.0), 0.45) * rim * (0.08 + 0.22 * fx.wSkybox);
+    let wearColor = mix(color, vec3<f32>(1.0, 0.92, 0.74), 0.5 + 0.3 * metallic);
+    let wear = edgeWear * (0.15 + 0.35 * metallic) * effShading;
+    materialColor = mix(materialColor, materialColor + wearColor * wear, clamp(edgeWear, 0.0, 1.0));
+
+    let pbrColor = (materialColor + envColor + rimColor) * (0.55 + brightness * 0.45);
+    color = mix(color * ao, pbrColor, effShading);
   }
 
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));

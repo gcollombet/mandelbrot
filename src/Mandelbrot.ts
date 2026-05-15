@@ -42,6 +42,6 @@ export interface MandelbrotParams {
     specularPower?: number;
     animationSpeed?: number;
     ambientOcclusionStrength?: number;
-    roughness?: number;
     textureName?: string;
+    skyboxName?: string;
 }

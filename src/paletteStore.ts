@@ -30,6 +30,7 @@ export interface PaletteRecord {
   thumbnail?: string;
   date?: string;
   textureName?: string;
+  skyboxName?: string;
   interpolationMode?: InterpolationMode;
   palettePeriod?: number;
   paletteOffset?: number;

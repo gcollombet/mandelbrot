@@ -22,6 +22,7 @@ import dentelleUrl from '../assets/dentelle.png';
 import bismuteUrl from '../assets/bismute.png';
 import graniteUrl from '../assets/granite.png';
 import lavaUrl from '../assets/lava.png';
+import skyboxUrl from '../assets/skybox.png';
 import type {TextureMetadata} from '../textureStore';
 import {
   deleteTextureEntry,
@@ -69,6 +70,7 @@ const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
   { name: 'Bismute', url: bismuteUrl },
   { name: 'Granite', url: graniteUrl },
   { name: 'Lava', url: lavaUrl },
+  { name: 'Skybox', url: skyboxUrl },
 ] as const;
 const BUILT_IN_TEXTURE_NAMES: ReadonlySet<string> = new Set(BUILT_IN_TEXTURES.map(t => t.name));
 const props = defineProps<{
@@ -108,8 +110,8 @@ const model =  defineModel<MandelbrotParams>({
      activateAnimate: false,
      animationSpeed: 1.0,
      ambientOcclusionStrength: 0.5,
-     roughness: 0.35,
      textureName: 'Gold',
+     skyboxName: 'Skybox',
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
      interpolationMode: 'lab',
@@ -300,6 +302,7 @@ async function savePreset() {
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
   savedValue.textureName = selectedTexture.value;
+  savedValue.skyboxName = selectedSkyboxTexture.value;
   const name = presetName.value.trim();
   const id = await savePresetEntry(savedValue, thumbnail, name || undefined, now);
   presets.value = await getAllPresetEntries();
@@ -333,6 +336,7 @@ async function quickSnapshot() {
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
   savedValue.textureName = selectedTexture.value;
+  savedValue.skyboxName = selectedSkyboxTexture.value;
   const now = new Date().toISOString();
   const id = await savePresetEntry(savedValue, thumbnail, undefined, now);
   presets.value = await getAllPresetEntries();
@@ -406,6 +410,7 @@ async function savePalette() {
     thumbnail,
     date: now,
     textureName: selectedTexture.value,
+    skyboxName: selectedSkyboxTexture.value,
     interpolationMode: model.value.interpolationMode,
     palettePeriod: model.value.palettePeriod,
     paletteOffset: model.value.paletteOffset,
@@ -428,6 +433,9 @@ function selectPalette(name: string) {
     // Restore texture if present
     if (palette.textureName) {
       selectTexture(palette.textureName);
+    }
+    if (palette.skyboxName) {
+      selectSkyboxTexture(palette.skyboxName);
     }
   }
 }
@@ -490,6 +498,10 @@ async function selectPreset(id: number) {
     const texName = saved.textureName;
     if (texName && textures.value.some(t => t.name === texName)) {
       selectTexture(texName);
+    }
+    const skyName = saved.skyboxName;
+    if (skyName && textures.value.some(t => t.name === skyName)) {
+      selectSkyboxTexture(skyName);
     }
   }
 }
@@ -921,23 +933,37 @@ function clearPalette() {
 // Tessellation Texture Library
 // =====================================================
 const TEXTURE_SELECTED_KEY = 'mandelbrot_selected_texture';
+const SKYBOX_SELECTED_KEY = 'mandelbrot_selected_skybox';
 const MAX_TEXTURE_SIZE = 4096;
 
 const textureName = ref('');
+const skyboxName = ref('');
 const textures = ref<TextureMetadata[]>([]);
 const selectedTexture = ref('Gold');
+const selectedSkyboxTexture = ref('Skybox');
 const showTextureDropdown = ref(false);
+const showSkyboxDropdown = ref(false);
 
 const currentTextureObj = computed(() => textures.value.find(t => t.name === selectedTexture.value));
 const currentTextureThumbnail = computed(() => currentTextureObj.value?.thumbnail);
+const currentSkyboxObj = computed(() => textures.value.find(t => t.name === selectedSkyboxTexture.value));
+const currentSkyboxThumbnail = computed(() => currentSkyboxObj.value?.thumbnail);
 
 /** Active blob URL — must be revoked when changed to avoid memory leaks. */
 const activeBlobUrl = ref<string | null>(null);
+const activeSkyboxBlobUrl = ref<string | null>(null);
 
 function revokeActiveBlobUrl() {
   if (activeBlobUrl.value) {
     URL.revokeObjectURL(activeBlobUrl.value);
     activeBlobUrl.value = null;
+  }
+}
+
+function revokeActiveSkyboxBlobUrl() {
+  if (activeSkyboxBlobUrl.value) {
+    URL.revokeObjectURL(activeSkyboxBlobUrl.value);
+    activeSkyboxBlobUrl.value = null;
   }
 }
 
@@ -989,8 +1015,8 @@ async function loadTextures() {
   // 3. Load metadata list
   textures.value = await getAllTextureEntries();
 
-  // 4. Restore persisted selection:
-  //    Priority: model.textureName (from parent/preset) > localStorage > default 'Gold'
+  // 4. Restore persisted selections:
+  //    Priority: model value (from parent/preset) > localStorage > built-in default
   const modelName = model.value.textureName;
   const savedName = localStorage.getItem(TEXTURE_SELECTED_KEY);
   const restoredName = (modelName && textures.value.some(t => t.name === modelName))
@@ -998,9 +1024,19 @@ async function loadTextures() {
     : (savedName && textures.value.some(t => t.name === savedName))
       ? savedName
       : 'Gold';
+  const modelSkyboxName = model.value.skyboxName;
+  const savedSkyboxName = localStorage.getItem(SKYBOX_SELECTED_KEY);
+  const restoredSkyboxName = (modelSkyboxName && textures.value.some(t => t.name === modelSkyboxName))
+    ? modelSkyboxName
+    : (savedSkyboxName && textures.value.some(t => t.name === savedSkyboxName))
+      ? savedSkyboxName
+      : 'Skybox';
   selectedTexture.value = restoredName;
   model.value.textureName = restoredName;
   textureName.value = restoredName;
+  selectedSkyboxTexture.value = restoredSkyboxName;
+  model.value.skyboxName = restoredSkyboxName;
+  skyboxName.value = restoredSkyboxName;
 }
 
 async function applyTextureToEngine(name: string, engine: import('../Engine').Engine) {
@@ -1011,6 +1047,14 @@ async function applyTextureToEngine(name: string, engine: import('../Engine').En
   await engine.updateTileTexture(activeBlobUrl.value);
 }
 
+async function applySkyboxToEngine(name: string, engine: import('../Engine').Engine) {
+  const blob = await getTextureBlob(name);
+  if (!blob) return;
+  revokeActiveSkyboxBlobUrl();
+  activeSkyboxBlobUrl.value = URL.createObjectURL(blob);
+  await engine.updateSkyboxTexture(activeSkyboxBlobUrl.value);
+}
+
 // Apply texture to engine whenever selectedTexture or engine changes.
 // This covers: initial load, tab re-mount, preset change, random, manual selection.
 watch([selectedTexture, () => props.engine] as const, async ([name, engine]) => {
@@ -1019,6 +1063,16 @@ watch([selectedTexture, () => props.engine] as const, async ([name, engine]) => 
       await applyTextureToEngine(name, engine);
     } catch (e) {
       console.warn('Failed to apply tile texture:', e);
+    }
+  }
+});
+
+watch([selectedSkyboxTexture, () => props.engine] as const, async ([name, engine]) => {
+  if (engine && name) {
+    try {
+      await applySkyboxToEngine(name, engine);
+    } catch (e) {
+      console.warn('Failed to apply skybox texture:', e);
     }
   }
 });
@@ -1046,6 +1100,27 @@ function selectTextureFromDropdown(tex: TextureMetadata) {
   selectTexture(tex.name);
 }
 
+async function selectSkyboxTexture(name: string) {
+  const tex = textures.value.find(t => t.name === name);
+  if (!tex) return;
+  selectedSkyboxTexture.value = name;
+  model.value.skyboxName = name;
+  skyboxName.value = tex.name;
+  showSkyboxDropdown.value = false;
+  localStorage.setItem(SKYBOX_SELECTED_KEY, name);
+  if (props.engine) {
+    try {
+      await applySkyboxToEngine(name, props.engine);
+    } catch (e) {
+      console.warn('Failed to update skybox texture:', e);
+    }
+  }
+}
+
+function selectSkyboxFromDropdown(tex: TextureMetadata) {
+  selectSkyboxTexture(tex.name);
+}
+
 async function deleteTexture() {
   const name = textureName.value.trim();
   if (!name) return;
@@ -1066,12 +1141,38 @@ async function deleteTexture() {
   }
 }
 
+async function deleteSkyboxTexture() {
+  const name = skyboxName.value.trim();
+  if (!name) return;
+  if (BUILT_IN_TEXTURE_NAMES.has(name)) {
+    window.alert('Built-in textures cannot be deleted.');
+    return;
+  }
+  if (window.confirm(`Delete skybox texture "${name}"? This cannot be undone.`)) {
+    const idx = textures.value.findIndex(t => t.name === name);
+    if (idx >= 0) {
+      textures.value.splice(idx, 1);
+      await deleteTextureEntry(name);
+      if (selectedTexture.value === name) {
+        await selectTexture('Gold');
+      }
+      await selectSkyboxTexture('Skybox');
+      skyboxName.value = 'Skybox';
+    }
+  }
+}
+
 const textureFileInput = ref<HTMLInputElement | null>(null);
+const skyboxFileInput = ref<HTMLInputElement | null>(null);
 function triggerImportTexture() {
   textureFileInput.value?.click();
 }
 
-async function importTexture(event: Event) {
+function triggerImportSkybox() {
+  skyboxFileInput.value?.click();
+}
+
+async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
   const input = event.target as HTMLInputElement;
   const file = input.files?.[0];
   if (!file) return;
@@ -1109,9 +1210,14 @@ async function importTexture(event: Event) {
     // Refresh metadata list
     textures.value = await getAllTextureEntries();
 
-    // Auto-select the newly imported texture
-    await selectTexture(name);
-    textureName.value = name;
+    // Auto-select the newly imported texture for the requested target
+    if (target === 'skybox') {
+      await selectSkyboxTexture(name);
+      skyboxName.value = name;
+    } else {
+      await selectTexture(name);
+      textureName.value = name;
+    }
     input.value = '';
   };
   img.onerror = () => {
@@ -1120,6 +1226,14 @@ async function importTexture(event: Event) {
     input.value = '';
   };
   img.src = tmpUrl;
+}
+
+async function importTexture(event: Event) {
+  await importTextureFor(event, 'tile');
+}
+
+async function importSkyboxTexture(event: Event) {
+  await importTextureFor(event, 'skybox');
 }
 
 async function renameAndSaveTexture() {
@@ -1138,6 +1252,28 @@ async function renameAndSaveTexture() {
     textures.value = await getAllTextureEntries();
     selectedTexture.value = name;
     localStorage.setItem(TEXTURE_SELECTED_KEY, name);
+  }
+}
+
+async function renameAndSaveSkyboxTexture() {
+  const name = skyboxName.value.trim();
+  if (!name) return;
+  const current = textures.value.find(t => t.name === selectedSkyboxTexture.value);
+  if (current && current.name !== name) {
+    if (BUILT_IN_TEXTURE_NAMES.has(current.name)) {
+      window.alert('Built-in textures cannot be renamed.');
+      skyboxName.value = current.name;
+      return;
+    }
+    if (textures.value.some(t => t.name === name)) {
+      window.alert(`A texture named "${name}" already exists.`);
+      return;
+    }
+    await renameTextureEntry(current.name, name);
+    textures.value = await getAllTextureEntries();
+    selectedSkyboxTexture.value = name;
+    model.value.skyboxName = name;
+    localStorage.setItem(SKYBOX_SELECTED_KEY, name);
   }
 }
 
@@ -1286,7 +1422,6 @@ async function renameAndSaveTexture() {
           :tessellation-level="model.tessellationLevel"
           :displacement-amount="model.displacementAmount"
           :ambient-occlusion-strength="model.ambientOcclusionStrength"
-          :roughness="model.roughness"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
           @invert="invertPalette"
@@ -1423,6 +1558,52 @@ async function renameAndSaveTexture() {
           </div>
           <div class="control">
             <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)">Delete</button>
+          </div>
+        </div>
+      </div>
+
+      <!-- Skybox Texture Library (same storage as material textures) -->
+      <div class="mb-3" style="margin-top: 0.8em;">
+        <label class="label" style="font-size:0.9em; margin-bottom:0.35em;">Skybox</label>
+        <div class="dropdown" :class="{ 'is-active': showSkyboxDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth is-small" @click="showSkyboxDropdown = !showSkyboxDropdown" aria-haspopup="true" aria-controls="dropdown-menu-skybox" type="button">
+              <span style="display:flex; align-items:center; min-height:28px;">
+                <img v-if="currentSkyboxThumbnail" :src="currentSkyboxThumbnail" alt="thumbnail" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedSkyboxTexture || 'Skybox...' }}</span>
+                <span class="icon is-small" style="margin-left:4px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-skybox" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:350px; overflow-y:auto;">
+              <a v-for="tex in textures" :key="'skybox-' + tex.name" class="dropdown-item"
+                @click.prevent="selectSkyboxFromDropdown(tex)"
+                :class="{ 'is-active': selectedSkyboxTexture === tex.name }"
+                style="display:flex; align-items:center; gap:0.5em;">
+                <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail"
+                  style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
+                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="field is-grouped" style="margin-top:0.5em;">
+          <div class="control is-expanded">
+            <input class="input is-small" v-model="skyboxName" type="text" placeholder="Nom skybox..."
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+              @keyup.enter="renameAndSaveSkyboxTexture"
+            />
+          </div>
+          <div class="control">
+            <button class="button is-warning is-small" @click="triggerImportSkybox">Import</button>
+            <input ref="skyboxFileInput" type="file" accept="image/*" style="display:none;" @change="importSkyboxTexture" />
+          </div>
+          <div class="control">
+            <button class="button is-danger is-small" @click="deleteSkyboxTexture" :disabled="!skyboxName || BUILT_IN_TEXTURE_NAMES.has(skyboxName)">Delete</button>
           </div>
         </div>
       </div>
@@ -1572,11 +1753,6 @@ async function renameAndSaveTexture() {
         <span class="gfx-slider-label">Ambient Occlusion</span>
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.ambientOcclusionStrength" />
         <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Roughness</span>
-        <input class="slider" type="range" min="0.02" max="1" step="0.01" v-model.number="model.roughness" />
-        <span class="gfx-slider-value">{{ (model.roughness ?? 0.35).toFixed(2) }}</span>
       </div>
 
       <hr class="section-sep"/>

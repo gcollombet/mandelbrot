@@ -17,7 +17,6 @@ const props = withDefaults(defineProps<{
   tessellationLevel?: number;
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
-  roughness?: number;
   applyToAll?: boolean;
 }>(), {
   interpolationMode: 'lab',
@@ -26,7 +25,6 @@ const props = withDefaults(defineProps<{
   tessellationLevel: 2,
   displacementAmount: 0.01,
   ambientOcclusionStrength: 0.5,
-  roughness: 0.35,
   applyToAll: false,
 });
 const emit = defineEmits<{
@@ -129,6 +127,9 @@ const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: numb
   shadingLevel:       { label: 'Brilliance',     min: 0, max: 3,     step: 0.05, unit: '' },
   specularPower:      { label: 'Specular',    min: 1, max: 64,    step: 0.5,  unit: '' },
   lightAngle:         { label: 'Direction',     min: 0, max: 6.283, step: 0.01, unit: 'rad' },
+  metallic:           { label: 'Metallic',      min: 0, max: 1,     step: 0.01, unit: '' },
+  roughness:          { label: 'Roughness',     min: 0.02, max: 1,  step: 0.01, unit: '' },
+  anisotropy:         { label: 'Anisotropy',    min: 0, max: 1,     step: 0.01, unit: '' },
 };
 
 /** Get the effective value of a field on the selected stop. */
@@ -213,7 +214,6 @@ defineExpose({ getSnapshot });
         :tessellationLevel="tessellationLevel"
         :displacementAmount="displacementAmount"
         :ambientOcclusionStrength="ambientOcclusionStrength"
-        :roughness="roughness"
       />
       <div class="handles-overlay">
         <GlissiereHandle
@@ -303,7 +303,7 @@ defineExpose({ getSnapshot });
 
       <!-- ── Lighting ── -->
       <label class="effects-group-title">Lighting</label>
-      <template v-for="field in (['shading','skybox','shadingLevel','specularPower','lightAngle'] as EffectFieldName[])" :key="field">
+      <template v-for="field in (['shading','skybox','shadingLevel','specularPower','lightAngle','metallic','roughness','anisotropy'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
           <input

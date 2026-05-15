@@ -2,14 +2,14 @@
  * A single stop in the extended palette.
  *
  * `color` and `position` define the RGB gradient as before.
- * The 10 optional effect fields are encoded into palette-texture rows 0-3
+ * The optional effect fields are encoded into palette-texture rows 0-3
  * and interpolated between stops just like colors.
  *
  * Texture layout (4096 x 4, rgba16float):
  *   Row 0 (y = 0.125): R, G, B, palette   (palette = opacity of RGB color)
  *   Row 1 (y = 0.375): zebra, tessellation, shading, skybox
  *   Row 2 (y = 0.625): webcam, smoothness, shadingLevel, specularPower
- *   Row 3 (y = 0.875): lightAngle, (reserved), (reserved), (reserved)
+ *   Row 3 (y = 0.875): lightAngle, metallic, roughness, anisotropy
  *
  * tessellationLevel and displacementAmount are global uniforms (not per-stop).
  *
@@ -30,7 +30,7 @@ export type ColorStop = {
   zebra?: number;
   /** Tessellation source weight (default 0) */
   tessellation?: number;
-  /** Phong-style shading intensity (default 0) */
+  /** Lighting/material intensity (default 0) */
   shading?: number;
   /** Skybox reflection weight inside shading (default 0) */
   skybox?: number;
@@ -43,10 +43,16 @@ export type ColorStop = {
 
   /** Shading diffuse/ambient level, range [0, 3] (default 1.5) */
   shadingLevel?: number;
-  /** Specular exponent, range [1, 64] (default 20) */
+  /** Specular intensity, range [1, 64] (default 20) */
   specularPower?: number;
   /** Light azimuth angle in radians, range [0, 2pi] (default 0.75) */
   lightAngle?: number;
+  /** Metallic response, range [0, 1] (default 0) */
+  metallic?: number;
+  /** Per-stop roughness, range [0.02, 1] (default 0.35) */
+  roughness?: number;
+  /** Anisotropic highlight strength, range [0, 1] (default 0.4) */
+  anisotropy?: number;
 
   // Legacy fields (kept for backward compat with saved presets, ignored by renderer)
   /** @deprecated Now a global uniform. Kept for preset compat. */
@@ -70,6 +76,9 @@ export const COLOR_STOP_DEFAULTS = {
   shadingLevel: 1.5,
   specularPower: 20.0,
   lightAngle: 0.75,
+  metallic: 0.0,
+  roughness: 0.35,
+  anisotropy: 0.4,
 } as const satisfies Record<EffectFieldName, number>;
 
 /** All optional effect field names (activation weights + continuous params). */
@@ -84,6 +93,9 @@ export const EFFECT_FIELD_NAMES = [
   'shadingLevel',
   'specularPower',
   'lightAngle',
+  'metallic',
+  'roughness',
+  'anisotropy',
 ] as const;
 
 export type EffectFieldName = (typeof EFFECT_FIELD_NAMES)[number];
