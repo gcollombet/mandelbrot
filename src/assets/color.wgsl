@@ -20,6 +20,8 @@ struct Uniforms {
   microBumpStrength: f32,
   clearcoatStrength: f32,
   subsurfaceStrength: f32,
+  reliefDepth: f32,
+  localShadowStrength: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -256,7 +258,72 @@ fn texture_bump_normal(tex_: texture_2d<f32>, normal: vec3<f32>, tangent: vec3<f
   return normalize(normal - bump);
 }
 
-fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32, isInterior: bool) -> vec3<f32> {
+fn fractal_height_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, fractalGradient: vec2<f32>, reliefDepth: f32) -> vec3<f32> {
+  let strength = clamp(reliefDepth, 0.0, 2.0);
+  let grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
+  return normalize(normal - tangent * grad.x * 0.34 * strength - bitangent * grad.y * 0.34 * strength);
+}
+
+fn fractal_height_ao(fractalGradient: vec2<f32>, reliefDepth: f32, strength: f32) -> f32 {
+  let slope = length(clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0)));
+  let occStrength = clamp(strength * 5.0, 0.0, 10.0);
+  let occ = smoothstep(0.12, 2.75, slope * clamp(reliefDepth, 0.0, 2.0)) * occStrength;
+  return clamp(1.0 - occ * 0.72, 0.16, 1.0);
+}
+
+fn surface_cavity(fractalGradient: vec2<f32>, reliefDepth: f32, strength: f32) -> f32 {
+  let slope = length(clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0)));
+  let relief = clamp(reliefDepth, 0.0, 2.0);
+  let occStrength = clamp(strength * 5.0, 0.0, 10.0);
+  let amount = smoothstep(0.04, 1.45, slope * relief) * occStrength;
+  return clamp(1.0 - amount * 0.48, 0.26, 1.0);
+}
+
+fn fractal_height_shadow(fractalGradient: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, reliefDepth: f32, strength: f32) -> f32 {
+  let lightPlane = vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent));
+  let lightPlaneLen = length(lightPlane);
+  if (lightPlaneLen < 1e-4 || strength <= 0.0 || reliefDepth <= 0.0) {
+    return 1.0;
+  }
+  let lightPlaneDir = lightPlane / lightPlaneLen;
+  let grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
+  let uphillTowardLight = max(dot(grad, lightPlaneDir), 0.0);
+  let grazing = 1.0 / max(lightDir.z + 0.35, 0.35);
+  let occStrength = clamp(strength * 5.0, 0.0, 10.0);
+  let shadow = uphillTowardLight * 0.22 * grazing * clamp(reliefDepth, 0.0, 2.0) * occStrength;
+  return clamp(1.0 - shadow, 0.22, 1.0);
+}
+
+fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f32 {
+  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
+  let zx = textureLoad(sourceTex, coord, 2, 0).r;
+  let zy = textureLoad(sourceTex, coord, 3, 0).r;
+  let derX = textureLoad(sourceTex, coord, 4, 0).r;
+  let derY = textureLoad(sourceTex, coord, 5, 0).r;
+  if (escape_nu(iterVal, zx, zy) < 0.0) {
+    return -1e6;
+  }
+
+  let zLen = max(length(vec2<f32>(zx, zy)), 1.000001);
+  let derLen = max(length(vec2<f32>(derX, derY)), 1e-8);
+  let distanceEstimate = max(0.5 * zLen * log(zLen) / derLen, 1e-12);
+  return clamp(-log(distanceEstimate), -8.0, 24.0);
+}
+
+fn sample_distance_height(sourceTex: texture_2d_array<f32>, uv: vec2<f32>) -> f32 {
+  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+    return -1e6;
+  }
+
+  let texSize = vec2<i32>(textureDimensions(sourceTex));
+  let coord = vec2<i32>(
+    i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
+    i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
+  );
+  return load_distance_height(sourceTex, coord);
+}
+
+fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32, fractalGradient: vec2<f32>, isInterior: bool) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
@@ -307,10 +374,13 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
 
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
-    let baseNormal = mandelbrot_normal(angle_der);
+    let reliefDepth = parameters.reliefDepth * effShading;
+    let surfaceRelief = clamp(reliefDepth * 0.5, 0.0, 1.0);
+    let flatNormal = vec3<f32>(0.0, 0.0, 1.0);
+    let baseNormal = normalize(mix(flatNormal, mandelbrot_normal(angle_der), surfaceRelief));
     let baseTangent = mandelbrot_tangent(angle_der, baseNormal);
     let baseBitangent = normalize(cross(baseNormal, baseTangent));
-    let normal = texture_bump_normal(
+    let bumpedNormal = texture_bump_normal(
       tileTex,
       baseNormal,
       baseTangent,
@@ -320,9 +390,19 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
       parameters.tessellationLevel,
       parameters.microBumpStrength * effTess
     );
-    let ao = pseudo_ambient_occlusion(normal, v_smooth, z);
+    let heightNormal = fractal_height_normal(bumpedNormal, baseTangent, baseBitangent, fractalGradient, reliefDepth);
+    let normal = heightNormal;
+    let heightAo = fractal_height_ao(fractalGradient, reliefDepth, parameters.localShadowStrength);
+    let surfaceOcclusionStrength = clamp(parameters.localShadowStrength * 5.0, 0.0, 10.0);
+    let normalCavity = clamp(
+      1.0 - smoothstep(0.02, 0.62, 1.0 - normal.z) * 0.58 * surfaceOcclusionStrength,
+      0.16,
+      1.0
+    );
+    let cavity = min(surface_cavity(fractalGradient, reliefDepth, parameters.localShadowStrength), normalCavity);
+    let ao = min(pseudo_ambient_occlusion(normal, v_smooth, z), heightAo) * cavity;
     let la = fx.lightAngle;
-    let lightDir = normalize(vec3<f32>(cos(la), sin(la), 0.5));
+    let lightDir = normalize(vec3<f32>(cos(la), sin(la), 1.85));
     let viewDir = normalize(vec3<f32>(cos(la + 0.5), sin(la + 0.5), 0.5));
     let halfDir = normalize(lightDir + viewDir);
     let tangent = mandelbrot_tangent(angle_der, normal);
@@ -344,9 +424,11 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
     let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL;
     let diffuseColor = color * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
-    let diffuseLight = diffuseColor * (0.14 + 0.86 * nDotL) * ao;
+    let localShadow = fractal_height_shadow(fractalGradient, lightDir, tangent, bitangent, reliefDepth, parameters.localShadowStrength);
+    let shadowedNDotL = nDotL * localShadow;
+    let diffuseLight = diffuseColor * (0.14 + 0.86 * shadowedNDotL) * ao;
     let brightness = max(fx.shadingLevel, 0.0);
-    var materialColor = diffuseLight + directSpecular * ao;
+    var materialColor = diffuseLight + directSpecular * ao * mix(1.0, localShadow, 0.45);
 
     materialColor += fake_subsurface_scattering(
       color,
@@ -383,11 +465,41 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     let wear = edgeWear * (0.15 + 0.35 * metallic) * effShading;
     materialColor = mix(materialColor, materialColor + wearColor * wear, clamp(edgeWear, 0.0, 1.0));
 
-    let pbrColor = (materialColor + envColor + rimColor) * (0.55 + brightness * 0.45);
+    materialColor *= mix(1.0, cavity, 0.65);
+
+    let pbrColor = (materialColor + envColor * mix(1.0, cavity, 0.35) + rimColor) * (0.55 + brightness * 0.45);
     color = mix(color * ao, pbrColor, effShading);
   }
 
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
+  if (iter_val <= 0.0) {
+    return -1.0;
+  }
+  let z_sq = zx_val * zx_val + zy_val * zy_val;
+  if (z_sq < parameters.mu) {
+    return -1.0;
+  }
+  let log_z2 = log(max(z_sq, 1e-12));
+  let mu_val = clamp(1.0 - log(log_z2 / log(parameters.mu)) / log(2.0), 0.0, 1.0);
+  return iter_val + mu_val;
+}
+
+fn distance_height_gradient(sourceTex: texture_2d_array<f32>, uv: vec2<f32>) -> vec2<f32> {
+  let texSize = vec2<i32>(textureDimensions(sourceTex));
+  let pixel = vec2<f32>(1.0 / f32(texSize.x), 1.0 / f32(texSize.y));
+  let centerHeight = sample_distance_height(sourceTex, uv);
+  let xr = sample_distance_height(sourceTex, uv + vec2<f32>(pixel.x, 0.0));
+  let xl = sample_distance_height(sourceTex, uv - vec2<f32>(pixel.x, 0.0));
+  let yu = sample_distance_height(sourceTex, uv + vec2<f32>(0.0, pixel.y));
+  let yd = sample_distance_height(sourceTex, uv - vec2<f32>(0.0, pixel.y));
+  let rightHeight = select(centerHeight, xr, xr > -1e5);
+  let leftHeight = select(centerHeight, xl, xl > -1e5);
+  let upHeight = select(centerHeight, yu, yu > -1e5);
+  let downHeight = select(centerHeight, yd, yd > -1e5);
+  return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 2.5;
 }
 
 // ── Colorize a single pixel from its raw layer values ──────────────
@@ -395,7 +507,8 @@ fn colorize_pixel(
   iter_val: f32, zx_val: f32, zy_val: f32,
   der_x: f32, der_y: f32,
   ref_i_val: f32,
-  uv_neutral: vec2<f32>
+  uv_neutral: vec2<f32>,
+  fractalGradient: vec2<f32>
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
   if (iter_val < 0.0) {
@@ -449,7 +562,7 @@ fn colorize_pixel(
 
   let v = nu;
   let v_smooth = nu_smooth;
-  var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y, false);
+  var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y, fractalGradient, false);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -513,14 +626,18 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     liveStep = textureLoad(tex, liveCoord, 1, 0).r;
 
     if (live_iter >= 0.0) {
+      let live_zx = textureLoad(tex, liveCoord, 2, 0).r;
+      let live_zy = textureLoad(tex, liveCoord, 3, 0).r;
+      let liveGradient = distance_height_gradient(tex, uv_live);
       liveColor = colorize_pixel(
         live_iter,
-        textureLoad(tex, liveCoord, 2, 0).r,
-        textureLoad(tex, liveCoord, 3, 0).r,
+        live_zx,
+        live_zy,
         textureLoad(tex, liveCoord, 4, 0).r,
         textureLoad(tex, liveCoord, 5, 0).r,
         textureLoad(tex, liveCoord, 6, 0).r,
-        uv_neutral
+        uv_neutral,
+        liveGradient
       );
     }
   }
@@ -555,14 +672,18 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       frozenStep = textureLoad(texFrozen, frozenCoord, 1, 0).r;
 
       if (frozen_iter >= 0.0) {
+        let frozen_zx = textureLoad(texFrozen, frozenCoord, 2, 0).r;
+        let frozen_zy = textureLoad(texFrozen, frozenCoord, 3, 0).r;
+        let frozenGradient = distance_height_gradient(texFrozen, uv_frozen);
         frozenColor = colorize_pixel(
           frozen_iter,
-          textureLoad(texFrozen, frozenCoord, 2, 0).r,
-          textureLoad(texFrozen, frozenCoord, 3, 0).r,
+          frozen_zx,
+          frozen_zy,
           textureLoad(texFrozen, frozenCoord, 4, 0).r,
           textureLoad(texFrozen, frozenCoord, 5, 0).r,
           textureLoad(texFrozen, frozenCoord, 6, 0).r,
-          uv_neutral
+          uv_neutral,
+          frozenGradient
         );
       }
     }

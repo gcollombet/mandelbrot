@@ -113,6 +113,8 @@ const model =  defineModel<MandelbrotParams>({
      microBumpStrength: 0.25,
      clearcoatStrength: 0.7,
      subsurfaceStrength: 0.0,
+     reliefDepth: 0.35,
+     localShadowStrength: 0.4,
      textureName: 'Gold',
      skyboxName: 'Skybox',
     dprMultiplier: 1.0,
@@ -1428,6 +1430,8 @@ async function renameAndSaveSkyboxTexture() {
           :micro-bump-strength="model.microBumpStrength"
           :clearcoat-strength="model.clearcoatStrength"
           :subsurface-strength="model.subsurfaceStrength"
+          :relief-depth="model.reliefDepth"
+          :local-shadow-strength="model.localShadowStrength"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
           @invert="invertPalette"
@@ -1774,6 +1778,16 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-label">Subsurface</span>
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.subsurfaceStrength" />
         <span class="gfx-slider-value">{{ (model.subsurfaceStrength ?? 0).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Surface Relief</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
+        <span class="gfx-slider-value">{{ (model.reliefDepth ?? 0.35).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Surface Occlusion</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.localShadowStrength" />
+        <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0.4).toFixed(2) }}</span>
       </div>
 
       <hr class="section-sep"/>

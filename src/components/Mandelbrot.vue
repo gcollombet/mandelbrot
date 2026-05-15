@@ -59,6 +59,8 @@ const props = withDefaults(defineProps<{
   microBumpStrength?: number,
   clearcoatStrength?: number,
   subsurfaceStrength?: number,
+  reliefDepth?: number,
+  localShadowStrength?: number,
  }>(),
 
     {
@@ -110,6 +112,8 @@ const props = withDefaults(defineProps<{
         microBumpStrength: 0.25,
         clearcoatStrength: 0.7,
         subsurfaceStrength: 0.0,
+        reliefDepth: 0.35,
+        localShadowStrength: 0.4,
      }
 );
 
@@ -182,6 +186,8 @@ async function draw() {
         microBumpStrength: props.microBumpStrength,
         clearcoatStrength: props.clearcoatStrength,
         subsurfaceStrength: props.subsurfaceStrength,
+        reliefDepth: props.reliefDepth,
+        localShadowStrength: props.localShadowStrength,
       }
     )
     await engine.render()
@@ -216,6 +222,8 @@ async function initWebGPU() {
     microBumpStrength: props.microBumpStrength,
     clearcoatStrength: props.clearcoatStrength,
     subsurfaceStrength: props.subsurfaceStrength,
+    reliefDepth: props.reliefDepth,
+    localShadowStrength: props.localShadowStrength,
   });
   return engine.initialize(navigator)
 }

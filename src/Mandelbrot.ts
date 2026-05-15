@@ -45,6 +45,8 @@ export interface MandelbrotParams {
     microBumpStrength?: number;
     clearcoatStrength?: number;
     subsurfaceStrength?: number;
+    reliefDepth?: number;
+    localShadowStrength?: number;
     textureName?: string;
     skyboxName?: string;
 }

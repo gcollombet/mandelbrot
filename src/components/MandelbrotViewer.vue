@@ -221,6 +221,8 @@ const mandelbrotParams = ref<MandelbrotParams>({
   microBumpStrength: 0.25,
   clearcoatStrength: 0.7,
   subsurfaceStrength: 0.0,
+  reliefDepth: 0.35,
+  localShadowStrength: 0.4,
   textureName: 'Gold',
 });
 
@@ -552,6 +554,8 @@ const shortcutLabels = computed(() => {
       :microBumpStrength="mandelbrotParams.microBumpStrength"
       :clearcoatStrength="mandelbrotParams.clearcoatStrength"
       :subsurfaceStrength="mandelbrotParams.subsurfaceStrength"
+      :reliefDepth="mandelbrotParams.reliefDepth"
+      :localShadowStrength="mandelbrotParams.localShadowStrength"
     />
 
     <!-- Popup Settings — one per open tab (multi-window) -->

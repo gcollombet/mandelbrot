@@ -28,6 +28,8 @@ const props = withDefaults(defineProps<{
   microBumpStrength?: number;
   clearcoatStrength?: number;
   subsurfaceStrength?: number;
+  reliefDepth?: number;
+  localShadowStrength?: number;
   applyToAll?: boolean;
 }>(), {
   interpolationMode: 'lab',
@@ -39,6 +41,8 @@ const props = withDefaults(defineProps<{
   microBumpStrength: 0.25,
   clearcoatStrength: 0.7,
   subsurfaceStrength: 0.0,
+  reliefDepth: 0.35,
+  localShadowStrength: 0.4,
   applyToAll: false,
 });
 const emit = defineEmits<{
@@ -287,6 +291,8 @@ defineExpose({ getSnapshot });
         :microBumpStrength="microBumpStrength"
         :clearcoatStrength="clearcoatStrength"
         :subsurfaceStrength="subsurfaceStrength"
+        :reliefDepth="reliefDepth"
+        :localShadowStrength="localShadowStrength"
       />
       <div class="handles-overlay">
         <GlissiereHandle
