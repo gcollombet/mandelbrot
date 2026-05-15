@@ -126,6 +126,30 @@ fn mandelbrot_normal(angle_der: f32) -> vec3<f32> {
   return normalize(vec3<f32>(cos(angle_der), sin(angle_der), 0.5));
 }
 
+fn fresnel_schlick(cosTheta: f32, f0: vec3<f32>) -> vec3<f32> {
+  let m = clamp(1.0 - cosTheta, 0.0, 1.0);
+  let m2 = m * m;
+  let m5 = m2 * m2 * m;
+  return f0 + (vec3<f32>(1.0) - f0) * m5;
+}
+
+fn ggx_distribution(nDotH: f32, roughness: f32) -> f32 {
+  let a = roughness * roughness;
+  let a2 = a * a;
+  let d = nDotH * nDotH * (a2 - 1.0) + 1.0;
+  return a2 / max(3.14159265 * d * d, 1e-5);
+}
+
+fn ggx_geometry_schlick(nDotV: f32, roughness: f32) -> f32 {
+  let r = roughness + 1.0;
+  let k = (r * r) / 8.0;
+  return nDotV / max(nDotV * (1.0 - k) + k, 1e-5);
+}
+
+fn ggx_geometry_smith(nDotV: f32, nDotL: f32, roughness: f32) -> f32 {
+  return ggx_geometry_schlick(nDotV, roughness) * ggx_geometry_schlick(nDotL, roughness);
+}
+
 fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec3<f32> {
   let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
   let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
@@ -198,10 +222,20 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     let la = fx.lightAngle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 0.5));
     let viewDir = normalize(vec3<f32>(cos(la + 0.5), sin(la + 0.5), 0.5));
-    let diff = max(dot(normal, lightDir), 0.0);
-    let reflectDir = reflect(-lightDir, normal);
-    let specular = pow(max(dot(viewDir, reflectDir), 0.0), fx.specularPower);
-    let raw = 0.4 * diff + 0.6 * specular;
+    let halfDir = normalize(lightDir + viewDir);
+    let nDotL = max(dot(normal, lightDir), 0.0);
+    let nDotV = max(dot(normal, viewDir), 0.0);
+    let nDotH = max(dot(normal, halfDir), 0.0);
+    let vDotH = max(dot(viewDir, halfDir), 0.0);
+    let roughness = clamp(sqrt(2.0 / (fx.specularPower + 2.0)), 0.08, 1.0);
+    let f0 = mix(vec3<f32>(0.04), color, effShading * 0.2 + fx.wSkybox * 0.15);
+    let fresnelSpec = fresnel_schlick(vDotH, f0);
+    let distribution = ggx_distribution(nDotH, roughness);
+    let geometry = ggx_geometry_smith(nDotV, nDotL, roughness);
+    let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
+    let specular = ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0) * specularTerm;
+    let diffuse = nDotL * (1.0 - 0.35 * ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0));
+    let raw = 0.55 * diffuse + 0.85 * specular;
     let brightness = fx.shadingLevel;
     var shading = 1.0 - brightness * 0.2 + brightness * 1.2 * raw;
 
@@ -214,8 +248,11 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
       let skyboxUV = dir_to_skybox_uv(skyboxDir, dx + sky_drift_u, dy + sky_drift_v);
       let skyboxColor = textureSampleLevel(skyboxTex, skyboxSampler, skyboxUV, 0.0).rgb;
       let lum = 0.2126 * skyboxColor.r + 0.7152 * skyboxColor.g + 0.0722 * skyboxColor.b;
+      let fresnel = fresnel_schlick(nDotV, mix(vec3<f32>(0.04), color, fx.wSkybox * 0.35));
+      let reflectionStrength = fx.wSkybox * clamp((fresnel.r + fresnel.g + fresnel.b) / 3.0, 0.0, 1.0);
       let shading_with_sky = 0.5 + (shading - 0.5) * (0.5 + lum);
-      shading = mix(shading, shading_with_sky, fx.wSkybox);
+      shading = mix(shading, shading_with_sky, reflectionStrength);
+      color = mix(color, skyboxColor, reflectionStrength * 0.35);
     }
 
     // Apply shading proportionally to wShading

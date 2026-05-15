@@ -13,7 +13,7 @@ import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import bronzeUrl from './assets/bronze.webp'
-import skyboxUrl from './assets/gold.jpg'
+import skyboxUrl from './assets/skybox.png'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
