@@ -108,6 +108,7 @@ export type RenderOptions = {
     displacementAmount: number,
     animationSpeed: number,
     ambientOcclusionStrength: number,
+    roughness: number,
 }
 
 export type ApproximationMode = 'perturbation' | 'bla'
@@ -399,7 +400,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 20, // 18 floats padded to 16-byte alignment (80 bytes)
+            size: 4 * 20, // 19 floats padded to 16-byte alignment (80 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1051,6 +1052,7 @@ export class Engine {
             renderOptions.animationSpeed,   // 15: animationSpeed
             mandelbrot.epsilon,             // 16: epsilon
             renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
+            renderOptions.roughness,        // 18: roughness
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

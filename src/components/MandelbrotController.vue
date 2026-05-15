@@ -31,6 +31,7 @@ const props = defineProps<{
   displacementAmount?: number,
   animationSpeed?: number,
   ambientOcclusionStrength?: number,
+  roughness?: number,
 }>();
 
 const emit = defineEmits<{
@@ -408,6 +409,7 @@ onUnmounted(() => {
       :displacementAmount="props.displacementAmount"
       :animationSpeed="props.animationSpeed"
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
+      :roughness="props.roughness"
     />
     
     <!-- Contrôles de navigation mobile -->

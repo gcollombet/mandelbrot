@@ -56,6 +56,7 @@ const props = withDefaults(defineProps<{
   displacementAmount?: number,
   animationSpeed?: number,
   ambientOcclusionStrength?: number,
+  roughness?: number,
  }>(),
 
     {
@@ -104,6 +105,7 @@ const props = withDefaults(defineProps<{
         displacementAmount: 0.01,
         animationSpeed: 1.0,
         ambientOcclusionStrength: 0.5,
+        roughness: 0.35,
      }
 );
 
@@ -173,6 +175,7 @@ async function draw() {
         displacementAmount: props.displacementAmount,
         animationSpeed: props.animationSpeed,
         ambientOcclusionStrength: props.ambientOcclusionStrength,
+        roughness: props.roughness,
       }
     )
     await engine.render()
@@ -204,6 +207,7 @@ async function initWebGPU() {
     displacementAmount: props.displacementAmount,
     animationSpeed: props.animationSpeed,
     ambientOcclusionStrength: props.ambientOcclusionStrength,
+    roughness: props.roughness,
   });
   return engine.initialize(navigator)
 }

@@ -108,6 +108,7 @@ const model =  defineModel<MandelbrotParams>({
      activateAnimate: false,
      animationSpeed: 1.0,
      ambientOcclusionStrength: 0.5,
+     roughness: 0.35,
      textureName: 'Gold',
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
@@ -1285,6 +1286,7 @@ async function renameAndSaveTexture() {
           :tessellation-level="model.tessellationLevel"
           :displacement-amount="model.displacementAmount"
           :ambient-occlusion-strength="model.ambientOcclusionStrength"
+          :roughness="model.roughness"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
           @invert="invertPalette"
@@ -1568,8 +1570,13 @@ async function renameAndSaveTexture() {
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Ambient Occlusion</span>
-        <input class="slider" type="range" min="0" max="1" step="0.01" v-model.number="model.ambientOcclusionStrength" />
+        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.ambientOcclusionStrength" />
         <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Roughness</span>
+        <input class="slider" type="range" min="0.02" max="1" step="0.01" v-model.number="model.roughness" />
+        <span class="gfx-slider-value">{{ (model.roughness ?? 0.35).toFixed(2) }}</span>
       </div>
 
       <hr class="section-sep"/>

@@ -17,6 +17,7 @@ struct Uniforms {
   animationSpeed: f32,    // global multiplier on drift frequencies [0.1, 5.0]
   epsilon: f32,           // interior detection threshold (|der|² < epsilon)
   ambientOcclusionStrength: f32,
+  roughness: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
@@ -151,13 +152,32 @@ fn ggx_geometry_smith(nDotV: f32, nDotL: f32, roughness: f32) -> f32 {
   return ggx_geometry_schlick(nDotV, roughness) * ggx_geometry_schlick(nDotL, roughness);
 }
 
+fn mandelbrot_tangent(angle_der: f32, normal: vec3<f32>) -> vec3<f32> {
+  let flow = vec3<f32>(-sin(angle_der), cos(angle_der), 0.0);
+  let projected = flow - normal * dot(flow, normal);
+  let projectedLen = length(projected);
+  return select(vec3<f32>(1.0, 0.0, 0.0), projected / projectedLen, projectedLen > 1e-5);
+}
+
+fn anisotropic_highlight(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, halfDir: vec3<f32>, nDotL: f32, nDotV: f32, roughness: f32) -> f32 {
+  let tDotH = dot(tangent, halfDir);
+  let bDotH = dot(bitangent, halfDir);
+  let nDotH = max(dot(normal, halfDir), 1e-5);
+  let alphaT = max(0.06, roughness * 0.45);
+  let alphaB = max(0.12, roughness * 1.65);
+  let stretch = (tDotH * tDotH) / (alphaT * alphaT) + (bDotH * bDotH) / (alphaB * alphaB);
+  let lobe = exp(-stretch / max(nDotH * nDotH, 1e-5));
+  let visibility = sqrt(max(nDotL * nDotV, 0.0));
+  return lobe * visibility;
+}
+
 fn pseudo_ambient_occlusion(normal: vec3<f32>, v_smooth: f32, z: vec2<f32>) -> f32 {
   let cavity = pow(clamp(1.0 - normal.z, 0.0, 1.0), 1.35);
   let depthMask = clamp(1.0 - exp(-v_smooth * 0.035), 0.0, 1.0);
   let basinMask = clamp(length(z) / 2.5, 0.0, 1.0);
-  let strength = clamp(parameters.ambientOcclusionStrength, 0.0, 1.0);
+  let strength = clamp(parameters.ambientOcclusionStrength, 0.0, 10.0);
   let ao = 1.0 - (0.55 * cavity + 0.25 * depthMask + 0.20 * basinMask) * 0.45 * strength;
-  return clamp(ao, 0.55, 1.0);
+  return clamp(ao, 0.08, 1.0);
 }
 
 fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec3<f32> {
@@ -234,17 +254,22 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 0.5));
     let viewDir = normalize(vec3<f32>(cos(la + 0.5), sin(la + 0.5), 0.5));
     let halfDir = normalize(lightDir + viewDir);
+    let tangent = mandelbrot_tangent(angle_der, normal);
+    let bitangent = normalize(cross(normal, tangent));
     let nDotL = max(dot(normal, lightDir), 0.0);
     let nDotV = max(dot(normal, viewDir), 0.0);
     let nDotH = max(dot(normal, halfDir), 0.0);
     let vDotH = max(dot(viewDir, halfDir), 0.0);
-    let roughness = clamp(sqrt(2.0 / (fx.specularPower + 2.0)), 0.08, 1.0);
+    let roughness = clamp(parameters.roughness, 0.02, 1.0);
+    let anisotropy = clamp(1.0 - roughness * 0.75, 0.0, 1.0);
+    let specularGain = clamp(fx.specularPower / 16.0, 0.15, 4.0);
     let f0 = mix(vec3<f32>(0.04), color, effShading * 0.2 + fx.wSkybox * 0.15);
     let fresnelSpec = fresnel_schlick(vDotH, f0);
     let distribution = ggx_distribution(nDotH, roughness);
     let geometry = ggx_geometry_smith(nDotV, nDotL, roughness);
     let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
-    let specular = ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0) * specularTerm;
+    let anisotropicTerm = anisotropic_highlight(normal, tangent, bitangent, halfDir, nDotL, nDotV, roughness);
+    let specular = ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0) * mix(specularTerm, anisotropicTerm, anisotropy * 0.65) * specularGain;
     let diffuse = nDotL * (1.0 - 0.35 * ((fresnelSpec.r + fresnelSpec.g + fresnelSpec.b) / 3.0));
     let raw = (0.55 * diffuse + 0.85 * specular) * ao;
     let brightness = fx.shadingLevel;
