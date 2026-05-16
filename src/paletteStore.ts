@@ -3,7 +3,8 @@
  *
  * Palettes are stored with `name` as the primary key (unique identifier).
  * Each record contains the full color stops array, interpolation mode,
- * period/offset, texture name, a thumbnail data-URL, and a date.
+ * period/offset, material/texture look settings, a thumbnail data-URL,
+ * and a date.
  *
  * The legacy `mandelbrot_palettes` localStorage key is migrated
  * automatically on first access.
@@ -34,6 +35,16 @@ export interface PaletteRecord {
   interpolationMode?: InterpolationMode;
   palettePeriod?: number;
   paletteOffset?: number;
+  activateAnimate?: boolean;
+  animationSpeed?: number;
+  tessellationLevel?: number;
+  displacementAmount?: number;
+  ambientOcclusionStrength?: number;
+  microBumpStrength?: number;
+  clearcoatStrength?: number;
+  subsurfaceStrength?: number;
+  reliefDepth?: number;
+  localShadowStrength?: number;
 }
 
 /** Lightweight entry for listings (same shape since palettes are small). */

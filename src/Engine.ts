@@ -285,6 +285,8 @@ export class Engine {
     tileTextureView?: GPUTextureView
     skyboxTexture?: GPUTexture
     skyboxTextureView?: GPUTextureView
+    private tileTextureSourceKey?: string
+    private skyboxTextureSourceKey?: string
     paletteTexture?: GPUTexture
     paletteTextureView?: GPUTextureView
     paletteSampler?: GPUSampler
@@ -1675,11 +1677,13 @@ export class Engine {
      * The new texture replaces the current one and the color bind group is rebuilt.
      * Max supported size: 4096×4096.
      */
-    async updateTileTexture(url: string): Promise<void> {
+    async updateTileTexture(url: string, sourceKey = url): Promise<void> {
+        if (this.tileTextureSourceKey === sourceKey) return
         const newTexture = await this._loadTexture(url)
         this.tileTexture?.destroy?.()
         this.tileTexture = newTexture
         this.tileTextureView = this.tileTexture.createView()
+        this.tileTextureSourceKey = sourceKey
         this.rebuildColorBindGroup()
         this.needRender = true
     }
@@ -1687,11 +1691,13 @@ export class Engine {
     /**
      * Replace the environment/skybox texture at runtime from a data URL or blob URL.
      */
-    async updateSkyboxTexture(url: string): Promise<void> {
+    async updateSkyboxTexture(url: string, sourceKey = url): Promise<void> {
+        if (this.skyboxTextureSourceKey === sourceKey) return
         const newTexture = await this._loadTexture(url)
         this.skyboxTexture?.destroy?.()
         this.skyboxTexture = newTexture
         this.skyboxTextureView = this.skyboxTexture.createView()
+        this.skyboxTextureSourceKey = sourceKey
         this.rebuildColorBindGroup()
         this.needRender = true
     }

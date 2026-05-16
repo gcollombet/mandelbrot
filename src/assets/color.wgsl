@@ -217,14 +217,14 @@ fn curvature_edge_wear(angle_der: f32, v_smooth: f32) -> f32 {
   return clamp(directionalRidge * 0.65 + iterationRidge * 0.35, 0.0, 1.0);
 }
 
-fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32) -> vec3<f32> {
+fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceHeight: f32) -> vec3<f32> {
   let backLight = pow(max(dot(normal, -lightDir), 0.0), 1.35);
   let rimScatter = pow(clamp(1.0 - nDotV, 0.0, 1.0), 2.15);
   let wrapLight = pow(clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0), 2.0);
-  let thickness = clamp((1.0 - ao) * 0.35 + edgeWear * 0.65, 0.0, 1.0);
-  let mask = (backLight * 0.45 + rimScatter * 0.35 + wrapLight * 0.20) * thickness;
-  let warmScatter = vec3<f32>(1.0, 0.42, 0.16);
-  let scatterColor = mix(color * color, warmScatter, 0.25);
+  let thinness = 1.0 - smoothstep(4.0, 13.0, distanceHeight);
+  let thickness = clamp(thinness * 0.62 + (1.0 - ao) * 0.23 + edgeWear * 0.15, 0.0, 1.0);
+  let mask = (backLight * 0.35 + rimScatter * 0.25 + wrapLight * 0.40) * thickness;
+  let scatterColor = mix(color, sqrt(max(color, vec3<f32>(0.0))), 0.35);
   return scatterColor * mask * clamp(strength, 0.0, 10.0) * (1.0 - metallic);
 }
 
@@ -323,7 +323,7 @@ fn sample_distance_height(sourceTex: texture_2d_array<f32>, uv: vec2<f32>) -> f3
   return load_distance_height(sourceTex, coord);
 }
 
-fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32, fractalGradient: vec2<f32>, isInterior: bool) -> vec3<f32> {
+fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32, fractalGradient: vec2<f32>, distanceHeight: f32, isInterior: bool) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
@@ -438,7 +438,8 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
       ao,
       edgeWear,
       metallic,
-      parameters.subsurfaceStrength
+      parameters.subsurfaceStrength,
+      distanceHeight
     );
 
     // Thin clearcoat layer: a sharp white lobe sitting above the base material.
@@ -508,7 +509,8 @@ fn colorize_pixel(
   der_x: f32, der_y: f32,
   ref_i_val: f32,
   uv_neutral: vec2<f32>,
-  fractalGradient: vec2<f32>
+  fractalGradient: vec2<f32>,
+  distanceHeight: f32
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
   if (iter_val < 0.0) {
@@ -562,7 +564,7 @@ fn colorize_pixel(
 
   let v = nu;
   let v_smooth = nu_smooth;
-  var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y, fractalGradient, false);
+  var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y, fractalGradient, distanceHeight, false);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -628,6 +630,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     if (live_iter >= 0.0) {
       let live_zx = textureLoad(tex, liveCoord, 2, 0).r;
       let live_zy = textureLoad(tex, liveCoord, 3, 0).r;
+      let liveDistanceHeight = load_distance_height(tex, liveCoord);
       let liveGradient = distance_height_gradient(tex, uv_live);
       liveColor = colorize_pixel(
         live_iter,
@@ -637,7 +640,8 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         textureLoad(tex, liveCoord, 5, 0).r,
         textureLoad(tex, liveCoord, 6, 0).r,
         uv_neutral,
-        liveGradient
+        liveGradient,
+        liveDistanceHeight
       );
     }
   }
@@ -674,6 +678,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       if (frozen_iter >= 0.0) {
         let frozen_zx = textureLoad(texFrozen, frozenCoord, 2, 0).r;
         let frozen_zy = textureLoad(texFrozen, frozenCoord, 3, 0).r;
+        let frozenDistanceHeight = load_distance_height(texFrozen, frozenCoord);
         let frozenGradient = distance_height_gradient(texFrozen, uv_frozen);
         frozenColor = colorize_pixel(
           frozen_iter,
@@ -683,7 +688,8 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
           textureLoad(texFrozen, frozenCoord, 5, 0).r,
           textureLoad(texFrozen, frozenCoord, 6, 0).r,
           uv_neutral,
-          frozenGradient
+          frozenGradient,
+          frozenDistanceHeight
         );
       }
     }

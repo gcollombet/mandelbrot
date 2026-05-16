@@ -419,10 +419,33 @@ async function savePalette() {
     interpolationMode: model.value.interpolationMode,
     palettePeriod: model.value.palettePeriod,
     paletteOffset: model.value.paletteOffset,
+    activateAnimate: model.value.activateAnimate,
+    animationSpeed: model.value.animationSpeed,
+    tessellationLevel: model.value.tessellationLevel,
+    displacementAmount: model.value.displacementAmount,
+    ambientOcclusionStrength: model.value.ambientOcclusionStrength,
+    microBumpStrength: model.value.microBumpStrength,
+    clearcoatStrength: model.value.clearcoatStrength,
+    subsurfaceStrength: model.value.subsurfaceStrength,
+    reliefDepth: model.value.reliefDepth,
+    localShadowStrength: model.value.localShadowStrength,
   };
   await savePaletteEntry(palette);
   palettes.value = await getAllPaletteEntries();
   paletteName.value = '';
+}
+
+function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
+  if (source.activateAnimate != null) model.value.activateAnimate = source.activateAnimate;
+  if (source.animationSpeed != null) model.value.animationSpeed = source.animationSpeed;
+  if (source.tessellationLevel != null) model.value.tessellationLevel = source.tessellationLevel;
+  if (source.displacementAmount != null) model.value.displacementAmount = source.displacementAmount;
+  if (source.ambientOcclusionStrength != null) model.value.ambientOcclusionStrength = source.ambientOcclusionStrength;
+  if (source.microBumpStrength != null) model.value.microBumpStrength = source.microBumpStrength;
+  if (source.clearcoatStrength != null) model.value.clearcoatStrength = source.clearcoatStrength;
+  if (source.subsurfaceStrength != null) model.value.subsurfaceStrength = source.subsurfaceStrength;
+  if (source.reliefDepth != null) model.value.reliefDepth = source.reliefDepth;
+  if (source.localShadowStrength != null) model.value.localShadowStrength = source.localShadowStrength;
 }
 
 function selectPalette(name: string) {
@@ -435,6 +458,7 @@ function selectPalette(name: string) {
     if (palette.interpolationMode) model.value.interpolationMode = palette.interpolationMode;
     if (palette.palettePeriod != null) model.value.palettePeriod = palette.palettePeriod;
     if (palette.paletteOffset != null) model.value.paletteOffset = palette.paletteOffset;
+    applyPaletteLookFields(palette);
     // Restore texture if present
     if (palette.textureName) {
       selectTexture(palette.textureName);
@@ -465,6 +489,7 @@ async function selectPaletteFromPreset(id: number) {
     model.value.interpolationMode = record.value.interpolationMode;
     model.value.palettePeriod = record.value.palettePeriod;
     model.value.paletteOffset = record.value.paletteOffset;
+    applyPaletteLookFields(record.value);
   }
 }
 
@@ -1047,17 +1072,19 @@ async function loadTextures() {
 async function applyTextureToEngine(name: string, engine: import('../Engine').Engine) {
   const blob = await getTextureBlob(name);
   if (!blob) return;
+  const textureMeta = textures.value.find(t => t.name === name);
   revokeActiveBlobUrl();
   activeBlobUrl.value = URL.createObjectURL(blob);
-  await engine.updateTileTexture(activeBlobUrl.value);
+  await engine.updateTileTexture(activeBlobUrl.value, `${name}:${textureMeta?.date ?? ''}`);
 }
 
 async function applySkyboxToEngine(name: string, engine: import('../Engine').Engine) {
   const blob = await getTextureBlob(name);
   if (!blob) return;
+  const textureMeta = textures.value.find(t => t.name === name);
   revokeActiveSkyboxBlobUrl();
   activeSkyboxBlobUrl.value = URL.createObjectURL(blob);
-  await engine.updateSkyboxTexture(activeSkyboxBlobUrl.value);
+  await engine.updateSkyboxTexture(activeSkyboxBlobUrl.value, `${name}:${textureMeta?.date ?? ''}`);
 }
 
 // Apply texture to engine whenever selectedTexture or engine changes.
@@ -1515,6 +1542,41 @@ async function renameAndSaveSkyboxTexture() {
 
       <hr class="section-sep"/>
 
+      <!-- ═══ SURFACE ═══ -->
+      <label class="gfx-section-title">Surface</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Ambient Occlusion</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.ambientOcclusionStrength" />
+        <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Micro Bump</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
+        <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0.25).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Clearcoat</span>
+        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.clearcoatStrength" />
+        <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0.7).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Subsurface</span>
+        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.subsurfaceStrength" />
+        <span class="gfx-slider-value">{{ (model.subsurfaceStrength ?? 0).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Surface Relief</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
+        <span class="gfx-slider-value">{{ (model.reliefDepth ?? 0.35).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Surface Occlusion</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.localShadowStrength" />
+        <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0.4).toFixed(2) }}</span>
+      </div>
+
+      <hr class="section-sep"/>
+
       <!-- ═══ TEXTURE ═══ -->
       <label class="gfx-section-title">Texture</label>
       <div class="gfx-slider-row">
@@ -1623,7 +1685,7 @@ async function renameAndSaveSkyboxTexture() {
       <!-- Extract palette from a preset -->
       <div class="mb-3">
         <label class="label">Extract from preset</label>
-        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applies the colors, interpolation, period, and offset from a preset.</p>
+        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applies the colors, interpolation, period, offset, and material look from a preset.</p>
         <div class="dropdown" :class="{ 'is-active': showPalettePresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showPalettePresetDropdown = !showPalettePresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palette-presets" type="button">
@@ -1759,39 +1821,6 @@ async function renameAndSaveSkyboxTexture() {
         </div>
         <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : 'Classic' }}</span>
       </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Ambient Occlusion</span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.ambientOcclusionStrength" />
-        <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Micro Bump</span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
-        <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0.25).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Clearcoat</span>
-        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.clearcoatStrength" />
-        <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0.7).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Subsurface</span>
-        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.subsurfaceStrength" />
-        <span class="gfx-slider-value">{{ (model.subsurfaceStrength ?? 0).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Surface Relief</span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
-        <span class="gfx-slider-value">{{ (model.reliefDepth ?? 0.35).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Surface Occlusion</span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.localShadowStrength" />
-        <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0.4).toFixed(2) }}</span>
-      </div>
-
-      <hr class="section-sep"/>
-
       <!-- ═══ PERFORMANCE ═══ -->
       <label class="gfx-section-title">Performance</label>
       <div class="gfx-slider-row">
