@@ -63,15 +63,15 @@ fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
   return textureLoad(rawTex, coord, layer, 0).r;
 }
 
-fn loadAllLayers(coord: vec2<i32>) -> FragOut {
+fn empty_out() -> FragOut {
   var o: FragOut;
-  o.iter      = pack(loadLayer(coord, 0));
-  o.genuine   = pack(loadLayer(coord, 1));
-  o.zx        = pack(loadLayer(coord, 2));
-  o.zy        = pack(loadLayer(coord, 3));
-  o.dzx       = pack(loadLayer(coord, 4));
-  o.dzy       = pack(loadLayer(coord, 5));
-  o.ref_i     = pack(loadLayer(coord, 6));
+  o.iter      = pack(0.0);
+  o.genuine   = pack(0.0);
+  o.zx        = pack(0.0);
+  o.zy        = pack(0.0);
+  o.dzx       = pack(0.0);
+  o.dzy       = pack(0.0);
+  o.ref_i     = pack(0.0);
   return o;
 }
 
@@ -111,7 +111,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   // Finished pixel: escaped (iter > 0, |z|² >= mu) or inside (iter == 0).
   // Pass through unchanged.
   if (iter_val == 0.0) {
-    return loadAllLayers(coord);
+    discard;
+    return empty_out();
   }
   if (iter_val > 0.0) {
     let zx = loadLayer(coord, 2);
@@ -119,7 +120,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     let z_sq = zx * zx + zy * zy;
     if (z_sq > uni.mu) {
       // Escaped — finished, pass through.
-      return loadAllLayers(coord);
+      discard;
+      return empty_out();
     }
     // Budget-exhausted anchor (iter > 0, |z|² < mu):
     // climb to a coarser finished ancestor starting at step 2.
@@ -134,7 +136,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   if (iter_val < 0.0) {
     let step_f = -iter_val;
     if (step_f <= 1.0) {
-      return loadAllLayers(coord);
+      discard;
+      return empty_out();
     }
     step_u = floor_power_of_two(u32(step_f));
   } else {
@@ -159,7 +162,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // to the pixel itself (prevents runaway on pathological inputs
     // or when all ancestors are unfinished sentinels).
     if (step_u >= dims.x || step_u >= dims.y) {
-      return loadAllLayers(coord);
+      discard;
+      return empty_out();
     }
 
     let step_i = i32(step_u);
@@ -219,5 +223,6 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   }
 
   // Fallback after exhausting all grid levels.
-  return loadAllLayers(coord);
+  discard;
+  return empty_out();
 }

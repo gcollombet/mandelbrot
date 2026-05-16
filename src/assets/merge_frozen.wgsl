@@ -79,10 +79,10 @@ fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, angle: f32) ->
 }
 
 // Read all 7 layers from a texture at the given coordinate.
-fn readAllLayers(tex: texture_2d_array<f32>, coord: vec2<i32>) -> FragOut {
+fn readAllLayersWithKnown01(tex: texture_2d_array<f32>, coord: vec2<i32>, iter: f32, step: f32) -> FragOut {
   var o: FragOut;
-  o.layer0 = pack(textureLoad(tex, coord, 0, 0).r);
-  o.layer1 = pack(textureLoad(tex, coord, 1, 0).r);
+  o.layer0 = pack(iter);
+  o.layer1 = pack(step);
   o.layer2 = pack(textureLoad(tex, coord, 2, 0).r);
   o.layer3 = pack(textureLoad(tex, coord, 3, 0).r);
   o.layer4 = pack(textureLoad(tex, coord, 4, 0).r);
@@ -137,7 +137,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
   var liveStep = 0.0;
   var liveIter = -1.0;
-  var liveData: FragOut;
+  var liveData = makeEmpty();
   if (liveInBounds) {
     let liveCoord = vec2<i32>(
       i32(clamp(uv_live.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
@@ -145,7 +145,9 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     );
     liveIter = textureLoad(texResolved, liveCoord, 0, 0).r;
     liveStep = textureLoad(texResolved, liveCoord, 1, 0).r;
-    liveData = readAllLayers(texResolved, liveCoord);
+    if (liveIter >= 0.0 && liveStep > 0.0) {
+      liveData = readAllLayersWithKnown01(texResolved, liveCoord, liveIter, liveStep);
+    }
   }
   let liveHasData = liveIter >= 0.0 && liveStep > 0.0;
 
@@ -163,7 +165,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
   var frozenStep = 0.0;
   var frozenIter = -1.0;
-  var frozenData: FragOut;
+  var frozenData = makeEmpty();
   if (frozenInBounds) {
     let frozenCoord = vec2<i32>(
       i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
@@ -171,7 +173,9 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     );
     frozenIter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
     frozenStep = textureLoad(texFrozen, frozenCoord, 1, 0).r;
-    frozenData = readAllLayers(texFrozen, frozenCoord);
+    if (frozenIter >= 0.0 && frozenStep > 0.0) {
+      frozenData = readAllLayersWithKnown01(texFrozen, frozenCoord, frozenIter, frozenStep);
+    }
   }
   let frozenHasData = frozenIter >= 0.0 && frozenStep > 0.0;
 

@@ -1429,9 +1429,17 @@ export class Engine {
             commandEncoder.copyBufferToBuffer(this.counterBuffer, 0, this.counterReadBuffer, 0, 8)
         }
 
+        // Pre-fill resolved with A so resolve.wgsl can discard pass-through
+        // pixels and only write sentinels / unfinished anchors that need snapping.
+        commandEncoder.copyTextureToTexture(
+            { texture: this.rawTexture },
+            { texture: this.resolvedTexture },
+            { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: LAYER_COUNT },
+        )
+
         // Pass 2: resolve des sentinelles (A -> resolved)
         const rpassResolve = commandEncoder.beginRenderPass({
-            colorAttachments: makeMrtAttachments(this.resolvedLayerViews),
+            colorAttachments: makeMrtAttachments(this.resolvedLayerViews, 'load'),
         })
         rpassResolve.setPipeline(this.pipelineResolve)
         rpassResolve.setBindGroup(0, this.bindGroupResolve)

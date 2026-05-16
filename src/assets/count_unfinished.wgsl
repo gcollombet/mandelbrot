@@ -73,17 +73,24 @@ fn count_unfinished(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   let coord = vec2<i32>(i32(gid.x), i32(gid.y));
   let iter = textureLoad(rawTex, coord, 0, 0).r;
-  let zx   = textureLoad(rawTex, coord, 2, 0).r;
-  let zy   = textureLoad(rawTex, coord, 3, 0).r;
 
-  let is_sentinel        = (iter < 0.0);
-  let needs_continuation = (iter > 0.0) && ((zx * zx + zy * zy) < params.mu);
-  let is_active          = (iter == -1.0) || needs_continuation;
-
-  if (is_sentinel || needs_continuation) {
+  if (iter < 0.0) {
     atomicAdd(&counter.count, 1u);
+    if (iter == -1.0) {
+      atomicAdd(&counter.active_count, 1u);
+    }
+    return;
   }
-  if (is_active) {
+
+  if (iter <= 0.0) {
+    return;
+  }
+
+  let zx = textureLoad(rawTex, coord, 2, 0).r;
+  let zy = textureLoad(rawTex, coord, 3, 0).r;
+  let needs_continuation = (zx * zx + zy * zy) < params.mu;
+  if (needs_continuation) {
+    atomicAdd(&counter.count, 1u);
     atomicAdd(&counter.active_count, 1u);
   }
 }
