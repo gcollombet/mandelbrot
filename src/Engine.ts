@@ -1364,11 +1364,14 @@ export class Engine {
         }
 
         // Helper: build 7 MRT color attachments from per-layer views
-        const makeMrtAttachments = (layerViews: GPUTextureView[]): GPURenderPassColorAttachment[] =>
+        const makeMrtAttachments = (
+            layerViews: GPUTextureView[],
+            loadOp: GPULoadOp = 'clear',
+        ): GPURenderPassColorAttachment[] =>
             layerViews.map(view => ({
                 view,
                 clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                loadOp: 'clear' as GPULoadOp,
+                loadOp,
                 storeOp: 'store' as GPUStoreOp,
             }))
 
@@ -1381,11 +1384,20 @@ export class Engine {
         rpassBrush.draw(6, 1, 0, 0)
         rpassBrush.end()
 
-        // Pass 1: Mandelbrot (B -> A), calcule uniquement les pixels == -1
+        // Pre-fill A with B so mandelbrot.wgsl can discard pass-through pixels
+        // instead of rewriting all 7 MRT layers for inactive pixels.
+        commandEncoder.copyTextureToTexture(
+            { texture: this.rawBrushTexture },
+            { texture: this.rawTexture },
+            { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: LAYER_COUNT },
+        )
+
+        // Pass 1: Mandelbrot (B -> A), writes only active pixels; inactive ones
+        // were already copied B -> A above and are discarded by the fragment shader.
         // When globalMaxIter = 0 (no orbit data), the shader acts as a pure
         // pass-through (sentinels stay as-is) — see mandelbrot.wgsl.
         const rpassMandelbrot = commandEncoder.beginRenderPass({
-            colorAttachments: makeMrtAttachments(this.rawLayerViews),
+            colorAttachments: makeMrtAttachments(this.rawLayerViews, 'load'),
         })
         rpassMandelbrot.setPipeline(this.pipelineMandelbrot)
         rpassMandelbrot.setBindGroup(0, this.bindGroupMandelbrot)

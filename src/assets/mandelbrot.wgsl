@@ -35,11 +35,11 @@ struct Mandelbrot {
   mu: f32,
   scale: f32,
   aspect: f32,
-  angle: f32,
+  angle: f32,           // currently unused here; rotation is handled by brush/color reprojection
   maxIteration: f32,    // iterations to compute THIS pass
   epsilon: f32,
-  antialiasLevel: f32,
-  iterationOffset: f32, // iterations already completed in previous passes
+  antialiasLevel: f32,  // currently unused in this pass
+  iterationOffset: f32, // currently unused; prev_iter carries continuation state
   globalMaxIter: f32,   // total iteration target for the current view
   orbitComplete: f32,   // 1.0 = orbit fully built, 0.0 = still building
   approximationMode: f32,
@@ -96,12 +96,6 @@ fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
-fn cdiv(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
-  let denominator: f32 = b.x * b.x + b.y * b.y;
-  return vec2<f32>((a.x * b.x + a.y * b.y) / denominator,
-                   (a.y * b.x - a.x * b.y) / denominator);
-}
-
 fn getOrbit(index: i32) -> vec2<f32> {
   return vec2<f32>(
     mandelbrotOrbitPointSuite[index].zx,
@@ -109,12 +103,7 @@ fn getOrbit(index: i32) -> vec2<f32> {
   );
 }
 
-fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: ptr<function, vec2<f32>>, dc: vec2<f32>) -> i32 {
-  if (mandelbrot.approximationMode < 0.5 || mandelbrot.orbitComplete < 0.5 || mandelbrot.blaLevelCount < 1.0) {
-    return 0;
-  }
-
-  let dcMag = sqrt(max(0.0, dot(dc, dc)));
+fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: ptr<function, vec2<f32>>, dc: vec2<f32>, dcMag: f32) -> i32 {
   var level = i32(mandelbrot.blaLevelCount) - 1;
   let max_iter = i32(mandelbrot.globalMaxIter);
   while (level >= 0) {
@@ -163,6 +152,18 @@ fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
   return textureLoad(rawIn, coord, layer, 0).r;
 }
 
+fn empty_out() -> FragOut {
+  var out: FragOut;
+  out.iter      = pack(0.0);
+  out.genuine   = pack(0.0);
+  out.zx        = pack(0.0);
+  out.zy        = pack(0.0);
+  out.dzx       = pack(0.0);
+  out.dzy       = pack(0.0);
+  out.ref_i     = pack(0.0);
+  return out;
+}
+
 // ── core computation ──────────────────────────────────────────────
 fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_dzx: f32, prev_dzy: f32, prev_ref_i: f32) -> FragOut {
   let dc = vec2<f32>(x0, y0);
@@ -175,51 +176,85 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var i: f32 = 0.0;
   var dz = vec2<f32>(prev_zx, prev_zy);
   var der = vec2<f32>(prev_dzx, prev_dzy);
-  var ref_i = i32(prev_ref_i)  ;
+  var ref_i = i32(prev_ref_i);
   var z = getOrbit(ref_i);
 
   var escaped = false;
   var inside = false;
 
-  while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
-    var next_der = der;
-    let skipped = try_apply_bla(&ref_i, &dz, &der, dc);
-    if (skipped > 0) {
-      z = getOrbit(ref_i) + dz;
-      next_der = der;
-      i += f32(skipped);
-    } else {
+  let useBla = mandelbrot.approximationMode >= 0.5
+            && mandelbrot.orbitComplete >= 0.5
+            && mandelbrot.blaLevelCount >= 1.0;
+
+  if (useBla) {
+    let dcMag = sqrt(max(0.0, dot(dc, dc)));
+    while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
+      var next_der = der;
+      let skipped = try_apply_bla(&ref_i, &dz, &der, dc, dcMag);
+      if (skipped > 0) {
+        z = getOrbit(ref_i) + dz;
+        next_der = der;
+        i += f32(skipped);
+      } else {
+        z = getOrbit(ref_i);
+        dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
+        ref_i += 1;
+        z = getOrbit(ref_i) + dz;
+        next_der = cmul(der * 2.0, z);
+        i += 1.0;
+      }
+
+      let dot_z = dot(z, z);
+      if (dot_z > muLimit) {
+        escaped = true;
+        break;
+      }
+      if (!IGNORE_EPSILON && dot(der, der) < epsilon) {
+        inside = true;
+        break;
+      }
+
+      let dot_dz = dot(dz, dz);
+      if (dot_z < dot_dz || f32(ref_i) == mandelbrot.globalMaxIter) {
+        dz = z;
+        ref_i = 0;
+      }
+
+      der = next_der;
+    }
+  } else {
+    while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
       z = getOrbit(ref_i);
       dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
       ref_i += 1;
       z = getOrbit(ref_i) + dz;
-      next_der = cmul(der * 2.0, z);
+      let next_der = cmul(der * 2.0, z);
       i += 1.0;
-    }
 
-    let dot_z = dot(z, z);
-    if (dot_z > muLimit) {
-      escaped = true;
-      break;
-    }
-    if (!IGNORE_EPSILON && dot(der, der) < epsilon) {
-      inside = true;
-      break;
-    }
+      let dot_z = dot(z, z);
+      if (dot_z > muLimit) {
+        escaped = true;
+        break;
+      }
+      if (!IGNORE_EPSILON && dot(der, der) < epsilon) {
+        inside = true;
+        break;
+      }
 
-    let dot_dz = dot(dz, dz);
-    if (dot_z < dot_dz || f32(ref_i) == mandelbrot.globalMaxIter) {
-      dz = z;
-      ref_i = 0;
-    }
+      let dot_dz = dot(dz, dz);
+      if (dot_z < dot_dz || f32(ref_i) == mandelbrot.globalMaxIter) {
+        dz = z;
+        ref_i = 0;
+      }
 
-    der = next_der;
+      der = next_der;
+    }
   }
 
   var out: FragOut;
 
   if (inside) {
-    // Confirmed inside the set. Store iteration count in ref_i for interior coloring.
+    // Confirmed inside the set. Keep total iteration in ref_i for diagnostics/compatibility.
     out.iter      = pack(0.0);
     out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
@@ -251,7 +286,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   if (total_iter >= globalMax && mandelbrot.orbitComplete >= 0.5) {
     // Reached the global iteration target without escaping AND the orbit
     // is fully built.  Mark as "inside for now" (iter = 0).
-    // Store iteration count in ref_i for interior coloring.
+    // Keep total iteration in ref_i for diagnostics/compatibility.
     out.iter      = pack(0.0);
     out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
@@ -284,24 +319,14 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   );
 
   let prev_iter = loadLayer(coord, 0);
-  let prev_zx   = loadLayer(coord, 2);
-  let prev_zy   = loadLayer(coord, 3);
-  let prev_ref_i = loadLayer(coord, 6);
 
   // When the reference orbit has no data yet (globalMaxIter == 0),
   // pass through all pixels unchanged — including sentinels.
   // This avoids marking uncomputed pixels as "inside the set" (iter = 0)
   // when no orbit steps are available to iterate.
   if (mandelbrot.globalMaxIter <= 0.0) {
-    var out: FragOut;
-    out.iter      = pack(prev_iter);
-    out.genuine   = pack(loadLayer(coord, 1));
-    out.zx        = pack(prev_zx);
-    out.zy        = pack(prev_zy);
-    out.dzx       = pack(loadLayer(coord, 4));
-    out.dzy       = pack(loadLayer(coord, 5));
-    out.ref_i     = pack(loadLayer(coord, 6));
-    return out;
+    discard;
+    return empty_out();
   }
 
   // Determine pixel state (iter-only convention):
@@ -311,19 +336,23 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   //   iter > 0  AND  |z|² < 4       : budget exhausted mid-progress, needs continuation
   //   iter < 0  AND  iter != -1     : resolution sentinel, pass through
   let is_compute_request = (prev_iter == -1.0);
-  let needs_continuation = (prev_iter > 0.0 && (prev_zx * prev_zx + prev_zy * prev_zy) < mandelbrot.mu);
 
-  if (!is_compute_request && !needs_continuation) {
-    // Pass through all 7 layers unchanged.
-    var out: FragOut;
-    out.iter      = pack(prev_iter);
-    out.genuine   = pack(loadLayer(coord, 1));
-    out.zx        = pack(prev_zx);
-    out.zy        = pack(prev_zy);
-    out.dzx       = pack(loadLayer(coord, 4));
-    out.dzy       = pack(loadLayer(coord, 5));
-    out.ref_i     = pack(loadLayer(coord, 6));
-    return out;
+  if (!is_compute_request && prev_iter <= 0.0) {
+    discard;
+    return empty_out();
+  }
+
+  var prev_zx = 0.0;
+  var prev_zy = 0.0;
+  var needs_continuation = false;
+  if (!is_compute_request) {
+    prev_zx = loadLayer(coord, 2);
+    prev_zy = loadLayer(coord, 3);
+    needs_continuation = (prev_zx * prev_zx + prev_zy * prev_zy) < mandelbrot.mu;
+    if (!needs_continuation) {
+      discard;
+      return empty_out();
+    }
   }
 
   // Neutral mapping: the neutral texture is a square that can contain the rotated screen.
@@ -334,13 +363,19 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let x0 = local_rot.x * mandelbrot.scale + mandelbrot.cx;
   let y0 = local_rot.y * mandelbrot.scale + mandelbrot.cy;
 
+  if (is_compute_request) {
+    // Fresh computation (sentinel == -1).
+    return mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+  }
+
   if (needs_continuation) {
     // Resume from stored state: iter > 0, |z|² < mu.
     let stored_dzx = loadLayer(coord, 4);
     let stored_dzy = loadLayer(coord, 5);
+    let prev_ref_i = loadLayer(coord, 6);
     return mandelbrot_compute(x0, y0, prev_iter, prev_zx, prev_zy, stored_dzx, stored_dzy, prev_ref_i);
   }
 
-  // Fresh computation (sentinel == -1).
-  return mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+  discard;
+  return empty_out();
 }
