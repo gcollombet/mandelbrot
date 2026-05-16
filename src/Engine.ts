@@ -48,10 +48,22 @@ const UNFINISHED_PIXEL_DONE_THRESHOLD = 10
 // EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
 const GPU_TIME_EMA_ALPHA = 0.25
 
+// Count unfinished pixels less often than every render frame.  The readback is
+// asynchronous, so this controls the compute/count pass frequency, not display FPS.
+const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
+const COUNTER_READBACK_BUFFER_COUNT = 3
+
 // Orbit chunking: compute reference orbit incrementally to avoid blocking.
 // Each frame computes at most this many iterations of arbitrary-precision
 // math, then yields so the browser stays responsive.
 const ORBIT_CHUNK_SIZE = 100
+
+type CounterReadbackSlot = {
+    buffer: GPUBuffer
+    pending: boolean
+    sequence: number
+    generation: number
+}
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -184,7 +196,13 @@ export class Engine {
     // GPU pixel counter (replaces blanket extraFrames = 1000)
     private pipelineCount?: GPUComputePipeline
     private counterBuffer?: GPUBuffer
-    private counterReadBuffer?: GPUBuffer
+    private counterReadbackSlots: CounterReadbackSlot[] = []
+    private counterReadbackWriteIndex = 0
+    private counterReadbackSequence = 0
+    private latestAppliedCounterReadbackSequence = 0
+    private counterReadbackGeneration = 0
+    private renderFrameSerial = 0
+    private lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
     private counterBindGroup?: GPUBindGroup
     private uniformBufferCount?: GPUBuffer
     /** Number of pixels still needing work. -1 = not yet known, 0 = fully converged. */
@@ -206,6 +224,8 @@ export class Engine {
     gpuFrameTimeMs = 0
     /** Exponentially smoothed GPU frame time (for adaptive refinement gating). */
     smoothedGpuTimeMs = 0
+    /** True while a delayed GPU timing sample is waiting for queue completion. */
+    private pendingGpuTiming = false
     /** Whether refinement was gated (blocked) on the previous frame. */
     private refinementWasGated = false
     private _fpsFrameCount = 0
@@ -444,11 +464,16 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
-        this.counterReadBuffer = this.device.createBuffer({
-            size: 8,
-            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
-            label: 'Engine Counter Readback',
-        })
+        this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
+            buffer: this.device.createBuffer({
+                size: 8,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+                label: `Engine Counter Readback ${index}`,
+            }),
+            pending: false,
+            sequence: 0,
+            generation: 0,
+        }))
         this.uniformBufferCount = this.device.createBuffer({
             size: 4 * 4, // 3 floats (mu, aspect, angle) padded to 16-byte alignment
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -642,6 +667,121 @@ export class Engine {
         this.rebuildMandelbrotBindGroup()
     }
 
+    private invalidateCounterReadback() {
+        this.unfinishedPixelCount = -1
+        this.activePixelCount = -1
+        this.counterReadbackGeneration++
+        this.lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
+    }
+
+    private hasPendingCounterReadbackForCurrentGeneration(): boolean {
+        return this.counterReadbackSlots.some(slot =>
+            slot.pending && slot.generation === this.counterReadbackGeneration
+        )
+    }
+
+    private acquireCounterReadbackSlot(): CounterReadbackSlot | undefined {
+        const slotCount = this.counterReadbackSlots.length
+        for (let i = 0; i < slotCount; i++) {
+            const index = (this.counterReadbackWriteIndex + i) % slotCount
+            const slot = this.counterReadbackSlots[index]
+            if (!slot.pending) {
+                this.counterReadbackWriteIndex = (index + 1) % slotCount
+                return slot
+            }
+        }
+        return undefined
+    }
+
+    private scheduleCounterReadback(slot: CounterReadbackSlot, sequence: number, generation: number) {
+        slot.pending = true
+        slot.sequence = sequence
+        slot.generation = generation
+
+        void (async () => {
+            let mapped = false
+            try {
+                await slot.buffer.mapAsync(GPUMapMode.READ)
+                mapped = true
+                const data = new Uint32Array(slot.buffer.getMappedRange())
+                const unfinished = data[0]
+                const active = data[1]
+                this.applyCounterReadback(sequence, generation, unfinished, active)
+            } catch {
+                // Buffer destruction or device loss can reject an outstanding readback.
+            } finally {
+                if (mapped) {
+                    slot.buffer.unmap()
+                }
+                slot.pending = false
+            }
+        })()
+    }
+
+    private applyCounterReadback(sequence: number, generation: number, unfinished: number, active: number) {
+        if (generation !== this.counterReadbackGeneration) {
+            return
+        }
+        if (sequence <= this.latestAppliedCounterReadbackSequence) {
+            return
+        }
+        this.latestAppliedCounterReadbackSequence = sequence
+
+        const prevUnfinished = this.unfinishedPixelCount
+        this.unfinishedPixelCount = unfinished
+        this.activePixelCount = active
+
+        // When progressive computation just finished, snapshot resolved→frozen
+        // so the unified color path has a valid frozen fallback for future clears.
+        if (prevUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
+            && unfinished <= UNFINISHED_PIXEL_DONE_THRESHOLD
+            && !this.zoomReprojectionActive) {
+            this.needFreezeSnapshot = true
+        }
+    }
+
+    private scheduleGpuTiming(submitStartMs: number) {
+        if (this.pendingGpuTiming) {
+            return
+        }
+
+        this.pendingGpuTiming = true
+        void this.device.queue.onSubmittedWorkDone()
+            .then(() => {
+                this.pendingGpuTiming = false
+                this.applyGpuFrameTiming(performance.now() - submitStartMs)
+            })
+            .catch(() => {
+                this.pendingGpuTiming = false
+            })
+    }
+
+    private applyGpuFrameTiming(elapsed: number) {
+        this.gpuFrameTimeMs = elapsed
+
+        if (this.smoothedGpuTimeMs === 0) {
+            this.smoothedGpuTimeMs = elapsed
+        } else {
+            this.smoothedGpuTimeMs =
+                this.smoothedGpuTimeMs * (1 - GPU_TIME_EMA_ALPHA)
+                + elapsed * GPU_TIME_EMA_ALPHA
+        }
+
+        if (elapsed <= 0) {
+            return
+        }
+
+        const ratio = (1000 / this.targetFps) / elapsed
+        const ideal = this.iterationBatchSize * ratio
+        this.iterationBatchSize = Math.round(
+            Math.min(MAX_BATCH_SIZE,
+                Math.max(MIN_BATCH_SIZE,
+                    this.iterationBatchSize * 0.7 + ideal * 0.3
+                )
+            )
+        )
+    }
+
     resize() {
         const dpr = (window.devicePixelRatio || 1) * this.dprMultiplier
         // Lire la taille CSS du canvas (pas du parent) pour respecter les contraintes CSS
@@ -817,8 +957,7 @@ export class Engine {
         this.previousMandelbrot = undefined  // force update() to re-write all uniforms
         this.previousRenderOptions = undefined
         this.needRender = true
-        this.unfinishedPixelCount = -1 // reset: not yet known after resize
-        this.activePixelCount = -1
+        this.invalidateCounterReadback() // reset: not yet known after resize
     }
 
     areObjectsEqual(obj1: any, obj2: any): boolean {
@@ -863,7 +1002,7 @@ export class Engine {
         this.currentBlaLevelCount = 0
         this.clearHistoryNextFrame = true
         this.needRender = true
-        this.unfinishedPixelCount = -1
+        this.invalidateCounterReadback()
     }
 
     getApproximationMode(): ApproximationMode {
@@ -881,7 +1020,7 @@ export class Engine {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
-            this.unfinishedPixelCount = -1
+            this.invalidateCounterReadback()
         }
     }
 
@@ -903,13 +1042,14 @@ export class Engine {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
-            this.unfinishedPixelCount = -1
+            this.invalidateCounterReadback()
         }
 
-        this.needRender = this.needRender || !(this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
-            && this.areObjectsEqual(renderOptions, this.previousRenderOptions))
-        if (this.needRender) {
-            this.unfinishedPixelCount = -1 // unknown — new params, GPU counter not read yet
+        const mandelbrotChanged = !this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
+        const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
+        this.needRender = this.needRender || mandelbrotChanged || renderOptionsChanged
+        if (mandelbrotChanged) {
+            this.invalidateCounterReadback() // unknown — new fractal params, GPU counter not read yet
         }
 
         // Check if any stop has webcam > 0 to decide whether to capture webcam frames
@@ -1217,6 +1357,10 @@ export class Engine {
         const seedStep = floorPowerOfTwo(SENTINEL_SEED_STEP)
         const baseSentinel = seedStep
         const clearFlag = this.clearHistoryNextFrame ? 1 : 0
+        if (this.clearHistoryNextFrame) {
+            this.invalidateCounterReadback()
+        }
+        const frameSerial = ++this.renderFrameSerial
 
         let shiftTexX = 0
         let shiftTexY = 0
@@ -1257,6 +1401,7 @@ export class Engine {
         // using WGSL-friendly positive modular arithmetic.
         const gridOffsetX = ((this.cumulativeShiftX % baseSentinel) + baseSentinel) % baseSentinel
         const gridOffsetY = ((this.cumulativeShiftY % baseSentinel) + baseSentinel) % baseSentinel
+        const counterReadbackPending = this.hasPendingCounterReadbackForCurrentGeneration()
 
         // Adaptive refinement gating: pause sentinel halving only when the
         // batch controller is already at its minimum AND there are too many
@@ -1264,12 +1409,17 @@ export class Engine {
         // prevents pixel-count avalanches while guaranteeing convergence:
         // if the batch has room to shrink, the gate stays open and the batch
         // controller absorbs the ×4 spike.  A structurally slow GPU (high DPR)
-        // will stabilise its batch above MIN, so refinement always proceeds.
+        // will stabilise its batch above MIN, so refinement proceeds. While a
+        // counter readback is pending, refinement pauses so that the delayed
+        // count cannot become optimistic relative to newer sentinels.
         const gateOpen =
-            this.clearHistoryNextFrame
-            || this.activePixelCount < 0
-            || this.iterationBatchSize > MIN_BATCH_SIZE
-            || this.activePixelCount < ACTIVE_PIXEL_GATE_THRESHOLD * this.gpuLoadMultiplier
+            !counterReadbackPending
+            && (
+                this.clearHistoryNextFrame
+                || this.activePixelCount < 0
+                || this.iterationBatchSize > MIN_BATCH_SIZE
+                || this.activePixelCount < ACTIVE_PIXEL_GATE_THRESHOLD * this.gpuLoadMultiplier
+            )
 
         // When the gate reopens after being closed, the next refinement step
         // will ~4× the pixel count.  Pre-emptively drop the iteration batch
@@ -1301,6 +1451,22 @@ export class Engine {
         // Write resolve uniforms (mu for budget-exhaustion detection + grid offset)
         const resolveUniforms = new Float32Array([this.previousMandelbrot.mu, gridOffsetX, gridOffsetY])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
+
+        const shouldDispatchCounter =
+            !counterReadbackPending
+            && (
+                this.unfinishedPixelCount < 0
+                || this.activePixelCount < 0
+                || frameSerial - this.lastCounterDispatchFrame >= COUNTER_SAMPLE_INTERVAL_FRAMES
+            )
+        const counterReadbackSlot = shouldDispatchCounter
+            ? this.acquireCounterReadbackSlot()
+            : undefined
+        let scheduledCounterReadback: {
+            slot: CounterReadbackSlot,
+            sequence: number,
+            generation: number,
+        } | undefined
 
         const commandEncoder = this.device.createCommandEncoder()
 
@@ -1409,9 +1575,11 @@ export class Engine {
             this.pipelineCount
             && this.counterBindGroup
             && this.counterBuffer
-            && this.counterReadBuffer
+            && counterReadbackSlot
             && this.uniformBufferCount
         ) {
+            const sequence = ++this.counterReadbackSequence
+            const generation = this.counterReadbackGeneration
             // Write count-shader uniforms (mu, aspect, angle)
             const muValue = this.previousMandelbrot.mu
             this.device.queue.writeBuffer(this.uniformBufferCount, 0, new Float32Array([muValue, aspect, this.previousMandelbrot.angle]))
@@ -1426,7 +1594,9 @@ export class Engine {
             )
             computePass.end()
             // Copy results to staging buffer for async readback
-            commandEncoder.copyBufferToBuffer(this.counterBuffer, 0, this.counterReadBuffer, 0, 8)
+            commandEncoder.copyBufferToBuffer(this.counterBuffer, 0, counterReadbackSlot.buffer, 0, 8)
+            this.lastCounterDispatchFrame = frameSerial
+            scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation }
         }
 
         // Pre-fill resolved with A so resolve.wgsl can discard pass-through
@@ -1465,50 +1635,14 @@ export class Engine {
         const submitStartMs = performance.now()
         this.device.queue.submit([commandEncoder.finish()])
 
-        // Adaptive batch sizing: measure GPU completion time and adjust.
-        // Also read back the unfinished pixel count asynchronously.
-        await this.device.queue.onSubmittedWorkDone()
-            const elapsed = performance.now() - submitStartMs
-            this.gpuFrameTimeMs = elapsed
-
-            // Update smoothed GPU time (EMA) for refinement gating.
-            if (this.smoothedGpuTimeMs === 0) {
-                this.smoothedGpuTimeMs = elapsed // seed on first frame
-            } else {
-                this.smoothedGpuTimeMs =
-                    this.smoothedGpuTimeMs * (1 - GPU_TIME_EMA_ALPHA)
-                    + elapsed * GPU_TIME_EMA_ALPHA
-            }
-
-            if (elapsed > 0) {
-                // Scale batch size proportionally: if frame took 32ms with batch=100,
-                // target 16ms -> new batch ≈ 100 * 16/32 = 50.
-                // Use exponential smoothing (alpha=0.3) to avoid oscillation.
-                const ratio = (1000 / this.targetFps) / elapsed
-                const ideal = this.iterationBatchSize * ratio
-                this.iterationBatchSize = Math.round(
-                    Math.min(MAX_BATCH_SIZE,
-                        Math.max(MIN_BATCH_SIZE,
-                            this.iterationBatchSize * 0.7 + ideal * 0.3
-                        )
-                    )
-                )
-            }
-
-        await this.counterReadBuffer!.mapAsync(GPUMapMode.READ)
-        const data = new Uint32Array(this.counterReadBuffer!.getMappedRange())
-        const prevUnfinished = this.unfinishedPixelCount
-        this.unfinishedPixelCount = data[0]
-        this.activePixelCount = data[1]
-        this.counterReadBuffer!.unmap()
-
-        // When progressive computation just finished (unfinished count dropped
-        // to the done threshold), snapshot resolved→frozen so the unified color
-        // path always has a valid frozen fallback for future clear cycles.
-        if (prevUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
-            && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
-            && !this.zoomReprojectionActive) {
-            this.needFreezeSnapshot = true
+        // Delayed GPU timing + counter readback: do not block this frame on GPU completion.
+        this.scheduleGpuTiming(submitStartMs)
+        if (scheduledCounterReadback) {
+            this.scheduleCounterReadback(
+                scheduledCounterReadback.slot,
+                scheduledCounterReadback.sequence,
+                scheduledCounterReadback.generation,
+            )
         }
 
         // Reset the clear flag now that it has been consumed by the GPU passes.
@@ -1612,7 +1746,10 @@ export class Engine {
         this.uniformBufferBrush?.destroy?.()
         this.uniformBufferResolve?.destroy?.()
         this.counterBuffer?.destroy?.()
-        this.counterReadBuffer?.destroy?.()
+        for (const slot of this.counterReadbackSlots) {
+            slot.buffer.destroy?.()
+        }
+        this.counterReadbackSlots = []
         this.uniformBufferCount?.destroy?.()
         this.uniformBufferMerge?.destroy?.()
         this.webcamTexture?.closeWebcam()
