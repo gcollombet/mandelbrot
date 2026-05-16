@@ -872,6 +872,9 @@ export class Engine {
 
     setBlaEpsilon(epsilon: number) {
         const next = Math.max(Number.MIN_VALUE, epsilon)
+        if (next === this.blaEpsilon) {
+            return
+        }
         this.mandelbrotNavigator.set_bla_epsilon(next)
         this.blaEpsilon = next
         if (this.approximationMode === 'bla') {
@@ -1688,6 +1691,10 @@ export class Engine {
         this.needRender = true
     }
 
+    isTileTextureSourceCurrent(sourceKey: string): boolean {
+        return this.tileTextureSourceKey === sourceKey
+    }
+
     /**
      * Replace the environment/skybox texture at runtime from a data URL or blob URL.
      */
@@ -1700,6 +1707,10 @@ export class Engine {
         this.skyboxTextureSourceKey = sourceKey
         this.rebuildColorBindGroup()
         this.needRender = true
+    }
+
+    isSkyboxTextureSourceCurrent(sourceKey: string): boolean {
+        return this.skyboxTextureSourceKey === sourceKey
     }
 
     private rebuildColorBindGroup() {

@@ -1070,21 +1070,25 @@ async function loadTextures() {
 }
 
 async function applyTextureToEngine(name: string, engine: import('../Engine').Engine) {
+  const textureMeta = textures.value.find(t => t.name === name);
+  const sourceKey = `${name}:${textureMeta?.date ?? ''}`;
+  if (engine.isTileTextureSourceCurrent(sourceKey)) return;
   const blob = await getTextureBlob(name);
   if (!blob) return;
-  const textureMeta = textures.value.find(t => t.name === name);
   revokeActiveBlobUrl();
   activeBlobUrl.value = URL.createObjectURL(blob);
-  await engine.updateTileTexture(activeBlobUrl.value, `${name}:${textureMeta?.date ?? ''}`);
+  await engine.updateTileTexture(activeBlobUrl.value, sourceKey);
 }
 
 async function applySkyboxToEngine(name: string, engine: import('../Engine').Engine) {
+  const textureMeta = textures.value.find(t => t.name === name);
+  const sourceKey = `${name}:${textureMeta?.date ?? ''}`;
+  if (engine.isSkyboxTextureSourceCurrent(sourceKey)) return;
   const blob = await getTextureBlob(name);
   if (!blob) return;
-  const textureMeta = textures.value.find(t => t.name === name);
   revokeActiveSkyboxBlobUrl();
   activeSkyboxBlobUrl.value = URL.createObjectURL(blob);
-  await engine.updateSkyboxTexture(activeSkyboxBlobUrl.value, `${name}:${textureMeta?.date ?? ''}`);
+  await engine.updateSkyboxTexture(activeSkyboxBlobUrl.value, sourceKey);
 }
 
 // Apply texture to engine whenever selectedTexture or engine changes.
