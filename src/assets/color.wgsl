@@ -44,7 +44,6 @@ struct EffectParams {
   paletteColor: vec3<f32>,
   wPalette: f32,
   // Row 1
-  wZebra: f32,
   wTessellation: f32,
   wShading: f32,
   wSkybox: f32,
@@ -70,7 +69,6 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
 
   // Row 1 (y = 0.375): zebra, tessellation, shading, skybox
   let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.375), 0.0);
-  e.wZebra = row1.r;
   e.wTessellation = row1.g;
   e.wShading = row1.b;
   e.wSkybox = row1.a;
@@ -258,48 +256,34 @@ fn texture_bump_normal(tex_: texture_2d<f32>, normal: vec3<f32>, tangent: vec3<f
   return normalize(normal - bump);
 }
 
-fn fractal_height_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, fractalGradient: vec2<f32>, reliefDepth: f32) -> vec3<f32> {
-  let strength = clamp(reliefDepth, 0.0, 2.0);
-  let grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
-  return normalize(normal - tangent * grad.x * 0.34 * strength - bitangent * grad.y * 0.34 * strength);
+fn fractal_height_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, grad: vec2<f32>, relief: f32) -> vec3<f32> {
+  return normalize(normal - tangent * grad.x * 0.34 * relief - bitangent * grad.y * 0.34 * relief);
 }
 
-fn fractal_height_ao(fractalGradient: vec2<f32>, reliefDepth: f32, strength: f32) -> f32 {
-  let slope = length(clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0)));
-  let occStrength = clamp(strength * 5.0, 0.0, 10.0);
-  let occ = smoothstep(0.12, 2.75, slope * clamp(reliefDepth, 0.0, 2.0)) * occStrength;
+fn fractal_height_ao(slope: f32, relief: f32, occStrength: f32) -> f32 {
+  let occ = smoothstep(0.12, 2.75, slope * relief) * occStrength;
   return clamp(1.0 - occ * 0.72, 0.16, 1.0);
 }
 
-fn surface_cavity(fractalGradient: vec2<f32>, reliefDepth: f32, strength: f32) -> f32 {
-  let slope = length(clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0)));
-  let relief = clamp(reliefDepth, 0.0, 2.0);
-  let occStrength = clamp(strength * 5.0, 0.0, 10.0);
+fn surface_cavity(slope: f32, relief: f32, occStrength: f32) -> f32 {
   let amount = smoothstep(0.04, 1.45, slope * relief) * occStrength;
   return clamp(1.0 - amount * 0.48, 0.26, 1.0);
 }
 
-fn fractal_height_shadow(fractalGradient: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, reliefDepth: f32, strength: f32) -> f32 {
+fn fractal_height_shadow(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, relief: f32, occStrength: f32) -> f32 {
   let lightPlane = vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent));
   let lightPlaneLen = length(lightPlane);
-  if (lightPlaneLen < 1e-4 || strength <= 0.0 || reliefDepth <= 0.0) {
+  if (lightPlaneLen < 1e-4 || occStrength <= 0.0 || relief <= 0.0) {
     return 1.0;
   }
   let lightPlaneDir = lightPlane / lightPlaneLen;
-  let grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
   let uphillTowardLight = max(dot(grad, lightPlaneDir), 0.0);
   let grazing = 1.0 / max(lightDir.z + 0.35, 0.35);
-  let occStrength = clamp(strength * 5.0, 0.0, 10.0);
-  let shadow = uphillTowardLight * 0.22 * grazing * clamp(reliefDepth, 0.0, 2.0) * occStrength;
+  let shadow = uphillTowardLight * 0.22 * grazing * relief * occStrength;
   return clamp(1.0 - shadow, 0.22, 1.0);
 }
 
-fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f32 {
-  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
-  let zx = textureLoad(sourceTex, coord, 2, 0).r;
-  let zy = textureLoad(sourceTex, coord, 3, 0).r;
-  let derX = textureLoad(sourceTex, coord, 4, 0).r;
-  let derY = textureLoad(sourceTex, coord, 5, 0).r;
+fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, derX: f32, derY: f32) -> f32 {
   if (escape_nu(iterVal, zx, zy) < 0.0) {
     return -1e6;
   }
@@ -310,20 +294,35 @@ fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f
   return clamp(-log(distanceEstimate), -8.0, 24.0);
 }
 
-fn sample_distance_height(sourceTex: texture_2d_array<f32>, uv: vec2<f32>) -> f32 {
-  if (uv.x < 0.0 || uv.x > 1.0 || uv.y < 0.0 || uv.y > 1.0) {
+fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f32 {
+  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
+  let zx = textureLoad(sourceTex, coord, 2, 0).r;
+  let zy = textureLoad(sourceTex, coord, 3, 0).r;
+  let derX = textureLoad(sourceTex, coord, 4, 0).r;
+  let derY = textureLoad(sourceTex, coord, 5, 0).r;
+  return distance_height_from_values(iterVal, zx, zy, derX, derY);
+}
+
+fn sample_distance_height_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
+  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
     return -1e6;
   }
-
-  let texSize = vec2<i32>(textureDimensions(sourceTex));
-  let coord = vec2<i32>(
-    i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
-    i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
-  );
   return load_distance_height(sourceTex, coord);
 }
 
-fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32, fractalGradient: vec2<f32>, distanceHeight: f32, isInterior: bool) -> vec3<f32> {
+fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerHeight: f32) -> vec2<f32> {
+  let xr = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize);
+  let xl = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize);
+  let yu = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize);
+  let yd = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize);
+  let rightHeight = select(centerHeight, xr, xr > -1e5);
+  let leftHeight = select(centerHeight, xl, xl > -1e5);
+  let upHeight = select(centerHeight, yu, yu > -1e5);
+  let downHeight = select(centerHeight, yd, yd > -1e5);
+  return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 2.5;
+}
+
+fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, der: vec2<f32>, angle_der: f32, dx: f32, dy: f32) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
@@ -331,10 +330,9 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
   // ── Sample all effect channels from the palette texture ──
   let fx = sampleEffects(palettePhase);
 
-  // Interior pixels use pure palette color only — no tessellation, webcam, or shading.
-  let effTess    = select(fx.wTessellation, 0.0, isInterior);
-  let effWebcam  = select(fx.wWebcam,       0.0, isInterior);
-  let effShading = select(fx.wShading,      0.0, isInterior);
+  let effTess = fx.wTessellation;
+  let effWebcam = fx.wWebcam;
+  let effShading = fx.wShading;
 
   // ── Tessellation depth: always smooth, independent of palette period ──
   let tess_depth = v_smooth * 2.0;
@@ -345,61 +343,82 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
   // ── Gentle sinusoidal animation (only when animate is on) ──
   let anim = parameters.animate;
   let t = parameters.time;
-  // Tile texture: slow organic drift
   let spd = parameters.animationSpeed;
-  let tile_drift_u = anim * 0.03 * sin(t * 0.4 * spd);
-  let tile_drift_v = anim * 0.03 * sin(t * 0.3 * spd + 1.2);
-  let tessColor = tile_tessellation(tileTex, tess_u + tile_drift_u, tess_v + tile_drift_v, parameters.tessellationLevel);
-
-  // Webcam texture: same tessellation coords as tile, slightly different animation phase
-  let cam_drift_u = anim * 0.04 * sin(t * 0.35 * spd + 0.7);
-  let cam_drift_v = anim * 0.04 * sin(t * 0.25 * spd + 2.0);
-  let webCamColor = tile_tessellation(
-    webcamTex,
-    tess_u + cam_drift_u,
-    tess_v + cam_drift_v,
-    parameters.tessellationLevel
-  );
 
   // ── Blend color sources using overlay/opacity model ──
   // Palette is always the base. Other sources overlay on top with their weight as opacity.
   var color = fx.paletteColor * fx.wPalette;
 
   // Tessellation: overlay on top of palette color
-  color = mix(color, tessColor, effTess);
+  if (effTess > 0.001) {
+    let tile_drift_u = anim * 0.03 * sin(t * 0.4 * spd);
+    let tile_drift_v = anim * 0.03 * sin(t * 0.3 * spd + 1.2);
+    let tessColor = tile_tessellation(tileTex, tess_u + tile_drift_u, tess_v + tile_drift_v, parameters.tessellationLevel);
+    color = mix(color, tessColor, effTess);
+  }
 
   // Webcam: overlay on top of current result
-  color = mix(color, webCamColor, effWebcam);
-  let edgeWear = curvature_edge_wear(angle_der, v_smooth);
+  if (effWebcam > 0.001) {
+    let cam_drift_u = anim * 0.04 * sin(t * 0.35 * spd + 0.7);
+    let cam_drift_v = anim * 0.04 * sin(t * 0.25 * spd + 2.0);
+    let webCamColor = tile_tessellation(
+      webcamTex,
+      tess_u + cam_drift_u,
+      tess_v + cam_drift_v,
+      parameters.tessellationLevel
+    );
+    color = mix(color, webCamColor, effWebcam);
+  }
 
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
     let reliefDepth = parameters.reliefDepth * effShading;
-    let surfaceRelief = clamp(reliefDepth * 0.5, 0.0, 1.0);
+    let relief = clamp(reliefDepth, 0.0, 2.0);
+    let surfaceRelief = relief * 0.5;
+    let occStrength = clamp(parameters.localShadowStrength * 5.0, 0.0, 10.0);
+    let needsDistanceHeight = parameters.subsurfaceStrength > 0.001;
+    let needsFractalGradient = relief > 0.001 || occStrength > 0.001;
+    var distanceHeight = 0.0;
+    var grad = vec2<f32>(0.0);
+    var slope = 0.0;
+    if (needsDistanceHeight || needsFractalGradient) {
+      distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, der.x, der.y);
+    }
+    if (needsFractalGradient) {
+      let fractalGradient = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight);
+      grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
+      slope = length(grad);
+    }
+    let edgeWear = curvature_edge_wear(angle_der, v_smooth);
     let flatNormal = vec3<f32>(0.0, 0.0, 1.0);
     let baseNormal = normalize(mix(flatNormal, mandelbrot_normal(angle_der), surfaceRelief));
     let baseTangent = mandelbrot_tangent(angle_der, baseNormal);
     let baseBitangent = normalize(cross(baseNormal, baseTangent));
-    let bumpedNormal = texture_bump_normal(
-      tileTex,
-      baseNormal,
-      baseTangent,
-      baseBitangent,
-      tess_u + tile_drift_u,
-      tess_v + tile_drift_v,
-      parameters.tessellationLevel,
-      parameters.microBumpStrength * effTess
-    );
-    let heightNormal = fractal_height_normal(bumpedNormal, baseTangent, baseBitangent, fractalGradient, reliefDepth);
+    var bumpedNormal = baseNormal;
+    let bumpStrength = parameters.microBumpStrength * effTess;
+    if (bumpStrength > 0.001) {
+      let tile_drift_u = anim * 0.03 * sin(t * 0.4 * spd);
+      let tile_drift_v = anim * 0.03 * sin(t * 0.3 * spd + 1.2);
+      bumpedNormal = texture_bump_normal(
+        tileTex,
+        baseNormal,
+        baseTangent,
+        baseBitangent,
+        tess_u + tile_drift_u,
+        tess_v + tile_drift_v,
+        parameters.tessellationLevel,
+        bumpStrength
+      );
+    }
+    let heightNormal = fractal_height_normal(bumpedNormal, baseTangent, baseBitangent, grad, relief);
     let normal = heightNormal;
-    let heightAo = fractal_height_ao(fractalGradient, reliefDepth, parameters.localShadowStrength);
-    let surfaceOcclusionStrength = clamp(parameters.localShadowStrength * 5.0, 0.0, 10.0);
+    let heightAo = fractal_height_ao(slope, relief, occStrength);
     let normalCavity = clamp(
-      1.0 - smoothstep(0.02, 0.62, 1.0 - normal.z) * 0.58 * surfaceOcclusionStrength,
+      1.0 - smoothstep(0.02, 0.62, 1.0 - normal.z) * 0.58 * occStrength,
       0.16,
       1.0
     );
-    let cavity = min(surface_cavity(fractalGradient, reliefDepth, parameters.localShadowStrength), normalCavity);
+    let cavity = min(surface_cavity(slope, relief, occStrength), normalCavity);
     let ao = min(pseudo_ambient_occlusion(normal, v_smooth, z), heightAo) * cavity;
     let la = fx.lightAngle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 1.85));
@@ -424,30 +443,34 @@ fn palette(v: f32, v_smooth: f32, z: vec2<f32>, angle_der: f32, dx: f32, dy: f32
     let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
     let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL;
     let diffuseColor = color * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
-    let localShadow = fractal_height_shadow(fractalGradient, lightDir, tangent, bitangent, reliefDepth, parameters.localShadowStrength);
+    let localShadow = fractal_height_shadow(grad, lightDir, tangent, bitangent, relief, occStrength);
     let shadowedNDotL = nDotL * localShadow;
     let diffuseLight = diffuseColor * (0.14 + 0.86 * shadowedNDotL) * ao;
     let brightness = max(fx.shadingLevel, 0.0);
     var materialColor = diffuseLight + directSpecular * ao * mix(1.0, localShadow, 0.45);
 
-    materialColor += fake_subsurface_scattering(
-      color,
-      normal,
-      lightDir,
-      nDotV,
-      ao,
-      edgeWear,
-      metallic,
-      parameters.subsurfaceStrength,
-      distanceHeight
-    );
+    if (parameters.subsurfaceStrength > 0.001) {
+      materialColor += fake_subsurface_scattering(
+        color,
+        normal,
+        lightDir,
+        nDotV,
+        ao,
+        edgeWear,
+        metallic,
+        parameters.subsurfaceStrength,
+        distanceHeight
+      );
+    }
 
     // Thin clearcoat layer: a sharp white lobe sitting above the base material.
     let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 10.0) * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
-    let clearcoatD = ggx_distribution(nDotH, 0.08);
-    let clearcoatG = ggx_geometry_smith(nDotV, nDotL, 0.08);
-    let clearcoatF = fresnel_schlick(vDotH, vec3<f32>(0.04));
-    materialColor += clearcoatF * (clearcoatD * clearcoatG / max(4.0 * nDotV * nDotL, 1e-5)) * nDotL * clearcoatStrength;
+    if (clearcoatStrength > 0.001) {
+      let clearcoatD = ggx_distribution(nDotH, 0.08);
+      let clearcoatG = ggx_geometry_smith(nDotV, nDotL, 0.08);
+      let clearcoatF = fresnel_schlick(vDotH, vec3<f32>(0.04));
+      materialColor += clearcoatF * (clearcoatD * clearcoatG / max(4.0 * nDotV * nDotL, 1e-5)) * nDotL * clearcoatStrength;
+    }
 
     var envColor = vec3<f32>(0.0);
     if (fx.wSkybox > 0.001) {
@@ -488,29 +511,15 @@ fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
   return iter_val + mu_val;
 }
 
-fn distance_height_gradient(sourceTex: texture_2d_array<f32>, uv: vec2<f32>) -> vec2<f32> {
-  let texSize = vec2<i32>(textureDimensions(sourceTex));
-  let pixel = vec2<f32>(1.0 / f32(texSize.x), 1.0 / f32(texSize.y));
-  let centerHeight = sample_distance_height(sourceTex, uv);
-  let xr = sample_distance_height(sourceTex, uv + vec2<f32>(pixel.x, 0.0));
-  let xl = sample_distance_height(sourceTex, uv - vec2<f32>(pixel.x, 0.0));
-  let yu = sample_distance_height(sourceTex, uv + vec2<f32>(0.0, pixel.y));
-  let yd = sample_distance_height(sourceTex, uv - vec2<f32>(0.0, pixel.y));
-  let rightHeight = select(centerHeight, xr, xr > -1e5);
-  let leftHeight = select(centerHeight, xl, xl > -1e5);
-  let upHeight = select(centerHeight, yu, yu > -1e5);
-  let downHeight = select(centerHeight, yd, yd > -1e5);
-  return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 2.5;
-}
-
 // ── Colorize a single pixel from its raw layer values ──────────────
 fn colorize_pixel(
+  sourceTex: texture_2d_array<f32>,
+  sourceCoord: vec2<i32>,
+  sourceTexSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
   der_x: f32, der_y: f32,
   ref_i_val: f32,
-  uv_neutral: vec2<f32>,
-  fractalGradient: vec2<f32>,
-  distanceHeight: f32
+  uv_neutral: vec2<f32>
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
   if (iter_val < 0.0) {
@@ -564,7 +573,7 @@ fn colorize_pixel(
 
   let v = nu;
   let v_smooth = nu_smooth;
-  var color = palette(v, v_smooth, z, angle_der, uv_neutral.x, uv_neutral.y, fractalGradient, distanceHeight, false);
+  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, der, angle_der, uv_neutral.x, uv_neutral.y);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -630,18 +639,17 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     if (live_iter >= 0.0) {
       let live_zx = textureLoad(tex, liveCoord, 2, 0).r;
       let live_zy = textureLoad(tex, liveCoord, 3, 0).r;
-      let liveDistanceHeight = load_distance_height(tex, liveCoord);
-      let liveGradient = distance_height_gradient(tex, uv_live);
       liveColor = colorize_pixel(
+        tex,
+        liveCoord,
+        texSize,
         live_iter,
         live_zx,
         live_zy,
         textureLoad(tex, liveCoord, 4, 0).r,
         textureLoad(tex, liveCoord, 5, 0).r,
         textureLoad(tex, liveCoord, 6, 0).r,
-        uv_neutral,
-        liveGradient,
-        liveDistanceHeight
+        uv_neutral
       );
     }
   }
@@ -678,18 +686,17 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       if (frozen_iter >= 0.0) {
         let frozen_zx = textureLoad(texFrozen, frozenCoord, 2, 0).r;
         let frozen_zy = textureLoad(texFrozen, frozenCoord, 3, 0).r;
-        let frozenDistanceHeight = load_distance_height(texFrozen, frozenCoord);
-        let frozenGradient = distance_height_gradient(texFrozen, uv_frozen);
         frozenColor = colorize_pixel(
+          texFrozen,
+          frozenCoord,
+          texSize,
           frozen_iter,
           frozen_zx,
           frozen_zy,
           textureLoad(texFrozen, frozenCoord, 4, 0).r,
           textureLoad(texFrozen, frozenCoord, 5, 0).r,
           textureLoad(texFrozen, frozenCoord, 6, 0).r,
-          uv_neutral,
-          frozenGradient,
-          frozenDistanceHeight
+          uv_neutral
         );
       }
     }
