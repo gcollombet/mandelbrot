@@ -147,17 +147,17 @@ onMounted(() => {
 
 /** UI metadata for effect fields: label, min, max, step, unit. */
 const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: number; step: number; unit: string }> = {
-  palette:            { label: 'Palette',       min: 0, max: 1,     step: 0.01, unit: '' },
-  zebra:              { label: 'Zebra',         min: 0, max: 1,     step: 0.01, unit: '' },
-  tessellation:       { label: 'Tessellation',  min: 0, max: 1,     step: 0.01, unit: '' },
-  shading:            { label: 'Relief',        min: 0, max: 1,     step: 0.01, unit: '' },
-  skybox:             { label: 'Metal',          min: 0, max: 1,     step: 0.01, unit: '' },
-  webcam:             { label: 'Webcam',        min: 0, max: 1,     step: 0.01, unit: '' },
-  smoothness:         { label: 'Smoothness',    min: 0, max: 1,     step: 0.01, unit: '' },
-  shadingLevel:       { label: 'Brilliance',     min: 0, max: 3,     step: 0.05, unit: '' },
-  specularPower:      { label: 'Specular',    min: 1, max: 64,    step: 0.5,  unit: '' },
-  lightAngle:         { label: 'Direction',     min: 0, max: 6.283, step: 0.01, unit: 'rad' },
-  metallic:           { label: 'Metallic',      min: 0, max: 1,     step: 0.01, unit: '' },
+  palette:            { label: 'Color Blend',       min: 0, max: 1,     step: 0.01, unit: '' },
+  zebra:              { label: 'Iteration Bands',   min: 0, max: 1,     step: 0.01, unit: '' },
+  tessellation:       { label: 'Image Blend',       min: 0, max: 1,     step: 0.01, unit: '' },
+  shading:            { label: 'Lighting Blend',    min: 0, max: 1,     step: 0.01, unit: '' },
+  skybox:             { label: 'Reflection Blend',  min: 0, max: 1,     step: 0.01, unit: '' },
+  webcam:             { label: 'Webcam Blend',      min: 0, max: 1,     step: 0.01, unit: '' },
+  smoothness:         { label: 'Smooth Iterations', min: 0, max: 1,     step: 0.01, unit: '' },
+  shadingLevel:       { label: 'Light Intensity',   min: 0, max: 3,     step: 0.05, unit: '' },
+  specularPower:      { label: 'Specular Strength', min: 1, max: 64,    step: 0.5,  unit: '' },
+  lightAngle:         { label: 'Light Direction',   min: 0, max: 6.283, step: 0.01, unit: 'rad' },
+  metallic:           { label: 'Metalness',         min: 0, max: 1,     step: 0.01, unit: '' },
   roughness:          { label: 'Roughness',     min: 0.02, max: 1,  step: 0.01, unit: '' },
   anisotropy:         { label: 'Anisotropy',    min: 0, max: 1,     step: 0.01, unit: '' },
 };
@@ -337,7 +337,7 @@ defineExpose({ getSnapshot });
 
       <!-- ── Stop presets ── -->
       <div class="stop-presets-panel">
-        <label class="effects-group-title">Stop Presets</label>
+        <label class="effects-group-title">Stop Looks</label>
         <div class="preset-row">
           <select class="select-input" v-model="selectedStopPresetName">
             <option value="">Choose preset...</option>
@@ -394,7 +394,7 @@ defineExpose({ getSnapshot });
       </template>
 
       <!-- ── Iteration ── -->
-      <label class="effects-group-title">Iteration</label>
+      <label class="effects-group-title">Iteration Mapping</label>
       <template v-for="field in (['smoothness','zebra'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
@@ -412,7 +412,7 @@ defineExpose({ getSnapshot });
       </template>
 
       <!-- ── Lighting ── -->
-      <label class="effects-group-title">Lighting</label>
+      <label class="effects-group-title">Lighting & Material</label>
       <template v-for="field in (['shading','skybox','shadingLevel','specularPower','lightAngle','metallic','roughness','anisotropy'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
@@ -433,7 +433,7 @@ defineExpose({ getSnapshot });
       </template>
 
       <!-- ── Texture ── -->
-      <label class="effects-group-title">Texture</label>
+      <label class="effects-group-title">Image Sources</label>
       <template v-for="field in (['tessellation','webcam'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
@@ -632,26 +632,25 @@ defineExpose({ getSnapshot });
 .effect-row {
   display: flex;
   align-items: center;
-  gap: 0.5em;
+  gap: 0.4em;
+  margin-bottom: 0.12em;
 }
 .effect-label {
   font-size: 0.82em;
   color: #222;
-  width: 80px;
+  width: 128px;
   flex-shrink: 0;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 .effect-slider {
   flex: 1;
-  min-width: 60px;
+  min-width: 40px;
 }
 .effect-value {
   font-family: monospace;
   font-size: 0.78em;
   color: #222;
-  width: 52px;
+  width: 46px;
   text-align: right;
   flex-shrink: 0;
 }

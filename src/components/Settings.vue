@@ -960,7 +960,7 @@ function clearPalette() {
 
 
 // =====================================================
-// Tessellation Texture Library
+// Image texture library
 // =====================================================
 const TEXTURE_SELECTED_KEY = 'mandelbrot_selected_texture';
 const SKYBOX_SELECTED_KEY = 'mandelbrot_selected_skybox';
@@ -1224,7 +1224,7 @@ async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
   img.onload = async () => {
     URL.revokeObjectURL(tmpUrl);
     if (img.width > MAX_TEXTURE_SIZE || img.height > MAX_TEXTURE_SIZE) {
-      window.alert(`Image trop grande (${img.width}×${img.height}). Taille maximale : ${MAX_TEXTURE_SIZE}×${MAX_TEXTURE_SIZE}.`);
+      window.alert(`Image too large (${img.width}×${img.height}). Maximum size: ${MAX_TEXTURE_SIZE}×${MAX_TEXTURE_SIZE}.`);
       input.value = '';
       return;
     }
@@ -1477,11 +1477,11 @@ async function renameAndSaveSkyboxTexture() {
       <hr class="section-sep"/>
 
       <!-- ═══ COLOR ═══ -->
-      <label class="label">Color</label>
+      <label class="gfx-section-title">Color</label>
 
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Interpolation</label>
-        <div class="field has-addons" style="margin-bottom: 0 !important;">
+      <div class="palette-control-row">
+        <label class="palette-control-label">Interpolation</label>
+        <div class="field has-addons palette-button-group">
           <p v-for="mode in interpolationModes" :key="mode.key" class="control">
             <button
               class="button is-small"
@@ -1494,113 +1494,123 @@ async function renameAndSaveSkyboxTexture() {
         </div>
       </div>
 
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Period:</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
-        <span style="font-family: monospace; min-width: 4.5em; text-align: right; font-size: 0.85em;">{{ formatPalettePeriod(model.palettePeriod) }}</span>
-      </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Offset:</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
-        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
-      </div>
-
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Hue:</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-180" max="180" step="1"
+      <div class="palette-control-row">
+        <label class="palette-control-label">Hue Shift</label>
+        <input class="slider is-fullwidth" type="range" min="-180" max="180" step="1"
           :value="hslHueShift"
           @input="onHslHueInput(Number(($event.target as HTMLInputElement).value))" />
-        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ hslHueShift }}°</span>
+        <span class="palette-control-value">{{ hslHueShift }}°</span>
       </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Saturation:</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
+      <div class="palette-control-row">
+        <label class="palette-control-label">Saturation Shift</label>
+        <input class="slider is-fullwidth" type="range" min="-100" max="100" step="1"
           :value="satShift"
           @input="onSatInput(Number(($event.target as HTMLInputElement).value))" />
-        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ satShift }}</span>
+        <span class="palette-control-value">{{ satShift }}</span>
       </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <label style="white-space: nowrap; min-width: 5.5em;">Lightness:</label>
-        <input class="slider is-fullwidth" style="flex: 2 1 90px; min-width: 75px; margin: 0 0.5em;" type="range" min="-100" max="100" step="1"
+      <div class="palette-control-row">
+        <label class="palette-control-label">Lightness Shift</label>
+        <input class="slider is-fullwidth" type="range" min="-100" max="100" step="1"
           :value="lumShift"
           @input="onLumInput(Number(($event.target as HTMLInputElement).value))" />
-        <span style="font-family: monospace; min-width: 3.5em; text-align: right;">{{ lumShift }}</span>
+        <span class="palette-control-value">{{ lumShift }}</span>
       </div>
 
       <hr class="section-sep"/>
 
-      <!-- ═══ ANIMATION ═══ -->
-      <label class="gfx-section-title">Animation</label>
-      <div class="buttons toggle-buttons" style="margin-bottom: 0.8em;">
+      <!-- ═══ PALETTE MAPPING ═══ -->
+      <label class="gfx-section-title">Palette Mapping</label>
+      <div class="palette-control-row">
+        <label class="palette-control-label">Cycle Length</label>
+        <input class="slider is-fullwidth" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
+        <span class="palette-control-value">{{ formatPalettePeriod(model.palettePeriod) }}</span>
+      </div>
+      <div class="palette-control-row">
+        <label class="palette-control-label">Cycle Offset</label>
+        <input class="slider is-fullwidth" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
+        <span class="palette-control-value">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
+      </div>
+
+      <hr class="section-sep"/>
+
+      <!-- ═══ MOTION ═══ -->
+      <label class="gfx-section-title">Motion</label>
+      <div class="buttons toggle-buttons compact-buttons">
         <button class="button is-small"
           :class="model.activateAnimate ? 'is-link' : 'is-light'"
           @click="model.activateAnimate = !model.activateAnimate">
-          Animate
+          Animated Drift
         </button>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Anim. speed</span>
+        <span class="gfx-slider-label">Drift Speed</span>
         <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
         <span class="gfx-slider-value">&times;{{ (model.animationSpeed ?? 1.0).toFixed(1) }}</span>
       </div>
 
       <hr class="section-sep"/>
 
-      <!-- ═══ SURFACE ═══ -->
-      <label class="gfx-section-title">Surface</label>
+      <!-- ═══ FRACTAL SURFACE ═══ -->
+      <label class="gfx-section-title">Fractal Surface</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Relief Depth</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
+        <span class="gfx-slider-value">{{ (model.reliefDepth ?? 0.35).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Relief Occlusion</span>
+        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.localShadowStrength" />
+        <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0.4).toFixed(2) }}</span>
+      </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Ambient Occlusion</span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.ambientOcclusionStrength" />
         <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Micro Bump</span>
+        <span class="gfx-slider-label">Fine Bump</span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
         <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0.25).toFixed(2) }}</span>
       </div>
+
+      <hr class="section-sep"/>
+
+      <!-- ═══ MATERIAL RESPONSE ═══ -->
+      <label class="gfx-section-title">Material Response</label>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Clearcoat</span>
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.clearcoatStrength" />
         <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0.7).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Subsurface</span>
+        <span class="gfx-slider-label">Subsurface Glow</span>
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.subsurfaceStrength" />
         <span class="gfx-slider-value">{{ (model.subsurfaceStrength ?? 0).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Surface Relief</span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
-        <span class="gfx-slider-value">{{ (model.reliefDepth ?? 0.35).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Surface Occlusion</span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.localShadowStrength" />
-        <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0.4).toFixed(2) }}</span>
       </div>
 
       <hr class="section-sep"/>
 
-      <!-- ═══ TEXTURE ═══ -->
-      <label class="gfx-section-title">Texture</label>
+      <!-- ═══ IMAGE LAYER ═══ -->
+      <label class="gfx-section-title">Image Layer</label>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Repetition</span>
+        <span class="gfx-slider-label">Image Scale</span>
         <input class="slider" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
         <span class="gfx-slider-value">{{ model.tessellationLevel }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Displacement</span>
+        <span class="gfx-slider-label">Image Displacement</span>
         <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
         <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
       </div>
-      <!-- Tessellation Texture Library (compact) -->
-      <div class="mb-3" style="margin-top: 0.6em;">
+      <!-- Image texture library (compact) -->
+      <div class="mb-3 compact-library">
+        <label class="palette-library-label">Image Texture</label>
         <div class="dropdown" :class="{ 'is-active': showTextureDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth is-small" @click="showTextureDropdown = !showTextureDropdown" aria-haspopup="true" aria-controls="dropdown-menu-textures" type="button">
               <span style="display:flex; align-items:center; min-height:28px;">
                 <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="thumbnail" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedTexture || 'Texture...' }}</span>
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedTexture || 'Image texture...' }}</span>
                 <span class="icon is-small" style="margin-left:4px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1622,7 +1632,7 @@ async function renameAndSaveSkyboxTexture() {
         </div>
         <div class="field is-grouped" style="margin-top:0.5em;">
           <div class="control is-expanded">
-            <input class="input is-small" v-model="textureName" type="text" placeholder="Nom..."
+            <input class="input is-small" v-model="textureName" type="text" placeholder="Image texture name..."
               @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
               @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
               @keyup.enter="renameAndSaveTexture"
@@ -1638,15 +1648,18 @@ async function renameAndSaveSkyboxTexture() {
         </div>
       </div>
 
-      <!-- Skybox Texture Library (same storage as material textures) -->
-      <div class="mb-3" style="margin-top: 0.8em;">
-        <label class="label" style="font-size:0.9em; margin-bottom:0.35em;">Skybox</label>
+      <hr class="section-sep"/>
+
+      <!-- Environment texture library (same storage as material textures) -->
+      <label class="gfx-section-title">Environment</label>
+      <div class="mb-3 compact-library">
+        <label class="palette-library-label">Environment Map</label>
         <div class="dropdown" :class="{ 'is-active': showSkyboxDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth is-small" @click="showSkyboxDropdown = !showSkyboxDropdown" aria-haspopup="true" aria-controls="dropdown-menu-skybox" type="button">
               <span style="display:flex; align-items:center; min-height:28px;">
                 <img v-if="currentSkyboxThumbnail" :src="currentSkyboxThumbnail" alt="thumbnail" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedSkyboxTexture || 'Skybox...' }}</span>
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedSkyboxTexture || 'Environment map...' }}</span>
                 <span class="icon is-small" style="margin-left:4px;">
                   <i class="fas fa-angle-down" aria-hidden="true"></i>
                 </span>
@@ -1668,7 +1681,7 @@ async function renameAndSaveSkyboxTexture() {
         </div>
         <div class="field is-grouped" style="margin-top:0.5em;">
           <div class="control is-expanded">
-            <input class="input is-small" v-model="skyboxName" type="text" placeholder="Nom skybox..."
+            <input class="input is-small" v-model="skyboxName" type="text" placeholder="Environment map name..."
               @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
               @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
               @keyup.enter="renameAndSaveSkyboxTexture"
@@ -1686,10 +1699,11 @@ async function renameAndSaveSkyboxTexture() {
 
       <hr class="section-sep"/>
 
-      <!-- Extract palette from a preset -->
+      <!-- Palette library -->
+      <label class="gfx-section-title">Palette Library</label>
       <div class="mb-3">
-        <label class="label">Extract from preset</label>
-        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applies the colors, interpolation, period, offset, and material look from a preset.</p>
+        <label class="palette-library-label">Load From Preset</label>
+        <p class="palette-library-hint">Applies colors, interpolation, cycle mapping, and material look from a preset.</p>
         <div class="dropdown" :class="{ 'is-active': showPalettePresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showPalettePresetDropdown = !showPalettePresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palette-presets" type="button">
@@ -1726,7 +1740,7 @@ async function renameAndSaveSkyboxTexture() {
       <hr class="section-sep"/>
 
       <div class="mb-3">
-        <label class="label">Saved palettes</label>
+        <label class="palette-library-label">Saved Palettes</label>
         <!-- Dropdown enrichie Bulma -->
         <div class="dropdown" :class="{ 'is-active': showPaletteDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
@@ -1772,7 +1786,7 @@ async function renameAndSaveSkyboxTexture() {
 
         <!-- Import / Export Palettes -->
         <hr class="section-sep"/>
-        <label class="label">Import / Export</label>
+        <label class="palette-library-label">Import / Export</label>
         <div class="field is-grouped">
           <div class="control">
             <button class="button is-info is-small" @click="exportPalettes" :disabled="palettes.length === 0">
@@ -1883,12 +1897,15 @@ async function renameAndSaveSkyboxTexture() {
 }
 .section-sep {
   border: none;
-  border-top: 1.5px solid #AAA;
-  margin: 1.2em 0 1.2em 0;
+  border-top: 1px solid #B8B8B8;
+  margin: 0.9em 0 0.75em 0;
 }
 .toggle-buttons {
   flex-wrap: wrap;
   gap: 0.4em;
+}
+.compact-buttons {
+  margin-bottom: 0.45em;
 }
 .toggle-buttons .button {
   margin-bottom: 0 !important;
@@ -1914,7 +1931,7 @@ async function renameAndSaveSkyboxTexture() {
   font-weight: 700;
   font-size: 0.92em;
   color: #111;
-  margin-bottom: 0.35em;
+  margin-bottom: 0.45em;
   letter-spacing: 0.02em;
   text-transform: uppercase;
 }
@@ -1928,7 +1945,7 @@ async function renameAndSaveSkyboxTexture() {
   display: flex;
   align-items: center;
   gap: 0.5em;
-  margin-bottom: 0.35em;
+  margin-bottom: 0.32em;
 }
 .gfx-slider-row input[type="range"] {
   flex: 1 1 auto;
@@ -1936,7 +1953,7 @@ async function renameAndSaveSkyboxTexture() {
 }
 .gfx-slider-label {
   flex: 0 0 auto;
-  min-width: 5.5em;
+  min-width: 7.4em;
   font-size: 0.88em;
   color: #222;
   font-weight: 500;
@@ -1948,5 +1965,54 @@ async function renameAndSaveSkyboxTexture() {
   font-size: 0.84em;
   color: #333;
   font-variant-numeric: tabular-nums;
+}
+.palette-control-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+  margin-bottom: 0.32em;
+}
+.palette-control-row input[type="range"] {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.palette-control-label {
+  flex: 0 0 auto;
+  min-width: 7.4em;
+  font-size: 0.88em;
+  color: #222;
+  font-weight: 500;
+}
+.palette-control-value {
+  flex: 0 0 auto;
+  min-width: 4.4em;
+  text-align: right;
+  font-family: monospace;
+  font-size: 0.84em;
+  color: #333;
+  font-variant-numeric: tabular-nums;
+}
+.palette-button-group {
+  flex: 1 1 auto;
+  min-width: 0;
+  margin-bottom: 0 !important;
+  flex-wrap: wrap;
+}
+.compact-library {
+  margin-top: 0.55em;
+  margin-bottom: 0.8em;
+}
+.palette-library-label {
+  display: block;
+  font-size: 0.86em;
+  font-weight: 600;
+  color: #222;
+  margin-bottom: 0.32em;
+}
+.palette-library-hint {
+  font-size: 0.8em;
+  color: #555;
+  margin-bottom: 0.45em;
+  line-height: 1.25;
 }
 </style>
