@@ -3,8 +3,9 @@ import {defineProps, onMounted, onUnmounted, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
 import MobileNavigationControls from './MobileNavigationControls.vue';
 import type {MandelbrotExposed} from "../types/MandelbrotExposed.ts";
-import type {ComplexCoordStr, IterationData} from "../CursorCoordinate.ts";
+import type {IterationData} from "../CursorCoordinate.ts";
 import type {ColorStop} from "../ColorStop.ts";
+import type {Engine} from '../Engine.ts';
 
 const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
@@ -39,42 +40,12 @@ const props = defineProps<{
 }>();
 
 const emit = defineEmits<{
-  cursorCoord: [coord: ComplexCoordStr | null, clientX: number, clientY: number];
   palettePick: [data: IterationData, clientX: number, clientY: number];
+  pickerDone: [];
+  engineReady: [engine: Engine];
 }>();
 
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
-
-// --- Cursor coordinate tracking ---
-let cursorOnCanvas = false;
-let lastClientX = 0;
-let lastClientY = 0;
-
-/** Recompute and emit cursor complex coords from the last known pixel position. */
-function refreshCursorCoord() {
-  if (!cursorOnCanvas) return;
-  const canvas = getCanvas();
-  if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  const px = lastClientX - rect.left;
-  const py = lastClientY - rect.top;
-  const nav = mandelbrotRef.value?.getNavigator();
-  if (!nav) return;
-  const result: string[] = nav.pixel_to_complex(px, py, rect.width, rect.height);
-  if (!result || result.length < 2) return;
-  emit('cursorCoord', { re: result[0], im: result[1] }, lastClientX, lastClientY);
-}
-
-function handleCanvasEnter(e: MouseEvent) {
-  cursorOnCanvas = true;
-  lastClientX = e.clientX;
-  lastClientY = e.clientY;
-}
-
-function handleCanvasLeave() {
-  cursorOnCanvas = false;
-  emit('cursorCoord', null, 0, 0);
-}
 
 // Etats d'interaction et navigation
 const pressedKeys: Record<string, boolean> = {};
@@ -139,7 +110,6 @@ function handleWheel(e: WheelEvent) {
   const zoomFactor = 0.95;
   if (e.deltaY < 0) mandelbrotRef.value?.zoom(zoomFactor);
   else mandelbrotRef.value?.zoom(1 / zoomFactor);
-  refreshCursorCoord();
 }
 
 // Center the view on a specific canvas point
@@ -208,24 +178,23 @@ function handleMouseDown(e: MouseEvent) {
 
 /** Lecture GPU au clic en mode pipette. */
 async function handlePickerClick(e: MouseEvent) {
-  const engine = mandelbrotRef.value?.getEngine();
-  if (!engine) return;
-  const canvas = getCanvas();
-  if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  const cssX = e.clientX - rect.left;
-  const cssY = e.clientY - rect.top;
-  const data = await engine.readIterationDataAt(cssX, cssY, rect.width, rect.height);
-  if (!data) return;
-  emit('palettePick', data, e.clientX, e.clientY);
+  try {
+    const engine = mandelbrotRef.value?.getEngine();
+    if (!engine) return;
+    const canvas = getCanvas();
+    if (!canvas) return;
+    const rect = canvas.getBoundingClientRect();
+    const cssX = e.clientX - rect.left;
+    const cssY = e.clientY - rect.top;
+    const data = await engine.readIterationDataAt(cssX, cssY, rect.width, rect.height);
+    if (!data) return;
+    emit('palettePick', data, e.clientX, e.clientY);
+  } finally {
+    emit('pickerDone');
+  }
 }
 
 function handleMouseMove(e: MouseEvent) {
-  // Track cursor position for continuous coordinate refresh
-  lastClientX = e.clientX;
-  lastClientY = e.clientY;
-  refreshCursorCoord();
-
   // En mode pipette, pas de drag/rotation
   if (props.pickerMode) return;
 
@@ -331,8 +300,6 @@ function updateLoop() {
     if (pressedKeys['KeyR']) mandelbrotRef.value?.zoom(zoomFactor);
     if (pressedKeys['KeyF']) mandelbrotRef.value?.zoom(1 / zoomFactor);
   }
-  // Refresh cursor tooltip coords each frame (view may have moved under the cursor)
-  refreshCursorCoord();
   updateTimer = window.setTimeout(updateLoop, 16);
 }
 
@@ -349,8 +316,6 @@ onMounted(async () => {
   canvas.addEventListener('mousedown', handleMouseDown);
   canvas.addEventListener('dblclick', handleDblClick);
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
-  canvas.addEventListener('mouseenter', handleCanvasEnter);
-  canvas.addEventListener('mouseleave', handleCanvasLeave);
   window.addEventListener('mousemove', handleMouseMove);
   window.addEventListener('mouseup', handleMouseUp);
 
@@ -379,8 +344,6 @@ onUnmounted(() => {
     canvas.removeEventListener('mousedown', handleMouseDown as EventListener);
     canvas.removeEventListener('dblclick', handleDblClick as EventListener);
     canvas.removeEventListener('contextmenu', (e) => e.preventDefault());
-    canvas.removeEventListener('mouseenter', handleCanvasEnter);
-    canvas.removeEventListener('mouseleave', handleCanvasLeave);
     canvas.removeEventListener('touchstart', handleTouchStart as EventListener);
     canvas.removeEventListener('touchmove', handleTouchMove as EventListener);
     canvas.removeEventListener('touchend', handleTouchEnd as EventListener);
@@ -418,6 +381,7 @@ onUnmounted(() => {
       :subsurfaceStrength="props.subsurfaceStrength"
       :reliefDepth="props.reliefDepth"
       :localShadowStrength="props.localShadowStrength"
+      @ready="emit('engineReady', $event)"
     />
     
     <!-- Contrôles de navigation mobile -->

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, ref, toRaw, watch} from 'vue';
-import type {ApproximationMode, InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
+import type {InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import type {ColorStop, EffectFieldName} from '../ColorStop.ts';
 import {COLOR_STOP_DEFAULTS} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
@@ -490,6 +490,13 @@ async function selectPaletteFromPreset(id: number) {
     model.value.palettePeriod = record.value.palettePeriod;
     model.value.paletteOffset = record.value.paletteOffset;
     applyPaletteLookFields(record.value);
+    // Restore textures if present
+    if (record.value.textureName) {
+      selectTexture(record.value.textureName);
+    }
+    if (record.value.skyboxName) {
+      selectSkyboxTexture(record.value.skyboxName);
+    }
   }
 }
 
@@ -671,11 +678,11 @@ for (const [sliderField, effectField] of SLIDER_TO_EFFECT) {
 
 // When colorStops is replaced wholesale (palette selection, LCH generation, etc.),
 // stamp the current legacy toggle/slider values onto all new stops.
-// `immediate: true` also handles the initial mount.
+// Do not run on Settings mount: opening a panel must not mutate palette data,
+// otherwise the renderer sees a palette change and recomputes the full image.
 watch(
   () => model.value.colorStops,
   () => { syncAllLegacyToStops(); },
-  { immediate: true },
 );
 
 onMounted(async () => {
@@ -689,20 +696,9 @@ const currentPaletteThumbnail = computed(() => currentPaletteObj.value?.thumbnai
 
 watch([() => props.activeTab, () => props.engine], async ([tab]) => {
   if (tab === 'navigation') {
-    await refreshNavigationPreview();
+    window.setTimeout(() => { void refreshNavigationPreview(); }, 0);
   }
-}, { immediate: true });
-
-watch(
-  [() => props.engine, () => model.value.approximationMode, () => model.value.epsilon] as const,
-  ([engine, approximationMode, epsilon]) => {
-    if (!engine) return;
-    const mode: ApproximationMode = approximationMode === 'bla' ? 'bla' : 'perturbation';
-    engine.setApproximationMode(mode);
-    engine.setBlaEpsilon(epsilon ?? 1e-6);
-  },
-  { immediate: true },
-);
+});
 
 // =====================================================
 // Import / Export Presets
@@ -973,6 +969,7 @@ const selectedTexture = ref('Gold');
 const selectedSkyboxTexture = ref('Skybox');
 const showTextureDropdown = ref(false);
 const showSkyboxDropdown = ref(false);
+let suppressTextureApply = false;
 
 const currentTextureObj = computed(() => textures.value.find(t => t.name === selectedTexture.value));
 const currentTextureThumbnail = computed(() => currentTextureObj.value?.thumbnail);
@@ -1036,6 +1033,7 @@ async function ensureDefaultTexture(name: string, assetUrl: string): Promise<voi
 }
 
 async function loadTextures() {
+  suppressTextureApply = true;
   // 1. Migrate legacy localStorage data (if any)
   await migrateFromLocalStorage();
 
@@ -1067,33 +1065,41 @@ async function loadTextures() {
   selectedSkyboxTexture.value = restoredSkyboxName;
   model.value.skyboxName = restoredSkyboxName;
   skyboxName.value = restoredSkyboxName;
+  void nextTick().then(() => { suppressTextureApply = false; });
 }
 
 async function applyTextureToEngine(name: string, engine: import('../Engine').Engine) {
   const textureMeta = textures.value.find(t => t.name === name);
   const sourceKey = `${name}:${textureMeta?.date ?? ''}`;
-  if (engine.isTileTextureSourceCurrent(sourceKey)) return;
+  const engineCurrent = engine.isTileTextureSourceCurrent(sourceKey);
+  if (engineCurrent && activeBlobUrl.value) return;
   const blob = await getTextureBlob(name);
   if (!blob) return;
   revokeActiveBlobUrl();
   activeBlobUrl.value = URL.createObjectURL(blob);
-  await engine.updateTileTexture(activeBlobUrl.value, sourceKey);
+  if (!engineCurrent) {
+    await engine.updateTileTexture(activeBlobUrl.value, sourceKey);
+  }
 }
 
 async function applySkyboxToEngine(name: string, engine: import('../Engine').Engine) {
   const textureMeta = textures.value.find(t => t.name === name);
   const sourceKey = `${name}:${textureMeta?.date ?? ''}`;
-  if (engine.isSkyboxTextureSourceCurrent(sourceKey)) return;
+  const engineCurrent = engine.isSkyboxTextureSourceCurrent(sourceKey);
+  if (engineCurrent && activeSkyboxBlobUrl.value) return;
   const blob = await getTextureBlob(name);
   if (!blob) return;
   revokeActiveSkyboxBlobUrl();
   activeSkyboxBlobUrl.value = URL.createObjectURL(blob);
-  await engine.updateSkyboxTexture(activeSkyboxBlobUrl.value, sourceKey);
+  if (!engineCurrent) {
+    await engine.updateSkyboxTexture(activeSkyboxBlobUrl.value, sourceKey);
+  }
 }
 
 // Apply texture to engine whenever selectedTexture or engine changes.
 // This covers: initial load, tab re-mount, preset change, random, manual selection.
 watch([selectedTexture, () => props.engine] as const, async ([name, engine]) => {
+  if (suppressTextureApply) return;
   if (engine && name) {
     try {
       await applyTextureToEngine(name, engine);
@@ -1104,6 +1110,7 @@ watch([selectedTexture, () => props.engine] as const, async ([name, engine]) => 
 });
 
 watch([selectedSkyboxTexture, () => props.engine] as const, async ([name, engine]) => {
+  if (suppressTextureApply) return;
   if (engine && name) {
     try {
       await applySkyboxToEngine(name, engine);
@@ -1455,6 +1462,7 @@ async function renameAndSaveSkyboxTexture() {
           :interpolation-mode="model.interpolationMode"
           :picker-mode="props.pickerMode"
           :tile-texture-url="activeBlobUrl"
+          :skybox-texture-url="activeSkyboxBlobUrl"
           :tessellation-level="model.tessellationLevel"
           :displacement-amount="model.displacementAmount"
           :ambient-occlusion-strength="model.ambientOcclusionStrength"

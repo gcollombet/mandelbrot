@@ -43,6 +43,7 @@ const props = defineProps<{
   colorStops: ColorStop[];
   interpolationMode?: InterpolationMode;
   tileTextureUrl?: string | null;
+  skyboxTextureUrl?: string | null;
   tessellationLevel?: number;
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
@@ -279,9 +280,10 @@ async function init() {
 
   // ── Tile & skybox textures (loaded from assets) ──
   const tileUrl = props.tileTextureUrl || bronzeUrl;
+  const skyboxUrl = props.skyboxTextureUrl || goldUrl;
   const [tileTexGpu, skyboxTexGpu] = await Promise.all([
     loadTexture(device, tileUrl),
-    loadTexture(device, goldUrl),
+    loadTexture(device, skyboxUrl),
   ]);
   tileTextureGpu = tileTexGpu;
   skyboxTextureGpu = skyboxTexGpu;
@@ -433,6 +435,24 @@ watch(
       render();
     } catch (e) {
       console.warn('PalettePreview: failed to load tile texture:', e);
+    }
+  },
+);
+
+// Re-render when skybox texture URL changes
+watch(
+  () => props.skyboxTextureUrl,
+  async (url) => {
+    if (!device) return;
+    const resolvedUrl = url || goldUrl;
+    try {
+      const oldSkybox = skyboxTextureGpu;
+      skyboxTextureGpu = await loadTexture(device, resolvedUrl);
+      oldSkybox?.destroy();
+      rebuildBindGroup();
+      render();
+    } catch (e) {
+      console.warn('PalettePreview: failed to load skybox texture:', e);
     }
   },
 );

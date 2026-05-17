@@ -5,7 +5,7 @@ import PalettePreview from './PalettePreview.vue';
 import {Palette} from '../Palette';
 import {rgb as d3rgb} from 'd3-color';
 import type {ColorStop} from "../ColorStop.ts";
-import { COLOR_STOP_DEFAULTS, getEffectValue } from '../ColorStop.ts';
+import { COLOR_STOP_DEFAULTS, createInterpolatedColorStop, getEffectValue } from '../ColorStop.ts';
 import type { EffectFieldName } from '../ColorStop.ts';
 import type {InterpolationMode} from "../Mandelbrot.ts";
 import {
@@ -22,6 +22,7 @@ const props = withDefaults(defineProps<{
   interpolationMode?: InterpolationMode;
   pickerMode?: boolean;
   tileTextureUrl?: string | null;
+  skyboxTextureUrl?: string | null;
   tessellationLevel?: number;
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
@@ -35,6 +36,7 @@ const props = withDefaults(defineProps<{
   interpolationMode: 'lab',
   pickerMode: false,
   tileTextureUrl: null,
+  skyboxTextureUrl: null,
   tessellationLevel: 2,
   displacementAmount: 0.01,
   ambientOcclusionStrength: 0.5,
@@ -70,7 +72,8 @@ function onPreviewDblClick(event: MouseEvent) {
   t = Math.max(0, Math.min(1, t));
   const pal = new Palette(props.colorStops, props.interpolationMode);
   const sampledColor = pal.getColorAt(t);
-  props.colorStops.push({ color: sampledColor, position: t });
+  const newStop = createInterpolatedColorStop(props.colorStops, t, sampledColor);
+  props.colorStops.push(newStop);
   emit('update:colorStops', props.colorStops);
   selectedIdx.value = props.colorStops.length - 1;
 }
@@ -285,6 +288,7 @@ defineExpose({ getSnapshot });
         :colorStops="colorStops"
         :interpolationMode="interpolationMode"
         :tileTextureUrl="tileTextureUrl"
+        :skyboxTextureUrl="skyboxTextureUrl"
         :tessellationLevel="tessellationLevel"
         :displacementAmount="displacementAmount"
         :ambientOcclusionStrength="ambientOcclusionStrength"

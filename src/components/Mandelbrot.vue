@@ -10,6 +10,10 @@ let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
 
+const emit = defineEmits<{
+  ready: [engine: Engine];
+}>();
+
 const cx = defineModel<string>('cx', { default: '-1.9771995110313272619112808106831597' })
 const cy = defineModel<string>('cy', { default: '0.0' })
 const scale = defineModel<string>('scale', { default: '2.5' })
@@ -247,6 +251,7 @@ onMounted(async () => {
   // Start the render loop for progressive refinement after the first
   // frame is already on screen.
   if (engine) {
+    emit('ready', engine);
     engine.startRenderLoop(draw);
   }
 });

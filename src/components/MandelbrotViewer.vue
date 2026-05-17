@@ -1,18 +1,28 @@
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, reactive, ref, toRaw, watch} from 'vue';
+import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, toRaw, watch} from 'vue';
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
-import type {MandelbrotParams} from "../Mandelbrot.ts";
+import type {ApproximationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {savePresetEntry} from '../presetStore';
-import type {ComplexCoordStr, IterationData} from '../CursorCoordinate';
-import {computePalettePhase, truncateCoord} from '../CursorCoordinate';
+import type {IterationData} from '../CursorCoordinate';
+import {computePalettePhase} from '../CursorCoordinate';
 import {Palette} from '../Palette';
+import {createInterpolatedColorStop} from '../ColorStop';
+import type {Engine} from '../Engine';
+import type {TextureMetadata} from '../textureStore';
+import {
+  ensureTextureLibrary,
+  SKYBOX_SELECTED_KEY,
+  storedTextureObjectUrl,
+  TEXTURE_SELECTED_KEY,
+  textureSourceKey,
+} from '../textureLibrary';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
 const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
-const mandelbrotEngine = computed(() => mandelbrotCtrlRef.value?.getEngine() ?? null);
+const mandelbrotEngine = shallowRef<Engine | null>(null);
 const renderStatsRef = ref<InstanceType<typeof RenderStats> | null>(null);
 const settingsRefs = ref<Record<string, InstanceType<typeof Settings> | null>>({});
 
@@ -33,6 +43,10 @@ function togglePickerMode() {
   pickerMode.value = !pickerMode.value;
 }
 
+function finishPickerMode() {
+  pickerMode.value = false;
+}
+
 /** Gère le clic en mode pipette : calcule la phase et ajoute directement le curseur. */
 function onPalettePick(data: IterationData, _clientX: number, _clientY: number) {
   const p = mandelbrotParams.value;
@@ -46,28 +60,8 @@ function onPalettePick(data: IterationData, _clientX: number, _clientY: number) 
   // Obtenir la couleur de la palette à cette phase
   const palette = new Palette(p.colorStops, p.interpolationMode);
   const colorHex = palette.getColorAt(result.phase);
-  stops.push({ color: colorHex, position: result.phase });
-}
-
-// --- Cursor tooltip ---
-const cursorTooltip = reactive({
-  visible: false,
-  cx: '',
-  cy: '',
-  clientX: 0,
-  clientY: 0,
-});
-
-function onCursorCoord(coord: ComplexCoordStr | null, clientX: number, clientY: number) {
-  if (!coord) {
-    cursorTooltip.visible = false;
-    return;
-  }
-  cursorTooltip.cx = truncateCoord(coord.re);
-  cursorTooltip.cy = truncateCoord(coord.im);
-  cursorTooltip.clientX = clientX;
-  cursorTooltip.clientY = clientY;
-  cursorTooltip.visible = true;
+  const newStop = createInterpolatedColorStop(stops, result.phase, colorHex);
+  stops.push(newStop);
 }
 
 // --- HUD hide during navigation ---
@@ -156,7 +150,7 @@ const mobileNavExpanded = ref(false);
 
 // Paramètres Mandelbrot avec valeurs par défaut
 const LOCAL_STORAGE_CURRENT_KEY = 'mandelbrot_last_settings';
-const mandelbrotParams = ref<MandelbrotParams>({
+const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   cx: '-1.9771995110313272619112808106831596467',
   cy: "0.0",
   mu: 4.0,
@@ -224,7 +218,94 @@ const mandelbrotParams = ref<MandelbrotParams>({
   reliefDepth: 0.35,
   localShadowStrength: 0.4,
   textureName: 'Gold',
-});
+  skyboxName: 'Skybox',
+};
+
+function loadInitialMandelbrotParams(): MandelbrotParams {
+  const params = structuredClone(DEFAULT_MANDELBROT_PARAMS);
+  try {
+    const raw = localStorage.getItem(LOCAL_STORAGE_CURRENT_KEY);
+    if (raw) Object.assign(params, JSON.parse(raw));
+  } catch {}
+  params.textureName ??= localStorage.getItem(TEXTURE_SELECTED_KEY) ?? 'Gold';
+  params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Skybox';
+  return params;
+}
+
+const mandelbrotParams = ref<MandelbrotParams>(loadInitialMandelbrotParams());
+
+let textureEntriesPromise: Promise<TextureMetadata[]> | null = null;
+let activeTileTextureUrl: string | null = null;
+let activeSkyboxTextureUrl: string | null = null;
+let textureApplyGeneration = 0;
+
+function getTextureEntries(): Promise<TextureMetadata[]> {
+  textureEntriesPromise ??= ensureTextureLibrary();
+  return textureEntriesPromise;
+}
+
+async function applyTexture(
+  engine: Engine,
+  kind: 'tile' | 'skybox',
+  name: string,
+  textures: TextureMetadata[],
+  generation: number,
+) {
+  const sourceKey = textureSourceKey(name, textures);
+  const isCurrent = kind === 'tile'
+    ? engine.isTileTextureSourceCurrent(sourceKey)
+    : engine.isSkyboxTextureSourceCurrent(sourceKey);
+  if (isCurrent) return;
+
+  const objectUrl = await storedTextureObjectUrl(name);
+  if (!objectUrl) return;
+  if (generation !== textureApplyGeneration) {
+    URL.revokeObjectURL(objectUrl);
+    return;
+  }
+
+  if (kind === 'tile') {
+    if (activeTileTextureUrl) URL.revokeObjectURL(activeTileTextureUrl);
+    activeTileTextureUrl = objectUrl;
+    await engine.updateTileTexture(objectUrl, sourceKey);
+  } else {
+    if (activeSkyboxTextureUrl) URL.revokeObjectURL(activeSkyboxTextureUrl);
+    activeSkyboxTextureUrl = objectUrl;
+    await engine.updateSkyboxTexture(objectUrl, sourceKey);
+  }
+}
+
+async function applySelectedTexturesToEngine() {
+  const engine = mandelbrotEngine.value;
+  if (!engine) return;
+  const generation = ++textureApplyGeneration;
+  try {
+    const textures = await getTextureEntries();
+    if (generation !== textureApplyGeneration) return;
+    const tileName = mandelbrotParams.value.textureName ?? 'Gold';
+    const skyboxName = mandelbrotParams.value.skyboxName ?? 'Skybox';
+    const effectiveTileName = textures.some(texture => texture.name === tileName) ? tileName : 'Gold';
+    const effectiveSkyboxName = textures.some(texture => texture.name === skyboxName) ? skyboxName : 'Skybox';
+    await applyTexture(engine, 'tile', effectiveTileName, textures, generation);
+    await applyTexture(engine, 'skybox', effectiveSkyboxName, textures, generation);
+  } catch (error) {
+    console.warn('Failed to apply stored textures:', error);
+  }
+}
+
+function onEngineReady(engine: Engine) {
+  mandelbrotEngine.value = engine;
+  applyApproximationToEngine();
+  void applySelectedTexturesToEngine();
+}
+
+function applyApproximationToEngine() {
+  const engine = mandelbrotEngine.value;
+  if (!engine) return;
+  const mode: ApproximationMode = mandelbrotParams.value.approximationMode === 'bla' ? 'bla' : 'perturbation';
+  engine.setApproximationMode(mode);
+  engine.setBlaEpsilon(mandelbrotParams.value.epsilon ?? 1e-6);
+}
 
 // Restore parametres a partir du localStorage puis surveille et persiste a chaque changement
 onMounted(() => {
@@ -241,12 +322,6 @@ onMounted(() => {
   // Bottom bar auto-hide
   window.addEventListener('mousemove', handleMouseMove, { passive: true });
   startBottomHideTimer();
-  try {
-    const raw = localStorage.getItem(LOCAL_STORAGE_CURRENT_KEY);
-    if (raw) {
-      Object.assign(mandelbrotParams.value, JSON.parse(raw));
-    }
-  } catch {}
 });
 onUnmounted(() => {
   window.removeEventListener('keydown', handleGlobalKeydown);
@@ -259,12 +334,24 @@ onUnmounted(() => {
   window.removeEventListener('touchstart', handleNavTouchstart);
   window.removeEventListener('touchend', handleNavTouchend);
   window.removeEventListener('mousemove', handleMouseMove);
+  if (activeTileTextureUrl) URL.revokeObjectURL(activeTileTextureUrl);
+  if (activeSkyboxTextureUrl) URL.revokeObjectURL(activeSkyboxTextureUrl);
   if (navigationTimeout !== null) clearTimeout(navigationTimeout);
   if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
 });
 watch(mandelbrotParams, (params) => {
   localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(params));
 }, { deep: true });
+
+watch(
+  [() => mandelbrotParams.value.textureName, () => mandelbrotParams.value.skyboxName] as const,
+  () => { void applySelectedTexturesToEngine(); },
+);
+
+watch(
+  [() => mandelbrotParams.value.approximationMode, () => mandelbrotParams.value.epsilon] as const,
+  () => { applyApproximationToEngine(); },
+);
 
 // When mobile nav expands, close all settings popups
 watch(mobileNavExpanded, (expanded) => {
@@ -515,7 +602,6 @@ const shortcutLabels = computed(() => {
     <!-- Render status indicator (bottom-center) -->
     <div
       class="render-stats-wrapper"
-      :class="{ 'hud-hidden': isNavigating && !renderStatsRef?.expanded }"
       v-show="showUI"
       @touchstart.stop
       @touchend.stop
@@ -532,8 +618,9 @@ const shortcutLabels = computed(() => {
       v-model:cx="mandelbrotParams.cx"
       v-model:cy="mandelbrotParams.cy"
       v-model:mobileNavExpanded="mobileNavExpanded"
-      @cursor-coord="onCursorCoord"
       @palette-pick="onPalettePick"
+      @picker-done="finishPickerMode"
+      @engine-ready="onEngineReady"
       :pickerMode="pickerMode"
       :mu="mandelbrotParams.mu"
       :antialiasLevel="mandelbrotParams.antialiasLevel"
@@ -585,19 +672,6 @@ const shortcutLabels = computed(() => {
         </div>
       </div>
     </template>
-
-    <!-- Cursor coordinate tooltip (masqué sur mobile) -->
-    <div
-      v-if="cursorTooltip.visible"
-      class="cursor-tooltip is-hidden-touch"
-      :style="{
-        left: cursorTooltip.clientX + 16 + 'px',
-        top: cursorTooltip.clientY - 8 + 'px',
-      }"
-    >
-      <span class="cursor-tooltip-label">cx</span> {{ cursorTooltip.cx }}<br/>
-      <span class="cursor-tooltip-label">cy</span> {{ cursorTooltip.cy }}
-    </div>
 
     <!-- Raccourcis clavier (masque sur mobile) — vertical stacked layout, left side -->
     <div
@@ -782,9 +856,7 @@ const shortcutLabels = computed(() => {
 /* Popup Settings */
 .settings-popup {
   max-width: 96vw;
-  background: rgba(255,255,255,0.75);
-  backdrop-filter: blur(12px) contrast(110%);
-  -webkit-backdrop-filter: blur(12px);
+  background: rgba(248, 248, 248, 0.96);
   border-radius: 12px;
   box-shadow: 0 8px 32px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.08);
   display: flex;
@@ -950,34 +1022,9 @@ const shortcutLabels = computed(() => {
   }
 }
 
-/* === Cursor coordinate tooltip === */
-.cursor-tooltip {
-  position: fixed;
-  z-index: 100;
-  pointer-events: none;
-  user-select: none;
-  padding: 4px 8px;
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.70);
-  backdrop-filter: blur(6px);
-  color: #eee;
-  font-size: 0.78rem;
-  font-family: 'SF Mono', 'Fira Code', 'Cascadia Code', monospace;
-  line-height: 1.45;
-  white-space: nowrap;
-  letter-spacing: 0.02em;
-}
-
-.cursor-tooltip-label {
-  color: rgba(255, 255, 255, 0.5);
-  margin-right: 4px;
-  font-weight: 500;
-}
-
-/* === Mode pipette : curseur crosshair === */
-.picker-cursor,
-.picker-cursor * {
-  cursor: crosshair !important;
+/* === Palette picker cursor on the fractal canvas === */
+.picker-cursor :deep(canvas) {
+  cursor: url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M14.7 3.3 20.7 9.3 18.9 11.1 17.8 10 9.4 18.4C9.1 18.7 8.7 18.9 8.3 18.9H5.1V15.7C5.1 15.3 5.3 14.9 5.6 14.6L14 6.2 12.9 5.1 14.7 3.3Z' fill='white' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M6.8 15.9H8.1L16.4 7.6 15.4 6.6 7.1 14.9 6.8 15.9Z' fill='%2338d5ff'/%3E%3C/svg%3E") 4 20, crosshair !important;
 }
 
 </style>

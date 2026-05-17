@@ -107,3 +107,65 @@ export type EffectFieldName = (typeof EFFECT_FIELD_NAMES)[number];
 export function getEffectValue(stop: ColorStop, field: EffectFieldName): number {
   return stop[field] ?? COLOR_STOP_DEFAULTS[field];
 }
+
+function clamp01(value: number): number {
+  return Math.max(0, Math.min(1, value));
+}
+
+function lerp(a: number, b: number, t: number): number {
+  return a + (b - a) * t;
+}
+
+function lerpAngle(a: number, b: number, t: number): number {
+  const tau = Math.PI * 2;
+  const delta = ((b - a + Math.PI) % tau + tau) % tau - Math.PI;
+  return ((a + delta * t) % tau + tau) % tau;
+}
+
+function findAdjacentStops(stops: ColorStop[], position: number): [ColorStop, ColorStop, number] | null {
+  if (stops.length === 0) return null;
+
+  const sortedStops = [...stops].sort((a, b) => a.position - b.position);
+  const rightIndex = sortedStops.findIndex(stop => stop.position >= position);
+  if (rightIndex <= 0) {
+    const stop = sortedStops[rightIndex < 0 ? sortedStops.length - 1 : 0];
+    return [stop, stop, 0];
+  }
+
+  if (rightIndex < 0) {
+    const stop = sortedStops[sortedStops.length - 1];
+    return [stop, stop, 0];
+  }
+
+  const left = sortedStops[rightIndex - 1];
+  const right = sortedStops[rightIndex];
+  const span = right.position - left.position;
+  const localT = span > 0 ? clamp01((position - left.position) / span) : 0;
+  return [left, right, localT];
+}
+
+export function createInterpolatedColorStop(
+  stops: ColorStop[],
+  position: number,
+  color: string,
+): ColorStop {
+  const clampedPosition = clamp01(position);
+  const newStop: ColorStop = { color, position: clampedPosition };
+  const adjacent = findAdjacentStops(stops, clampedPosition);
+
+  for (const field of EFFECT_FIELD_NAMES) {
+    if (!adjacent) {
+      newStop[field] = COLOR_STOP_DEFAULTS[field];
+      continue;
+    }
+
+    const [left, right, t] = adjacent;
+    const leftValue = getEffectValue(left, field);
+    const rightValue = getEffectValue(right, field);
+    newStop[field] = field === 'lightAngle'
+      ? lerpAngle(leftValue, rightValue, t)
+      : lerp(leftValue, rightValue, t);
+  }
+
+  return newStop;
+}
