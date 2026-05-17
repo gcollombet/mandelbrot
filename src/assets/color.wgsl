@@ -28,7 +28,7 @@ struct Uniforms {
 @group(0) @binding(2) var tileTex: texture_2d<f32>;
 @group(0) @binding(3) var skyboxTex: texture_2d<f32>;
 @group(0) @binding(4) var webcamTex: texture_2d<f32>;
-@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 4 rgba16float
+@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 5 rgba16float
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
 @group(0) @binding(8) var skyboxSampler: sampler;  // bilinear sampler for skybox
@@ -57,35 +57,42 @@ struct EffectParams {
   metallic: f32,        // [0, 1]
   roughness: f32,       // [0.02, 1]
   anisotropy: f32,      // [0, 1]
+  iridescenceColor: vec3<f32>,
+  wIridescence: f32,
 };
 
 fn sampleEffects(palettePhase: f32) -> EffectParams {
   var e: EffectParams;
 
-  // Row 0 (y = 0.125): R, G, B, palette weight
-  let row0 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.125), 0.0);
+  // Row 0 (y = 0.1): R, G, B, palette weight
+  let row0 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.1), 0.0);
   e.paletteColor = row0.rgb;
   e.wPalette = row0.a;
 
-  // Row 1 (y = 0.375): zebra, tessellation, shading, skybox
-  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.375), 0.0);
+  // Row 1 (y = 0.3): zebra, tessellation, shading, skybox
+  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.3), 0.0);
   e.wTessellation = row1.g;
   e.wShading = row1.b;
   e.wSkybox = row1.a;
 
-  // Row 2 (y = 0.625): webcam, smoothness, shadingLevel [0,3], specularPower [1,64]
-  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.625), 0.0);
+  // Row 2 (y = 0.5): webcam, smoothness, shadingLevel [0,3], specularPower [1,64]
+  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.5), 0.0);
   e.wWebcam = row2.r;
   e.wSmoothness = row2.g;
   e.shadingLevel = row2.b;       // direct: natural range [0, 3]
   e.specularPower = max(row2.a, 1.0); // direct: natural range [1, 64]
 
-  // Row 3 (y = 0.875): lightAngle [0,2pi], metallic, roughness, anisotropy
-  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.875), 0.0);
+  // Row 3 (y = 0.7): lightAngle [0,2pi], metallic, roughness, anisotropy
+  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.7), 0.0);
   e.lightAngle = row3.r;          // direct: radians [0, 2pi]
   e.metallic = clamp(row3.g, 0.0, 1.0);
   e.roughness = clamp(row3.b, 0.02, 1.0);
   e.anisotropy = clamp(row3.a, 0.0, 1.0);
+
+  // Row 4 (y = 0.9): iridescence R, G, B, enabled
+  let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.9), 0.0);
+  e.iridescenceColor = row4.rgb;
+  e.wIridescence = clamp(row4.a, 0.0, 1.0);
 
   return e;
 }
@@ -165,6 +172,16 @@ fn mandelbrot_tangent(angle_der: f32, normal: vec3<f32>) -> vec3<f32> {
   let projected = flow - normal * dot(flow, normal);
   let projectedLen = length(projected);
   return select(vec3<f32>(1.0, 0.0, 0.0), projected / projectedLen, projectedLen > 1e-5);
+}
+
+fn distance_tangent(grad: vec2<f32>, fallbackTangent: vec3<f32>, fallbackBitangent: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
+  let gradLen = length(grad);
+  let contour2d = vec2<f32>(-grad.y, grad.x) / max(gradLen, 1e-5);
+  let tangentRaw = fallbackTangent * contour2d.x + fallbackBitangent * contour2d.y;
+  let tangentFromDistance = tangentRaw / max(length(tangentRaw), 1e-5);
+  let projected = tangentFromDistance - normal * dot(tangentFromDistance, normal);
+  let projectedLen = length(projected);
+  return select(fallbackTangent, projected / max(projectedLen, 1e-5), gradLen > 1e-4 && projectedLen > 1e-5);
 }
 
 fn anisotropic_highlight(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, halfDir: vec3<f32>, nDotL: f32, nDotV: f32, roughness: f32) -> f32 {
@@ -420,12 +437,14 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     );
     let cavity = min(surface_cavity(slope, relief, occStrength), normalCavity);
     let ao = min(pseudo_ambient_occlusion(normal, v_smooth, z), heightAo) * cavity;
-    let la = fx.lightAngle;
+    let la = fx.lightAngle + parameters.angle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 1.85));
     let viewDir = normalize(vec3<f32>(cos(la + 0.5), sin(la + 0.5), 0.5));
     let halfDir = normalize(lightDir + viewDir);
     let tangent = mandelbrot_tangent(angle_der, normal);
     let bitangent = normalize(cross(normal, tangent));
+    let anisotropyTangent = distance_tangent(grad, baseTangent, baseBitangent, normal);
+    let anisotropyBitangent = normalize(cross(normal, anisotropyTangent));
     let nDotL = max(dot(normal, lightDir), 0.0);
     let nDotV = max(dot(normal, viewDir), 0.0);
     let nDotH = max(dot(normal, halfDir), 0.0);
@@ -439,15 +458,24 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let distribution = ggx_distribution(nDotH, roughness);
     let geometry = ggx_geometry_smith(nDotV, nDotL, roughness);
     let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
-    let anisotropicTerm = anisotropic_highlight(normal, tangent, bitangent, halfDir, nDotL, nDotV, roughness);
+    let anisotropicTerm = anisotropic_highlight(normal, anisotropyTangent, anisotropyBitangent, halfDir, nDotL, nDotV, roughness);
     let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
     let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL;
     let diffuseColor = color * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
     let localShadow = fractal_height_shadow(grad, lightDir, tangent, bitangent, relief, occStrength);
     let shadowedNDotL = nDotL * localShadow;
+    let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
+    let reflectionSide = mix(0.08, 1.0, litSide);
     let diffuseLight = diffuseColor * (0.14 + 0.86 * shadowedNDotL) * ao;
     let brightness = max(fx.shadingLevel, 0.0);
     var materialColor = diffuseLight + directSpecular * ao * mix(1.0, localShadow, 0.45);
+
+    if (fx.wIridescence > 0.001) {
+      let pearl = smoothstep(0.05, 0.9, 1.0 - nDotV) * fx.wIridescence * reflectionSide;
+      let pearlColor = fx.iridescenceColor * (0.35 + 0.65 * luminance(color));
+      materialColor += pearlColor * pearl * (0.16 + 0.34 * (1.0 - metallic)) * ao;
+      materialColor = mix(materialColor, materialColor + fx.iridescenceColor * pearl, 0.12);
+    }
 
     if (parameters.subsurfaceStrength > 0.001) {
       materialColor += fake_subsurface_scattering(
@@ -480,13 +508,13 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       let skyboxColor = rough_skybox_reflection(skyboxDir, tangent, bitangent, roughness, dx + sky_drift_u, dy + sky_drift_v);
       let fresnelEnv = fresnel_schlick(nDotV, f0);
       let reflectionStrength = fx.wSkybox * clamp(luminance(fresnelEnv), 0.0, 1.0);
-      envColor = skyboxColor * fresnelEnv * reflectionStrength * mix(0.55, 1.25, metallic);
+      envColor = skyboxColor * fresnelEnv * reflectionStrength * mix(0.55, 1.25, metallic) * reflectionSide;
     }
 
-    let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading;
+    let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading * reflectionSide;
     let rimColor = mix(color, vec3<f32>(1.0), 0.45) * rim * (0.08 + 0.22 * fx.wSkybox);
     let wearColor = mix(color, vec3<f32>(1.0, 0.92, 0.74), 0.5 + 0.3 * metallic);
-    let wear = edgeWear * (0.15 + 0.35 * metallic) * effShading;
+    let wear = edgeWear * (0.15 + 0.35 * metallic) * effShading * mix(0.35, 1.0, litSide);
     materialColor = mix(materialColor, materialColor + wearColor * wear, clamp(edgeWear, 0.0, 1.0));
 
     materialColor *= mix(1.0, cavity, 0.65);
@@ -557,12 +585,12 @@ fn colorize_pixel(
   // apply it to select between iter_val and nu.
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let prelimPhase = fract(nu * 2.0 / paletteRepeat + parameters.paletteOffset);
-  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.625), 0.0);
+  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.5), 0.0);
   let wSmoothness = row2.g;
   nu = mix(iter_val, nu, wSmoothness);
 
   // ── Zebra: continuous application (darkens even iterations) ──
-  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.375), 0.0);
+  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.3), 0.0);
   let wZebra = row1.r;
   let isEvenIter = 1.0 - abs(floor(iter_val) % 2.0);
 

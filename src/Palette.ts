@@ -1,7 +1,7 @@
 import { interpolateLab, interpolateRgb, interpolateHcl, interpolateHsl, interpolateCubehelix } from 'd3-interpolate';
 import { rgb } from 'd3-color';
 import type { ColorStop } from './ColorStop.ts';
-import { COLOR_STOP_DEFAULTS, getEffectValue } from './ColorStop.ts';
+import { applyStopTransferCurve, COLOR_STOP_DEFAULTS, getEffectValue, getStopTransferCurve } from './ColorStop.ts';
 import type { InterpolationMode } from './Mandelbrot.ts';
 
 const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: number) => string> = {
@@ -15,8 +15,8 @@ const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: num
 /** Width of the palette texture (one texel per iteration bucket). */
 const TEXTURE_WIDTH = 4096;
 
-/** Height of the palette texture (4 rows for RGB+effects). */
-const TEXTURE_HEIGHT = 4;
+/** Height of the palette texture (5 rows for RGB+effects+iridescence). */
+const TEXTURE_HEIGHT = 5;
 
 /**
  * Linearly interpolate a single effect field between two stops.
@@ -25,6 +25,10 @@ function lerpEffect(a: ColorStop, b: ColorStop, field: keyof typeof COLOR_STOP_D
   const va = getEffectValue(a, field);
   const vb = getEffectValue(b, field);
   return va + (vb - va) * t;
+}
+
+function getStopColor(stop: ColorStop, field: 'color' | 'iridescenceColor'): string | null {
+  return stop[field] ?? null;
 }
 
 export class Palette {
@@ -49,8 +53,9 @@ export class Palette {
       const b = this.points[i + 1];
       if (t >= a.position && t <= b.position) {
         const localT = (t - a.position) / (b.position - a.position);
+        const curvedT = applyStopTransferCurve(getStopTransferCurve(a), localT);
         const interp = this.interpolate(a.color, b.color);
-        return rgb(interp(localT)).formatHex();
+        return rgb(interp(curvedT)).formatHex();
       }
     }
     return '#000';
@@ -71,22 +76,61 @@ export class Palette {
       const b = this.points[i + 1];
       if (t >= a.position && t <= b.position) {
         const localT = (t - a.position) / (b.position - a.position);
-        return lerpEffect(a, b, field, localT);
+        const curvedT = applyStopTransferCurve(getStopTransferCurve(a), localT);
+        return lerpEffect(a, b, field, curvedT);
       }
     }
     return COLOR_STOP_DEFAULTS[field];
   }
 
+  getIridescenceAt(t: number): { color: string; weight: number } {
+    if (this.points.length === 0) return { color: '#000000', weight: 0 };
+    if (this.points.length === 1) {
+      return {
+        color: this.points[0].iridescenceColor ?? this.points[0].color,
+        weight: this.points[0].iridescenceColor ? 1 : 0,
+      };
+    }
+
+    const first = this.points[0];
+    const last = this.points[this.points.length - 1];
+    if (t <= first.position) {
+      return { color: first.iridescenceColor ?? first.color, weight: first.iridescenceColor ? 1 : 0 };
+    }
+    if (t >= last.position) {
+      return { color: last.iridescenceColor ?? last.color, weight: last.iridescenceColor ? 1 : 0 };
+    }
+
+    for (let i = 0; i < this.points.length - 1; ++i) {
+      const a = this.points[i];
+      const b = this.points[i + 1];
+      if (t >= a.position && t <= b.position) {
+        const localT = (t - a.position) / (b.position - a.position);
+        const curvedT = applyStopTransferCurve(getStopTransferCurve(a), localT);
+        const aIridescence = getStopColor(a, 'iridescenceColor');
+        const bIridescence = getStopColor(b, 'iridescenceColor');
+        if (!aIridescence && !bIridescence) return { color: '#000000', weight: 0 };
+        const aColor = aIridescence ?? a.color;
+        const bColor = bIridescence ?? b.color;
+        const weight = (aIridescence ? 1 : 0) + ((bIridescence ? 1 : 0) - (aIridescence ? 1 : 0)) * curvedT;
+        return { color: rgb(this.interpolate(aColor, bColor)(curvedT)).formatHex(), weight };
+      }
+    }
+
+    return { color: '#000000', weight: 0 };
+  }
+
   /**
-   * Generate a 4096 x 4 float texture as a Float32Array.
+   * Generate a 4096 x 5 float texture as a Float32Array.
    * All values are stored in their natural ranges — no normalization.
    * The Engine will encode these as float16 for the GPU texture.
    *
-   * Layout (4 rows of 4096 RGBA texels):
-   *   Row 0 (y=0.125): R [0,1], G [0,1], B [0,1], palette weight [0,1]
-   *   Row 1 (y=0.375): zebra [0,1], tessellation [0,1], shading [0,1], skybox [0,1]
-   *   Row 2 (y=0.625): webcam [0,1], smoothness [0,1], shadingLevel [0,3], specularPower [1,64]
-   *   Row 3 (y=0.875): lightAngle [0,2pi], metallic [0,1], roughness [0.02,1], anisotropy [0,1]
+   * Layout (5 rows of 4096 RGBA texels):
+   *   Row 0: R [0,1], G [0,1], B [0,1], palette weight [0,1]
+   *   Row 1: zebra [0,1], tessellation [0,1], shading [0,1], skybox [0,1]
+   *   Row 2: webcam [0,1], smoothness [0,1], shadingLevel [0,3], specularPower [1,64]
+   *   Row 3: lightAngle [0,2pi], metallic [0,1], roughness [0.02,1], anisotropy [0,1]
+   *   Row 4: iridescence RGB [0,1], iridescence weight [0,1]
    *
    * @returns {{ data: Float32Array, width: number, height: number }}
    */
@@ -126,6 +170,15 @@ export class Palette {
       data[row3 + 1] = this.getEffectAt(t, 'metallic');
       data[row3 + 2] = this.getEffectAt(t, 'roughness');
       data[row3 + 3] = this.getEffectAt(t, 'anisotropy');
+
+      // ── Row 4: iridescence R, G, B, weight ──
+      const iridescence = this.getIridescenceAt(t);
+      const iridescenceColor = rgb(iridescence.color);
+      const row4 = (4 * width + x) * 4;
+      data[row4]     = (iridescenceColor.r ?? 0) / 255;
+      data[row4 + 1] = (iridescenceColor.g ?? 0) / 255;
+      data[row4 + 2] = (iridescenceColor.b ?? 0) / 255;
+      data[row4 + 3] = Math.max(0, Math.min(1, iridescence.weight));
     }
 
     return { data, width, height };

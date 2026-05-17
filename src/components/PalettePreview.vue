@@ -291,9 +291,10 @@ async function init() {
   // ── Webcam placeholder (1×1 black) ──
   webcamTextureGpu = create1x1Texture(device, 0, 0, 0, 255);
 
-  // ── Palette texture (4096 × 4 rgba16float) ──
+  // ── Palette texture (4096 x 5 rgba16float) ──
+  const initialPalette = new Palette(props.colorStops, props.interpolationMode ?? 'lab').generateTexture();
   paletteTexture = device.createTexture({
-    size: [4096, 4, 1],
+    size: [initialPalette.width, initialPalette.height, 1],
     format: 'rgba16float',
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     label: 'PalettePreview PaletteTexture',

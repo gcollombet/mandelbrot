@@ -726,6 +726,45 @@ async function exportPresets() {
   URL.revokeObjectURL(url);
 }
 
+function downloadJsonFile(filename: string, payload: unknown) {
+  const data = JSON.stringify(payload, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+async function exportSelectedPreset() {
+  if (!selectedPreset.value) return;
+  const record = await getCachedPreset(selectedPreset.value);
+  if (!record) return;
+  downloadJsonFile(`mandelbrot-preset-${record.name || record.id}.json`, {
+    name: record.name,
+    value: record.value,
+    thumbnail: record.thumbnail,
+    date: record.date,
+  });
+}
+
+async function exportSelectedNavigationPreset() {
+  if (!selectedNavPreset.value) return;
+  const record = await getCachedPreset(selectedNavPreset.value);
+  if (!record) return;
+  downloadJsonFile(`mandelbrot-navigation-${record.name || record.id}.json`, {
+    name: record.name,
+    date: record.date,
+    value: {
+      cx: record.value.cx,
+      cy: record.value.cy,
+      scale: record.value.scale,
+      angle: record.value.angle,
+    },
+  });
+}
+
 const presetFileInput = ref<HTMLInputElement | null>(null);
 function triggerImportPresets() {
   presetFileInput.value?.click();
@@ -771,6 +810,12 @@ function exportPalettes() {
   a.download = 'mandelbrot-palettes.json';
   a.click();
   URL.revokeObjectURL(url);
+}
+
+function exportSelectedPalette() {
+  const palette = palettes.value.find(item => item.name === selectedPalette.value);
+  if (!palette) return;
+  downloadJsonFile(`mandelbrot-palette-${palette.name}.json`, palette);
 }
 
 const paletteFileInput = ref<HTMLInputElement | null>(null);
@@ -1380,6 +1425,13 @@ async function renameAndSaveSkyboxTexture() {
             </div>
           </div>
         </div>
+        <div class="field is-grouped" style="margin-top:0.65em;">
+          <div class="control">
+            <button class="button is-info is-small is-light" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset">
+              Export Selected Navigation
+            </button>
+          </div>
+        </div>
       </div>
     </div>
 
@@ -1441,6 +1493,11 @@ async function renameAndSaveSkyboxTexture() {
           <div class="control">
             <button class="button is-info is-small" @click="exportPresets" :disabled="presets.length === 0">
               Export
+            </button>
+          </div>
+          <div class="control">
+            <button class="button is-info is-small is-light" @click="exportSelectedPreset" :disabled="!selectedPreset">
+              Export Selected
             </button>
           </div>
           <div class="control">
@@ -1799,6 +1856,11 @@ async function renameAndSaveSkyboxTexture() {
           <div class="control">
             <button class="button is-info is-small" @click="exportPalettes" :disabled="palettes.length === 0">
               Export
+            </button>
+          </div>
+          <div class="control">
+            <button class="button is-info is-small is-light" @click="exportSelectedPalette" :disabled="!selectedPalette">
+              Export Selected
             </button>
           </div>
           <div class="control">

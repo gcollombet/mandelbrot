@@ -2,15 +2,17 @@
 import {computed, onMounted, ref, watch} from 'vue';
 import GlissiereHandle from './GlissiereHandle.vue';
 import PalettePreview from './PalettePreview.vue';
+import StopTransferCurveSelector from './StopTransferCurveSelector.vue';
 import {Palette} from '../Palette';
 import {rgb as d3rgb} from 'd3-color';
-import type {ColorStop} from "../ColorStop.ts";
-import { COLOR_STOP_DEFAULTS, createInterpolatedColorStop, getEffectValue } from '../ColorStop.ts';
+import type {ColorStop, StopTransferCurve} from "../ColorStop.ts";
+import { COLOR_STOP_DEFAULTS, createInterpolatedColorStop, getEffectValue, getStopTransferCurve } from '../ColorStop.ts';
 import type { EffectFieldName } from '../ColorStop.ts';
 import type {InterpolationMode} from "../Mandelbrot.ts";
 import {
   applyStopPresetValues,
   deleteStopPresetEntry,
+  ensureDefaultStopPresetEntries,
   getAllStopPresetEntries,
   saveStopPresetEntry,
   valuesFromStop,
@@ -128,6 +130,48 @@ const selectedHex = computed({
   }
 });
 
+const selectedIridescenceHex = computed({
+  get() {
+    if (!selectedStop.value?.iridescenceColor) return '#ffffff';
+    try {
+      return d3rgb(selectedStop.value.iridescenceColor).formatHex();
+    } catch {
+      return '#ffffff';
+    }
+  },
+  set(hex: string) {
+    if (props.applyToAll) {
+      for (const stop of props.colorStops) {
+        stop.iridescenceColor = hex;
+      }
+    } else {
+      if (selectedIdx.value === null) return;
+      const stop = props.colorStops[selectedIdx.value];
+      if (!stop) return;
+      stop.iridescenceColor = hex;
+    }
+    emit('update:colorStops', props.colorStops);
+  },
+});
+
+function enableIridescenceColor() {
+  selectedIridescenceHex.value = selectedHex.value;
+}
+
+function clearIridescenceColor() {
+  if (props.applyToAll) {
+    for (const stop of props.colorStops) {
+      delete stop.iridescenceColor;
+    }
+  } else {
+    if (selectedIdx.value === null) return;
+    const stop = props.colorStops[selectedIdx.value];
+    if (!stop) return;
+    delete stop.iridescenceColor;
+  }
+  emit('update:colorStops', props.colorStops);
+}
+
 // ── Per-stop effect editing ──
 
 /** The currently selected stop (reactive). */
@@ -136,11 +180,31 @@ const selectedStop = computed(() => {
   return props.colorStops[selectedIdx.value] ?? null;
 });
 
+const selectedTransferCurve = computed<StopTransferCurve>({
+  get() {
+    return selectedStop.value ? getStopTransferCurve(selectedStop.value) : 'linear';
+  },
+  set(curve: StopTransferCurve) {
+    if (props.applyToAll) {
+      for (const stop of props.colorStops) {
+        stop.transferCurve = curve;
+      }
+    } else {
+      if (selectedIdx.value === null) return;
+      const stop = props.colorStops[selectedIdx.value];
+      if (!stop) return;
+      stop.transferCurve = curve;
+    }
+    emit('update:colorStops', props.colorStops);
+  },
+});
+
 const stopPresetName = ref('');
 const selectedStopPresetName = ref('');
 const stopPresets = ref<StopPresetRecord[]>([]);
 
 function refreshStopPresets() {
+  ensureDefaultStopPresetEntries();
   stopPresets.value = getAllStopPresetEntries();
 }
 
@@ -228,6 +292,58 @@ function deleteSelectedStopPreset() {
   deleteStopPresetEntry(name);
   selectedStopPresetName.value = '';
   refreshStopPresets();
+}
+
+function downloadJsonFile(filename: string, payload: unknown) {
+  const data = JSON.stringify(payload, null, 2);
+  const blob = new Blob([data], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = filename;
+  a.click();
+  URL.revokeObjectURL(url);
+}
+
+function exportSelectedStopPreset() {
+  const preset = stopPresets.value.find(item => item.name === selectedStopPresetName.value);
+  if (!preset) return;
+  downloadJsonFile(`mandelbrot-stop-preset-${preset.name}.json`, preset);
+}
+
+function exportAllStopPresets() {
+  downloadJsonFile('mandelbrot-stop-presets.json', stopPresets.value);
+}
+
+const stopPresetFileInput = ref<HTMLInputElement | null>(null);
+function triggerImportStopPresets() {
+  stopPresetFileInput.value?.click();
+}
+
+function importStopPresets(event: Event) {
+  const input = event.target as HTMLInputElement;
+  const file = input.files?.[0];
+  if (!file) return;
+  const reader = new FileReader();
+  reader.onload = () => {
+    try {
+      const imported = JSON.parse(reader.result as string);
+      const records = Array.isArray(imported) ? imported : [imported];
+      for (const record of records) {
+        if (!record || typeof record.name !== 'string' || !record.values || typeof record.values.color !== 'string') continue;
+        saveStopPresetEntry({
+          name: record.name,
+          values: record.values,
+          date: typeof record.date === 'string' ? record.date : new Date().toISOString(),
+        });
+      }
+      refreshStopPresets();
+    } catch {
+      window.alert('Invalid stop preset file.');
+    }
+  };
+  reader.readAsText(file);
+  input.value = '';
 }
 
 /** Forward snapshot capture from the underlying PalettePreview. */
@@ -355,6 +471,9 @@ defineExpose({ getSnapshot });
           <button class="button is-small is-danger is-light" :disabled="!selectedStopPresetName" @click="deleteSelectedStopPreset">
             Delete
           </button>
+          <button class="button is-small is-info is-light" :disabled="!selectedStopPresetName" @click="exportSelectedStopPreset">
+            Export
+          </button>
         </div>
         <div class="preset-row">
           <input
@@ -367,19 +486,59 @@ defineExpose({ getSnapshot });
           <button class="button is-small is-light" :disabled="!stopPresetName.trim()" @click="saveCurrentStopPreset">
             Save
           </button>
+          <button class="button is-small is-info is-light" :disabled="stopPresets.length === 0" @click="exportAllStopPresets">
+            Export All
+          </button>
+          <button class="button is-small is-success is-light" @click="triggerImportStopPresets">
+            Import
+          </button>
+          <input ref="stopPresetFileInput" type="file" accept=".json" style="display:none;" @change="importStopPresets" />
         </div>
       </div>
 
       <!-- ── Color ── -->
       <label class="effects-group-title">Color</label>
-      <div class="color-picker-inline">
-        <input
-          type="color"
-          :value="selectedHex"
-          @input="selectedHex = ($event.target as HTMLInputElement).value"
-          class="native-color-input"
-        />
-        <span class="color-hex-label">{{ selectedHex }}</span>
+      <div class="color-transfer-row">
+        <div class="color-stack">
+          <div class="color-picker-inline">
+            <span class="color-kind-label">Base</span>
+            <input
+              type="color"
+              :value="selectedHex"
+              @input="selectedHex = ($event.target as HTMLInputElement).value"
+              class="native-color-input"
+            />
+            <span class="color-hex-label">{{ selectedHex }}</span>
+          </div>
+          <div class="color-picker-inline">
+            <span class="color-kind-label">Iridescence</span>
+            <input
+              v-if="selectedStop.iridescenceColor"
+              type="color"
+              :value="selectedIridescenceHex"
+              @input="selectedIridescenceHex = ($event.target as HTMLInputElement).value"
+              class="native-color-input"
+            />
+            <button
+              v-else
+              type="button"
+              class="button is-small is-light iridescence-toggle"
+              title="Use base color as iridescence color"
+              @click="enableIridescenceColor"
+            >
+              +
+            </button>
+            <span class="color-hex-label">{{ selectedStop.iridescenceColor ? selectedIridescenceHex : 'off' }}</span>
+            <button
+              v-if="selectedStop.iridescenceColor"
+              type="button"
+              class="delete is-small"
+              title="Remove iridescence color"
+              @click="clearIridescenceColor"
+            />
+          </div>
+        </div>
+        <StopTransferCurveSelector v-model="selectedTransferCurve" />
       </div>
       <template v-for="field in (['palette'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
@@ -626,12 +785,35 @@ defineExpose({ getSnapshot });
   font-family: monospace;
   font-size: 0.95em;
   color: #111;
+  min-width: 56px;
 }
 .color-picker-inline {
   display: flex;
   align-items: center;
   gap: 0.5em;
+}
+.color-stack {
+  display: grid;
+  gap: 0.28em;
+}
+.color-kind-label {
+  width: 72px;
+  font-size: 0.78em;
+  color: #333;
+  flex-shrink: 0;
+}
+.color-transfer-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.6em;
   margin-bottom: 0.3em;
+  flex-wrap: wrap;
+}
+.iridescence-toggle {
+  width: 36px;
+  height: 30px;
+  padding: 0 !important;
 }
 .effect-row {
   display: flex;

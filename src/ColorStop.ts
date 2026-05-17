@@ -1,3 +1,5 @@
+import { interpolateRgb } from 'd3-interpolate';
+
 /**
  * A single stop in the extended palette.
  *
@@ -5,22 +7,62 @@
  * The optional effect fields are encoded into palette-texture rows 0-3
  * and interpolated between stops just like colors.
  *
- * Texture layout (4096 x 4, rgba16float):
- *   Row 0 (y = 0.125): R, G, B, palette   (palette = opacity of RGB color)
- *   Row 1 (y = 0.375): zebra, tessellation, shading, skybox
- *   Row 2 (y = 0.625): webcam, smoothness, shadingLevel, specularPower
- *   Row 3 (y = 0.875): lightAngle, metallic, roughness, anisotropy
+ * Texture layout (4096 x 5, rgba16float):
+ *   Row 0: R, G, B, palette   (palette = opacity of RGB color)
+ *   Row 1: zebra, tessellation, shading, skybox
+ *   Row 2: webcam, smoothness, shadingLevel, specularPower
+ *   Row 3: lightAngle, metallic, roughness, anisotropy
+ *   Row 4: iridescence R, G, B, enabled
  *
  * tessellationLevel and displacementAmount are global uniforms (not per-stop).
  *
  * Activation weights are in [0, 1].
  * Continuous parameters are stored in their natural range (float16).
  */
+export const STOP_TRANSFER_CURVES = ['linear', 'gaussian', 'square', 'exponential'] as const;
+
+export type StopTransferCurve = (typeof STOP_TRANSFER_CURVES)[number];
+
+export function isStopTransferCurve(value: unknown): value is StopTransferCurve {
+  return typeof value === 'string' && (STOP_TRANSFER_CURVES as readonly string[]).includes(value);
+}
+
+export function getStopTransferCurve(stop: ColorStop): StopTransferCurve {
+  return isStopTransferCurve(stop.transferCurve) ? stop.transferCurve : 'linear';
+}
+
+export function applyStopTransferCurve(curve: StopTransferCurve, t: number): number {
+  const x = clamp01(t);
+  switch (curve) {
+    case 'gaussian': {
+      // Plateau at start, smooth transition, plateau at end.
+      const edgeStart = 0.28;
+      const edgeEnd = 0.72;
+      if (x <= edgeStart) return 0;
+      if (x >= edgeEnd) return 1;
+      const u = (x - edgeStart) / (edgeEnd - edgeStart);
+      return u * u * (3 - 2 * u);
+    }
+    case 'square':
+      // Square-wave transfer: immediate jump to next stop right after the boundary.
+      return x <= 0 ? 0 : 1;
+    case 'exponential':
+      return (Math.exp(3 * x) - 1) / (Math.exp(3) - 1);
+    case 'linear':
+    default:
+      return x;
+  }
+}
+
 export type ColorStop = {
   /** CSS color string (hex, rgb, hsl, etc.) */
   color: string;
+  /** Optional color used at grazing angles through a Fresnel blend. */
+  iridescenceColor?: string;
   /** Position along the palette in [0, 1] */
   position: number;
+  /** Transfer curve used from this stop to the next stop. */
+  transferCurve?: StopTransferCurve;
 
   // ── Activation weights (0 = off, 1 = full, fractional = blend) ──
 
@@ -152,6 +194,15 @@ export function createInterpolatedColorStop(
   const clampedPosition = clamp01(position);
   const newStop: ColorStop = { color, position: clampedPosition };
   const adjacent = findAdjacentStops(stops, clampedPosition);
+  if (adjacent) {
+    const [left, right, t] = adjacent;
+    newStop.transferCurve = getStopTransferCurve(left);
+    if (left.iridescenceColor || right.iridescenceColor) {
+      const leftColor = left.iridescenceColor ?? left.color;
+      const rightColor = right.iridescenceColor ?? right.color;
+      newStop.iridescenceColor = interpolateRgb(leftColor, rightColor)(t);
+    }
+  }
 
   for (const field of EFFECT_FIELD_NAMES) {
     if (!adjacent) {
