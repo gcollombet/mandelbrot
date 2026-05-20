@@ -45,6 +45,7 @@ export interface PaletteRecord {
   subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
+  varnishStrength?: number;
   stripeFrequency?: number;
 }
 

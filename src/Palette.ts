@@ -129,7 +129,7 @@ export class Palette {
    *   Row 0: R [0,1], G [0,1], B [0,1], palette weight [0,1]
    *   Row 1: zebra [0,1], tessellation [0,1], shading [0,1], skybox [0,1]
    *   Row 2: webcam [0,1], smoothness [0,1], shadingLevel [0,3], specularPower [1,64]
-   *   Row 3: lightAngle [0,2pi], metallic [0,1], roughness [0.02,1], anisotropy [0,1]
+   *   Row 3: reserved legacy lightAngle [0,2pi], metallic [0,1], roughness [0.02,1], anisotropy [0,1]
    *   Row 4: iridescence RGB [0,1], iridescence weight [0,1]
    *   Row 5: stripeAverage [0,1], directionCoherence [0,1], stripeRelief [0,1], directionCoherenceRelief [0,1]
    *
@@ -165,7 +165,7 @@ export class Palette {
       data[row2 + 2] = this.getEffectAt(t, 'shadingLevel');
       data[row2 + 3] = this.getEffectAt(t, 'specularPower');
 
-      // ── Row 3: lightAngle, metallic, roughness, anisotropy ──
+      // ── Row 3: reserved legacy lightAngle, metallic, roughness, anisotropy ──
       const row3 = (3 * width + x) * 4;
       data[row3]     = this.getEffectAt(t, 'lightAngle');
       data[row3 + 1] = this.getEffectAt(t, 'metallic');

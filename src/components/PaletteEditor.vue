@@ -33,6 +33,7 @@ const props = withDefaults(defineProps<{
   subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
+  varnishStrength?: number;
   applyToAll?: boolean;
 }>(), {
   interpolationMode: 'lab',
@@ -47,6 +48,7 @@ const props = withDefaults(defineProps<{
   subsurfaceStrength: 0.0,
   reliefDepth: 0.35,
   localShadowStrength: 0.4,
+  varnishStrength: 1.0,
   applyToAll: false,
 });
 const emit = defineEmits<{
@@ -417,6 +419,7 @@ defineExpose({ getSnapshot });
         :subsurfaceStrength="subsurfaceStrength"
         :reliefDepth="reliefDepth"
         :localShadowStrength="localShadowStrength"
+        :varnishStrength="varnishStrength"
       />
       <div class="handles-overlay">
         <GlissiereHandle
@@ -580,7 +583,7 @@ defineExpose({ getSnapshot });
 
       <!-- ── Lighting ── -->
       <label class="effects-group-title">Lighting & Material</label>
-      <template v-for="field in (['shading','skybox','shadingLevel','specularPower','lightAngle','metallic','roughness','anisotropy'] as EffectFieldName[])" :key="field">
+      <template v-for="field in (['shading','skybox','shadingLevel','specularPower','metallic','roughness','anisotropy'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
           <input

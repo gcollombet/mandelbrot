@@ -125,6 +125,8 @@ export type RenderOptions = {
     subsurfaceStrength: number,
     reliefDepth: number,
     localShadowStrength: number,
+    lightAngle: number,
+    varnishStrength: number,
     stripeFrequency: number,
 }
 
@@ -427,7 +429,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 24, // 23 floats padded to 16-byte alignment (96 bytes)
+            size: 4 * 28, // 25 floats padded to 16-byte alignment (112 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1211,6 +1213,8 @@ export class Engine {
             renderOptions.subsurfaceStrength, // 20: subsurfaceStrength
             renderOptions.reliefDepth,       // 21: reliefDepth
             renderOptions.localShadowStrength, // 22: localShadowStrength
+            renderOptions.lightAngle,          // 23: lightAngle
+            renderOptions.varnishStrength,     // 24: varnishStrength
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

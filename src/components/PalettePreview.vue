@@ -54,6 +54,7 @@ const props = defineProps<{
   subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
+  varnishStrength?: number;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -333,9 +334,9 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (23 floats, padded to 96 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (25 floats, padded to 112 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
-    size: 4 * 24,
+    size: 4 * 28,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
@@ -365,6 +366,8 @@ async function init() {
     props.subsurfaceStrength ?? 0.0, // subsurfaceStrength
     props.reliefDepth ?? 0.35, // reliefDepth
     props.localShadowStrength ?? 0.4, // localShadowStrength
+    3.927, // lightAngle
+    props.varnishStrength ?? 1.0, // varnishStrength
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -413,7 +416,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.clearcoatStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.clearcoatStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength],
   () => {
     if (!device || !uniformBuffer) return;
     const patch = new Float32Array([
@@ -427,6 +430,8 @@ watch(
       props.subsurfaceStrength ?? 0.0,
       props.reliefDepth ?? 0.35,
       props.localShadowStrength ?? 0.4,
+      3.927,
+      props.varnishStrength ?? 1.0,
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
     render();

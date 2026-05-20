@@ -217,6 +217,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   subsurfaceStrength: 0.0,
   reliefDepth: 0.35,
   localShadowStrength: 0.4,
+  varnishStrength: 1.0,
   stripeFrequency: 8,
   textureName: 'Gold',
   skyboxName: 'Skybox',
@@ -715,6 +716,8 @@ const shortcutLabels = computed(() => {
       :subsurfaceStrength="mandelbrotParams.subsurfaceStrength"
       :reliefDepth="mandelbrotParams.reliefDepth"
       :localShadowStrength="mandelbrotParams.localShadowStrength"
+      :lightAngle="mandelbrotParams.lightAngle"
+      :varnishStrength="mandelbrotParams.varnishStrength"
       :stripeFrequency="mandelbrotParams.stripeFrequency"
     />
 

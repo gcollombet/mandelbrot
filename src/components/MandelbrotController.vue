@@ -37,6 +37,8 @@ const props = defineProps<{
   subsurfaceStrength?: number,
   reliefDepth?: number,
   localShadowStrength?: number,
+  lightAngle?: number,
+  varnishStrength?: number,
   stripeFrequency?: number,
 }>();
 
@@ -382,6 +384,8 @@ onUnmounted(() => {
       :subsurfaceStrength="props.subsurfaceStrength"
       :reliefDepth="props.reliefDepth"
       :localShadowStrength="props.localShadowStrength"
+      :lightAngle="props.lightAngle"
+      :varnishStrength="props.varnishStrength"
       :stripeFrequency="props.stripeFrequency"
       @ready="emit('engineReady', $event)"
     />

@@ -11,11 +11,11 @@ import { interpolateRgb } from 'd3-interpolate';
  *   Row 0: R, G, B, palette   (palette = opacity of RGB color)
  *   Row 1: zebra, tessellation, shading, skybox
  *   Row 2: webcam, smoothness, shadingLevel, specularPower
- *   Row 3: lightAngle, metallic, roughness, anisotropy
+ *   Row 3: reserved legacy lightAngle, metallic, roughness, anisotropy
  *   Row 4: iridescence R, G, B, enabled
  *   Row 5: stripeAverage, directionCoherence, stripeRelief, directionCoherenceRelief
  *
- * tessellationLevel and displacementAmount are global uniforms (not per-stop).
+ * tessellationLevel, displacementAmount, and lightAngle are global uniforms (not per-stop).
  *
  * Activation weights are in [0, 1].
  * Continuous parameters are stored in their natural range (float16).

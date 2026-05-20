@@ -22,6 +22,8 @@ struct Uniforms {
   subsurfaceStrength: f32,
   reliefDepth: f32,
   localShadowStrength: f32,
+  lightAngle: f32,
+  varnishStrength: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -53,7 +55,6 @@ struct EffectParams {
   shadingLevel: f32,    // [0, 3]
   specularPower: f32,   // [1, 64]
   // Row 3
-  lightAngle: f32,      // [0, 2pi]
   metallic: f32,        // [0, 1]
   roughness: f32,       // [0.02, 1]
   anisotropy: f32,      // [0, 1]
@@ -90,9 +91,8 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   e.shadingLevel = row2.b;       // direct: natural range [0, 3]
   e.specularPower = max(row2.a, 1.0); // direct: natural range [1, 64]
 
-  // Row 3: lightAngle [0,2pi], metallic, roughness, anisotropy
+  // Row 3: reserved, metallic, roughness, anisotropy
   let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.583333333), 0.0);
-  e.lightAngle = row3.r;          // direct: radians [0, 2pi]
   e.metallic = clamp(row3.g, 0.0, 1.0);
   e.roughness = clamp(row3.b, 0.02, 1.0);
   e.anisotropy = clamp(row3.a, 0.0, 1.0);
@@ -481,7 +481,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     );
     let cavity = min(surface_cavity(slope, relief, occStrength), normalCavity);
     let ao = min(pseudo_ambient_occlusion(normal, v_smooth, z), heightAo) * cavity;
-    let la = fx.lightAngle;
+    let la = parameters.lightAngle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 1.85));
     let viewDir = vec3<f32>(0.0, 0.0, 1.0);
     let halfDir = normalize(lightDir + viewDir);
@@ -504,10 +504,9 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
     let anisotropicTerm = anisotropic_highlight(normal, anisotropyTangent, anisotropyBitangent, halfDir, nDotL, nDotV, roughness);
     let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
-    let envTakeover = fx.wSkybox * smoothstep(0.08, 0.75, metallic);
-    let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL * mix(1.0, 0.35, envTakeover);
+    let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL;
     let diffuseColor = color * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
-    let localShadow = fractal_height_shadow(grad, lightDir, tangent, bitangent, relief, occStrength);
+    let localShadow = fractal_height_shadow(grad, lightDir, baseTangentWorld, baseBitangentWorld, relief, occStrength);
     let shadowedNDotL = nDotL * localShadow;
     let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
     let reflectionSide = mix(0.08, 1.0, litSide);
@@ -516,10 +515,25 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     var materialColor = diffuseLight + directSpecular * ao * mix(1.0, localShadow, 0.45);
 
     if (fx.wIridescence > 0.001) {
-      let pearl = smoothstep(0.05, 0.9, 1.0 - nDotV) * fx.wIridescence * reflectionSide;
-      let pearlColor = fx.iridescenceColor * (0.35 + 0.65 * luminance(color));
-      materialColor += pearlColor * pearl * (0.16 + 0.34 * (1.0 - metallic)) * ao;
-      materialColor = mix(materialColor, materialColor + fx.iridescenceColor * pearl, 0.12);
+      let viewShift = smoothstep(0.04, 0.86, 1.0 - nDotV);
+      let lightShift = smoothstep(0.08, 0.82, 1.0 - nDotH);
+      let lightPlane = normalize(lightDir.xy + vec2<f32>(1e-5));
+      let tangentPlane = vec2<f32>(-lightPlane.y, lightPlane.x);
+      let orientationPlane = normalize(rotate(vec2<f32>(cos(angle_der), sin(angle_der)), sceneAngle) + vec2<f32>(1e-5));
+      let facingPearl = dot(orientationPlane, lightPlane) * 0.5 + 0.5;
+      let crossPearl = dot(orientationPlane, tangentPlane) * 0.5 + 0.5;
+      let orientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
+      let slopeShift = smoothstep(0.025, 1.15, slope * max(relief, 0.18));
+      let tiltShift = smoothstep(0.025, 0.55, length(normal.xy));
+      let surfaceShift = max(slopeShift, tiltShift * 0.65);
+      let pearlAngle = clamp(0.05 + viewShift * 0.12 + lightShift * 0.10 + orientationShift * 0.56 + surfaceShift * 0.32, 0.0, 1.0);
+      let pearlLighting = (0.18 + 0.82 * shadowedNDotL) * ao * mix(0.45, 1.0, localShadow) * mix(0.55, 1.0, cavity);
+      let coatWeight = fx.wIridescence * pearlAngle * mix(0.45, 1.45, orientationShift) * mix(0.60, 1.25, surfaceShift) * pearlLighting * (1.0 - metallic * 0.35);
+      let pearlTint = 0.18 + 0.74 * orientationShift + 0.18 * surfaceShift;
+      let pearlColor = mix(color, fx.iridescenceColor, pearlTint) * (0.78 + 0.36 * max(luminance(color), 0.25));
+      let pearlSheen = pow(nDotH, mix(2.5, 7.5, 1.0 - roughness)) * fx.wIridescence * pearlLighting * mix(0.45, 1.35, orientationShift);
+      materialColor = mix(materialColor, pearlColor, clamp(coatWeight, 0.0, 0.92));
+      materialColor += fx.iridescenceColor * pearlSheen * (0.28 + 0.46 * (1.0 - roughness)) * (1.0 - metallic * 0.25);
     }
 
     if (parameters.subsurfaceStrength > 0.001) {
@@ -537,7 +551,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     }
 
     // Thin clearcoat layer: a sharp white lobe sitting above the base material.
-    let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 10.0) * 0.18 * (1.0 - roughness * 0.55) * (1.0 - 0.45 * envTakeover);
+    let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 10.0) * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
     if (clearcoatStrength > 0.001) {
       let clearcoatD = ggx_distribution(nDotH, 0.08);
       let clearcoatG = ggx_geometry_smith(nDotV, nDotL, 0.08);
@@ -552,12 +566,16 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       let skyboxDir = reflect(-viewDir, normal);
       let skyboxColor = rough_skybox_reflection(skyboxDir, tangent, bitangent, roughness, dx + sky_drift_u, dy + sky_drift_v);
       let fresnelEnv = fresnel_schlick(nDotV, f0);
-      let reflectionStrength = fx.wSkybox * clamp(luminance(fresnelEnv), 0.0, 1.0);
-      envColor = skyboxColor * fresnelEnv * reflectionStrength * mix(0.55, 1.25, metallic) * reflectionSide;
+      let fresnelReflection = clamp(luminance(fresnelEnv), 0.0, 1.0);
+      let polishReflection = 0.075 * clamp(parameters.varnishStrength, 0.0, 10.0) * (1.0 - roughness * 0.55) * (1.0 - metallic * 0.35);
+      let reflectionStrength = fx.wSkybox * max(fresnelReflection, polishReflection);
+      envColor = skyboxColor * reflectionStrength * mix(0.55, 1.25, metallic) * reflectionSide;
     }
 
     let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading * reflectionSide;
-    let rimColor = mix(color, vec3<f32>(1.0), 0.45) * rim * (0.08 + 0.22 * fx.wSkybox);
+    let rimBaseColor = mix(color, vec3<f32>(1.0), 0.45);
+    let rimPearlColor = mix(rimBaseColor, fx.iridescenceColor, fx.wIridescence * 0.65);
+    let rimColor = rimPearlColor * rim * (0.08 + 0.22 * fx.wSkybox + 0.12 * fx.wIridescence);
     let wearColor = mix(color, vec3<f32>(1.0, 0.92, 0.74), 0.5 + 0.3 * metallic);
     let wear = edgeWear * (0.15 + 0.35 * metallic) * effShading * mix(0.35, 1.0, litSide);
     materialColor = mix(materialColor, materialColor + wearColor * wear, clamp(edgeWear, 0.0, 1.0));

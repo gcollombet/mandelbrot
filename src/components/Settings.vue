@@ -115,6 +115,7 @@ const model =  defineModel<MandelbrotParams>({
      subsurfaceStrength: 0.0,
      reliefDepth: 0.35,
      localShadowStrength: 0.4,
+     varnishStrength: 1.0,
      stripeFrequency: 8,
      textureName: 'Gold',
      skyboxName: 'Skybox',
@@ -430,6 +431,7 @@ async function savePalette() {
     subsurfaceStrength: model.value.subsurfaceStrength,
     reliefDepth: model.value.reliefDepth,
     localShadowStrength: model.value.localShadowStrength,
+    varnishStrength: model.value.varnishStrength,
     stripeFrequency: model.value.stripeFrequency,
   };
   await savePaletteEntry(palette);
@@ -448,6 +450,7 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   if (source.subsurfaceStrength != null) model.value.subsurfaceStrength = source.subsurfaceStrength;
   if (source.reliefDepth != null) model.value.reliefDepth = source.reliefDepth;
   if (source.localShadowStrength != null) model.value.localShadowStrength = source.localShadowStrength;
+  if (source.varnishStrength != null) model.value.varnishStrength = source.varnishStrength;
   if (source.stripeFrequency != null) model.value.stripeFrequency = source.stripeFrequency;
 }
 
@@ -630,10 +633,9 @@ function syncAllLegacyToStops() {
   if (m.activateZebra !== undefined)        fillMissingEffectOnStops('zebra',        m.activateZebra        ? 1.0 : 0.0);
 
   // Continuous sliders — only fill missing
-  // Note: tessellationLevel and displacementAmount are now global uniforms, not per-stop.
+  // Note: tessellationLevel, displacementAmount, and lightAngle are now global uniforms, not per-stop.
   if (m.shadingLevel !== undefined)       fillMissingEffectOnStops('shadingLevel',       m.shadingLevel);
   if (m.specularPower !== undefined)      fillMissingEffectOnStops('specularPower',      m.specularPower);
-  if (m.lightAngle !== undefined)         fillMissingEffectOnStops('lightAngle',         m.lightAngle);
 }
 
 // ── Activation toggles → stop weights ──
@@ -661,11 +663,10 @@ for (const [toggleField, effectField] of TOGGLE_TO_EFFECT) {
 
 // ── Continuous sliders → stop parameters ──
 // Map: legacy slider field → stop effect field name
-// Note: tessellationLevel and displacementAmount are now global uniforms, not per-stop.
+// Note: tessellationLevel, displacementAmount, and lightAngle are now global uniforms, not per-stop.
 const SLIDER_TO_EFFECT: Array<[keyof MandelbrotParams, EffectFieldName]> = [
   ['shadingLevel',       'shadingLevel'],
   ['specularPower',      'specularPower'],
-  ['lightAngle',         'lightAngle'],
 ];
 
 for (const [sliderField, effectField] of SLIDER_TO_EFFECT) {
@@ -1531,6 +1532,7 @@ async function renameAndSaveSkyboxTexture() {
           :subsurface-strength="model.subsurfaceStrength"
           :relief-depth="model.reliefDepth"
           :local-shadow-strength="model.localShadowStrength"
+          :varnish-strength="model.varnishStrength"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
           @invert="invertPalette"
@@ -1636,6 +1638,11 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Light Direction</span>
+        <input class="slider" type="range" min="0" max="6.283" step="0.01" v-model.number="model.lightAngle" />
+        <span class="gfx-slider-value">{{ (model.lightAngle ?? 3.927).toFixed(2) }} rad</span>
+      </div>
+      <div class="gfx-slider-row">
         <span class="gfx-slider-label">Fine Bump</span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
         <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0.25).toFixed(2) }}</span>
@@ -1649,6 +1656,11 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-label">Clearcoat</span>
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.clearcoatStrength" />
         <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0.7).toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Varnish Reflection</span>
+        <input class="slider" type="range" min="0" max="10" step="0.01" v-model.number="model.varnishStrength" />
+        <span class="gfx-slider-value">{{ (model.varnishStrength ?? 1.0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Subsurface Glow</span>
