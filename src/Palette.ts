@@ -15,8 +15,8 @@ const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: num
 /** Width of the palette texture (one texel per iteration bucket). */
 const TEXTURE_WIDTH = 4096;
 
-/** Height of the palette texture (5 rows for RGB+effects+iridescence). */
-const TEXTURE_HEIGHT = 5;
+/** Height of the palette texture (6 rows for RGB+effects+iridescence+orbit metrics). */
+const TEXTURE_HEIGHT = 6;
 
 /**
  * Linearly interpolate a single effect field between two stops.
@@ -121,16 +121,17 @@ export class Palette {
   }
 
   /**
-   * Generate a 4096 x 5 float texture as a Float32Array.
+   * Generate a 4096 x 6 float texture as a Float32Array.
    * All values are stored in their natural ranges — no normalization.
    * The Engine will encode these as float16 for the GPU texture.
    *
-   * Layout (5 rows of 4096 RGBA texels):
+   * Layout (6 rows of 4096 RGBA texels):
    *   Row 0: R [0,1], G [0,1], B [0,1], palette weight [0,1]
    *   Row 1: zebra [0,1], tessellation [0,1], shading [0,1], skybox [0,1]
    *   Row 2: webcam [0,1], smoothness [0,1], shadingLevel [0,3], specularPower [1,64]
    *   Row 3: lightAngle [0,2pi], metallic [0,1], roughness [0.02,1], anisotropy [0,1]
    *   Row 4: iridescence RGB [0,1], iridescence weight [0,1]
+   *   Row 5: stripeAverage [0,1], directionCoherence [0,1], stripeRelief [0,1], directionCoherenceRelief [0,1]
    *
    * @returns {{ data: Float32Array, width: number, height: number }}
    */
@@ -179,6 +180,13 @@ export class Palette {
       data[row4 + 1] = (iridescenceColor.g ?? 0) / 255;
       data[row4 + 2] = (iridescenceColor.b ?? 0) / 255;
       data[row4 + 3] = Math.max(0, Math.min(1, iridescence.weight));
+
+      // ── Row 5: orbit metric blends ──
+      const row5 = (5 * width + x) * 4;
+      data[row5]     = this.getEffectAt(t, 'stripeAverage');
+      data[row5 + 1] = this.getEffectAt(t, 'rotationMean');
+      data[row5 + 2] = this.getEffectAt(t, 'stripeRelief');
+      data[row5 + 3] = this.getEffectAt(t, 'directionCoherenceRelief');
     }
 
     return { data, width, height };

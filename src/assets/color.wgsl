@@ -24,11 +24,11 @@ struct Uniforms {
   localShadowStrength: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
-@group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (7 r32float layers)
+@group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
 @group(0) @binding(2) var tileTex: texture_2d<f32>;
 @group(0) @binding(3) var skyboxTex: texture_2d<f32>;
 @group(0) @binding(4) var webcamTex: texture_2d<f32>;
-@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 5 rgba16float
+@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 6 rgba16float
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
 @group(0) @binding(8) var skyboxSampler: sampler;  // bilinear sampler for skybox
@@ -59,40 +59,55 @@ struct EffectParams {
   anisotropy: f32,      // [0, 1]
   iridescenceColor: vec3<f32>,
   wIridescence: f32,
+  wStripeAverage: f32,
+  wRotationMean: f32,
+  wStripeRelief: f32,
+  wDirectionCoherenceRelief: f32,
 };
+
+fn samplePaletteColor(palettePhase: f32) -> vec3<f32> {
+  return textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.083333333), 0.0).rgb;
+}
 
 fn sampleEffects(palettePhase: f32) -> EffectParams {
   var e: EffectParams;
 
-  // Row 0 (y = 0.1): R, G, B, palette weight
-  let row0 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.1), 0.0);
+  // Row 0: R, G, B, palette weight
+  let row0 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.083333333), 0.0);
   e.paletteColor = row0.rgb;
   e.wPalette = row0.a;
 
-  // Row 1 (y = 0.3): zebra, tessellation, shading, skybox
-  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.3), 0.0);
+  // Row 1: zebra, tessellation, shading, skybox
+  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.25), 0.0);
   e.wTessellation = row1.g;
   e.wShading = row1.b;
   e.wSkybox = row1.a;
 
-  // Row 2 (y = 0.5): webcam, smoothness, shadingLevel [0,3], specularPower [1,64]
-  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.5), 0.0);
+  // Row 2: webcam, smoothness, shadingLevel [0,3], specularPower [1,64]
+  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.416666667), 0.0);
   e.wWebcam = row2.r;
   e.wSmoothness = row2.g;
   e.shadingLevel = row2.b;       // direct: natural range [0, 3]
   e.specularPower = max(row2.a, 1.0); // direct: natural range [1, 64]
 
-  // Row 3 (y = 0.7): lightAngle [0,2pi], metallic, roughness, anisotropy
-  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.7), 0.0);
+  // Row 3: lightAngle [0,2pi], metallic, roughness, anisotropy
+  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.583333333), 0.0);
   e.lightAngle = row3.r;          // direct: radians [0, 2pi]
   e.metallic = clamp(row3.g, 0.0, 1.0);
   e.roughness = clamp(row3.b, 0.02, 1.0);
   e.anisotropy = clamp(row3.a, 0.0, 1.0);
 
-  // Row 4 (y = 0.9): iridescence R, G, B, enabled
-  let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.9), 0.0);
+  // Row 4: iridescence R, G, B, enabled
+  let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.75), 0.0);
   e.iridescenceColor = row4.rgb;
   e.wIridescence = clamp(row4.a, 0.0, 1.0);
+
+  // Row 5: stripe color blend, direction coherence color blend, stripe relief, direction coherence relief
+  let row5 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.916666667), 0.0);
+  e.wStripeAverage = clamp(row5.r, 0.0, 1.0);
+  e.wRotationMean = clamp(row5.g, 0.0, 1.0);
+  e.wStripeRelief = clamp(row5.b, 0.0, 1.0);
+  e.wDirectionCoherenceRelief = clamp(row5.a, 0.0, 1.0);
 
   return e;
 }
@@ -117,6 +132,11 @@ fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
   let s = sin(angle);
   let c = cos(angle);
   return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
+}
+
+fn rotate_surface_vector(v: vec3<f32>, angle: f32) -> vec3<f32> {
+  let xy = rotate(v.xy, angle);
+  return vec3<f32>(xy.x, xy.y, v.z);
 }
 
 fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, angle: f32) -> bool {
@@ -339,7 +359,7 @@ fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: ve
   return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 2.5;
 }
 
-fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, der: vec2<f32>, angle_der: f32, dx: f32, dy: f32) -> vec3<f32> {
+fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, der: vec2<f32>, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
@@ -387,6 +407,13 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     color = mix(color, webCamColor, effWebcam);
   }
 
+  if (fx.wStripeAverage > 0.001) {
+    color = mix(color, samplePaletteColor(fract(stripeAverage)), fx.wStripeAverage);
+  }
+  if (fx.wRotationMean > 0.001) {
+    color = mix(color, samplePaletteColor(fract(directionCoherence)), fx.wRotationMean);
+  }
+
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
     let reliefDepth = parameters.reliefDepth * effShading;
@@ -394,9 +421,15 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let surfaceRelief = relief * 0.5;
     let occStrength = clamp(parameters.localShadowStrength * 5.0, 0.0, 10.0);
     let needsDistanceHeight = parameters.subsurfaceStrength > 0.001;
+    let stripeReliefStrength = fx.wStripeRelief * effShading;
+    let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
+    let needsStripeGradient = stripeReliefStrength > 0.001;
+    let needsDirectionCoherenceGradient = directionCoherenceStrength > 0.001;
     let needsFractalGradient = relief > 0.001 || occStrength > 0.001;
     var distanceHeight = 0.0;
     var grad = vec2<f32>(0.0);
+    var stripeGrad = vec2<f32>(0.0);
+    var directionCoherenceGrad = vec2<f32>(0.0);
     var slope = 0.0;
     if (needsDistanceHeight || needsFractalGradient) {
       distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, der.x, der.y);
@@ -405,6 +438,12 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       let fractalGradient = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight);
       grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
       slope = length(grad);
+    }
+    if (needsStripeGradient) {
+      stripeGrad = stripe_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, stripeAverage);
+    }
+    if (needsDirectionCoherenceGradient) {
+      directionCoherenceGrad = direction_coherence_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, directionCoherence);
     }
     let edgeWear = curvature_edge_wear(angle_der, v_smooth);
     let flatNormal = vec3<f32>(0.0, 0.0, 1.0);
@@ -428,7 +467,12 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       );
     }
     let heightNormal = fractal_height_normal(bumpedNormal, baseTangent, baseBitangent, grad, relief);
-    let normal = heightNormal;
+    let stripeNormal = direction_coherence_normal(heightNormal, baseTangent, baseBitangent, stripeGrad, stripeReliefStrength);
+    let directionNormal = direction_coherence_normal(stripeNormal, baseTangent, baseBitangent, directionCoherenceGrad, directionCoherenceStrength);
+    let sceneAngle = parameters.angle;
+    let normal = normalize(rotate_surface_vector(directionNormal, sceneAngle));
+    let baseTangentWorld = normalize(rotate_surface_vector(baseTangent, sceneAngle));
+    let baseBitangentWorld = normalize(rotate_surface_vector(baseBitangent, sceneAngle));
     let heightAo = fractal_height_ao(slope, relief, occStrength);
     let normalCavity = clamp(
       1.0 - smoothstep(0.02, 0.62, 1.0 - normal.z) * 0.58 * occStrength,
@@ -437,13 +481,13 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     );
     let cavity = min(surface_cavity(slope, relief, occStrength), normalCavity);
     let ao = min(pseudo_ambient_occlusion(normal, v_smooth, z), heightAo) * cavity;
-    let la = fx.lightAngle + parameters.angle;
+    let la = fx.lightAngle;
     let lightDir = normalize(vec3<f32>(cos(la), sin(la), 1.85));
-    let viewDir = normalize(vec3<f32>(cos(la + 0.5), sin(la + 0.5), 0.5));
+    let viewDir = vec3<f32>(0.0, 0.0, 1.0);
     let halfDir = normalize(lightDir + viewDir);
-    let tangent = mandelbrot_tangent(angle_der, normal);
+    let tangent = normalize(rotate_surface_vector(mandelbrot_tangent(angle_der, directionNormal), sceneAngle));
     let bitangent = normalize(cross(normal, tangent));
-    let anisotropyTangent = distance_tangent(grad, baseTangent, baseBitangent, normal);
+    let anisotropyTangent = distance_tangent(grad, baseTangentWorld, baseBitangentWorld, normal);
     let anisotropyBitangent = normalize(cross(normal, anisotropyTangent));
     let nDotL = max(dot(normal, lightDir), 0.0);
     let nDotV = max(dot(normal, viewDir), 0.0);
@@ -460,7 +504,8 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
     let anisotropicTerm = anisotropic_highlight(normal, anisotropyTangent, anisotropyBitangent, halfDir, nDotL, nDotV, roughness);
     let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
-    let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL;
+    let envTakeover = fx.wSkybox * smoothstep(0.08, 0.75, metallic);
+    let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL * mix(1.0, 0.35, envTakeover);
     let diffuseColor = color * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
     let localShadow = fractal_height_shadow(grad, lightDir, tangent, bitangent, relief, occStrength);
     let shadowedNDotL = nDotL * localShadow;
@@ -492,7 +537,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     }
 
     // Thin clearcoat layer: a sharp white lobe sitting above the base material.
-    let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 10.0) * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
+    let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 10.0) * 0.18 * (1.0 - roughness * 0.55) * (1.0 - 0.45 * envTakeover);
     if (clearcoatStrength > 0.001) {
       let clearcoatD = ggx_distribution(nDotH, 0.08);
       let clearcoatG = ggx_geometry_smith(nDotV, nDotL, 0.08);
@@ -539,6 +584,82 @@ fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
   return iter_val + mu_val;
 }
 
+fn decode_stripe_phase(refWithStripe: f32) -> f32 {
+  return fract(max(refWithStripe, 0.0));
+}
+
+fn stripe_phase_delta(a: f32, b: f32) -> f32 {
+  return fract(a - b + 0.5) - 0.5;
+}
+
+fn stripe_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
+  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
+    return -1e6;
+  }
+  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
+  let zx = textureLoad(sourceTex, coord, 2, 0).r;
+  let zy = textureLoad(sourceTex, coord, 3, 0).r;
+  if (escape_nu(iterVal, zx, zy) < 0.0) {
+    return -1e6;
+  }
+  return decode_stripe_phase(textureLoad(sourceTex, coord, 6, 0).r);
+}
+
+fn stripe_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerStripe: f32) -> vec2<f32> {
+  let xr = stripe_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize);
+  let xl = stripe_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize);
+  let yu = stripe_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize);
+  let yd = stripe_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize);
+  let right = select(centerStripe, xr, xr > -1e5);
+  let left = select(centerStripe, xl, xl > -1e5);
+  let up = select(centerStripe, yu, yu > -1e5);
+  let down = select(centerStripe, yd, yd > -1e5);
+  return vec2<f32>(stripe_phase_delta(right, left), stripe_phase_delta(up, down)) * 8.0;
+}
+
+const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
+const ORBIT_DIRECTION_BASE: f32 = 4096.0;
+
+fn decode_direction_coherence(encoded: f32) -> f32 {
+  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
+  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
+  let avgDir = vec2<f32>(
+    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
+    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
+  );
+  return clamp(length(avgDir), 0.0, 1.0);
+}
+
+fn direction_coherence_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
+  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
+    return -1e6;
+  }
+  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
+  let zx = textureLoad(sourceTex, coord, 2, 0).r;
+  let zy = textureLoad(sourceTex, coord, 3, 0).r;
+  if (escape_nu(iterVal, zx, zy) < 0.0) {
+    return -1e6;
+  }
+  return decode_direction_coherence(textureLoad(sourceTex, coord, 7, 0).r);
+}
+
+fn direction_coherence_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerCoherence: f32) -> vec2<f32> {
+  let xr = direction_coherence_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize);
+  let xl = direction_coherence_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize);
+  let yu = direction_coherence_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize);
+  let yd = direction_coherence_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize);
+  let right = select(centerCoherence, xr, xr > -1e5);
+  let left = select(centerCoherence, xl, xl > -1e5);
+  let up = select(centerCoherence, yu, yu > -1e5);
+  let down = select(centerCoherence, yd, yd > -1e5);
+  return vec2<f32>(right - left, up - down) * 8.0;
+}
+
+fn direction_coherence_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, grad: vec2<f32>, strength: f32) -> vec3<f32> {
+  let bump = tangent * grad.x + bitangent * grad.y;
+  return normalize(normal - bump * clamp(strength, 0.0, 1.0) * 0.75);
+}
+
 // ── Colorize a single pixel from its raw layer values ──────────────
 fn colorize_pixel(
   sourceTex: texture_2d_array<f32>,
@@ -546,7 +667,8 @@ fn colorize_pixel(
   sourceTexSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
   der_x: f32, der_y: f32,
-  ref_i_val: f32,
+  refWithStripe: f32,
+  avgDirection: f32,
   uv_neutral: vec2<f32>
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
@@ -559,9 +681,6 @@ fn colorize_pixel(
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
-  // Inside the set: iter_val == 0. Color by smooth iteration count (stored in ref_i_val).
-  // Smoothing with |z_n|: works regardless of epsilon detection.
-  // Palette cycling uses a fixed ratio (independent of palettePeriod).
   if (iter_val == 0.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
@@ -585,12 +704,12 @@ fn colorize_pixel(
   // apply it to select between iter_val and nu.
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let prelimPhase = fract(nu * 2.0 / paletteRepeat + parameters.paletteOffset);
-  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.5), 0.0);
+  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.416666667), 0.0);
   let wSmoothness = row2.g;
   nu = mix(iter_val, nu, wSmoothness);
 
   // ── Zebra: continuous application (darkens even iterations) ──
-  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.3), 0.0);
+  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.25), 0.0);
   let wZebra = row1.r;
   let isEvenIter = 1.0 - abs(floor(iter_val) % 2.0);
 
@@ -601,7 +720,9 @@ fn colorize_pixel(
 
   let v = nu;
   let v_smooth = nu_smooth;
-  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, der, angle_der, uv_neutral.x, uv_neutral.y);
+  let stripePhase = decode_stripe_phase(refWithStripe);
+  let directionCoherence = decode_direction_coherence(avgDirection);
+  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, der, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -677,6 +798,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         textureLoad(tex, liveCoord, 4, 0).r,
         textureLoad(tex, liveCoord, 5, 0).r,
         textureLoad(tex, liveCoord, 6, 0).r,
+        textureLoad(tex, liveCoord, 7, 0).r,
         uv_neutral
       );
     }
@@ -724,6 +846,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
           textureLoad(texFrozen, frozenCoord, 4, 0).r,
           textureLoad(texFrozen, frozenCoord, 5, 0).r,
           textureLoad(texFrozen, frozenCoord, 6, 0).r,
+          textureLoad(texFrozen, frozenCoord, 7, 0).r,
           uv_neutral
         );
       }

@@ -6,16 +6,17 @@
 // into the current display space and, for each output pixel, keeps the source
 // with the finest resolution (smallest positive step in layer 1).
 //
-// Output: 7 MRT render targets written directly into the frozen texture layers.
+// Output: 8 MRT render targets written directly into the frozen texture layers.
 //
-// Layer layout (r32float texture_2d_array, 7 layers):
+// Layer layout (r32float texture_2d_array, 8 layers):
 //   0 : iteration count
 //   1 : resolution step (1 = genuine, >= 2 = resolve-copied, 0 = no data)
 //   2 : z.x
 //   3 : z.y
 //   4 : dz.x
 //   5 : dz.y
-//   6 : ref_i
+//   6 : ref_i + fractional stripe phase
+//   7 : packed average orbit direction
 
 struct MergeUniforms {
   zoomFactor:    f32, // frozenScale / displayScale
@@ -51,7 +52,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
   return o;
 }
 
-// ── output struct (7 render targets) ──────────────────────────────
+// ── output struct (8 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) layer0: vec4<f32>,
   @location(1) layer1: vec4<f32>,
@@ -60,6 +61,7 @@ struct FragOut {
   @location(4) layer4: vec4<f32>,
   @location(5) layer5: vec4<f32>,
   @location(6) layer6: vec4<f32>,
+  @location(7) layer7: vec4<f32>,
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -78,7 +80,7 @@ fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, angle: f32) ->
   return abs(rotated.x) <= aspect && abs(rotated.y) <= 1.0;
 }
 
-// Read all 7 layers from a texture at the given coordinate.
+// Read all 8 layers from a texture at the given coordinate.
 fn readAllLayersWithKnown01(tex: texture_2d_array<f32>, coord: vec2<i32>, iter: f32, step: f32) -> FragOut {
   var o: FragOut;
   o.layer0 = pack(iter);
@@ -88,6 +90,7 @@ fn readAllLayersWithKnown01(tex: texture_2d_array<f32>, coord: vec2<i32>, iter: 
   o.layer4 = pack(textureLoad(tex, coord, 4, 0).r);
   o.layer5 = pack(textureLoad(tex, coord, 5, 0).r);
   o.layer6 = pack(textureLoad(tex, coord, 6, 0).r);
+  o.layer7 = pack(textureLoad(tex, coord, 7, 0).r);
   return o;
 }
 
@@ -100,6 +103,7 @@ fn makeEmpty() -> FragOut {
   o.layer4 = pack(0.0);
   o.layer5 = pack(0.0);
   o.layer6 = pack(0.0);
+  o.layer7 = pack(0.0);
   return o;
 }
 

@@ -45,6 +45,7 @@ export interface PaletteRecord {
   subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
+  stripeFrequency?: number;
 }
 
 /** Lightweight entry for listings (same shape since palettes are small). */

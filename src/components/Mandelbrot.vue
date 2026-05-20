@@ -65,6 +65,7 @@ const props = withDefaults(defineProps<{
   subsurfaceStrength?: number,
   reliefDepth?: number,
   localShadowStrength?: number,
+  stripeFrequency?: number,
  }>(),
 
     {
@@ -118,6 +119,7 @@ const props = withDefaults(defineProps<{
         subsurfaceStrength: 0.0,
         reliefDepth: 0.35,
         localShadowStrength: 0.4,
+        stripeFrequency: 8,
      }
 );
 
@@ -192,6 +194,7 @@ async function draw() {
         subsurfaceStrength: props.subsurfaceStrength,
         reliefDepth: props.reliefDepth,
         localShadowStrength: props.localShadowStrength,
+        stripeFrequency: props.stripeFrequency,
       }
     )
     await engine.render()
@@ -228,6 +231,7 @@ async function initWebGPU() {
     subsurfaceStrength: props.subsurfaceStrength,
     reliefDepth: props.reliefDepth,
     localShadowStrength: props.localShadowStrength,
+    stripeFrequency: props.stripeFrequency,
   });
   return engine.initialize(navigator)
 }

@@ -221,6 +221,10 @@ const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: numb
   skybox:             { label: 'Reflection Blend',  min: 0, max: 1,     step: 0.01, unit: '' },
   webcam:             { label: 'Webcam Blend',      min: 0, max: 1,     step: 0.01, unit: '' },
   smoothness:         { label: 'Smooth Iterations', min: 0, max: 1,     step: 0.01, unit: '' },
+  stripeAverage:      { label: 'Stripe Average',    min: 0, max: 1,     step: 0.01, unit: '' },
+  rotationMean:       { label: 'Direction Coherence', min: 0, max: 1,   step: 0.01, unit: '' },
+  stripeRelief:       { label: 'Stripe Relief',     min: 0, max: 1,     step: 0.01, unit: '' },
+  directionCoherenceRelief: { label: 'Direction Relief', min: 0, max: 1, step: 0.01, unit: '' },
   shadingLevel:       { label: 'Light Intensity',   min: 0, max: 3,     step: 0.05, unit: '' },
   specularPower:      { label: 'Specular Strength', min: 1, max: 64,    step: 0.5,  unit: '' },
   lightAngle:         { label: 'Light Direction',   min: 0, max: 6.283, step: 0.01, unit: 'rad' },
@@ -558,7 +562,7 @@ defineExpose({ getSnapshot });
 
       <!-- ── Iteration ── -->
       <label class="effects-group-title">Iteration Mapping</label>
-      <template v-for="field in (['smoothness','zebra'] as EffectFieldName[])" :key="field">
+      <template v-for="field in (['smoothness','zebra','stripeAverage','rotationMean','stripeRelief','directionCoherenceRelief'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
           <input

@@ -217,6 +217,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   subsurfaceStrength: 0.0,
   reliefDepth: 0.35,
   localShadowStrength: 0.4,
+  stripeFrequency: 8,
   textureName: 'Gold',
   skyboxName: 'Skybox',
 };
@@ -426,6 +427,12 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) return;
   const key = e.key.toLowerCase();
+  // Download canvas screenshot (B)
+  if (key === 'b' && !e.repeat) {
+    e.preventDefault();
+    void downloadCanvasSnapshot();
+    return;
+  }
   // Quick snapshot shortcut (P)
   if (key === 'p' && !e.repeat) {
     e.preventDefault();
@@ -437,6 +444,59 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     e.preventDefault();
     toggleTab(tab.key);
   }
+}
+
+function timestampForFilename(): string {
+  const d = new Date();
+  const yyyy = d.getFullYear();
+  const mm = String(d.getMonth() + 1).padStart(2, '0');
+  const dd = String(d.getDate()).padStart(2, '0');
+  const hh = String(d.getHours()).padStart(2, '0');
+  const mi = String(d.getMinutes()).padStart(2, '0');
+  const ss = String(d.getSeconds()).padStart(2, '0');
+  return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
+}
+
+async function downloadCanvasSnapshot() {
+  const canvas = mandelbrotCtrlRef.value?.getCanvas?.() ?? null;
+  if (!canvas) return;
+
+  const triggerDownload = (url: string, ext: 'webp' | 'png') => {
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `mandelbrot-${timestampForFilename()}.${ext}`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+  };
+
+  const webpSupported = canvas.toDataURL('image/webp').startsWith('data:image/webp');
+  if (webpSupported) {
+    await new Promise<void>((resolve) => {
+      canvas.toBlob((blob) => {
+        if (blob) {
+          const url = URL.createObjectURL(blob);
+          triggerDownload(url, 'webp');
+          setTimeout(() => URL.revokeObjectURL(url), 1000);
+        }
+        resolve();
+      }, 'image/webp', 0.95);
+    });
+    return;
+  }
+
+  await new Promise<void>((resolve) => {
+    canvas.toBlob((blob) => {
+      if (blob) {
+        const url = URL.createObjectURL(blob);
+        triggerDownload(url, 'png');
+        setTimeout(() => URL.revokeObjectURL(url), 1000);
+      } else {
+        triggerDownload(canvas.toDataURL('image/png'), 'png');
+      }
+      resolve();
+    }, 'image/png');
+  });
 }
 
 /** Trigger a quick snapshot — saves current state to IndexedDB without a name. */
@@ -596,6 +656,18 @@ const shortcutLabels = computed(() => {
         >
           {{ tab.label }} <span class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
         </button>
+        <button
+          class="top-tab-btn camera-btn"
+          title="Screenshot (B)"
+          aria-label="Download screenshot"
+          @click="downloadCanvasSnapshot"
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <path d="M4 8h3l1.5-2h7L17 8h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
+            <circle cx="12" cy="14" r="4" stroke="currentColor" stroke-width="1.8"/>
+          </svg>
+          <span class="tab-shortcut-hint is-hidden-touch">(B)</span>
+        </button>
       </div>
     </div>
 
@@ -643,6 +715,7 @@ const shortcutLabels = computed(() => {
       :subsurfaceStrength="mandelbrotParams.subsurfaceStrength"
       :reliefDepth="mandelbrotParams.reliefDepth"
       :localShadowStrength="mandelbrotParams.localShadowStrength"
+      :stripeFrequency="mandelbrotParams.stripeFrequency"
     />
 
     <!-- Popup Settings — one per open tab (multi-window) -->
@@ -715,6 +788,7 @@ const shortcutLabels = computed(() => {
         <span class="shortcut-label">Snapshot</span>
         <div class="shortcut-keys">
           <span class="tag is-black is-rounded">P</span>
+          <span class="tag is-black is-rounded">B</span>
         </div>
       </div>
     </div>
@@ -845,6 +919,12 @@ const shortcutLabels = computed(() => {
 .top-tab-btn.is-active {
   background: rgba(50, 115, 220, 0.85);
   color: #fff;
+}
+
+.camera-btn {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
 }
 
 .tab-shortcut-hint {

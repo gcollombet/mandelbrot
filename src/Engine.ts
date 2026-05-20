@@ -17,7 +17,7 @@ import skyboxUrl from './assets/skybox.png'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
-const LAYER_COUNT = 7
+const LAYER_COUNT = 8
 
 // Progressive refinement start step for the sentinel grid; must be a power-of-two.
 // Used uniformly for normal rendering, zoom reprojection, and post-zoom recompute.
@@ -125,6 +125,7 @@ export type RenderOptions = {
     subsurfaceStrength: number,
     reliefDepth: number,
     localShadowStrength: number,
+    stripeFrequency: number,
 }
 
 export type ApproximationMode = 'perturbation' | 'bla'
@@ -154,13 +155,13 @@ export class Engine {
     mandelbrotNavigator!: MandelbrotNavigator
 
     // resources
-    rawTexture?: GPUTexture // texture "neutre" (A) — 7-layer r32float array
+    rawTexture?: GPUTexture // texture "neutre" (A) — 8-layer r32float array
     rawArrayView?: GPUTextureView // full 2d-array view for sampling
     rawLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
-    rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B) — 7-layer r32float array
+    rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B) — 8-layer r32float array
     rawBrushArrayView?: GPUTextureView // full 2d-array view for sampling
     rawBrushLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
-    resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 7-layer r32float array
+    resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 8-layer r32float array
     resolvedArrayView?: GPUTextureView // full 2d-array view for sampling
     resolvedLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
     frozenTexture?: GPUTexture // frozen snapshot of resolved texture for zoom reprojection
@@ -421,7 +422,7 @@ export class Engine {
 
         // uniform buffers
         this.uniformBufferMandelbrot = this.device.createBuffer({
-            size: 4 * 16,
+            size: 4 * 20,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Mandelbrot',
         })
@@ -817,7 +818,7 @@ export class Engine {
 
         const layerCount = LAYER_COUNT
 
-        // Helper: create a 7-layer r32float texture array + per-layer 2d views + full 2d-array view
+        // Helper: create an r32float texture array + per-layer 2d views + full 2d-array view
         const createLayeredTexture = (label: string): {
             texture: GPUTexture,
             arrayView: GPUTextureView,
@@ -1047,9 +1048,13 @@ export class Engine {
 
         const mandelbrotChanged = !this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
         const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
+        const stripeFrequencyChanged = renderOptions.stripeFrequency !== this.previousRenderOptions?.stripeFrequency
         this.needRender = this.needRender || mandelbrotChanged || renderOptionsChanged
-        if (mandelbrotChanged) {
+        if (mandelbrotChanged || stripeFrequencyChanged) {
             this.invalidateCounterReadback() // unknown — new fractal params, GPU counter not read yet
+        }
+        if (stripeFrequencyChanged) {
+            this.clearHistoryNextFrame = true
         }
 
         // Check if any stop has webcam > 0 to decide whether to capture webcam frames
@@ -1286,6 +1291,10 @@ export class Engine {
             approximationModeFlag,
             blaLevelCount,
             this.blaEpsilon,
+            renderOptions.stripeFrequency,
+            0,
+            0,
+            0,
             0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)

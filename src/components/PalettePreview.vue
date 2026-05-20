@@ -35,7 +35,9 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
   return dst;
 }
 
-const LAYER_COUNT = 7;
+const LAYER_COUNT = 8;
+const ORBIT_DIRECTION_SCALE = 4095;
+const ORBIT_DIRECTION_BASE = 4096;
 /** Number of synthetic iterations to display. */
 const ITER_COUNT = 100;
 
@@ -119,7 +121,7 @@ function create1x1Texture(dev: GPUDevice, r: number, g: number, b: number, a: nu
 }
 
 /**
- * Build the 7-layer r32float synthetic texture.
+ * Build the 8-layer r32float synthetic texture.
  *
  * Width = canvas pixel width, height = canvas pixel height (64 CSS px * dpr).
  * Each column of ~(width/ITER_COUNT) pixels represents one iteration (1..100).
@@ -131,7 +133,8 @@ function create1x1Texture(dev: GPUDevice, r: number, g: number, b: number, a: nu
  * Layer 3: zy — imag(z), on escape circle
  * Layer 4: der_x — derivative real part (spiral angle varies with x, vertical variation with y)
  * Layer 5: der_y — derivative imag part
- * Layer 6: reserved (0)
+ * Layer 6: ref_i + fractional stripe phase
+ * Layer 7: packed average orbit direction
  */
 function buildSyntheticData(w: number, h: number, mu: number): Float32Array[] {
   const layers: Float32Array[] = [];
@@ -166,7 +169,15 @@ function buildSyntheticData(w: number, h: number, mu: number): Float32Array[] {
       layers[3][idx] = zy;
       layers[4][idx] = derX;
       layers[5][idx] = derY;
-      layers[6][idx] = 0;
+      const stripePhase = 0.5 + 0.5 * Math.sin(iterFloat * 0.2);
+      const coherence = Math.abs(Math.sin(iterFloat * 0.065 + vFrac * Math.PI));
+      const avgDirAngle = iterFloat * 0.08 + vFrac * Math.PI;
+      const avgDirX = Math.cos(avgDirAngle) * coherence;
+      const avgDirY = Math.sin(avgDirAngle) * coherence;
+      const avgDirXQ = Math.round(Math.max(0, Math.min(1, avgDirX * 0.5 + 0.5)) * ORBIT_DIRECTION_SCALE);
+      const avgDirYQ = Math.round(Math.max(0, Math.min(1, avgDirY * 0.5 + 0.5)) * ORBIT_DIRECTION_SCALE);
+      layers[6][idx] = stripePhase;
+      layers[7][idx] = avgDirXQ * ORBIT_DIRECTION_BASE + avgDirYQ;
     }
   }
   return layers;
@@ -254,7 +265,7 @@ async function init() {
   canvas.width = w;
   canvas.height = h;
 
-  // ── Synthetic texture (7 layers of r32float) ──
+  // ── Synthetic texture (8 layers of r32float) ──
   const mu = 1000000;
   const layerData = buildSyntheticData(w, h, mu);
   syntheticTexture = device.createTexture({
@@ -291,7 +302,7 @@ async function init() {
   // ── Webcam placeholder (1×1 black) ──
   webcamTextureGpu = create1x1Texture(device, 0, 0, 0, 255);
 
-  // ── Palette texture (4096 x 5 rgba16float) ──
+  // ── Palette texture (4096 x 6 rgba16float) ──
   const initialPalette = new Palette(props.colorStops, props.interpolationMode ?? 'lab').generateTexture();
   paletteTexture = device.createTexture({
     size: [initialPalette.width, initialPalette.height, 1],

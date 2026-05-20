@@ -115,6 +115,7 @@ const model =  defineModel<MandelbrotParams>({
      subsurfaceStrength: 0.0,
      reliefDepth: 0.35,
      localShadowStrength: 0.4,
+     stripeFrequency: 8,
      textureName: 'Gold',
      skyboxName: 'Skybox',
     dprMultiplier: 1.0,
@@ -429,6 +430,7 @@ async function savePalette() {
     subsurfaceStrength: model.value.subsurfaceStrength,
     reliefDepth: model.value.reliefDepth,
     localShadowStrength: model.value.localShadowStrength,
+    stripeFrequency: model.value.stripeFrequency,
   };
   await savePaletteEntry(palette);
   palettes.value = await getAllPaletteEntries();
@@ -446,6 +448,7 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   if (source.subsurfaceStrength != null) model.value.subsurfaceStrength = source.subsurfaceStrength;
   if (source.reliefDepth != null) model.value.reliefDepth = source.reliefDepth;
   if (source.localShadowStrength != null) model.value.localShadowStrength = source.localShadowStrength;
+  if (source.stripeFrequency != null) model.value.stripeFrequency = source.stripeFrequency;
 }
 
 function selectPalette(name: string) {
@@ -1908,6 +1911,11 @@ async function renameAndSaveSkyboxTexture() {
           </button>
         </div>
         <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : 'Classic' }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Stripe Frequency</span>
+        <input class="slider" type="range" min="1" max="32" step="1" v-model.number="model.stripeFrequency" />
+        <span class="gfx-slider-value">{{ model.stripeFrequency ?? 8 }}</span>
       </div>
       <!-- ═══ PERFORMANCE ═══ -->
       <label class="gfx-section-title">Performance</label>

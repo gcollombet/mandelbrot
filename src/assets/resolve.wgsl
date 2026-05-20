@@ -1,6 +1,6 @@
 // Resolve pass: replaces remaining sentinels with a snapped parent pixel.
 //
-// Uses a texture_2d_array<f32> with 7 r32float layers.
+// Uses a texture_2d_array<f32> with 8 r32float layers.
 //
 // Layer layout:
 //   0 : sentinel / iteration count (integer part)
@@ -9,7 +9,8 @@
 //   3 : z.y
 //   4 : dz.x (derivative real)
 //   5 : dz.y (derivative imag)
-//   6 : ref_i (reference orbit index, for resuming perturbation)
+//   6 : ref_i + fractional stripe phase (reference orbit index for resuming perturbation)
+//   7 : packed average orbit direction
 //
 // Sentinel convention:
 //   If layer0 == -step (step is power-of-two > 1), resolve by testing
@@ -46,7 +47,7 @@ fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
   return o;
 }
 
-// ── output struct (7 render targets) ──────────────────────────────
+// ── output struct (8 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,
   @location(1) genuine:   vec4<f32>,
@@ -55,6 +56,7 @@ struct FragOut {
   @location(4) dzx:       vec4<f32>,
   @location(5) dzy:       vec4<f32>,
   @location(6) ref_i:     vec4<f32>,
+  @location(7) avgDirection: vec4<f32>,
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -72,6 +74,7 @@ fn empty_out() -> FragOut {
   o.dzx       = pack(0.0);
   o.dzy       = pack(0.0);
   o.ref_i     = pack(0.0);
+  o.avgDirection = pack(0.0);
   return o;
 }
 
@@ -87,6 +90,7 @@ fn loadAllLayersAsCopy(coord: vec2<i32>, step: u32) -> FragOut {
   o.dzx       = pack(loadLayer(coord, 4));
   o.dzy       = pack(loadLayer(coord, 5));
   o.ref_i     = pack(loadLayer(coord, 6));
+  o.avgDirection = pack(loadLayer(coord, 7));
   return o;
 }
 

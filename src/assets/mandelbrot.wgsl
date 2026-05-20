@@ -1,6 +1,6 @@
 // Mandelbrot progressive-iteration shader.
 //
-// Layer layout (r32float texture_2d_array, 7 layers):
+// Layer layout (r32float texture_2d_array, 8 layers):
 //   0 : sentinel / iteration count (integer part).
 //       Negative  => sentinel (brush/resolve system).  -1 = compute request.
 //       0         => inside the set (confirmed), or budget fully exhausted at globalMaxIter.
@@ -10,7 +10,8 @@
 //   3 : z.y   (imag part of current z, for resuming / coloring)
 //   4 : dz.x  (real part of derivative, for resuming / shading)
 //   5 : dz.y  (imag part of derivative, for resuming / shading)
-//   6 : ref_i (reference orbit index, for resuming perturbation)
+//   6 : ref_i + fractional stripe phase (reference orbit index for resuming perturbation)
+//   7 : packed average orbit direction, 12 bits per component
 //
 // mu (smooth fractional part) and angle_der (shading angle) are
 // recalculated in the color shader from z and der, saving two layers
@@ -45,7 +46,11 @@ struct Mandelbrot {
   approximationMode: f32,
   blaLevelCount: f32,
   blaEpsilon: f32,
+  stripeFrequency: f32,
   _padding0: f32,
+  _padding1: f32,
+  _padding2: f32,
+  _padding3: f32,
 };
 
 struct BlaStep {
@@ -135,7 +140,7 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: p
 // Set to true to disable epsilon-based interior detection (for debugging).
 const IGNORE_EPSILON: bool = false;
 
-// ── output struct (7 render targets) ──────────────────────────────
+// ── output struct (8 render targets) ──────────────────────────────
 struct FragOut {
   @location(0) iter:      vec4<f32>,  // .r = integer iteration count (or sentinel)
   @location(1) genuine:   vec4<f32>,  // .r = resolution step (1 = genuine, >= 2 = copied)
@@ -143,7 +148,8 @@ struct FragOut {
   @location(3) zy:        vec4<f32>,  // .r = z.y
   @location(4) dzx:       vec4<f32>,  // .r = derivative x
   @location(5) dzy:       vec4<f32>,  // .r = derivative y
-  @location(6) ref_i:     vec4<f32>,  // .r = reference orbit index (for resuming)
+  @location(6) ref_i:     vec4<f32>,  // .r = integer ref_i + fractional stripe phase
+  @location(7) avgDirection: vec4<f32>,  // .r = packed average orbit direction
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -161,11 +167,80 @@ fn empty_out() -> FragOut {
   out.dzx       = pack(0.0);
   out.dzy       = pack(0.0);
   out.ref_i     = pack(0.0);
+  out.avgDirection = pack(0.0);
   return out;
 }
 
+const ORBIT_METRIC_EMA_ALPHA: f32 = 0.18;
+const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
+const ORBIT_DIRECTION_BASE: f32 = 4096.0;
+
+fn stripe_phase_from_ema(stripeEma: f32) -> f32 {
+  return clamp(0.5 + 0.5 * stripeEma, 0.0, 0.999999);
+}
+
+fn ref_i_with_stripe(refValue: f32, stripeEma: f32) -> f32 {
+  return floor(max(refValue, 0.0)) + stripe_phase_from_ema(stripeEma);
+}
+
+fn decode_ref_i(refWithStripe: f32) -> i32 {
+  return i32(floor(max(refWithStripe, 0.0)));
+}
+
+fn decode_stripe_ema(refWithStripe: f32, totalIter: f32) -> f32 {
+  if (totalIter <= 0.0) {
+    return 0.0;
+  }
+  return fract(refWithStripe) * 2.0 - 1.0;
+}
+
+fn orbit_direction_sample(z: vec2<f32>) -> vec2<f32> {
+  let zLen = length(z);
+  return select(vec2<f32>(0.0), z / zLen, zLen > 1e-8);
+}
+
+fn encode_avg_dir(avgDir: vec2<f32>) -> f32 {
+  let phase = clamp(avgDir * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
+  let xq = floor(phase.x * ORBIT_DIRECTION_SCALE + 0.5);
+  let yq = floor(phase.y * ORBIT_DIRECTION_SCALE + 0.5);
+  return xq * ORBIT_DIRECTION_BASE + yq;
+}
+
+fn decode_avg_dir(encoded: f32, totalIter: f32) -> vec2<f32> {
+  if (totalIter <= 0.0) {
+    return vec2<f32>(0.0);
+  }
+  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
+  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
+  return vec2<f32>(
+    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
+    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
+  );
+}
+
+fn update_orbit_ema(previous: f32, sample: f32, count: f32) -> f32 {
+  let decay = pow(1.0 - ORBIT_METRIC_EMA_ALPHA, max(count, 1.0));
+  return sample + (previous - sample) * decay;
+}
+
+fn update_orbit_mean_vec2(previous: vec2<f32>, sample: vec2<f32>, previousCount: f32, sampleCount: f32) -> vec2<f32> {
+  let safePreviousCount = max(previousCount, 0.0);
+  let safeSampleCount = max(sampleCount, 1.0);
+  let totalCount = safePreviousCount + safeSampleCount;
+  return (previous * safePreviousCount + sample * safeSampleCount) / max(totalCount, 1.0);
+}
+
+fn stripe_metric_sample(z: vec2<f32>) -> f32 {
+  return sin(max(mandelbrot.stripeFrequency, 0.0) * atan2(z.y, z.x));
+}
+
+fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
+  let zSq = max(dot(z, z), 1e-12);
+  return clamp(1.0 - log(log(zSq) / log(muLimit)) / log(2.0), 0.0, 1.0);
+}
+
 // ── core computation ──────────────────────────────────────────────
-fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_dzx: f32, prev_dzy: f32, prev_ref_i: f32) -> FragOut {
+fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_dzx: f32, prev_dzy: f32, prev_ref_i: f32, prev_avg_direction: f32) -> FragOut {
   let dc = vec2<f32>(x0, y0);
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
@@ -176,8 +251,12 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var i: f32 = 0.0;
   var dz = vec2<f32>(prev_zx, prev_zy);
   var der = vec2<f32>(prev_dzx, prev_dzy);
-  var ref_i = i32(prev_ref_i);
-  var z = getOrbit(ref_i);
+  var ref_i = decode_ref_i(prev_ref_i);
+  var z = getOrbit(ref_i) + dz;
+  var stripeEma = decode_stripe_ema(prev_ref_i, prev_iter);
+  var avgDir = decode_avg_dir(prev_avg_direction, prev_iter);
+  var previousStripeEma = stripeEma;
+  var previousAvgDir = avgDir;
 
   var escaped = false;
   var inside = false;
@@ -192,16 +271,26 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       var next_der = der;
       let skipped = try_apply_bla(&ref_i, &dz, &der, dc, dcMag);
       if (skipped > 0) {
+        let previousMetricCount = prev_iter + i;
         z = getOrbit(ref_i) + dz;
         next_der = der;
         i += f32(skipped);
+        previousStripeEma = stripeEma;
+        previousAvgDir = avgDir;
+        stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), f32(skipped));
+        avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, f32(skipped));
       } else {
+        let previousMetricCount = prev_iter + i;
         z = getOrbit(ref_i);
         dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
         ref_i += 1;
         z = getOrbit(ref_i) + dz;
         next_der = cmul(der * 2.0, z);
         i += 1.0;
+        previousStripeEma = stripeEma;
+        previousAvgDir = avgDir;
+        stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), 1.0);
+        avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
       }
 
       let dot_z = dot(z, z);
@@ -224,12 +313,17 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     }
   } else {
     while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
+      let previousMetricCount = prev_iter + i;
       z = getOrbit(ref_i);
       dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
       ref_i += 1;
       z = getOrbit(ref_i) + dz;
       let next_der = cmul(der * 2.0, z);
       i += 1.0;
+      previousStripeEma = stripeEma;
+      previousAvgDir = avgDir;
+      stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), 1.0);
+      avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
 
       let dot_z = dot(z, z);
       if (dot_z > muLimit) {
@@ -261,13 +355,18 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
     out.dzy       = pack(der.y);
-    out.ref_i     = pack(prev_iter + i);
+    out.ref_i     = pack(ref_i_with_stripe(prev_iter + i, stripeEma));
+    out.avgDirection = pack(encode_avg_dir(avgDir));
     return out;
   }
 
   let total_iter = prev_iter + i; // running total across all passes
 
   if (escaped) {
+    let escapeBlend = escape_fraction(z, muLimit);
+    let smoothStripeEma = mix(previousStripeEma, stripeEma, escapeBlend);
+    let smoothAvgDir = mix(previousAvgDir, avgDir, escapeBlend);
+
     // Escaped: store final z and der for color-shader recomputation
     // of mu (smooth frac) and angle_der (shading). No need for ref_i.
     out.iter      = pack(total_iter);
@@ -276,7 +375,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
     out.dzy       = pack(der.y);
-    out.ref_i     = pack(0.0);
+    out.ref_i     = pack(ref_i_with_stripe(0.0, smoothStripeEma));
+    out.avgDirection = pack(encode_avg_dir(smoothAvgDir));
     return out;
   }
 
@@ -293,7 +393,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     out.zy        = pack(z.y);
     out.dzx       = pack(der.x);
     out.dzy       = pack(der.y);
-    out.ref_i     = pack(total_iter);
+    out.ref_i     = pack(ref_i_with_stripe(total_iter, stripeEma));
+    out.avgDirection = pack(encode_avg_dir(avgDir));
     return out;
   }
 
@@ -305,7 +406,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   out.zy        = pack(dz.y);
   out.dzx       = pack(der.x);
   out.dzy       = pack(der.y);
-  out.ref_i     = pack(f32(ref_i));
+  out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), stripeEma));
+  out.avgDirection = pack(encode_avg_dir(avgDir));
   return out;
 }
 
@@ -365,7 +467,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
   if (is_compute_request) {
     // Fresh computation (sentinel == -1).
-    return mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0);
+    return mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
   }
 
   if (needs_continuation) {
@@ -373,7 +475,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     let stored_dzx = loadLayer(coord, 4);
     let stored_dzy = loadLayer(coord, 5);
     let prev_ref_i = loadLayer(coord, 6);
-    return mandelbrot_compute(x0, y0, prev_iter, prev_zx, prev_zy, stored_dzx, stored_dzy, prev_ref_i);
+    let prev_avg_direction = loadLayer(coord, 7);
+    return mandelbrot_compute(x0, y0, prev_iter, prev_zx, prev_zy, stored_dzx, stored_dzy, prev_ref_i, prev_avg_direction);
   }
 
   discard;

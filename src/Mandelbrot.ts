@@ -18,6 +18,7 @@ export interface MandelbrotParams {
     dprMultiplier: number;
     targetFps: number;
     gpuLoadMultiplier: number;
+    stripeFrequency: number;
     activateAnimate: boolean;
     colorStops: ColorStop[];
     interpolationMode: InterpolationMode;

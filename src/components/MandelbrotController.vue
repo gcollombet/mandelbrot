@@ -37,6 +37,7 @@ const props = defineProps<{
   subsurfaceStrength?: number,
   reliefDepth?: number,
   localShadowStrength?: number,
+  stripeFrequency?: number,
 }>();
 
 const emit = defineEmits<{
@@ -381,6 +382,7 @@ onUnmounted(() => {
       :subsurfaceStrength="props.subsurfaceStrength"
       :reliefDepth="props.reliefDepth"
       :localShadowStrength="props.localShadowStrength"
+      :stripeFrequency="props.stripeFrequency"
       @ready="emit('engineReady', $event)"
     />
     

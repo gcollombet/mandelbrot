@@ -7,12 +7,13 @@ import { interpolateRgb } from 'd3-interpolate';
  * The optional effect fields are encoded into palette-texture rows 0-3
  * and interpolated between stops just like colors.
  *
- * Texture layout (4096 x 5, rgba16float):
+ * Texture layout (4096 x 6, rgba16float):
  *   Row 0: R, G, B, palette   (palette = opacity of RGB color)
  *   Row 1: zebra, tessellation, shading, skybox
  *   Row 2: webcam, smoothness, shadingLevel, specularPower
  *   Row 3: lightAngle, metallic, roughness, anisotropy
  *   Row 4: iridescence R, G, B, enabled
+ *   Row 5: stripeAverage, directionCoherence, stripeRelief, directionCoherenceRelief
  *
  * tessellationLevel and displacementAmount are global uniforms (not per-stop).
  *
@@ -80,6 +81,14 @@ export type ColorStop = {
   webcam?: number;
   /** Smooth iteration blending weight (default 1) */
   smoothness?: number;
+  /** Stripe average coloring blend weight (default 0) */
+  stripeAverage?: number;
+  /** Average orbit-direction coherence coloring blend weight (default 0) */
+  rotationMean?: number;
+  /** Stripe average normal relief strength (default 0) */
+  stripeRelief?: number;
+  /** Average orbit-direction coherence normal relief strength (default 0) */
+  directionCoherenceRelief?: number;
 
   // ── Continuous effect parameters (natural ranges) ──
 
@@ -115,6 +124,10 @@ export const COLOR_STOP_DEFAULTS = {
   skybox: 0.0,
   webcam: 0.0,
   smoothness: 1.0,
+  stripeAverage: 0.0,
+  rotationMean: 0.0,
+  stripeRelief: 0.0,
+  directionCoherenceRelief: 0.0,
   shadingLevel: 1.5,
   specularPower: 20.0,
   lightAngle: 0.75,
@@ -132,6 +145,10 @@ export const EFFECT_FIELD_NAMES = [
   'skybox',
   'webcam',
   'smoothness',
+  'stripeAverage',
+  'rotationMean',
+  'stripeRelief',
+  'directionCoherenceRelief',
   'shadingLevel',
   'specularPower',
   'lightAngle',
