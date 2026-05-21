@@ -12,7 +12,7 @@ import { interpolateRgb } from 'd3-interpolate';
  *   Row 1: zebra, tessellation, shading, skybox
  *   Row 2: webcam, smoothness, shadingLevel, specularPower
  *   Row 3: reserved legacy lightAngle, metallic, roughness, anisotropy
- *   Row 4: iridescence R, G, B, enabled
+ *   Row 4: iridescence R, G, B, strength
  *   Row 5: stripeAverage, directionCoherence, stripeRelief, directionCoherenceRelief
  *
  * tessellationLevel, displacementAmount, and lightAngle are global uniforms (not per-stop).
@@ -104,6 +104,8 @@ export type ColorStop = {
   roughness?: number;
   /** Anisotropic highlight strength, range [0, 1] (default 0.4) */
   anisotropy?: number;
+  /** Iridescence intensity, range [0, 1] (default 1 when iridescence color is set) */
+  iridescencePower?: number;
 
   // Legacy fields (kept for backward compat with saved presets, ignored by renderer)
   /** @deprecated Now a global uniform. Kept for preset compat. */
@@ -134,6 +136,7 @@ export const COLOR_STOP_DEFAULTS = {
   metallic: 0.0,
   roughness: 0.35,
   anisotropy: 0.4,
+  iridescencePower: 1.0,
 } as const satisfies Record<EffectFieldName, number>;
 
 /** All optional effect field names (activation weights + continuous params). */
@@ -155,6 +158,7 @@ export const EFFECT_FIELD_NAMES = [
   'metallic',
   'roughness',
   'anisotropy',
+  'iridescencePower',
 ] as const;
 
 export type EffectFieldName = (typeof EFFECT_FIELD_NAMES)[number];

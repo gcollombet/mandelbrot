@@ -233,6 +233,7 @@ const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: numb
   metallic:           { label: 'Metalness',         min: 0, max: 1,     step: 0.01, unit: '' },
   roughness:          { label: 'Roughness',     min: 0.02, max: 1,  step: 0.01, unit: '' },
   anisotropy:         { label: 'Anisotropy',    min: 0, max: 1,     step: 0.01, unit: '' },
+  iridescencePower:   { label: 'Iridescence Strength', min: 0, max: 1, step: 0.01, unit: '' },
 };
 
 /** Get the effective value of a field on the selected stop. */
@@ -426,13 +427,15 @@ defineExpose({ getSnapshot });
           v-for="(stop, idx) in colorStops"
           :key="'handle-' + idx"
           :stop="stop"
-          :selected="selectedIdx === idx"
+          :selected="!applyToAll && selectedIdx === idx"
+          :highlighted="applyToAll"
+          :disabled="applyToAll"
           @update:position="t => colorStops[idx].position = t"
           @select="selectColor(idx)"
         />
         <!-- Bouton supprimer flottant au-dessus du curseur sélectionné -->
         <button
-          v-if="selectedIdx !== null && colorStops.length > 2"
+          v-if="!applyToAll && selectedIdx !== null && colorStops.length > 2"
           class="floating-delete-btn"
           :style="{ left: colorStops[selectedIdx]?.position * 100 + '%' }"
           title="Delete this stop"
@@ -451,15 +454,30 @@ defineExpose({ getSnapshot });
       <div class="effects-header">
         <label class="effects-section-title">
           Stop #{{ (selectedIdx ?? 0) + 1 }}
+          <span v-if="applyToAll" class="all-stops-indicator">All Stops Selected</span>
         </label>
-        <button class="button is-small apply-all-btn"
-          :class="applyToAll ? 'is-warning' : 'is-light'"
-          @click="emit('update:applyToAll', !applyToAll)"
-          :title="applyToAll ? 'Currently editing ALL stops. Click to edit only this stop.' : 'Currently editing this stop only. Click to apply changes to all stops.'"
-        >
-          <span v-if="applyToAll" style="font-weight:700;">&#9888; All stops</span>
-          <span v-else>This stop</span>
-        </button>
+        <div class="stop-scope-toggle" role="group" aria-label="Stop edit scope">
+          <button
+            type="button"
+            class="button is-small scope-btn"
+            :class="{ 'is-active': !applyToAll }"
+            :aria-pressed="!applyToAll"
+            title="Apply edits only to this stop"
+            @click="emit('update:applyToAll', false)"
+          >
+            This Stop
+          </button>
+          <button
+            type="button"
+            class="button is-small scope-btn"
+            :class="{ 'is-active': applyToAll }"
+            :aria-pressed="applyToAll"
+            title="Apply edits to all stops"
+            @click="emit('update:applyToAll', true)"
+          >
+            All Stops
+          </button>
+        </div>
       </div>
 
       <!-- ── Stop presets ── -->
@@ -548,6 +566,21 @@ defineExpose({ getSnapshot });
         <StopTransferCurveSelector v-model="selectedTransferCurve" />
       </div>
       <template v-for="field in (['palette'] as EffectFieldName[])" :key="field">
+        <div class="effect-row">
+          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
+          <input
+            class="slider effect-slider"
+            type="range"
+            :min="EFFECT_UI[field].min"
+            :max="EFFECT_UI[field].max"
+            :step="EFFECT_UI[field].step"
+            :value="getStopEffect(field)"
+            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
+          />
+          <span class="effect-value">{{ getStopEffect(field).toFixed(2) }}</span>
+        </div>
+      </template>
+      <template v-for="field in (['iridescencePower'] as EffectFieldName[])" :key="field">
         <div class="effect-row">
           <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
           <input
@@ -669,16 +702,16 @@ defineExpose({ getSnapshot });
 }
 .floating-delete-btn {
   position: absolute;
-  top: -22px;
+  top: -24px;
   transform: translateX(-50%);
-  width: 20px;
-  height: 20px;
-  border: 1px solid #ccc;
-  border-radius: 50%;
-  background: #f5f5f5;
-  color: #c44;
-  font-size: 1em;
-  font-weight: 700;
+  width: 24px;
+  height: 24px;
+  border: 1px solid #d7d7d7;
+  border-radius: 8px;
+  background: #ffffff;
+  color: #8a2f2f;
+  font-size: 0.95em;
+  font-weight: 600;
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -687,11 +720,15 @@ defineExpose({ getSnapshot });
   z-index: 20;
   line-height: 1;
   padding: 0;
-  transition: background 0.15s, color 0.15s;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 .floating-delete-btn:hover {
+  border-color: #d35d5d;
   background: #c44;
   color: #fff;
+  box-shadow: 0 3px 8px rgba(195, 68, 68, 0.32);
+  transform: translateX(-50%) translateY(-1px);
 }
 
 /* ── Per-point effect editing ── */
@@ -715,6 +752,40 @@ defineExpose({ getSnapshot });
 .apply-all-btn {
   font-size: 0.78em !important;
   min-width: 7em;
+}
+.all-stops-indicator {
+  display: inline-flex;
+  align-items: center;
+  padding: 0.16em 0.52em;
+  border-radius: 999px;
+  border: 1px solid #f0b429;
+  background: #fff7e0;
+  color: #7a5b00;
+  font-size: 0.68em;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.03em;
+}
+.stop-scope-toggle {
+  display: inline-flex;
+  border: 1px solid #cfcfcf;
+  border-radius: 7px;
+  overflow: hidden;
+  background: #f5f5f5;
+}
+.scope-btn {
+  border: 0 !important;
+  border-radius: 0 !important;
+  min-width: 6.4em;
+  height: 27px;
+  font-size: 0.77em !important;
+  font-weight: 600;
+  color: #333;
+  background: transparent;
+}
+.scope-btn.is-active {
+  color: #fff;
+  background: #3273dc;
 }
 .stop-presets-panel {
   margin-bottom: 0.55em;

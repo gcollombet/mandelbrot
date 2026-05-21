@@ -5,7 +5,12 @@ import type {ColorStop} from "../ColorStop.ts";
 const props = defineProps<{
   stop: ColorStop;
   selected?: boolean;
+  highlighted?: boolean;
+  disabled?: boolean;
 }>();
+
+const isEmphasized = computed(() => !!props.selected || !!props.highlighted);
+const selectedStroke = computed(() => (props.highlighted ? '#111' : '#fff'));
 
 const emit = defineEmits(['update:position', 'select']);
 
@@ -23,6 +28,10 @@ function luminance(hex: string): number {
 const borderColor = computed(() => luminance(props.stop.color) > 0.5 ? '#222' : '#fff');
 
 function onDown(e: MouseEvent) {
+  if (props.disabled) {
+    e.preventDefault();
+    return;
+  }
   e.preventDefault();
   emit('select');
   const startX = e.clientX;
@@ -46,6 +55,10 @@ function onDown(e: MouseEvent) {
 }
 
 function onTouchStart(e: TouchEvent) {
+  if (props.disabled) {
+    e.preventDefault();
+    return;
+  }
   e.preventDefault();
   emit('select');
   const touch = e.touches[0];
@@ -83,29 +96,31 @@ function onTouchStart(e: TouchEvent) {
     left: props.stop.position * 100 + '%',
     top: 0,
     height: '100%',
-    width: props.selected ? '38px' : '32px',
+    width: props.selected ? '38px' : (isEmphasized ? '34px' : '32px'),
     transform: 'translateX(-50%)',
-     zIndex: props.selected ? 10 : 1,
-     cursor: 'ew-resize',
+     zIndex: props.selected ? 10 : (isEmphasized ? 4 : 1),
+     cursor: props.disabled ? 'not-allowed' : 'ew-resize',
      pointerEvents: 'auto',
      background: 'transparent',
-     filter: props.selected ? 'drop-shadow(0 0 4px rgba(255,255,255,0.9)) drop-shadow(0 0 8px rgba(100,150,255,0.7))' : 'none',
+     filter: props.highlighted
+       ? 'drop-shadow(0 0 4px rgba(255,255,255,0.85)) drop-shadow(0 0 8px rgba(240,180,41,0.75))'
+       : (props.selected ? 'drop-shadow(0 0 3px rgba(255,255,255,0.75)) drop-shadow(0 0 5px rgba(100,150,255,0.65))' : 'none'),
      transition: 'filter 0.15s, width 0.15s',
   }"
-    :viewBox="props.selected ? '0 0 26 64' : '0 0 22 64'"
+    :viewBox="props.selected ? '0 0 26 64' : (isEmphasized ? '0 0 24 64' : '0 0 22 64')"
     @mousedown="onDown"
     @touchstart="onTouchStart"
   >
     <!-- Rectangle vertical (plus large si sélectionné) -->
     <rect
-      :x="props.selected ? 5 : 6"
+      :x="props.selected ? 5 : (isEmphasized ? 5.5 : 6)"
       y="0"
-      :width="props.selected ? 16 : 12"
+      :width="props.selected ? 16 : (isEmphasized ? 13 : 12)"
       height="64"
-      :rx="props.selected ? 10 : 8"
+      :rx="props.selected ? 10 : (isEmphasized ? 9 : 8)"
       :fill="props.stop.color"
-      :stroke="props.selected ? '#fff' : borderColor"
-      :stroke-width="props.selected ? 3 : 2"
+      :stroke="props.selected ? selectedStroke : (props.highlighted ? '#f0b429' : borderColor)"
+      :stroke-width="props.selected ? 3 : (isEmphasized ? 2.4 : 2)"
     />
   </svg>
 </template>

@@ -70,6 +70,11 @@ fn samplePaletteColor(palettePhase: f32) -> vec3<f32> {
   return textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.083333333), 0.0).rgb;
 }
 
+fn animatedPaletteOffset() -> f32 {
+  let paletteDrift = parameters.animate * parameters.time * parameters.animationSpeed * 0.025;
+  return fract(parameters.paletteOffset + paletteDrift);
+}
+
 fn sampleEffects(palettePhase: f32) -> EffectParams {
   var e: EffectParams;
 
@@ -97,7 +102,7 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   e.roughness = clamp(row3.b, 0.02, 1.0);
   e.anisotropy = clamp(row3.a, 0.0, 1.0);
 
-  // Row 4: iridescence R, G, B, enabled
+  // Row 4: iridescence R, G, B, strength
   let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.75), 0.0);
   e.iridescenceColor = row4.rgb;
   e.wIridescence = clamp(row4.a, 0.0, 1.0);
@@ -362,7 +367,7 @@ fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: ve
 fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, der: vec2<f32>, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
-  let palettePhase = fract(deep / paletteRepeat + parameters.paletteOffset);
+  let palettePhase = fract(deep / paletteRepeat + animatedPaletteOffset());
 
   // ── Sample all effect channels from the palette texture ──
   let fx = sampleEffects(palettePhase);
@@ -569,7 +574,8 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       let fresnelReflection = clamp(luminance(fresnelEnv), 0.0, 1.0);
       let polishReflection = 0.075 * clamp(parameters.varnishStrength, 0.0, 10.0) * (1.0 - roughness * 0.55) * (1.0 - metallic * 0.35);
       let reflectionStrength = fx.wSkybox * max(fresnelReflection, polishReflection);
-      envColor = skyboxColor * reflectionStrength * mix(0.55, 1.25, metallic) * reflectionSide;
+      let envVisibility = mix(reflectionSide, mix(0.55, 1.0, litSide), metallic);
+      envColor = skyboxColor * reflectionStrength * mix(0.55, 1.25, metallic) * envVisibility;
     }
 
     let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading * reflectionSide;
@@ -721,7 +727,7 @@ fn colorize_pixel(
   // Compute a preliminary phase to sample the smoothness weight, then
   // apply it to select between iter_val and nu.
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-  let prelimPhase = fract(nu * 2.0 / paletteRepeat + parameters.paletteOffset);
+  let prelimPhase = fract(nu * 2.0 / paletteRepeat + animatedPaletteOffset());
   let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.416666667), 0.0);
   let wSmoothness = row2.g;
   nu = mix(iter_val, nu, wSmoothness);

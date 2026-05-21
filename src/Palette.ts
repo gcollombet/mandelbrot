@@ -83,22 +83,28 @@ export class Palette {
     return COLOR_STOP_DEFAULTS[field];
   }
 
-  getIridescenceAt(t: number): { color: string; weight: number } {
-    if (this.points.length === 0) return { color: '#000000', weight: 0 };
+  getIridescenceAt(t: number): { color: string; strength: number } {
+    if (this.points.length === 0) return { color: '#000000', strength: 0 };
     if (this.points.length === 1) {
       return {
         color: this.points[0].iridescenceColor ?? this.points[0].color,
-        weight: this.points[0].iridescenceColor ? 1 : 0,
+        strength: this.points[0].iridescenceColor ? getEffectValue(this.points[0], 'iridescencePower') : 0,
       };
     }
 
     const first = this.points[0];
     const last = this.points[this.points.length - 1];
     if (t <= first.position) {
-      return { color: first.iridescenceColor ?? first.color, weight: first.iridescenceColor ? 1 : 0 };
+      return {
+        color: first.iridescenceColor ?? first.color,
+        strength: first.iridescenceColor ? getEffectValue(first, 'iridescencePower') : 0,
+      };
     }
     if (t >= last.position) {
-      return { color: last.iridescenceColor ?? last.color, weight: last.iridescenceColor ? 1 : 0 };
+      return {
+        color: last.iridescenceColor ?? last.color,
+        strength: last.iridescenceColor ? getEffectValue(last, 'iridescencePower') : 0,
+      };
     }
 
     for (let i = 0; i < this.points.length - 1; ++i) {
@@ -109,15 +115,17 @@ export class Palette {
         const curvedT = applyStopTransferCurve(getStopTransferCurve(a), localT);
         const aIridescence = getStopColor(a, 'iridescenceColor');
         const bIridescence = getStopColor(b, 'iridescenceColor');
-        if (!aIridescence && !bIridescence) return { color: '#000000', weight: 0 };
+        if (!aIridescence && !bIridescence) return { color: '#000000', strength: 0 };
         const aColor = aIridescence ?? a.color;
         const bColor = bIridescence ?? b.color;
-        const weight = (aIridescence ? 1 : 0) + ((bIridescence ? 1 : 0) - (aIridescence ? 1 : 0)) * curvedT;
-        return { color: rgb(this.interpolate(aColor, bColor)(curvedT)).formatHex(), weight };
+        const aStrength = aIridescence ? getEffectValue(a, 'iridescencePower') : 0;
+        const bStrength = bIridescence ? getEffectValue(b, 'iridescencePower') : 0;
+        const strength = aStrength + (bStrength - aStrength) * curvedT;
+        return { color: rgb(this.interpolate(aColor, bColor)(curvedT)).formatHex(), strength };
       }
     }
 
-    return { color: '#000000', weight: 0 };
+    return { color: '#000000', strength: 0 };
   }
 
   /**
@@ -130,7 +138,7 @@ export class Palette {
    *   Row 1: zebra [0,1], tessellation [0,1], shading [0,1], skybox [0,1]
    *   Row 2: webcam [0,1], smoothness [0,1], shadingLevel [0,3], specularPower [1,64]
    *   Row 3: reserved legacy lightAngle [0,2pi], metallic [0,1], roughness [0.02,1], anisotropy [0,1]
-   *   Row 4: iridescence RGB [0,1], iridescence weight [0,1]
+   *   Row 4: iridescence RGB [0,1], iridescence strength [0,1]
    *   Row 5: stripeAverage [0,1], directionCoherence [0,1], stripeRelief [0,1], directionCoherenceRelief [0,1]
    *
    * @returns {{ data: Float32Array, width: number, height: number }}
@@ -172,14 +180,14 @@ export class Palette {
       data[row3 + 2] = this.getEffectAt(t, 'roughness');
       data[row3 + 3] = this.getEffectAt(t, 'anisotropy');
 
-      // ── Row 4: iridescence R, G, B, weight ──
+      // ── Row 4: iridescence R, G, B, strength ──
       const iridescence = this.getIridescenceAt(t);
       const iridescenceColor = rgb(iridescence.color);
       const row4 = (4 * width + x) * 4;
       data[row4]     = (iridescenceColor.r ?? 0) / 255;
       data[row4 + 1] = (iridescenceColor.g ?? 0) / 255;
       data[row4 + 2] = (iridescenceColor.b ?? 0) / 255;
-      data[row4 + 3] = Math.max(0, Math.min(1, iridescence.weight));
+      data[row4 + 3] = Math.max(0, Math.min(1, iridescence.strength));
 
       // ── Row 5: orbit metric blends ──
       const row5 = (5 * width + x) * 4;

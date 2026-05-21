@@ -1516,6 +1516,35 @@ async function renameAndSaveSkyboxTexture() {
 
     <!-- Palettes tab -->
     <div v-else-if="activeTab === 'palettes'">
+      <div class="palette-top-controls">
+        <button
+          class="button is-small palette-animate-toggle"
+          :class="{ 'is-active': model.activateAnimate }"
+          type="button"
+          :aria-pressed="model.activateAnimate"
+          title="Animate palette offset"
+          @click="model.activateAnimate = !model.activateAnimate"
+        >
+          <span class="icon is-small">
+            <i :class="model.activateAnimate ? 'fas fa-pause' : 'fas fa-play'" aria-hidden="true"></i>
+          </span>
+          <span>Drift</span>
+          <span class="palette-toggle-state">{{ model.activateAnimate ? 'On' : 'Off' }}</span>
+        </button>
+
+        <div class="palette-compact-control">
+          <span class="palette-compact-label">Length</span>
+          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
+          <span class="palette-compact-value">{{ formatPalettePeriod(model.palettePeriod) }}</span>
+        </div>
+
+        <div class="palette-compact-control">
+          <span class="palette-compact-label">Offset</span>
+          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
+          <span class="palette-compact-value">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
+        </div>
+      </div>
+
       <div class="mb-3">
         <PaletteEditor
           ref="paletteEditorRef"
@@ -1588,30 +1617,8 @@ async function renameAndSaveSkyboxTexture() {
 
       <hr class="section-sep"/>
 
-      <!-- ═══ PALETTE MAPPING ═══ -->
-      <label class="gfx-section-title">Palette Mapping</label>
-      <div class="palette-control-row">
-        <label class="palette-control-label">Cycle Length</label>
-        <input class="slider is-fullwidth" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
-        <span class="palette-control-value">{{ formatPalettePeriod(model.palettePeriod) }}</span>
-      </div>
-      <div class="palette-control-row">
-        <label class="palette-control-label">Cycle Offset</label>
-        <input class="slider is-fullwidth" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
-        <span class="palette-control-value">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
-      </div>
-
-      <hr class="section-sep"/>
-
       <!-- ═══ MOTION ═══ -->
       <label class="gfx-section-title">Motion</label>
-      <div class="buttons toggle-buttons compact-buttons">
-        <button class="button is-small"
-          :class="model.activateAnimate ? 'is-link' : 'is-light'"
-          @click="model.activateAnimate = !model.activateAnimate">
-          Animated Drift
-        </button>
-      </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Drift Speed</span>
         <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
@@ -2081,6 +2088,66 @@ async function renameAndSaveSkyboxTexture() {
   font-size: 0.84em;
   color: #333;
   font-variant-numeric: tabular-nums;
+}
+.palette-top-controls {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  align-items: center;
+  gap: 0.45em 0.65em;
+  margin-bottom: 0.75em;
+}
+.palette-animate-toggle {
+  justify-content: flex-start;
+  gap: 0.35em;
+  min-width: 7.6em;
+  height: 28px;
+  border-color: #b8b8b8;
+  color: #222;
+  background: #f3f3f3;
+}
+.palette-animate-toggle.is-active {
+  border-color: #3273dc;
+  color: #fff;
+  background: #3273dc;
+}
+.palette-toggle-state {
+  margin-left: auto;
+  font-size: 0.72em;
+  font-weight: 700;
+  text-transform: uppercase;
+  opacity: 0.78;
+}
+.palette-compact-control {
+  display: grid;
+  grid-template-columns: auto minmax(5.5em, 1fr) 4.6em;
+  align-items: center;
+  gap: 0.38em;
+  min-width: 0;
+}
+.palette-compact-control input[type="range"] {
+  min-width: 0;
+}
+.palette-compact-label {
+  font-size: 0.78em;
+  font-weight: 600;
+  color: #222;
+  line-height: 1;
+}
+.palette-compact-value {
+  font-family: monospace;
+  font-size: 0.78em;
+  color: #333;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+@media (max-width: 520px) {
+  .palette-top-controls {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .palette-compact-control {
+    grid-column: 1 / -1;
+  }
 }
 .palette-button-group {
   flex: 1 1 auto;
