@@ -47,7 +47,7 @@ struct Mandelbrot {
   blaLevelCount: f32,
   blaEpsilon: f32,
   stripeFrequency: f32,
-  _padding0: f32,
+  trackOrbitMetrics: f32,
   _padding1: f32,
   _padding2: f32,
   _padding3: f32,
@@ -223,6 +223,10 @@ fn update_orbit_ema(previous: f32, sample: f32, count: f32) -> f32 {
   return sample + (previous - sample) * decay;
 }
 
+fn update_orbit_ema_unit(previous: f32, sample: f32) -> f32 {
+  return sample + (previous - sample) * (1.0 - ORBIT_METRIC_EMA_ALPHA);
+}
+
 fn update_orbit_mean_vec2(previous: vec2<f32>, sample: vec2<f32>, previousCount: f32, sampleCount: f32) -> vec2<f32> {
   let safePreviousCount = max(previousCount, 0.0);
   let safeSampleCount = max(sampleCount, 1.0);
@@ -253,8 +257,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var der = vec2<f32>(prev_dzx, prev_dzy);
   var ref_i = decode_ref_i(prev_ref_i);
   var z = getOrbit(ref_i) + dz;
-  var stripeEma = decode_stripe_ema(prev_ref_i, prev_iter);
-  var avgDir = decode_avg_dir(prev_avg_direction, prev_iter);
+  let trackOrbitMetrics = mandelbrot.trackOrbitMetrics >= 0.5;
+  var stripeEma = 0.0;
+  var avgDir = vec2<f32>(0.0);
+  if (trackOrbitMetrics) {
+    stripeEma = decode_stripe_ema(prev_ref_i, prev_iter);
+    avgDir = decode_avg_dir(prev_avg_direction, prev_iter);
+  }
   var previousStripeEma = stripeEma;
   var previousAvgDir = avgDir;
 
@@ -271,26 +280,30 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       var next_der = der;
       let skipped = try_apply_bla(&ref_i, &dz, &der, dc, dcMag);
       if (skipped > 0) {
-        let previousMetricCount = prev_iter + i;
         z = getOrbit(ref_i) + dz;
         next_der = der;
         i += f32(skipped);
-        previousStripeEma = stripeEma;
-        previousAvgDir = avgDir;
-        stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), f32(skipped));
-        avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, f32(skipped));
+        if (trackOrbitMetrics) {
+          let previousMetricCount = prev_iter + i - f32(skipped);
+          previousStripeEma = stripeEma;
+          previousAvgDir = avgDir;
+          stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), f32(skipped));
+          avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, f32(skipped));
+        }
       } else {
-        let previousMetricCount = prev_iter + i;
         z = getOrbit(ref_i);
         dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
         ref_i += 1;
         z = getOrbit(ref_i) + dz;
         next_der = cmul(der * 2.0, z);
         i += 1.0;
-        previousStripeEma = stripeEma;
-        previousAvgDir = avgDir;
-        stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), 1.0);
-        avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
+        if (trackOrbitMetrics) {
+          let previousMetricCount = prev_iter + i - 1.0;
+          previousStripeEma = stripeEma;
+          previousAvgDir = avgDir;
+          stripeEma = update_orbit_ema_unit(stripeEma, stripe_metric_sample(z));
+          avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
+        }
       }
 
       let dot_z = dot(z, z);
@@ -313,17 +326,19 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     }
   } else {
     while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
-      let previousMetricCount = prev_iter + i;
       z = getOrbit(ref_i);
       dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
       ref_i += 1;
       z = getOrbit(ref_i) + dz;
       let next_der = cmul(der * 2.0, z);
       i += 1.0;
-      previousStripeEma = stripeEma;
-      previousAvgDir = avgDir;
-      stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), 1.0);
-      avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
+      if (trackOrbitMetrics) {
+        let previousMetricCount = prev_iter + i - 1.0;
+        previousStripeEma = stripeEma;
+        previousAvgDir = avgDir;
+        stripeEma = update_orbit_ema_unit(stripeEma, stripe_metric_sample(z));
+        avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
+      }
 
       let dot_z = dot(z, z);
       if (dot_z > muLimit) {

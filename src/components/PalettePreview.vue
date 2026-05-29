@@ -36,6 +36,7 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 }
 
 const LAYER_COUNT = 8;
+const PREVIEW_MU = 1000000;
 const ORBIT_DIRECTION_SCALE = 4095;
 const ORBIT_DIRECTION_BASE = 4096;
 /** Number of synthetic iterations to display. */
@@ -267,7 +268,7 @@ async function init() {
   canvas.height = h;
 
   // ── Synthetic texture (8 layers of r32float) ──
-  const mu = 1000000;
+  const mu = PREVIEW_MU;
   const layerData = buildSyntheticData(w, h, mu);
   syntheticTexture = device.createTexture({
     size: { width: w, height: h, depthOrArrayLayers: LAYER_COUNT },
@@ -334,14 +335,16 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (25 floats, padded to 112 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (31 floats, padded to 128 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
-    size: 4 * 28,
+    size: 4 * 32,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
   // palettePeriod = ITER_COUNT * 2 to compensate for the `* 2.0` in the shader's
   // `deep = v * 2.0; palettePhase = fract(deep / palettePeriod)`, so we get exactly one cycle.
+  const previewLightAngle = 3.927;
+  const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
   const uniforms = new Float32Array([
     ITER_COUNT * 2, // palettePeriod
     0,            // paletteOffset
@@ -366,8 +369,14 @@ async function init() {
     props.subsurfaceStrength ?? 0.0, // subsurfaceStrength
     props.reliefDepth ?? 0.35, // reliefDepth
     props.localShadowStrength ?? 0.4, // localShadowStrength
-    3.927, // lightAngle
+    previewLightAngle, // lightAngle
     props.varnishStrength ?? 1.0, // varnishStrength
+    Math.log(mu),     // logMu
+    0,                // sceneSin
+    1,                // sceneCos
+    Math.cos(previewLightAngle) / previewLightLen, // lightDirX
+    Math.sin(previewLightAngle) / previewLightLen, // lightDirY
+    1.85 / previewLightLen, // lightDirZ
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -419,6 +428,8 @@ watch(
   [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.clearcoatStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength],
   () => {
     if (!device || !uniformBuffer) return;
+    const previewLightAngle = 3.927;
+    const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
     const patch = new Float32Array([
       props.tessellationLevel ?? 2,
       props.displacementAmount ?? 0.01,
@@ -430,8 +441,14 @@ watch(
       props.subsurfaceStrength ?? 0.0,
       props.reliefDepth ?? 0.35,
       props.localShadowStrength ?? 0.4,
-      3.927,
+      previewLightAngle,
       props.varnishStrength ?? 1.0,
+      Math.log(PREVIEW_MU),
+      0,
+      1,
+      Math.cos(previewLightAngle) / previewLightLen,
+      Math.sin(previewLightAngle) / previewLightLen,
+      1.85 / previewLightLen,
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
     render();

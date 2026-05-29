@@ -52,6 +52,7 @@ const GPU_TIME_EMA_ALPHA = 0.25
 // asynchronous, so this controls the compute/count pass frequency, not display FPS.
 const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
 const COUNTER_READBACK_BUFFER_COUNT = 3
+const ORBIT_METRIC_EPSILON = 0.001
 
 // Orbit chunking: compute reference orbit incrementally to avoid blocking.
 // Each frame computes at most this many iterations of arbitrary-precision
@@ -68,6 +69,15 @@ type CounterReadbackSlot = {
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
     return 2 ** Math.floor(Math.log2(v))
+}
+
+function shouldTrackOrbitMetrics(colorStops: ColorStop[]): boolean {
+    return colorStops.some(stop =>
+        (stop.stripeAverage ?? 0) > ORBIT_METRIC_EPSILON
+        || (stop.rotationMean ?? 0) > ORBIT_METRIC_EPSILON
+        || (stop.stripeRelief ?? 0) > ORBIT_METRIC_EPSILON
+        || (stop.directionCoherenceRelief ?? 0) > ORBIT_METRIC_EPSILON
+    )
 }
 
 // ── Float32 → Float16 conversion ──────────────────────────────────
@@ -249,6 +259,7 @@ export class Engine {
 
     previousMandelbrot?: Mandelbrot
     previousRenderOptions?: RenderOptions
+    private previousOrbitMetricsEnabled?: boolean
     needRender = true
     /** Whether the reference orbit is still being computed incrementally. */
     orbitIncomplete = false
@@ -429,7 +440,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 28, // 25 floats padded to 16-byte alignment (112 bytes)
+            size: 4 * 32, // 31 floats padded to 16-byte alignment (128 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1051,13 +1062,18 @@ export class Engine {
         const mandelbrotChanged = !this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
         const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
         const stripeFrequencyChanged = renderOptions.stripeFrequency !== this.previousRenderOptions?.stripeFrequency
+        const orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
+        const orbitMetricsChanged = this.previousOrbitMetricsEnabled !== undefined
+            && orbitMetricsEnabled !== this.previousOrbitMetricsEnabled
+        const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
         this.needRender = this.needRender || mandelbrotChanged || renderOptionsChanged
-        if (mandelbrotChanged || stripeFrequencyChanged) {
+        if (mandelbrotChanged || activeStripeFrequencyChanged || orbitMetricsChanged) {
             this.invalidateCounterReadback() // unknown — new fractal params, GPU counter not read yet
         }
-        if (stripeFrequencyChanged) {
+        if (activeStripeFrequencyChanged || orbitMetricsChanged) {
             this.clearHistoryNextFrame = true
         }
+        this.previousOrbitMetricsEnabled = orbitMetricsEnabled
 
         // Check if any stop has webcam > 0 to decide whether to capture webcam frames
         const hasWebcam = renderOptions.colorStops.some(s => (s.webcam ?? 0) > 0)
@@ -1181,6 +1197,9 @@ export class Engine {
             this.needRender = true
         }
 
+        const sceneSin = Math.sin(mandelbrot.angle)
+        const sceneCos = Math.cos(mandelbrot.angle)
+        const lightDirLen = Math.hypot(Math.cos(renderOptions.lightAngle), Math.sin(renderOptions.lightAngle), 1.85)
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,    // 0: palettePeriod
             renderOptions.paletteOffset,    // 1: paletteOffset
@@ -1215,6 +1234,12 @@ export class Engine {
             renderOptions.localShadowStrength, // 22: localShadowStrength
             renderOptions.lightAngle,          // 23: lightAngle
             renderOptions.varnishStrength,     // 24: varnishStrength
+            Math.log(mandelbrot.mu),            // 25: logMu
+            sceneSin,                           // 26: sceneSin
+            sceneCos,                           // 27: sceneCos
+            Math.cos(renderOptions.lightAngle) / lightDirLen, // 28: lightDirX
+            Math.sin(renderOptions.lightAngle) / lightDirLen, // 29: lightDirY
+            1.85 / lightDirLen,                 // 30: lightDirZ
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -1296,7 +1321,7 @@ export class Engine {
             blaLevelCount,
             this.blaEpsilon,
             renderOptions.stripeFrequency,
-            0,
+            orbitMetricsEnabled ? 1 : 0,
             0,
             0,
             0,
