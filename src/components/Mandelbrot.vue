@@ -245,6 +245,9 @@ async function initWebGPU() {
     varnishStrength: props.varnishStrength,
     stripeFrequency: props.stripeFrequency,
   });
+  engine.dprMultiplier = props.dprMultiplier ?? 1.0;
+  engine.targetFps = props.targetFps ?? 60;
+  engine.gpuLoadMultiplier = props.gpuLoadMultiplier ?? 1.0;
   return engine.initialize(navigator)
 }
 
