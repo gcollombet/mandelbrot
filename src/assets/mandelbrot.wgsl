@@ -281,11 +281,9 @@ fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
   return clamp(1.0 - log(log(zSq) / log(muLimit)) / log(2.0), 0.0, 1.0);
 }
 
-fn bailout_crossing_blend(prevZ: vec2<f32>, currentZ: vec2<f32>, muLimit: f32) -> f32 {
-  let prevLog = log(max(dot(prevZ, prevZ), 1e-12));
-  let currentLog = log(max(dot(currentZ, currentZ), 1e-12));
-  let bailoutLog = log(max(muLimit, 1.000001));
-  return clamp((bailoutLog - prevLog) / max(currentLog - prevLog, 1e-12), 0.0, 1.0);
+fn mix_angle(a: f32, b: f32, t: f32) -> f32 {
+  let delta = atan2(sin(b - a), cos(b - a));
+  return a + delta * t;
 }
 
 // ── core computation ──────────────────────────────────────────────
@@ -361,11 +359,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       der = next_der;
       let dot_z = dot(z, z);
       if (dot_z > muLimit) {
-        let shadingBlend = bailout_crossing_blend(previousZ, z, muLimit);
-        let shadingZ = mix(previousZ, z, shadingBlend);
-        let shadingDer = mix(previousDer, der, shadingBlend);
-        shadingHeight = distance_height(shadingZ, shadingDer);
-        shadingAngle = visual_derivative_angle(shadingZ, shadingDer);
+        let shadingBlend = escape_fraction(z, muLimit);
+        let previousHeight = distance_height(previousZ, previousDer);
+        let currentHeight = distance_height(z, der);
+        let previousAngle = visual_derivative_angle(previousZ, previousDer);
+        let currentAngle = visual_derivative_angle(z, der);
+        shadingHeight = mix(previousHeight, currentHeight, shadingBlend);
+        shadingAngle = mix_angle(previousAngle, currentAngle, shadingBlend);
         escaped = true;
         break;
       }
@@ -402,11 +402,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       der = next_der;
       let dot_z = dot(z, z);
       if (dot_z > muLimit) {
-        let shadingBlend = bailout_crossing_blend(previousZ, z, muLimit);
-        let shadingZ = mix(previousZ, z, shadingBlend);
-        let shadingDer = mix(previousDer, der, shadingBlend);
-        shadingHeight = distance_height(shadingZ, shadingDer);
-        shadingAngle = visual_derivative_angle(shadingZ, shadingDer);
+        let shadingBlend = escape_fraction(z, muLimit);
+        let previousHeight = distance_height(previousZ, previousDer);
+        let currentHeight = distance_height(z, der);
+        let previousAngle = visual_derivative_angle(previousZ, previousDer);
+        let currentAngle = visual_derivative_angle(z, der);
+        shadingHeight = mix(previousHeight, currentHeight, shadingBlend);
+        shadingAngle = mix_angle(previousAngle, currentAngle, shadingBlend);
         escaped = true;
         break;
       }
