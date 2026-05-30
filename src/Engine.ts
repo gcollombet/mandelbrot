@@ -1959,7 +1959,7 @@ export class Engine {
 
     // ── Readback d'un pixel d'itération depuis la texture resolved ────
     // Convertit les coordonnées écran (CSS) en coordonnées texture neutre,
-    // lit les couches 0 (iter), 2 (zx), 3 (zy), 4/5 (DE si échappé, dérivée si reprise)
+    // lit les couches 0 (iter), 2 (zx), 3 (zy), 4/5 (hauteur/angle si échappé, dérivée si reprise)
     // et renvoie les données brutes nécessaires au calcul de la phase palette.
 
     /** Données d'itération lues depuis le GPU pour un pixel. */

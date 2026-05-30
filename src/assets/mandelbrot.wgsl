@@ -8,14 +8,14 @@
 //   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied from grid step)
 //   2 : z.x   (real part of current z, for resuming / coloring)
 //   3 : z.y   (imag part of current z, for resuming / coloring)
-//   4 : escaped pixels: distance-vector.x, in-progress pixels: derivative.x
-//   5 : escaped pixels: distance-vector.y, in-progress pixels: derivative.y
+//   4 : escaped pixels: distance height, in-progress pixels: derivative.x
+//   5 : escaped pixels: visual derivative angle, in-progress pixels: derivative.y
 //   6 : ref_i + fractional stripe phase (reference orbit index for resuming perturbation)
 //   7 : packed average orbit direction, 12 bits per component
 //
 // mu (smooth fractional part) is recalculated in the color shader from z.
-// Escaped pixels store a distance vector in layers 4/5 so relief/reflection
-// shading does not have to reconstruct DE from a derivative convention.
+// Escaped pixels store distance height/angle in layers 4/5 so relief/reflection
+// shading does not have to reconstruct tiny DE vectors from a derivative convention.
 //
 // Pixel state convention (iter-only):
 //   iter == -1                     : sentinel, needs computation
@@ -109,11 +109,21 @@ fn cdiv(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
   );
 }
 
-fn distance_vector(z: vec2<f32>, der: vec2<f32>) -> vec2<f32> {
+fn distance_estimate(z: vec2<f32>, der: vec2<f32>) -> f32 {
   let zLen = max(length(z), 1.000001);
   let dC = cmul(z, der);
   let numerator = 0.5 * dot(z, z) * log(zLen);
-  return cdiv(vec2<f32>(numerator, 0.0), dC);
+  let de = cdiv(vec2<f32>(numerator, 0.0), dC);
+  return clamp(length(de), 1e-30, 1e30);
+}
+
+fn distance_height(z: vec2<f32>, der: vec2<f32>) -> f32 {
+  return clamp(-log(distance_estimate(z, der)), -8.0, 64.0);
+}
+
+fn visual_derivative_angle(z: vec2<f32>, der: vec2<f32>) -> f32 {
+  let dd = cdiv(der, z);
+  return atan2(dd.y, dd.x);
 }
 
 fn getOrbit(index: i32) -> vec2<f32> {
@@ -174,8 +184,8 @@ struct FragOut {
   @location(1) genuine:   vec4<f32>,  // .r = resolution step (1 = genuine, >= 2 = copied)
   @location(2) zx:        vec4<f32>,  // .r = z.x
   @location(3) zy:        vec4<f32>,  // .r = z.y
-  @location(4) dzx:       vec4<f32>,  // .r = escaped DE.x, or in-progress derivative x
-  @location(5) dzy:       vec4<f32>,  // .r = escaped DE.y, or in-progress derivative y
+  @location(4) dzx:       vec4<f32>,  // .r = escaped distance height, or in-progress derivative x
+  @location(5) dzy:       vec4<f32>,  // .r = escaped angle_der, or in-progress derivative y
   @location(6) ref_i:     vec4<f32>,  // .r = integer ref_i + fractional stripe phase
   @location(7) avgDirection: vec4<f32>,  // .r = packed average orbit direction
 };
@@ -412,15 +422,16 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     let smoothStripeEma = mix(previousStripeEma, stripeEma, escapeBlend);
     let smoothAvgDir = mix(previousAvgDir, avgDir, escapeBlend);
 
-    // Escaped: layers 4/5 switch from resumable derivative state to a
-    // Fraktaler-like distance vector consumed directly by the color shader.
-    let de = distance_vector(z, der);
+    // Escaped: layers 4/5 switch from resumable derivative state to scalar
+    // shading data. Storing height avoids precision loss from tiny DE vectors.
+    let deHeight = distance_height(z, der);
+    let angleDer = visual_derivative_angle(z, der);
     out.iter      = pack(total_iter);
     out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(de.x);
-    out.dzy       = pack(de.y);
+    out.dzx       = pack(deHeight);
+    out.dzy       = pack(angleDer);
     out.ref_i     = pack(ref_i_with_stripe(0.0, smoothStripeEma));
     out.avgDirection = pack(encode_avg_dir(smoothAvgDir));
     return out;

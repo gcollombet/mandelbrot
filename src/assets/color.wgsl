@@ -169,23 +169,6 @@ fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, sceneSin: f32,
   return abs(local.x) <= aspect && abs(local.y) <= 1.0;
 }
 
-fn cdiv(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
-  let d = max(b.x * b.x + b.y * b.y, 1e-30);
-  return vec2<f32>((a.x * b.x + a.y * b.y) / d,
-                   (a.y * b.x - a.x * b.y) / d);
-}
-
-fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
-  return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
-}
-
-fn visual_derivative_direction_from_de(z: vec2<f32>, de: vec2<f32>) -> vec2<f32> {
-  let z2de = cmul(cmul(z, z), de);
-  let dd = cdiv(vec2<f32>(1.0, 0.0), z2de);
-  let ddLen = length(dd);
-  return select(vec2<f32>(1.0, 0.0), dd / ddLen, ddLen > 1e-12);
-}
-
 fn dir_to_skybox_uv(dir: vec3<f32>, dx: f32, dy: f32) -> vec2<f32> {
   let d = normalize(dir);
   let u = abs((dx + atan2(d.z, d.x) / (2.0 * 3.14159265)) % 2.0 - 1.0) / 2.0;
@@ -358,22 +341,20 @@ fn fractal_height_shadow(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32
   return clamp(1.0 - shadow, 0.22, 1.0);
 }
 
-fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, deX: f32, deY: f32) -> f32 {
+fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32) -> f32 {
   if (escape_nu(iterVal, zx, zy) < 0.0) {
     return -1e6;
   }
 
-  let distanceEstimate = clamp(length(vec2<f32>(deX, deY)), 1e-12, 1e12);
-  return clamp(-log(distanceEstimate), -8.0, 24.0);
+  return clamp(storedHeight, -8.0, 64.0);
 }
 
 fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f32 {
   let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
   let zx = textureLoad(sourceTex, coord, 2, 0).r;
   let zy = textureLoad(sourceTex, coord, 3, 0).r;
-  let deX = textureLoad(sourceTex, coord, 4, 0).r;
-  let deY = textureLoad(sourceTex, coord, 5, 0).r;
-  return distance_height_from_values(iterVal, zx, zy, deX, deY);
+  let storedHeight = textureLoad(sourceTex, coord, 4, 0).r;
+  return distance_height_from_values(iterVal, zx, zy, storedHeight);
 }
 
 fn sample_distance_height_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
@@ -395,7 +376,7 @@ fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: ve
   return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 12.0;
 }
 
-fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, de: vec2<f32>, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
+fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset());
@@ -471,7 +452,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     var directionCoherenceGrad = vec2<f32>(0.0);
     var slope = 0.0;
     if (needsDistanceHeight || needsFractalGradient) {
-      distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, de.x, de.y);
+      distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
     }
     if (needsFractalGradient) {
       let fractalGradient = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight);
@@ -770,15 +751,14 @@ fn colorize_pixel(
   let isEvenIter = 1.0 - abs(floor(iter_val) % 2.0);
 
   let z = vec2<f32>(zx_val, zy_val);
-  let de = vec2<f32>(der_x, der_y);
-  let angleDir = visual_derivative_direction_from_de(z, de);
-  let angle_der = atan2(angleDir.y, angleDir.x);
+  let distanceHeightStored = der_x;
+  let angle_der = der_y;
 
   let v = nu;
   let v_smooth = nu_smooth;
   let stripePhase = decode_stripe_phase(refWithStripe);
   let directionCoherence = decode_direction_coherence(avgDirection);
-  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, de, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y);
+  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, distanceHeightStored, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
