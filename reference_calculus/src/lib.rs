@@ -13,6 +13,14 @@ fn dbig_to_f32(bf: &DBig) -> f32 {
     bf.to_string().parse::<f32>().unwrap()
 }
 
+fn dbig_to_f64(bf: &DBig) -> f64 {
+    bf.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
+fn dbig_i(value: i32) -> DBig {
+    DBig::try_from(value).unwrap()
+}
+
 #[cfg(target_arch = "wasm32")]
 fn exp_f64(value: f64) -> f64 {
     js_sys::Math::exp(value)
@@ -365,20 +373,8 @@ impl MandelbrotNavigator {
             && ((&self.reference_cx - &self.cx).abs() > &self.scale * &twenty
                 || (&self.reference_cy - &self.cy).abs() > &self.scale * &twenty)
         {
-            self.result.clear();
-            self.last_iter = 0;
-            self.previous_c = (self.cx.clone(), self.cy.clone());
-            self.reference_cx = self.cx.clone();
-            self.reference_cy = self.cy.clone();
-            self.last_zx = DBig::try_from(0).unwrap();
-            self.last_zy = DBig::try_from(0).unwrap();
-            self.last_dx = DBig::try_from(0).unwrap();
-            self.last_dy = DBig::try_from(0).unwrap();
-            self.bla_result.clear();
-            self.bla_levels.clear();
-            self.bla_level_count = 0;
-            self.bla_source_len = 0;
-            self.bla_source_epsilon = 0.0;
+            let (reference_cx, reference_cy) = self.choose_reference_near_view();
+            self.reset_reference_to(reference_cx, reference_cy);
         }
 
         let offset = self.result.len();
@@ -581,6 +577,44 @@ impl MandelbrotNavigator {
         self.result.capacity()
     }
 
+    fn reset_reference_to(&mut self, cx: DBig, cy: DBig) {
+        self.result.clear();
+        self.last_iter = 0;
+        self.reference_cx = cx;
+        self.reference_cy = cy;
+        self.previous_c = (self.reference_cx.clone(), self.reference_cy.clone());
+        self.last_zx = dbig_i(0);
+        self.last_zy = dbig_i(0);
+        self.last_dx = dbig_i(0);
+        self.last_dy = dbig_i(0);
+        self.bla_result.clear();
+        self.bla_levels.clear();
+        self.bla_level_count = 0;
+        self.bla_source_len = 0;
+        self.bla_source_epsilon = 0.0;
+    }
+
+    fn choose_reference_near_view(&self) -> (DBig, DBig) {
+        const MAX_DETECT_ITER: usize = 2048;
+        const MAX_PERIOD: usize = 512;
+        const NEWTON_STEPS: usize = 24;
+
+        let Some(period) = detect_period_f64(
+            dbig_to_f64(&self.cx),
+            dbig_to_f64(&self.cy),
+            MAX_DETECT_ITER,
+            MAX_PERIOD,
+        ) else {
+            return (self.cx.clone(), self.cy.clone());
+        };
+
+        let max_distance = &self.scale * dbig_i(1000);
+        match newton_nucleus(&self.cx, &self.cy, period, NEWTON_STEPS, &max_distance) {
+            Some(reference) => reference,
+            None => (self.cx.clone(), self.cy.clone()),
+        }
+    }
+
     pub fn scale(&mut self, value: &str) {
         self.scale = DBig::from_str(value).unwrap();
         self.vscale = DBig::try_from(1).unwrap();
@@ -667,6 +701,137 @@ fn conservative_line_min(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     (a.0.min(b.0), a.1.max(b.1))
 }
 
+fn detect_period_f64(cx: f64, cy: f64, max_iter: usize, max_period: usize) -> Option<usize> {
+    if !cx.is_finite() || !cy.is_finite() {
+        return None;
+    }
+
+    let mut orbit: Vec<(f64, f64)> = Vec::with_capacity(max_iter + 1);
+    let (mut zx, mut zy) = (0.0, 0.0);
+    orbit.push((zx, zy));
+
+    for n in 1..=max_iter {
+        let zx_new = zx * zx - zy * zy + cx;
+        let zy_new = 2.0 * zx * zy + cy;
+        zx = zx_new;
+        zy = zy_new;
+
+        if zx * zx + zy * zy > 4.0 {
+            return None;
+        }
+
+        orbit.push((zx, zy));
+        if n < 64 {
+            continue;
+        }
+
+        let limit = max_period.min(n / 2);
+        for period in 1..=limit {
+            let (px, py) = orbit[n - period];
+            let dx = zx - px;
+            let dy = zy - py;
+            if dx * dx + dy * dy < 1e-24 {
+                return Some(period);
+            }
+        }
+    }
+
+    None
+}
+
+fn iterate_critical_orbit(cx: &DBig, cy: &DBig, period: usize) -> (DBig, DBig) {
+    let two = dbig_i(2);
+    let mut zx = dbig_i(0);
+    let mut zy = dbig_i(0);
+
+    for _ in 0..period {
+        let zx_new = &zx * &zx - &zy * &zy + cx;
+        let zy_new = &two * &zx * &zy + cy;
+        zx = zx_new;
+        zy = zy_new;
+    }
+
+    (zx, zy)
+}
+
+fn newton_nucleus(
+    start_cx: &DBig,
+    start_cy: &DBig,
+    period: usize,
+    steps: usize,
+    max_distance: &DBig,
+) -> Option<(DBig, DBig)> {
+    if period == 0 {
+        return None;
+    }
+
+    let two = dbig_i(2);
+    let one = dbig_i(1);
+    let zero = dbig_i(0);
+    let max_distance_sq = max_distance * max_distance;
+    let validation_radius = max_distance / dbig_i(1000);
+    let validation_radius_sq = &validation_radius * &validation_radius;
+
+    let mut cx = start_cx.clone();
+    let mut cy = start_cy.clone();
+
+    for _ in 0..steps {
+        let mut zx = zero.clone();
+        let mut zy = zero.clone();
+        let mut dx = zero.clone();
+        let mut dy = zero.clone();
+
+        for _ in 0..period {
+            let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
+            let dy_new = &two * (&zx * &dy + &zy * &dx);
+            let zx_new = &zx * &zx - &zy * &zy + &cx;
+            let zy_new = &two * &zx * &zy + &cy;
+
+            zx = zx_new;
+            zy = zy_new;
+            dx = dx_new;
+            dy = dy_new;
+        }
+
+        let denom = &dx * &dx + &dy * &dy;
+        if denom == zero {
+            return None;
+        }
+
+        let step_x = (&zx * &dx + &zy * &dy) / &denom;
+        let step_y = (&zy * &dx - &zx * &dy) / &denom;
+        cx = &cx - &step_x;
+        cy = &cy - &step_y;
+
+        let distance_x = &cx - start_cx;
+        let distance_y = &cy - start_cy;
+        if &distance_x * &distance_x + &distance_y * &distance_y > max_distance_sq {
+            return None;
+        }
+
+        if &step_x * &step_x + &step_y * &step_y <= validation_radius_sq {
+            break;
+        }
+    }
+
+    let (zx, zy) = iterate_critical_orbit(&cx, &cy, period);
+    if &zx * &zx + &zy * &zy > validation_radius_sq {
+        return None;
+    }
+
+    for divisor in 1..period {
+        if period % divisor != 0 {
+            continue;
+        }
+        let (zx_div, zy_div) = iterate_critical_orbit(&cx, &cy, divisor);
+        if &zx_div * &zx_div + &zy_div * &zy_div <= validation_radius_sq {
+            return None;
+        }
+    }
+
+    Some((cx, cy))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -723,6 +888,20 @@ mod tests {
         assert_eq!(nav.bla_levels[5].skip, 32);
         assert_eq!(nav.bla_levels[6].skip, 64);
         assert!(nav.bla_result.iter().all(|step| step.radius_beta >= 0.0));
+    }
+
+    #[test]
+    fn newton_nucleus_finds_period_two_center() {
+        let start_x = DBig::from_str("-1.01").unwrap();
+        let start_y = DBig::from_str("0.001").unwrap();
+        let max_distance = DBig::from_str("0.1").unwrap();
+        let (cx, cy) = newton_nucleus(&start_x, &start_y, 2, 24, &max_distance)
+            .expect("period-2 nucleus should converge");
+
+        let cx_f64 = dbig_to_f64(&cx);
+        let cy_f64 = dbig_to_f64(&cy);
+        assert!((cx_f64 + 1.0).abs() < 1e-10, "cx={}", cx_f64);
+        assert!(cy_f64.abs() < 1e-10, "cy={}", cy_f64);
     }
 
     // test string_to_dbig_to_string
