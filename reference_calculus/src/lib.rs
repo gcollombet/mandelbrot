@@ -450,7 +450,7 @@ impl MandelbrotNavigator {
     fn compute_bla_reference_inner(&mut self, orbit_len: usize) -> BlaBufferInfo {
         const BLA_SKIP_LEVELS: usize = 0;
         const MIN_BLA_SKIP: usize = 1 << BLA_SKIP_LEVELS;
-        const MAX_BLA_SKIP: usize = 64;
+        const MAX_BLA_SKIP: usize = 16;
 
         if orbit_len <= 1 {
             self.bla_result.clear();
@@ -834,9 +834,9 @@ fn newton_nucleus(
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+  use super::*;
 
-    #[test]
+  #[test]
     fn construct_and_compute_orbit_simple() {
         // Construire le navigator avec des valeurs simples
         let mut nav = MandelbrotNavigator::new("0.0", "0.0", "1.0", 0.0);
@@ -872,13 +872,16 @@ mod tests {
     #[test]
     fn bla_reference_generation_builds_multiple_levels() {
         let mut nav = MandelbrotNavigator::new("-0.75", "0.1", "1.0", 0.0);
-        nav.compute_reference_orbit_ptr(64);
-        let bla = nav.compute_bla_reference_ptr(64);
+        nav.compute_reference_orbit_ptr(256);
+        let bla = nav.compute_bla_reference_ptr(256);
         assert!(
             bla.count >= 4,
             "expected culled BLA table to keep useful skips"
         );
-        assert_eq!(bla.level_count, 7, "expected levels for skips 1, 2, 4, 8, 16, 32, and 64");
+        assert_eq!(
+            bla.level_count, 9,
+            "expected levels for skips 1, 2, 4, 8, 16, 32, 64, 128, and 256"
+        );
         assert_ne!(bla.levels_ptr, 0);
         assert_eq!(nav.bla_levels[0].skip, 1);
         assert_eq!(nav.bla_levels[1].skip, 2);
@@ -887,6 +890,8 @@ mod tests {
         assert_eq!(nav.bla_levels[4].skip, 16);
         assert_eq!(nav.bla_levels[5].skip, 32);
         assert_eq!(nav.bla_levels[6].skip, 64);
+        assert_eq!(nav.bla_levels[7].skip, 128);
+        assert_eq!(nav.bla_levels[8].skip, 256);
         assert!(nav.bla_result.iter().all(|step| step.radius_beta >= 0.0));
     }
 
