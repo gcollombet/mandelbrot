@@ -127,14 +127,14 @@ function create1x1Texture(dev: GPUDevice, r: number, g: number, b: number, a: nu
  *
  * Width = canvas pixel width, height = canvas pixel height (64 CSS px * dpr).
  * Each column of ~(width/ITER_COUNT) pixels represents one iteration (1..100).
- * The vertical axis varies the derivative angle to show relief variation.
+ * The vertical axis varies the synthetic distance-vector angle to show relief variation.
  *
  * Layer 0: iter (1..ITER_COUNT)
  * Layer 1: sentinel (0 — not used)
  * Layer 2: zx — real(z), on escape circle
  * Layer 3: zy — imag(z), on escape circle
- * Layer 4: der_x — derivative real part (spiral angle varies with x, vertical variation with y)
- * Layer 5: der_y — derivative imag part
+ * Layer 4: de_x — distance-vector real part (spiral angle varies with x, vertical variation with y)
+ * Layer 5: de_y — distance-vector imag part
  * Layer 6: ref_i + fractional stripe phase
  * Layer 7: packed average orbit direction
  */
@@ -158,19 +158,19 @@ function buildSyntheticData(w: number, h: number, mu: number): Float32Array[] {
       const zx = escapeRadius * Math.cos(zAngle);
       const zy = escapeRadius * Math.sin(zAngle);
 
-      // Derivative: spiral angle varies continuously with x, vertical offset with y
+      // Distance vector: spiral angle varies continuously with x, vertical offset with y.
       // This produces a continuously varying normal for shading
-      const derAngle = (iterFloat / ITER_COUNT) * Math.PI * 2 + vFrac * Math.PI * 0.5;
-      const derMag = 1.0;
-      const derX = derMag * Math.cos(derAngle);
-      const derY = derMag * Math.sin(derAngle);
+      const deAngle = (iterFloat / ITER_COUNT) * Math.PI * 2 + vFrac * Math.PI * 0.5;
+      const deMag = 1.0;
+      const deX = deMag * Math.cos(deAngle);
+      const deY = deMag * Math.sin(deAngle);
 
       layers[0][idx] = iterFloat;  // iter
       layers[1][idx] = 1;          // genuine flag (1.0 = genuinely computed)
       layers[2][idx] = zx;
       layers[3][idx] = zy;
-      layers[4][idx] = derX;
-      layers[5][idx] = derY;
+      layers[4][idx] = deX;
+      layers[5][idx] = deY;
       const stripePhase = 0.5 + 0.5 * Math.sin(iterFloat * 0.2);
       const coherence = Math.abs(Math.sin(iterFloat * 0.065 + vFrac * Math.PI));
       const avgDirAngle = iterFloat * 0.08 + vFrac * Math.PI;

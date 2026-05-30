@@ -8,14 +8,14 @@
 //   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied from grid step)
 //   2 : z.x   (real part of current z, for resuming / coloring)
 //   3 : z.y   (imag part of current z, for resuming / coloring)
-//   4 : dz.x  (real part of derivative, for resuming / shading)
-//   5 : dz.y  (imag part of derivative, for resuming / shading)
+//   4 : escaped pixels: distance-vector.x, in-progress pixels: derivative.x
+//   5 : escaped pixels: distance-vector.y, in-progress pixels: derivative.y
 //   6 : ref_i + fractional stripe phase (reference orbit index for resuming perturbation)
 //   7 : packed average orbit direction, 12 bits per component
 //
-// mu (smooth fractional part) and angle_der (shading angle) are
-// recalculated in the color shader from z and der, saving two layers
-// of meaningful storage.
+// mu (smooth fractional part) is recalculated in the color shader from z.
+// Escaped pixels store a distance vector in layers 4/5 so relief/reflection
+// shading does not have to reconstruct DE from a derivative convention.
 //
 // Pixel state convention (iter-only):
 //   iter == -1                     : sentinel, needs computation
@@ -101,6 +101,21 @@ fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
+fn cdiv(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+  let denom = max(dot(b, b), 1e-30);
+  return vec2<f32>(
+    (a.x * b.x + a.y * b.y) / denom,
+    (a.y * b.x - a.x * b.y) / denom,
+  );
+}
+
+fn distance_vector(z: vec2<f32>, der: vec2<f32>) -> vec2<f32> {
+  let zLen = max(length(z), 1.000001);
+  let dC = cmul(z, der);
+  let numerator = 0.5 * dot(z, z) * log(zLen);
+  return cdiv(vec2<f32>(numerator, 0.0), dC);
+}
+
 fn getOrbit(index: i32) -> vec2<f32> {
   return vec2<f32>(
     mandelbrotOrbitPointSuite[index].zx,
@@ -108,7 +123,7 @@ fn getOrbit(index: i32) -> vec2<f32> {
   );
 }
 
-fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: ptr<function, vec2<f32>>, dc: vec2<f32>, dcMag: f32) -> i32 {
+fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: ptr<function, vec2<f32>>, dc: vec2<f32>, dcMag: f32, bailout: f32) -> i32 {
   var level = i32(mandelbrot.blaLevelCount) - 1;
   let max_iter = i32(mandelbrot.globalMaxIter);
   if (*ref_i <= 0) {
@@ -130,6 +145,13 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: p
         // linearized map is valid for the current perturbation before the skip.
         if (dot(*dz, *dz) <= radius * radius) {
           let candidate = cmul(a, *dz) + cmul(b, dc);
+          // Do not let a multi-iteration BLA block jump over the first escape.
+          // The color pass needs z/DE at the escape iteration, not after a block.
+          let candidateZ = getOrbit(*ref_i + skip) + candidate;
+          if (skip > 1 && dot(candidateZ, candidateZ) > bailout) {
+            level -= 1;
+            continue;
+          }
           *dz = candidate;
           *der = cmul(a, *der) + b;
           *ref_i += skip;
@@ -152,8 +174,8 @@ struct FragOut {
   @location(1) genuine:   vec4<f32>,  // .r = resolution step (1 = genuine, >= 2 = copied)
   @location(2) zx:        vec4<f32>,  // .r = z.x
   @location(3) zy:        vec4<f32>,  // .r = z.y
-  @location(4) dzx:       vec4<f32>,  // .r = derivative x
-  @location(5) dzy:       vec4<f32>,  // .r = derivative y
+  @location(4) dzx:       vec4<f32>,  // .r = escaped DE.x, or in-progress derivative x
+  @location(5) dzy:       vec4<f32>,  // .r = escaped DE.y, or in-progress derivative y
   @location(6) ref_i:     vec4<f32>,  // .r = integer ref_i + fractional stripe phase
   @location(7) avgDirection: vec4<f32>,  // .r = packed average orbit direction
 };
@@ -282,10 +304,12 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 
   if (useBla) {
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
+    var usedBla = false;
     while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
       var next_der = der;
-      let skipped = try_apply_bla(&ref_i, &dz, &der, dc, dcMag);
+      let skipped = try_apply_bla(&ref_i, &dz, &der, dc, dcMag, muLimit);
       if (skipped > 0) {
+        usedBla = true;
         z = getOrbit(ref_i) + dz;
         next_der = der;
         i += f32(skipped);
@@ -297,11 +321,12 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, f32(skipped));
         }
       } else {
-        z = getOrbit(ref_i);
-        dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
+        let zPrev = getOrbit(ref_i) + dz;
+        let refZ = getOrbit(ref_i);
+        dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
         ref_i += 1;
         z = getOrbit(ref_i) + dz;
-        next_der = cmul(der * 2.0, z);
+        next_der = 2.0 * cmul(zPrev, der) + vec2<f32>(1.0, 0.0);
         i += 1.0;
         if (trackOrbitMetrics) {
           let previousMetricCount = prev_iter + i - 1.0;
@@ -312,12 +337,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         }
       }
 
+      der = next_der;
       let dot_z = dot(z, z);
       if (dot_z > muLimit) {
         escaped = true;
         break;
       }
-      if (!IGNORE_EPSILON && dot(der, der) < epsilon) {
+      if (!usedBla && !IGNORE_EPSILON && dot(der, der) < epsilon) {
         inside = true;
         break;
       }
@@ -327,16 +353,15 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         dz = z;
         ref_i = 0;
       }
-
-      der = next_der;
     }
   } else {
     while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
-      z = getOrbit(ref_i);
-      dz = 2.0 * cmul(dz, z) + cmul(dz, dz) + dc;
+      let zPrev = getOrbit(ref_i) + dz;
+      let refZ = getOrbit(ref_i);
+      dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
       ref_i += 1;
       z = getOrbit(ref_i) + dz;
-      let next_der = cmul(der * 2.0, z);
+      let next_der = 2.0 * cmul(zPrev, der) + vec2<f32>(1.0, 0.0);
       i += 1.0;
       if (trackOrbitMetrics) {
         let previousMetricCount = prev_iter + i - 1.0;
@@ -346,6 +371,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
       }
 
+      der = next_der;
       let dot_z = dot(z, z);
       if (dot_z > muLimit) {
         escaped = true;
@@ -361,8 +387,6 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         dz = z;
         ref_i = 0;
       }
-
-      der = next_der;
     }
   }
 
@@ -388,14 +412,15 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     let smoothStripeEma = mix(previousStripeEma, stripeEma, escapeBlend);
     let smoothAvgDir = mix(previousAvgDir, avgDir, escapeBlend);
 
-    // Escaped: store final z and der for color-shader recomputation
-    // of mu (smooth frac) and angle_der (shading). No need for ref_i.
+    // Escaped: layers 4/5 switch from resumable derivative state to a
+    // Fraktaler-like distance vector consumed directly by the color shader.
+    let de = distance_vector(z, der);
     out.iter      = pack(total_iter);
     out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(der.x);
-    out.dzy       = pack(der.y);
+    out.dzx       = pack(de.x);
+    out.dzy       = pack(de.y);
     out.ref_i     = pack(ref_i_with_stripe(0.0, smoothStripeEma));
     out.avgDirection = pack(encode_avg_dir(smoothAvgDir));
     return out;
@@ -488,7 +513,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
   if (is_compute_request) {
     // Fresh computation (sentinel == -1).
-    return mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0);
+    return mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
   }
 
   if (needs_continuation) {
