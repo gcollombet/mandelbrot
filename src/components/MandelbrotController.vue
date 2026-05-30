@@ -21,6 +21,7 @@ const props = defineProps<{
   antialiasLevel?: number,
   palettePeriod?: number,
   paletteOffset?: number,
+  paletteMirror?: boolean,
   activateAnimate?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
@@ -367,6 +368,7 @@ onUnmounted(() => {
       :epsilon="props.epsilon"
       :antialiasLevel="props.antialiasLevel"
       :palettePeriod="props.palettePeriod"
+      :paletteMirror="props.paletteMirror"
       :colorStops="props.colorStops"
       :activateAnimate="props.activateAnimate"
       :paletteOffset="props.paletteOffset"

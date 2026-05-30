@@ -30,11 +30,13 @@ export interface PaletteRecord {
   colorStops: ColorStop[];
   thumbnail?: string;
   date?: string;
+  favorite?: boolean;
   textureName?: string;
   skyboxName?: string;
   interpolationMode?: InterpolationMode;
   palettePeriod?: number;
   paletteOffset?: number;
+  paletteMirror?: boolean;
   activateAnimate?: boolean;
   animationSpeed?: number;
   tessellationLevel?: number;

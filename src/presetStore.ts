@@ -34,6 +34,7 @@ export interface PresetMetadata {
   thumbnail: string;     // data-URL PNG
   date: string;          // ISO 8601
   scaleExponent: number; // floor(log10(1/scale)) — zoom indicator
+  favorite?: boolean;
 }
 
 /** Full record stored in IndexedDB. */
@@ -110,12 +111,13 @@ export async function getAllPresetEntries(): Promise<PresetMetadata[]> {
   const all: PresetRecord[] = await reqToPromise(store.getAll());
   await done;
   return all
-    .map(({ id, name, thumbnail, date, scaleExponent }) => ({
+    .map(({ id, name, thumbnail, date, scaleExponent, favorite }) => ({
       id,
       name,
       thumbnail,
       date,
       scaleExponent,
+      favorite,
     }))
     .sort((a, b) => b.date.localeCompare(a.date));
 }
@@ -138,6 +140,7 @@ export async function savePresetEntry(
   thumbnail: string,
   name?: string,
   date?: string,
+  favorite = false,
 ): Promise<number> {
   const record: Omit<PresetRecord, 'id'> & { id?: number } = {
     name: name ?? '',
@@ -145,6 +148,7 @@ export async function savePresetEntry(
     thumbnail,
     date: date ?? new Date().toISOString(),
     scaleExponent: computeScaleExponent(value.scale),
+    favorite,
   };
   const { store, done } = await tx('readwrite');
   const id = await reqToPromise(store.add(record) as IDBRequest<number>);

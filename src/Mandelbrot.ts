@@ -15,6 +15,7 @@ export interface MandelbrotParams {
     antialiasLevel: number;
     palettePeriod: number;
     paletteOffset: number;
+    paletteMirror: boolean;
     dprMultiplier: number;
     targetFps: number;
     gpuLoadMultiplier: number;

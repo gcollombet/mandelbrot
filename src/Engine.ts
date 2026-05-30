@@ -13,7 +13,7 @@ import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import bronzeUrl from './assets/bronze.webp'
-import skyboxUrl from './assets/skybox.png'
+import skyboxUrl from './assets/skybox.webp'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -32,6 +32,7 @@ const ZOOM_MIN_BRUSH_STEP = 2
 // to target TARGET_FRAME_MS of GPU time.
 const MIN_BATCH_SIZE = 100
 const MAX_BATCH_SIZE = 10_000
+const BLA_LINEARIZATION_EPSILON = 1e-6
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
 // each frame) is paused when the batch controller is at its minimum AND
@@ -123,6 +124,7 @@ export type RenderOptions = {
     antialiasLevel: number,
     palettePeriod: number,
     paletteOffset: number,
+    paletteMirror: boolean,
     colorStops: ColorStop[],
     interpolationMode: InterpolationMode,
     activateAnimate: boolean,
@@ -272,7 +274,7 @@ export class Engine {
     currentBlaLevelCount = 0
     mandelbrotReference = new Float32Array(1000000)
     private approximationMode: ApproximationMode = 'perturbation'
-    private blaEpsilon = 1e-6
+    private blaEpsilon = BLA_LINEARIZATION_EPSILON
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
 
@@ -440,7 +442,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 32, // 31 floats padded to 16-byte alignment (128 bytes)
+            size: 4 * 32, // 32 floats padded to 16-byte alignment (128 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1240,6 +1242,7 @@ export class Engine {
             Math.cos(renderOptions.lightAngle) / lightDirLen, // 28: lightDirX
             Math.sin(renderOptions.lightAngle) / lightDirLen, // 29: lightDirY
             1.85 / lightDirLen,                 // 30: lightDirZ
+            renderOptions.paletteMirror ? 1 : 0, // 31: paletteMirror
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

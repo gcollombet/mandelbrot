@@ -5,7 +5,7 @@ import type { InterpolationMode } from '../Mandelbrot.ts';
 import { Palette } from '../Palette.ts';
 import colorShader from '../assets/color.wgsl?raw';
 import bronzeUrl from '../assets/bronze.webp';
-import goldUrl from '../assets/gold.jpg';
+import goldUrl from '../assets/gold.webp';
 
 // ── Float32 → Float16 (copied from Engine.ts) ──
 const _f32 = new Float32Array(1);
@@ -335,7 +335,7 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (31 floats, padded to 128 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (32 floats, padded to 128 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
     size: 4 * 32,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -377,6 +377,7 @@ async function init() {
     Math.cos(previewLightAngle) / previewLightLen, // lightDirX
     Math.sin(previewLightAngle) / previewLightLen, // lightDirY
     1.85 / previewLightLen, // lightDirZ
+    0, // paletteMirror
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 

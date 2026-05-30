@@ -53,6 +53,7 @@ function onPalettePick(data: IterationData, _clientX: number, _clientY: number) 
   // Always use smooth=true for picking — per-stop smoothness is baked in the texture
   const result = computePalettePhase(
     data, p.mu, p.palettePeriod, p.paletteOffset, true,
+    p.paletteMirror,
   );
   if (result.isInSet) return; // pas de curseur pour les points dans l'ensemble
   const stops = p.colorStops;
@@ -158,6 +159,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   angle: 0.0,
   palettePeriod: 7.37,
   paletteOffset: 0.0,
+  paletteMirror: false,
   shadingLevel: 0.3,
   lightAngle: 3.927,
   antialiasLevel: 1,
@@ -241,6 +243,12 @@ let activeTileTextureUrl: string | null = null;
 let activeSkyboxTextureUrl: string | null = null;
 let textureApplyGeneration = 0;
 
+function revokeObjectUrl(url: string | null) {
+  if (url?.startsWith('blob:')) {
+    URL.revokeObjectURL(url);
+  }
+}
+
 function getTextureEntries(): Promise<TextureMetadata[]> {
   textureEntriesPromise ??= ensureTextureLibrary();
   return textureEntriesPromise;
@@ -262,16 +270,16 @@ async function applyTexture(
   const objectUrl = await storedTextureObjectUrl(name);
   if (!objectUrl) return;
   if (generation !== textureApplyGeneration) {
-    URL.revokeObjectURL(objectUrl);
+    revokeObjectUrl(objectUrl);
     return;
   }
 
   if (kind === 'tile') {
-    if (activeTileTextureUrl) URL.revokeObjectURL(activeTileTextureUrl);
+    revokeObjectUrl(activeTileTextureUrl);
     activeTileTextureUrl = objectUrl;
     await engine.updateTileTexture(objectUrl, sourceKey);
   } else {
-    if (activeSkyboxTextureUrl) URL.revokeObjectURL(activeSkyboxTextureUrl);
+    revokeObjectUrl(activeSkyboxTextureUrl);
     activeSkyboxTextureUrl = objectUrl;
     await engine.updateSkyboxTexture(objectUrl, sourceKey);
   }
@@ -306,7 +314,6 @@ function applyApproximationToEngine() {
   if (!engine) return;
   const mode: ApproximationMode = mandelbrotParams.value.approximationMode === 'bla' ? 'bla' : 'perturbation';
   engine.setApproximationMode(mode);
-  engine.setBlaEpsilon(mandelbrotParams.value.epsilon ?? 1e-6);
 }
 
 // Restore parametres a partir du localStorage puis surveille et persiste a chaque changement
@@ -336,8 +343,8 @@ onUnmounted(() => {
   window.removeEventListener('touchstart', handleNavTouchstart);
   window.removeEventListener('touchend', handleNavTouchend);
   window.removeEventListener('mousemove', handleMouseMove);
-  if (activeTileTextureUrl) URL.revokeObjectURL(activeTileTextureUrl);
-  if (activeSkyboxTextureUrl) URL.revokeObjectURL(activeSkyboxTextureUrl);
+  revokeObjectUrl(activeTileTextureUrl);
+  revokeObjectUrl(activeSkyboxTextureUrl);
   if (navigationTimeout !== null) clearTimeout(navigationTimeout);
   if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
 });
@@ -351,7 +358,7 @@ watch(
 );
 
 watch(
-  [() => mandelbrotParams.value.approximationMode, () => mandelbrotParams.value.epsilon] as const,
+  () => mandelbrotParams.value.approximationMode,
   () => { applyApproximationToEngine(); },
 );
 
@@ -700,6 +707,7 @@ const shortcutLabels = computed(() => {
       :epsilon="mandelbrotParams.epsilon"
       :palettePeriod="mandelbrotParams.palettePeriod"
       :paletteOffset="mandelbrotParams.paletteOffset"
+      :paletteMirror="mandelbrotParams.paletteMirror"
       :colorStops="mandelbrotParams.colorStops"
       :activateAnimate="mandelbrotParams.activateAnimate"
       :dprMultiplier="mandelbrotParams.dprMultiplier"

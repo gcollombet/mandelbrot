@@ -8,30 +8,20 @@ import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
 import defaultPresetsJson from '../assets/default-presets.json';
 import defaultPalettesJson from '../assets/default-palettes.json';
-import coloredTilesUrl from '../assets/colored_tiles.webp';
-import goldUrl from '../assets/gold.jpg';
-import zelligeUrl from '../assets/zellige.webp';
-import bronzeUrl from '../assets/bronze.webp';
-import mercureUrl from '../assets/mercure.webp';
-import honeyUrl from '../assets/honey.webp';
-import waterUrl from '../assets/water.png';
-import woodUrl from '../assets/wood.png';
-import marbleUrl from '../assets/marble.png';
-import satinUrl from '../assets/satin.png';
-import dentelleUrl from '../assets/dentelle.png';
-import bismuteUrl from '../assets/bismute.png';
-import graniteUrl from '../assets/granite.png';
-import lavaUrl from '../assets/lava.png';
-import skyboxUrl from '../assets/skybox.png';
 import type {TextureMetadata} from '../textureStore';
 import {
   deleteTextureEntry,
-  getAllTextureEntries,
-  getTextureBlob,
-  migrateFromLocalStorage,
   renameTextureEntry,
   saveTextureEntry,
 } from '../textureStore';
+import {
+  BUILT_IN_TEXTURE_NAMES,
+  ensureTextureLibrary,
+  SKYBOX_SELECTED_KEY,
+  storedTextureObjectUrl,
+  TEXTURE_SELECTED_KEY,
+  textureSourceKey,
+} from '../textureLibrary';
 import type {PresetMetadata, PresetRecord} from '../presetStore';
 import {
   computeScaleExponent,
@@ -42,6 +32,7 @@ import {
   migratePalettePeriod,
   migratePresetsFromLocalStorage,
   savePresetEntry,
+  updatePresetEntry,
 } from '../presetStore';
 import type {PaletteRecord} from '../paletteStore';
 import {
@@ -53,26 +44,6 @@ import {
 } from '../paletteStore';
 
 import type {Engine} from '../Engine.ts';
-
-/** Built-in textures: single source of truth for bootstrap, deletion protection, and UI. */
-const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string }> = [
-  { name: 'Colored Tiles', url: coloredTilesUrl },
-  { name: 'Gold', url: goldUrl },
-  { name: 'Zellige', url: zelligeUrl },
-  { name: 'Bronze', url: bronzeUrl },
-  { name: 'Mercure', url: mercureUrl },
-  { name: 'Honey', url: honeyUrl },
-  { name: 'Water', url: waterUrl },
-  { name: 'Wood', url: woodUrl },
-  { name: 'Marble', url: marbleUrl },
-  { name: 'Satin', url: satinUrl },
-  { name: 'Dentelle', url: dentelleUrl },
-  { name: 'Bismute', url: bismuteUrl },
-  { name: 'Granite', url: graniteUrl },
-  { name: 'Lava', url: lavaUrl },
-  { name: 'Skybox', url: skyboxUrl },
-] as const;
-const BUILT_IN_TEXTURE_NAMES: ReadonlySet<string> = new Set(BUILT_IN_TEXTURES.map(t => t.name));
 const props = defineProps<{
   engine: Engine | null;
   suspendShortcuts?: (suspend: boolean) => void;
@@ -94,6 +65,7 @@ const model =  defineModel<MandelbrotParams>({
     colorStops: [],
      palettePeriod: 256,
     paletteOffset: 0,
+    paletteMirror: false,
     antialiasLevel: 1,
     tessellationLevel: 2,
     shadingLevel: 1,
@@ -267,6 +239,39 @@ const showNavPresetDropdown = ref(false);
 
 const currentNavPresetMeta = computed(() => presets.value.find(p => p.id === selectedNavPreset.value));
 const currentNavPresetThumbnail = computed(() => currentNavPresetMeta.value?.thumbnail);
+const favoritePresets = computed(() => presets.value.filter(p => p.favorite));
+const favoritePalettes = computed(() => palettes.value.filter(p => p.favorite));
+const FAVORITE_FILTER_STORAGE_KEY = 'mandelbrot_favorite_filters';
+
+function loadFavoriteFilterState(): Record<string, boolean> {
+  try {
+    return JSON.parse(localStorage.getItem(FAVORITE_FILTER_STORAGE_KEY) ?? '{}') as Record<string, boolean>;
+  } catch {
+    return {};
+  }
+}
+
+const favoriteFilterState = loadFavoriteFilterState();
+const showOnlyFavoriteNavigation = ref(favoriteFilterState.navigation ?? false);
+const showOnlyFavoritePresets = ref(favoriteFilterState.presets ?? false);
+const showOnlyFavoritePalettePresets = ref(favoriteFilterState.palettePresets ?? false);
+const showOnlyFavoritePalettes = ref(favoriteFilterState.palettes ?? false);
+const visibleNavPresets = computed(() => showOnlyFavoriteNavigation.value ? favoritePresets.value : presets.value);
+const visiblePresets = computed(() => showOnlyFavoritePresets.value ? favoritePresets.value : presets.value);
+const visiblePalettePresets = computed(() => showOnlyFavoritePalettePresets.value ? favoritePresets.value : presets.value);
+const visiblePalettes = computed(() => showOnlyFavoritePalettes.value ? favoritePalettes.value : palettes.value);
+
+watch(
+  [showOnlyFavoriteNavigation, showOnlyFavoritePresets, showOnlyFavoritePalettePresets, showOnlyFavoritePalettes],
+  ([navigation, presetsOnly, palettePresets, palettesOnly]) => {
+    localStorage.setItem(FAVORITE_FILTER_STORAGE_KEY, JSON.stringify({
+      navigation,
+      presets: presetsOnly,
+      palettePresets,
+      palettes: palettesOnly,
+    }));
+  },
+);
 
 async function selectPresetLocation(id: number) {
   const record = await getCachedPreset(id);
@@ -321,6 +326,7 @@ async function savePreset() {
     thumbnail,
     date: now,
     scaleExponent: computeScaleExponent(savedValue.scale),
+    favorite: false,
   });
   presetName.value = '';
 }
@@ -354,6 +360,7 @@ async function quickSnapshot() {
     thumbnail,
     date: now,
     scaleExponent: computeScaleExponent(savedValue.scale),
+    favorite: false,
   });
 }
 
@@ -416,11 +423,13 @@ async function savePalette() {
     colorStops: structuredClone(toRaw(model.value.colorStops)),
     thumbnail,
     date: now,
+    favorite: palettes.value.find(item => item.name === paletteName.value.trim())?.favorite ?? false,
     textureName: selectedTexture.value,
     skyboxName: selectedSkyboxTexture.value,
     interpolationMode: model.value.interpolationMode,
     palettePeriod: model.value.palettePeriod,
     paletteOffset: model.value.paletteOffset,
+    paletteMirror: model.value.paletteMirror,
     activateAnimate: model.value.activateAnimate,
     animationSpeed: model.value.animationSpeed,
     tessellationLevel: model.value.tessellationLevel,
@@ -464,6 +473,7 @@ function selectPalette(name: string) {
     if (palette.interpolationMode) model.value.interpolationMode = palette.interpolationMode;
     if (palette.palettePeriod != null) model.value.palettePeriod = palette.palettePeriod;
     if (palette.paletteOffset != null) model.value.paletteOffset = palette.paletteOffset;
+    model.value.paletteMirror = palette.paletteMirror ?? false;
     applyPaletteLookFields(palette);
     // Restore texture if present
     if (palette.textureName) {
@@ -495,6 +505,7 @@ async function selectPaletteFromPreset(id: number) {
     model.value.interpolationMode = record.value.interpolationMode;
     model.value.palettePeriod = record.value.palettePeriod;
     model.value.paletteOffset = record.value.paletteOffset;
+    model.value.paletteMirror = record.value.paletteMirror ?? false;
     applyPaletteLookFields(record.value);
     // Restore textures if present
     if (record.value.textureName) {
@@ -523,6 +534,48 @@ async function deletePalette() {
     selectedPalette.value = '';
     paletteName.value = '';
   }
+}
+
+async function togglePresetFavorite(id: number): Promise<void> {
+  const record = await getCachedPreset(id);
+  if (!record) return;
+  record.favorite = !record.favorite;
+  await updatePresetEntry(record);
+  presetCache.set(id, record);
+  presets.value = await getAllPresetEntries();
+}
+
+async function togglePaletteFavorite(name: string): Promise<void> {
+  const palette = palettes.value.find(item => item.name === name);
+  if (!palette) return;
+  const updated = { ...palette, favorite: !palette.favorite };
+  await savePaletteEntry(updated);
+  palettes.value = await getAllPaletteEntries();
+}
+
+async function deleteAllPresets(): Promise<void> {
+  if (presets.value.length === 0) return;
+  if (!window.confirm(`Delete all ${presets.value.length} presets? This cannot be undone.`)) return;
+  for (const preset of presets.value) {
+    await deletePresetEntry(preset.id);
+  }
+  presetCache.clear();
+  presets.value = await getAllPresetEntries();
+  selectedPreset.value = null;
+  selectedNavPreset.value = null;
+  selectedPalettePreset.value = null;
+  presetName.value = '';
+}
+
+async function deleteAllPalettes(): Promise<void> {
+  if (palettes.value.length === 0) return;
+  if (!window.confirm(`Delete all ${palettes.value.length} palettes? This cannot be undone.`)) return;
+  for (const palette of palettes.value) {
+    await deletePaletteEntry(palette.name);
+  }
+  palettes.value = await getAllPaletteEntries();
+  selectedPalette.value = '';
+  paletteName.value = '';
 }
 
 async function selectPreset(id: number) {
@@ -719,6 +772,7 @@ async function exportPresets() {
     value: r.value,
     thumbnail: r.thumbnail,
     date: r.date,
+    favorite: r.favorite ?? false,
   }));
   const data = JSON.stringify(exportData, null, 2);
   const blob = new Blob([data], { type: 'application/json' });
@@ -750,7 +804,24 @@ async function exportSelectedPreset() {
     value: record.value,
     thumbnail: record.thumbnail,
     date: record.date,
+    favorite: record.favorite ?? false,
   });
+}
+
+async function exportFavoritePresets() {
+  const allRecords: PresetRecord[] = [];
+  for (const meta of favoritePresets.value) {
+    const record = await getCachedPreset(meta.id);
+    if (record) allRecords.push(record);
+  }
+  const exportData = allRecords.map(r => ({
+    name: r.name,
+    value: r.value,
+    thumbnail: r.thumbnail,
+    date: r.date,
+    favorite: r.favorite ?? false,
+  }));
+  downloadJsonFile('mandelbrot-favorite-presets.json', exportData);
 }
 
 async function exportSelectedNavigationPreset() {
@@ -760,6 +831,7 @@ async function exportSelectedNavigationPreset() {
   downloadJsonFile(`mandelbrot-navigation-${record.name || record.id}.json`, {
     name: record.name,
     date: record.date,
+    favorite: record.favorite ?? false,
     value: {
       cx: record.value.cx,
       cy: record.value.cy,
@@ -769,36 +841,84 @@ async function exportSelectedNavigationPreset() {
   });
 }
 
+async function exportFavoriteNavigationPresets() {
+  const exportData = [];
+  for (const meta of favoritePresets.value) {
+    const record = await getCachedPreset(meta.id);
+    if (!record) continue;
+    exportData.push({
+      name: record.name,
+      date: record.date,
+      favorite: record.favorite ?? false,
+      value: {
+        cx: record.value.cx,
+        cy: record.value.cy,
+        scale: record.value.scale,
+        angle: record.value.angle,
+      },
+    });
+  }
+  downloadJsonFile('mandelbrot-favorite-navigation.json', exportData);
+}
+
 const presetFileInput = ref<HTMLInputElement | null>(null);
 function triggerImportPresets() {
   presetFileInput.value?.click();
 }
-function importPresets(event: Event) {
+
+function readFileAsText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result ?? ''));
+    reader.onerror = () => reject(reader.error ?? new Error(`Failed to read ${file.name}`));
+    reader.readAsText(file);
+  });
+}
+
+async function readJsonFile(file: File): Promise<unknown> {
+  return JSON.parse(await readFileAsText(file));
+}
+
+async function importPresets(event: Event) {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = async () => {
+  const files = Array.from(input.files ?? []);
+  if (files.length === 0) return;
+
+  let importedCount = 0;
+  for (const file of files) {
     try {
-      const imported = JSON.parse(reader.result as string);
-      if (Array.isArray(imported)) {
-        for (const preset of imported) {
-          if (!preset.value) continue;
-          await savePresetEntry(
-            preset.value,
-            preset.thumbnail ?? '',
-            preset.name ?? '',
-            preset.date,
-          );
-        }
-        presets.value = await getAllPresetEntries();
+      const imported = await readJsonFile(file);
+      const records = Array.isArray(imported) ? imported : [imported];
+      for (const preset of records) {
+        if (!preset || typeof preset !== 'object' || !('value' in preset)) continue;
+        const record = preset as {
+          value: MandelbrotParams;
+          thumbnail?: string;
+          name?: string;
+          date?: string;
+          favorite?: boolean;
+        };
+        await savePresetEntry(
+          record.value,
+          record.thumbnail ?? '',
+          record.name ?? '',
+          record.date,
+          record.favorite ?? false,
+        );
+        importedCount += 1;
       }
-    } catch {
-      window.alert('Invalid file format.');
+    } catch (error) {
+      console.warn(`[Settings] Skipping preset import file "${file.name}"`, error);
     }
-  };
-  reader.readAsText(file);
-  // Reset pour pouvoir réimporter le même fichier
+  }
+
+  if (importedCount > 0) {
+    presets.value = await getAllPresetEntries();
+  } else {
+    window.alert('Invalid file format.');
+  }
+
+  // Reset pour pouvoir réimporter les mêmes fichiers
   input.value = '';
 }
 
@@ -822,30 +942,40 @@ function exportSelectedPalette() {
   downloadJsonFile(`mandelbrot-palette-${palette.name}.json`, palette);
 }
 
+function exportFavoritePalettes() {
+  downloadJsonFile('mandelbrot-favorite-palettes.json', favoritePalettes.value);
+}
+
 const paletteFileInput = ref<HTMLInputElement | null>(null);
 function triggerImportPalettes() {
   paletteFileInput.value?.click();
 }
-function importPalettes(event: Event) {
+async function importPalettes(event: Event) {
   const input = event.target as HTMLInputElement;
-  const file = input.files?.[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = async () => {
+  const files = Array.from(input.files ?? []);
+  if (files.length === 0) return;
+
+  let importedCount = 0;
+  for (const file of files) {
     try {
-      const imported = JSON.parse(reader.result as string);
-      if (Array.isArray(imported)) {
-        for (const palette of imported) {
-          if (!palette.name || !palette.colorStops) continue;
-          await savePaletteEntry(palette as PaletteRecord);
-        }
-        palettes.value = await getAllPaletteEntries();
+      const imported = await readJsonFile(file);
+      const records = Array.isArray(imported) ? imported : [imported];
+      for (const palette of records) {
+        if (!palette || typeof palette !== 'object' || !('name' in palette) || !('colorStops' in palette)) continue;
+        await savePaletteEntry(palette as PaletteRecord);
+        importedCount += 1;
       }
-    } catch {
-      window.alert('Invalid file format.');
+    } catch (error) {
+      console.warn(`[Settings] Skipping palette import file "${file.name}"`, error);
     }
-  };
-  reader.readAsText(file);
+  }
+
+  if (importedCount > 0) {
+    palettes.value = await getAllPaletteEntries();
+  } else {
+    window.alert('Invalid file format.');
+  }
+
   input.value = '';
 }
 
@@ -1007,8 +1137,6 @@ function clearPalette() {
 // =====================================================
 // Image texture library
 // =====================================================
-const TEXTURE_SELECTED_KEY = 'mandelbrot_selected_texture';
-const SKYBOX_SELECTED_KEY = 'mandelbrot_selected_skybox';
 const MAX_TEXTURE_SIZE = 4096;
 
 const textureName = ref('');
@@ -1031,14 +1159,18 @@ const activeSkyboxBlobUrl = ref<string | null>(null);
 
 function revokeActiveBlobUrl() {
   if (activeBlobUrl.value) {
-    URL.revokeObjectURL(activeBlobUrl.value);
+    if (activeBlobUrl.value.startsWith('blob:')) {
+      URL.revokeObjectURL(activeBlobUrl.value);
+    }
     activeBlobUrl.value = null;
   }
 }
 
 function revokeActiveSkyboxBlobUrl() {
   if (activeSkyboxBlobUrl.value) {
-    URL.revokeObjectURL(activeSkyboxBlobUrl.value);
+    if (activeSkyboxBlobUrl.value.startsWith('blob:')) {
+      URL.revokeObjectURL(activeSkyboxBlobUrl.value);
+    }
     activeSkyboxBlobUrl.value = null;
   }
 }
@@ -1064,33 +1196,9 @@ function generateThumbnailFromUrl(url: string, maxWidth = 256): Promise<string> 
   });
 }
 
-/** Fetch an asset URL as a Blob */
-async function fetchAssetBlob(url: string): Promise<Blob> {
-  const resp = await fetch(url);
-  return resp.blob();
-}
-
-/** Ensure a built-in default texture exists in the DB; add it if missing. */
-async function ensureDefaultTexture(name: string, assetUrl: string): Promise<void> {
-  const existing = await getTextureBlob(name);
-  if (existing) return;
-  const blob = await fetchAssetBlob(assetUrl);
-  const thumbUrl = URL.createObjectURL(blob);
-  const thumbnail = await generateThumbnailFromUrl(thumbUrl);
-  URL.revokeObjectURL(thumbUrl);
-  await saveTextureEntry(name, blob, thumbnail);
-}
-
 async function loadTextures() {
   suppressTextureApply = true;
-  // 1. Migrate legacy localStorage data (if any)
-  await migrateFromLocalStorage();
-
-  // 2. Bootstrap built-in default textures in parallel (added if missing)
-  await Promise.all(BUILT_IN_TEXTURES.map(t => ensureDefaultTexture(t.name, t.url)));
-
-  // 3. Load metadata list
-  textures.value = await getAllTextureEntries();
+  textures.value = await ensureTextureLibrary();
 
   // 4. Restore persisted selections:
   //    Priority: model value (from parent/preset) > localStorage > built-in default
@@ -1118,28 +1226,26 @@ async function loadTextures() {
 }
 
 async function applyTextureToEngine(name: string, engine: import('../Engine').Engine) {
-  const textureMeta = textures.value.find(t => t.name === name);
-  const sourceKey = `${name}:${textureMeta?.date ?? ''}`;
+  const sourceKey = textureSourceKey(name, textures.value);
   const engineCurrent = engine.isTileTextureSourceCurrent(sourceKey);
   if (engineCurrent && activeBlobUrl.value) return;
-  const blob = await getTextureBlob(name);
-  if (!blob) return;
+  const objectUrl = await storedTextureObjectUrl(name);
+  if (!objectUrl) return;
   revokeActiveBlobUrl();
-  activeBlobUrl.value = URL.createObjectURL(blob);
+  activeBlobUrl.value = objectUrl;
   if (!engineCurrent) {
     await engine.updateTileTexture(activeBlobUrl.value, sourceKey);
   }
 }
 
 async function applySkyboxToEngine(name: string, engine: import('../Engine').Engine) {
-  const textureMeta = textures.value.find(t => t.name === name);
-  const sourceKey = `${name}:${textureMeta?.date ?? ''}`;
+  const sourceKey = textureSourceKey(name, textures.value);
   const engineCurrent = engine.isSkyboxTextureSourceCurrent(sourceKey);
   if (engineCurrent && activeSkyboxBlobUrl.value) return;
-  const blob = await getTextureBlob(name);
-  if (!blob) return;
+  const objectUrl = await storedTextureObjectUrl(name);
+  if (!objectUrl) return;
   revokeActiveSkyboxBlobUrl();
-  activeSkyboxBlobUrl.value = URL.createObjectURL(blob);
+  activeSkyboxBlobUrl.value = objectUrl;
   if (!engineCurrent) {
     await engine.updateSkyboxTexture(activeSkyboxBlobUrl.value, sourceKey);
   }
@@ -1300,7 +1406,7 @@ async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
     await saveTextureEntry(name, file, thumbnail);
 
     // Refresh metadata list
-    textures.value = await getAllTextureEntries();
+    textures.value = await ensureTextureLibrary();
 
     // Auto-select the newly imported texture for the requested target
     if (target === 'skybox') {
@@ -1341,7 +1447,7 @@ async function renameAndSaveTexture() {
     }
     await renameTextureEntry(current.name, name);
     // Refresh metadata list
-    textures.value = await getAllTextureEntries();
+    textures.value = await ensureTextureLibrary();
     selectedTexture.value = name;
     localStorage.setItem(TEXTURE_SELECTED_KEY, name);
   }
@@ -1362,7 +1468,7 @@ async function renameAndSaveSkyboxTexture() {
       return;
     }
     await renameTextureEntry(current.name, name);
-    textures.value = await getAllTextureEntries();
+    textures.value = await ensureTextureLibrary();
     selectedSkyboxTexture.value = name;
     model.value.skyboxName = name;
     localStorage.setItem(SKYBOX_SELECTED_KEY, name);
@@ -1398,6 +1504,16 @@ async function renameAndSaveSkyboxTexture() {
       <div class="mb-3">
         <label class="label">Load a location</label>
         <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applies only the location (Cx, Cy, scale, angle) from a preset.</p>
+        <button
+          class="button is-small favorite-filter"
+          :class="{ 'is-active': showOnlyFavoriteNavigation }"
+          type="button"
+          :aria-pressed="showOnlyFavoriteNavigation"
+          @click="showOnlyFavoriteNavigation = !showOnlyFavoriteNavigation"
+        >
+          <span class="favorite-filter-heart">♥</span>
+          <span>Favorites</span>
+        </button>
         <div class="dropdown" :class="{ 'is-active': showNavPresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showNavPresetDropdown = !showNavPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-nav-presets" type="button">
@@ -1412,10 +1528,20 @@ async function renameAndSaveSkyboxTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-nav-presets" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in presets" :key="preset.id" class="dropdown-item"
+              <a v-for="preset in visibleNavPresets" :key="preset.id" class="dropdown-item favorite-row"
                 @click.prevent="selectNavPresetFromDropdown(preset)"
                 :class="{ 'is-active': selectedNavPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
+                <button
+                  class="favorite-button"
+                  :class="{ 'is-favorite': preset.favorite }"
+                  type="button"
+                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!preset.favorite"
+                  @click.stop.prevent="togglePresetFavorite(preset.id)"
+                >
+                  <span class="favorite-heart" aria-hidden="true">♥</span>
+                </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
@@ -1431,8 +1557,18 @@ async function renameAndSaveSkyboxTexture() {
         </div>
         <div class="field is-grouped" style="margin-top:0.65em;">
           <div class="control">
+            <button class="button is-warning is-small" @click="triggerImportPresets">
+              Import
+            </button>
+          </div>
+          <div class="control">
             <button class="button is-info is-small is-light" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset">
               Export Selected Navigation
+            </button>
+          </div>
+          <div class="control">
+            <button class="button is-info is-small" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0">
+              Export Favorites
             </button>
           </div>
         </div>
@@ -1443,6 +1579,16 @@ async function renameAndSaveSkyboxTexture() {
     <div v-else-if="activeTab === 'presets'">
       <div class="mb-3">
         <label class="label">Saved presets</label>
+        <button
+          class="button is-small favorite-filter"
+          :class="{ 'is-active': showOnlyFavoritePresets }"
+          type="button"
+          :aria-pressed="showOnlyFavoritePresets"
+          @click="showOnlyFavoritePresets = !showOnlyFavoritePresets"
+        >
+          <span class="favorite-filter-heart">♥</span>
+          <span>Favorites</span>
+        </button>
         <!-- Dropdown enrichie Bulma -->
         <div class="dropdown" :class="{ 'is-active': showPresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
@@ -1458,10 +1604,20 @@ async function renameAndSaveSkyboxTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-presets" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in presets" :key="preset.id" class="dropdown-item"
+              <a v-for="preset in visiblePresets" :key="preset.id" class="dropdown-item favorite-row"
                 @click.prevent="selectPresetFromDropdown(preset)"
                 :class="{ 'is-active': selectedPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
+                <button
+                  class="favorite-button"
+                  :class="{ 'is-favorite': preset.favorite }"
+                  type="button"
+                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!preset.favorite"
+                  @click.stop.prevent="togglePresetFavorite(preset.id)"
+                >
+                  <span class="favorite-heart" aria-hidden="true">♥</span>
+                </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
@@ -1505,10 +1661,20 @@ async function renameAndSaveSkyboxTexture() {
             </button>
           </div>
           <div class="control">
+            <button class="button is-info is-small" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0">
+              Export Favorites
+            </button>
+          </div>
+          <div class="control">
             <button class="button is-warning is-small" @click="triggerImportPresets">
               Import
             </button>
-            <input ref="presetFileInput" type="file" accept=".json" style="display:none;" @change="importPresets" />
+            <input ref="presetFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPresets" />
+          </div>
+          <div class="control">
+            <button class="button is-danger is-small is-light" @click="deleteAllPresets" :disabled="presets.length === 0">
+              Delete All
+            </button>
           </div>
         </div>
       </div>
@@ -1530,6 +1696,21 @@ async function renameAndSaveSkyboxTexture() {
           </span>
           <span>Drift</span>
           <span class="palette-toggle-state">{{ model.activateAnimate ? 'On' : 'Off' }}</span>
+        </button>
+
+        <button
+          class="button is-small palette-animate-toggle"
+          :class="{ 'is-active': model.paletteMirror }"
+          type="button"
+          :aria-pressed="model.paletteMirror"
+          title="Mirror palette repetition"
+          @click="model.paletteMirror = !model.paletteMirror"
+        >
+          <span class="icon is-small">
+            <i class="fas fa-arrows-left-right" aria-hidden="true"></i>
+          </span>
+          <span>Mirror</span>
+          <span class="palette-toggle-state">{{ model.paletteMirror ? 'On' : 'Off' }}</span>
         </button>
 
         <div class="palette-compact-control">
@@ -1791,6 +1972,16 @@ async function renameAndSaveSkyboxTexture() {
       <div class="mb-3">
         <label class="palette-library-label">Load From Preset</label>
         <p class="palette-library-hint">Applies colors, interpolation, cycle mapping, and material look from a preset.</p>
+        <button
+          class="button is-small favorite-filter"
+          :class="{ 'is-active': showOnlyFavoritePalettePresets }"
+          type="button"
+          :aria-pressed="showOnlyFavoritePalettePresets"
+          @click="showOnlyFavoritePalettePresets = !showOnlyFavoritePalettePresets"
+        >
+          <span class="favorite-filter-heart">♥</span>
+          <span>Favorites</span>
+        </button>
         <div class="dropdown" :class="{ 'is-active': showPalettePresetDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
             <button class="button is-fullwidth" @click="showPalettePresetDropdown = !showPalettePresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palette-presets" type="button">
@@ -1805,10 +1996,20 @@ async function renameAndSaveSkyboxTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-palette-presets" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in presets" :key="preset.id" class="dropdown-item"
+              <a v-for="preset in visiblePalettePresets" :key="preset.id" class="dropdown-item favorite-row"
                 @click.prevent="selectPalettePresetFromDropdown(preset)"
                 :class="{ 'is-active': selectedPalettePreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
+                <button
+                  class="favorite-button"
+                  :class="{ 'is-favorite': preset.favorite }"
+                  type="button"
+                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!preset.favorite"
+                  @click.stop.prevent="togglePresetFavorite(preset.id)"
+                >
+                  <span class="favorite-heart" aria-hidden="true">♥</span>
+                </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
@@ -1828,6 +2029,16 @@ async function renameAndSaveSkyboxTexture() {
 
       <div class="mb-3">
         <label class="palette-library-label">Saved Palettes</label>
+        <button
+          class="button is-small favorite-filter"
+          :class="{ 'is-active': showOnlyFavoritePalettes }"
+          type="button"
+          :aria-pressed="showOnlyFavoritePalettes"
+          @click="showOnlyFavoritePalettes = !showOnlyFavoritePalettes"
+        >
+          <span class="favorite-filter-heart">♥</span>
+          <span>Favorites</span>
+        </button>
         <!-- Dropdown enrichie Bulma -->
         <div class="dropdown" :class="{ 'is-active': showPaletteDropdown }" style="width:100%;">
           <div class="dropdown-trigger" style="width:100%;">
@@ -1845,10 +2056,20 @@ async function renameAndSaveSkyboxTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-palettes" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="palette in palettes" :key="palette.name" class="dropdown-item"
+              <a v-for="palette in visiblePalettes" :key="palette.name" class="dropdown-item favorite-row"
                 @click.prevent="selectPaletteFromDropdown(palette)"
                 :class="{ 'is-active': selectedPalette === palette.name }"
                 style="display:flex; flex-direction:column; gap:0.5em; padding:0.75em;">
+                <button
+                  class="favorite-button"
+                  :class="{ 'is-favorite': palette.favorite }"
+                  type="button"
+                  :title="palette.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!palette.favorite"
+                  @click.stop.prevent="togglePaletteFavorite(palette.name)"
+                >
+                  <span class="favorite-heart" aria-hidden="true">♥</span>
+                </button>
                 <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail"
                   style="height:32px; width:100%; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; text-align:center;">{{ palette.name }}</span>
@@ -1886,10 +2107,20 @@ async function renameAndSaveSkyboxTexture() {
             </button>
           </div>
           <div class="control">
+            <button class="button is-info is-small" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0">
+              Export Favorites
+            </button>
+          </div>
+          <div class="control">
             <button class="button is-warning is-small" @click="triggerImportPalettes">
               Import
             </button>
-            <input ref="paletteFileInput" type="file" accept=".json" style="display:none;" @change="importPalettes" />
+            <input ref="paletteFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPalettes" />
+          </div>
+          <div class="control">
+            <button class="button is-danger is-small is-light" @click="deleteAllPalettes" :disabled="palettes.length === 0">
+              Delete All
+            </button>
           </div>
         </div>
       </div>
@@ -2091,7 +2322,7 @@ async function renameAndSaveSkyboxTexture() {
 }
 .palette-top-controls {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 1fr);
   align-items: center;
   gap: 0.45em 0.65em;
   margin-bottom: 0.75em;
@@ -2171,5 +2402,59 @@ async function renameAndSaveSkyboxTexture() {
   color: #555;
   margin-bottom: 0.45em;
   line-height: 1.25;
+}
+.favorite-row {
+  position: relative;
+}
+.favorite-button {
+  position: absolute;
+  top: 50%;
+  right: 0.7em;
+  width: 1.9em;
+  height: 1.9em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transform: translateY(-50%);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  z-index: 2;
+}
+.favorite-heart {
+  color: transparent;
+  font-size: 1.35em;
+  line-height: 1;
+  -webkit-text-stroke: 1.6px #fff;
+  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+}
+.favorite-button.is-favorite {
+  color: #ec3d7a;
+}
+.favorite-button:hover {
+  color: #ec3d7a;
+}
+.favorite-button.is-favorite .favorite-heart,
+.favorite-button:hover .favorite-heart {
+  color: #ec3d7a;
+  -webkit-text-stroke-color: #ec3d7a;
+}
+.favorite-filter {
+  margin-bottom: 0.55em;
+  gap: 0.35em;
+  color: #333;
+}
+.favorite-filter.is-active {
+  border-color: #ec3d7a;
+  color: #ec3d7a;
+}
+.favorite-filter-heart {
+  color: transparent;
+  -webkit-text-stroke: 1.2px currentColor;
+  line-height: 1;
+}
+.favorite-filter.is-active .favorite-filter-heart {
+  color: #ec3d7a;
+  -webkit-text-stroke-color: #ec3d7a;
 }
 </style>

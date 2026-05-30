@@ -183,6 +183,7 @@ export interface PalettePhaseResult {
  * @param palettePeriod  – période de la palette
  * @param paletteOffset  – décalage de la palette
  * @param smooth     – utiliser le lissage (activateSmoothness)
+ * @param mirror     – alterner les cycles gauche-droite puis droite-gauche
  */
 export function computePalettePhase(
   data: IterationData,
@@ -190,6 +191,7 @@ export function computePalettePhase(
   palettePeriod: number,
   paletteOffset: number,
   smooth = true,
+  mirror = false,
 ): PalettePhaseResult {
   // Pixel dans l'ensemble : iter == 0
   if (data.iter === 0) {
@@ -214,7 +216,10 @@ export function computePalettePhase(
   const v = smooth ? nu : data.iter;
   const deep = v * 2;
   const paletteRepeat = Math.max(palettePeriod, 0.0001);
-  const phase = ((deep / paletteRepeat + paletteOffset) % 1 + 1) % 1; // fract() positif
+  const rawPhase = deep / paletteRepeat + paletteOffset;
+  const phaseForward = ((rawPhase % 1) + 1) % 1; // fract() positif
+  const cycle = Math.floor(rawPhase);
+  const phase = mirror && Math.abs(cycle % 2) === 1 ? Math.min(1 - phaseForward, 0.99999994) : phaseForward;
 
   return { phase, nu, iter: data.iter, isInSet: false };
 }

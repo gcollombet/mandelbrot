@@ -30,6 +30,7 @@ struct Uniforms {
   lightDirX: f32,
   lightDirY: f32,
   lightDirZ: f32,
+  paletteMirror: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -79,6 +80,15 @@ fn samplePaletteColor(palettePhase: f32) -> vec3<f32> {
 fn animatedPaletteOffset() -> f32 {
   let paletteDrift = parameters.animate * parameters.time * parameters.animationSpeed * 0.025;
   return fract(parameters.paletteOffset + paletteDrift);
+}
+
+fn palettePhaseFromRaw(rawPhase: f32) -> f32 {
+  let phase = fract(rawPhase);
+  if (parameters.paletteMirror < 0.5) {
+    return phase;
+  }
+  let reverse = (i32(floor(rawPhase)) % 2) != 0;
+  return select(phase, min(1.0 - phase, 0.99999994), reverse);
 }
 
 fn sampleEffects(palettePhase: f32) -> EffectParams {
@@ -379,7 +389,7 @@ fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: ve
 fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, der: vec2<f32>, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
-  let palettePhase = fract(deep / paletteRepeat + animatedPaletteOffset());
+  let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset());
 
   // ── Sample all effect channels from the palette texture ──
   let fx = sampleEffects(palettePhase);
@@ -740,7 +750,7 @@ fn colorize_pixel(
   // Compute a preliminary phase to sample the smoothness weight, then
   // apply it to select between iter_val and nu.
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-  let prelimPhase = fract(nu * 2.0 / paletteRepeat + animatedPaletteOffset());
+  let prelimPhase = palettePhaseFromRaw(nu * 2.0 / paletteRepeat + animatedPaletteOffset());
   let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.416666667), 0.0);
   let wSmoothness = row2.g;
   nu = mix(iter_val, nu, wSmoothness);
