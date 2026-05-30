@@ -452,7 +452,9 @@ impl MandelbrotNavigator {
     }
 
     fn compute_bla_reference_inner(&mut self, orbit_len: usize) -> BlaBufferInfo {
-        const MIN_BLA_SKIP: usize = 4;
+        const BLA_SKIP_LEVELS: usize = 0;
+        const MIN_BLA_SKIP: usize = 1 << BLA_SKIP_LEVELS;
+        const MAX_BLA_SKIP: usize = 64;
 
         if orbit_len <= 1 {
             self.bla_result.clear();
@@ -484,20 +486,17 @@ impl MandelbrotNavigator {
 
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE);
         let mut previous_level: Vec<BlaStep> = Vec::with_capacity(orbit_len - 1);
-        for start in 0..(orbit_len - 1) {
+        for start in 1..orbit_len {
             let z = self.result[start];
-            let next_z = self.result[start + 1];
             let a = (2.0 * z.zx, 2.0 * z.zy);
-            let a_abs = complex_abs(a).max(f32::MIN_POSITIVE);
-            let alpha = epsilon * complex_abs((next_z.zx, next_z.zy)) / a_abs;
-            let beta = 1.0 / a_abs;
+            let alpha = epsilon * complex_abs((z.zx, z.zy));
             previous_level.push(BlaStep {
                 ax: a.0,
                 ay: a.1,
                 bx: 1.0,
                 by: 0.0,
                 radius_alpha: alpha,
-                radius_beta: beta,
+                radius_beta: 0.0,
             });
         }
 
@@ -514,7 +513,7 @@ impl MandelbrotNavigator {
             level_start = self.bla_result.len();
         }
 
-        while skip * 2 < orbit_len {
+        while skip < MAX_BLA_SKIP && skip * 2 < orbit_len {
             let merged_skip = skip * 2;
             let level_entry_count = previous_level.len() / 2;
             if level_entry_count == 0 {
@@ -545,7 +544,7 @@ impl MandelbrotNavigator {
                 });
             }
 
-            if merged_skip >= MIN_BLA_SKIP {
+            if merged_skip >= MIN_BLA_SKIP && merged_skip <= MAX_BLA_SKIP {
                 self.bla_result.extend(current_level.iter().copied());
                 self.bla_levels.push(BlaLevel {
                     offset: level_start as u32,
@@ -708,16 +707,21 @@ mod tests {
     #[test]
     fn bla_reference_generation_builds_multiple_levels() {
         let mut nav = MandelbrotNavigator::new("-0.75", "0.1", "1.0", 0.0);
-        nav.compute_reference_orbit_ptr(8);
-        let bla = nav.compute_bla_reference_ptr(8);
+        nav.compute_reference_orbit_ptr(64);
+        let bla = nav.compute_bla_reference_ptr(64);
         assert!(
-            bla.count >= 3,
+            bla.count >= 4,
             "expected culled BLA table to keep useful skips"
         );
-        assert_eq!(bla.level_count, 2, "expected levels for skips 4 and 8 only");
+        assert_eq!(bla.level_count, 7, "expected levels for skips 1, 2, 4, 8, 16, 32, and 64");
         assert_ne!(bla.levels_ptr, 0);
-        assert_eq!(nav.bla_levels[0].skip, 4);
-        assert_eq!(nav.bla_levels[1].skip, 8);
+        assert_eq!(nav.bla_levels[0].skip, 1);
+        assert_eq!(nav.bla_levels[1].skip, 2);
+        assert_eq!(nav.bla_levels[2].skip, 4);
+        assert_eq!(nav.bla_levels[3].skip, 8);
+        assert_eq!(nav.bla_levels[4].skip, 16);
+        assert_eq!(nav.bla_levels[5].skip, 32);
+        assert_eq!(nav.bla_levels[6].skip, 64);
         assert!(nav.bla_result.iter().all(|step| step.radius_beta >= 0.0));
     }
 

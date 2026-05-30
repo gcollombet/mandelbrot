@@ -10,8 +10,10 @@
  */
 
 const DB_NAME = 'mandelbrot-textures';
-const DB_VERSION = 1;
-const STORE_NAME = 'textures';
+const DB_VERSION = 2;
+const LEGACY_STORE_NAME = 'textures';
+const METADATA_STORE_NAME = 'textureMetadata';
+const BLOB_STORE_NAME = 'textureBlobs';
 
 /** Legacy localStorage key used before the IndexedDB migration. */
 const LEGACY_STORAGE_KEY = 'mandelbrot_textures';
@@ -42,10 +44,34 @@ function openDB(): Promise<IDBDatabase> {
   if (_dbPromise) return _dbPromise;
   _dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+    req.onupgradeneeded = (event) => {
       const db = req.result;
-      if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'name' });
+      const transaction = req.transaction;
+      if (!db.objectStoreNames.contains(METADATA_STORE_NAME)) {
+        db.createObjectStore(METADATA_STORE_NAME, { keyPath: 'name' });
+      }
+      if (!db.objectStoreNames.contains(BLOB_STORE_NAME)) {
+        db.createObjectStore(BLOB_STORE_NAME, { keyPath: 'name' });
+      }
+      if (event.oldVersion < 2 && transaction && db.objectStoreNames.contains(LEGACY_STORE_NAME)) {
+        const legacyStore = transaction.objectStore(LEGACY_STORE_NAME);
+        const metadataStore = transaction.objectStore(METADATA_STORE_NAME);
+        const blobStore = transaction.objectStore(BLOB_STORE_NAME);
+        legacyStore.openCursor().onsuccess = (cursorEvent) => {
+          const cursor = (cursorEvent.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (!cursor) return;
+          const record = cursor.value as TextureRecord;
+          metadataStore.put({
+            name: record.name,
+            thumbnail: record.thumbnail,
+            date: record.date,
+          });
+          blobStore.put({
+            name: record.name,
+            blob: record.blob,
+          });
+          cursor.continue();
+        };
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -55,11 +81,12 @@ function openDB(): Promise<IDBDatabase> {
 }
 
 function tx(
+  storeName: string,
   mode: IDBTransactionMode,
 ): Promise<{ store: IDBObjectStore; done: Promise<void> }> {
   return openDB().then((db) => {
-    const transaction = db.transaction(STORE_NAME, mode);
-    const store = transaction.objectStore(STORE_NAME);
+    const transaction = db.transaction(storeName, mode);
+    const store = transaction.objectStore(storeName);
     const done = new Promise<void>((resolve, reject) => {
       transaction.oncomplete = () => resolve();
       transaction.onerror = () => reject(transaction.error);
@@ -84,18 +111,18 @@ function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
  * Return metadata for every stored texture (cheap — no blobs loaded).
  */
 export async function getAllTextureEntries(): Promise<TextureMetadata[]> {
-  const { store, done } = await tx('readonly');
-  const all: TextureRecord[] = await reqToPromise(store.getAll());
+  const { store, done } = await tx(METADATA_STORE_NAME, 'readonly');
+  const all: TextureMetadata[] = await reqToPromise(store.getAll());
   await done;
-  return all.map(({ name, thumbnail, date }) => ({ name, thumbnail, date }));
+  return all;
 }
 
 /**
  * Return the full Blob for a given texture, or `null` if not found.
  */
 export async function getTextureBlob(name: string): Promise<Blob | null> {
-  const { store, done } = await tx('readonly');
-  const record: TextureRecord | undefined = await reqToPromise(store.get(name));
+  const { store, done } = await tx(BLOB_STORE_NAME, 'readonly');
+  const record: { name: string; blob: Blob } | undefined = await reqToPromise(store.get(name));
   await done;
   return record?.blob ?? null;
 }
@@ -109,14 +136,20 @@ export async function saveTextureEntry(
   thumbnail: string,
   date?: string,
 ): Promise<void> {
-  const record: TextureRecord = {
+  const metadata: TextureMetadata = {
     name,
-    blob,
     thumbnail,
     date: date ?? new Date().toISOString(),
   };
-  const { store, done } = await tx('readwrite');
-  store.put(record);
+  const db = await openDB();
+  const transaction = db.transaction([METADATA_STORE_NAME, BLOB_STORE_NAME], 'readwrite');
+  transaction.objectStore(METADATA_STORE_NAME).put(metadata);
+  transaction.objectStore(BLOB_STORE_NAME).put({ name, blob });
+  const done = new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
   await done;
 }
 
@@ -124,8 +157,15 @@ export async function saveTextureEntry(
  * Delete a texture by name.
  */
 export async function deleteTextureEntry(name: string): Promise<void> {
-  const { store, done } = await tx('readwrite');
-  store.delete(name);
+  const db = await openDB();
+  const transaction = db.transaction([METADATA_STORE_NAME, BLOB_STORE_NAME], 'readwrite');
+  transaction.objectStore(METADATA_STORE_NAME).delete(name);
+  transaction.objectStore(BLOB_STORE_NAME).delete(name);
+  const done = new Promise<void>((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
   await done;
 }
 
@@ -136,23 +176,20 @@ export async function renameTextureEntry(
   oldName: string,
   newName: string,
 ): Promise<void> {
-  const { store, done } = await tx('readwrite');
-  const record: TextureRecord | undefined = await reqToPromise(store.get(oldName));
-  if (!record) {
-    await done;
-    return;
-  }
-  store.delete(oldName);
-  record.name = newName;
-  store.put(record);
+  const { store, done } = await tx(METADATA_STORE_NAME, 'readonly');
+  const metadata: TextureMetadata | undefined = await reqToPromise(store.get(oldName));
   await done;
+  const blob = await getTextureBlob(oldName);
+  if (!metadata || !blob) return;
+  await saveTextureEntry(newName, blob, metadata.thumbnail, metadata.date);
+  await deleteTextureEntry(oldName);
 }
 
 /**
  * Return how many entries are currently stored.
  */
 export async function getTextureCount(): Promise<number> {
-  const { store, done } = await tx('readonly');
+  const { store, done } = await tx(METADATA_STORE_NAME, 'readonly');
   const count = await reqToPromise(store.count());
   await done;
   return count;

@@ -111,21 +111,27 @@ fn getOrbit(index: i32) -> vec2<f32> {
 fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: ptr<function, vec2<f32>>, dc: vec2<f32>, dcMag: f32) -> i32 {
   var level = i32(mandelbrot.blaLevelCount) - 1;
   let max_iter = i32(mandelbrot.globalMaxIter);
+  if (*ref_i <= 0) {
+    return 0;
+  }
   while (level >= 0) {
     let levelInfo = mandelbrotBlaLevels[level];
     let skip = i32(levelInfo.skip);
-    if ((*ref_i % skip) == 0 && *ref_i + skip <= max_iter) {
-      let slot = *ref_i / skip;
+    let shiftedRef = *ref_i - 1;
+    if ((shiftedRef % skip) == 0 && *ref_i + skip <= max_iter) {
+      let slot = shiftedRef / skip;
       if (u32(slot) < levelInfo.count) {
         let entryIndex = i32(levelInfo.offset) + slot;
         let bla = mandelbrotBlaSuite[entryIndex];
         let a = vec2<f32>(bla.ax, bla.ay);
         let b = vec2<f32>(bla.bx, bla.by);
-        let candidate = cmul(a, *dz) + cmul(b, dc);
         let radius = max(0.0, bla.radius_alpha - bla.radius_beta * dcMag);
-        if (dot(candidate, candidate) <= radius * radius) {
+        // BLA radii are input-domain bounds: they describe when the block's
+        // linearized map is valid for the current perturbation before the skip.
+        if (dot(*dz, *dz) <= radius * radius) {
+          let candidate = cmul(a, *dz) + cmul(b, dc);
           *dz = candidate;
-          *der = cmul(a, *der);
+          *der = cmul(a, *der) + b;
           *ref_i += skip;
           return skip;
         }
