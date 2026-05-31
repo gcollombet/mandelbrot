@@ -7,7 +7,6 @@ import resolveShader from './assets/resolve.wgsl?raw'
 import countShader from './assets/count_unfinished.wgsl?raw'
 import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
-import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
 import type {ColorStop} from './ColorStop.ts'
@@ -32,6 +31,7 @@ const ZOOM_MIN_BRUSH_STEP = 2
 // to target TARGET_FRAME_MS of GPU time.
 const MIN_BATCH_SIZE = 100
 const MAX_BATCH_SIZE = 10_000
+const MAX_BLA_BATCH_SIZE = 100_000
 const BLA_LINEARIZATION_EPSILON = 1e-6
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
@@ -55,17 +55,77 @@ const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
 const COUNTER_READBACK_BUFFER_COUNT = 3
 const ORBIT_METRIC_EPSILON = 0.001
 
-// Orbit chunking: compute reference orbit incrementally to avoid blocking.
-// Each frame computes at most this many iterations of arbitrary-precision
-// math, then yields so the browser stays responsive.
-const ORBIT_CHUNK_SIZE = 100
-
 type CounterReadbackSlot = {
     buffer: GPUBuffer
     pending: boolean
     sequence: number
     generation: number
 }
+
+type ReferenceWorkerRequest =
+    | {
+        type: 'reset'
+        jobId: number
+        cx: string
+        cy: string
+        scale: string
+        angle: number
+        approximationMode: ApproximationMode
+        blaEpsilon: number
+        maxIterations: number
+    }
+    | {
+        type: 'updateView'
+        jobId: number
+        cx: string
+        cy: string
+        scale: string
+        angle: number
+        maxIterations: number
+    }
+    | {
+        type: 'setApproximationMode'
+        jobId: number
+        approximationMode: ApproximationMode
+    }
+    | {
+        type: 'setBlaEpsilon'
+        jobId: number
+        blaEpsilon: number
+    }
+    | { type: 'dispose' }
+
+type ReferenceWorkerResponse =
+    | {
+        type: 'orbitChunk'
+        jobId: number
+        offset: number
+        count: number
+        maxIterations: number
+        referenceCx: string
+        referenceCy: string
+        orbit: Float32Array<ArrayBuffer>
+    }
+    | {
+        type: 'blaReady'
+        jobId: number
+        maxIterations: number
+        steps: Float32Array<ArrayBuffer>
+        levels: Uint32Array<ArrayBuffer>
+        levelCount: number
+    }
+    | {
+        type: 'referenceReset'
+        jobId: number
+        maxIterations: number
+        referenceCx: string
+        referenceCy: string
+    }
+    | {
+        type: 'error'
+        jobId: number
+        message: string
+    }
 
 function floorPowerOfTwo(value: number): number {
     const v = Math.max(1, Math.floor(value))
@@ -271,10 +331,22 @@ export class Engine {
     currentGuardedMaxIter = 0
     /** Target maxIterations for the current frame. */
     currentMaxIterations = 0
+    currentReferenceAvailableIter = 0
+    currentReferenceRemainingIter = 0
+    isReferenceValidating = false
     currentBlaLevelCount = 0
     mandelbrotReference = new Float32Array(1000000)
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
+    private referenceWorker?: Worker
+    private referenceJobId = 0
+    private referenceAvailableOrbitLen = 0
+    private referenceBlaReadyMaxIterations = 0
+    private referenceWorkerFailed = false
+    private referenceViewKey = ''
+    private referenceWorkerCx = ''
+    private referenceWorkerCy = ''
+    private referenceOrbitWasReset = false
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
 
@@ -364,10 +436,167 @@ export class Engine {
         this.time = 0
     }
 
+    private postReferenceWorker(message: ReferenceWorkerRequest) {
+        if (!this.referenceWorker || this.referenceWorkerFailed) {
+            return
+        }
+        this.referenceWorker.postMessage(message)
+    }
+
+    private initializeReferenceWorker() {
+        this.referenceWorker?.terminate()
+        this.referenceWorker = new Worker(new URL('./referenceWorker.ts', import.meta.url), { type: 'module' })
+        this.referenceWorker.onmessage = (event: MessageEvent<ReferenceWorkerResponse>) => {
+            this.handleReferenceWorkerMessage(event.data)
+        }
+        this.referenceWorker.onerror = (event) => {
+            console.error('Reference worker error:', event.message)
+            this.referenceWorkerFailed = true
+            this.orbitIncomplete = false
+            this.currentBlaLevelCount = 0
+        }
+        this.referenceWorkerFailed = false
+        this.referenceAvailableOrbitLen = 0
+        this.referenceBlaReadyMaxIterations = 0
+        this.referenceJobId++
+    }
+
+    private resetReferenceJob(mandelbrot: Mandelbrot, scale: number, maxIterations: number) {
+        this.referenceAvailableOrbitLen = 0
+        this.referenceBlaReadyMaxIterations = 0
+        this.referenceOrbitWasReset = true
+        this.currentReferenceAvailableIter = 0
+        this.currentReferenceRemainingIter = maxIterations
+        this.isReferenceValidating = true
+        this.currentGuardedMaxIter = 0
+        this.currentBlaLevelCount = 0
+        this.orbitIncomplete = true
+        this.referenceViewKey = ''
+        this.referenceWorkerCx = ''
+        this.referenceWorkerCy = ''
+        this.referenceJobId++
+        this.postReferenceWorker({
+            type: 'reset',
+            jobId: this.referenceJobId,
+            cx: mandelbrot.cx,
+            cy: mandelbrot.cy,
+            scale: scale.toString(),
+            angle: mandelbrot.angle,
+            approximationMode: this.approximationMode,
+            blaEpsilon: this.blaEpsilon,
+            maxIterations,
+        })
+    }
+
+    private syncReferenceWorkerView(mandelbrot: Mandelbrot, scale: number, maxIterations: number) {
+        const scaleString = scale.toString()
+        const nextKey = `${mandelbrot.cx}\n${mandelbrot.cy}\n${scaleString}\n${mandelbrot.angle}\n${maxIterations}`
+        if (nextKey === this.referenceViewKey) {
+            return
+        }
+            this.referenceViewKey = nextKey
+        this.isReferenceValidating = true
+        this.postReferenceWorker({
+            type: 'updateView',
+            jobId: this.referenceJobId,
+            cx: mandelbrot.cx,
+            cy: mandelbrot.cy,
+            scale: scaleString,
+            angle: mandelbrot.angle,
+            maxIterations,
+        })
+    }
+
+    private handleReferenceWorkerMessage(message: ReferenceWorkerResponse) {
+        if (message.jobId !== this.referenceJobId) {
+            return
+        }
+
+        if (message.type === 'error') {
+            console.error('Reference worker error:', message.message)
+            this.referenceWorkerFailed = true
+            this.orbitIncomplete = false
+            this.currentBlaLevelCount = 0
+            return
+        }
+
+        if (message.type === 'referenceReset') {
+            this.referenceAvailableOrbitLen = 0
+            this.currentReferenceAvailableIter = 0
+            this.currentReferenceRemainingIter = this.currentMaxIterations
+            this.currentGuardedMaxIter = 0
+            this.orbitIncomplete = true
+            this.referenceWorkerCx = message.referenceCx
+            this.referenceWorkerCy = message.referenceCy
+            this.mandelbrotNavigator.reference_origin(message.referenceCx, message.referenceCy)
+            this.referenceOrbitWasReset = true
+            this.currentBlaLevelCount = 0
+            this.referenceBlaReadyMaxIterations = 0
+            this.clearHistoryNextFrame = true
+            this.needRender = true
+            return
+        }
+
+        if (message.type === 'orbitChunk') {
+            const previousAvailableOrbitLen = this.referenceAvailableOrbitLen
+            this.referenceAvailableOrbitLen = message.count
+
+            if (message.referenceCx !== this.referenceWorkerCx || message.referenceCy !== this.referenceWorkerCy) {
+                this.referenceWorkerCx = message.referenceCx
+                this.referenceWorkerCy = message.referenceCy
+                this.mandelbrotNavigator.reference_origin(message.referenceCx, message.referenceCy)
+                this.referenceOrbitWasReset = true
+                this.currentBlaLevelCount = 0
+                this.referenceBlaReadyMaxIterations = 0
+                this.clearHistoryNextFrame = true
+            } else if (message.offset === 0 && previousAvailableOrbitLen > 0) {
+                this.referenceOrbitWasReset = true
+                this.currentBlaLevelCount = 0
+                this.referenceBlaReadyMaxIterations = 0
+                this.clearHistoryNextFrame = true
+            }
+
+            if (message.orbit.length > 0 && this.mandelbrotReferenceBuffer) {
+                this.device.queue.writeBuffer(
+                    this.mandelbrotReferenceBuffer,
+                    message.offset * 4 * Float32Array.BYTES_PER_ELEMENT,
+                    message.orbit,
+                    0,
+                    message.orbit.length,
+                )
+            }
+
+            const availableIter = Math.max(0, this.referenceAvailableOrbitLen - 1)
+            this.currentReferenceAvailableIter = availableIter
+            this.currentReferenceRemainingIter = Math.max(0, this.currentMaxIterations - availableIter)
+            this.isReferenceValidating = false
+            this.currentGuardedMaxIter = Math.min(this.currentMaxIterations, availableIter)
+            this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < this.currentMaxIterations
+            this.needRender = true
+            return
+        }
+
+        this.ensureBlaBufferCapacity(message.steps.length / 6)
+        this.ensureBlaLevelBufferCapacity(message.levelCount)
+        if (message.steps.length > 0 && this.mandelbrotBlaBuffer) {
+            this.device.queue.writeBuffer(this.mandelbrotBlaBuffer, 0, message.steps, 0, message.steps.length)
+        }
+        if (message.levels.length > 0 && this.mandelbrotBlaLevelBuffer) {
+            this.device.queue.writeBuffer(this.mandelbrotBlaLevelBuffer, 0, message.levels, 0, message.levels.length)
+        }
+        this.currentBlaLevelCount = message.levelCount
+        this.referenceBlaReadyMaxIterations = message.maxIterations
+        this.isReferenceValidating = false
+        this.clearHistoryNextFrame = true
+        this.needRender = true
+        this.invalidateCounterReadback()
+    }
+
     async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
         this.mandelbrotNavigator = mandelbrotNavigator
         this.approximationMode = this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation'
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
+        this.initializeReferenceWorker()
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
         this.adapter = await navigator.gpu.requestAdapter()
         if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
@@ -789,13 +1018,20 @@ export class Engine {
 
         const ratio = (1000 / this.targetFps) / elapsed
         const ideal = this.iterationBatchSize * ratio
+        const maxBatchSize = this.getEffectiveMaxBatchSize()
         this.iterationBatchSize = Math.round(
-            Math.min(MAX_BATCH_SIZE,
+            Math.min(maxBatchSize,
                 Math.max(MIN_BATCH_SIZE,
                     this.iterationBatchSize * 0.7 + ideal * 0.3
                 )
             )
         )
+    }
+
+    private getEffectiveMaxBatchSize(): number {
+        return this.approximationMode === 'bla' && this.currentBlaLevelCount > 0
+            ? MAX_BLA_BATCH_SIZE
+            : MAX_BATCH_SIZE
     }
 
     resize() {
@@ -1016,6 +1252,11 @@ export class Engine {
 
         this.approximationMode = mode
         this.currentBlaLevelCount = 0
+        this.postReferenceWorker({
+            type: 'setApproximationMode',
+            jobId: this.referenceJobId,
+            approximationMode: mode,
+        })
         this.clearHistoryNextFrame = true
         this.needRender = true
         this.invalidateCounterReadback()
@@ -1032,6 +1273,11 @@ export class Engine {
         }
         this.mandelbrotNavigator.set_bla_epsilon(next)
         this.blaEpsilon = next
+        this.postReferenceWorker({
+            type: 'setBlaEpsilon',
+            jobId: this.referenceJobId,
+            blaEpsilon: next,
+        })
         if (this.approximationMode === 'bla') {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
@@ -1056,6 +1302,16 @@ export class Engine {
             this.approximationMode = navigatorApproximationMode
             this.blaEpsilon = navigatorBlaEpsilon
             this.currentBlaLevelCount = 0
+            this.postReferenceWorker({
+                type: 'setApproximationMode',
+                jobId: this.referenceJobId,
+                approximationMode: navigatorApproximationMode,
+            })
+            this.postReferenceWorker({
+                type: 'setBlaEpsilon',
+                jobId: this.referenceJobId,
+                blaEpsilon: navigatorBlaEpsilon,
+            })
             this.clearHistoryNextFrame = true
             this.needRender = true
             this.invalidateCounterReadback()
@@ -1252,61 +1508,38 @@ export class Engine {
 
         const maxIterations = Math.ceil(mandelbrot.maxIterations)
         this.currentMaxIterations = maxIterations
+        const computeScale = (this.zoomReprojectionActive && this.liveScale > 0)
+            ? this.liveScale
+            : mandelbrot.scale
 
-        // Compute one chunk of the reference orbit (bounded CPU work per frame).
-        // The WASM side resumes from where it left off; re-anchoring is handled
-        // internally when the view centre drifts too far from the reference.
-        const prtInfo = this.mandelbrotNavigator.compute_reference_orbit_chunk(
-            ORBIT_CHUNK_SIZE,
-            maxIterations,
-        )
-        const availableOrbitLen = prtInfo.count
-        const buffer = new Float32Array(wasmMemory.buffer, prtInfo.ptr, prtInfo.count * 4) // 4 floats par MandelbrotStep
-
-        if (prtInfo.offset < maxIterations) {
-            this.device.queue.writeBuffer(
-                this.mandelbrotReferenceBuffer!,
-                0,
-                buffer,
-                0
-            )
+        if (!this.referenceViewKey) {
+            this.resetReferenceJob(mandelbrot, computeScale, maxIterations)
         }
+        this.syncReferenceWorkerView(mandelbrot, computeScale, maxIterations)
 
         // Guard the shader: globalMaxIter must never exceed the orbit steps
         // we have actually computed, or the shader would read uninitialised memory.
-        const availableIter = Math.max(0, availableOrbitLen - 1)
+        const availableIter = Math.max(0, this.referenceAvailableOrbitLen - 1)
         const guardedMaxIter = Math.min(maxIterations, availableIter)
         this.currentGuardedMaxIter = guardedMaxIter
+        this.currentReferenceAvailableIter = availableIter
+        this.currentReferenceRemainingIter = Math.max(0, maxIterations - availableIter)
 
         // Track whether the orbit is still being built (used by needsMoreFrames).
-        this.orbitIncomplete = availableIter < maxIterations
+        this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < maxIterations
         const orbitComplete = availableIter >= maxIterations
 
-        let approximationModeFlag = 0
-        let blaLevelCount = 0
-        if (this.approximationMode === 'bla' && orbitComplete) {
-            const blaInfo = this.mandelbrotNavigator.compute_bla_reference_ptr(guardedMaxIter)
-            this.ensureBlaBufferCapacity(blaInfo.count)
-            this.ensureBlaLevelBufferCapacity(blaInfo.level_count)
-            if (blaInfo.count > 0) {
-                const blaBuffer = new Float32Array(wasmMemory.buffer, blaInfo.ptr, blaInfo.count * 6)
-                this.device.queue.writeBuffer(this.mandelbrotBlaBuffer!, 0, blaBuffer, 0)
-            }
-            if (blaInfo.level_count > 0) {
-                const blaLevelBuffer = new Uint32Array(wasmMemory.buffer, blaInfo.levels_ptr, blaInfo.level_count * 4)
-                this.device.queue.writeBuffer(this.mandelbrotBlaLevelBuffer!, 0, blaLevelBuffer, 0)
-            }
-            approximationModeFlag = 1
-            blaLevelCount = blaInfo.level_count
-        }
-        this.currentBlaLevelCount = blaLevelCount
+        const approximationModeFlag = this.approximationMode === 'bla'
+            && orbitComplete
+            && this.currentBlaLevelCount > 0
+            && this.referenceBlaReadyMaxIterations >= guardedMaxIter
+            ? 1
+            : 0
+        const blaLevelCount = approximationModeFlag ? this.currentBlaLevelCount : 0
 
         // Re-write the mandelbrot uniform with the guarded globalMaxIter.
         // During zoom reprojection, override scale with liveScale so the GPU
         // computes at the fixed target scale for this cycle.
-        const computeScale = (this.zoomReprojectionActive && this.liveScale > 0)
-            ? this.liveScale
-            : mandelbrot.scale
         const mandelbrotShaderUniformDataGuarded = new Float32Array([
             mandelbrot.dx,
             mandelbrot.dy,
@@ -1333,7 +1566,8 @@ export class Engine {
 
         // When the navigator re-anchors its reference orbit, `dx/dy` jump back to ~0.
         // Reprojecting history across that discontinuity would be nonsense, so we clear.
-        const orbitWasReset = prtInfo.offset === 0 && !!this.prevFrameMandelbrot
+        const orbitWasReset = this.referenceOrbitWasReset && !!this.prevFrameMandelbrot
+        this.referenceOrbitWasReset = false
 
         // clearHistoryNextFrame may already be true from the zoom reprojection
         // block above. These additional checks handle non-zoom resets.
@@ -1775,6 +2009,9 @@ export class Engine {
 
     destroy() {
         this.stopRenderLoop()
+        this.postReferenceWorker({ type: 'dispose' })
+        this.referenceWorker?.terminate()
+        this.referenceWorker = undefined
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.resolvedTexture?.destroy?.()

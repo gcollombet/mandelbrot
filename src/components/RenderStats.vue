@@ -17,6 +17,8 @@ const totalPixels = ref(0);
 const batchSize = ref(0);
 const orbitCount = ref(0);
 const maxIterations = ref(0);
+const orbitRemaining = ref(0);
+const referenceValidating = ref(false);
 
 // --- History for the graph ---
 const HISTORY_LENGTH = 200;
@@ -42,8 +44,10 @@ function poll() {
   const ns = e.neutralSize ?? 0;
   totalPixels.value = ns * ns;
   batchSize.value = typeof e.getIterationBatchSize === 'function' ? e.getIterationBatchSize() : 0;
-  orbitCount.value = e.currentGuardedMaxIter ?? 0;
+  orbitCount.value = e.currentReferenceAvailableIter ?? e.currentGuardedMaxIter ?? 0;
   maxIterations.value = e.currentMaxIterations ?? 0;
+  orbitRemaining.value = e.currentReferenceRemainingIter ?? Math.max(0, maxIterations.value - orbitCount.value);
+  referenceValidating.value = e.isReferenceValidating ?? false;
 
   // Push history
   unfinishedHistory.push(unfinishedPixels.value >= 0 ? unfinishedPixels.value : 0);
@@ -254,7 +258,14 @@ defineExpose({ expanded });
         </div>
         <div class="stats-row">
           <span class="stats-label">Orbite</span>
-          <span class="stats-value">{{ orbitCount }} / {{ maxIterations }}</span>
+          <span class="stats-value">
+            {{ orbitCount }} / {{ maxIterations }}
+            <span v-if="referenceValidating"> · validation</span>
+          </span>
+        </div>
+        <div class="stats-row">
+          <span class="stats-label">Orbite restante</span>
+          <span class="stats-value">{{ orbitRemaining }}</span>
         </div>
         <div class="stats-row">
           <span class="stats-label">Ops/frame</span>

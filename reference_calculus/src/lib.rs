@@ -344,6 +344,14 @@ impl MandelbrotNavigator {
         ]
     }
 
+    pub fn get_reference_params(&self) -> Vec<String> {
+        vec![self.reference_cx.to_string(), self.reference_cy.to_string()]
+    }
+
+    pub fn reference_origin(&mut self, cx: &str, cy: &str) {
+        self.reset_reference_to(DBig::from_str(cx).unwrap(), DBig::from_str(cy).unwrap());
+    }
+
     /// Retourne un tuple (ptr, offset, count) pour accès direct JS
     pub fn compute_reference_orbit_ptr(&mut self, max_iter: u32) -> OrbitBufferInfo {
         self.compute_reference_orbit_inner(max_iter as usize)
@@ -834,9 +842,9 @@ fn newton_nucleus(
 
 #[cfg(test)]
 mod tests {
-  use super::*;
+    use super::*;
 
-  #[test]
+    #[test]
     fn construct_and_compute_orbit_simple() {
         // Construire le navigator avec des valeurs simples
         let mut nav = MandelbrotNavigator::new("0.0", "0.0", "1.0", 0.0);

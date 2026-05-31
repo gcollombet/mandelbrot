@@ -12,6 +12,12 @@ export default defineConfig({
       wasm(),
       topLevelAwait()
   ],
+  worker: {
+    plugins: () => [
+      wasm(),
+      topLevelAwait()
+    ]
+  },
   build: {
     outDir: 'docs',
     assetsDir: ''  // Met les assets à la racine au lieu de assets/
