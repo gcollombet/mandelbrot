@@ -18,6 +18,13 @@ export default defineConfig({
             wasm(),
             topLevelAwait()
         ],
+        worker: {
+            format: 'es',
+            plugins: () => [
+                wasm(),
+                topLevelAwait()
+            ]
+        },
         ssr: {
             noExternal: ['mandelbrot']
         }
