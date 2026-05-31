@@ -67,27 +67,27 @@ const model =  defineModel<MandelbrotParams>({
     paletteOffset: 0,
     paletteMirror: false,
     antialiasLevel: 1,
-    tessellationLevel: 2,
-    shadingLevel: 1,
-    lightAngle: 3.927,
-    displacementAmount: 0.01,
-    specularPower: 4,
+    tessellationLevel: 0,
+    shadingLevel: 0,
+    lightAngle: 0,
+    displacementAmount: 0,
+    specularPower: 1,
     activatePalette: true,
     activateSkybox: false,
     activateTessellation: false,
     activateWebcam: false,
-    activateShading: true,
+    activateShading: false,
     activateZebra: false,
-     activateSmoothness: true,
+     activateSmoothness: false,
      activateAnimate: false,
      animationSpeed: 1.0,
-     ambientOcclusionStrength: 0.5,
-     microBumpStrength: 0.25,
-     clearcoatStrength: 0.7,
+     ambientOcclusionStrength: 0,
+     microBumpStrength: 0,
+     clearcoatStrength: 0,
      subsurfaceStrength: 0.0,
-     reliefDepth: 0.35,
-     localShadowStrength: 0.4,
-     varnishStrength: 1.0,
+     reliefDepth: 1,
+     localShadowStrength: 0,
+     varnishStrength: 0,
      stripeFrequency: 8,
      textureName: 'Gold',
      skyboxName: 'Skybox',
@@ -1743,6 +1743,10 @@ async function renameAndSaveSkyboxTexture() {
           :relief-depth="model.reliefDepth"
           :local-shadow-strength="model.localShadowStrength"
           :varnish-strength="model.varnishStrength"
+          :engine-device="engine?.device"
+          :engine-tile-texture="engine?.tileTexture"
+          :engine-skybox-texture="engine?.skyboxTexture"
+          :engine-webcam-texture="engine?.webcamTileTexture"
           v-model:apply-to-all="applyToAll"
           @toggle-picker="emit('toggle-picker')"
           @invert="invertPalette"
@@ -1813,17 +1817,17 @@ async function renameAndSaveSkyboxTexture() {
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Relief Depth</span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
-        <span class="gfx-slider-value">{{ (model.reliefDepth ?? 0.35).toFixed(2) }}</span>
+        <span class="gfx-slider-value">{{ (model.reliefDepth ?? 1).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Relief Occlusion</span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.localShadowStrength" />
-        <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0.4).toFixed(2) }}</span>
+        <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Ambient Occlusion</span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.ambientOcclusionStrength" />
-        <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0.5).toFixed(2) }}</span>
+        <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Light Direction</span>
@@ -1833,7 +1837,7 @@ async function renameAndSaveSkyboxTexture() {
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Fine Bump</span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
-        <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0.25).toFixed(2) }}</span>
+        <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0).toFixed(2) }}</span>
       </div>
 
       <hr class="section-sep"/>
@@ -1843,7 +1847,7 @@ async function renameAndSaveSkyboxTexture() {
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Clearcoat</span>
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.clearcoatStrength" />
-        <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0.7).toFixed(2) }}</span>
+        <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Varnish Reflection</span>

@@ -33,7 +33,9 @@ Rust and wasm-pack are required as well as nodejs.
 
 ```bash
 npm install
-cd reference_calculus/pkg
+cd reference_calculus
+wasm-pack build
+cd pkg
 npm link
 cd ../..
 npm link mandelbrot

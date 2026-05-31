@@ -160,13 +160,13 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   palettePeriod: 7.37,
   paletteOffset: 0.0,
   paletteMirror: false,
-  shadingLevel: 0.3,
-  lightAngle: 3.927,
+  shadingLevel: 0,
+  lightAngle: 0,
   antialiasLevel: 1,
   maxIterations: 100,
-  displacementAmount: 0.033,
+  displacementAmount: 0,
   specularPower: 1,
-  tessellationLevel: 1,
+  tessellationLevel: 0,
   epsilon: 0.00001,
   colorStops: [
     {
@@ -198,11 +198,11 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
       "position": 1
     }
   ],
-  activateShading: true,
-  activateTessellation: true,
+  activateShading: false,
+  activateTessellation: false,
   activateWebcam: false,
   activatePalette: true,
-  activateSkybox: true,
+  activateSkybox: false,
   activateSmoothness: false,
   activateZebra: false,
   activateAnimate: false,
@@ -213,13 +213,13 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   gpuLoadMultiplier: 1.0,
   interpolationMode: 'lab',
   animationSpeed: 1.0,
-  ambientOcclusionStrength: 0.5,
-  microBumpStrength: 0.25,
-  clearcoatStrength: 0.7,
+  ambientOcclusionStrength: 0,
+  microBumpStrength: 0,
+  clearcoatStrength: 0,
   subsurfaceStrength: 0.0,
-  reliefDepth: 0.35,
-  localShadowStrength: 0.4,
-  varnishStrength: 1.0,
+  reliefDepth: 1,
+  localShadowStrength: 0,
+  varnishStrength: 0,
   stripeFrequency: 8,
   textureName: 'Gold',
   skyboxName: 'Skybox',
@@ -232,7 +232,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
     if (raw) Object.assign(params, JSON.parse(raw));
   } catch {}
   params.textureName ??= localStorage.getItem(TEXTURE_SELECTED_KEY) ?? 'Gold';
-  params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Skybox';
+  params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? '';
   return params;
 }
 
