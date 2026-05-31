@@ -602,6 +602,9 @@ export class Engine {
         if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
         this.device = await this.adapter.requestDevice()
         this.device.label = 'Engine Device'
+        this.device.lost.then((info) => {
+            console.warn(`GPU device lost: reason=${info.reason}, message=${info.message}`)
+        })
         this.queue = this.device.queue
         this.queue.label = 'Engine Queue'
         this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext
@@ -2305,8 +2308,14 @@ export class Engine {
 
     // Met à jour la texture GPU à partir de la webcam (à appeler à chaque frame si webcamEnabled)
     async updateWebcamTexture() {
-        await this.webcamTexture?.openWebcam()
-        await this.webcamTexture?.drawWebGPUTexture(this.webcamTileTexture!, this.device)
+        try {
+            await this.webcamTexture?.openWebcam()
+            if (this.webcamTexture?.isOpen()) {
+                await this.webcamTexture?.drawWebGPUTexture(this.webcamTileTexture!, this.device)
+            }
+        } catch (e) {
+            console.warn('Webcam texture update failed:', e)
+        }
     }
 
     // Capture l'image de l'écran final sous PNG 16:9 à la largeur demandée
