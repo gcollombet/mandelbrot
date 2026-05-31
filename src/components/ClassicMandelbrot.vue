@@ -89,12 +89,6 @@ async function onSelectChange(e: Event) {
       :angle="selectedPoint?.angle"
       :cx="selectedPoint?.cx"
       :cy="selectedPoint?.cy"
-      :activatePalette="true"
-      :activateSkybox="false"
-      :activateTessellation="false"
-      :activateWebcam="false"
-      :activateShading="false"
-      :activateSmoothness="true"
     />
   </div>
 </template>

@@ -6,8 +6,9 @@ import StopTransferCurveSelector from './StopTransferCurveSelector.vue';
 import {Palette} from '../Palette';
 import {rgb as d3rgb} from 'd3-color';
 import type {ColorStop, StopTransferCurve} from "../ColorStop.ts";
-import { COLOR_STOP_DEFAULTS, createInterpolatedColorStop, getEffectValue, getStopTransferCurve } from '../ColorStop.ts';
-import type { EffectFieldName } from '../ColorStop.ts';
+import { createInterpolatedColorStop, getEffectValue, getStopTransferCurve } from '../ColorStop.ts';
+import type { EffectFieldName } from '../effectFieldConfig';
+import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG, UI_GROUPS } from '../effectFieldConfig';
 import type {InterpolationMode} from "../Mandelbrot.ts";
 import {
   applyStopPresetValues,
@@ -214,31 +215,17 @@ onMounted(() => {
   refreshStopPresets();
 });
 
-/** UI metadata for effect fields: label, min, max, step, unit. */
-const EFFECT_UI: Record<EffectFieldName, { label: string; min: number; max: number; step: number; unit: string }> = {
-  palette:            { label: 'Color Blend',       min: 0, max: 1,     step: 0.01, unit: '' },
-  zebra:              { label: 'Iteration Bands',   min: 0, max: 1,     step: 0.01, unit: '' },
-  tessellation:       { label: 'Image Blend',       min: 0, max: 1,     step: 0.01, unit: '' },
-  shading:            { label: 'Lighting Blend',    min: 0, max: 1,     step: 0.01, unit: '' },
-  skybox:             { label: 'Reflection Blend',  min: 0, max: 1,     step: 0.01, unit: '' },
-  webcam:             { label: 'Webcam Blend',      min: 0, max: 1,     step: 0.01, unit: '' },
-  smoothness:         { label: 'Smooth Iterations', min: 0, max: 1,     step: 0.01, unit: '' },
-  stripeAverage:      { label: 'Stripe Average',    min: 0, max: 1,     step: 0.01, unit: '' },
-  rotationMean:       { label: 'Direction Coherence', min: 0, max: 1,   step: 0.01, unit: '' },
-  stripeRelief:       { label: 'Stripe Relief',     min: 0, max: 1,     step: 0.01, unit: '' },
-  directionCoherenceRelief: { label: 'Direction Relief', min: 0, max: 1, step: 0.01, unit: '' },
-  shadingLevel:       { label: 'Light Intensity',   min: 0, max: 3,     step: 0.05, unit: '' },
-  specularPower:      { label: 'Specular Strength', min: 1, max: 64,    step: 0.5,  unit: '' },
-  lightAngle:         { label: 'Light Direction',   min: 0, max: 6.283, step: 0.01, unit: 'rad' },
-  metallic:           { label: 'Metalness',         min: 0, max: 1,     step: 0.01, unit: '' },
-  roughness:          { label: 'Roughness',     min: 0.02, max: 1,  step: 0.01, unit: '' },
-  anisotropy:         { label: 'Anisotropy',    min: 0, max: 1,     step: 0.01, unit: '' },
-  iridescencePower:   { label: 'Iridescence Strength', min: 0, max: 1, step: 0.01, unit: '' },
+const UI_GROUP_ORDER = ['color', 'iridescence', 'iteration', 'lighting', 'imageSources'] as const;
+
+const UI_GROUP_TITLES: Partial<Record<string, string>> = {
+  iteration: 'Iteration Mapping',
+  lighting: 'Lighting & Material',
+  imageSources: 'Image Sources',
 };
 
 /** Get the effective value of a field on the selected stop. */
 function getStopEffect(field: EffectFieldName): number {
-  if (!selectedStop.value) return COLOR_STOP_DEFAULTS[field];
+  if (!selectedStop.value) return DEFAULT_VALUES[field];
   return getEffectValue(selectedStop.value, field);
 }
 
@@ -565,92 +552,26 @@ defineExpose({ getSnapshot });
         </div>
         <StopTransferCurveSelector v-model="selectedTransferCurve" />
       </div>
-      <template v-for="field in (['palette'] as EffectFieldName[])" :key="field">
-        <div class="effect-row">
-          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
-          <input
-            class="slider effect-slider"
-            type="range"
-            :min="EFFECT_UI[field].min"
-            :max="EFFECT_UI[field].max"
-            :step="EFFECT_UI[field].step"
-            :value="getStopEffect(field)"
-            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
-          />
-          <span class="effect-value">{{ getStopEffect(field).toFixed(2) }}</span>
-        </div>
-      </template>
-      <template v-for="field in (['iridescencePower'] as EffectFieldName[])" :key="field">
-        <div class="effect-row">
-          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
-          <input
-            class="slider effect-slider"
-            type="range"
-            :min="EFFECT_UI[field].min"
-            :max="EFFECT_UI[field].max"
-            :step="EFFECT_UI[field].step"
-            :value="getStopEffect(field)"
-            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
-          />
-          <span class="effect-value">{{ getStopEffect(field).toFixed(2) }}</span>
-        </div>
-      </template>
-
-      <!-- ── Iteration ── -->
-      <label class="effects-group-title">Iteration Mapping</label>
-      <template v-for="field in (['smoothness','zebra','stripeAverage','rotationMean','stripeRelief','directionCoherenceRelief'] as EffectFieldName[])" :key="field">
-        <div class="effect-row">
-          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
-          <input
-            class="slider effect-slider"
-            type="range"
-            :min="EFFECT_UI[field].min"
-            :max="EFFECT_UI[field].max"
-            :step="EFFECT_UI[field].step"
-            :value="getStopEffect(field)"
-            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
-          />
-          <span class="effect-value">{{ getStopEffect(field).toFixed(2) }}</span>
-        </div>
-      </template>
-
-      <!-- ── Lighting ── -->
-      <label class="effects-group-title">Lighting & Material</label>
-      <template v-for="field in (['shading','skybox','shadingLevel','specularPower','metallic','roughness','anisotropy'] as EffectFieldName[])" :key="field">
-        <div class="effect-row">
-          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
-          <input
-            class="slider effect-slider"
-            type="range"
-            :min="EFFECT_UI[field].min"
-            :max="EFFECT_UI[field].max"
-            :step="EFFECT_UI[field].step"
-            :value="getStopEffect(field)"
-            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
-          />
-          <span class="effect-value">
-            {{ getStopEffect(field).toFixed(EFFECT_UI[field].step < 0.01 ? 3 : 2) }}
-            {{ EFFECT_UI[field].unit }}
-          </span>
-        </div>
-      </template>
-
-      <!-- ── Texture ── -->
-      <label class="effects-group-title">Image Sources</label>
-      <template v-for="field in (['tessellation','webcam'] as EffectFieldName[])" :key="field">
-        <div class="effect-row">
-          <span class="effect-label">{{ EFFECT_UI[field].label }}</span>
-          <input
-            class="slider effect-slider"
-            type="range"
-            :min="EFFECT_UI[field].min"
-            :max="EFFECT_UI[field].max"
-            :step="EFFECT_UI[field].step"
-            :value="getStopEffect(field)"
-            @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
-          />
-          <span class="effect-value">{{ getStopEffect(field).toFixed(2) }}</span>
-        </div>
+      <template v-for="groupName in UI_GROUP_ORDER" :key="groupName">
+        <label v-if="UI_GROUP_TITLES[groupName]" class="effects-group-title">{{ UI_GROUP_TITLES[groupName] }}</label>
+        <template v-for="field in UI_GROUPS[groupName]" :key="field">
+          <div class="effect-row">
+            <span class="effect-label">{{ EFFECT_FIELD_CONFIG[field].label }}</span>
+            <input
+              class="slider effect-slider"
+              type="range"
+              :min="EFFECT_FIELD_CONFIG[field].min"
+              :max="EFFECT_FIELD_CONFIG[field].max"
+              :step="EFFECT_FIELD_CONFIG[field].step"
+              :value="getStopEffect(field)"
+              @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
+            />
+            <span class="effect-value">
+              {{ getStopEffect(field).toFixed(EFFECT_FIELD_CONFIG[field].step < 0.01 ? 3 : 2) }}
+              {{ EFFECT_FIELD_CONFIG[field].unit }}
+            </span>
+          </div>
+        </template>
       </template>
     </div>
   </div>

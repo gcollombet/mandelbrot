@@ -1,8 +1,7 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, ref, toRaw, watch} from 'vue';
 import type {InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
-import type {ColorStop, EffectFieldName} from '../ColorStop.ts';
-import {COLOR_STOP_DEFAULTS} from '../ColorStop.ts';
+import type {ColorStop} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
 import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
@@ -68,18 +67,9 @@ const model =  defineModel<MandelbrotParams>({
     paletteMirror: false,
     antialiasLevel: 1,
     tessellationLevel: 0,
-    shadingLevel: 0,
     lightAngle: 0,
     displacementAmount: 0,
-    specularPower: 1,
-    activatePalette: true,
-    activateSkybox: false,
-    activateTessellation: false,
-    activateWebcam: false,
-    activateShading: false,
-    activateZebra: false,
-     activateSmoothness: false,
-     activateAnimate: false,
+    activateAnimate: false,
      animationSpeed: 1.0,
      ambientOcclusionStrength: 0,
      microBumpStrength: 0,
@@ -537,20 +527,34 @@ async function deletePalette() {
 }
 
 async function togglePresetFavorite(id: number): Promise<void> {
+  const metadata = presets.value.find(p => p.id === id);
+  if (!metadata) return;
+  metadata.favorite = !metadata.favorite;
   const record = await getCachedPreset(id);
-  if (!record) return;
-  record.favorite = !record.favorite;
-  await updatePresetEntry(record);
-  presetCache.set(id, record);
-  presets.value = await getAllPresetEntries();
+  if (record) {
+    record.favorite = metadata.favorite;
+    try {
+      await updatePresetEntry(record);
+      presetCache.set(id, record);
+    } catch (e) {
+      metadata.favorite = !metadata.favorite;
+      console.warn('Failed to save preset favorite:', e);
+    }
+  } else {
+    metadata.favorite = !metadata.favorite;
+  }
 }
 
 async function togglePaletteFavorite(name: string): Promise<void> {
   const palette = palettes.value.find(item => item.name === name);
   if (!palette) return;
-  const updated = { ...palette, favorite: !palette.favorite };
-  await savePaletteEntry(updated);
-  palettes.value = await getAllPaletteEntries();
+  palette.favorite = !palette.favorite;
+  try {
+    await savePaletteEntry({ ...palette });
+  } catch (e) {
+    palette.favorite = !palette.favorite;
+    console.warn('Failed to save palette favorite:', e);
+  }
 }
 
 async function deleteAllPresets(): Promise<void> {
@@ -589,7 +593,7 @@ async function selectPreset(id: number) {
     for (const key of PERF_FIELDS) {
       (saved as any)[key] = (current as any)[key];
     }
-    withSuppressedSync(() => { model.value = saved; });
+    model.value = saved;
     // Restore texture if saved with the preset
     const texName = saved.textureName;
     if (texName && textures.value.some(t => t.name === texName)) {
@@ -621,126 +625,6 @@ const maxIterMultSlider = computed({
     model.value.maxIterationMultiplier = Number(Math.pow(10, val).toPrecision(3));
   }
 });
-
-// =====================================================
-// Sync UI toggle/slider values → per-stop effect fields
-// =====================================================
-// When a global toggle or slider changes, propagate the value to ALL stops.
-// This is the bridge between legacy UI controls and the per-stop palette texture.
-
-/**
- * Guard flag: when true, legacy toggle/slider watchers skip their
- * `setEffectOnAllStops` calls so they don't overwrite per-stop values
- * that were just loaded from a preset or palette.
- * Cleared automatically on the next tick via `withSuppressedSync`.
- */
-let suppressLegacySync = false;
-
-/** Run `fn` with legacy sync suppressed; flag is cleared after Vue flushes watchers. */
-function withSuppressedSync(fn: () => void) {
-  suppressLegacySync = true;
-  fn();
-  void nextTick().then(() => { suppressLegacySync = false; });
-}
-
-/**
- * Set an effect field on every color stop in the model.
- * Mutates the stops in place (Vue reactivity tracks this).
- */
-function setEffectOnAllStops(field: EffectFieldName, value: number) {
-  for (const stop of model.value.colorStops) {
-    stop[field] = value;
-  }
-}
-
-/**
- * Set an effect field only on stops that don't already have it defined.
- * Used for migration/initialization — does NOT overwrite per-stop values.
- */
-function fillMissingEffectOnStops(field: EffectFieldName, value: number) {
-  for (const stop of model.value.colorStops) {
-    if (stop[field] === undefined) {
-      stop[field] = value;
-    }
-  }
-}
-
-/**
- * Fill in missing effect fields on all stops using current legacy toggle/slider
- * values. Only writes to stops where the field is `undefined` — existing per-stop
- * values are preserved. Called when colorStops are replaced (palette selection,
- * preset load, etc.) and on initial mount.
- */
-function syncAllLegacyToStops() {
-  const m = model.value;
-  const stops = m.colorStops;
-  if (!stops || stops.length === 0) return;
-
-  // Activation toggles — only fill missing
-  if (m.activateShading !== undefined)      fillMissingEffectOnStops('shading',      m.activateShading      ? 1.0 : 0.0);
-  if (m.activatePalette !== undefined)      fillMissingEffectOnStops('palette',      m.activatePalette      ? 1.0 : 0.0);
-  if (m.activateSmoothness !== undefined)   fillMissingEffectOnStops('smoothness',   m.activateSmoothness   ? 1.0 : 0.0);
-  if (m.activateTessellation !== undefined) fillMissingEffectOnStops('tessellation', m.activateTessellation ? 1.0 : 0.0);
-  if (m.activateSkybox !== undefined)       fillMissingEffectOnStops('skybox',       m.activateSkybox       ? 1.0 : 0.0);
-  if (m.activateWebcam !== undefined)       fillMissingEffectOnStops('webcam',       m.activateWebcam       ? 1.0 : 0.0);
-  if (m.activateZebra !== undefined)        fillMissingEffectOnStops('zebra',        m.activateZebra        ? 1.0 : 0.0);
-
-  // Continuous sliders — only fill missing
-  // Note: tessellationLevel, displacementAmount, and lightAngle are now global uniforms, not per-stop.
-  if (m.shadingLevel !== undefined)       fillMissingEffectOnStops('shadingLevel',       m.shadingLevel);
-  if (m.specularPower !== undefined)      fillMissingEffectOnStops('specularPower',      m.specularPower);
-}
-
-// ── Activation toggles → stop weights ──
-// Map: legacy boolean field → stop effect field name
-const TOGGLE_TO_EFFECT: Array<[keyof MandelbrotParams, EffectFieldName, number]> = [
-  ['activateShading',      'shading',      COLOR_STOP_DEFAULTS.shading],
-  ['activatePalette',      'palette',      COLOR_STOP_DEFAULTS.palette],
-  ['activateSmoothness',   'smoothness',   COLOR_STOP_DEFAULTS.smoothness],
-  ['activateTessellation',  'tessellation', COLOR_STOP_DEFAULTS.tessellation],
-  ['activateSkybox',        'skybox',       COLOR_STOP_DEFAULTS.skybox],
-  ['activateWebcam',        'webcam',       COLOR_STOP_DEFAULTS.webcam],
-  ['activateZebra',         'zebra',        COLOR_STOP_DEFAULTS.zebra],
-];
-
-for (const [toggleField, effectField] of TOGGLE_TO_EFFECT) {
-  watch(
-    () => model.value[toggleField] as boolean | undefined,
-    (val) => {
-      if (suppressLegacySync) return;
-      if (val === undefined) return;
-      setEffectOnAllStops(effectField, val ? 1.0 : 0.0);
-    },
-  );
-}
-
-// ── Continuous sliders → stop parameters ──
-// Map: legacy slider field → stop effect field name
-// Note: tessellationLevel, displacementAmount, and lightAngle are now global uniforms, not per-stop.
-const SLIDER_TO_EFFECT: Array<[keyof MandelbrotParams, EffectFieldName]> = [
-  ['shadingLevel',       'shadingLevel'],
-  ['specularPower',      'specularPower'],
-];
-
-for (const [sliderField, effectField] of SLIDER_TO_EFFECT) {
-  watch(
-    () => model.value[sliderField] as number | undefined,
-    (val) => {
-      if (suppressLegacySync) return;
-      if (val === undefined) return;
-      setEffectOnAllStops(effectField, val);
-    },
-  );
-}
-
-// When colorStops is replaced wholesale (palette selection, LCH generation, etc.),
-// stamp the current legacy toggle/slider values onto all new stops.
-// Do not run on Settings mount: opening a panel must not mutate palette data,
-// otherwise the renderer sees a palette change and recomputes the full image.
-watch(
-  () => model.value.colorStops,
-  () => { syncAllLegacyToStops(); },
-);
 
 onMounted(async () => {
   await loadPresets();

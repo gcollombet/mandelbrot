@@ -1,7 +1,9 @@
 import { interpolateLab, interpolateRgb, interpolateHcl, interpolateHsl, interpolateCubehelix } from 'd3-interpolate';
 import { rgb } from 'd3-color';
 import type { ColorStop } from './ColorStop.ts';
-import { applyStopTransferCurve, COLOR_STOP_DEFAULTS, getEffectValue, getStopTransferCurve } from './ColorStop.ts';
+import { applyStopTransferCurve, getEffectValue, getStopTransferCurve } from './ColorStop.ts';
+import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG } from './effectFieldConfig';
+import type { EffectFieldName } from './effectFieldConfig';
 import type { InterpolationMode } from './Mandelbrot.ts';
 
 const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: number) => string> = {
@@ -18,10 +20,23 @@ const TEXTURE_WIDTH = 4096;
 /** Height of the palette texture (6 rows for RGB+effects+iridescence+orbit metrics). */
 const TEXTURE_HEIGHT = 6;
 
-/**
- * Linearly interpolate a single effect field between two stops.
- */
-function lerpEffect(a: ColorStop, b: ColorStop, field: keyof typeof COLOR_STOP_DEFAULTS, t: number): number {
+/** Effect-only texture rows (1, 2, 3, 5) — fields grouped by row. */
+const EFFECT_ROWS: Array<{ row: number; fields: EffectFieldName[] }> = [];
+{
+  const rowFields = new Map<number, EffectFieldName[]>();
+  for (const name of Object.keys(EFFECT_FIELD_CONFIG) as EffectFieldName[]) {
+    const { textureRow } = EFFECT_FIELD_CONFIG[name];
+    if (textureRow === 0 || textureRow === 4) continue;
+    if (!rowFields.has(textureRow)) rowFields.set(textureRow, []);
+    rowFields.get(textureRow)!.push(name);
+  }
+  for (const [row, fields] of rowFields) {
+    EFFECT_ROWS.push({ row, fields });
+  }
+  EFFECT_ROWS.sort((a, b) => a.row - b.row);
+}
+
+function lerpEffect(a: ColorStop, b: ColorStop, field: EffectFieldName, t: number): number {
   const va = getEffectValue(a, field);
   const vb = getEffectValue(b, field);
   return va + (vb - va) * t;
@@ -40,10 +55,6 @@ export class Palette {
     this.interpolate = interpolators[mode] ?? interpolateLab;
   }
 
-  /**
-   * Get the interpolated CSS color at position t in [0, 1].
-   * Uses the configured color-space interpolation (Lab, RGB, etc.).
-   */
   getColorAt(t: number): string {
     if (this.points.length === 0) return '#000';
     if (t <= this.points[0].position) return this.points[0].color;
@@ -61,12 +72,8 @@ export class Palette {
     return '#000';
   }
 
-  /**
-   * Get the interpolated value of an effect field at position t in [0, 1].
-   * Uses linear interpolation between the two surrounding stops.
-   */
-  getEffectAt(t: number, field: keyof typeof COLOR_STOP_DEFAULTS): number {
-    if (this.points.length === 0) return COLOR_STOP_DEFAULTS[field];
+  getEffectAt(t: number, field: EffectFieldName): number {
+    if (this.points.length === 0) return DEFAULT_VALUES[field];
     if (t <= this.points[0].position) return getEffectValue(this.points[0], field);
     if (t >= this.points[this.points.length - 1].position) {
       return getEffectValue(this.points[this.points.length - 1], field);
@@ -80,7 +87,7 @@ export class Palette {
         return lerpEffect(a, b, field, curvedT);
       }
     }
-    return COLOR_STOP_DEFAULTS[field];
+    return DEFAULT_VALUES[field];
   }
 
   getIridescenceAt(t: number): { color: string; strength: number } {
@@ -135,13 +142,11 @@ export class Palette {
    *
    * Layout (6 rows of 4096 RGBA texels):
    *   Row 0: R [0,1], G [0,1], B [0,1], palette weight [0,1]
-   *   Row 1: zebra [0,1], tessellation [0,1], shading [0,1], skybox [0,1]
-   *   Row 2: webcam [0,1], smoothness [0,1], shadingLevel [0,3], specularPower [1,64]
-   *   Row 3: reserved legacy lightAngle [0,2pi], metallic [0,1], roughness [0.02,1], anisotropy [0,1]
-   *   Row 4: iridescence RGB [0,1], iridescence strength [0,1]
-   *   Row 5: stripeAverage [0,1], directionCoherence [0,1], stripeRelief [0,1], directionCoherenceRelief [0,1]
-   *
-   * @returns {{ data: Float32Array, width: number, height: number }}
+   *   Row 1: zebra, tessellation, shading, skybox
+   *   Row 2: webcam, smoothness, shadingLevel, specularPower
+   *   Row 3: (reserved), metallic, roughness, anisotropy
+   *   Row 4: iridescence R, G, B, strength
+   *   Row 5: stripeAverage, rotationMean, stripeRelief, directionCoherenceRelief
    */
   generateTexture(): { data: Float32Array; width: number; height: number } {
     const width = TEXTURE_WIDTH;
@@ -152,35 +157,23 @@ export class Palette {
       const t = x / (width - 1);
       const color = rgb(this.getColorAt(t));
 
-      // ── Row 0: R, G, B, palette weight ──
+      // Row 0: R, G, B, palette weight
       const row0 = (0 * width + x) * 4;
       data[row0]     = (color.r ?? 0) / 255;
       data[row0 + 1] = (color.g ?? 0) / 255;
       data[row0 + 2] = (color.b ?? 0) / 255;
       data[row0 + 3] = this.getEffectAt(t, 'palette');
 
-      // ── Row 1: zebra, tessellation, shading, skybox ──
-      const row1 = (1 * width + x) * 4;
-      data[row1]     = this.getEffectAt(t, 'zebra');
-      data[row1 + 1] = this.getEffectAt(t, 'tessellation');
-      data[row1 + 2] = this.getEffectAt(t, 'shading');
-      data[row1 + 3] = this.getEffectAt(t, 'skybox');
+      // Effect-only rows (1, 2, 3, 5): driven by config
+      for (const { row, fields } of EFFECT_ROWS) {
+        const base = (row * width + x) * 4;
+        for (const field of fields) {
+          const ch = EFFECT_FIELD_CONFIG[field].textureChannel;
+          data[base + ch] = this.getEffectAt(t, field);
+        }
+      }
 
-      // ── Row 2: webcam, smoothness, shadingLevel, specularPower ──
-      const row2 = (2 * width + x) * 4;
-      data[row2]     = this.getEffectAt(t, 'webcam');
-      data[row2 + 1] = this.getEffectAt(t, 'smoothness');
-      data[row2 + 2] = this.getEffectAt(t, 'shadingLevel');
-      data[row2 + 3] = this.getEffectAt(t, 'specularPower');
-
-      // ── Row 3: reserved legacy lightAngle, metallic, roughness, anisotropy ──
-      const row3 = (3 * width + x) * 4;
-      data[row3]     = this.getEffectAt(t, 'lightAngle');
-      data[row3 + 1] = this.getEffectAt(t, 'metallic');
-      data[row3 + 2] = this.getEffectAt(t, 'roughness');
-      data[row3 + 3] = this.getEffectAt(t, 'anisotropy');
-
-      // ── Row 4: iridescence R, G, B, strength ──
+      // Row 4: iridescence R, G, B, strength
       const iridescence = this.getIridescenceAt(t);
       const iridescenceColor = rgb(iridescence.color);
       const row4 = (4 * width + x) * 4;
@@ -188,22 +181,11 @@ export class Palette {
       data[row4 + 1] = (iridescenceColor.g ?? 0) / 255;
       data[row4 + 2] = (iridescenceColor.b ?? 0) / 255;
       data[row4 + 3] = Math.max(0, Math.min(1, iridescence.strength));
-
-      // ── Row 5: orbit metric blends ──
-      const row5 = (5 * width + x) * 4;
-      data[row5]     = this.getEffectAt(t, 'stripeAverage');
-      data[row5 + 1] = this.getEffectAt(t, 'rotationMean');
-      data[row5 + 2] = this.getEffectAt(t, 'stripeRelief');
-      data[row5 + 3] = this.getEffectAt(t, 'directionCoherenceRelief');
     }
 
     return { data, width, height };
   }
 
-  /**
-   * Generate a 1-row ImageData (4096 x 1) containing only the RGB color row.
-   * Used for palette thumbnails in the UI (always opaque).
-   */
   generateThumbnailRow(): ImageData {
     const width = TEXTURE_WIDTH;
     const imageData = new ImageData(width, 1);

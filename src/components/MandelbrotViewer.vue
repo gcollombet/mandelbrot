@@ -160,12 +160,10 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   palettePeriod: 7.37,
   paletteOffset: 0.0,
   paletteMirror: false,
-  shadingLevel: 0,
   lightAngle: 0,
   antialiasLevel: 1,
   maxIterations: 100,
   displacementAmount: 0,
-  specularPower: 1,
   tessellationLevel: 0,
   epsilon: 0.00001,
   colorStops: [
@@ -198,13 +196,6 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
       "position": 1
     }
   ],
-  activateShading: false,
-  activateTessellation: false,
-  activateWebcam: false,
-  activatePalette: true,
-  activateSkybox: false,
-  activateSmoothness: false,
-  activateZebra: false,
   activateAnimate: false,
   approximationMode: 'perturbation',
   dprMultiplier: 1.0,

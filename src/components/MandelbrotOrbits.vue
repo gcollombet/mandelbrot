@@ -248,12 +248,6 @@ watch(() => [props.scale, props.angle, props.cx, props.cy], () => {
       :angle="props.angle ?? 0.0"
       :cx="props.cx ?? '0.0'"
       :cy="props.cy ?? '0.0'"
-      :activateSmoothness="false"
-      :activatePalette="props.showPalette"
-      :activateSkybox="false"
-      :activateTessellation="false"
-      :activateWebcam="false"
-      :activateShading="false"
       :colorStops="[{ position: 0, color: '#000000' }, { position: 0.5, color: '#ffffff' }]"
       style="position: absolute; left: 0; top: 0; width: 100%; height: 100%; z-index: 1;"
     />

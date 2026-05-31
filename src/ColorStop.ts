@@ -1,21 +1,14 @@
 import { interpolateRgb } from 'd3-interpolate';
+import { DEFAULT_VALUES, EFFECT_FIELD_NAMES } from './effectFieldConfig';
+import type { EffectFieldName } from './effectFieldConfig';
+export type { EffectFieldName } from './effectFieldConfig';
 
 /**
  * A single stop in the extended palette.
  *
  * `color` and `position` define the RGB gradient as before.
- * The optional effect fields are encoded into palette-texture rows 0-3
+ * The optional effect fields are encoded into palette-texture rows
  * and interpolated between stops just like colors.
- *
- * Texture layout (4096 x 6, rgba16float):
- *   Row 0: R, G, B, palette   (palette = opacity of RGB color)
- *   Row 1: zebra, tessellation, shading, skybox
- *   Row 2: webcam, smoothness, shadingLevel, specularPower
- *   Row 3: reserved legacy lightAngle, metallic, roughness, anisotropy
- *   Row 4: iridescence R, G, B, strength
- *   Row 5: stripeAverage, directionCoherence, stripeRelief, directionCoherenceRelief
- *
- * tessellationLevel, displacementAmount, and lightAngle are global uniforms (not per-stop).
  *
  * Activation weights are in [0, 1].
  * Continuous parameters are stored in their natural range (float16).
@@ -36,7 +29,6 @@ export function applyStopTransferCurve(curve: StopTransferCurve, t: number): num
   const x = clamp01(t);
   switch (curve) {
     case 'gaussian': {
-      // Plateau at start, smooth transition, plateau at end.
       const edgeStart = 0.28;
       const edgeEnd = 0.72;
       if (x <= edgeStart) return 0;
@@ -45,7 +37,6 @@ export function applyStopTransferCurve(curve: StopTransferCurve, t: number): num
       return u * u * (3 - 2 * u);
     }
     case 'square':
-      // Square-wave transfer: immediate jump to next stop right after the boundary.
       return x <= 0 ? 0 : 1;
     case 'exponential':
       return (Math.exp(3 * x) - 1) / (Math.exp(3) - 1);
@@ -92,83 +83,26 @@ export type ColorStop = {
 
   // ── Continuous effect parameters (natural ranges) ──
 
-  /** Shading diffuse/ambient level, range [0, 3] (default 1.5) */
+  /** Shading diffuse/ambient level, range [0, 3] (default 0) */
   shadingLevel?: number;
-  /** Specular intensity, range [1, 64] (default 20) */
+  /** Specular intensity, range [1, 64] (default 0) */
   specularPower?: number;
-  /** Light azimuth angle in radians, range [0, 2pi] (default 0.75) */
-  lightAngle?: number;
   /** Metallic response, range [0, 1] (default 0) */
   metallic?: number;
-  /** Per-stop roughness, range [0.02, 1] (default 0.35) */
+  /** Per-stop roughness, range [0.02, 1] (default 0) */
   roughness?: number;
-  /** Anisotropic highlight strength, range [0, 1] (default 0.4) */
+  /** Anisotropic highlight strength, range [0, 1] (default 0) */
   anisotropy?: number;
-  /** Iridescence intensity, range [0, 1] (default 1 when iridescence color is set) */
+  /** Iridescence intensity, range [0, 1] (default 0) */
   iridescencePower?: number;
-
-  // Legacy fields (kept for backward compat with saved presets, ignored by renderer)
-  /** @deprecated Now a global uniform. Kept for preset compat. */
-  tessellationLevel?: number;
-  /** @deprecated Now a global uniform. Kept for preset compat. */
-  displacementAmount?: number;
 };
-
-/**
- * Default values for every optional effect field.
- * Used when a stop does not specify a field (legacy stops, new stops, etc.).
- */
-export const COLOR_STOP_DEFAULTS = {
-  palette: 1.0,
-  zebra: 0.0,
-  tessellation: 0.0,
-  shading: 0.0,
-  skybox: 0.0,
-  webcam: 0.0,
-  smoothness: 0.0,
-  stripeAverage: 0.0,
-  rotationMean: 0.0,
-  stripeRelief: 0.0,
-  directionCoherenceRelief: 0.0,
-  shadingLevel: 0.0,
-  specularPower: 1.0,
-  lightAngle: 0.0,
-  metallic: 0.0,
-  roughness: 1.0,
-  anisotropy: 0.0,
-  iridescencePower: 0.0,
-} as const satisfies Record<EffectFieldName, number>;
-
-/** All optional effect field names (activation weights + continuous params). */
-export const EFFECT_FIELD_NAMES = [
-  'palette',
-  'zebra',
-  'tessellation',
-  'shading',
-  'skybox',
-  'webcam',
-  'smoothness',
-  'stripeAverage',
-  'rotationMean',
-  'stripeRelief',
-  'directionCoherenceRelief',
-  'shadingLevel',
-  'specularPower',
-  'lightAngle',
-  'metallic',
-  'roughness',
-  'anisotropy',
-  'iridescencePower',
-] as const;
-
-export type EffectFieldName = (typeof EFFECT_FIELD_NAMES)[number];
 
 /**
  * Return the effective value of an effect field on a stop,
  * falling back to the default if the field is undefined.
  */
 export function getEffectValue(stop: ColorStop, field: EffectFieldName): number {
-  return stop[field] ?? COLOR_STOP_DEFAULTS[field];
+  return stop[field] ?? DEFAULT_VALUES[field];
 }
 
 function clamp01(value: number): number {
@@ -177,12 +111,6 @@ function clamp01(value: number): number {
 
 function lerp(a: number, b: number, t: number): number {
   return a + (b - a) * t;
-}
-
-function lerpAngle(a: number, b: number, t: number): number {
-  const tau = Math.PI * 2;
-  const delta = ((b - a + Math.PI) % tau + tau) % tau - Math.PI;
-  return ((a + delta * t) % tau + tau) % tau;
 }
 
 function findAdjacentStops(stops: ColorStop[], position: number): [ColorStop, ColorStop, number] | null {
@@ -227,16 +155,14 @@ export function createInterpolatedColorStop(
 
   for (const field of EFFECT_FIELD_NAMES) {
     if (!adjacent) {
-      newStop[field] = COLOR_STOP_DEFAULTS[field];
+      newStop[field] = DEFAULT_VALUES[field];
       continue;
     }
 
     const [left, right, t] = adjacent;
     const leftValue = getEffectValue(left, field);
     const rightValue = getEffectValue(right, field);
-    newStop[field] = field === 'lightAngle'
-      ? lerpAngle(leftValue, rightValue, t)
-      : lerp(leftValue, rightValue, t);
+    newStop[field] = lerp(leftValue, rightValue, t);
   }
 
   return newStop;
