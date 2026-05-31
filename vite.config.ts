@@ -13,6 +13,7 @@ export default defineConfig({
       topLevelAwait()
   ],
   worker: {
+    format: 'es',
     plugins: () => [
       wasm(),
       topLevelAwait()
