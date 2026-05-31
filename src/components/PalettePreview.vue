@@ -356,18 +356,18 @@ async function init() {
     1,            // liveZoomFactor (no zoom)
     0,            // frozenShiftU
     0,            // frozenShiftV
-    props.tessellationLevel ?? 2, // tessellationLevel
-    props.displacementAmount ?? 0.01, // displacementAmount
+    props.tessellationLevel ?? 0, // tessellationLevel
+    props.displacementAmount ?? 0, // displacementAmount
     1.0,          // animationSpeed
     1e-10,        // epsilon (interior detection, not relevant for preview)
-    props.ambientOcclusionStrength ?? 0.5, // ambientOcclusionStrength
-    props.microBumpStrength ?? 0.25, // microBumpStrength
-    props.clearcoatStrength ?? 0.7, // clearcoatStrength
+    props.ambientOcclusionStrength ?? 0, // ambientOcclusionStrength
+    props.microBumpStrength ?? 0, // microBumpStrength
+    props.clearcoatStrength ?? 0, // clearcoatStrength
     props.subsurfaceStrength ?? 0.0, // subsurfaceStrength
-    props.reliefDepth ?? 0.35, // reliefDepth
-    props.localShadowStrength ?? 0.4, // localShadowStrength
+    props.reliefDepth ?? 0, // reliefDepth
+    props.localShadowStrength ?? 0, // localShadowStrength
     previewLightAngle, // lightAngle
-    props.varnishStrength ?? 1.0, // varnishStrength
+    props.varnishStrength ?? 0, // varnishStrength
     Math.log(mu),     // logMu
     0,                // sceneSin
     1,                // sceneCos
@@ -429,18 +429,18 @@ watch(
     const previewLightAngle = 3.927;
     const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
     const patch = new Float32Array([
-      props.tessellationLevel ?? 2,
-      props.displacementAmount ?? 0.01,
+      props.tessellationLevel ?? 0,
+      props.displacementAmount ?? 0,
       1.0,
       1e-10,
-      props.ambientOcclusionStrength ?? 0.5,
-      props.microBumpStrength ?? 0.25,
-      props.clearcoatStrength ?? 0.7,
+      props.ambientOcclusionStrength ?? 0,
+      props.microBumpStrength ?? 0,
+      props.clearcoatStrength ?? 0,
       props.subsurfaceStrength ?? 0.0,
-      props.reliefDepth ?? 0.35,
-      props.localShadowStrength ?? 0.4,
+      props.reliefDepth ?? 1,
+      props.localShadowStrength ?? 0,
       previewLightAngle,
-      props.varnishStrength ?? 1.0,
+      props.varnishStrength ?? 0,
       Math.log(PREVIEW_MU),
       0,
       1,

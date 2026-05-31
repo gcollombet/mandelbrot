@@ -884,13 +884,16 @@ async function importPresets(event: Event) {
   const files = Array.from(input.files ?? []);
   if (files.length === 0) return;
 
+  const existing = await getAllPresetEntries();
   let importedCount = 0;
+  let hadValid = false;
   for (const file of files) {
     try {
       const imported = await readJsonFile(file);
       const records = Array.isArray(imported) ? imported : [imported];
       for (const preset of records) {
         if (!preset || typeof preset !== 'object' || !('value' in preset)) continue;
+        hadValid = true;
         const record = preset as {
           value: MandelbrotParams;
           thumbnail?: string;
@@ -898,10 +901,13 @@ async function importPresets(event: Event) {
           date?: string;
           favorite?: boolean;
         };
+        const name = record.name ?? '';
+        const date = record.date ?? '';
+        if (existing.some(e => e.name === name && e.date === date)) continue;
         await savePresetEntry(
           record.value,
           record.thumbnail ?? '',
-          record.name ?? '',
+          name,
           record.date,
           record.favorite ?? false,
         );
@@ -914,6 +920,8 @@ async function importPresets(event: Event) {
 
   if (importedCount > 0) {
     presets.value = await getAllPresetEntries();
+  } else if (hadValid) {
+    window.alert('All presets were already imported (same name + date).');
   } else {
     window.alert('Invalid file format.');
   }
@@ -955,14 +963,21 @@ async function importPalettes(event: Event) {
   const files = Array.from(input.files ?? []);
   if (files.length === 0) return;
 
+  const existing = await getAllPaletteEntries();
   let importedCount = 0;
+  let hadValid = false;
   for (const file of files) {
     try {
       const imported = await readJsonFile(file);
       const records = Array.isArray(imported) ? imported : [imported];
       for (const palette of records) {
         if (!palette || typeof palette !== 'object' || !('name' in palette) || !('colorStops' in palette)) continue;
-        await savePaletteEntry(palette as PaletteRecord);
+        hadValid = true;
+        const record = palette as PaletteRecord;
+        const name = record.name ?? '';
+        const date = record.date ?? '';
+        if (existing.some(e => e.name === name && e.date === date)) continue;
+        await savePaletteEntry(record);
         importedCount += 1;
       }
     } catch (error) {
@@ -972,6 +987,8 @@ async function importPalettes(event: Event) {
 
   if (importedCount > 0) {
     palettes.value = await getAllPaletteEntries();
+  } else if (hadValid) {
+    window.alert('All palettes were already imported (same name + date).');
   } else {
     window.alert('Invalid file format.');
   }
