@@ -20,6 +20,7 @@ export default defineConfig({
     ]
   },
   build: {
+    target: 'esnext',
     outDir: 'docs',
     assetsDir: ''  // Met les assets à la racine au lieu de assets/
   }

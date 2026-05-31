@@ -661,10 +661,7 @@ const shortcutLabels = computed(() => {
           aria-label="Download screenshot"
           @click="downloadCanvasSnapshot"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <path d="M4 8h3l1.5-2h7L17 8h3a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H4a2 2 0 0 1-2-2v-8a2 2 0 0 1 2-2Z" stroke="currentColor" stroke-width="1.8" stroke-linejoin="round"/>
-            <circle cx="12" cy="14" r="4" stroke="currentColor" stroke-width="1.8"/>
-          </svg>
+          <i class="fa-solid fa-camera fa-fw" aria-hidden="true"></i>
           <span class="tab-shortcut-hint is-hidden-touch">(B)</span>
         </button>
       </div>
@@ -830,11 +827,7 @@ const shortcutLabels = computed(() => {
       <a href="./presentation/"
          class="footer-presentation"
          aria-label="Présentation">
-        <svg height="16" width="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle; margin-right:4px;">
-          <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-          <line x1="8" y1="21" x2="16" y2="21"/>
-          <line x1="12" y1="17" x2="12" y2="21"/>
-        </svg>
+        <i class="fa-solid fa-display fa-fw" style="vertical-align:middle; margin-right:4px;"></i>
         Présentation
       </a>
     </div>

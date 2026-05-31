@@ -123,15 +123,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
       @touchend="handleCompassTouch"
       aria-label="Toggle navigation"
     >
-      <svg width="32" height="32" viewBox="0 0 24 24" fill="none" class="nav-icon">
-        <circle cx="12" cy="12" r="10" stroke="currentColor" stroke-width="2"/>
-        <path d="M12 2 L12 6" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-        <path d="M12 18 L12 22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-        <path d="M2 12 L6 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-        <path d="M18 12 L22 12" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-        <path d="M12 7 L10 12 L12 14 L14 12 Z" fill="currentColor"/>
-        <text x="12" y="6" text-anchor="middle" font-size="6" fill="currentColor" font-weight="bold">N</text>
-      </svg>
+      <i class="fa-solid fa-compass fa-2x nav-icon"></i>
     </button>
 
     <!-- Chevrons directionnels -->
@@ -148,9 +140,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Move North"
         >
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" class="nav-icon">
-            <path d="M12 5 L18 11 L15 11 L15 19 L9 19 L9 11 L6 11 Z" fill="currentColor" stroke="black" stroke-width="1"/>
-          </svg>
+          <i class="fa-solid fa-arrow-up fa-3x nav-icon"></i>
         </button>
 
         <!-- Sud -->
@@ -164,9 +154,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Move South"
         >
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" class="nav-icon">
-            <path d="M12 19 L6 13 L9 13 L9 5 L15 5 L15 13 L18 13 Z" fill="currentColor" stroke="black" stroke-width="1"/>
-          </svg>
+          <i class="fa-solid fa-arrow-down fa-3x nav-icon"></i>
         </button>
 
         <!-- Ouest -->
@@ -180,9 +168,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Move West"
         >
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" class="nav-icon">
-            <path d="M5 12 L11 18 L11 15 L19 15 L19 9 L11 9 L11 6 Z" fill="currentColor" stroke="black" stroke-width="1"/>
-          </svg>
+          <i class="fa-solid fa-arrow-left fa-3x nav-icon"></i>
         </button>
 
         <!-- Est -->
@@ -196,9 +182,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Move East"
         >
-          <svg width="48" height="48" viewBox="0 0 24 24" fill="none" class="nav-icon">
-            <path d="M19 12 L13 6 L13 9 L5 9 L5 15 L13 15 L13 18 Z" fill="currentColor" stroke="black" stroke-width="1"/>
-          </svg>
+          <i class="fa-solid fa-arrow-right fa-3x nav-icon"></i>
         </button>
 
         <!-- Rotation gauche (coin supérieur gauche) -->
@@ -212,10 +196,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Rotate Left"
         >
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" class="nav-icon">
-            <path d="M16 8 A6 6 0 1 0 8 16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-            <path d="M5 16 L8 16 L8 13" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          <i class="fa-solid fa-rotate-left fa-2x nav-icon"></i>
         </button>
 
         <!-- Rotation droite (coin supérieur droit) -->
@@ -229,10 +210,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Rotate Right"
         >
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" class="nav-icon">
-            <path d="M8 8 A6 6 0 1 1 16 16" stroke="currentColor" stroke-width="2.5" stroke-linecap="round"/>
-            <path d="M19 16 L16 16 L16 13" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
-          </svg>
+          <i class="fa-solid fa-rotate-right fa-2x nav-icon"></i>
         </button>
 
         <!-- Zoom out (coin inférieur gauche) -->
@@ -246,11 +224,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Zoom Out"
         >
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" class="nav-icon">
-            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
-            <path d="M18 18 L22 22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            <path d="M8 11 L14 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
+          <i class="fa-solid fa-magnifying-glass-minus fa-2x nav-icon"></i>
         </button>
 
         <!-- Zoom in (coin inférieur droit) -->
@@ -264,12 +238,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Zoom In"
         >
-          <svg width="40" height="40" viewBox="0 0 24 24" fill="none" class="nav-icon">
-            <circle cx="11" cy="11" r="7" stroke="currentColor" stroke-width="2"/>
-            <path d="M18 18 L22 22" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            <path d="M11 8 L11 14" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-            <path d="M8 11 L14 11" stroke="currentColor" stroke-width="2" stroke-linecap="round"/>
-          </svg>
+          <i class="fa-solid fa-magnifying-glass-plus fa-2x nav-icon"></i>
         </button>
 
         <!-- Bouton Présentation (lien vers la doc VitePress) -->
@@ -279,11 +248,7 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @click="goToPresentation"
           aria-label="Présentation"
         >
-          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="vertical-align:middle; margin-right:4px;">
-            <rect x="2" y="3" width="20" height="14" rx="2" ry="2"/>
-            <line x1="8" y1="21" x2="16" y2="21"/>
-            <line x1="12" y1="17" x2="12" y2="21"/>
-          </svg>
+          <i class="fa-solid fa-display fa-fw" style="vertical-align:middle; margin-right:4px;"></i>
           Présentation
         </button>
       </div>

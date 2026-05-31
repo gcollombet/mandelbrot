@@ -18,6 +18,9 @@ export default defineConfig({
             wasm(),
             topLevelAwait()
         ],
+        build: {
+            target: 'esnext'
+        },
         worker: {
             format: 'es',
             plugins: () => [
