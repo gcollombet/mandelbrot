@@ -265,10 +265,10 @@ async function runComputeLoop(jobId: number) {
         postError(jobId, error)
     } finally {
         computeLoopRunning = false
-        if (!disposed && navigator && jobId === activeJobId) {
+        if (!disposed && navigator) {
             const availableIter = Math.max(0, navigator.get_reference_orbit_len())
-            if (availableIter < targetMaxIterations || needsReferenceValidation) {
-                void runComputeLoop(jobId)
+            if (jobId !== activeJobId || availableIter < targetMaxIterations || needsReferenceValidation) {
+                void runComputeLoop(activeJobId)
             }
         }
     }

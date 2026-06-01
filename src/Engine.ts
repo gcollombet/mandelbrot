@@ -436,11 +436,12 @@ export class Engine {
         this.time = 0
     }
 
-    private postReferenceWorker(message: ReferenceWorkerRequest) {
+    private postReferenceWorker(message: ReferenceWorkerRequest): boolean {
         if (!this.referenceWorker || this.referenceWorkerFailed) {
-            return
+            return false
         }
         this.referenceWorker.postMessage(message)
+        return true
     }
 
     private initializeReferenceWorker() {
@@ -494,8 +495,10 @@ export class Engine {
         if (nextKey === this.referenceViewKey) {
             return
         }
-            this.referenceViewKey = nextKey
+        this.referenceViewKey = nextKey
         this.isReferenceValidating = true
+        this.orbitIncomplete = true
+        this.needRender = true
         this.postReferenceWorker({
             type: 'updateView',
             jobId: this.referenceJobId,
@@ -2052,6 +2055,7 @@ export class Engine {
         else if (this.clearHistoryNextFrame) reason = 'clearHistory'
         else if (this.needFreezeSnapshot) reason = 'freezeSnapshot'
         else if (this.needMergeSnapshot) reason = 'mergeSnapshot'
+        else if (this.isReferenceValidating) reason = 'referenceValidating'
         else if (this.orbitIncomplete) reason = 'orbitIncomplete'
         else if (this.unfinishedPixelCount < 0
             || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD) {

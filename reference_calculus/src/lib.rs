@@ -381,8 +381,7 @@ impl MandelbrotNavigator {
             && ((&self.reference_cx - &self.cx).abs() > &self.scale * &twenty
                 || (&self.reference_cy - &self.cy).abs() > &self.scale * &twenty)
         {
-            let (reference_cx, reference_cy) = self.choose_reference_near_view();
-            self.reset_reference_to(reference_cx, reference_cy);
+            self.reset_reference_to(self.cx.clone(), self.cy.clone());
         }
 
         let offset = self.result.len();

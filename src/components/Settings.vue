@@ -1412,7 +1412,7 @@ async function renameAndSaveSkyboxTexture() {
           :aria-pressed="showOnlyFavoriteNavigation"
           @click="showOnlyFavoriteNavigation = !showOnlyFavoriteNavigation"
         >
-          <span class="favorite-filter-heart">♥</span>
+          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoriteNavigation ? 'fa-solid' : 'fa-regular'"></i></span>
           <span>Favorites</span>
         </button>
         <div class="dropdown" :class="{ 'is-active': showNavPresetDropdown }" style="width:100%;">
@@ -1441,7 +1441,7 @@ async function renameAndSaveSkyboxTexture() {
                   :aria-pressed="!!preset.favorite"
                   @click.stop.prevent="togglePresetFavorite(preset.id)"
                 >
-                  <span class="favorite-heart" aria-hidden="true">♥</span>
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
                 </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -1459,17 +1459,17 @@ async function renameAndSaveSkyboxTexture() {
         <div class="field is-grouped" style="margin-top:0.65em;">
           <div class="control">
             <button class="button is-warning is-small" @click="triggerImportPresets">
-              Import
+              <i class="fa-solid fa-file-import mr-1"></i> Import
             </button>
           </div>
           <div class="control">
             <button class="button is-info is-small is-light" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset">
-              Export Selected Navigation
+              <i class="fa-solid fa-download mr-1"></i> Export Selected Navigation
             </button>
           </div>
           <div class="control">
             <button class="button is-info is-small" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0">
-              Export Favorites
+              <i class="fa-solid fa-star mr-1"></i> Export Favorites
             </button>
           </div>
         </div>
@@ -1487,7 +1487,7 @@ async function renameAndSaveSkyboxTexture() {
           :aria-pressed="showOnlyFavoritePresets"
           @click="showOnlyFavoritePresets = !showOnlyFavoritePresets"
         >
-          <span class="favorite-filter-heart">♥</span>
+          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoritePresets ? 'fa-solid' : 'fa-regular'"></i></span>
           <span>Favorites</span>
         </button>
         <!-- Dropdown enrichie Bulma -->
@@ -1517,7 +1517,7 @@ async function renameAndSaveSkyboxTexture() {
                   :aria-pressed="!!preset.favorite"
                   @click.stop.prevent="togglePresetFavorite(preset.id)"
                 >
-                  <span class="favorite-heart" aria-hidden="true">♥</span>
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
                 </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -1543,7 +1543,7 @@ async function renameAndSaveSkyboxTexture() {
             />
           </div>
           <div class="control">
-            <button class="button is-link is-small" @click="savePreset">Save</button>
+            <button class="button is-link is-small" @click="savePreset"><i class="fa-solid fa-floppy-disk mr-1"></i> Save</button>
           </div>
         </div>
 
@@ -1553,28 +1553,28 @@ async function renameAndSaveSkyboxTexture() {
         <div class="field is-grouped">
           <div class="control">
             <button class="button is-info is-small" @click="exportPresets" :disabled="presets.length === 0">
-              Export
+              <i class="fa-solid fa-download mr-1"></i> Export
             </button>
           </div>
           <div class="control">
             <button class="button is-info is-small is-light" @click="exportSelectedPreset" :disabled="!selectedPreset">
-              Export Selected
+              <i class="fa-solid fa-download mr-1"></i> Export Selected
             </button>
           </div>
           <div class="control">
             <button class="button is-info is-small" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0">
-              Export Favorites
+              <i class="fa-solid fa-star mr-1"></i> Export Favorites
             </button>
           </div>
           <div class="control">
             <button class="button is-warning is-small" @click="triggerImportPresets">
-              Import
+              <i class="fa-solid fa-file-import mr-1"></i> Import
             </button>
             <input ref="presetFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPresets" />
           </div>
           <div class="control">
             <button class="button is-danger is-small is-light" @click="deleteAllPresets" :disabled="presets.length === 0">
-              Delete All
+              <i class="fa-solid fa-trash-can mr-1"></i> Delete All
             </button>
           </div>
         </div>
@@ -1673,7 +1673,7 @@ async function renameAndSaveSkyboxTexture() {
               :class="model.interpolationMode === mode.key ? 'is-link' : 'is-light'"
               @click="model.interpolationMode = mode.key"
             >
-              {{ mode.label }}
+              <i class="fa-solid fa-palette fa-fw mr-1"></i> {{ mode.label }}
             </button>
           </p>
         </div>
@@ -1812,11 +1812,11 @@ async function renameAndSaveSkyboxTexture() {
             />
           </div>
           <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportTexture">Import</button>
+            <button class="button is-warning is-small" @click="triggerImportTexture"><i class="fa-solid fa-file-import mr-1"></i> Import</button>
             <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
           </div>
           <div class="control">
-            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)">Delete</button>
+            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)"><i class="fa-solid fa-trash-can mr-1"></i> Delete</button>
           </div>
         </div>
       </div>
@@ -1861,11 +1861,11 @@ async function renameAndSaveSkyboxTexture() {
             />
           </div>
           <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportSkybox">Import</button>
+            <button class="button is-warning is-small" @click="triggerImportSkybox"><i class="fa-solid fa-file-import mr-1"></i> Import</button>
             <input ref="skyboxFileInput" type="file" accept="image/*" style="display:none;" @change="importSkyboxTexture" />
           </div>
           <div class="control">
-            <button class="button is-danger is-small" @click="deleteSkyboxTexture" :disabled="!skyboxName || BUILT_IN_TEXTURE_NAMES.has(skyboxName)">Delete</button>
+            <button class="button is-danger is-small" @click="deleteSkyboxTexture" :disabled="!skyboxName || BUILT_IN_TEXTURE_NAMES.has(skyboxName)"><i class="fa-solid fa-trash-can mr-1"></i> Delete</button>
           </div>
         </div>
       </div>
@@ -1884,7 +1884,7 @@ async function renameAndSaveSkyboxTexture() {
           :aria-pressed="showOnlyFavoritePalettePresets"
           @click="showOnlyFavoritePalettePresets = !showOnlyFavoritePalettePresets"
         >
-          <span class="favorite-filter-heart">♥</span>
+          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoritePalettePresets ? 'fa-solid' : 'fa-regular'"></i></span>
           <span>Favorites</span>
         </button>
         <div class="dropdown" :class="{ 'is-active': showPalettePresetDropdown }" style="width:100%;">
@@ -1913,7 +1913,7 @@ async function renameAndSaveSkyboxTexture() {
                   :aria-pressed="!!preset.favorite"
                   @click.stop.prevent="togglePresetFavorite(preset.id)"
                 >
-                  <span class="favorite-heart" aria-hidden="true">♥</span>
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
                 </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -1941,7 +1941,7 @@ async function renameAndSaveSkyboxTexture() {
           :aria-pressed="showOnlyFavoritePalettes"
           @click="showOnlyFavoritePalettes = !showOnlyFavoritePalettes"
         >
-          <span class="favorite-filter-heart">♥</span>
+          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoritePalettes ? 'fa-solid' : 'fa-regular'"></i></span>
           <span>Favorites</span>
         </button>
         <!-- Dropdown enrichie Bulma -->
@@ -1973,7 +1973,7 @@ async function renameAndSaveSkyboxTexture() {
                   :aria-pressed="!!palette.favorite"
                   @click.stop.prevent="togglePaletteFavorite(palette.name)"
                 >
-                  <span class="favorite-heart" aria-hidden="true">♥</span>
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="palette.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
                 </button>
                 <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail"
                   style="height:32px; width:100%; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -1990,10 +1990,10 @@ async function renameAndSaveSkyboxTexture() {
             />
           </div>
           <div class="control">
-            <button class="button is-link is-small" @click="savePalette">Save</button>
+            <button class="button is-link is-small" @click="savePalette"><i class="fa-solid fa-floppy-disk mr-1"></i> Save</button>
           </div>
           <div class="control">
-            <button class="button is-danger is-small" @click="deletePalette" :disabled="!paletteName">Delete</button>
+            <button class="button is-danger is-small" @click="deletePalette" :disabled="!paletteName"><i class="fa-solid fa-trash-can mr-1"></i> Delete</button>
           </div>
         </div>
 
@@ -2003,28 +2003,28 @@ async function renameAndSaveSkyboxTexture() {
         <div class="field is-grouped">
           <div class="control">
             <button class="button is-info is-small" @click="exportPalettes" :disabled="palettes.length === 0">
-              Export
+              <i class="fa-solid fa-download mr-1"></i> Export
             </button>
           </div>
           <div class="control">
             <button class="button is-info is-small is-light" @click="exportSelectedPalette" :disabled="!selectedPalette">
-              Export Selected
+              <i class="fa-solid fa-download mr-1"></i> Export Selected
             </button>
           </div>
           <div class="control">
             <button class="button is-info is-small" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0">
-              Export Favorites
+              <i class="fa-solid fa-star mr-1"></i> Export Favorites
             </button>
           </div>
           <div class="control">
             <button class="button is-warning is-small" @click="triggerImportPalettes">
-              Import
+              <i class="fa-solid fa-file-import mr-1"></i> Import
             </button>
             <input ref="paletteFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPalettes" />
           </div>
           <div class="control">
             <button class="button is-danger is-small is-light" @click="deleteAllPalettes" :disabled="palettes.length === 0">
-              Delete All
+              <i class="fa-solid fa-trash-can mr-1"></i> Delete All
             </button>
           </div>
         </div>
@@ -2055,14 +2055,14 @@ async function renameAndSaveSkyboxTexture() {
             :class="model.approximationMode !== 'bla' ? 'is-link' : 'is-light'"
             @click="model.approximationMode = 'perturbation'"
           >
-            Perturbation
+            <i class="fa-solid fa-calculator fa-fw mr-1"></i> Perturbation
           </button>
           <button
             class="button is-small"
             :class="model.approximationMode === 'bla' ? 'is-link' : 'is-light'"
             @click="model.approximationMode = 'bla'"
           >
-            BLA
+            <i class="fa-solid fa-chart-line fa-fw mr-1"></i> BLA
           </button>
         </div>
         <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : 'Classic' }}</span>
@@ -2327,11 +2327,10 @@ async function renameAndSaveSkyboxTexture() {
   z-index: 2;
 }
 .favorite-heart {
-  color: transparent;
   font-size: 1.35em;
   line-height: 1;
-  -webkit-text-stroke: 1.6px #fff;
-  text-shadow: 0 1px 4px rgba(0, 0, 0, 0.85);
+  color: #fff;
+  filter: drop-shadow(0 1px 4px rgba(0, 0, 0, 0.85));
 }
 .favorite-button.is-favorite {
   color: #ec3d7a;
@@ -2342,24 +2341,18 @@ async function renameAndSaveSkyboxTexture() {
 .favorite-button.is-favorite .favorite-heart,
 .favorite-button:hover .favorite-heart {
   color: #ec3d7a;
-  -webkit-text-stroke-color: #ec3d7a;
 }
 .favorite-filter {
   margin-bottom: 0.55em;
   gap: 0.35em;
-  color: #333;
+  color: #888;
 }
 .favorite-filter.is-active {
   border-color: #ec3d7a;
   color: #ec3d7a;
 }
 .favorite-filter-heart {
-  color: transparent;
-  -webkit-text-stroke: 1.2px currentColor;
   line-height: 1;
-}
-.favorite-filter.is-active .favorite-filter-heart {
-  color: #ec3d7a;
-  -webkit-text-stroke-color: #ec3d7a;
+  color: inherit;
 }
 </style>

@@ -1,62 +1,91 @@
 # Agent guide (Mandelbrot)
 
-This repo contains a Vue/Vite frontend plus Rust crates (one compiled to WASM).
+Vue/Vite + WebGPU frontend with Rust/WASM arbitrary-precision reference calculus.
+Live demo: https://gcollombet.github.io/mandelbrot/
+
+## Setup & first run
+
+```bash
+npm install
+cd reference_calculus && wasm-pack build && cd ..
+# The wasm-pack output in reference_calculus/pkg/ is consumed as an npm dependency
+# named "mandelbrot" (the crate's package name). In dev, you may need:
+npm link reference_calculus/pkg   # register the local wasm package globally
+npm link mandelbrot               # link it into the root project
+npm run dev
+# Open http://localhost:5173
+```
+
+The app requires a **WebGPU-capable browser** (Chrome/Edge with `--enable-unsafe-webgpu` flag).
 
 ## Commands
 
 ### Frontend (root)
 
-- Dev server: `npm run dev`
-- Production build: `npm run build`
-  - Note: this also runs `wasm-pack build --dev` in `reference_calculus/` and stages `docs` via `git add docs`.
-- Preview build output: `npm run preview`
-- Docs (VitePress): `npm run docs:dev`, `npm run docs:build`, `npm run docs:preview`
+| Command | What it does |
+|---|---|
+| `npm run dev` | Vite dev server on :5173 |
+| `npm run build` | `wasm-pack build` (release) → `vue-tsc -b` → `vite build` → `vitepress build presentation` → `git add docs` |
+| `npm run preview` | Preview the Vite production build (serves `docs/`) |
+| `npm run docs:dev` | VitePress dev server for `presentation/` |
+| `npm run docs:build` | Build VitePress site |
+| `npm run docs:preview` | Preview VitePress build |
+
+**Important**: `npm run build` auto-stages `docs/` via `git add docs`. The Vite build outputs to `docs/` (GitHub Pages), **not** `dist/`. `vite.config.ts` sets `base: './'` for relative asset paths and `assetsDir: ''` (assets at root, not in `assets/` subdir).
 
 ### Rust / WASM
 
-- Build WASM package (dev): `wasm-pack build --dev reference_calculus`
-- Rust tests (native, reference_calculus): `cargo test --manifest-path reference_calculus/Cargo.toml`
-- Rust tests (workspace, astro-float-local): `cargo test --manifest-path astro-float-local/Cargo.toml`
+- Build WASM (dev): `wasm-pack build --dev reference_calculus`
+- Build WASM (release): `wasm-pack build reference_calculus`
+- Rust tests: `cargo test --manifest-path reference_calculus/Cargo.toml`
+- Rust test by name: `cargo test --manifest-path reference_calculus/Cargo.toml <substring>`
+
+The crate lives at `reference_calculus/` and uses `dashu-float` for arbitrary precision (not astro-float). Crate name is `mandelbrot`, edition 2018. It compiles to both `cdylib` (WASM) and `rlib`.
 
 ### Lint / format
 
-- Typecheck (acts as lint): `npx vue-tsc -b`
-- Rust format check:
-  - `cargo fmt --manifest-path reference_calculus/Cargo.toml --check`
-  - `cargo fmt --manifest-path astro-float-local/Cargo.toml --check`
-- Rust clippy (optional but preferred):
-  - `cargo clippy --manifest-path reference_calculus/Cargo.toml --all-targets`
-  - `cargo clippy --manifest-path astro-float-local/Cargo.toml --all-targets`
+- Typecheck: `npx vue-tsc -b`
+- Rust format check: `cargo fmt --manifest-path reference_calculus/Cargo.toml --check`
+- Rust clippy: `cargo clippy --manifest-path reference_calculus/Cargo.toml --all-targets`
 
-### Run a single test
+### Tests
 
-- Rust: `cargo test --manifest-path reference_calculus/Cargo.toml <test_name_or_substring>`
-- Rust (workspace crate): `cargo test --manifest-path astro-float-local/Cargo.toml -p astro-float-num <test_name_or_substring>`
-- JS/TS: no configured test runner was found (no Playwright/Vitest/Jest config or deps); `tests/navigation.spec.ts` is currently empty.
+- **Playwright** (E2E): `npx playwright test` — dev server must already be running on :5173
+  - Config: `tests/` directory, `playwright.config.ts`
+  - Chromium only, headed mode (WebGPU requires it), `--enable-unsafe-webgpu` flag
+  - `tests/navigation.spec.ts` — 13 UI/interaction tests (loading, tabs, keyboard, mouse, localStorage persistence)
+  - `tests/visual.spec.ts` — 6 screenshot-based tests (default view, zoom reprojection, frozen alignment, interior, palette preview, console errors)
+  - Screenshots go to `tests/screenshots/`
+- **Rust**: `cargo test --manifest-path reference_calculus/Cargo.toml`
+- No JS/TS unit test runner configured (no Vitest/Jest).
 
-## Coding style
+## Architecture
+
+- `src/` — Vue 3 + TypeScript frontend. WebGPU compute/render pipeline in `Engine.ts` (~2300 lines). WGSL shaders in `src/assets/*.wgsl`.
+- `reference_calculus/` — Rust crate compiled to WASM via `wasm-pack`. Provides arbitrary-precision reference orbit calculation (`MandelbrotNavigator`), consumed from TS via wasm-bindgen.
+- `presentation/` — VitePress documentation site, output to `docs/presentation/`.
+- `docs/` — GitHub Pages deployment target. Contains both the app build and the VitePress presentation.
+
+## Style & conventions
 
 ### TypeScript / Vue
 
-- Keep TypeScript strict (see `tsconfig.app.json`): no unused locals/params, no unchecked side-effect imports.
-- Prefer explicit, typed APIs over `any`. Use `unknown` + narrowing when needed.
+- TS config: `tsconfig.app.json` — `strict: false` but `noUnusedLocals`, `noUnusedParameters`, `noUncheckedSideEffectImports` are on.
 - Prefer `import type { ... }` for type-only imports.
-- Avoid side-effect-only imports unless essential; if required, document intent in code review/PR.
-- Use clear names: `PascalCase` for components/classes, `camelCase` for variables/functions, `SCREAMING_SNAKE_CASE` for constants.
-- Error handling: throw `Error` (or a specific subclass) with actionable messages; validate inputs at boundaries.
+- Name: `PascalCase` components/classes, `camelCase` variables/functions.
+- Styling: Tailwind CSS v4 + SCSS (`sass-embedded`).
 
-### Rust (applies especially under `astro-float-local/`)
+### Rust (reference_calculus)
 
+- Edition 2018 (not 2021 — no `use` changes, no `TryFrom` in prelude).
 - Run `rustfmt` on changes.
-- Minimize `unsafe`; justify any `unsafe` use.
-- Avoid `unwrap()` / `expect()` unless proven unreachable.
-- Prefer returning `Result` over panicking in non-test code.
-- Add regression tests for new behavior; document all public items.
+- Avoid `unwrap()`/`expect()` unless proven unreachable; prefer `Result`.
+- Add regression tests for new behavior.
 
-## Editor / agent rules
+## Environment
 
-- No `AGENTS.md` existed previously.
-- No Cursor rules (`.cursorrules` / `.cursor/rules`) were found.
+- No CI/CD workflows found (no `.github/workflows/`).
+- No Cursor rules (`.cursorrules`/`.cursor/rules`) found.
 - `.github/copilot-instructions.md` exists but is empty.
 
 <!-- CODEGRAPH_START -->
