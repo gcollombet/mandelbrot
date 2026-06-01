@@ -334,6 +334,8 @@ export class Engine {
     currentReferenceAvailableIter = 0
     currentReferenceRemainingIter = 0
     isReferenceValidating = false
+    referenceResetSerial = 0
+    referenceResetFlashUntil = 0
     currentBlaLevelCount = 0
     mandelbrotReference = new Float32Array(1000000)
     private approximationMode: ApproximationMode = 'perturbation'
@@ -379,6 +381,11 @@ export class Engine {
     private needMergeSnapshot = false
     /** Saved merge uniform values captured at zoom stop (before state is reset). */
     private mergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0 }
+    /** Initial live-texel offset between a frozen snapshot and the display when zoom starts. */
+    private frozenBaseShiftX = 0
+    private frozenBaseShiftY = 0
+    /** A reference reset occurred during this zoom cycle; use frozen only as visual fallback. */
+    private referenceResetDuringZoom = false
     /** True when the frozen texture is spatially aligned with the live texture.
      *  Set to true after a freeze snapshot or merge pass. Set to false on translation. */
     private frozenAligned = false
@@ -444,6 +451,16 @@ export class Engine {
         return true
     }
 
+    private markReferenceReset(maxIterations = this.currentMaxIterations) {
+        this.referenceResetSerial++
+        this.referenceResetFlashUntil = performance.now() + 900
+        this.referenceAvailableOrbitLen = 0
+        this.currentReferenceAvailableIter = 0
+        this.currentReferenceRemainingIter = maxIterations
+        this.currentGuardedMaxIter = 0
+        this.orbitIncomplete = true
+    }
+
     private initializeReferenceWorker() {
         this.referenceWorker?.terminate()
         this.referenceWorker = new Worker(new URL('./referenceWorker.ts', import.meta.url), { type: 'module' })
@@ -463,15 +480,11 @@ export class Engine {
     }
 
     private resetReferenceJob(mandelbrot: Mandelbrot, scale: number, maxIterations: number) {
-        this.referenceAvailableOrbitLen = 0
+        this.markReferenceReset(maxIterations)
         this.referenceBlaReadyMaxIterations = 0
         this.referenceOrbitWasReset = true
-        this.currentReferenceAvailableIter = 0
-        this.currentReferenceRemainingIter = maxIterations
         this.isReferenceValidating = true
-        this.currentGuardedMaxIter = 0
         this.currentBlaLevelCount = 0
-        this.orbitIncomplete = true
         this.referenceViewKey = ''
         this.referenceWorkerCx = ''
         this.referenceWorkerCy = ''
@@ -524,11 +537,7 @@ export class Engine {
         }
 
         if (message.type === 'referenceReset') {
-            this.referenceAvailableOrbitLen = 0
-            this.currentReferenceAvailableIter = 0
-            this.currentReferenceRemainingIter = this.currentMaxIterations
-            this.currentGuardedMaxIter = 0
-            this.orbitIncomplete = true
+            this.markReferenceReset()
             this.referenceWorkerCx = message.referenceCx
             this.referenceWorkerCy = message.referenceCy
             this.mandelbrotNavigator.reference_origin(message.referenceCx, message.referenceCy)
@@ -536,15 +545,16 @@ export class Engine {
             this.currentBlaLevelCount = 0
             this.referenceBlaReadyMaxIterations = 0
             this.clearHistoryNextFrame = true
+            this.invalidateCounterReadback()
             this.needRender = true
             return
         }
 
         if (message.type === 'orbitChunk') {
             const previousAvailableOrbitLen = this.referenceAvailableOrbitLen
-            this.referenceAvailableOrbitLen = message.count
 
             if (message.referenceCx !== this.referenceWorkerCx || message.referenceCy !== this.referenceWorkerCy) {
+                this.markReferenceReset()
                 this.referenceWorkerCx = message.referenceCx
                 this.referenceWorkerCy = message.referenceCy
                 this.mandelbrotNavigator.reference_origin(message.referenceCx, message.referenceCy)
@@ -552,12 +562,16 @@ export class Engine {
                 this.currentBlaLevelCount = 0
                 this.referenceBlaReadyMaxIterations = 0
                 this.clearHistoryNextFrame = true
+                this.invalidateCounterReadback()
             } else if (message.offset === 0 && previousAvailableOrbitLen > 0) {
+                this.markReferenceReset()
                 this.referenceOrbitWasReset = true
                 this.currentBlaLevelCount = 0
                 this.referenceBlaReadyMaxIterations = 0
                 this.clearHistoryNextFrame = true
+                this.invalidateCounterReadback()
             }
+            this.referenceAvailableOrbitLen = message.count
 
             if (message.orbit.length > 0 && this.mandelbrotReferenceBuffer) {
                 this.device.queue.writeBuffer(
@@ -986,6 +1000,7 @@ export class Engine {
         // so the unified color path has a valid frozen fallback for future clears.
         if (prevUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
             && unfinished <= UNFINISHED_PIXEL_DONE_THRESHOLD
+            && !this.clearHistoryNextFrame
             && !this.zoomReprojectionActive) {
             this.needFreezeSnapshot = true
         }
@@ -1360,6 +1375,33 @@ export class Engine {
         }
         scaleFactor = Math.sqrt(scaleFactor) - 1.0
 
+        // When the navigator re-anchors its reference orbit, `dx/dy` jump back to ~0.
+        // Reprojecting history across that discontinuity would be nonsense, so we clear.
+        const orbitWasReset = this.referenceOrbitWasReset && !!this.prevFrameMandelbrot
+        this.referenceOrbitWasReset = false
+
+        const hardResetHistory = !this.prevFrameMandelbrot || orbitWasReset
+        const muChanged = !!this.prevFrameMandelbrot && this.prevFrameMandelbrot.mu !== mandelbrot.mu
+        const preserveZoomFrozen = this.zoomReprojectionActive && hardResetHistory && !muChanged
+        if (hardResetHistory || muChanged) {
+            this.clearHistoryNextFrame = true
+            if (!preserveZoomFrozen) {
+                // Hard reset: also kill any active zoom reprojection cycle and
+                // discard pending snapshots captured under the previous reference.
+                this.zoomReprojectionActive = false
+                this.zoomFactor = 1.0
+                this.liveZoomFactor = 1.0
+                this.liveScale = 0
+                this.frozenBaseShiftX = 0
+                this.frozenBaseShiftY = 0
+                this.referenceResetDuringZoom = false
+            } else {
+                this.referenceResetDuringZoom = true
+            }
+            this.needFreezeSnapshot = false
+            this.needMergeSnapshot = false
+        }
+
         // ── Zoom reprojection state update (before uniform write) ─────
         // Detect scale changes and manage the zoom reprojection cycle.
         // During a cycle, the live texture is computed at a fixed `liveScale`
@@ -1369,7 +1411,10 @@ export class Engine {
             const scaleChanged = this.prevFrameMandelbrot
                 && this.prevFrameMandelbrot.scale !== mandelbrot.scale
 
-            if (scaleChanged && !this.zoomReprojectionActive) {
+            if (scaleChanged
+                && !this.zoomReprojectionActive
+                && !hardResetHistory
+                && !muChanged) {
                 // Start a new zoom reprojection cycle.
                 this.zoomReprojectionActive = true
                 this.frozenScale = this.prevFrameMandelbrot!.scale
@@ -1378,6 +1423,12 @@ export class Engine {
                 this.liveScale = this.zoomingIn
                     ? this.frozenScale / this.zoomMagnificationThreshold
                     : this.frozenScale * this.zoomMagnificationThreshold
+                const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
+                const deltaDx = mandelbrot.dx - this.prevFrameMandelbrot!.dx
+                const deltaDy = mandelbrot.dy - this.prevFrameMandelbrot!.dy
+                this.frozenBaseShiftX = Math.round(-(deltaDx * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
+                this.frozenBaseShiftY = Math.round((deltaDy * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
+                this.referenceResetDuringZoom = false
                 this.needFreezeSnapshot = true
                 this.clearHistoryNextFrame = true
             }
@@ -1395,7 +1446,7 @@ export class Engine {
                     ? this.zoomFactor >= this.zoomMagnificationThreshold
                     : this.zoomFactor <= 1.0 / this.zoomMagnificationThreshold
 
-                if (shouldSwap) {
+                if (shouldSwap && !this.referenceResetDuringZoom) {
                     // Swap: the live texture becomes the new frozen snapshot,
                     // start a new cycle at the next threshold step.
                     // Use mandelbrot.scale (current display) — NOT frozenScale —
@@ -1405,6 +1456,8 @@ export class Engine {
                     this.needFreezeSnapshot = true
                     this.clearHistoryNextFrame = true
                     this.frozenScale = this.liveScale
+                    this.frozenBaseShiftX = 0
+                    this.frozenBaseShiftY = 0
                     this.liveScale = this.zoomingIn
                         ? mandelbrot.scale / this.zoomMagnificationThreshold
                         : mandelbrot.scale * this.zoomMagnificationThreshold
@@ -1428,20 +1481,23 @@ export class Engine {
                         zf: this.zoomFactor,
                         lzf: this.liveZoomFactor,
                         frozenShiftU: (this.frozenScale > 0)
-                            ? this.cumulativeShiftX * (this.liveScale / this.frozenScale) / this.neutralSize
+                            ? (this.frozenBaseShiftX + this.cumulativeShiftX * (this.liveScale / this.frozenScale)) / this.neutralSize
                             : 0,
                         frozenShiftV: (this.frozenScale > 0)
-                            ? -this.cumulativeShiftY * (this.liveScale / this.frozenScale) / this.neutralSize
+                            ? -(this.frozenBaseShiftY + this.cumulativeShiftY * (this.liveScale / this.frozenScale)) / this.neutralSize
                             : 0,
                         aspect,
                         angle: mandelbrot.angle,
                     }
-                    this.needMergeSnapshot = true
+                    this.needMergeSnapshot = !this.referenceResetDuringZoom
 
                     this.zoomReprojectionActive = false
                     this.zoomFactor = 1.0
                     this.liveZoomFactor = 1.0
                     this.liveScale = 0
+                    this.frozenBaseShiftX = 0
+                    this.frozenBaseShiftY = 0
+                    this.referenceResetDuringZoom = false
                     this.clearHistoryNextFrame = true
             }
         }
@@ -1464,6 +1520,8 @@ export class Engine {
         const sceneSin = Math.sin(mandelbrot.angle)
         const sceneCos = Math.cos(mandelbrot.angle)
         const lightDirLen = Math.hypot(Math.cos(renderOptions.lightAngle), Math.sin(renderOptions.lightAngle), 1.85)
+        const colorLiveShiftX = this.clearHistoryNextFrame ? 0 : this.cumulativeShiftX
+        const colorLiveShiftY = this.clearHistoryNextFrame ? 0 : this.cumulativeShiftY
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,    // 0: palettePeriod
             renderOptions.paletteOffset,    // 1: paletteOffset
@@ -1481,10 +1539,10 @@ export class Engine {
             // This ensures the frozen texture follows the exact same pan drift
             // as the live texture, without independent accumulation errors.
             (this.zoomReprojectionActive && this.frozenScale > 0)
-                ? this.cumulativeShiftX * (this.liveScale / this.frozenScale) / this.neutralSize
+                ? (this.frozenBaseShiftX + colorLiveShiftX * (this.liveScale / this.frozenScale)) / this.neutralSize
                 : 0,                        // 11: frozenShiftU
             (this.zoomReprojectionActive && this.frozenScale > 0)
-                ? -this.cumulativeShiftY * (this.liveScale / this.frozenScale) / this.neutralSize
+                ? -(this.frozenBaseShiftY + colorLiveShiftY * (this.liveScale / this.frozenScale)) / this.neutralSize
                 : 0,                        // 12: frozenShiftV
             renderOptions.tessellationLevel, // 13: tessellationLevel
             renderOptions.displacementAmount, // 14: displacementAmount
@@ -1570,29 +1628,6 @@ export class Engine {
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)
 
-        // When the navigator re-anchors its reference orbit, `dx/dy` jump back to ~0.
-        // Reprojecting history across that discontinuity would be nonsense, so we clear.
-        const orbitWasReset = this.referenceOrbitWasReset && !!this.prevFrameMandelbrot
-        this.referenceOrbitWasReset = false
-
-        // clearHistoryNextFrame may already be true from the zoom reprojection
-        // block above. These additional checks handle non-zoom resets.
-        if (!this.prevFrameMandelbrot || orbitWasReset) {
-            this.clearHistoryNextFrame = true
-            // Hard reset: also kill any active zoom reprojection cycle
-            this.zoomReprojectionActive = false
-            this.zoomFactor = 1.0
-            this.liveZoomFactor = 1.0
-            this.liveScale = 0
-        }
-        if (this.prevFrameMandelbrot && this.prevFrameMandelbrot.mu !== mandelbrot.mu) {
-            this.clearHistoryNextFrame = true
-            this.zoomReprojectionActive = false
-            this.zoomFactor = 1.0
-            this.liveZoomFactor = 1.0
-            this.liveScale = 0
-        }
-
         // When the orbit just became complete, clear history once so that
         // pixels which were stored as budget-exhausted continuations (during
         // orbit building) get a fresh recompute with the full orbit available.
@@ -1600,6 +1635,7 @@ export class Engine {
         // grows every frame with scale, so the condition fires perpetually.
         // The ZOOM_STOP clear will trigger a full recompute when zoom ends.
         if (!this.zoomReprojectionActive
+            && !this.clearHistoryNextFrame
             && orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
             this.needFreezeSnapshot = true
             this.clearHistoryNextFrame = true
@@ -1661,6 +1697,9 @@ export class Engine {
             shiftTexX = -(deltaDx * texSize) / (2 * scaleForShift * neutralExtent)
             shiftTexY = (deltaDy * texSize) / (2 * scaleForShift * neutralExtent)
         }
+        const roundedShiftTexX = Math.round(shiftTexX)
+        const roundedShiftTexY = Math.round(shiftTexY)
+        const hasTranslationShift = roundedShiftTexX !== 0 || roundedShiftTexY !== 0
 
         // Accumulate cumulative texel shift for sentinel grid alignment.
         // We accumulate the *rounded* shift (what the shader actually applies)
@@ -1669,13 +1708,20 @@ export class Engine {
             this.cumulativeShiftX = 0
             this.cumulativeShiftY = 0
         } else {
-            this.cumulativeShiftX += Math.round(shiftTexX)
-            this.cumulativeShiftY += Math.round(shiftTexY)
+            this.cumulativeShiftX += roundedShiftTexX
+            this.cumulativeShiftY += roundedShiftTexY
             // Translation shifts the live texture but not the frozen texture,
             // so any non-zero shift desynchronizes them.
-            if (Math.round(shiftTexX) !== 0 || Math.round(shiftTexY) !== 0) {
+            if (hasTranslationShift) {
                 this.frozenAligned = false
             }
+        }
+
+        if (hasTranslationShift && !this.zoomReprojectionActive) {
+            // A pending non-zoom snapshot would copy the pre-translation
+            // resolved texture, then incorrectly mark it aligned with the
+            // translated live texture.
+            this.needFreezeSnapshot = false
         }
 
         // Grid offset passed to the shader: cumulative shift mod baseSentinel,
@@ -1808,6 +1854,10 @@ export class Engine {
             )
             this.needFreezeSnapshot = false
             this.frozenAligned = true
+            if (!this.zoomReprojectionActive) {
+                this.frozenBaseShiftX = 0
+                this.frozenBaseShiftY = 0
+            }
         }
 
         // Helper: build 7 MRT color attachments from per-layer views

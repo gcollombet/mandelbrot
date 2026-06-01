@@ -861,14 +861,15 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       );
       frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
       frozenStep = textureLoad(texFrozen, frozenCoord, 1, 0).r;
-      if (frozen_iter > 0.0) {
+      if (frozen_iter >= 0.0) {
         frozen_zx = textureLoad(texFrozen, frozenCoord, 2, 0).r;
         frozen_zy = textureLoad(texFrozen, frozenCoord, 3, 0).r;
       }
     }
   }
   let frozenEscaped = frozen_iter > 0.0 && (frozen_zx * frozen_zx + frozen_zy * frozen_zy) >= parameters.mu;
-  let frozenHasData = frozenEscaped && frozenStep > 0.0;
+  let frozenInterior = frozen_iter == 0.0;
+  let frozenHasData = (frozenEscaped || frozenInterior) && frozenStep > 0.0;
 
   // ── Pick the best pixel: smallest positive step wins ──
   // step > 0 means the pixel has data; step = 0 means no data.

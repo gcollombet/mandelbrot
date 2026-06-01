@@ -19,6 +19,8 @@ const orbitCount = ref(0);
 const maxIterations = ref(0);
 const orbitRemaining = ref(0);
 const referenceValidating = ref(false);
+const referenceResetActive = ref(false);
+const referenceResetSerial = ref(0);
 
 // --- History for the graph ---
 const HISTORY_LENGTH = 200;
@@ -48,6 +50,8 @@ function poll() {
   maxIterations.value = e.currentMaxIterations ?? 0;
   orbitRemaining.value = e.currentReferenceRemainingIter ?? Math.max(0, maxIterations.value - orbitCount.value);
   referenceValidating.value = e.isReferenceValidating ?? false;
+  referenceResetSerial.value = e.referenceResetSerial ?? 0;
+  referenceResetActive.value = (e.referenceResetFlashUntil ?? 0) > performance.now();
 
   // Push history
   unfinishedHistory.push(unfinishedPixels.value >= 0 ? unfinishedPixels.value : 0);
@@ -216,9 +220,10 @@ defineExpose({ expanded });
     <button class="stats-header" @click="toggle" :title="expanded ? 'Replier' : 'Statistiques de rendu'">
       <span
         class="status-dot"
-        :class="isRendering ? 'status-dot--active' : 'status-dot--idle'"
+        :class="referenceResetActive ? 'status-dot--reference' : (isRendering ? 'status-dot--active' : 'status-dot--idle')"
       ></span>
       <span class="stats-fps">{{ fps }} fps</span>
+      <span v-if="referenceResetActive" class="stats-reference-badge">ref</span>
       <span class="stats-toggle">{{ expanded ? '\u25B2' : '\u25BC' }}</span>
     </button>
 
@@ -260,7 +265,15 @@ defineExpose({ expanded });
           <span class="stats-label">Orbite</span>
           <span class="stats-value">
             {{ orbitCount }} / {{ maxIterations }}
-            <span v-if="referenceValidating"> · validation</span>
+            <span v-if="referenceResetActive"> · reset réf</span>
+            <span v-else-if="referenceValidating"> · validation</span>
+          </span>
+        </div>
+        <div class="stats-row">
+          <span class="stats-label">Référence</span>
+          <span class="stats-value" :class="{ 'stats-value--reference': referenceResetActive }">
+            #{{ referenceResetSerial }}
+            <span v-if="referenceResetActive"> · changement</span>
           </span>
         </div>
         <div class="stats-row">
@@ -335,9 +348,26 @@ defineExpose({ expanded });
   background: #aaa;
 }
 
+.status-dot--reference {
+  background: #a855f7;
+  box-shadow: 0 0 8px 2px rgba(168,85,247,0.65);
+  animation: reference-pulse 0.45s ease-in-out infinite alternate;
+}
+
 .stats-fps {
   font-variant-numeric: tabular-nums;
   min-width: 3.5em;
+}
+
+.stats-reference-badge {
+  padding: 1px 5px;
+  border-radius: 999px;
+  background: rgba(168,85,247,0.18);
+  color: #6d28d9;
+  font-size: 0.68rem;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
 }
 
 .stats-toggle {
@@ -418,5 +448,15 @@ defineExpose({ expanded });
   font-size: 0.85rem;
   font-variant-numeric: tabular-nums;
   font-weight: 500;
+}
+
+.stats-value--reference {
+  color: #7e22ce;
+  font-weight: 700;
+}
+
+@keyframes reference-pulse {
+  from { transform: scale(1); opacity: 0.75; }
+  to { transform: scale(1.25); opacity: 1; }
 }
 </style>
