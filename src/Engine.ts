@@ -349,6 +349,9 @@ export class Engine {
     private referenceWorkerCx = ''
     private referenceWorkerCy = ''
     private referenceOrbitWasReset = false
+    /** Complex-plane jump of the reference origin since last visual frame (consumed in update). */
+    private pendingRefJumpX = 0
+    private pendingRefJumpY = 0
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
 
@@ -537,6 +540,8 @@ export class Engine {
         }
 
         if (message.type === 'referenceReset') {
+            this.pendingRefJumpX += Number(message.referenceCx) - Number(this.referenceWorkerCx)
+            this.pendingRefJumpY += Number(message.referenceCy) - Number(this.referenceWorkerCy)
             this.markReferenceReset()
             this.referenceWorkerCx = message.referenceCx
             this.referenceWorkerCy = message.referenceCy
@@ -544,7 +549,6 @@ export class Engine {
             this.referenceOrbitWasReset = true
             this.currentBlaLevelCount = 0
             this.referenceBlaReadyMaxIterations = 0
-            this.clearHistoryNextFrame = true
             this.invalidateCounterReadback()
             this.needRender = true
             return
@@ -554,6 +558,8 @@ export class Engine {
             const previousAvailableOrbitLen = this.referenceAvailableOrbitLen
 
             if (message.referenceCx !== this.referenceWorkerCx || message.referenceCy !== this.referenceWorkerCy) {
+                this.pendingRefJumpX += Number(message.referenceCx) - Number(this.referenceWorkerCx)
+                this.pendingRefJumpY += Number(message.referenceCy) - Number(this.referenceWorkerCy)
                 this.markReferenceReset()
                 this.referenceWorkerCx = message.referenceCx
                 this.referenceWorkerCy = message.referenceCy
@@ -561,14 +567,12 @@ export class Engine {
                 this.referenceOrbitWasReset = true
                 this.currentBlaLevelCount = 0
                 this.referenceBlaReadyMaxIterations = 0
-                this.clearHistoryNextFrame = true
                 this.invalidateCounterReadback()
             } else if (message.offset === 0 && previousAvailableOrbitLen > 0) {
                 this.markReferenceReset()
                 this.referenceOrbitWasReset = true
                 this.currentBlaLevelCount = 0
                 this.referenceBlaReadyMaxIterations = 0
-                this.clearHistoryNextFrame = true
                 this.invalidateCounterReadback()
             }
             this.referenceAvailableOrbitLen = message.count
@@ -1395,7 +1399,23 @@ export class Engine {
                 this.frozenBaseShiftX = 0
                 this.frozenBaseShiftY = 0
                 this.referenceResetDuringZoom = false
+                this.pendingRefJumpX = 0
+                this.pendingRefJumpY = 0
             } else {
+                // The reference re-anchor makes dx/dy jump by -pendingRefJump.
+                // Isolate the actual pan component and fold it into frozenBaseShift.
+                const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
+                const rawDx = mandelbrot.dx - this.prevFrameMandelbrot!.dx
+                const rawDy = mandelbrot.dy - this.prevFrameMandelbrot!.dy
+                // dx changed by -refJump due to the reference switch; subtract that.
+                const panDx = rawDx + this.pendingRefJumpX
+                const panDy = rawDy + this.pendingRefJumpY
+                if (this.frozenScale > 0) {
+                    this.frozenBaseShiftX += Math.round(-(panDx * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
+                    this.frozenBaseShiftY += Math.round((panDy * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
+                }
+                this.pendingRefJumpX = 0
+                this.pendingRefJumpY = 0
                 this.referenceResetDuringZoom = true
             }
             this.needFreezeSnapshot = false
@@ -1503,6 +1523,8 @@ export class Engine {
                     this.frozenBaseShiftX = 0
                     this.frozenBaseShiftY = 0
                     this.referenceResetDuringZoom = false
+                    this.pendingRefJumpX = 0
+                    this.pendingRefJumpY = 0
                     this.clearHistoryNextFrame = true
             }
         }
