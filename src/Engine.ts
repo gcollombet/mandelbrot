@@ -1491,9 +1491,9 @@ export class Engine {
                 }
             } else if (!this.zoomReprojectionActive) {
                 this.zoomFactor = 1.0
-            this.liveZoomFactor = 1.0
-            this.liveScale = 0
-        }
+                this.liveZoomFactor = 1.0
+                this.liveScale = 0
+            }
 
             // If zoom has stopped (no scale change), deactivate and recompute
             // at the actual display scale.
