@@ -1442,6 +1442,11 @@ export class Engine {
                 // zoomFactor = frozenScale / displayScale.
                 // For zoom-in:  displayScale decreases → zoomFactor rises from ~1 to threshold.
                 // For zoom-out: displayScale increases → zoomFactor drops from ~1 to 1/threshold.
+                // Once the clear triggered by a reference reset has been consumed,
+                // re-enable swap so the zoom cycle can continue normally.
+                if (this.referenceResetDuringZoom && !this.clearHistoryNextFrame) {
+                    this.referenceResetDuringZoom = false
+                }
                 const shouldSwap = this.zoomingIn
                     ? this.zoomFactor >= this.zoomMagnificationThreshold
                     : this.zoomFactor <= 1.0 / this.zoomMagnificationThreshold
