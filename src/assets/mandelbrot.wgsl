@@ -118,7 +118,7 @@ fn distance_estimate(z: vec2<f32>, der: vec2<f32>) -> f32 {
 }
 
 fn distance_height(z: vec2<f32>, der: vec2<f32>) -> f32 {
-  return clamp(-log(distance_estimate(z, der)), -8.0, 64.0);
+  return clamp(-log(distance_estimate(z, der)), -64.0, 64.0);
 }
 
 fn visual_derivative_angle(z: vec2<f32>, der: vec2<f32>) -> f32 {
@@ -177,6 +177,7 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, der: p
 
 // Set to true to disable epsilon-based interior detection (for debugging).
 const IGNORE_EPSILON: bool = false;
+const SHADING_BAILOUT: f32 = 16.0;
 
 // ── output struct (8 render targets) ──────────────────────────────
 struct FragOut {
@@ -281,11 +282,6 @@ fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
   return clamp(1.0 - log(log(zSq) / log(muLimit)) / log(2.0), 0.0, 1.0);
 }
 
-fn mix_angle(a: f32, b: f32, t: f32) -> f32 {
-  let delta = atan2(sin(b - a), cos(b - a));
-  return a + delta * t;
-}
-
 // ── core computation ──────────────────────────────────────────────
 fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_dzx: f32, prev_dzy: f32, prev_ref_i: f32, prev_avg_direction: f32) -> FragOut {
   let dc = vec2<f32>(x0, y0);
@@ -314,6 +310,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var inside = false;
   var shadingHeight = 0.0;
   var shadingAngle = 0.0;
+  var shadingCaptured = false;
+  let shadingBailout = min(muLimit, SHADING_BAILOUT);
 
   let useBla = mandelbrot.approximationMode >= 0.5
             && mandelbrot.orbitComplete >= 0.5
@@ -323,8 +321,6 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
     var usedBla = false;
     while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
-      let previousZ = z;
-      let previousDer = der;
       var next_der = der;
       let skipped = try_apply_bla(&ref_i, &dz, &der, dc, dcMag, muLimit);
       if (skipped > 0) {
@@ -358,14 +354,16 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 
       der = next_der;
       let dot_z = dot(z, z);
+      if (!shadingCaptured && dot_z > shadingBailout) {
+        shadingHeight = distance_height(z, der);
+        shadingAngle = visual_derivative_angle(z, der);
+        shadingCaptured = true;
+      }
       if (dot_z > muLimit) {
-        let shadingBlend = escape_fraction(z, muLimit);
-        let previousHeight = distance_height(previousZ, previousDer);
-        let currentHeight = distance_height(z, der);
-        let previousAngle = visual_derivative_angle(previousZ, previousDer);
-        let currentAngle = visual_derivative_angle(z, der);
-        shadingHeight = mix(previousHeight, currentHeight, shadingBlend);
-        shadingAngle = mix_angle(previousAngle, currentAngle, shadingBlend);
+        if (!shadingCaptured) {
+          shadingHeight = distance_height(z, der);
+          shadingAngle = visual_derivative_angle(z, der);
+        }
         escaped = true;
         break;
       }
@@ -382,8 +380,6 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     }
   } else {
     while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
-      let previousZ = z;
-      let previousDer = der;
       let zPrev = getOrbit(ref_i) + dz;
       let refZ = getOrbit(ref_i);
       dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
@@ -401,14 +397,16 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 
       der = next_der;
       let dot_z = dot(z, z);
+      if (!shadingCaptured && dot_z > shadingBailout) {
+        shadingHeight = distance_height(z, der);
+        shadingAngle = visual_derivative_angle(z, der);
+        shadingCaptured = true;
+      }
       if (dot_z > muLimit) {
-        let shadingBlend = escape_fraction(z, muLimit);
-        let previousHeight = distance_height(previousZ, previousDer);
-        let currentHeight = distance_height(z, der);
-        let previousAngle = visual_derivative_angle(previousZ, previousDer);
-        let currentAngle = visual_derivative_angle(z, der);
-        shadingHeight = mix(previousHeight, currentHeight, shadingBlend);
-        shadingAngle = mix_angle(previousAngle, currentAngle, shadingBlend);
+        if (!shadingCaptured) {
+          shadingHeight = distance_height(z, der);
+          shadingAngle = visual_derivative_angle(z, der);
+        }
         escaped = true;
         break;
       }

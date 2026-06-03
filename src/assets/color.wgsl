@@ -346,7 +346,7 @@ fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32
     return -1e6;
   }
 
-  return clamp(storedHeight, -8.0, 64.0);
+  return clamp(storedHeight, -64.0, 64.0);
 }
 
 fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f32 {
@@ -617,8 +617,15 @@ fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
     return -1.0;
   }
   let log_z2 = log(max(z_sq, 1e-12));
-  let mu_val = clamp(1.0 - log(log_z2 / parameters.logMu) / log(2.0), 0.0, 1.0);
+  let logMu = max(parameters.logMu, 1e-6);
+  let mu_val = clamp(1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0), 0.0, 1.0);
   return iter_val + mu_val;
+}
+
+fn smooth_escape_fraction(z_sq: f32) -> f32 {
+  let log_z2 = log(max(z_sq, 1e-12));
+  let logMu = max(parameters.logMu, 1e-6);
+  return 1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0);
 }
 
 fn decode_stripe_phase(refWithStripe: f32) -> f32 {
@@ -724,8 +731,7 @@ fn colorize_pixel(
 
   // ── Escaped pixel ──
   let z_sq = zx_val * zx_val + zy_val * zy_val;
-  let log_z2 = log(z_sq);
-  let mu_val = clamp(1.0 - log(log_z2 / parameters.logMu) / log(2.0), 0.0, 1.0);
+  let mu_val = smooth_escape_fraction(z_sq);
 
   var nu = iter_val + mu_val;
 
