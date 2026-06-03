@@ -282,6 +282,20 @@ fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
   return clamp(1.0 - log(log(zSq) / log(muLimit)) / log(2.0), 0.0, 1.0);
 }
 
+fn bailout_crossing_blend(prevZ: vec2<f32>, currentZ: vec2<f32>, bailout: f32) -> f32 {
+  let prevLog = log(max(dot(prevZ, prevZ), 1e-12));
+  let currentLog = log(max(dot(currentZ, currentZ), 1e-12));
+  let bailoutLog = log(max(bailout, 1.000001));
+  return clamp((bailoutLog - prevLog) / max(currentLog - prevLog, 1e-12), 0.0, 1.0);
+}
+
+fn capture_shading_at_bailout(prevZ: vec2<f32>, prevDer: vec2<f32>, currentZ: vec2<f32>, currentDer: vec2<f32>, bailout: f32) -> vec2<f32> {
+  let t = bailout_crossing_blend(prevZ, currentZ, bailout);
+  let z = mix(prevZ, currentZ, t);
+  let der = mix(prevDer, currentDer, t);
+  return vec2<f32>(distance_height(z, der), visual_derivative_angle(z, der));
+}
+
 // ── core computation ──────────────────────────────────────────────
 fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_dzx: f32, prev_dzy: f32, prev_ref_i: f32, prev_avg_direction: f32) -> FragOut {
   let dc = vec2<f32>(x0, y0);
@@ -321,6 +335,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
     var usedBla = false;
     while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
+      let previousZ = z;
+      let previousDer = der;
       var next_der = der;
       let skipped = try_apply_bla(&ref_i, &dz, &der, dc, dcMag, muLimit);
       if (skipped > 0) {
@@ -355,8 +371,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       der = next_der;
       let dot_z = dot(z, z);
       if (!shadingCaptured && dot_z > shadingBailout) {
-        shadingHeight = distance_height(z, der);
-        shadingAngle = visual_derivative_angle(z, der);
+        let shading = capture_shading_at_bailout(previousZ, previousDer, z, der, shadingBailout);
+        shadingHeight = shading.x;
+        shadingAngle = shading.y;
         shadingCaptured = true;
       }
       if (dot_z > muLimit) {
@@ -380,6 +397,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     }
   } else {
     while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
+      let previousZ = z;
+      let previousDer = der;
       let zPrev = getOrbit(ref_i) + dz;
       let refZ = getOrbit(ref_i);
       dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
@@ -398,8 +417,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       der = next_der;
       let dot_z = dot(z, z);
       if (!shadingCaptured && dot_z > shadingBailout) {
-        shadingHeight = distance_height(z, der);
-        shadingAngle = visual_derivative_angle(z, der);
+        let shading = capture_shading_at_bailout(previousZ, previousDer, z, der, shadingBailout);
+        shadingHeight = shading.x;
+        shadingAngle = shading.y;
         shadingCaptured = true;
       }
       if (dot_z > muLimit) {
