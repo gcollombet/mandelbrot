@@ -381,6 +381,9 @@ export class Engine {
     // sentinel grid aligned after translation reprojection (Option B).
     cumulativeShiftX = 0
     cumulativeShiftY = 0
+    /** Rounded live-texel pan accumulated since the current frozen snapshot. Unlike cumulativeShift, it survives clears. */
+    private frozenPanShiftX = 0
+    private frozenPanShiftY = 0
 
     // ── Zoom reprojection state ──────────────────────────────────────
     /** Configurable magnification threshold before swapping (default ×2). */
@@ -1608,6 +1611,8 @@ export class Engine {
                 this.liveScale = 0
                 this.frozenBaseShiftX = 0
                 this.frozenBaseShiftY = 0
+                this.frozenPanShiftX = 0
+                this.frozenPanShiftY = 0
                 this.referenceResetDuringZoom = false
             } else {
                 // Keep the frozen texture in its current visual position. Trying
@@ -1649,6 +1654,8 @@ export class Engine {
                 const deltaDy = mandelbrot.dy - this.prevFrameMandelbrot!.dy
                 this.frozenBaseShiftX = Math.round(-(deltaDx * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
                 this.frozenBaseShiftY = Math.round((deltaDy * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
+                this.frozenPanShiftX = 0
+                this.frozenPanShiftY = 0
                 this.referenceResetDuringZoom = false
                 this.needFreezeSnapshot = true
                 this.clearHistoryNextFrame = true
@@ -1684,6 +1691,8 @@ export class Engine {
                     this.frozenScale = this.liveScale
                     this.frozenBaseShiftX = 0
                     this.frozenBaseShiftY = 0
+                    this.frozenPanShiftX = 0
+                    this.frozenPanShiftY = 0
                     this.liveScale = this.zoomingIn
                         ? mandelbrot.scale / this.zoomMagnificationThreshold
                         : mandelbrot.scale * this.zoomMagnificationThreshold
@@ -1707,10 +1716,10 @@ export class Engine {
                         zf: this.zoomFactor,
                         lzf: this.liveZoomFactor,
                         frozenShiftU: (this.frozenScale > 0)
-                            ? (this.frozenBaseShiftX + this.cumulativeShiftX * (this.liveScale / this.frozenScale)) / this.neutralSize
+                            ? (this.frozenBaseShiftX + this.frozenPanShiftX * (this.liveScale / this.frozenScale)) / this.neutralSize
                             : 0,
                         frozenShiftV: (this.frozenScale > 0)
-                            ? -(this.frozenBaseShiftY + this.cumulativeShiftY * (this.liveScale / this.frozenScale)) / this.neutralSize
+                            ? -(this.frozenBaseShiftY + this.frozenPanShiftY * (this.liveScale / this.frozenScale)) / this.neutralSize
                             : 0,
                         aspect,
                         angle: mandelbrot.angle,
@@ -1723,6 +1732,8 @@ export class Engine {
                     this.liveScale = 0
                     this.frozenBaseShiftX = 0
                     this.frozenBaseShiftY = 0
+                    this.frozenPanShiftX = 0
+                    this.frozenPanShiftY = 0
                     this.referenceResetDuringZoom = false
                     this.clearHistoryNextFrame = true
             }
@@ -1746,8 +1757,6 @@ export class Engine {
         const sceneSin = Math.sin(mandelbrot.angle)
         const sceneCos = Math.cos(mandelbrot.angle)
         const lightDirLen = Math.hypot(Math.cos(renderOptions.lightAngle), Math.sin(renderOptions.lightAngle), 1.85)
-        const colorLiveShiftX = this.clearHistoryNextFrame ? 0 : this.cumulativeShiftX
-        const colorLiveShiftY = this.clearHistoryNextFrame ? 0 : this.cumulativeShiftY
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,    // 0: palettePeriod
             renderOptions.paletteOffset,    // 1: paletteOffset
@@ -1765,10 +1774,10 @@ export class Engine {
             // This ensures the frozen texture follows the exact same pan drift
             // as the live texture, without independent accumulation errors.
             (this.zoomReprojectionActive && this.frozenScale > 0)
-                ? (this.frozenBaseShiftX + colorLiveShiftX * (this.liveScale / this.frozenScale)) / this.neutralSize
+                ? (this.frozenBaseShiftX + this.frozenPanShiftX * (this.liveScale / this.frozenScale)) / this.neutralSize
                 : 0,                        // 11: frozenShiftU
             (this.zoomReprojectionActive && this.frozenScale > 0)
-                ? -(this.frozenBaseShiftY + colorLiveShiftY * (this.liveScale / this.frozenScale)) / this.neutralSize
+                ? -(this.frozenBaseShiftY + this.frozenPanShiftY * (this.liveScale / this.frozenScale)) / this.neutralSize
                 : 0,                        // 12: frozenShiftV
             renderOptions.tessellationLevel, // 13: tessellationLevel
             renderOptions.displacementAmount, // 14: displacementAmount
@@ -1941,6 +1950,10 @@ export class Engine {
         } else {
             this.cumulativeShiftX += roundedShiftTexX
             this.cumulativeShiftY += roundedShiftTexY
+            if (this.zoomReprojectionActive) {
+                this.frozenPanShiftX += roundedShiftTexX
+                this.frozenPanShiftY += roundedShiftTexY
+            }
             // Translation shifts the live texture but not the frozen texture,
             // so any non-zero shift desynchronizes them.
             if (hasTranslationShift) {
@@ -2072,6 +2085,8 @@ export class Engine {
             rpassMerge.end()
             this.needMergeSnapshot = false
             this.frozenAligned = true
+            this.frozenPanShiftX = 0
+            this.frozenPanShiftY = 0
         }
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
@@ -2085,6 +2100,8 @@ export class Engine {
             )
             this.needFreezeSnapshot = false
             this.frozenAligned = true
+            this.frozenPanShiftX = 0
+            this.frozenPanShiftY = 0
             if (!this.zoomReprojectionActive) {
                 this.frozenBaseShiftX = 0
                 this.frozenBaseShiftY = 0
