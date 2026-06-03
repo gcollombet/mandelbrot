@@ -9,6 +9,8 @@ import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
+import type {ZoomState} from './zoomState'
+import {reduceZoomState, resetZoomState, isZoomActive, getFrozenScale, getLiveScale, getReferenceResetDuringZoom} from './zoomState'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import bronzeUrl from './assets/bronze.webp'
@@ -381,25 +383,11 @@ export class Engine {
     // sentinel grid aligned after translation reprojection (Option B).
     cumulativeShiftX = 0
     cumulativeShiftY = 0
-    /** Rounded live-texel pan accumulated since the current frozen snapshot. Unlike cumulativeShift, it survives clears. */
-    private frozenPanShiftX = 0
-    private frozenPanShiftY = 0
 
-    // ── Zoom reprojection state ──────────────────────────────────────
+    // ── Zoom reprojection state machine ───────────────────────────────
     /** Configurable magnification threshold before swapping (default ×2). */
     zoomMagnificationThreshold = 16.0
-    /** Current visual zoom factor: frozenScale / displayScale.
-     *  For zoom-in: < 1 (frozen covers larger area), trending towards 1/threshold.
-     *  For zoom-out: > 1 (frozen covers smaller area), trending towards threshold. */
-    private zoomFactor = 1.0
-    /** Scale at which the snapshot was frozen. */
-    private frozenScale = 0
-    /** Scale at which the live texture is being computed (fixed for the duration of a cycle). */
-    private liveScale = 0
-    /** Live zoom factor: liveScale / displayScale. Passed to color shader for UV rescaling. */
-    private liveZoomFactor = 1.0
-    /** True when we are in an active zoom reprojection cycle. */
-    private zoomReprojectionActive = false
+    private zoomState: ZoomState = { kind: 'idle' }
     /** Set to true when we need to GPU-copy resolved → frozen at the start of next render. */
     private needFreezeSnapshot = false
     /** Set to true when we need to run the merge pass (resolved+frozen→frozen) at zoom stop. */
@@ -409,13 +397,12 @@ export class Engine {
     /** Initial live-texel offset between a frozen snapshot and the display when zoom starts. */
     private frozenBaseShiftX = 0
     private frozenBaseShiftY = 0
-    /** A reference reset occurred during this zoom cycle; use frozen only as visual fallback. */
-    private referenceResetDuringZoom = false
+    /** Rounded live-texel pan accumulated since the current frozen snapshot. Unlike cumulativeShift, it survives clears. */
+    private frozenPanShiftX = 0
+    private frozenPanShiftY = 0
     /** True when the frozen texture is spatially aligned with the live texture.
      *  Set to true after a freeze snapshot or merge pass. Set to false on translation. */
     private frozenAligned = false
-    /** True when zoom direction is "in" (scale decreasing). */
-    private zoomingIn = true
 
     // Progressive iteration state – adaptive batch sizing
     private iterationBatchSize = MIN_BATCH_SIZE
@@ -1213,7 +1200,7 @@ export class Engine {
         if (prevUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
             && unfinished <= UNFINISHED_PIXEL_DONE_THRESHOLD
             && !this.clearHistoryNextFrame
-            && !this.zoomReprojectionActive) {
+&& !isZoomActive(this.zoomState)) {
             this.needFreezeSnapshot = true
         }
     }
@@ -1353,11 +1340,7 @@ export class Engine {
         this.frozenLayerViews = frozenResult.layerViews
 
         // Reset zoom reprojection state on resize
-        this.zoomReprojectionActive = false
-        this.zoomFactor = 1.0
-        this.liveZoomFactor = 1.0
-        this.frozenScale = 0
-        this.liveScale = 0
+        this.zoomState = resetZoomState()
 
         // Re-création des bind groups dépendant des textures
         if (this.pipelineBrush) {
@@ -1599,26 +1582,15 @@ export class Engine {
 
         const hardResetHistory = !this.prevFrameMandelbrot || orbitWasReset
         const muChanged = !!this.prevFrameMandelbrot && this.prevFrameMandelbrot.mu !== mandelbrot.mu
-        const preserveZoomFrozen = this.zoomReprojectionActive && hardResetHistory && !muChanged
+        const preserveZoomFrozen = isZoomActive(this.zoomState) && hardResetHistory && !muChanged
         if (hardResetHistory || muChanged) {
             this.clearHistoryNextFrame = true
             if (!preserveZoomFrozen) {
-                // Hard reset: also kill any active zoom reprojection cycle and
-                // discard pending snapshots captured under the previous reference.
-                this.zoomReprojectionActive = false
-                this.zoomFactor = 1.0
-                this.liveZoomFactor = 1.0
-                this.liveScale = 0
+                this.zoomState = resetZoomState()
                 this.frozenBaseShiftX = 0
                 this.frozenBaseShiftY = 0
                 this.frozenPanShiftX = 0
                 this.frozenPanShiftY = 0
-                this.referenceResetDuringZoom = false
-            } else {
-                // Keep the frozen texture in its current visual position. Trying
-                // to compensate the reference-origin jump via Number(new-old) is
-                // numerically unstable at deep zoom and makes the frozen jump.
-                this.referenceResetDuringZoom = true
             }
             // A reference reset clears the live texture. At deep zoom, the first
             // recompute can be slow enough to expose a black frame unless we keep
@@ -1629,113 +1601,73 @@ export class Engine {
         }
 
         // ── Zoom reprojection state update (before uniform write) ─────
-        // Detect scale changes and manage the zoom reprojection cycle.
-        // During a cycle, the live texture is computed at a fixed `liveScale`
-        // while the display zoom interpolates from frozenScale towards liveScale.
-        // The color shader rescales both textures to match the current display.
+        // Use the state machine to handle scale changes and reprojection cycles.
         {
             const scaleChanged = this.prevFrameMandelbrot
                 && this.prevFrameMandelbrot.scale !== mandelbrot.scale
 
-            if (scaleChanged
-                && !this.zoomReprojectionActive
-                && !hardResetHistory
-                && !muChanged) {
-                // Start a new zoom reprojection cycle.
-                this.zoomReprojectionActive = true
-                this.frozenScale = this.prevFrameMandelbrot!.scale
-                this.zoomingIn = mandelbrot.scale < this.frozenScale
-                // Compute target live scale: one threshold step ahead
-                this.liveScale = this.zoomingIn
-                    ? this.frozenScale / this.zoomMagnificationThreshold
-                    : this.frozenScale * this.zoomMagnificationThreshold
-                const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
-                const deltaDx = mandelbrot.dx - this.prevFrameMandelbrot!.dx
-                const deltaDy = mandelbrot.dy - this.prevFrameMandelbrot!.dy
-                this.frozenBaseShiftX = Math.round(-(deltaDx * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
-                this.frozenBaseShiftY = Math.round((deltaDy * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
-                this.frozenPanShiftX = 0
-                this.frozenPanShiftY = 0
-                this.referenceResetDuringZoom = false
-                this.needFreezeSnapshot = true
-                this.clearHistoryNextFrame = true
+            let event: import('./zoomState').ZoomEvent | null = null
+
+            if (hardResetHistory || muChanged) {
+                event = { type: 'referenceReset', muChanged, orbitWasReset }
+            } else if (scaleChanged) {
+                event = { type: 'scaleChanged', scale: mandelbrot.scale, prevScale: this.prevFrameMandelbrot!.scale }
+            } else if (this.prevFrameMandelbrot) {
+                event = { type: 'scaleStable' }
             }
 
-            // Update zoom factors during an active cycle
-            if (this.zoomReprojectionActive && this.frozenScale > 0) {
-                this.zoomFactor = this.frozenScale / mandelbrot.scale
-                this.liveZoomFactor = this.liveScale / mandelbrot.scale
+            // Capture zoom state values BEFORE state transition (needed for merge uniforms)
+            const wasZoomActive = isZoomActive(this.zoomState)
+            const prevFrozenScale = getFrozenScale(this.zoomState)
+            const prevLiveScale = getLiveScale(this.zoomState)
+            const prevRefResetDuringZoom = getReferenceResetDuringZoom(this.zoomState)
 
-                // Check if we've reached the swap threshold.
-                // zoomFactor = frozenScale / displayScale.
-                // For zoom-in:  displayScale decreases → zoomFactor rises from ~1 to threshold.
-                // For zoom-out: displayScale increases → zoomFactor drops from ~1 to 1/threshold.
-                // Once the clear triggered by a reference reset has been consumed,
-                // re-enable swap so the zoom cycle can continue normally.
-                if (this.referenceResetDuringZoom && !this.clearHistoryNextFrame) {
-                    this.referenceResetDuringZoom = false
+            const {state, effects} = event
+                ? reduceZoomState(this.zoomState, event, { threshold: this.zoomMagnificationThreshold })
+                : { state: this.zoomState, effects: [] as import('./zoomState').ZoomEffect[] }
+            this.zoomState = state
+
+            for (const effect of effects) {
+                switch (effect.type) {
+                    case 'copyResolvedToFrozen':
+                        this.needFreezeSnapshot = true
+                        if (isZoomActive(this.zoomState)) {
+                            if (!wasZoomActive) {
+                                // New cycle start: capture the initial pan delta
+                                const deltaDx = mandelbrot.dx - this.prevFrameMandelbrot!.dx
+                                const deltaDy = mandelbrot.dy - this.prevFrameMandelbrot!.dy
+                                const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
+                                const frozenScale = getFrozenScale(this.zoomState)
+                                if (frozenScale > 0) {
+                                    this.frozenBaseShiftX = Math.round(-(deltaDx * this.neutralSize) / (2 * frozenScale * neutralExtent))
+                                    this.frozenBaseShiftY = Math.round((deltaDy * this.neutralSize) / (2 * frozenScale * neutralExtent))
+                                }
+                            } else {
+                                // Swap: the live texture already contains pan, no base shift
+                                this.frozenBaseShiftX = 0
+                                this.frozenBaseShiftY = 0
+                            }
+                            this.frozenPanShiftX = 0
+                            this.frozenPanShiftY = 0
+                        }
+                        break
+                    case 'mergeResolvedAndFrozen':
+                        this.needMergeSnapshot = !prevRefResetDuringZoom
+                        if (wasZoomActive && prevFrozenScale > 0) {
+                            this.mergeUniforms = {
+                                zf: prevFrozenScale / mandelbrot.scale,
+                                lzf: prevLiveScale / mandelbrot.scale,
+                                frozenShiftU: (this.frozenBaseShiftX + this.frozenPanShiftX * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
+                                frozenShiftV: -(this.frozenBaseShiftY + this.frozenPanShiftY * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
+                                aspect,
+                                angle: mandelbrot.angle,
+                            }
+                        }
+                        break
+                    case 'clearHistoryNextFrame':
+                        this.clearHistoryNextFrame = true
+                        break
                 }
-                const shouldSwap = this.zoomingIn
-                    ? this.zoomFactor >= this.zoomMagnificationThreshold
-                    : this.zoomFactor <= 1.0 / this.zoomMagnificationThreshold
-
-                if (shouldSwap && !this.referenceResetDuringZoom) {
-                    // Swap: the live texture becomes the new frozen snapshot,
-                    // start a new cycle at the next threshold step.
-                    // Use mandelbrot.scale (current display) — NOT frozenScale —
-                    // to compute the next liveScale, so the new cycle starts
-                    // from where the user actually is. This prevents swap
-                    // cascades when zoom speed overshoots liveScale.
-                    this.needFreezeSnapshot = true
-                    this.clearHistoryNextFrame = true
-                    this.frozenScale = this.liveScale
-                    this.frozenBaseShiftX = 0
-                    this.frozenBaseShiftY = 0
-                    this.frozenPanShiftX = 0
-                    this.frozenPanShiftY = 0
-                    this.liveScale = this.zoomingIn
-                        ? mandelbrot.scale / this.zoomMagnificationThreshold
-                        : mandelbrot.scale * this.zoomMagnificationThreshold
-                    this.zoomFactor = this.frozenScale / mandelbrot.scale
-                    this.liveZoomFactor = this.liveScale / mandelbrot.scale
-                }
-            } else if (!this.zoomReprojectionActive) {
-                this.zoomFactor = 1.0
-                this.liveZoomFactor = 1.0
-                this.liveScale = 0
-            }
-
-            // If zoom has stopped (no scale change), deactivate and recompute
-            // at the actual display scale.
-            if (this.zoomReprojectionActive && !scaleChanged
-                && this.prevFrameMandelbrot
-                && this.prevFrameMandelbrot.scale === mandelbrot.scale) {
-                    // Capture merge uniforms BEFORE resetting zoom state.
-                    const aspect = (this.width / Math.max(1, this.height))
-                    this.mergeUniforms = {
-                        zf: this.zoomFactor,
-                        lzf: this.liveZoomFactor,
-                        frozenShiftU: (this.frozenScale > 0)
-                            ? (this.frozenBaseShiftX + this.frozenPanShiftX * (this.liveScale / this.frozenScale)) / this.neutralSize
-                            : 0,
-                        frozenShiftV: (this.frozenScale > 0)
-                            ? -(this.frozenBaseShiftY + this.frozenPanShiftY * (this.liveScale / this.frozenScale)) / this.neutralSize
-                            : 0,
-                        aspect,
-                        angle: mandelbrot.angle,
-                    }
-                    this.needMergeSnapshot = !this.referenceResetDuringZoom
-
-                    this.zoomReprojectionActive = false
-                    this.zoomFactor = 1.0
-                    this.liveZoomFactor = 1.0
-                    this.liveScale = 0
-                    this.frozenBaseShiftX = 0
-                    this.frozenBaseShiftY = 0
-                    this.frozenPanShiftX = 0
-                    this.frozenPanShiftY = 0
-                    this.referenceResetDuringZoom = false
-                    this.clearHistoryNextFrame = true
             }
         }
 
@@ -1757,6 +1689,17 @@ export class Engine {
         const sceneSin = Math.sin(mandelbrot.angle)
         const sceneCos = Math.cos(mandelbrot.angle)
         const lightDirLen = Math.hypot(Math.cos(renderOptions.lightAngle), Math.sin(renderOptions.lightAngle), 1.85)
+
+        const zoomActive = isZoomActive(this.zoomState)
+        const zoomFactor = zoomActive
+            ? getFrozenScale(this.zoomState) / mandelbrot.scale
+            : 1.0
+        const liveZoomFactor = zoomActive
+            ? getLiveScale(this.zoomState) / mandelbrot.scale
+            : 1.0
+        const frozenScale = getFrozenScale(this.zoomState)
+        const liveScale = getLiveScale(this.zoomState)
+
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,    // 0: palettePeriod
             renderOptions.paletteOffset,    // 1: paletteOffset
@@ -1766,18 +1709,18 @@ export class Engine {
             mandelbrot.angle,               // 5: angle
             renderOptions.activateAnimate ? 1 : 0, // 6: animate
             mandelbrot.mu,                  // 7: mu
-            this.zoomFactor,                // 8: zoomFactor
-            (this.zoomReprojectionActive || this.frozenAligned || this.needFreezeSnapshot) ? 1.0 : 0.0, // 9: frozenAligned
-            this.liveZoomFactor,            // 10: liveZoomFactor
+            zoomFactor,                     // 8: zoomFactor
+            (zoomActive || this.frozenAligned || this.needFreezeSnapshot) ? 1.0 : 0.0, // 9: frozenAligned
+            liveZoomFactor,                 // 10: liveZoomFactor
             // Frozen shift derived from the live texture's actual cumulative
             // shift (in rounded texels at liveScale), rescaled to frozen UV.
             // This ensures the frozen texture follows the exact same pan drift
             // as the live texture, without independent accumulation errors.
-            (this.zoomReprojectionActive && this.frozenScale > 0)
-                ? (this.frozenBaseShiftX + this.frozenPanShiftX * (this.liveScale / this.frozenScale)) / this.neutralSize
+            (zoomActive && frozenScale > 0)
+                ? (this.frozenBaseShiftX + this.frozenPanShiftX * (liveScale / frozenScale)) / this.neutralSize
                 : 0,                        // 11: frozenShiftU
-            (this.zoomReprojectionActive && this.frozenScale > 0)
-                ? -(this.frozenBaseShiftY + this.frozenPanShiftY * (this.liveScale / this.frozenScale)) / this.neutralSize
+            (zoomActive && frozenScale > 0)
+                ? -(this.frozenBaseShiftY + this.frozenPanShiftY * (liveScale / frozenScale)) / this.neutralSize
                 : 0,                        // 12: frozenShiftV
             renderOptions.tessellationLevel, // 13: tessellationLevel
             renderOptions.displacementAmount, // 14: displacementAmount
@@ -1807,8 +1750,8 @@ export class Engine {
 
         const maxIterations = Math.ceil(mandelbrot.maxIterations)
         this.currentMaxIterations = maxIterations
-        const computeScale = (this.zoomReprojectionActive && this.liveScale > 0)
-            ? this.liveScale
+        const computeScale = isZoomActive(this.zoomState) && getLiveScale(this.zoomState) > 0
+            ? getLiveScale(this.zoomState)
             : mandelbrot.scale
 
         if (!this.referenceViewKey) {
@@ -1869,7 +1812,7 @@ export class Engine {
         // During an active zoom reprojection cycle, skip this: maxIterations
         // grows every frame with scale, so the condition fires perpetually.
         // The ZOOM_STOP clear will trigger a full recompute when zoom ends.
-        if (!this.zoomReprojectionActive
+        if (!isZoomActive(this.zoomState)
             && !this.clearHistoryNextFrame
             && orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
             this.needFreezeSnapshot = true
@@ -1931,8 +1874,8 @@ export class Engine {
             // live texture is computed) instead of the display scale.
             const texSize = this.neutralSize
             const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
-            const scaleForShift = (this.zoomReprojectionActive && this.liveScale > 0)
-                ? this.liveScale
+            const scaleForShift = (isZoomActive(this.zoomState) && getLiveScale(this.zoomState) > 0)
+                ? getLiveScale(this.zoomState)
                 : this.previousMandelbrot.scale
             shiftTexX = -(deltaDx * texSize) / (2 * scaleForShift * neutralExtent)
             shiftTexY = (deltaDy * texSize) / (2 * scaleForShift * neutralExtent)
@@ -1950,7 +1893,7 @@ export class Engine {
         } else {
             this.cumulativeShiftX += roundedShiftTexX
             this.cumulativeShiftY += roundedShiftTexY
-            if (this.zoomReprojectionActive) {
+            if (isZoomActive(this.zoomState)) {
                 this.frozenPanShiftX += roundedShiftTexX
                 this.frozenPanShiftY += roundedShiftTexY
             }
@@ -1961,7 +1904,7 @@ export class Engine {
             }
         }
 
-        if (hasTranslationShift && !this.zoomReprojectionActive) {
+        if (hasTranslationShift && !isZoomActive(this.zoomState)) {
             // A pending non-zoom snapshot would copy the pre-translation
             // resolved texture, then incorrectly mark it aligned with the
             // translated live texture.
@@ -2014,7 +1957,7 @@ export class Engine {
             this.previousMandelbrot.mu,
             gridOffsetX,
             gridOffsetY,
-            this.zoomReprojectionActive ? ZOOM_MIN_BRUSH_STEP : 0,
+            isZoomActive(this.zoomState) ? ZOOM_MIN_BRUSH_STEP : 0,
             allowRefinement,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
@@ -2102,7 +2045,7 @@ export class Engine {
             this.frozenAligned = true
             this.frozenPanShiftX = 0
             this.frozenPanShiftY = 0
-            if (!this.zoomReprojectionActive) {
+            if (!isZoomActive(this.zoomState)) {
                 this.frozenBaseShiftX = 0
                 this.frozenBaseShiftY = 0
             }
@@ -2349,7 +2292,7 @@ export class Engine {
         let reason = ''
         if (this.needRender) reason = 'needRender'
         else if (this.snapshotCallback) reason = 'snapshot'
-        else if (this.zoomReprojectionActive) reason = 'zoomActive'
+        else if (isZoomActive(this.zoomState)) reason = 'zoomActive'
         else if (this.clearHistoryNextFrame) reason = 'clearHistory'
         else if (this.needFreezeSnapshot) reason = 'freezeSnapshot'
         else if (this.needMergeSnapshot) reason = 'mergeSnapshot'
