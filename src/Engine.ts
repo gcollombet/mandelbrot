@@ -349,9 +349,28 @@ export class Engine {
     private referenceWorkerCx = ''
     private referenceWorkerCy = ''
     private referenceOrbitWasReset = false
-    /** Complex-plane jump of the reference origin since last visual frame (consumed in update). */
-    private pendingRefJumpX = 0
-    private pendingRefJumpY = 0
+
+    // ── Deferred reference switch state ─────────────────────────────
+    /** True when a new reference is being accumulated (worker re-anchored, waiting for enough orbit). */
+    private pendingRefActive = false
+    /** Reference origin of the pending (accumulated) reference. */
+    private pendingRefCx = ''
+    private pendingRefCy = ''
+    /** Accumulated orbit data for the pending reference (Float32Array, 4 floats per step). */
+    private pendingRefOrbitBuffer: Float32Array<ArrayBuffer> | null = null
+    /** Total step count accumulated. */
+    private pendingRefOrbitLen = 0
+    /** Max iterations at the time the accumulation started. */
+    private pendingRefMaxIterations = 0
+    /** Accumulated BLA data for the pending reference (null if not yet received or in perturbation mode). */
+    private pendingRefBlaSteps: Float32Array<ArrayBuffer> | null = null
+    private pendingRefBlaLevels: Uint32Array<ArrayBuffer> | null = null
+    private pendingRefBlaLevelCount = 0
+    private pendingRefBlaReadyMaxIterations = 0
+    /** Pending reference has enough orbit data and must be applied during update(), not in worker callback. */
+    private pendingRefReady = false
+    /** Skip the render immediately after applying a pending reference; update() used old dx/dy for that call. */
+    private skipRenderOnce = false
 
     prevFrameMandelbrot?: Mandelbrot // paramètres de la dernière frame rendue (pour gestion d'historique)
 
@@ -464,6 +483,107 @@ export class Engine {
         this.orbitIncomplete = true
     }
 
+    /** Discard any pending deferred reference accumulation. */
+    private discardPendingReference() {
+        if (!this.pendingRefActive) return
+        this.pendingRefActive = false
+        this.pendingRefCx = ''
+        this.pendingRefCy = ''
+        this.pendingRefOrbitBuffer = null
+        this.pendingRefOrbitLen = 0
+        this.pendingRefMaxIterations = 0
+        this.pendingRefBlaSteps = null
+        this.pendingRefBlaLevels = null
+        this.pendingRefBlaLevelCount = 0
+        this.pendingRefBlaReadyMaxIterations = 0
+        this.pendingRefReady = false
+    }
+
+    /**
+     * Mark a fully-accumulated pending reference as ready.
+     * The actual switch must happen in update(), never in a worker callback,
+     * otherwise render() can see new GPU reference data with old uniforms.
+     */
+    private markPendingReferenceReady() {
+        if (!this.pendingRefActive) return
+        this.pendingRefReady = true
+        this.isReferenceValidating = false
+        this.needRender = true
+    }
+
+    /**
+     * Apply a fully-accumulated pending reference: write orbit/BLA data to GPU,
+     * update reference state, and flag orbitWasReset so the following update() clears
+     * history. Keep the frozen texture in its current visual space until live
+     * pixels are recomputed; do not apply an imprecise ref-origin delta.
+     */
+    private applyPendingReferenceSwitch() {
+        if (!this.pendingRefActive || !this.pendingRefReady) return
+
+        // Write accumulated orbit data to GPU buffer
+        const orbitBuffer = this.pendingRefOrbitBuffer
+        if (orbitBuffer && this.mandelbrotReferenceBuffer) {
+            const floatCount = this.pendingRefOrbitLen * 4
+            const writeSize = Math.min(floatCount, orbitBuffer.length)
+            this.device.queue.writeBuffer(
+                this.mandelbrotReferenceBuffer,
+                0,
+                orbitBuffer,
+                0,
+                writeSize,
+            )
+        }
+
+        // Write accumulated BLA data to GPU buffers
+        if (this.pendingRefBlaSteps && this.mandelbrotBlaBuffer) {
+            this.device.queue.writeBuffer(
+                this.mandelbrotBlaBuffer, 0,
+                this.pendingRefBlaSteps, 0,
+                this.pendingRefBlaSteps.length,
+            )
+        }
+        if (this.pendingRefBlaLevels && this.mandelbrotBlaLevelBuffer) {
+            this.device.queue.writeBuffer(
+                this.mandelbrotBlaLevelBuffer, 0,
+                this.pendingRefBlaLevels, 0,
+                this.pendingRefBlaLevels.length,
+            )
+        }
+        if (this.pendingRefBlaLevelCount > 0) {
+            this.currentBlaLevelCount = this.pendingRefBlaLevelCount
+            this.referenceBlaReadyMaxIterations = this.pendingRefBlaReadyMaxIterations
+        }
+
+        // Switch the main-thread reference state
+        this.referenceWorkerCx = this.pendingRefCx
+        this.referenceWorkerCy = this.pendingRefCy
+        this.mandelbrotNavigator.reference_origin(this.pendingRefCx, this.pendingRefCy)
+
+        // Set orbit length directly — NOT via markReferenceReset (which would zero it).
+        // This lets the next frame use the accumulated orbit immediately.
+        this.referenceAvailableOrbitLen = this.pendingRefOrbitLen
+        const availableIter = Math.max(0, this.pendingRefOrbitLen - 1)
+        this.currentReferenceAvailableIter = availableIter
+        this.currentReferenceRemainingIter = Math.max(0, this.currentMaxIterations - availableIter)
+        this.currentGuardedMaxIter = Math.min(this.currentMaxIterations, availableIter)
+        this.isReferenceValidating = false
+        this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < this.currentMaxIterations
+
+        // Flag the visual system for a reset (consumed by the next full update())
+        this.referenceResetSerial++
+        this.referenceResetFlashUntil = performance.now() + 900
+        this.referenceOrbitWasReset = true
+        this.invalidateCounterReadback()
+        this.needRender = true
+
+        // This update() call received dx/dy from before reference_origin().
+        // Do not render with mixed old uniforms and new reference buffers.
+        this.skipRenderOnce = true
+
+        // Discard pending state (now live)
+        this.discardPendingReference()
+    }
+
     private initializeReferenceWorker() {
         this.referenceWorker?.terminate()
         this.referenceWorker = new Worker(new URL('./referenceWorker.ts', import.meta.url), { type: 'module' })
@@ -483,6 +603,7 @@ export class Engine {
     }
 
     private resetReferenceJob(mandelbrot: Mandelbrot, scale: number, maxIterations: number) {
+        this.discardPendingReference()
         this.markReferenceReset(maxIterations)
         this.referenceBlaReadyMaxIterations = 0
         this.referenceOrbitWasReset = true
@@ -511,6 +632,7 @@ export class Engine {
         if (nextKey === this.referenceViewKey) {
             return
         }
+        this.discardPendingReference()
         this.referenceViewKey = nextKey
         this.isReferenceValidating = true
         this.orbitIncomplete = true
@@ -540,44 +662,110 @@ export class Engine {
         }
 
         if (message.type === 'referenceReset') {
-            this.pendingRefJumpX += Number(message.referenceCx) - Number(this.referenceWorkerCx)
-            this.pendingRefJumpY += Number(message.referenceCy) - Number(this.referenceWorkerCy)
-            this.markReferenceReset()
-            this.referenceWorkerCx = message.referenceCx
-            this.referenceWorkerCy = message.referenceCy
-            this.mandelbrotNavigator.reference_origin(message.referenceCx, message.referenceCy)
-            this.referenceOrbitWasReset = true
-            this.currentBlaLevelCount = 0
-            this.referenceBlaReadyMaxIterations = 0
-            this.invalidateCounterReadback()
-            this.needRender = true
+            // ── Deferred switch: start accumulating a new reference ──
+            // Instead of switching immediately (which triggers clearHistory,
+            // frozen misalignment, etc.), we wait until enough orbit data
+            // has been computed for this new reference.
+            if (this.pendingRefActive) {
+                if (message.referenceCx === this.pendingRefCx && message.referenceCy === this.pendingRefCy) {
+                    return // duplicate, already accumulating this reference
+                }
+                // Different reference — old accumulation is stale, restart
+                this.discardPendingReference()
+            }
+            this.pendingRefActive = true
+            this.pendingRefCx = message.referenceCx
+            this.pendingRefCy = message.referenceCy
+            this.pendingRefMaxIterations = message.maxIterations
+            // Allocate orbit buffer for accumulation (4 floats per step)
+            const bufLen = Math.max(message.maxIterations, this.currentMaxIterations) * 4
+            this.pendingRefOrbitBuffer = new Float32Array(bufLen)
+            this.pendingRefOrbitLen = 0
+            this.pendingRefBlaSteps = null
+            this.pendingRefBlaLevels = null
+            this.pendingRefBlaLevelCount = 0
+            this.pendingRefBlaReadyMaxIterations = 0
             return
         }
 
         if (message.type === 'orbitChunk') {
-            const previousAvailableOrbitLen = this.referenceAvailableOrbitLen
+            const wasPendingAccumulation = this.pendingRefActive
+                && message.referenceCx === this.pendingRefCx
+                && message.referenceCy === this.pendingRefCy
 
-            if (message.referenceCx !== this.referenceWorkerCx || message.referenceCy !== this.referenceWorkerCy) {
-                this.pendingRefJumpX += Number(message.referenceCx) - Number(this.referenceWorkerCx)
-                this.pendingRefJumpY += Number(message.referenceCy) - Number(this.referenceWorkerCy)
+            if (wasPendingAccumulation) {
+                // ── Accumulate orbit for the pending reference ──
+                const orbitBuf = this.pendingRefOrbitBuffer
+                if (orbitBuf && message.orbit.length > 0) {
+                    const floatOffset = message.offset * 4
+                    const copyLen = Math.min(message.orbit.length, orbitBuf.length - floatOffset)
+                    if (copyLen > 0) {
+                        // Convert to plain ArrayBuffer via slice() (worker messages carry ArrayBufferLike)
+                        orbitBuf.set(message.orbit.slice(0, copyLen), floatOffset)
+                    }
+                }
+                this.pendingRefOrbitLen = message.count
+
+                // Check if orbit is sufficient to switch
+                const targetLen = Math.min(this.pendingRefMaxIterations, this.currentMaxIterations)
+                if (this.pendingRefOrbitLen >= targetLen) {
+                    this.markPendingReferenceReady()
+                }
+            } else if (message.referenceCx !== this.referenceWorkerCx || message.referenceCy !== this.referenceWorkerCy) {
+                // ── Unknown reference (not pending, not current) → start new accumulation ──
+                if (this.pendingRefActive) {
+                    this.discardPendingReference()
+                }
+                this.pendingRefActive = true
+                this.pendingRefCx = message.referenceCx
+                this.pendingRefCy = message.referenceCy
+                this.pendingRefMaxIterations = message.maxIterations
+                const bufLen = Math.max(message.maxIterations, this.currentMaxIterations) * 4
+                this.pendingRefOrbitBuffer = new Float32Array(bufLen)
+                this.pendingRefOrbitLen = 0
+                this.pendingRefBlaSteps = null
+                this.pendingRefBlaLevels = null
+                this.pendingRefBlaLevelCount = 0
+                this.pendingRefBlaReadyMaxIterations = 0
+                // Accumulate this first chunk
+                const orbitBuf = this.pendingRefOrbitBuffer
+                if (orbitBuf && message.orbit.length > 0) {
+                    const floatOffset = message.offset * 4
+                    const copyLen = Math.min(message.orbit.length, orbitBuf.length - floatOffset)
+                    if (copyLen > 0) {
+                        orbitBuf.set(message.orbit.slice(0, copyLen), floatOffset)
+                    }
+                }
+                this.pendingRefOrbitLen = message.count
+                const targetLen = Math.min(this.pendingRefMaxIterations, this.currentMaxIterations)
+                if (this.pendingRefOrbitLen >= targetLen) {
+                    this.markPendingReferenceReady()
+                }
+                // This chunk was accumulated into pending — skip the GPU write below
+                // by making the accumulator flag true (it was false at check time above).
+                // We do this by jumping to the end of the handler.
+                this.isReferenceValidating = false
+                this.needRender = true
+                return
+            } else if (message.offset === 0 && this.referenceAvailableOrbitLen > 0) {
+                // ── Orbit restart for the CURRENT reference (should be rare) ──
                 this.markReferenceReset()
-                this.referenceWorkerCx = message.referenceCx
-                this.referenceWorkerCy = message.referenceCy
-                this.mandelbrotNavigator.reference_origin(message.referenceCx, message.referenceCy)
                 this.referenceOrbitWasReset = true
                 this.currentBlaLevelCount = 0
                 this.referenceBlaReadyMaxIterations = 0
                 this.invalidateCounterReadback()
-            } else if (message.offset === 0 && previousAvailableOrbitLen > 0) {
-                this.markReferenceReset()
-                this.referenceOrbitWasReset = true
-                this.currentBlaLevelCount = 0
-                this.referenceBlaReadyMaxIterations = 0
-                this.invalidateCounterReadback()
+                // Write GPU data normally below
+            } else {
+                // ── Normal orbit chunk for the current (active) reference ──
             }
-            this.referenceAvailableOrbitLen = message.count
 
-            if (message.orbit.length > 0 && this.mandelbrotReferenceBuffer) {
+            // ── GPU write + state update for the CURRENT reference ──
+            // If this chunk was accumulated into a pending reference, skip the GPU write.
+            // The ready reference will be applied at update() boundary.
+            if (wasPendingAccumulation) {
+                // Accumulated into pending, skip GPU write (flush already wrote it or will).
+            } else if (message.orbit.length > 0 && this.mandelbrotReferenceBuffer) {
+                this.referenceAvailableOrbitLen = message.count
                 this.device.queue.writeBuffer(
                     this.mandelbrotReferenceBuffer,
                     message.offset * 4 * Float32Array.BYTES_PER_ELEMENT,
@@ -585,6 +773,8 @@ export class Engine {
                     0,
                     message.orbit.length,
                 )
+            } else {
+                this.referenceAvailableOrbitLen = message.count
             }
 
             const availableIter = Math.max(0, this.referenceAvailableOrbitLen - 1)
@@ -597,6 +787,21 @@ export class Engine {
             return
         }
 
+        // ── blaReady ──
+        // If a pending reference is waiting for BLA, accumulate it.
+        // Otherwise, write to GPU normally.
+        if (this.pendingRefActive) {
+            // Copy into plain ArrayBuffer-backed arrays (worker messages carry ArrayBufferLike)
+            this.pendingRefBlaSteps = new Float32Array(message.steps)
+            this.pendingRefBlaLevels = new Uint32Array(message.levels)
+            this.pendingRefBlaLevelCount = message.levelCount
+            this.pendingRefBlaReadyMaxIterations = message.maxIterations
+            const targetLen = Math.min(this.pendingRefMaxIterations, this.currentMaxIterations)
+            if (this.pendingRefOrbitLen >= targetLen) {
+                this.markPendingReferenceReady()
+            }
+            return
+        }
         this.ensureBlaBufferCapacity(message.steps.length / 6)
         this.ensureBlaLevelBufferCapacity(message.levelCount)
         if (message.steps.length > 0 && this.mandelbrotBlaBuffer) {
@@ -1321,6 +1526,11 @@ export class Engine {
         this.time += delta
         this.lastUpdateTime = now
 
+        if (this.pendingRefReady) {
+            this.applyPendingReferenceSwitch()
+            return
+        }
+
         const navigatorApproximationMode = this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation'
         const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
@@ -1399,26 +1609,17 @@ export class Engine {
                 this.frozenBaseShiftX = 0
                 this.frozenBaseShiftY = 0
                 this.referenceResetDuringZoom = false
-                this.pendingRefJumpX = 0
-                this.pendingRefJumpY = 0
             } else {
-                // The reference re-anchor makes dx/dy jump by -pendingRefJump.
-                // Isolate the actual pan component and fold it into frozenBaseShift.
-                const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
-                const rawDx = mandelbrot.dx - this.prevFrameMandelbrot!.dx
-                const rawDy = mandelbrot.dy - this.prevFrameMandelbrot!.dy
-                // dx changed by -refJump due to the reference switch; subtract that.
-                const panDx = rawDx + this.pendingRefJumpX
-                const panDy = rawDy + this.pendingRefJumpY
-                if (this.frozenScale > 0) {
-                    this.frozenBaseShiftX += Math.round(-(panDx * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
-                    this.frozenBaseShiftY += Math.round((panDy * this.neutralSize) / (2 * this.frozenScale * neutralExtent))
-                }
-                this.pendingRefJumpX = 0
-                this.pendingRefJumpY = 0
+                // Keep the frozen texture in its current visual position. Trying
+                // to compensate the reference-origin jump via Number(new-old) is
+                // numerically unstable at deep zoom and makes the frozen jump.
                 this.referenceResetDuringZoom = true
             }
-            this.needFreezeSnapshot = false
+            // A reference reset clears the live texture. At deep zoom, the first
+            // recompute can be slow enough to expose a black frame unless we keep
+            // the last resolved image as a temporary frozen fallback. The render
+            // pass copies resolved -> frozen before executing the clear.
+            this.needFreezeSnapshot = orbitWasReset && !preserveZoomFrozen && !muChanged
             this.needMergeSnapshot = false
         }
 
@@ -1523,8 +1724,6 @@ export class Engine {
                     this.frozenBaseShiftX = 0
                     this.frozenBaseShiftY = 0
                     this.referenceResetDuringZoom = false
-                    this.pendingRefJumpX = 0
-                    this.pendingRefJumpY = 0
                     this.clearHistoryNextFrame = true
             }
         }
@@ -1559,7 +1758,7 @@ export class Engine {
             renderOptions.activateAnimate ? 1 : 0, // 6: animate
             mandelbrot.mu,                  // 7: mu
             this.zoomFactor,                // 8: zoomFactor
-            (this.zoomReprojectionActive || this.frozenAligned) ? 1.0 : 0.0, // 9: frozenAligned
+            (this.zoomReprojectionActive || this.frozenAligned || this.needFreezeSnapshot) ? 1.0 : 0.0, // 9: frozenAligned
             this.liveZoomFactor,            // 10: liveZoomFactor
             // Frozen shift derived from the live texture's actual cumulative
             // shift (in rounded texels at liveScale), rescaled to frozen UV.
@@ -1674,6 +1873,11 @@ export class Engine {
     }
 
     async render() {
+        if (this.skipRenderOnce) {
+            this.skipRenderOnce = false
+            return
+        }
+
         if (!this.needsMoreFrames()) {
             return
         }
