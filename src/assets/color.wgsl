@@ -273,12 +273,12 @@ fn curvature_edge_wear(angle_der: f32, v_smooth: f32) -> f32 {
   return clamp(directionalRidge * 0.65 + iterationRidge * 0.35, 0.0, 1.0);
 }
 
-fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceToSet: f32) -> vec3<f32> {
+fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceHeight: f32) -> vec3<f32> {
   let backLight = pow(max(dot(normal, -lightDir), 0.0), 1.35);
   let rimScatter = pow(clamp(1.0 - nDotV, 0.0, 1.0), 2.15);
   let wrapBase = clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0);
   let wrapLight = wrapBase * wrapBase;
-  let thinness = 1.0 - smoothstep(0.15, 3.5, distanceToSet);
+  let thinness = 1.0 - smoothstep(4.0, 13.0, distanceHeight);
   let thickness = clamp(thinness * 0.62 + (1.0 - ao) * 0.23 + edgeWear * 0.15, 0.0, 1.0);
   let mask = (backLight * 0.35 + rimScatter * 0.25 + wrapLight * 0.40) * thickness;
   let scatterColor = mix(color, sqrt(max(color, vec3<f32>(0.0))), 0.35);
@@ -347,14 +347,7 @@ fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32
     return -1e6;
   }
 
-  return storedHeight;
-}
-
-fn distance_relief_height(distance: f32) -> f32 {
-  if (distance < -1e5) {
-    return distance;
-  }
-  return 1.0 / (1.0 + max(distance, 0.0));
+  return clamp(storedHeight, -64.0, 64.0);
 }
 
 fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f32 {
@@ -381,11 +374,10 @@ fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: ve
   let xl = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize);
   let yu = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize);
   let yd = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize);
-  let centerReliefHeight = distance_relief_height(centerHeight);
-  let rightHeight = select(centerReliefHeight, distance_relief_height(xr), xr > -1e5);
-  let leftHeight = select(centerReliefHeight, distance_relief_height(xl), xl > -1e5);
-  let upHeight = select(centerReliefHeight, distance_relief_height(yu), yu > -1e5);
-  let downHeight = select(centerReliefHeight, distance_relief_height(yd), yd > -1e5);
+  let rightHeight = select(centerHeight, xr, xr > -1e5);
+  let leftHeight = select(centerHeight, xl, xl > -1e5);
+  let upHeight = select(centerHeight, yu, yu > -1e5);
+  let downHeight = select(centerHeight, yd, yd > -1e5);
   return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 12.0;
 }
 
@@ -723,11 +715,11 @@ fn debug_heat(t: f32) -> vec3<f32> {
 }
 
 fn debug_distance_scale(distance: f32) -> f32 {
-  return log(1.0 + max(distance, 0.0) * 64.0) / log(65.0);
+  return (distance + 16.0) / 32.0;
 }
 
 fn debug_gradient_scale(gradientLength: f32) -> f32 {
-  return log(1.0 + max(gradientLength, 0.0) * 8.0) / log(9.0);
+  return gradientLength / 6.0;
 }
 
 fn debug_wheel_sector(uv: vec2<f32>) -> i32 {

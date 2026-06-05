@@ -146,7 +146,7 @@ fn derivative_step(zPrev: vec2<f32>, derPolar: vec2<f32>) -> vec2<f32> {
 fn distance_height(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
   let logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
   let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - log(max(mandelbrot.scale, 1e-30));
-  return exp(clamp(logScreenDistance, -80.0, 80.0));
+  return clamp(-logScreenDistance, -64.0, 64.0);
 }
 
 fn visual_derivative_angle(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
