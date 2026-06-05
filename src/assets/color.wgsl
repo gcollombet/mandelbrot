@@ -709,8 +709,12 @@ fn direction_coherence_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: 
   return normalize(normal - bump * clamp(strength, 0.0, 1.0) * 0.75);
 }
 
+fn debug_mirror_phase(t: f32) -> f32 {
+  return 1.0 - abs(fract(t) * 2.0 - 1.0);
+}
+
 fn debug_heat(t: f32) -> vec3<f32> {
-  let x = clamp(t, 0.0, 1.0);
+  let x = debug_mirror_phase(t);
   return clamp(vec3<f32>(x * 2.0 - 0.25, 1.0 - abs(x * 2.0 - 1.0), 1.25 - x * 2.0), vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
@@ -738,6 +742,7 @@ fn colorize_pixel(
   der_x: f32, der_y: f32,
   refWithStripe: f32,
   avgDirection: f32,
+  uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
@@ -786,7 +791,7 @@ fn colorize_pixel(
   let angle_der = der_y;
 
   if (parameters.debugShading >= 0.5) {
-    let sector = debug_wheel_sector(uv_neutral);
+    let sector = debug_wheel_sector(uv_screen);
     if (sector == 0) {
       return vec4<f32>(debug_heat(fract(nu_smooth * 0.125)), 1.0);
     }
@@ -942,6 +947,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         textureLoad(tex, liveCoord, 5, 0).r,
         textureLoad(tex, liveCoord, 6, 0).r,
         textureLoad(tex, liveCoord, 7, 0).r,
+        uv_screen,
         uv_neutral
       );
       if (DEBUG_SHOW_LIVE_NEGATIVE) {
@@ -961,6 +967,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         textureLoad(texFrozen, frozenCoord, 5, 0).r,
         textureLoad(texFrozen, frozenCoord, 6, 0).r,
         textureLoad(texFrozen, frozenCoord, 7, 0).r,
+        uv_screen,
         uv_neutral
       );
       return vec4<f32>(frozenColor.rgb, 1.0);
@@ -979,6 +986,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       textureLoad(tex, liveCoord, 5, 0).r,
       textureLoad(tex, liveCoord, 6, 0).r,
       textureLoad(tex, liveCoord, 7, 0).r,
+      uv_screen,
       uv_neutral
     );
     if (DEBUG_SHOW_LIVE_NEGATIVE) {
@@ -1004,6 +1012,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       textureLoad(texFrozen, frozenCoord, 5, 0).r,
       textureLoad(texFrozen, frozenCoord, 6, 0).r,
       textureLoad(texFrozen, frozenCoord, 7, 0).r,
+      uv_screen,
       uv_neutral
     );
     return vec4<f32>(frozenColor.rgb, 1.0);

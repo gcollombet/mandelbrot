@@ -313,14 +313,53 @@ defineExpose({
 </script>
 
 <template>
-  <canvas ref="canvasRef"></canvas>
+  <div class="mandelbrot-canvas-wrap">
+    <canvas ref="canvasRef"></canvas>
+    <div v-if="props.debugShading" class="debug-legend" aria-hidden="true">
+      <div class="debug-legend-item debug-legend-top-left">Distance au bord</div>
+      <div class="debug-legend-item debug-legend-top-right">Palette / phase continue</div>
+      <div class="debug-legend-item debug-legend-bottom-left">Gradient du relief</div>
+      <div class="debug-legend-item debug-legend-bottom-right">Angle de la dérivée</div>
+    </div>
+  </div>
 </template>
 
 <style>
+.mandelbrot-canvas-wrap {
+  position: relative;
+  width: 100%;
+  height: 100%;
+}
+
 canvas {
   border-radius: 0;
   width: 100%;
-  height: 500px;
+  height: 100%;
   display: block;
 }
+
+.debug-legend {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.01em;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.75);
+}
+
+.debug-legend-item {
+  position: absolute;
+  max-width: 42%;
+  padding: 0.35rem 0.55rem;
+  border-radius: 999px;
+  background: rgba(10, 10, 20, 0.42);
+  color: rgba(255, 255, 255, 0.95);
+  backdrop-filter: blur(6px);
+}
+
+.debug-legend-top-left { top: 0.75rem; left: 0.75rem; }
+.debug-legend-top-right { top: 0.75rem; right: 0.75rem; }
+.debug-legend-bottom-left { left: 0.75rem; bottom: 0.75rem; }
+.debug-legend-bottom-right { right: 0.75rem; bottom: 0.75rem; }
 </style>

@@ -314,7 +314,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   let dc = vec2<f32>(x0, y0);
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
-  let epsilon = mandelbrot.epsilon;
+  let logEpsilon = log(max(mandelbrot.epsilon, 1e-30));
 
   // Resume state: if prev_iter > 0 we are continuing a previous pass.
 
@@ -385,7 +385,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         escaped = true;
         break;
       }
-      if (!usedBla && !IGNORE_EPSILON && 2.0 * derPolar.y < log(max(epsilon, 1e-30))) {
+      if (!usedBla && !IGNORE_EPSILON && 2.0 * derPolar.y < logEpsilon) {
         inside = true;
         break;
       }
@@ -421,7 +421,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         escaped = true;
         break;
       }
-      if (!IGNORE_EPSILON && 2.0 * derPolar.y < log(max(epsilon, 1e-30))) {
+      if (!IGNORE_EPSILON && 2.0 * derPolar.y < logEpsilon) {
         inside = true;
         break;
       }
