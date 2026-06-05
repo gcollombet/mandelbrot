@@ -36,6 +36,7 @@ export interface PaletteRecord {
   interpolationMode?: InterpolationMode;
   palettePeriod?: number;
   paletteOffset?: number;
+  heightPaletteShift?: number;
   paletteMirror?: boolean;
   activateAnimate?: boolean;
   animationSpeed?: number;
@@ -43,11 +44,11 @@ export interface PaletteRecord {
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
   microBumpStrength?: number;
-  clearcoatStrength?: number;
   subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
+  orbitTrapStrength?: number;
   stripeFrequency?: number;
 }
 

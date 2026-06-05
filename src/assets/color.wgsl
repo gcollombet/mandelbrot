@@ -18,7 +18,6 @@ struct Uniforms {
   epsilon: f32,           // interior detection threshold (|der|² < epsilon)
   ambientOcclusionStrength: f32,
   microBumpStrength: f32,
-  clearcoatStrength: f32,
   subsurfaceStrength: f32,
   reliefDepth: f32,
   localShadowStrength: f32,
@@ -32,6 +31,8 @@ struct Uniforms {
   lightDirZ: f32,
   paletteMirror: f32,
   debugShading: f32,
+  heightPaletteShift: f32,
+  orbitTrapStrength: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -129,7 +130,7 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   e.wStripeAverage = clamp(row5.r, 0.0, 1.0);
   e.wRotationMean = clamp(row5.g, 0.0, 1.0);
   e.wStripeRelief = clamp(row5.b, 0.0, 1.0);
-  e.wDirectionCoherenceRelief = clamp(row5.a, 0.0, 1.0);
+  e.wDirectionCoherenceRelief = clamp(row5.a, 0.0, 100.0);
 
   return e;
 }
@@ -273,12 +274,14 @@ fn curvature_edge_wear(angle_der: f32, v_smooth: f32) -> f32 {
   return clamp(directionalRidge * 0.65 + iterationRidge * 0.35, 0.0, 1.0);
 }
 
-fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceHeight: f32) -> vec3<f32> {
+fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceHeight: f32, slope: f32) -> vec3<f32> {
   let backLight = pow(max(dot(normal, -lightDir), 0.0), 1.35);
   let rimScatter = pow(clamp(1.0 - nDotV, 0.0, 1.0), 2.15);
   let wrapBase = clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0);
   let wrapLight = wrapBase * wrapBase;
-  let thinness = 1.0 - smoothstep(4.0, 13.0, distanceHeight);
+  let heightThinness = 1.0 - smoothstep(4.0, 13.0, distanceHeight);
+  let slopeThinness = smoothstep(0.15, 1.6, slope);
+  let thinness = clamp(heightThinness * 0.55 + slopeThinness * 0.45, 0.0, 1.0);
   let thickness = clamp(thinness * 0.62 + (1.0 - ao) * 0.23 + edgeWear * 0.15, 0.0, 1.0);
   let mask = (backLight * 0.35 + rimScatter * 0.25 + wrapLight * 0.40) * thickness;
   let scatterColor = mix(color, sqrt(max(color, vec3<f32>(0.0))), 0.35);
@@ -352,6 +355,20 @@ fn fractal_height_shadow(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32
   return clamp(1.0 - shadow, 0.22, 1.0);
 }
 
+struct PixelState {
+  iter: f32,
+  zx: f32,
+  zy: f32,
+};
+
+fn load_pixel_state(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelState {
+  var state: PixelState;
+  state.iter = textureLoad(sourceTex, coord, 0, 0).r;
+  state.zx = textureLoad(sourceTex, coord, 2, 0).r;
+  state.zy = textureLoad(sourceTex, coord, 3, 0).r;
+  return state;
+}
+
 fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32) -> f32 {
   if (escape_nu(iterVal, zx, zy) < 0.0) {
     return -1e6;
@@ -360,23 +377,13 @@ fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32
   return clamp(storedHeight, -64.0, 64.0);
 }
 
-fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f32 {
-  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
-  let zx = textureLoad(sourceTex, coord, 2, 0).r;
-  let zy = textureLoad(sourceTex, coord, 3, 0).r;
-  let storedHeight = textureLoad(sourceTex, coord, 4, 0).r;
-  return distance_height_from_values(iterVal, zx, zy, storedHeight);
-}
-
 fn sample_distance_height_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
   if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
     return -1e6;
   }
-  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
-  let zx = textureLoad(sourceTex, coord, 2, 0).r;
-  let zy = textureLoad(sourceTex, coord, 3, 0).r;
+  let state = load_pixel_state(sourceTex, coord);
   let storedHeight = textureLoad(sourceTex, coord, 4, 0).r;
-  return distance_height_from_values(iterVal, zx, zy, storedHeight);
+  return distance_height_from_values(state.iter, state.zx, state.zy, storedHeight);
 }
 
 fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerHeight: f32) -> vec2<f32> {
@@ -394,7 +401,8 @@ fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: ve
 fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
-  let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset());
+  let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
+  let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset() + heightPhaseShift);
 
   // ── Sample all effect channels from the palette texture ──
   let fx = sampleEffects(palettePhase);
@@ -446,6 +454,20 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   }
   if (fx.wRotationMean > 0.001) {
     color = mix(color, samplePaletteColor(fract(directionCoherence)), fx.wRotationMean);
+  }
+
+  let orbitTrapStrength = clamp(parameters.orbitTrapStrength, 0.0, 100.0) / 100.0;
+  if (orbitTrapStrength > 0.001) {
+    let escapeRadius = sqrt(max(parameters.mu, 1e-6));
+    let trapZ = z / escapeRadius;
+    let axisTrap = min(abs(trapZ.x), abs(trapZ.y));
+    let diagonalTrap = min(abs(trapZ.x - trapZ.y), abs(trapZ.x + trapZ.y)) * 0.70710678;
+    let circleTrap = abs(length(trapZ) - 1.0);
+    let trapDistance = min(axisTrap, min(diagonalTrap * 0.72, circleTrap * 0.85));
+    let trapWidth = mix(0.012, 0.16, orbitTrapStrength);
+    let trapMask = exp(-(trapDistance * trapDistance) / max(trapWidth * trapWidth, 1e-5));
+    let trapColor = samplePaletteColor(fract(palettePhase + 0.18));
+    color = mix(color, mix(color, trapColor, 0.72) + trapMask * 0.12, trapMask * orbitTrapStrength);
   }
 
   // ── Shading (always computed, applied proportionally to wShading) ──
@@ -553,6 +575,18 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     materialColor = mix(materialColor, materialColor * cavityTint, cavityAmount * reliefAccent * 0.22);
     materialColor += mix(color, vec3<f32>(1.0), 0.38) * ridge * 0.16 * (1.0 - metallic * 0.45);
 
+    let varnish = clamp(parameters.varnishStrength, 0.0, 10.0) * 0.1;
+    if (varnish > 0.001) {
+      let wetDarken = mix(1.0, 0.78, varnish);
+      let wetTint = mix(color, color * vec3<f32>(0.86, 0.90, 0.96), varnish * 0.35);
+      let coatPower = mix(110.0, 260.0, varnish) * mix(1.0, 0.75, roughness);
+      let coatFresnel = fresnel_schlick(nDotV, vec3<f32>(0.025));
+      let coatLobe = pow(max(nDotH, 0.0), coatPower) * (0.20 + 0.80 * shadowedNDotL) * ao;
+      let coatHighlight = coatFresnel * coatLobe * (0.30 + 0.85 * varnish) * (1.0 - metallic * 0.25);
+      materialColor = mix(materialColor * wetDarken, wetTint, varnish * 0.25);
+      materialColor += coatHighlight;
+    }
+
     if (fx.wIridescence > 0.001) {
       let viewShift = smoothstep(0.04, 0.86, 1.0 - nDotV);
       let lightShift = smoothstep(0.08, 0.82, 1.0 - nDotH);
@@ -585,17 +619,9 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
         edgeWear,
         metallic,
         parameters.subsurfaceStrength,
-        distanceHeight
+        distanceHeight,
+        slope
       );
-    }
-
-    // Thin clearcoat layer: a sharp white lobe sitting above the base material.
-    let clearcoatStrength = effShading * clamp(parameters.clearcoatStrength, 0.0, 10.0) * (0.12 + 0.38 * fx.wSkybox) * (1.0 - roughness * 0.55);
-    if (clearcoatStrength > 0.001) {
-      let clearcoatD = ggx_distribution(nDotH, 0.08);
-      let clearcoatG = ggx_geometry_smith(nDotV, nDotL, 0.08);
-      let clearcoatF = fresnel_schlick(vDotH, vec3<f32>(0.04));
-      materialColor += clearcoatF * (clearcoatD * clearcoatG / max(4.0 * nDotV * nDotL, 1e-5)) * nDotL * clearcoatStrength;
     }
 
     var envColor = vec3<f32>(0.0);
@@ -606,7 +632,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       let skyboxColor = rough_skybox_reflection(skyboxDir, tangent, bitangent, roughness, dx + sky_drift_u, dy + sky_drift_v);
       let fresnelEnv = fresnel_schlick(nDotV, f0);
       let fresnelReflection = clamp(luminance(fresnelEnv), 0.0, 1.0);
-      let polishReflection = 0.075 * clamp(parameters.varnishStrength, 0.0, 10.0) * (1.0 - roughness * 0.55) * (1.0 - metallic * 0.35);
+      let polishReflection = 0.10 * varnish * (1.0 - roughness * 0.55) * (1.0 - metallic * 0.35);
       let reflectionStrength = fx.wSkybox * max(fresnelReflection, polishReflection);
       let envVisibility = mix(reflectionSide, mix(0.55, 1.0, litSide), metallic);
       envColor = skyboxColor * reflectionStrength * mix(0.55, 1.25, metallic) * envVisibility;
@@ -661,10 +687,8 @@ fn stripe_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: 
   if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
     return -1e6;
   }
-  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
-  let zx = textureLoad(sourceTex, coord, 2, 0).r;
-  let zy = textureLoad(sourceTex, coord, 3, 0).r;
-  if (escape_nu(iterVal, zx, zy) < 0.0) {
+  let state = load_pixel_state(sourceTex, coord);
+  if (escape_nu(state.iter, state.zx, state.zy) < 0.0) {
     return -1e6;
   }
   return decode_stripe_phase(textureLoad(sourceTex, coord, 6, 0).r);
@@ -695,14 +719,49 @@ fn decode_direction_coherence(encoded: f32) -> f32 {
   return clamp(length(avgDir), 0.0, 1.0);
 }
 
+struct PixelExtras {
+  der_x: f32,
+  der_y: f32,
+  refWithStripe: f32,
+  avgDirection: f32,
+};
+
+struct PixelSample {
+  iter: f32,
+  step: f32,
+  zx: f32,
+  zy: f32,
+};
+
+fn load_pixel_sample(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelSample {
+  var pixelSample: PixelSample;
+  pixelSample.iter = textureLoad(sourceTex, coord, 0, 0).r;
+  pixelSample.step = textureLoad(sourceTex, coord, 1, 0).r;
+  if (pixelSample.iter > 0.0) {
+    pixelSample.zx = textureLoad(sourceTex, coord, 2, 0).r;
+    pixelSample.zy = textureLoad(sourceTex, coord, 3, 0).r;
+  } else {
+    pixelSample.zx = 0.0;
+    pixelSample.zy = 0.0;
+  }
+  return pixelSample;
+}
+
+fn load_pixel_extras(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelExtras {
+  var extras: PixelExtras;
+  extras.der_x = textureLoad(sourceTex, coord, 4, 0).r;
+  extras.der_y = textureLoad(sourceTex, coord, 5, 0).r;
+  extras.refWithStripe = textureLoad(sourceTex, coord, 6, 0).r;
+  extras.avgDirection = textureLoad(sourceTex, coord, 7, 0).r;
+  return extras;
+}
+
 fn direction_coherence_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
   if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
     return -1e6;
   }
-  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
-  let zx = textureLoad(sourceTex, coord, 2, 0).r;
-  let zy = textureLoad(sourceTex, coord, 3, 0).r;
-  if (escape_nu(iterVal, zx, zy) < 0.0) {
+  let state = load_pixel_state(sourceTex, coord);
+  if (escape_nu(state.iter, state.zx, state.zy) < 0.0) {
     return -1e6;
   }
   return decode_direction_coherence(textureLoad(sourceTex, coord, 7, 0).r);
@@ -722,7 +781,7 @@ fn direction_coherence_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord
 
 fn direction_coherence_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, grad: vec2<f32>, strength: f32) -> vec3<f32> {
   let bump = tangent * grad.x + bitangent * grad.y;
-  return normalize(normal - bump * clamp(strength, 0.0, 1.0) * 0.75);
+  return normalize(normal - bump * clamp(strength, 0.0, 100.0) * 0.75);
 }
 
 fn debug_mirror_phase(t: f32) -> f32 {
@@ -755,9 +814,7 @@ fn colorize_pixel(
   sourceCoord: vec2<i32>,
   sourceTexSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
-  der_x: f32, der_y: f32,
-  refWithStripe: f32,
-  avgDirection: f32,
+  extras: PixelExtras,
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>
 ) -> vec4<f32> {
@@ -803,8 +860,8 @@ fn colorize_pixel(
   let isEvenIter = 1.0 - abs(floor(iter_val) % 2.0);
 
   let z = vec2<f32>(zx_val, zy_val);
-  let distanceHeightStored = der_x;
-  let angle_der = der_y;
+  let distanceHeightStored = extras.der_x;
+  let angle_der = extras.der_y;
 
   if (parameters.debugShading >= 0.5) {
     let sector = debug_wheel_sector(uv_screen);
@@ -825,8 +882,8 @@ fn colorize_pixel(
 
   let v = nu;
   let v_smooth = nu_smooth;
-  let stripePhase = decode_stripe_phase(refWithStripe);
-  let directionCoherence = decode_direction_coherence(avgDirection);
+  let stripePhase = decode_stripe_phase(extras.refWithStripe);
+  let directionCoherence = decode_direction_coherence(extras.avgDirection);
   var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, distanceHeightStored, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y);
 
   // Apply zebra after palette computation: darken even iterations
@@ -880,9 +937,9 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
                 && uv_live.y >= 0.0 && uv_live.y <= 1.0;
   }
 
+  var liveCoord = vec2<i32>(0);
   var live_iter = -1.0;
   var liveStep = 0.0;  // 0 = no data
-  var liveCoord = vec2<i32>(0);
   var live_zx = 0.0;
   var live_zy = 0.0;
   if (liveInBounds) {
@@ -890,12 +947,11 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       i32(clamp(uv_live.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
       i32(clamp((1.0 - uv_live.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
     );
-    live_iter = textureLoad(tex, liveCoord, 0, 0).r;
-    liveStep = textureLoad(tex, liveCoord, 1, 0).r;
-    if (live_iter > 0.0) {
-      live_zx = textureLoad(tex, liveCoord, 2, 0).r;
-      live_zy = textureLoad(tex, liveCoord, 3, 0).r;
-    }
+    let liveSample = load_pixel_sample(tex, liveCoord);
+    live_iter = liveSample.iter;
+    liveStep = liveSample.step;
+    live_zx = liveSample.zx;
+    live_zy = liveSample.zy;
   }
   let liveEscaped = live_iter > 0.0 && (live_zx * live_zx + live_zy * live_zy) >= parameters.mu;
   let liveHasData = liveEscaped && liveStep > 0.0;
@@ -906,8 +962,8 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   // The CPU sets frozenAligned = 1.0 in those cases, 0.0 otherwise.
   let useFrozen = parameters.frozenAligned > 0.5;
 
-  var frozenStep = 0.0;  // 0 = no data
   var frozenCoord = vec2<i32>(0);
+  var frozenStep = 0.0;  // 0 = no data
   var frozen_iter = -1.0;
   var frozen_zx = 0.0;
   var frozen_zy = 0.0;
@@ -928,12 +984,11 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
         i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
       );
-      frozen_iter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
-      frozenStep = textureLoad(texFrozen, frozenCoord, 1, 0).r;
-      if (frozen_iter >= 0.0) {
-        frozen_zx = textureLoad(texFrozen, frozenCoord, 2, 0).r;
-        frozen_zy = textureLoad(texFrozen, frozenCoord, 3, 0).r;
-      }
+      let frozenSample = load_pixel_sample(texFrozen, frozenCoord);
+      frozen_iter = frozenSample.iter;
+      frozenStep = frozenSample.step;
+      frozen_zx = frozenSample.zx;
+      frozen_zy = frozenSample.zy;
     }
   }
   let frozenEscaped = frozen_iter > 0.0 && (frozen_zx * frozen_zx + frozen_zy * frozen_zy) >= parameters.mu;
@@ -952,6 +1007,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   if (liveHasData && frozenHasData) {
     // Both have data — pick the one with finer resolution (smaller step).
     if (liveStep <= effectiveFrozenStep) {
+      let liveExtras = load_pixel_extras(tex, liveCoord);
       let liveColor = colorize_pixel(
         tex,
         liveCoord,
@@ -959,10 +1015,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         live_iter,
         live_zx,
         live_zy,
-        textureLoad(tex, liveCoord, 4, 0).r,
-        textureLoad(tex, liveCoord, 5, 0).r,
-        textureLoad(tex, liveCoord, 6, 0).r,
-        textureLoad(tex, liveCoord, 7, 0).r,
+        liveExtras,
         uv_screen,
         uv_neutral
       );
@@ -972,6 +1025,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       }
       return vec4<f32>(liveColor.rgb, 1.0);
     } else {
+      let frozenExtras = load_pixel_extras(texFrozen, frozenCoord);
       let frozenColor = colorize_pixel(
         texFrozen,
         frozenCoord,
@@ -979,10 +1033,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         frozen_iter,
         frozen_zx,
         frozen_zy,
-        textureLoad(texFrozen, frozenCoord, 4, 0).r,
-        textureLoad(texFrozen, frozenCoord, 5, 0).r,
-        textureLoad(texFrozen, frozenCoord, 6, 0).r,
-        textureLoad(texFrozen, frozenCoord, 7, 0).r,
+        frozenExtras,
         uv_screen,
         uv_neutral
       );
@@ -991,6 +1042,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   if (liveHasData) {
+    let liveExtras = load_pixel_extras(tex, liveCoord);
     let liveColor = colorize_pixel(
       tex,
       liveCoord,
@@ -998,10 +1050,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       live_iter,
       live_zx,
       live_zy,
-      textureLoad(tex, liveCoord, 4, 0).r,
-      textureLoad(tex, liveCoord, 5, 0).r,
-      textureLoad(tex, liveCoord, 6, 0).r,
-      textureLoad(tex, liveCoord, 7, 0).r,
+      liveExtras,
       uv_screen,
       uv_neutral
     );
@@ -1017,6 +1066,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   if (frozenHasData) {
+    let frozenExtras = load_pixel_extras(texFrozen, frozenCoord);
     let frozenColor = colorize_pixel(
       texFrozen,
       frozenCoord,
@@ -1024,10 +1074,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       frozen_iter,
       frozen_zx,
       frozen_zy,
-      textureLoad(texFrozen, frozenCoord, 4, 0).r,
-      textureLoad(texFrozen, frozenCoord, 5, 0).r,
-      textureLoad(texFrozen, frozenCoord, 6, 0).r,
-      textureLoad(texFrozen, frozenCoord, 7, 0).r,
+      frozenExtras,
       uv_screen,
       uv_neutral
     );

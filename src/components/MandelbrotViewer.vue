@@ -159,6 +159,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   angle: 0.0,
   palettePeriod: 7.37,
   paletteOffset: 0.0,
+  heightPaletteShift: 0,
   paletteMirror: false,
   lightAngle: 0,
   antialiasLevel: 1,
@@ -207,11 +208,11 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   animationSpeed: 1.0,
   ambientOcclusionStrength: 0,
   microBumpStrength: 0,
-  clearcoatStrength: 0,
   subsurfaceStrength: 0.0,
   reliefDepth: 1,
   localShadowStrength: 0,
   varnishStrength: 0,
+  orbitTrapStrength: 0,
   stripeFrequency: 8,
   textureName: 'Gold',
   skyboxName: 'Window',
@@ -696,6 +697,7 @@ const shortcutLabels = computed(() => {
       :epsilon="mandelbrotParams.epsilon"
       :palettePeriod="mandelbrotParams.palettePeriod"
       :paletteOffset="mandelbrotParams.paletteOffset"
+      :heightPaletteShift="mandelbrotParams.heightPaletteShift"
       :paletteMirror="mandelbrotParams.paletteMirror"
       :colorStops="mandelbrotParams.colorStops"
       :activateAnimate="mandelbrotParams.activateAnimate"
@@ -710,12 +712,12 @@ const shortcutLabels = computed(() => {
       :animationSpeed="mandelbrotParams.animationSpeed"
       :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
       :microBumpStrength="mandelbrotParams.microBumpStrength"
-      :clearcoatStrength="mandelbrotParams.clearcoatStrength"
       :subsurfaceStrength="mandelbrotParams.subsurfaceStrength"
       :reliefDepth="mandelbrotParams.reliefDepth"
       :localShadowStrength="mandelbrotParams.localShadowStrength"
       :lightAngle="mandelbrotParams.lightAngle"
       :varnishStrength="mandelbrotParams.varnishStrength"
+      :orbitTrapStrength="mandelbrotParams.orbitTrapStrength"
       :stripeFrequency="mandelbrotParams.stripeFrequency"
     />
 

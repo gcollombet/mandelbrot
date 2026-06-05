@@ -63,7 +63,8 @@ const model =  defineModel<MandelbrotParams>({
     epsilon: 0.00001,
     colorStops: [],
      palettePeriod: 256,
-    paletteOffset: 0,
+     paletteOffset: 0,
+     heightPaletteShift: 0,
     paletteMirror: false,
     antialiasLevel: 1,
     tessellationLevel: 0,
@@ -74,11 +75,11 @@ const model =  defineModel<MandelbrotParams>({
       animationSpeed: 1.0,
      ambientOcclusionStrength: 0,
      microBumpStrength: 0,
-     clearcoatStrength: 0,
-     subsurfaceStrength: 0.0,
+       subsurfaceStrength: 0.0,
      reliefDepth: 1,
      localShadowStrength: 0,
      varnishStrength: 0,
+     orbitTrapStrength: 0,
      stripeFrequency: 8,
      textureName: 'Gold',
       skyboxName: 'Window',
@@ -420,6 +421,7 @@ async function savePalette() {
     interpolationMode: model.value.interpolationMode,
     palettePeriod: model.value.palettePeriod,
     paletteOffset: model.value.paletteOffset,
+    heightPaletteShift: model.value.heightPaletteShift,
     paletteMirror: model.value.paletteMirror,
     activateAnimate: model.value.activateAnimate,
     animationSpeed: model.value.animationSpeed,
@@ -427,11 +429,11 @@ async function savePalette() {
     displacementAmount: model.value.displacementAmount,
     ambientOcclusionStrength: model.value.ambientOcclusionStrength,
     microBumpStrength: model.value.microBumpStrength,
-    clearcoatStrength: model.value.clearcoatStrength,
     subsurfaceStrength: model.value.subsurfaceStrength,
     reliefDepth: model.value.reliefDepth,
     localShadowStrength: model.value.localShadowStrength,
     varnishStrength: model.value.varnishStrength,
+    orbitTrapStrength: model.value.orbitTrapStrength,
     stripeFrequency: model.value.stripeFrequency,
   };
   await savePaletteEntry(palette);
@@ -446,11 +448,11 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   if (source.displacementAmount != null) model.value.displacementAmount = source.displacementAmount;
   if (source.ambientOcclusionStrength != null) model.value.ambientOcclusionStrength = source.ambientOcclusionStrength;
   if (source.microBumpStrength != null) model.value.microBumpStrength = source.microBumpStrength;
-  if (source.clearcoatStrength != null) model.value.clearcoatStrength = source.clearcoatStrength;
   if (source.subsurfaceStrength != null) model.value.subsurfaceStrength = source.subsurfaceStrength;
   if (source.reliefDepth != null) model.value.reliefDepth = source.reliefDepth;
   if (source.localShadowStrength != null) model.value.localShadowStrength = source.localShadowStrength;
   if (source.varnishStrength != null) model.value.varnishStrength = source.varnishStrength;
+  if (source.orbitTrapStrength != null) model.value.orbitTrapStrength = source.orbitTrapStrength;
   if (source.stripeFrequency != null) model.value.stripeFrequency = source.stripeFrequency;
 }
 
@@ -464,6 +466,7 @@ function selectPalette(name: string) {
     if (palette.interpolationMode) model.value.interpolationMode = palette.interpolationMode;
     if (palette.palettePeriod != null) model.value.palettePeriod = palette.palettePeriod;
     if (palette.paletteOffset != null) model.value.paletteOffset = palette.paletteOffset;
+    if (palette.heightPaletteShift != null) model.value.heightPaletteShift = palette.heightPaletteShift;
     model.value.paletteMirror = palette.paletteMirror ?? false;
     applyPaletteLookFields(palette);
     // Restore texture if present
@@ -496,6 +499,7 @@ async function selectPaletteFromPreset(id: number) {
     model.value.interpolationMode = record.value.interpolationMode;
     model.value.palettePeriod = record.value.palettePeriod;
     model.value.paletteOffset = record.value.paletteOffset;
+    model.value.heightPaletteShift = record.value.heightPaletteShift ?? model.value.heightPaletteShift;
     model.value.paletteMirror = record.value.paletteMirror ?? false;
     applyPaletteLookFields(record.value);
     // Restore textures if present
@@ -1637,6 +1641,12 @@ async function renameAndSaveSkyboxTexture() {
         </div>
 
         <div class="palette-compact-control">
+          <span class="palette-compact-label">Height Shift</span>
+          <input class="slider" type="range" min="0" max="100" step="0.01" v-model.number="model.heightPaletteShift" />
+          <span class="palette-compact-value">{{ (model.heightPaletteShift ?? 0).toFixed(2) }}</span>
+        </div>
+
+        <div class="palette-compact-control">
           <span class="palette-compact-label">Offset</span>
           <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
           <span class="palette-compact-value">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
@@ -1655,11 +1665,11 @@ async function renameAndSaveSkyboxTexture() {
           :displacement-amount="model.displacementAmount"
           :ambient-occlusion-strength="model.ambientOcclusionStrength"
           :micro-bump-strength="model.microBumpStrength"
-          :clearcoat-strength="model.clearcoatStrength"
           :subsurface-strength="model.subsurfaceStrength"
           :relief-depth="model.reliefDepth"
           :local-shadow-strength="model.localShadowStrength"
           :varnish-strength="model.varnishStrength"
+          :orbit-trap-strength="model.orbitTrapStrength"
           :engine-device="engine?.device"
           :engine-tile-texture="engine?.tileTexture"
           :engine-skybox-texture="engine?.skyboxTexture"
@@ -1761,14 +1771,9 @@ async function renameAndSaveSkyboxTexture() {
 
       <!-- ═══ MATERIAL RESPONSE ═══ -->
       <label class="gfx-section-title">Material Response</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Clearcoat</span>
-        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.clearcoatStrength" />
-        <span class="gfx-slider-value">{{ (model.clearcoatStrength ?? 0).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Varnish Reflection</span>
-        <input class="slider" type="range" min="0" max="10" step="0.01" v-model.number="model.varnishStrength" />
+        <div class="gfx-slider-row">
+          <span class="gfx-slider-label">Varnish Reflection</span>
+          <input class="slider" type="range" min="0" max="10" step="0.01" v-model.number="model.varnishStrength" />
         <span class="gfx-slider-value">{{ (model.varnishStrength ?? 1.0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
@@ -2087,6 +2092,11 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-label">Stripe Frequency</span>
         <input class="slider" type="range" min="1" max="32" step="1" v-model.number="model.stripeFrequency" />
         <span class="gfx-slider-value">{{ model.stripeFrequency ?? 8 }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Orbit Trap</span>
+        <input class="slider" type="range" min="0" max="100" step="0.1" v-model.number="model.orbitTrapStrength" />
+        <span class="gfx-slider-value">{{ (model.orbitTrapStrength ?? 0).toFixed(1) }}</span>
       </div>
       <!-- ═══ PERFORMANCE ═══ -->
       <label class="gfx-section-title">Performance</label>

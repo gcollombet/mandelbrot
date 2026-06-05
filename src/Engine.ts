@@ -186,6 +186,7 @@ export type RenderOptions = {
     antialiasLevel: number,
     palettePeriod: number,
     paletteOffset: number,
+    heightPaletteShift: number,
     paletteMirror: boolean,
     colorStops: ColorStop[],
     interpolationMode: InterpolationMode,
@@ -196,12 +197,12 @@ export type RenderOptions = {
     animationSpeed: number,
     ambientOcclusionStrength: number,
     microBumpStrength: number,
-    clearcoatStrength: number,
     subsurfaceStrength: number,
     reliefDepth: number,
     localShadowStrength: number,
     lightAngle: number,
     varnishStrength: number,
+    orbitTrapStrength: number,
     stripeFrequency: number,
 }
 
@@ -891,7 +892,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 36, // 33 floats padded to 16-byte alignment (144 bytes)
+            size: 4 * 36, // 34 floats padded to 16-byte alignment (144 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1729,20 +1730,21 @@ export class Engine {
             mandelbrot.epsilon,             // 16: epsilon
             renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
             renderOptions.microBumpStrength, // 18: microBumpStrength
-            renderOptions.clearcoatStrength, // 19: clearcoatStrength
-            renderOptions.subsurfaceStrength, // 20: subsurfaceStrength
-            renderOptions.reliefDepth,       // 21: reliefDepth
-            renderOptions.localShadowStrength, // 22: localShadowStrength
-            renderOptions.lightAngle,          // 23: lightAngle
-            renderOptions.varnishStrength,     // 24: varnishStrength
-            Math.log(mandelbrot.mu),            // 25: logMu
-            sceneSin,                           // 26: sceneSin
-            sceneCos,                           // 27: sceneCos
-            Math.cos(renderOptions.lightAngle) / lightDirLen, // 28: lightDirX
-            Math.sin(renderOptions.lightAngle) / lightDirLen, // 29: lightDirY
-            1.85 / lightDirLen,                 // 30: lightDirZ
-            renderOptions.paletteMirror ? 1 : 0, // 31: paletteMirror
-            renderOptions.debugShading ? 1 : 0,  // 32: debugShading
+            renderOptions.subsurfaceStrength, // 19: subsurfaceStrength
+            renderOptions.reliefDepth,       // 20: reliefDepth
+            renderOptions.localShadowStrength, // 21: localShadowStrength
+            renderOptions.lightAngle,          // 22: lightAngle
+            renderOptions.varnishStrength,     // 23: varnishStrength
+            Math.log(mandelbrot.mu),            // 24: logMu
+            sceneSin,                           // 25: sceneSin
+            sceneCos,                           // 26: sceneCos
+            Math.cos(renderOptions.lightAngle) / lightDirLen, // 27: lightDirX
+            Math.sin(renderOptions.lightAngle) / lightDirLen, // 28: lightDirY
+            1.85 / lightDirLen,                 // 29: lightDirZ
+            renderOptions.paletteMirror ? 1 : 0, // 30: paletteMirror
+            renderOptions.debugShading ? 1 : 0,  // 31: debugShading
+            renderOptions.heightPaletteShift,    // 32: heightPaletteShift [0, 100]
+            renderOptions.orbitTrapStrength,     // 33: orbitTrapStrength [0, 100]
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

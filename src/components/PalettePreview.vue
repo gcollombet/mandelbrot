@@ -51,11 +51,11 @@ const props = defineProps<{
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
   microBumpStrength?: number;
-  clearcoatStrength?: number;
   subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
+  orbitTrapStrength?: number;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -332,7 +332,7 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (33 floats, padded to 144 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (34 floats, padded to 144 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
     size: 4 * 36,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -362,7 +362,6 @@ async function init() {
     1e-10,        // epsilon (interior detection, not relevant for preview)
     props.ambientOcclusionStrength ?? 0, // ambientOcclusionStrength
     props.microBumpStrength ?? 0, // microBumpStrength
-    props.clearcoatStrength ?? 0, // clearcoatStrength
     props.subsurfaceStrength ?? 0.0, // subsurfaceStrength
     props.reliefDepth ?? 0, // reliefDepth
     props.localShadowStrength ?? 0, // localShadowStrength
@@ -376,6 +375,8 @@ async function init() {
     1.85 / previewLightLen, // lightDirZ
     0, // paletteMirror
     0, // debugShading
+    0, // heightPaletteShift
+    props.orbitTrapStrength ?? 0, // orbitTrapStrength
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -424,7 +425,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.clearcoatStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.orbitTrapStrength],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = 3.927;
@@ -436,7 +437,6 @@ watch(
       1e-10,
       props.ambientOcclusionStrength ?? 0,
       props.microBumpStrength ?? 0,
-      props.clearcoatStrength ?? 0,
       props.subsurfaceStrength ?? 0.0,
       props.reliefDepth ?? 1,
       props.localShadowStrength ?? 0,
@@ -448,6 +448,10 @@ watch(
       Math.cos(previewLightAngle) / previewLightLen,
       Math.sin(previewLightAngle) / previewLightLen,
       1.85 / previewLightLen,
+      0,
+      0,
+      0,
+      props.orbitTrapStrength ?? 0,
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
     render();

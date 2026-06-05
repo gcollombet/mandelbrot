@@ -21,6 +21,7 @@ const props = defineProps<{
   antialiasLevel?: number,
   palettePeriod?: number,
   paletteOffset?: number,
+  heightPaletteShift?: number,
   paletteMirror?: boolean,
   activateAnimate?: boolean,
   debugShading?: boolean,
@@ -35,12 +36,12 @@ const props = defineProps<{
   animationSpeed?: number,
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
-  clearcoatStrength?: number,
   subsurfaceStrength?: number,
   reliefDepth?: number,
   localShadowStrength?: number,
   lightAngle?: number,
   varnishStrength?: number,
+  orbitTrapStrength?: number,
   stripeFrequency?: number,
 }>();
 
@@ -369,6 +370,7 @@ onUnmounted(() => {
       :epsilon="props.epsilon"
       :antialiasLevel="props.antialiasLevel"
       :palettePeriod="props.palettePeriod"
+      :heightPaletteShift="props.heightPaletteShift"
       :paletteMirror="props.paletteMirror"
       :colorStops="props.colorStops"
       :activateAnimate="props.activateAnimate"
@@ -384,12 +386,12 @@ onUnmounted(() => {
       :animationSpeed="props.animationSpeed"
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :microBumpStrength="props.microBumpStrength"
-      :clearcoatStrength="props.clearcoatStrength"
       :subsurfaceStrength="props.subsurfaceStrength"
       :reliefDepth="props.reliefDepth"
       :localShadowStrength="props.localShadowStrength"
       :lightAngle="props.lightAngle"
       :varnishStrength="props.varnishStrength"
+      :orbitTrapStrength="props.orbitTrapStrength"
       :stripeFrequency="props.stripeFrequency"
       @ready="emit('engineReady', $event)"
     />

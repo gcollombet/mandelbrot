@@ -15,6 +15,7 @@ export interface MandelbrotParams {
     antialiasLevel: number;
     palettePeriod: number;
     paletteOffset: number;
+    heightPaletteShift: number;
     paletteMirror: boolean;
     dprMultiplier: number;
     targetFps: number;
@@ -32,11 +33,11 @@ export interface MandelbrotParams {
     animationSpeed?: number;
     ambientOcclusionStrength?: number;
     microBumpStrength?: number;
-    clearcoatStrength?: number;
     subsurfaceStrength?: number;
     reliefDepth?: number;
     localShadowStrength?: number;
     varnishStrength?: number;
+    orbitTrapStrength?: number;
     textureName?: string;
     skyboxName?: string;
 }
