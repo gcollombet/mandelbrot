@@ -21,6 +21,7 @@ export interface MandelbrotParams {
     gpuLoadMultiplier: number;
     stripeFrequency: number;
     activateAnimate: boolean;
+    debugShading: boolean;
     colorStops: ColorStop[];
     interpolationMode: InterpolationMode;
     approximationMode?: ApproximationMode;

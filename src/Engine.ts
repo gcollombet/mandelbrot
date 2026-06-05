@@ -190,6 +190,7 @@ export type RenderOptions = {
     colorStops: ColorStop[],
     interpolationMode: InterpolationMode,
     activateAnimate: boolean,
+    debugShading: boolean,
     tessellationLevel: number,
     displacementAmount: number,
     animationSpeed: number,
@@ -890,7 +891,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 32, // 32 floats padded to 16-byte alignment (128 bytes)
+            size: 4 * 36, // 33 floats padded to 16-byte alignment (144 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1741,6 +1742,7 @@ export class Engine {
             Math.sin(renderOptions.lightAngle) / lightDirLen, // 29: lightDirY
             1.85 / lightDirLen,                 // 30: lightDirZ
             renderOptions.paletteMirror ? 1 : 0, // 31: paletteMirror
+            renderOptions.debugShading ? 1 : 0,  // 32: debugShading
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

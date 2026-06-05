@@ -31,6 +31,7 @@ struct Uniforms {
   lightDirY: f32,
   lightDirZ: f32,
   paletteMirror: f32,
+  debugShading: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -272,12 +273,12 @@ fn curvature_edge_wear(angle_der: f32, v_smooth: f32) -> f32 {
   return clamp(directionalRidge * 0.65 + iterationRidge * 0.35, 0.0, 1.0);
 }
 
-fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceHeight: f32) -> vec3<f32> {
+fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceToSet: f32) -> vec3<f32> {
   let backLight = pow(max(dot(normal, -lightDir), 0.0), 1.35);
   let rimScatter = pow(clamp(1.0 - nDotV, 0.0, 1.0), 2.15);
   let wrapBase = clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0);
   let wrapLight = wrapBase * wrapBase;
-  let thinness = 1.0 - smoothstep(4.0, 13.0, distanceHeight);
+  let thinness = 1.0 - smoothstep(0.15, 3.5, distanceToSet);
   let thickness = clamp(thinness * 0.62 + (1.0 - ao) * 0.23 + edgeWear * 0.15, 0.0, 1.0);
   let mask = (backLight * 0.35 + rimScatter * 0.25 + wrapLight * 0.40) * thickness;
   let scatterColor = mix(color, sqrt(max(color, vec3<f32>(0.0))), 0.35);
@@ -346,7 +347,14 @@ fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32
     return -1e6;
   }
 
-  return clamp(storedHeight, -64.0, 64.0);
+  return storedHeight;
+}
+
+fn distance_relief_height(distance: f32) -> f32 {
+  if (distance < -1e5) {
+    return distance;
+  }
+  return 1.0 / (1.0 + max(distance, 0.0));
 }
 
 fn load_distance_height(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> f32 {
@@ -361,7 +369,11 @@ fn sample_distance_height_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2
   if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
     return -1e6;
   }
-  return load_distance_height(sourceTex, coord);
+  let iterVal = textureLoad(sourceTex, coord, 0, 0).r;
+  let zx = textureLoad(sourceTex, coord, 2, 0).r;
+  let zy = textureLoad(sourceTex, coord, 3, 0).r;
+  let storedHeight = textureLoad(sourceTex, coord, 4, 0).r;
+  return distance_height_from_values(iterVal, zx, zy, storedHeight);
 }
 
 fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerHeight: f32) -> vec2<f32> {
@@ -369,10 +381,11 @@ fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: ve
   let xl = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize);
   let yu = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize);
   let yd = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize);
-  let rightHeight = select(centerHeight, xr, xr > -1e5);
-  let leftHeight = select(centerHeight, xl, xl > -1e5);
-  let upHeight = select(centerHeight, yu, yu > -1e5);
-  let downHeight = select(centerHeight, yd, yd > -1e5);
+  let centerReliefHeight = distance_relief_height(centerHeight);
+  let rightHeight = select(centerReliefHeight, distance_relief_height(xr), xr > -1e5);
+  let leftHeight = select(centerReliefHeight, distance_relief_height(xl), xl > -1e5);
+  let upHeight = select(centerReliefHeight, distance_relief_height(yu), yu > -1e5);
+  let downHeight = select(centerReliefHeight, distance_relief_height(yd), yd > -1e5);
   return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 12.0;
 }
 
@@ -704,6 +717,26 @@ fn direction_coherence_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: 
   return normalize(normal - bump * clamp(strength, 0.0, 1.0) * 0.75);
 }
 
+fn debug_heat(t: f32) -> vec3<f32> {
+  let x = clamp(t, 0.0, 1.0);
+  return clamp(vec3<f32>(x * 2.0 - 0.25, 1.0 - abs(x * 2.0 - 1.0), 1.25 - x * 2.0), vec3<f32>(0.0), vec3<f32>(1.0));
+}
+
+fn debug_distance_scale(distance: f32) -> f32 {
+  return log(1.0 + max(distance, 0.0) * 64.0) / log(65.0);
+}
+
+fn debug_gradient_scale(gradientLength: f32) -> f32 {
+  return log(1.0 + max(gradientLength, 0.0) * 8.0) / log(9.0);
+}
+
+fn debug_wheel_sector(uv: vec2<f32>) -> i32 {
+  let centered = uv - vec2<f32>(0.5);
+  let angle = atan2(centered.y, centered.x);
+  let phase = fract(angle / (2.0 * 3.141592653589793) + 1.0);
+  return i32(floor(phase * 4.0));
+}
+
 // ── Colorize a single pixel from its raw layer values ──────────────
 fn colorize_pixel(
   sourceTex: texture_2d_array<f32>,
@@ -759,6 +792,23 @@ fn colorize_pixel(
   let z = vec2<f32>(zx_val, zy_val);
   let distanceHeightStored = der_x;
   let angle_der = der_y;
+
+  if (parameters.debugShading >= 0.5) {
+    let sector = debug_wheel_sector(uv_neutral);
+    if (sector == 0) {
+      return vec4<f32>(debug_heat(fract(nu_smooth * 0.125)), 1.0);
+    }
+    if (sector == 1) {
+      let distanceHeight = distance_height_from_values(iter_val, z.x, z.y, distanceHeightStored);
+      return vec4<f32>(debug_heat(debug_distance_scale(distanceHeight)), 1.0);
+    }
+    if (sector == 2) {
+      let distanceHeight = distance_height_from_values(iter_val, z.x, z.y, distanceHeightStored);
+      let grad = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight);
+      return vec4<f32>(debug_heat(debug_gradient_scale(length(grad))), 1.0);
+    }
+    return vec4<f32>(debug_heat(fract(angle_der / (2.0 * 3.141592653589793) + 0.5)), 1.0);
+  }
 
   let v = nu;
   let v_smooth = nu_smooth;

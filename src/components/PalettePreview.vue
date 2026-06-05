@@ -332,9 +332,9 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (32 floats, padded to 128 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (33 floats, padded to 144 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
-    size: 4 * 32,
+    size: 4 * 36,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
@@ -375,6 +375,7 @@ async function init() {
     Math.sin(previewLightAngle) / previewLightLen, // lightDirY
     1.85 / previewLightLen, // lightDirZ
     0, // paletteMirror
+    0, // debugShading
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 

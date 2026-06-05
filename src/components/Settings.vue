@@ -68,9 +68,10 @@ const model =  defineModel<MandelbrotParams>({
     antialiasLevel: 1,
     tessellationLevel: 0,
     lightAngle: 0,
-    displacementAmount: 0,
-    activateAnimate: false,
-     animationSpeed: 1.0,
+      displacementAmount: 0,
+      activateAnimate: false,
+      debugShading: false,
+      animationSpeed: 1.0,
      ambientOcclusionStrength: 0,
      microBumpStrength: 0,
      clearcoatStrength: 0,
@@ -1597,6 +1598,21 @@ async function renameAndSaveSkyboxTexture() {
           </span>
           <span>Drift</span>
           <span class="palette-toggle-state">{{ model.activateAnimate ? 'On' : 'Off' }}</span>
+        </button>
+
+        <button
+          class="button is-small palette-animate-toggle"
+          :class="{ 'is-active': model.debugShading }"
+          type="button"
+          :aria-pressed="model.debugShading"
+          title="Show shading debug sectors"
+          @click="model.debugShading = !model.debugShading"
+        >
+          <span class="icon is-small">
+            <i class="fas fa-bug" aria-hidden="true"></i>
+          </span>
+          <span>Debug</span>
+          <span class="palette-toggle-state">{{ model.debugShading ? 'On' : 'Off' }}</span>
         </button>
 
         <button

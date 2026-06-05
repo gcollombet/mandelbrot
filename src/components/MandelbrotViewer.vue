@@ -197,6 +197,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
     }
   ],
   activateAnimate: false,
+  debugShading: false,
   approximationMode: 'perturbation',
   dprMultiplier: 1.0,
   maxIterationMultiplier: 0.01,
@@ -698,6 +699,7 @@ const shortcutLabels = computed(() => {
       :paletteMirror="mandelbrotParams.paletteMirror"
       :colorStops="mandelbrotParams.colorStops"
       :activateAnimate="mandelbrotParams.activateAnimate"
+      :debugShading="mandelbrotParams.debugShading"
       :dprMultiplier="mandelbrotParams.dprMultiplier"
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
       :targetFps="mandelbrotParams.targetFps"

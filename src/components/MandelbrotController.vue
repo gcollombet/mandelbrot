@@ -23,6 +23,7 @@ const props = defineProps<{
   paletteOffset?: number,
   paletteMirror?: boolean,
   activateAnimate?: boolean,
+  debugShading?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
   targetFps?: number,
@@ -371,6 +372,7 @@ onUnmounted(() => {
       :paletteMirror="props.paletteMirror"
       :colorStops="props.colorStops"
       :activateAnimate="props.activateAnimate"
+      :debugShading="props.debugShading"
       :paletteOffset="props.paletteOffset"
       :dprMultiplier="props.dprMultiplier"
       :maxIterationMultiplier="props.maxIterationMultiplier"

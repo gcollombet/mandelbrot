@@ -52,6 +52,7 @@ const props = withDefaults(defineProps<{
   paletteMirror?: boolean,
   antialiasLevel?: number,
   activateAnimate?: boolean,
+  debugShading?: boolean,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
   targetFps?: number,
@@ -107,9 +108,10 @@ const props = withDefaults(defineProps<{
        palettePeriod: 100.0,
        paletteOffset: 0,
        paletteMirror: false,
-       antialiasLevel: 1,
-       activateAnimate: false,
-       dprMultiplier: 0.5,
+        antialiasLevel: 1,
+        activateAnimate: false,
+        debugShading: false,
+        dprMultiplier: 0.5,
        maxIterationMultiplier: 0.1,
        targetFps: 60,
        gpuLoadMultiplier: 1.0,
@@ -172,7 +174,12 @@ async function draw() {
     angle.value = parseFloat(angle_string);
     await nextTick();
     isUpdating = false;
-    const maxIterations = Math.min(Math.max(100, 1000 * props.maxIterationMultiplier * Math.log2(1.0 / parseFloat(scale_string))),100_000);
+    const mu = Math.max(props.mu, 4);
+    const bailoutExtraIterations = Math.max(0, Math.ceil(Math.log2(Math.log(mu) / Math.log(4))));
+    const maxIterations = Math.min(
+      Math.max(100, 1000 * props.maxIterationMultiplier * Math.log2(1.0 / parseFloat(scale_string))) + bailoutExtraIterations,
+      100_000
+    );
     await engine.update({
           cx: cx_string,
           cy: cy_string,
@@ -192,6 +199,7 @@ async function draw() {
         colorStops: toRaw(props.colorStops),
         interpolationMode: props.interpolationMode,
         activateAnimate: props.activateAnimate,
+        debugShading: props.debugShading,
         tessellationLevel: props.tessellationLevel,
         displacementAmount: props.displacementAmount,
         animationSpeed: props.animationSpeed,
@@ -232,6 +240,7 @@ async function initWebGPU() {
     colorStops: props.colorStops,
     interpolationMode: props.interpolationMode,
     activateAnimate: props.activateAnimate,
+    debugShading: props.debugShading,
     tessellationLevel: props.tessellationLevel,
     displacementAmount: props.displacementAmount,
     animationSpeed: props.animationSpeed,
