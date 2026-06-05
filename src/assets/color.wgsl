@@ -324,8 +324,18 @@ fn fractal_height_ao(slope: f32, relief: f32, occStrength: f32) -> f32 {
   return clamp(1.0 - occ * 0.72, 0.16, 1.0);
 }
 
-fn surface_cavity(slope: f32, relief: f32, occStrength: f32) -> f32 {
-  let amount = smoothstep(0.04, 1.45, slope * relief) * occStrength;
+fn surface_cavity(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, relief: f32, occStrength: f32) -> f32 {
+  let lightPlane = vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent));
+  let lightPlaneLen = length(lightPlane);
+  if (lightPlaneLen < 1e-4 || occStrength <= 0.0 || relief <= 0.0) {
+    return 1.0;
+  }
+
+  let lightPlaneDir = lightPlane / lightPlaneLen;
+  let crossDir = vec2<f32>(-lightPlaneDir.y, lightPlaneDir.x);
+  let uphillTowardLight = max(dot(grad, lightPlaneDir), 0.0);
+  let sideCavity = abs(dot(grad, crossDir)) * 0.18;
+  let amount = smoothstep(0.04, 1.45, (uphillTowardLight + sideCavity) * relief) * occStrength;
   return clamp(1.0 - amount * 0.48, 0.26, 1.0);
 }
 
@@ -444,7 +454,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let reliefDepth = parameters.reliefDepth * effShading;
     let relief = clamp(reliefDepth, 0.0, 2.0);
     let surfaceRelief = relief * 0.5;
-    let occStrength = clamp(parameters.localShadowStrength * 5.0, 0.0, 10.0);
+    let occStrength = pow(clamp(parameters.localShadowStrength, 0.0, 10.0), 1.15);
     let needsDistanceHeight = parameters.subsurfaceStrength > 0.001;
     let stripeReliefStrength = fx.wStripeRelief * effShading;
     let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
@@ -503,9 +513,10 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       0.16,
       1.0
     );
-    let cavity = min(surface_cavity(slope, relief, occStrength), normalCavity);
-    let ao = min(pseudo_ambient_occlusion(normal, v_smooth, z), heightAo) * cavity;
     let lightDir = vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ);
+    let cavity = min(surface_cavity(grad, lightDir, baseTangentWorld, baseBitangentWorld, relief, occStrength), normalCavity);
+    let cavityAmount = 1.0 - cavity;
+    let ao = min(pseudo_ambient_occlusion(normal, v_smooth, z), mix(heightAo, 1.0, 0.45));
     let viewDir = vec3<f32>(0.0, 0.0, 1.0);
     let halfDir = normalize(lightDir + viewDir);
     let tangent = normalize(rotate_surface_vector_sincos(mandelbrot_tangent_from_dir(angleDir, directionNormal), sceneSin, sceneCos));
@@ -536,6 +547,11 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let diffuseLight = diffuseColor * (0.14 + 0.86 * shadowedNDotL) * ao;
     let brightness = max(fx.shadingLevel, 0.0);
     var materialColor = diffuseLight + directSpecular * ao * mix(1.0, localShadow, 0.45);
+    let reliefAccent = clamp(occStrength * effShading, 0.0, 2.0);
+    let ridge = smoothstep(0.10, 1.55, slope * relief) * litSide * reliefAccent;
+    let cavityTint = mix(color, sqrt(max(color, vec3<f32>(0.0))), 0.42);
+    materialColor = mix(materialColor, materialColor * cavityTint, cavityAmount * reliefAccent * 0.22);
+    materialColor += mix(color, vec3<f32>(1.0), 0.38) * ridge * 0.16 * (1.0 - metallic * 0.45);
 
     if (fx.wIridescence > 0.001) {
       let viewShift = smoothstep(0.04, 0.86, 1.0 - nDotV);
@@ -604,10 +620,10 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let wear = edgeWear * (0.15 + 0.35 * metallic) * effShading * mix(0.35, 1.0, litSide);
     materialColor = mix(materialColor, materialColor + wearColor * wear, clamp(edgeWear, 0.0, 1.0));
 
-    materialColor *= mix(1.0, cavity, 0.65);
+    materialColor *= mix(1.0, cavity, 0.22);
 
-    let pbrColor = (materialColor + envColor * mix(1.0, cavity, 0.35) + rimColor) * (0.55 + brightness * 0.45);
-    color = mix(color * ao, pbrColor, effShading);
+    let pbrColor = (materialColor + envColor * mix(1.0, cavity, 0.16) + rimColor) * (0.55 + brightness * 0.45);
+    color = mix(color * mix(ao, 1.0, 0.35), pbrColor, effShading);
   }
 
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));

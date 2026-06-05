@@ -81,7 +81,7 @@ const model =  defineModel<MandelbrotParams>({
      varnishStrength: 0,
      stripeFrequency: 8,
      textureName: 'Gold',
-     skyboxName: 'Skybox',
+      skyboxName: 'Window',
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
      interpolationMode: 'lab',
@@ -1042,10 +1042,10 @@ function clearPalette() {
 const MAX_TEXTURE_SIZE = 4096;
 
 const textureName = ref('');
-const skyboxName = ref('');
+const skyboxName = ref('Window');
 const textures = ref<TextureMetadata[]>([]);
 const selectedTexture = ref('Gold');
-const selectedSkyboxTexture = ref('Skybox');
+const selectedSkyboxTexture = ref('Window');
 const showTextureDropdown = ref(false);
 const showSkyboxDropdown = ref(false);
 let suppressTextureApply = false;
@@ -1117,7 +1117,7 @@ async function loadTextures() {
     ? modelSkyboxName
     : (savedSkyboxName && textures.value.some(t => t.name === savedSkyboxName))
       ? savedSkyboxName
-      : 'Skybox';
+      : 'Window';
   selectedTexture.value = restoredName;
   model.value.textureName = restoredName;
   textureName.value = restoredName;
@@ -1256,8 +1256,8 @@ async function deleteSkyboxTexture() {
       if (selectedTexture.value === name) {
         await selectTexture('Gold');
       }
-      await selectSkyboxTexture('Skybox');
-      skyboxName.value = 'Skybox';
+      await selectSkyboxTexture('Window');
+      skyboxName.value = 'Window';
     }
   }
 }
@@ -1738,7 +1738,7 @@ async function renameAndSaveSkyboxTexture() {
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Relief Occlusion</span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.localShadowStrength" />
+        <input class="slider" type="range" min="0" max="10" step="0.01" v-model.number="model.localShadowStrength" />
         <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">

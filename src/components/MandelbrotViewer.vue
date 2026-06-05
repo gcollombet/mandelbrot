@@ -214,7 +214,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   varnishStrength: 0,
   stripeFrequency: 8,
   textureName: 'Gold',
-  skyboxName: 'Skybox',
+  skyboxName: 'Window',
 };
 
 function loadInitialMandelbrotParams(): MandelbrotParams {
@@ -224,7 +224,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
     if (raw) Object.assign(params, JSON.parse(raw));
   } catch {}
   params.textureName ??= localStorage.getItem(TEXTURE_SELECTED_KEY) ?? 'Gold';
-  params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? '';
+  params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Window';
   return params;
 }
 
@@ -285,9 +285,9 @@ async function applySelectedTexturesToEngine() {
     const textures = await getTextureEntries();
     if (generation !== textureApplyGeneration) return;
     const tileName = mandelbrotParams.value.textureName ?? 'Gold';
-    const skyboxName = mandelbrotParams.value.skyboxName ?? 'Skybox';
+    const skyboxName = mandelbrotParams.value.skyboxName ?? 'Window';
     const effectiveTileName = textures.some(texture => texture.name === tileName) ? tileName : 'Gold';
-    const effectiveSkyboxName = textures.some(texture => texture.name === skyboxName) ? skyboxName : 'Skybox';
+    const effectiveSkyboxName = textures.some(texture => texture.name === skyboxName) ? skyboxName : 'Window';
     await applyTexture(engine, 'tile', effectiveTileName, textures, generation);
     await applyTexture(engine, 'skybox', effectiveSkyboxName, textures, generation);
   } catch (error) {
