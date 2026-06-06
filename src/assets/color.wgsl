@@ -33,6 +33,7 @@ struct Uniforms {
   debugShading: f32,
   heightPaletteShift: f32,
   orbitTrapStrength: f32,
+  phaseColoringStrength: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -468,6 +469,14 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let trapMask = exp(-(trapDistance * trapDistance) / max(trapWidth * trapWidth, 1e-5));
     let trapColor = samplePaletteColor(fract(palettePhase + 0.18));
     color = mix(color, mix(color, trapColor, 0.72) + trapMask * 0.12, trapMask * orbitTrapStrength);
+  }
+
+  let phaseStrength = clamp(parameters.phaseColoringStrength, 0.0, 100.0) / 100.0;
+  if (phaseStrength > 0.001) {
+    let rawPhase = angle_der / (2.0 * 3.141592653589793);
+    let mirrored = 1.0 - abs(fract(rawPhase) * 2.0 - 1.0);
+    let phaseColor = samplePaletteColor(fract(palettePhase + mirrored));
+    color = mix(color, phaseColor, phaseStrength * 0.60);
   }
 
   // ── Shading (always computed, applied proportionally to wShading) ──

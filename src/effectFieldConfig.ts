@@ -43,7 +43,7 @@ export const EFFECT_FIELD_CONFIG: Record<EffectFieldName, EffectFieldMeta> = {
   stripeAverage:      { label: 'Stripe Average',    defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 5, textureChannel: 0, uiGroup: 'iteration' },
   rotationMean:       { label: 'Direction Coherence', defaultValue: 0.0, min: 0, max: 1,   step: 0.01, unit: '', textureRow: 5, textureChannel: 1, uiGroup: 'iteration' },
   stripeRelief:       { label: 'Stripe Relief',     defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 5, textureChannel: 2, uiGroup: 'iteration' },
-  directionCoherenceRelief: { label: 'Direction Relief', defaultValue: 0.0, min: 0, max: 1, step: 0.01, unit: '', textureRow: 5, textureChannel: 3, uiGroup: 'iteration' },
+  directionCoherenceRelief: { label: 'Direction Relief', defaultValue: 0.0, min: 0, max: 100, step: 0.1, unit: '', textureRow: 5, textureChannel: 3, uiGroup: 'iteration' },
   shadingLevel:       { label: 'Light Intensity',   defaultValue: 0.0, min: 0, max: 3,     step: 0.05, unit: '', textureRow: 2, textureChannel: 2, uiGroup: 'lighting' },
   specularPower:      { label: 'Specular Strength', defaultValue: 0,   min: 1, max: 64,    step: 0.5,  unit: '', textureRow: 2, textureChannel: 3, uiGroup: 'lighting' },
   metallic:           { label: 'Metalness',         defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 3, textureChannel: 1, uiGroup: 'lighting' },

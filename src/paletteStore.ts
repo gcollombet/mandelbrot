@@ -49,6 +49,7 @@ export interface PaletteRecord {
   localShadowStrength?: number;
   varnishStrength?: number;
   orbitTrapStrength?: number;
+  phaseColoringStrength?: number;
   stripeFrequency?: number;
 }
 

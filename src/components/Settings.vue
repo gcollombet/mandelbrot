@@ -80,6 +80,7 @@ const model =  defineModel<MandelbrotParams>({
      localShadowStrength: 0,
      varnishStrength: 0,
      orbitTrapStrength: 0,
+     phaseColoringStrength: 0,
      stripeFrequency: 8,
      textureName: 'Gold',
       skyboxName: 'Window',
@@ -434,6 +435,7 @@ async function savePalette() {
     localShadowStrength: model.value.localShadowStrength,
     varnishStrength: model.value.varnishStrength,
     orbitTrapStrength: model.value.orbitTrapStrength,
+    phaseColoringStrength: model.value.phaseColoringStrength,
     stripeFrequency: model.value.stripeFrequency,
   };
   await savePaletteEntry(palette);
@@ -453,6 +455,7 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   if (source.localShadowStrength != null) model.value.localShadowStrength = source.localShadowStrength;
   if (source.varnishStrength != null) model.value.varnishStrength = source.varnishStrength;
   if (source.orbitTrapStrength != null) model.value.orbitTrapStrength = source.orbitTrapStrength;
+  if (source.phaseColoringStrength != null) model.value.phaseColoringStrength = source.phaseColoringStrength;
   if (source.stripeFrequency != null) model.value.stripeFrequency = source.stripeFrequency;
 }
 
@@ -1670,6 +1673,7 @@ async function renameAndSaveSkyboxTexture() {
           :local-shadow-strength="model.localShadowStrength"
           :varnish-strength="model.varnishStrength"
           :orbit-trap-strength="model.orbitTrapStrength"
+          :phase-coloring-strength="model.phaseColoringStrength"
           :engine-device="engine?.device"
           :engine-tile-texture="engine?.tileTexture"
           :engine-skybox-texture="engine?.skyboxTexture"
@@ -2096,8 +2100,13 @@ async function renameAndSaveSkyboxTexture() {
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Orbit Trap</span>
         <input class="slider" type="range" min="0" max="100" step="0.1" v-model.number="model.orbitTrapStrength" />
-        <span class="gfx-slider-value">{{ (model.orbitTrapStrength ?? 0).toFixed(1) }}</span>
-      </div>
+<span class="gfx-slider-value">{{ (model.orbitTrapStrength ?? 0).toFixed(1) }}</span>
+        </div>
+        <div class="gfx-slider-row">
+          <span class="gfx-slider-label">Phase Coloring</span>
+          <input class="slider" type="range" min="0" max="100" step="0.1" v-model.number="model.phaseColoringStrength" />
+          <span class="gfx-slider-value">{{ (model.phaseColoringStrength ?? 0).toFixed(1) }}</span>
+        </div>
       <!-- ═══ PERFORMANCE ═══ -->
       <label class="gfx-section-title">Performance</label>
       <div class="gfx-slider-row">

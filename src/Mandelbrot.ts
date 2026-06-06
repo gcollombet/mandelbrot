@@ -38,6 +38,7 @@ export interface MandelbrotParams {
     localShadowStrength?: number;
     varnishStrength?: number;
     orbitTrapStrength?: number;
+    phaseColoringStrength?: number;
     textureName?: string;
     skyboxName?: string;
 }

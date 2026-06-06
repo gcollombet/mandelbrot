@@ -70,6 +70,7 @@ const props = withDefaults(defineProps<{
   lightAngle?: number,
   varnishStrength?: number,
   orbitTrapStrength?: number,
+  phaseColoringStrength?: number,
   stripeFrequency?: number,
  }>(),
 
@@ -129,6 +130,7 @@ const props = withDefaults(defineProps<{
         lightAngle: 0,
         varnishStrength: 0,
         orbitTrapStrength: 0,
+        phaseColoringStrength: 0,
         stripeFrequency: 8,
      }
 );
@@ -214,6 +216,7 @@ async function draw() {
         lightAngle: props.lightAngle,
         varnishStrength: props.varnishStrength,
         orbitTrapStrength: props.orbitTrapStrength,
+        phaseColoringStrength: props.phaseColoringStrength,
         stripeFrequency: props.stripeFrequency,
       }
     )
@@ -256,6 +259,7 @@ async function initWebGPU() {
     lightAngle: props.lightAngle,
     varnishStrength: props.varnishStrength,
     orbitTrapStrength: props.orbitTrapStrength,
+    phaseColoringStrength: props.phaseColoringStrength,
     stripeFrequency: props.stripeFrequency,
   });
   engine.dprMultiplier = props.dprMultiplier ?? 1.0;

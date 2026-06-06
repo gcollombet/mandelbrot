@@ -203,6 +203,7 @@ export type RenderOptions = {
     lightAngle: number,
     varnishStrength: number,
     orbitTrapStrength: number,
+    phaseColoringStrength: number,
     stripeFrequency: number,
 }
 
@@ -1745,6 +1746,7 @@ export class Engine {
             renderOptions.debugShading ? 1 : 0,  // 31: debugShading
             renderOptions.heightPaletteShift,    // 32: heightPaletteShift [0, 100]
             renderOptions.orbitTrapStrength,     // 33: orbitTrapStrength [0, 100]
+            renderOptions.phaseColoringStrength, // 34: phaseColoringStrength [0, 100]
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

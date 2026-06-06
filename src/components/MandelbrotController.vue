@@ -42,6 +42,7 @@ const props = defineProps<{
   lightAngle?: number,
   varnishStrength?: number,
   orbitTrapStrength?: number,
+  phaseColoringStrength?: number,
   stripeFrequency?: number,
 }>();
 
@@ -392,6 +393,7 @@ onUnmounted(() => {
       :lightAngle="props.lightAngle"
       :varnishStrength="props.varnishStrength"
       :orbitTrapStrength="props.orbitTrapStrength"
+      :phaseColoringStrength="props.phaseColoringStrength"
       :stripeFrequency="props.stripeFrequency"
       @ready="emit('engineReady', $event)"
     />

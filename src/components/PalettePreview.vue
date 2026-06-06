@@ -56,6 +56,7 @@ const props = defineProps<{
   localShadowStrength?: number;
   varnishStrength?: number;
   orbitTrapStrength?: number;
+  phaseColoringStrength?: number;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -377,6 +378,7 @@ async function init() {
     0, // debugShading
     0, // heightPaletteShift
     props.orbitTrapStrength ?? 0, // orbitTrapStrength
+    props.phaseColoringStrength ?? 0, // phaseColoringStrength
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -425,7 +427,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.orbitTrapStrength],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.orbitTrapStrength, () => props.phaseColoringStrength],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = 3.927;
@@ -452,6 +454,7 @@ watch(
       0,
       0,
       props.orbitTrapStrength ?? 0,
+      props.phaseColoringStrength ?? 0,
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
     render();

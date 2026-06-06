@@ -213,6 +213,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   localShadowStrength: 0,
   varnishStrength: 0,
   orbitTrapStrength: 0,
+  phaseColoringStrength: 0,
   stripeFrequency: 8,
   textureName: 'Gold',
   skyboxName: 'Window',
@@ -718,6 +719,7 @@ const shortcutLabels = computed(() => {
       :lightAngle="mandelbrotParams.lightAngle"
       :varnishStrength="mandelbrotParams.varnishStrength"
       :orbitTrapStrength="mandelbrotParams.orbitTrapStrength"
+      :phaseColoringStrength="mandelbrotParams.phaseColoringStrength"
       :stripeFrequency="mandelbrotParams.stripeFrequency"
     />
 

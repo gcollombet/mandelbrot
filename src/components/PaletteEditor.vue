@@ -35,6 +35,7 @@ const props = withDefaults(defineProps<{
   localShadowStrength?: number;
   varnishStrength?: number;
   orbitTrapStrength?: number;
+  phaseColoringStrength?: number;
   applyToAll?: boolean;
 }>(), {
   interpolationMode: 'lab',
@@ -50,6 +51,7 @@ const props = withDefaults(defineProps<{
   localShadowStrength: 0,
   varnishStrength: 0,
   orbitTrapStrength: 0,
+  phaseColoringStrength: 0,
   applyToAll: false,
 });
 const emit = defineEmits<{
@@ -403,6 +405,7 @@ defineExpose({ getSnapshot });
         :localShadowStrength="localShadowStrength"
         :varnishStrength="varnishStrength"
         :orbitTrapStrength="orbitTrapStrength"
+        :phaseColoringStrength="phaseColoringStrength"
       />
       <div class="handles-overlay">
         <GlissiereHandle

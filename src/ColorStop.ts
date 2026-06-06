@@ -78,7 +78,7 @@ export type ColorStop = {
   rotationMean?: number;
   /** Stripe average normal relief strength (default 0) */
   stripeRelief?: number;
-  /** Average orbit-direction coherence normal relief strength (default 0) */
+  /** Average orbit-direction coherence normal relief strength, range [0, 100] (default 0) */
   directionCoherenceRelief?: number;
 
   // ── Continuous effect parameters (natural ranges) ──
