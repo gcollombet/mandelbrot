@@ -403,7 +403,8 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
-  let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset() + heightPhaseShift);
+  let phaseColoringShift = (1.0 - abs(fract(angle_der / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
+  let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset() + heightPhaseShift + phaseColoringShift);
 
   // ── Sample all effect channels from the palette texture ──
   let fx = sampleEffects(palettePhase);
@@ -469,14 +470,6 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let trapMask = exp(-(trapDistance * trapDistance) / max(trapWidth * trapWidth, 1e-5));
     let trapColor = samplePaletteColor(fract(palettePhase + 0.18));
     color = mix(color, mix(color, trapColor, 0.72) + trapMask * 0.12, trapMask * orbitTrapStrength);
-  }
-
-  let phaseStrength = clamp(parameters.phaseColoringStrength, 0.0, 100.0) / 100.0;
-  if (phaseStrength > 0.001) {
-    let rawPhase = angle_der / (2.0 * 3.141592653589793);
-    let mirrored = 1.0 - abs(fract(rawPhase) * 2.0 - 1.0);
-    let phaseColor = samplePaletteColor(fract(palettePhase + mirrored));
-    color = mix(color, phaseColor, phaseStrength * 0.60);
   }
 
   // ── Shading (always computed, applied proportionally to wShading) ──

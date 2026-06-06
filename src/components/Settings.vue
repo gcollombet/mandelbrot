@@ -118,6 +118,16 @@ function formatPalettePeriod(val: number): string {
   if (val >= 10) return val.toFixed(0);
   return val.toPrecision(3);
 }
+// Slider phase coloring : logarithmique, 0–1 ↔ 0–100
+const sliderPhaseColoring = computed({
+  get: () => {
+    const v = model.value.phaseColoringStrength ?? 0;
+    return v <= 0 ? 0 : Math.log10(v + 1) / 2;
+  },
+  set: val => {
+    model.value.phaseColoringStrength = val <= 0 ? 0 : Math.round((10 ** (val * 2) - 1) * 10) / 10;
+  }
+});
 // Slider log2(scale) : valeurs de slider 1 à 126 —> scale de 2^-1 à 2^-126
 const scaleSlider = computed({
   get: () => {
@@ -2104,8 +2114,9 @@ async function renameAndSaveSkyboxTexture() {
         </div>
         <div class="gfx-slider-row">
           <span class="gfx-slider-label">Phase Coloring</span>
-          <input class="slider" type="range" min="0" max="100" step="0.1" v-model.number="model.phaseColoringStrength" />
-          <span class="gfx-slider-value">{{ (model.phaseColoringStrength ?? 0).toFixed(1) }}</span>
+          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPhaseColoring" />
+          <span class="gfx-slider-value">{{ (model.phaseColoringStrength ?? 0).toFixed(1) }}×</span>
+        </div>
         </div>
       <!-- ═══ PERFORMANCE ═══ -->
       <label class="gfx-section-title">Performance</label>
@@ -2130,7 +2141,6 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-value">&times;{{ (model.gpuLoadMultiplier ?? 1.0).toFixed(2) }}</span>
       </div>
     </div>
-  </div>
 </template>
 
 <style scoped>
