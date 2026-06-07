@@ -1,12 +1,13 @@
 <script setup lang="ts">
-import {computed, onMounted, ref, watch} from 'vue';
+import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
+import {interpolateRgb} from 'd3-interpolate';
 import GlissiereHandle from './GlissiereHandle.vue';
 import PalettePreview from './PalettePreview.vue';
 import StopTransferCurveSelector from './StopTransferCurveSelector.vue';
 import {Palette} from '../Palette';
 import {rgb as d3rgb} from 'd3-color';
 import type {ColorStop, StopTransferCurve} from "../ColorStop.ts";
-import { createInterpolatedColorStop, getEffectValue, getStopTransferCurve } from '../ColorStop.ts';
+import {applyStopTransferCurve, createInterpolatedColorStop, getEffectValue, getStopTransferCurve} from '../ColorStop.ts';
 import type { EffectFieldName } from '../effectFieldConfig';
 import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG, UI_GROUPS } from '../effectFieldConfig';
 import type {InterpolationMode} from "../Mandelbrot.ts";
@@ -15,13 +16,13 @@ import {
   deleteStopPresetEntry,
   ensureDefaultStopPresetEntries,
   getAllStopPresetEntries,
-  getStopPresetByName,
   saveStopPresetEntry,
   valuesFromStop,
 } from '../stopPresetStore.ts';
 import type {StopPresetRecord} from '../stopPresetStore.ts';
 import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry} from '../remoteCatalog.ts';
 import {canDeleteCatalogEntry} from '../catalogPermissions.ts';
+import {buildStopPresetPreviewSpec} from '../stopPresetPreview.ts';
 
 const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
@@ -212,6 +213,108 @@ const selectedTransferCurve = computed<StopTransferCurve>({
 const stopPresetName = ref('');
 const selectedStopPresetName = ref('');
 const stopPresets = ref<StopPresetRecord[]>([]);
+const stopPresetDropdownOpen = ref(false);
+const stopPresetDropdownRef = ref<HTMLElement | null>(null);
+const stopPresetUploadSuccessKeys = ref<Set<string>>(new Set());
+const stopPresetUploadTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const STOP_PRESET_UPLOAD_SUCCESS_DURATION_MS = 2200;
+const stopPresetPreviewCache = new Map<string, string>();
+
+function stopPresetUploadKey(record: StopPresetRecord): string {
+  return record.guid || record.name;
+}
+
+function isStopPresetUploadSuccess(key: string): boolean {
+  return stopPresetUploadSuccessKeys.value.has(key);
+}
+
+function showStopPresetUploadSuccess(key: string): void {
+  const existingTimer = stopPresetUploadTimers.get(key);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  const nextKeys = new Set(stopPresetUploadSuccessKeys.value);
+  nextKeys.add(key);
+  stopPresetUploadSuccessKeys.value = nextKeys;
+
+  stopPresetUploadTimers.set(key, setTimeout(() => {
+    const remaining = new Set(stopPresetUploadSuccessKeys.value);
+    remaining.delete(key);
+    stopPresetUploadSuccessKeys.value = remaining;
+    stopPresetUploadTimers.delete(key);
+  }, STOP_PRESET_UPLOAD_SUCCESS_DURATION_MS));
+}
+
+function stopPresetUploadButtonClasses(key: string, remote?: {publishedName?: string; lastUpdated?: string}) {
+  return {
+    'is-upload-success': isStopPresetUploadSuccess(key),
+    'is-remote': !!remote && !isStopPresetUploadSuccess(key),
+  };
+}
+
+function stopPresetUploadButtonTitle(key: string, remote?: {publishedName?: string; lastUpdated?: string}): string {
+  if (isStopPresetUploadSuccess(key)) return 'Uploaded successfully';
+  if (remote) return 'Already in shared catalog. Upload again to update.';
+  return 'Upload to shared catalog';
+}
+
+function stopPresetUploadButtonIcon(key: string): string {
+  return isStopPresetUploadSuccess(key) ? 'fa-solid fa-check' : 'fa-solid fa-upload';
+}
+
+function stopPresetPreviewKey(record: StopPresetRecord): string {
+  return `${record.guid || record.name}|${record.lastUpdated || record.date}|${JSON.stringify(record.values)}`;
+}
+
+function buildStopPresetPreviewUrl(record: StopPresetRecord): string {
+  const key = stopPresetPreviewKey(record);
+  const cached = stopPresetPreviewCache.get(key);
+  if (cached) return cached;
+
+  const spec = buildStopPresetPreviewSpec(record.values);
+  const canvas = document.createElement('canvas');
+  canvas.width = 32;
+  canvas.height = 32;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+
+  const interpolate = interpolateRgb(spec.startColor, spec.endColor);
+  for (let x = 0; x < canvas.width; x += 1) {
+    const t = x / Math.max(canvas.width - 1, 1);
+    const curvedT = applyStopTransferCurve(spec.curve, t);
+    ctx.fillStyle = interpolate(curvedT);
+    ctx.fillRect(x, 0, 1, canvas.height);
+  }
+
+  const overlayAlpha = 0.07 + spec.effectStrength * 0.15;
+  ctx.fillStyle = `rgba(255, 255, 255, ${overlayAlpha.toFixed(3)})`;
+  ctx.fillRect(0, 0, canvas.width, 4);
+  ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(0.15, 0.03 + spec.effectStrength * 0.12).toFixed(3)})`;
+  ctx.fillRect(0, canvas.height - 4, canvas.width, 4);
+
+  const dataUrl = canvas.toDataURL('image/png');
+  stopPresetPreviewCache.set(key, dataUrl);
+  return dataUrl;
+}
+
+function stopPresetPreviewStyle(record: StopPresetRecord | null) {
+  if (!record) {
+    return {
+      backgroundImage: 'linear-gradient(135deg, rgba(230, 230, 230, 1), rgba(200, 200, 200, 1))',
+    };
+  }
+
+  const preview = buildStopPresetPreviewUrl(record);
+  return preview
+    ? {
+        backgroundImage: `url("${preview}")`,
+      }
+    : {
+        backgroundImage: 'linear-gradient(135deg, rgba(230, 230, 230, 1), rgba(200, 200, 200, 1))',
+      };
+}
+
+const selectedStopPresetRecord = computed(() => stopPresets.value.find(item => item.name === selectedStopPresetName.value) ?? null);
+const selectedStopPresetPreview = computed(() => stopPresetPreviewStyle(selectedStopPresetRecord.value));
 
 async function refreshStopPresets() {
   await ensureDefaultStopPresetEntries();
@@ -220,6 +323,17 @@ async function refreshStopPresets() {
 
 onMounted(() => {
   void refreshStopPresets();
+  document.addEventListener('pointerdown', handleDocumentPointerDown);
+  document.addEventListener('keydown', handleDocumentKeydown);
+});
+
+onUnmounted(() => {
+  document.removeEventListener('pointerdown', handleDocumentPointerDown);
+  document.removeEventListener('keydown', handleDocumentKeydown);
+  for (const timer of stopPresetUploadTimers.values()) {
+    clearTimeout(timer);
+  }
+  stopPresetUploadTimers.clear();
 });
 
 const UI_GROUP_ORDER = ['color', 'iridescence', 'iteration', 'lighting', 'imageSources'] as const;
@@ -287,24 +401,19 @@ function applySelectedStopPreset() {
 }
 
 async function deleteSelectedStopPreset() {
-  const name = selectedStopPresetName.value;
-  if (!name) return;
-  const preset = await getStopPresetByName(name);
-  if (!canDeleteCatalogEntry(props.isAdmin ? 'admin' : 'guest', preset?.remote)) {
+  const preset = selectedStopPresetRecord.value;
+  if (!preset) return;
+  if (!canDeleteCatalogEntry(props.isAdmin ? 'admin' : 'guest', preset.remote)) {
     window.alert('Shared catalog stop presets cannot be deleted locally.');
     return;
   }
-  if (!window.confirm(`Delete stop preset "${name}"? This cannot be undone.`)) return;
-  await deleteStopPresetEntry(name);
+  if (!window.confirm(`Delete stop preset "${preset.name}"? This cannot be undone.`)) return;
+  await deleteStopPresetEntry(preset.name);
   selectedStopPresetName.value = '';
   await refreshStopPresets();
 }
 
-async function toggleSelectedStopPresetFavorite() {
-  const name = selectedStopPresetName.value;
-  if (!name) return;
-  const preset = await getStopPresetByName(name);
-  if (!preset) return;
+async function toggleStopPresetFavorite(preset: StopPresetRecord) {
   await saveStopPresetEntry({...preset, favorite: !preset.favorite});
   await refreshStopPresets();
 }
@@ -318,12 +427,8 @@ function handleStopPresetUploadError(error: unknown) {
   window.alert('Remote stop preset upload failed. Check the console for details.');
 }
 
-async function uploadSelectedStopPreset() {
+async function uploadStopPresetToCloud(preset: StopPresetRecord) {
   if (!props.isAdmin) return;
-  const name = selectedStopPresetName.value;
-  if (!name) return;
-  const preset = await getStopPresetByName(name);
-  if (!preset) return;
   try {
     const guid = preset.guid || crypto.randomUUID();
     const uploaded = await uploadRemoteCatalogEntry('stopPreset', {
@@ -338,9 +443,38 @@ async function uploadSelectedStopPreset() {
       lastUpdated: uploaded.lastUpdated,
       remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
     });
+    showStopPresetUploadSuccess(stopPresetUploadKey(preset));
     await refreshStopPresets();
   } catch (error) {
     handleStopPresetUploadError(error);
+  }
+}
+
+function selectStopPresetFromDropdown(preset: StopPresetRecord) {
+  selectedStopPresetName.value = preset.name;
+  stopPresetDropdownOpen.value = false;
+}
+
+function toggleStopPresetDropdown() {
+  stopPresetDropdownOpen.value = !stopPresetDropdownOpen.value;
+}
+
+function closeStopPresetDropdown() {
+  stopPresetDropdownOpen.value = false;
+}
+
+function handleDocumentPointerDown(event: PointerEvent) {
+  if (!stopPresetDropdownOpen.value) return;
+  const root = stopPresetDropdownRef.value;
+  if (!root) return;
+  if (event.target instanceof Node && !root.contains(event.target)) {
+    closeStopPresetDropdown();
+  }
+}
+
+function handleDocumentKeydown(event: KeyboardEvent) {
+  if (event.key === 'Escape') {
+    closeStopPresetDropdown();
   }
 }
 
@@ -522,26 +656,72 @@ defineExpose({ getSnapshot });
       <!-- ── Stop presets ── -->
       <div class="stop-presets-panel">
         <label class="effects-group-title">Stop Looks</label>
-        <div class="preset-row">
-          <select class="select-input" v-model="selectedStopPresetName">
-            <option value="">Choose preset...</option>
-            <option v-for="preset in stopPresets" :key="preset.name" :value="preset.name">
-              {{ preset.name }}
-            </option>
-          </select>
-          <button v-if="props.isAdmin" class="button is-small is-light" :disabled="!selectedStopPresetName" @click="uploadSelectedStopPreset">
-            <i class="fa-solid fa-upload"></i>
+        <div class="stop-preset-dropdown" ref="stopPresetDropdownRef">
+          <button
+            class="button is-small is-fullwidth stop-preset-trigger"
+            type="button"
+            :class="{ 'has-selection': !!selectedStopPresetRecord }"
+            @click="toggleStopPresetDropdown"
+            :aria-expanded="stopPresetDropdownOpen"
+            aria-haspopup="listbox"
+            aria-label="Choose a stop preset"
+          >
+            <span class="stop-preset-trigger-preview" :style="selectedStopPresetPreview" aria-hidden="true"></span>
+            <span class="stop-preset-trigger-label">{{ selectedStopPresetRecord?.name || 'Choose preset...' }}</span>
+            <i class="fa-solid fa-chevron-down stop-preset-trigger-caret" aria-hidden="true"></i>
           </button>
-          <button class="button is-small is-light" :disabled="!selectedStopPresetName" @click="toggleSelectedStopPresetFavorite">
-            <i class="fa-heart" :class="stopPresets.find(preset => preset.name === selectedStopPresetName)?.favorite ? 'fa-solid' : 'fa-regular'"></i>
-          </button>
-          <button class="button is-small is-link" :disabled="!selectedStopPresetName" @click="applySelectedStopPreset">
+          <div v-if="stopPresetDropdownOpen" class="stop-preset-dropdown-menu" role="listbox" aria-label="Stop presets">
+            <div v-if="stopPresets.length === 0" class="stop-preset-empty">
+              No stop presets available.
+            </div>
+            <div
+              v-for="preset in stopPresets"
+              :key="preset.guid || preset.name"
+              class="stop-preset-option"
+              :class="{ 'is-active': selectedStopPresetName === preset.name }"
+              role="option"
+              :aria-selected="selectedStopPresetName === preset.name"
+              tabindex="0"
+              @click="selectStopPresetFromDropdown(preset)"
+              @keydown.enter.prevent="selectStopPresetFromDropdown(preset)"
+              @keydown.space.prevent="selectStopPresetFromDropdown(preset)"
+            >
+              <span class="stop-preset-preview" :style="stopPresetPreviewStyle(preset)" aria-hidden="true"></span>
+              <span class="stop-preset-label">{{ preset.name }}</span>
+              <span class="stop-preset-actions">
+                <button
+                  type="button"
+                  class="stop-preset-action"
+                  :class="{ 'is-favorite': preset.favorite }"
+                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!preset.favorite"
+                  @click.stop.prevent="toggleStopPresetFavorite(preset)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                </button>
+                <button
+                  v-if="props.isAdmin"
+                  type="button"
+                  class="stop-preset-action upload-button"
+                  :class="stopPresetUploadButtonClasses(stopPresetUploadKey(preset), preset.remote)"
+                  :title="stopPresetUploadButtonTitle(stopPresetUploadKey(preset), preset.remote)"
+                  :aria-label="stopPresetUploadButtonTitle(stopPresetUploadKey(preset), preset.remote)"
+                  @click.stop.prevent="uploadStopPresetToCloud(preset)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i :class="stopPresetUploadButtonIcon(stopPresetUploadKey(preset))"></i></span>
+                </button>
+              </span>
+            </div>
+          </div>
+        </div>
+        <div class="preset-row stop-preset-actions-row">
+          <button class="button is-small is-link" :disabled="!selectedStopPresetRecord" @click="applySelectedStopPreset">
             Apply
           </button>
-          <button class="button is-small is-danger is-light" :disabled="!selectedStopPresetName" @click="deleteSelectedStopPreset">
+          <button class="button is-small is-danger is-light" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">
             Delete
           </button>
-          <button class="button is-small is-info is-light" :disabled="!selectedStopPresetName" @click="exportSelectedStopPreset">
+          <button class="button is-small is-info is-light" :disabled="!selectedStopPresetRecord" @click="exportSelectedStopPreset">
             Export
           </button>
         </div>
@@ -766,6 +946,178 @@ defineExpose({ getSnapshot });
   color: #fff;
   background: #3273dc;
 }
+
+.stop-preset-dropdown {
+  position: relative;
+  width: 100%;
+}
+
+.stop-preset-trigger {
+  display: flex !important;
+  align-items: center;
+  justify-content: flex-start;
+  gap: 0.55em;
+  width: 100%;
+  min-height: 34px;
+  padding: 0.2em 0.55em !important;
+  border-color: #c9c9c9 !important;
+}
+
+.stop-preset-trigger.has-selection {
+  background: linear-gradient(180deg, #fff, #f7f7f7);
+}
+
+.stop-preset-trigger-preview,
+.stop-preset-preview {
+  flex: 0 0 auto;
+  width: 32px;
+  height: 32px;
+  border-radius: 5px;
+  border: 1px solid rgba(0, 0, 0, 0.16);
+  background-color: #d8d8d8;
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+}
+
+.stop-preset-trigger-label,
+.stop-preset-label {
+  min-width: 0;
+  flex: 1 1 auto;
+  text-align: left;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.stop-preset-trigger-label {
+  font-size: 0.82em;
+  color: #222;
+}
+
+.stop-preset-trigger-caret {
+  flex: 0 0 auto;
+  font-size: 0.78em;
+  color: #666;
+}
+
+.stop-preset-dropdown-menu {
+  position: absolute;
+  top: calc(100% + 0.35em);
+  left: 0;
+  right: 0;
+  z-index: 25;
+  max-height: 320px;
+  overflow-y: auto;
+  padding: 0.35em;
+  border: 1px solid #cfcfcf;
+  border-radius: 10px;
+  background: #fff;
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
+}
+
+.stop-preset-option {
+  display: flex;
+  align-items: center;
+  gap: 0.55em;
+  width: 100%;
+  min-height: 40px;
+  padding: 0.28em 0.4em;
+  border-radius: 8px;
+  cursor: pointer;
+  outline: none;
+  color: #111;
+  transition: background 0.14s, box-shadow 0.14s;
+}
+
+.stop-preset-option + .stop-preset-option {
+  margin-top: 0.16em;
+}
+
+.stop-preset-option:hover,
+.stop-preset-option:focus-visible,
+.stop-preset-option.is-active {
+  background: #f3f6fb;
+  box-shadow: inset 0 0 0 1px rgba(69, 128, 203, 0.18);
+}
+
+.stop-preset-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.2em;
+  flex: 0 0 auto;
+  margin-left: auto;
+}
+
+.stop-preset-action {
+  position: relative;
+  width: 1.9em;
+  height: 1.9em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  cursor: pointer;
+  color: #888;
+}
+
+.stop-preset-action.upload-button.is-remote .favorite-heart,
+.stop-preset-action.upload-button.is-remote:hover .favorite-heart {
+  color: #4fb7ff;
+}
+
+.stop-preset-action.upload-button.is-remote::after {
+  content: "✓";
+  position: absolute;
+  right: 0.08em;
+  bottom: 0.08em;
+  width: 0.85em;
+  height: 0.85em;
+  border-radius: 999px;
+  background: #27c46a;
+  color: #fff;
+  font-size: 0.58em;
+  font-weight: 800;
+  line-height: 0.85em;
+  text-align: center;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.42);
+}
+
+.stop-preset-action.is-favorite,
+.stop-preset-action:hover {
+  color: #ec3d7a;
+}
+
+.stop-preset-action.is-upload-success .favorite-heart,
+.stop-preset-action.is-upload-success:hover .favorite-heart {
+  color: #27c46a;
+}
+
+.stop-preset-action .favorite-heart {
+  font-size: 1.18em;
+  line-height: 1;
+  color: inherit;
+  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.25));
+}
+
+.stop-preset-action:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
+
+.stop-preset-empty {
+  padding: 0.55em 0.45em;
+  color: #666;
+  font-size: 0.82em;
+}
+
+.stop-preset-actions-row {
+  margin-top: 0.35em;
+}
+
 .stop-presets-panel {
   margin-bottom: 0.55em;
   padding: 0.45em;
