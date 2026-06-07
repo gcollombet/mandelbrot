@@ -58,6 +58,8 @@ const props = withDefaults(defineProps<{
   maxIterationMultiplier?: number,
   targetFps?: number,
   gpuLoadMultiplier?: number,
+  zoomMinBrushStep?: number,
+  sentinelSeedStep?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   tessellationLevel?: number,
   displacementAmount?: number,
@@ -114,10 +116,12 @@ const props = withDefaults(defineProps<{
         antialiasLevel: 1,
         activateAnimate: false,
         debugShading: false,
-        dprMultiplier: 1.0,
+       dprMultiplier: 1.0,
        maxIterationMultiplier: 0.1,
        targetFps: 60,
        gpuLoadMultiplier: 1.0,
+       zoomMinBrushStep: 1,
+       sentinelSeedStep: 64,
        interpolationMode: 'lab',
         tessellationLevel: 0,
         displacementAmount: 0,
@@ -218,6 +222,8 @@ async function draw() {
         orbitTrapStrength: props.orbitTrapStrength,
         phaseColoringStrength: props.phaseColoringStrength,
         stripeFrequency: props.stripeFrequency,
+        zoomMinBrushStep: props.zoomMinBrushStep,
+        sentinelSeedStep: props.sentinelSeedStep,
       }
     )
     await engine.render()
@@ -261,6 +267,8 @@ async function initWebGPU() {
     orbitTrapStrength: props.orbitTrapStrength,
     phaseColoringStrength: props.phaseColoringStrength,
     stripeFrequency: props.stripeFrequency,
+    zoomMinBrushStep: props.zoomMinBrushStep,
+    sentinelSeedStep: props.sentinelSeedStep,
   });
   engine.dprMultiplier = props.dprMultiplier ?? 1.0;
   engine.targetFps = props.targetFps ?? 60;

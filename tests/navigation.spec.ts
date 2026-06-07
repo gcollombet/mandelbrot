@@ -286,6 +286,17 @@ test.describe("Mandelbrot navigation", () => {
     const paramsBeforeReload = await getStoredParams(page);
     expect(paramsBeforeReload).not.toBeNull();
     const scaleBeforeReload = paramsBeforeReload?.scale as string;
+    expect(paramsBeforeReload?.zoomMinBrushStep).toBe(1);
+    expect(paramsBeforeReload?.sentinelSeedStep).toBe(64);
+
+    await page.evaluate((key) => {
+      const raw = localStorage.getItem(key);
+      if (!raw) return;
+      const params = JSON.parse(raw) as Record<string, unknown>;
+      params.zoomMinBrushStep = 8;
+      params.sentinelSeedStep = 512;
+      localStorage.setItem(key, JSON.stringify(params));
+    }, LS_KEY);
 
     // Reload the page — state should be restored from localStorage.
     await page.reload();
@@ -294,6 +305,8 @@ test.describe("Mandelbrot navigation", () => {
 
     const paramsAfterReload = await getStoredParams(page);
     expect(paramsAfterReload?.scale).toBe(scaleBeforeReload);
+    expect(paramsAfterReload?.zoomMinBrushStep).toBe(8);
+    expect(paramsAfterReload?.sentinelSeedStep).toBe(512);
   });
 
   // -----------------------------------------------------------------------

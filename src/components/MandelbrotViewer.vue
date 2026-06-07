@@ -4,6 +4,11 @@ import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
 import type {ApproximationMode, MandelbrotParams} from "../Mandelbrot.ts";
+import {
+  normalizePowerOfTwoStep,
+  preserveSessionPerformanceFields,
+  stripSessionPerformanceFields,
+} from "../Mandelbrot.ts";
 import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry} from '../presetStore';
 import {syncRemoteCatalog} from '../remoteCatalogSync';
 import {getLatestRemotePreset} from '../remoteCatalog';
@@ -205,6 +210,8 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   maxIterationMultiplier: 0.1,
   targetFps: 30,
   gpuLoadMultiplier: 1.0,
+  zoomMinBrushStep: 1,
+  sentinelSeedStep: 64,
   interpolationMode: 'lab',
   animationSpeed: 1.0,
   ambientOcclusionStrength: 0,
@@ -228,6 +235,11 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   } catch {}
   params.textureName ??= localStorage.getItem(TEXTURE_SELECTED_KEY) ?? 'Gold';
   params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Window';
+  params.zoomMinBrushStep = normalizePowerOfTwoStep(params.zoomMinBrushStep, 1, 1, 64);
+  params.sentinelSeedStep = Math.max(
+    normalizePowerOfTwoStep(params.sentinelSeedStep, 64, 1, 4096),
+    params.zoomMinBrushStep,
+  );
   return params;
 }
 
@@ -339,10 +351,12 @@ onMounted(() => {
         if (list.length === 0) {
           const latest = await getLatestRemotePreset();
           if (latest) {
+            const value = structuredClone(latest.value);
+            stripSessionPerformanceFields(value);
             await saveRemotePresetEntry({
               guid: latest.guid,
               name: latest.name,
-              value: latest.value,
+              value,
               thumbnail: latest.thumbnail,
               date: latest.lastUpdated,
               lastUpdated: latest.lastUpdated,
@@ -362,7 +376,7 @@ onMounted(() => {
           if (record && record.value) {
             // Apply only if the user hasn't started navigating away
             if (!userHasNavigated) {
-              mandelbrotParams.value = record.value;
+              mandelbrotParams.value = preserveSessionPerformanceFields(record.value, mandelbrotParams.value);
             }
           }
         }
@@ -759,6 +773,8 @@ const shortcutLabels = computed(() => {
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
       :targetFps="mandelbrotParams.targetFps"
       :gpuLoadMultiplier="mandelbrotParams.gpuLoadMultiplier"
+      :zoomMinBrushStep="mandelbrotParams.zoomMinBrushStep"
+      :sentinelSeedStep="mandelbrotParams.sentinelSeedStep"
       :interpolationMode="mandelbrotParams.interpolationMode"
       :tessellationLevel="mandelbrotParams.tessellationLevel"
       :displacementAmount="mandelbrotParams.displacementAmount"

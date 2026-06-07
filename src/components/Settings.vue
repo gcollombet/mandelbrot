@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import type {InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
+import {
+  preserveSessionPerformanceFields,
+  stripSessionPerformanceFields,
+} from "../Mandelbrot.ts";
 import type {ColorStop} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
 import {Palette} from '../Palette.ts';
@@ -102,6 +106,28 @@ function canUploadTexture(texture: TextureMetadata): boolean {
   return !!texture.guid;
 }
 
+const zoomMinBrushStepOptions = [1, 2, 4, 8, 16, 32, 64];
+const sentinelSeedStepOptions = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
+const zoomMinBrushStepIndex = computed({
+  get: () => Math.max(0, zoomMinBrushStepOptions.indexOf(model.value.zoomMinBrushStep)),
+  set: (index: number) => {
+    const value = zoomMinBrushStepOptions[Math.min(Math.max(Math.round(index), 0), zoomMinBrushStepOptions.length - 1)] ?? 1;
+    model.value.zoomMinBrushStep = value;
+    if (model.value.sentinelSeedStep < value) {
+      model.value.sentinelSeedStep = sentinelSeedStepOptions.find(step => step >= value) ?? sentinelSeedStepOptions[sentinelSeedStepOptions.length - 1];
+    }
+  },
+});
+const sentinelSeedStepIndex = computed({
+  get: () => Math.max(0, sentinelSeedStepOptions.indexOf(model.value.sentinelSeedStep)),
+  set: (index: number) => {
+    const minAllowed = model.value.zoomMinBrushStep;
+    const value = sentinelSeedStepOptions[Math.min(Math.max(Math.round(index), 0), sentinelSeedStepOptions.length - 1)] ?? 64;
+    const nextValue = sentinelSeedStepOptions.find(step => step >= Math.max(value, minAllowed)) ?? sentinelSeedStepOptions[sentinelSeedStepOptions.length - 1];
+    model.value.sentinelSeedStep = nextValue;
+  },
+});
+
 const emit = defineEmits<{
   'toggle-picker': [];
 }>();
@@ -134,6 +160,8 @@ const model =  defineModel<MandelbrotParams>({
      orbitTrapStrength: 0,
      phaseColoringStrength: 0,
      stripeFrequency: 8,
+     zoomMinBrushStep: 1,
+     sentinelSeedStep: 64,
      textureName: 'Gold',
       skyboxName: 'Window',
     dprMultiplier: 1.0,
@@ -367,11 +395,7 @@ async function savePreset() {
   } catch { /* ignore errors, no thumbnail */ }
   // Clone and strip performance fields before saving
   const savedValue = structuredClone(toRaw(model.value));
-  delete (savedValue as any).dprMultiplier;
-  delete (savedValue as any).maxIterationMultiplier;
-  delete (savedValue as any).antialiasLevel;
-  delete (savedValue as any).targetFps;
-  delete (savedValue as any).gpuLoadMultiplier;
+  stripSessionPerformanceFields(savedValue);
   delete (savedValue as any).activateAnimate;
   delete (savedValue as any).debugShading;
   savedValue.textureName = selectedTexture.value;
@@ -410,11 +434,7 @@ async function quickSnapshot() {
     }
   } catch { /* ignore */ }
   const savedValue = structuredClone(toRaw(model.value));
-  delete (savedValue as any).dprMultiplier;
-  delete (savedValue as any).maxIterationMultiplier;
-  delete (savedValue as any).antialiasLevel;
-  delete (savedValue as any).targetFps;
-  delete (savedValue as any).gpuLoadMultiplier;
+  stripSessionPerformanceFields(savedValue);
   delete (savedValue as any).activateAnimate;
   delete (savedValue as any).debugShading;
   savedValue.textureName = selectedTexture.value;
@@ -585,9 +605,6 @@ async function selectPalettePresetFromDropdown(preset: PresetMetadata) {
   await selectPaletteFromPreset(preset.id);
   showPalettePresetDropdown.value = false;
 }
-
-/** Performance fields — never copied from presets */
-const PERF_FIELDS: (keyof MandelbrotParams)[] = ['dprMultiplier', 'maxIterationMultiplier', 'antialiasLevel', 'targetFps', 'gpuLoadMultiplier'];
 
 async function deletePalette() {
   const name = paletteName.value.trim();
@@ -775,10 +792,7 @@ async function selectPreset(id: number) {
     // Restore all fields except performance params
     const saved = structuredClone(toRaw(record.value));
     const current = model.value;
-    for (const key of PERF_FIELDS) {
-      (saved as any)[key] = (current as any)[key];
-    }
-    model.value = saved;
+    model.value = preserveSessionPerformanceFields(saved, current);
     // Restore texture if saved with the preset
     const texName = textureNameForReference(saved.textureGuid, saved.textureName);
     if (texName) {
@@ -982,8 +996,10 @@ async function importPresets(event: Event) {
         const name = record.name ?? '';
         const date = record.date ?? '';
         if (existing.some(e => e.name === name && e.date === date)) continue;
+        const value = structuredClone(record.value);
+        stripSessionPerformanceFields(value);
         await savePresetEntry(
-          record.value,
+          value,
           record.thumbnail ?? '',
           name,
           record.date,
@@ -2404,6 +2420,16 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-label">Epsilon</span>
         <input class="slider" type="range" min="-30" max="0" step="0.01" v-model="epsilonSlider" />
         <span class="gfx-slider-value">{{ (model.epsilon ?? 1e-8).toExponential(1) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Zoom brush step</span>
+        <input class="slider" type="range" min="0" max="6" step="1" v-model.number="zoomMinBrushStepIndex" aria-label="Zoom brush step" />
+        <span class="gfx-slider-value">{{ model.zoomMinBrushStep }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Sentinel seed step</span>
+        <input class="slider" type="range" min="0" max="12" step="1" v-model.number="sentinelSeedStepIndex" aria-label="Sentinel seed step" />
+        <span class="gfx-slider-value">{{ model.sentinelSeedStep }}</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Approximation</span>

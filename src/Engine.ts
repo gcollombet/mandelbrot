@@ -10,22 +10,21 @@ import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
 import type {ZoomState} from './zoomState'
-import {reduceZoomState, resetZoomState, isZoomActive, getFrozenScale, getLiveScale, getReferenceResetDuringZoom} from './zoomState'
+import {
+    getFrozenScale,
+    getLiveScale,
+    getReferenceResetDuringZoom,
+    isZoomActive,
+    reduceZoomState,
+    resetZoomState
+} from './zoomState'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
+import {normalizePowerOfTwoStep} from './Mandelbrot.ts'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
 const LAYER_COUNT = 8
-
-// Progressive refinement start step for the sentinel grid; must be a power-of-two.
-// Used uniformly for normal rendering, zoom reprojection, and post-zoom recompute.
-const SENTINEL_SEED_STEP = 4096
-
-// Minimum brush refinement step during zoom.  The sentinel grid will not
-// subdivide below this value while zooming, avoiding wasted GPU work on
-// pixels that will be rescaled away.  Must be a power-of-two.
-const ZOOM_MIN_BRUSH_STEP = 2
 
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
 // to target TARGET_FRAME_MS of GPU time.
@@ -130,11 +129,6 @@ type ReferenceWorkerResponse =
         type: 'ready'
     }
 
-function floorPowerOfTwo(value: number): number {
-    const v = Math.max(1, Math.floor(value))
-    return 2 ** Math.floor(Math.log2(v))
-}
-
 function shouldTrackOrbitMetrics(colorStops: ColorStop[]): boolean {
     return colorStops.some(stop =>
         (stop.stripeAverage ?? 0) > ORBIT_METRIC_EPSILON
@@ -206,6 +200,8 @@ export type RenderOptions = {
     orbitTrapStrength: number,
     phaseColoringStrength: number,
     stripeFrequency: number,
+    zoomMinBrushStep: number,
+    sentinelSeedStep: number,
 }
 
 export type ApproximationMode = 'perturbation' | 'bla'
@@ -1872,10 +1868,18 @@ export class Engine {
         if (!this.previousMandelbrot) {
             return
         }
+        const renderOptions = this.previousRenderOptions
+        if (!renderOptions) {
+            return
+        }
 
         const aspect = (this.width / Math.max(1, this.height))
-        // All paths now use the same seed step for progressive refinement.
-        const seedStep = floorPowerOfTwo(SENTINEL_SEED_STEP)
+        // All paths now use the same configurable seed step for progressive refinement.
+        const zoomMinBrushStep = normalizePowerOfTwoStep(renderOptions.zoomMinBrushStep, 1, 1, 64)
+        const seedStep = Math.max(
+            normalizePowerOfTwoStep(renderOptions.sentinelSeedStep, 64, 1, 4096),
+            zoomMinBrushStep,
+        )
         const baseSentinel = seedStep
         const clearFlag = this.clearHistoryNextFrame ? 1 : 0
         if (this.clearHistoryNextFrame) {
@@ -1978,7 +1982,7 @@ export class Engine {
             this.previousMandelbrot.mu,
             gridOffsetX,
             gridOffsetY,
-            isZoomActive(this.zoomState) ? ZOOM_MIN_BRUSH_STEP : 0,
+            isZoomActive(this.zoomState) ? zoomMinBrushStep : 0,
             allowRefinement,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)

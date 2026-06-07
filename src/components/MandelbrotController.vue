@@ -29,6 +29,8 @@ const props = defineProps<{
   maxIterationMultiplier?: number,
   targetFps?: number,
   gpuLoadMultiplier?: number,
+  zoomMinBrushStep?: number,
+  sentinelSeedStep?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   pickerMode?: boolean,
   tessellationLevel?: number,
@@ -381,6 +383,8 @@ onUnmounted(() => {
       :maxIterationMultiplier="props.maxIterationMultiplier"
       :targetFps="props.targetFps"
       :gpuLoadMultiplier="props.gpuLoadMultiplier"
+      :zoomMinBrushStep="props.zoomMinBrushStep"
+      :sentinelSeedStep="props.sentinelSeedStep"
       :interpolationMode="props.interpolationMode"
       :tessellationLevel="props.tessellationLevel"
       :displacementAmount="props.displacementAmount"
