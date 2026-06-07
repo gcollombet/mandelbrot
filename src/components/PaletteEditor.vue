@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, ref, watch} from 'vue';
+import {computed, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import {interpolateRgb} from 'd3-interpolate';
 import GlissiereHandle from './GlissiereHandle.vue';
 import PalettePreview from './PalettePreview.vue';
@@ -414,7 +414,8 @@ async function deleteSelectedStopPreset() {
 }
 
 async function toggleStopPresetFavorite(preset: StopPresetRecord) {
-  await saveStopPresetEntry({...preset, favorite: !preset.favorite});
+  const plainPreset = structuredClone(toRaw(preset));
+  await saveStopPresetEntry({...plainPreset, favorite: !plainPreset.favorite});
   await refreshStopPresets();
 }
 
@@ -430,20 +431,21 @@ function handleStopPresetUploadError(error: unknown) {
 async function uploadStopPresetToCloud(preset: StopPresetRecord) {
   if (!props.isAdmin) return;
   try {
-    const guid = preset.guid || crypto.randomUUID();
+    const plainPreset = structuredClone(toRaw(preset));
+    const guid = plainPreset.guid || crypto.randomUUID();
     const uploaded = await uploadRemoteCatalogEntry('stopPreset', {
       guid,
-      name: preset.name,
-      values: preset.values,
-      lastUpdated: preset.lastUpdated || preset.date,
+      name: plainPreset.name,
+      values: plainPreset.values,
+      lastUpdated: plainPreset.lastUpdated || plainPreset.date,
     });
     await saveStopPresetEntry({
-      ...preset,
+      ...plainPreset,
       guid,
       lastUpdated: uploaded.lastUpdated,
       remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
     });
-    showStopPresetUploadSuccess(stopPresetUploadKey(preset));
+    showStopPresetUploadSuccess(stopPresetUploadKey(plainPreset));
     await refreshStopPresets();
   } catch (error) {
     handleStopPresetUploadError(error);
