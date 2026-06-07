@@ -1158,13 +1158,14 @@ const interpolationModes: { key: InterpolationMode; label: string }[] = [
 ];
 
 const paletteSubTabs = [
+  { key: 'stops', label: 'Stops' },
   { key: 'color', label: 'Color' },
   { key: 'motionCycle', label: 'Motion / Cycle' },
   { key: 'surfaceMaterial', label: 'Surface / Material' },
   { key: 'imageEnvironment', label: 'Image / Env' },
   { key: 'library', label: 'Library' },
 ] as const;
-const activePaletteSubTab = ref<(typeof paletteSubTabs)[number]['key']>('color');
+const activePaletteSubTab = ref<(typeof paletteSubTabs)[number]['key']>('stops');
 
 // =====================================================
 // Palette Manipulation Tools
@@ -1853,40 +1854,6 @@ async function renameAndSaveSkyboxTexture() {
 
     <!-- Palettes tab -->
     <div v-else-if="activeTab === 'palettes'">
-      <div class="mb-3">
-        <PaletteEditor
-          ref="paletteEditorRef"
-          :color-stops="model.colorStops"
-          :interpolation-mode="model.interpolationMode"
-          :picker-mode="props.pickerMode"
-          :tile-texture-url="activeBlobUrl"
-          :skybox-texture-url="activeSkyboxBlobUrl"
-          :tessellation-level="model.tessellationLevel"
-          :displacement-amount="model.displacementAmount"
-          :ambient-occlusion-strength="model.ambientOcclusionStrength"
-          :micro-bump-strength="model.microBumpStrength"
-          :subsurface-strength="model.subsurfaceStrength"
-          :relief-depth="model.reliefDepth"
-          :local-shadow-strength="model.localShadowStrength"
-          :varnish-strength="model.varnishStrength"
-          :orbit-trap-strength="model.orbitTrapStrength"
-          :phase-coloring-strength="model.phaseColoringStrength"
-          :is-admin="isAdmin"
-          :engine-device="engine?.device"
-          :engine-tile-texture="engine?.tileTexture"
-          :engine-skybox-texture="engine?.skyboxTexture"
-          :engine-webcam-texture="engine?.webcamTileTexture"
-          v-model:apply-to-all="applyToAll"
-          @toggle-picker="emit('toggle-picker')"
-          @invert="invertPalette"
-          @negate="negatePalette"
-          @duplicate="duplicatePalette"
-          @mirror="mirrorPalette"
-          @distribute="distributeEvenly"
-          @clear="clearPalette"
-        />
-      </div>
-
       <div class="palette-subtabs">
         <button
           v-for="tab in paletteSubTabs"
@@ -1899,6 +1866,42 @@ async function renameAndSaveSkyboxTexture() {
           {{ tab.label }}
         </button>
       </div>
+
+      <section v-show="activePaletteSubTab === 'stops'">
+        <div class="mb-3">
+          <PaletteEditor
+            ref="paletteEditorRef"
+            :color-stops="model.colorStops"
+            :interpolation-mode="model.interpolationMode"
+            :picker-mode="props.pickerMode"
+            :tile-texture-url="activeBlobUrl"
+            :skybox-texture-url="activeSkyboxBlobUrl"
+            :tessellation-level="model.tessellationLevel"
+            :displacement-amount="model.displacementAmount"
+            :ambient-occlusion-strength="model.ambientOcclusionStrength"
+            :micro-bump-strength="model.microBumpStrength"
+            :subsurface-strength="model.subsurfaceStrength"
+            :relief-depth="model.reliefDepth"
+            :local-shadow-strength="model.localShadowStrength"
+            :varnish-strength="model.varnishStrength"
+            :orbit-trap-strength="model.orbitTrapStrength"
+            :phase-coloring-strength="model.phaseColoringStrength"
+            :is-admin="isAdmin"
+            :engine-device="engine?.device"
+            :engine-tile-texture="engine?.tileTexture"
+            :engine-skybox-texture="engine?.skyboxTexture"
+            :engine-webcam-texture="engine?.webcamTileTexture"
+            v-model:apply-to-all="applyToAll"
+            @toggle-picker="emit('toggle-picker')"
+            @invert="invertPalette"
+            @negate="negatePalette"
+            @duplicate="duplicatePalette"
+            @mirror="mirrorPalette"
+            @distribute="distributeEvenly"
+            @clear="clearPalette"
+          />
+        </div>
+      </section>
 
       <section v-show="activePaletteSubTab === 'motionCycle'">
       <div class="palette-top-controls">

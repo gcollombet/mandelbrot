@@ -3,11 +3,12 @@ const {onRequest} = require('firebase-functions/v2/https');
 
 admin.initializeApp();
 
-const allowedOrigins = new Set([
+const allowedOriginList = [
   'http://localhost:5173',
   'http://127.0.0.1:5173',
   'https://gcollombet.github.io',
-]);
+];
+const allowedOrigins = new Set(allowedOriginList);
 
 function applyCors(req, res) {
   const origin = req.get('origin');
@@ -19,7 +20,7 @@ function applyCors(req, res) {
   res.set('Access-Control-Allow-Methods', 'GET, OPTIONS');
 }
 
-exports.role = onRequest({region: 'europe-west1'}, async (req, res) => {
+exports.role = onRequest({region: 'europe-west1', cors: allowedOriginList}, async (req, res) => {
   applyCors(req, res);
   if (req.method === 'OPTIONS') {
     res.status(204).send('');
