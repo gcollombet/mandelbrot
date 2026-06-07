@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, nextTick, onMounted, ref, toRaw, watch} from 'vue';
+import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import type {InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import type {ColorStop} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
@@ -10,8 +10,10 @@ import defaultPalettesJson from '../assets/default-palettes.json';
 import type {TextureMetadata} from '../textureStore';
 import {
   deleteTextureEntry,
+  getTextureBlob,
   renameTextureEntry,
   saveTextureEntry,
+  updateTextureMetadata,
 } from '../textureStore';
 import {
   BUILT_IN_TEXTURE_NAMES,
@@ -41,6 +43,11 @@ import {
   migratePalettesFromLocalStorage,
   savePaletteEntry,
 } from '../paletteStore';
+import {syncRemoteCatalog} from '../remoteCatalogSync';
+import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry, uploadRemoteTextureEntry} from '../remoteCatalog';
+import {isAuthConfigured, observeAuthState, signInWithGoogle, signOutCurrentUser, type UserRole} from '../authService';
+import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
+import {nameForCatalogReference} from '../catalogIdentity';
 
 import type {Engine} from '../Engine.ts';
 const props = defineProps<{
@@ -49,6 +56,20 @@ const props = defineProps<{
   activeTab: string;
   pickerMode?: boolean;
 }>();
+
+const authConfigured = isAuthConfigured();
+const authUserEmail = ref('');
+const userRole = ref<UserRole>('guest');
+const isAdmin = computed(() => canShowAdminUpload(userRole.value));
+let stopAuthObserver: (() => void) | null = null;
+
+async function loginWithGoogle() {
+  await signInWithGoogle();
+}
+
+async function logoutUser() {
+  await signOutCurrentUser();
+}
 
 const emit = defineEmits<{
   'toggle-picker': [];
@@ -192,6 +213,10 @@ const applyToAll = ref(false);
 
 async function deletePresetById(id: number) {
   const meta = presets.value.find(p => p.id === id);
+  if (!canDeleteCatalogEntry(userRole.value, meta?.remote)) {
+    window.alert('Shared catalog presets cannot be deleted locally.');
+    return;
+  }
   const label = meta?.name || formatPresetDate(meta?.date ?? '');
   if (!window.confirm(`Delete preset "${label}"? This cannot be undone.`)) return;
   await deletePresetEntry(id);
@@ -317,19 +342,25 @@ async function savePreset() {
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
   savedValue.textureName = selectedTexture.value;
+  savedValue.textureGuid = currentTextureObj.value?.guid;
   savedValue.skyboxName = selectedSkyboxTexture.value;
+  savedValue.skyboxGuid = currentSkyboxObj.value?.guid;
   const name = presetName.value.trim();
   const id = await savePresetEntry(savedValue, thumbnail, name || undefined, now);
   presets.value = await getAllPresetEntries();
+  const metadata = presets.value.find(preset => preset.id === id);
   // Cache the new record
   presetCache.set(id, {
     id,
-    name: name || '',
+    guid: metadata?.guid ?? crypto.randomUUID(),
+    name: metadata?.name ?? (name || now),
     value: savedValue,
     thumbnail,
     date: now,
+    lastUpdated: metadata?.lastUpdated ?? now,
     scaleExponent: computeScaleExponent(savedValue.scale),
     favorite: false,
+    remote: metadata?.remote,
   });
   presetName.value = '';
 }
@@ -352,18 +383,24 @@ async function quickSnapshot() {
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
   savedValue.textureName = selectedTexture.value;
+  savedValue.textureGuid = currentTextureObj.value?.guid;
   savedValue.skyboxName = selectedSkyboxTexture.value;
+  savedValue.skyboxGuid = currentSkyboxObj.value?.guid;
   const now = new Date().toISOString();
   const id = await savePresetEntry(savedValue, thumbnail, undefined, now);
   presets.value = await getAllPresetEntries();
+  const metadata = presets.value.find(preset => preset.id === id);
   presetCache.set(id, {
     id,
-    name: '',
+    guid: metadata?.guid ?? crypto.randomUUID(),
+    name: metadata?.name ?? now,
     value: savedValue,
     thumbnail,
     date: now,
+    lastUpdated: metadata?.lastUpdated ?? now,
     scaleExponent: computeScaleExponent(savedValue.scale),
     favorite: false,
+    remote: metadata?.remote,
   });
 }
 
@@ -410,6 +447,11 @@ async function loadPalettes() {
 
 async function savePalette() {
   if (!paletteName.value.trim()) return;
+  const existingPalette = palettes.value.find(item => item.name === paletteName.value.trim());
+  if (!canOverwriteCatalogPayload(userRole.value, existingPalette?.remote)) {
+    window.alert('Shared catalog palettes cannot be overwritten. Save a local variant with a new name.');
+    return;
+  }
   let thumbnail: string | undefined = undefined;
   let now = new Date().toISOString();
   // Try WebGPU snapshot first (shows effects), fall back to CPU gradient strip
@@ -426,9 +468,11 @@ async function savePalette() {
     colorStops: structuredClone(toRaw(model.value.colorStops)),
     thumbnail,
     date: now,
-    favorite: palettes.value.find(item => item.name === paletteName.value.trim())?.favorite ?? false,
+    favorite: existingPalette?.favorite ?? false,
     textureName: selectedTexture.value,
+    textureGuid: currentTextureObj.value?.guid,
     skyboxName: selectedSkyboxTexture.value,
+    skyboxGuid: currentSkyboxObj.value?.guid,
     interpolationMode: model.value.interpolationMode,
     palettePeriod: model.value.palettePeriod,
     paletteOffset: model.value.paletteOffset,
@@ -483,11 +527,13 @@ function selectPalette(name: string) {
     model.value.paletteMirror = palette.paletteMirror ?? false;
     applyPaletteLookFields(palette);
     // Restore texture if present
-    if (palette.textureName) {
-      selectTexture(palette.textureName);
+    const paletteTexture = textureNameForReference(palette.textureGuid, palette.textureName);
+    if (paletteTexture) {
+      selectTexture(paletteTexture);
     }
-    if (palette.skyboxName) {
-      selectSkyboxTexture(palette.skyboxName);
+    const paletteSkybox = textureNameForReference(palette.skyboxGuid, palette.skyboxName);
+    if (paletteSkybox) {
+      selectSkyboxTexture(paletteSkybox);
     }
   }
 }
@@ -516,11 +562,13 @@ async function selectPaletteFromPreset(id: number) {
     model.value.paletteMirror = record.value.paletteMirror ?? false;
     applyPaletteLookFields(record.value);
     // Restore textures if present
-    if (record.value.textureName) {
-      selectTexture(record.value.textureName);
+    const presetTexture = textureNameForReference(record.value.textureGuid, record.value.textureName);
+    if (presetTexture) {
+      selectTexture(presetTexture);
     }
-    if (record.value.skyboxName) {
-      selectSkyboxTexture(record.value.skyboxName);
+    const presetSkybox = textureNameForReference(record.value.skyboxGuid, record.value.skyboxName);
+    if (presetSkybox) {
+      selectSkyboxTexture(presetSkybox);
     }
   }
 }
@@ -536,6 +584,11 @@ const PERF_FIELDS: (keyof MandelbrotParams)[] = ['dprMultiplier', 'maxIterationM
 async function deletePalette() {
   const name = paletteName.value.trim();
   if (!name) return;
+  const palette = palettes.value.find(item => item.name === name);
+  if (!canDeleteCatalogEntry(userRole.value, palette?.remote)) {
+    window.alert('Shared catalog palettes cannot be deleted locally.');
+    return;
+  }
   if (window.confirm(`Delete palette "${name}"? This cannot be undone.`)) {
     await deletePaletteEntry(name);
     palettes.value = await getAllPaletteEntries();
@@ -572,6 +625,95 @@ async function togglePaletteFavorite(name: string): Promise<void> {
   } catch (e) {
     palette.favorite = !palette.favorite;
     console.warn('Failed to save palette favorite:', e);
+  }
+}
+
+function handleUploadError(error: unknown) {
+  if (error instanceof RemoteCatalogNameConflictError) {
+    window.alert(`A remote ${error.type} named "${error.conflictName}" already exists. Rename this item before uploading.`);
+    return;
+  }
+  console.warn('Remote catalog upload failed:', error);
+  window.alert('Remote catalog upload failed. Check the console for details.');
+}
+
+async function uploadCompletePreset(id: number): Promise<void> {
+  if (!isAdmin.value) return;
+  const record = await getCachedPreset(id);
+  if (!record) return;
+  try {
+    const uploaded = await uploadRemoteCatalogEntry('completePreset', {
+      guid: record.guid,
+      name: record.name,
+      lastUpdated: record.lastUpdated,
+      value: record.value,
+      thumbnail: record.thumbnail,
+      scaleExponent: record.scaleExponent,
+    });
+    record.lastUpdated = uploaded.lastUpdated;
+    record.remote = {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated};
+    await updatePresetEntry(record);
+    presetCache.set(id, record);
+    presets.value = await getAllPresetEntries();
+  } catch (error) {
+    handleUploadError(error);
+  }
+}
+
+async function uploadPalettePreset(palette: PaletteRecord): Promise<void> {
+  if (!isAdmin.value) return;
+  try {
+    palette.guid = palette.guid || crypto.randomUUID();
+    const uploaded = await uploadRemoteCatalogEntry('palettePreset', {
+      ...palette,
+      guid: palette.guid,
+      name: palette.name,
+      lastUpdated: palette.lastUpdated || palette.date || new Date().toISOString(),
+    });
+    await savePaletteEntry({
+      ...palette,
+      lastUpdated: uploaded.lastUpdated,
+      remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
+    });
+    palettes.value = await getAllPaletteEntries();
+  } catch (error) {
+    handleUploadError(error);
+  }
+}
+
+async function uploadTexture(texture: TextureMetadata): Promise<void> {
+  if (!isAdmin.value || !texture.guid) return;
+  const blob = await getTextureBlob(texture.name);
+  if (!blob) return;
+  try {
+    const uploaded = await uploadRemoteTextureEntry({
+      guid: texture.guid,
+      name: texture.name,
+      thumbnail: texture.thumbnail,
+      lastUpdated: texture.lastUpdated || texture.date,
+      contentType: blob.type,
+      size: blob.size,
+    }, blob);
+    await saveTextureEntry(texture.name, blob, texture.thumbnail, texture.date, texture.guid, texture.favorite ?? false, {
+      publishedName: uploaded.name,
+      lastUpdated: uploaded.lastUpdated,
+    });
+    textures.value = await ensureTextureLibrary();
+  } catch (error) {
+    handleUploadError(error);
+  }
+}
+
+async function toggleTextureFavorite(texture: TextureMetadata): Promise<void> {
+  if (!texture.guid) return;
+  const previous = texture.favorite ?? false;
+  texture.favorite = !previous;
+  try {
+    await updateTextureMetadata(texture);
+    textures.value = await ensureTextureLibrary();
+  } catch (error) {
+    texture.favorite = previous;
+    console.warn('Failed to save texture favorite:', error);
   }
 }
 
@@ -613,12 +755,12 @@ async function selectPreset(id: number) {
     }
     model.value = saved;
     // Restore texture if saved with the preset
-    const texName = saved.textureName;
-    if (texName && textures.value.some(t => t.name === texName)) {
+    const texName = textureNameForReference(saved.textureGuid, saved.textureName);
+    if (texName) {
       selectTexture(texName);
     }
-    const skyName = saved.skyboxName;
-    if (skyName && textures.value.some(t => t.name === skyName)) {
+    const skyName = textureNameForReference(saved.skyboxGuid, saved.skyboxName);
+    if (skyName) {
       selectSkyboxTexture(skyName);
     }
   }
@@ -645,9 +787,21 @@ const maxIterMultSlider = computed({
 });
 
 onMounted(async () => {
+  stopAuthObserver = observeAuthState((state) => {
+    authUserEmail.value = state.user?.email ?? '';
+    userRole.value = state.role;
+  });
   await loadPresets();
   await loadPalettes();
   await loadTextures();
+  await syncRemoteCatalog();
+  await loadPresets();
+  await loadPalettes();
+  await loadTextures();
+});
+
+onUnmounted(() => {
+  stopAuthObserver?.();
 });
 
 const currentPaletteObj = computed(() => palettes.value.find(p => p.name === selectedPalette.value));
@@ -1072,6 +1226,10 @@ const currentTextureThumbnail = computed(() => currentTextureObj.value?.thumbnai
 const currentSkyboxObj = computed(() => textures.value.find(t => t.name === selectedSkyboxTexture.value));
 const currentSkyboxThumbnail = computed(() => currentSkyboxObj.value?.thumbnail);
 
+function textureNameForReference(guid?: string, fallbackName?: string): string | null {
+  return nameForCatalogReference(textures.value, guid, fallbackName);
+}
+
 /** Active blob URL — must be revoked when changed to avoid memory leaks. */
 const activeBlobUrl = ref<string | null>(null);
 const activeSkyboxBlobUrl = ref<string | null>(null);
@@ -1199,6 +1357,7 @@ async function selectTexture(name: string) {
   if (!tex) return;
   selectedTexture.value = name;
   model.value.textureName = name;
+  model.value.textureGuid = tex.guid;
   textureName.value = tex.name;
   showTextureDropdown.value = false;
   // Persist selection
@@ -1222,6 +1381,7 @@ async function selectSkyboxTexture(name: string) {
   if (!tex) return;
   selectedSkyboxTexture.value = name;
   model.value.skyboxName = name;
+  model.value.skyboxGuid = tex.guid;
   skyboxName.value = tex.name;
   showSkyboxDropdown.value = false;
   localStorage.setItem(SKYBOX_SELECTED_KEY, name);
@@ -1241,6 +1401,11 @@ function selectSkyboxFromDropdown(tex: TextureMetadata) {
 async function deleteTexture() {
   const name = textureName.value.trim();
   if (!name) return;
+  const texture = textures.value.find(item => item.name === name);
+  if (!canDeleteCatalogEntry(userRole.value, texture?.remote)) {
+    window.alert('Shared catalog textures cannot be deleted locally.');
+    return;
+  }
   if (BUILT_IN_TEXTURE_NAMES.has(name)) {
     window.alert('Built-in textures cannot be deleted.');
     return;
@@ -1261,6 +1426,11 @@ async function deleteTexture() {
 async function deleteSkyboxTexture() {
   const name = skyboxName.value.trim();
   if (!name) return;
+  const texture = textures.value.find(item => item.name === name);
+  if (!canDeleteCatalogEntry(userRole.value, texture?.remote)) {
+    window.alert('Shared catalog textures cannot be deleted locally.');
+    return;
+  }
   if (BUILT_IN_TEXTURE_NAMES.has(name)) {
     window.alert('Built-in textures cannot be deleted.');
     return;
@@ -1398,6 +1568,21 @@ async function renameAndSaveSkyboxTexture() {
 
 <template>
   <div style="color: black !important;">
+    <div v-if="authConfigured" class="field is-grouped is-align-items-center" style="margin-bottom:0.75em;">
+      <div class="control" v-if="!authUserEmail">
+        <button class="button is-small is-light" type="button" @click="loginWithGoogle">
+          <i class="fa-brands fa-google mr-1"></i> Sign in with Google
+        </button>
+      </div>
+      <template v-else>
+        <div class="control" style="font-size:0.82em; color:#555;">
+          {{ authUserEmail }} · {{ userRole }}
+        </div>
+        <div class="control">
+          <button class="button is-small is-light" type="button" @click="logoutUser">Sign out</button>
+        </div>
+      </template>
+    </div>
     <!-- Navigation tab -->
     <div v-if="activeTab === 'navigation'">
       <div class="mb-3" style="font-family: monospace; word-break: break-all; white-space: pre-line;">
@@ -1460,6 +1645,15 @@ async function renameAndSaveSkyboxTexture() {
                   @click.stop.prevent="togglePresetFavorite(preset.id)"
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                </button>
+                <button
+                  v-if="isAdmin"
+                  class="favorite-button"
+                  type="button"
+                  title="Upload to shared catalog"
+                  @click.stop.prevent="uploadCompletePreset(preset.id)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
                 </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -1536,6 +1730,15 @@ async function renameAndSaveSkyboxTexture() {
                   @click.stop.prevent="togglePresetFavorite(preset.id)"
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                </button>
+                <button
+                  v-if="isAdmin"
+                  class="favorite-button"
+                  type="button"
+                  title="Upload to shared catalog"
+                  @click.stop.prevent="uploadCompletePreset(preset.id)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
                 </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -1684,6 +1887,7 @@ async function renameAndSaveSkyboxTexture() {
           :varnish-strength="model.varnishStrength"
           :orbit-trap-strength="model.orbitTrapStrength"
           :phase-coloring-strength="model.phaseColoringStrength"
+          :is-admin="isAdmin"
           :engine-device="engine?.device"
           :engine-tile-texture="engine?.tileTexture"
           :engine-skybox-texture="engine?.skyboxTexture"
@@ -1831,6 +2035,27 @@ async function renameAndSaveSkyboxTexture() {
                 @click.prevent="selectTextureFromDropdown(tex)"
                 :class="{ 'is-active': selectedTexture === tex.name }"
                 style="display:flex; align-items:center; gap:0.5em;">
+                <button
+                  class="favorite-button"
+                  :class="{ 'is-favorite': tex.favorite }"
+                  type="button"
+                  :disabled="!tex.guid"
+                  :title="tex.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!tex.favorite"
+                  @click.stop.prevent="toggleTextureFavorite(tex)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="tex.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                </button>
+                <button
+                  v-if="isAdmin"
+                  class="favorite-button"
+                  type="button"
+                  :disabled="!tex.guid"
+                  title="Upload to shared catalog"
+                  @click.stop.prevent="uploadTexture(tex)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
+                </button>
                 <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail"
                   style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
                 <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
@@ -1880,6 +2105,27 @@ async function renameAndSaveSkyboxTexture() {
                 @click.prevent="selectSkyboxFromDropdown(tex)"
                 :class="{ 'is-active': selectedSkyboxTexture === tex.name }"
                 style="display:flex; align-items:center; gap:0.5em;">
+                <button
+                  class="favorite-button"
+                  :class="{ 'is-favorite': tex.favorite }"
+                  type="button"
+                  :disabled="!tex.guid"
+                  :title="tex.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!tex.favorite"
+                  @click.stop.prevent="toggleTextureFavorite(tex)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="tex.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                </button>
+                <button
+                  v-if="isAdmin"
+                  class="favorite-button"
+                  type="button"
+                  :disabled="!tex.guid"
+                  title="Upload to shared catalog"
+                  @click.stop.prevent="uploadTexture(tex)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
+                </button>
                 <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail"
                   style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
                 <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
@@ -1950,6 +2196,15 @@ async function renameAndSaveSkyboxTexture() {
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
                 </button>
+                <button
+                  v-if="isAdmin"
+                  class="favorite-button"
+                  type="button"
+                  title="Upload to shared catalog"
+                  @click.stop.prevent="uploadCompletePreset(preset.id)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
+                </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
@@ -2009,6 +2264,15 @@ async function renameAndSaveSkyboxTexture() {
                   @click.stop.prevent="togglePaletteFavorite(palette.name)"
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="palette.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                </button>
+                <button
+                  v-if="isAdmin"
+                  class="favorite-button"
+                  type="button"
+                  title="Upload to shared catalog"
+                  @click.stop.prevent="uploadPalettePreset(palette)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
                 </button>
                 <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail"
                   style="height:32px; width:100%; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>

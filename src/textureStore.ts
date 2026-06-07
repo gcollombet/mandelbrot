@@ -9,8 +9,10 @@
  * reading the full images into memory.
  */
 
+import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
+
 const DB_NAME = 'mandelbrot-textures';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const LEGACY_STORE_NAME = 'textures';
 const METADATA_STORE_NAME = 'textureMetadata';
 const BLOB_STORE_NAME = 'textureBlobs';
@@ -24,9 +26,13 @@ const LEGACY_STORAGE_KEY = 'mandelbrot_textures';
 
 /** Lightweight entry returned for listings (no blob). */
 export interface TextureMetadata {
+  guid?: string;
   name: string;
   thumbnail: string;   // small data-URL (~5-15 KB)
   date: string;
+  lastUpdated?: string;
+  favorite?: boolean;
+  remote?: CatalogRemoteState;
 }
 
 /** Full record stored in IndexedDB. */
@@ -48,7 +54,27 @@ function openDB(): Promise<IDBDatabase> {
       const db = req.result;
       const transaction = req.transaction;
       if (!db.objectStoreNames.contains(METADATA_STORE_NAME)) {
-        db.createObjectStore(METADATA_STORE_NAME, { keyPath: 'name' });
+        const metadataStore = db.createObjectStore(METADATA_STORE_NAME, { keyPath: 'name' });
+        metadataStore.createIndex('guid', 'guid', { unique: true });
+      } else if (transaction) {
+        const metadataStore = transaction.objectStore(METADATA_STORE_NAME);
+        if (!metadataStore.indexNames.contains('guid')) {
+          metadataStore.createIndex('guid', 'guid', { unique: true });
+        }
+        metadataStore.openCursor().onsuccess = (cursorEvent) => {
+          const cursor = (cursorEvent.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (!cursor) return;
+          const record = cursor.value as TextureMetadata;
+          const date = record.date ?? new Date().toISOString();
+          cursor.update({
+            ...record,
+            guid: record.guid || createGuid(),
+            date,
+            lastUpdated: record.lastUpdated || date,
+            favorite: record.favorite ?? false,
+          });
+          cursor.continue();
+        };
       }
       if (!db.objectStoreNames.contains(BLOB_STORE_NAME)) {
         db.createObjectStore(BLOB_STORE_NAME, { keyPath: 'name' });
@@ -117,6 +143,34 @@ export async function getAllTextureEntries(): Promise<TextureMetadata[]> {
   return all;
 }
 
+export async function getTextureMetadataByName(name: string): Promise<TextureMetadata | null> {
+  const { store, done } = await tx(METADATA_STORE_NAME, 'readonly');
+  const metadata: TextureMetadata | undefined = await reqToPromise(store.get(name));
+  await done;
+  return metadata ?? null;
+}
+
+export async function getTextureMetadataByGuid(guid: string): Promise<TextureMetadata | null> {
+  const all = await getAllTextureEntries();
+  return all.find(record => record.guid === guid) ?? null;
+}
+
+export async function updateTextureMetadata(metadata: TextureMetadata): Promise<void> {
+  const { store, done } = await tx(METADATA_STORE_NAME, 'readwrite');
+  store.put({
+    ...metadata,
+    guid: metadata.guid || createGuid(),
+    lastUpdated: metadata.lastUpdated || metadata.date,
+    favorite: metadata.favorite ?? false,
+  });
+  await done;
+}
+
+async function uniqueTextureName(name: string, guid?: string): Promise<string> {
+  const all = await getAllTextureEntries();
+  return makeUniqueName(name, all.filter(record => record.guid !== guid).map(record => record.name));
+}
+
 /**
  * Return the full Blob for a given texture, or `null` if not found.
  */
@@ -135,11 +189,20 @@ export async function saveTextureEntry(
   blob: Blob,
   thumbnail: string,
   date?: string,
+  guid = createGuid(),
+  favorite = false,
+  remote?: CatalogRemoteState,
 ): Promise<void> {
+  if (!name.trim()) throw new Error('Texture name is required.');
+  const resolvedDate = date ?? new Date().toISOString();
   const metadata: TextureMetadata = {
-    name,
+    guid,
+    name: await uniqueTextureName(name.trim(), guid),
     thumbnail,
-    date: date ?? new Date().toISOString(),
+    date: resolvedDate,
+    lastUpdated: resolvedDate,
+    favorite,
+    remote,
   };
   const db = await openDB();
   const transaction = db.transaction([METADATA_STORE_NAME, BLOB_STORE_NAME], 'readwrite');
@@ -151,6 +214,20 @@ export async function saveTextureEntry(
     transaction.onabort = () => reject(transaction.error);
   });
   await done;
+}
+
+export async function saveRemoteTextureEntry(metadata: TextureMetadata, blob: Blob): Promise<void> {
+  if (!metadata.guid) metadata.guid = createGuid();
+  const existing = await getTextureMetadataByGuid(metadata.guid);
+  await saveTextureEntry(
+    existing?.name ?? metadata.name,
+    blob,
+    metadata.thumbnail,
+    existing?.date ?? metadata.date,
+    metadata.guid,
+    existing?.favorite ?? false,
+    metadata.remote,
+  );
 }
 
 /**
@@ -181,7 +258,7 @@ export async function renameTextureEntry(
   await done;
   const blob = await getTextureBlob(oldName);
   if (!metadata || !blob) return;
-  await saveTextureEntry(newName, blob, metadata.thumbnail, metadata.date);
+  await saveTextureEntry(newName, blob, metadata.thumbnail, metadata.date, metadata.guid, metadata.favorite ?? false, metadata.remote);
   await deleteTextureEntry(oldName);
 }
 

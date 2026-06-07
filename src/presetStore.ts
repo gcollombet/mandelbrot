@@ -12,9 +12,10 @@
  */
 
 import type { MandelbrotParams } from './Mandelbrot';
+import {createGuid, defaultPresetName, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 
 const DB_NAME = 'mandelbrot-presets';
-const DB_VERSION = 2;
+const DB_VERSION = 3;
 const STORE_NAME = 'presets';
 
 /** Legacy localStorage key used before the IndexedDB migration. */
@@ -30,11 +31,14 @@ const PALETTE_MIGRATION_KEY = 'mandelbrot_pp256_migrated';
 /** Lightweight entry returned for listings (no full params). */
 export interface PresetMetadata {
   id: number;
-  name: string;          // empty string when unnamed
+  guid: string;
+  name: string;
   thumbnail: string;     // data-URL PNG
   date: string;          // ISO 8601
+  lastUpdated: string;   // ISO 8601 content freshness
   scaleExponent: number; // floor(log10(1/scale)) — zoom indicator
   favorite?: boolean;
+  remote?: CatalogRemoteState;
 }
 
 /** Full record stored in IndexedDB. */
@@ -54,10 +58,31 @@ function openDB(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
+      const transaction = req.transaction;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+        const store = db.createObjectStore(STORE_NAME, { keyPath: 'id', autoIncrement: true });
+        store.createIndex('guid', 'guid', {unique: true});
+      } else if (transaction) {
+        const store = transaction.objectStore(STORE_NAME);
+        if (!store.indexNames.contains('guid')) {
+          store.createIndex('guid', 'guid', {unique: true});
+        }
+        store.openCursor().onsuccess = (event) => {
+          const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (!cursor) return;
+          const record = cursor.value as Partial<PresetRecord>;
+          const date = record.date ?? new Date().toISOString();
+          cursor.update({
+            ...record,
+            guid: record.guid || createGuid(),
+            name: record.name || defaultPresetName(date),
+            date,
+            lastUpdated: record.lastUpdated || date,
+            favorite: record.favorite ?? false,
+          });
+          cursor.continue();
+        };
       }
-      // v1→v2: no schema changes, palettePeriod migration is handled post-open
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
@@ -98,6 +123,18 @@ export function computeScaleExponent(scale: string | number): number {
   return Math.floor(Math.log10(1 / s));
 }
 
+export async function getAllPresetRecords(): Promise<PresetRecord[]> {
+  const { store, done } = await tx('readonly');
+  const all: PresetRecord[] = await reqToPromise(store.getAll());
+  await done;
+  return all;
+}
+
+async function uniquePresetName(name: string, guid?: string): Promise<string> {
+  const all = await getAllPresetRecords();
+  return makeUniqueName(name, all.filter(record => record.guid !== guid).map(record => record.name));
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -107,17 +144,18 @@ export function computeScaleExponent(scale: string | number): number {
  * Results are sorted newest-first by date.
  */
 export async function getAllPresetEntries(): Promise<PresetMetadata[]> {
-  const { store, done } = await tx('readonly');
-  const all: PresetRecord[] = await reqToPromise(store.getAll());
-  await done;
+  const all = await getAllPresetRecords();
   return all
-    .map(({ id, name, thumbnail, date, scaleExponent, favorite }) => ({
+    .map(({ id, guid, name, thumbnail, date, lastUpdated, scaleExponent, favorite, remote }) => ({
       id,
+      guid,
       name,
       thumbnail,
       date,
+      lastUpdated,
       scaleExponent,
       favorite,
+      remote,
     }))
     .sort((a, b) => b.date.localeCompare(a.date));
 }
@@ -132,6 +170,34 @@ export async function getPresetById(id: number): Promise<PresetRecord | null> {
   return record ?? null;
 }
 
+export async function getPresetByGuid(guid: string): Promise<PresetRecord | null> {
+  const all = await getAllPresetRecords();
+  return all.find(record => record.guid === guid) ?? null;
+}
+
+export function buildRemotePresetMerge(existing: PresetRecord, record: Omit<PresetRecord, 'id'> & { id?: number }): PresetRecord {
+  return {
+    ...existing,
+    value: record.value,
+    thumbnail: record.thumbnail,
+    date: existing.date || record.date,
+    lastUpdated: record.lastUpdated,
+    scaleExponent: computeScaleExponent(record.value.scale),
+    favorite: existing.favorite ?? false,
+    remote: record.remote,
+  };
+}
+
+export async function saveRemotePresetEntry(record: Omit<PresetRecord, 'id'> & { id?: number }): Promise<number> {
+  const existing = await getPresetByGuid(record.guid);
+  if (existing) {
+    const next = buildRemotePresetMerge(existing, record);
+    await updatePresetEntry(next);
+    return next.id;
+  }
+  return savePresetEntry(record.value, record.thumbnail, record.name, record.date, record.favorite ?? false, record.guid, record.remote);
+}
+
 /**
  * Store a new preset. Returns the auto-generated id.
  */
@@ -141,14 +207,21 @@ export async function savePresetEntry(
   name?: string,
   date?: string,
   favorite = false,
+  guid = createGuid(),
+  remote?: CatalogRemoteState,
 ): Promise<number> {
+  const now = date ?? new Date().toISOString();
+  const resolvedName = await uniquePresetName((name || defaultPresetName(now)).trim(), guid);
   const record: Omit<PresetRecord, 'id'> & { id?: number } = {
-    name: name ?? '',
+    guid,
+    name: resolvedName,
     value,
     thumbnail,
-    date: date ?? new Date().toISOString(),
+    date: now,
+    lastUpdated: now,
     scaleExponent: computeScaleExponent(value.scale),
     favorite,
+    remote,
   };
   const { store, done } = await tx('readwrite');
   const id = await reqToPromise(store.add(record) as IDBRequest<number>);
@@ -160,6 +233,8 @@ export async function savePresetEntry(
  * Overwrite an existing preset (e.g. to rename it).
  */
 export async function updatePresetEntry(record: PresetRecord): Promise<void> {
+  record.name = await uniquePresetName(record.name || defaultPresetName(record.date), record.guid);
+  record.lastUpdated = record.lastUpdated || record.date || new Date().toISOString();
   const { store, done } = await tx('readwrite');
   store.put(record);
   await done;

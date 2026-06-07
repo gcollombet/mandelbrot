@@ -40,5 +40,7 @@ export interface MandelbrotParams {
     orbitTrapStrength?: number;
     phaseColoringStrength?: number;
     textureName?: string;
+    textureGuid?: string;
     skyboxName?: string;
+    skyboxGuid?: string;
 }

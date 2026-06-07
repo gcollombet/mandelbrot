@@ -15,10 +15,13 @@ import {
   deleteStopPresetEntry,
   ensureDefaultStopPresetEntries,
   getAllStopPresetEntries,
+  getStopPresetByName,
   saveStopPresetEntry,
   valuesFromStop,
 } from '../stopPresetStore.ts';
 import type {StopPresetRecord} from '../stopPresetStore.ts';
+import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry} from '../remoteCatalog.ts';
+import {canDeleteCatalogEntry} from '../catalogPermissions.ts';
 
 const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
@@ -37,6 +40,7 @@ const props = withDefaults(defineProps<{
   orbitTrapStrength?: number;
   phaseColoringStrength?: number;
   applyToAll?: boolean;
+  isAdmin?: boolean;
 }>(), {
   interpolationMode: 'lab',
   pickerMode: false,
@@ -53,6 +57,7 @@ const props = withDefaults(defineProps<{
   orbitTrapStrength: 0,
   phaseColoringStrength: 0,
   applyToAll: false,
+  isAdmin: false,
 });
 const emit = defineEmits<{
   (e: 'update:colorStops', value: ColorStop[]): void;
@@ -208,13 +213,13 @@ const stopPresetName = ref('');
 const selectedStopPresetName = ref('');
 const stopPresets = ref<StopPresetRecord[]>([]);
 
-function refreshStopPresets() {
-  ensureDefaultStopPresetEntries();
-  stopPresets.value = getAllStopPresetEntries();
+async function refreshStopPresets() {
+  await ensureDefaultStopPresetEntries();
+  stopPresets.value = await getAllStopPresetEntries();
 }
 
 onMounted(() => {
-  refreshStopPresets();
+  void refreshStopPresets();
 });
 
 const UI_GROUP_ORDER = ['color', 'iridescence', 'iteration', 'lighting', 'imageSources'] as const;
@@ -246,18 +251,18 @@ function setStopEffect(field: EffectFieldName, value: number) {
   emit('update:colorStops', props.colorStops);
 }
 
-function saveCurrentStopPreset() {
+async function saveCurrentStopPreset() {
   const stop = selectedStop.value;
   const name = stopPresetName.value.trim();
   if (!stop || !name) return;
-  saveStopPresetEntry({
+  await saveStopPresetEntry({
     name,
     values: valuesFromStop(stop),
     date: new Date().toISOString(),
   });
   selectedStopPresetName.value = name;
   stopPresetName.value = '';
-  refreshStopPresets();
+  await refreshStopPresets();
 }
 
 function applySelectedStopPreset() {
@@ -281,13 +286,62 @@ function applySelectedStopPreset() {
   emit('update:colorStops', props.colorStops);
 }
 
-function deleteSelectedStopPreset() {
+async function deleteSelectedStopPreset() {
   const name = selectedStopPresetName.value;
   if (!name) return;
+  const preset = await getStopPresetByName(name);
+  if (!canDeleteCatalogEntry(props.isAdmin ? 'admin' : 'guest', preset?.remote)) {
+    window.alert('Shared catalog stop presets cannot be deleted locally.');
+    return;
+  }
   if (!window.confirm(`Delete stop preset "${name}"? This cannot be undone.`)) return;
-  deleteStopPresetEntry(name);
+  await deleteStopPresetEntry(name);
   selectedStopPresetName.value = '';
-  refreshStopPresets();
+  await refreshStopPresets();
+}
+
+async function toggleSelectedStopPresetFavorite() {
+  const name = selectedStopPresetName.value;
+  if (!name) return;
+  const preset = await getStopPresetByName(name);
+  if (!preset) return;
+  await saveStopPresetEntry({...preset, favorite: !preset.favorite});
+  await refreshStopPresets();
+}
+
+function handleStopPresetUploadError(error: unknown) {
+  if (error instanceof RemoteCatalogNameConflictError) {
+    window.alert(`A remote ${error.type} named "${error.conflictName}" already exists. Rename this stop preset before uploading.`);
+    return;
+  }
+  console.warn('Remote stop preset upload failed:', error);
+  window.alert('Remote stop preset upload failed. Check the console for details.');
+}
+
+async function uploadSelectedStopPreset() {
+  if (!props.isAdmin) return;
+  const name = selectedStopPresetName.value;
+  if (!name) return;
+  const preset = await getStopPresetByName(name);
+  if (!preset) return;
+  try {
+    const guid = preset.guid || crypto.randomUUID();
+    const uploaded = await uploadRemoteCatalogEntry('stopPreset', {
+      guid,
+      name: preset.name,
+      values: preset.values,
+      lastUpdated: preset.lastUpdated || preset.date,
+    });
+    await saveStopPresetEntry({
+      ...preset,
+      guid,
+      lastUpdated: uploaded.lastUpdated,
+      remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
+    });
+    await refreshStopPresets();
+  } catch (error) {
+    handleStopPresetUploadError(error);
+  }
 }
 
 function downloadJsonFile(filename: string, payload: unknown) {
@@ -321,19 +375,19 @@ function importStopPresets(event: Event) {
   const file = input.files?.[0];
   if (!file) return;
   const reader = new FileReader();
-  reader.onload = () => {
+    reader.onload = async () => {
     try {
       const imported = JSON.parse(reader.result as string);
       const records = Array.isArray(imported) ? imported : [imported];
       for (const record of records) {
         if (!record || typeof record.name !== 'string' || !record.values || typeof record.values.color !== 'string') continue;
-        saveStopPresetEntry({
+        await saveStopPresetEntry({
           name: record.name,
           values: record.values,
           date: typeof record.date === 'string' ? record.date : new Date().toISOString(),
         });
       }
-      refreshStopPresets();
+      await refreshStopPresets();
     } catch {
       window.alert('Invalid stop preset file.');
     }
@@ -475,6 +529,12 @@ defineExpose({ getSnapshot });
               {{ preset.name }}
             </option>
           </select>
+          <button class="button is-small is-light" :disabled="!selectedStopPresetName" @click="toggleSelectedStopPresetFavorite">
+            <i class="fa-heart" :class="stopPresets.find(preset => preset.name === selectedStopPresetName)?.favorite ? 'fa-solid' : 'fa-regular'"></i>
+          </button>
+          <button v-if="props.isAdmin" class="button is-small is-light" :disabled="!selectedStopPresetName" @click="uploadSelectedStopPreset">
+            <i class="fa-solid fa-upload"></i>
+          </button>
           <button class="button is-small is-link" :disabled="!selectedStopPresetName" @click="applySelectedStopPreset">
             Apply
           </button>

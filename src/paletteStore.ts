@@ -12,9 +12,10 @@
 
 import type {ColorStop} from './ColorStop';
 import type {InterpolationMode} from './Mandelbrot';
+import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 
 const DB_NAME = 'mandelbrot-palettes';
-const DB_VERSION = 1;
+const DB_VERSION = 2;
 const STORE_NAME = 'palettes';
 
 /** Legacy localStorage key used before the IndexedDB migration. */
@@ -26,13 +27,18 @@ const LEGACY_STORAGE_KEY = 'mandelbrot_palettes';
 
 /** Full record stored in IndexedDB. */
 export interface PaletteRecord {
+  guid?: string;
   name: string;
   colorStops: ColorStop[];
   thumbnail?: string;
   date?: string;
+  lastUpdated?: string;
   favorite?: boolean;
+  remote?: CatalogRemoteState;
   textureName?: string;
+  textureGuid?: string;
   skyboxName?: string;
+  skyboxGuid?: string;
   interpolationMode?: InterpolationMode;
   palettePeriod?: number;
   paletteOffset?: number;
@@ -68,8 +74,29 @@ function openDB(): Promise<IDBDatabase> {
     const req = indexedDB.open(DB_NAME, DB_VERSION);
     req.onupgradeneeded = () => {
       const db = req.result;
+      const transaction = req.transaction;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
-        db.createObjectStore(STORE_NAME, { keyPath: 'name' });
+        const store = db.createObjectStore(STORE_NAME, { keyPath: 'name' });
+        store.createIndex('guid', 'guid', {unique: true});
+      } else if (transaction) {
+        const store = transaction.objectStore(STORE_NAME);
+        if (!store.indexNames.contains('guid')) {
+          store.createIndex('guid', 'guid', {unique: true});
+        }
+        store.openCursor().onsuccess = (event) => {
+          const cursor = (event.target as IDBRequest<IDBCursorWithValue | null>).result;
+          if (!cursor) return;
+          const record = cursor.value as Partial<PaletteRecord>;
+          const date = record.date ?? new Date().toISOString();
+          cursor.update({
+            ...record,
+            guid: record.guid || createGuid(),
+            date,
+            lastUpdated: record.lastUpdated || date,
+            favorite: record.favorite ?? false,
+          });
+          cursor.continue();
+        };
       }
     };
     req.onsuccess = () => resolve(req.result);
@@ -114,6 +141,11 @@ export async function getAllPaletteEntries(): Promise<PaletteRecord[]> {
   return all.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
 }
 
+async function uniquePaletteName(name: string, guid?: string): Promise<string> {
+  const all = await getAllPaletteEntries();
+  return makeUniqueName(name, all.filter(record => record.guid !== guid).map(record => record.name));
+}
+
 /**
  * Return a single palette by name, or `null` if not found.
  */
@@ -124,10 +156,37 @@ export async function getPaletteByName(name: string): Promise<PaletteRecord | nu
   return record ?? null;
 }
 
+export async function getPaletteByGuid(guid: string): Promise<PaletteRecord | null> {
+  const all = await getAllPaletteEntries();
+  return all.find(record => record.guid === guid) ?? null;
+}
+
+export async function saveRemotePaletteEntry(record: PaletteRecord): Promise<void> {
+  if (!record.guid) record.guid = createGuid();
+  const existing = await getPaletteByGuid(record.guid);
+  if (existing) {
+    await savePaletteEntry({
+      ...record,
+      name: existing.name,
+      date: existing.date ?? record.date,
+      favorite: existing.favorite ?? false,
+      remote: record.remote,
+    });
+    return;
+  }
+  await savePaletteEntry(record);
+}
+
 /**
  * Store (or overwrite) a palette entry.
  */
 export async function savePaletteEntry(record: PaletteRecord): Promise<void> {
+  if (!record.name.trim()) throw new Error('Palette name is required.');
+  record.guid = record.guid || createGuid();
+  record.name = await uniquePaletteName(record.name.trim(), record.guid);
+  record.date = record.date ?? new Date().toISOString();
+  record.lastUpdated = record.lastUpdated ?? record.date;
+  record.favorite = record.favorite ?? false;
   const { store, done } = await tx('readwrite');
   store.put(record);
   await done;
@@ -176,7 +235,11 @@ export async function migratePalettesFromLocalStorage(): Promise<void> {
   for (const entry of entries) {
     if (!entry.name || !entry.colorStops) continue;
     try {
-      await savePaletteEntry(entry);
+      await savePaletteEntry({
+        ...entry,
+        guid: entry.guid || createGuid(),
+        lastUpdated: entry.lastUpdated || entry.date || new Date().toISOString(),
+      });
     } catch (e) {
       console.warn(`[paletteStore] Failed to migrate palette "${entry.name}":`, e);
     }
