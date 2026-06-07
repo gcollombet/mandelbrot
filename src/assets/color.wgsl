@@ -378,28 +378,36 @@ fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32
   return clamp(storedHeight, -64.0, 64.0);
 }
 
-fn sample_distance_height_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
+fn distance_height_scale_offset(zoomFactor: f32) -> f32 {
+  return -log(max(zoomFactor, 1e-30));
+}
+
+fn distance_height_gradient_scale(zoomFactor: f32) -> f32 {
+  return 1.0 / max(zoomFactor, 1e-30);
+}
+
+fn sample_distance_height_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, heightOffset: f32) -> f32 {
   if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
     return -1e6;
   }
   let state = load_pixel_state(sourceTex, coord);
-  let storedHeight = textureLoad(sourceTex, coord, 4, 0).r;
+  let storedHeight = textureLoad(sourceTex, coord, 4, 0).r + heightOffset;
   return distance_height_from_values(state.iter, state.zx, state.zy, storedHeight);
 }
 
-fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerHeight: f32) -> vec2<f32> {
-  let xr = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize);
-  let xl = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize);
-  let yu = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize);
-  let yd = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize);
+fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerHeight: f32, heightOffset: f32, gradientScale: f32) -> vec2<f32> {
+  let xr = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize, heightOffset);
+  let xl = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize, heightOffset);
+  let yu = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize, heightOffset);
+  let yd = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize, heightOffset);
   let rightHeight = select(centerHeight, xr, xr > -1e5);
   let leftHeight = select(centerHeight, xl, xl > -1e5);
   let upHeight = select(centerHeight, yu, yu > -1e5);
   let downHeight = select(centerHeight, yd, yd > -1e5);
-  return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 12.0;
+  return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 12.0 * gradientScale;
 }
 
-fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
+fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, distanceHeightOffset: f32, distanceHeightGradientScale: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
@@ -494,7 +502,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
     }
     if (needsFractalGradient) {
-      let fractalGradient = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight);
+      let fractalGradient = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
       grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
       slope = length(grad);
     }
@@ -818,7 +826,9 @@ fn colorize_pixel(
   iter_val: f32, zx_val: f32, zy_val: f32,
   extras: PixelExtras,
   uv_screen: vec2<f32>,
-  uv_neutral: vec2<f32>
+  uv_neutral: vec2<f32>,
+  distanceHeightOffset: f32,
+  distanceHeightGradientScale: f32
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
   if (iter_val < 0.0) {
@@ -862,7 +872,7 @@ fn colorize_pixel(
   let isEvenIter = 1.0 - abs(floor(iter_val) % 2.0);
 
   let z = vec2<f32>(zx_val, zy_val);
-  let distanceHeightStored = extras.der_x;
+  let distanceHeightStored = extras.der_x + distanceHeightOffset;
   let angle_der = extras.der_y;
 
   if (parameters.debugShading >= 0.5) {
@@ -876,7 +886,7 @@ fn colorize_pixel(
     }
     if (sector == 2) {
       let distanceHeight = distance_height_from_values(iter_val, z.x, z.y, distanceHeightStored);
-      let grad = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight);
+      let grad = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
       return vec4<f32>(debug_heat(debug_gradient_scale(length(grad))), 1.0);
     }
     return vec4<f32>(debug_heat(fract(angle_der / (2.0 * 3.141592653589793) + 0.5)), 1.0);
@@ -886,7 +896,7 @@ fn colorize_pixel(
   let v_smooth = nu_smooth;
   let stripePhase = decode_stripe_phase(extras.refWithStripe);
   let directionCoherence = decode_direction_coherence(extras.avgDirection);
-  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, distanceHeightStored, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y);
+  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, distanceHeightStored, distanceHeightOffset, distanceHeightGradientScale, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -919,6 +929,10 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 
   let zf  = parameters.zoomFactor;
   let lzf = parameters.liveZoomFactor;
+  let liveDistanceHeightOffset = distance_height_scale_offset(lzf);
+  let frozenDistanceHeightOffset = distance_height_scale_offset(zf);
+  let liveDistanceHeightGradientScale = distance_height_gradient_scale(lzf);
+  let frozenDistanceHeightGradientScale = distance_height_gradient_scale(zf);
 
   // ── Unified path: min-step-wins compositing ──────────────────────
   // Layer 1 stores the resolution step: 1 = genuine pixel (best),
@@ -1019,7 +1033,9 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         live_zy,
         liveExtras,
         uv_screen,
-        uv_neutral
+        uv_neutral,
+        liveDistanceHeightOffset,
+        liveDistanceHeightGradientScale
       );
       if (DEBUG_SHOW_LIVE_NEGATIVE) {
         let neg = vec3<f32>(1.0) - liveColor.rgb;
@@ -1037,7 +1053,9 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         frozen_zy,
         frozenExtras,
         uv_screen,
-        uv_neutral
+        uv_neutral,
+        frozenDistanceHeightOffset,
+        frozenDistanceHeightGradientScale
       );
       return vec4<f32>(frozenColor.rgb, 1.0);
     }
@@ -1054,7 +1072,9 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       live_zy,
       liveExtras,
       uv_screen,
-      uv_neutral
+      uv_neutral,
+      liveDistanceHeightOffset,
+      liveDistanceHeightGradientScale
     );
     if (DEBUG_SHOW_LIVE_NEGATIVE) {
       let neg = vec3<f32>(1.0) - liveColor.rgb;
@@ -1078,7 +1098,9 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       frozen_zy,
       frozenExtras,
       uv_screen,
-      uv_neutral
+      uv_neutral,
+      frozenDistanceHeightOffset,
+      frozenDistanceHeightGradientScale
     );
     return vec4<f32>(frozenColor.rgb, 1.0);
   }

@@ -80,14 +80,18 @@ fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, angle: f32) ->
   return abs(rotated.x) <= aspect && abs(rotated.y) <= 1.0;
 }
 
+fn normalizeDistanceHeight(height: f32, zoomFactor: f32) -> f32 {
+  return clamp(height - log(max(zoomFactor, 1e-30)), -64.0, 64.0);
+}
+
 // Read all 8 layers from a texture at the given coordinate.
-fn readAllLayersWithKnown01(tex: texture_2d_array<f32>, coord: vec2<i32>, iter: f32, step: f32) -> FragOut {
+fn readAllLayersWithKnown01(tex: texture_2d_array<f32>, coord: vec2<i32>, iter: f32, step: f32, zoomFactor: f32) -> FragOut {
   var o: FragOut;
   o.layer0 = pack(iter);
   o.layer1 = pack(step);
   o.layer2 = pack(textureLoad(tex, coord, 2, 0).r);
   o.layer3 = pack(textureLoad(tex, coord, 3, 0).r);
-  o.layer4 = pack(textureLoad(tex, coord, 4, 0).r);
+  o.layer4 = pack(normalizeDistanceHeight(textureLoad(tex, coord, 4, 0).r, zoomFactor));
   o.layer5 = pack(textureLoad(tex, coord, 5, 0).r);
   o.layer6 = pack(textureLoad(tex, coord, 6, 0).r);
   o.layer7 = pack(textureLoad(tex, coord, 7, 0).r);
@@ -150,7 +154,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     liveIter = textureLoad(texResolved, liveCoord, 0, 0).r;
     liveStep = textureLoad(texResolved, liveCoord, 1, 0).r;
     if (liveIter >= 0.0 && liveStep > 0.0) {
-      liveData = readAllLayersWithKnown01(texResolved, liveCoord, liveIter, liveStep);
+      liveData = readAllLayersWithKnown01(texResolved, liveCoord, liveIter, liveStep, lzf);
     }
   }
   let liveHasData = liveIter >= 0.0 && liveStep > 0.0;
@@ -178,7 +182,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     frozenIter = textureLoad(texFrozen, frozenCoord, 0, 0).r;
     frozenStep = textureLoad(texFrozen, frozenCoord, 1, 0).r;
     if (frozenIter >= 0.0 && frozenStep > 0.0) {
-      frozenData = readAllLayersWithKnown01(texFrozen, frozenCoord, frozenIter, frozenStep);
+      frozenData = readAllLayersWithKnown01(texFrozen, frozenCoord, frozenIter, frozenStep, zf);
     }
   }
   let frozenHasData = frozenIter >= 0.0 && frozenStep > 0.0;
