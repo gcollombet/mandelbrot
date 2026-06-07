@@ -81,11 +81,16 @@ type ErrorResponse = {
     message: string
 }
 
+type ReadyResponse = {
+    type: 'ready'
+}
+
 type ReferenceWorkerResponse =
     | OrbitChunkResponse
     | BlaReadyResponse
     | ReferenceResetResponse
     | ErrorResponse
+    | ReadyResponse
 
 type WorkerContext = typeof globalThis & {
     postMessage(message: unknown, transfer?: Transferable[]): void
@@ -318,3 +323,5 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
         postError('jobId' in message ? message.jobId : activeJobId, error)
     }
 }
+
+postResponse({ type: 'ready' })

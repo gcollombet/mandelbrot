@@ -76,7 +76,7 @@ const props = withDefaults(defineProps<{
 
     {
        mu: 4.0,
-       epsilon: 0.00001,
+       epsilon: 1e-9,
        colorStops: () => [
          {
            "color": "#002500",
@@ -114,7 +114,7 @@ const props = withDefaults(defineProps<{
         antialiasLevel: 1,
         activateAnimate: false,
         debugShading: false,
-        dprMultiplier: 0.5,
+        dprMultiplier: 1.0,
        maxIterationMultiplier: 0.1,
        targetFps: 60,
        gpuLoadMultiplier: 1.0,

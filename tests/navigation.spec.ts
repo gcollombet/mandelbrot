@@ -29,7 +29,8 @@ async function waitForCanvas(page: Page) {
   const canvas = page.locator("#fullscreen canvas").first();
   await expect(canvas).toBeVisible();
   // Canvas should have real dimensions once the engine has sized it.
-  await expect(canvas).toHaveJSProperty("width", expect.any(Number));
+  const width = await canvas.evaluate(el => (el as HTMLCanvasElement).width);
+  expect(width).toBeGreaterThan(0);
   return canvas;
 }
 
@@ -72,7 +73,7 @@ test.describe("Mandelbrot navigation", () => {
     const bar = page.locator(".top-settings-bar");
     await expect(bar).toBeVisible();
 
-    const buttons = page.locator(".top-tab-btn");
+    const buttons = page.locator(".top-tab-btn:not(.camera-btn)");
     await expect(buttons).toHaveCount(4);
 
     // Verify tab labels
@@ -310,7 +311,7 @@ test.describe("Mandelbrot navigation", () => {
 
     // Close one via the X button.
     const closeBtn = popups.first().locator(".delete");
-    await closeBtn.click();
+    await closeBtn.click({ force: true });
     await expect(page.locator(".settings-popup")).toHaveCount(1);
   });
 

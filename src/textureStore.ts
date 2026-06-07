@@ -17,8 +17,7 @@ const LEGACY_STORE_NAME = 'textures';
 const METADATA_STORE_NAME = 'textureMetadata';
 const BLOB_STORE_NAME = 'textureBlobs';
 
-/** Legacy localStorage key used before the IndexedDB migration. */
-const LEGACY_STORAGE_KEY = 'mandelbrot_textures';
+
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -273,61 +272,4 @@ export async function getTextureCount(): Promise<number> {
   return count;
 }
 
-// ---------------------------------------------------------------------------
-// Migration from localStorage
-// ---------------------------------------------------------------------------
 
-/** Convert a base-64 data-URL to a Blob. */
-function dataUrlToBlob(dataUrl: string): Blob {
-  const [header, b64] = dataUrl.split(',');
-  const mime = header.match(/:(.*?);/)?.[1] ?? 'image/jpeg';
-  const binary = atob(b64);
-  const bytes = new Uint8Array(binary.length);
-  for (let i = 0; i < binary.length; i++) {
-    bytes[i] = binary.charCodeAt(i);
-  }
-  return new Blob([bytes], { type: mime });
-}
-
-interface LegacyTextureEntry {
-  name: string;
-  dataUrl: string;
-  thumbnail: string;
-  date?: string;
-}
-
-/**
- * If textures exist in localStorage (legacy format), migrate them to
- * IndexedDB and remove the old key. Safe to call repeatedly — it is a
- * no-op once the legacy key has been cleaned up.
- */
-export async function migrateFromLocalStorage(): Promise<void> {
-  const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-  if (!raw) return;
-
-  let entries: LegacyTextureEntry[];
-  try {
-    entries = JSON.parse(raw);
-  } catch {
-    // Corrupted data — just remove it.
-    localStorage.removeItem(LEGACY_STORAGE_KEY);
-    return;
-  }
-
-  for (const entry of entries) {
-    if (!entry.dataUrl) continue;
-    try {
-      const blob = dataUrlToBlob(entry.dataUrl);
-      await saveTextureEntry(
-        entry.name,
-        blob,
-        entry.thumbnail ?? '',
-        entry.date,
-      );
-    } catch (e) {
-      console.warn(`[textureStore] Failed to migrate texture "${entry.name}":`, e);
-    }
-  }
-
-  localStorage.removeItem(LEGACY_STORAGE_KEY);
-}

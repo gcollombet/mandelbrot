@@ -44,3 +44,6 @@ export interface MandelbrotParams {
     skyboxName?: string;
     skyboxGuid?: string;
 }
+
+
+

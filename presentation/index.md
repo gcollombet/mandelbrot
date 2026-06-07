@@ -3,6 +3,50 @@ import Mandelbrot from '../src/components/Mandelbrot.vue'
 import ClassicMandelbrot from '../src/components/ClassicMandelbrot.vue'
 import MandelbrotOrbits from '../src/components/MandelbrotOrbits.vue'
 import MandelbrotController from '../src/components/MandelbrotController.vue'
+
+// Banded colors (smoothness: 0)
+const bandedStops = [
+  { color: '#002500', position: 0, smoothness: 0 },
+  { color: '#175b3d', position: 0.16, smoothness: 0 },
+  { color: '#ffceb6', position: 0.26, smoothness: 0 },
+  { color: '#edffff', position: 0.42, smoothness: 0 },
+  { color: '#ff8fbc', position: 0.7, smoothness: 0 },
+  { color: '#a6003e', position: 0.85, smoothness: 0 },
+  { color: '#100000', position: 1, smoothness: 0 }
+]
+
+// Zebra colors (zebra: 1, smoothness: 0)
+const zebraStops = [
+  { color: '#002500', position: 0, zebra: 1, smoothness: 0 },
+  { color: '#175b3d', position: 0.16, zebra: 1, smoothness: 0 },
+  { color: '#ffceb6', position: 0.26, zebra: 1, smoothness: 0 },
+  { color: '#edffff', position: 0.42, zebra: 1, smoothness: 0 },
+  { color: '#ff8fbc', position: 0.7, zebra: 1, smoothness: 0 },
+  { color: '#a6003e', position: 0.85, zebra: 1, smoothness: 0 },
+  { color: '#100000', position: 1, zebra: 1, smoothness: 0 }
+]
+
+// Smooth colors (smoothness: 1)
+const smoothStops = [
+  { color: '#002500', position: 0, smoothness: 1 },
+  { color: '#175b3d', position: 0.16, smoothness: 1 },
+  { color: '#ffceb6', position: 0.26, smoothness: 1 },
+  { color: '#edffff', position: 0.42, smoothness: 1 },
+  { color: '#ff8fbc', position: 0.7, smoothness: 1 },
+  { color: '#a6003e', position: 0.85, smoothness: 1 },
+  { color: '#100000', position: 1, smoothness: 1 }
+]
+
+// Shaded & Smooth colors (shading: 1, smoothness: 1)
+const shadedSmoothStops = [
+  { color: '#002500', position: 0, shading: 1, smoothness: 1 },
+  { color: '#175b3d', position: 0.16, shading: 1, smoothness: 1 },
+  { color: '#ffceb6', position: 0.26, shading: 1, smoothness: 1 },
+  { color: '#edffff', position: 0.42, shading: 1, smoothness: 1 },
+  { color: '#ff8fbc', position: 0.7, shading: 1, smoothness: 1 },
+  { color: '#a6003e', position: 0.85, shading: 1, smoothness: 1 },
+  { color: '#100000', position: 1, shading: 1, smoothness: 1 }
+]
 </script>
 <link rel="stylesheet" href="https://use.typekit.net/fnz7ojs.css">
 # WebAssembly, WebGPU, Rust, fractales et autres trucs cools.
@@ -192,12 +236,7 @@ Voici ce que ça donne avec une palette de couleurs cyclique.
 :cy="'0.0'"
 :scale="'1.5'"
 :angle="0.0"
-:activatePalette="true"
-:activateSkybox="false"
-:activateTessellation="false"
-:activateWebcam="false"
-:activateShading="false"
-:activateZebra="false"
+:colorStops="bandedStops"
 />
 </ClientOnly>
 
@@ -211,12 +250,7 @@ On peut le faire ressortir en ne coloriant que les itérations impaires.
 :cy="'0.0'"
 :scale="'1.5'"
 :angle="0.0"
-:activatePalette="true"
-:activateSkybox="false"
-:activateTessellation="false"
-:activateWebcam="false"
-:activateShading="false"
-:activateZebra="true"
+:colorStops="zebraStops"
 />
 </ClientOnly>
 
@@ -238,13 +272,7 @@ Voici ce que ça donne avec un lissage.
 :cy="'0.0'"
 :scale="'1.5'"
 :angle="0.0"
-:activatePalette="true"
-:activateSkybox="false"
-:activateTessellation="false"
-:activateWebcam="false"
-:activateShading="false"
-:activateZebra="false"
-:activateSmoothness="true"
+:colorStops="smoothStops"
 />
 </ClientOnly>
 
@@ -272,13 +300,7 @@ Ce qui est intéressant finalement, c'est plutôt de naviguer librement dans l'e
 :cy="'0.0'"
 :scale="'1.5'"
 :angle="0.0"
-:activatePalette="true"
-:activateSkybox="false"
-:activateTessellation="false"
-:activateWebcam="false"
-:activateShading="true"
-:activateZebra="false"
-:activateSmoothness="true"
+:colorStops="shadedSmoothStops"
 />
 </ClientOnly>
 

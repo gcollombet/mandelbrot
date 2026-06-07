@@ -33,3 +33,7 @@ target
 /docs/abstract-3d-gold-background.jpg
 /divergence
 /orbit
+
+# Textures
+/src/assets/*.webp
+/src/assets/thumbs/*.webp

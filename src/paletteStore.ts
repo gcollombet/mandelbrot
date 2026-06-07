@@ -18,8 +18,7 @@ const DB_NAME = 'mandelbrot-palettes';
 const DB_VERSION = 2;
 const STORE_NAME = 'palettes';
 
-/** Legacy localStorage key used before the IndexedDB migration. */
-const LEGACY_STORAGE_KEY = 'mandelbrot_palettes';
+
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -216,39 +215,4 @@ export async function getPaletteCount(): Promise<number> {
   return count;
 }
 
-// ---------------------------------------------------------------------------
-// Migration from localStorage
-// ---------------------------------------------------------------------------
 
-/**
- * If palettes exist in localStorage (legacy format), migrate them to
- * IndexedDB and remove the old key. Safe to call repeatedly — it is a
- * no-op once the legacy key has been cleaned up.
- */
-export async function migratePalettesFromLocalStorage(): Promise<void> {
-  const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-  if (!raw) return;
-
-  let entries: PaletteRecord[];
-  try {
-    entries = JSON.parse(raw);
-  } catch {
-    localStorage.removeItem(LEGACY_STORAGE_KEY);
-    return;
-  }
-
-  for (const entry of entries) {
-    if (!entry.name || !entry.colorStops) continue;
-    try {
-      await savePaletteEntry({
-        ...entry,
-        guid: entry.guid || createGuid(),
-        lastUpdated: entry.lastUpdated || entry.date || new Date().toISOString(),
-      });
-    } catch (e) {
-      console.warn(`[paletteStore] Failed to migrate palette "${entry.name}":`, e);
-    }
-  }
-
-  localStorage.removeItem(LEGACY_STORAGE_KEY);
-}

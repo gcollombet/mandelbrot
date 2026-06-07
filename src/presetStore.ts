@@ -18,11 +18,7 @@ const DB_NAME = 'mandelbrot-presets';
 const DB_VERSION = 3;
 const STORE_NAME = 'presets';
 
-/** Legacy localStorage key used before the IndexedDB migration. */
-const LEGACY_STORAGE_KEY = 'mandelbrot_presets';
 
-/** localStorage flag to track the palettePeriod ×256 migration. */
-const PALETTE_MIGRATION_KEY = 'mandelbrot_pp256_migrated';
 
 // ---------------------------------------------------------------------------
 // Public types
@@ -249,91 +245,4 @@ export async function deletePresetEntry(id: number): Promise<void> {
   await done;
 }
 
-// ---------------------------------------------------------------------------
-// Migration from localStorage
-// ---------------------------------------------------------------------------
 
-interface LegacyPreset {
-  name: string;
-  value: MandelbrotParams;
-  thumbnail?: string;
-  date?: string;
-}
-
-/**
- * If presets exist in localStorage (legacy format), migrate them to
- * IndexedDB and remove the old key. Safe to call repeatedly — it is a
- * no-op once the legacy key has been cleaned up.
- */
-export async function migratePresetsFromLocalStorage(): Promise<void> {
-  const raw = localStorage.getItem(LEGACY_STORAGE_KEY);
-  if (!raw) return;
-
-  let entries: LegacyPreset[];
-  try {
-    entries = JSON.parse(raw);
-  } catch {
-    localStorage.removeItem(LEGACY_STORAGE_KEY);
-    return;
-  }
-
-  for (const entry of entries) {
-    try {
-      await savePresetEntry(
-        entry.value,
-        entry.thumbnail ?? '',
-        entry.name,
-        entry.date,
-      );
-    } catch (e) {
-      console.warn(`[presetStore] Failed to migrate preset "${entry.name}":`, e);
-    }
-  }
-
-  localStorage.removeItem(LEGACY_STORAGE_KEY);
-}
-
-// ---------------------------------------------------------------------------
-// palettePeriod ×256 migration (removal of /256 divisor in color.wgsl)
-// ---------------------------------------------------------------------------
-
-/**
- * One-time migration: multiply palettePeriod by 256 for all existing presets.
- * This compensates for the removal of the `/256.0` divisor in color.wgsl.
- * Also migrates the current settings in localStorage.
- * Safe to call repeatedly — uses a localStorage flag to run only once.
- */
-export async function migratePalettePeriod(): Promise<void> {
-  if (localStorage.getItem(PALETTE_MIGRATION_KEY)) return;
-
-  // Migrate IndexedDB presets
-  try {
-    const { store, done } = await tx('readwrite');
-    const all: PresetRecord[] = await reqToPromise(store.getAll());
-    for (const record of all) {
-      if (record.value && typeof record.value.palettePeriod === 'number') {
-        record.value.palettePeriod = Number((record.value.palettePeriod * 256).toPrecision(6));
-        store.put(record);
-      }
-    }
-    await done;
-  } catch (e) {
-    console.warn('[presetStore] palettePeriod migration failed for IndexedDB:', e);
-  }
-
-  // Migrate current settings in localStorage
-  try {
-    const raw = localStorage.getItem('mandelbrot_last_settings');
-    if (raw) {
-      const settings = JSON.parse(raw);
-      if (typeof settings.palettePeriod === 'number') {
-        settings.palettePeriod = Number((settings.palettePeriod * 256).toPrecision(6));
-        localStorage.setItem('mandelbrot_last_settings', JSON.stringify(settings));
-      }
-    }
-  } catch (e) {
-    console.warn('[presetStore] palettePeriod migration failed for localStorage:', e);
-  }
-
-  localStorage.setItem(PALETTE_MIGRATION_KEY, '1');
-}

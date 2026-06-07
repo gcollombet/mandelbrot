@@ -4,6 +4,7 @@ import {
   getDoc,
   getDocs,
   limit,
+  orderBy,
   query,
   serverTimestamp,
   setDoc,
@@ -161,4 +162,21 @@ export async function uploadRemoteTextureEntry(entry: Omit<RemoteTextureEntry, '
     contentType: entry.contentType ?? blob.type,
     size: entry.size ?? blob.size,
   });
+}
+
+export async function getLatestRemotePreset(): Promise<RemoteCompletePresetEntry | null> {
+  try {
+    const {db} = requireServices();
+    const snapshot = await getDocs(query(entriesCollection(db, 'completePreset'), orderBy('lastUpdated', 'desc'), limit(1)));
+    if (snapshot.empty) return null;
+    const doc = snapshot.docs[0];
+    const data = doc.data();
+    return {
+      ...data,
+      ...metadataFromDoc(data, doc.id),
+    } as RemoteCompletePresetEntry;
+  } catch (error) {
+    console.warn('[remoteCatalog] Failed to fetch latest remote preset:', error);
+    return null;
+  }
 }

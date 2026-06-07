@@ -4,8 +4,7 @@ import type { ColorStop } from '../ColorStop.ts';
 import type { InterpolationMode } from '../Mandelbrot.ts';
 import { Palette } from '../Palette.ts';
 import colorShader from '../assets/color.wgsl?raw';
-import bronzeUrl from '../assets/bronze.webp';
-import goldUrl from '../assets/gold.webp';
+import { getDefaultTileTextureUrl, getDefaultSkyboxTextureUrl } from '../textureLibrary';
 
 // ── Float32 → Float16 (copied from Engine.ts) ──
 const _f32 = new Float32Array(1);
@@ -290,11 +289,11 @@ async function init() {
   });
 
   // ── Tile & skybox textures (loaded from assets) ──
-  const tileUrl = props.tileTextureUrl || bronzeUrl;
-  const skyboxUrl = props.skyboxTextureUrl || goldUrl;
+  const tileUrl = props.tileTextureUrl || getDefaultTileTextureUrl();
+  const skyboxUrl = props.skyboxTextureUrl || getDefaultSkyboxTextureUrl();
   const [tileTexGpu, skyboxTexGpu] = await Promise.all([
-    loadTexture(device, tileUrl),
-    loadTexture(device, skyboxUrl),
+    tileUrl ? loadTexture(device, tileUrl) : Promise.resolve(create1x1Texture(device, 255, 255, 255, 255)),
+    skyboxUrl ? loadTexture(device, skyboxUrl) : Promise.resolve(create1x1Texture(device, 255, 255, 255, 255)),
   ]);
   tileTextureGpu = tileTexGpu;
   skyboxTextureGpu = skyboxTexGpu;
@@ -466,10 +465,12 @@ watch(
   () => props.tileTextureUrl,
   async (url) => {
     if (!device) return;
-    const resolvedUrl = url || bronzeUrl;
+    const resolvedUrl = url || getDefaultTileTextureUrl();
     try {
       const oldTile = tileTextureGpu;
-      tileTextureGpu = await loadTexture(device, resolvedUrl);
+      tileTextureGpu = resolvedUrl
+        ? await loadTexture(device, resolvedUrl)
+        : create1x1Texture(device, 255, 255, 255, 255);
       oldTile?.destroy();
       rebuildBindGroup();
       render();
@@ -484,10 +485,12 @@ watch(
   () => props.skyboxTextureUrl,
   async (url) => {
     if (!device) return;
-    const resolvedUrl = url || goldUrl;
+    const resolvedUrl = url || getDefaultSkyboxTextureUrl();
     try {
       const oldSkybox = skyboxTextureGpu;
-      skyboxTextureGpu = await loadTexture(device, resolvedUrl);
+      skyboxTextureGpu = resolvedUrl
+        ? await loadTexture(device, resolvedUrl)
+        : create1x1Texture(device, 255, 255, 255, 255);
       oldSkybox?.destroy();
       rebuildBindGroup();
       render();

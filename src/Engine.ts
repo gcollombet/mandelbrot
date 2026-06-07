@@ -13,8 +13,6 @@ import type {ZoomState} from './zoomState'
 import {reduceZoomState, resetZoomState, isZoomActive, getFrozenScale, getLiveScale, getReferenceResetDuringZoom} from './zoomState'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
-import bronzeUrl from './assets/bronze.webp'
-import skyboxUrl from './assets/skybox.webp'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -127,6 +125,9 @@ type ReferenceWorkerResponse =
         type: 'error'
         jobId: number
         message: string
+    }
+    | {
+        type: 'ready'
     }
 
 function floorPowerOfTwo(value: number): number {
@@ -350,6 +351,8 @@ export class Engine {
     private referenceAvailableOrbitLen = 0
     private referenceBlaReadyMaxIterations = 0
     private referenceWorkerFailed = false
+    private referenceWorkerReady = false
+    private pendingWorkerMessages: ReferenceWorkerRequest[] = []
     private referenceViewKey = ''
     private referenceWorkerCx = ''
     private referenceWorkerCy = ''
@@ -441,14 +444,6 @@ export class Engine {
     // GPU load multiplier: scales the active-pixel gate threshold (default 1.0)
     gpuLoadMultiplier = 1.0
 
-    // Propriétés statiques pour le cache des textures
-    static _tileTexture?: GPUTexture
-    static _tileTextureView?: GPUTextureView
-    static _skyboxTexture?: GPUTexture
-    static _skyboxTextureView?: GPUTextureView
-    static _paletteTexture?: GPUTexture
-    static _paletteTextureView?: GPUTextureView
-
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas
         this.shaderPassCompute = mandelbrotShader
@@ -461,6 +456,14 @@ export class Engine {
     private postReferenceWorker(message: ReferenceWorkerRequest): boolean {
         if (!this.referenceWorker || this.referenceWorkerFailed) {
             return false
+        }
+        if (message.type === 'dispose') {
+            this.referenceWorker.postMessage(message)
+            return true
+        }
+        if (!this.referenceWorkerReady) {
+            this.pendingWorkerMessages.push(message)
+            return true
         }
         this.referenceWorker.postMessage(message)
         return true
@@ -590,6 +593,8 @@ export class Engine {
             this.currentBlaLevelCount = 0
         }
         this.referenceWorkerFailed = false
+        this.referenceWorkerReady = false
+        this.pendingWorkerMessages = []
         this.referenceAvailableOrbitLen = 0
         this.referenceBlaReadyMaxIterations = 0
         this.referenceJobId++
@@ -642,6 +647,16 @@ export class Engine {
     }
 
     private handleReferenceWorkerMessage(message: ReferenceWorkerResponse) {
+        if (message.type === 'ready') {
+            this.referenceWorkerReady = true
+            const queue = this.pendingWorkerMessages
+            this.pendingWorkerMessages = []
+            for (const msg of queue) {
+                this.referenceWorker?.postMessage(msg)
+            }
+            return
+        }
+
         if (message.jobId !== this.referenceJobId) {
             return
         }
@@ -829,21 +844,21 @@ export class Engine {
         this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext
         this.format = navigator.gpu.getPreferredCanvasFormat()
         this.ctx.configure({ device: this.device, format: this.format, alphaMode: 'opaque' })
-
-        // Chargement parallèle des textures additionnelles (tile + skybox)
-        const [tileTexture, skyboxTexture] = await Promise.all([
-            Engine._tileTexture
-                ? Promise.resolve(Engine._tileTexture)
-                : this._loadTexture(bronzeUrl),
-            Engine._skyboxTexture
-                ? Promise.resolve(Engine._skyboxTexture)
-                : this._loadTexture(skyboxUrl),
-        ])
-        Engine._tileTexture = tileTexture
-        this.tileTexture = tileTexture
+        // Initialisation synchrone des textures factices 1x1 (tile + skybox)
+        this.tileTexture = this.device.createTexture({
+            size: [1, 1, 1],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+            label: 'Engine TileTexture 1x1 Placeholder',
+        })
         this.tileTextureView = this.tileTexture.createView()
-        Engine._skyboxTexture = skyboxTexture
-        this.skyboxTexture = skyboxTexture
+
+        this.skyboxTexture = this.device.createTexture({
+            size: [1, 1, 1],
+            format: 'rgba8unorm',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
+            label: 'Engine SkyboxTexture 1x1 Placeholder',
+        })
         this.skyboxTextureView = this.skyboxTexture.createView()
 
         const palette = new Palette([])

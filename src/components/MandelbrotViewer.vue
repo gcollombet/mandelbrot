@@ -4,7 +4,9 @@ import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
 import type {ApproximationMode, MandelbrotParams} from "../Mandelbrot.ts";
-import {savePresetEntry} from '../presetStore';
+import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry} from '../presetStore';
+import {syncRemoteCatalog} from '../remoteCatalogSync';
+import {getLatestRemotePreset} from '../remoteCatalog';
 import type {IterationData} from '../CursorCoordinate';
 import {computePalettePhase} from '../CursorCoordinate';
 import {Palette} from '../Palette';
@@ -82,9 +84,11 @@ function onPalettePick(data: IterationData, _clientX: number, _clientY: number) 
 // --- HUD hide during navigation ---
 const isNavigating = ref(false);
 let navigationTimeout: number | null = null;
+let userHasNavigated = false;
 
 function onNavigationStart() {
   isNavigating.value = true;
+  userHasNavigated = true;
   if (navigationTimeout !== null) clearTimeout(navigationTimeout);
 }
 
@@ -165,13 +169,14 @@ const mobileNavExpanded = ref(false);
 
 // Paramètres Mandelbrot avec valeurs par défaut
 const LOCAL_STORAGE_CURRENT_KEY = 'mandelbrot_last_settings';
+const isFirstLoad = !localStorage.getItem(LOCAL_STORAGE_CURRENT_KEY);
 const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
-  cx: '-1.9771995110313272619112808106831596467',
+  cx: '-0.7',
   cy: "0.0",
   mu: 4.0,
-  scale: "2.5",
+  scale: "1.2",
   angle: 0.0,
-  palettePeriod: 7.37,
+  palettePeriod: 1886.72,
   paletteOffset: 0.0,
   heightPaletteShift: 0,
   paletteMirror: false,
@@ -180,42 +185,24 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   maxIterations: 100,
   displacementAmount: 0,
   tessellationLevel: 0,
-  epsilon: 0.00001,
+  epsilon: 1e-9,
   colorStops: [
     {
       "color": "#ffffff",
-      "position": 0
+      "position": 0,
+      "zebra": 1.0
     },
     {
       "color": "#ffffff",
-      "position": 0.16
-    },
-    {
-      "color": "#2cd2ff",
-      "position": 0.26
-    },
-    {
-      "color": "#000000",
-      "position": 0.49242990654205604
-    },
-    {
-      "color": "#ffffff",
-      "position": 0.7016397849462366
-    },
-    {
-      "color": "#ffaf27",
-      "position": 0.8575
-    },
-    {
-      "color": "#ffa03b",
-      "position": 1
+      "position": 1,
+      "zebra": 1.0
     }
   ],
   activateAnimate: false,
   debugShading: false,
   approximationMode: 'perturbation',
   dprMultiplier: 1.0,
-  maxIterationMultiplier: 0.01,
+  maxIterationMultiplier: 0.1,
   targetFps: 30,
   gpuLoadMultiplier: 1.0,
   interpolationMode: 'lab',
@@ -343,6 +330,47 @@ onMounted(() => {
   // Bottom bar auto-hide
   window.addEventListener('mousemove', handleMouseMove, { passive: true });
   startBottomHideTimer();
+
+  // If no navigation history is present (first-time visitor), sync remote catalog & load the first preset
+  if (isFirstLoad) {
+    void (async () => {
+      try {
+        let list = await getAllPresetEntries();
+        if (list.length === 0) {
+          const latest = await getLatestRemotePreset();
+          if (latest) {
+            await saveRemotePresetEntry({
+              guid: latest.guid,
+              name: latest.name,
+              value: latest.value,
+              thumbnail: latest.thumbnail,
+              date: latest.lastUpdated,
+              lastUpdated: latest.lastUpdated,
+              scaleExponent: latest.scaleExponent ?? 0,
+              favorite: false,
+              remote: {publishedName: latest.name, lastUpdated: latest.lastUpdated},
+            });
+            list = await getAllPresetEntries();
+          }
+          // Trigger full catalog sync in the background
+          void syncRemoteCatalog().catch(error => {
+            console.warn('Background remote catalog sync failed:', error);
+          });
+        }
+        if (list.length > 0) {
+          const record = await getPresetById(list[0].id);
+          if (record && record.value) {
+            // Apply only if the user hasn't started navigating away
+            if (!userHasNavigated) {
+              mandelbrotParams.value = record.value;
+            }
+          }
+        }
+      } catch (e) {
+        console.warn('Failed to asynchronously load initial preset:', e);
+      }
+    })();
+  }
 });
 onUnmounted(() => {
   stopAuthObserver?.();
@@ -759,7 +787,7 @@ const shortcutLabels = computed(() => {
         <!-- Barre de titre draggable -->
         <div class="settings-popup-header" @mousedown.prevent="startDrag(tab.key, $event)">
           <span class="settings-popup-title">{{ tab.label }}</span>
-          <button class="delete is-medium" aria-label="Fermer" @click="closeTab(tab.key)"></button>
+          <button class="delete is-medium" aria-label="Fermer" style="z-index: 10; position: relative; pointer-events: auto;" @mousedown.stop @click="closeTab(tab.key)"></button>
         </div>
         <div class="settings-popup-body">
           <Settings

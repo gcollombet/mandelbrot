@@ -5,7 +5,6 @@ import type {ColorStop} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
 import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
-import defaultPalettesJson from '../assets/default-palettes.json';
 import type {TextureMetadata} from '../textureStore';
 import {
   deleteTextureEntry,
@@ -28,8 +27,6 @@ import {
   deletePresetEntry,
   getAllPresetEntries,
   getPresetById,
-  migratePalettePeriod,
-  migratePresetsFromLocalStorage,
   savePresetEntry,
   updatePresetEntry,
 } from '../presetStore';
@@ -37,8 +34,6 @@ import type {PaletteRecord} from '../paletteStore';
 import {
   deletePaletteEntry,
   getAllPaletteEntries,
-  getPaletteCount,
-  migratePalettesFromLocalStorage,
   savePaletteEntry,
 } from '../paletteStore';
 import {syncRemoteCatalog} from '../remoteCatalogSync';
@@ -104,7 +99,7 @@ function uploadButtonIcon(key: string): string {
 }
 
 function canUploadTexture(texture: TextureMetadata): boolean {
-  return !!texture.guid && !BUILT_IN_TEXTURE_NAMES.has(texture.name);
+  return !!texture.guid;
 }
 
 const emit = defineEmits<{
@@ -117,7 +112,7 @@ const model =  defineModel<MandelbrotParams>({
     cy: "0.0",
     scale: "2.5",
     mu: 1000000.0,
-    epsilon: 0.00001,
+    epsilon: 1e-9,
     colorStops: [],
      palettePeriod: 256,
      paletteOffset: 0,
@@ -449,25 +444,11 @@ defineExpose({ quickSnapshot, refreshPresets: async () => { presets.value = awai
 
 
 async function loadPresets() {
-  // 1. Migrate legacy localStorage data (if any)
-  await migratePresetsFromLocalStorage();
-
-  // 1b. Migrate palettePeriod ×256 (removal of /256 divisor in shader)
-  await migratePalettePeriod();
-
-  // 2. Load metadata list
+  // Load metadata list
   presets.value = await getAllPresetEntries();
 }
 
 async function loadPalettes() {
-  await migratePalettesFromLocalStorage();
-  const count = await getPaletteCount();
-  if (count === 0 && defaultPalettesJson.length > 0) {
-    // Bootstrap from bundled defaults when store is empty
-    for (const p of defaultPalettesJson as PaletteRecord[]) {
-      await savePaletteEntry(structuredClone(p));
-    }
-  }
   palettes.value = await getAllPaletteEntries();
 }
 
@@ -713,7 +694,20 @@ async function uploadPalettePreset(palette: PaletteRecord): Promise<void> {
 
 async function uploadTexture(texture: TextureMetadata): Promise<void> {
   if (!isAdmin.value || !texture.guid) return;
-  const blob = await getTextureBlob(texture.name);
+  let blob: Blob | null = null;
+  if (BUILT_IN_TEXTURE_NAMES.has(texture.name)) {
+    const objectUrl = await storedTextureObjectUrl(texture.name);
+    if (objectUrl) {
+      try {
+        const response = await fetch(objectUrl);
+        blob = await response.blob();
+      } catch (e) {
+        console.warn('Failed to fetch built-in texture blob:', e);
+      }
+    }
+  } else {
+    blob = await getTextureBlob(texture.name);
+  }
   if (!blob) return;
   try {
     const uploaded = await uploadRemoteTextureEntry({

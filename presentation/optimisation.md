@@ -7,6 +7,17 @@ import RotationDemo from '../src/components/RotationDemo.vue'
 import SentinelProgressionDemo from '../src/components/SentinelProgressionDemo.vue'
 import AdaptiveBatchDemo from '../src/components/AdaptiveBatchDemo.vue'
 import ZoomReprojectionDemo from '../src/components/ZoomReprojectionDemo.vue'
+
+// Shaded & Smooth colors (shading: 1, smoothness: 1)
+const shadedSmoothStops = [
+  { color: '#002500', position: 0, shading: 1, smoothness: 1 },
+  { color: '#175b3d', position: 0.16, shading: 1, smoothness: 1 },
+  { color: '#ffceb6', position: 0.26, shading: 1, smoothness: 1 },
+  { color: '#edffff', position: 0.42, shading: 1, smoothness: 1 },
+  { color: '#ff8fbc', position: 0.7, shading: 1, smoothness: 1 },
+  { color: '#a6003e', position: 0.85, shading: 1, smoothness: 1 },
+  { color: '#100000', position: 1, shading: 1, smoothness: 1 }
+]
 </script>
 <link rel="stylesheet" href="https://use.typekit.net/fnz7ojs.css">
 
@@ -956,13 +967,7 @@ Voici un rendu interactif qui utilise toutes les optimisations décrites :
 :cy="'0.0'"
 :scale="'1.5'"
 :angle="0.0"
-:activatePalette="true"
-:activateSkybox="false"
-:activateTessellation="false"
-:activateWebcam="false"
-:activateShading="true"
-:activateZebra="false"
-:activateSmoothness="true"
+:colorStops="shadedSmoothStops"
 />
 </ClientOnly>
 
