@@ -1,0 +1,11 @@
+[
+  {
+    "origin": [
+      "http://localhost:5173",
+      "https://gcollombet.github.io"
+    ],
+    "method": ["GET", "HEAD", "POST", "PUT", "OPTIONS"],
+    "responseHeader": ["Content-Type", "Authorization"],
+    "maxAgeSeconds": 3600
+  }
+]
