@@ -5,7 +5,6 @@ import type {ColorStop} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
 import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
-import defaultPresetsJson from '../assets/default-presets.json';
 import defaultPalettesJson from '../assets/default-palettes.json';
 import type {TextureMetadata} from '../textureStore';
 import {
@@ -29,7 +28,6 @@ import {
   deletePresetEntry,
   getAllPresetEntries,
   getPresetById,
-  getPresetCount,
   migratePalettePeriod,
   migratePresetsFromLocalStorage,
   savePresetEntry,
@@ -45,7 +43,7 @@ import {
 } from '../paletteStore';
 import {syncRemoteCatalog} from '../remoteCatalogSync';
 import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry, uploadRemoteTextureEntry} from '../remoteCatalog';
-import {isAuthConfigured, observeAuthState, signInWithGoogle, signOutCurrentUser, type UserRole} from '../authService';
+import type {UserRole} from '../authService';
 import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
 import {nameForCatalogReference} from '../catalogIdentity';
 
@@ -55,20 +53,58 @@ const props = defineProps<{
   suspendShortcuts?: (suspend: boolean) => void;
   activeTab: string;
   pickerMode?: boolean;
+  userRole?: UserRole;
 }>();
 
-const authConfigured = isAuthConfigured();
-const authUserEmail = ref('');
-const userRole = ref<UserRole>('guest');
+const userRole = computed<UserRole>(() => props.userRole ?? 'guest');
 const isAdmin = computed(() => canShowAdminUpload(userRole.value));
-let stopAuthObserver: (() => void) | null = null;
+const uploadSuccessKeys = ref<Set<string>>(new Set());
+const uploadSuccessTimers = new Map<string, ReturnType<typeof setTimeout>>();
+const UPLOAD_SUCCESS_DURATION_MS = 2500;
 
-async function loginWithGoogle() {
-  await signInWithGoogle();
+function uploadSuccessKey(type: string, id: string | number): string {
+  return `${type}:${id}`;
 }
 
-async function logoutUser() {
-  await signOutCurrentUser();
+function isUploadSuccess(key: string): boolean {
+  return uploadSuccessKeys.value.has(key);
+}
+
+function showUploadSuccess(key: string): void {
+  const existingTimer = uploadSuccessTimers.get(key);
+  if (existingTimer) clearTimeout(existingTimer);
+
+  const nextKeys = new Set(uploadSuccessKeys.value);
+  nextKeys.add(key);
+  uploadSuccessKeys.value = nextKeys;
+
+  uploadSuccessTimers.set(key, setTimeout(() => {
+    const remainingKeys = new Set(uploadSuccessKeys.value);
+    remainingKeys.delete(key);
+    uploadSuccessKeys.value = remainingKeys;
+    uploadSuccessTimers.delete(key);
+  }, UPLOAD_SUCCESS_DURATION_MS));
+}
+
+function uploadButtonClasses(key: string, remote?: {publishedName?: string; lastUpdated?: string}) {
+  return {
+    'is-upload-success': isUploadSuccess(key),
+    'is-remote': !!remote && !isUploadSuccess(key),
+  };
+}
+
+function uploadButtonTitle(key: string, remote?: {publishedName?: string; lastUpdated?: string}): string {
+  if (isUploadSuccess(key)) return 'Uploaded successfully';
+  if (remote) return 'Already in shared catalog. Upload again to update.';
+  return 'Upload to shared catalog';
+}
+
+function uploadButtonIcon(key: string): string {
+  return isUploadSuccess(key) ? 'fa-solid fa-check' : 'fa-solid fa-upload';
+}
+
+function canUploadTexture(texture: TextureMetadata): boolean {
+  return !!texture.guid && !BUILT_IN_TEXTURE_NAMES.has(texture.name);
 }
 
 const emit = defineEmits<{
@@ -341,6 +377,8 @@ async function savePreset() {
   delete (savedValue as any).antialiasLevel;
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
+  delete (savedValue as any).activateAnimate;
+  delete (savedValue as any).debugShading;
   savedValue.textureName = selectedTexture.value;
   savedValue.textureGuid = currentTextureObj.value?.guid;
   savedValue.skyboxName = selectedSkyboxTexture.value;
@@ -382,6 +420,8 @@ async function quickSnapshot() {
   delete (savedValue as any).antialiasLevel;
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
+  delete (savedValue as any).activateAnimate;
+  delete (savedValue as any).debugShading;
   savedValue.textureName = selectedTexture.value;
   savedValue.textureGuid = currentTextureObj.value?.guid;
   savedValue.skyboxName = selectedSkyboxTexture.value;
@@ -415,21 +455,7 @@ async function loadPresets() {
   // 1b. Migrate palettePeriod ×256 (removal of /256 divisor in shader)
   await migratePalettePeriod();
 
-  // 2. Bootstrap with defaults when DB is empty
-  const count = await getPresetCount();
-  if (count === 0 && defaultPresetsJson.length > 0) {
-    for (const legacy of defaultPresetsJson as any[]) {
-      if (!legacy.value) continue;
-      await savePresetEntry(
-        legacy.value,
-        legacy.thumbnail ?? '',
-        legacy.name ?? '',
-        legacy.date,
-      );
-    }
-  }
-
-  // 3. Load metadata list
+  // 2. Load metadata list
   presets.value = await getAllPresetEntries();
 }
 
@@ -464,11 +490,14 @@ async function savePalette() {
     }
   } catch { /* ignore errors, no thumbnail */ }
   const palette: PaletteRecord = {
+    guid: existingPalette?.guid,
     name: paletteName.value.trim(),
     colorStops: structuredClone(toRaw(model.value.colorStops)),
     thumbnail,
-    date: now,
+    date: existingPalette?.date ?? now,
+    lastUpdated: now,
     favorite: existingPalette?.favorite ?? false,
+    remote: existingPalette?.remote,
     textureName: selectedTexture.value,
     textureGuid: currentTextureObj.value?.guid,
     skyboxName: selectedSkyboxTexture.value,
@@ -478,7 +507,6 @@ async function savePalette() {
     paletteOffset: model.value.paletteOffset,
     heightPaletteShift: model.value.heightPaletteShift,
     paletteMirror: model.value.paletteMirror,
-    activateAnimate: model.value.activateAnimate,
     animationSpeed: model.value.animationSpeed,
     tessellationLevel: model.value.tessellationLevel,
     displacementAmount: model.value.displacementAmount,
@@ -498,7 +526,6 @@ async function savePalette() {
 }
 
 function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
-  if (source.activateAnimate != null) model.value.activateAnimate = source.activateAnimate;
   if (source.animationSpeed != null) model.value.animationSpeed = source.animationSpeed;
   if (source.tessellationLevel != null) model.value.tessellationLevel = source.tessellationLevel;
   if (source.displacementAmount != null) model.value.displacementAmount = source.displacementAmount;
@@ -655,6 +682,7 @@ async function uploadCompletePreset(id: number): Promise<void> {
     await updatePresetEntry(record);
     presetCache.set(id, record);
     presets.value = await getAllPresetEntries();
+    showUploadSuccess(uploadSuccessKey('preset', id));
   } catch (error) {
     handleUploadError(error);
   }
@@ -663,19 +691,21 @@ async function uploadCompletePreset(id: number): Promise<void> {
 async function uploadPalettePreset(palette: PaletteRecord): Promise<void> {
   if (!isAdmin.value) return;
   try {
-    palette.guid = palette.guid || crypto.randomUUID();
+    const uploadPalette = structuredClone(toRaw(palette));
+    uploadPalette.guid = uploadPalette.guid || crypto.randomUUID();
     const uploaded = await uploadRemoteCatalogEntry('palettePreset', {
-      ...palette,
-      guid: palette.guid,
-      name: palette.name,
-      lastUpdated: palette.lastUpdated || palette.date || new Date().toISOString(),
+      ...uploadPalette,
+      guid: uploadPalette.guid,
+      name: uploadPalette.name,
+      lastUpdated: uploadPalette.lastUpdated || uploadPalette.date || new Date().toISOString(),
     });
     await savePaletteEntry({
-      ...palette,
+      ...uploadPalette,
       lastUpdated: uploaded.lastUpdated,
       remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
     });
     palettes.value = await getAllPaletteEntries();
+    showUploadSuccess(uploadSuccessKey('palette', uploadPalette.name));
   } catch (error) {
     handleUploadError(error);
   }
@@ -699,6 +729,7 @@ async function uploadTexture(texture: TextureMetadata): Promise<void> {
       lastUpdated: uploaded.lastUpdated,
     });
     textures.value = await ensureTextureLibrary();
+    showUploadSuccess(uploadSuccessKey('texture', texture.guid));
   } catch (error) {
     handleUploadError(error);
   }
@@ -787,10 +818,6 @@ const maxIterMultSlider = computed({
 });
 
 onMounted(async () => {
-  stopAuthObserver = observeAuthState((state) => {
-    authUserEmail.value = state.user?.email ?? '';
-    userRole.value = state.role;
-  });
   await loadPresets();
   await loadPalettes();
   await loadTextures();
@@ -801,7 +828,8 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  stopAuthObserver?.();
+  uploadSuccessTimers.forEach(timer => clearTimeout(timer));
+  uploadSuccessTimers.clear();
 });
 
 const currentPaletteObj = computed(() => palettes.value.find(p => p.name === selectedPalette.value));
@@ -1129,6 +1157,15 @@ const interpolationModes: { key: InterpolationMode; label: string }[] = [
   { key: 'cubehelix', label: 'Cubehelix' },
 ];
 
+const paletteSubTabs = [
+  { key: 'color', label: 'Color' },
+  { key: 'motionCycle', label: 'Motion / Cycle' },
+  { key: 'surfaceMaterial', label: 'Surface / Material' },
+  { key: 'imageEnvironment', label: 'Image / Env' },
+  { key: 'library', label: 'Library' },
+] as const;
+const activePaletteSubTab = ref<(typeof paletteSubTabs)[number]['key']>('color');
+
 // =====================================================
 // Palette Manipulation Tools
 // =====================================================
@@ -1280,24 +1317,32 @@ async function loadTextures() {
   // 4. Restore persisted selections:
   //    Priority: model value (from parent/preset) > localStorage > built-in default
   const modelName = model.value.textureName;
+  const modelGuidName = textureNameForReference(model.value.textureGuid, undefined);
   const savedName = localStorage.getItem(TEXTURE_SELECTED_KEY);
-  const restoredName = (modelName && textures.value.some(t => t.name === modelName))
+  const restoredName = modelGuidName
+    ? modelGuidName
+    : (modelName && textures.value.some(t => t.name === modelName))
     ? modelName
     : (savedName && textures.value.some(t => t.name === savedName))
       ? savedName
       : 'Gold';
   const modelSkyboxName = model.value.skyboxName;
+  const modelSkyboxGuidName = textureNameForReference(model.value.skyboxGuid, undefined);
   const savedSkyboxName = localStorage.getItem(SKYBOX_SELECTED_KEY);
-  const restoredSkyboxName = (modelSkyboxName && textures.value.some(t => t.name === modelSkyboxName))
+  const restoredSkyboxName = modelSkyboxGuidName
+    ? modelSkyboxGuidName
+    : (modelSkyboxName && textures.value.some(t => t.name === modelSkyboxName))
     ? modelSkyboxName
     : (savedSkyboxName && textures.value.some(t => t.name === savedSkyboxName))
       ? savedSkyboxName
       : 'Window';
   selectedTexture.value = restoredName;
   model.value.textureName = restoredName;
+  model.value.textureGuid = textures.value.find(t => t.name === restoredName)?.guid;
   textureName.value = restoredName;
   selectedSkyboxTexture.value = restoredSkyboxName;
   model.value.skyboxName = restoredSkyboxName;
+  model.value.skyboxGuid = textures.value.find(t => t.name === restoredSkyboxName)?.guid;
   skyboxName.value = restoredSkyboxName;
   void nextTick().then(() => { suppressTextureApply = false; });
 }
@@ -1568,21 +1613,6 @@ async function renameAndSaveSkyboxTexture() {
 
 <template>
   <div style="color: black !important;">
-    <div v-if="authConfigured" class="field is-grouped is-align-items-center" style="margin-bottom:0.75em;">
-      <div class="control" v-if="!authUserEmail">
-        <button class="button is-small is-light" type="button" @click="loginWithGoogle">
-          <i class="fa-brands fa-google mr-1"></i> Sign in with Google
-        </button>
-      </div>
-      <template v-else>
-        <div class="control" style="font-size:0.82em; color:#555;">
-          {{ authUserEmail }} · {{ userRole }}
-        </div>
-        <div class="control">
-          <button class="button is-small is-light" type="button" @click="logoutUser">Sign out</button>
-        </div>
-      </template>
-    </div>
     <!-- Navigation tab -->
     <div v-if="activeTab === 'navigation'">
       <div class="mb-3" style="font-family: monospace; word-break: break-all; white-space: pre-line;">
@@ -1601,6 +1631,21 @@ async function renameAndSaveSkyboxTexture() {
           <span style="font-family: monospace; min-width:5em; display:inline-block;">{{ angleDeg }}°</span>
         </span>
         <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="0" max="359" step="1" v-model.number="angleSlider" />
+      </div>
+
+      <hr class="section-sep"/>
+
+      <label class="gfx-section-title">Render Mapping</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Mu</span>
+        <input class="slider" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
+        <span class="gfx-slider-value">{{ (model.mu ?? 1.0).toFixed(1) }}</span>
+        <button class="button is-small is-light" style="padding: 0 6px; height: 22px; font-size: 0.75em;" @click="model.mu = 4" title="Mu = 4">4</button>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Stripe Frequency</span>
+        <input class="slider" type="range" min="1" max="32" step="1" v-model.number="model.stripeFrequency" />
+        <span class="gfx-slider-value">{{ model.stripeFrequency ?? 8 }}</span>
       </div>
 
       <hr class="section-sep"/>
@@ -1637,6 +1682,17 @@ async function renameAndSaveSkyboxTexture() {
                 :class="{ 'is-active': selectedNavPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
                 <button
+                  v-if="isAdmin"
+                  class="favorite-button upload-button"
+                  :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)"
+                  type="button"
+                  :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
+                  :aria-label="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
+                  @click.stop.prevent="uploadCompletePreset(preset.id)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i></span>
+                </button>
+                <button
                   class="favorite-button"
                   :class="{ 'is-favorite': preset.favorite }"
                   type="button"
@@ -1645,15 +1701,6 @@ async function renameAndSaveSkyboxTexture() {
                   @click.stop.prevent="togglePresetFavorite(preset.id)"
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button"
-                  type="button"
-                  title="Upload to shared catalog"
-                  @click.stop.prevent="uploadCompletePreset(preset.id)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
                 </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -1722,6 +1769,17 @@ async function renameAndSaveSkyboxTexture() {
                 :class="{ 'is-active': selectedPreset === preset.id }"
                 style="display:flex; align-items:center; gap:0.75em;">
                 <button
+                  v-if="isAdmin"
+                  class="favorite-button upload-button"
+                  :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)"
+                  type="button"
+                  :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
+                  :aria-label="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
+                  @click.stop.prevent="uploadCompletePreset(preset.id)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i></span>
+                </button>
+                <button
                   class="favorite-button"
                   :class="{ 'is-favorite': preset.favorite }"
                   type="button"
@@ -1730,15 +1788,6 @@ async function renameAndSaveSkyboxTexture() {
                   @click.stop.prevent="togglePresetFavorite(preset.id)"
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button"
-                  type="button"
-                  title="Upload to shared catalog"
-                  @click.stop.prevent="uploadCompletePreset(preset.id)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
                 </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -1804,71 +1853,6 @@ async function renameAndSaveSkyboxTexture() {
 
     <!-- Palettes tab -->
     <div v-else-if="activeTab === 'palettes'">
-      <div class="palette-top-controls">
-        <button
-          class="button is-small palette-animate-toggle"
-          :class="{ 'is-active': model.activateAnimate }"
-          type="button"
-          :aria-pressed="model.activateAnimate"
-          title="Animate palette offset"
-          @click="model.activateAnimate = !model.activateAnimate"
-        >
-          <span class="icon is-small">
-            <i :class="model.activateAnimate ? 'fas fa-pause' : 'fas fa-play'" aria-hidden="true"></i>
-          </span>
-          <span>Drift</span>
-          <span class="palette-toggle-state">{{ model.activateAnimate ? 'On' : 'Off' }}</span>
-        </button>
-
-        <button
-          class="button is-small palette-animate-toggle"
-          :class="{ 'is-active': model.debugShading }"
-          type="button"
-          :aria-pressed="model.debugShading"
-          title="Show shading debug sectors"
-          @click="model.debugShading = !model.debugShading"
-        >
-          <span class="icon is-small">
-            <i class="fas fa-bug" aria-hidden="true"></i>
-          </span>
-          <span>Debug</span>
-          <span class="palette-toggle-state">{{ model.debugShading ? 'On' : 'Off' }}</span>
-        </button>
-
-        <button
-          class="button is-small palette-animate-toggle"
-          :class="{ 'is-active': model.paletteMirror }"
-          type="button"
-          :aria-pressed="model.paletteMirror"
-          title="Mirror palette repetition"
-          @click="model.paletteMirror = !model.paletteMirror"
-        >
-          <span class="icon is-small">
-            <i class="fas fa-arrows-left-right" aria-hidden="true"></i>
-          </span>
-          <span>Mirror</span>
-          <span class="palette-toggle-state">{{ model.paletteMirror ? 'On' : 'Off' }}</span>
-        </button>
-
-        <div class="palette-compact-control">
-          <span class="palette-compact-label">Length</span>
-          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
-          <span class="palette-compact-value">{{ formatPalettePeriod(model.palettePeriod) }}</span>
-        </div>
-
-        <div class="palette-compact-control">
-          <span class="palette-compact-label">Height Shift</span>
-          <input class="slider" type="range" min="0" max="100" step="0.01" v-model.number="model.heightPaletteShift" />
-          <span class="palette-compact-value">{{ (model.heightPaletteShift ?? 0).toFixed(2) }}</span>
-        </div>
-
-        <div class="palette-compact-control">
-          <span class="palette-compact-label">Offset</span>
-          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
-          <span class="palette-compact-value">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
-        </div>
-      </div>
-
       <div class="mb-3">
         <PaletteEditor
           ref="paletteEditorRef"
@@ -1903,8 +1887,90 @@ async function renameAndSaveSkyboxTexture() {
         />
       </div>
 
-      <hr class="section-sep"/>
+      <div class="palette-subtabs">
+        <button
+          v-for="tab in paletteSubTabs"
+          :key="tab.key"
+          class="button is-small palette-subtab-button"
+          :class="activePaletteSubTab === tab.key ? 'is-link' : 'is-light'"
+          type="button"
+          @click="activePaletteSubTab = tab.key"
+        >
+          {{ tab.label }}
+        </button>
+      </div>
 
+      <section v-show="activePaletteSubTab === 'motionCycle'">
+      <div class="palette-top-controls">
+        <button
+          class="button is-small palette-icon-toggle"
+          :class="{ 'is-active': model.activateAnimate }"
+          type="button"
+          :aria-pressed="model.activateAnimate"
+          title="Animate palette offset"
+          @click="model.activateAnimate = !model.activateAnimate"
+        >
+          <i :class="model.activateAnimate ? 'fas fa-pause' : 'fas fa-play'" aria-hidden="true"></i>
+          <span>Drift</span>
+        </button>
+
+        <button
+          class="button is-small palette-icon-toggle"
+          :class="{ 'is-active': model.debugShading }"
+          type="button"
+          :aria-pressed="model.debugShading"
+          title="Show shading debug sectors"
+          @click="model.debugShading = !model.debugShading"
+        >
+          <i class="fas fa-bug" aria-hidden="true"></i>
+          <span>Debug</span>
+        </button>
+
+        <button
+          class="button is-small palette-icon-toggle"
+          :class="{ 'is-active': model.paletteMirror }"
+          type="button"
+          :aria-pressed="model.paletteMirror"
+          title="Mirror palette repetition"
+          @click="model.paletteMirror = !model.paletteMirror"
+        >
+          <i class="fas fa-arrows-left-right" aria-hidden="true"></i>
+          <span>Mirror</span>
+        </button>
+
+        <div class="palette-compact-control">
+          <span class="palette-compact-label">Length</span>
+          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
+          <span class="palette-compact-value">{{ formatPalettePeriod(model.palettePeriod) }}</span>
+        </div>
+
+        <div class="palette-compact-control">
+          <span class="palette-compact-label">Height Shift</span>
+          <input class="slider" type="range" min="0" max="100" step="0.01" v-model.number="model.heightPaletteShift" />
+          <span class="palette-compact-value">{{ (model.heightPaletteShift ?? 0).toFixed(2) }}</span>
+        </div>
+
+        <div class="palette-compact-control">
+          <span class="palette-compact-label">Offset</span>
+          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
+          <span class="palette-compact-value">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
+        </div>
+      </div>
+
+      <label class="gfx-section-title">Motion</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Drift Speed</span>
+        <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
+        <span class="gfx-slider-value">&times;{{ (model.animationSpeed ?? 1.0).toFixed(1) }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Phase Coloring</span>
+        <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPhaseColoring" />
+        <span class="gfx-slider-value">{{ (model.phaseColoringStrength ?? 0).toFixed(1) }}×</span>
+      </div>
+      </section>
+
+      <section v-show="activePaletteSubTab === 'color'">
       <!-- ═══ COLOR ═══ -->
       <label class="gfx-section-title">Color</label>
 
@@ -1945,20 +2011,16 @@ async function renameAndSaveSkyboxTexture() {
         <span class="palette-control-value">{{ lumShift }}</span>
       </div>
 
-      <hr class="section-sep"/>
+      </section>
 
-      <!-- ═══ MOTION ═══ -->
-      <label class="gfx-section-title">Motion</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Drift Speed</span>
-        <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
-        <span class="gfx-slider-value">&times;{{ (model.animationSpeed ?? 1.0).toFixed(1) }}</span>
-      </div>
-
-      <hr class="section-sep"/>
-
+      <section v-show="activePaletteSubTab === 'surfaceMaterial'">
       <!-- ═══ FRACTAL SURFACE ═══ -->
       <label class="gfx-section-title">Fractal Surface</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Orbit Trap</span>
+        <input class="slider" type="range" min="0" max="100" step="0.1" v-model.number="model.orbitTrapStrength" />
+        <span class="gfx-slider-value">{{ (model.orbitTrapStrength ?? 0).toFixed(1) }}</span>
+      </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Relief Depth</span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
@@ -1984,9 +2046,6 @@ async function renameAndSaveSkyboxTexture() {
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
         <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0).toFixed(2) }}</span>
       </div>
-
-      <hr class="section-sep"/>
-
       <!-- ═══ MATERIAL RESPONSE ═══ -->
       <label class="gfx-section-title">Material Response</label>
         <div class="gfx-slider-row">
@@ -1999,9 +2058,9 @@ async function renameAndSaveSkyboxTexture() {
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.subsurfaceStrength" />
         <span class="gfx-slider-value">{{ (model.subsurfaceStrength ?? 0).toFixed(2) }}</span>
       </div>
+      </section>
 
-      <hr class="section-sep"/>
-
+      <section v-show="activePaletteSubTab === 'imageEnvironment'">
       <!-- ═══ IMAGE LAYER ═══ -->
       <label class="gfx-section-title">Image Layer</label>
       <div class="gfx-slider-row">
@@ -2031,30 +2090,32 @@ async function renameAndSaveSkyboxTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-textures" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:350px; overflow-y:auto;">
-              <a v-for="tex in textures" :key="tex.name" class="dropdown-item"
+              <a v-for="tex in textures" :key="tex.name" class="dropdown-item favorite-row"
                 @click.prevent="selectTextureFromDropdown(tex)"
                 :class="{ 'is-active': selectedTexture === tex.name }"
                 style="display:flex; align-items:center; gap:0.5em;">
                 <button
+                  v-if="isAdmin"
+                  class="favorite-button upload-button"
+                  :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
+                  type="button"
+                  :disabled="!canUploadTexture(tex)"
+                  :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
+                  :aria-label="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
+                  @click.stop.prevent="uploadTexture(tex)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i></span>
+                </button>
+                <button
                   class="favorite-button"
                   :class="{ 'is-favorite': tex.favorite }"
                   type="button"
-                  :disabled="!tex.guid"
+                  :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)"
                   :title="tex.favorite ? 'Remove from favorites' : 'Add to favorites'"
                   :aria-pressed="!!tex.favorite"
                   @click.stop.prevent="toggleTextureFavorite(tex)"
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="tex.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button"
-                  type="button"
-                  :disabled="!tex.guid"
-                  title="Upload to shared catalog"
-                  @click.stop.prevent="uploadTexture(tex)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
                 </button>
                 <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail"
                   style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
@@ -2080,9 +2141,9 @@ async function renameAndSaveSkyboxTexture() {
           </div>
         </div>
       </div>
+      </section>
 
-      <hr class="section-sep"/>
-
+      <section v-show="activePaletteSubTab === 'imageEnvironment'">
       <!-- Environment texture library (same storage as material textures) -->
       <label class="gfx-section-title">Environment</label>
       <div class="mb-3 compact-library">
@@ -2101,30 +2162,32 @@ async function renameAndSaveSkyboxTexture() {
           </div>
           <div class="dropdown-menu" id="dropdown-menu-skybox" role="menu" style="width:100%;">
             <div class="dropdown-content" style="max-height:350px; overflow-y:auto;">
-              <a v-for="tex in textures" :key="'skybox-' + tex.name" class="dropdown-item"
+              <a v-for="tex in textures" :key="'skybox-' + tex.name" class="dropdown-item favorite-row"
                 @click.prevent="selectSkyboxFromDropdown(tex)"
                 :class="{ 'is-active': selectedSkyboxTexture === tex.name }"
                 style="display:flex; align-items:center; gap:0.5em;">
                 <button
+                  v-if="isAdmin"
+                  class="favorite-button upload-button"
+                  :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
+                  type="button"
+                  :disabled="!canUploadTexture(tex)"
+                  :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
+                  :aria-label="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
+                  @click.stop.prevent="uploadTexture(tex)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i></span>
+                </button>
+                <button
                   class="favorite-button"
                   :class="{ 'is-favorite': tex.favorite }"
                   type="button"
-                  :disabled="!tex.guid"
+                  :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)"
                   :title="tex.favorite ? 'Remove from favorites' : 'Add to favorites'"
                   :aria-pressed="!!tex.favorite"
                   @click.stop.prevent="toggleTextureFavorite(tex)"
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="tex.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button"
-                  type="button"
-                  :disabled="!tex.guid"
-                  title="Upload to shared catalog"
-                  @click.stop.prevent="uploadTexture(tex)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
                 </button>
                 <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail"
                   style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
@@ -2150,9 +2213,9 @@ async function renameAndSaveSkyboxTexture() {
           </div>
         </div>
       </div>
+      </section>
 
-      <hr class="section-sep"/>
-
+      <section v-show="activePaletteSubTab === 'library'">
       <!-- Palette library -->
       <label class="gfx-section-title">Palette Library</label>
       <div class="mb-3">
@@ -2198,12 +2261,14 @@ async function renameAndSaveSkyboxTexture() {
                 </button>
                 <button
                   v-if="isAdmin"
-                  class="favorite-button"
+                  class="favorite-button upload-button"
+                  :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)"
                   type="button"
-                  title="Upload to shared catalog"
+                  :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
+                  :aria-label="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
                   @click.stop.prevent="uploadCompletePreset(preset.id)"
                 >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
+                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i></span>
                 </button>
                 <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -2267,12 +2332,14 @@ async function renameAndSaveSkyboxTexture() {
                 </button>
                 <button
                   v-if="isAdmin"
-                  class="favorite-button"
+                  class="favorite-button upload-button"
+                  :class="uploadButtonClasses(uploadSuccessKey('palette', palette.name), palette.remote)"
                   type="button"
-                  title="Upload to shared catalog"
+                  :title="uploadButtonTitle(uploadSuccessKey('palette', palette.name), palette.remote)"
+                  :aria-label="uploadButtonTitle(uploadSuccessKey('palette', palette.name), palette.remote)"
                   @click.stop.prevent="uploadPalettePreset(palette)"
                 >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-upload"></i></span>
+                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('palette', palette.name))"></i></span>
                 </button>
                 <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail"
                   style="height:32px; width:100%; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
@@ -2328,19 +2395,14 @@ async function renameAndSaveSkyboxTexture() {
           </div>
         </div>
       </div>
+      </section>
     </div>
 
     <!-- Performance/Graphics tab -->
     <div v-else-if="activeTab === 'performance'" class="graphics-tab">
 
-      <!-- ═══ CALCUL ═══ -->
-      <label class="gfx-section-title">Computation</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Mu</span>
-        <input class="slider" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
-        <span class="gfx-slider-value">{{ (model.mu ?? 1.0).toFixed(1) }}</span>
-        <button class="button is-small is-light" style="padding: 0 6px; height: 22px; font-size: 0.75em;" @click="model.mu = 4" title="Mu = 4">4</button>
-      </div>
+      <!-- ═══ PERFORMANCE ═══ -->
+      <label class="gfx-section-title">Performance</label>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Epsilon</span>
         <input class="slider" type="range" min="-30" max="0" step="0.01" v-model="epsilonSlider" />
@@ -2367,24 +2429,6 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : 'Classic' }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Stripe Frequency</span>
-        <input class="slider" type="range" min="1" max="32" step="1" v-model.number="model.stripeFrequency" />
-        <span class="gfx-slider-value">{{ model.stripeFrequency ?? 8 }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Orbit Trap</span>
-        <input class="slider" type="range" min="0" max="100" step="0.1" v-model.number="model.orbitTrapStrength" />
-<span class="gfx-slider-value">{{ (model.orbitTrapStrength ?? 0).toFixed(1) }}</span>
-        </div>
-        <div class="gfx-slider-row">
-          <span class="gfx-slider-label">Phase Coloring</span>
-          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPhaseColoring" />
-          <span class="gfx-slider-value">{{ (model.phaseColoringStrength ?? 0).toFixed(1) }}×</span>
-        </div>
-        </div>
-      <!-- ═══ PERFORMANCE ═══ -->
-      <label class="gfx-section-title">Performance</label>
-      <div class="gfx-slider-row">
         <span class="gfx-slider-label">Resolution</span>
         <input class="slider" type="range" min="0.125" max="2" step="0.125" v-model.number="model.dprMultiplier" />
         <span class="gfx-slider-value">DPR &times;{{ model.dprMultiplier?.toFixed(2) ?? '1.00' }}</span>
@@ -2405,6 +2449,7 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-value">&times;{{ (model.gpuLoadMultiplier ?? 1.0).toFixed(2) }}</span>
       </div>
     </div>
+  </div>
 </template>
 
 <style scoped>
@@ -2534,37 +2579,44 @@ async function renameAndSaveSkyboxTexture() {
   color: #333;
   font-variant-numeric: tabular-nums;
 }
+.palette-subtabs {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.3em;
+  margin-bottom: 0.75em;
+}
+.palette-subtab-button {
+  height: 26px;
+  padding: 0 0.65em;
+  font-size: 0.78rem;
+}
 .palette-top-controls {
   display: grid;
-  grid-template-columns: auto auto minmax(0, 1fr) minmax(0, 1fr);
+  grid-template-columns: repeat(3, auto);
   align-items: center;
   gap: 0.45em 0.65em;
   margin-bottom: 0.75em;
 }
-.palette-animate-toggle {
-  justify-content: flex-start;
-  gap: 0.35em;
-  min-width: 7.6em;
-  height: 28px;
+.palette-icon-toggle {
+  justify-content: center;
+  gap: 0.3em;
+  min-width: 0;
+  height: 26px;
+  padding: 0 0.62em;
+  font-size: 0.76rem;
   border-color: #b8b8b8;
   color: #222;
   background: #f3f3f3;
 }
-.palette-animate-toggle.is-active {
+.palette-icon-toggle.is-active {
   border-color: #3273dc;
   color: #fff;
   background: #3273dc;
 }
-.palette-toggle-state {
-  margin-left: auto;
-  font-size: 0.72em;
-  font-weight: 700;
-  text-transform: uppercase;
-  opacity: 0.78;
-}
 .palette-compact-control {
+  grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: auto minmax(5.5em, 1fr) 4.6em;
+  grid-template-columns: 5.8em minmax(5.5em, 1fr) 4.8em;
   align-items: center;
   gap: 0.38em;
   min-width: 0;
@@ -2588,10 +2640,11 @@ async function renameAndSaveSkyboxTexture() {
 }
 @media (max-width: 520px) {
   .palette-top-controls {
-    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-columns: repeat(3, minmax(0, 1fr));
   }
   .palette-compact-control {
     grid-column: 1 / -1;
+    grid-template-columns: 5.5em minmax(4em, 1fr) 4.5em;
   }
 }
 .palette-button-group {
@@ -2619,6 +2672,7 @@ async function renameAndSaveSkyboxTexture() {
 }
 .favorite-row {
   position: relative;
+  padding-right: 5.7em !important;
 }
 .favorite-button {
   position: absolute;
@@ -2635,6 +2689,33 @@ async function renameAndSaveSkyboxTexture() {
   cursor: pointer;
   z-index: 2;
 }
+.favorite-button.upload-button {
+  right: 3.05em;
+}
+.favorite-button.upload-button.is-remote .favorite-heart,
+.favorite-button.upload-button.is-remote:hover .favorite-heart {
+  color: #4fb7ff;
+}
+.favorite-button.upload-button.is-remote::after {
+  content: "✓";
+  position: absolute;
+  right: 0.12em;
+  bottom: 0.05em;
+  width: 0.95em;
+  height: 0.95em;
+  border-radius: 999px;
+  background: #27c46a;
+  color: #fff;
+  font-size: 0.62em;
+  font-weight: 800;
+  line-height: 0.95em;
+  text-align: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.5);
+}
+.favorite-button:disabled {
+  cursor: not-allowed;
+  opacity: 0.45;
+}
 .favorite-heart {
   font-size: 1.35em;
   line-height: 1;
@@ -2650,6 +2731,10 @@ async function renameAndSaveSkyboxTexture() {
 .favorite-button.is-favorite .favorite-heart,
 .favorite-button:hover .favorite-heart {
   color: #ec3d7a;
+}
+.favorite-button.is-upload-success .favorite-heart,
+.favorite-button.is-upload-success:hover .favorite-heart {
+  color: #27c46a;
 }
 .favorite-filter {
   margin-bottom: 0.55em;

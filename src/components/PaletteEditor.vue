@@ -529,11 +529,11 @@ defineExpose({ getSnapshot });
               {{ preset.name }}
             </option>
           </select>
-          <button class="button is-small is-light" :disabled="!selectedStopPresetName" @click="toggleSelectedStopPresetFavorite">
-            <i class="fa-heart" :class="stopPresets.find(preset => preset.name === selectedStopPresetName)?.favorite ? 'fa-solid' : 'fa-regular'"></i>
-          </button>
           <button v-if="props.isAdmin" class="button is-small is-light" :disabled="!selectedStopPresetName" @click="uploadSelectedStopPreset">
             <i class="fa-solid fa-upload"></i>
+          </button>
+          <button class="button is-small is-light" :disabled="!selectedStopPresetName" @click="toggleSelectedStopPresetFavorite">
+            <i class="fa-heart" :class="stopPresets.find(preset => preset.name === selectedStopPresetName)?.favorite ? 'fa-solid' : 'fa-regular'"></i>
           </button>
           <button class="button is-small is-link" :disabled="!selectedStopPresetName" @click="applySelectedStopPreset">
             Apply

@@ -127,6 +127,10 @@ function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
   });
 }
 
+function clonePaletteRecord(record: PaletteRecord): PaletteRecord {
+  return JSON.parse(JSON.stringify(record)) as PaletteRecord;
+}
+
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
@@ -181,14 +185,15 @@ export async function saveRemotePaletteEntry(record: PaletteRecord): Promise<voi
  * Store (or overwrite) a palette entry.
  */
 export async function savePaletteEntry(record: PaletteRecord): Promise<void> {
-  if (!record.name.trim()) throw new Error('Palette name is required.');
-  record.guid = record.guid || createGuid();
-  record.name = await uniquePaletteName(record.name.trim(), record.guid);
-  record.date = record.date ?? new Date().toISOString();
-  record.lastUpdated = record.lastUpdated ?? record.date;
-  record.favorite = record.favorite ?? false;
+  const storable = clonePaletteRecord(record);
+  if (!storable.name.trim()) throw new Error('Palette name is required.');
+  storable.guid = storable.guid || createGuid();
+  storable.name = await uniquePaletteName(storable.name.trim(), storable.guid);
+  storable.date = storable.date ?? new Date().toISOString();
+  storable.lastUpdated = storable.lastUpdated ?? storable.date;
+  storable.favorite = storable.favorite ?? false;
   const { store, done } = await tx('readwrite');
-  store.put(record);
+  store.put(storable);
   await done;
 }
 

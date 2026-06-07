@@ -195,9 +195,10 @@ export async function saveTextureEntry(
 ): Promise<void> {
   if (!name.trim()) throw new Error('Texture name is required.');
   const resolvedDate = date ?? new Date().toISOString();
+  const resolvedName = await uniqueTextureName(name.trim(), guid);
   const metadata: TextureMetadata = {
     guid,
-    name: await uniqueTextureName(name.trim(), guid),
+    name: resolvedName,
     thumbnail,
     date: resolvedDate,
     lastUpdated: resolvedDate,
@@ -207,7 +208,7 @@ export async function saveTextureEntry(
   const db = await openDB();
   const transaction = db.transaction([METADATA_STORE_NAME, BLOB_STORE_NAME], 'readwrite');
   transaction.objectStore(METADATA_STORE_NAME).put(metadata);
-  transaction.objectStore(BLOB_STORE_NAME).put({ name, blob });
+  transaction.objectStore(BLOB_STORE_NAME).put({ name: resolvedName, blob });
   const done = new Promise<void>((resolve, reject) => {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);

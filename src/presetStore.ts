@@ -249,16 +249,6 @@ export async function deletePresetEntry(id: number): Promise<void> {
   await done;
 }
 
-/**
- * Return how many presets are currently stored.
- */
-export async function getPresetCount(): Promise<number> {
-  const { store, done } = await tx('readonly');
-  const count = await reqToPromise(store.count());
-  await done;
-  return count;
-}
-
 // ---------------------------------------------------------------------------
 // Migration from localStorage
 // ---------------------------------------------------------------------------

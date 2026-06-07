@@ -48,27 +48,27 @@ import {
 export const TEXTURE_SELECTED_KEY = 'mandelbrot_selected_texture';
 export const SKYBOX_SELECTED_KEY = 'mandelbrot_selected_skybox';
 
-export const BUILT_IN_TEXTURES: ReadonlyArray<{ name: string; url: string; thumbnailUrl: string }> = [
-  { name: 'Colored Tiles', url: coloredTilesUrl, thumbnailUrl: coloredTilesThumbUrl },
-  { name: 'Gold', url: goldUrl, thumbnailUrl: goldThumbUrl },
-  { name: 'Brushed Gold', url: brushedGoldUrl, thumbnailUrl: brushedGoldThumbUrl },
-  { name: 'Zellige', url: zelligeUrl, thumbnailUrl: zelligeThumbUrl },
-  { name: 'Bronze', url: bronzeUrl, thumbnailUrl: bronzeThumbUrl },
-  { name: 'Mercure', url: mercureUrl, thumbnailUrl: mercureThumbUrl },
-  { name: 'Honey', url: honeyUrl, thumbnailUrl: honeyThumbUrl },
-  { name: 'Water', url: waterUrl, thumbnailUrl: waterThumbUrl },
-  { name: 'Wood', url: woodUrl, thumbnailUrl: woodThumbUrl },
-  { name: 'Marble', url: marbleUrl, thumbnailUrl: marbleThumbUrl },
-  { name: 'Satin', url: satinUrl, thumbnailUrl: satinThumbUrl },
-  { name: 'Dentelle', url: dentelleUrl, thumbnailUrl: dentelleThumbUrl },
-  { name: 'Bismute', url: bismuteUrl, thumbnailUrl: bismuteThumbUrl },
-  { name: 'Granite', url: graniteUrl, thumbnailUrl: graniteThumbUrl },
-  { name: 'Lava', url: lavaUrl, thumbnailUrl: lavaThumbUrl },
-  { name: 'Mountain', url: mountainUrl, thumbnailUrl: mountainThumbUrl },
-  { name: 'Mountain Light', url: mountainLightUrl, thumbnailUrl: mountainLightThumbUrl },
-  { name: 'Skybox', url: skyboxUrl, thumbnailUrl: skyboxThumbUrl },
-  { name: 'Skybox Sunset', url: skyboxSunsetUrl, thumbnailUrl: skyboxSunsetThumbUrl },
-  { name: 'Window', url: windowUrl, thumbnailUrl: windowThumbUrl },
+export const BUILT_IN_TEXTURES: ReadonlyArray<{ guid: string; name: string; url: string; thumbnailUrl: string }> = [
+  { guid: 'builtin:colored-tiles', name: 'Colored Tiles', url: coloredTilesUrl, thumbnailUrl: coloredTilesThumbUrl },
+  { guid: 'builtin:gold', name: 'Gold', url: goldUrl, thumbnailUrl: goldThumbUrl },
+  { guid: 'builtin:brushed-gold', name: 'Brushed Gold', url: brushedGoldUrl, thumbnailUrl: brushedGoldThumbUrl },
+  { guid: 'builtin:zellige', name: 'Zellige', url: zelligeUrl, thumbnailUrl: zelligeThumbUrl },
+  { guid: 'builtin:bronze', name: 'Bronze', url: bronzeUrl, thumbnailUrl: bronzeThumbUrl },
+  { guid: 'builtin:mercure', name: 'Mercure', url: mercureUrl, thumbnailUrl: mercureThumbUrl },
+  { guid: 'builtin:honey', name: 'Honey', url: honeyUrl, thumbnailUrl: honeyThumbUrl },
+  { guid: 'builtin:water', name: 'Water', url: waterUrl, thumbnailUrl: waterThumbUrl },
+  { guid: 'builtin:wood', name: 'Wood', url: woodUrl, thumbnailUrl: woodThumbUrl },
+  { guid: 'builtin:marble', name: 'Marble', url: marbleUrl, thumbnailUrl: marbleThumbUrl },
+  { guid: 'builtin:satin', name: 'Satin', url: satinUrl, thumbnailUrl: satinThumbUrl },
+  { guid: 'builtin:dentelle', name: 'Dentelle', url: dentelleUrl, thumbnailUrl: dentelleThumbUrl },
+  { guid: 'builtin:bismute', name: 'Bismute', url: bismuteUrl, thumbnailUrl: bismuteThumbUrl },
+  { guid: 'builtin:granite', name: 'Granite', url: graniteUrl, thumbnailUrl: graniteThumbUrl },
+  { guid: 'builtin:lava', name: 'Lava', url: lavaUrl, thumbnailUrl: lavaThumbUrl },
+  { guid: 'builtin:mountain', name: 'Mountain', url: mountainUrl, thumbnailUrl: mountainThumbUrl },
+  { guid: 'builtin:mountain-light', name: 'Mountain Light', url: mountainLightUrl, thumbnailUrl: mountainLightThumbUrl },
+  { guid: 'builtin:skybox', name: 'Skybox', url: skyboxUrl, thumbnailUrl: skyboxThumbUrl },
+  { guid: 'builtin:skybox-sunset', name: 'Skybox Sunset', url: skyboxSunsetUrl, thumbnailUrl: skyboxSunsetThumbUrl },
+  { guid: 'builtin:window', name: 'Window', url: windowUrl, thumbnailUrl: windowThumbUrl },
 ] as const;
 
 export const BUILT_IN_TEXTURE_NAMES: ReadonlySet<string> = new Set(BUILT_IN_TEXTURES.map(t => t.name));
@@ -78,6 +78,7 @@ export async function ensureTextureLibrary(): Promise<TextureMetadata[]> {
   const storedTextures = await getAllTextureEntries();
   const customTextures = storedTextures.filter(texture => !BUILT_IN_TEXTURE_NAMES.has(texture.name));
   const builtIns = BUILT_IN_TEXTURES.map(texture => ({
+    guid: texture.guid,
     name: texture.name,
     thumbnail: texture.thumbnailUrl,
     date: 'built-in',

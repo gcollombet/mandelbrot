@@ -85,16 +85,20 @@ export async function syncRemoteCatalog(): Promise<void> {
       if (local && !isRemoteNewer(remote.lastUpdated, local.lastUpdated)) continue;
       const entry = await getRemoteCatalogEntry('texture', remote.guid) as RemoteTextureEntry | null;
       if (!entry) continue;
-      const blob = await getRemoteTextureBlob(entry);
-      await saveRemoteTextureEntry({
-        guid: entry.guid,
-        name: entry.name,
-        thumbnail: entry.thumbnail,
-        date: entry.lastUpdated,
-        lastUpdated: entry.lastUpdated,
-        favorite: false,
-        remote: {publishedName: entry.name, lastUpdated: entry.lastUpdated},
-      }, blob);
+      try {
+        const blob = await getRemoteTextureBlob(entry);
+        await saveRemoteTextureEntry({
+          guid: entry.guid,
+          name: entry.name,
+          thumbnail: entry.thumbnail,
+          date: entry.lastUpdated,
+          lastUpdated: entry.lastUpdated,
+          favorite: false,
+          remote: {publishedName: entry.name, lastUpdated: entry.lastUpdated},
+        }, blob);
+      } catch (error) {
+        console.warn(`[remoteCatalogSync] Failed to fetch remote texture "${entry.name}" (${entry.guid}):`, error);
+      }
     }
   } catch (error) {
     if (error instanceof RemoteCatalogUnavailableError) return;

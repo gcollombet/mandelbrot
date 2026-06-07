@@ -9,6 +9,7 @@ import type {IterationData} from '../CursorCoordinate';
 import {computePalettePhase} from '../CursorCoordinate';
 import {Palette} from '../Palette';
 import {createInterpolatedColorStop} from '../ColorStop';
+import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
 import type {TextureMetadata} from '../textureStore';
 import {
@@ -18,6 +19,7 @@ import {
   TEXTURE_SELECTED_KEY,
   textureSourceKey,
 } from '../textureLibrary';
+import {isAuthConfigured, observeAuthState, signInWithGoogle, signOutCurrentUser, type UserRole} from '../authService';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
@@ -35,6 +37,18 @@ const popupPositions = reactive<Record<string, { x: number; y: number }>>({});
 const popupRefs = ref<Record<string, HTMLElement | null>>({});
 
 const showUI = ref(true);
+const authConfigured = isAuthConfigured();
+const authUserEmail = ref('');
+const userRole = ref<UserRole>('guest');
+let stopAuthObserver: (() => void) | null = null;
+
+async function loginWithGoogle() {
+  await signInWithGoogle();
+}
+
+async function logoutUser() {
+  await signOutCurrentUser();
+}
 
 // --- Mode pipette palette ---
 const pickerMode = ref(false);
@@ -286,8 +300,8 @@ async function applySelectedTexturesToEngine() {
   try {
     const textures = await getTextureEntries();
     if (generation !== textureApplyGeneration) return;
-    const tileName = mandelbrotParams.value.textureName ?? 'Gold';
-    const skyboxName = mandelbrotParams.value.skyboxName ?? 'Window';
+    const tileName = nameForCatalogReference(textures, mandelbrotParams.value.textureGuid, mandelbrotParams.value.textureName) ?? 'Gold';
+    const skyboxName = nameForCatalogReference(textures, mandelbrotParams.value.skyboxGuid, mandelbrotParams.value.skyboxName) ?? 'Window';
     const effectiveTileName = textures.some(texture => texture.name === tileName) ? tileName : 'Gold';
     const effectiveSkyboxName = textures.some(texture => texture.name === skyboxName) ? skyboxName : 'Window';
     await applyTexture(engine, 'tile', effectiveTileName, textures, generation);
@@ -312,6 +326,10 @@ function applyApproximationToEngine() {
 
 // Restore parametres a partir du localStorage puis surveille et persiste a chaque changement
 onMounted(() => {
+  stopAuthObserver = observeAuthState((state) => {
+    authUserEmail.value = state.user?.email ?? '';
+    userRole.value = state.role;
+  });
   window.addEventListener('keydown', handleGlobalKeydown);
   window.addEventListener('pointerdown', handleOutsidePointerDown);
   // Navigation detection listeners for HUD hide
@@ -327,6 +345,7 @@ onMounted(() => {
   startBottomHideTimer();
 });
 onUnmounted(() => {
+  stopAuthObserver?.();
   window.removeEventListener('keydown', handleGlobalKeydown);
   window.removeEventListener('pointerdown', handleOutsidePointerDown);
   window.removeEventListener('keydown', handleNavKeydown);
@@ -347,7 +366,12 @@ watch(mandelbrotParams, (params) => {
 }, { deep: true });
 
 watch(
-  [() => mandelbrotParams.value.textureName, () => mandelbrotParams.value.skyboxName] as const,
+  [
+    () => mandelbrotParams.value.textureGuid,
+    () => mandelbrotParams.value.textureName,
+    () => mandelbrotParams.value.skyboxGuid,
+    () => mandelbrotParams.value.skyboxName,
+  ] as const,
   () => { void applySelectedTexturesToEngine(); },
 );
 
@@ -745,6 +769,7 @@ const shortcutLabels = computed(() => {
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
             :active-tab="tab.key"
             :pickerMode="pickerMode"
+            :user-role="userRole"
             @toggle-picker="togglePickerMode"
           />
         </div>
@@ -836,6 +861,25 @@ const shortcutLabels = computed(() => {
         <i class="fa-solid fa-display fa-fw" style="vertical-align:middle; margin-right:4px;"></i>
         Présentation
       </a>
+      <template v-if="authConfigured">
+        <span class="footer-separator">|</span>
+        <button
+          v-if="!authUserEmail"
+          class="footer-auth-button"
+          type="button"
+          @click="loginWithGoogle"
+        >
+          Login
+        </button>
+        <button
+          v-else
+          class="footer-auth-button"
+          type="button"
+          @click="logoutUser"
+        >
+          Logout
+        </button>
+      </template>
     </div>
   </div>
 </template>
@@ -1079,6 +1123,27 @@ const shortcutLabels = computed(() => {
 
 .footer-presentation:hover {
   background: rgba(226, 85, 85, 1);
+  transform: scale(1.05);
+}
+
+.footer-auth-button {
+  display: inline-flex;
+  align-items: center;
+  padding: 3px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: rgba(17, 17, 17, 0.78);
+  color: #fff;
+  font: inherit;
+  font-size: 0.8rem;
+  font-weight: 600;
+  letter-spacing: 0.02em;
+  cursor: pointer;
+  transition: background 0.2s, transform 0.15s;
+}
+
+.footer-auth-button:hover {
+  background: rgba(17, 17, 17, 0.95);
   transform: scale(1.05);
 }
 
