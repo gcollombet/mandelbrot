@@ -789,6 +789,7 @@ const shortcutLabels = computed(() => {
       :orbitTrapStrength="mandelbrotParams.orbitTrapStrength"
       :phaseColoringStrength="mandelbrotParams.phaseColoringStrength"
       :stripeFrequency="mandelbrotParams.stripeFrequency"
+      :textureMappingMode="mandelbrotParams.textureMappingMode"
     />
 
     <!-- Popup Settings — one per open tab (multi-window) -->

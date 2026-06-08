@@ -202,6 +202,7 @@ export type RenderOptions = {
     stripeFrequency: number,
     zoomMinBrushStep: number,
     sentinelSeedStep: number,
+    textureMappingMode: number,
 }
 
 export type ApproximationMode = 'perturbation' | 'bla'
@@ -1556,6 +1557,7 @@ export class Engine {
         const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
         const stripeFrequencyChanged = renderOptions.stripeFrequency !== this.previousRenderOptions?.stripeFrequency
         const orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
+            || renderOptions.textureMappingMode === 2
         const orbitMetricsChanged = this.previousOrbitMetricsEnabled !== undefined
             && orbitMetricsEnabled !== this.previousOrbitMetricsEnabled
         const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
@@ -1758,6 +1760,7 @@ export class Engine {
             renderOptions.heightPaletteShift,    // 32: heightPaletteShift [0, 100]
             renderOptions.orbitTrapStrength,     // 33: orbitTrapStrength [0, 100]
             renderOptions.phaseColoringStrength, // 34: phaseColoringStrength [0, 100]
+            renderOptions.textureMappingMode ?? 0, // 35: textureMappingMode
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -2452,7 +2455,7 @@ export class Engine {
             console.warn('Échec du chargement de la texture : ' + url, e)
             throw e
         }
-        const bitmap = await createImageBitmap(img)
+        const bitmap = await createImageBitmap(img, { premultiplyAlpha: 'none' })
         const texture = this.device.createTexture({
             size: [bitmap.width, bitmap.height, 1],
             format: 'rgba8unorm',

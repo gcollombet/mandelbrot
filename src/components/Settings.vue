@@ -45,6 +45,7 @@ import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry, uploadRemoteTe
 import type {UserRole} from '../authService';
 import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
 import {nameForCatalogReference} from '../catalogIdentity';
+import {MAX_IMPORTED_TEXTURE_SIDE, normalizeTextureBlob} from '../textureNormalization';
 
 import type {Engine} from '../Engine.ts';
 const props = defineProps<{
@@ -164,6 +165,7 @@ const model =  defineModel<MandelbrotParams>({
      sentinelSeedStep: 64,
      textureName: 'Gold',
       skyboxName: 'Window',
+      textureMappingMode: 0,
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
      interpolationMode: 'lab',
@@ -520,6 +522,7 @@ async function savePalette() {
     orbitTrapStrength: model.value.orbitTrapStrength,
     phaseColoringStrength: model.value.phaseColoringStrength,
     stripeFrequency: model.value.stripeFrequency,
+    textureMappingMode: model.value.textureMappingMode,
   };
   await savePaletteEntry(palette);
   palettes.value = await getAllPaletteEntries();
@@ -539,6 +542,11 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   if (source.orbitTrapStrength != null) model.value.orbitTrapStrength = source.orbitTrapStrength;
   if (source.phaseColoringStrength != null) model.value.phaseColoringStrength = source.phaseColoringStrength;
   if (source.stripeFrequency != null) model.value.stripeFrequency = source.stripeFrequency;
+  if (source.textureMappingMode != null) {
+    model.value.textureMappingMode = source.textureMappingMode;
+  } else {
+    model.value.textureMappingMode = 0;
+  }
 }
 
 function selectPalette(name: string) {
@@ -793,6 +801,9 @@ async function selectPreset(id: number) {
     const saved = structuredClone(toRaw(record.value));
     const current = model.value;
     model.value = preserveSessionPerformanceFields(saved, current);
+    if (model.value.textureMappingMode === undefined) {
+      model.value.textureMappingMode = 0;
+    }
     // Restore texture if saved with the preset
     const texName = textureNameForReference(saved.textureGuid, saved.textureName);
     if (texName) {
@@ -1258,8 +1269,6 @@ function clearPalette() {
 // =====================================================
 // Image texture library
 // =====================================================
-const MAX_TEXTURE_SIZE = 4096;
-
 const textureName = ref('');
 const skyboxName = ref('Window');
 const textures = ref<TextureMetadata[]>([]);
@@ -1525,16 +1534,8 @@ async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
     input.value = '';
     return;
   }
-  // Validate dimensions via a temporary blob URL (no base64 needed)
-  const tmpUrl = URL.createObjectURL(file);
-  const img = new Image();
-  img.onload = async () => {
-    URL.revokeObjectURL(tmpUrl);
-    if (img.width > MAX_TEXTURE_SIZE || img.height > MAX_TEXTURE_SIZE) {
-      window.alert(`Image too large (${img.width}×${img.height}). Maximum size: ${MAX_TEXTURE_SIZE}×${MAX_TEXTURE_SIZE}.`);
-      input.value = '';
-      return;
-    }
+  try {
+    const normalized = await normalizeTextureBlob(file);
     // Use filename (without extension) as default name
     const baseName = file.name.replace(/\.[^/.]+$/, '') || 'Texture';
     let name = baseName;
@@ -1542,13 +1543,13 @@ async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
     while (textures.value.some(t => t.name === name)) {
       name = `${baseName} (${counter++})`;
     }
-    // Generate thumbnail from the blob
-    const thumbUrl = URL.createObjectURL(file);
+    // Generate thumbnail from the normalized WebP blob.
+    const thumbUrl = URL.createObjectURL(normalized.blob);
     const thumbnail = await generateThumbnailFromUrl(thumbUrl);
     URL.revokeObjectURL(thumbUrl);
 
     // Store blob in IndexedDB
-    await saveTextureEntry(name, file, thumbnail);
+    await saveTextureEntry(name, normalized.blob, thumbnail);
 
     // Refresh metadata list
     textures.value = await ensureTextureLibrary();
@@ -1562,13 +1563,11 @@ async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
       textureName.value = name;
     }
     input.value = '';
-  };
-  img.onerror = () => {
-    URL.revokeObjectURL(tmpUrl);
-    window.alert('Failed to load image.');
+  } catch (error) {
+    console.warn('Failed to normalize imported texture:', error);
+    window.alert(`Failed to process image. Please choose a supported image that can be converted to WebP at ${MAX_IMPORTED_TEXTURE_SIDE}px maximum.`);
     input.value = '';
-  };
-  img.src = tmpUrl;
+  }
 }
 
 async function importTexture(event: Event) {
@@ -2085,6 +2084,16 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-label">Image Displacement</span>
         <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
         <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
+      </div>
+      <div class="gfx-slider-row" style="margin-bottom: 0.8em;">
+        <span class="gfx-slider-label">Image Mapping</span>
+        <div class="select is-small" style="flex: 1 1 auto;">
+          <select v-model.number="model.textureMappingMode" style="width: 100%;">
+            <option :value="0">Screen Space (Default)</option>
+            <option :value="1">Cartesian Escape Z (Dragon Scales)</option>
+            <option :value="2">Ray-Potential Polar (Smooth Skin)</option>
+          </select>
+        </div>
       </div>
       <!-- Image texture library (compact) -->
       <div class="mb-3 compact-library">

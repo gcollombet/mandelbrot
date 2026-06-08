@@ -34,6 +34,7 @@ struct Uniforms {
   heightPaletteShift: f32,
   orbitTrapStrength: f32,
   phaseColoringStrength: f32,
+  textureMappingMode: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -289,7 +290,7 @@ fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec
   return scatterColor * mask * clamp(strength, 0.0, 10.0) * (1.0 - metallic);
 }
 
-fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec3<f32> {
+fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec4<f32> {
   let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
   let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
 
@@ -304,16 +305,20 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
     i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
     i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
   );
-  return textureLoad(tex_, coord, 0).rgb;
+  return textureLoad(tex_, coord, 0);
+}
+
+fn visible_tile_rgb(tile: vec4<f32>) -> vec3<f32> {
+  return tile.rgb * tile.a;
 }
 
 fn texture_bump_normal(tex_: texture_2d<f32>, normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, v: f32, dist: f32, repeat: f32, strength: f32) -> vec3<f32> {
   let safeRepeat = max(repeat, 0.1);
   let stepSize = 1.0 / (safeRepeat * 96.0);
-  let lpx = luminance(tile_tessellation(tex_, v + stepSize, dist, repeat));
-  let lnx = luminance(tile_tessellation(tex_, v - stepSize, dist, repeat));
-  let lpy = luminance(tile_tessellation(tex_, v, dist + stepSize, repeat));
-  let lny = luminance(tile_tessellation(tex_, v, dist - stepSize, repeat));
+  let lpx = luminance(visible_tile_rgb(tile_tessellation(tex_, v + stepSize, dist, repeat)));
+  let lnx = luminance(visible_tile_rgb(tile_tessellation(tex_, v - stepSize, dist, repeat)));
+  let lpy = luminance(visible_tile_rgb(tile_tessellation(tex_, v, dist + stepSize, repeat)));
+  let lny = luminance(visible_tile_rgb(tile_tessellation(tex_, v, dist - stepSize, repeat)));
   let grad = vec2<f32>(lpx - lnx, lpy - lny);
   let bump = (tangent * grad.x + bitangent * grad.y) * clamp(strength, 0.0, 2.0) * 0.85;
   return normalize(normal - bump);
@@ -407,6 +412,12 @@ fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: ve
   return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 12.0 * gradientScale;
 }
 
+fn smooth_escape_fraction(z_sq: f32) -> f32 {
+  let log_z2 = log(max(z_sq, 1e-12));
+  let logMu = max(parameters.logMu, 1e-6);
+  return 1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0);
+}
+
 fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, distanceHeightOffset: f32, distanceHeightGradientScale: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
@@ -424,8 +435,43 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   // ── Tessellation depth: always smooth, independent of palette period ──
   let tess_depth = v_smooth * 2.0;
   let disp = parameters.displacementAmount;
-  let tess_u = tess_depth * 2.0 * disp + dx;
-  let tess_v = tess_depth * 2.0 * disp + dy;
+  var tess_u = 0.0;
+  var tess_v = 0.0;
+
+  if (parameters.textureMappingMode < 0.5) {
+    // Mode 0: Screen Space (Default)
+    tess_u = tess_depth * 2.0 * disp + dx;
+    tess_v = tess_depth * 2.0 * disp + dy;
+  } else if (parameters.textureMappingMode < 1.5) {
+    // Mode 1: Escape Z Texture Mapping (Log-Polar Raw Z)
+    // The reference image actually uses a polar mapping of the raw escape Z!
+    // By mapping U to the logarithmic radius and V to the angle, the texture
+    // flows radially inward, creating the sweeping ribbons. Because we use raw Z,
+    // the angle doubles at each boundary, creating the discrete cuts and causing
+    // the number of ribbons to double at each step (exactly like the reference).
+    let z_len = max(length(z), 1e-12);
+    let log_mu = log(max(parameters.mu, 1.0));
+    
+    // u goes from 1.0 (at |z|=R) to 2.0 (at |z|=R^2)
+    let u = 2.0 * log(z_len) / log_mu;
+    let theta = atan2(z.y, z.x);
+    
+    // U flows radially (counting down with iterations so it flows inward)
+    // V wraps around the circle (1 wrap per 2pi)
+    tess_u = (u - iterRaw);
+    tess_v = theta / (2.0 * 3.141592653589793);
+  } else {
+    // Mode 2: Polar Ray-Potential (Continuous Flow) - Continuous Version
+    let z_sq = z.x * z.x + z.y * z.y;
+    let p = clamp(smooth_escape_fraction(z_sq), 0.0, 1.0);
+    let theta = atan2(z.y, z.x) / (2.0 * 3.141592653589793);
+    let escape_angle = theta * pow(2.0, p);
+
+    let polar_scale_u = mix(0.0002, 0.02, disp * 10.0);
+    let polar_scale_v = mix(0.1, 5.0, disp * 10.0);
+    tess_u = v_smooth * polar_scale_u;
+    tess_v = tess_depth * 2.0 * disp + escape_angle * polar_scale_v; // add screen shift to rotate/drift smoothly
+  }
 
   // ── Gentle sinusoidal animation (only when animate is on) ──
   let anim = parameters.animate;
@@ -442,8 +488,8 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
 
   // Tessellation: overlay on top of palette color
   if (effTess > 0.001) {
-    let tessColor = tile_tessellation(tileTex, tess_u + tile_drift.x, tess_v + tile_drift.y, parameters.tessellationLevel);
-    color = mix(color, tessColor, effTess);
+    let tessSample = tile_tessellation(tileTex, tess_u + tile_drift.x, tess_v + tile_drift.y, parameters.tessellationLevel);
+    color = mix(color, tessSample.rgb, clamp(effTess * tessSample.a, 0.0, 1.0));
   }
 
   // Webcam: overlay on top of current result
@@ -456,7 +502,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       tess_v + cam_drift_v,
       parameters.tessellationLevel
     );
-    color = mix(color, webCamColor, effWebcam);
+    color = mix(color, webCamColor.rgb, effWebcam);
   }
 
   if (fx.wStripeAverage > 0.001) {
@@ -679,11 +725,7 @@ fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
   return iter_val + mu_val;
 }
 
-fn smooth_escape_fraction(z_sq: f32) -> f32 {
-  let log_z2 = log(max(z_sq, 1e-12));
-  let logMu = max(parameters.logMu, 1e-6);
-  return 1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0);
-}
+
 
 fn decode_stripe_phase(refWithStripe: f32) -> f32 {
   return fract(max(refWithStripe, 0.0));

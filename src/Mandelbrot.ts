@@ -45,6 +45,7 @@ export interface MandelbrotParams {
     textureGuid?: string;
     skyboxName?: string;
     skyboxGuid?: string;
+    textureMappingMode?: number;
 }
 
 export const SESSION_PERFORMANCE_FIELDS = [

@@ -46,6 +46,7 @@ const props = defineProps<{
   orbitTrapStrength?: number,
   phaseColoringStrength?: number,
   stripeFrequency?: number,
+  textureMappingMode?: number,
 }>();
 
 const emit = defineEmits<{
@@ -399,6 +400,7 @@ onUnmounted(() => {
       :orbitTrapStrength="props.orbitTrapStrength"
       :phaseColoringStrength="props.phaseColoringStrength"
       :stripeFrequency="props.stripeFrequency"
+      :textureMappingMode="props.textureMappingMode"
       @ready="emit('engineReady', $event)"
     />
     

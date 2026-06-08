@@ -56,6 +56,7 @@ export interface PaletteRecord {
   orbitTrapStrength?: number;
   phaseColoringStrength?: number;
   stripeFrequency?: number;
+  textureMappingMode?: number;
 }
 
 /** Lightweight entry for listings (same shape since palettes are small). */
