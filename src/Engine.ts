@@ -21,6 +21,11 @@ import {
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import {normalizePowerOfTwoStep} from './Mandelbrot.ts'
+import {
+    normalizeTextureMappingConfig,
+    textureMappingVariableId,
+    type TextureMappingConfig
+} from './TextureMapping.ts'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -202,7 +207,8 @@ export type RenderOptions = {
     stripeFrequency: number,
     zoomMinBrushStep: number,
     sentinelSeedStep: number,
-    textureMappingMode: number,
+    textureMapping: TextureMappingConfig,
+    textureMappingMode?: number,
 }
 
 export type ApproximationMode = 'perturbation' | 'bla'
@@ -905,7 +911,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 36, // 34 floats padded to 16-byte alignment (144 bytes)
+            size: 4 * 44, // 44 floats padded to 16-byte alignment (176 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1557,7 +1563,6 @@ export class Engine {
         const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
         const stripeFrequencyChanged = renderOptions.stripeFrequency !== this.previousRenderOptions?.stripeFrequency
         const orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
-            || renderOptions.textureMappingMode === 2
         const orbitMetricsChanged = this.previousOrbitMetricsEnabled !== undefined
             && orbitMetricsEnabled !== this.previousOrbitMetricsEnabled
         const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
@@ -1705,6 +1710,7 @@ export class Engine {
         const sceneSin = Math.sin(mandelbrot.angle)
         const sceneCos = Math.cos(mandelbrot.angle)
         const lightDirLen = Math.hypot(Math.cos(renderOptions.lightAngle), Math.sin(renderOptions.lightAngle), 1.85)
+        const textureMapping = normalizeTextureMappingConfig(renderOptions.textureMapping)
 
         const zoomActive = isZoomActive(this.zoomState)
         const zoomFactor = zoomActive
@@ -1760,7 +1766,15 @@ export class Engine {
             renderOptions.heightPaletteShift,    // 32: heightPaletteShift [0, 100]
             renderOptions.orbitTrapStrength,     // 33: orbitTrapStrength [0, 100]
             renderOptions.phaseColoringStrength, // 34: phaseColoringStrength [0, 100]
-            renderOptions.textureMappingMode ?? 0, // 35: textureMappingMode
+            textureMappingVariableId(textureMapping.xVariable), // 35: textureMappingXVariable
+            textureMappingVariableId(textureMapping.yVariable), // 36: textureMappingYVariable
+            textureMapping.xScale,                // 37: textureMappingXScale
+            textureMapping.yScale,                // 38: textureMappingYScale
+            textureMapping.mirrored ? 1 : 0,      // 39: textureMappingMirror
+            parseFloat(mandelbrot.cx),            // 40: centerX
+            parseFloat(mandelbrot.cy),            // 41: centerY
+            mandelbrot.scale,                     // 42: scale
+            0.0,                                  // 43: _pad
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

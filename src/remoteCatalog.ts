@@ -18,10 +18,11 @@ import type {MandelbrotParams} from './Mandelbrot';
 import type {PaletteRecord} from './paletteStore';
 import {getFirebaseServices} from './firebaseConfig';
 import type {StopPresetRecord} from './stopPresetStore';
+import type {TextureMappingPresetRecord} from './textureMappingPresetStore';
 
-export type CatalogType = 'completePreset' | 'palettePreset' | 'stopPreset' | 'texture';
+export type CatalogType = 'completePreset' | 'palettePreset' | 'stopPreset' | 'texture' | 'textureMappingPreset';
 
-export const CATALOG_TYPES: readonly CatalogType[] = ['completePreset', 'palettePreset', 'stopPreset', 'texture'];
+export const CATALOG_TYPES: readonly CatalogType[] = ['completePreset', 'palettePreset', 'stopPreset', 'texture', 'textureMappingPreset'];
 
 export interface RemoteCatalogMetadata {
   guid: string;
@@ -39,6 +40,8 @@ export interface RemotePalettePresetEntry extends RemoteCatalogMetadata, Omit<Pa
 
 export interface RemoteStopPresetEntry extends RemoteCatalogMetadata, Omit<StopPresetRecord, 'date' | 'favorite' | 'guid' | 'name' | 'lastUpdated' | 'remote'> {}
 
+export interface RemoteTextureMappingPresetEntry extends RemoteCatalogMetadata, Omit<TextureMappingPresetRecord, 'date' | 'favorite' | 'guid' | 'name' | 'lastUpdated' | 'remote' | 'builtIn'> {}
+
 export interface RemoteTextureEntry extends RemoteCatalogMetadata {
   thumbnail: string;
   blobPath: string;
@@ -50,13 +53,15 @@ export type RemoteCatalogEntry =
   | RemoteCompletePresetEntry
   | RemotePalettePresetEntry
   | RemoteStopPresetEntry
+  | RemoteTextureMappingPresetEntry
   | RemoteTextureEntry;
 
 export type RemoteEntryByType<T extends CatalogType> =
   T extends 'completePreset' ? RemoteCompletePresetEntry
     : T extends 'palettePreset' ? RemotePalettePresetEntry
       : T extends 'stopPreset' ? RemoteStopPresetEntry
-        : RemoteTextureEntry;
+        : T extends 'textureMappingPreset' ? RemoteTextureMappingPresetEntry
+          : RemoteTextureEntry;
 
 export class RemoteCatalogUnavailableError extends Error {
   constructor() {

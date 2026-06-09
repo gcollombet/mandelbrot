@@ -11,6 +11,7 @@ import {applyStopTransferCurve, createInterpolatedColorStop, getEffectValue, get
 import type { EffectFieldName } from '../effectFieldConfig';
 import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG, UI_GROUPS } from '../effectFieldConfig';
 import type {InterpolationMode} from "../Mandelbrot.ts";
+import type {TextureMappingConfig} from "../TextureMapping.ts";
 import {
   applyStopPresetValues,
   deleteStopPresetEntry,
@@ -40,6 +41,7 @@ const props = withDefaults(defineProps<{
   varnishStrength?: number;
   orbitTrapStrength?: number;
   phaseColoringStrength?: number;
+  textureMapping?: TextureMappingConfig;
   applyToAll?: boolean;
   isAdmin?: boolean;
 }>(), {
@@ -57,6 +59,7 @@ const props = withDefaults(defineProps<{
   varnishStrength: 0,
   orbitTrapStrength: 0,
   phaseColoringStrength: 0,
+  textureMapping: undefined,
   applyToAll: false,
   isAdmin: false,
 });
@@ -596,6 +599,7 @@ defineExpose({ getSnapshot });
         :varnishStrength="varnishStrength"
         :orbitTrapStrength="orbitTrapStrength"
         :phaseColoringStrength="phaseColoringStrength"
+        :textureMapping="textureMapping"
       />
       <div class="handles-overlay">
         <GlissiereHandle

@@ -13,6 +13,7 @@
 import type {ColorStop} from './ColorStop';
 import type {InterpolationMode} from './Mandelbrot';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
+import type {TextureMappingConfig} from './TextureMapping';
 
 const DB_NAME = 'mandelbrot-palettes';
 const DB_VERSION = 2;
@@ -56,6 +57,7 @@ export interface PaletteRecord {
   orbitTrapStrength?: number;
   phaseColoringStrength?: number;
   stripeFrequency?: number;
+  textureMapping?: TextureMappingConfig;
   textureMappingMode?: number;
 }
 
@@ -215,5 +217,4 @@ export async function getPaletteCount(): Promise<number> {
   await done;
   return count;
 }
-
 

@@ -1,11 +1,12 @@
 <script setup lang="ts">
-import {defineProps, onMounted, onUnmounted, ref} from 'vue';
+import {onMounted, onUnmounted, ref} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
 import MobileNavigationControls from './MobileNavigationControls.vue';
 import type {MandelbrotExposed} from "../types/MandelbrotExposed.ts";
 import type {IterationData} from "../CursorCoordinate.ts";
 import type {ColorStop} from "../ColorStop.ts";
 import type {Engine} from '../Engine.ts';
+import type {TextureMappingConfig} from '../TextureMapping.ts';
 
 const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
@@ -46,6 +47,7 @@ const props = defineProps<{
   orbitTrapStrength?: number,
   phaseColoringStrength?: number,
   stripeFrequency?: number,
+  textureMapping?: TextureMappingConfig,
   textureMappingMode?: number,
 }>();
 
@@ -400,6 +402,7 @@ onUnmounted(() => {
       :orbitTrapStrength="props.orbitTrapStrength"
       :phaseColoringStrength="props.phaseColoringStrength"
       :stripeFrequency="props.stripeFrequency"
+      :textureMapping="props.textureMapping"
       :textureMappingMode="props.textureMappingMode"
       @ready="emit('engineReady', $event)"
     />

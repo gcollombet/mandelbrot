@@ -11,6 +11,7 @@ import {
 } from "../Mandelbrot.ts";
 import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry} from '../presetStore';
 import {syncRemoteCatalog} from '../remoteCatalogSync';
+import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
 import {getLatestRemotePreset} from '../remoteCatalog';
 import type {IterationData} from '../CursorCoordinate';
 import {computePalettePhase} from '../CursorCoordinate';
@@ -225,6 +226,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   stripeFrequency: 8,
   textureName: 'Gold',
   skyboxName: 'Window',
+  textureMapping: normalizeTextureMappingFromLegacy({ textureMappingMode: 0 }),
 };
 
 function loadInitialMandelbrotParams(): MandelbrotParams {
@@ -235,6 +237,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   } catch {}
   params.textureName ??= localStorage.getItem(TEXTURE_SELECTED_KEY) ?? 'Gold';
   params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Window';
+  params.textureMapping = normalizeTextureMappingFromLegacy(params);
   params.zoomMinBrushStep = normalizePowerOfTwoStep(params.zoomMinBrushStep, 1, 1, 64);
   params.sentinelSeedStep = Math.max(
     normalizePowerOfTwoStep(params.sentinelSeedStep, 64, 1, 4096),
@@ -789,6 +792,7 @@ const shortcutLabels = computed(() => {
       :orbitTrapStrength="mandelbrotParams.orbitTrapStrength"
       :phaseColoringStrength="mandelbrotParams.phaseColoringStrength"
       :stripeFrequency="mandelbrotParams.stripeFrequency"
+      :textureMapping="mandelbrotParams.textureMapping"
       :textureMappingMode="mandelbrotParams.textureMappingMode"
     />
 

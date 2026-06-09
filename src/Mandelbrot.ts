@@ -1,4 +1,5 @@
 import type {ColorStop} from "./ColorStop.ts";
+import type {TextureMappingConfig} from "./TextureMapping.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
 export type ApproximationMode = 'perturbation' | 'bla';
@@ -45,6 +46,7 @@ export interface MandelbrotParams {
     textureGuid?: string;
     skyboxName?: string;
     skyboxGuid?: string;
+    textureMapping?: TextureMappingConfig;
     textureMappingMode?: number;
 }
 

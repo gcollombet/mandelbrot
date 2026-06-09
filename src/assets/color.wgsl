@@ -34,7 +34,15 @@ struct Uniforms {
   heightPaletteShift: f32,
   orbitTrapStrength: f32,
   phaseColoringStrength: f32,
-  textureMappingMode: f32,
+  textureMappingXVariable: f32,
+  textureMappingYVariable: f32,
+  textureMappingXScale: f32,
+  textureMappingYScale: f32,
+  textureMappingMirror: f32,
+  centerX: f32,
+  centerY: f32,
+  scale: f32,
+  _pad: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -294,8 +302,9 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
   let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
   let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
 
-  let mirrorX = (tileIndex.x % 2) == 1;
-  let mirrorY = (tileIndex.y % 2) == 1;
+  let useMirror = parameters.textureMappingMirror > 0.5;
+  let mirrorX = useMirror && (abs(tileIndex.x) % 2 == 1);
+  let mirrorY = useMirror && (abs(tileIndex.y) % 2 == 1);
   let uv = vec2<f32>(
     select(tileUV.x, 1.0 - tileUV.x, mirrorX),
     select(tileUV.y, 1.0 - tileUV.y, mirrorY)
@@ -306,6 +315,53 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
     i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
   );
   return textureLoad(tex_, coord, 0);
+}
+
+fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, angle_der: f32, dx: f32, dy: f32, tess_depth: f32, disp: f32) -> f32 {
+  let id = i32(variableId + 0.5);
+  let z_len = max(length(z), 1e-12);
+  if (id == 0) {
+    return tess_depth * 2.0 * disp + dx;
+  }
+  if (id == 1) {
+    return tess_depth * 2.0 * disp + dy;
+  }
+  if (id == 2) {
+    let log_mu = log(max(parameters.mu, 1.0));
+    let u = 2.0 * log(z_len) / max(log_mu, 1e-6);
+    return u - iterRaw;
+  }
+  if (id == 3) {
+    return sin(angle_der);
+  }
+  if (id == 4) {
+    return dx;
+  }
+  if (id == 5) {
+    return dy;
+  }
+  if (id == 6) {
+    return iterRaw;
+  }
+  if (id == 7) {
+    return v_smooth;
+  }
+  if (id == 8) {
+    return distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
+  }
+  if (id == 9) {
+    return z_len;
+  }
+  if (id == 10) {
+    return log(z_len);
+  }
+  if (id == 11) {
+    return z.x;
+  }
+  if (id == 12) {
+    return z.y;
+  }
+  return tess_depth * 2.0 * disp + dx;
 }
 
 fn visible_tile_rgb(tile: vec4<f32>) -> vec3<f32> {
@@ -428,9 +484,13 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   // ── Sample all effect channels from the palette texture ──
   let fx = sampleEffects(palettePhase);
 
-  let effTess = fx.wTessellation;
+  var effTess = fx.wTessellation;
   let effWebcam = fx.wWebcam;
   let effShading = fx.wShading;
+
+    // ── Blend color sources using overlay/opacity model ──
+    // Palette is always the base. Other sources overlay on top with their weight as opacity.
+    var color = fx.paletteColor * fx.wPalette;
 
   // ── Tessellation depth: always smooth, independent of palette period ──
   let tess_depth = v_smooth * 2.0;
@@ -438,40 +498,8 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   var tess_u = 0.0;
   var tess_v = 0.0;
 
-  if (parameters.textureMappingMode < 0.5) {
-    // Mode 0: Screen Space (Default)
-    tess_u = tess_depth * 2.0 * disp + dx;
-    tess_v = tess_depth * 2.0 * disp + dy;
-  } else if (parameters.textureMappingMode < 1.5) {
-    // Mode 1: Escape Z Texture Mapping (Log-Polar Raw Z)
-    // The reference image actually uses a polar mapping of the raw escape Z!
-    // By mapping U to the logarithmic radius and V to the angle, the texture
-    // flows radially inward, creating the sweeping ribbons. Because we use raw Z,
-    // the angle doubles at each boundary, creating the discrete cuts and causing
-    // the number of ribbons to double at each step (exactly like the reference).
-    let z_len = max(length(z), 1e-12);
-    let log_mu = log(max(parameters.mu, 1.0));
-    
-    // u goes from 1.0 (at |z|=R) to 2.0 (at |z|=R^2)
-    let u = 2.0 * log(z_len) / log_mu;
-    let theta = atan2(z.y, z.x);
-    
-    // U flows radially (counting down with iterations so it flows inward)
-    // V wraps around the circle (1 wrap per 2pi)
-    tess_u = (u - iterRaw);
-    tess_v = theta / (2.0 * 3.141592653589793);
-  } else {
-    // Mode 2: Polar Ray-Potential (Continuous Flow) - Continuous Version
-    let z_sq = z.x * z.x + z.y * z.y;
-    let p = clamp(smooth_escape_fraction(z_sq), 0.0, 1.0);
-    let theta = atan2(z.y, z.x) / (2.0 * 3.141592653589793);
-    let escape_angle = theta * pow(2.0, p);
-
-    let polar_scale_u = mix(0.0002, 0.02, disp * 10.0);
-    let polar_scale_v = mix(0.1, 5.0, disp * 10.0);
-    tess_u = v_smooth * polar_scale_u;
-    tess_v = tess_depth * 2.0 * disp + escape_angle * polar_scale_v; // add screen shift to rotate/drift smoothly
-  }
+  tess_u = texture_mapping_value(parameters.textureMappingXVariable, iterRaw, v_smooth, z, distanceHeightStored, angle_der, dx, dy, tess_depth, disp) * parameters.textureMappingXScale;
+  tess_v = texture_mapping_value(parameters.textureMappingYVariable, iterRaw, v_smooth, z, distanceHeightStored, angle_der, dx, dy, tess_depth, disp) * parameters.textureMappingYScale;
 
   // ── Gentle sinusoidal animation (only when animate is on) ──
   let anim = parameters.animate;
@@ -482,9 +510,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     anim * 0.03 * sin(t * 0.3 * spd + 1.2),
   );
 
-  // ── Blend color sources using overlay/opacity model ──
-  // Palette is always the base. Other sources overlay on top with their weight as opacity.
-  var color = fx.paletteColor * fx.wPalette;
+
 
   // Tessellation: overlay on top of palette color
   if (effTess > 0.001) {

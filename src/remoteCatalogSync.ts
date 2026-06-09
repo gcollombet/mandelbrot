@@ -6,12 +6,14 @@ import {
   type RemoteCompletePresetEntry,
   type RemotePalettePresetEntry,
   type RemoteStopPresetEntry,
+  type RemoteTextureMappingPresetEntry,
   type RemoteTextureEntry,
 } from './remoteCatalog';
 import {getAllPaletteEntries, saveRemotePaletteEntry} from './paletteStore';
 import {getAllPresetRecords, saveRemotePresetEntry} from './presetStore';
 import {getAllStopPresetEntries, saveRemoteStopPresetEntry} from './stopPresetStore';
 import {getAllTextureEntries, saveRemoteTextureEntry} from './textureStore';
+import {getAllStoredTextureMappingPresetEntries, saveRemoteTextureMappingPresetEntry} from './textureMappingPresetStore';
 
 function isRemoteNewer(remoteLastUpdated: string, localLastUpdated?: string): boolean {
   if (!localLastUpdated) return true;
@@ -25,11 +27,12 @@ export function shouldFetchRemoteEntry(remoteLastUpdated: string, localLastUpdat
 export async function syncRemoteCatalog(): Promise<void> {
   try {
     const metadata = await listAllRemoteCatalogMetadata();
-    const [presets, palettes, stops, textures] = await Promise.all([
+    const [presets, palettes, stops, textures, textureMappings] = await Promise.all([
       getAllPresetRecords(),
       getAllPaletteEntries(),
       getAllStopPresetEntries(),
       getAllTextureEntries(),
+      getAllStoredTextureMappingPresetEntries(),
     ]);
 
     const presetsByGuid = new Map(presets.map(entry => [entry.guid, entry]));
@@ -72,6 +75,20 @@ export async function syncRemoteCatalog(): Promise<void> {
       const entry = await getRemoteCatalogEntry('stopPreset', remote.guid) as RemoteStopPresetEntry | null;
       if (!entry) continue;
       await saveRemoteStopPresetEntry({
+        ...entry,
+        date: entry.lastUpdated,
+        favorite: false,
+        remote: {publishedName: entry.name, lastUpdated: entry.lastUpdated},
+      });
+    }
+
+    const textureMappingsByGuid = new Map(textureMappings.map(entry => [entry.guid, entry]));
+    for (const remote of metadata.textureMappingPreset) {
+      const local = textureMappingsByGuid.get(remote.guid);
+      if (local && !isRemoteNewer(remote.lastUpdated, local.lastUpdated)) continue;
+      const entry = await getRemoteCatalogEntry('textureMappingPreset', remote.guid) as RemoteTextureMappingPresetEntry | null;
+      if (!entry) continue;
+      await saveRemoteTextureMappingPresetEntry({
         ...entry,
         date: entry.lastUpdated,
         favorite: false,

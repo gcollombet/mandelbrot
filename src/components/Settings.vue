@@ -42,6 +42,21 @@ import {
 } from '../paletteStore';
 import {syncRemoteCatalog} from '../remoteCatalogSync';
 import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry, uploadRemoteTextureEntry} from '../remoteCatalog';
+import type {TextureMappingPresetRecord} from '../textureMappingPresetStore';
+import {
+  deleteTextureMappingPresetEntry,
+  getAllTextureMappingPresetEntries,
+  saveTextureMappingPresetEntry,
+} from '../textureMappingPresetStore';
+import {
+  DRAGON_SCALES_TEXTURE_MAPPING,
+  normalizeTextureMappingFromLegacy,
+  SCREEN_SPACE_TEXTURE_MAPPING,
+  TEXTURE_MAPPING_SCALE_MAX,
+  TEXTURE_MAPPING_SCALE_MIN,
+  TEXTURE_MAPPING_VARIABLE_OPTIONS,
+  textureMappingEquals,
+} from '../TextureMapping';
 import type {UserRole} from '../authService';
 import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
 import {nameForCatalogReference} from '../catalogIdentity';
@@ -165,7 +180,7 @@ const model =  defineModel<MandelbrotParams>({
      sentinelSeedStep: 64,
      textureName: 'Gold',
       skyboxName: 'Window',
-      textureMappingMode: 0,
+      textureMapping: normalizeTextureMappingFromLegacy({ textureMappingMode: 0 }),
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
      interpolationMode: 'lab',
@@ -173,6 +188,69 @@ const model =  defineModel<MandelbrotParams>({
      targetFps: 60,
      gpuLoadMultiplier: 1.0,
   }
+});
+
+function ensureActiveTextureMapping() {
+  model.value.textureMapping = normalizeTextureMappingFromLegacy(model.value);
+  delete (model.value as any).textureMappingMode;
+}
+
+ensureActiveTextureMapping();
+
+const textureMappingXScaleSlider = computed({
+  get: () => Math.log10(normalizeTextureMappingFromLegacy(model.value).xScale),
+  set: (value: number) => {
+    ensureActiveTextureMapping();
+    model.value.textureMapping!.xScale = Number(Math.pow(10, value).toPrecision(4));
+  },
+});
+
+const textureMappingYScaleSlider = computed({
+  get: () => Math.log10(normalizeTextureMappingFromLegacy(model.value).yScale),
+  set: (value: number) => {
+    ensureActiveTextureMapping();
+    model.value.textureMapping!.yScale = Number(Math.pow(10, value).toPrecision(4));
+  },
+});
+
+const textureMappingXVariable = computed({
+  get: () => normalizeTextureMappingFromLegacy(model.value).xVariable,
+  set: (value) => {
+    ensureActiveTextureMapping();
+    model.value.textureMapping!.xVariable = value;
+  },
+});
+
+const textureMappingYVariable = computed({
+  get: () => normalizeTextureMappingFromLegacy(model.value).yVariable,
+  set: (value) => {
+    ensureActiveTextureMapping();
+    model.value.textureMapping!.yVariable = value;
+  },
+});
+
+const textureMappingMirror = computed({
+  get: () => normalizeTextureMappingFromLegacy(model.value).mirrored,
+  set: (value: boolean) => {
+    ensureActiveTextureMapping();
+    model.value.textureMapping!.mirrored = value;
+  },
+});
+
+function applyTextureMapping(mapping: unknown) {
+  model.value.textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: mapping });
+  delete (model.value as any).textureMappingMode;
+}
+
+function applyBuiltInTextureMapping(kind: 'screen' | 'dragon') {
+  applyTextureMapping(kind === 'dragon' ? DRAGON_SCALES_TEXTURE_MAPPING : SCREEN_SPACE_TEXTURE_MAPPING);
+  selectedTextureMappingPreset.value = kind === 'dragon' ? 'Dragon Scales' : 'Screen Space';
+}
+
+const activeTextureMappingLabel = computed(() => {
+  const active = normalizeTextureMappingFromLegacy(model.value);
+  const matching = textureMappingPresets.value.find(preset => textureMappingEquals(preset.mapping, active));
+  return matching?.name ?? 'Custom';
 });
 
 
@@ -404,6 +482,8 @@ async function savePreset() {
   savedValue.textureGuid = currentTextureObj.value?.guid;
   savedValue.skyboxName = selectedSkyboxTexture.value;
   savedValue.skyboxGuid = currentSkyboxObj.value?.guid;
+  savedValue.textureMapping = normalizeTextureMappingFromLegacy(savedValue);
+  delete (savedValue as any).textureMappingMode;
   const name = presetName.value.trim();
   const id = await savePresetEntry(savedValue, thumbnail, name || undefined, now);
   presets.value = await getAllPresetEntries();
@@ -443,6 +523,8 @@ async function quickSnapshot() {
   savedValue.textureGuid = currentTextureObj.value?.guid;
   savedValue.skyboxName = selectedSkyboxTexture.value;
   savedValue.skyboxGuid = currentSkyboxObj.value?.guid;
+  savedValue.textureMapping = normalizeTextureMappingFromLegacy(savedValue);
+  delete (savedValue as any).textureMappingMode;
   const now = new Date().toISOString();
   const id = await savePresetEntry(savedValue, thumbnail, undefined, now);
   presets.value = await getAllPresetEntries();
@@ -522,7 +604,7 @@ async function savePalette() {
     orbitTrapStrength: model.value.orbitTrapStrength,
     phaseColoringStrength: model.value.phaseColoringStrength,
     stripeFrequency: model.value.stripeFrequency,
-    textureMappingMode: model.value.textureMappingMode,
+    textureMapping: normalizeTextureMappingFromLegacy(model.value),
   };
   await savePaletteEntry(palette);
   palettes.value = await getAllPaletteEntries();
@@ -542,11 +624,8 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   if (source.orbitTrapStrength != null) model.value.orbitTrapStrength = source.orbitTrapStrength;
   if (source.phaseColoringStrength != null) model.value.phaseColoringStrength = source.phaseColoringStrength;
   if (source.stripeFrequency != null) model.value.stripeFrequency = source.stripeFrequency;
-  if (source.textureMappingMode != null) {
-    model.value.textureMappingMode = source.textureMappingMode;
-  } else {
-    model.value.textureMappingMode = 0;
-  }
+  model.value.textureMapping = normalizeTextureMappingFromLegacy(source);
+  delete (model.value as any).textureMappingMode;
 }
 
 function selectPalette(name: string) {
@@ -799,11 +878,11 @@ async function selectPreset(id: number) {
     presetName.value = record.name;
     // Restore all fields except performance params
     const saved = structuredClone(toRaw(record.value));
+    saved.textureMapping = normalizeTextureMappingFromLegacy(saved);
+    delete (saved as any).textureMappingMode;
     const current = model.value;
     model.value = preserveSessionPerformanceFields(saved, current);
-    if (model.value.textureMappingMode === undefined) {
-      model.value.textureMappingMode = 0;
-    }
+    ensureActiveTextureMapping();
     // Restore texture if saved with the preset
     const texName = textureNameForReference(saved.textureGuid, saved.textureName);
     if (texName) {
@@ -839,10 +918,12 @@ const maxIterMultSlider = computed({
 onMounted(async () => {
   await loadPresets();
   await loadPalettes();
+  await loadTextureMappingPresets();
   await loadTextures();
   await syncRemoteCatalog();
   await loadPresets();
   await loadPalettes();
+  await loadTextureMappingPresets();
   await loadTextures();
 });
 
@@ -1009,6 +1090,8 @@ async function importPresets(event: Event) {
         if (existing.some(e => e.name === name && e.date === date)) continue;
         const value = structuredClone(record.value);
         stripSessionPerformanceFields(value);
+        value.textureMapping = normalizeTextureMappingFromLegacy(value);
+        delete (value as any).textureMappingMode;
         await savePresetEntry(
           value,
           record.thumbnail ?? '',
@@ -1079,6 +1162,8 @@ async function importPalettes(event: Event) {
         if (!palette || typeof palette !== 'object' || !('name' in palette) || !('colorStops' in palette)) continue;
         hadValid = true;
         const record = palette as PaletteRecord;
+        record.textureMapping = normalizeTextureMappingFromLegacy(record);
+        delete (record as any).textureMappingMode;
         const name = record.name ?? '';
         const date = record.date ?? '';
         if (existing.some(e => e.name === name && e.date === date)) continue;
@@ -1272,6 +1357,10 @@ function clearPalette() {
 const textureName = ref('');
 const skyboxName = ref('Window');
 const textures = ref<TextureMetadata[]>([]);
+const textureMappingPresetName = ref('');
+const textureMappingPresets = ref<TextureMappingPresetRecord[]>([]);
+const selectedTextureMappingPreset = ref('Screen Space');
+const showTextureMappingDropdown = ref(false);
 const selectedTexture = ref('Gold');
 const selectedSkyboxTexture = ref('Window');
 const showTextureDropdown = ref(false);
@@ -1282,6 +1371,88 @@ const currentTextureObj = computed(() => textures.value.find(t => t.name === sel
 const currentTextureThumbnail = computed(() => currentTextureObj.value?.thumbnail);
 const currentSkyboxObj = computed(() => textures.value.find(t => t.name === selectedSkyboxTexture.value));
 const currentSkyboxThumbnail = computed(() => currentSkyboxObj.value?.thumbnail);
+
+async function loadTextureMappingPresets() {
+  textureMappingPresets.value = await getAllTextureMappingPresetEntries();
+}
+
+function selectTextureMappingPresetFromDropdown(preset: TextureMappingPresetRecord) {
+  selectedTextureMappingPreset.value = preset.name;
+  textureMappingPresetName.value = preset.builtIn ? '' : preset.name;
+  applyTextureMapping(preset.mapping);
+  showTextureMappingDropdown.value = false;
+}
+
+async function saveTextureMappingPreset() {
+  const name = textureMappingPresetName.value.trim();
+  if (!name) return;
+  const existing = textureMappingPresets.value.find(item => item.name === name && !item.builtIn);
+  if (!canOverwriteCatalogPayload(userRole.value, existing?.remote)) {
+    window.alert('Shared catalog texture mappings cannot be overwritten. Save a local variant with a new name.');
+    return;
+  }
+  const now = new Date().toISOString();
+  await saveTextureMappingPresetEntry({
+    guid: existing?.guid ?? crypto.randomUUID(),
+    name,
+    mapping: normalizeTextureMappingFromLegacy(model.value),
+    date: existing?.date ?? now,
+    lastUpdated: now,
+    favorite: existing?.favorite ?? false,
+    remote: existing?.remote,
+  });
+  textureMappingPresets.value = await getAllTextureMappingPresetEntries();
+  selectedTextureMappingPreset.value = name;
+  textureMappingPresetName.value = '';
+}
+
+async function toggleTextureMappingFavorite(preset: TextureMappingPresetRecord): Promise<void> {
+  if (preset.builtIn) return;
+  const previous = preset.favorite ?? false;
+  preset.favorite = !previous;
+  try {
+    await saveTextureMappingPresetEntry({ ...preset });
+    textureMappingPresets.value = await getAllTextureMappingPresetEntries();
+  } catch (error) {
+    preset.favorite = previous;
+    console.warn('Failed to save texture mapping favorite:', error);
+  }
+}
+
+async function uploadTextureMappingPreset(preset: TextureMappingPresetRecord): Promise<void> {
+  if (!isAdmin.value || preset.builtIn) return;
+  try {
+    const uploaded = await uploadRemoteCatalogEntry('textureMappingPreset', {
+      guid: preset.guid,
+      name: preset.name,
+      lastUpdated: preset.lastUpdated || preset.date || new Date().toISOString(),
+      mapping: normalizeTextureMappingFromLegacy({ textureMapping: preset.mapping }),
+    });
+    await saveTextureMappingPresetEntry({
+      ...preset,
+      lastUpdated: uploaded.lastUpdated,
+      remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
+    });
+    textureMappingPresets.value = await getAllTextureMappingPresetEntries();
+    showUploadSuccess(uploadSuccessKey('texture-mapping', preset.guid));
+  } catch (error) {
+    handleUploadError(error);
+  }
+}
+
+async function deleteTextureMappingPreset(preset: TextureMappingPresetRecord): Promise<void> {
+  if (preset.builtIn) return;
+  if (!canDeleteCatalogEntry(userRole.value, preset.remote)) {
+    window.alert('Shared catalog texture mappings cannot be deleted locally.');
+    return;
+  }
+  if (!window.confirm(`Delete texture mapping "${preset.name}"? This cannot be undone.`)) return;
+  await deleteTextureMappingPresetEntry(preset.name);
+  textureMappingPresets.value = await getAllTextureMappingPresetEntries();
+  if (selectedTextureMappingPreset.value === preset.name) {
+    selectedTextureMappingPreset.value = activeTextureMappingLabel.value;
+  }
+}
 
 function textureNameForReference(guid?: string, fallbackName?: string): string | null {
   return nameForCatalogReference(textures.value, guid, fallbackName);
@@ -1895,11 +2066,12 @@ async function renameAndSaveSkyboxTexture() {
             :varnish-strength="model.varnishStrength"
             :orbit-trap-strength="model.orbitTrapStrength"
             :phase-coloring-strength="model.phaseColoringStrength"
+            :texture-mapping="model.textureMapping"
             :is-admin="isAdmin"
-            :engine-device="engine?.device"
-            :engine-tile-texture="engine?.tileTexture"
-            :engine-skybox-texture="engine?.skyboxTexture"
-            :engine-webcam-texture="engine?.webcamTileTexture"
+            :engine-device="props.engine?.device"
+            :engine-tile-texture="props.engine?.tileTexture"
+            :engine-skybox-texture="props.engine?.skyboxTexture"
+            :engine-webcam-texture="props.engine?.webcamTileTexture"
             v-model:apply-to-all="applyToAll"
             @toggle-picker="emit('toggle-picker')"
             @invert="invertPalette"
@@ -2085,14 +2257,116 @@ async function renameAndSaveSkyboxTexture() {
         <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
         <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
       </div>
-      <div class="gfx-slider-row" style="margin-bottom: 0.8em;">
-        <span class="gfx-slider-label">Image Mapping</span>
+      <div class="field is-grouped is-grouped-multiline" style="margin-bottom: 0.65em;">
+        <p class="control">
+          <button class="button is-small" :class="activeTextureMappingLabel === 'Screen Space' ? 'is-link' : 'is-light'" @click="applyBuiltInTextureMapping('screen')">
+            Screen Space
+          </button>
+        </p>
+        <p class="control">
+          <button class="button is-small" :class="activeTextureMappingLabel === 'Dragon Scales' ? 'is-link' : 'is-light'" @click="applyBuiltInTextureMapping('dragon')">
+            Dragon Scales
+          </button>
+        </p>
+        <p class="control" style="align-self:center; font-size:0.8em; opacity:0.8;">{{ activeTextureMappingLabel }}</p>
+      </div>
+      <div class="gfx-slider-row" style="margin-bottom: 0.45em;">
+        <span class="gfx-slider-label">Mapping X</span>
         <div class="select is-small" style="flex: 1 1 auto;">
-          <select v-model.number="model.textureMappingMode" style="width: 100%;">
-            <option :value="0">Screen Space (Default)</option>
-            <option :value="1">Cartesian Escape Z (Dragon Scales)</option>
-            <option :value="2">Ray-Potential Polar (Smooth Skin)</option>
+          <select v-model="textureMappingXVariable" style="width: 100%;">
+            <option v-for="option in TEXTURE_MAPPING_VARIABLE_OPTIONS" :key="'x-' + option.value" :value="option.value">{{ option.label }}</option>
           </select>
+        </div>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">X Scale</span>
+        <input class="slider" type="range" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" step="0.01" v-model.number="textureMappingXScaleSlider" />
+        <span class="gfx-slider-value">&times;{{ normalizeTextureMappingFromLegacy(model).xScale.toFixed(2) }}</span>
+      </div>
+      <div class="gfx-slider-row" style="margin-bottom: 0.45em;">
+        <span class="gfx-slider-label">Mapping Y</span>
+        <div class="select is-small" style="flex: 1 1 auto;">
+          <select v-model="textureMappingYVariable" style="width: 100%;">
+            <option v-for="option in TEXTURE_MAPPING_VARIABLE_OPTIONS" :key="'y-' + option.value" :value="option.value">{{ option.label }}</option>
+          </select>
+        </div>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Y Scale</span>
+        <input class="slider" type="range" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" step="0.01" v-model.number="textureMappingYScaleSlider" />
+        <span class="gfx-slider-value">&times;{{ normalizeTextureMappingFromLegacy(model).yScale.toFixed(2) }}</span>
+      </div>
+      <label class="checkbox" style="display:flex; align-items:center; gap:0.5em; margin:0.25em 0 0.8em;">
+        <input type="checkbox" v-model="textureMappingMirror" />
+        Mirror texture
+      </label>
+      <div class="mb-3 compact-library">
+        <label class="palette-library-label">Texture Mapping Preset</label>
+        <div class="dropdown" :class="{ 'is-active': showTextureMappingDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth is-small" @click="showTextureMappingDropdown = !showTextureMappingDropdown" aria-haspopup="true" aria-controls="dropdown-menu-texture-mappings" type="button">
+              <span style="display:flex; align-items:center; min-height:28px;">
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ activeTextureMappingLabel }}</span>
+                <span class="icon is-small" style="margin-left:4px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-texture-mappings" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:260px; overflow-y:auto;">
+              <a v-for="preset in textureMappingPresets" :key="preset.guid" class="dropdown-item favorite-row"
+                @click.prevent="selectTextureMappingPresetFromDropdown(preset)"
+                :class="{ 'is-active': activeTextureMappingLabel === preset.name }"
+                style="display:flex; align-items:center; gap:0.5em;">
+                <button
+                  v-if="isAdmin && !preset.builtIn"
+                  class="favorite-button upload-button"
+                  :class="uploadButtonClasses(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
+                  type="button"
+                  :title="uploadButtonTitle(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
+                  :aria-label="uploadButtonTitle(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
+                  @click.stop.prevent="uploadTextureMappingPreset(preset)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('texture-mapping', preset.guid))"></i></span>
+                </button>
+                <button
+                  class="favorite-button"
+                  :class="{ 'is-favorite': preset.favorite }"
+                  type="button"
+                  :disabled="preset.builtIn"
+                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!preset.favorite"
+                  @click.stop.prevent="toggleTextureMappingFavorite(preset)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                </button>
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ preset.name }}</span>
+                <button
+                  v-if="!preset.builtIn"
+                  class="favorite-button"
+                  type="button"
+                  title="Delete texture mapping"
+                  aria-label="Delete texture mapping"
+                  @click.stop.prevent="deleteTextureMappingPreset(preset)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-trash"></i></span>
+                </button>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="field is-grouped" style="margin-top:0.5em;">
+          <div class="control is-expanded">
+            <input class="input is-small" v-model="textureMappingPresetName" type="text" placeholder="Mapping preset name..."
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+              @keyup.enter="saveTextureMappingPreset"
+            />
+          </div>
+          <div class="control">
+            <button class="button is-link is-small" @click="saveTextureMappingPreset"><i class="fa-solid fa-floppy-disk mr-1"></i> Save</button>
+          </div>
         </div>
       </div>
       <!-- Image texture library (compact) -->

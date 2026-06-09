@@ -3,6 +3,10 @@ import {nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import {Engine} from '../Engine.ts';
 import {MandelbrotNavigator} from 'mandelbrot';
 import type {ColorStop} from '../ColorStop.ts';
+import {
+  normalizeTextureMappingFromLegacy,
+  type TextureMappingConfig
+} from '../TextureMapping.ts';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let canvas: HTMLCanvasElement | null = null;
@@ -74,6 +78,7 @@ const props = withDefaults(defineProps<{
   orbitTrapStrength?: number,
   phaseColoringStrength?: number,
   stripeFrequency?: number,
+  textureMapping?: TextureMappingConfig,
   textureMappingMode?: number,
  }>(),
 
@@ -137,7 +142,7 @@ const props = withDefaults(defineProps<{
         orbitTrapStrength: 0,
         phaseColoringStrength: 0,
         stripeFrequency: 8,
-        textureMappingMode: 0,
+        textureMapping: () => normalizeTextureMappingFromLegacy({ textureMappingMode: 0 }),
      }
 );
 
@@ -226,6 +231,7 @@ async function draw() {
         stripeFrequency: props.stripeFrequency,
         zoomMinBrushStep: props.zoomMinBrushStep,
         sentinelSeedStep: props.sentinelSeedStep,
+        textureMapping: normalizeTextureMappingFromLegacy(props),
         textureMappingMode: props.textureMappingMode,
       }
     )
@@ -272,6 +278,7 @@ async function initWebGPU() {
     stripeFrequency: props.stripeFrequency,
     zoomMinBrushStep: props.zoomMinBrushStep,
     sentinelSeedStep: props.sentinelSeedStep,
+    textureMapping: normalizeTextureMappingFromLegacy(props),
     textureMappingMode: props.textureMappingMode,
   });
   engine.dprMultiplier = props.dprMultiplier ?? 1.0;

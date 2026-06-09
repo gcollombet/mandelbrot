@@ -5,6 +5,11 @@ import type { InterpolationMode } from '../Mandelbrot.ts';
 import { Palette } from '../Palette.ts';
 import colorShader from '../assets/color.wgsl?raw';
 import { getDefaultTileTextureUrl, getDefaultSkyboxTextureUrl } from '../textureLibrary';
+import {
+  normalizeTextureMappingFromLegacy,
+  textureMappingVariableId,
+  type TextureMappingConfig,
+} from '../TextureMapping';
 
 // ── Float32 → Float16 (copied from Engine.ts) ──
 const _f32 = new Float32Array(1);
@@ -56,6 +61,7 @@ const props = defineProps<{
   varnishStrength?: number;
   orbitTrapStrength?: number;
   phaseColoringStrength?: number;
+  textureMapping?: TextureMappingConfig;
 }>();
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
@@ -332,9 +338,9 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (34 floats, padded to 144 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (44 floats, padded to 176 bytes for 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
-    size: 4 * 36,
+    size: 4 * 44,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
@@ -342,6 +348,7 @@ async function init() {
   // `deep = v * 2.0; palettePhase = fract(deep / palettePeriod)`, so we get exactly one cycle.
   const previewLightAngle = 3.927;
   const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
+  const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
   const uniforms = new Float32Array([
     ITER_COUNT * 2, // palettePeriod
     0,            // paletteOffset
@@ -378,6 +385,15 @@ async function init() {
     0, // heightPaletteShift
     props.orbitTrapStrength ?? 0, // orbitTrapStrength
     props.phaseColoringStrength ?? 0, // phaseColoringStrength
+    textureMappingVariableId(textureMapping.xVariable), // textureMappingXVariable
+    textureMappingVariableId(textureMapping.yVariable), // textureMappingYVariable
+    textureMapping.xScale, // textureMappingXScale
+    textureMapping.yScale, // textureMappingYScale
+    textureMapping.mirrored ? 1 : 0, // textureMappingMirror
+    -0.7, // centerX
+    0, // centerY
+    1.2, // scale
+    0, // _pad
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -426,11 +442,12 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.orbitTrapStrength, () => props.phaseColoringStrength],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = 3.927;
     const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
+    const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
     const patch = new Float32Array([
       props.tessellationLevel ?? 0,
       props.displacementAmount ?? 0,
@@ -454,6 +471,15 @@ watch(
       0,
       props.orbitTrapStrength ?? 0,
       props.phaseColoringStrength ?? 0,
+      textureMappingVariableId(textureMapping.xVariable),
+      textureMappingVariableId(textureMapping.yVariable),
+      textureMapping.xScale,
+      textureMapping.yScale,
+      textureMapping.mirrored ? 1 : 0,
+      -0.7,
+      0,
+      1.2,
+      0,
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
     render();
