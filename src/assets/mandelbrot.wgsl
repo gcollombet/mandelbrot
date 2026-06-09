@@ -107,40 +107,50 @@ fn angle_wrap(a: f32) -> f32 {
   return atan2(sin(a), cos(a));
 }
 
-fn complex_log_mag(v: vec2<f32>) -> f32 {
-  if (dot(v, v) <= 1e-30) {
-    return LOG_DER_ZERO;
+// ── derivative state: der = derM · exp(derS) ───────────────────────
+// Cartesian mantissa + log scale.  The derivative recurrences
+// (der' = 2·z·der + 1, and der' = der·a + b for BLA blocks) run as plain
+// multiply/adds on the mantissa; a log/exp pair is paid only when the
+// mantissa leaves [1e-16, 1e16] (every ~25 iterations), instead of the
+// ~10 transcendentals per iteration of the previous log-polar form.
+// The storage format in layers 4/5 is unchanged: (angle, log magnitude),
+// converted by der_to_polar on store and inverted on load.
+//
+// Cached alongside the state (recomputed only when derS changes):
+//   derInvScale  = exp(-derS)   — the "+1" term expressed in mantissa space
+//   epsThreshold = exp(logEpsilon - 2·derS)
+//                  so that dot(derM, derM) < epsThreshold ⇔ |der|² < epsilon
+
+const DER_RENORM_HI: f32 = 1e16;
+const DER_RENORM_LO: f32 = 1e-16;
+
+fn der_refresh_cache(derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32) {
+  // Rebase very small scales so the "+1" / "+b" terms cannot overflow the
+  // mantissa (exp(-derS) stays <= e^40 ≈ 2.4e17).
+  if (*derS < -40.0) {
+    *derM = *derM * exp(max(*derS, -80.0));
+    *derS = 0.0;
   }
-  return 0.5 * log(max(dot(v, v), 1e-30));
+  *derInvScale = exp(clamp(-(*derS), -80.0, 80.0));
+  *epsThreshold = exp(clamp(logEpsilon - 2.0 * (*derS), -87.0, 87.0));
 }
 
-fn log_complex_add(aAngle: f32, aLogMag: f32, bAngle: f32, bLogMag: f32) -> vec2<f32> {
-  let hiLog = max(aLogMag, bLogMag);
-  if (hiLog <= LOG_DER_ZERO + 1.0) {
-    return vec2<f32>(0.0, LOG_DER_ZERO);
+fn der_renormalize(derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32) {
+  let mm = dot(*derM, *derM);
+  if (mm > 0.0) {
+    let lm = 0.5 * log(mm);
+    *derS = *derS + lm;
+    *derM = *derM * exp(-lm);
   }
-  let ar = exp(aLogMag - hiLog);
-  let br = exp(bLogMag - hiLog);
-  let sum = vec2<f32>(cos(aAngle) * ar + cos(bAngle) * br, sin(aAngle) * ar + sin(bAngle) * br);
-  let sumLen = length(sum);
-  if (sumLen <= 1e-20) {
-    return vec2<f32>(0.0, LOG_DER_ZERO);
-  }
-  return vec2<f32>(atan2(sum.y, sum.x), hiLog + log(sumLen));
+  der_refresh_cache(derM, derS, derInvScale, epsThreshold, logEpsilon);
 }
 
-fn log_complex_mul_by_complex(derPolar: vec2<f32>, factor: vec2<f32>) -> vec2<f32> {
-  let factorLenSq = dot(factor, factor);
-  if (derPolar.y <= LOG_DER_ZERO + 1.0 || factorLenSq <= 1e-30) {
+fn der_to_polar(m: vec2<f32>, s: f32) -> vec2<f32> {
+  let mm = dot(m, m);
+  if (mm <= 1e-30) {
     return vec2<f32>(0.0, LOG_DER_ZERO);
   }
-  return vec2<f32>(angle_wrap(derPolar.x + atan2(factor.y, factor.x)), derPolar.y + 0.5 * log(factorLenSq));
-}
-
-fn derivative_step(zPrev: vec2<f32>, derPolar: vec2<f32>) -> vec2<f32> {
-  let doubledZ = 2.0 * zPrev;
-  let termA = log_complex_mul_by_complex(derPolar, doubledZ);
-  return log_complex_add(termA.x, termA.y, 0.0, 0.0);
+  return vec2<f32>(atan2(m.y, m.x), s + 0.5 * log(mm));
 }
 
 fn distance_height(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
@@ -160,18 +170,21 @@ fn getOrbit(index: i32) -> vec2<f32> {
   );
 }
 
-fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derPolar: ptr<function, vec2<f32>>, dc: vec2<f32>, dcMag: f32, bailout: f32) -> i32 {
-  var level = i32(mandelbrot.blaLevelCount) - 1;
-  let max_iter = i32(mandelbrot.globalMaxIter);
+fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derInvScale: f32, dc: vec2<f32>, dcMag: f32, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
+  let shiftedRef = *ref_i - 1;
+  // BLA level skips are powers of two (skip = skip0 << level), so the highest
+  // level aligned with shiftedRef follows directly from its trailing-zero
+  // count — no per-level modulo scan.  Every level below an aligned level is
+  // aligned too, so the loop only descends on radius/escape failures.
+  var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
   while (level >= 0) {
     let levelInfo = mandelbrotBlaLevels[level];
     let skip = i32(levelInfo.skip);
-    let shiftedRef = *ref_i - 1;
-    if ((shiftedRef % skip) == 0 && *ref_i + skip <= max_iter) {
-      let slot = shiftedRef / skip;
+    if (*ref_i + skip <= maxIterI) {
+      let slot = shiftedRef >> u32(skip0Log + level);
       if (u32(slot) < levelInfo.count) {
         let entryIndex = i32(levelInfo.offset) + slot;
         let bla = mandelbrotBlaSuite[entryIndex];
@@ -185,15 +198,13 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derPol
           // Do not let a multi-iteration BLA block jump over the first escape.
           // The color pass needs z/DE at the escape iteration, not after a block.
           let candidateZ = getOrbit(*ref_i + skip) + candidate;
-          if (skip > 1 && dot(candidateZ, candidateZ) > bailout) {
-            level -= 1;
-            continue;
+          if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+            *dz = candidate;
+            // der' = der·a + b, in mantissa space.
+            *derM = cmul(*derM, a) + b * derInvScale;
+            *ref_i += skip;
+            return skip;
           }
-          *dz = candidate;
-          let termA = log_complex_mul_by_complex(*derPolar, a);
-          *derPolar = log_complex_add(termA.x, termA.y, atan2(b.y, b.x), complex_log_mag(b));
-          *ref_i += skip;
-          return skip;
         }
       }
     }
@@ -293,13 +304,6 @@ fn update_orbit_ema_unit(previous: f32, sample: f32) -> f32 {
   return sample + (previous - sample) * (1.0 - ORBIT_METRIC_EMA_ALPHA);
 }
 
-fn update_orbit_mean_vec2(previous: vec2<f32>, sample: vec2<f32>, previousCount: f32, sampleCount: f32) -> vec2<f32> {
-  let safePreviousCount = max(previousCount, 0.0);
-  let safeSampleCount = max(sampleCount, 1.0);
-  let totalCount = safePreviousCount + safeSampleCount;
-  return (previous * safePreviousCount + sample * safeSampleCount) / max(totalCount, 1.0);
-}
-
 fn stripe_metric_sample(z: vec2<f32>) -> f32 {
   return sin(max(mandelbrot.stripeFrequency, 0.0) * atan2(z.y, z.x));
 }
@@ -315,23 +319,44 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
   let logEpsilon = log(max(mandelbrot.epsilon, 1e-30));
+  let globalMaxIterI = i32(mandelbrot.globalMaxIter);
 
   // Resume state: if prev_iter > 0 we are continuing a previous pass.
 
   var i: f32 = 0.0;
   var dz = vec2<f32>(prev_zx, prev_zy);
-  var derPolar = vec2<f32>(prev_dzx, prev_dzy);
   var ref_i = decode_ref_i(prev_ref_i);
   var z = getOrbit(ref_i) + dz;
+
+  // Derivative state der = derM · exp(derS), converted from the stored
+  // (angle, log magnitude) representation in layers 4/5.
+  var derM: vec2<f32>;
+  var derS: f32;
+  if (prev_dzy <= LOG_DER_ZERO + 1.0) {
+    derM = vec2<f32>(0.0);
+    derS = 0.0;
+  } else {
+    derM = vec2<f32>(cos(prev_dzx), sin(prev_dzx));
+    derS = prev_dzy;
+  }
+  var derInvScale = 0.0;
+  var epsThreshold = 0.0;
+  der_refresh_cache(&derM, &derS, &derInvScale, &epsThreshold, logEpsilon);
+
   let trackOrbitMetrics = mandelbrot.trackOrbitMetrics >= 0.5;
   var stripeEma = 0.0;
-  var avgDir = vec2<f32>(0.0);
+  // Orbit direction is accumulated as a plain sum and normalized once on
+  // exit (saves a division + two multiplies per iteration vs a running mean).
+  var avgDirSum = vec2<f32>(0.0);
+  var avgCount = 0.0;
   if (trackOrbitMetrics) {
     stripeEma = decode_stripe_ema(prev_ref_i, prev_iter);
-    avgDir = decode_avg_dir(prev_avg_direction, prev_iter);
+    avgCount = max(prev_iter, 0.0);
+    avgDirSum = decode_avg_dir(prev_avg_direction, prev_iter) * avgCount;
   }
   var previousStripeEma = stripeEma;
-  var previousAvgDir = avgDir;
+  var previousAvgDirSum = avgDirSum;
+  var previousAvgCount = avgCount;
 
   var escaped = false;
   var inside = false;
@@ -344,90 +369,100 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 
   if (useBla) {
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
+    let skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
     var usedBla = false;
-    while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
-      var nextDerPolar = derPolar;
-      let skipped = try_apply_bla(&ref_i, &dz, &derPolar, dc, dcMag, muLimit);
+    while (i < max_iteration && ref_i < globalMaxIterI) {
+      let skipped = try_apply_bla(&ref_i, &dz, &derM, derInvScale, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
       if (skipped > 0) {
         usedBla = true;
         z = getOrbit(ref_i) + dz;
-        nextDerPolar = derPolar;
         i += f32(skipped);
         if (trackOrbitMetrics) {
-          let previousMetricCount = prev_iter + i - f32(skipped);
           previousStripeEma = stripeEma;
-          previousAvgDir = avgDir;
+          previousAvgDirSum = avgDirSum;
+          previousAvgCount = avgCount;
           stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), f32(skipped));
-          avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, f32(skipped));
+          avgDirSum += orbit_direction_sample(z) * f32(skipped);
+          avgCount += f32(skipped);
         }
       } else {
-        let zPrev = getOrbit(ref_i) + dz;
         let refZ = getOrbit(ref_i);
+        let zPrev = refZ + dz;
         dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
         ref_i += 1;
         z = getOrbit(ref_i) + dz;
-        nextDerPolar = derivative_step(zPrev, derPolar);
+        derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
         i += 1.0;
         if (trackOrbitMetrics) {
-          let previousMetricCount = prev_iter + i - 1.0;
           previousStripeEma = stripeEma;
-          previousAvgDir = avgDir;
+          previousAvgDirSum = avgDirSum;
+          previousAvgCount = avgCount;
           stripeEma = update_orbit_ema_unit(stripeEma, stripe_metric_sample(z));
-          avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
+          avgDirSum += orbit_direction_sample(z);
+          avgCount += 1.0;
         }
       }
 
-      derPolar = nextDerPolar;
+      let derMM = dot(derM, derM);
       let dot_z = dot(z, z);
       if (dot_z > muLimit) {
+        let derPolar = der_to_polar(derM, derS);
         shadingHeight = distance_height(z, derPolar);
         shadingAngle = visual_derivative_angle(z, derPolar);
         escaped = true;
         break;
       }
-      if (!usedBla && !IGNORE_EPSILON && 2.0 * derPolar.y < logEpsilon) {
+      if (!usedBla && !IGNORE_EPSILON && derMM < epsThreshold) {
         inside = true;
         break;
       }
+      if (derMM > DER_RENORM_HI || derMM < DER_RENORM_LO) {
+        der_renormalize(&derM, &derS, &derInvScale, &epsThreshold, logEpsilon);
+      }
 
       let dot_dz = dot(dz, dz);
-      if (dot_z < dot_dz || f32(ref_i) == mandelbrot.globalMaxIter) {
+      if (dot_z < dot_dz || ref_i == globalMaxIterI) {
         dz = z;
         ref_i = 0;
       }
     }
   } else {
-    while (i < max_iteration && f32(ref_i) < mandelbrot.globalMaxIter) {
-      let zPrev = getOrbit(ref_i) + dz;
+    while (i < max_iteration && ref_i < globalMaxIterI) {
       let refZ = getOrbit(ref_i);
+      let zPrev = refZ + dz;
       dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
       ref_i += 1;
       z = getOrbit(ref_i) + dz;
-      let nextDerPolar = derivative_step(zPrev, derPolar);
+      derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
       i += 1.0;
       if (trackOrbitMetrics) {
-        let previousMetricCount = prev_iter + i - 1.0;
         previousStripeEma = stripeEma;
-        previousAvgDir = avgDir;
+        previousAvgDirSum = avgDirSum;
+        previousAvgCount = avgCount;
         stripeEma = update_orbit_ema_unit(stripeEma, stripe_metric_sample(z));
-        avgDir = update_orbit_mean_vec2(avgDir, orbit_direction_sample(z), previousMetricCount, 1.0);
+        avgDirSum += orbit_direction_sample(z);
+        avgCount += 1.0;
       }
 
-      derPolar = nextDerPolar;
+      let derMM = dot(derM, derM);
       let dot_z = dot(z, z);
       if (dot_z > muLimit) {
+        let derPolar = der_to_polar(derM, derS);
         shadingHeight = distance_height(z, derPolar);
         shadingAngle = visual_derivative_angle(z, derPolar);
         escaped = true;
         break;
       }
-      if (!IGNORE_EPSILON && 2.0 * derPolar.y < logEpsilon) {
+      if (!IGNORE_EPSILON && derMM < epsThreshold) {
         inside = true;
         break;
       }
+      if (derMM > DER_RENORM_HI || derMM < DER_RENORM_LO) {
+        der_renormalize(&derM, &derS, &derInvScale, &epsThreshold, logEpsilon);
+      }
 
       let dot_dz = dot(dz, dz);
-      if (dot_z < dot_dz || f32(ref_i) == mandelbrot.globalMaxIter) {
+      if (dot_z < dot_dz || ref_i == globalMaxIterI) {
         dz = z;
         ref_i = 0;
       }
@@ -436,14 +471,19 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 
   var out: FragOut;
 
+  // Convert the derivative back to the stored (angle, log magnitude) form
+  // and the direction sum back to a mean, once per pass.
+  let derPolarOut = der_to_polar(derM, derS);
+  let avgDir = avgDirSum / max(avgCount, 1.0);
+
   if (inside) {
     // Confirmed inside the set. Keep total iteration in ref_i for diagnostics/compatibility.
     out.iter      = pack(0.0);
     out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(derPolar.x);
-    out.dzy       = pack(derPolar.y);
+    out.dzx       = pack(derPolarOut.x);
+    out.dzy       = pack(derPolarOut.y);
     out.ref_i     = pack(ref_i_with_stripe(prev_iter + i, stripeEma));
     out.avgDirection = pack(encode_avg_dir(avgDir));
     return out;
@@ -454,6 +494,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   if (escaped) {
     let escapeBlend = escape_fraction(z, muLimit);
     let smoothStripeEma = mix(previousStripeEma, stripeEma, escapeBlend);
+    let previousAvgDir = previousAvgDirSum / max(previousAvgCount, 1.0);
     let smoothAvgDir = mix(previousAvgDir, avgDir, escapeBlend);
 
     // Escaped: layers 4/5 switch from resumable derivative state to scalar
@@ -482,8 +523,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     out.genuine   = pack(1.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(derPolar.x);
-    out.dzy       = pack(derPolar.y);
+    out.dzx       = pack(derPolarOut.x);
+    out.dzy       = pack(derPolarOut.y);
     out.ref_i     = pack(ref_i_with_stripe(total_iter, stripeEma));
     out.avgDirection = pack(encode_avg_dir(avgDir));
     return out;
@@ -495,8 +536,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   out.genuine   = pack(1.0);
   out.zx        = pack(dz.x);
   out.zy        = pack(dz.y);
-  out.dzx       = pack(derPolar.x);
-  out.dzy       = pack(derPolar.y);
+  out.dzx       = pack(derPolarOut.x);
+  out.dzy       = pack(derPolarOut.y);
   out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), stripeEma));
   out.avgDirection = pack(encode_avg_dir(avgDir));
   return out;

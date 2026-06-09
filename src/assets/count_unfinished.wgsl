@@ -50,47 +50,72 @@ fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
   return inside_x && inside_y;
 }
 
+// Workgroup-local partial counters: each 16×16 workgroup reduces locally and
+// issues at most two global atomicAdds, instead of up to two per pixel.
+var<workgroup> wgCount: atomic<u32>;
+var<workgroup> wgActive: atomic<u32>;
+
 @compute @workgroup_size(16, 16)
-fn count_unfinished(@builtin(global_invocation_id) gid: vec3<u32>) {
+fn count_unfinished(
+  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(local_invocation_index) lidx: u32,
+) {
+  if (lidx == 0u) {
+    atomicStore(&wgCount, 0u);
+    atomicStore(&wgActive, 0u);
+  }
+  workgroupBarrier();
+
+  // Per-pixel classification (no early returns: the barriers below must stay
+  // in uniform control flow).
+  var needs = false;
+  var isActive = false;
+
   let dims = textureDimensions(rawTex);
-  if (gid.x >= dims.x || gid.y >= dims.y) {
-    return;
-  }
+  if (gid.x < dims.x && gid.y < dims.y) {
+    // Map pixel coordinate to neutral-space [-1, 1]
+    // Y is flipped to match the fragment-shader convention where uv.y=0 is
+    // bottom and uv.y=1 is top, whereas gid.y=0 is the first texel row.
+    let uv = vec2<f32>(
+      (f32(gid.x) + 0.5) / f32(dims.x),
+      1.0 - (f32(gid.y) + 0.5) / f32(dims.y),
+    );
+    let xy_neutral = uv * 2.0 - vec2<f32>(1.0);
 
-  // Map pixel coordinate to neutral-space [-1, 1]
-  // Y is flipped to match the fragment-shader convention where uv.y=0 is
-  // bottom and uv.y=1 is top, whereas gid.y=0 is the first texel row.
-  let uv = vec2<f32>(
-    (f32(gid.x) + 0.5) / f32(dims.x),
-    1.0 - (f32(gid.y) + 0.5) / f32(dims.y),
-  );
-  let xy_neutral = uv * 2.0 - vec2<f32>(1.0);
+    // Pixels outside the rotated viewport are ignored.
+    if (is_inside_rotated_screen(xy_neutral)) {
+      let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+      let iter = textureLoad(rawTex, coord, 0, 0).r;
 
-  // Skip pixels outside the rotated viewport
-  if (!is_inside_rotated_screen(xy_neutral)) {
-    return;
-  }
-
-  let coord = vec2<i32>(i32(gid.x), i32(gid.y));
-  let iter = textureLoad(rawTex, coord, 0, 0).r;
-
-  if (iter < 0.0) {
-    atomicAdd(&counter.count, 1u);
-    if (iter == -1.0) {
-      atomicAdd(&counter.active_count, 1u);
+      if (iter < 0.0) {
+        needs = true;
+        isActive = iter == -1.0;
+      } else if (iter > 0.0) {
+        let zx = textureLoad(rawTex, coord, 2, 0).r;
+        let zy = textureLoad(rawTex, coord, 3, 0).r;
+        let needs_continuation = (zx * zx + zy * zy) < params.mu;
+        needs = needs_continuation;
+        isActive = needs_continuation;
+      }
     }
-    return;
   }
 
-  if (iter <= 0.0) {
-    return;
+  if (needs) {
+    atomicAdd(&wgCount, 1u);
   }
+  if (isActive) {
+    atomicAdd(&wgActive, 1u);
+  }
+  workgroupBarrier();
 
-  let zx = textureLoad(rawTex, coord, 2, 0).r;
-  let zy = textureLoad(rawTex, coord, 3, 0).r;
-  let needs_continuation = (zx * zx + zy * zy) < params.mu;
-  if (needs_continuation) {
-    atomicAdd(&counter.count, 1u);
-    atomicAdd(&counter.active_count, 1u);
+  if (lidx == 0u) {
+    let c = atomicLoad(&wgCount);
+    let a = atomicLoad(&wgActive);
+    if (c > 0u) {
+      atomicAdd(&counter.count, c);
+    }
+    if (a > 0u) {
+      atomicAdd(&counter.active_count, a);
+    }
   }
 }
