@@ -13,9 +13,23 @@
 //   7 : packed average orbit direction
 //
 // Sentinel convention:
-//   If layer0 == -step (step is power-of-two > 1), resolve by testing
-//   all 4 corner anchors of the grid cell and using the first finished
-//   one.  This ensures correct resolve regardless of pan direction.
+//   If layer0 == -step (step is power-of-two > 1), resolve by bilinearly
+//   interpolating the 4 corner anchors of the grid cell (weights from the
+//   fractional position inside the cell, unfinished corners masked out).
+//   This smooths the progressive preview instead of producing flat squares.
+//   Interpolated quantities:
+//     - nu (smooth iteration) — interpolated continuously, then re-encoded
+//       as iter = floor(nu) plus a synthetic |z| that reproduces fract(nu)
+//       through the smooth-escape formula used by color.wgsl;
+//     - z direction — interpolated as unit vectors (orbit traps / mapping);
+//     - distance height (layer 4) — plain lerp;
+//     - derivative angle (layer 5) — circular lerp via (cos, sin);
+//     - stripe phase (layer 6 fraction) — circular lerp; integer ref_i is
+//       taken from the dominant corner;
+//     - average orbit direction (layer 7) — unpacked, lerped, repacked.
+//   If a cell straddles the set boundary, the group (inside vs escaped)
+//   with the larger total weight wins, to avoid false halos at the edge.
+//   If no corner is finished, climb to the next coarser grid level.
 
 struct ResolveUniforms {
   mu: f32,
@@ -103,6 +117,44 @@ fn floor_power_of_two(step: u32) -> u32 {
   return 1u << msb_index;
 }
 
+// ── Bilinear interpolation helpers ─────────────────────────────────
+
+const TWO_PI: f32 = 6.283185307179586;
+const LN_2: f32 = 0.6931471805599453;
+const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
+const ORBIT_DIRECTION_BASE: f32 = 4096.0;
+
+// Smooth escape fraction, identical to color.wgsl's escape_nu fraction.
+// Returned separately from the iteration count so that nu can be
+// interpolated relative to a local base iteration: at deep zooms the
+// iteration counts are large and f32 ULP would otherwise quantize the
+// interpolated fraction (visible as flat texels again).
+fn smooth_frac(z_sq: f32, logMu: f32) -> f32 {
+  let log_z2 = log(max(z_sq, 1e-12));
+  return clamp(1.0 - log(max(log_z2 / logMu, 1e-12)) / LN_2, 0.0, 1.0);
+}
+
+fn decode_avg_dir(encoded: f32) -> vec2<f32> {
+  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
+  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
+  return vec2<f32>(
+    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
+    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
+  );
+}
+
+fn encode_avg_dir(avgDir: vec2<f32>) -> f32 {
+  let phase = clamp(avgDir * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
+  let xq = floor(phase.x * ORBIT_DIRECTION_SCALE + 0.5);
+  let yq = floor(phase.y * ORBIT_DIRECTION_SCALE + 0.5);
+  return xq * ORBIT_DIRECTION_BASE + yq;
+}
+
+fn phase_to_dir(phase: f32) -> vec2<f32> {
+  let a = phase * TWO_PI;
+  return vec2<f32>(cos(a), sin(a));
+}
+
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let dims = vec2<u32>(textureDimensions(rawTex));
@@ -149,18 +201,20 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     step_u = 2u;
   }
 
-  // Snap to parent anchor, climbing to coarser steps if the anchor is
-  // budget-exhausted (iter > 0 AND |z|² < mu).  This eliminates the
-  // Sierpinski-triangle artifact that appeared when the resolve pass
-  // blindly copied unfinished pixels.
+  // Interpolate the 4 corner anchors of the grid cell, climbing to coarser
+  // steps if no corner is finished.  Finished corners are weighted by the
+  // pixel's bilinear position inside the cell; unfinished (sentinel or
+  // budget-exhausted) corners get zero weight.  This eliminates both the
+  // flat-square look and the Sierpinski-triangle artifact.
 
   // Grid offset for sentinel alignment after translation.
   let gx = i32(uni.gridOffsetX);
   let gy = i32(uni.gridOffsetY);
 
+  let logMu = log(max(uni.mu, 1.0001));
+
   // Climb through coarser grid levels. The maximum number of doublings
   // before step_u exceeds the texture size is bounded by log2(max(dims)).
-  // Using 20 iterations covers textures up to 2^20 = 1M pixels per side.
   for (var level = 0u; level < 10u; level = level + 1u) {
     // Safety: if step exceeds texture size, stop climbing and fall back
     // to the pixel itself (prevents runaway on pathological inputs
@@ -174,28 +228,60 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // Snap to grid-aligned anchor, accounting for cumulative shift offset.
     let sx = i32(x) - gx;
     let sy = i32(y) - gy;
-    let base_x = u32(sx - ((sx % step_i + step_i) % step_i) + gx);
-    let base_y = u32(sy - ((sy % step_i + step_i) % step_i) + gy);
+    let mx = (sx % step_i + step_i) % step_i;
+    let my = (sy % step_i + step_i) % step_i;
+    let base_x = sx - mx + gx;
+    let base_y = sy - my + gy;
 
-    // Test 4 candidate anchors (all corners of the grid cell) so that
-    // resolve works regardless of the navigation direction.
-    var candidates = array<vec2<u32>, 4>(
-      vec2<u32>(base_x,          base_y),
-      vec2<u32>(base_x + step_u, base_y),
-      vec2<u32>(base_x,          base_y + step_u),
-      vec2<u32>(base_x + step_u, base_y + step_u)
+    // Bilinear weights from the fractional position inside the cell.
+    let fx = f32(mx) / f32(step_i);
+    let fy = f32(my) / f32(step_i);
+    var weights = array<f32, 4>(
+      (1.0 - fx) * (1.0 - fy),
+      fx * (1.0 - fy),
+      (1.0 - fx) * fy,
+      fx * fy
+    );
+    var candidates = array<vec2<i32>, 4>(
+      vec2<i32>(base_x,          base_y),
+      vec2<i32>(base_x + step_i, base_y),
+      vec2<i32>(base_x,          base_y + step_i),
+      vec2<i32>(base_x + step_i, base_y + step_i)
     );
 
+    // Accumulators for escaped corners.  nu is accumulated relative to
+    // baseIter (the first escaped corner's iteration count) to keep full
+    // f32 precision at deep zooms where iter counts are large.
+    var wEscaped = 0.0;
+    var baseIter = -1.0;
+    var nuSum = 0.0;
+    var distSum = 0.0;
+    var zDirSum = vec2<f32>(0.0);
+    var angleDirSum = vec2<f32>(0.0);
+    var stripeDirSum = vec2<f32>(0.0);
+    var avgDirSum = vec2<f32>(0.0);
+    // Dominant escaped corner (largest weight) for non-interpolable parts.
+    var bestEscapedW = -1.0;
+    var bestRefInt = 0.0;
+    var bestAngle = 0.0;
+    var bestStripe = 0.0;
+    // Inside-set corners: track total weight and the dominant one.
+    var wInside = 0.0;
+    var bestInsideW = -1.0;
+    var bestInsideCoord = vec2<i32>(0);
+    // Fallback when every finished corner has zero bilinear weight
+    // (e.g. the pixel sits exactly on an unfinished anchor).
+    var hasFinished = false;
+    var firstFinishedCoord = vec2<i32>(0);
+
     for (var i = 0u; i < 4u; i = i + 1u) {
-      let cx = candidates[i].x;
-      let cy = candidates[i].y;
+      let ccoord = candidates[i];
 
       // Bounds check: skip candidates that fall outside the texture.
-      if (cx >= dims.x || cy >= dims.y) {
+      if (ccoord.x < 0 || ccoord.y < 0 || ccoord.x >= i32(dims.x) || ccoord.y >= i32(dims.y)) {
         continue;
       }
 
-      let ccoord = vec2<i32>(i32(cx), i32(cy));
       let citer = loadLayer(ccoord, 0);
 
       // Sentinel — this candidate is not computed yet.
@@ -203,9 +289,20 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
         continue;
       }
 
-      // Inside set (iter == 0): use it.
+      let w = weights[i];
+
+      // Inside set (iter == 0).
       if (citer == 0.0) {
-        return loadAllLayersAsCopy(ccoord, step_u);
+        if (!hasFinished) {
+          hasFinished = true;
+          firstFinishedCoord = ccoord;
+        }
+        wInside = wInside + w;
+        if (w > bestInsideW) {
+          bestInsideW = w;
+          bestInsideCoord = ccoord;
+        }
+        continue;
       }
 
       // iter > 0: check whether pixel actually escaped or is budget-exhausted.
@@ -213,12 +310,92 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       let zy = loadLayer(ccoord, 3);
       let z_sq = zx * zx + zy * zy;
 
-      if (z_sq >= uni.mu) {
-        // Escaped — use this pixel.
-        return loadAllLayersAsCopy(ccoord, step_u);
+      if (z_sq < uni.mu) {
+        // Budget-exhausted: skip this candidate.
+        continue;
       }
 
-      // Budget-exhausted: skip this candidate, try the others.
+      // Escaped — accumulate.
+      if (!hasFinished) {
+        hasFinished = true;
+        firstFinishedCoord = ccoord;
+      }
+      if (baseIter < 0.0) {
+        baseIter = citer;
+      }
+      wEscaped = wEscaped + w;
+      nuSum = nuSum + w * ((citer - baseIter) + smooth_frac(z_sq, logMu));
+      distSum = distSum + w * loadLayer(ccoord, 4);
+      let angle = loadLayer(ccoord, 5);
+      angleDirSum = angleDirSum + w * vec2<f32>(cos(angle), sin(angle));
+      let zLen = max(sqrt(z_sq), 1e-12);
+      zDirSum = zDirSum + w * vec2<f32>(zx, zy) / zLen;
+      let refVal = max(loadLayer(ccoord, 6), 0.0);
+      let stripePhase = fract(refVal);
+      stripeDirSum = stripeDirSum + w * phase_to_dir(stripePhase);
+      avgDirSum = avgDirSum + w * decode_avg_dir(loadLayer(ccoord, 7));
+      if (w > bestEscapedW) {
+        bestEscapedW = w;
+        bestRefInt = floor(refVal);
+        bestAngle = angle;
+        bestStripe = stripePhase;
+      }
+    }
+
+    let wTotal = wEscaped + wInside;
+    if (wTotal > 1e-6) {
+      // The cell straddles the set boundary: the dominant group wins.
+      if (wInside > wEscaped) {
+        return loadAllLayersAsCopy(bestInsideCoord, step_u);
+      }
+
+      // ── Interpolate among escaped corners ──
+      let invW = 1.0 / wEscaped;
+
+      // nu: re-encode as iter = floor(nu) + synthetic |z| so that color.wgsl's
+      // smooth-escape formula reproduces fract(nu) exactly.  floor/fract are
+      // computed on the small relative value to preserve f32 precision.
+      let nuRel = nuSum * invW;
+      let relFloor = floor(nuRel);
+      var iterOut = baseIter + relFloor;
+      var frac = clamp(nuRel - relFloor, 0.0, 0.9999);
+      if (iterOut < 1.0) {
+        iterOut = 1.0;
+        frac = 0.0;
+      }
+      let log_z2 = logMu * exp2(1.0 - frac);
+      let zLenOut = exp(0.5 * log_z2);
+      let zDirLen = length(zDirSum);
+      let zDir = select(vec2<f32>(1.0, 0.0), zDirSum / zDirLen, zDirLen > 1e-5);
+      let zOut = zDir * zLenOut;
+
+      // Derivative angle: circular interpolation.
+      let angleOut = select(bestAngle, atan2(angleDirSum.y, angleDirSum.x), length(angleDirSum) > 1e-5);
+
+      // Stripe phase: circular interpolation; integer ref_i from dominant corner.
+      let stripeOut = select(
+        bestStripe,
+        fract(atan2(stripeDirSum.y, stripeDirSum.x) / TWO_PI + 1.0),
+        length(stripeDirSum) > 1e-5
+      );
+      let refOut = bestRefInt + min(stripeOut, 0.999999);
+
+      var o: FragOut;
+      o.iter      = pack(iterOut);
+      o.genuine   = pack(f32(step_u));
+      o.zx        = pack(zOut.x);
+      o.zy        = pack(zOut.y);
+      o.dzx       = pack(distSum * invW);
+      o.dzy       = pack(angleOut);
+      o.ref_i     = pack(refOut);
+      o.avgDirection = pack(encode_avg_dir(clamp(avgDirSum * invW, vec2<f32>(-1.0), vec2<f32>(1.0))));
+      return o;
+    }
+
+    // All finished corners carry zero bilinear weight — snap to the first
+    // finished one (preserves the previous behavior).
+    if (hasFinished) {
+      return loadAllLayersAsCopy(firstFinishedCoord, step_u);
     }
 
     // None of the 4 candidates had a finished pixel — climb to the next

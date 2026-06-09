@@ -340,26 +340,11 @@ fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f
   if (id == 5) {
     return dy;
   }
-  if (id == 6) {
-    return iterRaw;
-  }
   if (id == 7) {
     return v_smooth;
   }
   if (id == 8) {
     return distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
-  }
-  if (id == 9) {
-    return z_len;
-  }
-  if (id == 10) {
-    return log(z_len);
-  }
-  if (id == 11) {
-    return z.x;
-  }
-  if (id == 12) {
-    return z.y;
   }
   return tess_depth * 2.0 * disp + dx;
 }
@@ -474,7 +459,7 @@ fn smooth_escape_fraction(z_sq: f32) -> f32 {
   return 1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0);
 }
 
-fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, distanceHeightOffset: f32, distanceHeightGradientScale: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32) -> vec3<f32> {
+fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, distanceHeightOffset: f32, distanceHeightGradientScale: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32, uv_tex: vec2<f32>, magnified: bool) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
@@ -574,15 +559,28 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
     }
     if (needsFractalGradient) {
-      let fractalGradient = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
+      var fractalGradient: vec2<f32>;
+      if (magnified) {
+        fractalGradient = distance_height_gradient_bilinear(sourceTex, uv_tex, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
+      } else {
+        fractalGradient = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
+      }
       grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
       slope = length(grad);
     }
     if (needsStripeGradient) {
-      stripeGrad = stripe_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, stripeAverage);
+      if (magnified) {
+        stripeGrad = stripe_gradient_bilinear(sourceTex, uv_tex, sourceTexSize, stripeAverage);
+      } else {
+        stripeGrad = stripe_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, stripeAverage);
+      }
     }
     if (needsDirectionCoherenceGradient) {
-      directionCoherenceGrad = direction_coherence_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, directionCoherence);
+      if (magnified) {
+        directionCoherenceGrad = direction_coherence_gradient_bilinear(sourceTex, uv_tex, sourceTexSize, directionCoherence);
+      } else {
+        directionCoherenceGrad = direction_coherence_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, directionCoherence);
+      }
     }
     let edgeWear = curvature_edge_wear(angle_der, v_smooth);
     let flatNormal = vec3<f32>(0.0, 0.0, 1.0);
@@ -857,6 +855,74 @@ fn direction_coherence_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord
   return vec2<f32>(right - left, up - down) * 8.0;
 }
 
+// ── Bilinear (magnified) variants of the gradient functions ─────────
+// When the source texture is magnified on screen, the per-texel finite
+// differences above produce normals that are constant inside each texel
+// (faceted relief).  These variants compute the analytic gradient of the
+// bilinearly-interpolated field instead: continuous inside each cell.
+// The 1-texel-span cell differences are scaled ×2 to match the magnitude
+// of the 2-texel-span central differences used by the nearest variants.
+
+struct BilinearCell {
+  base: vec2<i32>,
+  f: vec2<f32>,
+};
+
+fn bilinear_cell(uv: vec2<f32>, texSize: vec2<i32>) -> BilinearCell {
+  let texSizeF = vec2<f32>(f32(texSize.x), f32(texSize.y));
+  let p = vec2<f32>(uv.x * texSizeF.x, (1.0 - uv.y) * texSizeF.y) - vec2<f32>(0.5);
+  let baseF = floor(p);
+  var cell: BilinearCell;
+  cell.base = vec2<i32>(i32(baseF.x), i32(baseF.y));
+  cell.f = p - baseF;
+  return cell;
+}
+
+fn distance_height_gradient_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>, centerHeight: f32, heightOffset: f32, gradientScale: f32) -> vec2<f32> {
+  let cell = bilinear_cell(uv, texSize);
+  let h00r = sample_distance_height_at_coord(sourceTex, cell.base, texSize, heightOffset);
+  let h10r = sample_distance_height_at_coord(sourceTex, cell.base + vec2<i32>(1, 0), texSize, heightOffset);
+  let h01r = sample_distance_height_at_coord(sourceTex, cell.base + vec2<i32>(0, 1), texSize, heightOffset);
+  let h11r = sample_distance_height_at_coord(sourceTex, cell.base + vec2<i32>(1, 1), texSize, heightOffset);
+  let h00 = select(centerHeight, h00r, h00r > -1e5);
+  let h10 = select(centerHeight, h10r, h10r > -1e5);
+  let h01 = select(centerHeight, h01r, h01r > -1e5);
+  let h11 = select(centerHeight, h11r, h11r > -1e5);
+  let gx = mix(h10 - h00, h11 - h01, cell.f.y);
+  let gy = mix(h01 - h00, h11 - h10, cell.f.x);
+  return vec2<f32>(gx, gy) * 24.0 * gradientScale;
+}
+
+fn stripe_gradient_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>, centerStripe: f32) -> vec2<f32> {
+  let cell = bilinear_cell(uv, texSize);
+  let s00r = stripe_at_coord(sourceTex, cell.base, texSize);
+  let s10r = stripe_at_coord(sourceTex, cell.base + vec2<i32>(1, 0), texSize);
+  let s01r = stripe_at_coord(sourceTex, cell.base + vec2<i32>(0, 1), texSize);
+  let s11r = stripe_at_coord(sourceTex, cell.base + vec2<i32>(1, 1), texSize);
+  let s00 = select(centerStripe, s00r, s00r > -1e5);
+  let s10 = select(centerStripe, s10r, s10r > -1e5);
+  let s01 = select(centerStripe, s01r, s01r > -1e5);
+  let s11 = select(centerStripe, s11r, s11r > -1e5);
+  let gx = mix(stripe_phase_delta(s10, s00), stripe_phase_delta(s11, s01), cell.f.y);
+  let gy = mix(stripe_phase_delta(s01, s00), stripe_phase_delta(s11, s10), cell.f.x);
+  return vec2<f32>(gx, gy) * 16.0;
+}
+
+fn direction_coherence_gradient_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>, centerCoherence: f32) -> vec2<f32> {
+  let cell = bilinear_cell(uv, texSize);
+  let c00r = direction_coherence_at_coord(sourceTex, cell.base, texSize);
+  let c10r = direction_coherence_at_coord(sourceTex, cell.base + vec2<i32>(1, 0), texSize);
+  let c01r = direction_coherence_at_coord(sourceTex, cell.base + vec2<i32>(0, 1), texSize);
+  let c11r = direction_coherence_at_coord(sourceTex, cell.base + vec2<i32>(1, 1), texSize);
+  let c00 = select(centerCoherence, c00r, c00r > -1e5);
+  let c10 = select(centerCoherence, c10r, c10r > -1e5);
+  let c01 = select(centerCoherence, c01r, c01r > -1e5);
+  let c11 = select(centerCoherence, c11r, c11r > -1e5);
+  let gx = mix(c10 - c00, c11 - c01, cell.f.y);
+  let gy = mix(c01 - c00, c11 - c10, cell.f.x);
+  return vec2<f32>(gx, gy) * 16.0;
+}
+
 fn direction_coherence_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, grad: vec2<f32>, strength: f32) -> vec3<f32> {
   let bump = tangent * grad.x + bitangent * grad.y;
   return normalize(normal - bump * clamp(strength, 0.0, 100.0) * 0.75);
@@ -896,7 +962,9 @@ fn colorize_pixel(
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
   distanceHeightOffset: f32,
-  distanceHeightGradientScale: f32
+  distanceHeightGradientScale: f32,
+  uv_tex: vec2<f32>,
+  magnified: bool
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
   if (iter_val < 0.0) {
@@ -964,12 +1032,202 @@ fn colorize_pixel(
   let v_smooth = nu_smooth;
   let stripePhase = decode_stripe_phase(extras.refWithStripe);
   let directionCoherence = decode_direction_coherence(extras.avgDirection);
-  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, distanceHeightStored, distanceHeightOffset, distanceHeightGradientScale, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y);
+  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, distanceHeightStored, distanceHeightOffset, distanceHeightGradientScale, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y, uv_tex, magnified);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
 
   return vec4<f32>(color, 1.0);
+}
+
+// ── Bilinear interpolation of magnified source textures ────────────
+// When a source texture is magnified on screen (zoom factor > 1), nearest
+// sampling shows each texel as a flat square.  These helpers rebuild a
+// continuous pixel by bilinearly interpolating the 4 surrounding texels,
+// using the same per-channel strategy as resolve.wgsl:
+//   - nu interpolated continuously, re-encoded as iter = floor(nu) plus a
+//     synthetic |z| that reproduces fract(nu) through smooth_escape_fraction;
+//   - z direction interpolated as unit vectors;
+//   - distance height lerped; derivative angle and stripe phase lerped
+//     circularly; average orbit direction unpacked, lerped, repacked.
+// Non-escaped corners (sentinel, inside, budget-exhausted, no data) are
+// masked out; if they dominate, the caller keeps its nearest sample.
+
+const TWO_PI: f32 = 6.283185307179586;
+
+fn decode_avg_dir_vec(encoded: f32) -> vec2<f32> {
+  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
+  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
+  return vec2<f32>(
+    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
+    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
+  );
+}
+
+fn encode_avg_dir_vec(avgDir: vec2<f32>) -> f32 {
+  let phase = clamp(avgDir * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
+  let xq = floor(phase.x * ORBIT_DIRECTION_SCALE + 0.5);
+  let yq = floor(phase.y * ORBIT_DIRECTION_SCALE + 0.5);
+  return xq * ORBIT_DIRECTION_BASE + yq;
+}
+
+struct InterpPixel {
+  kind: i32, // 0 = not interpolable (caller keeps nearest), 1 = escaped interpolated
+  iter: f32,
+  zx: f32,
+  zy: f32,
+  extras: PixelExtras,
+};
+
+fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>) -> InterpPixel {
+  var out: InterpPixel;
+  out.kind = 0;
+
+  let texSizeF = vec2<f32>(f32(texSize.x), f32(texSize.y));
+  let p = vec2<f32>(uv.x * texSizeF.x, (1.0 - uv.y) * texSizeF.y) - vec2<f32>(0.5);
+  let baseF = floor(p);
+  let f = p - baseF;
+  let base = vec2<i32>(i32(baseF.x), i32(baseF.y));
+  var offsets = array<vec2<i32>, 4>(
+    vec2<i32>(0, 0), vec2<i32>(1, 0), vec2<i32>(0, 1), vec2<i32>(1, 1)
+  );
+  var weights = array<f32, 4>(
+    (1.0 - f.x) * (1.0 - f.y),
+    f.x * (1.0 - f.y),
+    (1.0 - f.x) * f.y,
+    f.x * f.y
+  );
+
+  var wEscaped = 0.0;
+  var wOther = 0.0;
+  // nu is accumulated relative to baseIter (the first escaped corner's
+  // iteration count) to keep full f32 precision at deep zooms where
+  // iteration counts are large.
+  var baseIter = -1.0;
+  var nuSum = 0.0;
+  var distSum = 0.0;
+  var zDirSum = vec2<f32>(0.0);
+  var angleDirSum = vec2<f32>(0.0);
+  var stripeDirSum = vec2<f32>(0.0);
+  var avgDirSum = vec2<f32>(0.0);
+  var bestW = -1.0;
+  var bestRefInt = 0.0;
+  var bestAngle = 0.0;
+  var bestStripe = 0.0;
+
+  for (var i = 0u; i < 4u; i = i + 1u) {
+    let ccoord = clamp(base + offsets[i], vec2<i32>(0), texSize - vec2<i32>(1));
+    let w = weights[i];
+    let citer = textureLoad(sourceTex, ccoord, 0, 0).r;
+    let cstep = textureLoad(sourceTex, ccoord, 1, 0).r;
+    if (citer <= 0.0 || cstep <= 0.0) {
+      wOther = wOther + w;
+      continue;
+    }
+    let zx = textureLoad(sourceTex, ccoord, 2, 0).r;
+    let zy = textureLoad(sourceTex, ccoord, 3, 0).r;
+    let z_sq = zx * zx + zy * zy;
+    if (z_sq < parameters.mu) {
+      // Budget-exhausted: not displayable as escaped.
+      wOther = wOther + w;
+      continue;
+    }
+
+    if (baseIter < 0.0) {
+      baseIter = citer;
+    }
+    wEscaped = wEscaped + w;
+    nuSum = nuSum + w * ((citer - baseIter) + clamp(smooth_escape_fraction(z_sq), 0.0, 1.0));
+    distSum = distSum + w * textureLoad(sourceTex, ccoord, 4, 0).r;
+    let angle = textureLoad(sourceTex, ccoord, 5, 0).r;
+    angleDirSum = angleDirSum + w * vec2<f32>(cos(angle), sin(angle));
+    let zLen = max(sqrt(z_sq), 1e-12);
+    zDirSum = zDirSum + w * vec2<f32>(zx, zy) / zLen;
+    let refVal = max(textureLoad(sourceTex, ccoord, 6, 0).r, 0.0);
+    let stripePhase = fract(refVal);
+    let stripeAngle = stripePhase * TWO_PI;
+    stripeDirSum = stripeDirSum + w * vec2<f32>(cos(stripeAngle), sin(stripeAngle));
+    avgDirSum = avgDirSum + w * decode_avg_dir_vec(textureLoad(sourceTex, ccoord, 7, 0).r);
+    if (w > bestW) {
+      bestW = w;
+      bestRefInt = floor(refVal);
+      bestAngle = angle;
+      bestStripe = stripePhase;
+    }
+  }
+
+  // Escaped corners must dominate, otherwise the caller keeps its nearest
+  // sample (avoids halos along the interior / no-data boundary).
+  if (wEscaped <= 1e-6 || wEscaped < wOther) {
+    return out;
+  }
+
+  let invW = 1.0 / wEscaped;
+  let logMu = max(parameters.logMu, 1e-6);
+
+  // nu → iter = floor(nu) + synthetic |z| reproducing fract(nu).
+  // floor/fract are computed on the small relative value for f32 precision.
+  let nuRel = nuSum * invW;
+  let relFloor = floor(nuRel);
+  var iterOut = baseIter + relFloor;
+  var frac = clamp(nuRel - relFloor, 0.0, 0.9999);
+  if (iterOut < 1.0) {
+    iterOut = 1.0;
+    frac = 0.0;
+  }
+  let log_z2 = logMu * exp2(1.0 - frac);
+  let zLenOut = exp(0.5 * log_z2);
+  let zDirLen = length(zDirSum);
+  let zDir = select(vec2<f32>(1.0, 0.0), zDirSum / zDirLen, zDirLen > 1e-5);
+
+  out.kind = 1;
+  out.iter = iterOut;
+  out.zx = zDir.x * zLenOut;
+  out.zy = zDir.y * zLenOut;
+  out.extras.der_x = distSum * invW;
+  out.extras.der_y = select(bestAngle, atan2(angleDirSum.y, angleDirSum.x), length(angleDirSum) > 1e-5);
+  let stripeOut = select(
+    bestStripe,
+    fract(atan2(stripeDirSum.y, stripeDirSum.x) / TWO_PI + 1.0),
+    length(stripeDirSum) > 1e-5
+  );
+  out.extras.refWithStripe = bestRefInt + min(stripeOut, 0.999999);
+  out.extras.avgDirection = encode_avg_dir_vec(clamp(avgDirSum * invW, vec2<f32>(-1.0), vec2<f32>(1.0)));
+  return out;
+}
+
+// Colorize from a source texture, optionally replacing the nearest sample
+// with a bilinear interpolation when the texture is magnified on screen.
+fn colorize_sampled(
+  sourceTex: texture_2d_array<f32>,
+  coord: vec2<i32>,
+  texSize: vec2<i32>,
+  iter_val: f32, zx_val: f32, zy_val: f32,
+  uv_tex: vec2<f32>,
+  magnified: bool,
+  uv_screen: vec2<f32>,
+  uv_neutral: vec2<f32>,
+  distanceHeightOffset: f32,
+  distanceHeightGradientScale: f32
+) -> vec4<f32> {
+  var it = iter_val;
+  var zx = zx_val;
+  var zy = zy_val;
+  var extras = load_pixel_extras(sourceTex, coord);
+  if (magnified) {
+    let interp = sample_escaped_bilinear(sourceTex, uv_tex, texSize);
+    if (interp.kind == 1) {
+      it = interp.iter;
+      zx = interp.zx;
+      zy = interp.zy;
+      extras = interp.extras;
+    }
+  }
+  return colorize_pixel(
+    sourceTex, coord, texSize, it, zx, zy, extras,
+    uv_screen, uv_neutral, distanceHeightOffset, distanceHeightGradientScale,
+    uv_tex, magnified
+  );
 }
 
 // ── Debug flag ──
@@ -997,6 +1255,9 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 
   let zf  = parameters.zoomFactor;
   let lzf = parameters.liveZoomFactor;
+  // Texture magnified on screen → bilinear interpolation of the samples.
+  let liveMagnified = lzf > 1.001;
+  let frozenMagnified = zf > 1.001;
   let liveDistanceHeightOffset = distance_height_scale_offset(lzf);
   let frozenDistanceHeightOffset = distance_height_scale_offset(zf);
   let liveDistanceHeightGradientScale = distance_height_gradient_scale(lzf);
@@ -1051,9 +1312,10 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   var frozen_iter = -1.0;
   var frozen_zx = 0.0;
   var frozen_zy = 0.0;
+  var uv_frozen = vec2<f32>(0.0);
   if (useFrozen) {
-    let uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
-                    - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
+    uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
+                - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
     var frozenInBounds: bool;
     if (zf < 1.0) {
@@ -1091,15 +1353,15 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   if (liveHasData && frozenHasData) {
     // Both have data — pick the one with finer resolution (smaller step).
     if (liveStep <= effectiveFrozenStep) {
-      let liveExtras = load_pixel_extras(tex, liveCoord);
-      let liveColor = colorize_pixel(
+      let liveColor = colorize_sampled(
         tex,
         liveCoord,
         texSize,
         live_iter,
         live_zx,
         live_zy,
-        liveExtras,
+        uv_live,
+        liveMagnified,
         uv_screen,
         uv_neutral,
         liveDistanceHeightOffset,
@@ -1111,15 +1373,15 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       }
       return vec4<f32>(liveColor.rgb, 1.0);
     } else {
-      let frozenExtras = load_pixel_extras(texFrozen, frozenCoord);
-      let frozenColor = colorize_pixel(
+      let frozenColor = colorize_sampled(
         texFrozen,
         frozenCoord,
         texSize,
         frozen_iter,
         frozen_zx,
         frozen_zy,
-        frozenExtras,
+        uv_frozen,
+        frozenMagnified,
         uv_screen,
         uv_neutral,
         frozenDistanceHeightOffset,
@@ -1130,15 +1392,15 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   if (liveHasData) {
-    let liveExtras = load_pixel_extras(tex, liveCoord);
-    let liveColor = colorize_pixel(
+    let liveColor = colorize_sampled(
       tex,
       liveCoord,
       texSize,
       live_iter,
       live_zx,
       live_zy,
-      liveExtras,
+      uv_live,
+      liveMagnified,
       uv_screen,
       uv_neutral,
       liveDistanceHeightOffset,
@@ -1156,15 +1418,15 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   }
 
   if (frozenHasData) {
-    let frozenExtras = load_pixel_extras(texFrozen, frozenCoord);
-    let frozenColor = colorize_pixel(
+    let frozenColor = colorize_sampled(
       texFrozen,
       frozenCoord,
       texSize,
       frozen_iter,
       frozen_zx,
       frozen_zy,
-      frozenExtras,
+      uv_frozen,
+      frozenMagnified,
       uv_screen,
       uv_neutral,
       frozenDistanceHeightOffset,

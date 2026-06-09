@@ -27,6 +27,11 @@ vi.mock('../../src/textureStore', () => ({
   saveRemoteTextureEntry: vi.fn(),
 }));
 
+vi.mock('../../src/textureMappingPresetStore', () => ({
+  getAllStoredTextureMappingPresetEntries: vi.fn(),
+  saveRemoteTextureMappingPresetEntry: vi.fn(),
+}));
+
 import {
   getRemoteCatalogEntry,
   getRemoteTextureBlob,
@@ -37,6 +42,7 @@ import {getAllPresetRecords, saveRemotePresetEntry} from '../../src/presetStore'
 import {getAllPaletteEntries, saveRemotePaletteEntry} from '../../src/paletteStore';
 import {getAllStopPresetEntries, saveRemoteStopPresetEntry} from '../../src/stopPresetStore';
 import {getAllTextureEntries, saveRemoteTextureEntry} from '../../src/textureStore';
+import {getAllStoredTextureMappingPresetEntries, saveRemoteTextureMappingPresetEntry} from '../../src/textureMappingPresetStore';
 import {shouldFetchRemoteEntry, syncRemoteCatalog} from '../../src/remoteCatalogSync';
 
 const emptyMetadata = {
@@ -44,6 +50,7 @@ const emptyMetadata = {
   palettePreset: [],
   stopPreset: [],
   texture: [],
+  textureMappingPreset: [],
 };
 
 describe('remoteCatalogSync', () => {
@@ -53,6 +60,7 @@ describe('remoteCatalogSync', () => {
     vi.mocked(getAllPaletteEntries).mockResolvedValue([]);
     vi.mocked(getAllStopPresetEntries).mockResolvedValue([]);
     vi.mocked(getAllTextureEntries).mockResolvedValue([]);
+    vi.mocked(getAllStoredTextureMappingPresetEntries).mockResolvedValue([]);
     vi.mocked(listAllRemoteCatalogMetadata).mockResolvedValue(emptyMetadata);
   });
 
@@ -106,13 +114,16 @@ describe('remoteCatalogSync', () => {
       palettePreset: [{guid: 'palette-1', name: 'Palette', lastUpdated: '2026-06-07T10:00:00.000Z'}],
       stopPreset: [{guid: 'stop-1', name: 'Stop', lastUpdated: '2026-06-07T10:00:00.000Z'}],
       texture: [{guid: 'texture-1', name: 'Texture', lastUpdated: '2026-06-07T10:00:00.000Z'}],
+      textureMappingPreset: [{guid: 'mapping-1', name: 'Mapping', lastUpdated: '2026-06-07T10:00:00.000Z'}],
     });
     vi.mocked(getAllPaletteEntries).mockResolvedValue([{guid: 'palette-1', lastUpdated: '2026-06-07T09:00:00.000Z'} as any]);
     vi.mocked(getAllStopPresetEntries).mockResolvedValue([{guid: 'stop-1', lastUpdated: '2026-06-07T09:00:00.000Z'} as any]);
     vi.mocked(getAllTextureEntries).mockResolvedValue([{guid: 'texture-1', lastUpdated: '2026-06-07T09:00:00.000Z'} as any]);
+    vi.mocked(getAllStoredTextureMappingPresetEntries).mockResolvedValue([{guid: 'mapping-1', lastUpdated: '2026-06-07T09:00:00.000Z'} as any]);
     vi.mocked(getRemoteCatalogEntry).mockImplementation(async (type: string, guid: string) => {
       if (type === 'palettePreset') return {guid, name: 'Palette', lastUpdated: '2026-06-07T10:00:00.000Z', colorStops: []};
       if (type === 'stopPreset') return {guid, name: 'Stop', lastUpdated: '2026-06-07T10:00:00.000Z', values: {color: '#fff'}};
+      if (type === 'textureMappingPreset') return {guid, name: 'Mapping', lastUpdated: '2026-06-07T10:00:00.000Z', mapping: {}};
       return {guid, name: 'Texture', lastUpdated: '2026-06-07T10:00:00.000Z', thumbnail: 'thumb', blobPath: 'catalog/texture/texture-1'};
     });
     const blob = new Blob(['x'], {type: 'image/webp'});
@@ -122,6 +133,7 @@ describe('remoteCatalogSync', () => {
 
     expect(saveRemotePaletteEntry).toHaveBeenCalledWith(expect.objectContaining({guid: 'palette-1', remote: expect.any(Object)}));
     expect(saveRemoteStopPresetEntry).toHaveBeenCalledWith(expect.objectContaining({guid: 'stop-1', remote: expect.any(Object)}));
+    expect(saveRemoteTextureMappingPresetEntry).toHaveBeenCalledWith(expect.objectContaining({guid: 'mapping-1', remote: expect.any(Object)}));
     expect(saveRemoteTextureEntry).toHaveBeenCalledWith(expect.objectContaining({guid: 'texture-1', remote: expect.any(Object)}), blob);
   });
 
