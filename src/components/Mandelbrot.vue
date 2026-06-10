@@ -313,6 +313,11 @@ onMounted(async () => {
   if (engine) {
     emit('ready', engine);
     engine.startRenderLoop(draw);
+    if (import.meta.env.DEV) {
+      // Dev-only hook for runtime inspection and A/B toggling of engine flags
+      // (e.g. useInplaceCompute) from the console or Playwright tests.
+      ;(window as any).__mandelbrotEngine = engine
+    }
   }
 });
 
