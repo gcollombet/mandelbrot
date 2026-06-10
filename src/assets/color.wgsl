@@ -1080,6 +1080,7 @@ struct InterpPixel {
   iter: f32,
   zx: f32,
   zy: f32,
+  step: f32, // finest resolution step among contributing corners (for compositing)
   extras: PixelExtras,
 };
 
@@ -1103,7 +1104,8 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
   );
 
   var wEscaped = 0.0;
-  var wOther = 0.0;
+  var wInside = 0.0;
+  var minStep = 1e30;
   // nu is accumulated relative to baseIter (the first escaped corner's
   // iteration count) to keep full f32 precision at deep zooms where
   // iteration counts are large.
@@ -1124,19 +1126,25 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
     let w = weights[i];
     let citer = textureLoad(sourceTex, ccoord, 0, 0).r;
     let cstep = textureLoad(sourceTex, ccoord, 1, 0).r;
-    if (citer <= 0.0 || cstep <= 0.0) {
-      wOther = wOther + w;
+    // Sentinel or no data: this corner simply contributes no weight.
+    if (citer < 0.0 || cstep <= 0.0) {
+      continue;
+    }
+    // Inside the set: tracked separately so the interior keeps priority
+    // (interpolating escaped values over it would erode the set boundary).
+    if (citer == 0.0) {
+      wInside = wInside + w;
       continue;
     }
     let zx = textureLoad(sourceTex, ccoord, 2, 0).r;
     let zy = textureLoad(sourceTex, ccoord, 3, 0).r;
     let z_sq = zx * zx + zy * zy;
     if (z_sq < parameters.mu) {
-      // Budget-exhausted: not displayable as escaped.
-      wOther = wOther + w;
+      // Budget-exhausted: not displayable as escaped, contributes no weight.
       continue;
     }
 
+    minStep = min(minStep, cstep);
     if (baseIter < 0.0) {
       baseIter = citer;
     }
@@ -1160,9 +1168,11 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
     }
   }
 
-  // Escaped corners must dominate, otherwise the caller keeps its nearest
-  // sample (avoids halos along the interior / no-data boundary).
-  if (wEscaped <= 1e-6 || wEscaped < wOther) {
+  // The interior keeps priority over escaped interpolation (no halo inside
+  // the set), but no-data / budget-exhausted corners do NOT block it: the
+  // interpolation is then the only usable data for this pixel, which fills
+  // the flat blocks that otherwise flash during frozen reprojection swaps.
+  if (wEscaped <= 1e-6 || wInside > wEscaped) {
     return out;
   }
 
@@ -1188,6 +1198,7 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
   out.iter = iterOut;
   out.zx = zDir.x * zLenOut;
   out.zy = zDir.y * zLenOut;
+  out.step = minStep;
   out.extras.der_x = distSum * invW;
   out.extras.der_y = select(bestAngle, atan2(angleDirSum.y, angleDirSum.x), length(angleDirSum) > 1e-5);
   let stripeOut = select(
@@ -1200,13 +1211,14 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
   return out;
 }
 
-// Colorize from a source texture, optionally replacing the nearest sample
-// with a bilinear interpolation when the texture is magnified on screen.
+// Colorize from a source texture, replacing the nearest sample with a
+// pre-computed bilinear interpolation when one is available (magnified case).
 fn colorize_sampled(
   sourceTex: texture_2d_array<f32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
+  interp: InterpPixel,
   uv_tex: vec2<f32>,
   magnified: bool,
   uv_screen: vec2<f32>,
@@ -1218,14 +1230,11 @@ fn colorize_sampled(
   var zx = zx_val;
   var zy = zy_val;
   var extras = load_pixel_extras(sourceTex, coord);
-  if (magnified) {
-    let interp = sample_escaped_bilinear(sourceTex, uv_tex, texSize);
-    if (interp.kind == 1) {
-      it = interp.iter;
-      zx = interp.zx;
-      zy = interp.zy;
-      extras = interp.extras;
-    }
+  if (interp.kind == 1) {
+    it = interp.iter;
+    zx = interp.zx;
+    zy = interp.zy;
+    extras = interp.extras;
   }
   return colorize_pixel(
     sourceTex, coord, texSize, it, zx, zy, extras,
@@ -1302,8 +1311,24 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
     live_zx = liveSample.zx;
     live_zy = liveSample.zy;
   }
+
+  // When magnified, the bilinear interpolation both smooths the display and
+  // serves as a data source where the nearest texel is unusable (sentinel,
+  // budget-exhausted) — this fills the flat blocks that otherwise flash
+  // when the compositing alternates between live and frozen during zoom.
+  var liveInterp: InterpPixel;
+  liveInterp.kind = 0;
+  if (liveInBounds && liveMagnified) {
+    liveInterp = sample_escaped_bilinear(tex, uv_live, texSize);
+  }
+
   let liveEscaped = live_iter > 0.0 && (live_zx * live_zx + live_zy * live_zy) >= parameters.mu;
-  let liveHasData = liveEscaped && liveStep > 0.0;
+  var liveHasData = liveEscaped && liveStep > 0.0;
+  var liveCompositeStep = liveStep;
+  if (liveInterp.kind == 1) {
+    liveHasData = true;
+    liveCompositeStep = liveInterp.step;
+  }
 
   // ── Sample frozen texture ──
   // The frozen texture is only usable when it is aligned with the live texture
@@ -1317,6 +1342,8 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   var frozen_zx = 0.0;
   var frozen_zy = 0.0;
   var uv_frozen = vec2<f32>(0.0);
+  var frozenInterp: InterpPixel;
+  frozenInterp.kind = 0;
   if (useFrozen) {
     uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
                 - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
@@ -1339,11 +1366,19 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       frozenStep = frozenSample.step;
       frozen_zx = frozenSample.zx;
       frozen_zy = frozenSample.zy;
+      if (frozenMagnified) {
+        frozenInterp = sample_escaped_bilinear(texFrozen, uv_frozen, texSize);
+      }
     }
   }
   let frozenEscaped = frozen_iter > 0.0 && (frozen_zx * frozen_zx + frozen_zy * frozen_zy) >= parameters.mu;
   let frozenInterior = frozen_iter == 0.0;
-  let frozenHasData = (frozenEscaped || frozenInterior) && frozenStep > 0.0;
+  var frozenHasData = (frozenEscaped || frozenInterior) && frozenStep > 0.0;
+  var frozenCompositeStep = frozenStep;
+  if (frozenInterp.kind == 1) {
+    frozenHasData = true;
+    frozenCompositeStep = frozenInterp.step;
+  }
 
   // ── Pick the best pixel: smallest positive step wins ──
   // step > 0 means the pixel has data; step = 0 means no data.
@@ -1352,11 +1387,11 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   // frozenScale is zf/lzf times coarser per axis than a live genuine pixel
   // (step=1) at liveScale.  Scale the frozen step to live-resolution units.
   let scaleRatio = select(1.0, zf / lzf, lzf > 0.0);
-  let effectiveFrozenStep = frozenStep * scaleRatio;
+  let effectiveFrozenStep = frozenCompositeStep * scaleRatio;
 
   if (liveHasData && frozenHasData) {
     // Both have data — pick the one with finer resolution (smaller step).
-    if (liveStep <= effectiveFrozenStep) {
+    if (liveCompositeStep <= effectiveFrozenStep) {
       let liveColor = colorize_sampled(
         tex,
         liveCoord,
@@ -1364,6 +1399,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         live_iter,
         live_zx,
         live_zy,
+        liveInterp,
         uv_live,
         liveMagnified,
         uv_screen,
@@ -1384,6 +1420,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
         frozen_iter,
         frozen_zx,
         frozen_zy,
+        frozenInterp,
         uv_frozen,
         frozenMagnified,
         uv_screen,
@@ -1403,6 +1440,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       live_iter,
       live_zx,
       live_zy,
+      liveInterp,
       uv_live,
       liveMagnified,
       uv_screen,
@@ -1429,6 +1467,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
       frozen_iter,
       frozen_zx,
       frozen_zy,
+      frozenInterp,
       uv_frozen,
       frozenMagnified,
       uv_screen,

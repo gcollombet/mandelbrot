@@ -155,81 +155,6 @@ fn phase_to_dir(phase: f32) -> vec2<f32> {
   return vec2<f32>(cos(a), sin(a));
 }
 
-// ── corner classification & parent fallback ─────────────────────────
-
-struct CornerSample {
-  kind: i32, // 0 = unfinished / out of bounds, 1 = escaped, 2 = inside
-  coord: vec2<i32>,
-  iter: f32,
-  z: vec2<f32>,
-  z_sq: f32,
-};
-
-fn classify_corner(coord: vec2<i32>, dims: vec2<u32>) -> CornerSample {
-  var s: CornerSample;
-  s.kind = 0;
-  s.coord = coord;
-  if (coord.x < 0 || coord.y < 0 || coord.x >= i32(dims.x) || coord.y >= i32(dims.y)) {
-    return s;
-  }
-  let citer = loadLayer(coord, 0);
-  if (citer < 0.0) {
-    return s;
-  }
-  if (citer == 0.0) {
-    s.kind = 2;
-    return s;
-  }
-  let zx = loadLayer(coord, 2);
-  let zy = loadLayer(coord, 3);
-  let z_sq = zx * zx + zy * zy;
-  if (z_sq < uni.mu) {
-    // Budget-exhausted: not usable yet.
-    return s;
-  }
-  s.kind = 1;
-  s.iter = citer;
-  s.z = vec2<f32>(zx, zy);
-  s.z_sq = z_sq;
-  return s;
-}
-
-// When a cell corner is unfinished (sentinel or budget-exhausted), substitute
-// the NEAREST finished anchor of the parent grid level.  Coarser anchors were
-// seeded earlier and have accumulated more iteration budget, so they finish
-// first; without this substitution, cells with a single finished corner
-// collapse to a flat square and budget-exhausted anchors degrade into flat
-// parent copies — which is exactly the "random squares" artifact seen when
-// convergence is slow (deep zooms with large globalMaxIter).
-// Choosing the nearest (not the first) finished parent keeps distinct corners
-// mapped to distinct parents, preserving the spatial variation of the
-// interpolation.  Callers must only invoke this for partially-finished cells:
-// probing parents on fully-empty cells would multiply the cost of the
-// level-climbing loop during the early convergence phase.
-fn parent_fallback(coord: vec2<i32>, dims: vec2<u32>, step_i: i32, gx: i32, gy: i32) -> CornerSample {
-  let step2 = step_i * 2;
-  let px = coord.x - gx;
-  let py = coord.y - gy;
-  let pbx = px - ((px % step2 + step2) % step2) + gx;
-  let pby = py - ((py % step2 + step2) % step2) + gy;
-  var best: CornerSample;
-  best.kind = 0;
-  best.coord = coord;
-  var bestDist = 0x7fffffff;
-  for (var k = 0u; k < 4u; k = k + 1u) {
-    let pc = vec2<i32>(pbx + i32(k % 2u) * step2, pby + i32(k / 2u) * step2);
-    let ps = classify_corner(pc, dims);
-    if (ps.kind != 0) {
-      let d = abs(pc.x - coord.x) + abs(pc.y - coord.y);
-      if (d < bestDist) {
-        bestDist = d;
-        best = ps;
-      }
-    }
-  }
-  return best;
-}
-
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let dims = vec2<u32>(textureDimensions(rawTex));
@@ -349,68 +274,66 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     var hasFinished = false;
     var firstFinishedCoord = vec2<i32>(0);
 
-    // Classify the 4 corners first (cheap: 1-3 loads each).
-    var samples: array<CornerSample, 4>;
-    var anyFinished = false;
     for (var i = 0u; i < 4u; i = i + 1u) {
-      samples[i] = classify_corner(candidates[i], dims);
-      if (samples[i].kind != 0) {
-        anyFinished = true;
+      let ccoord = candidates[i];
+
+      // Bounds check: skip candidates that fall outside the texture.
+      if (ccoord.x < 0 || ccoord.y < 0 || ccoord.x >= i32(dims.x) || ccoord.y >= i32(dims.y)) {
+        continue;
       }
-    }
 
-    // Parent fallback only for partially-finished cells: fully-empty cells
-    // climb to the next coarser level below at the original (cheap) cost.
-    if (anyFinished) {
-      for (var i = 0u; i < 4u; i = i + 1u) {
-        if (samples[i].kind == 0) {
-          samples[i] = parent_fallback(candidates[i], dims, step_i, gx, gy);
-        }
-      }
-    }
+      let citer = loadLayer(ccoord, 0);
 
-    for (var i = 0u; i < 4u; i = i + 1u) {
-      let cs = samples[i];
-
-      if (cs.kind == 0) {
+      // Sentinel — this candidate is not computed yet.
+      if (citer < 0.0) {
         continue;
       }
 
       let w = weights[i];
 
       // Inside set (iter == 0).
-      if (cs.kind == 2) {
+      if (citer == 0.0) {
         if (!hasFinished) {
           hasFinished = true;
-          firstFinishedCoord = cs.coord;
+          firstFinishedCoord = ccoord;
         }
         wInside = wInside + w;
         if (w > bestInsideW) {
           bestInsideW = w;
-          bestInsideCoord = cs.coord;
+          bestInsideCoord = ccoord;
         }
+        continue;
+      }
+
+      // iter > 0: check whether pixel actually escaped or is budget-exhausted.
+      let zx = loadLayer(ccoord, 2);
+      let zy = loadLayer(ccoord, 3);
+      let z_sq = zx * zx + zy * zy;
+
+      if (z_sq < uni.mu) {
+        // Budget-exhausted: skip this candidate.
         continue;
       }
 
       // Escaped — accumulate.
       if (!hasFinished) {
         hasFinished = true;
-        firstFinishedCoord = cs.coord;
+        firstFinishedCoord = ccoord;
       }
       if (baseIter < 0.0) {
-        baseIter = cs.iter;
+        baseIter = citer;
       }
       wEscaped = wEscaped + w;
-      nuSum = nuSum + w * ((cs.iter - baseIter) + smooth_frac(cs.z_sq, logMu));
-      distSum = distSum + w * loadLayer(cs.coord, 4);
-      let angle = loadLayer(cs.coord, 5);
+      nuSum = nuSum + w * ((citer - baseIter) + smooth_frac(z_sq, logMu));
+      distSum = distSum + w * loadLayer(ccoord, 4);
+      let angle = loadLayer(ccoord, 5);
       angleDirSum = angleDirSum + w * vec2<f32>(cos(angle), sin(angle));
-      let zLen = max(sqrt(cs.z_sq), 1e-12);
-      zDirSum = zDirSum + w * cs.z / zLen;
-      let refVal = max(loadLayer(cs.coord, 6), 0.0);
+      let zLen = max(sqrt(z_sq), 1e-12);
+      zDirSum = zDirSum + w * vec2<f32>(zx, zy) / zLen;
+      let refVal = max(loadLayer(ccoord, 6), 0.0);
       let stripePhase = fract(refVal);
       stripeDirSum = stripeDirSum + w * phase_to_dir(stripePhase);
-      avgDirSum = avgDirSum + w * decode_avg_dir(loadLayer(cs.coord, 7));
+      avgDirSum = avgDirSum + w * decode_avg_dir(loadLayer(ccoord, 7));
       if (w > bestEscapedW) {
         bestEscapedW = w;
         bestRefInt = floor(refVal);

@@ -317,7 +317,13 @@ onMounted(async () => {
 });
 
 onUnmounted(() => {
-  engine?.stopRenderLoop();
+  // Fully destroy the engine (render loop, reference worker, GPU resources).
+  // stopRenderLoop alone leaves the old instance alive across Vite HMR
+  // re-mounts: a stale engine compiled with outdated shaders can then keep
+  // rendering to the same canvas, alternating frames with the new instance
+  // (visible as a smooth/blocky flicker and a large slowdown).
+  engine?.destroy();
+  engine = null;
   window.removeEventListener('resize', handleResize);
 });
 
