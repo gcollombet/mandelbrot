@@ -745,6 +745,15 @@ const shortcutLabels = computed(() => {
           <i class="fa-solid fa-camera fa-fw" aria-hidden="true"></i>
           <span class="tab-shortcut-hint is-hidden-touch">(B)</span>
         </button>
+        <button
+          v-if="authConfigured"
+          class="top-tab-btn camera-btn auth-btn"
+          :title="authUserEmail ? 'Logout (' + authUserEmail + ')' : 'Login'"
+          @click="authUserEmail ? logoutUser() : loginWithGoogle()"
+        >
+          <i :class="authUserEmail ? 'fa-solid fa-right-from-bracket fa-fw' : 'fa-solid fa-right-to-bracket fa-fw'" aria-hidden="true"></i>
+          <span class="is-hidden-touch" style="margin-left: 6px;">{{ authUserEmail ? 'Logout' : 'Login' }}</span>
+        </button>
       </div>
     </div>
 
@@ -1224,6 +1233,13 @@ const shortcutLabels = computed(() => {
 @media (max-width: 1023px) {
   .render-stats-wrapper {
     bottom: 100px;
+  }
+}
+
+@media (max-width: 768px) {
+  .top-tab-btn {
+    padding: 8px 12px;
+    font-size: 0.85rem;
   }
 }
 
