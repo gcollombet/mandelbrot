@@ -13,11 +13,26 @@
   --accent: oklch(0.70 0.17 245);
   --accent-bright: oklch(0.78 0.16 240);
   --accent-soft: oklch(0.70 0.17 245 / 0.16);
+  --mauve: oklch(0.70 0.17 320);
+  --mauve-bright: oklch(0.77 0.15 322);
   --magenta: oklch(0.70 0.19 350);
   --track: #272b35;
   --radius: 18px;
   --mono: "JetBrains Mono", ui-monospace, monospace;
   --sans: "Space Grotesk", system-ui, sans-serif;
+  --glass: rgba(10, 12, 18, 0.52);
+  --glass-line: rgba(255, 255, 255, 0.10);
+}
+
+/* AI gradient ring animation, shared by the compass button and the splash mark */
+@property --ai-angle {
+  syntax: '<angle>';
+  initial-value: 0deg;
+  inherits: false;
+}
+
+@keyframes ai-spin {
+  to { --ai-angle: 360deg; }
 }
 
 html, body {
@@ -26,4 +41,61 @@ html, body {
     height: 100%;
     width: 100%;
     overflow: hidden;
+}
+
+/* --- Custom Checkbox Styling (Switch Toggle style) --- */
+input[type="checkbox"],
+.checkbox input[type="checkbox"] {
+  -webkit-appearance: none !important;
+  appearance: none !important;
+  width: 38px !important;
+  height: 22px !important;
+  border-radius: 999px !important;
+  background-color: var(--track) !important;
+  border: 1px solid var(--line) !important;
+  position: relative !important;
+  cursor: pointer !important;
+  outline: none !important;
+  transition: background-color 0.18s, border-color 0.18s, box-shadow 0.18s !important;
+  display: inline-flex !important;
+  align-items: center !important;
+  vertical-align: middle !important;
+  flex-shrink: 0 !important;
+  margin: 0 !important;
+}
+
+input[type="checkbox"]::after,
+.checkbox input[type="checkbox"]::after {
+  content: "" !important;
+  position: absolute !important;
+  top: 2px !important;
+  left: 2px !important;
+  width: 16px !important;
+  height: 16px !important;
+  border-radius: 50% !important;
+  background-color: #8a91a1 !important;
+  transition: left 0.18s, background-color 0.18s !important;
+}
+
+input[type="checkbox"]:hover,
+.checkbox input[type="checkbox"]:hover {
+  border-color: var(--accent-bright) !important;
+}
+
+input[type="checkbox"]:focus-visible,
+.checkbox input[type="checkbox"]:focus-visible {
+  border-color: var(--accent-bright) !important;
+}
+
+input[type="checkbox"]:checked,
+.checkbox input[type="checkbox"]:checked {
+  background-color: var(--accent) !important;
+  border-color: var(--accent) !important;
+  box-shadow: 0 0 10px var(--accent-soft) !important;
+}
+
+input[type="checkbox"]:checked::after,
+.checkbox input[type="checkbox"]:checked::after {
+  left: 18px !important;
+  background-color: #fff !important;
 }

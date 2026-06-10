@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Logo — Realtime Mandelbrot Renderer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg-0:#07080d;
+    --panel:#101218;
+    --line:#23272f;
+    --line-soft:#1b1e26;
+    --ink:#f2f4f8;
+    --ink-2:#aeb4c2;
+    --ink-3:#646b7c;
+    --accent:oklch(0.70 0.17 245);
+    --accent-bright:oklch(0.78 0.16 240);
+    --mauve:oklch(0.70 0.17 320);
+    --mauve-bright:oklch(0.77 0.15 322);
+    --magenta:oklch(0.70 0.19 350);
+    --mono:"JetBrains Mono",ui-monospace,monospace;
+    --sans:"Space Grotesk",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:var(--sans);
+    background:var(--bg-0);
+    color:var(--ink);
+    min-height:100vh;
+    display:flex;flex-direction:column;align-items:center;
+    padding:40px 22px 70px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .page-head{
+    width:min(960px,100%);margin-bottom:26px;
+    display:flex;align-items:baseline;gap:14px;
+  }
+  .page-head h1{font-size:18px;font-weight:700;letter-spacing:.18em;text-transform:uppercase;color:var(--ink-2);}
+  .page-head span{font-family:var(--mono);font-size:12px;color:var(--ink-3);}
+
+  .grid{
+    width:min(960px,100%);
+    display:grid;grid-template-columns:repeat(2, 1fr);gap:16px;
+  }
+  .card{
+    background:var(--panel);
+    border:1px solid var(--line-soft);
+    border-radius:16px;
+    overflow:hidden;
+    display:flex;flex-direction:column;
+  }
+  .card.wide{grid-column:1 / -1;}
+  .card .stage{
+    flex:1;display:flex;align-items:center;justify-content:center;gap:34px;
+    padding:48px 30px;min-height:200px;
+  }
+  .card .meta{
+    padding:12px 18px;border-top:1px solid var(--line-soft);
+    display:flex;justify-content:space-between;align-items:center;
+  }
+  .card .meta .name{font-size:13px;font-weight:600;color:var(--ink-2);}
+  .card .meta .spec{font-family:var(--mono);font-size:11px;color:var(--ink-3);}
+
+  .stage.light{background:#eef0f4;}
+  .stage.fract{
+    background:
+      radial-gradient(540px 320px at 78% 18%, oklch(0.45 0.16 350 / .5), transparent 65%),
+      radial-gradient(440px 300px at 16% 86%, oklch(0.4 0.13 160 / .45), transparent 60%),
+      #0a0508;
+  }
+
+  /* ---------- lockups ---------- */
+  .lockup-h{display:flex;align-items:center;gap:22px;}
+  .lockup-h .words .kicker{
+    font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.38em;
+    text-transform:uppercase;color:var(--ink-3);margin-bottom:6px;
+  }
+  .lockup-h .words .title{font-size:30px;line-height:1.1;font-weight:700;letter-spacing:-.015em;}
+  .lockup-h .words .title .grad{
+    background:linear-gradient(100deg, var(--accent-bright), var(--mauve-bright));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+  .stage.light .words .kicker{color:#7a8194;}
+  .stage.light .words .title{color:#15171e;}
+
+  .lockup-v{display:flex;flex-direction:column;align-items:center;text-align:center;gap:18px;}
+  .lockup-v .kicker{
+    font-family:var(--mono);font-size:11px;font-weight:600;letter-spacing:.38em;
+    text-transform:uppercase;color:var(--ink-3);
+  }
+  .lockup-v .title{font-size:28px;line-height:1.12;font-weight:700;letter-spacing:-.015em;}
+  .lockup-v .title .grad{
+    background:linear-gradient(100deg, var(--accent-bright), var(--mauve-bright));
+    -webkit-background-clip:text;background-clip:text;color:transparent;
+  }
+
+  /* ---------- ringed mark (splash style) ---------- */
+  .ringed{
+    position:relative;width:108px;height:108px;border-radius:50%;
+    display:grid;place-items:center;isolation:isolate;flex:none;
+  }
+  .ringed::before{
+    content:"";position:absolute;inset:0;border-radius:50%;z-index:-2;
+    background:conic-gradient(from 210deg,
+      var(--accent-bright), var(--mauve-bright), var(--magenta), var(--accent), var(--accent-bright));
+    filter:drop-shadow(0 0 22px oklch(0.65 0.18 290 / .5));
+  }
+  .ringed::after{content:"";position:absolute;inset:4px;border-radius:50%;z-index:-1;background:#0a0c12;}
+  .ringed svg{width:54px;height:54px;}
+
+  /* ---------- app icon ---------- */
+  .appicon{
+    position:relative;border-radius:27%;
+    display:grid;place-items:center;isolation:isolate;flex:none;
+    background:
+      radial-gradient(120% 120% at 80% 0%, oklch(0.4 0.13 280 / .65), transparent 60%),
+      radial-gradient(120% 120% at 10% 100%, oklch(0.36 0.12 330 / .5), transparent 55%),
+      #0b0d14;
+    border:1px solid rgba(255,255,255,0.09);
+    box-shadow:0 18px 44px -18px rgba(0,0,0,0.9);
+  }
+  .appicon.s120{width:120px;height:120px;}
+  .appicon.s120 svg{width:64px;height:64px;}
+  .appicon.s60{width:60px;height:60px;border-radius:27%;}
+  .appicon.s60 svg{width:32px;height:32px;}
+  .appicon.s32{width:32px;height:32px;border-radius:27%;}
+  .appicon.s32 svg{width:18px;height:18px;}
+
+  .icon-row{display:flex;align-items:flex-end;gap:28px;}
+
+  .mark-plain svg{width:96px;height:96px;}
+  .mark-mono svg{width:96px;height:96px;}
+
+  @media (max-width:720px){
+    .grid{grid-template-columns:1fr;}
+    .lockup-h{flex-direction:column;text-align:center;gap:16px;}
+  }
+</style>
+</head>
+<body>
+
+  <!-- shared symbol : cardioid + bulbs -->
+  <svg width="0" height="0" style="position:absolute" aria-hidden="true">
+    <defs>
+      <linearGradient id="lg-brand" x1="0" y1="0" x2="1" y2="1">
+        <stop offset="0" stop-color="oklch(0.78 0.16 240)"/>
+        <stop offset="1" stop-color="oklch(0.77 0.15 322)"/>
+      </linearGradient>
+      <symbol id="mark" viewBox="0 0 54 54">
+        <path d="M38 27c0-2.8-1.6-5.2-4.2-6 1-1.1 1.6-2.6 1.6-4.2 0-3.5-2.8-6.3-6.3-6.3-4.6 0-7 3.6-7.6 6.8-4.7.8-9.5 4.4-9.5 10.7 0 6.2 4.8 9.9 9.5 10.7.6 3.2 3 6.8 7.6 6.8 3.5 0 6.3-2.8 6.3-6.3 0-1.6-.6-3.1-1.6-4.2 2.6-.8 4.2-3.2 4.2-6z"
+          fill="none" stroke-width="2.4" stroke-linejoin="round"/>
+        <circle cx="42.5" cy="27" r="3.4" stroke="none"/>
+        <circle cx="48.5" cy="27" r="1.6" stroke="none" opacity="0.7"/>
+      </symbol>
+    </defs>
+  </svg>
+
+  <header class="page-head">
+    <h1>Logo</h1>
+    <span>Realtime Mandelbrot Renderer · cardioïde + bulbes</span>
+  </header>
+
+  <div class="grid">
+
+    <div class="card wide" data-screen-label="Lockup horizontal">
+      <div class="stage">
+        <div class="lockup-h">
+          <div class="ringed">
+            <svg><use href="#mark" stroke="url(#lg-brand)" fill="url(#lg-brand)"/></svg>
+          </div>
+          <div class="words">
+            <p class="kicker">Realtime</p>
+            <p class="title">Mandelbrot <span class="grad">Renderer</span></p>
+          </div>
+        </div>
+      </div>
+      <div class="meta"><span class="name">Lockup principal — horizontal</span><span class="spec">anneau conique bleu→mauve · Space Grotesk 700 + JetBrains Mono</span></div>
+    </div>
+
+    <div class="card" data-screen-label="Lockup vertical">
+      <div class="stage">
+        <div class="lockup-v">
+          <div class="ringed">
+            <svg><use href="#mark" stroke="url(#lg-brand)" fill="url(#lg-brand)"/></svg>
+          </div>
+          <div>
+            <p class="kicker">Realtime</p>
+            <p class="title">Mandelbrot<br><span class="grad">Renderer</span></p>
+          </div>
+        </div>
+      </div>
+      <div class="meta"><span class="name">Lockup vertical — splash</span><span class="spec">usage : splash · à propos</span></div>
+    </div>
+
+    <div class="card" data-screen-label="Marque seule">
+      <div class="stage">
+        <div class="mark-plain">
+          <svg viewBox="0 0 54 54" width="96" height="96"><use href="#mark" stroke="url(#lg-brand)" fill="url(#lg-brand)"/></svg>
+        </div>
+      </div>
+      <div class="meta"><span class="name">Marque seule — dégradé</span><span class="spec">fond sombre uniquement</span></div>
+    </div>
+
+    <div class="card" data-screen-label="Monochrome blanc">
+      <div class="stage fract">
+        <div class="mark-mono">
+          <svg viewBox="0 0 54 54" width="96" height="96"><use href="#mark" stroke="#ffffff" fill="#ffffff"/></svg>
+        </div>
+      </div>
+      <div class="meta"><span class="name">Monochrome blanc</span><span class="spec">sur photo / rendu fractal</span></div>
+    </div>
+
+    <div class="card" data-screen-label="Monochrome sombre">
+      <div class="stage light">
+        <div class="mark-mono">
+          <svg viewBox="0 0 54 54" width="96" height="96"><use href="#mark" stroke="#15171e" fill="#15171e"/></svg>
+        </div>
+      </div>
+      <div class="meta"><span class="name">Monochrome sombre</span><span class="spec">fonds clairs · impression</span></div>
+    </div>
+
+    <div class="card wide" data-screen-label="Icône application">
+      <div class="stage">
+        <div class="icon-row">
+          <div class="appicon s120"><svg viewBox="0 0 54 54" width="64" height="64"><use href="#mark" stroke="url(#lg-brand)" fill="url(#lg-brand)"/></svg></div>
+          <div class="appicon s60"><svg viewBox="0 0 54 54" width="32" height="32"><use href="#mark" stroke="url(#lg-brand)" fill="url(#lg-brand)"/></svg></div>
+          <div class="appicon s32"><svg viewBox="0 0 54 54" width="18" height="18"><use href="#mark" stroke="url(#lg-brand)" fill="url(#lg-brand)"/></svg></div>
+        </div>
+      </div>
+      <div class="meta"><span class="name">Icône app — 120 / 60 / 32</span><span class="spec">superellipse 27% · halos bleu & mauve</span></div>
+    </div>
+
+  </div>
+
+</body>
+</html>

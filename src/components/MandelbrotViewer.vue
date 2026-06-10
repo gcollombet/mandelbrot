@@ -9,7 +9,8 @@ import {
   preserveSessionPerformanceFields,
   stripSessionPerformanceFields,
 } from "../Mandelbrot.ts";
-import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry} from '../presetStore';
+import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry, getAllPresetRecords} from '../presetStore';
+import type {PresetRecord} from '../presetStore';
 import {syncRemoteCatalog} from '../remoteCatalogSync';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
 import {getLatestRemotePreset} from '../remoteCatalog';
@@ -17,7 +18,9 @@ import type {IterationData} from '../CursorCoordinate';
 import {computePalettePhase} from '../CursorCoordinate';
 import {Palette} from '../Palette';
 import {normalizeAnimationConfig} from '../AnimationConfig';
-import {createInterpolatedColorStop} from '../ColorStop';
+import {createInterpolatedColorStop, getEffectValue, type ColorStop} from '../ColorStop';
+import {EFFECT_FIELD_NAMES} from '../effectFieldConfig';
+import {interpolateRgb} from 'd3-interpolate';
 import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
 import type {TextureMetadata} from '../textureStore';
@@ -437,11 +440,12 @@ watch(mobileNavExpanded, (expanded) => {
 
 // Tabs du menu — raccourcis adaptés au layout clavier
 const settingsTabs = computed(() => [
-  { key: 'navigation', label: 'Navigation', icon: 'fa-solid fa-arrows-up-down-left-right', shortcut: keyboardLayout === 'azerty' ? 'w' : 'z' },
   { key: 'presets', label: 'Presets', icon: 'fa-solid fa-bookmark', shortcut: 'x' },
-  { key: 'performance', label: 'Graphics', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
-  { key: 'animation', label: 'Animation', icon: 'fa-solid fa-film', shortcut: 'c' },
+  { key: 'navigation', label: 'Navigation', icon: 'fa-solid fa-arrows-up-down-left-right', shortcut: keyboardLayout === 'azerty' ? 'w' : 'z' },
   { key: 'palettes', label: 'Palettes', icon: 'fa-solid fa-palette', shortcut: 'n' },
+  { key: 'animation', label: 'Animation', icon: 'fa-solid fa-film', shortcut: 'c' },
+  { key: 'performance', label: 'Performance', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
+  { key: 'screenshot', label: 'Screenshot', icon: 'fa-solid fa-camera', shortcut: 'b' },
 ]);
 
 function toggleTab(tabKey: string) {
@@ -716,6 +720,315 @@ const shortcutLabels = computed(() => {
     };
   }
 });
+
+// --- Preset Pins Overlay & Transition Travel ---
+const presetRecords = ref<PresetRecord[]>([]);
+
+async function loadPresetRecords() {
+  try {
+    presetRecords.value = await getAllPresetRecords();
+  } catch (e) {
+    console.warn('Failed to load preset records:', e);
+  }
+}
+
+let presetPollTimer: number | null = null;
+watch(
+  () => mandelbrotParams.value.showPresetPins,
+  (show) => {
+    if (show) {
+      void loadPresetRecords();
+      if (!presetPollTimer) {
+        presetPollTimer = window.setInterval(() => { void loadPresetRecords(); }, 1500);
+      }
+    } else {
+      if (presetPollTimer) {
+        clearInterval(presetPollTimer);
+        presetPollTimer = null;
+      }
+    }
+  },
+  { immediate: true }
+);
+
+onUnmounted(() => {
+  if (presetPollTimer) {
+    clearInterval(presetPollTimer);
+  }
+});
+
+const visiblePins = computed(() => {
+  if (!mandelbrotParams.value.showPresetPins) return [];
+  const ctrl = mandelbrotCtrlRef.value;
+  if (!ctrl) return [];
+  const canvas = ctrl.getCanvas();
+  const navigator = ctrl.getNavigator();
+  if (!canvas || !navigator) return [];
+
+  const width = canvas.width;
+  const height = canvas.height;
+  const cssWidth = canvas.clientWidth;
+  const cssHeight = canvas.clientHeight;
+
+  // Reactivity dependencies
+  void mandelbrotParams.value.cx;
+  void mandelbrotParams.value.cy;
+  void mandelbrotParams.value.scale;
+  void mandelbrotParams.value.angle;
+
+  return presetRecords.value.map(preset => {
+    const coords = navigator.coordinate_to_pixel(
+      preset.value.cx,
+      preset.value.cy,
+      width,
+      height
+    );
+    const x = coords[0] * (cssWidth / width);
+    const y = coords[1] * (cssHeight / height);
+    
+    // Check if on-screen (with some margin so hover card can clip smoothly)
+    const onScreen = x >= -50 && x <= cssWidth + 50 && y >= -50 && y <= cssHeight + 50;
+    
+    const targetLog = getApproximateLog10(preset.value.scale);
+    const currentLog = getApproximateLog10(mandelbrotParams.value.scale);
+    const zoomDiff = targetLog - currentLog; // positive means target is higher (zoomed out)
+    const absZoomDiff = Math.abs(zoomDiff);
+    // Exponential scale down for farther zoom levels (min 0.3x)
+    const pinScale = Math.max(0.3, Math.exp(-absZoomDiff * 0.15));
+    
+    // Altitude indicator: 1 = higher (zoomed out), -1 = lower (zoomed in), 0 = same level
+    let altitudeDirection = 0;
+    if (zoomDiff > 0.5) altitudeDirection = 1;
+    else if (zoomDiff < -0.5) altitudeDirection = -1;
+    
+    // Filter out ISO strings, "Unnamed Preset", or blanks
+    const rawName = preset.name;
+    const isISODate = rawName && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(rawName);
+    const isInvalid = !rawName || rawName === 'Unnamed Preset' || rawName.trim() === '' || isISODate;
+    const validName = isInvalid ? null : rawName;
+    
+    return {
+      preset,
+      x,
+      y,
+      onScreen,
+      favorite: preset.favorite || false,
+      pinScale,
+      validName,
+      magnitude: Math.round(Math.abs(targetLog)),
+      altitudeDirection
+    };
+  }).filter(p => p.onScreen);
+});
+
+// Travel animation loop state
+let travelAnimationId: number | null = null;
+let travelStartTime = 0;
+let travelDuration = 2.5; // seconds
+
+// Save start parameters for interpolation
+
+let travelStartColorStops: ColorStop[] = [];
+
+// Target parameters
+let travelTargetPreset: PresetRecord | null = null;
+
+function evaluatePaletteAt(stops: ColorStop[], position: number): { color: string; iridescenceColor?: string; effects: Record<string, number> } {
+  const defaultRes = {
+    color: '#000000',
+    effects: {} as Record<string, number>
+  };
+  
+  if (stops.length === 0) {
+    for (const field of EFFECT_FIELD_NAMES) {
+      defaultRes.effects[field] = 0;
+    }
+    return defaultRes;
+  }
+  
+  const sorted = [...stops].sort((a, b) => a.position - b.position);
+  let left = sorted[0];
+  let right = sorted[sorted.length - 1];
+  
+  const getEffects = (stop: ColorStop) => {
+    const eff: Record<string, number> = {};
+    for (const field of EFFECT_FIELD_NAMES) {
+      eff[field] = getEffectValue(stop, field);
+    }
+    return eff;
+  };
+  
+  if (position <= left.position) {
+    return { color: left.color, iridescenceColor: left.iridescenceColor, effects: getEffects(left) };
+  }
+  if (position >= right.position) {
+    return { color: right.color, iridescenceColor: right.iridescenceColor, effects: getEffects(right) };
+  }
+  
+  for (let i = 0; i < sorted.length - 1; i++) {
+    if (position >= sorted[i].position && position <= sorted[i+1].position) {
+      left = sorted[i];
+      right = sorted[i+1];
+      break;
+    }
+  }
+  
+  const span = right.position - left.position;
+  const t = span > 0 ? (position - left.position) / span : 0;
+  
+  const color = interpolateRgb(left.color, right.color)(t);
+  const effects: Record<string, number> = {};
+  for (const field of EFFECT_FIELD_NAMES) {
+    const lv = getEffectValue(left, field);
+    const rv = getEffectValue(right, field);
+    effects[field] = lv + (rv - lv) * t;
+  }
+  
+  let iridescenceColor: string | undefined = undefined;
+  if (left.iridescenceColor || right.iridescenceColor) {
+    iridescenceColor = interpolateRgb(left.iridescenceColor ?? left.color, right.iridescenceColor ?? right.color)(t);
+  }
+  
+  return { color, iridescenceColor, effects };
+}
+
+function interpolateColorStops(
+  stopsA: ColorStop[],
+  stopsB: ColorStop[],
+  t: number
+): ColorStop[] {
+  const N = 32;
+  const res: ColorStop[] = [];
+  
+  for (let i = 0; i < N; i++) {
+    const pos = i / (N - 1);
+    const valA = evaluatePaletteAt(stopsA, pos);
+    const valB = evaluatePaletteAt(stopsB, pos);
+    
+    const color = interpolateRgb(valA.color, valB.color)(t);
+    const stop: ColorStop = {
+      color,
+      position: pos,
+    };
+    
+    if (valA.iridescenceColor || valB.iridescenceColor) {
+      stop.iridescenceColor = interpolateRgb(valA.iridescenceColor ?? valA.color, valB.iridescenceColor ?? valB.color)(t);
+    }
+    
+    for (const field of EFFECT_FIELD_NAMES) {
+      const vA = valA.effects[field] ?? 0;
+      const vB = valB.effects[field] ?? 0;
+      stop[field] = vA + (vB - vA) * t;
+    }
+    
+    res.push(stop);
+  }
+  
+  return res;
+}
+
+function tickTravelAnimation() {
+  if (!travelTargetPreset) return;
+  const elapsed = (Date.now() - travelStartTime) / 1000;
+  let progress = Math.min(1.0, elapsed / travelDuration);
+  
+  const tEased = progress * progress * (3.0 - 2.0 * progress);
+  
+
+  
+  mandelbrotParams.value.colorStops = interpolateColorStops(
+    travelStartColorStops,
+    travelTargetPreset.value.colorStops,
+    tEased
+  );
+  
+  if (progress >= 0.5) {
+    if (travelTargetPreset.value.textureName) {
+      mandelbrotParams.value.textureName = travelTargetPreset.value.textureName;
+      mandelbrotParams.value.textureGuid = travelTargetPreset.value.textureGuid;
+    }
+    if (travelTargetPreset.value.skyboxName) {
+      mandelbrotParams.value.skyboxName = travelTargetPreset.value.skyboxName;
+      mandelbrotParams.value.skyboxGuid = travelTargetPreset.value.skyboxGuid;
+    }
+  }
+  
+  if (progress < 1.0) {
+    travelAnimationId = requestAnimationFrame(tickTravelAnimation);
+  } else {
+    // Finaliser : s'assurer que tout est exactement aligné
+    const target = travelTargetPreset.value;
+    mandelbrotParams.value.mu = target.mu ?? 4.0;
+    mandelbrotParams.value.stripeFrequency = target.stripeFrequency ?? 8;
+    mandelbrotParams.value.colorStops = target.colorStops;
+    mandelbrotParams.value.interpolationMode = target.interpolationMode;
+    mandelbrotParams.value.approximationMode = target.approximationMode;
+    mandelbrotParams.value.tessellationLevel = target.tessellationLevel ?? 0;
+    mandelbrotParams.value.displacementAmount = target.displacementAmount ?? 0;
+    mandelbrotParams.value.ambientOcclusionStrength = target.ambientOcclusionStrength ?? 0;
+    mandelbrotParams.value.microBumpStrength = target.microBumpStrength ?? 0;
+    mandelbrotParams.value.subsurfaceStrength = target.subsurfaceStrength ?? 0;
+    mandelbrotParams.value.reliefDepth = target.reliefDepth ?? 1;
+    mandelbrotParams.value.localShadowStrength = target.localShadowStrength ?? 0;
+    mandelbrotParams.value.varnishStrength = target.varnishStrength ?? 0;
+    mandelbrotParams.value.orbitTrapStrength = target.orbitTrapStrength ?? 0;
+    mandelbrotParams.value.phaseColoringStrength = target.phaseColoringStrength ?? 0;
+    mandelbrotParams.value.heightPaletteShift = target.heightPaletteShift ?? 0;
+    mandelbrotParams.value.palettePeriod = target.palettePeriod ?? 256;
+    mandelbrotParams.value.paletteOffset = target.paletteOffset ?? 0;
+    mandelbrotParams.value.paletteMirror = target.paletteMirror ?? false;
+    mandelbrotParams.value.textureMapping = target.textureMapping;
+    
+    travelTargetPreset = null;
+    travelAnimationId = null;
+  }
+}
+
+function getApproximateLog10(scaleStr: string): number {
+  const s = scaleStr.toLowerCase();
+  if (s.includes('e')) {
+    const parts = s.split('e');
+    return parseFloat(parts[1]) || 0;
+  }
+  const f = parseFloat(s);
+  if (f > 0 && f !== Infinity) return Math.log10(f);
+  return 0;
+}
+
+function startTravelToPreset(preset: PresetRecord) {
+  const ctrl = mandelbrotCtrlRef.value;
+  if (!ctrl) return;
+  const navigator = ctrl.getNavigator();
+  if (!navigator) return;
+  
+  if (travelAnimationId) {
+    cancelAnimationFrame(travelAnimationId);
+    navigator.cancel_transition();
+  }
+  
+  const startLog = getApproximateLog10(mandelbrotParams.value.scale);
+  const targetLog = getApproximateLog10(preset.value.scale);
+  const zoomDiff = Math.abs(startLog - targetLog);
+  
+  // Base duration: 1.875s. Add 0.1875s per order of magnitude of zoom. Cap at 12.5 seconds.
+  travelDuration = Math.max(1.875, Math.min(1.875 + zoomDiff * 0.1875, 12.5));
+
+  navigator.start_transition(
+    preset.value.cx,
+    preset.value.cy,
+    preset.value.scale,
+    preset.value.angle ?? mandelbrotParams.value.angle,
+    travelDuration
+  );
+  
+  travelStartTime = Date.now();
+  travelTargetPreset = preset;
+  
+
+  travelStartColorStops = structuredClone(toRaw(mandelbrotParams.value.colorStops));
+  
+  travelAnimationId = requestAnimationFrame(tickTravelAnimation);
+}
 </script>
 
 <template>
@@ -732,7 +1045,7 @@ const shortcutLabels = computed(() => {
           :key="tab.key"
           class="top-tab-btn camera-btn"
           :class="{ 'is-active': openTabs.has(tab.key) }"
-          @click="toggleTab(tab.key)"
+          @click="tab.key === 'screenshot' ? downloadCanvasSnapshot() : toggleTab(tab.key)"
           :title="tab.label"
         >
           <svg v-if="tab.key === 'navigation'" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg>
@@ -740,19 +1053,11 @@ const shortcutLabels = computed(() => {
           <svg v-else-if="tab.key === 'performance'" viewBox="0 0 24 24"><path d="M12 3a9 9 0 00-9 9c0 2.3.9 4.4 2.3 6l1.4-1.4A7 7 0 1118.3 16l1.4 1.4C21.1 16.4 22 14.3 22 12a9 9 0 00-9-9z"/><path d="M12 11h5v2h-5z" transform="rotate(-45 12 12)"/></svg>
           <svg v-else-if="tab.key === 'animation'" viewBox="0 0 24 24"><path d="M16 16v-3.5l4 3.5v-8l-4 3.5V8a2 2 0 00-2-2H4a2 2 0 00-2 2v8a2 2 0 002 2h10a2 2 0 002-2z"/></svg>
           <svg v-else-if="tab.key === 'palettes'" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 3a9 9 0 100 18c1.1 0 2-.9 2-2 0-1.5 1.5-2 3-2a4 4 0 004-4c0-5-4-8-9-8z M6.3 11a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0 M10.3 8a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0 M14.3 10a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0"/></svg>
+          <svg v-else-if="tab.key === 'screenshot'" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
           <i v-else :class="[tab.icon, 'fa-fw']" aria-hidden="true"></i>
 
           <span class="tab-label-text is-hidden-touch">{{ tab.label }}</span>
           <span class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
-        </button>
-        <button
-          class="top-tab-btn camera-btn"
-          title="Screenshot (B)"
-          aria-label="Download screenshot"
-          @click="downloadCanvasSnapshot"
-        >
-          <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
-          <span class="tab-shortcut-hint is-hidden-touch">(B)</span>
         </button>
         <button
           v-if="authConfigured"
@@ -825,6 +1130,45 @@ const shortcutLabels = computed(() => {
       :textureMappingMode="mandelbrotParams.textureMappingMode"
     />
 
+    <!-- Overlay des pins de presets -->
+    <div
+      v-if="mandelbrotParams.showPresetPins"
+      class="preset-pins-overlay"
+      :class="{ 'hud-hidden': isNavigating }"
+    >
+      <div
+        v-for="pin in visiblePins"
+        :key="pin.preset.id"
+        class="preset-pin-container"
+        :class="{ 'is-favorite': pin.favorite }"
+        :style="{ left: pin.x + 'px', top: pin.y + 'px', '--pin-scale': pin.pinScale }"
+      >
+        <button
+          class="preset-pin-btn"
+          @click="startTravelToPreset(pin.preset)"
+          :aria-label="'Travel to ' + (pin.preset.name || 'preset')"
+        >
+          <span class="preset-pin-dot"></span>
+          <span class="preset-pin-pulse"></span>
+        </button>
+        <!-- Hover circular preview card -->
+        <div class="preset-pin-card">
+          <div class="preset-pin-circle-thumb">
+            <img v-if="pin.preset.thumbnail" :src="pin.preset.thumbnail" alt="preset thumbnail" />
+          </div>
+          <span class="preset-pin-label">
+            <template v-if="pin.validName">{{ pin.validName }}</template>
+            <span class="preset-pin-mag" v-if="pin.magnitude > 0">
+              <i class="fa-solid fa-arrow-up" v-if="pin.altitudeDirection === 1"></i>
+              <i class="fa-solid fa-arrow-down" v-else-if="pin.altitudeDirection === -1"></i>
+              <i class="fa-solid fa-minus" v-else></i>
+              10<sup>-{{ pin.magnitude }}</sup>
+            </span>
+          </span>
+        </div>
+      </div>
+    </div>
+
     <!-- Popup Settings — one per open tab (multi-window) -->
     <template v-for="tab in settingsTabs" :key="'popup-' + tab.key">
       <div
@@ -892,7 +1236,7 @@ const shortcutLabels = computed(() => {
       <div class="shortcut-group">
         <span class="shortcut-label">Settings</span>
         <div class="shortcut-keys">
-          <span v-for="tab in settingsTabs" :key="tab.key" class="tag is-black is-rounded">{{ tab.shortcut.toUpperCase() }}</span>
+          <span v-for="tab in settingsTabs.filter(t => t.key !== 'screenshot')" :key="tab.key" class="tag is-black is-rounded">{{ tab.shortcut.toUpperCase() }}</span>
         </div>
       </div>
       <div class="shortcut-group">
@@ -1078,10 +1422,15 @@ const shortcutLabels = computed(() => {
 /* Popup Settings */
 .settings-popup {
   max-width: 96vw;
-  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  background:
+    radial-gradient(900px 520px at 88% -18%, oklch(0.62 0.16 250 / 0.34), transparent 62%),
+    radial-gradient(760px 560px at 4% 118%, oklch(0.62 0.17 320 / 0.26), transparent 58%),
+    linear-gradient(180deg, rgba(22,25,34,0.90), rgba(16,18,24,0.92));
+  backdrop-filter: blur(26px) saturate(1.1);
+  -webkit-backdrop-filter: blur(26px) saturate(1.1);
   border: 1px solid var(--line);
   border-radius: var(--radius); /* 18px */
-  box-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
+  box-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.04) inset;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1092,7 +1441,7 @@ const shortcutLabels = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 22px 26px;
+  padding: 12px 18px;
   border-bottom: 1px solid var(--line);
   background: rgba(0, 0, 0, 0.18);
   cursor: move;
@@ -1102,45 +1451,46 @@ const shortcutLabels = computed(() => {
 .title-container {
   display: flex;
   align-items: center;
-  gap: 14px;
+  gap: 10px;
 }
 
 .dot {
-  width: 9px;
-  height: 9px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
-  background: var(--accent-bright);
-  box-shadow: 0 0 14px var(--accent-bright);
+  background: var(--mauve-bright);
+  box-shadow: 0 0 10px var(--mauve);
   display: inline-block;
 }
 
 .settings-popup-title {
-  font-size: 22px;
+  font-size: 14px;
   font-weight: 700;
-  letter-spacing: 0.16em;
+  letter-spacing: 0.14em;
   text-transform: uppercase;
   color: var(--ink);
   font-family: var(--sans);
 }
 
 .close {
-  width: 38px;
-  height: 38px;
-  border-radius: 11px;
+  width: 28px;
+  height: 28px;
+  border-radius: 8px;
   border: 1px solid var(--line);
   background: var(--row);
   color: var(--ink-2);
   cursor: pointer;
-  font-size: 18px;
+  font-size: 14px;
   display: grid;
   place-items: center;
   transition: .16s;
+  padding: 0;
 }
 
 .close:hover {
   color: var(--ink);
-  background: #202531;
-  border-color: #333a47;
+  background: var(--row-on);
+  border-color: var(--ink-3);
 }
 
 .settings-popup-body {
@@ -1335,6 +1685,155 @@ const shortcutLabels = computed(() => {
 /* === Palette picker cursor on the fractal canvas === */
 .picker-cursor :deep(canvas) {
   cursor: url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M14.7 3.3 20.7 9.3 18.9 11.1 17.8 10 9.4 18.4C9.1 18.7 8.7 18.9 8.3 18.9H5.1V15.7C5.1 15.3 5.3 14.9 5.6 14.6L14 6.2 12.9 5.1 14.7 3.3Z' fill='white' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M6.8 15.9H8.1L16.4 7.6 15.4 6.6 7.1 14.9 6.8 15.9Z' fill='%2338d5ff'/%3E%3C/svg%3E") 4 20, crosshair !important;
+}
+
+/* === Preset Pins Overlay & Styling === */
+.preset-pins-overlay {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  z-index: 25;
+  overflow: hidden;
+  transition: opacity 0.4s ease;
+}
+.preset-pins-overlay.hud-hidden {
+  opacity: 0;
+}
+.preset-pin-container {
+  position: absolute;
+  transform: translate(-50%, -50%);
+  pointer-events: auto;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.preset-pin-btn {
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  border: none;
+  background: transparent;
+  cursor: pointer;
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+  outline: none;
+  transform: scale(var(--pin-scale, 1));
+}
+.preset-pin-dot {
+  width: 10px;
+  height: 10px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  box-shadow: 0 0 12px var(--accent-bright);
+  transition: transform 0.2s ease;
+  z-index: 2;
+}
+.preset-pin-pulse {
+  position: absolute;
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  border: 2px solid var(--accent-bright);
+  opacity: 0;
+  animation: pin-pulsate 1.8s infinite ease-out;
+  z-index: 1;
+}
+.preset-pin-btn:hover .preset-pin-dot {
+  transform: scale(1.3);
+  background: #fff;
+  box-shadow: 0 0 16px #fff, 0 0 24px var(--accent-bright);
+}
+@keyframes pin-pulsate {
+  0% {
+    transform: scale(0.5);
+    opacity: 0.8;
+  }
+  100% {
+    transform: scale(1.8);
+    opacity: 0;
+  }
+}
+.preset-pin-card {
+  position: absolute;
+  bottom: 26px;
+  left: 50%;
+  transform: translateX(-50%) translateY(10px) scale(0.8);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease, transform 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 8px;
+  z-index: 10;
+}
+.preset-pin-container:hover .preset-pin-card {
+  opacity: 1;
+  transform: translateX(-50%) translateY(0) scale(1);
+}
+.preset-pin-circle-thumb {
+  width: 76px;
+  height: 76px;
+  border-radius: 50%;
+  border: 3px solid var(--accent-bright);
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 15px var(--accent-bright);
+  overflow: hidden;
+  background: #111;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: transform 0.2s ease;
+}
+.preset-pin-circle-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+.preset-pin-label {
+  padding: 4px 10px;
+  border-radius: 20px;
+  background: rgba(16, 18, 24, 0.72);
+  backdrop-filter: blur(12px);
+  border: 1px solid var(--line);
+  color: #fff;
+  font-size: 12px;
+  font-weight: 600;
+  white-space: nowrap;
+  box-shadow: 0 4px 12px rgba(0, 0, 0, 0.4);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.preset-pin-mag {
+  font-size: 10px;
+  opacity: 0.8;
+  background: rgba(255, 255, 255, 0.15);
+  padding: 2px 6px;
+  border-radius: 4px;
+}
+
+.preset-pin-container.is-favorite .preset-pin-dot {
+  background: #a855f7;
+  box-shadow: 0 0 12px #a855f7;
+}
+
+.preset-pin-container.is-favorite .preset-pin-pulse {
+  border-color: #a855f7;
+}
+
+.preset-pin-container.is-favorite .preset-pin-btn:hover .preset-pin-dot {
+  box-shadow: 0 0 16px #fff, 0 0 24px #a855f7;
+}
+
+.preset-pin-container.is-favorite .preset-pin-circle-thumb {
+  border-color: transparent;
+  background: linear-gradient(#111, #111) padding-box,
+              linear-gradient(135deg, #a855f7, #ec4899) border-box;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 15px #a855f7;
 }
 
 </style>

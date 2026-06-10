@@ -1,6 +1,6 @@
 <script setup lang="ts">
-import { computed, defineProps, defineEmits, ref } from 'vue';
-import type {ColorStop} from "../ColorStop.ts";
+import { computed, ref } from 'vue';
+import type { ColorStop } from "../ColorStop.ts";
 
 const props = defineProps<{
   stop: ColorStop;
@@ -10,22 +10,11 @@ const props = defineProps<{
 }>();
 
 const isEmphasized = computed(() => !!props.selected || !!props.highlighted);
-const selectedStroke = computed(() => (props.highlighted ? '#111' : '#fff'));
+const selectedStroke = computed(() => (props.highlighted ? '#111' : 'var(--accent-bright)'));
 
 const emit = defineEmits(['update:position', 'select']);
 
 const svgRef = ref<SVGSVGElement|null>(null);
-
-// Calcul de la luminance pour choisir la couleur de bordure
-function luminance(hex: string): number {
-  let c = hex.replace('#', '');
-  if (c.length === 3) c = c.split('').map(x => x + x).join('');
-  const r = parseInt(c.substring(0,2), 16) / 255;
-  const g = parseInt(c.substring(2,4), 16) / 255;
-  const b = parseInt(c.substring(4,6), 16) / 255;
-  return 0.299*r + 0.587*g + 0.114*b;
-}
-const borderColor = computed(() => luminance(props.stop.color) > 0.5 ? '#222' : '#fff');
 
 function onDown(e: MouseEvent) {
   if (props.disabled) {
@@ -92,38 +81,55 @@ function onTouchStart(e: TouchEvent) {
   <svg
     ref="svgRef"
     :style="{
-    position: 'absolute',
-    left: props.stop.position * 100 + '%',
-    top: 0,
-    height: '100%',
-    width: props.selected ? '38px' : (isEmphasized ? '34px' : '32px'),
-    transform: 'translateX(-50%)',
-     zIndex: props.selected ? 10 : (isEmphasized ? 4 : 1),
-     cursor: props.disabled ? 'not-allowed' : 'ew-resize',
-     pointerEvents: 'auto',
-     background: 'transparent',
-     filter: props.highlighted
-       ? 'drop-shadow(0 0 4px rgba(255,255,255,0.85)) drop-shadow(0 0 8px rgba(240,180,41,0.75))'
-       : (props.selected ? 'drop-shadow(0 0 3px rgba(255,255,255,0.75)) drop-shadow(0 0 5px rgba(100,150,255,0.65))' : 'none'),
-     transition: 'filter 0.15s, width 0.15s',
-  }"
-    :viewBox="props.selected ? '0 0 26 64' : (isEmphasized ? '0 0 24 64' : '0 0 22 64')"
+      left: props.stop.position * 100 + '%',
+      zIndex: props.selected ? 10 : (isEmphasized ? 4 : 1),
+    }"
+    viewBox="0 0 32 80"
     @mousedown="onDown"
     @touchstart="onTouchStart"
+    class="stop-marker"
+    :class="{ 'sel': props.selected, 'highlighted': props.highlighted }"
   >
-    <!-- Rectangle vertical (plus large si sélectionné) -->
+    <!-- Rectangle vertical -->
     <rect
-      :x="props.selected ? 5 : (isEmphasized ? 5.5 : 6)"
+      :x="props.selected ? 8 : 9"
       y="0"
-      :width="props.selected ? 16 : (isEmphasized ? 13 : 12)"
-      height="64"
-      :rx="props.selected ? 10 : (isEmphasized ? 9 : 8)"
+      :width="props.selected ? 16 : 14"
+      height="80"
+      rx="8"
       :fill="props.stop.color"
-      :stroke="props.selected ? selectedStroke : (props.highlighted ? '#f0b429' : borderColor)"
-      :stroke-width="props.selected ? 3 : (isEmphasized ? 2.4 : 2)"
+      :stroke="props.selected ? selectedStroke : (props.highlighted ? '#f0b429' : '#fff')"
+      :stroke-width="props.selected ? 3 : 2.5"
     />
   </svg>
 </template>
 
 <style scoped>
+.stop-marker {
+  position: absolute;
+  top: 8px;
+  height: calc(100% - 16px);
+  width: 32px;
+  transform: translateX(-50%) scaleY(1);
+  cursor: grab;
+  pointer-events: auto;
+  background: transparent;
+  transition: transform 0.12s ease, filter 0.12s ease, width 0.12s ease;
+  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.55));
+  overflow: visible;
+}
+
+.stop-marker:hover {
+  transform: translateX(-50%) scaleY(1.04);
+}
+
+.stop-marker.sel {
+  width: 36px;
+  transform: translateX(-50%) scaleY(1.06);
+  filter: drop-shadow(0 0 0 2px var(--accent)) drop-shadow(0 4px 12px rgba(0, 0, 0, 0.6));
+}
+
+.stop-marker:active {
+  cursor: grabbing;
+}
 </style>

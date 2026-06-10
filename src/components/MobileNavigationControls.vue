@@ -118,7 +118,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
     <!-- Bouton central boussole -->
     <button
       class="nav-button compass-button"
-      :class="{ active: expanded }"
       @click="toggleExpanded"
       @touchend="handleCompassTouch"
       aria-label="Toggle navigation"
@@ -132,7 +131,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
         <!-- Nord -->
         <button
           class="nav-button direction-button north"
-          :class="{ active: activeButton === 'north' }"
           @touchstart="handleTouchStart($event, () => startMoving('north'))"
           @touchend="handleTouchEnd"
           @mousedown="startMoving('north')"
@@ -146,7 +144,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
         <!-- Sud -->
         <button
           class="nav-button direction-button south"
-          :class="{ active: activeButton === 'south' }"
           @touchstart="handleTouchStart($event, () => startMoving('south'))"
           @touchend="handleTouchEnd"
           @mousedown="startMoving('south')"
@@ -160,7 +157,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
         <!-- Ouest -->
         <button
           class="nav-button direction-button west"
-          :class="{ active: activeButton === 'west' }"
           @touchstart="handleTouchStart($event, () => startMoving('west'))"
           @touchend="handleTouchEnd"
           @mousedown="startMoving('west')"
@@ -174,7 +170,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
         <!-- Est -->
         <button
           class="nav-button direction-button east"
-          :class="{ active: activeButton === 'east' }"
           @touchstart="handleTouchStart($event, () => startMoving('east'))"
           @touchend="handleTouchEnd"
           @mousedown="startMoving('east')"
@@ -188,7 +183,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
         <!-- Rotation gauche (coin supérieur gauche) -->
         <button
           class="nav-button corner-button rotate-left"
-          :class="{ active: activeButton === 'rotate-left' }"
           @touchstart="handleTouchStart($event, () => startRotating('left'))"
           @touchend="handleTouchEnd"
           @mousedown="startRotating('left')"
@@ -202,7 +196,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
         <!-- Rotation droite (coin supérieur droit) -->
         <button
           class="nav-button corner-button rotate-right"
-          :class="{ active: activeButton === 'rotate-right' }"
           @touchstart="handleTouchStart($event, () => startRotating('right'))"
           @touchend="handleTouchEnd"
           @mousedown="startRotating('right')"
@@ -216,7 +209,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
         <!-- Zoom out (coin inférieur gauche) -->
         <button
           class="nav-button corner-button zoom-out"
-          :class="{ active: activeButton === 'zoom-out' }"
           @touchstart="handleTouchStart($event, () => startZooming('out'))"
           @touchend="handleTouchEnd"
           @mousedown="startZooming('out')"
@@ -224,13 +216,15 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Zoom Out"
         >
-          <i class="fa-solid fa-magnifying-glass-minus fa-2x nav-icon"></i>
+          <svg class="nav-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"/>
+            <path d="M21 21l-5-5M8 11h6"/>
+          </svg>
         </button>
 
         <!-- Zoom in (coin inférieur droit) -->
         <button
           class="nav-button corner-button zoom-in"
-          :class="{ active: activeButton === 'zoom-in' }"
           @touchstart="handleTouchStart($event, () => startZooming('in'))"
           @touchend="handleTouchEnd"
           @mousedown="startZooming('in')"
@@ -238,7 +232,10 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
           @mouseleave="stopAllActions"
           aria-label="Zoom In"
         >
-          <i class="fa-solid fa-magnifying-glass-plus fa-2x nav-icon"></i>
+          <svg class="nav-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
+            <circle cx="11" cy="11" r="7"/>
+            <path d="M21 21l-5-5M8 11h6M11 8v6"/>
+          </svg>
         </button>
 
         <!-- Bouton Présentation (lien vers la doc VitePress) -->
@@ -264,48 +261,74 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
   z-index: 100;
 }
 
+/* ---------- shared glass button ---------- */
 .nav-button {
   position: absolute;
   display: flex;
   align-items: center;
   justify-content: center;
-  background: rgba(255, 255, 255, 0.15);
-  backdrop-filter: blur(8px);
-  border: none;
+  background: var(--glass);
+  backdrop-filter: blur(16px) saturate(1.15);
+  -webkit-backdrop-filter: blur(16px) saturate(1.15);
+  border: 1px solid var(--glass-line);
   border-radius: 50%;
   cursor: pointer;
   pointer-events: auto;
   touch-action: none;
   user-select: none;
-  transition: all 0.2s ease;
-  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.25);
+  -webkit-user-select: none;
+  box-shadow: 0 10px 28px -12px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(0, 0, 0, 0.25);
+  transition: transform 0.14s, background 0.14s, border-color 0.14s;
 }
 
 .nav-button:active {
-  transform: scale(0.95);
+  transform: scale(0.9);
 }
 
 .nav-icon {
-  color: white;
-  filter: drop-shadow(0 1px 2px black);
+  color: #fff;
+  filter: drop-shadow(0 1px 2px rgba(0, 0, 0, 0.5));
 }
 
-.nav-button.active .nav-icon {
-  color: black;
-  filter: drop-shadow(0 1px 2px white);
-}
-
-/* Bouton central boussole */
+/* Bouton central boussole — anneau dégradé animé (AI ring) */
 .compass-button {
   bottom: 32px;
   left: 50%;
   transform: translateX(-50%);
   width: 64px;
   height: 64px;
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  isolation: isolate;
 }
 
-.compass-button.active {
-  background: rgba(255, 255, 255, 0.3);
+.compass-button:active {
+  transform: translateX(-50%) scale(0.92);
+}
+
+.compass-button::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 50%;
+  z-index: -2;
+  background: conic-gradient(from var(--ai-angle, 0deg),
+    var(--accent-bright), var(--mauve-bright), var(--magenta), var(--accent), var(--accent-bright));
+  animation: ai-spin 5s linear infinite;
+  filter: drop-shadow(0 0 14px oklch(0.7 0.17 280 / 0.55));
+}
+
+.compass-button::after {
+  content: "";
+  position: absolute;
+  inset: 3px;
+  border-radius: 50%;
+  z-index: -1;
+  background: rgba(10, 12, 18, 0.78);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  transition: background 0.14s;
 }
 
 /* Conteneur des contrôles directionnels */
@@ -326,10 +349,18 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
   transform: translateX(-50%);
 }
 
+.direction-button.north:active {
+  transform: translateX(-50%) scale(0.9);
+}
+
 .direction-button.south {
   bottom: 120px;
   left: 50%;
   transform: translateX(-50%);
+}
+
+.direction-button.south:active {
+  transform: translateX(-50%) scale(0.9);
 }
 
 .direction-button.west {
@@ -338,10 +369,18 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
   transform: translateY(-50%);
 }
 
+.direction-button.west:active {
+  transform: translateY(-50%) scale(0.9);
+}
+
 .direction-button.east {
   top: 50%;
   right: 24px;
   transform: translateY(-50%);
+}
+
+.direction-button.east:active {
+  transform: translateY(-50%) scale(0.9);
 }
 
 /* Boutons de coin */
@@ -411,35 +450,38 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
   }
 }
 
-/* Bouton Présentation — pilule en bas à droite, au-dessus du zoom-in */
+/* Bouton Présentation — pilule dégradée, en bas à droite, au-dessus du zoom-in */
 .presentation-button {
   position: absolute;
   bottom: 96px;
   right: 24px;
   display: inline-flex;
   align-items: center;
-  padding: 6px 14px;
-  border: none;
-  border-radius: 20px;
-  background: rgba(226, 85, 85, 0.85);
-  backdrop-filter: blur(8px);
+  gap: 8px;
+  padding: 11px 18px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 999px;
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 45%),
+    linear-gradient(110deg, var(--accent), var(--mauve));
   color: #fff;
-  font-size: 0.8rem;
-  font-weight: 600;
+  font-size: 0.85rem;
+  font-weight: 700;
   letter-spacing: 0.02em;
   cursor: pointer;
   pointer-events: auto;
   touch-action: manipulation;
   user-select: none;
-  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.25);
-  transition: background 0.2s, transform 0.15s;
+  box-shadow: 0 10px 26px -10px var(--mauve), 0 4px 14px -6px var(--accent);
+  transition: transform 0.14s, filter 0.14s;
 }
 
 .presentation-button:active {
-  background: rgba(226, 85, 85, 1);
-  transform: scale(0.95);
+  filter: brightness(1.08);
+  transform: scale(0.94);
 }
 
+.presentation-button i,
 .presentation-button svg {
   color: #fff;
   flex-shrink: 0;

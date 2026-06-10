@@ -557,7 +557,7 @@ onUnmounted(() => {
   <canvas
     ref="canvasRef"
     class="palette-preview-canvas"
-    style="width: 100%; height: 64px; border-radius: 2px; box-shadow: 0 1px 4px #0001;"
+    style="width: 100%; height: 96px; border-radius: 12px; border: 1px solid var(--line);"
   ></canvas>
 </template>
 

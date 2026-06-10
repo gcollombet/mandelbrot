@@ -1,0 +1,818 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Animation — Panneau</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg-0:#07080d;
+    --panel:#101218;
+    --panel-2:#161922;
+    --row:#171a23;
+    --row-on:#1b2330;
+    --line:#23272f;
+    --line-soft:#1b1e26;
+    --ink:#f2f4f8;
+    --ink-2:#aeb4c2;
+    --ink-3:#646b7c;
+    --ink-4:#414757;
+    --accent:oklch(0.70 0.17 245);
+    --accent-bright:oklch(0.78 0.16 240);
+    --accent-soft:oklch(0.70 0.17 245 / 0.16);
+    --mauve:oklch(0.70 0.17 320);
+    --mauve-bright:oklch(0.77 0.15 322);
+    --magenta:oklch(0.70 0.19 350);
+    --track:#272b35;
+    --radius:18px;
+    --mono:"JetBrains Mono",ui-monospace,monospace;
+    --sans:"Space Grotesk",system-ui,sans-serif;
+  }
+
+  *{box-sizing:border-box;margin:0;padding:0;}
+
+  html,body{height:100%;}
+  body{
+    font-family:var(--sans);
+    /* Neutral dark stage — in the real app your fractal render sits here */
+    background:
+      radial-gradient(1400px 900px at 50% -10%, #0d0f16, transparent 70%),
+      var(--bg-0);
+    color:var(--ink);
+    min-height:100vh;
+    display:flex;
+    flex-direction:column;
+    align-items:center;
+    padding:34px 22px 64px;
+    -webkit-font-smoothing:antialiased;
+  }
+  .tabbar,.panel,.fps{flex:0 0 auto;}
+
+  /* ---------- Top tab bar ---------- */
+  .tabbar{
+    width:min(1080px,100%);
+    display:flex;
+    gap:6px;
+    padding:8px;
+    background:rgba(16,18,24,0.72);
+    backdrop-filter:blur(18px);
+    border:1px solid var(--line);
+    border-radius:16px;
+    margin-bottom:26px;
+  }
+  .tab{
+    display:flex;align-items:center;gap:10px;
+    padding:11px 16px;
+    border-radius:11px;
+    color:var(--ink-2);
+    font-weight:600;font-size:15px;
+    cursor:pointer;
+    border:1px solid transparent;
+    white-space:nowrap;
+    transition:.16s;
+  }
+  .tab .key{color:var(--ink-4);font-family:var(--mono);font-size:12px;font-weight:600;}
+  .tab svg{width:18px;height:18px;stroke:currentColor;fill:none;stroke-width:1.8;}
+  .tab:hover{color:var(--ink);background:var(--panel-2);}
+  .tab.active{
+    background:var(--accent);
+    color:#fff;
+    box-shadow:0 8px 24px -8px var(--accent);
+  }
+  .tab.active .key{color:rgba(255,255,255,0.7);}
+  .tab.logout{margin-left:auto;}
+
+  /* ---------- Panel ---------- */
+  .panel{
+    width:min(1080px,100%);
+    /* The colorful gradient now lives INSIDE the panel — glass over the fractal */
+    background:
+      radial-gradient(900px 520px at 88% -18%, oklch(0.62 0.16 250 / 0.34), transparent 62%),
+      radial-gradient(760px 560px at 4% 118%, oklch(0.62 0.17 320 / 0.26), transparent 58%),
+      linear-gradient(180deg, rgba(22,25,34,0.90), rgba(16,18,24,0.92));
+    backdrop-filter:blur(26px) saturate(1.1);
+    -webkit-backdrop-filter:blur(26px) saturate(1.1);
+    border:1px solid var(--line);
+    border-radius:var(--radius);
+    box-shadow:0 40px 90px -30px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.04) inset;
+    overflow:hidden;
+  }
+  .panel-head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:13px 26px;
+    border-bottom:1px solid var(--line);
+    background:rgba(0,0,0,0.18);
+  }
+  .panel-head .title{
+    display:flex;align-items:center;gap:14px;
+  }
+  .panel-head h1{
+    font-size:18px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;
+  }
+  .panel-head .dot{
+    width:9px;height:9px;border-radius:50%;
+    background:var(--mauve-bright);
+    box-shadow:0 0 14px var(--mauve);
+  }
+  .close{
+    width:32px;height:32px;border-radius:9px;
+    border:1px solid var(--line);background:var(--row);
+    color:var(--ink-2);cursor:pointer;font-size:18px;
+    display:grid;place-items:center;transition:.16s;
+  }
+  .close:hover{color:var(--ink);background:#202531;border-color:#333a47;}
+
+  .panel-body{padding:24px 26px 28px;}
+
+  .section-label{
+    display:flex;align-items:center;gap:12px;
+    font-size:13px;font-weight:700;letter-spacing:0.22em;text-transform:uppercase;
+    color:var(--ink-3);
+    margin:6px 0 16px;
+  }
+  .section-label::after{content:"";flex:1;height:1px;background:var(--line-soft);}
+  .section-label .tick{width:6px;height:14px;border-radius:3px;
+    background:linear-gradient(180deg,var(--accent-bright),var(--mauve));}
+
+  /* ---------- Playback ---------- */
+  .playback{
+    display:flex;align-items:center;gap:20px;
+    background:var(--row);
+    border:1px solid var(--line);
+    border-radius:14px;
+    padding:16px 20px;
+    margin-bottom:30px;
+  }
+  /* ---- AI-style animated Drift button ---- */
+  .play-btn{
+    position:relative;isolation:isolate;
+    display:flex;align-items:center;gap:10px;
+    padding:12px 22px;border-radius:12px;border:none;cursor:pointer;
+    color:#fff;background:transparent;
+    font-family:var(--sans);font-weight:700;font-size:15px;letter-spacing:.02em;
+    transition:transform .16s, filter .16s;
+  }
+  /* rotating gradient border + glow */
+  .play-btn::before{
+    content:"";position:absolute;inset:-2px;border-radius:14px;z-index:-2;
+    background:conic-gradient(from var(--ai-angle,0deg),
+      var(--accent-bright), var(--mauve-bright), var(--magenta),
+      var(--accent), var(--accent-bright));
+    filter:blur(0.5px);
+    animation:ai-spin 4s linear infinite;
+  }
+  /* solid inner fill so only the border shows the gradient */
+  .play-btn::after{
+    content:"";position:absolute;inset:0;border-radius:12px;z-index:-1;
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.16), rgba(255,255,255,0) 42%),
+      linear-gradient(110deg, var(--accent), oklch(0.62 0.16 285));
+    box-shadow:0 8px 26px -8px var(--accent), 0 0 22px -6px var(--mauve);
+  }
+  /* sheen sweep */
+  .play-btn .sheen{
+    position:absolute;inset:0;border-radius:12px;overflow:hidden;z-index:0;pointer-events:none;
+  }
+  .play-btn .sheen::before{
+    content:"";position:absolute;top:0;bottom:0;width:42%;left:-60%;
+    background:linear-gradient(100deg, transparent, rgba(255,255,255,0.55), transparent);
+    transform:skewX(-18deg);
+    animation:ai-sheen 3.4s ease-in-out infinite;
+  }
+  .play-btn > svg, .play-btn > span{position:relative;z-index:1;}
+  .play-btn:hover{transform:translateY(-1px);filter:saturate(1.15) brightness(1.05);}
+  @property --ai-angle{syntax:'<angle>';initial-value:0deg;inherits:false;}
+  @keyframes ai-spin{to{--ai-angle:360deg;}}
+  @keyframes ai-sheen{0%{left:-60%;}55%,100%{left:130%;}}
+
+  /* paused: freeze + dim, neutral look */
+  .play-btn.paused{color:var(--ink);}
+  .play-btn.paused::before{animation-play-state:paused;filter:grayscale(0.7) brightness(0.6);}
+  .play-btn.paused::after{background:var(--row-on);box-shadow:none;border:1px solid var(--line);}
+  .play-btn.paused .sheen::before{animation-play-state:paused;opacity:0;}
+  @media (prefers-reduced-motion: reduce){
+    .play-btn::before,.play-btn .sheen::before{animation:none;}
+  }
+  .play-btn svg{width:14px;height:14px;fill:currentColor;}
+  .playback .pb-label{font-weight:600;font-size:16px;color:var(--ink-2);min-width:106px;}
+  .playback .pb-slider{flex:1;}
+  .playback .pb-val{font-family:var(--mono);font-weight:700;font-size:18px;color:var(--ink);min-width:80px;text-align:right;}
+
+  /* ---------- Mixer ---------- */
+  .mixer{display:flex;flex-direction:column;gap:8px;}
+
+  .row{
+    display:grid;
+    grid-template-columns:248px 124px 1fr 1fr;
+    align-items:center;
+    gap:22px;
+    padding:8px 18px;
+    background:var(--row);
+    border:1px solid var(--line-soft);
+    border-radius:13px;
+    position:relative;
+    transition:.18s;
+  }
+  .row::before{
+    content:"";position:absolute;left:0;top:9px;bottom:9px;width:3px;border-radius:3px;
+    background:transparent;transition:.18s;
+  }
+  .row.on{background:var(--row-on);border-color:#2b3340;}
+  .row.on::before{background:linear-gradient(180deg,var(--accent-bright),var(--mauve));box-shadow:0 0 12px var(--accent);}
+  .row.off .ctl{opacity:0.4;pointer-events:none;}
+  .row.off .name{color:var(--ink-3);}
+
+  /* toggle + name */
+  .name-cell{display:flex;align-items:center;gap:14px;}
+  .toggle{
+    --w:46px;--h:26px;
+    width:var(--w);height:var(--h);flex:none;
+    border-radius:999px;background:var(--track);border:1px solid var(--line);
+    position:relative;cursor:pointer;transition:.18s;
+  }
+  .toggle::after{
+    content:"";position:absolute;top:2px;left:2px;
+    width:20px;height:20px;border-radius:50%;background:#8a91a1;transition:.18s;
+  }
+  .toggle.on{background:var(--accent);border-color:var(--accent);}
+  .toggle.on::after{left:22px;background:#fff;}
+  .name{font-size:17px;font-weight:600;color:var(--ink);letter-spacing:-.01em;}
+
+  /* waveform select */
+  .wave{position:relative;}
+  .wave select{
+    appearance:none;-webkit-appearance:none;width:100%;
+    font-family:var(--mono);font-size:14px;font-weight:600;
+    color:var(--ink);background:#0b0d12;border:1px solid var(--line);
+    border-radius:10px;padding:10px 34px 10px 14px;cursor:pointer;text-transform:lowercase;
+  }
+  .wave::after{
+    content:"";position:absolute;right:13px;top:50%;transform:translateY(-60%) rotate(45deg);
+    width:7px;height:7px;border-right:2px solid var(--ink-3);border-bottom:2px solid var(--ink-3);
+    pointer-events:none;
+  }
+  .wave select:focus{outline:none;border-color:var(--accent);}
+
+  /* param group: label / slider / value */
+  .param{display:grid;grid-template-columns:auto 1fr auto;align-items:center;gap:12px;}
+  .param .plabel{
+    font-size:11px;font-weight:700;letter-spacing:.14em;text-transform:uppercase;color:var(--ink-3);
+    width:46px;
+  }
+  .param .pval{
+    font-family:var(--mono);font-weight:700;font-size:15px;color:var(--ink);
+    min-width:88px;text-align:right;white-space:nowrap;
+  }
+  .param .pval .unit{font-size:12px;color:var(--ink-3);margin-left:3px;font-weight:600;}
+
+  /* ---------- range sliders ---------- */
+  input[type=range]{
+    -webkit-appearance:none;appearance:none;width:100%;height:6px;
+    background:var(--track);border-radius:999px;outline:none;cursor:pointer;
+  }
+  input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none;width:20px;height:20px;border-radius:50%;
+    background:var(--accent-bright);border:3px solid #0b0d12;
+    box-shadow:0 0 0 1px var(--accent),0 4px 12px -2px var(--accent);
+    cursor:pointer;transition:.12s;
+  }
+  input[type=range]::-webkit-slider-thumb:hover{transform:scale(1.12);}
+  input[type=range]::-moz-range-thumb{
+    width:18px;height:18px;border-radius:50%;background:var(--accent-bright);
+    border:3px solid #0b0d12;box-shadow:0 0 0 1px var(--accent);cursor:pointer;
+  }
+  .pb-slider input[type=range]{height:7px;}
+
+  /* scrollbar */
+  .panel-body::-webkit-scrollbar{width:10px;}
+
+  /* ---------- footer fps ---------- */
+  .fps{
+    margin-top:26px;display:flex;align-items:center;gap:12px;
+    padding:11px 20px;border-radius:999px;
+    background:rgba(16,18,24,0.8);border:1px solid var(--line);backdrop-filter:blur(12px);
+    font-weight:600;color:var(--ink-2);
+  }
+  .fps .live{width:9px;height:9px;border-radius:50%;background:oklch(0.72 0.18 145);box-shadow:0 0 10px oklch(0.72 0.18 145);}
+  .fps .num{font-family:var(--mono);font-weight:700;color:var(--ink);}
+  .fps .caret{color:var(--ink-3);}
+
+  /* ============ PALETTES VIEW ============ */
+  [hidden]{display:none !important;}
+
+  /* sub-tabs */
+  .subtabs{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:20px;}
+  .subtab{
+    padding:8px 15px;border-radius:10px;font-weight:600;font-size:14px;
+    color:var(--ink-2);background:var(--row);border:1px solid var(--line-soft);
+    cursor:pointer;transition:.15s;
+  }
+  .subtab:hover{color:var(--ink);background:var(--row-on);}
+  .subtab.active{background:var(--accent);color:#fff;border-color:var(--accent);
+    box-shadow:0 6px 18px -8px var(--accent);}
+
+  /* gradient strip */
+  .strip-wrap{display:flex;align-items:stretch;gap:12px;margin-bottom:14px;}
+  .strip-tools-l{display:flex;flex-direction:column;gap:6px;}
+  .strip-tools-r{display:flex;align-items:center;gap:6px;justify-content:flex-end;margin-bottom:12px;}
+  .iconbtn{
+    width:34px;height:34px;border-radius:9px;display:grid;place-items:center;
+    background:var(--row);border:1px solid var(--line);color:var(--ink-2);cursor:pointer;transition:.15s;
+  }
+  .iconbtn:hover{color:var(--ink);background:var(--row-on);border-color:#333a47;}
+  .iconbtn svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:1.7;}
+  .iconbtn.danger{color:oklch(0.65 0.2 25);border-color:oklch(0.5 0.15 25 / .5);background:oklch(0.45 0.18 25 / .14);}
+  .iconbtn.danger:hover{background:oklch(0.5 0.2 25 / .25);color:oklch(0.72 0.22 25);}
+  .iconbtn.x{color:oklch(0.7 0.2 25);font-size:16px;font-weight:700;}
+
+  .strip{
+    position:relative;flex:1;height:96px;border-radius:12px;
+    border:1px solid var(--line);overflow:hidden;cursor:crosshair;
+    box-shadow:0 8px 26px -12px #000 inset, 0 0 0 1px rgba(255,255,255,0.03) inset;
+  }
+  .stop-marker{
+    position:absolute;top:8px;bottom:8px;width:16px;margin-left:-8px;
+    border-radius:8px;border:2.5px solid #fff;cursor:grab;
+    box-shadow:0 2px 8px rgba(0,0,0,.55);transition:transform .12s, box-shadow .12s;
+  }
+  .stop-marker:hover{transform:scaleY(1.04);}
+  .stop-marker.sel{border-color:var(--accent-bright);box-shadow:0 0 0 2px var(--accent),0 4px 12px rgba(0,0,0,.6);transform:scaleY(1.06);}
+  .stop-marker:active{cursor:grabbing;}
+
+  .stop-head{display:flex;align-items:center;justify-content:space-between;margin:18px 0 16px;}
+  .stop-head h2{font-size:20px;font-weight:700;letter-spacing:-.01em;}
+  .seg{display:flex;background:var(--row);border:1px solid var(--line);border-radius:10px;padding:3px;gap:3px;}
+  .seg button{
+    padding:7px 16px;border:none;background:transparent;color:var(--ink-2);
+    font-family:var(--sans);font-weight:600;font-size:13px;border-radius:7px;cursor:pointer;transition:.15s;
+  }
+  .seg button.on{background:var(--accent);color:#fff;}
+
+  /* cards & groups */
+  .pcard{
+    background:var(--row);border:1px solid var(--line-soft);border-radius:13px;
+    padding:18px 20px;margin-bottom:22px;
+  }
+  .grp-label{
+    font-size:12px;font-weight:700;letter-spacing:.2em;text-transform:uppercase;
+    color:var(--ink-3);margin:0 0 4px;
+  }
+  .pgroup{margin-bottom:8px;}
+
+  /* preset row */
+  .preset-pick{display:flex;align-items:center;gap:12px;margin-bottom:14px;}
+  .swatch{width:42px;height:42px;border-radius:9px;border:1px solid var(--line);flex:none;background:#fff;}
+  .select-box{position:relative;flex:1;}
+  .select-box select{
+    appearance:none;-webkit-appearance:none;width:100%;
+    font-family:var(--sans);font-size:15px;font-weight:600;color:var(--ink);
+    background:#0b0d12;border:1px solid var(--line);border-radius:10px;padding:12px 38px 12px 15px;cursor:pointer;
+  }
+  .select-box::after{content:"";position:absolute;right:15px;top:50%;transform:translateY(-60%) rotate(45deg);
+    width:7px;height:7px;border-right:2px solid var(--ink-3);border-bottom:2px solid var(--ink-3);pointer-events:none;}
+  .btn-row{display:flex;gap:10px;margin-bottom:14px;}
+  .btn{
+    padding:10px 18px;border-radius:9px;font-family:var(--sans);font-weight:600;font-size:14px;
+    cursor:pointer;border:1px solid transparent;transition:.15s;
+  }
+  .btn-blue{background:var(--accent-soft);color:var(--accent-bright);border-color:oklch(0.7 0.17 245 / .4);}
+  .btn-blue:hover{background:oklch(0.7 0.17 245 / .28);}
+  .btn-red{background:oklch(0.5 0.18 25 / .14);color:oklch(0.72 0.2 25);border-color:oklch(0.5 0.15 25 / .4);}
+  .btn-red:hover{background:oklch(0.5 0.18 25 / .26);}
+  .btn-green{background:oklch(0.5 0.14 150 / .16);color:oklch(0.78 0.16 150);border-color:oklch(0.5 0.13 150 / .4);}
+  .btn-green:hover{background:oklch(0.5 0.14 150 / .28);}
+  .btn-ghost{background:var(--row-on);color:var(--ink-2);border-color:var(--line);}
+  .btn-ghost:hover{color:var(--ink);}
+  .save-row{display:flex;gap:10px;align-items:center;}
+  .txt-in{
+    flex:1;font-family:var(--sans);font-size:14px;color:var(--ink);
+    background:#0b0d12;border:1px solid var(--line);border-radius:9px;padding:11px 15px;
+  }
+  .txt-in::placeholder{color:var(--ink-4);}
+  .txt-in:focus,.select-box select:focus{outline:none;border-color:var(--accent);}
+
+  /* color row */
+  .color-row{display:flex;align-items:center;gap:16px;margin-bottom:14px;}
+  .color-row .clbl{font-size:15px;color:var(--ink-2);width:104px;}
+  .hex{font-family:var(--mono);font-size:16px;font-weight:600;color:var(--ink);}
+  .mini-swatch{width:40px;height:34px;border-radius:8px;border:1px solid var(--line);}
+  .plus-btn{width:40px;height:34px;border-radius:8px;border:1px solid var(--line);background:var(--row-on);
+    color:var(--ink-2);font-size:18px;cursor:pointer;display:grid;place-items:center;}
+  .plus-btn:hover{color:var(--ink);}
+
+  /* curve presets */
+  .curves{display:flex;gap:4px;background:var(--row);border:1px solid var(--line);border-radius:10px;padding:4px;}
+  .curve{width:48px;height:38px;border-radius:7px;display:grid;place-items:center;cursor:pointer;
+    background:transparent;border:none;color:var(--ink-3);transition:.15s;}
+  .curve svg{width:30px;height:24px;stroke:currentColor;fill:none;stroke-width:2;}
+  .curve:hover{color:var(--ink-2);}
+  .curve.on{background:var(--accent-soft);color:var(--accent-bright);box-shadow:0 0 0 1px oklch(0.7 0.17 245 / .5) inset;}
+
+  .color-head{display:flex;align-items:flex-start;justify-content:space-between;gap:20px;}
+  .color-head .col-left{flex:1;}
+
+  /* palette slider rows */
+  .srow{display:grid;grid-template-columns:200px 1fr 70px;align-items:center;gap:18px;padding:6px 0;}
+  .srow .slbl{font-size:15px;color:var(--ink-2);white-space:nowrap;}
+  .srow .sval{font-family:var(--mono);font-weight:700;font-size:15px;color:var(--ink);text-align:right;}
+
+  @media (max-width:880px){
+    .row{grid-template-columns:1fr 1fr;gap:14px;}
+    .name-cell{grid-column:1 / -1;}
+    .wave{grid-column:1 / -1;}
+  }
+  @media (max-width:560px){
+    .tab span.label{display:none;}
+    .param{grid-template-columns:auto 1fr auto;}
+    .srow{grid-template-columns:130px 1fr 56px;gap:10px;}
+    .srow .slbl{white-space:normal;font-size:14px;}
+  }
+    .param{grid-template-columns:auto 1fr auto;}
+  }
+</style>
+</head>
+<body>
+
+  <nav class="tabbar">
+    <div class="tab"><svg viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg><span class="label">Navigation</span><span class="key">W</span></div>
+    <div class="tab"><svg viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z"/></svg><span class="label">Presets</span><span class="key">X</span></div>
+    <div class="tab"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><circle cx="9" cy="9" r="1.4" fill="currentColor" stroke="none"/><circle cx="15.5" cy="11" r="1.4" fill="currentColor" stroke="none"/></svg><span class="label">Graphics</span><span class="key">V</span></div>
+    <div class="tab" data-view="animation"><svg viewBox="0 0 24 24"><rect x="3" y="5" width="18" height="14" rx="2"/><path d="M3 9h18M8 5v14"/></svg><span class="label">Animation</span><span class="key">C</span></div>
+    <div class="tab" data-view="palettes"><svg viewBox="0 0 24 24"><path d="M12 3a9 9 0 100 18c1.1 0 2-.9 2-2 0-1.5 1.5-2 3-2a4 4 0 004-4c0-5-4-8-9-8z"/></svg><span class="label">Palettes</span><span class="key">N</span></div>
+    <div class="tab"><svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg><span class="key">B</span></div>
+    <div class="tab logout"><svg viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M10 12H3m0 0l3-3m-3 3l3 3"/></svg><span class="label">Logout</span></div>
+  </nav>
+
+  <section class="panel">
+    <header class="panel-head">
+      <div class="title"><span class="dot"></span><h1 id="panelTitle">Animation</h1></div>
+      <button class="close" aria-label="Fermer">✕</button>
+    </header>
+
+    <div class="panel-body">
+
+     <div id="view-animation">
+      <div class="section-label"><span class="tick"></span>Playback</div>
+      <div class="playback">
+        <button class="play-btn" id="driftBtn">
+          <span class="sheen"></span>
+          <svg viewBox="0 0 24 24" id="driftIcon"><path d="M8 5v14l11-7z"/></svg>
+          <span id="driftLabel">Drift</span>
+        </button>
+        <span class="pb-label">Global Speed</span>
+        <div class="pb-slider"><input type="range" min="0" max="300" value="10" id="globalSpeed"></div>
+        <span class="pb-val" id="globalVal">×0.10</span>
+      </div>
+
+      <div class="section-label"><span class="tick"></span>Mixer</div>
+      <div class="mixer" id="mixer"></div>
+     </div>
+
+     <div id="view-palettes" hidden>
+      <div class="subtabs" id="subtabs">
+        <div class="subtab active" data-sub="stops">Stops</div>
+        <div class="subtab" data-sub="color">Color</div>
+        <div class="subtab" data-sub="motion">Motion / Cycle</div>
+        <div class="subtab" data-sub="surface">Surface / Material</div>
+        <div class="subtab" data-sub="image">Image / Env</div>
+        <div class="subtab" data-sub="library">Library</div>
+      </div>
+
+      <div class="strip-tools-r">
+        <button class="iconbtn" title="Reverse"><svg viewBox="0 0 24 24"><path d="M7 7h11l-3-3M17 17H6l3 3"/></svg></button>
+        <button class="iconbtn" title="Invert"><svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3v18" fill="currentColor"/><path d="M12 3a9 9 0 010 18z" fill="currentColor" stroke="none"/></svg></button>
+        <button class="iconbtn" title="Duplicate"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg></button>
+        <button class="iconbtn" title="Distribute"><svg viewBox="0 0 24 24"><path d="M4 12h16M8 8l-4 4 4 4M16 8l4 4-4 4"/></svg></button>
+        <button class="iconbtn" title="List"><svg viewBox="0 0 24 24"><path d="M4 7h16M4 12h16M4 17h16"/></svg></button>
+        <button class="iconbtn danger" title="Delete"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg></button>
+      </div>
+
+      <div class="strip-wrap">
+        <div class="strip-tools-l">
+          <button class="iconbtn x" title="Clear">✕</button>
+          <button class="iconbtn" title="Eyedropper"><svg viewBox="0 0 24 24"><path d="M19 5a2 2 0 00-3-1l-7 7-2 4 4-2 7-7a2 2 0 001-1z"/><path d="M7 15l-2 2"/></svg></button>
+        </div>
+        <div class="strip" id="strip"></div>
+      </div>
+
+      <div class="stop-head">
+        <h2 id="stopTitle">Stop #1</h2>
+        <div class="seg">
+          <button class="on" id="segThis">This Stop</button>
+          <button id="segAll">All Stops</button>
+        </div>
+      </div>
+
+      <div class="pgroup" data-grp="library">
+        <p class="grp-label">Stop Looks</p>
+        <div class="pcard">
+          <div class="preset-pick">
+            <div class="swatch"></div>
+            <div class="select-box"><select><option>Choose preset…</option><option>Chrome Drift</option><option>Aurora</option><option>Oil Slick</option></select></div>
+          </div>
+          <div class="btn-row">
+            <button class="btn btn-blue">Apply</button>
+            <button class="btn btn-red">Delete</button>
+            <button class="btn btn-ghost">Export</button>
+          </div>
+          <div class="save-row">
+            <input class="txt-in" placeholder="New preset name…">
+            <button class="btn btn-ghost">Save</button>
+            <button class="btn btn-blue">Export All</button>
+            <button class="btn btn-green">Import</button>
+          </div>
+        </div>
+      </div>
+
+      <div class="pgroup" data-grp="color">
+        <p class="grp-label">Color</p>
+        <div class="color-head">
+          <div class="col-left">
+            <div class="color-row">
+              <span class="clbl">Base</span>
+              <span class="mini-swatch" style="background:#fff"></span>
+              <span class="hex">#ffffff</span>
+            </div>
+            <div class="color-row">
+              <span class="clbl">Iridescence</span>
+              <button class="plus-btn">+</button>
+              <span class="hex" style="color:var(--ink-3)">off</span>
+            </div>
+          </div>
+          <div class="curves" id="curves">
+            <button class="curve" title="Linear"><svg viewBox="0 0 30 24"><path d="M3 21L27 3"/></svg></button>
+            <button class="curve on" title="Smooth"><svg viewBox="0 0 30 24"><path d="M3 21C9 21 9 3 15 3M15 3C21 3 21 21 27 3" transform="translate(0,0)"/><path d="M3 21C10 21 12 3 15 12S22 3 27 3"/></svg></button>
+            <button class="curve" title="Step"><svg viewBox="0 0 30 24"><path d="M3 21V8h12V3"/></svg></button>
+            <button class="curve" title="Ease in"><svg viewBox="0 0 30 24"><path d="M3 21C18 21 24 14 27 3"/></svg></button>
+          </div>
+        </div>
+        <div class="pcard" id="grpColor"></div>
+      </div>
+
+      <div class="pgroup" data-grp="motion">
+        <p class="grp-label">Iteration Mapping</p>
+        <div class="pcard" id="grpIter"></div>
+      </div>
+
+      <div class="pgroup" data-grp="surface">
+        <p class="grp-label">Lighting &amp; Material</p>
+        <div class="pcard" id="grpLight"></div>
+      </div>
+
+      <div class="pgroup" data-grp="image">
+        <p class="grp-label">Image Sources</p>
+        <div class="pcard" id="grpImage"></div>
+      </div>
+     </div>
+
+    </div>
+  </section>
+
+  <div class="fps"><span class="live"></span><span class="num" id="fps">60</span> fps <span class="caret">▾</span></div>
+
+<script>
+  const ROWS = [
+    {name:"Palette Offset",      wave:"pulse", speed:2.1, range:0.26, unit:"cycle", on:true,  rmin:0, rmax:1,   rstep:0.01},
+    {name:"Height Palette Shift",wave:"loop",  speed:1.2, range:13.0, unit:"",      on:false, rmin:0, rmax:30,  rstep:0.5},
+    {name:"Light Angle",         wave:"loop",  speed:0.4, range:1.00, unit:"turn",  on:false, rmin:0, rmax:2,   rstep:0.01},
+    {name:"Texture Drift",       wave:"sine",  speed:1.0, range:1.00, unit:"",      on:false, rmin:0, rmax:4,   rstep:0.05},
+    {name:"Sky Reflection Drift",wave:"pulse", speed:0.8, range:0.28, unit:"",      on:true,  rmin:0, rmax:1,   rstep:0.01},
+    {name:"Phase Coloring",      wave:"pulse", speed:0.3, range:6.0,  unit:"",      on:false, rmin:0, rmax:20,  rstep:0.5},
+    {name:"Varnish",             wave:"pulse", speed:2.3, range:5.65, unit:"",      on:false, rmin:0, rmax:12,  rstep:0.05},
+    {name:"Micro Bump",          wave:"pulse", speed:0.3, range:0.50, unit:"",      on:false, rmin:0, rmax:2,   rstep:0.01},
+    {name:"Displacement",        wave:"sine",  speed:0.2, range:0.020,unit:"",      on:false, rmin:0, rmax:0.1, rstep:0.001},
+    {name:"Tessellation",        wave:"sine",  speed:0.1, range:2.0,  unit:"",      on:false, rmin:0, rmax:8,   rstep:0.1},
+  ];
+  const WAVES = ["pulse","sine","loop","saw","noise"];
+
+  const mixer = document.getElementById('mixer');
+
+  function fmtRange(v, step){
+    if(step >= 1) return (+v).toFixed(1);
+    if(step >= 0.1) return (+v).toFixed(1);
+    if(step >= 0.01) return (+v).toFixed(2);
+    return (+v).toFixed(3);
+  }
+
+  ROWS.forEach((r, i) => {
+    const row = document.createElement('div');
+    row.className = 'row ' + (r.on ? 'on' : 'off');
+    row.innerHTML = `
+      <div class="name-cell">
+        <div class="toggle ${r.on?'on':''}" role="switch" aria-checked="${r.on}" tabindex="0"></div>
+        <span class="name">${r.name}</span>
+      </div>
+      <div class="wave ctl">
+        <select>${WAVES.map(w=>`<option ${w===r.wave?'selected':''}>${w}</option>`).join('')}</select>
+      </div>
+      <div class="param ctl">
+        <span class="plabel">Speed</span>
+        <input type="range" min="0" max="300" step="1" value="${Math.round(r.speed*100)}" data-kind="speed">
+        <span class="pval speedVal">×${r.speed.toFixed(1)}</span>
+      </div>
+      <div class="param ctl">
+        <span class="plabel">Range</span>
+        <input type="range" min="${r.rmin}" max="${r.rmax}" step="${r.rstep}" value="${r.range}" data-kind="range">
+        <span class="pval rangeVal">${fmtRange(r.range, r.rstep)}<span class="unit">${r.unit}</span></span>
+      </div>`;
+    mixer.appendChild(row);
+
+    const toggle = row.querySelector('.toggle');
+    const setOn = (on) => {
+      r.on = on;
+      toggle.classList.toggle('on', on);
+      toggle.setAttribute('aria-checked', on);
+      row.classList.toggle('on', on);
+      row.classList.toggle('off', !on);
+    };
+    toggle.addEventListener('click', () => setOn(!r.on));
+    toggle.addEventListener('keydown', e => { if(e.key===' '||e.key==='Enter'){e.preventDefault();setOn(!r.on);} });
+
+    const speedIn = row.querySelector('[data-kind=speed]');
+    const speedOut = row.querySelector('.speedVal');
+    speedIn.addEventListener('input', () => { speedOut.textContent = '×' + (speedIn.value/100).toFixed(1); });
+
+    const rangeIn = row.querySelector('[data-kind=range]');
+    const rangeOut = row.querySelector('.rangeVal');
+    rangeIn.addEventListener('input', () => {
+      rangeOut.innerHTML = fmtRange(rangeIn.value, r.rstep) + `<span class="unit">${r.unit}</span>`;
+    });
+  });
+
+  // Global speed
+  const gs = document.getElementById('globalSpeed'), gv = document.getElementById('globalVal');
+  gs.addEventListener('input', () => { gv.textContent = '×' + (gs.value/100).toFixed(2); });
+
+  // Drift play/pause
+  const driftBtn = document.getElementById('driftBtn');
+  const driftLabel = document.getElementById('driftLabel');
+  const driftIcon = document.getElementById('driftIcon');
+  let playing = true;
+  driftBtn.addEventListener('click', () => {
+    playing = !playing;
+    driftBtn.classList.toggle('paused', !playing);
+    driftLabel.textContent = playing ? 'Drift' : 'Paused';
+    driftIcon.innerHTML = playing ? '<path d="M8 5v14l11-7z"/>' : '<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>';
+    document.getElementById('fps').textContent = playing ? '60' : '0';
+  });
+
+  document.querySelector('.close').addEventListener('click', () => {
+    document.querySelector('.panel').animate(
+      [{opacity:1,transform:'scale(1)'},{opacity:0,transform:'scale(0.98)'}],
+      {duration:180,fill:'forwards'});
+  });
+
+  /* ============ PALETTES ============ */
+  // gradient stops {pos 0-100, color}
+  const STOPS = [
+    {pos:2,  c:'#ffffff'},
+    {pos:35, c:'#15310f'},
+    {pos:41, c:'#3a5bd0'},
+    {pos:46, c:'#2a0fb0'},
+    {pos:56, c:'#1f8a9a'},
+    {pos:63, c:'#2e9e4a'},
+    {pos:70, c:'#f5d711'},
+    {pos:98, c:'#cfc9b0'},
+  ];
+  const strip = document.getElementById('strip');
+  let selStop = 0;
+
+  function buildGradient(){
+    const sorted = [...STOPS].sort((a,b)=>a.pos-b.pos);
+    return 'linear-gradient(90deg,' + sorted.map(s=>`${s.c} ${s.pos}%`).join(',') + ')';
+  }
+  function renderStrip(){
+    strip.style.background = buildGradient();
+    strip.querySelectorAll('.stop-marker').forEach(m=>m.remove());
+    STOPS.forEach((s,i)=>{
+      const m = document.createElement('div');
+      m.className = 'stop-marker' + (i===selStop?' sel':'');
+      m.style.left = s.pos + '%';
+      m.style.background = s.c;
+      m.addEventListener('pointerdown', e=>startDrag(e,i,m));
+      strip.appendChild(m);
+    });
+  }
+  function selectStop(i){
+    selStop = i;
+    document.getElementById('stopTitle').textContent = 'Stop #' + (i+1);
+    const sw = document.querySelector('.mini-swatch'), hx = document.querySelector('.color-row .hex');
+    if(sw){sw.style.background = STOPS[i].c;}
+    if(hx){hx.textContent = STOPS[i].c;}
+    renderStrip();
+  }
+  function startDrag(e,i,m){
+    e.preventDefault();
+    selectStop(i);
+    const rect = strip.getBoundingClientRect();
+    const move = ev=>{
+      let p = ((ev.clientX-rect.left)/rect.width)*100;
+      p = Math.max(0,Math.min(100,p));
+      STOPS[i].pos = p; m.style.left = p+'%';
+      strip.style.background = buildGradient();
+    };
+    const up = ()=>{document.removeEventListener('pointermove',move);document.removeEventListener('pointerup',up);};
+    document.addEventListener('pointermove',move);
+    document.addEventListener('pointerup',up);
+  }
+  renderStrip();
+
+  // palette sliders
+  const COLOR = [
+    {n:'Color Blend', v:1.00, min:0, max:1, step:0.01},
+    {n:'Iridescence Strength', v:0, min:0, max:1, step:0.01},
+  ];
+  const ITER = [
+    {n:'Iteration Bands', v:0, min:0, max:1, step:0.01},
+    {n:'Smooth Iterations', v:1.00, min:0, max:1, step:0.01},
+    {n:'Stripe Average', v:0, min:0, max:1, step:0.01},
+    {n:'Direction Coherence', v:0, min:0, max:1, step:0.01},
+    {n:'Stripe Relief', v:0, min:0, max:1, step:0.01},
+    {n:'Direction Relief', v:0, min:0, max:1, step:0.01},
+  ];
+  const LIGHT = [
+    {n:'Lighting Blend', v:1.00, min:0, max:1, step:0.01},
+    {n:'Reflection Blend', v:1.00, min:0, max:1, step:0.01},
+    {n:'Light Intensity', v:0, min:0, max:2, step:0.01},
+    {n:'Specular Strength', v:34.50, min:0, max:100, step:0.5},
+    {n:'Metalness', v:1.00, min:0, max:1, step:0.01},
+    {n:'Roughness', v:0.02, min:0, max:1, step:0.01},
+    {n:'Anisotropy', v:1.00, min:0, max:1, step:0.01},
+  ];
+  const IMAGE = [
+    {n:'Image Blend', v:0, min:0, max:1, step:0.01},
+    {n:'Webcam Blend', v:0, min:0, max:1, step:0.01},
+  ];
+  function pfmt(v,step){ return step>=0.5 ? (+v).toFixed(2) : (+v).toFixed(2); }
+  function fillGroup(el, data){
+    data.forEach(d=>{
+      const row = document.createElement('div');
+      row.className = 'srow';
+      row.innerHTML = `<span class="slbl">${d.n}</span>
+        <input type="range" min="${d.min}" max="${d.max}" step="${d.step}" value="${d.v}">
+        <span class="sval">${pfmt(d.v)}</span>`;
+      const inp = row.querySelector('input'), out = row.querySelector('.sval');
+      inp.addEventListener('input', ()=>{ out.textContent = pfmt(inp.value); });
+      el.appendChild(row);
+    });
+  }
+  fillGroup(document.getElementById('grpColor'), COLOR);
+  fillGroup(document.getElementById('grpIter'), ITER);
+  fillGroup(document.getElementById('grpLight'), LIGHT);
+  fillGroup(document.getElementById('grpImage'), IMAGE);
+
+  // curve preset selector
+  document.getElementById('curves').addEventListener('click', e=>{
+    const c = e.target.closest('.curve'); if(!c) return;
+    document.querySelectorAll('#curves .curve').forEach(x=>x.classList.remove('on'));
+    c.classList.add('on');
+  });
+  // this/all segmented
+  document.getElementById('segThis').addEventListener('click', ()=>{
+    document.getElementById('segThis').classList.add('on');
+    document.getElementById('segAll').classList.remove('on');
+  });
+  document.getElementById('segAll').addEventListener('click', ()=>{
+    document.getElementById('segAll').classList.add('on');
+    document.getElementById('segThis').classList.remove('on');
+  });
+
+  // sub-tab filtering: each sub-tab reveals a subset of groups (Stops = all)
+  const SUB_GROUPS = {
+    stops:   ['library','color','motion','surface','image'],
+    color:   ['color'],
+    motion:  ['motion'],
+    surface: ['surface'],
+    image:   ['image'],
+    library: ['library'],
+  };
+  document.getElementById('subtabs').addEventListener('click', e=>{
+    const t = e.target.closest('.subtab'); if(!t) return;
+    document.querySelectorAll('.subtab').forEach(x=>x.classList.remove('active'));
+    t.classList.add('active');
+    const show = SUB_GROUPS[t.dataset.sub] || [];
+    document.querySelectorAll('#view-palettes .pgroup').forEach(g=>{
+      g.hidden = !show.includes(g.dataset.grp);
+    });
+  });
+
+  // ============ TOP VIEW SWITCHING ============
+  const TITLES = {animation:'Animation', palettes:'Palettes'};
+  function showView(v){
+    document.getElementById('view-animation').hidden = (v!=='animation');
+    document.getElementById('view-palettes').hidden = (v!=='palettes');
+    document.getElementById('panelTitle').textContent = TITLES[v];
+    document.querySelectorAll('.tabbar .tab').forEach(t=>{
+      t.classList.toggle('active', t.dataset.view===v);
+    });
+  }
+  document.querySelectorAll('.tabbar .tab[data-view]').forEach(t=>{
+    t.addEventListener('click', ()=>showView(t.dataset.view));
+  });
+  showView('animation');
+</script>
+</body>
+</html>

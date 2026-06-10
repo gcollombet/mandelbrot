@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {onMounted, ref} from "vue";
 import MandelbrotViewer from "./components/MandelbrotViewer.vue";
+import SplashScreen from "./components/SplashScreen.vue";
 
 const isWebGPUSupported = ref(false);
 const isFrench = ref(true);
@@ -16,6 +17,7 @@ onMounted(() => {
 <template>
   <div id="fullscreen" v-if="isWebGPUSupported">
     <MandelbrotViewer/>
+    <SplashScreen/>
   </div>
   <div v-else class="section is-flex is-flex-direction-column is-align-items-center is-justify-content-center" style="height: 100vh;">
     <div class="box has-text-centered" style="max-width: 400px;">

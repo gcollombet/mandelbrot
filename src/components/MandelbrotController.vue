@@ -66,7 +66,8 @@ const pressedKeys: Record<string, boolean> = {};
 
 defineExpose({
   getCanvas,
-  getEngine: () => mandelbrotRef.value?.getEngine() ?? null
+  getEngine: () => mandelbrotRef.value?.getEngine() ?? null,
+  getNavigator: () => mandelbrotRef.value?.getNavigator() ?? null
 });
 let isDragging = false;
 let isRotating = false;

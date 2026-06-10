@@ -12,6 +12,7 @@ export interface MandelbrotParams {
     mu: number;
     epsilon: number;
     angle: number;
+    showPresetPins?: boolean;
     maxIterations: number;
     maxIterationMultiplier: number;
     antialiasLevel: number;

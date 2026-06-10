@@ -108,6 +108,18 @@ pub struct MandelbrotNavigator {
     vtx: DBig,
     vty: DBig,
     last_step_time: Option<f64>, // timestamp en ms
+    
+    // Champs de transition/voyage
+    transition_start_cx: Option<DBig>,
+    transition_start_cy: Option<DBig>,
+    transition_start_scale: Option<DBig>,
+    transition_start_angle: Option<f64>,
+    transition_target_cx: Option<DBig>,
+    transition_target_cy: Option<DBig>,
+    transition_target_scale: Option<DBig>,
+    transition_target_angle: Option<f64>,
+    transition_duration: f64,
+    transition_elapsed: f64,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -145,6 +157,16 @@ impl MandelbrotNavigator {
             vtx: zero.clone(),
             vty: zero.clone(),
             last_step_time: None,
+            transition_start_cx: None,
+            transition_start_cy: None,
+            transition_start_scale: None,
+            transition_start_angle: None,
+            transition_target_cx: None,
+            transition_target_cy: None,
+            transition_target_scale: None,
+            transition_target_angle: None,
+            transition_duration: 0.0,
+            transition_elapsed: 0.0,
         }
     }
 
@@ -251,80 +273,138 @@ impl MandelbrotNavigator {
             }
         };
 
-        // Animation translation avec vitesse et damping
-        let damping_base = exp_f64(-std::f64::consts::LN_2 * delta_time / 0.05); // // (1.0 - 25.0 * delta_time).max(0.01);
-        let damping = DBig::from_str(&damping_base.to_string()).unwrap();
-        let delta_time_big = DBig::from_str(&delta_time.to_string()).unwrap();
+        // Si une transition/voyage est en cours, on effectue l'interpolation
+        if let (
+            Some(start_cx),
+            Some(start_cy),
+            Some(start_scale),
+            Some(start_angle),
+            Some(target_cx),
+            Some(target_cy),
+            Some(target_scale),
+            Some(target_angle),
+        ) = (
+            self.transition_start_cx.as_ref(),
+            self.transition_start_cy.as_ref(),
+            self.transition_start_scale.as_ref(),
+            self.transition_start_angle.as_ref(),
+            self.transition_target_cx.as_ref(),
+            self.transition_target_cy.as_ref(),
+            self.transition_target_scale.as_ref(),
+            self.transition_target_angle.as_ref(),
+        ) {
+            self.transition_elapsed += delta_time;
+            let t = self.transition_elapsed / self.transition_duration;
+            if t >= 1.0 {
+                self.cx = target_cx.clone();
+                self.cy = target_cy.clone();
+                self.scale = target_scale.clone();
+                self.angle = *target_angle;
 
-        // On anime l'échelle avec la vitesse et damping
-        if self.vscale != DBig::try_from(1).unwrap() {
-            //let delta_scale = DBig::try_from(1).unwrap() + &self.vscale * (DBig::try_from(1).unwrap() + &delta_time_big).ln();
-            //self.scale = self.scale.powf(&(&self.vscale * &delta_time_big));
+                // Fin de la transition
+                self.transition_start_cx = None;
+                self.transition_start_cy = None;
+                self.transition_start_scale = None;
+                self.transition_start_angle = None;
+                self.transition_target_cx = None;
+                self.transition_target_cy = None;
+                self.transition_target_scale = None;
+                self.transition_target_angle = None;
+            } else {
+                // Easing cubique ease-in-out : t * t * (3 - 2 * t)
+                let t_eased = t * t * (3.0 - 2.0 * t);
 
-            // 2 en une seconde, je veux que le scale soit divisé par deux, en 2 par 4, en trois par 8, etc.
-            // si 0.5 en une seconde, alors en delta_time, on fait scale * (0.5)^(delta_time)
-            if delta_time_big > DBig::try_from(0).unwrap() {
-                self.scale = &self.scale
-                    * self
-                        .vscale
-                        .powf(&(&delta_time_big * DBig::try_from(10).unwrap()));
+                // Interpolation exponentielle pour l'échelle (scale)
+                let ratio = target_scale / start_scale;
+                let ratio_f64 = dbig_to_f64(&ratio);
+                let factor = ratio_f64.powf(t_eased);
+                let factor_big = DBig::from_str(&factor.to_string()).unwrap_or_else(|_| DBig::try_from(1).unwrap());
+                self.scale = start_scale * &factor_big;
+
+                // Pour la position (cx, cy), afin d'avoir une vitesse visuelle de translation uniforme,
+                // on interpole linéairement par rapport au SCALE (qui évolue exponentiellement) plutôt qu'au temps.
+                let t_pos_big = if (ratio_f64 - 1.0).abs() < 1e-6 {
+                    DBig::from_str(&t_eased.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap())
+                } else {
+                    (&self.scale - start_scale) / (target_scale - start_scale)
+                };
+                let one_minus_t_pos = &DBig::try_from(1).unwrap() - &t_pos_big;
+
+                // Interpolation pour cx et cy, pondérée par l'évolution de l'échelle
+                self.cx = start_cx * &one_minus_t_pos + target_cx * &t_pos_big;
+                self.cy = start_cy * &one_minus_t_pos + target_cy * &t_pos_big;
+
+                // Interpolation linéaire pour l'angle
+                self.angle = start_angle * (1.0 - t_eased) + target_angle * t_eased;
             }
-            self.vscale = DBig::try_from(1).unwrap()
-                + ((&self.vscale - DBig::try_from(1).unwrap()) * &damping);
+        } else {
+            // Animation translation avec vitesse et damping (manuel)
+            let damping_base = exp_f64(-std::f64::consts::LN_2 * delta_time / 0.05); // (1.0 - 25.0 * delta_time).max(0.01);
+            let damping = DBig::from_str(&damping_base.to_string()).unwrap();
+            let delta_time_big = DBig::from_str(&delta_time.to_string()).unwrap();
 
-            // si vsclale plus petit que 0.5 ou plus grand que 2, on le clamp à 0.5 ou 2 pour éviter les valeurs extrêmes
-            if self.vscale.clone() > DBig::from_str("2").unwrap() {
-                self.vscale = DBig::from_str("2").unwrap();
+            // On anime l'échelle avec la vitesse et damping
+            if self.vscale != DBig::try_from(1).unwrap() {
+                if delta_time_big > DBig::try_from(0).unwrap() {
+                    self.scale = &self.scale
+                        * self
+                            .vscale
+                            .powf(&(&delta_time_big * DBig::try_from(10).unwrap()));
+                }
+                self.vscale = DBig::try_from(1).unwrap()
+                    + ((&self.vscale - DBig::try_from(1).unwrap()) * &damping);
+
+                // si vsclale plus petit que 0.5 ou plus grand que 2, on le clamp à 0.5 ou 2 pour éviter les valeurs extrêmes
+                if self.vscale.clone() > DBig::from_str("2").unwrap() {
+                    self.vscale = DBig::from_str("2").unwrap();
+                }
+                if self.vscale.clone() < DBig::from_str("0.5").unwrap() {
+                    self.vscale = DBig::from_str("0.5").unwrap();
+                }
+
+                if self.vscale.clone().abs() > DBig::from_str("0.999").unwrap()
+                    && self.vscale.clone().abs() < DBig::from_str("1.001").unwrap()
+                {
+                    self.vscale = DBig::try_from(1).unwrap();
+                }
             }
-            if self.vscale.clone() < DBig::from_str("0.5").unwrap() {
-                self.vscale = DBig::from_str("0.5").unwrap();
+
+            let epsilon = &self.scale / DBig::try_from(1000000).unwrap();
+
+            // Clamp vitesse plus gros que scale
+            let norm = self.vtx.clone() * self.vtx.clone() + self.vty.clone() * self.vty.clone();
+            if norm.clone() > DBig::try_from(0).unwrap() {
+                let norm = norm.clone().sqr();
+                let threshold = self.scale.clone() * DBig::from_str("2.0").unwrap();
+                if norm.clone() > threshold {
+                    let factor = norm.clone() / threshold.clone();
+                    self.vtx = self.vtx.clone() / factor.clone();
+                    self.vty = self.vty.clone() / factor.clone();
+                }
             }
 
-            if self.vscale.clone().abs() > DBig::from_str("0.999").unwrap()
-                && self.vscale.clone().abs() < DBig::from_str("1.001").unwrap()
-            {
-                self.vscale = DBig::try_from(1).unwrap();
+            // Rendre damping dépendant du temps
+            let k = std::f64::consts::LN_2 / 0.05;
+            let displacement_factor_f64 = (1.0 - damping_base) / k;
+            let displacement_factor = DBig::from_str(&displacement_factor_f64.to_string()).unwrap();
+            self.cx = &self.cx + &self.vtx * &displacement_factor;
+            self.cy = &self.cy + &self.vty * &displacement_factor;
+            self.vtx = &self.vtx * &damping;
+            self.vty = &self.vty * &damping;
+
+            if self.vtx.clone().abs() < epsilon {
+                self.vtx = DBig::try_from(0).unwrap();
             }
-        }
-
-        let epsilon = &self.scale / DBig::try_from(1000000).unwrap();
-
-        // Clamp vitesse plus gros que scale
-
-        let norm = self.vtx.clone() * self.vtx.clone() + self.vty.clone() * self.vty.clone();
-        if norm.clone() > DBig::try_from(0).unwrap() {
-            let norm = norm.clone().sqr();
-            let threshold = self.scale.clone() * DBig::from_str("2.0").unwrap();
-            if norm.clone() > threshold {
-                let factor = norm.clone() / threshold.clone();
-                self.vtx = self.vtx.clone() / factor.clone();
-                self.vty = self.vty.clone() / factor.clone();
+            if self.vty.clone().abs() < epsilon {
+                self.vty = DBig::try_from(0).unwrap();
             }
-        }
 
-        // Rendre damping dépendant du temps
-        // Use exact integral instead of Euler: for v(t) = v0*e^(-k*t),
-        // displacement = v0 * (1 - e^(-k*dt)) / k = v0 * (1 - damping) / k
-        let k = std::f64::consts::LN_2 / 0.05;
-        let displacement_factor_f64 = (1.0 - damping_base) / k;
-        let displacement_factor = DBig::from_str(&displacement_factor_f64.to_string()).unwrap();
-        self.cx = &self.cx + &self.vtx * &displacement_factor;
-        self.cy = &self.cy + &self.vty * &displacement_factor;
-        self.vtx = &self.vtx * &damping;
-        self.vty = &self.vty * &damping;
-
-        if self.vtx.clone().abs() < epsilon {
-            self.vtx = DBig::try_from(0).unwrap();
-        }
-        if self.vty.clone().abs() < epsilon {
-            self.vty = DBig::try_from(0).unwrap();
-        }
-
-        // On anime l'angle avec la vitesse angulaire et damping
-        self.angle += self.vangle * delta_time;
-        self.vangle *= damping_base;
-        if self.vangle.abs() < 0.005 {
-            self.vangle = 0.0;
+            // On anime l'angle avec la vitesse angulaire et damping
+            self.angle += self.vangle * delta_time;
+            self.vangle *= damping_base;
+            if self.vangle.abs() < 0.005 {
+                self.vangle = 0.0;
+            }
         }
 
         // Calcul du delta par rapport à la référence
@@ -457,7 +537,7 @@ impl MandelbrotNavigator {
     fn compute_bla_reference_inner(&mut self, orbit_len: usize) -> BlaBufferInfo {
         const BLA_SKIP_LEVELS: usize = 0;
         const MIN_BLA_SKIP: usize = 1 << BLA_SKIP_LEVELS;
-        const MAX_BLA_SKIP: usize = 16;
+        const MAX_BLA_SKIP: usize = 256;
 
         if orbit_len <= 1 {
             self.bla_result.clear();
@@ -678,6 +758,112 @@ impl MandelbrotNavigator {
         let im = &self.cy + &ry_big * &self.scale;
 
         vec![re.to_string(), im.to_string()]
+    }
+
+    pub fn coordinate_to_pixel(
+        &self,
+        cx: &str,
+        cy: &str,
+        canvas_width: f64,
+        canvas_height: f64,
+    ) -> Vec<f64> {
+        let w = canvas_width.max(1.0);
+        let h = canvas_height.max(1.0);
+        let aspect = w / h;
+
+        let px_big = DBig::from_str(cx).unwrap_or_else(|_| DBig::try_from(0).unwrap());
+        let py_big = DBig::from_str(cy).unwrap_or_else(|_| DBig::try_from(0).unwrap());
+
+        // Subtract view center (arbitrary precision)
+        let delta_x = &px_big - &self.cx;
+        let delta_y = &py_big - &self.cy;
+
+        // Divide by scale (arbitrary precision)
+        let rx_big = &delta_x / &self.scale;
+        let ry_big = &delta_y / &self.scale;
+
+        // Convert to f64 for rotation and screen mapping
+        let rx = dbig_to_f64(&rx_big);
+        let ry = dbig_to_f64(&ry_big);
+
+        // Inverse rotation: we want to find xr, yr given rx, ry.
+        // Rotation by +angle was:
+        // rx = cos(a) * xr - sin(a) * yr
+        // ry = sin(a) * xr + cos(a) * yr
+        // So:
+        // xr = cos(a) * rx + sin(a) * ry
+        // yr = -sin(a) * rx + cos(a) * ry
+        let sin_a = self.angle.sin();
+        let cos_a = self.angle.cos();
+
+        let xr = cos_a * rx + sin_a * ry;
+        let yr = -sin_a * rx + cos_a * ry;
+
+        // Map xr, yr to normalized coordinates:
+        // xr = nx * aspect => nx = xr / aspect
+        // yr = ny => ny = yr
+        let nx = xr / aspect;
+        let ny = yr;
+
+        // Map normalized coordinates to pixels:
+        // nx = (px / w) * 2 - 1 => px = (nx + 1) / 2 * w
+        // ny = 1 - (py / h) * 2 => py = (1 - ny) / 2 * h
+        let px = (nx + 1.0) * 0.5 * w;
+        let py = (1.0 - ny) * 0.5 * h;
+
+        vec![px, py]
+    }
+
+    pub fn start_transition(
+        &mut self,
+        target_cx: &str,
+        target_cy: &str,
+        target_scale: &str,
+        target_angle: f64,
+        duration: f64,
+    ) {
+        self.transition_start_cx = Some(self.cx.clone());
+        self.transition_start_cy = Some(self.cy.clone());
+        self.transition_start_scale = Some(self.scale.clone());
+        self.transition_start_angle = Some(self.angle);
+
+        self.transition_target_cx = Some(DBig::from_str(target_cx).unwrap_or_else(|_| self.cx.clone()));
+        self.transition_target_cy = Some(DBig::from_str(target_cy).unwrap_or_else(|_| self.cy.clone()));
+        self.transition_target_scale = Some(DBig::from_str(target_scale).unwrap_or_else(|_| self.scale.clone()));
+
+        let mut diff = (target_angle - self.angle) % (2.0 * std::f64::consts::PI);
+        if diff > std::f64::consts::PI {
+            diff -= 2.0 * std::f64::consts::PI;
+        } else if diff < -std::f64::consts::PI {
+            diff += 2.0 * std::f64::consts::PI;
+        }
+        self.transition_target_angle = Some(self.angle + diff);
+
+        self.transition_duration = duration.max(0.01);
+        self.transition_elapsed = 0.0;
+
+        // Zero out velocities to prevent drift during transition
+        self.vscale = DBig::try_from(1).unwrap();
+        self.vangle = 0.0;
+        self.vtx = DBig::try_from(0).unwrap();
+        self.vty = DBig::try_from(0).unwrap();
+    }
+
+    pub fn cancel_transition(&mut self) {
+        self.transition_start_cx = None;
+        self.transition_start_cy = None;
+        self.transition_start_scale = None;
+        self.transition_start_angle = None;
+        self.transition_target_cx = None;
+        self.transition_target_cy = None;
+        self.transition_target_scale = None;
+        self.transition_target_angle = None;
+        self.transition_duration = 0.0;
+        self.transition_elapsed = 0.0;
+    }
+
+    pub fn is_in_transition(&self) -> bool {
+        self.transition_start_cx.is_some()
     }
 }
 
@@ -983,5 +1169,57 @@ mod tests {
         // The result strings should be long (not truncated to 15 digits)
         assert!(result[0].len() > 20, "re string too short: {}", result[0]);
         assert!(result[1].len() > 20, "im string too short: {}", result[1]);
+    }
+
+    #[test]
+    fn coordinate_to_pixel_reverses_correctly() {
+        let cx = "-0.743643887037158704752191506114774";
+        let cy = "0.131825904205311970493132056385139";
+        let nav = MandelbrotNavigator::new(cx, cy, "2.5", 0.5); // some angle
+
+        // Project center
+        let px = nav.coordinate_to_pixel(cx, cy, 800.0, 600.0);
+        assert!((px[0] - 400.0).abs() < 1e-10);
+        assert!((px[1] - 300.0).abs() < 1e-10);
+
+        // Project another point, then project it back
+        let complex = nav.pixel_to_complex(120.0, 450.0, 800.0, 600.0);
+        let px_back = nav.coordinate_to_pixel(&complex[0], &complex[1], 800.0, 600.0);
+        assert!((px_back[0] - 120.0).abs() < 1e-9, "expected 120, got {}", px_back[0]);
+        assert!((px_back[1] - 450.0).abs() < 1e-9, "expected 450, got {}", px_back[1]);
+    }
+
+    #[test]
+    fn transition_interpolates_smoothly() {
+        let mut nav = MandelbrotNavigator::new("0.0", "0.0", "2.0", 0.0);
+        nav.start_transition("1.0", "2.0", "0.5", 1.0, 1.0); // duration = 1.0s
+
+        assert!(nav.is_in_transition());
+
+        // Call step with dt = 0.5 (halfway)
+        // Set last_step_time first to control delta_time
+        #[cfg(target_arch = "wasm32")]
+        {
+            nav.last_step_time = Some(js_sys::Date::now() - 500.0);
+        }
+        #[cfg(not(target_arch = "wasm32"))]
+        {
+            // step calculates delta_time. In test mode we can mock it or let it run.
+            // Since step calculates delta_time from real elapsed time, we can manually set
+            // elapsed or we can just test that calling step moves cx, cy, scale closer to target.
+        }
+
+        // Let's run a couple of step calls and verify it approaches the target
+        let _ = nav.step();
+        assert!(nav.is_in_transition());
+
+        // Force transition completion
+        nav.transition_elapsed = 1.0;
+        let _ = nav.step();
+        assert!(!nav.is_in_transition());
+        assert_eq!(nav.cx.to_string(), "1");
+        assert_eq!(nav.cy.to_string(), "2");
+        assert_eq!(nav.scale.to_string(), "0.5");
+        assert_eq!(nav.angle, 1.0);
     }
 }

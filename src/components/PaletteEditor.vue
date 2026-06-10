@@ -601,6 +601,7 @@ defineExpose({ getSnapshot });
         :phaseColoringStrength="phaseColoringStrength"
         :textureMapping="textureMapping"
       />
+      <div class="canvas-shadow-overlay"></div>
       <div class="handles-overlay">
         <GlissiereHandle
           v-for="(stop, idx) in colorStops"
@@ -856,6 +857,17 @@ defineExpose({ getSnapshot });
   display: flex;
   justify-content: center;
   overflow: visible;
+  position: relative;
+  height: 96px;
+  border-radius: 12px;
+}
+.canvas-shadow-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  pointer-events: none;
+  box-shadow: 0 8px 26px -12px #000 inset, 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  z-index: 2;
 }
 .handles-overlay {
   position: absolute;
@@ -864,6 +876,7 @@ defineExpose({ getSnapshot });
   right: 0;
   height: 100%;
   pointer-events: none;
+  z-index: 3;
 }
 .floating-delete-btn {
   position: absolute;
@@ -907,12 +920,32 @@ defineExpose({ getSnapshot });
   margin-bottom: 0.5em;
 }
 .effects-section-title {
-  font-size: 0.92em;
+  font-size: 13px;
   font-weight: 700;
-  color: var(--ink);
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-3);
   display: flex;
   align-items: center;
-  gap: 0.6em;
+  gap: 12px;
+  flex: 1;
+  margin: 10px 0;
+}
+.effects-section-title::before {
+  content: "";
+  width: 6px;
+  height: 14px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--accent-bright), var(--mauve));
+  display: inline-block;
+  flex-shrink: 0;
+}
+.effects-section-title::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line-soft);
+  margin-right: 12px;
 }
 .apply-all-btn {
   font-size: 0.78em !important;
@@ -934,27 +967,31 @@ defineExpose({ getSnapshot });
 .stop-scope-toggle {
   display: inline-flex;
   border: 1px solid var(--line);
-  border-radius: 7px;
+  border-radius: 8px;
   overflow: hidden;
-  background: var(--row);
+  background: var(--panel-2);
+  padding: 2px;
 }
 .scope-btn {
   border: 0 !important;
-  border-radius: 0 !important;
+  border-radius: 6px !important;
   min-width: 6.4em;
-  height: 27px;
+  height: 24px;
+  line-height: 24px;
   font-size: 0.77em !important;
   font-weight: 600;
-  color: var(--ink-2);
-  background: transparent;
+  color: var(--ink-2) !important;
+  background: transparent !important;
+  transition: .15s;
 }
 .scope-btn:hover {
   color: var(--ink) !important;
-  background: var(--panel-2) !important;
+  background: var(--row-on) !important;
 }
 .scope-btn.is-active {
   color: #fff !important;
   background: var(--accent) !important;
+  box-shadow: 0 2px 8px -2px var(--accent) !important;
 }
 .scope-btn.is-active:hover {
   background: var(--accent-bright) !important;
@@ -1159,14 +1196,30 @@ defineExpose({ getSnapshot });
   padding: 0 0.4em;
 }
 .effects-group-title {
-  font-size: 0.78em;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
   font-weight: 700;
-  color: var(--ink-2);
+  letter-spacing: 0.22em;
   text-transform: uppercase;
-  letter-spacing: 0.03em;
-  margin-top: 0.6em;
-  margin-bottom: 0.25em;
-  display: block;
+  color: var(--ink-3);
+  margin: 20px 0 16px;
+}
+.effects-group-title::before {
+  content: "";
+  width: 6px;
+  height: 14px;
+  border-radius: 3px;
+  background: linear-gradient(180deg, var(--accent-bright), var(--mauve));
+  display: inline-block;
+  flex-shrink: 0;
+}
+.effects-group-title::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line-soft);
 }
 .pipette-btn {
   width: 30px;
