@@ -217,6 +217,7 @@ const textureMappingXScaleSlider = computed({
   set: (value: number) => {
     ensureActiveTextureMapping();
     model.value.textureMapping!.xScale = Number(Math.pow(10, value).toPrecision(4));
+    triggerTextureMappingUpdate();
   },
 });
 
@@ -225,6 +226,7 @@ const textureMappingYScaleSlider = computed({
   set: (value: number) => {
     ensureActiveTextureMapping();
     model.value.textureMapping!.yScale = Number(Math.pow(10, value).toPrecision(4));
+    triggerTextureMappingUpdate();
   },
 });
 
@@ -233,6 +235,7 @@ const textureMappingXVariable = computed({
   set: (value) => {
     ensureActiveTextureMapping();
     model.value.textureMapping!.xVariable = value;
+    triggerTextureMappingUpdate();
   },
 });
 
@@ -241,6 +244,7 @@ const textureMappingYVariable = computed({
   set: (value) => {
     ensureActiveTextureMapping();
     model.value.textureMapping!.yVariable = value;
+    triggerTextureMappingUpdate();
   },
 });
 
@@ -249,6 +253,7 @@ const textureMappingMirror = computed({
   set: (value: boolean) => {
     ensureActiveTextureMapping();
     model.value.textureMapping!.mirrored = value;
+    triggerTextureMappingUpdate();
   },
 });
 
@@ -668,6 +673,18 @@ async function deleteAnimationPreset(preset: AnimationPresetRecord): Promise<voi
     animationPresetName.value = '';
   }
 }
+
+function triggerAnimationUpdate() {
+  if (model.value.animation) {
+    model.value.animation = cloneAnimationConfig(model.value.animation);
+  }
+}
+
+function triggerTextureMappingUpdate() {
+  ensureActiveTextureMapping();
+  model.value.textureMapping = { ...model.value.textureMapping! };
+}
+
 
 async function savePalette() {
   if (!paletteName.value.trim()) return;
@@ -2185,7 +2202,7 @@ async function renameAndSaveSkyboxTexture() {
         </button>
         <div class="gfx-slider-row animation-global-speed">
           <span class="gfx-slider-label">Global Speed</span>
-          <input class="slider" type="range" min="0" max="5" step="0.05" v-model.number="model.animation.globalSpeed" @input="model.animationSpeed = model.animation.globalSpeed" />
+          <input class="slider" type="range" min="0" max="5" step="0.05" v-model.number="model.animation.globalSpeed" @input="model.animationSpeed = model.animation.globalSpeed; triggerAnimationUpdate()" />
           <span class="gfx-slider-value">&times;{{ (model.animation?.globalSpeed ?? 1).toFixed(2) }}</span>
         </div>
       </div>
@@ -2196,24 +2213,25 @@ async function renameAndSaveSkyboxTexture() {
           v-for="track in ANIMATION_TRACK_DEFINITIONS"
           :key="track.id"
           class="animation-track-row"
+          :class="{ 'is-disabled': !model.animation.tracks[track.id].enabled }"
         >
           <label class="checkbox animation-track-enabled">
-            <input type="checkbox" v-model="model.animation.tracks[track.id].enabled" />
+            <input type="checkbox" v-model="model.animation.tracks[track.id].enabled" @change="triggerAnimationUpdate" />
             <span>{{ animationTrackLabel(track.id) }}</span>
           </label>
           <div class="select is-small animation-track-type">
-            <select v-model="model.animation.tracks[track.id].type">
+            <select v-model="model.animation.tracks[track.id].type" :disabled="!model.animation.tracks[track.id].enabled" @change="triggerAnimationUpdate">
               <option v-for="type in ANIMATION_TYPES" :key="`${track.id}-${type}`" :value="type">{{ type }}</option>
             </select>
           </div>
           <div class="animation-track-slider">
             <span class="animation-track-metric">Speed</span>
-            <input class="slider" type="range" min="0" max="5" step="0.05" v-model.number="model.animation.tracks[track.id].speed" />
+            <input class="slider" type="range" min="0" max="5" step="0.05" v-model.number="model.animation.tracks[track.id].speed" :disabled="!model.animation.tracks[track.id].enabled" @input="triggerAnimationUpdate" />
             <span class="animation-track-value">&times;{{ model.animation.tracks[track.id].speed.toFixed(2) }}</span>
           </div>
           <div class="animation-track-slider">
             <span class="animation-track-metric">Range</span>
-            <input class="slider" type="range" :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep" v-model.number="model.animation.tracks[track.id].amplitude" />
+            <input class="slider" type="range" :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep" v-model.number="model.animation.tracks[track.id].amplitude" :disabled="!model.animation.tracks[track.id].enabled" @input="triggerAnimationUpdate" />
             <span class="animation-track-value">{{ animationTrackAmplitudeValue(track.id) }}</span>
           </div>
         </div>
@@ -2248,7 +2266,7 @@ async function renameAndSaveSkyboxTexture() {
             <div class="dropdown-content" style="max-height:260px; overflow-y:auto;">
               <a v-for="preset in visibleAnimationPresets" :key="preset.guid" class="dropdown-item favorite-row"
                 @click.prevent="selectAnimationPresetFromDropdown(preset)"
-                :class="{ 'is-active': selectedAnimationPreset === preset.name }"
+                :class="{ 'is-active': selectedAnimationPreset === preset.name, 'has-delete': canDeleteCatalogEntry(userRole, preset.remote) }"
                 style="display:flex; align-items:center; gap:0.5em;">
                 <button
                   v-if="isAdmin"
@@ -2273,7 +2291,8 @@ async function renameAndSaveSkyboxTexture() {
                 </button>
                 <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ preset.name }}</span>
                 <button
-                  class="favorite-button"
+                  v-if="canDeleteCatalogEntry(userRole, preset.remote)"
+                  class="delete-preset-button"
                   type="button"
                   title="Delete animation preset"
                   aria-label="Delete animation preset"
@@ -2567,7 +2586,7 @@ async function renameAndSaveSkyboxTexture() {
             <div class="dropdown-content" style="max-height:260px; overflow-y:auto;">
               <a v-for="preset in textureMappingPresets" :key="preset.guid" class="dropdown-item favorite-row"
                 @click.prevent="selectTextureMappingPresetFromDropdown(preset)"
-                :class="{ 'is-active': activeTextureMappingLabel === preset.name }"
+                :class="{ 'is-active': activeTextureMappingLabel === preset.name, 'has-delete': !preset.builtIn && canDeleteCatalogEntry(userRole, preset.remote) }"
                 style="display:flex; align-items:center; gap:0.5em;">
                 <button
                   v-if="isAdmin && !preset.builtIn"
@@ -2593,8 +2612,8 @@ async function renameAndSaveSkyboxTexture() {
                 </button>
                 <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ preset.name }}</span>
                 <button
-                  v-if="!preset.builtIn"
-                  class="favorite-button"
+                  v-if="!preset.builtIn && canDeleteCatalogEntry(userRole, preset.remote)"
+                  class="delete-preset-button"
                   type="button"
                   title="Delete texture mapping"
                   aria-label="Delete texture mapping"
@@ -3086,15 +3105,19 @@ async function renameAndSaveSkyboxTexture() {
 .animation-mixer {
   display: flex;
   flex-direction: column;
-  gap: 0.55em;
+  gap: 0.25em;
 }
 .animation-track-row {
   display: grid;
   grid-template-columns: minmax(135px, 1.2fr) 92px minmax(150px, 1fr) minmax(150px, 1fr);
-  gap: 0.55em;
+  gap: 0.4em;
   align-items: center;
-  padding: 0.45em 0;
+  padding: 0.25em 0;
   border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+  transition: opacity 0.2s ease;
+}
+.animation-track-row.is-disabled {
+  opacity: 0.45;
 }
 .animation-track-enabled {
   display: flex;
@@ -3113,7 +3136,7 @@ async function renameAndSaveSkyboxTexture() {
 .animation-track-slider {
   display: grid;
   grid-template-columns: 42px minmax(64px, 1fr) 54px;
-  gap: 0.35em;
+  gap: 0.2em;
   align-items: center;
   min-width: 0;
 }
@@ -3296,6 +3319,15 @@ async function renameAndSaveSkyboxTexture() {
   position: relative;
   padding-right: 5.7em !important;
 }
+.favorite-row.has-delete {
+  padding-right: 7.7em !important;
+}
+.favorite-row.has-delete .favorite-button {
+  right: 3.05em;
+}
+.favorite-row.has-delete .favorite-button.upload-button {
+  right: 5.4em;
+}
 .favorite-button {
   position: absolute;
   top: 50%;
@@ -3313,6 +3345,27 @@ async function renameAndSaveSkyboxTexture() {
 }
 .favorite-button.upload-button {
   right: 3.05em;
+}
+.delete-preset-button {
+  position: absolute;
+  top: 50%;
+  right: 0.7em;
+  width: 1.9em;
+  height: 1.9em;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  transform: translateY(-50%);
+  border: 0;
+  background: transparent;
+  cursor: pointer;
+  z-index: 2;
+}
+.delete-preset-button .favorite-heart {
+  color: #fff;
+}
+.delete-preset-button:hover .favorite-heart {
+  color: #ff3860;
 }
 .favorite-button.upload-button.is-remote .favorite-heart,
 .favorite-button.upload-button.is-remote:hover .favorite-heart {
