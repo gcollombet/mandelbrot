@@ -871,10 +871,10 @@ defineExpose({ getSnapshot });
   transform: translateX(-50%);
   width: 24px;
   height: 24px;
-  border: 1px solid #d7d7d7;
+  border: 1px solid var(--line);
   border-radius: 8px;
-  background: #ffffff;
-  color: #8a2f2f;
+  background: var(--panel-2);
+  color: oklch(0.70 0.18 20);
   font-size: 0.95em;
   font-weight: 600;
   cursor: pointer;
@@ -885,12 +885,12 @@ defineExpose({ getSnapshot });
   z-index: 20;
   line-height: 1;
   padding: 0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.14);
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
   transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s;
 }
 .floating-delete-btn:hover {
-  border-color: #d35d5d;
-  background: #c44;
+  border-color: oklch(0.60 0.18 20);
+  background: oklch(0.60 0.18 20);
   color: #fff;
   box-shadow: 0 3px 8px rgba(195, 68, 68, 0.32);
   transform: translateX(-50%) translateY(-1px);
@@ -909,7 +909,7 @@ defineExpose({ getSnapshot });
 .effects-section-title {
   font-size: 0.92em;
   font-weight: 700;
-  color: #111;
+  color: var(--ink);
   display: flex;
   align-items: center;
   gap: 0.6em;
@@ -923,9 +923,9 @@ defineExpose({ getSnapshot });
   align-items: center;
   padding: 0.16em 0.52em;
   border-radius: 999px;
-  border: 1px solid #f0b429;
-  background: #fff7e0;
-  color: #7a5b00;
+  border: 1px solid oklch(0.75 0.15 80);
+  background: oklch(0.75 0.15 80 / 0.15);
+  color: oklch(0.85 0.12 80);
   font-size: 0.68em;
   font-weight: 700;
   text-transform: uppercase;
@@ -933,10 +933,10 @@ defineExpose({ getSnapshot });
 }
 .stop-scope-toggle {
   display: inline-flex;
-  border: 1px solid #cfcfcf;
+  border: 1px solid var(--line);
   border-radius: 7px;
   overflow: hidden;
-  background: #f5f5f5;
+  background: var(--row);
 }
 .scope-btn {
   border: 0 !important;
@@ -945,12 +945,19 @@ defineExpose({ getSnapshot });
   height: 27px;
   font-size: 0.77em !important;
   font-weight: 600;
-  color: #333;
+  color: var(--ink-2);
   background: transparent;
 }
+.scope-btn:hover {
+  color: var(--ink) !important;
+  background: var(--panel-2) !important;
+}
 .scope-btn.is-active {
-  color: #fff;
-  background: #3273dc;
+  color: #fff !important;
+  background: var(--accent) !important;
+}
+.scope-btn.is-active:hover {
+  background: var(--accent-bright) !important;
 }
 
 .stop-preset-dropdown {
@@ -966,11 +973,14 @@ defineExpose({ getSnapshot });
   width: 100%;
   min-height: 34px;
   padding: 0.2em 0.55em !important;
-  border-color: #c9c9c9 !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px !important;
+  background: var(--row) !important;
+  color: var(--ink) !important;
 }
 
 .stop-preset-trigger.has-selection {
-  background: linear-gradient(180deg, #fff, #f7f7f7);
+  background: var(--row) !important;
 }
 
 .stop-preset-trigger-preview,
@@ -979,12 +989,12 @@ defineExpose({ getSnapshot });
   width: 32px;
   height: 32px;
   border-radius: 5px;
-  border: 1px solid rgba(0, 0, 0, 0.16);
+  border: 1px solid var(--line);
   background-color: #d8d8d8;
   background-size: cover;
   background-position: center;
   background-repeat: no-repeat;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.18);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
 }
 
 .stop-preset-trigger-label,
@@ -999,13 +1009,13 @@ defineExpose({ getSnapshot });
 
 .stop-preset-trigger-label {
   font-size: 0.82em;
-  color: #222;
+  color: var(--ink);
 }
 
 .stop-preset-trigger-caret {
   flex: 0 0 auto;
   font-size: 0.78em;
-  color: #666;
+  color: var(--ink-2);
 }
 
 .stop-preset-dropdown-menu {
@@ -1017,10 +1027,10 @@ defineExpose({ getSnapshot });
   max-height: 320px;
   overflow-y: auto;
   padding: 0.35em;
-  border: 1px solid #cfcfcf;
+  border: 1px solid var(--line);
   border-radius: 10px;
-  background: #fff;
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.16);
+  background: var(--panel);
+  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
 }
 
 .stop-preset-option {
@@ -1033,7 +1043,7 @@ defineExpose({ getSnapshot });
   border-radius: 8px;
   cursor: pointer;
   outline: none;
-  color: #111;
+  color: var(--ink);
   transition: background 0.14s, box-shadow 0.14s;
 }
 
@@ -1044,8 +1054,8 @@ defineExpose({ getSnapshot });
 .stop-preset-option:hover,
 .stop-preset-option:focus-visible,
 .stop-preset-option.is-active {
-  background: #f3f6fb;
-  box-shadow: inset 0 0 0 1px rgba(69, 128, 203, 0.18);
+  background: var(--row);
+  box-shadow: inset 0 0 0 1px var(--accent-soft);
 }
 
 .stop-preset-actions {
@@ -1067,12 +1077,12 @@ defineExpose({ getSnapshot });
   border-radius: 999px;
   background: transparent;
   cursor: pointer;
-  color: #888;
+  color: var(--ink-3);
 }
 
 .stop-preset-action.upload-button.is-remote .favorite-heart,
 .stop-preset-action.upload-button.is-remote:hover .favorite-heart {
-  color: #4fb7ff;
+  color: var(--accent);
 }
 
 .stop-preset-action.upload-button.is-remote::after {
@@ -1083,7 +1093,7 @@ defineExpose({ getSnapshot });
   width: 0.85em;
   height: 0.85em;
   border-radius: 999px;
-  background: #27c46a;
+  background: oklch(0.65 0.17 140);
   color: #fff;
   font-size: 0.58em;
   font-weight: 800;
@@ -1094,12 +1104,12 @@ defineExpose({ getSnapshot });
 
 .stop-preset-action.is-favorite,
 .stop-preset-action:hover {
-  color: #ec3d7a;
+  color: var(--magenta);
 }
 
 .stop-preset-action.is-upload-success .favorite-heart,
 .stop-preset-action.is-upload-success:hover .favorite-heart {
-  color: #27c46a;
+  color: oklch(0.65 0.17 140);
 }
 
 .stop-preset-action .favorite-heart {
@@ -1116,7 +1126,7 @@ defineExpose({ getSnapshot });
 
 .stop-preset-empty {
   padding: 0.55em 0.45em;
-  color: #666;
+  color: var(--ink-3);
   font-size: 0.82em;
 }
 
@@ -1126,10 +1136,10 @@ defineExpose({ getSnapshot });
 
 .stop-presets-panel {
   margin-bottom: 0.55em;
-  padding: 0.45em;
-  border: 1px solid rgba(0, 0, 0, 0.08);
-  border-radius: 6px;
-  background: rgba(0, 0, 0, 0.025);
+  padding: 0.6em;
+  border: 1px solid var(--line-soft);
+  border-radius: 8px;
+  background: var(--panel-2);
 }
 .preset-row {
   display: flex;
@@ -1141,17 +1151,17 @@ defineExpose({ getSnapshot });
   flex: 1;
   min-width: 0;
   height: 28px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--line);
   border-radius: 4px;
-  background: #fff;
-  color: #111;
+  background: var(--row);
+  color: var(--ink);
   font-size: 0.82em;
   padding: 0 0.4em;
 }
 .effects-group-title {
   font-size: 0.78em;
   font-weight: 700;
-  color: #111;
+  color: var(--ink-2);
   text-transform: uppercase;
   letter-spacing: 0.03em;
   margin-top: 0.6em;
@@ -1161,10 +1171,10 @@ defineExpose({ getSnapshot });
 .pipette-btn {
   width: 30px;
   height: 30px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--line);
   border-radius: 5px;
-  background: #f5f5f5;
-  color: #333;
+  background: var(--row);
+  color: var(--ink);
   cursor: pointer;
   display: flex;
   align-items: center;
@@ -1173,33 +1183,33 @@ defineExpose({ getSnapshot });
   flex-shrink: 0;
 }
 .pipette-btn:hover {
-  background: #e8e8e8;
-  border-color: #aaa;
+  background: var(--panel-2);
+  border-color: var(--ink-3);
 }
 .pipette-btn.is-active {
-  background: #c44;
-  border-color: #c44;
+  background: oklch(0.60 0.18 20);
+  border-color: oklch(0.60 0.18 20);
   color: #fff;
 }
 .picker-hint {
   font-size: 0.82em;
-  color: #c44;
+  color: oklch(0.60 0.18 20);
   font-weight: 500;
   white-space: nowrap;
 }
 .native-color-input {
   width: 36px;
   height: 30px;
-  border: 1px solid #ccc;
+  border: 1px solid var(--line);
   border-radius: 5px;
   padding: 2px;
   cursor: pointer;
   background: none;
 }
 .color-hex-label {
-  font-family: monospace;
+  font-family: var(--mono);
   font-size: 0.95em;
-  color: #111;
+  color: var(--ink);
   min-width: 56px;
 }
 .color-picker-inline {
@@ -1214,7 +1224,7 @@ defineExpose({ getSnapshot });
 .color-kind-label {
   width: 72px;
   font-size: 0.78em;
-  color: #333;
+  color: var(--ink-2);
   flex-shrink: 0;
 }
 .color-transfer-row {
@@ -1233,27 +1243,123 @@ defineExpose({ getSnapshot });
 .effect-row {
   display: flex;
   align-items: center;
-  gap: 0.4em;
-  margin-bottom: 0.12em;
+  gap: 0.8em;
+  margin-bottom: 0.2em;
 }
 .effect-label {
   font-size: 0.82em;
-  color: #222;
+  color: var(--ink-2);
   width: 128px;
   flex-shrink: 0;
   white-space: nowrap;
 }
 .effect-slider {
+  -webkit-appearance: none;
+  appearance: none;
   flex: 1;
   min-width: 40px;
+  height: 6px;
+  background: var(--track) !important;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
 }
+.effect-slider::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent-bright) !important;
+  border: 3px solid #0b0d12 !important;
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 12px -2px var(--accent) !important;
+  cursor: pointer;
+  transition: .12s;
+}
+.effect-slider::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+}
+.effect-slider::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-bright) !important;
+  border: 3px solid #0b0d12 !important;
+  box-shadow: 0 0 0 1px var(--accent) !important;
+  cursor: pointer;
+}
+
 .effect-value {
-  font-family: monospace;
+  font-family: var(--mono);
   font-size: 0.78em;
-  color: #222;
-  width: 46px;
+  color: var(--ink);
+  width: 56px;
   text-align: right;
   flex-shrink: 0;
 }
 
+.palette-editor :deep(.input) {
+  background-color: var(--row) !important;
+  border: 1px solid var(--line) !important;
+  color: var(--ink) !important;
+  border-radius: 8px !important;
+}
+.palette-editor :deep(.input:focus) {
+  border-color: var(--accent) !important;
+  box-shadow: none !important;
+}
+
+.palette-editor :deep(.button) {
+  background-color: var(--row) !important;
+  border: 1px solid var(--line) !important;
+  color: var(--ink-2) !important;
+  font-family: var(--sans) !important;
+  font-weight: 600 !important;
+  border-radius: 8px !important;
+  transition: .16s !important;
+}
+.palette-editor :deep(.button:hover) {
+  color: var(--ink) !important;
+  background-color: var(--panel-2) !important;
+}
+.palette-editor :deep(.button.is-link) {
+  background-color: var(--accent) !important;
+  color: #fff !important;
+  border: none !important;
+  box-shadow: 0 4px 12px -5px var(--accent) !important;
+}
+.palette-editor :deep(.button.is-link:hover) {
+  background-color: var(--accent-bright) !important;
+}
+.palette-editor :deep(.button.is-danger) {
+  background-color: oklch(0.60 0.18 20) !important;
+  color: #fff !important;
+  border: none !important;
+}
+.palette-editor :deep(.button.is-danger.is-light) {
+  background-color: oklch(0.60 0.18 20 / 0.15) !important;
+  color: oklch(0.75 0.15 20) !important;
+  border: 1px solid oklch(0.60 0.18 20 / 0.3) !important;
+}
+.palette-editor :deep(.button.is-danger.is-light:hover) {
+  background-color: oklch(0.60 0.18 20 / 0.3) !important;
+  color: #fff !important;
+}
+.palette-editor :deep(.button.is-info.is-light) {
+  background-color: var(--accent-soft) !important;
+  color: var(--accent-bright) !important;
+  border: 1px solid var(--accent-soft) !important;
+}
+.palette-editor :deep(.button.is-info.is-light:hover) {
+  background-color: oklch(0.70 0.17 245 / 0.3) !important;
+  color: #fff !important;
+}
+.palette-editor :deep(.button.is-success.is-light) {
+  background-color: oklch(0.65 0.17 140 / 0.15) !important;
+  color: oklch(0.78 0.15 140) !important;
+  border: 1px solid oklch(0.65 0.17 140 / 0.3) !important;
+}
+.palette-editor :deep(.button.is-success.is-light:hover) {
+  background-color: oklch(0.65 0.17 140 / 0.3) !important;
+  color: #fff !important;
+}
 </style>

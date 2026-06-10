@@ -293,18 +293,18 @@ defineExpose({ expanded });
 .render-stats {
   display: flex;
   flex-direction: column;
-  border-radius: 16px;
-  background: rgba(255,255,255,0.85);
-  backdrop-filter: blur(8px);
-  color: #111;
+  border-radius: 18px;
+  background: rgba(16, 18, 24, 0.8);
+  border: 1px solid var(--line);
+  backdrop-filter: blur(12px);
+  color: var(--ink-2);
   font-size: 0.9rem;
-  font-family: inherit;
-  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
+  font-family: var(--sans);
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
   user-select: none;
   letter-spacing: 0.01em;
   overflow: hidden;
   transition: width 0.25s ease, box-shadow 0.25s ease;
-  /* Assure la réactivité des taps sur mobile */
   touch-action: manipulation;
 }
 
@@ -315,46 +315,50 @@ defineExpose({ expanded });
 .stats-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 14px;
+  gap: 12px;
+  padding: 11px 20px;
   border: none;
   background: none;
   cursor: pointer;
   color: inherit;
   font: inherit;
+  font-weight: 600;
   letter-spacing: inherit;
   width: 100%;
 }
 
 .stats-header:hover {
-  background: rgba(255,255,255,0.2);
+  background: rgba(255, 255, 255, 0.05);
 }
 
 .status-dot {
   display: inline-block;
-  width: 10px;
-  height: 10px;
+  width: 9px;
+  height: 9px;
   border-radius: 50%;
   flex-shrink: 0;
   transition: background 0.3s;
 }
 
 .status-dot--active {
-  background: #22c55e;
-  box-shadow: 0 0 6px 1px rgba(34,197,94,0.5);
+  background: oklch(0.72 0.18 145);
+  box-shadow: 0 0 10px oklch(0.72 0.18 145);
 }
 
 .status-dot--idle {
-  background: #aaa;
+  background: var(--ink-4);
 }
 
 .status-dot--reference {
-  background: #a855f7;
-  box-shadow: 0 0 8px 2px rgba(168,85,247,0.65);
+  background: var(--magenta);
+  box-shadow: 0 0 12px var(--magenta);
   animation: reference-pulse 0.45s ease-in-out infinite alternate;
 }
 
 .stats-fps {
+  font-family: var(--mono);
+  font-weight: 700;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
   min-width: 3.5em;
 }
@@ -362,8 +366,8 @@ defineExpose({ expanded });
 .stats-reference-badge {
   padding: 1px 5px;
   border-radius: 999px;
-  background: rgba(168,85,247,0.18);
-  color: #6d28d9;
+  background: rgba(236, 61, 122, 0.18);
+  color: var(--magenta);
   font-size: 0.68rem;
   font-weight: 700;
   letter-spacing: 0.04em;
@@ -373,7 +377,8 @@ defineExpose({ expanded });
 .stats-toggle {
   margin-left: auto;
   font-size: 0.7rem;
-  opacity: 0.5;
+  color: var(--ink-3);
+  opacity: 0.7;
 }
 
 /* --- Expanded panel --- */
@@ -387,14 +392,16 @@ defineExpose({ expanded });
   border-radius: 8px;
   display: block;
   margin-bottom: 6px;
+  background: rgba(0, 0, 0, 0.2);
 }
 
 .stats-legend {
   display: flex;
-  gap: 10px;
+  flex-wrap: wrap;
+  gap: 6px 10px;
   font-size: 0.7rem;
-  opacity: 0.7;
-  margin-bottom: 6px;
+  color: var(--ink-3);
+  margin-bottom: 8px;
 }
 
 .legend-item {
@@ -411,19 +418,19 @@ defineExpose({ expanded });
 }
 
 .legend-swatch--green {
-  background: rgba(34,197,94,0.7);
+  background: rgba(34, 197, 94, 0.7);
 }
 
 .legend-swatch--orange {
-  background: rgba(255,170,0,0.8);
+  background: rgba(255, 170, 0, 0.8);
 }
 
 .legend-swatch--cyan {
-  background: rgba(0,180,220,0.8);
+  background: rgba(0, 180, 220, 0.8);
 }
 
 .legend-swatch--purple {
-  background: rgba(180,80,220,0.8);
+  background: rgba(180, 80, 220, 0.8);
 }
 
 .stats-grid {
@@ -437,21 +444,24 @@ defineExpose({ expanded });
   justify-content: space-between;
   align-items: baseline;
   padding: 1px 0;
+  border-bottom: 1px solid var(--line-soft);
 }
 
 .stats-label {
   font-size: 0.78rem;
-  opacity: 0.65;
+  color: var(--ink-3);
 }
 
 .stats-value {
+  font-family: var(--mono);
   font-size: 0.85rem;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
 }
 
 .stats-value--reference {
-  color: #7e22ce;
+  color: var(--magenta);
   font-weight: 700;
 }
 

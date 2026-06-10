@@ -46,9 +46,9 @@ const curves: Array<{ value: StopTransferCurve; label: string; path: string }> =
   gap: 3px;
   align-items: center;
   padding: 3px;
-  border: 1px solid rgba(180, 188, 204, 0.55);
+  border: 1px solid var(--line);
   border-radius: 6px;
-  background: rgba(16, 20, 28, 0.08);
+  background: var(--panel-2);
 }
 
 .curve-button {
@@ -60,19 +60,19 @@ const curves: Array<{ value: StopTransferCurve; label: string; path: string }> =
   border: 1px solid transparent;
   border-radius: 4px;
   background: transparent;
-  color: #4d5565;
+  color: var(--ink-3);
   cursor: pointer;
 }
 
 .curve-button:hover {
-  background: rgba(78, 135, 255, 0.1);
-  color: #26324a;
+  background: var(--row-on);
+  color: var(--ink);
 }
 
 .curve-button.is-active {
-  border-color: rgba(78, 135, 255, 0.55);
-  background: rgba(78, 135, 255, 0.18);
-  color: #1d4ed8;
+  border-color: var(--accent);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
 }
 
 .curve-button svg {

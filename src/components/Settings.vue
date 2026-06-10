@@ -611,12 +611,17 @@ function animationTrackLabel(id: AnimationTrackId): string {
   return animationTrackDefinition(id).label;
 }
 
-function animationTrackAmplitudeValue(id: AnimationTrackId): string {
+
+
+function animationTrackAmplitudeValueOnly(id: AnimationTrackId): string {
   const definition = animationTrackDefinition(id);
   const value = animationTrack(id).amplitude;
-  const suffix = definition.unit ? ` ${definition.unit}` : '';
   const decimals = definition.amplitudeStep < 0.01 ? 3 : definition.amplitudeStep < 0.1 ? 2 : 1;
-  return `${value.toFixed(decimals)}${suffix}`;
+  return value.toFixed(decimals);
+}
+
+function animationTrackAmplitudeUnit(id: AnimationTrackId): string {
+  return animationTrackDefinition(id).unit || '';
 }
 
 async function saveAnimationPreset() {
@@ -1949,7 +1954,7 @@ async function renameAndSaveSkyboxTexture() {
 </script>
 
 <template>
-  <div style="color: black !important;">
+  <div class="settings-container">
     <!-- Navigation tab -->
     <div v-if="activeTab === 'navigation'">
       <div class="mb-3" style="font-family: monospace; word-break: break-all; white-space: pre-line;">
@@ -2191,51 +2196,66 @@ async function renameAndSaveSkyboxTexture() {
     <!-- Animation tab -->
     <div v-else-if="activeTab === 'animation'" class="animation-tab">
       <label class="gfx-section-title">Playback</label>
-      <div class="animation-playback-row">
+      <div class="playback">
         <button
-          class="button is-small palette-icon-toggle"
-          :class="{ 'is-active': model.activateAnimate }"
+          class="play-btn"
+          :class="{ 'paused': !model.activateAnimate }"
           type="button"
           :aria-pressed="model.activateAnimate"
           title="Play animation"
           @click="model.activateAnimate = !model.activateAnimate"
         >
-          <i :class="model.activateAnimate ? 'fas fa-pause' : 'fas fa-play'" aria-hidden="true"></i>
+          <svg v-if="model.activateAnimate" viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
+          <svg v-else viewBox="0 0 24 24" style="width: 14px; height: 14px; fill: currentColor;"><path d="M8 5v14l11-7z"/></svg>
           <span>Drift</span>
         </button>
-        <div class="gfx-slider-row animation-global-speed">
-          <span class="gfx-slider-label">Global Speed</span>
-          <input class="slider" type="range" min="0" max="5" step="0.05" v-model.number="model.animation.globalSpeed" @input="model.animationSpeed = model.animation.globalSpeed; triggerAnimationUpdate()" />
-          <span class="gfx-slider-value">&times;{{ (model.animation?.globalSpeed ?? 1).toFixed(2) }}</span>
+        <span class="pb-label">Global Speed</span>
+        <div class="pb-slider">
+          <input type="range" min="0" max="5" step="0.05" v-model.number="model.animation.globalSpeed" @input="model.animationSpeed = model.animation.globalSpeed; triggerAnimationUpdate()" />
         </div>
+        <span class="pb-val">&times;{{ (model.animation?.globalSpeed ?? 1).toFixed(2) }}</span>
       </div>
 
       <label class="gfx-section-title">Mixer</label>
-      <div class="animation-mixer">
+      <div class="mixer">
         <div
           v-for="track in ANIMATION_TRACK_DEFINITIONS"
           :key="track.id"
-          class="animation-track-row"
-          :class="{ 'is-disabled': !model.animation.tracks[track.id].enabled }"
+          class="row"
+          :class="model.animation.tracks[track.id].enabled ? 'on' : 'off'"
         >
-          <label class="checkbox animation-track-enabled">
-            <input type="checkbox" v-model="model.animation.tracks[track.id].enabled" @change="triggerAnimationUpdate" />
-            <span>{{ animationTrackLabel(track.id) }}</span>
-          </label>
-          <div class="select is-small animation-track-type">
-            <select v-model="model.animation.tracks[track.id].type" :disabled="!model.animation.tracks[track.id].enabled" @change="triggerAnimationUpdate">
+          <div class="name-cell">
+            <div
+              class="toggle"
+              :class="{ 'on': model.animation.tracks[track.id].enabled }"
+              role="switch"
+              :aria-checked="model.animation.tracks[track.id].enabled"
+              tabindex="0"
+              @click="model.animation.tracks[track.id].enabled = !model.animation.tracks[track.id].enabled; triggerAnimationUpdate()"
+              @keydown.space.prevent="model.animation.tracks[track.id].enabled = !model.animation.tracks[track.id].enabled; triggerAnimationUpdate()"
+              @keydown.enter.prevent="model.animation.tracks[track.id].enabled = !model.animation.tracks[track.id].enabled; triggerAnimationUpdate()"
+            ></div>
+            <span class="name">{{ animationTrackLabel(track.id) }}</span>
+          </div>
+
+          <div class="wave ctl">
+            <select v-model="model.animation.tracks[track.id].type" @change="triggerAnimationUpdate">
               <option v-for="type in ANIMATION_TYPES" :key="`${track.id}-${type}`" :value="type">{{ type }}</option>
             </select>
           </div>
-          <div class="animation-track-slider">
-            <span class="animation-track-metric">Speed</span>
-            <input class="slider" type="range" min="0" max="5" step="0.05" v-model.number="model.animation.tracks[track.id].speed" :disabled="!model.animation.tracks[track.id].enabled" @input="triggerAnimationUpdate" />
-            <span class="animation-track-value">&times;{{ model.animation.tracks[track.id].speed.toFixed(2) }}</span>
+
+          <div class="param ctl">
+            <span class="plabel">Speed</span>
+            <input type="range" min="0" max="5" step="0.05" v-model.number="model.animation.tracks[track.id].speed" @input="triggerAnimationUpdate" />
+            <span class="pval">&times;{{ model.animation.tracks[track.id].speed.toFixed(2) }}</span>
           </div>
-          <div class="animation-track-slider">
-            <span class="animation-track-metric">Range</span>
-            <input class="slider" type="range" :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep" v-model.number="model.animation.tracks[track.id].amplitude" :disabled="!model.animation.tracks[track.id].enabled" @input="triggerAnimationUpdate" />
-            <span class="animation-track-value">{{ animationTrackAmplitudeValue(track.id) }}</span>
+
+          <div class="param ctl">
+            <span class="plabel">Range</span>
+            <input type="range" :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep" v-model.number="model.animation.tracks[track.id].amplitude" @input="triggerAnimationUpdate" />
+            <span class="pval">
+              {{ animationTrackAmplitudeValueOnly(track.id) }}<span class="unit">{{ animationTrackAmplitudeUnit(track.id) }}</span>
+            </span>
           </div>
         </div>
       </div>
@@ -3077,110 +3097,445 @@ async function renameAndSaveSkyboxTexture() {
   transition: background 0.15s, color 0.15s, box-shadow 0.15s;
 }
 
-/* ── Force dark text across all tabs ── */
+/* ── Force light text across all tabs for dark mode ── */
 :deep(.label),
 :deep(.checkbox),
 :deep(.help),
 :deep(.control-label),
 :deep(.title),
-:deep(.subtitle) {
-  color: #111 !important;
+:deep(.subtitle),
+:deep(.dropdown-item) {
+  color: var(--ink) !important;
+}
+
+:deep(.dropdown-content) {
+  background-color: var(--panel-2) !important;
+  border: 1px solid var(--line) !important;
+  box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4) !important;
+}
+
+:deep(.dropdown-item:hover),
+:deep(.dropdown-item.is-active) {
+  background-color: var(--row-on) !important;
+  color: var(--ink) !important;
+}
+
+.settings-container {
+  font-family: var(--sans);
+  color: var(--ink);
+}
+
+/* Custom slider styling matching the model */
+:deep(input[type=range]) {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: var(--track) !important;
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+}
+:deep(input[type=range]::-webkit-slider-thumb) {
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent-bright) !important;
+  border: 3px solid #0b0d12 !important;
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 12px -2px var(--accent) !important;
+  cursor: pointer;
+  transition: .12s;
+}
+:deep(input[type=range]::-webkit-slider-thumb:hover) {
+  transform: scale(1.12);
+}
+:deep(input[type=range]::-moz-range-thumb) {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-bright) !important;
+  border: 3px solid #0b0d12 !important;
+  box-shadow: 0 0 0 1px var(--accent) !important;
+  cursor: pointer;
+}
+
+/* Custom dark styling for standard controls */
+:deep(.input) {
+  background-color: #0b0d12 !important;
+  border: 1px solid var(--line) !important;
+  color: var(--ink) !important;
+  border-radius: 10px !important;
+}
+:deep(.input:focus) {
+  border-color: var(--accent) !important;
+  box-shadow: none !important;
+}
+
+:deep(.select select) {
+  appearance: none !important;
+  -webkit-appearance: none !important;
+  width: 100%;
+  font-family: var(--mono) !important;
+  font-size: 14px !important;
+  font-weight: 600 !important;
+  color: var(--ink) !important;
+  background: #0b0d12 !important;
+  border: 1px solid var(--line) !important;
+  border-radius: 10px !important;
+  padding: 8px 34px 8px 14px !important;
+  cursor: pointer;
+  text-transform: lowercase !important;
+}
+:deep(.select::after) {
+  border-right: 2px solid var(--ink-3) !important;
+  border-bottom: 2px solid var(--ink-3) !important;
+  border-left: 0 !important;
+  border-top: 0 !important;
+  content: "" !important;
+  display: block !important;
+  height: 7px !important;
+  margin-top: -6px !important;
+  position: absolute !important;
+  right: 14px !important;
+  top: 50% !important;
+  transform: rotate(45deg) !important;
+  transform-origin: center !important;
+  width: 7px !important;
+  pointer-events: none !important;
+  z-index: 4 !important;
+}
+:deep(.select select:focus) {
+  border-color: var(--accent) !important;
+  outline: none !important;
+}
+
+:deep(.button) {
+  background-color: var(--row) !important;
+  border: 1px solid var(--line) !important;
+  color: var(--ink-2) !important;
+  font-family: var(--sans) !important;
+  font-weight: 600 !important;
+  border-radius: 11px !important;
+  transition: .16s !important;
+}
+:deep(.button:hover) {
+  color: var(--ink) !important;
+  background-color: var(--panel-2) !important;
+  border-color: var(--line) !important;
+}
+:deep(.button.is-link) {
+  background-color: var(--accent) !important;
+  color: #fff !important;
+  border: none !important;
+  box-shadow: 0 8px 22px -10px var(--accent) !important;
+}
+:deep(.button.is-link:hover) {
+  background-color: var(--accent-bright) !important;
+}
+:deep(.button.is-warning) {
+  background-color: var(--magenta) !important;
+  color: #fff !important;
+  border: none !important;
+}
+:deep(.button.is-danger) {
+  background-color: oklch(0.60 0.18 20) !important;
+  color: #fff !important;
+  border: none !important;
+}
+
+/* Invert HR */
+:deep(.section-sep) {
+  border-top: 1px solid var(--line) !important;
 }
 
 /* ── Graphics tab layout ── */
 .graphics-tab {
-  color: #111;
+  color: var(--ink);
 }
 .animation-tab {
-  color: #111;
+  color: var(--ink);
   min-width: 0;
 }
-.animation-playback-row {
+
+/* ---------- Playback ---------- */
+.playback {
   display: flex;
   align-items: center;
-  gap: 0.75em;
+  gap: 20px;
+  background: var(--row);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 16px 20px;
+  margin-bottom: 30px;
+}
+.play-btn {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 20px;
+  border-radius: 11px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  cursor: pointer;
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 15px;
+  letter-spacing: .02em;
+  transition: .16s;
+  box-shadow: 0 8px 22px -10px var(--accent);
+}
+.play-btn:hover {
+  background: var(--accent-bright);
+}
+.play-btn.paused {
+  background: var(--row-on);
+  color: var(--ink);
+  box-shadow: none;
+  border: 1px solid var(--line);
+}
+.play-btn svg {
+  width: 14px;
+  height: 14px;
+  fill: currentColor;
+}
+.pb-label {
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 14px;
+  color: var(--ink-2);
+  white-space: nowrap;
+}
+.pb-slider {
+  flex: 1;
+  display: flex;
+  align-items: center;
+}
+.pb-slider input[type="range"] {
+  width: 100%;
+}
+.pb-val {
+  font-family: var(--mono);
+  font-size: 14px;
+  color: var(--accent);
+  font-weight: 700;
+  min-width: 50px;
+  text-align: right;
+}
+.compact-library {
+  margin-top: 0.55em;
   margin-bottom: 0.8em;
 }
-.animation-global-speed {
-  flex: 1 1 auto;
-  margin-bottom: 0;
+.palette-library-label {
+  display: block;
+  font-size: 0.86em;
+  font-weight: 600;
+  color: var(--ink-2);
+  margin-bottom: 0.32em;
 }
-.animation-mixer {
+.palette-library-hint {
+  font-size: 0.8em;
+  color: var(--ink-3);
+  margin-bottom: 0.45em;
+  line-height: 1.25;
+}
+
+/* ---------- Mixer ---------- */
+.mixer {
   display: flex;
   flex-direction: column;
-  gap: 0.25em;
+  gap: 8px;
 }
-.animation-track-row {
+.row {
   display: grid;
-  grid-template-columns: minmax(135px, 1.2fr) 92px minmax(150px, 1fr) minmax(150px, 1fr);
-  gap: 0.4em;
+  grid-template-columns: 248px 124px 1fr 1fr;
   align-items: center;
-  padding: 0.25em 0;
-  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
-  transition: opacity 0.2s ease;
+  gap: 22px;
+  padding: 14px 18px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 13px;
+  position: relative;
+  transition: .18s;
 }
-.animation-track-row.is-disabled {
-  opacity: 0.45;
+.row::before {
+  content: "";
+  position: absolute;
+  left: 0;
+  top: 0;
+  bottom: 0;
+  width: 3px;
+  border-top-left-radius: 13px;
+  border-bottom-left-radius: 13px;
+  background: transparent;
+  transition: .18s;
 }
-.animation-track-enabled {
+.row.on {
+  background: var(--row-on);
+  border-color: #2b3340;
+}
+.row.on::before {
+  background: var(--accent-bright);
+  box-shadow: 0 0 12px var(--accent);
+}
+.row.off .ctl {
+  opacity: 0.4;
+  pointer-events: none;
+}
+.row.off .name {
+  color: var(--ink-3);
+}
+
+/* toggle + name */
+.name-cell {
   display: flex;
   align-items: center;
-  gap: 0.45em;
+  gap: 14px;
   min-width: 0;
 }
-.animation-track-enabled span {
+.toggle {
+  --w: 46px;
+  --h: 26px;
+  width: var(--w);
+  height: var(--h);
+  flex: none;
+  border-radius: 999px;
+  background: var(--track);
+  border: 1px solid var(--line);
+  position: relative;
+  cursor: pointer;
+  transition: .18s;
+}
+.toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #fff;
+  transition: .18s;
+}
+.toggle.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.toggle.on::after {
+  left: 22px;
+  background: #fff;
+}
+.name {
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--ink);
+  letter-spacing: -.01em;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
-.animation-track-type select {
-  width: 100%;
+
+/* waveform select */
+.wave {
+  position: relative;
 }
-.animation-track-slider {
+.wave select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  background: #0b0d12;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 10px 34px 10px 14px;
+  cursor: pointer;
+  text-transform: lowercase;
+}
+.wave::after {
+  content: "";
+  position: absolute;
+  right: 13px;
+  top: 50%;
+  transform: translateY(-60%) rotate(45deg);
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--ink-3);
+  border-bottom: 2px solid var(--ink-3);
+  pointer-events: none;
+}
+.wave select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+
+/* param group: label / slider / value */
+.param {
   display: grid;
-  grid-template-columns: 42px minmax(64px, 1fr) 54px;
-  gap: 0.2em;
+  grid-template-columns: auto 1fr auto;
   align-items: center;
+  gap: 12px;
   min-width: 0;
 }
-.animation-track-metric,
-.animation-track-value {
-  font-size: 0.75em;
-  color: #333;
+.param .plabel {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .14em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  width: 46px;
+}
+.param .pval {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--ink);
+  min-width: 88px;
+  text-align: right;
   white-space: nowrap;
 }
-.animation-track-value {
-  text-align: right;
+.param .pval .unit {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-left: 3px;
+  font-weight: 600;
 }
-@media (max-width: 760px) {
-  .animation-playback-row {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .animation-track-row {
-    grid-template-columns: 1fr;
-  }
-}
+
+/* ---------- Section title ---------- */
 .gfx-section-title {
-  display: block;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
   font-weight: 700;
-  font-size: 0.92em;
-  color: #111;
-  margin-bottom: 0.45em;
-  letter-spacing: 0.02em;
+  letter-spacing: 0.22em;
   text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 20px 0 16px;
 }
+.gfx-section-title::before {
+  content: "";
+  width: 6px;
+  height: 14px;
+  border-radius: 3px;
+  background: var(--accent);
+  display: inline-block;
+}
+
 .gfx-hint {
   font-size: 0.82em;
-  color: #555;
-  margin-bottom: 0.4em;
+  color: var(--ink-2);
+  margin-bottom: 0.45em;
   line-height: 1.3;
 }
 .gfx-slider-row {
   display: flex;
   align-items: center;
   gap: 0.5em;
-  margin-bottom: 0.32em;
+  margin-bottom: 0.4em;
 }
 .gfx-slider-row input[type="range"] {
   flex: 1 1 auto;
@@ -3190,22 +3545,23 @@ async function renameAndSaveSkyboxTexture() {
   flex: 0 0 auto;
   min-width: 7.4em;
   font-size: 0.88em;
-  color: #222;
+  color: var(--ink-2);
   font-weight: 500;
 }
 .gfx-slider-value {
   flex: 0 0 auto;
   min-width: 4em;
   text-align: right;
+  font-family: var(--mono);
   font-size: 0.84em;
-  color: #333;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
 .palette-control-row {
   display: flex;
   align-items: center;
   gap: 0.5em;
-  margin-bottom: 0.32em;
+  margin-bottom: 0.4em;
 }
 .palette-control-row input[type="range"] {
   flex: 1 1 auto;
@@ -3215,16 +3571,16 @@ async function renameAndSaveSkyboxTexture() {
   flex: 0 0 auto;
   min-width: 7.4em;
   font-size: 0.88em;
-  color: #222;
+  color: var(--ink-2);
   font-weight: 500;
 }
 .palette-control-value {
   flex: 0 0 auto;
   min-width: 4.4em;
   text-align: right;
-  font-family: monospace;
+  font-family: var(--mono);
   font-size: 0.84em;
-  color: #333;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
 }
 .palette-subtabs {
@@ -3252,14 +3608,14 @@ async function renameAndSaveSkyboxTexture() {
   height: 26px;
   padding: 0 0.62em;
   font-size: 0.76rem;
-  border-color: #b8b8b8;
-  color: #222;
-  background: #f3f3f3;
+  border-color: var(--line);
+  color: var(--ink-2);
+  background: var(--row);
 }
 .palette-icon-toggle.is-active {
-  border-color: #3273dc;
+  border-color: var(--accent);
   color: #fff;
-  background: #3273dc;
+  background: var(--accent);
 }
 .palette-compact-control {
   grid-column: 1 / -1;
@@ -3275,13 +3631,13 @@ async function renameAndSaveSkyboxTexture() {
 .palette-compact-label {
   font-size: 0.78em;
   font-weight: 600;
-  color: #222;
+  color: var(--ink-2);
   line-height: 1;
 }
 .palette-compact-value {
-  font-family: monospace;
+  font-family: var(--mono);
   font-size: 0.78em;
-  color: #333;
+  color: var(--ink);
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
@@ -3301,23 +3657,8 @@ async function renameAndSaveSkyboxTexture() {
   margin-bottom: 0 !important;
   flex-wrap: wrap;
 }
-.compact-library {
-  margin-top: 0.55em;
-  margin-bottom: 0.8em;
-}
-.palette-library-label {
-  display: block;
-  font-size: 0.86em;
-  font-weight: 600;
-  color: #222;
-  margin-bottom: 0.32em;
-}
-.palette-library-hint {
-  font-size: 0.8em;
-  color: #555;
-  margin-bottom: 0.45em;
-  line-height: 1.25;
-}
+
+/* ---------- Favorites ---------- */
 .favorite-row {
   position: relative;
   padding-right: 5.7em !important;
@@ -3417,11 +3758,13 @@ async function renameAndSaveSkyboxTexture() {
 .favorite-filter {
   margin-bottom: 0.55em;
   gap: 0.35em;
-  color: #888;
+  color: var(--ink-3);
+  border-color: var(--line) !important;
+  background-color: var(--row) !important;
 }
 .favorite-filter.is-active {
-  border-color: #ec3d7a;
-  color: #ec3d7a;
+  border-color: #ec3d7a !important;
+  color: #ec3d7a !important;
 }
 .favorite-filter-heart {
   line-height: 1;

@@ -1,4 +1,25 @@
 
+:root {
+  --panel: #101218;
+  --panel-2: #161922;
+  --row: #171a23;
+  --row-on: #1b2330;
+  --line: #23272f;
+  --line-soft: #1b1e26;
+  --ink: #f2f4f8;
+  --ink-2: #aeb4c2;
+  --ink-3: #646b7c;
+  --ink-4: #414757;
+  --accent: oklch(0.70 0.17 245);
+  --accent-bright: oklch(0.78 0.16 240);
+  --accent-soft: oklch(0.70 0.17 245 / 0.16);
+  --magenta: oklch(0.70 0.19 350);
+  --track: #272b35;
+  --radius: 18px;
+  --mono: "JetBrains Mono", ui-monospace, monospace;
+  --sans: "Space Grotesk", system-ui, sans-serif;
+}
+
 html, body {
     margin: 0;
     padding: 0;

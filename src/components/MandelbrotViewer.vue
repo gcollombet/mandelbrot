@@ -652,10 +652,10 @@ function popupStyle(tabKey: string) {
   const pos = popupPositions[tabKey] ?? { x: -1, y: -1 };
   const z = tabZOrder[tabKey] ?? 50;
   // Palette popup is wider; presets/navigation wider to fit dropdown lists
-  const w = tabKey === 'palettes' ? '860px'
-          : tabKey === 'animation' ? '640px'
-          : (tabKey === 'presets' || tabKey === 'navigation') ? '560px'
-          : '460px';
+  const w = tabKey === 'palettes' ? '1080px'
+          : tabKey === 'animation' ? '1080px'
+          : (tabKey === 'presets' || tabKey === 'navigation') ? '720px'
+          : '640px';
   const mh = (tabKey === 'presets' || tabKey === 'navigation') ? '94vh' : '80vh';
   if (pos.x < 0) {
     // Stagger multiple popups so they don't overlap perfectly
@@ -735,7 +735,13 @@ const shortcutLabels = computed(() => {
           @click="toggleTab(tab.key)"
           :title="tab.label"
         >
-          <i :class="[tab.icon, 'fa-fw']" aria-hidden="true"></i>
+          <svg v-if="tab.key === 'navigation'" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg>
+          <svg v-else-if="tab.key === 'presets'" viewBox="0 0 24 24"><path d="M6 3h12v18l-6-4-6 4z"/></svg>
+          <svg v-else-if="tab.key === 'performance'" viewBox="0 0 24 24"><path d="M12 3a9 9 0 00-9 9c0 2.3.9 4.4 2.3 6l1.4-1.4A7 7 0 1118.3 16l1.4 1.4C21.1 16.4 22 14.3 22 12a9 9 0 00-9-9z"/><path d="M12 11h5v2h-5z" transform="rotate(-45 12 12)"/></svg>
+          <svg v-else-if="tab.key === 'animation'" viewBox="0 0 24 24"><path d="M16 16v-3.5l4 3.5v-8l-4 3.5V8a2 2 0 00-2-2H4a2 2 0 00-2 2v8a2 2 0 002 2h10a2 2 0 002-2z"/></svg>
+          <svg v-else-if="tab.key === 'palettes'" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 3a9 9 0 100 18c1.1 0 2-.9 2-2 0-1.5 1.5-2 3-2a4 4 0 004-4c0-5-4-8-9-8z M6.3 11a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0 M10.3 8a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0 M14.3 10a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0"/></svg>
+          <i v-else :class="[tab.icon, 'fa-fw']" aria-hidden="true"></i>
+
           <span class="tab-label-text is-hidden-touch">{{ tab.label }}</span>
           <span class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
         </button>
@@ -745,7 +751,7 @@ const shortcutLabels = computed(() => {
           aria-label="Download screenshot"
           @click="downloadCanvasSnapshot"
         >
-          <i class="fa-solid fa-camera fa-fw" aria-hidden="true"></i>
+          <svg viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
           <span class="tab-shortcut-hint is-hidden-touch">(B)</span>
         </button>
         <button
@@ -754,7 +760,8 @@ const shortcutLabels = computed(() => {
           :title="authUserEmail ? 'Logout (' + authUserEmail + ')' : 'Login'"
           @click="authUserEmail ? logoutUser() : loginWithGoogle()"
         >
-          <i :class="authUserEmail ? 'fa-solid fa-right-from-bracket fa-fw' : 'fa-solid fa-right-to-bracket fa-fw'" aria-hidden="true"></i>
+          <svg v-if="authUserEmail" viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M10 12H3m0 0l3-3m-3 3l3 3"/></svg>
+          <svg v-else viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M3 12h11m0 0l-3-3m3 3l-3 3"/></svg>
           <span class="is-hidden-touch">{{ authUserEmail ? 'Logout' : 'Login' }}</span>
         </button>
       </div>
@@ -829,8 +836,11 @@ const shortcutLabels = computed(() => {
       >
         <!-- Barre de titre draggable -->
         <div class="settings-popup-header" @mousedown.prevent="startDrag(tab.key, $event)">
-          <span class="settings-popup-title">{{ tab.label }}</span>
-          <button class="delete is-medium" aria-label="Fermer" style="z-index: 10; position: relative; pointer-events: auto;" @mousedown.stop @click="closeTab(tab.key)"></button>
+          <div class="title-container">
+            <span class="dot"></span>
+            <span class="settings-popup-title">{{ tab.label }}</span>
+          </div>
+          <button class="close" aria-label="Fermer" style="z-index: 10; position: relative; pointer-events: auto;" @mousedown.stop @click="closeTab(tab.key)">✕</button>
         </div>
         <div class="settings-popup-body">
           <Settings
@@ -932,23 +942,14 @@ const shortcutLabels = computed(() => {
         <i class="fa-solid fa-display fa-fw" style="vertical-align:middle; margin-right:4px;"></i>
         Présentation
       </a>
-      <template v-if="authConfigured">
+      <template v-if="authConfigured && !authUserEmail">
         <span class="footer-separator">|</span>
         <button
-          v-if="!authUserEmail"
           class="footer-auth-button"
           type="button"
           @click="loginWithGoogle"
         >
           Login
-        </button>
-        <button
-          v-else
-          class="footer-auth-button"
-          type="button"
-          @click="logoutUser"
-        >
-          Logout
         </button>
       </template>
     </div>
@@ -1006,35 +1007,59 @@ const shortcutLabels = computed(() => {
 
 .top-settings-bar-inner {
   display: flex;
-  gap: 0;
-  background: rgba(255,255,255,0.65);
-  backdrop-filter: blur(12px);
+  gap: 6px;
+  padding: 8px;
+  background: rgba(16, 18, 24, 0.72);
+  backdrop-filter: blur(18px);
+  border: 1px solid var(--line);
   border-radius: 16px;
-  box-shadow: 0 2px 12px 0 rgba(0,0,0,0.08);
   overflow: hidden;
   pointer-events: auto;
+  box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
 }
 
 .top-tab-btn {
-  background: transparent;
-  border: none;
-  padding: 8px 18px;
-  font-size: 0.92rem;
-  font-weight: 500;
-  color: #222;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  padding: 11px 16px;
+  border-radius: 11px;
+  color: var(--ink-2);
+  font-weight: 600;
+  font-size: 15px;
   cursor: pointer;
-  transition: background 0.2s, color 0.2s;
+  border: 1px solid transparent;
+  background: transparent;
   white-space: nowrap;
-  letter-spacing: 0.01em;
+  transition: .16s;
+  font-family: var(--sans);
+}
+
+.top-tab-btn svg {
+  width: 18px;
+  height: 18px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
 }
 
 .top-tab-btn:hover {
-  background: rgba(255,255,255,0.45);
+  color: var(--ink);
+  background: var(--panel-2);
 }
 
 .top-tab-btn.is-active {
-  background: rgba(50, 115, 220, 0.85);
+  background: var(--accent);
   color: #fff;
+  box-shadow: 0 8px 24px -8px var(--accent);
+}
+
+.top-tab-btn.is-active .tab-shortcut-hint {
+  color: rgba(255, 255, 255, 0.7);
+}
+
+.top-tab-btn.auth-btn {
+  margin-left: auto;
 }
 
 .camera-btn {
@@ -1044,17 +1069,19 @@ const shortcutLabels = computed(() => {
 }
 
 .tab-shortcut-hint {
-  opacity: 0.5;
-  font-size: 0.82em;
-  font-weight: 400;
+  color: var(--ink-4);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-weight: 600;
 }
 
 /* Popup Settings */
 .settings-popup {
   max-width: 96vw;
-  background: rgba(248, 248, 248, 0.96);
-  border-radius: 12px;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.18), 0 2px 8px rgba(0,0,0,0.08);
+  background: linear-gradient(180deg, var(--panel-2), var(--panel));
+  border: 1px solid var(--line);
+  border-radius: var(--radius); /* 18px */
+  box-shadow: 0 40px 90px -30px rgba(0, 0, 0, 0.8), 0 0 0 1px rgba(255, 255, 255, 0.02) inset;
   display: flex;
   flex-direction: column;
   overflow: hidden;
@@ -1065,24 +1092,73 @@ const shortcutLabels = computed(() => {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 10px 16px;
-  background: rgba(255,255,255,0.5);
+  padding: 22px 26px;
+  border-bottom: 1px solid var(--line);
+  background: rgba(0, 0, 0, 0.18);
   cursor: move;
   user-select: none;
-  border-bottom: 1px solid rgba(0,0,0,0.06);
+}
+
+.title-container {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+
+.dot {
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  box-shadow: 0 0 14px var(--accent-bright);
+  display: inline-block;
 }
 
 .settings-popup-title {
-  font-weight: 600;
-  font-size: 1rem;
-  color: #222;
+  font-size: 22px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink);
+  font-family: var(--sans);
+}
+
+.close {
+  width: 38px;
+  height: 38px;
+  border-radius: 11px;
+  border: 1px solid var(--line);
+  background: var(--row);
+  color: var(--ink-2);
+  cursor: pointer;
+  font-size: 18px;
+  display: grid;
+  place-items: center;
+  transition: .16s;
+}
+
+.close:hover {
+  color: var(--ink);
+  background: #202531;
+  border-color: #333a47;
 }
 
 .settings-popup-body {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 16px;
+  padding: 24px 26px 28px;
   min-height: 0;
+}
+
+.settings-popup-body::-webkit-scrollbar {
+  width: 10px;
+}
+.settings-popup-body::-webkit-scrollbar-track {
+  background: transparent;
+}
+.settings-popup-body::-webkit-scrollbar-thumb {
+  background: var(--line);
+  border-radius: 999px;
 }
 
 /* === Shortcut hint bar — vertical stacked, left side === */
@@ -1090,14 +1166,15 @@ const shortcutLabels = computed(() => {
   position: absolute;
   left: 24px;
   bottom: 16px;
-  padding: 10px 14px;
+  padding: 12px 16px;
   border-radius: 12px;
-  background: rgba(255,255,255,0.25);
-  backdrop-filter: blur(8px);
-  color: #111;
+  background: rgba(16, 18, 24, 0.72);
+  backdrop-filter: blur(18px);
+  border: 1px solid var(--line);
+  color: var(--ink);
   font-size: 0.85rem;
   font-family: inherit;
-  box-shadow: 0 2px 12px 0 rgba(0,0,0,0.06);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
   pointer-events: none;
   user-select: none;
   opacity: 0.85;
@@ -1120,7 +1197,7 @@ const shortcutLabels = computed(() => {
   font-weight: 600;
   min-width: 4.5em;
   font-size: 0.82rem;
-  color: #333;
+  color: var(--ink-2);
 }
 
 .shortcut-keys {
@@ -1135,6 +1212,10 @@ const shortcutLabels = computed(() => {
   padding: 2px 8px;
   height: auto;
   line-height: 1.5;
+  background-color: var(--row-on) !important;
+  color: var(--accent-bright) !important;
+  border: 1px solid var(--line) !important;
+  font-family: var(--mono) !important;
 }
 
 .shortcut-separator {
@@ -1146,13 +1227,14 @@ const shortcutLabels = computed(() => {
   right: 24px;
   bottom: 16px;
   padding: 6px 14px;
-  border-radius: 10px;
-  background: rgba(255,255,255,0.25);
-  backdrop-filter: blur(8px);
-  color: #111;
+  border-radius: 12px;
+  background: rgba(16, 18, 24, 0.72);
+  backdrop-filter: blur(18px);
+  border: 1px solid var(--line);
+  color: var(--ink-2);
   font-size: 0.85rem;
   font-family: inherit;
-  box-shadow: 0 2px 8px 0 rgba(0,0,0,0.04);
+  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
   pointer-events: auto;
   user-select: none;
   opacity: 0.85;
@@ -1165,17 +1247,17 @@ const shortcutLabels = computed(() => {
 
 .footer-separator {
   margin: 0 4px;
-  opacity: 0.5;
+  color: var(--line);
 }
 
 .footer-link {
-  color: #111;
+  color: var(--ink-2);
   text-decoration: underline;
   transition: color 0.2s;
 }
 
 .footer-link:hover {
-  color: #e25555;
+  color: var(--accent-bright);
 }
 
 .footer-presentation {
@@ -1183,17 +1265,19 @@ const shortcutLabels = computed(() => {
   align-items: center;
   padding: 3px 10px;
   border-radius: 6px;
-  background: rgba(226, 85, 85, 0.85);
-  color: #fff;
+  background: var(--accent-soft);
+  border: 1px solid var(--accent);
+  color: var(--accent-bright);
   font-size: 0.8rem;
   font-weight: 600;
   text-decoration: none;
   letter-spacing: 0.02em;
-  transition: background 0.2s, transform 0.15s;
+  transition: background 0.2s, color 0.2s, transform 0.15s;
 }
 
 .footer-presentation:hover {
-  background: rgba(226, 85, 85, 1);
+  background: var(--accent);
+  color: #fff;
   transform: scale(1.05);
 }
 
@@ -1201,20 +1285,22 @@ const shortcutLabels = computed(() => {
   display: inline-flex;
   align-items: center;
   padding: 3px 10px;
-  border: 0;
+  border: 1px solid var(--line);
   border-radius: 6px;
-  background: rgba(17, 17, 17, 0.78);
-  color: #fff;
+  background: var(--row);
+  color: var(--ink-2);
   font: inherit;
   font-size: 0.8rem;
   font-weight: 600;
   letter-spacing: 0.02em;
   cursor: pointer;
-  transition: background 0.2s, transform 0.15s;
+  transition: background 0.2s, color 0.2s, border-color 0.2s, transform 0.15s;
 }
 
 .footer-auth-button:hover {
-  background: rgba(17, 17, 17, 0.95);
+  background: var(--row-on);
+  color: var(--ink);
+  border-color: var(--ink-3);
   transform: scale(1.05);
 }
 
