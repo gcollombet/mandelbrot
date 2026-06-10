@@ -43,6 +43,22 @@ struct Uniforms {
   centerY: f32,
   scale: f32,
   _pad: f32,
+  textureDriftX: f32,
+  textureDriftY: f32,
+  skyDriftX: f32,
+  skyDriftY: f32,
+  paletteOffsetAnimation: f32,
+  heightPaletteShiftAnimation: f32,
+  lightAngleAnimation: f32,
+  textureDriftAnimation: f32,
+  skyReflectionDriftAnimation: f32,
+  phaseColoringAnimation: f32,
+  varnishAnimation: f32,
+  microBumpAnimation: f32,
+  displacementAnimation: f32,
+  tessellationAnimation: f32,
+  _pad2: f32,
+  _pad3: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -90,8 +106,7 @@ fn samplePaletteColor(palettePhase: f32) -> vec3<f32> {
 }
 
 fn animatedPaletteOffset() -> f32 {
-  let paletteDrift = parameters.animate * parameters.time * parameters.animationSpeed * 0.025;
-  return fract(parameters.paletteOffset + paletteDrift);
+  return fract(parameters.paletteOffset);
 }
 
 fn palettePhaseFromRaw(rawPhase: f32) -> f32 {
@@ -486,14 +501,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   tess_u = texture_mapping_value(parameters.textureMappingXVariable, iterRaw, v_smooth, z, distanceHeightStored, angle_der, dx, dy, tess_depth, disp) * parameters.textureMappingXScale;
   tess_v = texture_mapping_value(parameters.textureMappingYVariable, iterRaw, v_smooth, z, distanceHeightStored, angle_der, dx, dy, tess_depth, disp) * parameters.textureMappingYScale;
 
-  // ── Gentle sinusoidal animation (only when animate is on) ──
-  let anim = parameters.animate;
-  let t = parameters.time;
-  let spd = parameters.animationSpeed;
-  let tile_drift = vec2<f32>(
-    anim * 0.03 * sin(t * 0.4 * spd),
-    anim * 0.03 * sin(t * 0.3 * spd + 1.2),
-  );
+  let tile_drift = vec2<f32>(parameters.textureDriftX, parameters.textureDriftY);
 
 
 
@@ -505,12 +513,10 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
 
   // Webcam: overlay on top of current result
   if (effWebcam > 0.001) {
-    let cam_drift_u = anim * 0.04 * sin(t * 0.35 * spd + 0.7);
-    let cam_drift_v = anim * 0.04 * sin(t * 0.25 * spd + 2.0);
     let webCamColor = tile_tessellation(
       webcamTex,
-      tess_u + cam_drift_u,
-      tess_v + cam_drift_v,
+      tess_u + tile_drift.x,
+      tess_v + tile_drift.y,
       parameters.tessellationLevel
     );
     color = mix(color, webCamColor.rgb, effWebcam);
@@ -706,10 +712,8 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
 
     var envColor = vec3<f32>(0.0);
     if (fx.wSkybox > 0.001) {
-      let sky_drift_u = anim * 0.02 * sin(t * 0.25 * spd + 3.5);
-      let sky_drift_v = anim * 0.02 * sin(t * 0.2 * spd + 4.8);
       let skyboxDir = reflect(-viewDir, normal);
-      let skyboxColor = rough_skybox_reflection(skyboxDir, tangent, bitangent, roughness, dx + sky_drift_u, dy + sky_drift_v);
+      let skyboxColor = rough_skybox_reflection(skyboxDir, tangent, bitangent, roughness, dx + parameters.skyDriftX, dy + parameters.skyDriftY);
       let fresnelEnv = fresnel_schlick(nDotV, f0);
       let fresnelReflection = clamp(luminance(fresnelEnv), 0.0, 1.0);
       let polishReflection = 0.10 * varnish * (1.0 - roughness * 0.55) * (1.0 - metallic * 0.35);

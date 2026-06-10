@@ -41,6 +41,7 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 
 const LAYER_COUNT = 8;
 const PREVIEW_MU = 1000000;
+const COLOR_UNIFORM_FLOAT_COUNT = 60;
 const ORBIT_DIRECTION_SCALE = 4095;
 const ORBIT_DIRECTION_BASE = 4096;
 /** Number of synthetic iterations to display. */
@@ -338,9 +339,9 @@ async function init() {
     label: 'PalettePreview FrozenTexture',
   });
 
-  // ── Uniform buffer (44 floats, padded to 176 bytes for 16-byte alignment) ──
+  // ── Uniform buffer (padded to 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
-    size: 4 * 44,
+    size: 4 * COLOR_UNIFORM_FLOAT_COUNT,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
@@ -394,6 +395,22 @@ async function init() {
     0, // centerY
     1.2, // scale
     0, // _pad
+    0, // textureDriftX
+    0, // textureDriftY
+    0, // skyDriftX
+    0, // skyDriftY
+    0, // paletteOffsetAnimation
+    0, // heightPaletteShiftAnimation
+    0, // lightAngleAnimation
+    0, // textureDriftAnimation
+    0, // skyReflectionDriftAnimation
+    0, // phaseColoringAnimation
+    0, // varnishAnimation
+    0, // microBumpAnimation
+    0, // displacementAnimation
+    0, // tessellationAnimation
+    0, // _pad2
+    0, // _pad3
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 

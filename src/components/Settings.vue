@@ -57,6 +57,20 @@ import {
   TEXTURE_MAPPING_VARIABLE_OPTIONS,
   textureMappingEquals,
 } from '../TextureMapping';
+import {
+  ANIMATION_TRACK_DEFINITIONS,
+  ANIMATION_TYPES,
+  animationTrackDefinition,
+  cloneAnimationConfig,
+  normalizeAnimationConfig,
+  type AnimationTrackId,
+} from '../AnimationConfig';
+import type {AnimationPresetRecord} from '../animationPresetStore';
+import {
+  deleteAnimationPresetEntry,
+  getAllAnimationPresetEntries,
+  saveAnimationPresetEntry,
+} from '../animationPresetStore';
 import type {UserRole} from '../authService';
 import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
 import {nameForCatalogReference} from '../catalogIdentity';
@@ -164,6 +178,7 @@ const model =  defineModel<MandelbrotParams>({
     tessellationLevel: 0,
     lightAngle: 0,
       displacementAmount: 0,
+      animation: normalizeAnimationConfig(null, 1.0),
       activateAnimate: false,
       debugShading: false,
       animationSpeed: 1.0,
@@ -350,6 +365,12 @@ const selectedPalette = ref('');
 const showPaletteDropdown = ref(false);
 const applyToAll = ref(false);
 
+// Animation preset management
+const animationPresetName = ref('');
+const animationPresets = ref<AnimationPresetRecord[]>([]);
+const selectedAnimationPreset = ref('');
+const showAnimationPresetDropdown = ref(false);
+
 async function deletePresetById(id: number) {
   const meta = presets.value.find(p => p.id === id);
   if (!canDeleteCatalogEntry(userRole.value, meta?.remote)) {
@@ -408,6 +429,7 @@ const currentNavPresetMeta = computed(() => presets.value.find(p => p.id === sel
 const currentNavPresetThumbnail = computed(() => currentNavPresetMeta.value?.thumbnail);
 const favoritePresets = computed(() => presets.value.filter(p => p.favorite));
 const favoritePalettes = computed(() => palettes.value.filter(p => p.favorite));
+const favoriteAnimationPresets = computed(() => animationPresets.value.filter(p => p.favorite));
 const FAVORITE_FILTER_STORAGE_KEY = 'mandelbrot_favorite_filters';
 
 function loadFavoriteFilterState(): Record<string, boolean> {
@@ -423,19 +445,22 @@ const showOnlyFavoriteNavigation = ref(favoriteFilterState.navigation ?? false);
 const showOnlyFavoritePresets = ref(favoriteFilterState.presets ?? false);
 const showOnlyFavoritePalettePresets = ref(favoriteFilterState.palettePresets ?? false);
 const showOnlyFavoritePalettes = ref(favoriteFilterState.palettes ?? false);
+const showOnlyFavoriteAnimationPresets = ref(favoriteFilterState.animationPresets ?? false);
 const visibleNavPresets = computed(() => showOnlyFavoriteNavigation.value ? favoritePresets.value : presets.value);
 const visiblePresets = computed(() => showOnlyFavoritePresets.value ? favoritePresets.value : presets.value);
 const visiblePalettePresets = computed(() => showOnlyFavoritePalettePresets.value ? favoritePresets.value : presets.value);
 const visiblePalettes = computed(() => showOnlyFavoritePalettes.value ? favoritePalettes.value : palettes.value);
+const visibleAnimationPresets = computed(() => showOnlyFavoriteAnimationPresets.value ? favoriteAnimationPresets.value : animationPresets.value);
 
 watch(
-  [showOnlyFavoriteNavigation, showOnlyFavoritePresets, showOnlyFavoritePalettePresets, showOnlyFavoritePalettes],
-  ([navigation, presetsOnly, palettePresets, palettesOnly]) => {
+  [showOnlyFavoriteNavigation, showOnlyFavoritePresets, showOnlyFavoritePalettePresets, showOnlyFavoritePalettes, showOnlyFavoriteAnimationPresets],
+  ([navigation, presetsOnly, palettePresets, palettesOnly, animationPresetsOnly]) => {
     localStorage.setItem(FAVORITE_FILTER_STORAGE_KEY, JSON.stringify({
       navigation,
       presets: presetsOnly,
       palettePresets,
       palettes: palettesOnly,
+      animationPresets: animationPresetsOnly,
     }));
   },
 );
@@ -478,6 +503,8 @@ async function savePreset() {
   stripSessionPerformanceFields(savedValue);
   delete (savedValue as any).activateAnimate;
   delete (savedValue as any).debugShading;
+  savedValue.animation = normalizeAnimationConfig(savedValue.animation, savedValue.animationSpeed);
+  savedValue.animationSpeed = savedValue.animation.globalSpeed;
   savedValue.textureName = selectedTexture.value;
   savedValue.textureGuid = currentTextureObj.value?.guid;
   savedValue.skyboxName = selectedSkyboxTexture.value;
@@ -519,6 +546,8 @@ async function quickSnapshot() {
   stripSessionPerformanceFields(savedValue);
   delete (savedValue as any).activateAnimate;
   delete (savedValue as any).debugShading;
+  savedValue.animation = normalizeAnimationConfig(savedValue.animation, savedValue.animationSpeed);
+  savedValue.animationSpeed = savedValue.animation.globalSpeed;
   savedValue.textureName = selectedTexture.value;
   savedValue.textureGuid = currentTextureObj.value?.guid;
   savedValue.skyboxName = selectedSkyboxTexture.value;
@@ -554,6 +583,90 @@ async function loadPresets() {
 
 async function loadPalettes() {
   palettes.value = await getAllPaletteEntries();
+}
+
+async function loadAnimationPresets() {
+  animationPresets.value = await getAllAnimationPresetEntries();
+}
+
+function ensureAnimationConfig() {
+  model.value.animation = normalizeAnimationConfig(model.value.animation, model.value.animationSpeed);
+  model.value.animationSpeed = model.value.animation.globalSpeed;
+}
+
+function animationTrack(id: AnimationTrackId) {
+  ensureAnimationConfig();
+  return model.value.animation!.tracks[id];
+}
+
+function animationTrackLabel(id: AnimationTrackId): string {
+  return animationTrackDefinition(id).label;
+}
+
+function animationTrackAmplitudeValue(id: AnimationTrackId): string {
+  const definition = animationTrackDefinition(id);
+  const value = animationTrack(id).amplitude;
+  const suffix = definition.unit ? ` ${definition.unit}` : '';
+  const decimals = definition.amplitudeStep < 0.01 ? 3 : definition.amplitudeStep < 0.1 ? 2 : 1;
+  return `${value.toFixed(decimals)}${suffix}`;
+}
+
+async function saveAnimationPreset() {
+  const name = animationPresetName.value.trim();
+  if (!name) return;
+  const existing = animationPresets.value.find(item => item.name === name);
+  if (!canOverwriteCatalogPayload(userRole.value, existing?.remote)) {
+    window.alert('Shared catalog animation presets cannot be overwritten. Save a local variant with a new name.');
+    return;
+  }
+  ensureAnimationConfig();
+  const now = new Date().toISOString();
+  await saveAnimationPresetEntry({
+    guid: existing?.guid ?? crypto.randomUUID(),
+    name,
+    animation: cloneAnimationConfig(model.value.animation!),
+    date: existing?.date ?? now,
+    lastUpdated: now,
+    favorite: existing?.favorite ?? false,
+    remote: existing?.remote,
+  });
+  animationPresets.value = await getAllAnimationPresetEntries();
+  selectedAnimationPreset.value = name;
+  animationPresetName.value = '';
+}
+
+function selectAnimationPresetFromDropdown(preset: AnimationPresetRecord) {
+  selectedAnimationPreset.value = preset.name;
+  animationPresetName.value = preset.name;
+  model.value.animation = cloneAnimationConfig(preset.animation);
+  model.value.animationSpeed = model.value.animation.globalSpeed;
+  showAnimationPresetDropdown.value = false;
+}
+
+async function toggleAnimationPresetFavorite(preset: AnimationPresetRecord): Promise<void> {
+  const previous = preset.favorite ?? false;
+  preset.favorite = !previous;
+  try {
+    await saveAnimationPresetEntry({ ...preset });
+    animationPresets.value = await getAllAnimationPresetEntries();
+  } catch (error) {
+    preset.favorite = previous;
+    console.warn('Failed to save animation preset favorite:', error);
+  }
+}
+
+async function deleteAnimationPreset(preset: AnimationPresetRecord): Promise<void> {
+  if (!canDeleteCatalogEntry(userRole.value, preset.remote)) {
+    window.alert('Shared catalog animation presets cannot be deleted locally.');
+    return;
+  }
+  if (!window.confirm(`Delete animation preset "${preset.name}"? This cannot be undone.`)) return;
+  await deleteAnimationPresetEntry(preset.name);
+  animationPresets.value = await getAllAnimationPresetEntries();
+  if (selectedAnimationPreset.value === preset.name) {
+    selectedAnimationPreset.value = '';
+    animationPresetName.value = '';
+  }
 }
 
 async function savePalette() {
@@ -592,7 +705,6 @@ async function savePalette() {
     paletteOffset: model.value.paletteOffset,
     heightPaletteShift: model.value.heightPaletteShift,
     paletteMirror: model.value.paletteMirror,
-    animationSpeed: model.value.animationSpeed,
     tessellationLevel: model.value.tessellationLevel,
     displacementAmount: model.value.displacementAmount,
     ambientOcclusionStrength: model.value.ambientOcclusionStrength,
@@ -612,7 +724,6 @@ async function savePalette() {
 }
 
 function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
-  if (source.animationSpeed != null) model.value.animationSpeed = source.animationSpeed;
   if (source.tessellationLevel != null) model.value.tessellationLevel = source.tessellationLevel;
   if (source.displacementAmount != null) model.value.displacementAmount = source.displacementAmount;
   if (source.ambientOcclusionStrength != null) model.value.ambientOcclusionStrength = source.ambientOcclusionStrength;
@@ -796,6 +907,27 @@ async function uploadPalettePreset(palette: PaletteRecord): Promise<void> {
   }
 }
 
+async function uploadAnimationPreset(preset: AnimationPresetRecord): Promise<void> {
+  if (!isAdmin.value) return;
+  try {
+    const uploaded = await uploadRemoteCatalogEntry('animationPreset', {
+      guid: preset.guid,
+      name: preset.name,
+      lastUpdated: preset.lastUpdated || preset.date || new Date().toISOString(),
+      animation: cloneAnimationConfig(preset.animation),
+    });
+    await saveAnimationPresetEntry({
+      ...preset,
+      lastUpdated: uploaded.lastUpdated,
+      remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
+    });
+    animationPresets.value = await getAllAnimationPresetEntries();
+    showUploadSuccess(uploadSuccessKey('animation', preset.guid));
+  } catch (error) {
+    handleUploadError(error);
+  }
+}
+
 async function uploadTexture(texture: TextureMetadata): Promise<void> {
   if (!isAdmin.value || !texture.guid) return;
   let blob: Blob | null = null;
@@ -879,8 +1011,10 @@ async function selectPreset(id: number) {
     // Restore all fields except performance params
     const saved = structuredClone(toRaw(record.value));
     saved.textureMapping = normalizeTextureMappingFromLegacy(saved);
+    saved.animation = normalizeAnimationConfig(saved.animation, saved.animationSpeed);
     delete (saved as any).textureMappingMode;
     const current = model.value;
+    saved.activateAnimate = current.activateAnimate;
     model.value = preserveSessionPerformanceFields(saved, current);
     ensureActiveTextureMapping();
     // Restore texture if saved with the preset
@@ -918,11 +1052,13 @@ const maxIterMultSlider = computed({
 onMounted(async () => {
   await loadPresets();
   await loadPalettes();
+  await loadAnimationPresets();
   await loadTextureMappingPresets();
   await loadTextures();
   await syncRemoteCatalog();
   await loadPresets();
   await loadPalettes();
+  await loadAnimationPresets();
   await loadTextureMappingPresets();
   await loadTextures();
 });
@@ -2032,6 +2168,138 @@ async function renameAndSaveSkyboxTexture() {
       </div>
     </div>
 
+    <!-- Animation tab -->
+    <div v-else-if="activeTab === 'animation'" class="animation-tab">
+      <label class="gfx-section-title">Playback</label>
+      <div class="animation-playback-row">
+        <button
+          class="button is-small palette-icon-toggle"
+          :class="{ 'is-active': model.activateAnimate }"
+          type="button"
+          :aria-pressed="model.activateAnimate"
+          title="Play animation"
+          @click="model.activateAnimate = !model.activateAnimate"
+        >
+          <i :class="model.activateAnimate ? 'fas fa-pause' : 'fas fa-play'" aria-hidden="true"></i>
+          <span>Drift</span>
+        </button>
+        <div class="gfx-slider-row animation-global-speed">
+          <span class="gfx-slider-label">Global Speed</span>
+          <input class="slider" type="range" min="0" max="5" step="0.05" v-model.number="model.animation.globalSpeed" @input="model.animationSpeed = model.animation.globalSpeed" />
+          <span class="gfx-slider-value">&times;{{ (model.animation?.globalSpeed ?? 1).toFixed(2) }}</span>
+        </div>
+      </div>
+
+      <label class="gfx-section-title">Mixer</label>
+      <div class="animation-mixer">
+        <div
+          v-for="track in ANIMATION_TRACK_DEFINITIONS"
+          :key="track.id"
+          class="animation-track-row"
+        >
+          <label class="checkbox animation-track-enabled">
+            <input type="checkbox" v-model="model.animation.tracks[track.id].enabled" />
+            <span>{{ animationTrackLabel(track.id) }}</span>
+          </label>
+          <div class="select is-small animation-track-type">
+            <select v-model="model.animation.tracks[track.id].type">
+              <option v-for="type in ANIMATION_TYPES" :key="`${track.id}-${type}`" :value="type">{{ type }}</option>
+            </select>
+          </div>
+          <div class="animation-track-slider">
+            <span class="animation-track-metric">Speed</span>
+            <input class="slider" type="range" min="0" max="5" step="0.05" v-model.number="model.animation.tracks[track.id].speed" />
+            <span class="animation-track-value">&times;{{ model.animation.tracks[track.id].speed.toFixed(2) }}</span>
+          </div>
+          <div class="animation-track-slider">
+            <span class="animation-track-metric">Range</span>
+            <input class="slider" type="range" :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep" v-model.number="model.animation.tracks[track.id].amplitude" />
+            <span class="animation-track-value">{{ animationTrackAmplitudeValue(track.id) }}</span>
+          </div>
+        </div>
+      </div>
+
+      <hr class="section-sep"/>
+
+      <div class="mb-3 compact-library">
+        <label class="palette-library-label">Animation Presets</label>
+        <button
+          class="button is-small favorite-filter"
+          :class="{ 'is-active': showOnlyFavoriteAnimationPresets }"
+          type="button"
+          :aria-pressed="showOnlyFavoriteAnimationPresets"
+          @click="showOnlyFavoriteAnimationPresets = !showOnlyFavoriteAnimationPresets"
+        >
+          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoriteAnimationPresets ? 'fa-solid' : 'fa-regular'"></i></span>
+          <span>Favorites</span>
+        </button>
+        <div class="dropdown" :class="{ 'is-active': showAnimationPresetDropdown }" style="width:100%;">
+          <div class="dropdown-trigger" style="width:100%;">
+            <button class="button is-fullwidth is-small" @click="showAnimationPresetDropdown = !showAnimationPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-animation-presets" type="button">
+              <span style="display:flex; align-items:center; min-height:28px;">
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ animationPresetName || selectedAnimationPreset || 'Choose animation preset...' }}</span>
+                <span class="icon is-small" style="margin-left:4px;">
+                  <i class="fas fa-angle-down" aria-hidden="true"></i>
+                </span>
+              </span>
+            </button>
+          </div>
+          <div class="dropdown-menu" id="dropdown-menu-animation-presets" role="menu" style="width:100%;">
+            <div class="dropdown-content" style="max-height:260px; overflow-y:auto;">
+              <a v-for="preset in visibleAnimationPresets" :key="preset.guid" class="dropdown-item favorite-row"
+                @click.prevent="selectAnimationPresetFromDropdown(preset)"
+                :class="{ 'is-active': selectedAnimationPreset === preset.name }"
+                style="display:flex; align-items:center; gap:0.5em;">
+                <button
+                  v-if="isAdmin"
+                  class="favorite-button upload-button"
+                  :class="uploadButtonClasses(uploadSuccessKey('animation', preset.guid), preset.remote)"
+                  type="button"
+                  :title="uploadButtonTitle(uploadSuccessKey('animation', preset.guid), preset.remote)"
+                  :aria-label="uploadButtonTitle(uploadSuccessKey('animation', preset.guid), preset.remote)"
+                  @click.stop.prevent="uploadAnimationPreset(preset)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('animation', preset.guid))"></i></span>
+                </button>
+                <button
+                  class="favorite-button"
+                  :class="{ 'is-favorite': preset.favorite }"
+                  type="button"
+                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :aria-pressed="!!preset.favorite"
+                  @click.stop.prevent="toggleAnimationPresetFavorite(preset)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                </button>
+                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ preset.name }}</span>
+                <button
+                  class="favorite-button"
+                  type="button"
+                  title="Delete animation preset"
+                  aria-label="Delete animation preset"
+                  @click.stop.prevent="deleteAnimationPreset(preset)"
+                >
+                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-trash"></i></span>
+                </button>
+              </a>
+            </div>
+          </div>
+        </div>
+        <div class="field is-grouped" style="margin-top:0.5em;">
+          <div class="control is-expanded">
+            <input class="input is-small" v-model="animationPresetName" type="text" placeholder="Animation preset name..."
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+              @keyup.enter="saveAnimationPreset"
+            />
+          </div>
+          <div class="control">
+            <button class="button is-link is-small" @click="saveAnimationPreset"><i class="fa-solid fa-floppy-disk mr-1"></i> Save</button>
+          </div>
+        </div>
+      </div>
+    </div>
+
     <!-- Palettes tab -->
     <div v-else-if="activeTab === 'palettes'">
       <div class="palette-subtabs">
@@ -2088,18 +2356,6 @@ async function renameAndSaveSkyboxTexture() {
       <div class="palette-top-controls">
         <button
           class="button is-small palette-icon-toggle"
-          :class="{ 'is-active': model.activateAnimate }"
-          type="button"
-          :aria-pressed="model.activateAnimate"
-          title="Animate palette offset"
-          @click="model.activateAnimate = !model.activateAnimate"
-        >
-          <i :class="model.activateAnimate ? 'fas fa-pause' : 'fas fa-play'" aria-hidden="true"></i>
-          <span>Drift</span>
-        </button>
-
-        <button
-          class="button is-small palette-icon-toggle"
           :class="{ 'is-active': model.debugShading }"
           type="button"
           :aria-pressed="model.debugShading"
@@ -2141,12 +2397,6 @@ async function renameAndSaveSkyboxTexture() {
         </div>
       </div>
 
-      <label class="gfx-section-title">Motion</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Drift Speed</span>
-        <input class="slider" type="range" min="0.1" max="5" step="0.1" v-model.number="model.animationSpeed" />
-        <span class="gfx-slider-value">&times;{{ (model.animationSpeed ?? 1.0).toFixed(1) }}</span>
-      </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Phase Coloring</span>
         <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPhaseColoring" />
@@ -2818,6 +3068,72 @@ async function renameAndSaveSkyboxTexture() {
 /* ── Graphics tab layout ── */
 .graphics-tab {
   color: #111;
+}
+.animation-tab {
+  color: #111;
+  min-width: 0;
+}
+.animation-playback-row {
+  display: flex;
+  align-items: center;
+  gap: 0.75em;
+  margin-bottom: 0.8em;
+}
+.animation-global-speed {
+  flex: 1 1 auto;
+  margin-bottom: 0;
+}
+.animation-mixer {
+  display: flex;
+  flex-direction: column;
+  gap: 0.55em;
+}
+.animation-track-row {
+  display: grid;
+  grid-template-columns: minmax(135px, 1.2fr) 92px minmax(150px, 1fr) minmax(150px, 1fr);
+  gap: 0.55em;
+  align-items: center;
+  padding: 0.45em 0;
+  border-bottom: 1px solid rgba(0, 0, 0, 0.08);
+}
+.animation-track-enabled {
+  display: flex;
+  align-items: center;
+  gap: 0.45em;
+  min-width: 0;
+}
+.animation-track-enabled span {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.animation-track-type select {
+  width: 100%;
+}
+.animation-track-slider {
+  display: grid;
+  grid-template-columns: 42px minmax(64px, 1fr) 54px;
+  gap: 0.35em;
+  align-items: center;
+  min-width: 0;
+}
+.animation-track-metric,
+.animation-track-value {
+  font-size: 0.75em;
+  color: #333;
+  white-space: nowrap;
+}
+.animation-track-value {
+  text-align: right;
+}
+@media (max-width: 760px) {
+  .animation-playback-row {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .animation-track-row {
+    grid-template-columns: 1fr;
+  }
 }
 .gfx-section-title {
   display: block;

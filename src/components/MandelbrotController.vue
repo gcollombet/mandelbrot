@@ -7,6 +7,7 @@ import type {IterationData} from "../CursorCoordinate.ts";
 import type {ColorStop} from "../ColorStop.ts";
 import type {Engine} from '../Engine.ts';
 import type {TextureMappingConfig} from '../TextureMapping.ts';
+import type {AnimationConfig} from '../AnimationConfig.ts';
 
 const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
@@ -36,6 +37,7 @@ const props = defineProps<{
   pickerMode?: boolean,
   tessellationLevel?: number,
   displacementAmount?: number,
+  animation?: AnimationConfig,
   animationSpeed?: number,
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
@@ -391,6 +393,7 @@ onUnmounted(() => {
       :interpolationMode="props.interpolationMode"
       :tessellationLevel="props.tessellationLevel"
       :displacementAmount="props.displacementAmount"
+      :animation="props.animation"
       :animationSpeed="props.animationSpeed"
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :microBumpStrength="props.microBumpStrength"

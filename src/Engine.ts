@@ -26,6 +26,11 @@ import {
     textureMappingVariableId,
     type TextureMappingConfig
 } from './TextureMapping.ts'
+import {
+    normalizeAnimationConfig,
+    type AnimationConfig,
+    type AnimationTrackConfig,
+} from './AnimationConfig.ts'
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -37,6 +42,8 @@ const MIN_BATCH_SIZE = 100
 const MAX_BATCH_SIZE = 10_000
 const MAX_BLA_BATCH_SIZE = 100_000
 const BLA_LINEARIZATION_EPSILON = 1e-6
+const COLOR_UNIFORM_FLOAT_COUNT = 60
+const TAU = Math.PI * 2
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
 // each frame) is paused when the batch controller is at its minimum AND
@@ -182,6 +189,38 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
     return dst
 }
 
+function clamp(value: number, min: number, max: number): number {
+    return Math.min(Math.max(value, min), max)
+}
+
+function animationWave(track: AnimationTrackConfig, time: number, globalSpeed: number): number {
+    const phase = track.phase ?? 0
+    const cycles = time * track.speed * globalSpeed + phase
+    switch (track.type) {
+        case 'loop':
+            return cycles - Math.floor(cycles)
+        case 'pulse':
+            return 0.5 + 0.5 * Math.sin(cycles * TAU)
+        case 'stepped': {
+            const stepCount = 8
+            const stepped = Math.floor((cycles - Math.floor(cycles)) * stepCount) / Math.max(1, stepCount - 1)
+            return stepped * 2 - 1
+        }
+        case 'sine':
+        default:
+            return Math.sin(cycles * TAU)
+    }
+}
+
+function animationContribution(track: AnimationTrackConfig, time: number, globalSpeed: number): number {
+    if (!track.enabled) return 0
+    return animationWave(track, time, globalSpeed) * track.amplitude
+}
+
+function shiftedAnimationContribution(track: AnimationTrackConfig, time: number, globalSpeed: number, phaseShift: number): number {
+    return animationContribution({...track, phase: (track.phase ?? 0) + phaseShift}, time, globalSpeed)
+}
+
 export type RenderOptions = {
     antialiasLevel: number,
     palettePeriod: number,
@@ -194,6 +233,7 @@ export type RenderOptions = {
     debugShading: boolean,
     tessellationLevel: number,
     displacementAmount: number,
+    animation: AnimationConfig,
     animationSpeed: number,
     ambientOcclusionStrength: number,
     microBumpStrength: number,
@@ -911,7 +951,7 @@ export class Engine {
             label: 'Engine UniformBuffer Mandelbrot',
         })
         this.uniformBufferColor = this.device.createBuffer({
-            size: 4 * 44, // 44 floats padded to 16-byte alignment (176 bytes)
+            size: 4 * COLOR_UNIFORM_FLOAT_COUNT,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Color',
         })
@@ -1709,7 +1749,29 @@ export class Engine {
 
         const sceneSin = Math.sin(mandelbrot.angle)
         const sceneCos = Math.cos(mandelbrot.angle)
-        const lightDirLen = Math.hypot(Math.cos(renderOptions.lightAngle), Math.sin(renderOptions.lightAngle), 1.85)
+        const animation = normalizeAnimationConfig(renderOptions.animation, renderOptions.animationSpeed)
+        const animGlobalSpeed = clamp(animation.globalSpeed, 0, 10)
+        const animTime = renderOptions.activateAnimate ? this.time : 0
+        const paletteOffsetAnim = animationContribution(animation.tracks.paletteOffset, animTime, animGlobalSpeed)
+        const heightPaletteShiftAnim = animationContribution(animation.tracks.heightPaletteShift, animTime, animGlobalSpeed)
+        const lightAngleAnim = animationContribution(animation.tracks.lightAngle, animTime, animGlobalSpeed) * TAU
+        const textureDriftAnimX = animationContribution(animation.tracks.textureDrift, animTime, animGlobalSpeed)
+        const textureDriftAnimY = shiftedAnimationContribution(animation.tracks.textureDrift, animTime, animGlobalSpeed, 0.25)
+        const skyReflectionDriftAnimX = animationContribution(animation.tracks.skyReflectionDrift, animTime, animGlobalSpeed)
+        const skyReflectionDriftAnimY = shiftedAnimationContribution(animation.tracks.skyReflectionDrift, animTime, animGlobalSpeed, 0.25)
+        const phaseColoringAnim = animationContribution(animation.tracks.phaseColoring, animTime, animGlobalSpeed)
+        const varnishAnim = animationContribution(animation.tracks.varnish, animTime, animGlobalSpeed)
+        const microBumpAnim = animationContribution(animation.tracks.microBump, animTime, animGlobalSpeed)
+        const displacementAnim = animationContribution(animation.tracks.displacement, animTime, animGlobalSpeed)
+        const tessellationAnim = animationContribution(animation.tracks.tessellation, animTime, animGlobalSpeed)
+        const effectiveLightAngle = renderOptions.lightAngle + lightAngleAnim
+        const effectiveTessellationLevel = clamp(renderOptions.tessellationLevel + tessellationAnim, 0, 10)
+        const effectiveDisplacementAmount = clamp(renderOptions.displacementAmount + displacementAnim, 0, 0.1)
+        const effectiveMicroBumpStrength = clamp(renderOptions.microBumpStrength + microBumpAnim, 0, 10)
+        const effectiveVarnishStrength = clamp(renderOptions.varnishStrength + varnishAnim, 0, 10)
+        const effectiveHeightPaletteShift = clamp(renderOptions.heightPaletteShift + heightPaletteShiftAnim, 0, 100)
+        const effectivePhaseColoringStrength = clamp(renderOptions.phaseColoringStrength + phaseColoringAnim, 0, 100)
+        const lightDirLen = Math.hypot(Math.cos(effectiveLightAngle), Math.sin(effectiveLightAngle), 1.85)
         const textureMapping = normalizeTextureMappingConfig(renderOptions.textureMapping)
 
         const zoomActive = isZoomActive(this.zoomState)
@@ -1724,7 +1786,7 @@ export class Engine {
 
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,    // 0: palettePeriod
-            renderOptions.paletteOffset,    // 1: paletteOffset
+            renderOptions.paletteOffset + paletteOffsetAnim, // 1: paletteOffset
             scaleFactor,                    // 2: bloomStrength (scaleFactor)
             this.time,                      // 3: time
             aspect,                         // 4: aspect
@@ -1744,28 +1806,28 @@ export class Engine {
             (zoomActive && frozenScale > 0)
                 ? -(this.frozenBaseShiftY + this.frozenPanShiftY * (liveScale / frozenScale)) / this.neutralSize
                 : 0,                        // 12: frozenShiftV
-            renderOptions.tessellationLevel, // 13: tessellationLevel
-            renderOptions.displacementAmount, // 14: displacementAmount
-            renderOptions.animationSpeed,   // 15: animationSpeed
+            effectiveTessellationLevel,     // 13: tessellationLevel
+            effectiveDisplacementAmount,    // 14: displacementAmount
+            animGlobalSpeed,                // 15: animationSpeed (legacy/global speed)
             mandelbrot.epsilon,             // 16: epsilon
             renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
-            renderOptions.microBumpStrength, // 18: microBumpStrength
+            effectiveMicroBumpStrength,     // 18: microBumpStrength
             renderOptions.subsurfaceStrength, // 19: subsurfaceStrength
             renderOptions.reliefDepth,       // 20: reliefDepth
             renderOptions.localShadowStrength, // 21: localShadowStrength
-            renderOptions.lightAngle,          // 22: lightAngle
-            renderOptions.varnishStrength,     // 23: varnishStrength
+            effectiveLightAngle,              // 22: lightAngle
+            effectiveVarnishStrength,         // 23: varnishStrength
             Math.log(mandelbrot.mu),            // 24: logMu
             sceneSin,                           // 25: sceneSin
             sceneCos,                           // 26: sceneCos
-            Math.cos(renderOptions.lightAngle) / lightDirLen, // 27: lightDirX
-            Math.sin(renderOptions.lightAngle) / lightDirLen, // 28: lightDirY
+            Math.cos(effectiveLightAngle) / lightDirLen, // 27: lightDirX
+            Math.sin(effectiveLightAngle) / lightDirLen, // 28: lightDirY
             1.85 / lightDirLen,                 // 29: lightDirZ
             renderOptions.paletteMirror ? 1 : 0, // 30: paletteMirror
             renderOptions.debugShading ? 1 : 0,  // 31: debugShading
-            renderOptions.heightPaletteShift,    // 32: heightPaletteShift [0, 100]
+            effectiveHeightPaletteShift,         // 32: heightPaletteShift [0, 100]
             renderOptions.orbitTrapStrength,     // 33: orbitTrapStrength [0, 100]
-            renderOptions.phaseColoringStrength, // 34: phaseColoringStrength [0, 100]
+            effectivePhaseColoringStrength,      // 34: phaseColoringStrength [0, 100]
             textureMappingVariableId(textureMapping.xVariable), // 35: textureMappingXVariable
             textureMappingVariableId(textureMapping.yVariable), // 36: textureMappingYVariable
             textureMapping.xScale,                // 37: textureMappingXScale
@@ -1775,6 +1837,22 @@ export class Engine {
             parseFloat(mandelbrot.cy),            // 41: centerY
             mandelbrot.scale,                     // 42: scale
             0.0,                                  // 43: _pad
+            0.03 * textureDriftAnimX,             // 44: textureDriftX
+            0.03 * textureDriftAnimY,             // 45: textureDriftY
+            0.02 * skyReflectionDriftAnimX,       // 46: skyDriftX
+            0.02 * skyReflectionDriftAnimY,       // 47: skyDriftY
+            paletteOffsetAnim,                    // 48: paletteOffsetAnimation
+            heightPaletteShiftAnim,               // 49: heightPaletteShiftAnimation
+            lightAngleAnim,                       // 50: lightAngleAnimation
+            textureDriftAnimX,                    // 51: textureDriftAnimation
+            skyReflectionDriftAnimX,              // 52: skyReflectionDriftAnimation
+            phaseColoringAnim,                    // 53: phaseColoringAnimation
+            varnishAnim,                          // 54: varnishAnimation
+            microBumpAnim,                        // 55: microBumpAnimation
+            displacementAnim,                     // 56: displacementAnimation
+            tessellationAnim,                     // 57: tessellationAnimation
+            0.0,                                  // 58: _pad2
+            0.0,                                  // 59: _pad3
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

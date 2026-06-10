@@ -19,10 +19,11 @@ import type {PaletteRecord} from './paletteStore';
 import {getFirebaseServices} from './firebaseConfig';
 import type {StopPresetRecord} from './stopPresetStore';
 import type {TextureMappingPresetRecord} from './textureMappingPresetStore';
+import type {AnimationPresetRecord} from './animationPresetStore';
 
-export type CatalogType = 'completePreset' | 'palettePreset' | 'stopPreset' | 'texture' | 'textureMappingPreset';
+export type CatalogType = 'completePreset' | 'palettePreset' | 'stopPreset' | 'texture' | 'textureMappingPreset' | 'animationPreset';
 
-export const CATALOG_TYPES: readonly CatalogType[] = ['completePreset', 'palettePreset', 'stopPreset', 'texture', 'textureMappingPreset'];
+export const CATALOG_TYPES: readonly CatalogType[] = ['completePreset', 'palettePreset', 'stopPreset', 'texture', 'textureMappingPreset', 'animationPreset'];
 
 export interface RemoteCatalogMetadata {
   guid: string;
@@ -42,6 +43,8 @@ export interface RemoteStopPresetEntry extends RemoteCatalogMetadata, Omit<StopP
 
 export interface RemoteTextureMappingPresetEntry extends RemoteCatalogMetadata, Omit<TextureMappingPresetRecord, 'date' | 'favorite' | 'guid' | 'name' | 'lastUpdated' | 'remote' | 'builtIn'> {}
 
+export interface RemoteAnimationPresetEntry extends RemoteCatalogMetadata, Omit<AnimationPresetRecord, 'date' | 'favorite' | 'guid' | 'name' | 'lastUpdated' | 'remote'> {}
+
 export interface RemoteTextureEntry extends RemoteCatalogMetadata {
   thumbnail: string;
   blobPath: string;
@@ -54,6 +57,7 @@ export type RemoteCatalogEntry =
   | RemotePalettePresetEntry
   | RemoteStopPresetEntry
   | RemoteTextureMappingPresetEntry
+  | RemoteAnimationPresetEntry
   | RemoteTextureEntry;
 
 export type RemoteEntryByType<T extends CatalogType> =
@@ -61,7 +65,8 @@ export type RemoteEntryByType<T extends CatalogType> =
     : T extends 'palettePreset' ? RemotePalettePresetEntry
       : T extends 'stopPreset' ? RemoteStopPresetEntry
         : T extends 'textureMappingPreset' ? RemoteTextureMappingPresetEntry
-          : RemoteTextureEntry;
+          : T extends 'animationPreset' ? RemoteAnimationPresetEntry
+            : RemoteTextureEntry;
 
 export class RemoteCatalogUnavailableError extends Error {
   constructor() {

@@ -69,12 +69,12 @@ test.describe("Mandelbrot navigation", () => {
   // 2. Top settings bar
   // -----------------------------------------------------------------------
 
-  test("top settings bar is visible with 4 tabs", async ({ page }) => {
+  test("top settings bar is visible with 5 tabs", async ({ page }) => {
     const bar = page.locator(".top-settings-bar");
     await expect(bar).toBeVisible();
 
     const buttons = page.locator(".top-tab-btn:not(.camera-btn)");
-    await expect(buttons).toHaveCount(4);
+    await expect(buttons).toHaveCount(5);
 
     // Verify tab labels
     const labels = await buttons.allTextContents();
@@ -83,8 +83,9 @@ test.describe("Mandelbrot navigation", () => {
       expect.arrayContaining([
         "Navigation",
         "Presets",
-        "Palettes",
         "Graphics",
+        "Animation",
+        "Palettes",
       ]),
     );
   });
@@ -139,13 +140,29 @@ test.describe("Mandelbrot navigation", () => {
     ).toHaveClass(/is-active/);
     await expect(page.locator(".settings-popup")).toHaveCount(1);
 
-    // 'c' opens Palettes too (multi-window).
+    // 'c' opens Animation too (multi-window).
     await page.keyboard.press("c");
     await expect(page.locator(".settings-popup")).toHaveCount(2);
 
     // 'x' again closes Presets.
     await page.keyboard.press("x");
     await expect(page.locator(".settings-popup")).toHaveCount(1);
+  });
+
+  test("Animation panel owns Drift controls", async ({ page }) => {
+    await page.locator(".top-tab-btn", { hasText: "Animation" }).click();
+    const animationPopup = page.locator(".settings-popup", { hasText: "Animation" });
+    await expect(animationPopup.getByText("Global Speed")).toBeVisible();
+    await expect(animationPopup.getByRole("button", { name: /Drift/i })).toBeVisible();
+    await expect(animationPopup.getByText("Palette Offset")).toBeVisible();
+    await expect(animationPopup.getByText("Light Angle")).toBeVisible();
+
+    await page.locator(".top-tab-btn", { hasText: "Palettes" }).click();
+    const palettesPopup = page.locator(".settings-popup", { hasText: "Palettes" });
+    await palettesPopup.getByRole("button", { name: "Motion / Cycle" }).click();
+    await expect(palettesPopup.getByText("Length")).toBeVisible();
+    await expect(palettesPopup.getByRole("button", { name: /Drift/i })).toHaveCount(0);
+    await expect(palettesPopup.getByText("Drift Speed")).toHaveCount(0);
   });
 
   // -----------------------------------------------------------------------

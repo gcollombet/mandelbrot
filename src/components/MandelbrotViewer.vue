@@ -16,6 +16,7 @@ import {getLatestRemotePreset} from '../remoteCatalog';
 import type {IterationData} from '../CursorCoordinate';
 import {computePalettePhase} from '../CursorCoordinate';
 import {Palette} from '../Palette';
+import {normalizeAnimationConfig} from '../AnimationConfig';
 import {createInterpolatedColorStop} from '../ColorStop';
 import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
@@ -214,6 +215,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   zoomMinBrushStep: 1,
   sentinelSeedStep: 64,
   interpolationMode: 'lab',
+  animation: normalizeAnimationConfig(null, 1.0),
   animationSpeed: 1.0,
   ambientOcclusionStrength: 0,
   microBumpStrength: 0,
@@ -237,6 +239,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   } catch {}
   params.textureName ??= localStorage.getItem(TEXTURE_SELECTED_KEY) ?? 'Gold';
   params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Window';
+  params.animation = normalizeAnimationConfig(params.animation, params.animationSpeed);
   params.textureMapping = normalizeTextureMappingFromLegacy(params);
   params.zoomMinBrushStep = normalizePowerOfTwoStep(params.zoomMinBrushStep, 1, 1, 64);
   params.sentinelSeedStep = Math.max(
@@ -436,8 +439,9 @@ watch(mobileNavExpanded, (expanded) => {
 const settingsTabs = computed(() => [
   { key: 'navigation', label: 'Navigation', shortcut: keyboardLayout === 'azerty' ? 'w' : 'z' },
   { key: 'presets', label: 'Presets', shortcut: 'x' },
-  { key: 'palettes', label: 'Palettes', shortcut: 'c' },
   { key: 'performance', label: 'Graphics', shortcut: 'v' },
+  { key: 'animation', label: 'Animation', shortcut: 'c' },
+  { key: 'palettes', label: 'Palettes', shortcut: 'n' },
 ]);
 
 function toggleTab(tabKey: string) {
@@ -586,6 +590,10 @@ async function triggerQuickSnapshot() {
   delete (savedValue as any).antialiasLevel;
   delete (savedValue as any).targetFps;
   delete (savedValue as any).gpuLoadMultiplier;
+  delete (savedValue as any).activateAnimate;
+  delete (savedValue as any).debugShading;
+  savedValue.animation = normalizeAnimationConfig(savedValue.animation, savedValue.animationSpeed);
+  savedValue.animationSpeed = savedValue.animation.globalSpeed;
   await savePresetEntry(savedValue, thumbnail);
   // Refresh any open Settings component's preset list
   for (const ref of Object.values(settingsRefs.value)) {
@@ -645,6 +653,7 @@ function popupStyle(tabKey: string) {
   const z = tabZOrder[tabKey] ?? 50;
   // Palette popup is wider; presets/navigation wider to fit dropdown lists
   const w = tabKey === 'palettes' ? '860px'
+          : tabKey === 'animation' ? '640px'
           : (tabKey === 'presets' || tabKey === 'navigation') ? '560px'
           : '460px';
   const mh = (tabKey === 'presets' || tabKey === 'navigation') ? '94vh' : '80vh';
@@ -781,6 +790,7 @@ const shortcutLabels = computed(() => {
       :interpolationMode="mandelbrotParams.interpolationMode"
       :tessellationLevel="mandelbrotParams.tessellationLevel"
       :displacementAmount="mandelbrotParams.displacementAmount"
+      :animation="mandelbrotParams.animation"
       :animationSpeed="mandelbrotParams.animationSpeed"
       :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
       :microBumpStrength="mandelbrotParams.microBumpStrength"

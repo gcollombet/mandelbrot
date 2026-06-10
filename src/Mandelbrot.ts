@@ -1,5 +1,6 @@
 import type {ColorStop} from "./ColorStop.ts";
 import type {TextureMappingConfig} from "./TextureMapping.ts";
+import type {AnimationConfig} from "./AnimationConfig.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
 export type ApproximationMode = 'perturbation' | 'bla';
@@ -33,6 +34,7 @@ export interface MandelbrotParams {
     tessellationLevel?: number;
     lightAngle?: number;
     displacementAmount?: number;
+    animation?: AnimationConfig;
     animationSpeed?: number;
     ambientOcclusionStrength?: number;
     microBumpStrength?: number;

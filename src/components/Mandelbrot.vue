@@ -7,6 +7,7 @@ import {
   normalizeTextureMappingFromLegacy,
   type TextureMappingConfig
 } from '../TextureMapping.ts';
+import {normalizeAnimationConfig, type AnimationConfig} from '../AnimationConfig.ts';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let canvas: HTMLCanvasElement | null = null;
@@ -67,6 +68,7 @@ const props = withDefaults(defineProps<{
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   tessellationLevel?: number,
   displacementAmount?: number,
+  animation?: AnimationConfig,
   animationSpeed?: number,
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
@@ -129,8 +131,9 @@ const props = withDefaults(defineProps<{
        zoomMinBrushStep: 1,
        sentinelSeedStep: 64,
        interpolationMode: 'lab',
-        tessellationLevel: 0,
-        displacementAmount: 0,
+       tessellationLevel: 0,
+       displacementAmount: 0,
+       animation: () => normalizeAnimationConfig(null, 1.0),
         animationSpeed: 1.0,
         ambientOcclusionStrength: 0,
         microBumpStrength: 0,
@@ -218,6 +221,7 @@ async function draw() {
         debugShading: props.debugShading,
         tessellationLevel: props.tessellationLevel,
         displacementAmount: props.displacementAmount,
+        animation: normalizeAnimationConfig(props.animation, props.animationSpeed),
         animationSpeed: props.animationSpeed,
         ambientOcclusionStrength: props.ambientOcclusionStrength,
         microBumpStrength: props.microBumpStrength,
@@ -265,6 +269,7 @@ async function initWebGPU() {
     debugShading: props.debugShading,
     tessellationLevel: props.tessellationLevel,
     displacementAmount: props.displacementAmount,
+    animation: normalizeAnimationConfig(props.animation, props.animationSpeed),
     animationSpeed: props.animationSpeed,
     ambientOcclusionStrength: props.ambientOcclusionStrength,
     microBumpStrength: props.microBumpStrength,

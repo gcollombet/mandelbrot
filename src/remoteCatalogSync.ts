@@ -7,6 +7,7 @@ import {
   type RemotePalettePresetEntry,
   type RemoteStopPresetEntry,
   type RemoteTextureMappingPresetEntry,
+  type RemoteAnimationPresetEntry,
   type RemoteTextureEntry,
 } from './remoteCatalog';
 import {getAllPaletteEntries, saveRemotePaletteEntry} from './paletteStore';
@@ -14,6 +15,7 @@ import {getAllPresetRecords, saveRemotePresetEntry} from './presetStore';
 import {getAllStopPresetEntries, saveRemoteStopPresetEntry} from './stopPresetStore';
 import {getAllTextureEntries, saveRemoteTextureEntry} from './textureStore';
 import {getAllStoredTextureMappingPresetEntries, saveRemoteTextureMappingPresetEntry} from './textureMappingPresetStore';
+import {getAllAnimationPresetEntries, saveRemoteAnimationPresetEntry} from './animationPresetStore';
 
 function isRemoteNewer(remoteLastUpdated: string, localLastUpdated?: string): boolean {
   if (!localLastUpdated) return true;
@@ -27,12 +29,13 @@ export function shouldFetchRemoteEntry(remoteLastUpdated: string, localLastUpdat
 export async function syncRemoteCatalog(): Promise<void> {
   try {
     const metadata = await listAllRemoteCatalogMetadata();
-    const [presets, palettes, stops, textures, textureMappings] = await Promise.all([
+    const [presets, palettes, stops, textures, textureMappings, animations] = await Promise.all([
       getAllPresetRecords(),
       getAllPaletteEntries(),
       getAllStopPresetEntries(),
       getAllTextureEntries(),
       getAllStoredTextureMappingPresetEntries(),
+      getAllAnimationPresetEntries(),
     ]);
 
     const presetsByGuid = new Map(presets.map(entry => [entry.guid, entry]));
@@ -89,6 +92,20 @@ export async function syncRemoteCatalog(): Promise<void> {
       const entry = await getRemoteCatalogEntry('textureMappingPreset', remote.guid) as RemoteTextureMappingPresetEntry | null;
       if (!entry) continue;
       await saveRemoteTextureMappingPresetEntry({
+        ...entry,
+        date: entry.lastUpdated,
+        favorite: false,
+        remote: {publishedName: entry.name, lastUpdated: entry.lastUpdated},
+      });
+    }
+
+    const animationsByGuid = new Map(animations.map(entry => [entry.guid, entry]));
+    for (const remote of metadata.animationPreset) {
+      const local = animationsByGuid.get(remote.guid);
+      if (local && !isRemoteNewer(remote.lastUpdated, local.lastUpdated)) continue;
+      const entry = await getRemoteCatalogEntry('animationPreset', remote.guid) as RemoteAnimationPresetEntry | null;
+      if (!entry) continue;
+      await saveRemoteAnimationPresetEntry({
         ...entry,
         date: entry.lastUpdated,
         favorite: false,
