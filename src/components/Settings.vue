@@ -595,8 +595,11 @@ async function loadAnimationPresets() {
 }
 
 function ensureAnimationConfig() {
-  model.value.animation = normalizeAnimationConfig(model.value.animation, model.value.animationSpeed);
-  model.value.animationSpeed = model.value.animation.globalSpeed;
+  const current = model.value.animation;
+  if (!current || !current.tracks || Object.keys(current.tracks).length < ANIMATION_TRACK_DEFINITIONS.length) {
+    model.value.animation = normalizeAnimationConfig(current, model.value.animationSpeed);
+    model.value.animationSpeed = model.value.animation.globalSpeed;
+  }
 }
 
 function animationTrack(id: AnimationTrackId) {

@@ -437,11 +437,11 @@ watch(mobileNavExpanded, (expanded) => {
 
 // Tabs du menu — raccourcis adaptés au layout clavier
 const settingsTabs = computed(() => [
-  { key: 'navigation', label: 'Navigation', shortcut: keyboardLayout === 'azerty' ? 'w' : 'z' },
-  { key: 'presets', label: 'Presets', shortcut: 'x' },
-  { key: 'performance', label: 'Graphics', shortcut: 'v' },
-  { key: 'animation', label: 'Animation', shortcut: 'c' },
-  { key: 'palettes', label: 'Palettes', shortcut: 'n' },
+  { key: 'navigation', label: 'Navigation', icon: 'fa-solid fa-arrows-up-down-left-right', shortcut: keyboardLayout === 'azerty' ? 'w' : 'z' },
+  { key: 'presets', label: 'Presets', icon: 'fa-solid fa-bookmark', shortcut: 'x' },
+  { key: 'performance', label: 'Graphics', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
+  { key: 'animation', label: 'Animation', icon: 'fa-solid fa-film', shortcut: 'c' },
+  { key: 'palettes', label: 'Palettes', icon: 'fa-solid fa-palette', shortcut: 'n' },
 ]);
 
 function toggleTab(tabKey: string) {
@@ -730,11 +730,14 @@ const shortcutLabels = computed(() => {
         <button
           v-for="tab in settingsTabs"
           :key="tab.key"
-          class="top-tab-btn"
+          class="top-tab-btn camera-btn"
           :class="{ 'is-active': openTabs.has(tab.key) }"
           @click="toggleTab(tab.key)"
+          :title="tab.label"
         >
-          {{ tab.label }} <span class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
+          <i :class="[tab.icon, 'fa-fw']" aria-hidden="true"></i>
+          <span class="tab-label-text is-hidden-touch">{{ tab.label }}</span>
+          <span class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
         </button>
         <button
           class="top-tab-btn camera-btn"
@@ -752,7 +755,7 @@ const shortcutLabels = computed(() => {
           @click="authUserEmail ? logoutUser() : loginWithGoogle()"
         >
           <i :class="authUserEmail ? 'fa-solid fa-right-from-bracket fa-fw' : 'fa-solid fa-right-to-bracket fa-fw'" aria-hidden="true"></i>
-          <span class="is-hidden-touch" style="margin-left: 6px;">{{ authUserEmail ? 'Logout' : 'Login' }}</span>
+          <span class="is-hidden-touch">{{ authUserEmail ? 'Logout' : 'Login' }}</span>
         </button>
       </div>
     </div>
