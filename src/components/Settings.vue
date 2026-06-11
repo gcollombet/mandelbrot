@@ -328,6 +328,14 @@ function truncateDecimal(str: string, digits: number): string {
   return intPart + "." + decPart.slice(0, digits);
 }
 
+const coordsCopied = ref(false);
+function copyCoordinates() {
+  const txt = `Cx ${model.value.cx}, Cy ${model.value.cy}`;
+  navigator.clipboard?.writeText(txt);
+  coordsCopied.value = true;
+  window.setTimeout(() => { coordsCopied.value = false; }, 1200);
+}
+
 function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = 'lab'): string {
   const canvas = document.createElement('canvas');
   canvas.width = 320;
@@ -1066,6 +1074,18 @@ function downloadJsonFile(filename: string, payload: unknown) {
   a.download = filename;
   a.click();
   URL.revokeObjectURL(url);
+}
+
+async function exportPresetById(id: number) {
+  const record = await getCachedPreset(id);
+  if (!record) return;
+  downloadJsonFile(`mandelbrot-preset-${record.name || record.id}.json`, {
+    name: record.name,
+    value: record.value,
+    thumbnail: record.thumbnail,
+    date: record.date,
+    favorite: record.favorite ?? false,
+  });
 }
 
 async function exportSelectedPreset() {
@@ -1884,73 +1904,94 @@ async function renameAndSaveSkyboxTexture() {
 <template>
   <div class="settings-container">
     <!-- Navigation tab -->
-    <div v-if="activeTab === 'navigation'">
-      <div class="mb-3" style="font-family: monospace; word-break: break-all; white-space: pre-line;">
-        <span>Cx: <span>{{ truncateDecimal(model.cx, 38) }}</span></span><br />
-        <span>Cy: <span>{{ truncateDecimal(model.cy, 38) }}</span></span>
+    <div v-if="activeTab === 'navigation'" class="cv-body">
+
+      <!-- ============ 1. LOCATION ============ -->
+      <div class="section-label"><span class="tick"></span>Location</div>
+      <p class="section-help">Where you are in the complex plane.</p>
+
+      <div class="coords">
+        <div class="lab">
+          <div class="l1">Center</div>
+          <div class="l2">Complex coordinates — read-only</div>
+        </div>
+        <div class="vals">
+          <div class="cline"><span class="ax">Cx</span><span class="num">{{ truncateDecimal(model.cx, 38) }}</span></div>
+          <div class="cline"><span class="ax">Cy</span><span class="num">{{ truncateDecimal(model.cy, 38) }}</span></div>
+        </div>
+        <button class="copy" :class="{ ok: coordsCopied }" title="Copy coordinates" @click="copyCoordinates">
+          <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+        </button>
       </div>
 
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <span>Scale&nbsp;:
-          <span style="font-family: monospace; min-width:7.5em; display:inline-block;">{{ Number(model.scale).toExponential(2) }}</span>
-        </span>
-        <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="1" max="126" step="1" v-model.number="scaleSlider" />
-      </div>
-      <div class="mb-3" style="display: flex; align-items: center; gap: 0.8em;">
-        <span>Angle&nbsp;:
-          <span style="font-family: monospace; min-width:5em; display:inline-block;">{{ angleDeg }}°</span>
-        </span>
-        <input class="slider is-fullwidth" style="flex: 1 1 110px; min-width: 85px; margin: 0 0.6em 0 0.6em;" type="range" min="0" max="359" step="1" v-model.number="angleSlider" />
-      </div>
-      <label class="checkbox" style="display: flex; align-items: center; gap: 0.5em; margin: 0.8em 0 0.4em 0;">
-        <input type="checkbox" v-model="model.showPresetPins" />
-        Show presets on map (pins)
-      </label>
-
-      <hr class="section-sep"/>
-
-      <label class="gfx-section-title">Render Mapping</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Mu</span>
-        <input class="slider" type="range" min="0" max="5" step="0.01" v-model="muSlider" />
-        <span class="gfx-slider-value">{{ (model.mu ?? 1.0).toFixed(1) }}</span>
-        <button class="button is-small is-light" style="padding: 0 6px; height: 22px; font-size: 0.75em;" @click="model.mu = 4" title="Mu = 4">4</button>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Stripe Frequency</span>
-        <input class="slider" type="range" min="1" max="32" step="1" v-model.number="model.stripeFrequency" />
-        <span class="gfx-slider-value">{{ model.stripeFrequency ?? 8 }}</span>
+      <div class="frow">
+        <div class="lab">
+          <div class="l1">Zoom</div>
+          <div class="l2">Magnification — scale of the view</div>
+        </div>
+        <input type="range" min="1" max="126" step="1" v-model.number="scaleSlider" />
+        <span class="val">{{ Number(model.scale).toExponential(2) }}</span>
       </div>
 
-      <hr class="section-sep"/>
+      <div class="frow">
+        <div class="lab">
+          <div class="l1">Rotation</div>
+          <div class="l2">View angle around the center</div>
+        </div>
+        <input type="range" min="0" max="359" step="1" v-model.number="angleSlider" />
+        <span class="val">{{ angleDeg }}<span class="unit">°</span></span>
+      </div>
 
-      <div class="mb-3">
-        <label class="label">Load a location</label>
-        <p style="font-size: 0.82em; color: #555; margin-bottom: 0.5em;">Applies only the location (Cx, Cy, scale, angle) from a preset.</p>
+      <!-- ============ 2. RENDER MAPPING ============ -->
+      <div class="section-label"><span class="tick"></span>Render Mapping</div>
+      <p class="section-help">How iteration data is mapped before coloring — independent from the location.</p>
+
+      <div class="frow">
+        <div class="lab">
+          <div class="l1">Mu</div>
+          <div class="l2">Escape value scaling</div>
+        </div>
+        <div class="mu-ctl">
+          <input type="range" min="0" max="5" step="0.01" v-model="muSlider" />
+          <button class="mu-quick" @click="model.mu = 4" title="Mu = 4">4</button>
+        </div>
+        <span class="val">{{ (model.mu ?? 1.0).toFixed(1) }}</span>
+      </div>
+
+      <div class="frow">
+        <div class="lab">
+          <div class="l1">Stripe Frequency</div>
+          <div class="l2">Density of stripe banding in the coloring</div>
+        </div>
+        <input type="range" min="1" max="32" step="1" v-model.number="model.stripeFrequency" />
+        <span class="val">{{ model.stripeFrequency ?? 8 }}</span>
+      </div>
+
+      <!-- ============ 3. LOCATIONS LIBRARY ============ -->
+      <div class="section-label"><span class="tick"></span>Locations Library</div>
+      <p class="section-help">Saved places. Loading applies the location only (Cx, Cy, zoom, angle) — your render settings are kept.</p>
+
+      <div class="lib-row">
         <button
-          class="button is-small favorite-filter"
-          :class="{ 'is-active': showOnlyFavoriteNavigation }"
+          class="fav-filter"
+          :class="{ on: showOnlyFavoriteNavigation }"
           type="button"
           :aria-pressed="showOnlyFavoriteNavigation"
           @click="showOnlyFavoriteNavigation = !showOnlyFavoriteNavigation"
         >
-          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoriteNavigation ? 'fa-solid' : 'fa-regular'"></i></span>
-          <span>Favorites</span>
+          <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+          Favorites
         </button>
-        <div class="dropdown" :class="{ 'is-active': showNavPresetDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth" @click="showNavPresetDropdown = !showNavPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-nav-presets" type="button">
-              <span style="display:flex; align-items:center; min-height:36px;">
-                <img v-if="currentNavPresetThumbnail" :src="currentNavPresetThumbnail" alt="thumbnail" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentNavPresetMeta?.name || (selectedNavPreset ? formatPresetDate(currentNavPresetMeta?.date ?? '') : 'Choose a preset...') }}</span>
-                <span class="icon is-small" style="margin-left:5px;">
-                  <i class="fas fa-angle-down" aria-hidden="true"></i>
-                </span>
-              </span>
+        <div class="dropdown cv-dropdown" :class="{ 'is-active': showNavPresetDropdown }">
+          <div class="dropdown-trigger">
+            <button class="cv-select-trigger" @click="showNavPresetDropdown = !showNavPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-nav-presets" type="button">
+              <img v-if="currentNavPresetThumbnail" :src="currentNavPresetThumbnail" alt="thumbnail" class="cv-trigger-thumb" />
+              <span class="cv-trigger-label">{{ currentNavPresetMeta?.name || (selectedNavPreset ? formatPresetDate(currentNavPresetMeta?.date ?? '') : 'Choose a preset…') }}</span>
+              <span class="cv-caret"></span>
             </button>
           </div>
-          <div class="dropdown-menu" id="dropdown-menu-nav-presets" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
+          <div class="dropdown-menu" id="dropdown-menu-nav-presets" role="menu">
+            <div class="dropdown-content cv-dropdown-content">
               <a v-for="preset in visibleNavPresets" :key="preset.id" class="dropdown-item favorite-row"
                 @click.prevent="selectNavPresetFromDropdown(preset)"
                 :class="{ 'is-active': selectedNavPreset === preset.id }"
@@ -1980,7 +2021,7 @@ async function renameAndSaveSkyboxTexture() {
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
                   <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
-                  <span style="font-size:0.78em; color:#666; display:flex; gap:0.6em;">
+                  <span style="font-size:0.78em; color:var(--ink-3); display:flex; gap:0.6em;">
                     <span>{{ formatPresetDate(preset.date) }}</span>
                     <span v-if="preset.scaleExponent > 0" style="font-family:monospace;">{{ formatZoom(preset.scaleExponent) }}</span>
                   </span>
@@ -1989,139 +2030,123 @@ async function renameAndSaveSkyboxTexture() {
             </div>
           </div>
         </div>
-        <div class="field is-grouped" style="margin-top:0.65em;">
-          <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportPresets">
-              <i class="fa-solid fa-file-import mr-1"></i> Import
-            </button>
-          </div>
-          <div class="control">
-            <button class="button is-info is-small is-light" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset">
-              <i class="fa-solid fa-download mr-1"></i> Export Selected Navigation
-            </button>
-          </div>
-          <div class="control">
-            <button class="button is-info is-small" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0">
-              <i class="fa-solid fa-star mr-1"></i> Export Favorites
-            </button>
-          </div>
+      </div>
+
+      <button class="load-btn" @click="selectedNavPreset && selectPresetLocation(selectedNavPreset)" :disabled="!selectedNavPreset">
+        <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+        Load location
+      </button>
+      <p class="load-note">Applies Cx, Cy, zoom &amp; angle from the selected preset.</p>
+
+      <div class="trow">
+        <div class="lab">
+          <div class="l1">Show presets on map</div>
+          <div class="l2">Pins every saved location on the fractal view</div>
         </div>
+        <div class="toggle" :class="{ on: model.showPresetPins }" role="switch" :aria-checked="model.showPresetPins" tabindex="0"
+          @click="model.showPresetPins = !model.showPresetPins"
+          @keydown.enter.prevent="model.showPresetPins = !model.showPresetPins"
+          @keydown.space.prevent="model.showPresetPins = !model.showPresetPins"></div>
+      </div>
+
+      <div class="transfer">
+        <span class="tlab">Transfer</span>
+        <button class="tbtn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
+        <button class="tbtn" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
+        <button class="tbtn" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
       </div>
     </div>
 
     <!-- Presets tab -->
-    <div v-else-if="activeTab === 'presets'">
-      <div class="mb-3">
-        <label class="label">Saved presets</label>
+    <div v-else-if="activeTab === 'presets'" class="cv-body">
+
+      <!-- ============ 1. SAVE CURRENT VIEW ============ -->
+      <div class="section-label"><span class="tick"></span>Save current view</div>
+      <p class="section-help">Captures everything — location, palette and render settings.</p>
+      <div class="save-row">
+        <input class="txt-in" v-model="presetName" type="text" placeholder="Name (optional)…"
+          @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+          @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+        />
+        <button class="save-btn" @click="savePreset">
+          <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
+          Save
+        </button>
+      </div>
+
+      <!-- ============ 2. LIBRARY ============ -->
+      <div class="section-label"><span class="tick"></span>Library</div>
+      <p class="section-help">Click a preset to apply it. Hover a card for actions — favorite, export, delete.</p>
+
+      <div class="lib-bar">
         <button
-          class="button is-small favorite-filter"
-          :class="{ 'is-active': showOnlyFavoritePresets }"
+          class="fav-filter"
+          :class="{ on: showOnlyFavoritePresets }"
           type="button"
           :aria-pressed="showOnlyFavoritePresets"
           @click="showOnlyFavoritePresets = !showOnlyFavoritePresets"
         >
-          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoritePresets ? 'fa-solid' : 'fa-regular'"></i></span>
-          <span>Favorites</span>
+          <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+          Favorites
         </button>
-        <!-- Dropdown enrichie Bulma -->
-        <div class="dropdown" :class="{ 'is-active': showPresetDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth" @click="showPresetDropdown = !showPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-presets" type="button">
-              <span style="display:flex; align-items:center; min-height:36px;">
-                <img v-if="currentPresetThumbnail" :src="currentPresetThumbnail" alt="thumbnail" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentPresetMeta?.name || (selectedPreset ? formatPresetDate(currentPresetMeta?.date ?? '') : 'Choose a preset...') }}</span>
-                <span class="icon is-small" style="margin-left:5px;">
-                  <i class="fas fa-angle-down" aria-hidden="true"></i>
-                </span>
-              </span>
+        <span class="count">{{ visiblePresets.length }} preset{{ visiblePresets.length === 1 ? '' : 's' }}</span>
+      </div>
+
+      <div class="grid">
+        <div
+          v-for="preset in visiblePresets"
+          :key="preset.id"
+          class="card"
+          :class="{ sel: selectedPreset === preset.id }"
+          @click="selectPresetFromDropdown(preset)"
+        >
+          <span class="sel-badge">Applied</span>
+          <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail" class="thumb" />
+          <div v-else class="thumb thumb-empty"></div>
+          <div class="acts">
+            <button
+              v-if="isAdmin"
+              class="abtn"
+              :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)"
+              type="button"
+              :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
+              @click.stop.prevent="uploadCompletePreset(preset.id)"
+            >
+              <i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i>
+            </button>
+            <button class="abtn heart" :class="{ faved: preset.favorite }" title="Favorite"
+              @click.stop.prevent="togglePresetFavorite(preset.id)">
+              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+            </button>
+            <button class="abtn" title="Export" @click.stop.prevent="exportPresetById(preset.id)">
+              <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
+            </button>
+            <button class="abtn del" title="Delete" @click.stop.prevent="deletePresetById(preset.id)">
+              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
             </button>
           </div>
-          <div class="dropdown-menu" id="dropdown-menu-presets" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in visiblePresets" :key="preset.id" class="dropdown-item favorite-row"
-                @click.prevent="selectPresetFromDropdown(preset)"
-                :class="{ 'is-active': selectedPreset === preset.id }"
-                style="display:flex; align-items:center; gap:0.75em;">
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button upload-button"
-                  :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)"
-                  type="button"
-                  :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
-                  :aria-label="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
-                  @click.stop.prevent="uploadCompletePreset(preset.id)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i></span>
-                </button>
-                <button
-                  class="favorite-button"
-                  :class="{ 'is-favorite': preset.favorite }"
-                  type="button"
-                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
-                  :aria-pressed="!!preset.favorite"
-                  @click.stop.prevent="togglePresetFavorite(preset.id)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
-                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
-                  <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
-                  <span style="font-size:0.78em; color:#666; display:flex; gap:0.6em;">
-                    <span>{{ formatPresetDate(preset.date) }}</span>
-                    <span v-if="preset.scaleExponent > 0" style="font-family:monospace;">{{ formatZoom(preset.scaleExponent) }}</span>
-                  </span>
-                </div>
-                <button class="delete is-small" style="flex-shrink:0;"
-                  @click.stop.prevent="deletePresetById(preset.id)"
-                  title="Delete this preset"></button>
-              </a>
+          <div class="info">
+            <div class="nm">{{ preset.name || formatPresetDate(preset.date) }}</div>
+            <div class="sub">
+              <span>{{ formatPresetDate(preset.date) }}</span>
+              <span v-if="preset.scaleExponent > 0" class="depth">{{ formatZoom(preset.scaleExponent) }}</span>
             </div>
           </div>
         </div>
-        <div class="field is-grouped" style="margin-top:0.8em;">
-          <div class="control is-expanded">
-            <input class="input" v-model="presetName" type="text" placeholder="Name (optional)..."
-              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-            />
-          </div>
-          <div class="control">
-            <button class="button is-link is-small" @click="savePreset"><i class="fa-solid fa-floppy-disk mr-1"></i> Save</button>
-          </div>
+        <div v-if="visiblePresets.length === 0" class="empty">
+          {{ showOnlyFavoritePresets ? 'No favorites yet — hover a card and tap the heart.' : 'No presets saved yet.' }}
         </div>
+      </div>
 
-        <!-- Import / Export Presets -->
-        <hr class="section-sep"/>
-        <label class="label">Import / Export</label>
-        <div class="field is-grouped">
-          <div class="control">
-            <button class="button is-info is-small" @click="exportPresets" :disabled="presets.length === 0">
-              <i class="fa-solid fa-download mr-1"></i> Export
-            </button>
-          </div>
-          <div class="control">
-            <button class="button is-info is-small is-light" @click="exportSelectedPreset" :disabled="!selectedPreset">
-              <i class="fa-solid fa-download mr-1"></i> Export Selected
-            </button>
-          </div>
-          <div class="control">
-            <button class="button is-info is-small" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0">
-              <i class="fa-solid fa-star mr-1"></i> Export Favorites
-            </button>
-          </div>
-          <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportPresets">
-              <i class="fa-solid fa-file-import mr-1"></i> Import
-            </button>
-            <input ref="presetFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPresets" />
-          </div>
-          <div class="control">
-            <button class="button is-danger is-small is-light" @click="deleteAllPresets" :disabled="presets.length === 0">
-              <i class="fa-solid fa-trash-can mr-1"></i> Delete All
-            </button>
-          </div>
-        </div>
+      <!-- ============ 3. TRANSFER ============ -->
+      <div class="section-label"><span class="tick"></span>Transfer</div>
+      <div class="transfer">
+        <button class="tbtn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
+        <button class="tbtn" @click="exportPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
+        <button class="tbtn" @click="exportSelectedPreset" :disabled="!selectedPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
+        <button class="tbtn" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
+        <button class="tbtn danger" @click="deleteAllPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete all</button>
+        <input ref="presetFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPresets" />
       </div>
     </div>
 
@@ -3458,13 +3483,34 @@ async function renameAndSaveSkyboxTexture() {
 .palette-subtabs {
   display: flex;
   flex-wrap: wrap;
-  gap: 0.3em;
-  margin-bottom: 0.75em;
+  gap: 6px;
+  margin-bottom: 18px;
 }
-.palette-subtab-button {
-  height: 26px;
-  padding: 0 0.65em;
-  font-size: 0.78rem;
+/* Canvas-style subtab pills (canvas/Palettes Panel — .subtab) */
+.palette-subtab-button.button {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  height: auto;
+  padding: 9px 15px;
+  border-radius: 11px;
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 13px;
+  color: var(--ink-2);
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  transition: 0.15s;
+}
+.palette-subtab-button.button.is-light:hover {
+  color: var(--ink);
+  background: var(--row-on);
+}
+.palette-subtab-button.button.is-link {
+  background: var(--accent);
+  color: #fff;
+  border-color: var(--accent);
+  box-shadow: 0 6px 18px -8px var(--accent);
 }
 .palette-top-controls {
   display: grid;
@@ -3748,5 +3794,745 @@ async function renameAndSaveSkyboxTexture() {
   color: oklch(0.60 0.18 20);
   font-weight: 500;
   white-space: nowrap;
+}
+
+/* =========================================================================
+   Canvas design system — shared by Navigation, Presets & Palettes panels
+   (mockups: canvas/Navigation Panel.html, Presets Panel.html, Palettes Panel)
+   ========================================================================= */
+.cv-body {
+  font-family: var(--sans);
+  color: var(--ink);
+}
+
+/* section label with gradient tick */
+.cv-body .section-label {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0.22em;
+  text-transform: uppercase;
+  color: var(--ink-3);
+  margin: 22px 0 4px;
+}
+.cv-body .section-label::after {
+  content: "";
+  flex: 1;
+  height: 1px;
+  background: var(--line-soft);
+}
+.cv-body .section-label .tick {
+  width: 6px;
+  height: 14px;
+  border-radius: 3px;
+  flex: none;
+  background: linear-gradient(180deg, var(--accent-bright), var(--mauve));
+}
+.cv-body .section-label:first-child {
+  margin-top: 0;
+}
+.cv-body .section-help {
+  font-size: 13.5px;
+  color: var(--ink-3);
+  margin: 2px 0 12px;
+  line-height: 1.4;
+}
+
+/* generic row : [label+sub] [control] [value] */
+.cv-body .frow {
+  display: grid;
+  grid-template-columns: 188px 1fr 110px;
+  align-items: center;
+  gap: 18px;
+  padding: 9px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+.cv-body .frow .lab .l1 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.2;
+}
+.cv-body .frow .lab .l2 {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 2px;
+  line-height: 1.3;
+}
+.cv-body .frow .val,
+.cv-body .coords .val {
+  font-family: var(--mono);
+  font-weight: 700;
+  font-size: 15px;
+  color: var(--ink);
+  text-align: right;
+  white-space: nowrap;
+}
+.cv-body .frow .val .unit {
+  font-size: 11px;
+  color: var(--ink-3);
+  margin-left: 2px;
+}
+
+/* coordinates card */
+.cv-body .coords {
+  display: grid;
+  grid-template-columns: 188px 1fr auto;
+  align-items: center;
+  gap: 18px;
+  padding: 12px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+.cv-body .coords .lab .l1 {
+  font-size: 15px;
+  font-weight: 600;
+}
+.cv-body .coords .lab .l2 {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 2px;
+}
+.cv-body .coords .vals {
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink-2);
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+}
+.cv-body .coords .vals .cline {
+  display: flex;
+  gap: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+}
+.cv-body .coords .vals .ax {
+  color: var(--ink-4);
+  flex: none;
+  width: 24px;
+}
+.cv-body .coords .vals .num {
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--ink);
+}
+.cv-body .copy {
+  width: 36px;
+  height: 36px;
+  border-radius: 9px;
+  border: 1px solid var(--line);
+  background: var(--row-on);
+  color: var(--ink-2);
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: 0.15s;
+  flex: none;
+}
+.cv-body .copy:hover {
+  color: var(--ink);
+  border-color: #333a47;
+}
+.cv-body .copy svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.8;
+}
+.cv-body .copy.ok {
+  color: oklch(0.78 0.16 150);
+  border-color: oklch(0.5 0.13 150 / 0.5);
+}
+
+/* sliders */
+.cv-body input[type=range] {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 6px;
+  background: var(--track);
+  border-radius: 999px;
+  outline: none;
+  cursor: pointer;
+}
+.cv-body input[type=range]::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  border: 3px solid #0b0d12;
+  box-shadow: 0 0 0 1px var(--accent), 0 4px 12px -2px var(--accent);
+  cursor: pointer;
+  transition: 0.12s;
+}
+.cv-body input[type=range]::-webkit-slider-thumb:hover {
+  transform: scale(1.12);
+}
+.cv-body input[type=range]::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  background: var(--accent-bright);
+  border: 3px solid #0b0d12;
+  box-shadow: 0 0 0 1px var(--accent);
+  cursor: pointer;
+}
+
+/* mu : slider + quick button */
+.cv-body .mu-ctl {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.cv-body .mu-ctl input {
+  flex: 1;
+}
+.cv-body .mu-quick {
+  flex: none;
+  background: #0b0d12;
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  color: var(--accent-bright);
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 700;
+  padding: 4px 10px;
+  cursor: pointer;
+  transition: 0.15s;
+}
+.cv-body .mu-quick:hover {
+  background: var(--row-on);
+  color: var(--ink);
+}
+
+/* toggle switch */
+.cv-body .toggle {
+  width: 46px;
+  height: 26px;
+  flex: none;
+  border-radius: 999px;
+  background: var(--track);
+  border: 1px solid var(--line);
+  position: relative;
+  cursor: pointer;
+  transition: 0.18s;
+}
+.cv-body .toggle::after {
+  content: "";
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 20px;
+  height: 20px;
+  border-radius: 50%;
+  background: #8a91a1;
+  transition: 0.18s;
+}
+.cv-body .toggle.on {
+  background: var(--accent);
+  border-color: var(--accent);
+}
+.cv-body .toggle.on::after {
+  left: 22px;
+  background: #fff;
+}
+.cv-body .trow {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 11px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+.cv-body .trow .lab {
+  flex: 1;
+}
+.cv-body .trow .lab .l1 {
+  font-size: 15px;
+  font-weight: 600;
+}
+.cv-body .trow .lab .l2 {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 2px;
+}
+
+/* library row : favorites filter + preset picker */
+.cv-body .lib-row {
+  display: flex;
+  gap: 10px;
+  margin-bottom: 8px;
+}
+.cv-body .lib-bar {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin-bottom: 12px;
+}
+.cv-body .count {
+  font-family: var(--mono);
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink-3);
+  margin-left: auto;
+}
+.cv-body .fav-filter {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 0 16px;
+  border-radius: 12px;
+  cursor: pointer;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  color: var(--ink-2);
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 14px;
+  transition: 0.15s;
+}
+.cv-body .lib-bar .fav-filter {
+  padding: 10px 16px;
+  border-radius: 11px;
+}
+.cv-body .fav-filter svg {
+  width: 16px;
+  height: 16px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 1.9;
+}
+.cv-body .fav-filter:hover {
+  color: var(--ink);
+}
+.cv-body .fav-filter.on {
+  color: var(--mauve-bright);
+  border-color: oklch(0.7 0.17 320 / 0.5);
+  background: oklch(0.7 0.17 320 / 0.12);
+}
+.cv-body .fav-filter.on svg {
+  fill: currentColor;
+}
+
+/* preset picker (rich dropdown styled as canvas select) */
+.cv-body .cv-dropdown {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.cv-body .cv-dropdown .dropdown-trigger {
+  width: 100%;
+}
+.cv-body .cv-select-trigger {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  width: 100%;
+  font-family: var(--sans);
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  background: #0b0d12;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 11px 40px 11px 12px;
+  cursor: pointer;
+  position: relative;
+  text-align: left;
+}
+.cv-body .cv-select-trigger:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.cv-body .cv-trigger-thumb {
+  height: 30px;
+  width: 52px;
+  object-fit: cover;
+  border-radius: 5px;
+  background: #222;
+  flex: none;
+}
+.cv-body .cv-trigger-label {
+  flex: 1 1 auto;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cv-body .cv-caret {
+  position: absolute;
+  right: 16px;
+  top: 50%;
+  transform: translateY(-60%) rotate(45deg);
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--ink-3);
+  border-bottom: 2px solid var(--ink-3);
+  pointer-events: none;
+}
+.cv-body .cv-dropdown-content {
+  max-height: 450px;
+  overflow-y: auto;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 12px;
+}
+
+/* load button */
+.cv-body .load-btn {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 10px;
+  padding: 12px;
+  border-radius: 12px;
+  border: 1px solid oklch(0.7 0.17 245 / 0.4);
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  transition: 0.15s;
+  margin-bottom: 4px;
+}
+.cv-body .load-btn:hover {
+  background: oklch(0.7 0.17 245 / 0.28);
+}
+.cv-body .load-btn svg {
+  width: 17px;
+  height: 17px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+.cv-body .load-btn:disabled {
+  opacity: 0.45;
+  cursor: default;
+}
+.cv-body .load-note {
+  font-size: 12px;
+  color: var(--ink-3);
+  text-align: center;
+  margin: 0 0 12px;
+}
+
+/* transfer group */
+.cv-body .transfer {
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  flex-wrap: wrap;
+  padding: 12px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+}
+.cv-body .transfer .tlab {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--ink-4);
+  flex: none;
+  margin-right: 4px;
+}
+.cv-body .tbtn {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 9px 15px;
+  border-radius: 9px;
+  cursor: pointer;
+  font-family: var(--sans);
+  font-weight: 600;
+  font-size: 13.5px;
+  transition: 0.15s;
+  background: var(--row-on);
+  color: var(--ink-2);
+  border: 1px solid var(--line);
+}
+.cv-body .tbtn:hover {
+  color: var(--ink);
+  border-color: #333a47;
+}
+.cv-body .tbtn svg {
+  width: 15px;
+  height: 15px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+.cv-body .tbtn.primary {
+  background: linear-gradient(110deg, var(--accent), var(--mauve));
+  color: #fff;
+  border-color: transparent;
+  box-shadow: 0 6px 18px -8px var(--mauve);
+}
+.cv-body .tbtn.primary:hover {
+  filter: brightness(1.1);
+}
+.cv-body .tbtn:disabled {
+  opacity: 0.4;
+  cursor: default;
+  pointer-events: none;
+}
+.cv-body .tbtn.danger {
+  margin-left: auto;
+  color: var(--red);
+  border-color: oklch(0.5 0.15 25 / 0.5);
+  background: oklch(0.45 0.18 25 / 0.12);
+}
+.cv-body .tbtn.danger:hover {
+  background: oklch(0.5 0.2 25 / 0.22);
+  color: oklch(0.72 0.22 25);
+}
+
+/* save current view */
+.cv-body .save-row {
+  display: flex;
+  gap: 10px;
+}
+.cv-body .txt-in {
+  flex: 1;
+  font-family: var(--sans);
+  font-size: 15px;
+  color: var(--ink);
+  background: #0b0d12;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  padding: 13px 16px;
+}
+.cv-body .txt-in::placeholder {
+  color: var(--ink-4);
+}
+.cv-body .txt-in:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.cv-body .save-btn {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  flex: none;
+  padding: 0 22px;
+  border-radius: 12px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background:
+    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 45%),
+    linear-gradient(110deg, var(--accent), var(--mauve));
+  color: #fff;
+  font-family: var(--sans);
+  font-weight: 700;
+  font-size: 15px;
+  cursor: pointer;
+  box-shadow: 0 8px 22px -10px var(--mauve);
+  transition: 0.15s;
+}
+.cv-body .save-btn:hover {
+  filter: brightness(1.08);
+}
+.cv-body .save-btn svg {
+  width: 17px;
+  height: 17px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+
+/* preset card grid */
+.cv-body .grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 10px;
+  max-height: 436px;
+  overflow-y: auto;
+  padding: 2px 6px 2px 2px;
+  overscroll-behavior: contain;
+}
+.cv-body .grid::-webkit-scrollbar {
+  width: 8px;
+}
+.cv-body .grid::-webkit-scrollbar-thumb {
+  background: #2a2f3b;
+  border-radius: 8px;
+}
+.cv-body .grid::-webkit-scrollbar-track {
+  background: transparent;
+}
+.cv-body .card {
+  position: relative;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 13px;
+  overflow: hidden;
+  cursor: pointer;
+  transition: border-color 0.15s, transform 0.15s, box-shadow 0.15s;
+}
+.cv-body .card:hover {
+  border-color: #333a47;
+  transform: translateY(-2px);
+}
+.cv-body .card.sel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent), 0 10px 30px -14px var(--accent);
+}
+.cv-body .card .thumb {
+  width: 100%;
+  aspect-ratio: 16 / 10;
+  display: block;
+  background: #000;
+  object-fit: cover;
+}
+.cv-body .card .thumb-empty {
+  background: linear-gradient(135deg, #14171f, #0c0e14);
+}
+.cv-body .card .info {
+  padding: 10px 12px 11px;
+}
+.cv-body .card .nm {
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.cv-body .card .sub {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 3px;
+  font-size: 12px;
+  color: var(--ink-3);
+}
+.cv-body .card .depth {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-bright);
+  background: var(--accent-soft);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+.cv-body .acts {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  display: flex;
+  gap: 6px;
+  opacity: 0;
+  transform: translateY(-3px);
+  transition: 0.15s;
+}
+.cv-body .card:hover .acts {
+  opacity: 1;
+  transform: none;
+}
+.cv-body .abtn {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.14);
+  background: rgba(8, 10, 15, 0.72);
+  backdrop-filter: blur(8px);
+  color: #fff;
+  cursor: pointer;
+  display: grid;
+  place-items: center;
+  transition: 0.13s;
+}
+.cv-body .abtn svg {
+  width: 15px;
+  height: 15px;
+  stroke: currentColor;
+  fill: none;
+  stroke-width: 2;
+}
+.cv-body .abtn:hover {
+  background: rgba(20, 24, 33, 0.9);
+}
+.cv-body .abtn.heart.faved {
+  color: var(--mauve-bright);
+  opacity: 1;
+}
+.cv-body .card .abtn.heart.faved {
+  opacity: 1;
+}
+.cv-body .abtn.heart.faved svg {
+  fill: currentColor;
+}
+.cv-body .abtn.del:hover {
+  color: var(--red);
+  border-color: oklch(0.5 0.15 25 / 0.6);
+}
+.cv-body .sel-badge {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: #fff;
+  background: var(--accent);
+  border-radius: 6px;
+  padding: 3px 8px;
+  display: none;
+  z-index: 1;
+}
+.cv-body .card.sel .sel-badge {
+  display: block;
+}
+.cv-body .empty {
+  grid-column: 1 / -1;
+  text-align: center;
+  color: var(--ink-3);
+  font-size: 14px;
+  padding: 40px 0;
+}
+
+@media (max-width: 720px) {
+  .cv-body .grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}
+@media (max-width: 520px) {
+  .cv-body .frow {
+    grid-template-columns: 1fr 90px;
+  }
+  .cv-body .frow .lab {
+    grid-column: 1 / -1;
+  }
+  .cv-body .coords {
+    grid-template-columns: 1fr auto;
+  }
+  .cv-body .coords .lab {
+    grid-column: 1 / -1;
+  }
+  .cv-body .grid {
+    grid-template-columns: 1fr;
+  }
+  .cv-body .save-row {
+    flex-direction: column;
+  }
+  .cv-body .transfer {
+    flex-wrap: wrap;
+  }
 }
 </style>
