@@ -73,8 +73,8 @@ test.describe("Mandelbrot navigation", () => {
     const bar = page.locator(".top-settings-bar");
     await expect(bar).toBeVisible();
 
-    const buttons = page.locator(".top-tab-btn:not(.camera-btn)");
-    await expect(buttons).toHaveCount(5);
+    const buttons = page.locator(".top-tab-btn:not(.auth-btn)");
+    await expect(buttons).toHaveCount(6);
 
     // Verify tab labels
     const labels = await buttons.allTextContents();
@@ -83,9 +83,10 @@ test.describe("Mandelbrot navigation", () => {
       expect.arrayContaining([
         "Navigation",
         "Presets",
-        "Graphics",
+        "Performance",
         "Animation",
         "Palettes",
+        "Screenshot",
       ]),
     );
   });
@@ -159,7 +160,7 @@ test.describe("Mandelbrot navigation", () => {
 
     await page.locator(".top-tab-btn", { hasText: "Palettes" }).click();
     const palettesPopup = page.locator(".settings-popup", { hasText: "Palettes" });
-    await palettesPopup.getByRole("button", { name: "Motion / Cycle" }).click();
+    await palettesPopup.getByRole("button", { name: "Cycle" }).click();
     await expect(palettesPopup.getByText("Length")).toBeVisible();
     await expect(palettesPopup.getByRole("button", { name: /Drift/i })).toHaveCount(0);
     await expect(palettesPopup.getByText("Drift Speed")).toHaveCount(0);

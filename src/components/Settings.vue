@@ -6,7 +6,10 @@ import {
   stripSessionPerformanceFields,
 } from "../Mandelbrot.ts";
 import type {ColorStop} from '../ColorStop.ts';
+import {createInterpolatedColorStop} from '../ColorStop.ts';
 import PaletteEditor from './PaletteEditor.vue';
+import PalettePreview from './PalettePreview.vue';
+import GlissiereHandle from './GlissiereHandle.vue';
 import AnimationPanel from './AnimationPanel.vue';
 import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
@@ -365,6 +368,43 @@ const selectedPalette = ref('');
 const showPaletteDropdown = ref(false);
 const applyToAll = ref(false);
 
+const MAX_COLORS = 200;
+const previewRef = ref<InstanceType<typeof PalettePreview> | null>(null);
+const selectedIdx = ref<number | null>(0);
+
+watch(() => model.value.colorStops.length, (newLen, oldLen) => {
+  if (newLen > oldLen) {
+    selectedIdx.value = newLen - 1;
+  }
+});
+
+function selectColor(idx: number) {
+  selectedIdx.value = idx;
+}
+
+function deleteSelectedStop() {
+  if (selectedIdx.value === null) return;
+  if (model.value.colorStops.length <= 2) return; // garder au moins 2 stops
+  model.value.colorStops.splice(selectedIdx.value, 1);
+  // Ajuster la sélection
+  if (selectedIdx.value >= model.value.colorStops.length) {
+    selectedIdx.value = model.value.colorStops.length - 1;
+  }
+}
+
+function onPreviewDblClick(event: MouseEvent) {
+  if (model.value.colorStops.length >= MAX_COLORS) return;
+  const canvas = previewRef.value?.canvasRef;
+  if (!canvas) return;
+  const rect = canvas.getBoundingClientRect();
+  let t = (event.clientX - rect.left) / rect.width;
+  t = Math.max(0, Math.min(1, t));
+  const pal = new Palette(model.value.colorStops, model.value.interpolationMode);
+  const sampledColor = pal.getColorAt(t);
+  const newStop = createInterpolatedColorStop(model.value.colorStops, t, sampledColor);
+  model.value.colorStops.push(newStop);
+  selectedIdx.value = model.value.colorStops.length - 1;
+}
 
 
 async function deletePresetById(id: number) {
@@ -596,7 +636,7 @@ async function savePalette() {
   let now = new Date().toISOString();
   // Try WebGPU snapshot first (shows effects), fall back to CPU gradient strip
   try {
-    const snap = paletteEditorRef.value?.getSnapshot?.();
+    const snap = previewRef.value?.getSnapshot?.();
     if (snap) {
       thumbnail = snap;
     } else {
@@ -1313,14 +1353,14 @@ const interpolationModes: { key: InterpolationMode; label: string }[] = [
 ];
 
 const paletteSubTabs = [
-  { key: 'stops', label: 'Stops' },
-  { key: 'color', label: 'Color' },
-  { key: 'motionCycle', label: 'Motion / Cycle' },
-  { key: 'surfaceMaterial', label: 'Surface / Material' },
-  { key: 'imageEnvironment', label: 'Image / Env' },
-  { key: 'library', label: 'Library' },
+  { key: 'library', label: 'Library', icon: 'fa-solid fa-swatchbook' },
+  { key: 'stops', label: 'Stops Settings', icon: 'fa-solid fa-sliders' },
+  { key: 'surfaceMaterial', label: 'Global Settings', icon: 'fa-solid fa-globe' },
+  { key: 'motionCycle', label: 'Cycle', icon: 'fa-solid fa-arrows-rotate' },
+  { key: 'imageEnvironment', label: 'Texture', icon: 'fa-solid fa-image' },
+  { key: 'color', label: 'Color', icon: 'fa-solid fa-rainbow' },
 ] as const;
-const activePaletteSubTab = ref<(typeof paletteSubTabs)[number]['key']>('stops');
+const activePaletteSubTab = ref<(typeof paletteSubTabs)[number]['key']>('library');
 
 // =====================================================
 // Palette Manipulation Tools
@@ -2099,6 +2139,87 @@ async function renameAndSaveSkyboxTexture() {
 
     <!-- Palettes tab -->
     <div v-else-if="activeTab === 'palettes'">
+      <!-- ═══ Pipette + outils compact ═══ -->
+      <div class="top-bar mb-2 mt-2">
+        <div class="color-picker-row">
+          <button
+            class="pipette-btn"
+            :class="{ 'is-active': props.pickerMode }"
+            :title="props.pickerMode ? 'Exit pipette mode (Escape)' : 'Pipette: click on the fractal'"
+            @click="emit('toggle-picker')"
+          >
+            <i class="fa-solid fa-eye-dropper fa-fw"></i>
+          </button>
+          <span v-if="props.pickerMode" class="picker-hint">Click on the fractal&hellip;</span>
+        </div>
+        <div class="outils-bar">
+          <button class="button is-small is-light outils-btn" @click="invertPalette" title="Reverse order">
+            <i class="fa-solid fa-arrow-right-arrow-left fa-fw"></i>
+          </button>
+          <button class="button is-small is-light outils-btn" @click="negatePalette" title="Negate RGB">
+            <i class="fa-solid fa-circle-half-stroke fa-fw"></i>
+          </button>
+          <button class="button is-small is-light outils-btn" @click="duplicatePalette" title="Duplicate 2x">
+            <i class="fa-regular fa-copy fa-fw"></i>
+          </button>
+          <button class="button is-small is-light outils-btn" @click="mirrorPalette" title="Mirror (palindrome)">
+            <i class="fa-solid fa-arrows-left-right fa-fw"></i>
+          </button>
+          <button class="button is-small is-light outils-btn" @click="distributeEvenly" title="Distribute evenly">
+            <i class="fa-solid fa-align-justify fa-fw"></i>
+          </button>
+          <button class="button is-small is-danger is-light outils-btn" @click="clearPalette" title="Clear entire palette">
+            <i class="fa-solid fa-trash-can fa-fw"></i>
+          </button>
+        </div>
+      </div>
+
+      <!-- WebGPU preview with handles overlaid -->
+      <div class="canvas-row mb-3" style="position:relative;" @dblclick="onPreviewDblClick" title="Double-click to add a color stop">
+        <PalettePreview
+          ref="previewRef"
+          :colorStops="model.colorStops"
+          :interpolationMode="model.interpolationMode"
+          :tileTextureUrl="activeBlobUrl"
+          :skyboxTextureUrl="activeSkyboxBlobUrl"
+          :tessellationLevel="model.tessellationLevel"
+          :displacementAmount="model.displacementAmount"
+          :ambientOcclusionStrength="model.ambientOcclusionStrength"
+          :microBumpStrength="model.microBumpStrength"
+          :subsurfaceStrength="model.subsurfaceStrength"
+          :reliefDepth="model.reliefDepth"
+          :localShadowStrength="model.localShadowStrength"
+          :varnishStrength="model.varnishStrength"
+          :orbitTrapStrength="model.orbitTrapStrength"
+          :phaseColoringStrength="model.phaseColoringStrength"
+          :textureMapping="model.textureMapping"
+        />
+        <div class="canvas-shadow-overlay"></div>
+        <div class="handles-overlay">
+          <GlissiereHandle
+            v-for="(stop, idx) in model.colorStops"
+            :key="'handle-' + idx"
+            :stop="stop"
+            :selected="!applyToAll && selectedIdx === idx"
+            :highlighted="applyToAll"
+            :disabled="applyToAll"
+            @update:position="t => model.colorStops[idx].position = t"
+            @select="selectColor(idx)"
+          />
+          <!-- Bouton supprimer flottant au-dessus du curseur sélectionné -->
+          <button
+            v-if="!applyToAll && selectedIdx !== null && model.colorStops.length > 2"
+            class="floating-delete-btn"
+            :style="{ left: model.colorStops[selectedIdx]?.position * 100 + '%' }"
+            title="Delete this stop"
+            @mousedown.stop
+            @click.stop="deleteSelectedStop"
+          >
+            &times;
+          </button>
+        </div>
+      </div>
+
       <div class="palette-subtabs">
         <button
           v-for="tab in paletteSubTabs"
@@ -2108,6 +2229,7 @@ async function renameAndSaveSkyboxTexture() {
           type="button"
           @click="activePaletteSubTab = tab.key"
         >
+          <i :class="[tab.icon, 'mr-1']" aria-hidden="true"></i>
           {{ tab.label }}
         </button>
       </div>
@@ -2117,6 +2239,7 @@ async function renameAndSaveSkyboxTexture() {
           <PaletteEditor
             ref="paletteEditorRef"
             :color-stops="model.colorStops"
+            :selected-idx="selectedIdx"
             :interpolation-mode="model.interpolationMode"
             :picker-mode="props.pickerMode"
             :tile-texture-url="activeBlobUrl"
@@ -2133,36 +2256,13 @@ async function renameAndSaveSkyboxTexture() {
             :phase-coloring-strength="model.phaseColoringStrength"
             :texture-mapping="model.textureMapping"
             :is-admin="isAdmin"
-            :engine-device="props.engine?.device"
-            :engine-tile-texture="props.engine?.tileTexture"
-            :engine-skybox-texture="props.engine?.skyboxTexture"
-            :engine-webcam-texture="props.engine?.webcamTileTexture"
             v-model:apply-to-all="applyToAll"
-            @toggle-picker="emit('toggle-picker')"
-            @invert="invertPalette"
-            @negate="negatePalette"
-            @duplicate="duplicatePalette"
-            @mirror="mirrorPalette"
-            @distribute="distributeEvenly"
-            @clear="clearPalette"
           />
         </div>
       </section>
 
       <section v-show="activePaletteSubTab === 'motionCycle'">
       <div class="palette-top-controls">
-        <button
-          class="button is-small palette-icon-toggle"
-          :class="{ 'is-active': model.debugShading }"
-          type="button"
-          :aria-pressed="model.debugShading"
-          title="Show shading debug sectors"
-          @click="model.debugShading = !model.debugShading"
-        >
-          <i class="fas fa-bug" aria-hidden="true"></i>
-          <span>Debug</span>
-        </button>
-
         <button
           class="button is-small palette-icon-toggle"
           :class="{ 'is-active': model.paletteMirror }"
@@ -2800,6 +2900,18 @@ async function renameAndSaveSkyboxTexture() {
         <span class="gfx-slider-label">Max GPU load</span>
         <input class="slider" type="range" min="0.25" max="4" step="0.25" v-model.number="model.gpuLoadMultiplier" />
         <span class="gfx-slider-value">&times;{{ (model.gpuLoadMultiplier ?? 1.0).toFixed(2) }}</span>
+      </div>
+
+      <hr class="section-sep" />
+
+      <!-- ═══ ADVANCED ═══ -->
+      <label class="gfx-section-title">Advanced</label>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label">Debug Shading</span>
+        <div style="flex: 1 1 auto; display: flex; align-items: center;">
+          <input type="checkbox" v-model="model.debugShading" />
+        </div>
+        <span class="gfx-slider-value">{{ model.debugShading ? 'On' : 'Off' }}</span>
       </div>
     </div>
   </div>
@@ -3529,5 +3641,112 @@ async function renameAndSaveSkyboxTexture() {
 .favorite-filter-heart {
   line-height: 1;
   color: inherit;
+}
+/* ── Palette preview toolbar styles ── */
+.top-bar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 0.5em;
+  flex-wrap: wrap;
+}
+.color-picker-row {
+  display: flex;
+  align-items: center;
+  gap: 0.5em;
+}
+.outils-bar {
+  display: flex;
+  gap: 0.2em;
+}
+.outils-btn {
+  font-size: 0.72em !important;
+  padding: 0.2em 0.5em !important;
+  min-width: 0 !important;
+}
+
+.canvas-row {
+  display: flex;
+  justify-content: center;
+  overflow: visible;
+  position: relative;
+  height: 80px;
+  border-radius: 12px;
+}
+.canvas-shadow-overlay {
+  position: absolute;
+  inset: 0;
+  border-radius: 12px;
+  pointer-events: none;
+  box-shadow: 0 8px 26px -12px #000 inset, 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
+  z-index: 2;
+}
+.handles-overlay {
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 100%;
+  pointer-events: none;
+  z-index: 3;
+}
+.floating-delete-btn {
+  position: absolute;
+  top: -24px;
+  transform: translateX(-50%);
+  width: 24px;
+  height: 24px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+  color: oklch(0.70 0.18 20);
+  font-size: 0.95em;
+  font-weight: 600;
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  pointer-events: auto;
+  z-index: 20;
+  line-height: 1;
+  padding: 0;
+  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
+  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s;
+}
+.floating-delete-btn:hover {
+  border-color: oklch(0.60 0.18 20);
+  background: oklch(0.60 0.18 20);
+  color: #fff;
+  box-shadow: 0 3px 8px rgba(195, 68, 68, 0.32);
+  transform: translateX(-50%) translateY(-1px);
+}
+.pipette-btn {
+  width: 30px;
+  height: 30px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  background: var(--row);
+  color: var(--ink);
+  cursor: pointer;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+  flex-shrink: 0;
+}
+.pipette-btn:hover {
+  background: var(--panel-2);
+  border-color: var(--ink-3);
+}
+.pipette-btn.is-active {
+  background: oklch(0.60 0.18 20);
+  border-color: oklch(0.60 0.18 20);
+  color: #fff;
+}
+.picker-hint {
+  font-size: 0.82em;
+  color: oklch(0.60 0.18 20);
+  font-weight: 500;
+  white-space: nowrap;
 }
 </style>

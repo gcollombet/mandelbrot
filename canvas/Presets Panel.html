@@ -1,0 +1,420 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Presets — Panneau réorganisé</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<style>
+  :root{
+    --bg-0:#07080d;
+    --row:#171a23;
+    --row-on:#1b2330;
+    --line:#23272f;
+    --line-soft:#1b1e26;
+    --ink:#f2f4f8;
+    --ink-2:#aeb4c2;
+    --ink-3:#646b7c;
+    --ink-4:#414757;
+    --accent:oklch(0.70 0.17 245);
+    --accent-bright:oklch(0.78 0.16 240);
+    --accent-soft:oklch(0.70 0.17 245 / 0.16);
+    --mauve:oklch(0.70 0.17 320);
+    --mauve-bright:oklch(0.77 0.15 322);
+    --red:oklch(0.65 0.2 25);
+    --track:#272b35;
+    --mono:"JetBrains Mono",ui-monospace,monospace;
+    --sans:"Space Grotesk",system-ui,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0;}
+  body{
+    font-family:var(--sans);
+    background:
+      radial-gradient(1400px 900px at 50% -10%, #0d0f16, transparent 70%),
+      var(--bg-0);
+    color:var(--ink);
+    min-height:100vh;
+    display:flex;flex-direction:column;align-items:center;
+    padding:36px 20px 70px;
+    -webkit-font-smoothing:antialiased;
+  }
+  body > *{flex:0 0 auto;}
+
+  .panel{
+    width:min(880px,100%);
+    background:
+      radial-gradient(700px 420px at 88% -18%, oklch(0.62 0.16 250 / 0.34), transparent 62%),
+      radial-gradient(580px 440px at 4% 118%, oklch(0.62 0.17 320 / 0.26), transparent 58%),
+      linear-gradient(180deg, rgba(22,25,34,0.90), rgba(16,18,24,0.92));
+    backdrop-filter:blur(26px) saturate(1.1);
+    -webkit-backdrop-filter:blur(26px) saturate(1.1);
+    border:1px solid var(--line);
+    border-radius:18px;
+    box-shadow:0 40px 90px -30px rgba(0,0,0,0.8), 0 0 0 1px rgba(255,255,255,0.04) inset;
+    overflow:hidden;
+  }
+  .panel-head{
+    display:flex;align-items:center;justify-content:space-between;
+    padding:13px 24px;border-bottom:1px solid var(--line);
+    background:rgba(0,0,0,0.18);
+  }
+  .panel-head .title{display:flex;align-items:center;gap:13px;}
+  .panel-head h1{font-size:18px;font-weight:700;letter-spacing:0.16em;text-transform:uppercase;}
+  .panel-head .dot{width:9px;height:9px;border-radius:50%;background:var(--mauve-bright);box-shadow:0 0 14px var(--mauve);}
+  .close{
+    width:32px;height:32px;border-radius:9px;border:1px solid var(--line);
+    background:var(--row);color:var(--ink-2);cursor:pointer;font-size:16px;
+    display:grid;place-items:center;transition:.16s;
+  }
+  .close:hover{color:var(--ink);background:#202531;}
+
+  .panel-body{padding:20px 24px 24px;}
+
+  .section-label{
+    display:flex;align-items:center;gap:12px;
+    font-size:13px;font-weight:700;letter-spacing:0.22em;text-transform:uppercase;
+    color:var(--ink-3);
+    margin:22px 0 4px;
+  }
+  .section-label::after{content:"";flex:1;height:1px;background:var(--line-soft);}
+  .section-label .tick{width:6px;height:14px;border-radius:3px;flex:none;
+    background:linear-gradient(180deg,var(--accent-bright),var(--mauve));}
+  .section-label:first-child{margin-top:0;}
+  .section-help{font-size:13.5px;color:var(--ink-3);margin:2px 0 12px;line-height:1.4;}
+
+  /* ---------- save current ---------- */
+  .save-row{display:flex;gap:10px;}
+  .txt-in{
+    flex:1;font-family:var(--sans);font-size:15px;color:var(--ink);
+    background:#0b0d12;border:1px solid var(--line);border-radius:12px;padding:13px 16px;
+  }
+  .txt-in::placeholder{color:var(--ink-4);}
+  .txt-in:focus{outline:none;border-color:var(--accent);}
+  .save-btn{
+    display:flex;align-items:center;gap:9px;flex:none;
+    padding:0 22px;border-radius:12px;border:1px solid rgba(255,255,255,0.14);
+    background:
+      linear-gradient(180deg, rgba(255,255,255,0.14), rgba(255,255,255,0) 45%),
+      linear-gradient(110deg, var(--accent), var(--mauve));
+    color:#fff;font-family:var(--sans);font-weight:700;font-size:15px;cursor:pointer;
+    box-shadow:0 8px 22px -10px var(--mauve);
+    transition:.15s;
+  }
+  .save-btn:hover{filter:brightness(1.08);}
+  .save-btn svg{width:17px;height:17px;stroke:currentColor;fill:none;stroke-width:2;}
+
+  /* ---------- library toolbar ---------- */
+  .lib-bar{display:flex;align-items:center;gap:10px;margin-bottom:12px;}
+  .fav-filter{
+    display:flex;align-items:center;gap:8px;flex:none;
+    padding:10px 16px;border-radius:11px;cursor:pointer;
+    background:var(--row);border:1px solid var(--line-soft);
+    color:var(--ink-2);font-family:var(--sans);font-weight:600;font-size:14px;
+    transition:.15s;
+  }
+  .fav-filter svg{width:16px;height:16px;stroke:currentColor;fill:none;stroke-width:1.9;}
+  .fav-filter:hover{color:var(--ink);}
+  .fav-filter.on{color:var(--mauve-bright);border-color:oklch(0.7 0.17 320 / .5);background:oklch(0.7 0.17 320 / .12);}
+  .fav-filter.on svg{fill:currentColor;}
+  .count{font-family:var(--mono);font-size:12.5px;font-weight:600;color:var(--ink-3);margin-left:auto;}
+
+  /* ---------- preset grid (inline, scrolls INSIDE the panel) ---------- */
+  .grid{
+    display:grid;grid-template-columns:repeat(3,1fr);gap:10px;
+    max-height:436px;overflow-y:auto;
+    padding:2px 6px 2px 2px;
+    overscroll-behavior:contain;
+  }
+  .grid::-webkit-scrollbar{width:8px;}
+  .grid::-webkit-scrollbar-thumb{background:#2a2f3b;border-radius:8px;}
+  .grid::-webkit-scrollbar-track{background:transparent;}
+
+  .card{
+    position:relative;
+    background:var(--row);border:1px solid var(--line-soft);border-radius:13px;
+    overflow:hidden;cursor:pointer;
+    transition:border-color .15s, transform .15s, box-shadow .15s;
+  }
+  .card:hover{border-color:#333a47;transform:translateY(-2px);}
+  .card.sel{
+    border-color:var(--accent);
+    box-shadow:0 0 0 1px var(--accent), 0 10px 30px -14px var(--accent);
+  }
+  .thumb{width:100%;aspect-ratio:16/10;display:block;background:#000;}
+  .card .info{padding:10px 12px 11px;}
+  .card .nm{
+    font-size:14px;font-weight:600;color:var(--ink);
+    white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+  }
+  .card .sub{
+    display:flex;align-items:center;gap:8px;margin-top:3px;
+    font-size:12px;color:var(--ink-3);
+  }
+  .card .depth{
+    font-family:var(--mono);font-size:11px;font-weight:600;color:var(--accent-bright);
+    background:var(--accent-soft);border-radius:5px;padding:1px 6px;
+  }
+  /* hover actions */
+  .acts{
+    position:absolute;top:8px;right:8px;display:flex;gap:6px;
+    opacity:0;transform:translateY(-3px);
+    transition:.15s;
+  }
+  .card:hover .acts,.card .abtn.faved{opacity:1;transform:none;}
+  .abtn{
+    width:30px;height:30px;border-radius:8px;border:1px solid rgba(255,255,255,0.14);
+    background:rgba(8,10,15,0.72);backdrop-filter:blur(8px);
+    color:#fff;cursor:pointer;display:grid;place-items:center;transition:.13s;
+  }
+  .abtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;}
+  .abtn:hover{background:rgba(20,24,33,0.9);}
+  .abtn.heart.faved{color:var(--mauve-bright);opacity:1;}
+  .abtn.heart.faved svg{fill:currentColor;}
+  .abtn.del:hover{color:var(--red);border-color:oklch(0.5 0.15 25 / .6);}
+  /* selected badge */
+  .sel-badge{
+    position:absolute;top:8px;left:8px;
+    font-size:11px;font-weight:700;letter-spacing:.08em;text-transform:uppercase;
+    color:#fff;background:var(--accent);border-radius:6px;padding:3px 8px;
+    display:none;
+  }
+  .card.sel .sel-badge{display:block;}
+
+  .empty{
+    grid-column:1 / -1;text-align:center;color:var(--ink-3);font-size:14px;
+    padding:40px 0;
+  }
+
+  /* ---------- transfer footer ---------- */
+  .transfer{
+    display:flex;gap:10px;align-items:center;flex-wrap:wrap;
+    padding:12px 16px;background:var(--row);border:1px solid var(--line-soft);border-radius:12px;
+  }
+  .transfer .tlab{font-size:12px;font-weight:700;letter-spacing:.16em;text-transform:uppercase;
+    color:var(--ink-4);flex:none;margin-right:4px;}
+  .tbtn{
+    display:flex;align-items:center;gap:8px;
+    padding:9px 15px;border-radius:9px;cursor:pointer;
+    font-family:var(--sans);font-weight:600;font-size:13.5px;transition:.15s;
+    background:var(--row-on);color:var(--ink-2);border:1px solid var(--line);
+  }
+  .tbtn:hover{color:var(--ink);border-color:#333a47;}
+  .tbtn svg{width:15px;height:15px;stroke:currentColor;fill:none;stroke-width:2;}
+  .tbtn.primary{
+    background:linear-gradient(110deg, var(--accent), var(--mauve));
+    color:#fff;border-color:transparent;
+    box-shadow:0 6px 18px -8px var(--mauve);
+  }
+  .tbtn.primary:hover{filter:brightness(1.1);}
+  .tbtn:disabled{opacity:.4;cursor:default;pointer-events:none;}
+  .tbtn.danger{
+    margin-left:auto;
+    color:var(--red);border-color:oklch(0.5 0.15 25 / .5);background:oklch(0.45 0.18 25 / .12);
+  }
+  .tbtn.danger:hover{background:oklch(0.5 0.2 25 / .22);color:oklch(0.72 0.22 25);}
+
+  @media (max-width:720px){
+    .grid{grid-template-columns:repeat(2,1fr);}
+  }
+  @media (max-width:480px){
+    .grid{grid-template-columns:1fr;}
+    .save-row{flex-direction:column;}
+    .save-btn{padding:13px;justify-content:center;}
+  }
+</style>
+</head>
+<body>
+
+  <section class="panel" data-screen-label="Presets — réorganisé">
+    <header class="panel-head">
+      <div class="title"><span class="dot"></span><h1>Presets</h1></div>
+      <button class="close" aria-label="Fermer">✕</button>
+    </header>
+
+    <div class="panel-body">
+
+      <!-- ============ 1. SAVE CURRENT VIEW ============ -->
+      <div class="section-label"><span class="tick"></span>Save current view</div>
+      <p class="section-help">Captures everything — location, palette and render settings.</p>
+      <div class="save-row">
+        <input class="txt-in" id="saveName" placeholder="Name (optional)…">
+        <button class="save-btn" id="saveBtn">
+          <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
+          Save
+        </button>
+      </div>
+
+      <!-- ============ 2. LIBRARY ============ -->
+      <div class="section-label"><span class="tick"></span>Library</div>
+      <p class="section-help">Click a preset to apply it. Hover a card for actions — favorite, export, delete.</p>
+
+      <div class="lib-bar">
+        <button class="fav-filter" id="favBtn">
+          <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+          Favorites
+        </button>
+        <span class="count" id="count"></span>
+      </div>
+
+      <div class="grid" id="grid"></div>
+
+      <!-- ============ 3. TRANSFER ============ -->
+      <div class="section-label"><span class="tick"></span>Transfer</div>
+      <div class="transfer">
+        <button class="tbtn primary"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
+        <button class="tbtn"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
+        <button class="tbtn" id="expSel" disabled><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
+        <button class="tbtn"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
+        <button class="tbtn danger"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete all</button>
+      </div>
+
+    </div>
+  </section>
+
+<script>
+  /* ---------- data ---------- */
+  const PRESETS = [
+    {name:"Silver Starburst",  date:"10 juin 2026 22:36", depth:"10^30", fav:true,  cr:-0.79, ci:0.15,  pal:[[20,22,40],[120,140,200],[235,240,250],[60,70,120]]},
+    {name:"Magenta Filaments", date:"10 juin 2026 22:34", depth:"10^28", fav:false, cr:-0.16, ci:0.66,  pal:[[20,2,24],[150,10,160],[255,60,255],[60,0,80]]},
+    {name:"2026-06-10T20:31:08.114Z", date:"10 juin 2026 22:31", depth:"10^15", fav:false, cr:0.285, ci:0.01, pal:[[5,10,8],[30,110,60],[250,246,227],[176,18,63]]},
+    {name:"Golden Tide",       date:"9 juin 2026 18:02",  depth:"10^21", fav:true,  cr:-0.835,ci:-0.232,pal:[[25,12,2],[200,140,30],[255,236,180],[120,60,10]]},
+    {name:"Deep Indigo Spiral",date:"9 juin 2026 17:40",  depth:"10^33", fav:false, cr:-0.745,ci:0.113, pal:[[8,8,28],[60,70,180],[170,190,255],[20,20,70]]},
+    {name:"Crimson Reef",      date:"8 juin 2026 21:15",  depth:"10^18", fav:false, cr:-0.62, ci:-0.44, pal:[[30,4,10],[176,18,63],[255,160,180],[80,10,30]]},
+  ];
+
+  /* ---------- tiny julia thumbnail renderer ---------- */
+  function renderThumb(canvas, cr, ci, pal){
+    const W = canvas.width, H = canvas.height;
+    const ctx = canvas.getContext('2d');
+    const img = ctx.createImageData(W,H);
+    function col(t){
+      t = t - Math.floor(t);
+      const x = t*(pal.length-1), i = Math.floor(x), f = x-i;
+      const a = pal[i], b = pal[Math.min(i+1,pal.length-1)];
+      return [a[0]+(b[0]-a[0])*f, a[1]+(b[1]-a[1])*f, a[2]+(b[2]-a[2])*f];
+    }
+    let p = 0;
+    const maxIt = 80, asp = W/H;
+    for(let y=0;y<H;y++){
+      for(let x=0;x<W;x++){
+        let zr = (x/W - 0.5)*3.0*asp, zi = (y/H - 0.5)*3.0;
+        let i = 0;
+        while(i<maxIt && zr*zr+zi*zi<9){
+          const t = zr*zr - zi*zi + cr;
+          zi = 2*zr*zi + ci; zr = t; i++;
+        }
+        if(i>=maxIt){ img.data[p]=0;img.data[p+1]=0;img.data[p+2]=0; }
+        else{
+          const nu = i + 1 - Math.log2(Math.log2(zr*zr+zi*zi)/2 || 1);
+          const c = col(nu*0.04);
+          img.data[p]=c[0];img.data[p+1]=c[1];img.data[p+2]=c[2];
+        }
+        img.data[p+3]=255;p+=4;
+      }
+    }
+    ctx.putImageData(img,0,0);
+  }
+
+  /* ---------- build grid ---------- */
+  const grid = document.getElementById('grid');
+  const countEl = document.getElementById('count');
+  const expSel = document.getElementById('expSel');
+  let selected = null;
+
+  function svgIcon(kind){
+    if(kind==='heart') return '<svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>';
+    if(kind==='export') return '<svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>';
+    return '<svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>';
+  }
+
+  PRESETS.forEach((pr, idx)=>{
+    const card = document.createElement('div');
+    card.className = 'card';
+    card.dataset.fav = pr.fav;
+    card.innerHTML = `
+      <span class="sel-badge">Applied</span>
+      <canvas class="thumb" width="208" height="130"></canvas>
+      <div class="acts">
+        <button class="abtn heart ${pr.fav?'faved':''}" title="Favorite">${svgIcon('heart')}</button>
+        <button class="abtn" title="Export">${svgIcon('export')}</button>
+        <button class="abtn del" title="Delete">${svgIcon('del')}</button>
+      </div>
+      <div class="info">
+        <div class="nm">${pr.name}</div>
+        <div class="sub"><span>${pr.date}</span><span class="depth">${pr.depth}</span></div>
+      </div>`;
+    grid.appendChild(card);
+    renderThumb(card.querySelector('canvas'), pr.cr, pr.ci, pr.pal);
+
+    // select / apply
+    card.addEventListener('click', ()=>{
+      grid.querySelectorAll('.card').forEach(c=>c.classList.remove('sel'));
+      card.classList.add('sel');
+      selected = card;
+      expSel.disabled = false;
+    });
+    // favorite
+    const heart = card.querySelector('.heart');
+    heart.addEventListener('click', e=>{
+      e.stopPropagation();
+      heart.classList.toggle('faved');
+      card.dataset.fav = heart.classList.contains('faved');
+      applyFilter();
+    });
+    // export (stop propagation only)
+    card.querySelector('.abtn[title=Export]').addEventListener('click', e=>e.stopPropagation());
+    // delete
+    card.querySelector('.del').addEventListener('click', e=>{
+      e.stopPropagation();
+      if(card===selected){selected=null;expSel.disabled=true;}
+      card.style.transition='opacity .2s, transform .2s';
+      card.style.opacity='0';card.style.transform='scale(0.95)';
+      setTimeout(()=>{card.remove();applyFilter();},200);
+    });
+  });
+
+  /* ---------- favorites filter ---------- */
+  const favBtn = document.getElementById('favBtn');
+  favBtn.addEventListener('click', ()=>{
+    favBtn.classList.toggle('on');
+    applyFilter();
+  });
+  function applyFilter(){
+    const only = favBtn.classList.contains('on');
+    let visible = 0;
+    grid.querySelectorAll('.card').forEach(c=>{
+      const show = !only || c.dataset.fav === 'true';
+      c.style.display = show ? '' : 'none';
+      if(show) visible++;
+    });
+    countEl.textContent = visible + ' preset' + (visible>1?'s':'');
+    let empty = grid.querySelector('.empty');
+    if(visible===0){
+      if(!empty){
+        empty = document.createElement('div');
+        empty.className='empty';
+        empty.textContent='No favorites yet — hover a card and tap the heart.';
+        grid.appendChild(empty);
+      }
+    } else if(empty){ empty.remove(); }
+  }
+  applyFilter();
+
+  /* ---------- save ---------- */
+  document.getElementById('saveBtn').addEventListener('click', ()=>{
+    const inp = document.getElementById('saveName');
+    inp.value='';
+    inp.placeholder='Saved ✓';
+    setTimeout(()=>inp.placeholder='Name (optional)…',1500);
+  });
+
+  document.querySelector('.close').addEventListener('click', () => {
+    document.querySelector('.panel').animate(
+      [{opacity:1,transform:'scale(1)'},{opacity:0,transform:'scale(0.98)'}],
+      {duration:180,fill:'forwards'});
+  });
+</script>
+</body>
+</html>

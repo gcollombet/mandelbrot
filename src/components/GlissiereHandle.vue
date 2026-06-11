@@ -107,8 +107,8 @@ function onTouchStart(e: TouchEvent) {
 <style scoped>
 .stop-marker {
   position: absolute;
-  top: 8px;
-  height: calc(100% - 16px);
+  top: 0;
+  height: 100%;
   width: 32px;
   transform: translateX(-50%) scaleY(1);
   cursor: grab;

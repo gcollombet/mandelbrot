@@ -1,13 +1,10 @@
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
+import {computed, onMounted, onUnmounted, ref, toRaw} from 'vue';
 import {interpolateRgb} from 'd3-interpolate';
-import GlissiereHandle from './GlissiereHandle.vue';
-import PalettePreview from './PalettePreview.vue';
 import StopTransferCurveSelector from './StopTransferCurveSelector.vue';
-import {Palette} from '../Palette';
 import {rgb as d3rgb} from 'd3-color';
 import type {ColorStop, StopTransferCurve} from "../ColorStop.ts";
-import {applyStopTransferCurve, createInterpolatedColorStop, getEffectValue, getStopTransferCurve} from '../ColorStop.ts';
+import {applyStopTransferCurve, getEffectValue, getStopTransferCurve} from '../ColorStop.ts';
 import type { EffectFieldName } from '../effectFieldConfig';
 import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG, UI_GROUPS } from '../effectFieldConfig';
 import type {InterpolationMode} from "../Mandelbrot.ts";
@@ -27,6 +24,7 @@ import {buildStopPresetPreviewSpec} from '../stopPresetPreview.ts';
 
 const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
+  selectedIdx: number | null;
   interpolationMode?: InterpolationMode;
   pickerMode?: boolean;
   tileTextureUrl?: string | null;
@@ -45,6 +43,7 @@ const props = withDefaults(defineProps<{
   applyToAll?: boolean;
   isAdmin?: boolean;
 }>(), {
+  selectedIdx: 0,
   interpolationMode: 'lab',
   pickerMode: false,
   tileTextureUrl: null,
@@ -66,65 +65,15 @@ const props = withDefaults(defineProps<{
 const emit = defineEmits<{
   (e: 'update:colorStops', value: ColorStop[]): void;
   (e: 'update:applyToAll', value: boolean): void;
-  (e: 'toggle-picker'): void;
-  (e: 'invert'): void;
-  (e: 'negate'): void;
-  (e: 'duplicate'): void;
-  (e: 'mirror'): void;
-  (e: 'distribute'): void;
-  (e: 'clear'): void;
 }>();
 
-const MAX_COLORS = 200;
 
-const previewRef = ref<InstanceType<typeof PalettePreview> | null>(null);
-
-function onPreviewDblClick(event: MouseEvent) {
-  if (props.colorStops.length >= MAX_COLORS) return;
-  const canvas = previewRef.value?.canvasRef;
-  if (!canvas) return;
-  const rect = canvas.getBoundingClientRect();
-  let t = (event.clientX - rect.left) / rect.width;
-  t = Math.max(0, Math.min(1, t));
-  const pal = new Palette(props.colorStops, props.interpolationMode);
-  const sampledColor = pal.getColorAt(t);
-  const newStop = createInterpolatedColorStop(props.colorStops, t, sampledColor);
-  props.colorStops.push(newStop);
-  emit('update:colorStops', props.colorStops);
-  selectedIdx.value = props.colorStops.length - 1;
-}
-
-// Index de la couleur sélectionnée
-const selectedIdx = ref<number|null>(0);
-
-// Auto-sélectionner le dernier curseur ajouté (ex: via pipette)
-watch(() => props.colorStops.length, (newLen, oldLen) => {
-  if (newLen > oldLen) {
-    selectedIdx.value = newLen - 1;
-  }
-});
-
-function selectColor(idx: number) {
-  selectedIdx.value = idx;
-}
-
-/** Supprime le stop sélectionné (minimum 2 stops requis). */
-function deleteSelectedStop() {
-  if (selectedIdx.value === null) return;
-  if (props.colorStops.length <= 2) return; // garder au moins 2 stops
-  props.colorStops.splice(selectedIdx.value, 1);
-  emit('update:colorStops', props.colorStops);
-  // Ajuster la sélection
-  if (selectedIdx.value >= props.colorStops.length) {
-    selectedIdx.value = props.colorStops.length - 1;
-  }
-}
 
 // Hex color of the selected stop (for the native color picker)
 const selectedHex = computed({
   get() {
-    if (selectedIdx.value === null || props.colorStops.length === 0) return '#ffffff';
-    const c = props.colorStops[selectedIdx.value]?.color || '#ffffff';
+    if (props.selectedIdx === null || props.colorStops.length === 0) return '#ffffff';
+    const c = props.colorStops[props.selectedIdx]?.color || '#ffffff';
     // Ensure it's a valid 7-char hex for the input
     try {
       return d3rgb(c).formatHex();
@@ -133,10 +82,10 @@ const selectedHex = computed({
     }
   },
   set(hex: string) {
-    if (selectedIdx.value !== null && props.colorStops[selectedIdx.value]) {
+    if (props.selectedIdx !== null && props.colorStops[props.selectedIdx]) {
       //@ts-ignore
-      props.colorStops[selectedIdx.value] = {
-        ...props.colorStops[selectedIdx.value],
+      props.colorStops[props.selectedIdx] = {
+        ...props.colorStops[props.selectedIdx],
         color: hex
       };
       emit('update:colorStops', props.colorStops);
@@ -159,8 +108,8 @@ const selectedIridescenceHex = computed({
         stop.iridescenceColor = hex;
       }
     } else {
-      if (selectedIdx.value === null) return;
-      const stop = props.colorStops[selectedIdx.value];
+      if (props.selectedIdx === null) return;
+      const stop = props.colorStops[props.selectedIdx];
       if (!stop) return;
       stop.iridescenceColor = hex;
     }
@@ -178,8 +127,8 @@ function clearIridescenceColor() {
       delete stop.iridescenceColor;
     }
   } else {
-    if (selectedIdx.value === null) return;
-    const stop = props.colorStops[selectedIdx.value];
+    if (props.selectedIdx === null) return;
+    const stop = props.colorStops[props.selectedIdx];
     if (!stop) return;
     delete stop.iridescenceColor;
   }
@@ -190,8 +139,8 @@ function clearIridescenceColor() {
 
 /** The currently selected stop (reactive). */
 const selectedStop = computed(() => {
-  if (selectedIdx.value === null) return null;
-  return props.colorStops[selectedIdx.value] ?? null;
+  if (props.selectedIdx === null) return null;
+  return props.colorStops[props.selectedIdx] ?? null;
 });
 
 const selectedTransferCurve = computed<StopTransferCurve>({
@@ -204,10 +153,12 @@ const selectedTransferCurve = computed<StopTransferCurve>({
         stop.transferCurve = curve;
       }
     } else {
-      if (selectedIdx.value === null) return;
-      const stop = props.colorStops[selectedIdx.value];
+      if (props.selectedIdx === null) return;
+      const stop = props.colorStops[props.selectedIdx];
       if (!stop) return;
-      stop.transferCurve = curve;
+      
+      const newCurve = curve === 'linear' ? undefined : curve;
+      stop.transferCurve = newCurve;
     }
     emit('update:colorStops', props.colorStops);
   },
@@ -360,9 +311,11 @@ function setStopEffect(field: EffectFieldName, value: number) {
       stop[field] = value;
     }
   } else {
-    if (selectedIdx.value === null) return;
-    const stop = props.colorStops[selectedIdx.value];
+    if (props.selectedIdx === null) return;
+    const stop = props.colorStops[props.selectedIdx];
     if (!stop) return;
+    
+    // Assign effect property
     stop[field] = value;
   }
   emit('update:colorStops', props.colorStops);
@@ -394,10 +347,10 @@ function applySelectedStopPreset() {
       }
     }
   } else {
-    if (selectedIdx.value === null) return;
-    const stop = props.colorStops[selectedIdx.value];
+    if (props.selectedIdx === null) return;
+    const stop = props.colorStops[props.selectedIdx];
     if (!stop) return;
-    props.colorStops[selectedIdx.value] = applyStopPresetValues(stop, preset.values);
+    props.colorStops[props.selectedIdx] = applyStopPresetValues(stop, preset.values);
   }
 
   emit('update:colorStops', props.colorStops);
@@ -535,105 +488,19 @@ function importStopPresets(event: Event) {
   input.value = '';
 }
 
-/** Forward snapshot capture from the underlying PalettePreview. */
-function getSnapshot(): string | null {
-  return previewRef.value?.getSnapshot?.() ?? null;
-}
 
-defineExpose({ getSnapshot });
 
 </script>
 
 <template>
   <div class="palette-editor">
-    <!-- ═══ Pipette + outils compact ═══ -->
-    <div class="top-bar">
-      <div class="color-picker-row">
-        <button
-          class="pipette-btn"
-          :class="{ 'is-active': props.pickerMode }"
-          :title="props.pickerMode ? 'Exit pipette mode (Escape)' : 'Pipette: click on the fractal'"
-          @click="emit('toggle-picker')"
-        >
-          <i class="fa-solid fa-eye-dropper fa-fw"></i>
-        </button>
-        <span v-if="props.pickerMode" class="picker-hint">Click on the fractal&hellip;</span>
-      </div>
-      <div class="outils-bar">
-        <button class="button is-small is-light outils-btn" @click="emit('invert')" title="Reverse order">
-          <i class="fa-solid fa-arrow-right-arrow-left fa-fw"></i>
-        </button>
-        <button class="button is-small is-light outils-btn" @click="emit('negate')" title="Negate RGB">
-          <i class="fa-solid fa-circle-half-stroke fa-fw"></i>
-        </button>
-        <button class="button is-small is-light outils-btn" @click="emit('duplicate')" title="Duplicate 2x">
-          <i class="fa-regular fa-copy fa-fw"></i>
-        </button>
-        <button class="button is-small is-light outils-btn" @click="emit('mirror')" title="Mirror (palindrome)">
-          <i class="fa-solid fa-arrows-left-right fa-fw"></i>
-        </button>
-        <button class="button is-small is-light outils-btn" @click="emit('distribute')" title="Distribute evenly">
-          <i class="fa-solid fa-align-justify fa-fw"></i>
-        </button>
-        <button class="button is-small is-danger is-light outils-btn" @click="emit('clear')" title="Clear entire palette">
-          <i class="fa-solid fa-trash-can fa-fw"></i>
-        </button>
-      </div>
-    </div>
-
-    <!-- WebGPU preview with handles overlaid -->
-    <div class="canvas-row" style="position:relative;" @dblclick="onPreviewDblClick" title="Double-click to add a color stop">
-      <PalettePreview
-        ref="previewRef"
-        :colorStops="colorStops"
-        :interpolationMode="interpolationMode"
-        :tileTextureUrl="tileTextureUrl"
-        :skyboxTextureUrl="skyboxTextureUrl"
-        :tessellationLevel="tessellationLevel"
-        :displacementAmount="displacementAmount"
-        :ambientOcclusionStrength="ambientOcclusionStrength"
-        :microBumpStrength="microBumpStrength"
-        :subsurfaceStrength="subsurfaceStrength"
-        :reliefDepth="reliefDepth"
-        :localShadowStrength="localShadowStrength"
-        :varnishStrength="varnishStrength"
-        :orbitTrapStrength="orbitTrapStrength"
-        :phaseColoringStrength="phaseColoringStrength"
-        :textureMapping="textureMapping"
-      />
-      <div class="canvas-shadow-overlay"></div>
-      <div class="handles-overlay">
-        <GlissiereHandle
-          v-for="(stop, idx) in colorStops"
-          :key="'handle-' + idx"
-          :stop="stop"
-          :selected="!applyToAll && selectedIdx === idx"
-          :highlighted="applyToAll"
-          :disabled="applyToAll"
-          @update:position="t => colorStops[idx].position = t"
-          @select="selectColor(idx)"
-        />
-        <!-- Bouton supprimer flottant au-dessus du curseur sélectionné -->
-        <button
-          v-if="!applyToAll && selectedIdx !== null && colorStops.length > 2"
-          class="floating-delete-btn"
-          :style="{ left: colorStops[selectedIdx]?.position * 100 + '%' }"
-          title="Delete this stop"
-          @mousedown.stop
-          @click.stop="deleteSelectedStop"
-        >
-          &times;
-        </button>
-      </div>
-    </div>
-
     <!-- ═══ Effets par point ═══ -->
     <div v-if="selectedStop" class="effects-panel">
 
       <!-- Toggle global + titre -->
       <div class="effects-header">
         <label class="effects-section-title">
-          Stop #{{ (selectedIdx ?? 0) + 1 }}
+          Stop #{{ (props.selectedIdx ?? 0) + 1 }}
           <span v-if="applyToAll" class="all-stops-indicator">All Stops Selected</span>
         </label>
         <div class="stop-scope-toggle" role="group" aria-label="Stop edit scope">
@@ -828,85 +695,6 @@ defineExpose({ getSnapshot });
   flex-direction: column;
   align-items: stretch;
   gap: 0.5em;
-}
-
-/* ── Top bar: color picker + outils ── */
-.top-bar {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.5em;
-  flex-wrap: wrap;
-}
-.color-picker-row {
-  display: flex;
-  align-items: center;
-  gap: 0.5em;
-}
-.outils-bar {
-  display: flex;
-  gap: 0.2em;
-}
-.outils-btn {
-  font-size: 0.72em !important;
-  padding: 0.2em 0.5em !important;
-  min-width: 0 !important;
-}
-
-.canvas-row {
-  display: flex;
-  justify-content: center;
-  overflow: visible;
-  position: relative;
-  height: 96px;
-  border-radius: 12px;
-}
-.canvas-shadow-overlay {
-  position: absolute;
-  inset: 0;
-  border-radius: 12px;
-  pointer-events: none;
-  box-shadow: 0 8px 26px -12px #000 inset, 0 0 0 1px rgba(255, 255, 255, 0.03) inset;
-  z-index: 2;
-}
-.handles-overlay {
-  position: absolute;
-  top: 0;
-  left: 0;
-  right: 0;
-  height: 100%;
-  pointer-events: none;
-  z-index: 3;
-}
-.floating-delete-btn {
-  position: absolute;
-  top: -24px;
-  transform: translateX(-50%);
-  width: 24px;
-  height: 24px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-2);
-  color: oklch(0.70 0.18 20);
-  font-size: 0.95em;
-  font-weight: 600;
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  pointer-events: auto;
-  z-index: 20;
-  line-height: 1;
-  padding: 0;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.3);
-  transition: background 0.15s, color 0.15s, border-color 0.15s, box-shadow 0.15s, transform 0.15s;
-}
-.floating-delete-btn:hover {
-  border-color: oklch(0.60 0.18 20);
-  background: oklch(0.60 0.18 20);
-  color: #fff;
-  box-shadow: 0 3px 8px rgba(195, 68, 68, 0.32);
-  transform: translateX(-50%) translateY(-1px);
 }
 
 /* ── Per-point effect editing ── */
@@ -1221,35 +1009,7 @@ defineExpose({ getSnapshot });
   height: 1px;
   background: var(--line-soft);
 }
-.pipette-btn {
-  width: 30px;
-  height: 30px;
-  border: 1px solid var(--line);
-  border-radius: 5px;
-  background: var(--row);
-  color: var(--ink);
-  cursor: pointer;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  transition: background 0.15s, color 0.15s, border-color 0.15s;
-  flex-shrink: 0;
-}
-.pipette-btn:hover {
-  background: var(--panel-2);
-  border-color: var(--ink-3);
-}
-.pipette-btn.is-active {
-  background: oklch(0.60 0.18 20);
-  border-color: oklch(0.60 0.18 20);
-  color: #fff;
-}
-.picker-hint {
-  font-size: 0.82em;
-  color: oklch(0.60 0.18 20);
-  font-weight: 500;
-  white-space: nowrap;
-}
+
 .native-color-input {
   width: 36px;
   height: 30px;
