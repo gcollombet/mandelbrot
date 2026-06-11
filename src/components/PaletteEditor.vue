@@ -298,6 +298,26 @@ const UI_GROUP_TITLES: Partial<Record<string, string>> = {
   imageSources: 'Image Sources',
 };
 
+const EFFECT_FIELD_HELP: Record<EffectFieldName, string> = {
+  palette: 'How strongly this stop contributes its base palette color',
+  zebra: 'Adds discrete iteration bands around this stop',
+  tessellation: 'Blends the selected image texture into this stop',
+  shading: 'Mixes relief lighting with the stop color',
+  skybox: 'Adds environment reflection to the material response',
+  webcam: 'Blends live camera input when webcam mode is available',
+  smoothness: 'Uses continuous iteration values instead of hard steps',
+  stripeAverage: 'Accumulates stripe orbit data into color variation',
+  rotationMean: 'Uses orbit direction coherence as a coloring signal',
+  stripeRelief: 'Turns stripe bands into local relief detail',
+  directionCoherenceRelief: 'Turns direction coherence into raised surface relief',
+  shadingLevel: 'Intensity of direct light for this stop',
+  specularPower: 'Strength and tightness of glossy highlights',
+  metallic: 'How much this stop behaves like a metal surface',
+  roughness: 'Softens or sharpens reflected highlights',
+  anisotropy: 'Stretches highlights along the surface direction',
+  iridescencePower: 'Strength of the optional spectral tint',
+};
+
 /** Get the effective value of a field on the selected stop. */
 function getStopEffect(field: EffectFieldName): number {
   if (!selectedStop.value) return DEFAULT_VALUES[field];
@@ -530,6 +550,7 @@ function importStopPresets(event: Event) {
       <!-- ── Stop presets ── -->
       <div class="stop-presets-panel">
         <label class="effects-group-title">Stop Looks</label>
+        <p class="effects-section-help">Reusable looks for one stop — color response, mapping and material values.</p>
         <div class="stop-preset-dropdown" ref="stopPresetDropdownRef">
           <button
             class="button is-small is-fullwidth stop-preset-trigger"
@@ -622,10 +643,14 @@ function importStopPresets(event: Event) {
 
       <!-- ── Color ── -->
       <label class="effects-group-title">Color</label>
+      <p class="effects-section-help">Settings below apply to the selected stop — or to every stop at once.</p>
       <div class="color-transfer-row">
         <div class="color-stack">
           <div class="color-picker-inline">
-            <span class="color-kind-label">Base</span>
+            <span class="color-kind-label">
+              <span class="l1">Base color</span>
+              <span class="l2">The stop's color on the gradient</span>
+            </span>
             <input
               type="color"
               :value="selectedHex"
@@ -635,7 +660,10 @@ function importStopPresets(event: Event) {
             <span class="color-hex-label">{{ selectedHex }}</span>
           </div>
           <div class="color-picker-inline">
-            <span class="color-kind-label">Iridescence</span>
+            <span class="color-kind-label">
+              <span class="l1">Iridescence</span>
+              <span class="l2">Optional spectral tint for this stop</span>
+            </span>
             <input
               v-if="selectedStop.iridescenceColor"
               type="color"
@@ -662,13 +690,22 @@ function importStopPresets(event: Event) {
             />
           </div>
         </div>
-        <StopTransferCurveSelector v-model="selectedTransferCurve" />
+        <div class="curve-row">
+          <span class="color-kind-label">
+            <span class="l1">Blend curve</span>
+            <span class="l2">Interpolation shape toward the next stop</span>
+          </span>
+          <StopTransferCurveSelector v-model="selectedTransferCurve" />
+        </div>
       </div>
       <template v-for="groupName in UI_GROUP_ORDER" :key="groupName">
         <label v-if="UI_GROUP_TITLES[groupName]" class="effects-group-title">{{ UI_GROUP_TITLES[groupName] }}</label>
         <template v-for="field in UI_GROUPS[groupName]" :key="field">
           <div class="effect-row">
-            <span class="effect-label">{{ EFFECT_FIELD_CONFIG[field].label }}</span>
+            <span class="effect-label">
+              <span class="l1">{{ EFFECT_FIELD_CONFIG[field].label }}</span>
+              <span class="l2">{{ EFFECT_FIELD_HELP[field] }}</span>
+            </span>
             <input
               class="slider effect-slider"
               type="range"
@@ -694,18 +731,21 @@ function importStopPresets(event: Event) {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  gap: 0.5em;
+  gap: 8px;
+  font-family: var(--sans);
+  color: var(--ink);
 }
 
 /* ── Per-point effect editing ── */
 .effects-panel {
-  margin-top: 0.2em;
+  margin-top: 0;
 }
 .effects-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  margin-bottom: 0.5em;
+  gap: 14px;
+  margin-bottom: 12px;
 }
 .effects-section-title {
   font-size: 13px;
@@ -717,7 +757,7 @@ function importStopPresets(event: Event) {
   align-items: center;
   gap: 12px;
   flex: 1;
-  margin: 10px 0;
+  margin: 10px 0 6px;
 }
 .effects-section-title::before {
   content: "";
@@ -755,18 +795,18 @@ function importStopPresets(event: Event) {
 .stop-scope-toggle {
   display: inline-flex;
   border: 1px solid var(--line);
-  border-radius: 8px;
+  border-radius: 10px;
   overflow: hidden;
-  background: var(--panel-2);
+  background: var(--row);
   padding: 2px;
 }
 .scope-btn {
   border: 0 !important;
-  border-radius: 6px !important;
-  min-width: 6.4em;
-  height: 24px;
-  line-height: 24px;
-  font-size: 0.77em !important;
+  border-radius: 8px !important;
+  min-width: 92px;
+  height: 30px;
+  line-height: 30px;
+  font-size: 13px !important;
   font-weight: 600;
   color: var(--ink-2) !important;
   background: transparent !important;
@@ -796,11 +836,11 @@ function importStopPresets(event: Event) {
   justify-content: flex-start;
   gap: 0.55em;
   width: 100%;
-  min-height: 34px;
-  padding: 0.2em 0.55em !important;
+  min-height: 42px;
+  padding: 5px 10px !important;
   border: 1px solid var(--line) !important;
-  border-radius: 10px !important;
-  background: var(--row) !important;
+  border-radius: 12px !important;
+  background: #0b0d12 !important;
   color: var(--ink) !important;
 }
 
@@ -960,17 +1000,18 @@ function importStopPresets(event: Event) {
 }
 
 .stop-presets-panel {
-  margin-bottom: 0.55em;
-  padding: 0.6em;
+  margin-bottom: 14px;
+  padding: 12px;
   border: 1px solid var(--line-soft);
-  border-radius: 8px;
+  border-radius: 12px;
   background: var(--panel-2);
 }
 .preset-row {
   display: flex;
   align-items: center;
-  gap: 0.35em;
-  margin-top: 0.35em;
+  gap: 10px;
+  margin-top: 8px;
+  flex-wrap: wrap;
 }
 .select-input {
   flex: 1;
@@ -1009,62 +1050,109 @@ function importStopPresets(event: Event) {
   height: 1px;
   background: var(--line-soft);
 }
+.effects-section-help {
+  font-size: 13.5px;
+  color: var(--ink-3);
+  margin: -8px 0 12px;
+  line-height: 1.4;
+}
 
 .native-color-input {
-  width: 36px;
-  height: 30px;
+  width: 42px;
+  height: 36px;
   border: 1px solid var(--line);
-  border-radius: 5px;
+  border-radius: 9px;
   padding: 2px;
   cursor: pointer;
   background: none;
 }
 .color-hex-label {
   font-family: var(--mono);
-  font-size: 0.95em;
+  font-size: 15px;
+  font-weight: 600;
   color: var(--ink);
-  min-width: 56px;
+  min-width: 76px;
 }
 .color-picker-inline {
-  display: flex;
+  display: grid;
+  grid-template-columns: 208px auto auto auto;
   align-items: center;
-  gap: 0.5em;
+  gap: 12px;
+  padding: 9px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
 }
 .color-stack {
   display: grid;
-  gap: 0.28em;
+  gap: 8px;
+  flex: 1 1 auto;
 }
 .color-kind-label {
-  width: 72px;
-  font-size: 0.78em;
-  color: var(--ink-2);
-  flex-shrink: 0;
+  min-width: 0;
+  color: var(--ink);
+}
+.color-kind-label .l1 {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
+}
+.color-kind-label .l2 {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 2px;
+  line-height: 1.3;
 }
 .color-transfer-row {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 0.6em;
-  margin-bottom: 0.3em;
-  flex-wrap: wrap;
+  display: grid;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 .iridescence-toggle {
-  width: 36px;
-  height: 30px;
+  width: 42px;
+  height: 36px;
   padding: 0 !important;
 }
-.effect-row {
-  display: flex;
+.curve-row {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
   align-items: center;
-  gap: 0.8em;
-  margin-bottom: 0.2em;
+  gap: 18px;
+  padding: 9px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+}
+.effect-row {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr) 92px;
+  align-items: center;
+  gap: 18px;
+  padding: 9px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  margin-bottom: 8px;
 }
 .effect-label {
-  font-size: 0.82em;
-  color: var(--ink-2);
-  width: 128px;
-  flex-shrink: 0;
+  color: var(--ink);
+  min-width: 0;
+}
+.effect-label .l1 {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  line-height: 1.2;
   white-space: nowrap;
+}
+.effect-label .l2 {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 2px;
+  line-height: 1.3;
 }
 .effect-slider {
   -webkit-appearance: none;
@@ -1103,15 +1191,20 @@ function importStopPresets(event: Event) {
 
 .effect-value {
   font-family: var(--mono);
-  font-size: 0.78em;
+  font-size: 15px;
+  font-weight: 700;
   color: var(--ink);
-  width: 56px;
   text-align: right;
-  flex-shrink: 0;
+  white-space: nowrap;
+}
+
+.palette-editor :deep(.stop-transfer-curve-selector),
+.curve-row :deep(.stop-transfer-curve-selector) {
+  justify-content: flex-start;
 }
 
 .palette-editor :deep(.input) {
-  background-color: var(--row) !important;
+  background-color: #0b0d12 !important;
   border: 1px solid var(--line) !important;
   color: var(--ink) !important;
   border-radius: 8px !important;
@@ -1129,6 +1222,25 @@ function importStopPresets(event: Event) {
   font-weight: 600 !important;
   border-radius: 8px !important;
   transition: .16s !important;
+}
+
+@media (max-width: 760px) {
+  .effects-header {
+    align-items: stretch;
+    flex-direction: column;
+  }
+  .stop-scope-toggle {
+    align-self: flex-start;
+  }
+  .color-picker-inline,
+  .curve-row,
+  .effect-row {
+    grid-template-columns: 1fr 86px;
+  }
+  .color-kind-label,
+  .effect-label {
+    grid-column: 1 / -1;
+  }
 }
 .palette-editor :deep(.button:hover) {
   color: var(--ink) !important;

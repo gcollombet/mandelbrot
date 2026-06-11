@@ -17,7 +17,6 @@ import type {TextureMetadata} from '../textureStore';
 import {
   deleteTextureEntry,
   getTextureBlob,
-  renameTextureEntry,
   saveTextureEntry,
   updateTextureMetadata,
 } from '../textureStore';
@@ -441,9 +440,6 @@ async function refreshNavigationPreview() {
 const selectedPreset = ref<number | null>(null);
 const showPresetDropdown = ref(false);
 
-const currentPresetMeta = computed(() => presets.value.find(p => p.id === selectedPreset.value));
-const currentPresetThumbnail = computed(() => currentPresetMeta.value?.thumbnail);
-
 async function selectPresetFromDropdown(preset: PresetMetadata) {
   await selectPreset(preset.id);
   showPresetDropdown.value = false;
@@ -737,9 +733,6 @@ function selectPaletteFromDropdown(palette: PaletteRecord) {
 const selectedPalettePreset = ref<number | null>(null);
 const showPalettePresetDropdown = ref(false);
 
-const currentPalettePresetMeta = computed(() => presets.value.find(p => p.id === selectedPalettePreset.value));
-const currentPalettePresetThumbnail = computed(() => currentPalettePresetMeta.value?.thumbnail);
-
 async function selectPaletteFromPreset(id: number) {
   const record = await getCachedPreset(id);
   if (record) {
@@ -768,20 +761,24 @@ async function selectPalettePresetFromDropdown(preset: PresetMetadata) {
   showPalettePresetDropdown.value = false;
 }
 
-async function deletePalette() {
-  const name = paletteName.value.trim();
-  if (!name) return;
+async function deletePaletteByName(name: string) {
   const palette = palettes.value.find(item => item.name === name);
-  if (!canDeleteCatalogEntry(userRole.value, palette?.remote)) {
+  if (!palette) return;
+  if (!canDeleteCatalogEntry(userRole.value, palette.remote)) {
     window.alert('Shared catalog palettes cannot be deleted locally.');
     return;
   }
-  if (window.confirm(`Delete palette "${name}"? This cannot be undone.`)) {
-    await deletePaletteEntry(name);
-    palettes.value = await getAllPaletteEntries();
-    selectedPalette.value = '';
-    paletteName.value = '';
-  }
+  if (!window.confirm(`Delete palette "${name}"? This cannot be undone.`)) return;
+  await deletePaletteEntry(name);
+  palettes.value = await getAllPaletteEntries();
+  if (selectedPalette.value === name) selectedPalette.value = '';
+  if (paletteName.value === name) paletteName.value = '';
+}
+
+function exportPaletteByName(name: string) {
+  const palette = palettes.value.find(item => item.name === name);
+  if (!palette) return;
+  downloadJsonFile(`mandelbrot-palette-${palette.name}.json`, palette);
 }
 
 async function togglePresetFavorite(id: number): Promise<void> {
@@ -1028,9 +1025,6 @@ onUnmounted(() => {
   uploadSuccessTimers.forEach(timer => clearTimeout(timer));
   uploadSuccessTimers.clear();
 });
-
-const currentPaletteObj = computed(() => palettes.value.find(p => p.name === selectedPalette.value));
-const currentPaletteThumbnail = computed(() => currentPaletteObj.value?.thumbnail);
 
 watch([() => props.activeTab, () => props.engine], async ([tab]) => {
   if (tab === 'navigation') {
@@ -1374,8 +1368,8 @@ const interpolationModes: { key: InterpolationMode; label: string }[] = [
 
 const paletteSubTabs = [
   { key: 'library', label: 'Library', icon: 'fa-solid fa-swatchbook' },
-  { key: 'stops', label: 'Stops Settings', icon: 'fa-solid fa-sliders' },
-  { key: 'surfaceMaterial', label: 'Global Settings', icon: 'fa-solid fa-globe' },
+  { key: 'stops', label: 'Stops', icon: 'fa-solid fa-sliders' },
+  { key: 'surfaceMaterial', label: 'Global', icon: 'fa-solid fa-globe' },
   { key: 'motionCycle', label: 'Cycle', icon: 'fa-solid fa-arrows-rotate' },
   { key: 'imageEnvironment', label: 'Texture', icon: 'fa-solid fa-image' },
   { key: 'color', label: 'Color', icon: 'fa-solid fa-rainbow' },
@@ -1477,9 +1471,7 @@ const showSkyboxDropdown = ref(false);
 let suppressTextureApply = false;
 
 const currentTextureObj = computed(() => textures.value.find(t => t.name === selectedTexture.value));
-const currentTextureThumbnail = computed(() => currentTextureObj.value?.thumbnail);
 const currentSkyboxObj = computed(() => textures.value.find(t => t.name === selectedSkyboxTexture.value));
-const currentSkyboxThumbnail = computed(() => currentSkyboxObj.value?.thumbnail);
 
 async function loadTextureMappingPresets() {
   textureMappingPresets.value = await getAllTextureMappingPresetEntries();
@@ -1721,6 +1713,25 @@ function selectTextureFromDropdown(tex: TextureMetadata) {
   selectTexture(tex.name);
 }
 
+async function deleteTextureByName(name: string) {
+  if (BUILT_IN_TEXTURE_NAMES.has(name)) {
+    window.alert('Built-in textures cannot be deleted.');
+    return;
+  }
+  const texture = textures.value.find(item => item.name === name);
+  if (!canDeleteCatalogEntry(userRole.value, texture?.remote)) {
+    window.alert('Shared catalog textures cannot be deleted locally.');
+    return;
+  }
+  if (!window.confirm(`Delete texture "${name}"? This cannot be undone.`)) return;
+  await deleteTextureEntry(name);
+  textures.value = await ensureTextureLibrary();
+  if (selectedTexture.value === name) await selectTexture('Gold');
+  if (selectedSkyboxTexture.value === name) await selectSkyboxTexture('Window');
+  if (textureName.value === name) textureName.value = '';
+  if (skyboxName.value === name) skyboxName.value = '';
+}
+
 async function selectSkyboxTexture(name: string) {
   const tex = textures.value.find(t => t.name === name);
   if (!tex) return;
@@ -1856,47 +1867,6 @@ async function importTexture(event: Event) {
 
 async function importSkyboxTexture(event: Event) {
   await importTextureFor(event, 'skybox');
-}
-
-async function renameAndSaveTexture() {
-  const name = textureName.value.trim();
-  if (!name) return;
-  // If a texture is selected and we're renaming it
-  const current = textures.value.find(t => t.name === selectedTexture.value);
-  if (current && current.name !== name) {
-    // Check name collision
-    if (textures.value.some(t => t.name === name)) {
-      window.alert(`A texture named "${name}" already exists.`);
-      return;
-    }
-    await renameTextureEntry(current.name, name);
-    // Refresh metadata list
-    textures.value = await ensureTextureLibrary();
-    selectedTexture.value = name;
-    localStorage.setItem(TEXTURE_SELECTED_KEY, name);
-  }
-}
-
-async function renameAndSaveSkyboxTexture() {
-  const name = skyboxName.value.trim();
-  if (!name) return;
-  const current = textures.value.find(t => t.name === selectedSkyboxTexture.value);
-  if (current && current.name !== name) {
-    if (BUILT_IN_TEXTURE_NAMES.has(current.name)) {
-      window.alert('Built-in textures cannot be renamed.');
-      skyboxName.value = current.name;
-      return;
-    }
-    if (textures.value.some(t => t.name === name)) {
-      window.alert(`A texture named "${name}" already exists.`);
-      return;
-    }
-    await renameTextureEntry(current.name, name);
-    textures.value = await ensureTextureLibrary();
-    selectedSkyboxTexture.value = name;
-    model.value.skyboxName = name;
-    localStorage.setItem(SKYBOX_SELECTED_KEY, name);
-  }
 }
 
 </script>
@@ -2163,9 +2133,10 @@ async function renameAndSaveSkyboxTexture() {
     </div>
 
     <!-- Palettes tab -->
-    <div v-else-if="activeTab === 'palettes'">
+    <div v-else-if="activeTab === 'palettes'" class="cv-body palette-canvas-panel">
       <!-- ═══ Pipette + outils compact ═══ -->
-      <div class="top-bar mb-2 mt-2">
+      <div class="palette-strip-zone">
+      <div class="top-bar palette-strip-bar mb-2 mt-2">
         <div class="color-picker-row">
           <button
             class="pipette-btn"
@@ -2200,7 +2171,7 @@ async function renameAndSaveSkyboxTexture() {
       </div>
 
       <!-- WebGPU preview with handles overlaid -->
-      <div class="canvas-row mb-3" style="position:relative;" @dblclick="onPreviewDblClick" title="Double-click to add a color stop">
+      <div class="canvas-row palette-strip mb-3" style="position:relative;" @dblclick="onPreviewDblClick" title="Double-click to add a color stop">
         <PalettePreview
           ref="previewRef"
           :colorStops="model.colorStops"
@@ -2243,6 +2214,7 @@ async function renameAndSaveSkyboxTexture() {
             &times;
           </button>
         </div>
+      </div>
       </div>
 
       <div class="palette-subtabs">
@@ -2287,40 +2259,38 @@ async function renameAndSaveSkyboxTexture() {
       </section>
 
       <section v-show="activePaletteSubTab === 'motionCycle'">
+      <label class="gfx-section-title">Palette Cycle</label>
+      <p class="section-help">How the palette repeats across iteration depth.</p>
       <div class="palette-top-controls">
-        <button
-          class="button is-small palette-icon-toggle"
-          :class="{ 'is-active': model.paletteMirror }"
-          type="button"
-          :aria-pressed="model.paletteMirror"
-          title="Mirror palette repetition"
-          @click="model.paletteMirror = !model.paletteMirror"
-        >
-          <i class="fas fa-arrows-left-right" aria-hidden="true"></i>
-          <span>Mirror</span>
-        </button>
+        <div class="trow">
+          <div class="lab"><div class="l1">Mirror</div><div class="l2">Ping-pong the palette instead of wrapping</div></div>
+          <div class="toggle" :class="{ on: model.paletteMirror }" role="switch" :aria-checked="model.paletteMirror" tabindex="0"
+            @click="model.paletteMirror = !model.paletteMirror"
+            @keydown.enter.prevent="model.paletteMirror = !model.paletteMirror"
+            @keydown.space.prevent="model.paletteMirror = !model.paletteMirror"></div>
+        </div>
 
         <div class="palette-compact-control">
-          <span class="palette-compact-label">Length</span>
+          <span class="palette-compact-label"><span class="l1">Length</span><span class="l2">Iteration span before the palette repeats</span></span>
           <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
           <span class="palette-compact-value">{{ formatPalettePeriod(model.palettePeriod) }}</span>
         </div>
 
         <div class="palette-compact-control">
-          <span class="palette-compact-label">Height Shift</span>
+          <span class="palette-compact-label"><span class="l1">Height Shift</span><span class="l2">Moves palette phase along relief height</span></span>
           <input class="slider" type="range" min="0" max="100" step="0.01" v-model.number="model.heightPaletteShift" />
           <span class="palette-compact-value">{{ (model.heightPaletteShift ?? 0).toFixed(2) }}</span>
         </div>
 
         <div class="palette-compact-control">
-          <span class="palette-compact-label">Offset</span>
+          <span class="palette-compact-label"><span class="l1">Offset</span><span class="l2">Rotates the palette cycle start point</span></span>
           <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
           <span class="palette-compact-value">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
         </div>
       </div>
 
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Phase Coloring</span>
+        <span class="gfx-slider-label"><span class="l1">Phase Coloring</span><span class="l2">Adds orbit phase variation to the palette</span></span>
         <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPhaseColoring" />
         <span class="gfx-slider-value">{{ (model.phaseColoringStrength ?? 0).toFixed(1) }}×</span>
       </div>
@@ -2328,10 +2298,11 @@ async function renameAndSaveSkyboxTexture() {
 
       <section v-show="activePaletteSubTab === 'color'">
       <!-- ═══ COLOR ═══ -->
-      <label class="gfx-section-title">Color</label>
+      <label class="gfx-section-title">Color Space</label>
+      <p class="section-help">Global adjustments — applied on top of every palette.</p>
 
       <div class="palette-control-row">
-        <label class="palette-control-label">Interpolation</label>
+        <label class="palette-control-label"><span class="l1">Interpolation</span><span class="l2">Color space used to blend between stops</span></label>
         <div class="field is-grouped palette-button-group">
           <p v-for="mode in interpolationModes" :key="mode.key" class="control">
             <button
@@ -2346,21 +2317,21 @@ async function renameAndSaveSkyboxTexture() {
       </div>
 
       <div class="palette-control-row">
-        <label class="palette-control-label">Hue Shift</label>
+        <label class="palette-control-label"><span class="l1">Hue Shift</span><span class="l2">Rotates every color around the hue wheel</span></label>
         <input class="slider is-fullwidth" type="range" min="-180" max="180" step="1"
           :value="hslHueShift"
           @input="onHslHueInput(Number(($event.target as HTMLInputElement).value))" />
         <span class="palette-control-value">{{ hslHueShift }}°</span>
       </div>
       <div class="palette-control-row">
-        <label class="palette-control-label">Saturation Shift</label>
+        <label class="palette-control-label"><span class="l1">Saturation Shift</span><span class="l2">Adds or removes chroma globally</span></label>
         <input class="slider is-fullwidth" type="range" min="-100" max="100" step="1"
           :value="satShift"
           @input="onSatInput(Number(($event.target as HTMLInputElement).value))" />
         <span class="palette-control-value">{{ satShift }}</span>
       </div>
       <div class="palette-control-row">
-        <label class="palette-control-label">Lightness Shift</label>
+        <label class="palette-control-label"><span class="l1">Lightness Shift</span><span class="l2">Brightens or darkens all palette colors</span></label>
         <input class="slider is-fullwidth" type="range" min="-100" max="100" step="1"
           :value="lumShift"
           @input="onLumInput(Number(($event.target as HTMLInputElement).value))" />
@@ -2372,496 +2343,295 @@ async function renameAndSaveSkyboxTexture() {
       <section v-show="activePaletteSubTab === 'surfaceMaterial'">
       <!-- ═══ FRACTAL SURFACE ═══ -->
       <label class="gfx-section-title">Fractal Surface</label>
+      <p class="section-help">Shared relief and shading — applies to the whole render, all stops.</p>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Orbit Trap</span>
+        <span class="gfx-slider-label"><span class="l1">Orbit Trap</span><span class="l2">Emphasizes orbit-distance structure in the surface</span></span>
         <input class="slider" type="range" min="0" max="100" step="0.1" v-model.number="model.orbitTrapStrength" />
         <span class="gfx-slider-value">{{ (model.orbitTrapStrength ?? 0).toFixed(1) }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Relief Depth</span>
+        <span class="gfx-slider-label"><span class="l1">Relief Depth</span><span class="l2">Strength of the generated height field</span></span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
         <span class="gfx-slider-value">{{ (model.reliefDepth ?? 1).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Relief Occlusion</span>
+        <span class="gfx-slider-label"><span class="l1">Relief Occlusion</span><span class="l2">Local shadowing from nearby relief details</span></span>
         <input class="slider" type="range" min="0" max="10" step="0.01" v-model.number="model.localShadowStrength" />
         <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Ambient Occlusion</span>
+        <span class="gfx-slider-label"><span class="l1">Ambient Occlusion</span><span class="l2">Broad contact shading across the fractal surface</span></span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.ambientOcclusionStrength" />
         <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Light Direction</span>
+        <span class="gfx-slider-label"><span class="l1">Light Direction</span><span class="l2">Angle of the main directional light</span></span>
         <input class="slider" type="range" min="0" max="6.283" step="0.01" v-model.number="model.lightAngle" />
         <span class="gfx-slider-value">{{ (model.lightAngle ?? 3.927).toFixed(2) }} rad</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Fine Bump</span>
+        <span class="gfx-slider-label"><span class="l1">Fine Bump</span><span class="l2">Small-scale normal detail layered on relief</span></span>
         <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
         <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0).toFixed(2) }}</span>
       </div>
       <!-- ═══ MATERIAL RESPONSE ═══ -->
       <label class="gfx-section-title">Material Response</label>
         <div class="gfx-slider-row">
-          <span class="gfx-slider-label">Varnish Reflection</span>
+          <span class="gfx-slider-label"><span class="l1">Varnish Reflection</span><span class="l2">Glossy clear reflection over the material</span></span>
           <input class="slider" type="range" min="0" max="10" step="0.01" v-model.number="model.varnishStrength" />
         <span class="gfx-slider-value">{{ (model.varnishStrength ?? 1.0).toFixed(2) }}</span>
       </div>
       <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Subsurface Glow</span>
+        <span class="gfx-slider-label"><span class="l1">Subsurface Glow</span><span class="l2">Soft internal light bleeding through colors</span></span>
         <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.subsurfaceStrength" />
         <span class="gfx-slider-value">{{ (model.subsurfaceStrength ?? 0).toFixed(2) }}</span>
       </div>
       </section>
 
       <section v-show="activePaletteSubTab === 'imageEnvironment'">
-      <!-- ═══ IMAGE LAYER ═══ -->
-      <label class="gfx-section-title">Image Layer</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Image Scale</span>
-        <input class="slider" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
-        <span class="gfx-slider-value">{{ model.tessellationLevel }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Image Displacement</span>
-        <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
-        <span class="gfx-slider-value">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
-      </div>
-      <div class="field is-grouped is-grouped-multiline" style="margin-bottom: 0.65em;">
-        <p class="control">
-          <button class="button is-small" :class="activeTextureMappingLabel === 'Screen Space' ? 'is-link' : 'is-light'" @click="applyBuiltInTextureMapping('screen')">
-            Screen Space
-          </button>
-        </p>
-        <p class="control">
-          <button class="button is-small" :class="activeTextureMappingLabel === 'Dragon Scales' ? 'is-link' : 'is-light'" @click="applyBuiltInTextureMapping('dragon')">
-            Dragon Scales
-          </button>
-        </p>
-        <p class="control" style="align-self:center; font-size:0.8em; opacity:0.8;">{{ activeTextureMappingLabel }}</p>
-      </div>
-      <div class="gfx-slider-row" style="margin-bottom: 0.45em;">
-        <span class="gfx-slider-label">Mapping X</span>
-        <div class="select is-small" style="flex: 1 1 auto;">
-          <select v-model="textureMappingXVariable" style="width: 100%;">
-            <option v-for="option in TEXTURE_MAPPING_VARIABLE_OPTIONS" :key="'x-' + option.value" :value="option.value">{{ option.label }}</option>
-          </select>
-        </div>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">X Scale</span>
-        <input class="slider" type="range" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" step="0.01" v-model.number="textureMappingXScaleSlider" />
-        <span class="gfx-slider-value">&times;{{ normalizeTextureMappingFromLegacy(model).xScale.toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row" style="margin-bottom: 0.45em;">
-        <span class="gfx-slider-label">Mapping Y</span>
-        <div class="select is-small" style="flex: 1 1 auto;">
-          <select v-model="textureMappingYVariable" style="width: 100%;">
-            <option v-for="option in TEXTURE_MAPPING_VARIABLE_OPTIONS" :key="'y-' + option.value" :value="option.value">{{ option.label }}</option>
-          </select>
-        </div>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Y Scale</span>
-        <input class="slider" type="range" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" step="0.01" v-model.number="textureMappingYScaleSlider" />
-        <span class="gfx-slider-value">&times;{{ normalizeTextureMappingFromLegacy(model).yScale.toFixed(2) }}</span>
-      </div>
-      <label class="checkbox" style="display:flex; align-items:center; gap:0.5em; margin:0.25em 0 0.8em;">
-        <input type="checkbox" v-model="textureMappingMirror" />
-        Mirror texture
-      </label>
-      <div class="mb-3 compact-library">
-        <label class="palette-library-label">Texture Mapping Preset</label>
-        <div class="dropdown" :class="{ 'is-active': showTextureMappingDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth is-small" @click="showTextureMappingDropdown = !showTextureMappingDropdown" aria-haspopup="true" aria-controls="dropdown-menu-texture-mappings" type="button">
-              <span style="display:flex; align-items:center; min-height:28px;">
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ activeTextureMappingLabel }}</span>
-                <span class="icon is-small" style="margin-left:4px;">
-                  <i class="fas fa-angle-down" aria-hidden="true"></i>
-                </span>
-              </span>
-            </button>
-          </div>
-          <div class="dropdown-menu" id="dropdown-menu-texture-mappings" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:260px; overflow-y:auto;">
-              <a v-for="preset in textureMappingPresets" :key="preset.guid" class="dropdown-item favorite-row"
-                @click.prevent="selectTextureMappingPresetFromDropdown(preset)"
-                :class="{ 'is-active': activeTextureMappingLabel === preset.name, 'has-delete': !preset.builtIn && canDeleteCatalogEntry(userRole, preset.remote) }"
-                style="display:flex; align-items:center; gap:0.5em;">
-                <button
-                  v-if="isAdmin && !preset.builtIn"
-                  class="favorite-button upload-button"
-                  :class="uploadButtonClasses(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
-                  type="button"
-                  :title="uploadButtonTitle(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
-                  :aria-label="uploadButtonTitle(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
-                  @click.stop.prevent="uploadTextureMappingPreset(preset)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('texture-mapping', preset.guid))"></i></span>
-                </button>
-                <button
-                  class="favorite-button"
-                  :class="{ 'is-favorite': preset.favorite }"
-                  type="button"
-                  :disabled="preset.builtIn"
-                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
-                  :aria-pressed="!!preset.favorite"
-                  @click.stop.prevent="toggleTextureMappingFavorite(preset)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ preset.name }}</span>
-                <button
-                  v-if="!preset.builtIn && canDeleteCatalogEntry(userRole, preset.remote)"
-                  class="delete-preset-button"
-                  type="button"
-                  title="Delete texture mapping"
-                  aria-label="Delete texture mapping"
-                  @click.stop.prevent="deleteTextureMappingPreset(preset)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-trash"></i></span>
-                </button>
-              </a>
-            </div>
-          </div>
-        </div>
-        <div class="field is-grouped" style="margin-top:0.5em;">
-          <div class="control is-expanded">
-            <input class="input is-small" v-model="textureMappingPresetName" type="text" placeholder="Mapping preset name..."
-              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-              @keyup.enter="saveTextureMappingPreset"
-            />
-          </div>
-          <div class="control">
-            <button class="button is-link is-small" @click="saveTextureMappingPreset"><i class="fa-solid fa-floppy-disk mr-1"></i> Save</button>
-          </div>
-        </div>
-      </div>
-      <!-- Image texture library (compact) -->
-      <div class="mb-3 compact-library">
-        <label class="palette-library-label">Image Texture</label>
-        <div class="dropdown" :class="{ 'is-active': showTextureDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth is-small" @click="showTextureDropdown = !showTextureDropdown" aria-haspopup="true" aria-controls="dropdown-menu-textures" type="button">
-              <span style="display:flex; align-items:center; min-height:28px;">
-                <img v-if="currentTextureThumbnail" :src="currentTextureThumbnail" alt="thumbnail" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedTexture || 'Image texture...' }}</span>
-                <span class="icon is-small" style="margin-left:4px;">
-                  <i class="fas fa-angle-down" aria-hidden="true"></i>
-                </span>
-              </span>
-            </button>
-          </div>
-          <div class="dropdown-menu" id="dropdown-menu-textures" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:350px; overflow-y:auto;">
-              <a v-for="tex in textures" :key="tex.name" class="dropdown-item favorite-row"
-                @click.prevent="selectTextureFromDropdown(tex)"
-                :class="{ 'is-active': selectedTexture === tex.name }"
-                style="display:flex; align-items:center; gap:0.5em;">
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button upload-button"
-                  :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
-                  type="button"
-                  :disabled="!canUploadTexture(tex)"
-                  :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
-                  :aria-label="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
-                  @click.stop.prevent="uploadTexture(tex)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i></span>
-                </button>
-                <button
-                  class="favorite-button"
-                  :class="{ 'is-favorite': tex.favorite }"
-                  type="button"
-                  :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)"
-                  :title="tex.favorite ? 'Remove from favorites' : 'Add to favorites'"
-                  :aria-pressed="!!tex.favorite"
-                  @click.stop.prevent="toggleTextureFavorite(tex)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="tex.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail"
-                  style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
-              </a>
-            </div>
-          </div>
-        </div>
-        <div class="field is-grouped" style="margin-top:0.5em;">
-          <div class="control is-expanded">
-            <input class="input is-small" v-model="textureName" type="text" placeholder="Image texture name..."
-              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-              @keyup.enter="renameAndSaveTexture"
-            />
-          </div>
-          <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportTexture"><i class="fa-solid fa-file-import mr-1"></i> Import</button>
-            <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
-          </div>
-          <div class="control">
-            <button class="button is-danger is-small" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)"><i class="fa-solid fa-trash-can mr-1"></i> Delete</button>
-          </div>
-        </div>
-      </div>
-      </section>
+      <div class="section-label"><span class="tick"></span>Image Layer</div>
+      <p class="section-help">Blend an image texture into the fractal surface.</p>
 
-      <section v-show="activePaletteSubTab === 'imageEnvironment'">
-      <!-- Environment texture library (same storage as material textures) -->
-      <label class="gfx-section-title">Environment</label>
-      <div class="mb-3 compact-library">
-        <label class="palette-library-label">Environment Map</label>
-        <div class="dropdown" :class="{ 'is-active': showSkyboxDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth is-small" @click="showSkyboxDropdown = !showSkyboxDropdown" aria-haspopup="true" aria-controls="dropdown-menu-skybox" type="button">
-              <span style="display:flex; align-items:center; min-height:28px;">
-                <img v-if="currentSkyboxThumbnail" :src="currentSkyboxThumbnail" alt="thumbnail" style="height:24px; width:42px; object-fit:cover; margin-right:6px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ selectedSkyboxTexture || 'Environment map...' }}</span>
-                <span class="icon is-small" style="margin-left:4px;">
-                  <i class="fas fa-angle-down" aria-hidden="true"></i>
-                </span>
-              </span>
+      <div class="frow">
+        <div class="lab"><div class="l1">Image Scale</div><div class="l2">Repeats or enlarges the image layer over the fractal</div></div>
+        <input class="slider" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
+        <span class="val">{{ model.tessellationLevel }}</span>
+      </div>
+      <div class="frow">
+        <div class="lab"><div class="l1">Image Displacement</div><div class="l2">How strongly image brightness offsets the surface relief</div></div>
+        <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
+        <span class="val">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
+      </div>
+      <div class="crow">
+        <div class="lab"><div class="l1">Mapping preset</div><div class="l2">How the image wraps onto the fractal</div></div>
+        <div class="ctl">
+          <span class="seg">
+            <button :class="{ on: activeTextureMappingLabel === 'Screen Space' }" @click="applyBuiltInTextureMapping('screen')">Screen Space</button>
+            <button :class="{ on: activeTextureMappingLabel === 'Dragon Scales' }" @click="applyBuiltInTextureMapping('dragon')">Dragon Scales</button>
+            <button :class="{ on: activeTextureMappingLabel !== 'Screen Space' && activeTextureMappingLabel !== 'Dragon Scales' }" type="button">Custom</button>
+          </span>
+        </div>
+      </div>
+      <div class="crow">
+        <div class="lab"><div class="l1">Mapping X</div><div class="l2">Horizontal coordinate source</div></div>
+        <div class="ctl"><div class="select-box"><select v-model="textureMappingXVariable">
+          <option v-for="option in TEXTURE_MAPPING_VARIABLE_OPTIONS" :key="'x-' + option.value" :value="option.value">{{ option.label }}</option>
+        </select></div></div>
+      </div>
+      <div class="frow">
+        <div class="lab"><div class="l1">X Scale</div><div class="l2">Horizontal tiling frequency for the selected source</div></div>
+        <input class="slider" type="range" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" step="0.01" v-model.number="textureMappingXScaleSlider" />
+        <span class="val">&times;{{ normalizeTextureMappingFromLegacy(model).xScale.toFixed(2) }}</span>
+      </div>
+      <div class="crow">
+        <div class="lab"><div class="l1">Mapping Y</div><div class="l2">Vertical coordinate source</div></div>
+        <div class="ctl"><div class="select-box"><select v-model="textureMappingYVariable">
+          <option v-for="option in TEXTURE_MAPPING_VARIABLE_OPTIONS" :key="'y-' + option.value" :value="option.value">{{ option.label }}</option>
+        </select></div></div>
+      </div>
+      <div class="frow">
+        <div class="lab"><div class="l1">Y Scale</div><div class="l2">Vertical tiling frequency for the selected source</div></div>
+        <input class="slider" type="range" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" step="0.01" v-model.number="textureMappingYScaleSlider" />
+        <span class="val">&times;{{ normalizeTextureMappingFromLegacy(model).yScale.toFixed(2) }}</span>
+      </div>
+      <div class="trow">
+        <div class="lab"><div class="l1">Mirror texture</div><div class="l2">Avoids visible seams when the image tiles</div></div>
+        <div class="toggle" :class="{ on: textureMappingMirror }" role="switch" :aria-checked="textureMappingMirror" tabindex="0"
+          @click="textureMappingMirror = !textureMappingMirror"
+          @keydown.enter.prevent="textureMappingMirror = !textureMappingMirror"
+          @keydown.space.prevent="textureMappingMirror = !textureMappingMirror"></div>
+      </div>
+
+      <div class="section-label"><span class="tick"></span>Texture Mapping Presets</div>
+      <p class="section-help">Save or reuse coordinate mappings independently from the selected image.</p>
+      <div class="grid texture-grid">
+        <div
+          v-for="preset in textureMappingPresets"
+          :key="preset.guid"
+          class="card texture-card"
+          :class="{ sel: activeTextureMappingLabel === preset.name }"
+          @click="selectTextureMappingPresetFromDropdown(preset)"
+        >
+          <span class="sel-badge">Applied</span>
+          <div class="thumb thumb-empty mapping-thumb"><i class="fa-solid fa-vector-square" aria-hidden="true"></i></div>
+          <div class="acts">
+            <button
+              v-if="isAdmin && !preset.builtIn"
+              class="abtn"
+              :class="uploadButtonClasses(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
+              type="button"
+              :title="uploadButtonTitle(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
+              @click.stop.prevent="uploadTextureMappingPreset(preset)"
+            >
+              <i :class="uploadButtonIcon(uploadSuccessKey('texture-mapping', preset.guid))"></i>
+            </button>
+            <button class="abtn heart" :class="{ faved: preset.favorite }" type="button" :disabled="preset.builtIn" title="Favorite" @click.stop.prevent="toggleTextureMappingFavorite(preset)">
+              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+            </button>
+            <button v-if="!preset.builtIn && canDeleteCatalogEntry(userRole, preset.remote)" class="abtn del" type="button" title="Delete" @click.stop.prevent="deleteTextureMappingPreset(preset)">
+              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
             </button>
           </div>
-          <div class="dropdown-menu" id="dropdown-menu-skybox" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:350px; overflow-y:auto;">
-              <a v-for="tex in textures" :key="'skybox-' + tex.name" class="dropdown-item favorite-row"
-                @click.prevent="selectSkyboxFromDropdown(tex)"
-                :class="{ 'is-active': selectedSkyboxTexture === tex.name }"
-                style="display:flex; align-items:center; gap:0.5em;">
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button upload-button"
-                  :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
-                  type="button"
-                  :disabled="!canUploadTexture(tex)"
-                  :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
-                  :aria-label="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)"
-                  @click.stop.prevent="uploadTexture(tex)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i></span>
-                </button>
-                <button
-                  class="favorite-button"
-                  :class="{ 'is-favorite': tex.favorite }"
-                  type="button"
-                  :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)"
-                  :title="tex.favorite ? 'Remove from favorites' : 'Add to favorites'"
-                  :aria-pressed="!!tex.favorite"
-                  @click.stop.prevent="toggleTextureFavorite(tex)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="tex.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail"
-                  style="height:48px; width:85px; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 4px rgba(0,0,0,0.12);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ tex.name }}</span>
-              </a>
-            </div>
+          <div class="info">
+            <div class="nm">{{ preset.name }}</div>
+            <div class="sub"><span>{{ preset.builtIn ? 'Built-in mapping' : 'Saved mapping' }}</span></div>
           </div>
         </div>
-        <div class="field is-grouped" style="margin-top:0.5em;">
-          <div class="control is-expanded">
-            <input class="input is-small" v-model="skyboxName" type="text" placeholder="Environment map name..."
-              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-              @keyup.enter="renameAndSaveSkyboxTexture"
-            />
+        <div v-if="textureMappingPresets.length === 0" class="empty">No texture mapping presets saved yet.</div>
+      </div>
+      <div class="save-row texture-save-row">
+        <input class="txt-in" v-model="textureMappingPresetName" type="text" placeholder="Mapping preset name..."
+          @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+          @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+          @keyup.enter="saveTextureMappingPreset"
+        />
+        <button class="save-btn" @click="saveTextureMappingPreset"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>Save</button>
+      </div>
+
+      <div class="section-label"><span class="tick"></span>Image Texture</div>
+      <p class="section-help">Click a texture to use it as the image layer.</p>
+      <div class="grid texture-grid">
+        <div v-for="tex in textures" :key="tex.name" class="card texture-card" :class="{ sel: selectedTexture === tex.name }" @click="selectTextureFromDropdown(tex)">
+          <span class="sel-badge">Applied</span>
+          <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
+          <div v-else class="thumb thumb-empty"></div>
+          <div class="acts">
+            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" type="button" :disabled="!canUploadTexture(tex)" :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" @click.stop.prevent="uploadTexture(tex)">
+              <i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i>
+            </button>
+            <button class="abtn heart" :class="{ faved: tex.favorite }" type="button" title="Favorite" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click.stop.prevent="toggleTextureFavorite(tex)">
+              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+            </button>
+            <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" class="abtn del" type="button" title="Delete" @click.stop.prevent="deleteTextureByName(tex.name)">
+              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+            </button>
           </div>
-          <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportSkybox"><i class="fa-solid fa-file-import mr-1"></i> Import</button>
-            <input ref="skyboxFileInput" type="file" accept="image/*" style="display:none;" @change="importSkyboxTexture" />
-          </div>
-          <div class="control">
-            <button class="button is-danger is-small" @click="deleteSkyboxTexture" :disabled="!skyboxName || BUILT_IN_TEXTURE_NAMES.has(skyboxName)"><i class="fa-solid fa-trash-can mr-1"></i> Delete</button>
-          </div>
+          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in texture' : 'Saved texture' }}</span></div></div>
         </div>
+        <div v-if="textures.length === 0" class="empty">No image textures available.</div>
+      </div>
+      <div class="transfer texture-transfer">
+        <button class="tbtn primary" @click="triggerImportTexture"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import image</button>
+        <button class="tbtn danger" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete selected</button>
+        <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
+      </div>
+
+      <div class="section-label"><span class="tick"></span>Environment Map</div>
+      <p class="section-help">Select the image used for glossy and ambient environment reflections.</p>
+      <div class="grid texture-grid">
+        <div v-for="tex in textures" :key="'skybox-card-' + tex.name" class="card texture-card" :class="{ sel: selectedSkyboxTexture === tex.name }" @click="selectSkyboxFromDropdown(tex)">
+          <span class="sel-badge">Applied</span>
+          <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
+          <div v-else class="thumb thumb-empty"></div>
+          <div class="acts">
+            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" type="button" :disabled="!canUploadTexture(tex)" :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" @click.stop.prevent="uploadTexture(tex)">
+              <i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i>
+            </button>
+            <button class="abtn heart" :class="{ faved: tex.favorite }" type="button" title="Favorite" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click.stop.prevent="toggleTextureFavorite(tex)">
+              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+            </button>
+            <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" class="abtn del" type="button" title="Delete" @click.stop.prevent="deleteTextureByName(tex.name)">
+              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+            </button>
+          </div>
+          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in map' : 'Saved map' }}</span></div></div>
+        </div>
+        <div v-if="textures.length === 0" class="empty">No environment maps available.</div>
+      </div>
+      <div class="transfer texture-transfer">
+        <button class="tbtn primary" @click="triggerImportSkybox"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import image</button>
+        <button class="tbtn danger" @click="deleteSkyboxTexture" :disabled="!skyboxName || BUILT_IN_TEXTURE_NAMES.has(skyboxName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete selected</button>
+        <input ref="skyboxFileInput" type="file" accept="image/*" style="display:none;" @change="importSkyboxTexture" />
       </div>
       </section>
 
       <section v-show="activePaletteSubTab === 'library'">
-      <!-- Palette library -->
-      <label class="gfx-section-title">Palette Library</label>
-      <div class="mb-3">
-        <label class="palette-library-label">Load From Preset</label>
-        <p class="palette-library-hint">Applies colors, interpolation, cycle mapping, and material look from a preset.</p>
-        <button
-          class="button is-small favorite-filter"
-          :class="{ 'is-active': showOnlyFavoritePalettePresets }"
-          type="button"
-          :aria-pressed="showOnlyFavoritePalettePresets"
-          @click="showOnlyFavoritePalettePresets = !showOnlyFavoritePalettePresets"
-        >
-          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoritePalettePresets ? 'fa-solid' : 'fa-regular'"></i></span>
-          <span>Favorites</span>
+      <div class="section-label"><span class="tick"></span>Saved Palettes</div>
+      <p class="section-help">Colors only — applying a palette keeps your current material and mapping.</p>
+      <div class="lib-bar">
+        <button class="fav-filter" :class="{ on: showOnlyFavoritePalettes }" type="button" :aria-pressed="showOnlyFavoritePalettes" @click="showOnlyFavoritePalettes = !showOnlyFavoritePalettes">
+          <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+          Favorites
         </button>
-        <div class="dropdown" :class="{ 'is-active': showPalettePresetDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth" @click="showPalettePresetDropdown = !showPalettePresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palette-presets" type="button">
-              <span style="display:flex; align-items:center; min-height:36px;">
-                <img v-if="currentPalettePresetThumbnail" :src="currentPalettePresetThumbnail" alt="thumbnail" style="height:32px; width:56px; object-fit:cover; margin-right:8px; border-radius:3px; background:#888;" />
-                <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">{{ currentPalettePresetMeta?.name || (selectedPalettePreset ? formatPresetDate(currentPalettePresetMeta?.date ?? '') : 'Choose a preset...') }}</span>
-                <span class="icon is-small" style="margin-left:5px;">
-                  <i class="fas fa-angle-down" aria-hidden="true"></i>
-                </span>
-              </span>
+        <span class="count">{{ visiblePalettes.length }} palette{{ visiblePalettes.length === 1 ? '' : 's' }}</span>
+      </div>
+      <div class="grid palette-library-grid saved-palette-grid" style="max-height:228px;">
+        <div v-for="palette in visiblePalettes" :key="palette.name" class="card palette-card" :class="{ sel: selectedPalette === palette.name }" @click="selectPaletteFromDropdown(palette)">
+          <span class="sel-badge">Applied</span>
+          <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail" class="thumb palette-thumb" />
+          <div v-else class="thumb thumb-empty palette-thumb"></div>
+          <div class="acts">
+            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('palette', palette.name), palette.remote)" type="button" :title="uploadButtonTitle(uploadSuccessKey('palette', palette.name), palette.remote)" @click.stop.prevent="uploadPalettePreset(palette)">
+              <i :class="uploadButtonIcon(uploadSuccessKey('palette', palette.name))"></i>
+            </button>
+            <button class="abtn heart" :class="{ faved: palette.favorite }" title="Favorite" @click.stop.prevent="togglePaletteFavorite(palette.name)">
+              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+            </button>
+            <button class="abtn" title="Export" @click.stop.prevent="exportPaletteByName(palette.name)">
+              <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
+            </button>
+            <button v-if="canDeleteCatalogEntry(userRole, palette.remote)" class="abtn del" title="Delete" @click.stop.prevent="deletePaletteByName(palette.name)">
+              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
             </button>
           </div>
-          <div class="dropdown-menu" id="dropdown-menu-palette-presets" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="preset in visiblePalettePresets" :key="preset.id" class="dropdown-item favorite-row"
-                @click.prevent="selectPalettePresetFromDropdown(preset)"
-                :class="{ 'is-active': selectedPalettePreset === preset.id }"
-                style="display:flex; align-items:center; gap:0.75em;">
-                <button
-                  class="favorite-button"
-                  :class="{ 'is-favorite': preset.favorite }"
-                  type="button"
-                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
-                  :aria-pressed="!!preset.favorite"
-                  @click.stop.prevent="togglePresetFavorite(preset.id)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button upload-button"
-                  :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)"
-                  type="button"
-                  :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
-                  :aria-label="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
-                  @click.stop.prevent="uploadCompletePreset(preset.id)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i></span>
-                </button>
-                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
-                  style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
-                  <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
-                  <span style="font-size:0.78em; color:#666; display:flex; gap:0.6em;">
-                    <span>{{ formatPresetDate(preset.date) }}</span>
-                    <span v-if="preset.scaleExponent > 0" style="font-family:monospace;">{{ formatZoom(preset.scaleExponent) }}</span>
-                  </span>
-                </div>
-              </a>
-            </div>
-          </div>
+          <div class="info"><div class="nm">{{ palette.name }}</div><div class="sub"><span>{{ formatPresetDate(palette.date) }}</span></div></div>
         </div>
+        <div v-if="visiblePalettes.length === 0" class="empty">{{ showOnlyFavoritePalettes ? 'No favorite palettes yet.' : 'No saved palettes yet.' }}</div>
+      </div>
+      <div class="save-row palette-save-row">
+        <input class="txt-in" v-model="paletteName" type="text" placeholder="Save current palette as..."
+          @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+          @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+          @keyup.enter="savePalette"
+        />
+        <button class="save-btn" @click="savePalette"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>Save</button>
       </div>
 
-      <hr class="section-sep"/>
 
-      <div class="mb-3">
-        <label class="palette-library-label">Saved Palettes</label>
-        <button
-          class="button is-small favorite-filter"
-          :class="{ 'is-active': showOnlyFavoritePalettes }"
-          type="button"
-          :aria-pressed="showOnlyFavoritePalettes"
-          @click="showOnlyFavoritePalettes = !showOnlyFavoritePalettes"
-        >
-          <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoritePalettes ? 'fa-solid' : 'fa-regular'"></i></span>
-          <span>Favorites</span>
+      <div class="section-label"><span class="tick"></span>Full Presets</div>
+      <p class="section-help">A full look — colors, interpolation, cycle mapping and material. Click to apply everything.</p>
+      <div class="lib-bar">
+        <button class="fav-filter" :class="{ on: showOnlyFavoritePalettePresets }" type="button" :aria-pressed="showOnlyFavoritePalettePresets" @click="showOnlyFavoritePalettePresets = !showOnlyFavoritePalettePresets">
+          <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+          Favorites
         </button>
-        <!-- Dropdown enrichie Bulma -->
-        <div class="dropdown" :class="{ 'is-active': showPaletteDropdown }" style="width:100%;">
-          <div class="dropdown-trigger" style="width:100%;">
-            <button class="button is-fullwidth" @click="showPaletteDropdown = !showPaletteDropdown" aria-haspopup="true" aria-controls="dropdown-menu-palettes" type="button">
-              <span style="display:flex; align-items:center; flex-direction:column; gap:0.5em; padding:0.4em 0;">
-                <img v-if="currentPaletteThumbnail" :src="currentPaletteThumbnail" alt="thumbnail" style="height:24px; width:100%; max-width:280px; object-fit:cover; border-radius:3px; background:#888; box-shadow:0 1px 3px rgba(0,0,0,0.2);" />
-                <span style="width:100%; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; display:flex; align-items:center; justify-content:center; gap:0.3em;">
-                   <span style="flex:1 1 auto; text-align:center;">{{ paletteName || 'Choose a palette...' }}</span>
-                  <span class="icon is-small">
-                    <i class="fas fa-angle-down" aria-hidden="true"></i>
-                  </span>
-                </span>
-              </span>
+        <span class="count">{{ visiblePalettePresets.length }} preset{{ visiblePalettePresets.length === 1 ? '' : 's' }}</span>
+      </div>
+      <div class="grid palette-library-grid full-preset-grid" style="max-height:264px;">
+        <div v-for="preset in visiblePalettePresets" :key="preset.id" class="card" :class="{ sel: selectedPalettePreset === preset.id }" @click="selectPalettePresetFromDropdown(preset)">
+          <span class="sel-badge">Applied</span>
+          <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail" class="thumb" />
+          <div v-else class="thumb thumb-empty"></div>
+          <div class="acts">
+            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)" type="button" :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)" @click.stop.prevent="uploadCompletePreset(preset.id)">
+              <i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i>
+            </button>
+            <button class="abtn heart" :class="{ faved: preset.favorite }" title="Favorite" @click.stop.prevent="togglePresetFavorite(preset.id)">
+              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+            </button>
+            <button class="abtn" title="Export" @click.stop.prevent="exportPresetById(preset.id)">
+              <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
+            </button>
+            <button class="abtn del" title="Delete" @click.stop.prevent="deletePresetById(preset.id)">
+              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
             </button>
           </div>
-          <div class="dropdown-menu" id="dropdown-menu-palettes" role="menu" style="width:100%;">
-            <div class="dropdown-content" style="max-height:450px; overflow-y:auto;">
-              <a v-for="palette in visiblePalettes" :key="palette.name" class="dropdown-item favorite-row"
-                @click.prevent="selectPaletteFromDropdown(palette)"
-                :class="{ 'is-active': selectedPalette === palette.name }"
-                style="display:flex; flex-direction:column; gap:0.5em; padding:0.75em;">
-                <button
-                  class="favorite-button"
-                  :class="{ 'is-favorite': palette.favorite }"
-                  type="button"
-                  :title="palette.favorite ? 'Remove from favorites' : 'Add to favorites'"
-                  :aria-pressed="!!palette.favorite"
-                  @click.stop.prevent="togglePaletteFavorite(palette.name)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="palette.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <button
-                  v-if="isAdmin"
-                  class="favorite-button upload-button"
-                  :class="uploadButtonClasses(uploadSuccessKey('palette', palette.name), palette.remote)"
-                  type="button"
-                  :title="uploadButtonTitle(uploadSuccessKey('palette', palette.name), palette.remote)"
-                  :aria-label="uploadButtonTitle(uploadSuccessKey('palette', palette.name), palette.remote)"
-                  @click.stop.prevent="uploadPalettePreset(palette)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(uploadSuccessKey('palette', palette.name))"></i></span>
-                </button>
-                <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail"
-                  style="height:32px; width:100%; object-fit:cover; border-radius:4px; background:#aaa; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
-                <span style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; text-align:center;">{{ palette.name }}</span>
-              </a>
-            </div>
+          <div class="info">
+            <div class="nm">{{ preset.name || formatPresetDate(preset.date) }}</div>
+            <div class="sub"><span>{{ formatPresetDate(preset.date) }}</span><span v-if="preset.scaleExponent > 0" class="depth">{{ formatZoom(preset.scaleExponent) }}</span></div>
           </div>
         </div>
-        <div class="field is-grouped" style="margin-top:0.8em;">
-          <div class="control is-expanded">
-            <input class="input" v-model="paletteName" type="text" placeholder="Name..."
-              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-            />
-          </div>
-          <div class="control">
-            <button class="button is-link is-small" @click="savePalette"><i class="fa-solid fa-floppy-disk mr-1"></i> Save</button>
-          </div>
-          <div class="control">
-            <button class="button is-danger is-small" @click="deletePalette" :disabled="!paletteName"><i class="fa-solid fa-trash-can mr-1"></i> Delete</button>
-          </div>
-        </div>
+        <div v-if="visiblePalettePresets.length === 0" class="empty">{{ showOnlyFavoritePalettePresets ? 'No favorite full presets yet.' : 'No full presets available.' }}</div>
+      </div>
 
-        <!-- Import / Export Palettes -->
-        <hr class="section-sep"/>
-        <label class="palette-library-label">Import / Export</label>
-        <div class="field is-grouped">
-          <div class="control">
-            <button class="button is-info is-small" @click="exportPalettes" :disabled="palettes.length === 0">
-              <i class="fa-solid fa-download mr-1"></i> Export
-            </button>
-          </div>
-          <div class="control">
-            <button class="button is-info is-small is-light" @click="exportSelectedPalette" :disabled="!selectedPalette">
-              <i class="fa-solid fa-download mr-1"></i> Export Selected
-            </button>
-          </div>
-          <div class="control">
-            <button class="button is-info is-small" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0">
-              <i class="fa-solid fa-star mr-1"></i> Export Favorites
-            </button>
-          </div>
-          <div class="control">
-            <button class="button is-warning is-small" @click="triggerImportPalettes">
-              <i class="fa-solid fa-file-import mr-1"></i> Import
-            </button>
-            <input ref="paletteFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPalettes" />
-          </div>
-          <div class="control">
-            <button class="button is-danger is-small is-light" @click="deleteAllPalettes" :disabled="palettes.length === 0">
-              <i class="fa-solid fa-trash-can mr-1"></i> Delete All
-            </button>
-          </div>
-        </div>
+      <div class="section-label"><span class="tick"></span>Transfer</div>
+      <div class="transfer">
+        <button class="tbtn primary" @click="triggerImportPalettes"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
+        <button class="tbtn" @click="exportPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
+        <button class="tbtn" @click="exportSelectedPalette" :disabled="!selectedPalette"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
+        <button class="tbtn" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
+        <button class="tbtn danger" @click="deleteAllPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete all</button>
+        <input ref="paletteFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPalettes" />
       </div>
       </section>
     </div>
@@ -3428,71 +3198,133 @@ async function renameAndSaveSkyboxTexture() {
   margin-bottom: 0.45em;
   line-height: 1.3;
 }
-.gfx-slider-row {
+.palette-canvas-panel {
+  --palette-label-width: 208px;
+}
+.palette-strip-zone {
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 12px;
+  margin: 8px 0 16px;
+}
+.palette-strip-bar {
   display: flex;
   align-items: center;
-  gap: 0.5em;
-  margin-bottom: 0.4em;
+  justify-content: space-between;
+  gap: 14px;
+  margin: 0 0 10px !important;
 }
-.gfx-slider-row input[type="range"] {
+.palette-strip-bar .color-picker-row {
   flex: 1 1 auto;
   min-width: 0;
 }
-.gfx-slider-label {
-  flex: 0 0 auto;
-  min-width: 7.4em;
-  font-size: 0.88em;
-  color: var(--ink-2);
-  font-weight: 500;
+.palette-strip-bar .picker-hint {
+  color: var(--ink-3);
+  font-size: 13px;
 }
-.gfx-slider-value {
-  flex: 0 0 auto;
-  min-width: 4em;
-  text-align: right;
-  font-family: var(--mono);
-  font-size: 0.84em;
-  color: var(--ink);
-  font-variant-numeric: tabular-nums;
+.palette-strip-bar .outils-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
 }
+.palette-strip {
+  margin-bottom: 0 !important;
+  overflow: hidden;
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  background: #07080d;
+}
+.palette-canvas-panel .pipette-btn,
+.palette-canvas-panel .outils-btn.button {
+  width: 34px;
+  height: 34px;
+  display: inline-grid;
+  place-items: center;
+  padding: 0 !important;
+  border-radius: 9px !important;
+  border: 1px solid var(--line) !important;
+  background: var(--row-on) !important;
+  color: var(--ink-2) !important;
+}
+.palette-canvas-panel .pipette-btn:hover,
+.palette-canvas-panel .outils-btn.button:hover {
+  color: var(--ink) !important;
+  border-color: #333a47 !important;
+}
+.palette-canvas-panel .pipette-btn.is-active {
+  background: var(--accent) !important;
+  color: #fff !important;
+  border-color: var(--accent) !important;
+}
+.gfx-slider-row,
 .palette-control-row {
-  display: flex;
+  display: grid;
+  grid-template-columns: var(--palette-label-width) minmax(0, 1fr) 92px;
   align-items: center;
-  gap: 0.5em;
-  margin-bottom: 0.4em;
+  gap: 18px;
+  padding: 9px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  margin-bottom: 8px;
 }
+.gfx-slider-row input[type="range"],
 .palette-control-row input[type="range"] {
-  flex: 1 1 auto;
   min-width: 0;
 }
+.gfx-slider-label,
 .palette-control-label {
-  flex: 0 0 auto;
-  min-width: 7.4em;
-  font-size: 0.88em;
-  color: var(--ink-2);
-  font-weight: 500;
+  font-size: 15px;
+  color: var(--ink);
+  font-weight: 600;
+  line-height: 1.2;
 }
+.gfx-slider-label .l1,
+.palette-control-label .l1,
+.palette-compact-label .l1 {
+  display: block;
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.2;
+}
+.gfx-slider-label .l2,
+.palette-control-label .l2,
+.palette-compact-label .l2 {
+  display: block;
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 2px;
+  line-height: 1.3;
+}
+.gfx-slider-value,
 .palette-control-value {
-  flex: 0 0 auto;
-  min-width: 4.4em;
   text-align: right;
   font-family: var(--mono);
-  font-size: 0.84em;
+  font-size: 15px;
+  font-weight: 700;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 .palette-subtabs {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 6px;
+  display: grid;
+  grid-template-columns: repeat(6, minmax(0, 1fr));
+  gap: 8px;
   margin-bottom: 18px;
 }
 /* Canvas-style subtab pills (canvas/Palettes Panel — .subtab) */
 .palette-subtab-button.button {
   display: flex;
+  justify-content: center;
   align-items: center;
   gap: 8px;
-  height: auto;
-  padding: 9px 15px;
+  min-width: 0;
+  height: 42px;
+  padding: 0 12px;
   border-radius: 11px;
   font-family: var(--sans);
   font-weight: 600;
@@ -3513,22 +3345,22 @@ async function renameAndSaveSkyboxTexture() {
   box-shadow: 0 6px 18px -8px var(--accent);
 }
 .palette-top-controls {
-  display: grid;
-  grid-template-columns: repeat(3, auto);
-  align-items: center;
-  gap: 0.45em 0.65em;
-  margin-bottom: 0.75em;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin-bottom: 8px;
 }
 .palette-icon-toggle {
-  justify-content: center;
-  gap: 0.3em;
-  min-width: 0;
-  height: 26px;
-  padding: 0 0.62em;
-  font-size: 0.76rem;
-  border-color: var(--line);
-  color: var(--ink-2);
-  background: var(--row);
+  justify-content: flex-end;
+  gap: 10px;
+  width: 100%;
+  height: auto;
+  padding: 11px 16px !important;
+  font-size: 15px;
+  border-radius: 12px !important;
+  border-color: var(--line-soft) !important;
+  color: var(--ink) !important;
+  background: var(--row) !important;
 }
 .palette-icon-toggle.is-active {
   border-color: var(--accent) !important;
@@ -3536,37 +3368,47 @@ async function renameAndSaveSkyboxTexture() {
   background: var(--accent) !important;
 }
 .palette-compact-control {
-  grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: 5.8em minmax(5.5em, 1fr) 4.8em;
+  grid-template-columns: var(--palette-label-width) minmax(0, 1fr) 92px;
   align-items: center;
-  gap: 0.38em;
+  gap: 18px;
+  padding: 9px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
   min-width: 0;
 }
 .palette-compact-control input[type="range"] {
   min-width: 0;
 }
 .palette-compact-label {
-  font-size: 0.78em;
+  font-size: 15px;
   font-weight: 600;
-  color: var(--ink-2);
-  line-height: 1;
+  color: var(--ink);
+  line-height: 1.2;
 }
 .palette-compact-value {
   font-family: var(--mono);
-  font-size: 0.78em;
+  font-size: 15px;
+  font-weight: 700;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
   text-align: right;
   white-space: nowrap;
 }
 @media (max-width: 520px) {
-  .palette-top-controls {
-    grid-template-columns: repeat(3, minmax(0, 1fr));
+  .palette-subtabs {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
   }
+  .gfx-slider-row,
+  .palette-control-row,
   .palette-compact-control {
+    grid-template-columns: 1fr 82px;
+  }
+  .gfx-slider-label,
+  .palette-control-label,
+  .palette-compact-label {
     grid-column: 1 / -1;
-    grid-template-columns: 5.5em minmax(4em, 1fr) 4.5em;
   }
 }
 .palette-button-group {
@@ -3574,6 +3416,34 @@ async function renameAndSaveSkyboxTexture() {
   min-width: 0;
   margin-bottom: 0 !important;
   flex-wrap: wrap;
+  gap: 4px;
+  padding: 4px;
+  background: var(--row);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+}
+.palette-button-group .control {
+  margin: 0 !important;
+}
+.palette-button-group .button {
+  border: 0 !important;
+  border-radius: 7px !important;
+  background: transparent !important;
+  color: var(--ink-3) !important;
+  box-shadow: none !important;
+  font-family: var(--sans) !important;
+  font-size: 13px !important;
+  font-weight: 600 !important;
+  padding: 8px 12px !important;
+  height: auto !important;
+}
+.palette-button-group .button:hover {
+  color: var(--ink-2) !important;
+}
+.palette-button-group .button.is-link {
+  background: var(--accent-soft) !important;
+  color: var(--accent-bright) !important;
+  box-shadow: 0 0 0 1px oklch(0.7 0.17 245 / 0.5) inset !important;
 }
 
 /* ---------- Favorites ---------- */
@@ -4070,6 +3940,99 @@ async function renameAndSaveSkyboxTexture() {
   color: var(--ink-3);
   margin-top: 2px;
 }
+.cv-body .crow {
+  display: grid;
+  grid-template-columns: 208px 1fr;
+  align-items: center;
+  gap: 18px;
+  padding: 9px 16px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  margin-bottom: 8px;
+}
+.cv-body .crow .lab .l1 {
+  font-size: 15px;
+  font-weight: 600;
+  color: var(--ink);
+  line-height: 1.2;
+}
+.cv-body .crow .lab .l2 {
+  font-size: 12px;
+  color: var(--ink-3);
+  margin-top: 2px;
+  line-height: 1.3;
+}
+.cv-body .crow .ctl {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+.cv-body .seg {
+  display: inline-flex;
+  gap: 4px;
+  background: var(--row);
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 4px;
+  flex-wrap: wrap;
+}
+.cv-body .seg button {
+  border: 0;
+  border-radius: 7px;
+  background: transparent;
+  color: var(--ink-3);
+  cursor: pointer;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 8px 12px;
+  transition: 0.15s;
+}
+.cv-body .seg button:hover {
+  color: var(--ink-2);
+}
+.cv-body .seg button.on {
+  background: var(--accent-soft);
+  color: var(--accent-bright);
+  box-shadow: 0 0 0 1px oklch(0.7 0.17 245 / 0.5) inset;
+}
+.cv-body .select-box {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+}
+.cv-body .select-box select {
+  appearance: none;
+  -webkit-appearance: none;
+  width: 100%;
+  font-family: var(--mono);
+  font-size: 14px;
+  font-weight: 600;
+  color: var(--ink);
+  background: #0b0d12;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  padding: 11px 36px 11px 14px;
+  cursor: pointer;
+}
+.cv-body .select-box::after {
+  content: "";
+  position: absolute;
+  right: 14px;
+  top: 50%;
+  transform: translateY(-60%) rotate(45deg);
+  width: 7px;
+  height: 7px;
+  border-right: 2px solid var(--ink-3);
+  border-bottom: 2px solid var(--ink-3);
+  pointer-events: none;
+}
+.cv-body .select-box select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 
 /* library row : favorites filter + preset picker */
 .cv-body .lib-row {
@@ -4467,6 +4430,11 @@ async function renameAndSaveSkyboxTexture() {
 .cv-body .abtn:hover {
   background: rgba(20, 24, 33, 0.9);
 }
+.cv-body .abtn:disabled {
+  opacity: 0.42;
+  cursor: default;
+  pointer-events: none;
+}
 .cv-body .abtn.heart.faved {
   color: var(--mauve-bright);
   opacity: 1;
@@ -4506,10 +4474,90 @@ async function renameAndSaveSkyboxTexture() {
   font-size: 14px;
   padding: 40px 0;
 }
+.cv-body .palette-library-grid,
+.cv-body .texture-grid {
+  margin-bottom: 12px;
+}
+.cv-body .palette-thumb {
+  aspect-ratio: 16 / 4;
+}
+.cv-body .saved-palette-grid {
+  grid-template-columns: 1fr;
+  gap: 7px;
+}
+.cv-body .saved-palette-grid .palette-card {
+  display: grid;
+  grid-template-columns: minmax(280px, 54%) minmax(0, 1fr);
+  align-items: stretch;
+  min-height: 50px;
+}
+.cv-body .saved-palette-grid .palette-card:hover {
+  transform: translateY(-1px);
+}
+.cv-body .saved-palette-grid .palette-thumb {
+  width: 100%;
+  height: 100%;
+  min-height: 50px;
+  aspect-ratio: auto;
+  object-fit: cover;
+}
+.cv-body .saved-palette-grid .palette-card .info {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-width: 0;
+  padding: 8px 112px 8px 14px;
+}
+.cv-body .saved-palette-grid .palette-card .acts {
+  opacity: 1;
+  transform: none;
+  top: 50%;
+  right: 10px;
+  translate: 0 -50%;
+}
+.cv-body .full-preset-grid {
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+}
+.cv-body .full-preset-grid .card .thumb {
+  aspect-ratio: 16 / 8;
+}
+.cv-body .full-preset-grid .card .info {
+  padding: 8px 10px 9px;
+}
+.cv-body .full-preset-grid .card .nm {
+  font-size: 13px;
+}
+.cv-body .full-preset-grid .card .sub {
+  font-size: 11px;
+}
+.cv-body .texture-grid {
+  max-height: 250px;
+}
+.cv-body .texture-card .thumb {
+  aspect-ratio: 16 / 9;
+}
+.cv-body .mapping-thumb {
+  display: grid;
+  place-items: center;
+  aspect-ratio: 16 / 4;
+  color: var(--accent-bright);
+  font-size: 22px;
+}
+.cv-body .palette-save-row,
+.cv-body .texture-save-row,
+.cv-body .texture-transfer {
+  margin-bottom: 14px;
+}
 
 @media (max-width: 720px) {
   .cv-body .grid {
     grid-template-columns: repeat(2, 1fr);
+  }
+  .cv-body .full-preset-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .cv-body .saved-palette-grid .palette-card {
+    grid-template-columns: minmax(160px, 48%) minmax(0, 1fr);
   }
 }
 @media (max-width: 520px) {
@@ -4525,7 +4573,17 @@ async function renameAndSaveSkyboxTexture() {
   .cv-body .coords .lab {
     grid-column: 1 / -1;
   }
+  .cv-body .crow {
+    grid-template-columns: 1fr;
+  }
   .cv-body .grid {
+    grid-template-columns: 1fr;
+  }
+  .cv-body .full-preset-grid,
+  .cv-body .saved-palette-grid {
+    grid-template-columns: 1fr;
+  }
+  .cv-body .saved-palette-grid .palette-card {
     grid-template-columns: 1fr;
   }
   .cv-body .save-row {
