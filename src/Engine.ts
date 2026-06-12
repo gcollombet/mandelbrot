@@ -42,7 +42,10 @@ const LAYER_COUNT = 8
 const MIN_BATCH_SIZE = 100
 const MAX_BATCH_SIZE = 10_000
 const MAX_BLA_BATCH_SIZE = 100_000
-const BLA_LINEARIZATION_EPSILON = 1e-6
+// Validity radii scale linearly with this epsilon; 1e-4 keeps the error well
+// below a pixel while letting high-skip BLA levels accept far more often than
+// the previous 1e-6 (which made BLA slower than plain perturbation).
+const BLA_LINEARIZATION_EPSILON = 1e-4
 const COLOR_UNIFORM_FLOAT_COUNT = 60
 const TAU = Math.PI * 2
 
