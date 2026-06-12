@@ -7,6 +7,7 @@ import type {ApproximationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
   normalizePowerOfTwoStep,
   preserveSessionPerformanceFields,
+  stripExplorationStateFields,
   stripSessionPerformanceFields,
 } from "../Mandelbrot.ts";
 import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry, getAllPresetRecords} from '../presetStore';
@@ -23,6 +24,15 @@ import {EFFECT_FIELD_NAMES} from '../effectFieldConfig';
 import {interpolateRgb} from 'd3-interpolate';
 import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
+import {
+  chevronCountForZoomDelta,
+  edgeDistanceInScreens,
+  perceptualPresetDistance,
+  projectToSafeFrameEdge,
+  spatialDistanceInScreens,
+  type SafeFrame,
+  zoomDepthDeltaSteps,
+} from '../presetDiscovery';
 import type {TextureMetadata} from '../textureStore';
 import {
   ensureTextureLibrary,
@@ -47,6 +57,12 @@ const shortcutsSuspended = ref(false);
 // Per-tab popup positions and refs
 const popupPositions = reactive<Record<string, { x: number; y: number }>>({});
 const popupRefs = ref<Record<string, HTMLElement | null>>({});
+const rootRef = ref<HTMLElement | null>(null);
+const discoveryRadarActive = ref(false);
+const radarPulseKey = ref(0);
+const discoveryLayoutVersion = ref(0);
+const activeDiscoveryClusterId = ref<string | null>(null);
+const isPresetTraveling = ref(false);
 
 const showUI = ref(true);
 const authConfigured = isAuthConfigured();
@@ -96,6 +112,16 @@ const isNavigating = ref(false);
 let navigationTimeout: number | null = null;
 let userHasNavigated = false;
 
+function invalidateDiscoveryLayout() {
+  discoveryLayoutVersion.value += 1;
+}
+
+function deactivateDiscoveryRadar() {
+  discoveryRadarActive.value = false;
+  activeDiscoveryClusterId.value = null;
+  isPresetTraveling.value = false;
+}
+
 function onNavigationStart() {
   isNavigating.value = true;
   userHasNavigated = true;
@@ -138,6 +164,9 @@ function handleMouseMove(e: MouseEvent) {
 function handleNavKeydown(e: KeyboardEvent) {
   const navKeys = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyR', 'KeyF'];
   if (navKeys.includes(e.code)) {
+    if (discoveryRadarActive.value) {
+      deactivateDiscoveryRadar();
+    }
     onNavigationStart();
   }
 }
@@ -153,6 +182,9 @@ function handleNavMousedown(e: MouseEvent) {
   // Only treat canvas interactions as navigation (not menu clicks)
   const target = e.target as HTMLElement;
   if (target.tagName === 'CANVAS') {
+    if (discoveryRadarActive.value) {
+      deactivateDiscoveryRadar();
+    }
     onNavigationStart();
   }
 }
@@ -162,11 +194,17 @@ function handleNavMouseup() {
 }
 
 function handleNavWheel() {
+  if (discoveryRadarActive.value) {
+    deactivateDiscoveryRadar();
+  }
   onNavigationStart();
   onNavigationEnd();
 }
 
 function handleNavTouchstart() {
+  if (discoveryRadarActive.value) {
+    deactivateDiscoveryRadar();
+  }
   onNavigationStart();
 }
 
@@ -244,6 +282,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Window';
   params.animation = normalizeAnimationConfig(params.animation, params.animationSpeed);
   params.textureMapping = normalizeTextureMappingFromLegacy(params);
+  stripExplorationStateFields(params);
   params.zoomMinBrushStep = normalizePowerOfTwoStep(params.zoomMinBrushStep, 1, 1, 64);
   params.sentinelSeedStep = Math.max(
     normalizePowerOfTwoStep(params.sentinelSeedStep, 64, 1, 4096),
@@ -348,6 +387,7 @@ onMounted(() => {
   window.addEventListener('wheel', handleNavWheel, { passive: true });
   window.addEventListener('touchstart', handleNavTouchstart, { passive: true });
   window.addEventListener('touchend', handleNavTouchend, { passive: true });
+  window.addEventListener('resize', invalidateDiscoveryLayout, { passive: true });
   // Bottom bar auto-hide
   window.addEventListener('mousemove', handleMouseMove, { passive: true });
   startBottomHideTimer();
@@ -362,6 +402,7 @@ onMounted(() => {
           if (latest) {
             const value = structuredClone(latest.value);
             stripSessionPerformanceFields(value);
+            stripExplorationStateFields(value);
             await saveRemotePresetEntry({
               guid: latest.guid,
               name: latest.name,
@@ -385,7 +426,9 @@ onMounted(() => {
           if (record && record.value) {
             // Apply only if the user hasn't started navigating away
             if (!userHasNavigated) {
-              mandelbrotParams.value = preserveSessionPerformanceFields(record.value, mandelbrotParams.value);
+              const saved = structuredClone(record.value);
+              stripExplorationStateFields(saved);
+              mandelbrotParams.value = preserveSessionPerformanceFields(saved, mandelbrotParams.value);
             }
           }
         }
@@ -406,6 +449,7 @@ onUnmounted(() => {
   window.removeEventListener('wheel', handleNavWheel);
   window.removeEventListener('touchstart', handleNavTouchstart);
   window.removeEventListener('touchend', handleNavTouchend);
+  window.removeEventListener('resize', invalidateDiscoveryLayout);
   window.removeEventListener('mousemove', handleMouseMove);
   revokeObjectUrl(activeTileTextureUrl);
   revokeObjectUrl(activeSkyboxTextureUrl);
@@ -413,7 +457,9 @@ onUnmounted(() => {
   if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
 });
 watch(mandelbrotParams, (params) => {
-  localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(params));
+  const saved = structuredClone(toRaw(params));
+  stripExplorationStateFields(saved);
+  localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(saved));
 }, { deep: true });
 
 watch(
@@ -457,11 +503,13 @@ function toggleTab(tabKey: string) {
     // Initialize centered position for new popup
     popupPositions[tabKey] = { x: -1, y: -1 };
   }
+  invalidateDiscoveryLayout();
 }
 
 function closeTab(tabKey: string) {
   openTabs.delete(tabKey);
   delete popupPositions[tabKey];
+  invalidateDiscoveryLayout();
 }
 
 function closeAllSettings() {
@@ -469,14 +517,18 @@ function closeAllSettings() {
   for (const key of Object.keys(popupPositions)) {
     delete popupPositions[key];
   }
+  invalidateDiscoveryLayout();
 }
 
 // Close popups when tapping outside on mobile
 function handleOutsidePointerDown(e: PointerEvent) {
+  const target = e.target as HTMLElement;
+  if (activeDiscoveryClusterId.value && !target.closest('.discovery-cluster')) {
+    activeDiscoveryClusterId.value = null;
+  }
   if (openTabs.size === 0) return;
   // En mode pipette, ne pas fermer les Settings au clic sur le canvas
   if (pickerMode.value) return;
-  const target = e.target as HTMLElement;
   // Check if click was inside any open popup or the top settings bar
   const insidePopup = Object.values(popupRefs.value).some(
     el => el && el.contains(target)
@@ -494,6 +546,11 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     if (pickerMode.value) {
       e.preventDefault();
       pickerMode.value = false;
+      return;
+    }
+    if (activeDiscoveryClusterId.value) {
+      e.preventDefault();
+      activeDiscoveryClusterId.value = null;
       return;
     }
     if (openTabs.size > 0) {
@@ -588,12 +645,8 @@ async function triggerQuickSnapshot() {
     }
   } catch { /* ignore */ }
   const savedValue = structuredClone(toRaw(mandelbrotParams.value));
-  // Strip performance fields
-  delete (savedValue as any).dprMultiplier;
-  delete (savedValue as any).maxIterationMultiplier;
-  delete (savedValue as any).antialiasLevel;
-  delete (savedValue as any).targetFps;
-  delete (savedValue as any).gpuLoadMultiplier;
+  stripSessionPerformanceFields(savedValue);
+  stripExplorationStateFields(savedValue);
   delete (savedValue as any).activateAnimate;
   delete (savedValue as any).debugShading;
   savedValue.animation = normalizeAnimationConfig(savedValue.animation, savedValue.animationSpeed);
@@ -618,6 +671,7 @@ function bringToFront(tabKey: string) {
 }
 
 function setPopupRef(tabKey: string, el: HTMLElement | null) {
+  if (popupRefs.value[tabKey] === el) return;
   popupRefs.value[tabKey] = el;
 }
 
@@ -643,6 +697,7 @@ function onDrag(e: MouseEvent) {
     x: e.clientX - dragOffset.value.x,
     y: e.clientY - dragOffset.value.y,
   };
+  invalidateDiscoveryLayout();
 }
 
 function stopDrag() {
@@ -655,11 +710,12 @@ function stopDrag() {
 function popupStyle(tabKey: string) {
   const pos = popupPositions[tabKey] ?? { x: -1, y: -1 };
   const z = tabZOrder[tabKey] ?? 50;
-  // Palette popup is wider; presets/navigation wider to fit dropdown lists
-  const w = tabKey === 'palettes' ? '1080px'
-          : tabKey === 'animation' ? '1080px'
-          : (tabKey === 'presets' || tabKey === 'navigation') ? '720px'
-          : '640px';
+  // Palette popup is wider; presets/navigation wider to fit dropdown lists.
+  // Cap to the viewport so popups never overflow on small screens.
+  const w = tabKey === 'palettes' ? 'min(1080px, 96vw)'
+          : tabKey === 'animation' ? 'min(1080px, 96vw)'
+          : (tabKey === 'presets' || tabKey === 'navigation') ? 'min(720px, 96vw)'
+          : 'min(640px, 96vw)';
   const mh = (tabKey === 'presets' || tabKey === 'navigation') ? '94vh' : '80vh';
   if (pos.x < 0) {
     // Stagger multiple popups so they don't overlap perfectly
@@ -723,6 +779,43 @@ const shortcutLabels = computed(() => {
 
 // --- Preset Pins Overlay & Transition Travel ---
 const presetRecords = ref<PresetRecord[]>([]);
+const CANVAS_PIN_MARGIN = 32;
+const ONSCREEN_CLUSTER_CELL_SIZE = 46;
+const OFFSCREEN_CLUSTER_CELL_SIZE = 88;
+const OFFSCREEN_EDGE_CLUSTER_LIMIT = 10;
+const EDGE_CLUSTER_PREVIEW_LIMIT = 5;
+const DISCOVERY_RECOMPUTE_DELAY_MS = 260;
+type DiscoveryPin = {
+  preset: PresetRecord;
+  x: number;
+  y: number;
+  edgeX: number;
+  edgeY: number;
+  onScreen: boolean;
+  favorite: boolean;
+  pinScale: number;
+  validName: string | null;
+  magnitude: number;
+  altitudeDirection: number;
+  chevronCount: number;
+  pulseDuration: string;
+  revealDelay: string;
+  zoomDeltaSteps: number;
+  perceptualDistance: number;
+  popupPlacement: string;
+};
+type DiscoveryCluster = {
+  id: string;
+  x: number;
+  y: number;
+  representative: DiscoveryPin;
+  totalCount: number;
+  pins: DiscoveryPin[];
+  hiddenCount: number;
+  popupPlacement: string;
+};
+const visiblePins = ref<DiscoveryPin[]>([]);
+let discoveryRecomputeTimer: number | null = null;
 
 async function loadPresetRecords() {
   try {
@@ -732,19 +825,17 @@ async function loadPresetRecords() {
   }
 }
 
-let presetPollTimer: number | null = null;
 watch(
-  () => mandelbrotParams.value.showPresetPins,
-  (show) => {
-    if (show) {
-      void loadPresetRecords();
-      if (!presetPollTimer) {
-        presetPollTimer = window.setInterval(() => { void loadPresetRecords(); }, 1500);
-      }
+  discoveryRadarActive,
+  (active) => {
+    if (active) {
+      scheduleDiscoveryRecompute(0);
     } else {
-      if (presetPollTimer) {
-        clearInterval(presetPollTimer);
-        presetPollTimer = null;
+      visiblePins.value = [];
+      activeDiscoveryClusterId.value = null;
+      if (discoveryRecomputeTimer !== null) {
+        clearTimeout(discoveryRecomputeTimer);
+        discoveryRecomputeTimer = null;
       }
     }
   },
@@ -752,13 +843,38 @@ watch(
 );
 
 onUnmounted(() => {
-  if (presetPollTimer) {
-    clearInterval(presetPollTimer);
+  if (discoveryRecomputeTimer !== null) {
+    clearTimeout(discoveryRecomputeTimer);
   }
 });
 
-const visiblePins = computed(() => {
-  if (!mandelbrotParams.value.showPresetPins) return [];
+function scheduleDiscoveryRecompute(delay = DISCOVERY_RECOMPUTE_DELAY_MS) {
+  if (!discoveryRadarActive.value) return;
+  if (isPresetTraveling.value) return;
+  if (discoveryRecomputeTimer !== null) {
+    clearTimeout(discoveryRecomputeTimer);
+  }
+  discoveryRecomputeTimer = window.setTimeout(() => {
+    discoveryRecomputeTimer = null;
+    visiblePins.value = buildDiscoveryPins();
+  }, delay);
+}
+
+watch(
+  [
+    () => mandelbrotParams.value.cx,
+    () => mandelbrotParams.value.cy,
+    () => mandelbrotParams.value.scale,
+    () => mandelbrotParams.value.angle,
+    discoveryLayoutVersion,
+    presetRecords,
+  ],
+  () => { scheduleDiscoveryRecompute(); },
+  { deep: false },
+);
+
+function buildDiscoveryPins(): DiscoveryPin[] {
+  if (!discoveryRadarActive.value) return [];
   const ctrl = mandelbrotCtrlRef.value;
   if (!ctrl) return [];
   const canvas = ctrl.getCanvas();
@@ -769,12 +885,7 @@ const visiblePins = computed(() => {
   const height = canvas.height;
   const cssWidth = canvas.clientWidth;
   const cssHeight = canvas.clientHeight;
-
-  // Reactivity dependencies
-  void mandelbrotParams.value.cx;
-  void mandelbrotParams.value.cy;
-  void mandelbrotParams.value.scale;
-  void mandelbrotParams.value.angle;
+  const safeFrame = computeDiscoverySafeFrame(canvas);
 
   return presetRecords.value.map(preset => {
     const coords = navigator.coordinate_to_pixel(
@@ -785,41 +896,222 @@ const visiblePins = computed(() => {
     );
     const x = coords[0] * (cssWidth / width);
     const y = coords[1] * (cssHeight / height);
-    
-    // Check if on-screen (with some margin so hover card can clip smoothly)
-    const onScreen = x >= -50 && x <= cssWidth + 50 && y >= -50 && y <= cssHeight + 50;
-    
+    const point = {x, y};
+    const onScreen = point.x >= -CANVAS_PIN_MARGIN
+      && point.x <= cssWidth + CANVAS_PIN_MARGIN
+      && point.y >= -CANVAS_PIN_MARGIN
+      && point.y <= cssHeight + CANVAS_PIN_MARGIN;
+
     const targetLog = getApproximateLog10(preset.value.scale);
-    const currentLog = getApproximateLog10(mandelbrotParams.value.scale);
-    const zoomDiff = targetLog - currentLog; // positive means target is higher (zoomed out)
-    const absZoomDiff = Math.abs(zoomDiff);
-    // Exponential scale down for farther zoom levels (min 0.3x)
-    const pinScale = Math.max(0.3, Math.exp(-absZoomDiff * 0.15));
-    
-    // Altitude indicator: 1 = higher (zoomed out), -1 = lower (zoomed in), 0 = same level
+    const zoomDeltaSteps = zoomDepthDeltaSteps(mandelbrotParams.value.scale, preset.value.scale);
+    const absZoomDeltaSteps = Math.abs(zoomDeltaSteps);
+    const spatialDistance = onScreen
+      ? spatialDistanceInScreens(point, {width: cssWidth, height: cssHeight})
+      : edgeDistanceInScreens(point, safeFrame, {width: cssWidth, height: cssHeight});
+    const perceptualDistance = perceptualPresetDistance(spatialDistance, zoomDeltaSteps);
+    const pinScale = Math.max(0.42, Math.exp(-absZoomDeltaSteps * 0.035));
+
     let altitudeDirection = 0;
-    if (zoomDiff > 0.5) altitudeDirection = 1;
-    else if (zoomDiff < -0.5) altitudeDirection = -1;
+    if (zoomDeltaSteps > 0.75) altitudeDirection = -1;
+    else if (zoomDeltaSteps < -0.75) altitudeDirection = 1;
+    const chevronCount = chevronCountForZoomDelta(zoomDeltaSteps);
+    const pulseDuration = `${Math.max(0.75, 2.1 - Math.min(absZoomDeltaSteps, 12) * 0.08).toFixed(2)}s`;
+    const edgePoint = onScreen ? point : projectToSafeFrameEdge(point, safeFrame);
+    const revealDelay = radarRevealDelayForPoint(edgePoint, {width: cssWidth, height: cssHeight});
     
     // Filter out ISO strings, "Unnamed Preset", or blanks
     const rawName = preset.name;
     const isISODate = rawName && /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/.test(rawName);
     const isInvalid = !rawName || rawName === 'Unnamed Preset' || rawName.trim() === '' || isISODate;
     const validName = isInvalid ? null : rawName;
+    const popupPlacement = popupPlacementForPoint(point, {width: cssWidth, height: cssHeight});
     
     return {
       preset,
       x,
       y,
+      edgeX: edgePoint.x,
+      edgeY: edgePoint.y,
       onScreen,
       favorite: preset.favorite || false,
       pinScale,
       validName,
       magnitude: Math.round(Math.abs(targetLog)),
-      altitudeDirection
+      altitudeDirection,
+      chevronCount,
+      pulseDuration,
+      revealDelay,
+      zoomDeltaSteps,
+      perceptualDistance,
+      popupPlacement,
     };
-  }).filter(p => p.onScreen);
-});
+  });
+}
+
+function popupPlacementForPoint(point: {x: number; y: number}, size: {width: number; height: number}): string {
+  const vertical = point.y < 150 ? 'below' : 'above';
+  const horizontal = point.x < 150 ? 'align-left'
+    : point.x > size.width - 150 ? 'align-right'
+      : 'align-center';
+  return `${vertical} ${horizontal}`;
+}
+
+function radarRevealDelayForPoint(point: {x: number; y: number}, size: {width: number; height: number}): string {
+  const centerX = size.width / 2;
+  const centerY = size.height / 2;
+  const dx = point.x - centerX;
+  const dy = point.y - centerY;
+  const maxDistance = Math.hypot(centerX, centerY) || 1;
+  const progress = Math.min(1, Math.hypot(dx, dy) / maxDistance);
+  return `${Math.round(progress * 1120)}ms`;
+}
+
+function buildDiscoveryClusters(
+  pins: DiscoveryPin[],
+  idPrefix: string,
+  cellSize: number,
+  positionForPin: (pin: DiscoveryPin) => {x: number; y: number},
+  limit?: number,
+): DiscoveryCluster[] {
+  const clusters = new Map<string, DiscoveryPin[]>();
+  for (const pin of [...pins].sort((a, b) => a.perceptualDistance - b.perceptualDistance)) {
+    const point = positionForPin(pin);
+    const key = `${idPrefix}-${Math.round(point.x / cellSize)}:${Math.round(point.y / cellSize)}`;
+    const group = clusters.get(key);
+    if (group) group.push(pin);
+    else clusters.set(key, [pin]);
+  }
+
+  const canvasSize = getCurrentCanvasSize();
+  const result = Array.from(clusters.entries())
+    .map(([id, pins]) => {
+      const sortedPins = [...pins].sort((a, b) => a.perceptualDistance - b.perceptualDistance);
+      const representative = sortedPins[0]!;
+      const x = sortedPins.reduce((sum, pin) => sum + positionForPin(pin).x, 0) / sortedPins.length;
+      const y = sortedPins.reduce((sum, pin) => sum + positionForPin(pin).y, 0) / sortedPins.length;
+      return {
+        id,
+        x,
+        y,
+        representative,
+        totalCount: sortedPins.length,
+        pins: sortedPins.slice(0, EDGE_CLUSTER_PREVIEW_LIMIT),
+        hiddenCount: Math.max(0, sortedPins.length - EDGE_CLUSTER_PREVIEW_LIMIT),
+        popupPlacement: popupPlacementForPoint({x, y}, canvasSize),
+      };
+    })
+    .sort((a, b) => a.representative.perceptualDistance - b.representative.perceptualDistance);
+
+  return typeof limit === 'number' ? result.slice(0, limit) : result;
+}
+
+const onScreenDiscoveryClusters = computed<DiscoveryCluster[]>(() => buildDiscoveryClusters(
+  visiblePins.value.filter(pin => pin.onScreen),
+  'screen',
+  ONSCREEN_CLUSTER_CELL_SIZE,
+  pin => ({x: pin.x, y: pin.y}),
+));
+const singleOnScreenDiscoveryPins = computed(() => onScreenDiscoveryClusters.value
+  .filter(cluster => cluster.totalCount === 1)
+  .map(cluster => cluster.representative));
+const groupedOnScreenDiscoveryClusters = computed(() => onScreenDiscoveryClusters.value
+  .filter(cluster => cluster.totalCount > 1));
+const edgeDiscoveryClusters = computed<DiscoveryCluster[]>(() => buildDiscoveryClusters(
+  visiblePins.value.filter(pin => !pin.onScreen),
+  'edge',
+  OFFSCREEN_CLUSTER_CELL_SIZE,
+  pin => ({x: pin.edgeX, y: pin.edgeY}),
+  OFFSCREEN_EDGE_CLUSTER_LIMIT,
+));
+const presetPinsVisible = computed(() => discoveryRadarActive.value && !isPresetTraveling.value);
+
+function toggleDiscoveryCluster(id: string) {
+  activeDiscoveryClusterId.value = activeDiscoveryClusterId.value === id ? null : id;
+}
+
+function isDiscoveryClusterOpen(id: string) {
+  return activeDiscoveryClusterId.value === id;
+}
+
+function computeDiscoverySafeFrame(canvas: HTMLCanvasElement): SafeFrame {
+  if (discoveryRadarActive.value) {
+    return {
+      left: 24,
+      top: 24,
+      right: Math.max(24, canvas.clientWidth - 24),
+      bottom: Math.max(24, canvas.clientHeight - 24),
+    };
+  }
+  const canvasRect = canvas.getBoundingClientRect();
+  const rootRect = rootRef.value?.getBoundingClientRect();
+  const leftOffset = rootRect?.left ?? canvasRect.left;
+  const topOffset = rootRect?.top ?? canvasRect.top;
+  let frame: SafeFrame = {
+    left: 48,
+    top: 78,
+    right: Math.max(48, canvas.clientWidth - 48),
+    bottom: Math.max(78, canvas.clientHeight - (mobileNavExpanded.value ? 126 : 64)),
+  };
+
+  const exclusionRects = [
+    document.querySelector('.top-settings-bar')?.getBoundingClientRect(),
+    document.querySelector('.render-stats-wrapper')?.getBoundingClientRect(),
+    bottomBarVisible.value ? document.querySelector('.shortcut-hint')?.getBoundingClientRect() : null,
+    bottomBarVisible.value ? document.querySelector('.footer-love')?.getBoundingClientRect() : null,
+    ...Object.values(popupRefs.value).map(el => el?.getBoundingClientRect()),
+  ].filter((rect): rect is DOMRect => !!rect);
+
+  for (const rect of exclusionRects) {
+    const local = {
+      left: rect.left - leftOffset,
+      top: rect.top - topOffset,
+      right: rect.right - leftOffset,
+      bottom: rect.bottom - topOffset,
+    };
+    const overlapsY = local.bottom > frame.top && local.top < frame.bottom;
+    const overlapsX = local.right > frame.left && local.left < frame.right;
+    if (!overlapsX || !overlapsY) continue;
+    if (local.top <= frame.top && local.bottom < canvas.clientHeight * 0.45) {
+      frame.top = Math.max(frame.top, local.bottom + 12);
+    } else if (local.bottom >= frame.bottom && local.top > canvas.clientHeight * 0.55) {
+      frame.bottom = Math.min(frame.bottom, local.top - 12);
+    } else if (local.left <= frame.left && local.right < canvas.clientWidth * 0.45) {
+      frame.left = Math.max(frame.left, local.right + 12);
+    } else if (local.right >= frame.right && local.left > canvas.clientWidth * 0.55) {
+      frame.right = Math.min(frame.right, local.left - 12);
+    }
+  }
+
+  if (frame.right - frame.left < 160 || frame.bottom - frame.top < 140) {
+    frame = {
+      left: 48,
+      top: 78,
+      right: Math.max(48, canvas.clientWidth - 48),
+      bottom: Math.max(78, canvas.clientHeight - 64),
+    };
+  }
+  return frame;
+}
+
+function getCurrentCanvasSize(): {width: number; height: number} {
+  const canvas = mandelbrotCtrlRef.value?.getCanvas();
+  return {
+    width: canvas?.clientWidth ?? window.innerWidth,
+    height: canvas?.clientHeight ?? window.innerHeight,
+  };
+}
+
+async function toggleDiscoveryRadar() {
+  if (discoveryRadarActive.value) {
+    deactivateDiscoveryRadar();
+    return;
+  }
+  closeAllSettings();
+  radarPulseKey.value += 1;
+  discoveryRadarActive.value = true;
+  await loadPresetRecords();
+  invalidateDiscoveryLayout();
+}
 
 // Travel animation loop state
 let travelAnimationId: number | null = null;
@@ -981,6 +1273,9 @@ function tickTravelAnimation() {
     
     travelTargetPreset = null;
     travelAnimationId = null;
+    isPresetTraveling.value = false;
+    radarPulseKey.value += 1;
+    scheduleDiscoveryRecompute(0);
   }
 }
 
@@ -1000,6 +1295,13 @@ function startTravelToPreset(preset: PresetRecord) {
   if (!ctrl) return;
   const navigator = ctrl.getNavigator();
   if (!navigator) return;
+  activeDiscoveryClusterId.value = null;
+  isPresetTraveling.value = true;
+  visiblePins.value = [];
+  if (discoveryRecomputeTimer !== null) {
+    clearTimeout(discoveryRecomputeTimer);
+    discoveryRecomputeTimer = null;
+  }
   
   if (travelAnimationId) {
     cancelAnimationFrame(travelAnimationId);
@@ -1032,12 +1334,12 @@ function startTravelToPreset(preset: PresetRecord) {
 </script>
 
 <template>
-  <div style="position: relative; height: 100vh; width: 100vw;" :class="{ 'picker-cursor': pickerMode }">
+  <div ref="rootRef" style="position: relative; height: 100vh; width: 100vw;" :class="{ 'picker-cursor': pickerMode }">
     <!-- Barre de navigation en haut, centree, 4 boutons on/off -->
     <div
       class="top-settings-bar"
       :class="{ 'hud-hidden': isNavigating }"
-      v-show="showUI"
+      v-show="showUI && !discoveryRadarActive"
     >
       <div class="top-settings-bar-inner">
         <button
@@ -1075,7 +1377,7 @@ function startTravelToPreset(preset: PresetRecord) {
     <!-- Render status indicator (bottom-center) -->
     <div
       class="render-stats-wrapper"
-      v-show="showUI"
+      v-show="showUI && !discoveryRadarActive"
       @touchstart.stop
       @touchend.stop
     >
@@ -1130,19 +1432,42 @@ function startTravelToPreset(preset: PresetRecord) {
       :textureMappingMode="mandelbrotParams.textureMappingMode"
     />
 
+    <button
+      class="discovery-radar-button"
+      :class="{ 'is-active': discoveryRadarActive, 'hud-hidden': isNavigating }"
+      type="button"
+      :aria-pressed="discoveryRadarActive"
+      title="Discover nearby presets"
+      @click="toggleDiscoveryRadar"
+    >
+      <span class="radar-button-ring" aria-hidden="true"></span>
+      <span class="radar-button-core" aria-hidden="true"></span>
+      <span class="is-hidden-touch">{{ discoveryRadarActive ? 'Radar On' : 'Discover' }}</span>
+    </button>
+
+    <div
+      v-if="presetPinsVisible"
+      :key="radarPulseKey"
+      class="discovery-radar-pulse"
+      :class="{ 'hud-hidden': isNavigating }"
+      aria-hidden="true"
+    ></div>
+
     <!-- Overlay des pins de presets -->
     <div
-      v-if="mandelbrotParams.showPresetPins"
+      v-if="presetPinsVisible"
       class="preset-pins-overlay"
-      :class="{ 'hud-hidden': isNavigating }"
     >
       <div
-        v-for="pin in visiblePins"
+        v-for="pin in singleOnScreenDiscoveryPins"
         :key="pin.preset.id"
-        class="preset-pin-container"
-        :class="{ 'is-favorite': pin.favorite }"
-        :style="{ left: pin.x + 'px', top: pin.y + 'px', '--pin-scale': pin.pinScale }"
+        class="preset-pin-container discovery-pin"
+        :class="[{ 'is-favorite': pin.favorite, 'is-deeper': pin.altitudeDirection === -1, 'is-shallower': pin.altitudeDirection === 1 }, pin.popupPlacement]"
+        :style="{ left: pin.x + 'px', top: pin.y + 'px', '--pin-scale': pin.pinScale, '--pin-pulse-duration': pin.pulseDuration, '--pin-reveal-delay': pin.revealDelay }"
       >
+        <div v-if="pin.altitudeDirection === 1" class="pin-chevrons pin-chevrons-up" aria-hidden="true">
+          <i v-for="n in pin.chevronCount" :key="'up-' + n" class="fa-solid fa-chevron-up"></i>
+        </div>
         <button
           class="preset-pin-btn"
           @click="startTravelToPreset(pin.preset)"
@@ -1151,6 +1476,9 @@ function startTravelToPreset(preset: PresetRecord) {
           <span class="preset-pin-dot"></span>
           <span class="preset-pin-pulse"></span>
         </button>
+        <div v-if="pin.altitudeDirection === -1" class="pin-chevrons pin-chevrons-down" aria-hidden="true">
+          <i v-for="n in pin.chevronCount" :key="'down-' + n" class="fa-solid fa-chevron-down"></i>
+        </div>
         <!-- Hover circular preview card -->
         <div class="preset-pin-card">
           <div class="preset-pin-circle-thumb">
@@ -1167,12 +1495,104 @@ function startTravelToPreset(preset: PresetRecord) {
           </span>
         </div>
       </div>
+      <div
+        v-for="cluster in groupedOnScreenDiscoveryClusters"
+        :key="'screen-cluster-' + cluster.id"
+        class="discovery-edge-marker discovery-cluster discovery-screen-cluster"
+        :class="[{ 'is-open': isDiscoveryClusterOpen(cluster.id), 'is-favorite': cluster.representative.favorite, 'is-deeper': cluster.representative.altitudeDirection === -1, 'is-shallower': cluster.representative.altitudeDirection === 1 }, cluster.popupPlacement]"
+        :style="{ left: cluster.x + 'px', top: cluster.y + 'px', '--pin-pulse-duration': cluster.representative.pulseDuration, '--pin-reveal-delay': cluster.representative.revealDelay }"
+        role="button"
+        tabindex="0"
+        :title="cluster.totalCount + ' presets nearby'"
+        :aria-label="cluster.totalCount + ' visible presets nearby'"
+        @click.stop="toggleDiscoveryCluster(cluster.id)"
+        @keydown.enter.prevent="toggleDiscoveryCluster(cluster.id)"
+        @keydown.space.prevent="toggleDiscoveryCluster(cluster.id)"
+      >
+        <span class="edge-marker-dot" aria-hidden="true"></span>
+        <span class="edge-marker-count">{{ cluster.totalCount }}</span>
+        <span class="edge-marker-direction" aria-hidden="true">
+          <i class="fa-solid fa-arrow-up" v-if="cluster.representative.altitudeDirection === 1"></i>
+          <i class="fa-solid fa-arrow-down" v-else-if="cluster.representative.altitudeDirection === -1"></i>
+          <i class="fa-solid fa-minus" v-else></i>
+        </span>
+        <span class="edge-cluster-preview" @click.stop>
+          <button
+            v-for="pin in cluster.pins"
+            :key="'screen-preview-' + pin.preset.id"
+            class="edge-cluster-item"
+            type="button"
+            :title="'Travel to ' + (pin.preset.name || 'preset')"
+            @click="startTravelToPreset(pin.preset)"
+          >
+            <span class="edge-cluster-thumb">
+              <img v-if="pin.preset.thumbnail" :src="pin.preset.thumbnail" alt="" />
+            </span>
+            <span class="edge-cluster-meta">
+              <span class="edge-cluster-name">{{ pin.validName || 'Preset' }}</span>
+              <span class="edge-cluster-mag">
+                <i class="fa-solid fa-arrow-up" v-if="pin.altitudeDirection === 1"></i>
+                <i class="fa-solid fa-arrow-down" v-else-if="pin.altitudeDirection === -1"></i>
+                <i class="fa-solid fa-minus" v-else></i>
+                10<sup>-{{ pin.magnitude }}</sup>
+              </span>
+            </span>
+          </button>
+          <span v-if="cluster.hiddenCount > 0" class="edge-cluster-more">+{{ cluster.hiddenCount }} more</span>
+        </span>
+      </div>
+      <div
+        v-for="cluster in edgeDiscoveryClusters"
+        :key="'edge-cluster-' + cluster.id"
+        class="discovery-edge-marker discovery-cluster"
+        :class="[{ 'is-open': isDiscoveryClusterOpen(cluster.id), 'is-deeper': cluster.representative.altitudeDirection === -1, 'is-shallower': cluster.representative.altitudeDirection === 1, 'is-favorite': cluster.representative.favorite }, cluster.popupPlacement]"
+        :style="{ left: cluster.x + 'px', top: cluster.y + 'px', '--pin-pulse-duration': cluster.representative.pulseDuration, '--pin-reveal-delay': cluster.representative.revealDelay }"
+        role="button"
+        tabindex="0"
+        :title="cluster.totalCount === 1 ? '1 preset off-screen' : cluster.totalCount + ' presets in this direction'"
+        :aria-label="cluster.totalCount === 1 ? '1 off-screen preset' : cluster.totalCount + ' off-screen presets in this direction'"
+        @click.stop="toggleDiscoveryCluster(cluster.id)"
+        @keydown.enter.prevent="toggleDiscoveryCluster(cluster.id)"
+        @keydown.space.prevent="toggleDiscoveryCluster(cluster.id)"
+      >
+        <span class="edge-marker-dot" aria-hidden="true"></span>
+        <span v-if="cluster.totalCount > 1" class="edge-marker-count">{{ cluster.totalCount }}</span>
+        <span class="edge-marker-direction" aria-hidden="true">
+          <i class="fa-solid fa-arrow-up" v-if="cluster.representative.altitudeDirection === 1"></i>
+          <i class="fa-solid fa-arrow-down" v-else-if="cluster.representative.altitudeDirection === -1"></i>
+          <i class="fa-solid fa-minus" v-else></i>
+        </span>
+        <span class="edge-cluster-preview" @click.stop>
+          <button
+            v-for="pin in cluster.pins"
+            :key="'edge-preview-' + pin.preset.id"
+            class="edge-cluster-item"
+            type="button"
+            :title="'Travel to ' + (pin.preset.name || 'preset')"
+            @click="startTravelToPreset(pin.preset)"
+          >
+            <span class="edge-cluster-thumb">
+              <img v-if="pin.preset.thumbnail" :src="pin.preset.thumbnail" alt="" />
+            </span>
+            <span class="edge-cluster-meta">
+              <span class="edge-cluster-name">{{ pin.validName || 'Preset' }}</span>
+              <span class="edge-cluster-mag">
+                <i class="fa-solid fa-arrow-up" v-if="pin.altitudeDirection === 1"></i>
+                <i class="fa-solid fa-arrow-down" v-else-if="pin.altitudeDirection === -1"></i>
+                <i class="fa-solid fa-minus" v-else></i>
+                10<sup>-{{ pin.magnitude }}</sup>
+              </span>
+            </span>
+          </button>
+          <span v-if="cluster.hiddenCount > 0" class="edge-cluster-more">+{{ cluster.hiddenCount }} more</span>
+        </span>
+      </div>
     </div>
 
     <!-- Popup Settings — one per open tab (multi-window) -->
     <template v-for="tab in settingsTabs" :key="'popup-' + tab.key">
-      <div
-        v-if="openTabs.has(tab.key)"
+	      <div
+	        v-if="openTabs.has(tab.key) && !discoveryRadarActive"
         :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
         class="settings-popup"
         :style="popupStyle(tab.key)"
@@ -1205,7 +1625,7 @@ function startTravelToPreset(preset: PresetRecord) {
     <div
       class="shortcut-hint is-hidden-touch"
       :class="{ 'hud-hidden': isNavigating, 'bottom-bar-hidden': !bottomBarVisible }"
-      v-show="showUI"
+      v-show="showUI && !discoveryRadarActive"
     >
       <div class="shortcut-group">
         <span class="shortcut-label">Move</span>
@@ -1252,7 +1672,7 @@ function startTravelToPreset(preset: PresetRecord) {
     <div
       class="footer-love is-hidden-touch"
       :class="{ 'hud-hidden': isNavigating, 'bottom-bar-hidden': !bottomBarVisible }"
-      v-show="showUI"
+      v-show="showUI && !discoveryRadarActive"
     >
       <small>
         <a href="https://wgpu.rs/"
@@ -1441,7 +1861,7 @@ function startTravelToPreset(preset: PresetRecord) {
   display: flex;
   align-items: center;
   justify-content: space-between;
-  padding: 12px 18px;
+  padding: var(--space-3) var(--space-5);
   border-bottom: 1px solid var(--line);
   background: rgba(0, 0, 0, 0.18);
   cursor: move;
@@ -1496,7 +1916,7 @@ function startTravelToPreset(preset: PresetRecord) {
 .settings-popup-body {
   flex: 1 1 auto;
   overflow-y: auto;
-  padding: 24px 26px 28px;
+  padding: var(--space-5) var(--space-5) calc(var(--space-5) + var(--space-2));
   min-height: 0;
 }
 
@@ -1687,7 +2107,138 @@ function startTravelToPreset(preset: PresetRecord) {
   cursor: url("data:image/svg+xml,%3Csvg width='24' height='24' viewBox='0 0 24 24' xmlns='http://www.w3.org/2000/svg'%3E%3Cpath d='M14.7 3.3 20.7 9.3 18.9 11.1 17.8 10 9.4 18.4C9.1 18.7 8.7 18.9 8.3 18.9H5.1V15.7C5.1 15.3 5.3 14.9 5.6 14.6L14 6.2 12.9 5.1 14.7 3.3Z' fill='white' stroke='black' stroke-width='1.4' stroke-linejoin='round'/%3E%3Cpath d='M6.8 15.9H8.1L16.4 7.6 15.4 6.6 7.1 14.9 6.8 15.9Z' fill='%2338d5ff'/%3E%3C/svg%3E") 4 20, crosshair !important;
 }
 
-/* === Preset Pins Overlay & Styling === */
+/* === Preset Discovery Radar & Pins === */
+.discovery-radar-button {
+  position: absolute;
+  right: 22px;
+  top: 92px;
+  z-index: 32;
+  min-width: 118px;
+  height: 42px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  background:
+    radial-gradient(circle at 28px 50%, rgba(63, 230, 184, 0.32), transparent 28px),
+    rgba(10, 14, 22, 0.68);
+  color: #fff;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 9px;
+  padding: 0 14px 0 12px;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  cursor: pointer;
+  backdrop-filter: blur(14px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 0 18px rgba(63, 230, 184, 0.18);
+  transition: opacity 0.25s ease, transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.discovery-radar-button:hover,
+.discovery-radar-button.is-active {
+  border-color: rgba(63, 230, 184, 0.85);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.4), 0 0 28px rgba(63, 230, 184, 0.38);
+}
+
+.discovery-radar-button.is-active {
+  color: #03110d;
+  background:
+    radial-gradient(circle at 28px 50%, rgba(255, 255, 255, 0.72), transparent 25px),
+    linear-gradient(135deg, #6ff7d2, #32d6ff);
+  border-color: rgba(255, 255, 255, 0.92);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.42), 0 0 0 2px rgba(63, 230, 184, 0.42), 0 0 34px rgba(63, 230, 184, 0.65);
+}
+
+.discovery-radar-button.hud-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.radar-button-ring {
+  width: 19px;
+  height: 19px;
+  border-radius: 50%;
+  border: 2px solid rgba(63, 230, 184, 0.9);
+  position: relative;
+  flex: 0 0 auto;
+}
+
+.radar-button-ring::after {
+  content: "";
+  position: absolute;
+  inset: -2px;
+  border-radius: 50%;
+  border: 1px solid rgba(63, 230, 184, 0.75);
+  animation: radar-button-sonar 1.8s ease-out infinite;
+}
+
+.discovery-radar-button.is-active .radar-button-ring::after {
+  animation: none;
+  opacity: 0;
+}
+
+.radar-button-core {
+  position: absolute;
+  width: 5px;
+  height: 5px;
+  left: 22px;
+  border-radius: 50%;
+  background: #fff;
+  box-shadow: 0 0 10px rgba(255, 255, 255, 0.9);
+}
+
+.discovery-radar-button.is-active .radar-button-core {
+  background: #03110d;
+  box-shadow: 0 0 0 4px rgba(3, 17, 13, 0.14);
+}
+
+@keyframes radar-button-sonar {
+  0% {
+    opacity: 0.7;
+    transform: scale(0.72);
+  }
+  80% {
+    opacity: 0;
+    transform: scale(1.9);
+  }
+  100% {
+    opacity: 0;
+    transform: scale(1.9);
+  }
+}
+
+.discovery-radar-pulse {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 16vmin;
+  height: 16vmin;
+  border-radius: 50%;
+  border: 2px solid rgba(63, 230, 184, 0.55);
+  transform: translate(-50%, -50%) scale(0.1);
+  pointer-events: none;
+  z-index: 24;
+  animation: discovery-radar-pulse 1.25s ease-out forwards;
+}
+
+.discovery-radar-pulse.hud-hidden {
+  opacity: 0;
+}
+
+@keyframes discovery-radar-pulse {
+  0% {
+    opacity: 0.9;
+    transform: translate(-50%, -50%) scale(0.08);
+    box-shadow: 0 0 20px rgba(63, 230, 184, 0.35);
+  }
+  100% {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(18);
+    box-shadow: 0 0 80px rgba(63, 230, 184, 0);
+  }
+}
+
 .preset-pins-overlay {
   position: absolute;
   inset: 0;
@@ -1707,6 +2258,56 @@ function startTravelToPreset(preset: PresetRecord) {
   align-items: center;
   justify-content: center;
 }
+
+.discovery-pin {
+  animation: discovery-pin-reveal 0.34s ease-out both;
+  animation-delay: var(--pin-reveal-delay, 0ms);
+}
+
+@keyframes discovery-pin-reveal {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.42);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+    filter: blur(0);
+  }
+}
+
+.pin-chevrons {
+  position: absolute;
+  left: 50%;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0;
+  color: rgba(63, 230, 184, 0.95);
+  font-size: 8px;
+  line-height: 1;
+  text-shadow: 0 0 10px rgba(63, 230, 184, 0.78);
+  pointer-events: none;
+  transform: translateX(-50%);
+  z-index: 4;
+}
+
+.pin-chevrons i {
+  display: block;
+  height: 6px;
+  line-height: 1;
+}
+
+.pin-chevrons-up {
+  bottom: calc(50% + 9px);
+}
+
+.pin-chevrons-down {
+  top: calc(50% + 9px);
+}
+
 .preset-pin-btn {
   width: 20px;
   height: 20px;
@@ -1737,24 +2338,13 @@ function startTravelToPreset(preset: PresetRecord) {
   height: 24px;
   border-radius: 50%;
   border: 2px solid var(--accent-bright);
-  opacity: 0;
-  animation: pin-pulsate 1.8s infinite ease-out;
+  opacity: 0.28;
   z-index: 1;
 }
 .preset-pin-btn:hover .preset-pin-dot {
   transform: scale(1.3);
   background: #fff;
   box-shadow: 0 0 16px #fff, 0 0 24px var(--accent-bright);
-}
-@keyframes pin-pulsate {
-  0% {
-    transform: scale(0.5);
-    opacity: 0.8;
-  }
-  100% {
-    transform: scale(1.8);
-    opacity: 0;
-  }
 }
 .preset-pin-card {
   position: absolute;
@@ -1770,9 +2360,31 @@ function startTravelToPreset(preset: PresetRecord) {
   gap: 8px;
   z-index: 10;
 }
+
+.preset-pin-container.below .preset-pin-card {
+  bottom: auto;
+  top: 26px;
+}
+
+.preset-pin-container.align-left .preset-pin-card {
+  left: 0;
+  transform: translateY(10px) scale(0.8);
+}
+
+.preset-pin-container.align-right .preset-pin-card {
+  left: auto;
+  right: 0;
+  transform: translateY(10px) scale(0.8);
+}
+
 .preset-pin-container:hover .preset-pin-card {
   opacity: 1;
   transform: translateX(-50%) translateY(0) scale(1);
+}
+
+.preset-pin-container.align-left:hover .preset-pin-card,
+.preset-pin-container.align-right:hover .preset-pin-card {
+  transform: translateY(0) scale(1);
 }
 .preset-pin-circle-thumb {
   width: 76px;
@@ -1834,6 +2446,220 @@ function startTravelToPreset(preset: PresetRecord) {
   background: linear-gradient(#111, #111) padding-box,
               linear-gradient(135deg, #a855f7, #ec4899) border-box;
   box-shadow: 0 8px 24px rgba(0, 0, 0, 0.5), 0 0 15px #a855f7;
+}
+
+.discovery-edge-marker {
+  position: absolute;
+  z-index: 28;
+  width: 28px;
+  height: 28px;
+  transform: translate(-50%, -50%);
+  border-radius: 50%;
+  border: 1px solid rgba(255, 255, 255, 0.22);
+  background: rgba(10, 14, 22, 0.62);
+  color: #fff;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  pointer-events: auto;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 8px 18px rgba(0, 0, 0, 0.34), 0 0 13px rgba(63, 230, 184, 0.2);
+  animation: discovery-edge-marker-reveal 0.34s ease-out both;
+  animation-delay: var(--pin-reveal-delay, 0ms);
+}
+
+@keyframes discovery-edge-marker-reveal {
+  from {
+    opacity: 0;
+    transform: translate(-50%, -50%) scale(0.42);
+    filter: blur(2px);
+  }
+  to {
+    opacity: 1;
+    transform: translate(-50%, -50%) scale(1);
+    filter: blur(0);
+  }
+}
+
+.discovery-edge-marker:hover {
+  border-color: rgba(255, 255, 255, 0.75);
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.42), 0 0 24px rgba(255, 255, 255, 0.32);
+}
+
+.discovery-edge-marker.is-favorite {
+  box-shadow: 0 8px 22px rgba(0, 0, 0, 0.36), 0 0 18px rgba(168, 85, 247, 0.36);
+}
+
+.discovery-cluster.is-open {
+  z-index: 45;
+}
+
+.edge-marker-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: currentColor;
+  box-shadow: 0 0 10px currentColor;
+}
+
+.edge-marker-count {
+  position: absolute;
+  min-width: 16px;
+  height: 16px;
+  right: -7px;
+  top: -7px;
+  padding: 0 4px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.94);
+  color: #101219;
+  font-size: 10px;
+  font-weight: 800;
+  line-height: 16px;
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.35);
+}
+
+.edge-marker-direction {
+  position: absolute;
+  right: -3px;
+  bottom: -4px;
+  width: 14px;
+  height: 14px;
+  border-radius: 999px;
+  background: rgba(63, 230, 184, 0.92);
+  color: #05110e;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 8px;
+  font-weight: 900;
+  line-height: 1;
+}
+
+.edge-marker-direction i {
+  display: block;
+  line-height: 1;
+}
+
+.edge-cluster-preview {
+  position: absolute;
+  left: 50%;
+  bottom: 34px;
+  width: 218px;
+  transform: translateX(-50%) translateY(8px) scale(0.96);
+  opacity: 0;
+  pointer-events: none;
+  display: flex;
+  flex-direction: column;
+  gap: 5px;
+  padding: 7px;
+  border-radius: 12px;
+  background: rgba(12, 15, 22, 0.82);
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 14px 34px rgba(0, 0, 0, 0.48);
+  transition: opacity 0.18s ease, transform 0.18s ease;
+}
+
+.discovery-edge-marker.below .edge-cluster-preview {
+  bottom: auto;
+  top: 34px;
+}
+
+.discovery-edge-marker.align-left .edge-cluster-preview {
+  left: 0;
+  transform: translateY(8px) scale(0.96);
+}
+
+.discovery-edge-marker.align-right .edge-cluster-preview {
+  left: auto;
+  right: 0;
+  transform: translateY(8px) scale(0.96);
+}
+
+.discovery-edge-marker:hover .edge-cluster-preview,
+.discovery-edge-marker:focus-visible .edge-cluster-preview,
+.discovery-cluster.is-open .edge-cluster-preview {
+  opacity: 1;
+  pointer-events: auto;
+  transform: translateX(-50%) translateY(0) scale(1);
+}
+
+.discovery-edge-marker.align-left:hover .edge-cluster-preview,
+.discovery-edge-marker.align-left:focus-visible .edge-cluster-preview,
+.discovery-edge-marker.align-right:hover .edge-cluster-preview,
+.discovery-edge-marker.align-right:focus-visible .edge-cluster-preview,
+.discovery-cluster.align-left.is-open .edge-cluster-preview,
+.discovery-cluster.align-right.is-open .edge-cluster-preview {
+  transform: translateY(0) scale(1);
+}
+
+.edge-cluster-item {
+  height: 42px;
+  display: grid;
+  grid-template-columns: 58px minmax(0, 1fr);
+  align-items: center;
+  gap: 8px;
+  border: 0;
+  border-radius: 8px;
+  padding: 4px;
+  color: #fff;
+  background: rgba(255, 255, 255, 0.06);
+  cursor: pointer;
+  text-align: left;
+}
+
+.edge-cluster-item:hover {
+  background: rgba(255, 255, 255, 0.13);
+}
+
+.edge-cluster-thumb {
+  width: 58px;
+  height: 34px;
+  border-radius: 7px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.1);
+}
+
+.edge-cluster-thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.edge-cluster-meta {
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.edge-cluster-name {
+  overflow: hidden;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  font-size: 11px;
+  font-weight: 700;
+}
+
+.edge-cluster-mag,
+.edge-cluster-more {
+  font-size: 10px;
+  color: rgba(255, 255, 255, 0.68);
+  font-weight: 700;
+}
+
+@media (max-width: 768px) {
+  .discovery-radar-button {
+    top: 84px;
+    right: 12px;
+    min-width: 42px;
+    width: 42px;
+    padding: 0;
+  }
+
+  .radar-button-core {
+    left: 18px;
+  }
 }
 
 </style>

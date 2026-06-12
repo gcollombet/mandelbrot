@@ -63,6 +63,10 @@ export const SESSION_PERFORMANCE_FIELDS = [
     'sentinelSeedStep',
 ] as const satisfies readonly (keyof MandelbrotParams)[];
 
+export const EXPLORATION_STATE_FIELDS = [
+    'showPresetPins',
+] as const satisfies readonly (keyof MandelbrotParams)[];
+
 export function normalizePowerOfTwoStep(value: number | undefined, defaultValue: number, minValue: number, maxValue: number): number {
     const raw = typeof value === 'number' && Number.isFinite(value) ? value : defaultValue;
     const normalized = 2 ** Math.floor(Math.log2(Math.max(1, Math.floor(raw))));
@@ -72,6 +76,14 @@ export function normalizePowerOfTwoStep(value: number | undefined, defaultValue:
 export function stripSessionPerformanceFields<T extends object>(value: T): T {
     const record = value as Record<string, unknown>;
     for (const field of SESSION_PERFORMANCE_FIELDS) {
+        delete record[field];
+    }
+    return value;
+}
+
+export function stripExplorationStateFields<T extends object>(value: T): T {
+    const record = value as Record<string, unknown>;
+    for (const field of EXPLORATION_STATE_FIELDS) {
         delete record[field];
     }
     return value;

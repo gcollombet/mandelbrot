@@ -24,6 +24,28 @@
   --sans: "Space Grotesk", system-ui, sans-serif;
   --glass: rgba(10, 12, 18, 0.52);
   --glass-line: rgba(255, 255, 255, 0.10);
+
+  /* ── Density scale ──────────────────────────────────────────────
+     Single source of truth for spacing/sizing across all panels.
+     Denser fixed baseline; tune here, not per-component.
+     Legacy --radius:18px kept intentionally for the splash/compass marks. */
+  --space-1: 4px;
+  --space-2: 6px;
+  --space-3: 8px;
+  --space-4: 12px;
+  --space-5: 16px;
+  --font-xs: 11px;
+  --font-sm: 12px;
+  --font-md: 13px;
+  --font-lg: 14px;
+  --ctrl-h: 30px;          /* control height (selects/buttons) */
+  --thumb: 16px;           /* slider thumb diameter */
+  --label-w: 150px;        /* slider/control label column width */
+  --value-w: 72px;         /* slider value column width */
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 16px;
+  --gallery-min: 140px;    /* min card width for auto-fill galleries */
 }
 
 /* AI gradient ring animation, shared by the compass button and the splash mark */

@@ -2,6 +2,7 @@ import {describe, expect, it} from 'vitest';
 import {
   normalizePowerOfTwoStep,
   preserveSessionPerformanceFields,
+  stripExplorationStateFields,
   stripSessionPerformanceFields,
 } from '../../src/Mandelbrot';
 
@@ -59,6 +60,39 @@ describe('performance settings helpers', () => {
     const stripped = stripSessionPerformanceFields(payload);
 
     expect(stripped).toEqual({scale: '1.0'});
+  });
+
+  it('strips exploration fields from preset payloads', () => {
+    const payload = {
+      scale: '1.0',
+      showPresetPins: true,
+    } as Record<string, unknown>;
+
+    const stripped = stripExplorationStateFields(payload);
+
+    expect(stripped).toEqual({scale: '1.0'});
+  });
+
+  it('preserves current exploration fields outside preset application helpers', () => {
+    const current = {
+      dprMultiplier: 1.5,
+      maxIterationMultiplier: 0.2,
+      antialiasLevel: 4,
+      targetFps: 30,
+      gpuLoadMultiplier: 2,
+      zoomMinBrushStep: 8,
+      sentinelSeedStep: 512,
+      showPresetPins: true,
+    } as const;
+
+    const saved = stripExplorationStateFields({
+      scale: '1.0',
+      showPresetPins: false,
+    } as any);
+    const merged = preserveSessionPerformanceFields(saved, current);
+
+    expect(merged).not.toHaveProperty('showPresetPins');
+    expect(current.showPresetPins).toBe(true);
   });
 
   it('keeps sentinel seed step at least as large as the zoom brush step', () => {

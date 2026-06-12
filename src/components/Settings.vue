@@ -3,6 +3,7 @@ import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue
 import type {InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
   preserveSessionPerformanceFields,
+  stripExplorationStateFields,
   stripSessionPerformanceFields,
 } from "../Mandelbrot.ts";
 import type {ColorStop} from '../ColorStop.ts';
@@ -455,6 +456,20 @@ function formatPresetDate(iso: string): string {
   } catch { return iso; }
 }
 
+/**
+ * Unnamed entries fall back to an ISO timestamp as their `name` (see save logic).
+ * Treat those as auto-named so the card shows only the date, not a raw ISO string.
+ */
+function isAutoName(name: string | undefined | null): boolean {
+  if (!name || !name.trim()) return true;
+  return /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}/.test(name);
+}
+
+/** The real user-given name, or '' when the entry is unnamed (date-only). */
+function displayName(name: string | undefined | null): string {
+  return isAutoName(name) ? '' : (name ?? '');
+}
+
 /** Format scale exponent for display, e.g. "10^42". */
 function formatZoom(exp: number): string {
   if (exp <= 0) return '1\u00d7';
@@ -537,6 +552,7 @@ async function savePreset() {
   // Clone and strip performance fields before saving
   const savedValue = structuredClone(toRaw(model.value));
   stripSessionPerformanceFields(savedValue);
+  stripExplorationStateFields(savedValue);
   delete (savedValue as any).activateAnimate;
   delete (savedValue as any).debugShading;
   savedValue.animation = normalizeAnimationConfig(savedValue.animation, savedValue.animationSpeed);
@@ -580,6 +596,7 @@ async function quickSnapshot() {
   } catch { /* ignore */ }
   const savedValue = structuredClone(toRaw(model.value));
   stripSessionPerformanceFields(savedValue);
+  stripExplorationStateFields(savedValue);
   delete (savedValue as any).activateAnimate;
   delete (savedValue as any).debugShading;
   savedValue.animation = normalizeAnimationConfig(savedValue.animation, savedValue.animationSpeed);
@@ -970,6 +987,7 @@ async function selectPreset(id: number) {
     presetName.value = record.name;
     // Restore all fields except performance params
     const saved = structuredClone(toRaw(record.value));
+    stripExplorationStateFields(saved);
     saved.textureMapping = normalizeTextureMappingFromLegacy(saved);
     saved.animation = normalizeAnimationConfig(saved.animation, saved.animationSpeed);
     delete (saved as any).textureMappingMode;
@@ -1193,6 +1211,7 @@ async function importPresets(event: Event) {
         if (existing.some(e => e.name === name && e.date === date)) continue;
         const value = structuredClone(record.value);
         stripSessionPerformanceFields(value);
+        stripExplorationStateFields(value);
         value.textureMapping = normalizeTextureMappingFromLegacy(value);
         delete (value as any).textureMappingMode;
         await savePresetEntry(
@@ -2008,17 +2027,6 @@ async function importSkyboxTexture(event: Event) {
       </button>
       <p class="load-note">Applies Cx, Cy, zoom &amp; angle from the selected preset.</p>
 
-      <div class="trow">
-        <div class="lab">
-          <div class="l1">Show presets on map</div>
-          <div class="l2">Pins every saved location on the fractal view</div>
-        </div>
-        <div class="toggle" :class="{ on: model.showPresetPins }" role="switch" :aria-checked="model.showPresetPins" tabindex="0"
-          @click="model.showPresetPins = !model.showPresetPins"
-          @keydown.enter.prevent="model.showPresetPins = !model.showPresetPins"
-          @keydown.space.prevent="model.showPresetPins = !model.showPresetPins"></div>
-      </div>
-
       <div class="transfer">
         <span class="tlab">Transfer</span>
         <button class="tbtn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
@@ -2096,7 +2104,7 @@ async function importSkyboxTexture(event: Event) {
             </button>
           </div>
           <div class="info">
-            <div class="nm">{{ preset.name || formatPresetDate(preset.date) }}</div>
+            <div v-if="displayName(preset.name)" class="nm">{{ displayName(preset.name) }}</div>
             <div class="sub">
               <span>{{ formatPresetDate(preset.date) }}</span>
               <span v-if="preset.scaleExponent > 0" class="depth">{{ formatZoom(preset.scaleExponent) }}</span>
@@ -2574,7 +2582,7 @@ async function importSkyboxTexture(event: Event) {
               <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
             </button>
           </div>
-          <div class="info"><div class="nm">{{ palette.name }}</div><div class="sub"><span>{{ formatPresetDate(palette.date) }}</span></div></div>
+          <div class="info"><div v-if="displayName(palette.name)" class="nm">{{ displayName(palette.name) }}</div><div class="sub"><span>{{ formatPresetDate(palette.date) }}</span></div></div>
         </div>
         <div v-if="visiblePalettes.length === 0" class="empty">{{ showOnlyFavoritePalettes ? 'No favorite palettes yet.' : 'No saved palettes yet.' }}</div>
       </div>
@@ -2617,7 +2625,7 @@ async function importSkyboxTexture(event: Event) {
             </button>
           </div>
           <div class="info">
-            <div class="nm">{{ preset.name || formatPresetDate(preset.date) }}</div>
+            <div v-if="displayName(preset.name)" class="nm">{{ displayName(preset.name) }}</div>
             <div class="sub"><span>{{ formatPresetDate(preset.date) }}</span><span v-if="preset.scaleExponent > 0" class="depth">{{ formatZoom(preset.scaleExponent) }}</span></div>
           </div>
         </div>
@@ -2800,8 +2808,8 @@ async function importSkyboxTexture(event: Event) {
 }
 :deep(input[type=range]::-webkit-slider-thumb) {
   -webkit-appearance: none;
-  width: 20px;
-  height: 20px;
+  width: var(--thumb);
+  height: var(--thumb);
   border-radius: 50%;
   background: var(--accent-bright) !important;
   border: 3px solid #0b0d12 !important;
@@ -2813,8 +2821,8 @@ async function importSkyboxTexture(event: Event) {
   transform: scale(1.12);
 }
 :deep(input[type=range]::-moz-range-thumb) {
-  width: 18px;
-  height: 18px;
+  width: var(--thumb);
+  height: var(--thumb);
   border-radius: 50%;
   background: var(--accent-bright) !important;
   border: 3px solid #0b0d12 !important;
@@ -2943,7 +2951,7 @@ async function importSkyboxTexture(event: Event) {
   cursor: pointer;
   font-family: var(--sans);
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--font-lg);
   letter-spacing: .02em;
   transition: .16s;
   box-shadow: 0 8px 22px -10px var(--accent);
@@ -3088,7 +3096,7 @@ async function importSkyboxTexture(event: Event) {
   background: #fff;
 }
 .name {
-  font-size: 15px;
+  font-size: var(--font-lg);
   font-weight: 600;
   color: var(--ink);
   letter-spacing: -.01em;
@@ -3152,7 +3160,7 @@ async function importSkyboxTexture(event: Event) {
 .param .pval {
   font-family: var(--mono);
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--font-md);
   color: var(--ink);
   min-width: 88px;
   text-align: right;
@@ -3199,7 +3207,7 @@ async function importSkyboxTexture(event: Event) {
   line-height: 1.3;
 }
 .palette-canvas-panel {
-  --palette-label-width: 208px;
+  --palette-label-width: var(--label-w);
 }
 .palette-strip-zone {
   background: var(--panel-2);
@@ -3262,14 +3270,14 @@ async function importSkyboxTexture(event: Event) {
 .gfx-slider-row,
 .palette-control-row {
   display: grid;
-  grid-template-columns: var(--palette-label-width) minmax(0, 1fr) 92px;
+  grid-template-columns: var(--palette-label-width) minmax(0, 1fr) var(--value-w);
   align-items: center;
-  gap: 18px;
-  padding: 9px 16px;
+  gap: var(--space-4);
+  padding: var(--space-1) var(--space-4);
   background: var(--row);
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-1);
 }
 .gfx-slider-row input[type="range"],
 .palette-control-row input[type="range"] {
@@ -3277,7 +3285,7 @@ async function importSkyboxTexture(event: Event) {
 }
 .gfx-slider-label,
 .palette-control-label {
-  font-size: 15px;
+  font-size: var(--font-md);
   color: var(--ink);
   font-weight: 600;
   line-height: 1.2;
@@ -3286,7 +3294,7 @@ async function importSkyboxTexture(event: Event) {
 .palette-control-label .l1,
 .palette-compact-label .l1 {
   display: block;
-  font-size: 15px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--ink);
   line-height: 1.2;
@@ -3304,7 +3312,7 @@ async function importSkyboxTexture(event: Event) {
 .palette-control-value {
   text-align: right;
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--font-md);
   font-weight: 700;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
@@ -3323,12 +3331,12 @@ async function importSkyboxTexture(event: Event) {
   align-items: center;
   gap: 8px;
   min-width: 0;
-  height: 42px;
-  padding: 0 12px;
-  border-radius: 11px;
+  height: 36px;
+  padding: 0 var(--space-4);
+  border-radius: var(--radius-md);
   font-family: var(--sans);
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--font-md);
   color: var(--ink-2);
   background: var(--row);
   border: 1px solid var(--line-soft);
@@ -3355,9 +3363,9 @@ async function importSkyboxTexture(event: Event) {
   gap: 10px;
   width: 100%;
   height: auto;
-  padding: 11px 16px !important;
-  font-size: 15px;
-  border-radius: 12px !important;
+  padding: var(--space-3) var(--space-4) !important;
+  font-size: var(--font-lg);
+  border-radius: var(--radius-md) !important;
   border-color: var(--line-soft) !important;
   color: var(--ink) !important;
   background: var(--row) !important;
@@ -3369,27 +3377,28 @@ async function importSkyboxTexture(event: Event) {
 }
 .palette-compact-control {
   display: grid;
-  grid-template-columns: var(--palette-label-width) minmax(0, 1fr) 92px;
+  grid-template-columns: var(--palette-label-width) minmax(0, 1fr) var(--value-w);
   align-items: center;
-  gap: 18px;
-  padding: 9px 16px;
+  gap: var(--space-4);
+  padding: var(--space-1) var(--space-4);
   background: var(--row);
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-1);
   min-width: 0;
 }
 .palette-compact-control input[type="range"] {
   min-width: 0;
 }
 .palette-compact-label {
-  font-size: 15px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--ink);
   line-height: 1.2;
 }
 .palette-compact-value {
   font-family: var(--mono);
-  font-size: 15px;
+  font-size: var(--font-md);
   font-weight: 700;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
@@ -3586,8 +3595,12 @@ async function importSkyboxTexture(event: Event) {
   justify-content: center;
   overflow: visible;
   position: relative;
-  height: 80px;
-  border-radius: 12px;
+  height: 56px;
+  border-radius: var(--radius-md);
+}
+/* tighter margin under the palette preview strip (overrides generic .mb-3) */
+.canvas-row.palette-strip.mb-3 {
+  margin-bottom: var(--space-3);
 }
 .canvas-shadow-overlay {
   position: absolute;
@@ -3679,13 +3692,13 @@ async function importSkyboxTexture(event: Event) {
 .cv-body .section-label {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 13px;
+  gap: var(--space-4);
+  font-size: var(--font-md);
   font-weight: 700;
   letter-spacing: 0.22em;
   text-transform: uppercase;
   color: var(--ink-3);
-  margin: 22px 0 4px;
+  margin: var(--space-5) 0 var(--space-1);
 }
 .cv-body .section-label::after {
   content: "";
@@ -3704,26 +3717,26 @@ async function importSkyboxTexture(event: Event) {
   margin-top: 0;
 }
 .cv-body .section-help {
-  font-size: 13.5px;
+  font-size: var(--font-md);
   color: var(--ink-3);
-  margin: 2px 0 12px;
+  margin: 2px 0 var(--space-3);
   line-height: 1.4;
 }
 
 /* generic row : [label+sub] [control] [value] */
 .cv-body .frow {
   display: grid;
-  grid-template-columns: 188px 1fr 110px;
+  grid-template-columns: var(--label-w) 1fr 92px;
   align-items: center;
-  gap: 18px;
-  padding: 9px 16px;
+  gap: var(--space-4);
+  padding: var(--space-1) var(--space-4);
   background: var(--row);
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-1);
 }
 .cv-body .frow .lab .l1 {
-  font-size: 15px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--ink);
   line-height: 1.2;
@@ -3738,7 +3751,7 @@ async function importSkyboxTexture(event: Event) {
 .cv-body .coords .val {
   font-family: var(--mono);
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--font-md);
   color: var(--ink);
   text-align: right;
   white-space: nowrap;
@@ -3752,17 +3765,17 @@ async function importSkyboxTexture(event: Event) {
 /* coordinates card */
 .cv-body .coords {
   display: grid;
-  grid-template-columns: 188px 1fr auto;
+  grid-template-columns: var(--label-w) 1fr auto;
   align-items: center;
-  gap: 18px;
-  padding: 12px 16px;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
   background: var(--row);
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-2);
 }
 .cv-body .coords .lab .l1 {
-  font-size: 15px;
+  font-size: var(--font-md);
   font-weight: 600;
 }
 .cv-body .coords .lab .l2 {
@@ -3838,8 +3851,8 @@ async function importSkyboxTexture(event: Event) {
 }
 .cv-body input[type=range]::-webkit-slider-thumb {
   -webkit-appearance: none;
-  width: 20px;
-  height: 20px;
+  width: var(--thumb);
+  height: var(--thumb);
   border-radius: 50%;
   background: var(--accent-bright);
   border: 3px solid #0b0d12;
@@ -3851,8 +3864,8 @@ async function importSkyboxTexture(event: Event) {
   transform: scale(1.12);
 }
 .cv-body input[type=range]::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
+  width: var(--thumb);
+  height: var(--thumb);
   border-radius: 50%;
   background: var(--accent-bright);
   border: 3px solid #0b0d12;
@@ -3921,18 +3934,18 @@ async function importSkyboxTexture(event: Event) {
 .cv-body .trow {
   display: flex;
   align-items: center;
-  gap: 14px;
-  padding: 11px 16px;
+  gap: var(--space-4);
+  padding: var(--space-3) var(--space-4);
   background: var(--row);
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-2);
 }
 .cv-body .trow .lab {
   flex: 1;
 }
 .cv-body .trow .lab .l1 {
-  font-size: 15px;
+  font-size: var(--font-md);
   font-weight: 600;
 }
 .cv-body .trow .lab .l2 {
@@ -3942,17 +3955,17 @@ async function importSkyboxTexture(event: Event) {
 }
 .cv-body .crow {
   display: grid;
-  grid-template-columns: 208px 1fr;
+  grid-template-columns: var(--label-w) 1fr;
   align-items: center;
-  gap: 18px;
-  padding: 9px 16px;
+  gap: var(--space-4);
+  padding: var(--space-2) var(--space-4);
   background: var(--row);
   border: 1px solid var(--line-soft);
-  border-radius: 12px;
-  margin-bottom: 8px;
+  border-radius: var(--radius-md);
+  margin-bottom: var(--space-2);
 }
 .cv-body .crow .lab .l1 {
-  font-size: 15px;
+  font-size: var(--font-md);
   font-weight: 600;
   color: var(--ink);
   line-height: 1.2;
@@ -4008,13 +4021,13 @@ async function importSkyboxTexture(event: Event) {
   -webkit-appearance: none;
   width: 100%;
   font-family: var(--mono);
-  font-size: 14px;
+  font-size: var(--font-lg);
   font-weight: 600;
   color: var(--ink);
   background: #0b0d12;
   border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 11px 36px 11px 14px;
+  border-radius: var(--radius-md);
+  padding: var(--space-2) 36px var(--space-2) var(--space-4);
   cursor: pointer;
 }
 .cv-body .select-box::after {
@@ -4107,13 +4120,13 @@ async function importSkyboxTexture(event: Event) {
   gap: 8px;
   width: 100%;
   font-family: var(--sans);
-  font-size: 15px;
+  font-size: var(--font-lg);
   font-weight: 600;
   color: var(--ink);
   background: #0b0d12;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 11px 40px 11px 12px;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) 40px var(--space-3) var(--space-4);
   cursor: pointer;
   position: relative;
   text-align: left;
@@ -4169,7 +4182,7 @@ async function importSkyboxTexture(event: Event) {
   color: var(--accent-bright);
   font-family: var(--sans);
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--font-lg);
   cursor: pointer;
   transition: 0.15s;
   margin-bottom: 4px;
@@ -4274,12 +4287,12 @@ async function importSkyboxTexture(event: Event) {
 .cv-body .txt-in {
   flex: 1;
   font-family: var(--sans);
-  font-size: 15px;
+  font-size: var(--font-lg);
   color: var(--ink);
   background: #0b0d12;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 13px 16px;
+  border-radius: var(--radius-md);
+  padding: var(--space-3) var(--space-4);
 }
 .cv-body .txt-in::placeholder {
   color: var(--ink-4);
@@ -4302,7 +4315,7 @@ async function importSkyboxTexture(event: Event) {
   color: #fff;
   font-family: var(--sans);
   font-weight: 700;
-  font-size: 15px;
+  font-size: var(--font-lg);
   cursor: pointer;
   box-shadow: 0 8px 22px -10px var(--mauve);
   transition: 0.15s;
@@ -4318,11 +4331,11 @@ async function importSkyboxTexture(event: Event) {
   stroke-width: 2;
 }
 
-/* preset card grid */
+/* preset card grid — responsive auto-fill (no fixed column count) */
 .cv-body .grid {
   display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 10px;
+  grid-template-columns: repeat(auto-fill, minmax(var(--gallery-min), 1fr));
+  gap: var(--space-2);
   max-height: 436px;
   overflow-y: auto;
   padding: 2px 6px 2px 2px;
@@ -4476,20 +4489,21 @@ async function importSkyboxTexture(event: Event) {
 }
 .cv-body .palette-library-grid,
 .cv-body .texture-grid {
-  margin-bottom: 12px;
+  margin-bottom: var(--space-2);
 }
 .cv-body .palette-thumb {
-  aspect-ratio: 16 / 4;
+  aspect-ratio: 16 / 3;
 }
 .cv-body .saved-palette-grid {
   grid-template-columns: 1fr;
-  gap: 7px;
+  gap: 1px;
 }
 .cv-body .saved-palette-grid .palette-card {
   display: grid;
   grid-template-columns: minmax(280px, 54%) minmax(0, 1fr);
   align-items: stretch;
-  min-height: 50px;
+  min-height: 44px;
+  border-radius: var(--radius-sm);
 }
 .cv-body .saved-palette-grid .palette-card:hover {
   transform: translateY(-1px);
@@ -4497,7 +4511,7 @@ async function importSkyboxTexture(event: Event) {
 .cv-body .saved-palette-grid .palette-thumb {
   width: 100%;
   height: 100%;
-  min-height: 50px;
+  min-height: 44px;
   aspect-ratio: auto;
   object-fit: cover;
 }
@@ -4506,7 +4520,7 @@ async function importSkyboxTexture(event: Event) {
   flex-direction: column;
   justify-content: center;
   min-width: 0;
-  padding: 8px 112px 8px 14px;
+  padding: var(--space-1) 112px var(--space-1) var(--space-4);
 }
 .cv-body .saved-palette-grid .palette-card .acts {
   opacity: 1;
@@ -4516,7 +4530,8 @@ async function importSkyboxTexture(event: Event) {
   translate: 0 -50%;
 }
 .cv-body .full-preset-grid {
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  /* denser cards → smaller min so more columns pack in */
+  grid-template-columns: repeat(auto-fill, minmax(130px, 1fr));
 }
 .cv-body .full-preset-grid .card .thumb {
   aspect-ratio: 16 / 8;
@@ -4550,12 +4565,7 @@ async function importSkyboxTexture(event: Event) {
 }
 
 @media (max-width: 720px) {
-  .cv-body .grid {
-    grid-template-columns: repeat(2, 1fr);
-  }
-  .cv-body .full-preset-grid {
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-  }
+  /* .grid / .full-preset-grid reflow on their own via auto-fill minmax() */
   .cv-body .saved-palette-grid .palette-card {
     grid-template-columns: minmax(160px, 48%) minmax(0, 1fr);
   }
@@ -4576,10 +4586,6 @@ async function importSkyboxTexture(event: Event) {
   .cv-body .crow {
     grid-template-columns: 1fr;
   }
-  .cv-body .grid {
-    grid-template-columns: 1fr;
-  }
-  .cv-body .full-preset-grid,
   .cv-body .saved-palette-grid {
     grid-template-columns: 1fr;
   }

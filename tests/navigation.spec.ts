@@ -34,6 +34,14 @@ async function waitForCanvas(page: Page) {
   return canvas;
 }
 
+async function dismissSplash(page: Page) {
+  const splash = page.locator(".splash");
+  if (await splash.isVisible().catch(() => false)) {
+    await splash.click({ force: true });
+    await expect(splash).toBeHidden();
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -46,6 +54,7 @@ test.describe("Mandelbrot navigation", () => {
     await page.reload();
     // Wait for the app and WebGPU canvas to be ready.
     await waitForCanvas(page);
+    await dismissSplash(page);
     // Give the render loop a moment to produce the first frame.
     await page.waitForTimeout(1500);
   });
@@ -164,6 +173,43 @@ test.describe("Mandelbrot navigation", () => {
     await expect(palettesPopup.getByText("Length")).toBeVisible();
     await expect(palettesPopup.getByRole("button", { name: /Drift/i })).toHaveCount(0);
     await expect(palettesPopup.getByText("Drift Speed")).toHaveCount(0);
+  });
+
+  test("radar discovery toggles on and stays active while zooming", async ({ page }) => {
+    const radar = page.getByRole("button", { name: /Discover/i });
+    await expect(radar).toBeVisible();
+    await expect(radar).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator(".preset-pins-overlay")).toHaveCount(0);
+
+    await radar.click();
+    await expect(radar).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator(".discovery-radar-pulse")).toBeVisible();
+    await expect(page.locator(".preset-pins-overlay")).toHaveCount(1);
+
+    await radar.click();
+    await expect(radar).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator(".preset-pins-overlay")).toHaveCount(0);
+
+    await radar.click();
+    await expect(radar).toHaveAttribute("aria-pressed", "true");
+    const canvas = page.locator("#fullscreen canvas").first();
+    const box = (await canvas.boundingBox())!;
+    await page.mouse.move(box.x + box.width / 2, box.y + box.height / 2);
+    await page.mouse.wheel(0, -100);
+    await expect(radar).toHaveAttribute("aria-pressed", "true");
+    await expect(page.locator(".preset-pins-overlay")).toHaveCount(1);
+
+    await radar.click();
+    await expect(radar).toHaveAttribute("aria-pressed", "false");
+    await expect(page.locator(".preset-pins-overlay")).toHaveCount(0);
+  });
+
+  test("Navigation Location Library remains available without permanent pin toggle", async ({ page }) => {
+    await page.locator(".top-tab-btn", { hasText: "Navigation" }).click();
+    const navigationPopup = page.locator(".settings-popup", { hasText: "Navigation" });
+    await expect(navigationPopup.getByText("Locations Library")).toBeVisible();
+    await expect(navigationPopup.locator(".cv-select-trigger")).toBeVisible();
+    await expect(navigationPopup.getByText("Show presets on map")).toHaveCount(0);
   });
 
   // -----------------------------------------------------------------------
