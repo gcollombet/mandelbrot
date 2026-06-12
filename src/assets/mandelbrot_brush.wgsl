@@ -76,7 +76,9 @@ struct BlaLevel {
   offset: u32,
   count: u32,
   skip: u32,
-  _padding: u32,
+  // Largest radius_alpha among this level's entries; effective radii are
+  // always <= radius_alpha, so |dz| above this bound rejects the whole level.
+  maxRadius: f32,
 };
 
 // Same layout as reproject.wgsl — the CPU-side uniform buffer is shared.
@@ -168,16 +170,19 @@ fn getOrbit(index: i32) -> vec2<f32> {
   );
 }
 
-fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derInvScale: f32, dc: vec2<f32>, dcMag: f32, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
+fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, zOut: ptr<function, vec2<f32>>, derInvScale: f32, dc: vec2<f32>, dcMag: f32, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
+  let dzMag2 = dot(*dz, *dz);
   let shiftedRef = *ref_i - 1;
   var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
   while (level >= 0) {
     let levelInfo = mandelbrotBlaLevels[level];
     let skip = i32(levelInfo.skip);
-    if (*ref_i + skip <= maxIterI) {
+    // Whole-level fast reject: every entry's effective radius is bounded by
+    // the level's maxRadius, so a too-large |dz| skips the entry fetch.
+    if (dzMag2 <= levelInfo.maxRadius * levelInfo.maxRadius && *ref_i + skip <= maxIterI) {
       let slot = shiftedRef >> u32(skip0Log + level);
       if (u32(slot) < levelInfo.count) {
         let entryIndex = i32(levelInfo.offset) + slot;
@@ -185,11 +190,12 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
         let a = vec2<f32>(bla.ax, bla.ay);
         let b = vec2<f32>(bla.bx, bla.by);
         let radius = max(0.0, bla.radius_alpha - bla.radius_beta * dcMag);
-        if (dot(*dz, *dz) <= radius * radius) {
+        if (dzMag2 <= radius * radius) {
           let candidate = cmul(a, *dz) + cmul(b, dc);
           let candidateZ = getOrbit(*ref_i + skip) + candidate;
           if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
             *dz = candidate;
+            *zOut = candidateZ;
             *derM = cmul(*derM, a) + b * derInvScale;
             *ref_i += skip;
             return skip;
@@ -350,12 +356,21 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   if (useBla) {
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
     let skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
+    // Level 0 carries the loosest per-level radius bound (merged radii only
+    // shrink), so one register compare against it tells whether any BLA entry
+    // could possibly accept the current |dz|.
+    let maxBlaRadius = mandelbrotBlaLevels[0].maxRadius;
+    let maxBlaR2 = maxBlaRadius * maxBlaRadius;
     var usedBla = false;
+    var blaZ = vec2<f32>(0.0);
     while (i < max_iteration && ref_i < globalMaxIterI) {
-      let skipped = try_apply_bla(&ref_i, &dz, &derM, derInvScale, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
+      var skipped = 0;
+      if (dot(dz, dz) <= maxBlaR2) {
+        skipped = try_apply_bla(&ref_i, &dz, &derM, &blaZ, derInvScale, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
+      }
       if (skipped > 0) {
         usedBla = true;
-        z = getOrbit(ref_i) + dz;
+        z = blaZ;
         i += f32(skipped);
         if (trackOrbitMetrics) {
           previousStripeEma = stripeEma;

@@ -68,7 +68,10 @@ pub struct BlaLevel {
     pub offset: u32,
     pub count: u32,
     pub skip: u32,
-    pub _padding: u32,
+    /// Largest radius_alpha among this level's entries, stored as f32 bits.
+    /// Lets the shader reject a whole level (or the whole table) from |dz|
+    /// alone, before fetching any BlaStep entry.
+    pub max_radius_bits: u32,
 }
 
 #[derive(Clone)]
@@ -535,7 +538,10 @@ impl MandelbrotNavigator {
     }
 
     fn compute_bla_reference_inner(&mut self, orbit_len: usize) -> BlaBufferInfo {
-        const BLA_SKIP_LEVELS: usize = 0;
+        // Skip-1 BLA entries always lose to the exact perturbation step: same
+        // arithmetic cost, extra table lookups, and they drop the dz² term.
+        // Start the table at skip 2 and let single steps stay exact.
+        const BLA_SKIP_LEVELS: usize = 1;
         const MIN_BLA_SKIP: usize = 1 << BLA_SKIP_LEVELS;
         const MAX_BLA_SKIP: usize = 256;
 
@@ -591,7 +597,7 @@ impl MandelbrotNavigator {
                 offset: level_start as u32,
                 count: previous_level.len() as u32,
                 skip: skip as u32,
-                _padding: 0,
+                max_radius_bits: max_radius_alpha_bits(&previous_level),
             });
             level_start = self.bla_result.len();
         }
@@ -633,7 +639,7 @@ impl MandelbrotNavigator {
                     offset: level_start as u32,
                     count: current_level.len() as u32,
                     skip: merged_skip as u32,
-                    _padding: 0,
+                    max_radius_bits: max_radius_alpha_bits(&current_level),
                 });
                 level_start = self.bla_result.len();
             }
@@ -894,6 +900,13 @@ fn conservative_line_min(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
     (a.0.min(b.0), a.1.max(b.1))
 }
 
+fn max_radius_alpha_bits(entries: &[BlaStep]) -> u32 {
+    entries
+        .iter()
+        .fold(0.0f32, |acc, step| acc.max(step.radius_alpha))
+        .to_bits()
+}
+
 fn detect_period_f64(cx: f64, cy: f64, max_iter: usize, max_period: usize) -> Option<usize> {
     if !cx.is_finite() || !cy.is_finite() {
         return None;
@@ -1072,20 +1085,32 @@ mod tests {
             "expected culled BLA table to keep useful skips"
         );
         assert_eq!(
-            bla.level_count, 9,
-            "expected levels for skips 1, 2, 4, 8, 16, 32, 64, 128, and 256"
+            bla.level_count, 8,
+            "expected levels for skips 2, 4, 8, 16, 32, 64, 128, and 256 (skip 1 always loses to the exact step)"
         );
         assert_ne!(bla.levels_ptr, 0);
-        assert_eq!(nav.bla_levels[0].skip, 1);
-        assert_eq!(nav.bla_levels[1].skip, 2);
-        assert_eq!(nav.bla_levels[2].skip, 4);
-        assert_eq!(nav.bla_levels[3].skip, 8);
-        assert_eq!(nav.bla_levels[4].skip, 16);
-        assert_eq!(nav.bla_levels[5].skip, 32);
-        assert_eq!(nav.bla_levels[6].skip, 64);
-        assert_eq!(nav.bla_levels[7].skip, 128);
-        assert_eq!(nav.bla_levels[8].skip, 256);
+        assert_eq!(nav.bla_levels[0].skip, 2);
+        assert_eq!(nav.bla_levels[1].skip, 4);
+        assert_eq!(nav.bla_levels[2].skip, 8);
+        assert_eq!(nav.bla_levels[3].skip, 16);
+        assert_eq!(nav.bla_levels[4].skip, 32);
+        assert_eq!(nav.bla_levels[5].skip, 64);
+        assert_eq!(nav.bla_levels[6].skip, 128);
+        assert_eq!(nav.bla_levels[7].skip, 256);
         assert!(nav.bla_result.iter().all(|step| step.radius_beta >= 0.0));
+        // Each level's stored max radius must bound every entry it covers, and
+        // the per-level max must not grow with the skip (merged radii shrink).
+        let mut previous_max = f32::INFINITY;
+        for level in nav.bla_levels.iter() {
+            let start = level.offset as usize;
+            let end = start + level.count as usize;
+            let max_radius = f32::from_bits(level.max_radius_bits);
+            assert!(nav.bla_result[start..end]
+                .iter()
+                .all(|step| step.radius_alpha <= max_radius));
+            assert!(max_radius <= previous_max);
+            previous_max = max_radius;
+        }
     }
 
     #[test]
