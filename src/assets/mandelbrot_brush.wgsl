@@ -58,10 +58,16 @@ struct Mandelbrot {
   blaEpsilon: f32,
   stripeFrequency: f32,
   trackOrbitMetrics: f32,
-  _padding1: f32,
+  scaleExp: f32,        // floatexp deep path: shared base-2 exponent for scale & cx/cy
   _padding2: f32,
   _padding3: f32,
 };
+
+// floatexp deep-zoom threshold (base-2 exponent of scale). Below this the shader
+// switches to the extended-exponent (fe) path, before f32 precision degrades
+// approaching the underflow wall. Mirror of Engine.DEEP_EXP_THRESHOLD.
+const DEEP_EXP: i32 = -116;
+const LN2: f32 = 0.6931471805599453;
 
 struct BlaStep {
   ax: f32,
@@ -117,6 +123,60 @@ fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
+// ── extended-exponent complex (floatexp) ───────────────────────────
+// value = m · 2^e with one shared integer exponent per complex. Used on the
+// deep-zoom path where dz/dc fall below the f32 normal minimum. frexp/ldexp keep
+// renorm exact. Mirror of mandelbrot.wgsl's fe helpers.
+struct fe { m: vec2<f32>, e: i32 };
+
+// Exponent assigned to a zero fe. Must be far below any real scale exponent so a
+// zero never dominates fe_add (which would drop the other term): with e = 0 a
+// fresh dz = 0 would swallow dc and the perturbation would never start.
+const FE_ZERO_E: i32 = -1000000;
+
+fn fe_renorm(v: fe) -> fe {
+  let a = max(abs(v.m.x), abs(v.m.y));
+  if (!(a > 0.0)) {
+    return fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
+  }
+  let r = frexp(a);
+  return fe(ldexp(v.m, vec2<i32>(-r.exp, -r.exp)), v.e + r.exp);
+}
+
+fn fe_from_vec(v: vec2<f32>, e: i32) -> fe {
+  return fe_renorm(fe(v, e));
+}
+
+fn fe_to_vec(v: fe) -> vec2<f32> {
+  return ldexp(v.m, vec2<i32>(v.e, v.e));
+}
+
+fn fe_cmul(a: fe, b: fe) -> fe {
+  return fe_renorm(fe(cmul(a.m, b.m), a.e + b.e));
+}
+
+fn fe_cmul_f32(zf: vec2<f32>, b: fe) -> fe {
+  return fe_renorm(fe(cmul(zf, b.m), b.e));
+}
+
+fn fe_add(a: fe, b: fe) -> fe {
+  let d = a.e - b.e;
+  if (d > 24) { return a; }
+  if (d < -24) { return b; }
+  if (d >= 0) {
+    return fe_renorm(fe(a.m + ldexp(b.m, vec2<i32>(-d, -d)), a.e));
+  }
+  return fe_renorm(fe(ldexp(a.m, vec2<i32>(d, d)) + b.m, b.e));
+}
+
+fn fe_add3(a: fe, b: fe, c: fe) -> fe {
+  return fe_add(fe_add(a, b), c);
+}
+
+fn fe_mag2_f32(v: fe) -> f32 {
+  return ldexp(dot(v.m, v.m), 2 * v.e);
+}
+
 const LOG_DER_ZERO: f32 = -80.0;
 
 fn angle_wrap(a: f32) -> f32 {
@@ -156,6 +216,15 @@ fn der_to_polar(m: vec2<f32>, s: f32) -> vec2<f32> {
 fn distance_height(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
   let logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
   let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - log(max(mandelbrot.scale, 1e-30));
+  return clamp(-logScreenDistance, -64.0, 64.0);
+}
+
+// Deep path: mandelbrot.scale holds only the fe mantissa, so log(scale) is
+// recomposed from the shared exponent (log(mantissa) + scaleExp·ln2).
+fn distance_height_deep(z: vec2<f32>, derPolar: vec2<f32>, scaleExp: i32) -> f32 {
+  let logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
+  let logScale = log(max(mandelbrot.scale, 1e-30)) + f32(scaleExp) * LN2;
+  let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - logScale;
   return clamp(-logScreenDistance, -64.0, 64.0);
 }
 
@@ -527,6 +596,130 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   return out;
 }
 
+// ── deep (floatexp) perturbation ──────────────────────────────────
+// Exact perturbation with dz/dc in extended-exponent form, for scale below the
+// deep threshold. Mirrors mandelbrot.wgsl's mandelbrot_compute_deep but returns
+// TexelOut. dz, dc are fe; z_n stays O(1) f32; der reuses the shallow machinery;
+// the resumable dz is parked as (mantissa in zx/zy, exponent in avgDirection),
+// so orbit-direction metrics are unavailable on the deep path.
+fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_dzx: f32, prev_dzy: f32) -> TexelOut {
+  let max_iteration = mandelbrot.maxIteration;
+  let muLimit = mandelbrot.mu;
+  let logEpsilon = log(max(mandelbrot.epsilon, 1e-30));
+  let globalMaxIterI = i32(mandelbrot.globalMaxIter);
+  let scaleExp = i32(mandelbrot.scaleExp);
+
+  var i: f32 = 0.0;
+  var dz = fe_renorm(fe(prev_dz_m, prev_dz_e));
+  var ref_i = prev_ref_i_int;
+  var z = getOrbit(ref_i) + fe_to_vec(dz);
+
+  var derM: vec2<f32>;
+  var derS: f32;
+  if (prev_dzy <= LOG_DER_ZERO + 1.0) {
+    derM = vec2<f32>(0.0);
+    derS = 0.0;
+  } else {
+    derM = vec2<f32>(cos(prev_dzx), sin(prev_dzx));
+    derS = prev_dzy;
+  }
+  var derInvScale = 0.0;
+  var epsThreshold = 0.0;
+  der_refresh_cache(&derM, &derS, &derInvScale, &epsThreshold, logEpsilon);
+
+  var escaped = false;
+  var inside = false;
+  var shadingHeight = 0.0;
+  var shadingAngle = 0.0;
+
+  while (i < max_iteration && ref_i < globalMaxIterI) {
+    let refZ = getOrbit(ref_i);
+    let zPrev = refZ + fe_to_vec(dz);
+    // dz' = 2·z_n·dz + dz² + dc   (z_n = refZ is O(1) f32)
+    dz = fe_add3(fe_cmul_f32(2.0 * refZ, dz), fe_cmul(dz, dz), dc);
+    ref_i += 1;
+    z = getOrbit(ref_i) + fe_to_vec(dz);
+    derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
+    i += 1.0;
+
+    let derMM = dot(derM, derM);
+    let dot_z = dot(z, z);
+    if (dot_z > muLimit) {
+      let derPolar = der_to_polar(derM, derS);
+      shadingHeight = distance_height_deep(z, derPolar, scaleExp);
+      shadingAngle = visual_derivative_angle(z, derPolar);
+      escaped = true;
+      break;
+    }
+    if (!IGNORE_EPSILON && derMM < epsThreshold) {
+      inside = true;
+      break;
+    }
+    if (derMM > DER_RENORM_HI || derMM < DER_RENORM_LO) {
+      der_renormalize(&derM, &derS, &derInvScale, &epsThreshold, logEpsilon);
+    }
+
+    if (dot_z < fe_mag2_f32(dz) || ref_i == globalMaxIterI) {
+      dz = fe_from_vec(z, 0);
+      ref_i = 0;
+    }
+  }
+
+  var out: TexelOut;
+  let derPolarOut = der_to_polar(derM, derS);
+
+  if (inside) {
+    out.iter      = pack(0.0);
+    out.genuine   = pack(1.0);
+    out.zx        = pack(z.x);
+    out.zy        = pack(z.y);
+    out.dzx       = pack(derPolarOut.x);
+    out.dzy       = pack(derPolarOut.y);
+    out.ref_i     = pack(ref_i_with_stripe(prev_iter + i, 0.0));
+    out.avgDirection = pack(0.0);
+    return out;
+  }
+
+  let total_iter = prev_iter + i;
+
+  if (escaped) {
+    out.iter      = pack(total_iter);
+    out.genuine   = pack(1.0);
+    out.zx        = pack(z.x);
+    out.zy        = pack(z.y);
+    out.dzx       = pack(shadingHeight);
+    out.dzy       = pack(shadingAngle);
+    out.ref_i     = pack(ref_i_with_stripe(0.0, 0.0));
+    out.avgDirection = pack(0.0);
+    return out;
+  }
+
+  if (total_iter >= mandelbrot.globalMaxIter && mandelbrot.orbitComplete >= 0.5) {
+    out.iter      = pack(0.0);
+    out.genuine   = pack(1.0);
+    out.zx        = pack(z.x);
+    out.zy        = pack(z.y);
+    out.dzx       = pack(derPolarOut.x);
+    out.dzy       = pack(derPolarOut.y);
+    out.ref_i     = pack(ref_i_with_stripe(total_iter, 0.0));
+    out.avgDirection = pack(0.0);
+    return out;
+  }
+
+  // Budget exhausted mid-progress: park dz as normalized mantissa in zx/zy
+  // (|m|² < 2 < mu keeps the continuation test valid) + exponent in avgDirection.
+  let dzN = fe_renorm(dz);
+  out.iter      = pack(total_iter);
+  out.genuine   = pack(1.0);
+  out.zx        = pack(dzN.m.x);
+  out.zy        = pack(dzN.m.y);
+  out.dzx       = pack(derPolarOut.x);
+  out.dzy       = pack(derPolarOut.y);
+  out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), 0.0));
+  out.avgDirection = pack(f32(dzN.e));
+  return out;
+}
+
 // ── brush logic (verbatim from reproject.wgsl, texel-local subset) ──
 fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
   let s = sin(angle);
@@ -643,18 +836,35 @@ fn cs_main(
         if (is_compute_request || needs_continuation) {
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
           let local_rot = xy_neutral * neutralExtent;
-          let x0 = local_rot.x * mandelbrot.scale + mandelbrot.cx;
-          let y0 = local_rot.y * mandelbrot.scale + mandelbrot.cy;
 
           var result: TexelOut;
-          if (is_compute_request) {
-            result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, LOG_DER_ZERO, 0.0, 0.0);
+          let scaleExp = i32(mandelbrot.scaleExp);
+          if (scaleExp <= DEEP_EXP) {
+            // Deep path: scale/cx/cy carry fe mantissas sharing exponent scaleExp;
+            // dc = local·scaleMant + (cxMant, cyMant) is a single same-exponent add.
+            let dc = fe_renorm(fe(local_rot * mandelbrot.scale + vec2<f32>(mandelbrot.cx, mandelbrot.cy), scaleExp));
+            if (is_compute_request) {
+              result = mandelbrot_compute_deep(dc, 0.0, vec2<f32>(0.0), 0, 0, 0.0, LOG_DER_ZERO);
+            } else {
+              // Deep continuation: layers 2/3 hold the dz mantissa, layer 7 its exponent.
+              let dz_e = i32(loadLayer(coord, 7));
+              let stored_dzx = loadLayer(coord, 4);
+              let stored_dzy = loadLayer(coord, 5);
+              let prev_ref_i = decode_ref_i(loadLayer(coord, 6));
+              result = mandelbrot_compute_deep(dc, iter_val, vec2<f32>(zx, zy), dz_e, prev_ref_i, stored_dzx, stored_dzy);
+            }
           } else {
-            let stored_dzx = loadLayer(coord, 4);
-            let stored_dzy = loadLayer(coord, 5);
-            let prev_ref_i = loadLayer(coord, 6);
-            let prev_avg_direction = loadLayer(coord, 7);
-            result = mandelbrot_compute(x0, y0, iter_val, zx, zy, stored_dzx, stored_dzy, prev_ref_i, prev_avg_direction);
+            let x0 = local_rot.x * mandelbrot.scale + mandelbrot.cx;
+            let y0 = local_rot.y * mandelbrot.scale + mandelbrot.cy;
+            if (is_compute_request) {
+              result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, LOG_DER_ZERO, 0.0, 0.0);
+            } else {
+              let stored_dzx = loadLayer(coord, 4);
+              let stored_dzy = loadLayer(coord, 5);
+              let prev_ref_i = loadLayer(coord, 6);
+              let prev_avg_direction = loadLayer(coord, 7);
+              result = mandelbrot_compute(x0, y0, iter_val, zx, zy, stored_dzx, stored_dzy, prev_ref_i, prev_avg_direction);
+            }
           }
           storeTexel(coord, result);
 

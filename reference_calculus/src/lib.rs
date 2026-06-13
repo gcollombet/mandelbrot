@@ -1197,6 +1197,24 @@ mod tests {
     }
 
     #[test]
+    fn reference_orbit_preserves_precision_at_phase1_depth() {
+        // Phase-1 floatexp target band (~1e-300). floatexp only removes the GPU
+        // f32 delta-underflow wall; the reference orbit's precision still comes
+        // from DBig here, so confirm a high-digit center survives the coordinate
+        // math and reference-orbit recurrence at deep scale (no f64 truncation).
+        let frac = "7436438870371587047521915061147741580450975735832".repeat(7); // ~343 digits
+        let cx = format!("-0.{}", frac);
+        let cy = format!("0.{}", frac);
+        let mut nav = MandelbrotNavigator::new(&cx, &cy, "1e-300", 0.0);
+        // Exercise the DBig orbit recurrence (a·a − b·b + c, etc.).
+        let _ = nav.compute_reference_orbit_ptr(64);
+        // The center must still be carried at full precision, not collapsed to ~17.
+        let result = nav.pixel_to_complex(500.0, 500.0, 1000.0, 1000.0);
+        assert!(result[0].len() > 200, "re truncated at 1e-300: {} chars", result[0].len());
+        assert!(result[1].len() > 200, "im truncated at 1e-300: {} chars", result[1].len());
+    }
+
+    #[test]
     fn coordinate_to_pixel_reverses_correctly() {
         let cx = "-0.743643887037158704752191506114774";
         let cy = "0.131825904205311970493132056385139";

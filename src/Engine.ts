@@ -10,6 +10,7 @@ import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
+import {DEEP_EXP_THRESHOLD, frexpFloat32} from './floatexp'
 import type {ZoomState} from './zoomState'
 import {
     getFrozenScale,
@@ -1924,6 +1925,26 @@ export class Engine {
             ? getLiveScale(this.zoomState)
             : mandelbrot.scale
 
+        // floatexp decomposition for the deep-zoom path. scale and the
+        // reference-relative center offset (dx, dy) share one base-2 exponent
+        // (expScale): since |center − reference| < 20·scale, dx/dy are the same
+        // order as scale. The shader rebuilds dc = local·scaleMant + (cxMant,
+        // cyMant) as a single same-exponent add. Below the threshold we send
+        // mantissas (which would underflow f32 as raw values); above it we send
+        // the plain values so the shallow f32 path is unchanged. expScale is
+        // always sent so the shader's deep test matches the host's.
+        const scaleParts = frexpFloat32(computeScale)
+        const expScale = scaleParts.exponent
+        const deep = expScale <= DEEP_EXP_THRESHOLD
+        // cx/cy mantissas re-based onto the shared scale exponent. Decomposing
+        // each component first (rather than dx * 2^-expScale) avoids ever forming
+        // a huge/overflowing power and handles a zero component cleanly. Since
+        // |center − reference| ≈ scale, the rebased exponent gap is small.
+        const cxParts = frexpFloat32(mandelbrot.dx)
+        const cyParts = frexpFloat32(mandelbrot.dy)
+        const cxMant = Math.fround(cxParts.mantissa * 2 ** (cxParts.exponent - expScale))
+        const cyMant = Math.fround(cyParts.mantissa * 2 ** (cyParts.exponent - expScale))
+
         if (!this.referenceViewKey) {
             this.resetReferenceJob(mandelbrot, computeScale, maxIterations)
         }
@@ -1942,6 +1963,7 @@ export class Engine {
         const orbitComplete = availableIter >= maxIterations
 
         const approximationModeFlag = this.approximationMode === 'bla'
+            && !deep // BLA's b·dc term and radii are f32 and break below 1e-38
             && orbitComplete
             && this.currentBlaLevelCount > 0
             && this.referenceBlaReadyMaxIterations >= guardedMaxIter
@@ -1953,10 +1975,10 @@ export class Engine {
         // During zoom reprojection, override scale with liveScale so the GPU
         // computes at the fixed target scale for this cycle.
         const mandelbrotShaderUniformDataGuarded = new Float32Array([
-            mandelbrot.dx,
-            mandelbrot.dy,
+            deep ? cxMant : mandelbrot.dx,        // 0: cx — fe mantissa when deep, else plain
+            deep ? cyMant : mandelbrot.dy,        // 1: cy — fe mantissa when deep, else plain
             mandelbrot.mu,
-            computeScale,
+            deep ? scaleParts.mantissa : computeScale, // 3: scale — fe mantissa when deep, else plain
             aspect,
             mandelbrot.angle,
             this.iterationBatchSize,
@@ -1970,7 +1992,7 @@ export class Engine {
             this.blaEpsilon,
             renderOptions.stripeFrequency,
             orbitMetricsEnabled ? 1 : 0,
-            0,
+            expScale,  // 17: shared base-2 exponent for scale & cx/cy (fe deep path)
             0,
             0,
         ])
