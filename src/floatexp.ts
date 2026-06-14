@@ -38,3 +38,55 @@ export function frexpFloat32(value: number): { mantissa: number; exponent: numbe
     if (Math.abs(mf) >= 1) { mf *= 0.5; exponent += 1 }
     return { mantissa: mf, exponent }
 }
+
+const LOG2_10 = 3.321928094887362
+
+// Parse a decimal string into sign · m10 · 10^d with m10 ∈ [1, 10), keeping only
+// the leading significant digits (enough for an f32 mantissa). Returns null on a
+// malformed input; returns {sign:1, m10:0, d:0} for zero.
+function parseDecimal(s: string): { sign: number; m10: number; d: number } | null {
+    s = s.trim()
+    if (s.length === 0) return null
+    let sign = 1
+    if (s[0] === '-') { sign = -1; s = s.slice(1) } else if (s[0] === '+') { s = s.slice(1) }
+    let exp = 0
+    const eIdx = s.search(/[eE]/)
+    if (eIdx >= 0) {
+        const ev = parseInt(s.slice(eIdx + 1), 10)
+        if (!Number.isFinite(ev)) return null
+        exp = ev
+        s = s.slice(0, eIdx)
+    }
+    const dotIdx = s.indexOf('.')
+    const intPart = dotIdx >= 0 ? s.slice(0, dotIdx) : s
+    const fracPart = dotIdx >= 0 ? s.slice(dotIdx + 1) : ''
+    if (!/^[0-9]*$/.test(intPart) || !/^[0-9]*$/.test(fracPart) || intPart + fracPart === '') return null
+    const digits = intPart + fracPart
+    const pointPos = intPart.length // number of digits before the decimal point
+    let firstNZ = -1
+    for (let i = 0; i < digits.length; i++) { if (digits[i] !== '0') { firstNZ = i; break } }
+    if (firstNZ < 0) return { sign: 1, m10: 0, d: 0 } // all zeros
+    const lead = digits.slice(firstNZ, firstNZ + 18)
+    const m10 = parseFloat(lead[0] + '.' + lead.slice(1)) // ∈ [1, 10)
+    const d = (pointPos - 1 - firstNZ) + exp // value = m10 · 10^d
+    return { sign, m10, d }
+}
+
+// Extended-exponent decomposition straight from a decimal string, with no f64
+// intermediate — so it works for scales far below the f64 floor (~1e-308),
+// removing the host-side depth wall. value = mantissa · 2^exponent,
+// |mantissa| ∈ [0.5, 1). Falls back to {0,0} on malformed input or zero.
+export function frexpFromDecimalString(s: string): { mantissa: number; exponent: number } {
+    const p = parseDecimal(s)
+    if (!p || p.m10 === 0) return { mantissa: 0, exponent: 0 }
+    // log2(value) = (log10(m10) + d) · log2(10); the large `d` term keeps full
+    // f64 relative precision, far more than the f32 mantissa needs.
+    const log2v = (Math.log10(p.m10) + p.d) * LOG2_10
+    let exponent = Math.floor(log2v)
+    let mantissa = 2 ** (log2v - exponent) // ∈ [1, 2)
+    mantissa *= 0.5 // → [0.5, 1)
+    exponent += 1
+    let mf = Math.fround(mantissa * p.sign)
+    if (Math.abs(mf) >= 1) { mf *= 0.5; exponent += 1 }
+    return { mantissa: mf, exponent }
+}

@@ -10,7 +10,7 @@ import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
-import {DEEP_EXP_THRESHOLD, frexpFloat32} from './floatexp'
+import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString} from './floatexp'
 import type {ZoomState} from './zoomState'
 import {
     getFrozenScale,
@@ -268,6 +268,12 @@ export type Mandelbrot = {
     scale: number,
     angle: number,
     epsilon: number,
+    // Full-precision decimal strings of dx/dy/scale, when available. The deep
+    // (floatexp) path decomposes from these to avoid the f64 underflow floor
+    // (~1e-308); falls back to the numeric fields when absent (e.g. mid-zoom).
+    dxStr?: string,
+    dyStr?: string,
+    scaleStr?: string,
 }
 
 export class Engine {
@@ -1940,7 +1946,14 @@ export class Engine {
         // mantissas (which would underflow f32 as raw values); above it we send
         // the plain values so the shallow f32 path is unchanged. expScale is
         // always sent so the shader's deep test matches the host's.
-        const scaleParts = frexpFloat32(computeScale)
+        // Prefer the full-precision decimal strings (no f64 floor → works below
+        // ~1e-308); fall back to the numeric fields mid-zoom, where only the f64
+        // liveScale is available. The offset strings stay valid during zoom (a
+        // pure zoom keeps the center fixed).
+        const zooming = isZoomActive(this.zoomState) && getLiveScale(this.zoomState) > 0
+        const scaleParts = (!zooming && mandelbrot.scaleStr)
+            ? frexpFromDecimalString(mandelbrot.scaleStr)
+            : frexpFloat32(computeScale)
         const expScale = scaleParts.exponent
         const deep = expScale <= DEEP_EXP_THRESHOLD
         this.floatExpActive = deep
@@ -1948,10 +1961,12 @@ export class Engine {
         // each component first (rather than dx * 2^-expScale) avoids ever forming
         // a huge/overflowing power and handles a zero component cleanly. Since
         // |center − reference| ≈ scale, the rebased exponent gap is small.
-        const cxParts = frexpFloat32(mandelbrot.dx)
-        const cyParts = frexpFloat32(mandelbrot.dy)
-        const cxMant = Math.fround(cxParts.mantissa * 2 ** (cxParts.exponent - expScale))
-        const cyMant = Math.fround(cyParts.mantissa * 2 ** (cyParts.exponent - expScale))
+        const cxParts = mandelbrot.dxStr ? frexpFromDecimalString(mandelbrot.dxStr) : frexpFloat32(mandelbrot.dx)
+        const cyParts = mandelbrot.dyStr ? frexpFromDecimalString(mandelbrot.dyStr) : frexpFloat32(mandelbrot.dy)
+        // Guard the zero component: a 0 mantissa with a deep expScale would form
+        // 0 · 2^(huge) = 0 · Infinity = NaN.
+        const cxMant = cxParts.mantissa === 0 ? 0 : Math.fround(cxParts.mantissa * 2 ** (cxParts.exponent - expScale))
+        const cyMant = cyParts.mantissa === 0 ? 0 : Math.fround(cyParts.mantissa * 2 ** (cyParts.exponent - expScale))
 
         if (!this.referenceViewKey) {
             this.resetReferenceJob(mandelbrot, computeScale, maxIterations)

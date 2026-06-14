@@ -220,8 +220,15 @@ async function draw() {
           cy: cy_string,
           dx: parseFloat(dx),
           dy: parseFloat(dy),
+          // Full-precision decimal strings of the reference-relative offset and
+          // scale, so the deep (floatexp) path can decompose them without going
+          // through f64 (which underflows ~1e-308). parseFloat above stays for
+          // the shallow path and anything still expecting numbers.
+          dxStr: dx,
+          dyStr: dy,
           mu: props.mu,
           scale: parseFloat(scale_string),
+          scaleStr: scale_string,
           angle: parseFloat(angle_string),
           maxIterations,
           epsilon: props.epsilon

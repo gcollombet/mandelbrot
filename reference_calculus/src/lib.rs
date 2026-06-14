@@ -17,6 +17,18 @@ fn dbig_to_f64(bf: &DBig) -> f64 {
     bf.to_string().parse::<f64>().unwrap_or(0.0)
 }
 
+// Split a high-precision value into a double-float (hi, lo) pair of f32s: hi is
+// the nearest f32, lo captures the residual (z - hi). Together they carry ~2x
+// the significand (~1e-14) versus a single f32 (~1e-7). Used to store the
+// reference orbit z_n accurately enough for deep-zoom perturbation, where the
+// f32 truncation of z_n is the dominant error.
+fn dbig_to_f32_hilo(bf: &DBig) -> (f32, f32) {
+    let hi = dbig_to_f32(bf);
+    let hi_big = DBig::from_str(&hi.to_string()).unwrap_or_else(|_| dbig_i(0));
+    let lo = dbig_to_f32(&(bf - &hi_big));
+    (hi, lo)
+}
+
 // Significant-bit budget needed to resolve detail at a given view scale: roughly
 // -log2(scale) plus a margin for the reference-orbit accumulation. dashu rounds
 // every operation to the operands' precision and never grows it, so without this
@@ -67,8 +79,11 @@ fn exp_f64(value: f64) -> f64 {
 pub struct MandelbrotStep {
     pub zx: f32,
     pub zy: f32,
-    pub dx: f32,
-    pub dy: f32,
+    // Low parts of the double-float reference orbit z_n (zx = hi, zx_lo = lo).
+    // (Reuses the slots that previously held the orbit derivative, which was
+    // computed but never consumed by the shaders.)
+    pub zx_lo: f32,
+    pub zy_lo: f32,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -127,8 +142,6 @@ pub struct MandelbrotNavigator {
     previous_c: (DBig, DBig),         // Dernier C vu
     last_zx: DBig,
     last_zy: DBig,
-    last_dx: DBig,
-    last_dy: DBig,
     approximation_mode: ApproximationMode,
     bla_epsilon: f32,
     bla_result: Box<Vec<BlaStep>>,
@@ -180,8 +193,6 @@ impl MandelbrotNavigator {
             previous_c: (cx.clone(), cy.clone()),
             last_zx: zero.clone(),
             last_zy: zero.clone(),
-            last_dx: zero.clone(),
-            last_dy: zero.clone(),
             approximation_mode: ApproximationMode::Perturbation,
             bla_epsilon: 1e-6,
             bla_result: Box::new(Vec::with_capacity(20_000)),
@@ -645,11 +656,8 @@ impl MandelbrotNavigator {
         let offset = self.result.len();
         let mut zx = self.last_zx.clone();
         let mut zy = self.last_zy.clone();
-        let mut dx = self.last_dx.clone();
-        let mut dy = self.last_dy.clone();
 
         let two = DBig::try_from(2).unwrap();
-        let one = DBig::try_from(1).unwrap();
         let threshold = DBig::try_from(1_000_000).unwrap();
         let total_iter: usize = target;
 
@@ -657,12 +665,9 @@ impl MandelbrotNavigator {
         let reference_cy = &self.reference_cy;
 
         if self.result.is_empty() {
-            self.result.push(MandelbrotStep {
-                zx: dbig_to_f32(&zx),
-                zy: dbig_to_f32(&zy),
-                dx: dbig_to_f32(&dx),
-                dy: dbig_to_f32(&dy),
-            });
+            let (zx_hi, zx_lo) = dbig_to_f32_hilo(&zx);
+            let (zy_hi, zy_lo) = dbig_to_f32_hilo(&zy);
+            self.result.push(MandelbrotStep { zx: zx_hi, zy: zy_hi, zx_lo, zy_lo });
         }
 
         while self.last_iter < total_iter {
@@ -671,33 +676,22 @@ impl MandelbrotNavigator {
             if magnitude_sq > threshold {
                 zx = DBig::try_from(0).unwrap();
                 zy = DBig::try_from(0).unwrap();
-                dx = DBig::try_from(0).unwrap();
-                dy = DBig::try_from(0).unwrap();
             } else {
-                let dx_new = &two * &zx * &dx + &one;
-                let dy_new = &two * &zy * &dy;
                 let zx_new = &zx * &zx - &zy * &zy + reference_cx;
                 let zy_new = &two * &zx * &zy + reference_cy;
 
                 zx = zx_new;
                 zy = zy_new;
-                dx = dx_new;
-                dy = dy_new;
             }
             self.last_iter += 1;
-            self.result.push(MandelbrotStep {
-                zx: dbig_to_f32(&zx),
-                zy: dbig_to_f32(&zy),
-                dx: dbig_to_f32(&dx),
-                dy: dbig_to_f32(&dy),
-            });
+            let (zx_hi, zx_lo) = dbig_to_f32_hilo(&zx);
+            let (zy_hi, zy_lo) = dbig_to_f32_hilo(&zy);
+            self.result.push(MandelbrotStep { zx: zx_hi, zy: zy_hi, zx_lo, zy_lo });
         }
 
         // Stocker la dernière valeur exacte
         self.last_zx = zx.clone();
         self.last_zy = zy.clone();
-        self.last_dx = dx.clone();
-        self.last_dy = dy.clone();
         self.bla_source_len = 0;
         self.bla_level_count = 0;
         self.bla_source_epsilon = 0.0;
@@ -853,8 +847,6 @@ impl MandelbrotNavigator {
         self.previous_c = (self.reference_cx.clone(), self.reference_cy.clone());
         self.last_zx = dbig_i(0);
         self.last_zy = dbig_i(0);
-        self.last_dx = dbig_i(0);
-        self.last_dy = dbig_i(0);
         self.bla_result.clear();
         self.bla_levels.clear();
         self.bla_level_count = 0;

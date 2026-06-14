@@ -1,7 +1,8 @@
 import {describe, expect, it} from 'vitest';
-import {DEEP_EXP_THRESHOLD, frexpFloat32} from '../../src/floatexp';
+import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString} from '../../src/floatexp';
 
 const reconstruct = (m: number, e: number) => m * 2 ** e;
+const LOG2_10 = 3.321928094887362;
 
 describe('frexpFloat32', () => {
   it('returns {0,0} for zero and non-finite inputs', () => {
@@ -46,6 +47,40 @@ describe('frexpFloat32', () => {
     expect(Math.abs(mantissa)).toBeLessThan(1);
     // Reconstruction stays in the right ballpark despite reduced subnormal precision.
     expect(Math.abs(reconstruct(mantissa, exponent) / v - 1)).toBeLessThan(1e-2);
+  });
+
+  it('frexpFromDecimalString round-trips in-f64-range decimal strings', () => {
+    const samples = ['1', '2', '0.5', '-1.75', '1234.5', '1e-35', '1e-100', '1e-300'];
+    for (const s of samples) {
+      const {mantissa, exponent} = frexpFromDecimalString(s);
+      expect(Math.abs(reconstruct(mantissa, exponent) / parseFloat(s) - 1)).toBeLessThan(1e-6);
+      if (parseFloat(s) !== 0) {
+        expect(Math.abs(mantissa)).toBeGreaterThanOrEqual(0.5);
+        expect(Math.abs(mantissa)).toBeLessThan(1);
+      }
+    }
+  });
+
+  it('frexpFromDecimalString works far below the f64 floor (no f64 underflow)', () => {
+    // parseFloat("1e-500") === 0, so the f64 path is dead here — but the string
+    // path must still produce a correct (mantissa, base-2 exponent).
+    for (const deep of [400, 500, 1000, 5000]) {
+      const {mantissa, exponent} = frexpFromDecimalString(`1e-${deep}`);
+      expect(Math.abs(mantissa)).toBeGreaterThanOrEqual(0.5);
+      expect(Math.abs(mantissa)).toBeLessThan(1);
+      // exponent ≈ floor(-deep · log2(10)), within a couple ULPs of normalization.
+      expect(Math.abs(exponent - -deep * LOG2_10)).toBeLessThan(2);
+    }
+    // negative sign is preserved
+    expect(frexpFromDecimalString('-1e-500').mantissa).toBeLessThan(0);
+    // zero / malformed are safe
+    expect(frexpFromDecimalString('0')).toEqual({mantissa: 0, exponent: 0});
+    expect(frexpFromDecimalString('')).toEqual({mantissa: 0, exponent: 0});
+  });
+
+  it('frexpFromDecimalString agrees with frexpFloat32 on the deep threshold', () => {
+    expect(frexpFromDecimalString('1e-35').exponent).toBeLessThanOrEqual(DEEP_EXP_THRESHOLD);
+    expect(frexpFromDecimalString('1e-34').exponent).toBeGreaterThan(DEEP_EXP_THRESHOLD);
   });
 
   it('maps the ~1e-35 deep threshold to the expected exponent boundary', () => {
