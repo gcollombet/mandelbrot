@@ -109,14 +109,8 @@ let computeLoopRunning = false
 let needsReferenceValidation = false
 let currentReferenceCx = ''
 let currentReferenceCy = ''
-let currentScale = ''
 
 const ORBIT_CHUNK_SIZE = 1000
-// Below this scale the GPU renders with the floatexp exact path and ignores BLA,
-// so building the BLA table would be wasted work (and its end-of-build burst
-// caused a render cut). Kept just shallower than the shader's deep threshold
-// (~1.2e-35) so we only skip BLA where the shader definitely won't use it.
-const BLA_DEEP_SKIP_SCALE = 1e-35
 
 function postResponse(message: ReferenceWorkerResponse, transfer?: Transferable[]) {
     ctx.postMessage(message, transfer ?? [])
@@ -156,7 +150,6 @@ function resetNavigator(message: ResetMessage) {
     needsReferenceValidation = false
     currentReferenceCx = ''
     currentReferenceCy = ''
-    currentScale = message.scale
     applyApproximationMode(message.approximationMode)
     navigator.set_bla_epsilon(message.blaEpsilon)
     void runComputeLoop(message.jobId)
@@ -177,13 +170,6 @@ function copyOrbitSlice(ptr: number, offset: number, count: number): Float32Arra
 
 function postBlaIfReady(jobId: number, maxIterations: number, availableIter: number) {
     if (!navigator || jobId !== activeJobId || disposed) {
-        return
-    }
-    // Deep zoom: the GPU renders with the floatexp exact path and ignores BLA, so
-    // skip building it — both to save work and to avoid the end-of-build burst
-    // that triggered a render cut (black screen) on each reference recenter.
-    const scaleNum = currentScale ? Number(currentScale) : NaN
-    if (Number.isFinite(scaleNum) && scaleNum < BLA_DEEP_SKIP_SCALE) {
         return
     }
     if (
@@ -307,7 +293,6 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     navigator.origin(message.cx, message.cy)
                     navigator.scale(message.scale)
                     navigator.angle(message.angle)
-                    currentScale = message.scale
                     targetMaxIterations = message.maxIterations
                     needsReferenceValidation = true
                     void runComputeLoop(message.jobId)

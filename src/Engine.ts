@@ -1989,8 +1989,9 @@ export class Engine {
         this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < maxIterations
         const orbitComplete = availableIter >= maxIterations
 
+        // BLA now runs in the deep (floatexp) path too: a/b/radii are stored in
+        // fe form and try_apply_bla_deep does its radius test in log space.
         const approximationModeFlag = this.approximationMode === 'bla'
-            && !deep // BLA's b·dc term and radii are f32 and break below 1e-38
             && orbitComplete
             && this.currentBlaLevelCount > 0
             && this.referenceBlaReadyMaxIterations >= guardedMaxIter

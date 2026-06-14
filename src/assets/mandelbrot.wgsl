@@ -651,6 +651,56 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 //   • dz, dc are fe; z_n (orbit) stays O(1) f32; der reuses the shallow machinery
 //   • the per-pass resumable dz is parked as (mantissa in zx/zy, exponent in the
 //     avgDirection layer), so orbit-direction metrics are unavailable here.
+// BLA in the deep (floatexp) path: a·dz + b·dc with a, b in fe, dc/dz in fe, and
+// the radius test |dz| ≤ alpha − beta·|dc| done in log space (everything is far
+// below f32 here). The derivative update folds the block's shared exponent into
+// the log scale derS. log_dcMag = log|dc| is precomputed by the caller.
+fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, log_dcMag: f32, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
+  if (*ref_i <= 0) {
+    return 0;
+  }
+  let log_dz = log(max(length((*dz).m), 1e-30)) + f32((*dz).e) * LN2;
+  let shiftedRef = *ref_i - 1;
+  var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
+  while (level >= 0) {
+    let levelInfo = mandelbrotBlaLevels[level];
+    let skip = i32(levelInfo.skip);
+    if (*ref_i + skip <= maxIterI) {
+      let slot = shiftedRef >> u32(skip0Log + level);
+      if (u32(slot) < levelInfo.count) {
+        let bla = mandelbrotBlaSuite[i32(levelInfo.offset) + slot];
+        // radius = alpha − beta·|dc|, validity |dz| ≤ radius, all in log space.
+        let log_alpha = log(bla.radius_alpha) + f32(bla.alpha_exp) * LN2;
+        let log_betaDc = log(max(bla.radius_beta, 1e-30)) + log_dcMag;
+        if (log_betaDc < log_alpha) {            // radius > 0
+          let ratio = exp(log_betaDc - log_alpha); // ∈ [0,1)
+          let log_radius = log_alpha + log(max(1.0 - ratio, 1e-30));
+          if (log_dz <= log_radius) {
+            // candidate = a·dz + b·dc  (a, b share exponent ab_exp)
+            let a = fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp);
+            let b = fe(vec2<f32>(bla.bx, bla.by), bla.ab_exp);
+            let candidate = fe_add(fe_cmul(a, *dz), fe_cmul(b, dc));
+            let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(candidate);
+            // Don't let a multi-step block jump over the first escape.
+            if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+              *dz = candidate;
+              *zOut = candidateZ;
+              // der' = der·a + b·1, folding the shared exponent into derS.
+              *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
+              *derS = *derS + f32(bla.ab_exp) * LN2;
+              der_refresh_cache(derM, derS, derInvScale, epsThreshold, logEpsilon);
+              *ref_i += skip;
+              return skip;
+            }
+          }
+        }
+      }
+    }
+    level -= 1;
+  }
+  return 0;
+}
+
 fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_dzx: f32, prev_dzy: f32) -> FragOut {
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
@@ -683,15 +733,37 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   var shadingHeight = 0.0;
   var shadingAngle = 0.0;
 
+  // BLA acceleration in the deep path: skip iteration blocks when |dz| is small.
+  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5;
+  var skip0Log = 0;
+  var log_dcMag = 0.0;
+  if (useBlaDeep) {
+    skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
+    log_dcMag = log(max(length(dc.m), 1e-30)) + f32(dc.e) * LN2;
+  }
+  var usedBla = false;
+
   while (i < max_iteration && ref_i < globalMaxIterI) {
-    let refZ = getOrbit(ref_i);
-    let zPrev = refZ + fe_to_vec(dz);
-    // dz' = 2·z_n·dz + dz² + dc   (z_n = refZ is O(1) f32)
-    dz = fe_add3(fe_cmul_f32(2.0 * refZ, dz), fe_cmul(dz, dz), dc);
-    ref_i += 1;
-    z = getOrbit(ref_i) + fe_to_vec(dz);
-    derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
-    i += 1.0;
+    var skipped = 0;
+    if (useBlaDeep) {
+      var blaZ = vec2<f32>(0.0);
+      skipped = try_apply_bla_deep(&ref_i, &dz, &derM, &derS, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, log_dcMag, muLimit, skip0Log, globalMaxIterI);
+      if (skipped > 0) {
+        usedBla = true;
+        z = blaZ;
+        i += f32(skipped);
+      }
+    }
+    if (skipped == 0) {
+      let refZ = getOrbit(ref_i);
+      let zPrev = refZ + fe_to_vec(dz);
+      // dz' = 2·z_n·dz + dz² + dc   (z_n = refZ is O(1) f32)
+      dz = fe_add3(fe_cmul_f32(2.0 * refZ, dz), fe_cmul(dz, dz), dc);
+      ref_i += 1;
+      z = getOrbit(ref_i) + fe_to_vec(dz);
+      derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
+      i += 1.0;
+    }
 
     let derMM = dot(derM, derM);
     let dot_z = dot(z, z);
@@ -702,7 +774,9 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       escaped = true;
       break;
     }
-    if (!IGNORE_EPSILON && derMM < epsThreshold) {
+    // BLA blocks can jump past the interior condition, so skip the derivative
+    // interior test once BLA has been used (matches the shallow BLA path).
+    if (!usedBla && !IGNORE_EPSILON && derMM < epsThreshold) {
       inside = true;
       break;
     }

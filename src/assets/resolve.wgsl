@@ -253,6 +253,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // baseIter (the first escaped corner's iteration count) to keep full
     // f32 precision at deep zooms where iter counts are large.
     var wEscaped = 0.0;
+    var nEscaped = 0u;
     var baseIter = -1.0;
     var nuSum = 0.0;
     var distSum = 0.0;
@@ -267,6 +268,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     var bestStripe = 0.0;
     // Inside-set corners: track total weight and the dominant one.
     var wInside = 0.0;
+    var nInside = 0u;
     var bestInsideW = -1.0;
     var bestInsideCoord = vec2<i32>(0);
     // Fallback when every finished corner has zero bilinear weight
@@ -297,6 +299,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
           hasFinished = true;
           firstFinishedCoord = ccoord;
         }
+        nInside = nInside + 1u;
         wInside = wInside + w;
         if (w > bestInsideW) {
           bestInsideW = w;
@@ -323,6 +326,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       if (baseIter < 0.0) {
         baseIter = citer;
       }
+      nEscaped = nEscaped + 1u;
       wEscaped = wEscaped + w;
       nuSum = nuSum + w * ((citer - baseIter) + smooth_frac(z_sq, logMu));
       distSum = distSum + w * loadLayer(ccoord, 4);
@@ -342,13 +346,21 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       }
     }
 
-    let wTotal = wEscaped + wInside;
-    if (wTotal > 1e-6) {
+    // Rank-aware gate: only render this cell at the current level when at
+    // least 3 of its 4 corners are RESOLVED (escaped or inside).  With fewer,
+    // the renormalized bilinear degenerates — 1 corner → flat square, 2 on an
+    // edge → bands, 2 diagonal → singular — so we climb to the coarser level
+    // instead.  Counting resolved (not just escaped) corners keeps converged
+    // frames identical: once every corner is escaped/inside, nResolved == 4
+    // everywhere and nothing climbs.  See design.md of this change.
+    let nResolved = nEscaped + nInside;
+    if (nResolved >= 3u) {
       // The cell straddles the set boundary: the dominant group wins.
       if (wInside > wEscaped) {
         return loadAllLayersAsCopy(bestInsideCoord, step_u);
       }
 
+      if (wEscaped > 1e-6) {
       // ── Interpolate among escaped corners ──
       let invW = 1.0 / wEscaped;
 
@@ -390,16 +402,18 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       o.ref_i     = pack(refOut);
       o.avgDirection = pack(encode_avg_dir(clamp(avgDirSum * invW, vec2<f32>(-1.0), vec2<f32>(1.0))));
       return o;
+      }
+
+      // >= 3 resolved corners but all of them carry zero bilinear weight
+      // (pixel sits exactly on the lone unresolved corner) — snap to the first
+      // resolved corner instead of producing nothing.
+      if (hasFinished) {
+        return loadAllLayersAsCopy(firstFinishedCoord, step_u);
+      }
     }
 
-    // All finished corners carry zero bilinear weight — snap to the first
-    // finished one (preserves the previous behavior).
-    if (hasFinished) {
-      return loadAllLayersAsCopy(firstFinishedCoord, step_u);
-    }
-
-    // None of the 4 candidates had a finished pixel — climb to the next
-    // coarser grid level.
+    // Fewer than 3 resolved corners (degenerate cell) — climb to the next
+    // coarser grid level and re-evaluate the same criterion.
     step_u = step_u * 2u;
   }
 
