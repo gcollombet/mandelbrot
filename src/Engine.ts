@@ -410,7 +410,7 @@ export class Engine {
     referenceResetSerial = 0
     referenceResetFlashUntil = 0
     currentBlaLevelCount = 0
-    mandelbrotReference = new Float32Array(1000000)
+    mandelbrotReference = new Float32Array(4 * 1000000)
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private referenceWorker?: Worker
@@ -990,7 +990,7 @@ export class Engine {
             label: 'Engine UniformBuffer Resolve',
         })
         this.mandelbrotReferenceBuffer = this.device.createBuffer({
-            size: 4 * 1000000,
+            size: 16 * 1000000,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         })

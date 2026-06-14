@@ -15,6 +15,14 @@ let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
 
+function isValidDecimal(s: unknown): boolean {
+  if (typeof s !== 'string') return false;
+  const trimmed = s.trim();
+  if (!trimmed) return false;
+  const decimalRegex = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/;
+  return decimalRegex.test(trimmed);
+}
+
 const emit = defineEmits<{
   ready: [engine: Engine];
 }>();
@@ -36,10 +44,14 @@ watch(
     if (!nextCx || !nextCy || !nextScale) return;
     // Évite les appels inutiles si rien n'a vraiment changé
     if (nextCx !== prevCx || nextCy !== prevCy) {
-      navigator.origin(nextCx, nextCy);
+      if (isValidDecimal(nextCx) && isValidDecimal(nextCy)) {
+        navigator.origin(nextCx, nextCy);
+      }
     }
     if (nextScale !== prevScale) {
-      navigator.scale(nextScale);
+      if (isValidDecimal(nextScale)) {
+        navigator.scale(nextScale);
+      }
     }
     if (nextAngle !== prevAngle) {
       navigator.angle(Number(nextAngle));
@@ -196,7 +208,7 @@ async function draw() {
     const bailoutExtraIterations = Math.max(0, Math.ceil(Math.log2(Math.log(mu) / Math.log(4))));
     const maxIterations = Math.min(
       Math.max(100, 1000 * props.maxIterationMultiplier * Math.log2(1.0 / parseFloat(scale_string))) + bailoutExtraIterations,
-      100_000
+      1_000_000
     );
     await engine.update({
           cx: cx_string,
@@ -246,16 +258,34 @@ async function draw() {
 async function initWebGPU() {
   if (!canvasRef.value) return;
   canvas = canvasRef.value;
+
+  let initialCx = cx.value;
+  let initialCy = cy.value;
+  let initialScale = scale.value;
+
+  if (!isValidDecimal(initialCx)) {
+    initialCx = '-0.7';
+    cx.value = initialCx;
+  }
+  if (!isValidDecimal(initialCy)) {
+    initialCy = '0.0';
+    cy.value = initialCy;
+  }
+  if (!isValidDecimal(initialScale)) {
+    initialScale = '2.5';
+    scale.value = initialScale;
+  }
+
   navigator = new MandelbrotNavigator(
-      cx.value,
-      cy.value,
-      scale.value,
+      initialCx,
+      initialCy,
+      initialScale,
       Number(angle.value)
   );
   // Si des props ont déjà changé avant l'init, on s'assure que le navigator est aligné.
   // (Le watch ci-dessus ne pouvait rien faire tant que navigator était undefined.)
-  navigator.origin(cx.value, cy.value);
-  navigator.scale(scale.value);
+  navigator.origin(initialCx, initialCy);
+  navigator.scale(initialScale);
   navigator.angle(Number(angle.value));
   engine = new Engine(canvas, {
     antialiasLevel: props.antialiasLevel,

@@ -306,27 +306,22 @@ const sliderPhaseColoring = computed({
     model.value.phaseColoringStrength = val <= 0 ? 0 : Math.round((10 ** (val * 2) - 1) * 10) / 10;
   }
 });
-// Slider log2(scale) : valeurs de slider 1 à 126 —> scale de 2^-1 à 2^-126
+// Slider log2(scale) : valeurs de slider 1 à 300 —> scale de 2^-1 à 2^-300
 const scaleSlider = computed({
   get: () => {
     // Clamp la scale, éviter NaN si vide
     const s = Number(model.value.scale);
-    const slider = s > 0 ? -Math.log2(s) : 126;
+    const slider = s > 0 ? -Math.log2(s) : 300;
     if (!isFinite(slider)) return 1;
-    return Math.min(Math.max(Math.round(slider), 1), 126); // Entre 1 et 126
+    return Math.min(Math.max(Math.round(slider), 1), 300); // Entre 1 et 300
   },
   set: (val: number) => {
-    // Clamp entre 1 et 126
-    const v = Math.min(Math.max(Math.round(val), 1), 126);
+    // Clamp entre 1 et 300
+    const v = Math.min(Math.max(Math.round(val), 1), 300);
     model.value.scale = (2 ** -v).toPrecision(10);
   }
 });
 
-function truncateDecimal(str: string, digits: number): string {
-  const [intPart, decPart] = str.split(".");
-  if (!decPart) return intPart;
-  return intPart + "." + decPart.slice(0, digits);
-}
 
 const coordsCopied = ref(false);
 function copyCoordinates() {
@@ -334,6 +329,20 @@ function copyCoordinates() {
   navigator.clipboard?.writeText(txt);
   coordsCopied.value = true;
   window.setTimeout(() => { coordsCopied.value = false; }, 1200);
+}
+
+function updateCx(val: string) {
+  model.value = {
+    ...model.value,
+    cx: val
+  };
+}
+
+function updateCy(val: string) {
+  model.value = {
+    ...model.value,
+    cy: val
+  };
 }
 
 function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = 'lab'): string {
@@ -1902,11 +1911,33 @@ async function importSkyboxTexture(event: Event) {
       <div class="coords">
         <div class="lab">
           <div class="l1">Center</div>
-          <div class="l2">Complex coordinates — read-only</div>
+          <div class="l2">Complex coordinates</div>
         </div>
         <div class="vals">
-          <div class="cline"><span class="ax">Cx</span><span class="num">{{ truncateDecimal(model.cx, 38) }}</span></div>
-          <div class="cline"><span class="ax">Cy</span><span class="num">{{ truncateDecimal(model.cy, 38) }}</span></div>
+          <div class="cline">
+            <span class="ax">Cx</span>
+            <input
+              type="text"
+              class="coord-input"
+              :value="model.cx"
+              @input="updateCx(($event.target as HTMLInputElement).value)"
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+              placeholder="0.0"
+            />
+          </div>
+          <div class="cline">
+            <span class="ax">Cy</span>
+            <input
+              type="text"
+              class="coord-input"
+              :value="model.cy"
+              @input="updateCy(($event.target as HTMLInputElement).value)"
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+              placeholder="0.0"
+            />
+          </div>
         </div>
         <button class="copy" :class="{ ok: coordsCopied }" title="Copy coordinates" @click="copyCoordinates">
           <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
@@ -1918,7 +1949,7 @@ async function importSkyboxTexture(event: Event) {
           <div class="l1">Zoom</div>
           <div class="l2">Magnification — scale of the view</div>
         </div>
-        <input type="range" min="1" max="126" step="1" v-model.number="scaleSlider" />
+        <input type="range" min="1" max="300" step="1" v-model.number="scaleSlider" />
         <span class="val">{{ Number(model.scale).toExponential(2) }}</span>
       </div>
 
@@ -3808,6 +3839,26 @@ async function importSkyboxTexture(event: Event) {
   overflow: hidden;
   text-overflow: ellipsis;
   color: var(--ink);
+}
+.cv-body .coords .vals .cline .coord-input {
+  flex: 1;
+  background: rgba(0, 0, 0, 0.25);
+  border: 1px solid var(--line-soft);
+  border-radius: var(--radius-sm);
+  color: var(--ink);
+  font-family: var(--mono);
+  font-size: 13px;
+  font-weight: 600;
+  padding: 4px 8px;
+  min-width: 0;
+  width: 100%;
+  outline: none;
+  box-sizing: border-box;
+  transition: border-color 0.2s, background-color 0.2s;
+}
+.cv-body .coords .vals .cline .coord-input:focus {
+  border-color: var(--accent);
+  background: rgba(0, 0, 0, 0.45);
 }
 .cv-body .copy {
   width: 36px;
