@@ -718,7 +718,13 @@ impl MandelbrotNavigator {
         // Start the table at skip 2 and let single steps stay exact.
         const BLA_SKIP_LEVELS: usize = 1;
         const MIN_BLA_SKIP: usize = 1 << BLA_SKIP_LEVELS;
-        const MAX_BLA_SKIP: usize = 256;
+        // Largest single BLA jump. The radius test gates every level, so a high
+        // cap is safe-by-construction: deeper levels are only selected where the
+        // orbit's validity radius actually allows them (smooth, far-from-zero
+        // stretches). Each level halves in entry count, so the table tail is
+        // bounded (< 2× total). Near orbit-zero approaches the per-level radius
+        // collapses and exact iteration is forced regardless of this cap.
+        const MAX_BLA_SKIP: usize = 65536;
 
         if orbit_len <= 1 {
             self.bla_result.clear();
