@@ -116,6 +116,8 @@ pub struct Mandelbrot {
 pub struct MandelbrotNavigator {
     cx: DBig,
     cy: DBig,
+    cx_continuous: DBig,
+    cy_continuous: DBig,
     reference_cx: DBig,
     reference_cy: DBig,
     scale: DBig,
@@ -169,6 +171,8 @@ impl MandelbrotNavigator {
             reference_cy: cy.clone(),
             cx: cx.clone(),
             cy: cy.clone(),
+            cx_continuous: cx.clone(),
+            cy_continuous: cy.clone(),
             scale,
             angle,
             result: Box::new(Vec::with_capacity(10_000)),
@@ -214,6 +218,8 @@ impl MandelbrotNavigator {
         let prec = precision_bits_for_scale(&self.scale).max(64);
         self.cx = raise_precision(self.cx.clone(), prec);
         self.cy = raise_precision(self.cy.clone(), prec);
+        self.cx_continuous = raise_precision(self.cx_continuous.clone(), prec);
+        self.cy_continuous = raise_precision(self.cy_continuous.clone(), prec);
         self.scale = raise_precision(self.scale.clone(), prec);
         self.reference_cx = raise_precision(self.reference_cx.clone(), prec);
         self.reference_cy = raise_precision(self.reference_cy.clone(), prec);
@@ -243,7 +249,13 @@ impl MandelbrotNavigator {
         self.vangle += delta_angle * 20.0;
     }
 
-    pub fn translate_direct(&mut self, dx: f64, dy: f64) {
+    pub fn translate_direct(
+        &mut self,
+        dx: f64,
+        dy: f64,
+        canvas_width: Option<f64>,
+        canvas_height: Option<f64>,
+    ) {
         self.ensure_precision();
         // Applique le déplacement immédiatement
         let angle = self.angle;
@@ -254,8 +266,48 @@ impl MandelbrotNavigator {
         let scale = &self.scale;
         let delta_x = (&dx_big * &cos_a - &dy_big * &sin_a) * scale;
         let delta_y = (&dx_big * &sin_a + &dy_big * &cos_a) * scale;
-        self.cx = &self.cx + delta_x;
-        self.cy = &self.cy + delta_y;
+        
+        self.cx_continuous = &self.cx_continuous + delta_x;
+        self.cy_continuous = &self.cy_continuous + delta_y;
+
+        if let (Some(w), Some(h)) = (canvas_width, canvas_height) {
+            let aspect = w / h;
+            let neutral_extent = (aspect * aspect + 1.0).sqrt();
+            let tex_size = (w * w + h * h).sqrt().ceil();
+            
+            let dcx = &self.cx_continuous - &self.reference_cx;
+            let dcy = &self.cy_continuous - &self.reference_cy;
+            
+            let rx_big = &dcx / scale;
+            let ry_big = &dcy / scale;
+            
+            let rx = dbig_to_f64(&rx_big);
+            let ry = dbig_to_f64(&ry_big);
+            
+            let cos_a_f64 = angle.cos();
+            let sin_a_f64 = angle.sin();
+            
+            let px_factor = tex_size / (2.0 * neutral_extent);
+            let dpx = (cos_a_f64 * rx + sin_a_f64 * ry) * px_factor;
+            let dpy = (sin_a_f64 * rx - cos_a_f64 * ry) * px_factor;
+            
+            let rounded_dpx = dpx.round();
+            let rounded_dpy = dpy.round();
+            
+            let factor = 2.0 * neutral_extent / tex_size;
+            let snapped_rx = (cos_a_f64 * rounded_dpx + sin_a_f64 * rounded_dpy) * factor;
+            let snapped_ry = (sin_a_f64 * rounded_dpx - cos_a_f64 * rounded_dpy) * factor;
+            
+            let snapped_rx_big = DBig::from_str(&snapped_rx.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap());
+            let snapped_ry_big = DBig::from_str(&snapped_ry.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap());
+            
+            self.cx = &self.reference_cx + &snapped_rx_big * scale;
+            self.cy = &self.reference_cy + &snapped_ry_big * scale;
+        } else {
+            self.cx = self.cx_continuous.clone();
+            self.cy = self.cy_continuous.clone();
+        }
+
         self.vtx = DBig::from_str("0").unwrap();
         self.vty = DBig::from_str("0").unwrap();
     }
@@ -296,7 +348,11 @@ impl MandelbrotNavigator {
         self.vscale = &self.vscale * factor_big;
     }
 
-    pub fn step(&mut self) -> Vec<String> {
+    pub fn step(
+        &mut self,
+        canvas_width: Option<f64>,
+        canvas_height: Option<f64>,
+    ) -> Vec<String> {
         // Calcul du temps écoulé depuis le dernier appel
         let delta_time = {
             #[cfg(target_arch = "wasm32")]
@@ -352,6 +408,8 @@ impl MandelbrotNavigator {
             if t >= 1.0 {
                 self.cx = target_cx.clone();
                 self.cy = target_cy.clone();
+                self.cx_continuous = target_cx.clone();
+                self.cy_continuous = target_cy.clone();
                 self.scale = target_scale.clone();
                 self.angle = *target_angle;
 
@@ -385,8 +443,10 @@ impl MandelbrotNavigator {
                 let one_minus_t_pos = &DBig::try_from(1).unwrap() - &t_pos_big;
 
                 // Interpolation pour cx et cy, pondérée par l'évolution de l'échelle
-                self.cx = start_cx * &one_minus_t_pos + target_cx * &t_pos_big;
-                self.cy = start_cy * &one_minus_t_pos + target_cy * &t_pos_big;
+                self.cx_continuous = start_cx * &one_minus_t_pos + target_cx * &t_pos_big;
+                self.cy_continuous = start_cy * &one_minus_t_pos + target_cy * &t_pos_big;
+                self.cx = self.cx_continuous.clone();
+                self.cy = self.cy_continuous.clone();
 
                 // Interpolation linéaire pour l'angle
                 self.angle = start_angle * (1.0 - t_eased) + target_angle * t_eased;
@@ -441,8 +501,12 @@ impl MandelbrotNavigator {
             let k = std::f64::consts::LN_2 / 0.05;
             let displacement_factor_f64 = (1.0 - damping_base) / k;
             let displacement_factor = DBig::from_str(&displacement_factor_f64.to_string()).unwrap();
-            self.cx = &self.cx + &self.vtx * &displacement_factor;
-            self.cy = &self.cy + &self.vty * &displacement_factor;
+            
+            self.cx_continuous = &self.cx_continuous + &self.vtx * &displacement_factor;
+            self.cy_continuous = &self.cy_continuous + &self.vty * &displacement_factor;
+            self.cx = self.cx_continuous.clone();
+            self.cy = self.cy_continuous.clone();
+            
             self.vtx = &self.vtx * &damping;
             self.vty = &self.vty * &damping;
 
@@ -459,6 +523,58 @@ impl MandelbrotNavigator {
             if self.vangle.abs() < 0.005 {
                 self.vangle = 0.0;
             }
+        }
+
+        if let (Some(w), Some(h)) = (canvas_width, canvas_height) {
+            let is_zooming = if let (Some(start_scale), Some(target_scale)) = (
+                &self.transition_start_scale,
+                &self.transition_target_scale,
+            ) {
+                start_scale != target_scale
+            } else {
+                self.vscale != DBig::try_from(1).unwrap()
+            };
+
+            if !is_zooming {
+                let aspect = w / h;
+                let neutral_extent = (aspect * aspect + 1.0).sqrt();
+                let tex_size = (w * w + h * h).sqrt().ceil();
+                
+                let dcx = &self.cx_continuous - &self.reference_cx;
+                let dcy = &self.cy_continuous - &self.reference_cy;
+                
+                let rx_big = &dcx / &self.scale;
+                let ry_big = &dcy / &self.scale;
+                
+                let rx = dbig_to_f64(&rx_big);
+                let ry = dbig_to_f64(&ry_big);
+                
+                let cos_a_f64 = self.angle.cos();
+                let sin_a_f64 = self.angle.sin();
+                
+                let px_factor = tex_size / (2.0 * neutral_extent);
+                let dpx = (cos_a_f64 * rx + sin_a_f64 * ry) * px_factor;
+                let dpy = (sin_a_f64 * rx - cos_a_f64 * ry) * px_factor;
+                
+                let rounded_dpx = dpx.round();
+                let rounded_dpy = dpy.round();
+                
+                let factor = 2.0 * neutral_extent / tex_size;
+                let snapped_rx = (cos_a_f64 * rounded_dpx + sin_a_f64 * rounded_dpy) * factor;
+                let snapped_ry = (sin_a_f64 * rounded_dpx - cos_a_f64 * rounded_dpy) * factor;
+                
+                let snapped_rx_big = DBig::from_str(&snapped_rx.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap());
+                let snapped_ry_big = DBig::from_str(&snapped_ry.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap());
+                
+                self.cx = &self.reference_cx + &snapped_rx_big * &self.scale;
+                self.cy = &self.reference_cy + &snapped_ry_big * &self.scale;
+            } else {
+                self.cx = self.cx_continuous.clone();
+                self.cy = self.cy_continuous.clone();
+            }
+        } else {
+            self.cx = self.cx_continuous.clone();
+            self.cy = self.cy_continuous.clone();
         }
 
         // Keep the precision in step with the (now updated) zoom depth so the
@@ -781,6 +897,8 @@ impl MandelbrotNavigator {
     pub fn origin(&mut self, cx: &str, cy: &str) {
         self.cx = DBig::from_str(cx).unwrap();
         self.cy = DBig::from_str(cy).unwrap();
+        self.cx_continuous = self.cx.clone();
+        self.cy_continuous = self.cy.clone();
         self.vtx = DBig::from_str("0").unwrap();
         self.vty = DBig::from_str("0").unwrap();
         self.ensure_precision();
@@ -1214,14 +1332,14 @@ mod tests {
         nav.zoom(1.5);
         nav.angle(0.7);
         nav.zoom(0.5);
-        nav.step();
+        nav.step(None, None);
         nav.zoom(2.0);
-        nav.step();
+        nav.step(None, None);
         nav.zoom(1.2);
 
         // Vérifier que l'échelle a changé
         // Appeler step pour que l'update soit appliqué
-        let _params = nav.step();
+        let _params = nav.step(None, None);
         // On attend que l'échelle ait augmenté
         assert!(1 == 1, "scale should have increased after zoom+step");
     }
@@ -1314,12 +1432,12 @@ mod tests {
         }
 
         // Let's run a couple of step calls and verify it approaches the target
-        let _ = nav.step();
+        let _ = nav.step(None, None);
         assert!(nav.is_in_transition());
 
         // Force transition completion
         nav.transition_elapsed = 1.0;
-        let _ = nav.step();
+        let _ = nav.step(None, None);
         assert!(!nav.is_in_transition());
         assert_eq!(nav.cx.to_string(), "1");
         assert_eq!(nav.cy.to_string(), "2");
@@ -1336,7 +1454,7 @@ mod tests {
         let mut nav = MandelbrotNavigator::new("-0.5", "0.6", "1.0", 0.0);
         for k in 1..=60 {
             nav.scale(&format!("1e-{}", k * 2));
-            nav.translate_direct(0.1234567891011, -0.2345678910);
+            nav.translate_direct(0.1234567891011, -0.2345678910, None, None);
         }
         let cx = nav.get_params()[0].clone();
         // ~1e-120 depth: the center must carry far more than the old ~95-digit
@@ -1352,11 +1470,11 @@ mod tests {
         let mut nav = MandelbrotNavigator::new("-0.5", "0.6", "1.0", 0.0);
         for k in 1..=50 {
             nav.scale(&format!("1e-{}", k * 2));
-            nav.translate_direct(0.123456789, -0.234567891);
+            nav.translate_direct(0.123456789, -0.234567891, None, None);
         }
         let deep_len = nav.get_params()[0].len();
         nav.scale("1e-2");               // zoom back out to a shallow scale
-        nav.translate_direct(0.0, 0.0);  // runs ensure_precision at shallow
+        nav.translate_direct(0.0, 0.0, None, None);  // runs ensure_precision at shallow
         let shallow_len = nav.get_params()[0].len();
         assert!(shallow_len >= deep_len - 5,
             "center precision dropped on zoom-out: {} -> {}", deep_len, shallow_len);

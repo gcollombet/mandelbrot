@@ -197,7 +197,8 @@ watch(
 async function draw() {
   if (!engine || !navigator) return;
 
-    const step = navigator.step();
+    const canvas = canvasRef.value;
+    const step = navigator.step(canvas ? canvas.width : undefined, canvas ? canvas.height : undefined);
     if (!step) return;
     const [dx, dy] = step as [string, string];
     const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
@@ -404,11 +405,19 @@ defineExpose({
   getEngine: () => engine!,
   getNavigator: () => navigator!,
   translate: (dx: number, dy: number) => navigator?.translate(dx, dy),
-  translateDirect: (dx: number, dy: number) => navigator?.translate_direct(dx, dy),
+  translateDirect: (dx: number, dy: number) => {
+    if (!navigator) return;
+    const canvas = canvasRef.value;
+    navigator.translate_direct(dx, dy, canvas ? canvas.width : undefined, canvas ? canvas.height : undefined);
+  },
   rotate: (da: number) => navigator?.rotate(da),
   angle: (a: number) => navigator?.angle(a),
   zoom: (f: number) => navigator?.zoom(f),
-  step: () => navigator?.step(),
+  step: () => {
+    if (!navigator) return;
+    const canvas = canvasRef.value;
+    return navigator.step(canvas ? canvas.width : undefined, canvas ? canvas.height : undefined);
+  },
   getParams: () => navigator?.get_params(),
   drawOnce: async () => draw(),
   resize: async () => handleResize(),
