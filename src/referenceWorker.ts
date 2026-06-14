@@ -198,7 +198,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     const stepsSource = new Float32Array(
         wasmMemory.buffer,
         blaInfo.ptr,
-        blaInfo.count * 6,
+        blaInfo.count * 8,
     )
     const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
     steps.set(stepsSource)

@@ -60,11 +60,15 @@ const DEEP_EXP: i32 = -116;
 const LN2: f32 = 0.6931471805599453;
 
 struct BlaStep {
+  // floatexp form: a = (ax,ay)·2^ab_exp, b = (bx,by)·2^ab_exp,
+  // alpha = radius_alpha·2^alpha_exp, beta = radius_beta (O(1)).
   ax: f32,
   ay: f32,
   bx: f32,
   by: f32,
+  ab_exp: i32,
   radius_alpha: f32,
+  alpha_exp: i32,
   radius_beta: f32,
 };
 
@@ -272,9 +276,13 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
       if (u32(slot) < levelInfo.count) {
         let entryIndex = i32(levelInfo.offset) + slot;
         let bla = mandelbrotBlaSuite[entryIndex];
-        let a = vec2<f32>(bla.ax, bla.ay);
-        let b = vec2<f32>(bla.bx, bla.by);
-        let radius = max(0.0, bla.radius_alpha - bla.radius_beta * dcMag);
+        // Reconstruct the f32 coefficients from their floatexp storage. In the
+        // shallow regime (where this BLA path runs) the exponents are small, so
+        // ldexp is exact and these match the pre-floatexp values.
+        let a = ldexp(vec2<f32>(bla.ax, bla.ay), vec2<i32>(bla.ab_exp, bla.ab_exp));
+        let b = ldexp(vec2<f32>(bla.bx, bla.by), vec2<i32>(bla.ab_exp, bla.ab_exp));
+        let alpha = ldexp(bla.radius_alpha, bla.alpha_exp);
+        let radius = max(0.0, alpha - bla.radius_beta * dcMag);
         // BLA radii are input-domain bounds: they describe when the block's
         // linearized map is valid for the current perturbation before the skip.
         if (dzMag2 <= radius * radius) {

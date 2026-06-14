@@ -98,11 +98,17 @@ pub enum ApproximationMode {
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct BlaStep {
-    pub ax: f32,
+    // BLA coefficients in extended-exponent (floatexp) form, so the deep path can
+    // use them: `a` and `b` grow at the same rate (~product of derivatives) and
+    // share one base-2 exponent; the validity radius `alpha` shrinks far below
+    // f32 and carries its own; `beta` stays O(1).
+    pub ax: f32, // a = (ax, ay) · 2^ab_exp
     pub ay: f32,
-    pub bx: f32,
+    pub bx: f32, // b = (bx, by) · 2^ab_exp
     pub by: f32,
-    pub radius_alpha: f32,
+    pub ab_exp: i32,
+    pub radius_alpha: f32, // alpha = radius_alpha · 2^alpha_exp
+    pub alpha_exp: i32,
     pub radius_beta: f32,
 }
 
@@ -742,31 +748,27 @@ impl MandelbrotNavigator {
         self.bla_result.clear();
         self.bla_levels.clear();
 
-        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE);
-        let mut previous_level: Vec<BlaStep> = Vec::with_capacity(orbit_len - 1);
+        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        let mut previous_level: Vec<BlaF64> = Vec::with_capacity(orbit_len - 1);
         for start in 1..orbit_len {
             let z = self.result[start];
-            let a = (2.0 * z.zx, 2.0 * z.zy);
-            let alpha = epsilon * complex_abs((z.zx, z.zy));
-            previous_level.push(BlaStep {
-                ax: a.0,
-                ay: a.1,
-                bx: 1.0,
-                by: 0.0,
-                radius_alpha: alpha,
-                radius_beta: 0.0,
-            });
+            // Use the double-float orbit (hi + lo) so the BLA coefficient is as
+            // accurate as the reference, not just f32.
+            let zx = z.zx as f64 + z.zx_lo as f64;
+            let zy = z.zy as f64 + z.zy_lo as f64;
+            let alpha = epsilon * (zx * zx + zy * zy).sqrt();
+            previous_level.push(BlaF64 { ax: 2.0 * zx, ay: 2.0 * zy, bx: 1.0, by: 0.0, alpha, beta: 0.0 });
         }
 
         let mut skip = 1usize;
         let mut level_start = 0usize;
         if skip >= MIN_BLA_SKIP {
-            self.bla_result.extend(previous_level.iter().copied());
+            self.bla_result.extend(previous_level.iter().map(bla_f64_to_fe));
             self.bla_levels.push(BlaLevel {
                 offset: level_start as u32,
                 count: previous_level.len() as u32,
                 skip: skip as u32,
-                max_radius_bits: max_radius_alpha_bits(&previous_level),
+                max_radius_bits: max_alpha_bits(&previous_level),
             });
             level_start = self.bla_result.len();
         }
@@ -778,37 +780,32 @@ impl MandelbrotNavigator {
                 break;
             }
 
-            let mut current_level = Vec::with_capacity(level_entry_count);
+            let mut current_level: Vec<BlaF64> = Vec::with_capacity(level_entry_count);
             for idx in 0..level_entry_count {
                 let left = previous_level[idx * 2];
                 let right = previous_level[idx * 2 + 1];
-                let (ax, ay) = complex_mul((right.ax, right.ay), (left.ax, left.ay));
-                let (abx, aby) = complex_mul((right.ax, right.ay), (left.bx, left.by));
-                let a_left_abs = complex_abs((left.ax, left.ay)).max(f32::MIN_POSITIVE);
-                let b_left_abs = complex_abs((left.bx, left.by));
-                let merged_alpha_from_right = right.radius_alpha / a_left_abs;
-                let merged_beta_from_right = (right.radius_beta + b_left_abs) / a_left_abs;
-                let (radius_alpha, radius_beta) = conservative_line_min(
-                    (left.radius_alpha, left.radius_beta),
-                    (merged_alpha_from_right, merged_beta_from_right),
-                );
-                current_level.push(BlaStep {
-                    ax,
-                    ay,
-                    bx: abx + right.bx,
-                    by: aby + right.by,
-                    radius_alpha,
-                    radius_beta,
-                });
+                let (ax, ay) = cmul64((right.ax, right.ay), (left.ax, left.ay));
+                let (abx, aby) = cmul64((right.ax, right.ay), (left.bx, left.by));
+                let a_left_abs = cabs64((left.ax, left.ay)).max(f64::MIN_POSITIVE);
+                let b_left_abs = cabs64((left.bx, left.by));
+                let merged_alpha = right.alpha / a_left_abs;
+                let merged_beta = (right.beta + b_left_abs) / a_left_abs;
+                // Conservative line-min: smallest alpha, largest beta. Clamp beta
+                // finite: when the orbit passes near 0 (a ≈ 0) the division blows
+                // it up; a huge beta just means the block is degenerate (radius
+                // goes negative → BLA not applied), which is the correct outcome.
+                let alpha = left.alpha.min(merged_alpha);
+                let beta = left.beta.max(merged_beta).min(1e30);
+                current_level.push(BlaF64 { ax, ay, bx: abx + right.bx, by: aby + right.by, alpha, beta });
             }
 
             if merged_skip >= MIN_BLA_SKIP && merged_skip <= MAX_BLA_SKIP {
-                self.bla_result.extend(current_level.iter().copied());
+                self.bla_result.extend(current_level.iter().map(bla_f64_to_fe));
                 self.bla_levels.push(BlaLevel {
                     offset: level_start as u32,
                     count: current_level.len() as u32,
                     skip: merged_skip as u32,
-                    max_radius_bits: max_radius_alpha_bits(&current_level),
+                    max_radius_bits: max_alpha_bits(&current_level),
                 });
                 level_start = self.bla_result.len();
             }
@@ -1059,24 +1056,62 @@ pub struct BlaBufferInfo {
     pub level_count: usize,
 }
 
-fn complex_mul(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+
+// BLA coefficients during the build, in f64 so the merge (product of derivatives,
+// up to ~1e154 at ~1e-308 depth) and the shrinking radii don't over/underflow
+// f32. Converted to the extended-exponent BlaStep for the shader at storage.
+#[derive(Copy, Clone)]
+struct BlaF64 {
+    ax: f64,
+    ay: f64,
+    bx: f64,
+    by: f64,
+    alpha: f64,
+    beta: f64,
+}
+
+fn cmul64(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
     (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
 }
 
-fn complex_abs(a: (f32, f32)) -> f32 {
+fn cabs64(a: (f64, f64)) -> f64 {
     (a.0 * a.0 + a.1 * a.1).sqrt()
 }
 
-fn conservative_line_min(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
-    (a.0.min(b.0), a.1.max(b.1))
+// (exponent, 2^-exponent) such that |x|·2^-exponent ∈ [0.5, 1); (0, 1.0) for 0.
+fn frexp_scale(x: f64) -> (i32, f64) {
+    let ax = x.abs();
+    if !(ax > 0.0) || !ax.is_finite() {
+        return (0, 1.0);
+    }
+    let e = ax.log2().floor() as i32 + 1;
+    (e, 2f64.powi(-e))
 }
 
-fn max_radius_alpha_bits(entries: &[BlaStep]) -> u32 {
-    entries
-        .iter()
-        .fold(0.0f32, |acc, step| acc.max(step.radius_alpha))
-        .to_bits()
+fn bla_f64_to_fe(s: &BlaF64) -> BlaStep {
+    // a and b share one exponent (same order of magnitude).
+    let ab_max = s.ax.abs().max(s.ay.abs()).max(s.bx.abs()).max(s.by.abs());
+    let (ab_exp, ab_scale) = frexp_scale(ab_max);
+    let (alpha_exp, alpha_scale) = frexp_scale(s.alpha);
+    BlaStep {
+        ax: (s.ax * ab_scale) as f32,
+        ay: (s.ay * ab_scale) as f32,
+        bx: (s.bx * ab_scale) as f32,
+        by: (s.by * ab_scale) as f32,
+        ab_exp,
+        radius_alpha: (s.alpha * alpha_scale) as f32,
+        alpha_exp,
+        radius_beta: s.beta as f32,
+    }
 }
+
+// Largest actual alpha magnitude in a level, as f32 bits (the shallow path's
+// whole-level fast-reject bound). Underflows to 0 in the deep regime, where the
+// shader uses the per-entry fe radius instead.
+fn max_alpha_bits(entries: &[BlaF64]) -> u32 {
+    (entries.iter().fold(0.0f64, |m, s| m.max(s.alpha)) as f32).to_bits()
+}
+
 
 fn detect_period_f64(cx: f64, cy: f64, max_iter: usize, max_period: usize) -> Option<usize> {
     if !cx.is_finite() || !cy.is_finite() {
@@ -1271,14 +1306,17 @@ mod tests {
         assert!(nav.bla_result.iter().all(|step| step.radius_beta >= 0.0));
         // Each level's stored max radius must bound every entry it covers, and
         // the per-level max must not grow with the skip (merged radii shrink).
-        let mut previous_max = f32::INFINITY;
+        let mut previous_max = f64::INFINITY;
         for level in nav.bla_levels.iter() {
             let start = level.offset as usize;
             let end = start + level.count as usize;
-            let max_radius = f32::from_bits(level.max_radius_bits);
-            assert!(nav.bla_result[start..end]
-                .iter()
-                .all(|step| step.radius_alpha <= max_radius));
+            let max_radius = f32::from_bits(level.max_radius_bits) as f64;
+            // radius_alpha is now an fe mantissa; the actual radius is
+            // radius_alpha · 2^alpha_exp.
+            assert!(nav.bla_result[start..end].iter().all(|step| {
+                let alpha = step.radius_alpha as f64 * 2f64.powi(step.alpha_exp);
+                alpha <= max_radius * (1.0 + 1e-5) + 1e-30
+            }));
             assert!(max_radius <= previous_max);
             previous_max = max_radius;
         }
@@ -1472,4 +1510,30 @@ mod tests {
             "center precision dropped on zoom-out: {} -> {}", deep_len, shallow_len);
     }
 
+
+    #[test]
+    fn bla_build_is_range_safe_at_deep_zoom() {
+        // At deep zoom the merged BLA coefficient `a` grows huge and the radii
+        // shrink far below the f32 range. The f64 build + fe storage must keep
+        // every stored value finite and normalized (the old f32 build produced
+        // Inf/NaN here), and the exponents must actually carry the range.
+        let frac = "7436438870371587047521915061147741580450975735832".repeat(4);
+        let cx = format!("-0.{}", frac);
+        let cy = format!("0.{}", frac);
+        let mut nav = MandelbrotNavigator::new(&cx, &cy, "1e-200", 0.0);
+        nav.use_bla();
+        let _ = nav.compute_reference_orbit_ptr(3000);
+        let _ = nav.compute_bla_reference_ptr(3000);
+        assert!(!nav.bla_result.is_empty());
+        for st in nav.bla_result.iter() {
+            assert!(st.ax.is_finite() && st.ay.is_finite() && st.bx.is_finite() && st.by.is_finite());
+            assert!(st.radius_alpha.is_finite() && st.radius_beta.is_finite());
+            let abm = st.ax.abs().max(st.ay.abs()).max(st.bx.abs()).max(st.by.abs());
+            // [0.5, 1), but an f32 cast of a near-1 value can round up to 1.0.
+            assert!(abm == 0.0 || (abm >= 0.5 && abm <= 1.0), "ab mantissa not normalized: {}", abm);
+        }
+        // The fe exponents are actually populated (not all zero) — the extraction
+        // is doing real work, and would carry the range if the orbit expanded.
+        assert!(nav.bla_result.iter().any(|st| st.alpha_exp != 0 || st.ab_exp != 0));
+    }
 }

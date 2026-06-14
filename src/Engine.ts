@@ -605,7 +605,11 @@ export class Engine {
             )
         }
 
-        // Write accumulated BLA data to GPU buffers
+        // Write accumulated BLA data to GPU buffers (grow the buffer first so a
+        // large pending table can't overflow it — 8 floats per floatexp BlaStep).
+        if (this.pendingRefBlaSteps && this.pendingRefBlaSteps.length > 0) {
+            this.ensureBlaBufferCapacity(this.pendingRefBlaSteps.length / 8)
+        }
         if (this.pendingRefBlaSteps && this.mandelbrotBlaBuffer) {
             this.device.queue.writeBuffer(
                 this.mandelbrotBlaBuffer, 0,
@@ -885,7 +889,7 @@ export class Engine {
             }
             return
         }
-        this.ensureBlaBufferCapacity(message.steps.length / 6)
+        this.ensureBlaBufferCapacity(message.steps.length / 8)
         this.ensureBlaLevelBufferCapacity(message.levelCount)
         if (message.steps.length > 0 && this.mandelbrotBlaBuffer) {
             this.device.queue.writeBuffer(this.mandelbrotBlaBuffer, 0, message.steps, 0, message.steps.length)
@@ -1006,7 +1010,7 @@ export class Engine {
             label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         })
         this.mandelbrotBlaBuffer = this.device.createBuffer({
-            size: 4 * 6,
+            size: 4 * 8, // one floatexp BlaStep = 8 × 4 bytes
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot BLA Storage Buffer',
         })
@@ -1252,7 +1256,7 @@ export class Engine {
 
         this.mandelbrotBlaBuffer?.destroy?.()
         this.mandelbrotBlaBuffer = this.device.createBuffer({
-            size: safeRequiredEntries * 4 * 6,
+            size: safeRequiredEntries * 4 * 8, // 8 floats per floatexp BlaStep
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot BLA Storage Buffer',
         })
