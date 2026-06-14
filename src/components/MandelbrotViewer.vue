@@ -1381,7 +1381,11 @@ function startTravelToPreset(preset: PresetRecord) {
       @touchstart.stop
       @touchend.stop
     >
-      <RenderStats ref="renderStatsRef" :engine="mandelbrotEngine" />
+      <RenderStats
+        ref="renderStatsRef"
+        :engine="mandelbrotEngine"
+        v-model:debugShading="mandelbrotParams.debugShading"
+      />
     </div>
 
     <!-- Composant MandelbrotController avec tous les parametres -->

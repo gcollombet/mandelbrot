@@ -17,6 +17,36 @@ fn dbig_to_f64(bf: &DBig) -> f64 {
     bf.to_string().parse::<f64>().unwrap_or(0.0)
 }
 
+// Significant-bit budget needed to resolve detail at a given view scale: roughly
+// -log2(scale) plus a margin for the reference-orbit accumulation. dashu rounds
+// every operation to the operands' precision and never grows it, so without this
+// the reference center caps at a fixed digit budget and deep zoom hits a hard
+// precision cliff (e.g. ~1e-95). Scaling the precision with depth keeps the
+// reference accurate as far as the orbit/host scale allow.
+fn precision_bits_for_scale(scale: &DBig) -> usize {
+    let s = dbig_to_f64(scale).abs();
+    let depth = if s > 0.0 && s.is_finite() {
+        (-s.log2()).ceil().max(0.0) as usize
+    } else {
+        // Below the f64 normal range (~1e-308): use a generous fixed budget.
+        4096
+    };
+    depth + 64
+}
+
+// Raise a value's precision to `prec` bits when it carries fewer (or unlimited),
+// but NEVER round a finite value down. Reducing precision on zoom-out would
+// discard the reference center's hard-won deep digits, so zooming back in (or
+// recentering at a shallower scale) would land on a corrupted center ("garbage").
+fn raise_precision(v: DBig, prec: usize) -> DBig {
+    let cur = v.precision();
+    if cur == 0 || cur < prec {
+        v.with_precision(prec).value()
+    } else {
+        v
+    }
+}
+
 fn dbig_i(value: i32) -> DBig {
     DBig::try_from(value).unwrap()
 }
@@ -134,7 +164,7 @@ impl MandelbrotNavigator {
         let cy = DBig::from_str(cy).unwrap();
         let scale = DBig::from_str(scale).unwrap();
 
-        MandelbrotNavigator {
+        let mut navigator = MandelbrotNavigator {
             reference_cx: cx.clone(),
             reference_cy: cy.clone(),
             cx: cx.clone(),
@@ -170,10 +200,30 @@ impl MandelbrotNavigator {
             transition_target_angle: None,
             transition_duration: 0.0,
             transition_elapsed: 0.0,
-        }
+        };
+        navigator.ensure_precision();
+        navigator
+    }
+
+    // Raise the precision of the navigation state to match the current zoom
+    // depth, so accumulation (cx += delta·scale, scale *= factor, …) keeps enough
+    // significant digits. with_precision sets the precision bound without losing
+    // the value; subsequent ops then accumulate digits down to the scale instead
+    // of being rounded to a fixed budget (the cause of the deep precision cliff).
+    fn ensure_precision(&mut self) {
+        let prec = precision_bits_for_scale(&self.scale).max(64);
+        self.cx = raise_precision(self.cx.clone(), prec);
+        self.cy = raise_precision(self.cy.clone(), prec);
+        self.scale = raise_precision(self.scale.clone(), prec);
+        self.reference_cx = raise_precision(self.reference_cx.clone(), prec);
+        self.reference_cy = raise_precision(self.reference_cy.clone(), prec);
+        self.vtx = raise_precision(self.vtx.clone(), prec);
+        self.vty = raise_precision(self.vty.clone(), prec);
+        self.vscale = raise_precision(self.vscale.clone(), prec);
     }
 
     pub fn translate(&mut self, dx: f64, dy: f64) {
+        self.ensure_precision();
         // dx/dy sont des valeurs entre 0 et 1 (écran)
         // On convertit en déplacement complexe selon l'échelle et l'angle
         let angle = self.angle;
@@ -194,6 +244,7 @@ impl MandelbrotNavigator {
     }
 
     pub fn translate_direct(&mut self, dx: f64, dy: f64) {
+        self.ensure_precision();
         // Applique le déplacement immédiatement
         let angle = self.angle;
         let cos_a = DBig::from_str(&angle.cos().to_string()).unwrap();
@@ -410,6 +461,10 @@ impl MandelbrotNavigator {
             }
         }
 
+        // Keep the precision in step with the (now updated) zoom depth so the
+        // reference center retains enough digits as the view deepens.
+        self.ensure_precision();
+
         // Calcul du delta par rapport à la référence
         let delta_x = &self.cx - &self.reference_cx;
         let delta_y = &self.cy - &self.reference_cy;
@@ -457,12 +512,16 @@ impl MandelbrotNavigator {
     /// Shared implementation: computes orbit steps from `last_iter` up to `target`
     /// (capped at 10 000).  Handles re-anchoring when the view centre drifts.
     fn compute_reference_orbit_inner(&mut self, target: usize) -> OrbitBufferInfo {
-        let min_positive = DBig::from_str(&(f32::MIN_POSITIVE * 10.0).to_string()).unwrap();
         let twenty = DBig::try_from(20).unwrap();
 
-        if self.scale.clone() > min_positive
-            && ((&self.reference_cx - &self.cx).abs() > &self.scale * &twenty
-                || (&self.reference_cy - &self.cy).abs() > &self.scale * &twenty)
+        // Recenter the reference whenever the view center has drifted more than
+        // ~20·scale from it, at ANY zoom depth. This was previously gated behind
+        // scale > ~1.2e-37 (f32::MIN_POSITIVE·10), which silently disabled
+        // recentering past that depth and left the reference stale (loss of
+        // detail until a manual refresh forced a recompute). The comparison is
+        // arbitrary-precision DBig, so there is no f32 floor to respect.
+        if (&self.reference_cx - &self.cx).abs() > &self.scale * &twenty
+            || (&self.reference_cy - &self.cy).abs() > &self.scale * &twenty
         {
             self.reset_reference_to(self.cx.clone(), self.cy.clone());
         }
@@ -711,6 +770,7 @@ impl MandelbrotNavigator {
     pub fn scale(&mut self, value: &str) {
         self.scale = DBig::from_str(value).unwrap();
         self.vscale = DBig::try_from(1).unwrap();
+        self.ensure_precision();
     }
 
     pub fn angle(&mut self, value: f64) {
@@ -723,6 +783,7 @@ impl MandelbrotNavigator {
         self.cy = DBig::from_str(cy).unwrap();
         self.vtx = DBig::from_str("0").unwrap();
         self.vty = DBig::from_str("0").unwrap();
+        self.ensure_precision();
     }
 
     /// Convert a canvas pixel position to complex-plane coordinates (arbitrary precision).
@@ -1265,4 +1326,40 @@ mod tests {
         assert_eq!(nav.scale.to_string(), "0.5");
         assert_eq!(nav.angle, 1.0);
     }
+
+
+    #[test]
+    fn precision_scales_with_zoom_depth() {
+        // Deepen the view step by step (like navigation) and nudge the center at
+        // each depth. With precision scaling the center must keep digits down to
+        // the scale instead of capping at a fixed budget (the old ~1e-95 cliff).
+        let mut nav = MandelbrotNavigator::new("-0.5", "0.6", "1.0", 0.0);
+        for k in 1..=60 {
+            nav.scale(&format!("1e-{}", k * 2));
+            nav.translate_direct(0.1234567891011, -0.2345678910);
+        }
+        let cx = nav.get_params()[0].clone();
+        // ~1e-120 depth: the center must carry far more than the old ~95-digit
+        // cap (the cliff was ~1e-95). Without precision scaling this caps low.
+        assert!(cx.len() > 110, "center capped at {} chars", cx.len());
+    }
+
+
+    #[test]
+    fn precision_not_reduced_on_zoom_out() {
+        // Go deep (accumulate many center digits), then zoom back out. The center
+        // must keep its digits — reducing precision on zoom-out corrupted it.
+        let mut nav = MandelbrotNavigator::new("-0.5", "0.6", "1.0", 0.0);
+        for k in 1..=50 {
+            nav.scale(&format!("1e-{}", k * 2));
+            nav.translate_direct(0.123456789, -0.234567891);
+        }
+        let deep_len = nav.get_params()[0].len();
+        nav.scale("1e-2");               // zoom back out to a shallow scale
+        nav.translate_direct(0.0, 0.0);  // runs ensure_precision at shallow
+        let shallow_len = nav.get_params()[0].len();
+        assert!(shallow_len >= deep_len - 5,
+            "center precision dropped on zoom-out: {} -> {}", deep_len, shallow_len);
+    }
+
 }

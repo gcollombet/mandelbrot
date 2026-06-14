@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import {nextTick, onMounted, onUnmounted, ref, watch} from 'vue';
+import {computed, nextTick, onMounted, onUnmounted, ref, watch} from 'vue';
 
 const props = defineProps<{
   engine: any;
 }>();
+
+const debugShading = defineModel<boolean>('debugShading', { default: false });
 
 const expanded = ref(false);
 
@@ -21,6 +23,109 @@ const orbitRemaining = ref(0);
 const referenceValidating = ref(false);
 const referenceResetActive = ref(false);
 const referenceResetSerial = ref(0);
+
+const floatExpActive = ref(false);
+const debugShadingActive = ref(false);
+
+
+const isBuildingRef = ref(false);
+const pendingRefActive = ref(false);
+const pendingRefOrbitLen = ref(0);
+const pendingRefMaxIterations = ref(0);
+
+const currentScaleStr = ref('2.5');
+
+function getApproximateLog10(scaleStr: string): number {
+  const s = scaleStr.toLowerCase();
+  if (s.includes('e')) {
+    const parts = s.split('e');
+    return parseFloat(parts[1]) || 0;
+  }
+  const f = parseFloat(s);
+  if (f > 0 && f !== Infinity) return Math.log10(f);
+  return 0;
+}
+
+const zoomPercent = computed(() => {
+  const L = getApproximateLog10(currentScaleStr.value || '2.5');
+  // map from [3, -300] to [0, 100]
+  const pct = ((3 - L) / 303) * 100;
+  return Math.min(100, Math.max(0, pct));
+});
+
+const zoomMagnitude = computed(() => {
+  return Math.round(getApproximateLog10(currentScaleStr.value));
+});
+
+const maxIterationsCondensed = computed(() => {
+  return formatCondensedNumber(maxIterations.value);
+});
+
+const currentRefPercent = computed(() => {
+  const count = orbitCount.value || 0;
+  const max = maxIterations.value || 0;
+  if (max <= 0) return 0;
+  return Math.min(100, Math.max(0, (count / max) * 100));
+});
+
+const pendingRefPercent = computed(() => {
+  const len = pendingRefOrbitLen.value || 0;
+  const max = pendingRefMaxIterations.value || 0;
+  if (max <= 0) return 0;
+  return Math.min(100, Math.max(0, (len / max) * 100));
+});
+
+function formatCondensedNumber(val: number | null | undefined): string {
+  if (val === null || val === undefined || isNaN(val)) {
+    return '0';
+  }
+  if (val < 1000) {
+    return val.toString();
+  }
+  let suffix = '';
+  let divided = val;
+  if (val >= 1e9) {
+    suffix = 'G';
+    divided = val / 1e9;
+  } else if (val >= 1e6) {
+    suffix = 'M';
+    divided = val / 1e6;
+  } else if (val >= 1000) {
+    suffix = 'k';
+    divided = val / 1000;
+  }
+
+  let formatted: string;
+  if (divided >= 100) {
+    formatted = Math.round(divided).toString();
+  } else if (divided >= 10) {
+    formatted = divided.toFixed(1);
+  } else {
+    formatted = divided.toFixed(2);
+  }
+
+  if (formatted.includes('.')) {
+    while (formatted.endsWith('0')) {
+      formatted = formatted.slice(0, -1);
+    }
+    if (formatted.endsWith('.')) {
+      formatted = formatted.slice(0, -1);
+    }
+  }
+
+  return formatted.replace('.', ',') + suffix;
+}
+
+function formatRefOrbit(count: number, max: number): string {
+  const c = count || 0;
+  const m = max || 0;
+  if (c > m) {
+    const formattedM = formatCondensedNumber(m);
+    return `${formattedM} / ${formattedM} (+ ${formatCondensedNumber(c - m)})`;
+  }
+  return `${formatCondensedNumber(c)} / ${formatCondensedNumber(m)}`;
+}
+
 
 // --- History for the graph ---
 const HISTORY_LENGTH = 200;
@@ -40,7 +145,7 @@ function poll() {
   if (!e) return;
   fps.value = e.fps ?? 0;
   isRendering.value = e.isRendering ?? false;
-  gpuFrameTimeMs.value = e.gpuFrameTimeMs ?? 0;
+  gpuFrameTimeMs.value = e.isRendering ? (e.gpuFrameTimeMs ?? 0) : 0;
   unfinishedPixels.value = e.unfinishedPixelCount ?? -1;
   activePixels.value = e.activePixelCount ?? -1;
   const ns = e.neutralSize ?? 0;
@@ -52,6 +157,22 @@ function poll() {
   referenceValidating.value = e.isReferenceValidating ?? false;
   referenceResetSerial.value = e.referenceResetSerial ?? 0;
   referenceResetActive.value = (e.referenceResetFlashUntil ?? 0) > performance.now();
+  pendingRefActive.value = e.pendingRefActive ?? false;
+  pendingRefOrbitLen.value = e.pendingRefOrbitLen ?? 0;
+  pendingRefMaxIterations.value = e.pendingRefMaxIterations ?? 0;
+  isBuildingRef.value = pendingRefActive.value || referenceResetActive.value;
+
+  floatExpActive.value = e.floatExpActive ?? false;
+  debugShadingActive.value = e.debugShadingActive ?? false;
+
+  if (e.mandelbrotNavigator) {
+    const params = e.mandelbrotNavigator.get_params() as [string, string, string, string] | undefined;
+    if (params && params.length >= 3) {
+      currentScaleStr.value = params[2];
+    }
+  }
+
+
 
   // Push history
   unfinishedHistory.push(unfinishedPixels.value >= 0 ? unfinishedPixels.value : 0);
@@ -220,10 +341,22 @@ defineExpose({ expanded });
     <button class="stats-header" @click="toggle" :title="expanded ? 'Replier' : 'Statistiques de rendu'">
       <span
         class="status-dot"
-        :class="referenceResetActive ? 'status-dot--reference' : (isRendering ? 'status-dot--active' : 'status-dot--idle')"
+        :class="isBuildingRef ? 'status-dot--reference' : (isRendering ? 'status-dot--active' : 'status-dot--idle')"
       ></span>
       <span class="stats-fps">{{ fps }} fps</span>
-      <span v-if="referenceResetActive" class="stats-reference-badge">ref</span>
+
+      <!-- Brief indicators for zoom magnitude and max iterations -->
+      <span class="header-badge" title="Magnitude du zoom">
+        <span class="header-badge-label">Z</span>
+        <span class="header-badge-value">{{ zoomMagnitude }}</span>
+      </span>
+      <span class="header-badge" title="Itérations maximales">
+        <span class="header-badge-label">I</span>
+        <span class="header-badge-value">{{ maxIterationsCondensed }}</span>
+      </span>
+
+      <span v-if="isBuildingRef" class="stats-reference-badge">ref</span>
+
       <span class="stats-toggle">{{ expanded ? '\u25B2' : '\u25BC' }}</span>
     </button>
 
@@ -241,6 +374,18 @@ defineExpose({ expanded });
           <span class="stats-label">Completion</span>
           <span class="stats-value">{{ completionPercent() }}%</span>
         </div>
+
+        <!-- Zoom progress row -->
+        <div class="stats-row stats-row--progress">
+          <div class="progress-row-header">
+            <span class="stats-label">Zoom</span>
+            <span class="stats-value">10<sup>{{ getApproximateLog10(currentScaleStr).toFixed(1) }}</sup></span>
+          </div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar-fill progress-bar-fill--zoom" :style="{ width: zoomPercent + '%' }"></div>
+          </div>
+        </div>
+
         <div class="stats-row">
           <span class="stats-label">Pixels restants</span>
           <span class="stats-value">{{ formatPixelCount(unfinishedPixels) }}</span>
@@ -262,12 +407,42 @@ defineExpose({ expanded });
           <span class="stats-value">{{ batchSize }}</span>
         </div>
         <div class="stats-row">
-          <span class="stats-label">Orbite</span>
-          <span class="stats-value">
-            {{ orbitCount }} / {{ maxIterations }}
-            <span v-if="referenceResetActive"> · reset réf</span>
-            <span v-else-if="referenceValidating"> · validation</span>
+          <span class="stats-label">Mode de calcul</span>
+          <span class="stats-value" :class="{ 'stats-value--floatexp': floatExpActive }">
+            {{ floatExpActive ? 'FloatExp' : 'F32' }}
           </span>
+        </div>
+        <div class="stats-row">
+          <span class="stats-label">Itérations max</span>
+          <span class="stats-value">{{ formatCondensedNumber(maxIterations) }}</span>
+        </div>
+
+        <!-- Réf. actuelle progress row -->
+        <div class="stats-row stats-row--progress">
+          <div class="progress-row-header">
+            <span class="stats-label">Réf. actuelle</span>
+            <span class="stats-value">
+              {{ formatRefOrbit(orbitCount, maxIterations) }}
+              <span v-if="referenceResetActive"> · reset réf</span>
+              <span v-else-if="referenceValidating"> · validation</span>
+            </span>
+          </div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar-fill progress-bar-fill--current" :style="{ width: currentRefPercent + '%' }"></div>
+          </div>
+        </div>
+
+        <!-- Nouv. référence progress row -->
+        <div v-if="pendingRefActive" class="stats-row stats-row--progress">
+          <div class="progress-row-header">
+            <span class="stats-label" style="color: var(--magenta);">Nouv. référence</span>
+            <span class="stats-value" style="color: var(--magenta); font-weight: 700;">
+              {{ formatCondensedNumber(pendingRefOrbitLen) }} / {{ formatCondensedNumber(pendingRefMaxIterations) }}
+            </span>
+          </div>
+          <div class="progress-bar-wrap">
+            <div class="progress-bar-fill progress-bar-fill--pending" :style="{ width: pendingRefPercent + '%' }"></div>
+          </div>
         </div>
         <div class="stats-row">
           <span class="stats-label">Référence</span>
@@ -284,6 +459,18 @@ defineExpose({ expanded });
           <span class="stats-label">Ops/frame</span>
           <span class="stats-value">{{ formatOps(opsPerFrame()) }}</span>
         </div>
+
+        <!-- Switch for Debug mode inside grid -->
+        <div class="stats-row debug-row">
+          <span class="stats-label">Visualisation débug</span>
+          <div class="debug-switch-wrap">
+            <label class="debug-switch">
+              <input type="checkbox" v-model="debugShading" />
+              <span class="debug-switch-slider"></span>
+            </label>
+          </div>
+        </div>
+
       </div>
     </div>
   </div>
@@ -293,12 +480,12 @@ defineExpose({ expanded });
 .render-stats {
   display: flex;
   flex-direction: column;
-  border-radius: 18px;
-  background: rgba(16, 18, 24, 0.8);
+  border-radius: 12px;
+  background: rgba(16, 18, 24, 0.85);
   border: 1px solid var(--line);
   backdrop-filter: blur(12px);
   color: var(--ink-2);
-  font-size: 0.9rem;
+  font-size: 0.82rem;
   font-family: var(--sans);
   box-shadow: 0 8px 32px rgba(0, 0, 0, 0.4);
   user-select: none;
@@ -309,14 +496,14 @@ defineExpose({ expanded });
 }
 
 .render-stats--expanded {
-  width: 240px;
+  width: 250px;
 }
 
 .stats-header {
   display: flex;
   align-items: center;
-  gap: 12px;
-  padding: 11px 20px;
+  gap: 8px;
+  padding: 6px 12px;
   border: none;
   background: none;
   cursor: pointer;
@@ -333,8 +520,8 @@ defineExpose({ expanded });
 
 .status-dot {
   display: inline-block;
-  width: 9px;
-  height: 9px;
+  width: 8px;
+  height: 8px;
   border-radius: 50%;
   flex-shrink: 0;
   transition: background 0.3s;
@@ -360,7 +547,33 @@ defineExpose({ expanded });
   font-weight: 700;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
-  min-width: 3.5em;
+  min-width: 3.2em;
+}
+
+.header-badge {
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  font-weight: 700;
+  padding: 1px 5px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.05);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+  color: var(--ink-2);
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  height: 16px;
+  line-height: 1;
+}
+
+.header-badge-label {
+  color: var(--ink-3);
+  font-weight: 600;
+  opacity: 0.8;
+}
+
+.header-badge-value {
+  color: var(--ink);
 }
 
 .stats-reference-badge {
@@ -368,7 +581,7 @@ defineExpose({ expanded });
   border-radius: 999px;
   background: rgba(236, 61, 122, 0.18);
   color: var(--magenta);
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   font-weight: 700;
   letter-spacing: 0.04em;
   text-transform: uppercase;
@@ -383,25 +596,25 @@ defineExpose({ expanded });
 
 /* --- Expanded panel --- */
 .stats-panel {
-  padding: 0 14px 10px;
+  padding: 0 10px 8px;
 }
 
 .stats-graph {
   width: 100%;
-  height: 64px;
-  border-radius: 8px;
+  height: 48px;
+  border-radius: 6px;
   display: block;
-  margin-bottom: 6px;
+  margin-bottom: 4px;
   background: rgba(0, 0, 0, 0.2);
 }
 
 .stats-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 6px 10px;
-  font-size: 0.7rem;
+  gap: 4px 8px;
+  font-size: 0.65rem;
   color: var(--ink-3);
-  margin-bottom: 8px;
+  margin-bottom: 6px;
 }
 
 .legend-item {
@@ -448,13 +661,13 @@ defineExpose({ expanded });
 }
 
 .stats-label {
-  font-size: 0.78rem;
+  font-size: 0.74rem;
   color: var(--ink-3);
 }
 
 .stats-value {
   font-family: var(--mono);
-  font-size: 0.85rem;
+  font-size: 0.78rem;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
@@ -468,5 +681,109 @@ defineExpose({ expanded });
 @keyframes reference-pulse {
   from { transform: scale(1); opacity: 0.75; }
   to { transform: scale(1.25); opacity: 1; }
+}
+
+.debug-row {
+  border-bottom: 1px dashed rgba(255, 0, 127, 0.2);
+  align-items: center !important;
+  padding: 3px 0 !important;
+}
+
+.stats-value--floatexp {
+  color: var(--cyan, #00b4dc);
+  font-weight: 700;
+}
+
+.debug-switch-wrap {
+  display: flex;
+  align-items: center;
+  cursor: default;
+}
+
+.debug-switch {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.debug-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.debug-switch-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background-color: var(--line, rgba(255, 255, 255, 0.1));
+  transition: .2s;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.debug-switch-slider:before {
+  position: absolute;
+  content: "";
+  height: 12px;
+  width: 12px;
+  left: 2px;
+  bottom: 2px;
+  background-color: var(--ink-3, #8a8d9a);
+  transition: .2s;
+  border-radius: 50%;
+}
+
+.debug-switch input:checked + .debug-switch-slider {
+  background-color: rgba(236, 61, 122, 0.2);
+  border-color: var(--magenta, #ff007f);
+}
+
+.debug-switch input:checked + .debug-switch-slider:before {
+  transform: translateX(14px);
+  background-color: var(--magenta, #ff007f);
+  box-shadow: 0 0 6px var(--magenta, #ff007f);
+}
+
+.stats-row--progress {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--line-soft);
+}
+
+.progress-row-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  width: 100%;
+}
+
+.progress-bar-wrap {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+  position: relative;
+}
+
+.progress-bar-fill {
+  height: 100%;
+  border-radius: 2px;
+  transition: width 0.15s ease-out;
+}
+
+.progress-bar-fill--zoom,
+.progress-bar-fill--current,
+.progress-bar-fill--pending {
+  background: linear-gradient(90deg, var(--cyan, #00b4dc), var(--magenta, #ff007f));
+}
+
+.progress-bar-fill--pending {
+  box-shadow: 0 0 4px var(--magenta);
 }
 </style>

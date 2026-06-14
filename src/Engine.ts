@@ -421,22 +421,24 @@ export class Engine {
     private referenceWorkerReady = false
     private pendingWorkerMessages: ReferenceWorkerRequest[] = []
     private referenceViewKey = ''
-    private referenceWorkerCx = ''
-    private referenceWorkerCy = ''
+    referenceWorkerCx = ''
+    referenceWorkerCy = ''
+    floatExpActive = false
+    debugShadingActive = false
     private referenceOrbitWasReset = false
 
     // ── Deferred reference switch state ─────────────────────────────
     /** True when a new reference is being accumulated (worker re-anchored, waiting for enough orbit). */
-    private pendingRefActive = false
+    pendingRefActive = false
     /** Reference origin of the pending (accumulated) reference. */
     private pendingRefCx = ''
     private pendingRefCy = ''
     /** Accumulated orbit data for the pending reference (Float32Array, 4 floats per step). */
     private pendingRefOrbitBuffer: Float32Array<ArrayBuffer> | null = null
     /** Total step count accumulated. */
-    private pendingRefOrbitLen = 0
+    pendingRefOrbitLen = 0
     /** Max iterations at the time the accumulation started. */
-    private pendingRefMaxIterations = 0
+    pendingRefMaxIterations = 0
     /** Accumulated BLA data for the pending reference (null if not yet received or in perturbation mode). */
     private pendingRefBlaSteps: Float32Array<ArrayBuffer> | null = null
     private pendingRefBlaLevels: Uint32Array<ArrayBuffer> | null = null
@@ -888,7 +890,10 @@ export class Engine {
         this.currentBlaLevelCount = message.levelCount
         this.referenceBlaReadyMaxIterations = message.maxIterations
         this.isReferenceValidating = false
-        this.clearHistoryNextFrame = true
+        // BLA is a pure acceleration of the same perturbation result, so do not
+        // clear history when it arrives: already-computed pixels stay valid and
+        // continuations simply start using BLA. Clearing here caused a visible
+        // render cut (black screen) each time the BLA table was delivered.
         this.needRender = true
         this.invalidateCounterReadback()
     }
@@ -1632,6 +1637,8 @@ export class Engine {
         this.time += delta
         this.lastUpdateTime = now
 
+        this.debugShadingActive = renderOptions.debugShading
+
         if (this.pendingRefReady) {
             this.applyPendingReferenceSwitch()
             return
@@ -1936,6 +1943,7 @@ export class Engine {
         const scaleParts = frexpFloat32(computeScale)
         const expScale = scaleParts.exponent
         const deep = expScale <= DEEP_EXP_THRESHOLD
+        this.floatExpActive = deep
         // cx/cy mantissas re-based onto the shared scale exponent. Decomposing
         // each component first (rather than dx * 2^-expScale) avoids ever forming
         // a huge/overflowing power and handles a zero component cleanly. Since

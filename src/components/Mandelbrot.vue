@@ -15,6 +15,10 @@ let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
 
+const refPixelX = ref<number | null>(null);
+const refPixelY = ref<number | null>(null);
+const refOnScreen = ref<boolean>(false);
+
 function isValidDecimal(s: unknown): boolean {
   if (typeof s !== 'string') return false;
   const trimmed = s.trim();
@@ -253,7 +257,39 @@ async function draw() {
     )
     await engine.render()
 
+    if (props.debugShading && navigator && canvasRef.value) {
+      const refs = navigator.get_reference_params() as [string, string];
+      if (refs && refs.length >= 2) {
+        const [refCx, refCy] = refs;
+        const cw = canvasRef.value.width;
+        const ch = canvasRef.value.height;
+        const coords = navigator.coordinate_to_pixel(refCx, refCy, cw, ch);
+        if (coords && coords.length === 2) {
+          const clientX = coords[0] * (canvasRef.value.clientWidth / cw);
+          const clientY = coords[1] * (canvasRef.value.clientHeight / ch);
+          refPixelX.value = clientX;
+          refPixelY.value = clientY;
+          refOnScreen.value = clientX >= 0 && clientX <= canvasRef.value.clientWidth &&
+                             clientY >= 0 && clientY <= canvasRef.value.clientHeight;
+        } else {
+          refOnScreen.value = false;
+        }
+      } else {
+        refOnScreen.value = false;
+      }
+    } else {
+      refOnScreen.value = false;
+    }
 }
+
+watch(
+  () => props.debugShading,
+  (val) => {
+    if (val && engine && !engine.isRendering) {
+      draw();
+    }
+  }
+);
 
 async function initWebGPU() {
   if (!canvasRef.value) return;
@@ -394,6 +430,15 @@ defineExpose({
       <div class="debug-legend-item debug-legend-bottom-left">Gradient du relief</div>
       <div class="debug-legend-item debug-legend-bottom-right">Angle de la dérivée</div>
     </div>
+    <!-- Target marker for the reference point in debug mode -->
+    <div
+      v-if="props.debugShading && refOnScreen && refPixelX !== null && refPixelY !== null"
+      class="debug-ref-marker"
+      :style="{ left: refPixelX + 'px', top: refPixelY + 'px' }"
+    >
+      <div class="debug-ref-crosshair"></div>
+      <div class="debug-ref-label">Réf</div>
+    </div>
   </div>
 </template>
 
@@ -435,4 +480,65 @@ canvas {
 .debug-legend-top-right { top: 0.75rem; right: 0.75rem; }
 .debug-legend-bottom-left { left: 0.75rem; bottom: 0.75rem; }
 .debug-legend-bottom-right { right: 0.75rem; bottom: 0.75rem; }
+
+.debug-ref-marker {
+  position: absolute;
+  width: 0;
+  height: 0;
+  pointer-events: none;
+  z-index: 10;
+}
+
+.debug-ref-crosshair {
+  position: absolute;
+  top: 0;
+  left: 0;
+  transform: translate(-50%, -50%);
+  width: 20px;
+  height: 20px;
+  border: 1.5px solid var(--magenta, #ff007f);
+  border-radius: 50%;
+  box-shadow: 0 0 8px rgba(255, 0, 127, 0.6);
+}
+
+.debug-ref-crosshair::before,
+.debug-ref-crosshair::after {
+  content: '';
+  position: absolute;
+  background: var(--magenta, #ff007f);
+}
+
+/* Horizontal line */
+.debug-ref-crosshair::before {
+  top: 9px;
+  left: -6px;
+  width: 32px;
+  height: 1.5px;
+}
+
+/* Vertical line */
+.debug-ref-crosshair::after {
+  left: 9px;
+  top: -6px;
+  width: 1.5px;
+  height: 32px;
+}
+
+.debug-ref-label {
+  position: absolute;
+  top: 18px;
+  left: 0;
+  transform: translateX(-50%);
+  background: rgba(10, 10, 20, 0.75);
+  color: var(--magenta, #ff007f);
+  font-family: var(--mono, monospace);
+  font-size: 10px;
+  font-weight: 700;
+  padding: 2px 6px;
+  border-radius: 4px;
+  border: 1px solid rgba(255, 0, 127, 0.3);
+  backdrop-filter: blur(4px);
+  text-shadow: 0 1px 2px black;
+  white-space: nowrap;
+}
 </style>
