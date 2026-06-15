@@ -49,7 +49,14 @@ watch(
     // Évite les appels inutiles si rien n'a vraiment changé
     if (nextCx !== prevCx || nextCy !== prevCy) {
       if (isValidDecimal(nextCx) && isValidDecimal(nextCy)) {
+        // isUpdating is false here, so this centre change came from the parent
+        // model (preset load, manual entry) — a discontinuous teleport, not the
+        // draw loop. Cancel any in-flight travel transition (else step() would
+        // keep interpolating over the new params), then force a fresh reference
+        // at the new centre instead of drifting against the old far reference.
+        navigator.cancel_transition();
         navigator.origin(nextCx, nextCy);
+        engine?.resetReference(nextCx, nextCy);
       }
     }
     if (nextScale !== prevScale) {
@@ -420,6 +427,21 @@ defineExpose({
   rotate: (da: number) => navigator?.rotate(da),
   angle: (a: number) => navigator?.angle(a),
   zoom: (f: number) => navigator?.zoom(f),
+  // Snap the navigator exactly onto a target and force a fresh reference orbit.
+  // Used when a "travel to preset" animation completes: the travel finalises
+  // cx/cy/scale through the draw loop (isUpdating, which the param watcher
+  // ignores), so the reference is never hard-reset at the deep target and the
+  // GPU keeps a stale/lagging reference → garbage until a manual reload. This
+  // reproduces the cold-start state: transition cancelled, centre/scale snapped,
+  // reference re-anchored and recomputed at the exact target.
+  resetReferenceTo: (cx: string, cy: string, scaleStr: string, angleVal: number) => {
+    if (!navigator || !engine) return;
+    navigator.cancel_transition();
+    navigator.origin(cx, cy);
+    navigator.scale(scaleStr);
+    navigator.angle(angleVal);
+    engine.resetReference(cx, cy);
+  },
   step: () => {
     if (!navigator) return;
     const canvas = canvasRef.value;

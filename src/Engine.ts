@@ -679,6 +679,26 @@ export class Engine {
         this.referenceJobId++
     }
 
+    /**
+     * Force a fresh reference orbit at the next update(), re-anchored at the new
+     * view centre. Use for discontinuous teleports (preset load, manual coordinate
+     * entry). The incremental updateView path keeps the old, now far-away reference
+     * until the worker finishes recomputing and the pending-switch fires; meanwhile
+     * dx/dy is huge and the snapped centre is corrupted through f64, so the deep
+     * path renders garbage until a manual page reload. Re-anchoring the shared front
+     * navigator now (dx/dy ≈ 0 immediately) and clearing the view key — so the next
+     * update() runs resetReferenceJob (a clean worker reset at the new centre) instead
+     * of updateView — reproduces the known-good reload behaviour without the reload.
+     */
+    resetReference(cx: string, cy: string) {
+        if (this.mandelbrotNavigator) {
+            this.mandelbrotNavigator.reference_origin(cx, cy)
+        }
+        this.discardPendingReference()
+        this.referenceViewKey = ''
+        this.needRender = true
+    }
+
     private resetReferenceJob(mandelbrot: Mandelbrot, scale: number, maxIterations: number) {
         this.discardPendingReference()
         this.markReferenceReset(maxIterations)

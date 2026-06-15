@@ -1270,7 +1270,19 @@ function tickTravelAnimation() {
     mandelbrotParams.value.paletteOffset = target.paletteOffset ?? 0;
     mandelbrotParams.value.paletteMirror = target.paletteMirror ?? false;
     mandelbrotParams.value.textureMapping = target.textureMapping;
-    
+
+    // The travel finalises cx/cy/scale through the navigator's transition in the
+    // draw loop (isUpdating), which the param watcher ignores — so the reference
+    // is never hard-reset at the deep target and the GPU keeps a stale reference
+    // (garbage until reload). Snap onto the exact target and force a fresh
+    // reference, reproducing the cold-start (reload) state.
+    mandelbrotCtrlRef.value?.resetReferenceTo(
+      target.cx,
+      target.cy,
+      target.scale,
+      target.angle ?? mandelbrotParams.value.angle,
+    );
+
     travelTargetPreset = null;
     travelAnimationId = null;
     isPresetTraveling.value = false;
