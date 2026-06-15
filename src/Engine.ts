@@ -384,6 +384,8 @@ export class Engine {
     private refinementWasGated = false
     private _fpsFrameCount = 0
     private _fpsLastTime = 0
+    /** Wall-clock time of the last frame actually stepped + rendered. */
+    private _lastDrawMs = 0
 
     // tailles
     neutralSize = 0 // coté en pixels de la texture neutre (D)
@@ -2642,7 +2644,29 @@ export class Engine {
     }
 
     private async _loop() {
-        if (this._drawFn) {
+        if (!this._drawFn) {
+            this._rafId = null
+            return
+        }
+
+        // Pace stepping + rendering to the *real* GPU frame time rather than the
+        // raw rAF interval. Rendering is fire-and-forget (queue.submit returns
+        // before the GPU is done — see scheduleGpuTiming), so rAF keeps firing at
+        // ~display rate even when a deep-zoom frame takes hundreds of ms on the
+        // GPU. Without this gate the navigator would advance ~60×/s while the
+        // screen only updates a handful of times per second, so the animation
+        // (zoom in particular) wouldn't track render time and the displayed image
+        // would jump. By only invoking draw() once a real frame's worth of time
+        // has elapsed, navigator.step()'s own Date.now() delta_time becomes the
+        // true render cadence → uniform, render-time-dependent zoom, and no
+        // backlog of un-displayable frames piling up in the queue.
+        // smoothedGpuTimeMs == 0 until the first frame is timed (no gating then);
+        // cap at 500 ms so we stay responsive if a frame spikes.
+        const now = performance.now()
+        const minInterval = Math.min(this.smoothedGpuTimeMs, 500)
+        if (now - this._lastDrawMs >= minInterval) {
+            this._lastDrawMs = now
+
             const active = this.needsMoreFrames()
             this.isRendering = active
 
@@ -2652,20 +2676,17 @@ export class Engine {
             if (active) {
                 this._fpsFrameCount++
             }
-            const now = performance.now()
-            if (this._fpsLastTime === 0) this._fpsLastTime = now
-            const elapsed = now - this._fpsLastTime
+            const fpsNow = performance.now()
+            if (this._fpsLastTime === 0) this._fpsLastTime = fpsNow
+            const elapsed = fpsNow - this._fpsLastTime
             if (elapsed >= 1000) {
                 this.fps = Math.round((this._fpsFrameCount * 1000) / elapsed)
                 this._fpsFrameCount = 0
-                this._fpsLastTime = now
+                this._fpsLastTime = fpsNow
             }
-
-            this._rafId = requestAnimationFrame(async () => this._loop())
-        } else {
-            this._rafId = null
-            return
         }
+
+        this._rafId = requestAnimationFrame(async () => this._loop())
     }
 
     /**
