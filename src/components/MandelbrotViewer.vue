@@ -499,6 +499,8 @@ function toggleTab(tabKey: string) {
     openTabs.delete(tabKey);
     delete popupPositions[tabKey];
   } else {
+    // Close any other open settings window first so only one is open at a time
+    closeAllSettings();
     openTabs.add(tabKey);
     // Initialize centered position for new popup
     popupPositions[tabKey] = { x: -1, y: -1 };
@@ -1303,6 +1305,7 @@ function getApproximateLog10(scaleStr: string): number {
 }
 
 function startTravelToPreset(preset: PresetRecord) {
+  console.log('[REF] startTravelToPreset', String(preset.value.cx).slice(0, 14), 'scale', preset.value.scale);
   const ctrl = mandelbrotCtrlRef.value;
   if (!ctrl) return;
   const navigator = ctrl.getNavigator();

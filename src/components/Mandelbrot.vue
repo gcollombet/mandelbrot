@@ -41,6 +41,9 @@ const angle = defineModel<number>('angle', { default: 0 })
 watch(
   () => [cx.value, cy.value, scale.value, angle.value] as const,
   ([nextCx, nextCy, nextScale, nextAngle], [prevCx, prevCy, prevScale, prevAngle]) => {
+    if ((nextCx !== prevCx || nextCy !== prevCy)) {
+      console.log('[REF] Mandelbrot.vue watcher cx change', String(nextCx).slice(0, 14), 'isUpdating', isUpdating);
+    }
     if (isUpdating) {
       return;
     }
@@ -435,6 +438,7 @@ defineExpose({
   // reproduces the cold-start state: transition cancelled, centre/scale snapped,
   // reference re-anchored and recomputed at the exact target.
   resetReferenceTo: (cx: string, cy: string, scaleStr: string, angleVal: number) => {
+    console.log('[REF] resetReferenceTo (travel done)', cx.slice(0, 14), 'scale', scaleStr, 'engine?', !!engine, 'nav?', !!navigator);
     if (!navigator || !engine) return;
     navigator.cancel_transition();
     navigator.origin(cx, cy);

@@ -137,6 +137,7 @@ function applyApproximationMode(mode: ApproximationMode) {
 }
 
 function resetNavigator(message: ResetMessage) {
+    console.log('[REF worker] RESET (fresh navigator)', message.cx.slice(0, 14), 'scale', message.scale.slice(0, 10))
     navigator?.free()
     navigator = new MandelbrotNavigator(
         message.cx,
@@ -235,10 +236,14 @@ async function runComputeLoop(jobId: number) {
             needsReferenceValidation = false
             const orbit = copyOrbitSlice(info.ptr, info.offset, info.count)
             const [referenceCx, referenceCy] = navigator.get_reference_params()
+            if (info.offset === 0) {
+                console.log('[REF worker] orbit (re)start ref=', referenceCx.slice(0, 14), 'prevRef=', currentReferenceCx.slice(0, 14) || '(none)')
+            }
             if (
                 currentReferenceCx
                 && (referenceCx !== currentReferenceCx || referenceCy !== currentReferenceCy)
             ) {
+                console.log('[REF worker] -> referenceReset (recenter) newRef=', referenceCx.slice(0, 14))
                 lastBlaMaxIterations = 0
                 postResponse({
                     type: 'referenceReset',
@@ -290,6 +295,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                 break
             case 'updateView':
                 if (navigator && message.jobId === activeJobId) {
+                    console.log('[REF worker] updateView (reuse navigator)', message.cx.slice(0, 14), 'scale', message.scale.slice(0, 10))
                     navigator.origin(message.cx, message.cy)
                     navigator.scale(message.scale)
                     navigator.angle(message.angle)

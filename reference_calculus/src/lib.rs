@@ -17,18 +17,6 @@ fn dbig_to_f64(bf: &DBig) -> f64 {
     bf.to_string().parse::<f64>().unwrap_or(0.0)
 }
 
-// Split a high-precision value into a double-float (hi, lo) pair of f32s: hi is
-// the nearest f32, lo captures the residual (z - hi). Together they carry ~2x
-// the significand (~1e-14) versus a single f32 (~1e-7). Used to store the
-// reference orbit z_n accurately enough for deep-zoom perturbation, where the
-// f32 truncation of z_n is the dominant error.
-fn dbig_to_f32_hilo(bf: &DBig) -> (f32, f32) {
-    let hi = dbig_to_f32(bf);
-    let hi_big = DBig::from_str(&hi.to_string()).unwrap_or_else(|_| dbig_i(0));
-    let lo = dbig_to_f32(&(bf - &hi_big));
-    (hi, lo)
-}
-
 // Significant-bit budget needed to resolve detail at a given view scale: roughly
 // -log2(scale) plus a margin for the reference-orbit accumulation. dashu rounds
 // every operation to the operands' precision and never grows it, so without this
@@ -79,11 +67,11 @@ fn exp_f64(value: f64) -> f64 {
 pub struct MandelbrotStep {
     pub zx: f32,
     pub zy: f32,
-    // Low parts of the double-float reference orbit z_n (zx = hi, zx_lo = lo).
-    // (Reuses the slots that previously held the orbit derivative, which was
-    // computed but never consumed by the shaders.)
-    pub zx_lo: f32,
-    pub zy_lo: f32,
+    // Padding to keep the 16-byte stride the GPU orbit buffer expects; the shader
+    // reads only zx/zy. These slots previously held the orbit derivative, then a
+    // double-float low word of z_n — both unused by the shaders, so inert padding.
+    pub pad0: f32,
+    pub pad1: f32,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -320,6 +308,9 @@ impl MandelbrotNavigator {
             
             self.cx = &self.reference_cx + &snapped_rx_big * scale;
             self.cy = &self.reference_cy + &snapped_ry_big * scale;
+            // Sync cx_continuous so subsequent steps start from an exact pixel boundary.
+            self.cx_continuous = self.cx.clone();
+            self.cy_continuous = self.cy.clone();
         } else {
             self.cx = self.cx_continuous.clone();
             self.cy = self.cy_continuous.clone();
@@ -585,6 +576,13 @@ impl MandelbrotNavigator {
                 
                 self.cx = &self.reference_cx + &snapped_rx_big * &self.scale;
                 self.cy = &self.reference_cy + &snapped_ry_big * &self.scale;
+                // Keep cx_continuous in sync with the snapped position so that
+                // sub-pixel drift doesn't accumulate across frames.  Without
+                // this, the sub-pixel fraction in cx_continuous causes the
+                // first step after a rest to snap to the wrong pixel, producing
+                // a 1-pixel misalignment at the very start of each translation.
+                self.cx_continuous = self.cx.clone();
+                self.cy_continuous = self.cy.clone();
             } else {
                 self.cx = self.cx_continuous.clone();
                 self.cy = self.cy_continuous.clone();
@@ -671,9 +669,7 @@ impl MandelbrotNavigator {
         let reference_cy = &self.reference_cy;
 
         if self.result.is_empty() {
-            let (zx_hi, zx_lo) = dbig_to_f32_hilo(&zx);
-            let (zy_hi, zy_lo) = dbig_to_f32_hilo(&zy);
-            self.result.push(MandelbrotStep { zx: zx_hi, zy: zy_hi, zx_lo, zy_lo });
+            self.result.push(MandelbrotStep { zx: dbig_to_f32(&zx), zy: dbig_to_f32(&zy), pad0: 0.0, pad1: 0.0 });
         }
 
         while self.last_iter < total_iter {
@@ -690,9 +686,7 @@ impl MandelbrotNavigator {
                 zy = zy_new;
             }
             self.last_iter += 1;
-            let (zx_hi, zx_lo) = dbig_to_f32_hilo(&zx);
-            let (zy_hi, zy_lo) = dbig_to_f32_hilo(&zy);
-            self.result.push(MandelbrotStep { zx: zx_hi, zy: zy_hi, zx_lo, zy_lo });
+            self.result.push(MandelbrotStep { zx: dbig_to_f32(&zx), zy: dbig_to_f32(&zy), pad0: 0.0, pad1: 0.0 });
         }
 
         // Stocker la dernière valeur exacte
@@ -758,10 +752,8 @@ impl MandelbrotNavigator {
         let mut previous_level: Vec<BlaF64> = Vec::with_capacity(orbit_len - 1);
         for start in 1..orbit_len {
             let z = self.result[start];
-            // Use the double-float orbit (hi + lo) so the BLA coefficient is as
-            // accurate as the reference, not just f32.
-            let zx = z.zx as f64 + z.zx_lo as f64;
-            let zy = z.zy as f64 + z.zy_lo as f64;
+            let zx = z.zx as f64;
+            let zy = z.zy as f64;
             let alpha = epsilon * (zx * zx + zy * zy).sqrt();
             previous_level.push(BlaF64 { ax: 2.0 * zx, ay: 2.0 * zy, bx: 1.0, by: 0.0, alpha, beta: 0.0 });
         }

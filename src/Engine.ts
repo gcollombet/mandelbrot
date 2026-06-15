@@ -461,6 +461,8 @@ export class Engine {
 
     // flag pour indiquer si l'historique doit être effacé au prochain rendu
     clearHistoryNextFrame = false
+    // true when the previous rendered frame had a scale change (used to detect small-zoom stop)
+    _prevFrameScaleChanged = false
 
     // Cumulative texel shift since last clearHistory – used to keep the
     // sentinel grid aligned after translation reprojection (Option B).
@@ -693,6 +695,7 @@ export class Engine {
      * of updateView — reproduces the known-good reload behaviour without the reload.
      */
     resetReference(cx: string, cy: string) {
+        console.log('[REF] Engine.resetReference', cx.slice(0, 14), '| prevKey?', this.referenceViewKey ? 'set' : 'empty')
         if (this.mandelbrotNavigator) {
             this.mandelbrotNavigator.reference_origin(cx, cy)
         }
@@ -702,6 +705,7 @@ export class Engine {
     }
 
     private resetReferenceJob(mandelbrot: Mandelbrot, scale: number, maxIterations: number) {
+        console.log('[REF] resetReferenceJob -> worker reset', mandelbrot.cx.slice(0, 14), 'scale', scale, 'maxIter', maxIterations)
         this.discardPendingReference()
         this.markReferenceReset(maxIterations)
         this.referenceBlaReadyMaxIterations = 0
@@ -731,6 +735,7 @@ export class Engine {
         if (nextKey === this.referenceViewKey) {
             return
         }
+        console.log('[REF] syncReferenceWorkerView -> updateView', mandelbrot.cx.slice(0, 14), 'scale', scaleString)
         this.discardPendingReference()
         this.referenceViewKey = nextKey
         this.isReferenceValidating = true
@@ -1786,6 +1791,18 @@ export class Engine {
                 : { state: this.zoomState, effects: [] as import('./zoomState').ZoomEffect[] }
             this.zoomState = state
 
+            // Small-zoom stop: scale just stabilised while the zoom state machine
+            // stayed in 'idle' (zoom factor was too small to trigger reprojecting).
+            // The previous frame had an un-snapped cx (is_zooming=true in Rust),
+            // so prevFrameMandelbrot.dx is fractional.  The current frame snaps cx
+            // to an integer pixel, making the delta non-integer → 1-frame sub-pixel
+            // misalignment.  Force a history clear so shiftTexX is 0 for this frame
+            // and the texture rebuilds from the snapped position.
+            if (!wasZoomActive && this._prevFrameScaleChanged && !scaleChanged) {
+                this.clearHistoryNextFrame = true
+            }
+            this._prevFrameScaleChanged = !!scaleChanged
+
             for (const effect of effects) {
                 switch (effect.type) {
                     case 'copyResolvedToFrozen':
@@ -1995,6 +2012,7 @@ export class Engine {
         const cyMant = cyParts.mantissa === 0 ? 0 : Math.fround(cyParts.mantissa * 2 ** (cyParts.exponent - expScale))
 
         if (!this.referenceViewKey) {
+            console.log('[REF] update: reset branch (key empty) | deep', deep, 'expScale', expScale, 'mode', this.approximationMode)
             this.resetReferenceJob(mandelbrot, computeScale, maxIterations)
         }
         this.syncReferenceWorkerView(mandelbrot, computeScale, maxIterations)
