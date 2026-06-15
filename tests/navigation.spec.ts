@@ -150,13 +150,22 @@ test.describe("Mandelbrot navigation", () => {
     ).toHaveClass(/is-active/);
     await expect(page.locator(".settings-popup")).toHaveCount(1);
 
-    // 'c' opens Animation too (multi-window).
+    // 'c' opens Animation and closes Presets.
     await page.keyboard.press("c");
-    await expect(page.locator(".settings-popup")).toHaveCount(2);
-
-    // 'x' again closes Presets.
-    await page.keyboard.press("x");
+    await expect(
+      page.locator(".top-tab-btn", { hasText: "Presets" }),
+    ).not.toHaveClass(/is-active/);
+    await expect(
+      page.locator(".top-tab-btn", { hasText: "Animation" }),
+    ).toHaveClass(/is-active/);
     await expect(page.locator(".settings-popup")).toHaveCount(1);
+
+    // 'c' again closes Animation.
+    await page.keyboard.press("c");
+    await expect(
+      page.locator(".top-tab-btn", { hasText: "Animation" }),
+    ).not.toHaveClass(/is-active/);
+    await expect(page.locator(".settings-popup")).toHaveCount(0);
   });
 
   test("Animation panel owns Drift controls", async ({ page }) => {
@@ -377,19 +386,20 @@ test.describe("Mandelbrot navigation", () => {
   // 12. Multiple settings popups (multi-window)
   // -----------------------------------------------------------------------
 
-  test("multiple settings popups can be open simultaneously", async ({
+  test("only one settings popup can be open at a time", async ({
     page,
   }) => {
     await page.locator(".top-tab-btn", { hasText: "Navigation" }).click();
     await page.locator(".top-tab-btn", { hasText: "Palettes" }).click();
 
     const popups = page.locator(".settings-popup");
-    await expect(popups).toHaveCount(2);
+    await expect(popups).toHaveCount(1);
+    await expect(popups.first().locator(".settings-popup-title")).toHaveText("Palettes");
 
-    // Close one via the X button.
-    const closeBtn = popups.first().locator(".delete");
+    // Close it via the close/delete button.
+    const closeBtn = popups.first().locator("button.close, button.delete, .close, .delete").first();
     await closeBtn.click({ force: true });
-    await expect(page.locator(".settings-popup")).toHaveCount(1);
+    await expect(page.locator(".settings-popup")).toHaveCount(0);
   });
 
   // -----------------------------------------------------------------------
