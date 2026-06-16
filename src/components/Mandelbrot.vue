@@ -14,6 +14,7 @@ let canvas: HTMLCanvasElement | null = null;
 let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
+let _lastScaleLog = '';
 
 const refPixelX = ref<number | null>(null);
 const refPixelY = ref<number | null>(null);
@@ -63,6 +64,7 @@ watch(
       }
     }
     if (nextScale !== prevScale) {
+      console.log('[REF] watcher scale change', String(nextScale).slice(0, 14), 'type', typeof nextScale, 'valid', isValidDecimal(nextScale));
       if (isValidDecimal(nextScale)) {
         navigator.scale(nextScale);
       }
@@ -212,6 +214,10 @@ async function draw() {
     if (!step) return;
     const [dx, dy] = step as [string, string];
     const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
+    if (scale_string !== _lastScaleLog) {
+      _lastScaleLog = scale_string;
+      console.log('[REF] draw scale', scale_string, 'dx', String(dx).slice(0, 12), 'cx', String(cx_string).slice(0, 14));
+    }
     isUpdating = true;
     cx.value = cx_string;
     cy.value = cy_string;
@@ -429,7 +435,7 @@ defineExpose({
   },
   rotate: (da: number) => navigator?.rotate(da),
   angle: (a: number) => navigator?.angle(a),
-  zoom: (f: number) => navigator?.zoom(f),
+  zoom: (f: number) => { console.log('[REF] zoom() called factor', f); navigator?.zoom(f); },
   // Snap the navigator exactly onto a target and force a fresh reference orbit.
   // Used when a "travel to preset" animation completes: the travel finalises
   // cx/cy/scale through the draw loop (isUpdating, which the param watcher

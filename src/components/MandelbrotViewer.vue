@@ -577,6 +577,12 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     triggerQuickSnapshot();
     return;
   }
+  // Trigger idle-time antialiasing accumulation (G — "A" is a pan key).
+  if (key === 'g' && !e.repeat) {
+    e.preventDefault();
+    mandelbrotCtrlRef.value?.getEngine?.()?.triggerAaAccumulation();
+    return;
+  }
   const tab = settingsTabs.value.find(t => t.shortcut === key);
   if (tab && !e.repeat) {
     e.preventDefault();

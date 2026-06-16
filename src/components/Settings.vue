@@ -2686,6 +2686,11 @@ async function importSkyboxTexture(event: Event) {
         <span class="gfx-slider-value">{{ (model.epsilon ?? 1e-8).toExponential(1) }}</span>
       </div>
       <div class="gfx-slider-row">
+        <span class="gfx-slider-label" title="Samples accumulated when rendering in high quality (press G when idle)">Antialiasing</span>
+        <input class="slider" type="range" min="1" max="16" step="1" v-model.number="model.antialiasLevel" aria-label="Antialiasing samples" />
+        <span class="gfx-slider-value">{{ (model.antialiasLevel ?? 1) > 1 ? model.antialiasLevel + '×' : 'Off' }}</span>
+      </div>
+      <div class="gfx-slider-row">
         <span class="gfx-slider-label">Zoom brush step</span>
         <input class="slider" type="range" min="0" max="6" step="1" v-model.number="zoomMinBrushStepIndex" aria-label="Zoom brush step" />
         <span class="gfx-slider-value">{{ model.zoomMinBrushStep }}</span>

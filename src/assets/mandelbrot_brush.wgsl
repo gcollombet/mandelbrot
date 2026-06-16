@@ -59,8 +59,8 @@ struct Mandelbrot {
   stripeFrequency: f32,
   trackOrbitMetrics: f32,
   scaleExp: f32,        // floatexp deep path: shared base-2 exponent for scale & cx/cy
-  _padding2: f32,
-  _padding3: f32,
+  aaOffsetX: f32,       // sub-pixel AA jitter, neutral-space units (0 = off)
+  aaOffsetY: f32,
 };
 
 // floatexp deep-zoom threshold (base-2 exponent of scale). Below this the shader
@@ -909,7 +909,8 @@ fn cs_main(
 
         if (is_compute_request || needs_continuation) {
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
-          let local_rot = xy_neutral * neutralExtent;
+          // AA sub-pixel jitter (neutral-space units); zero for sample 0 / AA off.
+          let local_rot = xy_neutral * neutralExtent + vec2<f32>(mandelbrot.aaOffsetX, mandelbrot.aaOffsetY);
 
           var result: TexelOut;
           let scaleExp = i32(mandelbrot.scaleExp);

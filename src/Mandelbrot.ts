@@ -89,6 +89,33 @@ export function stripExplorationStateFields<T extends object>(value: T): T {
     return value;
 }
 
+/**
+ * Sub-pixel AA jitter offset for a given sample index.
+ *
+ * Uses the R2 low-discrepancy sequence (plastic constant) for even sample
+ * placement, warped through a tent filter so offsets are importance-sampled
+ * for a tent reconstruction kernel. Output components are in roughly [-1, 1]
+ * (texel units). Sample 0 returns {0, 0} (the unjittered base sample).
+ */
+export function computeAaJitterOffset(sampleIndex: number): { x: number; y: number } {
+    if (sampleIndex <= 0) {
+        return { x: 0, y: 0 };
+    }
+    // Plastic constant: real root of x³ = x + 1.
+    const phi = 1.22074408460575947536;
+    const phi1 = 1 / phi;
+    const phi2 = 1 / (phi * phi);
+    const r2x = (sampleIndex * phi1) % 1;
+    const r2y = (sampleIndex * phi2) % 1;
+    // Tent-filter warp: maps uniform [0,1] → triangular [-1,1] via inverse CDF.
+    const tent = (u: number): number => {
+        const x2 = 2 * u - 1;
+        if (x2 === 0) return 0;
+        return x2 / Math.sqrt(Math.abs(x2)) - Math.sign(x2);
+    };
+    return { x: tent(r2x), y: tent(r2y) };
+}
+
 export function preserveSessionPerformanceFields<T extends Partial<MandelbrotParams>>(
     next: T,
     current: Pick<MandelbrotParams, typeof SESSION_PERFORMANCE_FIELDS[number]>,

@@ -7,6 +7,7 @@ import brushShader from './assets/reproject.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
 import countShader from './assets/count_unfinished.wgsl?raw'
 import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
+import presentShader from './assets/present.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
@@ -22,7 +23,7 @@ import {
 } from './zoomState'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
-import {normalizePowerOfTwoStep} from './Mandelbrot.ts'
+import {normalizePowerOfTwoStep, computeAaJitterOffset} from './Mandelbrot.ts'
 import {
     normalizeTextureMappingConfig,
     textureMappingVariableId,
@@ -328,6 +329,18 @@ export class Engine {
     pipelineColor?: GPURenderPipeline
     bindGroupColor?: GPUBindGroup
 
+    // ── AA accumulation/present resources ─────────────────────────────
+    /** Color pipeline writing linear RGB into accumTexture, replacing (sample 0). */
+    private pipelineColorAccumClear?: GPURenderPipeline
+    /** Color pipeline additively blending linear RGB + alpha into accumTexture (sample >= 1). */
+    private pipelineColorAccum?: GPURenderPipeline
+    /** Present pipeline: accumTexture (linear sum / count) → swapchain (sRGB). */
+    private pipelinePresent?: GPURenderPipeline
+    private bindGroupPresent?: GPUBindGroup
+    /** rgba16float accumulation texture (linear RGB sum in .rgb, sample count in .a). */
+    private accumTexture?: GPUTexture
+    private accumTextureView?: GPUTextureView
+
     // In-place compute path: fused brush+mandelbrot+count working directly on
     // rawTexture (A) for frames without translation/clearHistory.  Replaces the
     // brush render pass, the B→A copy, the mandelbrot render pass and the count
@@ -463,6 +476,19 @@ export class Engine {
     clearHistoryNextFrame = false
     // true when the previous rendered frame had a scale change (used to detect small-zoom stop)
     _prevFrameScaleChanged = false
+
+    // ── Idle-time antialiasing (AA) accumulation state ────────────────
+    /** True while AA accumulation is running (explicitly triggered, idle only). */
+    aaActive = false
+    /** Index of the current AA sample (0 = unjittered base sample). */
+    aaSampleIndex = 0
+    /** How many samples have been composited into the accumulator so far. */
+    aaAccumulatedSamples = 0
+    /** Current sub-pixel jitter offset (neutral-space units), written to uniforms 18/19. */
+    aaOffsetX = 0
+    aaOffsetY = 0
+    /** True for the first frame of a new AA sample (drives the selective reseed). */
+    aaReseedPending = false
 
     // Cumulative texel shift since last clearHistory – used to keep the
     // sentinel grid aligned after translation reprojection (Option B).
@@ -735,7 +761,7 @@ export class Engine {
         if (nextKey === this.referenceViewKey) {
             return
         }
-        console.log('[REF] syncReferenceWorkerView -> updateView', mandelbrot.cx.slice(0, 14), 'scale', scaleString)
+        console.log('[REF] syncReferenceWorkerView -> updateView', mandelbrot.cx.slice(0, 14), 'scale', scaleString, 'dx', mandelbrot.dx, 'dxStr', mandelbrot.dxStr)
         this.discardPendingReference()
         this.referenceViewKey = nextKey
         this.isReferenceValidating = true
@@ -1156,12 +1182,43 @@ export class Engine {
             label: 'Engine RenderPipeline Resolve',
         })
 
+        // Direct path: sRGB straight to the swapchain (fs_main_direct), byte-identical
+        // to the historical behaviour. Used when AA is inactive and for PNG export.
         this.pipelineColor = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
             vertex: { module: moduleColor, entryPoint: 'vs_main' },
-            fragment: { module: moduleColor, entryPoint: 'fs_main', targets: [{ format: this.format }] },
+            fragment: { module: moduleColor, entryPoint: 'fs_main_direct', targets: [{ format: this.format }] },
             primitive: { topology: 'triangle-list' },
-            label: 'Engine RenderPipeline Color',
+            label: 'Engine RenderPipeline Color (direct)',
+        })
+
+        // AA accumulation paths: render linear RGB (fs_main) into the rgba16float
+        // accumulation texture. Clear variant replaces (sample 0); accum variant
+        // additively blends color AND alpha (sample >= 1), so alpha tracks the
+        // per-pixel sample count.
+        this.pipelineColorAccumClear = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
+            vertex: { module: moduleColor, entryPoint: 'vs_main' },
+            fragment: { module: moduleColor, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline ColorAccumClear',
+        })
+        this.pipelineColorAccum = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
+            vertex: { module: moduleColor, entryPoint: 'vs_main' },
+            fragment: {
+                module: moduleColor,
+                entryPoint: 'fs_main',
+                targets: [{
+                    format: 'rgba16float',
+                    blend: {
+                        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    },
+                }],
+            },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline ColorAccum',
         })
 
         // Compute pipeline for counting unfinished pixels
@@ -1217,6 +1274,22 @@ export class Engine {
             label: 'Engine RenderPipeline Merge',
         })
 
+        // ── Present pipeline (accumTexture → swapchain, AA only) ─────────
+        const modulePresent = this.device.createShaderModule({ code: presentShader, label: 'Engine ShaderModule Present' })
+        const layoutPresent = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+            ],
+            label: 'Engine BindGroupLayout Present',
+        })
+        this.pipelinePresent = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutPresent] }),
+            vertex: { module: modulePresent, entryPoint: 'vs_main' },
+            fragment: { module: modulePresent, entryPoint: 'fs_main', targets: [{ format: this.format }] },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline Present',
+        })
+
         // bind groups seront (ré)créés dans resize car dépend des textures
         this.bindGroupBrush = undefined
         this.bindGroupMandelbrot = undefined
@@ -1226,6 +1299,7 @@ export class Engine {
         this.counterBindGroup = undefined
         this.bindGroupMerge = undefined
         this.bindGroupInplace = undefined
+        this.bindGroupPresent = undefined
     }
 
     private rebuildInplaceBindGroup() {
@@ -1464,6 +1538,7 @@ export class Engine {
         this.rawBrushTexture?.destroy?.()
         this.resolvedTexture?.destroy?.()
         this.frozenTexture?.destroy?.()
+        this.accumTexture?.destroy?.()
 
         const layerCount = LAYER_COUNT
 
@@ -1518,6 +1593,25 @@ export class Engine {
         this.frozenTexture = frozenResult.texture
         this.frozenArrayView = frozenResult.arrayView
         this.frozenLayerViews = frozenResult.layerViews
+
+        // AA accumulation texture: screen-resolution (matches the color pass output),
+        // rgba16float to hold the linear-RGB sum + per-pixel sample count in alpha.
+        this.accumTexture = this.device.createTexture({
+            size: { width: this.width, height: this.height, depthOrArrayLayers: 1 },
+            format: 'rgba16float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'Engine AccumTexture',
+        })
+        this.accumTextureView = this.accumTexture.createView({ label: 'Engine AccumTexture View' })
+        if (this.pipelinePresent) {
+            this.bindGroupPresent = this.device.createBindGroup({
+                layout: this.pipelinePresent.getBindGroupLayout(0),
+                entries: [{ binding: 0, resource: this.accumTextureView }],
+                label: 'Engine BindGroup Present',
+            })
+        }
+        // Resetting textures invalidates any in-flight AA accumulation.
+        this.resetAaState()
 
         // Reset zoom reprojection state on resize
         this.zoomState = resetZoomState()
@@ -1710,6 +1804,10 @@ export class Engine {
             && orbitMetricsEnabled !== this.previousOrbitMetricsEnabled
         const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
         this.needRender = this.needRender || mandelbrotChanged || renderOptionsChanged
+        // Any navigation/parameter change aborts AA → instant single-sample fallback.
+        if (this.aaActive && (mandelbrotChanged || renderOptionsChanged)) {
+            this.resetAaState()
+        }
         if (mandelbrotChanged || activeStripeFrequencyChanged || orbitMetricsChanged) {
             this.invalidateCounterReadback() // unknown — new fractal params, GPU counter not read yet
         }
@@ -2012,7 +2110,7 @@ export class Engine {
         const cyMant = cyParts.mantissa === 0 ? 0 : Math.fround(cyParts.mantissa * 2 ** (cyParts.exponent - expScale))
 
         if (!this.referenceViewKey) {
-            console.log('[REF] update: reset branch (key empty) | deep', deep, 'expScale', expScale, 'mode', this.approximationMode)
+            console.log('[REF] update: reset branch (key empty) | deep', deep, 'expScale', expScale, 'mode', this.approximationMode, 'dx', mandelbrot.dx, 'dxStr', mandelbrot.dxStr)
             this.resetReferenceJob(mandelbrot, computeScale, maxIterations)
         }
         this.syncReferenceWorkerView(mandelbrot, computeScale, maxIterations)
@@ -2061,8 +2159,8 @@ export class Engine {
             renderOptions.stripeFrequency,
             orbitMetricsEnabled ? 1 : 0,
             expScale,  // 17: shared base-2 exponent for scale & cx/cy (fe deep path)
-            0,
-            0,
+            this.aaOffsetX,  // 18: AA sub-pixel jitter X (neutral-space units)
+            this.aaOffsetY,  // 19: AA sub-pixel jitter Y
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)
 
@@ -2082,6 +2180,33 @@ export class Engine {
 
         this.previousMandelbrot = structuredClone(mandelbrot) // conserve current pour utilisation future
         this.previousRenderOptions = structuredClone(renderOptions)
+    }
+
+    /** Clear all AA accumulation state (idle, single-sample). */
+    resetAaState() {
+        this.aaActive = false
+        this.aaSampleIndex = 0
+        this.aaAccumulatedSamples = 0
+        this.aaOffsetX = 0
+        this.aaOffsetY = 0
+        this.aaReseedPending = false
+    }
+
+    /**
+     * Explicitly start idle-time AA accumulation. Intended to be called when the
+     * view is fully converged and idle (from a UI button / shortcut). Accumulation
+     * never starts automatically; any navigation/param change aborts it.
+     */
+    triggerAaAccumulation() {
+        this.resetAaState()
+        this.aaActive = true
+        this.needRender = true
+    }
+
+    /** Readable AA progress for the UI ("AA: done/total"). */
+    get aaProgress(): { active: boolean; done: number; total: number } {
+        const total = Math.max(1, Math.round(this.previousRenderOptions?.antialiasLevel ?? 1))
+        return { active: this.aaActive, done: this.aaAccumulatedSamples, total }
     }
 
     async render() {
@@ -2447,6 +2572,19 @@ export class Engine {
             && this.counterSampleFrame >= this.lastRawMutationFrame
         this.resolveSkipped = skipResolve
 
+        // Fully converged: safe to capture an AA sample. No pending history clear,
+        // no freeze/merge, not zooming, orbit complete, zero unfinished/active
+        // pixels, and the latest pixel counts have been read back.
+        const fullyConverged =
+            !this.clearHistoryNextFrame
+            && !this.needFreezeSnapshot
+            && !this.needMergeSnapshot
+            && !isZoomActive(this.zoomState)
+            && !this.orbitIncomplete
+            && this.unfinishedPixelCount === 0
+            && this.activePixelCount === 0
+            && !this.hasPendingCounterReadbackForCurrentGeneration()
+
         if (!skipResolve) {
             // Pre-fill resolved with A so resolve.wgsl can discard pass-through
             // pixels and only write sentinels / unfinished anchors that need snapping.
@@ -2466,21 +2604,77 @@ export class Engine {
             rpassResolve.end()
         }
 
-        // Pass 3: colorisation vers écran (resolved -> swapchain)
-        const colorBindGroup = skipResolve ? this.bindGroupColorRaw! : this.bindGroupColor
+        // ── Pass 3 (color) + Pass 4 (AA present) ──────────────────────────
+        const colorBindGroup = (skipResolve ? this.bindGroupColorRaw! : this.bindGroupColor)!
         const swapView = this.ctx.getCurrentTexture().createView()
-        const rpassColor = commandEncoder.beginRenderPass({
-            colorAttachments: [{
-                view: swapView,
-                clearValue: { r: 1, g: 1, b: 1, a: 1 },
-                loadOp: 'clear',
-                storeOp: 'store',
-            }],
-        })
-        rpassColor.setPipeline(this.pipelineColor)
-        rpassColor.setBindGroup(0, colorBindGroup)
-        rpassColor.draw(6, 1, 0, 0)
-        rpassColor.end()
+
+        const antialiasLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
+        const neutralExtentColor = Math.sqrt(aspect * aspect + 1.0)
+
+        // AA with level <= 1 is a no-op: deactivate so the loop can idle.
+        if (this.aaActive && antialiasLevel <= 1) {
+            this.resetAaState()
+        }
+
+        // Capture a new AA sample only on a fully-converged frame, so partial
+        // mid-reconverge frames never pollute the accumulator.
+        const aaCompositeThisFrame =
+            this.aaActive
+            && fullyConverged
+            && this.aaAccumulatedSamples < antialiasLevel
+            && !!this.accumTextureView
+            && !!this.pipelineColorAccum
+            && !!this.pipelineColorAccumClear
+        // Show the accumulator (running average) once we have >= 1 captured sample
+        // (or are capturing one now); otherwise fall back to a direct render.
+        const aaShowAccum = this.aaActive && (this.aaAccumulatedSamples >= 1 || aaCompositeThisFrame)
+
+        if (aaCompositeThisFrame) {
+            const firstSample = this.aaSampleIndex === 0
+            const rpassAccum = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: this.accumTextureView!,
+                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                    loadOp: firstSample ? 'clear' : 'load',
+                    storeOp: 'store',
+                }],
+            })
+            rpassAccum.setPipeline(firstSample ? this.pipelineColorAccumClear! : this.pipelineColorAccum!)
+            rpassAccum.setBindGroup(0, colorBindGroup)
+            rpassAccum.draw(6, 1, 0, 0)
+            rpassAccum.end()
+        } else if (!aaShowAccum) {
+            // Direct path: color straight to the swapchain (AA off, or sample 0 not
+            // yet converged). Byte-identical to the historical behaviour.
+            const rpassColor = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: swapView,
+                    clearValue: { r: 1, g: 1, b: 1, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            })
+            rpassColor.setPipeline(this.pipelineColor)
+            rpassColor.setBindGroup(0, colorBindGroup)
+            rpassColor.draw(6, 1, 0, 0)
+            rpassColor.end()
+        }
+
+        // Pass 4 (present): blit the accumulator's per-pixel average to the swapchain.
+        if (aaShowAccum && this.pipelinePresent && this.bindGroupPresent) {
+            const rpassPresent = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: swapView,
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            })
+            rpassPresent.setPipeline(this.pipelinePresent)
+            rpassPresent.setBindGroup(0, this.bindGroupPresent)
+            rpassPresent.draw(6, 1, 0, 0)
+            rpassPresent.end()
+        }
 
         // soumission des commandes
         const submitStartMs = performance.now()
@@ -2506,6 +2700,28 @@ export class Engine {
         // Parameters have been consumed — clear the flag so the engine can go idle
         // once all other conditions (orbit, unfinished pixels, etc.) are satisfied.
         this.needRender = false
+
+        // ── Advance the AA state machine ──────────────────────────────────
+        // Runs after the clear/needRender resets above so the flags it sets stick
+        // for the next frame. Only fires on the frame that captured a sample.
+        if (aaCompositeThisFrame) {
+            this.aaAccumulatedSamples++
+            if (this.aaAccumulatedSamples < antialiasLevel) {
+                // Queue the next jittered sample.
+                this.aaSampleIndex++
+                const j = computeAaJitterOffset(this.aaSampleIndex)
+                this.aaOffsetX = j.x * neutralExtentColor / Math.max(1, this.neutralSize)
+                this.aaOffsetY = j.y * neutralExtentColor / Math.max(1, this.neutralSize)
+                // Stage A: full reconverge for the jittered sample. Stage B will
+                // replace this with a selective reseed of the boundary sliver only.
+                this.clearHistoryNextFrame = true
+                this.aaReseedPending = true
+                this.needRender = true
+            } else {
+                // Accumulation complete → go idle; the final average stays on screen.
+                this.aaActive = false
+            }
+        }
 
         // Passe snapshot PNG écran (optionnelle, si demandée)
         if (this.snapshotCallback) {
@@ -2632,6 +2848,7 @@ export class Engine {
             || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD) {
             reason = `unfinished=${this.unfinishedPixelCount}`
         }
+        else if (this.aaActive) reason = 'aaAccumulating'
         return reason !== ''
     }
 

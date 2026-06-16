@@ -1248,8 +1248,26 @@ fn colorize_sampled(
 // with genuine pixels tinted green and resolve-copied pixels tinted red.
 const DEBUG_SHOW_LIVE_NEGATIVE: bool = false;
 
-@fragment
-fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
+// ── sRGB ↔ linear (gamma-correct AA accumulation) ──────────────────
+fn srgb_to_linear(c: vec3<f32>) -> vec3<f32> {
+  let cutoff = c <= vec3<f32>(0.04045);
+  let low = c / 12.92;
+  let high = pow((max(c, vec3<f32>(0.0)) + 0.055) / 1.055, vec3<f32>(2.4));
+  return select(high, low, cutoff);
+}
+
+fn linear_to_sRGB(c: vec3<f32>) -> vec3<f32> {
+  let cl = max(c, vec3<f32>(0.0));
+  let cutoff = cl <= vec3<f32>(0.0031308);
+  let low = cl * 12.92;
+  let high = 1.055 * pow(cl, vec3<f32>(1.0 / 2.4)) - 0.055;
+  return select(high, low, cutoff);
+}
+
+// Core shading, returns sRGB color (unchanged from the historical fs_main body).
+// Entry points below wrap this: fs_main (linear, for AA accumulation) and
+// fs_main_direct (sRGB, for direct-to-swapchain and PNG export).
+fn shade_srgb(fragCoord: vec2<f32>) -> vec4<f32> {
   let uv_screen = fragCoord;
 
   let xy_screen = vec2<f32>(uv_screen.x * 2.0 - 1.0, uv_screen.y * 2.0 - 1.0);
@@ -1480,4 +1498,19 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 
   // No valid pixel from either source.
   return vec4<f32>(0.05, 0.05, 0.05, 1.0);
+}
+
+// AA-accumulation path: output linear RGB with alpha = 1.0 so additive blending
+// sums colors in linear space and accumulates a per-pixel sample count in alpha.
+@fragment
+fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
+  let c = shade_srgb(fragCoord);
+  return vec4<f32>(srgb_to_linear(c.rgb), 1.0);
+}
+
+// Direct path: unmodified sRGB output (no linear roundtrip) for the legacy
+// direct-to-swapchain render and the PNG/snapshot export.
+@fragment
+fn fs_main_direct(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
+  return shade_srgb(fragCoord);
 }

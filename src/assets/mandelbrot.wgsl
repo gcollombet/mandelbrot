@@ -49,8 +49,8 @@ struct Mandelbrot {
   stripeFrequency: f32,
   trackOrbitMetrics: f32,
   scaleExp: f32,        // floatexp deep path: shared base-2 exponent for scale & cx/cy
-  _padding2: f32,
-  _padding3: f32,
+  aaOffsetX: f32,       // sub-pixel AA jitter, neutral-space units (0 = off)
+  aaOffsetY: f32,
 };
 
 // floatexp deep-zoom threshold (base-2 exponent of scale). Below this the shader
@@ -896,7 +896,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   // Neutral mapping: the neutral texture is a square that can contain the rotated screen.
   let xy_neutral = vec2<f32>(uv.x * 2.0 - 1.0, uv.y * 2.0 - 1.0);
   let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
-  let local_rot = xy_neutral * neutralExtent;
+  // AA sub-pixel jitter (neutral-space units); zero for sample 0 / AA off.
+  let local_rot = xy_neutral * neutralExtent + vec2<f32>(mandelbrot.aaOffsetX, mandelbrot.aaOffsetY);
 
   // Deep-zoom path: below the threshold, scale/cx/cy carry fe mantissas sharing
   // exponent scaleExp, and dc is built in extended-exponent form to dodge the
