@@ -85,6 +85,7 @@ const props = withDefaults(defineProps<{
   heightPaletteShift?: number,
   paletteMirror?: boolean,
   antialiasLevel?: number,
+  aaAuto?: boolean,
   activateAnimate?: boolean,
   debugShading?: boolean,
   dprMultiplier?: number,
@@ -150,6 +151,7 @@ const props = withDefaults(defineProps<{
         heightPaletteShift: 0,
         paletteMirror: false,
         antialiasLevel: 1,
+        aaAuto: false,
         activateAnimate: false,
         debugShading: false,
        dprMultiplier: 1.0,
@@ -251,6 +253,7 @@ async function draw() {
         },
       {
         antialiasLevel: props.antialiasLevel,
+        aaAuto: props.aaAuto,
         palettePeriod: props.palettePeriod,
         paletteOffset: props.paletteOffset,
         heightPaletteShift: props.heightPaletteShift,
@@ -349,6 +352,7 @@ async function initWebGPU() {
   navigator.angle(Number(angle.value));
   engine = new Engine(canvas, {
     antialiasLevel: props.antialiasLevel,
+    aaAuto: props.aaAuto,
     palettePeriod: props.palettePeriod,
     paletteOffset: props.paletteOffset,
     heightPaletteShift: props.heightPaletteShift,

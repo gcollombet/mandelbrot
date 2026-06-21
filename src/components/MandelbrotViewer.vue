@@ -47,6 +47,10 @@ import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
 const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
 const mandelbrotEngine = shallowRef<Engine | null>(null);
+
+// AA accumulation progress (polled from the engine for the on-screen indicator).
+const aaProgress = ref<{ active: boolean; done: number; total: number }>({ active: false, done: 0, total: 1 });
+let aaProgressTimer: ReturnType<typeof setInterval> | null = null;
 const renderStatsRef = ref<InstanceType<typeof RenderStats> | null>(null);
 const settingsRefs = ref<Record<string, InstanceType<typeof Settings> | null>>({});
 
@@ -230,6 +234,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   paletteMirror: false,
   lightAngle: 0,
   antialiasLevel: 1,
+  aaAuto: false,
   maxIterations: 100,
   displacementAmount: 0,
   tessellationLevel: 0,
@@ -387,6 +392,11 @@ onMounted(() => {
   window.addEventListener('wheel', handleNavWheel, { passive: true });
   window.addEventListener('touchstart', handleNavTouchstart, { passive: true });
   window.addEventListener('touchend', handleNavTouchend, { passive: true });
+  // Poll AA accumulation progress for the on-screen indicator.
+  aaProgressTimer = setInterval(() => {
+    const p = mandelbrotEngine.value?.aaProgress;
+    if (p) aaProgress.value = p;
+  }, 120);
   window.addEventListener('resize', invalidateDiscoveryLayout, { passive: true });
   // Bottom bar auto-hide
   window.addEventListener('mousemove', handleMouseMove, { passive: true });
@@ -455,6 +465,7 @@ onUnmounted(() => {
   revokeObjectUrl(activeSkyboxTextureUrl);
   if (navigationTimeout !== null) clearTimeout(navigationTimeout);
   if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
+  if (aaProgressTimer !== null) clearInterval(aaProgressTimer);
 });
 watch(mandelbrotParams, (params) => {
   const saved = structuredClone(toRaw(params));
@@ -544,6 +555,12 @@ function handleOutsidePointerDown(e: PointerEvent) {
 // Gestion clavier globale (W pour settings, Escape pour fermer)
 function handleGlobalKeydown(e: KeyboardEvent) {
   if (e.key === 'Escape') {
+    // Restaurer l'UI masquée en priorité.
+    if (!showUI.value) {
+      e.preventDefault();
+      showUI.value = true;
+      return;
+    }
     // Quitter le mode pipette en priorité
     if (pickerMode.value) {
       e.preventDefault();
@@ -581,6 +598,16 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   if (key === 'g' && !e.repeat) {
     e.preventDefault();
     mandelbrotCtrlRef.value?.getEngine?.()?.triggerAaAccumulation();
+    return;
+  }
+  // Toggle AA selective reseed (H): on = Stage B (boundary-only), off = full reconverge.
+  if (key === 'h' && !e.repeat) {
+    e.preventDefault();
+    const eng = mandelbrotCtrlRef.value?.getEngine?.();
+    if (eng) {
+      eng.useAaSelectiveReseed = !eng.useAaSelectiveReseed;
+      console.log('[AA] useAaSelectiveReseed =', eng.useAaSelectiveReseed);
+    }
     return;
   }
   const tab = settingsTabs.value.find(t => t.shortcut === key);
@@ -1356,6 +1383,23 @@ function startTravelToPreset(preset: PresetRecord) {
 
 <template>
   <div ref="rootRef" style="position: relative; height: 100vh; width: 100vw;" :class="{ 'picker-cursor': pickerMode }">
+    <!-- Bouton pour masquer toute l'interface -->
+    <button
+      v-show="showUI && !discoveryRadarActive"
+      class="ui-hide-toggle"
+      title="Masquer l'interface (Échap pour réafficher)"
+      @click="showUI = false"
+      @touchstart.stop
+      @touchend.stop
+    >
+      <i class="fa-solid fa-eye-slash"></i>
+    </button>
+
+    <!-- Indication affichée quand l'interface est masquée -->
+    <div v-show="!showUI" class="ui-hidden-hint">
+      Appuyez sur <kbd>Échap</kbd> pour afficher l'interface
+    </div>
+
     <!-- Barre de navigation en haut, centree, 4 boutons on/off -->
     <div
       class="top-settings-bar"
@@ -1409,6 +1453,33 @@ function startTravelToPreset(preset: PresetRecord) {
       />
     </div>
 
+    <!-- Antialiasing control / progress (bottom-center) -->
+    <div
+      v-show="showUI && !discoveryRadarActive && mandelbrotParams.antialiasLevel > 1"
+      class="aa-control"
+      @touchstart.stop
+      @touchend.stop
+    >
+      <button
+        v-if="!aaProgress.active && !mandelbrotParams.aaAuto"
+        class="aa-button"
+        title="Accumulate high-quality antialiasing (shortcut: G)"
+        @click="mandelbrotCtrlRef?.getEngine?.()?.triggerAaAccumulation()"
+      >
+        <i class="fa-solid fa-wand-magic-sparkles"></i>
+        Render AA {{ mandelbrotParams.antialiasLevel }}×
+      </button>
+      <div v-if="aaProgress.active" class="aa-progress">
+        <span class="aa-progress-label">AA {{ aaProgress.done }}/{{ aaProgress.total }}</span>
+        <div class="aa-progress-track">
+          <div
+            class="aa-progress-fill"
+            :style="{ width: (100 * aaProgress.done / Math.max(1, aaProgress.total)) + '%' }"
+          ></div>
+        </div>
+      </div>
+    </div>
+
     <!-- Composant MandelbrotController avec tous les parametres -->
     <MandelbrotController
       ref="mandelbrotCtrlRef"
@@ -1424,6 +1495,7 @@ function startTravelToPreset(preset: PresetRecord) {
       :pickerMode="pickerMode"
       :mu="mandelbrotParams.mu"
       :antialiasLevel="mandelbrotParams.antialiasLevel"
+      :aaAuto="mandelbrotParams.aaAuto"
       :epsilon="mandelbrotParams.epsilon"
       :palettePeriod="mandelbrotParams.palettePeriod"
       :paletteOffset="mandelbrotParams.paletteOffset"
@@ -1460,6 +1532,7 @@ function startTravelToPreset(preset: PresetRecord) {
     <button
       class="discovery-radar-button"
       :class="{ 'is-active': discoveryRadarActive, 'hud-hidden': isNavigating }"
+      v-show="showUI"
       type="button"
       :aria-pressed="discoveryRadarActive"
       title="Discover nearby presets"
@@ -2118,6 +2191,124 @@ function startTravelToPreset(preset: PresetRecord) {
   .render-stats-wrapper {
     bottom: 100px;
   }
+}
+
+/* Hide-UI toggle (top-right) + "press Esc" hint when hidden. */
+.ui-hide-toggle {
+  position: fixed;
+  top: 16px;
+  right: 16px;
+  z-index: 30;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 36px;
+  height: 36px;
+  color: #fff;
+  background: rgba(20, 20, 28, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 50%;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.ui-hide-toggle:hover {
+  background: rgba(40, 40, 56, 0.85);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.ui-hidden-hint {
+  position: fixed;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 30;
+  padding: 11px 18px;
+  font-size: 0.95rem;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(15, 15, 22, 0.85);
+  border: 1px solid rgba(255, 255, 255, 0.3);
+  border-radius: 10px;
+  box-shadow: 0 4px 20px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(8px);
+  pointer-events: none;
+  white-space: nowrap;
+  animation: ui-hint-fade 1.8s ease forwards;
+}
+.ui-hidden-hint kbd {
+  font-family: inherit;
+  font-weight: 700;
+  padding: 1px 7px;
+  border-radius: 4px;
+  background: rgba(255, 255, 255, 0.22);
+}
+@keyframes ui-hint-fade {
+  0%, 55% { opacity: 1; }
+  100% { opacity: 0; }
+}
+
+/* Antialiasing control / progress — sits just above the render-stats bar. */
+.aa-control {
+  position: fixed;
+  bottom: 56px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 20;
+  pointer-events: auto;
+}
+@media (max-width: 1023px) {
+  .aa-control {
+    bottom: 140px;
+  }
+}
+.aa-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 12px;
+  font-size: 0.8rem;
+  font-weight: 600;
+  color: #fff;
+  background: rgba(20, 20, 28, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  cursor: pointer;
+  backdrop-filter: blur(8px);
+  transition: background 0.15s ease, border-color 0.15s ease;
+}
+.aa-button:hover {
+  background: rgba(40, 40, 56, 0.85);
+  border-color: rgba(255, 255, 255, 0.35);
+}
+.aa-progress {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 12px;
+  background: rgba(20, 20, 28, 0.72);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  border-radius: 999px;
+  backdrop-filter: blur(8px);
+}
+.aa-progress-label {
+  font-size: 0.78rem;
+  font-weight: 600;
+  color: #fff;
+  white-space: nowrap;
+  font-variant-numeric: tabular-nums;
+}
+.aa-progress-track {
+  width: 120px;
+  height: 5px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.18);
+  overflow: hidden;
+}
+.aa-progress-fill {
+  height: 100%;
+  border-radius: 999px;
+  background: linear-gradient(90deg, #7c5cff, #4cc9f0);
+  transition: width 0.2s ease;
 }
 
 @media (max-width: 768px) {

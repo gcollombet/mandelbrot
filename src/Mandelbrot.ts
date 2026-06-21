@@ -16,6 +16,7 @@ export interface MandelbrotParams {
     maxIterations: number;
     maxIterationMultiplier: number;
     antialiasLevel: number;
+    aaAuto?: boolean;
     zoomMinBrushStep: number;
     sentinelSeedStep: number;
     palettePeriod: number;
@@ -57,6 +58,7 @@ export const SESSION_PERFORMANCE_FIELDS = [
     'dprMultiplier',
     'maxIterationMultiplier',
     'antialiasLevel',
+    'aaAuto',
     'targetFps',
     'gpuLoadMultiplier',
     'zoomMinBrushStep',
@@ -125,6 +127,7 @@ export function preserveSessionPerformanceFields<T extends Partial<MandelbrotPar
         dprMultiplier: current.dprMultiplier,
         maxIterationMultiplier: current.maxIterationMultiplier,
         antialiasLevel: current.antialiasLevel,
+        aaAuto: current.aaAuto,
         targetFps: current.targetFps,
         gpuLoadMultiplier: current.gpuLoadMultiplier,
         zoomMinBrushStep: current.zoomMinBrushStep,

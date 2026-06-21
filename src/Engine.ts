@@ -8,6 +8,8 @@ import resolveShader from './assets/resolve.wgsl?raw'
 import countShader from './assets/count_unfinished.wgsl?raw'
 import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import presentShader from './assets/present.wgsl?raw'
+import aaTargetShader from './assets/aa_target.wgsl?raw'
+import aaReseedShader from './assets/aa_reseed.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
@@ -229,6 +231,7 @@ function shiftedAnimationContribution(track: AnimationTrackConfig, time: number,
 
 export type RenderOptions = {
     antialiasLevel: number,
+    aaAuto?: boolean,
     palettePeriod: number,
     paletteOffset: number,
     heightPaletteShift: number,
@@ -340,6 +343,19 @@ export class Engine {
     /** rgba16float accumulation texture (linear RGB sum in .rgb, sample count in .a). */
     private accumTexture?: GPUTexture
     private accumTextureView?: GPUTextureView
+    /** Per-neutral-texel AA target sample count (r32float), baked once from the DE after sample 0. */
+    private aaTargetTexture?: GPUTexture
+    private aaTargetTextureView?: GPUTextureView
+    /** Compute pipeline that bakes aaTargetTexture from the converged neutral texture. */
+    private pipelineAaTarget?: GPUComputePipeline
+    private bindGroupAaTarget?: GPUBindGroup
+    private uniformBufferAaTarget?: GPUBuffer
+    /** Stage B selective reseed: stamps iter=-1 on the boundary sliver between samples. */
+    private pipelineAaReseed?: GPUComputePipeline
+    private bindGroupAaReseed?: GPUBindGroup
+    /** When true, AA reconverges only the boundary sliver (Stage B); false falls back
+     *  to a full reconverge per sample (Stage A). Auto-disabled if grid step != 1. */
+    useAaSelectiveReseed = true
 
     // In-place compute path: fused brush+mandelbrot+count working directly on
     // rawTexture (A) for frames without translation/clearHistory.  Replaces the
@@ -489,6 +505,8 @@ export class Engine {
     aaOffsetY = 0
     /** True for the first frame of a new AA sample (drives the selective reseed). */
     aaReseedPending = false
+    /** When true, AA accumulation auto-starts as soon as the view is fully converged. */
+    aaAuto = false
 
     // Cumulative texel shift since last clearHistory – used to keep the
     // sentinel grid aligned after translation reprojection (Option B).
@@ -1151,6 +1169,7 @@ export class Engine {
                 { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+                { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
@@ -1288,6 +1307,45 @@ export class Engine {
             fragment: { module: modulePresent, entryPoint: 'fs_main', targets: [{ format: this.format }] },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Present',
+        })
+
+        // ── AA target-map bake pipeline (neutral DE → per-texel sample count) ──
+        const moduleAaTarget = this.device.createShaderModule({ code: aaTargetShader, label: 'Engine ShaderModule AaTarget' })
+        const layoutAaTarget = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+            label: 'Engine BindGroupLayout AaTarget',
+        })
+        this.pipelineAaTarget = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutAaTarget] }),
+            compute: { module: moduleAaTarget, entryPoint: 'cs_main' },
+            label: 'Engine ComputePipeline AaTarget',
+        })
+        if (!this.uniformBufferAaTarget) {
+            this.uniformBufferAaTarget = this.device.createBuffer({
+                size: 16, // 4 × f32: [antialiasLevel, aaSampleIndex, pad, pad] (shared with reseed)
+                usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+                label: 'Engine UniformBuffer AaParams',
+            })
+        }
+
+        // ── AA selective reseed pipeline (Stage B) ───────────────────────
+        const moduleAaReseed = this.device.createShaderModule({ code: aaReseedShader, label: 'Engine ShaderModule AaReseed' })
+        const layoutAaReseed = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+            ],
+            label: 'Engine BindGroupLayout AaReseed',
+        })
+        this.pipelineAaReseed = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutAaReseed] }),
+            compute: { module: moduleAaReseed, entryPoint: 'cs_main' },
+            label: 'Engine ComputePipeline AaReseed',
         })
 
         // bind groups seront (ré)créés dans resize car dépend des textures
@@ -1539,6 +1597,7 @@ export class Engine {
         this.resolvedTexture?.destroy?.()
         this.frozenTexture?.destroy?.()
         this.accumTexture?.destroy?.()
+        this.aaTargetTexture?.destroy?.()
 
         const layerCount = LAYER_COUNT
 
@@ -1608,6 +1667,37 @@ export class Engine {
                 layout: this.pipelinePresent.getBindGroupLayout(0),
                 entries: [{ binding: 0, resource: this.accumTextureView }],
                 label: 'Engine BindGroup Present',
+            })
+        }
+        // AA target map: per-neutral-texel sample count, baked once from the DE.
+        // STORAGE_BINDING (bake write) + TEXTURE_BINDING (color-pass read).
+        this.aaTargetTexture = this.device.createTexture({
+            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
+            format: 'r32float',
+            usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'Engine AaTargetTexture',
+        })
+        this.aaTargetTextureView = this.aaTargetTexture.createView({ label: 'Engine AaTargetTexture View' })
+        if (this.pipelineAaTarget && this.rawArrayView && this.uniformBufferAaTarget) {
+            this.bindGroupAaTarget = this.device.createBindGroup({
+                layout: this.pipelineAaTarget.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: this.rawArrayView },
+                    { binding: 1, resource: this.aaTargetTextureView },
+                    { binding: 2, resource: { buffer: this.uniformBufferAaTarget } },
+                ],
+                label: 'Engine BindGroup AaTarget',
+            })
+        }
+        if (this.pipelineAaReseed && this.rawArrayView && this.uniformBufferAaTarget) {
+            this.bindGroupAaReseed = this.device.createBindGroup({
+                layout: this.pipelineAaReseed.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: this.aaTargetTextureView },
+                    { binding: 1, resource: this.rawArrayView },
+                    { binding: 2, resource: { buffer: this.uniformBufferAaTarget } },
+                ],
+                label: 'Engine BindGroup AaReseed',
             })
         }
         // Resetting textures invalidates any in-flight AA accumulation.
@@ -1804,10 +1894,14 @@ export class Engine {
             && orbitMetricsEnabled !== this.previousOrbitMetricsEnabled
         const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
         this.needRender = this.needRender || mandelbrotChanged || renderOptionsChanged
-        // Any navigation/parameter change aborts AA → instant single-sample fallback.
-        if (this.aaActive && (mandelbrotChanged || renderOptionsChanged)) {
+        // Any navigation/parameter change resets AA → instant single-sample fallback,
+        // and re-arms auto AA. Not guarded by aaActive: after accumulation completes
+        // (aaActive false, aaAccumulatedSamples > 0) a move must still clear the count
+        // so auto AA can fire again on the next convergence.
+        if (mandelbrotChanged || renderOptionsChanged) {
             this.resetAaState()
         }
+        this.aaAuto = renderOptions.aaAuto ?? false
         if (mandelbrotChanged || activeStripeFrequencyChanged || orbitMetricsChanged) {
             this.invalidateCounterReadback() // unknown — new fractal params, GPU counter not read yet
         }
@@ -1996,6 +2090,7 @@ export class Engine {
             : 1.0
         const frozenScale = getFrozenScale(this.zoomState)
         const liveScale = getLiveScale(this.zoomState)
+        const antialiasLevelColor = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
 
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,    // 0: palettePeriod
@@ -2064,8 +2159,8 @@ export class Engine {
             microBumpAnim,                        // 55: microBumpAnimation
             displacementAnim,                     // 56: displacementAnimation
             tessellationAnim,                     // 57: tessellationAnimation
-            0.0,                                  // 58: _pad2
-            0.0,                                  // 59: _pad3
+            this.aaSampleIndex,                   // 58: aaSampleIndex (AA accumulation gate)
+            antialiasLevelColor,                  // 59: antialiasLevel (debug sample-count viz)
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -2170,8 +2265,11 @@ export class Engine {
         // During an active zoom reprojection cycle, skip this: maxIterations
         // grows every frame with scale, so the condition fires perpetually.
         // The ZOOM_STOP clear will trigger a full recompute when zoom ends.
+        // Suppressed during AA: the present pass already shows a stable average,
+        // and a freeze + clearHistory here would clobber selective-reseed state.
         if (!isZoomActive(this.zoomState)
             && !this.clearHistoryNextFrame
+            && !this.aaActive
             && orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
             this.needFreezeSnapshot = true
             this.clearHistoryNextFrame = true
@@ -2477,6 +2575,24 @@ export class Engine {
         }
 
         if (useInplacePath) {
+            // Stage B selective reseed: stamp the boundary sliver (target > sample
+            // index) as compute requests so only it reconverges with the new jitter;
+            // frozen texels are left as-is and skipped by the fused pass below.
+            if (this.aaReseedPending && this.pipelineAaReseed && this.bindGroupAaReseed && this.uniformBufferAaTarget) {
+                const aaLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
+                this.device.queue.writeBuffer(
+                    this.uniformBufferAaTarget,
+                    0,
+                    new Float32Array([aaLevel, this.aaSampleIndex, this.height, 0]).buffer,
+                )
+                const reseedPass = commandEncoder.beginComputePass()
+                reseedPass.setPipeline(this.pipelineAaReseed)
+                reseedPass.setBindGroup(0, this.bindGroupAaReseed)
+                const rwg = Math.ceil(this.neutralSize / 16)
+                reseedPass.dispatchWorkgroups(rwg, rwg)
+                reseedPass.end()
+                this.aaReseedPending = false
+            }
             // Fused brush+mandelbrot+count: a single compute dispatch working
             // in place on A.  Finished texels generate zero texture writes,
             // replacing passes 0/1, the B→A copy and the count pass.
@@ -2616,6 +2732,17 @@ export class Engine {
             this.resetAaState()
         }
 
+        // Auto AA: start accumulation as soon as the view is fully converged.
+        // accumulatedSamples === 0 ensures we only fire once per converged view
+        // (it stays > 0 after completion until the next navigation resets it).
+        if (this.aaAuto
+            && antialiasLevel > 1
+            && !this.aaActive
+            && this.aaAccumulatedSamples === 0
+            && fullyConverged) {
+            this.triggerAaAccumulation()
+        }
+
         // Capture a new AA sample only on a fully-converged frame, so partial
         // mid-reconverge frames never pollute the accumulator.
         const aaCompositeThisFrame =
@@ -2676,6 +2803,30 @@ export class Engine {
             rpassPresent.end()
         }
 
+        // Bake the AA target map once, right after sample 0 has converged and been
+        // composited (reads the converged neutral DE in rawTexture). Reused by the
+        // color gate and the selective reseed for all subsequent samples.
+        const aaBakeThisFrame = aaCompositeThisFrame
+            && this.aaSampleIndex === 0
+            && !!this.pipelineAaTarget
+            && !!this.bindGroupAaTarget
+            && !!this.uniformBufferAaTarget
+        if (aaBakeThisFrame) {
+            this.device.queue.writeBuffer(
+                this.uniformBufferAaTarget!,
+                0,
+                new Float32Array([antialiasLevel, 0, this.height, 0]).buffer,
+            )
+            const bakePass = commandEncoder.beginComputePass()
+            bakePass.setPipeline(this.pipelineAaTarget!)
+            bakePass.setBindGroup(0, this.bindGroupAaTarget!)
+            bakePass.dispatchWorkgroups(
+                Math.ceil(this.neutralSize / 16),
+                Math.ceil(this.neutralSize / 16),
+            )
+            bakePass.end()
+        }
+
         // soumission des commandes
         const submitStartMs = performance.now()
         this.device.queue.submit([commandEncoder.finish()])
@@ -2712,10 +2863,25 @@ export class Engine {
                 const j = computeAaJitterOffset(this.aaSampleIndex)
                 this.aaOffsetX = j.x * neutralExtentColor / Math.max(1, this.neutralSize)
                 this.aaOffsetY = j.y * neutralExtentColor / Math.max(1, this.neutralSize)
-                // Stage A: full reconverge for the jittered sample. Stage B will
-                // replace this with a selective reseed of the boundary sliver only.
-                this.clearHistoryNextFrame = true
-                this.aaReseedPending = true
+                // Stage B: reconverge only the boundary sliver via a selective reseed.
+                // Requires the grid at its finest step (1) and the reseed pipeline.
+                // Otherwise fall back to Stage A's full reconverge.
+                const canSelectiveReseed = this.useAaSelectiveReseed
+                    && this.useInplaceCompute
+                    && zoomMinBrushStep <= 1
+                    && !!this.pipelineAaReseed
+                    && !!this.bindGroupAaReseed
+                if (canSelectiveReseed) {
+                    this.aaReseedPending = true
+                    // The reseed marks the boundary sliver as active again; without
+                    // invalidating the (async) pixel counter, the stale "0 active"
+                    // from the previous convergence would make fullyConverged fire
+                    // immediately and composite a half-computed sample. Force a fresh
+                    // count so the next composite waits for the sliver to reconverge.
+                    this.invalidateCounterReadback()
+                } else {
+                    this.clearHistoryNextFrame = true
+                }
                 this.needRender = true
             } else {
                 // Accumulation complete → go idle; the final average stays on screen.
@@ -2849,6 +3015,19 @@ export class Engine {
             reason = `unfinished=${this.unfinishedPixelCount}`
         }
         else if (this.aaActive) reason = 'aaAccumulating'
+        // Auto AA pending: the view looks converged but accumulation hasn't started
+        // yet. Keep the loop alive so render()'s auto-trigger (which needs the full
+        // fullyConverged check incl. the async counter) gets a chance to fire,
+        // instead of idling on the exact frame convergence completes.
+        else if (this.aaAuto
+            && !this.aaActive
+            && this.aaAccumulatedSamples === 0
+            && this.unfinishedPixelCount === 0
+            && this.activePixelCount === 0
+            && !this.orbitIncomplete
+            && !isZoomActive(this.zoomState)) {
+            reason = 'aaAutoPending'
+        }
         return reason !== ''
     }
 
@@ -2975,6 +3154,7 @@ export class Engine {
                 { binding: 6, resource: this.frozenArrayView! },
                 { binding: 7, resource: this.paletteSampler! },
                 { binding: 8, resource: this.skyboxSampler! },
+                { binding: 9, resource: this.aaTargetTextureView! },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,

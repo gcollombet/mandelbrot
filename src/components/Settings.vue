@@ -173,6 +173,7 @@ const model =  defineModel<MandelbrotParams>({
      heightPaletteShift: 0,
     paletteMirror: false,
     antialiasLevel: 1,
+    aaAuto: false,
     tessellationLevel: 0,
     lightAngle: 0,
       displacementAmount: 0,
@@ -2687,8 +2688,15 @@ async function importSkyboxTexture(event: Event) {
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label" title="Samples accumulated when rendering in high quality (press G when idle)">Antialiasing</span>
-        <input class="slider" type="range" min="1" max="16" step="1" v-model.number="model.antialiasLevel" aria-label="Antialiasing samples" />
+        <input class="slider" type="range" min="1" max="64" step="1" v-model.number="model.antialiasLevel" aria-label="Antialiasing samples" />
         <span class="gfx-slider-value">{{ (model.antialiasLevel ?? 1) > 1 ? model.antialiasLevel + '×' : 'Off' }}</span>
+      </div>
+      <div class="gfx-slider-row">
+        <span class="gfx-slider-label" title="Automatically accumulate antialiasing once the view is fully converged">Auto AA</span>
+        <div style="flex: 1 1 auto; display: flex; align-items: center;">
+          <input type="checkbox" v-model="model.aaAuto" aria-label="Automatic antialiasing" />
+        </div>
+        <span class="gfx-slider-value">{{ model.aaAuto ? 'On' : 'Off' }}</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Zoom brush step</span>

@@ -57,8 +57,8 @@ struct Uniforms {
   microBumpAnimation: f32,
   displacementAnimation: f32,
   tessellationAnimation: f32,
-  _pad2: f32,
-  _pad3: f32,
+  aaSampleIndex: f32,    // current AA sample index (for the per-pixel accumulation gate)
+  antialiasLevel: f32,   // max AA samples (for the debug sample-count visualization)
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -69,6 +69,7 @@ struct Uniforms {
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
 @group(0) @binding(8) var skyboxSampler: sampler;  // bilinear sampler for skybox
+@group(0) @binding(9) var aaTargetTex: texture_2d<f32>; // per-neutral-texel AA target sample count (r32float)
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -953,7 +954,7 @@ fn debug_wheel_sector(uv: vec2<f32>) -> i32 {
   let centered = uv - vec2<f32>(0.5);
   let angle = atan2(centered.y, centered.x);
   let phase = fract(angle / (2.0 * 3.141592653589793) + 1.0);
-  return i32(floor(phase * 4.0));
+  return i32(floor(phase * 5.0));
 }
 
 // ── Colorize a single pixel from its raw layer values ──────────────
@@ -1029,7 +1030,27 @@ fn colorize_pixel(
       let grad = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
       return vec4<f32>(debug_heat(debug_gradient_scale(length(grad))), 1.0);
     }
-    return vec4<f32>(debug_heat(fract(angle_der / (2.0 * 3.141592653589793) + 0.5)), 1.0);
+    if (sector == 3) {
+      return vec4<f32>(debug_heat(fract(angle_der / (2.0 * 3.141592653589793) + 0.5)), 1.0);
+    }
+    // sector 4: AA per-pixel sample-count tiers. Blue = 1 sample, warm = up to
+    // antialiasLevel. Reads the actual baked target map (so a bake bug shows here);
+    // if not baked yet (AA hasn't run), computes the intended target on the fly so
+    // the view is always meaningful.
+    var aaN = textureLoad(aaTargetTex, sourceCoord, 0).r;
+    if (aaN < 1.0) {
+      aaN = 1.0;
+      if (iter_val > 0.0) {
+        // Mirror aa_target.wgsl: de_px = (H/2)·exp(-height); ramp 1..L over [R_FULL, R_OUT].
+        let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);
+        let hTexels = f32(sourceTexSize.y) / neutralExtent;
+        let de_px = (hTexels * 0.5) * exp(-extras.der_x);
+        let t = 1.0 - smoothstep(1.0, 6.0, de_px);
+        aaN = clamp(round(1.0 + (parameters.antialiasLevel - 1.0) * t), 1.0, parameters.antialiasLevel);
+      }
+    }
+    let aaT = (aaN - 1.0) / max(parameters.antialiasLevel - 1.0, 1.0);
+    return vec4<f32>(debug_heat(aaT), 1.0);
   }
 
   let v = nu;
@@ -1267,7 +1288,7 @@ fn linear_to_sRGB(c: vec3<f32>) -> vec3<f32> {
 // Core shading, returns sRGB color (unchanged from the historical fs_main body).
 // Entry points below wrap this: fs_main (linear, for AA accumulation) and
 // fs_main_direct (sRGB, for direct-to-swapchain and PNG export).
-fn shade_srgb(fragCoord: vec2<f32>) -> vec4<f32> {
+fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   let uv_screen = fragCoord;
 
   let xy_screen = vec2<f32>(uv_screen.x * 2.0 - 1.0, uv_screen.y * 2.0 - 1.0);
@@ -1323,6 +1344,16 @@ fn shade_srgb(fragCoord: vec2<f32>) -> vec4<f32> {
       i32(clamp(uv_live.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
       i32(clamp((1.0 - uv_live.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
     );
+    // AA per-pixel gate: once this pixel has accumulated its distance-estimation
+    // target sample count, stop contributing so its average is the unbiased mean
+    // of exactly `target` jittered samples (no over-weighting of frozen pixels).
+    // target <= 0 means "not baked yet" (sample 0) → always contribute.
+    if (applyAaGate) {
+      let aaTarget = textureLoad(aaTargetTex, liveCoord, 0).r;
+      if (aaTarget > 0.0 && parameters.aaSampleIndex >= aaTarget) {
+        discard;
+      }
+    }
     let liveSample = load_pixel_sample(tex, liveCoord);
     live_iter = liveSample.iter;
     liveStep = liveSample.step;
@@ -1504,13 +1535,13 @@ fn shade_srgb(fragCoord: vec2<f32>) -> vec4<f32> {
 // sums colors in linear space and accumulates a per-pixel sample count in alpha.
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
-  let c = shade_srgb(fragCoord);
+  let c = shade_srgb(fragCoord, true);
   return vec4<f32>(srgb_to_linear(c.rgb), 1.0);
 }
 
-// Direct path: unmodified sRGB output (no linear roundtrip) for the legacy
-// direct-to-swapchain render and the PNG/snapshot export.
+// Direct path: unmodified sRGB output (no linear roundtrip, no AA gate) for the
+// legacy direct-to-swapchain render and the PNG/snapshot export.
 @fragment
 fn fs_main_direct(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
-  return shade_srgb(fragCoord);
+  return shade_srgb(fragCoord, false);
 }
