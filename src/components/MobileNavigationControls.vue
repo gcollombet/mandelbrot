@@ -103,13 +103,6 @@ const handleTouchEnd = (e: TouchEvent) => {
   e.preventDefault();
   stopAllActions();
 };
-
-/** Navigue vers la page Présentation (relative à l'URL courante). */
-function goToPresentation(e: TouchEvent | MouseEvent) {
-  e.preventDefault();
-  e.stopPropagation();
-  window.location.href = new URL('./presentation/', window.location.href).href;
-}
 </script>
 
 
@@ -236,17 +229,6 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
             <circle cx="11" cy="11" r="7"/>
             <path d="M21 21l-5-5M8 11h6M11 8v6"/>
           </svg>
-        </button>
-
-        <!-- Bouton Présentation (lien vers la doc VitePress) -->
-        <button
-          class="presentation-button"
-          @touchend.prevent.stop="goToPresentation"
-          @click="goToPresentation"
-          aria-label="Présentation"
-        >
-          <i class="fa-solid fa-display fa-fw" style="vertical-align:middle; margin-right:4px;"></i>
-          Présentation
         </button>
       </div>
     </transition>
@@ -450,40 +432,4 @@ function goToPresentation(e: TouchEvent | MouseEvent) {
   }
 }
 
-/* Bouton Présentation — pilule dégradée, en bas à droite, au-dessus du zoom-in */
-.presentation-button {
-  position: absolute;
-  bottom: 96px;
-  right: 24px;
-  display: inline-flex;
-  align-items: center;
-  gap: 8px;
-  padding: 11px 18px;
-  border: 1px solid rgba(255, 255, 255, 0.16);
-  border-radius: 999px;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0) 45%),
-    linear-gradient(110deg, var(--accent), var(--mauve));
-  color: #fff;
-  font-size: 0.85rem;
-  font-weight: 700;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  pointer-events: auto;
-  touch-action: manipulation;
-  user-select: none;
-  box-shadow: 0 10px 26px -10px var(--mauve), 0 4px 14px -6px var(--accent);
-  transition: transform 0.14s, filter 0.14s;
-}
-
-.presentation-button:active {
-  filter: brightness(1.08);
-  transform: scale(0.94);
-}
-
-.presentation-button i,
-.presentation-button svg {
-  color: #fff;
-  flex-shrink: 0;
-}
 </style>

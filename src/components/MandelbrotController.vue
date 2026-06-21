@@ -36,6 +36,7 @@ const props = defineProps<{
   sentinelSeedStep?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   pickerMode?: boolean,
+  uiHidden?: boolean,
   tessellationLevel?: number,
   displacementAmount?: number,
   animation?: AnimationConfig,
@@ -58,6 +59,7 @@ const emit = defineEmits<{
   palettePick: [data: IterationData, clientX: number, clientY: number];
   pickerDone: [];
   engineReady: [engine: Engine];
+  requestShowUi: [];
 }>();
 
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
@@ -151,6 +153,8 @@ function handleDblClick(e: MouseEvent) {
   // En mode pipette, bloquer le double-clic
   if (props.pickerMode) { e.preventDefault(); return; }
   e.preventDefault();
+  // En mode masqué, le double-clic réaffiche l'UI plutôt que de recentrer.
+  if (props.uiHidden) { emit('requestShowUi'); return; }
   centerOnCanvasPoint(e.clientX, e.clientY);
 }
 
@@ -167,10 +171,15 @@ function handleTouchEndForDoubleTap(e: TouchEvent) {
     now - lastTapTime < DOUBLE_TAP_DELAY &&
     Math.hypot(tapX - lastTapX, tapY - lastTapY) < DOUBLE_TAP_DISTANCE
   ) {
-    // Double tap detected — center on that point
+    // Double tap detected
     e.preventDefault();
-    centerOnCanvasPoint(tapX, tapY);
     lastTapTime = 0; // reset to avoid triple-tap
+    // En mode masqué, le double-tap réaffiche l'UI plutôt que de recentrer.
+    if (props.uiHidden) {
+      emit('requestShowUi');
+      return;
+    }
+    centerOnCanvasPoint(tapX, tapY);
   } else {
     lastTapTime = now;
     lastTapX = tapX;
@@ -417,7 +426,7 @@ onUnmounted(() => {
     />
     
     <!-- Contrôles de navigation mobile -->
-    <MobileNavigationControls :mandelbrot-ref="mandelbrotRef" v-model:expanded="mobileNavExpanded" />
+    <MobileNavigationControls v-show="!props.uiHidden" :mandelbrot-ref="mandelbrotRef" v-model:expanded="mobileNavExpanded" />
   </div>
 </template>
 

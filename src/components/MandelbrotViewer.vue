@@ -69,6 +69,10 @@ const activeDiscoveryClusterId = ref<string | null>(null);
 const isPresetTraveling = ref(false);
 
 const showUI = ref(true);
+// Tactile = pas de survol + pointeur grossier → on guide vers le double-tap
+// plutôt que la touche Échap (absente sur mobile).
+const isTouchDevice = typeof window !== 'undefined'
+  && window.matchMedia?.('(hover: none) and (pointer: coarse)').matches;
 const authConfigured = isAuthConfigured();
 const authUserEmail = ref('');
 const userRole = ref<UserRole>('guest');
@@ -205,11 +209,17 @@ function handleNavWheel() {
   onNavigationEnd();
 }
 
-function handleNavTouchstart() {
-  if (discoveryRadarActive.value) {
-    deactivateDiscoveryRadar();
+function handleNavTouchstart(e: TouchEvent) {
+  // Only treat canvas touches as navigation (not HUD button taps). Without this
+  // filter, tapping a HUD button would flip isNavigating → the button gets
+  // `hud-hidden` (pointer-events: none) mid-tap and the tap is lost on mobile.
+  const target = e.target as HTMLElement;
+  if (target.tagName === 'CANVAS') {
+    if (discoveryRadarActive.value) {
+      deactivateDiscoveryRadar();
+    }
+    onNavigationStart();
   }
-  onNavigationStart();
 }
 
 function handleNavTouchend() {
@@ -577,6 +587,10 @@ function handleGlobalKeydown(e: KeyboardEvent) {
       closeAllSettings();
       return;
     }
+    // Rien d'autre à fermer → masquer l'UI (Escape devient un bascule).
+    e.preventDefault();
+    showUI.value = false;
+    return;
   }
   if (shortcutsSuspended.value) return;
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
@@ -1383,27 +1397,16 @@ function startTravelToPreset(preset: PresetRecord) {
 
 <template>
   <div ref="rootRef" style="position: relative; height: 100vh; width: 100vw;" :class="{ 'picker-cursor': pickerMode }">
-    <!-- Bouton pour masquer toute l'interface -->
-    <button
-      v-show="showUI && !discoveryRadarActive"
-      class="ui-hide-toggle"
-      title="Masquer l'interface (Échap pour réafficher)"
-      @click="showUI = false"
-      @touchstart.stop
-      @touchend.stop
-    >
-      <i class="fa-solid fa-eye-slash"></i>
-    </button>
-
     <!-- Indication affichée quand l'interface est masquée -->
     <div v-show="!showUI" class="ui-hidden-hint">
-      Appuyez sur <kbd>Échap</kbd> pour afficher l'interface
+      <template v-if="isTouchDevice">Double-tapez pour afficher l'interface</template>
+      <template v-else>Appuyez sur <kbd>Échap</kbd> pour afficher l'interface</template>
     </div>
 
     <!-- Barre de navigation en haut, centree, 4 boutons on/off -->
     <div
       class="top-settings-bar"
-      :class="{ 'hud-hidden': isNavigating }"
+      :class="{ 'hud-hidden': isNavigating || mobileNavExpanded }"
       v-show="showUI && !discoveryRadarActive"
     >
       <div class="top-settings-bar-inner">
@@ -1492,7 +1495,9 @@ function startTravelToPreset(preset: PresetRecord) {
       @palette-pick="onPalettePick"
       @picker-done="finishPickerMode"
       @engine-ready="onEngineReady"
+      @request-show-ui="showUI = true"
       :pickerMode="pickerMode"
+      :uiHidden="!showUI"
       :mu="mandelbrotParams.mu"
       :antialiasLevel="mandelbrotParams.antialiasLevel"
       :aaAuto="mandelbrotParams.aaAuto"
@@ -1529,19 +1534,38 @@ function startTravelToPreset(preset: PresetRecord) {
       :textureMappingMode="mandelbrotParams.textureMappingMode"
     />
 
-    <button
-      class="discovery-radar-button"
-      :class="{ 'is-active': discoveryRadarActive, 'hud-hidden': isNavigating }"
+    <!-- Cluster d'actions flottant (bas-droite) : masquage UI + Discover -->
+    <div
+      class="hud-fab-cluster"
+      :class="{ 'hud-hidden': isNavigating || mobileNavExpanded }"
       v-show="showUI"
-      type="button"
-      :aria-pressed="discoveryRadarActive"
-      title="Discover nearby presets"
-      @click="toggleDiscoveryRadar"
     >
-      <span class="radar-button-ring" aria-hidden="true"></span>
-      <span class="radar-button-core" aria-hidden="true"></span>
-      <span class="is-hidden-touch">{{ discoveryRadarActive ? 'Radar On' : 'Discover' }}</span>
-    </button>
+      <button
+        v-show="!discoveryRadarActive"
+        class="ui-hide-toggle"
+        title="Masquer l'interface (Échap pour réafficher)"
+        @click="showUI = false"
+        @touchstart.stop
+        @touchend.stop
+      >
+        <i class="fa-solid fa-eye-slash"></i>
+      </button>
+
+      <button
+        class="discovery-radar-button"
+        :class="{ 'is-active': discoveryRadarActive }"
+        type="button"
+        :aria-pressed="discoveryRadarActive"
+        title="Discover nearby presets"
+        @click="toggleDiscoveryRadar"
+        @touchstart.stop
+        @touchend.stop
+      >
+        <span class="radar-button-ring" aria-hidden="true"></span>
+        <span class="radar-button-core" aria-hidden="true"></span>
+        <span class="is-hidden-touch">{{ discoveryRadarActive ? 'Radar On' : 'Discover' }}</span>
+      </button>
+    </div>
 
     <div
       v-if="presetPinsVisible"
@@ -2195,10 +2219,6 @@ function startTravelToPreset(preset: PresetRecord) {
 
 /* Hide-UI toggle (top-right) + "press Esc" hint when hidden. */
 .ui-hide-toggle {
-  position: fixed;
-  top: 16px;
-  right: 16px;
-  z-index: 30;
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -2324,11 +2344,27 @@ function startTravelToPreset(preset: PresetRecord) {
 }
 
 /* === Preset Discovery Radar & Pins === */
-.discovery-radar-button {
-  position: absolute;
-  right: 22px;
-  top: 92px;
+/* Floating action cluster (bottom-right), stacked above the "made with love"
+   footer badge. Hidden during canvas navigation like the top settings bar. */
+.hud-fab-cluster {
+  position: fixed;
+  right: 16px;
+  bottom: 64px;
   z-index: 32;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 10px;
+  transition: opacity 0.25s ease;
+}
+
+.hud-fab-cluster.hud-hidden {
+  opacity: 0;
+  pointer-events: none;
+}
+
+.discovery-radar-button {
+  position: relative;
   min-width: 118px;
   height: 42px;
   border: 1px solid rgba(255, 255, 255, 0.2);
@@ -2364,11 +2400,6 @@ function startTravelToPreset(preset: PresetRecord) {
     linear-gradient(135deg, #6ff7d2, #32d6ff);
   border-color: rgba(255, 255, 255, 0.92);
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.42), 0 0 0 2px rgba(63, 230, 184, 0.42), 0 0 34px rgba(63, 230, 184, 0.65);
-}
-
-.discovery-radar-button.hud-hidden {
-  opacity: 0;
-  pointer-events: none;
 }
 
 .radar-button-ring {
@@ -2865,9 +2896,11 @@ function startTravelToPreset(preset: PresetRecord) {
 }
 
 @media (max-width: 768px) {
-  .discovery-radar-button {
-    top: 84px;
+  .hud-fab-cluster {
     right: 12px;
+  }
+
+  .discovery-radar-button {
     min-width: 42px;
     width: 42px;
     padding: 0;
