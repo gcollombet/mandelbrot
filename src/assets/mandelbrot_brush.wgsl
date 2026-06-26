@@ -166,6 +166,12 @@ fn fe_cmul_f32(zf: vec2<f32>, b: fe) -> fe {
   return fe_renorm(fe(cmul(zf, b.m), b.e));
 }
 
+// complex reciprocal 1/z in fe form (Padé denominator): 1/z = conj(z)/|z|².
+fn fe_cinv(z: fe) -> fe {
+  let d = dot(z.m, z.m);
+  return fe_renorm(fe(vec2<f32>(z.m.x, -z.m.y) / d, -z.e));
+}
+
 fn fe_add(a: fe, b: fe) -> fe {
   let d = a.e - b.e;
   if (d > 24) { return a; }
@@ -295,6 +301,7 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
               }
             }
           } else {
+            // ── affine BLA: z ← A·z + B·c ──
             let candidate = cmul(a, *dz) + cmul(b, dc);
             let candidateZ = getOrbit(*ref_i + skip) + candidate;
             if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
@@ -673,16 +680,41 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
           if (log_dz <= log_radius) {
             let a = fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp);
             let b = fe(vec2<f32>(bla.bx, bla.by), bla.ab_exp);
-            let candidate = fe_add(fe_cmul(a, *dz), fe_cmul(b, dc));
-            let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(candidate);
-            if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
-              *dz = candidate;
-              *zOut = candidateZ;
-              *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
-              *derS = *derS + f32(bla.ab_exp) * LN2;
-              der_refresh_cache(derM, derS, derInvScale, epsThreshold, logEpsilon);
-              *ref_i += skip;
-              return skip;
+            let num = fe_add(fe_cmul(a, *dz), fe_cmul(b, dc));
+            if (mandelbrot.approximationMode >= 1.5) {
+              // ── Padé [1/1] in floatexp: dz ← num/(1 + D·dz) ──
+              let d = fe(vec2<f32>(bla.dx, bla.dy), bla.d_exp);
+              let m = fe_add(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(d, *dz));   // 1 + D·dz
+              if (fe_mag2_f32(m) >= PADE_POLE2) {                            // pole-safe
+                let invM = fe_cinv(m);
+                let candidate = fe_cmul(num, invM);
+                let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(candidate);
+                if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+                  *dz = candidate;
+                  *zOut = candidateZ;
+                  // D4 derivative der' = (A/M²)·der + B/M, in derM/derS space.
+                  let aOverM2 = fe_cmul(a, fe_cmul(invM, invM));   // A/M²
+                  let bOverM = fe_cmul(b, invM);                   // B/M
+                  *derM = cmul(*derM, aOverM2.m);
+                  *derS = *derS + f32(aOverM2.e) * LN2;
+                  *derM = *derM + bOverM.m * exp(clamp(f32(bOverM.e) * LN2 - *derS, -80.0, 80.0));
+                  der_refresh_cache(derM, derS, derInvScale, epsThreshold, logEpsilon);
+                  *ref_i += skip;
+                  return skip;
+                }
+              }
+            } else {
+              // ── affine: dz ← A·dz + B·dc ──
+              let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(num);
+              if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+                *dz = num;
+                *zOut = candidateZ;
+                *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
+                *derS = *derS + f32(bla.ab_exp) * LN2;
+                der_refresh_cache(derM, derS, derInvScale, epsThreshold, logEpsilon);
+                *ref_i += skip;
+                return skip;
+              }
             }
           }
         }
@@ -724,10 +756,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   var shadingHeight = 0.0;
   var shadingAngle = 0.0;
 
-  // BLA acceleration in the deep path: skip iteration blocks when |dz| is small.
-  // Pade mode → exact in the deep regime too (see useBla note above).
-  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5
-                && mandelbrot.approximationMode < 1.5;
+  // BLA (affine) and Padé (rational, floatexp) both run on the deep path.
+  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5;
   var skip0Log = 0;
   var log_dcMag = 0.0;
   if (useBlaDeep) {
