@@ -947,9 +947,99 @@ impl MandelbrotNavigator {
         };
 
         let max_distance = &self.scale * dbig_i(1000);
-        match newton_nucleus(&self.cx, &self.cy, period, NEWTON_STEPS, &max_distance) {
+        let tolerance = self.scale.clone();
+        match newton_nucleus(&self.cx, &self.cy, period, NEWTON_STEPS, &max_distance, &tolerance) {
             Some(reference) => reference,
             None => (self.cx.clone(), self.cy.clone()),
+        }
+    }
+
+    /// Deep-capable period detection via the ball/atom method, evaluated at the
+    /// arbitrary-precision view centre. Unlike `detect_period_f64` — which
+    /// truncates the centre to f64 and is therefore blind past ~1e-15 — this
+    /// carries the critical orbit `z_n` and its derivative `dz_n/dc` in DBig, so
+    /// it works at any zoom depth. The smallest `n` whose image-disk of the view
+    /// (radius `radius` ≈ a few · `scale`) covers the origin — i.e.
+    /// `|z_n| ≤ radius · |dz_n/dc|` — is the period of the smallest atom
+    /// containing the view centre. Returns `None` if the orbit escapes
+    /// (`|z| > 2`) before any such `n`, meaning no minibrot sits under the view.
+    fn detect_period_ball(&self, max_iter: usize, radius: &DBig) -> Option<usize> {
+        let two = dbig_i(2);
+        let one = dbig_i(1);
+        let four = dbig_i(4);
+        let radius_sq = radius * radius;
+        let cx = &self.cx;
+        let cy = &self.cy;
+
+        let mut zx = dbig_i(0);
+        let mut zy = dbig_i(0);
+        // dz/dc, tracked in DBig so the (huge) derivative magnitude at depth
+        // never overflows — the comparison stays exact.
+        let mut dx = dbig_i(0);
+        let mut dy = dbig_i(0);
+
+        for n in 1..=max_iter {
+            // Derivative recurrence uses the *previous* z: dz' = 2·z·dz + 1.
+            let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
+            let dy_new = &two * (&zx * &dy + &zy * &dx);
+            let zx_new = &zx * &zx - &zy * &zy + cx;
+            let zy_new = &two * &zx * &zy + cy;
+            zx = zx_new;
+            zy = zy_new;
+            dx = dx_new;
+            dy = dy_new;
+
+            let z2 = &zx * &zx + &zy * &zy;
+            let d2 = &dx * &dx + &dy * &dy;
+            // |z|² ≤ radius² · |dz|²  ⇔  the view-disk's n-th image covers 0.
+            if z2 <= &radius_sq * &d2 {
+                return Some(n);
+            }
+            if z2 > four {
+                return None;
+            }
+        }
+        None
+    }
+
+    /// Locate the minibrot under the current view and return its exact nucleus.
+    ///
+    /// Two stages, both arbitrary-precision so they hold at any depth:
+    ///   1. `detect_period_ball` finds the period `p` of the atom containing the
+    ///      view centre.
+    ///   2. `newton_nucleus` refines the view centre to the period-`p` nucleus
+    ///      (`z_p = 0`) in full precision.
+    ///
+    /// `radius_factor` scales the view radius used by the ball test (≈2–4 covers
+    /// a centred minibrot; larger snaps to a bigger parent atom). Returns
+    /// `["ok", cx, cy, period]` on success, `["nonewton", period]` if the period
+    /// was found but Newton did not converge within range, or `["none"]` if no
+    /// minibrot sits under the view.
+    pub fn find_minibrot(&mut self, max_iter: u32, radius_factor: f64) -> Vec<String> {
+        const NEWTON_STEPS: usize = 80;
+        self.ensure_precision();
+
+        let factor = DBig::from_str(&radius_factor.max(1e-6).to_string())
+            .unwrap_or_else(|_| dbig_i(4));
+        let radius = &self.scale * &factor;
+
+        let Some(period) = self.detect_period_ball(max_iter as usize, &radius) else {
+            return vec!["none".to_string()];
+        };
+
+        // The nucleus is within ~scale of the view centre; bound Newton's reach
+        // generously but not wildly, so a stray detection cannot teleport the
+        // view far off-screen. Converge/validate to within one view height.
+        let max_distance = &self.scale * dbig_i(1000);
+        let tolerance = self.scale.clone();
+        match newton_nucleus(&self.cx, &self.cy, period, NEWTON_STEPS, &max_distance, &tolerance) {
+            Some((ncx, ncy)) => vec![
+                "ok".to_string(),
+                ncx.to_string(),
+                ncy.to_string(),
+                period.to_string(),
+            ],
+            None => vec!["nonewton".to_string(), period.to_string()],
         }
     }
 
@@ -1305,27 +1395,50 @@ fn detect_period_f64(cx: f64, cy: f64, max_iter: usize, max_period: usize) -> Op
     None
 }
 
-fn iterate_critical_orbit(cx: &DBig, cy: &DBig, period: usize) -> (DBig, DBig) {
+/// Iterate the critical orbit `z₀=0, z←z²+c` for `period` steps, returning both
+/// the value `z_period` and its derivative `dz_period/dc`. The derivative is
+/// what lets callers validate nucleus-ness in a scale-invariant way: near a
+/// depth-`scale` nucleus `|dz| ~ 1/scale`, so `z` and `c` live on different
+/// scales and `z` can only be compared to a `c`-space radius via `|z| ≤ r·|dz|`.
+fn critical_value_and_derivative(cx: &DBig, cy: &DBig, period: usize) -> (DBig, DBig, DBig, DBig) {
     let two = dbig_i(2);
+    let one = dbig_i(1);
     let mut zx = dbig_i(0);
     let mut zy = dbig_i(0);
+    let mut dx = dbig_i(0);
+    let mut dy = dbig_i(0);
 
     for _ in 0..period {
+        let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
+        let dy_new = &two * (&zx * &dy + &zy * &dx);
         let zx_new = &zx * &zx - &zy * &zy + cx;
         let zy_new = &two * &zx * &zy + cy;
         zx = zx_new;
         zy = zy_new;
+        dx = dx_new;
+        dy = dy_new;
     }
 
-    (zx, zy)
+    (zx, zy, dx, dy)
 }
 
+/// Newton's method for the period-`period` nucleus (`z_period(c) = 0`), starting
+/// from `(start_cx, start_cy)`.
+///
+/// `max_distance` bounds how far the iterate may drift from the start (reach).
+/// `tolerance` is the `c`-space convergence/validation radius: Newton stops once
+/// a step is smaller than it, and the result is accepted only if the critical
+/// value sits within `tolerance` of a true root — `|z_p| ≤ tolerance·|dz_p|`.
+/// The derivative weighting is essential at depth: `|dz_p| ~ 1/scale`, so a bare
+/// `|z_p| ≤ tolerance` test (the old code) rejected every deep nucleus because
+/// the precision-floor noise in `z_p` dwarfs `scale`.
 fn newton_nucleus(
     start_cx: &DBig,
     start_cy: &DBig,
     period: usize,
     steps: usize,
     max_distance: &DBig,
+    tolerance: &DBig,
 ) -> Option<(DBig, DBig)> {
     if period == 0 {
         return None;
@@ -1335,8 +1448,7 @@ fn newton_nucleus(
     let one = dbig_i(1);
     let zero = dbig_i(0);
     let max_distance_sq = max_distance * max_distance;
-    let validation_radius = max_distance / dbig_i(1000);
-    let validation_radius_sq = &validation_radius * &validation_radius;
+    let tol_sq = tolerance * tolerance;
 
     let mut cx = start_cx.clone();
     let mut cy = start_cy.clone();
@@ -1375,22 +1487,30 @@ fn newton_nucleus(
             return None;
         }
 
-        if &step_x * &step_x + &step_y * &step_y <= validation_radius_sq {
+        if &step_x * &step_x + &step_y * &step_y <= tol_sq {
             break;
         }
     }
 
-    let (zx, zy) = iterate_critical_orbit(&cx, &cy, period);
-    if &zx * &zx + &zy * &zy > validation_radius_sq {
+    // Scale-invariant nucleus check: |z_p|² ≤ tolerance² · |dz_p|².
+    let (zp_x, zp_y, dp_x, dp_y) = critical_value_and_derivative(&cx, &cy, period);
+    let zp2 = &zp_x * &zp_x + &zp_y * &zp_y;
+    let dp2 = &dp_x * &dp_x + &dp_y * &dp_y;
+    if zp2 > &tol_sq * &dp2 {
         return None;
     }
 
+    // Primitivity: reject if a proper divisor already returns to ~0 (i.e. the
+    // detected period is a multiple of the true one). Same derivative-relative
+    // criterion so it stays correct at depth.
     for divisor in 1..period {
         if period % divisor != 0 {
             continue;
         }
-        let (zx_div, zy_div) = iterate_critical_orbit(&cx, &cy, divisor);
-        if &zx_div * &zx_div + &zy_div * &zy_div <= validation_radius_sq {
+        let (zd_x, zd_y, dd_x, dd_y) = critical_value_and_derivative(&cx, &cy, divisor);
+        let zd2 = &zd_x * &zd_x + &zd_y * &zd_y;
+        let dd2 = &dd_x * &dd_x + &dd_y * &dd_y;
+        if zd2 <= &tol_sq * &dd2 {
             return None;
         }
     }
@@ -2038,13 +2158,57 @@ mod tests {
         let start_x = DBig::from_str("-1.01").unwrap();
         let start_y = DBig::from_str("0.001").unwrap();
         let max_distance = DBig::from_str("0.1").unwrap();
-        let (cx, cy) = newton_nucleus(&start_x, &start_y, 2, 24, &max_distance)
+        let tolerance = DBig::from_str("1e-4").unwrap();
+        let (cx, cy) = newton_nucleus(&start_x, &start_y, 2, 24, &max_distance, &tolerance)
             .expect("period-2 nucleus should converge");
 
         let cx_f64 = dbig_to_f64(&cx);
         let cy_f64 = dbig_to_f64(&cy);
         assert!((cx_f64 + 1.0).abs() < 1e-10, "cx={}", cx_f64);
         assert!(cy_f64.abs() < 1e-10, "cy={}", cy_f64);
+    }
+
+    #[test]
+    fn find_minibrot_snaps_to_period_two_nucleus() {
+        // View sitting just off the period-2 nucleus (c = -1) at a modest zoom.
+        let mut nav = MandelbrotNavigator::new("-1.0000003", "0.0000002", "1e-6", 0.0);
+        let res = nav.find_minibrot(4096, 4.0);
+        assert_eq!(res[0], "ok", "expected a hit, got {:?}", res);
+        let cx = res[1].parse::<f64>().unwrap();
+        let cy = res[2].parse::<f64>().unwrap();
+        let period: usize = res[3].parse().unwrap();
+        assert_eq!(period, 2, "period {}", period);
+        assert!((cx + 1.0).abs() < 1e-12, "cx={}", cx);
+        assert!(cy.abs() < 1e-12, "cy={}", cy);
+    }
+
+    #[test]
+    fn find_minibrot_uses_full_precision_centre() {
+        // The view centre carries far more digits than f64 can hold and the zoom
+        // is past the f64 floor — `detect_period_f64` would truncate the centre
+        // and fail, but the DBig ball method must still resolve period 2. This is
+        // the whole point of the "deep" detector.
+        // Offset from the c=-1 nucleus is ~5e-23, well inside the ball radius
+        // (4·scale = 4e-22), but far beyond f64's reach.
+        let mut nav = MandelbrotNavigator::new(
+            "-0.99999999999999999999995",
+            "0.00000000000000000000003",
+            "1e-22",
+            0.0,
+        );
+        let res = nav.find_minibrot(8192, 4.0);
+        assert_eq!(res[0], "ok", "expected a hit at depth, got {:?}", res);
+        assert_eq!(res[3].parse::<usize>().unwrap(), 2);
+        let cx = res[1].parse::<f64>().unwrap();
+        assert!((cx + 1.0).abs() < 1e-12, "cx={}", cx);
+    }
+
+    #[test]
+    fn find_minibrot_returns_none_in_escaping_region() {
+        // c = 0.4 escapes quickly: no atom under the view.
+        let mut nav = MandelbrotNavigator::new("0.4", "0.3", "1e-5", 0.0);
+        let res = nav.find_minibrot(4096, 4.0);
+        assert_eq!(res[0], "none", "expected no minibrot, got {:?}", res);
     }
 
     // test string_to_dbig_to_string
@@ -2248,3 +2412,4 @@ mod tests {
         assert!(nav.bla_result.iter().any(|st| st.alpha_exp != 0 || st.ab_exp != 0));
     }
 }
+

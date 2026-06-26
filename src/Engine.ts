@@ -127,6 +127,12 @@ type ReferenceWorkerRequest =
         jobId: number
         grid: number
     }
+    | {
+        type: 'findMinibrot'
+        jobId: number
+        maxIter: number
+        radiusFactor: number
+    }
     | { type: 'dispose' }
 
 type ReferenceWorkerResponse =
@@ -166,6 +172,14 @@ type ReferenceWorkerResponse =
         result: PadeBenchmarkResult
     }
     | {
+        type: 'minibrotFound'
+        jobId: number
+        status: 'ok' | 'none' | 'nonewton'
+        cx: string | null
+        cy: string | null
+        period: number | null
+    }
+    | {
         type: 'ready'
     }
 
@@ -177,6 +191,14 @@ export type PadeBenchmarkResult = {
     stepsPade: number
     mismatches: number
     maxIterDelta: number
+}
+
+export type MinibrotResult = {
+    /** 'ok' = nucleus found; 'none' = no atom under the view; 'nonewton' = period found but Newton did not converge. */
+    status: 'ok' | 'none' | 'nonewton'
+    cx: string | null
+    cy: string | null
+    period: number | null
 }
 
 function shouldTrackOrbitMetrics(colorStops: ColorStop[]): boolean {
@@ -481,6 +503,7 @@ export class Engine {
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private maxBlaSkip = 65536
     private pendingBenchmarkResolve: ((r: PadeBenchmarkResult) => void) | null = null
+    private pendingMinibrotResolve: ((r: MinibrotResult) => void) | null = null
     // Time-to-completion of the last render session (ms). Wall includes everything;
     // GPU is the accumulated mandelbrot-pass compute (the part blocks reduce).
     lastCompletionWallMs = 0
@@ -843,6 +866,17 @@ export class Engine {
             const resolve = this.pendingBenchmarkResolve
             this.pendingBenchmarkResolve = null
             resolve?.(message.result)
+            return
+        }
+        if (message.type === 'minibrotFound') {
+            const resolve = this.pendingMinibrotResolve
+            this.pendingMinibrotResolve = null
+            resolve?.({
+                status: message.status,
+                cx: message.cx,
+                cy: message.cy,
+                period: message.period,
+            })
             return
         }
         if (message.type === 'ready') {
@@ -1919,6 +1953,27 @@ export class Engine {
         return new Promise<PadeBenchmarkResult>((resolve) => {
             this.pendingBenchmarkResolve = resolve
             this.postReferenceWorker({ type: 'benchmarkPade', jobId: this.referenceJobId, grid })
+        })
+    }
+
+    // Find the minibrot under the current view (deep period detection + Newton
+    // nucleus refinement, both arbitrary-precision in the worker). Resolves with
+    // the exact nucleus coordinates so the caller can recentre the view on it.
+    // `radiusFactor` scales the view radius used by the ball test (~2–4 covers a
+    // centred minibrot; larger snaps to a bigger parent atom).
+    findMinibrot(radiusFactor = 4): Promise<MinibrotResult> {
+        const empty: MinibrotResult = { status: 'none', cx: null, cy: null, period: null }
+        // Supersede any in-flight request so its caller does not hang.
+        this.pendingMinibrotResolve?.(empty)
+        this.pendingMinibrotResolve = null
+        return new Promise<MinibrotResult>((resolve) => {
+            this.pendingMinibrotResolve = resolve
+            this.postReferenceWorker({
+                type: 'findMinibrot',
+                jobId: this.referenceJobId,
+                maxIter: this.currentMaxIterations,
+                radiusFactor,
+            })
         })
     }
 

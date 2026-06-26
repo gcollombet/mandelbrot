@@ -49,6 +49,13 @@ type BenchmarkPadeMessage = {
     grid: number
 }
 
+type FindMinibrotMessage = {
+    type: 'findMinibrot'
+    jobId: number
+    maxIter: number
+    radiusFactor: number
+}
+
 type DisposeMessage = {
     type: 'dispose'
 }
@@ -60,6 +67,7 @@ type ReferenceWorkerMessage =
     | SetBlaEpsilonMessage
     | SetMaxBlaSkipMessage
     | BenchmarkPadeMessage
+    | FindMinibrotMessage
     | DisposeMessage
 
 type OrbitChunkResponse = {
@@ -114,6 +122,15 @@ type PadeBenchmarkResponse = {
     }
 }
 
+type MinibrotFoundResponse = {
+    type: 'minibrotFound'
+    jobId: number
+    status: 'ok' | 'none' | 'nonewton'
+    cx: string | null
+    cy: string | null
+    period: number | null
+}
+
 type ReferenceWorkerResponse =
     | OrbitChunkResponse
     | BlaReadyResponse
@@ -121,6 +138,7 @@ type ReferenceWorkerResponse =
     | ErrorResponse
     | ReadyResponse
     | PadeBenchmarkResponse
+    | MinibrotFoundResponse
 
 type WorkerContext = typeof globalThis & {
     postMessage(message: unknown, transfer?: Transferable[]): void
@@ -389,6 +407,28 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                         },
                     })
                     b.free()
+                }
+                break
+            case 'findMinibrot':
+                if (navigator && message.jobId === activeJobId) {
+                    // The worker navigator already tracks the current view (set on
+                    // every updateView); detect the atom period at full precision
+                    // and refine to its nucleus.
+                    const res = navigator.find_minibrot(message.maxIter, message.radiusFactor)
+                    const status = res[0] as 'ok' | 'none' | 'nonewton'
+                    postResponse({
+                        type: 'minibrotFound',
+                        jobId: message.jobId,
+                        status,
+                        cx: status === 'ok' ? res[1] : null,
+                        cy: status === 'ok' ? res[2] : null,
+                        period:
+                            status === 'ok'
+                                ? Number(res[3])
+                                : status === 'nonewton'
+                                  ? Number(res[1])
+                                  : null,
+                    })
                 }
                 break
             case 'dispose':

@@ -384,6 +384,42 @@ function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = '
   tempCanvas.width = rowData.width;
   tempCanvas.height = 1;
   const tempCtx = tempCanvas.getContext('2d');
+// Deep "find minibrot": ask the engine to detect the atom under the current
+// view (full-precision period detection + Newton nucleus), then recentre the
+// view exactly on its nucleus, keeping the current zoom.
+const findingMinibrot = ref(false);
+const findMinibrotStatus = ref<string | null>(null);
+let findMinibrotStatusTimer: ReturnType<typeof setTimeout> | null = null;
+
+function setMinibrotStatus(text: string) {
+  findMinibrotStatus.value = text;
+  if (findMinibrotStatusTimer) clearTimeout(findMinibrotStatusTimer);
+  findMinibrotStatusTimer = setTimeout(() => { findMinibrotStatus.value = null; }, 4000);
+}
+
+async function findMinibrot() {
+  if (!props.engine || findingMinibrot.value) return;
+  findingMinibrot.value = true;
+  findMinibrotStatus.value = null;
+  try {
+    const res = await props.engine.findMinibrot(4);
+    if (res.status === 'ok' && res.cx && res.cy) {
+      // Setting the model centre teleports the view via the parent watcher
+      // (cancel transition → origin → resetReference), keeping the zoom.
+      model.value = { ...model.value, cx: res.cx, cy: res.cy };
+      setMinibrotStatus(`Centered on period-${res.period} minibrot`);
+    } else if (res.status === 'nonewton') {
+      setMinibrotStatus(`Period ${res.period} found, but the nucleus did not converge`);
+    } else {
+      setMinibrotStatus('No minibrot under this view — zoom onto one first');
+    }
+  } catch {
+    setMinibrotStatus('Find minibrot failed');
+  } finally {
+    findingMinibrot.value = false;
+  }
+}
+
   if (!tempCtx) return '';
   tempCtx.putImageData(rowData, 0, 0);
   ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
@@ -1989,6 +2025,19 @@ async function importSkyboxTexture(event: Event) {
         <div class="lab">
           <div class="l1">Mu</div>
           <div class="l2">Escape value scaling</div>
+      <div class="find-minibrot-row">
+        <button
+          class="tbtn find-minibrot-btn"
+          :disabled="!props.engine || findingMinibrot"
+          title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
+          @click="findMinibrot"
+        >
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          {{ findingMinibrot ? 'Searching…' : 'Find minibrot' }}
+        </button>
+        <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
+      </div>
+
         </div>
         <div class="mu-ctl">
           <input type="range" min="0" max="5" step="0.01" v-model="muSlider" />
@@ -4393,6 +4442,18 @@ async function importSkyboxTexture(event: Event) {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
+}
+.cv-body .find-minibrot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 4px;
+  flex-wrap: wrap;
+}
+.cv-body .find-minibrot-status {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--ink-2);
 }
 .cv-body .txt-in::placeholder {
   color: var(--ink-4);
