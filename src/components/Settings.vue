@@ -326,20 +326,40 @@ const sliderPhaseColoring = computed({
   }
 });
 // Slider log2(scale) : valeurs de slider 1 à 300 —> scale de 2^-1 à 2^-300
+// Decimal order of magnitude of a (possibly very deep) scale string. Number()
+// underflows to 0 below ~1e-308, so read the exponent straight off the string
+// for deep values. Returns log10(scale) (negative when zoomed in).
+function scaleLog10(scaleStr: string): number {
+  const s = (scaleStr ?? '').toLowerCase();
+  if (s.includes('e')) {
+    const parts = s.split('e');
+    return parseFloat(parts[1]) || 0;
+  }
+  const f = parseFloat(s);
+  if (f > 0 && f !== Infinity) return Math.log10(f);
+  return 0;
+}
+
+const SCALE_SLIDER_MAX = 300;
+
+// The slider maps to the decimal zoom depth: position v ⇒ scale 1e-v, so it
+// reads directly as a power of ten (1 → 10⁻¹ … 300 → 10⁻³⁰⁰). The scale is set
+// as a `1e-v` STRING — never `2**-v`, which underflows past ~1e-324. The
+// arbitrary-precision navigator parses the string natively.
 const scaleSlider = computed({
   get: () => {
-    // Clamp la scale, éviter NaN si vide
-    const s = Number(model.value.scale);
-    const slider = s > 0 ? -Math.log2(s) : 300;
-    if (!isFinite(slider)) return 1;
-    return Math.min(Math.max(Math.round(slider), 1), 300); // Entre 1 et 300
+    const mag = -scaleLog10(model.value.scale);
+    if (!isFinite(mag)) return 1;
+    return Math.min(Math.max(Math.round(mag), 1), SCALE_SLIDER_MAX);
   },
   set: (val: number) => {
-    // Clamp entre 1 et 300
-    const v = Math.min(Math.max(Math.round(val), 1), 300);
-    model.value.scale = (2 ** -v).toPrecision(10);
+    const v = Math.min(Math.max(Math.round(val), 1), SCALE_SLIDER_MAX);
+    model.value.scale = `1e-${v}`;
   }
 });
+
+// Zoom readout as a power of ten (survives JS float underflow at deep zoom).
+const scaleExponent = computed(() => Math.round(scaleLog10(model.value.scale)));
 
 
 const coordsCopied = ref(false);
@@ -364,26 +384,6 @@ function updateCy(val: string) {
   };
 }
 
-function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = 'lab'): string {
-  const canvas = document.createElement('canvas');
-  canvas.width = 320;
-  canvas.height = 40;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return '';
-
-  if (colorStops.length === 0) {
-    ctx.fillStyle = '#000';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-    return canvas.toDataURL('image/png');
-  }
-
-  const palette = new Palette(colorStops, mode);
-  const rowData = palette.generateThumbnailRow(); // ImageData (4096×1, always opaque)
-
-  const tempCanvas = document.createElement('canvas');
-  tempCanvas.width = rowData.width;
-  tempCanvas.height = 1;
-  const tempCtx = tempCanvas.getContext('2d');
 // Deep "find minibrot": ask the engine to detect the atom under the current
 // view (full-precision period detection + Newton nucleus), then recentre the
 // view exactly on its nucleus, keeping the current zoom.
@@ -420,6 +420,26 @@ async function findMinibrot() {
   }
 }
 
+function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = 'lab'): string {
+  const canvas = document.createElement('canvas');
+  canvas.width = 320;
+  canvas.height = 40;
+  const ctx = canvas.getContext('2d');
+  if (!ctx) return '';
+
+  if (colorStops.length === 0) {
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+    return canvas.toDataURL('image/png');
+  }
+
+  const palette = new Palette(colorStops, mode);
+  const rowData = palette.generateThumbnailRow(); // ImageData (4096×1, always opaque)
+
+  const tempCanvas = document.createElement('canvas');
+  tempCanvas.width = rowData.width;
+  tempCanvas.height = 1;
+  const tempCtx = tempCanvas.getContext('2d');
   if (!tempCtx) return '';
   tempCtx.putImageData(rowData, 0, 0);
   ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
@@ -2005,13 +2025,26 @@ async function importSkyboxTexture(event: Event) {
         </button>
       </div>
 
+      <div class="find-minibrot-row">
+        <button
+          class="tbtn find-minibrot-btn"
+          :disabled="!props.engine || findingMinibrot"
+          title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
+          @click="findMinibrot"
+        >
+          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+          {{ findingMinibrot ? 'Searching…' : 'Find minibrot' }}
+        </button>
+        <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
+      </div>
+
       <div class="frow">
         <div class="lab">
           <div class="l1">Zoom</div>
           <div class="l2">Magnification — scale of the view</div>
         </div>
         <input type="range" min="1" max="300" step="1" v-model.number="scaleSlider" />
-        <span class="val">{{ Number(model.scale).toExponential(2) }}</span>
+        <span class="val">10<sup>{{ scaleExponent }}</sup></span>
       </div>
 
       <div class="frow">
@@ -2031,19 +2064,6 @@ async function importSkyboxTexture(event: Event) {
         <div class="lab">
           <div class="l1">Mu</div>
           <div class="l2">Escape value scaling</div>
-      <div class="find-minibrot-row">
-        <button
-          class="tbtn find-minibrot-btn"
-          :disabled="!props.engine || findingMinibrot"
-          title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
-          @click="findMinibrot"
-        >
-          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-          {{ findingMinibrot ? 'Searching…' : 'Find minibrot' }}
-        </button>
-        <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
-      </div>
-
         </div>
         <div class="mu-ctl">
           <input type="range" min="0" max="5" step="0.01" v-model="muSlider" />
@@ -4423,6 +4443,18 @@ async function importSkyboxTexture(event: Event) {
   cursor: default;
   pointer-events: none;
 }
+.cv-body .find-minibrot-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  margin: 10px 0 4px;
+  flex-wrap: wrap;
+}
+.cv-body .find-minibrot-status {
+  font-family: var(--sans);
+  font-size: 12px;
+  color: var(--ink-2);
+}
 .cv-body .tbtn.danger {
   margin-left: auto;
   color: var(--red);
@@ -4448,18 +4480,6 @@ async function importSkyboxTexture(event: Event) {
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
-}
-.cv-body .find-minibrot-row {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  margin: 10px 0 4px;
-  flex-wrap: wrap;
-}
-.cv-body .find-minibrot-status {
-  font-family: var(--sans);
-  font-size: 12px;
-  color: var(--ink-2);
 }
 .cv-body .txt-in::placeholder {
   color: var(--ink-4);
