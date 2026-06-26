@@ -157,11 +157,12 @@ const sentinelSeedStepIndex = computed({
 });
 
 // BLA/Padé radius ε on a log10 scale: slider value is the exponent (R = ε·|A| for
-// affine, √ε·|A| for Padé). Recommended band [1e-8, 1e-4]; allow [1e-8, 1e-2].
+// affine, √ε·|A| for Padé). Bounded to the safe band [1e-8, 1e-4]: above 1e-4 the
+// Padé √ε radius admits blocks beyond the rational map's validity (slight distortion).
 const blaEpsilonExp = computed({
   get: () => Math.round(Math.log10(model.value.blaEpsilon ?? 1e-4)),
   set: (exp: number) => {
-    model.value.blaEpsilon = Math.pow(10, Math.min(-2, Math.max(-8, Math.round(exp))));
+    model.value.blaEpsilon = Math.pow(10, Math.min(-4, Math.max(-8, Math.round(exp))));
   },
 });
 
@@ -2755,7 +2756,7 @@ async function importSkyboxTexture(event: Event) {
       </div>
       <div class="gfx-slider-row" v-if="model.approximationMode !== 'perturbation'">
         <span class="gfx-slider-label">Radius ε</span>
-        <input class="slider" type="range" min="-8" max="-2" step="1" v-model.number="blaEpsilonExp" aria-label="BLA/Padé radius epsilon" />
+        <input class="slider" type="range" min="-8" max="-4" step="1" v-model.number="blaEpsilonExp" aria-label="BLA/Padé radius epsilon" />
         <span class="gfx-slider-value">{{ (model.blaEpsilon ?? 1e-4).toExponential(0) }}</span>
       </div>
       <div class="gfx-slider-row" v-if="model.approximationMode !== 'perturbation'">
