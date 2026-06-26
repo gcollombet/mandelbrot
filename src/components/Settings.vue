@@ -614,7 +614,10 @@ async function savePreset() {
     }
   } catch { /* ignore errors, no thumbnail */ }
   // Clone and strip performance fields before saving
-  const savedValue = structuredClone(toRaw(model.value));
+  // JSON clone (not structuredClone): after a whole-object model replacement the
+  // params can carry nested Vue reactive Proxies that toRaw doesn't unwrap, and
+  // structuredClone throws DataCloneError on a Proxy. The preset is JSON-saved anyway.
+  const savedValue = JSON.parse(JSON.stringify(model.value));
   stripSessionPerformanceFields(savedValue);
   stripExplorationStateFields(savedValue);
   delete (savedValue as any).activateAnimate;
@@ -658,7 +661,10 @@ async function quickSnapshot() {
       thumbnail = await props.engine.getSnapshotPng(256);
     }
   } catch { /* ignore */ }
-  const savedValue = structuredClone(toRaw(model.value));
+  // JSON clone (not structuredClone): after a whole-object model replacement the
+  // params can carry nested Vue reactive Proxies that toRaw doesn't unwrap, and
+  // structuredClone throws DataCloneError on a Proxy. The preset is JSON-saved anyway.
+  const savedValue = JSON.parse(JSON.stringify(model.value));
   stripSessionPerformanceFields(savedValue);
   stripExplorationStateFields(savedValue);
   delete (savedValue as any).activateAnimate;

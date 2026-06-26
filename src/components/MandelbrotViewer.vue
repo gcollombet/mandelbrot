@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, toRaw, watch} from 'vue';
+import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
@@ -492,8 +492,18 @@ onUnmounted(() => {
   if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
   if (aaProgressTimer !== null) clearInterval(aaProgressTimer);
 });
+// Deep-clone to a plain, mutable object. JSON round-trip (not structuredClone)
+// because the params object can transiently carry nested Vue reactive Proxies —
+// e.g. after a whole-object model replacement from Settings (`{...model.value}`),
+// whose nested values stay proxies that `toRaw` does NOT unwrap (it only unwraps
+// the top level). structuredClone throws DataCloneError on a Proxy; JSON.stringify
+// reads straight through it. These snapshots are all JSON-serializable anyway.
+function clonePlain<T>(value: T): T {
+  return JSON.parse(JSON.stringify(value));
+}
+
 watch(mandelbrotParams, (params) => {
-  const saved = structuredClone(toRaw(params));
+  const saved = clonePlain(params);
   stripExplorationStateFields(saved);
   localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(saved));
 }, { deep: true });
@@ -713,7 +723,7 @@ async function triggerQuickSnapshot() {
       thumbnail = await engine.getSnapshotPng(256);
     }
   } catch { /* ignore */ }
-  const savedValue = structuredClone(toRaw(mandelbrotParams.value));
+  const savedValue = clonePlain(mandelbrotParams.value);
   stripSessionPerformanceFields(savedValue);
   stripExplorationStateFields(savedValue);
   delete (savedValue as any).activateAnimate;
@@ -1409,7 +1419,7 @@ function startTravelToPreset(preset: PresetRecord) {
   travelTargetPreset = preset;
   
 
-  travelStartColorStops = structuredClone(toRaw(mandelbrotParams.value.colorStops));
+  travelStartColorStops = clonePlain(mandelbrotParams.value.colorStops);
   
   travelAnimationId = requestAnimationFrame(tickTravelAnimation);
 }
