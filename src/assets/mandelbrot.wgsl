@@ -26,8 +26,6 @@
 struct MandelbrotStep {
   zx: f32,
   zy: f32,
-  dx: f32,
-  dy: f32,
 };
 
 struct Mandelbrot {
@@ -70,6 +68,12 @@ struct BlaStep {
   radius_alpha: f32,
   alpha_exp: i32,
   radius_beta: f32,
+  // Padé [1/1] denominator coefficient D = (dx,dy)·2^d_exp. Zero in affine mode
+  // (the block is then purely linear). Carried for the rational application; it is
+  // out of the radius gate (it is √ε-small in the pullback). See add-pade-approximation.
+  dx: f32,
+  dy: f32,
+  d_exp: i32,
 };
 
 struct BlaLevel {
@@ -112,6 +116,16 @@ fn vs_main(@builtin(vertex_index) VertexIndex: u32) -> VertexOutput {
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
+
+// Complex reciprocal 1/z = conj(z)/|z|² (used by the Padé block application).
+fn cinv(z: vec2<f32>) -> vec2<f32> {
+  return vec2<f32>(z.x, -z.y) / dot(z, z);
+}
+
+// Padé pole guard: when |1 + D·dz|² < PADE_POLE2 the rational map is near its pole,
+// so the block is rejected (descend a level / fall back to an exact step). Within
+// the √ε validity radius |D·dz| ≤ √ε ⇒ |1+D·dz| ≈ 1, so this fires very rarely.
+const PADE_POLE2: f32 = 1e-4;
 
 // ── extended-exponent complex (floatexp) ───────────────────────────
 // value = m · 2^e, with one shared integer exponent for the whole complex.
@@ -286,17 +300,40 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
         // BLA radii are input-domain bounds: they describe when the block's
         // linearized map is valid for the current perturbation before the skip.
         if (dzMag2 <= radius * radius) {
-          let candidate = cmul(a, *dz) + cmul(b, dc);
-          // Do not let a multi-iteration BLA block jump over the first escape.
-          // The color pass needs z/DE at the escape iteration, not after a block.
-          let candidateZ = getOrbit(*ref_i + skip) + candidate;
-          if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
-            *dz = candidate;
-            *zOut = candidateZ;
-            // der' = der·a + b, in mantissa space.
-            *derM = cmul(*derM, a) + b * derInvScale;
-            *ref_i += skip;
-            return skip;
+          if (mandelbrot.approximationMode >= 1.5) {
+            // ── Padé [1/1]: z ← (A·z + B·c)/(1 + D·z) ──
+            let d = ldexp(vec2<f32>(bla.dx, bla.dy), vec2<i32>(bla.d_exp, bla.d_exp));
+            let m = vec2<f32>(1.0, 0.0) + cmul(d, *dz);   // 1 + D·dz
+            if (dot(m, m) >= PADE_POLE2) {                // pole-safe (else descend)
+              let invM = cinv(m);
+              let num = cmul(a, *dz) + cmul(b, dc);
+              let candidate = cmul(num, invM);
+              let candidateZ = getOrbit(*ref_i + skip) + candidate;
+              if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+                *dz = candidate;
+                *zOut = candidateZ;
+                // D4 derivative: der' = (A/M²)·der + B/M, reusing invM = 1/M.
+                let derNum = cmul(cmul(a, invM), *derM) + b * derInvScale;
+                *derM = cmul(invM, derNum);
+                *ref_i += skip;
+                return skip;
+              }
+            }
+            // pole too close or escape guard: fall through and descend a level.
+          } else {
+            // ── affine BLA: z ← A·z + B·c ──
+            let candidate = cmul(a, *dz) + cmul(b, dc);
+            // Do not let a multi-iteration BLA block jump over the first escape.
+            // The color pass needs z/DE at the escape iteration, not after a block.
+            let candidateZ = getOrbit(*ref_i + skip) + candidate;
+            if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+              *dz = candidate;
+              *zOut = candidateZ;
+              // der' = der·a + b, in mantissa space.
+              *derM = cmul(*derM, a) + b * derInvScale;
+              *ref_i += skip;
+              return skip;
+            }
           }
         }
       }
@@ -419,7 +456,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var i: f32 = 0.0;
   var dz = vec2<f32>(prev_zx, prev_zy);
   var ref_i = decode_ref_i(prev_ref_i);
-  var z = getOrbit(ref_i) + dz;
+  // Carried reference-orbit value. Invariant: refZ == getOrbit(ref_i) at the end
+  // of every loop branch, so a single-step iteration reads the orbit once (it used
+  // to read getOrbit(ref_i) and getOrbit(ref_i+1) — the latter is the next step's
+  // refZ). Resyncs are always a fresh getOrbit read (never z − dz), so the orbit
+  // values fed to the iteration are identical to reloading every step.
+  var refZ = getOrbit(ref_i);
+  var z = refZ + dz;
 
   // Derivative state der = derM · exp(derS), converted from the stored
   // (angle, log magnitude) representation in layers 4/5.
@@ -479,6 +522,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         usedBla = true;
         z = blaZ;
         i += f32(skipped);
+        refZ = getOrbit(ref_i); // ref_i jumped past the block — resync carried orbit
         if (trackOrbitMetrics) {
           previousStripeEma = stripeEma;
           previousAvgDirSum = avgDirSum;
@@ -488,11 +532,11 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           avgCount += f32(skipped);
         }
       } else {
-        let refZ = getOrbit(ref_i);
         let zPrev = refZ + dz;
         dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
         ref_i += 1;
-        z = getOrbit(ref_i) + dz;
+        refZ = getOrbit(ref_i);
+        z = refZ + dz;
         derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
         i += 1.0;
         if (trackOrbitMetrics) {
@@ -526,15 +570,16 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       if (dot_z < dot_dz || ref_i == globalMaxIterI) {
         dz = z;
         ref_i = 0;
+        refZ = getOrbit(0);
       }
     }
   } else {
     while (i < max_iteration && ref_i < globalMaxIterI) {
-      let refZ = getOrbit(ref_i);
       let zPrev = refZ + dz;
       dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
       ref_i += 1;
-      z = getOrbit(ref_i) + dz;
+      refZ = getOrbit(ref_i);
+      z = refZ + dz;
       derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
       i += 1.0;
       if (trackOrbitMetrics) {
@@ -567,6 +612,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       if (dot_z < dot_dz || ref_i == globalMaxIterI) {
         dz = z;
         ref_i = 0;
+        refZ = getOrbit(0);
       }
     }
   }
@@ -711,7 +757,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   var i: f32 = 0.0;
   var dz = fe_renorm(fe(prev_dz_m, prev_dz_e));
   var ref_i = prev_ref_i_int;
-  var z = getOrbit(ref_i) + fe_to_vec(dz);
+  var refZ = getOrbit(ref_i); // carried orbit value (see mandelbrot_compute)
+  var z = refZ + fe_to_vec(dz);
 
   // Derivative state der = derM · exp(derS), same representation & storage as
   // the shallow path (already range-safe via the log scale derS).
@@ -734,7 +781,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   var shadingAngle = 0.0;
 
   // BLA acceleration in the deep path: skip iteration blocks when |dz| is small.
-  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5;
+  // Padé runs on the shallow path only; in the deep (floatexp) regime, pade mode
+  // (approximationMode ≥ 1.5) falls back to exact perturbation — the rational
+  // block + its derivative are not ported to fe yet (deferred). Affine BLA (1.0)
+  // still runs deep.
+  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5
+                && mandelbrot.approximationMode < 1.5;
   var skip0Log = 0;
   var log_dcMag = 0.0;
   if (useBlaDeep) {
@@ -752,15 +804,16 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
         usedBla = true;
         z = blaZ;
         i += f32(skipped);
+        refZ = getOrbit(ref_i); // ref_i jumped past the block — resync carried orbit
       }
     }
     if (skipped == 0) {
-      let refZ = getOrbit(ref_i);
       let zPrev = refZ + fe_to_vec(dz);
       // dz' = 2·z_n·dz + dz² + dc   (z_n = refZ is O(1) f32)
       dz = fe_add3(fe_cmul_f32(2.0 * refZ, dz), fe_cmul(dz, dz), dc);
       ref_i += 1;
-      z = getOrbit(ref_i) + fe_to_vec(dz);
+      refZ = getOrbit(ref_i);
+      z = refZ + fe_to_vec(dz);
       derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
       i += 1.0;
     }
@@ -788,6 +841,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     if (dot_z < fe_mag2_f32(dz) || ref_i == globalMaxIterI) {
       dz = fe_from_vec(z, 0);
       ref_i = 0;
+      refZ = getOrbit(0);
     }
   }
 

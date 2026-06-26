@@ -264,6 +264,8 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   activateAnimate: false,
   debugShading: false,
   approximationMode: 'perturbation',
+  blaEpsilon: 1e-4,
+  maxBlaSkip: 65536,
   dprMultiplier: 1.0,
   maxIterationMultiplier: 0.1,
   targetFps: 30,
@@ -376,14 +378,27 @@ async function applySelectedTexturesToEngine() {
 function onEngineReady(engine: Engine) {
   mandelbrotEngine.value = engine;
   applyApproximationToEngine();
+  applyBlaTuningToEngine();
   void applySelectedTexturesToEngine();
 }
 
 function applyApproximationToEngine() {
   const engine = mandelbrotEngine.value;
   if (!engine) return;
-  const mode: ApproximationMode = mandelbrotParams.value.approximationMode === 'bla' ? 'bla' : 'perturbation';
+  const raw = mandelbrotParams.value.approximationMode;
+  const mode: ApproximationMode = raw === 'bla' || raw === 'pade' ? raw : 'perturbation';
   engine.setApproximationMode(mode);
+}
+
+// BLA/Padé tuning: ε sets the validity radius (ε·|A| affine, √ε·|A| Padé), maxBlaSkip
+// caps the largest block jump. Both rebuild the table and re-render in a block mode.
+function applyBlaTuningToEngine() {
+  const engine = mandelbrotEngine.value;
+  if (!engine) return;
+  const eps = mandelbrotParams.value.blaEpsilon;
+  if (typeof eps === 'number' && isFinite(eps) && eps > 0) engine.setBlaEpsilon(eps);
+  const skip = mandelbrotParams.value.maxBlaSkip;
+  if (typeof skip === 'number' && isFinite(skip) && skip >= 2) engine.setMaxBlaSkip(skip);
 }
 
 // Restore parametres a partir du localStorage puis surveille et persiste a chaque changement
@@ -496,6 +511,11 @@ watch(
 watch(
   () => mandelbrotParams.value.approximationMode,
   () => { applyApproximationToEngine(); },
+);
+
+watch(
+  () => [mandelbrotParams.value.blaEpsilon, mandelbrotParams.value.maxBlaSkip],
+  () => { applyBlaTuningToEngine(); },
 );
 
 // When mobile nav expands, close all settings popups

@@ -3,7 +3,7 @@ import type {TextureMappingConfig} from "./TextureMapping.ts";
 import type {AnimationConfig} from "./AnimationConfig.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
-export type ApproximationMode = 'perturbation' | 'bla';
+export type ApproximationMode = 'perturbation' | 'bla' | 'pade';
 
 export interface MandelbrotParams {
     scale: string;
@@ -32,6 +32,8 @@ export interface MandelbrotParams {
     colorStops: ColorStop[];
     interpolationMode: InterpolationMode;
     approximationMode?: ApproximationMode;
+    blaEpsilon?: number;
+    maxBlaSkip?: number;
 
     tessellationLevel?: number;
     lightAngle?: number;

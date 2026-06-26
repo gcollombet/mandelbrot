@@ -80,6 +80,7 @@ pub struct MandelbrotStep {
 pub enum ApproximationMode {
     Perturbation = 0,
     BivariateLinear = 1,
+    Pade = 2,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -98,6 +99,12 @@ pub struct BlaStep {
     pub radius_alpha: f32, // alpha = radius_alpha · 2^alpha_exp
     pub alpha_exp: i32,
     pub radius_beta: f32,
+    // Padé [1/1] denominator coefficient D = (dx, dy) · 2^d_exp. Zero in affine
+    // mode. |D| ~ 1/|A| so it needs its own exponent: |A| reaches ~1e154 at depth,
+    // which would underflow dx/dy in f32 without d_exp.
+    pub dx: f32,
+    pub dy: f32,
+    pub d_exp: i32,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -138,6 +145,9 @@ pub struct MandelbrotNavigator {
     last_zy: DBig,
     approximation_mode: ApproximationMode,
     bla_epsilon: f32,
+    // Largest single block jump emitted into the table (power-of-two cap). UI-tunable;
+    // clamped to a power of two in [MIN_BLA_SKIP, 1<<20].
+    max_bla_skip: usize,
     bla_result: Box<Vec<BlaStep>>,
     bla_levels: Box<Vec<BlaLevel>>,
     bla_level_count: usize,
@@ -189,6 +199,7 @@ impl MandelbrotNavigator {
             last_zy: zero.clone(),
             approximation_mode: ApproximationMode::Perturbation,
             bla_epsilon: 1e-6,
+            max_bla_skip: 65536,
             bla_result: Box::new(Vec::with_capacity(20_000)),
             bla_levels: Box::new(Vec::with_capacity(32)),
             bla_level_count: 0,
@@ -325,12 +336,30 @@ impl MandelbrotNavigator {
         self.vangle = 0.0;
     }
 
+    // The BLA table cache key is (orbit_len, epsilon) and does NOT include the mode,
+    // so every mode change must invalidate it: affine uses an ε radius with D=0,
+    // Padé a √ε radius with a real D. Without this, switching modes reuses the
+    // other mode's table (e.g. BLA after Padé renders with the √ε+D table).
+    fn invalidate_bla_on_mode_change(&mut self, next: ApproximationMode) {
+        if self.approximation_mode != next {
+            self.bla_source_len = 0;
+            self.bla_level_count = 0;
+        }
+    }
+
     pub fn use_perturbation(&mut self) {
+        self.invalidate_bla_on_mode_change(ApproximationMode::Perturbation);
         self.approximation_mode = ApproximationMode::Perturbation;
     }
 
     pub fn use_bla(&mut self) {
+        self.invalidate_bla_on_mode_change(ApproximationMode::BivariateLinear);
         self.approximation_mode = ApproximationMode::BivariateLinear;
+    }
+
+    pub fn use_pade(&mut self) {
+        self.invalidate_bla_on_mode_change(ApproximationMode::Pade);
+        self.approximation_mode = ApproximationMode::Pade;
     }
 
     pub fn get_approximation_mode(&self) -> ApproximationMode {
@@ -348,6 +377,72 @@ impl MandelbrotNavigator {
 
     pub fn get_bla_epsilon(&self) -> f32 {
         self.bla_epsilon
+    }
+
+    pub fn set_max_bla_skip(&mut self, max_skip: u32) {
+        // Clamp to a power of two in [MIN_BLA_SKIP=2, 1<<20]; the table levels are
+        // powers of two, so a non-power cap would just round down anyway.
+        let clamped = (max_skip as usize).clamp(2, 1 << 20).next_power_of_two();
+        if clamped != self.max_bla_skip {
+            self.bla_source_len = 0;
+            self.bla_level_count = 0;
+        }
+        self.max_bla_skip = clamped;
+    }
+
+    pub fn get_max_bla_skip(&self) -> u32 {
+        self.max_bla_skip as u32
+    }
+
+    /// CPU benchmark over the *current* reference orbit: counts iteration loop steps
+    /// for exact perturbation vs affine BLA vs Padé blocks, on a `grid×grid` of pixel
+    /// offsets spanning the on-screen view (dc = t·scale). The algorithm mirrors the
+    /// shader (block selection + rational application + pole guard + rebasing), so the
+    /// step counts are representative of GPU work. `pade_mismatches` / `max_iter_delta`
+    /// cross-check that Padé reaches the same escape iteration as exact stepping.
+    pub fn benchmark_pade(&self, grid: u32) -> PadeBenchmark {
+        let len = self.last_iter.min(self.result.len());
+        if len < 8 {
+            return PadeBenchmark::default();
+        }
+        let orbit: Vec<(f64, f64)> =
+            (0..len).map(|i| (self.result[i].zx as f64, self.result[i].zy as f64)).collect();
+        let eps = (self.bla_epsilon.max(f32::MIN_POSITIVE)) as f64;
+        let max_skip = self.max_bla_skip;
+        let aff = bench_build_levels(&orbit, eps, false, max_skip);
+        let pad = bench_build_levels(&orbit, eps, true, max_skip);
+        // Bound the exact baseline cost (non-escaping pixels run to max_iter).
+        let max_iter = (len - 1).min(8000).max(1);
+        let scale = dbig_to_f64(&self.scale).abs().max(1e-300);
+        let n = grid.clamp(2, 128) as usize;
+        let (mut se, mut sa, mut sp) = (0u64, 0u64, 0u64);
+        let (mut mismatches, mut max_delta) = (0u32, 0u32);
+        for gy in 0..n {
+            for gx in 0..n {
+                let tx = (gx as f64 / (n - 1) as f64) * 2.0 - 1.0;
+                let ty = (gy as f64 / (n - 1) as f64) * 2.0 - 1.0;
+                let dc = (tx * scale, ty * scale);
+                let (s_e, i_e, e_e) = bench_run_pixel(&[], &orbit, dc, max_iter, false);
+                let (s_a, _ia, _ea) = bench_run_pixel(&aff, &orbit, dc, max_iter, false);
+                let (s_p, i_p, e_p) = bench_run_pixel(&pad, &orbit, dc, max_iter, true);
+                se += s_e as u64;
+                sa += s_a as u64;
+                sp += s_p as u64;
+                if i_p != i_e || e_p != e_e {
+                    mismatches += 1;
+                    max_delta = max_delta.max((i_p as i64 - i_e as i64).unsigned_abs() as u32);
+                }
+            }
+        }
+        PadeBenchmark {
+            pixels: (n * n) as u32,
+            max_iter: max_iter as u32,
+            steps_exact: se as f64,
+            steps_affine: sa as f64,
+            steps_pade: sp as f64,
+            pade_mismatches: mismatches,
+            max_iter_delta: max_delta,
+        }
     }
 
     pub fn zoom(&mut self, factor: f64) {
@@ -718,7 +813,7 @@ impl MandelbrotNavigator {
         // stretches). Each level halves in entry count, so the table tail is
         // bounded (< 2× total). Near orbit-zero approaches the per-level radius
         // collapses and exact iteration is forced regardless of this cap.
-        const MAX_BLA_SKIP: usize = 65536;
+        let max_bla_skip = self.max_bla_skip;
 
         if orbit_len <= 1 {
             self.bla_result.clear();
@@ -749,13 +844,13 @@ impl MandelbrotNavigator {
         self.bla_levels.clear();
 
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        let pade = self.approximation_mode == ApproximationMode::Pade;
         let mut previous_level: Vec<BlaF64> = Vec::with_capacity(orbit_len - 1);
         for start in 1..orbit_len {
             let z = self.result[start];
             let zx = z.zx as f64;
             let zy = z.zy as f64;
-            let alpha = epsilon * (zx * zx + zy * zy).sqrt();
-            previous_level.push(BlaF64 { ax: 2.0 * zx, ay: 2.0 * zy, bx: 1.0, by: 0.0, alpha, beta: 0.0 });
+            previous_level.push(bla_seed(zx, zy, epsilon, pade));
         }
 
         let mut skip = 1usize;
@@ -771,7 +866,7 @@ impl MandelbrotNavigator {
             level_start = self.bla_result.len();
         }
 
-        while skip < MAX_BLA_SKIP && skip * 2 < orbit_len {
+        while skip < max_bla_skip && skip * 2 < orbit_len {
             let merged_skip = skip * 2;
             let level_entry_count = previous_level.len() / 2;
             if level_entry_count == 0 {
@@ -782,22 +877,10 @@ impl MandelbrotNavigator {
             for idx in 0..level_entry_count {
                 let left = previous_level[idx * 2];
                 let right = previous_level[idx * 2 + 1];
-                let (ax, ay) = cmul64((right.ax, right.ay), (left.ax, left.ay));
-                let (abx, aby) = cmul64((right.ax, right.ay), (left.bx, left.by));
-                let a_left_abs = cabs64((left.ax, left.ay)).max(f64::MIN_POSITIVE);
-                let b_left_abs = cabs64((left.bx, left.by));
-                let merged_alpha = right.alpha / a_left_abs;
-                let merged_beta = (right.beta + b_left_abs) / a_left_abs;
-                // Conservative line-min: smallest alpha, largest beta. Clamp beta
-                // finite: when the orbit passes near 0 (a ≈ 0) the division blows
-                // it up; a huge beta just means the block is degenerate (radius
-                // goes negative → BLA not applied), which is the correct outcome.
-                let alpha = left.alpha.min(merged_alpha);
-                let beta = left.beta.max(merged_beta).min(1e30);
-                current_level.push(BlaF64 { ax, ay, bx: abx + right.bx, by: aby + right.by, alpha, beta });
+                current_level.push(bla_merge(left, right, pade));
             }
 
-            if merged_skip >= MIN_BLA_SKIP && merged_skip <= MAX_BLA_SKIP {
+            if merged_skip >= MIN_BLA_SKIP && merged_skip <= max_bla_skip {
                 self.bla_result.extend(current_level.iter().map(bla_f64_to_fe));
                 self.bla_levels.push(BlaLevel {
                     offset: level_start as u32,
@@ -1066,6 +1149,12 @@ struct BlaF64 {
     by: f64,
     alpha: f64,
     beta: f64,
+    // Padé [1/1] denominator coefficient D (block map (A·z+B·c)/(1+D·z)). Zero in
+    // affine mode (the block is then purely linear). D is carried for the block
+    // *application*, not the radius gate (it is √ε-small in the pullback): see
+    // design D3/D4 of the add-pade-approximation change.
+    dx: f64,
+    dy: f64,
 }
 
 fn cmul64(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
@@ -1074,6 +1163,67 @@ fn cmul64(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
 
 fn cabs64(a: (f64, f64)) -> f64 {
     (a.0 * a.0 + a.1 * a.1).sqrt()
+}
+
+// Complex −1/(re + i·im) = −conj / |·|². Returns (0,0) when the input is ~0 (a
+// degenerate seed, where the validity radius also collapses so the block is never
+// applied — matching the affine Bug-1 guard).
+fn cinv_neg64(re: f64, im: f64) -> (f64, f64) {
+    let d = re * re + im * im;
+    if !(d > 0.0) || !d.is_finite() {
+        return (0.0, 0.0);
+    }
+    (-re / d, im / d)
+}
+
+// Complex division a / b. Used by the Padé block application (rational map) in the
+// shader-port phase; defined here alongside the other complex helpers.
+#[allow(dead_code)]
+fn cdiv64(a: (f64, f64), b: (f64, f64)) -> (f64, f64) {
+    let d = b.0 * b.0 + b.1 * b.1;
+    ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+}
+
+// One-step seed at reference value Z = (zx, zy): A = 2Z, B = 1, β = 0. Affine
+// validity radius is ε·|Z|; the Padé seed reproduces z² exactly (D = −1/A) and is
+// valid to √ε·|Z| — a 1/√ε larger radius (design D2/D3). D is computed only in Padé
+// mode; affine entries keep D = 0.
+fn bla_seed(zx: f64, zy: f64, epsilon: f64, pade: bool) -> BlaF64 {
+    let mag = (zx * zx + zy * zy).sqrt();
+    let (alpha, dx, dy) = if pade {
+        let (dx, dy) = cinv_neg64(2.0 * zx, 2.0 * zy);
+        (epsilon.sqrt() * mag, dx, dy)
+    } else {
+        (epsilon * mag, 0.0, 0.0)
+    };
+    BlaF64 { ax: 2.0 * zx, ay: 2.0 * zy, bx: 1.0, by: 0.0, alpha, beta: 0.0, dx, dy }
+}
+
+// Merge two consecutive blocks: x = left (first), y = right (second). The affine
+// fields follow mathr; Padé additionally composes D_z = D_x + A_x·D_y (design D3,
+// with A_x = left.a). The radius α/β composes identically in both modes — D is out
+// of the radius gate (design D3-(a)).
+fn bla_merge(left: BlaF64, right: BlaF64, pade: bool) -> BlaF64 {
+    let (ax, ay) = cmul64((right.ax, right.ay), (left.ax, left.ay));
+    let (abx, aby) = cmul64((right.ax, right.ay), (left.bx, left.by));
+    let a_left_abs = cabs64((left.ax, left.ay)).max(f64::MIN_POSITIVE);
+    let b_left_abs = cabs64((left.bx, left.by));
+    let merged_alpha = right.alpha / a_left_abs;
+    let merged_beta = (right.beta + b_left_abs) / a_left_abs;
+    // Conservative line-min: smallest alpha, largest beta. Padé uses the same `min`
+    // (philosophy A) with the √ε seed — the CPU loop benchmark found the reciprocal-
+    // quadrature alternative (D3-B) does NOT reduce the residual accuracy tail near
+    // edge-of-chaos points, so the simpler `min` stays. Clamp beta finite (a ≈ 0 ⇒
+    // degenerate block, radius goes negative → not applied, the correct outcome).
+    let alpha = left.alpha.min(merged_alpha);
+    let beta = left.beta.max(merged_beta).min(1e30);
+    let (dx, dy) = if pade {
+        let (adyx, adyy) = cmul64((left.ax, left.ay), (right.dx, right.dy));
+        (left.dx + adyx, left.dy + adyy)
+    } else {
+        (0.0, 0.0)
+    };
+    BlaF64 { ax, ay, bx: abx + right.bx, by: aby + right.by, alpha, beta, dx, dy }
 }
 
 // (exponent, 2^-exponent) such that |x|·2^-exponent ∈ [0.5, 1); (0, 1.0) for 0.
@@ -1091,6 +1241,9 @@ fn bla_f64_to_fe(s: &BlaF64) -> BlaStep {
     let ab_max = s.ax.abs().max(s.ay.abs()).max(s.bx.abs()).max(s.by.abs());
     let (ab_exp, ab_scale) = frexp_scale(ab_max);
     let (alpha_exp, alpha_scale) = frexp_scale(s.alpha);
+    // D carries its own exponent (|D| ~ 1/|A|, unrelated to the a/b scale).
+    let d_max = s.dx.abs().max(s.dy.abs());
+    let (d_exp, d_scale) = frexp_scale(d_max);
     BlaStep {
         ax: (s.ax * ab_scale) as f32,
         ay: (s.ay * ab_scale) as f32,
@@ -1100,6 +1253,9 @@ fn bla_f64_to_fe(s: &BlaF64) -> BlaStep {
         radius_alpha: (s.alpha * alpha_scale) as f32,
         alpha_exp,
         radius_beta: s.beta as f32,
+        dx: (s.dx * d_scale) as f32,
+        dy: (s.dy * d_scale) as f32,
+        d_exp,
     }
 }
 
@@ -1242,6 +1398,138 @@ fn newton_nucleus(
     Some((cx, cy))
 }
 
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+#[derive(Default, Clone, Copy)]
+pub struct PadeBenchmark {
+    pub pixels: u32,
+    pub max_iter: u32,
+    pub steps_exact: f64,
+    pub steps_affine: f64,
+    pub steps_pade: f64,
+    pub pade_mismatches: u32,
+    pub max_iter_delta: u32,
+}
+
+struct PadeLevel {
+    skip: usize,
+    entries: Vec<BlaF64>,
+}
+
+fn bench_build_levels(orbit: &[(f64, f64)], epsilon: f64, pade: bool, max_skip: usize) -> Vec<PadeLevel> {
+    let n = orbit.len();
+    let mut levels = Vec::new();
+    if n < 3 {
+        return levels;
+    }
+    let mut prev: Vec<BlaF64> =
+        (1..n).map(|i| bla_seed(orbit[i].0, orbit[i].1, epsilon, pade)).collect();
+    let mut skip = 1usize;
+    while skip * 2 < n && skip < max_skip {
+        let m = prev.len() / 2;
+        if m == 0 {
+            break;
+        }
+        let cur: Vec<BlaF64> =
+            (0..m).map(|i| bla_merge(prev[2 * i], prev[2 * i + 1], pade)).collect();
+        skip *= 2;
+        levels.push(PadeLevel { skip, entries: cur.clone() });
+        prev = cur;
+    }
+    levels
+}
+
+fn bench_block(e: &BlaF64, dz: (f64, f64), dc: (f64, f64), pade: bool) -> Option<(f64, f64)> {
+    let nn = cmul64((e.ax, e.ay), dz);
+    let bc = cmul64((e.bx, e.by), dc);
+    let num = (nn.0 + bc.0, nn.1 + bc.1);
+    if !pade {
+        return Some(num);
+    }
+    let dd = cmul64((e.dx, e.dy), dz);
+    let m = (1.0 + dd.0, dd.1);
+    if m.0 * m.0 + m.1 * m.1 < 1e-4 {
+        return None; // pole guard
+    }
+    Some(cdiv64(num, m))
+}
+
+// One pixel: exact perturbation + block jumps + rebasing. Empty `levels` ⇒ exact.
+// Returns (loop steps, mandelbrot iteration reached, escaped).
+fn bench_run_pixel(levels: &[PadeLevel], orbit: &[(f64, f64)], dc: (f64, f64), max_iter: usize, pade: bool) -> (usize, usize, bool) {
+    let bailout2 = 4.0_f64;
+    let orbit_len = orbit.len();
+    let dc_mag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
+    let mut dz = (0.0_f64, 0.0_f64);
+    let mut ref_i = 0usize;
+    let mut iter = 0usize;
+    let mut steps = 0usize;
+    let mut escaped = false;
+    while iter < max_iter {
+        let mut applied = false;
+        if ref_i != 0 {
+            let shifted = ref_i - 1;
+            let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+            for lvl in levels.iter().rev() {
+                let skip = lvl.skip;
+                if shifted % skip != 0 {
+                    continue;
+                }
+                let slot = shifted / skip;
+                if slot >= lvl.entries.len() || ref_i + skip > max_iter {
+                    continue;
+                }
+                let e = &lvl.entries[slot];
+                let radius = (e.alpha - e.beta * dc_mag).max(0.0);
+                if dz2 > radius * radius {
+                    continue;
+                }
+                let cand = match bench_block(e, dz, dc, pade) {
+                    Some(c) => c,
+                    None => continue,
+                };
+                let zi = orbit[ref_i + skip];
+                let candz = (zi.0 + cand.0, zi.1 + cand.1);
+                if skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 {
+                    continue;
+                }
+                dz = cand;
+                ref_i += skip;
+                iter += skip;
+                applied = true;
+                break;
+            }
+        }
+        if !applied {
+            let z = orbit[ref_i];
+            let m2 = cmul64((2.0 * z.0, 2.0 * z.1), dz);
+            let sq = cmul64(dz, dz);
+            dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
+            ref_i += 1;
+            iter += 1;
+        }
+        steps += 1;
+        if ref_i > orbit_len - 1 {
+            ref_i = orbit_len - 1;
+        }
+        let z = orbit[ref_i];
+        let full = (z.0 + dz.0, z.1 + dz.1);
+        let full2 = full.0 * full.0 + full.1 * full.1;
+        if full2 > bailout2 {
+            escaped = true;
+            break;
+        }
+        let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+        if full2 < dz2 || ref_i == orbit_len - 1 {
+            dz = full;
+            ref_i = 0;
+        }
+        if steps > max_iter * 2 + 16 {
+            break;
+        }
+    }
+    (steps, iter, escaped)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1277,6 +1565,431 @@ mod tests {
             nav.get_approximation_mode(),
             ApproximationMode::Perturbation
         );
+        nav.use_pade();
+        assert_eq!(nav.get_approximation_mode(), ApproximationMode::Pade);
+    }
+
+    #[test]
+    fn pade_seed_reproduces_quadratic_and_radius() {
+        // The Padé seed reproduces the exact step's z² term: expanding (A·z)/(1+D·z)
+        // with D = −1/A gives A·z + z² + O(z³), so the z² coefficient −A·D = 1. (D2)
+        let (zx, zy) = (0.3_f64, -0.4_f64);
+        let s = bla_seed(zx, zy, 1e-6, true);
+        let (adx, ady) = cmul64((s.ax, s.ay), (s.dx, s.dy)); // A·D
+        assert!(
+            (-adx - 1.0).abs() < 1e-12 && (-ady).abs() < 1e-12,
+            "Padé z² coefficient −A·D = ({}, {}), expected (1, 0)",
+            -adx,
+            -ady
+        );
+        // Padé validity radius is √ε·|Z| — a 1/√ε factor above affine ε·|Z|. (D3)
+        let a = bla_seed(zx, zy, 1e-6, false);
+        let ratio = s.alpha / a.alpha;
+        assert!(
+            ((ratio - 1.0 / 1e-6_f64.sqrt()) / ratio).abs() < 1e-9,
+            "radius ratio {} expected {}",
+            ratio,
+            1.0 / 1e-6_f64.sqrt()
+        );
+        assert_eq!((a.dx, a.dy), (0.0, 0.0)); // affine carries no D
+    }
+
+    // ── CPU-only skip diagnostic (Validation path step 2 / task 2.3) ───────────
+    // Compares how far the affine vs Padé block tables can skip at a swept input
+    // |dz|, no shader involved. Padé's √ε radius (vs affine ε) admits the same fixed
+    // block at a ~1/√ε larger |dz|, so in the band [ε|A|, √ε|A|] it out-skips affine.
+    // Isolates the math risk before any GPU work.
+
+    struct LevelF64 {
+        skip: usize,
+        entries: Vec<BlaF64>,
+    }
+
+    fn ref_orbit_f64(cx: f64, cy: f64, max_iter: usize) -> Vec<(f64, f64)> {
+        let mut v = Vec::with_capacity(max_iter + 1);
+        let (mut zx, mut zy) = (0.0_f64, 0.0_f64);
+        v.push((zx, zy));
+        for _ in 0..max_iter {
+            let nx = zx * zx - zy * zy + cx;
+            let ny = 2.0 * zx * zy + cy;
+            zx = nx;
+            zy = ny;
+            v.push((zx, zy));
+            if zx * zx + zy * zy > 1e12 {
+                break;
+            }
+        }
+        v
+    }
+
+    fn build_levels(orbit: &[(f64, f64)], epsilon: f64, pade: bool) -> Vec<LevelF64> {
+        let orbit_len = orbit.len();
+        let mut levels: Vec<LevelF64> = Vec::new();
+        if orbit_len < 3 {
+            return levels;
+        }
+        let mut prev: Vec<BlaF64> = (1..orbit_len)
+            .map(|i| bla_seed(orbit[i].0, orbit[i].1, epsilon, pade))
+            .collect();
+        let mut skip = 1usize; // skip-1 is the base; emitted levels start at skip 2
+        while skip * 2 < orbit_len {
+            let n = prev.len() / 2;
+            if n == 0 {
+                break;
+            }
+            let cur: Vec<BlaF64> =
+                (0..n).map(|i| bla_merge(prev[2 * i], prev[2 * i + 1], pade)).collect();
+            skip *= 2;
+            levels.push(LevelF64 { skip, entries: cur.clone() });
+            prev = cur;
+        }
+        levels
+    }
+
+    // Largest aligned block skip available at reference index m for input |dz|
+    // (dc = 0, so the radius is alpha). Mirrors the shader's level selection.
+    fn max_aligned_skip(levels: &[LevelF64], m: usize, dz_mag: f64) -> usize {
+        if m == 0 {
+            return 0;
+        }
+        let shifted = m - 1;
+        let dz2 = dz_mag * dz_mag;
+        let mut best = 0usize;
+        for lvl in levels.iter() {
+            if shifted % lvl.skip != 0 {
+                continue;
+            }
+            let slot = shifted / lvl.skip;
+            if slot >= lvl.entries.len() {
+                continue;
+            }
+            let e = &lvl.entries[slot];
+            if dz2 <= e.alpha * e.alpha && lvl.skip > best {
+                best = lvl.skip;
+            }
+        }
+        best
+    }
+
+    fn total_skip_reach(levels: &[LevelF64], orbit_len: usize, dz_mag: f64) -> u64 {
+        (1..orbit_len).map(|m| max_aligned_skip(levels, m, dz_mag) as u64).sum()
+    }
+
+    #[test]
+    fn pade_skips_more_than_affine() {
+        let eps = 1e-6_f64;
+        let centers = [
+            ("cardioid-edge", -0.745_f64, 0.113_f64),
+            ("period-3-island", -1.75_f64, 0.0_f64),
+            ("feigenbaum", -1.401155_f64, 0.0_f64),
+        ];
+        for (name, cx, cy) in centers {
+            let orbit = ref_orbit_f64(cx, cy, 4096);
+            let aff = build_levels(&orbit, eps, false);
+            let pad = build_levels(&orbit, eps, true);
+            println!("\n[{}] orbit_len={} levels={}", name, orbit.len(), aff.len());
+            let mut best_ratio = 1.0_f64;
+            for k in 0..15 {
+                let dz_mag = 1e-9 * 10f64.powf(k as f64 * 0.5);
+                let a = total_skip_reach(&aff, orbit.len(), dz_mag);
+                let p = total_skip_reach(&pad, orbit.len(), dz_mag);
+                let ratio = p as f64 / (a.max(1)) as f64;
+                if ratio > best_ratio {
+                    best_ratio = ratio;
+                }
+                println!(
+                    "   |dz|={:>9.2e}  skipSum affine={:>9}  pade={:>9}  x{:.2}",
+                    dz_mag, a, p, ratio
+                );
+            }
+            println!("   -> best Pade/affine skip ratio = x{:.2}", best_ratio);
+            assert!(
+                best_ratio > 1.0,
+                "[{}] Pade never out-skipped affine across the |dz| sweep",
+                name
+            );
+        }
+    }
+
+    // ── block application (CPU mirror of the shader) ───────────────────────────
+    fn affine_block_apply(e: &BlaF64, dz: (f64, f64), dc: (f64, f64)) -> (f64, f64) {
+        let n = cmul64((e.ax, e.ay), dz);
+        let m = cmul64((e.bx, e.by), dc);
+        (n.0 + m.0, n.1 + m.1)
+    }
+
+    fn pade_block_apply(e: &BlaF64, dz: (f64, f64), dc: (f64, f64)) -> Option<(f64, f64)> {
+        let n = cmul64((e.ax, e.ay), dz);
+        let bc = cmul64((e.bx, e.by), dc);
+        let num = (n.0 + bc.0, n.1 + bc.1); // A·dz + B·dc
+        let dd = cmul64((e.dx, e.dy), dz);
+        let mden = (1.0 + dd.0, dd.1); // 1 + D·dz
+        if mden.0 * mden.0 + mden.1 * mden.1 < 1e-4 {
+            return None; // pole guard
+        }
+        Some(cdiv64(num, mden))
+    }
+
+    #[test]
+    fn pade_merge_composition_is_exact_for_c0() {
+        // For c = 0 the Möbius composition is exact: merge(x,y) applied to z equals
+        // y(x(z)). This validates A_z = A_y·A_x and D_z = D_x + A_x·D_y. (D3)
+        let eps = 1e-6;
+        let x = bla_seed(0.4, 0.2, eps, true);
+        let y = bla_seed(-0.3, 0.5, eps, true);
+        let merged = bla_merge(x, y, true);
+        let c = (0.0, 0.0);
+        let z = (1e-3, 5e-4);
+        let w1 = pade_block_apply(&x, z, c).unwrap();
+        let w2 = pade_block_apply(&y, w1, c).unwrap();
+        let wm = pade_block_apply(&merged, z, c).unwrap();
+        let err = ((wm.0 - w2.0).powi(2) + (wm.1 - w2.1).powi(2)).sqrt();
+        let mag = (w2.0 * w2.0 + w2.1 * w2.1).sqrt().max(1e-30);
+        assert!(err / mag < 1e-10, "merged vs sequential rel err {}", err / mag);
+        // D_z = D_x + A_x·D_y exactly
+        let axdy = cmul64((x.ax, x.ay), (y.dx, y.dy));
+        assert!((merged.dx - (x.dx + axdy.0)).abs() < 1e-12);
+        assert!((merged.dy - (x.dy + axdy.1)).abs() < 1e-12);
+    }
+
+    #[test]
+    fn pade_block_derivative_matches_finite_difference() {
+        // der_out = (A − B·c·D)/M²·der_in + B/M, M = 1 + D·z. Validate against a
+        // central finite difference of w(z(c),c) with z(c) = z0 + der_in·(c−c0). (D4)
+        let eps = 1e-6;
+        let e = bla_merge(bla_seed(0.35, -0.22, eps, true), bla_seed(-0.15, 0.4, eps, true), true);
+        let a = (e.ax, e.ay);
+        let b = (e.bx, e.by);
+        let d = (e.dx, e.dy);
+        let der_in = (0.7, -0.3);
+        let z0 = (2e-3, 1e-3);
+        let c0 = (1e-5, -3e-6);
+        // analytic
+        let dz0 = cmul64(d, z0);
+        let m = (1.0 + dz0.0, dz0.1);
+        let inv_m = cdiv64((1.0, 0.0), m);
+        let inv_m2 = cmul64(inv_m, inv_m);
+        let bcd = cmul64(cmul64(b, c0), d);
+        let a_bcd = (a.0 - bcd.0, a.1 - bcd.1);
+        let t1 = cmul64(cmul64(a_bcd, inv_m2), der_in);
+        let t2 = cmul64(b, inv_m);
+        let der_out = (t1.0 + t2.0, t1.1 + t2.1);
+        // finite difference (w is analytic in c ⇒ d/d(Re c) = dw/dc)
+        let w = |c: (f64, f64)| -> (f64, f64) {
+            let dcm = (c.0 - c0.0, c.1 - c0.1);
+            let dz = cmul64(der_in, dcm);
+            let z = (z0.0 + dz.0, z0.1 + dz.1);
+            let az = cmul64(a, z);
+            let bc = cmul64(b, c);
+            let num = (az.0 + bc.0, az.1 + bc.1);
+            let ddz = cmul64(d, z);
+            cdiv64(num, (1.0 + ddz.0, ddz.1))
+        };
+        let h = 1e-6;
+        let wp = w((c0.0 + h, c0.1));
+        let wm = w((c0.0 - h, c0.1));
+        let fd = ((wp.0 - wm.0) / (2.0 * h), (wp.1 - wm.1) / (2.0 * h));
+        let err = ((der_out.0 - fd.0).powi(2) + (der_out.1 - fd.1).powi(2)).sqrt();
+        let mag = (der_out.0 * der_out.0 + der_out.1 * der_out.1).sqrt().max(1e-30);
+        assert!(err / mag < 1e-5, "derivative mismatch: analytic {:?} fd {:?} rel {}", der_out, fd, err / mag);
+    }
+
+    // ── full per-pixel loop: exact vs affine vs Padé (CPU port of the shader) ────
+    // Real iteration/step counts (not just radius capacity) AND a correctness
+    // cross-check that blocks (affine or Padé) reach the same escape result as exact
+    // perturbation. Empty `levels` ⇒ exact stepping. (tasks 6.1/6.2 on CPU)
+    fn try_skip_cpu(levels: &[LevelF64], ref_i: usize, dz: (f64, f64), dc: (f64, f64), dc_mag: f64, orbit: &[(f64, f64)], bailout2: f64, max_iter: usize, pade: bool) -> Option<((f64, f64), usize)> {
+        if ref_i == 0 {
+            return None;
+        }
+        let shifted = ref_i - 1;
+        let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+        for lvl in levels.iter().rev() {
+            let skip = lvl.skip;
+            if shifted % skip != 0 {
+                continue;
+            }
+            let slot = shifted / skip;
+            if slot >= lvl.entries.len() || ref_i + skip > max_iter {
+                continue;
+            }
+            let e = &lvl.entries[slot];
+            let radius = (e.alpha - e.beta * dc_mag).max(0.0);
+            if dz2 > radius * radius {
+                continue;
+            }
+            let cand = if pade {
+                match pade_block_apply(e, dz, dc) {
+                    Some(c) => c,
+                    None => continue, // pole → descend a level
+                }
+            } else {
+                affine_block_apply(e, dz, dc)
+            };
+            let zi = orbit[ref_i + skip];
+            let candz = (zi.0 + cand.0, zi.1 + cand.1);
+            if skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 {
+                continue; // don't jump over the first escape
+            }
+            return Some((cand, skip));
+        }
+        None
+    }
+
+    fn run_pixel_cpu(levels: &[LevelF64], orbit: &[(f64, f64)], dc: (f64, f64), max_iter: usize, pade: bool) -> (usize, usize, bool) {
+        let bailout2 = 4.0_f64;
+        let orbit_len = orbit.len();
+        let dc_mag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
+        let mut dz = (0.0_f64, 0.0_f64);
+        let mut ref_i = 0usize;
+        let mut iter = 0usize;
+        let mut steps = 0usize;
+        let mut escaped = false;
+        while iter < max_iter {
+            if let Some((cand, skip)) = try_skip_cpu(levels, ref_i, dz, dc, dc_mag, orbit, bailout2, max_iter, pade) {
+                dz = cand;
+                ref_i += skip;
+                iter += skip;
+            } else {
+                let z = orbit[ref_i];
+                let m2 = cmul64((2.0 * z.0, 2.0 * z.1), dz);
+                let sq = cmul64(dz, dz);
+                dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
+                ref_i += 1;
+                iter += 1;
+            }
+            steps += 1;
+            if ref_i > orbit_len - 1 {
+                ref_i = orbit_len - 1;
+            }
+            let z = orbit[ref_i];
+            let full = (z.0 + dz.0, z.1 + dz.1);
+            let full2 = full.0 * full.0 + full.1 * full.1;
+            if full2 > bailout2 {
+                escaped = true;
+                break;
+            }
+            let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+            if full2 < dz2 || ref_i == orbit_len - 1 {
+                dz = full; // rebasing
+                ref_i = 0;
+            }
+            if steps > max_iter * 2 + 16 {
+                break;
+            }
+        }
+        (steps, iter, escaped)
+    }
+
+    #[test]
+    fn pade_full_loop_correct_and_faster() {
+        let eps = 1e-6_f64;
+        let max_iter = 3000usize;
+        let centers = [
+            ("cusp", -0.75_f64, 0.0_f64),
+            ("period-2-bulb", -1.25_f64, 0.0_f64),
+            ("feigenbaum", -1.401155_f64, 0.0_f64),
+        ];
+        for (name, cx, cy) in centers {
+            let orbit = ref_orbit_f64(cx, cy, max_iter);
+            // Perturbation needs a bounded reference; an escaping center is a misuse
+            // (you'd pick a nearby nucleus). Skip so the benchmark stays meaningful.
+            if orbit.len() <= max_iter {
+                println!("\n[{}] reference escaped at iter {} — skipped (need a bounded reference)", name, orbit.len() - 1);
+                continue;
+            }
+            let aff = build_levels(&orbit, eps, false);
+            let pad = build_levels(&orbit, eps, true);
+            // A row of pixels offset from the center; small scale so some escape.
+            let scale = 3e-3_f64;
+            let n = 96usize;
+            let (mut steps_exact, mut steps_aff, mut steps_pad) = (0u64, 0u64, 0u64);
+            let (mut mismatch_aff, mut mismatch_pad, mut max_d) = (0usize, 0usize, 0usize);
+            for k in 0..n {
+                let t = (k as f64 / n as f64) * 2.0 - 1.0;
+                let dc = (t * scale, 0.37 * t * scale);
+                let (se, ie, ee) = run_pixel_cpu(&[], &orbit, dc, max_iter, false);
+                let (sa, ia, ea) = run_pixel_cpu(&aff, &orbit, dc, max_iter, false);
+                let (sp, ip, ep) = run_pixel_cpu(&pad, &orbit, dc, max_iter, true);
+                steps_exact += se as u64;
+                steps_aff += sa as u64;
+                steps_pad += sp as u64;
+                if ia != ie || ea != ee {
+                    mismatch_aff += 1;
+                }
+                if ip != ie || ep != ee {
+                    mismatch_pad += 1;
+                    max_d = max_d.max((ip as i64 - ie as i64).unsigned_abs() as usize);
+                }
+            }
+            println!(
+                "\n[{}] pixels={} | steps exact={} affine={} pade={} | pade vs affine x{:.2}",
+                name, n, steps_exact, steps_aff, steps_pad,
+                steps_aff as f64 / steps_pad.max(1) as f64
+            );
+            println!(
+                "   correctness vs exact: affine mismatches={} pade mismatches={} (max |Δiter|={})",
+                mismatch_aff, mismatch_pad, max_d
+            );
+            // Padé matches exact stepping in well-behaved regions (cusp, bulb: 0
+            // mismatches) and is allowed a small, bounded tail of few-iteration
+            // escape differences near edge-of-chaos points (e.g. Feigenbaum), where
+            // it operates at larger |dz| and its ε-level error amplifies. A real
+            // regression — a near-pole blowup — would show a large max |Δiter|.
+            assert!(mismatch_pad <= n / 8 && max_d <= 64,
+                "[{}] Padé diverges from exact beyond tolerance: {} mismatches, max |Δiter|={}", name, mismatch_pad, max_d);
+            // Padé should never take more steps than affine.
+            assert!(steps_pad <= steps_aff,
+                "[{}] Padé took more steps than affine ({} > {})", name, steps_pad, steps_aff);
+        }
+    }
+
+    #[test]
+    fn production_pade_table_has_valid_radii() {
+        // Build the PRODUCTION table (the one uploaded to the GPU) in pade mode and
+        // check the first entry's radius. If alpha is 0/NaN, the GPU gate rejects
+        // every block → Padé renders like perturbation. This is the ground-truth
+        // check for "is the pade table itself broken".
+        let mut nav = MandelbrotNavigator::new("-0.75", "0.0", "0.0001", 0.0);
+        nav.compute_reference_orbit_ptr(2000);
+
+        nav.use_pade();
+        let info_p = nav.compute_bla_reference_ptr(2000);
+        assert!(info_p.count > 0, "pade table empty (count=0)");
+        let e_p = nav.bla_result[0];
+        let alpha_p = (e_p.radius_alpha as f64) * 2f64.powi(e_p.alpha_exp);
+        println!(
+            "\nPROD pade : count={} levels={} | entry0 alpha={:.3e} ax={:.3e} dx={:.3e} d_exp={}",
+            info_p.count, info_p.level_count, alpha_p, e_p.ax, e_p.dx, e_p.d_exp
+        );
+
+        nav.use_bla();
+        let info_a = nav.compute_bla_reference_ptr(2000);
+        let e_a = nav.bla_result[0];
+        let alpha_a = (e_a.radius_alpha as f64) * 2f64.powi(e_a.alpha_exp);
+        println!(
+            "PROD affine: count={} levels={} | entry0 alpha={:.3e} ax={:.3e}",
+            info_a.count, info_a.level_count, alpha_a, e_a.ax
+        );
+
+        assert!(alpha_p > 0.0 && alpha_p.is_finite(), "pade entry0 alpha broken: {}", alpha_p);
+        assert!(alpha_p > alpha_a, "pade alpha {:.3e} not larger than affine {:.3e}", alpha_p, alpha_a);
+        assert!(e_p.dx != 0.0 || e_p.dy != 0.0, "pade entry0 D is zero (not a real pade table)");
+    }
+
+    #[test]
+    fn benchmark_pade_runs_on_real_orbit() {
+        let mut nav = MandelbrotNavigator::new("-0.75", "0.0", "0.0001", 0.0);
+        nav.compute_reference_orbit_ptr(2000);
+        let b = nav.benchmark_pade(12);
+        println!(
+            "\nbench[-0.75 @1e-4]: pixels={} maxIter={} | steps exact={} affine={} pade={} | pade/affine x{:.3} | mismatch={} maxΔ={}",
+            b.pixels, b.max_iter, b.steps_exact, b.steps_affine, b.steps_pade,
+            b.steps_affine / b.steps_pade.max(1.0), b.pade_mismatches, b.max_iter_delta
+        );
+        assert!(b.pixels > 0);
+        assert!(b.steps_pade <= b.steps_affine + 1.0, "Padé worse than affine");
+        assert!(b.pade_mismatches <= b.pixels / 4, "too many Padé mismatches");
     }
 
     #[test]

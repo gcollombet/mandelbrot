@@ -14,8 +14,8 @@ export type MandelbrotExposed = {
   initialize: () => Promise<void>,
   useBla: () => void,
   usePerturbation: () => void,
-  setApproximationMode: (mode: 'bla' | 'perturbation') => void,
-  getApproximationMode: () => 'bla' | 'perturbation' | undefined,
+  setApproximationMode: (mode: 'bla' | 'perturbation' | 'pade') => void,
+  getApproximationMode: () => 'bla' | 'perturbation' | 'pade' | undefined,
   setBlaEpsilon: (epsilon: number) => void,
   resetReferenceTo?: (cx: string, cy: string, scaleStr: string, angleVal: number) => void,
 };

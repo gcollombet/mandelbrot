@@ -50,6 +50,10 @@ const MAX_BLA_BATCH_SIZE = 100_000
 // below a pixel while letting high-skip BLA levels accept far more often than
 // the previous 1e-6 (which made BLA slower than plain perturbation).
 const BLA_LINEARIZATION_EPSILON = 1e-4
+// Floats per floatexp BlaStep uploaded to the GPU. Matches the Rust `BlaStep`
+// (#[repr(C)] of 11 × 4-byte fields): ax,ay,bx,by,ab_exp,radius_alpha,alpha_exp,
+// radius_beta + the Padé D coefficient dx,dy,d_exp.
+const BLA_STEP_FLOATS = 11
 const COLOR_UNIFORM_FLOAT_COUNT = 60
 const TAU = Math.PI * 2
 
@@ -91,6 +95,7 @@ type ReferenceWorkerRequest =
         angle: number
         approximationMode: ApproximationMode
         blaEpsilon: number
+        maxBlaSkip: number
         maxIterations: number
     }
     | {
@@ -111,6 +116,16 @@ type ReferenceWorkerRequest =
         type: 'setBlaEpsilon'
         jobId: number
         blaEpsilon: number
+    }
+    | {
+        type: 'setMaxBlaSkip'
+        jobId: number
+        maxBlaSkip: number
+    }
+    | {
+        type: 'benchmarkPade'
+        jobId: number
+        grid: number
     }
     | { type: 'dispose' }
 
@@ -146,8 +161,23 @@ type ReferenceWorkerResponse =
         message: string
     }
     | {
+        type: 'padeBenchmark'
+        jobId: number
+        result: PadeBenchmarkResult
+    }
+    | {
         type: 'ready'
     }
+
+export type PadeBenchmarkResult = {
+    pixels: number
+    maxIter: number
+    stepsExact: number
+    stepsAffine: number
+    stepsPade: number
+    mismatches: number
+    maxIterDelta: number
+}
 
 function shouldTrackOrbitMetrics(colorStops: ColorStop[]): boolean {
     return colorStops.some(stop =>
@@ -260,7 +290,7 @@ export type RenderOptions = {
     textureMappingMode?: number,
 }
 
-export type ApproximationMode = 'perturbation' | 'bla'
+export type ApproximationMode = 'perturbation' | 'bla' | 'pade'
 
 export type Mandelbrot = {
     maxIterations: number,
@@ -447,9 +477,20 @@ export class Engine {
     referenceResetSerial = 0
     referenceResetFlashUntil = 0
     currentBlaLevelCount = 0
-    mandelbrotReference = new Float32Array(4 * 1000000)
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
+    private maxBlaSkip = 65536
+    private pendingBenchmarkResolve: ((r: PadeBenchmarkResult) => void) | null = null
+    // Time-to-completion of the last render session (ms). Wall includes everything;
+    // GPU is the accumulated mandelbrot-pass compute (the part blocks reduce).
+    lastCompletionWallMs = 0
+    lastCompletionGpuMs = 0
+    // Diagnostic: the mode flag (0/1/2) and block-level count last sent to the shader.
+    lastShaderApproxFlag = 0
+    lastShaderBlaLevelCount = 0
+    private completionStartMs = 0
+    private completionAccumulatedGpuMs = 0
+    private completionTimerActive = false
     private referenceWorker?: Worker
     private referenceJobId = 0
     private referenceAvailableOrbitLen = 0
@@ -470,7 +511,7 @@ export class Engine {
     /** Reference origin of the pending (accumulated) reference. */
     private pendingRefCx = ''
     private pendingRefCy = ''
-    /** Accumulated orbit data for the pending reference (Float32Array, 4 floats per step). */
+    /** Accumulated orbit data for the pending reference (Float32Array, 2 floats per step: zx, zy). */
     private pendingRefOrbitBuffer: Float32Array<ArrayBuffer> | null = null
     /** Total step count accumulated. */
     pendingRefOrbitLen = 0
@@ -642,7 +683,7 @@ export class Engine {
         // Write accumulated orbit data to GPU buffer
         const orbitBuffer = this.pendingRefOrbitBuffer
         if (orbitBuffer && this.mandelbrotReferenceBuffer) {
-            const floatCount = this.pendingRefOrbitLen * 4
+            const floatCount = this.pendingRefOrbitLen * 2
             const writeSize = Math.min(floatCount, orbitBuffer.length)
             this.device.queue.writeBuffer(
                 this.mandelbrotReferenceBuffer,
@@ -654,9 +695,9 @@ export class Engine {
         }
 
         // Write accumulated BLA data to GPU buffers (grow the buffer first so a
-        // large pending table can't overflow it — 8 floats per floatexp BlaStep).
+        // large pending table can't overflow it — BLA_STEP_FLOATS per BlaStep).
         if (this.pendingRefBlaSteps && this.pendingRefBlaSteps.length > 0) {
-            this.ensureBlaBufferCapacity(this.pendingRefBlaSteps.length / 8)
+            this.ensureBlaBufferCapacity(this.pendingRefBlaSteps.length / BLA_STEP_FLOATS)
         }
         if (this.pendingRefBlaSteps && this.mandelbrotBlaBuffer) {
             this.device.queue.writeBuffer(
@@ -769,6 +810,7 @@ export class Engine {
             angle: mandelbrot.angle,
             approximationMode: this.approximationMode,
             blaEpsilon: this.blaEpsilon,
+            maxBlaSkip: this.maxBlaSkip,
             maxIterations,
         })
     }
@@ -797,6 +839,12 @@ export class Engine {
     }
 
     private handleReferenceWorkerMessage(message: ReferenceWorkerResponse) {
+        if (message.type === 'padeBenchmark') {
+            const resolve = this.pendingBenchmarkResolve
+            this.pendingBenchmarkResolve = null
+            resolve?.(message.result)
+            return
+        }
         if (message.type === 'ready') {
             this.referenceWorkerReady = true
             const queue = this.pendingWorkerMessages
@@ -835,8 +883,8 @@ export class Engine {
             this.pendingRefCx = message.referenceCx
             this.pendingRefCy = message.referenceCy
             this.pendingRefMaxIterations = message.maxIterations
-            // Allocate orbit buffer for accumulation (4 floats per step)
-            const bufLen = Math.max(message.maxIterations, this.currentMaxIterations) * 4
+            // Allocate orbit buffer for accumulation (2 floats per step: zx, zy)
+            const bufLen = Math.max(message.maxIterations, this.currentMaxIterations) * 2
             this.pendingRefOrbitBuffer = new Float32Array(bufLen)
             this.pendingRefOrbitLen = 0
             this.pendingRefBlaSteps = null
@@ -855,7 +903,7 @@ export class Engine {
                 // ── Accumulate orbit for the pending reference ──
                 const orbitBuf = this.pendingRefOrbitBuffer
                 if (orbitBuf && message.orbit.length > 0) {
-                    const floatOffset = message.offset * 4
+                    const floatOffset = message.offset * 2
                     const copyLen = Math.min(message.orbit.length, orbitBuf.length - floatOffset)
                     if (copyLen > 0) {
                         // Convert to plain ArrayBuffer via slice() (worker messages carry ArrayBufferLike)
@@ -878,7 +926,7 @@ export class Engine {
                 this.pendingRefCx = message.referenceCx
                 this.pendingRefCy = message.referenceCy
                 this.pendingRefMaxIterations = message.maxIterations
-                const bufLen = Math.max(message.maxIterations, this.currentMaxIterations) * 4
+                const bufLen = Math.max(message.maxIterations, this.currentMaxIterations) * 2
                 this.pendingRefOrbitBuffer = new Float32Array(bufLen)
                 this.pendingRefOrbitLen = 0
                 this.pendingRefBlaSteps = null
@@ -888,7 +936,7 @@ export class Engine {
                 // Accumulate this first chunk
                 const orbitBuf = this.pendingRefOrbitBuffer
                 if (orbitBuf && message.orbit.length > 0) {
-                    const floatOffset = message.offset * 4
+                    const floatOffset = message.offset * 2
                     const copyLen = Math.min(message.orbit.length, orbitBuf.length - floatOffset)
                     if (copyLen > 0) {
                         orbitBuf.set(message.orbit.slice(0, copyLen), floatOffset)
@@ -926,7 +974,7 @@ export class Engine {
                 this.referenceAvailableOrbitLen = message.count
                 this.device.queue.writeBuffer(
                     this.mandelbrotReferenceBuffer,
-                    message.offset * 4 * Float32Array.BYTES_PER_ELEMENT,
+                    message.offset * 2 * Float32Array.BYTES_PER_ELEMENT,
                     message.orbit,
                     0,
                     message.orbit.length,
@@ -960,7 +1008,7 @@ export class Engine {
             }
             return
         }
-        this.ensureBlaBufferCapacity(message.steps.length / 8)
+        this.ensureBlaBufferCapacity(message.steps.length / BLA_STEP_FLOATS)
         this.ensureBlaLevelBufferCapacity(message.levelCount)
         if (message.steps.length > 0 && this.mandelbrotBlaBuffer) {
             this.device.queue.writeBuffer(this.mandelbrotBlaBuffer, 0, message.steps, 0, message.steps.length)
@@ -981,7 +1029,7 @@ export class Engine {
 
     async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
         this.mandelbrotNavigator = mandelbrotNavigator
-        this.approximationMode = this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation'
+        this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         this.initializeReferenceWorker()
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
@@ -1076,12 +1124,12 @@ export class Engine {
             label: 'Engine UniformBuffer Resolve',
         })
         this.mandelbrotReferenceBuffer = this.device.createBuffer({
-            size: 16 * 1000000,
+            size: 8 * 1000000, // 1M steps × 2 floats (zx, zy) × 4 bytes; shader reads only zx/zy
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         })
         this.mandelbrotBlaBuffer = this.device.createBuffer({
-            size: 4 * 8, // one floatexp BlaStep = 8 × 4 bytes
+            size: 4 * BLA_STEP_FLOATS, // one floatexp BlaStep = BLA_STEP_FLOATS × 4 bytes
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot BLA Storage Buffer',
         })
@@ -1415,7 +1463,7 @@ export class Engine {
 
         this.mandelbrotBlaBuffer?.destroy?.()
         this.mandelbrotBlaBuffer = this.device.createBuffer({
-            size: safeRequiredEntries * 4 * 8, // 8 floats per floatexp BlaStep
+            size: safeRequiredEntries * 4 * BLA_STEP_FLOATS, // BLA_STEP_FLOATS per BlaStep
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot BLA Storage Buffer',
         })
@@ -1533,6 +1581,9 @@ export class Engine {
 
     private applyGpuFrameTiming(elapsed: number) {
         this.gpuFrameTimeMs = elapsed
+        if (this.completionTimerActive && elapsed > 0) {
+            this.completionAccumulatedGpuMs += elapsed
+        }
 
         if (this.smoothedGpuTimeMs === 0) {
             this.smoothedGpuTimeMs = elapsed
@@ -1559,7 +1610,7 @@ export class Engine {
     }
 
     private getEffectiveMaxBatchSize(): number {
-        return this.approximationMode === 'bla' && this.currentBlaLevelCount > 0
+        return (this.approximationMode === 'bla' || this.approximationMode === 'pade') && this.currentBlaLevelCount > 0
             ? MAX_BLA_BATCH_SIZE
             : MAX_BATCH_SIZE
     }
@@ -1808,6 +1859,8 @@ export class Engine {
 
         if (mode === 'bla') {
             this.mandelbrotNavigator.use_bla()
+        } else if (mode === 'pade') {
+            this.mandelbrotNavigator.use_pade()
         } else {
             this.mandelbrotNavigator.use_perturbation()
         }
@@ -1840,7 +1893,50 @@ export class Engine {
             jobId: this.referenceJobId,
             blaEpsilon: next,
         })
-        if (this.approximationMode === 'bla') {
+        // ε sets the validity radius (ε·|A| affine, √ε·|A| Padé), so a change must
+        // rebuild the table and re-render in either block-jump mode.
+        if (this.approximationMode === 'bla' || this.approximationMode === 'pade') {
+            this.currentBlaLevelCount = 0
+            this.clearHistoryNextFrame = true
+            this.needRender = true
+            this.invalidateCounterReadback()
+        }
+    }
+
+    getMaxBlaSkip(): number {
+        return this.maxBlaSkip
+    }
+
+    // Run the CPU skip benchmark (exact vs affine vs Padé) on the worker's current
+    // reference orbit. Resolves with loop-step counts + a correctness cross-check.
+    benchmarkPade(grid = 16): Promise<PadeBenchmarkResult> {
+        const empty: PadeBenchmarkResult = {
+            pixels: 0, maxIter: 0, stepsExact: 0, stepsAffine: 0, stepsPade: 0, mismatches: 0, maxIterDelta: 0,
+        }
+        // Supersede any in-flight request so its caller does not hang.
+        this.pendingBenchmarkResolve?.(empty)
+        this.pendingBenchmarkResolve = null
+        return new Promise<PadeBenchmarkResult>((resolve) => {
+            this.pendingBenchmarkResolve = resolve
+            this.postReferenceWorker({ type: 'benchmarkPade', jobId: this.referenceJobId, grid })
+        })
+    }
+
+    setMaxBlaSkip(maxSkip: number) {
+        // Clamp to a power of two in [2, 1<<20] to match the Rust table levels.
+        const clamped = Math.min(1 << 20, Math.max(2, Math.round(maxSkip)))
+        const pow2 = 1 << Math.round(Math.log2(clamped))
+        if (pow2 === this.maxBlaSkip) {
+            return
+        }
+        this.mandelbrotNavigator.set_max_bla_skip(pow2)
+        this.maxBlaSkip = pow2
+        this.postReferenceWorker({
+            type: 'setMaxBlaSkip',
+            jobId: this.referenceJobId,
+            maxBlaSkip: pow2,
+        })
+        if (this.approximationMode === 'bla' || this.approximationMode === 'pade') {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
@@ -1858,6 +1954,21 @@ export class Engine {
         this.time += delta
         this.lastUpdateTime = now
 
+        // Time-to-completion tracking: wall-clock + accumulated GPU compute per
+        // render session, for comparing perturbation / BLA / Padé. Wall includes
+        // reference build (constant across modes); the GPU figure isolates the
+        // per-pixel iteration compute, the part blocks actually reduce.
+        const renderingNow = this.needsMoreFrames()
+        if (renderingNow && !this.completionTimerActive) {
+            this.completionStartMs = now
+            this.completionAccumulatedGpuMs = 0
+            this.completionTimerActive = true
+        } else if (!renderingNow && this.completionTimerActive) {
+            this.lastCompletionWallMs = now - this.completionStartMs
+            this.lastCompletionGpuMs = this.completionAccumulatedGpuMs
+            this.completionTimerActive = false
+        }
+
         this.debugShadingActive = renderOptions.debugShading
 
         if (this.pendingRefReady) {
@@ -1865,7 +1976,7 @@ export class Engine {
             return
         }
 
-        const navigatorApproximationMode = this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation'
+        const navigatorApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
             this.approximationMode = navigatorApproximationMode
@@ -2224,13 +2335,23 @@ export class Engine {
 
         // BLA now runs in the deep (floatexp) path too: a/b/radii are stored in
         // fe form and try_apply_bla_deep does its radius test in log space.
-        const approximationModeFlag = this.approximationMode === 'bla'
+        // Block-jump modes: 'bla' (affine) and 'pade' (rational) both use the table;
+        // the uniform flag carries which one (1 = BLA, 2 = Padé) so the shader picks
+        // the affine vs rational application. 0 = exact perturbation.
+        const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade')
             && orbitComplete
             && this.currentBlaLevelCount > 0
             && this.referenceBlaReadyMaxIterations >= guardedMaxIter
-            ? 1
+        const approximationModeFlag = blocksReady
+            ? (this.approximationMode === 'pade' ? 2 : 1)
             : 0
-        const blaLevelCount = approximationModeFlag ? this.currentBlaLevelCount : 0
+        const blaLevelCount = blocksReady ? this.currentBlaLevelCount : 0
+        // Diagnostic mirror of exactly what the shader receives this frame: the mode
+        // flag (0=exact, 1=BLA, 2=Padé) and the block-level count. If, in Padé mode,
+        // flag≠2 or levels=0, blocks are disabled before the GPU (Engine/worker side);
+        // if flag=2 & levels>0 but no speedup, the issue is in the shader path.
+        this.lastShaderApproxFlag = approximationModeFlag
+        this.lastShaderBlaLevelCount = blaLevelCount
 
         // Re-write the mandelbrot uniform with the guarded globalMaxIter.
         // During zoom reprojection, override scale with liveScale so the GPU

@@ -11,6 +11,7 @@ type ResetMessage = {
     angle: number
     approximationMode: ApproximationMode
     blaEpsilon: number
+    maxBlaSkip: number
     maxIterations: number
 }
 
@@ -36,6 +37,18 @@ type SetBlaEpsilonMessage = {
     blaEpsilon: number
 }
 
+type SetMaxBlaSkipMessage = {
+    type: 'setMaxBlaSkip'
+    jobId: number
+    maxBlaSkip: number
+}
+
+type BenchmarkPadeMessage = {
+    type: 'benchmarkPade'
+    jobId: number
+    grid: number
+}
+
 type DisposeMessage = {
     type: 'dispose'
 }
@@ -45,6 +58,8 @@ type ReferenceWorkerMessage =
     | UpdateViewMessage
     | SetApproximationModeMessage
     | SetBlaEpsilonMessage
+    | SetMaxBlaSkipMessage
+    | BenchmarkPadeMessage
     | DisposeMessage
 
 type OrbitChunkResponse = {
@@ -85,12 +100,27 @@ type ReadyResponse = {
     type: 'ready'
 }
 
+type PadeBenchmarkResponse = {
+    type: 'padeBenchmark'
+    jobId: number
+    result: {
+        pixels: number
+        maxIter: number
+        stepsExact: number
+        stepsAffine: number
+        stepsPade: number
+        mismatches: number
+        maxIterDelta: number
+    }
+}
+
 type ReferenceWorkerResponse =
     | OrbitChunkResponse
     | BlaReadyResponse
     | ReferenceResetResponse
     | ErrorResponse
     | ReadyResponse
+    | PadeBenchmarkResponse
 
 type WorkerContext = typeof globalThis & {
     postMessage(message: unknown, transfer?: Transferable[]): void
@@ -131,6 +161,8 @@ function applyApproximationMode(mode: ApproximationMode) {
     }
     if (mode === 'bla') {
         navigator.use_bla()
+    } else if (mode === 'pade') {
+        navigator.use_pade()
     } else {
         navigator.use_perturbation()
     }
@@ -153,19 +185,29 @@ function resetNavigator(message: ResetMessage) {
     currentReferenceCy = ''
     applyApproximationMode(message.approximationMode)
     navigator.set_bla_epsilon(message.blaEpsilon)
+    navigator.set_max_bla_skip(message.maxBlaSkip)
     void runComputeLoop(message.jobId)
 }
 
+// The WASM orbit is laid out 4 floats/step (zx, zy, then two inert padding slots
+// that once held the orbit derivative / a double-float low word of z_n). The GPU
+// shader reads only zx/zy, so deinterleave to 2 floats/step right here: this halves
+// the orbit storage buffer and every chunk's CPU→GPU upload, and tightens getOrbit's
+// stride (the hottest read in the iteration loop) from 16 to 8 bytes.
 function copyOrbitSlice(ptr: number, offset: number, count: number): Float32Array<ArrayBuffer> {
-    const floatsPerStep = 4
+    const SRC_STRIDE = 4
+    const DST_STRIDE = 2
     const stepCount = Math.max(0, count - offset)
     const source = new Float32Array(
         wasmMemory.buffer,
-        ptr + offset * floatsPerStep * Float32Array.BYTES_PER_ELEMENT,
-        stepCount * floatsPerStep,
+        ptr + offset * SRC_STRIDE * Float32Array.BYTES_PER_ELEMENT,
+        stepCount * SRC_STRIDE,
     )
-    const copied: Float32Array<ArrayBuffer> = new Float32Array(source.length)
-    copied.set(source)
+    const copied: Float32Array<ArrayBuffer> = new Float32Array(stepCount * DST_STRIDE)
+    for (let i = 0; i < stepCount; i++) {
+        copied[i * DST_STRIDE] = source[i * SRC_STRIDE]         // zx
+        copied[i * DST_STRIDE + 1] = source[i * SRC_STRIDE + 1] // zy
+    }
     return copied
 }
 
@@ -176,16 +218,21 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     if (
         lastBlaMaxIterations >= maxIterations
         || availableIter < maxIterations
-        || navigator.get_approximation_mode() !== 1
+        // Build/post the block table for both BLA (1) and Padé (2); perturbation
+        // (0) needs no table.
+        || navigator.get_approximation_mode() === 0
     ) {
         return
     }
 
     const blaInfo = navigator.compute_bla_reference_ptr(maxIterations)
+    // Floats per floatexp BlaStep — must match the Rust #[repr(C)] BlaStep (11 ×
+    // 4-byte fields incl. the Padé D coefficient) and Engine's BLA_STEP_FLOATS.
+    const BLA_STEP_FLOATS = 11
     const stepsSource = new Float32Array(
         wasmMemory.buffer,
         blaInfo.ptr,
-        blaInfo.count * 8,
+        blaInfo.count * BLA_STEP_FLOATS,
     )
     const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
     steps.set(stepsSource)
@@ -316,6 +363,32 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     navigator.set_bla_epsilon(message.blaEpsilon)
                     lastBlaMaxIterations = 0
                     void runComputeLoop(message.jobId)
+                }
+                break
+            case 'setMaxBlaSkip':
+                if (navigator && message.jobId === activeJobId) {
+                    navigator.set_max_bla_skip(message.maxBlaSkip)
+                    lastBlaMaxIterations = 0
+                    void runComputeLoop(message.jobId)
+                }
+                break
+            case 'benchmarkPade':
+                if (navigator && message.jobId === activeJobId) {
+                    const b = navigator.benchmark_pade(message.grid)
+                    postResponse({
+                        type: 'padeBenchmark',
+                        jobId: message.jobId,
+                        result: {
+                            pixels: b.pixels,
+                            maxIter: b.max_iter,
+                            stepsExact: b.steps_exact,
+                            stepsAffine: b.steps_affine,
+                            stepsPade: b.steps_pade,
+                            mismatches: b.pade_mismatches,
+                            maxIterDelta: b.max_iter_delta,
+                        },
+                    })
+                    b.free()
                 }
                 break
             case 'dispose':

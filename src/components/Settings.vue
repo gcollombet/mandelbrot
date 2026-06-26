@@ -156,6 +156,23 @@ const sentinelSeedStepIndex = computed({
   },
 });
 
+// BLA/Padé radius ε on a log10 scale: slider value is the exponent (R = ε·|A| for
+// affine, √ε·|A| for Padé). Recommended band [1e-8, 1e-4]; allow [1e-8, 1e-2].
+const blaEpsilonExp = computed({
+  get: () => Math.round(Math.log10(model.value.blaEpsilon ?? 1e-4)),
+  set: (exp: number) => {
+    model.value.blaEpsilon = Math.pow(10, Math.min(-2, Math.max(-8, Math.round(exp))));
+  },
+});
+
+// Max block skip on a log2 scale: slider value is the exponent (skip = 2^value).
+const maxBlaSkipLog2 = computed({
+  get: () => Math.round(Math.log2(model.value.maxBlaSkip ?? 65536)),
+  set: (log2: number) => {
+    model.value.maxBlaSkip = 1 << Math.min(18, Math.max(1, Math.round(log2)));
+  },
+});
+
 const emit = defineEmits<{
   'toggle-picker': [];
 }>();
@@ -2713,7 +2730,7 @@ async function importSkyboxTexture(event: Event) {
         <div class="buttons has-addons toggle-buttons" style="margin-bottom:0;">
           <button
             class="button is-small"
-            :class="model.approximationMode !== 'bla' ? 'is-link' : 'is-light'"
+            :class="model.approximationMode === 'perturbation' ? 'is-link' : 'is-light'"
             @click="model.approximationMode = 'perturbation'"
           >
             <i class="fa-solid fa-calculator fa-fw mr-1"></i> Perturbation
@@ -2725,8 +2742,26 @@ async function importSkyboxTexture(event: Event) {
           >
             <i class="fa-solid fa-chart-line fa-fw mr-1"></i> BLA
           </button>
+          <button
+            class="button is-small"
+            :class="model.approximationMode === 'pade' ? 'is-link' : 'is-light'"
+            @click="model.approximationMode = 'pade'"
+            title="Padé [1/1] rational block-jump (experimental)"
+          >
+            <i class="fa-solid fa-superscript fa-fw mr-1"></i> Padé
+          </button>
         </div>
-        <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : 'Classic' }}</span>
+        <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : model.approximationMode === 'pade' ? 'Padé' : 'Classic' }}</span>
+      </div>
+      <div class="gfx-slider-row" v-if="model.approximationMode !== 'perturbation'">
+        <span class="gfx-slider-label">Radius ε</span>
+        <input class="slider" type="range" min="-8" max="-2" step="1" v-model.number="blaEpsilonExp" aria-label="BLA/Padé radius epsilon" />
+        <span class="gfx-slider-value">{{ (model.blaEpsilon ?? 1e-4).toExponential(0) }}</span>
+      </div>
+      <div class="gfx-slider-row" v-if="model.approximationMode !== 'perturbation'">
+        <span class="gfx-slider-label">Max skip</span>
+        <input class="slider" type="range" min="1" max="18" step="1" v-model.number="maxBlaSkipLog2" aria-label="Max block skip" />
+        <span class="gfx-slider-value">{{ model.maxBlaSkip ?? 65536 }}</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Resolution</span>
