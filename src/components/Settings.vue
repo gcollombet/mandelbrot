@@ -160,17 +160,12 @@ const sentinelSeedStepIndex = computed({
 // affine, √ε·|A| for Padé). Bounded to the safe band [1e-8, 1e-4]: above 1e-4 the
 // Padé √ε radius admits blocks beyond the rational map's validity (slight distortion).
 const blaEpsilonExp = computed({
-  get: () => Math.round(Math.log10(model.value.blaEpsilon ?? 1e-4)),
+  get: () => Math.round(Math.log10(model.value.blaEpsilon ?? 1e-3)),
   set: (exp: number) => {
-    model.value.blaEpsilon = Math.pow(10, Math.min(-4, Math.max(-8, Math.round(exp))));
-  },
-});
-
-// Max block skip on a log2 scale: slider value is the exponent (skip = 2^value).
-const maxBlaSkipLog2 = computed({
-  get: () => Math.round(Math.log2(model.value.maxBlaSkip ?? 65536)),
-  set: (log2: number) => {
-    model.value.maxBlaSkip = 1 << Math.min(18, Math.max(1, Math.round(log2)));
+    // (H2) bounds the c-truncation error at any ε, so the clamp can be wide:
+    // 1e-12 (ultra-clean) … 1e0 (maximal; radius √ε·|A| = |A| reaches the
+    // |z|=|2Z| pole, where the pole guard takes over and forces exact steps).
+    model.value.blaEpsilon = Math.pow(10, Math.min(0, Math.max(-12, Math.round(exp))));
   },
 });
 
@@ -2831,13 +2826,12 @@ async function importSkyboxTexture(event: Event) {
       </div>
       <div class="gfx-slider-row" v-if="model.approximationMode !== 'perturbation'">
         <span class="gfx-slider-label">Radius ε</span>
-        <input class="slider" type="range" min="-8" max="-4" step="1" v-model.number="blaEpsilonExp" aria-label="BLA/Padé radius epsilon" />
-        <span class="gfx-slider-value">{{ (model.blaEpsilon ?? 1e-4).toExponential(0) }}</span>
+        <input class="slider" type="range" min="-12" max="0" step="1" v-model.number="blaEpsilonExp" aria-label="BLA/Padé radius epsilon" />
+        <span class="gfx-slider-value">{{ (model.blaEpsilon ?? 1e-3).toExponential(0) }}</span>
       </div>
       <div class="gfx-slider-row" v-if="model.approximationMode !== 'perturbation'">
         <span class="gfx-slider-label">Max skip</span>
-        <input class="slider" type="range" min="1" max="18" step="1" v-model.number="maxBlaSkipLog2" aria-label="Max block skip" />
-        <span class="gfx-slider-value">{{ model.maxBlaSkip ?? 65536 }}</span>
+        <span class="gfx-slider-value">Auto</span>
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Resolution</span>

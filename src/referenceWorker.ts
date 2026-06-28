@@ -244,9 +244,10 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     }
 
     const blaInfo = navigator.compute_bla_reference_ptr(maxIterations)
-    // Floats per floatexp BlaStep — must match the Rust #[repr(C)] BlaStep (11 ×
-    // 4-byte fields incl. the Padé D coefficient) and Engine's BLA_STEP_FLOATS.
-    const BLA_STEP_FLOATS = 11
+    // Floats per floatexp BlaStep — must match the Rust #[repr(C)] BlaStep (12 ×
+    // 4-byte fields: a/b/D coefficients + exponents, alpha/beta radii, and the
+    // near-critical-guard log2_min_a) and Engine's BLA_STEP_FLOATS.
+    const BLA_STEP_FLOATS = 12
     const stepsSource = new Float32Array(
         wasmMemory.buffer,
         blaInfo.ptr,

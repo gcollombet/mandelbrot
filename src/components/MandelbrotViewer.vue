@@ -264,7 +264,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   activateAnimate: false,
   debugShading: false,
   approximationMode: 'perturbation',
-  blaEpsilon: 1e-4,
+  blaEpsilon: 1e-3,
   maxBlaSkip: 65536,
   dprMultiplier: 1.0,
   maxIterationMultiplier: 0.1,

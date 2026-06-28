@@ -51,6 +51,14 @@ fn dbig_i(value: i32) -> DBig {
     DBig::try_from(value).unwrap()
 }
 
+// BLA/Padé block-table sizing.
+// L_min = 4: drop the 1- and 2-step levels ("merge and cull"). Over the first
+// steps from the origin the result can be dominated by z² (at C = −1/2 two steps
+// give exactly c²), which a linear/rational block cannot represent — Guard 2.
+// Smallest emitted block is therefore 4; shorter spans stay exact.
+const BLA_SKIP_LEVELS: usize = 2;
+const MIN_BLA_SKIP: usize = 1 << BLA_SKIP_LEVELS;
+
 #[cfg(target_arch = "wasm32")]
 fn exp_f64(value: f64) -> f64 {
     js_sys::Math::exp(value)
@@ -105,6 +113,9 @@ pub struct BlaStep {
     pub dx: f32,
     pub dy: f32,
     pub d_exp: i32,
+    // log2 of the smallest |2Z_k| this block spans — the near-critical guard (G).
+    // A single f32 log suffices (only compared to log2(mu)); no separate exponent.
+    pub log2_min_a: f32,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -198,7 +209,7 @@ impl MandelbrotNavigator {
             last_zx: zero.clone(),
             last_zy: zero.clone(),
             approximation_mode: ApproximationMode::Perturbation,
-            bla_epsilon: 1e-6,
+            bla_epsilon: 1e-3,
             max_bla_skip: 65536,
             bla_result: Box::new(Vec::with_capacity(20_000)),
             bla_levels: Box::new(Vec::with_capacity(32)),
@@ -392,6 +403,24 @@ impl MandelbrotNavigator {
 
     pub fn get_max_bla_skip(&self) -> u32 {
         self.max_bla_skip as u32
+    }
+
+    /// Auto block-size bound (no magic constant). The longest useful block is
+    /// `L_max ≈ log2(√ε/|c|)` (generic `|2Z|≈2`); size the merge table to the next
+    /// power of two above it, with `|c|` ≈ the view scale. The radius and (H2)
+    /// `|B|·|c|<ε` tests stop blocks before this, so it is only a tiny safe ceiling
+    /// (≈512 even at zoom 1e-100, ~9 levels). Replaces the manual `maxSkip` knob.
+    fn auto_max_skip(&self) -> usize {
+        let eps = (self.bla_epsilon.max(f32::MIN_POSITIVE)) as f64;
+        let sqrt_eps = eps.sqrt();
+        let c = dbig_to_f64(&self.scale).abs().max(1e-300); // |c| ≈ view scale
+        let ratio = sqrt_eps / c; // √ε / |c|
+        if !ratio.is_finite() || ratio <= 2.0 {
+            return MIN_BLA_SKIP; // shallow: no benefit beyond the minimum block
+        }
+        let l_max = ratio.log2().max(1.0); // longest block in steps (|2Z|≈2)
+        let next_pow2 = (l_max.ceil() as usize).next_power_of_two();
+        next_pow2.clamp(MIN_BLA_SKIP, 1 << 20)
     }
 
     /// CPU benchmark over the *current* reference orbit: counts iteration loop steps
@@ -802,18 +831,12 @@ impl MandelbrotNavigator {
     }
 
     fn compute_bla_reference_inner(&mut self, orbit_len: usize) -> BlaBufferInfo {
-        // Skip-1 BLA entries always lose to the exact perturbation step: same
-        // arithmetic cost, extra table lookups, and they drop the dz² term.
-        // Start the table at skip 2 and let single steps stay exact.
-        const BLA_SKIP_LEVELS: usize = 1;
-        const MIN_BLA_SKIP: usize = 1 << BLA_SKIP_LEVELS;
-        // Largest single BLA jump. The radius test gates every level, so a high
-        // cap is safe-by-construction: deeper levels are only selected where the
-        // orbit's validity radius actually allows them (smooth, far-from-zero
-        // stretches). Each level halves in entry count, so the table tail is
-        // bounded (< 2× total). Near orbit-zero approaches the per-level radius
-        // collapses and exact iteration is forced regardless of this cap.
-        let max_bla_skip = self.max_bla_skip;
+        // Block size is auto-determined from ε and the zoom scale (no magic
+        // constant): the longest useful block is ~log2(√ε/|c|), and the merge
+        // table needs the next power of two above it (≈512 even at 1e-100). The
+        // per-level validity tests (radius + (H2) |B|·|c|<ε) stop blocks before
+        // this anyway, so it is a tiny safe ceiling.
+        let max_bla_skip = self.auto_max_skip();
 
         if orbit_len <= 1 {
             self.bla_result.clear();
@@ -1239,6 +1262,11 @@ struct BlaF64 {
     by: f64,
     alpha: f64,
     beta: f64,
+    // Smallest |A_k| = |2·Z_k| over the steps this block spans (merge by min).
+    // Drives the near-critical guard (G): a Möbius block straddling a step with
+    // tiny |2Z_k| picks up a spurious c·z/(2Z_k−z) term that (H1)/(H2) miss, so
+    // the shader rejects the block when this falls below mu = √(|c|/ε).
+    min_a: f64,
     // Padé [1/1] denominator coefficient D (block map (A·z+B·c)/(1+D·z)). Zero in
     // affine mode (the block is then purely linear). D is carried for the block
     // *application*, not the radius gate (it is √ε-small in the pullback): see
@@ -1286,7 +1314,7 @@ fn bla_seed(zx: f64, zy: f64, epsilon: f64, pade: bool) -> BlaF64 {
     } else {
         (epsilon * mag, 0.0, 0.0)
     };
-    BlaF64 { ax: 2.0 * zx, ay: 2.0 * zy, bx: 1.0, by: 0.0, alpha, beta: 0.0, dx, dy }
+    BlaF64 { ax: 2.0 * zx, ay: 2.0 * zy, bx: 1.0, by: 0.0, alpha, beta: 0.0, dx, dy, min_a: 2.0 * mag }
 }
 
 // Merge two consecutive blocks: x = left (first), y = right (second). The affine
@@ -1313,7 +1341,7 @@ fn bla_merge(left: BlaF64, right: BlaF64, pade: bool) -> BlaF64 {
     } else {
         (0.0, 0.0)
     };
-    BlaF64 { ax, ay, bx: abx + right.bx, by: aby + right.by, alpha, beta, dx, dy }
+    BlaF64 { ax, ay, bx: abx + right.bx, by: aby + right.by, alpha, beta, dx, dy, min_a: left.min_a.min(right.min_a) }
 }
 
 // (exponent, 2^-exponent) such that |x|·2^-exponent ∈ [0.5, 1); (0, 1.0) for 0.
@@ -1346,6 +1374,7 @@ fn bla_f64_to_fe(s: &BlaF64) -> BlaStep {
         dx: (s.dx * d_scale) as f32,
         dy: (s.dy * d_scale) as f32,
         d_exp,
+        log2_min_a: s.min_a.max(1e-300).log2() as f32,
     }
 }
 
@@ -2114,26 +2143,36 @@ mod tests {
 
     #[test]
     fn bla_reference_generation_builds_multiple_levels() {
-        let mut nav = MandelbrotNavigator::new("-0.75", "0.1", "1.0", 0.0);
+        // Shallow zoom: auto block-sizing yields a minimal table (no benefit to
+        // large skips), and L_min = 4 means the smallest level is skip 4 — the 1-
+        // and 2-step levels are culled (Guard 2).
+        let mut shallow = MandelbrotNavigator::new("-0.75", "0.1", "1.0", 0.0);
+        shallow.compute_reference_orbit_ptr(256);
+        shallow.compute_bla_reference_ptr(256);
+        assert!(shallow.bla_level_count >= 1);
+        assert_eq!(
+            shallow.bla_levels[0].skip, MIN_BLA_SKIP as u32,
+            "smallest skip is L_min = {}", MIN_BLA_SKIP
+        );
+
+        // Deep zoom: auto-sizing opens several levels, all powers of two starting
+        // at L_min and doubling, with non-increasing per-level max radius.
+        let mut nav = MandelbrotNavigator::new("-0.75", "0.1", "1e-30", 0.0);
         nav.compute_reference_orbit_ptr(256);
         let bla = nav.compute_bla_reference_ptr(256);
+        assert!(bla.count >= 4, "expected a populated BLA table at depth");
         assert!(
-            bla.count >= 4,
-            "expected culled BLA table to keep useful skips"
-        );
-        assert_eq!(
-            bla.level_count, 8,
-            "expected levels for skips 2, 4, 8, 16, 32, 64, 128, and 256 (skip 1 always loses to the exact step)"
+            nav.bla_level_count >= 4,
+            "deep zoom should open several levels, got {}", nav.bla_level_count
         );
         assert_ne!(bla.levels_ptr, 0);
-        assert_eq!(nav.bla_levels[0].skip, 2);
-        assert_eq!(nav.bla_levels[1].skip, 4);
-        assert_eq!(nav.bla_levels[2].skip, 8);
-        assert_eq!(nav.bla_levels[3].skip, 16);
-        assert_eq!(nav.bla_levels[4].skip, 32);
-        assert_eq!(nav.bla_levels[5].skip, 64);
-        assert_eq!(nav.bla_levels[6].skip, 128);
-        assert_eq!(nav.bla_levels[7].skip, 256);
+        assert_eq!(nav.bla_levels[0].skip, MIN_BLA_SKIP as u32);
+        for i in 1..nav.bla_level_count {
+            assert_eq!(
+                nav.bla_levels[i].skip, nav.bla_levels[i - 1].skip * 2,
+                "levels double from L_min"
+            );
+        }
         assert!(nav.bla_result.iter().all(|step| step.radius_beta >= 0.0));
         // Each level's stored max radius must bound every entry it covers, and
         // the per-level max must not grow with the skip (merged radii shrink).

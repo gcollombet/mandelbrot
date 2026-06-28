@@ -49,11 +49,11 @@ const MAX_BLA_BATCH_SIZE = 100_000
 // Validity radii scale linearly with this epsilon; 1e-4 keeps the error well
 // below a pixel while letting high-skip BLA levels accept far more often than
 // the previous 1e-6 (which made BLA slower than plain perturbation).
-const BLA_LINEARIZATION_EPSILON = 1e-4
+const BLA_LINEARIZATION_EPSILON = 1e-3
 // Floats per floatexp BlaStep uploaded to the GPU. Matches the Rust `BlaStep`
 // (#[repr(C)] of 11 × 4-byte fields): ax,ay,bx,by,ab_exp,radius_alpha,alpha_exp,
 // radius_beta + the Padé D coefficient dx,dy,d_exp.
-const BLA_STEP_FLOATS = 11
+const BLA_STEP_FLOATS = 12
 const COLOR_UNIFORM_FLOAT_COUNT = 60
 const TAU = Math.PI * 2
 

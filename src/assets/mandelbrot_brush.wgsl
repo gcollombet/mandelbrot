@@ -83,6 +83,8 @@ struct BlaStep {
   dx: f32,
   dy: f32,
   d_exp: i32,
+  // log2 of the smallest |2Z_k| the block spans — near-critical guard (G).
+  log2_min_a: f32,
 };
 
 struct BlaLevel {
@@ -263,6 +265,9 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
     return 0;
   }
   let dzMag2 = dot(*dz, *dz);
+  // (G) near-critical guard: a Möbius block may only span steps with
+  // |2Z_k| ≥ mu = √(|c|/ε); in log2, min_k log2|2Z_k| ≥ log2(mu).
+  let log2_mu = 0.5 * (log2(max(dcMag, 1e-30)) - log2(max(mandelbrot.blaEpsilon, 1e-30)));
   let shiftedRef = *ref_i - 1;
   var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
   while (level >= 0) {
@@ -286,7 +291,9 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
             // ── Padé [1/1] (in-place compute path) ──
             let d = ldexp(vec2<f32>(bla.dx, bla.dy), vec2<i32>(bla.d_exp, bla.d_exp));
             let m = vec2<f32>(1.0, 0.0) + cmul(d, *dz);   // 1 + D·dz
-            if (dot(m, m) >= PADE_POLE2) {
+            // (H2) c-truncation bound (|B|·|c| < ε) + (G) near-critical guard
+            // (block's min |2Z_k| ≥ mu) + pole guard. Any failing ⇒ descend a level.
+            if (length(b) * dcMag < mandelbrot.blaEpsilon && bla.log2_min_a >= log2_mu && dot(m, m) >= PADE_POLE2) {
               let invM = cinv(m);
               let num = cmul(a, *dz) + cmul(b, dc);
               let candidate = cmul(num, invM);
@@ -663,6 +670,9 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
     return 0;
   }
   let log_dz = log(max(length((*dz).m), 1e-30)) + f32((*dz).e) * LN2;
+  // (G) near-critical guard threshold in log2: min_k log2|2Z_k| ≥ log2(mu),
+  // mu = √(|c|/ε). log_dcMag is natural-log |c|, so convert via /LN2.
+  let log2_mu = 0.5 * (log_dcMag - log(max(mandelbrot.blaEpsilon, 1e-30))) / LN2;
   let shiftedRef = *ref_i - 1;
   var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
   while (level >= 0) {
@@ -685,7 +695,10 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
               // ── Padé [1/1] in floatexp: dz ← num/(1 + D·dz) ──
               let d = fe(vec2<f32>(bla.dx, bla.dy), bla.d_exp);
               let m = fe_add(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(d, *dz));   // 1 + D·dz
-              if (fe_mag2_f32(m) >= PADE_POLE2) {                            // pole-safe
+              // (H2) c-truncation bound in log space (|B|·|c| < ε) + (G)
+              // near-critical guard (min |2Z_k| ≥ mu) + pole guard.
+              let log_bDc = log(max(length(b.m), 1e-30)) + f32(b.e) * LN2 + log_dcMag;
+              if (log_bDc < log(max(mandelbrot.blaEpsilon, 1e-30)) && bla.log2_min_a >= log2_mu && fe_mag2_f32(m) >= PADE_POLE2) {
                 let invM = fe_cinv(m);
                 let candidate = fe_cmul(num, invM);
                 let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(candidate);
