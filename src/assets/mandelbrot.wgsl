@@ -458,6 +458,12 @@ fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
 }
 
 // ── core computation ──────────────────────────────────────────────
+// Per-invocation loop-turn counter — one per iteration-loop turn (a block-apply
+// or an exact step). The per-dispatch batch budgets TURNS (work), not covered
+// iterations, so block-skipping isn't throttled by an iteration cap. Reset at the
+// start of each compute function.
+var<private> g_workSteps: u32 = 0u;
+
 fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_dzx: f32, prev_dzy: f32, prev_ref_i: f32, prev_avg_direction: f32) -> FragOut {
   let dc = vec2<f32>(x0, y0);
   let max_iteration = mandelbrot.maxIteration;
@@ -468,6 +474,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   // Resume state: if prev_iter > 0 we are continuing a previous pass.
 
   var i: f32 = 0.0;
+  g_workSteps = 0u;
   var dz = vec2<f32>(prev_zx, prev_zy);
   var ref_i = decode_ref_i(prev_ref_i);
   // Carried reference-orbit value. Invariant: refZ == getOrbit(ref_i) at the end
@@ -527,7 +534,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     let maxBlaR2 = maxBlaRadius * maxBlaRadius;
     var usedBla = false;
     var blaZ = vec2<f32>(0.0);
-    while (i < max_iteration && ref_i < globalMaxIterI) {
+    while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+      g_workSteps += 1u;
       var skipped = 0;
       if (dot(dz, dz) <= maxBlaR2) {
         skipped = try_apply_bla(&ref_i, &dz, &derM, &blaZ, derInvScale, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
@@ -588,7 +596,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       }
     }
   } else {
-    while (i < max_iteration && ref_i < globalMaxIterI) {
+    while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+      g_workSteps += 1u;
       let zPrev = refZ + dz;
       dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
       ref_i += 1;
@@ -799,6 +808,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   let scaleExp = i32(mandelbrot.scaleExp);
 
   var i: f32 = 0.0;
+  g_workSteps = 0u;
   var dz = fe_renorm(fe(prev_dz_m, prev_dz_e));
   var ref_i = prev_ref_i_int;
   var refZ = getOrbit(ref_i); // carried orbit value (see mandelbrot_compute)
@@ -836,7 +846,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   }
   var usedBla = false;
 
-  while (i < max_iteration && ref_i < globalMaxIterI) {
+  while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+    g_workSteps += 1u;
     var skipped = 0;
     if (useBlaDeep) {
       var blaZ = vec2<f32>(0.0);

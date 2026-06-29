@@ -1,5 +1,5 @@
 (async ()=>{
-    var G = "" + new URL("mandelbrot_bg-Bc65vEoX.wasm", import.meta.url).href, Q = async (r = {}, _)=>{
+    var G = "" + new URL("mandelbrot_bg-DiRiIhwK.wasm", import.meta.url).href, Q = async (r = {}, _)=>{
         let a;
         if (_.startsWith("data:")) {
             const n = _.replace(/^data:.*?base64,/, "");
@@ -26,23 +26,23 @@
         t = r;
     }
     let A = null;
-    function B() {
+    function D() {
         return (A === null || A.byteLength === 0) && (A = new Uint8Array(t.memory.buffer)), A;
     }
-    let D = new TextDecoder("utf-8", {
+    let B = new TextDecoder("utf-8", {
         ignoreBOM: !0,
         fatal: !0
     });
-    D.decode();
+    B.decode();
     const e_ = 2146435072;
     let L = 0;
     function t_(r, _) {
-        return L += _, L >= e_ && (D = new TextDecoder("utf-8", {
+        return L += _, L >= e_ && (B = new TextDecoder("utf-8", {
             ignoreBOM: !0,
             fatal: !0
-        }), D.decode(), L = _), D.decode(B().subarray(r, r + _));
+        }), B.decode(), L = _), B.decode(D().subarray(r, r + _));
     }
-    function K(r, _) {
+    function X(r, _) {
         return r = r >>> 0, t_(r, _);
     }
     let v = null;
@@ -67,10 +67,10 @@
     function p(r, _, a) {
         if (a === void 0) {
             const l = S.encode(r), g = _(l.length, 1) >>> 0;
-            return B().subarray(g, g + l.length).set(l), c = l.length, g;
+            return D().subarray(g, g + l.length).set(l), c = l.length, g;
         }
         let n = r.length, o = _(n, 1) >>> 0;
-        const s = B();
+        const s = D();
         let b = 0;
         for(; b < n; b++){
             const l = r.charCodeAt(b);
@@ -79,7 +79,7 @@
         }
         if (b !== n) {
             b !== 0 && (r = r.slice(b)), o = a(o, n, n = b + r.length * 3, 1) >>> 0;
-            const l = B().subarray(o + b, o + n), g = S.encodeInto(r, l);
+            const l = D().subarray(o + b, o + n), g = S.encodeInto(r, l);
             b += g.written, o = a(o, n, b, 1) >>> 0;
         }
         return c = b, o;
@@ -314,7 +314,7 @@
         }
     }
     Symbol.dispose && (x.prototype[Symbol.dispose] = x.prototype.free);
-    const X = typeof FinalizationRegistry > "u" ? {
+    const K = typeof FinalizationRegistry > "u" ? {
         register: ()=>{},
         unregister: ()=>{}
     } : new FinalizationRegistry((r)=>t.__wbg_padebenchmark_free(r >>> 0, 1));
@@ -322,11 +322,11 @@
         static __wrap(_) {
             _ = _ >>> 0;
             const a = Object.create(z.prototype);
-            return a.__wbg_ptr = _, X.register(a, a.__wbg_ptr, a), a;
+            return a.__wbg_ptr = _, K.register(a, a.__wbg_ptr, a), a;
         }
         __destroy_into_raw() {
             const _ = this.__wbg_ptr;
-            return this.__wbg_ptr = 0, X.unregister(this), _;
+            return this.__wbg_ptr = 0, K.unregister(this), _;
         }
         free() {
             const _ = this.__destroy_into_raw();
@@ -383,10 +383,10 @@
         return Date.now();
     }
     function s_(r, _) {
-        throw new Error(K(r, _));
+        throw new Error(X(r, _));
     }
     function i_(r, _) {
-        return K(r, _);
+        return X(r, _);
     }
     function l_() {
         const r = t.__wbindgen_export_0, _ = r.grow(4);
@@ -401,7 +401,7 @@
             __wbindgen_init_externref_table: l_,
             __wbindgen_cast_2241b6af4c4b2941: i_
         }
-    }, G), C = e.memory, g_ = e.__wbg_blabufferinfo_free, c_ = e.__wbg_blalevel_free, p_ = e.__wbg_blastep_free, d_ = e.__wbg_get_blabufferinfo_count, f_ = e.__wbg_get_blabufferinfo_level_count, w_ = e.__wbg_get_blabufferinfo_levels_ptr, m_ = e.__wbg_get_blabufferinfo_ptr, u_ = e.__wbg_get_blastep_ab_exp, v_ = e.__wbg_get_blastep_alpha_exp, h_ = e.__wbg_get_blastep_ax, x_ = e.__wbg_get_blastep_ay, y_ = e.__wbg_get_blastep_bx, k_ = e.__wbg_get_blastep_by, R_ = e.__wbg_get_blastep_d_exp, S_ = e.__wbg_get_blastep_dx, E_ = e.__wbg_get_blastep_dy, F_ = e.__wbg_get_blastep_log2_min_a, I_ = e.__wbg_get_blastep_radius_alpha, z_ = e.__wbg_get_blastep_radius_beta, T_ = e.__wbg_get_padebenchmark_max_iter, A_ = e.__wbg_get_padebenchmark_max_iter_delta, M_ = e.__wbg_get_padebenchmark_pade_mismatches, B_ = e.__wbg_get_padebenchmark_pixels, D_ = e.__wbg_get_padebenchmark_steps_affine, C_ = e.__wbg_get_padebenchmark_steps_exact, j_ = e.__wbg_get_padebenchmark_steps_pade, L_ = e.__wbg_mandelbrotnavigator_free, U_ = e.__wbg_mandelbrotstep_free, W_ = e.__wbg_orbitbufferinfo_free, O_ = e.__wbg_padebenchmark_free, N_ = e.__wbg_set_blabufferinfo_count, V_ = e.__wbg_set_blabufferinfo_level_count, P_ = e.__wbg_set_blabufferinfo_levels_ptr, J_ = e.__wbg_set_blabufferinfo_ptr, X_ = e.__wbg_set_blastep_ab_exp, Y_ = e.__wbg_set_blastep_alpha_exp, H_ = e.__wbg_set_blastep_ax, K_ = e.__wbg_set_blastep_ay, Z_ = e.__wbg_set_blastep_bx, $_ = e.__wbg_set_blastep_by, q_ = e.__wbg_set_blastep_d_exp, G_ = e.__wbg_set_blastep_dx, Q_ = e.__wbg_set_blastep_dy, _e = e.__wbg_set_blastep_log2_min_a, ee = e.__wbg_set_blastep_radius_alpha, te = e.__wbg_set_blastep_radius_beta, re = e.__wbg_set_padebenchmark_max_iter, ae = e.__wbg_set_padebenchmark_pade_mismatches, ne = e.__wbg_set_padebenchmark_pixels, oe = e.__wbg_set_padebenchmark_steps_affine, be = e.__wbg_set_padebenchmark_steps_exact, se = e.__wbg_set_padebenchmark_steps_pade, ie = e.mandelbrotnavigator_angle, le = e.mandelbrotnavigator_benchmark_pade, ge = e.mandelbrotnavigator_cancel_transition, ce = e.mandelbrotnavigator_compute_bla_reference_ptr, pe = e.mandelbrotnavigator_compute_reference_orbit_chunk, de = e.mandelbrotnavigator_compute_reference_orbit_ptr, fe = e.mandelbrotnavigator_coordinate_to_pixel, we = e.mandelbrotnavigator_find_minibrot, me = e.mandelbrotnavigator_get_approximation_mode, ue = e.mandelbrotnavigator_get_bla_epsilon, ve = e.mandelbrotnavigator_get_max_bla_skip, he = e.mandelbrotnavigator_get_params, xe = e.mandelbrotnavigator_get_reference_orbit_capacity, ye = e.mandelbrotnavigator_get_reference_orbit_len, ke = e.mandelbrotnavigator_get_reference_params, Re = e.mandelbrotnavigator_is_in_transition, Se = e.mandelbrotnavigator_new, Ee = e.mandelbrotnavigator_origin, Fe = e.mandelbrotnavigator_pixel_to_complex, Ie = e.mandelbrotnavigator_reference_origin, ze = e.mandelbrotnavigator_rotate, Te = e.mandelbrotnavigator_rotate_direct, Ae = e.mandelbrotnavigator_scale, Me = e.mandelbrotnavigator_set_bla_epsilon, Be = e.mandelbrotnavigator_set_max_bla_skip, De = e.mandelbrotnavigator_start_transition, Ce = e.mandelbrotnavigator_step, je = e.mandelbrotnavigator_translate, Le = e.mandelbrotnavigator_translate_direct, Ue = e.mandelbrotnavigator_use_bla, We = e.mandelbrotnavigator_use_pade, Oe = e.mandelbrotnavigator_use_perturbation, Ne = e.mandelbrotnavigator_zoom, Ve = e.__wbg_set_blalevel_count, Pe = e.__wbg_set_blalevel_max_radius_bits, Je = e.__wbg_set_blalevel_offset, Xe = e.__wbg_set_blalevel_skip, Ye = e.__wbg_set_mandelbrotstep_pad0, He = e.__wbg_set_mandelbrotstep_pad1, Ke = e.__wbg_set_mandelbrotstep_zx, Ze = e.__wbg_set_mandelbrotstep_zy, $e = e.__wbg_set_orbitbufferinfo_count, qe = e.__wbg_set_orbitbufferinfo_offset, Ge = e.__wbg_set_orbitbufferinfo_ptr, Qe = e.__wbg_set_padebenchmark_max_iter_delta, _t = e.__wbg_get_blalevel_count, et = e.__wbg_get_blalevel_max_radius_bits, tt = e.__wbg_get_blalevel_offset, rt = e.__wbg_get_blalevel_skip, at = e.__wbg_get_orbitbufferinfo_count, nt = e.__wbg_get_orbitbufferinfo_offset, ot = e.__wbg_get_orbitbufferinfo_ptr, bt = e.__wbg_get_mandelbrotstep_pad0, st = e.__wbg_get_mandelbrotstep_pad1, it = e.__wbg_get_mandelbrotstep_zx, lt = e.__wbg_get_mandelbrotstep_zy, gt = e.__wbindgen_export_0, ct = e.__externref_drop_slice, pt = e.__wbindgen_free, dt = e.__wbindgen_malloc, ft = e.__wbindgen_realloc, Z = e.__wbindgen_start;
+    }, G), C = e.memory, g_ = e.__wbg_blabufferinfo_free, c_ = e.__wbg_blalevel_free, p_ = e.__wbg_blastep_free, d_ = e.__wbg_get_blabufferinfo_count, f_ = e.__wbg_get_blabufferinfo_level_count, w_ = e.__wbg_get_blabufferinfo_levels_ptr, m_ = e.__wbg_get_blabufferinfo_ptr, u_ = e.__wbg_get_blastep_ab_exp, v_ = e.__wbg_get_blastep_alpha_exp, h_ = e.__wbg_get_blastep_ax, x_ = e.__wbg_get_blastep_ay, y_ = e.__wbg_get_blastep_bx, k_ = e.__wbg_get_blastep_by, R_ = e.__wbg_get_blastep_d_exp, S_ = e.__wbg_get_blastep_dx, F_ = e.__wbg_get_blastep_dy, E_ = e.__wbg_get_blastep_log2_min_a, I_ = e.__wbg_get_blastep_radius_alpha, z_ = e.__wbg_get_blastep_radius_beta, T_ = e.__wbg_get_padebenchmark_max_iter, A_ = e.__wbg_get_padebenchmark_max_iter_delta, M_ = e.__wbg_get_padebenchmark_pade_mismatches, D_ = e.__wbg_get_padebenchmark_pixels, B_ = e.__wbg_get_padebenchmark_steps_affine, C_ = e.__wbg_get_padebenchmark_steps_exact, j_ = e.__wbg_get_padebenchmark_steps_pade, L_ = e.__wbg_mandelbrotnavigator_free, U_ = e.__wbg_mandelbrotstep_free, W_ = e.__wbg_orbitbufferinfo_free, O_ = e.__wbg_padebenchmark_free, N_ = e.__wbg_set_blabufferinfo_count, V_ = e.__wbg_set_blabufferinfo_level_count, P_ = e.__wbg_set_blabufferinfo_levels_ptr, J_ = e.__wbg_set_blabufferinfo_ptr, K_ = e.__wbg_set_blastep_ab_exp, Y_ = e.__wbg_set_blastep_alpha_exp, H_ = e.__wbg_set_blastep_ax, X_ = e.__wbg_set_blastep_ay, Z_ = e.__wbg_set_blastep_bx, $_ = e.__wbg_set_blastep_by, q_ = e.__wbg_set_blastep_d_exp, G_ = e.__wbg_set_blastep_dx, Q_ = e.__wbg_set_blastep_dy, _e = e.__wbg_set_blastep_log2_min_a, ee = e.__wbg_set_blastep_radius_alpha, te = e.__wbg_set_blastep_radius_beta, re = e.__wbg_set_padebenchmark_max_iter, ae = e.__wbg_set_padebenchmark_pade_mismatches, ne = e.__wbg_set_padebenchmark_pixels, oe = e.__wbg_set_padebenchmark_steps_affine, be = e.__wbg_set_padebenchmark_steps_exact, se = e.__wbg_set_padebenchmark_steps_pade, ie = e.mandelbrotnavigator_angle, le = e.mandelbrotnavigator_benchmark_pade, ge = e.mandelbrotnavigator_cancel_transition, ce = e.mandelbrotnavigator_compute_bla_reference_ptr, pe = e.mandelbrotnavigator_compute_reference_orbit_chunk, de = e.mandelbrotnavigator_compute_reference_orbit_ptr, fe = e.mandelbrotnavigator_coordinate_to_pixel, we = e.mandelbrotnavigator_find_minibrot, me = e.mandelbrotnavigator_get_approximation_mode, ue = e.mandelbrotnavigator_get_bla_epsilon, ve = e.mandelbrotnavigator_get_max_bla_skip, he = e.mandelbrotnavigator_get_params, xe = e.mandelbrotnavigator_get_reference_orbit_capacity, ye = e.mandelbrotnavigator_get_reference_orbit_len, ke = e.mandelbrotnavigator_get_reference_params, Re = e.mandelbrotnavigator_is_in_transition, Se = e.mandelbrotnavigator_new, Fe = e.mandelbrotnavigator_origin, Ee = e.mandelbrotnavigator_pixel_to_complex, Ie = e.mandelbrotnavigator_reference_origin, ze = e.mandelbrotnavigator_rotate, Te = e.mandelbrotnavigator_rotate_direct, Ae = e.mandelbrotnavigator_scale, Me = e.mandelbrotnavigator_set_bla_epsilon, De = e.mandelbrotnavigator_set_max_bla_skip, Be = e.mandelbrotnavigator_start_transition, Ce = e.mandelbrotnavigator_step, je = e.mandelbrotnavigator_translate, Le = e.mandelbrotnavigator_translate_direct, Ue = e.mandelbrotnavigator_use_bla, We = e.mandelbrotnavigator_use_pade, Oe = e.mandelbrotnavigator_use_perturbation, Ne = e.mandelbrotnavigator_zoom, Ve = e.__wbg_set_blalevel_count, Pe = e.__wbg_set_blalevel_max_radius_bits, Je = e.__wbg_set_blalevel_offset, Ke = e.__wbg_set_blalevel_skip, Ye = e.__wbg_set_mandelbrotstep_pad0, He = e.__wbg_set_mandelbrotstep_pad1, Xe = e.__wbg_set_mandelbrotstep_zx, Ze = e.__wbg_set_mandelbrotstep_zy, $e = e.__wbg_set_orbitbufferinfo_count, qe = e.__wbg_set_orbitbufferinfo_offset, Ge = e.__wbg_set_orbitbufferinfo_ptr, Qe = e.__wbg_set_padebenchmark_max_iter_delta, _t = e.__wbg_get_blalevel_count, et = e.__wbg_get_blalevel_max_radius_bits, tt = e.__wbg_get_blalevel_offset, rt = e.__wbg_get_blalevel_skip, at = e.__wbg_get_orbitbufferinfo_count, nt = e.__wbg_get_orbitbufferinfo_offset, ot = e.__wbg_get_orbitbufferinfo_ptr, bt = e.__wbg_get_mandelbrotstep_pad0, st = e.__wbg_get_mandelbrotstep_pad1, it = e.__wbg_get_mandelbrotstep_zx, lt = e.__wbg_get_mandelbrotstep_zy, gt = e.__wbindgen_export_0, ct = e.__externref_drop_slice, pt = e.__wbindgen_free, dt = e.__wbindgen_malloc, ft = e.__wbindgen_realloc, Z = e.__wbindgen_start;
     var wt = Object.freeze({
         __proto__: null,
         __externref_drop_slice: ct,
@@ -424,8 +424,8 @@
         __wbg_get_blastep_by: k_,
         __wbg_get_blastep_d_exp: R_,
         __wbg_get_blastep_dx: S_,
-        __wbg_get_blastep_dy: E_,
-        __wbg_get_blastep_log2_min_a: F_,
+        __wbg_get_blastep_dy: F_,
+        __wbg_get_blastep_log2_min_a: E_,
         __wbg_get_blastep_radius_alpha: I_,
         __wbg_get_blastep_radius_beta: z_,
         __wbg_get_mandelbrotstep_pad0: bt,
@@ -438,8 +438,8 @@
         __wbg_get_padebenchmark_max_iter: T_,
         __wbg_get_padebenchmark_max_iter_delta: A_,
         __wbg_get_padebenchmark_pade_mismatches: M_,
-        __wbg_get_padebenchmark_pixels: B_,
-        __wbg_get_padebenchmark_steps_affine: D_,
+        __wbg_get_padebenchmark_pixels: D_,
+        __wbg_get_padebenchmark_steps_affine: B_,
         __wbg_get_padebenchmark_steps_exact: C_,
         __wbg_get_padebenchmark_steps_pade: j_,
         __wbg_mandelbrotnavigator_free: L_,
@@ -453,11 +453,11 @@
         __wbg_set_blalevel_count: Ve,
         __wbg_set_blalevel_max_radius_bits: Pe,
         __wbg_set_blalevel_offset: Je,
-        __wbg_set_blalevel_skip: Xe,
-        __wbg_set_blastep_ab_exp: X_,
+        __wbg_set_blalevel_skip: Ke,
+        __wbg_set_blastep_ab_exp: K_,
         __wbg_set_blastep_alpha_exp: Y_,
         __wbg_set_blastep_ax: H_,
-        __wbg_set_blastep_ay: K_,
+        __wbg_set_blastep_ay: X_,
         __wbg_set_blastep_bx: Z_,
         __wbg_set_blastep_by: $_,
         __wbg_set_blastep_d_exp: q_,
@@ -468,7 +468,7 @@
         __wbg_set_blastep_radius_beta: te,
         __wbg_set_mandelbrotstep_pad0: Ye,
         __wbg_set_mandelbrotstep_pad1: He,
-        __wbg_set_mandelbrotstep_zx: Ke,
+        __wbg_set_mandelbrotstep_zx: Xe,
         __wbg_set_mandelbrotstep_zy: Ze,
         __wbg_set_orbitbufferinfo_count: $e,
         __wbg_set_orbitbufferinfo_offset: qe,
@@ -502,15 +502,15 @@
         mandelbrotnavigator_get_reference_params: ke,
         mandelbrotnavigator_is_in_transition: Re,
         mandelbrotnavigator_new: Se,
-        mandelbrotnavigator_origin: Ee,
-        mandelbrotnavigator_pixel_to_complex: Fe,
+        mandelbrotnavigator_origin: Fe,
+        mandelbrotnavigator_pixel_to_complex: Ee,
         mandelbrotnavigator_reference_origin: Ie,
         mandelbrotnavigator_rotate: ze,
         mandelbrotnavigator_rotate_direct: Te,
         mandelbrotnavigator_scale: Ae,
         mandelbrotnavigator_set_bla_epsilon: Me,
-        mandelbrotnavigator_set_max_bla_skip: Be,
-        mandelbrotnavigator_start_transition: De,
+        mandelbrotnavigator_set_max_bla_skip: De,
+        mandelbrotnavigator_start_transition: Be,
         mandelbrotnavigator_step: Ce,
         mandelbrotnavigator_translate: je,
         mandelbrotnavigator_translate_direct: Le,
@@ -523,7 +523,7 @@
     __(wt);
     Z();
     const O = self;
-    let i, d = 0, T = !1, m = 0, E = 0, U = !1, F = !1, R = "", N = "";
+    let i, d = 0, T = !1, m = 0, F = 0, U = !1, E = !1, R = "", N = "";
     const mt = 1e3;
     function u(r, _) {
         O.postMessage(r, _ ?? []);
@@ -543,7 +543,7 @@
         i && (r === "bla" ? i.use_bla() : r === "pade" ? i.use_pade() : i.use_perturbation());
     }
     function ut(r) {
-        console.log("[REF worker] RESET (fresh navigator)", r.cx.slice(0, 14), "scale", r.scale.slice(0, 10)), i?.free(), i = new W(r.cx, r.cy, r.scale, r.angle), d = r.jobId, m = 0, E = r.maxIterations, F = !1, R = "", N = "", q(r.approximationMode), i.set_bla_epsilon(r.blaEpsilon), i.set_max_bla_skip(r.maxBlaSkip), h(r.jobId);
+        console.log("[REF worker] RESET (fresh navigator)", r.cx.slice(0, 14), "scale", r.scale.slice(0, 10)), i?.free(), i = new W(r.cx, r.cy, r.scale, r.angle), d = r.jobId, m = 0, F = r.maxIterations, E = !1, R = "", N = "", q(r.approximationMode), i.set_bla_epsilon(r.blaEpsilon), i.set_max_bla_skip(r.maxBlaSkip), h(r.jobId);
     }
     function vt(r, _, a) {
         const s = Math.max(0, a - _), b = new Float32Array(C.buffer, r + _ * 4 * Float32Array.BYTES_PER_ELEMENT, s * 4), l = new Float32Array(s * 2);
@@ -572,13 +572,13 @@
             U = !0;
             try {
                 for(; !T && i && r === d;){
-                    const _ = E, a = Math.max(0, i.get_reference_orbit_len());
-                    if (a >= _ && !F) {
-                        if (H(r, _, a), await Y(), E <= _) break;
+                    const _ = F, a = Math.max(0, i.get_reference_orbit_len());
+                    if (a >= _ && !E) {
+                        if (H(r, _, a), await Y(), F <= _) break;
                         continue;
                     }
                     const n = i.compute_reference_orbit_chunk(mt, _);
-                    F = !1;
+                    E = !1;
                     const o = vt(n.ptr, n.offset, n.count), [s, b] = i.get_reference_params();
                     n.offset === 0 && console.log("[REF worker] orbit (re)start ref=", s.slice(0, 14), "prevRef=", R.slice(0, 14) || "(none)"), R && (s !== R || b !== N) && (console.log("[REF worker] -> referenceReset (recenter) newRef=", s.slice(0, 14)), m = 0, u({
                         type: "referenceReset",
@@ -606,7 +606,7 @@
             } finally{
                 if (U = !1, !T && i) {
                     const _ = Math.max(0, i.get_reference_orbit_len());
-                    (r !== d || _ < E || F) && h(d);
+                    (r !== d || _ < F || E) && h(d);
                 }
             }
         }
@@ -619,7 +619,7 @@
                     T || ut(_);
                     break;
                 case "updateView":
-                    i && _.jobId === d && (console.log("[REF worker] updateView (reuse navigator)", _.cx.slice(0, 14), "scale", _.scale.slice(0, 10)), i.origin(_.cx, _.cy), i.scale(_.scale), i.angle(_.angle), E = _.maxIterations, F = !0, h(_.jobId));
+                    i && _.jobId === d && (console.log("[REF worker] updateView (reuse navigator)", _.cx.slice(0, 14), "scale", _.scale.slice(0, 10)), i.origin(_.cx, _.cy), i.scale(_.scale), i.angle(_.angle), F = _.maxIterations, E = !0, h(_.jobId));
                     break;
                 case "setApproximationMode":
                     _.jobId === d && (q(_.approximationMode), m = 0, h(_.jobId));

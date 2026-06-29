@@ -2840,7 +2840,7 @@ async function importSkyboxTexture(event: Event) {
       </div>
       <div class="gfx-slider-row">
         <span class="gfx-slider-label">Iterations</span>
-        <input class="slider" type="range" min="-2" max="1" step="0.01" v-model="maxIterMultSlider" />
+        <input class="slider" type="range" min="-2" max="2" step="0.01" v-model="maxIterMultSlider" />
         <span class="gfx-slider-value">&times;{{ (model.maxIterationMultiplier ?? 1.0).toPrecision(3) }}</span>
       </div>
       <div class="gfx-slider-row">

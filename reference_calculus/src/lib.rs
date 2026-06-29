@@ -405,22 +405,17 @@ impl MandelbrotNavigator {
         self.max_bla_skip as u32
     }
 
-    /// Auto block-size bound (no magic constant). The longest useful block is
-    /// `L_max ≈ log2(√ε/|c|)` (generic `|2Z|≈2`); size the merge table to the next
-    /// power of two above it, with `|c|` ≈ the view scale. The radius and (H2)
-    /// `|B|·|c|<ε` tests stop blocks before this, so it is only a tiny safe ceiling
-    /// (≈512 even at zoom 1e-100, ~9 levels). Replaces the manual `maxSkip` knob.
-    fn auto_max_skip(&self) -> usize {
-        let eps = (self.bla_epsilon.max(f32::MIN_POSITIVE)) as f64;
-        let sqrt_eps = eps.sqrt();
-        let c = dbig_to_f64(&self.scale).abs().max(1e-300); // |c| ≈ view scale
-        let ratio = sqrt_eps / c; // √ε / |c|
-        if !ratio.is_finite() || ratio <= 2.0 {
-            return MIN_BLA_SKIP; // shallow: no benefit beyond the minimum block
-        }
-        let l_max = ratio.log2().max(1.0); // longest block in steps (|2Z|≈2)
-        let next_pow2 = (l_max.ceil() as usize).next_power_of_two();
-        next_pow2.clamp(MIN_BLA_SKIP, 1 << 20)
+    /// Auto block-size bound (no magic constant). Size the merge table to the
+    /// LARGEST block the reference orbit can support — `p* = ⌈log₂ L_max⌉` levels
+    /// with `L_max` bounded by the orbit length — not to some "typical useful"
+    /// length. The earlier `log₂ log₂(√ε/|c|)` heuristic (~9 levels, blocks ≤512)
+    /// needlessly throttled long blocks in smooth deep regions; the per-block
+    /// validity tests (radius / (H2) / (G)) already gate which blocks are usable,
+    /// and the extra levels are almost free (entry counts halve each level, so the
+    /// table stays ~orbit/2 entries regardless). This is what Fraktaler-3 et al do.
+    /// The build's own `skip*2 < orbit_len` guard then caps levels at the orbit.
+    fn auto_max_skip(orbit_len: usize) -> usize {
+        orbit_len.next_power_of_two().clamp(MIN_BLA_SKIP, 1 << 24)
     }
 
     /// CPU benchmark over the *current* reference orbit: counts iteration loop steps
@@ -831,12 +826,12 @@ impl MandelbrotNavigator {
     }
 
     fn compute_bla_reference_inner(&mut self, orbit_len: usize) -> BlaBufferInfo {
-        // Block size is auto-determined from ε and the zoom scale (no magic
-        // constant): the longest useful block is ~log2(√ε/|c|), and the merge
-        // table needs the next power of two above it (≈512 even at 1e-100). The
-        // per-level validity tests (radius + (H2) |B|·|c|<ε) stop blocks before
-        // this anyway, so it is a tiny safe ceiling.
-        let max_bla_skip = self.auto_max_skip();
+        // Block size is auto-determined (no magic constant): the table is sized to
+        // the largest block the orbit can support — p* = ⌈log₂(orbit_len)⌉ levels
+        // (~20–40 at deep zoom). The per-level validity tests (radius + (H2)
+        // |B|·|c|<ε + (G) near-critical) gate which blocks are actually usable;
+        // the extra levels are near-free (entry counts halve each level).
+        let max_bla_skip = Self::auto_max_skip(orbit_len);
 
         if orbit_len <= 1 {
             self.bla_result.clear();

@@ -119,6 +119,20 @@ struct CounterBuffer {
   active_count: atomic<u32>,
 };
 
+// Per-dispatch work instrumentation (in-place path only). Values are reduced at
+// workgroup granularity then downscaled by the lane count (256, via >>8) so the
+// u32 accumulators don't overflow on big renders; the displayed metrics are
+// ratios, so the shared scale cancels.
+//   realized skip   = covMean / realMean      (covered iters per real loop step)
+//   workgroup waste = maxAccum / realMean      (lane-time / useful work; 1 = ideal)
+//   straggler       = maxSteps                 (worst single-texel loop count)
+struct WorkStats {
+  realMean: atomic<u32>,
+  covMean: atomic<u32>,
+  maxAccum: atomic<u32>,
+  maxSteps: atomic<u32>,
+};
+
 @group(0) @binding(0) var<uniform> mandelbrot: Mandelbrot;
 @group(0) @binding(1) var<storage, read> mandelbrotOrbitPointSuite: array<MandelbrotStep>;
 @group(0) @binding(2) var<storage, read> mandelbrotBlaSuite: array<BlaStep>;
@@ -126,6 +140,12 @@ struct CounterBuffer {
 @group(0) @binding(4) var raw: texture_storage_2d_array<r32float, read_write>;
 @group(0) @binding(5) var<uniform> brush: BrushUniforms;
 @group(0) @binding(6) var<storage, read_write> counter: CounterBuffer;
+@group(0) @binding(7) var<storage, read_write> workStats: WorkStats;
+
+// Per-invocation real loop-step counter (work done by this texel this dispatch),
+// incremented once per iteration-loop turn (a block-apply or an exact step both
+// count as 1). Reset in cs_main before each texel's compute.
+var<private> g_workSteps: u32 = 0u;
 
 // ── complex helpers (verbatim from mandelbrot.wgsl) ────────────────
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -491,7 +511,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     let maxBlaR2 = maxBlaRadius * maxBlaRadius;
     var usedBla = false;
     var blaZ = vec2<f32>(0.0);
-    while (i < max_iteration && ref_i < globalMaxIterI) {
+    while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+      g_workSteps += 1u;
       var skipped = 0;
       if (dot(dz, dz) <= maxBlaR2) {
         skipped = try_apply_bla(&ref_i, &dz, &derM, &blaZ, derInvScale, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
@@ -552,7 +573,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       }
     }
   } else {
-    while (i < max_iteration && ref_i < globalMaxIterI) {
+    while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+      g_workSteps += 1u;
       let zPrev = refZ + dz;
       dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
       ref_i += 1;
@@ -779,7 +801,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   }
   var usedBla = false;
 
-  while (i < max_iteration && ref_i < globalMaxIterI) {
+  while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+    g_workSteps += 1u;
     var skipped = 0;
     if (useBlaDeep) {
       var blaZ = vec2<f32>(0.0);
@@ -938,6 +961,10 @@ fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
 // is wrapped in ifs, never early-returned.
 var<workgroup> wgCount: atomic<u32>;
 var<workgroup> wgActive: atomic<u32>;
+// Work-instrumentation partials (reduced once per workgroup, like the counters).
+var<workgroup> wgRealSum: atomic<u32>;  // Σ real loop steps over this workgroup's texels
+var<workgroup> wgRealMax: atomic<u32>;  // max real loop steps among them (straggler)
+var<workgroup> wgCovSum: atomic<u32>;   // Σ covered iterations over them
 
 @compute @workgroup_size(16, 16)
 fn cs_main(
@@ -947,6 +974,9 @@ fn cs_main(
   if (lidx == 0u) {
     atomicStore(&wgCount, 0u);
     atomicStore(&wgActive, 0u);
+    atomicStore(&wgRealSum, 0u);
+    atomicStore(&wgRealMax, 0u);
+    atomicStore(&wgCovSum, 0u);
   }
   workgroupBarrier();
 
@@ -997,6 +1027,11 @@ fn cs_main(
         }
 
         if (is_compute_request || needs_continuation) {
+          // Work instrumentation: count this texel's real loop steps and the
+          // iterations it covers this dispatch (covered base = prior iter, or 0
+          // for a fresh compute request).
+          g_workSteps = 0u;
+          let startIter = select(iter_val, 0.0, is_compute_request);
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
           // AA sub-pixel jitter (neutral-space units); zero for sample 0 / AA off.
           let local_rot = xy_neutral * neutralExtent + vec2<f32>(mandelbrot.aaOffsetX, mandelbrot.aaOffsetY);
@@ -1031,6 +1066,13 @@ fn cs_main(
             }
           }
           storeTexel(coord, result);
+
+          // Accumulate work metrics for this texel into the workgroup partials.
+          let realSteps = g_workSteps;
+          let covered = u32(max(0.0, result.iter.r - startIter));
+          atomicAdd(&wgRealSum, realSteps);
+          atomicMax(&wgRealMax, realSteps);
+          atomicAdd(&wgCovSum, covered);
 
           // Count the written (post-iteration) state.
           iter_val = result.iter.r;
@@ -1072,6 +1114,20 @@ fn cs_main(
     }
     if (a > 0u) {
       atomicAdd(&counter.active_count, a);
+    }
+    // Work-instrumentation reduction. Downscale the per-workgroup sums by the
+    // lane count (256, via >>8) so the global u32 accumulators can't overflow;
+    // the consumed metrics are ratios so the scale cancels. maxAccum/realMean
+    // = lane-time / useful work (workgroup lockstep waste); covMean/realMean =
+    // realized skip; maxSteps = worst single-texel straggler.
+    let rs = atomicLoad(&wgRealSum);
+    let rm = atomicLoad(&wgRealMax);
+    let cv = atomicLoad(&wgCovSum);
+    if (rm > 0u) {
+      atomicAdd(&workStats.realMean, (rs + 128u) >> 8u);
+      atomicAdd(&workStats.covMean, (cv + 128u) >> 8u);
+      atomicAdd(&workStats.maxAccum, rm);
+      atomicMax(&workStats.maxSteps, rm);
     }
   }
 }

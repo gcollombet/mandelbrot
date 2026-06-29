@@ -43,6 +43,9 @@ const shaderApproxFlag = ref(0);
 const shaderBlaLevelCount = ref(0);
 const unfinishedPixels = ref(-1);
 const activePixels = ref(-1);
+const realizedSkip = ref(-1);
+const workgroupWaste = ref(-1);
+const maxPixelSteps = ref(-1);
 const totalPixels = ref(0);
 const batchSize = ref(0);
 const orbitCount = ref(0);
@@ -180,6 +183,9 @@ function poll() {
   shaderBlaLevelCount.value = e.lastShaderBlaLevelCount ?? 0;
   unfinishedPixels.value = e.unfinishedPixelCount ?? -1;
   activePixels.value = e.activePixelCount ?? -1;
+  realizedSkip.value = e.realizedSkip ?? -1;
+  workgroupWaste.value = e.workgroupWaste ?? -1;
+  maxPixelSteps.value = e.maxPixelSteps ?? -1;
   const ns = e.neutralSize ?? 0;
   totalPixels.value = ns * ns;
   batchSize.value = typeof e.getIterationBatchSize === 'function' ? e.getIterationBatchSize() : 0;
@@ -423,6 +429,24 @@ defineExpose({ expanded });
           <span class="stats-value">
             {{ shaderApproxFlag === 2 ? 'Padé' : shaderApproxFlag === 1 ? 'BLA' : 'exact' }} · {{ shaderBlaLevelCount }} lvl
           </span>
+        </div>
+
+        <!-- Real GPU work (in-place compute path). Realized skip = covered iters
+             ÷ real loop steps (≈1 in perturbation; >1 with blocks) — the true
+             on-GPU compression; compare its drop vs the wall-time drop to size
+             the parallelization margin. WG waste = workgroup lane-time ÷ useful
+             work (1 = balanced; high = a few pixels stall the 16×16 tile). -->
+        <div v-if="realizedSkip >= 0" class="stats-row">
+          <span class="stats-label">Real skip</span>
+          <span class="stats-value">×{{ realizedSkip.toFixed(2) }}</span>
+        </div>
+        <div v-if="workgroupWaste >= 0" class="stats-row">
+          <span class="stats-label">WG waste</span>
+          <span class="stats-value">×{{ workgroupWaste.toFixed(1) }}</span>
+        </div>
+        <div v-if="maxPixelSteps >= 0" class="stats-row">
+          <span class="stats-label">Max pixel work</span>
+          <span class="stats-value">{{ maxPixelSteps.toLocaleString() }} steps</span>
         </div>
 
         <!-- Padé skip benchmark: exact vs affine vs Padé loop-step counts on the

@@ -231,7 +231,7 @@ async function draw() {
     const bailoutExtraIterations = Math.max(0, Math.ceil(Math.log2(Math.log(mu) / Math.log(4))));
     const maxIterations = Math.min(
       Math.max(100, 1000 * props.maxIterationMultiplier * Math.log2(1.0 / parseFloat(scale_string))) + bailoutExtraIterations,
-      1_000_000
+      10_000_000
     );
     await engine.update({
           cx: cx_string,

@@ -44,8 +44,11 @@ const LAYER_COUNT = 8
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
 // to target TARGET_FRAME_MS of GPU time.
 const MIN_BATCH_SIZE = 100
+// Per-dispatch budget, in loop TURNS (work units): one BLA/Padé block-apply or one
+// exact step each count as 1, so the cap bounds GPU work per frame uniformly across
+// modes. (Was a covered-iteration cap with a 10× BLA fudge — that throttled long
+// blocks in smooth regions; turn-budgeting lets them run, capped only by frame time.)
 const MAX_BATCH_SIZE = 10_000
-const MAX_BLA_BATCH_SIZE = 100_000
 // Validity radii scale linearly with this epsilon; 1e-4 keeps the error well
 // below a pixel while letting high-skip BLA levels accept far more often than
 // the previous 1e-6 (which made BLA slower than plain perturbation).
@@ -431,6 +434,7 @@ export class Engine {
     // GPU pixel counter (replaces blanket extraFrames = 1000)
     private pipelineCount?: GPUComputePipeline
     private counterBuffer?: GPUBuffer
+    private workStatsBuffer?: GPUBuffer
     private counterReadbackSlots: CounterReadbackSlot[] = []
     private counterReadbackWriteIndex = 0
     private counterReadbackSequence = 0
@@ -445,6 +449,23 @@ export class Engine {
     /** Number of pixels that mandelbrot.wgsl actually processes (iter == -1 + continuations).
      *  Used for adaptive refinement gating. -1 = not yet known. */
     activePixelCount = -1
+
+    // ── Work instrumentation (in-place compute path), latest sampled dispatch ──
+    /** covered iterations ÷ real loop steps — the true on-GPU BLA/Padé compression
+     *  (≈1 in perturbation mode; >1 with blocks). -1 = not yet known. */
+    realizedSkip = -1
+    /** workgroup lane-time ÷ useful work — divergence/straggler waste within a
+     *  16×16 tile (1 = balanced; high = a few pixels stall the workgroup). */
+    workgroupWaste = -1
+    /** worst single-texel real loop steps in the sampled dispatch. */
+    maxPixelSteps = -1
+    /** approximate total real loop steps for the render (realMean × 256). */
+    realLoopStepsApprox = -1
+    // workStatsBuffer accumulates on the GPU across EVERY dispatch of a render
+    // generation (cleared once, here-tracked, not per dispatch), so the totals are
+    // exact and deterministic — independent of which frames the CPU happens to
+    // sample. -1 ⇒ not yet cleared for the current generation.
+    private workStatsClearedGeneration = -1
 
     // Self-managing render loop
     private _rafId: number | null = null
@@ -1181,9 +1202,18 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
+        // Work-instrumentation buffer (in-place compute path): 4 × u32
+        // (realMean, covMean, maxAccum, maxSteps) — see WorkStats in the shader.
+        this.workStatsBuffer = this.device.createBuffer({
+            size: 16,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+            label: 'Engine WorkStats Storage',
+        })
+        // Readback slots hold counter (8 B) + workStats (16 B) = 24 B, copied
+        // together each sampled in-place dispatch and read as 6 × u32.
         this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
             buffer: this.device.createBuffer({
-                size: 8,
+                size: 24,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: `Engine Counter Readback ${index}`,
             }),
@@ -1348,6 +1378,7 @@ export class Engine {
                 { binding: 4, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'read-write', format: 'r32float', viewDimension: '2d-array' } },
                 { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
                 { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
             ],
             label: 'Engine BindGroupLayout InplaceCompute',
         })
@@ -1445,7 +1476,7 @@ export class Engine {
     private rebuildInplaceBindGroup() {
         if (!this.pipelineInplace || !this.rawArrayView || !this.uniformBufferMandelbrot
             || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
-            || !this.uniformBufferBrush || !this.counterBuffer) {
+            || !this.uniformBufferBrush || !this.counterBuffer || !this.workStatsBuffer) {
             return
         }
 
@@ -1460,6 +1491,7 @@ export class Engine {
                 { binding: 4, resource: this.rawArrayView },
                 { binding: 5, resource: { buffer: this.uniformBufferBrush } },
                 { binding: 6, resource: { buffer: this.counterBuffer } },
+                { binding: 7, resource: { buffer: this.workStatsBuffer } },
             ],
             label: 'Engine BindGroup InplaceCompute',
         })
@@ -1524,7 +1556,12 @@ export class Engine {
     private invalidateCounterReadback() {
         this.unfinishedPixelCount = -1
         this.activePixelCount = -1
+        this.realizedSkip = -1
+        this.workgroupWaste = -1
+        this.maxPixelSteps = -1
+        this.realLoopStepsApprox = -1
         this.counterReadbackGeneration++
+        // Next in-place dispatch re-clears workStats for the new generation.
         this.lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
         this.counterSampleFrame = -1
     }
@@ -1561,7 +1598,12 @@ export class Engine {
                 const data = new Uint32Array(slot.buffer.getMappedRange())
                 const unfinished = data[0]
                 const active = data[1]
-                this.applyCounterReadback(sequence, generation, frame, unfinished, active)
+                // Work stats (data[2..5]); 0 on non-in-place frames (buffer cleared).
+                const realMean = data[2]
+                const covMean = data[3]
+                const maxAccum = data[4]
+                const maxSteps = data[5]
+                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
             } finally {
@@ -1573,7 +1615,7 @@ export class Engine {
         })()
     }
 
-    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number) {
+    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0) {
         if (generation !== this.counterReadbackGeneration) {
             return
         }
@@ -1586,6 +1628,31 @@ export class Engine {
         this.unfinishedPixelCount = unfinished
         this.activePixelCount = active
         this.counterSampleFrame = frame
+
+        // Work instrumentation (in-place path). realMean/covMean/maxAccum are the
+        // GPU buffer's RUNNING TOTALS over the whole render generation (accumulated
+        // across every dispatch on the GPU, not just sampled ones), so the metrics
+        // are exact and deterministic: the ratios converge then freeze at the same
+        // whole-render figure regardless of frame-sampling timing. realMean/covMean
+        // are per-lane means (Σ/256); the /256 cancels in the ratios.
+        if (realMean > 0) {
+            const skip = covMean / realMean      // covered ÷ real (render-wide)
+            const waste = maxAccum / realMean    // lane-time ÷ useful (render-wide)
+            // Both are mathematically ≥ 1 (every loop turn covers ≥1 iter; the
+            // tile max ≥ its mean). A value below 1 means a u32 accumulator wrapped
+            // on an extreme deep-interior render — show nothing rather than a wrong
+            // number. (Normal views fit u32 and read a stable, deterministic value.)
+            if (skip >= 1 && waste >= 1) {
+                this.realizedSkip = skip
+                this.workgroupWaste = waste
+                this.maxPixelSteps = maxSteps
+                this.realLoopStepsApprox = realMean * 256
+            } else {
+                this.realizedSkip = -1
+                this.workgroupWaste = -1
+                this.maxPixelSteps = -1
+            }
+        }
 
         // When progressive computation just finished, snapshot resolved→frozen
         // so the unified color path has a valid frozen fallback for future clears.
@@ -1644,9 +1711,12 @@ export class Engine {
     }
 
     private getEffectiveMaxBatchSize(): number {
-        return (this.approximationMode === 'bla' || this.approximationMode === 'pade') && this.currentBlaLevelCount > 0
-            ? MAX_BLA_BATCH_SIZE
-            : MAX_BATCH_SIZE
+        // The shader batch now budgets loop TURNS (work), not covered iterations,
+        // so block-skipping modes no longer need an inflated iteration cap — one
+        // turn is ~one unit of work in every mode. The adaptive ramp (FPS-driven)
+        // settles the actual turn count below this cap; Padé turns cost a bit more
+        // (~3× ops) so it just settles a little lower on its own.
+        return MAX_BATCH_SIZE
     }
 
     resize() {
@@ -2773,6 +2843,13 @@ export class Engine {
             // in place on A.  Finished texels generate zero texture writes,
             // replacing passes 0/1, the B→A copy and the count pass.
             commandEncoder.clearBuffer(this.counterBuffer!, 0, 8)
+            // workStats accumulates across the whole render generation — clear it
+            // only on the generation's first in-place dispatch, then let every
+            // dispatch atomicAdd into it (exact, sampling-independent totals).
+            if (this.workStatsClearedGeneration !== this.counterReadbackGeneration) {
+                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 16)
+                this.workStatsClearedGeneration = this.counterReadbackGeneration
+            }
             const computePass = commandEncoder.beginComputePass()
             computePass.setPipeline(this.pipelineInplace!)
             computePass.setBindGroup(0, this.bindGroupInplace!)
@@ -2786,6 +2863,7 @@ export class Engine {
                 const sequence = ++this.counterReadbackSequence
                 const generation = this.counterReadbackGeneration
                 commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
+                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 16)
                 this.lastCounterDispatchFrame = frameSerial
                 scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
             }
