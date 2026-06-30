@@ -2853,7 +2853,9 @@ export class Engine {
             const computePass = commandEncoder.beginComputePass()
             computePass.setPipeline(this.pipelineInplace!)
             computePass.setBindGroup(0, this.bindGroupInplace!)
-            const workgroups = Math.ceil(this.neutralSize / 16)
+            // cs_main is @workgroup_size(8,8) — smaller tiles reduce intra-workgroup
+            // lockstep divergence waste (one deep straggler holds 64 lanes, not 256).
+            const workgroups = Math.ceil(this.neutralSize / 8)
             computePass.dispatchWorkgroups(workgroups, workgroups)
             computePass.end()
 

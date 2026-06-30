@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Animation — Éditeur dense</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="dense/dense-shell.css">
+<template id="__bundler_thumbnail" data-bg-color="#07080d">
+  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+    <path d="M14 60q12-34 24 0t24 0 24 0 20 0" fill="none" stroke="#5b8def" stroke-width="4"/>
+    <circle cx="38" cy="38" r="6" fill="#c06cd8"/><circle cx="86" cy="82" r="6" fill="#3fae8f"/>
+    <path d="M50 96l22-12-22-12z" fill="#e0a23a"/>
+  </svg>
+</template>
+<style>
+  .playbar{ display:flex; align-items:center; gap:14px; margin-bottom:var(--gap); flex-wrap:wrap; }
+  .play-btn{ display:inline-flex; align-items:center; gap:9px; padding:0 18px; height:38px; border-radius:var(--r,10px);
+    border:1px solid transparent; cursor:pointer; color:#fff; font-family:var(--sans); font-weight:700; font-size:14px;
+    background:linear-gradient(110deg, var(--accent), oklch(var(--lit) calc(var(--chroma)*var(--cmul,1)) 300));
+    box-shadow:0 8px 22px -10px var(--accent); transition:.15s; }
+  .play-btn:hover{ filter:brightness(1.07); }
+  .play-btn svg{ width:14px; height:14px; fill:currentColor; }
+  .play-btn.paused{ background:var(--row-on); color:var(--ink-2); border-color:var(--line); box-shadow:none; }
+  #root[data-style="clair"] .play-btn.paused{ color:var(--ink); }
+
+  .mixgrid{ display:grid; grid-template-columns:repeat(auto-fill,minmax(210px,1fr)); gap:8px; }
+  .mixcell{ background:var(--row); border:1px solid var(--line-soft); border-radius:11px; padding:8px 9px 9px; display:flex; flex-direction:column; gap:6px; }
+  .mc-head{ display:flex; align-items:center; gap:9px; }
+  .mc-name{ flex:1; min-width:0; font-size:13px; font-weight:600; color:var(--ink); white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+  .mixcell.off .mc-name{ color:var(--ink-3); }
+  .mixcell.off .mc-fields{ opacity:.38; pointer-events:none; }
+  .mc-wave{ flex:none; width:86px; min-width:0; }
+  .mc-fields{ display:flex; flex-direction:column; gap:5px; transition:opacity .15s; }
+  .tog{ width:34px; height:19px; border-radius:999px; background:var(--track); border:1px solid var(--line);
+    position:relative; flex:none; cursor:pointer; transition:.16s; }
+  .tog::after{ content:""; position:absolute; top:1.5px; left:1.5px; width:14px; height:14px; border-radius:50%; background:#8a91a1; transition:.16s; }
+  .tog.on{ background:var(--accent); border-color:var(--accent); }
+  .tog.on::after{ left:16px; background:#fff; }
+</style>
+</head>
+<body>
+<div id="root" data-style="clair" data-layout="columns" data-primary="main">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span><h1>Animation</h1></div>
+    <div class="ptabs" id="ptabs"></div>
+    <span class="spacer"></span>
+    <button class="tb-btn" id="viewBtn">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <span class="lbl">Affichage</span>
+    </button>
+    <button class="close" id="closeBtn" aria-label="Fermer">✕</button>
+  </header>
+  <nav class="tabbar" id="tabbar"></nav>
+  <div class="body"><div class="sections" id="sections"></div></div>
+  <nav class="mobile-nav" id="mobileNav"></nav>
+</div>
+
+<script src="dense/palette-dense-data.js"></script>
+<script src="dense/palette-dense-ui.js"></script>
+<script src="dense/dense-kit.js"></script>
+<script>
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "chroma": "vif",
+  "field": "gauge",
+  "shape": "rond"
+}/*EDITMODE-END*/;
+(function(){
+  const mk = d=>PDUI.makeField(d, ()=>{});
+  const WAVES = ["pulse","sine","loop","saw","noise"];
+  const ROWS = [
+    {name:"Palette Offset",       wave:"pulse", speed:2.1, r:0.26, rmin:0,rmax:1,  rstep:0.01, u:"cycle", on:true},
+    {name:"Height Palette Shift", wave:"loop",  speed:1.2, r:13.0, rmin:0,rmax:30, rstep:0.5,  u:"",      on:false},
+    {name:"Light Angle",          wave:"loop",  speed:0.4, r:1.00, rmin:0,rmax:2,  rstep:0.01, u:"turn",  on:false},
+    {name:"Texture Drift",        wave:"sine",  speed:1.0, r:1.00, rmin:0,rmax:4,  rstep:0.05, u:"",      on:false},
+    {name:"Sky Reflection Drift", wave:"pulse", speed:0.8, r:0.28, rmin:0,rmax:1,  rstep:0.01, u:"",      on:true},
+    {name:"Phase Coloring",       wave:"pulse", speed:0.3, r:6.0,  rmin:0,rmax:20, rstep:0.5,  u:"",      on:false},
+    {name:"Varnish",              wave:"pulse", speed:2.3, r:5.65, rmin:0,rmax:12, rstep:0.05, u:"",      on:false},
+    {name:"Micro Bump",           wave:"pulse", speed:0.3, r:0.50, rmin:0,rmax:2,  rstep:0.01, u:"",      on:false},
+    {name:"Displacement",         wave:"sine",  speed:0.2, r:0.020,rmin:0,rmax:0.1,rstep:0.001,u:"",      on:false},
+    {name:"Tessellation",         wave:"sine",  speed:0.1, r:2.0,  rmin:0,rmax:8,  rstep:0.1,  u:"",      on:false},
+  ];
+
+  const SECTIONS = [
+    { id:'play', title:'Lecture', hue:285, scope:"Marche/arrêt global et vitesse maître",
+      icon:'<path d="M8 5v14l11-7z"/>',
+      render(body){
+        const bar=document.createElement('div'); bar.className='playbar';
+        bar.innerHTML=`<button class="play-btn" id="drift"><svg id="dicon" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg><span id="dlabel">Drift</span></button>`;
+        body.appendChild(bar);
+        const g=document.createElement('div'); g.className='fields';
+        g.appendChild(mk({k:'gspeed',n:'Vitesse globale',d:"Multiplicateur de vitesse de toutes les animations",min:0,max:3,step:0.01,v:0.10,
+          f:v=>'×'+v.toFixed(2)}));
+        body.appendChild(g);
+        const btn=bar.querySelector('#drift'), ic=bar.querySelector('#dicon'), lb=bar.querySelector('#dlabel');
+        let playing=true;
+        btn.addEventListener('click', ()=>{ playing=!playing; btn.classList.toggle('paused',!playing);
+          lb.textContent=playing?'Drift':'En pause';
+          ic.innerHTML=playing?'<path d="M8 5v14l11-7z"/>':'<path d="M7 5h3v14H7zM14 5h3v14h-3z"/>'; });
+      }},
+    { id:'mix', title:'Mixer', hue:245, scope:"Paramètres animés — onde, vitesse, amplitude",
+      icon:'<path d="M4 12q4-7 8 0t8 0"/><path d="M4 17h16"/>',
+      render(body){
+        const grid=document.createElement('div'); grid.className='mixgrid';
+        ROWS.forEach((r,i)=>{
+          const cell=document.createElement('div'); cell.className='mixcell'+(r.on?'':' off');
+          const head=document.createElement('div'); head.className='mc-head';
+          head.innerHTML=`<span class="tog ${r.on?'on':''}"></span><span class="mc-name">${r.name}</span>
+            <div class="selbox mc-wave"><select>${WAVES.map(w=>`<option ${w===r.wave?'selected':''}>${w}</option>`).join('')}</select></div>`;
+          const fields=document.createElement('div'); fields.className='mc-fields';
+          fields.appendChild(mk({k:'sp'+i,n:'Vitesse',d:"Fréquence de l'animation",min:0,max:3,step:0.01,v:r.speed,f:v=>'×'+v.toFixed(2)}));
+          fields.appendChild(mk({k:'rg'+i,n:'Amplitude',d:"Ampleur de la modulation",min:r.rmin,max:r.rmax,step:r.rstep,v:r.r,u:r.u,
+            f:r.rstep<0.01?'p3':(r.rstep<0.1?'p2':'p1')}));
+          cell.append(head, fields); grid.appendChild(cell);
+          const tog=head.querySelector('.tog');
+          tog.addEventListener('click', ()=>{ const on=tog.classList.toggle('on'); cell.classList.toggle('off',!on); });
+        });
+        body.appendChild(grid);
+      }},
+  ];
+  DENSE.init({ sections:SECTIONS, viewKey:'pd_view_anim', defaults:{layout:'inspector'} });
+})();
+</script>
+</body>
+</html>

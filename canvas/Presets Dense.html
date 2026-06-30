@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Presets — Éditeur dense</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="dense/dense-shell.css">
+<template id="__bundler_thumbnail" data-bg-color="#07080d">
+  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+    <rect x="22" y="24" width="32" height="24" rx="4" fill="#5b8def"/><rect x="64" y="24" width="32" height="24" rx="4" fill="#c06cd8"/>
+    <rect x="22" y="56" width="32" height="24" rx="4" fill="#3fae8f"/><rect x="64" y="56" width="32" height="24" rx="4" fill="#e0a23a"/>
+    <path d="M40 92h40" stroke="#2b3242" stroke-width="6" stroke-linecap="round"/>
+  </svg>
+</template>
+<style>
+  .lib-bar2{ display:flex; align-items:center; gap:9px; margin-bottom:9px; }
+  .lib-count{ margin-left:auto; font-family:var(--mono); font-size:11.5px; font-weight:600; color:var(--ink-3); }
+  .mini-btn.favf.on{ color:oklch(.74 .15 322); border-color:oklch(.7 .15 322/.5); background:oklch(.7 .15 322/.12); }
+  .mini-btn.favf.on svg{ fill:currentColor; }
+  .card .depth{ font-family:var(--mono); font-size:9.5px; font-weight:600; color:var(--accent);
+    background:color-mix(in oklab,var(--accent) 16%,transparent); border-radius:4px; padding:1px 5px; }
+</style>
+</head>
+<body>
+<div id="root" data-style="clair" data-layout="columns" data-primary="main">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span><h1>Presets</h1></div>
+    <div class="ptabs" id="ptabs"></div>
+    <span class="spacer"></span>
+    <button class="tb-btn" id="viewBtn">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <span class="lbl">Affichage</span>
+    </button>
+    <button class="close" id="closeBtn" aria-label="Fermer">✕</button>
+  </header>
+  <nav class="tabbar" id="tabbar"></nav>
+  <div class="body"><div class="sections" id="sections"></div></div>
+  <nav class="mobile-nav" id="mobileNav"></nav>
+</div>
+
+<script src="dense/palette-dense-data.js"></script>
+<script src="dense/palette-dense-ui.js"></script>
+<script src="dense/dense-kit.js"></script>
+<script>
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "chroma": "code",
+  "field": "gauge",
+  "shape": "doux"
+}/*EDITMODE-END*/;
+(function(){
+  const ITEMS = [
+    {name:"Silver Starburst",  sub:"10 juin 22:36", depth:"10³⁰", fav:true,  cr:-0.79, ci:0.15,  pal:[[20,22,40],[120,140,200],[235,240,250],[60,70,120]]},
+    {name:"Magenta Filaments", sub:"10 juin 22:34", depth:"10²⁸", fav:false, cr:-0.16, ci:0.66,  pal:[[20,2,24],[150,10,160],[255,60,255],[60,0,80]]},
+    {name:"Golden Tide",       sub:"9 juin 18:02",  depth:"10²¹", fav:true,  cr:-0.835,ci:-0.232, pal:[[25,12,2],[200,140,30],[255,236,180],[120,60,10]]},
+    {name:"Deep Indigo Spiral",sub:"9 juin 17:40",  depth:"10³³", fav:false, cr:-0.745,ci:0.113,  pal:[[8,8,28],[60,70,180],[170,190,255],[20,20,70]]},
+    {name:"Crimson Reef",      sub:"8 juin 21:15",  depth:"10¹⁸", fav:false, cr:-0.62, ci:-0.44,  pal:[[30,4,10],[176,18,63],[255,160,180],[80,10,30]]},
+    {name:"Teal Abyss",        sub:"8 juin 11:02",  depth:"10²⁴", fav:false, cr:-0.70, ci:0.27,   pal:[[2,14,18],[14,122,138],[127,212,192],[244,249,244]]},
+  ];
+
+  const SECTIONS = [
+    { id:'save', title:'Enregistrer la vue', hue:155, scope:"Capture lieu, palette et rendu",
+      icon:'<path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/>',
+      render(body){
+        const sr=document.createElement('div'); sr.className='save-row';
+        sr.innerHTML=`<input class="txt-in" placeholder="Nom (optionnel)…">
+          <button class="mini-btn primary"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>Enregistrer</button>`;
+        body.appendChild(sr);
+        const btn=sr.querySelector('.mini-btn'), inp=sr.querySelector('.txt-in');
+        btn.addEventListener('click', ()=>{ inp.value=''; inp.placeholder='Enregistré ✓'; setTimeout(()=>inp.placeholder='Nom (optionnel)…',1400); });
+      }},
+    { id:'lib', title:'Bibliothèque', hue:265, scope:"Cliquer pour appliquer — survol pour les actions",
+      icon:'<path d="M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z"/>',
+      render(body){
+        const bar=document.createElement('div'); bar.className='lib-bar2';
+        bar.innerHTML=`<button class="mini-btn favf" id="favf"><svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>Favoris</button><span class="lib-count" id="count"></span>`;
+        const grid=document.createElement('div'); grid.className='grid';
+        body.append(bar, grid);
+        PDUI.buildCards(grid, ITEMS, PDUI.juliaThumb, 78);
+        // inject depth badge into each card's sub line
+        grid.querySelectorAll('.card').forEach((c,i)=>{
+          const sub=c.querySelector('.sub'); if(sub){ const d=document.createElement('span'); d.className='depth'; d.textContent=ITEMS[i].depth; sub.appendChild(d); }
+        });
+        grid.querySelector('.card')?.classList.add('sel');
+        const favf=bar.querySelector('#favf'), count=bar.querySelector('#count');
+        function applyFilter(){
+          const only=favf.classList.contains('on'); let vis=0;
+          grid.querySelectorAll('.card').forEach(c=>{ const fav=!!c.querySelector('.heart.faved'); const show=!only||fav;
+            c.style.display=show?'':'none'; if(show)vis++; });
+          count.textContent=vis+' preset'+(vis>1?'s':'');
+        }
+        favf.addEventListener('click', ()=>{ favf.classList.toggle('on'); applyFilter(); });
+        grid.addEventListener('click', ()=>setTimeout(applyFilter,0));
+        applyFilter();
+      }},
+    { id:'transfer', title:'Transfert', hue:25, scope:"Import / export",
+      icon:'<path d="M12 3v12M7 10l5 5 5-5M5 21h14"/>',
+      render(body){
+        const tr=document.createElement('div'); tr.className='transfer';
+        tr.innerHTML=`<button class="mini-btn primary"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Importer</button>
+          <button class="mini-btn"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Exporter tout</button>
+          <button class="mini-btn"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Favoris</button>
+          <button class="mini-btn danger"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Tout supprimer</button>`;
+        body.appendChild(tr);
+      }},
+  ];
+  DENSE.init({ sections:SECTIONS, viewKey:'pd_view' });
+})();
+</script>
+</body>
+</html>

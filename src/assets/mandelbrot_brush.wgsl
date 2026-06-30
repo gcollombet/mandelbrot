@@ -966,7 +966,7 @@ var<workgroup> wgRealSum: atomic<u32>;  // Σ real loop steps over this workgrou
 var<workgroup> wgRealMax: atomic<u32>;  // max real loop steps among them (straggler)
 var<workgroup> wgCovSum: atomic<u32>;   // Σ covered iterations over them
 
-@compute @workgroup_size(16, 16)
+@compute @workgroup_size(8, 8)
 fn cs_main(
   @builtin(global_invocation_id) gid: vec3<u32>,
   @builtin(local_invocation_index) lidx: u32,
@@ -1124,8 +1124,8 @@ fn cs_main(
     let rm = atomicLoad(&wgRealMax);
     let cv = atomicLoad(&wgCovSum);
     if (rm > 0u) {
-      atomicAdd(&workStats.realMean, (rs + 128u) >> 8u);
-      atomicAdd(&workStats.covMean, (cv + 128u) >> 8u);
+      atomicAdd(&workStats.realMean, (rs + 32u) >> 6u);
+      atomicAdd(&workStats.covMean, (cv + 32u) >> 6u);
       atomicAdd(&workStats.maxAccum, rm);
       atomicMax(&workStats.maxSteps, rm);
     }

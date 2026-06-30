@@ -1,0 +1,117 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover">
+<title>Navigation — Éditeur dense</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=JetBrains+Mono:wght@500;600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="dense/dense-shell.css">
+<template id="__bundler_thumbnail" data-bg-color="#07080d">
+  <svg viewBox="0 0 120 120" xmlns="http://www.w3.org/2000/svg">
+    <circle cx="60" cy="60" r="30" fill="none" stroke="#5b8def" stroke-width="4"/>
+    <circle cx="60" cy="60" r="5" fill="#c06cd8"/>
+    <path d="M60 14v14M60 92v14M14 60h14M92 60h14" stroke="#3fae8f" stroke-width="4"/>
+  </svg>
+</template>
+<style>
+  /* panel-specific bits */
+  .coordbox{ display:flex; align-items:center; gap:12px; padding:10px 12px; background:var(--row);
+    border:1px solid var(--line-soft); border-radius:var(--rfld,9px); margin-bottom:var(--gap); }
+  .coordbox .cc{ display:flex; flex-direction:column; gap:3px; min-width:0; flex:1; font-family:var(--mono); font-size:11.5px; }
+  .coordbox .cline{ display:flex; gap:9px; white-space:nowrap; overflow:hidden; }
+  .coordbox .ax{ color:var(--ink-4); flex:none; width:22px; font-weight:700; }
+  .coordbox .num{ color:var(--ink); overflow:hidden; text-overflow:ellipsis; }
+  .copy{ width:34px; height:34px; border-radius:8px; border:1px solid var(--line); background:var(--row-on);
+    color:var(--ink-2); cursor:pointer; display:grid; place-items:center; flex:none; }
+  .copy svg{ width:15px; height:15px; stroke:currentColor; fill:none; stroke-width:1.8; }
+  .copy.ok{ color:oklch(.74 .16 150); border-color:oklch(.5 .13 150/.5); }
+  .navlib-row{ display:flex; gap:8px; margin-bottom:var(--gap); }
+  .mini-btn.favf.on{ color:oklch(.74 .15 322); border-color:oklch(.7 .15 322/.5); background:oklch(.7 .15 322/.12); }
+  .mini-btn.favf.on svg{ fill:currentColor; }
+</style>
+</head>
+<body>
+<div id="root" data-style="clair" data-layout="columns" data-primary="main">
+  <header class="topbar">
+    <div class="brand"><span class="dot"></span><h1>Navigation</h1></div>
+    <div class="ptabs" id="ptabs"></div>
+    <span class="spacer"></span>
+    <button class="tb-btn" id="viewBtn">
+      <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
+      <span class="lbl">Affichage</span>
+    </button>
+    <button class="close" id="closeBtn" aria-label="Fermer">✕</button>
+  </header>
+  <nav class="tabbar" id="tabbar"></nav>
+  <div class="body"><div class="sections" id="sections"></div></div>
+  <nav class="mobile-nav" id="mobileNav"></nav>
+</div>
+
+<script src="dense/palette-dense-data.js"></script>
+<script src="dense/palette-dense-ui.js"></script>
+<script src="dense/dense-kit.js"></script>
+<script>
+const TWEAKS = /*EDITMODE-BEGIN*/{
+  "chroma": "code",
+  "field": "gauge",
+  "shape": "doux"
+}/*EDITMODE-END*/;
+(function(){
+  const mk = (d)=>PDUI.makeField(d, ()=>{});
+  const grid = ()=>{ const g=document.createElement('div'); g.className='fields'; return g; };
+
+  const SECTIONS = [
+    { id:'loc', title:'Localisation', hue:200, scope:'Position dans le plan complexe',
+      icon:'<circle cx="12" cy="12" r="3.2"/><path d="M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22"/><circle cx="12" cy="12" r="9"/>',
+      render(body){
+        const cb=document.createElement('div'); cb.className='coordbox';
+        cb.innerHTML=`<div class="cc">
+          <div class="cline"><span class="ax">Cx</span><span class="num">-1.97718383671767311029305116604640</span></div>
+          <div class="cline"><span class="ax">Cy</span><span class="num">0.00000164572023352835557083719150</span></div></div>
+          <button class="copy" id="copyBtn" title="Copier les coordonnées"><svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg></button>`;
+        body.appendChild(cb);
+        cb.querySelector('#copyBtn').addEventListener('click', e=>{
+          const t=[...cb.querySelectorAll('.num')].map(n=>n.textContent).join(', ');
+          navigator.clipboard?.writeText(t); e.currentTarget.classList.add('ok');
+          setTimeout(()=>e.currentTarget.classList.remove('ok'),1200);
+        });
+        const g=grid();
+        g.appendChild(mk({k:'zoom',n:'Zoom',d:"Grossissement — échelle de la vue",min:0,max:100,step:0.1,v:8,
+          f:v=>Math.pow(10,-(v/100)*13).toExponential(2)}));
+        g.appendChild(mk({k:'rot',n:'Rotation',d:"Angle de vue autour du centre",min:0,max:360,step:0.1,v:138.41,u:'°',f:'p2'}));
+        body.appendChild(g);
+      }},
+    { id:'map', title:'Mapping de rendu', hue:25, scope:"Mappage des itérations avant coloration",
+      icon:'<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 12h16M12 4v16"/>',
+      render(body){
+        const g=grid();
+        g.appendChild(mk({k:'mu',n:'Mu',d:"Échelle de la valeur d'échappement — l'ordre de grandeur",min:0,max:9,step:0.02,v:5,
+          f:v=>{const x=Math.pow(10,v); return x>=1e6?(x/1e6).toFixed(2)+'M':x>=1e3?(x/1e3).toFixed(1)+'K':x.toFixed(0);}}));
+        g.appendChild(mk({k:'stripe',n:'Fréquence rayures',d:"Densité du banding de rayures dans la coloration",min:1,max:32,step:1,v:8,f:'p0'}));
+        body.appendChild(g);
+      }},
+    { id:'lib', title:'Bibliothèque de lieux', hue:300, scope:"Applique Cx, Cy, zoom & angle",
+      icon:'<path d="M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z"/>',
+      render(body){
+        const row=document.createElement('div'); row.className='navlib-row';
+        row.innerHTML=`<button class="mini-btn favf" id="favf"><svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>Favoris</button>
+          <div class="selbox" style="flex:1"><select>
+            <option>Choisir un lieu…</option><option>Seahorse Valley</option><option>Elephant Valley</option>
+            <option>Mini Mandelbrot — needle</option><option>Spiral Arms ★</option><option>Dendrite Forest ★</option></select></div>`;
+        body.appendChild(row);
+        row.querySelector('#favf').addEventListener('click', e=>e.currentTarget.classList.toggle('on'));
+        body.appendChild(mk({k:'pins',n:'Afficher les lieux sur la carte',d:"Épingle chaque lieu sauvegardé sur la vue fractale",kind:'toggle',v:false}));
+        const tr=document.createElement('div'); tr.className='transfer'; tr.style.marginTop='8px';
+        tr.innerHTML=`<button class="mini-btn primary"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Importer</button>
+          <button class="mini-btn"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Exporter</button>
+          <button class="mini-btn"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Favoris</button>`;
+        body.appendChild(tr);
+      }},
+  ];
+  DENSE.init({ sections:SECTIONS, viewKey:'pd_view' });
+})();
+</script>
+</body>
+</html>
