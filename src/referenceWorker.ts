@@ -13,6 +13,9 @@ type ResetMessage = {
     blaEpsilon: number
     maxBlaSkip: number
     maxIterations: number
+    // Fixed precision budget as a target scale (e.g. "1e-30"). Sets the navigator's
+    // descending-profile precision ahead of time; a budget change arrives as a fresh reset.
+    precisionBudget: string
 }
 
 type UpdateViewMessage = {
@@ -159,6 +162,12 @@ let currentReferenceCx = ''
 let currentReferenceCy = ''
 
 const ORBIT_CHUNK_SIZE = 1000
+// Compute the reference orbit to HEADROOM× the display maxIter, so interactive zoom-in (which
+// raises maxIter) finds the orbit already long enough — no transient black frame while it
+// catches up. The BLA table is still built only to the display maxIter (what the shader uses).
+// Capped at the GPU reference buffer's step capacity (mirrors Engine's 1M-step buffer).
+const REFERENCE_ITER_HEADROOM = 2
+const ORBIT_STEP_CAPACITY = 1_000_000
 
 function postResponse(message: ReferenceWorkerResponse, transfer?: Transferable[]) {
     ctx.postMessage(message, transfer ?? [])
@@ -195,6 +204,9 @@ function resetNavigator(message: ResetMessage) {
         message.scale,
         message.angle,
     )
+    // Fix the precision budget ahead of time (descending-profile depth). A budget change
+    // re-enters this reset path, so the orbit is always rebuilt at the current budget.
+    navigator.set_precision_budget(message.precisionBudget)
     activeJobId = message.jobId
     lastBlaMaxIterations = 0
     targetMaxIterations = message.maxIterations
@@ -284,9 +296,11 @@ async function runComputeLoop(jobId: number) {
     try {
         while (!disposed && navigator && jobId === activeJobId) {
             const maxIterations = targetMaxIterations
+            // Orbit ceiling carries the headroom; BLA/posts use the display maxIterations.
+            const orbitTarget = Math.min(maxIterations * REFERENCE_ITER_HEADROOM, ORBIT_STEP_CAPACITY)
             const availableBefore = Math.max(0, navigator.get_reference_orbit_len())
 
-            if (availableBefore >= maxIterations && !needsReferenceValidation) {
+            if (availableBefore >= orbitTarget && !needsReferenceValidation) {
                 postBlaIfReady(jobId, maxIterations, availableBefore)
                 await yieldToWorkerEvents()
                 if (targetMaxIterations <= maxIterations) {
@@ -297,7 +311,7 @@ async function runComputeLoop(jobId: number) {
 
             const info = navigator.compute_reference_orbit_chunk(
                 ORBIT_CHUNK_SIZE,
-                maxIterations,
+                orbitTarget,
             )
             needsReferenceValidation = false
             const orbit = copyOrbitSlice(info.ptr, info.offset, info.count)

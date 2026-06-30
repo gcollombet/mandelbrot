@@ -17,5 +17,7 @@ export type MandelbrotExposed = {
   setApproximationMode: (mode: 'bla' | 'perturbation' | 'pade') => void,
   getApproximationMode: () => 'bla' | 'perturbation' | 'pade' | undefined,
   setBlaEpsilon: (epsilon: number) => void,
+  setPrecisionBudget?: (targetScale: string) => void,
+  getPrecisionBudget?: () => string | undefined,
   resetReferenceTo?: (cx: string, cy: string, scaleStr: string, angleVal: number) => void,
 };

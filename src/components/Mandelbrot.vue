@@ -470,6 +470,8 @@ defineExpose({
   setApproximationMode: (mode: 'bla' | 'perturbation' | 'pade') => engine?.setApproximationMode(mode),
   getApproximationMode: () => engine?.getApproximationMode(),
   setBlaEpsilon: (epsilon: number) => engine?.setBlaEpsilon(epsilon),
+  setPrecisionBudget: (targetScale: string) => engine?.setPrecisionBudget(targetScale),
+  getPrecisionBudget: () => engine?.getPrecisionBudget(),
 });
 </script>
 

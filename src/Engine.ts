@@ -57,6 +57,11 @@ const BLA_LINEARIZATION_EPSILON = 1e-3
 // (#[repr(C)] of 11 × 4-byte fields): ax,ay,bx,by,ab_exp,radius_alpha,alpha_exp,
 // radius_beta + the Padé D coefficient dx,dy,d_exp.
 const BLA_STEP_FLOATS = 12
+// Reference orbit is accumulated to HEADROOM× the display maxIter (headroom for interactive
+// zoom-in, avoids a transient black frame). Capped at the GPU reference buffer's step
+// capacity (the 8·CAPACITY-byte mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts.
+const REFERENCE_ITER_HEADROOM = 2
+const ORBIT_STEP_CAPACITY = 1_000_000
 const COLOR_UNIFORM_FLOAT_COUNT = 60
 const TAU = Math.PI * 2
 
@@ -100,6 +105,7 @@ type ReferenceWorkerRequest =
         blaEpsilon: number
         maxBlaSkip: number
         maxIterations: number
+        precisionBudget: string
     }
     | {
         type: 'updateView'
@@ -523,6 +529,10 @@ export class Engine {
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private maxBlaSkip = 65536
+    // Fixed precision budget as a target scale (max zoom depth navigation stays precise at).
+    // Default 1e-30 keeps shallow use fast; the Settings slider can deepen it to 1e-1000.
+    // Changing it forces a full reference recompute. See fix-reference-precision-budget.
+    private precisionBudget = '1e-30'
     private pendingBenchmarkResolve: ((r: PadeBenchmarkResult) => void) | null = null
     private pendingMinibrotResolve: ((r: MinibrotResult) => void) | null = null
     // Time-to-completion of the last render session (ms). Wall includes everything;
@@ -856,6 +866,7 @@ export class Engine {
             blaEpsilon: this.blaEpsilon,
             maxBlaSkip: this.maxBlaSkip,
             maxIterations,
+            precisionBudget: this.precisionBudget,
         })
     }
 
@@ -939,7 +950,10 @@ export class Engine {
             this.pendingRefCy = message.referenceCy
             this.pendingRefMaxIterations = message.maxIterations
             // Allocate orbit buffer for accumulation (2 floats per step: zx, zy)
-            const bufLen = Math.max(message.maxIterations, this.currentMaxIterations) * 2
+            const bufLen = Math.min(
+                Math.max(message.maxIterations, this.currentMaxIterations) * REFERENCE_ITER_HEADROOM,
+                ORBIT_STEP_CAPACITY,
+            ) * 2
             this.pendingRefOrbitBuffer = new Float32Array(bufLen)
             this.pendingRefOrbitLen = 0
             this.pendingRefBlaSteps = null
@@ -981,7 +995,10 @@ export class Engine {
                 this.pendingRefCx = message.referenceCx
                 this.pendingRefCy = message.referenceCy
                 this.pendingRefMaxIterations = message.maxIterations
-                const bufLen = Math.max(message.maxIterations, this.currentMaxIterations) * 2
+                const bufLen = Math.min(
+                Math.max(message.maxIterations, this.currentMaxIterations) * REFERENCE_ITER_HEADROOM,
+                ORBIT_STEP_CAPACITY,
+            ) * 2
                 this.pendingRefOrbitBuffer = new Float32Array(bufLen)
                 this.pendingRefOrbitLen = 0
                 this.pendingRefBlaSteps = null
@@ -1043,8 +1060,15 @@ export class Engine {
             this.currentReferenceRemainingIter = Math.max(0, this.currentMaxIterations - availableIter)
             this.isReferenceValidating = false
             this.currentGuardedMaxIter = Math.min(this.currentMaxIterations, availableIter)
+            const wasOrbitIncomplete = this.orbitIncomplete
             this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < this.currentMaxIterations
-            this.needRender = true
+            // Only re-render while the VISIBLE portion (≤ maxIter) is still being built, plus the
+            // frame it completes. Headroom chunks beyond maxIter (the 2× lookahead for zoom-in)
+            // don't change what the shader draws — guardedMaxIter is capped — so forcing a render
+            // for each of them re-runs the full pass for nothing (a massive framerate drop).
+            if (this.orbitIncomplete || wasOrbitIncomplete) {
+                this.needRender = true
+            }
             return
         }
 
@@ -1084,6 +1108,9 @@ export class Engine {
 
     async initialize(mandelbrotNavigator: MandelbrotNavigator): Promise<void> {
         this.mandelbrotNavigator = mandelbrotNavigator
+        // Keep the shared front navigator (coordinate math, minibrot search) at the budget
+        // precision too, so its state matches the worker's reference.
+        this.mandelbrotNavigator.set_precision_budget(this.precisionBudget)
         this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         this.initializeReferenceWorker()
@@ -1179,7 +1206,7 @@ export class Engine {
             label: 'Engine UniformBuffer Resolve',
         })
         this.mandelbrotReferenceBuffer = this.device.createBuffer({
-            size: 8 * 1000000, // 1M steps × 2 floats (zx, zy) × 4 bytes; shader reads only zx/zy
+            size: 8 * ORBIT_STEP_CAPACITY, // CAPACITY steps × 2 floats (zx, zy) × 4 bytes; shader reads only zx/zy
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot Orbit ReferenceStorage Buffer',
         })
@@ -2009,6 +2036,30 @@ export class Engine {
 
     getMaxBlaSkip(): number {
         return this.maxBlaSkip
+    }
+
+    getPrecisionBudget(): string {
+        return this.precisionBudget
+    }
+
+    /**
+     * Set the navigation precision budget (target scale, e.g. "1e-300"). Forces a full
+     * reference recompute — an assumed design choice. Clearing referenceViewKey makes the
+     * next update() take the reset branch (resetReferenceJob), which carries the new budget.
+     */
+    setPrecisionBudget(targetScale: string) {
+        if (targetScale === this.precisionBudget) {
+            return
+        }
+        this.precisionBudget = targetScale
+        this.mandelbrotNavigator.set_precision_budget(targetScale)
+        // Force the next update() to fully reset the worker reference at the new budget.
+        this.referenceViewKey = ''
+        this.referenceBlaReadyMaxIterations = 0
+        this.currentBlaLevelCount = 0
+        this.clearHistoryNextFrame = true
+        this.needRender = true
+        this.invalidateCounterReadback()
     }
 
     // Run the CPU skip benchmark (exact vs affine vs Padé) on the worker's current

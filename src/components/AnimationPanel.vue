@@ -20,6 +20,7 @@ import {
   canDeleteCatalogEntry,
   canOverwriteCatalogPayload,
 } from '../catalogPermissions';
+import { DenseField, DenseSection, DenseSelect } from './dense';
 
 const props = defineProps<{
   userRole: UserRole;
@@ -65,13 +66,6 @@ function animationTrack(id: AnimationTrackId) {
 
 function animationTrackLabel(id: AnimationTrackId): string {
   return animationTrackDefinition(id).label;
-}
-
-function animationTrackAmplitudeValueOnly(id: AnimationTrackId): string {
-  const definition = animationTrackDefinition(id);
-  const value = animationTrack(id).amplitude;
-  const decimals = definition.amplitudeStep < 0.01 ? 3 : definition.amplitudeStep < 0.1 ? 2 : 1;
-  return value.toFixed(decimals);
 }
 
 function animationTrackAmplitudeUnit(id: AnimationTrackId): string {
@@ -167,6 +161,47 @@ function uploadButtonIcon(preset: AnimationPresetRecord): string {
   return props.uploadSuccessKeys.has(key) ? 'fa-solid fa-check' : 'fa-solid fa-upload';
 }
 
+// ── Dense field wiring ──────────────────────────────────────────────
+const waveOptions = ANIMATION_TYPES.map(t => ({ label: t, value: t }));
+
+const speedFmt = (v: number) => '×' + v.toFixed(2);
+
+function amplitudeFmt(id: AnimationTrackId) {
+  const step = animationTrackDefinition(id).amplitudeStep;
+  const decimals = step < 0.01 ? 3 : step < 0.1 ? 2 : 1;
+  return (v: number) => v.toFixed(decimals);
+}
+
+function setGlobalSpeed(v: number) {
+  ensureAnimationConfig();
+  model.value.animation!.globalSpeed = v;
+  model.value.animationSpeed = v;
+  triggerAnimationUpdate();
+}
+
+function setTrackType(id: AnimationTrackId, v: string | number) {
+  animationTrack(id).type = v as typeof ANIMATION_TYPES[number];
+  triggerAnimationUpdate();
+}
+
+function setTrackSpeed(id: AnimationTrackId, v: number) {
+  animationTrack(id).speed = v;
+  triggerAnimationUpdate();
+}
+
+function setTrackAmplitude(id: AnimationTrackId, v: number) {
+  animationTrack(id).amplitude = v;
+  triggerAnimationUpdate();
+}
+
+function toggleTrack(id: AnimationTrackId) {
+  const t = animationTrack(id);
+  t.enabled = !t.enabled;
+  triggerAnimationUpdate();
+}
+
+const visibleAnimationPresetCount = computed(() => visibleAnimationPresets.value.length);
+
 onMounted(() => {
   ensureAnimationConfig();
   loadAnimationPresets();
@@ -182,591 +217,299 @@ watch(
 </script>
 
 <template>
-  <div class="animation-tab-container" v-if="model.animation">
-    <label class="gfx-section-title">Playback</label>
-    <div class="playback">
-      <button
-        class="play-btn"
-        :class="{ 'paused': model.activateAnimate }"
-        type="button"
-        :aria-pressed="model.activateAnimate"
-        title="Play/Pause animation"
-        @click="model.activateAnimate = !model.activateAnimate"
-      >
-        <span class="sheen"></span>
-        <svg v-if="!model.activateAnimate" viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-        <svg v-else viewBox="0 0 24 24"><path d="M6 19h4V5H6v14zm8-14v14h4V5h-4z"/></svg>
-        <span>{{ model.activateAnimate ? 'Pause' : 'Animate' }}</span>
-      </button>
-      <span class="pb-label">Global Speed</span>
-      <div class="pb-slider">
-        <input
-          type="range"
-          min="0"
-          max="5"
-          step="0.05"
-          v-model.number="model.animation.globalSpeed"
-          @input="model.animationSpeed = model.animation.globalSpeed; triggerAnimationUpdate()"
-        />
-      </div>
-      <span class="pb-val">&times;{{ (model.animation?.globalSpeed ?? 1).toFixed(2) }}</span>
-    </div>
+  <div class="sections" v-if="model.animation">
 
-    <label class="gfx-section-title">Mixer</label>
-    <div class="mixer">
-      <div
-        v-for="track in ANIMATION_TRACK_DEFINITIONS"
-        :key="track.id"
-        class="row"
-        :class="model.animation.tracks[track.id].enabled ? 'on' : 'off'"
-      >
-        <div class="name-cell">
-          <div
-            class="toggle"
-            :class="{ 'on': model.animation.tracks[track.id].enabled }"
-            role="switch"
-            :aria-checked="model.animation.tracks[track.id].enabled"
-            tabindex="0"
-            @click="model.animation.tracks[track.id].enabled = !model.animation.tracks[track.id].enabled; triggerAnimationUpdate()"
-            @keydown.space.prevent="model.animation.tracks[track.id].enabled = !model.animation.tracks[track.id].enabled; triggerAnimationUpdate()"
-            @keydown.enter.prevent="model.animation.tracks[track.id].enabled = !model.animation.tracks[track.id].enabled; triggerAnimationUpdate()"
-          ></div>
-          <span class="name">{{ animationTrackLabel(track.id) }}</span>
-        </div>
+        <!-- ═══ Lecture ═══ -->
+        <DenseSection
+          title="Lecture"
+          scope="Marche/arrêt global et vitesse maître"
+          icon='<path d=&quot;M8 5v14l11-7z&quot;/>'
+        >
+          <div class="playbar">
+            <button
+              class="play-btn"
+              :class="{ paused: !model.activateAnimate }"
+              type="button"
+              :aria-pressed="model.activateAnimate"
+              title="Play/Pause animation"
+              @click="model.activateAnimate = !model.activateAnimate"
+            >
+              <svg v-if="model.activateAnimate" viewBox="0 0 24 24"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>
+              <svg v-else viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <span>{{ model.activateAnimate ? 'En pause' : 'Drift' }}</span>
+            </button>
+          </div>
+          <div class="fields">
+            <DenseField
+              label="Vitesse globale"
+              :min="0" :max="5" :step="0.05"
+              :f="speedFmt"
+              :model-value="model.animation.globalSpeed"
+              @update:model-value="setGlobalSpeed"
+            />
+          </div>
+        </DenseSection>
 
-        <div class="wave ctl">
-          <select v-model="model.animation.tracks[track.id].type" @change="triggerAnimationUpdate">
-            <option v-for="type in ANIMATION_TYPES" :key="`${track.id}-${type}`" :value="type">{{ type }}</option>
-          </select>
-        </div>
+        <!-- ═══ Mixer ═══ -->
+        <DenseSection
+          title="Mixer"
+          scope="Paramètres animés — onde, vitesse, amplitude"
+          icon='<path d=&quot;M4 12q4-7 8 0t8 0&quot;/><path d=&quot;M4 17h16&quot;/>'
+        >
+          <div class="mixgrid">
+            <div
+              v-for="track in ANIMATION_TRACK_DEFINITIONS"
+              :key="track.id"
+              class="mixcell"
+              :class="{ off: !model.animation.tracks[track.id].enabled }"
+            >
+              <div class="mc-head">
+                <span
+                  class="tog"
+                  :class="{ on: model.animation.tracks[track.id].enabled }"
+                  role="switch"
+                  :aria-checked="model.animation.tracks[track.id].enabled"
+                  tabindex="0"
+                  @click="toggleTrack(track.id)"
+                  @keydown.space.prevent="toggleTrack(track.id)"
+                  @keydown.enter.prevent="toggleTrack(track.id)"
+                ></span>
+                <span class="mc-name">{{ animationTrackLabel(track.id) }}</span>
+                <DenseSelect
+                  class="mc-wave"
+                  :options="waveOptions"
+                  :model-value="model.animation.tracks[track.id].type"
+                  @update:model-value="(v) => setTrackType(track.id, v)"
+                />
+              </div>
+              <div class="mc-fields">
+                <DenseField
+                  label="Vitesse"
+                  :min="0" :max="5" :step="0.05"
+                  :f="speedFmt"
+                  :model-value="model.animation.tracks[track.id].speed"
+                  @update:model-value="(v) => setTrackSpeed(track.id, v)"
+                />
+                <DenseField
+                  label="Amplitude"
+                  :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep"
+                  :f="amplitudeFmt(track.id)"
+                  :unit="animationTrackAmplitudeUnit(track.id)"
+                  :model-value="model.animation.tracks[track.id].amplitude"
+                  @update:model-value="(v) => setTrackAmplitude(track.id, v)"
+                />
+              </div>
+            </div>
+          </div>
+        </DenseSection>
 
-        <div class="param ctl">
-          <span class="plabel">Speed</span>
-          <input type="range" min="0" max="5" step="0.05" v-model.number="model.animation.tracks[track.id].speed" @input="triggerAnimationUpdate" />
-          <span class="pval">&times;{{ model.animation.tracks[track.id].speed.toFixed(2) }}</span>
-        </div>
+        <!-- ═══ Préréglages ═══ -->
+        <DenseSection
+          title="Préréglages"
+          scope="Enregistrer & appliquer une animation"
+          icon='<rect x=&quot;5&quot; y=&quot;3&quot; width=&quot;14&quot; height=&quot;18&quot; rx=&quot;2&quot;/><path d=&quot;M9 3v5h7V3M8 21v-7h8v7&quot;/>'
+        >
+          <div class="lib-bar2">
+            <button
+              class="mini-btn favf"
+              :class="{ on: showOnlyFavoriteAnimationPresets }"
+              type="button"
+              :aria-pressed="showOnlyFavoriteAnimationPresets"
+              @click="showOnlyFavoriteAnimationPresets = !showOnlyFavoriteAnimationPresets"
+            >
+              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+              Favoris
+            </button>
+            <span class="lib-count">{{ visibleAnimationPresetCount }} préréglage{{ visibleAnimationPresetCount > 1 ? 's' : '' }}</span>
+          </div>
 
-        <div class="param ctl">
-          <span class="plabel">Range</span>
-          <input type="range" :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep" v-model.number="model.animation.tracks[track.id].amplitude" @input="triggerAnimationUpdate" />
-          <span class="pval">
-            {{ animationTrackAmplitudeValueOnly(track.id) }}<span class="unit">{{ animationTrackAmplitudeUnit(track.id) }}</span>
-          </span>
-        </div>
-      </div>
-    </div>
-
-    <hr class="section-sep"/>
-
-    <div class="mb-3 compact-library">
-      <label class="palette-library-label">Animation Presets</label>
-      <button
-        class="button is-small favorite-filter"
-        :class="{ 'is-active': showOnlyFavoriteAnimationPresets }"
-        type="button"
-        :aria-pressed="showOnlyFavoriteAnimationPresets"
-        @click="showOnlyFavoriteAnimationPresets = !showOnlyFavoriteAnimationPresets"
-      >
-        <span class="favorite-filter-heart"><i class="fa-heart" :class="showOnlyFavoriteAnimationPresets ? 'fa-solid' : 'fa-regular'"></i></span>
-        <span>Favorites</span>
-      </button>
-      <div class="dropdown" :class="{ 'is-active': showAnimationPresetDropdown }" style="width:100%;">
-        <div class="dropdown-trigger" style="width:100%;">
-          <button class="button is-fullwidth is-small" @click="showAnimationPresetDropdown = !showAnimationPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-animation-presets" type="button">
-            <span style="display:flex; align-items:center; min-height:28px;">
-              <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.88em;">{{ animationPresetName || selectedAnimationPreset || 'Choose animation preset...' }}</span>
-              <span class="icon is-small" style="margin-left:4px;">
-                <i class="fas fa-angle-down" aria-hidden="true"></i>
-              </span>
-            </span>
-          </button>
-        </div>
-        <div class="dropdown-menu" id="dropdown-menu-animation-presets" role="menu" style="width:100%;">
-          <div class="dropdown-content" style="max-height:260px; overflow-y:auto;">
-            <a v-for="preset in visibleAnimationPresets" :key="preset.guid" class="dropdown-item favorite-row"
-              @click.prevent="selectAnimationPresetFromDropdown(preset)"
-              :class="{ 'is-active': selectedAnimationPreset === preset.name, 'has-delete': canDeleteCatalogEntry(props.userRole, preset.remote) }"
-              style="display:flex; align-items:center; gap:0.5em;">
+          <div class="anim-preset-list">
+            <div
+              v-for="preset in visibleAnimationPresets"
+              :key="preset.guid"
+              class="anim-preset-row"
+              :class="{ sel: selectedAnimationPreset === preset.name }"
+              @click="selectAnimationPresetFromDropdown(preset)"
+            >
               <button
                 v-if="props.isAdmin"
-                class="favorite-button upload-button"
+                class="iconbtn"
                 :class="uploadButtonClasses(preset)"
                 type="button"
                 :title="uploadButtonTitle(preset)"
                 :aria-label="uploadButtonTitle(preset)"
-                @click.stop.prevent="emit('upload-preset', preset)"
+                @click.stop="emit('upload-preset', preset)"
               >
-                <span class="favorite-heart" aria-hidden="true"><i :class="uploadButtonIcon(preset)"></i></span>
+                <i :class="uploadButtonIcon(preset)"></i>
               </button>
               <button
-                class="favorite-button"
-                :class="{ 'is-favorite': preset.favorite }"
+                class="iconbtn favf"
+                :class="{ on: preset.favorite }"
                 type="button"
-                :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                :title="preset.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'"
                 :aria-pressed="!!preset.favorite"
-                @click.stop.prevent="toggleAnimationPresetFavorite(preset)"
+                @click.stop="toggleAnimationPresetFavorite(preset)"
               >
-                <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+                <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
               </button>
-              <span style="flex:1 1 auto; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:0.95em;">{{ preset.name }}</span>
+              <span class="ap-name">{{ preset.name }}</span>
               <button
                 v-if="canDeleteCatalogEntry(props.userRole, preset.remote)"
-                class="delete-preset-button"
+                class="iconbtn danger"
                 type="button"
-                title="Delete animation preset"
-                aria-label="Delete animation preset"
-                @click.stop.prevent="deleteAnimationPreset(preset)"
+                title="Supprimer le préréglage"
+                aria-label="Supprimer le préréglage"
+                @click.stop="deleteAnimationPreset(preset)"
               >
-                <span class="favorite-heart" aria-hidden="true"><i class="fa-solid fa-trash"></i></span>
+                <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
               </button>
-            </a>
+            </div>
           </div>
-        </div>
-      </div>
-      <div class="field is-grouped" style="margin-top:0.5em;">
-        <div class="control is-expanded">
-          <input class="input is-small" v-model="animationPresetName" type="text" placeholder="Animation preset name..."
-            @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-            @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-            @keyup.enter="saveAnimationPreset"
-          />
-        </div>
-        <div class="control">
-          <button class="button is-link is-small" @click="saveAnimationPreset"><i class="fa-solid fa-floppy-disk mr-1"></i> Save</button>
-        </div>
-      </div>
-    </div>
+
+          <div class="save-row">
+            <input
+              class="txt-in"
+              v-model="animationPresetName"
+              type="text"
+              placeholder="Nom du préréglage…"
+              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+              @keyup.enter="saveAnimationPreset"
+            />
+            <button class="mini-btn primary" type="button" @click="saveAnimationPreset">
+              <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
+              Enregistrer
+            </button>
+          </div>
+        </DenseSection>
+
   </div>
 </template>
 
+
 <style scoped>
-/* Playback styles from mockup */
-.playback {
-  display: flex;
-  align-items: center;
-  gap: 20px;
-  background: var(--row);
-  border: 1px solid var(--line);
-  border-radius: 14px;
-  padding: 16px 20px;
-  margin-bottom: 30px;
-}
-
-/* AI-style animated Drift button */
-.play-btn {
-  position: relative;
-  isolation: isolate;
-  display: flex;
-  align-items: center;
-  gap: 10px;
-  padding: 12px 22px;
-  border-radius: 12px;
-  border: none;
-  cursor: pointer;
-  color: #fff;
-  background: transparent;
-  font-family: var(--sans);
-  font-weight: 700;
-  font-size: 15px;
-  letter-spacing: .02em;
-  transition: transform .16s, filter .16s;
-  flex-shrink: 0;
-}
-
-/* rotating gradient border + glow */
-.play-btn::before {
-  content: "";
-  position: absolute;
-  inset: -2px;
-  border-radius: 14px;
-  z-index: -2;
-  background: conic-gradient(from var(--ai-angle, 0deg),
-    var(--accent-bright), var(--mauve-bright), var(--magenta),
-    var(--accent), var(--accent-bright));
-  filter: blur(0.5px);
-  animation: ai-spin 4s linear infinite;
-}
-
-/* solid inner fill so only the border shows the gradient */
-.play-btn::after {
-  content: "";
-  position: absolute;
-  inset: 0;
-  border-radius: 12px;
-  z-index: -1;
-  background:
-    linear-gradient(180deg, rgba(255, 255, 255, 0.16), rgba(255, 255, 255, 0) 42%),
-    linear-gradient(110deg, var(--accent), oklch(0.62 0.16 285));
-  box-shadow: 0 8px 26px -8px var(--accent), 0 0 22px -6px var(--mauve);
-}
-
-/* sheen sweep */
-.play-btn .sheen {
-  position: absolute;
-  inset: 0;
-  border-radius: 12px;
-  overflow: hidden;
-  z-index: 0;
-  pointer-events: none;
-}
-
-.play-btn .sheen::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  width: 42%;
-  left: -60%;
-  background: linear-gradient(100deg, transparent, rgba(255, 255, 255, 0.55), transparent);
-  transform: skewX(-18deg);
-  animation: ai-sheen 3.4s ease-in-out infinite;
-}
-
-.play-btn > svg, .play-btn > span {
-  position: relative;
-  z-index: 1;
-}
-
-.play-btn:hover {
-  transform: translateY(-1px);
-  filter: saturate(1.15) brightness(1.05);
-}
-
-@property --ai-angle {
-  syntax: '<angle>';
-  initial-value: 0deg;
-  inherits: false;
-}
-
-@keyframes ai-spin {
-  to {
-    --ai-angle: 360deg;
-  }
-}
-
-@keyframes ai-sheen {
-  0% {
-    left: -60%;
-  }
-  55%, 100% {
-    left: 130%;
-  }
-}
-
-/* paused: freeze + dim, neutral look */
-.play-btn.paused {
-  color: var(--ink);
-}
-
-.play-btn.paused::before {
-  animation-play-state: paused;
-  filter: grayscale(0.7) brightness(0.6);
-}
-
-.play-btn.paused::after {
-  background: var(--row-on);
-  box-shadow: none;
-  border: 1px solid var(--line);
-}
-
-.play-btn.paused .sheen::before {
-  animation-play-state: paused;
-  opacity: 0;
-}
-
-@media (prefers-reduced-motion: reduce) {
-  .play-btn::before, .play-btn .sheen::before {
-    animation: none;
-  }
-}
-
-.play-btn svg {
-  width: 14px;
-  height: 14px;
-  fill: currentColor;
-}
-
-.playback .pb-label {
-  font-weight: 600;
-  font-size: 16px;
-  color: var(--ink-2);
-  min-width: 106px;
-}
-
-.playback .pb-slider {
-  flex: 1;
-}
-
-.playback .pb-val {
-  font-family: var(--mono);
-  font-weight: 700;
-  font-size: 18px;
-  color: var(--ink);
-  min-width: 80px;
-  text-align: right;
-}
-
-/* Mixer styles from mockup */
-.mixer {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-
-.row {
-  display: grid;
-  grid-template-columns: 248px 124px 1fr 1fr;
-  align-items: center;
-  gap: 22px;
-  padding: 8px 18px;
-  background: var(--row);
-  border: 1px solid var(--line-soft);
-  border-radius: 13px;
-  position: relative;
-  transition: .18s;
-}
-
-.row::before {
-  content: "";
-  position: absolute;
-  left: 0;
-  top: 9px;
-  bottom: 9px;
-  width: 3px;
-  border-radius: 3px;
-  background: transparent;
-  transition: .18s;
-}
-
-.row.on {
-  background: var(--row-on);
-  border-color: #2b3340;
-}
-
-.row.on::before {
-  background: linear-gradient(180deg, var(--accent-bright), var(--mauve));
-  box-shadow: 0 0 12px var(--accent);
-}
-
-.row.off .ctl {
-  opacity: 0.4;
-  pointer-events: none;
-}
-
-.row.off .name {
-  color: var(--ink-3);
-}
-
-/* toggle + name */
-.name-cell {
+/* ── Lecture: play bar ──────────────────────────────────────── */
+.playbar {
   display: flex;
   align-items: center;
   gap: 14px;
+  margin-bottom: var(--gap);
+  flex-wrap: wrap;
 }
-
-.toggle {
-  --w: 46px;
-  --h: 26px;
-  width: var(--w);
-  height: var(--h);
-  flex: none;
-  border-radius: 999px;
-  background: var(--track);
-  border: 1px solid var(--line);
-  position: relative;
-  cursor: pointer;
-  transition: .18s;
-}
-
-.toggle::after {
-  content: "";
-  position: absolute;
-  top: 2px;
-  left: 2px;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: #8a91a1;
-  transition: .18s;
-}
-
-.toggle.on {
-  background: var(--accent);
-  border-color: var(--accent);
-}
-
-.toggle.on::after {
-  left: 22px;
-  background: #fff;
-}
-
-.name {
-  font-size: 17px;
-  font-weight: 600;
-  color: var(--ink);
-  letter-spacing: -.01em;
-}
-
-/* waveform select */
-.wave {
-  position: relative;
-}
-
-.wave select {
-  appearance: none;
-  -webkit-appearance: none;
-  width: 100%;
-  font-family: var(--mono);
-  font-size: 14px;
-  font-weight: 600;
-  color: var(--ink);
-  background: #0b0d12;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  padding: 10px 34px 10px 14px;
-  cursor: pointer;
-  text-transform: lowercase;
-}
-
-.wave::after {
-  content: "";
-  position: absolute;
-  right: 13px;
-  top: 50%;
-  transform: translateY(-60%) rotate(45deg);
-  width: 7px;
-  height: 7px;
-  border-right: 2px solid var(--ink-3);
-  border-bottom: 2px solid var(--ink-3);
-  pointer-events: none;
-}
-
-.wave select:focus {
-  outline: none;
-  border-color: var(--accent);
-}
-
-/* param group: label / slider / value */
-.param {
-  display: grid;
-  grid-template-columns: auto 1fr auto;
+.play-btn {
+  display: inline-flex;
   align-items: center;
-  gap: 12px;
-}
-
-.param .plabel {
-  font-size: 11px;
+  gap: 9px;
+  padding: 0 18px;
+  height: 38px;
+  border-radius: 10px;
+  border: 1px solid transparent;
+  cursor: pointer;
+  color: #fff;
+  font-family: var(--sans);
   font-weight: 700;
-  letter-spacing: .14em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  width: 46px;
+  font-size: 14px;
+  background: linear-gradient(110deg, var(--accent), oklch(var(--lit) calc(var(--chroma) * var(--cmul)) 300));
+  box-shadow: 0 8px 22px -10px var(--accent);
+  transition: .15s;
+}
+.play-btn:hover { filter: brightness(1.07); }
+.play-btn svg { width: 14px; height: 14px; fill: currentColor; }
+.play-btn.paused {
+  background: var(--row-on);
+  color: var(--ink-2);
+  border-color: var(--line);
+  box-shadow: none;
 }
 
-.param .pval {
-  font-family: var(--mono);
-  font-weight: 700;
-  font-size: 15px;
-  color: var(--ink);
-  min-width: 88px;
-  text-align: right;
-  white-space: nowrap;
+/* ── Mixer cells ────────────────────────────────────────────── */
+.mixgrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+  gap: 8px;
 }
-
-.param .pval .unit {
-  font-size: 12px;
-  color: var(--ink-3);
-  margin-left: 3px;
+.mixcell {
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 11px;
+  padding: 8px 9px 9px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.mc-head { display: flex; align-items: center; gap: 9px; }
+.mc-name {
+  flex: 1;
+  min-width: 0;
+  font-size: 13px;
   font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-/* range sliders */
-input[type=range] {
-  -webkit-appearance: none;
-  appearance: none;
-  width: 100%;
-  height: 6px;
-  background: var(--track);
-  border-radius: 999px;
-  outline: none;
-  cursor: pointer;
+.mixcell.off .mc-name { color: var(--ink-3); }
+.mixcell.off .mc-fields { opacity: .38; pointer-events: none; }
+.mc-wave { flex: none; width: 92px; min-width: 0; }
+.mc-fields { display: flex; flex-direction: column; gap: 5px; transition: opacity .15s; }
+/* the wave select inside the head sheds its row chrome */
+.mc-wave :deep(.fld) {
+  height: auto;
+  padding: 0;
+  background: transparent;
+  border: none;
+  overflow: visible;
 }
+.mc-wave :deep(.selbox) { margin-left: 0; min-width: 0; width: 100%; }
 
-input[type=range]::-webkit-slider-thumb {
-  -webkit-appearance: none;
-  width: 20px;
-  height: 20px;
-  border-radius: 50%;
-  background: var(--accent-bright);
-  border: 3px solid #0b0d12;
-  box-shadow: 0 0 0 1px var(--accent), 0 4px 12px -2px var(--accent);
-  cursor: pointer;
-  transition: .12s;
+/* ── Préréglages library ────────────────────────────────────── */
+.lib-bar2 { display: flex; align-items: center; gap: 9px; margin-bottom: 9px; }
+.lib-count {
+  margin-left: auto;
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-3);
 }
-
-input[type=range]::-webkit-slider-thumb:hover {
-  transform: scale(1.12);
+.mini-btn.favf.on {
+  color: oklch(.74 .15 322);
+  border-color: oklch(.7 .15 322 / .5);
+  background: oklch(.7 .15 322 / .12);
 }
+.mini-btn.favf.on svg { fill: currentColor; }
 
-input[type=range]::-moz-range-thumb {
-  width: 18px;
-  height: 18px;
-  border-radius: 50%;
-  background: var(--accent-bright);
-  border: 3px solid #0b0d12;
-  box-shadow: 0 0 0 1px var(--accent);
-  cursor: pointer;
-}
-
-.pb-slider input[type=range] {
-  height: 7px;
-}
-
-/* gfx-section-title styles local to keep consistency with settings */
-.gfx-section-title {
+.anim-preset-list { display: flex; flex-direction: column; gap: 5px; }
+.anim-preset-row {
   display: flex;
   align-items: center;
-  gap: 12px;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  margin: 20px 0 16px;
+  gap: 7px;
+  padding: 5px 7px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 7px;
+  cursor: pointer;
+  transition: border-color .14s, background .14s;
 }
-
-.gfx-section-title::before {
-  content: "";
-  width: 6px;
-  height: 14px;
-  border-radius: 3px;
-  background: linear-gradient(180deg, var(--accent-bright), var(--mauve));
-  display: inline-block;
+.anim-preset-row:hover { border-color: var(--line); background: var(--row-on); }
+.anim-preset-row.sel {
+  border-color: var(--accent);
+  box-shadow: 0 0 0 1px var(--accent);
 }
-
-.gfx-section-title::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--line-soft);
+.ap-name {
+  flex: 1 1 auto;
+  min-width: 0;
+  font-size: 12.5px;
+  font-weight: 600;
+  color: var(--ink);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
-
-@media (max-width: 880px) {
-  .row {
-    grid-template-columns: 1fr 1fr;
-    gap: 14px;
-  }
-  .name-cell {
-    grid-column: 1 / -1;
-  }
-  .wave {
-    grid-column: 1 / -1;
-  }
+.anim-preset-row .iconbtn { flex: none; font-size: 12px; }
+.anim-preset-row .iconbtn.favf.on {
+  color: oklch(.74 .15 322);
+  border-color: oklch(.7 .15 322 / .5);
 }
-
-@media (max-width: 560px) {
-  .param {
-    grid-template-columns: auto 1fr auto;
-  }
-}
+.anim-preset-row .iconbtn.is-upload-success { color: oklch(.74 .16 150); border-color: oklch(.5 .13 150 / .5); }
+.anim-preset-row .iconbtn.is-remote { color: var(--accent); border-color: oklch(.6 .12 255 / .5); }
 </style>

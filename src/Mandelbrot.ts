@@ -34,6 +34,9 @@ export interface MandelbrotParams {
     approximationMode?: ApproximationMode;
     blaEpsilon?: number;
     maxBlaSkip?: number;
+    // Navigation precision budget as a target scale (e.g. "1e-30"). Max zoom depth the
+    // reference stays precise at; persisted per preset. See fix-reference-precision-budget.
+    precisionBudget?: string;
 
     tessellationLevel?: number;
     lightAngle?: number;

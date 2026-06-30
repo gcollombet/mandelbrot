@@ -21,6 +21,13 @@ import type {StopPresetRecord} from '../stopPresetStore.ts';
 import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry} from '../remoteCatalog.ts';
 import {canDeleteCatalogEntry} from '../catalogPermissions.ts';
 import {buildStopPresetPreviewSpec} from '../stopPresetPreview.ts';
+import { DenseField } from './dense';
+
+// Per-effect value formatter for dense fields (mirrors the old toFixed logic).
+function effectFmt(field: EffectFieldName) {
+  const decimals = EFFECT_FIELD_CONFIG[field].step < 0.01 ? 3 : 2;
+  return (v: number) => v.toFixed(decimals);
+}
 
 const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
@@ -699,28 +706,21 @@ function importStopPresets(event: Event) {
         </div>
       </div>
       <template v-for="groupName in UI_GROUP_ORDER" :key="groupName">
-        <label v-if="UI_GROUP_TITLES[groupName]" class="effects-group-title">{{ UI_GROUP_TITLES[groupName] }}</label>
-        <template v-for="field in UI_GROUPS[groupName]" :key="field">
-          <div class="effect-row">
-            <span class="effect-label">
-              <span class="l1">{{ EFFECT_FIELD_CONFIG[field].label }}</span>
-              <span class="l2">{{ EFFECT_FIELD_HELP[field] }}</span>
-            </span>
-            <input
-              class="slider effect-slider"
-              type="range"
-              :min="EFFECT_FIELD_CONFIG[field].min"
-              :max="EFFECT_FIELD_CONFIG[field].max"
-              :step="EFFECT_FIELD_CONFIG[field].step"
-              :value="getStopEffect(field)"
-              @input="setStopEffect(field, parseFloat(($event.target as HTMLInputElement).value))"
-            />
-            <span class="effect-value">
-              {{ getStopEffect(field).toFixed(EFFECT_FIELD_CONFIG[field].step < 0.01 ? 3 : 2) }}
-              {{ EFFECT_FIELD_CONFIG[field].unit }}
-            </span>
-          </div>
-        </template>
+        <div v-if="UI_GROUP_TITLES[groupName]" class="subhead">{{ UI_GROUP_TITLES[groupName] }}</div>
+        <div class="fields">
+          <DenseField
+            v-for="field in UI_GROUPS[groupName]" :key="field"
+            :label="EFFECT_FIELD_CONFIG[field].label"
+            :desc="EFFECT_FIELD_HELP[field]"
+            :min="EFFECT_FIELD_CONFIG[field].min"
+            :max="EFFECT_FIELD_CONFIG[field].max"
+            :step="EFFECT_FIELD_CONFIG[field].step"
+            :f="effectFmt(field)"
+            :unit="EFFECT_FIELD_CONFIG[field].unit"
+            :model-value="getStopEffect(field)"
+            @update:model-value="(v: number) => setStopEffect(field, v)"
+          />
+        </div>
       </template>
     </div>
   </div>

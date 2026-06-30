@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
-import type {InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
+import type {ApproximationMode, InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
   preserveSessionPerformanceFields,
   stripExplorationStateFields,
@@ -12,6 +12,7 @@ import PaletteEditor from './PaletteEditor.vue';
 import PalettePreview from './PalettePreview.vue';
 import GlissiereHandle from './GlissiereHandle.vue';
 import AnimationPanel from './AnimationPanel.vue';
+import { DenseField, DenseSection, DenseToggle, DenseSeg, DenseSelect } from './dense';
 import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
 import type {TextureMetadata} from '../textureStore';
@@ -169,6 +170,21 @@ const blaEpsilonExp = computed({
   },
 });
 
+// Navigation precision budget on a power-of-ten scale: the slider value is the (negative)
+// exponent of the target scale the reference stays precise at. Range 1e-1 … 1e-1000
+// (≈ 3300 bits at the deepest). Default 1e-30. Deeper budgets cost more (full reference
+// recompute) but keep deep zoom accurate; past the budget the render degrades (assumed).
+const precisionBudgetExp = computed({
+  get: () => {
+    const m = /1e(-?\d+)/i.exec(model.value.precisionBudget ?? '1e-30');
+    return m ? Math.abs(parseInt(m[1], 10)) : 30;
+  },
+  set: (exp: number) => {
+    const e = Math.min(1000, Math.max(1, Math.round(exp)));
+    model.value.precisionBudget = `1e-${e}`;
+  },
+});
+
 const emit = defineEmits<{
   'toggle-picker': [];
 }>();
@@ -286,7 +302,6 @@ const activeTextureMappingLabel = computed(() => {
 });
 
 
-const angleDeg = computed(() => (((model.value.angle * 180 / Math.PI) % 360 + 360) % 360).toFixed(2));
 // Slider rotation : angle en ° mod 360 (wrapping)
 const angleSlider = computed({
   get: () => (((model.value.angle * 180 / Math.PI) % 360 + 360) % 360),
@@ -353,8 +368,39 @@ const scaleSlider = computed({
   }
 });
 
-// Zoom readout as a power of ten (survives JS float underflow at deep zoom).
-const scaleExponent = computed(() => Math.round(scaleLog10(model.value.scale)));
+// ── Dense field formatters (Navigation) ──────────────────────────────
+const zoomFmt = (v: number) => `1e-${Math.round(v)}`;
+const angleFmt = (v: number) => v.toFixed(1);
+const muFmt = (v: number) => Math.pow(10, v).toFixed(1);
+
+// ── Dense field formatters (Performance) ─────────────────────────────
+const epsilonFmt = (v: number) => Math.pow(10, v).toExponential(1);
+const antialiasFmt = (v: number) => (v > 1 ? v + '×' : 'Off');
+const radiusFmt = (v: number) => Math.pow(10, v).toExponential(0);
+// Slider value is the positive exponent; display as the target scale (e.g. 30 → "1e-30").
+const precisionBudgetFmt = (v: number) => `1e-${Math.round(v)}`;
+const resolutionFmt = (v: number) => 'DPR ×' + v.toFixed(2);
+const iterationsFmt = (v: number) => '×' + Math.pow(10, v).toPrecision(3);
+const fpsFmt = (v: number) => v + ' fps';
+const gpuLoadFmt = (v: number) => '×' + v.toFixed(2);
+// These read the resolved model value (the slider carries an index, not the step).
+const zoomBrushFmt = () => String(model.value.zoomMinBrushStep);
+const sentinelStepFmt = () => String(model.value.sentinelSeedStep);
+const approximationOptions = [
+  { label: 'Perturbation', value: 'perturbation' },
+  { label: 'BLA', value: 'bla' },
+  { label: 'Padé', value: 'pade' },
+];
+
+// ── Dense field formatters (Palettes) ────────────────────────────────
+const palettePeriodFmt = () => formatPalettePeriod(model.value.palettePeriod);
+const pctFmt = (v: number) => (v * 100).toFixed(1) + '%';
+const phaseColoringFmt = () => (model.value.phaseColoringStrength ?? 0).toFixed(1) + '×';
+const degFmt = (v: number) => v + '°';
+const radFmt = (v: number) => v.toFixed(2) + ' rad';
+const imgDispFmt = (v: number) => '×' + v.toFixed(3);
+const xScaleFmt = () => '×' + normalizeTextureMappingFromLegacy(model.value).xScale.toFixed(2);
+const yScaleFmt = () => '×' + normalizeTextureMappingFromLegacy(model.value).yScale.toFixed(2);
 
 
 const coordsCopied = ref(false);
@@ -1978,107 +2024,110 @@ async function importSkyboxTexture(event: Event) {
 <template>
   <div class="settings-container">
     <!-- Navigation tab -->
-    <div v-if="activeTab === 'navigation'" class="cv-body">
+    <div v-if="activeTab === 'navigation'" class="cv-body sections">
 
       <!-- ============ 1. LOCATION ============ -->
-      <div class="section-label"><span class="tick"></span>Location</div>
-      <p class="section-help">Where you are in the complex plane.</p>
-
-      <div class="coords">
-        <div class="lab">
-          <div class="l1">Center</div>
-          <div class="l2">Complex coordinates</div>
-        </div>
-        <div class="vals">
-          <div class="cline">
-            <span class="ax">Cx</span>
-            <input
-              type="text"
-              class="coord-input"
-              :value="model.cx"
-              @input="updateCx(($event.target as HTMLInputElement).value)"
-              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-              placeholder="0.0"
-            />
+      <DenseSection
+        title="Localisation"
+        scope="Position dans le plan complexe"
+        icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;3.2&quot;/><path d=&quot;M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22&quot;/><circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/>'
+      >
+        <div class="coords">
+          <div class="lab">
+            <div class="l1">Center</div>
+            <div class="l2">Complex coordinates</div>
           </div>
-          <div class="cline">
-            <span class="ax">Cy</span>
-            <input
-              type="text"
-              class="coord-input"
-              :value="model.cy"
-              @input="updateCy(($event.target as HTMLInputElement).value)"
-              @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-              @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-              placeholder="0.0"
-            />
+          <div class="vals">
+            <div class="cline">
+              <span class="ax">Cx</span>
+              <input
+                type="text"
+                class="coord-input"
+                :value="model.cx"
+                @input="updateCx(($event.target as HTMLInputElement).value)"
+                @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+                @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+                placeholder="0.0"
+              />
+            </div>
+            <div class="cline">
+              <span class="ax">Cy</span>
+              <input
+                type="text"
+                class="coord-input"
+                :value="model.cy"
+                @input="updateCy(($event.target as HTMLInputElement).value)"
+                @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+                @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+                placeholder="0.0"
+              />
+            </div>
           </div>
+          <button class="copy" :class="{ ok: coordsCopied }" title="Copier les coordonnées" @click="copyCoordinates">
+            <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+          </button>
         </div>
-        <button class="copy" :class="{ ok: coordsCopied }" title="Copy coordinates" @click="copyCoordinates">
-          <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
-        </button>
-      </div>
 
-      <div class="find-minibrot-row">
-        <button
-          class="tbtn find-minibrot-btn"
-          :disabled="!props.engine || findingMinibrot"
-          title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
-          @click="findMinibrot"
-        >
-          <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-          {{ findingMinibrot ? 'Searching…' : 'Find minibrot' }}
-        </button>
-        <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
-      </div>
-
-      <div class="frow">
-        <div class="lab">
-          <div class="l1">Zoom</div>
-          <div class="l2">Magnification — scale of the view</div>
+        <div class="find-minibrot-row">
+          <button
+            class="mini-btn"
+            :disabled="!props.engine || findingMinibrot"
+            title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
+            @click="findMinibrot"
+          >
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            {{ findingMinibrot ? 'Searching…' : 'Find minibrot' }}
+          </button>
+          <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
         </div>
-        <input type="range" min="1" max="300" step="1" v-model.number="scaleSlider" />
-        <span class="val">10<sup>{{ scaleExponent }}</sup></span>
-      </div>
 
-      <div class="frow">
-        <div class="lab">
-          <div class="l1">Rotation</div>
-          <div class="l2">View angle around the center</div>
+        <div class="fields">
+          <DenseField
+            label="Zoom" :min="1" :max="300" :step="1"
+            :f="zoomFmt"
+            :model-value="scaleSlider"
+            @update:model-value="(v: number) => scaleSlider = v"
+          />
+          <DenseField
+            label="Rotation" :min="0" :max="359" :step="1"
+            :f="angleFmt" unit="°"
+            :model-value="angleSlider"
+            @update:model-value="(v: number) => angleSlider = v"
+          />
         </div>
-        <input type="range" min="0" max="359" step="1" v-model.number="angleSlider" />
-        <span class="val">{{ angleDeg }}<span class="unit">°</span></span>
-      </div>
+      </DenseSection>
 
       <!-- ============ 2. RENDER MAPPING ============ -->
-      <div class="section-label"><span class="tick"></span>Render Mapping</div>
-      <p class="section-help">How iteration data is mapped before coloring — independent from the location.</p>
-
-      <div class="frow">
-        <div class="lab">
-          <div class="l1">Mu</div>
-          <div class="l2">Escape value scaling</div>
+      <DenseSection
+        title="Mapping de rendu"
+        scope="Mappage des itérations avant coloration"
+        icon='<rect x=&quot;4&quot; y=&quot;4&quot; width=&quot;16&quot; height=&quot;16&quot; rx=&quot;2&quot;/><path d=&quot;M4 12h16M12 4v16&quot;/>'
+      >
+        <div class="mu-row">
+          <DenseField
+            label="Mu" :min="0" :max="5" :step="0.01"
+            :f="muFmt"
+            :model-value="muSlider"
+            @update:model-value="(v: number) => muSlider = v"
+          />
+          <button class="mini-btn mu-quick" @click="model.mu = 4" title="Mu = 4">4</button>
         </div>
-        <div class="mu-ctl">
-          <input type="range" min="0" max="5" step="0.01" v-model="muSlider" />
-          <button class="mu-quick" @click="model.mu = 4" title="Mu = 4">4</button>
+        <div class="fields">
+          <DenseField
+            label="Fréquence rayures" :min="1" :max="32" :step="1"
+            f="p0"
+            :model-value="model.stripeFrequency ?? 8"
+            @update:model-value="(v: number) => model.stripeFrequency = v"
+          />
         </div>
-        <span class="val">{{ (model.mu ?? 1.0).toFixed(1) }}</span>
-      </div>
-
-      <div class="frow">
-        <div class="lab">
-          <div class="l1">Stripe Frequency</div>
-          <div class="l2">Density of stripe banding in the coloring</div>
-        </div>
-        <input type="range" min="1" max="32" step="1" v-model.number="model.stripeFrequency" />
-        <span class="val">{{ model.stripeFrequency ?? 8 }}</span>
-      </div>
+      </DenseSection>
 
       <!-- ============ 3. LOCATIONS LIBRARY ============ -->
-      <div class="section-label"><span class="tick"></span>Locations Library</div>
-      <p class="section-help">Saved places. Loading applies the location only (Cx, Cy, zoom, angle) — your render settings are kept.</p>
+      <DenseSection
+        title="Bibliothèque de lieux"
+        scope="Applique Cx, Cy, zoom & angle"
+        icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
+      >
 
       <div class="lib-row">
         <button
@@ -2141,40 +2190,48 @@ async function importSkyboxTexture(event: Event) {
         </div>
       </div>
 
-      <button class="load-btn" @click="selectedNavPreset && selectPresetLocation(selectedNavPreset)" :disabled="!selectedNavPreset">
+      <button class="mini-btn primary load-btn" @click="selectedNavPreset && selectPresetLocation(selectedNavPreset)" :disabled="!selectedNavPreset">
         <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
         Load location
       </button>
       <p class="load-note">Applies Cx, Cy, zoom &amp; angle from the selected preset.</p>
 
       <div class="transfer">
-        <span class="tlab">Transfer</span>
-        <button class="tbtn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
-        <button class="tbtn" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
-        <button class="tbtn" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
+        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
+        <button class="mini-btn" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
+        <button class="mini-btn" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
       </div>
+
+      </DenseSection>
     </div>
 
     <!-- Presets tab -->
-    <div v-else-if="activeTab === 'presets'" class="cv-body">
+    <div v-else-if="activeTab === 'presets'" class="cv-body sections">
 
       <!-- ============ 1. SAVE CURRENT VIEW ============ -->
-      <div class="section-label"><span class="tick"></span>Save current view</div>
-      <p class="section-help">Captures everything — location, palette and render settings.</p>
+      <DenseSection
+        title="Enregistrer la vue"
+        scope="Capture lieu, palette et rendu"
+        icon='<path d=&quot;M5 3h12l4 4v14H5z&quot;/><path d=&quot;M9 3v5h7V3M8 21v-7h8v7&quot;/>'
+      >
       <div class="save-row">
         <input class="txt-in" v-model="presetName" type="text" placeholder="Name (optional)…"
           @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
           @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
         />
-        <button class="save-btn" @click="savePreset">
+        <button class="mini-btn primary" @click="savePreset">
           <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
           Save
         </button>
       </div>
+      </DenseSection>
 
       <!-- ============ 2. LIBRARY ============ -->
-      <div class="section-label"><span class="tick"></span>Library</div>
-      <p class="section-help">Click a preset to apply it. Hover a card for actions — favorite, export, delete.</p>
+      <DenseSection
+        title="Bibliothèque"
+        scope="Cliquer pour appliquer — survol pour les actions"
+        icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
+      >
 
       <div class="lib-bar">
         <button
@@ -2236,16 +2293,23 @@ async function importSkyboxTexture(event: Event) {
         </div>
       </div>
 
+      </DenseSection>
+
       <!-- ============ 3. TRANSFER ============ -->
-      <div class="section-label"><span class="tick"></span>Transfer</div>
+      <DenseSection
+        title="Transfert"
+        scope="Import / export"
+        icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'
+      >
       <div class="transfer">
-        <button class="tbtn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
-        <button class="tbtn" @click="exportPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
-        <button class="tbtn" @click="exportSelectedPreset" :disabled="!selectedPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
-        <button class="tbtn" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
-        <button class="tbtn danger" @click="deleteAllPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete all</button>
+        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
+        <button class="mini-btn" @click="exportPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
+        <button class="mini-btn" @click="exportSelectedPreset" :disabled="!selectedPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
+        <button class="mini-btn" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
+        <button class="mini-btn danger" @click="deleteAllPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete all</button>
         <input ref="presetFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPresets" />
       </div>
+      </DenseSection>
     </div>
 
     <!-- Animation tab -->
@@ -2387,188 +2451,108 @@ async function importSkyboxTexture(event: Event) {
       </section>
 
       <section v-show="activePaletteSubTab === 'motionCycle'">
-      <label class="gfx-section-title">Palette Cycle</label>
-      <p class="section-help">How the palette repeats across iteration depth.</p>
-      <div class="palette-top-controls">
-        <div class="trow">
-          <div class="lab"><div class="l1">Mirror</div><div class="l2">Ping-pong the palette instead of wrapping</div></div>
-          <div class="toggle" :class="{ on: model.paletteMirror }" role="switch" :aria-checked="model.paletteMirror" tabindex="0"
-            @click="model.paletteMirror = !model.paletteMirror"
-            @keydown.enter.prevent="model.paletteMirror = !model.paletteMirror"
-            @keydown.space.prevent="model.paletteMirror = !model.paletteMirror"></div>
+      <DenseSection title="Palette Cycle" scope="Répétition de la palette" icon='<path d=&quot;M4 12a8 8 0 018-8 8 8 0 017 4M20 12a8 8 0 01-8 8 8 8 0 01-7-4&quot;/><path d=&quot;M16 8h4V4M8 16H4v4&quot;/>'>
+        <DenseToggle
+          label="Mirror"
+          :model-value="!!model.paletteMirror"
+          @update:model-value="(v: boolean) => model.paletteMirror = v"
+        />
+        <div class="fields">
+          <DenseField label="Length" :min="0" :max="1" :step="0.001" :f="palettePeriodFmt"
+            :model-value="sliderPalettePeriod" @update:model-value="(v: number) => sliderPalettePeriod = v" />
+          <DenseField label="Height Shift" :min="0" :max="100" :step="0.01" f="p2"
+            :model-value="model.heightPaletteShift ?? 0" @update:model-value="(v: number) => model.heightPaletteShift = v" />
+          <DenseField label="Offset" :min="0" :max="1" :step="0.001" :f="pctFmt"
+            :model-value="model.paletteOffset ?? 0" @update:model-value="(v: number) => model.paletteOffset = v" />
+          <DenseField label="Phase Coloring" :min="0" :max="1" :step="0.001" :f="phaseColoringFmt"
+            :model-value="sliderPhaseColoring" @update:model-value="(v: number) => sliderPhaseColoring = v" />
         </div>
-
-        <div class="palette-compact-control">
-          <span class="palette-compact-label"><span class="l1">Length</span><span class="l2">Iteration span before the palette repeats</span></span>
-          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPalettePeriod" />
-          <span class="palette-compact-value">{{ formatPalettePeriod(model.palettePeriod) }}</span>
-        </div>
-
-        <div class="palette-compact-control">
-          <span class="palette-compact-label"><span class="l1">Height Shift</span><span class="l2">Moves palette phase along relief height</span></span>
-          <input class="slider" type="range" min="0" max="100" step="0.01" v-model.number="model.heightPaletteShift" />
-          <span class="palette-compact-value">{{ (model.heightPaletteShift ?? 0).toFixed(2) }}</span>
-        </div>
-
-        <div class="palette-compact-control">
-          <span class="palette-compact-label"><span class="l1">Offset</span><span class="l2">Rotates the palette cycle start point</span></span>
-          <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="model.paletteOffset" />
-          <span class="palette-compact-value">{{ (model.paletteOffset * 100).toFixed(1) }}%</span>
-        </div>
-      </div>
-
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label"><span class="l1">Phase Coloring</span><span class="l2">Adds orbit phase variation to the palette</span></span>
-        <input class="slider" type="range" min="0" max="1" step="0.001" v-model.number="sliderPhaseColoring" />
-        <span class="gfx-slider-value">{{ (model.phaseColoringStrength ?? 0).toFixed(1) }}×</span>
-      </div>
+      </DenseSection>
       </section>
 
       <section v-show="activePaletteSubTab === 'color'">
-      <!-- ═══ COLOR ═══ -->
-      <label class="gfx-section-title">Color Space</label>
-      <p class="section-help">Global adjustments — applied on top of every palette.</p>
-
-      <div class="palette-control-row">
-        <label class="palette-control-label"><span class="l1">Interpolation</span><span class="l2">Color space used to blend between stops</span></label>
-        <div class="field is-grouped palette-button-group">
-          <p v-for="mode in interpolationModes" :key="mode.key" class="control">
-            <button
-              class="button is-small"
-              :class="model.interpolationMode === mode.key ? 'is-link' : 'is-light'"
-              @click="model.interpolationMode = mode.key"
-            >
-              <i class="fa-solid fa-palette fa-fw mr-1"></i> {{ mode.label }}
-            </button>
-          </p>
+      <DenseSection title="Color Space" scope="Réglages globaux sur toute palette" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'>
+        <DenseSeg
+          label="Interpolation"
+          :options="interpolationModes.map(m => ({ label: m.label, value: m.key }))"
+          :model-value="model.interpolationMode"
+          @update:model-value="(v: string | number) => model.interpolationMode = v as InterpolationMode"
+        />
+        <div class="fields">
+          <DenseField label="Hue Shift" :min="-180" :max="180" :step="1" :f="degFmt"
+            :model-value="hslHueShift" @update:model-value="onHslHueInput" />
+          <DenseField label="Saturation Shift" :min="-100" :max="100" :step="1" f="p0"
+            :model-value="satShift" @update:model-value="onSatInput" />
+          <DenseField label="Lightness Shift" :min="-100" :max="100" :step="1" f="p0"
+            :model-value="lumShift" @update:model-value="onLumInput" />
         </div>
-      </div>
-
-      <div class="palette-control-row">
-        <label class="palette-control-label"><span class="l1">Hue Shift</span><span class="l2">Rotates every color around the hue wheel</span></label>
-        <input class="slider is-fullwidth" type="range" min="-180" max="180" step="1"
-          :value="hslHueShift"
-          @input="onHslHueInput(Number(($event.target as HTMLInputElement).value))" />
-        <span class="palette-control-value">{{ hslHueShift }}°</span>
-      </div>
-      <div class="palette-control-row">
-        <label class="palette-control-label"><span class="l1">Saturation Shift</span><span class="l2">Adds or removes chroma globally</span></label>
-        <input class="slider is-fullwidth" type="range" min="-100" max="100" step="1"
-          :value="satShift"
-          @input="onSatInput(Number(($event.target as HTMLInputElement).value))" />
-        <span class="palette-control-value">{{ satShift }}</span>
-      </div>
-      <div class="palette-control-row">
-        <label class="palette-control-label"><span class="l1">Lightness Shift</span><span class="l2">Brightens or darkens all palette colors</span></label>
-        <input class="slider is-fullwidth" type="range" min="-100" max="100" step="1"
-          :value="lumShift"
-          @input="onLumInput(Number(($event.target as HTMLInputElement).value))" />
-        <span class="palette-control-value">{{ lumShift }}</span>
-      </div>
+      </DenseSection>
 
       </section>
 
       <section v-show="activePaletteSubTab === 'surfaceMaterial'">
-      <!-- ═══ FRACTAL SURFACE ═══ -->
-      <label class="gfx-section-title">Fractal Surface</label>
-      <p class="section-help">Shared relief and shading — applies to the whole render, all stops.</p>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label"><span class="l1">Orbit Trap</span><span class="l2">Emphasizes orbit-distance structure in the surface</span></span>
-        <input class="slider" type="range" min="0" max="100" step="0.1" v-model.number="model.orbitTrapStrength" />
-        <span class="gfx-slider-value">{{ (model.orbitTrapStrength ?? 0).toFixed(1) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label"><span class="l1">Relief Depth</span><span class="l2">Strength of the generated height field</span></span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.reliefDepth" />
-        <span class="gfx-slider-value">{{ (model.reliefDepth ?? 1).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label"><span class="l1">Relief Occlusion</span><span class="l2">Local shadowing from nearby relief details</span></span>
-        <input class="slider" type="range" min="0" max="10" step="0.01" v-model.number="model.localShadowStrength" />
-        <span class="gfx-slider-value">{{ (model.localShadowStrength ?? 0).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label"><span class="l1">Ambient Occlusion</span><span class="l2">Broad contact shading across the fractal surface</span></span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.ambientOcclusionStrength" />
-        <span class="gfx-slider-value">{{ (model.ambientOcclusionStrength ?? 0).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label"><span class="l1">Light Direction</span><span class="l2">Angle of the main directional light</span></span>
-        <input class="slider" type="range" min="0" max="6.283" step="0.01" v-model.number="model.lightAngle" />
-        <span class="gfx-slider-value">{{ (model.lightAngle ?? 3.927).toFixed(2) }} rad</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label"><span class="l1">Fine Bump</span><span class="l2">Small-scale normal detail layered on relief</span></span>
-        <input class="slider" type="range" min="0" max="2" step="0.01" v-model.number="model.microBumpStrength" />
-        <span class="gfx-slider-value">{{ (model.microBumpStrength ?? 0).toFixed(2) }}</span>
-      </div>
-      <!-- ═══ MATERIAL RESPONSE ═══ -->
-      <label class="gfx-section-title">Material Response</label>
-        <div class="gfx-slider-row">
-          <span class="gfx-slider-label"><span class="l1">Varnish Reflection</span><span class="l2">Glossy clear reflection over the material</span></span>
-          <input class="slider" type="range" min="0" max="10" step="0.01" v-model.number="model.varnishStrength" />
-        <span class="gfx-slider-value">{{ (model.varnishStrength ?? 1.0).toFixed(2) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label"><span class="l1">Subsurface Glow</span><span class="l2">Soft internal light bleeding through colors</span></span>
-        <input class="slider" type="range" min="0" max="10" step="0.05" v-model.number="model.subsurfaceStrength" />
-        <span class="gfx-slider-value">{{ (model.subsurfaceStrength ?? 0).toFixed(2) }}</span>
-      </div>
+      <DenseSection title="Fractal Surface" scope="Relief & ombrage — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
+        <div class="fields">
+          <DenseField label="Orbit Trap" :min="0" :max="100" :step="0.1" f="p1"
+            :model-value="model.orbitTrapStrength ?? 0" @update:model-value="(v: number) => model.orbitTrapStrength = v" />
+          <DenseField label="Relief Depth" :min="0" :max="2" :step="0.01" f="p2"
+            :model-value="model.reliefDepth ?? 1" @update:model-value="(v: number) => model.reliefDepth = v" />
+          <DenseField label="Relief Occlusion" :min="0" :max="10" :step="0.01" f="p2"
+            :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
+          <DenseField label="Ambient Occlusion" :min="0" :max="2" :step="0.01" f="p2"
+            :model-value="model.ambientOcclusionStrength ?? 0" @update:model-value="(v: number) => model.ambientOcclusionStrength = v" />
+          <DenseField label="Light Direction" :min="0" :max="6.283" :step="0.01" :f="radFmt"
+            :model-value="model.lightAngle ?? 3.927" @update:model-value="(v: number) => model.lightAngle = v" />
+          <DenseField label="Fine Bump" :min="0" :max="2" :step="0.01" f="p2"
+            :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
+        </div>
+      </DenseSection>
+      <DenseSection title="Material Response" scope="Réflexion & diffusion" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;8&quot;/><path d=&quot;M8 9a3 3 0 014 0&quot;/>'>
+        <div class="fields">
+          <DenseField label="Varnish Reflection" :min="0" :max="10" :step="0.01" f="p2"
+            :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
+          <DenseField label="Subsurface Glow" :min="0" :max="10" :step="0.05" f="p2"
+            :model-value="model.subsurfaceStrength ?? 0" @update:model-value="(v: number) => model.subsurfaceStrength = v" />
+        </div>
+      </DenseSection>
       </section>
 
       <section v-show="activePaletteSubTab === 'imageEnvironment'">
-      <div class="section-label"><span class="tick"></span>Image Layer</div>
-      <p class="section-help">Blend an image texture into the fractal surface.</p>
-
-      <div class="frow">
-        <div class="lab"><div class="l1">Image Scale</div><div class="l2">Repeats or enlarges the image layer over the fractal</div></div>
-        <input class="slider" type="range" min="0.1" max="10" step="0.1" v-model.number="model.tessellationLevel" />
-        <span class="val">{{ model.tessellationLevel }}</span>
-      </div>
-      <div class="frow">
-        <div class="lab"><div class="l1">Image Displacement</div><div class="l2">How strongly image brightness offsets the surface relief</div></div>
-        <input class="slider" type="range" min="0" max="0.1" step="0.001" v-model.number="model.displacementAmount" />
-        <span class="val">&times;{{ (model.displacementAmount ?? 1.0).toFixed(3) }}</span>
-      </div>
-      <div class="crow">
-        <div class="lab"><div class="l1">Mapping preset</div><div class="l2">How the image wraps onto the fractal</div></div>
-        <div class="ctl">
-          <span class="seg">
-            <button :class="{ on: activeTextureMappingLabel === 'Screen Space' }" @click="applyBuiltInTextureMapping('screen')">Screen Space</button>
-            <button :class="{ on: activeTextureMappingLabel === 'Dragon Scales' }" @click="applyBuiltInTextureMapping('dragon')">Dragon Scales</button>
-            <button :class="{ on: activeTextureMappingLabel !== 'Screen Space' && activeTextureMappingLabel !== 'Dragon Scales' }" type="button">Custom</button>
-          </span>
+      <DenseSection title="Image Layer" scope="Mélange une image dans la surface" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><path d=&quot;M3 15l5-4 4 3 4-5 5 6&quot;/>'>
+        <div class="fields">
+          <DenseField label="Image Scale" :min="0.1" :max="10" :step="0.1" f="p1"
+            :model-value="model.tessellationLevel ?? 1" @update:model-value="(v: number) => model.tessellationLevel = v" />
+          <DenseField label="Image Displacement" :min="0" :max="0.1" :step="0.001" :f="imgDispFmt"
+            :model-value="model.displacementAmount ?? 0" @update:model-value="(v: number) => model.displacementAmount = v" />
         </div>
-      </div>
-      <div class="crow">
-        <div class="lab"><div class="l1">Mapping X</div><div class="l2">Horizontal coordinate source</div></div>
-        <div class="ctl"><div class="select-box"><select v-model="textureMappingXVariable">
-          <option v-for="option in TEXTURE_MAPPING_VARIABLE_OPTIONS" :key="'x-' + option.value" :value="option.value">{{ option.label }}</option>
-        </select></div></div>
-      </div>
-      <div class="frow">
-        <div class="lab"><div class="l1">X Scale</div><div class="l2">Horizontal tiling frequency for the selected source</div></div>
-        <input class="slider" type="range" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" step="0.01" v-model.number="textureMappingXScaleSlider" />
-        <span class="val">&times;{{ normalizeTextureMappingFromLegacy(model).xScale.toFixed(2) }}</span>
-      </div>
-      <div class="crow">
-        <div class="lab"><div class="l1">Mapping Y</div><div class="l2">Vertical coordinate source</div></div>
-        <div class="ctl"><div class="select-box"><select v-model="textureMappingYVariable">
-          <option v-for="option in TEXTURE_MAPPING_VARIABLE_OPTIONS" :key="'y-' + option.value" :value="option.value">{{ option.label }}</option>
-        </select></div></div>
-      </div>
-      <div class="frow">
-        <div class="lab"><div class="l1">Y Scale</div><div class="l2">Vertical tiling frequency for the selected source</div></div>
-        <input class="slider" type="range" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" step="0.01" v-model.number="textureMappingYScaleSlider" />
-        <span class="val">&times;{{ normalizeTextureMappingFromLegacy(model).yScale.toFixed(2) }}</span>
-      </div>
-      <div class="trow">
-        <div class="lab"><div class="l1">Mirror texture</div><div class="l2">Avoids visible seams when the image tiles</div></div>
-        <div class="toggle" :class="{ on: textureMappingMirror }" role="switch" :aria-checked="textureMappingMirror" tabindex="0"
-          @click="textureMappingMirror = !textureMappingMirror"
-          @keydown.enter.prevent="textureMappingMirror = !textureMappingMirror"
-          @keydown.space.prevent="textureMappingMirror = !textureMappingMirror"></div>
-      </div>
+
+        <div class="crow">
+          <div class="lab"><div class="l1">Mapping preset</div><div class="l2">How the image wraps onto the fractal</div></div>
+          <div class="ctl">
+            <span class="seg">
+              <button :class="{ on: activeTextureMappingLabel === 'Screen Space' }" @click="applyBuiltInTextureMapping('screen')">Screen Space</button>
+              <button :class="{ on: activeTextureMappingLabel === 'Dragon Scales' }" @click="applyBuiltInTextureMapping('dragon')">Dragon Scales</button>
+              <button :class="{ on: activeTextureMappingLabel !== 'Screen Space' && activeTextureMappingLabel !== 'Dragon Scales' }" type="button">Custom</button>
+            </span>
+          </div>
+        </div>
+
+        <div class="fields">
+          <DenseSelect label="Mapping X"
+            :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
+            :model-value="textureMappingXVariable" @update:model-value="(v: string | number) => textureMappingXVariable = v as typeof textureMappingXVariable" />
+          <DenseField label="X Scale" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :f="xScaleFmt"
+            :model-value="textureMappingXScaleSlider" @update:model-value="(v: number) => textureMappingXScaleSlider = v" />
+          <DenseSelect label="Mapping Y"
+            :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
+            :model-value="textureMappingYVariable" @update:model-value="(v: string | number) => textureMappingYVariable = v as typeof textureMappingYVariable" />
+          <DenseField label="Y Scale" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :f="yScaleFmt"
+            :model-value="textureMappingYScaleSlider" @update:model-value="(v: number) => textureMappingYScaleSlider = v" />
+        </div>
+
+        <DenseToggle label="Mirror texture"
+          :model-value="textureMappingMirror" @update:model-value="(v: boolean) => textureMappingMirror = v" />
+      </DenseSection>
 
       <div class="section-label"><span class="tick"></span>Texture Mapping Presets</div>
       <p class="section-help">Save or reuse coordinate mappings independently from the selected image.</p>
@@ -2765,106 +2749,115 @@ async function importSkyboxTexture(event: Event) {
     </div>
 
     <!-- Performance/Graphics tab -->
-    <div v-else-if="activeTab === 'performance'" class="graphics-tab">
+    <div v-else-if="activeTab === 'performance'" class="graphics-tab sections">
 
       <!-- ═══ PERFORMANCE ═══ -->
-      <label class="gfx-section-title">Performance</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Epsilon</span>
-        <input class="slider" type="range" min="-30" max="0" step="0.01" v-model="epsilonSlider" />
-        <span class="gfx-slider-value">{{ (model.epsilon ?? 1e-8).toExponential(1) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label" title="Samples accumulated when rendering in high quality (press G when idle)">Antialiasing</span>
-        <input class="slider" type="range" min="1" max="64" step="1" v-model.number="model.antialiasLevel" aria-label="Antialiasing samples" />
-        <span class="gfx-slider-value">{{ (model.antialiasLevel ?? 1) > 1 ? model.antialiasLevel + '×' : 'Off' }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label" title="Automatically accumulate antialiasing once the view is fully converged">Auto AA</span>
-        <div style="flex: 1 1 auto; display: flex; align-items: center;">
-          <input type="checkbox" v-model="model.aaAuto" aria-label="Automatic antialiasing" />
+      <DenseSection
+        title="Performance"
+        scope="Qualité & charge GPU"
+        icon='<path d=&quot;M12 2a10 10 0 100 20 10 10 0 000-20z&quot;/><path d=&quot;M12 12l5-3&quot;/>'
+      >
+        <div class="fields">
+          <DenseField
+            label="Epsilon" :min="-30" :max="0" :step="0.01"
+            :f="epsilonFmt"
+            :model-value="epsilonSlider"
+            @update:model-value="(v: number) => epsilonSlider = v"
+          />
+          <DenseField
+            label="Antialiasing" :min="1" :max="64" :step="1"
+            :f="antialiasFmt"
+            :model-value="model.antialiasLevel ?? 1"
+            @update:model-value="(v: number) => model.antialiasLevel = v"
+          />
+          <DenseToggle
+            label="Auto AA"
+            :model-value="!!model.aaAuto"
+            @update:model-value="(v: boolean) => model.aaAuto = v"
+          />
+          <DenseField
+            label="Zoom brush step" :min="0" :max="6" :step="1"
+            :f="zoomBrushFmt"
+            :model-value="zoomMinBrushStepIndex"
+            @update:model-value="(v: number) => zoomMinBrushStepIndex = v"
+          />
+          <DenseField
+            label="Sentinel seed step" :min="0" :max="12" :step="1"
+            :f="sentinelStepFmt"
+            :model-value="sentinelSeedStepIndex"
+            @update:model-value="(v: number) => sentinelSeedStepIndex = v"
+          />
         </div>
-        <span class="gfx-slider-value">{{ model.aaAuto ? 'On' : 'Off' }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Zoom brush step</span>
-        <input class="slider" type="range" min="0" max="6" step="1" v-model.number="zoomMinBrushStepIndex" aria-label="Zoom brush step" />
-        <span class="gfx-slider-value">{{ model.zoomMinBrushStep }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Sentinel seed step</span>
-        <input class="slider" type="range" min="0" max="12" step="1" v-model.number="sentinelSeedStepIndex" aria-label="Sentinel seed step" />
-        <span class="gfx-slider-value">{{ model.sentinelSeedStep }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Approximation</span>
-        <div class="buttons has-addons toggle-buttons" style="margin-bottom:0;">
-          <button
-            class="button is-small"
-            :class="model.approximationMode === 'perturbation' ? 'is-link' : 'is-light'"
-            @click="model.approximationMode = 'perturbation'"
-          >
-            <i class="fa-solid fa-calculator fa-fw mr-1"></i> Perturbation
-          </button>
-          <button
-            class="button is-small"
-            :class="model.approximationMode === 'bla' ? 'is-link' : 'is-light'"
-            @click="model.approximationMode = 'bla'"
-          >
-            <i class="fa-solid fa-chart-line fa-fw mr-1"></i> BLA
-          </button>
-          <button
-            class="button is-small"
-            :class="model.approximationMode === 'pade' ? 'is-link' : 'is-light'"
-            @click="model.approximationMode = 'pade'"
-            title="Padé [1/1] rational block-jump (experimental)"
-          >
-            <i class="fa-solid fa-superscript fa-fw mr-1"></i> Padé
-          </button>
-        </div>
-        <span class="gfx-slider-value">{{ model.approximationMode === 'bla' ? 'BLA' : model.approximationMode === 'pade' ? 'Padé' : 'Classic' }}</span>
-      </div>
-      <div class="gfx-slider-row" v-if="model.approximationMode !== 'perturbation'">
-        <span class="gfx-slider-label">Radius ε</span>
-        <input class="slider" type="range" min="-12" max="0" step="1" v-model.number="blaEpsilonExp" aria-label="BLA/Padé radius epsilon" />
-        <span class="gfx-slider-value">{{ (model.blaEpsilon ?? 1e-3).toExponential(0) }}</span>
-      </div>
-      <div class="gfx-slider-row" v-if="model.approximationMode !== 'perturbation'">
-        <span class="gfx-slider-label">Max skip</span>
-        <span class="gfx-slider-value">Auto</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Resolution</span>
-        <input class="slider" type="range" min="0.125" max="2" step="0.125" v-model.number="model.dprMultiplier" />
-        <span class="gfx-slider-value">DPR &times;{{ model.dprMultiplier?.toFixed(2) ?? '1.00' }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Iterations</span>
-        <input class="slider" type="range" min="-2" max="2" step="0.01" v-model="maxIterMultSlider" />
-        <span class="gfx-slider-value">&times;{{ (model.maxIterationMultiplier ?? 1.0).toPrecision(3) }}</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Target FPS</span>
-        <input class="slider" type="range" min="10" max="60" step="1" v-model.number="model.targetFps" />
-        <span class="gfx-slider-value">{{ model.targetFps ?? 60 }} fps</span>
-      </div>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Max GPU load</span>
-        <input class="slider" type="range" min="0.25" max="4" step="0.25" v-model.number="model.gpuLoadMultiplier" />
-        <span class="gfx-slider-value">&times;{{ (model.gpuLoadMultiplier ?? 1.0).toFixed(2) }}</span>
-      </div>
 
-      <hr class="section-sep" />
+        <DenseSeg
+          label="Approximation"
+          :options="approximationOptions"
+          :model-value="model.approximationMode ?? 'perturbation'"
+          @update:model-value="(v: string | number) => model.approximationMode = v as ApproximationMode"
+        />
+
+        <div class="fields">
+          <DenseField
+            label="Nav precision" :min="1" :max="1000" :step="1"
+            :f="precisionBudgetFmt"
+            :model-value="precisionBudgetExp"
+            @update:model-value="(v: number) => precisionBudgetExp = v"
+          />
+        </div>
+
+        <div class="fields" v-if="model.approximationMode !== 'perturbation'">
+          <DenseField
+            label="Radius ε" :min="-12" :max="0" :step="1"
+            :f="radiusFmt"
+            :model-value="blaEpsilonExp"
+            @update:model-value="(v: number) => blaEpsilonExp = v"
+          />
+          <div class="fld">
+            <span class="fld-lab">Max skip</span>
+            <span class="fld-val">Auto</span>
+          </div>
+        </div>
+
+        <div class="fields">
+          <DenseField
+            label="Resolution" :min="0.125" :max="2" :step="0.125"
+            :f="resolutionFmt"
+            :model-value="model.dprMultiplier ?? 1"
+            @update:model-value="(v: number) => model.dprMultiplier = v"
+          />
+          <DenseField
+            label="Iterations" :min="-2" :max="2" :step="0.01"
+            :f="iterationsFmt"
+            :model-value="maxIterMultSlider"
+            @update:model-value="(v: number) => maxIterMultSlider = v"
+          />
+          <DenseField
+            label="Target FPS" :min="10" :max="60" :step="1"
+            :f="fpsFmt"
+            :model-value="model.targetFps ?? 60"
+            @update:model-value="(v: number) => model.targetFps = v"
+          />
+          <DenseField
+            label="Max GPU load" :min="0.25" :max="4" :step="0.25"
+            :f="gpuLoadFmt"
+            :model-value="model.gpuLoadMultiplier ?? 1"
+            @update:model-value="(v: number) => model.gpuLoadMultiplier = v"
+          />
+        </div>
+      </DenseSection>
 
       <!-- ═══ ADVANCED ═══ -->
-      <label class="gfx-section-title">Advanced</label>
-      <div class="gfx-slider-row">
-        <span class="gfx-slider-label">Debug Shading</span>
-        <div style="flex: 1 1 auto; display: flex; align-items: center;">
-          <input type="checkbox" v-model="model.debugShading" />
-        </div>
-        <span class="gfx-slider-value">{{ model.debugShading ? 'On' : 'Off' }}</span>
-      </div>
+      <DenseSection
+        title="Advanced"
+        scope="Diagnostics"
+        icon='<path d=&quot;M12 2l2.4 7.4H22l-6 4.5 2.3 7.1-6.3-4.6L5.7 21l2.3-7.1-6-4.5h7.6z&quot;/>'
+      >
+        <DenseToggle
+          label="Debug Shading"
+          :model-value="!!model.debugShading"
+          @update:model-value="(v: boolean) => model.debugShading = v"
+        />
+      </DenseSection>
     </div>
   </div>
 </template>
@@ -4050,6 +4043,15 @@ async function importSkyboxTexture(event: Event) {
 }
 .cv-body .mu-ctl input {
   flex: 1;
+}
+.cv-body .mu-row {
+  display: flex;
+  align-items: center;
+  gap: var(--gap, 5px);
+  margin-bottom: var(--gap, 5px);
+}
+.cv-body .mu-row .fld {
+  flex: 1 1 auto;
 }
 .cv-body .mu-quick {
   flex: none;

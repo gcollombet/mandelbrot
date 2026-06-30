@@ -10,7 +10,7 @@ pub type JsValue = String;
 
 // Fonction utilitaire pour convertir DBig en f32 de manière sûre
 fn dbig_to_f32(bf: &DBig) -> f32 {
-    bf.to_string().parse::<f32>().unwrap()
+    bf.to_string().parse::<f32>().unwrap_or(0.0)
 }
 
 fn dbig_to_f64(bf: &DBig) -> f64 {
@@ -32,6 +32,94 @@ fn precision_bits_for_scale(scale: &DBig) -> usize {
         4096
     };
     depth + 64
+}
+
+// Reference-orbit descending precision profile (fix-reference-precision-budget, design D2):
+// the working precision at orbit step n is clamp(P − ⌊G_n − margin⌋, FLOOR, P), where
+// G_n = log2|dZ_n/dC| is the bits the orbit has amplified. Bits are shed only once earned, so
+// the costly DBig precision is confined to the first ~P iterations; the rest run at the floor.
+// FLOOR is well above the f32 storage mantissa (~24 bits), MARGIN absorbs the linear η_k drift.
+const PRECISION_FLOOR_BITS: usize = 64;
+const PRECISION_MARGIN_BITS: usize = 24;
+// Default budget when none is set: target scale 1e-30 (≈ 100 + 64 guard bits). Keeps shallow
+// use fast; deep diving raises the budget explicitly (preset or Settings slider, to 1e-1000).
+const DEFAULT_BUDGET_BITS: usize = 164;
+
+// Per-step precision from the amplified-bit count G_n. Clamped to [FLOOR, budget].
+fn profile_precision(budget: usize, g_bits: f64) -> usize {
+    let shed = (g_bits - PRECISION_MARGIN_BITS as f64).floor().max(0.0) as usize;
+    budget.saturating_sub(shed).max(PRECISION_FLOOR_BITS).min(budget.max(PRECISION_FLOOR_BITS))
+}
+
+// Complex value in extended-exponent form: (x, y) · 2^e. Used to carry dZ_n/dC, whose
+// magnitude reaches 2^P (far past f64 range) at depth, so a plain f64 would overflow.
+#[derive(Clone, Copy)]
+struct FExpC {
+    x: f64,
+    y: f64,
+    e: i32,
+}
+
+impl FExpC {
+    fn zero() -> Self {
+        FExpC { x: 0.0, y: 0.0, e: 0 }
+    }
+
+    // Pull the mantissa back to O(1), folding the magnitude into the exponent.
+    fn normalize(&mut self) {
+        let m = self.x.hypot(self.y);
+        if m == 0.0 || !m.is_finite() {
+            if !m.is_finite() {
+                // Saturate rather than propagate inf/NaN.
+                self.x = 0.0;
+                self.y = 0.0;
+                self.e = i32::MAX / 2;
+            }
+            return;
+        }
+        let k = m.log2().floor() as i32;
+        if k != 0 {
+            let f = 2f64.powi(-k);
+            self.x *= f;
+            self.y *= f;
+            self.e += k;
+        }
+    }
+
+    // log2 of the magnitude (= G_n). Returns 0 for a zero derivative (start), so no bits shed.
+    fn log2_mag(&self) -> f64 {
+        let m = self.x.hypot(self.y);
+        if m <= 0.0 {
+            0.0
+        } else {
+            m.log2() + self.e as f64
+        }
+    }
+
+    // der ← 2·Z·der + 1, with Z = (zx, zy) in plain f64 (the orbit value is O(1)).
+    fn step(&mut self, zx: f64, zy: f64) {
+        let two_zx = 2.0 * zx;
+        let two_zy = 2.0 * zy;
+        // 2·Z·der (complex), still at exponent self.e
+        let mx = two_zx * self.x - two_zy * self.y;
+        let my = two_zx * self.y + two_zy * self.x;
+        let e = self.e;
+        // + 1 (i.e. (1,0)·2^0): align to the larger exponent, the smaller term scaled by 2^-Δ.
+        if e >= 0 {
+            let d = e; // 0 − e is −e; scale the +1 term by 2^-e
+            let f = if d > 1023 { 0.0 } else { 2f64.powi(-d) };
+            self.x = mx + f;
+            self.y = my;
+            self.e = e;
+        } else {
+            let d = -e; // scale the (mx,my) term by 2^e = 2^-d into exponent 0
+            let f = if d > 1023 { 0.0 } else { 2f64.powi(-d) };
+            self.x = mx * f + 1.0;
+            self.y = my * f;
+            self.e = 0;
+        }
+        self.normalize();
+    }
 }
 
 // Raise a value's precision to `prec` bits when it carries fewer (or unlimited),
@@ -154,7 +242,15 @@ pub struct MandelbrotNavigator {
     previous_c: (DBig, DBig),         // Dernier C vu
     last_zx: DBig,
     last_zy: DBig,
+    // Running orbit derivative dZ_n/dC in extended-exponent form, carried across incremental
+    // chunks alongside last_zx/last_zy. Drives the descending precision profile (G_n = log2|der|).
+    last_der: FExpC,
     approximation_mode: ApproximationMode,
+    // Fixed precision budget in bits: P = precision_bits_for_scale(target) chosen ahead of
+    // time (a max zoom depth), held constant across interactive navigation. Drives
+    // ensure_precision and the reference-orbit descending profile. Changing it (set_precision_
+    // budget) triggers a full reference recompute. See the fix-reference-precision-budget change.
+    budget_prec: usize,
     bla_epsilon: f32,
     // Largest single block jump emitted into the table (power-of-two cap). UI-tunable;
     // clamped to a power of two in [MIN_BLA_SKIP, 1<<20].
@@ -208,7 +304,9 @@ impl MandelbrotNavigator {
             previous_c: (cx.clone(), cy.clone()),
             last_zx: zero.clone(),
             last_zy: zero.clone(),
+            last_der: FExpC::zero(),
             approximation_mode: ApproximationMode::Perturbation,
+            budget_prec: DEFAULT_BUDGET_BITS,
             bla_epsilon: 1e-3,
             max_bla_skip: 65536,
             bla_result: Box::new(Vec::with_capacity(20_000)),
@@ -232,8 +330,33 @@ impl MandelbrotNavigator {
             transition_duration: 0.0,
             transition_elapsed: 0.0,
         };
+        // A fresh navigator implies its construction scale as a depth floor (a deep preset
+        // reset arrives here at its deep scale); default to at least the 1e-30 budget.
+        navigator.budget_prec = precision_bits_for_scale(&navigator.scale).max(DEFAULT_BUDGET_BITS);
         navigator.ensure_precision();
         navigator
+    }
+
+    /// Set the fixed precision budget from a target scale string (e.g. "1e-300"), the maximum
+    /// zoom depth navigation should stay precise at. Recomputes the budget and forces a full
+    /// reference recompute (reset_reference_to) so the orbit is rebuilt at the new profile —
+    /// an assumed design choice, not a per-frame cost.
+    pub fn set_precision_budget(&mut self, target_scale: &str) {
+        let target = DBig::from_str(target_scale).unwrap_or_else(|_| DBig::try_from(1).unwrap());
+        // Floor at the current view-scale depth: a deep preset must render correctly at load
+        // even if the slider budget is shallow. The slider only adds headroom for zooming
+        // deeper than the load scale without a recompute; zooming past the budget then degrades.
+        let prec = precision_bits_for_scale(&target)
+            .max(precision_bits_for_scale(&self.scale))
+            .max(DEFAULT_BUDGET_BITS);
+        if prec == self.budget_prec {
+            return;
+        }
+        self.budget_prec = prec;
+        self.ensure_precision();
+        // Full recompute: drop the orbit so it rebuilds at the new budget from iteration 0.
+        let (cx, cy) = (self.reference_cx.clone(), self.reference_cy.clone());
+        self.reset_reference_to(cx, cy);
     }
 
     // Raise the precision of the navigation state to match the current zoom
@@ -242,7 +365,11 @@ impl MandelbrotNavigator {
     // the value; subsequent ops then accumulate digits down to the scale instead
     // of being rounded to a fixed budget (the cause of the deep precision cliff).
     fn ensure_precision(&mut self) {
-        let prec = precision_bits_for_scale(&self.scale).max(64);
+        // Driven by the fixed budget, NOT the live view scale: the reference centre C and all
+        // navigation state (and therefore period detection / Newton nucleus, which read this
+        // state) stay at the full budget precision P regardless of the current zoom. The
+        // descending profile reduces precision only for the rendered orbit value z_n, never C.
+        let prec = self.budget_prec.max(64);
         self.cx = raise_precision(self.cx.clone(), prec);
         self.cy = raise_precision(self.cy.clone(), prec);
         self.cx_continuous = raise_precision(self.cx_continuous.clone(), prec);
@@ -391,9 +518,10 @@ impl MandelbrotNavigator {
     }
 
     pub fn set_max_bla_skip(&mut self, max_skip: u32) {
-        // Clamp to a power of two in [MIN_BLA_SKIP=2, 1<<20]; the table levels are
-        // powers of two, so a non-power cap would just round down anyway.
-        let clamped = (max_skip as usize).clamp(2, 1 << 20).next_power_of_two();
+        // Clamp to a power of two in [MIN_BLA_SKIP=2, 1<<18]; the table levels are
+        // powers of two, so a non-power cap would just round down anyway. Upper cap 2^18
+        // bounds the f32 reference-orbit noise (design D6).
+        let clamped = (max_skip as usize).clamp(2, 1 << 18).next_power_of_two();
         if clamped != self.max_bla_skip {
             self.bla_source_len = 0;
             self.bla_level_count = 0;
@@ -415,7 +543,10 @@ impl MandelbrotNavigator {
     /// table stays ~orbit/2 entries regardless). This is what Fraktaler-3 et al do.
     /// The build's own `skip*2 < orbit_len` guard then caps levels at the orbit.
     fn auto_max_skip(orbit_len: usize) -> usize {
-        orbit_len.next_power_of_two().clamp(MIN_BLA_SKIP, 1 << 24)
+        // Upper cap 2^18 (was 2^24): bounds the longest emitted block length L so the f32
+        // reference-orbit noise (√L·1e-7 ≈ 5e-5 at L=2^18) stays ~×20 under the default
+        // blaEpsilon, keeping it masked (fix-reference-precision-budget, design D6).
+        orbit_len.next_power_of_two().clamp(MIN_BLA_SKIP, 1 << 18)
     }
 
     /// CPU benchmark over the *current* reference orbit: counts iteration loop steps
@@ -779,10 +910,18 @@ impl MandelbrotNavigator {
         let offset = self.result.len();
         let mut zx = self.last_zx.clone();
         let mut zy = self.last_zy.clone();
+        let mut der = self.last_der;
+        // f32-precision view of the current z_n, carried across iterations so the derivative
+        // step reuses the value already converted for orbit storage (no extra per-step DBig→f
+        // string conversion, which dominates the orbit build). f32 precision is plenty for the
+        // magnitude-only G_n = log2|der|.
+        let mut zx_f = dbig_to_f32(&zx) as f64;
+        let mut zy_f = dbig_to_f32(&zy) as f64;
 
         let two = DBig::try_from(2).unwrap();
         let threshold = DBig::try_from(1_000_000).unwrap();
         let total_iter: usize = target;
+        let budget = self.budget_prec.max(PRECISION_FLOOR_BITS);
 
         let reference_cx = &self.reference_cx;
         let reference_cy = &self.reference_cy;
@@ -792,25 +931,43 @@ impl MandelbrotNavigator {
         }
 
         while self.last_iter < total_iter {
+            // Descending profile: working precision for THIS step from the bits the orbit has
+            // already amplified (G_n = log2|dZ_n/dC|). der carries dZ_n/dC; using der_n (pre-
+            // step) is conservative (G_n ≤ G_{n+1}, so we shed no more than earned). C stays at
+            // the full budget P — only the z_n operands are rounded down to p_n.
+            let g_bits = der.log2_mag();
+            let p_n = profile_precision(budget, g_bits);
             let magnitude_sq = &zx * &zx + &zy * &zy;
 
             if magnitude_sq > threshold {
+                // Reference rebase: the orbit (and its derivative) restart near zero, so the
+                // next steps become sensitive again — G drops to 0 and precision rises back.
                 zx = DBig::try_from(0).unwrap();
                 zy = DBig::try_from(0).unwrap();
+                der = FExpC::zero();
             } else {
-                let zx_new = &zx * &zx - &zy * &zy + reference_cx;
-                let zy_new = &two * &zx * &zy + reference_cy;
-
+                let zx_n = zx.with_precision(p_n).value();
+                let zy_n = zy.with_precision(p_n).value();
+                let zx_new = (&zx_n * &zx_n - &zy_n * &zy_n + reference_cx).with_precision(p_n).value();
+                let zy_new = (&two * &zx_n * &zy_n + reference_cy).with_precision(p_n).value();
+                // der_{n+1} = 2·Z_n·der_n + 1 (uses Z_n, the pre-update f32-precision value).
+                der.step(zx_f, zy_f);
                 zx = zx_new;
                 zy = zy_new;
             }
             self.last_iter += 1;
-            self.result.push(MandelbrotStep { zx: dbig_to_f32(&zx), zy: dbig_to_f32(&zy), pad0: 0.0, pad1: 0.0 });
+            let sx = dbig_to_f32(&zx);
+            let sy = dbig_to_f32(&zy);
+            self.result.push(MandelbrotStep { zx: sx, zy: sy, pad0: 0.0, pad1: 0.0 });
+            // Carry z_{n+1}'s f32 for the next iteration's derivative step.
+            zx_f = sx as f64;
+            zy_f = sy as f64;
         }
 
-        // Stocker la dernière valeur exacte
+        // Stocker la dernière valeur exacte (et la dérivée) pour la reprise incrémentale
         self.last_zx = zx.clone();
         self.last_zy = zy.clone();
+        self.last_der = der;
         self.bla_source_len = 0;
         self.bla_level_count = 0;
         self.bla_source_epsilon = 0.0;
@@ -943,6 +1100,7 @@ impl MandelbrotNavigator {
         self.previous_c = (self.reference_cx.clone(), self.reference_cy.clone());
         self.last_zx = dbig_i(0);
         self.last_zy = dbig_i(0);
+        self.last_der = FExpC::zero();
         self.bla_result.clear();
         self.bla_levels.clear();
         self.bla_level_count = 0;
@@ -2444,6 +2602,116 @@ mod tests {
         // The fe exponents are actually populated (not all zero) — the extraction
         // is doing real work, and would carry the range if the orbit expanded.
         assert!(nav.bla_result.iter().any(|st| st.alpha_exp != 0 || st.ab_exp != 0));
+    }
+
+    // Brute-force reference orbit at a UNIFORM precision (no descending profile), as the
+    // baseline the budget-profile orbit must match to f32.
+    fn uniform_orbit(cx: &str, cy: &str, prec: usize, n: usize) -> Vec<(f32, f32)> {
+        let two = DBig::try_from(2).unwrap();
+        let rcx = DBig::from_str(cx).unwrap().with_precision(prec).value();
+        let rcy = DBig::from_str(cy).unwrap().with_precision(prec).value();
+        let threshold = DBig::try_from(1_000_000).unwrap();
+        let mut zx = DBig::try_from(0).unwrap();
+        let mut zy = DBig::try_from(0).unwrap();
+        let mut out = vec![(0.0f32, 0.0f32)];
+        for _ in 0..n {
+            let mag = &zx * &zx + &zy * &zy;
+            if mag > threshold {
+                zx = DBig::try_from(0).unwrap();
+                zy = DBig::try_from(0).unwrap();
+            } else {
+                let zxn = (&zx * &zx - &zy * &zy + &rcx).with_precision(prec).value();
+                let zyn = (&two * &zx * &zy + &rcy).with_precision(prec).value();
+                zx = zxn;
+                zy = zyn;
+            }
+            out.push((dbig_to_f32(&zx), dbig_to_f32(&zy)));
+        }
+        out
+    }
+
+    #[test]
+    fn descending_profile_matches_uniform_precision() {
+        // Spec: Descending precision profile. The budget-profile orbit must agree with a
+        // uniform full-precision orbit to f32 over the whole length — shedding earned bits
+        // does not corrupt the stored reference.
+        let cx = "-0.743643887037158704752191506114774";
+        let cy = "0.131825904205311970493132056385139";
+        let mut nav = MandelbrotNavigator::new(cx, cy, "1e-60", 0.0);
+        let n = 3000usize;
+        let _ = nav.compute_reference_orbit_ptr(n as u32);
+        let baseline = uniform_orbit(cx, cy, nav.budget_prec, n);
+        let mut max_err = 0.0f32;
+        for i in 0..n.min(nav.result.len()).min(baseline.len()) {
+            let dx = (nav.result[i].zx - baseline[i].0).abs();
+            let dy = (nav.result[i].zy - baseline[i].1).abs();
+            max_err = max_err.max(dx).max(dy);
+        }
+        assert!(max_err < 1e-3, "profile diverged from uniform precision: max_err={}", max_err);
+    }
+
+    #[test]
+    fn descending_profile_sheds_bits_as_orbit_amplifies() {
+        // Spec: precision sheds only earned bits; first step at full P. Drive the derivative
+        // recurrence directly and check the profile is full at the start and strictly lower
+        // once the orbit has amplified many bits.
+        let budget = 1024usize;
+        let mut der = FExpC::zero();
+        let p_start = profile_precision(budget, der.log2_mag());
+        assert_eq!(p_start, budget, "first step must use full budget P");
+        // Amplify: iterate der on a point with |2Z|>1 so the derivative grows.
+        for _ in 0..400 {
+            der.step(0.9, 0.3);
+        }
+        let g = der.log2_mag();
+        assert!(g > 50.0, "derivative did not amplify: G={}", g);
+        let p_late = profile_precision(budget, g);
+        assert!(p_late < budget, "precision did not shed after amplification: {}", p_late);
+        assert!(p_late >= PRECISION_FLOOR_BITS, "precision dropped below floor: {}", p_late);
+    }
+
+    #[test]
+    fn append_only_extension_preserves_earlier_steps() {
+        // Spec: Append-only orbit growth. Extending in n must not alter already-computed steps,
+        // and must equal a fresh navigator computed directly to the larger count.
+        let cx = "-0.743643887037158704752191506114774";
+        let cy = "0.131825904205311970493132056385139";
+        let mut nav = MandelbrotNavigator::new(cx, cy, "1e-60", 0.0);
+        let n1 = 800usize;
+        let n2 = 2500usize;
+        let _ = nav.compute_reference_orbit_ptr(n1 as u32);
+        let snapshot: Vec<(f32, f32)> =
+            (0..=n1).map(|i| (nav.result[i].zx, nav.result[i].zy)).collect();
+        let _ = nav.compute_reference_orbit_ptr(n2 as u32);
+        for i in 0..=n1 {
+            assert_eq!(nav.result[i].zx, snapshot[i].0, "step {} zx changed on extend", i);
+            assert_eq!(nav.result[i].zy, snapshot[i].1, "step {} zy changed on extend", i);
+        }
+        let mut fresh = MandelbrotNavigator::new(cx, cy, "1e-60", 0.0);
+        let _ = fresh.compute_reference_orbit_ptr(n2 as u32);
+        for i in 0..=n2 {
+            assert_eq!(nav.result[i].zx, fresh.result[i].zx, "extend != fresh at {} zx", i);
+            assert_eq!(nav.result[i].zy, fresh.result[i].zy, "extend != fresh at {} zy", i);
+        }
+    }
+
+    #[test]
+    fn set_precision_budget_recomputes_and_deepens() {
+        // Spec: Fixed precision budget — changing it triggers a full recompute and a deeper
+        // target raises P.
+        let cx = "-0.743643887037158704752191506114774";
+        let cy = "0.131825904205311970493132056385139";
+        let mut nav = MandelbrotNavigator::new(cx, cy, "1e-10", 0.0);
+        let _ = nav.compute_reference_orbit_ptr(500);
+        assert!(nav.last_iter > 0);
+        let prec_before = nav.budget_prec;
+        nav.set_precision_budget("1e-300");
+        assert!(nav.budget_prec > prec_before, "deeper budget must raise P");
+        assert_eq!(nav.last_iter, 0, "changing the budget must drop the orbit for recompute");
+        // And it rebuilds correctly from zero.
+        let info = nav.compute_reference_orbit_ptr(500);
+        assert_eq!(info.offset, 0, "recompute must restart at offset 0");
+        assert!(nav.last_iter >= 500);
     }
 }
 

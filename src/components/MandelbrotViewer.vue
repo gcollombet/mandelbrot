@@ -3,6 +3,7 @@ import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
+import { DenseTopbar, useDenseView, denseAttrs } from './dense';
 import type {ApproximationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
   normalizePowerOfTwoStep,
@@ -266,6 +267,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   approximationMode: 'perturbation',
   blaEpsilon: 1e-3,
   maxBlaSkip: 65536,
+  precisionBudget: '1e-30',
   dprMultiplier: 1.0,
   maxIterationMultiplier: 0.1,
   targetFps: 30,
@@ -379,6 +381,7 @@ function onEngineReady(engine: Engine) {
   mandelbrotEngine.value = engine;
   applyApproximationToEngine();
   applyBlaTuningToEngine();
+  applyPrecisionBudgetToEngine();
   void applySelectedTexturesToEngine();
 }
 
@@ -399,6 +402,15 @@ function applyBlaTuningToEngine() {
   if (typeof eps === 'number' && isFinite(eps) && eps > 0) engine.setBlaEpsilon(eps);
   const skip = mandelbrotParams.value.maxBlaSkip;
   if (typeof skip === 'number' && isFinite(skip) && skip >= 2) engine.setMaxBlaSkip(skip);
+}
+
+// Navigation precision budget: a target scale fixing how deep the reference stays precise.
+// Changing it forces a full reference recompute (assumed degradation past the budget).
+function applyPrecisionBudgetToEngine() {
+  const engine = mandelbrotEngine.value;
+  if (!engine) return;
+  const budget = mandelbrotParams.value.precisionBudget;
+  if (typeof budget === 'string' && budget.length > 0) engine.setPrecisionBudget(budget);
 }
 
 // Restore parametres a partir du localStorage puis surveille et persiste a chaque changement
@@ -528,6 +540,11 @@ watch(
   () => { applyBlaTuningToEngine(); },
 );
 
+watch(
+  () => mandelbrotParams.value.precisionBudget,
+  () => { applyPrecisionBudgetToEngine(); },
+);
+
 // When mobile nav expands, close all settings popups
 watch(mobileNavExpanded, (expanded) => {
   if (expanded) {
@@ -544,6 +561,14 @@ const settingsTabs = computed(() => [
   { key: 'performance', label: 'Performance', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
   { key: 'screenshot', label: 'Screenshot', icon: 'fa-solid fa-camera', shortcut: 'b' },
 ]);
+
+// Tabs whose panel has been ported to the dense shell. These render inside the
+// `.dense` popup (DenseTopbar + dense body); others keep the legacy popup chrome.
+const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes']);
+const denseView = useDenseView();
+function isDenseTab(tabKey: string): boolean {
+  return densePortedTabs.has(tabKey);
+}
 
 function toggleTab(tabKey: string) {
   if (openTabs.has(tabKey)) {
@@ -757,6 +782,7 @@ function setPopupRef(tabKey: string, el: HTMLElement | null) {
 function startDrag(tabKey: string, e: MouseEvent) {
   const el = popupRefs.value[tabKey];
   if (!el) return;
+  e.preventDefault?.();
   isDragging.value = true;
   draggingTab.value = tabKey;
   const rect = el.getBoundingClientRect();
@@ -1743,8 +1769,37 @@ function startTravelToPreset(preset: PresetRecord) {
 
     <!-- Popup Settings — one per open tab (multi-window) -->
     <template v-for="tab in settingsTabs" :key="'popup-' + tab.key">
+      <!-- Dense shell popup (ported panels) -->
+      <div
+        v-if="openTabs.has(tab.key) && !discoveryRadarActive && isDenseTab(tab.key)"
+        :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
+        class="dense dense-popup"
+        v-bind="denseAttrs(denseView)"
+        :style="popupStyle(tab.key)"
+        @mousedown="bringToFront(tab.key)"
+      >
+        <DenseTopbar
+          :title="tab.label"
+          @close="closeTab(tab.key)"
+          @drag-start="startDrag(tab.key, $event)"
+        />
+        <div class="body">
+          <Settings
+            :ref="(el: any) => { settingsRefs[tab.key] = el }"
+            v-model="mandelbrotParams"
+            :engine="mandelbrotEngine"
+            :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
+            :active-tab="tab.key"
+            :pickerMode="pickerMode"
+            :user-role="userRole"
+            @toggle-picker="togglePickerMode"
+          />
+        </div>
+      </div>
+
+      <!-- Legacy popup chrome (not-yet-ported panels) -->
 	      <div
-	        v-if="openTabs.has(tab.key) && !discoveryRadarActive"
+	        v-else-if="openTabs.has(tab.key) && !discoveryRadarActive"
         :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
         class="settings-popup"
         :style="popupStyle(tab.key)"
@@ -1992,6 +2047,12 @@ function startTravelToPreset(preset: PresetRecord) {
 }
 
 /* Popup Settings */
+/* Dense-shell popup: positioning only — visual chrome comes from `.dense`. */
+.dense-popup {
+  pointer-events: auto;
+  max-width: 96vw;
+}
+
 .settings-popup {
   max-width: 96vw;
   background:
