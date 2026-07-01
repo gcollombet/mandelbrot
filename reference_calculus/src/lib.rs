@@ -2,6 +2,7 @@ use core::convert::TryFrom;
 use core::str::FromStr;
 use dashu_float::ops::Abs;
 use dashu_float::DBig;
+use dashu_int::UBig;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::prelude::*;
 
@@ -41,9 +42,12 @@ fn precision_bits_for_scale(scale: &DBig) -> usize {
 // FLOOR is well above the f32 storage mantissa (~24 bits), MARGIN absorbs the linear η_k drift.
 const PRECISION_FLOOR_BITS: usize = 64;
 const PRECISION_MARGIN_BITS: usize = 24;
-// Default budget when none is set: target scale 1e-30 (≈ 100 + 64 guard bits). Keeps shallow
-// use fast; deep diving raises the budget explicitly (preset or Settings slider, to 1e-1000).
-const DEFAULT_BUDGET_BITS: usize = 164;
+// Floor budget for a navigator with no explicit budget set (the shared FRONT navigator). 64 =
+// pure current-view precision (ensure_precision = max(view, budget)), matching the original
+// view-driven behaviour so per-frame coordinate serialization stays cheap. The WORKER navigator
+// always receives an explicit budget (default target 1e-30 → 164 bits) via the reset message,
+// so this floor never lowers it. Deep diving raises the budget explicitly (preset / slider).
+const DEFAULT_BUDGET_BITS: usize = 64;
 
 // Per-step precision from the amplified-bit count G_n. Clamped to [FLOOR, budget].
 fn profile_precision(budget: usize, g_bits: f64) -> usize {
@@ -155,6 +159,54 @@ fn exp_f64(value: f64) -> f64 {
 #[cfg(not(target_arch = "wasm32"))]
 fn exp_f64(value: f64) -> f64 {
     value.exp()
+}
+
+#[cfg(target_arch = "wasm32")]
+fn ln_f64(value: f64) -> f64 {
+    js_sys::Math::log(value)
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+fn ln_f64(value: f64) -> f64 {
+    value.ln()
+}
+
+const LOG2_10: f64 = 3.321928094887362;
+
+// Extended-exponent decomposition of a DBig: value ≈ mantissa · 2^exponent, |mantissa| ∈
+// [0.5, 1). Computed in O(1) by reading only the top ~53 bits of the significand and its base-10
+// exponent — independent of the navigator's precision, and with no decimal-string round-trip
+// (the per-frame cost that made rendering scale with the precision budget). Mirrors the host
+// frexpFromDecimalString in src/floatexp.ts so the shader's deep path is unchanged.
+fn dbig_frexp(v: &DBig) -> (f64, i32) {
+    let repr = v.repr();
+    let exp10 = repr.exponent(); // value = significand · 10^exp10
+    // Magnitude of the significand (UBig); sign is taken from v directly to avoid naming the
+    // dashu Sign type (not re-exported by dashu-float).
+    let (_, mag) = repr.significand().clone().into_parts();
+    if mag == UBig::from(0u8) {
+        return (0.0, 0); // value is exactly zero
+    }
+    // floor(log2(|significand|)) = bit length − 1 (ilog base 2 is exact).
+    let e2 = mag.ilog(&UBig::from(2u8));
+    let (top, extra) = if e2 >= 53 {
+        let sh = e2 - 52; // leaves the top 53 bits
+        let shifted = &mag >> sh; // < 2^53, exact in f64
+        (u64::try_from(&shifted).unwrap_or(0) as f64, sh as f64)
+    } else {
+        (u64::try_from(&mag).unwrap_or(0) as f64, 0.0)
+    };
+    // log2(value) = log2(|significand|) + exp10·log2(10)
+    let log2v = (ln_f64(top) * core::f64::consts::LOG2_E) + extra + (exp10 as f64) * LOG2_10;
+    let exponent = log2v.floor();
+    let frac = log2v - exponent;
+    // mantissa = 2^frac · 0.5 ∈ [0.5, 1)
+    let mut mantissa = exp_f64(frac * core::f64::consts::LN_2) * 0.5;
+    let exp_out = exponent as i32 + 1;
+    if *v < DBig::try_from(0).unwrap() {
+        mantissa = -mantissa;
+    }
+    (mantissa, exp_out)
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -365,11 +417,13 @@ impl MandelbrotNavigator {
     // the value; subsequent ops then accumulate digits down to the scale instead
     // of being rounded to a fixed budget (the cause of the deep precision cliff).
     fn ensure_precision(&mut self) {
-        // Driven by the fixed budget, NOT the live view scale: the reference centre C and all
-        // navigation state (and therefore period detection / Newton nucleus, which read this
-        // state) stay at the full budget precision P regardless of the current zoom. The
-        // descending profile reduces precision only for the rendered orbit value z_n, never C.
-        let prec = self.budget_prec.max(64);
+        // Precision is the LARGER of the current-view need and the fixed budget. The worker
+        // navigator carries a deep budget, so `max(view, deep) = deep` → its reference centre C
+        // and navigation state (read by period detection / Newton nucleus) stay at the full
+        // budget P at any zoom. The shared FRONT navigator keeps a modest default budget, so it
+        // tracks the view — its per-frame coordinate strings stay view-length, never the deep
+        // budget (which would make per-frame DBig→string serialization cost ∝ budget).
+        let prec = precision_bits_for_scale(&self.scale).max(self.budget_prec).max(64);
         self.cx = raise_precision(self.cx.clone(), prec);
         self.cy = raise_precision(self.cy.clone(), prec);
         self.cx_continuous = raise_precision(self.cx_continuous.clone(), prec);
@@ -863,6 +917,20 @@ impl MandelbrotNavigator {
         ]
     }
 
+    /// Per-frame float-exponent decomposition of the values the render path needs — scale and
+    /// the reference-relative offset (dx, dy) — as `[scaleM, scaleE, dxM, dxE, dyM, dyE]`
+    /// (value = mantissa · 2^exponent). Done here, in O(1), instead of `get_params`/`step`
+    /// returning decimal strings the host re-parses every frame: that round-trip's cost grew
+    /// with the precision and is what made the framerate scale with the budget.
+    pub fn view_floatexp(&self) -> Vec<f64> {
+        let (sm, se) = dbig_frexp(&self.scale);
+        let dx = &self.cx - &self.reference_cx;
+        let dy = &self.cy - &self.reference_cy;
+        let (dxm, dxe) = dbig_frexp(&dx);
+        let (dym, dye) = dbig_frexp(&dy);
+        vec![sm, se as f64, dxm, dxe as f64, dym, dye as f64]
+    }
+
     pub fn get_reference_params(&self) -> Vec<String> {
         vec![self.reference_cx.to_string(), self.reference_cy.to_string()]
     }
@@ -1205,9 +1273,23 @@ impl MandelbrotNavigator {
 
         // The nucleus is within ~scale of the view centre; bound Newton's reach
         // generously but not wildly, so a stray detection cannot teleport the
-        // view far off-screen. Converge/validate to within one view height.
+        // view far off-screen.
         let max_distance = &self.scale * dbig_i(1000);
-        let tolerance = self.scale.clone();
+        // Converge/validate to (most of) the working precision, NOT to the
+        // current view scale. A nucleus only resolved to ~scale is accurate
+        // enough to *display* at the current zoom, but its absolute error
+        // stays fixed while the view keeps shrinking on every subsequent
+        // zoom step — so a few zooms later the error dwarfs the new scale
+        // and the view drifts off the minibrot ("imprécis dès qu'on zoom").
+        // `prec` (decimal digits, DBig is base 10) is the same precision
+        // `ensure_precision` already raised cx/cy/scale to, so Newton has
+        // that many digits of headroom to converge into; `margin_digits`
+        // reserves some of it for the rounding noise that accumulates over
+        // `period` squarings per Newton step.
+        let prec = precision_bits_for_scale(&self.scale).max(self.budget_prec).max(64);
+        let margin_digits = 24 + (period as f64).log10().ceil().max(0.0) as usize;
+        let tol_digits = prec.saturating_sub(margin_digits).max(16);
+        let tolerance = DBig::from_str(&format!("1e-{tol_digits}")).unwrap_or_else(|_| self.scale.clone());
         match newton_nucleus(&self.cx, &self.cy, period, NEWTON_STEPS, &max_distance, &tolerance) {
             Some((ncx, ncy)) => vec![
                 "ok".to_string(),
@@ -2396,6 +2478,30 @@ mod tests {
     }
 
     #[test]
+    fn find_minibrot_resolves_far_beyond_view_scale() {
+        // Regression for the "imprécis dès qu'on zoom" bug: Newton used to stop
+        // refining once its step fell below the *view* scale, so the returned
+        // nucleus carried no more accuracy than the current zoom level — fine
+        // to display, but a few zoom steps later the (now-fixed) absolute error
+        // dwarfs the much-smaller new scale and the view drifts off the
+        // minibrot. The nucleus must instead be resolved close to the working
+        // precision, i.e. far tighter than `scale`.
+        let mut nav = MandelbrotNavigator::new("-1.0000003", "0.0000002", "1e-6", 0.0);
+        let res = nav.find_minibrot(4096, 4.0);
+        assert_eq!(res[0], "ok", "expected a hit, got {:?}", res);
+        let cx = DBig::from_str(&res[1]).unwrap();
+        let cy = DBig::from_str(&res[2]).unwrap();
+        let offset_sq = (&cx + dbig_i(1)) * (&cx + dbig_i(1)) + &cy * &cy;
+        let bound = DBig::from_str("1e-6").unwrap() * DBig::from_str("1e-20").unwrap();
+        let bound_sq = &bound * &bound;
+        assert!(
+            offset_sq < bound_sq,
+            "nucleus only resolved to view-scale precision: offset²={}",
+            offset_sq
+        );
+    }
+
+    #[test]
     fn find_minibrot_returns_none_in_escaping_region() {
         // c = 0.4 escapes quickly: no atom under the view.
         let mut nav = MandelbrotNavigator::new("0.4", "0.3", "1e-5", 0.0);
@@ -2693,6 +2799,48 @@ mod tests {
             assert_eq!(nav.result[i].zx, fresh.result[i].zx, "extend != fresh at {} zx", i);
             assert_eq!(nav.result[i].zy, fresh.result[i].zy, "extend != fresh at {} zy", i);
         }
+    }
+
+    #[test]
+    fn dbig_frexp_matches_reference_decomposition() {
+        // value = mantissa · 2^exponent, |mantissa| ∈ [0.5, 1), for a range of magnitudes
+        // including far below the f64 floor (deep zoom). Cross-check against a direct f64
+        // reference where representable, and the invariant everywhere.
+        let cases = [
+            "1.0", "2.0", "0.5", "-0.5", "3.0", "-7.5",
+            "0.7436438870371587047521915061147741580450975735832",
+            "1e-30", "1e-100", "-1e-100", "1e-300", "5e-321",
+        ];
+        for s in cases {
+            let v = DBig::from_str(s).unwrap();
+            let (m, e) = dbig_frexp(&v);
+            assert!(m == 0.0 || (m.abs() >= 0.5 && m.abs() < 1.0), "mantissa out of [0.5,1): {} for {}", m, s);
+            // Reconstruct value ≈ m · 2^e and compare to the true value in log space.
+            let log2_recon = m.abs().log2() + e as f64;
+            // True log2 from the string: leading digits + decimal exponent.
+            let f = s.trim_start_matches('-').parse::<f64>().unwrap_or(0.0);
+            // Only cross-check where f64 itself is accurate (normal range); subnormals (e.g.
+            // 5e-321) lose mantissa bits, so there the exact-DBig result is the more accurate one.
+            if f.is_normal() {
+                assert!((log2_recon - f.log2()).abs() < 1e-6, "log2 mismatch for {}: {} vs {}", s, log2_recon, f.log2());
+            }
+        }
+    }
+
+    #[test]
+    fn view_floatexp_matches_get_params_strings() {
+        // The O(1) Rust decomposition must agree with parsing the decimal strings the host
+        // used to do (frexpFromDecimalString). Compare scale's floatexp to a from-string frexp.
+        let cx = "-0.743643887037158704752191506114774";
+        let cy = "0.131825904205311970493132056385139";
+        let nav = MandelbrotNavigator::new(cx, cy, "1e-120", 0.0);
+        let fe = nav.view_floatexp();
+        assert_eq!(fe.len(), 6);
+        let (scale_m, scale_e) = dbig_frexp(&nav.scale);
+        assert_eq!(fe[0], scale_m);
+        assert_eq!(fe[1], scale_e as f64);
+        // scale 1e-120 → log2 ≈ -398.6; exponent must be in that ballpark.
+        assert!((fe[1] - (-398.0)).abs() < 3.0, "scale exponent off: {}", fe[1]);
     }
 
     #[test]

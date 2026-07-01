@@ -15,6 +15,15 @@ describe('preset discovery helpers', () => {
     expect(zoomDepthDeltaSteps('1e-4', '1e-6')).toBeCloseTo(Math.log2(100));
   });
 
+  it('stays accurate far below the f64 floor (regression)', () => {
+    // Number('1e-500') === 0, so the old Number()-based parsing collapsed both
+    // sides to the same fallback once either scale underflowed, reporting 0
+    // zoom-depth difference between presets that are actually 500 steps apart.
+    const LOG2_10 = 3.321928094887362;
+    expect(zoomDepthDeltaSteps('1e-500', '1e-700')).toBeCloseTo(200 * LOG2_10, 2);
+    expect(zoomDepthDeltaSteps('1e-1000', '1')).toBeCloseTo(-1000 * LOG2_10, 2);
+  });
+
   it('treats one 2x zoom step as half a screen of perceptual travel', () => {
     expect(perceptualPresetDistance(0, 1)).toBeCloseTo(0.5);
     expect(perceptualPresetDistance(0.75, 2)).toBeCloseTo(1.75);

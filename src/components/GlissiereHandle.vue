@@ -90,13 +90,13 @@ function onTouchStart(e: TouchEvent) {
     class="stop-marker"
     :class="{ 'sel': props.selected, 'highlighted': props.highlighted }"
   >
-    <!-- Rectangle vertical -->
+    <!-- Rectangle vertical (inset so the stroke/caps are never clipped by the viewBox) -->
     <rect
       :x="props.selected ? 8 : 9"
-      y="0"
+      y="5"
       :width="props.selected ? 16 : 14"
-      height="80"
-      rx="8"
+      height="70"
+      rx="7"
       :fill="props.stop.color"
       :stroke="props.selected ? selectedStroke : (props.highlighted ? '#f0b429' : '#fff')"
       :stroke-width="props.selected ? 3 : 2.5"

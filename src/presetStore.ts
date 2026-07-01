@@ -13,6 +13,7 @@
 
 import type { MandelbrotParams } from './Mandelbrot';
 import {createGuid, defaultPresetName, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
+import {log10FromDecimalString} from './floatexp';
 
 const DB_NAME = 'mandelbrot-presets';
 const DB_VERSION = 3;
@@ -112,11 +113,21 @@ function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
 // Helpers
 // ---------------------------------------------------------------------------
 
-/** Compute the zoom indicator: floor(log10(1 / scale)). */
+/**
+ * Compute the zoom indicator: floor(log10(1 / scale)).
+ *
+ * For string input, reads the exponent straight off the decimal string via
+ * `log10FromDecimalString` instead of `Number(scale)`: past ~1e-308, scale
+ * underflows to exactly 0 in f64, which used to make this silently report 0
+ * (no zoom) for any preset deeper than the f64 floor.
+ */
 export function computeScaleExponent(scale: string | number): number {
-  const s = Number(scale);
-  if (!s || s <= 0 || !isFinite(s)) return 0;
-  return Math.floor(Math.log10(1 / s));
+  if (typeof scale === 'string') {
+    const log10Scale = log10FromDecimalString(scale);
+    return Number.isFinite(log10Scale) ? Math.floor(-log10Scale) : 0;
+  }
+  if (!scale || scale <= 0 || !isFinite(scale)) return 0;
+  return Math.floor(Math.log10(1 / scale));
 }
 
 export async function getAllPresetRecords(): Promise<PresetRecord[]> {

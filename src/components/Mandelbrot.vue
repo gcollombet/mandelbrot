@@ -8,6 +8,7 @@ import {
   type TextureMappingConfig
 } from '../TextureMapping.ts';
 import {normalizeAnimationConfig, type AnimationConfig} from '../AnimationConfig.ts';
+import {log2FromDecimalString} from '../floatexp.ts';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let canvas: HTMLCanvasElement | null = null;
@@ -216,6 +217,9 @@ async function draw() {
     if (!step) return;
     const [dx, dy] = step as [string, string];
     const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
+    // O(1) float-exponent decomposition of scale/dx/dy computed in Rust (no decimal-string
+    // re-parse each frame): [scaleM, scaleE, dxM, dxE, dyM, dyE]. Read after step() updated cx.
+    const viewFloatexp = navigator.view_floatexp() as Float64Array;
     if (scale_string !== _lastScaleLog) {
       _lastScaleLog = scale_string;
       console.log('[REF] draw scale', scale_string, 'dx', String(dx).slice(0, 12), 'cx', String(cx_string).slice(0, 14));
@@ -229,8 +233,11 @@ async function draw() {
     isUpdating = false;
     const mu = Math.max(props.mu, 4);
     const bailoutExtraIterations = Math.max(0, Math.ceil(Math.log2(Math.log(mu) / Math.log(4))));
+    // log2(1/scale) straight from the decimal string: `Math.log2(1.0 / parseFloat(scale_string))`
+    // underflows once scale drops below the smallest f64 subnormal (~5e-324, i.e. past ~1e-308) —
+    // parseFloat hits exactly 0, 1/0 is Infinity, and maxIterations pins at the 10M ceiling.
     const maxIterations = Math.min(
-      Math.max(100, 1000 * props.maxIterationMultiplier * Math.log2(1.0 / parseFloat(scale_string))) + bailoutExtraIterations,
+      Math.max(100, 1000 * props.maxIterationMultiplier * -log2FromDecimalString(scale_string)) + bailoutExtraIterations,
       10_000_000
     );
     await engine.update({
@@ -244,6 +251,7 @@ async function draw() {
           // the shallow path and anything still expecting numbers.
           dxStr: dx,
           dyStr: dy,
+          viewFloatexp,
           mu: props.mu,
           scale: parseFloat(scale_string),
           scaleStr: scale_string,

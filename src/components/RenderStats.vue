@@ -568,6 +568,10 @@ defineExpose({ expanded });
         </div>
 
       </div>
+
+      <button class="stats-footer-close" @click="toggle" title="Replier le panneau">
+        <span>{{ '▲' }} Replier</span>
+      </button>
     </div>
   </div>
 </template>
@@ -592,14 +596,14 @@ defineExpose({ expanded });
 }
 
 .render-stats--expanded {
-  width: 250px;
+  width: 210px;
 }
 
 .stats-header {
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 6px 12px;
+  gap: 6px;
+  padding: 5px 10px;
   border: none;
   background: none;
   cursor: pointer;
@@ -692,25 +696,25 @@ defineExpose({ expanded });
 
 /* --- Expanded panel --- */
 .stats-panel {
-  padding: 0 10px 8px;
+  padding: 0 8px 4px;
 }
 
 .stats-graph {
   width: 100%;
-  height: 48px;
-  border-radius: 6px;
+  height: 34px;
+  border-radius: 5px;
   display: block;
-  margin-bottom: 4px;
+  margin-bottom: 3px;
   background: rgba(0, 0, 0, 0.2);
 }
 
 .stats-legend {
   display: flex;
   flex-wrap: wrap;
-  gap: 4px 8px;
-  font-size: 0.65rem;
+  gap: 2px 6px;
+  font-size: 0.6rem;
   color: var(--ink-3);
-  margin-bottom: 6px;
+  margin-bottom: 4px;
 }
 
 .legend-item {
@@ -745,25 +749,25 @@ defineExpose({ expanded });
 .stats-grid {
   display: flex;
   flex-direction: column;
-  gap: 2px;
+  gap: 0;
 }
 
 .stats-row {
   display: flex;
   justify-content: space-between;
   align-items: baseline;
-  padding: 1px 0;
+  padding: 0;
   border-bottom: 1px solid var(--line-soft);
 }
 
 .stats-label {
-  font-size: 0.74rem;
+  font-size: 0.66rem;
   color: var(--ink-3);
 }
 
 .stats-value {
   font-family: var(--mono);
-  font-size: 0.78rem;
+  font-size: 0.68rem;
   color: var(--ink);
   font-variant-numeric: tabular-nums;
   font-weight: 500;
@@ -846,9 +850,31 @@ defineExpose({ expanded });
 .stats-row--progress {
   display: flex;
   flex-direction: column;
-  gap: 4px;
-  padding: 4px 0;
+  gap: 2px;
+  padding: 2px 0;
   border-bottom: 1px solid var(--line-soft);
+}
+
+.stats-footer-close {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 100%;
+  margin-top: 4px;
+  padding: 4px 0;
+  border: none;
+  border-top: 1px solid var(--line-soft);
+  background: none;
+  color: var(--ink-3);
+  font: inherit;
+  font-size: 0.66rem;
+  letter-spacing: 0.04em;
+  cursor: pointer;
+}
+
+.stats-footer-close:hover {
+  background: rgba(255, 255, 255, 0.05);
+  color: var(--ink);
 }
 
 .progress-row-header {

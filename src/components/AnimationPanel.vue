@@ -219,26 +219,12 @@ watch(
 <template>
   <div class="sections" v-if="model.animation">
 
-        <!-- ═══ Lecture ═══ -->
+        <!-- ═══ Mixer ═══ -->
         <DenseSection
-          title="Lecture"
-          scope="Marche/arrêt global et vitesse maître"
-          icon='<path d=&quot;M8 5v14l11-7z&quot;/>'
+          title="Mixer"
+          scope="Paramètres animés — onde, vitesse, amplitude"
+          icon='<path d=&quot;M4 12q4-7 8 0t8 0&quot;/><path d=&quot;M4 17h16&quot;/>'
         >
-          <div class="playbar">
-            <button
-              class="play-btn"
-              :class="{ paused: !model.activateAnimate }"
-              type="button"
-              :aria-pressed="model.activateAnimate"
-              title="Play/Pause animation"
-              @click="model.activateAnimate = !model.activateAnimate"
-            >
-              <svg v-if="model.activateAnimate" viewBox="0 0 24 24"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>
-              <svg v-else viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-              <span>{{ model.activateAnimate ? 'En pause' : 'Drift' }}</span>
-            </button>
-          </div>
           <div class="fields">
             <DenseField
               label="Vitesse globale"
@@ -248,14 +234,6 @@ watch(
               @update:model-value="setGlobalSpeed"
             />
           </div>
-        </DenseSection>
-
-        <!-- ═══ Mixer ═══ -->
-        <DenseSection
-          title="Mixer"
-          scope="Paramètres animés — onde, vitesse, amplitude"
-          icon='<path d=&quot;M4 12q4-7 8 0t8 0&quot;/><path d=&quot;M4 17h16&quot;/>'
-        >
           <div class="mixgrid">
             <div
               v-for="track in ANIMATION_TRACK_DEFINITIONS"
@@ -388,40 +366,6 @@ watch(
 
 
 <style scoped>
-/* ── Lecture: play bar ──────────────────────────────────────── */
-.playbar {
-  display: flex;
-  align-items: center;
-  gap: 14px;
-  margin-bottom: var(--gap);
-  flex-wrap: wrap;
-}
-.play-btn {
-  display: inline-flex;
-  align-items: center;
-  gap: 9px;
-  padding: 0 18px;
-  height: 38px;
-  border-radius: 10px;
-  border: 1px solid transparent;
-  cursor: pointer;
-  color: #fff;
-  font-family: var(--sans);
-  font-weight: 700;
-  font-size: 14px;
-  background: linear-gradient(110deg, var(--accent), oklch(var(--lit) calc(var(--chroma) * var(--cmul)) 300));
-  box-shadow: 0 8px 22px -10px var(--accent);
-  transition: .15s;
-}
-.play-btn:hover { filter: brightness(1.07); }
-.play-btn svg { width: 14px; height: 14px; fill: currentColor; }
-.play-btn.paused {
-  background: var(--row-on);
-  color: var(--ink-2);
-  border-color: var(--line);
-  box-shadow: none;
-}
-
 /* ── Mixer cells ────────────────────────────────────────────── */
 .mixgrid {
   display: grid;

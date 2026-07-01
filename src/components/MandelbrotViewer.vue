@@ -3,7 +3,7 @@ import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
-import { DenseTopbar, useDenseView, denseAttrs } from './dense';
+import { DenseTopbar, DenseTip, useDenseView, denseAttrs } from './dense';
 import type {ApproximationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
   normalizePowerOfTwoStep,
@@ -77,6 +77,7 @@ const isTouchDevice = typeof window !== 'undefined'
 const authConfigured = isAuthConfigured();
 const authUserEmail = ref('');
 const userRole = ref<UserRole>('guest');
+const isAdmin = computed(() => userRole.value === 'admin');
 let stopAuthObserver: (() => void) | null = null;
 
 async function loginWithGoogle() {
@@ -415,6 +416,12 @@ function applyPrecisionBudgetToEngine() {
 
 // Restore parametres a partir du localStorage puis surveille et persiste a chaque changement
 onMounted(() => {
+  // DEV: with the UI forced on but no WebGPU, open the Palettes panel so it is
+  // visible for inspection (no canvas is rendered).
+  if (forceUINoGpu) {
+    openTabs.add('palettes');
+    popupPositions['palettes'] = { x: -1, y: -1 };
+  }
   stopAuthObserver = observeAuthState((state) => {
     authUserEmail.value = state.user?.email ?? '';
     userRole.value = state.role;
@@ -564,10 +571,31 @@ const settingsTabs = computed(() => [
 
 // Tabs whose panel has been ported to the dense shell. These render inside the
 // `.dense` popup (DenseTopbar + dense body); others keep the legacy popup chrome.
+// DEV: when WebGPU is unavailable but `?forceui` forced the UI on (see App.vue),
+// skip the WebGPU canvas (MandelbrotController) and just show the panels.
+const hasWebGPU = typeof navigator !== 'undefined' && 'gpu' in navigator;
+const forceUINoGpu = !hasWebGPU
+  && typeof window !== 'undefined'
+  && new URLSearchParams(window.location.search).has('forceui');
+
 const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes']);
 const denseView = useDenseView();
 function isDenseTab(tabKey: string): boolean {
   return densePortedTabs.has(tabKey);
+}
+
+// Primary ptabs grouping (topbar "Paramètres" / "Presets" switch), per the mockup's
+// data-primary/[data-group] mechanism (dense.css). Only the Palettes panel currently
+// has sections tagged with data-group; other tabs simply render no ptabs.
+const PTABS_BY_TAB: Record<string, { value: string; label: string }[]> = {
+  palettes: [
+    { value: 'params', label: 'Paramètres' },
+    { value: 'library', label: 'Presets' },
+  ],
+};
+const primaryByTab = reactive<Record<string, string>>({});
+function primaryFor(tabKey: string): string {
+  return primaryByTab[tabKey] ?? 'params';
 }
 
 function toggleTab(tabKey: string) {
@@ -1206,6 +1234,11 @@ function getCurrentCanvasSize(): {width: number; height: number} {
   };
 }
 
+// Kick off idle-time antialiasing accumulation (same as the "G" shortcut).
+function triggerRenderAa() {
+  mandelbrotCtrlRef.value?.getEngine?.()?.triggerAaAccumulation();
+}
+
 async function toggleDiscoveryRadar() {
   if (discoveryRadarActive.value) {
     deactivateDiscoveryRadar();
@@ -1519,15 +1552,6 @@ function startTravelToPreset(preset: PresetRecord) {
       @touchstart.stop
       @touchend.stop
     >
-      <button
-        v-if="!aaProgress.active && !mandelbrotParams.aaAuto"
-        class="aa-button"
-        title="Accumulate high-quality antialiasing (shortcut: G)"
-        @click="mandelbrotCtrlRef?.getEngine?.()?.triggerAaAccumulation()"
-      >
-        <i class="fa-solid fa-wand-magic-sparkles"></i>
-        Render AA {{ mandelbrotParams.antialiasLevel }}×
-      </button>
       <div v-if="aaProgress.active" class="aa-progress">
         <span class="aa-progress-label">AA {{ aaProgress.done }}/{{ aaProgress.total }}</span>
         <div class="aa-progress-track">
@@ -1541,6 +1565,7 @@ function startTravelToPreset(preset: PresetRecord) {
 
     <!-- Composant MandelbrotController avec tous les parametres -->
     <MandelbrotController
+      v-if="hasWebGPU"
       ref="mandelbrotCtrlRef"
       style="width: 100%; height: 100%; display: block;"
       v-model:scale="mandelbrotParams.scale"
@@ -1590,7 +1615,8 @@ function startTravelToPreset(preset: PresetRecord) {
       :textureMappingMode="mandelbrotParams.textureMappingMode"
     />
 
-    <!-- Cluster d'actions flottant (bas-droite) : masquage UI + Discover -->
+    <!-- Cluster d'actions flottant (bas-droite) : masquage UI + Render AA + Discover.
+         Boutons ronds par défaut ; s'étirent avec libellé au survol du cluster. -->
     <div
       class="hud-fab-cluster"
       :class="{ 'hud-hidden': isNavigating || mobileNavExpanded }"
@@ -1598,17 +1624,31 @@ function startTravelToPreset(preset: PresetRecord) {
     >
       <button
         v-show="!discoveryRadarActive"
-        class="ui-hide-toggle"
+        class="fab-btn ui-hide-toggle"
         title="Masquer l'interface (Échap pour réafficher)"
         @click="showUI = false"
         @touchstart.stop
         @touchend.stop
       >
-        <i class="fa-solid fa-eye-slash"></i>
+        <span class="fab-ico"><i class="fa-solid fa-eye-slash"></i></span>
+        <span class="fab-label">Masquer</span>
       </button>
 
       <button
-        class="discovery-radar-button"
+        v-show="!discoveryRadarActive"
+        class="fab-btn render-aa-button"
+        type="button"
+        title="Render AA — lisser le rendu (raccourci G)"
+        @click="triggerRenderAa"
+        @touchstart.stop
+        @touchend.stop
+      >
+        <span class="fab-ico"><i class="fa-solid fa-wand-magic-sparkles"></i></span>
+        <span class="fab-label">Render AA</span>
+      </button>
+
+      <button
+        class="fab-btn discovery-radar-button"
         :class="{ 'is-active': discoveryRadarActive }"
         type="button"
         :aria-pressed="discoveryRadarActive"
@@ -1617,9 +1657,11 @@ function startTravelToPreset(preset: PresetRecord) {
         @touchstart.stop
         @touchend.stop
       >
-        <span class="radar-button-ring" aria-hidden="true"></span>
-        <span class="radar-button-core" aria-hidden="true"></span>
-        <span class="is-hidden-touch">{{ discoveryRadarActive ? 'Radar On' : 'Discover' }}</span>
+        <span class="fab-ico radar-ico" aria-hidden="true">
+          <span class="radar-button-ring"></span>
+          <span class="radar-button-core"></span>
+        </span>
+        <span class="fab-label">{{ discoveryRadarActive ? 'Radar On' : 'Discover' }}</span>
       </button>
     </div>
 
@@ -1767,6 +1809,9 @@ function startTravelToPreset(preset: PresetRecord) {
       </div>
     </div>
 
+    <!-- Shared dense tooltip (teleported to body) -->
+    <DenseTip />
+
     <!-- Popup Settings — one per open tab (multi-window) -->
     <template v-for="tab in settingsTabs" :key="'popup-' + tab.key">
       <!-- Dense shell popup (ported panels) -->
@@ -1775,14 +1820,34 @@ function startTravelToPreset(preset: PresetRecord) {
         :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
         class="dense dense-popup"
         v-bind="denseAttrs(denseView)"
+        :data-primary="primaryFor(tab.key)"
         :style="popupStyle(tab.key)"
         @mousedown="bringToFront(tab.key)"
       >
         <DenseTopbar
           :title="tab.label"
+          :ptabs="PTABS_BY_TAB[tab.key]"
+          :primary="primaryFor(tab.key)"
+          :is-admin="isAdmin"
+          @update:primary="(v: string) => primaryByTab[tab.key] = v"
           @close="closeTab(tab.key)"
           @drag-start="startDrag(tab.key, $event)"
-        />
+        >
+          <template v-if="tab.key === 'animation'" #lead>
+            <button
+              class="tb-play"
+              :class="{ paused: !mandelbrotParams.activateAnimate }"
+              type="button"
+              :aria-pressed="mandelbrotParams.activateAnimate"
+              title="Lecture / pause de l'animation"
+              @click="mandelbrotParams.activateAnimate = !mandelbrotParams.activateAnimate"
+            >
+              <svg v-if="mandelbrotParams.activateAnimate" viewBox="0 0 24 24"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>
+              <svg v-else viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
+              <span class="lbl">Animate</span>
+            </button>
+          </template>
+        </DenseTopbar>
         <div class="body">
           <Settings
             :ref="(el: any) => { settingsRefs[tab.key] = el }"
@@ -1966,7 +2031,7 @@ function startTravelToPreset(preset: PresetRecord) {
 /* Barre de boutons centree sur l'ecran */
 .top-settings-bar {
   position: fixed;
-  top: 16px;
+  top: 10px;
   left: 0;
   right: 0;
   z-index: 30;
@@ -1978,12 +2043,12 @@ function startTravelToPreset(preset: PresetRecord) {
 
 .top-settings-bar-inner {
   display: flex;
-  gap: 6px;
-  padding: 8px;
+  gap: 2px;
+  padding: 4px;
   background: rgba(16, 18, 24, 0.72);
   backdrop-filter: blur(18px);
   border: 1px solid var(--line);
-  border-radius: 16px;
+  border-radius: 11px;
   overflow: hidden;
   pointer-events: auto;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
@@ -1992,12 +2057,12 @@ function startTravelToPreset(preset: PresetRecord) {
 .top-tab-btn {
   display: flex;
   align-items: center;
-  gap: 10px;
-  padding: 11px 16px;
-  border-radius: 11px;
+  gap: 7px;
+  padding: 6px 11px;
+  border-radius: 8px;
   color: var(--ink-2);
   font-weight: 600;
-  font-size: 15px;
+  font-size: 12.5px;
   cursor: pointer;
   border: 1px solid transparent;
   background: transparent;
@@ -2007,8 +2072,8 @@ function startTravelToPreset(preset: PresetRecord) {
 }
 
 .top-tab-btn svg {
-  width: 18px;
-  height: 18px;
+  width: 15px;
+  height: 15px;
   stroke: currentColor;
   fill: none;
   stroke-width: 1.8;
@@ -2042,7 +2107,7 @@ function startTravelToPreset(preset: PresetRecord) {
 .tab-shortcut-hint {
   color: var(--ink-4);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 10.5px;
   font-weight: 600;
 }
 
@@ -2309,23 +2374,66 @@ function startTravelToPreset(preset: PresetRecord) {
 }
 
 /* Hide-UI toggle (top-right) + "press Esc" hint when hidden. */
-.ui-hide-toggle {
+/* Floating HUD actions: round by default, expand into a labelled pill on cluster hover
+   (matches the mobile round look until the pointer is over the cluster). */
+.fab-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: flex-start;
+  height: 42px;
+  width: 42px;
+  padding: 0;
+  color: #fff;
+  background: rgba(20, 20, 28, 0.6);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 999px;
+  cursor: pointer;
+  overflow: hidden;
+  white-space: nowrap;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
+  transition: width 0.22s ease, background 0.15s ease, border-color 0.15s ease, box-shadow 0.2s ease;
+}
+.fab-btn .fab-ico {
+  flex: 0 0 auto;
+  width: 40px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  width: 36px;
-  height: 36px;
-  color: #fff;
-  background: rgba(20, 20, 28, 0.6);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 50%;
-  cursor: pointer;
-  backdrop-filter: blur(8px);
-  transition: background 0.15s ease, border-color 0.15s ease;
+  font-size: 15px;
 }
+.fab-btn .fab-label {
+  max-width: 0;
+  opacity: 0;
+  overflow: hidden;
+  font-size: 13px;
+  font-weight: 700;
+  letter-spacing: 0;
+  transition: max-width 0.22s ease, opacity 0.18s ease, padding 0.22s ease;
+}
+.hud-fab-cluster:hover .fab-btn,
+.fab-btn:focus-visible,
+.discovery-radar-button.is-active {
+  width: auto;
+}
+.hud-fab-cluster:hover .fab-label,
+.fab-btn:focus-visible .fab-label,
+.discovery-radar-button.is-active .fab-label {
+  max-width: 140px;
+  opacity: 1;
+  padding-right: 15px;
+}
+
 .ui-hide-toggle:hover {
   background: rgba(40, 40, 56, 0.85);
   border-color: rgba(255, 255, 255, 0.35);
+}
+
+.render-aa-button .fab-ico { color: #ffd27a; }
+.render-aa-button:hover {
+  background: rgba(48, 38, 20, 0.82);
+  border-color: rgba(255, 210, 122, 0.55);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.4), 0 0 20px rgba(255, 200, 100, 0.25);
 }
 .ui-hidden-hint {
   position: fixed;
@@ -2371,25 +2479,6 @@ function startTravelToPreset(preset: PresetRecord) {
   .aa-control {
     bottom: 140px;
   }
-}
-.aa-button {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  padding: 6px 12px;
-  font-size: 0.8rem;
-  font-weight: 600;
-  color: #fff;
-  background: rgba(20, 20, 28, 0.72);
-  border: 1px solid rgba(255, 255, 255, 0.18);
-  border-radius: 999px;
-  cursor: pointer;
-  backdrop-filter: blur(8px);
-  transition: background 0.15s ease, border-color 0.15s ease;
-}
-.aa-button:hover {
-  background: rgba(40, 40, 56, 0.85);
-  border-color: rgba(255, 255, 255, 0.35);
 }
 .aa-progress {
   display: flex;
@@ -2455,28 +2544,12 @@ function startTravelToPreset(preset: PresetRecord) {
 }
 
 .discovery-radar-button {
-  position: relative;
-  min-width: 118px;
-  height: 42px;
-  border: 1px solid rgba(255, 255, 255, 0.2);
-  border-radius: 999px;
   background:
-    radial-gradient(circle at 28px 50%, rgba(63, 230, 184, 0.32), transparent 28px),
+    radial-gradient(circle at 21px 50%, rgba(63, 230, 184, 0.32), transparent 26px),
     rgba(10, 14, 22, 0.68);
-  color: #fff;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  gap: 9px;
-  padding: 0 14px 0 12px;
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0;
-  cursor: pointer;
-  backdrop-filter: blur(14px);
   box-shadow: 0 10px 30px rgba(0, 0, 0, 0.35), 0 0 18px rgba(63, 230, 184, 0.18);
-  transition: opacity 0.25s ease, transform 0.2s ease, border-color 0.2s ease, box-shadow 0.2s ease;
 }
+.radar-ico { position: relative; }
 
 .discovery-radar-button:hover,
 .discovery-radar-button.is-active {
@@ -2520,7 +2593,9 @@ function startTravelToPreset(preset: PresetRecord) {
   position: absolute;
   width: 5px;
   height: 5px;
-  left: 22px;
+  left: 50%;
+  top: 50%;
+  transform: translate(-50%, -50%);
   border-radius: 50%;
   background: #fff;
   box-shadow: 0 0 10px rgba(255, 255, 255, 0.9);
@@ -2989,16 +3064,6 @@ function startTravelToPreset(preset: PresetRecord) {
 @media (max-width: 768px) {
   .hud-fab-cluster {
     right: 12px;
-  }
-
-  .discovery-radar-button {
-    min-width: 42px;
-    width: 42px;
-    padding: 0;
-  }
-
-  .radar-button-core {
-    left: 18px;
   }
 }
 

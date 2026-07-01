@@ -1,5 +1,5 @@
 import {describe, expect, it} from 'vitest';
-import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString} from '../../src/floatexp';
+import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString} from '../../src/floatexp';
 
 const reconstruct = (m: number, e: number) => m * 2 ** e;
 const LOG2_10 = 3.321928094887362;
@@ -79,15 +79,37 @@ describe('frexpFloat32', () => {
   });
 
   it('frexpFromDecimalString agrees with frexpFloat32 on the deep threshold', () => {
-    expect(frexpFromDecimalString('1e-35').exponent).toBeLessThanOrEqual(DEEP_EXP_THRESHOLD);
-    expect(frexpFromDecimalString('1e-34').exponent).toBeGreaterThan(DEEP_EXP_THRESHOLD);
+    expect(frexpFromDecimalString('1e-31').exponent).toBeLessThanOrEqual(DEEP_EXP_THRESHOLD);
+    expect(frexpFromDecimalString('1e-29').exponent).toBeGreaterThan(DEEP_EXP_THRESHOLD);
   });
 
-  it('maps the ~1e-35 deep threshold to the expected exponent boundary', () => {
+  it('maps the ~1e-30 deep threshold to the expected exponent boundary', () => {
     // The shader switches to the fe path when expScale <= DEEP_EXP_THRESHOLD.
-    expect(frexpFloat32(1e-35).exponent).toBeLessThanOrEqual(DEEP_EXP_THRESHOLD);
-    expect(frexpFloat32(1e-34).exponent).toBeGreaterThan(DEEP_EXP_THRESHOLD);
+    expect(frexpFloat32(1e-31).exponent).toBeLessThanOrEqual(DEEP_EXP_THRESHOLD);
+    expect(frexpFloat32(1e-29).exponent).toBeGreaterThan(DEEP_EXP_THRESHOLD);
     // A typical shallow view stays well above the threshold.
     expect(frexpFloat32(1e-6).exponent).toBeGreaterThan(DEEP_EXP_THRESHOLD);
+  });
+
+  it('log2FromDecimalString matches Math.log2 within the f64 range', () => {
+    for (const s of ['1', '2', '0.5', '1234.5', '1e-35', '1e-100', '1e-300']) {
+      expect(log2FromDecimalString(s)).toBeCloseTo(Math.log2(parseFloat(s)), 6);
+    }
+  });
+
+  it('log2FromDecimalString stays finite far below the f64 floor, unlike Math.log2(parseFloat(s))', () => {
+    // Regression: maxIterations used to be derived via Math.log2(1/parseFloat(scale)).
+    // Below ~5e-324 parseFloat(s) underflows to exactly 0, so 1/0 = Infinity and the
+    // iteration count pinned at its 10M ceiling instead of scaling with depth.
+    expect(parseFloat('1e-320')).not.toBe(0); // still a (degraded) f64 subnormal
+    expect(parseFloat('1e-330')).toBe(0); // genuinely underflowed
+    expect(Number.isFinite(Math.log2(parseFloat('1e-330')))).toBe(false);
+
+    for (const deep of [320, 330, 500, 1000, 5000]) {
+      const v = log2FromDecimalString(`1e-${deep}`);
+      expect(Number.isFinite(v)).toBe(true);
+      // log2(1e-deep) ≈ -deep · log2(10), within rounding of the leading digits.
+      expect(Math.abs(v - -deep * LOG2_10)).toBeLessThan(1e-6);
+    }
   });
 });

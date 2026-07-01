@@ -64,7 +64,7 @@ struct Mandelbrot {
 // floatexp deep-zoom threshold (base-2 exponent of scale). Below this the shader
 // switches to the extended-exponent (fe) path, before f32 precision degrades
 // approaching the underflow wall. Mirror of Engine.DEEP_EXP_THRESHOLD.
-const DEEP_EXP: i32 = -116;
+const DEEP_EXP: i32 = -100;
 const LN2: f32 = 0.6931471805599453;
 
 struct BlaStep {

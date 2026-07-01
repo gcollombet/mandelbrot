@@ -954,7 +954,7 @@ fn debug_wheel_sector(uv: vec2<f32>) -> i32 {
   let centered = uv - vec2<f32>(0.5);
   let angle = atan2(centered.y, centered.x);
   let phase = fract(angle / (2.0 * 3.141592653589793) + 1.0);
-  return i32(floor(phase * 5.0));
+  return i32(floor(phase * 4.0));
 }
 
 // ── Colorize a single pixel from its raw layer values ──────────────
@@ -1030,27 +1030,7 @@ fn colorize_pixel(
       let grad = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
       return vec4<f32>(debug_heat(debug_gradient_scale(length(grad))), 1.0);
     }
-    if (sector == 3) {
-      return vec4<f32>(debug_heat(fract(angle_der / (2.0 * 3.141592653589793) + 0.5)), 1.0);
-    }
-    // sector 4: AA per-pixel sample-count tiers. Blue = 1 sample, warm = up to
-    // antialiasLevel. Reads the actual baked target map (so a bake bug shows here);
-    // if not baked yet (AA hasn't run), computes the intended target on the fly so
-    // the view is always meaningful.
-    var aaN = textureLoad(aaTargetTex, sourceCoord, 0).r;
-    if (aaN < 1.0) {
-      aaN = 1.0;
-      if (iter_val > 0.0) {
-        // Mirror aa_target.wgsl: de_px = (H/2)·exp(-height); ramp 1..L over [R_FULL, R_OUT].
-        let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);
-        let hTexels = f32(sourceTexSize.y) / neutralExtent;
-        let de_px = (hTexels * 0.5) * exp(-extras.der_x);
-        let t = 1.0 - smoothstep(1.0, 6.0, de_px);
-        aaN = clamp(round(1.0 + (parameters.antialiasLevel - 1.0) * t), 1.0, parameters.antialiasLevel);
-      }
-    }
-    let aaT = (aaN - 1.0) / max(parameters.antialiasLevel - 1.0, 1.0);
-    return vec4<f32>(debug_heat(aaT), 1.0);
+    return vec4<f32>(debug_heat(fract(angle_der / (2.0 * 3.141592653589793) + 0.5)), 1.0);
   }
 
   let v = nu;

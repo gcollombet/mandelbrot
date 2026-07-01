@@ -76,6 +76,11 @@ type ReferenceWorkerMessage =
 type OrbitChunkResponse = {
     type: 'orbitChunk'
     jobId: number
+    // Monotonic id of the reference orbit this chunk belongs to. A new id is minted
+    // every time the orbit restarts at offset 0 (fresh navigator, Rust-side recenter,
+    // precision-budget rebuild), so the Engine routes chunks by id instead of
+    // comparing reference coordinates.
+    refId: number
     offset: number
     count: number
     maxIterations: number
@@ -87,18 +92,11 @@ type OrbitChunkResponse = {
 type BlaReadyResponse = {
     type: 'blaReady'
     jobId: number
+    refId: number
     maxIterations: number
     steps: Float32Array<ArrayBuffer>
     levels: Uint32Array<ArrayBuffer>
     levelCount: number
-}
-
-type ReferenceResetResponse = {
-    type: 'referenceReset'
-    jobId: number
-    maxIterations: number
-    referenceCx: string
-    referenceCy: string
 }
 
 type ErrorResponse = {
@@ -137,7 +135,6 @@ type MinibrotFoundResponse = {
 type ReferenceWorkerResponse =
     | OrbitChunkResponse
     | BlaReadyResponse
-    | ReferenceResetResponse
     | ErrorResponse
     | ReadyResponse
     | PadeBenchmarkResponse
@@ -158,8 +155,10 @@ let lastBlaMaxIterations = 0
 let targetMaxIterations = 0
 let computeLoopRunning = false
 let needsReferenceValidation = false
-let currentReferenceCx = ''
-let currentReferenceCy = ''
+// Monotonic across navigator recreations: every orbit restart (chunk at offset 0)
+// mints a fresh id, so consumers can order references globally.
+let refCounter = 0
+let currentRefId = 0
 
 const ORBIT_CHUNK_SIZE = 1000
 // Compute the reference orbit to HEADROOM× the display maxIter, so interactive zoom-in (which
@@ -211,8 +210,6 @@ function resetNavigator(message: ResetMessage) {
     lastBlaMaxIterations = 0
     targetMaxIterations = message.maxIterations
     needsReferenceValidation = false
-    currentReferenceCx = ''
-    currentReferenceCy = ''
     applyApproximationMode(message.approximationMode)
     navigator.set_bla_epsilon(message.blaEpsilon)
     navigator.set_max_bla_skip(message.maxBlaSkip)
@@ -255,6 +252,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         return
     }
 
+    const refId = currentRefId
     const blaInfo = navigator.compute_bla_reference_ptr(maxIterations)
     // Floats per floatexp BlaStep — must match the Rust #[repr(C)] BlaStep (12 ×
     // 4-byte fields: a/b/D coefficients + exponents, alpha/beta radii, and the
@@ -280,6 +278,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     postResponse({
         type: 'blaReady',
         jobId,
+        refId,
         maxIterations,
         steps,
         levels,
@@ -316,30 +315,20 @@ async function runComputeLoop(jobId: number) {
             needsReferenceValidation = false
             const orbit = copyOrbitSlice(info.ptr, info.offset, info.count)
             const [referenceCx, referenceCy] = navigator.get_reference_params()
+            // Offset 0 means the orbit (re)started — fresh navigator or Rust-side
+            // recenter/rebuild. Mint a new reference id and invalidate the BLA table,
+            // which belonged to the previous orbit.
             if (info.offset === 0) {
-                console.log('[REF worker] orbit (re)start ref=', referenceCx.slice(0, 14), 'prevRef=', currentReferenceCx.slice(0, 14) || '(none)')
-            }
-            if (
-                currentReferenceCx
-                && (referenceCx !== currentReferenceCx || referenceCy !== currentReferenceCy)
-            ) {
-                console.log('[REF worker] -> referenceReset (recenter) newRef=', referenceCx.slice(0, 14))
+                currentRefId = ++refCounter
                 lastBlaMaxIterations = 0
-                postResponse({
-                    type: 'referenceReset',
-                    jobId,
-                    maxIterations,
-                    referenceCx,
-                    referenceCy,
-                })
+                console.log('[REF worker] orbit (re)start refId=', currentRefId, 'ref=', referenceCx.slice(0, 14))
             }
-            currentReferenceCx = referenceCx
-            currentReferenceCy = referenceCy
             const availableIter = Math.max(0, info.count - 1)
 
             postResponse({
                 type: 'orbitChunk',
                 jobId,
+                refId: currentRefId,
                 offset: info.offset,
                 count: info.count,
                 maxIterations,

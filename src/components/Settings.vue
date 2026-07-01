@@ -54,9 +54,7 @@ import {
   saveTextureMappingPresetEntry,
 } from '../textureMappingPresetStore';
 import {
-  DRAGON_SCALES_TEXTURE_MAPPING,
   normalizeTextureMappingFromLegacy,
-  SCREEN_SPACE_TEXTURE_MAPPING,
   TEXTURE_MAPPING_SCALE_MAX,
   TEXTURE_MAPPING_SCALE_MIN,
   TEXTURE_MAPPING_VARIABLE_OPTIONS,
@@ -290,11 +288,6 @@ function applyTextureMapping(mapping: unknown) {
   delete (model.value as any).textureMappingMode;
 }
 
-function applyBuiltInTextureMapping(kind: 'screen' | 'dragon') {
-  applyTextureMapping(kind === 'dragon' ? DRAGON_SCALES_TEXTURE_MAPPING : SCREEN_SPACE_TEXTURE_MAPPING);
-  selectedTextureMappingPreset.value = kind === 'dragon' ? 'Dragon Scales' : 'Screen Space';
-}
-
 const activeTextureMappingLabel = computed(() => {
   const active = normalizeTextureMappingFromLegacy(model.value);
   const matching = textureMappingPresets.value.find(preset => textureMappingEquals(preset.mapping, active));
@@ -335,7 +328,7 @@ const sliderPhaseColoring = computed({
     model.value.phaseColoringStrength = val <= 0 ? 0 : Math.round((10 ** (val * 2) - 1) * 10) / 10;
   }
 });
-// Slider log2(scale) : valeurs de slider 1 à 300 —> scale de 2^-1 à 2^-300
+// Slider log2(scale) : valeurs de slider 1 à 1000 —> scale de 2^-1 à 2^-1000
 // Decimal order of magnitude of a (possibly very deep) scale string. Number()
 // underflows to 0 below ~1e-308, so read the exponent straight off the string
 // for deep values. Returns log10(scale) (negative when zoomed in).
@@ -350,10 +343,10 @@ function scaleLog10(scaleStr: string): number {
   return 0;
 }
 
-const SCALE_SLIDER_MAX = 300;
+const SCALE_SLIDER_MAX = 1000;
 
 // The slider maps to the decimal zoom depth: position v ⇒ scale 1e-v, so it
-// reads directly as a power of ten (1 → 10⁻¹ … 300 → 10⁻³⁰⁰). The scale is set
+// reads directly as a power of ten (1 → 10⁻¹ … 1000 → 10⁻¹⁰⁰⁰). The scale is set
 // as a `1e-v` STRING — never `2**-v`, which underflows past ~1e-324. The
 // arbitrary-precision navigator parses the string natively.
 const scaleSlider = computed({
@@ -401,6 +394,21 @@ const radFmt = (v: number) => v.toFixed(2) + ' rad';
 const imgDispFmt = (v: number) => '×' + v.toFixed(3);
 const xScaleFmt = () => '×' + normalizeTextureMappingFromLegacy(model.value).xScale.toFixed(2);
 const yScaleFmt = () => '×' + normalizeTextureMappingFromLegacy(model.value).yScale.toFixed(2);
+
+// Texture-mapping presets are shown as a simple select (no visual preview).
+const mappingSelectOptions = computed(() =>
+  textureMappingPresets.value.map(p => ({
+    label: p.name + (p.builtIn ? ' (intégré)' : ''),
+    value: p.name,
+  })),
+);
+const activeMappingPreset = computed(() =>
+  textureMappingPresets.value.find(p => p.name === activeTextureMappingLabel.value),
+);
+function onSelectMappingPreset(name: string | number) {
+  const preset = textureMappingPresets.value.find(p => p.name === name);
+  if (preset) selectTextureMappingPresetFromDropdown(preset);
+}
 
 
 const coordsCopied = ref(false);
@@ -486,6 +494,12 @@ function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = '
   ctx.drawImage(tempCanvas, 0, 0, canvas.width, canvas.height);
   return canvas.toDataURL('image/png');
 }
+
+// Palette strip background — accurate gradient built from the real Palette
+// interpolation (matches the mockup's gradient strip; reactive to stop edits).
+const paletteStripUrl = computed(() =>
+  generatePaletteThumbnail(model.value.colorStops, model.value.interpolationMode),
+);
 
 const navigationPreview = ref<string | null>(null);
 const presetName = ref('');
@@ -1516,16 +1530,6 @@ const interpolationModes: { key: InterpolationMode; label: string }[] = [
   { key: 'cubehelix', label: 'Cubehelix' },
 ];
 
-const paletteSubTabs = [
-  { key: 'library', label: 'Library', icon: 'fa-solid fa-swatchbook' },
-  { key: 'stops', label: 'Stops', icon: 'fa-solid fa-sliders' },
-  { key: 'surfaceMaterial', label: 'Global', icon: 'fa-solid fa-globe' },
-  { key: 'motionCycle', label: 'Cycle', icon: 'fa-solid fa-arrows-rotate' },
-  { key: 'imageEnvironment', label: 'Texture', icon: 'fa-solid fa-image' },
-  { key: 'color', label: 'Color', icon: 'fa-solid fa-rainbow' },
-] as const;
-const activePaletteSubTab = ref<(typeof paletteSubTabs)[number]['key']>('library');
-
 // =====================================================
 // Palette Manipulation Tools
 // =====================================================
@@ -1655,40 +1659,6 @@ async function saveTextureMappingPreset() {
   textureMappingPresets.value = await getAllTextureMappingPresetEntries();
   selectedTextureMappingPreset.value = name;
   textureMappingPresetName.value = '';
-}
-
-async function toggleTextureMappingFavorite(preset: TextureMappingPresetRecord): Promise<void> {
-  if (preset.builtIn) return;
-  const previous = preset.favorite ?? false;
-  preset.favorite = !previous;
-  try {
-    await saveTextureMappingPresetEntry({ ...preset });
-    textureMappingPresets.value = await getAllTextureMappingPresetEntries();
-  } catch (error) {
-    preset.favorite = previous;
-    console.warn('Failed to save texture mapping favorite:', error);
-  }
-}
-
-async function uploadTextureMappingPreset(preset: TextureMappingPresetRecord): Promise<void> {
-  if (!isAdmin.value || preset.builtIn) return;
-  try {
-    const uploaded = await uploadRemoteCatalogEntry('textureMappingPreset', {
-      guid: preset.guid,
-      name: preset.name,
-      lastUpdated: preset.lastUpdated || preset.date || new Date().toISOString(),
-      mapping: normalizeTextureMappingFromLegacy({ textureMapping: preset.mapping }),
-    });
-    await saveTextureMappingPresetEntry({
-      ...preset,
-      lastUpdated: uploaded.lastUpdated,
-      remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
-    });
-    textureMappingPresets.value = await getAllTextureMappingPresetEntries();
-    showUploadSuccess(uploadSuccessKey('texture-mapping', preset.guid));
-  } catch (error) {
-    handleUploadError(error);
-  }
 }
 
 async function deleteTextureMappingPreset(preset: TextureMappingPresetRecord): Promise<void> {
@@ -2083,7 +2053,7 @@ async function importSkyboxTexture(event: Event) {
 
         <div class="fields">
           <DenseField
-            label="Zoom" :min="1" :max="300" :step="1"
+            label="Zoom" :min="1" :max="1000" :step="1"
             :f="zoomFmt"
             :model-value="scaleSlider"
             @update:model-value="(v: number) => scaleSlider = v"
@@ -2362,26 +2332,9 @@ async function importSkyboxTexture(event: Event) {
         </div>
       </div>
 
-      <!-- WebGPU preview with handles overlaid -->
+      <!-- Gradient preview strip (mockup style) with handles overlaid -->
       <div class="canvas-row palette-strip mb-3" style="position:relative;" @dblclick="onPreviewDblClick" title="Double-click to add a color stop">
-        <PalettePreview
-          ref="previewRef"
-          :colorStops="model.colorStops"
-          :interpolationMode="model.interpolationMode"
-          :tileTextureUrl="activeBlobUrl"
-          :skyboxTextureUrl="activeSkyboxBlobUrl"
-          :tessellationLevel="model.tessellationLevel"
-          :displacementAmount="model.displacementAmount"
-          :ambientOcclusionStrength="model.ambientOcclusionStrength"
-          :microBumpStrength="model.microBumpStrength"
-          :subsurfaceStrength="model.subsurfaceStrength"
-          :reliefDepth="model.reliefDepth"
-          :localShadowStrength="model.localShadowStrength"
-          :varnishStrength="model.varnishStrength"
-          :orbitTrapStrength="model.orbitTrapStrength"
-          :phaseColoringStrength="model.phaseColoringStrength"
-          :textureMapping="model.textureMapping"
-        />
+        <div class="palette-strip-fill" :style="{ backgroundImage: `url(${paletteStripUrl})` }"></div>
         <div class="canvas-shadow-overlay"></div>
         <div class="handles-overlay">
           <GlissiereHandle
@@ -2407,71 +2360,73 @@ async function importSkyboxTexture(event: Event) {
           </button>
         </div>
       </div>
+
+      <!-- Pinned quick fields under the strip (mockup HUD .pins) -->
+      <div class="pins">
+        <DenseField label="Période" :min="0" :max="1" :step="0.001" :f="palettePeriodFmt"
+          :model-value="sliderPalettePeriod" @update:model-value="(v: number) => sliderPalettePeriod = v" />
+        <DenseField label="Offset" :min="0" :max="1" :step="0.001" :f="pctFmt"
+          :model-value="model.paletteOffset ?? 0" @update:model-value="(v: number) => model.paletteOffset = v" />
+        <DenseField label="Décalage hauteur" :min="0" :max="100" :step="0.01" f="p2"
+          :model-value="model.heightPaletteShift ?? 0" @update:model-value="(v: number) => model.heightPaletteShift = v" />
+        <DenseField label="Phase couleur" :min="0" :max="1" :step="0.001" :f="phaseColoringFmt"
+          :model-value="sliderPhaseColoring" @update:model-value="(v: number) => sliderPhaseColoring = v" />
+        <DenseToggle label="Miroir"
+          :model-value="!!model.paletteMirror" @update:model-value="(v: boolean) => model.paletteMirror = v" />
+      </div>
       </div>
 
-      <div class="palette-subtabs">
-        <button
-          v-for="tab in paletteSubTabs"
-          :key="tab.key"
-          class="button is-small palette-subtab-button"
-          :class="activePaletteSubTab === tab.key ? 'is-link' : 'is-light'"
-          type="button"
-          @click="activePaletteSubTab = tab.key"
-        >
-          <i :class="[tab.icon, 'mr-1']" aria-hidden="true"></i>
-          {{ tab.label }}
-        </button>
-      </div>
+      <div class="sections">
 
-      <section v-show="activePaletteSubTab === 'stops'">
-        <div class="mb-3">
-          <PaletteEditor
-            ref="paletteEditorRef"
-            :color-stops="model.colorStops"
-            :selected-idx="selectedIdx"
-            :interpolation-mode="model.interpolationMode"
-            :picker-mode="props.pickerMode"
-            :tile-texture-url="activeBlobUrl"
-            :skybox-texture-url="activeSkyboxBlobUrl"
-            :tessellation-level="model.tessellationLevel"
-            :displacement-amount="model.displacementAmount"
-            :ambient-occlusion-strength="model.ambientOcclusionStrength"
-            :micro-bump-strength="model.microBumpStrength"
-            :subsurface-strength="model.subsurfaceStrength"
-            :relief-depth="model.reliefDepth"
-            :local-shadow-strength="model.localShadowStrength"
-            :varnish-strength="model.varnishStrength"
-            :orbit-trap-strength="model.orbitTrapStrength"
-            :phase-coloring-strength="model.phaseColoringStrength"
-            :texture-mapping="model.textureMapping"
-            :is-admin="isAdmin"
-            v-model:apply-to-all="applyToAll"
-          />
-        </div>
-      </section>
+      <PaletteEditor
+        ref="paletteEditorRef"
+        :color-stops="model.colorStops"
+        :selected-idx="selectedIdx"
+        :interpolation-mode="model.interpolationMode"
+        :picker-mode="props.pickerMode"
+        :tile-texture-url="activeBlobUrl"
+        :skybox-texture-url="activeSkyboxBlobUrl"
+        :tessellation-level="model.tessellationLevel"
+        :displacement-amount="model.displacementAmount"
+        :ambient-occlusion-strength="model.ambientOcclusionStrength"
+        :micro-bump-strength="model.microBumpStrength"
+        :subsurface-strength="model.subsurfaceStrength"
+        :relief-depth="model.reliefDepth"
+        :local-shadow-strength="model.localShadowStrength"
+        :varnish-strength="model.varnishStrength"
+        :orbit-trap-strength="model.orbitTrapStrength"
+        :phase-coloring-strength="model.phaseColoringStrength"
+        :texture-mapping="model.textureMapping"
+        :is-admin="isAdmin"
+        v-model:apply-to-all="applyToAll"
+      />
 
-      <section v-show="activePaletteSubTab === 'motionCycle'">
-      <DenseSection title="Palette Cycle" scope="Répétition de la palette" icon='<path d=&quot;M4 12a8 8 0 018-8 8 8 0 017 4M20 12a8 8 0 01-8 8 8 8 0 01-7-4&quot;/><path d=&quot;M16 8h4V4M8 16H4v4&quot;/>'>
-        <DenseToggle
-          label="Mirror"
-          :model-value="!!model.paletteMirror"
-          @update:model-value="(v: boolean) => model.paletteMirror = v"
-        />
+      <DenseSection group="params" :hue="25" title="Global · Surface" scope="Relief et ombrage partagés — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
         <div class="fields">
-          <DenseField label="Length" :min="0" :max="1" :step="0.001" :f="palettePeriodFmt"
-            :model-value="sliderPalettePeriod" @update:model-value="(v: number) => sliderPalettePeriod = v" />
-          <DenseField label="Height Shift" :min="0" :max="100" :step="0.01" f="p2"
-            :model-value="model.heightPaletteShift ?? 0" @update:model-value="(v: number) => model.heightPaletteShift = v" />
-          <DenseField label="Offset" :min="0" :max="1" :step="0.001" :f="pctFmt"
-            :model-value="model.paletteOffset ?? 0" @update:model-value="(v: number) => model.paletteOffset = v" />
-          <DenseField label="Phase Coloring" :min="0" :max="1" :step="0.001" :f="phaseColoringFmt"
-            :model-value="sliderPhaseColoring" @update:model-value="(v: number) => sliderPhaseColoring = v" />
+          <DenseField label="Orbit trap" :min="0" :max="100" :step="0.1" f="p1"
+            :model-value="model.orbitTrapStrength ?? 0" @update:model-value="(v: number) => model.orbitTrapStrength = v" />
+          <DenseField label="Profondeur relief" :min="0" :max="2" :step="0.01" f="p2"
+            :model-value="model.reliefDepth ?? 1" @update:model-value="(v: number) => model.reliefDepth = v" />
+          <DenseField label="Occlusion relief" :min="0" :max="10" :step="0.01" f="p2"
+            :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
+          <DenseField label="Occlusion ambiante" :min="0" :max="2" :step="0.01" f="p2"
+            :model-value="model.ambientOcclusionStrength ?? 0" @update:model-value="(v: number) => model.ambientOcclusionStrength = v" />
+          <DenseField label="Direction lumière" :min="0" :max="6.283" :step="0.01" :f="radFmt"
+            :model-value="model.lightAngle ?? 3.927" @update:model-value="(v: number) => model.lightAngle = v" />
+          <DenseField label="Bump fin" :min="0" :max="2" :step="0.01" f="p2"
+            :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
         </div>
       </DenseSection>
-      </section>
+      <DenseSection group="params" :hue="285" title="Global · Matière" scope="Réponse matériau sur toute la surface" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;8&quot;/><path d=&quot;M8 9a3 3 0 014 0&quot;/>'>
+        <div class="fields">
+          <DenseField label="Vernis" :min="0" :max="10" :step="0.01" f="p2"
+            :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
+          <DenseField label="Sous-surface" :min="0" :max="10" :step="0.05" f="p2"
+            :model-value="model.subsurfaceStrength ?? 0" @update:model-value="(v: number) => model.subsurfaceStrength = v" />
+        </div>
+      </DenseSection>
 
-      <section v-show="activePaletteSubTab === 'color'">
-      <DenseSection title="Color Space" scope="Réglages globaux sur toute palette" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'>
+      <DenseSection group="params" :hue="230" title="Espace couleur" scope="Ajustements globaux sur chaque palette" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'>
         <DenseSeg
           label="Interpolation"
           :options="interpolationModes.map(m => ({ label: m.label, value: m.key }))"
@@ -2479,156 +2434,16 @@ async function importSkyboxTexture(event: Event) {
           @update:model-value="(v: string | number) => model.interpolationMode = v as InterpolationMode"
         />
         <div class="fields">
-          <DenseField label="Hue Shift" :min="-180" :max="180" :step="1" :f="degFmt"
+          <DenseField label="Teinte" :min="-180" :max="180" :step="1" :f="degFmt"
             :model-value="hslHueShift" @update:model-value="onHslHueInput" />
-          <DenseField label="Saturation Shift" :min="-100" :max="100" :step="1" f="p0"
+          <DenseField label="Saturation" :min="-100" :max="100" :step="1" f="p0"
             :model-value="satShift" @update:model-value="onSatInput" />
-          <DenseField label="Lightness Shift" :min="-100" :max="100" :step="1" f="p0"
+          <DenseField label="Luminosité" :min="-100" :max="100" :step="1" f="p0"
             :model-value="lumShift" @update:model-value="onLumInput" />
         </div>
       </DenseSection>
 
-      </section>
-
-      <section v-show="activePaletteSubTab === 'surfaceMaterial'">
-      <DenseSection title="Fractal Surface" scope="Relief & ombrage — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
-        <div class="fields">
-          <DenseField label="Orbit Trap" :min="0" :max="100" :step="0.1" f="p1"
-            :model-value="model.orbitTrapStrength ?? 0" @update:model-value="(v: number) => model.orbitTrapStrength = v" />
-          <DenseField label="Relief Depth" :min="0" :max="2" :step="0.01" f="p2"
-            :model-value="model.reliefDepth ?? 1" @update:model-value="(v: number) => model.reliefDepth = v" />
-          <DenseField label="Relief Occlusion" :min="0" :max="10" :step="0.01" f="p2"
-            :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
-          <DenseField label="Ambient Occlusion" :min="0" :max="2" :step="0.01" f="p2"
-            :model-value="model.ambientOcclusionStrength ?? 0" @update:model-value="(v: number) => model.ambientOcclusionStrength = v" />
-          <DenseField label="Light Direction" :min="0" :max="6.283" :step="0.01" :f="radFmt"
-            :model-value="model.lightAngle ?? 3.927" @update:model-value="(v: number) => model.lightAngle = v" />
-          <DenseField label="Fine Bump" :min="0" :max="2" :step="0.01" f="p2"
-            :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
-        </div>
-      </DenseSection>
-      <DenseSection title="Material Response" scope="Réflexion & diffusion" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;8&quot;/><path d=&quot;M8 9a3 3 0 014 0&quot;/>'>
-        <div class="fields">
-          <DenseField label="Varnish Reflection" :min="0" :max="10" :step="0.01" f="p2"
-            :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
-          <DenseField label="Subsurface Glow" :min="0" :max="10" :step="0.05" f="p2"
-            :model-value="model.subsurfaceStrength ?? 0" @update:model-value="(v: number) => model.subsurfaceStrength = v" />
-        </div>
-      </DenseSection>
-      </section>
-
-      <section v-show="activePaletteSubTab === 'imageEnvironment'">
-      <DenseSection title="Image Layer" scope="Mélange une image dans la surface" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><path d=&quot;M3 15l5-4 4 3 4-5 5 6&quot;/>'>
-        <div class="fields">
-          <DenseField label="Image Scale" :min="0.1" :max="10" :step="0.1" f="p1"
-            :model-value="model.tessellationLevel ?? 1" @update:model-value="(v: number) => model.tessellationLevel = v" />
-          <DenseField label="Image Displacement" :min="0" :max="0.1" :step="0.001" :f="imgDispFmt"
-            :model-value="model.displacementAmount ?? 0" @update:model-value="(v: number) => model.displacementAmount = v" />
-        </div>
-
-        <div class="crow">
-          <div class="lab"><div class="l1">Mapping preset</div><div class="l2">How the image wraps onto the fractal</div></div>
-          <div class="ctl">
-            <span class="seg">
-              <button :class="{ on: activeTextureMappingLabel === 'Screen Space' }" @click="applyBuiltInTextureMapping('screen')">Screen Space</button>
-              <button :class="{ on: activeTextureMappingLabel === 'Dragon Scales' }" @click="applyBuiltInTextureMapping('dragon')">Dragon Scales</button>
-              <button :class="{ on: activeTextureMappingLabel !== 'Screen Space' && activeTextureMappingLabel !== 'Dragon Scales' }" type="button">Custom</button>
-            </span>
-          </div>
-        </div>
-
-        <div class="fields">
-          <DenseSelect label="Mapping X"
-            :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
-            :model-value="textureMappingXVariable" @update:model-value="(v: string | number) => textureMappingXVariable = v as typeof textureMappingXVariable" />
-          <DenseField label="X Scale" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :f="xScaleFmt"
-            :model-value="textureMappingXScaleSlider" @update:model-value="(v: number) => textureMappingXScaleSlider = v" />
-          <DenseSelect label="Mapping Y"
-            :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
-            :model-value="textureMappingYVariable" @update:model-value="(v: string | number) => textureMappingYVariable = v as typeof textureMappingYVariable" />
-          <DenseField label="Y Scale" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :f="yScaleFmt"
-            :model-value="textureMappingYScaleSlider" @update:model-value="(v: number) => textureMappingYScaleSlider = v" />
-        </div>
-
-        <DenseToggle label="Mirror texture"
-          :model-value="textureMappingMirror" @update:model-value="(v: boolean) => textureMappingMirror = v" />
-      </DenseSection>
-
-      <div class="section-label"><span class="tick"></span>Texture Mapping Presets</div>
-      <p class="section-help">Save or reuse coordinate mappings independently from the selected image.</p>
-      <div class="grid texture-grid">
-        <div
-          v-for="preset in textureMappingPresets"
-          :key="preset.guid"
-          class="card texture-card"
-          :class="{ sel: activeTextureMappingLabel === preset.name }"
-          @click="selectTextureMappingPresetFromDropdown(preset)"
-        >
-          <span class="sel-badge">Applied</span>
-          <div class="thumb thumb-empty mapping-thumb"><i class="fa-solid fa-vector-square" aria-hidden="true"></i></div>
-          <div class="acts">
-            <button
-              v-if="isAdmin && !preset.builtIn"
-              class="abtn"
-              :class="uploadButtonClasses(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
-              type="button"
-              :title="uploadButtonTitle(uploadSuccessKey('texture-mapping', preset.guid), preset.remote)"
-              @click.stop.prevent="uploadTextureMappingPreset(preset)"
-            >
-              <i :class="uploadButtonIcon(uploadSuccessKey('texture-mapping', preset.guid))"></i>
-            </button>
-            <button class="abtn heart" :class="{ faved: preset.favorite }" type="button" :disabled="preset.builtIn" title="Favorite" @click.stop.prevent="toggleTextureMappingFavorite(preset)">
-              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-            </button>
-            <button v-if="!preset.builtIn && canDeleteCatalogEntry(userRole, preset.remote)" class="abtn del" type="button" title="Delete" @click.stop.prevent="deleteTextureMappingPreset(preset)">
-              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
-            </button>
-          </div>
-          <div class="info">
-            <div class="nm">{{ preset.name }}</div>
-            <div class="sub"><span>{{ preset.builtIn ? 'Built-in mapping' : 'Saved mapping' }}</span></div>
-          </div>
-        </div>
-        <div v-if="textureMappingPresets.length === 0" class="empty">No texture mapping presets saved yet.</div>
-      </div>
-      <div class="save-row texture-save-row">
-        <input class="txt-in" v-model="textureMappingPresetName" type="text" placeholder="Mapping preset name..."
-          @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-          @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-          @keyup.enter="saveTextureMappingPreset"
-        />
-        <button class="save-btn" @click="saveTextureMappingPreset"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>Save</button>
-      </div>
-
-      <div class="section-label"><span class="tick"></span>Image Texture</div>
-      <p class="section-help">Click a texture to use it as the image layer.</p>
-      <div class="grid texture-grid">
-        <div v-for="tex in textures" :key="tex.name" class="card texture-card" :class="{ sel: selectedTexture === tex.name }" @click="selectTextureFromDropdown(tex)">
-          <span class="sel-badge">Applied</span>
-          <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
-          <div v-else class="thumb thumb-empty"></div>
-          <div class="acts">
-            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" type="button" :disabled="!canUploadTexture(tex)" :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" @click.stop.prevent="uploadTexture(tex)">
-              <i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i>
-            </button>
-            <button class="abtn heart" :class="{ faved: tex.favorite }" type="button" title="Favorite" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click.stop.prevent="toggleTextureFavorite(tex)">
-              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-            </button>
-            <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" class="abtn del" type="button" title="Delete" @click.stop.prevent="deleteTextureByName(tex.name)">
-              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
-            </button>
-          </div>
-          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in texture' : 'Saved texture' }}</span></div></div>
-        </div>
-        <div v-if="textures.length === 0" class="empty">No image textures available.</div>
-      </div>
-      <div class="transfer texture-transfer">
-        <button class="tbtn primary" @click="triggerImportTexture"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import image</button>
-        <button class="tbtn danger" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete selected</button>
-        <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
-      </div>
-
-      <div class="section-label"><span class="tick"></span>Environment Map</div>
+      <DenseSection group="params" :hue="175" title="Texture · Environnement" scope="Réflexions ambiantes" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M3 12h18M12 3a14 14 0 010 18 14 14 0 010-18z&quot;/>'>
       <p class="section-help">Select the image used for glossy and ambient environment reflections.</p>
       <div class="grid texture-grid">
         <div v-for="tex in textures" :key="'skybox-card-' + tex.name" class="card texture-card" :class="{ sel: selectedSkyboxTexture === tex.name }" @click="selectSkyboxFromDropdown(tex)">
@@ -2655,10 +2470,81 @@ async function importSkyboxTexture(event: Event) {
         <button class="tbtn danger" @click="deleteSkyboxTexture" :disabled="!skyboxName || BUILT_IN_TEXTURE_NAMES.has(skyboxName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete selected</button>
         <input ref="skyboxFileInput" type="file" accept="image/*" style="display:none;" @change="importSkyboxTexture" />
       </div>
-      </section>
+      </DenseSection>
 
-      <section v-show="activePaletteSubTab === 'library'">
-      <div class="section-label"><span class="tick"></span>Saved Palettes</div>
+      <DenseSection group="params" :hue="175" title="Texture · Images" scope="Images à mélanger dans la surface" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><circle cx=&quot;9&quot; cy=&quot;10&quot; r=&quot;2&quot;/><path d=&quot;M21 15l-5-5-11 9&quot;/>'>
+      <p class="section-help">Click a texture to use it as the image layer.</p>
+      <div class="grid texture-grid">
+        <div v-for="tex in textures" :key="tex.name" class="card texture-card" :class="{ sel: selectedTexture === tex.name }" @click="selectTextureFromDropdown(tex)">
+          <span class="sel-badge">Applied</span>
+          <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
+          <div v-else class="thumb thumb-empty"></div>
+          <div class="acts">
+            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" type="button" :disabled="!canUploadTexture(tex)" :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" @click.stop.prevent="uploadTexture(tex)">
+              <i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i>
+            </button>
+            <button class="abtn heart" :class="{ faved: tex.favorite }" type="button" title="Favorite" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click.stop.prevent="toggleTextureFavorite(tex)">
+              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
+            </button>
+            <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" class="abtn del" type="button" title="Delete" @click.stop.prevent="deleteTextureByName(tex.name)">
+              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
+            </button>
+          </div>
+          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in texture' : 'Saved texture' }}</span></div></div>
+        </div>
+        <div v-if="textures.length === 0" class="empty">No image textures available.</div>
+      </div>
+      <div class="transfer texture-transfer">
+        <button class="tbtn primary" @click="triggerImportTexture"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import image</button>
+        <button class="tbtn danger" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete selected</button>
+        <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
+      </div>
+      </DenseSection>
+
+      <DenseSection group="params" :hue="175" title="Texture" scope="Échelle, mapping et préréglages de la couche image" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><path d=&quot;M3 15l5-4 4 3 4-5 5 6&quot;/>'>
+        <div class="fields">
+          <DenseField label="Échelle image" :min="0.1" :max="10" :step="0.1" f="p1"
+            :model-value="model.tessellationLevel ?? 1" @update:model-value="(v: number) => model.tessellationLevel = v" />
+          <DenseField label="Déplacement" :min="0" :max="0.1" :step="0.001" :f="imgDispFmt"
+            :model-value="model.displacementAmount ?? 0" @update:model-value="(v: number) => model.displacementAmount = v" />
+        </div>
+
+        <div class="fields">
+          <DenseSelect label="Mapping X"
+            :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
+            :model-value="textureMappingXVariable" @update:model-value="(v: string | number) => textureMappingXVariable = v as typeof textureMappingXVariable" />
+          <DenseField label="Échelle X" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :f="xScaleFmt"
+            :model-value="textureMappingXScaleSlider" @update:model-value="(v: number) => textureMappingXScaleSlider = v" />
+          <DenseSelect label="Mapping Y"
+            :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
+            :model-value="textureMappingYVariable" @update:model-value="(v: string | number) => textureMappingYVariable = v as typeof textureMappingYVariable" />
+          <DenseField label="Échelle Y" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :f="yScaleFmt"
+            :model-value="textureMappingYScaleSlider" @update:model-value="(v: number) => textureMappingYScaleSlider = v" />
+        </div>
+
+        <DenseToggle label="Texture miroir"
+          :model-value="textureMappingMirror" @update:model-value="(v: boolean) => textureMappingMirror = v" />
+
+        <DenseSelect
+          label="Préréglage mapping"
+          :options="mappingSelectOptions"
+          :model-value="activeTextureMappingLabel"
+          @update:model-value="onSelectMappingPreset"
+        />
+        <div class="save-row">
+          <input class="txt-in" v-model="textureMappingPresetName" type="text" placeholder="Nom du mapping…"
+            @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
+            @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
+            @keyup.enter="saveTextureMappingPreset"
+          />
+          <button class="mini-btn primary" @click="saveTextureMappingPreset"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>Enregistrer</button>
+        </div>
+        <div v-if="activeMappingPreset && !activeMappingPreset.builtIn && canDeleteCatalogEntry(userRole, activeMappingPreset.remote)" class="transfer">
+          <button class="mini-btn danger" @click="deleteTextureMappingPreset(activeMappingPreset)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Supprimer</button>
+        </div>
+      </DenseSection>
+
+      <DenseSection group="library" :hue="300" title="Palettes sauvegardées" scope="Couleurs seules — garde matière & mapping" icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'>
       <p class="section-help">Colors only — applying a palette keeps your current material and mapping.</p>
       <div class="lib-bar">
         <button class="fav-filter" :class="{ on: showOnlyFavoritePalettes }" type="button" :aria-pressed="showOnlyFavoritePalettes" @click="showOnlyFavoritePalettes = !showOnlyFavoritePalettes">
@@ -2698,9 +2584,9 @@ async function importSkyboxTexture(event: Event) {
         />
         <button class="save-btn" @click="savePalette"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>Save</button>
       </div>
+      </DenseSection>
 
-
-      <div class="section-label"><span class="tick"></span>Full Presets</div>
+      <DenseSection group="library" :hue="300" title="Presets complets" scope="Un look complet — couleurs, interpolation, mapping, matière" icon='<rect x=&quot;4&quot; y=&quot;4&quot; width=&quot;16&quot; height=&quot;16&quot; rx=&quot;2&quot;/><path d=&quot;M4 12h16M12 4v16&quot;/>'>
       <p class="section-help">A full look — colors, interpolation, cycle mapping and material. Click to apply everything.</p>
       <div class="lib-bar">
         <button class="fav-filter" :class="{ on: showOnlyFavoritePalettePresets }" type="button" :aria-pressed="showOnlyFavoritePalettePresets" @click="showOnlyFavoritePalettePresets = !showOnlyFavoritePalettePresets">
@@ -2735,8 +2621,9 @@ async function importSkyboxTexture(event: Event) {
         </div>
         <div v-if="visiblePalettePresets.length === 0" class="empty">{{ showOnlyFavoritePalettePresets ? 'No favorite full presets yet.' : 'No full presets available.' }}</div>
       </div>
+      </DenseSection>
 
-      <div class="section-label"><span class="tick"></span>Transfer</div>
+      <DenseSection group="library" :hue="300" title="Transfert" scope="Import / export" icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'>
       <div class="transfer">
         <button class="tbtn primary" @click="triggerImportPalettes"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
         <button class="tbtn" @click="exportPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
@@ -2745,7 +2632,9 @@ async function importSkyboxTexture(event: Event) {
         <button class="tbtn danger" @click="deleteAllPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete all</button>
         <input ref="paletteFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPalettes" />
       </div>
-      </section>
+      </DenseSection>
+
+      </div>
     </div>
 
     <!-- Performance/Graphics tab -->
@@ -2954,7 +2843,7 @@ async function importSkyboxTexture(event: Event) {
   height: var(--thumb);
   border-radius: 50%;
   background: var(--accent-bright) !important;
-  border: 3px solid #0b0d12 !important;
+  border: 3px solid var(--bg-0) !important;
   box-shadow: 0 0 0 1px var(--accent), 0 4px 12px -2px var(--accent) !important;
   cursor: pointer;
   transition: .12s;
@@ -2967,14 +2856,14 @@ async function importSkyboxTexture(event: Event) {
   height: var(--thumb);
   border-radius: 50%;
   background: var(--accent-bright) !important;
-  border: 3px solid #0b0d12 !important;
+  border: 3px solid var(--bg-0) !important;
   box-shadow: 0 0 0 1px var(--accent) !important;
   cursor: pointer;
 }
 
 /* Custom dark styling for standard controls */
 :deep(.input) {
-  background-color: #0b0d12 !important;
+  background-color: var(--bg-0) !important;
   border: 1px solid var(--line) !important;
   color: var(--ink) !important;
   border-radius: 10px !important;
@@ -2992,7 +2881,7 @@ async function importSkyboxTexture(event: Event) {
   font-size: 14px !important;
   font-weight: 600 !important;
   color: var(--ink) !important;
-  background: #0b0d12 !important;
+  background: var(--bg-0) !important;
   border: 1px solid var(--line) !important;
   border-radius: 10px !important;
   padding: 8px 34px 8px 14px !important;
@@ -3259,7 +3148,7 @@ async function importSkyboxTexture(event: Event) {
   font-size: 13px;
   font-weight: 600;
   color: var(--ink);
-  background: #0b0d12;
+  background: var(--bg-0);
   border: 1px solid var(--line);
   border-radius: 8px;
   padding: 6px 30px 6px 12px;
@@ -3744,6 +3633,15 @@ async function importSkyboxTexture(event: Event) {
 .canvas-row.palette-strip.mb-3 {
   margin-bottom: var(--space-3);
 }
+.palette-strip-fill {
+  position: absolute;
+  inset: 0;
+  border-radius: var(--radius-md);
+  background-size: 100% 100%;
+  background-repeat: no-repeat;
+  border: 1px solid var(--line);
+  z-index: 1;
+}
 .canvas-shadow-overlay {
   position: absolute;
   inset: 0;
@@ -4017,7 +3915,7 @@ async function importSkyboxTexture(event: Event) {
   height: var(--thumb);
   border-radius: 50%;
   background: var(--accent-bright);
-  border: 3px solid #0b0d12;
+  border: 3px solid var(--bg-0);
   box-shadow: 0 0 0 1px var(--accent), 0 4px 12px -2px var(--accent);
   cursor: pointer;
   transition: 0.12s;
@@ -4030,7 +3928,7 @@ async function importSkyboxTexture(event: Event) {
   height: var(--thumb);
   border-radius: 50%;
   background: var(--accent-bright);
-  border: 3px solid #0b0d12;
+  border: 3px solid var(--bg-0);
   box-shadow: 0 0 0 1px var(--accent);
   cursor: pointer;
 }
@@ -4055,7 +3953,7 @@ async function importSkyboxTexture(event: Event) {
 }
 .cv-body .mu-quick {
   flex: none;
-  background: #0b0d12;
+  background: var(--bg-0);
   border: 1px solid var(--line);
   border-radius: 9px;
   color: var(--accent-bright);
@@ -4195,7 +4093,7 @@ async function importSkyboxTexture(event: Event) {
   font-size: var(--font-lg);
   font-weight: 600;
   color: var(--ink);
-  background: #0b0d12;
+  background: var(--bg-0);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: var(--space-2) 36px var(--space-2) var(--space-4);
@@ -4294,7 +4192,7 @@ async function importSkyboxTexture(event: Event) {
   font-size: var(--font-lg);
   font-weight: 600;
   color: var(--ink);
-  background: #0b0d12;
+  background: var(--bg-0);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: var(--space-3) 40px var(--space-3) var(--space-4);
@@ -4472,7 +4370,7 @@ async function importSkyboxTexture(event: Event) {
   font-family: var(--sans);
   font-size: var(--font-lg);
   color: var(--ink);
-  background: #0b0d12;
+  background: var(--bg-0);
   border: 1px solid var(--line);
   border-radius: var(--radius-md);
   padding: var(--space-3) var(--space-4);
@@ -4683,20 +4581,21 @@ async function importSkyboxTexture(event: Event) {
 }
 .cv-body .saved-palette-grid .palette-card {
   display: grid;
-  grid-template-columns: minmax(280px, 54%) minmax(0, 1fr);
+  grid-template-columns: minmax(220px, 54%) minmax(0, 1fr);
   align-items: stretch;
-  min-height: 44px;
+  height: 38px;
   border-radius: var(--radius-sm);
+  overflow: hidden;
 }
 .cv-body .saved-palette-grid .palette-card:hover {
   transform: translateY(-1px);
 }
 .cv-body .saved-palette-grid .palette-thumb {
   width: 100%;
-  height: 100%;
-  min-height: 44px;
+  height: 38px;
   aspect-ratio: auto;
   object-fit: cover;
+  display: block;
 }
 .cv-body .saved-palette-grid .palette-card .info {
   display: flex;

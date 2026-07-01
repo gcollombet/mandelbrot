@@ -5,9 +5,16 @@ import SplashScreen from "./components/SplashScreen.vue";
 
 const isWebGPUSupported = ref(false);
 const isFrench = ref(true);
+// DEV FLAG: `?forceui` in the URL renders the UI even without WebGPU so the
+// panels can be inspected/screenshotted during the dense-shell work. The canvas
+// (MandelbrotController) is skipped when WebGPU is absent — see MandelbrotViewer.
+const forceUI = ref(false);
 
 onMounted(() => {
   isWebGPUSupported.value = typeof navigator !== "undefined" && "gpu" in navigator;
+  if (typeof window !== "undefined") {
+    forceUI.value = new URLSearchParams(window.location.search).has("forceui");
+  }
   if (typeof navigator !== "undefined") {
     isFrench.value = navigator.language.startsWith("fr");
   }
@@ -15,7 +22,7 @@ onMounted(() => {
 </script>
 
 <template>
-  <div id="fullscreen" v-if="isWebGPUSupported">
+  <div id="fullscreen" v-if="isWebGPUSupported || forceUI">
     <MandelbrotViewer/>
     <SplashScreen/>
   </div>

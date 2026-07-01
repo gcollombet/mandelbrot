@@ -21,7 +21,7 @@ import type {StopPresetRecord} from '../stopPresetStore.ts';
 import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry} from '../remoteCatalog.ts';
 import {canDeleteCatalogEntry} from '../catalogPermissions.ts';
 import {buildStopPresetPreviewSpec} from '../stopPresetPreview.ts';
-import { DenseField } from './dense';
+import { DenseField, DenseSection } from './dense';
 
 // Per-effect value formatter for dense fields (mirrors the old toFixed logic).
 function effectFmt(field: EffectFieldName) {
@@ -297,33 +297,60 @@ onUnmounted(() => {
   stopPresetUploadTimers.clear();
 });
 
-const UI_GROUP_ORDER = ['color', 'iridescence', 'iteration', 'lighting', 'imageSources'] as const;
 
-const UI_GROUP_TITLES: Partial<Record<string, string>> = {
-  iteration: 'Iteration Mapping',
-  lighting: 'Lighting & Material',
-  imageSources: 'Image Sources',
+// French labels matching the canvas mockup.
+const EFFECT_LABEL_FR: Record<EffectFieldName, string> = {
+  palette: 'Mélange couleur',
+  iridescencePower: 'Force iridescence',
+  zebra: 'Bandes',
+  smoothness: 'Lissage',
+  stripeAverage: 'Moyenne rayures',
+  rotationMean: 'Cohérence dir.',
+  stripeRelief: 'Relief rayures',
+  directionCoherenceRelief: 'Relief direction',
+  shading: 'Mélange lumière',
+  skybox: 'Réflexion',
+  shadingLevel: 'Intensité lumière',
+  specularPower: 'Spéculaire',
+  metallic: 'Métallicité',
+  roughness: 'Rugosité',
+  anisotropy: 'Anisotropie',
+  tessellation: 'Mélange image',
+  webcam: 'Mélange webcam',
 };
 
-const EFFECT_FIELD_HELP: Record<EffectFieldName, string> = {
-  palette: 'How strongly this stop contributes its base palette color',
-  zebra: 'Adds discrete iteration bands around this stop',
-  tessellation: 'Blends the selected image texture into this stop',
-  shading: 'Mixes relief lighting with the stop color',
-  skybox: 'Adds environment reflection to the material response',
-  webcam: 'Blends live camera input when webcam mode is available',
-  smoothness: 'Uses continuous iteration values instead of hard steps',
-  stripeAverage: 'Accumulates stripe orbit data into color variation',
-  rotationMean: 'Uses orbit direction coherence as a coloring signal',
-  stripeRelief: 'Turns stripe bands into local relief detail',
-  directionCoherenceRelief: 'Turns direction coherence into raised surface relief',
-  shadingLevel: 'Intensity of direct light for this stop',
-  specularPower: 'Strength and tightness of glossy highlights',
-  metallic: 'How much this stop behaves like a metal surface',
-  roughness: 'Softens or sharpens reflected highlights',
-  anisotropy: 'Stretches highlights along the surface direction',
-  iridescencePower: 'Strength of the optional spectral tint',
+// French tooltips for each effect field.
+const EFFECT_DESC_FR: Record<EffectFieldName, string> = {
+  palette: 'Force de la couleur de base de ce point dans le dégradé',
+  iridescencePower: 'Intensité de la teinte spectrale optionnelle',
+  zebra: 'Ajoute des bandes d’itérations discrètes autour de ce point',
+  tessellation: 'Mélange la texture image sélectionnée dans ce point',
+  shading: 'Mélange l’éclairage du relief avec la couleur du point',
+  skybox: 'Ajoute la réflexion d’environnement à la réponse matériau',
+  webcam: 'Mélange le flux caméra quand le mode webcam est disponible',
+  smoothness: 'Utilise des itérations continues plutôt que par paliers',
+  stripeAverage: 'Intègre les données d’orbite en rayures dans la couleur',
+  rotationMean: 'Utilise la cohérence de direction d’orbite comme signal',
+  stripeRelief: 'Transforme les rayures en relief local',
+  directionCoherenceRelief: 'Transforme la cohérence de direction en relief',
+  shadingLevel: 'Intensité de la lumière directe pour ce point',
+  specularPower: 'Force et finesse des reflets spéculaires',
+  metallic: 'À quel point ce point se comporte comme un métal',
+  roughness: 'Adoucit ou durcit les reflets',
+  anisotropy: 'Étire les reflets selon la direction de la surface',
 };
+
+// Point sections mirroring the mockup (fields keyed by their uiGroup).
+const POINT_SECTIONS = [
+  { title: 'Point · Éclairage & Matière', scope: 'Lumière et propriétés de matériau', hue: 55,
+    icon: '<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>',
+    fields: UI_GROUPS['lighting'] ?? [] },
+  { title: 'Point · Itérations', scope: 'Réponse couleur selon le nombre d’itérations', hue: 155,
+    icon: '<path d="M4 6h16M4 12h16M4 18h10"/>', fields: UI_GROUPS['iteration'] ?? [] },
+  { title: 'Point · Sources image', scope: 'Mélange des couches image du point', hue: 325,
+    icon: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 15l-5-5-11 9"/>',
+    fields: UI_GROUPS['imageSources'] ?? [] },
+];
 
 /** Get the effective value of a field on the selected stop. */
 function getStopEffect(field: EffectFieldName): number {
@@ -520,210 +547,168 @@ function importStopPresets(event: Event) {
 </script>
 
 <template>
-  <div class="palette-editor">
-    <!-- ═══ Effets par point ═══ -->
-    <div v-if="selectedStop" class="effects-panel">
-
-      <!-- Toggle global + titre -->
-      <div class="effects-header">
-        <label class="effects-section-title">
-          Stop #{{ (props.selectedIdx ?? 0) + 1 }}
-          <span v-if="applyToAll" class="all-stops-indicator">All Stops Selected</span>
-        </label>
-        <div class="stop-scope-toggle" role="group" aria-label="Stop edit scope">
-          <button
-            type="button"
-            class="button is-small scope-btn"
-            :class="{ 'is-active': !applyToAll }"
-            :aria-pressed="!applyToAll"
-            title="Apply edits only to this stop"
-            @click="emit('update:applyToAll', false)"
-          >
-            This Stop
-          </button>
-          <button
-            type="button"
-            class="button is-small scope-btn"
-            :class="{ 'is-active': applyToAll }"
-            :aria-pressed="applyToAll"
-            title="Apply edits to all stops"
-            @click="emit('update:applyToAll', true)"
-          >
-            All Stops
-          </button>
-        </div>
-      </div>
-
-      <!-- ── Stop presets ── -->
-      <div class="stop-presets-panel">
-        <label class="effects-group-title">Stop Looks</label>
-        <p class="effects-section-help">Reusable looks for one stop — color response, mapping and material values.</p>
-        <div class="stop-preset-dropdown" ref="stopPresetDropdownRef">
-          <button
-            class="button is-small is-fullwidth stop-preset-trigger"
-            type="button"
-            :class="{ 'has-selection': !!selectedStopPresetRecord }"
-            @click="toggleStopPresetDropdown"
-            :aria-expanded="stopPresetDropdownOpen"
-            aria-haspopup="listbox"
-            aria-label="Choose a stop preset"
-          >
-            <span class="stop-preset-trigger-preview" :style="selectedStopPresetPreview" aria-hidden="true"></span>
-            <span class="stop-preset-trigger-label">{{ selectedStopPresetRecord?.name || 'Choose preset...' }}</span>
-            <i class="fa-solid fa-chevron-down stop-preset-trigger-caret" aria-hidden="true"></i>
-          </button>
-          <div v-if="stopPresetDropdownOpen" class="stop-preset-dropdown-menu" role="listbox" aria-label="Stop presets">
-            <div v-if="stopPresets.length === 0" class="stop-preset-empty">
-              No stop presets available.
-            </div>
-            <div
-              v-for="preset in stopPresets"
-              :key="preset.guid || preset.name"
-              class="stop-preset-option"
-              :class="{ 'is-active': selectedStopPresetName === preset.name }"
-              role="option"
-              :aria-selected="selectedStopPresetName === preset.name"
-              tabindex="0"
-              @click="selectStopPresetFromDropdown(preset)"
-              @keydown.enter.prevent="selectStopPresetFromDropdown(preset)"
-              @keydown.space.prevent="selectStopPresetFromDropdown(preset)"
-            >
-              <span class="stop-preset-preview" :style="stopPresetPreviewStyle(preset)" aria-hidden="true"></span>
-              <span class="stop-preset-label">{{ preset.name }}</span>
-              <span class="stop-preset-actions">
-                <button
-                  type="button"
-                  class="stop-preset-action"
-                  :class="{ 'is-favorite': preset.favorite }"
-                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
-                  :aria-pressed="!!preset.favorite"
-                  @click.stop.prevent="toggleStopPresetFavorite(preset)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-                </button>
-                <button
-                  v-if="props.isAdmin"
-                  type="button"
-                  class="stop-preset-action upload-button"
-                  :class="stopPresetUploadButtonClasses(stopPresetUploadKey(preset), preset.remote)"
-                  :title="stopPresetUploadButtonTitle(stopPresetUploadKey(preset), preset.remote)"
-                  :aria-label="stopPresetUploadButtonTitle(stopPresetUploadKey(preset), preset.remote)"
-                  @click.stop.prevent="uploadStopPresetToCloud(preset)"
-                >
-                  <span class="favorite-heart" aria-hidden="true"><i :class="stopPresetUploadButtonIcon(stopPresetUploadKey(preset))"></i></span>
-                </button>
-              </span>
-            </div>
-          </div>
-        </div>
-        <div class="preset-row stop-preset-actions-row">
-          <button class="button is-small is-link" :disabled="!selectedStopPresetRecord" @click="applySelectedStopPreset">
-            Apply
-          </button>
-          <button class="button is-small is-danger is-light" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">
-            Delete
-          </button>
-          <button class="button is-small is-info is-light" :disabled="!selectedStopPresetRecord" @click="exportSelectedStopPreset">
-            Export
-          </button>
-        </div>
-        <div class="preset-row">
-          <input
-            class="input is-small"
-            v-model="stopPresetName"
-            type="text"
-            placeholder="New preset name..."
-            @keyup.enter="saveCurrentStopPreset"
-          />
-          <button class="button is-small is-light" :disabled="!stopPresetName.trim()" @click="saveCurrentStopPreset">
-            Save
-          </button>
-          <button class="button is-small is-info is-light" :disabled="stopPresets.length === 0" @click="exportAllStopPresets">
-            Export All
-          </button>
-          <button class="button is-small is-success is-light" @click="triggerImportStopPresets">
-            Import
-          </button>
-          <input ref="stopPresetFileInput" type="file" accept=".json" style="display:none;" @change="importStopPresets" />
-        </div>
-      </div>
-
-      <!-- ── Color ── -->
-      <label class="effects-group-title">Color</label>
-      <p class="effects-section-help">Settings below apply to the selected stop — or to every stop at once.</p>
-      <div class="color-transfer-row">
-        <div class="color-stack">
-          <div class="color-picker-inline">
-            <span class="color-kind-label">
-              <span class="l1">Base color</span>
-              <span class="l2">The stop's color on the gradient</span>
-            </span>
-            <input
-              type="color"
-              :value="selectedHex"
-              @input="selectedHex = ($event.target as HTMLInputElement).value"
-              class="native-color-input"
-            />
-            <span class="color-hex-label">{{ selectedHex }}</span>
-          </div>
-          <div class="color-picker-inline">
-            <span class="color-kind-label">
-              <span class="l1">Iridescence</span>
-              <span class="l2">Optional spectral tint for this stop</span>
-            </span>
-            <input
-              v-if="selectedStop.iridescenceColor"
-              type="color"
-              :value="selectedIridescenceHex"
-              @input="selectedIridescenceHex = ($event.target as HTMLInputElement).value"
-              class="native-color-input"
-            />
-            <button
-              v-else
-              type="button"
-              class="button is-small is-light iridescence-toggle"
-              title="Use base color as iridescence color"
-              @click="enableIridescenceColor"
-            >
-              +
-            </button>
-            <span class="color-hex-label">{{ selectedStop.iridescenceColor ? selectedIridescenceHex : 'off' }}</span>
-            <button
-              v-if="selectedStop.iridescenceColor"
-              type="button"
-              class="delete is-small"
-              title="Remove iridescence color"
-              @click="clearIridescenceColor"
-            />
-          </div>
-        </div>
-        <div class="curve-row">
-          <span class="color-kind-label">
-            <span class="l1">Blend curve</span>
-            <span class="l2">Interpolation shape toward the next stop</span>
+  <template v-if="selectedStop">
+    <!-- ═══ Point · Couleur ═══ -->
+    <DenseSection
+      group="params"
+      :hue="200"
+      title="Point · Couleur"
+      scope="S'applique au point sélectionné"
+      icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'
+    >
+      <div class="fields">
+        <div class="fld fld-col">
+          <span class="fld-lab">Couleur</span>
+          <span class="swatch" :style="{ background: selectedHex }">
+            <input type="color" :value="selectedHex" @input="selectedHex = ($event.target as HTMLInputElement).value" />
           </span>
-          <StopTransferCurveSelector v-model="selectedTransferCurve" />
+          <span class="hex">{{ selectedHex }}</span>
+        </div>
+        <div class="fld fld-col">
+          <span class="fld-lab">Iridescence</span>
+          <template v-if="selectedStop.iridescenceColor">
+            <span class="swatch" :style="{ background: selectedIridescenceHex }">
+              <input type="color" :value="selectedIridescenceHex" @input="selectedIridescenceHex = ($event.target as HTMLInputElement).value" />
+            </span>
+            <span class="hex">{{ selectedIridescenceHex }}</span>
+            <button class="col-clr" title="Retirer l'iridescence" @click="clearIridescenceColor">✕</button>
+          </template>
+          <template v-else>
+            <button class="col-plus" title="Activer l'iridescence" @click="enableIridescenceColor">+</button>
+            <span class="hex">off</span>
+          </template>
         </div>
       </div>
-      <template v-for="groupName in UI_GROUP_ORDER" :key="groupName">
-        <div v-if="UI_GROUP_TITLES[groupName]" class="subhead">{{ UI_GROUP_TITLES[groupName] }}</div>
-        <div class="fields">
-          <DenseField
-            v-for="field in UI_GROUPS[groupName]" :key="field"
-            :label="EFFECT_FIELD_CONFIG[field].label"
-            :desc="EFFECT_FIELD_HELP[field]"
-            :min="EFFECT_FIELD_CONFIG[field].min"
-            :max="EFFECT_FIELD_CONFIG[field].max"
-            :step="EFFECT_FIELD_CONFIG[field].step"
-            :f="effectFmt(field)"
-            :unit="EFFECT_FIELD_CONFIG[field].unit"
-            :model-value="getStopEffect(field)"
-            @update:model-value="(v: number) => setStopEffect(field, v)"
-          />
+
+      <div class="fld fld-curve">
+        <span class="fld-lab seg-lab">Courbe de fondu</span>
+        <StopTransferCurveSelector v-model="selectedTransferCurve" />
+      </div>
+
+      <div class="fields">
+        <DenseField
+          :label="EFFECT_LABEL_FR.palette" :desc="EFFECT_DESC_FR.palette"
+          :min="EFFECT_FIELD_CONFIG.palette.min" :max="EFFECT_FIELD_CONFIG.palette.max" :step="EFFECT_FIELD_CONFIG.palette.step"
+          :f="effectFmt('palette')"
+          :model-value="getStopEffect('palette')"
+          @update:model-value="(v: number) => setStopEffect('palette', v)"
+        />
+        <DenseField
+          :label="EFFECT_LABEL_FR.iridescencePower" :desc="EFFECT_DESC_FR.iridescencePower"
+          :min="EFFECT_FIELD_CONFIG.iridescencePower.min" :max="EFFECT_FIELD_CONFIG.iridescencePower.max" :step="EFFECT_FIELD_CONFIG.iridescencePower.step"
+          :f="effectFmt('iridescencePower')"
+          :model-value="getStopEffect('iridescencePower')"
+          @update:model-value="(v: number) => setStopEffect('iridescencePower', v)"
+        />
+      </div>
+    </DenseSection>
+
+    <!-- ═══ Point · Itérations / Éclairage & Matière / Sources image ═══ -->
+    <DenseSection
+      v-for="sec in POINT_SECTIONS"
+      :key="sec.title"
+      group="params"
+      :hue="sec.hue"
+      :title="sec.title"
+      :scope="sec.scope"
+      :icon="sec.icon"
+    >
+      <div class="fields">
+        <DenseField
+          v-for="field in sec.fields" :key="field"
+          :label="EFFECT_LABEL_FR[field]"
+          :desc="EFFECT_DESC_FR[field]"
+          :min="EFFECT_FIELD_CONFIG[field].min"
+          :max="EFFECT_FIELD_CONFIG[field].max"
+          :step="EFFECT_FIELD_CONFIG[field].step"
+          :f="effectFmt(field)"
+          :unit="EFFECT_FIELD_CONFIG[field].unit"
+          :model-value="getStopEffect(field)"
+          @update:model-value="(v: number) => setStopEffect(field, v)"
+        />
+      </div>
+    </DenseSection>
+
+    <!-- ═══ Stop Looks (per-stop reusable looks) — Point · Presets ═══ -->
+    <DenseSection
+      group="params"
+      :hue="300"
+      title="Point · Presets"
+      scope="Réglages réutilisables pour un point"
+      icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
+    >
+      <div class="stop-preset-dropdown" ref="stopPresetDropdownRef">
+        <button
+          class="mini-btn is-fullwidth stop-preset-trigger"
+          type="button"
+          :class="{ 'has-selection': !!selectedStopPresetRecord }"
+          @click="toggleStopPresetDropdown"
+          :aria-expanded="stopPresetDropdownOpen"
+          aria-haspopup="listbox"
+          aria-label="Choose a stop preset"
+        >
+          <span class="stop-preset-trigger-preview" :style="selectedStopPresetPreview" aria-hidden="true"></span>
+          <span class="stop-preset-trigger-label">{{ selectedStopPresetRecord?.name || 'Choisir un preset…' }}</span>
+          <i class="fa-solid fa-chevron-down stop-preset-trigger-caret" aria-hidden="true"></i>
+        </button>
+        <div v-if="stopPresetDropdownOpen" class="stop-preset-dropdown-menu" role="listbox" aria-label="Stop presets">
+          <div v-if="stopPresets.length === 0" class="stop-preset-empty">Aucun preset disponible.</div>
+          <div
+            v-for="preset in stopPresets"
+            :key="preset.guid || preset.name"
+            class="stop-preset-option"
+            :class="{ 'is-active': selectedStopPresetName === preset.name }"
+            role="option"
+            :aria-selected="selectedStopPresetName === preset.name"
+            tabindex="0"
+            @click="selectStopPresetFromDropdown(preset)"
+            @keydown.enter.prevent="selectStopPresetFromDropdown(preset)"
+            @keydown.space.prevent="selectStopPresetFromDropdown(preset)"
+          >
+            <span class="stop-preset-preview" :style="stopPresetPreviewStyle(preset)" aria-hidden="true"></span>
+            <span class="stop-preset-label">{{ preset.name }}</span>
+            <span class="stop-preset-actions">
+              <button
+                type="button"
+                class="stop-preset-action"
+                :class="{ 'is-favorite': preset.favorite }"
+                :title="preset.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'"
+                :aria-pressed="!!preset.favorite"
+                @click.stop.prevent="toggleStopPresetFavorite(preset)"
+              >
+                <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
+              </button>
+              <button
+                v-if="props.isAdmin"
+                type="button"
+                class="stop-preset-action upload-button"
+                :class="stopPresetUploadButtonClasses(stopPresetUploadKey(preset), preset.remote)"
+                :title="stopPresetUploadButtonTitle(stopPresetUploadKey(preset), preset.remote)"
+                :aria-label="stopPresetUploadButtonTitle(stopPresetUploadKey(preset), preset.remote)"
+                @click.stop.prevent="uploadStopPresetToCloud(preset)"
+              >
+                <span class="favorite-heart" aria-hidden="true"><i :class="stopPresetUploadButtonIcon(stopPresetUploadKey(preset))"></i></span>
+              </button>
+            </span>
+          </div>
         </div>
-      </template>
-    </div>
-  </div>
+      </div>
+      <div class="transfer">
+        <button class="mini-btn primary" :disabled="!selectedStopPresetRecord" @click="applySelectedStopPreset">Appliquer</button>
+        <button class="mini-btn danger" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">Supprimer</button>
+        <button class="mini-btn" :disabled="!selectedStopPresetRecord" @click="exportSelectedStopPreset">Exporter</button>
+      </div>
+      <div class="save-row">
+        <input class="txt-in" v-model="stopPresetName" type="text" placeholder="Nom du preset…" @keyup.enter="saveCurrentStopPreset" />
+        <button class="mini-btn primary" :disabled="!stopPresetName.trim()" @click="saveCurrentStopPreset">Enregistrer</button>
+      </div>
+      <div class="transfer">
+        <button class="mini-btn" :disabled="stopPresets.length === 0" @click="exportAllStopPresets">Exporter tout</button>
+        <button class="mini-btn" @click="triggerImportStopPresets">Importer</button>
+        <input ref="stopPresetFileInput" type="file" accept=".json" style="display:none;" @change="importStopPresets" />
+      </div>
+    </DenseSection>
+  </template>
 </template>
 
 <style scoped>
@@ -840,7 +825,7 @@ function importStopPresets(event: Event) {
   padding: 5px 10px !important;
   border: 1px solid var(--line) !important;
   border-radius: 12px !important;
-  background: #0b0d12 !important;
+  background: var(--bg-0) !important;
   color: var(--ink) !important;
 }
 
@@ -1171,7 +1156,7 @@ function importStopPresets(event: Event) {
   height: 20px;
   border-radius: 50%;
   background: var(--accent-bright) !important;
-  border: 3px solid #0b0d12 !important;
+  border: 3px solid var(--bg-0) !important;
   box-shadow: 0 0 0 1px var(--accent), 0 4px 12px -2px var(--accent) !important;
   cursor: pointer;
   transition: .12s;
@@ -1184,7 +1169,7 @@ function importStopPresets(event: Event) {
   height: 18px;
   border-radius: 50%;
   background: var(--accent-bright) !important;
-  border: 3px solid #0b0d12 !important;
+  border: 3px solid var(--bg-0) !important;
   box-shadow: 0 0 0 1px var(--accent) !important;
   cursor: pointer;
 }
@@ -1204,7 +1189,7 @@ function importStopPresets(event: Event) {
 }
 
 .palette-editor :deep(.input) {
-  background-color: #0b0d12 !important;
+  background-color: var(--bg-0) !important;
   border: 1px solid var(--line) !important;
   color: var(--ink) !important;
   border-radius: 8px !important;
