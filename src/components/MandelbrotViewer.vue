@@ -14,6 +14,7 @@ import {
 import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry, getAllPresetRecords} from '../presetStore';
 import type {PresetRecord} from '../presetStore';
 import {syncRemoteCatalog} from '../remoteCatalogSync';
+import {log10FromDecimalString} from '../floatexp';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
 import {getLatestRemotePreset} from '../remoteCatalog';
 import type {IterationData} from '../CursorCoordinate';
@@ -1429,15 +1430,12 @@ function tickTravelAnimation() {
   }
 }
 
+// Deep-safe log10 of a scale string: the navigator emits PLAIN decimal strings,
+// which parseFloat underflows to 0 below ~1e-308 (pin magnitudes and travel
+// durations then read a zoom depth of 0 past that point).
 function getApproximateLog10(scaleStr: string): number {
-  const s = scaleStr.toLowerCase();
-  if (s.includes('e')) {
-    const parts = s.split('e');
-    return parseFloat(parts[1]) || 0;
-  }
-  const f = parseFloat(s);
-  if (f > 0 && f !== Infinity) return Math.log10(f);
-  return 0;
+  const log = log10FromDecimalString(scaleStr ?? '');
+  return Number.isFinite(log) ? log : 0;
 }
 
 function startTravelToPreset(preset: PresetRecord) {

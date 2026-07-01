@@ -30,6 +30,7 @@ import {
   TEXTURE_SELECTED_KEY,
   textureSourceKey,
 } from '../textureLibrary';
+import {log10FromDecimalString} from '../floatexp';
 import type {PresetMetadata, PresetRecord} from '../presetStore';
 import {
   computeScaleExponent,
@@ -328,19 +329,14 @@ const sliderPhaseColoring = computed({
     model.value.phaseColoringStrength = val <= 0 ? 0 : Math.round((10 ** (val * 2) - 1) * 10) / 10;
   }
 });
-// Slider log2(scale) : valeurs de slider 1 à 1000 —> scale de 2^-1 à 2^-1000
-// Decimal order of magnitude of a (possibly very deep) scale string. Number()
-// underflows to 0 below ~1e-308, so read the exponent straight off the string
-// for deep values. Returns log10(scale) (negative when zoomed in).
+// Decimal order of magnitude of a (possibly very deep) scale string, straight
+// from the string's digits — the navigator emits PLAIN decimal strings
+// ("0.000…000465"), which parseFloat underflows to 0 below ~1e-308 (the old
+// implementation then read magnitude 0 and the slider snapped back to 1e-1).
+// Returns log10(scale) (negative when zoomed in), 0 for zero/malformed input.
 function scaleLog10(scaleStr: string): number {
-  const s = (scaleStr ?? '').toLowerCase();
-  if (s.includes('e')) {
-    const parts = s.split('e');
-    return parseFloat(parts[1]) || 0;
-  }
-  const f = parseFloat(s);
-  if (f > 0 && f !== Infinity) return Math.log10(f);
-  return 0;
+  const log = log10FromDecimalString(scaleStr ?? '');
+  return Number.isFinite(log) ? log : 0;
 }
 
 const SCALE_SLIDER_MAX = 1000;

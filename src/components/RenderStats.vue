@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, onUnmounted, ref, watch} from 'vue';
+import {log10FromDecimalString} from '../floatexp';
 
 const props = defineProps<{
   engine: any;
@@ -66,15 +67,11 @@ const pendingRefMaxIterations = ref(0);
 
 const currentScaleStr = ref('2.5');
 
+// Deep-safe log10 of a scale string: the navigator emits PLAIN decimal strings,
+// which parseFloat underflows to 0 below ~1e-308 (the Z indicator then froze at 0).
 function getApproximateLog10(scaleStr: string): number {
-  const s = scaleStr.toLowerCase();
-  if (s.includes('e')) {
-    const parts = s.split('e');
-    return parseFloat(parts[1]) || 0;
-  }
-  const f = parseFloat(s);
-  if (f > 0 && f !== Infinity) return Math.log10(f);
-  return 0;
+  const log = log10FromDecimalString(scaleStr ?? '');
+  return Number.isFinite(log) ? log : 0;
 }
 
 const zoomPercent = computed(() => {
