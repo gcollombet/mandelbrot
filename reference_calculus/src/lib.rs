@@ -9,6 +9,8 @@ use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub type JsValue = String;
 
+mod jet;
+
 // Fonction utilitaire pour convertir DBig en f32 de manière sûre
 fn dbig_to_f32(bf: &DBig) -> f32 {
     bf.to_string().parse::<f32>().unwrap_or(0.0)
@@ -151,6 +153,11 @@ fn dbig_i(value: i32) -> DBig {
 const BLA_SKIP_LEVELS: usize = 2;
 const MIN_BLA_SKIP: usize = 1 << BLA_SKIP_LEVELS;
 
+// Anisotropy factor s of the jet (V) polydisc: R_c = s·c_max (add-jet-approximation
+// design D4/D6). The headroom is what lets moderate zoom-outs re-solve radii
+// without re-walking the orbit.
+const JET_ANISOTROPY_LOG2: f64 = 10.0; // s = 1024
+
 #[cfg(target_arch = "wasm32")]
 fn exp_f64(value: f64) -> f64 {
     js_sys::Math::exp(value)
@@ -229,6 +236,9 @@ pub enum ApproximationMode {
     Perturbation = 0,
     BivariateLinear = 1,
     Pade = 2,
+    /// Bivariate truncated Taylor jet blocks (order-adaptive, rule (V) radii) —
+    /// see the add-jet-approximation change and `jet.rs`.
+    Jet = 3,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -312,6 +322,26 @@ pub struct MandelbrotNavigator {
     bla_level_count: usize,
     bla_source_len: usize,
     bla_source_epsilon: f32,
+    // Pade-flavor the current bla table was built with (part of the cache key).
+    bla_source_pade: bool,
+    // Jet-mode table (separate storage from the BLA table; see jet.rs and the
+    // add-jet-approximation change). Coefficients depend only on the orbit
+    // (jet_source_len); bounds carry the R_c = s·c_max headroom they were walked
+    // with; radii carry the (epsilon, c_max) they were solved for.
+    jet_levels: Box<Vec<jet::JetLevelF64>>,
+    jet_bounds: Box<Vec<Vec<jet::JetBlockBounds>>>,
+    jet_radii: Box<Vec<Vec<[f64; jet::JET_K]>>>,
+    // GPU-serialized buffers, split so a radius re-solve re-uploads only the
+    // small radius buffer (16 B/block, vec4-packed): the coefficient buffer is
+    // orbit-keyed (rebuilt with the levels), the radius buffer + level directory
+    // are (ε, c_max)-keyed (rebuilt on every re-solve). Same flat block index.
+    jet_coeffs_result: Box<Vec<jet::JetCoeffs>>,
+    jet_radii_result: Box<Vec<jet::JetRadii>>,
+    jet_gpu_levels: Box<Vec<jet::JetLevel>>,
+    jet_source_len: usize,
+    jet_bounds_log2_rc: f64,
+    jet_radii_epsilon: f64,
+    jet_radii_log2_c_max: f64,
     // Ajout des vitesses pour l'animation
     vscale: DBig,
     vangle: f64,
@@ -366,6 +396,17 @@ impl MandelbrotNavigator {
             bla_level_count: 0,
             bla_source_len: 0,
             bla_source_epsilon: 0.0,
+            bla_source_pade: false,
+            jet_levels: Box::new(Vec::new()),
+            jet_bounds: Box::new(Vec::new()),
+            jet_radii: Box::new(Vec::new()),
+            jet_coeffs_result: Box::new(Vec::new()),
+            jet_radii_result: Box::new(Vec::new()),
+            jet_gpu_levels: Box::new(Vec::new()),
+            jet_source_len: 0,
+            jet_bounds_log2_rc: f64::NAN,
+            jet_radii_epsilon: 0.0,
+            jet_radii_log2_c_max: f64::NAN,
             vscale: DBig::try_from(1).unwrap(),
             vangle: 0.0,
             vtx: zero.clone(),
@@ -528,30 +569,26 @@ impl MandelbrotNavigator {
         self.vangle = 0.0;
     }
 
-    // The BLA table cache key is (orbit_len, epsilon) and does NOT include the mode,
-    // so every mode change must invalidate it: affine uses an ε radius with D=0,
-    // Padé a √ε radius with a real D. Without this, switching modes reuses the
-    // other mode's table (e.g. BLA after Padé renders with the √ε+D table).
-    fn invalidate_bla_on_mode_change(&mut self, next: ApproximationMode) {
-        if self.approximation_mode != next {
-            self.bla_source_len = 0;
-            self.bla_level_count = 0;
-        }
-    }
-
+    // The BLA table cache key is (orbit_len, epsilon, pade-flavor) — see the
+    // cache-hit check in compute_bla_reference_inner. Mode switches therefore
+    // never need to invalidate anything: a stale-flavored table simply misses the
+    // key and rebuilds on next use, while an identical-flavored one is reused
+    // (e.g. Perturbation → BLA, or a round-trip through Jet, which has its own
+    // table storage and leaves the BLA table alone).
     pub fn use_perturbation(&mut self) {
-        self.invalidate_bla_on_mode_change(ApproximationMode::Perturbation);
         self.approximation_mode = ApproximationMode::Perturbation;
     }
 
     pub fn use_bla(&mut self) {
-        self.invalidate_bla_on_mode_change(ApproximationMode::BivariateLinear);
         self.approximation_mode = ApproximationMode::BivariateLinear;
     }
 
     pub fn use_pade(&mut self) {
-        self.invalidate_bla_on_mode_change(ApproximationMode::Pade);
         self.approximation_mode = ApproximationMode::Pade;
+    }
+
+    pub fn use_jet(&mut self) {
+        self.approximation_mode = ApproximationMode::Jet;
     }
 
     pub fn get_approximation_mode(&self) -> ApproximationMode {
@@ -1074,6 +1111,7 @@ impl MandelbrotNavigator {
 
         if self.bla_source_len == orbit_len
             && (self.bla_source_epsilon - self.bla_epsilon).abs() <= f32::EPSILON
+            && self.bla_source_pade == (self.approximation_mode == ApproximationMode::Pade)
         {
             return BlaBufferInfo {
                 ptr: self.bla_result.as_ptr() as usize,
@@ -1141,12 +1179,124 @@ impl MandelbrotNavigator {
         self.bla_level_count = self.bla_levels.len();
         self.bla_source_len = orbit_len;
         self.bla_source_epsilon = self.bla_epsilon;
+        self.bla_source_pade = pade;
 
         BlaBufferInfo {
             ptr: self.bla_result.as_ptr() as usize,
             count: self.bla_result.len(),
             levels_ptr: self.bla_levels.as_ptr() as usize,
             level_count: self.bla_level_count,
+        }
+    }
+
+    /// log2 of the per-view bound c_max ≥ |δC| over rendered pixels: the view
+    /// scale times a diagonal margin (deltas span ~±(extent·√2) around the
+    /// reference).
+    fn jet_log2_c_max(&self) -> f64 {
+        let (m, e) = dbig_frexp(&self.scale);
+        (m.abs().max(f64::MIN_POSITIVE)).log2() + e as f64 + 2.0
+    }
+
+    /// Build (or reuse) the jet table for the current reference orbit: exact
+    /// coefficient levels keyed by orbit length, (V) bound data keyed by the
+    /// R_c headroom, radii keyed by (ε, c_max). Each stage recomputes only when
+    /// its own key moved — a zoom within the headroom re-solves radii alone
+    /// (closed form, no orbit access: design D6).
+    fn ensure_jet_table(&mut self, orbit_len: usize) {
+        let orbit_len = orbit_len.min(self.result.len());
+        if orbit_len <= 2 {
+            self.jet_levels.clear();
+            self.jet_bounds.clear();
+            self.jet_radii.clear();
+            self.jet_source_len = 0;
+            return;
+        }
+        let orbit: Vec<(f64, f64)> = self.result[..orbit_len]
+            .iter()
+            .map(|s| (s.zx as f64, s.zy as f64))
+            .collect();
+        // Same auto-sizing as the BLA build (which shadows self.max_bla_skip
+        // with auto_max_skip): the top levels are the long blocks that carry
+        // deep-zoom skipping — capping them by the vestigial UI setting halved
+        // the jet table's levels relative to BLA/Padé.
+        let max_skip = Self::auto_max_skip(orbit_len);
+        if self.jet_source_len != orbit_len {
+            *self.jet_levels = jet::build_jet_levels(&orbit, MIN_BLA_SKIP, max_skip);
+            self.jet_source_len = orbit_len;
+            self.jet_bounds_log2_rc = f64::NAN; // cascade: bounds now stale
+            // Coefficients depend only on the orbit — serialize them once here,
+            // not on every radius re-solve (the whole point of the split buffer).
+            *self.jet_coeffs_result = jet::jet_serialize_coeffs(&self.jet_levels);
+        }
+        let log2_c_max = self.jet_log2_c_max();
+        let log2_rc = log2_c_max + JET_ANISOTROPY_LOG2;
+        // Bounds stay valid while c_max remains inside the stored headroom and
+        // hasn't shrunk so far that the radii solve got needlessly loose (4 octaves
+        // of slack before a re-walk; a re-solve alone handles anything inside).
+        // The stamp uses the anisotropy LADDER's minimum rung (s = 32: saturated
+        // candidates fall back to it), the smallest headroom any candidate may
+        // carry — see jet_block_bounds_pre.
+        let log2_rc_min = log2_c_max + 5.0;
+        let bounds_stale = !self.jet_bounds_log2_rc.is_finite()
+            || log2_c_max > self.jet_bounds_log2_rc
+            || log2_rc < self.jet_bounds_log2_rc - 4.0;
+        if bounds_stale {
+            *self.jet_bounds = self
+                .jet_levels
+                .iter()
+                .map(|lvl| {
+                    (0..lvl.entries.len())
+                        .map(|slot| {
+                            jet::jet_block_bounds(
+                                &lvl.entries[slot],
+                                &orbit,
+                                1 + slot * lvl.skip,
+                                lvl.skip,
+                                log2_rc,
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            self.jet_bounds_log2_rc = log2_rc_min;
+            self.jet_radii_log2_c_max = f64::NAN; // cascade: radii now stale
+        }
+        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        let radii_stale = !self.jet_radii_log2_c_max.is_finite()
+            || (self.jet_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
+            || (self.jet_radii_log2_c_max - log2_c_max).abs() > 2.0;
+        if radii_stale {
+            *self.jet_radii = self
+                .jet_bounds
+                .iter()
+                .map(|lvl| {
+                    lvl.iter().map(|b| jet::jet_solve_radii(b, epsilon, log2_c_max)).collect()
+                })
+                .collect();
+            self.jet_radii_epsilon = epsilon;
+            self.jet_radii_log2_c_max = log2_c_max;
+            // Re-serialize only the radius buffer + level directory; the
+            // coefficient buffer stays as built for the current orbit.
+            let (radii, dir) = jet::jet_serialize_radii(&self.jet_levels, &self.jet_radii);
+            *self.jet_radii_result = radii;
+            *self.jet_gpu_levels = dir;
+        }
+    }
+
+    /// Build (or reuse) the jet table for the current orbit and expose the
+    /// GPU-serialized buffers: a coefficient buffer (`JetCoeffs`, 108 B/block), a
+    /// radius buffer (`JetRadii`, 16 B/block vec4-packed) and the `JetLevel`
+    /// directory. The coefficient and radius arrays share the same flat block index.
+    pub fn compute_jet_reference(&mut self, max_iter: u32) -> JetBufferInfo {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.ensure_jet_table(orbit_len);
+        JetBufferInfo {
+            coeffs_ptr: self.jet_coeffs_result.as_ptr() as usize,
+            coeffs_count: self.jet_coeffs_result.len(),
+            radii_ptr: self.jet_radii_result.as_ptr() as usize,
+            radii_count: self.jet_radii_result.len(),
+            levels_ptr: self.jet_gpu_levels.as_ptr() as usize,
+            level_count: self.jet_gpu_levels.len(),
         }
     }
 
@@ -1174,6 +1324,12 @@ impl MandelbrotNavigator {
         self.bla_level_count = 0;
         self.bla_source_len = 0;
         self.bla_source_epsilon = 0.0;
+        self.jet_levels.clear();
+        self.jet_bounds.clear();
+        self.jet_radii.clear();
+        self.jet_source_len = 0;
+        self.jet_bounds_log2_rc = f64::NAN;
+        self.jet_radii_log2_c_max = f64::NAN;
     }
 
     fn choose_reference_near_view(&self) -> (DBig, DBig) {
@@ -1481,6 +1637,19 @@ pub struct OrbitBufferInfo {
 pub struct BlaBufferInfo {
     pub ptr: usize,
     pub count: usize,
+    pub levels_ptr: usize,
+    pub level_count: usize,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct JetBufferInfo {
+    // Coefficient buffer: `JetCoeffs` records (108 B), orbit-keyed.
+    pub coeffs_ptr: usize,
+    pub coeffs_count: usize,
+    // Radius buffer: `JetRadii` records (16 B, vec4-packed), (ε, c_max)-keyed.
+    // `radii_count` equals `coeffs_count` — index-aligned per block.
+    pub radii_ptr: usize,
+    pub radii_count: usize,
     pub levels_ptr: usize,
     pub level_count: usize,
 }
@@ -1951,6 +2120,66 @@ mod tests {
         );
         nav.use_pade();
         assert_eq!(nav.get_approximation_mode(), ApproximationMode::Pade);
+        nav.use_jet();
+        assert_eq!(nav.get_approximation_mode(), ApproximationMode::Jet);
+    }
+
+    #[test]
+    fn jet_mode_table_caching_and_flavor_key() {
+        // (task 2.5) The jet table lives in its own storage; a round-trip through
+        // jet mode leaves the BLA cache warm (no rebuild), while the pade flavor
+        // is part of the BLA cache key (bla ↔ pade rebuilds, bla ↔ bla reuses).
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.compute_reference_orbit_ptr(512);
+        nav.use_bla();
+        nav.compute_bla_reference_ptr(512);
+        assert!(nav.bla_source_len > 0);
+        // Poison a stored field: only a REBUILD would overwrite it.
+        let marker = -12345.0_f32;
+        nav.bla_result[0].radius_beta = marker;
+
+        nav.use_jet();
+        let info = nav.compute_jet_reference(512);
+        assert!(info.level_count > 0, "jet table built no levels");
+        assert!(info.coeffs_count > 0 && info.coeffs_ptr != 0, "jet coeff buffer empty");
+        assert!(info.radii_count > 0 && info.radii_ptr != 0, "jet radius buffer empty");
+        assert_eq!(info.coeffs_count, info.radii_count, "coeff/radius buffers must be index-aligned");
+        let positive_radii = nav
+            .jet_radii
+            .iter()
+            .flatten()
+            .flat_map(|r| r.iter())
+            .filter(|r| r.is_finite())
+            .count();
+        assert!(positive_radii > 0, "no positive jet radii at shallow scale");
+
+        nav.use_bla();
+        nav.compute_bla_reference_ptr(512);
+        assert_eq!(
+            nav.bla_result[0].radius_beta, marker,
+            "BLA cache was rebuilt by a jet round-trip"
+        );
+
+        nav.use_pade();
+        nav.compute_bla_reference_ptr(512);
+        assert_ne!(
+            nav.bla_result[0].radius_beta, marker,
+            "pade flavor did not rebuild the BLA table"
+        );
+        assert!(
+            nav.bla_result[0].dx != 0.0 || nav.bla_result[0].dy != 0.0,
+            "pade table carries no D"
+        );
+
+        // Radii lifecycle: shrinking the scale (zoom in) inside the headroom only
+        // re-solves radii (bounds keyed by R_c stay), and the orbit is untouched.
+        nav.use_jet();
+        let bounds_rc = nav.jet_bounds_log2_rc;
+        let orbit_len_before = nav.result.len();
+        nav.scale = DBig::from_str("0.00000005").unwrap(); // ×0.5 zoom in
+        nav.compute_jet_reference(512);
+        assert_eq!(nav.jet_bounds_log2_rc, bounds_rc, "bounds re-walked inside headroom");
+        assert_eq!(nav.result.len(), orbit_len_before, "reference orbit rebuilt");
     }
 
     #[test]
@@ -2220,7 +2449,9 @@ mod tests {
         None
     }
 
-    fn run_pixel_cpu(levels: &[LevelF64], orbit: &[(f64, f64)], dc: (f64, f64), max_iter: usize, pade: bool) -> (usize, usize, bool) {
+    // Returns (loop steps, iterations, escaped, weighted ops). Ops use the paper
+    // convention: exact step 2, affine lookup 2, Möbius/Padé lookup 6.
+    fn run_pixel_cpu(levels: &[LevelF64], orbit: &[(f64, f64)], dc: (f64, f64), max_iter: usize, pade: bool) -> (usize, usize, bool, u64, (f64, f64)) {
         let bailout2 = 4.0_f64;
         let orbit_len = orbit.len();
         let dc_mag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
@@ -2228,12 +2459,14 @@ mod tests {
         let mut ref_i = 0usize;
         let mut iter = 0usize;
         let mut steps = 0usize;
+        let mut ops = 0u64;
         let mut escaped = false;
         while iter < max_iter {
             if let Some((cand, skip)) = try_skip_cpu(levels, ref_i, dz, dc, dc_mag, orbit, bailout2, max_iter, pade) {
                 dz = cand;
                 ref_i += skip;
                 iter += skip;
+                ops += if pade { 6 } else { 2 };
             } else {
                 let z = orbit[ref_i];
                 let m2 = cmul64((2.0 * z.0, 2.0 * z.1), dz);
@@ -2241,6 +2474,7 @@ mod tests {
                 dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
                 ref_i += 1;
                 iter += 1;
+                ops += 2;
             }
             steps += 1;
             if ref_i > orbit_len - 1 {
@@ -2262,7 +2496,8 @@ mod tests {
                 break;
             }
         }
-        (steps, iter, escaped)
+        let z = orbit[ref_i.min(orbit_len - 1)];
+        (steps, iter, escaped, ops, (z.0 + dz.0, z.1 + dz.1))
     }
 
     #[test]
@@ -2292,9 +2527,9 @@ mod tests {
             for k in 0..n {
                 let t = (k as f64 / n as f64) * 2.0 - 1.0;
                 let dc = (t * scale, 0.37 * t * scale);
-                let (se, ie, ee) = run_pixel_cpu(&[], &orbit, dc, max_iter, false);
-                let (sa, ia, ea) = run_pixel_cpu(&aff, &orbit, dc, max_iter, false);
-                let (sp, ip, ep) = run_pixel_cpu(&pad, &orbit, dc, max_iter, true);
+                let (se, ie, ee, _, _) = run_pixel_cpu(&[], &orbit, dc, max_iter, false);
+                let (sa, ia, ea, _, _) = run_pixel_cpu(&aff, &orbit, dc, max_iter, false);
+                let (sp, ip, ep, _, _) = run_pixel_cpu(&pad, &orbit, dc, max_iter, true);
                 steps_exact += se as u64;
                 steps_aff += sa as u64;
                 steps_pad += sp as u64;
@@ -2325,6 +2560,170 @@ mod tests {
             // Padé should never take more steps than affine.
             assert!(steps_pad <= steps_aff,
                 "[{}] Padé took more steps than affine ({} > {})", name, steps_pad, steps_aff);
+        }
+    }
+
+    #[test]
+    fn jet_ops_benchmark_vs_affine_pade() {
+        // (add-jet-approximation task 3.6) Weighted-ops comparison on the same
+        // pixels, paper convention: exact step 2, affine lookup 2, Möbius 6, jet
+        // order k: k(k+3)/2. Pixel scale sits in the jet regime (c_max ≪ ε, gate
+        // (b)). Caveat for reading the ratios: this CPU harness omits the
+        // shader's (H2)/(G) guards for affine/Padé — near critical passages that
+        // FLATTERS them (they skip blocks the GPU would reject), so the jet
+        // column is a lower bound on its real advantage there.
+        let max_iter = 3000usize;
+        let centers = [
+            ("cusp", -0.75_f64, 0.0_f64),
+            ("period-2-bulb", -1.25_f64, 0.0_f64),
+            ("feigenbaum", -1.401155_f64, 0.0_f64),
+        ];
+        println!("\nops convention: exact 2 | affine 2 | möbius 6 | jet k(k+3)/2");
+        for (eps, c_max) in [(1e-4_f64, 1e-5_f64), (1e-6, 1e-9)] {
+        println!("-- eps={:e} c_max={:e}", eps, c_max);
+        for (name, cx, cy) in centers {
+            let orbit = ref_orbit_f64(cx, cy, max_iter);
+            if orbit.len() <= max_iter {
+                println!("[{}] reference escaped — skipped", name);
+                continue;
+            }
+            let aff = build_levels(&orbit, eps, false);
+            let pad = build_levels(&orbit, eps, true);
+            let jlv = jet::build_jet_levels(&orbit, 4, 1 << 18);
+            let jrad =
+                jet::jet_build_radii(&jlv, &orbit, c_max.log2() + 10.0, eps, c_max.log2());
+            let n = 64usize;
+            let (mut ops_e, mut ops_a, mut ops_p, mut ops_j) = (0u64, 0u64, 0u64, 0u64);
+            let (mut jet_mismatch, mut jet_max_d) = (0usize, 0usize);
+            for kpx in 0..n {
+                let t = (kpx as f64 / n as f64) * 2.0 - 1.0;
+                let dc = (t * c_max * 0.7, 0.37 * t * c_max);
+                let (_, ie, ee, oe, _) = run_pixel_cpu(&[], &orbit, dc, max_iter, false);
+                let (_, _, _, oa, _) = run_pixel_cpu(&aff, &orbit, dc, max_iter, false);
+                let (_, _, _, op, _) = run_pixel_cpu(&pad, &orbit, dc, max_iter, true);
+                let jr = jet::jet_run_pixel(&jlv, &jrad, &orbit, dc, max_iter);
+                ops_e += oe;
+                ops_a += oa;
+                ops_p += op;
+                ops_j += jr.ops;
+                if jr.iters != ie || jr.escaped != ee {
+                    jet_mismatch += 1;
+                    jet_max_d = jet_max_d.max((jr.iters as i64 - ie as i64).unsigned_abs() as usize);
+                }
+            }
+            println!(
+                "[{}] jet mismatches={} max|Δiter|={}",
+                name, jet_mismatch, jet_max_d
+            );
+            println!(
+                "[{}] ops exact={} | affine={} (x{:.1}) | pade={} (x{:.1}) | jet={} (x{:.1})",
+                name,
+                ops_e,
+                ops_a,
+                ops_e as f64 / ops_a.max(1) as f64,
+                ops_p,
+                ops_e as f64 / ops_p.max(1) as f64,
+                ops_j,
+                ops_e as f64 / ops_j.max(1) as f64
+            );
+            // Same tolerance as the Padé harness: ε-level per-block errors shift
+            // escape iterations by a few near edge-of-chaos references (the drift
+            // scales with ε — at ε = 1e-4 the coarse regime shows it, at 1e-6 it
+            // vanishes). A real bug shows as a large |Δiter|.
+            assert!(
+                jet_mismatch <= n * 3 / 4 && jet_max_d <= 64,
+                "[{}] jet diverges beyond tolerance: {} mismatches, max |Δiter| = {}",
+                name, jet_mismatch, jet_max_d
+            );
+            // ×2 floor (skipping demonstrably active): at the coarse-c_max
+            // regime (c/ε ~ 0.1) rigorous radii certify only short-to-mid
+            // blocks — long ones genuinely carry O(1) c-channel remainders, and
+            // every mode compresses poorly (feigenbaum: jet ×2.7 still beats
+            // pade ×2.0 / affine ×1.3 there). NB: the harness Padé/affine
+            // columns lack the shader's H2/G gates and are flattered.
+            assert!(
+                ops_j * 2 < ops_e,
+                "[{}] jet ops {} not even ×2 under exact {}",
+                name, ops_j, ops_e
+            );
+        }
+        }
+    }
+
+    // Iso-ERROR comparison (not iso-ε): jet certifies its error and delivers it
+    // with orders of magnitude of margin, while BLA/Padé radii are heuristic —
+    // so at equal ε jet is slower but far more precise. This prints, per mode
+    // and ε, the ops speedup AND the worst measured end-to-end relative error,
+    // so ε values with comparable DELIVERED error can be compared for speed.
+    // Run: cargo test --release iso_error_benchmark -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn iso_error_benchmark() {
+        let c_max = 1e-9_f64;
+        let max_iter = 3000usize;
+        let centers = [
+            ("cusp", -0.75_f64, 0.0_f64),
+            ("period-2-bulb", -1.25_f64, 0.0_f64),
+            ("feigenbaum", -1.401155_f64, 0.0_f64),
+        ];
+        for (name, cx, cy) in centers {
+            let orbit = ref_orbit_f64(cx, cy, max_iter);
+            if orbit.len() <= max_iter {
+                continue;
+            }
+            println!("\n[{}]  (c_max = {:e})", name, c_max);
+            let n = 48usize;
+            let pixel = |k: usize| {
+                let t = (k as f64 / n as f64) * 2.0 - 1.0;
+                (t * c_max * 0.7, 0.29 * t * c_max)
+            };
+            // Exact reference results per pixel.
+            let exact: Vec<_> = (0..n)
+                .map(|k| run_pixel_cpu(&[], &orbit, pixel(k), max_iter, false))
+                .collect();
+            let ops_exact: u64 = exact.iter().map(|e| e.3).sum();
+            let report = |label: String, ops: u64, worst: f64| {
+                println!(
+                    "  {:<14} x{:>6.1}  worst rel err {:.2e}",
+                    label,
+                    ops_exact as f64 / ops.max(1) as f64,
+                    worst
+                );
+            };
+            for (mode, eps) in [
+                ("bla", 1e-6), ("bla", 1e-4),
+                ("pade", 1e-6), ("pade", 1e-4),
+            ] {
+                let lv = build_levels(&orbit, eps, mode == "pade");
+                let (mut ops, mut worst) = (0u64, 0f64);
+                for k in 0..n {
+                    let (_, _, esc, o, fz) = run_pixel_cpu(&lv, &orbit, pixel(k), max_iter, mode == "pade");
+                    ops += o;
+                    let (ex, ey) = exact[k].4;
+                    if !esc && !exact[k].2 {
+                        let m = (ex * ex + ey * ey).sqrt().max(1e-300);
+                        worst = worst.max(((fz.0 - ex).powi(2) + (fz.1 - ey).powi(2)).sqrt() / m);
+                    }
+                }
+                report(format!("{} ε={:.0e}", mode, eps), ops, worst);
+            }
+            for eps in [1e-6_f64, 1e-4, 1e-2, 1e-1] {
+                let jlv = jet::build_jet_levels(&orbit, 4, 1 << 18);
+                let jr = jet::jet_build_radii(&jlv, &orbit, c_max.log2() + 10.0, eps, c_max.log2());
+                let (mut ops, mut worst) = (0u64, 0f64);
+                for k in 0..n {
+                    let r = jet::jet_run_pixel(&jlv, &jr, &orbit, pixel(k), max_iter);
+                    ops += r.ops;
+                    let (ex, ey) = exact[k].4;
+                    if !r.escaped && !exact[k].2 {
+                        let m = (ex * ex + ey * ey).sqrt().max(1e-300);
+                        worst = worst.max(
+                            ((r.final_z.0 - ex).powi(2) + (r.final_z.1 - ey).powi(2)).sqrt() / m,
+                        );
+                    }
+                }
+                report(format!("jet ε={:.0e}", eps), ops, worst);
+            }
         }
     }
 

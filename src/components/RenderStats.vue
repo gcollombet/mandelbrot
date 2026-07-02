@@ -424,7 +424,7 @@ defineExpose({ expanded });
         <div class="stats-row">
           <span class="stats-label">Shader mode</span>
           <span class="stats-value">
-            {{ shaderApproxFlag === 2 ? 'Padé' : shaderApproxFlag === 1 ? 'BLA' : 'exact' }} · {{ shaderBlaLevelCount }} lvl
+            {{ shaderApproxFlag === 3 ? 'Jet' : shaderApproxFlag === 2 ? 'Padé' : shaderApproxFlag === 1 ? 'BLA' : 'exact' }} · {{ shaderBlaLevelCount }} lvl
           </span>
         </div>
 

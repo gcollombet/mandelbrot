@@ -1,6 +1,7 @@
 import {MandelbrotNavigator} from 'mandelbrot'
 import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import type {ApproximationMode} from './Engine'
+import {log2FromDecimalString} from './floatexp'
 
 type ResetMessage = {
     type: 'reset'
@@ -94,7 +95,14 @@ type BlaReadyResponse = {
     jobId: number
     refId: number
     maxIterations: number
+    // 'bla': BLA/Padé records (12 floats each) in `steps`, no `radii`.
+    // 'jet': coefficient records (27 floats each) in `steps` + a separate radius
+    // buffer (4 floats each, vec4-packed) in `radii` — the split "buffer de
+    // rayons" so a radius re-solve re-uploads only the small array.
+    kind: 'bla' | 'jet'
     steps: Float32Array<ArrayBuffer>
+    // Jet-only: per-block radii (r1, r2, r3, pad), index-aligned with `steps`.
+    radii?: Float32Array<ArrayBuffer>
     levels: Uint32Array<ArrayBuffer>
     levelCount: number
 }
@@ -159,6 +167,12 @@ let needsReferenceValidation = false
 // mints a fresh id, so consumers can order references globally.
 let refCounter = 0
 let currentRefId = 0
+// Jet-mode c_max lifecycle (add-jet-approximation D6): log2(scale) at the last
+// jet-table build. Zoom keeps existing radii VALID (they are monotone-sound
+// under a shrinking c_max); once the view has moved ≥ 2 octaves the table is
+// re-posted — the Rust side then re-solves radii in closed form (no orbit walk
+// inside the R_c headroom) and only re-walks bounds beyond it.
+let lastJetLog2Scale = Number.NaN
 
 const ORBIT_CHUNK_SIZE = 1000
 // Compute the reference orbit to HEADROOM× the display maxIter, so interactive zoom-in (which
@@ -189,6 +203,8 @@ function applyApproximationMode(mode: ApproximationMode) {
         navigator.use_bla()
     } else if (mode === 'pade') {
         navigator.use_pade()
+    } else if (mode === 'jet') {
+        navigator.use_jet()
     } else {
         navigator.use_perturbation()
     }
@@ -213,6 +229,7 @@ function resetNavigator(message: ResetMessage) {
     applyApproximationMode(message.approximationMode)
     navigator.set_bla_epsilon(message.blaEpsilon)
     navigator.set_max_bla_skip(message.maxBlaSkip)
+    lastJetLog2Scale = log2FromDecimalString(message.scale)
     void runComputeLoop(message.jobId)
 }
 
@@ -242,35 +259,77 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     if (!navigator || jobId !== activeJobId || disposed) {
         return
     }
+    const mode = navigator.get_approximation_mode()
+    // Jet rebuilds are ~10-20× costlier than BLA ones (exact degree-6 merges +
+    // majorant walks). During zoom-in maxIterations grows every updateView; a
+    // rebuild per tick would keep the table permanently stale (the engine then
+    // renders exact perturbation). Throttle: keep serving the posted table until
+    // the target outgrows it by 1.5× — blocks then still cover ≥⅔ of the
+    // iterations (the engine accepts partial tables in jet mode), the tail runs
+    // exact, and the ≥2-octave scale-drift repost refreshes radii regardless.
+    const jetStillFresh = mode === 3
+        && lastBlaMaxIterations > 0
+        && maxIterations <= Math.ceil(lastBlaMaxIterations * 1.5)
     if (
         lastBlaMaxIterations >= maxIterations
+        || jetStillFresh
         || availableIter < maxIterations
-        // Build/post the block table for both BLA (1) and Padé (2); perturbation
-        // (0) needs no table.
-        || navigator.get_approximation_mode() === 0
+        // Build/post the block table for BLA (1), Padé (2) and jet (3);
+        // perturbation (0) needs no table.
+        || mode === 0
     ) {
         return
     }
 
     const refId = currentRefId
-    const blaInfo = navigator.compute_bla_reference_ptr(maxIterations)
-    // Floats per floatexp BlaStep — must match the Rust #[repr(C)] BlaStep (12 ×
-    // 4-byte fields: a/b/D coefficients + exponents, alpha/beta radii, and the
-    // near-critical-guard log2_min_a) and Engine's BLA_STEP_FLOATS.
-    const BLA_STEP_FLOATS = 12
-    const stepsSource = new Float32Array(
-        wasmMemory.buffer,
-        blaInfo.ptr,
-        blaInfo.count * BLA_STEP_FLOATS,
-    )
+    // Jet mode (3) ships its own table: a coefficient buffer (27-float records)
+    // plus a SEPARATE radius buffer (3-float records) — the split "buffer de
+    // rayons" (add-jet-approximation D6). BLA (1) / Padé (2) share the 12-float
+    // BlaStep table with no separate radii. Both level directories are 4 × u32
+    // per level (the last word is an f32 bit-pattern).
+    const isJet = mode === 3
+    if (!isJet) {
+        // BLA / Padé path: one 12-float BlaStep table.
+        const info = navigator.compute_bla_reference_ptr(maxIterations)
+        const stepsSource = new Float32Array(wasmMemory.buffer, info.ptr, info.count * 12)
+        const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
+        steps.set(stepsSource)
+        const levelsSource = new Uint32Array(wasmMemory.buffer, info.levels_ptr, info.level_count * 4)
+        const levels: Uint32Array<ArrayBuffer> = new Uint32Array(levelsSource.length)
+        levels.set(levelsSource)
+        lastBlaMaxIterations = maxIterations
+        postResponse({
+            type: 'blaReady',
+            jobId,
+            refId,
+            maxIterations,
+            kind: 'bla',
+            steps,
+            levels,
+            levelCount: info.level_count,
+        }, [steps.buffer, levels.buffer])
+        return
+    }
+
+    // Jet path: coefficient buffer + radius buffer + level directory.
+    const tableT0 = performance.now()
+    const info = navigator.compute_jet_reference(maxIterations)
+    // The jet build is the worker's single big synchronous chunk (exact
+    // degree-6 merges + majorant walks): surface it so slow-mode reports can
+    // tell build latency from per-application cost.
+    console.log(`[REF worker] jet table built in ${(performance.now() - tableT0).toFixed(0)}ms (maxIter ${maxIterations})`)
+
+    // Strides must match the Rust #[repr(C)] JetCoeffs / JetRadii and Engine's
+    // JET_COEFF_FLOATS / JET_RADII_FLOATS.
+    const stepsSource = new Float32Array(wasmMemory.buffer, info.coeffs_ptr, info.coeffs_count * 27)
     const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
     steps.set(stepsSource)
 
-    const levelsSource = new Uint32Array(
-        wasmMemory.buffer,
-        blaInfo.levels_ptr,
-        blaInfo.level_count * 4,
-    )
+    const radiiSource = new Float32Array(wasmMemory.buffer, info.radii_ptr, info.radii_count * 4)
+    const radii: Float32Array<ArrayBuffer> = new Float32Array(radiiSource.length)
+    radii.set(radiiSource)
+
+    const levelsSource = new Uint32Array(wasmMemory.buffer, info.levels_ptr, info.level_count * 4)
     const levels: Uint32Array<ArrayBuffer> = new Uint32Array(levelsSource.length)
     levels.set(levelsSource)
     lastBlaMaxIterations = maxIterations
@@ -280,10 +339,12 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         jobId,
         refId,
         maxIterations,
+        kind: 'jet',
         steps,
+        radii,
         levels,
-        levelCount: blaInfo.level_count,
-    }, [steps.buffer, levels.buffer])
+        levelCount: info.level_count,
+    }, [steps.buffer, radii.buffer, levels.buffer])
 }
 
 async function runComputeLoop(jobId: number) {
@@ -370,6 +431,16 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     navigator.angle(message.angle)
                     targetMaxIterations = message.maxIterations
                     needsReferenceValidation = true
+                    // Jet radii depend on the per-view c_max: after ≥ 2 octaves
+                    // of scale drift, re-post the table (cheap closed-form
+                    // re-solve Rust-side; existing radii stay sound meanwhile).
+                    if (navigator.get_approximation_mode() === 3) {
+                        const log2Scale = log2FromDecimalString(message.scale)
+                        if (!Number.isFinite(lastJetLog2Scale) || Math.abs(log2Scale - lastJetLog2Scale) >= 2) {
+                            lastJetLog2Scale = log2Scale
+                            lastBlaMaxIterations = 0
+                        }
+                    }
                     void runComputeLoop(message.jobId)
                 }
                 break

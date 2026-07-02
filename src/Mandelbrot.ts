@@ -3,7 +3,7 @@ import type {TextureMappingConfig} from "./TextureMapping.ts";
 import type {AnimationConfig} from "./AnimationConfig.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
-export type ApproximationMode = 'perturbation' | 'bla' | 'pade';
+export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet';
 
 export interface MandelbrotParams {
     scale: string;
@@ -29,6 +29,8 @@ export interface MandelbrotParams {
     stripeFrequency: number;
     activateAnimate: boolean;
     debugShading: boolean;
+    // Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes.
+    debugView?: number;
     colorStops: ColorStop[];
     interpolationMode: InterpolationMode;
     approximationMode?: ApproximationMode;

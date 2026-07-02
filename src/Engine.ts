@@ -2,6 +2,7 @@
 
 import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
 import inplaceComputeShader from './assets/mandelbrot_brush.wgsl?raw'
+import debugViewShader from './assets/mandelbrot_debug.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
 import brushShader from './assets/reproject.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
@@ -57,6 +58,14 @@ const BLA_LINEARIZATION_EPSILON = 1e-3
 // (#[repr(C)] of 11 × 4-byte fields): ax,ay,bx,by,ab_exp,radius_alpha,alpha_exp,
 // radius_beta + the Padé D coefficient dx,dy,d_exp.
 const BLA_STEP_FLOATS = 12
+// Floats per jet COEFFICIENT record — must match the Rust #[repr(C)] JetCoeffs
+// (9 coefficients × (x, y, e)) and the WGSL JetStep (108 B).
+const JET_COEFF_FLOATS = 27
+// Floats per jet RADIUS record — the split "buffer de rayons": Rust JetRadii /
+// WGSL JetRadii (vec4: r1, r2, r3, pad), 16 B so a probe is one coalesced load.
+// Its own buffer so a radius re-solve re-uploads only these, not the whole
+// coefficient table.
+const JET_RADII_FLOATS = 4
 // Step capacity of the GPU reference buffer (the 8·CAPACITY-byte
 // mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts, where the orbit
 // is computed to 2× the display maxIter (interactive zoom-in headroom) but never
@@ -164,7 +173,13 @@ type ReferenceWorkerResponse =
         jobId: number
         refId: number
         maxIterations: number
+        // Which block table the payload carries: BLA/Padé records
+        // (BLA_STEP_FLOATS stride, no `radii`) or jet coefficient records
+        // (JET_COEFF_FLOATS stride) with a separate radius buffer in `radii`
+        // (JET_RADII_FLOATS stride — the split "buffer de rayons").
+        kind: 'bla' | 'jet'
         steps: Float32Array<ArrayBuffer>
+        radii?: Float32Array<ArrayBuffer>
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
     }
@@ -204,9 +219,11 @@ type ReferenceSlot = {
     orbitLen: number
     /** Accumulated orbit chunks, contiguous and in order (staging only; emptied on promote). */
     chunks: Float32Array<ArrayBuffer>[]
-    /** BLA/Padé block table for this reference (arrives after the orbit completes). */
+    /** Block table for this reference (arrives after the orbit completes). */
     bla: {
+        kind: 'bla' | 'jet'
         steps: Float32Array<ArrayBuffer>
+        radii?: Float32Array<ArrayBuffer>
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
         maxIterations: number
@@ -322,6 +339,10 @@ export type RenderOptions = {
     interpolationMode: InterpolationMode,
     activateAnimate: boolean,
     debugShading: boolean,
+    // Diagnostic overlay (mandelbrot_debug.wgsl): 0 = off, 1 = cost heat,
+    // 2 = average applied block length, 3 = exact/low/high composition,
+    // 4 = table probes per loop turn.
+    debugView?: number,
     tessellationLevel: number,
     displacementAmount: number,
     animation: AnimationConfig,
@@ -342,7 +363,7 @@ export type RenderOptions = {
     textureMappingMode?: number,
 }
 
-export type ApproximationMode = 'perturbation' | 'bla' | 'pade'
+export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet'
 
 export type Mandelbrot = {
     maxIterations: number,
@@ -405,8 +426,14 @@ export class Engine {
     mandelbrotReferenceBuffer?: GPUBuffer // storage buffer contenant l'orbite
     mandelbrotBlaBuffer?: GPUBuffer // storage buffer contenant les sauts BLA
     mandelbrotBlaLevelBuffer?: GPUBuffer // storage buffer contenant les metadonnees BLA
+    mandelbrotJetBuffer?: GPUBuffer // storage buffer: jet coefficient records (add-jet-approximation)
+    mandelbrotJetRadiiBuffer?: GPUBuffer // storage buffer: jet radii (the split "buffer de rayons")
+    mandelbrotJetLevelBuffer?: GPUBuffer // storage buffer: jet level directory
     private mandelbrotBlaBufferCapacity = 0
     private mandelbrotBlaLevelBufferCapacity = 0
+    private mandelbrotJetBufferCapacity = 0
+    private mandelbrotJetRadiiBufferCapacity = 0
+    private mandelbrotJetLevelBufferCapacity = 0
 
     // pipelines / bindgroups
     pipelineBrush?: GPURenderPipeline
@@ -582,6 +609,12 @@ export class Engine {
     referenceWorkerCy = ''
     floatExpActive = false
     debugShadingActive = false
+    debugViewMode = 0
+    // Console/devtools override: __mandelbrotEngine.debugViewOverride = 1..4
+    // wins over the Settings value (0 = follow Settings).
+    debugViewOverride = 0
+    private pipelineDebug?: GPURenderPipeline
+    private bindGroupDebug?: GPUBindGroup
     private referenceOrbitWasReset = false
 
     // ── Reference slots (deferred switch) ───────────────────────────
@@ -770,14 +803,7 @@ export class Engine {
         // shader falls back to exact perturbation (correct, just slower) until
         // the worker's blaReady for this refId lands.
         if (staging.bla) {
-            this.ensureBlaBufferCapacity(staging.bla.steps.length / BLA_STEP_FLOATS)
-            this.ensureBlaLevelBufferCapacity(staging.bla.levelCount)
-            if (staging.bla.steps.length > 0 && this.mandelbrotBlaBuffer) {
-                this.device.queue.writeBuffer(this.mandelbrotBlaBuffer, 0, staging.bla.steps, 0, staging.bla.steps.length)
-            }
-            if (staging.bla.levels.length > 0 && this.mandelbrotBlaLevelBuffer) {
-                this.device.queue.writeBuffer(this.mandelbrotBlaLevelBuffer, 0, staging.bla.levels, 0, staging.bla.levels.length)
-            }
+            this.writeBlockTable(staging.bla)
             this.currentBlaLevelCount = staging.bla.levelCount
             this.referenceBlaReadyMaxIterations = staging.bla.maxIterations
         } else {
@@ -1030,14 +1056,7 @@ export class Engine {
 
         // ── blaReady — routed by refId, exactly like orbit chunks ──
         if (this.activeRef && message.refId === this.activeRef.refId) {
-            this.ensureBlaBufferCapacity(message.steps.length / BLA_STEP_FLOATS)
-            this.ensureBlaLevelBufferCapacity(message.levelCount)
-            if (message.steps.length > 0 && this.mandelbrotBlaBuffer) {
-                this.device.queue.writeBuffer(this.mandelbrotBlaBuffer, 0, message.steps, 0, message.steps.length)
-            }
-            if (message.levels.length > 0 && this.mandelbrotBlaLevelBuffer) {
-                this.device.queue.writeBuffer(this.mandelbrotBlaLevelBuffer, 0, message.levels, 0, message.levels.length)
-            }
+            this.writeBlockTable(message)
             this.currentBlaLevelCount = message.levelCount
             this.referenceBlaReadyMaxIterations = message.maxIterations
             this.isReferenceValidating = false
@@ -1049,7 +1068,9 @@ export class Engine {
             this.invalidateCounterReadback()
         } else if (this.stagingRef && message.refId === this.stagingRef.refId) {
             this.stagingRef.bla = {
+                kind: message.kind,
                 steps: message.steps,
+                radii: message.radii,
                 levels: message.levels,
                 levelCount: message.levelCount,
                 maxIterations: message.maxIterations,
@@ -1064,7 +1085,7 @@ export class Engine {
         // only feed per-frame shader uniforms and UI, and serializing them to decimal strings
         // every frame at the full budget made per-frame cost ∝ budget. The budget lives only on
         // the worker navigator (set via the reset message), which builds the reference orbit.
-        this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
+        this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         this.initializeReferenceWorker()
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
@@ -1175,6 +1196,24 @@ export class Engine {
         })
         this.mandelbrotBlaBufferCapacity = 1
         this.mandelbrotBlaLevelBufferCapacity = 1
+        this.mandelbrotJetBuffer = this.device.createBuffer({
+            size: 4 * JET_COEFF_FLOATS,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Jet Coeff Storage Buffer',
+        })
+        this.mandelbrotJetRadiiBuffer = this.device.createBuffer({
+            size: 4 * JET_RADII_FLOATS,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Jet Radii Storage Buffer',
+        })
+        this.mandelbrotJetLevelBuffer = this.device.createBuffer({
+            size: 4 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Jet Level Storage Buffer',
+        })
+        this.mandelbrotJetBufferCapacity = 1
+        this.mandelbrotJetRadiiBufferCapacity = 1
+        this.mandelbrotJetLevelBufferCapacity = 1
 
         // Counter buffers for GPU pixel-completion readback (2 × u32: total unfinished + active)
         this.counterBuffer = this.device.createBuffer({
@@ -1222,6 +1261,7 @@ export class Engine {
         const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
         const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
         const moduleCount = this.device.createShaderModule({ code: countShader, label: 'Engine ShaderModule Count' })
+        const moduleDebug = this.device.createShaderModule({ code: debugViewShader, label: 'Engine ShaderModule DebugView' })
 
         const layoutBrush = this.device.createBindGroupLayout({
             entries: [
@@ -1238,8 +1278,33 @@ export class Engine {
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
                 { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
                 { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
             ],
             label: 'Engine BindGroupLayout Mandelbrot',
+        })
+
+        // Diagnostic overlay pipeline (block-skipping debug views). Renders a
+        // fullscreen instrumented recompute straight to the swapchain.
+        const layoutDebug = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+            ],
+            label: 'Engine BindGroupLayout DebugView',
+        })
+        this.pipelineDebug = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutDebug], label: 'Engine PipelineLayout DebugView' }),
+            vertex: { module: moduleDebug, entryPoint: 'vs_main' },
+            fragment: { module: moduleDebug, entryPoint: 'fs_main', targets: [{ format: this.format }] },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine Pipeline DebugView',
         })
 
         const layoutResolve = this.device.createBindGroupLayout({
@@ -1359,6 +1424,9 @@ export class Engine {
                 { binding: 5, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
                 { binding: 6, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
                 { binding: 7, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
             ],
             label: 'Engine BindGroupLayout InplaceCompute',
         })
@@ -1456,6 +1524,7 @@ export class Engine {
     private rebuildInplaceBindGroup() {
         if (!this.pipelineInplace || !this.rawArrayView || !this.uniformBufferMandelbrot
             || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
+            || !this.mandelbrotJetBuffer || !this.mandelbrotJetRadiiBuffer || !this.mandelbrotJetLevelBuffer
             || !this.uniformBufferBrush || !this.counterBuffer || !this.workStatsBuffer) {
             return
         }
@@ -1472,6 +1541,9 @@ export class Engine {
                 { binding: 5, resource: { buffer: this.uniformBufferBrush } },
                 { binding: 6, resource: { buffer: this.counterBuffer } },
                 { binding: 7, resource: { buffer: this.workStatsBuffer } },
+                { binding: 8, resource: { buffer: this.mandelbrotJetBuffer } },
+                { binding: 9, resource: { buffer: this.mandelbrotJetLevelBuffer } },
+                { binding: 10, resource: { buffer: this.mandelbrotJetRadiiBuffer } },
             ],
             label: 'Engine BindGroup InplaceCompute',
         })
@@ -1479,7 +1551,8 @@ export class Engine {
 
     private rebuildMandelbrotBindGroup() {
         if (!this.pipelineMandelbrot || !this.rawBrushArrayView || !this.uniformBufferMandelbrot
-            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer) {
+            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
+            || !this.mandelbrotJetBuffer || !this.mandelbrotJetRadiiBuffer || !this.mandelbrotJetLevelBuffer) {
             return
         }
 
@@ -1492,13 +1565,61 @@ export class Engine {
                 { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
                 { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
                 { binding: 4, resource: this.rawBrushArrayView },
+                { binding: 5, resource: { buffer: this.mandelbrotJetBuffer } },
+                { binding: 6, resource: { buffer: this.mandelbrotJetLevelBuffer } },
+                { binding: 7, resource: { buffer: this.mandelbrotJetRadiiBuffer } },
             ],
             label: 'Engine BindGroup Mandelbrot',
         })
 
+        if (this.pipelineDebug) {
+            this.bindGroupDebug = this.device.createBindGroup({
+                layout: this.pipelineDebug.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: this.uniformBufferMandelbrot } },
+                    { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
+                    { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
+                    { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
+                    { binding: 5, resource: { buffer: this.mandelbrotJetBuffer } },
+                    { binding: 6, resource: { buffer: this.mandelbrotJetLevelBuffer } },
+                    { binding: 7, resource: { buffer: this.mandelbrotJetRadiiBuffer } },
+                ],
+                label: 'Engine BindGroup DebugView',
+            })
+        }
+
         // The in-place compute bind group shares the orbit/BLA buffers, so it
         // must be rebuilt whenever they are reallocated.
         this.rebuildInplaceBindGroup()
+    }
+
+    // Upload a worker-built block table into the buffers of its kind. The level
+    // directories share the 4-u32 stride; only the step stride differs. Jet
+    // tables carry a second array (`radii`, the split "buffer de rayons").
+    private writeBlockTable(table: { kind: 'bla' | 'jet', steps: Float32Array<ArrayBuffer>, radii?: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number }) {
+        if (table.kind === 'jet') {
+            this.ensureJetBufferCapacity(table.steps.length / JET_COEFF_FLOATS)
+            this.ensureJetLevelBufferCapacity(table.levelCount)
+            if (table.steps.length > 0 && this.mandelbrotJetBuffer) {
+                this.device.queue.writeBuffer(this.mandelbrotJetBuffer, 0, table.steps, 0, table.steps.length)
+            }
+            const radii = table.radii
+            if (radii && radii.length > 0 && this.mandelbrotJetRadiiBuffer) {
+                this.device.queue.writeBuffer(this.mandelbrotJetRadiiBuffer, 0, radii, 0, radii.length)
+            }
+            if (table.levels.length > 0 && this.mandelbrotJetLevelBuffer) {
+                this.device.queue.writeBuffer(this.mandelbrotJetLevelBuffer, 0, table.levels, 0, table.levels.length)
+            }
+            return
+        }
+        this.ensureBlaBufferCapacity(table.steps.length / BLA_STEP_FLOATS)
+        this.ensureBlaLevelBufferCapacity(table.levelCount)
+        if (table.steps.length > 0 && this.mandelbrotBlaBuffer) {
+            this.device.queue.writeBuffer(this.mandelbrotBlaBuffer, 0, table.steps, 0, table.steps.length)
+        }
+        if (table.levels.length > 0 && this.mandelbrotBlaLevelBuffer) {
+            this.device.queue.writeBuffer(this.mandelbrotBlaLevelBuffer, 0, table.levels, 0, table.levels.length)
+        }
     }
 
     private ensureBlaBufferCapacity(requiredEntries: number) {
@@ -1530,6 +1651,54 @@ export class Engine {
             label: 'Engine Mandelbrot BLA Level Storage Buffer',
         })
         this.mandelbrotBlaLevelBufferCapacity = safeRequiredEntries
+        this.rebuildMandelbrotBindGroup()
+    }
+
+    private ensureJetBufferCapacity(requiredEntries: number) {
+        const safeRequiredEntries = Math.max(1, Math.ceil(requiredEntries))
+        if (safeRequiredEntries <= this.mandelbrotJetBufferCapacity) {
+            return
+        }
+        this.mandelbrotJetBuffer?.destroy?.()
+        this.mandelbrotJetBuffer = this.device.createBuffer({
+            size: safeRequiredEntries * 4 * JET_COEFF_FLOATS,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Jet Coeff Storage Buffer',
+        })
+        this.mandelbrotJetBufferCapacity = safeRequiredEntries
+        // The radius buffer is index-aligned with the coefficient buffer, so it
+        // must hold the same number of blocks.
+        this.ensureJetRadiiBufferCapacity(safeRequiredEntries)
+        this.rebuildMandelbrotBindGroup()
+    }
+
+    private ensureJetRadiiBufferCapacity(requiredEntries: number) {
+        const safeRequiredEntries = Math.max(1, Math.ceil(requiredEntries))
+        if (safeRequiredEntries <= this.mandelbrotJetRadiiBufferCapacity) {
+            return
+        }
+        this.mandelbrotJetRadiiBuffer?.destroy?.()
+        this.mandelbrotJetRadiiBuffer = this.device.createBuffer({
+            size: safeRequiredEntries * 4 * JET_RADII_FLOATS,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Jet Radii Storage Buffer',
+        })
+        this.mandelbrotJetRadiiBufferCapacity = safeRequiredEntries
+        this.rebuildMandelbrotBindGroup()
+    }
+
+    private ensureJetLevelBufferCapacity(requiredEntries: number) {
+        const safeRequiredEntries = Math.max(1, Math.ceil(requiredEntries))
+        if (safeRequiredEntries <= this.mandelbrotJetLevelBufferCapacity) {
+            return
+        }
+        this.mandelbrotJetLevelBuffer?.destroy?.()
+        this.mandelbrotJetLevelBuffer = this.device.createBuffer({
+            size: safeRequiredEntries * 4 * 4,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Jet Level Storage Buffer',
+        })
+        this.mandelbrotJetLevelBufferCapacity = safeRequiredEntries
         this.rebuildMandelbrotBindGroup()
     }
 
@@ -1945,6 +2114,8 @@ export class Engine {
             this.mandelbrotNavigator.use_bla()
         } else if (mode === 'pade') {
             this.mandelbrotNavigator.use_pade()
+        } else if (mode === 'jet') {
+            this.mandelbrotNavigator.use_jet()
         } else {
             this.mandelbrotNavigator.use_perturbation()
         }
@@ -1959,6 +2130,16 @@ export class Engine {
         this.clearHistoryNextFrame = true
         this.needRender = true
         this.invalidateCounterReadback()
+    }
+
+    /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes. */
+    setDebugView(mode: number) {
+        const next = Math.max(0, Math.round(mode))
+        if (next === this.debugViewMode) {
+            return
+        }
+        this.debugViewMode = next
+        this.needRender = true
     }
 
     getApproximationMode(): ApproximationMode {
@@ -1979,7 +2160,7 @@ export class Engine {
         })
         // ε sets the validity radius (ε·|A| affine, √ε·|A| Padé), so a change must
         // rebuild the table and re-render in either block-jump mode.
-        if (this.approximationMode === 'bla' || this.approximationMode === 'pade') {
+        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet') {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
@@ -2065,7 +2246,7 @@ export class Engine {
             jobId: this.referenceJobId,
             maxBlaSkip: pow2,
         })
-        if (this.approximationMode === 'bla' || this.approximationMode === 'pade') {
+        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet') {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
@@ -2099,13 +2280,16 @@ export class Engine {
         }
 
         this.debugShadingActive = renderOptions.debugShading
+        if (this.debugViewOverride > 0) {
+            this.debugViewMode = this.debugViewOverride
+        }
 
         if (this.stagingReady()) {
             this.promoteStagingReference()
             return
         }
 
-        const navigatorApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
+        const navigatorApproximationMode: ApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
             this.approximationMode = navigatorApproximationMode
@@ -2484,12 +2668,21 @@ export class Engine {
         // Block-jump modes: 'bla' (affine) and 'pade' (rational) both use the table;
         // the uniform flag carries which one (1 = BLA, 2 = Padé) so the shader picks
         // the affine vs rational application. 0 = exact perturbation.
-        const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade')
+        // A jet table built for FEWER iterations than the current target is still
+        // sound: its blocks cover a prefix of the same orbit (slot bounds reject
+        // anything past it, the tail runs exact) and radii only get MORE
+        // conservative as c_max shrinks on zoom-in. Requiring full coverage — as
+        // BLA/Padé do — would disable jet during the whole zoom (its rebuilds are
+        // throttled worker-side because they cost ~10-20× a BLA build).
+        const tableCoversView = this.approximationMode === 'jet'
+            ? this.referenceBlaReadyMaxIterations > 0
+            : this.referenceBlaReadyMaxIterations >= guardedMaxIter
+        const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet')
             && orbitComplete
             && this.currentBlaLevelCount > 0
-            && this.referenceBlaReadyMaxIterations >= guardedMaxIter
+            && tableCoversView
         const approximationModeFlag = blocksReady
-            ? (this.approximationMode === 'pade' ? 2 : 1)
+            ? (this.approximationMode === 'jet' ? 3 : this.approximationMode === 'pade' ? 2 : 1)
             : 0
         const blaLevelCount = blocksReady ? this.currentBlaLevelCount : 0
         // Diagnostic mirror of exactly what the shader receives this frame: the mode
@@ -2512,7 +2705,7 @@ export class Engine {
             this.iterationBatchSize,
             mandelbrot.epsilon,
             renderOptions.antialiasLevel,
-            0,  // iterationOffset
+            this.debugViewMode,  // iterationOffset slot — recycled as debugView
             guardedMaxIter,
             orbitComplete ? 1 : 0,
             approximationModeFlag,
@@ -3080,6 +3273,22 @@ export class Engine {
             rpassPresent.end()
         }
 
+        // ── Debug overlay: instrumented recompute straight onto the frame ──
+        if (this.debugViewMode > 0 && this.pipelineDebug && this.bindGroupDebug) {
+            const rpassDebug = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: swapView,
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+            })
+            rpassDebug.setPipeline(this.pipelineDebug)
+            rpassDebug.setBindGroup(0, this.bindGroupDebug)
+            rpassDebug.draw(6, 1, 0, 0)
+            rpassDebug.end()
+        }
+
         // Bake the AA target map once, right after sample 0 has converged and been
         // composited (reads the converged neutral DE in rawTexture). Reused by the
         // color gate and the selective reseed for all subsequent samples.
@@ -3107,6 +3316,16 @@ export class Engine {
         // soumission des commandes
         const submitStartMs = performance.now()
         this.device.queue.submit([commandEncoder.finish()])
+        // Debug overlay active: surface the GPU frame time. The debug pass strips
+        // the derivative/f32-path/lockstep asymmetries for every mode, so this
+        // number compares the pure skipping algorithms wall-clock — switch modes
+        // and read the console.
+        if (this.debugViewMode > 0) {
+            const dbgT0 = performance.now()
+            void this.device.queue.onSubmittedWorkDone().then(() => {
+                console.log(`[debug view] GPU frame ${(performance.now() - dbgT0).toFixed(1)}ms (mode ${this.approximationMode}, view ${this.debugViewMode})`)
+            })
+        }
 
         // Delayed GPU timing + counter readback: do not block this frame on GPU completion.
         this.scheduleGpuTiming(submitStartMs)

@@ -87,11 +87,56 @@ struct BlaLevel {
   maxRadius: f32,
 };
 
+// ── bivariate jet mode (add-jet-approximation) ─────────────────────
+// One truncated-Taylor coefficient (x, y)·2^e. Exponents are per-coefficient
+// (design D7: within-block spreads reach 75+ bits, no sharing is safe) and can
+// exceed the f32 range even at shallow zooms, so jet evaluation always runs in
+// floatexp arithmetic.
+struct JetCoeff { x: f32, y: f32, e: i32 };
+
+// Jet radius record (16 B, vec4-packed: x=r1, y=r2, z=r3, w=pad — one coalesced
+// load per probe), in its own buffer ("le buffer de rayons"): the runtime
+// descent (per-level maxR3 gate + order selection) reads radii ALONE — the
+// 108 B coefficient record is touched only once a block is applied. -inf ⇒
+// that order is never applied.
+struct JetRadii {
+  v: vec4<f32>,
+};
+
+// Register-file budget for the hoisted per-level maxR3 gates (actual tables top
+// out around 17 levels; the fill and the descent both clamp to this).
+const JET_MAX_LEVELS = 32;
+
+// Largest |∂Φ/∂z exponent| folded into the derivative MANTISSA (ldexp) instead
+// of derS: derS and its exp() caches stay valid, eliding der_refresh_cache's
+// two exp() per application. Bounded so one application cannot push derM past
+// f32 (DER_RENORM window half-width ≈ 2^26.6, checked every loop turn).
+const JET_DER_EXP_FOLD: i32 = 16;
+
+// Jet coefficient record (108 B), degree-major: an order-k application reads
+// only coeffs[0 .. k(k+3)/2) — coeffs[0]/coeffs[1] are the affine A/B. Same flat
+// block index as the radius buffer.
+struct JetStep {
+  coeffs: array<JetCoeff, 9>,
+};
+
+// Level directory: maxR3 (log2) is the loosest top-order radius of the level —
+// the whole-level fast reject, sibling of BlaLevel.maxRadius.
+struct JetLevel {
+  offset: u32,
+  count: u32,
+  skip: u32,
+  maxR3: f32,
+};
+
 @group(0) @binding(0) var<uniform> mandelbrot: Mandelbrot;
 @group(0) @binding(1) var<storage, read> mandelbrotOrbitPointSuite: array<MandelbrotStep>;
 @group(0) @binding(2) var<storage, read> mandelbrotBlaSuite: array<BlaStep>;
 @group(0) @binding(3) var<storage, read> mandelbrotBlaLevels: array<BlaLevel>;
 @group(0) @binding(4) var rawIn: texture_2d_array<f32>;
+@group(0) @binding(5) var<storage, read> mandelbrotJetSuite: array<JetStep>;
+@group(0) @binding(6) var<storage, read> mandelbrotJetLevels: array<JetLevel>;
+@group(0) @binding(7) var<storage, read> mandelbrotJetRadii: array<JetRadii>;
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -520,24 +565,71 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var shadingHeight = 0.0;
   var shadingAngle = 0.0;
 
+  // approximationMode: 1 = affine BLA, 2 = Padé, 3 = jet. The level-count
+  // uniform carries the ACTIVE table's level count (BLA or jet).
+  let isJet = mandelbrot.approximationMode >= 2.5;
   let useBla = mandelbrot.approximationMode >= 0.5
             && mandelbrot.orbitComplete >= 0.5
             && mandelbrot.blaLevelCount >= 1.0;
 
   if (useBla) {
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
-    let skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
-    // Level 0 carries the loosest per-level radius bound (merged radii only
-    // shrink), so one register compare against it tells whether any BLA entry
-    // could possibly accept the current |dz|.
-    let maxBlaRadius = mandelbrotBlaLevels[0].maxRadius;
-    let maxBlaR2 = maxBlaRadius * maxBlaRadius;
+    var skip0Log = 0;
+    var maxBlaR2 = 0.0;
+    var jetMaxR3 = -3.0e38;
+    // Hoisted per-level maxR3 gates: loaded ONCE per pixel, so the descent in
+    // try_apply_jet never re-reads the level directory on failing probes.
+    var jetLvlR3: array<f32, JET_MAX_LEVELS>;
+    if (isJet) {
+      skip0Log = i32(countTrailingZeros(max(mandelbrotJetLevels[0].skip, 1u)));
+      // Global fast-reject bound (sibling of maxBlaR2): the loosest top-order
+      // radius across ALL levels. Without it, a dead/stale table would pay the
+      // level walk on every iteration — slower than exact stepping.
+      for (var l = 0; l < min(i32(mandelbrot.blaLevelCount), JET_MAX_LEVELS); l++) {
+        let r = mandelbrotJetLevels[l].maxR3;
+        jetLvlR3[l] = r;
+        jetMaxR3 = max(jetMaxR3, r);
+      }
+    } else {
+      skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
+      // Level 0 carries the loosest per-level radius bound (merged radii only
+      // shrink), so one register compare against it tells whether any BLA entry
+      // could possibly accept the current |dz|. (The jet path has per-level
+      // log2 gates inside try_apply_jet instead.)
+      let maxBlaRadius = mandelbrotBlaLevels[0].maxRadius;
+      maxBlaR2 = maxBlaRadius * maxBlaRadius;
+    }
+    let dcFe = fe_from_vec(dc, 0);
+    let dcFe2 = fe_cmul(dcFe, dcFe);
+    let dcFe3 = fe_cmul(dcFe2, dcFe);
+    // (#4) f32 dc powers for the jet fast path. The gate needs |dc| > 2^-42 so
+    // dc²/dc³ stay clear of the f32 subnormal band (else the pure-c Horner
+    // terms would silently flush — the fe path keeps them).
+    let dcF2 = cmul(dc, dc);
+    let dcF3 = cmul(dcF2, dc);
+    let jetF32Ok = isJet && dcMag > 2.3e-13;
     var usedBla = false;
     var blaZ = vec2<f32>(0.0);
     while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
       g_workSteps += 1u;
       var skipped = 0;
-      if (dot(dz, dz) <= maxBlaR2) {
+      if (isJet) {
+        // Global gate first (one log2 vs the table-wide bound), then convert dz
+        // to floatexp for the shared evaluator (coefficient exponents exceed
+        // f32 even shallow). Use length(), not dot(): |dz|² UNDERFLOWS f32 for
+        // |dz| < ~1e-19 (routine at mid-deep shallow zooms) and a clamped
+        // log2 would over-estimate |dz| and reject everything. When even
+        // length() underflows, pass the gate — the fe-domain test inside
+        // try_apply_jet is exact.
+        let dzMag = length(dz);
+        if (dzMag < 1.2e-38 || log2(dzMag) < jetMaxR3) {
+          var dzFe = fe_from_vec(dz, 0);
+          skipped = try_apply_jet(&ref_i, &dzFe, &derM, &derS, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, dcF2, dcF3, jetF32Ok);
+          if (skipped > 0) {
+            dz = fe_to_vec(dzFe);
+          }
+        }
+      } else if (dot(dz, dz) <= maxBlaR2) {
         skipped = try_apply_bla(&ref_i, &dz, &derM, &blaZ, derInvScale, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
       }
       if (skipped > 0) {
@@ -800,6 +892,210 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
   return 0;
 }
 
+// ── jet block application (add-jet-approximation) ──────────────────
+// Shared by the shallow and deep loops: evaluation runs in floatexp regardless
+// of path (per-coefficient exponents can exceed f32 even at shallow zooms), the
+// shallow wrapper converts dz at the edges. The runtime validity test is the
+// single comparison log2|dz| < r_k — no min_a / H2 / beta on this path (rule (V)
+// subsumes them at build time).
+
+fn jet_coeff_fe(c: JetCoeff) -> fe {
+  return fe_renorm(fe(vec2<f32>(c.x, c.y), c.e));
+}
+
+fn fe_scale(a: fe, s: f32) -> fe {
+  return fe_renorm(fe(a.m * s, a.e));
+}
+
+// Order-k evaluation of the stored jet, Horner in dz with per-pixel-hoisted dc
+// powers (dc2/dc3 are loop invariants — computed once per pixel, not per
+// application). Rows P_i(dc) = Σ_j a_ij dc^j are built once and reused by the
+// value AND both partials, roughly halving the fe-op count at order 3:
+//   Φ      = P0 + dz·(P1 + dz·(P2 + dz·P3))
+//   ∂Φ/∂z  = P1 + dz·(2·P2 + dz·3·P3)
+//   ∂Φ/∂c  = Q0 + dz·(Q1 + dz·Q2),  Q_i = ∂P_i/∂c
+// Reads only the degree ≤ k coefficient prefix (design D1).
+fn jet_apply(entry: i32, k: i32, dz: fe, dc: fe, dc2: fe, dc3: fe, pdz: ptr<function, fe>, pdc: ptr<function, fe>) -> fe {
+  let a10 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[0]);
+  let a01 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[1]);
+  var p0 = fe_cmul(a01, dc);
+  var p1 = a10;
+  var q0 = a01;
+  if (k < 2) {
+    *pdz = p1;
+    *pdc = q0;
+    return fe_add(p0, fe_cmul(p1, dz));
+  }
+  let a20 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[2]);
+  let a11 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[3]);
+  let a02 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[4]);
+  let a11dc = fe_cmul(a11, dc);
+  p0 = fe_add(p0, fe_cmul(a02, dc2));
+  p1 = fe_add(p1, a11dc);
+  var p2 = a20;
+  q0 = fe_add(q0, fe_scale(fe_cmul(a02, dc), 2.0));
+  var q1 = a11;
+  if (k < 3) {
+    *pdz = fe_add(p1, fe_scale(fe_cmul(p2, dz), 2.0));
+    *pdc = fe_add(q0, fe_cmul(q1, dz));
+    return fe_add(p0, fe_cmul(fe_add(p1, fe_cmul(p2, dz)), dz));
+  }
+  let a30 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[5]);
+  let a21 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[6]);
+  let a12 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[7]);
+  let a03 = jet_coeff_fe(mandelbrotJetSuite[entry].coeffs[8]);
+  let a12dc2 = fe_cmul(a12, dc2);
+  p0 = fe_add(p0, fe_cmul(a03, dc3));
+  p1 = fe_add(p1, a12dc2);
+  p2 = fe_add(p2, fe_cmul(a21, dc));
+  let p3 = a30;
+  q0 = fe_add(q0, fe_scale(fe_cmul(a03, dc2), 3.0));
+  q1 = fe_add(q1, fe_scale(fe_cmul(a12, dc), 2.0));
+  let q2 = a21;
+  *pdz = fe_add(p1, fe_cmul(fe_add(fe_scale(p2, 2.0), fe_scale(fe_cmul(p3, dz), 3.0)), dz));
+  *pdc = fe_add(q0, fe_cmul(fe_add(q1, fe_cmul(q2, dz)), dz));
+  return fe_add(p0, fe_cmul(fe_add(p1, fe_cmul(fe_add(p2, fe_cmul(p3, dz)), dz)), dz));
+}
+
+// ldexp-exact f32 reconstruction of a coefficient whose radii.w flag certifies
+// |log2| ≤ 96 (build-side jet_f32_safe).
+fn jet_coeff_f32(c: JetCoeff) -> vec2<f32> {
+  return ldexp(vec2<f32>(c.x, c.y), vec2<i32>(c.e));
+}
+
+// Plain-f32 twin of jet_apply — the shallow fast path: same Horner rows, no
+// per-op fe renorm (frexp/ldexp), no fe_add exponent alignment. Entered only
+// when the block's radii.w flag certifies every shipped coefficient fits f32
+// AND the caller certifies dz/dc powers are f32-scaled; |dz|,|dc| < 1 on
+// applied blocks then caps every Horner intermediate at ~2^99 « f32 max.
+fn jet_apply_f32(entry: i32, k: i32, dz: vec2<f32>, dc: vec2<f32>, dc2: vec2<f32>, dc3: vec2<f32>, pdz: ptr<function, vec2<f32>>, pdc: ptr<function, vec2<f32>>) -> vec2<f32> {
+  let a10 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[0]);
+  let a01 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[1]);
+  var p0 = cmul(a01, dc);
+  var p1 = a10;
+  var q0 = a01;
+  if (k < 2) {
+    *pdz = p1;
+    *pdc = q0;
+    return p0 + cmul(p1, dz);
+  }
+  let a20 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[2]);
+  let a11 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[3]);
+  let a02 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[4]);
+  let a11dc = cmul(a11, dc);
+  p0 = p0 + cmul(a02, dc2);
+  p1 = p1 + a11dc;
+  var p2 = a20;
+  q0 = q0 + 2.0 * cmul(a02, dc);
+  var q1 = a11;
+  if (k < 3) {
+    *pdz = p1 + 2.0 * cmul(p2, dz);
+    *pdc = q0 + cmul(q1, dz);
+    return p0 + cmul(p1 + cmul(p2, dz), dz);
+  }
+  let a30 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[5]);
+  let a21 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[6]);
+  let a12 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[7]);
+  let a03 = jet_coeff_f32(mandelbrotJetSuite[entry].coeffs[8]);
+  let a12dc2 = cmul(a12, dc2);
+  p0 = p0 + cmul(a03, dc3);
+  p1 = p1 + a12dc2;
+  p2 = p2 + cmul(a21, dc);
+  let p3 = a30;
+  q0 = q0 + 3.0 * cmul(a03, dc2);
+  q1 = q1 + 2.0 * cmul(a12, dc);
+  let q2 = a21;
+  *pdz = p1 + cmul(2.0 * p2 + 3.0 * cmul(p3, dz), dz);
+  *pdc = q0 + cmul(q1 + cmul(q2, dz), dz);
+  return p0 + cmul(p1 + cmul(p2 + cmul(p3, dz), dz), dz);
+}
+
+// Jet skip attempt: greedy on skip via the r3 gates (hoisted per-level
+// registers then the per-block radius buffer), then the SMALLEST valid order
+// (design D2) — a far-inside entry pays an affine-sized evaluation. Works on
+// both paths (dz always fe here). `lvlR3` is the caller-hoisted copy of the
+// level directory's maxR3 gates: a failing level probe costs ZERO memory reads
+// (the skip is recomputed from the power-of-two scaffold), and the directory
+// itself is only read once a level gate passes.
+// `dcF/dcF2/dcF3` + `f32Ok` drive the plain-f32 fast path (#4): the caller sets
+// f32Ok only when its dz/dc live at f32 scale (shallow loop, |dc| > 2^-42 so
+// the dc powers clear the subnormal band); the deep loop passes zeros + false.
+fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR3: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, dcF2: vec2<f32>, dcF3: vec2<f32>, f32Ok: bool) -> i32 {
+  if (*ref_i <= 0) {
+    return 0;
+  }
+  let log2_dz = log2(max(length((*dz).m), 1e-30)) + f32((*dz).e);
+  let shiftedRef = *ref_i - 1;
+  var level = min(min(i32(mandelbrot.blaLevelCount), JET_MAX_LEVELS) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
+  while (level >= 0) {
+    // Levels are the power-of-two scaffold: skip = levels[0].skip << level.
+    let skip = i32(1u << u32(skip0Log + level));
+    if (log2_dz < (*lvlR3)[level] && *ref_i + skip <= maxIterI) {
+      let levelInfo = mandelbrotJetLevels[level];
+      let slot = shiftedRef >> u32(skip0Log + level);
+      if (u32(slot) < levelInfo.count) {
+        let entry = i32(levelInfo.offset) + slot;
+        // One coalesced 16 B read (vec4: x=r1, y=r2, z=r3) — the 108 B
+        // coefficient record stays untouched until a block actually applies.
+        let radii = mandelbrotJetRadii[entry].v;
+        // r3 gates the block before the order descent.
+        if (log2_dz < radii.z) {
+          var k = 3;
+          if (log2_dz < radii.x) {
+            k = 1;
+          } else if (log2_dz < radii.y) {
+            k = 2;
+          }
+          var pdz: fe;
+          var pdc: fe;
+          var phi: fe;
+          // (#4) Plain-f32 fast path: radii.w is the build-side "all shipped
+          // coefficient exponents fit f32" flag — free, it rides the same vec4
+          // load as the radii. log2_dz > -100 keeps the dz-side products clear
+          // of the f32 subnormal band; everything else pays the fe evaluator.
+          if (f32Ok && radii.w > 0.5 && log2_dz > -100.0) {
+            var pdzF = vec2<f32>(0.0);
+            var pdcF = vec2<f32>(0.0);
+            let phiF = jet_apply_f32(entry, k, fe_to_vec(*dz), dcF, dcF2, dcF3, &pdzF, &pdcF);
+            phi = fe_from_vec(phiF, 0);
+            pdz = fe_from_vec(pdzF, 0);
+            pdc = fe_from_vec(pdcF, 0);
+          } else {
+            phi = jet_apply(entry, k, *dz, dc, dc2, dc3, &pdz, &pdc);
+          }
+          let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(phi);
+          // Do not jump over the first escape (same rule as the BLA paths).
+          if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+            *dz = phi;
+            *zOut = candidateZ;
+            // der' = ∂Φ/∂z·der + ∂Φ/∂c. (#3) Small ∂Φ/∂z exponents — the norm
+            // on the slow dynamics that dominate wall-clock — fold into the
+            // MANTISSA (ldexp, exact) instead of derS: derS and its exp()
+            // caches stay valid, eliding der_refresh_cache's two exp(). The
+            // loop's DER_RENORM window absorbs the drift (≤ 2^16 per
+            // application against a 2^±26 window, re-checked every turn, so it
+            // cannot compound past f32). Large exponents keep the derS fold +
+            // cache refresh (as the deep Padé path does for A/M²).
+            if (abs(pdz.e) <= JET_DER_EXP_FOLD) {
+              *derM = ldexp(cmul(*derM, pdz.m), vec2<i32>(pdz.e))
+                    + pdc.m * exp(clamp(f32(pdc.e) * LN2 - *derS, -80.0, 80.0));
+            } else {
+              *derM = cmul(*derM, pdz.m);
+              *derS = *derS + f32(pdz.e) * LN2;
+              *derM = *derM + pdc.m * exp(clamp(f32(pdc.e) * LN2 - *derS, -80.0, 80.0));
+              der_refresh_cache(derM, derS, derInvScale, epsThreshold, logEpsilon);
+            }
+            *ref_i += skip;
+            return skip;
+          }
+        }
+      }
+    }
+    level -= 1;
+  }
+  return 0;
+}
+
 fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_dzx: f32, prev_dzy: f32) -> FragOut {
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
@@ -834,15 +1130,35 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   var shadingHeight = 0.0;
   var shadingAngle = 0.0;
 
-  // BLA acceleration in the deep path: skip iteration blocks when |dz| is small.
-  // BLA (affine) and Padé (rational, floatexp) both run on the deep path;
-  // try_apply_bla_deep branches on approximationMode ≥ 1.5.
+  // Block acceleration in the deep path: skip iteration blocks when |dz| is
+  // small. Affine BLA and Padé share try_apply_bla_deep (mode ≥ 1.5 branches to
+  // Padé); jet mode (≥ 2.5) uses its own table and try_apply_jet.
+  let isJetDeep = mandelbrot.approximationMode >= 2.5;
   let useBlaDeep = mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5;
   var skip0Log = 0;
   var log_dcMag = 0.0;
   if (useBlaDeep) {
-    skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
+    if (isJetDeep) {
+      skip0Log = i32(countTrailingZeros(max(mandelbrotJetLevels[0].skip, 1u)));
+    } else {
+      skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
+    }
     log_dcMag = log(max(length(dc.m), 1e-30)) + f32(dc.e) * LN2;
+  }
+  var jetMaxR3Deep = -3.0e38;
+  var dcDeep2 = fe(vec2<f32>(0.0, 0.0), 0);
+  var dcDeep3 = fe(vec2<f32>(0.0, 0.0), 0);
+  // Hoisted per-level maxR3 gates (see the shallow loop's jetLvlR3).
+  var jetLvlR3Deep: array<f32, JET_MAX_LEVELS>;
+  if (useBlaDeep && isJetDeep) {
+    dcDeep2 = fe_cmul(dc, dc);
+    dcDeep3 = fe_cmul(dcDeep2, dc);
+    // Global fast-reject bound (see the shallow loop's jetMaxR3).
+    for (var l = 0; l < min(i32(mandelbrot.blaLevelCount), JET_MAX_LEVELS); l++) {
+      let r = mandelbrotJetLevels[l].maxR3;
+      jetLvlR3Deep[l] = r;
+      jetMaxR3Deep = max(jetMaxR3Deep, r);
+    }
   }
   var usedBla = false;
 
@@ -851,7 +1167,13 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     var skipped = 0;
     if (useBlaDeep) {
       var blaZ = vec2<f32>(0.0);
-      skipped = try_apply_bla_deep(&ref_i, &dz, &derM, &derS, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, log_dcMag, muLimit, skip0Log, globalMaxIterI);
+      if (isJetDeep) {
+        if (log2(max(length(dz.m), 1e-30)) + f32(dz.e) < jetMaxR3Deep) {
+          skipped = try_apply_jet(&ref_i, &dz, &derM, &derS, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), false);
+        }
+      } else {
+        skipped = try_apply_bla_deep(&ref_i, &dz, &derM, &derS, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, log_dcMag, muLimit, skip0Log, globalMaxIterI);
+      }
       if (skipped > 0) {
         usedBla = true;
         z = blaZ;

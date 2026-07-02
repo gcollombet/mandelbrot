@@ -266,6 +266,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   ],
   activateAnimate: false,
   debugShading: false,
+  debugView: 0,
   approximationMode: 'perturbation',
   blaEpsilon: 1e-3,
   maxBlaSkip: 65536,
@@ -391,7 +392,7 @@ function applyApproximationToEngine() {
   const engine = mandelbrotEngine.value;
   if (!engine) return;
   const raw = mandelbrotParams.value.approximationMode;
-  const mode: ApproximationMode = raw === 'bla' || raw === 'pade' ? raw : 'perturbation';
+  const mode: ApproximationMode = raw === 'bla' || raw === 'pade' || raw === 'jet' ? raw : 'perturbation';
   engine.setApproximationMode(mode);
 }
 
@@ -541,6 +542,14 @@ watch(
 watch(
   () => mandelbrotParams.value.approximationMode,
   () => { applyApproximationToEngine(); },
+);
+
+// Debug overlay: driven straight into the engine (deliberately OUTSIDE the
+// renderOptions/persistence flow — the params normalizers rewrite the model
+// and would re-trigger in a loop).
+watch(
+  () => mandelbrotParams.value.debugView,
+  (v) => { mandelbrotEngine.value?.setDebugView(Number(v ?? 0)); },
 );
 
 watch(
@@ -782,6 +791,7 @@ async function triggerQuickSnapshot() {
   stripExplorationStateFields(savedValue);
   delete (savedValue as any).activateAnimate;
   delete (savedValue as any).debugShading;
+  delete (savedValue as any).debugView;
   savedValue.animation = normalizeAnimationConfig(savedValue.animation, savedValue.animationSpeed);
   savedValue.animationSpeed = savedValue.animation.globalSpeed;
   await savePresetEntry(savedValue, thumbnail);
@@ -1588,6 +1598,7 @@ function startTravelToPreset(preset: PresetRecord) {
       :colorStops="mandelbrotParams.colorStops"
       :activateAnimate="mandelbrotParams.activateAnimate"
       :debugShading="mandelbrotParams.debugShading"
+      :debugView="mandelbrotParams.debugView ?? 0"
       :dprMultiplier="mandelbrotParams.dprMultiplier"
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
       :targetFps="mandelbrotParams.targetFps"

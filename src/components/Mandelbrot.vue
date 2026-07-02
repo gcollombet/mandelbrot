@@ -89,6 +89,7 @@ const props = withDefaults(defineProps<{
   aaAuto?: boolean,
   activateAnimate?: boolean,
   debugShading?: boolean,
+  debugView?: number,
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
   targetFps?: number,
@@ -155,6 +156,7 @@ const props = withDefaults(defineProps<{
         aaAuto: false,
         activateAnimate: false,
         debugShading: false,
+        debugView: 0,
        dprMultiplier: 1.0,
        maxIterationMultiplier: 0.1,
        targetFps: 60,
@@ -270,6 +272,7 @@ async function draw() {
         interpolationMode: props.interpolationMode,
         activateAnimate: props.activateAnimate,
         debugShading: props.debugShading,
+        debugView: props.debugView ?? 0,
         tessellationLevel: props.tessellationLevel,
         displacementAmount: props.displacementAmount,
         animation: normalizeAnimationConfig(props.animation, props.animationSpeed),
@@ -326,6 +329,7 @@ watch(
   }
 );
 
+
 async function initWebGPU() {
   if (!canvasRef.value) return;
   canvas = canvasRef.value;
@@ -369,6 +373,7 @@ async function initWebGPU() {
     interpolationMode: props.interpolationMode,
     activateAnimate: props.activateAnimate,
     debugShading: props.debugShading,
+    debugView: props.debugView ?? 0,
     tessellationLevel: props.tessellationLevel,
     displacementAmount: props.displacementAmount,
     animation: normalizeAnimationConfig(props.animation, props.animationSpeed),
@@ -475,7 +480,7 @@ defineExpose({
   initialize: async () => initWebGPU(),
   useBla: () => engine?.setApproximationMode('bla'),
   usePerturbation: () => engine?.setApproximationMode('perturbation'),
-  setApproximationMode: (mode: 'bla' | 'perturbation' | 'pade') => engine?.setApproximationMode(mode),
+  setApproximationMode: (mode: 'bla' | 'perturbation' | 'pade' | 'jet') => engine?.setApproximationMode(mode),
   getApproximationMode: () => engine?.getApproximationMode(),
   setBlaEpsilon: (epsilon: number) => engine?.setBlaEpsilon(epsilon),
   setPrecisionBudget: (targetScale: string) => engine?.setPrecisionBudget(targetScale),

@@ -375,10 +375,18 @@ const gpuLoadFmt = (v: number) => '×' + v.toFixed(2);
 // These read the resolved model value (the slider carries an index, not the step).
 const zoomBrushFmt = () => String(model.value.zoomMinBrushStep);
 const sentinelStepFmt = () => String(model.value.sentinelSeedStep);
+const debugViewOptions = [
+  { label: 'Off', value: 0 },
+  { label: 'Cout', value: 1 },
+  { label: 'Skip', value: 2 },
+  { label: 'Mix', value: 3 },
+  { label: 'Probes', value: 4 },
+];
 const approximationOptions = [
   { label: 'Perturbation', value: 'perturbation' },
   { label: 'BLA', value: 'bla' },
   { label: 'Padé', value: 'pade' },
+  { label: 'Jet', value: 'jet' },
 ];
 
 // ── Dense field formatters (Palettes) ────────────────────────────────
@@ -2701,6 +2709,19 @@ async function importSkyboxTexture(event: Event) {
             <span class="fld-lab">Max skip</span>
             <span class="fld-val">Auto</span>
           </div>
+        </div>
+
+        <!-- Block-skipping diagnostic overlay (mandelbrot_debug.wgsl): renders an
+             instrumented recompute as colors. Cout = loop turns heat, Skip =
+             average applied block length, Mix = exact/low/high-order iteration
+             composition (RGB), Probes = table probes per turn. -->
+        <div class="fields" v-if="model.approximationMode !== 'perturbation'">
+          <DenseSelect
+            label="Debug view"
+            :options="debugViewOptions"
+            :model-value="model.debugView ?? 0"
+            @update:model-value="(v: string | number) => model.debugView = Number(v)"
+          />
         </div>
 
         <div class="fields">

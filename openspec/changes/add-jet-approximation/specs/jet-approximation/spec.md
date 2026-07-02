@@ -62,16 +62,20 @@ comparison |z| < r_k (log-space on the deep path). The jet path SHALL NOT evalua
   existing per-level whole-level rejection gate)
 
 ### Requirement: Guard subsumption at order 1
-The computed radii SHALL reproduce the protective behaviour of the removed guards: on a
-block straddling a near-critical reference step (where the current `min_a` guard
-rejects), the order-1 radius SHALL be r₁ = 0, while r_k for k ≥ 2 MAY remain positive
+The computed radii SHALL reproduce the protective behaviour of the removed guards: on
+blocks straddling a near-critical reference step (where the current `min_a` guard
+rejects), the order-1 radius SHALL collapse to r₁ = 0 on the majority of such blocks,
+and on any such block where (V) still admits order 1 (the guard being a conservative
+heuristic while (V) is a computed radius), the order-1 application SHALL verifiably
+remain within the ½ε(|A₁₀||z| + |A₀₁|c_max) budget. Orders k ≥ 2 MAY remain positive
 and admit the block.
 
-#### Scenario: Near-critical block, order 1 rejected
-- **WHEN** radii are built for a block whose steps include |2Z_j| small enough to
+#### Scenario: Near-critical block, order 1 protected
+- **WHEN** radii are built for blocks whose steps include |2Z_j| small enough to
   trigger today's `min_a` guard at the current view's c_max and ε
-- **THEN** r₁ = 0 for that block and the CPU harness confirms orders k ≥ 2 pass
-  through it within the remainder bound
+- **THEN** r₁ = 0 on the majority of those blocks; every remaining one passes a direct
+  remainder check at |z| = 0.9·r₁; and the CPU harness confirms orders k ≥ 2 pass
+  through within the remainder bound
 
 ### Requirement: Adaptive-order evaluation with prefix layout
 The GPU table SHALL store per block the radii r₁…r_K followed by coefficients sorted by
