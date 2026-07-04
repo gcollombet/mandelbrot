@@ -1,0 +1,2150 @@
+// Möbius-c+ block skipping (add-mobius-cplus).
+//
+// The c-augmented Möbius form m(z, c) = ((A + A'·c)·z + B·c) / (1 + (D + D'·c)·z)
+// is the Padé [1/1] vehicle plus two c-linear coefficients chosen to exactly
+// annihilate the zc and z²c cross-terms of the block map — the terms guard (G)
+// exists for. Coefficients derive from the block's bivariate jet (jet.rs, used
+// here as a build-only tool); validity is ONE certified entry radius per block
+// from the compensated remainder Q plus a Cauchy tail (rule (V), note §4).
+// Source math: MOBIUS_CPLUS_IMPLEMENTATION.md (externally verified).
+#![allow(dead_code)] // consumed progressively by the add-mobius-cplus tasks
+
+use crate::jet::{
+    cfe_to_coeff, fe_exp2, fe_is_inf, jet_idx, jet_majorant_pre, CFe, JetCoeffFe, JetF64,
+    JetLevel, JET_DS, JET_MONOMIALS, JET_NCOEFF,
+};
+
+// ── coefficient extraction (note §3) ───────────────────────────────────────────
+
+/// The five complex block coefficients. `degenerate` marks c₁₀ = 0 blocks
+/// (prefix blocks from Z₀ = 0): their radius is −∞ and they are never applied.
+#[derive(Clone, Copy, Debug)]
+pub struct MobiusCPlus {
+    pub a: CFe,  // A  = c₁₀
+    pub b: CFe,  // B  = c₀₁
+    pub d: CFe,  // D  = −c₂₀/c₁₀            (Padé [1/1])
+    pub ap: CFe, // A' = c₁₁ + B·D           (annihilates zc)
+    pub dp: CFe, // D' = −(c₂₁ + D·c₁₁)/A    (annihilates z²c)
+    pub degenerate: bool,
+}
+
+pub fn mobius_from_jet(jet: &JetF64) -> MobiusCPlus {
+    let c10 = jet.coeff(1, 0);
+    let c01 = jet.coeff(0, 1);
+    if c10.is_zero() {
+        return MobiusCPlus {
+            a: CFe::ZERO,
+            b: c01,
+            d: CFe::ZERO,
+            ap: CFe::ZERO,
+            dp: CFe::ZERO,
+            degenerate: true,
+        };
+    }
+    let c20 = jet.coeff(2, 0);
+    let c11 = jet.coeff(1, 1);
+    let c21 = jet.coeff(2, 1);
+    let a = c10;
+    let b = c01;
+    let d = c20.div(c10).neg();
+    let ap = c11.add(b.mul(d));
+    let dp = c21.add(d.mul(c11)).div(a).neg();
+    MobiusCPlus { a, b, d, ap, dp, degenerate: false }
+}
+
+// ── compensated remainder Q (note §4.1) ────────────────────────────────────────
+
+/// Taylor coefficients (degree ≤ D_s) of Q = (1 + (D + D'c)z)·Φ − ((A + A'c)z + Bc):
+/// q_ij = c_ij + D·c_{i−1,j} + D'·c_{i−1,j−1} minus {A at (1,0), A' at (1,1),
+/// B at (0,1)} — out-of-range indices contribute 0. By construction
+/// q₁₀ = q₀₁ = q₂₀ = q₁₁ = q₂₁ = 0; verifying that numerically is the
+/// build-integrity check of the extraction (mobius_q_integrity_log2).
+pub fn mobius_q(jet: &JetF64, m: &MobiusCPlus) -> [CFe; JET_NCOEFF] {
+    let mut q = [CFe::ZERO; JET_NCOEFF];
+    for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+        let (i, j) = (i as usize, j as usize);
+        let mut v = jet.a[n];
+        if i >= 1 && i - 1 + j >= 1 {
+            v = v.add(m.d.mul(jet.coeff(i - 1, j)));
+        }
+        if i >= 1 && j >= 1 && i + j >= 3 {
+            v = v.add(m.dp.mul(jet.coeff(i - 1, j - 1)));
+        }
+        match (i, j) {
+            (1, 0) => v = v.sub(m.a),
+            (1, 1) => v = v.sub(m.ap),
+            (0, 1) => v = v.sub(m.b),
+            _ => {}
+        }
+        q[n] = v;
+    }
+    q
+}
+
+/// Worst |q_ij| / scale over the five constructed zeros, in log2 (−∞ when every
+/// zero is exact). Scale per slot is the LARGEST term entering the cancellation
+/// (|c_ij|, |D·c_{i−1,j}|, |D'·c_{i−1,j−1}|, the subtracted block coefficient) —
+/// the honest rounding scale: it verifies the formulas, not that the
+/// cancellation is benign.
+pub fn mobius_q_integrity_log2(jet: &JetF64, m: &MobiusCPlus, q: &[CFe; JET_NCOEFF]) -> f64 {
+    let l2 = |v: &CFe| v.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let mut worst = f64::NEG_INFINITY;
+    for &(i, j) in &[(1usize, 0usize), (0, 1), (2, 0), (1, 1), (2, 1)] {
+        let qv = q[jet_idx(i, j)];
+        let Some(ql) = qv.log2_mag() else { continue };
+        let mut scale = l2(&jet.coeff(i, j));
+        if i >= 1 && i - 1 + j >= 1 {
+            scale = scale.max(l2(&m.d.mul(jet.coeff(i - 1, j))));
+        }
+        if i >= 1 && j >= 1 && i + j >= 3 {
+            scale = scale.max(l2(&m.dp.mul(jet.coeff(i - 1, j - 1))));
+        }
+        scale = scale.max(match (i, j) {
+            (1, 0) => l2(&m.a),
+            (0, 1) => l2(&m.b),
+            (1, 1) => l2(&m.ap),
+            _ => f64::NEG_INFINITY,
+        });
+        if scale.is_finite() {
+            worst = worst.max(ql - scale);
+        }
+    }
+    worst
+}
+
+// ── level build (orbit-keyed stage) ────────────────────────────────────────────
+
+/// One block's orbit-keyed data: the five coefficients plus the |q_ij| moduli
+/// (log2; −∞ for zeros, including the five constructed zeros — their f64
+/// residue is rounding noise ~2^−52 relative, far below any usable ε). The
+/// full jet is dropped after extraction: unlike jet mode, Möbius-c+ never
+/// ships jets, so levels here are ~5× lighter than JetLevelF64.
+#[derive(Clone, Debug)]
+pub struct MobiusBlock {
+    pub m: MobiusCPlus,
+    pub log2_q: [f64; JET_NCOEFF],
+}
+
+pub struct MobiusLevel {
+    pub skip: usize,
+    pub blocks: Vec<MobiusBlock>,
+}
+
+fn block_from_jet(jet: &JetF64) -> MobiusBlock {
+    let m = mobius_from_jet(jet);
+    let mut log2_q = [f64::NEG_INFINITY; JET_NCOEFF];
+    if !m.degenerate {
+        let q = mobius_q(jet, &m);
+        for (n, v) in q.iter().enumerate() {
+            log2_q[n] = v.log2_mag().unwrap_or(f64::NEG_INFINITY);
+        }
+        // The five constructed zeros are exact by design (verified by the
+        // integrity test); their stored residue would only pollute REST.
+        for &(i, j) in &[(1usize, 0usize), (0, 1), (2, 0), (1, 1), (2, 1)] {
+            log2_q[jet_idx(i, j)] = f64::NEG_INFINITY;
+        }
+    }
+    MobiusBlock { m, log2_q }
+}
+
+/// Build every merge-tree level from skip 1 up to `max_skip`, extracting the
+/// Möbius data per block and keeping only two jet levels alive at a time
+/// (streaming compose — the jets are a build-only tool here). ALL levels are
+/// retained (skip 1 and 2 included): the §4.4 merge validity chain walks the
+/// tree from the leaves. Emission to the GPU filters on skip ≥ MIN_BLA_SKIP.
+/// Block geometry matches the BLA scaffold: slot s of a level covers the
+/// `skip` reference steps applied from ref index 1 + s·skip.
+pub fn mobius_build_levels(orbit: &[(f64, f64)], max_skip: usize) -> Vec<MobiusLevel> {
+    mobius_build_levels_with(orbit, max_skip, false)
+}
+
+/// `plain = true` extracts the plain-Möbius variant (A' = D' = 0) — the census
+/// baseline (task 2.7); identical geometry, same radius machinery downstream.
+pub fn mobius_build_levels_with(
+    orbit: &[(f64, f64)],
+    max_skip: usize,
+    plain: bool,
+) -> Vec<MobiusLevel> {
+    let extract: fn(&JetF64) -> MobiusBlock =
+        if plain { block_from_jet_plain } else { block_from_jet };
+    let orbit_len = orbit.len();
+    let mut out = Vec::new();
+    if orbit_len < 3 {
+        return out;
+    }
+    let mut prev: Vec<JetF64> =
+        (1..orbit_len).map(|i| crate::jet::jet_seed(orbit[i].0, orbit[i].1)).collect();
+    out.push(MobiusLevel { skip: 1, blocks: prev.iter().map(extract).collect() });
+    let mut skip = 1usize;
+    while skip < max_skip && skip * 2 < orbit_len {
+        let n = prev.len() / 2;
+        if n == 0 {
+            break;
+        }
+        let cur: Vec<JetF64> = (0..n)
+            .map(|i| crate::jet::jet_compose(&prev[2 * i], &prev[2 * i + 1]))
+            .collect();
+        skip *= 2;
+        out.push(MobiusLevel { skip, blocks: cur.iter().map(extract).collect() });
+        prev = cur;
+    }
+    out
+}
+
+// ── bounds (R_c-keyed stage): M_Q per anisotropic polydisc (note §4.2) ────────
+
+/// The anisotropic polydisc grid: R_z ∈ {3e-2, 1e-2, 1e-3} × R_c = s·c_max.
+/// The note's s ∈ {3e3, 3e5} is calibrated for DEEP zoom (c_max ≤ 1e-12); at
+/// interactive c_max (~1e-5) those rungs make R_c = 0.03..3 and the majorant
+/// walk's +R_c-per-step c-channel explodes for blocks past ~30 steps — every
+/// long block's radius died and the field A/B measured mobius ≥ 2× slower
+/// than Padé. The low rungs {1024, 32} (the jet's ladder, same lived failure)
+/// keep coarse-scale majorants finite; at depth their tail θ_c is merely a
+/// little looser and the note rungs win the max. Candidate index = iz·|S| + is.
+///
+/// Patch v2 Fix 2: the v1 R_z grid {3e-2, 1e-2, 1e-3} MISSED the 1e-4..3e-4
+/// band where the slow long blocks (L ≥ 256 — the ones that carry Padé-class
+/// speed) actually optimize, so their radii were under-certified → shorter
+/// blocks → more applications than Padé. The finer grid restores them; more
+/// candidates only ever RAISE the max-over-candidates radius, so this is safe
+/// (build cost scales with the count — measured marginal).
+pub const MOBIUS_RZ: [f64; 7] = [3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5];
+pub const MOBIUS_S: [f64; 4] = [3e3, 3e5, 1024.0, 32.0];
+pub const MOBIUS_NCAND: usize = MOBIUS_RZ.len() * MOBIUS_S.len();
+
+/// Per-block, per-candidate log2 M_Q (+∞ when the majorant walk saturated: the
+/// candidate polydisc is unusable). Everything else the solve needs is either
+/// in `MobiusBlock` (orbit-keyed) or global (the candidate grid).
+#[derive(Clone, Copy, Debug)]
+pub struct MobiusBounds {
+    pub log2_mq: [f64; MOBIUS_NCAND],
+}
+
+/// Bounds for the whole table: the per-candidate R_c they were walked with
+/// (the headroom stamp — radii re-solves stay valid while c_max ≤ these), plus
+/// per-level per-block M_Q values. Re-walking needs the orbit but NOT the jets.
+pub struct MobiusBoundsTable {
+    pub log2_rz: [f64; MOBIUS_NCAND],
+    pub log2_rc: [f64; MOBIUS_NCAND],
+    pub per_level: Vec<Vec<MobiusBounds>>,
+}
+
+fn cfe_log2(v: &CFe) -> f64 {
+    v.log2_mag().unwrap_or(f64::NEG_INFINITY)
+}
+
+/// log2(Σ 2^l) over a slice of log2 magnitudes (−∞ entries ignored).
+fn lse2(terms: &[f64]) -> f64 {
+    let m = terms.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+    if m == f64::NEG_INFINITY || !m.is_finite() {
+        return m;
+    }
+    m + terms.iter().map(|l| (l - m).exp2()).sum::<f64>().log2()
+}
+
+/// Walk the scalar majorant for every (block, candidate) and assemble
+/// M_Q = (1 + |D|R_z + |D'|R_zR_c)·M + |A|R_z + |A'|R_zR_c + |B|R_c.
+pub fn mobius_build_bounds(
+    levels: &[MobiusLevel],
+    orbit: &[(f64, f64)],
+    log2_c_max: f64,
+) -> MobiusBoundsTable {
+    let twoz: Vec<(f64, i64)> = orbit
+        .iter()
+        .map(|&(zx, zy)| {
+            let m = 2.0 * (zx * zx + zy * zy).sqrt();
+            if m > 0.0 {
+                let bits = m.to_bits();
+                let be = ((bits >> 52) & 0x7ff) as i64 - 1023;
+                (f64::from_bits((bits & !(0x7ffu64 << 52)) | (1023u64 << 52)), be)
+            } else {
+                (0.0, i64::MIN / 2)
+            }
+        })
+        .collect();
+    let mut log2_rz = [0f64; MOBIUS_NCAND];
+    let mut log2_rc = [0f64; MOBIUS_NCAND];
+    for iz in 0..MOBIUS_RZ.len() {
+        for is in 0..MOBIUS_S.len() {
+            let c = iz * MOBIUS_S.len() + is;
+            log2_rz[c] = MOBIUS_RZ[iz].log2();
+            log2_rc[c] = MOBIUS_S[is].log2() + log2_c_max;
+        }
+    }
+    let per_level = levels
+        .iter()
+        .map(|lvl| {
+            (0..lvl.blocks.len())
+                .map(|slot| {
+                    let blk = &lvl.blocks[slot];
+                    let mut b = MobiusBounds { log2_mq: [f64::INFINITY; MOBIUS_NCAND] };
+                    if blk.m.degenerate {
+                        return b;
+                    }
+                    let first = 1 + slot * lvl.skip;
+                    let seg = &twoz[first..first + lvl.skip];
+                    let la = cfe_log2(&blk.m.a);
+                    let lb = cfe_log2(&blk.m.b);
+                    let ld = cfe_log2(&blk.m.d);
+                    let lap = cfe_log2(&blk.m.ap);
+                    let ldp = cfe_log2(&blk.m.dp);
+                    for c in 0..MOBIUS_NCAND {
+                        let m = jet_majorant_pre(
+                            seg,
+                            fe_exp2(log2_rz[c]),
+                            fe_exp2(log2_rc[c]),
+                        );
+                        if fe_is_inf(&m) {
+                            continue;
+                        }
+                        let log2_m = m.log2_mag().unwrap_or(f64::NEG_INFINITY);
+                        let fac = lse2(&[
+                            0.0,
+                            ld + log2_rz[c],
+                            ldp + log2_rz[c] + log2_rc[c],
+                        ]);
+                        b.log2_mq[c] = lse2(&[
+                            fac + log2_m,
+                            la + log2_rz[c],
+                            lap + log2_rz[c] + log2_rc[c],
+                            lb + log2_rc[c],
+                        ]);
+                    }
+                    b
+                })
+                .collect()
+        })
+        .collect();
+    MobiusBoundsTable { log2_rz, log2_rc, per_level }
+}
+
+// ── certified radius: condition (V) by descending geometric scan (note §4.3) ──
+
+/// Scan grid: 0.1 decade steps from 0.999·R_z down to 1e-16 (the note's grid).
+/// The condition is not guaranteed monotone in x, so bisection is UNSOUND here
+/// (unlike the jet's monotone H_k); the first success from above wins — validity
+/// at the accepted x is certified pointwise by (V) itself.
+const SCAN_STEP_LOG2: f64 = 0.332_192_809_488_736_2; // 0.1 decade
+const SCAN_FLOOR_LOG2: f64 = -53.150_849_518_197_8; // 1e-16
+
+/// Solve (V) for one block: largest log2 x with
+/// REST(x, c_max)/DEN(x, c_max) ≤ ½·ε·(|A|·x + |B|·c_max) and DEN > 0.5,
+/// maximized over the candidate polydiscs. −∞ when no scan point certifies.
+pub fn mobius_solve_radius(
+    blk: &MobiusBlock,
+    bounds: &MobiusBounds,
+    table: &MobiusBoundsTable,
+    epsilon: f64,
+    log2_c_max: f64,
+) -> f64 {
+    if blk.m.degenerate {
+        return f64::NEG_INFINITY;
+    }
+    let la = cfe_log2(&blk.m.a);
+    let lb = cfe_log2(&blk.m.b);
+    let ld = cfe_log2(&blk.m.d);
+    let ldp = cfe_log2(&blk.m.dp);
+    let log2_half_eps = epsilon.log2() - 1.0;
+    // Power-of-x coefficients of the stored REST terms: C_i = Σ_j |q_ij|·c_max^j,
+    // shared by every candidate and scan point.
+    let mut cpow = [f64::NEG_INFINITY; JET_DS + 1];
+    for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+        let l = blk.log2_q[n];
+        if l == f64::NEG_INFINITY {
+            continue;
+        }
+        let t = l + j as f64 * log2_c_max;
+        let slot = &mut cpow[i as usize];
+        *slot = if *slot == f64::NEG_INFINITY { t } else { lse2(&[*slot, t]) };
+    }
+    let mut best = f64::NEG_INFINITY;
+    for c in 0..MOBIUS_NCAND {
+        let log2_mq = bounds.log2_mq[c];
+        if !log2_mq.is_finite() {
+            continue; // saturated majorant
+        }
+        let log2_rz = table.log2_rz[c];
+        let start = log2_rz + (0.999f64).log2();
+        if start <= best {
+            continue; // cannot beat the current best radius
+        }
+        let log2_theta_c = log2_c_max - table.log2_rc[c];
+        if log2_theta_c >= -1e-9 {
+            continue; // θ_c ≥ 1: the Cauchy tail diverges on this polydisc
+        }
+        let mut x = start;
+        while x >= SCAN_FLOOR_LOG2 {
+            if x <= best {
+                break; // remaining scan points cannot improve the max
+            }
+            // DEN(x, c_max) > 0.5, computed in linear domain (values ≤ O(1)).
+            let d1 = ld + x;
+            let d2 = ldp + x + log2_c_max;
+            let den = 1.0
+                - if d1 > -80.0 { d1.exp2() } else { 0.0 }
+                - if d2 > -80.0 { d2.exp2() } else { 0.0 };
+            if den > 0.5 {
+                let rhs = log2_half_eps + lse2(&[la + x, lb + log2_c_max]);
+                // Σ REST terms / 2^rhs, accumulated in linear domain.
+                let mut acc = 0.0f64;
+                for (i, &ci) in cpow.iter().enumerate() {
+                    if ci == f64::NEG_INFINITY {
+                        continue;
+                    }
+                    let t = ci + i as f64 * x - rhs;
+                    if t > 62.0 {
+                        acc = f64::INFINITY;
+                        break;
+                    }
+                    if t > -62.0 {
+                        acc += t.exp2();
+                    }
+                }
+                if acc <= den {
+                    let ltheta = (x - log2_rz).max(log2_theta_c);
+                    let theta = ltheta.exp2();
+                    let tail = log2_mq
+                        + (JET_DS + 1) as f64 * ltheta
+                        + (((JET_DS + 2) as f64 - (JET_DS + 1) as f64 * theta)
+                            / ((1.0 - theta) * (1.0 - theta)))
+                            .log2();
+                    let t = tail - rhs;
+                    if t <= 62.0 {
+                        if t > -62.0 {
+                            acc += t.exp2();
+                        }
+                        if acc <= den {
+                            best = best.max(x);
+                            break; // first success from above on this candidate
+                        }
+                    }
+                }
+            }
+            x -= SCAN_STEP_LOG2;
+        }
+    }
+    best
+}
+
+// ── full radii build ──────────────────────────────────────────────────────────
+
+/// Solve every block's certified (V) radius. Returns log2 radii aligned with
+/// `levels`.
+///
+/// Patch v2 Fix 1: NO merge validity chain. The §4.4 intermediate-validity cap
+/// `r ← min(r_formula, r_x, r_y/(|A_x| + r_y·|D_x|))` is the Möbius-SIMPLE rule
+/// (single-step transport). For c+ the scalar majorant walks EVERY step of the
+/// block, so condition (V) already certifies the whole COMPOSED map on
+/// `|z| ≤ r_formula, |c| ≤ c_max, DEN > 0.5` — the intermediate point is inside
+/// that box by construction, nothing to add. Keeping the cap was actively
+/// harmful: `|D_x| ≈ 4e3` at near-critical passages collapsed the radius
+/// (measured ÷1.6e6 on the seahorse 38→40 block) and the `min` propagated
+/// recursively to every ancestor, dropping the whole near-critical region back
+/// to exact stepping — the dominant slowness the field A/B saw.
+pub fn mobius_build_radii(
+    levels: &[MobiusLevel],
+    bounds: &MobiusBoundsTable,
+    epsilon: f64,
+    log2_c_max: f64,
+) -> Vec<Vec<f64>> {
+    levels
+        .iter()
+        .zip(bounds.per_level.iter())
+        .map(|(lvl, blv)| {
+            lvl.blocks
+                .iter()
+                .zip(blv.iter())
+                .map(|(blk, b)| mobius_solve_radius(blk, b, bounds, epsilon, log2_c_max))
+                .collect()
+        })
+        .collect()
+}
+
+// ── GPU serialization (design D1 + spike 1.1 outcome) ──────────────────────────
+
+/// GPU coefficient record, 60 B: the five block coefficients with PRIVATE
+/// exponents each (the spike measured within-group spreads up to 61 bits —
+/// far past the shared-mantissa budget — so the D1 fallback applies to every
+/// group). Order: A, B, A', D, D'. Orbit-keyed: serialized once per orbit,
+/// never re-uploaded on a radius re-solve.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MobiusCoeffs {
+    pub a: JetCoeffFe,
+    pub b: JetCoeffFe,
+    pub ap: JetCoeffFe,
+    pub d: JetCoeffFe,
+    pub dp: JetCoeffFe,
+}
+
+/// GPU radius sidecar entry, 16 B vec4-packed: x = certified radius (log2
+/// domain, f32; −∞ ⇒ never applied), y = f32-safe fast-path flag (1.0/0.0),
+/// z/w spare. A descent probe reads this 16 B alone; the 60 B coefficient
+/// record is read only on application. Radii are the only (ε, c_max)-dependent
+/// data, so a zoom re-solve re-uploads 16 B/block.
+#[repr(C)]
+#[derive(Copy, Clone, Debug, PartialEq)]
+pub struct MobiusRadius {
+    pub r_log2: f32,
+    pub f32_safe: f32,
+    pub pad0: f32,
+    pub pad1: f32,
+}
+
+/// Largest |log2| a shipped coefficient may have for the block to qualify for
+/// the shader's plain-f32 evaluation (same budget as the jet's fast path).
+pub const MOBIUS_F32_SAFE_LOG2: f64 = 96.0;
+
+/// True when all five coefficients reconstruct inside the f32 range with
+/// Horner headroom — the build-side gate for the shallow fast-path flag.
+pub fn mobius_f32_safe(m: &MobiusCPlus) -> bool {
+    [&m.a, &m.b, &m.ap, &m.d, &m.dp].iter().all(|c| match c.log2_mag() {
+        None => true,
+        Some(l) => l.abs() <= MOBIUS_F32_SAFE_LOG2,
+    })
+}
+
+/// Smallest emitted skip: matches the BLA/jet tables (MIN_BLA_SKIP) — levels
+/// below it exist only for the merge validity chain.
+pub const MOBIUS_MIN_EMIT_SKIP: usize = 4;
+
+/// Serialize the emitted (skip ≥ MOBIUS_MIN_EMIT_SKIP) levels' coefficients
+/// into the flat coefficient buffer. Block ordering matches
+/// `mobius_serialize_radii` exactly (same flat index).
+pub fn mobius_serialize_coeffs(levels: &[MobiusLevel]) -> Vec<MobiusCoeffs> {
+    let mut out = Vec::new();
+    for lvl in levels {
+        if lvl.skip < MOBIUS_MIN_EMIT_SKIP {
+            continue;
+        }
+        for blk in &lvl.blocks {
+            out.push(MobiusCoeffs {
+                a: cfe_to_coeff(&blk.m.a),
+                b: cfe_to_coeff(&blk.m.b),
+                ap: cfe_to_coeff(&blk.m.ap),
+                d: cfe_to_coeff(&blk.m.d),
+                dp: cfe_to_coeff(&blk.m.dp),
+            });
+        }
+    }
+    out
+}
+
+/// Serialize the emitted levels' radii + the level directory (re-emitted on
+/// every (ε, c_max) re-solve; `max_r3_log2` holds the level's largest radius —
+/// the whole-level fast-reject gate, same slot the jet uses).
+pub fn mobius_serialize_radii(
+    levels: &[MobiusLevel],
+    radii: &[Vec<f64>],
+) -> (Vec<MobiusRadius>, Vec<JetLevel>) {
+    let mut out = Vec::new();
+    let mut dir = Vec::new();
+    for (li, lvl) in levels.iter().enumerate() {
+        if lvl.skip < MOBIUS_MIN_EMIT_SKIP {
+            continue;
+        }
+        let offset = out.len() as u32;
+        let mut max_r = f32::NEG_INFINITY;
+        for (slot, blk) in lvl.blocks.iter().enumerate() {
+            let r = radii[li][slot];
+            let r32 = if r.is_finite() { r as f32 } else { f32::NEG_INFINITY };
+            max_r = max_r.max(r32);
+            out.push(MobiusRadius {
+                r_log2: r32,
+                f32_safe: if mobius_f32_safe(&blk.m) { 1.0 } else { 0.0 },
+                pad0: 0.0,
+                pad1: 0.0,
+            });
+        }
+        dir.push(JetLevel {
+            offset,
+            count: lvl.blocks.len() as u32,
+            skip: lvl.skip as u32,
+            max_r3_log2: max_r,
+        });
+    }
+    (out, dir)
+}
+
+// ── application + CPU pixel loop (note §5) ─────────────────────────────────────
+
+/// Plain-Möbius extraction (A' = D' = 0): the census baseline. Same radius
+/// machinery applies — its q₁₁/q₂₁ do NOT vanish (the (G) killers), so its
+/// certified radii can only be ≤ the c+ ones (r_c+ ≥ r_Möbius by construction).
+pub fn mobius_from_jet_plain(jet: &JetF64) -> MobiusCPlus {
+    let mut m = mobius_from_jet(jet);
+    m.ap = CFe::ZERO;
+    m.dp = CFe::ZERO;
+    m
+}
+
+/// Orbit-keyed block data for the plain variant (census tool).
+pub fn block_from_jet_plain(jet: &JetF64) -> MobiusBlock {
+    let m = mobius_from_jet_plain(jet);
+    let mut log2_q = [f64::NEG_INFINITY; JET_NCOEFF];
+    if !m.degenerate {
+        let q = mobius_q(jet, &m);
+        for (n, v) in q.iter().enumerate() {
+            log2_q[n] = v.log2_mag().unwrap_or(f64::NEG_INFINITY);
+        }
+        // Only q₁₀/q₀₁/q₂₀ are constructed zeros without A'/D' (q₁₁, q₂₁ live).
+        for &(i, j) in &[(1usize, 0usize), (0, 1), (2, 0)] {
+            log2_q[jet_idx(i, j)] = f64::NEG_INFINITY;
+        }
+    }
+    MobiusBlock { m, log2_q }
+}
+
+/// Apply the block map and its two partials at (z, c):
+/// m = (Ae·z + B·c)/(1 + De·z) with Ae = A + A'·c, De = D + D'·c;
+/// ∂m/∂z = (Ae − m·De)/(1 + De·z); ∂m/∂c = (A'·z + B − m·D'·z)/(1 + De·z).
+pub fn mobius_apply(m: &MobiusCPlus, z: CFe, c: CFe) -> (CFe, CFe, CFe) {
+    let ae = m.a.add(m.ap.mul(c));
+    let de = m.d.add(m.dp.mul(c));
+    let den = CFe::ONE.add(de.mul(z));
+    let phi = ae.mul(z).add(m.b.mul(c)).div(den);
+    let ddz = ae.sub(phi.mul(de)).div(den);
+    let ddc = m.ap.mul(z).add(m.b).sub(phi.mul(m.dp).mul(z)).div(den);
+    (phi, ddz, ddc)
+}
+
+pub struct MobiusPixelResult {
+    /// Loop turns (skip applications + exact steps) — the wall-clock proxy.
+    pub steps: usize,
+    /// Iterations advanced (matches exact stepping when correct).
+    pub iters: usize,
+    /// Block applications (the census unit — never weighted ops).
+    pub applications: usize,
+    pub escaped: bool,
+    /// Distance-estimation derivative dz/d(δc) at exit.
+    pub der: (f64, f64),
+    /// Full-orbit value Z_ref + dz at exit.
+    pub final_z: (f64, f64),
+}
+
+/// CPU port of the Möbius-c+ per-pixel loop (sibling of `jet_run_pixel` and the
+/// shader loops): greedy on skip, ONE validity comparison log2|dz| < r per
+/// probed block — no H2, no min_a/(G), no beta correction, no separate pole
+/// test — exact-step fallback, first-escape rule, Zhuoran rebasing.
+pub fn mobius_run_pixel(
+    levels: &[MobiusLevel],
+    radii: &[Vec<f64>],
+    orbit: &[(f64, f64)],
+    dc: (f64, f64),
+    max_iter: usize,
+) -> MobiusPixelResult {
+    let bailout2 = 4.0_f64;
+    let orbit_len = orbit.len();
+    let cfe = CFe::from_c(dc.0, dc.1);
+    let mut dz = (0.0_f64, 0.0_f64);
+    let mut der = (0.0_f64, 0.0_f64);
+    let mut ref_i = 0usize;
+    let mut iter = 0usize;
+    let mut r = MobiusPixelResult {
+        steps: 0,
+        iters: 0,
+        applications: 0,
+        escaped: false,
+        der,
+        final_z: (0.0, 0.0),
+    };
+    while iter < max_iter {
+        let mut applied = false;
+        if ref_i > 0 {
+            let shifted = ref_i - 1;
+            let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+            let log2_dz = if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+            for (li, lvl) in levels.iter().enumerate().rev() {
+                if shifted % lvl.skip != 0 {
+                    continue;
+                }
+                let slot = shifted / lvl.skip;
+                // Cap on the iteration budget (iter, not ref_i: rebasing resets
+                // ref_i while iter keeps counting) and on the orbit itself.
+                if slot >= lvl.blocks.len()
+                    || iter + lvl.skip > max_iter
+                    || ref_i + lvl.skip >= orbit_len
+                {
+                    continue;
+                }
+                if !(log2_dz < radii[li][slot]) {
+                    continue; // the single validity comparison
+                }
+                let blk = &lvl.blocks[slot];
+                let (phi, pdz, pdc) = mobius_apply(&blk.m, CFe::from_c(dz.0, dz.1), cfe);
+                let cand = phi.to_f64();
+                let zi = orbit[ref_i + lvl.skip];
+                let candz = (zi.0 + cand.0, zi.1 + cand.1);
+                if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 {
+                    continue; // don't jump over the first escape
+                }
+                let (px, py) = pdz.to_f64();
+                let (qx, qy) = pdc.to_f64();
+                der = (px * der.0 - py * der.1 + qx, px * der.1 + py * der.0 + qy);
+                dz = cand;
+                ref_i += lvl.skip;
+                iter += lvl.skip;
+                r.applications += 1;
+                applied = true;
+                break;
+            }
+        }
+        if !applied {
+            let z = orbit[ref_i];
+            let fz = (z.0 + dz.0, z.1 + dz.1);
+            der = (
+                2.0 * (fz.0 * der.0 - fz.1 * der.1) + 1.0,
+                2.0 * (fz.0 * der.1 + fz.1 * der.0),
+            );
+            let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+            let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
+            dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
+            ref_i += 1;
+            iter += 1;
+        }
+        r.steps += 1;
+        if ref_i > orbit_len - 1 {
+            ref_i = orbit_len - 1;
+        }
+        let z = orbit[ref_i];
+        let full = (z.0 + dz.0, z.1 + dz.1);
+        let full2 = full.0 * full.0 + full.1 * full.1;
+        if full2 > bailout2 {
+            r.escaped = true;
+            break;
+        }
+        let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+        if full2 < dz2 || ref_i == orbit_len - 1 {
+            dz = full; // rebasing (der unchanged: Z is dc-independent)
+            ref_i = 0;
+        }
+        if r.steps > max_iter * 2 + 16 {
+            break;
+        }
+    }
+    let z = orbit[ref_i.min(orbit_len - 1)];
+    r.final_z = (z.0 + dz.0, z.1 + dz.1);
+    r.iters = iter;
+    r.der = der;
+    r
+}
+
+// ── tests & spike ───────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::jet::{build_jet_levels, jet_compose, jet_seed};
+
+    type C = (f64, f64);
+
+    fn cm(a: C, b: C) -> C {
+        (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+    }
+
+    fn cdiv(a: C, b: C) -> C {
+        let d = b.0 * b.0 + b.1 * b.1;
+        ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+    }
+
+    fn assert_close(got: C, want: C, tol: f64, what: &str) {
+        let d = ((got.0 - want.0).powi(2) + (got.1 - want.1).powi(2)).sqrt();
+        let m = (want.0 * want.0 + want.1 * want.1).sqrt().max(1e-300);
+        assert!(d / m < tol, "{}: got {:?} want {:?} (rel {})", what, got, want, d / m);
+    }
+
+    fn ref_orbit_f64(cx: f64, cy: f64, max_iter: usize) -> Vec<(f64, f64)> {
+        let mut v = Vec::with_capacity(max_iter + 1);
+        let (mut zx, mut zy) = (0.0_f64, 0.0_f64);
+        v.push((zx, zy));
+        for _ in 0..max_iter {
+            let nx = zx * zx - zy * zy + cx;
+            let ny = 2.0 * zx * zy + cy;
+            zx = nx;
+            zy = ny;
+            v.push((zx, zy));
+            if zx * zx + zy * zy > 1e12 {
+                break;
+            }
+        }
+        v
+    }
+
+    #[test]
+    fn mobius_extraction_matches_direct_formulas() {
+        // (task 2.1) Two- and three-step hand-built jets: A/B/D/A'/D' must equal
+        // the direct note-§3 formulas computed in plain f64 from the jet
+        // coefficients, and the seed's closed forms (D' = 0, A' = D = −1/(2Z)).
+        let z1 = (0.3, -0.4);
+        let z2 = (-0.55, 0.2);
+        let z3 = (0.15, 0.65);
+        let seed = jet_seed(z1.0, z1.1);
+        let j2 = jet_compose(&seed, &jet_seed(z2.0, z2.1));
+        let j3 = jet_compose(&j2, &jet_seed(z3.0, z3.1));
+        for (name, jet) in [("seed", &seed), ("two-step", &j2), ("three-step", &j3)] {
+            let m = mobius_from_jet(jet);
+            assert!(!m.degenerate, "{}: degenerate on O(1) orbit", name);
+            let c10 = jet.coeff(1, 0).to_f64();
+            let c01 = jet.coeff(0, 1).to_f64();
+            let c20 = jet.coeff(2, 0).to_f64();
+            let c11 = jet.coeff(1, 1).to_f64();
+            let c21 = jet.coeff(2, 1).to_f64();
+            let d = { let t = cdiv(c20, c10); (-t.0, -t.1) };
+            let ap = { let t = cm(c01, d); (c11.0 + t.0, c11.1 + t.1) };
+            let dp = {
+                let t = cm(d, c11);
+                let n = (c21.0 + t.0, c21.1 + t.1);
+                let t = cdiv(n, c10);
+                (-t.0, -t.1)
+            };
+            assert_close(m.a.to_f64(), c10, 1e-14, &format!("{} A", name));
+            assert_close(m.b.to_f64(), c01, 1e-14, &format!("{} B", name));
+            assert_close(m.d.to_f64(), d, 1e-13, &format!("{} D", name));
+            assert_close(m.ap.to_f64(), ap, 1e-13, &format!("{} A'", name));
+            assert_close(m.dp.to_f64(), dp, 1e-13, &format!("{} D'", name));
+        }
+        // Seed closed forms: A = 2Z, B = 1, D = −1/(2Z), A' = D, D' = 0.
+        let m = mobius_from_jet(&seed);
+        let a = (2.0 * z1.0, 2.0 * z1.1);
+        assert_close(m.a.to_f64(), a, 1e-14, "seed A = 2Z");
+        assert_close(m.b.to_f64(), (1.0, 0.0), 1e-14, "seed B = 1");
+        let dw = cdiv((-1.0, 0.0), a);
+        assert_close(m.d.to_f64(), dw, 1e-14, "seed D = -1/2Z");
+        assert_close(m.ap.to_f64(), dw, 1e-14, "seed A' = D");
+        assert!(m.dp.is_zero(), "seed D' = 0, got {:?}", m.dp);
+        // Degenerate: a jet whose c₁₀ vanishes (block starting at Z = 0).
+        let m0 = mobius_from_jet(&jet_seed(0.0, 0.0));
+        assert!(m0.degenerate);
+    }
+
+    #[test]
+    fn mobius_q_zeros_on_every_block() {
+        // (task 2.2) The build-integrity invariant: q₁₀/q₀₁/q₂₀/q₁₁/q₂₁ vanish to
+        // ~1e-14 relative on EVERY block of every test orbit, and the leading
+        // surviving q terms match their closed forms (q₃₀ = c₃₀ + D·c₂₀ =
+        // c₃₀ − c₂₀²/c₁₀ — the superconvergence numerator — and q₀₂ = c₀₂).
+        let tol_log2 = (1e-13_f64).log2(); // ~1e-14 relative with CFe headroom
+        for (name, cx, cy, len) in [
+            ("cusp", -0.75_f64, 0.0_f64, 1usize << 12),
+            ("period2", -1.25, 0.0, 1 << 12),
+            ("seahorse", -0.743643887037151, 0.131825904205330, 1 << 12),
+            ("feigenbaum", -1.401155, 0.0, 1 << 13),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, len);
+            if orbit.len() <= len {
+                println!("[{}] escaped — skipped", name);
+                continue;
+            }
+            let levels = build_jet_levels(&orbit, 1, 1 << 18);
+            let mut checked = 0usize;
+            let mut worst = f64::NEG_INFINITY;
+            for lvl in &levels {
+                for jet in &lvl.entries {
+                    let m = mobius_from_jet(jet);
+                    if m.degenerate {
+                        continue;
+                    }
+                    let q = mobius_q(jet, &m);
+                    let integ = mobius_q_integrity_log2(jet, &m, &q);
+                    worst = worst.max(integ);
+                    assert!(
+                        integ <= tol_log2,
+                        "[{}] skip {} block: q-zero integrity 2^{:.1} (rel {:.2e})",
+                        name, lvl.skip, integ, integ.exp2()
+                    );
+                    checked += 1;
+                }
+            }
+            println!(
+                "[{}] q-zeros checked on {} blocks, worst rel 2^{:.1}",
+                name, checked, worst
+            );
+            assert!(checked > 100, "[{}] too few blocks ({})", name, checked);
+            // Closed forms on one mid-level block.
+            let lvl = &levels[4.min(levels.len() - 1)];
+            let jet = &lvl.entries[0];
+            let m = mobius_from_jet(jet);
+            let q = mobius_q(jet, &m);
+            let want_q30 = jet.coeff(3, 0).add(m.d.mul(jet.coeff(2, 0)));
+            let got = q[jet_idx(3, 0)].sub(want_q30);
+            assert!(
+                got.log2_mag().unwrap_or(f64::NEG_INFINITY)
+                    < want_q30.log2_mag().unwrap_or(0.0) - 40.0,
+                "[{}] q30 closed form",
+                name
+            );
+            let dq02 = q[jet_idx(0, 2)].sub(jet.coeff(0, 2));
+            assert!(dq02.is_zero() || dq02.log2_mag().unwrap() < jet.coeff(0, 2).log2_mag().unwrap() - 40.0);
+        }
+    }
+
+    // Exact block walk w ← 2Z·w + w² + c in extended-exponent arithmetic.
+    fn exact_block_walk(
+        orbit: &[(f64, f64)],
+        first: usize,
+        skip: usize,
+        z0: CFe,
+        c: CFe,
+    ) -> CFe {
+        let mut w = z0;
+        for j in 0..skip {
+            let (zx, zy) = orbit[first + j];
+            let a = CFe::from_c(2.0 * zx, 2.0 * zy);
+            w = a.mul(w).add(w.mul(w)).add(c);
+        }
+        w
+    }
+
+    // Shared harness: bounded orbit + levels + bounds + chained radii.
+    fn harness(
+        cx: f64,
+        cy: f64,
+        max_iter: usize,
+        eps: f64,
+        c_max: f64,
+    ) -> Option<(Vec<(f64, f64)>, Vec<MobiusLevel>, MobiusBoundsTable, Vec<Vec<f64>>)> {
+        let orbit = ref_orbit_f64(cx, cy, max_iter);
+        if orbit.len() <= max_iter {
+            return None;
+        }
+        let levels = mobius_build_levels(&orbit, 1 << 18);
+        let bounds = mobius_build_bounds(&levels, &orbit, c_max.log2());
+        let radii = mobius_build_radii(&levels, &bounds, eps, c_max.log2());
+        Some((orbit, levels, bounds, radii))
+    }
+
+    #[test]
+    fn mobius_radius_sound_against_exact_walk() {
+        // (tasks 2.3/2.4) Applying a block at any sampled entry |z| < r, |c| ≤
+        // c_max must stay within ε·(|A|·|z| + |B|·c_max) of the exact block walk —
+        // no runtime guard besides the radius comparison (spec: radius soundness).
+        for (eps, c_max) in [(1e-6_f64, 1e-9_f64), (1e-4, 1e-5), (1e-12, 1e-14)] {
+            let log2_c_max = c_max.log2();
+            for (name, cx, cy) in [
+                ("feigenbaum", -1.401155_f64, 0.0_f64),
+                ("cusp", -0.75, 0.0),
+                ("period2", -1.25, 0.0),
+            ] {
+                let Some((orbit, levels, _bounds, radii)) =
+                    harness(cx, cy, 4096, eps, c_max)
+                else {
+                    panic!("[{}] reference escaped", name);
+                };
+                let mut solved = 0usize;
+                let mut positive = 0usize;
+                for (li, lvl) in levels.iter().enumerate() {
+                    let step = (lvl.blocks.len() / 8).max(1);
+                    for slot in (0..lvl.blocks.len()).step_by(step) {
+                        solved += 1;
+                        let log2_r = radii[li][slot];
+                        if !log2_r.is_finite() {
+                            continue;
+                        }
+                        positive += 1;
+                        let blk = &lvl.blocks[slot];
+                        let first = 1 + slot * lvl.skip;
+                        let la = cfe_log2(&blk.m.a);
+                        let lb = cfe_log2(&blk.m.b);
+                        for (fx, fc, ph) in [
+                            (0.95_f64, 1.0_f64, 0.7_f64),
+                            (0.5, 1.0, 2.1),
+                            (0.95, 0.125, 4.0),
+                            (0.1, 1.0, 5.3),
+                        ] {
+                            let x_log2 = log2_r + fx.log2();
+                            let x = fe_exp2(x_log2);
+                            let z = CFe { x: x.x * ph.cos(), y: x.x * ph.sin(), e: x.e };
+                            let cmag = fe_exp2(log2_c_max + fc.log2());
+                            let c = CFe {
+                                x: cmag.x * (ph * 1.7).cos(),
+                                y: cmag.x * (ph * 1.7).sin(),
+                                e: cmag.e,
+                            };
+                            let (applied, _, _) = mobius_apply(&blk.m, z, c);
+                            let exact = exact_block_walk(&orbit, first, lvl.skip, z, c);
+                            let err = applied.sub(exact);
+                            let Some(err_log2) = err.log2_mag() else { continue };
+                            // The (V) certificate: err ≤ ε·(|A|·r + |B|·c_max)
+                            // for EVERY |z| ≤ r. The tighter |z|-scaled form
+                            // holds at the boundary (fx ≈ 1) but is not implied
+                            // for interior entries — the pure-c error terms do
+                            // not shrink with |z| (the end-to-end battery
+                            // referees those). Assert the |z|-scaled budget at
+                            // the boundary sample, the certified budget inside.
+                            let scale_x = if fx > 0.9 { x_log2 } else { log2_r };
+                            let budget =
+                                lse2(&[la + scale_x, lb + log2_c_max]) + eps.log2();
+                            assert!(
+                                err_log2 <= budget + 1e-6,
+                                "[{}] eps={:e} c_max={:e} skip {} slot {} fx={} fc={}: \
+                                 err 2^{:.2} > budget 2^{:.2}",
+                                name, eps, c_max, lvl.skip, slot, fx, fc, err_log2, budget
+                            );
+                        }
+                    }
+                }
+                println!(
+                    "[{}] eps={:e} c_max={:e}: {} sampled, {} positive radii",
+                    name, eps, c_max, solved, positive
+                );
+                // Spec: radii survive shallow scales — the |B|·c_max term keeps a
+                // usable population even at the coarse regime.
+                assert!(
+                    positive * 8 > solved,
+                    "[{}] eps={:e} c_max={:e}: radius population collapsed ({}/{})",
+                    name, eps, c_max, positive, solved
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mobius_radii_are_pure_formula_no_chain() {
+        // (task 2.5, patch v2 Fix 1) The built radius of EVERY block equals its
+        // standalone (V) formula radius — no merge cap. The removed §4.4 chain
+        // is the Möbius-simple single-step rule; for c+ the majorant walks all
+        // block steps so (V) already covers the composed map. The end-to-end
+        // referee is mobius_global_error_and_parity (ρ_N/(N·ε) bounded, escape
+        // parity) — if the chain were load-bearing for soundness, that test
+        // would break; it stays green.
+        let eps = 1e-6_f64;
+        let c_max = 1e-9_f64;
+        for (name, cx, cy) in
+            [("feigenbaum", -1.401155_f64, 0.0_f64), ("cusp", -0.75, 0.0), ("period2", -1.25, 0.0)]
+        {
+            let Some((_orbit, levels, bounds, radii)) = harness(cx, cy, 2048, eps, c_max)
+            else {
+                panic!("[{}] escaped", name);
+            };
+            for (li, lvl) in levels.iter().enumerate() {
+                for (s, blk) in lvl.blocks.iter().enumerate() {
+                    let formula = mobius_solve_radius(
+                        blk,
+                        &bounds.per_level[li][s],
+                        &bounds,
+                        eps,
+                        c_max.log2(),
+                    );
+                    let got = radii[li][s];
+                    assert!(
+                        (got == f64::NEG_INFINITY && formula == f64::NEG_INFINITY)
+                            || (got - formula).abs() < 1e-12,
+                        "[{}] skip {} slot {}: built {} != formula {}",
+                        name, lvl.skip, s, got, formula
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mobius_historical_g_block() {
+        // (task 2.6, note §6.3) The block that motivated guard (G): seahorse
+        // reference, steps 26→50 (contains |2Z₃₉| ≈ 5.4e-3), entry
+        // |z| = 7.53e-13, ε = 1e-12, |c| = 1e-14. Plain Möbius errs ~1.5e-9
+        // (would violate ε); Möbius-c+ stays ≤ ~5e-13 < ε, and the residual
+        // scales ~c² (÷~100 per depth decade).
+        let orbit = ref_orbit_f64(-0.743643887037151, 0.131825904205330, 128);
+        assert!(orbit.len() > 64, "seahorse escaped before step 64");
+        let first = 26usize;
+        let skip = 24usize; // steps 26..50
+        let min_2z = (first..first + skip)
+            .map(|i| {
+                let (zx, zy) = orbit[i];
+                2.0 * (zx * zx + zy * zy).sqrt()
+            })
+            .fold(f64::INFINITY, f64::min);
+        println!("min |2Z| over steps {}..{} = {:.3e}", first, first + skip, min_2z);
+        assert!(min_2z < 1e-2, "block does not straddle the near-critical step");
+        let mut jet = jet_seed(orbit[first].0, orbit[first].1);
+        for i in first + 1..first + skip {
+            jet = jet_compose(&jet, &jet_seed(orbit[i].0, orbit[i].1));
+        }
+        let m_plus = mobius_from_jet(&jet);
+        let m_plain = mobius_from_jet_plain(&jet);
+        let z = CFe::from_c(7.53e-13, 0.0);
+        let mut errs = [(0f64, 0f64); 2]; // (plain, c+) at |c| = 1e-14, 1e-15
+        for (k, cmag) in [1e-14_f64, 1e-15].iter().enumerate() {
+            let c = CFe::from_c(0.6 * cmag, 0.8 * cmag);
+            let exact = exact_block_walk(&orbit, first, skip, z, c);
+            let exact_mag = exact.log2_mag().unwrap().exp2();
+            let rel = |m: &MobiusCPlus| -> f64 {
+                let (applied, _, _) = mobius_apply(m, z, c);
+                let d = applied.sub(exact);
+                d.log2_mag().map(|l| l.exp2()).unwrap_or(0.0) / exact_mag
+            };
+            errs[k] = (rel(&m_plain), rel(&m_plus));
+            println!(
+                "|c| = {:e}: plain Möbius rel err {:.3e} | Möbius-c+ rel err {:.3e}",
+                cmag, errs[k].0, errs[k].1
+            );
+        }
+        // The historical numbers: plain fails ε by ~3 decades, c+ passes.
+        assert!(errs[0].0 > 1e-10, "plain Möbius unexpectedly good: {:.3e}", errs[0].0);
+        assert!(errs[0].1 < 2e-12, "Möbius-c+ exceeds ε: {:.3e}", errs[0].1);
+        // Residual ~c²: one decade deeper ⇒ ~two decades smaller (allow slack).
+        assert!(
+            errs[1].1 < errs[0].1 / 10.0,
+            "c+ residual does not scale like c²: {:.3e} → {:.3e}",
+            errs[0].1, errs[1].1
+        );
+    }
+
+    #[test]
+    fn mobius_superconvergence_constant() {
+        // (task 2.6, note §6.4) Pure-z channel (c = 0) on the near-parabolic
+        // block C = (−0.7499, 0.0001), start 2: err_rel/x² must equal the
+        // superconvergence constant |c₃₀ − c₂₀²/c₁₀|/|c₁₀| (= |q₃₀|/|c₁₀|) at
+        // full float precision, for every block length.
+        let orbit = ref_orbit_f64(-0.7499, 0.0001, 600);
+        assert!(orbit.len() > 512);
+        let first = 2usize;
+        for len in [64usize, 128, 256] {
+            let mut jet = jet_seed(orbit[first].0, orbit[first].1);
+            for i in first + 1..first + len {
+                jet = jet_compose(&jet, &jet_seed(orbit[i].0, orbit[i].1));
+            }
+            let m = mobius_from_jet(&jet);
+            let q = mobius_q(&jet, &m);
+            let predicted = q[jet_idx(3, 0)].log2_mag().unwrap()
+                - m.a.log2_mag().unwrap();
+            let c0 = CFe::ZERO;
+            for x in [1e-6_f64, 3e-7] {
+                let z = CFe::from_c(x, 0.0);
+                let (applied, _, _) = mobius_apply(&m, z, c0);
+                let exact = exact_block_walk(&orbit, first, len, z, c0);
+                let rel = applied.sub(exact).log2_mag().unwrap()
+                    - exact.log2_mag().unwrap();
+                let measured = rel - 2.0 * x.log2();
+                println!(
+                    "L={:>3} x={:e}: err_rel/x² = {:.6} (predicted |q₃₀|/|c₁₀| = {:.6})",
+                    len,
+                    x,
+                    measured.exp2(),
+                    predicted.exp2()
+                );
+                // Full-precision match up to the den ≈ 1 + O(|D|x) factor and
+                // the x⁴ term (both ~1e-4 relative at x = 1e-6).
+                assert!(
+                    (measured - predicted).abs() < 0.01,
+                    "L={} x={}: constant 2^{:.4} vs predicted 2^{:.4}",
+                    len, x, measured, predicted
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn mobius_global_error_and_parity() {
+        // (task 2.6, note §6.5) End-to-end against exact perturbation stepping,
+        // same Zhuoran rebasing: identical iteration counts and escape verdicts,
+        // final relative error ρ_N/(N·ε) ≤ 5 across orbit classes and (ε, |c|)
+        // regimes. Skips must actually be exercised. Never measured past the
+        // reference length (max_iter ≤ orbit length by construction here).
+        // Regimes: the note's deep battery PLUS the interactive/coarse pairs
+        // where the field A/B runs (the pointwise |z|-scaled budget is not
+        // implied by (V) inside the box — this end-to-end bound is the
+        // soundness referee there).
+        for (eps, c_maxes) in [
+            (1e-12_f64, [1e-13_f64, 1e-14, 1e-16]),
+            (1e-15, [1e-13, 1e-14, 1e-16]),
+            (1e-3, [1e-5, 1e-7, 1e-9]),
+            (1e-4, [1e-5, 1e-7, 1e-9]),
+        ] {
+            for c_max in c_maxes {
+                // Per-center iteration budget: the Misiurewicz spiral point is
+                // preperiodic (repelling), so its f64 orbit drifts and escapes
+                // at iteration 446 — its harness run stays below that.
+                for (name, cx, cy, max_iter) in [
+                    ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64, 2500usize),
+                    ("near-parab", -0.7499, 0.0001, 2500),
+                    ("spiral", -0.77568377, 0.13646737, 400),
+                    ("feigenbaum", -1.401155, 0.0, 2500),
+                ] {
+                    let Some((orbit, levels, _bounds, radii)) =
+                        harness(cx, cy, max_iter, eps, c_max)
+                    else {
+                        println!("[{}] escaped — skipped", name);
+                        continue;
+                    };
+                    let bound = 5.0 * max_iter as f64 * eps;
+                    let (mut worst, mut compared, mut mismatches, mut skipping) =
+                        (0f64, 0usize, 0usize, 0usize);
+                    for kpx in 0..24 {
+                        let t = (kpx as f64 / 24.0) * 2.0 - 1.0;
+                        let dc = (t * c_max * 0.7, 0.37 * t * c_max);
+                        let exact = mobius_run_pixel(&[], &[], &orbit, dc, max_iter);
+                        let got = mobius_run_pixel(&levels, &radii, &orbit, dc, max_iter);
+                        // Escaping pixels whose orbit grazes the bailout can
+                        // legitimately shift their escape iteration by a few
+                        // steps within the ε budget (pronounced at coarse ε);
+                        // tolerate ≤ 1% + 2 iterations there. Non-escaping
+                        // pixels and verdicts stay strict.
+                        let it_tol = if exact.escaped && got.escaped {
+                            2 + exact.iters / 100
+                        } else {
+                            0
+                        };
+                        let it_delta = got.iters.abs_diff(exact.iters);
+                        if it_delta > it_tol || got.escaped != exact.escaped {
+                            mismatches += 1;
+                            continue;
+                        }
+                        if got.steps < exact.steps {
+                            skipping += 1;
+                        }
+                        if exact.escaped {
+                            continue;
+                        }
+                        let (ex, ey) = exact.final_z;
+                        let (gx, gy) = got.final_z;
+                        let mag = (ex * ex + ey * ey).sqrt().max(1e-300);
+                        let rel = ((gx - ex).powi(2) + (gy - ey).powi(2)).sqrt() / mag;
+                        worst = worst.max(rel);
+                        compared += 1;
+                    }
+                    println!(
+                        "[{}] eps={:e} c={:e}: {} compared, worst ρ_N/(N·ε) = {:.3}, skipping {}, mismatches {}",
+                        name, eps, c_max, compared,
+                        worst / (max_iter as f64 * eps), skipping, mismatches
+                    );
+                    // Iteration/escape parity is only a meaningful property
+                    // when the certified accumulated error N·ε stays « 1: at
+                    // coarse ε (interactive), a ~1e-3 relative error near a
+                    // chaotic boundary legitimately shifts escape times by
+                    // O(1) relative (Lyapunov amplification — the theorem's
+                    // bound allows it, and the heuristic modes drift more
+                    // without being measured). ρ_N on non-escaping pixels
+                    // stays the referee at every regime.
+                    if max_iter as f64 * eps <= 0.01 {
+                        assert_eq!(mismatches, 0, "[{}] iteration/escape parity broken", name);
+                    } else if mismatches > 0 {
+                        println!(
+                            "  [{}] {} escape-time shifts at coarse eps (N·ε = {:.2}) — allowed",
+                            name, mismatches, max_iter as f64 * eps
+                        );
+                    }
+                    assert!(
+                        worst <= bound,
+                        "[{}] eps={:e} c={:e}: ρ_N {:.3e} > 5·N·ε {:.3e}",
+                        name, eps, c_max, worst, bound
+                    );
+                    assert!(
+                        skipping > 12,
+                        "[{}] eps={:e} c={:e}: blocks barely used ({}/24)",
+                        name, eps, c_max, skipping
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn mobius_census_vs_plain_mobius() {
+        // (task 2.7) r_c+ ≥ r_Möbius per block ⇒ the c+ loop never needs more
+        // loop turns or applications in total. Also the note §6.7 census: at
+        // deep |c| ≤ 1e-14, the fraction of emitted blocks whose certified
+        // radius falls below the delta band (~1e-11) should be ≈ 0.
+        let eps = 1e-12_f64;
+        let c_max = 1e-14_f64;
+        let max_iter = 2500usize;
+        for (name, cx, cy) in [
+            ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64),
+            ("near-parab", -0.7499, 0.0001),
+            ("feigenbaum", -1.401155, 0.0),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, max_iter);
+            if orbit.len() <= max_iter {
+                println!("[{}] escaped — skipped", name);
+                continue;
+            }
+            let levels = mobius_build_levels(&orbit, 1 << 18);
+            let plain_levels = mobius_build_levels_with(&orbit, 1 << 18, true);
+            let bounds = mobius_build_bounds(&levels, &orbit, c_max.log2());
+            let plain_bounds = mobius_build_bounds(&plain_levels, &orbit, c_max.log2());
+            let radii = mobius_build_radii(&levels, &bounds, eps, c_max.log2());
+            let plain_radii =
+                mobius_build_radii(&plain_levels, &plain_bounds, eps, c_max.log2());
+            // Per-block radius dominance (the "by construction" claim, verified).
+            let (mut dominated, mut total_finite) = (0usize, 0usize);
+            for (li, lvl) in radii.iter().enumerate() {
+                for (s, &r) in lvl.iter().enumerate() {
+                    let rp = plain_radii[li][s];
+                    if rp.is_finite() {
+                        total_finite += 1;
+                        if r >= rp - 1e-9 {
+                            dominated += 1;
+                        }
+                    }
+                }
+            }
+            println!(
+                "[{}] radius dominance: c+ ≥ plain on {}/{} plain-certified blocks",
+                name, dominated, total_finite
+            );
+            assert!(
+                dominated * 100 >= total_finite * 99,
+                "[{}] r_c+ < r_Möbius on too many blocks",
+                name
+            );
+            // Loop census over a pixel row.
+            let (mut steps_p, mut steps_c, mut apps_p, mut apps_c) = (0u64, 0u64, 0u64, 0u64);
+            for kpx in 0..24 {
+                let t = (kpx as f64 / 24.0) * 2.0 - 1.0;
+                let dc = (t * c_max * 0.7, 0.37 * t * c_max);
+                let p = mobius_run_pixel(&plain_levels, &plain_radii, &orbit, dc, max_iter);
+                let c = mobius_run_pixel(&levels, &radii, &orbit, dc, max_iter);
+                steps_p += p.steps as u64;
+                steps_c += c.steps as u64;
+                apps_p += p.applications as u64;
+                apps_c += c.applications as u64;
+            }
+            println!(
+                "[{}] plain: steps {} apps {} | c+: steps {} apps {}",
+                name, steps_p, apps_p, steps_c, apps_c
+            );
+            assert!(steps_c <= steps_p, "[{}] c+ loop slower than plain", name);
+            assert!(apps_c <= apps_p, "[{}] c+ needs more applications", name);
+            // Dead-radius census on emitted (skip ≥ 4) blocks.
+            let band = (1e-11_f64).log2();
+            let (mut dead, mut finite) = (0usize, 0usize);
+            for (li, lvl) in levels.iter().enumerate() {
+                if lvl.skip < 4 {
+                    continue;
+                }
+                for &r in &radii[li] {
+                    if r.is_finite() {
+                        finite += 1;
+                        if r < band {
+                            dead += 1;
+                        }
+                    }
+                }
+            }
+            println!(
+                "[{}] dead-radius census: {}/{} emitted certified blocks below the delta band",
+                name, dead, finite
+            );
+            assert!(
+                dead * 4 <= finite,
+                "[{}] too many blocks below the delta band ({}/{})",
+                name, dead, finite
+            );
+        }
+    }
+
+    #[test]
+    fn mobius_serialization_round_trip() {
+        // (task 3.2) The GPU records must preserve the five coefficients within
+        // f32 mantissa tolerance, radii within f32 rounding, keep the coefficient
+        // and radius buffers index-aligned, emit only skip ≥ 4 levels, mark
+        // uncertified blocks with −∞, and carry a correct f32-safe flag.
+        let eps = 1e-6_f64;
+        let c_max = 1e-9_f64;
+        let Some((_orbit, levels, _bounds, radii)) =
+            harness(-1.401155, 0.0, 2048, eps, c_max)
+        else {
+            panic!("reference escaped");
+        };
+        let coeffs = mobius_serialize_coeffs(&levels);
+        let (rad, dir) = mobius_serialize_radii(&levels, &radii);
+        assert_eq!(coeffs.len(), rad.len(), "buffers not index-aligned");
+        let emitted: Vec<usize> = levels
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.skip >= MOBIUS_MIN_EMIT_SKIP)
+            .map(|(i, _)| i)
+            .collect();
+        assert_eq!(dir.len(), emitted.len());
+        let total: usize = emitted.iter().map(|&li| levels[li].blocks.len()).sum();
+        assert_eq!(rad.len(), total);
+        for (d, &li) in dir.iter().zip(emitted.iter()) {
+            let lvl = &levels[li];
+            assert_eq!(d.skip as usize, lvl.skip);
+            assert_eq!(d.count as usize, lvl.blocks.len());
+            let mut max_r = f32::NEG_INFINITY;
+            for (slot, blk) in lvl.blocks.iter().enumerate() {
+                let flat = d.offset as usize + slot;
+                let r = &rad[flat];
+                let cb = &coeffs[flat];
+                max_r = max_r.max(r.r_log2);
+                let want = radii[li][slot];
+                if want.is_finite() {
+                    assert!(
+                        (r.r_log2 as f64 - want).abs() < 1e-3,
+                        "skip {} slot {}: r {} vs {}",
+                        lvl.skip, slot, r.r_log2, want
+                    );
+                } else {
+                    assert_eq!(r.r_log2, f32::NEG_INFINITY);
+                }
+                assert_eq!(
+                    r.f32_safe > 0.5,
+                    mobius_f32_safe(&blk.m),
+                    "f32_safe flag mismatch"
+                );
+                for (name, src, got) in [
+                    ("A", &blk.m.a, &cb.a),
+                    ("B", &blk.m.b, &cb.b),
+                    ("A'", &blk.m.ap, &cb.ap),
+                    ("D", &blk.m.d, &cb.d),
+                    ("D'", &blk.m.dp, &cb.dp),
+                ] {
+                    match src.log2_mag() {
+                        None => assert_eq!((got.x, got.y), (0.0, 0.0)),
+                        Some(want) => {
+                            let l = (got.x as f64).hypot(got.y as f64).log2() + got.e as f64;
+                            assert!(
+                                (l - want).abs() < 1e-5,
+                                "skip {} slot {} {}: log2 {} vs {}",
+                                lvl.skip, slot, name, l, want
+                            );
+                        }
+                    }
+                    if r.f32_safe > 0.5 {
+                        assert!(got.e.abs() <= 100, "flagged block ships exponent {}", got.e);
+                    }
+                }
+            }
+            assert_eq!(d.max_r3_log2, max_r, "level skip {} max_r directory", lvl.skip);
+        }
+        // A degenerate block serializes to −∞ radius and zero coefficients.
+        let dg = MobiusBlock {
+            m: mobius_from_jet(&jet_seed(0.0, 0.0)),
+            log2_q: [f64::NEG_INFINITY; JET_NCOEFF],
+        };
+        let lv = vec![MobiusLevel { skip: 4, blocks: vec![dg] }];
+        let (r0, _) = mobius_serialize_radii(&lv, &[vec![f64::NEG_INFINITY]]);
+        assert_eq!(r0[0].r_log2, f32::NEG_INFINITY);
+    }
+
+    // ── Diagnostic (6.3 follow-up): mobius vs Padé-heuristic at USER regimes ──
+    // Field report: mobius+ ≥ 2× slower than Padé on most views. Padé's radii
+    // are heuristic (√ε·|A|); mobius radii are certified. This census compares
+    // loop turns (wall-clock proxy) at interactive (ε, c_max) and prints the
+    // f32-fast-path fraction of APPLIED blocks (fe applications cost ~2× — the
+    // jet lesson).
+    #[test]
+    #[ignore] // diagnostic — run with -- --ignored --nocapture
+    fn mobius_vs_pade_user_regime_census() {
+        let max_iter = 3000usize;
+        for (eps, c_max) in [(1e-3_f64, 1e-5_f64), (1e-4, 1e-5), (1e-4, 1e-9), (1e-6, 1e-9)] {
+            for (name, cx, cy) in [
+                ("cusp", -0.75_f64, 0.0_f64),
+                ("period2", -1.25, 0.0),
+                ("feigenbaum", -1.401155, 0.0),
+            ] {
+                let orbit = ref_orbit_f64(cx, cy, max_iter);
+                if orbit.len() <= max_iter {
+                    continue;
+                }
+                let pade_levels =
+                    crate::bench_build_levels(&orbit, eps, true, 1 << 18);
+                let levels = mobius_build_levels(&orbit, 1 << 18);
+                let bounds = mobius_build_bounds(&levels, &orbit, c_max.log2());
+                let radii = mobius_build_radii(&levels, &bounds, eps, c_max.log2());
+                let (mut t_pade, mut t_mob, mut t_exact) = (0u64, 0u64, 0u64);
+                let (mut apps_f32, mut apps_all) = (0u64, 0u64);
+                for kpx in 0..16 {
+                    let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
+                    let dc = (t * c_max * 0.7, 0.37 * t * c_max);
+                    let (ps, _, _) =
+                        crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
+                    let m = mobius_run_pixel(&levels, &radii, &orbit, dc, max_iter);
+                    let e = mobius_run_pixel(&[], &[], &orbit, dc, max_iter);
+                    t_pade += ps as u64;
+                    t_mob += m.steps as u64;
+                    t_exact += e.steps as u64;
+                    apps_all += m.applications as u64;
+                }
+                // f32-safe fraction over emitted blocks, weighted by skip
+                // (proxy for the application mix).
+                let (mut safe_w, mut all_w) = (0u64, 0u64);
+                for (li, lvl) in levels.iter().enumerate() {
+                    if lvl.skip < MOBIUS_MIN_EMIT_SKIP {
+                        continue;
+                    }
+                    for (s, blk) in lvl.blocks.iter().enumerate() {
+                        if radii[li][s].is_finite() {
+                            all_w += lvl.skip as u64;
+                            if mobius_f32_safe(&blk.m) {
+                                safe_w += lvl.skip as u64;
+                            }
+                        }
+                    }
+                }
+                let _ = apps_f32;
+                println!(
+                    "[{}] eps={:>6.0e} c={:>6.0e}: turns exact={:>6} pade={:>5} mobius={:>5} (mob/pade {:.2}x) | apps {} | f32-safe skip-weighted {:.0}%",
+                    name, eps, c_max, t_exact, t_pade, t_mob,
+                    t_mob as f64 / t_pade.max(1) as f64,
+                    apps_all,
+                    100.0 * safe_w as f64 / all_w.max(1) as f64
+                );
+            }
+        }
+    }
+
+    const LOG2_10_LOCAL: f64 = 3.321928094887362;
+
+    // ── Instrumentation (patch v2): applied-length histogram + blocking-term ─
+    // census. Point 1: distribution of applied block lengths, c+ vs Padé
+    // heuristic. Point 2: for every block refused while |z| sits in the working
+    // band (1e-13..1e-11), which (V) term binds — stored q by degree, Cauchy
+    // tail, DEN, or the c_max scale. Run before/after Fix 1+2 with
+    //   cargo test --release mobius_patch_v2_instrumentation -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn mobius_patch_v2_instrumentation() {
+        let eps = 1e-6_f64;
+        let max_iter = 3000usize;
+        for (dec, cx, cy, name) in [
+            (-9.0_f64, -1.401155_f64, 0.0_f64, "feigenbaum"),
+            (-30.0, -1.401155, 0.0, "feigenbaum"),
+            (-9.0, -0.75, 0.0, "cusp"),
+        ] {
+            let log2_c_max = dec * LOG2_10_LOCAL;
+            let orbit = ref_orbit_f64(cx, cy, max_iter);
+            if orbit.len() <= max_iter {
+                continue;
+            }
+            let levels = mobius_build_levels(&orbit, 1 << 18);
+            let bounds = mobius_build_bounds(&levels, &orbit, log2_c_max);
+            let radii = mobius_build_radii(&levels, &bounds, eps, log2_c_max);
+            let pade_levels = crate::bench_build_levels(&orbit, eps, true, 1 << 18);
+            let cm = log2_c_max.exp2().max(1e-300);
+            println!("\n=== [{}] c~1e{:.0} eps={:e} ===", name, dec, eps);
+
+            // Point 1: applied-length histograms over a pixel row.
+            let mut hist_mob = std::collections::BTreeMap::<usize, u64>::new();
+            let mut hist_pade = std::collections::BTreeMap::<usize, u64>::new();
+            for kpx in 0..16 {
+                let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
+                let dc = (t * cm * 0.7, 0.37 * t * cm);
+                applied_lengths_mobius(&levels, &radii, &orbit, dc, max_iter, &mut hist_mob);
+                applied_lengths_pade(&pade_levels, &orbit, dc, max_iter, &mut hist_mob_noop(), &mut hist_pade);
+            }
+            let sum = |h: &std::collections::BTreeMap<usize, u64>| -> (u64, u64) {
+                let apps: u64 = h.values().filter(|_| true).sum();
+                let iters: u64 = h.iter().map(|(k, v)| *k as u64 * v).sum();
+                (apps, iters)
+            };
+            let (am, im) = sum(&hist_mob);
+            let (ap, ip) = sum(&hist_pade);
+            println!("  applied-length histogram (skip: count):");
+            println!("    c+    {:?}  (apps={} iters={})", hist_mob, am, im);
+            println!("    padé  {:?}  (apps={} iters={})", hist_pade, ap, ip);
+
+            // Point 2: blocking-term census over emitted blocks probed at the
+            // working band, one representative |z| per (block, band position).
+            let mut census: std::collections::BTreeMap<&str, u64> =
+                std::collections::BTreeMap::new();
+            let mut refused = 0u64;
+            let mut admitted = 0u64;
+            for (li, lvl) in levels.iter().enumerate() {
+                if lvl.skip < MOBIUS_MIN_EMIT_SKIP {
+                    continue;
+                }
+                for (s, blk) in lvl.blocks.iter().enumerate() {
+                    if blk.m.degenerate {
+                        continue;
+                    }
+                    let log2_r = radii[li][s];
+                    // Probe at |z| = 1e-12 (mid working band).
+                    let probe = (1e-12_f64).log2();
+                    if log2_r.is_finite() && log2_r >= probe {
+                        admitted += 1;
+                        continue;
+                    }
+                    refused += 1;
+                    let term = binding_term(blk, &bounds.per_level[li][s], &bounds, eps, log2_c_max, probe);
+                    *census.entry(term).or_insert(0) += 1;
+                }
+            }
+            println!(
+                "  blocking-term census at |z|=1e-12 (emitted blocks): admitted={} refused={}",
+                admitted, refused
+            );
+            for (term, n) in &census {
+                println!("    {:>10}: {}", term, n);
+            }
+        }
+    }
+
+    fn hist_mob_noop() -> std::collections::BTreeMap<usize, u64> {
+        std::collections::BTreeMap::new()
+    }
+
+    fn applied_lengths_mobius(
+        levels: &[MobiusLevel],
+        radii: &[Vec<f64>],
+        orbit: &[(f64, f64)],
+        dc: (f64, f64),
+        max_iter: usize,
+        hist: &mut std::collections::BTreeMap<usize, u64>,
+    ) {
+        let orbit_len = orbit.len();
+        let cfe = CFe::from_c(dc.0, dc.1);
+        let (mut dz, mut ref_i, mut iter, mut steps) =
+            ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
+        while iter < max_iter {
+            let mut applied = false;
+            if ref_i > 0 {
+                let shifted = ref_i - 1;
+                let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+                let log2_dz = if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                for (li, lvl) in levels.iter().enumerate().rev() {
+                    if shifted % lvl.skip != 0 {
+                        continue;
+                    }
+                    let slot = shifted / lvl.skip;
+                    if slot >= lvl.blocks.len()
+                        || iter + lvl.skip > max_iter
+                        || ref_i + lvl.skip >= orbit_len
+                    {
+                        continue;
+                    }
+                    if !(log2_dz < radii[li][slot]) {
+                        continue;
+                    }
+                    let (phi, _, _) = mobius_apply(&lvl.blocks[slot].m, CFe::from_c(dz.0, dz.1), cfe);
+                    let cand = phi.to_f64();
+                    let zi = orbit[ref_i + lvl.skip];
+                    let candz = (zi.0 + cand.0, zi.1 + cand.1);
+                    if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > 4.0 {
+                        continue;
+                    }
+                    *hist.entry(lvl.skip).or_insert(0) += 1;
+                    dz = cand;
+                    ref_i += lvl.skip;
+                    iter += lvl.skip;
+                    applied = true;
+                    break;
+                }
+            }
+            if !applied {
+                let z = orbit[ref_i];
+                let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+                let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
+                dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
+                ref_i += 1;
+                iter += 1;
+                *hist.entry(1).or_insert(0) += 1;
+            }
+            steps += 1;
+            if ref_i > orbit_len - 1 {
+                ref_i = orbit_len - 1;
+            }
+            let z = orbit[ref_i];
+            let full = (z.0 + dz.0, z.1 + dz.1);
+            let full2 = full.0 * full.0 + full.1 * full.1;
+            if full2 > 4.0 {
+                break;
+            }
+            let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+            if full2 < dz2 || ref_i == orbit_len - 1 {
+                dz = full;
+                ref_i = 0;
+            }
+            if steps > max_iter * 2 + 16 {
+                break;
+            }
+        }
+    }
+
+    fn applied_lengths_pade(
+        levels: &[crate::PadeLevel],
+        orbit: &[(f64, f64)],
+        dc: (f64, f64),
+        max_iter: usize,
+        _unused: &mut std::collections::BTreeMap<usize, u64>,
+        hist: &mut std::collections::BTreeMap<usize, u64>,
+    ) {
+        // Mirrors bench_run_pixel but records applied skip lengths.
+        let orbit_len = orbit.len();
+        let dc_mag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
+        let (mut dz, mut ref_i, mut iter, mut steps) =
+            ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
+        while iter < max_iter {
+            let mut applied = false;
+            if ref_i != 0 {
+                let shifted = ref_i - 1;
+                let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+                for lvl in levels.iter().rev() {
+                    let skip = lvl.skip;
+                    if shifted % skip != 0 {
+                        continue;
+                    }
+                    let slot = shifted / skip;
+                    if slot >= lvl.entries.len() || ref_i + skip > max_iter {
+                        continue;
+                    }
+                    let e = &lvl.entries[slot];
+                    let radius = (e.alpha - e.beta * dc_mag).max(0.0);
+                    if dz2 > radius * radius {
+                        continue;
+                    }
+                    let cand = match crate::bench_block(e, dz, dc, true) {
+                        Some(c) => c,
+                        None => continue,
+                    };
+                    let zi = orbit[ref_i + skip];
+                    let candz = (zi.0 + cand.0, zi.1 + cand.1);
+                    if skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > 4.0 {
+                        continue;
+                    }
+                    *hist.entry(skip).or_insert(0) += 1;
+                    dz = cand;
+                    ref_i += skip;
+                    iter += skip;
+                    applied = true;
+                    break;
+                }
+            }
+            if !applied {
+                let z = orbit[ref_i];
+                let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+                let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
+                dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
+                ref_i += 1;
+                iter += 1;
+                *hist.entry(1).or_insert(0) += 1;
+            }
+            steps += 1;
+            if ref_i > orbit_len - 1 {
+                ref_i = orbit_len - 1;
+            }
+            let z = orbit[ref_i];
+            let full = (z.0 + dz.0, z.1 + dz.1);
+            let full2 = full.0 * full.0 + full.1 * full.1;
+            if full2 > 4.0 {
+                break;
+            }
+            let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+            if full2 < dz2 || ref_i == orbit_len - 1 {
+                dz = full;
+                ref_i = 0;
+            }
+            if steps > max_iter * 2 + 16 {
+                break;
+            }
+        }
+    }
+
+    // At probe log2 x, over the best candidate, decide which (V) component keeps
+    // REST/DEN above the ½ε(|A|x + |B|c_max) budget (or blocks DEN ≤ 0.5).
+    fn binding_term(
+        blk: &MobiusBlock,
+        bounds: &MobiusBounds,
+        table: &MobiusBoundsTable,
+        epsilon: f64,
+        log2_c_max: f64,
+        x: f64,
+    ) -> &'static str {
+        let la = cfe_log2(&blk.m.a);
+        let lb = cfe_log2(&blk.m.b);
+        let ld = cfe_log2(&blk.m.d);
+        let ldp = cfe_log2(&blk.m.dp);
+        let log2_half_eps = epsilon.log2() - 1.0;
+        let rhs = log2_half_eps + lse2(&[la + x, lb + log2_c_max]);
+        // Per-power stored-q sums.
+        let mut cpow = [f64::NEG_INFINITY; JET_DS + 1];
+        for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+            let l = blk.log2_q[n];
+            if l == f64::NEG_INFINITY {
+                continue;
+            }
+            let t = l + j as f64 * log2_c_max;
+            let slot = &mut cpow[i as usize];
+            *slot = if *slot == f64::NEG_INFINITY { t } else { lse2(&[*slot, t]) };
+        }
+        // Best candidate = the one giving the smallest REST/DEN excess at x
+        // (its DEN passes and its tail is finite).
+        let mut best_excess = f64::INFINITY;
+        let mut best_term = "saturated";
+        for c in 0..MOBIUS_NCAND {
+            let log2_mq = bounds.log2_mq[c];
+            if !log2_mq.is_finite() {
+                continue;
+            }
+            let log2_theta_c = log2_c_max - table.log2_rc[c];
+            if log2_theta_c >= -1e-9 {
+                continue;
+            }
+            let d1 = ld + x;
+            let d2 = ldp + x + log2_c_max;
+            let den = 1.0
+                - if d1 > -80.0 { d1.exp2() } else { 0.0 }
+                - if d2 > -80.0 { d2.exp2() } else { 0.0 };
+            if den <= 0.5 {
+                if best_excess == f64::INFINITY {
+                    best_term = "DEN";
+                }
+                continue;
+            }
+            // Which side dominates REST: stored-q (and which degree) vs Cauchy.
+            let mut q_lin = 0.0f64;
+            let mut worst_deg = 0usize;
+            let mut worst_deg_val = f64::NEG_INFINITY;
+            for (i, &ci) in cpow.iter().enumerate() {
+                if ci == f64::NEG_INFINITY {
+                    continue;
+                }
+                let t = ci + i as f64 * x;
+                if t > worst_deg_val {
+                    worst_deg_val = t;
+                    worst_deg = i;
+                }
+                let e = t - rhs;
+                if e > -62.0 && e < 62.0 {
+                    q_lin += e.exp2();
+                } else if e >= 62.0 {
+                    q_lin = f64::INFINITY;
+                }
+            }
+            let log2_rz = table.log2_rz[c];
+            let ltheta = (x - log2_rz).max(log2_theta_c);
+            let theta = ltheta.exp2();
+            let tail_log2 = log2_mq
+                + (JET_DS + 1) as f64 * ltheta
+                + (((JET_DS + 2) as f64 - (JET_DS + 1) as f64 * theta)
+                    / ((1.0 - theta) * (1.0 - theta)))
+                    .log2();
+            let tail_lin = {
+                let e = tail_log2 - rhs;
+                if e > -62.0 && e < 62.0 { e.exp2() } else if e >= 62.0 { f64::INFINITY } else { 0.0 }
+            };
+            let total = q_lin + tail_lin;
+            let excess = total / den;
+            if excess < best_excess {
+                best_excess = excess;
+                best_term = if !total.is_finite() {
+                    if q_lin.is_finite() { "cauchy" } else { "storedq" }
+                } else if tail_lin > q_lin {
+                    "cauchy"
+                } else if worst_deg == 0 {
+                    "cmax_c2" // pure-c residual (q_0j), the irreducible term
+                } else {
+                    "storedq"
+                };
+            }
+        }
+        if best_excess <= 1.0 + 1e-9 {
+            // Admissible at x for the best candidate — refusal came from the
+            // scan floor / rounding, not a term. Rare.
+            return "admissible";
+        }
+        best_term
+    }
+
+    // ── Diagnostic: deep-regime turn parity + fe-op weight vs Padé ───────────
+    // Field report: Padé still much faster even at c_max = 1e-50 (deep fe path),
+    // while less precise. Separates the two causes: (a) mobius takes fewer skips
+    // (turn deficit), (b) each mobius application costs more fe arithmetic.
+    // c_max is passed as log2 only (f64 orbit unchanged — same trick as the jet
+    // deep census). fe-op weights counted from the shaders: Padé
+    // try_apply_bla_deep ≈ 8 cmul + 1 cinv, raw shared-exponent coeff loads
+    // (0 renorm); mobius try_apply_mobius fe branch ≈ 13 cmul + 1 cinv + 5
+    // private-exponent coeff renorms + both analytic partials. cmul=1, cinv=4,
+    // renorm=1, exact step=4.
+    #[test]
+    #[ignore] // diagnostic — run with -- --ignored --nocapture
+    fn mobius_deep_turns_and_op_weight_vs_pade() {
+        const PADE_APPLY_W: f64 = 8.0 + 4.0;
+        const MOBIUS_APPLY_W: f64 = 13.0 + 4.0 + 5.0;
+        let max_iter = 3000usize;
+        let eps = 1e-6_f64;
+        for dec in [-9.0_f64, -30.0, -50.0] {
+            let log2_c_max = dec * LOG2_10_LOCAL;
+            for (name, cx, cy) in [
+                ("cusp", -0.75_f64, 0.0_f64),
+                ("period2", -1.25, 0.0),
+                ("feigenbaum", -1.401155, 0.0),
+            ] {
+                let orbit = ref_orbit_f64(cx, cy, max_iter);
+                if orbit.len() <= max_iter {
+                    continue;
+                }
+                let levels = mobius_build_levels(&orbit, 1 << 18);
+                let bounds = mobius_build_bounds(&levels, &orbit, log2_c_max);
+                let radii = mobius_build_radii(&levels, &bounds, eps, log2_c_max);
+                let pade_levels = crate::bench_build_levels(&orbit, eps, true, 1 << 18);
+                let cm = log2_c_max.exp2().max(1e-300);
+                let (mut t_pade, mut t_mob, mut apps_mob) = (0u64, 0u64, 0u64);
+                for kpx in 0..16 {
+                    let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
+                    let dc = (t * cm * 0.7, 0.37 * t * cm);
+                    let (ps, _, _) = crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
+                    let m = mobius_run_pixel(&levels, &radii, &orbit, dc, max_iter);
+                    t_pade += ps as u64;
+                    t_mob += m.steps as u64;
+                    apps_mob += m.applications as u64;
+                }
+                let exact_w = 4.0;
+                let mob_exact = (t_mob - apps_mob) as f64;
+                let mob_cost = mob_exact * exact_w + apps_mob as f64 * MOBIUS_APPLY_W;
+                let pade_cost = t_pade as f64 * PADE_APPLY_W; // turns as apps upper bound
+                println!(
+                    "[{}] c~1e{:>3.0}: turns pade={:>5} mob={:>5} (mob/pade {:.2}x turns) | weighted GPU-cost mob/pade ≈ {:.2}x",
+                    name, dec, t_pade, t_mob,
+                    t_mob as f64 / t_pade.max(1) as f64,
+                    mob_cost / pade_cost.max(1.0)
+                );
+            }
+        }
+    }
+
+    // ── Diagnostic: WHICH constraint starves the coarse-regime radii ─────────
+    // Prints, at the worst census regime: per-level median formula radius vs
+    // chained radius (isolates the §4.4 min-cascade), the applied-skip
+    // histogram, and the turns with the chain disabled (diagnostic only —
+    // shipping without the chain would void the certification).
+    #[test]
+    #[ignore] // diagnostic — run with -- --ignored --nocapture
+    fn mobius_coarse_regime_bind_analysis() {
+        let (eps, c_max) = (1e-3_f64, 1e-5_f64);
+        let max_iter = 3000usize;
+        let orbit = ref_orbit_f64(-0.75, 0.0, max_iter);
+        assert!(orbit.len() > max_iter);
+        let levels = mobius_build_levels(&orbit, 1 << 18);
+        let bounds = mobius_build_bounds(&levels, &orbit, c_max.log2());
+        let chained = mobius_build_radii(&levels, &bounds, eps, c_max.log2());
+        // Formula-only radii (no chain).
+        let formula: Vec<Vec<f64>> = levels
+            .iter()
+            .zip(bounds.per_level.iter())
+            .map(|(lvl, blv)| {
+                lvl.blocks
+                    .iter()
+                    .zip(blv.iter())
+                    .map(|(blk, b)| mobius_solve_radius(blk, b, &bounds, eps, c_max.log2()))
+                    .collect()
+            })
+            .collect();
+        println!("per-level radii (log2 median) at eps={:e} c_max={:e}:", eps, c_max);
+        for (li, lvl) in levels.iter().enumerate() {
+            let med = |v: &Vec<f64>| -> (f64, usize) {
+                let mut f: Vec<f64> = v.iter().cloned().filter(|r| r.is_finite()).collect();
+                f.sort_by(|a, b| a.partial_cmp(b).unwrap());
+                (if f.is_empty() { f64::NEG_INFINITY } else { f[f.len() / 2] }, f.len())
+            };
+            let (mf, nf) = med(&formula[li]);
+            let (mc, nc) = med(&chained[li]);
+            println!(
+                "  skip {:>5}: formula r 2^{:>6.1} ({:>4} finite) | chained r 2^{:>6.1} ({:>4} finite) of {}",
+                lvl.skip, mf, nf, mc, nc, lvl.blocks.len()
+            );
+        }
+        let mut turns = |radii: &Vec<Vec<f64>>| -> (u64, std::collections::BTreeMap<usize, u64>) {
+            let mut t = 0u64;
+            let mut hist = std::collections::BTreeMap::new();
+            for kpx in 0..16 {
+                let tt = (kpx as f64 / 16.0) * 2.0 - 1.0;
+                let dc = (tt * c_max * 0.7, 0.37 * tt * c_max);
+                // Re-run manually to log applied skips.
+                let m = mobius_run_pixel(&levels, radii, &orbit, dc, max_iter);
+                t += m.steps as u64;
+                let _ = &mut hist;
+                let _ = m;
+            }
+            (t, hist)
+        };
+        let (t_chain, _) = turns(&chained);
+        let (t_formula, _) = turns(&formula);
+        println!("turns: chained={} formula-only={}", t_chain, t_formula);
+        // Applied-skip histogram (chained radii), one representative pixel.
+        let dc = (0.31 * c_max, 0.17 * c_max);
+        let mut hist = std::collections::BTreeMap::<usize, u64>::new();
+        {
+            let radii = &chained;
+            let cfe = CFe::from_c(dc.0, dc.1);
+            let (mut dz, mut ref_i, mut iter, mut steps) =
+                ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
+            let orbit_len = orbit.len();
+            while iter < max_iter {
+                let mut applied = false;
+                if ref_i > 0 {
+                    let shifted = ref_i - 1;
+                    let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+                    let log2_dz =
+                        if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                    for (li, lvl) in levels.iter().enumerate().rev() {
+                        if shifted % lvl.skip != 0 {
+                            continue;
+                        }
+                        let slot = shifted / lvl.skip;
+                        if slot >= lvl.blocks.len()
+                            || iter + lvl.skip > max_iter
+                            || ref_i + lvl.skip >= orbit_len
+                        {
+                            continue;
+                        }
+                        if !(log2_dz < radii[li][slot]) {
+                            continue;
+                        }
+                        let (phi, _, _) =
+                            mobius_apply(&lvl.blocks[slot].m, CFe::from_c(dz.0, dz.1), cfe);
+                        let cand = phi.to_f64();
+                        let zi = orbit[ref_i + lvl.skip];
+                        let candz = (zi.0 + cand.0, zi.1 + cand.1);
+                        if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > 4.0 {
+                            continue;
+                        }
+                        *hist.entry(lvl.skip).or_insert(0) += 1;
+                        dz = cand;
+                        ref_i += lvl.skip;
+                        iter += lvl.skip;
+                        applied = true;
+                        break;
+                    }
+                }
+                if !applied {
+                    let z = orbit[ref_i];
+                    let m2 = (
+                        2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                        2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+                    );
+                    let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
+                    dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
+                    ref_i += 1;
+                    iter += 1;
+                    *hist.entry(1).or_insert(0) += 1;
+                }
+                steps += 1;
+                if ref_i > orbit_len - 1 {
+                    ref_i = orbit_len - 1;
+                }
+                let z = orbit[ref_i];
+                let full = (z.0 + dz.0, z.1 + dz.1);
+                let full2 = full.0 * full.0 + full.1 * full.1;
+                if full2 > 4.0 {
+                    break;
+                }
+                let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+                if full2 < dz2 || ref_i == orbit_len - 1 {
+                    dz = full;
+                    ref_i = 0;
+                }
+                if steps > max_iter * 2 + 16 {
+                    break;
+                }
+                if iter % 512 == 0 && iter > 0 && !applied {
+                    // Sample |dz| along the run for the probe-vs-radius picture.
+                    println!("  iter {:>5}: log2|dz| = {:.1}", iter, log2_hint(dz));
+                }
+            }
+        }
+        println!("applied-skip histogram (1 pixel): {:?}", hist);
+    }
+
+    fn log2_hint(dz: (f64, f64)) -> f64 {
+        let m = (dz.0 * dz.0 + dz.1 * dz.1).sqrt();
+        if m > 0.0 { m.log2() } else { f64::NEG_INFINITY }
+    }
+
+    // ── Build-time benchmark — cargo test --release mobius_build_time -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn mobius_build_time_benchmark() {
+        use std::time::Instant;
+        let eps = 1e-6_f64;
+        let c_max = 1e-9_f64;
+        for len in [1usize << 15, 1 << 17] {
+            let orbit = ref_orbit_f64(-1.25, 0.0, len);
+            assert!(orbit.len() > len);
+            let t0 = Instant::now();
+            let levels = mobius_build_levels(&orbit, 1 << 18);
+            let t_levels = t0.elapsed();
+            let t1 = Instant::now();
+            let bounds = mobius_build_bounds(&levels, &orbit, c_max.log2());
+            let t_bounds = t1.elapsed();
+            let t2 = Instant::now();
+            let radii = mobius_build_radii(&levels, &bounds, eps, c_max.log2());
+            let t_radii = t2.elapsed();
+            let blocks: usize = levels.iter().map(|l| l.blocks.len()).sum();
+            let positive: usize = radii
+                .iter()
+                .map(|lvl| lvl.iter().filter(|r| r.is_finite()).count())
+                .sum();
+            println!(
+                "orbit {:>8}: levels {:>7.1?} | bounds {:>7.1?} | radii {:>7.1?} | blocks {} ({} positive)",
+                len, t_levels, t_bounds, t_radii, blocks, positive
+            );
+        }
+    }
+
+    // ── Spike (task 1.1): shared-exponent feasibility for {A, B, A'} / {D, D'} ──
+    // Decision input for design D1: a group sharing one i32 exponent with f32
+    // mantissas loses coefficients once the within-group log2 spread exceeds the
+    // f32 subnormal reach (~24 bits budget for full precision, ~126+24 before a
+    // mantissa flushes to zero). Measures worst spreads per level per orbit.
+    #[test]
+    fn mobius_exponent_spike() {
+        let centers: [(&str, f64, f64, usize); 4] = [
+            ("cusp-near-parabolic", -0.75, 0.0, 1 << 15),
+            ("period2-bulb", -1.25, 0.0, 1 << 15),
+            ("seahorse", -0.743643887037151, 0.131825904205330, 1 << 15),
+            ("feigenbaum-long", -1.401155, 0.0, 1 << 17),
+        ];
+        for (name, cx, cy, len) in centers {
+            let orbit = ref_orbit_f64(cx, cy, len);
+            if orbit.len() <= len {
+                println!("\n[{}] escaped at {} — skipped", name, orbit.len() - 1);
+                continue;
+            }
+            let levels = build_jet_levels(&orbit, 2, 1 << 18);
+            println!("\n[{}] orbit_len={} levels={}", name, orbit.len(), levels.len());
+            println!(
+                "   {:>7} {:>7} | worst spread AB A' | worst spread D D' | A-B | A-A' | D-D'",
+                "skip", "blocks"
+            );
+            let (mut worst_ab, mut worst_d) = (0f64, 0f64);
+            for lvl in &levels {
+                let mut sp_ab = 0f64; // {A, B, A'}
+                let mut sp_d = 0f64; // {D, D'}
+                let (mut sp_a_b, mut sp_a_ap, mut sp_d_dp) = (0f64, 0f64, 0f64);
+                for jet in &lvl.entries {
+                    let m = mobius_from_jet(jet);
+                    if m.degenerate {
+                        continue;
+                    }
+                    let la = m.a.log2_mag();
+                    let lb = m.b.log2_mag();
+                    let lap = m.ap.log2_mag();
+                    let ld = m.d.log2_mag();
+                    let ldp = m.dp.log2_mag();
+                    let group = |vals: &[Option<f64>]| -> f64 {
+                        let fin: Vec<f64> = vals.iter().filter_map(|v| *v).collect();
+                        if fin.len() < 2 {
+                            return 0.0;
+                        }
+                        let hi = fin.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                        let lo = fin.iter().cloned().fold(f64::INFINITY, f64::min);
+                        hi - lo
+                    };
+                    sp_ab = sp_ab.max(group(&[la, lb, lap]));
+                    sp_d = sp_d.max(group(&[ld, ldp]));
+                    sp_a_b = sp_a_b.max(group(&[la, lb]));
+                    sp_a_ap = sp_a_ap.max(group(&[la, lap]));
+                    sp_d_dp = sp_d_dp.max(group(&[ld, ldp]));
+                }
+                worst_ab = worst_ab.max(sp_ab);
+                worst_d = worst_d.max(sp_d);
+                println!(
+                    "   {:>7} {:>7} | {:>18.0} | {:>17.0} | {:>4.0} | {:>4.0} | {:>4.0}",
+                    lvl.skip,
+                    lvl.entries.len(),
+                    sp_ab,
+                    sp_d,
+                    sp_a_b,
+                    sp_a_ap,
+                    sp_d_dp
+                );
+            }
+            println!(
+                "   -> worst {{A,B,A'}} spread {:.0} bits | worst {{D,D'}} spread {:.0} bits (f32 shared-exp budget ~24)",
+                worst_ab, worst_d
+            );
+        }
+    }
+}

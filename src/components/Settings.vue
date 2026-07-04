@@ -387,6 +387,7 @@ const approximationOptions = [
   { label: 'BLA', value: 'bla' },
   { label: 'Padé', value: 'pade' },
   { label: 'Jet', value: 'jet' },
+  { label: 'Möbius+', value: 'mobius' },
 ];
 
 // ── Dense field formatters (Palettes) ────────────────────────────────

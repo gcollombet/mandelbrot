@@ -137,6 +137,37 @@ impl CFe {
         r
     }
 
+    #[inline]
+    pub fn neg(self) -> CFe {
+        CFe { x: -self.x, y: -self.y, e: self.e }
+    }
+
+    #[inline]
+    pub fn sub(self, o: CFe) -> CFe {
+        self.add(o.neg())
+    }
+
+    /// Complex division. Mantissas are normalized ([0.5, 2)) so |o|² ∈ [0.25, 4)
+    /// and the quotient needs no pre-scaling. Division by zero saturates to the
+    /// huge-exponent marker (same policy as a non-finite normalize).
+    #[inline]
+    pub fn div(self, o: CFe) -> CFe {
+        if self.is_zero() {
+            return CFe::ZERO;
+        }
+        if o.is_zero() {
+            return CFe { x: 0.0, y: 0.0, e: i64::MAX / 2 };
+        }
+        let d = o.x * o.x + o.y * o.y;
+        let mut r = CFe {
+            x: (self.x * o.x + self.y * o.y) / d,
+            y: (self.y * o.x - self.x * o.y) / d,
+            e: self.e - o.e,
+        };
+        r.normalize();
+        r
+    }
+
     /// log2 of the magnitude; None for zero.
     #[inline]
     pub fn log2_mag(&self) -> Option<f64> {
@@ -776,7 +807,7 @@ pub struct JetLevel {
     pub max_r3_log2: f32,
 }
 
-fn cfe_to_coeff(c: &CFe) -> JetCoeffFe {
+pub(crate) fn cfe_to_coeff(c: &CFe) -> JetCoeffFe {
     if c.is_zero() || c.e < -(i32::MAX as i64) / 2 {
         return JetCoeffFe { x: 0.0, y: 0.0, e: 0 };
     }

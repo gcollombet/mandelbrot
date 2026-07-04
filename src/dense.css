@@ -79,6 +79,7 @@
 .dense .topbar {
   display: flex; align-items: center; gap: 12px;
   padding: 10px 14px; border-bottom: 1px solid var(--line); background: var(--head);
+  cursor: move; user-select: none; touch-action: none;
 }
 .dense .topbar .brand { display: flex; align-items: center; gap: 10px; margin-right: 4px; }
 .dense .topbar .dot { width: 8px; height: 8px; border-radius: 50%;

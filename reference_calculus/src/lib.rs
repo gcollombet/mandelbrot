@@ -10,6 +10,7 @@ use wasm_bindgen::prelude::*;
 pub type JsValue = String;
 
 mod jet;
+mod mobius;
 
 // Fonction utilitaire pour convertir DBig en f32 de manière sûre
 fn dbig_to_f32(bf: &DBig) -> f32 {
@@ -239,6 +240,9 @@ pub enum ApproximationMode {
     /// Bivariate truncated Taylor jet blocks (order-adaptive, rule (V) radii) —
     /// see the add-jet-approximation change and `jet.rs`.
     Jet = 3,
+    /// c-augmented Möbius blocks (5 coefficients, one certified radius) — see
+    /// the add-mobius-cplus change and `mobius.rs`.
+    MobiusCPlus = 4,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -342,6 +346,20 @@ pub struct MandelbrotNavigator {
     jet_bounds_log2_rc: f64,
     jet_radii_epsilon: f64,
     jet_radii_log2_c_max: f64,
+    // Möbius-c+ table (own storage — see mobius.rs and the add-mobius-cplus
+    // change). Levels (coefficients + q moduli, ALL merge levels from skip 1
+    // for the §4.4 chain) are orbit-keyed; bounds (M_Q per polydisc) carry the
+    // c_max they were walked with; radii carry their (ε, c_max).
+    mobius_levels: Box<Vec<mobius::MobiusLevel>>,
+    mobius_bounds: Box<Option<mobius::MobiusBoundsTable>>,
+    mobius_radii: Box<Vec<Vec<f64>>>,
+    mobius_coeffs_result: Box<Vec<mobius::MobiusCoeffs>>,
+    mobius_radii_result: Box<Vec<mobius::MobiusRadius>>,
+    mobius_gpu_levels: Box<Vec<jet::JetLevel>>,
+    mobius_source_len: usize,
+    mobius_bounds_log2_c_max: f64,
+    mobius_radii_epsilon: f64,
+    mobius_radii_log2_c_max: f64,
     // Ajout des vitesses pour l'animation
     vscale: DBig,
     vangle: f64,
@@ -407,6 +425,16 @@ impl MandelbrotNavigator {
             jet_bounds_log2_rc: f64::NAN,
             jet_radii_epsilon: 0.0,
             jet_radii_log2_c_max: f64::NAN,
+            mobius_levels: Box::new(Vec::new()),
+            mobius_bounds: Box::new(None),
+            mobius_radii: Box::new(Vec::new()),
+            mobius_coeffs_result: Box::new(Vec::new()),
+            mobius_radii_result: Box::new(Vec::new()),
+            mobius_gpu_levels: Box::new(Vec::new()),
+            mobius_source_len: 0,
+            mobius_bounds_log2_c_max: f64::NAN,
+            mobius_radii_epsilon: 0.0,
+            mobius_radii_log2_c_max: f64::NAN,
             vscale: DBig::try_from(1).unwrap(),
             vangle: 0.0,
             vtx: zero.clone(),
@@ -585,6 +613,10 @@ impl MandelbrotNavigator {
 
     pub fn use_pade(&mut self) {
         self.approximation_mode = ApproximationMode::Pade;
+    }
+
+    pub fn use_mobius_cplus(&mut self) {
+        self.approximation_mode = ApproximationMode::MobiusCPlus;
     }
 
     pub fn use_jet(&mut self) {
@@ -1300,6 +1332,82 @@ impl MandelbrotNavigator {
         }
     }
 
+    /// Build (or reuse) the Möbius-c+ table for the current reference orbit:
+    /// levels (coefficients + q moduli, all merge levels) keyed by orbit
+    /// length; M_Q bounds keyed by the c_max they were walked with (the
+    /// R_c = s·c_max headroom); radii keyed by (ε, c_max) and re-solved in
+    /// closed form from the stored bounds — no orbit access (design D4).
+    fn ensure_mobius_table(&mut self, orbit_len: usize) {
+        let orbit_len = orbit_len.min(self.result.len());
+        if orbit_len <= 2 {
+            self.mobius_levels.clear();
+            *self.mobius_bounds = None;
+            self.mobius_radii.clear();
+            self.mobius_source_len = 0;
+            return;
+        }
+        let orbit: Vec<(f64, f64)> = self.result[..orbit_len]
+            .iter()
+            .map(|s| (s.zx as f64, s.zy as f64))
+            .collect();
+        let max_skip = Self::auto_max_skip(orbit_len);
+        if self.mobius_source_len != orbit_len {
+            *self.mobius_levels = mobius::mobius_build_levels(&orbit, max_skip);
+            self.mobius_source_len = orbit_len;
+            self.mobius_bounds_log2_c_max = f64::NAN; // cascade: bounds stale
+            // Coefficients are orbit-keyed: serialized once here, never on a
+            // radius re-solve (the split-buffer point).
+            *self.mobius_coeffs_result = mobius::mobius_serialize_coeffs(&self.mobius_levels);
+        }
+        let log2_c_max = self.jet_log2_c_max();
+        // Bounds stay sound for any c_max below the stored R_c rungs; re-walk
+        // on zoom-out past the build point, or after 4 octaves of zoom-in
+        // (the fixed R_c = s·c_max_build drifts away from the intended
+        // anisotropy and inflates M_Q's c-channel).
+        let bounds_stale = !self.mobius_bounds_log2_c_max.is_finite()
+            || log2_c_max > self.mobius_bounds_log2_c_max
+            || log2_c_max < self.mobius_bounds_log2_c_max - 4.0;
+        if bounds_stale {
+            *self.mobius_bounds =
+                Some(mobius::mobius_build_bounds(&self.mobius_levels, &orbit, log2_c_max));
+            self.mobius_bounds_log2_c_max = log2_c_max;
+            self.mobius_radii_log2_c_max = f64::NAN; // cascade: radii stale
+        }
+        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        let radii_stale = !self.mobius_radii_log2_c_max.is_finite()
+            || (self.mobius_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
+            || (self.mobius_radii_log2_c_max - log2_c_max).abs() > 2.0;
+        if radii_stale {
+            let bounds = self.mobius_bounds.as_ref().as_ref().expect("bounds built above");
+            *self.mobius_radii =
+                mobius::mobius_build_radii(&self.mobius_levels, bounds, epsilon, log2_c_max);
+            self.mobius_radii_epsilon = epsilon;
+            self.mobius_radii_log2_c_max = log2_c_max;
+            // Re-serialize only the radius sidecar + level directory.
+            let (radii, dir) =
+                mobius::mobius_serialize_radii(&self.mobius_levels, &self.mobius_radii);
+            *self.mobius_radii_result = radii;
+            *self.mobius_gpu_levels = dir;
+        }
+    }
+
+    /// Build (or reuse) the Möbius-c+ table and expose the GPU buffers: a
+    /// coefficient buffer (`MobiusCoeffs`, 60 B/block), a radius sidecar
+    /// (`MobiusRadius`, 16 B vec4) and the level directory. The coefficient
+    /// and radius arrays share the same flat block index.
+    pub fn compute_mobius_reference(&mut self, max_iter: u32) -> MobiusBufferInfo {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.ensure_mobius_table(orbit_len);
+        MobiusBufferInfo {
+            coeffs_ptr: self.mobius_coeffs_result.as_ptr() as usize,
+            coeffs_count: self.mobius_coeffs_result.len(),
+            radii_ptr: self.mobius_radii_result.as_ptr() as usize,
+            radii_count: self.mobius_radii_result.len(),
+            levels_ptr: self.mobius_gpu_levels.as_ptr() as usize,
+            level_count: self.mobius_gpu_levels.len(),
+        }
+    }
+
     /// Retourne la taille du buffer en nombre de MandelbrotStep
     pub fn get_reference_orbit_len(&self) -> usize {
         self.last_iter
@@ -1330,6 +1438,12 @@ impl MandelbrotNavigator {
         self.jet_source_len = 0;
         self.jet_bounds_log2_rc = f64::NAN;
         self.jet_radii_log2_c_max = f64::NAN;
+        self.mobius_levels.clear();
+        *self.mobius_bounds = None;
+        self.mobius_radii.clear();
+        self.mobius_source_len = 0;
+        self.mobius_bounds_log2_c_max = f64::NAN;
+        self.mobius_radii_log2_c_max = f64::NAN;
     }
 
     fn choose_reference_near_view(&self) -> (DBig, DBig) {
@@ -1647,6 +1761,19 @@ pub struct JetBufferInfo {
     pub coeffs_ptr: usize,
     pub coeffs_count: usize,
     // Radius buffer: `JetRadii` records (16 B, vec4-packed), (ε, c_max)-keyed.
+    // `radii_count` equals `coeffs_count` — index-aligned per block.
+    pub radii_ptr: usize,
+    pub radii_count: usize,
+    pub levels_ptr: usize,
+    pub level_count: usize,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct MobiusBufferInfo {
+    // Coefficient buffer: `MobiusCoeffs` records (60 B), orbit-keyed.
+    pub coeffs_ptr: usize,
+    pub coeffs_count: usize,
+    // Radius sidecar: `MobiusRadius` records (16 B, vec4-packed), (ε, c_max)-keyed.
     // `radii_count` equals `coeffs_count` — index-aligned per block.
     pub radii_ptr: usize,
     pub radii_count: usize,
@@ -2180,6 +2307,70 @@ mod tests {
         nav.compute_jet_reference(512);
         assert_eq!(nav.jet_bounds_log2_rc, bounds_rc, "bounds re-walked inside headroom");
         assert_eq!(nav.result.len(), orbit_len_before, "reference orbit rebuilt");
+    }
+
+    #[test]
+    fn mobius_mode_table_caching_and_isolation() {
+        // (task 3.3) The mobius+ table lives in its own storage: a round-trip
+        // through mobius+ leaves the BLA and jet caches warm, and vice versa;
+        // zooming inside the headroom re-solves radii without re-walking bounds
+        // or touching the reference orbit.
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.compute_reference_orbit_ptr(512);
+        nav.use_bla();
+        nav.compute_bla_reference_ptr(512);
+        let marker = -12345.0_f32;
+        nav.bla_result[0].radius_beta = marker;
+        nav.use_jet();
+        nav.compute_jet_reference(512);
+        let jet_len = nav.jet_source_len;
+        assert!(jet_len > 0);
+        let jet_marker = nav.jet_radii_result[0].r_log2;
+
+        nav.use_mobius_cplus();
+        assert_eq!(nav.get_approximation_mode(), ApproximationMode::MobiusCPlus);
+        let info = nav.compute_mobius_reference(512);
+        assert!(info.level_count > 0, "mobius table built no levels");
+        assert!(info.coeffs_count > 0 && info.coeffs_ptr != 0, "coeff buffer empty");
+        assert!(info.radii_count > 0 && info.radii_ptr != 0, "radius buffer empty");
+        assert_eq!(info.coeffs_count, info.radii_count, "buffers must be index-aligned");
+        let positive = nav
+            .mobius_radii
+            .iter()
+            .flatten()
+            .filter(|r| r.is_finite())
+            .count();
+        assert!(positive > 0, "no positive mobius radii at shallow scale");
+
+        // Round-trip back: BLA and jet caches untouched.
+        nav.use_bla();
+        nav.compute_bla_reference_ptr(512);
+        assert_eq!(nav.bla_result[0].radius_beta, marker, "BLA cache rebuilt");
+        nav.use_jet();
+        nav.compute_jet_reference(512);
+        assert_eq!(nav.jet_source_len, jet_len, "jet levels rebuilt");
+        assert_eq!(nav.jet_radii_result[0].r_log2, jet_marker, "jet radii re-solved");
+
+        // And the mobius cache survives the detour (orbit unchanged).
+        let mob_len = nav.mobius_source_len;
+        nav.use_mobius_cplus();
+        nav.compute_mobius_reference(512);
+        assert_eq!(nav.mobius_source_len, mob_len, "mobius levels rebuilt");
+
+        // Zoom-in inside the headroom: radii re-solve alone (bounds stamp and
+        // orbit untouched), and only the sidecar/directory re-serialize.
+        let bounds_stamp = nav.mobius_bounds_log2_c_max;
+        let orbit_len_before = nav.result.len();
+        let coeffs_ptr_before = nav.mobius_coeffs_result.as_ptr() as usize;
+        nav.scale = DBig::from_str("0.00000005").unwrap(); // ×0.5 zoom in
+        nav.compute_mobius_reference(512);
+        assert_eq!(nav.mobius_bounds_log2_c_max, bounds_stamp, "bounds re-walked inside headroom");
+        assert_eq!(nav.result.len(), orbit_len_before, "reference orbit rebuilt");
+        assert_eq!(
+            nav.mobius_coeffs_result.as_ptr() as usize,
+            coeffs_ptr_before,
+            "coefficient buffer re-serialized by a radius re-solve"
+        );
     }
 
     #[test]

@@ -99,9 +99,11 @@ type BlaReadyResponse = {
     // 'jet': coefficient records (27 floats each) in `steps` + a separate radius
     // buffer (4 floats each, vec4-packed) in `radii` — the split "buffer de
     // rayons" so a radius re-solve re-uploads only the small array.
-    kind: 'bla' | 'jet'
+    // 'mobius': Möbius-c+ coefficient records (15 floats each: 5 × (x, y,
+    // e-as-i32-bits)) in `steps` + the same 4-float vec4 radius sidecar.
+    kind: 'bla' | 'jet' | 'mobius'
     steps: Float32Array<ArrayBuffer>
-    // Jet-only: per-block radii (r1, r2, r3, pad), index-aligned with `steps`.
+    // Jet/mobius only: per-block radii (vec4-packed), index-aligned with `steps`.
     radii?: Float32Array<ArrayBuffer>
     levels: Uint32Array<ArrayBuffer>
     levelCount: number
@@ -205,6 +207,8 @@ function applyApproximationMode(mode: ApproximationMode) {
         navigator.use_pade()
     } else if (mode === 'jet') {
         navigator.use_jet()
+    } else if (mode === 'mobius') {
+        navigator.use_mobius_cplus()
     } else {
         navigator.use_perturbation()
     }
@@ -260,14 +264,15 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         return
     }
     const mode = navigator.get_approximation_mode()
-    // Jet rebuilds are ~10-20× costlier than BLA ones (exact degree-6 merges +
-    // majorant walks). During zoom-in maxIterations grows every updateView; a
-    // rebuild per tick would keep the table permanently stale (the engine then
-    // renders exact perturbation). Throttle: keep serving the posted table until
-    // the target outgrows it by 1.5× — blocks then still cover ≥⅔ of the
-    // iterations (the engine accepts partial tables in jet mode), the tail runs
-    // exact, and the ≥2-octave scale-drift repost refreshes radii regardless.
-    const jetStillFresh = mode === 3
+    // Jet/mobius rebuilds are ~10-20× costlier than BLA ones (exact degree-6
+    // merges + majorant walks). During zoom-in maxIterations grows every
+    // updateView; a rebuild per tick would keep the table permanently stale
+    // (the engine then renders exact perturbation). Throttle: keep serving the
+    // posted table until the target outgrows it by 1.5× — blocks then still
+    // cover ≥⅔ of the iterations (the engine accepts partial tables for these
+    // modes), the tail runs exact, and the ≥2-octave scale-drift repost
+    // refreshes radii regardless.
+    const jetStillFresh = (mode === 3 || mode === 4)
         && lastBlaMaxIterations > 0
         && maxIterations <= Math.ceil(lastBlaMaxIterations * 1.5)
     if (
@@ -288,7 +293,8 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     // BlaStep table with no separate radii. Both level directories are 4 × u32
     // per level (the last word is an f32 bit-pattern).
     const isJet = mode === 3
-    if (!isJet) {
+    const isMobius = mode === 4
+    if (!isJet && !isMobius) {
         // BLA / Padé path: one 12-float BlaStep table.
         const info = navigator.compute_bla_reference_ptr(maxIterations)
         const stepsSource = new Float32Array(wasmMemory.buffer, info.ptr, info.count * 12)
@@ -311,17 +317,20 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         return
     }
 
-    // Jet path: coefficient buffer + radius buffer + level directory.
+    // Jet/mobius path: coefficient buffer + radius sidecar + level directory.
     const tableT0 = performance.now()
-    const info = navigator.compute_jet_reference(maxIterations)
-    // The jet build is the worker's single big synchronous chunk (exact
+    const info = isMobius
+        ? navigator.compute_mobius_reference(maxIterations)
+        : navigator.compute_jet_reference(maxIterations)
+    // These builds are the worker's single big synchronous chunk (exact
     // degree-6 merges + majorant walks): surface it so slow-mode reports can
     // tell build latency from per-application cost.
-    console.log(`[REF worker] jet table built in ${(performance.now() - tableT0).toFixed(0)}ms (maxIter ${maxIterations})`)
+    console.log(`[REF worker] ${isMobius ? 'mobius' : 'jet'} table built in ${(performance.now() - tableT0).toFixed(0)}ms (maxIter ${maxIterations})`)
 
-    // Strides must match the Rust #[repr(C)] JetCoeffs / JetRadii and Engine's
-    // JET_COEFF_FLOATS / JET_RADII_FLOATS.
-    const stepsSource = new Float32Array(wasmMemory.buffer, info.coeffs_ptr, info.coeffs_count * 27)
+    // Strides must match the Rust #[repr(C)] JetCoeffs / MobiusCoeffs /
+    // JetRadii / MobiusRadius and Engine's *_FLOATS constants.
+    const coeffFloats = isMobius ? 15 : 27
+    const stepsSource = new Float32Array(wasmMemory.buffer, info.coeffs_ptr, info.coeffs_count * coeffFloats)
     const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
     steps.set(stepsSource)
 
@@ -339,7 +348,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         jobId,
         refId,
         maxIterations,
-        kind: 'jet',
+        kind: isMobius ? 'mobius' : 'jet',
         steps,
         radii,
         levels,
@@ -431,10 +440,12 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     navigator.angle(message.angle)
                     targetMaxIterations = message.maxIterations
                     needsReferenceValidation = true
-                    // Jet radii depend on the per-view c_max: after ≥ 2 octaves
-                    // of scale drift, re-post the table (cheap closed-form
-                    // re-solve Rust-side; existing radii stay sound meanwhile).
-                    if (navigator.get_approximation_mode() === 3) {
+                    // Jet/mobius radii depend on the per-view c_max: after ≥ 2
+                    // octaves of scale drift, re-post the table (cheap
+                    // closed-form re-solve Rust-side; existing radii stay
+                    // sound meanwhile).
+                    const driftMode = navigator.get_approximation_mode()
+                    if (driftMode === 3 || driftMode === 4) {
                         const log2Scale = log2FromDecimalString(message.scale)
                         if (!Number.isFinite(lastJetLog2Scale) || Math.abs(log2Scale - lastJetLog2Scale) >= 2) {
                             lastJetLog2Scale = log2Scale

@@ -168,6 +168,23 @@ next levers stay as listed (split evaluation, f32 shallow fast path).
   Results feed back through `fe_from_vec` (renormalizing), so the #3 fold
   branch picks up f32-path derivatives with their true exponents.
 
+*Perf round 3 (2026-07-03) — level hint (#5):* the descent restarted at the full
+alignment maximum every turn and walked DOWN through the top levels (tighter
+radii, so they reject) to reach the accepted one. The accepted level is strongly
+correlated turn-to-turn (|dz| drifts slowly), so a per-pixel register
+(`jetLevelHint`, threaded as a `hint` in/out pointer, one per loop — shallow +
+deep × both production shaders + debug) now caps the start at `hint +
+JET_LEVEL_HINT_UP` (UP = 2). Soundness: capping the start level can only SHORTEN
+a skip, never break correctness — every level's block is an independently valid
+approximation of its own `skip` iterations (D2). And it can never turn an
+available skip into none: radii are monotone across the merge tree (a level-L
+block is a merge of two level-(L−1) blocks, which only shrinks the radius), so
+if any level above the cap would accept, the cap level accepts too. The only
+cost is a transient one-level-shorter skip while `hint` climbs (UP levels/turn)
+after a downward |dz| jump; post-rebase `ref_i` resets shrink the alignment cap
+anyway, so a stale hint self-limits. `hint` starts at `JET_MAX_LEVELS`
+(uncapped) so the first application per pixel sees the full alignment range.
+
 ### D7 — Exponent strategy: per-coefficient (spike DECIDED, 2026-07-02)
 
 Spike (`jet_exponent_spike` in `reference_calculus/src/jet.rs`) built D_s = 6 jets over

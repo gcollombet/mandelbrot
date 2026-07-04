@@ -480,7 +480,7 @@ defineExpose({
   initialize: async () => initWebGPU(),
   useBla: () => engine?.setApproximationMode('bla'),
   usePerturbation: () => engine?.setApproximationMode('perturbation'),
-  setApproximationMode: (mode: 'bla' | 'perturbation' | 'pade' | 'jet') => engine?.setApproximationMode(mode),
+  setApproximationMode: (mode: 'bla' | 'perturbation' | 'pade' | 'jet' | 'mobius') => engine?.setApproximationMode(mode),
   getApproximationMode: () => engine?.getApproximationMode(),
   setBlaEpsilon: (epsilon: number) => engine?.setBlaEpsilon(epsilon),
   setPrecisionBudget: (targetScale: string) => engine?.setPrecisionBudget(targetScale),

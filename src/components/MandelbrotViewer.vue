@@ -392,7 +392,7 @@ function applyApproximationToEngine() {
   const engine = mandelbrotEngine.value;
   if (!engine) return;
   const raw = mandelbrotParams.value.approximationMode;
-  const mode: ApproximationMode = raw === 'bla' || raw === 'pade' || raw === 'jet' ? raw : 'perturbation';
+  const mode: ApproximationMode = raw === 'bla' || raw === 'pade' || raw === 'jet' || raw === 'mobius' ? raw : 'perturbation';
   engine.setApproximationMode(mode);
 }
 
@@ -818,7 +818,7 @@ function setPopupRef(tabKey: string, el: HTMLElement | null) {
   popupRefs.value[tabKey] = el;
 }
 
-function startDrag(tabKey: string, e: MouseEvent) {
+function startDrag(tabKey: string, e: MouseEvent | PointerEvent) {
   const el = popupRefs.value[tabKey];
   if (!el) return;
   e.preventDefault?.();
@@ -831,11 +831,14 @@ function startDrag(tabKey: string, e: MouseEvent) {
     popupPositions[tabKey] = { x: rect.left, y: rect.top };
   }
   bringToFront(tabKey);
-  window.addEventListener('mousemove', onDrag);
-  window.addEventListener('mouseup', stopDrag);
+  // Pointer events cover both mouse and touch input (incl. the legacy header's
+  // mousedown-triggered drags, since real mouse movement also dispatches pointermove),
+  // so dragging works on tablets/touchscreens too.
+  window.addEventListener('pointermove', onDrag);
+  window.addEventListener('pointerup', stopDrag);
 }
 
-function onDrag(e: MouseEvent) {
+function onDrag(e: MouseEvent | PointerEvent) {
   if (!isDragging.value || !draggingTab.value) return;
   popupPositions[draggingTab.value] = {
     x: e.clientX - dragOffset.value.x,
@@ -847,8 +850,8 @@ function onDrag(e: MouseEvent) {
 function stopDrag() {
   isDragging.value = false;
   draggingTab.value = null;
-  window.removeEventListener('mousemove', onDrag);
-  window.removeEventListener('mouseup', stopDrag);
+  window.removeEventListener('pointermove', onDrag);
+  window.removeEventListener('pointerup', stopDrag);
 }
 
 function popupStyle(tabKey: string) {

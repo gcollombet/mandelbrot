@@ -22,11 +22,17 @@ const emit = defineEmits<{
 }>();
 
 const menuOpen = ref(false);
+
+/** Drag from anywhere on the topbar background — but not from buttons/controls. */
+function onHeaderPointerDown(e: PointerEvent) {
+  if ((e.target as HTMLElement).closest('button')) return;
+  emit('drag-start', e);
+}
 </script>
 
 <template>
-  <header class="topbar">
-    <div class="brand" @pointerdown="emit('drag-start', $event)">
+  <header class="topbar" @pointerdown="onHeaderPointerDown">
+    <div class="brand">
       <span class="dot"></span>
       <h1>{{ title }}</h1>
     </div>

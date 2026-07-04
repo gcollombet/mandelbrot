@@ -66,6 +66,14 @@ const JET_COEFF_FLOATS = 27
 // Its own buffer so a radius re-solve re-uploads only these, not the whole
 // coefficient table.
 const JET_RADII_FLOATS = 4
+// Floats per Möbius-c+ COEFFICIENT record — must match the Rust #[repr(C)]
+// MobiusCoeffs: 5 coefficients × (x, y, e), 60 B. Mobius tables ship in the
+// SAME GPU buffers as jet ones (the element type is identical and the modes
+// are exclusive; layoutInplace already sits at the 8-storage-buffer WebGPU
+// default limit, so new bindings were not an option) — only the indexing
+// stride differs shader-side. The radius sidecar and level directory reuse
+// the jet strides outright (16 B vec4 / 4 × u32).
+const MOBIUS_COEFF_FLOATS = 15
 // Step capacity of the GPU reference buffer (the 8·CAPACITY-byte
 // mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts, where the orbit
 // is computed to 2× the display maxIter (interactive zoom-in headroom) but never
@@ -174,10 +182,11 @@ type ReferenceWorkerResponse =
         refId: number
         maxIterations: number
         // Which block table the payload carries: BLA/Padé records
-        // (BLA_STEP_FLOATS stride, no `radii`) or jet coefficient records
-        // (JET_COEFF_FLOATS stride) with a separate radius buffer in `radii`
+        // (BLA_STEP_FLOATS stride, no `radii`), jet coefficient records
+        // (JET_COEFF_FLOATS stride) or Möbius-c+ records (MOBIUS_COEFF_FLOATS
+        // stride) — the latter two with a separate radius buffer in `radii`
         // (JET_RADII_FLOATS stride — the split "buffer de rayons").
-        kind: 'bla' | 'jet'
+        kind: 'bla' | 'jet' | 'mobius'
         steps: Float32Array<ArrayBuffer>
         radii?: Float32Array<ArrayBuffer>
         levels: Uint32Array<ArrayBuffer>
@@ -221,7 +230,7 @@ type ReferenceSlot = {
     chunks: Float32Array<ArrayBuffer>[]
     /** Block table for this reference (arrives after the orbit completes). */
     bla: {
-        kind: 'bla' | 'jet'
+        kind: 'bla' | 'jet' | 'mobius'
         steps: Float32Array<ArrayBuffer>
         radii?: Float32Array<ArrayBuffer>
         levels: Uint32Array<ArrayBuffer>
@@ -363,7 +372,7 @@ export type RenderOptions = {
     textureMappingMode?: number,
 }
 
-export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet'
+export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet' | 'mobius'
 
 export type Mandelbrot = {
     maxIterations: number,
@@ -578,6 +587,12 @@ export class Engine {
     referenceResetSerial = 0
     referenceResetFlashUntil = 0
     currentBlaLevelCount = 0
+    // Kind of the block table currently sitting in the GPU buffers (set by
+    // writeBlockTable). The frame gate requires it to MATCH the current mode:
+    // after a mode switch the counters still describe the previous mode's
+    // table — jet and mobius even share buffers — so blocks stay disabled
+    // until the worker's repost lands.
+    private currentBlockTableKind: 'bla' | 'jet' | 'mobius' | null = null
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private maxBlaSkip = 65536
@@ -1085,7 +1100,7 @@ export class Engine {
         // only feed per-frame shader uniforms and UI, and serializing them to decimal strings
         // every frame at the full budget made per-frame cost ∝ budget. The budget lives only on
         // the worker navigator (set via the reset message), which builds the reference orbit.
-        this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
+        this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         this.initializeReferenceWorker()
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
@@ -1596,14 +1611,25 @@ export class Engine {
     // Upload a worker-built block table into the buffers of its kind. The level
     // directories share the 4-u32 stride; only the step stride differs. Jet
     // tables carry a second array (`radii`, the split "buffer de rayons").
-    private writeBlockTable(table: { kind: 'bla' | 'jet', steps: Float32Array<ArrayBuffer>, radii?: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number }) {
-        if (table.kind === 'jet') {
-            this.ensureJetBufferCapacity(table.steps.length / JET_COEFF_FLOATS)
+    private writeBlockTable(table: { kind: 'bla' | 'jet' | 'mobius', steps: Float32Array<ArrayBuffer>, radii?: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number }) {
+        this.currentBlockTableKind = table.kind
+        if (table.kind === 'jet' || table.kind === 'mobius') {
+            // Mobius tables live in the jet buffers (same 12 B element type,
+            // exclusive modes): only the block stride differs, and the shader
+            // indexes by the mode flag. The coeff capacity is tracked in
+            // jet-entry units (27 floats) — a float-count ceiling covers the
+            // denser mobius records; the radii sidecar is sized on its own
+            // block count (mobius has 27/15 more blocks per coeff float).
+            const blockCount = Math.ceil(
+                table.steps.length / (table.kind === 'mobius' ? MOBIUS_COEFF_FLOATS : JET_COEFF_FLOATS),
+            )
+            this.ensureJetBufferCapacity(Math.ceil(table.steps.length / JET_COEFF_FLOATS))
+            this.ensureJetRadiiBufferCapacity(blockCount)
             this.ensureJetLevelBufferCapacity(table.levelCount)
+            const radii = table.radii
             if (table.steps.length > 0 && this.mandelbrotJetBuffer) {
                 this.device.queue.writeBuffer(this.mandelbrotJetBuffer, 0, table.steps, 0, table.steps.length)
             }
-            const radii = table.radii
             if (radii && radii.length > 0 && this.mandelbrotJetRadiiBuffer) {
                 this.device.queue.writeBuffer(this.mandelbrotJetRadiiBuffer, 0, radii, 0, radii.length)
             }
@@ -2116,6 +2142,8 @@ export class Engine {
             this.mandelbrotNavigator.use_pade()
         } else if (mode === 'jet') {
             this.mandelbrotNavigator.use_jet()
+        } else if (mode === 'mobius') {
+            this.mandelbrotNavigator.use_mobius_cplus()
         } else {
             this.mandelbrotNavigator.use_perturbation()
         }
@@ -2158,9 +2186,10 @@ export class Engine {
             jobId: this.referenceJobId,
             blaEpsilon: next,
         })
-        // ε sets the validity radius (ε·|A| affine, √ε·|A| Padé), so a change must
-        // rebuild the table and re-render in either block-jump mode.
-        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet') {
+        // ε sets the validity radius (ε·|A| affine, √ε·|A| Padé, the certified
+        // (V) radii for jet/mobius), so a change must rebuild the table and
+        // re-render in any block-jump mode.
+        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius') {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
@@ -2246,7 +2275,7 @@ export class Engine {
             jobId: this.referenceJobId,
             maxBlaSkip: pow2,
         })
-        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet') {
+        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius') {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
@@ -2289,7 +2318,7 @@ export class Engine {
             return
         }
 
-        const navigatorApproximationMode: ApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
+        const navigatorApproximationMode: ApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
             this.approximationMode = navigatorApproximationMode
@@ -2668,21 +2697,31 @@ export class Engine {
         // Block-jump modes: 'bla' (affine) and 'pade' (rational) both use the table;
         // the uniform flag carries which one (1 = BLA, 2 = Padé) so the shader picks
         // the affine vs rational application. 0 = exact perturbation.
-        // A jet table built for FEWER iterations than the current target is still
-        // sound: its blocks cover a prefix of the same orbit (slot bounds reject
-        // anything past it, the tail runs exact) and radii only get MORE
-        // conservative as c_max shrinks on zoom-in. Requiring full coverage — as
-        // BLA/Padé do — would disable jet during the whole zoom (its rebuilds are
-        // throttled worker-side because they cost ~10-20× a BLA build).
-        const tableCoversView = this.approximationMode === 'jet'
+        // A jet/mobius table built for FEWER iterations than the current target
+        // is still sound: its blocks cover a prefix of the same orbit (slot
+        // bounds reject anything past it, the tail runs exact) and radii only
+        // get MORE conservative as c_max shrinks on zoom-in. Requiring full
+        // coverage — as BLA/Padé do — would disable these modes during the
+        // whole zoom (their rebuilds are throttled worker-side because they
+        // cost ~10-20× a BLA build).
+        const prefixTableMode = this.approximationMode === 'jet' || this.approximationMode === 'mobius'
+        const tableCoversView = prefixTableMode
             ? this.referenceBlaReadyMaxIterations > 0
             : this.referenceBlaReadyMaxIterations >= guardedMaxIter
-        const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet')
+        // Active-table audit: the counters describe the LAST posted table, which
+        // after a mode switch is still the previous mode's (jet and mobius even
+        // share GPU buffers with different strides). Blocks stay disabled until
+        // the worker posts a table of the current mode's kind.
+        const expectedTableKind = this.approximationMode === 'jet' ? 'jet'
+            : this.approximationMode === 'mobius' ? 'mobius'
+            : 'bla'
+        const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius')
             && orbitComplete
             && this.currentBlaLevelCount > 0
+            && this.currentBlockTableKind === expectedTableKind
             && tableCoversView
         const approximationModeFlag = blocksReady
-            ? (this.approximationMode === 'jet' ? 3 : this.approximationMode === 'pade' ? 2 : 1)
+            ? (this.approximationMode === 'mobius' ? 4 : this.approximationMode === 'jet' ? 3 : this.approximationMode === 'pade' ? 2 : 1)
             : 0
         const blaLevelCount = blocksReady ? this.currentBlaLevelCount : 0
         // Diagnostic mirror of exactly what the shader receives this frame: the mode
