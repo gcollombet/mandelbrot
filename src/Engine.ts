@@ -1,12 +1,10 @@
 // Engine.ts: implémente une classe Engine pour gérer le pipeline WebGPU
 
-import mandelbrotShader from './assets/mandelbrot.wgsl?raw'
 import inplaceComputeShader from './assets/mandelbrot_brush.wgsl?raw'
 import debugViewShader from './assets/mandelbrot_debug.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
-import brushShader from './assets/reproject.wgsl?raw'
+import reprojectCsShader from './assets/reproject_cs.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
-import countShader from './assets/count_unfinished.wgsl?raw'
 import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import presentShader from './assets/present.wgsl?raw'
 import aaTargetShader from './assets/aa_target.wgsl?raw'
@@ -40,7 +38,12 @@ import {
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
-const LAYER_COUNT = 8
+// Raw state textures (A/B) carry a 9th layer: the Cartesian derivative log
+// scale derS for in-progress pixels (all-compute-der-cartesian). Display-side
+// textures (resolved/frozen) and their 8-target MRT pipelines stay at 8 —
+// they only ever consume the escaped format.
+const RAW_LAYERS = 9
+const DISPLAY_LAYERS = 8
 
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
 // to target TARGET_FRAME_MS of GPU time.
@@ -84,7 +87,7 @@ const TAU = Math.PI * 2
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
 // each frame) is paused when the batch controller is at its minimum AND
-// the number of active pixels (those mandelbrot.wgsl actually processes:
+// the number of active pixels (those the fused compute pass actually processes:
 // iter == -1 or continuations) exceeds this threshold.  This prevents
 // pixel-count avalanches while still guaranteeing convergence — the gate
 // only closes when the GPU truly cannot absorb more work.
@@ -409,12 +412,10 @@ export class Engine {
     mandelbrotNavigator!: MandelbrotNavigator
 
     // resources
-    rawTexture?: GPUTexture // texture "neutre" (A) — 8-layer r32float array
+    rawTexture?: GPUTexture // texture "neutre" (A) — r32float array, written via textureStore only
     rawArrayView?: GPUTextureView // full 2d-array view for sampling
-    rawLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
-    rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B) — 8-layer r32float array
+    rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B) — r32float array, written via textureStore only
     rawBrushArrayView?: GPUTextureView // full 2d-array view for sampling
-    rawBrushLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
     resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 8-layer r32float array
     resolvedArrayView?: GPUTextureView // full 2d-array view for sampling
     resolvedLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
@@ -445,10 +446,6 @@ export class Engine {
     private mandelbrotJetLevelBufferCapacity = 0
 
     // pipelines / bindgroups
-    pipelineBrush?: GPURenderPipeline
-    bindGroupBrush?: GPUBindGroup
-    pipelineMandelbrot?: GPURenderPipeline
-    bindGroupMandelbrot?: GPUBindGroup
     pipelineResolve?: GPURenderPipeline
     bindGroupResolve?: GPUBindGroup
     pipelineColor?: GPURenderPipeline
@@ -480,14 +477,15 @@ export class Engine {
     useAaSelectiveReseed = true
 
     // In-place compute path: fused brush+mandelbrot+count working directly on
-    // rawTexture (A) for frames without translation/clearHistory.  Replaces the
-    // brush render pass, the B→A copy, the mandelbrot render pass and the count
-    // pass with a single compute dispatch whose writes are proportional to the
-    // number of active pixels.
-    /** Runtime toggle: when false, every frame uses the render ping-pong path. */
-    useInplaceCompute = true
+    // rawTexture (A) — the single production iteration path. Pan/clear frames
+    // first run the reproject_cs utility pass (A→B + copy back) in the same
+    // encoder, then this dispatch continues iteration; writes stay
+    // proportional to the number of active pixels.
     private pipelineInplace?: GPUComputePipeline
     private bindGroupInplace?: GPUBindGroup
+    // Utility compute pass (pan shift / clear stamp), ping-pong A→B.
+    private pipelineReprojectCs?: GPUComputePipeline
+    private bindGroupReprojectCs?: GPUBindGroup
     /** Alternative color bind group reading rawTexture (A) instead of resolved,
      *  used when the resolve pass is skipped (image fully converged). */
     private bindGroupColorRaw?: GPUBindGroup
@@ -499,7 +497,6 @@ export class Engine {
     private counterSampleFrame = -1
 
     // GPU pixel counter (replaces blanket extraFrames = 1000)
-    private pipelineCount?: GPUComputePipeline
     private counterBuffer?: GPUBuffer
     private workStatsBuffer?: GPUBuffer
     private counterReadbackSlots: CounterReadbackSlot[] = []
@@ -509,11 +506,9 @@ export class Engine {
     private counterReadbackGeneration = 0
     private renderFrameSerial = 0
     private lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
-    private counterBindGroup?: GPUBindGroup
-    private uniformBufferCount?: GPUBuffer
     /** Number of pixels still needing work. -1 = not yet known, 0 = fully converged. */
     unfinishedPixelCount = -1
-    /** Number of pixels that mandelbrot.wgsl actually processes (iter == -1 + continuations).
+    /** Number of pixels the fused compute pass actually processes (iter == -1 + continuations).
      *  Used for adaptive refinement gating. -1 = not yet known. */
     activePixelCount = -1
 
@@ -560,7 +555,6 @@ export class Engine {
     neutralSize = 0 // coté en pixels de la texture neutre (D)
 
     // shader sources (optionnellement remplaçables)
-    shaderPassCompute: string
     shaderPassColor: string
 
     // config
@@ -738,7 +732,6 @@ export class Engine {
 
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas
-        this.shaderPassCompute = mandelbrotShader
         this.shaderPassColor = colorShader
         this.antialiasLevel = options.antialiasLevel
         this.palettePeriod = options.palettePeriod
@@ -1255,11 +1248,6 @@ export class Engine {
             sequence: 0,
             generation: 0,
         }))
-        this.uniformBufferCount = this.device.createBuffer({
-            size: 4 * 4, // 3 floats (mu, aspect, angle) padded to 16-byte alignment
-            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
-            label: 'Engine UniformBuffer Count',
-        })
         this.uniformBufferMerge = this.device.createBuffer({
             size: 4 * 8, // 6 floats (zf, lzf, frozenShiftU, frozenShiftV, aspect, angle) padded to 32 bytes
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -1271,34 +1259,9 @@ export class Engine {
     }
 
     private async _createPipelines() {
-        const moduleBrush = this.device.createShaderModule({ code: brushShader, label: 'Engine ShaderModule Brush' })
-        const moduleCompute = this.device.createShaderModule({ code: this.shaderPassCompute, label: 'Engine ShaderModule Compute' })
         const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
         const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
-        const moduleCount = this.device.createShaderModule({ code: countShader, label: 'Engine ShaderModule Count' })
         const moduleDebug = this.device.createShaderModule({ code: debugViewShader, label: 'Engine ShaderModule DebugView' })
-
-        const layoutBrush = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-            ],
-            label: 'Engine BindGroupLayout Brush',
-        })
-
-        const layoutMandelbrot = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-            ],
-            label: 'Engine BindGroupLayout Mandelbrot',
-        })
 
         // Diagnostic overlay pipeline (block-skipping debug views). Renders a
         // fullscreen instrumented recompute straight to the swapchain.
@@ -1346,24 +1309,9 @@ export class Engine {
             label: 'Engine BindGroupLayout Color',
         })
 
-        // 8 MRT targets for the layered r32float texture array (LAYER_COUNT)
-        const mrtTargets: GPUColorTargetState[] = Array.from({ length: LAYER_COUNT }, () => ({ format: 'r32float' as GPUTextureFormat }))
-
-        this.pipelineBrush = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutBrush] }),
-            vertex: { module: moduleBrush, entryPoint: 'vs_main' },
-            fragment: { module: moduleBrush, entryPoint: 'fs_main', targets: mrtTargets },
-            primitive: { topology: 'triangle-list' },
-            label: 'Engine RenderPipeline Brush',
-        })
-
-        this.pipelineMandelbrot = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMandelbrot] }),
-            vertex: { module: moduleCompute, entryPoint: 'vs_main' },
-            fragment: { module: moduleCompute, entryPoint: 'fs_main', targets: mrtTargets },
-            primitive: { topology: 'triangle-list' },
-            label: 'Engine RenderPipeline Mandelbrot',
-        })
+        // 8 MRT targets for the display-side passes (resolve/merge). The raw
+        // iteration path writes via textureStore and never touches MRT.
+        const mrtTargets: GPUColorTargetState[] = Array.from({ length: DISPLAY_LAYERS }, () => ({ format: 'r32float' as GPUTextureFormat }))
 
         this.pipelineResolve = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
@@ -1412,21 +1360,6 @@ export class Engine {
             label: 'Engine RenderPipeline ColorAccum',
         })
 
-        // Compute pipeline for counting unfinished pixels
-        const layoutCount = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
-            ],
-            label: 'Engine BindGroupLayout Count',
-        })
-        this.pipelineCount = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutCount] }),
-            compute: { module: moduleCount, entryPoint: 'count_unfinished' },
-            label: 'Engine ComputePipeline Count',
-        })
-
         // ── In-place compute pipeline (fused brush+mandelbrot+count on A) ──
         const moduleInplace = this.device.createShaderModule({ code: inplaceComputeShader, label: 'Engine ShaderModule InplaceCompute' })
         const layoutInplace = this.device.createBindGroupLayout({
@@ -1449,6 +1382,24 @@ export class Engine {
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutInplace] }),
             compute: { module: moduleInplace, entryPoint: 'cs_main' },
             label: 'Engine ComputePipeline InplaceBrushMandelbrot',
+        })
+
+        // ── Utility compute pass (pan/clear ping-pong A→B) ───────────────
+        // Compute port of the fragment brush: reads A, rewrites B wholesale
+        // (textureStore — no MRT, so the raw layer count is free to grow).
+        const moduleReprojectCs = this.device.createShaderModule({ code: reprojectCsShader, label: 'Engine ShaderModule ReprojectCs' })
+        const layoutReprojectCs = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
+            ],
+            label: 'Engine BindGroupLayout ReprojectCs',
+        })
+        this.pipelineReprojectCs = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutReprojectCs] }),
+            compute: { module: moduleReprojectCs, entryPoint: 'cs_main' },
+            label: 'Engine ComputePipeline ReprojectCs',
         })
 
         // ── Merge pipeline (resolved + frozen → frozen via MRT) ──────────
@@ -1525,14 +1476,12 @@ export class Engine {
         })
 
         // bind groups seront (ré)créés dans resize car dépend des textures
-        this.bindGroupBrush = undefined
-        this.bindGroupMandelbrot = undefined
         this.bindGroupResolve = undefined
         this.bindGroupColor = undefined
         this.bindGroupColorRaw = undefined
-        this.counterBindGroup = undefined
         this.bindGroupMerge = undefined
         this.bindGroupInplace = undefined
+        this.bindGroupReprojectCs = undefined
         this.bindGroupPresent = undefined
     }
 
@@ -1564,28 +1513,14 @@ export class Engine {
         })
     }
 
-    private rebuildMandelbrotBindGroup() {
-        if (!this.pipelineMandelbrot || !this.rawBrushArrayView || !this.uniformBufferMandelbrot
+    // Rebuild the bind groups sharing the orbit/BLA/jet buffers (debug overlay
+    // + in-place compute) — called whenever one of those buffers reallocates.
+    private rebuildIterationBindGroups() {
+        if (!this.uniformBufferMandelbrot
             || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
             || !this.mandelbrotJetBuffer || !this.mandelbrotJetRadiiBuffer || !this.mandelbrotJetLevelBuffer) {
             return
         }
-
-        const layout = this.pipelineMandelbrot.getBindGroupLayout(0)
-        this.bindGroupMandelbrot = this.device.createBindGroup({
-            layout,
-            entries: [
-                { binding: 0, resource: { buffer: this.uniformBufferMandelbrot } },
-                { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
-                { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
-                { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
-                { binding: 4, resource: this.rawBrushArrayView },
-                { binding: 5, resource: { buffer: this.mandelbrotJetBuffer } },
-                { binding: 6, resource: { buffer: this.mandelbrotJetLevelBuffer } },
-                { binding: 7, resource: { buffer: this.mandelbrotJetRadiiBuffer } },
-            ],
-            label: 'Engine BindGroup Mandelbrot',
-        })
 
         if (this.pipelineDebug) {
             this.bindGroupDebug = this.device.createBindGroup({
@@ -1603,8 +1538,6 @@ export class Engine {
             })
         }
 
-        // The in-place compute bind group shares the orbit/BLA buffers, so it
-        // must be rebuilt whenever they are reallocated.
         this.rebuildInplaceBindGroup()
     }
 
@@ -1661,7 +1594,7 @@ export class Engine {
             label: 'Engine Mandelbrot BLA Storage Buffer',
         })
         this.mandelbrotBlaBufferCapacity = safeRequiredEntries
-        this.rebuildMandelbrotBindGroup()
+        this.rebuildIterationBindGroups()
     }
 
     private ensureBlaLevelBufferCapacity(requiredEntries: number) {
@@ -1677,7 +1610,7 @@ export class Engine {
             label: 'Engine Mandelbrot BLA Level Storage Buffer',
         })
         this.mandelbrotBlaLevelBufferCapacity = safeRequiredEntries
-        this.rebuildMandelbrotBindGroup()
+        this.rebuildIterationBindGroups()
     }
 
     private ensureJetBufferCapacity(requiredEntries: number) {
@@ -1695,7 +1628,7 @@ export class Engine {
         // The radius buffer is index-aligned with the coefficient buffer, so it
         // must hold the same number of blocks.
         this.ensureJetRadiiBufferCapacity(safeRequiredEntries)
-        this.rebuildMandelbrotBindGroup()
+        this.rebuildIterationBindGroups()
     }
 
     private ensureJetRadiiBufferCapacity(requiredEntries: number) {
@@ -1710,7 +1643,7 @@ export class Engine {
             label: 'Engine Mandelbrot Jet Radii Storage Buffer',
         })
         this.mandelbrotJetRadiiBufferCapacity = safeRequiredEntries
-        this.rebuildMandelbrotBindGroup()
+        this.rebuildIterationBindGroups()
     }
 
     private ensureJetLevelBufferCapacity(requiredEntries: number) {
@@ -1725,7 +1658,7 @@ export class Engine {
             label: 'Engine Mandelbrot Jet Level Storage Buffer',
         })
         this.mandelbrotJetLevelBufferCapacity = safeRequiredEntries
-        this.rebuildMandelbrotBindGroup()
+        this.rebuildIterationBindGroups()
     }
 
     private invalidateCounterReadback() {
@@ -1929,10 +1862,8 @@ export class Engine {
         this.accumTexture?.destroy?.()
         this.aaTargetTexture?.destroy?.()
 
-        const layerCount = LAYER_COUNT
-
         // Helper: create an r32float texture array + per-layer 2d views + full 2d-array view
-        const createLayeredTexture = (label: string, extraUsage: GPUTextureUsageFlags = 0): {
+        const createLayeredTexture = (label: string, layerCount: number, extraUsage: GPUTextureUsageFlags = 0): {
             texture: GPUTexture,
             arrayView: GPUTextureView,
             layerViews: GPUTextureView[],
@@ -1963,22 +1894,22 @@ export class Engine {
 
         // STORAGE_BINDING: the in-place compute path writes A as a read_write
         // storage texture (r32float is the only format allowing this).
-        const rawResult = createLayeredTexture('Engine RawTexture (A)', GPUTextureUsage.STORAGE_BINDING)
+        const rawResult = createLayeredTexture('Engine RawTexture (A)', RAW_LAYERS, GPUTextureUsage.STORAGE_BINDING)
         this.rawTexture = rawResult.texture
         this.rawArrayView = rawResult.arrayView
-        this.rawLayerViews = rawResult.layerViews
 
-        const brushResult = createLayeredTexture('Engine RawBrushTexture (B)')
+        // STORAGE_BINDING: the utility compute pass (reproject_cs) writes B
+        // as a write-only storage texture array.
+        const brushResult = createLayeredTexture('Engine RawBrushTexture (B)', RAW_LAYERS, GPUTextureUsage.STORAGE_BINDING)
         this.rawBrushTexture = brushResult.texture
         this.rawBrushArrayView = brushResult.arrayView
-        this.rawBrushLayerViews = brushResult.layerViews
 
-        const resolvedResult = createLayeredTexture('Engine ResolvedTexture')
+        const resolvedResult = createLayeredTexture('Engine ResolvedTexture', DISPLAY_LAYERS)
         this.resolvedTexture = resolvedResult.texture
         this.resolvedArrayView = resolvedResult.arrayView
         this.resolvedLayerViews = resolvedResult.layerViews
 
-        const frozenResult = createLayeredTexture('Engine FrozenTexture')
+        const frozenResult = createLayeredTexture('Engine FrozenTexture', DISPLAY_LAYERS)
         this.frozenTexture = frozenResult.texture
         this.frozenArrayView = frozenResult.arrayView
         this.frozenLayerViews = frozenResult.layerViews
@@ -2037,20 +1968,18 @@ export class Engine {
         this.zoomState = resetZoomState()
 
         // Re-création des bind groups dépendant des textures
-        if (this.pipelineBrush) {
-            const layout = this.pipelineBrush.getBindGroupLayout(0)
-            this.bindGroupBrush = this.device.createBindGroup({
-                layout,
+        this.rebuildIterationBindGroups()
+
+        if (this.pipelineReprojectCs) {
+            this.bindGroupReprojectCs = this.device.createBindGroup({
+                layout: this.pipelineReprojectCs.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: { buffer: this.uniformBufferBrush! } },
                     { binding: 1, resource: this.rawArrayView! },
+                    { binding: 2, resource: this.rawBrushArrayView! },
                 ],
-                label: 'Engine BindGroup Brush',
+                label: 'Engine BindGroup ReprojectCs',
             })
-        }
-
-        if (this.pipelineMandelbrot) {
-            this.rebuildMandelbrotBindGroup()
         }
 
         if (this.pipelineResolve) {
@@ -2066,20 +1995,6 @@ export class Engine {
         }
 
         this.rebuildColorBindGroup()
-
-        // Counter compute pass bind group (reads rawTexture A after mandelbrot pass)
-        if (this.pipelineCount && this.counterBuffer && this.uniformBufferCount) {
-            const layout = this.pipelineCount.getBindGroupLayout(0)
-            this.counterBindGroup = this.device.createBindGroup({
-                layout,
-                entries: [
-                    { binding: 0, resource: this.rawArrayView! },
-                    { binding: 1, resource: { buffer: this.counterBuffer } },
-                    { binding: 2, resource: { buffer: this.uniformBufferCount } },
-                ],
-                label: 'Engine BindGroup Count',
-            })
-        }
 
         // Merge pass bind group: reads resolved (binding 1) + rawBrushTexture as
         // frozen-copy (binding 2).  At zoom stop we copyTexture(frozen→rawBrush)
@@ -2816,15 +2731,15 @@ export class Engine {
             return
         }
 
-        if (!this.pipelineBrush
-            || !this.pipelineMandelbrot
+        if (!this.pipelineInplace
+            || !this.pipelineReprojectCs
             || !this.pipelineResolve
             || !this.pipelineColor
         ) {
             return
         }
-        if (!this.bindGroupBrush
-            || !this.bindGroupMandelbrot
+        if (!this.bindGroupInplace
+            || !this.bindGroupReprojectCs
             || !this.bindGroupResolve
             || !this.bindGroupColor
         ) {
@@ -2859,7 +2774,7 @@ export class Engine {
             const deltaDy = this.previousMandelbrot.dy - this.prevFrameMandelbrot.dy
 
             // Convert Mandelbrot translation (complex-plane units) -> texture texel shift.
-            // See `src/assets/reproject.wgsl` translation reprojection logic.
+            // See `src/assets/reproject_cs.wgsl` translation reprojection logic.
             // During zoom reprojection, use liveScale (the scale at which the
             // live texture is computed) instead of the display scale.
             const texSize = this.neutralSize
@@ -2909,7 +2824,7 @@ export class Engine {
 
         // Adaptive refinement gating: pause sentinel halving only when the
         // batch controller is already at its minimum AND there are too many
-        // active pixels (those mandelbrot.wgsl actually processes).  This
+        // active pixels (those the fused compute pass actually processes).  This
         // prevents pixel-count avalanches while guaranteeing convergence:
         // if the batch has room to shrink, the gate stays open and the batch
         // controller absorbs the ×4 spike.  A structurally slow GPU (high DPR)
@@ -2985,11 +2900,12 @@ export class Engine {
             && this.pipelineMerge && this.bindGroupMerge
             && this.resolvedTexture && this.frozenTexture && this.rawBrushTexture) {
             const texSize = this.neutralSize
-            // 1) Copy frozen → rawBrushTexture (temp read-only copy of frozen)
+            // 1) Copy frozen → rawBrushTexture (temp read-only copy of frozen;
+            //    B has 9 layers, frozen 8 — copy the 8 display layers)
             commandEncoder.copyTextureToTexture(
                 { texture: this.frozenTexture },
                 { texture: this.rawBrushTexture },
-                { width: texSize, height: texSize, depthOrArrayLayers: LAYER_COUNT },
+                { width: texSize, height: texSize, depthOrArrayLayers: DISPLAY_LAYERS },
             )
             // 2) Write merge uniforms (captured at zoom stop before state reset)
             const mergeData = new Float32Array([
@@ -3025,7 +2941,7 @@ export class Engine {
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
         if (this.needFreezeSnapshot && this.resolvedTexture && this.frozenTexture) {
-            const layerCount = LAYER_COUNT
+            const layerCount = DISPLAY_LAYERS
             const texSize = this.neutralSize
             commandEncoder.copyTextureToTexture(
                 { texture: this.resolvedTexture },
@@ -3054,26 +2970,37 @@ export class Engine {
                 storeOp: 'store' as GPUStoreOp,
             }))
 
-        // ── Frame path selection ─────────────────────────────────────────
-        // In-place compute path: only for frames without translation and
-        // without clearHistory (the fused shader is strictly texel-local —
-        // translation reads the neighbouring texel and must stay on the
-        // render ping-pong path).
-        const useInplacePath = this.useInplaceCompute
-            && !this.clearHistoryNextFrame
-            && !hasTranslationShift
-            && !!this.pipelineInplace
-            && !!this.bindGroupInplace
-            && !!this.counterBuffer
+        // ── Frame passes ─────────────────────────────────────────────────
+        // Single production iteration path: the fused in-place compute.
+        // Pan and clear frames first run the ping-pong utility pass
+        // (reproject_cs A→B + copy B→A) — the neighbour gather is race-free
+        // because A is read-only during that pass — then the same frame's
+        // in-place dispatch continues iteration on A.
+        const utilityNeeded = this.clearHistoryNextFrame || hasTranslationShift
 
-        // Track frames that may mutate A: full-path frames always rewrite it;
+        // Track frames that may mutate A: utility frames rewrite it wholesale;
         // in-place frames only write when work remains (unknown counts are
         // conservatively treated as a mutation).
-        if (!useInplacePath || this.unfinishedPixelCount !== 0 || this.activePixelCount !== 0) {
+        if (utilityNeeded || this.unfinishedPixelCount !== 0 || this.activePixelCount !== 0) {
             this.lastRawMutationFrame = frameSerial
         }
 
-        if (useInplacePath) {
+        {
+            if (utilityNeeded) {
+                // Utility pass: pan gather / clear stamp / sentinel refinement,
+                // A→B, then B is copied back so iteration proceeds on A.
+                const utilPass = commandEncoder.beginComputePass()
+                utilPass.setPipeline(this.pipelineReprojectCs!)
+                utilPass.setBindGroup(0, this.bindGroupReprojectCs!)
+                const uwg = Math.ceil(this.neutralSize / 16)
+                utilPass.dispatchWorkgroups(uwg, uwg)
+                utilPass.end()
+                commandEncoder.copyTextureToTexture(
+                    { texture: this.rawBrushTexture },
+                    { texture: this.rawTexture },
+                    { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: RAW_LAYERS },
+                )
+            }
             // Stage B selective reseed: stamp the boundary sliver (target > sample
             // index) as compute requests so only it reconverges with the new jitter;
             // frozen texels are left as-is and skipped by the fused pass below.
@@ -3122,64 +3049,6 @@ export class Engine {
                 this.lastCounterDispatchFrame = frameSerial
                 scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
             }
-        } else {
-            // Pass 0: brush des sentinelles (A -> B)
-            const rpassBrush = commandEncoder.beginRenderPass({
-                colorAttachments: makeMrtAttachments(this.rawBrushLayerViews),
-            })
-            rpassBrush.setPipeline(this.pipelineBrush)
-            rpassBrush.setBindGroup(0, this.bindGroupBrush)
-            rpassBrush.draw(6, 1, 0, 0)
-            rpassBrush.end()
-
-            // Pre-fill A with B so mandelbrot.wgsl can discard pass-through pixels
-            // instead of rewriting all 8 MRT layers for inactive pixels.
-            commandEncoder.copyTextureToTexture(
-                { texture: this.rawBrushTexture },
-                { texture: this.rawTexture },
-                { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: LAYER_COUNT },
-            )
-
-            // Pass 1: Mandelbrot (B -> A), writes only active pixels; inactive ones
-            // were already copied B -> A above and are discarded by the fragment shader.
-            // When globalMaxIter = 0 (no orbit data), the shader acts as a pure
-            // pass-through (sentinels stay as-is) — see mandelbrot.wgsl.
-            const rpassMandelbrot = commandEncoder.beginRenderPass({
-                colorAttachments: makeMrtAttachments(this.rawLayerViews, 'load'),
-            })
-            rpassMandelbrot.setPipeline(this.pipelineMandelbrot)
-            rpassMandelbrot.setBindGroup(0, this.bindGroupMandelbrot)
-            rpassMandelbrot.draw(6, 1, 0, 0)
-            rpassMandelbrot.end()
-
-            // Pass 1.5: count unfinished pixels (compute pass, reads A)
-            if (
-                this.pipelineCount
-                && this.counterBindGroup
-                && this.counterBuffer
-                && counterReadbackSlot
-                && this.uniformBufferCount
-            ) {
-                const sequence = ++this.counterReadbackSequence
-                const generation = this.counterReadbackGeneration
-                // Write count-shader uniforms (mu, aspect, angle)
-                const muValue = this.previousMandelbrot.mu
-                this.device.queue.writeBuffer(this.uniformBufferCount, 0, new Float32Array([muValue, aspect, this.previousMandelbrot.angle]))
-                // Reset atomic counters to 0
-                commandEncoder.clearBuffer(this.counterBuffer, 0, 8)
-                const computePass = commandEncoder.beginComputePass()
-                computePass.setPipeline(this.pipelineCount)
-                computePass.setBindGroup(0, this.counterBindGroup)
-                computePass.dispatchWorkgroups(
-                    Math.ceil(this.neutralSize / 16),
-                    Math.ceil(this.neutralSize / 16),
-                )
-                computePass.end()
-                // Copy results to staging buffer for async readback
-                commandEncoder.copyBufferToBuffer(this.counterBuffer, 0, counterReadbackSlot.buffer, 0, 8)
-                this.lastCounterDispatchFrame = frameSerial
-                scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
-            }
         }
 
         // ── Resolve gating (C1) ──────────────────────────────────────────
@@ -3188,8 +3057,7 @@ export class Engine {
         // to A: skip the copy + resolve pass and let color read A directly.
         // Frames requesting a frozen snapshot or merge keep the resolve so
         // resolvedTexture is guaranteed fresh for the next frame's copy.
-        const skipResolve = useInplacePath
-            && !!this.bindGroupColorRaw
+        const skipResolve = !!this.bindGroupColorRaw
             && !this.needFreezeSnapshot
             && !this.needMergeSnapshot
             && this.unfinishedPixelCount === 0
@@ -3213,10 +3081,12 @@ export class Engine {
         if (!skipResolve) {
             // Pre-fill resolved with A so resolve.wgsl can discard pass-through
             // pixels and only write sentinels / unfinished anchors that need snapping.
+            // A has 9 layers, resolved 8 — the continuation-only layer 8 is
+            // never displayed, copy the 8 display layers.
             commandEncoder.copyTextureToTexture(
                 { texture: this.rawTexture },
                 { texture: this.resolvedTexture },
-                { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: LAYER_COUNT },
+                { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: DISPLAY_LAYERS },
             )
 
             // Pass 2: resolve des sentinelles (A -> resolved)
@@ -3402,7 +3272,6 @@ export class Engine {
                 // Requires the grid at its finest step (1) and the reseed pipeline.
                 // Otherwise fall back to Stage A's full reconverge.
                 const canSelectiveReseed = this.useAaSelectiveReseed
-                    && this.useInplaceCompute
                     && zoomMinBrushStep <= 1
                     && !!this.pipelineAaReseed
                     && !!this.bindGroupAaReseed
@@ -3522,7 +3391,6 @@ export class Engine {
             slot.buffer.destroy?.()
         }
         this.counterReadbackSlots = []
-        this.uniformBufferCount?.destroy?.()
         this.uniformBufferMerge?.destroy?.()
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()

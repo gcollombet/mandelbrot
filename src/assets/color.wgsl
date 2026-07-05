@@ -140,16 +140,9 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   e.shadingLevel = row2.b;       // direct: natural range [0, 3]
   e.specularPower = max(row2.a, 1.0); // direct: natural range [1, 64]
 
-  // Row 3: reserved, metallic, roughness, anisotropy
-  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.583333333), 0.0);
-  e.metallic = clamp(row3.g, 0.0, 1.0);
-  e.roughness = clamp(row3.b, 0.02, 1.0);
-  e.anisotropy = clamp(row3.a, 0.0, 1.0);
-
-  // Row 4: iridescence R, G, B, strength
-  let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.75), 0.0);
-  e.iridescenceColor = row4.rgb;
-  e.wIridescence = clamp(row4.a, 0.0, 1.0);
+  // Rows 3 (metallic/roughness/anisotropy) and 4 (iridescence) are only read
+  // inside the shading branch, so they are sampled lazily there via
+  // sampleShadingMaterial() rather than for every pixel.
 
   // Row 5: stripe color blend, direction coherence color blend, stripe relief, direction coherence relief
   let row5 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.916666667), 0.0);
@@ -159,6 +152,21 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   e.wDirectionCoherenceRelief = clamp(row5.a, 0.0, 100.0);
 
   return e;
+}
+
+// Rows 3 & 4 of the palette texture (material + iridescence). Sampled lazily
+// from inside the shading branch since no other code path reads these fields.
+fn sampleShadingMaterial(palettePhase: f32, e: ptr<function, EffectParams>) {
+  // Row 3: reserved, metallic, roughness, anisotropy
+  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.583333333), 0.0);
+  (*e).metallic = clamp(row3.g, 0.0, 1.0);
+  (*e).roughness = clamp(row3.b, 0.02, 1.0);
+  (*e).anisotropy = clamp(row3.a, 0.0, 1.0);
+
+  // Row 4: iridescence R, G, B, strength
+  let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.75), 0.0);
+  (*e).iridescenceColor = row4.rgb;
+  (*e).wIridescence = clamp(row4.a, 0.0, 1.0);
 }
 
 @vertex
@@ -483,7 +491,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset() + heightPhaseShift + phaseColoringShift);
 
   // ── Sample all effect channels from the palette texture ──
-  let fx = sampleEffects(palettePhase);
+  var fx = sampleEffects(palettePhase);
 
   var effTess = fx.wTessellation;
   let effWebcam = fx.wWebcam;
@@ -546,6 +554,8 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
 
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
+    // Material + iridescence rows are only needed here: sample them lazily.
+    sampleShadingMaterial(palettePhase, &fx);
     let angleDir = vec2<f32>(cos(angle_der), sin(angle_der));
     let reliefDepth = parameters.reliefDepth * effShading;
     let relief = clamp(reliefDepth, 0.0, 2.0);
@@ -565,28 +575,31 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     if (needsDistanceHeight || needsFractalGradient) {
       distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
     }
-    if (needsFractalGradient) {
-      var fractalGradient: vec2<f32>;
+    // The three fields (fractal height, stripe phase, direction coherence)
+    // share the same 4 neighbour texels. Fetch each neighbour once and derive
+    // whichever gradients are needed together, instead of reloading layers
+    // 0/2/3 and recomputing escape_nu three times per neighbour.
+    if (needsFractalGradient || needsStripeGradient || needsDirectionCoherenceGradient) {
       if (magnified) {
-        fractalGradient = distance_height_gradient_bilinear(sourceTex, uv_tex, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
+        field_gradients_bilinear(
+          sourceTex, uv_tex, sourceTexSize,
+          distanceHeight, stripeAverage, directionCoherence,
+          distanceHeightOffset, distanceHeightGradientScale,
+          needsFractalGradient, needsStripeGradient, needsDirectionCoherenceGradient,
+          &grad, &stripeGrad, &directionCoherenceGrad
+        );
       } else {
-        fractalGradient = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
+        field_gradients_at_coord(
+          sourceTex, sourceCoord, sourceTexSize,
+          distanceHeight, stripeAverage, directionCoherence,
+          distanceHeightOffset, distanceHeightGradientScale,
+          needsFractalGradient, needsStripeGradient, needsDirectionCoherenceGradient,
+          &grad, &stripeGrad, &directionCoherenceGrad
+        );
       }
-      grad = clamp(fractalGradient, vec2<f32>(-6.0), vec2<f32>(6.0));
-      slope = length(grad);
-    }
-    if (needsStripeGradient) {
-      if (magnified) {
-        stripeGrad = stripe_gradient_bilinear(sourceTex, uv_tex, sourceTexSize, stripeAverage);
-      } else {
-        stripeGrad = stripe_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, stripeAverage);
-      }
-    }
-    if (needsDirectionCoherenceGradient) {
-      if (magnified) {
-        directionCoherenceGrad = direction_coherence_gradient_bilinear(sourceTex, uv_tex, sourceTexSize, directionCoherence);
-      } else {
-        directionCoherenceGrad = direction_coherence_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, directionCoherence);
+      if (needsFractalGradient) {
+        grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
+        slope = length(grad);
       }
     }
     let edgeWear = curvature_edge_wear(angle_der, v_smooth);
@@ -764,29 +777,6 @@ fn stripe_phase_delta(a: f32, b: f32) -> f32 {
   return fract(a - b + 0.5) - 0.5;
 }
 
-fn stripe_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
-  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
-    return -1e6;
-  }
-  let state = load_pixel_state(sourceTex, coord);
-  if (escape_nu(state.iter, state.zx, state.zy) < 0.0) {
-    return -1e6;
-  }
-  return decode_stripe_phase(textureLoad(sourceTex, coord, 6, 0).r);
-}
-
-fn stripe_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerStripe: f32) -> vec2<f32> {
-  let xr = stripe_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize);
-  let xl = stripe_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize);
-  let yu = stripe_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize);
-  let yd = stripe_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize);
-  let right = select(centerStripe, xr, xr > -1e5);
-  let left = select(centerStripe, xl, xl > -1e5);
-  let up = select(centerStripe, yu, yu > -1e5);
-  let down = select(centerStripe, yd, yd > -1e5);
-  return vec2<f32>(stripe_phase_delta(right, left), stripe_phase_delta(up, down)) * 8.0;
-}
-
 const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
 const ORBIT_DIRECTION_BASE: f32 = 4096.0;
 
@@ -837,29 +827,6 @@ fn load_pixel_extras(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> Pixe
   return extras;
 }
 
-fn direction_coherence_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>) -> f32 {
-  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
-    return -1e6;
-  }
-  let state = load_pixel_state(sourceTex, coord);
-  if (escape_nu(state.iter, state.zx, state.zy) < 0.0) {
-    return -1e6;
-  }
-  return decode_direction_coherence(textureLoad(sourceTex, coord, 7, 0).r);
-}
-
-fn direction_coherence_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerCoherence: f32) -> vec2<f32> {
-  let xr = direction_coherence_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize);
-  let xl = direction_coherence_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize);
-  let yu = direction_coherence_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize);
-  let yd = direction_coherence_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize);
-  let right = select(centerCoherence, xr, xr > -1e5);
-  let left = select(centerCoherence, xl, xl > -1e5);
-  let up = select(centerCoherence, yu, yu > -1e5);
-  let down = select(centerCoherence, yd, yd > -1e5);
-  return vec2<f32>(right - left, up - down) * 8.0;
-}
-
 // ── Bilinear (magnified) variants of the gradient functions ─────────
 // When the source texture is magnified on screen, the per-texel finite
 // differences above produce normals that are constant inside each texel
@@ -883,49 +850,152 @@ fn bilinear_cell(uv: vec2<f32>, texSize: vec2<i32>) -> BilinearCell {
   return cell;
 }
 
-fn distance_height_gradient_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>, centerHeight: f32, heightOffset: f32, gradientScale: f32) -> vec2<f32> {
-  let cell = bilinear_cell(uv, texSize);
-  let h00r = sample_distance_height_at_coord(sourceTex, cell.base, texSize, heightOffset);
-  let h10r = sample_distance_height_at_coord(sourceTex, cell.base + vec2<i32>(1, 0), texSize, heightOffset);
-  let h01r = sample_distance_height_at_coord(sourceTex, cell.base + vec2<i32>(0, 1), texSize, heightOffset);
-  let h11r = sample_distance_height_at_coord(sourceTex, cell.base + vec2<i32>(1, 1), texSize, heightOffset);
-  let h00 = select(centerHeight, h00r, h00r > -1e5);
-  let h10 = select(centerHeight, h10r, h10r > -1e5);
-  let h01 = select(centerHeight, h01r, h01r > -1e5);
-  let h11 = select(centerHeight, h11r, h11r > -1e5);
-  let gx = mix(h10 - h00, h11 - h01, cell.f.y);
-  let gy = mix(h01 - h00, h11 - h10, cell.f.x);
-  return vec2<f32>(gx, gy) * 24.0 * gradientScale;
+// ── Shared neighbour fetch ──────────────────────────────────────────
+// The fractal-height, stripe-phase and direction-coherence fields all live
+// in the same source texel (layers 4 / 6 / 7) and share the same validity
+// test (in-bounds + escaped). Fetching a neighbour once and decoding only the
+// requested channels avoids reloading layers 0/2/3 and recomputing escape_nu
+// separately for each field.
+struct NeighborFields {
+  valid: bool,       // in-bounds AND escaped → usable; otherwise fall back to center
+  height: f32,
+  stripe: f32,
+  coherence: f32,
+};
+
+fn sample_neighbor_fields(
+  sourceTex: texture_2d_array<f32>,
+  coord: vec2<i32>,
+  texSize: vec2<i32>,
+  heightOffset: f32,
+  needHeight: bool,
+  needStripe: bool,
+  needCoh: bool
+) -> NeighborFields {
+  var nf: NeighborFields;
+  nf.valid = false;
+  nf.height = 0.0;
+  nf.stripe = 0.0;
+  nf.coherence = 0.0;
+  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
+    return nf;
+  }
+  let state = load_pixel_state(sourceTex, coord);
+  if (escape_nu(state.iter, state.zx, state.zy) < 0.0) {
+    return nf;
+  }
+  nf.valid = true;
+  if (needHeight) {
+    let storedHeight = textureLoad(sourceTex, coord, 4, 0).r + heightOffset;
+    nf.height = clamp(storedHeight, -64.0, 64.0);
+  }
+  if (needStripe) {
+    nf.stripe = decode_stripe_phase(textureLoad(sourceTex, coord, 6, 0).r);
+  }
+  if (needCoh) {
+    nf.coherence = decode_direction_coherence(textureLoad(sourceTex, coord, 7, 0).r);
+  }
+  return nf;
 }
 
-fn stripe_gradient_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>, centerStripe: f32) -> vec2<f32> {
-  let cell = bilinear_cell(uv, texSize);
-  let s00r = stripe_at_coord(sourceTex, cell.base, texSize);
-  let s10r = stripe_at_coord(sourceTex, cell.base + vec2<i32>(1, 0), texSize);
-  let s01r = stripe_at_coord(sourceTex, cell.base + vec2<i32>(0, 1), texSize);
-  let s11r = stripe_at_coord(sourceTex, cell.base + vec2<i32>(1, 1), texSize);
-  let s00 = select(centerStripe, s00r, s00r > -1e5);
-  let s10 = select(centerStripe, s10r, s10r > -1e5);
-  let s01 = select(centerStripe, s01r, s01r > -1e5);
-  let s11 = select(centerStripe, s11r, s11r > -1e5);
-  let gx = mix(stripe_phase_delta(s10, s00), stripe_phase_delta(s11, s01), cell.f.y);
-  let gy = mix(stripe_phase_delta(s01, s00), stripe_phase_delta(s11, s10), cell.f.x);
-  return vec2<f32>(gx, gy) * 16.0;
+// Central-difference gradients of any subset of the three fields, sharing the
+// four neighbour fetches. Scales match the former per-field functions:
+// height ×12·scale, stripe ×8, coherence ×8. Outputs left untouched when their
+// need flag is false.
+fn field_gradients_at_coord(
+  sourceTex: texture_2d_array<f32>,
+  coord: vec2<i32>,
+  texSize: vec2<i32>,
+  centerHeight: f32,
+  centerStripe: f32,
+  centerCoherence: f32,
+  heightOffset: f32,
+  heightGradientScale: f32,
+  needHeight: bool,
+  needStripe: bool,
+  needCoh: bool,
+  heightGrad: ptr<function, vec2<f32>>,
+  stripeGrad: ptr<function, vec2<f32>>,
+  cohGrad: ptr<function, vec2<f32>>
+) {
+  let nR = sample_neighbor_fields(sourceTex, coord + vec2<i32>(1, 0), texSize, heightOffset, needHeight, needStripe, needCoh);
+  let nL = sample_neighbor_fields(sourceTex, coord - vec2<i32>(1, 0), texSize, heightOffset, needHeight, needStripe, needCoh);
+  let nU = sample_neighbor_fields(sourceTex, coord + vec2<i32>(0, 1), texSize, heightOffset, needHeight, needStripe, needCoh);
+  let nD = sample_neighbor_fields(sourceTex, coord - vec2<i32>(0, 1), texSize, heightOffset, needHeight, needStripe, needCoh);
+  if (needHeight) {
+    let r = select(centerHeight, nR.height, nR.valid);
+    let l = select(centerHeight, nL.height, nL.valid);
+    let u = select(centerHeight, nU.height, nU.valid);
+    let d = select(centerHeight, nD.height, nD.valid);
+    *heightGrad = vec2<f32>(r - l, u - d) * 12.0 * heightGradientScale;
+  }
+  if (needStripe) {
+    let r = select(centerStripe, nR.stripe, nR.valid);
+    let l = select(centerStripe, nL.stripe, nL.valid);
+    let u = select(centerStripe, nU.stripe, nU.valid);
+    let d = select(centerStripe, nD.stripe, nD.valid);
+    *stripeGrad = vec2<f32>(stripe_phase_delta(r, l), stripe_phase_delta(u, d)) * 8.0;
+  }
+  if (needCoh) {
+    let r = select(centerCoherence, nR.coherence, nR.valid);
+    let l = select(centerCoherence, nL.coherence, nL.valid);
+    let u = select(centerCoherence, nU.coherence, nU.valid);
+    let d = select(centerCoherence, nD.coherence, nD.valid);
+    *cohGrad = vec2<f32>(r - l, u - d) * 8.0;
+  }
 }
 
-fn direction_coherence_gradient_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>, centerCoherence: f32) -> vec2<f32> {
+// Bilinear (magnified) counterpart: analytic gradient of the bilinearly
+// interpolated field over the enclosing cell, sharing the four corner fetches.
+// Scales match the former per-field functions: height ×24·scale, others ×16.
+fn field_gradients_bilinear(
+  sourceTex: texture_2d_array<f32>,
+  uv: vec2<f32>,
+  texSize: vec2<i32>,
+  centerHeight: f32,
+  centerStripe: f32,
+  centerCoherence: f32,
+  heightOffset: f32,
+  heightGradientScale: f32,
+  needHeight: bool,
+  needStripe: bool,
+  needCoh: bool,
+  heightGrad: ptr<function, vec2<f32>>,
+  stripeGrad: ptr<function, vec2<f32>>,
+  cohGrad: ptr<function, vec2<f32>>
+) {
   let cell = bilinear_cell(uv, texSize);
-  let c00r = direction_coherence_at_coord(sourceTex, cell.base, texSize);
-  let c10r = direction_coherence_at_coord(sourceTex, cell.base + vec2<i32>(1, 0), texSize);
-  let c01r = direction_coherence_at_coord(sourceTex, cell.base + vec2<i32>(0, 1), texSize);
-  let c11r = direction_coherence_at_coord(sourceTex, cell.base + vec2<i32>(1, 1), texSize);
-  let c00 = select(centerCoherence, c00r, c00r > -1e5);
-  let c10 = select(centerCoherence, c10r, c10r > -1e5);
-  let c01 = select(centerCoherence, c01r, c01r > -1e5);
-  let c11 = select(centerCoherence, c11r, c11r > -1e5);
-  let gx = mix(c10 - c00, c11 - c01, cell.f.y);
-  let gy = mix(c01 - c00, c11 - c10, cell.f.x);
-  return vec2<f32>(gx, gy) * 16.0;
+  let n00 = sample_neighbor_fields(sourceTex, cell.base, texSize, heightOffset, needHeight, needStripe, needCoh);
+  let n10 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(1, 0), texSize, heightOffset, needHeight, needStripe, needCoh);
+  let n01 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(0, 1), texSize, heightOffset, needHeight, needStripe, needCoh);
+  let n11 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(1, 1), texSize, heightOffset, needHeight, needStripe, needCoh);
+  if (needHeight) {
+    let h00 = select(centerHeight, n00.height, n00.valid);
+    let h10 = select(centerHeight, n10.height, n10.valid);
+    let h01 = select(centerHeight, n01.height, n01.valid);
+    let h11 = select(centerHeight, n11.height, n11.valid);
+    let gx = mix(h10 - h00, h11 - h01, cell.f.y);
+    let gy = mix(h01 - h00, h11 - h10, cell.f.x);
+    *heightGrad = vec2<f32>(gx, gy) * 24.0 * heightGradientScale;
+  }
+  if (needStripe) {
+    let s00 = select(centerStripe, n00.stripe, n00.valid);
+    let s10 = select(centerStripe, n10.stripe, n10.valid);
+    let s01 = select(centerStripe, n01.stripe, n01.valid);
+    let s11 = select(centerStripe, n11.stripe, n11.valid);
+    let gx = mix(stripe_phase_delta(s10, s00), stripe_phase_delta(s11, s01), cell.f.y);
+    let gy = mix(stripe_phase_delta(s01, s00), stripe_phase_delta(s11, s10), cell.f.x);
+    *stripeGrad = vec2<f32>(gx, gy) * 16.0;
+  }
+  if (needCoh) {
+    let c00 = select(centerCoherence, n00.coherence, n00.valid);
+    let c10 = select(centerCoherence, n10.coherence, n10.valid);
+    let c01 = select(centerCoherence, n01.coherence, n01.valid);
+    let c11 = select(centerCoherence, n11.coherence, n11.valid);
+    let gx = mix(c10 - c00, c11 - c01, cell.f.y);
+    let gy = mix(c01 - c00, c11 - c10, cell.f.x);
+    *cohGrad = vec2<f32>(gx, gy) * 16.0;
+  }
 }
 
 fn direction_coherence_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, grad: vec2<f32>, strength: f32) -> vec3<f32> {

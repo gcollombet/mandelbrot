@@ -3434,6 +3434,76 @@ mod tests {
     }
 
     #[test]
+    // ── Instrumentation: does the DBig BUDGET change the f32-stored reference
+    // (hence der) at all? The user sees budget fix the deep-zoom DE; the model
+    // says f32 storage (24 bits) caps der regardless. This compares the actual
+    // f32 orbit the GPU would receive at a low vs high budget, and the der built
+    // against each. Run: cargo test --release der_budget_f32_orbit_probe -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn der_budget_f32_orbit_probe() {
+        let center = "-1.401155";
+        let n = 8000usize;
+        let read_f32 = |budget: &str| -> Vec<(f64, f64)> {
+            let mut nav = MandelbrotNavigator::new(center, "0", "1e-30", 0.0);
+            nav.set_precision_budget(budget);
+            let _ = nav.compute_reference_orbit_ptr(n as u32);
+            (0..nav.result.len())
+                .map(|i| (nav.result[i].zx as f64, nav.result[i].zy as f64))
+                .collect()
+        };
+        let budgets = ["1e-12", "1e-30", "1e-80", "1e-300"];
+        let refs: Vec<(&str, Vec<(f64, f64)>)> =
+            budgets.iter().map(|&b| (b, read_f32(b))).collect();
+        let (_, gt) = &refs[refs.len() - 1]; // highest budget = ground truth
+        println!("\nf32-stored reference vs budget (center {}, N target {}):", center, n);
+        for (b, orbit) in &refs {
+            let len = orbit.len().min(gt.len());
+            let (mut max_diff, mut first_div) = (0.0f64, None::<usize>);
+            for i in 0..len {
+                let d = ((orbit[i].0 - gt[i].0).powi(2) + (orbit[i].1 - gt[i].1).powi(2)).sqrt();
+                if d > max_diff {
+                    max_diff = d;
+                }
+                if first_div.is_none() && d > 1e-6 {
+                    first_div = Some(i);
+                }
+            }
+            // der against this f32 orbit for a deep pixel, phase + magnitude.
+            let dc = (1e-40, 0.4e-40);
+            let (mut dz, mut der, mut ref_i, mut iter) =
+                ((0.0f64, 0.0f64), (0.0f64, 0.0f64), 0usize, 0usize);
+            let ol = orbit.len();
+            while iter < n && ref_i < ol - 1 {
+                let z = orbit[ref_i];
+                let fz = (z.0 + dz.0, z.1 + dz.1);
+                der = (2.0 * (fz.0 * der.0 - fz.1 * der.1) + 1.0, 2.0 * (fz.0 * der.1 + fz.1 * der.0));
+                let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+                let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
+                dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
+                ref_i += 1;
+                iter += 1;
+                let zc = orbit[ref_i];
+                let full = (zc.0 + dz.0, zc.1 + dz.1);
+                if full.0 * full.0 + full.1 * full.1 > 4.0 {
+                    break;
+                }
+                let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+                if full.0 * full.0 + full.1 * full.1 < dz2 {
+                    dz = full;
+                    ref_i = 0;
+                }
+            }
+            let dmag = (der.0 * der.0 + der.1 * der.1).sqrt();
+            let dphase = der.1.atan2(der.0);
+            println!(
+                "  budget {:>7}: len {:>5} | f32 orbit max|Δ| vs hi {:.2e} (first>1e-6 @ {:?}) | der |·|={:.4e} arg={:.6}",
+                b, orbit.len(), max_diff, first_div, dmag, dphase
+            );
+        }
+    }
+
+    #[test]
     fn set_precision_budget_recomputes_and_deepens() {
         // Spec: Fixed precision budget — changing it triggers a full recompute and a deeper
         // target raises P.
@@ -3450,6 +3520,95 @@ mod tests {
         let info = nav.compute_reference_orbit_ptr(500);
         assert_eq!(info.offset, 0, "recompute must restart at offset 0");
         assert!(nav.last_iter >= 500);
+    }
+
+    #[test]
+    fn ders_compensated_accumulation_drift_harness() {
+        // Spec: derS accumulates with compensated summation — GPU-free referee.
+        // Simule la chaîne f32 exacte des mises à jour de derS (folds de renorm
+        // 0.5·log(mm) ∈ [−18.4, 18.4] avec dérive vers ~161 ≈ derS à 1e-70,
+        // plus folds d'exposant de bloc e·LN2 périodiques) de trois façons :
+        // f32 naïf, paire (hi, lo) compensée par TwoSum (le miroir exact du
+        // helper shader), et vérité terrain f64.
+        const N: usize = 100_000;
+        const TARGET: f32 = 161.0; // échelle de derS aux zooms 1e-70
+        let ln2 = core::f32::consts::LN_2;
+
+        // LCG déterministe : le harnais doit être reproductible.
+        let mut state: u64 = 0x9E37_79B9_7F4A_7C15;
+        let mut next_unit = move || -> f32 {
+            state = state
+                .wrapping_mul(6364136223846793005)
+                .wrapping_add(1442695040888963407);
+            // uniforme dans [0, 2)
+            ((state >> 33) as f64 / (1u64 << 30) as f64) as f32
+        };
+        // TwoSum de Knuth, sans branche — évaluation identique au shader.
+        let two_sum = |a: f32, b: f32| -> (f32, f32) {
+            let s = a + b;
+            let bv = s - a;
+            let av = s - bv;
+            (s, (a - av) + (b - bv))
+        };
+        let ulp_at = |x: f32| -> f64 {
+            let x = x.abs().max(1.0);
+            (f32::from_bits(x.to_bits() + 1) - x) as f64
+        };
+
+        let mut naive: f32 = 0.0;
+        let mut hi: f32 = 0.0;
+        let mut lo: f32 = 0.0;
+        let mut truth: f64 = 0.0;
+        let mut worst_comp_ulp = 0.0f64;
+        let mut worst_naive_ulp = 0.0f64;
+        println!("       N |      derS | naive err (ULP) | comp err (ULP)");
+        for i in 1..=N {
+            // Tous les ~97 updates, une application de bloc deep replie e·LN2 ;
+            // sinon un fold de renorm dans [−18.4, 18.4]. Un rappel doux vers
+            // la rampe 0→TARGET maintient derS dans la bande réaliste d'un
+            // pixel profond (l'ULP du test est celui d'un derS ~1e-70).
+            let ramp = TARGET * (i as f32) / (N as f32);
+            let inc: f32 = if i % 97 == 0 {
+                let e = ((next_unit() - 1.0) * 64.0) as i32;
+                e as f32 * ln2
+            } else {
+                (next_unit() - 1.0) * 18.4 + (ramp - hi) * 0.05
+            };
+            naive += inc;
+            let (s, err) = two_sum(hi, inc);
+            hi = s;
+            lo += err;
+            truth += inc as f64;
+
+            let folded = hi + lo; // la lecture shader : un seul add
+            let u = ulp_at(truth as f32);
+            let comp_ulp = ((folded as f64) - truth).abs() / u;
+            let naive_ulp = ((naive as f64) - truth).abs() / u;
+            worst_comp_ulp = worst_comp_ulp.max(comp_ulp);
+            worst_naive_ulp = worst_naive_ulp.max(naive_ulp);
+            if i % (N / 10) == 0 {
+                println!(
+                    "{:>8} | {:>9.3} | {:>15.1} | {:>14.3}",
+                    i, truth, naive_ulp, comp_ulp
+                );
+            }
+        }
+        println!(
+            "worst over the run: naive {:.1} ULP, compensated {:.3} ULP",
+            worst_naive_ulp, worst_comp_ulp
+        );
+        // La somme compensée doit rester à quelques ULP de la vérité f64 sur
+        // TOUT le parcours ; l'accumulateur naïf dérive d'un ordre au-dessus.
+        assert!(
+            worst_comp_ulp <= 4.0,
+            "compensated derS drifted {:.2} ULP (> 4)",
+            worst_comp_ulp
+        );
+        assert!(
+            worst_naive_ulp > 10.0 * worst_comp_ulp.max(0.5),
+            "naive drift ({:.2} ULP) unexpectedly small — harness shape no longer exercises the problem",
+            worst_naive_ulp
+        );
     }
 }
 

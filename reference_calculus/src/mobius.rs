@@ -10,8 +10,8 @@
 #![allow(dead_code)] // consumed progressively by the add-mobius-cplus tasks
 
 use crate::jet::{
-    cfe_to_coeff, fe_exp2, fe_is_inf, jet_idx, jet_majorant_pre, CFe, JetCoeffFe, JetF64,
-    JetLevel, JET_DS, JET_MONOMIALS, JET_NCOEFF,
+    self, cfe_to_coeff, fe_exp2, jet_idx, CFe, JetCoeffFe, JetF64, JetLevel, JET_DS,
+    JET_MONOMIALS, JET_NCOEFF,
 };
 
 // ── coefficient extraction (note §3) ───────────────────────────────────────────
@@ -193,38 +193,42 @@ pub fn mobius_build_levels_with(
 
 // ── bounds (R_c-keyed stage): M_Q per anisotropic polydisc (note §4.2) ────────
 
-/// The anisotropic polydisc grid: R_z ∈ {3e-2, 1e-2, 1e-3} × R_c = s·c_max.
-/// The note's s ∈ {3e3, 3e5} is calibrated for DEEP zoom (c_max ≤ 1e-12); at
-/// interactive c_max (~1e-5) those rungs make R_c = 0.03..3 and the majorant
-/// walk's +R_c-per-step c-channel explodes for blocks past ~30 steps — every
-/// long block's radius died and the field A/B measured mobius ≥ 2× slower
-/// than Padé. The low rungs {1024, 32} (the jet's ladder, same lived failure)
-/// keep coarse-scale majorants finite; at depth their tail θ_c is merely a
-/// little looser and the note rungs win the max. Candidate index = iz·|S| + is.
-///
-/// Patch v2 Fix 2: the v1 R_z grid {3e-2, 1e-2, 1e-3} MISSED the 1e-4..3e-4
-/// band where the slow long blocks (L ≥ 256 — the ones that carry Padé-class
-/// speed) actually optimize, so their radii were under-certified → shorter
-/// blocks → more applications than Padé. The finer grid restores them; more
-/// candidates only ever RAISE the max-over-candidates radius, so this is safe
-/// (build cost scales with the count — measured marginal).
-pub const MOBIUS_RZ: [f64; 7] = [3e-2, 1e-2, 3e-3, 1e-3, 3e-4, 1e-4, 3e-5];
+/// R_c anisotropy rungs: R_c = s·c_max. The note's s ∈ {3e3, 3e5} is
+/// deep-zoom-calibrated; the low rungs {1024, 32} keep the c-channel finite at
+/// interactive c_max (~1e-5) where s = 3e3 would floor ρ ≥ R_c ≈ 0.03 and
+/// saturate long blocks. One candidate per rung — the R_z dimension is no
+/// longer a fixed grid.
 pub const MOBIUS_S: [f64; 4] = [3e3, 3e5, 1024.0, 32.0];
-pub const MOBIUS_NCAND: usize = MOBIUS_RZ.len() * MOBIUS_S.len();
+pub const MOBIUS_NCAND: usize = MOBIUS_S.len();
 
-/// Per-block, per-candidate log2 M_Q (+∞ when the majorant walk saturated: the
-/// candidate polydisc is unusable). Everything else the solve needs is either
-/// in `MobiusBlock` (orbit-keyed) or global (the candidate grid).
+/// Patch v3: R_z is BISECTED per block, not sampled from a fixed grid. Target
+/// peak ρ < 0.5 (log2 −1) along the whole majorant walk. Keeping ρ below 0.5
+/// holds the ρ² term strictly under the linear one (ρ² < ½ρ), so the walk
+/// never enters the double-exponential runaway that saturated the fixed grid's
+/// long near-critical blocks — the majorant stays finite AND tight. ρ is
+/// monotone increasing in R_z (R_z is the initial ρ, the recurrence is
+/// monotone in ρ), so the largest R_z meeting the criterion is found by an
+/// EXACT log bisection. The old grid missed each block's own critical R_z; the
+/// bisection lands on it, recovering the long deep-census blocks with no risk
+/// of over-certification (the walk is a majorant at any R_z — verified by the
+/// polydisc-invariant test).
+const MOBIUS_RHO_TARGET_LOG2: f64 = -1.0; // ρ < 0.5
+
+/// Per-block, per-candidate bounds: the bisected log2 R_z (−∞ when no R_z keeps
+/// the peak below target — the rung's R_c saturates) and the resulting log2 M_Q
+/// (+∞ likewise). R_z is per-BLOCK now (each block has its own critical value),
+/// so it lives here, not in the table.
 #[derive(Clone, Copy, Debug)]
 pub struct MobiusBounds {
+    pub log2_rz: [f64; MOBIUS_NCAND],
     pub log2_mq: [f64; MOBIUS_NCAND],
 }
 
-/// Bounds for the whole table: the per-candidate R_c they were walked with
-/// (the headroom stamp — radii re-solves stay valid while c_max ≤ these), plus
-/// per-level per-block M_Q values. Re-walking needs the orbit but NOT the jets.
+/// Bounds for the whole table: the per-rung R_c they were walked with (the
+/// headroom stamp — radii re-solves stay valid while c_max ≤ these), plus
+/// per-level per-block bisected R_z + M_Q. Re-walking needs the orbit but NOT
+/// the jets.
 pub struct MobiusBoundsTable {
-    pub log2_rz: [f64; MOBIUS_NCAND],
     pub log2_rc: [f64; MOBIUS_NCAND],
     pub per_level: Vec<Vec<MobiusBounds>>,
 }
@@ -242,7 +246,47 @@ fn lse2(terms: &[f64]) -> f64 {
     m + terms.iter().map(|l| (l - m).exp2()).sum::<f64>().log2()
 }
 
-/// Walk the scalar majorant for every (block, candidate) and assemble
+/// Largest log2(R_z) keeping the majorant walk's PEAK ρ below 0.5 on
+/// (R_z, R_c). Returns −∞ when even a vanishing R_z leaves the peak at/above
+/// the target (R_c alone floors it — that rung's c-channel saturates for this
+/// block, independent of R_z). Also returns the final M (log2) at the chosen
+/// R_z. Exact log bisection: the peak is monotone increasing in R_z.
+fn mobius_bisect_rz(twoz: &[(f64, i64)], log2_rc: f64) -> (f64, f64) {
+    let peak = |lrz: f64| jet::jet_majorant_peak_pre(twoz, fe_exp2(lrz), fe_exp2(log2_rc));
+    // R_z ≪ R_c isolates the R_c contribution. If the peak already hits the
+    // target here, no R_z helps.
+    let lo0 = log2_rc - 80.0;
+    let (peak_lo, _) = peak(lo0);
+    if !(peak_lo < MOBIUS_RHO_TARGET_LOG2) {
+        return (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    // R_z = 0.5 starts ρ at the target, so it is invalid for any nontrivial
+    // block; if a degenerate-flat block leaves it valid, accept it.
+    let hi0 = MOBIUS_RHO_TARGET_LOG2;
+    let (peak_hi, final_hi) = peak(hi0);
+    if peak_hi < MOBIUS_RHO_TARGET_LOG2 {
+        return (hi0, final_hi);
+    }
+    let mut lo = lo0;
+    let mut hi = hi0;
+    // 20 iters ⇒ R_z precision ≈ range/2^20 ≪ the 0.1-log2 scan step. Fewer
+    // iters only loosen the polydisc slightly; the walk is a valid majorant at
+    // any R_z, so this never over-certifies (the peak target is a tightness
+    // knob, not a soundness one — the polydisc-invariant test is the referee).
+    for _ in 0..20 {
+        let mid = 0.5 * (lo + hi);
+        if peak(mid).0 < MOBIUS_RHO_TARGET_LOG2 {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    let (_, final_m) = peak(lo);
+    (lo, final_m)
+}
+
+/// Per block, per R_c rung: bisect R_z to the tightest runaway-free polydisc
+/// (peak ρ < 0.5), then assemble
 /// M_Q = (1 + |D|R_z + |D'|R_zR_c)·M + |A|R_z + |A'|R_zR_c + |B|R_c.
 pub fn mobius_build_bounds(
     levels: &[MobiusLevel],
@@ -262,14 +306,9 @@ pub fn mobius_build_bounds(
             }
         })
         .collect();
-    let mut log2_rz = [0f64; MOBIUS_NCAND];
     let mut log2_rc = [0f64; MOBIUS_NCAND];
-    for iz in 0..MOBIUS_RZ.len() {
-        for is in 0..MOBIUS_S.len() {
-            let c = iz * MOBIUS_S.len() + is;
-            log2_rz[c] = MOBIUS_RZ[iz].log2();
-            log2_rc[c] = MOBIUS_S[is].log2() + log2_c_max;
-        }
+    for (is, &s) in MOBIUS_S.iter().enumerate() {
+        log2_rc[is] = s.log2() + log2_c_max;
     }
     let per_level = levels
         .iter()
@@ -277,7 +316,10 @@ pub fn mobius_build_bounds(
             (0..lvl.blocks.len())
                 .map(|slot| {
                     let blk = &lvl.blocks[slot];
-                    let mut b = MobiusBounds { log2_mq: [f64::INFINITY; MOBIUS_NCAND] };
+                    let mut b = MobiusBounds {
+                        log2_rz: [f64::NEG_INFINITY; MOBIUS_NCAND],
+                        log2_mq: [f64::INFINITY; MOBIUS_NCAND],
+                    };
                     if blk.m.degenerate {
                         return b;
                     }
@@ -289,24 +331,20 @@ pub fn mobius_build_bounds(
                     let lap = cfe_log2(&blk.m.ap);
                     let ldp = cfe_log2(&blk.m.dp);
                     for c in 0..MOBIUS_NCAND {
-                        let m = jet_majorant_pre(
-                            seg,
-                            fe_exp2(log2_rz[c]),
-                            fe_exp2(log2_rc[c]),
-                        );
-                        if fe_is_inf(&m) {
-                            continue;
+                        let (log2_rz, log2_m) = mobius_bisect_rz(seg, log2_rc[c]);
+                        if !log2_rz.is_finite() || !log2_m.is_finite() {
+                            continue; // rung saturates for this block
                         }
-                        let log2_m = m.log2_mag().unwrap_or(f64::NEG_INFINITY);
+                        b.log2_rz[c] = log2_rz;
                         let fac = lse2(&[
                             0.0,
-                            ld + log2_rz[c],
-                            ldp + log2_rz[c] + log2_rc[c],
+                            ld + log2_rz,
+                            ldp + log2_rz + log2_rc[c],
                         ]);
                         b.log2_mq[c] = lse2(&[
                             fac + log2_m,
-                            la + log2_rz[c],
-                            lap + log2_rz[c] + log2_rc[c],
+                            la + log2_rz,
+                            lap + log2_rz + log2_rc[c],
                             lb + log2_rc[c],
                         ]);
                     }
@@ -315,7 +353,7 @@ pub fn mobius_build_bounds(
                 .collect()
         })
         .collect();
-    MobiusBoundsTable { log2_rz, log2_rc, per_level }
+    MobiusBoundsTable { log2_rc, per_level }
 }
 
 // ── certified radius: condition (V) by descending geometric scan (note §4.3) ──
@@ -363,7 +401,10 @@ pub fn mobius_solve_radius(
         if !log2_mq.is_finite() {
             continue; // saturated majorant
         }
-        let log2_rz = table.log2_rz[c];
+        let log2_rz = bounds.log2_rz[c]; // per-block bisected R_z
+        if !log2_rz.is_finite() {
+            continue; // rung unusable for this block
+        }
         let start = log2_rz + (0.999f64).log2();
         if start <= best {
             continue; // cannot beat the current best radius
@@ -999,6 +1040,95 @@ mod tests {
     }
 
     #[test]
+    fn mobius_bisected_polydisc_invariant() {
+        // (patch v3) The whole point of the bisection is a SOUND majorant: at
+        // the bisected (R_z, R_c) the walk's M must actually upper-bound the
+        // true complex block map w ← 2Z·w + w² + c sampled on the polydisc, and
+        // the peak criterion must hold (ρ < 0.5 throughout ⇒ M ≤ ~0.5). A
+        // violated bound would over-certify radii → wrong pixels; this is the
+        // guard for that risk (mirror of jet_majorant_bounds_block_map_on_polydisc).
+        let two = |zx: f64, zy: f64| -> (f64, i64) {
+            let m = 2.0 * (zx * zx + zy * zy).sqrt();
+            if m > 0.0 {
+                let bits = m.to_bits();
+                let be = ((bits >> 52) & 0x7ff) as i64 - 1023;
+                (f64::from_bits((bits & !(0x7ffu64 << 52)) | (1023u64 << 52)), be)
+            } else {
+                (0.0, i64::MIN / 2)
+            }
+        };
+        let mut checked = 0usize;
+        for (name, cx, cy) in [
+            ("feigenbaum", -1.401155_f64, 0.0_f64),
+            ("cusp", -0.75, 0.0),
+            ("period2", -1.25, 0.0),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, 4096);
+            assert!(orbit.len() > 4096, "[{}] escaped", name);
+            let twoz: Vec<(f64, i64)> = orbit.iter().map(|&(x, y)| two(x, y)).collect();
+            let levels = mobius_build_levels(&orbit, 1 << 18);
+            for c_max in [1e-9_f64, 1e-30] {
+                let log2_c_max = c_max.log2();
+                for (li, lvl) in levels.iter().enumerate() {
+                    let step = (lvl.blocks.len() / 6).max(1);
+                    for slot in (0..lvl.blocks.len()).step_by(step) {
+                        if lvl.blocks[slot].m.degenerate {
+                            continue;
+                        }
+                        let first = 1 + slot * lvl.skip;
+                        let seg = &twoz[first..first + lvl.skip];
+                        for (is, &s) in MOBIUS_S.iter().enumerate() {
+                            let _ = is;
+                            let log2_rc = s.log2() + log2_c_max;
+                            let (log2_rz, log2_m) = mobius_bisect_rz(seg, log2_rc);
+                            if !log2_rz.is_finite() {
+                                continue;
+                            }
+                            // Peak criterion ⇒ the majorant is small (≤ ~1).
+                            assert!(
+                                log2_m <= 0.0 + 1e-9,
+                                "[{}] skip {} rung {}: M 2^{:.2} > 0.5 despite ρ<0.5",
+                                name, lvl.skip, s, log2_m
+                            );
+                            // Sample the true block map on the polydisc boundary
+                            // and interior; |w_out| must not exceed M.
+                            let rz = fe_exp2(log2_rz);
+                            let rc = fe_exp2(log2_rc);
+                            for p in 0..12 {
+                                let phz = p as f64 * 0.5236;
+                                let phc = p as f64 * 0.6155 + 0.3;
+                                for (fz, fc) in [(1.0, 1.0), (1.0, 0.4), (0.6, 1.0), (0.0, 1.0)] {
+                                    let z0 = CFe {
+                                        x: fz * rz.x * phz.cos(),
+                                        y: fz * rz.x * phz.sin(),
+                                        e: rz.e,
+                                    };
+                                    let cc = CFe {
+                                        x: fc * rc.x * phc.cos(),
+                                        y: fc * rc.x * phc.sin(),
+                                        e: rc.e,
+                                    };
+                                    let w = exact_block_walk(&orbit, first, lvl.skip, z0, cc);
+                                    if let Some(wl) = w.log2_mag() {
+                                        assert!(
+                                            wl <= log2_m + 1e-6,
+                                            "[{}] skip {} rung {} sample {}: |Φ| 2^{:.3} > M 2^{:.3}",
+                                            name, lvl.skip, s, p, wl, log2_m
+                                        );
+                                    }
+                                }
+                            }
+                            checked += 1;
+                        }
+                    }
+                }
+            }
+        }
+        println!("polydisc invariant checked on {} (block, rung) polydiscs", checked);
+        assert!(checked > 200, "too few polydiscs exercised ({})", checked);
+    }
+
+    #[test]
     fn mobius_radii_are_pure_formula_no_chain() {
         // (task 2.5, patch v2 Fix 1) The built radius of EVERY block equals its
         // standalone (V) formula radius — no merge cap. The removed §4.4 chain
@@ -1487,6 +1617,90 @@ mod tests {
 
     const LOG2_10_LOCAL: f64 = 3.321928094887362;
 
+    // Round an f64 to p significant mantissa bits (round-to-nearest) — models a
+    // reference stored/computed at p bits of relative precision. p ≥ 52 is the
+    // identity (full f64).
+    fn round_bits(v: f64, p: u32) -> f64 {
+        if v == 0.0 || !v.is_finite() || p >= 52 {
+            return v;
+        }
+        let drop = 52 - p;
+        let bits = v.to_bits();
+        let half = 1u64 << (drop - 1);
+        let mask = !((1u64 << drop) - 1);
+        f64::from_bits(bits.wrapping_add(half) & mask)
+    }
+
+    // ── Instrumentation (option 3): how many REFERENCE bits does the DERIVATIVE
+    // (distance estimation) need, above what the COLOR (iteration count) needs?
+    // The orbit runs in f64 (52-bit arithmetic); only the reference precision
+    // varies (each Z_n rounded to p bits before use), so der error isolates the
+    // reference-precision limit — the quantity the user's budget lever controls.
+    // The GPU stores the reference in f32 (p = 24). The margin the DE needs =
+    // (p where der error saturates) − (p where the color stops changing).
+    #[test]
+    #[ignore]
+    fn mobius_der_precision_vs_reference_bits() {
+        let eps = 1e-6_f64;
+        for (name, cx, cy, n) in [
+            ("feigenbaum", -1.401155_f64, 0.0_f64, 8000usize),
+            ("feigenbaum-long", -1.401155, 0.0, 30000),
+            ("seahorse", -0.743643887037151, 0.131825904205330, 3000),
+        ] {
+            let orbit_gt = ref_orbit_f64(cx, cy, n);
+            if orbit_gt.len() <= n {
+                println!("[{}] escaped at {} — capped", name, orbit_gt.len() - 1);
+            }
+            let nn = orbit_gt.len() - 1;
+            let c_max = 1e-40_f64; // deep pixel scale (dc ≈ c_max)
+            println!(
+                "\n=== [{}] N={} c_max={:e} eps={:e} (GPU reference = f32 = 24 bits) ===",
+                name, nn, c_max, eps
+            );
+            println!(
+                "  {:>4} | {:>12} | {:>10} | color (iters/escape)",
+                "bits", "der rel err", "DE rel err"
+            );
+            // Ground truth: full-f64 reference (p = 52). Der error is measured
+            // against it; it saturates once the reference stops limiting der.
+            let mut prev_der_err = f64::INFINITY;
+            for p in [12u32, 16, 20, 24, 28, 32, 36, 40, 44, 48] {
+                let orbit_p: Vec<(f64, f64)> = orbit_gt
+                    .iter()
+                    .map(|&(x, y)| (round_bits(x, p), round_bits(y, p)))
+                    .collect();
+                let (mut der_err, mut de_err, mut color_mismatch) = (0.0f64, 0.0f64, 0usize);
+                for kpx in 0..16 {
+                    let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
+                    let dc = (t * c_max * 0.7, 0.37 * t * c_max);
+                    let gt = mobius_run_pixel(&[], &[], &orbit_gt, dc, nn);
+                    let dp = mobius_run_pixel(&[], &[], &orbit_p, dc, nn);
+                    // der (dz/dc) relative error.
+                    let dg = (gt.der.0 * gt.der.0 + gt.der.1 * gt.der.1).sqrt().max(1e-300);
+                    let dd = ((dp.der.0 - gt.der.0).powi(2) + (dp.der.1 - gt.der.1).powi(2)).sqrt();
+                    der_err = der_err.max(dd / dg);
+                    // DE = |z|·ln|z| / |der|; compare the estimator itself.
+                    let de = |r: &MobiusPixelResult| -> f64 {
+                        let z = (r.final_z.0 * r.final_z.0 + r.final_z.1 * r.final_z.1).sqrt();
+                        let d = (r.der.0 * r.der.0 + r.der.1 * r.der.1).sqrt().max(1e-300);
+                        z * z.ln().max(1e-6) / d
+                    };
+                    let (dge, dpe) = (de(&gt), de(&dp));
+                    de_err = de_err.max((dpe - dge).abs() / dge.abs().max(1e-300));
+                    if dp.iters != gt.iters || dp.escaped != gt.escaped {
+                        color_mismatch += 1;
+                    }
+                }
+                println!(
+                    "  {:>4} | {:>12.2e} | {:>10.2e} | {} mismatch/16",
+                    p, der_err, de_err, color_mismatch
+                );
+                let _ = prev_der_err;
+                prev_der_err = der_err;
+            }
+        }
+    }
+
     // ── Instrumentation (patch v2): applied-length histogram + blocking-term ─
     // census. Point 1: distribution of applied block lengths, c+ vs Padé
     // heuristic. Point 2: for every block refused while |z| sits in the working
@@ -1764,7 +1978,7 @@ mod tests {
         let mut best_term = "saturated";
         for c in 0..MOBIUS_NCAND {
             let log2_mq = bounds.log2_mq[c];
-            if !log2_mq.is_finite() {
+            if !log2_mq.is_finite() || !bounds.log2_rz[c].is_finite() {
                 continue;
             }
             let log2_theta_c = log2_c_max - table.log2_rc[c];
@@ -1802,7 +2016,7 @@ mod tests {
                     q_lin = f64::INFINITY;
                 }
             }
-            let log2_rz = table.log2_rz[c];
+            let log2_rz = bounds.log2_rz[c];
             let ltheta = (x - log2_rz).max(log2_theta_c);
             let theta = ltheta.exp2();
             let tail_log2 = log2_mq

@@ -1,7 +1,7 @@
 // One-shot bake of the per-neutral-texel AA sample-count target, derived from
 // the distance estimate already stored in the converged neutral texture.
 //
-// Neutral layer layout (see mandelbrot.wgsl):
+// Neutral layer layout (see mandelbrot_brush.wgsl):
 //   layer 0 = iter  (> 0 escaped, == 0 interior/in-set)
 //   layer 4 = distance_height = clamp(-log(DE_texels), -64, 64); high → near boundary.
 //

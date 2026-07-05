@@ -1,14 +1,18 @@
 // Resolve pass: replaces remaining sentinels with a snapped parent pixel.
 //
-// Uses a texture_2d_array<f32> with 8 r32float layers.
+// Input: the RAW state texture (9 r32float layers — see mandelbrot_brush.wgsl);
+// output: the 8-layer resolved texture (MRT). Only FINISHED pixels are ever
+// interpreted here (sentinels and budget-exhausted continuations are replaced
+// by finished ancestors), so the in-progress raw derivative in layers 4/5/8
+// is never read — layers 4/5 below are the escaped format.
 //
-// Layer layout:
-//   0 : sentinel / iteration count (integer part)
+// Layer layout (finished pixels):
+//   0 : iteration count (integer part)
 //   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied from grid step)
 //   2 : z.x
 //   3 : z.y
-//   4 : dz.x (derivative real)
-//   5 : dz.y (derivative imag)
+//   4 : distance height (escaped)
+//   5 : visual derivative angle (escaped)
 //   6 : ref_i + fractional stripe phase (reference orbit index for resuming perturbation)
 //   7 : packed average orbit direction
 //

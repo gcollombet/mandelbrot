@@ -243,6 +243,14 @@ blocks at depth.
 - Paranoia denominator guard: implemented behind `MOBIUS_PARANOIA_GUARD`
   (default ON, both production shaders + debug). Keep/drop decided after the
   field round (6.3) — expected to never fire (DEN > 0.5 is inside the radius).
+- ~~Scan grid / R_z~~ — RESOLVED by patch v3: R_z is no longer a fixed grid at
+  all but a per-block, per-rung EXACT log bisection to the largest R_z keeping
+  the majorant peak ρ < 0.5 (the peak is monotone in R_z). This is the "tighter
+  majorant" — holding ρ² under the linear term kills the runaway that saturated
+  long near-critical blocks. Deep near-critical went 5.2× → 1.00× turns vs Padé
+  (feigenbaum 1e-30 refused-block count 42 → 0); GPU seahorse skip 6.4 → 7.6
+  (≥ Padé). Sound (walk is a majorant at any R_z; polydisc-invariant test is the
+  referee). The fixed-grid history below is kept for the record:
 - ~~Scan grid~~ — REVISITED after the first field round (mobius ≥ 2× slower
   than Padé on most views): the note's s ∈ {3e3, 3e5} is deep-zoom-calibrated —
   at interactive c_max (~1e-5) it makes R_c = 0.03..3 and the majorant walk's

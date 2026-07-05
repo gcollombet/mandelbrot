@@ -411,6 +411,36 @@ pub fn jet_majorant_pre(twoz: &[(f64, i64)], rz: CFe, rc: CFe) -> CFe {
     CFe { x: rho.0 * 0.5, y: 0.0, e: rho.1 + 1 } // mantissa back to [0.5, 1)
 }
 
+/// Peak ρ (log2 magnitude) reached anywhere along the majorant walk, and the
+/// final M (log2). Same recurrence as `jet_majorant_pre` — the majorant itself
+/// is unchanged; this only reports the peak the walk passes through, for the
+/// Möbius-c+ R_z bisection (add-mobius-cplus patch v2): the largest R_z keeping
+/// the peak below 0.5 gives a tight, runaway-free polydisc. Returns
+/// (+∞, +∞) when the walk saturates. ρ is monotone increasing in the initial
+/// R_z (R_z sets ρ₀ and the recurrence is monotone in ρ), so the peak is
+/// monotone in R_z — the bisection is exact.
+pub fn jet_majorant_peak_pre(twoz: &[(f64, i64)], rz: CFe, rc: CFe) -> (f64, f64) {
+    let rce = sfe_from_cfe(&rc);
+    let mut rho = sfe_from_cfe(&rz);
+    let l2 = |m: f64, e: i64| -> f64 {
+        if m > 0.0 { m.log2() + e as f64 } else { f64::NEG_INFINITY }
+    };
+    let mut peak = l2(rho.0, rho.1);
+    for &(am, ae) in twoz {
+        let lin = sfe_norm(am * rho.0, ae + rho.1);
+        let sq = sfe_norm(rho.0 * rho.0, 2 * rho.1);
+        rho = sfe_add(sfe_add(lin, sq), rce);
+        if rho.1 > MAJORANT_SATURATION_LOG2 {
+            return (f64::INFINITY, f64::INFINITY);
+        }
+        let cur = l2(rho.0, rho.1);
+        if cur > peak {
+            peak = cur;
+        }
+    }
+    (peak, l2(rho.0, rho.1))
+}
+
 // ── rule (V): per-block bound data and radii solve ─────────────────────────────
 //
 // Implementation form of Definition (V). The remainder is certified in two SPLIT

@@ -43,9 +43,26 @@ holds for all |z| ≤ r, |c| ≤ c_max: `REST(x, c_max)/DEN(x, c_max) ≤
 ½·ε·(|A|·x + |B|·c_max)` where REST sums the stored |q_ij| monomials plus the Cauchy
 tail from the scalar majorant, and `DEN = 1 − |D|·x − |D'|·x·c_max` is required > 0.5.
 The radius SHALL be found by descending geometric scan (first success from above), NOT
-bisection, and maximized over an anisotropic polydisc grid (`R_c` proportional to
-`c_max`, never equal to `R_z`). The error scale SHALL be `ε·(|A|·x + |B|·c_max)` —
-never the |A|·x term alone.
+bisection, and maximized over anisotropic polydiscs (`R_c = s·c_max` rungs, never equal
+to `R_z`). The error scale SHALL be `ε·(|A|·x + |B|·c_max)` — never the |A|·x term alone.
+
+R_z SHALL NOT be a fixed grid: per block and per R_c rung it SHALL be BISECTED (exact log
+bisection — the majorant peak is monotone in R_z) to the largest value keeping the
+majorant walk's peak ρ below 0.5 throughout. This holds the ρ² term strictly under the
+linear one, so the walk never enters the double-exponential runaway that a too-large R_z
+triggers at near-critical passages — recovering the long blocks a fixed grid left
+saturated, with no over-certification (the walk is a valid majorant at any R_z; the
+polydisc-invariant test verifies M bounds the true block map on the bisected polydisc).
+
+#### Scenario: Bisected polydisc bounds the true map
+- **WHEN** a block's R_z is bisected for a rung and the majorant M is computed there
+- **THEN** the true complex block walk `w ← 2Z·w + w² + c`, sampled anywhere on
+  `|z| ≤ R_z, |c| ≤ R_c`, satisfies `|w_out| ≤ M`, and `M ≤ ~0.5` (the peak criterion)
+
+#### Scenario: Long near-critical blocks recovered
+- **WHEN** a long block (skip ≥ 128) spans a near-critical reference step at deep c_max
+- **THEN** the bisection finds a small-enough R_z that the majorant stays finite and the
+  block certifies at the working band, where the fixed R_z grid left it saturated (−∞)
 
 #### Scenario: Radius soundness against exact stepping
 - **WHEN** a block is applied at any entry |z| < r with any |c| ≤ c_max (sampled over

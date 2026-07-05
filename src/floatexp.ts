@@ -4,7 +4,7 @@
 // f32 (~1.2e-38). The shader switches to an extended-exponent representation
 // (value = mantissa · 2^exponent) below DEEP_EXP_THRESHOLD; this module produces
 // the (mantissa, exponent) decomposition the shader consumes. See
-// src/assets/mandelbrot.wgsl and openspec/changes/add-floatexp-deep-zoom.
+// src/assets/mandelbrot_brush.wgsl and openspec/changes/add-floatexp-deep-zoom.
 
 // floatexp deep-zoom threshold, as a base-2 exponent of scale. Below scale
 // ≈ 2^-100 (~7.9e-31, i.e. around 1e-30) the shader uses the extended-exponent
