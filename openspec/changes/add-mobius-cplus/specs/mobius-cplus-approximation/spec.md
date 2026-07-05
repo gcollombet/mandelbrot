@@ -140,8 +140,8 @@ shallow path (the jet's measured 2×): flagged blocks reconstruct in plain f32.
   and only the sidecar buffer is re-uploaded
 
 ### Requirement: Global error bound holds end-to-end
-On the CPU harness with the same Zhuoran rebasing as the shaders, the mobius+ loop
-SHALL reach the same iteration counts and escape verdicts as exact perturbation
+The mobius+ loop SHALL, on the CPU harness with the same Zhuoran rebasing as the
+shaders, reach the same iteration counts and escape verdicts as exact perturbation
 stepping, with final relative error satisfying ρ_N/(N·ε) ≤ 5 across the seahorse,
 near-parabolic, spiral and Feigenbaum test references at ε ∈ {1e-12, 1e-15} and
 |c| ∈ {1e-13, 1e-14, 1e-16}.

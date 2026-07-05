@@ -232,8 +232,11 @@ unchanged (x = r log2, y = f32-safe fast-path flag, z/w spare).
 
 Additive; `bla` remains the default. If `mobius+` misbehaves, users stay on
 `pade`/`jet`. Deprecation path (collapse Padé/jet onto mobius+) is a separate proposal
-gated on: field A/B ≥ Padé wall-clock on the user's views AND census ≈ 0 dead-radius
-blocks at depth.
+gated on: `apps_total(mobius+) ≤ apps_total(Padé)` at render completion on the user's
+benchmark views (the 6.3 "Total apps" indicator — deterministic, GPU/thermal
+independent; wall-clock as sanity check) AND census ≈ 0 dead-radius blocks at depth.
+OUTCOME (6.4 field round): the speed gate FAILED — no deprecation; mobius+'s durable
+value is derivative fidelity (see the 6.4 entries in Open Questions).
 
 ## Open Questions
 
@@ -242,7 +245,7 @@ blocks at depth.
   coefficient carries a private exponent; record = 60 B (5 × JetCoeffFe).
 - Paranoia denominator guard: implemented behind `MOBIUS_PARANOIA_GUARD`
   (default ON, both production shaders + debug). Keep/drop decided after the
-  field round (6.3) — expected to never fire (DEN > 0.5 is inside the radius).
+  field round (6.4) — expected to never fire (DEN > 0.5 is inside the radius).
 - ~~Scan grid / R_z~~ — RESOLVED by patch v3: R_z is no longer a fixed grid at
   all but a per-block, per-rung EXACT log bisection to the largest R_z keeping
   the majorant peak ρ < 0.5 (the peak is monotone in R_z). This is the "tighter
@@ -273,7 +276,47 @@ blocks at depth.
   already sits at the 8-storage-buffer WebGPU default limit, so dedicated
   bindings were not an option — this supersedes D6's "own GPU buffers +
   bindings"). The audit also closed a latent jet↔pade stale-table window.
-- Deprecation of Padé/jet onto mobius+: separate follow-up decision, gated on
-  the 6.3 field A/B; the CPU census inputs (r_c+ ≥ r_Möbius on 100 % of
-  blocks, ~8× fewer loop turns than plain Möbius on slow orbits, census ≈ 0)
-  are recorded in `MANDELBROT_MOBIUS_CPLUS_IMPLEMENTATION.md`.
+- Field-round metric — DECIDED: the arbiter is `Σ applications` (loop turns =
+  block skips + exact steps, i.e. `g_workSteps`), summed over the full render
+  generation and frozen at completion — the findings-§9 lesson made operational:
+  per-application cost is flat on the memory-latency plateau, so the application
+  COUNT is the wall-clock, in deterministic, GPU/thermal-independent form.
+  Surfaced as a "Total apps" RenderStats indicator (task 6.3), superseding the
+  CPU `benchmarkPade` panel (sampled, re-emulated, drift-prone). Caveats: valid
+  across plateau modes only (32–80 B; jet at 120 B/all-floatexp still needs
+  wall-clock); counts only the in-place compute path until all-compute lands
+  (benchmark renders are full compute requests, hence fully in-place already);
+  ±32/workgroup/dispatch quantization from the >>6 downscale (~1 % at 1080p,
+  below any decision threshold).
+- ~~Deprecation of Padé/jet onto mobius+~~ — RESOLVED NEGATIVE by the 6.4 field
+  round (user GPU, 2026-07-05/06): the 1-mode collapse FAILS on speed.
+  Deep: apps/s(mobius+) < jet AND apps_total(mobius+) > jet — both paths are
+  all-fe there, so the §10 plateau argument does not apply (fe arithmetic is
+  compute-bound; the radius hierarchy is the arbiter and jet's order-3 radii
+  dominate; mobius+ additionally pays fe_cinv + the exp() in the der update).
+  Vs Padé: apps_total similar but apps/s lower (5 ldexp reconstructions,
+  2 augmentation cmuls, exact pdz/pdc vs Padé's lean apply). Model correction:
+  the per-application cost plateau is a SHALLOW-f32 phenomenon only. Speed
+  positioning: Padé wins shallow (heuristic radii), jet wins deep (largest
+  certified radii), mobius+ squeezed on both sides. No deprecation proposal.
+- 6.4 NEW AXIS — derivative fidelity (same field round): on some views mobius+
+  needs ≥2× the applications of every other mode yet is the ONLY mode whose
+  derivative (DE) stays correct. Structural, verified in the shader: the Padé
+  der update (`try_apply_bla`/`try_apply_bla_deep`, D4) applies
+  `der' = (A/M²)·der + B/M`, but the exact ∂z of (Az+Bc)/(1+Dz) is
+  (A − B·c·D)/M² — the missing −BcD term is the BD part of the spurious
+  q₁₁ = A₁₁ + BD that A' annihilates; the plain Padé form cannot carry the
+  A₁₁·c multiplier dependence at all. Since DE reads log|der| at full
+  magnification (×24–33 absolute-error amplification, see compensate-ders),
+  the derivative's c-channel breaks BEFORE the value's. Also: rule (V)
+  certifies VALUE error only — jet's larger radii pass derivative error
+  legally; mobius+'s smaller radii protect its der by accident. Follow-ups:
+  (a) reposition mobius+ as the DE-correct mode (its durable niche);
+  (b) research a derivative radius (V'): same majorant M, differentiated
+  Cauchy tail (factor i, one power down), r' per block at build,
+  r_eff = min(r, r') when DE is enabled — gives every mode an honest der
+  radius and would likely hand jet the DE title with fewer applications.
+  Related but separate: shallow BLA's der collapse at zoom ~1e-18 is a
+  suspected NUMERIC bug (dot(dz,dz) f32 underflow below |dz| ~ 1e-19 incl.
+  radius-0 blocks passing 0 ≤ 0; derM update without the derS fold
+  discipline), spun off for investigation.

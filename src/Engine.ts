@@ -152,11 +152,6 @@ type ReferenceWorkerRequest =
         maxBlaSkip: number
     }
     | {
-        type: 'benchmarkPade'
-        jobId: number
-        grid: number
-    }
-    | {
         type: 'findMinibrot'
         jobId: number
         maxIter: number
@@ -201,11 +196,6 @@ type ReferenceWorkerResponse =
         message: string
     }
     | {
-        type: 'padeBenchmark'
-        jobId: number
-        result: PadeBenchmarkResult
-    }
-    | {
         type: 'minibrotFound'
         jobId: number
         status: 'ok' | 'none' | 'nonewton'
@@ -240,16 +230,6 @@ type ReferenceSlot = {
         levelCount: number
         maxIterations: number
     } | null
-}
-
-export type PadeBenchmarkResult = {
-    pixels: number
-    maxIter: number
-    stepsExact: number
-    stepsAffine: number
-    stepsPade: number
-    mismatches: number
-    maxIterDelta: number
 }
 
 export type MinibrotResult = {
@@ -521,7 +501,9 @@ export class Engine {
     workgroupWaste = -1
     /** worst single-texel real loop steps in the sampled dispatch. */
     maxPixelSteps = -1
-    /** approximate total real loop steps for the render (realMean × 256). */
+    /** Absolute total applications for the current render generation — the
+     *  full-generation Σ g_workSteps (block skips + exact steps) recovered from
+     *  the >>6 workgroup downscale as realMean << 6. -1 = not yet known. */
     realLoopStepsApprox = -1
     // workStatsBuffer accumulates on the GPU across EVERY dispatch of a render
     // generation (cleared once, here-tracked, not per dispatch), so the totals are
@@ -594,12 +576,15 @@ export class Engine {
     // Default 1e-30 keeps shallow use fast; the Settings slider can deepen it to 1e-1000.
     // Changing it forces a full reference recompute. See fix-reference-precision-budget.
     private precisionBudget = '1e-30'
-    private pendingBenchmarkResolve: ((r: PadeBenchmarkResult) => void) | null = null
     private pendingMinibrotResolve: ((r: MinibrotResult) => void) | null = null
     // Time-to-completion of the last render session (ms). Wall includes everything;
     // GPU is the accumulated mandelbrot-pass compute (the part blocks reduce).
     lastCompletionWallMs = 0
     lastCompletionGpuMs = 0
+    // Absolute total applications (Σ g_workSteps over all texels of the last
+    // completed render generation), frozen at completion alongside the timings —
+    // the deterministic, machine-independent cost metric for mode A/B comparison.
+    lastCompletionTotalApps = -1
     // Diagnostic: the mode flag (0/1/2) and block-level count last sent to the shader.
     lastShaderApproxFlag = 0
     lastShaderBlaLevelCount = 0
@@ -951,12 +936,6 @@ export class Engine {
     }
 
     private handleReferenceWorkerMessage(message: ReferenceWorkerResponse) {
-        if (message.type === 'padeBenchmark') {
-            const resolve = this.pendingBenchmarkResolve
-            this.pendingBenchmarkResolve = null
-            resolve?.(message.result)
-            return
-        }
         if (message.type === 'minibrotFound') {
             const resolve = this.pendingMinibrotResolve
             this.pendingMinibrotResolve = null
@@ -1754,7 +1733,7 @@ export class Engine {
                 this.realizedSkip = skip
                 this.workgroupWaste = waste
                 this.maxPixelSteps = maxSteps
-                this.realLoopStepsApprox = realMean * 256
+                this.realLoopStepsApprox = realMean * 64
             } else {
                 this.realizedSkip = -1
                 this.workgroupWaste = -1
@@ -2140,21 +2119,6 @@ export class Engine {
         this.needRender = true
     }
 
-    // Run the CPU skip benchmark (exact vs affine vs Padé) on the worker's current
-    // reference orbit. Resolves with loop-step counts + a correctness cross-check.
-    benchmarkPade(grid = 16): Promise<PadeBenchmarkResult> {
-        const empty: PadeBenchmarkResult = {
-            pixels: 0, maxIter: 0, stepsExact: 0, stepsAffine: 0, stepsPade: 0, mismatches: 0, maxIterDelta: 0,
-        }
-        // Supersede any in-flight request so its caller does not hang.
-        this.pendingBenchmarkResolve?.(empty)
-        this.pendingBenchmarkResolve = null
-        return new Promise<PadeBenchmarkResult>((resolve) => {
-            this.pendingBenchmarkResolve = resolve
-            this.postReferenceWorker({ type: 'benchmarkPade', jobId: this.referenceJobId, grid })
-        })
-    }
-
     // Find the minibrot under the current view (deep period detection + Newton
     // nucleus refinement, both arbitrary-precision in the worker). Resolves with
     // the exact nucleus coordinates so the caller can recentre the view on it.
@@ -2220,6 +2184,9 @@ export class Engine {
         } else if (!renderingNow && this.completionTimerActive) {
             this.lastCompletionWallMs = now - this.completionStartMs
             this.lastCompletionGpuMs = this.completionAccumulatedGpuMs
+            // realLoopStepsApprox is the render-wide running total (accumulated on
+            // the GPU across every dispatch), so at completion it is the final Σ.
+            this.lastCompletionTotalApps = this.realLoopStepsApprox
             this.completionTimerActive = false
         }
 
@@ -2250,6 +2217,17 @@ export class Engine {
                 blaEpsilon: navigatorBlaEpsilon,
             })
             this.clearHistoryNextFrame = true
+            // Invalidate the frozen fallback: it still holds the OLD mode's
+            // completed image. clearHistoryNextFrame wipes only the live texture,
+            // so without this the color pass composites old-mode frozen pixels
+            // (step=1) against the new mode's coarse in-progress pixels via
+            // min-step-wins — a visible old/new "mix" that resolves slowly. A
+            // mode switch keeps the same reference orbit and view, so the new
+            // mode recomputes cleanly; a fresh frozen snapshot is recaptured on
+            // completion. (Not gated on zoom: mid-zoom mode changes are rare and
+            // the zoom path owns frozenAligned itself.)
+            this.frozenAligned = false
+            this.needFreezeSnapshot = false
             this.needRender = true
             this.invalidateCounterReadback()
         }

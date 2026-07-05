@@ -80,9 +80,23 @@
       never rebuilt across mode switches, pixel-diff within block-sampling floor.
 - [x] 6.2 `tests/mobius-deep.spec.ts`: deep view (≤1e-32, fe path) renders structured
       content and converges; near-critical view (seahorse) traversed without blackout.
-- [ ] 6.3 Field measurement round on the user's benchmark views (debug view timings,
-      realizedSkip): mobius+ vs Padé wall-clock, census 2.7 numbers at interactive
-      scales. Record results in design.md.
+- [x] 6.3 "Total apps" indicator in RenderStats (prerequisite for 6.4): surface the
+      full-generation Σ g_workSteps (applications = block skips + exact steps — the
+      findings-§9 wall-clock proxy) as an ABSOLUTE count, frozen at render completion
+      alongside completionWallMs/completionGpuMs. Rescale the >>6 workgroup downscale
+      back to absolute (quantization ±32/workgroup/dispatch accepted; reconcile the
+      stale ">>8 (256 lanes)" comment in mandelbrot_brush.wgsl while there). Retire
+      the CPU `benchmarkPade` panel section — sampled 16× CPU re-emulation that must
+      be resynced on every mode change, superseded by the GPU counter measuring the
+      real kernel (all pixels, rebasing included).
+- [x] 6.4 Field measurement round on the user's benchmark views. Decision criterion
+      for the 1-mode collapse: on each view, at completion,
+      `apps_total(mobius+) ≤ apps_total(pade)` AND no visual regression → file the
+      Padé/jet deprecation proposal. Wall-clock is a sanity check only (the
+      deterministic counter arbitrates). Plateau caveat: apps_total is a faithful
+      wall-clock proxy only among plateau modes (32–80 B: bla/pade/mobius+); jet
+      (120 B, all-floatexp, ~2×/application) must still be compared by wall-clock.
+      Record results in design.md.
 
 ## 7. Close-out
 

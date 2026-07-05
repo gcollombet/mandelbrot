@@ -10,36 +10,13 @@ const debugShading = defineModel<boolean>('debugShading', { default: false });
 
 const expanded = ref(false);
 
-// --- Padé skip benchmark (CPU, on the current reference orbit) ---
-type PadeBench = { pixels: number; maxIter: number; stepsExact: number; stepsAffine: number; stepsPade: number; mismatches: number; maxIterDelta: number };
-const benchmarkResult = ref<PadeBench | null>(null);
-const benchmarkRunning = ref(false);
-async function runPadeBenchmark() {
-  if (!props.engine || benchmarkRunning.value) return;
-  benchmarkRunning.value = true;
-  try {
-    benchmarkResult.value = await props.engine.benchmarkPade(16);
-  } catch {
-    benchmarkResult.value = null;
-  } finally {
-    benchmarkRunning.value = false;
-  }
-}
-
-// Fraction of the complete iteration count (= exact stepping) that a block mode
-// skips: (stepsExact − steps) / stepsExact, over the sampled pixel grid.
-function savedPct(steps: number): string {
-  const exact = benchmarkResult.value?.stepsExact ?? 0;
-  if (exact <= 0) return '—';
-  return `−${((1 - steps / exact) * 100).toFixed(1)}%`;
-}
-
 // --- Polled stats (reactive mirrors of Engine plain properties) ---
 const fps = ref(0);
 const isRendering = ref(false);
 const gpuFrameTimeMs = ref(0);
 const completionWallMs = ref(0);
 const completionGpuMs = ref(0);
+const completionTotalApps = ref(-1);
 const shaderApproxFlag = ref(0);
 const shaderBlaLevelCount = ref(0);
 const unfinishedPixels = ref(-1);
@@ -176,6 +153,7 @@ function poll() {
   gpuFrameTimeMs.value = e.isRendering ? (e.gpuFrameTimeMs ?? 0) : 0;
   completionWallMs.value = e.lastCompletionWallMs ?? 0;
   completionGpuMs.value = e.lastCompletionGpuMs ?? 0;
+  completionTotalApps.value = e.lastCompletionTotalApps ?? -1;
   shaderApproxFlag.value = e.lastShaderApproxFlag ?? 0;
   shaderBlaLevelCount.value = e.lastShaderBlaLevelCount ?? 0;
   unfinishedPixels.value = e.unfinishedPixelCount ?? -1;
@@ -260,6 +238,13 @@ function formatOps(n: number): string {
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
   if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
   return String(n);
+}
+
+// Total apps ÷ GPU ms of the same completed render (applications per GPU
+// millisecond). -1 until both are known.
+function appsPerGpuMs(): number {
+  if (completionTotalApps.value < 0 || completionGpuMs.value <= 0) return -1;
+  return completionTotalApps.value / completionGpuMs.value;
 }
 
 function opsPerFrame(): number {
@@ -418,6 +403,25 @@ defineExpose({ expanded });
           <span class="stats-value">{{ completionWallMs.toFixed(0) }}ms · gpu {{ completionGpuMs.toFixed(0) }}ms</span>
         </div>
 
+        <!-- Total applications for the last completed render: the full-generation
+             Σ g_workSteps (block skips + exact steps), an ABSOLUTE deterministic
+             count frozen at completion. This is the cost metric for A/B mode
+             comparison on a view — lower is better; wall-clock is only a sanity
+             check. (±~1% workgroup-downscale quantization.) -->
+        <div v-if="completionTotalApps >= 0" class="stats-row">
+          <span class="stats-label">Total apps</span>
+          <span class="stats-value">{{ formatOps(completionTotalApps) }}</span>
+        </div>
+
+        <!-- GPU throughput: Total apps ÷ GPU compute time of the same render.
+             apps_total is deterministic; gpu ms carries the hardware's real
+             lane-throughput, so this ratio exposes cost-per-app differences the
+             counter alone hides (e.g. jet's ~2×/application floatexp work). -->
+        <div v-if="appsPerGpuMs() >= 0" class="stats-row">
+          <span class="stats-label">Apps / gpu ms</span>
+          <span class="stats-value">{{ formatOps(appsPerGpuMs()) }}</span>
+        </div>
+
         <!-- What the GPU shader actually receives. In Padé mode this MUST read
              "Padé · N lvl" (N>0); if it shows "exact" or "0 lvl", blocks are
              disabled before the GPU. -->
@@ -444,28 +448,6 @@ defineExpose({ expanded });
         <div v-if="maxPixelSteps >= 0" class="stats-row">
           <span class="stats-label">Max pixel work</span>
           <span class="stats-value">{{ maxPixelSteps.toLocaleString() }} steps</span>
-        </div>
-
-        <!-- Padé skip benchmark: exact vs affine vs Padé loop-step counts on the
-             current reference orbit (CPU; algorithm mirrors the shader). -->
-        <div class="stats-row">
-          <span class="stats-label">Padé bench</span>
-          <button
-            class="stats-value"
-            style="cursor:pointer;background:none;border:1px solid currentColor;border-radius:4px;padding:0 8px;font:inherit;color:inherit;"
-            :disabled="benchmarkRunning"
-            @click="runPadeBenchmark"
-          >{{ benchmarkRunning ? '…' : 'run' }}</button>
-        </div>
-        <div v-if="benchmarkResult" class="stats-row">
-          <span class="stats-label">↳ iter saved</span>
-          <span class="stats-value">
-            Padé {{ savedPct(benchmarkResult.stepsPade) }} · BLA {{ savedPct(benchmarkResult.stepsAffine) }}
-          </span>
-        </div>
-        <div v-if="benchmarkResult" class="stats-row">
-          <span class="stats-label">↳ correctness</span>
-          <span class="stats-value">{{ benchmarkResult.mismatches }}≠ Δ{{ benchmarkResult.maxIterDelta }} / {{ benchmarkResult.pixels }}px</span>
         </div>
 
         <!-- Zoom progress row -->

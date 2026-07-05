@@ -122,13 +122,15 @@ struct CounterBuffer {
   active_count: atomic<u32>,
 };
 
-// Per-dispatch work instrumentation (in-place path only). Values are reduced at
-// workgroup granularity then downscaled by the lane count (256, via >>8) so the
-// u32 accumulators don't overflow on big renders; the displayed metrics are
-// ratios, so the shared scale cancels.
+// Per-dispatch work instrumentation (in-place path only). realMean/covMean are
+// reduced at workgroup granularity then downscaled by 64 (via >>6, rounded) so
+// the u32 accumulators don't overflow on big renders. The ratio metrics cancel
+// the shared scale; the absolute "Total apps" count rescales realMean back by
+// <<6 (quantization ±32 per workgroup per dispatch).
 //   realized skip   = covMean / realMean      (covered iters per real loop step)
 //   workgroup waste = maxAccum / realMean      (lane-time / useful work; 1 = ideal)
 //   straggler       = maxSteps                 (worst single-texel loop count)
+//   total apps      = realMean << 6            (absolute Σ g_workSteps this render)
 struct WorkStats {
   realMean: atomic<u32>,
   covMean: atomic<u32>,
@@ -356,11 +358,19 @@ fn cinv(z: vec2<f32>) -> vec2<f32> {
 }
 const PADE_POLE2: f32 = 1e-4;
 
-fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, zOut: ptr<function, vec2<f32>>, derInvScale: f32, dc: vec2<f32>, dcMag: f32, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
+fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: vec2<f32>, dcMag: f32, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
-  let dzMag2 = dot(*dz, *dz);
+  // (V-underflow) dot(dz,dz) flushes to 0 in f32 below |dz| ~ 1e-19 (routine at
+  // mid-deep shallow zooms). Gate off length(), not dot(), in log2 space —
+  // same shape as the jet/mobius block-table gate (see the comment near the
+  // isBlockTable branch below). dzMagTiny short-circuits log2() so it is
+  // never evaluated at/below its domain floor; when length() has also
+  // underflowed (< ~1e-38) the magnitude test is treated as open — the radius
+  // test below (with its own dead-block guard) is what actually validates.
+  let dzMag = length(*dz);
+  let dzMagTiny = dzMag < 1.2e-38;
   // (G) near-critical guard: a Möbius block may only span steps with
   // |2Z_k| ≥ mu = √(|c|/ε); in log2, min_k log2|2Z_k| ≥ log2(mu).
   let log2_mu = 0.5 * (log2(max(dcMag, 1e-30)) - log2(max(mandelbrot.blaEpsilon, 1e-30)));
@@ -371,7 +381,7 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
     let skip = i32(levelInfo.skip);
     // Whole-level fast reject: every entry's effective radius is bounded by
     // the level's maxRadius, so a too-large |dz| skips the entry fetch.
-    if (dzMag2 <= levelInfo.maxRadius * levelInfo.maxRadius && *ref_i + skip <= maxIterI) {
+    if ((dzMagTiny || log2(dzMag) <= log2(max(levelInfo.maxRadius, 1e-30))) && *ref_i + skip <= maxIterI) {
       let slot = shiftedRef >> u32(skip0Log + level);
       if (u32(slot) < levelInfo.count) {
         let entryIndex = i32(levelInfo.offset) + slot;
@@ -382,7 +392,11 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
         let b = ldexp(vec2<f32>(bla.bx, bla.by), vec2<i32>(bla.ab_exp, bla.ab_exp));
         let alpha = ldexp(bla.radius_alpha, bla.alpha_exp);
         let radius = max(0.0, alpha - bla.radius_beta * dcMag);
-        if (dzMag2 <= radius * radius) {
+        // (dead-block) a collapsed radius rejects unconditionally. Without
+        // this, dz == 0 (or a fully-underflowed dzMag) would pass a naive
+        // log2(radius) = -inf comparison — the same "0 <= 0" degeneracy this
+        // gate exists to remove, just relocated to -infinity.
+        if (radius > 0.0 && (dzMagTiny || log2(dzMag) <= log2(radius))) {
           if (mandelbrot.approximationMode >= 1.5) {
             // ── Padé [1/1] (in-place compute path) ──
             let d = ldexp(vec2<f32>(bla.dx, bla.dy), vec2<i32>(bla.d_exp, bla.d_exp));
@@ -397,8 +411,21 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
               if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
                 *dz = candidate;
                 *zOut = candidateZ;
-                let derNum = cmul(cmul(a, invM), *derM) + b * derInvScale;
-                *derM = cmul(invM, derNum);
+                // D4 derivative der' = (A/M²)·der + B/M, folded in derM/derS
+                // space (mirrors try_apply_bla_deep's aOverM2/bOverM split):
+                // multiply the raw (unscaled) mantissas by invM²/invM — both
+                // O(1)-bounded by the PADE_POLE2 pole guard above — and fold
+                // the shared exponent ab_exp into derS afterward. This keeps
+                // the mantissa product itself from ever overflowing/
+                // underflowing, which using the already-ldexp'd a/b (as the
+                // value branch above does) would not: ab_exp can be large
+                // even in the "shallow" regime once many blocks compound.
+                let aMantissa = vec2<f32>(bla.ax, bla.ay);
+                let bMantissa = vec2<f32>(bla.bx, bla.by);
+                let invM2 = cmul(invM, invM);
+                *derM = cmul(cmul(aMantissa, invM2), *derM) + cmul(bMantissa, invM) * (*derInvScale);
+                der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
+                der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
                 *ref_i += skip;
                 return skip;
               }
@@ -410,7 +437,10 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
             if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
               *dz = candidate;
               *zOut = candidateZ;
-              *derM = cmul(*derM, a) + b * derInvScale;
+              // Mantissa-only update + derS fold — see the Padé branch note above.
+              *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
+              der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
+              der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
               *ref_i += skip;
               return skip;
             }
@@ -589,14 +619,17 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   if (useBla) {
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
     var skip0Log = 0;
-    var maxBlaR2 = 0.0;
+    // log2-domain, not squared-radius: a plain dot(dz,dz)/radius² comparison
+    // underflows in f32 below |dz| ~ 1e-19 (see try_apply_bla), so this bound
+    // is compared against log2(length(dz)) at the call site instead.
+    var logMaxBlaR = -3.0e38;
     var jetMaxR3 = -3.0e38;
     // Hoisted per-level maxR3 gates: loaded ONCE per pixel, so the descent in
     // try_apply_jet never re-reads the level directory on failing probes.
     var jetLvlR3: array<f32, JET_MAX_LEVELS>;
     if (isBlockTable) {
       skip0Log = i32(countTrailingZeros(max(mandelbrotJetLevels[0].skip, 1u)));
-      // Global fast-reject bound (sibling of maxBlaR2): the loosest top-order
+      // Global fast-reject bound (sibling of logMaxBlaR): the loosest top-order
       // radius across ALL levels. Without it, a dead/stale table would pay the
       // level walk on every iteration — slower than exact stepping.
       for (var l = 0; l < min(i32(mandelbrot.blaLevelCount), JET_MAX_LEVELS); l++) {
@@ -611,7 +644,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       // could possibly accept the current |dz|. (The jet path has per-level
       // log2 gates inside try_apply_jet instead.)
       let maxBlaRadius = mandelbrotBlaLevels[0].maxRadius;
-      maxBlaR2 = maxBlaRadius * maxBlaRadius;
+      logMaxBlaR = log2(max(maxBlaRadius, 1e-30));
     }
     let dcFe = fe_from_vec(dc, 0);
     let dcFe2 = fe_cmul(dcFe, dcFe);
@@ -651,8 +684,14 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
             dz = fe_to_vec(dzFe);
           }
         }
-      } else if (dot(dz, dz) <= maxBlaR2) {
-        skipped = try_apply_bla(&ref_i, &dz, &derM, &blaZ, derInvScale, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
+      } else {
+        // Same log2/length() discipline as the isBlockTable gate above (dz
+        // stays plain f32 here — try_apply_bla reconstructs coefficients to
+        // f32 itself, no fe conversion needed on this path).
+        let dzMagOuter = length(dz);
+        if (dzMagOuter < 1.2e-38 || log2(dzMagOuter) <= logMaxBlaR) {
+          skipped = try_apply_bla(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
+        }
       }
       if (skipped > 0) {
         usedBla = true;
@@ -1626,11 +1665,12 @@ fn cs_main(
     if (a > 0u) {
       atomicAdd(&counter.active_count, a);
     }
-    // Work-instrumentation reduction. Downscale the per-workgroup sums by the
-    // lane count (256, via >>8) so the global u32 accumulators can't overflow;
-    // the consumed metrics are ratios so the scale cancels. maxAccum/realMean
-    // = lane-time / useful work (workgroup lockstep waste); covMean/realMean =
-    // realized skip; maxSteps = worst single-texel straggler.
+    // Work-instrumentation reduction. Downscale the per-workgroup sums by 64
+    // (via >>6, rounded) so the global u32 accumulators can't overflow; the
+    // ratio metrics cancel the scale. maxAccum/realMean = lane-time / useful
+    // work (workgroup lockstep waste); covMean/realMean = realized skip;
+    // maxSteps = worst single-texel straggler. The absolute Total-apps count
+    // recovers Σ g_workSteps as realMean << 6.
     let rs = atomicLoad(&wgRealSum);
     let rm = atomicLoad(&wgRealMax);
     let cv = atomicLoad(&wgCovSum);

@@ -47,12 +47,6 @@ type SetMaxBlaSkipMessage = {
     maxBlaSkip: number
 }
 
-type BenchmarkPadeMessage = {
-    type: 'benchmarkPade'
-    jobId: number
-    grid: number
-}
-
 type FindMinibrotMessage = {
     type: 'findMinibrot'
     jobId: number
@@ -70,7 +64,6 @@ type ReferenceWorkerMessage =
     | SetApproximationModeMessage
     | SetBlaEpsilonMessage
     | SetMaxBlaSkipMessage
-    | BenchmarkPadeMessage
     | FindMinibrotMessage
     | DisposeMessage
 
@@ -119,20 +112,6 @@ type ReadyResponse = {
     type: 'ready'
 }
 
-type PadeBenchmarkResponse = {
-    type: 'padeBenchmark'
-    jobId: number
-    result: {
-        pixels: number
-        maxIter: number
-        stepsExact: number
-        stepsAffine: number
-        stepsPade: number
-        mismatches: number
-        maxIterDelta: number
-    }
-}
-
 type MinibrotFoundResponse = {
     type: 'minibrotFound'
     jobId: number
@@ -147,7 +126,6 @@ type ReferenceWorkerResponse =
     | BlaReadyResponse
     | ErrorResponse
     | ReadyResponse
-    | PadeBenchmarkResponse
     | MinibrotFoundResponse
 
 type WorkerContext = typeof globalThis & {
@@ -474,25 +452,6 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     navigator.set_max_bla_skip(message.maxBlaSkip)
                     lastBlaMaxIterations = 0
                     void runComputeLoop(message.jobId)
-                }
-                break
-            case 'benchmarkPade':
-                if (navigator && message.jobId === activeJobId) {
-                    const b = navigator.benchmark_pade(message.grid)
-                    postResponse({
-                        type: 'padeBenchmark',
-                        jobId: message.jobId,
-                        result: {
-                            pixels: b.pixels,
-                            maxIter: b.max_iter,
-                            stepsExact: b.steps_exact,
-                            stepsAffine: b.steps_affine,
-                            stepsPade: b.steps_pade,
-                            mismatches: b.pade_mismatches,
-                            maxIterDelta: b.max_iter_delta,
-                        },
-                    })
-                    b.free()
                 }
                 break
             case 'findMinibrot':
