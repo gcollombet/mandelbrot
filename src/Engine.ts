@@ -475,6 +475,15 @@ export class Engine {
     // encoder, then this dispatch continues iteration; writes stay
     // proportional to the number of active pixels.
     private pipelineInplace?: GPUComputePipeline
+    // Specialized in-place brush kernels, keyed by override combination so the
+    // driver can dead-code-eliminate unused paths (lower register pressure,
+    // higher occupancy on mobile). Currently keyed on ENABLE_DEEP (floatexp
+    // subtree); ENABLE_AA is the next axis to add once the analytic-AA z″ path
+    // can be gated and validated visually. Lazily built, hot combos precompiled.
+    private inplacePipelineCache = new Map<string, GPUComputePipeline>()
+    private inplaceModule?: GPUShaderModule
+    private inplacePipelineLayout?: GPUPipelineLayout
+    private inplaceBindGroupLayout?: GPUBindGroupLayout
     private bindGroupInplace?: GPUBindGroup
     // Utility compute pass (pan shift / clear stamp), ping-pong A→B.
     private pipelineReprojectCs?: GPUComputePipeline
@@ -564,6 +573,7 @@ export class Engine {
 
     // shader sources (optionnellement remplaçables)
     shaderPassColor: string
+    private f16Supported = false
 
     // config
     width = 0
@@ -1121,7 +1131,13 @@ export class Engine {
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
         this.adapter = await navigator.gpu.requestAdapter()
         if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
-        this.device = await this.adapter.requestDevice()
+        // shader-f16 doubles ALU throughput and halves register use for the
+        // bounded shading math in the color pass (mobile win). Opt in only if
+        // the adapter exposes it; the color source falls back to f32 otherwise.
+        this.f16Supported = this.adapter.features.has('shader-f16')
+        this.device = await this.adapter.requestDevice({
+            requiredFeatures: this.f16Supported ? ['shader-f16'] : [],
+        })
         this.device.label = 'Engine Device'
         this.device.lost.then((info) => {
             console.warn(`GPU device lost: reason=${info.reason}, message=${info.message}`)
@@ -1283,7 +1299,15 @@ export class Engine {
 
     private async _createPipelines() {
         const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
-        const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
+        // Precision specialization for the color pass. The shader declares
+        // `alias hcol = f32;` (valid f32 default, used for bounded shading math);
+        // when the device supports shader-f16 we enable it and swap the alias to
+        // f16 so those helpers run at 2× ALU rate. Structure is identical either
+        // way — only the working precision of the shading lobes changes.
+        const colorCode = this.f16Supported
+            ? 'enable f16;\n' + this.shaderPassColor.replace('alias hcol = f32;', 'alias hcol = f16;')
+            : this.shaderPassColor
+        const moduleColor = this.device.createShaderModule({ code: colorCode, label: 'Engine ShaderModule Color' })
         const moduleDebug = this.device.createShaderModule({ code: debugViewShader, label: 'Engine ShaderModule DebugView' })
 
         // Diagnostic overlay pipeline (block-skipping debug views). Renders a
@@ -1401,11 +1425,16 @@ export class Engine {
             ],
             label: 'Engine BindGroupLayout InplaceCompute',
         })
-        this.pipelineInplace = this.device.createComputePipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutInplace] }),
-            compute: { module: moduleInplace, entryPoint: 'cs_main' },
-            label: 'Engine ComputePipeline InplaceBrushMandelbrot',
-        })
+        this.inplaceModule = moduleInplace
+        this.inplaceBindGroupLayout = layoutInplace
+        this.inplacePipelineLayout = this.device.createPipelineLayout({ bindGroupLayouts: [layoutInplace] })
+        // Precompile both hot combos up front so no first-frame stall on the
+        // deep⇄shallow transition. All variants share inplacePipelineLayout, so
+        // bindGroupInplace (built from inplaceBindGroupLayout) is compatible with
+        // every one. pipelineInplace stays the deep-capable default (used as the
+        // "ready" guard and for backward compatibility).
+        this.pipelineInplace = this.getInplacePipeline(true)
+        this.getInplacePipeline(false)
 
         // ── Utility compute pass (pan/clear ping-pong A→B) ───────────────
         // Compute port of the fragment brush: reads A, rewrites B wholesale
@@ -1523,6 +1552,27 @@ export class Engine {
         this.bindGroupPresent = undefined
     }
 
+    // Lazily build + cache a specialized in-place kernel for the given override
+    // combination. Adding an axis (e.g. AA) means extending the key and the
+    // constants map here and precompiling the new hot combo at init.
+    private getInplacePipeline(deep: boolean): GPUComputePipeline {
+        const key = `d${deep ? 1 : 0}`
+        let pipeline = this.inplacePipelineCache.get(key)
+        if (!pipeline) {
+            pipeline = this.device.createComputePipeline({
+                layout: this.inplacePipelineLayout!,
+                compute: {
+                    module: this.inplaceModule!,
+                    entryPoint: 'cs_main',
+                    constants: { ENABLE_DEEP: deep ? 1 : 0 },
+                },
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep})`,
+            })
+            this.inplacePipelineCache.set(key, pipeline)
+        }
+        return pipeline
+    }
+
     private rebuildInplaceBindGroup() {
         if (!this.pipelineInplace || !this.rawArrayView || !this.uniformBufferMandelbrot
             || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
@@ -1531,7 +1581,7 @@ export class Engine {
             return
         }
 
-        const layout = this.pipelineInplace.getBindGroupLayout(0)
+        const layout = this.inplaceBindGroupLayout!
         this.bindGroupInplace = this.device.createBindGroup({
             layout,
             entries: [
@@ -3224,7 +3274,10 @@ export class Engine {
                 this.workStatsClearedSession = this.workStatsSessionSerial
             }
             const computePass = commandEncoder.beginComputePass()
-            computePass.setPipeline(this.pipelineInplace!)
+            // Shallow views (scaleExp > DEEP_EXP) never enter the floatexp deep
+            // path, so run the DCE'd shallow kernel; floatExpActive is set from
+            // expScale <= DEEP_EXP_THRESHOLD earlier this frame.
+            computePass.setPipeline(this.getInplacePipeline(this.floatExpActive))
             computePass.setBindGroup(0, this.bindGroupInplace!)
             // cs_main is @workgroup_size(8,8) — smaller tiles reduce intra-workgroup
             // lockstep divergence waste (one deep straggler holds 64 lanes, not 256).

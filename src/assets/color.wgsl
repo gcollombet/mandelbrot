@@ -1,3 +1,10 @@
+// Working precision for the bounded shading math (lighting lobes, AO, edge
+// wear, subsurface). Default f32; the engine swaps this to f16 (and prepends
+// `enable f16;`) when the device supports shader-f16, doubling ALU throughput
+// on mobile. Only values in a safe [~1e-3, ~1e3] range use hcol — iteration
+// counts, distance estimates and palette phase stay f32.
+alias hcol = f32;
+
 struct Uniforms {
   palettePeriod: f32,
   paletteOffset: f32,
@@ -221,12 +228,18 @@ fn mandelbrot_normal_from_dir(angleDir: vec2<f32>) -> vec3<f32> {
 }
 
 fn fresnel_schlick(cosTheta: f32, f0: vec3<f32>) -> vec3<f32> {
-  let m = clamp(1.0 - cosTheta, 0.0, 1.0);
+  // Bounded: cosTheta and f0 both in [0,1].
+  let m = clamp(hcol(1.0) - hcol(cosTheta), hcol(0.0), hcol(1.0));
   let m2 = m * m;
   let m5 = m2 * m2 * m;
-  return f0 + (vec3<f32>(1.0) - f0) * m5;
+  let f0h = vec3<hcol>(f0);
+  return vec3<f32>(f0h + (vec3<hcol>(1.0) - f0h) * m5);
 }
 
+// KEPT f32 ON PURPOSE. a2 = roughness⁴ underflows f16 for roughness < ~0.088
+// (roughness is clamped to [0.02,1] at the call site), which zeroes the GGX
+// numerator on GPUs without f16 subnormals → sharp specular highlights vanish.
+// The dynamic range of this term is f16-hostile; leave the specular core in f32.
 fn ggx_distribution(nDotH: f32, roughness: f32) -> f32 {
   let a = roughness * roughness;
   let a2 = a * a;
@@ -235,9 +248,12 @@ fn ggx_distribution(nDotH: f32, roughness: f32) -> f32 {
 }
 
 fn ggx_geometry_schlick(nDotV: f32, roughness: f32) -> f32 {
-  let r = roughness + 1.0;
-  let k = (r * r) / 8.0;
-  return nDotV / max(nDotV * (1.0 - k) + k, 1e-5);
+  // Denominator is ≥ k ≥ 0.125, so the guard never binds and there is no
+  // f16 underflow; all operands are in [0,1].
+  let r = hcol(roughness) + hcol(1.0);
+  let k = (r * r) / hcol(8.0);
+  let nv = hcol(nDotV);
+  return f32(nv / max(nv * (hcol(1.0) - k) + k, hcol(1.0e-4)));
 }
 
 fn ggx_geometry_smith(nDotV: f32, nDotL: f32, roughness: f32) -> f32 {
@@ -262,24 +278,34 @@ fn distance_tangent(grad: vec2<f32>, fallbackTangent: vec3<f32>, fallbackBitange
 }
 
 fn anisotropic_highlight(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, halfDir: vec3<f32>, nDotL: f32, nDotV: f32, roughness: f32) -> f32 {
-  let tDotH = dot(tangent, halfDir);
-  let bDotH = dot(bitangent, halfDir);
-  let nDotH = max(dot(normal, halfDir), 1e-5);
-  let alphaT = max(0.06, roughness * 0.45);
-  let alphaB = max(0.12, roughness * 1.65);
+  // Bounded: all operands are unit-vector dot products / [0,1] roughness. The
+  // squared-nDotH guard uses 1e-4 (smallest safe normal f16) instead of 1e-5,
+  // which would flush to zero on GPUs without f16 subnormals; the difference
+  // only affects extreme grazing angles where the lobe already vanishes.
+  let nrm = vec3<hcol>(normal);
+  let tDotH = dot(vec3<hcol>(tangent), vec3<hcol>(halfDir));
+  let bDotH = dot(vec3<hcol>(bitangent), vec3<hcol>(halfDir));
+  let ndh = dot(nrm, vec3<hcol>(halfDir));
+  let nDotH2 = max(ndh * ndh, hcol(1.0e-4));
+  let rough = hcol(roughness);
+  let alphaT = max(hcol(0.06), rough * hcol(0.45));
+  let alphaB = max(hcol(0.12), rough * hcol(1.65));
   let stretch = (tDotH * tDotH) / (alphaT * alphaT) + (bDotH * bDotH) / (alphaB * alphaB);
-  let lobe = exp(-stretch / max(nDotH * nDotH, 1e-5));
-  let visibility = sqrt(max(nDotL * nDotV, 0.0));
-  return lobe * visibility;
+  let lobe = exp(-stretch / nDotH2);
+  let visibility = sqrt(max(hcol(nDotL) * hcol(nDotV), hcol(0.0)));
+  return f32(lobe * visibility);
 }
 
 fn pseudo_ambient_occlusion(normal: vec3<f32>, v_smooth: f32, z: vec2<f32>) -> f32 {
-  let cavity = pow(clamp(1.0 - normal.z, 0.0, 1.0), 1.35);
-  let depthMask = clamp(1.0 - exp(-v_smooth * 0.035), 0.0, 1.0);
-  let basinMask = clamp(length(z) / 2.5, 0.0, 1.0);
-  let strength = clamp(parameters.ambientOcclusionStrength, 0.0, 2.0);
-  let ao = 1.0 - (0.55 * cavity + 0.25 * depthMask + 0.20 * basinMask) * 0.45 * strength;
-  return clamp(ao, 0.08, 1.0);
+  // exp(-v_smooth*0.035) and length(z)/2.5 both saturate their clamps, so the
+  // large-magnitude inputs (v_smooth, |z|) are computed in f32 and only the
+  // already-bounded results enter hcol.
+  let cavity = pow(clamp(hcol(1.0) - hcol(normal.z), hcol(0.0), hcol(1.0)), hcol(1.35));
+  let depthMask = clamp(hcol(1.0 - exp(-v_smooth * 0.035)), hcol(0.0), hcol(1.0));
+  let basinMask = clamp(hcol(length(z)) / hcol(2.5), hcol(0.0), hcol(1.0));
+  let strength = clamp(hcol(parameters.ambientOcclusionStrength), hcol(0.0), hcol(2.0));
+  let ao = hcol(1.0) - (hcol(0.55) * cavity + hcol(0.25) * depthMask + hcol(0.20) * basinMask) * hcol(0.45) * strength;
+  return f32(clamp(ao, hcol(0.08), hcol(1.0)));
 }
 
 fn luminance(color: vec3<f32>) -> f32 {
@@ -313,17 +339,22 @@ fn curvature_edge_wear(angle_der: f32, v_smooth: f32) -> f32 {
 }
 
 fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceHeight: f32, slope: f32) -> vec3<f32> {
-  let backLight = pow(max(dot(normal, -lightDir), 0.0), 1.35);
-  let rimScatter = pow(clamp(1.0 - nDotV, 0.0, 1.0), 2.15);
-  let wrapBase = clamp(dot(normal, lightDir) * 0.5 + 0.5, 0.0, 1.0);
+  // Bounded lighting terms → hcol. distanceHeight/slope enter only through
+  // smoothstep (saturating), so their large range is harmless.
+  let nrm = vec3<hcol>(normal);
+  let lgt = vec3<hcol>(lightDir);
+  let backLight = pow(max(dot(nrm, -lgt), hcol(0.0)), hcol(1.35));
+  let rimScatter = pow(clamp(hcol(1.0) - hcol(nDotV), hcol(0.0), hcol(1.0)), hcol(2.15));
+  let wrapBase = clamp(dot(nrm, lgt) * hcol(0.5) + hcol(0.5), hcol(0.0), hcol(1.0));
   let wrapLight = wrapBase * wrapBase;
-  let heightThinness = 1.0 - smoothstep(4.0, 13.0, distanceHeight);
-  let slopeThinness = smoothstep(0.15, 1.6, slope);
-  let thinness = clamp(heightThinness * 0.55 + slopeThinness * 0.45, 0.0, 1.0);
-  let thickness = clamp(thinness * 0.62 + (1.0 - ao) * 0.23 + edgeWear * 0.15, 0.0, 1.0);
-  let mask = (backLight * 0.35 + rimScatter * 0.25 + wrapLight * 0.40) * thickness;
-  let scatterColor = mix(color, sqrt(max(color, vec3<f32>(0.0))), 0.35);
-  return scatterColor * mask * clamp(strength, 0.0, 10.0) * (1.0 - metallic);
+  let heightThinness = hcol(1.0) - smoothstep(hcol(4.0), hcol(13.0), hcol(distanceHeight));
+  let slopeThinness = smoothstep(hcol(0.15), hcol(1.6), hcol(slope));
+  let thinness = clamp(heightThinness * hcol(0.55) + slopeThinness * hcol(0.45), hcol(0.0), hcol(1.0));
+  let thickness = clamp(thinness * hcol(0.62) + (hcol(1.0) - hcol(ao)) * hcol(0.23) + hcol(edgeWear) * hcol(0.15), hcol(0.0), hcol(1.0));
+  let mask = (backLight * hcol(0.35) + rimScatter * hcol(0.25) + wrapLight * hcol(0.40)) * thickness;
+  let col = vec3<hcol>(color);
+  let scatterColor = mix(col, sqrt(max(col, vec3<hcol>(0.0))), hcol(0.35));
+  return vec3<f32>(scatterColor * mask * hcol(clamp(strength, 0.0, 10.0)) * hcol(1.0 - metallic));
 }
 
 fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec4<f32> {
@@ -394,40 +425,48 @@ fn texture_bump_normal(tex_: texture_2d<f32>, normal: vec3<f32>, tangent: vec3<f
 }
 
 fn fractal_height_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, grad: vec2<f32>, relief: f32) -> vec3<f32> {
-  return normalize(normal - tangent * grad.x * 0.34 * relief - bitangent * grad.y * 0.34 * relief);
+  // grad is clamped to [-6,6] and relief to [0,2] upstream, so every term is
+  // well within f16 range.
+  let rl = hcol(relief);
+  let n = vec3<hcol>(normal)
+    - vec3<hcol>(tangent) * hcol(grad.x) * hcol(0.34) * rl
+    - vec3<hcol>(bitangent) * hcol(grad.y) * hcol(0.34) * rl;
+  return vec3<f32>(normalize(n));
 }
 
 fn fractal_height_ao(slope: f32, relief: f32, occStrength: f32) -> f32 {
-  let occ = smoothstep(0.12, 2.75, slope * relief) * occStrength;
-  return clamp(1.0 - occ * 0.72, 0.16, 1.0);
+  let occ = smoothstep(hcol(0.12), hcol(2.75), hcol(slope) * hcol(relief)) * hcol(occStrength);
+  return f32(clamp(hcol(1.0) - occ * hcol(0.72), hcol(0.16), hcol(1.0)));
 }
 
 fn surface_cavity(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, relief: f32, occStrength: f32) -> f32 {
-  let lightPlane = vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent));
+  // Light-plane projection computed in f32 (unit-vector dots), then the bounded
+  // geometry runs in hcol.
+  let lightPlane = vec2<hcol>(vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent)));
   let lightPlaneLen = length(lightPlane);
-  if (lightPlaneLen < 1e-4 || occStrength <= 0.0 || relief <= 0.0) {
+  if (lightPlaneLen < hcol(1.0e-4) || occStrength <= 0.0 || relief <= 0.0) {
     return 1.0;
   }
-
+  let g = vec2<hcol>(grad);
   let lightPlaneDir = lightPlane / lightPlaneLen;
-  let crossDir = vec2<f32>(-lightPlaneDir.y, lightPlaneDir.x);
-  let uphillTowardLight = max(dot(grad, lightPlaneDir), 0.0);
-  let sideCavity = abs(dot(grad, crossDir)) * 0.18;
-  let amount = smoothstep(0.04, 1.45, (uphillTowardLight + sideCavity) * relief) * occStrength;
-  return clamp(1.0 - amount * 0.48, 0.26, 1.0);
+  let crossDir = vec2<hcol>(-lightPlaneDir.y, lightPlaneDir.x);
+  let uphillTowardLight = max(dot(g, lightPlaneDir), hcol(0.0));
+  let sideCavity = abs(dot(g, crossDir)) * hcol(0.18);
+  let amount = smoothstep(hcol(0.04), hcol(1.45), (uphillTowardLight + sideCavity) * hcol(relief)) * hcol(occStrength);
+  return f32(clamp(hcol(1.0) - amount * hcol(0.48), hcol(0.26), hcol(1.0)));
 }
 
 fn fractal_height_shadow(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, relief: f32, occStrength: f32) -> f32 {
-  let lightPlane = vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent));
+  let lightPlane = vec2<hcol>(vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent)));
   let lightPlaneLen = length(lightPlane);
-  if (lightPlaneLen < 1e-4 || occStrength <= 0.0 || relief <= 0.0) {
+  if (lightPlaneLen < hcol(1.0e-4) || occStrength <= 0.0 || relief <= 0.0) {
     return 1.0;
   }
   let lightPlaneDir = lightPlane / lightPlaneLen;
-  let uphillTowardLight = max(dot(grad, lightPlaneDir), 0.0);
-  let grazing = 1.0 / max(lightDir.z + 0.35, 0.35);
-  let shadow = uphillTowardLight * 0.22 * grazing * relief * occStrength;
-  return clamp(1.0 - shadow, 0.22, 1.0);
+  let uphillTowardLight = max(dot(vec2<hcol>(grad), lightPlaneDir), hcol(0.0));
+  let grazing = hcol(1.0) / max(hcol(lightDir.z) + hcol(0.35), hcol(0.35));
+  let shadow = uphillTowardLight * hcol(0.22) * grazing * hcol(relief) * hcol(occStrength);
+  return f32(clamp(hcol(1.0) - shadow, hcol(0.22), hcol(1.0)));
 }
 
 struct PixelState {

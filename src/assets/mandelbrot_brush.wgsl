@@ -70,6 +70,13 @@ struct Mandelbrot {
 const DEEP_EXP: i32 = -100;
 const LN2: f32 = 0.6931471805599453;
 
+// Pipeline-specialization override. When false, the driver dead-code-eliminates
+// the entire floatexp deep-zoom subtree (mandelbrot_compute_deep + try_apply_*
+// deep variants, all fe-typed), shrinking register pressure / raising occupancy
+// for the shallow kernel used across the 1e10–1e25 interactive range (scaleExp >
+// DEEP_EXP). Default true keeps the deep-capable kernel identical to before.
+override ENABLE_DEEP: bool = true;
+
 struct BlaStep {
   // floatexp form: a = (ax,ay)·2^ab_exp, b = (bx,by)·2^ab_exp,
   // alpha = radius_alpha·2^alpha_exp, beta = radius_beta (O(1)).
@@ -2008,7 +2015,7 @@ fn cs_main(
 
           var result: TexelOut;
           let scaleExp = i32(mandelbrot.scaleExp);
-          if (scaleExp <= DEEP_EXP) {
+          if (ENABLE_DEEP && scaleExp <= DEEP_EXP) {
             // Deep path: scale/cx/cy carry fe mantissas sharing exponent scaleExp;
             // dc = local·scaleMant + (cxMant, cyMant) is a single same-exponent add.
             let dc = fe_renorm(fe(local_rot * mandelbrot.scale + vec2<f32>(mandelbrot.cx, mandelbrot.cy), scaleExp));
