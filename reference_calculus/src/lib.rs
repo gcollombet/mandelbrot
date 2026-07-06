@@ -378,6 +378,11 @@ pub struct MandelbrotNavigator {
     unified_bounds_log2_c_max: f64,
     unified_radii_epsilon: f64,
     unified_radii_log2_c_max: f64,
+    // Stage mask of the LAST ensure_unified_table call (1 = coeffs+levels,
+    // 2 = bounds, 4 = radii+SA+periodic; 0 = everything warm). Surfaced to the
+    // worker so build-latency reports can tell a keyframe radii re-solve from
+    // a cold build (Phase F, 7.2).
+    unified_last_build_stages: u32,
     // Ajout des vitesses pour l'animation
     vscale: DBig,
     vangle: f64,
@@ -463,6 +468,7 @@ impl MandelbrotNavigator {
             unified_bounds_log2_c_max: f64::NAN,
             unified_radii_epsilon: 0.0,
             unified_radii_log2_c_max: f64::NAN,
+            unified_last_build_stages: 0,
             vscale: DBig::try_from(1).unwrap(),
             vangle: 0.0,
             vtx: zero.clone(),
@@ -1441,6 +1447,7 @@ impl MandelbrotNavigator {
     }
 
     fn ensure_unified_table(&mut self, orbit_len: usize) {
+        self.unified_last_build_stages = 0;
         let orbit_len = orbit_len.min(self.result.len());
         if orbit_len <= 2 {
             self.unified_levels.clear();
@@ -1455,6 +1462,7 @@ impl MandelbrotNavigator {
             .collect();
         let max_skip = Self::auto_max_skip(orbit_len);
         if self.unified_source_len != orbit_len {
+            self.unified_last_build_stages |= 1;
             *self.unified_levels = unified::build_unified_levels(&orbit, max_skip);
             self.unified_source_len = orbit_len;
             self.unified_bounds_log2_c_max = f64::NAN; // cascade: bounds stale
@@ -1471,6 +1479,7 @@ impl MandelbrotNavigator {
             || log2_c_max > self.unified_bounds_log2_c_max
             || log2_c_max < self.unified_bounds_log2_c_max - 4.0;
         if bounds_stale {
+            self.unified_last_build_stages |= 2;
             *self.unified_bounds = Some(unified::unified_build_bounds(
                 &self.unified_levels,
                 &orbit,
@@ -1484,6 +1493,7 @@ impl MandelbrotNavigator {
             || (self.unified_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
             || (self.unified_radii_log2_c_max - log2_c_max).abs() > 2.0;
         if radii_stale {
+            self.unified_last_build_stages |= 4;
             let bounds = self.unified_bounds.as_ref().as_ref().expect("bounds built above");
             let radii = unified::unified_solve_radii(
                 &self.unified_levels,
@@ -1532,6 +1542,13 @@ impl MandelbrotNavigator {
             levels_ptr: self.unified_gpu_levels.as_ptr() as usize,
             level_count: self.unified_gpu_levels.len(),
         }
+    }
+
+    /// Stage mask of the last unified-table ensure: 1 = coeffs+levels,
+    /// 2 = bounds, 4 = radii (0 = fully warm). Lets the worker label its
+    /// build-latency report (cold build vs keyframe radii re-solve).
+    pub fn unified_last_stages(&self) -> u32 {
+        self.unified_last_build_stages
     }
 
     /// Retourne la taille du buffer en nombre de MandelbrotStep
@@ -2589,6 +2606,100 @@ mod tests {
         nav.compute_reference_orbit_ptr(512);
         nav.compute_unified_reference(512);
         assert!(nav.unified_source_len > 0, "unified table not rebuilt after reset");
+    }
+
+    #[test]
+    fn unified_keyframe_stage_cadence() {
+        // (Phase F, 7.1/7.2) Zoom-animation keyframes at constant reference:
+        // the coefficient stage NEVER re-runs, bounds re-walk only every ~4
+        // octaves of zoom-in, radii re-solve only every ~2 octaves — the
+        // per-keyframe table cost is the light radii scan, not the build.
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.compute_reference_orbit_ptr(512);
+        nav.compute_unified_reference(512);
+        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4, "cold build runs all stages");
+
+        // 32 keyframes × ×2^-0.25 zoom-in = 8 octaves at constant reference.
+        let mut coeffs_runs = 0u32;
+        let mut bounds_runs = 0u32;
+        let mut radii_runs = 0u32;
+        let mut scale = DBig::from_str("0.0000001").unwrap();
+        let factor = DBig::from_str("0.8408964152537145").unwrap(); // 2^-0.25
+        for _ in 0..32 {
+            scale = (&scale * &factor).with_precision(30).value();
+            nav.scale = scale.clone();
+            nav.compute_unified_reference(512);
+            let stages = nav.unified_last_stages();
+            coeffs_runs += stages & 1;
+            bounds_runs += (stages >> 1) & 1;
+            radii_runs += (stages >> 2) & 1;
+        }
+        assert_eq!(coeffs_runs, 0, "coefficients rebuilt during a constant-reference zoom");
+        assert!(
+            bounds_runs <= 3,
+            "bounds re-walked {bounds_runs}× over 8 octaves (expected ≤ every ~4 octaves)"
+        );
+        assert!(
+            radii_runs <= 5,
+            "radii re-solved {radii_runs}× over 8 octaves (expected ≤ every ~2 octaves)"
+        );
+        assert!(radii_runs >= 2, "radii never re-solved — staleness rule broken");
+    }
+
+    #[test]
+    #[ignore] // timing diagnostic, run on demand: cargo test --release -- --ignored unified_keyframe_budget
+    fn unified_keyframe_budget() {
+        // (Phase F, 7.2) Per-keyframe table time vs cold build at a realistic
+        // deep orbit length — the number recorded in design.md. The keyframe
+        // cost is the radii+SA+periodic re-solve (stage 4); the cold cost adds
+        // the level merges and majorant walks.
+        use std::time::Instant;
+        let mut nav = MandelbrotNavigator::new(
+            "-0.743643887037151",
+            "0.131825904205330",
+            "0.0000000001",
+            0.0,
+        );
+        let mut built = 0usize;
+        while built < 40_000 {
+            nav.compute_reference_orbit_ptr(40_000);
+            let now = nav.get_reference_orbit_len();
+            if now == built {
+                break;
+            }
+            built = now;
+        }
+        let t0 = Instant::now();
+        nav.compute_unified_reference(40_000);
+        let cold = t0.elapsed();
+        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4);
+        println!(
+            "nav orbit len {} | blocks {} | eps {} | l2c {:.1}",
+            nav.result.len(),
+            nav.unified_levels.iter().map(|l| l.blocks.len()).sum::<usize>(),
+            nav.bla_epsilon,
+            nav.jet_log2_c_max(),
+        );
+
+        // One radii-only keyframe: 3 octaves of zoom-in (past the ±2 slack,
+        // inside the 4-octave bounds headroom).
+        nav.scale = (&nav.scale * &DBig::from_str("0.125").unwrap()).with_precision(30).value();
+        let t1 = Instant::now();
+        nav.compute_unified_reference(40_000);
+        let keyframe = t1.elapsed();
+        assert_eq!(nav.unified_last_stages(), 4, "keyframe should re-solve radii alone");
+        println!(
+            "unified keyframe budget @40k: cold build {:?} | radii-only keyframe {:?} (×{:.1} less)",
+            cold,
+            keyframe,
+            cold.as_secs_f64() / keyframe.as_secs_f64().max(1e-9)
+        );
+        // Interactive-budget guard for the keyframe path (generous CI margin;
+        // the 4.3-measured radii stage was 0.46 s at 40k on the dev machine).
+        assert!(
+            keyframe.as_secs_f64() < cold.as_secs_f64(),
+            "keyframe re-solve is not cheaper than a cold build"
+        );
     }
 
     #[test]

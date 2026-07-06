@@ -27,6 +27,28 @@ function tierMix(): string {
   // Affine + Padé share the ≤48 B path (affine is census-dead anyway).
   return `≤48B ${pct(t[0] + t[1])} · c+ ${pct(t[2])} · jet ${pct(t[3])}`;
 }
+// Table build (Phase F): last block-table build wall-clock + which unified
+// stages ran (radii-only = the frame-coherent keyframe path).
+const tableBuildMs = ref(-1);
+const tableBuildStages = ref(-1);
+function tableBuild(): string {
+  if (tableBuildMs.value < 0) return '';
+  const s = tableBuildStages.value;
+  const label = s < 0 ? ''
+    : s === 0 ? ' (warm)'
+    : ` (${[s & 1 ? 'coeffs' : '', s & 2 ? 'bounds' : '', s & 4 ? 'radii' : ''].filter(Boolean).join('+')})`;
+  return `${tableBuildMs.value.toFixed(0)} ms${label}`;
+}
+// Analytic AA frontier (Phase D): re-iterated texels / boundary-band texels
+// at the last reseed — margin-passing texels expand their Taylor payload instead.
+const aaFrontierStamped = ref(-1);
+const aaFrontierEligible = ref(-1);
+function aaFrontier(): string {
+  const s = aaFrontierStamped.value;
+  const e = aaFrontierEligible.value;
+  if (s < 0 || e <= 0) return '';
+  return `${(100 * s / e).toFixed(1)}% (${s}/${e})`;
+}
 const shaderApproxFlag = ref(0);
 const shaderBlaLevelCount = ref(0);
 const unfinishedPixels = ref(-1);
@@ -165,6 +187,10 @@ function poll() {
   completionGpuMs.value = e.lastCompletionGpuMs ?? 0;
   completionTotalApps.value = e.lastCompletionTotalApps ?? -1;
   tierApps.value = e.tierAppsApprox ?? [-1, -1, -1, -1];
+  aaFrontierStamped.value = e.aaFrontierStamped ?? -1;
+  aaFrontierEligible.value = e.aaFrontierEligible ?? -1;
+  tableBuildMs.value = e.lastTableBuildMs ?? -1;
+  tableBuildStages.value = e.lastTableBuildStages ?? -1;
   shaderApproxFlag.value = e.lastShaderApproxFlag ?? 0;
   shaderBlaLevelCount.value = e.lastShaderBlaLevelCount ?? 0;
   unfinishedPixels.value = e.unfinishedPixelCount ?? -1;
@@ -430,6 +456,21 @@ defineExpose({ expanded });
         <div v-if="shaderApproxFlag === 5 && tierMix()" class="stats-row">
           <span class="stats-label">Tier mix</span>
           <span class="stats-value">{{ tierMix() }}</span>
+        </div>
+
+        <!-- Analytic AA frontier: share of the AA boundary band that still
+             re-iterates per sample (margin-fail); the rest is expanded from the
+             Taylor payload in the color pass. -->
+        <div v-if="aaFrontier()" class="stats-row">
+          <span class="stats-label">AA frontier</span>
+          <span class="stats-value">{{ aaFrontier() }}</span>
+        </div>
+
+        <!-- Block-table build latency + the unified stages it ran: "(radii)"
+             alone is the frame-coherent keyframe re-solve (Phase F). -->
+        <div v-if="tableBuild()" class="stats-row">
+          <span class="stats-label">Table build</span>
+          <span class="stats-value">{{ tableBuild() }}</span>
         </div>
 
         <!-- GPU throughput: Total apps ÷ GPU compute time of the same render.

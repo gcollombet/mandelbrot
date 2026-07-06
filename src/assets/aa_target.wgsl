@@ -12,7 +12,11 @@ struct AaParams {
   antialiasLevel: f32,
   aaSampleIndex: f32,   // unused here; shared buffer with the reseed pass
   screenHeightPx: f32,  // device-pixel screen height (1 neutral texel == 1 device px)
+  aaLogDelta: f32,      // unused here; shared buffer with the reseed pass
+  aaAnalytic: f32,      // unused here; shared buffer with the reseed pass
+  _pad0: f32,
   _pad1: f32,
+  _pad2: f32,
 };
 
 // Boundary-distance ramp (device px): full sample count within R_FULL, tapering

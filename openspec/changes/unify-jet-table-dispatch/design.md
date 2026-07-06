@@ -304,6 +304,97 @@ pre-existing, investigation chip filed; (6) the SA no-early-escape guard
 (|Z|+ρ ≤ 1.9) correctly zeroes n0 on needle-class references — conservative by
 construction.
 
+## Phase D status — SHIPPED (color + reseed); field tuning open
+
+5.3/5.4/5.5-automated landed (2026-07-06). Key implementation decisions beyond
+the plan below:
+
+- **Decision tags, not re-evaluated margins.** The FIRST reseed (pristine
+  sample-0 payload) evaluates the margin once and tags analytic-OK texels with
+  a +0.5 fraction in the AA target map (integer part = sample target, color
+  gate floors it). Later reseeds and the color pass read the tag. Re-evaluating
+  per sample would race margin-fail re-iterations (their payload is rewritten
+  at the new jitter → a late pass would double-jitter).
+- **Iteration parity renormalization.** The analytic subsample must present
+  iter = floor(ν̂) with a synthetic |z| reproducing fract(ν̂) (the bilinear-
+  resolve recipe): zebra parity and palette phase step per integer iteration,
+  and a re-iterated subsample crossing an iteration line gets iter±1. Without
+  this the tagged pixels flip hard against the brute reference.
+- **Repeat-accumulation bias fix (pre-existing).** After an accumulation the
+  band holds the LAST sample's jitter; a re-trigger now forces a clear
+  (`rawJittered`) so sample 0 is the unjittered base again.
+- **Frontier reality check.** Intro view: 99 % of the band margin-fails at
+  ln-margin threshold ln 5 (|z″| ~ |z′|² near the set ⇒ margin ≈ DE/(ln|z|·δ)
+  < 5 across the whole ≤6 px band at shallow zoom). The 1–10 % frontier claim
+  is deep-escaping-view territory — field round decides the threshold (and
+  whether a shallow-depth gate should disable the tag pass entirely).
+- **A/B noise floor.** The converged base is NOT bit-deterministic run-to-run
+  (adaptive batch boundaries × per-pass derS compensation reset ⇒ DE low-bit
+  drift ⇒ band-edge target flips): brute↔brute 16× differs by 0.60 % of pixels
+  (max 255). The Playwright assertion calibrates against it (3× floor);
+  steady-state referees must not assume pixel determinism near the band edge.
+- Frontier stats: reseed atomics [stamped, eligible] → Engine
+  `aaFrontierStamped/Eligible` → RenderStats "AA frontier" row.
+
+## Phase D plan (original implementation notes, superseded by the above)
+
+Done (5.1/5.2): tier second partials certified on CPU; z″ tracked in unified mode
+in both loops with the 2·derS-tied scale; Taylor payload lands in raw layers on
+escape. REMAINING (5.3–5.5) — the exact plan, so the next session starts cold:
+
+- **Payload contract (escaped pixels, raw texture):** layer 8 = S (= derS+derSLo
+  at escape), 9/10 = z′ mantissa (z′ = m·e^S), 11/12 = z″ mantissa (z″ = m·e^{2S});
+  layers 2/3 hold the escape z as today. In-progress: 9/10 = sndM (scale 2·layer 8).
+- **5.3 color:** the converged-frame color path already reads the RAW texture
+  directly (`bindGroupColorRaw`, the skipResolve path) — expand there, NOT through
+  resolve. Uniform additions: current sample's jitter offset in C UNITS (engine:
+  offC = aaJitter × scale — the shader adds aaOffset in neutral units before the
+  ×scale, no rotation involved), the analytic flag, and δ = sub-pixel half-extent
+  in c units (for the margin). Per escaped pixel: margin test in LOG space
+  (ln|z′| − ln|z″| − ln δ = ln|m₉₁₀| − ln|m₁₁₁₂| − S − ln δ > ln 5); when OK,
+  ẑ = z + cmul(m₉₁₀, δĉ)·e^{S+ln|δc|} + ½·cmul(m₁₁₁₂, δĉ²)·e^{2S+2ln|δc|}
+  (exponent-summed exp(clamp(...)) so e^S never overflows f32 alone); derive the
+  subsample's smooth iteration + escape-z inputs from ẑ and color normally into
+  the existing linear accumulation. Keep the CENTER pixel's height/angle for DE
+  shading (decided acceptable). Margin-fail pixels: their layers already hold the
+  re-iterated sample (see 5.4).
+- **5.4 reseed:** aa_reseed currently stamps iter = −1 wherever aaTarget >
+  sampleIndex; gate additionally on margin-fail (read the payload — needs a
+  SAMPLED binding of the raw texture next to the storage one) so margin-OK pixels
+  are never re-iterated; report the frontier fraction.
+- **5.5 spec:** 16× analytic vs brute A/B on an escaping-dominated view: image
+  within the second-order bound, AA-sample apps_total dropping to ~the frontier
+  fraction, gamma-correct accumulation unchanged.
+
+## Phase F status — SHIPPED (measured numbers)
+
+The staged cache itself landed at 2.4; Phase F added the referees, the timing
+surface, and killed the measured build blocker (2026-07-06):
+
+- **Dead-work fix.** Levels below the emit floor (skip 1–2, never serialized —
+  MOBIUS_MIN_EMIT_SKIP = 4) carried 75 % of all blocks through the bounds walks
+  and radii scans. `build_unified_levels` now leaves them empty (level entries
+  kept for merge-chain index alignment). Full suite green; the serialized GPU
+  table is bit-identical.
+- **40k-orbit budget (seahorse, ε = 1e-3, dev machine).** Cold build
+  4.85 s → 2.85 s; radii-only keyframe re-solve 2.38 s → 1.19 s (×2.4 cheaper
+  than cold). Keyframe cadence over a constant-reference zoom: coefficients
+  never re-run, bounds every ~4 octaves, radii every ~2 octaves
+  (`unified_keyframe_stage_cadence`, asserted; `unified_keyframe_budget` keeps
+  the wall-clocks).
+- **Measurement correction.** The 4.3-era "radii 0.46 s @40k" figure came from
+  the f64 test-orbit helper whose seahorse orbit ESCAPES at ~3.1k iterations
+  (6.2k blocks); a real 40k orbit builds ~20k emitted blocks. The radii scan
+  is the remaining wall — linear in orbit length, ~1.2 s at 40k, ~60 µs/block
+  (4-tier descending scans + (V′)). Follow-up candidates if the field wants
+  interactive keyframes at 40k+: coarser scan steps at deep levels, or moving
+  the scan to a worker-pool (wasm is single-threaded — would need rayon+atomics
+  or a JS-side split).
+- **Timing surface.** Worker posts `buildMs` + the Rust `unified_last_stages()`
+  mask with every blaReady; RenderStats debug shows "Table build: N ms
+  (coeffs+bounds+radii | radii | warm)" — a radii-only label IS the
+  frame-coherent path working.
+
 ## Phase A status (2.8 automated half, intro view)
 
 `tests/unified-mode.spec.ts` green on the user's machine (headed WebGPU, dev
@@ -332,8 +423,9 @@ band-fallback rule bounds this, but the field numbers should watch it.
   fast-forward.
 - SA × progressive: resolved in practice at 4.2 — continuation frames resume past
   n0 naturally (the skip only seeds compute-request starts).
-- Does the tag need 2 bits or 3 (exact-only blocks, e.g. degenerate prefix / dead
-  radius)? Reserve the third bit.
+- ~~Does the tag need 2 bits or 3 (exact-only blocks)?~~ — RESOLVED by shipping:
+  2 bits suffice; dead/degenerate blocks carry the −∞ radius sentinel (the probe
+  fails before the tag matters). The third bit stays reserved in the encoding.
 - ~~Tier-mix counters~~ — RESOLVED at 2.6: debug-shader first. `dbg_try_unified`
   maps its per-order buckets to tiers (o1 = ≤48 B affine/Padé, o2 = c+ 80 B,
   o3 = jet 108 B), so the existing debug view reads as the tier-mix census. A
@@ -343,6 +435,8 @@ band-fallback rule bounds this, but the field numbers should watch it.
   2026-07-06): NO packing for now. The payload ships as plain full-precision
   r32float layers on the AA-enabled permutation (~5 extra: z′x, z′y, z″x, z″y,
   margin); packing (z″ half-precision, margin as a flag bit) is a later
-  optimization only if the memory budget actually hurts. Still open: is reusing
-  the center pixel's DE for subsamples acceptable (DE varies slowly at sub-pixel
-  scale) or must subsample DE be reconstructed from z′ too?
+  optimization only if the memory budget actually hurts. ~~Is reusing the center
+  pixel's DE for subsamples acceptable?~~ — SHIPPED that way at 5.3 (center
+  height/angle for shading, ẑ only for ν/escape-z): the 5.5 automated A/B stays
+  within the calibrated noise floor. The deep-view field round has the final
+  word (it also tunes the ln 5 margin threshold).

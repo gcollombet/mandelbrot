@@ -478,6 +478,16 @@ struct TexelOut {
   ref_i:     vec4<f32>,
   avgDirection: vec4<f32>,
   derS:      vec4<f32>, // layer 8: raw derivative log scale (continuations)
+  // Phase D (analytic AA, auto mode) — layers 9..12; writes are silently
+  // dropped when the raw texture is allocated at 9 layers.
+  //   in-progress: 9/10 = sndM.x/y (z″ mantissa; scale is TIED to 2·derS)
+  //   escaped:     8 = S (derS at escape), 9/10 = derM.x/y (z′ mantissa),
+  //                11/12 = sndM.x/y — the Taylor payload ẑ(δc) = z + z′·δc
+  //                + ½·z″·δc² the color pass expands per AA sample.
+  aa9:  vec4<f32>,
+  aa10: vec4<f32>,
+  aa11: vec4<f32>,
+  aa12: vec4<f32>,
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -496,6 +506,10 @@ fn storeTexel(coord: vec2<i32>, out: TexelOut) {
   textureStore(raw, coord, 6, out.ref_i);
   textureStore(raw, coord, 7, out.avgDirection);
   textureStore(raw, coord, 8, out.derS);
+  textureStore(raw, coord, 9, out.aa9);
+  textureStore(raw, coord, 10, out.aa10);
+  textureStore(raw, coord, 11, out.aa11);
+  textureStore(raw, coord, 12, out.aa12);
 }
 
 const ORBIT_METRIC_EMA_ALPHA: f32 = 0.18;
@@ -564,7 +578,7 @@ fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
 }
 
 // ── core computation (verbatim from mandelbrot.wgsl) ───────────────
-fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_ref_i: f32, prev_avg_direction: f32) -> TexelOut {
+fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_ref_i: f32, prev_avg_direction: f32, prev_sndx: f32, prev_sndy: f32) -> TexelOut {
   let dc = vec2<f32>(x0, y0);
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
@@ -592,6 +606,10 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   // Compensation term of the derS two-sum pair — register-only, reset each
   // pass (the stored derS is the collapsed hi + lo).
   var derSLo: f32 = 0.0;
+  // Phase D: z″ mantissa (scale TIED to 2·derS). Tracked in unified mode; a
+  // saturated/garbage value only downgrades the pixel to real re-iteration at
+  // AA time (margin test), never corrupts the value channel.
+  var sndM = vec2<f32>(prev_sndx, prev_sndy);
   var derInvScale = 0.0;
   var epsThreshold = 0.0;
   der_refresh_cache(&derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon);
@@ -723,7 +741,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         if (dzMag < 1.2e-38 || log2(dzMag) < jetMaxR3) {
           var dzFe = fe_from_vec(dz, 0);
           if (isUnified) {
-            skipped = try_apply_unified(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, unifiedF32Ok, &jetLevelHint);
+            skipped = try_apply_unified(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, unifiedF32Ok, &jetLevelHint, &sndM);
           } else if (isMobius) {
             skipped = try_apply_mobius(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, mobiusF32Ok, &jetLevelHint);
           } else {
@@ -761,6 +779,10 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         ref_i += 1;
         refZ = getOrbit(ref_i);
         z = refZ + dz;
+        if (isUnified) {
+          // z″ ← 2(z′² + z·z″), in the 2·derS-tied scale (uses the OLD derM).
+          sndM = 2.0 * (cmul(derM, derM) + cmul(zPrev, sndM));
+        }
         derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
         i += 1.0;
         if (trackOrbitMetrics) {
@@ -787,7 +809,12 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         break;
       }
       if (derMM > DER_RENORM_HI || derMM < DER_RENORM_LO) {
+        let sBefore = derS + derSLo;
         der_renormalize(&derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon);
+        if (isUnified) {
+          // z″ scale is tied to 2·derS: mirror the renorm shift twice.
+          sndM = sndM * exp(clamp(-2.0 * ((derS + derSLo) - sBefore), -80.0, 80.0));
+        }
       }
 
       let dot_dz = dot(dz, dz);
@@ -878,7 +905,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     out.dzy       = pack(angleDer);
     out.ref_i     = pack(ref_i_with_stripe(0.0, smoothStripeEma));
     out.avgDirection = pack(encode_avg_dir(smoothAvgDir));
-    out.derS      = pack(0.0); // finished — layer 8 dead
+    // Phase D Taylor payload (escaped): S in layer 8, z′/z″ mantissas in
+    // 9..12 — the color pass expands ẑ(δc) per AA sample from these.
+    out.derS      = pack(derS + derSLo);
+    out.aa9       = pack(derM.x);
+    out.aa10      = pack(derM.y);
+    out.aa11      = pack(sndM.x);
+    out.aa12      = pack(sndM.y);
     return out;
   }
 
@@ -908,6 +941,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), stripeEma));
   out.avgDirection = pack(encode_avg_dir(avgDir));
   out.derS      = pack(derS + derSLo);
+  out.aa9       = pack(sndM.x);
+  out.aa10      = pack(sndM.y);
   return out;
 }
 
@@ -1323,7 +1358,7 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
 // registers — the verified identities). Tags are block properties, so the
 // choice is warp-uniform. Rational tags (0-2) get the plain-f32 fast path;
 // the jet tag always evaluates in fe (deep is where it fires).
-fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>) -> i32 {
+fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
@@ -1349,6 +1384,11 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
           var phi: fe;
           var pdz: fe;
           var pdc: fe;
+          // Phase D tier second partials (zero for the affine tag): the z″
+          // chain δ″′ = m_zz·δ′² + 2·m_zc·δ′ + m_cc + m_z·δ″.
+          var mzz = fe(vec2<f32>(0.0), 0);
+          var mzc = fe(vec2<f32>(0.0), 0);
+          var mcc = fe(vec2<f32>(0.0), 0);
           var denOk = true;
           if (tag <= 2 && f32Ok && radii.z > 0.5 && log2_dz > -100.0) {
             // Plain-f32 fast path, rational tiers (2-5 ldexp reconstructions).
@@ -1378,8 +1418,19 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                 let invDen = cinv(den);
                 let phiF = cmul(cmul(ae, dzF) + cmul(cb, dcF), invDen);
                 phi = fe_from_vec(phiF, 0);
-                pdz = fe_from_vec(cmul(ae - cmul(phiF, de), invDen), 0);
-                pdc = fe_from_vec(cmul(cmul(capF, dzF) + cb - cmul(phiF, cmul(cdpF, dzF)), invDen), 0);
+                let mzF = cmul(ae - cmul(phiF, de), invDen);
+                let mcF = cmul(cmul(capF, dzF) + cb - cmul(phiF, cmul(cdpF, dzF)), invDen);
+                pdz = fe_from_vec(mzF, 0);
+                pdc = fe_from_vec(mcF, 0);
+                // m_zz = −2·De·m_z/den ; m_cc = −2·D′·z·m_c/den ;
+                // m_zc = (A′ − m_c·De − φ·D′)/den − m_z·D′·z/den.
+                mzz = fe_from_vec(-2.0 * cmul(de, cmul(mzF, invDen)), 0);
+                mcc = fe_from_vec(-2.0 * cmul(cmul(cdpF, dzF), cmul(mcF, invDen)), 0);
+                mzc = fe_from_vec(
+                  cmul(capF - cmul(mcF, de) - cmul(phiF, cdpF), invDen)
+                    - cmul(mzF, cmul(cmul(cdpF, dzF), invDen)),
+                  0,
+                );
               }
             }
           } else {
@@ -1413,6 +1464,12 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                 } else {
                   pdc = fe_cmul(cb, invDen);
                 }
+                mzz = fe_neg(fe_scale(fe_cmul(de, fe_cmul(pdz, invDen)), 2.0));
+                mcc = fe_neg(fe_scale(fe_cmul(fe_cmul(cdp, *dz), fe_cmul(pdc, invDen)), 2.0));
+                mzc = fe_add(
+                  fe_cmul(fe_add3(cap, fe_neg(fe_cmul(pdc, de)), fe_neg(fe_cmul(phi, cdp))), invDen),
+                  fe_neg(fe_cmul(pdz, fe_cmul(fe_cmul(cdp, *dz), invDen))),
+                );
               }
             } else {
               // Jet tier: full 108 B record, identity reconstruction, order-3
@@ -1435,6 +1492,9 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               let q0 = fe_add3(cb, fe_scale(fe_cmul(a02, dc), 2.0), fe_scale(fe_cmul(a03, dc2), 3.0));
               let q1 = fe_add(a11, fe_scale(fe_cmul(a12, dc), 2.0));
               pdc = fe_add(q0, fe_cmul(*dz, fe_add(q1, fe_cmul(*dz, a21))));
+              mzz = fe_add(fe_scale(p2, 2.0), fe_scale(fe_cmul(a30, *dz), 6.0));
+              mzc = fe_add(q1, fe_scale(fe_cmul(a21, *dz), 2.0));
+              mcc = fe_add3(fe_scale(a02, 2.0), fe_scale(fe_cmul(a03, dc), 6.0), fe_scale(fe_cmul(a12, *dz), 2.0));
             }
           }
           if (denOk) {
@@ -1449,6 +1509,15 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               g_tierApps[1] += select(0u, 1u, tag == 1);
               g_tierApps[2] += select(0u, 1u, tag == 2);
               g_tierApps[3] += select(0u, 1u, tag == 3);
+              // Phase D: z″ tier update in the OLD 2·derS scale (needs the
+              // OLD derM); rescaled by the measured der-scale shift after the
+              // der update below. Saturated folds only degrade the AA margin
+              // (frontier fallback), never the value channel.
+              let sOld = *derS + *derSLo;
+              let sndNew = ldexp(cmul(mzz.m, cmul(*derM, *derM)), vec2<i32>(clamp(mzz.e, -126, 126)))
+                + ldexp(cmul(pdz.m, *snd), vec2<i32>(clamp(pdz.e, -126, 126)))
+                + 2.0 * cmul(mzc.m, *derM) * exp(clamp(f32(mzc.e) * LN2 - sOld, -80.0, 80.0))
+                + mcc.m * exp(clamp(f32(mcc.e) * LN2 - 2.0 * sOld, -80.0, 80.0));
               *dz = phi;
               *zOut = candidateZ;
               // der' = ∂m/∂z·der + ∂m/∂c, with the (#3) exponent-fold
@@ -1462,6 +1531,7 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                 *derM = *derM + pdc.m * exp(clamp(f32(pdc.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
                 der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
               }
+              *snd = sndNew * exp(clamp(-2.0 * ((*derS + *derSLo) - sOld), -80.0, 80.0));
               *ref_i += skip;
               *hint = level; // (#5) seed next turn's descent
               return skip;
@@ -1564,7 +1634,7 @@ fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
   return true;
 }
 
-fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32) -> TexelOut {
+fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32) -> TexelOut {
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
   let logEpsilon = log(max(mandelbrot.epsilon, 1e-30));
@@ -1585,6 +1655,10 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   // Compensation term of the derS two-sum pair — register-only, reset each
   // pass (the stored derS is the collapsed hi + lo).
   var derSLo: f32 = 0.0;
+  // Phase D: z″ mantissa (scale TIED to 2·derS). Tracked in unified mode; a
+  // saturated/garbage value only downgrades the pixel to real re-iteration at
+  // AA time (margin test), never corrupts the value channel.
+  var sndM = vec2<f32>(prev_sndx, prev_sndy);
   var derInvScale = 0.0;
   var epsThreshold = 0.0;
   der_refresh_cache(&derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon);
@@ -1669,7 +1743,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       if (isBlockTableDeep) {
         if (log2(max(length(dz.m), 1e-30)) + f32(dz.e) < jetMaxR3Deep) {
           if (isUnifiedDeep) {
-            skipped = try_apply_unified(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep);
+            skipped = try_apply_unified(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep, &sndM);
           } else if (isMobiusDeep) {
             skipped = try_apply_mobius(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep);
           } else {
@@ -1693,6 +1767,9 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       ref_i += 1;
       refZ = getOrbit(ref_i);
       z = refZ + fe_to_vec(dz);
+      if (isUnifiedDeep) {
+        sndM = 2.0 * (cmul(derM, derM) + cmul(zPrev, sndM));
+      }
       derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
       i += 1.0;
     }
@@ -1713,7 +1790,11 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       break;
     }
     if (derMM > DER_RENORM_HI || derMM < DER_RENORM_LO) {
+      let sBefore = derS + derSLo;
       der_renormalize(&derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon);
+      if (isUnifiedDeep) {
+        sndM = sndM * exp(clamp(-2.0 * ((derS + derSLo) - sBefore), -80.0, 80.0));
+      }
     }
 
     if (dot_z < fe_mag2_f32(dz) || ref_i == globalMaxIterI) {
@@ -1750,7 +1831,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     out.dzy       = pack(shadingAngle);
     out.ref_i     = pack(ref_i_with_stripe(0.0, 0.0));
     out.avgDirection = pack(0.0);
-    out.derS      = pack(0.0); // finished — layer 8 dead
+    // Phase D Taylor payload (escaped) — see the shallow exit.
+    out.derS      = pack(derS + derSLo);
+    out.aa9       = pack(derM.x);
+    out.aa10      = pack(derM.y);
+    out.aa11      = pack(sndM.x);
+    out.aa12      = pack(sndM.y);
     return out;
   }
 
@@ -1780,6 +1866,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), 0.0));
   out.avgDirection = pack(f32(dzN.e));
   out.derS      = pack(derS + derSLo);
+  out.aa9       = pack(sndM.x);
+  out.aa10      = pack(sndM.y);
   return out;
 }
 
@@ -1941,6 +2029,8 @@ fn cs_main(
               var saDerx = 0.0;
               var saDery = 0.0;
               var saDers = 0.0;
+              var saSndx = 0.0;
+              var saSndy = 0.0;
               if (mandelbrot.approximationMode >= 4.5 && mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5) {
                 let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
                 let saBase = i32(lastLvl.offset + lastLvl.count);
@@ -1965,9 +2055,15 @@ fn cs_main(
                   saDerx = dr.m.x;
                   saDery = dr.m.y;
                   saDers = f32(dr.e) * LN2;
+                  // Phase D: z″ seed ∂²(SA)/∂c² = 2b₂ + 6b₃·dc + 12b₄·dc²,
+                  // expressed in the 2·derS-tied mantissa convention.
+                  let sd = fe_renorm(fe_add(fe_scale(b2, 2.0), fe_cmul(dc, fe_add(fe_scale(b3, 6.0), fe_cmul(fe_scale(b4, 12.0), dc)))));
+                  let sndScale = exp(clamp(f32(sd.e) * LN2 - 2.0 * saDers, -80.0, 80.0));
+                  saSndx = sd.m.x * sndScale;
+                  saSndy = sd.m.y * sndScale;
                 }
               }
-              result = mandelbrot_compute_deep(dc, saIter, saDz, saDzE, saRef, saDerx, saDery, saDers);
+              result = mandelbrot_compute_deep(dc, saIter, saDz, saDzE, saRef, saDerx, saDery, saDers, saSndx, saSndy);
             } else {
               // Deep continuation: layers 2/3 hold the dz mantissa, layer 7 its
               // exponent; layers 4/5/8 the raw derivative (derM.x, derM.y, derS).
@@ -1976,13 +2072,14 @@ fn cs_main(
               let stored_dery = loadLayer(coord, 5);
               let stored_ders = loadLayer(coord, 8);
               let prev_ref_i = decode_ref_i(loadLayer(coord, 6));
-              result = mandelbrot_compute_deep(dc, iter_val, vec2<f32>(zx, zy), dz_e, prev_ref_i, stored_derx, stored_dery, stored_ders);
+              // Phase D: z″ mantissa rides layers 9/10 (0 on 9-layer allocs).
+              result = mandelbrot_compute_deep(dc, iter_val, vec2<f32>(zx, zy), dz_e, prev_ref_i, stored_derx, stored_dery, stored_ders, loadLayer(coord, 9), loadLayer(coord, 10));
             }
           } else {
             let x0 = local_rot.x * mandelbrot.scale + mandelbrot.cx;
             let y0 = local_rot.y * mandelbrot.scale + mandelbrot.cy;
             if (is_compute_request) {
-              result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
+              result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0);
             } else {
               // Continuation: layers 4/5/8 hold the raw derivative registers.
               let stored_derx = loadLayer(coord, 4);
@@ -1990,7 +2087,7 @@ fn cs_main(
               let stored_ders = loadLayer(coord, 8);
               let prev_ref_i = loadLayer(coord, 6);
               let prev_avg_direction = loadLayer(coord, 7);
-              result = mandelbrot_compute(x0, y0, iter_val, zx, zy, stored_derx, stored_dery, stored_ders, prev_ref_i, prev_avg_direction);
+              result = mandelbrot_compute(x0, y0, iter_val, zx, zy, stored_derx, stored_dery, stored_ders, prev_ref_i, prev_avg_direction, loadLayer(coord, 9), loadLayer(coord, 10));
             }
           }
           storeTexel(coord, result);

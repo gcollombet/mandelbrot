@@ -133,7 +133,15 @@ fn moduli_from_jet(jet: &JetF64, m: &MobiusCPlus) -> UnifiedModuli {
 /// applied from ref index 1 + s·skip). This is the ONE build the whole table
 /// derives from (design D1).
 pub fn build_unified_levels(orbit: &[(f64, f64)], max_skip: usize) -> Vec<UnifiedLevel> {
+    // Levels below the emit floor are never serialized (MOBIUS_MIN_EMIT_SKIP)
+    // and never dispatched — extracting their blocks/moduli only feeds the
+    // bounds walks and radii scans with dead work (~75 % of all blocks live at
+    // skip 1–2). Keep the level ENTRY (index alignment with the merge chain)
+    // but leave it empty; every downstream stage then costs zero there.
     let extract = |jets: &[JetF64], skip: usize| -> UnifiedLevel {
+        if skip < MOBIUS_MIN_EMIT_SKIP {
+            return UnifiedLevel { skip, blocks: Vec::new(), moduli: Vec::new() };
+        }
         let blocks: Vec<UnifiedBlock> = jets.iter().map(UnifiedBlock::from_jet).collect();
         let moduli = jets
             .iter()
@@ -1405,12 +1413,44 @@ mod tests {
         let t3 = Instant::now();
         let sa = sa_build(&orbit, eps, c_max, orbit.len() - 1);
         let t_sa = t3.elapsed();
+        let t4 = Instant::now();
+        let periodic = periodic_build(&orbit, eps, c_max.log2());
+        let t_periodic = t4.elapsed();
+        let t5 = Instant::now();
+        let (side, dir) = unified_serialize_radii(
+            &levels,
+            &rad,
+            c_max.log2() + 10.0,
+            Some(&sa),
+            periodic.as_ref(),
+        );
+        let t_serialize = t5.elapsed();
         let nblocks: usize = levels.iter().map(|l| l.blocks.len()).sum();
         println!(
-            "unified build @40k ({} blocks): levels {:?} | bounds {:?} | radii {:?} | sa {:?} (n0={}) | total {:?}",
-            nblocks, t_levels, t_bounds, t_radii, t_sa, sa.n0, t0.elapsed()
+            "unified build @40k ({} blocks): levels {:?} | bounds {:?} | radii {:?} | sa {:?} (n0={}) | periodic {:?} | serialize {:?} ({} entries, {} levels) | total {:?}",
+            nblocks, t_levels, t_bounds, t_radii, t_sa, sa.n0, t_periodic, t_serialize,
+            side.len(), dir.len(), t0.elapsed()
         );
-        let _ = rad;
+
+        // Same breakdown at the ENGINE's live configuration (ε = 1e-3 default,
+        // c_max = 4·scale): the radii scan cost depends on (ε, c_max), so the
+        // interactive keyframe budget must be measured at the shipped values.
+        let eps_gpu = 1e-3_f64;
+        let l2c_gpu = (1e-10_f64).log2() + 2.0;
+        let tb = Instant::now();
+        let bounds_gpu = unified_build_bounds(&levels, &orbit, l2c_gpu);
+        let tb_bounds = tb.elapsed();
+        let tr = Instant::now();
+        let rad_gpu = unified_solve_radii(&levels, &bounds_gpu, eps_gpu, l2c_gpu);
+        let tr_radii = tr.elapsed();
+        let ts = Instant::now();
+        let sa_gpu = sa_build(&orbit, eps_gpu, l2c_gpu.exp2(), orbit.len() - 1);
+        let ts_sa = ts.elapsed();
+        let _ = rad_gpu;
+        println!(
+            "unified build @40k GPU-config (eps 1e-3, c_max 4e-10): bounds {:?} | radii {:?} | sa {:?} (n0={})",
+            tb_bounds, tr_radii, ts_sa, sa_gpu.n0
+        );
     }
 
     #[test]
@@ -1732,6 +1772,153 @@ mod tests {
     }
 
     #[test]
+    fn unified_second_derivative_propagation() {
+        // (Phase D, task 5.1) The (z′, z″) block-propagation formulas per tier
+        // match exact step-by-step chains through the block:
+        //   δ′_c  = m_z·δ_c + m_c
+        //   δ′_cc = m_zz·δ_c² + 2·m_zc·δ_c + m_cc + m_z·δ_cc
+        // with the rational second partials m_zz = −2·De·m_z/den,
+        // m_cc = −2·D′·z·m_c/den, m_zc = (A′ − m_c·De − m·D′)/den − m_z·D′·z/den
+        // (affine: all zero; jet: polynomial rows). Exact chain per step:
+        // δ_c ← (2Z + 2δ)·δ_c + 1, δ_cc ← 2·δ_c² + (2Z + 2δ)·δ_cc.
+        let cm = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+        let cdiv = |a: (f64, f64), b: (f64, f64)| {
+            let d = b.0 * b.0 + b.1 * b.1;
+            ((a.0 * b.0 + a.1 * b.1) / d, (a.1 * b.0 - a.0 * b.1) / d)
+        };
+        let cadd = |a: (f64, f64), b: (f64, f64)| (a.0 + b.0, a.1 + b.1);
+        let csub = |a: (f64, f64), b: (f64, f64)| (a.0 - b.0, a.1 - b.1);
+        let eps = 1e-12_f64;
+        for (name, cx, cy) in [
+            ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64),
+            ("feigenbaum", -1.401155, 0.0),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, 1024);
+            assert!(orbit.len() > 1024, "[{}] escaped", name);
+            let levels = build_unified_levels(&orbit, 1 << 18);
+            let c_max = 1e-9_f64;
+            let rad = unified_build_radii(&levels, &orbit, eps, c_max);
+            let mut checked = 0usize;
+            for (li, lvl) in levels.iter().enumerate() {
+                if lvl.skip < 4 {
+                    continue;
+                }
+                for sidx in (0..lvl.blocks.len()).step_by(11) {
+                    let blk = &lvl.blocks[sidx];
+                    if blk.m.degenerate {
+                        continue;
+                    }
+                    let first = 1 + sidx * lvl.skip;
+                    for tier in 0..4usize {
+                        let r = rad.tiers[li][sidx][tier];
+                        if !r.is_finite() {
+                            continue;
+                        }
+                        let x = (r - 1.0).exp2();
+                        if !(x.is_finite() && x > 0.0) {
+                            continue;
+                        }
+                        let z0 = (x * 0.6, -x * 0.5);
+                        let c = (c_max * 0.8, c_max * 0.3);
+                        // Seeds: nontrivial first/second derivative state.
+                        let d0 = (1.3_f64, 0.2_f64);
+                        let s0 = (0.4_f64, -0.7_f64);
+                        // Exact chains through the block steps.
+                        let (mut w, mut dw, mut sw) = (z0, d0, s0);
+                        for j in first..first + lvl.skip {
+                            let zr = orbit[j];
+                            let m2 = (2.0 * (zr.0 + w.0), 2.0 * (zr.1 + w.1));
+                            let ndw = cadd(cm(m2, dw), (1.0, 0.0));
+                            let nsw = cadd(cm((2.0, 0.0), cm(dw, dw)), cm(m2, sw));
+                            let nw = cadd(cadd(cm((2.0, 0.0), cm(zr, w)), cm(w, w)), c);
+                            w = nw;
+                            dw = ndw;
+                            sw = nsw;
+                        }
+                        // Tier formulas.
+                        let a = blk.m.a.to_f64();
+                        let b = blk.m.b.to_f64();
+                        let d = blk.m.d.to_f64();
+                        let ap = blk.m.ap.to_f64();
+                        let dp = blk.m.dp.to_f64();
+                        let (m_v, m_z, m_c, m_zz, m_zc, m_cc);
+                        if tier == TIER_JET {
+                            let a20 = blk.a20().to_f64();
+                            let a11 = blk.a11().to_f64();
+                            let a21 = blk.a21().to_f64();
+                            let a02 = blk.a02.to_f64();
+                            let a30 = blk.a30.to_f64();
+                            let a12 = blk.a12.to_f64();
+                            let a03 = blk.a03.to_f64();
+                            let c2 = cm(c, c);
+                            let p0 = cadd(cadd(cm(b, c), cm(a02, c2)), cm(cm(a03, c2), c));
+                            let p1 = cadd(cadd(a, cm(a11, c)), cm(a12, c2));
+                            let p2 = cadd(a20, cm(a21, c));
+                            m_v = cadd(p0, cm(z0, cadd(p1, cm(z0, cadd(p2, cm(z0, a30))))));
+                            m_z = cadd(p1, cm(z0, cadd(cm((2.0, 0.0), p2), cm(z0, cm((3.0, 0.0), a30)))));
+                            let q0 = cadd(cadd(b, cm((2.0, 0.0), cm(a02, c))), cm((3.0, 0.0), cm(a03, c2)));
+                            let q1 = cadd(a11, cm((2.0, 0.0), cm(a12, c)));
+                            m_c = cadd(q0, cm(z0, cadd(q1, cm(z0, a21))));
+                            m_zz = cadd(cm((2.0, 0.0), p2), cm((6.0, 0.0), cm(a30, z0)));
+                            m_zc = cadd(q1, cm((2.0, 0.0), cm(a21, z0)));
+                            m_cc = cadd(
+                                cadd(cm((2.0, 0.0), a02), cm((6.0, 0.0), cm(a03, c))),
+                                cm((2.0, 0.0), cm(a12, z0)),
+                            );
+                        } else {
+                            let (apx, dpx) = if tier == TIER_CPLUS {
+                                (ap, dp)
+                            } else {
+                                ((0.0, 0.0), (0.0, 0.0))
+                            };
+                            let ax = if tier == TIER_AFFINE { a } else { a };
+                            let dx2 = if tier == TIER_AFFINE { (0.0, 0.0) } else { d };
+                            let ae = cadd(ax, cm(apx, c));
+                            let de = cadd(dx2, cm(dpx, c));
+                            let bc = cm(b, c);
+                            let den = cadd((1.0, 0.0), cm(de, z0));
+                            m_v = cdiv(cadd(cm(ae, z0), bc), den);
+                            m_z = cdiv(csub(ae, cm(m_v, de)), den);
+                            m_c = cdiv(
+                                csub(cadd(cm(apx, z0), b), cm(m_v, cm(dpx, z0))),
+                                den,
+                            );
+                            m_zz = cm((-2.0, 0.0), cdiv(cm(de, m_z), den));
+                            m_cc = cm((-2.0, 0.0), cdiv(cm(cm(dpx, z0), m_c), den));
+                            m_zc = csub(
+                                cdiv(csub(csub(apx, cm(m_c, de)), cm(m_v, dpx)), den),
+                                cdiv(cm(m_z, cm(dpx, z0)), den),
+                            );
+                        }
+                        let pd = cadd(cm(m_z, d0), m_c);
+                        let ps = cadd(
+                            cadd(cm(m_zz, cm(d0, d0)), cm((2.0, 0.0), cm(m_zc, d0))),
+                            cadd(m_cc, cm(m_z, s0)),
+                        );
+                        let scale_d = (dw.0 * dw.0 + dw.1 * dw.1).sqrt().max(1e-300);
+                        let scale_s = (sw.0 * sw.0 + sw.1 * sw.1).sqrt().max(1e-300);
+                        let ed = ((pd.0 - dw.0).powi(2) + (pd.1 - dw.1).powi(2)).sqrt() / scale_d;
+                        let es = ((ps.0 - sw.0).powi(2) + (ps.1 - sw.1).powi(2)).sqrt() / scale_s;
+                        checked += 1;
+                        assert!(
+                            ed < 1e-6,
+                            "[{} l{} s{} t{}] z' propagation off by {:e}",
+                            name, li, sidx, tier, ed
+                        );
+                        assert!(
+                            es < 1e-5,
+                            "[{} l{} s{} t{}] z'' propagation off by {:e}",
+                            name, li, sidx, tier, es
+                        );
+                    }
+                }
+            }
+            println!("[{}] second-derivative propagation samples: {}", name, checked);
+            assert!(checked > 40, "[{}] too few samples", name);
+        }
+    }
+
+    #[test]
     fn unified_tiers_match_standalone_builds() {
         // (task 2.1) Tier-coefficient parity: the unified record's prefixes
         // equal the standalone extractions (c+ five, plain-Möbius three with
@@ -1748,6 +1935,18 @@ mod tests {
             (1..orbit.len()).map(|i| jet_seed(orbit[i].0, orbit[i].1)).collect();
         for (li, (ul, cl)) in unified.iter().zip(cplus.iter()).enumerate() {
             assert_eq!(ul.skip, cl.skip);
+            if ul.skip < MOBIUS_MIN_EMIT_SKIP {
+                // Sub-emit levels are deliberately empty in the unified build
+                // (never serialized/dispatched — dead bounds/radii work);
+                // advance the streaming jets and move on.
+                assert!(ul.blocks.is_empty(), "sub-emit level not empty");
+                if jets.len() >= 2 {
+                    jets = (0..jets.len() / 2)
+                        .map(|i| jet_compose(&jets[2 * i], &jets[2 * i + 1]))
+                        .collect();
+                }
+                continue;
+            }
             assert_eq!(ul.blocks.len(), cl.blocks.len());
             for (s, (ub, cb)) in ul.blocks.iter().zip(cl.blocks.iter()).enumerate() {
                 // c+ prefix parity (identical extraction path).

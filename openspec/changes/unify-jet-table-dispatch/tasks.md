@@ -178,27 +178,62 @@ must pass before the next phase starts. Prerequisites:
 
 ## 5. Phase D — analytic antialiasing
 
-- [ ] 5.1 Kernel state: (z′, z″) propagation through exact steps and through the
-      dispatched tiers (closed per-block formulas incl. z-derivatives of m_z/m_c);
-      CPU referee test: deviation ≤ ~1e-12 vs step-by-step.
-- [ ] 5.2 Raw-state layers for z″ across passes and display-side payload layers
-      (z′, z″, margin) through resolve — both AA-enabled pipeline permutations only,
-      reusing the der-Cartesian layer pattern. Plain full-precision r32float layers,
-      NO packing (decided; packing is a later optimization if memory hurts).
-- [ ] 5.3 Color pass: per-AA-sample inline reconstruction ẑ(δᵢ) = z + z′δᵢ + ½z″δᵢ²
+- [x] 5.1 Kernel math + CPU referee (`unified_second_derivative_propagation`):
+      second partials derived per tier — rational m_zz = −2·De·m_z/den,
+      m_cc = −2·D′·z·m_c/den, m_zc = (A′ − m_c·De − φ·D′)/den − m_z·D′·z/den;
+      jet polynomial rows; affine zero — z′ chains to 1e-6, z″ to 1e-5 vs
+      exact stepping on all four tiers (94 samples, both test orbits).
+- [x] 5.2 Kernel state SHIPPED (unified mode, both loops): sndM registers with
+      the scale TIED to 2·derS (zero extra scale registers — renorm/fold shifts
+      mirrored ×2 via measured ΔS around der updates); exact-step update
+      sndM ← 2(derM² + z·sndM); tier update inside try_apply_unified (per-branch
+      partials, OLD-derM ordering, saturating folds degrade only the AA margin);
+      SA seeds z″ = ∂²(SA)/∂c². RAW_LAYERS 9 → 13: in-progress parks sndM in
+      9/10 (scale derivable from layer 8); escaped stores the Taylor payload
+      (8 = S, 9/10 = z′ mantissa, 11/12 = z″ mantissa). reproject copies by
+      destination layer count (zero changes); allocation is unconditional v1
+      (gating to 9 layers when AA is off = recorded follow-up). naga + vue-tsc
+      + vite green; unified-mode spec non-regressive.
+- [x] 5.3 Color pass: per-AA-sample inline reconstruction ẑ(δᵢ) = z + z′δᵢ + ½z″δᵢ²
       from the payload; subsample smooth-iteration (log-log extrapolation) and
       escape-z coordinates from ẑ; feed the NORMAL coloring path and the existing
-      linear-RGB accumulation — no compute-side averaging anywhere. Referee test:
-      analytic sample color vs re-iterated same-jitter sample within the
-      second-order bound.
-- [ ] 5.4 Reseed: stamp only margin-failing frontier pixels (today: the whole DE
+      linear-RGB accumulation — no compute-side averaging anywhere. → SHIPPED:
+      colorize_pixel expands tagged pixels (uniforms 60–63: δĉ unit dir, ln|δc|
+      exponent-summed with S — deep-scale-safe; display-z clamped to the bailout
+      circle so escape gates hold while nu keeps the true extrapolation; center
+      height/angle kept for DE shading per design). The flag finalizes in render()
+      AFTER skipResolve is known (payload layers exist only on the raw binding).
+      Referee = the 5.5 A/B (analytic vs re-iterated same jitter).
+- [x] 5.4 Reseed: stamp only margin-failing frontier pixels (today: the whole DE
       boundary band); frontier fraction in AA stats; SA-prefix sharing for frontier
-      re-iterations when Phase C is active.
-- [ ] 5.5 Playwright + field: 16× analytic AA vs 16× brute on escaping-dominated
-      views — final image within second-order bound, AA-sample apps_total dropping
-      to ~frontier fraction (1–10 % band), gamma-correct accumulation unchanged;
-      coordinate with the open add-adaptive-antialiasing change (its sample-count
-      adaptivity stays, its per-sample cost model updates).
+      re-iterations when Phase C is active. → SHIPPED with a DECISION-TAG design:
+      the first reseed (pristine sample-0 payload) evaluates the margin ONCE and
+      tags analytic-OK texels with a +0.5 fraction in the AA target map; later
+      reseeds and the color pass read the tag — no margin re-evaluation race
+      against margin-fail re-iterations (double-jitter hazard eliminated). aaTarget
+      is read_write storage in the reseed; payload reads use a disjoint layers-8..12
+      view next to the layer-0 stamp view. Frontier counters (stamped/eligible
+      atomics) → Engine.aaFrontierStamped/Eligible → RenderStats "AA frontier" row.
+      SA-prefix sharing is free: stamps are compute requests (iter = −1), which
+      already enter through 4.2's SA continuation path. naga + vue-tsc + vite green.
+- [x] 5.5 Playwright + field: 16× analytic AA vs 16× brute — AUTOMATED HALF GREEN
+      (`tests/analytic-aa.spec.ts`, intro view): zero GPU errors; frontier split
+      real (analytic stamps 44 989 of 45 461 eligible, brute stamps all); image
+      A/B 1.25 % significant vs a CALIBRATED brute↔brute floor of 0.60 % — the
+      converged base is not bit-deterministic run-to-run (adaptive batching moves
+      pass boundaries; the derS two-sum compensation resets per pass ⇒ DE low
+      bits drift ⇒ ~1-3 % of band-edge AA targets flip), so the assertion is
+      3×floor, sibling-spec style. En-route findings + fixes: (1) iteration-
+      PARITY: an analytic subsample crossing an iteration line must renormalize
+      iter = floor(ν̂) + synthetic |z| (bilinear-resolve recipe) or zebra/palette
+      flip hard — fixed in colorize_pixel; (2) repeat-accumulation bias fixed:
+      triggerAaAccumulation now recomputes when the band still holds the previous
+      accumulation's last jitter (rawJittered flag); (3) intro-view frontier is
+      99 % — margin ln5 with |z″|~|z′|² makes the whole ≤6 px band fail at
+      shallow zoom; the 1–10 % expectation is for deep escaping-dominated views
+      → FIELD HALF (user GPU, deep views + threshold tuning) remains, along with
+      the add-adaptive-antialiasing coordination. unified-mode + unified-deep
+      specs re-run green after the changes.
 
 ## 6. Phase E — interior/periodic regime
 
@@ -233,19 +268,39 @@ must pass before the next phase starts. Prerequisites:
 
 ## 7. Phase F — frame-coherent builds (any time after Phase A)
 
-- [ ] 7.1 Coefficients+levels cache keyed by reference orbit only; ε/c_max/DE changes
+- [x] 7.1 Coefficients+levels cache keyed by reference orbit only; ε/c_max/DE changes
       re-run bounds/radii stages only; invalidation test (pan/re-reference clears
-      all).
-- [ ] 7.2 Radii-stage timing in build stats surfaced to RenderStats debug; budget
-      test on the benchmark orbit set; zoom-animation measurement: per-keyframe table
-      time vs cold build recorded in design.md.
+      all). → Core landed AT 2.4 (staged cache + `unified_cache_isolation_and_cascade`);
+      completed here with the keyframe referee `unified_keyframe_stage_cadence`:
+      32 keyframes × 8 octaves of constant-reference zoom-in — coefficients re-run
+      0×, bounds ≤ every ~4 octaves, radii ≤ every ~2 octaves (both asserted).
+- [x] 7.2 Radii-stage timing in build stats surfaced to RenderStats debug; budget
+      test on the benchmark orbit set; zoom-animation measurement recorded in
+      design.md. → SHIPPED: Rust `unified_last_stages()` mask (1 coeffs/2 bounds/
+      4 radii) → worker `buildMs`+`buildStages` on blaReady → Engine
+      `lastTableBuildMs/Stages` → RenderStats "Table build: N ms (radii)" row.
+      Budget tests: `unified_keyframe_budget` (nav-level, cold vs radii-only
+      keyframe) + `unified_build_budget` extended with periodic/serialize/
+      GPU-config rows. MEASURED BLOCKER FIXED en route: the sub-emit levels
+      (skip 1–2 — 75 % of all blocks, never serialized since
+      MOBIUS_MIN_EMIT_SKIP = 4) were still walked by bounds and scanned by
+      radii; `build_unified_levels` now leaves them EMPTY (entries kept for
+      index alignment). 40k-orbit figures: cold 4.85 s → 2.85 s, radii-only
+      keyframe 2.38 s → 1.19 s (×2.4 vs cold). Full Rust suite 73 green; wasm
+      rebuilt; unified-mode + analytic-aa Playwright green. Caveat discovered:
+      the earlier "radii 0.46 s @40k" figure was measured on an orbit that
+      ESCAPES at ~3.1k (f64 test helper) — real 40k tables are ~20k blocks and
+      the radii scan is the remaining linear-in-orbit wall (~1.2 s at 40k).
 
 ## 8. Close-out
 
-- [ ] 8.1 Companion doc `MANDELBROT_UNIFIED_TABLE_IMPLEMENTATION.md`: shipped phases,
+- [x] 8.1 Companion doc `MANDELBROT_UNIFIED_TABLE_IMPLEMENTATION.md`: shipped phases,
       measured numbers per gate, reserve-gate verdicts ([K/1], tile-coherent
       sequences, secondary-reference hook), superseded machinery (per-mode tables,
-      heuristic Padé guards on dispatched path, prefix rebasing).
-- [ ] 8.2 Update design.md open questions with outcomes; file the follow-up removal
-      change (legacy mode deletion) if the field rounds hold; update the project
-      memory verdict map.
+      heuristic Padé guards on dispatched path, prefix rebasing). → WRITTEN,
+      including the open field rounds (§5) and the not-yet-filed removal change.
+- [x] 8.2 Update design.md open questions with outcomes (tag bits, subsample-DE
+      reuse — both resolved); update the project memory verdict map (done). The
+      follow-up removal change is NOT filed — its condition ("if the field rounds
+      hold") is not met while 3.4 / 5.5-field / 6.4 remain open; the gating is
+      recorded in the companion doc §4.

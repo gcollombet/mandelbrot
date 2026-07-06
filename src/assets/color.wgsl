@@ -59,6 +59,10 @@ struct Uniforms {
   tessellationAnimation: f32,
   aaSampleIndex: f32,    // current AA sample index (for the per-pixel accumulation gate)
   antialiasLevel: f32,   // max AA samples (for the debug sample-count visualization)
+  aaJitterHatX: f32,     // unit direction of the current sample's jitter δc (c-space basis)
+  aaJitterHatY: f32,
+  aaJitterLogMag: f32,   // ln|δc| in c units (exponent-summed with the payload's S)
+  aaAnalytic: f32,       // 1 = analytic AA expansion enabled (auto mode, raw payload bound)
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -753,6 +757,10 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
+fn cmul_c(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+  return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
 fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
   if (iter_val <= 0.0) {
     return -1.0;
@@ -1039,7 +1047,8 @@ fn colorize_pixel(
   distanceHeightOffset: f32,
   distanceHeightGradientScale: f32,
   uv_tex: vec2<f32>,
-  magnified: bool
+  magnified: bool,
+  analyticTag: bool
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
   if (iter_val < 0.0) {
@@ -1056,10 +1065,55 @@ fn colorize_pixel(
   }
 
   // ── Escaped pixel ──
-  let z_sq = zx_val * zx_val + zy_val * zy_val;
-  let mu_val = smooth_escape_fraction(z_sq);
+  var iter_v = iter_val;
+  var z = vec2<f32>(zx_val, zy_val);
+  var z_sq = dot(z, z);
+  var mu_val = smooth_escape_fraction(z_sq);
 
-  var nu = iter_val + mu_val;
+  // Phase D analytic AA: pixels the reseed tagged analytic-OK were frozen at
+  // their sample-0 state; reconstruct this sample's sub-pixel value
+  // ẑ(δc) = z + z′·δc + ½·z″·δc² from the raw Taylor payload
+  // (layer 8 = S, 9/10 = z′ mantissa ·e^S, 11/12 = z″ mantissa ·e^{2S}) and
+  // derive the subsample's smooth iteration / escape-z from ẑ — the log-log
+  // formula extrapolates below bailout, no re-iteration. The extrapolated ν̂ is
+  // then renormalized like the bilinear resolve: iter = floor(ν̂) + a synthetic
+  // |z| reproducing fract(ν̂), so integer-parity coloring (zebra) and the escape
+  // gates see a genuinely-escaped-at-that-iteration sample — a re-iterated
+  // subsample crossing an iteration line gets iter±1, and the analytic one must
+  // match. Height/angle keep the center pixel's values (DE varies slowly at
+  // sub-pixel scale); the escape-z DIRECTION stays the center's (like the
+  // bilinear path, no per-iteration angle doubling).
+  if (analyticTag && parameters.aaAnalytic > 0.5 && textureNumLayers(sourceTex) > 12u) {
+    let S = textureLoad(sourceTex, sourceCoord, 8, 0).r;
+    let m1 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 9, 0).r,
+                       textureLoad(sourceTex, sourceCoord, 10, 0).r);
+    let m2 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 11, 0).r,
+                       textureLoad(sourceTex, sourceCoord, 12, 0).r);
+    let hat = vec2<f32>(parameters.aaJitterHatX, parameters.aaJitterHatY);
+    // Exponent-summed magnitudes: e^{S+ln|δc|} stays finite where e^S alone
+    // would overflow f32.
+    let e1 = exp(clamp(S + parameters.aaJitterLogMag, -80.0, 80.0));
+    let e2 = exp(clamp(2.0 * (S + parameters.aaJitterLogMag), -80.0, 80.0));
+    let zhat = z + cmul_c(m1, hat) * e1 + cmul_c(cmul_c(m2, hat), hat) * (0.5 * e2);
+    let zhat_sq = dot(zhat, zhat);
+    let nuHat = iter_val + smooth_escape_fraction(zhat_sq);
+    var iterEff = floor(nuHat);
+    var fracEff = nuHat - iterEff;
+    if (iterEff < 1.0) {
+      iterEff = 1.0;
+      fracEff = 0.0;
+    }
+    iter_v = iterEff;
+    mu_val = fracEff;
+    // Synthetic |z| reproducing fracEff through smooth_escape_fraction (always
+    // outside bailout since fracEff < 1), direction from ẑ.
+    let log_z2 = max(parameters.logMu, 1e-6) * exp2(1.0 - fracEff);
+    let zhatLen = max(sqrt(zhat_sq), 1e-30);
+    z = zhat * (exp(0.5 * log_z2) / zhatLen);
+    z_sq = dot(z, z);
+  }
+
+  var nu = iter_v + mu_val;
 
   if (nu < 0.0) {
     return vec4<f32>(0.0, 0.0, 0.5, 1.0);
@@ -1075,14 +1129,13 @@ fn colorize_pixel(
   let prelimPhase = palettePhaseFromRaw(nu * 2.0 / paletteRepeat + animatedPaletteOffset());
   let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.416666667), 0.0);
   let wSmoothness = row2.g;
-  nu = mix(iter_val, nu, wSmoothness);
+  nu = mix(iter_v, nu, wSmoothness);
 
   // ── Zebra: continuous application (darkens even iterations) ──
   let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.25), 0.0);
   let wZebra = row1.r;
-  let isEvenIter = 1.0 - abs(floor(iter_val) % 2.0);
+  let isEvenIter = 1.0 - abs(floor(iter_v) % 2.0);
 
-  let z = vec2<f32>(zx_val, zy_val);
   let distanceHeightStored = extras.der_x + distanceHeightOffset;
   let angle_der = extras.der_y;
 
@@ -1092,11 +1145,11 @@ fn colorize_pixel(
       return vec4<f32>(debug_heat(fract(nu_smooth * 0.125)), 1.0);
     }
     if (sector == 1) {
-      let distanceHeight = distance_height_from_values(iter_val, z.x, z.y, distanceHeightStored);
+      let distanceHeight = distance_height_from_values(iter_v, z.x, z.y, distanceHeightStored);
       return vec4<f32>(debug_heat(debug_distance_scale(distanceHeight)), 1.0);
     }
     if (sector == 2) {
-      let distanceHeight = distance_height_from_values(iter_val, z.x, z.y, distanceHeightStored);
+      let distanceHeight = distance_height_from_values(iter_v, z.x, z.y, distanceHeightStored);
       let grad = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
       return vec4<f32>(debug_heat(debug_gradient_scale(length(grad))), 1.0);
     }
@@ -1107,7 +1160,7 @@ fn colorize_pixel(
   let v_smooth = nu_smooth;
   let stripePhase = decode_stripe_phase(extras.refWithStripe);
   let directionCoherence = decode_direction_coherence(extras.avgDirection);
-  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_val, v, v_smooth, z, distanceHeightStored, distanceHeightOffset, distanceHeightGradientScale, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y, uv_tex, magnified);
+  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_v, v, v_smooth, z, distanceHeightStored, distanceHeightOffset, distanceHeightGradientScale, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y, uv_tex, magnified);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -1295,22 +1348,26 @@ fn colorize_sampled(
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
   distanceHeightOffset: f32,
-  distanceHeightGradientScale: f32
+  distanceHeightGradientScale: f32,
+  analyticTag: bool
 ) -> vec4<f32> {
   var it = iter_val;
   var zx = zx_val;
   var zy = zy_val;
   var extras = load_pixel_extras(sourceTex, coord);
+  var analytic = analyticTag;
   if (interp.kind == 1) {
     it = interp.iter;
     zx = interp.zx;
     zy = interp.zy;
     extras = interp.extras;
+    // Bilinear-interpolated values are not payload-consistent: no expansion.
+    analytic = false;
   }
   return colorize_pixel(
     sourceTex, coord, texSize, it, zx, zy, extras,
     uv_screen, uv_neutral, distanceHeightOffset, distanceHeightGradientScale,
-    uv_tex, magnified
+    uv_tex, magnified, analytic
   );
 }
 
@@ -1389,6 +1446,9 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   var liveStep = 0.0;  // 0 = no data
   var live_zx = 0.0;
   var live_zy = 0.0;
+  // Phase D: the reseed tags analytic-OK pixels with a +0.5 fraction in the AA
+  // target map (the integer part stays the sample-count target).
+  var liveAnalyticTag = false;
   if (liveInBounds) {
     liveCoord = vec2<i32>(
       i32(clamp(uv_live.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
@@ -1399,7 +1459,9 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     // of exactly `target` jittered samples (no over-weighting of frozen pixels).
     // target <= 0 means "not baked yet" (sample 0) → always contribute.
     if (applyAaGate) {
-      let aaTarget = textureLoad(aaTargetTex, liveCoord, 0).r;
+      let aaTargetRaw = textureLoad(aaTargetTex, liveCoord, 0).r;
+      let aaTarget = floor(aaTargetRaw);
+      liveAnalyticTag = fract(aaTargetRaw) > 0.25;
       if (aaTarget > 0.0 && parameters.aaSampleIndex >= aaTarget) {
         discard;
       }
@@ -1504,7 +1566,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         uv_screen,
         uv_neutral,
         liveDistanceHeightOffset,
-        liveDistanceHeightGradientScale
+        liveDistanceHeightGradientScale,
+        liveAnalyticTag
       );
       if (DEBUG_SHOW_LIVE_NEGATIVE) {
         let neg = vec3<f32>(1.0) - liveColor.rgb;
@@ -1525,7 +1588,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         uv_screen,
         uv_neutral,
         frozenDistanceHeightOffset,
-        frozenDistanceHeightGradientScale
+        frozenDistanceHeightGradientScale,
+        false
       );
       return vec4<f32>(frozenColor.rgb, 1.0);
     }
@@ -1545,7 +1609,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       uv_screen,
       uv_neutral,
       liveDistanceHeightOffset,
-      liveDistanceHeightGradientScale
+      liveDistanceHeightGradientScale,
+      liveAnalyticTag
     );
     if (DEBUG_SHOW_LIVE_NEGATIVE) {
       let neg = vec3<f32>(1.0) - liveColor.rgb;
@@ -1572,7 +1637,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       uv_screen,
       uv_neutral,
       frozenDistanceHeightOffset,
-      frozenDistanceHeightGradientScale
+      frozenDistanceHeightGradientScale,
+      false
     );
     return vec4<f32>(frozenColor.rgb, 1.0);
   }

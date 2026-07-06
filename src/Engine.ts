@@ -42,7 +42,12 @@ import {
 // scale derS for in-progress pixels (all-compute-der-cartesian). Display-side
 // textures (resolved/frozen) and their 8-target MRT pipelines stay at 8 —
 // they only ever consume the escaped format.
-const RAW_LAYERS = 9
+// 13 = 9 iteration layers + the Phase D analytic-AA extras (9/10 in-progress
+// z″ mantissa; 8..12 escaped Taylor payload). Allocated unconditionally for
+// now — writes are cheap and reproject copies by destination layer count;
+// FOLLOW-UP: gate to 9 when antialiasLevel == 1 (saves 4 × texSize² × 4 B × 2
+// textures; needs a realloc path on the AA toggle).
+const RAW_LAYERS = 13
 const DISPLAY_LAYERS = 8
 
 // Adaptive iteration batch sizing — the batch auto-adjusts each frame
@@ -82,7 +87,7 @@ const MOBIUS_COEFF_FLOATS = 15
 // is computed to 2× the display maxIter (interactive zoom-in headroom) but never
 // beyond this cap.
 const ORBIT_STEP_CAPACITY = 1_000_000
-const COLOR_UNIFORM_FLOAT_COUNT = 60
+const COLOR_UNIFORM_FLOAT_COUNT = 64
 const TAU = Math.PI * 2
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
@@ -189,6 +194,10 @@ type ReferenceWorkerResponse =
         radii?: Float32Array<ArrayBuffer>
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
+        // Worker-side table build wall-clock + unified stage mask (1 = coeffs,
+        // 2 = bounds, 4 = radii) — RenderStats' "Table build" debug row.
+        buildMs?: number
+        buildStages?: number
     }
     | {
         type: 'error'
@@ -394,6 +403,10 @@ export class Engine {
     // resources
     rawTexture?: GPUTexture // texture "neutre" (A) — r32float array, written via textureStore only
     rawArrayView?: GPUTextureView // full 2d-array view for sampling
+    /** Raw layer 0 (iter) as a 2d storage view — the reseed's write target. */
+    private rawIterStorageView?: GPUTextureView
+    /** Raw layers 8..12 (Taylor payload) as a 5-layer sampled array view (disjoint from layer 0). */
+    private rawPayloadView?: GPUTextureView
     rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B) — r32float array, written via textureStore only
     rawBrushArrayView?: GPUTextureView // full 2d-array view for sampling
     resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 8-layer r32float array
@@ -507,6 +520,11 @@ export class Engine {
     realLoopStepsApprox = -1
     // [affine, Padé, c+, jet] Σ applications (auto mode); -1 = unknown.
     tierAppsApprox: [number, number, number, number] = [-1, -1, -1, -1]
+    /** Last block-table build wall-clock (worker-side, ms) and its unified
+     *  stage mask (1 = coeffs, 2 = bounds, 4 = radii; −1 = non-unified table).
+     *  A radii-only mask (4) is the Phase F keyframe path. */
+    lastTableBuildMs = -1
+    lastTableBuildStages = -1
     // workStatsBuffer accumulates on the GPU across EVERY dispatch of a render
     // generation (cleared once, here-tracked, not per dispatch), so the totals are
     // exact and deterministic — independent of which frames the CPU happens to
@@ -661,8 +679,21 @@ export class Engine {
     aaOffsetY = 0
     /** True for the first frame of a new AA sample (drives the selective reseed). */
     aaReseedPending = false
+    /** True while the raw texture's boundary band holds a jittered sample (set by
+     *  reseeds / jittered full clears). A new accumulation must then recompute so
+     *  its sample 0 is the unbiased unjittered base. */
+    private rawJittered = false
     /** When true, AA accumulation auto-starts as soon as the view is fully converged. */
     aaAuto = false
+    // ── Phase D: analytic AA (Taylor-payload expansion in the color pass) ──
+    /** Master switch (auto mode only — the payload's z″ is tracked by the unified kernel). */
+    aaAnalyticEnabled = true
+    /** Frontier stats from the last reseed: re-iterated texels / boundary-band texels (−1 = none yet). */
+    aaFrontierStamped = -1
+    aaFrontierEligible = -1
+    private aaFrontierBuffer?: GPUBuffer
+    private aaFrontierReadback?: GPUBuffer
+    private aaFrontierMapPending = false
 
     // Cumulative texel shift since last clearHistory – used to keep the
     // sentinel grid aligned after translation reprojection (Option B).
@@ -1054,6 +1085,10 @@ export class Engine {
             this.writeBlockTable(message)
             this.currentBlaLevelCount = message.levelCount
             this.referenceBlaReadyMaxIterations = message.maxIterations
+            if (message.buildMs !== undefined) {
+                this.lastTableBuildMs = message.buildMs
+                this.lastTableBuildStages = message.buildStages ?? -1
+            }
             this.isReferenceValidating = false
             // BLA is a pure acceleration of the same perturbation result, so do not
             // clear history when it arrives: already-computed pixels stay valid and
@@ -1441,7 +1476,7 @@ export class Engine {
         })
         if (!this.uniformBufferAaTarget) {
             this.uniformBufferAaTarget = this.device.createBuffer({
-                size: 16, // 4 × f32: [antialiasLevel, aaSampleIndex, pad, pad] (shared with reseed)
+                size: 32, // 8 × f32: [antialiasLevel, aaSampleIndex, screenHeightPx, aaLogDelta, aaAnalytic, pads] (shared with reseed)
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
                 label: 'Engine UniformBuffer AaParams',
             })
@@ -1451,9 +1486,11 @@ export class Engine {
         const moduleAaReseed = this.device.createShaderModule({ code: aaReseedShader, label: 'Engine ShaderModule AaReseed' })
         const layoutAaReseed = this.device.createBindGroupLayout({
             entries: [
-                { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'read-write', format: 'r32float', viewDimension: '2d' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
                 { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
             ],
             label: 'Engine BindGroupLayout AaReseed',
         })
@@ -1462,6 +1499,19 @@ export class Engine {
             compute: { module: moduleAaReseed, entryPoint: 'cs_main' },
             label: 'Engine ComputePipeline AaReseed',
         })
+        // Frontier stats: [stamped, eligible] u32 pair, cleared before each reseed.
+        if (!this.aaFrontierBuffer) {
+            this.aaFrontierBuffer = this.device.createBuffer({
+                size: 8,
+                usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
+                label: 'Engine AaFrontier Storage',
+            })
+            this.aaFrontierReadback = this.device.createBuffer({
+                size: 8,
+                usage: GPUBufferUsage.MAP_READ | GPUBufferUsage.COPY_DST,
+                label: 'Engine AaFrontier Readback',
+            })
+        }
 
         // bind groups seront (ré)créés dans resize car dépend des textures
         this.bindGroupResolve = undefined
@@ -1949,6 +1999,15 @@ export class Engine {
         const rawResult = createLayeredTexture('Engine RawTexture (A)', RAW_LAYERS, GPUTextureUsage.STORAGE_BINDING)
         this.rawTexture = rawResult.texture
         this.rawArrayView = rawResult.arrayView
+        // Phase D reseed views: layer 0 storage (stamp target) + layers 8..12
+        // sampled (Taylor payload) — disjoint subresources, usable in one dispatch.
+        this.rawIterStorageView = rawResult.layerViews[0]
+        this.rawPayloadView = this.rawTexture.createView({
+            dimension: '2d-array',
+            baseArrayLayer: 8,
+            arrayLayerCount: 5,
+            label: 'Engine RawTexture (A) PayloadView',
+        })
 
         // STORAGE_BINDING: the utility compute pass (reproject_cs) writes B
         // as a write-only storage texture array.
@@ -2002,13 +2061,16 @@ export class Engine {
                 label: 'Engine BindGroup AaTarget',
             })
         }
-        if (this.pipelineAaReseed && this.rawArrayView && this.uniformBufferAaTarget) {
+        if (this.pipelineAaReseed && this.rawIterStorageView && this.rawPayloadView
+            && this.uniformBufferAaTarget && this.aaFrontierBuffer) {
             this.bindGroupAaReseed = this.device.createBindGroup({
                 layout: this.pipelineAaReseed.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: this.aaTargetTextureView },
-                    { binding: 1, resource: this.rawArrayView },
+                    { binding: 1, resource: this.rawIterStorageView },
                     { binding: 2, resource: { buffer: this.uniformBufferAaTarget } },
+                    { binding: 3, resource: this.rawPayloadView },
+                    { binding: 4, resource: { buffer: this.aaFrontierBuffer } },
                 ],
                 label: 'Engine BindGroup AaReseed',
             })
@@ -2515,6 +2577,14 @@ export class Engine {
         const liveScale = getLiveScale(this.zoomState)
         const antialiasLevelColor = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
 
+        // Phase D analytic AA: current sample's jitter δc as unit direction +
+        // ln|δc| (exponent-summed with the payload's S in the shader, so deep
+        // scales never underflow the f32 uniform).
+        const aaJitterMag = Math.hypot(this.aaOffsetX, this.aaOffsetY)
+        const aaJitterLogMag = aaJitterMag > 0 && mandelbrot.scale > 0
+            ? Math.log(aaJitterMag) + Math.log(mandelbrot.scale)
+            : 0
+
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,    // 0: palettePeriod
             renderOptions.paletteOffset + paletteOffsetAnim, // 1: paletteOffset
@@ -2584,6 +2654,10 @@ export class Engine {
             tessellationAnim,                     // 57: tessellationAnimation
             this.aaSampleIndex,                   // 58: aaSampleIndex (AA accumulation gate)
             antialiasLevelColor,                  // 59: antialiasLevel (debug sample-count viz)
+            aaJitterMag > 0 ? this.aaOffsetX / aaJitterMag : 0, // 60: aaJitterHatX (δc unit direction)
+            aaJitterMag > 0 ? this.aaOffsetY / aaJitterMag : 0, // 61: aaJitterHatY
+            Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
+            0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -2758,6 +2832,44 @@ export class Engine {
         this.aaOffsetX = 0
         this.aaOffsetY = 0
         this.aaReseedPending = false
+        this.aaFrontierStamped = -1
+        this.aaFrontierEligible = -1
+    }
+
+    /**
+     * Phase D analytic-AA parameters: ln of the sub-pixel jitter half-extent δ
+     * in c units (the margin test's denominator) and the master eligibility.
+     * Analytic AA needs the unified kernel's z″ payload, so it is auto-mode only;
+     * it also disables below f64 scale (the log turns −∞).
+     */
+    private aaAnalyticParams(aspect: number, scale?: number): { logDelta: number; enabled: boolean } {
+        const s = scale ?? this.previousMandelbrot?.scale ?? 0
+        const neutralExtent = Math.sqrt(aspect * aspect + 1)
+        const logDelta = s > 0
+            ? Math.log(Math.SQRT2 * neutralExtent / Math.max(1, this.neutralSize)) + Math.log(s)
+            : Number.NEGATIVE_INFINITY
+        const enabled = this.aaAnalyticEnabled
+            && this.approximationMode === 'auto'
+            && Number.isFinite(logDelta)
+        return { logDelta, enabled }
+    }
+
+    /** Map the frontier stats readback (once per reseed; skipped while a map is in flight). */
+    private readbackAaFrontier() {
+        const buf = this.aaFrontierReadback
+        if (!buf || this.aaFrontierMapPending) {
+            return
+        }
+        this.aaFrontierMapPending = true
+        buf.mapAsync(GPUMapMode.READ).then(() => {
+            const d = new Uint32Array(buf.getMappedRange().slice(0))
+            buf.unmap()
+            this.aaFrontierStamped = d[0]
+            this.aaFrontierEligible = d[1]
+            this.aaFrontierMapPending = false
+        }).catch(() => {
+            this.aaFrontierMapPending = false
+        })
     }
 
     /**
@@ -2767,6 +2879,13 @@ export class Engine {
      */
     triggerAaAccumulation() {
         this.resetAaState()
+        // A previous accumulation left the boundary band at its LAST sample's
+        // jitter; recompute so sample 0 is the unjittered base again (unbiased
+        // mean, deterministic A/B re-runs).
+        if (this.rawJittered) {
+            this.clearHistoryNextFrame = true
+            this.invalidateCounterReadback()
+        }
         this.aaActive = true
         this.needRender = true
     }
@@ -2943,6 +3062,7 @@ export class Engine {
             generation: number,
             frame: number,
         } | undefined
+        let aaFrontierCopyScheduled = false
 
         const commandEncoder = this.device.createCommandEncoder()
 
@@ -3060,19 +3180,36 @@ export class Engine {
             // Stage B selective reseed: stamp the boundary sliver (target > sample
             // index) as compute requests so only it reconverges with the new jitter;
             // frozen texels are left as-is and skipped by the fused pass below.
+            // Phase D: margin-passing escaped texels are tagged analytic-OK instead
+            // of stamped — the color pass expands their Taylor payload per sample.
             if (this.aaReseedPending && this.pipelineAaReseed && this.bindGroupAaReseed && this.uniformBufferAaTarget) {
                 const aaLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
+                const aaAnalytic = this.aaAnalyticParams(aspect)
                 this.device.queue.writeBuffer(
                     this.uniformBufferAaTarget,
                     0,
-                    new Float32Array([aaLevel, this.aaSampleIndex, this.height, 0]).buffer,
+                    new Float32Array([
+                        aaLevel, this.aaSampleIndex, this.height,
+                        aaAnalytic.enabled ? aaAnalytic.logDelta : 0,
+                        aaAnalytic.enabled ? 1 : 0,
+                        0, 0, 0,
+                    ]).buffer,
                 )
+                if (this.aaFrontierBuffer) {
+                    commandEncoder.clearBuffer(this.aaFrontierBuffer, 0, 8)
+                }
                 const reseedPass = commandEncoder.beginComputePass()
                 reseedPass.setPipeline(this.pipelineAaReseed)
                 reseedPass.setBindGroup(0, this.bindGroupAaReseed)
                 const rwg = Math.ceil(this.neutralSize / 16)
                 reseedPass.dispatchWorkgroups(rwg, rwg)
                 reseedPass.end()
+                // The stamped band reconverges at this sample's (non-zero) jitter.
+                this.rawJittered = true
+                if (this.aaFrontierBuffer && this.aaFrontierReadback && !this.aaFrontierMapPending) {
+                    commandEncoder.copyBufferToBuffer(this.aaFrontierBuffer, 0, this.aaFrontierReadback, 0, 8)
+                    aaFrontierCopyScheduled = true
+                }
                 this.aaReseedPending = false
             }
             // Fused brush+mandelbrot+count: a single compute dispatch working
@@ -3191,6 +3328,15 @@ export class Engine {
         // (or are capturing one now); otherwise fall back to a direct render.
         const aaShowAccum = this.aaActive && (this.aaAccumulatedSamples >= 1 || aaCompositeThisFrame)
 
+        // Phase D: finalize the analytic-AA color flag now that skipResolve is
+        // known — the expansion reads payload layers 8..12, which exist only on
+        // the raw texture binding. update() pre-wrote 0; this lands before submit.
+        if (aaCompositeThisFrame && skipResolve && this.aaSampleIndex > 0
+            && (this.aaOffsetX !== 0 || this.aaOffsetY !== 0)
+            && this.aaAnalyticParams(aspect).enabled) {
+            this.device.queue.writeBuffer(this.uniformBufferColor!, 63 * 4, new Float32Array([1]).buffer)
+        }
+
         if (aaCompositeThisFrame) {
             const firstSample = this.aaSampleIndex === 0
             const rpassAccum = commandEncoder.beginRenderPass({
@@ -3266,7 +3412,7 @@ export class Engine {
             this.device.queue.writeBuffer(
                 this.uniformBufferAaTarget!,
                 0,
-                new Float32Array([antialiasLevel, 0, this.height, 0]).buffer,
+                new Float32Array([antialiasLevel, 0, this.height, 0, 0, 0, 0, 0]).buffer,
             )
             const bakePass = commandEncoder.beginComputePass()
             bakePass.setPipeline(this.pipelineAaTarget!)
@@ -3302,8 +3448,17 @@ export class Engine {
                 scheduledCounterReadback.frame,
             )
         }
+        if (aaFrontierCopyScheduled) {
+            this.readbackAaFrontier()
+        }
 
         // Reset the clear flag now that it has been consumed by the GPU passes.
+        if (this.clearHistoryNextFrame) {
+            // A clear re-stamps every pixel for recompute at the current jitter
+            // offset (0 outside AA accumulation → the base is unjittered again).
+            // Pan gathers COPY pixels, so they deliberately don't touch this.
+            this.rawJittered = this.aaOffsetX !== 0 || this.aaOffsetY !== 0
+        }
         this.clearHistoryNextFrame = false
 
         // marque mise à jour des paramètres frame précédente pour prochaine frame

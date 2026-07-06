@@ -103,6 +103,12 @@ type BlaReadyResponse = {
     radii?: Float32Array<ArrayBuffer>
     levels: Uint32Array<ArrayBuffer>
     levelCount: number
+    // Table build wall-clock (worker-side) + the unified stage mask for it
+    // (1 = coeffs+levels, 2 = bounds, 4 = radii; 0/undefined = warm or
+    // non-unified). Lets RenderStats tell a keyframe radii re-solve from a
+    // cold build (Phase F, 7.2).
+    buildMs?: number
+    buildStages?: number
 }
 
 type ErrorResponse = {
@@ -311,7 +317,9 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     // These builds are the worker's single big synchronous chunk (exact
     // degree-6 merges + majorant walks): surface it so slow-mode reports can
     // tell build latency from per-application cost.
-    console.log(`[REF worker] ${isMobius ? 'mobius' : isUnified ? 'unified' : 'jet'} table built in ${(performance.now() - tableT0).toFixed(0)}ms (maxIter ${maxIterations})`)
+    const buildMs = performance.now() - tableT0
+    const buildStages = isUnified ? navigator.unified_last_stages() : undefined
+    console.log(`[REF worker] ${isMobius ? 'mobius' : isUnified ? 'unified' : 'jet'} table built in ${buildMs.toFixed(0)}ms (maxIter ${maxIterations}${buildStages !== undefined ? `, stages ${buildStages}` : ''})`)
 
     // Strides must match the Rust #[repr(C)] JetCoeffs / MobiusCoeffs /
     // JetRadii / MobiusRadius and Engine's *_FLOATS constants.
@@ -339,6 +347,8 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         radii,
         levels,
         levelCount: info.level_count,
+        buildMs,
+        buildStages,
     }, [steps.buffer, radii.buffer, levels.buffer])
 }
 
