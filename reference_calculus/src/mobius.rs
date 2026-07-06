@@ -2361,4 +2361,322 @@ mod tests {
             );
         }
     }
+
+    // ── unify-jet-table-dispatch task 1.1: offline unified tier census ─────────
+
+    /// §12 closed-form error terms for the plain-Möbius (Padé) tier at
+    /// log2 |z| = lx, log2 |c| = log2_cmax, all relative to the output scale
+    /// s = |A|·x + |B|·y. Channels: [0] = z (C·x², C = |q₃₀|/|A|),
+    /// [1] = spurious zc (|q₁₁|·x·y/s, q₁₁ = A' of the c+ extraction),
+    /// [2] = pure c² (|A₀₂|·y²/s). Coefficients read off the c+ block (its A/B/D
+    /// match the plain extraction; q₃₀ and A₀₂ are form-independent).
+    fn pade_terms(blk: &MobiusBlock, lx: f64, log2_cmax: f64) -> [f64; 3] {
+        let m = &blk.m;
+        let l2a = m.a.log2_mag().unwrap_or(f64::NEG_INFINITY);
+        let l2b = m.b.log2_mag().unwrap_or(f64::NEG_INFINITY);
+        let l2s = lse2(&[l2a + lx, l2b + log2_cmax]);
+        [
+            blk.log2_q[jet_idx(3, 0)] - l2a + 2.0 * lx,
+            m.ap.log2_mag().unwrap_or(f64::NEG_INFINITY) + lx + log2_cmax - l2s,
+            blk.log2_q[jet_idx(0, 2)] + 2.0 * log2_cmax - l2s,
+        ]
+    }
+
+    /// §12 closed-form Padé radius (log2 |z|): largest x with the summed error
+    /// channels ≤ ε, capped by the pole bound |D|·x ≤ 1/4. Descending scan
+    /// (0.25 log2 steps, first success from above), −∞ when nothing certifies.
+    fn pade_closed_form(blk: &MobiusBlock, eps: f64, log2_cmax: f64) -> f64 {
+        let m = &blk.m;
+        if m.degenerate {
+            return f64::NEG_INFINITY;
+        }
+        let l2a = m.a.log2_mag().unwrap_or(f64::NEG_INFINITY);
+        if !l2a.is_finite() {
+            return f64::NEG_INFINITY;
+        }
+        let l2eps = eps.log2();
+        let l2d = m.d.log2_mag().unwrap_or(f64::NEG_INFINITY);
+        let pole_cap = if l2d.is_finite() { -2.0 - l2d } else { 0.0 };
+        let mut lx = pole_cap.min(-1.0);
+        while lx > -160.0 {
+            if lse2(&pade_terms(blk, lx, log2_cmax)) <= l2eps {
+                return lx;
+            }
+            lx -= 0.25;
+        }
+        f64::NEG_INFINITY
+    }
+
+    struct AutoPixelResult {
+        /// Loop turns (applications + exact steps) — the wall-clock proxy.
+        steps: u64,
+        iters: usize,
+        /// Applications per tier: [affine, Padé, c+, jet].
+        apps: [u64; 4],
+        escaped: bool,
+        /// Padé-tier applications whose binding §12 channel was the z channel —
+        /// the [K/1] reserve-gate numerator (design D11).
+        pade_apps_zbound: u64,
+    }
+
+    /// Dispatch replay: mobius_run_pixel's loop with a per-application cheapest-
+    /// sufficient-tier choice over the 4-tier radii (tag semantics of design D3,
+    /// evaluated at the actual entry). Each tier applies its own evaluator; der
+    /// is not tracked (the census counts applications only).
+    fn auto_run_pixel(
+        mlv: &[MobiusLevel],
+        plv: &[MobiusLevel],
+        jlv: &[crate::jet::JetLevelF64],
+        tiers: &[Vec<[f64; 4]>],
+        orbit: &[(f64, f64)],
+        dc: (f64, f64),
+        max_iter: usize,
+        log2_cmax: f64,
+    ) -> AutoPixelResult {
+        use crate::jet::jet_eval;
+        let bailout2 = 4.0_f64;
+        let orbit_len = orbit.len();
+        let cfe = CFe::from_c(dc.0, dc.1);
+        let mut dz = (0.0_f64, 0.0_f64);
+        let mut ref_i = 0usize;
+        let mut iter = 0usize;
+        let mut r = AutoPixelResult {
+            steps: 0,
+            iters: 0,
+            apps: [0; 4],
+            escaped: false,
+            pade_apps_zbound: 0,
+        };
+        while iter < max_iter {
+            let mut applied = false;
+            if ref_i > 0 {
+                let shifted = ref_i - 1;
+                let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+                let log2_dz =
+                    if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                for (li, lvl) in mlv.iter().enumerate().rev() {
+                    if shifted % lvl.skip != 0 {
+                        continue;
+                    }
+                    let slot = shifted / lvl.skip;
+                    if slot >= lvl.blocks.len()
+                        || iter + lvl.skip > max_iter
+                        || ref_i + lvl.skip >= orbit_len
+                    {
+                        continue;
+                    }
+                    let t = &tiers[li][slot];
+                    let tier = if log2_dz < t[0] {
+                        0
+                    } else if log2_dz < t[1] {
+                        1
+                    } else if log2_dz < t[2] {
+                        2
+                    } else if log2_dz < t[3] {
+                        3
+                    } else {
+                        continue;
+                    };
+                    let zfe = CFe::from_c(dz.0, dz.1);
+                    let cand = match tier {
+                        0 => {
+                            let m = &lvl.blocks[slot].m;
+                            m.a.mul(zfe).add(m.b.mul(cfe)).to_f64()
+                        }
+                        1 => mobius_apply(&plv[li].blocks[slot].m, zfe, cfe).0.to_f64(),
+                        2 => mobius_apply(&lvl.blocks[slot].m, zfe, cfe).0.to_f64(),
+                        _ => jet_eval(&jlv[li].entries[slot], zfe, cfe, 3).to_f64(),
+                    };
+                    let zi = orbit[ref_i + lvl.skip];
+                    let candz = (zi.0 + cand.0, zi.1 + cand.1);
+                    if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 {
+                        continue; // don't jump over the first escape
+                    }
+                    if tier == 1 {
+                        let terms = pade_terms(&lvl.blocks[slot], log2_dz, log2_cmax);
+                        if terms[0] >= terms[1].max(terms[2]) {
+                            r.pade_apps_zbound += 1;
+                        }
+                    }
+                    dz = cand;
+                    ref_i += lvl.skip;
+                    iter += lvl.skip;
+                    r.apps[tier] += 1;
+                    applied = true;
+                    break;
+                }
+            }
+            if !applied {
+                let z = orbit[ref_i];
+                let m2 = (
+                    2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                    2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+                );
+                let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
+                dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
+                ref_i += 1;
+                iter += 1;
+            }
+            r.steps += 1;
+            if ref_i > orbit_len - 1 {
+                ref_i = orbit_len - 1;
+            }
+            let z = orbit[ref_i];
+            let full = (z.0 + dz.0, z.1 + dz.1);
+            let full2 = full.0 * full.0 + full.1 * full.1;
+            if full2 > bailout2 {
+                r.escaped = true;
+                break;
+            }
+            let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
+            if full2 < dz2 || ref_i == orbit_len - 1 {
+                dz = full; // rebasing
+                ref_i = 0;
+            }
+            if r.steps > (max_iter * 2 + 16) as u64 {
+                break;
+            }
+        }
+        r.iters = iter;
+        r
+    }
+
+    #[test]
+    fn unified_tier_census() {
+        // (unify-jet-table-dispatch 1.1) Offline tag census + dispatch replay:
+        // per benchmark view and c_max, derive the four tier radii per block on
+        // the shared dyadic scaffold (aff/jet from rule (V) at orders 1/3, Padé
+        // from plain-Möbius (V) boosted by the §12 closed form, c+ from its (V)
+        // machinery), report the block-tag mix at the delta band and the
+        // application share per tier from a pixel-row dispatch replay, against
+        // the three single-mode baselines. Also reports the [K/1] reserve gate
+        // (z-channel-bound share of Padé applications) and radius-ladder
+        // violations. Structural assertion: the dispatch's coverage is the union
+        // of the tiers', so its loop turns never exceed any single mode's.
+        use crate::jet::{build_jet_levels, jet_build_radii, jet_run_pixel};
+        let eps = 1e-12_f64;
+        for (name, cx, cy, max_iter) in [
+            ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64, 2500usize),
+            ("near-parab", -0.7499, 0.0001, 2500),
+            ("feigenbaum", -1.401155, 0.0, 2500),
+            ("spiral", -0.77568377, 0.13646737, 400),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, max_iter);
+            if orbit.len() <= max_iter {
+                println!("[{}] escaped — skipped", name);
+                continue;
+            }
+            let mlv = mobius_build_levels(&orbit, 1 << 18);
+            let plv = mobius_build_levels_with(&orbit, 1 << 18, true);
+            let jlv = build_jet_levels(&orbit, 1, 1 << 18);
+            assert_eq!(mlv.len(), jlv.len(), "[{}] scaffold mismatch", name);
+            for c_max in [1e-5_f64, 1e-9, 1e-14] {
+                let l2c = c_max.log2();
+                let mb = mobius_build_bounds(&mlv, &orbit, l2c);
+                let pb = mobius_build_bounds(&plv, &orbit, l2c);
+                let r_cp = mobius_build_radii(&mlv, &mb, eps, l2c);
+                let r_pv = mobius_build_radii(&plv, &pb, eps, l2c);
+                let r_jet = jet_build_radii(&jlv, &orbit, l2c + 10.0, eps, l2c);
+                // 4-tier radii per block: [affine, Padé, c+, jet].
+                let tiers: Vec<Vec<[f64; 4]>> = mlv
+                    .iter()
+                    .enumerate()
+                    .map(|(li, lvl)| {
+                        (0..lvl.blocks.len())
+                            .map(|s| {
+                                [
+                                    r_jet[li][s][0],
+                                    r_pv[li][s]
+                                        .max(pade_closed_form(&lvl.blocks[s], eps, l2c)),
+                                    r_cp[li][s],
+                                    r_jet[li][s][2],
+                                ]
+                            })
+                            .collect()
+                    })
+                    .collect();
+                // Block-tag census at the delta band (|dz| ~ 1024·c_max) over
+                // emitted (skip ≥ 4) blocks, plus ladder-violation count.
+                let band = l2c + 10.0;
+                let mut tag_cnt = [0usize; 4];
+                let (mut dead, mut ladder_viol, mut emitted) = (0usize, 0usize, 0usize);
+                for (li, lvl) in mlv.iter().enumerate() {
+                    if lvl.skip < 4 {
+                        continue;
+                    }
+                    for s in 0..lvl.blocks.len() {
+                        emitted += 1;
+                        let t = &tiers[li][s];
+                        for w in 0..3 {
+                            if t[w].is_finite() && t[w + 1].is_finite() && t[w] > t[w + 1] + 1e-9
+                            {
+                                ladder_viol += 1;
+                                break;
+                            }
+                        }
+                        let tag = if band < t[0] {
+                            0
+                        } else if band < t[1] {
+                            1
+                        } else if band < t[2] {
+                            2
+                        } else if band < t[3] {
+                            3
+                        } else {
+                            4
+                        };
+                        if tag == 4 {
+                            dead += 1;
+                        } else {
+                            tag_cnt[tag] += 1;
+                        }
+                    }
+                }
+                // Dispatch replay + single-mode baselines over a pixel row.
+                let mut a_steps = 0u64;
+                let mut a_apps = [0u64; 4];
+                let (mut a_zb, mut st_p, mut st_c, mut st_j) = (0u64, 0u64, 0u64, 0u64);
+                for kpx in 0..24 {
+                    let t = (kpx as f64 / 24.0) * 2.0 - 1.0;
+                    let dc = (t * c_max * 0.7, 0.37 * t * c_max);
+                    let a = auto_run_pixel(&mlv, &plv, &jlv, &tiers, &orbit, dc, max_iter, l2c);
+                    a_steps += a.steps;
+                    a_zb += a.pade_apps_zbound;
+                    for k in 0..4 {
+                        a_apps[k] += a.apps[k];
+                    }
+                    st_p += mobius_run_pixel(&plv, &r_pv, &orbit, dc, max_iter).steps as u64;
+                    st_c += mobius_run_pixel(&mlv, &r_cp, &orbit, dc, max_iter).steps as u64;
+                    st_j += jet_run_pixel(&jlv, &r_jet, &orbit, dc, max_iter).steps as u64;
+                }
+                let apps_total: u64 = a_apps.iter().sum();
+                println!(
+                    "[{} c_max={:e}] tags(skip≥4): aff {} padé {} c+ {} jet {} dead {} (of {}, ladder-viol {})",
+                    name, c_max, tag_cnt[0], tag_cnt[1], tag_cnt[2], tag_cnt[3], dead, emitted, ladder_viol
+                );
+                println!(
+                    "[{} c_max={:e}] replay: auto steps {} (apps aff {} padé {} c+ {} jet {}) | padé {} c+ {} jet {} | K/1 z-bound {}/{} padé apps",
+                    name, c_max, a_steps, a_apps[0], a_apps[1], a_apps[2], a_apps[3],
+                    st_p, st_c, st_j, a_zb, a_apps[1]
+                );
+                // Structural: auto's coverage is the tier union — it cannot need
+                // more loop turns than any single mode (2 % slack for trajectory
+                // divergence within the certified band).
+                for (mode, st) in [("padé", st_p), ("c+", st_c), ("jet", st_j)] {
+                    assert!(
+                        a_steps as f64 <= st as f64 * 1.02 + 8.0,
+                        "[{} c_max={:e}] auto ({} steps) slower than {} ({} steps)",
+                        name, c_max, a_steps, mode, st
+                    );
+                }
+                if c_max <= 1e-9 {
+                    assert!(
+                        apps_total > 0,
+                        "[{} c_max={:e}] dispatch never applied a block",
+                        name, c_max
+                    );
+                }
+            }
+        }
+    }
 }

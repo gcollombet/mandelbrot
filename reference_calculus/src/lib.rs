@@ -11,6 +11,7 @@ pub type JsValue = String;
 
 mod jet;
 mod mobius;
+mod unified;
 
 // Fonction utilitaire pour convertir DBig en f32 de manière sûre
 fn dbig_to_f32(bf: &DBig) -> f32 {
@@ -243,6 +244,10 @@ pub enum ApproximationMode {
     /// c-augmented Möbius blocks (5 coefficients, one certified radius) — see
     /// the add-mobius-cplus change and `mobius.rs`.
     MobiusCPlus = 4,
+    /// Unified block table: ONE build, per-block dispatch tags over the
+    /// affine/Padé/c+/jet tiers (prefix-ordered records, tagged-radius
+    /// sidecar) — see the unify-jet-table-dispatch change and `unified.rs`.
+    Unified = 5,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -360,6 +365,19 @@ pub struct MandelbrotNavigator {
     mobius_bounds_log2_c_max: f64,
     mobius_radii_epsilon: f64,
     mobius_radii_log2_c_max: f64,
+    // Unified table (unify-jet-table-dispatch): same three-stage cache —
+    // levels+coeffs orbit-keyed, bounds R_c-headroom-keyed, radii+tags
+    // (ε, c_max)-keyed.
+    unified_levels: Box<Vec<unified::UnifiedLevel>>,
+    unified_bounds: Box<Option<unified::UnifiedBounds>>,
+    unified_radii: Box<Option<unified::UnifiedRadii>>,
+    unified_coeffs_result: Box<Vec<[jet::JetCoeffFe; unified::UNIFIED_GPU_COEFFS]>>,
+    unified_radii_result: Box<Vec<unified::UnifiedRadius>>,
+    unified_gpu_levels: Box<Vec<jet::JetLevel>>,
+    unified_source_len: usize,
+    unified_bounds_log2_c_max: f64,
+    unified_radii_epsilon: f64,
+    unified_radii_log2_c_max: f64,
     // Ajout des vitesses pour l'animation
     vscale: DBig,
     vangle: f64,
@@ -435,6 +453,16 @@ impl MandelbrotNavigator {
             mobius_bounds_log2_c_max: f64::NAN,
             mobius_radii_epsilon: 0.0,
             mobius_radii_log2_c_max: f64::NAN,
+            unified_levels: Box::new(Vec::new()),
+            unified_bounds: Box::new(None),
+            unified_radii: Box::new(None),
+            unified_coeffs_result: Box::new(Vec::new()),
+            unified_radii_result: Box::new(Vec::new()),
+            unified_gpu_levels: Box::new(Vec::new()),
+            unified_source_len: 0,
+            unified_bounds_log2_c_max: f64::NAN,
+            unified_radii_epsilon: 0.0,
+            unified_radii_log2_c_max: f64::NAN,
             vscale: DBig::try_from(1).unwrap(),
             vangle: 0.0,
             vtx: zero.clone(),
@@ -621,6 +649,10 @@ impl MandelbrotNavigator {
 
     pub fn use_jet(&mut self) {
         self.approximation_mode = ApproximationMode::Jet;
+    }
+
+    pub fn use_unified(&mut self) {
+        self.approximation_mode = ApproximationMode::Unified;
     }
 
     pub fn get_approximation_mode(&self) -> ApproximationMode {
@@ -1408,6 +1440,100 @@ impl MandelbrotNavigator {
         }
     }
 
+    fn ensure_unified_table(&mut self, orbit_len: usize) {
+        let orbit_len = orbit_len.min(self.result.len());
+        if orbit_len <= 2 {
+            self.unified_levels.clear();
+            *self.unified_bounds = None;
+            *self.unified_radii = None;
+            self.unified_source_len = 0;
+            return;
+        }
+        let orbit: Vec<(f64, f64)> = self.result[..orbit_len]
+            .iter()
+            .map(|s| (s.zx as f64, s.zy as f64))
+            .collect();
+        let max_skip = Self::auto_max_skip(orbit_len);
+        if self.unified_source_len != orbit_len {
+            *self.unified_levels = unified::build_unified_levels(&orbit, max_skip);
+            self.unified_source_len = orbit_len;
+            self.unified_bounds_log2_c_max = f64::NAN; // cascade: bounds stale
+            // Coefficients are orbit-keyed: serialized once here, never on a
+            // radius re-solve (the split-buffer point).
+            *self.unified_coeffs_result =
+                unified::unified_serialize_coeffs(&self.unified_levels);
+        }
+        let log2_c_max = self.jet_log2_c_max();
+        // Same headroom rule as the mobius/jet stages: bounds stay sound for
+        // any c_max at or below the walk stamp; re-walk on zoom-out past it or
+        // after 4 octaves of zoom-in.
+        let bounds_stale = !self.unified_bounds_log2_c_max.is_finite()
+            || log2_c_max > self.unified_bounds_log2_c_max
+            || log2_c_max < self.unified_bounds_log2_c_max - 4.0;
+        if bounds_stale {
+            *self.unified_bounds = Some(unified::unified_build_bounds(
+                &self.unified_levels,
+                &orbit,
+                log2_c_max,
+            ));
+            self.unified_bounds_log2_c_max = log2_c_max;
+            self.unified_radii_log2_c_max = f64::NAN; // cascade: radii stale
+        }
+        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        let radii_stale = !self.unified_radii_log2_c_max.is_finite()
+            || (self.unified_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
+            || (self.unified_radii_log2_c_max - log2_c_max).abs() > 2.0;
+        if radii_stale {
+            let bounds = self.unified_bounds.as_ref().as_ref().expect("bounds built above");
+            let radii = unified::unified_solve_radii(
+                &self.unified_levels,
+                bounds,
+                epsilon,
+                log2_c_max,
+            );
+            // Certified SA prefix ((ε, c_max)-keyed like the radii): the
+            // common skip every compute-request pixel starts at (Phase C).
+            let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
+            // Periodic block (Phase E): certified interiority verdict at O(p)
+            // when the reference is attracted to a cycle. None for escaping
+            // references — the header then carries p = 0.
+            let periodic = unified::periodic_build(&orbit, epsilon, log2_c_max);
+            // Working band for the dispatch tags: the post-rebase delta band
+            // sits ~10 bits above c_max (census note 5 placeholder — refined
+            // from the replay-observed |dz| distribution when the GPU tier-mix
+            // counters land).
+            let (radii_side, dir) = unified::unified_serialize_radii(
+                &self.unified_levels,
+                &radii,
+                log2_c_max + 10.0,
+                Some(&sa),
+                periodic.as_ref(),
+            );
+            *self.unified_radii = Some(radii);
+            self.unified_radii_epsilon = epsilon;
+            self.unified_radii_log2_c_max = log2_c_max;
+            *self.unified_radii_result = radii_side;
+            *self.unified_gpu_levels = dir;
+        }
+    }
+
+    /// Build (or reuse) the unified table and expose the GPU buffers: the
+    /// prefix-ordered coefficient records (108 B/block, tier prefixes
+    /// 24/36/60/108 B), the tagged-radius sidecar (16 B vec4) and the level
+    /// directory. Coefficient and sidecar arrays share the flat block index.
+    pub fn compute_unified_reference(&mut self, max_iter: u32) -> UnifiedBufferInfo {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.ensure_unified_table(orbit_len);
+        UnifiedBufferInfo {
+            coeffs_ptr: self.unified_coeffs_result.as_ptr() as usize,
+            coeffs_count: self.unified_coeffs_result.len(),
+            radii_ptr: self.unified_radii_result.as_ptr() as usize,
+            radii_count: self.unified_radii_result.len(),
+            levels_ptr: self.unified_gpu_levels.as_ptr() as usize,
+            level_count: self.unified_gpu_levels.len(),
+        }
+    }
+
     /// Retourne la taille du buffer en nombre de MandelbrotStep
     pub fn get_reference_orbit_len(&self) -> usize {
         self.last_iter
@@ -1444,6 +1570,12 @@ impl MandelbrotNavigator {
         self.mobius_source_len = 0;
         self.mobius_bounds_log2_c_max = f64::NAN;
         self.mobius_radii_log2_c_max = f64::NAN;
+        self.unified_levels.clear();
+        *self.unified_bounds = None;
+        *self.unified_radii = None;
+        self.unified_source_len = 0;
+        self.unified_bounds_log2_c_max = f64::NAN;
+        self.unified_radii_log2_c_max = f64::NAN;
     }
 
     fn choose_reference_near_view(&self) -> (DBig, DBig) {
@@ -1762,6 +1894,19 @@ pub struct JetBufferInfo {
     pub coeffs_count: usize,
     // Radius buffer: `JetRadii` records (16 B, vec4-packed), (ε, c_max)-keyed.
     // `radii_count` equals `coeffs_count` — index-aligned per block.
+    pub radii_ptr: usize,
+    pub radii_count: usize,
+    pub levels_ptr: usize,
+    pub level_count: usize,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct UnifiedBufferInfo {
+    // Coefficient buffer: 9 × 12 B prefix-ordered records, orbit-keyed.
+    pub coeffs_ptr: usize,
+    pub coeffs_count: usize,
+    // Sidecar: `UnifiedRadius` records (16 B: tagged radius, tag, f32-safe),
+    // (ε, c_max)-keyed. `radii_count` equals `coeffs_count` — index-aligned.
     pub radii_ptr: usize,
     pub radii_count: usize,
     pub levels_ptr: usize,
@@ -2371,6 +2516,79 @@ mod tests {
             coeffs_ptr_before,
             "coefficient buffer re-serialized by a radius re-solve"
         );
+    }
+
+    #[test]
+    fn unified_cache_isolation_and_cascade() {
+        // (unify-jet-table-dispatch 2.4) Three-stage cache semantics: the
+        // unified table round-trips through the other modes with every stage
+        // warm; an in-headroom zoom re-solves radii ALONE (bounds stamp,
+        // orbit, and the orbit-keyed coefficient buffer untouched); a
+        // reference reset invalidates every stage.
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.compute_reference_orbit_ptr(512);
+        let info = nav.compute_unified_reference(512);
+        assert!(info.level_count > 0, "unified table built no levels");
+        assert!(info.coeffs_count > 0 && info.coeffs_ptr != 0, "coeff buffer empty");
+        // Sidecar = one entry per block + the 9-entry SA/periodic header.
+        assert_eq!(info.coeffs_count + 9, info.radii_count, "buffers must be index-aligned (+header)");
+        let src_len = nav.unified_source_len;
+        let bounds_stamp = nav.unified_bounds_log2_c_max;
+        assert!(src_len > 0 && bounds_stamp.is_finite());
+
+        // Detour through the other modes: unified stages stay warm.
+        nav.use_bla();
+        nav.compute_bla_reference_ptr(512);
+        nav.use_mobius_cplus();
+        nav.compute_mobius_reference(512);
+        nav.compute_unified_reference(512);
+        assert_eq!(nav.unified_source_len, src_len, "unified levels rebuilt on detour");
+        assert_eq!(
+            nav.unified_bounds_log2_c_max, bounds_stamp,
+            "unified bounds re-walked on detour"
+        );
+
+        // In-headroom zoom-in: radii stage alone re-solves.
+        let orbit_len_before = nav.result.len();
+        let coeffs_ptr_before = nav.unified_coeffs_result.as_ptr() as usize;
+        let radii_stamp = nav.unified_radii_log2_c_max;
+        nav.scale = DBig::from_str("0.00000005").unwrap(); // ×0.5 zoom in
+        nav.compute_unified_reference(512);
+        assert_eq!(
+            nav.unified_bounds_log2_c_max, bounds_stamp,
+            "bounds re-walked inside headroom"
+        );
+        assert_eq!(nav.result.len(), orbit_len_before, "reference orbit rebuilt");
+        assert_eq!(
+            nav.unified_coeffs_result.as_ptr() as usize,
+            coeffs_ptr_before,
+            "coefficient buffer re-serialized by a radius re-solve"
+        );
+        // The ×0.5 zoom moves log2_c_max by 1 — inside the ±2 radii slack, so
+        // even the radii stage may stay warm; force it stale via ε instead.
+        let _ = radii_stamp;
+        nav.set_bla_epsilon(1e-7);
+        nav.compute_unified_reference(512);
+        assert!(
+            (nav.unified_radii_epsilon - 1e-7).abs() < 1e-12,
+            "radii stage did not re-solve on ε change"
+        );
+        assert_eq!(
+            nav.unified_coeffs_result.as_ptr() as usize,
+            coeffs_ptr_before,
+            "ε re-solve touched the coefficient buffer"
+        );
+
+        // Reference reset: every unified stage invalidates.
+        nav.reset_reference_to(
+            DBig::from_str("-0.75").unwrap(),
+            DBig::from_str("0.0").unwrap(),
+        );
+        assert_eq!(nav.unified_source_len, 0, "reset left unified levels warm");
+        assert!(!nav.unified_bounds_log2_c_max.is_finite(), "reset left bounds stamp");
+        nav.compute_reference_orbit_ptr(512);
+        nav.compute_unified_reference(512);
+        assert!(nav.unified_source_len > 0, "unified table not rebuilt after reset");
     }
 
     #[test]

@@ -365,7 +365,7 @@ pub fn jet_majorant(orbit: &[(f64, f64)], first: usize, skip: usize, rz: CFe, rc
 // hypot/log2 per step. Zero is (0.0, i64::MIN/2).
 
 #[inline(always)]
-fn sfe_norm(m: f64, e: i64) -> (f64, i64) {
+pub(crate) fn sfe_norm(m: f64, e: i64) -> (f64, i64) {
     if !(m > 0.0) {
         return (0.0, i64::MIN / 2);
     }
@@ -537,8 +537,24 @@ pub fn jet_block_bounds(
 
 /// `jet_block_bounds` over precomputed |2Z_j| values covering the block's steps.
 pub fn jet_block_bounds_pre(jet: &JetF64, twoz: &[(f64, i64)], log2_rc: f64) -> JetBlockBounds {
-    let log2_a10 = coeff_log2(jet, 1, 0);
-    let log2_a20 = coeff_log2(jet, 2, 0);
+    let mut log2_a = [f64::NEG_INFINITY; JET_NCOEFF];
+    for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+        log2_a[n] = coeff_log2(jet, i as usize, j as usize);
+    }
+    jet_block_bounds_moduli(&log2_a, twoz, log2_rc)
+}
+
+/// The (V) bound data from coefficient MODULI alone (log2 |a_ij| in monomial
+/// order) — the unified build extracts moduli while the full jet is alive and
+/// drops the jet, so the radii stage must not need it back (design D9).
+pub fn jet_block_bounds_moduli(
+    log2_a: &[f64; JET_NCOEFF],
+    twoz: &[(f64, i64)],
+    log2_rc: f64,
+) -> JetBlockBounds {
+    let moduli_log2 = |i: usize, j: usize| log2_a[jet_idx(i, j)];
+    let log2_a10 = moduli_log2(1, 0);
+    let log2_a20 = moduli_log2(2, 0);
     let mut log2_min_2z = f64::INFINITY;
     for &(m, e) in twoz {
         let l = if m > 0.0 { m.log2() + e as f64 } else { f64::NEG_INFINITY };
@@ -591,7 +607,7 @@ pub fn jet_block_bounds_pre(jet: &JetF64, twoz: &[(f64, i64)], log2_rc: f64) -> 
             let mut terms = [f64::NEG_INFINITY; JET_DS];
             for i in 1..=d {
                 let j = d - i;
-                terms[i - 1] = coeff_log2(jet, i, j)
+                terms[i - 1] = moduli_log2(i, j)
                     + i as f64 * log2_rz
                     + j as f64 * c.log2_rc;
             }
@@ -600,11 +616,11 @@ pub fn jet_block_bounds_pre(jet: &JetF64, twoz: &[(f64, i64)], log2_rc: f64) -> 
     }
     let mut log2_a0 = [f64::NEG_INFINITY; JET_DS - 1];
     for (d, slot) in log2_a0.iter_mut().enumerate() {
-        *slot = coeff_log2(jet, 0, d + 2);
+        *slot = moduli_log2(0, d + 2);
     }
     JetBlockBounds {
         log2_a10,
-        log2_a01: coeff_log2(jet, 0, 1),
+        log2_a01: moduli_log2(0, 1),
         log2_a0,
         log2_rc,
         log2_min_2z,

@@ -94,7 +94,10 @@ type BlaReadyResponse = {
     // rayons" so a radius re-solve re-uploads only the small array.
     // 'mobius': Möbius-c+ coefficient records (15 floats each: 5 × (x, y,
     // e-as-i32-bits)) in `steps` + the same 4-float vec4 radius sidecar.
-    kind: 'bla' | 'jet' | 'mobius'
+    // 'unified': prefix-ordered records (27 floats each: 9 × (x, y,
+    // e-as-i32-bits) — [A, B, D, A', D', a02, a30, a12, a03]) in `steps` +
+    // the tagged-radius sidecar (4 floats: r, tag, f32safe, spare).
+    kind: 'bla' | 'jet' | 'mobius' | 'unified'
     steps: Float32Array<ArrayBuffer>
     // Jet/mobius only: per-block radii (vec4-packed), index-aligned with `steps`.
     radii?: Float32Array<ArrayBuffer>
@@ -187,6 +190,8 @@ function applyApproximationMode(mode: ApproximationMode) {
         navigator.use_jet()
     } else if (mode === 'mobius') {
         navigator.use_mobius_cplus()
+    } else if (mode === 'auto') {
+        navigator.use_unified()
     } else {
         navigator.use_perturbation()
     }
@@ -250,7 +255,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     // cover ≥⅔ of the iterations (the engine accepts partial tables for these
     // modes), the tail runs exact, and the ≥2-octave scale-drift repost
     // refreshes radii regardless.
-    const jetStillFresh = (mode === 3 || mode === 4)
+    const jetStillFresh = (mode === 3 || mode === 4 || mode === 5)
         && lastBlaMaxIterations > 0
         && maxIterations <= Math.ceil(lastBlaMaxIterations * 1.5)
     if (
@@ -272,7 +277,8 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     // per level (the last word is an f32 bit-pattern).
     const isJet = mode === 3
     const isMobius = mode === 4
-    if (!isJet && !isMobius) {
+    const isUnified = mode === 5
+    if (!isJet && !isMobius && !isUnified) {
         // BLA / Padé path: one 12-float BlaStep table.
         const info = navigator.compute_bla_reference_ptr(maxIterations)
         const stepsSource = new Float32Array(wasmMemory.buffer, info.ptr, info.count * 12)
@@ -299,11 +305,13 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     const tableT0 = performance.now()
     const info = isMobius
         ? navigator.compute_mobius_reference(maxIterations)
-        : navigator.compute_jet_reference(maxIterations)
+        : isUnified
+            ? navigator.compute_unified_reference(maxIterations)
+            : navigator.compute_jet_reference(maxIterations)
     // These builds are the worker's single big synchronous chunk (exact
     // degree-6 merges + majorant walks): surface it so slow-mode reports can
     // tell build latency from per-application cost.
-    console.log(`[REF worker] ${isMobius ? 'mobius' : 'jet'} table built in ${(performance.now() - tableT0).toFixed(0)}ms (maxIter ${maxIterations})`)
+    console.log(`[REF worker] ${isMobius ? 'mobius' : isUnified ? 'unified' : 'jet'} table built in ${(performance.now() - tableT0).toFixed(0)}ms (maxIter ${maxIterations})`)
 
     // Strides must match the Rust #[repr(C)] JetCoeffs / MobiusCoeffs /
     // JetRadii / MobiusRadius and Engine's *_FLOATS constants.
@@ -326,7 +334,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         jobId,
         refId,
         maxIterations,
-        kind: isMobius ? 'mobius' : 'jet',
+        kind: isMobius ? 'mobius' : isUnified ? 'unified' : 'jet',
         steps,
         radii,
         levels,
@@ -423,7 +431,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     // closed-form re-solve Rust-side; existing radii stay
                     // sound meanwhile).
                     const driftMode = navigator.get_approximation_mode()
-                    if (driftMode === 3 || driftMode === 4) {
+                    if (driftMode === 3 || driftMode === 4 || driftMode === 5) {
                         const log2Scale = log2FromDecimalString(message.scale)
                         if (!Number.isFinite(lastJetLog2Scale) || Math.abs(log2Scale - lastJetLog2Scale) >= 2) {
                             lastJetLog2Scale = log2Scale

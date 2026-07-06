@@ -17,6 +17,16 @@ const gpuFrameTimeMs = ref(0);
 const completionWallMs = ref(0);
 const completionGpuMs = ref(0);
 const completionTotalApps = ref(-1);
+// Tier mix (auto mode): live per-tier Σ applications [affine, Padé, c+, jet].
+const tierApps = ref<[number, number, number, number]>([-1, -1, -1, -1]);
+function tierMix(): string {
+  const t = tierApps.value;
+  const total = t[0] + t[1] + t[2] + t[3];
+  if (total <= 0) return '';
+  const pct = (v: number) => (100 * v / total).toFixed(0) + '%';
+  // Affine + Padé share the ≤48 B path (affine is census-dead anyway).
+  return `≤48B ${pct(t[0] + t[1])} · c+ ${pct(t[2])} · jet ${pct(t[3])}`;
+}
 const shaderApproxFlag = ref(0);
 const shaderBlaLevelCount = ref(0);
 const unfinishedPixels = ref(-1);
@@ -154,6 +164,7 @@ function poll() {
   completionWallMs.value = e.lastCompletionWallMs ?? 0;
   completionGpuMs.value = e.lastCompletionGpuMs ?? 0;
   completionTotalApps.value = e.lastCompletionTotalApps ?? -1;
+  tierApps.value = e.tierAppsApprox ?? [-1, -1, -1, -1];
   shaderApproxFlag.value = e.lastShaderApproxFlag ?? 0;
   shaderBlaLevelCount.value = e.lastShaderBlaLevelCount ?? 0;
   unfinishedPixels.value = e.unfinishedPixelCount ?? -1;
@@ -413,6 +424,14 @@ defineExpose({ expanded });
           <span class="stats-value">{{ formatOps(completionTotalApps) }}</span>
         </div>
 
+        <!-- Tier mix (auto dispatch): share of applications per evaluation tier
+             — the memory-path census (≤48 B rational, 80 B c+, 108 B jet).
+             Same GPU counters as Total apps, live during the render. -->
+        <div v-if="shaderApproxFlag === 5 && tierMix()" class="stats-row">
+          <span class="stats-label">Tier mix</span>
+          <span class="stats-value">{{ tierMix() }}</span>
+        </div>
+
         <!-- GPU throughput: Total apps ÷ GPU compute time of the same render.
              apps_total is deterministic; gpu ms carries the hardware's real
              lane-throughput, so this ratio exposes cost-per-app differences the
@@ -428,7 +447,7 @@ defineExpose({ expanded });
         <div class="stats-row">
           <span class="stats-label">Shader mode</span>
           <span class="stats-value">
-            {{ shaderApproxFlag === 4 ? 'Möbius+' : shaderApproxFlag === 3 ? 'Jet' : shaderApproxFlag === 2 ? 'Padé' : shaderApproxFlag === 1 ? 'BLA' : 'exact' }} · {{ shaderBlaLevelCount }} lvl
+            {{ shaderApproxFlag === 5 ? 'Auto' : shaderApproxFlag === 4 ? 'Möbius+' : shaderApproxFlag === 3 ? 'Jet' : shaderApproxFlag === 2 ? 'Padé' : shaderApproxFlag === 1 ? 'BLA' : 'exact' }} · {{ shaderBlaLevelCount }} lvl
           </span>
         </div>
 

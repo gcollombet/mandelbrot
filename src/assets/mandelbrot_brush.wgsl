@@ -136,6 +136,12 @@ struct WorkStats {
   covMean: atomic<u32>,
   maxAccum: atomic<u32>,
   maxSteps: atomic<u32>,
+  // Tier mix (auto mode): Σ applications per dispatch tier, same >>6 scale as
+  // realMean — [affine, Padé, c+, jet]; zero outside mode 5.
+  tierAff: atomic<u32>,
+  tierPade: atomic<u32>,
+  tierCplus: atomic<u32>,
+  tierJet: atomic<u32>,
 };
 
 // ── bivariate jet mode (add-jet-approximation) ─────────────────────
@@ -179,6 +185,9 @@ const JET_DER_EXP_FOLD: i32 = 16;
 // Same flat block index as the radius buffer either way.
 const JET_COEFF_STRIDE: i32 = 9;
 const MOBIUS_COEFF_STRIDE: i32 = 5;
+// Unified table (mode 5): 9 elements in PREFIX order [A, B, D, A', D', a02,
+// a30, a12, a03] — same element count as jet, tier-directed prefix reads.
+const UNIFIED_COEFF_STRIDE: i32 = 9;
 
 // Level directory: maxR3 (log2) is the loosest top-order radius of the level —
 // the whole-level fast reject, sibling of BlaLevel.maxRadius.
@@ -205,6 +214,8 @@ struct JetLevel {
 // incremented once per iteration-loop turn (a block-apply or an exact step both
 // count as 1). Reset in cs_main before each texel's compute.
 var<private> g_workSteps: u32 = 0u;
+// Per-texel tier application counts (auto mode), flushed with the work stats.
+var<private> g_tierApps: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
 
 // ── complex helpers (verbatim from mandelbrot.wgsl) ────────────────
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -606,12 +617,14 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   // This is the in-place COMPUTE iteration path (the progressive-continuation
   // workhorse) — NOT a throwaway preview. BLA (affine) and Padé (rational) both
   // apply here; try_apply_bla branches on approximationMode ≥ 1.5.
-  // approximationMode: 1 = affine BLA, 2 = Padé, 3 = jet, 4 = Möbius-c+. The
+  // approximationMode: 1 = affine BLA, 2 = Padé, 3 = jet, 4 = Möbius-c+,
+  // 5 = unified (per-block dispatch tags over the four tiers). The
   // level-count uniform carries the ACTIVE table's level count. Jet and mobius
   // share the level/radius/coefficient buffers (different coefficient stride).
-  let isMobius = mandelbrot.approximationMode >= 3.5;
-  let isJet = mandelbrot.approximationMode >= 2.5 && !isMobius;
-  let isBlockTable = isJet || isMobius;
+  let isUnified = mandelbrot.approximationMode >= 4.5;
+  let isMobius = mandelbrot.approximationMode >= 3.5 && !isUnified;
+  let isJet = mandelbrot.approximationMode >= 2.5 && !isMobius && !isUnified;
+  let isBlockTable = isJet || isMobius || isUnified;
   let useBla = mandelbrot.approximationMode >= 0.5
             && mandelbrot.orbitComplete >= 0.5
             && mandelbrot.blaLevelCount >= 1.0;
@@ -658,11 +671,45 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     // Möbius products are degree-1 in dc (no dc²/dc³), so its f32-path gate
     // only needs dc itself clear of the subnormal band.
     let mobiusF32Ok = isMobius && dcMag > 1e-30;
+    // Unified fast path serves the RATIONAL tags only (degree-1 in dc): same
+    // gate as Möbius; the jet tag always evaluates in fe.
+    let unifiedF32Ok = isUnified && dcMag > 1e-30;
     var usedBla = false;
     var blaZ = vec2<f32>(0.0);
     var jetLevelHint = JET_MAX_LEVELS; // (#5) start uncapped, then track accepts
+    // Phase E periodic-interior state (auto mode): armed when the header
+    // carries a period block; one compare per loop turn, an attempt every p
+    // iterations at the aligned phase (O(1/p) amortized).
+    var perP = 0;
+    var perStart = 0;
+    var perNext = 2147483647;
+    var perR = -3.0e38;
+    var perHdr = 0;
+    if (isUnified) {
+      let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
+      perHdr = i32(lastLvl.offset + lastLvl.count);
+      perStart = i32(mandelbrotJetRadii[perHdr + 4].v.w);
+      perP = i32(mandelbrotJetRadii[perHdr + 5].v.w);
+      perR = mandelbrotJetRadii[perHdr + 6].v.w;
+      if (perP > 0) {
+        perNext = perStart;
+      }
+    }
     while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
       g_workSteps += 1u;
+      if (perP > 0 && ref_i >= perNext) {
+        let k = (ref_i - perStart + perP - 1) / perP;
+        let aligned = perStart + k * perP;
+        if (ref_i == aligned) {
+          perNext = aligned + perP;
+          if (try_periodic_interior(perHdr, fe_from_vec(dz, 0), dcFe, perR)) {
+            inside = true;
+            break;
+          }
+        } else {
+          perNext = aligned;
+        }
+      }
       var skipped = 0;
       if (isBlockTable) {
         // Global gate first (one log2 vs the table-wide bound), then convert dz
@@ -675,7 +722,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         let dzMag = length(dz);
         if (dzMag < 1.2e-38 || log2(dzMag) < jetMaxR3) {
           var dzFe = fe_from_vec(dz, 0);
-          if (isMobius) {
+          if (isUnified) {
+            skipped = try_apply_unified(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, unifiedF32Ok, &jetLevelHint);
+          } else if (isMobius) {
             skipped = try_apply_mobius(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, mobiusF32Ok, &jetLevelHint);
           } else {
             skipped = try_apply_jet(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, dcF2, dcF3, jetF32Ok, &jetLevelHint);
@@ -1265,6 +1314,256 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
   }
   return 0;
 }
+
+// ── unified block application (unify-jet-table-dispatch, task 2.6) ──────────
+// One sidecar probe (x = tagged tier's certified radius, y = tier tag,
+// z = f32-safe flag), then a TIER-DIRECTED prefix read of the 9-slot record
+// [A, B, D, A', D', a02, a30, a12, a03]: affine reads 2 slots, Padé 3, c+ 5,
+// jet all 9 (reconstructing a20 = −D·A, a11 = A' − B·D, a21 = −D'·A − D·a11 in
+// registers — the verified identities). Tags are block properties, so the
+// choice is warp-uniform. Rational tags (0-2) get the plain-f32 fast path;
+// the jet tag always evaluates in fe (deep is where it fires).
+fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>) -> i32 {
+  if (*ref_i <= 0) {
+    return 0;
+  }
+  let log2_dz = log2(max(length((*dz).m), 1e-30)) + f32((*dz).e);
+  let shiftedRef = *ref_i - 1;
+  var level = min(min(i32(mandelbrot.blaLevelCount), JET_MAX_LEVELS) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
+  level = min(level, *hint + JET_LEVEL_HINT_UP);
+  while (level >= 0) {
+    let skip = i32(1u << u32(skip0Log + level));
+    if (log2_dz < (*lvlR)[level] && *ref_i + skip <= maxIterI) {
+
+
+      let levelInfo = mandelbrotJetLevels[level];
+      let slot = shiftedRef >> u32(skip0Log + level);
+      if (u32(slot) < levelInfo.count) {
+        let entry = i32(levelInfo.offset) + slot;
+        // One coalesced 16 B probe; the record is read only on application,
+        // and only the tagged tier's prefix of it.
+        let radii = mandelbrotJetRadii[entry].v;
+        if (log2_dz < radii.x) {
+          let tag = i32(radii.y + 0.5);
+          let base = entry * UNIFIED_COEFF_STRIDE;
+          var phi: fe;
+          var pdz: fe;
+          var pdc: fe;
+          var denOk = true;
+          if (tag <= 2 && f32Ok && radii.z > 0.5 && log2_dz > -100.0) {
+            // Plain-f32 fast path, rational tiers (2-5 ldexp reconstructions).
+            let ca = jet_coeff_f32(mandelbrotJetSuite[base]);
+            let cb = jet_coeff_f32(mandelbrotJetSuite[base + 1]);
+            let dzF = fe_to_vec(*dz);
+            if (tag == 0) {
+              // Affine tier: 24 B, one cmul pair; exact-form partials.
+              phi = fe_from_vec(cmul(ca, dzF) + cmul(cb, dcF), 0);
+              pdz = fe_from_vec(ca, 0);
+              pdc = fe_from_vec(cb, 0);
+            } else {
+              var ae = ca;
+              var de = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
+              var capF = vec2<f32>(0.0);
+              var cdpF = vec2<f32>(0.0);
+              if (tag == 2) {
+                capF = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
+                cdpF = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
+                ae = ca + cmul(capF, dcF);
+                de = de + cmul(cdpF, dcF);
+              }
+              let den = vec2<f32>(1.0, 0.0) + cmul(de, dzF);
+              if (MOBIUS_PARANOIA_GUARD && dot(den, den) < MOBIUS_DEN_GUARD2) {
+                denOk = false;
+              } else {
+                let invDen = cinv(den);
+                let phiF = cmul(cmul(ae, dzF) + cmul(cb, dcF), invDen);
+                phi = fe_from_vec(phiF, 0);
+                pdz = fe_from_vec(cmul(ae - cmul(phiF, de), invDen), 0);
+                pdc = fe_from_vec(cmul(cmul(capF, dzF) + cb - cmul(phiF, cmul(cdpF, dzF)), invDen), 0);
+              }
+            }
+          } else {
+            let ca = jet_coeff_fe(mandelbrotJetSuite[base]);
+            let cb = jet_coeff_fe(mandelbrotJetSuite[base + 1]);
+            if (tag == 0) {
+              phi = fe_add(fe_cmul(ca, *dz), fe_cmul(cb, dc));
+              pdz = ca;
+              pdc = cb;
+            } else if (tag <= 2) {
+              let cd = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
+              var ae = ca;
+              var de = cd;
+              var cap = fe(vec2<f32>(0.0), 0);
+              var cdp = fe(vec2<f32>(0.0), 0);
+              if (tag == 2) {
+                cap = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
+                cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
+                ae = fe_add(ca, fe_cmul(cap, dc));
+                de = fe_add(cd, fe_cmul(cdp, dc));
+              }
+              let den = fe_add(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz));
+              if (MOBIUS_PARANOIA_GUARD && (den.e < -10 || (den.e < 5 && fe_mag2_f32(den) < MOBIUS_DEN_GUARD2))) {
+                denOk = false;
+              } else {
+                let invDen = fe_cinv(den);
+                phi = fe_cmul(fe_add(fe_cmul(ae, *dz), fe_cmul(cb, dc)), invDen);
+                pdz = fe_cmul(fe_add(ae, fe_neg(fe_cmul(phi, de))), invDen);
+                if (tag == 2) {
+                  pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, fe_cmul(cdp, *dz)))), invDen);
+                } else {
+                  pdc = fe_cmul(cb, invDen);
+                }
+              }
+            } else {
+              // Jet tier: full 108 B record, identity reconstruction, order-3
+              // Horner rows shared by the value and both partials.
+              let cd  = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
+              let cap = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
+              let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
+              let a02 = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+              let a30 = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
+              let a12 = jet_coeff_fe(mandelbrotJetSuite[base + 7]);
+              let a03 = jet_coeff_fe(mandelbrotJetSuite[base + 8]);
+              let a20 = fe_neg(fe_cmul(cd, ca));
+              let a11 = fe_add(cap, fe_neg(fe_cmul(cb, cd)));
+              let a21 = fe_add(fe_neg(fe_cmul(cdp, ca)), fe_neg(fe_cmul(cd, a11)));
+              let p0 = fe_add3(fe_cmul(cb, dc), fe_cmul(a02, dc2), fe_cmul(a03, dc3));
+              let p1 = fe_add3(ca, fe_cmul(a11, dc), fe_cmul(a12, dc2));
+              let p2 = fe_add(a20, fe_cmul(a21, dc));
+              phi = fe_add(p0, fe_cmul(*dz, fe_add(p1, fe_cmul(*dz, fe_add(p2, fe_cmul(*dz, a30))))));
+              pdz = fe_add(p1, fe_cmul(*dz, fe_add(fe_scale(p2, 2.0), fe_cmul(*dz, fe_scale(a30, 3.0)))));
+              let q0 = fe_add3(cb, fe_scale(fe_cmul(a02, dc), 2.0), fe_scale(fe_cmul(a03, dc2), 3.0));
+              let q1 = fe_add(a11, fe_scale(fe_cmul(a12, dc), 2.0));
+              pdc = fe_add(q0, fe_cmul(*dz, fe_add(q1, fe_cmul(*dz, a21))));
+            }
+          }
+          if (denOk) {
+            let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(phi);
+            // Do not jump over the first escape (same rule as the BLA paths).
+            if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+              // Tier counters: LITERAL indices via branchless selects — a
+              // dynamic-index write (g_tierApps[tag]) is silently dropped on
+              // the Metal backend inside this non-uniform loop (observed in
+              // the field: 24M successes, zero counted).
+              g_tierApps[0] += select(0u, 1u, tag == 0);
+              g_tierApps[1] += select(0u, 1u, tag == 1);
+              g_tierApps[2] += select(0u, 1u, tag == 2);
+              g_tierApps[3] += select(0u, 1u, tag == 3);
+              *dz = phi;
+              *zOut = candidateZ;
+              // der' = ∂m/∂z·der + ∂m/∂c, with the (#3) exponent-fold
+              // discipline shared with the jet/mobius paths.
+              if (abs(pdz.e) <= JET_DER_EXP_FOLD) {
+                *derM = ldexp(cmul(*derM, pdz.m), vec2<i32>(pdz.e))
+                      + pdc.m * exp(clamp(f32(pdc.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
+              } else {
+                *derM = cmul(*derM, pdz.m);
+                der_scale_add(derS, derSLo, f32(pdz.e) * LN2);
+                *derM = *derM + pdc.m * exp(clamp(f32(pdc.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
+                der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
+              }
+              *ref_i += skip;
+              *hint = level; // (#5) seed next turn's descent
+              return skip;
+            }
+          }
+        }
+      }
+    }
+    level -= 1;
+  }
+  return 0;
+}
+// ── interior/periodic verdict (Phase E, design D8, findings §17) ─────────────
+fn fe_csqrt(a: fe) -> fe {
+  var m = a.m;
+  var e = a.e;
+  if ((e & 1) != 0) {
+    m = m * 2.0;
+    e = e - 1;
+  }
+  let r = length(m);
+  let re = sqrt(max(0.5 * (r + m.x), 0.0));
+  var im = sqrt(max(0.5 * (r - m.x), 0.0));
+  if (m.y < 0.0) {
+    im = -im;
+  }
+  return fe_renorm(fe(vec2<f32>(re, im), e / 2));
+}
+
+// Certified interiority attempt at a periodic phase point. The period block
+// Φ_p (sidecar header entries hdrBase+4..8, c+ form) is a FIXED Möbius map of
+// the delta for this pixel's dc: fixed points ζ± from De·δ² + (1−Ae)·δ − Bc =
+// 0, multiplier κ = (Ae − Bc·De)/(1+De·ζ)². TRUE ⇒ provably interior: |κ| < 
+// 0.98 (κ is the pixel's own cycle multiplier, certified to ~1e-4 by the
+// block radius), |w₀| = |(δ−ζa)/(δ−ζr)| < 0.5 (well inside the basin), and
+// the whole contraction path stays inside the certified radius
+// (max(|ζa|, |δ−ζa|)·2 ≤ r ⇒ |δ_j| ≤ |ζa| + |δ−ζa| ≤ r for all j).
+fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
+  let log2_dz = log2(max(length(dz.m), 1e-30)) + f32(dz.e);
+  if (!(log2_dz < rLog2)) {
+    return false;
+  }
+  let hA = mandelbrotJetRadii[hdrBase + 4].v;
+  let hB = mandelbrotJetRadii[hdrBase + 5].v;
+  let hD = mandelbrotJetRadii[hdrBase + 6].v;
+  let hAp = mandelbrotJetRadii[hdrBase + 7].v;
+  let hDp = mandelbrotJetRadii[hdrBase + 8].v;
+  let cA = fe(vec2<f32>(hA.x, hA.y), i32(hA.z));
+  let cB = fe(vec2<f32>(hB.x, hB.y), i32(hB.z));
+  let cD = fe(vec2<f32>(hD.x, hD.y), i32(hD.z));
+  let cAp = fe(vec2<f32>(hAp.x, hAp.y), i32(hAp.z));
+  let cDp = fe(vec2<f32>(hDp.x, hDp.y), i32(hDp.z));
+  let ae = fe_add(cA, fe_cmul(cAp, dc));
+  let de = fe_add(cD, fe_cmul(cDp, dc));
+  let bc = fe_cmul(cB, dc);
+  if (length(de.m) < 1e-20) {
+    return false; // degenerate quadratic — no certified verdict
+  }
+  let one = fe(vec2<f32>(1.0, 0.0), 0);
+  let oneMinusAe = fe_add(one, fe_neg(ae));
+  let disc = fe_add(fe_cmul(oneMinusAe, oneMinusAe), fe_scale(fe_cmul(de, bc), 4.0));
+  let sq = fe_csqrt(disc);
+  let inv2De = fe_cinv(fe_scale(de, 2.0));
+  let negOmA = fe_neg(oneMinusAe); // Ae − 1
+  let z1 = fe_cmul(fe_add(negOmA, sq), inv2De);
+  let z2 = fe_cmul(fe_add(negOmA, fe_neg(sq)), inv2De);
+  let num = fe_add(ae, fe_neg(fe_cmul(bc, de)));
+  let d1 = fe_add(one, fe_cmul(de, z1));
+  let k1 = fe_cmul(num, fe_cinv(fe_cmul(d1, d1)));
+  let d2 = fe_add(one, fe_cmul(de, z2));
+  let k2 = fe_cmul(num, fe_cinv(fe_cmul(d2, d2)));
+  let l2k1 = log2(max(length(k1.m), 1e-30)) + f32(k1.e);
+  let l2k2 = log2(max(length(k2.m), 1e-30)) + f32(k2.e);
+  var za = z1;
+  var zr = z2;
+  var l2ka = l2k1;
+  if (l2k2 < l2k1) {
+    za = z2;
+    zr = z1;
+    l2ka = l2k2;
+  }
+  if (!(l2ka < -0.03)) {
+    return false; // not attracting with margin (|κ| ≥ ~0.98)
+  }
+  let dza = fe_add(dz, fe_neg(za));
+  let dzr = fe_add(dz, fe_neg(zr));
+  if (length(dzr.m) < 1e-20) {
+    return false;
+  }
+  let w0 = fe_cmul(dza, fe_cinv(dzr));
+  let l2w = log2(max(length(w0.m), 1e-30)) + f32(w0.e);
+  if (!(l2w < -1.0)) {
+    return false; // outside the safe basin margin (|w₀| ≥ 0.5)
+  }
+  let l2za = log2(max(length(za.m), 1e-30)) + f32(za.e);
+  let l2dza = log2(max(length(dza.m), 1e-30)) + f32(dza.e);
+  if (!(max(l2za, l2dza) + 1.0 < rLog2)) {
+    return false; // contraction path not provably inside the radius
+  }
+  return true;
+}
+
 fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32) -> TexelOut {
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
@@ -1298,9 +1597,10 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   // Affine BLA and Padé share try_apply_bla_deep (mode ≥ 1.5 branches to
   // Padé); jet (3) and Möbius-c+ (4) use the shared jet buffers and their own
   // try_apply_*.
-  let isMobiusDeep = mandelbrot.approximationMode >= 3.5;
-  let isJetDeep = mandelbrot.approximationMode >= 2.5 && !isMobiusDeep;
-  let isBlockTableDeep = isJetDeep || isMobiusDeep;
+  let isUnifiedDeep = mandelbrot.approximationMode >= 4.5;
+  let isMobiusDeep = mandelbrot.approximationMode >= 3.5 && !isUnifiedDeep;
+  let isJetDeep = mandelbrot.approximationMode >= 2.5 && !isMobiusDeep && !isUnifiedDeep;
+  let isBlockTableDeep = isJetDeep || isMobiusDeep || isUnifiedDeep;
   let useBlaDeep = mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5;
   var skip0Log = 0;
   var log_dcMag = 0.0;
@@ -1318,7 +1618,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   // Hoisted per-level maxR3 gates (see the shallow loop's jetLvlR3).
   var jetLvlR3Deep: array<f32, JET_MAX_LEVELS>;
   if (useBlaDeep && isBlockTableDeep) {
-    if (isJetDeep) {
+    if (isJetDeep || isUnifiedDeep) {
       dcDeep2 = fe_cmul(dc, dc);
       dcDeep3 = fe_cmul(dcDeep2, dc);
     }
@@ -1331,15 +1631,46 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   }
   var jetLevelHintDeep = JET_MAX_LEVELS; // (#5) per-pixel level hint
   var usedBla = false;
+  // Phase E periodic-interior state (see the shallow loop).
+  var perP = 0;
+  var perStart = 0;
+  var perNext = 2147483647;
+  var perR = -3.0e38;
+  var perHdr = 0;
+  if (isUnifiedDeep && useBlaDeep) {
+    let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
+    perHdr = i32(lastLvl.offset + lastLvl.count);
+    perStart = i32(mandelbrotJetRadii[perHdr + 4].v.w);
+    perP = i32(mandelbrotJetRadii[perHdr + 5].v.w);
+    perR = mandelbrotJetRadii[perHdr + 6].v.w;
+    if (perP > 0) {
+      perNext = perStart;
+    }
+  }
 
   while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
     g_workSteps += 1u;
+    if (perP > 0 && ref_i >= perNext) {
+      let k = (ref_i - perStart + perP - 1) / perP;
+      let aligned = perStart + k * perP;
+      if (ref_i == aligned) {
+        perNext = aligned + perP;
+        if (try_periodic_interior(perHdr, dz, dc, perR)) {
+          inside = true;
+          break;
+        }
+      } else {
+        perNext = aligned;
+      }
+    }
     var skipped = 0;
     if (useBlaDeep) {
       var blaZ = vec2<f32>(0.0);
       if (isBlockTableDeep) {
         if (log2(max(length(dz.m), 1e-30)) + f32(dz.e) < jetMaxR3Deep) {
-          if (isMobiusDeep) {
+          if (isUnifiedDeep) {
+            skipped = try_apply_unified(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep);
+          } else if (isMobiusDeep) {
             skipped = try_apply_mobius(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep);
           } else {
             skipped = try_apply_jet(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), false, &jetLevelHintDeep);
@@ -1511,6 +1842,7 @@ var<workgroup> wgActive: atomic<u32>;
 var<workgroup> wgRealSum: atomic<u32>;  // Σ real loop steps over this workgroup's texels
 var<workgroup> wgRealMax: atomic<u32>;  // max real loop steps among them (straggler)
 var<workgroup> wgCovSum: atomic<u32>;   // Σ covered iterations over them
+var<workgroup> wgTier: array<atomic<u32>, 4>; // Σ tier applications (auto mode)
 
 @compute @workgroup_size(8, 8)
 fn cs_main(
@@ -1523,6 +1855,9 @@ fn cs_main(
     atomicStore(&wgRealSum, 0u);
     atomicStore(&wgRealMax, 0u);
     atomicStore(&wgCovSum, 0u);
+    for (var t = 0; t < 4; t++) {
+      atomicStore(&wgTier[t], 0u);
+    }
   }
   workgroupBarrier();
 
@@ -1577,6 +1912,7 @@ fn cs_main(
           // iterations it covers this dispatch (covered base = prior iter, or 0
           // for a fresh compute request).
           g_workSteps = 0u;
+          g_tierApps = array<u32, 4>(0u, 0u, 0u, 0u);
           let startIter = select(iter_val, 0.0, is_compute_request);
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
           // AA sub-pixel jitter (neutral-space units); zero for sample 0 / AA off.
@@ -1589,7 +1925,49 @@ fn cs_main(
             // dc = local·scaleMant + (cxMant, cyMant) is a single same-exponent add.
             let dc = fe_renorm(fe(local_rot * mandelbrot.scale + vec2<f32>(mandelbrot.cx, mandelbrot.cy), scaleExp));
             if (is_compute_request) {
-              result = mandelbrot_compute_deep(dc, 0.0, vec2<f32>(0.0), 0, 0, 0.0, 0.0, 0.0);
+              // Certified SA prefix (Phase C, auto mode): the sidecar carries a
+              // 4-entry header after the block records (base = last directory
+              // entry's offset+count) — b1..b4 + n0. Start the pixel at n = n0
+              // with δ = Σ b_j·dc^j and ∂δ/∂c = Σ j·b_j·dc^(j−1), entering
+              // mandelbrot_compute_deep through its CONTINUATION parameters
+              // (no changes inside the iteration function). n0 = 0 (shallow
+              // c_max, non-auto modes, dead profile) degenerates to the plain
+              // fresh start. The build's no-early-escape guard (|Z|+ρ ≤ 1.9
+              // over the prefix) certifies no escape is jumped.
+              var saIter = 0.0;
+              var saDz = vec2<f32>(0.0);
+              var saDzE = 0;
+              var saRef = 0;
+              var saDerx = 0.0;
+              var saDery = 0.0;
+              var saDers = 0.0;
+              if (mandelbrot.approximationMode >= 4.5 && mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5) {
+                let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
+                let saBase = i32(lastLvl.offset + lastLvl.count);
+                let h0 = mandelbrotJetRadii[saBase].v;
+                let n0 = i32(h0.w);
+                if (n0 > 0 && f32(n0) < mandelbrot.maxIteration) {
+                  let b1 = fe(vec2<f32>(h0.x, h0.y), i32(h0.z));
+                  let h1 = mandelbrotJetRadii[saBase + 1].v;
+                  let b2 = fe(vec2<f32>(h1.x, h1.y), i32(h1.z));
+                  let h2 = mandelbrotJetRadii[saBase + 2].v;
+                  let b3 = fe(vec2<f32>(h2.x, h2.y), i32(h2.z));
+                  let h3 = mandelbrotJetRadii[saBase + 3].v;
+                  let b4 = fe(vec2<f32>(h3.x, h3.y), i32(h3.z));
+                  let v = fe_cmul(fe_add(fe_cmul(fe_add(fe_cmul(fe_add(fe_cmul(b4, dc), b3), dc), b2), dc), b1), dc);
+                  let d = fe_add(fe_cmul(fe_add(fe_cmul(fe_add(fe_cmul(fe_scale(b4, 4.0), dc), fe_scale(b3, 3.0)), dc), fe_scale(b2, 2.0)), dc), b1);
+                  let vr = fe_renorm(v);
+                  let dr = fe_renorm(d);
+                  saIter = f32(n0);
+                  saDz = vr.m;
+                  saDzE = vr.e;
+                  saRef = n0;
+                  saDerx = dr.m.x;
+                  saDery = dr.m.y;
+                  saDers = f32(dr.e) * LN2;
+                }
+              }
+              result = mandelbrot_compute_deep(dc, saIter, saDz, saDzE, saRef, saDerx, saDery, saDers);
             } else {
               // Deep continuation: layers 2/3 hold the dz mantissa, layer 7 its
               // exponent; layers 4/5/8 the raw derivative (derM.x, derM.y, derS).
@@ -1623,6 +2001,9 @@ fn cs_main(
           atomicAdd(&wgRealSum, realSteps);
           atomicMax(&wgRealMax, realSteps);
           atomicAdd(&wgCovSum, covered);
+          for (var t = 0; t < 4; t++) {
+            atomicAdd(&wgTier[t], g_tierApps[t]);
+          }
 
           // Count the written (post-iteration) state.
           iter_val = result.iter.r;
@@ -1679,6 +2060,14 @@ fn cs_main(
       atomicAdd(&workStats.covMean, (cv + 32u) >> 6u);
       atomicAdd(&workStats.maxAccum, rm);
       atomicMax(&workStats.maxSteps, rm);
+      // Tier counters flush RAW (no >>6): they count BLOCK applications only
+      // (small per-workgroup-per-dispatch — the downscale rounded typical
+      // 1-10 app flushes to ZERO), and their session totals stay far under
+      // u32 even on heavy renders, unlike the loop-turn accumulators above.
+      atomicAdd(&workStats.tierAff, atomicLoad(&wgTier[0]));
+      atomicAdd(&workStats.tierPade, atomicLoad(&wgTier[1]));
+      atomicAdd(&workStats.tierCplus, atomicLoad(&wgTier[2]));
+      atomicAdd(&workStats.tierJet, atomicLoad(&wgTier[3]));
     }
   }
 }

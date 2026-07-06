@@ -226,7 +226,7 @@ const model =  defineModel<MandelbrotParams>({
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
      interpolationMode: 'lab',
-     approximationMode: 'perturbation',
+     approximationMode: 'auto',
      targetFps: 60,
      gpuLoadMultiplier: 1.0,
   }
@@ -382,13 +382,24 @@ const debugViewOptions = [
   { label: 'Mix', value: 3 },
   { label: 'Probes', value: 4 },
 ];
+// Primary control (post 2.8 ship gate): Auto = unified per-block dispatch,
+// Exact = pure perturbation. Legacy single modes live in the debug section as
+// overrides (same model field, so presets carrying them keep working).
 const approximationOptions = [
-  { label: 'Perturbation', value: 'perturbation' },
+  { label: 'Auto', value: 'auto' },
+  { label: 'Exact', value: 'perturbation' },
+];
+const legacyModeOptions = [
+  { label: 'Off', value: 'off' },
   { label: 'BLA', value: 'bla' },
   { label: 'Padé', value: 'pade' },
   { label: 'Jet', value: 'jet' },
   { label: 'Möbius+', value: 'mobius' },
 ];
+const legacyOverride = () => {
+  const m = model.value.approximationMode;
+  return m === 'bla' || m === 'pade' || m === 'jet' || m === 'mobius' ? m : 'off';
+};
 
 // ── Dense field formatters (Palettes) ────────────────────────────────
 const palettePeriodFmt = () => formatPalettePeriod(model.value.palettePeriod);
@@ -2686,7 +2697,7 @@ async function importSkyboxTexture(event: Event) {
         <DenseSeg
           label="Approximation"
           :options="approximationOptions"
-          :model-value="model.approximationMode ?? 'perturbation'"
+          :model-value="legacyOverride() !== 'off' ? 'auto' : (model.approximationMode ?? 'auto')"
           @update:model-value="(v: string | number) => model.approximationMode = v as ApproximationMode"
         />
 
@@ -2724,6 +2735,16 @@ async function importSkyboxTexture(event: Event) {
             @update:model-value="(v: string | number) => model.debugView = Number(v)"
           />
         </div>
+
+        <!-- Legacy single-mode override (debug): forces one tier's standalone
+             table instead of the unified dispatch. Off = follow the primary
+             Auto/Exact control. -->
+        <DenseSeg
+          label="Mode override"
+          :options="legacyModeOptions"
+          :model-value="legacyOverride()"
+          @update:model-value="(v: string | number) => model.approximationMode = (v === 'off' ? 'auto' : v) as ApproximationMode"
+        />
 
         <div class="fields">
           <DenseField

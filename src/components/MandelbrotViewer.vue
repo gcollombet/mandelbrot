@@ -267,7 +267,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   activateAnimate: false,
   debugShading: false,
   debugView: 0,
-  approximationMode: 'perturbation',
+  approximationMode: 'auto',
   blaEpsilon: 1e-3,
   maxBlaSkip: 65536,
   precisionBudget: '1e-30',
@@ -392,7 +392,7 @@ function applyApproximationToEngine() {
   const engine = mandelbrotEngine.value;
   if (!engine) return;
   const raw = mandelbrotParams.value.approximationMode;
-  const mode: ApproximationMode = raw === 'bla' || raw === 'pade' || raw === 'jet' || raw === 'mobius' ? raw : 'perturbation';
+  const mode: ApproximationMode = raw === 'bla' || raw === 'pade' || raw === 'jet' || raw === 'mobius' || raw === 'auto' ? raw : 'perturbation';
   engine.setApproximationMode(mode);
 }
 

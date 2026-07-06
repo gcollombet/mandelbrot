@@ -184,7 +184,7 @@ type ReferenceWorkerResponse =
         // (JET_COEFF_FLOATS stride) or Möbius-c+ records (MOBIUS_COEFF_FLOATS
         // stride) — the latter two with a separate radius buffer in `radii`
         // (JET_RADII_FLOATS stride — the split "buffer de rayons").
-        kind: 'bla' | 'jet' | 'mobius'
+        kind: 'bla' | 'jet' | 'mobius' | 'unified'
         steps: Float32Array<ArrayBuffer>
         radii?: Float32Array<ArrayBuffer>
         levels: Uint32Array<ArrayBuffer>
@@ -223,7 +223,7 @@ type ReferenceSlot = {
     chunks: Float32Array<ArrayBuffer>[]
     /** Block table for this reference (arrives after the orbit completes). */
     bla: {
-        kind: 'bla' | 'jet' | 'mobius'
+        kind: 'bla' | 'jet' | 'mobius' | 'unified'
         steps: Float32Array<ArrayBuffer>
         radii?: Float32Array<ArrayBuffer>
         levels: Uint32Array<ArrayBuffer>
@@ -355,7 +355,7 @@ export type RenderOptions = {
     textureMappingMode?: number,
 }
 
-export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet' | 'mobius'
+export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet' | 'mobius' | 'auto'
 
 export type Mandelbrot = {
     maxIterations: number,
@@ -505,11 +505,19 @@ export class Engine {
      *  full-generation Σ g_workSteps (block skips + exact steps) recovered from
      *  the >>6 workgroup downscale as realMean << 6. -1 = not yet known. */
     realLoopStepsApprox = -1
+    // [affine, Padé, c+, jet] Σ applications (auto mode); -1 = unknown.
+    tierAppsApprox: [number, number, number, number] = [-1, -1, -1, -1]
     // workStatsBuffer accumulates on the GPU across EVERY dispatch of a render
     // generation (cleared once, here-tracked, not per dispatch), so the totals are
     // exact and deterministic — independent of which frames the CPU happens to
     // sample. -1 ⇒ not yet cleared for the current generation.
-    private workStatsClearedGeneration = -1
+    // Work-stats SESSION: bumps only when pixel work actually restarts (mode/ε/
+    // reference/resize) — NOT on mid-render table posts. Drives the GPU-side
+    // stats clear so Total apps spans the whole converge-from-restart session.
+    private workStatsSessionSerial = 0
+    private workStatsClearedSession = -1
+    private finalStatsBuffer?: GPUBuffer
+    private finalStatsPending = false
 
     // Self-managing render loop
     private _rafId: number | null = null
@@ -568,7 +576,7 @@ export class Engine {
     // after a mode switch the counters still describe the previous mode's
     // table — jet and mobius even share buffers — so blocks stay disabled
     // until the worker's repost lands.
-    private currentBlockTableKind: 'bla' | 'jet' | 'mobius' | null = null
+    private currentBlockTableKind: 'bla' | 'jet' | 'mobius' | 'unified' | null = null
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private maxBlaSkip = 65536
@@ -1052,7 +1060,7 @@ export class Engine {
             // continuations simply start using BLA. Clearing here caused a visible
             // render cut (black screen) each time the BLA table was delivered.
             this.needRender = true
-            this.invalidateCounterReadback()
+            this.invalidateCounterReadback(true)
         } else if (this.stagingRef && message.refId === this.stagingRef.refId) {
             this.stagingRef.bla = {
                 kind: message.kind,
@@ -1072,7 +1080,7 @@ export class Engine {
         // only feed per-frame shader uniforms and UI, and serializing them to decimal strings
         // every frame at the full budget made per-frame cost ∝ budget. The budget lives only on
         // the worker navigator (set via the reset message), which builds the reference orbit.
-        this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
+        this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 5 ? 'auto' : this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         this.initializeReferenceWorker()
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
@@ -1208,18 +1216,19 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
-        // Work-instrumentation buffer (in-place compute path): 4 × u32
-        // (realMean, covMean, maxAccum, maxSteps) — see WorkStats in the shader.
+        // Work-instrumentation buffer (in-place compute path): 8 × u32
+        // (realMean, covMean, maxAccum, maxSteps, tierAff/Pade/Cplus/Jet) —
+        // see WorkStats in the shader.
         this.workStatsBuffer = this.device.createBuffer({
-            size: 16,
+            size: 32,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine WorkStats Storage',
         })
-        // Readback slots hold counter (8 B) + workStats (16 B) = 24 B, copied
-        // together each sampled in-place dispatch and read as 6 × u32.
+        // Readback slots hold counter (8 B) + workStats (32 B) = 40 B, copied
+        // together each sampled in-place dispatch and read as 10 × u32.
         this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
             buffer: this.device.createBuffer({
-                size: 24,
+                size: 40,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: `Engine Counter Readback ${index}`,
             }),
@@ -1523,9 +1532,9 @@ export class Engine {
     // Upload a worker-built block table into the buffers of its kind. The level
     // directories share the 4-u32 stride; only the step stride differs. Jet
     // tables carry a second array (`radii`, the split "buffer de rayons").
-    private writeBlockTable(table: { kind: 'bla' | 'jet' | 'mobius', steps: Float32Array<ArrayBuffer>, radii?: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number }) {
+    private writeBlockTable(table: { kind: 'bla' | 'jet' | 'mobius' | 'unified', steps: Float32Array<ArrayBuffer>, radii?: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number }) {
         this.currentBlockTableKind = table.kind
-        if (table.kind === 'jet' || table.kind === 'mobius') {
+        if (table.kind === 'jet' || table.kind === 'mobius' || table.kind === 'unified') {
             // Mobius tables live in the jet buffers (same 12 B element type,
             // exclusive modes): only the block stride differs, and the shader
             // indexes by the mode flag. The coeff capacity is tracked in
@@ -1533,10 +1542,12 @@ export class Engine {
             // denser mobius records; the radii sidecar is sized on its own
             // block count (mobius has 27/15 more blocks per coeff float).
             const blockCount = Math.ceil(
-                table.steps.length / (table.kind === 'mobius' ? MOBIUS_COEFF_FLOATS : JET_COEFF_FLOATS),
+                table.steps.length / (table.kind === 'mobius' ? MOBIUS_COEFF_FLOATS : JET_COEFF_FLOATS), // unified = 27 floats = jet stride
             )
             this.ensureJetBufferCapacity(Math.ceil(table.steps.length / JET_COEFF_FLOATS))
-            this.ensureJetRadiiBufferCapacity(blockCount)
+            // Unified sidecars carry 4 extra entries (the SA prefix header)
+            // beyond the per-block records — size on the actual array.
+            this.ensureJetRadiiBufferCapacity(Math.max(blockCount, Math.ceil((table.radii?.length ?? 0) / 4)))
             this.ensureJetLevelBufferCapacity(table.levelCount)
             const radii = table.radii
             if (table.steps.length > 0 && this.mandelbrotJetBuffer) {
@@ -1640,15 +1651,72 @@ export class Engine {
         this.rebuildIterationBindGroups()
     }
 
-    private invalidateCounterReadback() {
+    // One-off exact stats copy at render completion: counter+workStats hold
+    // the session totals on the GPU; a standalone 40 B copy + map gives the
+    // deterministic Σ regardless of readback sampling alignment. Discarded if
+    // a new session starts before it lands.
+    private requestFinalStatsReadback() {
+        if (!this.device || !this.workStatsBuffer || !this.counterBuffer || this.finalStatsPending) {
+            return
+        }
+        if (!this.finalStatsBuffer) {
+            this.finalStatsBuffer = this.device.createBuffer({
+                size: 40,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+                label: 'Engine Final Stats Readback',
+            })
+        }
+        const session = this.workStatsSessionSerial
+        const encoder = this.device.createCommandEncoder({ label: 'Engine Final Stats Copy' })
+        encoder.copyBufferToBuffer(this.counterBuffer, 0, this.finalStatsBuffer, 0, 8)
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 32)
+        this.device.queue.submit([encoder.finish()])
+        this.finalStatsPending = true
+        void (async () => {
+            let mapped = false
+            try {
+                await this.finalStatsBuffer!.mapAsync(GPUMapMode.READ)
+                mapped = true
+                if (session !== this.workStatsSessionSerial) {
+                    return // a new session started: totals belong to it now
+                }
+                const data = new Uint32Array(this.finalStatsBuffer!.getMappedRange())
+                const realMean = data[2]
+                const covMean = data[3]
+                if (realMean > 0 && covMean / realMean >= 1) {
+                    this.realLoopStepsApprox = realMean * 64
+                    this.tierAppsApprox = [data[6], data[7], data[8], data[9]]
+                    this.lastCompletionTotalApps = this.realLoopStepsApprox
+                }
+            } catch {
+                // Device loss / buffer destruction can reject the map.
+            } finally {
+                if (mapped) {
+                    this.finalStatsBuffer!.unmap()
+                }
+                this.finalStatsPending = false
+            }
+        })()
+    }
+
+    // `preserveWorkStats = true` is the TABLE-POST variant: a blaReady mid-
+    // render continues the SAME work session, so the GPU-side Σ apps keeps
+    // accumulating and the CPU mirrors stay provisional instead of resetting —
+    // zeroing here was why auto/mobius froze Total apps at −1 (the short
+    // post-table reconvergence ended before any sampled readback landed).
+    private invalidateCounterReadback(preserveWorkStats = false) {
         this.unfinishedPixelCount = -1
         this.activePixelCount = -1
         this.realizedSkip = -1
         this.workgroupWaste = -1
         this.maxPixelSteps = -1
-        this.realLoopStepsApprox = -1
+        if (!preserveWorkStats) {
+            this.realLoopStepsApprox = -1
+            this.tierAppsApprox = [-1, -1, -1, -1]
+            // Next in-place dispatch re-clears workStats for the new session.
+            this.workStatsSessionSerial++
+        }
         this.counterReadbackGeneration++
-        // Next in-place dispatch re-clears workStats for the new generation.
         this.lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
         this.counterSampleFrame = -1
     }
@@ -1690,7 +1758,8 @@ export class Engine {
                 const covMean = data[3]
                 const maxAccum = data[4]
                 const maxSteps = data[5]
-                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps)
+                const tierApps: [number, number, number, number] = [data[6], data[7], data[8], data[9]]
+                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps, tierApps)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
             } finally {
@@ -1702,7 +1771,7 @@ export class Engine {
         })()
     }
 
-    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0) {
+    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0]) {
         if (generation !== this.counterReadbackGeneration) {
             return
         }
@@ -1734,6 +1803,10 @@ export class Engine {
                 this.workgroupWaste = waste
                 this.maxPixelSteps = maxSteps
                 this.realLoopStepsApprox = realMean * 64
+                // Tier mix (auto mode): per-tier Σ block applications — RAW
+                // counters (no downscale shader-side: block applications per
+                // workgroup per dispatch are small and would round to zero).
+                this.tierAppsApprox = [tierApps[0], tierApps[1], tierApps[2], tierApps[3]]
             } else {
                 this.realizedSkip = -1
                 this.workgroupWaste = -1
@@ -2038,6 +2111,8 @@ export class Engine {
             this.mandelbrotNavigator.use_jet()
         } else if (mode === 'mobius') {
             this.mandelbrotNavigator.use_mobius_cplus()
+        } else if (mode === 'auto') {
+            this.mandelbrotNavigator.use_unified()
         } else {
             this.mandelbrotNavigator.use_perturbation()
         }
@@ -2083,7 +2158,7 @@ export class Engine {
         // ε sets the validity radius (ε·|A| affine, √ε·|A| Padé, the certified
         // (V) radii for jet/mobius), so a change must rebuild the table and
         // re-render in any block-jump mode.
-        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius') {
+        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius' || this.approximationMode === 'auto') {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
@@ -2154,7 +2229,7 @@ export class Engine {
             jobId: this.referenceJobId,
             maxBlaSkip: pow2,
         })
-        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius') {
+        if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius' || this.approximationMode === 'auto') {
             this.currentBlaLevelCount = 0
             this.clearHistoryNextFrame = true
             this.needRender = true
@@ -2184,10 +2259,12 @@ export class Engine {
         } else if (!renderingNow && this.completionTimerActive) {
             this.lastCompletionWallMs = now - this.completionStartMs
             this.lastCompletionGpuMs = this.completionAccumulatedGpuMs
-            // realLoopStepsApprox is the render-wide running total (accumulated on
-            // the GPU across every dispatch), so at completion it is the final Σ.
+            // Provisional: the last sampled readback (may miss tail dispatches
+            // or read −1 right after a table post). The exact figure lands via
+            // the final readback and overwrites it.
             this.lastCompletionTotalApps = this.realLoopStepsApprox
             this.completionTimerActive = false
+            this.requestFinalStatsReadback()
         }
 
         this.debugShadingActive = renderOptions.debugShading
@@ -2200,7 +2277,7 @@ export class Engine {
             return
         }
 
-        const navigatorApproximationMode: ApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
+        const navigatorApproximationMode: ApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 5 ? 'auto' : this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
             this.approximationMode = navigatorApproximationMode
@@ -2597,7 +2674,7 @@ export class Engine {
         // coverage — as BLA/Padé do — would disable these modes during the
         // whole zoom (their rebuilds are throttled worker-side because they
         // cost ~10-20× a BLA build).
-        const prefixTableMode = this.approximationMode === 'jet' || this.approximationMode === 'mobius'
+        const prefixTableMode = this.approximationMode === 'jet' || this.approximationMode === 'mobius' || this.approximationMode === 'auto'
         const tableCoversView = prefixTableMode
             ? this.referenceBlaReadyMaxIterations > 0
             : this.referenceBlaReadyMaxIterations >= guardedMaxIter
@@ -2607,14 +2684,15 @@ export class Engine {
         // the worker posts a table of the current mode's kind.
         const expectedTableKind = this.approximationMode === 'jet' ? 'jet'
             : this.approximationMode === 'mobius' ? 'mobius'
+            : this.approximationMode === 'auto' ? 'unified'
             : 'bla'
-        const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius')
+        const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius' || this.approximationMode === 'auto')
             && orbitComplete
             && this.currentBlaLevelCount > 0
             && this.currentBlockTableKind === expectedTableKind
             && tableCoversView
         const approximationModeFlag = blocksReady
-            ? (this.approximationMode === 'mobius' ? 4 : this.approximationMode === 'jet' ? 3 : this.approximationMode === 'pade' ? 2 : 1)
+            ? (this.approximationMode === 'auto' ? 5 : this.approximationMode === 'mobius' ? 4 : this.approximationMode === 'jet' ? 3 : this.approximationMode === 'pade' ? 2 : 1)
             : 0
         const blaLevelCount = blocksReady ? this.currentBlaLevelCount : 0
         // Diagnostic mirror of exactly what the shader receives this frame: the mode
@@ -3004,9 +3082,9 @@ export class Engine {
             // workStats accumulates across the whole render generation — clear it
             // only on the generation's first in-place dispatch, then let every
             // dispatch atomicAdd into it (exact, sampling-independent totals).
-            if (this.workStatsClearedGeneration !== this.counterReadbackGeneration) {
-                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 16)
-                this.workStatsClearedGeneration = this.counterReadbackGeneration
+            if (this.workStatsClearedSession !== this.workStatsSessionSerial) {
+                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 32)
+                this.workStatsClearedSession = this.workStatsSessionSerial
             }
             const computePass = commandEncoder.beginComputePass()
             computePass.setPipeline(this.pipelineInplace!)
@@ -3023,7 +3101,7 @@ export class Engine {
                 const sequence = ++this.counterReadbackSequence
                 const generation = this.counterReadbackGeneration
                 commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
-                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 16)
+                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 32)
                 this.lastCounterDispatchFrame = frameSerial
                 scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
             }
