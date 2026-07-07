@@ -3,6 +3,7 @@ import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
+import PerformancePanel from './PerformancePanel.vue';
 import { DenseTopbar, DenseTip, useDenseView, denseAttrs } from './dense';
 import type {ApproximationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
@@ -71,6 +72,19 @@ const activeDiscoveryClusterId = ref<string | null>(null);
 const isPresetTraveling = ref(false);
 
 const showUI = ref(true);
+
+// Separate GPU performance panel (floating, dark, theme-independent). Opened via
+// the `m` key, the `?perf=1` URL param, or a persisted localStorage flag.
+const showPerfPanel = ref((() => {
+  try {
+    if (new URLSearchParams(window.location.search).get('perf') === '1') return true;
+    return window.localStorage.getItem('perf') === '1';
+  } catch { return false; }
+})());
+function togglePerfPanel() {
+  showPerfPanel.value = !showPerfPanel.value;
+  try { window.localStorage.setItem('perf', showPerfPanel.value ? '1' : '0'); } catch { /* ignore */ }
+}
 // Tactile = pas de survol + pointeur grossier → on guide vers le double-tap
 // plutôt que la touche Échap (absente sur mobile).
 const isTouchDevice = typeof window !== 'undefined'
@@ -248,6 +262,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   lightAngle: 0,
   antialiasLevel: 1,
   aaAuto: false,
+  aaAdaptive: true,
   maxIterations: 100,
   displacementAmount: 0,
   tessellationLevel: 0,
@@ -699,6 +714,12 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   if (key === 'p' && !e.repeat) {
     e.preventDefault();
     triggerQuickSnapshot();
+    return;
+  }
+  // Toggle the GPU performance panel (M — Mesures).
+  if (key === 'm' && !e.repeat) {
+    e.preventDefault();
+    togglePerfPanel();
     return;
   }
   // Trigger idle-time antialiasing accumulation (G — "A" is a pan key).
@@ -1556,6 +1577,18 @@ function startTravelToPreset(preset: PresetRecord) {
       />
     </div>
 
+    <!-- GPU performance panel (separate floating overlay, top-left) -->
+    <div
+      v-show="showPerfPanel"
+      class="perf-panel-wrapper"
+      @touchstart.stop
+      @touchend.stop
+      @pointerdown.stop
+      @wheel.stop
+    >
+      <PerformancePanel :engine="mandelbrotEngine" @close="togglePerfPanel" />
+    </div>
+
     <!-- Antialiasing control / progress (bottom-center) -->
     <div
       v-show="showUI && !discoveryRadarActive && mandelbrotParams.antialiasLevel > 1"
@@ -1593,6 +1626,7 @@ function startTravelToPreset(preset: PresetRecord) {
       :mu="mandelbrotParams.mu"
       :antialiasLevel="mandelbrotParams.antialiasLevel"
       :aaAuto="mandelbrotParams.aaAuto"
+      :aaAdaptive="mandelbrotParams.aaAdaptive ?? true"
       :epsilon="mandelbrotParams.epsilon"
       :palettePeriod="mandelbrotParams.palettePeriod"
       :paletteOffset="mandelbrotParams.paletteOffset"
@@ -2377,6 +2411,18 @@ function startTravelToPreset(preset: PresetRecord) {
   transform: translateX(-50%);
   z-index: 20;
   pointer-events: auto;
+}
+
+.perf-panel-wrapper {
+  position: fixed;
+  top: 14px;
+  left: 14px;
+  width: min(340px, calc(100vw - 28px));
+  max-height: calc(100vh - 28px);
+  overflow-y: auto;
+  z-index: 40;
+  pointer-events: auto;
+  -webkit-overflow-scrolling: touch;
 }
 
 @media (max-width: 1023px) {

@@ -70,3 +70,133 @@ Staged delivery: Sections 1–6 are **Stage A** (quality: per-pixel adaptive acc
 - [ ] 9.6 PNG snapshot export still correct (direct path)
 - [ ] 9.7 Verify Stage B speedup: boundary-only reconverge, frozen pixels not re-iterated (inspect `activePixelCount` taper across samples)
 - [ ] 9.8 `npx playwright test` — regenerate visual baselines only if the linear roundtrip changed them
+
+## 10. Contrast-driven target (Sobel + moiré, fused with DE — 2026-07-06 design round)
+
+Design decisions (user-validated): predictors fuse in TARGET space via max —
+`target = max(ramp_DE, ramp_sobel, level·(phase_freq > Nyquist))` (magnitudes
+have no common scale; the moiré predictor saturates instead of ramping since
+edge intensity under-reports aliasing past Nyquist). Rebake follows any
+coloring-param change — acceptable by design: AA accumulation is idle-time and
+already restarts on param changes. Orthogonal to unify-jet-table-dispatch
+Phase D: analytic tags decide HOW a subsample is produced, the target decides
+HOW MANY — a Sobel-flagged margin-OK pixel accumulates analytically (near
+free), which widens analytic AA's useful zone beyond the DE band.
+
+- [x] 10.1 Bake input plumbing: accumTexture (sample-0 composite) bound to the
+      bake (binding 3, rgba16float float-sample); AaParams grown to 16 floats
+      (shared bake/reseed layout: + aspect, sceneSin/Cos, screenWidthPx,
+      palettePeriod, mu, logMu, aaContrast); neutral→screen inverse projection
+      in the shader (uv-flip conventions matched to color.wgsl's liveCoord);
+      off-screen neutral texels keep target 1.
+- [x] 10.2 Contrast ramp: 3×3 Sobel on sRGB-encoded luma at the projected
+      screen texel; `1 + smoothstep(EDGE_LO=0.12, EDGE_HI=1.6, |g|)·(level−1)`;
+      fused via max in target space. Constants first, field-tunable later.
+- [x] 10.3 Moiré predictor: |∇ν| central differences from the raw layers
+      (valid escaped neighbors only, center fallback), phase step =
+      |∇ν|·2/palettePeriod; > 0.5 (Nyquist) → target = level. The ν-divergent
+      boundary band is already the DE ramp's job.
+- [x] 10.4 Interior clamp dropped: interior texels take the fused contrast
+      target; deep interior stays at 1 automatically (flat black → Sobel 0).
+      Stamped interior texels are fresh compute requests; their payload is zero
+      → margin fails → honest re-iteration, never analytic-tagged.
+- [x] 10.5 Referee GREEN (`tests/adaptive-aa-contrast.spec.ts`, palettePeriod
+      0.2, intro view, 8×): DE-only eligible 48 103 → fused 151 152 (×3.1),
+      zero GPU errors, DE ring preserved as the floor. Measured synergy: 61 %
+      of the widened band is analytic-tagged (stamped 58 331/151 152) — the
+      Taylor margins PASS off-boundary, so the contrast band is near-free
+      under auto mode. INTERPLAY DECISION: `tests/analytic-aa.spec.ts` now
+      PINS aaContrastEnabled = false (it referees the Phase D expansion on the
+      DE band; with contrast on its analytic zone grows 472 → ~30k texels and
+      its image bound sat flakily at its own threshold — re-run 2× green
+      pinned). Engine toggle `aaContrastEnabled` (default ON) is the A/B hook.
+- [ ] 10.6 Field: moiré view (deep palette bands), interior-boundary quality,
+      threshold tuning; record verdicts in design.md.
+
+## 11. Field fixes — 2026-07-07 round (user report: AA ne se déclenche pas / rebascule)
+
+- [x] 11.1 Convergence-gate deadlock: `fullyConverged` and the `aaAutoPending`
+      keepalive required unfinished/active === 0, but the render loop idles at
+      ≤ UNFINISHED_PIXEL_DONE_THRESHOLD (10) — any view settling with 1–10
+      stuck pixels never composited a sample (manual trigger spun at 0/N
+      forever, auto never fired). Both gates now use the SAME idle threshold
+      (counters known and ≤ 10).
+- [x] 11.2 Post-completion revert: `aaShowAccum` was gated on `aaActive`, so
+      the first frame rendered after completion (animations set needRender
+      every frame) fell back to the direct path and silently dropped the
+      accumulated average. The accumulator now persists (samples ≥ 1) until a
+      real invalidation (any param/navigation change → resetAaState).
+- [x] 11.3 Payload binding under the slack gate: composites can now run with
+      skipResolve false, and the resolved 8-layer binding has no Taylor
+      payload — the accum pass now ALWAYS binds the raw texture (genuine
+      values are what the accumulator wants; resolve is a display nicety),
+      and the analytic-flag finalize keys on the raw binding's existence.
+- [x] 11.4 Auto AA suppressed while `activateAnimate` (time-driven coloring
+      smears the samples and the persisted average would freeze the
+      animation); manual trigger remains the user's explicit choice.
+- [ ] 11.5 Field re-check (user): AA triggers reliably (incl. re-triggers and
+      views with a few stuck pixels), the average survives completion, and
+      band edges (short-period / high-contrast palettes) actually smooth at
+      8–16×. Then the 10.6 threshold-tuning round.
+- [x] 11.6 Jitter amplitude bug (field report: "band edges less smooth than a
+      DPR×2 render"): one neutral texel spans 2·neutralExtent/neutralSize in
+      local_rot units, but the state machine scaled the tent jitter by
+      neutralExtent/neutralSize — HALF a texel per unit j. The tent
+      reconstruction kernel (support ±1 texel by design, spec section 1.4)
+      effectively ran at half width → under-filtered edges. Fixed (×2), and
+      the analytic-margin half-extent δ doubled to match. Expected visual
+      effect: noticeably smoother band/boundary edges at the same level;
+      slightly wider prefilter overall. NOTE for the field round: "details
+      near the boundary look more drowned than DPR×2" is partly FUNDAMENTAL —
+      temporal AA prefilters the 1× color function over the pixel footprint
+      (correct pixel integral), while DPR×2 adds real resolution; the two
+      compose (DPR×2 + AA is the quality maximum). If post-fix edges are now
+      too soft instead, the knob is the reconstruction kernel (tent ±1 → box
+      ±0.5 matches DPR-style sharpness) — decide at 10.6 with the thresholds.
+- [x] 11.7 Reconstruction kernel → BOX ±0.5 texel (user decision, 2026-07-07):
+      the DPR×2 reference is regular-grid box supersampling downscaled to a
+      DPR-1 display, so 16× box-jittered accumulation converges to the exact
+      box integral and matches/beats its sharpness (no tent softness, no
+      resolution myth — at screen DPR 1 the ×2 canvas is resized down).
+      computeAaJitterOffset now returns uniform R2 in [−0.5, 0.5] texel
+      (unit test updated); analytic δ follows (√2·0.5·texel). Sobel adapted
+      for ITERATION BANDING: per-channel R/G/B gradients with max-magnitude
+      (iso-luma hue banding was invisible to luma-only Sobel) and an
+      early-saturating ramp (EDGE_LO 0.08, EDGE_HI 0.8 — a hard band edge
+      needs the full budget under the box kernel; mid-ramp counts leave
+      visible steps). naga + vue-tsc + vitest + vite green.
+- [x] 11.8 A/B option "Adaptive AA" (user request): `aaAdaptive` boolean beside
+      `aaAuto` (MandelbrotParams session field + Settings toggle + full props
+      chain + RenderOptions). false → the bake writes the FULL budget on every
+      texel (aaFull param, predictors bypassed) — the DPR×N-style uniform
+      reference for comparing against the adaptive target map. Toggling it is
+      a param change → AA resets and the next accumulation rebakes.
+- [x] 11.9 Accumulation domain → DISPLAY space (sRGB), field verdict 2026-07-07:
+      even FULL 16× read worse than DPR×2 — brighter near the boundary, harsher
+      band transitions. Root cause: we averaged in linear RGB (design's
+      "gamma-correct" choice) while the DPR×2 reference is a browser downscale
+      that averages sRGB as-is (black/white mix: linear mean displays 0.735 vs
+      0.5). fs_main now emits sRGB into the accumulator, present divides
+      without conversion, the bake reads accum without re-encoding; spec
+      requirement AMENDED (Display-space accumulation). With box ±0.5 jitter,
+      antialiasLevel = 4 ≈ DPR×2 up to sample placement; 16 is strictly
+      smoother. Playwright AA specs not re-run (user-driven testing session) —
+      their diff calibration is domain-relative and should hold; re-run with
+      the next automated round.
+- [x] 11.10 AUDIT + root-cause of the pre-existing roughness (user: "le problème
+      pré-existait avant les optimisations de skip"): the R2 constant was WRONG
+      since Stage A — 1.22074408460575947536 is the root of x⁴ = x + 1 (the R3
+      sequence's constant), not the plastic constant 1.32471795724474602596
+      (x³ = x + 1) the comment claimed. The resulting 2D pair loses the
+      low-discrepancy property: 4–16-sample prefixes cluster in one corner of
+      the pixel instead of stratifying it → band transitions quantized
+      unevenly regardless of kernel. Fixed + seeded at 0.5 so sample 0 = (0,0)
+      is a natural member of the sequence (a hors-série center point biased
+      small prefixes). New unit test asserts quadrant stratification of the
+      8- and 16-prefixes (would have caught the bug). Audited CORRECT: jitter
+      injection point (local_rot, both paths, no cx/cy pollution), gate
+      semantics (target-T pixel = samples 0..T−1, alpha divisor), selective
+      reseed predicate, importance-sampling + equal-weight averaging.
+      DECISION REVERTED with the user: accumulation stays GAMMA-CORRECT
+      (linear RGB) — 11.9's sRGB-averaging amendment rolled back (spec
+      restored); the brighter-than-DPR×2 edge is the correct light integral.

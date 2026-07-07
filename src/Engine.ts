@@ -105,6 +105,24 @@ const UNFINISHED_PIXEL_DONE_THRESHOLD = 10
 // EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
 const GPU_TIME_EMA_ALPHA = 0.25
 
+// Per-pass GPU timing (PerformancePanel). Each timed pass gets a begin/end
+// timestamp pair via GPUComputePass/RenderPassTimestampWrites — recorded inline
+// by the GPU, so NO pipeline barrier is added to the measured pass. The values
+// are resolved and read back asynchronously off the critical path (like the
+// counter readback). Order here defines slot indices and the panel's display
+// order. `label` is shown to the user; `help` explains the metric.
+const PASS_SLOTS: { key: string; label: string; help: string }[] = [
+    { key: 'merge',     label: 'Merge (zoom)',   help: 'Fusion résolu+figé en fin de zoom (MRT min-step). Ne tourne qu\'à l\'arrêt d\'un zoom.' },
+    { key: 'reproject', label: 'Reprojection',   help: 'Décalage entier des pixels lors d\'un pan + effacement des bords (réutilise le calcul).' },
+    { key: 'reseed',    label: 'AA reseed',      help: 'Ré-amorçage sélectif de la frontière pour un échantillon d\'anti-aliasing. Actif seulement en accumulation AA.' },
+    { key: 'compute',   label: 'Itération',      help: 'Kernel fusionné brush+mandelbrot+comptage (perturbation/BLA/jet…). C\'est le cœur du coût.' },
+    { key: 'resolve',   label: 'Resolve',        help: 'Conversion de l\'état sentinelle en état échappé (distance, angle de relief).' },
+    { key: 'aaAccum',   label: 'Couleur (AA)',   help: 'Passe couleur accumulée dans le buffer AA (linéaire) pendant l\'accumulation.' },
+    { key: 'color',     label: 'Couleur',        help: 'Passe couleur directe : palette, relief, skybox, iridescence → écran.' },
+    { key: 'present',   label: 'Present (AA)',   help: 'Division de l\'accumulateur AA par le nombre d\'échantillons + sRGB → écran.' },
+]
+const TS_COUNT = PASS_SLOTS.length * 2
+
 // Count unfinished pixels less often than every render frame.  The readback is
 // asynchronous, so this controls the compute/count pass frequency, not display FPS.
 const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
@@ -332,6 +350,8 @@ function shiftedAnimationContribution(track: AnimationTrackConfig, time: number,
 export type RenderOptions = {
     antialiasLevel: number,
     aaAuto?: boolean,
+    /** false = FULL AA (every pixel gets the whole budget); true/undefined = adaptive target map. */
+    aaAdaptive?: boolean,
     palettePeriod: number,
     paletteOffset: number,
     heightPaletteShift: number,
@@ -563,8 +583,11 @@ export class Engine {
     private pendingGpuTiming = false
     /** Whether refinement was gated (blocked) on the previous frame. */
     private refinementWasGated = false
-    private _fpsFrameCount = 0
-    private _fpsLastTime = 0
+    // FPS from the interval between actually-rendered frames (EMA). Counts every
+    // rendered frame, not just iteration frames, and rejects the idle-resume gap.
+    private _emaFrameMs = 0
+    private _wasActive = false
+    private _lastActiveRenderMs = 0
     /** Wall-clock time of the last frame actually stepped + rendered. */
     private _lastDrawMs = 0
 
@@ -574,6 +597,26 @@ export class Engine {
     // shader sources (optionnellement remplaçables)
     shaderPassColor: string
     private f16Supported = false
+
+    // ── Per-pass GPU timing (PerformancePanel data source) ──────────────
+    // Polled by PerformancePanel.vue, same pattern as RenderStats.
+    timestampCapable = false                    // adapter exposes 'timestamp-query'
+    readonly passMeta = PASS_SLOTS              // labels + help for the panel
+    passTimingsMs: Record<string, number> = {}  // EMA per pass (ms), over frames it ran
+    passActive: Record<string, boolean> = {}    // did each pass run in the last measured frame
+    passGpuSumMs = 0                            // Σ timed passes that ran (breakdown; may overlap)
+    passGpuSpanMs = 0                          // authoritative GPU frame time = max(end) − min(begin)
+    frameSerial = 0                            // monotonic, ++ per actually-rendered frame (one submit)
+    cpuRenderMs = 0                             // render() JS wall time (CPU side of the frame)
+    frameIntervalMs = 0                         // wall time between successive render() calls
+    private timestampsEnabled = false
+    private timestampQuerySet?: GPUQuerySet
+    private tsResolveBuffer?: GPUBuffer
+    private tsReadBuffer?: GPUBuffer
+    private tsReadbackFree = true
+    private tsSlotsUsedThisFrame = 0
+    private tsPendingSlots = 0
+    private lastRenderStartMs = 0
 
     // config
     width = 0
@@ -698,6 +741,10 @@ export class Engine {
     // ── Phase D: analytic AA (Taylor-payload expansion in the color pass) ──
     /** Master switch (auto mode only — the payload's z″ is tracked by the unified kernel). */
     aaAnalyticEnabled = true
+    /** Contrast + moiré AA-target predictors (design D-contrast): Sobel on the
+     *  colorized sample-0 + palette-phase Nyquist saturation, fused with the DE
+     *  ramp via max in target space. Toggle for A/B tests. */
+    aaContrastEnabled = true
     /** Frontier stats from the last reseed: re-iterated texels / boundary-band texels (−1 = none yet). */
     aaFrontierStamped = -1
     aaFrontierEligible = -1
@@ -1134,16 +1181,35 @@ export class Engine {
         // shader-f16 doubles ALU throughput and halves register use for the
         // bounded shading math in the color pass (mobile win). Opt in only if
         // the adapter exposes it; the color source falls back to f32 otherwise.
-        this.f16Supported = this.adapter.features.has('shader-f16')
-        this.device = await this.adapter.requestDevice({
-            requiredFeatures: this.f16Supported ? ['shader-f16'] : [],
-        })
+        // A/B DEBUG OVERRIDE: append `?f16=off` to the URL (or run
+        //   localStorage.setItem('f16','off')  / 'on' / 'auto', then reload)
+        // to force the f32 path on an f16-capable device — lets you measure the
+        // color-pass f16 win vs regression on a real device in ~30 s. `off`
+        // forces f32; `on`/`auto`/absent = default (f16 when the adapter has it).
+        const f16Override = this.readF16Override()
+        const f16Available = this.adapter.features.has('shader-f16')
+        this.f16Supported = f16Override === 'off' ? false : f16Available
+        console.info(`[Engine] shader-f16: available=${f16Available} override=${f16Override ?? 'auto'} → active=${this.f16Supported}`)
+        // Per-pass GPU timing needs the optional 'timestamp-query' feature. Often
+        // absent on mobile (iOS/Safari) — the panel degrades to global metrics.
+        this.timestampCapable = this.adapter.features.has('timestamp-query')
+        const requiredFeatures: GPUFeatureName[] = []
+        if (this.f16Supported) requiredFeatures.push('shader-f16')
+        if (this.timestampCapable) requiredFeatures.push('timestamp-query')
+        this.device = await this.adapter.requestDevice({ requiredFeatures })
+        this.timestampsEnabled = this.timestampCapable
+        console.info(`[Engine] timestamp-query: available=${this.timestampCapable} → per-pass timing ${this.timestampsEnabled ? 'ON' : 'OFF'}`)
         this.device.label = 'Engine Device'
         this.device.lost.then((info) => {
             console.warn(`GPU device lost: reason=${info.reason}, message=${info.message}`)
         })
         this.queue = this.device.queue
         this.queue.label = 'Engine Queue'
+        if (this.timestampsEnabled) {
+            this.timestampQuerySet = this.device.createQuerySet({ type: 'timestamp', count: TS_COUNT, label: 'Engine PerfTimestamps' })
+            this.tsResolveBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC, label: 'Engine TS Resolve' })
+            this.tsReadBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'Engine TS Readback' })
+        }
         this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext
         this.format = navigator.gpu.getPreferredCanvasFormat()
         this.ctx.configure({ device: this.device, format: this.format, alphaMode: 'opaque' })
@@ -1488,13 +1554,15 @@ export class Engine {
             label: 'Engine RenderPipeline Present',
         })
 
-        // ── AA target-map bake pipeline (neutral DE → per-texel sample count) ──
+        // ── AA target-map bake pipeline (DE ∪ contrast ∪ moiré → per-texel sample count) ──
         const moduleAaTarget = this.device.createShaderModule({ code: aaTargetShader, label: 'Engine ShaderModule AaTarget' })
         const layoutAaTarget = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
                 { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                // Sample-0 composite (rgba16float, screen res) for the contrast ramp.
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout AaTarget',
         })
@@ -1505,7 +1573,10 @@ export class Engine {
         })
         if (!this.uniformBufferAaTarget) {
             this.uniformBufferAaTarget = this.device.createBuffer({
-                size: 32, // 8 × f32: [antialiasLevel, aaSampleIndex, screenHeightPx, aaLogDelta, aaAnalytic, pads] (shared with reseed)
+                // 16 × f32 (shared bake/reseed): [antialiasLevel, aaSampleIndex,
+                // screenHeightPx, aaLogDelta, aaAnalytic, aspect, sceneSin,
+                // sceneCos, screenWidthPx, palettePeriod, mu, logMu, aaContrast, pads]
+                size: 64,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
                 label: 'Engine UniformBuffer AaParams',
             })
@@ -1550,6 +1621,96 @@ export class Engine {
         this.bindGroupInplace = undefined
         this.bindGroupReprojectCs = undefined
         this.bindGroupPresent = undefined
+    }
+
+    // Debug A/B override for the color-pass f16 path. Reads `?f16=` from the URL
+    // first (easiest on mobile — just edit the address bar), then localStorage.
+    // Returns 'off' | 'on' | 'auto' | null (null = no override → default).
+    private readF16Override(): 'off' | 'on' | 'auto' | null {
+        const normalize = (v: string | null): 'off' | 'on' | 'auto' | null => {
+            const s = (v ?? '').trim().toLowerCase()
+            return s === 'off' || s === 'on' || s === 'auto' ? s : null
+        }
+        try {
+            const fromUrl = normalize(new URLSearchParams(window.location.search).get('f16'))
+            if (fromUrl) return fromUrl
+            return normalize(window.localStorage.getItem('f16'))
+        } catch {
+            return null
+        }
+    }
+
+    // Timestamp-write descriptor for a timed pass (slot = index into PASS_SLOTS).
+    // Returns undefined when timestamps are off, so callers can spread it into a
+    // pass descriptor unconditionally. The shape is shared by compute and render
+    // pass timestampWrites. Records the slot as used this frame.
+    private tsWrites(slot: number): GPUComputePassTimestampWrites | undefined {
+        if (!this.timestampsEnabled || !this.timestampQuerySet) return undefined
+        this.tsSlotsUsedThisFrame |= (1 << slot)
+        return { querySet: this.timestampQuerySet, beginningOfPassWriteIndex: slot * 2, endOfPassWriteIndex: slot * 2 + 1 }
+    }
+
+    // Deferred, off-critical-path readback of the resolved timestamps → per-pass
+    // EMA (ms). Skips frames while a previous map is in flight (tsReadbackFree).
+    private readbackTimestamps() {
+        const buf = this.tsReadBuffer
+        if (!buf) return
+        this.tsReadbackFree = false
+        const pending = this.tsPendingSlots
+        void buf.mapAsync(GPUMapMode.READ).then(() => {
+            try {
+                const data = new BigInt64Array(buf.getMappedRange().slice(0))
+                const timings: Record<string, number> = { ...this.passTimingsMs }
+                const active: Record<string, boolean> = {}
+
+                // Per-pass end−begin is UNRELIABLE on tiled/mobile GPUs: the begin
+                // timestamps cluster at frame start (fast command parse; deferred
+                // fragment execution), so end−begin reads as cumulative-from-start
+                // rather than a real pass duration. Passes run SEQUENTIALLY on the
+                // GPU timeline, so the robust partition is the gap between
+                // consecutive END markers: pass duration = end − previous end (first
+                // = end − min begin = frame start). This sums exactly to the frame
+                // span and gives true per-shader time regardless of begin clustering.
+                // (Any inter-pass copy/clear falls into the following pass's gap.)
+                const ranPasses: { key: string; end: bigint }[] = []
+                let minBegin = 0n, have = false
+                for (let i = 0; i < PASS_SLOTS.length; i++) {
+                    const key = PASS_SLOTS[i].key
+                    const ran = (pending & (1 << i)) !== 0
+                    active[key] = ran
+                    if (!ran) continue
+                    const begin = data[i * 2]
+                    if (!have) { minBegin = begin; have = true }
+                    else if (begin < minBegin) minBegin = begin
+                    ranPasses.push({ key, end: data[i * 2 + 1] })
+                }
+                // Sort by end → the GPU execution order (robust to any overlap).
+                ranPasses.sort((a, b) => (a.end < b.end ? -1 : a.end > b.end ? 1 : 0))
+                let prevEnd = minBegin
+                let sum = 0
+                for (const rp of ranPasses) {
+                    let ms = Number(rp.end - prevEnd) / 1e6
+                    prevEnd = rp.end
+                    if (!Number.isFinite(ms) || ms < 0) ms = 0
+                    const prev = timings[rp.key]
+                    timings[rp.key] = prev === undefined ? ms : prev * 0.8 + ms * 0.2
+                    sum += timings[rp.key]
+                }
+                this.passTimingsMs = timings
+                this.passActive = active
+                this.passGpuSumMs = sum
+                if (have && ranPasses.length) {
+                    const spanMs = Number(ranPasses[ranPasses.length - 1].end - minBegin) / 1e6
+                    this.passGpuSpanMs = this.passGpuSpanMs > 0
+                        ? this.passGpuSpanMs * 0.8 + spanMs * 0.2
+                        : spanMs
+                }
+            } catch { /* mapping raced with device loss */ }
+            finally {
+                try { buf.unmap() } catch { /* already unmapped */ }
+                this.tsReadbackFree = true
+            }
+        }).catch(() => { this.tsReadbackFree = true })
     }
 
     // Lazily build + cache a specialized in-place kernel for the given override
@@ -2100,13 +2261,14 @@ export class Engine {
             label: 'Engine AaTargetTexture',
         })
         this.aaTargetTextureView = this.aaTargetTexture.createView({ label: 'Engine AaTargetTexture View' })
-        if (this.pipelineAaTarget && this.rawArrayView && this.uniformBufferAaTarget) {
+        if (this.pipelineAaTarget && this.rawArrayView && this.uniformBufferAaTarget && this.accumTextureView) {
             this.bindGroupAaTarget = this.device.createBindGroup({
                 layout: this.pipelineAaTarget.getBindGroupLayout(0),
                 entries: [
                     { binding: 0, resource: this.rawArrayView },
                     { binding: 1, resource: this.aaTargetTextureView },
                     { binding: 2, resource: { buffer: this.uniformBufferAaTarget } },
+                    { binding: 3, resource: this.accumTextureView },
                 ],
                 label: 'Engine BindGroup AaTarget',
             })
@@ -2895,6 +3057,9 @@ export class Engine {
     private aaAnalyticParams(aspect: number, scale?: number): { logDelta: number; enabled: boolean } {
         const s = scale ?? this.previousMandelbrot?.scale ?? 0
         const neutralExtent = Math.sqrt(aspect * aspect + 1)
+        // δ = max jitter magnitude: box components |j| ≤ 0.5 → magnitude ≤ √2·0.5,
+        // ×(2·extent/size) per texel (the same scale the state machine applies),
+        // × scale.
         const logDelta = s > 0
             ? Math.log(Math.SQRT2 * neutralExtent / Math.max(1, this.neutralSize)) + Math.log(s)
             : Number.NEGATIVE_INFINITY
@@ -3114,6 +3279,25 @@ export class Engine {
         } | undefined
         let aaFrontierCopyScheduled = false
 
+        // Frame timing: wall interval between render() calls (the true frame
+        // budget) and CPU-side render() duration. tsSlotsUsedThisFrame resets so
+        // tsWrites() can record which passes actually ran this frame.
+        const renderStartMs = performance.now()
+        this.frameIntervalMs = this.lastRenderStartMs ? renderStartMs - this.lastRenderStartMs : 0
+        this.lastRenderStartMs = renderStartMs
+        this.tsSlotsUsedThisFrame = 0
+        // Rendering FPS from the active-frame interval (EMA). Counts every frame
+        // that actually renders — not only iteration frames. lastRenderStartMs is
+        // reset to 0 in _loop on idle→active resume, so the stale gap is skipped
+        // here (frameIntervalMs === 0). The <5000 guard drops any pathological gap.
+        if (this.frameIntervalMs > 0 && this.frameIntervalMs < 5000) {
+            this._emaFrameMs = this._emaFrameMs > 0
+                ? this._emaFrameMs * 0.85 + this.frameIntervalMs * 0.15
+                : this.frameIntervalMs
+            this.fps = Math.round(1000 / this._emaFrameMs)
+        }
+        this._lastActiveRenderMs = renderStartMs
+
         const commandEncoder = this.device.createCommandEncoder()
 
         // ── Zoom stop: merge resolved + frozen → frozen via MRT ──────────
@@ -3154,6 +3338,7 @@ export class Engine {
                 }))
             const rpassMerge = commandEncoder.beginRenderPass({
                 colorAttachments: mergeAttachments,
+                timestampWrites: this.tsWrites(0),
             })
             rpassMerge.setPipeline(this.pipelineMerge)
             rpassMerge.setBindGroup(0, this.bindGroupMerge)
@@ -3215,7 +3400,7 @@ export class Engine {
             if (utilityNeeded) {
                 // Utility pass: pan gather / clear stamp / sentinel refinement,
                 // A→B, then B is copied back so iteration proceeds on A.
-                const utilPass = commandEncoder.beginComputePass()
+                const utilPass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(1) })
                 utilPass.setPipeline(this.pipelineReprojectCs!)
                 utilPass.setBindGroup(0, this.bindGroupReprojectCs!)
                 const uwg = Math.ceil(this.neutralSize / 16)
@@ -3242,13 +3427,13 @@ export class Engine {
                         aaLevel, this.aaSampleIndex, this.height,
                         aaAnalytic.enabled ? aaAnalytic.logDelta : 0,
                         aaAnalytic.enabled ? 1 : 0,
-                        0, 0, 0,
+                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // bake-only fields, unused by the reseed
                     ]).buffer,
                 )
                 if (this.aaFrontierBuffer) {
                     commandEncoder.clearBuffer(this.aaFrontierBuffer, 0, 8)
                 }
-                const reseedPass = commandEncoder.beginComputePass()
+                const reseedPass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(2) })
                 reseedPass.setPipeline(this.pipelineAaReseed)
                 reseedPass.setBindGroup(0, this.bindGroupAaReseed)
                 const rwg = Math.ceil(this.neutralSize / 16)
@@ -3273,7 +3458,7 @@ export class Engine {
                 commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 32)
                 this.workStatsClearedSession = this.workStatsSessionSerial
             }
-            const computePass = commandEncoder.beginComputePass()
+            const computePass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(3) })
             // Shallow views (scaleExp > DEEP_EXP) never enter the floatexp deep
             // path, so run the DCE'd shallow kernel; floatExpActive is set from
             // expScale <= DEEP_EXP_THRESHOLD earlier this frame.
@@ -3312,16 +3497,21 @@ export class Engine {
         this.resolveSkipped = skipResolve
 
         // Fully converged: safe to capture an AA sample. No pending history clear,
-        // no freeze/merge, not zooming, orbit complete, zero unfinished/active
-        // pixels, and the latest pixel counts have been read back.
+        // no freeze/merge, not zooming, orbit complete, pixel counts known and at
+        // (or below) the SAME idle threshold the render loop uses — requiring
+        // exactly 0 deadlocked AA on any view that idles with a few stuck pixels
+        // (needsMoreFrames stops driving frames at ≤ threshold, so the counters
+        // never reach 0 and the composite never fired: "AA ne se déclenche pas").
         const fullyConverged =
             !this.clearHistoryNextFrame
             && !this.needFreezeSnapshot
             && !this.needMergeSnapshot
             && !isZoomActive(this.zoomState)
             && !this.orbitIncomplete
-            && this.unfinishedPixelCount === 0
-            && this.activePixelCount === 0
+            && this.unfinishedPixelCount >= 0
+            && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
+            && this.activePixelCount >= 0
+            && this.activePixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
             && !this.hasPendingCounterReadbackForCurrentGeneration()
 
         if (!skipResolve) {
@@ -3338,6 +3528,7 @@ export class Engine {
             // Pass 2: resolve des sentinelles (A -> resolved)
             const rpassResolve = commandEncoder.beginRenderPass({
                 colorAttachments: makeMrtAttachments(this.resolvedLayerViews, 'load'),
+                timestampWrites: this.tsWrites(4),
             })
             rpassResolve.setPipeline(this.pipelineResolve)
             rpassResolve.setBindGroup(0, this.bindGroupResolve)
@@ -3360,8 +3551,12 @@ export class Engine {
         // Auto AA: start accumulation as soon as the view is fully converged.
         // accumulatedSamples === 0 ensures we only fire once per converged view
         // (it stays > 0 after completion until the next navigation resets it).
+        // Suppressed while animations run: time-driven coloring changes between
+        // samples would smear the average, and the persisted result would freeze
+        // the animation — manual triggering stays the user's explicit choice.
         if (this.aaAuto
             && antialiasLevel > 1
+            && !renderOptions.activateAnimate
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
             && fullyConverged) {
@@ -3379,12 +3574,18 @@ export class Engine {
             && !!this.pipelineColorAccumClear
         // Show the accumulator (running average) once we have >= 1 captured sample
         // (or are capturing one now); otherwise fall back to a direct render.
-        const aaShowAccum = this.aaActive && (this.aaAccumulatedSamples >= 1 || aaCompositeThisFrame)
+        // NOT gated on aaActive: after completion (aaActive false) the average
+        // must SURVIVE later frames — with animations or other needRender sources
+        // active, the first post-completion frame used to fall back to the direct
+        // path and silently drop the accumulated AA ("rebascule sans AA"). Any
+        // navigation/param change still reverts via resetAaState (samples → 0).
+        const aaShowAccum = this.aaAccumulatedSamples >= 1 || aaCompositeThisFrame
 
-        // Phase D: finalize the analytic-AA color flag now that skipResolve is
-        // known — the expansion reads payload layers 8..12, which exist only on
-        // the raw texture binding. update() pre-wrote 0; this lands before submit.
-        if (aaCompositeThisFrame && skipResolve && this.aaSampleIndex > 0
+        // Phase D: finalize the analytic-AA color flag — the expansion reads
+        // payload layers 8..12, which exist only on the raw texture binding.
+        // The ACCUM pass always binds raw (below), so the flag only needs the
+        // binding to exist. update() pre-wrote 0; this lands before submit.
+        if (aaCompositeThisFrame && !!this.bindGroupColorRaw && this.aaSampleIndex > 0
             && (this.aaOffsetX !== 0 || this.aaOffsetY !== 0)
             && this.aaAnalyticParams(aspect).enabled) {
             this.device.queue.writeBuffer(this.uniformBufferColor!, 63 * 4, new Float32Array([1]).buffer)
@@ -3399,9 +3600,16 @@ export class Engine {
                     loadOp: firstSample ? 'clear' : 'load',
                     storeOp: 'store',
                 }],
+                timestampWrites: this.tsWrites(5),
             })
             rpassAccum.setPipeline(firstSample ? this.pipelineColorAccumClear! : this.pipelineColorAccum!)
-            rpassAccum.setBindGroup(0, colorBindGroup)
+            // Accumulation reads the RAW binding directly: composites may now run
+            // with a few idle-threshold unfinished pixels (skipResolve false), and
+            // the analytic Taylor payload (layers 8..12) only exists on raw —
+            // falling back to the resolved 8-layer binding would silently disable
+            // the expansion for the whole sample. Raw genuine values are what the
+            // accumulator wants anyway (resolve is a display nicety).
+            rpassAccum.setBindGroup(0, this.bindGroupColorRaw ?? colorBindGroup)
             rpassAccum.draw(6, 1, 0, 0)
             rpassAccum.end()
         } else if (!aaShowAccum) {
@@ -3414,6 +3622,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
+                timestampWrites: this.tsWrites(6),
             })
             rpassColor.setPipeline(this.pipelineColor)
             rpassColor.setBindGroup(0, colorBindGroup)
@@ -3430,6 +3639,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
+                timestampWrites: this.tsWrites(7),
             })
             rpassPresent.setPipeline(this.pipelinePresent)
             rpassPresent.setBindGroup(0, this.bindGroupPresent)
@@ -3462,10 +3672,26 @@ export class Engine {
             && !!this.bindGroupAaTarget
             && !!this.uniformBufferAaTarget
         if (aaBakeThisFrame) {
+            // Contrast/moiré predictor inputs (design D-contrast): the bake
+            // Sobels the sample-0 composite (encoded just above in this same
+            // frame) and reads the palette-phase frequency from the raw layers.
+            const bakeMandelbrot = this.previousMandelbrot!
             this.device.queue.writeBuffer(
                 this.uniformBufferAaTarget!,
                 0,
-                new Float32Array([antialiasLevel, 0, this.height, 0, 0, 0, 0, 0]).buffer,
+                new Float32Array([
+                    antialiasLevel, 0, this.height, 0, 0,
+                    aspect,
+                    Math.sin(bakeMandelbrot.angle),
+                    Math.cos(bakeMandelbrot.angle),
+                    this.width,
+                    Math.max(renderOptions.palettePeriod ?? 1, 1e-4),
+                    bakeMandelbrot.mu,
+                    Math.log(Math.max(bakeMandelbrot.mu, 1e-6)),
+                    this.aaContrastEnabled ? 1 : 0,
+                    renderOptions.aaAdaptive === false ? 1 : 0, // aaFull: uniform budget (A/B vs adaptive)
+                    0, 0,
+                ]).buffer,
             )
             const bakePass = commandEncoder.beginComputePass()
             bakePass.setPipeline(this.pipelineAaTarget!)
@@ -3477,9 +3703,24 @@ export class Engine {
             bakePass.end()
         }
 
+        // Per-pass timing: resolve the timestamp pairs into a buffer and copy to
+        // a mappable readback (both GPU-side, no stall). Only when the previous
+        // readback has completed — otherwise skip this frame's sample.
+        let tsResolvedThisFrame = false
+        if (this.timestampsEnabled && this.timestampQuerySet && this.tsResolveBuffer && this.tsReadBuffer
+            && this.tsReadbackFree && this.tsSlotsUsedThisFrame !== 0) {
+            commandEncoder.resolveQuerySet(this.timestampQuerySet, 0, TS_COUNT, this.tsResolveBuffer, 0)
+            commandEncoder.copyBufferToBuffer(this.tsResolveBuffer, 0, this.tsReadBuffer, 0, TS_COUNT * 8)
+            this.tsPendingSlots = this.tsSlotsUsedThisFrame
+            tsResolvedThisFrame = true
+        }
+
         // soumission des commandes
         const submitStartMs = performance.now()
         this.device.queue.submit([commandEncoder.finish()])
+        this.cpuRenderMs = performance.now() - renderStartMs
+        this.frameSerial++   // one actually-rendered frame → one measurement for the panel
+        if (tsResolvedThisFrame) this.readbackTimestamps()
         // Debug overlay active: surface the GPU frame time. The debug pass strips
         // the derivative/f32-path/lockstep asymmetries for every mode, so this
         // number compares the pure skipping algorithms wall-clock — switch modes
@@ -3527,11 +3768,16 @@ export class Engine {
         if (aaCompositeThisFrame) {
             this.aaAccumulatedSamples++
             if (this.aaAccumulatedSamples < antialiasLevel) {
-                // Queue the next jittered sample.
+                // Queue the next jittered sample. j is in TEXEL units (tent
+                // support ±1 texel); one neutral texel spans 2·neutralExtent /
+                // neutralSize in local_rot units (xy_neutral ∈ [−1,1] covers
+                // neutralSize texels). The missing ×2 halved the reconstruction
+                // kernel — a half-width tent under-filters edges (field report:
+                // band edges stayed crunchier than a DPR×2 render).
                 this.aaSampleIndex++
                 const j = computeAaJitterOffset(this.aaSampleIndex)
-                this.aaOffsetX = j.x * neutralExtentColor / Math.max(1, this.neutralSize)
-                this.aaOffsetY = j.y * neutralExtentColor / Math.max(1, this.neutralSize)
+                this.aaOffsetX = j.x * 2 * neutralExtentColor / Math.max(1, this.neutralSize)
+                this.aaOffsetY = j.y * 2 * neutralExtentColor / Math.max(1, this.neutralSize)
                 // Stage B: reconverge only the boundary sliver via a selective reseed.
                 // Requires the grid at its finest step (1) and the reseed pipeline.
                 // Otherwise fall back to Stage A's full reconverge.
@@ -3689,8 +3935,13 @@ export class Engine {
         else if (this.aaAuto
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
-            && this.unfinishedPixelCount === 0
-            && this.activePixelCount === 0
+            // Same idle threshold as the convergence gates: requiring exactly 0
+            // left auto AA permanently pending on views that idle with a few
+            // stuck unfinished pixels.
+            && this.unfinishedPixelCount >= 0
+            && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
+            && this.activePixelCount >= 0
+            && this.activePixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
             && !this.orbitIncomplete
             && !isZoomActive(this.zoomState)) {
             reason = 'aaAutoPending'
@@ -3749,21 +4000,21 @@ export class Engine {
             this._lastDrawMs = now
 
             const active = this.needsMoreFrames()
+            // On idle→active resume, drop the stale interval so the first rendered
+            // frame after a pause isn't counted as one giant slow frame.
+            if (active && !this._wasActive) this.lastRenderStartMs = 0
+            this._wasActive = active
             this.isRendering = active
 
             await this._drawFn()
 
-            // FPS counter: count only frames that did real GPU work
-            if (active) {
-                this._fpsFrameCount++
-            }
-            const fpsNow = performance.now()
-            if (this._fpsLastTime === 0) this._fpsLastTime = fpsNow
-            const elapsed = fpsNow - this._fpsLastTime
-            if (elapsed >= 1000) {
-                this.fps = Math.round((this._fpsFrameCount * 1000) / elapsed)
-                this._fpsFrameCount = 0
-                this._fpsLastTime = fpsNow
+            // FPS is updated inside render() from the frame interval (accurate).
+            // When idle, decay it to 0 after a short grace so the panel honestly
+            // shows "not rendering" instead of a stale rate.
+            if (!active && this._lastActiveRenderMs
+                && performance.now() - this._lastActiveRenderMs > 600) {
+                this.fps = 0
+                this._emaFrameMs = 0
             }
         }
 

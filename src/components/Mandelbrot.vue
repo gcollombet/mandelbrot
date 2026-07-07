@@ -87,6 +87,7 @@ const props = withDefaults(defineProps<{
   paletteMirror?: boolean,
   antialiasLevel?: number,
   aaAuto?: boolean,
+  aaAdaptive?: boolean,
   activateAnimate?: boolean,
   debugShading?: boolean,
   debugView?: number,
@@ -154,6 +155,7 @@ const props = withDefaults(defineProps<{
         paletteMirror: false,
         antialiasLevel: 1,
         aaAuto: false,
+        aaAdaptive: true,
         activateAnimate: false,
         debugShading: false,
         debugView: 0,
@@ -264,6 +266,7 @@ async function draw() {
       {
         antialiasLevel: props.antialiasLevel,
         aaAuto: props.aaAuto,
+        aaAdaptive: props.aaAdaptive,
         palettePeriod: props.palettePeriod,
         paletteOffset: props.paletteOffset,
         heightPaletteShift: props.heightPaletteShift,
@@ -365,6 +368,7 @@ async function initWebGPU() {
   engine = new Engine(canvas, {
     antialiasLevel: props.antialiasLevel,
     aaAuto: props.aaAuto,
+    aaAdaptive: props.aaAdaptive,
     palettePeriod: props.palettePeriod,
     paletteOffset: props.paletteOffset,
     heightPaletteShift: props.heightPaletteShift,

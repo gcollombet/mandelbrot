@@ -40,7 +40,15 @@ Each accumulated sample beyond the first SHALL offset the sampling grid by a sub
 
 ### Requirement: Gamma-correct linear accumulation
 
-Accumulated samples SHALL be summed in linear RGB in an `rgba16float` accumulation texture, and the displayed image SHALL be the per-pixel running average converted back to sRGB. The PNG/snapshot export path SHALL be unaffected by the linear roundtrip.
+Accumulated samples SHALL be summed in linear RGB in an `rgba16float`
+accumulation texture, and the displayed image SHALL be the per-pixel running
+average converted back to sRGB. The PNG/snapshot export path SHALL be
+unaffected by the linear roundtrip. (Decision history 2026-07-07: briefly
+amended to display-space/sRGB averaging to match a browser-downscaled DPR×2
+reference, then REVERTED by user decision — gamma-correct is a feature; the
+linear mean legitimately reads brighter than an sRGB downscale on dark/bright
+edges, and the perceived edge roughness was the jitter sequence's defect, not
+the averaging domain's.)
 
 #### Scenario: Average is gamma-correct
 
@@ -107,3 +115,58 @@ The engine SHALL expose readable AA progress (active flag, samples done, total t
 
 - **WHEN** accumulation is in progress at sample `n` of `antialiasLevel`
 - **THEN** the engine reports active = true, done = `n`, total = `antialiasLevel`
+
+### Requirement: Contrast-driven target map fused with the DE ramp
+
+The AA target bake SHALL derive the per-texel sample count from the fusion of
+independent aliasing predictors, combined in TARGET space (each predictor maps
+to a sample count through its own ramp; the fused target is their max):
+
+- **DE ramp** (existing): geometric proximity to the set boundary — the only
+  predictor that sees sub-pixel features invisible in the 1:1 render (thin
+  filaments between samples).
+- **Contrast ramp**: luma edge magnitude (Sobel or equivalent 3×3 gradient) of
+  the CONVERGED sample-0 COLOR image (the accumulation texture after the first
+  composite), projected from screen space into the neutral-texel target map —
+  catches palette banding, zebra, stripe/orbit-trap/texture edges and shading
+  contours the DE cannot see, on BOTH sides of the interior boundary.
+- **Moiré saturation**: where the palette-phase frequency per screen pixel
+  exceeds Nyquist (|∇ν| · 2 / palettePeriod ≳ 1), the target SHALL saturate to
+  the full `antialiasLevel` regardless of local contrast — aliasing there
+  manifests as low-frequency false structure that an edge detector
+  under-reports, and averaging toward the palette mean is the correct output.
+
+#### Scenario: Palette edge far from the set boundary
+
+- **WHEN** a short-period palette produces a hard color band in a region where
+  de_px > 6 (DE ramp target = 1)
+- **THEN** the fused target along the band edge exceeds 1 and the band edge
+  accumulates jittered samples
+
+#### Scenario: Sub-pixel filament still covered
+
+- **WHEN** a filament of the set is thinner than one texel and invisible in the
+  sample-0 render (no local contrast)
+- **THEN** the DE ramp alone still drives the fused target to `antialiasLevel`
+  near it
+
+#### Scenario: Interior side of the boundary
+
+- **WHEN** an interior (in-set) texel borders escaped texels with visible
+  contrast
+- **THEN** its fused target exceeds 1 (today's DE ramp forces interior texels
+  to 1), and its jittered re-iterations may legitimately flip to escaped —
+  boundary coverage
+
+#### Scenario: Moiré zone saturates
+
+- **WHEN** the palette phase advances by more than half a period per screen
+  pixel over a region
+- **THEN** the region's target is `antialiasLevel` even where the local Sobel
+  magnitude is low
+
+#### Scenario: Bake input is the colored render
+
+- **WHEN** the target map is baked for an accumulation
+- **THEN** the contrast predictor reads the converged, colorized sample-0 image
+  (post palette/shading, linear RGB), not the raw iteration layers

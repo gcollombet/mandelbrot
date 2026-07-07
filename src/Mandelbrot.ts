@@ -17,6 +17,7 @@ export interface MandelbrotParams {
     maxIterationMultiplier: number;
     antialiasLevel: number;
     aaAuto?: boolean;
+    aaAdaptive?: boolean;
     zoomMinBrushStep: number;
     sentinelSeedStep: number;
     palettePeriod: number;
@@ -66,6 +67,7 @@ export const SESSION_PERFORMANCE_FIELDS = [
     'maxIterationMultiplier',
     'antialiasLevel',
     'aaAuto',
+    'aaAdaptive',
     'targetFps',
     'gpuLoadMultiplier',
     'zoomMinBrushStep',
@@ -102,27 +104,33 @@ export function stripExplorationStateFields<T extends object>(value: T): T {
  * Sub-pixel AA jitter offset for a given sample index.
  *
  * Uses the R2 low-discrepancy sequence (plastic constant) for even sample
- * placement, warped through a tent filter so offsets are importance-sampled
- * for a tent reconstruction kernel. Output components are in roughly [-1, 1]
- * (texel units). Sample 0 returns {0, 0} (the unjittered base sample).
+ * placement, uniform over the pixel footprint — a BOX reconstruction kernel.
+ * Box matches the sharpness reference of a DPR×N render downscaled to a
+ * DPR-1 display (regular-grid box supersampling): the accumulated average
+ * converges to the exact box integral of the pixel footprint. (The earlier
+ * tent warp traded sharpness for smoother reconstruction; field round
+ * 2026-07-07 chose the box.) Output components are in [-0.5, 0.5] texel
+ * units. Sample 0 returns {0, 0} (the unjittered base sample).
  */
 export function computeAaJitterOffset(sampleIndex: number): { x: number; y: number } {
     if (sampleIndex <= 0) {
         return { x: 0, y: 0 };
     }
-    // Plastic constant: real root of x³ = x + 1.
-    const phi = 1.22074408460575947536;
+    // Plastic constant: real root of x³ = x + 1. (A long-standing bug had
+    // 1.22074408460575947536 here — the root of x⁴ = x + 1, i.e. the R3
+    // sequence's constant. The resulting 2D pair loses the low-discrepancy
+    // guarantee: at 4–16 samples the positions cluster in one corner of the
+    // pixel instead of stratifying it, which quantized band transitions
+    // unevenly regardless of the reconstruction kernel.)
+    const phi = 1.32471795724474602596;
     const phi1 = 1 / phi;
     const phi2 = 1 / (phi * phi);
-    const r2x = (sampleIndex * phi1) % 1;
-    const r2y = (sampleIndex * phi2) % 1;
-    // Tent-filter warp: maps uniform [0,1] → triangular [-1,1] via inverse CDF.
-    const tent = (u: number): number => {
-        const x2 = 2 * u - 1;
-        if (x2 === 0) return 0;
-        return x2 / Math.sqrt(Math.abs(x2)) - Math.sign(x2);
-    };
-    return { x: tent(r2x), y: tent(r2y) };
+    // Seed 0.5 keeps sample 0 at exactly (0, 0) as a NATURAL member of the
+    // sequence, so small prefixes stay uniformly distributed (a hors-série
+    // center point biases low sample counts toward the pixel center).
+    const r2x = (0.5 + sampleIndex * phi1) % 1;
+    const r2y = (0.5 + sampleIndex * phi2) % 1;
+    return { x: r2x - 0.5, y: r2y - 0.5 };
 }
 
 export function preserveSessionPerformanceFields<T extends Partial<MandelbrotParams>>(
@@ -135,6 +143,7 @@ export function preserveSessionPerformanceFields<T extends Partial<MandelbrotPar
         maxIterationMultiplier: current.maxIterationMultiplier,
         antialiasLevel: current.antialiasLevel,
         aaAuto: current.aaAuto,
+        aaAdaptive: current.aaAdaptive,
         targetFps: current.targetFps,
         gpuLoadMultiplier: current.gpuLoadMultiplier,
         zoomMinBrushStep: current.zoomMinBrushStep,

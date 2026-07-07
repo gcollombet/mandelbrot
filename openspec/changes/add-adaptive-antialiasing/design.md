@@ -103,3 +103,51 @@ Additive feature behind an explicit trigger; no data migration. Rollback = leave
 ## Open Questions
 
 All three prior tuning questions are resolved (see "Resolved tuning decisions"): wider smoothstep ramp over `height ∈ [-1, 2]`; fixed default `antialiasLevel`; N as a per-pixel ceiling with interruption always honored. Remaining unknowns are implementation-level (exact smoothstep edge values, default level value) and best settled empirically during Stage A.
+
+## D-contrast — contrast-driven target fused with DE (2026-07-06, user-validated)
+
+The DE ramp predicts only GEOMETRIC aliasing (proximity to the set); every
+palette-space contour escapes it (short palette periods, zebra parity, stripe
+average, orbit traps, texture mapping, relief speculars), and interior texels
+are clamped to 1 sample today (the interior side of the boundary never
+supersamples). Decision: fuse three predictors IN TARGET SPACE via max —
+
+    target = max( ramp_DE(de_px),                    // sub-pixel geometry
+                  ramp_sobel(|∇luma| of sample-0),   // palette/shading edges
+                  level · (phase_freq > Nyquist) )   // moiré saturation
+
+- Max in target space, not magnitude space: the predictors have no common
+  scale; each maps to a sample count through its own ramp first.
+- The Sobel reads the CONVERGED, COLORIZED sample-0 (the accumulation texture
+  right after the first composite — linear RGB at screen res), projected back
+  to neutral texels with the inverse of shade_srgb's screen→neutral mapping.
+- Sobel alone is insufficient: contrast-adaptive sampling only sees aliasing
+  visible at 1:1 — a filament thinner than a pixel that fell between samples
+  has no local contrast; the DE ramp keeps covering those. Complementary, not
+  substitutive.
+- Moiré saturates instead of ramping: past Nyquist (|∇ν|·2/palettePeriod ≳ 1
+  per screen pixel) edge magnitude under-reports the aliasing (it shows as
+  low-frequency false structure); the correct output is the palette mean,
+  which only the full sample budget approximates.
+- Rebake on any coloring-param change is ACCEPTED (user decision): AA is
+  idle-time and already restarts on param changes; palette animations simply
+  restart accumulation more often.
+- Orthogonality to unify-jet-table-dispatch Phase D: the analytic tags decide
+  HOW a subsample is produced (Taylor expansion vs re-iteration), the target
+  decides HOW MANY. A contrast-flagged, margin-OK escaped pixel accumulates
+  analytically — near free — so this widens the analytic path's useful zone
+  beyond the DE band where margins fail ~99 % shallow.
+
+### D-contrast — shipped (2026-07-06), measured numbers
+
+Implementation landed (aa_target.wgsl fused bake, 16-float shared AaParams,
+accumTexture bound to the bake, `Engine.aaContrastEnabled` toggle). Referee
+(`tests/adaptive-aa-contrast.spec.ts`, palettePeriod 0.2, intro view, 8×):
+DE-only eligible 48 103 texels → fused 151 152 (×3.1); DE ring preserved;
+zero GPU errors. The synergy with unify-jet-table-dispatch Phase D measured
+directly: 61 % of the widened band is analytic-tagged (only 58 331 of 151 152
+re-iterate) — Taylor margins pass off-boundary, so contrast-flagged texels
+accumulate near-free under auto mode. Interplay decision: the Phase D referee
+(tests/analytic-aa.spec.ts) pins aaContrastEnabled = false to keep refereeing
+the DE-band expansion in isolation. Remaining: 10.6 field round (deep moiré
+views, interior-boundary quality, EDGE_LO/HI + Nyquist threshold tuning).

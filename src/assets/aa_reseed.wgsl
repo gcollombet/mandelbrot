@@ -25,7 +25,15 @@ struct AaParams {
   screenHeightPx: f32,  // unused here; shared buffer with the target bake pass
   aaLogDelta: f32,      // ln δ — sub-pixel jitter half-extent in c units
   aaAnalytic: f32,      // 1 = analytic AA enabled (auto mode, payload live)
-  _pad0: f32,
+  aspect: f32,          // unused here; shared buffer with the target bake pass
+  sceneSin: f32,
+  sceneCos: f32,
+  screenWidthPx: f32,
+  palettePeriod: f32,
+  mu: f32,
+  logMu: f32,
+  aaContrast: f32,
+  aaFull: f32,
   _pad1: f32,
   _pad2: f32,
 };

@@ -3,7 +3,10 @@
 // The accumulation texture stores, per pixel, the linear-RGB sum of all accepted
 // AA samples in .rgb and the number of accepted samples in .a (additive blend).
 // Dividing rgb by alpha yields the per-pixel mean — correct for both uniform and
-// distance-estimation-adaptive sample counts — then we convert back to sRGB.
+// adaptive sample counts — then we convert back to sRGB. (Gamma-correct linear
+// averaging KEPT by field decision 2026-07-07: it reads brighter than a
+// browser-style sRGB downscale on dark/bright edges, but that is the correct
+// light integral; the perceived roughness came from the jitter sequence.)
 
 @group(0) @binding(0) var accumTex: texture_2d<f32>;
 

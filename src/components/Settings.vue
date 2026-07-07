@@ -202,6 +202,7 @@ const model =  defineModel<MandelbrotParams>({
     paletteMirror: false,
     antialiasLevel: 1,
     aaAuto: false,
+    aaAdaptive: true,
     tessellationLevel: 0,
     lightAngle: 0,
       displacementAmount: 0,
@@ -2679,6 +2680,11 @@ async function importSkyboxTexture(event: Event) {
             label="Auto AA"
             :model-value="!!model.aaAuto"
             @update:model-value="(v: boolean) => model.aaAuto = v"
+          />
+          <DenseToggle
+            label="Adaptive AA"
+            :model-value="model.aaAdaptive !== false"
+            @update:model-value="(v: boolean) => model.aaAdaptive = v"
           />
           <DenseField
             label="Zoom brush step" :min="0" :max="6" :step="1"
