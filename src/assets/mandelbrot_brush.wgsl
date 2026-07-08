@@ -1516,15 +1516,28 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               g_tierApps[1] += select(0u, 1u, tag == 1);
               g_tierApps[2] += select(0u, 1u, tag == 2);
               g_tierApps[3] += select(0u, 1u, tag == 3);
-              // Phase D: z″ tier update in the OLD 2·derS scale (needs the
-              // OLD derM); rescaled by the measured der-scale shift after the
-              // der update below. Saturated folds only degrade the AA margin
-              // (frontier fallback), never the value channel.
+              // Phase D: z″ tier update, computed term by term at the NEW
+              // 2·derS scale with BOTH the fe exponents AND the running
+              // mantissa magnitudes folded into one exp() argument (mantissas
+              // stay O(1) outside). The previous old-scale form broke on the
+              // DEEP path: certified deep blocks carry coefficient exponents
+              // up to ~±133 (a20 ~ ±266) since |dz| ~ 2^-133, so the
+              // ldexp(clamp(e, ±126)) truncated and the post-hoc rescale
+              // exp(clamp(−2ΔS, −80, 80)) saturated (ΔS ≈ +92 per big block ⇒
+              // snd inflated by e^{+104} ⇒ inf ⇒ NaN), and Metal's
+              // max(NaN, x) = x then laundered the NaN into an auto-PASSING
+              // reseed margin — every deep pixel tagged analytic with a
+              // garbage payload (fast + integer-ν + shifted palette). Here a
+              // saturated fold leaves snd huge ⇒ margin FAILS ⇒ honest
+              // re-iteration (the safe degrade direction).
               let sOld = *derS + *derSLo;
-              let sndNew = ldexp(cmul(mzz.m, cmul(*derM, *derM)), vec2<i32>(clamp(mzz.e, -126, 126)))
-                + ldexp(cmul(pdz.m, *snd), vec2<i32>(clamp(pdz.e, -126, 126)))
-                + 2.0 * cmul(mzc.m, *derM) * exp(clamp(f32(mzc.e) * LN2 - sOld, -80.0, 80.0))
-                + mcc.m * exp(clamp(f32(mcc.e) * LN2 - 2.0 * sOld, -80.0, 80.0));
+              let derOld = *derM;
+              let dLen = max(length(derOld), 1e-38);
+              let dHat = derOld / dLen;
+              let logDer = log(dLen) + sOld;      // ln|z′| (true scale)
+              let sndLen = max(length(*snd), 1e-38);
+              let sndHat = *snd / sndLen;
+              let logSnd = log(sndLen) + 2.0 * sOld; // ln|z″| (true scale)
               *dz = phi;
               *zOut = candidateZ;
               // der' = ∂m/∂z·der + ∂m/∂c, with the (#3) exponent-fold
@@ -1538,7 +1551,18 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                 *derM = *derM + pdc.m * exp(clamp(f32(pdc.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
                 der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
               }
-              *snd = sndNew * exp(clamp(-2.0 * ((*derS + *derSLo) - sOld), -80.0, 80.0));
+              // z″_new = m_z·z″ + m_zz·z′² + 2·m_zc·z′ + m_cc, emitted at the
+              // NEW scale: each term = O(1) mantissas × exp(ln(term) − 2·sNew).
+              let sNew = *derS + *derSLo;
+              let t1 = cmul(pdz.m, sndHat)
+                * exp(clamp(f32(pdz.e) * LN2 + logSnd - 2.0 * sNew, -78.0, 78.0));
+              let t2 = cmul(mzz.m, cmul(dHat, dHat))
+                * exp(clamp(f32(mzz.e) * LN2 + 2.0 * logDer - 2.0 * sNew, -78.0, 78.0));
+              let t3 = 2.0 * cmul(mzc.m, dHat)
+                * exp(clamp(f32(mzc.e) * LN2 + logDer - 2.0 * sNew, -78.0, 78.0));
+              let t4 = mcc.m
+                * exp(clamp(f32(mcc.e) * LN2 - 2.0 * sNew, -78.0, 78.0));
+              *snd = t1 + t2 + t3 + t4;
               *ref_i += skip;
               *hint = level; // (#5) seed next turn's descent
               return skip;

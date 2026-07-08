@@ -1128,6 +1128,11 @@ fn colorize_pixel(
                        textureLoad(sourceTex, sourceCoord, 10, 0).r);
     let m2 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 11, 0).r,
                        textureLoad(sourceTex, sourceCoord, 12, 0).r);
+    // Finite guard (mirrors the reseed): a non-finite payload must fall back
+    // to the center color, never feed the reconstruction.
+    if (abs(S) < 1e6
+      && abs(m1.x) < 1e30 && abs(m1.y) < 1e30
+      && abs(m2.x) < 1e30 && abs(m2.y) < 1e30) {
     let hat = vec2<f32>(parameters.aaJitterHatX, parameters.aaJitterHatY);
     // Exponent-summed magnitudes: e^{S+ln|δc|} stays finite where e^S alone
     // would overflow f32.
@@ -1150,6 +1155,7 @@ fn colorize_pixel(
     let zhatLen = max(sqrt(zhat_sq), 1e-30);
     z = zhat * (exp(0.5 * log_z2) / zhatLen);
     z_sq = dot(z, z);
+    }
   }
 
   var nu = iter_v + mu_val;

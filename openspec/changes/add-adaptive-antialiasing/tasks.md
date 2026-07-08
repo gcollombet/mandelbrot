@@ -200,3 +200,60 @@ free), which widens analytic AA's useful zone beyond the DE band.
       DECISION REVERTED with the user: accumulation stays GAMMA-CORRECT
       (linear RGB) — 11.9's sRGB-averaging amendment rolled back (spec
       restored); the brighter-than-DPR×2 edge is the correct light integral.
+- [x] 11.11 Deep-zoom regression FIXED (field 2026-07-07: deep views became
+      very fast, ν went integer-ish, palette shifted): the analytic AA
+      expansion (unify-jet-table-dispatch Phase D — auto-mode Taylor payload,
+      color-side ẑ reconstruction) is UNVALIDATED on the floatexp path. Deep
+      pixels got tagged analytic-OK (margin passed on an unreliable fe-tracked
+      z″/derS), skipped re-iteration → fast, and the color pass reconstructed
+      a wrong ẑ → integer-parity-renormalized to shifted whole iterations.
+      Gated `aaAnalyticParams.enabled` on `!floatExpActive` as a stopgap.
+      SUPERSEDED by 11.12 (real root cause found + fixed; deep re-enabled).
+- [x] 11.12 Deep analytic AA — REAL fix (fast AND correct on deep, superseding
+      the 11.11 stopgap): the payload/kernel were sound; the bug was the δc
+      SCALE fed to the color-pass reconstruction and the reseed margin.
+      `aaJitterLogMag` and `aaAnalyticParams.logDelta` derived ln(scale) from
+      the raw numeric `mandelbrot.scale` field, which diverges from the true
+      view scale in deep zoom (the compute path builds δc from scaleStr /
+      viewFloatexp instead). Wrong ln(scale) → e^{S+ln|δc|} off by orders of
+      magnitude → reconstructed ẑ garbage → integer-parity-renormalized to a
+      shifted whole iteration; and the reseed margin (same wrong δ) tagged deep
+      pixels analytic-OK so they skipped re-iteration (fast). Fix: shared
+      `currentLnScale()` reads viewFloatexp[1]·ln2 + ln|mantissa| (or
+      log2FromDecimalString(scaleStr)·ln2) — the SAME full-precision source the
+      compute uses — for both the color uniform and the margin. KEPT (genuine
+      correctness improvement, helps shallow near the f32 boundary too).
+      HOWEVER removing the `!floatExpActive` gate still reproduced the deep
+      breakage → the δc scale was necessary but NOT sufficient. Precision ruled
+      out (scale 1e-40 → S = ln|dz/dc| ≈ 92, not thousands; derS is a
+      compensated derS+derSLo sum, accurate to ~1e-5 → e^S reliable). The
+      remaining defect is localized to the DEEP payload itself: z″ (sndM) /
+      derM tracking through try_apply_unified's fe-coefficient block
+      applications on the floatexp path — the Phase D 5.2 addition that was
+      only ever validated shallow. Deep gate RESTORED (11.11): honest brute
+      re-iteration, correct + slower. Fast-deep is deferred to the unify
+      Phase D 5.5 GPU referee (needs a WGSL-level harness comparing the
+      fe-block sndM/derM propagation against exact deep stepping — cannot be
+      settled by reasoning or headless CPU tests).
+- [x] 11.13 Deep analytic AA — ROOT CAUSE IN THE KERNEL, fixed (3rd round,
+      supersedes the 11.11 gate and completes 11.12's δc-scale half): in
+      try_apply_unified, the z″ tier update was computed at the OLD derS scale
+      then rescaled. Deep-only failure: certified deep blocks carry fe
+      coefficient exponents up to ~±133 (a20 ~ ±266) because |dz| ~ 2^-133, so
+      (a) ldexp(clamp(e, ±126)) truncated the m_zz/m_z terms and (b) a big
+      block shifts derS by ΔS ≈ +92, saturating the exp(clamp(−2ΔS, −80, 80))
+      rescale → snd inflated by e^{+104} per block → inf → inf−inf → NaN. The
+      NaN was then LAUNDERED by Metal's max(NaN, x) = x in the reseed margin
+      (log(max(length(NaN), 1e-38)) = −87) → auto-PASS → every deep pixel
+      tagged analytic with a garbage payload: fast, integer-ν (constant frac
+      from the NaN→1e-12 laundering in smooth_escape_fraction), shifted
+      palette — the exact field symptoms. Shallow never hit it (coefficient
+      exponents ≤ ~30, rescale ≤ e^{60}). FIX: per-term computation at the NEW
+      scale with exponents AND running mantissa magnitudes folded into one
+      clamped exp() argument (O(1) mantissas outside; ±78 headroom) — no
+      overflow path left, saturation degrades to margin-fail → honest
+      re-iteration. Finite guards added to the reseed margin and the color
+      reconstruction (|x| < big form — false for NaN AND inf without x != x).
+      Deep gate REMOVED. naga + vue-tsc + vite green. User validation owed:
+      deep views fast AND correct; shallow non-regression
+      (tests/analytic-aa.spec.ts run recommended).

@@ -45,6 +45,8 @@ import {
   textureSourceKey,
 } from '../textureLibrary';
 import {isAuthConfigured, observeAuthState, signInWithGoogle, signOutCurrentUser, type UserRole} from '../authService';
+import {getKeyboardLayout, getSettingsTabs} from '../keyboardShortcuts';
+import AboutPanel from './AboutPanel.vue';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
@@ -54,7 +56,6 @@ const mandelbrotEngine = shallowRef<Engine | null>(null);
 // AA accumulation progress (polled from the engine for the on-screen indicator).
 const aaProgress = ref<{ active: boolean; done: number; total: number }>({ active: false, done: 0, total: 1 });
 let aaProgressTimer: ReturnType<typeof setInterval> | null = null;
-const renderStatsRef = ref<InstanceType<typeof RenderStats> | null>(null);
 const settingsRefs = ref<Record<string, InstanceType<typeof Settings> | null>>({});
 
 // Multi-window support: set of open tabs, each with its own popup position
@@ -158,31 +159,6 @@ function onNavigationEnd() {
   navigationTimeout = window.setTimeout(() => {
     isNavigating.value = false;
   }, 300);
-}
-
-// --- Auto-hide bottom bar (shortcuts + made with) after 10s ---
-const bottomBarVisible = ref(true);
-let bottomHideTimer: number | null = null;
-
-function startBottomHideTimer() {
-  if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
-  bottomHideTimer = window.setTimeout(() => {
-    bottomBarVisible.value = false;
-  }, 10000);
-}
-
-function showBottomBar() {
-  bottomBarVisible.value = true;
-  startBottomHideTimer();
-}
-
-function handleMouseMove(e: MouseEvent) {
-  // Show bottom bar when mouse is in the bottom 100px of the screen
-  if (e.clientY >= window.innerHeight - 100) {
-    if (!bottomBarVisible.value) {
-      showBottomBar();
-    }
-  }
 }
 
 // Navigation events from keyboard/mouse/touch
@@ -459,9 +435,6 @@ onMounted(() => {
     if (p) aaProgress.value = p;
   }, 120);
   window.addEventListener('resize', invalidateDiscoveryLayout, { passive: true });
-  // Bottom bar auto-hide
-  window.addEventListener('mousemove', handleMouseMove, { passive: true });
-  startBottomHideTimer();
 
   // If no navigation history is present (first-time visitor), sync remote catalog & load the first preset
   if (isFirstLoad) {
@@ -521,11 +494,9 @@ onUnmounted(() => {
   window.removeEventListener('touchstart', handleNavTouchstart);
   window.removeEventListener('touchend', handleNavTouchend);
   window.removeEventListener('resize', invalidateDiscoveryLayout);
-  window.removeEventListener('mousemove', handleMouseMove);
   revokeObjectUrl(activeTileTextureUrl);
   revokeObjectUrl(activeSkyboxTextureUrl);
   if (navigationTimeout !== null) clearTimeout(navigationTimeout);
-  if (bottomHideTimer !== null) clearTimeout(bottomHideTimer);
   if (aaProgressTimer !== null) clearInterval(aaProgressTimer);
 });
 // Deep-clone to a plain, mutable object. JSON round-trip (not structuredClone)
@@ -585,14 +556,8 @@ watch(mobileNavExpanded, (expanded) => {
 });
 
 // Tabs du menu — raccourcis adaptés au layout clavier
-const settingsTabs = computed(() => [
-  { key: 'presets', label: 'Presets', icon: 'fa-solid fa-bookmark', shortcut: 'x' },
-  { key: 'navigation', label: 'Navigation', icon: 'fa-solid fa-arrows-up-down-left-right', shortcut: keyboardLayout === 'azerty' ? 'w' : 'z' },
-  { key: 'palettes', label: 'Palettes', icon: 'fa-solid fa-palette', shortcut: 'n' },
-  { key: 'animation', label: 'Animation', icon: 'fa-solid fa-film', shortcut: 'c' },
-  { key: 'performance', label: 'Performance', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
-  { key: 'screenshot', label: 'Screenshot', icon: 'fa-solid fa-camera', shortcut: 'b' },
-]);
+const keyboardLayout = getKeyboardLayout();
+const settingsTabs = computed(() => getSettingsTabs(keyboardLayout));
 
 // Tabs whose panel has been ported to the dense shell. These render inside the
 // `.dense` popup (DenseTopbar + dense body); others keep the legacy popup chrome.
@@ -603,7 +568,7 @@ const forceUINoGpu = !hasWebGPU
   && typeof window !== 'undefined'
   && new URLSearchParams(window.location.search).has('forceui');
 
-const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes']);
+const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes', 'about']);
 const denseView = useDenseView();
 function isDenseTab(tabKey: string): boolean {
   return densePortedTabs.has(tabKey);
@@ -911,40 +876,6 @@ function popupStyle(tabKey: string) {
   };
 }
 
-// Détection de la disposition du clavier
-function getKeyboardLayout() {
-  const lang = window.navigator.language || window.navigator.languages?.[0] || 'en';
-  if (lang.startsWith('fr') || lang.startsWith('be')) return 'azerty';
-  return 'qwerty';
-}
-const keyboardLayout = getKeyboardLayout();
-
-const shortcutLabels = computed(() => {
-  if (keyboardLayout === 'azerty') {
-    return {
-      up: 'Z',
-      down: 'S',
-      left: 'Q',
-      right: 'D',
-      rotateLeft: 'A',
-      rotateRight: 'E',
-      zoomIn: 'R',
-      zoomOut: 'F',
-    };
-  } else {
-    return {
-      up: 'W',
-      down: 'S',
-      left: 'A',
-      right: 'D',
-      rotateLeft: 'Q',
-      rotateRight: 'E',
-      zoomIn: 'R',
-      zoomOut: 'F',
-    };
-  }
-});
-
 // --- Preset Pins Overlay & Transition Travel ---
 const presetRecords = ref<PresetRecord[]>([]);
 const CANVAS_PIN_MARGIN = 32;
@@ -1224,8 +1155,6 @@ function computeDiscoverySafeFrame(canvas: HTMLCanvasElement): SafeFrame {
   const exclusionRects = [
     document.querySelector('.top-settings-bar')?.getBoundingClientRect(),
     document.querySelector('.render-stats-wrapper')?.getBoundingClientRect(),
-    bottomBarVisible.value ? document.querySelector('.shortcut-hint')?.getBoundingClientRect() : null,
-    bottomBarVisible.value ? document.querySelector('.footer-love')?.getBoundingClientRect() : null,
     ...Object.values(popupRefs.value).map(el => el?.getBoundingClientRect()),
   ].filter((rect): rect is DOMRect => !!rect);
 
@@ -1536,7 +1465,7 @@ function startTravelToPreset(preset: PresetRecord) {
           :key="tab.key"
           class="top-tab-btn camera-btn"
           :class="{ 'is-active': openTabs.has(tab.key) }"
-          @click="tab.key === 'screenshot' ? downloadCanvasSnapshot() : toggleTab(tab.key)"
+          @click="toggleTab(tab.key)"
           :title="tab.label"
         >
           <svg v-if="tab.key === 'navigation'" viewBox="0 0 24 24"><path d="M12 3v18M3 12h18M8 7l4-4 4 4M8 17l4 4 4-4M7 8l-4 4 4 4M17 8l4 4-4 4"/></svg>
@@ -1544,21 +1473,10 @@ function startTravelToPreset(preset: PresetRecord) {
           <svg v-else-if="tab.key === 'performance'" viewBox="0 0 24 24"><path d="M12 3a9 9 0 00-9 9c0 2.3.9 4.4 2.3 6l1.4-1.4A7 7 0 1118.3 16l1.4 1.4C21.1 16.4 22 14.3 22 12a9 9 0 00-9-9z"/><path d="M12 11h5v2h-5z" transform="rotate(-45 12 12)"/></svg>
           <svg v-else-if="tab.key === 'animation'" viewBox="0 0 24 24"><path d="M16 16v-3.5l4 3.5v-8l-4 3.5V8a2 2 0 00-2-2H4a2 2 0 00-2 2v8a2 2 0 002 2h10a2 2 0 002-2z"/></svg>
           <svg v-else-if="tab.key === 'palettes'" viewBox="0 0 24 24"><path fill-rule="evenodd" d="M12 3a9 9 0 100 18c1.1 0 2-.9 2-2 0-1.5 1.5-2 3-2a4 4 0 004-4c0-5-4-8-9-8z M6.3 11a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0 M10.3 8a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0 M14.3 10a1.2 1.2 0 102.4 0a1.2 1.2 0 10-2.4 0"/></svg>
-          <svg v-else-if="tab.key === 'screenshot'" viewBox="0 0 24 24"><path d="M4 8h3l2-3h6l2 3h3v11H4z"/><circle cx="12" cy="13" r="3.2"/></svg>
           <i v-else :class="[tab.icon, 'fa-fw']" aria-hidden="true"></i>
 
           <span class="tab-label-text is-hidden-touch">{{ tab.label }}</span>
           <span class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
-        </button>
-        <button
-          v-if="authConfigured"
-          class="top-tab-btn camera-btn auth-btn"
-          :title="authUserEmail ? 'Logout (' + authUserEmail + ')' : 'Login'"
-          @click="authUserEmail ? logoutUser() : loginWithGoogle()"
-        >
-          <svg v-if="authUserEmail" viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M10 12H3m0 0l3-3m-3 3l3 3"/></svg>
-          <svg v-else viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M3 12h11m0 0l-3-3m3 3l-3 3"/></svg>
-          <span class="is-hidden-touch">{{ authUserEmail ? 'Logout' : 'Login' }}</span>
         </button>
       </div>
     </div>
@@ -1571,9 +1489,8 @@ function startTravelToPreset(preset: PresetRecord) {
       @touchend.stop
     >
       <RenderStats
-        ref="renderStatsRef"
         :engine="mandelbrotEngine"
-        v-model:debugShading="mandelbrotParams.debugShading"
+        @open-perf-panel="togglePerfPanel"
       />
     </div>
 
@@ -1586,7 +1503,11 @@ function startTravelToPreset(preset: PresetRecord) {
       @pointerdown.stop
       @wheel.stop
     >
-      <PerformancePanel :engine="mandelbrotEngine" @close="togglePerfPanel" />
+      <PerformancePanel
+        :engine="mandelbrotEngine"
+        v-model:debugShading="mandelbrotParams.debugShading"
+        @close="togglePerfPanel"
+      />
     </div>
 
     <!-- Antialiasing control / progress (bottom-center) -->
@@ -1708,6 +1629,19 @@ function startTravelToPreset(preset: PresetRecord) {
           <span class="radar-button-core"></span>
         </span>
         <span class="fab-label">{{ discoveryRadarActive ? 'Radar On' : 'Discover' }}</span>
+      </button>
+
+      <button
+        v-show="!discoveryRadarActive"
+        class="fab-btn screenshot-button"
+        type="button"
+        title="Screenshot — capturer le rendu (raccourci B)"
+        @click="downloadCanvasSnapshot"
+        @touchstart.stop
+        @touchend.stop
+      >
+        <span class="fab-ico"><i class="fa-solid fa-camera"></i></span>
+        <span class="fab-label">Screenshot</span>
       </button>
     </div>
 
@@ -1875,9 +1809,13 @@ function startTravelToPreset(preset: PresetRecord) {
           :ptabs="PTABS_BY_TAB[tab.key]"
           :primary="primaryFor(tab.key)"
           :is-admin="isAdmin"
+          :auth-configured="authConfigured"
+          :auth-user-email="authUserEmail"
           @update:primary="(v: string) => primaryByTab[tab.key] = v"
           @close="closeTab(tab.key)"
           @drag-start="startDrag(tab.key, $event)"
+          @login="loginWithGoogle"
+          @logout="logoutUser"
         >
           <template v-if="tab.key === 'animation'" #lead>
             <button
@@ -1895,7 +1833,9 @@ function startTravelToPreset(preset: PresetRecord) {
           </template>
         </DenseTopbar>
         <div class="body">
+          <AboutPanel v-if="tab.key === 'about'" />
           <Settings
+            v-else
             :ref="(el: any) => { settingsRefs[tab.key] = el }"
             v-model="mandelbrotParams"
             :engine="mandelbrotEngine"
@@ -1939,111 +1879,13 @@ function startTravelToPreset(preset: PresetRecord) {
       </div>
     </template>
 
-    <!-- Raccourcis clavier (masque sur mobile) — vertical stacked layout, left side -->
-    <div
-      class="shortcut-hint is-hidden-touch"
-      :class="{ 'hud-hidden': isNavigating, 'bottom-bar-hidden': !bottomBarVisible }"
-      v-show="showUI && !discoveryRadarActive"
-    >
-      <div class="shortcut-group">
-        <span class="shortcut-label">Move</span>
-        <div class="shortcut-keys">
-          <span class="tag is-black is-rounded">Left clic</span>
-          <span class="tag is-black is-rounded">{{ shortcutLabels.up }}</span>
-          <span class="tag is-black is-rounded">{{ shortcutLabels.left }}</span>
-          <span class="tag is-black is-rounded">{{ shortcutLabels.down }}</span>
-          <span class="tag is-black is-rounded">{{ shortcutLabels.right }}</span>
-        </div>
-      </div>
-      <div class="shortcut-group">
-        <span class="shortcut-label">Rotate</span>
-        <div class="shortcut-keys">
-          <span class="tag is-black is-rounded">Right clic</span>
-          <span class="tag is-black is-rounded">{{ shortcutLabels.rotateLeft }}</span>
-          <span class="tag is-black is-rounded">{{ shortcutLabels.rotateRight }}</span>
-        </div>
-      </div>
-      <div class="shortcut-group">
-        <span class="shortcut-label">Zoom</span>
-        <div class="shortcut-keys">
-          <span class="tag is-black is-rounded">Wheel</span>
-          <span class="tag is-black is-rounded">{{ shortcutLabels.zoomIn }}</span>
-          <span class="tag is-black is-rounded">{{ shortcutLabels.zoomOut }}</span>
-        </div>
-      </div>
-      <div class="shortcut-group">
-        <span class="shortcut-label">Settings</span>
-        <div class="shortcut-keys">
-          <span v-for="tab in settingsTabs.filter(t => t.key !== 'screenshot')" :key="tab.key" class="tag is-black is-rounded">{{ tab.shortcut.toUpperCase() }}</span>
-        </div>
-      </div>
-      <div class="shortcut-group">
-        <span class="shortcut-label">Snapshot</span>
-        <div class="shortcut-keys">
-          <span class="tag is-black is-rounded">P</span>
-          <span class="tag is-black is-rounded">B</span>
-        </div>
-      </div>
-    </div>
-
-    <!-- Footer avec liens -->
-    <div
-      class="footer-love is-hidden-touch"
-      :class="{ 'hud-hidden': isNavigating, 'bottom-bar-hidden': !bottomBarVisible }"
-      v-show="showUI && !discoveryRadarActive"
-    >
-      <small>
-        <a href="https://wgpu.rs/"
-           target="_blank"
-           rel="noopener"
-           class="footer-link"
-           aria-label="wGPU">
-          Made with
-          <img src="https://raw.githubusercontent.com/gfx-rs/wgpu/refs/heads/trunk/logo.png"
-               alt="wGPU logo"
-               style="height: 24px; width: 24px; vertical-align: middle;"/>
-        </a>
-      </small>
-      <span class="footer-separator">|</span>
-      <small>
-        <a href="https://github.com/gcollombet/mandelbrot"
-           target="_blank"
-           rel="noopener"
-           class="footer-link"
-           aria-label="GitHub">
-          <svg class="github-logo" height="20" viewBox="0 0 16 16" width="20" fill="currentColor" style="vertical-align:middle; margin-right:4px;">
-            <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27.68 0 1.36.09 2 .27 1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.013 8.013 0 0 0 16 8c0-4.42-3.58-8-8-8z"></path>
-          </svg>
-          GitHub
-        </a>
-      </small>
-      <span class="footer-separator">|</span>
-      <a href="./presentation/"
-         class="footer-presentation"
-         aria-label="Présentation">
-        <i class="fa-solid fa-display fa-fw" style="vertical-align:middle; margin-right:4px;"></i>
-        Présentation
-      </a>
-      <template v-if="authConfigured && !authUserEmail">
-        <span class="footer-separator">|</span>
-        <button
-          class="footer-auth-button"
-          type="button"
-          @click="loginWithGoogle"
-        >
-          Login
-        </button>
-      </template>
-    </div>
   </div>
 </template>
 
 <style scoped>
 /* === HUD animation: fade out during navigation === */
 .top-settings-bar,
-.render-stats-wrapper,
-.shortcut-hint,
-.footer-love {
+.render-stats-wrapper {
   transition: opacity 0.4s ease, transform 0.4s ease;
 }
 
@@ -2056,21 +1898,6 @@ function startTravelToPreset(preset: PresetRecord) {
 .render-stats-wrapper.hud-hidden {
   opacity: 0;
   transform: translateX(-50%) translateY(20px);
-  pointer-events: none;
-}
-
-.shortcut-hint.hud-hidden,
-.footer-love.hud-hidden {
-  opacity: 0;
-  transform: translateY(20px);
-  pointer-events: none;
-}
-
-/* === Bottom bar auto-hide === */
-.shortcut-hint.bottom-bar-hidden,
-.footer-love.bottom-bar-hidden {
-  opacity: 0;
-  transform: translateY(20px);
   pointer-events: none;
 }
 
@@ -2138,10 +1965,6 @@ function startTravelToPreset(preset: PresetRecord) {
 
 .top-tab-btn.is-active .tab-shortcut-hint {
   color: rgba(255, 255, 255, 0.7);
-}
-
-.top-tab-btn.auth-btn {
-  margin-left: auto;
 }
 
 .camera-btn {
@@ -2255,155 +2078,6 @@ function startTravelToPreset(preset: PresetRecord) {
   border-radius: 999px;
 }
 
-/* === Shortcut hint bar — vertical stacked, left side === */
-.shortcut-hint {
-  position: absolute;
-  left: 24px;
-  bottom: 16px;
-  padding: 12px 16px;
-  border-radius: 12px;
-  background: rgba(16, 18, 24, 0.72);
-  backdrop-filter: blur(18px);
-  border: 1px solid var(--line);
-  color: var(--ink);
-  font-size: 0.85rem;
-  font-family: inherit;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-  pointer-events: none;
-  user-select: none;
-  opacity: 0.85;
-  letter-spacing: 0.01em;
-  z-index: 20;
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  max-width: 260px;
-}
-
-.shortcut-group {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  white-space: nowrap;
-}
-
-.shortcut-label {
-  font-weight: 600;
-  min-width: 4.5em;
-  font-size: 0.82rem;
-  color: var(--ink-2);
-}
-
-.shortcut-keys {
-  display: flex;
-  align-items: center;
-  gap: 3px;
-  flex-wrap: wrap;
-}
-
-.shortcut-hint .tag.is-rounded {
-  font-size: 0.72rem;
-  padding: 2px 8px;
-  height: auto;
-  line-height: 1.5;
-  background-color: var(--row-on) !important;
-  color: var(--accent-bright) !important;
-  border: 1px solid var(--line) !important;
-  font-family: var(--mono) !important;
-}
-
-.shortcut-separator {
-  display: none;
-}
-
-.footer-love {
-  position: absolute;
-  right: 24px;
-  bottom: 16px;
-  padding: 6px 14px;
-  border-radius: 12px;
-  background: rgba(16, 18, 24, 0.72);
-  backdrop-filter: blur(18px);
-  border: 1px solid var(--line);
-  color: var(--ink-2);
-  font-size: 0.85rem;
-  font-family: inherit;
-  box-shadow: 0 8px 32px rgba(0,0,0,0.3);
-  pointer-events: auto;
-  user-select: none;
-  opacity: 0.85;
-  letter-spacing: 0.01em;
-  z-index: 20;
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-
-.footer-separator {
-  margin: 0 4px;
-  color: var(--line);
-}
-
-.footer-link {
-  color: var(--ink-2);
-  text-decoration: underline;
-  transition: color 0.2s;
-}
-
-.footer-link:hover {
-  color: var(--accent-bright);
-}
-
-.footer-presentation {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 10px;
-  border-radius: 6px;
-  background: var(--accent-soft);
-  border: 1px solid var(--accent);
-  color: var(--accent-bright);
-  font-size: 0.8rem;
-  font-weight: 600;
-  text-decoration: none;
-  letter-spacing: 0.02em;
-  transition: background 0.2s, color 0.2s, transform 0.15s;
-}
-
-.footer-presentation:hover {
-  background: var(--accent);
-  color: #fff;
-  transform: scale(1.05);
-}
-
-.footer-auth-button {
-  display: inline-flex;
-  align-items: center;
-  padding: 3px 10px;
-  border: 1px solid var(--line);
-  border-radius: 6px;
-  background: var(--row);
-  color: var(--ink-2);
-  font: inherit;
-  font-size: 0.8rem;
-  font-weight: 600;
-  letter-spacing: 0.02em;
-  cursor: pointer;
-  transition: background 0.2s, color 0.2s, border-color 0.2s, transform 0.15s;
-}
-
-.footer-auth-button:hover {
-  background: var(--row-on);
-  color: var(--ink);
-  border-color: var(--ink-3);
-  transform: scale(1.05);
-}
-
-.github-logo {
-  display: inline-block;
-  vertical-align: middle;
-  margin-bottom: 2px;
-}
-
 .render-stats-wrapper {
   position: fixed;
   bottom: 16px;
@@ -2492,6 +2166,13 @@ function startTravelToPreset(preset: PresetRecord) {
   background: rgba(48, 38, 20, 0.82);
   border-color: rgba(255, 210, 122, 0.55);
   box-shadow: 0 12px 34px rgba(0, 0, 0, 0.4), 0 0 20px rgba(255, 200, 100, 0.25);
+}
+
+.screenshot-button .fab-ico { color: #7ac9ff; }
+.screenshot-button:hover {
+  background: rgba(20, 36, 48, 0.82);
+  border-color: rgba(122, 201, 255, 0.55);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.4), 0 0 20px rgba(100, 180, 255, 0.25);
 }
 .ui-hidden-hint {
   position: fixed;

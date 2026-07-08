@@ -70,6 +70,11 @@ async function runAaAccumulation(page: Page, analytic: boolean, timeout = 150_00
   await page.evaluate((useAnalytic) => {
     const engine = (window as any).__mandelbrotEngine;
     engine.aaAnalyticEnabled = useAnalytic;
+    // Pin the target map to the DE ramp: this spec referees the Phase D
+    // Taylor expansion on the boundary band; the contrast/moiré predictors
+    // (which widen the analytic zone ~60×) have their own referee in
+    // adaptive-aa-contrast.spec.ts.
+    engine.aaContrastEnabled = false;
     engine.triggerAaAccumulation();
   }, analytic);
   const deadline = Date.now() + timeout;

@@ -20,6 +20,8 @@ import { onMounted, onUnmounted, reactive, ref, computed } from 'vue';
 const props = defineProps<{ engine: any }>();
 const emit = defineEmits<{ (e: 'close'): void }>();
 
+const debugShading = defineModel<boolean>('debugShading', { default: false });
+
 // Fixed per-pass colors (indexed by engine PASS_SLOTS order).
 const PASS_COLORS = ['#8b5cf6', '#38bdf8', '#f472b6', '#f59e0b', '#34d399', '#22d3ee', '#eab308', '#a78bfa'];
 
@@ -35,8 +37,162 @@ const stats = reactive({
   gpuSumMs: 0,    // Σ of measured passes (breakdown; may overlap/exceed span)
   unfinished: -1,
   active: -1,
+  totalPixels: 0,
   passes: [] as PassRow[],
+
+  // Render (relocated from RenderStats)
+  completionWallMs: 0,
+  completionGpuMs: 0,
+  completionTotalApps: -1,
+  batchSize: 0,
+
+  // Dispatch
+  tierApps: [-1, -1, -1, -1] as [number, number, number, number],
+  shaderApproxFlag: 0,
+  shaderBlaLevelCount: 0,
+  aaFrontierStamped: -1,
+  aaFrontierEligible: -1,
+  floatExpActive: false,
+
+  // Reference / orbit build
+  orbitCount: 0,
+  maxIterations: 0,
+  orbitRemaining: 0,
+  referenceValidating: false,
+  referenceResetActive: false,
+  referenceResetSerial: 0,
+  pendingRefActive: false,
+  pendingRefOrbitLen: 0,
+  pendingRefMaxIterations: 0,
 });
+
+const shaderModeLabel = computed(() => {
+  switch (stats.shaderApproxFlag) {
+    case 5: return 'Auto';
+    case 4: return 'Möbius+';
+    case 3: return 'Jet';
+    case 2: return 'Padé';
+    case 1: return 'BLA';
+    default: return 'exact';
+  }
+});
+
+const currentRefPercent = computed(() => {
+  const count = stats.orbitCount || 0;
+  const max = stats.maxIterations || 0;
+  if (max <= 0) return 0;
+  return Math.min(100, Math.max(0, (count / max) * 100));
+});
+
+const pendingRefPercent = computed(() => {
+  const len = stats.pendingRefOrbitLen || 0;
+  const max = stats.pendingRefMaxIterations || 0;
+  if (max <= 0) return 0;
+  return Math.min(100, Math.max(0, (len / max) * 100));
+});
+
+function completionPercent(): string {
+  if (stats.totalPixels === 0 || stats.unfinished < 0) return '--';
+  const pct = ((stats.totalPixels - stats.unfinished) / stats.totalPixels) * 100;
+  return pct.toFixed(1);
+}
+
+function formatCondensedNumber(val: number | null | undefined): string {
+  if (val === null || val === undefined || isNaN(val)) {
+    return '0';
+  }
+  if (val < 1000) {
+    return val.toString();
+  }
+  let suffix = '';
+  let divided = val;
+  if (val >= 1e9) {
+    suffix = 'G';
+    divided = val / 1e9;
+  } else if (val >= 1e6) {
+    suffix = 'M';
+    divided = val / 1e6;
+  } else if (val >= 1000) {
+    suffix = 'k';
+    divided = val / 1000;
+  }
+
+  let formatted: string;
+  if (divided >= 100) {
+    formatted = Math.round(divided).toString();
+  } else if (divided >= 10) {
+    formatted = divided.toFixed(1);
+  } else {
+    formatted = divided.toFixed(2);
+  }
+
+  if (formatted.includes('.')) {
+    while (formatted.endsWith('0')) {
+      formatted = formatted.slice(0, -1);
+    }
+    if (formatted.endsWith('.')) {
+      formatted = formatted.slice(0, -1);
+    }
+  }
+
+  return formatted.replace('.', ',') + suffix;
+}
+
+function formatPixelCount(n: number): string {
+  if (n < 0) return '--';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function formatOps(n: number): string {
+  if (n < 0) return '--';
+  if (n >= 1_000_000_000) return (n / 1_000_000_000).toFixed(2) + 'G';
+  if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
+  if (n >= 1_000) return (n / 1_000).toFixed(1) + 'k';
+  return String(n);
+}
+
+function formatRefOrbit(count: number, max: number): string {
+  const c = count || 0;
+  const m = max || 0;
+  if (c > m) {
+    const formattedM = formatCondensedNumber(m);
+    return `${formattedM} / ${formattedM} (+ ${formatCondensedNumber(c - m)})`;
+  }
+  return `${formatCondensedNumber(c)} / ${formatCondensedNumber(m)}`;
+}
+
+// Tier mix (auto mode): live per-tier Σ applications [affine, Padé, c+, jet].
+function tierMix(): string {
+  const t = stats.tierApps;
+  const total = t[0] + t[1] + t[2] + t[3];
+  if (total <= 0) return '';
+  const pct = (v: number) => (100 * v / total).toFixed(0) + '%';
+  // Affine + Padé share the ≤48 B path (affine is census-dead anyway).
+  return `≤48B ${pct(t[0] + t[1])} · c+ ${pct(t[2])} · jet ${pct(t[3])}`;
+}
+
+// Analytic AA frontier: re-iterated texels / boundary-band texels at the last
+// reseed — margin-passing texels expand their Taylor payload instead.
+function aaFrontier(): string {
+  const s = stats.aaFrontierStamped;
+  const e = stats.aaFrontierEligible;
+  if (s < 0 || e <= 0) return '';
+  return `${(100 * s / e).toFixed(1)}% (${s}/${e})`;
+}
+
+// Total apps ÷ GPU ms of the same completed render (applications per GPU
+// millisecond). -1 until both are known.
+function appsPerGpuMs(): number {
+  if (stats.completionTotalApps < 0 || stats.completionGpuMs <= 0) return -1;
+  return stats.completionTotalApps / stats.completionGpuMs;
+}
+
+function opsPerFrame(): number {
+  if (stats.active < 0 || stats.batchSize <= 0) return -1;
+  return stats.active * stats.batchSize;
+}
 
 interface Sample {
   t: number; fps: number; frameMs: number;
@@ -63,6 +219,8 @@ function readLive(e: any) {
   stats.gpuSumMs = e.passGpuSumMs ?? 0;
   stats.unfinished = e.unfinishedPixelCount ?? -1;
   stats.active = e.activePixelCount ?? -1;
+  const ns = e.neutralSize ?? 0;
+  stats.totalPixels = ns * ns;
   const meta: { key: string; label: string; help: string }[] = e.passMeta ?? [];
   const t: Record<string, number> = e.passTimingsMs ?? {};
   const a: Record<string, boolean> = e.passActive ?? {};
@@ -71,6 +229,31 @@ function readLive(e: any) {
     ms: t[m.key] ?? 0, active: !!a[m.key],
     color: PASS_COLORS[i % PASS_COLORS.length],
   }));
+
+  // Render
+  stats.completionWallMs = e.lastCompletionWallMs ?? 0;
+  stats.completionGpuMs = e.lastCompletionGpuMs ?? 0;
+  stats.completionTotalApps = e.lastCompletionTotalApps ?? -1;
+  stats.batchSize = typeof e.getIterationBatchSize === 'function' ? e.getIterationBatchSize() : 0;
+
+  // Dispatch
+  stats.tierApps = e.tierAppsApprox ?? [-1, -1, -1, -1];
+  stats.shaderApproxFlag = e.lastShaderApproxFlag ?? 0;
+  stats.shaderBlaLevelCount = e.lastShaderBlaLevelCount ?? 0;
+  stats.aaFrontierStamped = e.aaFrontierStamped ?? -1;
+  stats.aaFrontierEligible = e.aaFrontierEligible ?? -1;
+  stats.floatExpActive = e.floatExpActive ?? false;
+
+  // Reference / orbit build
+  stats.orbitCount = e.currentReferenceAvailableIter ?? e.currentGuardedMaxIter ?? 0;
+  stats.maxIterations = e.currentMaxIterations ?? 0;
+  stats.orbitRemaining = e.currentReferenceRemainingIter ?? Math.max(0, stats.maxIterations - stats.orbitCount);
+  stats.referenceValidating = e.isReferenceValidating ?? false;
+  stats.referenceResetSerial = e.referenceResetSerial ?? 0;
+  stats.referenceResetActive = (e.referenceResetFlashUntil ?? 0) > performance.now();
+  stats.pendingRefActive = e.pendingRefActive ?? false;
+  stats.pendingRefOrbitLen = e.pendingRefOrbitLen ?? 0;
+  stats.pendingRefMaxIterations = e.pendingRefMaxIterations ?? 0;
 }
 
 // One measurement per rendered frame. Trimmed relative to the NEWEST sample, so
@@ -150,21 +333,6 @@ const passSumAvg = computed(() => passesAvgSorted.value.reduce((s, p) => s + p.m
 const barMaxAvg = computed(() => Math.max(avgFrameMs.value, passSumAvg.value, 0.001));
 const idleMsAvg = computed(() => Math.max(0, barMaxAvg.value - passSumAvg.value));
 function pctAvg(ms: number): number { return (ms / barMaxAvg.value) * 100; }
-
-// Generic mini-sparkline path (self-normalized to its own max).
-function sparkPath(data: number[]): string {
-  if (data.length < 2) return '';
-  const w = 100, h = 20, max = Math.max(...data, 0.001), n = data.length;
-  return 'M' + data.map((v, i) => `${(i / (n - 1) * w).toFixed(1)},${(h - (v / max) * h).toFixed(1)}`).join(' L');
-}
-// One sparkline per global metric → history on ALL metrics.
-const seriesPaths = computed(() => ({
-  fps: sparkPath(history.value.map(s => s.fps)),
-  frame: sparkPath(history.value.map(s => s.frameMs)),
-  gpuSpan: sparkPath(history.value.map(s => s.gpuSpanMs)),
-  gpuSum: sparkPath(history.value.map(s => s.gpuSumMs)),
-  cpu: sparkPath(history.value.map(s => s.cpuMs)),
-}));
 
 // Main history graph = per-pass times STACKED over the frame history (area
 // chart). Each band's top edge is the running cumulative including that pass;
@@ -267,32 +435,23 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       <button class="perf-close" type="button" aria-label="Fermer" @click="emit('close')">✕</button>
     </div>
 
-    <!-- Global metric cards, each with its own 30 s sparkline -->
+    <!-- Global metric cards: FPS emphasized, the other three compact plain values -->
     <div class="perf-cards">
-      <div class="perf-card" title="Images par seconde effectivement rendues (dérivé de l'intervalle réel entre frames rendues).">
-        <div class="pc-val">{{ stats.fps }}</div>
+      <div class="perf-card hero" title="Images par seconde effectivement rendues (dérivé de l'intervalle réel entre frames rendues).">
+        <div class="pc-val pc-val--hero">{{ stats.fps }}</div>
         <div class="pc-lbl">FPS</div>
-        <svg class="pc-spark" viewBox="0 0 100 20" preserveAspectRatio="none"><path :d="seriesPaths.fps" fill="none" stroke="#34d399" stroke-width="1" vector-effect="non-scaling-stroke" /></svg>
       </div>
-      <div class="perf-card" title="Temps réel entre deux frames = le vrai budget par image. C'est ce que ressent l'utilisateur.">
+      <div class="perf-card compact" title="Temps réel entre deux frames = le vrai budget par image. C'est ce que ressent l'utilisateur.">
         <div class="pc-val">{{ fmt(stats.frameIntervalMs) }}<span class="pc-u">ms</span></div>
-        <div class="pc-lbl">Intervalle frame</div>
-        <svg class="pc-spark" viewBox="0 0 100 20" preserveAspectRatio="none"><path :d="seriesPaths.frame" fill="none" stroke="#f59e0b" stroke-width="1" vector-effect="non-scaling-stroke" /></svg>
+        <div class="pc-lbl">Frame</div>
       </div>
-      <div class="perf-card accent" title="Temps GPU RÉEL de la frame = dernier end − premier begin des passes (timeline GPU). C'est le total autoritaire : les passes tournent séquentiellement, donc ce span les englobe (copies inter-passes comprises).">
+      <div class="perf-card compact" title="Temps GPU RÉEL de la frame = dernier end − premier begin des passes (timeline GPU). C'est le total autoritaire : les passes tournent séquentiellement, donc ce span les englobe (copies inter-passes comprises).">
         <div class="pc-val">{{ fmt(stats.gpuSpanMs) }}<span class="pc-u">ms</span></div>
-        <div class="pc-lbl">GPU frame (span)</div>
-        <svg class="pc-spark" viewBox="0 0 100 20" preserveAspectRatio="none"><path :d="seriesPaths.gpuSpan" fill="none" stroke="#38bdf8" stroke-width="1" vector-effect="non-scaling-stroke" /></svg>
+        <div class="pc-lbl">GPU span</div>
       </div>
-      <div class="perf-card" title="Σ des durées par passe, mesurées comme l'écart entre fins de passe consécutives (partition de la timeline GPU). Sum ≈ span par construction. Toute copie/clear inter-passe tombe dans la passe suivante.">
+      <div class="perf-card compact" title="Σ des durées par passe, mesurées comme l'écart entre fins de passe consécutives (partition de la timeline GPU). Sum ≈ span par construction. Toute copie/clear inter-passe tombe dans la passe suivante.">
         <div class="pc-val">{{ fmt(stats.gpuSumMs) }}<span class="pc-u">ms</span></div>
         <div class="pc-lbl">Σ passes</div>
-        <svg class="pc-spark" viewBox="0 0 100 20" preserveAspectRatio="none"><path :d="seriesPaths.gpuSum" fill="none" stroke="#818cf8" stroke-width="1" vector-effect="non-scaling-stroke" /></svg>
-      </div>
-      <div class="perf-card" title="Durée d'exécution du JS de render() côté CPU (construction des passes + submit). Si élevé, le CPU est le goulot, pas le GPU.">
-        <div class="pc-val">{{ fmt(stats.cpuRenderMs) }}<span class="pc-u">ms</span></div>
-        <div class="pc-lbl">CPU render</div>
-        <svg class="pc-spark" viewBox="0 0 100 20" preserveAspectRatio="none"><path :d="seriesPaths.cpu" fill="none" stroke="#c084fc" stroke-width="1" vector-effect="non-scaling-stroke" /></svg>
       </div>
     </div>
 
@@ -366,15 +525,120 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       du temps GPU par N.
     </div>
 
+    <!-- Render: completion, timing, applications, pixel counts -->
+    <div class="perf-sub">Rendu</div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Completion</span>
+      <span class="perf-stat-value">{{ completionPercent() }}%</span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Last render</span>
+      <span class="perf-stat-value">{{ stats.completionWallMs.toFixed(0) }}ms · gpu {{ stats.completionGpuMs.toFixed(0) }}ms</span>
+    </div>
+    <div v-if="stats.completionTotalApps >= 0" class="perf-stat-row">
+      <span class="perf-stat-label">Total apps</span>
+      <span class="perf-stat-value">{{ formatOps(stats.completionTotalApps) }}</span>
+    </div>
+    <div v-if="appsPerGpuMs() >= 0" class="perf-stat-row">
+      <span class="perf-stat-label">Apps / gpu ms</span>
+      <span class="perf-stat-value">{{ formatOps(appsPerGpuMs()) }}</span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Ops/frame</span>
+      <span class="perf-stat-value">{{ formatOps(opsPerFrame()) }}</span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Pixels restants</span>
+      <span class="perf-stat-value">{{ formatPixelCount(stats.unfinished) }}</span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Pixels actifs</span>
+      <span class="perf-stat-value">{{ formatPixelCount(stats.active) }}</span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Total pixels</span>
+      <span class="perf-stat-value">{{ formatPixelCount(stats.totalPixels) }}</span>
+    </div>
+
+    <!-- Dispatch: which approximation tier/mode is actually feeding the shader -->
+    <div class="perf-sub">Dispatch</div>
+    <div v-if="stats.shaderApproxFlag === 5 && tierMix()" class="perf-stat-row">
+      <span class="perf-stat-label">Tier mix</span>
+      <span class="perf-stat-value">{{ tierMix() }}</span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Shader mode</span>
+      <span class="perf-stat-value">{{ shaderModeLabel }} · {{ stats.shaderBlaLevelCount }} lvl</span>
+    </div>
+    <div v-if="aaFrontier()" class="perf-stat-row">
+      <span class="perf-stat-label">AA frontier</span>
+      <span class="perf-stat-value">{{ aaFrontier() }}</span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Mode de calcul</span>
+      <span class="perf-stat-value" :class="{ 'perf-stat-value--floatexp': stats.floatExpActive }">
+        {{ stats.floatExpActive ? 'FloatExp' : 'F32' }}
+      </span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Batch size</span>
+      <span class="perf-stat-value">{{ stats.batchSize }}</span>
+    </div>
+
+    <!-- Reference: reference orbit build progress -->
+    <div class="perf-sub">Référence</div>
+    <div class="perf-stat-row perf-stat-row--progress">
+      <div class="perf-progress-header">
+        <span class="perf-stat-label">Réf. actuelle</span>
+        <span class="perf-stat-value">
+          {{ formatRefOrbit(stats.orbitCount, stats.maxIterations) }}
+          <span v-if="stats.referenceResetActive"> · reset réf</span>
+          <span v-else-if="stats.referenceValidating"> · validation</span>
+        </span>
+      </div>
+      <div class="perf-progress-track">
+        <div class="perf-progress-fill" :style="{ width: currentRefPercent + '%' }"></div>
+      </div>
+    </div>
+    <div v-if="stats.pendingRefActive" class="perf-stat-row perf-stat-row--progress">
+      <div class="perf-progress-header">
+        <span class="perf-stat-label perf-stat-label--pending">Nouv. référence</span>
+        <span class="perf-stat-value perf-stat-value--pending">
+          {{ formatCondensedNumber(stats.pendingRefOrbitLen) }} / {{ formatCondensedNumber(stats.pendingRefMaxIterations) }}
+        </span>
+      </div>
+      <div class="perf-progress-track">
+        <div class="perf-progress-fill perf-progress-fill--pending" :style="{ width: pendingRefPercent + '%' }"></div>
+      </div>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Référence</span>
+      <span class="perf-stat-value" :class="{ 'perf-stat-value--reference': stats.referenceResetActive }">
+        #{{ stats.referenceResetSerial }}
+        <span v-if="stats.referenceResetActive"> · changement</span>
+      </span>
+    </div>
+    <div class="perf-stat-row">
+      <span class="perf-stat-label">Orbite restante</span>
+      <span class="perf-stat-value">{{ stats.orbitRemaining }}</span>
+    </div>
+
+    <!-- Debug -->
+    <div class="perf-sub">Debug</div>
+    <div class="perf-stat-row perf-debug-row">
+      <span class="perf-stat-label">Visualisation débug</span>
+      <div class="perf-debug-switch-wrap">
+        <label class="perf-debug-switch">
+          <input type="checkbox" v-model="debugShading" />
+          <span class="perf-debug-switch-slider"></span>
+        </label>
+      </div>
+    </div>
+
     <div class="perf-export">
       <span class="pe-count">{{ history.length }} échant. / 30 s</span>
       <button class="pe-btn" type="button" :disabled="history.length < 2" @click="exportCsv">Export CSV</button>
       <button class="pe-btn" type="button" :disabled="history.length < 2" @click="exportJson">JSON</button>
-    </div>
-
-    <div class="perf-foot">
-      <span v-if="stats.unfinished >= 0" title="Pixels non encore convergés (itération en cours).">px non finis : {{ stats.unfinished.toLocaleString() }}</span>
-      <span v-if="stats.active >= 0" title="Pixels réellement itérés lors du dernier dispatch.">actifs : {{ stats.active.toLocaleString() }}</span>
     </div>
   </div>
 </template>
@@ -426,22 +690,23 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 }
 .perf-close:hover { background: rgba(255, 255, 255, 0.16); }
 .perf-cards {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(74px, 1fr));
+  display: flex;
+  flex-wrap: wrap;
   gap: 6px;
 }
 .perf-card {
   background: rgba(255, 255, 255, 0.04);
   border: 1px solid rgba(255, 255, 255, 0.08);
   border-radius: 8px;
-  padding: 7px 8px;
   text-align: center;
 }
-.perf-card.accent { border-color: rgba(56, 189, 248, 0.5); background: rgba(56, 189, 248, 0.08); }
-.pc-val { font-size: 17px; font-weight: 650; line-height: 1.1; }
-.pc-u { font-size: 10px; font-weight: 400; opacity: 0.6; margin-left: 1px; }
-.pc-lbl { font-size: 9.5px; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.62; margin-top: 2px; }
-.pc-spark { width: 100%; height: 13px; display: block; margin-top: 4px; opacity: 0.85; }
+.perf-card.hero { border-color: rgba(52, 211, 153, 0.5); background: rgba(52, 211, 153, 0.08); flex: 1.2; padding: 7px 6px; }
+.perf-card.compact { flex: 1; padding: 7px 4px; min-width: 60px; }
+.pc-val { font-size: 17px; font-weight: 650; line-height: 1.1; white-space: nowrap; }
+.pc-val--hero { font-size: 26px; }
+.perf-card.compact .pc-val { font-size: 13px; }
+.pc-u { font-size: 9px; font-weight: 400; opacity: 0.6; margin-left: 1px; }
+.pc-lbl { font-size: 9px; text-transform: uppercase; letter-spacing: 0.03em; opacity: 0.62; margin-top: 2px; white-space: nowrap; }
 
 .perf-sub { font-size: 11px; font-weight: 600; opacity: 0.85; margin-top: 2px; }
 .perf-hint { font-weight: 400; opacity: 0.55; font-size: 10px; }
@@ -508,5 +773,133 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 .pe-btn:hover:not(:disabled) { background: rgba(56, 189, 248, 0.22); }
 .pe-btn:disabled { opacity: 0.4; cursor: default; }
 
-.perf-foot { display: flex; gap: 12px; font-size: 10px; opacity: 0.55; flex-wrap: wrap; margin-top: 2px; }
+/* --- Relocated stat rows (Rendu / Dispatch / Référence / Debug) --- */
+.perf-stat-row {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  padding: 2.5px 0;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+  font-size: 11px;
+}
+
+.perf-stat-label {
+  font-size: 10.5px;
+  opacity: 0.6;
+}
+
+.perf-stat-label--pending {
+  color: #ec3d7a;
+  opacity: 1;
+}
+
+.perf-stat-value {
+  font-variant-numeric: tabular-nums;
+  font-weight: 500;
+  text-align: right;
+}
+
+.perf-stat-value--pending {
+  color: #ec3d7a;
+  font-weight: 700;
+}
+
+.perf-stat-value--reference {
+  color: #ec3d7a;
+  font-weight: 700;
+}
+
+.perf-stat-value--floatexp {
+  color: #38bdf8;
+  font-weight: 700;
+}
+
+.perf-stat-row--progress {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 2.5px 0;
+}
+
+.perf-progress-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: baseline;
+  width: 100%;
+}
+
+.perf-progress-track {
+  width: 100%;
+  height: 3px;
+  background: rgba(255, 255, 255, 0.08);
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+.perf-progress-fill {
+  height: 100%;
+  border-radius: 2px;
+  background: linear-gradient(90deg, #38bdf8, #ec3d7a);
+  transition: width 0.15s ease-out;
+}
+
+.perf-progress-fill--pending {
+  box-shadow: 0 0 4px #ec3d7a;
+}
+
+.perf-debug-row {
+  align-items: center !important;
+}
+
+.perf-debug-switch-wrap {
+  display: flex;
+  align-items: center;
+}
+
+.perf-debug-switch {
+  position: relative;
+  display: inline-block;
+  width: 32px;
+  height: 18px;
+  cursor: pointer;
+}
+
+.perf-debug-switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.perf-debug-switch-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background-color: rgba(255, 255, 255, 0.1);
+  transition: .2s;
+  border-radius: 999px;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+}
+
+.perf-debug-switch-slider:before {
+  position: absolute;
+  content: "";
+  height: 12px;
+  width: 12px;
+  left: 2px;
+  bottom: 2px;
+  background-color: #8a8d9a;
+  transition: .2s;
+  border-radius: 50%;
+}
+
+.perf-debug-switch input:checked + .perf-debug-switch-slider {
+  background-color: rgba(236, 61, 122, 0.2);
+  border-color: #ec3d7a;
+}
+
+.perf-debug-switch input:checked + .perf-debug-switch-slider:before {
+  transform: translateX(14px);
+  background-color: #ec3d7a;
+  box-shadow: 0 0 6px #ec3d7a;
+}
 </style>

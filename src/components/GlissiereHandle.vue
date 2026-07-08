@@ -9,12 +9,11 @@ const props = defineProps<{
   disabled?: boolean;
 }>();
 
-const isEmphasized = computed(() => !!props.selected || !!props.highlighted);
-const selectedStroke = computed(() => (props.highlighted ? '#111' : 'var(--accent-bright)'));
+const zIndex = computed(() => (props.selected ? 10 : (props.highlighted ? 4 : 1)));
 
 const emit = defineEmits(['update:position', 'select']);
 
-const svgRef = ref<SVGSVGElement|null>(null);
+const markerRef = ref<HTMLElement | null>(null);
 
 function onDown(e: MouseEvent) {
   if (props.disabled) {
@@ -25,9 +24,9 @@ function onDown(e: MouseEvent) {
   emit('select');
   const startX = e.clientX;
   const startVal = props.stop.position;
-  const svg = svgRef.value;
-  if (!svg) return;
-  const parent = svg.parentElement as HTMLElement;
+  const marker = markerRef.value;
+  if (!marker) return;
+  const parent = marker.parentElement as HTMLElement;
   const rect = parent.getBoundingClientRect();
   function onMove(ev: MouseEvent) {
     const dx = ev.clientX - startX;
@@ -54,9 +53,9 @@ function onTouchStart(e: TouchEvent) {
   if (!touch) return;
   const startX = touch.clientX;
   const startVal = props.stop.position;
-  const svg = svgRef.value;
-  if (!svg) return;
-  const parent = svg.parentElement as HTMLElement;
+  const marker = markerRef.value;
+  if (!marker) return;
+  const parent = marker.parentElement as HTMLElement;
   const rect = parent.getBoundingClientRect();
   function onTouchMove(ev: TouchEvent) {
     const t0 = ev.touches[0];
@@ -78,55 +77,47 @@ function onTouchStart(e: TouchEvent) {
 </script>
 
 <template>
-  <svg
-    ref="svgRef"
+  <div
+    ref="markerRef"
+    class="stop-marker"
+    :class="{ sel: props.selected, highlighted: props.highlighted }"
     :style="{
       left: props.stop.position * 100 + '%',
-      zIndex: props.selected ? 10 : (isEmphasized ? 4 : 1),
+      background: props.stop.color,
+      zIndex,
     }"
-    viewBox="0 0 32 80"
     @mousedown="onDown"
     @touchstart="onTouchStart"
-    class="stop-marker"
-    :class="{ 'sel': props.selected, 'highlighted': props.highlighted }"
-  >
-    <!-- Rectangle vertical (inset so the stroke/caps are never clipped by the viewBox) -->
-    <rect
-      :x="props.selected ? 8 : 9"
-      y="5"
-      :width="props.selected ? 16 : 14"
-      height="70"
-      rx="7"
-      :fill="props.stop.color"
-      :stroke="props.selected ? selectedStroke : (props.highlighted ? '#f0b429' : '#fff')"
-      :stroke-width="props.selected ? 3 : 2.5"
-    />
-  </svg>
+  ></div>
 </template>
 
 <style scoped>
 .stop-marker {
   position: absolute;
-  top: 0;
-  height: 100%;
-  width: 32px;
-  transform: translateX(-50%) scaleY(1);
+  top: 4px;
+  bottom: 4px;
+  width: 12px;
+  transform: translateX(-50%);
+  border-radius: 6px;
+  border: 2px solid #fff;
+  box-shadow: 0 2px 7px rgba(0, 0, 0, 0.5);
   cursor: grab;
   pointer-events: auto;
-  background: transparent;
-  transition: transform 0.12s ease, filter 0.12s ease, width 0.12s ease;
-  filter: drop-shadow(0 2px 8px rgba(0, 0, 0, 0.55));
-  overflow: visible;
+  transition: width 0.12s ease, border-color 0.12s ease, box-shadow 0.12s ease;
 }
 
 .stop-marker:hover {
-  transform: translateX(-50%) scaleY(1.04);
+  box-shadow: 0 3px 10px rgba(0, 0, 0, 0.6);
+}
+
+.stop-marker.highlighted {
+  border-color: #f0b429;
 }
 
 .stop-marker.sel {
-  width: 36px;
-  transform: translateX(-50%) scaleY(1.06);
-  filter: drop-shadow(0 0 0 2px var(--accent)) drop-shadow(0 4px 12px rgba(0, 0, 0, 0.6));
+  width: 16px;
+  border-color: var(--accent-bright);
+  box-shadow: 0 0 0 2px var(--accent), 0 3px 9px rgba(0, 0, 0, 0.6);
 }
 
 .stop-marker:active {

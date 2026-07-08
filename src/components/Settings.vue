@@ -512,12 +512,6 @@ function generatePaletteThumbnail(colorStops: any[], mode: InterpolationMode = '
   return canvas.toDataURL('image/png');
 }
 
-// Palette strip background — accurate gradient built from the real Palette
-// interpolation (matches the mockup's gradient strip; reactive to stop edits).
-const paletteStripUrl = computed(() =>
-  generatePaletteThumbnail(model.value.colorStops, model.value.interpolationMode),
-);
-
 const navigationPreview = ref<string | null>(null);
 const presetName = ref('');
 const presets = ref<PresetMetadata[]>([]);
@@ -2349,9 +2343,27 @@ async function importSkyboxTexture(event: Event) {
         </div>
       </div>
 
-      <!-- Gradient preview strip (mockup style) with handles overlaid -->
+      <!-- Live WebGPU material preview strip (mockup style) with handles overlaid -->
       <div class="canvas-row palette-strip mb-3" style="position:relative;" @dblclick="onPreviewDblClick" title="Double-click to add a color stop">
-        <div class="palette-strip-fill" :style="{ backgroundImage: `url(${paletteStripUrl})` }"></div>
+        <PalettePreview
+          ref="previewRef"
+          class="palette-strip-fill"
+          :colorStops="model.colorStops"
+          :interpolationMode="model.interpolationMode"
+          :tileTextureUrl="activeBlobUrl"
+          :skyboxTextureUrl="activeSkyboxBlobUrl"
+          :tessellationLevel="model.tessellationLevel"
+          :displacementAmount="model.displacementAmount"
+          :ambientOcclusionStrength="model.ambientOcclusionStrength"
+          :microBumpStrength="model.microBumpStrength"
+          :subsurfaceStrength="model.subsurfaceStrength"
+          :reliefDepth="model.reliefDepth"
+          :localShadowStrength="model.localShadowStrength"
+          :varnishStrength="model.varnishStrength"
+          :orbitTrapStrength="model.orbitTrapStrength"
+          :phaseColoringStrength="model.phaseColoringStrength"
+          :textureMapping="model.textureMapping"
+        />
         <div class="canvas-shadow-overlay"></div>
         <div class="handles-overlay">
           <GlissiereHandle

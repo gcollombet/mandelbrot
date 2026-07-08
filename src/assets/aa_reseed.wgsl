@@ -84,9 +84,15 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         // Margin in log space: ln|z′| − ln|z″| − S − ln δ > ln 5.
         // m1 = 0 (no payload / saturated fold) fails → honest re-iteration;
         // m2 = 0 (genuinely negligible z″) passes.
+        // Finite guard first: max() LAUNDERS NaN on Metal (max(NaN, x) = x),
+        // which once turned a NaN z″ into an auto-passing margin. |x| < big is
+        // false for both NaN and inf without relying on x != x semantics.
+        let finiteOk = abs(s) < 1e6
+          && abs(m1.x) < 1e30 && abs(m1.y) < 1e30
+          && abs(m2.x) < 1e30 && abs(m2.y) < 1e30;
         let marginLog = log(max(length(m1), 1e-38)) - log(max(length(m2), 1e-38))
                       - s - params.aaLogDelta;
-        if (length(m1) > 0.0 && marginLog > LN_MARGIN_THRESHOLD) {
+        if (finiteOk && length(m1) > 0.0 && marginLog > LN_MARGIN_THRESHOLD) {
           textureStore(aaTargetTex, coord, vec4<f32>(tgt + 0.5, 0.0, 0.0, 0.0));
           return;
         }

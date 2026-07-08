@@ -64,6 +64,7 @@ const emit = defineEmits<{
 }>();
 
 const mandelbrotRef = ref<MandelbrotExposed | null>(null);
+const wrapperRef = ref<HTMLDivElement | null>(null);
 
 // Etats d'interaction et navigation
 const pressedKeys: Record<string, boolean> = {};
@@ -102,6 +103,19 @@ function getCanvas(): HTMLCanvasElement | null {
   return mandelbrotRef.value?.getCanvas() ?? null;
 }
 
+// Les listeners souris/tactile sont attachés au wrapper (stable) plutôt qu'au
+// <canvas> lui-même : le canvas est recréé par Vue à chaque hot-reload de
+// Mandelbrot.vue (changement de <script> ou d'une dépendance comme Engine.ts),
+// ce qui laisserait les listeners accrochés sur l'ancien nœud détaché.
+function isFromCanvas(e: Event): boolean {
+  const canvas = getCanvas();
+  return !!canvas && e.target === canvas;
+}
+
+function handleContextMenu(e: MouseEvent) {
+  if (isFromCanvas(e)) e.preventDefault();
+}
+
 function getCanvasCoords(e: MouseEvent) {
   const canvas = getCanvas();
   if (!canvas) return {x: 0, y: 0, width: 0, height: 0};
@@ -126,6 +140,7 @@ function handleKeyup(e: KeyboardEvent) {
 }
 
 function handleWheel(e: WheelEvent) {
+  if (!isFromCanvas(e)) return;
   // En mode pipette, bloquer le zoom
   if (props.pickerMode) { e.preventDefault(); return; }
   e.preventDefault();
@@ -151,6 +166,7 @@ function centerOnCanvasPoint(clientX: number, clientY: number) {
 }
 
 function handleDblClick(e: MouseEvent) {
+  if (!isFromCanvas(e)) return;
   // En mode pipette, bloquer le double-clic
   if (props.pickerMode) { e.preventDefault(); return; }
   e.preventDefault();
@@ -160,6 +176,7 @@ function handleDblClick(e: MouseEvent) {
 }
 
 function handleTouchEndForDoubleTap(e: TouchEvent) {
+  if (!isFromCanvas(e)) return;
   if (props.pickerMode) return;
   if (e.touches.length !== 0) return;
   const now = Date.now();
@@ -189,6 +206,7 @@ function handleTouchEndForDoubleTap(e: TouchEvent) {
 }
 
 function handleMouseDown(e: MouseEvent) {
+  if (!isFromCanvas(e)) return;
   // En mode pipette, bloquer drag/rotation et déclencher la lecture GPU
   if (props.pickerMode) {
     e.preventDefault();
@@ -258,6 +276,7 @@ function handleMouseUp(e: MouseEvent) {
 }
 
 function handleTouchStart(e: TouchEvent) {
+  if (!isFromCanvas(e)) return;
   if (props.pickerMode) return;
   const canvas = getCanvas();
   if (!canvas) return;
@@ -333,26 +352,28 @@ function updateLoop() {
 }
 
 onMounted(async () => {
-  const canvas = getCanvas();
-  if (!canvas) return;
+  // Les listeners souris/tactile sont posés sur le wrapper (stable au hot-reload),
+  // pas sur le <canvas> qui, lui, est recréé quand Mandelbrot.vue est hot-reloadé.
+  const wrapper = wrapperRef.value;
+  if (!wrapper) return;
 
   // clavier
   window.addEventListener('keydown', handleKeydown);
   window.addEventListener('keyup', handleKeyup);
 
   // souris / touchpad
-  canvas.addEventListener('wheel', handleWheel, { passive: false });
-  canvas.addEventListener('mousedown', handleMouseDown);
-  canvas.addEventListener('dblclick', handleDblClick);
-  canvas.addEventListener('contextmenu', (e) => e.preventDefault());
+  wrapper.addEventListener('wheel', handleWheel, { passive: false });
+  wrapper.addEventListener('mousedown', handleMouseDown);
+  wrapper.addEventListener('dblclick', handleDblClick);
+  wrapper.addEventListener('contextmenu', handleContextMenu);
   window.addEventListener('mousemove', handleMouseMove);
   window.addEventListener('mouseup', handleMouseUp);
 
   // tactile
-  canvas.addEventListener('touchstart', handleTouchStart, { passive: false });
-  canvas.addEventListener('touchmove', handleTouchMove, { passive: false });
-  canvas.addEventListener('touchend', handleTouchEnd, { passive: false });
-  canvas.addEventListener('touchend', handleTouchEndForDoubleTap, { passive: false });
+  wrapper.addEventListener('touchstart', handleTouchStart, { passive: false });
+  wrapper.addEventListener('touchmove', handleTouchMove, { passive: false });
+  wrapper.addEventListener('touchend', handleTouchEnd, { passive: false });
+  wrapper.addEventListener('touchend', handleTouchEndForDoubleTap, { passive: false });
 
   // boucle clavier (la boucle de rendu est gérée par l'engine via Mandelbrot.vue)
   updateLoop();
@@ -362,27 +383,27 @@ onUnmounted(() => {
   // stop keyboard loop
   if (updateTimer !== null) clearTimeout(updateTimer);
 
-  const canvas = getCanvas();
+  const wrapper = wrapperRef.value;
   // remove listeners
   window.removeEventListener('keydown', handleKeydown);
   window.removeEventListener('keyup', handleKeyup);
   window.removeEventListener('mousemove', handleMouseMove);
   window.removeEventListener('mouseup', handleMouseUp);
-  if (canvas) {
-    canvas.removeEventListener('wheel', handleWheel as EventListener);
-    canvas.removeEventListener('mousedown', handleMouseDown as EventListener);
-    canvas.removeEventListener('dblclick', handleDblClick as EventListener);
-    canvas.removeEventListener('contextmenu', (e) => e.preventDefault());
-    canvas.removeEventListener('touchstart', handleTouchStart as EventListener);
-    canvas.removeEventListener('touchmove', handleTouchMove as EventListener);
-    canvas.removeEventListener('touchend', handleTouchEnd as EventListener);
-    canvas.removeEventListener('touchend', handleTouchEndForDoubleTap as EventListener);
+  if (wrapper) {
+    wrapper.removeEventListener('wheel', handleWheel as EventListener);
+    wrapper.removeEventListener('mousedown', handleMouseDown as EventListener);
+    wrapper.removeEventListener('dblclick', handleDblClick as EventListener);
+    wrapper.removeEventListener('contextmenu', handleContextMenu);
+    wrapper.removeEventListener('touchstart', handleTouchStart as EventListener);
+    wrapper.removeEventListener('touchmove', handleTouchMove as EventListener);
+    wrapper.removeEventListener('touchend', handleTouchEnd as EventListener);
+    wrapper.removeEventListener('touchend', handleTouchEndForDoubleTap as EventListener);
   }
 });
 </script>
 
 <template>
-  <div style="position: relative; width: 100%; height: 100%;">
+  <div ref="wrapperRef" style="position: relative; width: 100%; height: 100%;">
     <Mandelbrot
       ref="mandelbrotRef"
       v-model:scale="scale"

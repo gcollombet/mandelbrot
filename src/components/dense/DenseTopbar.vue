@@ -12,6 +12,10 @@ defineProps<{
   primary?: string;
   /** The "Affichage" view menu is admin-only. */
   isAdmin?: boolean;
+  /** Whether auth is configured for this deployment — shows the Login/Logout control when true. */
+  authConfigured?: boolean;
+  /** Signed-in user's email, if any. Empty/undefined renders the "Login" state. */
+  authUserEmail?: string;
 }>();
 
 const emit = defineEmits<{
@@ -19,6 +23,8 @@ const emit = defineEmits<{
   (e: 'update:primary', v: string): void;
   /** Forwarded pointerdown on the brand area, for the host to drive window drag. */
   (e: 'drag-start', ev: PointerEvent): void;
+  (e: 'login'): void;
+  (e: 'logout'): void;
 }>();
 
 const menuOpen = ref(false);
@@ -48,6 +54,17 @@ function onHeaderPointerDown(e: PointerEvent) {
     </div>
     <span class="spacer"></span>
     <slot name="actions" />
+    <button
+      v-if="authConfigured"
+      class="tb-btn auth-btn"
+      type="button"
+      :title="authUserEmail ? 'Logout (' + authUserEmail + ')' : 'Login'"
+      @click="authUserEmail ? emit('logout') : emit('login')"
+    >
+      <svg v-if="authUserEmail" viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M10 12H3m0 0l3-3m-3 3l3 3"/></svg>
+      <svg v-else viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M3 12h11m0 0l-3-3m3 3l-3 3"/></svg>
+      <span class="lbl">{{ authUserEmail ? 'Logout' : 'Login' }}</span>
+    </button>
     <button v-if="isAdmin" class="tb-btn" @click="menuOpen = !menuOpen">
       <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
       <span class="lbl">Affichage</span>

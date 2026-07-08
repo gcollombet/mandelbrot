@@ -78,11 +78,11 @@ test.describe("Mandelbrot navigation", () => {
   // 2. Top settings bar
   // -----------------------------------------------------------------------
 
-  test("top settings bar is visible with 5 tabs", async ({ page }) => {
+  test("top settings bar is visible with 6 tabs", async ({ page }) => {
     const bar = page.locator(".top-settings-bar");
     await expect(bar).toBeVisible();
 
-    const buttons = page.locator(".top-tab-btn:not(.auth-btn)");
+    const buttons = page.locator(".top-tab-btn");
     await expect(buttons).toHaveCount(6);
 
     // Verify tab labels
@@ -95,7 +95,7 @@ test.describe("Mandelbrot navigation", () => {
         "Performance",
         "Animation",
         "Palettes",
-        "Screenshot",
+        "About",
       ]),
     );
   });

@@ -1,17 +1,30 @@
 <script setup lang="ts">
-import {onMounted, ref} from 'vue';
+import {computed, onBeforeUnmount, onMounted, ref} from 'vue';
+import {getKeyboardLayout, getShortcutGroups} from '../keyboardShortcuts';
 
 const visible = ref(true);
 const isFrench = ref(true);
+const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
+
+let autoDismissTimer: number | null = null;
 
 function dismiss() {
   visible.value = false;
+  if (autoDismissTimer !== null) {
+    clearTimeout(autoDismissTimer);
+    autoDismissTimer = null;
+  }
 }
 
 onMounted(() => {
   if (typeof navigator !== 'undefined') {
     isFrench.value = navigator.language.startsWith('fr');
   }
+  autoDismissTimer = window.setTimeout(dismiss, 10000);
+});
+
+onBeforeUnmount(() => {
+  if (autoDismissTimer !== null) clearTimeout(autoDismissTimer);
 });
 </script>
 
@@ -34,6 +47,14 @@ onMounted(() => {
     <p class="kicker">Realtime</p>
     <h2>Mandelbrot<br><span class="grad">Renderer</span></h2>
     <div class="loader"></div>
+    <div class="shortcut-groups">
+      <div v-for="group in shortcutGroups" :key="group.label" class="shortcut-group">
+        <span class="shortcut-label">{{ group.label }}</span>
+        <div class="shortcut-keys">
+          <span v-for="(k, i) in group.keys" :key="i" class="shortcut-key">{{ k }}</span>
+        </div>
+      </div>
+    </div>
     <p class="tap">{{ isFrench ? 'Toucher pour explorer' : 'Tap to explore' }}</p>
   </div>
 </template>
@@ -156,6 +177,49 @@ onMounted(() => {
 
 @keyframes splash-load {
   to { transform: scaleX(1); }
+}
+
+.splash .shortcut-groups {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+  margin-top: 28px;
+  opacity: 0;
+  animation: splash-tap-in 0.4s ease 2.3s forwards;
+}
+
+.splash .shortcut-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: center;
+}
+
+.splash .shortcut-label {
+  font-size: 0.72rem;
+  font-weight: 600;
+  min-width: 4.2em;
+  text-align: right;
+  color: var(--ink-3);
+}
+
+.splash .shortcut-keys {
+  display: flex;
+  align-items: center;
+  gap: 3px;
+  flex-wrap: wrap;
+}
+
+.splash .shortcut-key {
+  font-family: var(--mono);
+  font-size: 0.68rem;
+  padding: 2px 7px;
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--line);
+  color: var(--ink-2);
 }
 
 .splash .tap {

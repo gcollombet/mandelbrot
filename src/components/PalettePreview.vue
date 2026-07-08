@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { onMounted, onUnmounted, ref, watch } from 'vue';
-import type { ColorStop } from '../ColorStop.ts';
-import type { InterpolationMode } from '../Mandelbrot.ts';
-import { Palette } from '../Palette.ts';
+import {onMounted, onUnmounted, ref, watch} from 'vue';
+import type {ColorStop} from '../ColorStop.ts';
+import type {InterpolationMode} from '../Mandelbrot.ts';
+import {Palette} from '../Palette.ts';
 import colorShader from '../assets/color.wgsl?raw';
-import { getDefaultTileTextureUrl, getDefaultSkyboxTextureUrl } from '../textureLibrary';
+import {getDefaultSkyboxTextureUrl, getDefaultTileTextureUrl} from '../textureLibrary';
 import {
   normalizeTextureMappingFromLegacy,
-  textureMappingVariableId,
   type TextureMappingConfig,
+  textureMappingVariableId,
 } from '../TextureMapping';
 
 // ── Float32 → Float16 (copied from Engine.ts) ──
@@ -41,11 +41,21 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 
 const LAYER_COUNT = 8;
 const PREVIEW_MU = 1000000;
-const COLOR_UNIFORM_FLOAT_COUNT = 60;
+const COLOR_UNIFORM_FLOAT_COUNT = 64;
 const ORBIT_DIRECTION_SCALE = 4095;
 const ORBIT_DIRECTION_BASE = 4096;
 /** Number of synthetic iterations to display. */
 const ITER_COUNT = 100;
+/**
+ * Baseline tessellation scale for the preview. The global `tessellationLevel`
+ * uniform only feeds the micro-bump / image-blend / webcam paths (all gated by
+ * their per-stop weights), so a non-zero baseline is visually inert until the
+ * user enables micro-bump or image blend — at which point it gives them a scale
+ * to act on. See color.wgsl lines 562 / 572 / 663.
+ */
+const PREVIEW_TESSELLATION_LEVEL = 5;
+/** Preview light azimuth, shared by the uniform blocks (single source of truth). */
+const PREVIEW_LIGHT_ANGLE = 3.927;
 
 const props = defineProps<{
   colorStops: ColorStop[];
@@ -92,6 +102,9 @@ let syntheticTexture: GPUTexture | null = null;
 let syntheticArrayView: GPUTextureView | null = null;
 let ctx: GPUCanvasContext | null = null;
 let format: GPUTextureFormat = 'bgra8unorm';
+// sRGB view format so the GPU applies linear→sRGB on write — matching the real
+// render's present.wgsl pass. Without it the preview shows raw linear colour (dark).
+let srgbFormat: GPUTextureFormat = 'bgra8unorm-srgb';
 
 // Resources needed to rebuild bind group when tile texture changes
 let bindGroupLayout: GPUBindGroupLayout | null = null;
@@ -100,6 +113,10 @@ let skyboxTextureGpu: GPUTexture | null = null;
 let skyboxSampler: GPUSampler | null = null;
 let webcamTextureGpu: GPUTexture | null = null;
 let frozenTextureGpu: GPUTexture | null = null;
+let aaTargetTextureGpu: GPUTexture | null = null;
+// Current backing size (physical px); applySize() rebuilds when it changes.
+let currentW = 0;
+let currentH = 0;
 
 /** Load an image URL into a GPUTexture (rgba8unorm). */
 async function loadTexture(dev: GPUDevice, url: string): Promise<GPUTexture> {
@@ -126,6 +143,18 @@ function create1x1Texture(dev: GPUDevice, r: number, g: number, b: number, a: nu
     label: 'PalettePreview 1x1',
   });
   dev.queue.writeTexture({ texture: tex }, new Uint8Array([r, g, b, a]), { bytesPerRow: 4 }, [1, 1]);
+  return tex;
+}
+
+/** Create a 1×1 r32float texture filled with a single value (used as a neutral AA-target placeholder). */
+function create1x1R32F(dev: GPUDevice, value = 0): GPUTexture {
+  const tex = dev.createTexture({
+    size: [1, 1, 1],
+    format: 'r32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'PalettePreview 1x1 r32float',
+  });
+  dev.queue.writeTexture({ texture: tex }, new Float32Array([value]).buffer as ArrayBuffer, { bytesPerRow: 4 }, [1, 1]);
   return tex;
 }
 
@@ -166,8 +195,17 @@ function buildSyntheticData(w: number, h: number, mu: number): Float32Array[] {
       const zy = escapeRadius * Math.sin(zAngle);
 
       // Stored shading data for escaped pixels.
-      const distanceHeight = 4.0 + Math.sin(iterFloat * 0.22 + vFrac * Math.PI) * 0.6;
-      const angleDer = (iterFloat / ITER_COUNT) * Math.PI * 2 + vFrac * Math.PI * 0.5;
+      // Metallic CYLINDER cross-section: the height rises as a semicircle (max at the
+      // centre → 0 at the top/bottom edges); its vertical gradient tilts the normal
+      // like a rounded rod — bright toward the centre, curving away (darker) to the
+      // edges. The SSAA resolve pass smooths the reflection that used to block up here.
+      // angle_der stays near the light (base orientation) with only a light horizontal
+      // drift so the palette progression reads cleanly.
+      const cyl = 2 * vFrac - 1;                                // -1 (top) .. +1 (bottom)
+      const cylProfile = Math.sqrt(Math.max(0, 1 - cyl * cyl)); // 1 at centre → 0 at edges
+      const CYL_HEIGHT = 60.0;   // curvature strength (usable ≈20–60; shader clamps height at ±64)
+      const distanceHeight = 4.0 + cylProfile * CYL_HEIGHT;
+      const angleDer = PREVIEW_LIGHT_ANGLE + (iterFloat / ITER_COUNT) * 0.6;
 
       layers[0][idx] = iterFloat;  // iter
       layers[1][idx] = 1;          // genuine flag (1.0 = genuinely computed)
@@ -210,7 +248,7 @@ function render() {
   const encoder = device.createCommandEncoder({ label: 'PalettePreview Encoder' });
   const pass = encoder.beginRenderPass({
     colorAttachments: [{
-      view: tex.createView(),
+      view: tex.createView({ format: srgbFormat }),
       loadOp: 'clear',
       storeOp: 'store',
       clearValue: { r: 0, g: 0, b: 0, a: 1 },
@@ -228,7 +266,8 @@ function render() {
 function rebuildBindGroup() {
   if (!device || !bindGroupLayout || !uniformBuffer || !syntheticArrayView
       || !tileTextureGpu || !skyboxTextureGpu || !webcamTextureGpu
-      || !paletteTextureView || !frozenTextureGpu || !paletteSampler || !skyboxSampler) return;
+      || !paletteTextureView || !frozenTextureGpu || !paletteSampler || !skyboxSampler
+      || !aaTargetTextureGpu) return;
   const frozenView = frozenTextureGpu.createView({
     dimension: '2d-array',
     baseArrayLayer: 0,
@@ -246,6 +285,7 @@ function rebuildBindGroup() {
       { binding: 6, resource: frozenView },
       { binding: 7, resource: paletteSampler },
       { binding: 8, resource: skyboxSampler },
+      { binding: 9, resource: aaTargetTextureGpu.createView() },
     ],
     label: 'PalettePreview BindGroup',
   });
@@ -261,39 +301,14 @@ async function init() {
 
   ctx = canvas.getContext('webgpu') as GPUCanvasContext;
   format = navigator.gpu.getPreferredCanvasFormat();
-  ctx.configure({ device, format, alphaMode: 'opaque' });
+  srgbFormat = `${format}-srgb` as GPUTextureFormat;
+  ctx.configure({ device, format, alphaMode: 'opaque', viewFormats: [srgbFormat] });
 
-  // ── Canvas size: adapt to CSS layout ──
-  const rect = canvas.getBoundingClientRect();
-  const dpr = window.devicePixelRatio || 1;
-  const w = Math.round(rect.width * dpr);
-  const h = Math.round(rect.height * dpr);
-  canvas.width = w;
-  canvas.height = h;
-
-  // ── Synthetic texture (8 layers of r32float) ──
+  // Size-dependent resources (canvas dims, synthetic + frozen textures, aspect) are
+  // (re)built by applySize() — called at the end of init AND on every ResizeObserver
+  // change, so they always match the REAL displayed size (the panel opens with an
+  // animation, so onMounted would otherwise measure a wrong intermediate size).
   const mu = PREVIEW_MU;
-  const layerData = buildSyntheticData(w, h, mu);
-  syntheticTexture = device.createTexture({
-    size: { width: w, height: h, depthOrArrayLayers: LAYER_COUNT },
-    format: 'r32float',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    label: 'PalettePreview SyntheticTexture',
-  });
-  for (let l = 0; l < LAYER_COUNT; l++) {
-    device.queue.writeTexture(
-      { texture: syntheticTexture, origin: { x: 0, y: 0, z: l } },
-      layerData[l].buffer as ArrayBuffer,
-      { bytesPerRow: w * 4 },
-      { width: w, height: h, depthOrArrayLayers: 1 },
-    );
-  }
-  syntheticArrayView = syntheticTexture.createView({
-    dimension: '2d-array',
-    baseArrayLayer: 0,
-    arrayLayerCount: LAYER_COUNT,
-    label: 'PalettePreview SyntheticArrayView',
-  });
 
   // ── Tile & skybox textures (loaded from assets) ──
   const tileUrl = props.tileTextureUrl || getDefaultTileTextureUrl();
@@ -307,6 +322,9 @@ async function init() {
 
   // ── Webcam placeholder (1×1 black) ──
   webcamTextureGpu = create1x1Texture(device, 0, 0, 0, 255);
+
+  // ── AA-target placeholder (1×1 r32float = 0 → AA accumulation gate disabled) ──
+  aaTargetTextureGpu = create1x1R32F(device, 0);
 
   // ── Palette texture (4096 x 6 rgba16float) ──
   const initialPalette = new Palette(props.colorStops, props.interpolationMode ?? 'lab').generateTexture();
@@ -331,14 +349,6 @@ async function init() {
   });
   uploadPalette();
 
-  // ── Frozen texture placeholder (same size, dummy) ──
-  frozenTextureGpu = device.createTexture({
-    size: { width: w, height: h, depthOrArrayLayers: LAYER_COUNT },
-    format: 'r32float',
-    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    label: 'PalettePreview FrozenTexture',
-  });
-
   // ── Uniform buffer (padded to 16-byte alignment) ──
   uniformBuffer = device.createBuffer({
     size: 4 * COLOR_UNIFORM_FLOAT_COUNT,
@@ -347,7 +357,7 @@ async function init() {
   });
   // palettePeriod = ITER_COUNT * 2 to compensate for the `* 2.0` in the shader's
   // `deep = v * 2.0; palettePhase = fract(deep / palettePeriod)`, so we get exactly one cycle.
-  const previewLightAngle = 3.927;
+  const previewLightAngle = PREVIEW_LIGHT_ANGLE;
   const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
   const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
   const uniforms = new Float32Array([
@@ -355,7 +365,7 @@ async function init() {
     0,            // paletteOffset
     1,            // bloomStrength
     0,            // time
-    w / h,        // aspect
+    1,            // aspect (real value written by applySize once the size is known)
     0,            // angle
     0,            // animate
     mu,           // mu
@@ -364,7 +374,7 @@ async function init() {
     1,            // liveZoomFactor (no zoom)
     0,            // frozenShiftU
     0,            // frozenShiftV
-    props.tessellationLevel ?? 0, // tessellationLevel
+    props.tessellationLevel || PREVIEW_TESSELLATION_LEVEL, // tessellationLevel
     props.displacementAmount ?? 0, // displacementAmount
     1.0,          // animationSpeed
     1e-10,        // epsilon (interior detection, not relevant for preview)
@@ -409,8 +419,12 @@ async function init() {
     0, // microBumpAnimation
     0, // displacementAnimation
     0, // tessellationAnimation
-    0, // _pad2
-    0, // _pad3
+    0, // aaSampleIndex
+    0, // antialiasLevel
+    0, // aaJitterHatX
+    0, // aaJitterHatY
+    0, // aaJitterLogMag
+    0, // aaAnalytic
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -426,23 +440,87 @@ async function init() {
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
       { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+      { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
     ],
     label: 'PalettePreview BindGroupLayout',
   });
 
-  // ── Pipeline ──
+  // ── Pipeline (renders straight to the sRGB canvas) ──
   const module = device.createShaderModule({ code: colorShader, label: 'PalettePreview ShaderModule' });
   pipeline = device.createRenderPipeline({
     layout: device.createPipelineLayout({ bindGroupLayouts: [bindGroupLayout] }),
     vertex: { module, entryPoint: 'vs_main' },
-    fragment: { module, entryPoint: 'fs_main', targets: [{ format }] },
+    fragment: { module, entryPoint: 'fs_main', targets: [{ format: srgbFormat }] },
     primitive: { topology: 'triangle-list' },
     label: 'PalettePreview RenderPipeline',
   });
 
-  // ── Bind group ──
-  rebuildBindGroup();
+  // Build the size-dependent resources for the current (real) layout size + render.
+  applySize();
+}
 
+/**
+ * (Re)create the size-dependent GPU resources for the canvas's CURRENT layout size and
+ * render. Called at the end of init and from the ResizeObserver, so the synthetic
+ * texture is always built at the real displayed size — the palette panel opens with a
+ * scale animation, so a single measurement at mount catches a wrong intermediate size
+ * (that mismatch was the block/crenellation, not a shading issue).
+ */
+function applySize() {
+  const canvas = canvasRef.value;
+  if (!device || !canvas || !uniformBuffer || !bindGroupLayout) return;
+  const dpr = window.devicePixelRatio || 1;
+  // Measure the PARENT container (the .palette-strip). The canvas is position:absolute
+  // inset:0 inside it, so the container carries the real layout size — and its
+  // clientWidth is transform-independent (not skewed by the panel's open animation).
+  const host = canvas.parentElement ?? canvas;
+  const rect = host.getBoundingClientRect();
+  const cssW = host.clientWidth || rect.width;
+  const cssH = 54*8.0;// host.clientHeight || rect.height;
+  const w = Math.max(1, Math.round(cssW * dpr));
+  const h = Math.max(1, Math.round(cssH * dpr));
+  if (w === currentW && h === currentH) return; // no-op if size unchanged
+  currentW = w;
+  currentH = h;
+  canvas.width = w;
+  canvas.height = h;
+
+  // Synthetic texture (8 layers of r32float) at the real size.
+  const layerData = buildSyntheticData(w, h, PREVIEW_MU);
+  syntheticTexture?.destroy();
+  syntheticTexture = device.createTexture({
+    size: { width: w, height: h, depthOrArrayLayers: LAYER_COUNT },
+    format: 'r32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'PalettePreview SyntheticTexture',
+  });
+  for (let l = 0; l < LAYER_COUNT; l++) {
+    device.queue.writeTexture(
+      { texture: syntheticTexture, origin: { x: 0, y: 0, z: l } },
+      layerData[l].buffer as ArrayBuffer,
+      { bytesPerRow: w * 4 },
+      { width: w, height: h, depthOrArrayLayers: 1 },
+    );
+  }
+  syntheticArrayView = syntheticTexture.createView({
+    dimension: '2d-array',
+    baseArrayLayer: 0,
+    arrayLayerCount: LAYER_COUNT,
+    label: 'PalettePreview SyntheticArrayView',
+  });
+
+  // Frozen placeholder (same size, dummy).
+  frozenTextureGpu?.destroy();
+  frozenTextureGpu = device.createTexture({
+    size: { width: w, height: h, depthOrArrayLayers: LAYER_COUNT },
+    format: 'r32float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'PalettePreview FrozenTexture',
+  });
+
+  // Update aspect (uniform index 4) and rebuild.
+  device.queue.writeBuffer(uniformBuffer, 4 * 4, new Float32Array([w / h]).buffer as ArrayBuffer);
+  rebuildBindGroup();
   render();
 }
 
@@ -462,11 +540,11 @@ watch(
   [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
   () => {
     if (!device || !uniformBuffer) return;
-    const previewLightAngle = 3.927;
+    const previewLightAngle = PREVIEW_LIGHT_ANGLE;
     const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
     const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
     const patch = new Float32Array([
-      props.tessellationLevel ?? 0,
+      props.tessellationLevel || PREVIEW_TESSELLATION_LEVEL,
       props.displacementAmount ?? 0,
       1.0,
       1e-10,
@@ -543,11 +621,23 @@ watch(
   },
 );
 
+let resizeObserver: ResizeObserver | null = null;
+
 onMounted(() => {
   init().catch(e => console.warn('PalettePreview init failed:', e));
+  // Rebuild at the real size whenever the canvas resizes (e.g. once the palette
+  // panel finishes its open animation) so the texture never stays at a wrong size.
+  const canvas = canvasRef.value;
+  const host = canvas?.parentElement ?? canvas;
+  if (host && typeof ResizeObserver !== 'undefined') {
+    resizeObserver = new ResizeObserver(() => applySize());
+    resizeObserver.observe(host);
+  }
 });
 
 onUnmounted(() => {
+  resizeObserver?.disconnect();
+  resizeObserver = null;
   device?.destroy();
   device = null;
 });

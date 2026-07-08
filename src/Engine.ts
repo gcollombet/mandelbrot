@@ -12,7 +12,7 @@ import aaReseedShader from './assets/aa_reseed.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {Palette} from './Palette.ts'
-import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString} from './floatexp'
+import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString} from './floatexp'
 import type {ZoomState} from './zoomState'
 import {
     getFrozenScale,
@@ -2791,10 +2791,16 @@ export class Engine {
 
         // Phase D analytic AA: current sample's jitter δc as unit direction +
         // ln|δc| (exponent-summed with the payload's S in the shader, so deep
-        // scales never underflow the f32 uniform).
+        // scales never underflow the f32 uniform). ln(scale) MUST come from the
+        // same full-precision source the compute path uses to build δc
+        // (scaleStr/viewFloatexp) — the raw numeric `mandelbrot.scale` field
+        // diverges from the true scale in deep zoom, and feeding its wrong log
+        // here made the reconstructed ẑ off by orders of magnitude (fast but
+        // integer-ν/palette-shifted deep render, field report 2026-07-07).
         const aaJitterMag = Math.hypot(this.aaOffsetX, this.aaOffsetY)
-        const aaJitterLogMag = aaJitterMag > 0 && mandelbrot.scale > 0
-            ? Math.log(aaJitterMag) + Math.log(mandelbrot.scale)
+        const lnScale = this.currentLnScale()
+        const aaJitterLogMag = aaJitterMag > 0 && Number.isFinite(lnScale)
+            ? Math.log(aaJitterMag) + lnScale
             : 0
 
         const colorShaderData = new Float32Array([
@@ -3054,18 +3060,43 @@ export class Engine {
      * Analytic AA needs the unified kernel's z″ payload, so it is auto-mode only;
      * it also disables below f64 scale (the log turns −∞).
      */
-    private aaAnalyticParams(aspect: number, scale?: number): { logDelta: number; enabled: boolean } {
-        const s = scale ?? this.previousMandelbrot?.scale ?? 0
+    /**
+     * Full-precision ln(view scale) — from the same decimal/floatexp source the
+     * compute path builds δc from (NOT the raw numeric `mandelbrot.scale` field,
+     * which diverges from the true scale in deep zoom). −∞ when unavailable.
+     */
+    private currentLnScale(): number {
+        const m = this.previousMandelbrot
+        if (m?.viewFloatexp) {
+            return m.viewFloatexp[1] * Math.LN2 + Math.log(Math.abs(m.viewFloatexp[0]) || 1)
+        }
+        if (m?.scaleStr) {
+            return log2FromDecimalString(m.scaleStr) * Math.LN2
+        }
+        const s = m?.scale ?? 0
+        return s > 0 ? Math.log(s) : Number.NEGATIVE_INFINITY
+    }
+
+    private aaAnalyticParams(aspect: number, lnScale?: number): { logDelta: number; enabled: boolean } {
+        const ln = lnScale ?? this.currentLnScale()
         const neutralExtent = Math.sqrt(aspect * aspect + 1)
         // δ = max jitter magnitude: box components |j| ≤ 0.5 → magnitude ≤ √2·0.5,
         // ×(2·extent/size) per texel (the same scale the state machine applies),
-        // × scale.
-        const logDelta = s > 0
-            ? Math.log(Math.SQRT2 * neutralExtent / Math.max(1, this.neutralSize)) + Math.log(s)
+        // × scale. Uses the full-precision ln(scale) so the reseed margin denom
+        // matches the actual deep δc (the raw-scale bug tagged deep pixels wrong).
+        const logDelta = Number.isFinite(ln)
+            ? Math.log(Math.SQRT2 * neutralExtent / Math.max(1, this.neutralSize)) + ln
             : Number.NEGATIVE_INFINITY
         const enabled = this.aaAnalyticEnabled
             && this.approximationMode === 'auto'
             && Number.isFinite(logDelta)
+        // Deep re-enabled (2026-07-07, third attempt — root cause found in the
+        // KERNEL this time): try_apply_unified's z″ tier update computed at the
+        // old derS scale overflowed on deep blocks (coefficient exponents ~±133
+        // exceed the ldexp/exp clamps; ΔS ≈ +92 per big block saturated the
+        // rescale) → NaN sndM → Metal's max(NaN, x) laundered the reseed margin
+        // into an auto-pass. Fixed by per-term new-scale folding + finite
+        // guards in the reseed and color passes.
         return { logDelta, enabled }
     }
 
