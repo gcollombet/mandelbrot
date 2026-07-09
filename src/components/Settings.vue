@@ -6,12 +6,19 @@ import {
   stripExplorationStateFields,
   stripSessionPerformanceFields,
 } from "../Mandelbrot.ts";
-import type {ColorStop} from '../ColorStop.ts';
-import {createInterpolatedColorStop} from '../ColorStop.ts';
+import type {ColorStop, StopTransferCurve} from '../ColorStop.ts';
+import {createInterpolatedColorStop, getStopTransferCurve} from '../ColorStop.ts';
+import {
+  applyStopPresetValues,
+  ensureDefaultStopPresetEntries,
+  getAllStopPresetEntries,
+} from '../stopPresetStore.ts';
+import type {StopPresetRecord} from '../stopPresetStore.ts';
 import PaletteEditor from './PaletteEditor.vue';
 import PalettePreview from './PalettePreview.vue';
 import GlissiereHandle from './GlissiereHandle.vue';
 import AnimationPanel from './AnimationPanel.vue';
+import StopTransferCurveSelector from './StopTransferCurveSelector.vue';
 import { DenseField, DenseSection, DenseToggle, DenseSeg, DenseSelect } from './dense';
 import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
@@ -535,6 +542,115 @@ watch(() => model.value.colorStops.length, (newLen, oldLen) => {
     selectedIdx.value = newLen - 1;
   }
 });
+
+// ── Compact "Point · Couleur" quickbar, rendered above the palette strip.
+// Mirrors PaletteEditor.vue's per-stop color/curve/effect fields but reads/writes
+// `model` directly (no Teleport — see git history for why that approach was dropped).
+const quickSelectedStop = computed(() => {
+  if (selectedIdx.value === null) return null;
+  return model.value.colorStops[selectedIdx.value] ?? null;
+});
+
+const quickSelectedHex = computed({
+  get() {
+    if (selectedIdx.value === null || model.value.colorStops.length === 0) return '#ffffff';
+    const c = model.value.colorStops[selectedIdx.value]?.color || '#ffffff';
+    try {
+      return d3rgb(c).formatHex();
+    } catch {
+      return '#ffffff';
+    }
+  },
+  set(hex: string) {
+    if (selectedIdx.value !== null && model.value.colorStops[selectedIdx.value]) {
+      model.value.colorStops[selectedIdx.value] = {
+        ...model.value.colorStops[selectedIdx.value],
+        color: hex,
+      };
+    }
+  },
+});
+
+const quickSelectedIridescenceHex = computed({
+  get() {
+    if (!quickSelectedStop.value?.iridescenceColor) return '#ffffff';
+    try {
+      return d3rgb(quickSelectedStop.value.iridescenceColor).formatHex();
+    } catch {
+      return '#ffffff';
+    }
+  },
+  set(hex: string) {
+    if (applyToAll.value) {
+      for (const stop of model.value.colorStops) stop.iridescenceColor = hex;
+    } else {
+      if (selectedIdx.value === null) return;
+      const stop = model.value.colorStops[selectedIdx.value];
+      if (!stop) return;
+      stop.iridescenceColor = hex;
+    }
+  },
+});
+
+function quickEnableIridescenceColor() {
+  quickSelectedIridescenceHex.value = quickSelectedHex.value;
+}
+
+function quickClearIridescenceColor() {
+  if (applyToAll.value) {
+    for (const stop of model.value.colorStops) delete stop.iridescenceColor;
+  } else {
+    if (selectedIdx.value === null) return;
+    const stop = model.value.colorStops[selectedIdx.value];
+    if (!stop) return;
+    delete stop.iridescenceColor;
+  }
+}
+
+const quickSelectedTransferCurve = computed<StopTransferCurve>({
+  get() {
+    return quickSelectedStop.value ? getStopTransferCurve(quickSelectedStop.value) : 'linear';
+  },
+  set(curve: StopTransferCurve) {
+    const newCurve = curve === 'linear' ? undefined : curve;
+    if (applyToAll.value) {
+      for (const stop of model.value.colorStops) stop.transferCurve = newCurve;
+    } else {
+      if (selectedIdx.value === null) return;
+      const stop = model.value.colorStops[selectedIdx.value];
+      if (!stop) return;
+      stop.transferCurve = newCurve;
+    }
+  },
+});
+
+// ── Stop preset list + current selection, shared with PaletteEditor's "Point · Presets"
+// section below (v-model'd down as props so both stay in sync). ──
+const stopPresets = ref<StopPresetRecord[]>([]);
+const selectedStopPresetName = ref('');
+
+async function refreshStopPresets() {
+  await ensureDefaultStopPresetEntries();
+  stopPresets.value = await getAllStopPresetEntries();
+}
+
+/** Quickbar preset picker: applies immediately when an entry is selected. */
+function applyQuickStopPreset(name: string) {
+  selectedStopPresetName.value = name;
+  const preset = stopPresets.value.find(item => item.name === name);
+  if (!preset) return;
+  if (applyToAll.value) {
+    for (let i = 0; i < model.value.colorStops.length; i += 1) {
+      const stop = model.value.colorStops[i];
+      if (stop) model.value.colorStops[i] = applyStopPresetValues(stop, preset.values);
+    }
+  } else {
+    if (selectedIdx.value === null) return;
+    const stop = model.value.colorStops[selectedIdx.value];
+    if (!stop) return;
+    model.value.colorStops[selectedIdx.value] = applyStopPresetValues(stop, preset.values);
+  }
+}
 
 function selectColor(idx: number) {
   selectedIdx.value = idx;
@@ -1188,6 +1304,7 @@ onMounted(async () => {
   await loadPalettes();
   await loadTextureMappingPresets();
   await loadTextures();
+  await refreshStopPresets();
   await syncRemoteCatalog();
   await loadPresets();
   await loadPalettes();
@@ -2310,6 +2427,29 @@ async function importSkyboxTexture(event: Event) {
       <!-- ═══ Pipette + outils compact ═══ -->
       <div class="palette-strip-zone">
       <div class="top-bar palette-strip-bar mb-2 mt-2">
+        <!-- Stop edit scope: apply edits to just the selected stop, or to all stops -->
+        <div class="stop-scope-toggle" role="group" aria-label="Stop edit scope">
+          <button
+            type="button"
+            class="button is-small scope-btn"
+            :class="{ 'is-active': !applyToAll }"
+            :aria-pressed="!applyToAll"
+            title="Apply edits only to this stop"
+            @click="applyToAll = false"
+          >
+            This Stop
+          </button>
+          <button
+            type="button"
+            class="button is-small scope-btn"
+            :class="{ 'is-active': applyToAll }"
+            :aria-pressed="applyToAll"
+            title="Apply edits to all stops"
+            @click="applyToAll = true"
+          >
+            All Stops
+          </button>
+        </div>
         <div class="color-picker-row">
           <button
             class="pipette-btn"
@@ -2323,24 +2463,51 @@ async function importSkyboxTexture(event: Event) {
         </div>
         <div class="outils-bar">
           <button class="button is-small is-light outils-btn" @click="invertPalette" title="Reverse order">
-            <i class="fa-solid fa-arrow-right-arrow-left fa-fw"></i>
-          </button>
-          <button class="button is-small is-light outils-btn" @click="negatePalette" title="Negate RGB">
-            <i class="fa-solid fa-circle-half-stroke fa-fw"></i>
+            <i class="fa-solid fa-arrow-right-arrow-left fa-fw"></i> Inverser
           </button>
           <button class="button is-small is-light outils-btn" @click="duplicatePalette" title="Duplicate 2x">
-            <i class="fa-regular fa-copy fa-fw"></i>
+            <i class="fa-regular fa-copy fa-fw"></i> Dupliquer
           </button>
           <button class="button is-small is-light outils-btn" @click="mirrorPalette" title="Mirror (palindrome)">
-            <i class="fa-solid fa-arrows-left-right fa-fw"></i>
+            <i class="fa-solid fa-arrows-left-right fa-fw"></i> Palindrome
           </button>
           <button class="button is-small is-light outils-btn" @click="distributeEvenly" title="Distribute evenly">
-            <i class="fa-solid fa-align-justify fa-fw"></i>
+            <i class="fa-solid fa-align-justify fa-fw"></i> Répartir
           </button>
           <button class="button is-small is-danger is-light outils-btn" @click="clearPalette" title="Clear entire palette">
-            <i class="fa-solid fa-trash-can fa-fw"></i>
+            <i class="fa-solid fa-trash-can fa-fw"></i> Effacer
           </button>
         </div>
+      </div>
+
+      <!-- Compact stop bar: color/iridescence/curve pickers + stop preset picker,
+           shown above the strip on a single line so they're visible without scrolling. -->
+      <div v-if="quickSelectedStop" class="stop-quickbar">
+        <span class="quickbar-lab">Couleur</span>
+        <span class="swatch" :style="{ background: quickSelectedHex }" title="Couleur du point">
+          <input type="color" :value="quickSelectedHex" @input="quickSelectedHex = ($event.target as HTMLInputElement).value" />
+        </span>
+        <span class="quickbar-hex">{{ quickSelectedHex }}</span>
+
+        <span class="quickbar-lab">Iridescence</span>
+        <template v-if="quickSelectedStop.iridescenceColor">
+          <span class="swatch" :style="{ background: quickSelectedIridescenceHex }" title="Couleur d'iridescence">
+            <input type="color" :value="quickSelectedIridescenceHex" @input="quickSelectedIridescenceHex = ($event.target as HTMLInputElement).value" />
+          </span>
+          <button class="col-clr" title="Retirer l'iridescence" @click="quickClearIridescenceColor">✕</button>
+        </template>
+        <button v-else class="col-plus" title="Activer l'iridescence" @click="quickEnableIridescenceColor">+</button>
+
+        <StopTransferCurveSelector v-model="quickSelectedTransferCurve" />
+
+        <select
+          class="quickbar-preset-select"
+          :value="selectedStopPresetName"
+          @change="applyQuickStopPreset(($event.target as HTMLSelectElement).value)"
+        >
+          <option value="" disabled>Choisir un preset…</option>
+          <option v-for="preset in stopPresets" :key="preset.guid || preset.name" :value="preset.name">{{ preset.name }}</option>
+        </select>
       </div>
 
       <!-- Live WebGPU material preview strip (mockup style) with handles overlaid -->
@@ -2428,9 +2595,12 @@ async function importSkyboxTexture(event: Event) {
         :texture-mapping="model.textureMapping"
         :is-admin="isAdmin"
         v-model:apply-to-all="applyToAll"
+        :stop-presets="stopPresets"
+        v-model:selected-stop-preset-name="selectedStopPresetName"
+        @refresh-stop-presets="refreshStopPresets"
       />
 
-      <DenseSection group="params" :hue="25" title="Global · Surface" scope="Relief et ombrage partagés — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
+      <DenseSection group="params" :hue="25" title="Global · Surface & Matière" scope="Relief, ombrage et matériau partagés — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
         <div class="fields">
           <DenseField label="Orbit trap" :min="0" :max="100" :step="0.1" f="p1"
             :model-value="model.orbitTrapStrength ?? 0" @update:model-value="(v: number) => model.orbitTrapStrength = v" />
@@ -2444,10 +2614,6 @@ async function importSkyboxTexture(event: Event) {
             :model-value="model.lightAngle ?? 3.927" @update:model-value="(v: number) => model.lightAngle = v" />
           <DenseField label="Bump fin" :min="0" :max="2" :step="0.01" f="p2"
             :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
-        </div>
-      </DenseSection>
-      <DenseSection group="params" :hue="285" title="Global · Matière" scope="Réponse matériau sur toute la surface" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;8&quot;/><path d=&quot;M8 9a3 3 0 014 0&quot;/>'>
-        <div class="fields">
           <DenseField label="Vernis" :min="0" :max="10" :step="0.01" f="p2"
             :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
           <DenseField label="Sous-surface" :min="0" :max="10" :step="0.05" f="p2"
@@ -2462,6 +2628,12 @@ async function importSkyboxTexture(event: Event) {
           :model-value="model.interpolationMode"
           @update:model-value="(v: string | number) => model.interpolationMode = v as InterpolationMode"
         />
+        <div class="transfer">
+          <button class="mini-btn" @click="negatePalette" title="Negate RGB">
+            <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 000 18z" fill="currentColor" stroke="none"/></svg>
+            Négatif RGB
+          </button>
+        </div>
         <div class="fields">
           <DenseField label="Teinte" :min="-180" :max="180" :step="1" :f="degFmt"
             :model-value="hslHueShift" @update:model-value="onHslHueInput" />
@@ -3308,6 +3480,7 @@ async function importSkyboxTexture(event: Event) {
   display: flex;
   align-items: center;
   justify-content: space-between;
+  flex-wrap: wrap;
   gap: 14px;
   margin: 0 0 10px !important;
 }
@@ -3326,6 +3499,92 @@ async function importSkyboxTexture(event: Event) {
   flex-wrap: wrap;
   justify-content: flex-end;
 }
+.stop-scope-toggle {
+  display: inline-flex;
+  flex: 0 0 auto;
+  border: 1px solid var(--line);
+  border-radius: 10px;
+  overflow: hidden;
+  background: var(--row);
+  padding: 2px;
+}
+.scope-btn {
+  border: 0 !important;
+  border-radius: 8px !important;
+  min-width: 92px;
+  height: 30px;
+  line-height: 30px;
+  font-size: 13px !important;
+  font-weight: 600;
+  color: var(--ink-2) !important;
+  background: transparent !important;
+  transition: .15s;
+}
+.scope-btn:hover {
+  color: var(--ink) !important;
+  background: var(--row-on) !important;
+}
+.scope-btn.is-active {
+  color: #fff !important;
+  background: var(--accent) !important;
+  box-shadow: 0 2px 8px -2px var(--accent) !important;
+}
+.scope-btn.is-active:hover {
+  background: var(--accent-bright) !important;
+}
+.stop-quickbar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  background: var(--row);
+  border: 1px solid var(--line-soft);
+  border-radius: 12px;
+  padding: 8px 10px;
+  margin-bottom: 10px;
+}
+.stop-quickbar .swatch {
+  width: 28px;
+  height: 28px;
+  flex: 0 0 auto;
+}
+.quickbar-lab {
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink-3);
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.quickbar-hex {
+  font-family: var(--mono);
+  font-size: 11.5px;
+  font-weight: 600;
+  color: var(--ink);
+  flex: 0 0 auto;
+  margin-right: 4px;
+}
+.stop-quickbar .col-plus,
+.stop-quickbar .col-clr {
+  flex: 0 0 auto;
+}
+.quickbar-preset-select {
+  flex: 1 1 160px;
+  min-width: 140px;
+  height: 34px;
+  font-family: var(--sans);
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--ink);
+  background: var(--bg-0);
+  border: 1px solid var(--line);
+  border-radius: 9px;
+  padding: 0 10px;
+  cursor: pointer;
+}
+.quickbar-preset-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
 .palette-strip {
   margin-bottom: 0 !important;
   overflow: hidden;
@@ -3333,8 +3592,7 @@ async function importSkyboxTexture(event: Event) {
   border-radius: 12px;
   background: #07080d;
 }
-.palette-canvas-panel .pipette-btn,
-.palette-canvas-panel .outils-btn.button {
+.palette-canvas-panel .pipette-btn {
   width: 34px;
   height: 34px;
   display: inline-grid;
@@ -3344,6 +3602,20 @@ async function importSkyboxTexture(event: Event) {
   border: 1px solid var(--line) !important;
   background: var(--row-on) !important;
   color: var(--ink-2) !important;
+}
+.palette-canvas-panel .outils-btn.button {
+  height: 34px;
+  display: inline-flex !important;
+  align-items: center;
+  gap: 6px;
+  padding: 0 12px !important;
+  border-radius: 9px !important;
+  border: 1px solid var(--line) !important;
+  background: var(--row-on) !important;
+  color: var(--ink-2) !important;
+  font-size: 12px !important;
+  font-weight: 600;
+  white-space: nowrap;
 }
 .palette-canvas-panel .pipette-btn:hover,
 .palette-canvas-panel .outils-btn.button:hover {

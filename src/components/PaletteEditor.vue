@@ -1,10 +1,7 @@
 <script setup lang="ts">
-import {computed, onMounted, onUnmounted, ref, toRaw} from 'vue';
-import {interpolateRgb} from 'd3-interpolate';
-import StopTransferCurveSelector from './StopTransferCurveSelector.vue';
-import {rgb as d3rgb} from 'd3-color';
-import type {ColorStop, StopTransferCurve} from "../ColorStop.ts";
-import {applyStopTransferCurve, getEffectValue, getStopTransferCurve} from '../ColorStop.ts';
+import {computed, ref} from 'vue';
+import type {ColorStop} from "../ColorStop.ts";
+import {getEffectValue} from '../ColorStop.ts';
 import type { EffectFieldName } from '../effectFieldConfig';
 import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG, UI_GROUPS } from '../effectFieldConfig';
 import type {InterpolationMode} from "../Mandelbrot.ts";
@@ -12,15 +9,11 @@ import type {TextureMappingConfig} from "../TextureMapping.ts";
 import {
   applyStopPresetValues,
   deleteStopPresetEntry,
-  ensureDefaultStopPresetEntries,
-  getAllStopPresetEntries,
   saveStopPresetEntry,
   valuesFromStop,
 } from '../stopPresetStore.ts';
 import type {StopPresetRecord} from '../stopPresetStore.ts';
-import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry} from '../remoteCatalog.ts';
 import {canDeleteCatalogEntry} from '../catalogPermissions.ts';
-import {buildStopPresetPreviewSpec} from '../stopPresetPreview.ts';
 import { DenseField, DenseSection } from './dense';
 
 // Per-effect value formatter for dense fields (mirrors the old toFixed logic).
@@ -49,6 +42,8 @@ const props = withDefaults(defineProps<{
   textureMapping?: TextureMappingConfig;
   applyToAll?: boolean;
   isAdmin?: boolean;
+  stopPresets?: StopPresetRecord[];
+  selectedStopPresetName?: string;
 }>(), {
   selectedIdx: 0,
   interpolationMode: 'lab',
@@ -68,79 +63,17 @@ const props = withDefaults(defineProps<{
   textureMapping: undefined,
   applyToAll: false,
   isAdmin: false,
+  stopPresets: () => [],
+  selectedStopPresetName: '',
 });
 const emit = defineEmits<{
   (e: 'update:colorStops', value: ColorStop[]): void;
   (e: 'update:applyToAll', value: boolean): void;
+  (e: 'update:selectedStopPresetName', value: string): void;
+  (e: 'refresh-stop-presets'): void;
 }>();
 
 
-
-// Hex color of the selected stop (for the native color picker)
-const selectedHex = computed({
-  get() {
-    if (props.selectedIdx === null || props.colorStops.length === 0) return '#ffffff';
-    const c = props.colorStops[props.selectedIdx]?.color || '#ffffff';
-    // Ensure it's a valid 7-char hex for the input
-    try {
-      return d3rgb(c).formatHex();
-    } catch {
-      return '#ffffff';
-    }
-  },
-  set(hex: string) {
-    if (props.selectedIdx !== null && props.colorStops[props.selectedIdx]) {
-      //@ts-ignore
-      props.colorStops[props.selectedIdx] = {
-        ...props.colorStops[props.selectedIdx],
-        color: hex
-      };
-      emit('update:colorStops', props.colorStops);
-    }
-  }
-});
-
-const selectedIridescenceHex = computed({
-  get() {
-    if (!selectedStop.value?.iridescenceColor) return '#ffffff';
-    try {
-      return d3rgb(selectedStop.value.iridescenceColor).formatHex();
-    } catch {
-      return '#ffffff';
-    }
-  },
-  set(hex: string) {
-    if (props.applyToAll) {
-      for (const stop of props.colorStops) {
-        stop.iridescenceColor = hex;
-      }
-    } else {
-      if (props.selectedIdx === null) return;
-      const stop = props.colorStops[props.selectedIdx];
-      if (!stop) return;
-      stop.iridescenceColor = hex;
-    }
-    emit('update:colorStops', props.colorStops);
-  },
-});
-
-function enableIridescenceColor() {
-  selectedIridescenceHex.value = selectedHex.value;
-}
-
-function clearIridescenceColor() {
-  if (props.applyToAll) {
-    for (const stop of props.colorStops) {
-      delete stop.iridescenceColor;
-    }
-  } else {
-    if (props.selectedIdx === null) return;
-    const stop = props.colorStops[props.selectedIdx];
-    if (!stop) return;
-    delete stop.iridescenceColor;
-  }
-  emit('update:colorStops', props.colorStops);
-}
 
 // ── Per-stop effect editing ──
 
@@ -150,153 +83,13 @@ const selectedStop = computed(() => {
   return props.colorStops[props.selectedIdx] ?? null;
 });
 
-const selectedTransferCurve = computed<StopTransferCurve>({
-  get() {
-    return selectedStop.value ? getStopTransferCurve(selectedStop.value) : 'linear';
-  },
-  set(curve: StopTransferCurve) {
-    if (props.applyToAll) {
-      for (const stop of props.colorStops) {
-        stop.transferCurve = curve;
-      }
-    } else {
-      if (props.selectedIdx === null) return;
-      const stop = props.colorStops[props.selectedIdx];
-      if (!stop) return;
-      
-      const newCurve = curve === 'linear' ? undefined : curve;
-      stop.transferCurve = newCurve;
-    }
-    emit('update:colorStops', props.colorStops);
-  },
-});
-
 const stopPresetName = ref('');
-const selectedStopPresetName = ref('');
-const stopPresets = ref<StopPresetRecord[]>([]);
-const stopPresetDropdownOpen = ref(false);
-const stopPresetDropdownRef = ref<HTMLElement | null>(null);
-const stopPresetUploadSuccessKeys = ref<Set<string>>(new Set());
-const stopPresetUploadTimers = new Map<string, ReturnType<typeof setTimeout>>();
-const STOP_PRESET_UPLOAD_SUCCESS_DURATION_MS = 2200;
-const stopPresetPreviewCache = new Map<string, string>();
 
-function stopPresetUploadKey(record: StopPresetRecord): string {
-  return record.guid || record.name;
+const selectedStopPresetRecord = computed(() => props.stopPresets.find(item => item.name === props.selectedStopPresetName) ?? null);
+
+function refreshStopPresets() {
+  emit('refresh-stop-presets');
 }
-
-function isStopPresetUploadSuccess(key: string): boolean {
-  return stopPresetUploadSuccessKeys.value.has(key);
-}
-
-function showStopPresetUploadSuccess(key: string): void {
-  const existingTimer = stopPresetUploadTimers.get(key);
-  if (existingTimer) clearTimeout(existingTimer);
-
-  const nextKeys = new Set(stopPresetUploadSuccessKeys.value);
-  nextKeys.add(key);
-  stopPresetUploadSuccessKeys.value = nextKeys;
-
-  stopPresetUploadTimers.set(key, setTimeout(() => {
-    const remaining = new Set(stopPresetUploadSuccessKeys.value);
-    remaining.delete(key);
-    stopPresetUploadSuccessKeys.value = remaining;
-    stopPresetUploadTimers.delete(key);
-  }, STOP_PRESET_UPLOAD_SUCCESS_DURATION_MS));
-}
-
-function stopPresetUploadButtonClasses(key: string, remote?: {publishedName?: string; lastUpdated?: string}) {
-  return {
-    'is-upload-success': isStopPresetUploadSuccess(key),
-    'is-remote': !!remote && !isStopPresetUploadSuccess(key),
-  };
-}
-
-function stopPresetUploadButtonTitle(key: string, remote?: {publishedName?: string; lastUpdated?: string}): string {
-  if (isStopPresetUploadSuccess(key)) return 'Uploaded successfully';
-  if (remote) return 'Already in shared catalog. Upload again to update.';
-  return 'Upload to shared catalog';
-}
-
-function stopPresetUploadButtonIcon(key: string): string {
-  return isStopPresetUploadSuccess(key) ? 'fa-solid fa-check' : 'fa-solid fa-upload';
-}
-
-function stopPresetPreviewKey(record: StopPresetRecord): string {
-  return `${record.guid || record.name}|${record.lastUpdated || record.date}|${JSON.stringify(record.values)}`;
-}
-
-function buildStopPresetPreviewUrl(record: StopPresetRecord): string {
-  const key = stopPresetPreviewKey(record);
-  const cached = stopPresetPreviewCache.get(key);
-  if (cached) return cached;
-
-  const spec = buildStopPresetPreviewSpec(record.values);
-  const canvas = document.createElement('canvas');
-  canvas.width = 32;
-  canvas.height = 32;
-  const ctx = canvas.getContext('2d');
-  if (!ctx) return '';
-
-  const interpolate = interpolateRgb(spec.startColor, spec.endColor);
-  for (let x = 0; x < canvas.width; x += 1) {
-    const t = x / Math.max(canvas.width - 1, 1);
-    const curvedT = applyStopTransferCurve(spec.curve, t);
-    ctx.fillStyle = interpolate(curvedT);
-    ctx.fillRect(x, 0, 1, canvas.height);
-  }
-
-  const overlayAlpha = 0.07 + spec.effectStrength * 0.15;
-  ctx.fillStyle = `rgba(255, 255, 255, ${overlayAlpha.toFixed(3)})`;
-  ctx.fillRect(0, 0, canvas.width, 4);
-  ctx.fillStyle = `rgba(0, 0, 0, ${Math.min(0.15, 0.03 + spec.effectStrength * 0.12).toFixed(3)})`;
-  ctx.fillRect(0, canvas.height - 4, canvas.width, 4);
-
-  const dataUrl = canvas.toDataURL('image/png');
-  stopPresetPreviewCache.set(key, dataUrl);
-  return dataUrl;
-}
-
-function stopPresetPreviewStyle(record: StopPresetRecord | null) {
-  if (!record) {
-    return {
-      backgroundImage: 'linear-gradient(135deg, rgba(230, 230, 230, 1), rgba(200, 200, 200, 1))',
-    };
-  }
-
-  const preview = buildStopPresetPreviewUrl(record);
-  return preview
-    ? {
-        backgroundImage: `url("${preview}")`,
-      }
-    : {
-        backgroundImage: 'linear-gradient(135deg, rgba(230, 230, 230, 1), rgba(200, 200, 200, 1))',
-      };
-}
-
-const selectedStopPresetRecord = computed(() => stopPresets.value.find(item => item.name === selectedStopPresetName.value) ?? null);
-const selectedStopPresetPreview = computed(() => stopPresetPreviewStyle(selectedStopPresetRecord.value));
-
-async function refreshStopPresets() {
-  await ensureDefaultStopPresetEntries();
-  stopPresets.value = await getAllStopPresetEntries();
-}
-
-onMounted(() => {
-  void refreshStopPresets();
-  document.addEventListener('pointerdown', handleDocumentPointerDown);
-  document.addEventListener('keydown', handleDocumentKeydown);
-});
-
-onUnmounted(() => {
-  document.removeEventListener('pointerdown', handleDocumentPointerDown);
-  document.removeEventListener('keydown', handleDocumentKeydown);
-  for (const timer of stopPresetUploadTimers.values()) {
-    clearTimeout(timer);
-  }
-  stopPresetUploadTimers.clear();
-});
-
 
 // French labels matching the canvas mockup.
 const EFFECT_LABEL_FR: Record<EffectFieldName, string> = {
@@ -340,16 +133,13 @@ const EFFECT_DESC_FR: Record<EffectFieldName, string> = {
   anisotropy: 'Étire les reflets selon la direction de la surface',
 };
 
-// Point sections mirroring the mockup (fields keyed by their uiGroup).
+// Point sections mirroring the mockup (fields keyed by their uiGroup), merged
+// into a single "Point · Effets" DenseSection with a subhead per group.
 const POINT_SECTIONS = [
-  { title: 'Point · Éclairage & Matière', scope: 'Lumière et propriétés de matériau', hue: 55,
-    icon: '<circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2"/>',
-    fields: UI_GROUPS['lighting'] ?? [] },
-  { title: 'Point · Itérations', scope: 'Réponse couleur selon le nombre d’itérations', hue: 155,
-    icon: '<path d="M4 6h16M4 12h16M4 18h10"/>', fields: UI_GROUPS['iteration'] ?? [] },
-  { title: 'Point · Sources image', scope: 'Mélange des couches image du point', hue: 325,
-    icon: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 15l-5-5-11 9"/>',
-    fields: UI_GROUPS['imageSources'] ?? [] },
+  { title: 'Couleur', fields: ['palette', 'iridescencePower'] as EffectFieldName[] },
+  { title: 'Éclairage & Matière', fields: UI_GROUPS['lighting'] ?? [] },
+  { title: 'Itérations', fields: UI_GROUPS['iteration'] ?? [] },
+  { title: 'Sources image', fields: UI_GROUPS['imageSources'] ?? [] },
 ];
 
 /** Get the effective value of a field on the selected stop. */
@@ -384,13 +174,13 @@ async function saveCurrentStopPreset() {
     values: valuesFromStop(stop),
     date: new Date().toISOString(),
   });
-  selectedStopPresetName.value = name;
+  emit('update:selectedStopPresetName', name);
   stopPresetName.value = '';
-  await refreshStopPresets();
+  refreshStopPresets();
 }
 
 function applySelectedStopPreset() {
-  const preset = stopPresets.value.find(item => item.name === selectedStopPresetName.value);
+  const preset = props.stopPresets.find(item => item.name === props.selectedStopPresetName);
   if (!preset) return;
 
   if (props.applyToAll) {
@@ -419,75 +209,8 @@ async function deleteSelectedStopPreset() {
   }
   if (!window.confirm(`Delete stop preset "${preset.name}"? This cannot be undone.`)) return;
   await deleteStopPresetEntry(preset.name);
-  selectedStopPresetName.value = '';
-  await refreshStopPresets();
-}
-
-async function toggleStopPresetFavorite(preset: StopPresetRecord) {
-  const plainPreset = structuredClone(toRaw(preset));
-  await saveStopPresetEntry({...plainPreset, favorite: !plainPreset.favorite});
-  await refreshStopPresets();
-}
-
-function handleStopPresetUploadError(error: unknown) {
-  if (error instanceof RemoteCatalogNameConflictError) {
-    window.alert(`A remote ${error.type} named "${error.conflictName}" already exists. Rename this stop preset before uploading.`);
-    return;
-  }
-  console.warn('Remote stop preset upload failed:', error);
-  window.alert('Remote stop preset upload failed. Check the console for details.');
-}
-
-async function uploadStopPresetToCloud(preset: StopPresetRecord) {
-  if (!props.isAdmin) return;
-  try {
-    const plainPreset = structuredClone(toRaw(preset));
-    const guid = plainPreset.guid || crypto.randomUUID();
-    const uploaded = await uploadRemoteCatalogEntry('stopPreset', {
-      guid,
-      name: plainPreset.name,
-      values: plainPreset.values,
-      lastUpdated: plainPreset.lastUpdated || plainPreset.date,
-    });
-    await saveStopPresetEntry({
-      ...plainPreset,
-      guid,
-      lastUpdated: uploaded.lastUpdated,
-      remote: {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
-    });
-    showStopPresetUploadSuccess(stopPresetUploadKey(plainPreset));
-    await refreshStopPresets();
-  } catch (error) {
-    handleStopPresetUploadError(error);
-  }
-}
-
-function selectStopPresetFromDropdown(preset: StopPresetRecord) {
-  selectedStopPresetName.value = preset.name;
-  stopPresetDropdownOpen.value = false;
-}
-
-function toggleStopPresetDropdown() {
-  stopPresetDropdownOpen.value = !stopPresetDropdownOpen.value;
-}
-
-function closeStopPresetDropdown() {
-  stopPresetDropdownOpen.value = false;
-}
-
-function handleDocumentPointerDown(event: PointerEvent) {
-  if (!stopPresetDropdownOpen.value) return;
-  const root = stopPresetDropdownRef.value;
-  if (!root) return;
-  if (event.target instanceof Node && !root.contains(event.target)) {
-    closeStopPresetDropdown();
-  }
-}
-
-function handleDocumentKeydown(event: KeyboardEvent) {
-  if (event.key === 'Escape') {
-    closeStopPresetDropdown();
-  }
+  emit('update:selectedStopPresetName', '');
+  refreshStopPresets();
 }
 
 function downloadJsonFile(filename: string, payload: unknown) {
@@ -502,13 +225,13 @@ function downloadJsonFile(filename: string, payload: unknown) {
 }
 
 function exportSelectedStopPreset() {
-  const preset = stopPresets.value.find(item => item.name === selectedStopPresetName.value);
+  const preset = props.stopPresets.find(item => item.name === props.selectedStopPresetName);
   if (!preset) return;
   downloadJsonFile(`mandelbrot-stop-preset-${preset.name}.json`, preset);
 }
 
 function exportAllStopPresets() {
-  downloadJsonFile('mandelbrot-stop-presets.json', stopPresets.value);
+  downloadJsonFile('mandelbrot-stop-presets.json', props.stopPresets);
 }
 
 const stopPresetFileInput = ref<HTMLInputElement | null>(null);
@@ -533,7 +256,7 @@ function importStopPresets(event: Event) {
           date: typeof record.date === 'string' ? record.date : new Date().toISOString(),
         });
       }
-      await refreshStopPresets();
+      refreshStopPresets();
     } catch {
       window.alert('Invalid stop preset file.');
     }
@@ -548,151 +271,43 @@ function importStopPresets(event: Event) {
 
 <template>
   <template v-if="selectedStop">
-    <!-- ═══ Point · Couleur ═══ -->
+    <!-- ═══ Point · Effets (Éclairage & Matière / Itérations / Sources image) ═══ -->
     <DenseSection
+      key="point-effets"
       group="params"
-      :hue="200"
-      title="Point · Couleur"
-      scope="S'applique au point sélectionné"
-      icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'
+      :hue="55"
+      title="Point · Effets"
+      scope="Itérations, éclairage, matière et sources image pour ce point"
+      icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;4&quot;/><path d=&quot;M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2&quot;/>'
     >
-      <div class="fields">
-        <div class="fld fld-col">
-          <span class="fld-lab">Couleur</span>
-          <span class="swatch" :style="{ background: selectedHex }">
-            <input type="color" :value="selectedHex" @input="selectedHex = ($event.target as HTMLInputElement).value" />
-          </span>
-          <span class="hex">{{ selectedHex }}</span>
+      <template v-for="sec in POINT_SECTIONS" :key="sec.title">
+        <div class="subhead">{{ sec.title }}</div>
+        <div class="fields">
+          <DenseField
+            v-for="field in sec.fields" :key="field"
+            :label="EFFECT_LABEL_FR[field]"
+            :desc="EFFECT_DESC_FR[field]"
+            :min="EFFECT_FIELD_CONFIG[field].min"
+            :max="EFFECT_FIELD_CONFIG[field].max"
+            :step="EFFECT_FIELD_CONFIG[field].step"
+            :f="effectFmt(field)"
+            :unit="EFFECT_FIELD_CONFIG[field].unit"
+            :model-value="getStopEffect(field)"
+            @update:model-value="(v: number) => setStopEffect(field, v)"
+          />
         </div>
-        <div class="fld fld-col">
-          <span class="fld-lab">Iridescence</span>
-          <template v-if="selectedStop.iridescenceColor">
-            <span class="swatch" :style="{ background: selectedIridescenceHex }">
-              <input type="color" :value="selectedIridescenceHex" @input="selectedIridescenceHex = ($event.target as HTMLInputElement).value" />
-            </span>
-            <span class="hex">{{ selectedIridescenceHex }}</span>
-            <button class="col-clr" title="Retirer l'iridescence" @click="clearIridescenceColor">✕</button>
-          </template>
-          <template v-else>
-            <button class="col-plus" title="Activer l'iridescence" @click="enableIridescenceColor">+</button>
-            <span class="hex">off</span>
-          </template>
-        </div>
-      </div>
-
-      <div class="fld fld-curve">
-        <span class="fld-lab seg-lab">Courbe de fondu</span>
-        <StopTransferCurveSelector v-model="selectedTransferCurve" />
-      </div>
-
-      <div class="fields">
-        <DenseField
-          :label="EFFECT_LABEL_FR.palette" :desc="EFFECT_DESC_FR.palette"
-          :min="EFFECT_FIELD_CONFIG.palette.min" :max="EFFECT_FIELD_CONFIG.palette.max" :step="EFFECT_FIELD_CONFIG.palette.step"
-          :f="effectFmt('palette')"
-          :model-value="getStopEffect('palette')"
-          @update:model-value="(v: number) => setStopEffect('palette', v)"
-        />
-        <DenseField
-          :label="EFFECT_LABEL_FR.iridescencePower" :desc="EFFECT_DESC_FR.iridescencePower"
-          :min="EFFECT_FIELD_CONFIG.iridescencePower.min" :max="EFFECT_FIELD_CONFIG.iridescencePower.max" :step="EFFECT_FIELD_CONFIG.iridescencePower.step"
-          :f="effectFmt('iridescencePower')"
-          :model-value="getStopEffect('iridescencePower')"
-          @update:model-value="(v: number) => setStopEffect('iridescencePower', v)"
-        />
-      </div>
-    </DenseSection>
-
-    <!-- ═══ Point · Itérations / Éclairage & Matière / Sources image ═══ -->
-    <DenseSection
-      v-for="sec in POINT_SECTIONS"
-      :key="sec.title"
-      group="params"
-      :hue="sec.hue"
-      :title="sec.title"
-      :scope="sec.scope"
-      :icon="sec.icon"
-    >
-      <div class="fields">
-        <DenseField
-          v-for="field in sec.fields" :key="field"
-          :label="EFFECT_LABEL_FR[field]"
-          :desc="EFFECT_DESC_FR[field]"
-          :min="EFFECT_FIELD_CONFIG[field].min"
-          :max="EFFECT_FIELD_CONFIG[field].max"
-          :step="EFFECT_FIELD_CONFIG[field].step"
-          :f="effectFmt(field)"
-          :unit="EFFECT_FIELD_CONFIG[field].unit"
-          :model-value="getStopEffect(field)"
-          @update:model-value="(v: number) => setStopEffect(field, v)"
-        />
-      </div>
+      </template>
     </DenseSection>
 
     <!-- ═══ Stop Looks (per-stop reusable looks) — Point · Presets ═══ -->
     <DenseSection
+      key="point-presets"
       group="params"
       :hue="300"
       title="Point · Presets"
       scope="Réglages réutilisables pour un point"
       icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
     >
-      <div class="stop-preset-dropdown" ref="stopPresetDropdownRef">
-        <button
-          class="mini-btn is-fullwidth stop-preset-trigger"
-          type="button"
-          :class="{ 'has-selection': !!selectedStopPresetRecord }"
-          @click="toggleStopPresetDropdown"
-          :aria-expanded="stopPresetDropdownOpen"
-          aria-haspopup="listbox"
-          aria-label="Choose a stop preset"
-        >
-          <span class="stop-preset-trigger-preview" :style="selectedStopPresetPreview" aria-hidden="true"></span>
-          <span class="stop-preset-trigger-label">{{ selectedStopPresetRecord?.name || 'Choisir un preset…' }}</span>
-          <i class="fa-solid fa-chevron-down stop-preset-trigger-caret" aria-hidden="true"></i>
-        </button>
-        <div v-if="stopPresetDropdownOpen" class="stop-preset-dropdown-menu" role="listbox" aria-label="Stop presets">
-          <div v-if="stopPresets.length === 0" class="stop-preset-empty">Aucun preset disponible.</div>
-          <div
-            v-for="preset in stopPresets"
-            :key="preset.guid || preset.name"
-            class="stop-preset-option"
-            :class="{ 'is-active': selectedStopPresetName === preset.name }"
-            role="option"
-            :aria-selected="selectedStopPresetName === preset.name"
-            tabindex="0"
-            @click="selectStopPresetFromDropdown(preset)"
-            @keydown.enter.prevent="selectStopPresetFromDropdown(preset)"
-            @keydown.space.prevent="selectStopPresetFromDropdown(preset)"
-          >
-            <span class="stop-preset-preview" :style="stopPresetPreviewStyle(preset)" aria-hidden="true"></span>
-            <span class="stop-preset-label">{{ preset.name }}</span>
-            <span class="stop-preset-actions">
-              <button
-                type="button"
-                class="stop-preset-action"
-                :class="{ 'is-favorite': preset.favorite }"
-                :title="preset.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'"
-                :aria-pressed="!!preset.favorite"
-                @click.stop.prevent="toggleStopPresetFavorite(preset)"
-              >
-                <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
-              </button>
-              <button
-                v-if="props.isAdmin"
-                type="button"
-                class="stop-preset-action upload-button"
-                :class="stopPresetUploadButtonClasses(stopPresetUploadKey(preset), preset.remote)"
-                :title="stopPresetUploadButtonTitle(stopPresetUploadKey(preset), preset.remote)"
-                :aria-label="stopPresetUploadButtonTitle(stopPresetUploadKey(preset), preset.remote)"
-                @click.stop.prevent="uploadStopPresetToCloud(preset)"
-              >
-                <span class="favorite-heart" aria-hidden="true"><i :class="stopPresetUploadButtonIcon(stopPresetUploadKey(preset))"></i></span>
-              </button>
-            </span>
-          </div>
-        </div>
-      </div>
       <div class="transfer">
         <button class="mini-btn primary" :disabled="!selectedStopPresetRecord" @click="applySelectedStopPreset">Appliquer</button>
         <button class="mini-btn danger" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">Supprimer</button>
@@ -724,264 +339,6 @@ function importStopPresets(event: Event) {
 /* ── Per-point effect editing ── */
 .effects-panel {
   margin-top: 0;
-}
-.effects-header {
-  display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: 14px;
-  margin-bottom: 12px;
-}
-.effects-section-title {
-  font-size: 13px;
-  font-weight: 700;
-  letter-spacing: 0.22em;
-  text-transform: uppercase;
-  color: var(--ink-3);
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex: 1;
-  margin: 10px 0 6px;
-}
-.effects-section-title::before {
-  content: "";
-  width: 6px;
-  height: 14px;
-  border-radius: 3px;
-  background: linear-gradient(180deg, var(--accent-bright), var(--mauve));
-  display: inline-block;
-  flex-shrink: 0;
-}
-.effects-section-title::after {
-  content: "";
-  flex: 1;
-  height: 1px;
-  background: var(--line-soft);
-  margin-right: 12px;
-}
-.apply-all-btn {
-  font-size: 0.78em !important;
-  min-width: 7em;
-}
-.all-stops-indicator {
-  display: inline-flex;
-  align-items: center;
-  padding: 0.16em 0.52em;
-  border-radius: 999px;
-  border: 1px solid oklch(0.75 0.15 80);
-  background: oklch(0.75 0.15 80 / 0.15);
-  color: oklch(0.85 0.12 80);
-  font-size: 0.68em;
-  font-weight: 700;
-  text-transform: uppercase;
-  letter-spacing: 0.03em;
-}
-.stop-scope-toggle {
-  display: inline-flex;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  overflow: hidden;
-  background: var(--row);
-  padding: 2px;
-}
-.scope-btn {
-  border: 0 !important;
-  border-radius: 8px !important;
-  min-width: 92px;
-  height: 30px;
-  line-height: 30px;
-  font-size: 13px !important;
-  font-weight: 600;
-  color: var(--ink-2) !important;
-  background: transparent !important;
-  transition: .15s;
-}
-.scope-btn:hover {
-  color: var(--ink) !important;
-  background: var(--row-on) !important;
-}
-.scope-btn.is-active {
-  color: #fff !important;
-  background: var(--accent) !important;
-  box-shadow: 0 2px 8px -2px var(--accent) !important;
-}
-.scope-btn.is-active:hover {
-  background: var(--accent-bright) !important;
-}
-
-.stop-preset-dropdown {
-  position: relative;
-  width: 100%;
-}
-
-.stop-preset-trigger {
-  display: flex !important;
-  align-items: center;
-  justify-content: flex-start;
-  gap: 0.55em;
-  width: 100%;
-  min-height: 42px;
-  padding: 5px 10px !important;
-  border: 1px solid var(--line) !important;
-  border-radius: 12px !important;
-  background: var(--bg-0) !important;
-  color: var(--ink) !important;
-}
-
-.stop-preset-trigger.has-selection {
-  background: var(--row) !important;
-}
-
-.stop-preset-trigger-preview,
-.stop-preset-preview {
-  flex: 0 0 auto;
-  width: 32px;
-  height: 32px;
-  border-radius: 5px;
-  border: 1px solid var(--line);
-  background-color: #d8d8d8;
-  background-size: cover;
-  background-position: center;
-  background-repeat: no-repeat;
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.08);
-}
-
-.stop-preset-trigger-label,
-.stop-preset-label {
-  min-width: 0;
-  flex: 1 1 auto;
-  text-align: left;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-}
-
-.stop-preset-trigger-label {
-  font-size: 0.82em;
-  color: var(--ink);
-}
-
-.stop-preset-trigger-caret {
-  flex: 0 0 auto;
-  font-size: 0.78em;
-  color: var(--ink-2);
-}
-
-.stop-preset-dropdown-menu {
-  position: absolute;
-  top: calc(100% + 0.35em);
-  left: 0;
-  right: 0;
-  z-index: 25;
-  max-height: 320px;
-  overflow-y: auto;
-  padding: 0.35em;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel);
-  box-shadow: 0 12px 30px rgba(0, 0, 0, 0.5);
-}
-
-.stop-preset-option {
-  display: flex;
-  align-items: center;
-  gap: 0.55em;
-  width: 100%;
-  min-height: 40px;
-  padding: 0.28em 0.4em;
-  border-radius: 8px;
-  cursor: pointer;
-  outline: none;
-  color: var(--ink);
-  transition: background 0.14s, box-shadow 0.14s;
-}
-
-.stop-preset-option + .stop-preset-option {
-  margin-top: 0.16em;
-}
-
-.stop-preset-option:hover,
-.stop-preset-option:focus-visible,
-.stop-preset-option.is-active {
-  background: var(--row);
-  box-shadow: inset 0 0 0 1px var(--accent-soft);
-}
-
-.stop-preset-actions {
-  display: inline-flex;
-  align-items: center;
-  gap: 0.2em;
-  flex: 0 0 auto;
-  margin-left: auto;
-}
-
-.stop-preset-action {
-  position: relative;
-  width: 1.9em;
-  height: 1.9em;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
-  border: 0;
-  border-radius: 999px;
-  background: transparent;
-  cursor: pointer;
-  color: var(--ink-3);
-}
-
-.stop-preset-action.upload-button.is-remote .favorite-heart,
-.stop-preset-action.upload-button.is-remote:hover .favorite-heart {
-  color: var(--accent);
-}
-
-.stop-preset-action.upload-button.is-remote::after {
-  content: "✓";
-  position: absolute;
-  right: 0.08em;
-  bottom: 0.08em;
-  width: 0.85em;
-  height: 0.85em;
-  border-radius: 999px;
-  background: oklch(0.65 0.17 140);
-  color: #fff;
-  font-size: 0.58em;
-  font-weight: 800;
-  line-height: 0.85em;
-  text-align: center;
-  box-shadow: 0 1px 3px rgba(0, 0, 0, 0.42);
-}
-
-.stop-preset-action.is-favorite,
-.stop-preset-action:hover {
-  color: var(--magenta);
-}
-
-.stop-preset-action.is-upload-success .favorite-heart,
-.stop-preset-action.is-upload-success:hover .favorite-heart {
-  color: oklch(0.65 0.17 140);
-}
-
-.stop-preset-action .favorite-heart {
-  font-size: 1.18em;
-  line-height: 1;
-  color: inherit;
-  filter: drop-shadow(0 1px 3px rgba(0, 0, 0, 0.25));
-}
-
-.stop-preset-action:disabled {
-  cursor: not-allowed;
-  opacity: 0.45;
-}
-
-.stop-preset-empty {
-  padding: 0.55em 0.45em;
-  color: var(--ink-3);
-  font-size: 0.82em;
-}
-
-.stop-preset-actions-row {
-  margin-top: 0.35em;
 }
 
 .stop-presets-panel {
@@ -1210,13 +567,6 @@ function importStopPresets(event: Event) {
 }
 
 @media (max-width: 760px) {
-  .effects-header {
-    align-items: stretch;
-    flex-direction: column;
-  }
-  .stop-scope-toggle {
-    align-self: flex-start;
-  }
   .color-picker-inline,
   .curve-row,
   .effect-row {
