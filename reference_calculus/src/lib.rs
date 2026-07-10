@@ -1417,8 +1417,31 @@ impl MandelbrotNavigator {
             || (self.mobius_radii_log2_c_max - log2_c_max).abs() > 2.0;
         if radii_stale {
             let bounds = self.mobius_bounds.as_ref().as_ref().expect("bounds built above");
-            *self.mobius_radii =
+            // The renderer transports dz/dc alongside dz for distance-estimate
+            // shading.  A value-only radius can therefore accept a block whose
+            // displayed derivative is no longer within epsilon.  Keep the
+            // runtime's single radius comparison, but make it certify both
+            // channels: an uncertain derivative simply falls back to exact
+            // perturbation stepping.
+            let value_radii =
                 mobius::mobius_build_radii(&self.mobius_levels, bounds, epsilon, log2_c_max);
+            let derivative_radii = mobius::mobius_build_derivative_radii(
+                &self.mobius_levels,
+                bounds,
+                epsilon,
+                log2_c_max,
+            );
+            *self.mobius_radii = value_radii
+                .into_iter()
+                .zip(derivative_radii)
+                .map(|(value, derivative)| {
+                    value
+                        .into_iter()
+                        .zip(derivative)
+                        .map(|(rv, rd)| rv.min(rd))
+                        .collect()
+                })
+                .collect();
             self.mobius_radii_epsilon = epsilon;
             self.mobius_radii_log2_c_max = log2_c_max;
             // Re-serialize only the radius sidecar + level directory.
@@ -1430,7 +1453,7 @@ impl MandelbrotNavigator {
     }
 
     /// Build (or reuse) the Möbius-c+ table and expose the GPU buffers: a
-    /// coefficient buffer (`MobiusCoeffs`, 60 B/block), a radius sidecar
+    /// coefficient buffer (`MobiusCoeffs`, 72 B/block), a radius sidecar
     /// (`MobiusRadius`, 16 B vec4) and the level directory. The coefficient
     /// and radius arrays share the same flat block index.
     pub fn compute_mobius_reference(&mut self, max_iter: u32) -> MobiusBufferInfo {
@@ -1504,10 +1527,11 @@ impl MandelbrotNavigator {
             // Certified SA prefix ((ε, c_max)-keyed like the radii): the
             // common skip every compute-request pixel starts at (Phase C).
             let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
-            // Periodic block (Phase E): certified interiority verdict at O(p)
-            // when the reference is attracted to a cycle. None for escaping
-            // references — the header then carries p = 0.
-            let periodic = unified::periodic_build(&orbit, epsilon, log2_c_max);
+            // The periodic fixed-point shortcut remains disabled until its
+            // tail-free radius oracle is replaced by a full Cauchy certificate.
+            // The serialized header carries p = 0, so the shader never enters
+            // that optional path.
+            let periodic: Option<unified::PeriodicBlock> = None;
             // Working band for the dispatch tags: the post-rebase delta band
             // sits ~10 bits above c_max (census note 5 placeholder — refined
             // from the replay-observed |dz| distribution when the GPU tier-mix
@@ -1932,7 +1956,7 @@ pub struct UnifiedBufferInfo {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct MobiusBufferInfo {
-    // Coefficient buffer: `MobiusCoeffs` records (60 B), orbit-keyed.
+    // Coefficient buffer: `MobiusCoeffs` records (72 B), orbit-keyed.
     pub coeffs_ptr: usize,
     pub coeffs_count: usize,
     // Radius sidecar: `MobiusRadius` records (16 B, vec4-packed), (ε, c_max)-keyed.
@@ -2503,6 +2527,25 @@ mod tests {
             .filter(|r| r.is_finite())
             .count();
         assert!(positive > 0, "no positive mobius radii at shallow scale");
+        // The direct Möbius mode transports dz/dc for shading.  Its emitted
+        // radius must consequently be no larger than the independent Cauchy
+        // certificate for that derivative channel.
+        let derivative_radii = mobius::mobius_build_derivative_radii(
+            &nav.mobius_levels,
+            nav.mobius_bounds.as_ref().as_ref().expect("mobius bounds built"),
+            nav.bla_epsilon as f64,
+            nav.jet_log2_c_max(),
+        );
+        for (value_row, derivative_row) in nav.mobius_radii.iter().zip(derivative_radii.iter()) {
+            for (&value, &derivative) in value_row.iter().zip(derivative_row.iter()) {
+                assert!(
+                    value <= derivative,
+                    "emitted Möbius radius exceeds its derivative certificate: {} > {}",
+                    value,
+                    derivative,
+                );
+            }
+        }
 
         // Round-trip back: BLA and jet caches untouched.
         nav.use_bla();
@@ -2547,8 +2590,9 @@ mod tests {
         let info = nav.compute_unified_reference(512);
         assert!(info.level_count > 0, "unified table built no levels");
         assert!(info.coeffs_count > 0 && info.coeffs_ptr != 0, "coeff buffer empty");
-        // Sidecar = one entry per block + the 9-entry SA/periodic header.
-        assert_eq!(info.coeffs_count + 9, info.radii_count, "buffers must be index-aligned (+header)");
+        // Sidecar = one entry per block + the 10-entry SA/periodic header
+        // (SA b1..b4 + n0, then the 6-coefficient F-form periodic block).
+        assert_eq!(info.coeffs_count + 10, info.radii_count, "buffers must be index-aligned (+header)");
         let src_len = nav.unified_source_len;
         let bounds_stamp = nav.unified_bounds_log2_c_max;
         assert!(src_len > 0 && bounds_stamp.is_finite());
@@ -3940,4 +3984,3 @@ mod tests {
         );
     }
 }
-

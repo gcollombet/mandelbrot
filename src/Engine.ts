@@ -81,7 +81,7 @@ const JET_RADII_FLOATS = 4
 // default limit, so new bindings were not an option) — only the indexing
 // stride differs shader-side. The radius sidecar and level directory reuse
 // the jet strides outright (16 B vec4 / 4 × u32).
-const MOBIUS_COEFF_FLOATS = 15
+const MOBIUS_COEFF_FLOATS = 18
 // Step capacity of the GPU reference buffer (the 8·CAPACITY-byte
 // mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts, where the orbit
 // is computed to 2× the display maxIter (interactive zoom-in headroom) but never
@@ -1801,13 +1801,14 @@ export class Engine {
             // indexes by the mode flag. The coeff capacity is tracked in
             // jet-entry units (27 floats) — a float-count ceiling covers the
             // denser mobius records; the radii sidecar is sized on its own
-            // block count (mobius has 27/15 more blocks per coeff float).
+            // block count (mobius has 27/18 more blocks per coeff float).
             const blockCount = Math.ceil(
                 table.steps.length / (table.kind === 'mobius' ? MOBIUS_COEFF_FLOATS : JET_COEFF_FLOATS), // unified = 27 floats = jet stride
             )
             this.ensureJetBufferCapacity(Math.ceil(table.steps.length / JET_COEFF_FLOATS))
-            // Unified sidecars carry 4 extra entries (the SA prefix header)
-            // beyond the per-block records — size on the actual array.
+            // Unified sidecars carry 10 extra entries (the SA prefix +
+            // periodic-block header) beyond the per-block records — size on
+            // the actual array.
             this.ensureJetRadiiBufferCapacity(Math.max(blockCount, Math.ceil((table.radii?.length ?? 0) / 4)))
             this.ensureJetLevelBufferCapacity(table.levelCount)
             const radii = table.radii

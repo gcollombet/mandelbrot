@@ -191,7 +191,7 @@ const JET_DER_EXP_FOLD: i32 = 16;
 // (identical 12 B element, exclusive modes) — the mode flag picks the stride.
 // Same flat block index as the radius buffer either way.
 const JET_COEFF_STRIDE: i32 = 9;
-const MOBIUS_COEFF_STRIDE: i32 = 5;
+const MOBIUS_COEFF_STRIDE: i32 = 6;
 // Unified table (mode 5): 9 elements in PREFIX order [A, B, D, A', D', a02,
 // a30, a12, a03] — same element count as jet, tier-directed prefix reads.
 const UNIFIED_COEFF_STRIDE: i32 = 9;
@@ -1240,12 +1240,13 @@ fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<fun
 }
 
 // ── Möbius-c+ block application (add-mobius-cplus) ──────────────────
-// m(z, c) = ((A + A'·c)·z + B·c) / (1 + (D + D'·c)·z): the Padé vehicle plus
-// two c-linear coefficients that annihilate the zc/z²c cross-terms guard (G)
-// exists for. ONE validity comparison log2|dz| < r per probed block — no H2,
-// no min_a, no beta·dcMag, no separate pole test (DEN > 0.5 is folded into the
-// certified radius). Records live in the jet coefficient buffer at stride 5
-// (order A, B, A', D, D'), radii in the same vec4 sidecar (x = r, y = the
+// m(z, c) = ((A + A'·c)·z + B·c) / (1 + (D + D'·c)·z + F·c): the Padé vehicle
+// plus three c-coefficients that annihilate the zc/z²c cross-terms guard (G)
+// exists for and the pure-c² term (F resums the pure-c channel — the shallow
+// cmax_c2 bind). ONE validity comparison log2|dz| < r per probed block — no
+// H2, no min_a, no beta·dcMag, no separate pole test (DEN > 0.5 is folded into
+// the certified radius). Records live in the jet coefficient buffer at stride
+// 6 (order A, B, A', D, D', F), radii in the same vec4 sidecar (x = r, y = the
 // f32-safe fast-path flag).
 
 fn fe_neg(a: fe) -> fe {
@@ -1289,25 +1290,26 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
           var pdc: fe;
           var denOk = true;
           if (f32Ok && radii.y > 0.5 && log2_dz > -100.0) {
-            // Plain-f32 fast path: 5 ldexp reconstructions + the [1/1] form.
+            // Plain-f32 fast path: 6 ldexp reconstructions + the [1/1] form.
             let ca  = jet_coeff_f32(mandelbrotJetSuite[base]);
             let cb  = jet_coeff_f32(mandelbrotJetSuite[base + 1]);
             let cap = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
             let cd  = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
             let cdp = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
+            let cf  = jet_coeff_f32(mandelbrotJetSuite[base + 5]);
             let dzF = fe_to_vec(*dz);
             let ae = ca + cmul(cap, dcF);       // Ae = A + A'·dc
             let de = cd + cmul(cdp, dcF);       // De = D + D'·dc
-            let den = vec2<f32>(1.0, 0.0) + cmul(de, dzF);
+            let den = vec2<f32>(1.0, 0.0) + cmul(de, dzF) + cmul(cf, dcF);
             if (MOBIUS_PARANOIA_GUARD && dot(den, den) < MOBIUS_DEN_GUARD2) {
               denOk = false;
             } else {
               let invDen = cinv(den);
               let phiF = cmul(cmul(ae, dzF) + cmul(cb, dcF), invDen);
               phi = fe_from_vec(phiF, 0);
-              // ∂m/∂z = (Ae − m·De)/den ; ∂m/∂c = (A'·z + B − m·D'·z)/den
+              // ∂m/∂z = (Ae − m·De)/den ; ∂m/∂c = (A'·z + B − m·(D'·z + F))/den
               pdz = fe_from_vec(cmul(ae - cmul(phiF, de), invDen), 0);
-              pdc = fe_from_vec(cmul(cmul(cap, dzF) + cb - cmul(phiF, cmul(cdp, dzF)), invDen), 0);
+              pdc = fe_from_vec(cmul(cmul(cap, dzF) + cb - cmul(phiF, cmul(cdp, dzF) + cf), invDen), 0);
             }
           } else {
             let ca  = jet_coeff_fe(mandelbrotJetSuite[base]);
@@ -1315,16 +1317,17 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
             let cap = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
             let cd  = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
             let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
+            let cf  = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
             let ae = fe_add(ca, fe_cmul(cap, dc));
             let de = fe_add(cd, fe_cmul(cdp, dc));
-            let den = fe_add(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz));
+            let den = fe_add3(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz), fe_cmul(cf, dc));
             if (MOBIUS_PARANOIA_GUARD && (den.e < -10 || (den.e < 5 && fe_mag2_f32(den) < MOBIUS_DEN_GUARD2))) {
               denOk = false;
             } else {
               let invDen = fe_cinv(den);
               phi = fe_cmul(fe_add(fe_cmul(ae, *dz), fe_cmul(cb, dc)), invDen);
               pdz = fe_cmul(fe_add(ae, fe_neg(fe_cmul(phi, de))), invDen);
-              pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, fe_cmul(cdp, *dz)))), invDen);
+              pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, fe_add(fe_cmul(cdp, *dz), cf)))), invDen);
             }
           }
           if (denOk) {
@@ -1412,30 +1415,34 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               var de = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
               var capF = vec2<f32>(0.0);
               var cdpF = vec2<f32>(0.0);
+              var cfF = vec2<f32>(0.0);
               if (tag == 2) {
                 capF = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
                 cdpF = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
+                cfF = jet_coeff_f32(mandelbrotJetSuite[base + 5]);
                 ae = ca + cmul(capF, dcF);
                 de = de + cmul(cdpF, dcF);
               }
-              let den = vec2<f32>(1.0, 0.0) + cmul(de, dzF);
+              // F-form: den = 1 + De·dz + F·dc; ∂den/∂c = D′·dz + F.
+              let den = vec2<f32>(1.0, 0.0) + cmul(de, dzF) + cmul(cfF, dcF);
               if (MOBIUS_PARANOIA_GUARD && dot(den, den) < MOBIUS_DEN_GUARD2) {
                 denOk = false;
               } else {
                 let invDen = cinv(den);
+                let dcdenF = cmul(cdpF, dzF) + cfF;
                 let phiF = cmul(cmul(ae, dzF) + cmul(cb, dcF), invDen);
                 phi = fe_from_vec(phiF, 0);
                 let mzF = cmul(ae - cmul(phiF, de), invDen);
-                let mcF = cmul(cmul(capF, dzF) + cb - cmul(phiF, cmul(cdpF, dzF)), invDen);
+                let mcF = cmul(cmul(capF, dzF) + cb - cmul(phiF, dcdenF), invDen);
                 pdz = fe_from_vec(mzF, 0);
                 pdc = fe_from_vec(mcF, 0);
-                // m_zz = −2·De·m_z/den ; m_cc = −2·D′·z·m_c/den ;
-                // m_zc = (A′ − m_c·De − φ·D′)/den − m_z·D′·z/den.
+                // m_zz = −2·De·m_z/den ; m_cc = −2·(D′·z + F)·m_c/den ;
+                // m_zc = (A′ − m_c·De − φ·D′)/den − m_z·(D′·z + F)/den.
                 mzz = fe_from_vec(-2.0 * cmul(de, cmul(mzF, invDen)), 0);
-                mcc = fe_from_vec(-2.0 * cmul(cmul(cdpF, dzF), cmul(mcF, invDen)), 0);
+                mcc = fe_from_vec(-2.0 * cmul(dcdenF, cmul(mcF, invDen)), 0);
                 mzc = fe_from_vec(
                   cmul(capF - cmul(mcF, de) - cmul(phiF, cdpF), invDen)
-                    - cmul(mzF, cmul(cmul(cdpF, dzF), invDen)),
+                    - cmul(mzF, cmul(dcdenF, invDen)),
                   0,
                 );
               }
@@ -1453,44 +1460,51 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               var de = cd;
               var cap = fe(vec2<f32>(0.0), 0);
               var cdp = fe(vec2<f32>(0.0), 0);
+              var cf = fe(vec2<f32>(0.0), 0);
               if (tag == 2) {
                 cap = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
                 cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
+                cf = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
                 ae = fe_add(ca, fe_cmul(cap, dc));
                 de = fe_add(cd, fe_cmul(cdp, dc));
               }
-              let den = fe_add(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz));
+              // F-form: den = 1 + De·dz + F·dc; ∂den/∂c = D′·dz + F.
+              let den = fe_add3(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz), fe_cmul(cf, dc));
               if (MOBIUS_PARANOIA_GUARD && (den.e < -10 || (den.e < 5 && fe_mag2_f32(den) < MOBIUS_DEN_GUARD2))) {
                 denOk = false;
               } else {
                 let invDen = fe_cinv(den);
+                let dcden = fe_add(fe_cmul(cdp, *dz), cf);
                 phi = fe_cmul(fe_add(fe_cmul(ae, *dz), fe_cmul(cb, dc)), invDen);
                 pdz = fe_cmul(fe_add(ae, fe_neg(fe_cmul(phi, de))), invDen);
                 if (tag == 2) {
-                  pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, fe_cmul(cdp, *dz)))), invDen);
+                  pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, dcden))), invDen);
                 } else {
                   pdc = fe_cmul(cb, invDen);
                 }
                 mzz = fe_neg(fe_scale(fe_cmul(de, fe_cmul(pdz, invDen)), 2.0));
-                mcc = fe_neg(fe_scale(fe_cmul(fe_cmul(cdp, *dz), fe_cmul(pdc, invDen)), 2.0));
+                mcc = fe_neg(fe_scale(fe_cmul(dcden, fe_cmul(pdc, invDen)), 2.0));
                 mzc = fe_add(
                   fe_cmul(fe_add3(cap, fe_neg(fe_cmul(pdc, de)), fe_neg(fe_cmul(phi, cdp))), invDen),
-                  fe_neg(fe_cmul(pdz, fe_cmul(fe_cmul(cdp, *dz), invDen))),
+                  fe_neg(fe_cmul(pdz, fe_cmul(dcden, invDen))),
                 );
               }
             } else {
-              // Jet tier: full 108 B record, identity reconstruction, order-3
-              // Horner rows shared by the value and both partials.
+              // Jet tier: full 108 B record, F-form identity reconstruction
+              // (a20 = −D·A, a11 = A′ − B·D − F·A, a21 = −D′·A − D·a11 + F·D·A,
+              // a02 = −F·B), order-3 Horner rows shared by the value and both
+              // partials.
               let cd  = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
               let cap = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
               let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
-              let a02 = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+              let cf  = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
               let a30 = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
               let a12 = jet_coeff_fe(mandelbrotJetSuite[base + 7]);
               let a03 = jet_coeff_fe(mandelbrotJetSuite[base + 8]);
+              let a02 = fe_neg(fe_cmul(cf, cb));
               let a20 = fe_neg(fe_cmul(cd, ca));
-              let a11 = fe_add(cap, fe_neg(fe_cmul(cb, cd)));
-              let a21 = fe_add(fe_neg(fe_cmul(cdp, ca)), fe_neg(fe_cmul(cd, a11)));
+              let a11 = fe_add3(cap, fe_neg(fe_cmul(cb, cd)), fe_neg(fe_cmul(cf, ca)));
+              let a21 = fe_add3(fe_neg(fe_cmul(cdp, ca)), fe_neg(fe_cmul(cd, a11)), fe_cmul(fe_cmul(cf, cd), ca));
               let p0 = fe_add3(fe_cmul(cb, dc), fe_cmul(a02, dc2), fe_cmul(a03, dc3));
               let p1 = fe_add3(ca, fe_cmul(a11, dc), fe_cmul(a12, dc2));
               let p2 = fe_add(a20, fe_cmul(a21, dc));
@@ -1593,9 +1607,10 @@ fn fe_csqrt(a: fe) -> fe {
 }
 
 // Certified interiority attempt at a periodic phase point. The period block
-// Φ_p (sidecar header entries hdrBase+4..8, c+ form) is a FIXED Möbius map of
-// the delta for this pixel's dc: fixed points ζ± from De·δ² + (1−Ae)·δ − Bc =
-// 0, multiplier κ = (Ae − Bc·De)/(1+De·ζ)². TRUE ⇒ provably interior: |κ| < 
+// Φ_p (sidecar header entries hdrBase+4..9, c+ F-form: den = 1 + De·δ + F·c)
+// is a FIXED Möbius map of the delta for this pixel's dc: fixed points ζ± from
+// De·δ² + (1 + Fc − Ae)·δ − Bc = 0, multiplier
+// κ = (Ae·(1+Fc) − Bc·De)/((1+Fc)+De·ζ)². TRUE ⇒ provably interior: |κ| <
 // 0.98 (κ is the pixel's own cycle multiplier, certified to ~1e-4 by the
 // block radius), |w₀| = |(δ−ζa)/(δ−ζr)| < 0.5 (well inside the basin), and
 // the whole contraction path stays inside the certified radius
@@ -1610,11 +1625,13 @@ fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
   let hD = mandelbrotJetRadii[hdrBase + 6].v;
   let hAp = mandelbrotJetRadii[hdrBase + 7].v;
   let hDp = mandelbrotJetRadii[hdrBase + 8].v;
+  let hF = mandelbrotJetRadii[hdrBase + 9].v;
   let cA = fe(vec2<f32>(hA.x, hA.y), i32(hA.z));
   let cB = fe(vec2<f32>(hB.x, hB.y), i32(hB.z));
   let cD = fe(vec2<f32>(hD.x, hD.y), i32(hD.z));
   let cAp = fe(vec2<f32>(hAp.x, hAp.y), i32(hAp.z));
   let cDp = fe(vec2<f32>(hDp.x, hDp.y), i32(hDp.z));
+  let cF = fe(vec2<f32>(hF.x, hF.y), i32(hF.z));
   let ae = fe_add(cA, fe_cmul(cAp, dc));
   let de = fe_add(cD, fe_cmul(cDp, dc));
   let bc = fe_cmul(cB, dc);
@@ -1622,17 +1639,18 @@ fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
     return false; // degenerate quadratic — no certified verdict
   }
   let one = fe(vec2<f32>(1.0, 0.0), 0);
-  let oneMinusAe = fe_add(one, fe_neg(ae));
-  let disc = fe_add(fe_cmul(oneMinusAe, oneMinusAe), fe_scale(fe_cmul(de, bc), 4.0));
+  let onePlusFc = fe_add(one, fe_cmul(cF, dc));
+  let uMinusAe = fe_add(onePlusFc, fe_neg(ae)); // 1 + Fc − Ae
+  let disc = fe_add(fe_cmul(uMinusAe, uMinusAe), fe_scale(fe_cmul(de, bc), 4.0));
   let sq = fe_csqrt(disc);
   let inv2De = fe_cinv(fe_scale(de, 2.0));
-  let negOmA = fe_neg(oneMinusAe); // Ae − 1
-  let z1 = fe_cmul(fe_add(negOmA, sq), inv2De);
-  let z2 = fe_cmul(fe_add(negOmA, fe_neg(sq)), inv2De);
-  let num = fe_add(ae, fe_neg(fe_cmul(bc, de)));
-  let d1 = fe_add(one, fe_cmul(de, z1));
+  let negU = fe_neg(uMinusAe); // Ae − 1 − Fc
+  let z1 = fe_cmul(fe_add(negU, sq), inv2De);
+  let z2 = fe_cmul(fe_add(negU, fe_neg(sq)), inv2De);
+  let num = fe_add(fe_cmul(ae, onePlusFc), fe_neg(fe_cmul(bc, de)));
+  let d1 = fe_add(onePlusFc, fe_cmul(de, z1));
   let k1 = fe_cmul(num, fe_cinv(fe_cmul(d1, d1)));
-  let d2 = fe_add(one, fe_cmul(de, z2));
+  let d2 = fe_add(onePlusFc, fe_cmul(de, z2));
   let k2 = fe_cmul(num, fe_cinv(fe_cmul(d2, d2)));
   let l2k1 = log2(max(length(k1.m), 1e-30)) + f32(k1.e);
   let l2k2 = log2(max(length(k2.m), 1e-30)) + f32(k2.e);
@@ -2045,8 +2063,10 @@ fn cs_main(
             let dc = fe_renorm(fe(local_rot * mandelbrot.scale + vec2<f32>(mandelbrot.cx, mandelbrot.cy), scaleExp));
             if (is_compute_request) {
               // Certified SA prefix (Phase C, auto mode): the sidecar carries a
-              // 4-entry header after the block records (base = last directory
-              // entry's offset+count) — b1..b4 + n0. Start the pixel at n = n0
+              // 10-entry header after the block records (base = last directory
+              // entry's offset+count) — SA b1..b4 + n0 in the first four
+              // entries, then the 6-coefficient periodic block. Start the
+              // pixel at n = n0
               // with δ = Σ b_j·dc^j and ∂δ/∂c = Σ j·b_j·dc^(j−1), entering
               // mandelbrot_compute_deep through its CONTINUATION parameters
               // (no changes inside the iteration function). n0 = 0 (shallow

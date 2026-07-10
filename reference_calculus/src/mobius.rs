@@ -1,9 +1,13 @@
 // Möbius-c+ block skipping (add-mobius-cplus).
 //
-// The c-augmented Möbius form m(z, c) = ((A + A'·c)·z + B·c) / (1 + (D + D'·c)·z)
-// is the Padé [1/1] vehicle plus two c-linear coefficients chosen to exactly
+// The c-augmented Möbius form
+// m(z, c) = ((A + A'·c)·z + B·c) / (1 + (D + D'·c)·z + F·c)
+// is the Padé [1/1] vehicle plus three c-coefficients chosen to exactly
 // annihilate the zc and z²c cross-terms of the block map — the terms guard (G)
-// exists for. Coefficients derive from the block's bivariate jet (jet.rs, used
+// exists for — plus the pure-c² term (F, the Chisholm-style denominator
+// c-slot: it RESUMS the pure-c geometric series instead of correcting it,
+// closing the shallow cmax_c2 bind the 5-coefficient census measured).
+// Coefficients derive from the block's bivariate jet (jet.rs, used
 // here as a build-only tool); validity is ONE certified entry radius per block
 // from the compensated remainder Q plus a Cauchy tail (rule (V), note §4).
 // Source math: MOBIUS_CPLUS_IMPLEMENTATION.md (externally verified).
@@ -16,15 +20,16 @@ use crate::jet::{
 
 // ── coefficient extraction (note §3) ───────────────────────────────────────────
 
-/// The five complex block coefficients. `degenerate` marks c₁₀ = 0 blocks
+/// The six complex block coefficients. `degenerate` marks c₁₀ = 0 blocks
 /// (prefix blocks from Z₀ = 0): their radius is −∞ and they are never applied.
 #[derive(Clone, Copy, Debug)]
 pub struct MobiusCPlus {
     pub a: CFe,  // A  = c₁₀
     pub b: CFe,  // B  = c₀₁
-    pub d: CFe,  // D  = −c₂₀/c₁₀            (Padé [1/1])
-    pub ap: CFe, // A' = c₁₁ + B·D           (annihilates zc)
-    pub dp: CFe, // D' = −(c₂₁ + D·c₁₁)/A    (annihilates z²c)
+    pub d: CFe,  // D  = −c₂₀/c₁₀                    (Padé [1/1])
+    pub ap: CFe, // A' = c₁₁ + D·B + F·A             (annihilates zc)
+    pub dp: CFe, // D' = −(c₂₁ + D·c₁₁ + F·c₂₀)/A    (annihilates z²c)
+    pub f: CFe,  // F  = −c₀₂/c₀₁                    (annihilates c², resums pure-c)
     pub degenerate: bool,
 }
 
@@ -38,27 +43,35 @@ pub fn mobius_from_jet(jet: &JetF64) -> MobiusCPlus {
             d: CFe::ZERO,
             ap: CFe::ZERO,
             dp: CFe::ZERO,
+            f: CFe::ZERO,
             degenerate: true,
         };
     }
     let c20 = jet.coeff(2, 0);
     let c11 = jet.coeff(1, 1);
     let c21 = jet.coeff(2, 1);
+    let c02 = jet.coeff(0, 2);
     let a = c10;
     let b = c01;
     let d = c20.div(c10).neg();
-    let ap = c11.add(b.mul(d));
-    let dp = c21.add(d.mul(c11)).div(a).neg();
-    MobiusCPlus { a, b, d, ap, dp, degenerate: false }
+    // B = c₀₁ can vanish in principle (never observed on real orbits); F = 0
+    // falls back to the 5-coefficient form — q₀₂ = c₀₂ then stays a live REST
+    // term, which is sound (just not resummed).
+    let f = if c01.is_zero() { CFe::ZERO } else { c02.div(c01).neg() };
+    let ap = c11.add(d.mul(b)).add(f.mul(a));
+    let dp = c21.add(d.mul(c11)).add(f.mul(c20)).div(a).neg();
+    MobiusCPlus { a, b, d, ap, dp, f, degenerate: false }
 }
 
 // ── compensated remainder Q (note §4.1) ────────────────────────────────────────
 
-/// Taylor coefficients (degree ≤ D_s) of Q = (1 + (D + D'c)z)·Φ − ((A + A'c)z + Bc):
-/// q_ij = c_ij + D·c_{i−1,j} + D'·c_{i−1,j−1} minus {A at (1,0), A' at (1,1),
-/// B at (0,1)} — out-of-range indices contribute 0. By construction
-/// q₁₀ = q₀₁ = q₂₀ = q₁₁ = q₂₁ = 0; verifying that numerically is the
-/// build-integrity check of the extraction (mobius_q_integrity_log2).
+/// Taylor coefficients (degree ≤ D_s) of
+/// Q = (1 + (D + D'c)z + Fc)·Φ − ((A + A'c)z + Bc):
+/// q_ij = c_ij + D·c_{i−1,j} + D'·c_{i−1,j−1} + F·c_{i,j−1} minus {A at (1,0),
+/// A' at (1,1), B at (0,1)} — out-of-range indices contribute 0. By
+/// construction q₁₀ = q₀₁ = q₂₀ = q₁₁ = q₀₂ = q₂₁ = 0; verifying that
+/// numerically is the build-integrity check of the extraction
+/// (mobius_q_integrity_log2).
 pub fn mobius_q(jet: &JetF64, m: &MobiusCPlus) -> [CFe; JET_NCOEFF] {
     let mut q = [CFe::ZERO; JET_NCOEFF];
     for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
@@ -69,6 +82,9 @@ pub fn mobius_q(jet: &JetF64, m: &MobiusCPlus) -> [CFe; JET_NCOEFF] {
         }
         if i >= 1 && j >= 1 && i + j >= 3 {
             v = v.add(m.dp.mul(jet.coeff(i - 1, j - 1)));
+        }
+        if j >= 1 && i + j >= 2 {
+            v = v.add(m.f.mul(jet.coeff(i, j - 1)));
         }
         match (i, j) {
             (1, 0) => v = v.sub(m.a),
@@ -81,15 +97,20 @@ pub fn mobius_q(jet: &JetF64, m: &MobiusCPlus) -> [CFe; JET_NCOEFF] {
     q
 }
 
-/// Worst |q_ij| / scale over the five constructed zeros, in log2 (−∞ when every
+/// Worst |q_ij| / scale over the six constructed zeros, in log2 (−∞ when every
 /// zero is exact). Scale per slot is the LARGEST term entering the cancellation
-/// (|c_ij|, |D·c_{i−1,j}|, |D'·c_{i−1,j−1}|, the subtracted block coefficient) —
-/// the honest rounding scale: it verifies the formulas, not that the
-/// cancellation is benign.
+/// (|c_ij|, |D·c_{i−1,j}|, |D'·c_{i−1,j−1}|, |F·c_{i,j−1}|, the subtracted
+/// block coefficient) — the honest rounding scale: it verifies the formulas,
+/// not that the cancellation is benign.
 pub fn mobius_q_integrity_log2(jet: &JetF64, m: &MobiusCPlus, q: &[CFe; JET_NCOEFF]) -> f64 {
     let l2 = |v: &CFe| v.log2_mag().unwrap_or(f64::NEG_INFINITY);
     let mut worst = f64::NEG_INFINITY;
-    for &(i, j) in &[(1usize, 0usize), (0, 1), (2, 0), (1, 1), (2, 1)] {
+    for &(i, j) in MOBIUS_Q_ZEROS {
+        // If B = c₀₁ vanishes, F deliberately falls back to zero and q₀₂
+        // remains a genuine residual term rather than a constructed zero.
+        if (i, j) == (0, 2) && m.b.is_zero() {
+            continue;
+        }
         let qv = q[jet_idx(i, j)];
         let Some(ql) = qv.log2_mag() else { continue };
         let mut scale = l2(&jet.coeff(i, j));
@@ -98,6 +119,9 @@ pub fn mobius_q_integrity_log2(jet: &JetF64, m: &MobiusCPlus, q: &[CFe; JET_NCOE
         }
         if i >= 1 && j >= 1 && i + j >= 3 {
             scale = scale.max(l2(&m.dp.mul(jet.coeff(i - 1, j - 1))));
+        }
+        if j >= 1 && i + j >= 2 {
+            scale = scale.max(l2(&m.f.mul(jet.coeff(i, j - 1))));
         }
         scale = scale.max(match (i, j) {
             (1, 0) => l2(&m.a),
@@ -112,10 +136,14 @@ pub fn mobius_q_integrity_log2(jet: &JetF64, m: &MobiusCPlus, q: &[CFe; JET_NCOE
     worst
 }
 
+/// The six slots annihilated by construction (c+ extraction).
+pub const MOBIUS_Q_ZEROS: &[(usize, usize)] =
+    &[(1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (2, 1)];
+
 // ── level build (orbit-keyed stage) ────────────────────────────────────────────
 
-/// One block's orbit-keyed data: the five coefficients plus the |q_ij| moduli
-/// (log2; −∞ for zeros, including the five constructed zeros — their f64
+/// One block's orbit-keyed data: the six coefficients plus the |q_ij| moduli
+/// (log2; −∞ for zeros, including the six constructed zeros — their f64
 /// residue is rounding noise ~2^−52 relative, far below any usable ε). The
 /// full jet is dropped after extraction: unlike jet mode, Möbius-c+ never
 /// ships jets, so levels here are ~5× lighter than JetLevelF64.
@@ -138,9 +166,14 @@ fn block_from_jet(jet: &JetF64) -> MobiusBlock {
         for (n, v) in q.iter().enumerate() {
             log2_q[n] = v.log2_mag().unwrap_or(f64::NEG_INFINITY);
         }
-        // The five constructed zeros are exact by design (verified by the
+        // The six constructed zeros are exact by design (verified by the
         // integrity test); their stored residue would only pollute REST.
-        for &(i, j) in &[(1usize, 0usize), (0, 1), (2, 0), (1, 1), (2, 1)] {
+        // q₀₂ is only annihilated when B = c₀₁ is nonzero. The c₀₁ = 0
+        // fallback keeps it as a REST term, even when F happens to be zero.
+        for &(i, j) in MOBIUS_Q_ZEROS {
+            if (i, j) == (0, 2) && m.b.is_zero() {
+                continue;
+            }
             log2_q[jet_idx(i, j)] = f64::NEG_INFINITY;
         }
     }
@@ -287,7 +320,7 @@ fn mobius_bisect_rz(twoz: &[(f64, i64)], log2_rc: f64) -> (f64, f64) {
 
 /// Per block, per R_c rung: bisect R_z to the tightest runaway-free polydisc
 /// (peak ρ < 0.5), then assemble
-/// M_Q = (1 + |D|R_z + |D'|R_zR_c)·M + |A|R_z + |A'|R_zR_c + |B|R_c.
+/// M_Q = (1 + |D|R_z + |D'|R_zR_c + |F|R_c)·M + |A|R_z + |A'|R_zR_c + |B|R_c.
 pub fn mobius_build_bounds(
     levels: &[MobiusLevel],
     orbit: &[(f64, f64)],
@@ -330,6 +363,7 @@ pub fn mobius_build_bounds(
                     let ld = cfe_log2(&blk.m.d);
                     let lap = cfe_log2(&blk.m.ap);
                     let ldp = cfe_log2(&blk.m.dp);
+                    let lf = cfe_log2(&blk.m.f);
                     for c in 0..MOBIUS_NCAND {
                         let (log2_rz, log2_m) = mobius_bisect_rz(seg, log2_rc[c]);
                         if !log2_rz.is_finite() || !log2_m.is_finite() {
@@ -340,6 +374,7 @@ pub fn mobius_build_bounds(
                             0.0,
                             ld + log2_rz,
                             ldp + log2_rz + log2_rc[c],
+                            lf + log2_rc[c],
                         ]);
                         b.log2_mq[c] = lse2(&[
                             fac + log2_m,
@@ -382,7 +417,11 @@ pub fn mobius_solve_radius(
     let lb = cfe_log2(&blk.m.b);
     let ld = cfe_log2(&blk.m.d);
     let ldp = cfe_log2(&blk.m.dp);
+    let lf = cfe_log2(&blk.m.f);
     let log2_half_eps = epsilon.log2() - 1.0;
+    // The |F|·c_max DEN contribution is x-independent: hoist it out of the scan.
+    let df = lf + log2_c_max;
+    let den_f = if df > -80.0 { df.exp2() } else { 0.0 };
     // Power-of-x coefficients of the stored REST terms: C_i = Σ_j |q_ij|·c_max^j,
     // shared by every candidate and scan point.
     let mut cpow = [f64::NEG_INFINITY; JET_DS + 1];
@@ -423,7 +462,8 @@ pub fn mobius_solve_radius(
             let d2 = ldp + x + log2_c_max;
             let den = 1.0
                 - if d1 > -80.0 { d1.exp2() } else { 0.0 }
-                - if d2 > -80.0 { d2.exp2() } else { 0.0 };
+                - if d2 > -80.0 { d2.exp2() } else { 0.0 }
+                - den_f;
             if den > 0.5 {
                 let rhs = log2_half_eps + lse2(&[la + x, lb + log2_c_max]);
                 // Σ REST terms / 2^rhs, accumulated in linear domain.
@@ -443,12 +483,7 @@ pub fn mobius_solve_radius(
                 }
                 if acc <= den {
                     let ltheta = (x - log2_rz).max(log2_theta_c);
-                    let theta = ltheta.exp2();
-                    let tail = log2_mq
-                        + (JET_DS + 1) as f64 * ltheta
-                        + (((JET_DS + 2) as f64 - (JET_DS + 1) as f64 * theta)
-                            / ((1.0 - theta) * (1.0 - theta)))
-                            .log2();
+                    let tail = mobius_cauchy_tail_log2(log2_mq, ltheta);
                     let t = tail - rhs;
                     if t <= 62.0 {
                         if t > -62.0 {
@@ -465,6 +500,133 @@ pub fn mobius_solve_radius(
         }
     }
     best
+}
+
+/// Cauchy tail of Q after the stored total-degree-D_s prefix. theta is the
+/// maximum of x/R_z and c_max/R_c, so this bounds every bivariate monomial.
+fn mobius_cauchy_tail_log2(log2_mq: f64, log2_theta: f64) -> f64 {
+    let theta = log2_theta.exp2();
+    let n = (JET_DS + 1) as f64;
+    log2_mq
+        + n * log2_theta
+        + (((n + 1.0) - n * theta) / ((1.0 - theta) * (1.0 - theta))).log2()
+}
+
+/// Cauchy tail of ∂Q/∂z after the stored total-degree-D_s prefix:
+/// M_Q/R_z · ½ Σ_{n≥D_s+1} n(n+1) θ^{n−1}.
+fn mobius_cauchy_dz_tail_log2(log2_mq: f64, log2_rz: f64, log2_theta: f64) -> f64 {
+    let theta = log2_theta.exp2();
+    let n = (JET_DS + 1) as f64;
+    let numerator = n * (n + 1.0)
+        - 2.0 * (n + 1.0) * (n - 1.0) * theta
+        + n * (n - 1.0) * theta * theta;
+    let factor = numerator / (2.0 * (1.0 - theta).powi(3));
+    log2_mq - log2_rz + (n - 1.0) * log2_theta + factor.log2()
+}
+
+/// Solve the derivative counterpart of (V) for one rational Möbius block.
+/// With d = inf|DEN| > 0.5, the exact identity
+/// ∂z(Φ − m) = Q_z/DEN − Q·(D + D'c)/DEN² gives a Cauchy-certified bound
+/// for the propagated perturbation derivative.
+pub fn mobius_solve_derivative_radius(
+    blk: &MobiusBlock,
+    bounds: &MobiusBounds,
+    table: &MobiusBoundsTable,
+    epsilon: f64,
+    log2_c_max: f64,
+) -> f64 {
+    if blk.m.degenerate {
+        return f64::NEG_INFINITY;
+    }
+    let la = cfe_log2(&blk.m.a);
+    let lap = cfe_log2(&blk.m.ap);
+    let ld = cfe_log2(&blk.m.d);
+    let ldp = cfe_log2(&blk.m.dp);
+    let lf = cfe_log2(&blk.m.f);
+    let ldeff = lse2(&[ld, ldp + log2_c_max]);
+    let rhs = epsilon.log2() - 1.0 + lse2(&[la, lap + log2_c_max]);
+    let df = lf + log2_c_max;
+    let den_f = if df > -80.0 { df.exp2() } else { 0.0 };
+    let mut best = f64::NEG_INFINITY;
+
+    for c in 0..MOBIUS_NCAND {
+        let log2_mq = bounds.log2_mq[c];
+        let log2_rz = bounds.log2_rz[c];
+        if !log2_mq.is_finite() || !log2_rz.is_finite() {
+            continue;
+        }
+        let log2_theta_c = log2_c_max - table.log2_rc[c];
+        if log2_theta_c >= -1e-9 {
+            continue;
+        }
+        let mut x = log2_rz + (0.999f64).log2();
+        while x >= SCAN_FLOOR_LOG2 {
+            if x <= best {
+                break;
+            }
+            let d1 = ld + x;
+            let d2 = ldp + x + log2_c_max;
+            let den = 1.0
+                - if d1 > -80.0 { d1.exp2() } else { 0.0 }
+                - if d2 > -80.0 { d2.exp2() } else { 0.0 }
+                - den_f;
+            if den > 0.5 {
+                let mut q = f64::NEG_INFINITY;
+                let mut qz = f64::NEG_INFINITY;
+                for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+                    let l = blk.log2_q[n];
+                    if !l.is_finite() {
+                        continue;
+                    }
+                    q = lse2(&[q, l + i as f64 * x + j as f64 * log2_c_max]);
+                    if i >= 1 {
+                        qz = lse2(&[
+                            qz,
+                            l + (i as f64).log2() + (i as f64 - 1.0) * x
+                                + j as f64 * log2_c_max,
+                        ]);
+                    }
+                }
+                let log2_theta = (x - log2_rz).max(log2_theta_c);
+                q = lse2(&[q, mobius_cauchy_tail_log2(log2_mq, log2_theta)]);
+                qz = lse2(&[
+                    qz,
+                    mobius_cauchy_dz_tail_log2(log2_mq, log2_rz, log2_theta),
+                ]);
+                let log2_den = den.log2();
+                let bound = lse2(&[qz - log2_den, ldeff + q - 2.0 * log2_den]);
+                if bound <= rhs {
+                    best = best.max(x);
+                    break;
+                }
+            }
+            x -= SCAN_STEP_LOG2;
+        }
+    }
+    best
+}
+
+/// Solve every block's Cauchy-certified ∂z radius, index-aligned with
+/// mobius_build_radii.
+pub fn mobius_build_derivative_radii(
+    levels: &[MobiusLevel],
+    bounds: &MobiusBoundsTable,
+    epsilon: f64,
+    log2_c_max: f64,
+) -> Vec<Vec<f64>> {
+    levels
+        .iter()
+        .zip(bounds.per_level.iter())
+        .map(|(lvl, blv)| {
+            lvl.blocks
+                .iter()
+                .zip(blv.iter())
+                .map(|(blk, b)| {
+                    mobius_solve_derivative_radius(blk, b, bounds, epsilon, log2_c_max)
+                })
+                .collect()
+        })
+        .collect()
 }
 
 // ── full radii build ──────────────────────────────────────────────────────────
@@ -503,10 +665,10 @@ pub fn mobius_build_radii(
 
 // ── GPU serialization (design D1 + spike 1.1 outcome) ──────────────────────────
 
-/// GPU coefficient record, 60 B: the five block coefficients with PRIVATE
+/// GPU coefficient record, 72 B: the six block coefficients with PRIVATE
 /// exponents each (the spike measured within-group spreads up to 61 bits —
 /// far past the shared-mantissa budget — so the D1 fallback applies to every
-/// group). Order: A, B, A', D, D'. Orbit-keyed: serialized once per orbit,
+/// group). Order: A, B, A', D, D', F. Orbit-keyed: serialized once per orbit,
 /// never re-uploaded on a radius re-solve.
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
@@ -516,6 +678,7 @@ pub struct MobiusCoeffs {
     pub ap: JetCoeffFe,
     pub d: JetCoeffFe,
     pub dp: JetCoeffFe,
+    pub f: JetCoeffFe,
 }
 
 /// GPU radius sidecar entry, 16 B vec4-packed: x = certified radius (log2
@@ -536,10 +699,10 @@ pub struct MobiusRadius {
 /// the shader's plain-f32 evaluation (same budget as the jet's fast path).
 pub const MOBIUS_F32_SAFE_LOG2: f64 = 96.0;
 
-/// True when all five coefficients reconstruct inside the f32 range with
+/// True when all six coefficients reconstruct inside the f32 range with
 /// Horner headroom — the build-side gate for the shallow fast-path flag.
 pub fn mobius_f32_safe(m: &MobiusCPlus) -> bool {
-    [&m.a, &m.b, &m.ap, &m.d, &m.dp].iter().all(|c| match c.log2_mag() {
+    [&m.a, &m.b, &m.ap, &m.d, &m.dp, &m.f].iter().all(|c| match c.log2_mag() {
         None => true,
         Some(l) => l.abs() <= MOBIUS_F32_SAFE_LOG2,
     })
@@ -565,6 +728,7 @@ pub fn mobius_serialize_coeffs(levels: &[MobiusLevel]) -> Vec<MobiusCoeffs> {
                 ap: cfe_to_coeff(&blk.m.ap),
                 d: cfe_to_coeff(&blk.m.d),
                 dp: cfe_to_coeff(&blk.m.dp),
+                f: cfe_to_coeff(&blk.m.f),
             });
         }
     }
@@ -609,13 +773,15 @@ pub fn mobius_serialize_radii(
 
 // ── application + CPU pixel loop (note §5) ─────────────────────────────────────
 
-/// Plain-Möbius extraction (A' = D' = 0): the census baseline. Same radius
-/// machinery applies — its q₁₁/q₂₁ do NOT vanish (the (G) killers), so its
-/// certified radii can only be ≤ the c+ ones (r_c+ ≥ r_Möbius by construction).
+/// Plain-Möbius extraction (A' = D' = F = 0): the census baseline. Same radius
+/// machinery applies — its q₁₁/q₂₁/q₀₂ do NOT vanish (the (G) killers plus the
+/// pure-c² term), so its certified radii can only be ≤ the c+ ones
+/// (r_c+ ≥ r_Möbius by construction).
 pub fn mobius_from_jet_plain(jet: &JetF64) -> MobiusCPlus {
     let mut m = mobius_from_jet(jet);
     m.ap = CFe::ZERO;
     m.dp = CFe::ZERO;
+    m.f = CFe::ZERO;
     m
 }
 
@@ -637,15 +803,16 @@ pub fn block_from_jet_plain(jet: &JetF64) -> MobiusBlock {
 }
 
 /// Apply the block map and its two partials at (z, c):
-/// m = (Ae·z + B·c)/(1 + De·z) with Ae = A + A'·c, De = D + D'·c;
-/// ∂m/∂z = (Ae − m·De)/(1 + De·z); ∂m/∂c = (A'·z + B − m·D'·z)/(1 + De·z).
+/// m = (Ae·z + B·c)/den with Ae = A + A'·c, De = D + D'·c,
+/// den = 1 + De·z + F·c;
+/// ∂m/∂z = (Ae − m·De)/den; ∂m/∂c = (A'·z + B − m·(D'·z + F))/den.
 pub fn mobius_apply(m: &MobiusCPlus, z: CFe, c: CFe) -> (CFe, CFe, CFe) {
     let ae = m.a.add(m.ap.mul(c));
     let de = m.d.add(m.dp.mul(c));
-    let den = CFe::ONE.add(de.mul(z));
+    let den = CFe::ONE.add(de.mul(z)).add(m.f.mul(c));
     let phi = ae.mul(z).add(m.b.mul(c)).div(den);
     let ddz = ae.sub(phi.mul(de)).div(den);
-    let ddc = m.ap.mul(z).add(m.b).sub(phi.mul(m.dp).mul(z)).div(den);
+    let ddc = m.ap.mul(z).add(m.b).sub(phi.mul(m.dp.mul(z).add(m.f))).div(den);
     (phi, ddz, ddc)
 }
 
@@ -813,9 +980,11 @@ mod tests {
 
     #[test]
     fn mobius_extraction_matches_direct_formulas() {
-        // (task 2.1) Two- and three-step hand-built jets: A/B/D/A'/D' must equal
-        // the direct note-§3 formulas computed in plain f64 from the jet
-        // coefficients, and the seed's closed forms (D' = 0, A' = D = −1/(2Z)).
+        // (task 2.1) Two- and three-step hand-built jets: A/B/D/A'/D'/F must
+        // equal the direct formulas computed in plain f64 from the jet
+        // coefficients (F = −c₀₂/c₀₁, A' = c₁₁ + D·B + F·A,
+        // D' = −(c₂₁ + D·c₁₁ + F·c₂₀)/A), and the seed's closed forms
+        // (c₀₂ = 0 ⟹ F = 0, D' = 0, A' = D = −1/(2Z)).
         let z1 = (0.3, -0.4);
         let z2 = (-0.55, 0.2);
         let z3 = (0.15, 0.65);
@@ -830,21 +999,30 @@ mod tests {
             let c20 = jet.coeff(2, 0).to_f64();
             let c11 = jet.coeff(1, 1).to_f64();
             let c21 = jet.coeff(2, 1).to_f64();
+            let c02 = jet.coeff(0, 2).to_f64();
             let d = { let t = cdiv(c20, c10); (-t.0, -t.1) };
-            let ap = { let t = cm(c01, d); (c11.0 + t.0, c11.1 + t.1) };
+            let f = { let t = cdiv(c02, c01); (-t.0, -t.1) };
+            let ap = {
+                let t = cm(d, c01);
+                let u = cm(f, c10);
+                (c11.0 + t.0 + u.0, c11.1 + t.1 + u.1)
+            };
             let dp = {
                 let t = cm(d, c11);
-                let n = (c21.0 + t.0, c21.1 + t.1);
+                let u = cm(f, c20);
+                let n = (c21.0 + t.0 + u.0, c21.1 + t.1 + u.1);
                 let t = cdiv(n, c10);
                 (-t.0, -t.1)
             };
             assert_close(m.a.to_f64(), c10, 1e-14, &format!("{} A", name));
             assert_close(m.b.to_f64(), c01, 1e-14, &format!("{} B", name));
             assert_close(m.d.to_f64(), d, 1e-13, &format!("{} D", name));
+            assert_close(m.f.to_f64(), f, 1e-13, &format!("{} F", name));
             assert_close(m.ap.to_f64(), ap, 1e-13, &format!("{} A'", name));
             assert_close(m.dp.to_f64(), dp, 1e-13, &format!("{} D'", name));
         }
-        // Seed closed forms: A = 2Z, B = 1, D = −1/(2Z), A' = D, D' = 0.
+        // Seed closed forms: A = 2Z, B = 1, D = −1/(2Z), A' = D, D' = 0, F = 0
+        // (the seed has no c² term).
         let m = mobius_from_jet(&seed);
         let a = (2.0 * z1.0, 2.0 * z1.1);
         assert_close(m.a.to_f64(), a, 1e-14, "seed A = 2Z");
@@ -853,17 +1031,47 @@ mod tests {
         assert_close(m.d.to_f64(), dw, 1e-14, "seed D = -1/2Z");
         assert_close(m.ap.to_f64(), dw, 1e-14, "seed A' = D");
         assert!(m.dp.is_zero(), "seed D' = 0, got {:?}", m.dp);
+        assert!(m.f.is_zero(), "seed F = 0, got {:?}", m.f);
         // Degenerate: a jet whose c₁₀ vanishes (block starting at Z = 0).
         let m0 = mobius_from_jet(&jet_seed(0.0, 0.0));
         assert!(m0.degenerate);
     }
 
     #[test]
+    fn mobius_c02_fallback_keeps_the_residual_live() {
+        // F is unavailable when B = c₀₁ is zero. That must remain a sound
+        // five-coefficient fallback: q₀₂ is neither erased from REST nor
+        // checked as a constructed zero.
+        let mut jet = JetF64::ZERO;
+        jet.a[jet_idx(1, 0)] = CFe::ONE;
+        jet.a[jet_idx(0, 2)] = CFe::ONE;
+        let m = mobius_from_jet(&jet);
+        assert!(!m.degenerate);
+        assert!(m.b.is_zero());
+        assert!(m.f.is_zero());
+
+        let q = mobius_q(&jet, &m);
+        assert!(q[jet_idx(0, 2)].sub(CFe::ONE).is_zero());
+        assert_eq!(
+            mobius_q_integrity_log2(&jet, &m, &q),
+            f64::NEG_INFINITY,
+            "q₀₂ is not a constructed zero in the B = 0 fallback"
+        );
+
+        let blk = block_from_jet(&jet);
+        assert!(
+            blk.log2_q[jet_idx(0, 2)].is_finite(),
+            "the live q₀₂ residual must be retained in REST"
+        );
+    }
+
+    #[test]
     fn mobius_q_zeros_on_every_block() {
-        // (task 2.2) The build-integrity invariant: q₁₀/q₀₁/q₂₀/q₁₁/q₂₁ vanish to
-        // ~1e-14 relative on EVERY block of every test orbit, and the leading
-        // surviving q terms match their closed forms (q₃₀ = c₃₀ + D·c₂₀ =
-        // c₃₀ − c₂₀²/c₁₀ — the superconvergence numerator — and q₀₂ = c₀₂).
+        // (task 2.2) The build-integrity invariant: q₁₀/q₀₁/q₂₀/q₁₁/q₀₂/q₂₁
+        // vanish to ~1e-14 relative on EVERY block of every test orbit, and the
+        // leading surviving q terms match their closed forms (q₃₀ = c₃₀ + D·c₂₀
+        // = c₃₀ − c₂₀²/c₁₀ — the superconvergence numerator — and
+        // q₀₃ = c₀₃ + F·c₀₂).
         let tol_log2 = (1e-13_f64).log2(); // ~1e-14 relative with CFe headroom
         for (name, cx, cy, len) in [
             ("cusp", -0.75_f64, 0.0_f64, 1usize << 12),
@@ -914,8 +1122,15 @@ mod tests {
                 "[{}] q30 closed form",
                 name
             );
-            let dq02 = q[jet_idx(0, 2)].sub(jet.coeff(0, 2));
-            assert!(dq02.is_zero() || dq02.log2_mag().unwrap() < jet.coeff(0, 2).log2_mag().unwrap() - 40.0);
+            let want_q03 = jet.coeff(0, 3).add(m.f.mul(jet.coeff(0, 2)));
+            let dq03 = q[jet_idx(0, 3)].sub(want_q03);
+            assert!(
+                dq03.is_zero()
+                    || dq03.log2_mag().unwrap()
+                        < want_q03.log2_mag().unwrap_or(0.0) - 40.0,
+                "[{}] q03 closed form",
+                name
+            );
         }
     }
 
@@ -1172,8 +1387,11 @@ mod tests {
         // (task 2.6, note §6.3) The block that motivated guard (G): seahorse
         // reference, steps 26→50 (contains |2Z₃₉| ≈ 5.4e-3), entry
         // |z| = 7.53e-13, ε = 1e-12, |c| = 1e-14. Plain Möbius errs ~1.5e-9
-        // (would violate ε); Möbius-c+ stays ≤ ~5e-13 < ε, and the residual
-        // scales ~c² (÷~100 per depth decade).
+        // (would violate ε); Möbius-c+ stays far below ε. With the F
+        // coefficient (pure-c² annihilated) the residual on this block drops
+        // to the f64 rounding floor (~1e-15, was 1.3e-12 for the 5-coefficient
+        // form), so the historical ~c² scaling check is replaced by a floor
+        // assertion: deeper |c| must never be WORSE.
         let orbit = ref_orbit_f64(-0.743643887037151, 0.131825904205330, 128);
         assert!(orbit.len() > 64, "seahorse escaped before step 64");
         let first = 26usize;
@@ -1211,11 +1429,13 @@ mod tests {
         }
         // The historical numbers: plain fails ε by ~3 decades, c+ passes.
         assert!(errs[0].0 > 1e-10, "plain Möbius unexpectedly good: {:.3e}", errs[0].0);
-        assert!(errs[0].1 < 2e-12, "Möbius-c+ exceeds ε: {:.3e}", errs[0].1);
-        // Residual ~c²: one decade deeper ⇒ ~two decades smaller (allow slack).
+        // F-form: the residual sits at the f64 rounding floor, 3 decades under
+        // the 5-coefficient form's 1.3e-12 on this block.
+        assert!(errs[0].1 < 1e-14, "Möbius-c+ above the rounding floor: {:.3e}", errs[0].1);
+        // Deeper |c| must never be worse (floor-limited, no strict c² scaling).
         assert!(
-            errs[1].1 < errs[0].1 / 10.0,
-            "c+ residual does not scale like c²: {:.3e} → {:.3e}",
+            errs[1].1 <= errs[0].1 * 1.5,
+            "c+ residual grows with depth: {:.3e} → {:.3e}",
             errs[0].1, errs[1].1
         );
     }
@@ -1465,7 +1685,7 @@ mod tests {
 
     #[test]
     fn mobius_serialization_round_trip() {
-        // (task 3.2) The GPU records must preserve the five coefficients within
+        // (task 3.2) The GPU records must preserve the six coefficients within
         // f32 mantissa tolerance, radii within f32 rounding, keep the coefficient
         // and radius buffers index-aligned, emit only skip ≥ 4 levels, mark
         // uncertified blocks with −∞, and carry a correct f32-safe flag.
@@ -1519,6 +1739,7 @@ mod tests {
                     ("A'", &blk.m.ap, &cb.ap),
                     ("D", &blk.m.d, &cb.d),
                     ("D'", &blk.m.dp, &cb.dp),
+                    ("F", &blk.m.f, &cb.f),
                 ] {
                     match src.log2_mag() {
                         None => assert_eq!((got.x, got.y), (0.0, 0.0)),
@@ -2678,5 +2899,14 @@ mod tests {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod size_check {
+    #[test]
+    fn mobius_coeffs_layout() {
+        assert_eq!(std::mem::size_of::<super::MobiusCoeffs>(), 72);
+        assert_eq!(std::mem::align_of::<super::MobiusCoeffs>(), 4);
     }
 }

@@ -3,18 +3,22 @@
 //! ONE build serves every evaluation tier. Per block, the coefficient record is
 //! PREFIX-ORDERED (design D2):
 //!
-//!   [A, B, D, A', D', a02, a30, a12, a03]
+//!   [A, B, D, A', D', F, a30, a12, a03]
 //!    └affine┘
 //!    └── Padé ──┘
-//!    └──── c+ ─────┘
-//!    └──────────── jet (order 3) ───────────┘
+//!    └────── c+ ──────┘
+//!    └──────────── jet (order 3) ─────────┘
 //!
-//! so each tier reads a strict prefix. The jet tier reconstructs its remaining
-//! degree ≤ 3 coefficients from the verified §11 identities:
+//! so each tier reads a strict prefix. Slot 5 carries F = −c₀₂/c₀₁ (the
+//! 6-coefficient c+ extraction's denominator c-slot, `mobius_from_jet`) — the
+//! raw a₀₂ it displaced is reconstructible in registers (a₀₂ = −F·B), keeping
+//! the record size-neutral. The jet tier reconstructs its remaining degree ≤ 3
+//! coefficients from the F-refreshed §11 identities:
 //!
-//!   a20 = −D·A,   a11 = A' − B·D,   a21 = −D'·A − D·a11
+//!   a20 = −D·A,   a11 = A' − B·D − F·A,
+//!   a21 = −D'·A − D·a11 + F·D·A,   a02 = −F·B
 //!
-//! (1–2 extra multiplications, amortized: the jet tier runs in the fe
+//! (2–3 extra multiplications, amortized: the jet tier runs in the fe
 //! compute-bound regime, while BANDWIDTH is the axis the plateau punishes —
 //! duplicated per-tier records were rejected for exactly that reason.)
 
@@ -23,20 +27,26 @@ use crate::jet::{
     sfe_norm, CFe, JetCoeffFe, JetF64, JetLevel, JET_MONOMIALS, JET_NCOEFF,
 };
 use crate::jet::JetBlockBounds;
+// The unified record shares the 6-coefficient F-form extraction with the
+// standalone mobius mode (`mobius_from_jet`, denominator 1 + (D+D'c)z + Fc):
+// slot 5 ships F, the displaced raw a₀₂ is reconstructed in registers
+// (a₀₂ = −F·B) and the §11 identities carry the F terms (see module head).
 use crate::mobius::{
-    mobius_build_bounds, mobius_build_radii, mobius_from_jet, mobius_from_jet_plain,
-    mobius_q, MobiusBlock, MobiusBoundsTable, MobiusCPlus, MobiusLevel,
+    mobius_build_bounds, mobius_build_derivative_radii, mobius_build_radii,
+    mobius_from_jet, mobius_from_jet_plain, mobius_q, MobiusBlock,
+    MobiusBoundsTable, MobiusCPlus, MobiusLevel,
     MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP,
 };
 
-/// One unified block: the c+ extraction (tiers 0–2) plus the four raw jet
-/// coefficients the identities cannot reconstruct (tier 3, order-3 evaluation).
+/// One unified block: the c+ extraction (tiers 0–2, F included) plus the three
+/// raw jet coefficients the identities cannot reconstruct (tier 3, order-3
+/// evaluation).
 #[derive(Clone, Debug)]
 pub struct UnifiedBlock {
-    /// A, B, D, A', D' — the c-augmented Möbius extraction (prefix slots 0–4).
+    /// A, B, D, A', D', F — the c-augmented Möbius extraction (prefix slots
+    /// 0–5).
     pub m: MobiusCPlus,
-    /// Raw slots 5–8: a₀₂, a₃₀, a₁₂, a₀₃ (degree ≤ 3 completion).
-    pub a02: CFe,
+    /// Raw slots 6–8: a₃₀, a₁₂, a₀₃ (degree ≤ 3 completion).
     pub a30: CFe,
     pub a12: CFe,
     pub a03: CFe,
@@ -46,27 +56,38 @@ impl UnifiedBlock {
     pub fn from_jet(jet: &JetF64) -> UnifiedBlock {
         UnifiedBlock {
             m: mobius_from_jet(jet),
-            a02: jet.coeff(0, 2),
             a30: jet.coeff(3, 0),
             a12: jet.coeff(1, 2),
             a03: jet.coeff(0, 3),
         }
     }
 
-    /// §11 identity reconstructions for the jet tier. (Used by
+    /// §11 identity reconstructions for the jet tier (F-form; used by
     /// `unified_eval_jet3` — the CPU referee of the GPU register
-    /// reconstruction landing with task 2.6.)
+    /// reconstruction).
     #[allow(dead_code)]
     pub fn a20(&self) -> CFe {
         self.m.d.mul(self.m.a).neg()
     }
     #[allow(dead_code)]
     pub fn a11(&self) -> CFe {
-        self.m.ap.sub(self.m.b.mul(self.m.d))
+        self.m.ap.sub(self.m.b.mul(self.m.d)).sub(self.m.f.mul(self.m.a))
     }
     #[allow(dead_code)]
     pub fn a21(&self) -> CFe {
-        self.m.dp.mul(self.m.a).neg().sub(self.m.d.mul(self.a11()))
+        self.m
+            .dp
+            .mul(self.m.a)
+            .neg()
+            .sub(self.m.d.mul(self.a11()))
+            .add(self.m.f.mul(self.m.d).mul(self.m.a))
+    }
+    /// a₀₂ = −F·B (exact when F is live; the c₀₁ = 0 fallback keeps F = 0 and
+    /// the moduli stage then leaves the raw a₀₂ slot as a live REST term for
+    /// the jet tier — sound, just not reconstructed).
+    #[allow(dead_code)]
+    pub fn a02(&self) -> CFe {
+        self.m.f.mul(self.m.b).neg()
     }
 }
 
@@ -91,8 +112,10 @@ pub struct UnifiedLevel {
 }
 
 /// Constructed-zero q indices per extraction (their rounding residue would
-/// only pollute REST — same discipline as the mobius build).
-const Q_ZEROS_CPLUS: [(usize, usize); 5] = [(1, 0), (0, 1), (2, 0), (1, 1), (2, 1)];
+/// only pollute REST — same discipline as the mobius build). q₀₂ is only a
+/// constructed zero when F is live — `q_moduli` keeps it as a REST term on the
+/// c₀₁ = 0 fallback (F = 0), mirroring `block_from_jet`.
+const Q_ZEROS_CPLUS: [(usize, usize); 6] = [(1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (2, 1)];
 const Q_ZEROS_PLAIN: [(usize, usize); 3] = [(1, 0), (0, 1), (2, 0)];
 
 fn q_moduli(jet: &JetF64, m: &MobiusCPlus, zeros: &[(usize, usize)]) -> [f64; JET_NCOEFF] {
@@ -105,6 +128,9 @@ fn q_moduli(jet: &JetF64, m: &MobiusCPlus, zeros: &[(usize, usize)]) -> [f64; JE
         out[n] = v.log2_mag().unwrap_or(f64::NEG_INFINITY);
     }
     for &(i, j) in zeros {
+        if (i, j) == (0, 2) && m.f.is_zero() {
+            continue;
+        }
         out[jet_idx(i, j)] = f64::NEG_INFINITY;
     }
     out
@@ -176,12 +202,14 @@ pub fn build_unified_levels(orbit: &[(f64, f64)], max_skip: usize) -> Vec<Unifie
 
 // ── tiered radii stage (task 2.2, design D4) ───────────────────────────────────
 
-/// §12-style closed-form radius, generalized: the low-degree stored q moduli
-/// ARE the (verified-exact) error model, so the radius is the largest x with
+/// §12-style closed-form radius oracle. It only sees the stored low-degree q
+/// moduli, so it deliberately omits the Cauchy tail and is NOT a certificate.
+/// It remains useful for diagnostics, but must never enlarge a runtime radius.
+/// The proposed radius is the largest x with
 /// Σ_ij |q_ij|·x^i·y^j ≤ ε·(|A|·x + |B|·y), y = c_max, capped by the pole
-/// bound (|D| + |D'|·y)·x ≤ ¼. Descending scan (0.25 log2 steps, first success
-/// from above). The Cauchy tail is deliberately absent — that pessimism is what
-/// this radius removes; per-tier soundness vs exact stepping is the referee.
+/// bound (|D| + |D'|·y)·x + |F|·y ≤ ¼ (den = 1 + De·z + F·c: the DEN budget
+/// loses the x-independent |F|·y slice up front). Descending scan (0.25 log2
+/// steps, first success from above).
 pub fn closed_form_radius(
     m: &MobiusCPlus,
     log2_q: &[f64; JET_NCOEFF],
@@ -196,11 +224,14 @@ pub fn closed_form_radius(
     if !l2a.is_finite() {
         return f64::NEG_INFINITY;
     }
-    let l2eps = eps.log2();
+    let l2eps = eps.log2() - 1.0;
     let l2d = m.d.log2_mag().unwrap_or(f64::NEG_INFINITY);
     let l2dp_y = m.dp.log2_mag().unwrap_or(f64::NEG_INFINITY) + log2_cmax;
     let l2_deff = lse2_pair(l2d, l2dp_y);
-    let pole_cap = if l2_deff.is_finite() { -2.0 - l2_deff } else { 0.0 };
+    let Some(l2_quarter) = pole_budget_log2(m, log2_cmax) else {
+        return f64::NEG_INFINITY;
+    };
+    let pole_cap = if l2_deff.is_finite() { l2_quarter - l2_deff } else { 0.0 };
     scan_first_success(pole_cap.min(-1.0), |lx| {
         let l2s = lse2_pair(l2a + lx, l2b + log2_cmax);
         let mut rest = f64::NEG_INFINITY;
@@ -217,7 +248,8 @@ pub fn closed_form_radius(
 /// its form, so the derivative error is the differentiated remainder series:
 /// for polynomial tiers |∂z(Φ − f̃)| ≤ Σ i·|q_ij|·x^(i−1)·y^j; for rational
 /// tiers the quotient rule adds the DEN corrections, bounded under the pole
-/// cap |De|·x ≤ ¼ (DEN ≥ ¾) by (4/3)·Σ i·|q|·x^(i−1)·y^j + (16/9)·|De|·Σ|q|·x^i·y^j.
+/// cap |De|·x + |F|·y ≤ ¼ (DEN ≥ ¾) by
+/// (4/3)·Σ i·|q|·x^(i−1)·y^j + (16/9)·|De|·Σ|q|·x^i·y^j.
 /// Condition (V′): that ≤ ½ε·(|A| + |A′|·y) — the multiplier scale, the same
 /// c-channel-inclusive lesson as (V)'s value scale. Descending scan as (V).
 /// `rational` selects the DEN corrections; polynomial tiers skip the pole cap.
@@ -237,13 +269,20 @@ pub fn derivative_radius(
     }
     let l2ap_y = m.ap.log2_mag().unwrap_or(f64::NEG_INFINITY) + log2_cmax;
     let l2scale = lse2_pair(l2a, l2ap_y);
-    let l2eps = eps.log2();
+    let l2eps = eps.log2() - 1.0;
     let l2d = m.d.log2_mag().unwrap_or(f64::NEG_INFINITY);
     let l2dp_y = m.dp.log2_mag().unwrap_or(f64::NEG_INFINITY) + log2_cmax;
     let l2_deff = lse2_pair(l2d, l2dp_y);
     let four_thirds = (4.0f64 / 3.0).log2();
-    let top = if rational && l2_deff.is_finite() {
-        (-2.0 - l2_deff).min(-1.0)
+    let top = if rational {
+        let Some(l2_quarter) = pole_budget_log2(m, log2_cmax) else {
+            return f64::NEG_INFINITY;
+        };
+        if l2_deff.is_finite() {
+            (l2_quarter - l2_deff).min(-1.0)
+        } else {
+            -1.0
+        }
     } else {
         -1.0
     };
@@ -319,6 +358,21 @@ fn scan_first_success(top: f64, cond: impl Fn(f64) -> bool) -> f64 {
     f64::NEG_INFINITY
 }
 
+/// log2 of the DEN pole budget left for the z-channel: ¼ − |F|·c_max
+/// (den = 1 + De·z + F·c ⇒ DEN ≥ 1 − |De|·x − |F|·y ≥ ¾ under the cap; the
+/// |F|·y slice is x-independent, so it comes off the budget up front). None
+/// when that slice alone exhausts it — no x can hold the pole bound.
+fn pole_budget_log2(m: &MobiusCPlus, log2_cmax: f64) -> Option<f64> {
+    let l2f_y = m.f.log2_mag().unwrap_or(f64::NEG_INFINITY) + log2_cmax;
+    let fy = if l2f_y > -1074.0 { l2f_y.exp2() } else { 0.0 };
+    let quarter = 0.25 - fy;
+    if quarter > 0.0 {
+        Some(quarter.log2())
+    } else {
+        None
+    }
+}
+
 fn lse2_pair(a: f64, b: f64) -> f64 {
     let hi = a.max(b);
     if !hi.is_finite() {
@@ -344,6 +398,7 @@ fn to_mobius_levels(levels: &[UnifiedLevel], plain: bool) -> Vec<MobiusLevel> {
                     let log2_q = if plain {
                         m.ap = CFe::ZERO;
                         m.dp = CFe::ZERO;
+                        m.f = CFe::ZERO;
                         md.log2_q_plain
                     } else {
                         md.log2_q_cplus
@@ -376,8 +431,8 @@ pub struct UnifiedRadii {
     pub tiers_der: Vec<Vec<[f64; 4]>>,
     /// Raw value radii per tier (diagnostics: der-limited ⇔ r′ < r_value).
     pub tiers_value: Vec<Vec<[f64; 4]>>,
-    /// Blocks where the closed form exceeded the (V) radius, per rational tier
-    /// (diagnostic for the tightness model — spec scenario).
+    /// Blocks where the tail-free oracle would exceed the (V) radius, per
+    /// rational tier. Diagnostic only: these proposed boosts are never applied.
     pub boost_pade: usize,
     pub boost_cplus: usize,
 }
@@ -426,10 +481,10 @@ pub fn unified_build_bounds(
 }
 
 /// Radii stage ((ε, c_max)-keyed, pure log2 solving): per block, the four tier
-/// radii — affine/jet from rule (V) at orders 1/3, Padé/c+ as
-/// max((V), generalized §12 closed form). No cross-tier clamping: each radius
-/// is individually sound for its own evaluator, and the dispatch tag points at
-/// a tier whose OWN radius covers.
+/// radii — all four from rule (V). The tail-free closed-form oracle is recorded
+/// as a diagnostic only: it cannot extend a runtime radius without a Cauchy
+/// tail. No cross-tier clamping: each radius is individually sound for its own
+/// evaluator, and the dispatch tag points at a tier whose OWN radius covers.
 pub fn unified_solve_radii(
     levels: &[UnifiedLevel],
     bounds: &UnifiedBounds,
@@ -440,6 +495,8 @@ pub fn unified_solve_radii(
     let plv = to_mobius_levels(levels, true);
     let r_cv = mobius_build_radii(&mlv, &bounds.cplus, eps, log2_c_max);
     let r_pv = mobius_build_radii(&plv, &bounds.plain, eps, log2_c_max);
+    let rd_cv = mobius_build_derivative_radii(&mlv, &bounds.cplus, eps, log2_c_max);
+    let rd_pv = mobius_build_derivative_radii(&plv, &bounds.plain, eps, log2_c_max);
     let mut boost_pade = 0usize;
     let mut boost_cplus = 0usize;
     let mut tiers: Vec<Vec<[f64; 4]>> = Vec::with_capacity(levels.len());
@@ -457,6 +514,7 @@ pub fn unified_solve_radii(
                 let mut m = blk.m;
                 m.ap = CFe::ZERO;
                 m.dp = CFe::ZERO;
+                m.f = CFe::ZERO;
                 m
             };
             let cf_p = closed_form_radius(&plain_m, &md.log2_q_plain, eps, log2_c_max);
@@ -467,22 +525,28 @@ pub fn unified_solve_radii(
             if cf_c > r_cv[li][s] {
                 boost_cplus += 1;
             }
-            let value = [rj[0], r_pv[li][s].max(cf_p), r_cv[li][s].max(cf_c), rj[2]];
+            let value = [rj[0], r_pv[li][s], r_cv[li][s], rj[2]];
             // (V′): per-tier remainder moduli — affine drops only its two
-            // exact slots; jet drops the whole stored degree ≤ 3 prefix.
+            // exact slots; jet drops the whole stored degree ≤ 3 prefix,
+            // EXCEPT a₀₂ on the c₀₁ = 0 fallback (F = 0): the register
+            // reconstruction a₀₂ = −F·B then misses the raw coefficient, so
+            // it stays a live REST term.
             let mut q_aff = md.log2_a;
             q_aff[jet_idx(1, 0)] = f64::NEG_INFINITY;
             q_aff[jet_idx(0, 1)] = f64::NEG_INFINITY;
             let mut q_jet = md.log2_a;
             for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+                if (i, j) == (0, 2) && blk.m.b.is_zero() {
+                    continue;
+                }
                 if (i as usize) + (j as usize) <= 3 {
                     q_jet[n] = f64::NEG_INFINITY;
                 }
             }
             let der = [
                 derivative_radius(&plain_m, &q_aff, eps, log2_c_max, false),
-                derivative_radius(&plain_m, &md.log2_q_plain, eps, log2_c_max, true),
-                derivative_radius(&blk.m, &md.log2_q_cplus, eps, log2_c_max, true),
+                rd_pv[li][s],
+                rd_cv[li][s],
                 derivative_radius(&blk.m, &q_jet, eps, log2_c_max, false),
             ];
             row.push([
@@ -522,11 +586,12 @@ pub fn unified_eval_jet3(blk: &UnifiedBlock, z: CFe, c: CFe) -> CFe {
     let a20 = blk.a20();
     let a11 = blk.a11();
     let a21 = blk.a21();
+    let a02 = blk.a02();
     let z2 = z.mul(z);
     let c2 = c.mul(c);
     // Row grouping P_i(c) = Σ_j a_ij c^j, Φ = Σ_i P_i·z^i (same shape as
     // jet_eval's Horner rows).
-    let p0 = blk.m.b.mul(c).add(blk.a02.mul(c2)).add(blk.a03.mul(c2).mul(c));
+    let p0 = blk.m.b.mul(c).add(a02.mul(c2)).add(blk.a03.mul(c2).mul(c));
     let p1 = blk.m.a.add(a11.mul(c)).add(blk.a12.mul(c2));
     let p2 = a20.add(a21.mul(c));
     let p3 = blk.a30;
@@ -656,6 +721,7 @@ pub fn sa_profile(orbit: &[(f64, f64)], eps: f64, samples: &[usize]) -> Vec<(usi
 // ── interior/periodic regime (Phase E, design D8, findings §17) ─────────────────
 
 /// Longest reference period the build will detect.
+#[allow(dead_code)] // runtime path is disabled pending a full tail certificate
 pub const PERIODIC_MAX_P: usize = 512;
 
 /// The composed period block Φ_p in c+ form, with its certified entry radius:
@@ -675,6 +741,7 @@ pub struct PeriodicBlock {
 /// Detect reference periodicity after the transient (sustained |Z_{k+p} − Z_k|
 /// < 1e-12 through the orbit tail) and compose Φ_p from p seed jets at the
 /// earliest converged phase. None for escaping/aperiodic references.
+#[allow(dead_code)] // retained for the CPU model test while runtime is disabled
 pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<PeriodicBlock> {
     const TOL2: f64 = 1e-24;
     let n = orbit.len();
@@ -714,6 +781,8 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
         return None;
     }
     // Compose Φ_p at phase `start` (seeds start..start+p−1: δ ← 2Z_i·δ + δ² + c).
+    // c+ F-form: the runtime fixed points come from
+    // De·δ² + (1 + F·c − Ae)·δ − B·c = 0 with den = 1 + De·δ + F·c.
     let mut jet = jet_seed(orbit[start].0, orbit[start].1);
     for i in (start + 1)..(start + period) {
         jet = crate::jet::jet_compose(&jet, &jet_seed(orbit[i].0, orbit[i].1));
@@ -741,8 +810,9 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
 // ── GPU serialization (task 2.3, designs D2/D3) ─────────────────────────────────
 
 /// Slots per shipped coefficient record: the prefix-ordered
-/// [A, B, D, A′, D′, a₀₂, a₃₀, a₁₂, a₀₃] — 108 B at 12 B/coefficient. Tier
-/// prefix reads: affine 24 B, Padé 36 B, c+ 60 B, jet 108 B.
+/// [A, B, D, A′, D′, F, a₃₀, a₁₂, a₀₃] — 108 B at 12 B/coefficient. Tier
+/// prefix reads: affine 24 B, Padé 36 B, c+ 72 B, jet 108 B (the jet tier
+/// reconstructs a₀₂ = −F·B in registers).
 pub const UNIFIED_GPU_COEFFS: usize = 9;
 
 /// GPU radius sidecar entry, 16 B vec4-packed (one coalesced probe): x = the
@@ -779,10 +849,16 @@ pub fn unified_tag(tiers: &[f64; 4], log2_band: f64) -> Option<usize> {
     best
 }
 
-fn unified_f32_safe(md: &UnifiedModuli) -> bool {
+fn unified_f32_safe(md: &UnifiedModuli, m: &MobiusCPlus) -> bool {
     // Every degree ≤ 3 modulus (stored slots AND identity-reconstructed ones)
-    // must reconstruct inside the f32 range with Horner headroom.
-    JET_MONOMIALS.iter().enumerate().all(|(n, &(i, j))| {
+    // must reconstruct inside the f32 range with Horner headroom — plus F
+    // itself (a shipped slot the fast path reconstructs, a RATIO of jet
+    // coefficients the moduli don't cover).
+    let f_ok = match m.f.log2_mag() {
+        None => true,
+        Some(l) => l.abs() <= MOBIUS_F32_SAFE_LOG2,
+    };
+    f_ok && JET_MONOMIALS.iter().enumerate().all(|(n, &(i, j))| {
         if (i as usize) + (j as usize) > 3 {
             return true;
         }
@@ -806,7 +882,7 @@ pub fn unified_serialize_coeffs(levels: &[UnifiedLevel]) -> Vec<[JetCoeffFe; UNI
                 cfe_to_coeff(&b.m.d),
                 cfe_to_coeff(&b.m.ap),
                 cfe_to_coeff(&b.m.dp),
-                cfe_to_coeff(&b.a02),
+                cfe_to_coeff(&b.m.f),
                 cfe_to_coeff(&b.a30),
                 cfe_to_coeff(&b.a12),
                 cfe_to_coeff(&b.a03),
@@ -820,11 +896,12 @@ pub fn unified_serialize_coeffs(levels: &[UnifiedLevel]) -> Vec<[JetCoeffFe; UNI
 /// directory. `log2_band` is the working band the tags are chosen at — the
 /// caller derives it from the replay-observed |dz| distribution (census note
 /// 5), NOT from a fixed c_max multiple. When `sa` or `periodic` is present, a
-/// NINE-entry header follows the block sidecar (base = total block count,
+/// TEN-entry header follows the block sidecar (base = total block count,
 /// computable in the shader from the last directory entry):
 ///   [0..4) SA prefix: entry j = (b_{j+1}.x, .y, exponent, j == 0 ? n0 : 0)
-///   [4..9) periodic block: A(.., start), B(.., p), D(.., r_log2), A'(.., 0),
-///          D'(.., 0) — p == 0 in entry 5's w disables the runtime attempt.
+///   [4..10) periodic block: A(.., start), B(.., p), D(.., r_log2), A'(.., 0),
+///          D'(.., 0), F(.., 0) — p == 0 in entry 5's w disables the runtime
+///          attempt.
 pub fn unified_serialize_radii(
     levels: &[UnifiedLevel],
     radii: &UnifiedRadii,
@@ -852,7 +929,7 @@ pub fn unified_serialize_radii(
                 Some(tag) => UnifiedRadius {
                     r_log2: tiers[tag] as f32,
                     tag: tag as f32,
-                    f32_safe: if unified_f32_safe(md) { 1.0 } else { 0.0 },
+                    f32_safe: if unified_f32_safe(md, &lvl.blocks[s].m) { 1.0 } else { 0.0 },
                     pad: 0.0,
                 },
             };
@@ -880,7 +957,7 @@ pub fn unified_serialize_radii(
             });
         }
         let pm = periodic.map(|p| p.m).unwrap_or(MobiusCPlus {
-            a: zero, b: zero, d: zero, ap: zero, dp: zero, degenerate: true,
+            a: zero, b: zero, d: zero, ap: zero, dp: zero, f: zero, degenerate: true,
         });
         let metas = [
             periodic.map(|p| p.start as f32).unwrap_or(0.0),
@@ -888,8 +965,9 @@ pub fn unified_serialize_radii(
             periodic.map(|p| p.log2_r as f32).unwrap_or(f32::NEG_INFINITY),
             0.0,
             0.0,
+            0.0,
         ];
-        for (j, coef) in [pm.a, pm.b, pm.d, pm.ap, pm.dp].iter().enumerate() {
+        for (j, coef) in [pm.a, pm.b, pm.d, pm.ap, pm.dp, pm.f].iter().enumerate() {
             let c = cfe_to_coeff(coef);
             out.push(UnifiedRadius {
                 r_log2: c.x,
@@ -939,10 +1017,10 @@ mod tests {
 
     #[test]
     fn unified_identities_reconstruct_the_jet() {
-        // (task 2.1) On every block of every test orbit: a20 = −D·A,
-        // a11 = A' − B·D, a21 = −D'·A − D·a11 reproduce the source jet's raw
-        // coefficients to ~1e-13 relative — the record's identity-reconstruction
-        // invariant.
+        // (task 2.1, F-form) On every block of every test orbit: a20 = −D·A,
+        // a11 = A' − B·D − F·A, a21 = −D'·A − D·a11 + F·D·A and a02 = −F·B
+        // reproduce the source jet's raw coefficients to ~1e-11 at operand
+        // scale — the record's identity-reconstruction invariant.
         for (name, cx, cy) in [
             ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64),
             ("near-parab", -0.7499, 0.0001),
@@ -976,15 +1054,19 @@ mod tests {
                             "a11",
                             blk.a11(),
                             jet.coeff(1, 1),
-                            mag(blk.m.ap).max(mag(blk.m.b.mul(blk.m.d))),
+                            mag(blk.m.ap)
+                                .max(mag(blk.m.b.mul(blk.m.d)))
+                                .max(mag(blk.m.f.mul(blk.m.a))),
                         ),
                         (
                             "a21",
                             blk.a21(),
                             jet.coeff(2, 1),
                             mag(blk.m.dp.mul(blk.m.a))
-                                .max(mag(blk.m.d.mul(blk.a11()))),
+                                .max(mag(blk.m.d.mul(blk.a11())))
+                                .max(mag(blk.m.f.mul(blk.m.d).mul(blk.m.a))),
                         ),
+                        ("a02", blk.a02(), jet.coeff(0, 2), mag(blk.a02())),
                     ] {
                         let (gx, gy) = got.to_f64();
                         let (wx, wy) = want.to_f64();
@@ -1084,6 +1166,7 @@ mod tests {
                                         let mut m = blk.m;
                                         m.ap = CFe::ZERO;
                                         m.dp = CFe::ZERO;
+                                        m.f = CFe::ZERO;
                                         mobius_apply(&m, zfe, cfe).0
                                     }
                                     TIER_CPLUS => mobius_apply(&blk.m, zfe, cfe).0,
@@ -1144,7 +1227,7 @@ mod tests {
                 let blk = &lvl.blocks[s];
                 // Prefix order, exact deterministic round-trip.
                 let want = [
-                    &blk.m.a, &blk.m.b, &blk.m.d, &blk.m.ap, &blk.m.dp, &blk.a02,
+                    &blk.m.a, &blk.m.b, &blk.m.d, &blk.m.ap, &blk.m.dp, &blk.m.f,
                     &blk.a30, &blk.a12, &blk.a03,
                 ];
                 for (k, w) in want.iter().enumerate() {
@@ -1276,6 +1359,7 @@ mod tests {
                                         let mut m = blk.m;
                                         m.ap = CFe::ZERO;
                                         m.dp = CFe::ZERO;
+                                        m.f = CFe::ZERO;
                                         mobius_apply(&m, zfe, cfe).1
                                     }
                                     TIER_CPLUS => mobius_apply(&blk.m, zfe, cfe).1,
@@ -1624,6 +1708,7 @@ mod tests {
                             let mut m = blk.m;
                             m.ap = CFe::ZERO;
                             m.dp = CFe::ZERO;
+                            m.f = CFe::ZERO;
                             crate::mobius::mobius_apply(&m, zfe, cfe).0
                         }
                         TIER_CPLUS => crate::mobius::mobius_apply(&blk.m, zfe, cfe).0,
@@ -1665,9 +1750,9 @@ mod tests {
         );
     }
 
-    #[test]
-    fn periodic_interior_verdict_certified() {
-        // (Phase E, tasks 6.1/6.3 CPU referee) On the period-2 disk reference
+   #[test]
+    fn periodic_interior_model_matches_cycle_multiplier() {
+        // CPU model check for the dormant Phase-E path. On the period-2 disk reference
         // C = −1 + 0.1i: detection finds p = 2; the composed block's fixed-
         // Möbius multiplier κ(dc) matches the ANALYTIC cycle multiplier
         // 4·(c + 1) of the pixel's own cycle (findings §17 measured |κ| =
@@ -1699,23 +1784,30 @@ mod tests {
             let d = per.m.d.to_f64();
             let ap = per.m.ap.to_f64();
             let dp = per.m.dp.to_f64();
+            let fco = per.m.f.to_f64();
             let ae = (a.0 + cm(ap, dc).0, a.1 + cm(ap, dc).1);
             let de = (d.0 + cm(dp, dc).0, d.1 + cm(dp, dc).1);
             let bc = cm(b, dc);
-            // De·z² + (1−Ae)·z − Bc = 0.
-            let one_m_ae = (1.0 - ae.0, -ae.1);
+            let fc = cm(fco, dc);
+            let one_p_fc = (1.0 + fc.0, fc.1);
+            // F-form: den = (1 + Fc) + De·z ⇒ De·z² + (1 + Fc − Ae)·z − Bc = 0.
+            let u_m_ae = (one_p_fc.0 - ae.0, one_p_fc.1 - ae.1);
             let disc = {
-                let t = cm(one_m_ae, one_m_ae);
+                let t = cm(u_m_ae, u_m_ae);
                 let f = cm(de, bc);
                 (t.0 + 4.0 * f.0, t.1 + 4.0 * f.1)
             };
             let sq = csqrt(disc);
             let two_de = (2.0 * de.0, 2.0 * de.1);
-            let z1 = cdiv(((-one_m_ae.0) + sq.0, (-one_m_ae.1) + sq.1), two_de);
-            let z2 = cdiv(((-one_m_ae.0) - sq.0, (-one_m_ae.1) - sq.1), two_de);
+            let z1 = cdiv(((-u_m_ae.0) + sq.0, (-u_m_ae.1) + sq.1), two_de);
+            let z2 = cdiv(((-u_m_ae.0) - sq.0, (-u_m_ae.1) - sq.1), two_de);
             let kappa = |z: (f64, f64)| {
-                let num = (ae.0 - cm(bc, de).0, ae.1 - cm(bc, de).1);
-                let den = (1.0 + cm(de, z).0, cm(de, z).1);
+                // m′ = (Ae·(1+Fc) − Bc·De)/den².
+                let num = (
+                    cm(ae, one_p_fc).0 - cm(bc, de).0,
+                    cm(ae, one_p_fc).1 - cm(bc, de).1,
+                );
+                let den = (one_p_fc.0 + cm(de, z).0, one_p_fc.1 + cm(de, z).1);
                 cdiv(num, cm(den, den))
             };
             let (k1, k2) = (kappa(z1), kappa(z2));
@@ -1740,11 +1832,14 @@ mod tests {
             let delta0 = (za.0 + 1e-7, za.1 - 5e-8);
             let w0 = cdiv((delta0.0 - za.0, delta0.1 - za.1), (delta0.0 - zr.0, delta0.1 - zr.1));
             for k in [10usize, 1000] {
-                // Iterate the block map exactly (f64 c+ form).
+                // Iterate the block map exactly (f64 c+ F-form).
                 let (mut zx2, mut zy2) = delta0;
                 for _ in 0..k {
                     let num = (cm(ae, (zx2, zy2)).0 + bc.0, cm(ae, (zx2, zy2)).1 + bc.1);
-                    let den = (1.0 + cm(de, (zx2, zy2)).0, cm(de, (zx2, zy2)).1);
+                    let den = (
+                        one_p_fc.0 + cm(de, (zx2, zy2)).0,
+                        one_p_fc.1 + cm(de, (zx2, zy2)).1,
+                    );
                     let nz = cdiv(num, den);
                     zx2 = nz.0;
                     zy2 = nz.1;
@@ -1777,8 +1872,10 @@ mod tests {
         // match exact step-by-step chains through the block:
         //   δ′_c  = m_z·δ_c + m_c
         //   δ′_cc = m_zz·δ_c² + 2·m_zc·δ_c + m_cc + m_z·δ_cc
-        // with the rational second partials m_zz = −2·De·m_z/den,
-        // m_cc = −2·D′·z·m_c/den, m_zc = (A′ − m_c·De − m·D′)/den − m_z·D′·z/den
+        // with the rational second partials (F-form, den = 1 + De·z + F·c,
+        // ∂den/∂c = D′·z + F): m_zz = −2·De·m_z/den,
+        // m_cc = −2·(D′·z + F)·m_c/den,
+        // m_zc = (A′ − m_c·De − m·D′)/den − m_z·(D′·z + F)/den
         // (affine: all zero; jet: polynomial rows). Exact chain per step:
         // δ_c ← (2Z + 2δ)·δ_c + 1, δ_cc ← 2·δ_c² + (2Z + 2δ)·δ_cc.
         let cm = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
@@ -1846,7 +1943,7 @@ mod tests {
                             let a20 = blk.a20().to_f64();
                             let a11 = blk.a11().to_f64();
                             let a21 = blk.a21().to_f64();
-                            let a02 = blk.a02.to_f64();
+                            let a02 = blk.a02().to_f64();
                             let a30 = blk.a30.to_f64();
                             let a12 = blk.a12.to_f64();
                             let a03 = blk.a03.to_f64();
@@ -1866,28 +1963,30 @@ mod tests {
                                 cm((2.0, 0.0), cm(a12, z0)),
                             );
                         } else {
-                            let (apx, dpx) = if tier == TIER_CPLUS {
-                                (ap, dp)
+                            let (apx, dpx, fx) = if tier == TIER_CPLUS {
+                                (ap, dp, blk.m.f.to_f64())
                             } else {
-                                ((0.0, 0.0), (0.0, 0.0))
+                                ((0.0, 0.0), (0.0, 0.0), (0.0, 0.0))
                             };
                             let ax = if tier == TIER_AFFINE { a } else { a };
                             let dx2 = if tier == TIER_AFFINE { (0.0, 0.0) } else { d };
                             let ae = cadd(ax, cm(apx, c));
                             let de = cadd(dx2, cm(dpx, c));
                             let bc = cm(b, c);
-                            let den = cadd((1.0, 0.0), cm(de, z0));
+                            // F-form: den = 1 + De·z + F·c; ∂den/∂c = D'·z + F.
+                            let den = cadd(cadd((1.0, 0.0), cm(de, z0)), cm(fx, c));
+                            let dcden = cadd(cm(dpx, z0), fx);
                             m_v = cdiv(cadd(cm(ae, z0), bc), den);
                             m_z = cdiv(csub(ae, cm(m_v, de)), den);
                             m_c = cdiv(
-                                csub(cadd(cm(apx, z0), b), cm(m_v, cm(dpx, z0))),
+                                csub(cadd(cm(apx, z0), b), cm(m_v, dcden)),
                                 den,
                             );
                             m_zz = cm((-2.0, 0.0), cdiv(cm(de, m_z), den));
-                            m_cc = cm((-2.0, 0.0), cdiv(cm(cm(dpx, z0), m_c), den));
+                            m_cc = cm((-2.0, 0.0), cdiv(cm(dcden, m_c), den));
                             m_zc = csub(
                                 cdiv(csub(csub(apx, cm(m_c, de)), cm(m_v, dpx)), den),
-                                cdiv(cm(m_z, cm(dpx, z0)), den),
+                                cdiv(cm(m_z, dcden), den),
                             );
                         }
                         let pd = cadd(cm(m_z, d0), m_c);
@@ -1921,9 +2020,11 @@ mod tests {
     #[test]
     fn unified_tiers_match_standalone_builds() {
         // (task 2.1) Tier-coefficient parity: the unified record's prefixes
-        // equal the standalone extractions (c+ five, plain-Möbius three with
-        // A' = D' = 0 sharing A/B/D), and the order-3 jet-tier evaluation from
-        // the record matches jet_eval(·, 3) on sample points to fp round-off.
+        // equal the standalone extractions (the full 6-coefficient c+ F-form
+        // shared with the standalone mobius mode; plain-Möbius with
+        // A' = D' = F = 0 sharing A/B/D), and the order-3 jet-tier evaluation
+        // from the record matches jet_eval(·, 3) on sample points to fp
+        // round-off.
         let orbit = ref_orbit_f64(-1.401155, 0.0, 512);
         assert!(orbit.len() > 512, "reference escaped");
         let unified = build_unified_levels(&orbit, 1 << 10);
@@ -1949,13 +2050,15 @@ mod tests {
             }
             assert_eq!(ul.blocks.len(), cl.blocks.len());
             for (s, (ub, cb)) in ul.blocks.iter().zip(cl.blocks.iter()).enumerate() {
-                // c+ prefix parity (identical extraction path).
+                // Full 6-coefficient parity with the standalone c+ build (one
+                // shared extraction: `mobius_from_jet`).
                 for (what, got, want) in [
                     ("A", &ub.m.a, &cb.m.a),
                     ("B", &ub.m.b, &cb.m.b),
                     ("D", &ub.m.d, &cb.m.d),
                     ("A'", &ub.m.ap, &cb.m.ap),
                     ("D'", &ub.m.dp, &cb.m.dp),
+                    ("F", &ub.m.f, &cb.m.f),
                 ] {
                     assert!(
                         rel_err(*got, *want) < 1e-15,
