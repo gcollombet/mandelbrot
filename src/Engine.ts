@@ -75,13 +75,13 @@ const JET_COEFF_FLOATS = 27
 // coefficient table.
 const JET_RADII_FLOATS = 4
 // Floats per Möbius-c+ COEFFICIENT record — must match the Rust #[repr(C)]
-// MobiusCoeffs: 5 coefficients × (x, y, e), 60 B. Mobius tables ship in the
-// SAME GPU buffers as jet ones (the element type is identical and the modes
-// are exclusive; layoutInplace already sits at the 8-storage-buffer WebGPU
-// default limit, so new bindings were not an option) — only the indexing
-// stride differs shader-side. The radius sidecar and level directory reuse
-// the jet strides outright (16 B vec4 / 4 × u32).
-const MOBIUS_COEFF_FLOATS = 18
+// MobiusCoeffs: 7 coefficients × (x, y, e), 84 B ([2/1]-c+: A, B, A', D, D',
+// F, N₂). Mobius tables ship in the SAME GPU buffers as jet ones (the element
+// type is identical and the modes are exclusive; layoutInplace already sits
+// at the 8-storage-buffer WebGPU default limit, so new bindings were not an
+// option) — only the indexing stride differs shader-side. The radius sidecar
+// and level directory reuse the jet strides outright (16 B vec4 / 4 × u32).
+const MOBIUS_COEFF_FLOATS = 21
 // Step capacity of the GPU reference buffer (the 8·CAPACITY-byte
 // mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts, where the orbit
 // is computed to 2× the display maxIter (interactive zoom-in headroom) but never
@@ -683,7 +683,15 @@ export class Engine {
     floatExpActive = false
     debugShadingActive = false
     debugViewMode = 0
-    // Console/devtools override: __mandelbrotEngine.debugViewOverride = 1..4
+    // The debug overlay is a from-scratch full recompute that does NOT read the
+    // progressive textures, so it's "complete" on the single frame it draws. It
+    // only needs to be redrawn when its inputs change (view/params/mode, or a
+    // fresh block table). This flag gates the render loop in debug mode so the
+    // engine idles instead of endlessly re-running the (invisible) progressive
+    // machine and repaying the heavy recompute every frame. Starts true so the
+    // first frame after enabling a view draws.
+    debugViewDirty = true
+    // Console/devtools override: __mandelbrotEngine.debugViewOverride = 1..5
     // wins over the Settings value (0 = follow Settings).
     debugViewOverride = 0
     private pipelineDebug?: GPURenderPipeline
@@ -899,6 +907,8 @@ export class Engine {
             this.currentBlaLevelCount = 0
             this.referenceBlaReadyMaxIterations = 0
         }
+        // New reference/table promoted → the debug overlay must redraw once.
+        this.debugViewDirty = true
 
         // Switch the main-thread reference state
         this.activeRef = staging
@@ -1142,6 +1152,9 @@ export class Engine {
             this.writeBlockTable(message)
             this.currentBlaLevelCount = message.levelCount
             this.referenceBlaReadyMaxIterations = message.maxIterations
+            // A fresh block table changes what the debug overlay would draw
+            // (blocks now enabled / different skips) — redraw it once.
+            this.debugViewDirty = true
             if (message.buildMs !== undefined) {
                 this.lastTableBuildMs = message.buildMs
                 this.lastTableBuildStages = message.buildStages ?? -1
@@ -1801,7 +1814,7 @@ export class Engine {
             // indexes by the mode flag. The coeff capacity is tracked in
             // jet-entry units (27 floats) — a float-count ceiling covers the
             // denser mobius records; the radii sidecar is sized on its own
-            // block count (mobius has 27/18 more blocks per coeff float).
+            // block count (mobius has 27/21 more blocks per coeff float).
             const blockCount = Math.ceil(
                 table.steps.length / (table.kind === 'mobius' ? MOBIUS_COEFF_FLOATS : JET_COEFF_FLOATS), // unified = 27 floats = jet stride
             )
@@ -2104,6 +2117,19 @@ export class Engine {
 
     private applyGpuFrameTiming(elapsed: number) {
         this.gpuFrameTimeMs = elapsed
+
+        // The debug overlay recomputes every pixel from scratch on top of the
+        // normal frame (see the debug pass in render()), so `elapsed` here is
+        // dominated by its cost rather than the real progressive iteration.
+        // Feeding that into completion timing, frame pacing (smoothedGpuTimeMs)
+        // or the batch-size feedback loop below would throttle the underlying
+        // computation to a crawl while debug view is on — the image never
+        // appears to finish/settle. Freeze all three; they resume from their
+        // last real values once debug view is toggled off.
+        if (this.debugViewMode > 0) {
+            return
+        }
+
         if (this.completionTimerActive && elapsed > 0) {
             this.completionAccumulatedGpuMs += elapsed
         }
@@ -2404,13 +2430,14 @@ export class Engine {
         this.invalidateCounterReadback()
     }
 
-    /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes. */
+    /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes, 5 tier. */
     setDebugView(mode: number) {
         const next = Math.max(0, Math.round(mode))
         if (next === this.debugViewMode) {
             return
         }
         this.debugViewMode = next
+        this.debugViewDirty = true
         this.needRender = true
     }
 
@@ -2592,6 +2619,9 @@ export class Engine {
             && orbitMetricsEnabled !== this.previousOrbitMetricsEnabled
         const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
         this.needRender = this.needRender || mandelbrotChanged || renderOptionsChanged
+        // Any view/param change invalidates the current debug snapshot (see
+        // debugViewDirty) so it redraws once, then idles again.
+        this.debugViewDirty = this.debugViewDirty || mandelbrotChanged || renderOptionsChanged
         // Any navigation/parameter change resets AA → instant single-sample fallback,
         // and re-arms auto AA. Not guarded by aaActive: after accumulation completes
         // (aaActive false, aaAccumulatedSamples > 0) a move must still clear the count
@@ -3693,6 +3723,10 @@ export class Engine {
             rpassDebug.setBindGroup(0, this.bindGroupDebug)
             rpassDebug.draw(6, 1, 0, 0)
             rpassDebug.end()
+            // Snapshot drawn with the current inputs — consumed. needsMoreFrames()
+            // now idles until a param/mode/table change re-dirties it. (No early
+            // return sits between here and submit, so this always reaches the GPU.)
+            this.debugViewDirty = false
         }
 
         // Bake the AA target map once, right after sample 0 has converged and been
@@ -3946,6 +3980,25 @@ export class Engine {
      * unfinished pixels, incomplete orbit, or continuous-render mode).
      */
     needsMoreFrames(): boolean {
+        // Debug overlay active: it's a from-scratch recompute that ignores the
+        // progressive textures, so the progressive machine's unfinished pixels
+        // and AA passes must NOT keep the loop alive — that made the debug view
+        // re-render endlessly and crawl. Redraw only for its real inputs: an
+        // explicit request / dirty snapshot, a live zoom, a pending capture, or
+        // a reference/table still being built. debugViewDirty is cleared once
+        // the debug pass has drawn (see render()).
+        if (this.debugViewMode > 0) {
+            let r = ''
+            if (this.needRender || this.debugViewDirty) r = 'debugDirty'
+            else if (this.snapshotCallback) r = 'snapshot'
+            else if (this.needFreezeSnapshot) r = 'freezeSnapshot'
+            else if (this.needMergeSnapshot) r = 'mergeSnapshot'
+            else if (isZoomActive(this.zoomState)) r = 'zoomActive'
+            else if (this.isReferenceValidating) r = 'referenceValidating'
+            else if (this.orbitIncomplete) r = 'orbitIncomplete'
+            return r !== ''
+        }
+
         let reason = ''
         if (this.needRender) reason = 'needRender'
         else if (this.snapshotCallback) reason = 'snapshot'

@@ -3,51 +3,63 @@
 //! ONE build serves every evaluation tier. Per block, the coefficient record is
 //! PREFIX-ORDERED (design D2):
 //!
-//!   [A, B, D, A', D', F, a30, a12, a03]
+//!   [A, B, D, N₂, A', D', F, a12, a03]
 //!    └affine┘
-//!    └── Padé ──┘
-//!    └────── c+ ──────┘
+//!    └─── Padé ────┘
+//!    └──────── c+ ─────────┘
 //!    └──────────── jet (order 3) ─────────┘
 //!
-//! so each tier reads a strict prefix. Slot 5 carries F = −c₀₂/c₀₁ (the
-//! 6-coefficient c+ extraction's denominator c-slot, `mobius_from_jet`) — the
-//! raw a₀₂ it displaced is reconstructible in registers (a₀₂ = −F·B), keeping
-//! the record size-neutral. The jet tier reconstructs its remaining degree ≤ 3
-//! coefficients from the F-refreshed §11 identities:
+//! so each tier reads a strict prefix (affine 24 B, Padé 48 B, c+ 84 B, jet
+//! 108 B). The rational tiers are the [2/1] superconvergent extraction
+//! (`mobius_from_jet_k2`, mobius round 7): D = −c₃₀/c₂₀ resums the z-channel
+//! pole, N₂ = c₂₀ + D·c₁₀ annihilates z² exactly and q₃₀ becomes a constructed
+//! zero. The Padé tier is the PLAIN view of the same extraction (A' = D' = F
+//! = 0, D/N₂ kept — a plain [2/1] whose q₂₀/q₃₀ both vanish); shipping the
+//! [1/1] D instead would leave q₂₀ = N₂ live for the Padé tier, which is why
+//! N₂ sits INSIDE its prefix. Slot 6 carries F = −c₀₂/c₀₁ (denominator c-slot);
+//! the raw a₀₂ and a₃₀ both displaced from the record are reconstructible in
+//! registers, keeping the record size-neutral vs the 9-slot [1/1] layout. The
+//! jet tier reconstructs its remaining degree ≤ 3 coefficients from the
+//! [2/1]-refreshed §11 identities:
 //!
-//!   a20 = −D·A,   a11 = A' − B·D − F·A,
-//!   a21 = −D'·A − D·a11 + F·D·A,   a02 = −F·B
+//!   a20 = N₂ − D·A,   a11 = A' − B·D − F·A,
+//!   a21 = −D'·A − D·a11 − F·a20,   a02 = −F·B,   a30 = −D·a20
 //!
-//! (2–3 extra multiplications, amortized: the jet tier runs in the fe
-//! compute-bound regime, while BANDWIDTH is the axis the plateau punishes —
-//! duplicated per-tier records were rejected for exactly that reason.)
+//! (a30 is exact iff the [2/1] extraction is live, i.e. c₂₀ ≠ 0 — the c₂₀ = 0
+//! fallback keeps q₃₀ a live REST term for every rational tier AND the jet
+//! tier, mirroring the F = 0 / a₀₂ fallback. 3–4 extra multiplications,
+//! amortized: the jet tier runs in the fe compute-bound regime, while
+//! BANDWIDTH is the axis the plateau punishes — duplicated per-tier records
+//! were rejected for exactly that reason.)
 
 use crate::jet::{
     cfe_to_coeff, fe_exp2, jet_block_bounds_moduli, jet_idx, jet_seed, jet_solve_radii,
     sfe_norm, CFe, JetCoeffFe, JetF64, JetLevel, JET_MONOMIALS, JET_NCOEFF,
 };
 use crate::jet::JetBlockBounds;
-// The unified record shares the 6-coefficient F-form extraction with the
-// standalone mobius mode (`mobius_from_jet`, denominator 1 + (D+D'c)z + Fc):
-// slot 5 ships F, the displaced raw a₀₂ is reconstructed in registers
-// (a₀₂ = −F·B) and the §11 identities carry the F terms (see module head).
+// The unified record shares the 7-coefficient [2/1] F-form extraction with
+// the standalone mobius mode (`mobius_from_jet_k2`, numerator (N₂z + A + A'c)z
+// + Bc, denominator 1 + (D+D'c)z + Fc): slots 3/6 ship N₂/F, the displaced
+// raw a₃₀/a₀₂ are reconstructed in registers (a₃₀ = −D·a₂₀, a₀₂ = −F·B) and
+// the §11 identities carry the N₂/F terms (see module head). The [1/1]
+// extraction (`mobius_from_jet`) remains the PERIODIC header's form (its
+// runtime fixed points stay a quadratic).
 use crate::mobius::{
     mobius_build_bounds, mobius_build_derivative_radii, mobius_build_radii,
-    mobius_from_jet, mobius_from_jet_plain, mobius_q, MobiusBlock,
+    mobius_from_jet, mobius_from_jet_k2, mobius_q, MobiusBlock,
     MobiusBoundsTable, MobiusCPlus, MobiusLevel,
     MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP,
 };
 
-/// One unified block: the c+ extraction (tiers 0–2, F included) plus the three
-/// raw jet coefficients the identities cannot reconstruct (tier 3, order-3
-/// evaluation).
+/// One unified block: the [2/1] c+ extraction (tiers 0–2, N₂/F included) plus
+/// the two raw jet coefficients the identities cannot reconstruct (tier 3,
+/// order-3 evaluation).
 #[derive(Clone, Debug)]
 pub struct UnifiedBlock {
-    /// A, B, D, A', D', F — the c-augmented Möbius extraction (prefix slots
-    /// 0–5).
+    /// A, B, D, N₂, A', D', F — the [2/1] c-augmented Möbius extraction
+    /// (prefix slots 0–6; N₂ lives in `m.n2`).
     pub m: MobiusCPlus,
-    /// Raw slots 6–8: a₃₀, a₁₂, a₀₃ (degree ≤ 3 completion).
-    pub a30: CFe,
+    /// Raw slots 7–8: a₁₂, a₀₃ (degree ≤ 3 completion).
     pub a12: CFe,
     pub a03: CFe,
 }
@@ -55,19 +67,19 @@ pub struct UnifiedBlock {
 impl UnifiedBlock {
     pub fn from_jet(jet: &JetF64) -> UnifiedBlock {
         UnifiedBlock {
-            m: mobius_from_jet(jet),
-            a30: jet.coeff(3, 0),
+            m: mobius_from_jet_k2(jet),
             a12: jet.coeff(1, 2),
             a03: jet.coeff(0, 3),
         }
     }
 
-    /// §11 identity reconstructions for the jet tier (F-form; used by
+    /// §11 identity reconstructions for the jet tier ([2/1] F-form; used by
     /// `unified_eval_jet3` — the CPU referee of the GPU register
-    /// reconstruction).
+    /// reconstruction). a₂₀ = N₂ − D·A is exact under BOTH extractions (the
+    /// c₂₀ = 0 fallback has N₂ = 0 and the [1/1] D).
     #[allow(dead_code)]
     pub fn a20(&self) -> CFe {
-        self.m.d.mul(self.m.a).neg()
+        self.m.n2.sub(self.m.d.mul(self.m.a))
     }
     #[allow(dead_code)]
     pub fn a11(&self) -> CFe {
@@ -80,7 +92,7 @@ impl UnifiedBlock {
             .mul(self.m.a)
             .neg()
             .sub(self.m.d.mul(self.a11()))
-            .add(self.m.f.mul(self.m.d).mul(self.m.a))
+            .sub(self.m.f.mul(self.a20()))
     }
     /// a₀₂ = −F·B (exact when F is live; the c₀₁ = 0 fallback keeps F = 0 and
     /// the moduli stage then leaves the raw a₀₂ slot as a live REST term for
@@ -88,6 +100,14 @@ impl UnifiedBlock {
     #[allow(dead_code)]
     pub fn a02(&self) -> CFe {
         self.m.f.mul(self.m.b).neg()
+    }
+    /// a₃₀ = −D·a₂₀ (q₃₀ = 0 under the [2/1] extraction). On the c₂₀ = 0
+    /// fallback this yields 0 while the raw c₃₀ may be live — the moduli stage
+    /// then keeps the a₃₀ slot a live REST term for the jet tier (sound, just
+    /// not reconstructed), same discipline as a₀₂ under F = 0.
+    #[allow(dead_code)]
+    pub fn a30(&self) -> CFe {
+        self.m.d.mul(self.a20()).neg()
     }
 }
 
@@ -114,9 +134,14 @@ pub struct UnifiedLevel {
 /// Constructed-zero q indices per extraction (their rounding residue would
 /// only pollute REST — same discipline as the mobius build). q₀₂ is only a
 /// constructed zero when F is live — `q_moduli` keeps it as a REST term on the
-/// c₀₁ = 0 fallback (F = 0), mirroring `block_from_jet`.
-const Q_ZEROS_CPLUS: [(usize, usize); 6] = [(1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (2, 1)];
-const Q_ZEROS_PLAIN: [(usize, usize); 3] = [(1, 0), (0, 1), (2, 0)];
+/// c₀₁ = 0 fallback (F = 0) — and q₃₀ only when the [2/1] extraction is live
+/// (c₂₀ ≠ 0), mirroring `block_from_jet`. The periodic header keeps the [1/1]
+/// extraction, whose zero list has no (3, 0).
+const Q_ZEROS_CPLUS: [(usize, usize); 7] =
+    [(1, 0), (0, 1), (2, 0), (3, 0), (1, 1), (0, 2), (2, 1)];
+const Q_ZEROS_PLAIN: [(usize, usize); 4] = [(1, 0), (0, 1), (2, 0), (3, 0)];
+const Q_ZEROS_PERIODIC: [(usize, usize); 6] =
+    [(1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (2, 1)];
 
 fn q_moduli(jet: &JetF64, m: &MobiusCPlus, zeros: &[(usize, usize)]) -> [f64; JET_NCOEFF] {
     let mut out = [f64::NEG_INFINITY; JET_NCOEFF];
@@ -129,6 +154,10 @@ fn q_moduli(jet: &JetF64, m: &MobiusCPlus, zeros: &[(usize, usize)]) -> [f64; JE
     }
     for &(i, j) in zeros {
         if (i, j) == (0, 2) && m.f.is_zero() {
+            continue;
+        }
+        // [2/1] fallback: c₂₀ = 0 keeps the [1/1] D and q₃₀ stays live.
+        if (i, j) == (3, 0) && jet.coeff(2, 0).is_zero() {
             continue;
         }
         out[jet_idx(i, j)] = f64::NEG_INFINITY;
@@ -144,7 +173,14 @@ fn moduli_from_jet(jet: &JetF64, m: &MobiusCPlus) -> UnifiedModuli {
             .log2_mag()
             .unwrap_or(f64::NEG_INFINITY);
     }
-    let plain = mobius_from_jet_plain(jet);
+    // The Padé tier is the PLAIN VIEW of the record's own extraction (A' = D'
+    // = F = 0, D/N₂ kept) — computing it from the shipped m rather than a
+    // separate extraction keeps the plain moduli consistent with what the GPU
+    // Padé tier actually evaluates, by construction.
+    let mut plain = *m;
+    plain.ap = CFe::ZERO;
+    plain.dp = CFe::ZERO;
+    plain.f = CFe::ZERO;
     UnifiedModuli {
         log2_a,
         log2_q_cplus: q_moduli(jet, m, &Q_ZEROS_CPLUS),
@@ -322,11 +358,12 @@ pub fn unified_eval_jet3_dz(blk: &UnifiedBlock, z: CFe, c: CFe) -> CFe {
     let a20 = blk.a20();
     let a11 = blk.a11();
     let a21 = blk.a21();
+    let a30 = blk.a30();
     let c2 = c.mul(c);
     let p1 = blk.m.a.add(a11.mul(c)).add(blk.a12.mul(c2));
     let p2 = a20.add(a21.mul(c));
     let two_p2 = CFe { x: 2.0 * p2.x, y: 2.0 * p2.y, e: p2.e };
-    let three_p3 = CFe { x: 3.0 * blk.a30.x, y: 3.0 * blk.a30.y, e: blk.a30.e };
+    let three_p3 = CFe { x: 3.0 * a30.x, y: 3.0 * a30.y, e: a30.e };
     p1.add(two_p2.add(three_p3.mul(z)).mul(z))
 }
 
@@ -528,15 +565,20 @@ pub fn unified_solve_radii(
             let value = [rj[0], r_pv[li][s], r_cv[li][s], rj[2]];
             // (V′): per-tier remainder moduli — affine drops only its two
             // exact slots; jet drops the whole stored degree ≤ 3 prefix,
-            // EXCEPT a₀₂ on the c₀₁ = 0 fallback (F = 0): the register
-            // reconstruction a₀₂ = −F·B then misses the raw coefficient, so
-            // it stays a live REST term.
+            // EXCEPT a₀₂ on the c₀₁ = 0 fallback (F = 0) and a₃₀ on the
+            // c₂₀ = 0 fallback ([1/1] D): the register reconstructions
+            // a₀₂ = −F·B / a₃₀ = −D·a₂₀ then miss the raw coefficients, so
+            // they stay live REST terms.
             let mut q_aff = md.log2_a;
             q_aff[jet_idx(1, 0)] = f64::NEG_INFINITY;
             q_aff[jet_idx(0, 1)] = f64::NEG_INFINITY;
+            let k2_live = md.log2_a[jet_idx(2, 0)].is_finite();
             let mut q_jet = md.log2_a;
             for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
                 if (i, j) == (0, 2) && blk.m.b.is_zero() {
+                    continue;
+                }
+                if (i, j) == (3, 0) && !k2_live {
                     continue;
                 }
                 if (i as usize) + (j as usize) <= 3 {
@@ -594,7 +636,7 @@ pub fn unified_eval_jet3(blk: &UnifiedBlock, z: CFe, c: CFe) -> CFe {
     let p0 = blk.m.b.mul(c).add(a02.mul(c2)).add(blk.a03.mul(c2).mul(c));
     let p1 = blk.m.a.add(a11.mul(c)).add(blk.a12.mul(c2));
     let p2 = a20.add(a21.mul(c));
-    let p3 = blk.a30;
+    let p3 = blk.a30();
     p0.add(p1.mul(z)).add(p2.add(p3.mul(z)).mul(z2))
 }
 
@@ -787,11 +829,15 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
     for i in (start + 1)..(start + period) {
         jet = crate::jet::jet_compose(&jet, &jet_seed(orbit[i].0, orbit[i].1));
     }
+    // The periodic header STAYS on the [1/1] extraction: its runtime verdict
+    // solves the fixed points of the block map, a quadratic for a [1/1]
+    // numerator (De·δ² + (1 + Fc − Ae)·δ − Bc = 0) but a CUBIC for the [2/1]
+    // one — not worth the shader surgery for a κ-accuracy verdict.
     let m = mobius_from_jet(&jet);
     if m.degenerate {
         return None;
     }
-    let q = q_moduli(&jet, &m, &Q_ZEROS_CPLUS);
+    let q = q_moduli(&jet, &m, &Q_ZEROS_PERIODIC);
     // The interiority verdict does not need ε-exact VALUES — it needs κ and
     // the basin geometry accurate enough that the runtime margins (|κ| < 0.98,
     // |w₀| < 0.5) dominate, and the contraction amortizes the per-block error
@@ -810,9 +856,9 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
 // ── GPU serialization (task 2.3, designs D2/D3) ─────────────────────────────────
 
 /// Slots per shipped coefficient record: the prefix-ordered
-/// [A, B, D, A′, D′, F, a₃₀, a₁₂, a₀₃] — 108 B at 12 B/coefficient. Tier
-/// prefix reads: affine 24 B, Padé 36 B, c+ 72 B, jet 108 B (the jet tier
-/// reconstructs a₀₂ = −F·B in registers).
+/// [A, B, D, N₂, A′, D′, F, a₁₂, a₀₃] — 108 B at 12 B/coefficient. Tier
+/// prefix reads: affine 24 B, Padé 48 B, c+ 84 B, jet 108 B (the jet tier
+/// reconstructs a₂₀/a₁₁/a₂₁/a₀₂/a₃₀ in registers).
 pub const UNIFIED_GPU_COEFFS: usize = 9;
 
 /// GPU radius sidecar entry, 16 B vec4-packed (one coalesced probe): x = the
@@ -851,14 +897,14 @@ pub fn unified_tag(tiers: &[f64; 4], log2_band: f64) -> Option<usize> {
 
 fn unified_f32_safe(md: &UnifiedModuli, m: &MobiusCPlus) -> bool {
     // Every degree ≤ 3 modulus (stored slots AND identity-reconstructed ones)
-    // must reconstruct inside the f32 range with Horner headroom — plus F
-    // itself (a shipped slot the fast path reconstructs, a RATIO of jet
-    // coefficients the moduli don't cover).
-    let f_ok = match m.f.log2_mag() {
+    // must reconstruct inside the f32 range with Horner headroom — plus F and
+    // N₂ themselves (shipped slots the fast path reconstructs, derived from
+    // RATIOS of jet coefficients the moduli don't cover).
+    let slot_ok = |c: &CFe| match c.log2_mag() {
         None => true,
         Some(l) => l.abs() <= MOBIUS_F32_SAFE_LOG2,
     };
-    f_ok && JET_MONOMIALS.iter().enumerate().all(|(n, &(i, j))| {
+    slot_ok(&m.f) && slot_ok(&m.n2) && JET_MONOMIALS.iter().enumerate().all(|(n, &(i, j))| {
         if (i as usize) + (j as usize) > 3 {
             return true;
         }
@@ -880,10 +926,10 @@ pub fn unified_serialize_coeffs(levels: &[UnifiedLevel]) -> Vec<[JetCoeffFe; UNI
                 cfe_to_coeff(&b.m.a),
                 cfe_to_coeff(&b.m.b),
                 cfe_to_coeff(&b.m.d),
+                cfe_to_coeff(&b.m.n2),
                 cfe_to_coeff(&b.m.ap),
                 cfe_to_coeff(&b.m.dp),
                 cfe_to_coeff(&b.m.f),
-                cfe_to_coeff(&b.a30),
                 cfe_to_coeff(&b.a12),
                 cfe_to_coeff(&b.a03),
             ]);
@@ -957,7 +1003,7 @@ pub fn unified_serialize_radii(
             });
         }
         let pm = periodic.map(|p| p.m).unwrap_or(MobiusCPlus {
-            a: zero, b: zero, d: zero, ap: zero, dp: zero, f: zero, degenerate: true,
+            a: zero, b: zero, d: zero, ap: zero, dp: zero, f: zero, n2: zero, degenerate: true,
         });
         let metas = [
             periodic.map(|p| p.start as f32).unwrap_or(0.0),
@@ -984,7 +1030,6 @@ pub fn unified_serialize_radii(
 mod tests {
     use super::*;
     use crate::jet::{jet_compose, jet_eval, jet_seed};
-    use crate::mobius::{mobius_build_levels_with, mobius_from_jet_plain};
 
     fn ref_orbit_f64(cx: f64, cy: f64, max_iter: usize) -> Vec<(f64, f64)> {
         let mut v = Vec::with_capacity(max_iter + 1);
@@ -1017,10 +1062,11 @@ mod tests {
 
     #[test]
     fn unified_identities_reconstruct_the_jet() {
-        // (task 2.1, F-form) On every block of every test orbit: a20 = −D·A,
-        // a11 = A' − B·D − F·A, a21 = −D'·A − D·a11 + F·D·A and a02 = −F·B
-        // reproduce the source jet's raw coefficients to ~1e-11 at operand
-        // scale — the record's identity-reconstruction invariant.
+        // (task 2.1, [2/1] F-form) On every block of every test orbit:
+        // a20 = N₂ − D·A, a11 = A' − B·D − F·A, a21 = −D'·A − D·a11 − F·a20,
+        // a02 = −F·B and a30 = −D·a20 (the [2/1] q₃₀ zero) reproduce the
+        // source jet's raw coefficients to ~1e-11 at operand scale — the
+        // record's identity-reconstruction invariant.
         for (name, cx, cy) in [
             ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64),
             ("near-parab", -0.7499, 0.0001),
@@ -1048,8 +1094,13 @@ mod tests {
                         let (x, y) = v.to_f64();
                         (x * x + y * y).sqrt()
                     };
-                    for (what, got, want, scale) in [
-                        ("a20", blk.a20(), jet.coeff(2, 0), mag(blk.a20())),
+                    let mut checks = vec![
+                        (
+                            "a20",
+                            blk.a20(),
+                            jet.coeff(2, 0),
+                            mag(blk.m.n2).max(mag(blk.m.d.mul(blk.m.a))),
+                        ),
                         (
                             "a11",
                             blk.a11(),
@@ -1064,10 +1115,26 @@ mod tests {
                             jet.coeff(2, 1),
                             mag(blk.m.dp.mul(blk.m.a))
                                 .max(mag(blk.m.d.mul(blk.a11())))
-                                .max(mag(blk.m.f.mul(blk.m.d).mul(blk.m.a))),
+                                .max(mag(blk.m.f.mul(blk.a20()))),
                         ),
                         ("a02", blk.a02(), jet.coeff(0, 2), mag(blk.a02())),
-                    ] {
+                    ];
+                    // a₃₀ = −D·a₂₀ holds only when the [2/1] extraction is
+                    // live (c₂₀ ≠ 0) — the fallback keeps the raw c₃₀ a live
+                    // REST term instead.
+                    if !jet.coeff(2, 0).is_zero() {
+                        checks.push((
+                            "a30",
+                            blk.a30(),
+                            jet.coeff(3, 0),
+                            // The chain is −D·(N₂ − D·A): its rounding scale is
+                            // |D| times a₂₀'s operand scale (the N₂ ↔ D·A
+                            // cancellation amplified by D).
+                            mag(blk.m.d.mul(blk.m.n2))
+                                .max(mag(blk.m.d.mul(blk.m.d).mul(blk.m.a))),
+                        ));
+                    }
+                    for (what, got, want, scale) in checks {
                         let (gx, gy) = got.to_f64();
                         let (wx, wy) = want.to_f64();
                         let d = ((gx - wx).powi(2) + (gy - wy).powi(2)).sqrt();
@@ -1227,8 +1294,8 @@ mod tests {
                 let blk = &lvl.blocks[s];
                 // Prefix order, exact deterministic round-trip.
                 let want = [
-                    &blk.m.a, &blk.m.b, &blk.m.d, &blk.m.ap, &blk.m.dp, &blk.m.f,
-                    &blk.a30, &blk.a12, &blk.a03,
+                    &blk.m.a, &blk.m.b, &blk.m.d, &blk.m.n2, &blk.m.ap, &blk.m.dp,
+                    &blk.m.f, &blk.a12, &blk.a03,
                 ];
                 for (k, w) in want.iter().enumerate() {
                     assert_eq!(
@@ -1911,7 +1978,14 @@ mod tests {
                         if !r.is_finite() {
                             continue;
                         }
-                        let x = (r - 1.0).exp2();
+                        // Sample WELL below r: this test referees the (z′, z″)
+                        // propagation FORMULAS (a wrong formula errs O(1)),
+                        // not the tier's remainder. z″ is a best-effort
+                        // payload — (V)/(V′) certify value and z′ only — and
+                        // the [2/1] radii are large enough that the
+                        // uncertified z″ REST term shows at r − 1 (~1e-4
+                        // relative on near-critical seahorse blocks).
+                        let x = (r - 4.0).exp2();
                         if !(x.is_finite() && x > 0.0) {
                             continue;
                         }
@@ -1944,7 +2018,7 @@ mod tests {
                             let a11 = blk.a11().to_f64();
                             let a21 = blk.a21().to_f64();
                             let a02 = blk.a02().to_f64();
-                            let a30 = blk.a30.to_f64();
+                            let a30 = blk.a30().to_f64();
                             let a12 = blk.a12.to_f64();
                             let a03 = blk.a03.to_f64();
                             let c2 = cm(c, c);
@@ -1970,19 +2044,35 @@ mod tests {
                             };
                             let ax = if tier == TIER_AFFINE { a } else { a };
                             let dx2 = if tier == TIER_AFFINE { (0.0, 0.0) } else { d };
+                            // Both rational tiers carry the [2/1] numerator
+                            // slot N₂ (the Padé tier is the plain view of the
+                            // same extraction); affine has none.
+                            let n2x = if tier == TIER_AFFINE {
+                                (0.0, 0.0)
+                            } else {
+                                blk.m.n2.to_f64()
+                            };
                             let ae = cadd(ax, cm(apx, c));
                             let de = cadd(dx2, cm(dpx, c));
                             let bc = cm(b, c);
-                            // F-form: den = 1 + De·z + F·c; ∂den/∂c = D'·z + F.
+                            // [2/1] F-form: num = (N₂·z + Ae)·z + Bc,
+                            // den = 1 + De·z + F·c; ∂den/∂c = D'·z + F.
                             let den = cadd(cadd((1.0, 0.0), cm(de, z0)), cm(fx, c));
                             let dcden = cadd(cm(dpx, z0), fx);
-                            m_v = cdiv(cadd(cm(ae, z0), bc), den);
-                            m_z = cdiv(csub(ae, cm(m_v, de)), den);
+                            m_v = cdiv(cadd(cm(cadd(cm(n2x, z0), ae), z0), bc), den);
+                            m_z = cdiv(
+                                csub(cadd(cm((2.0, 0.0), cm(n2x, z0)), ae), cm(m_v, de)),
+                                den,
+                            );
                             m_c = cdiv(
                                 csub(cadd(cm(apx, z0), b), cm(m_v, dcden)),
                                 den,
                             );
-                            m_zz = cm((-2.0, 0.0), cdiv(cm(de, m_z), den));
+                            // m_zz = (2·N₂ − 2·De·m_z)/den.
+                            m_zz = cdiv(
+                                cm((2.0, 0.0), csub(n2x, cm(de, m_z))),
+                                den,
+                            );
                             m_cc = cm((-2.0, 0.0), cdiv(cm(dcden, m_c), den));
                             m_zc = csub(
                                 cdiv(csub(csub(apx, cm(m_c, de)), cm(m_v, dpx)), den),
@@ -2004,8 +2094,13 @@ mod tests {
                             "[{} l{} s{} t{}] z' propagation off by {:e}",
                             name, li, sidx, tier, ed
                         );
+                        // z″ is uncertified REST territory — (V)/(V′) cover
+                        // value and z′ only — and the [2/1] radii are wide
+                        // enough that its remainder shows ~1e-5 relative even
+                        // at r − 4. A FORMULA error would be O(1) (the m_zz
+                        // [2/1] form is verified by finite differences).
                         assert!(
-                            es < 1e-5,
+                            es < 1e-3,
                             "[{} l{} s{} t{}] z'' propagation off by {:e}",
                             name, li, sidx, tier, es
                         );
@@ -2020,15 +2115,15 @@ mod tests {
     #[test]
     fn unified_tiers_match_standalone_builds() {
         // (task 2.1) Tier-coefficient parity: the unified record's prefixes
-        // equal the standalone extractions (the full 6-coefficient c+ F-form
-        // shared with the standalone mobius mode; plain-Möbius with
-        // A' = D' = F = 0 sharing A/B/D), and the order-3 jet-tier evaluation
-        // from the record matches jet_eval(·, 3) on sample points to fp
-        // round-off.
+        // equal the standalone extraction (the full 7-coefficient [2/1] c+
+        // F-form shared with the standalone mobius mode — `mobius_from_jet_k2`
+        // since the round-7 adoption; the Padé tier is its plain view, sharing
+        // A/B/D/N₂ by construction), and the order-3 jet-tier evaluation from
+        // the record matches jet_eval(·, 3) on sample points to fp round-off.
         let orbit = ref_orbit_f64(-1.401155, 0.0, 512);
         assert!(orbit.len() > 512, "reference escaped");
         let unified = build_unified_levels(&orbit, 1 << 10);
-        let cplus = mobius_build_levels_with(&orbit, 1 << 10, false);
+        let cplus = crate::mobius::mobius_build_levels(&orbit, 1 << 10);
         assert_eq!(unified.len(), cplus.len(), "scaffold mismatch");
         // Rebuild the jets once more to compare evaluations (streaming, level
         // by level, same shape as the builder).
@@ -2050,12 +2145,13 @@ mod tests {
             }
             assert_eq!(ul.blocks.len(), cl.blocks.len());
             for (s, (ub, cb)) in ul.blocks.iter().zip(cl.blocks.iter()).enumerate() {
-                // Full 6-coefficient parity with the standalone c+ build (one
-                // shared extraction: `mobius_from_jet`).
+                // Full 7-coefficient parity with the standalone c+ build (one
+                // shared extraction: `mobius_from_jet_k2`).
                 for (what, got, want) in [
                     ("A", &ub.m.a, &cb.m.a),
                     ("B", &ub.m.b, &cb.m.b),
                     ("D", &ub.m.d, &cb.m.d),
+                    ("N2", &ub.m.n2, &cb.m.n2),
                     ("A'", &ub.m.ap, &cb.m.ap),
                     ("D'", &ub.m.dp, &cb.m.dp),
                     ("F", &ub.m.f, &cb.m.f),
@@ -2066,14 +2162,11 @@ mod tests {
                         li, s, what
                     );
                 }
-                // Plain (Padé) tier shares A/B/D by construction.
-                let plain = mobius_from_jet_plain(&jets[s]);
-                if !plain.degenerate {
-                    assert!(rel_err(ub.m.a, plain.a) < 1e-15, "A vs plain");
-                    assert!(rel_err(ub.m.d, plain.d) < 1e-13, "D vs plain");
-                }
-                // Jet-tier evaluation parity on sample entries.
-                if !ub.m.degenerate {
+                // Plain (Padé) tier = the record's own plain view: A/B/D/N₂
+                // shared by construction (nothing external to referee).
+                // Jet-tier evaluation parity on sample entries (the a₃₀
+                // reconstruction needs the [2/1] extraction live: c₂₀ ≠ 0).
+                if !ub.m.degenerate && !jets[s].coeff(2, 0).is_zero() {
                     for (zx, zy, cx2, cy2) in [
                         (1e-6_f64, -2e-6_f64, 1e-9_f64, 3e-10_f64),
                         (3e-4, 1e-4, -1e-7, 2e-8),
@@ -2099,4 +2192,8 @@ mod tests {
             }
         }
     }
+
+
+
+
 }

@@ -92,9 +92,9 @@ type BlaReadyResponse = {
     // 'jet': coefficient records (27 floats each) in `steps` + a separate radius
     // buffer (4 floats each, vec4-packed) in `radii` — the split "buffer de
     // rayons" so a radius re-solve re-uploads only the small array.
-    // 'mobius': Möbius-c+ coefficient records (18 floats each: 6 × (x, y,
-    // e-as-i32-bits) — [A, B, A', D, D', F]) in `steps` + the same 4-float
-    // vec4 radius sidecar.
+    // 'mobius': Möbius-c+ coefficient records (21 floats each: 7 × (x, y,
+    // e-as-i32-bits) — [A, B, A', D, D', F, N₂], the [2/1]-c+ form) in
+    // `steps` + the same 4-float vec4 radius sidecar.
     // 'unified': prefix-ordered records (27 floats each: 9 × (x, y,
     // e-as-i32-bits) — [A, B, D, A', D', a02, a30, a12, a03]) in `steps` +
     // the tagged-radius sidecar (4 floats: r, tag, f32safe, spare).
@@ -324,7 +324,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
 
     // Strides must match the Rust #[repr(C)] JetCoeffs / MobiusCoeffs /
     // JetRadii / MobiusRadius and Engine's *_FLOATS constants.
-    const coeffFloats = isMobius ? 18 : 27
+    const coeffFloats = isMobius ? 21 : 27
     const stepsSource = new Float32Array(wasmMemory.buffer, info.coeffs_ptr, info.coeffs_count * coeffFloats)
     const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
     steps.set(stepsSource)

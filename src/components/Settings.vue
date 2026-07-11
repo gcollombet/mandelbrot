@@ -389,7 +389,78 @@ const debugViewOptions = [
   { label: 'Skip', value: 2 },
   { label: 'Mix', value: 3 },
   { label: 'Probes', value: 4 },
+  { label: 'Tier', value: 5 },
 ];
+
+// Color scales for the debug view legend — kept in sync by hand with
+// mandelbrot_debug.wgsl's heat()/skip_ramp()/TIER_COLOR_* (WGSL can't be
+// imported here). Gradient stops sample the same functions at fixed t;
+// the tier swatches are literal copies of the shader's flat constants.
+function heatColor(t: number): string {
+  const x = Math.min(1, Math.max(0, t));
+  const r = Math.min(1, Math.max(0, 2.2 * x - 0.1));
+  const g = Math.min(1, Math.max(0, 2.0 * x - 0.75));
+  const b = x < 0.4
+    ? Math.min(1, Math.max(0, 0.4 + 1.2 * x))
+    : Math.min(1, Math.max(0, 2.2 - 3.2 * x));
+  return `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
+}
+function heatGradient(steps = 10): string {
+  const stops = Array.from({ length: steps + 1 }, (_, i) => {
+    const t = i / steps;
+    return `${heatColor(t)} ${(t * 100).toFixed(1)}%`;
+  });
+  return `linear-gradient(90deg, ${stops.join(', ')})`;
+}
+const skipRampGradient = 'linear-gradient(90deg, '
+  + 'rgb(26, 38, 179) 0%, rgb(0, 179, 230) 25%, '
+  + 'rgb(26, 204, 51) 50%, rgb(255, 230, 26) 75%, rgb(230, 26, 26) 100%)';
+const debugViewLegends: Record<number, {
+  kind: 'gradient' | 'swatches';
+  gradient?: string;
+  ticks?: string[];
+  note?: string;
+  swatches?: { color: string; label: string }[];
+}> = {
+  1: {
+    kind: 'gradient',
+    gradient: heatGradient(),
+    ticks: ['1 tour', '~316 tours', '100k+ tours (plafond)'],
+    note: 'Chaleur = nombre de tours de boucle par pixel (échelle log). Où part le temps GPU.',
+  },
+  2: {
+    kind: 'gradient',
+    gradient: skipRampGradient,
+    ticks: ['1 (aucun saut)', '32 px/tour', '1024+ px/tour'],
+    note: 'Longueur moyenne des blocs appliqués (itérations couvertes / tour), échelle log2.',
+  },
+  3: {
+    kind: 'swatches',
+    swatches: [
+      { color: 'rgb(255, 60, 60)', label: 'Exact (perturbation pure)' },
+      { color: 'rgb(60, 255, 60)', label: 'Ordre 1 (affine / linéaire)' },
+      { color: 'rgb(60, 60, 255)', label: 'Ordre 2-3 (rationnel / jet)' },
+    ],
+    note: 'Composition RVB : part des itérations couvertes par chaque ordre (mélange par pixel).',
+  },
+  4: {
+    kind: 'gradient',
+    gradient: heatGradient(),
+    ticks: ['0 probe/tour', '4 probes/tour', '8+ probes/tour'],
+    note: 'Chaleur = sondes de table par tour de boucle (surcoût de recherche). Élevé = table mal adaptée.',
+  },
+  5: {
+    kind: 'swatches',
+    swatches: [
+      { color: 'rgb(140, 140, 140)', label: 'Exact (perturbation pure)' },
+      { color: 'rgb(64, 140, 242)', label: 'Affine / Padé (ordre 1)' },
+      { color: 'rgb(64, 217, 89)', label: 'Möbius c+ (ordre 2)' },
+      { color: 'rgb(242, 153, 38)', label: 'Jet (ordre 3)' },
+    ],
+    note: 'Couleur plate = tier dominant par pixel (le plus utile en mode Auto).',
+  },
+};
+const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);
 // Primary control (post 2.8 ship gate): Auto = unified per-block dispatch,
 // Exact = pure perturbation. Legacy single modes live in the debug section as
 // overrides (same model field, so presets carrying them keep working).
@@ -2916,7 +2987,9 @@ async function importSkyboxTexture(event: Event) {
         <!-- Block-skipping diagnostic overlay (mandelbrot_debug.wgsl): renders an
              instrumented recompute as colors. Cout = loop turns heat, Skip =
              average applied block length, Mix = exact/low/high-order iteration
-             composition (RGB), Probes = table probes per turn. -->
+             composition (RGB), Probes = table probes per turn, Tier = dominant
+             algorithm per pixel (flat swatch, most useful in Auto mode). The
+             legend below mirrors the shader's palettes (debugViewLegends). -->
         <div class="fields" v-if="model.approximationMode !== 'perturbation'">
           <DenseSelect
             label="Debug view"
@@ -2924,6 +2997,19 @@ async function importSkyboxTexture(event: Event) {
             :model-value="model.debugView ?? 0"
             @update:model-value="(v: string | number) => model.debugView = Number(v)"
           />
+        </div>
+
+        <div v-if="model.approximationMode !== 'perturbation' && debugViewLegend" class="dbgview-legend">
+          <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-bar" :style="{ background: debugViewLegend.gradient }"></div>
+          <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-ticks">
+            <span v-for="tick in debugViewLegend.ticks" :key="tick">{{ tick }}</span>
+          </div>
+          <div v-if="debugViewLegend.kind === 'swatches'" class="dbgview-legend-swatches">
+            <span v-for="sw in debugViewLegend.swatches" :key="sw.label" class="dbgview-legend-swatch">
+              <i :style="{ background: sw.color }"></i>{{ sw.label }}
+            </span>
+          </div>
+          <p class="dbgview-legend-note">{{ debugViewLegend.note }}</p>
         </div>
 
         <!-- Legacy single-mode override (debug): forces one tier's standalone
@@ -5009,5 +5095,49 @@ async function importSkyboxTexture(event: Event) {
   .cv-body .transfer {
     flex-wrap: wrap;
   }
+}
+
+.dbgview-legend {
+  margin: -4px 0 2px;
+  padding: 8px 10px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: var(--panel-2);
+}
+.dbgview-legend-bar {
+  height: 10px;
+  border-radius: 5px;
+}
+.dbgview-legend-ticks {
+  display: flex;
+  justify-content: space-between;
+  margin-top: 4px;
+  font-family: var(--mono);
+  font-size: 10px;
+  color: var(--ink-2);
+}
+.dbgview-legend-swatches {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 14px;
+}
+.dbgview-legend-swatch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  color: var(--ink);
+}
+.dbgview-legend-swatch i {
+  width: 11px;
+  height: 11px;
+  border-radius: 3px;
+  flex: none;
+}
+.dbgview-legend-note {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--ink-2);
 }
 </style>

@@ -13,6 +13,9 @@
 //                 jet: G = order 1, B = orders 2-3. Padé: B. BLA: G.
 //   4 "probes"  — heat: table probes per loop turn (lookup overhead — this is
 //                 the one that shows a dead/ill-fitting table burning time).
+//   5 "tier"    — flat swatch: which tier covered the most iterations on this
+//                 pixel (exact / affine·Padé / Möbius c+ / jet), most useful
+//                 in unified (Auto) mode to see which algorithm was picked.
 
 struct MandelbrotStep { zx: f32, zy: f32 };
 
@@ -39,12 +42,13 @@ struct JetCoeff { x: f32, y: f32, e: i32 };
 // (x=r1, y=r2, z=r3, w=pad: one coalesced 16 B load per probe); coefficients
 // read only on apply. Same flat block index.
 struct JetRadii { v: vec4<f32> };
-// Flat coefficient buffer shared by jet (stride 9) and Möbius-c+ (stride 6,
-// order A, B, A', D, D', F) — exclusive modes, identical 12 B element.
+// Flat coefficient buffer shared by jet (stride 9) and Möbius-c+ (stride 7,
+// order A, B, A', D, D', F, N₂ — the [2/1]-c+ form) — exclusive modes,
+// identical 12 B element.
 const JET_COEFF_STRIDE: i32 = 9;
-const MOBIUS_COEFF_STRIDE: i32 = 6;
-// Unified table (mode 5): 9 elements in PREFIX order [A, B, D, A', D', a02,
-// a30, a12, a03] — tier-directed prefix reads (production parity).
+const MOBIUS_COEFF_STRIDE: i32 = 7;
+// Unified table (mode 5): 9 elements in PREFIX order [A, B, D, N₂, A', D', F,
+// a12, a03] ([2/1] record) — tier-directed prefix reads (production parity).
 const UNIFIED_COEFF_STRIDE: i32 = 9;
 // Register budget for the hoisted per-level maxR3 gates (production parity).
 const JET_MAX_LEVELS = 32;
@@ -321,6 +325,7 @@ fn dbg_try_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, dc: fe, maxI
             let cd  = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
             let cdp = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
             let cf  = jet_coeff_f32(mandelbrotJetSuite[base + 5]);
+            let cn2 = jet_coeff_f32(mandelbrotJetSuite[base + 6]);
             let dzF = fe_to_vec(*dz);
             let ae = ca + cmul(cap, dcF);
             let de = cd + cmul(cdp, dcF);
@@ -328,7 +333,7 @@ fn dbg_try_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, dc: fe, maxI
             if (MOBIUS_PARANOIA_GUARD && dot(den, den) < MOBIUS_DEN_GUARD2) {
               denOk = false;
             } else {
-              phi = fe_from_vec(cmul(cmul(ae, dzF) + cmul(cb, dcF), cinv(den)), 0);
+              phi = fe_from_vec(cmul(cmul(cmul(cn2, dzF) + ae, dzF) + cmul(cb, dcF), cinv(den)), 0);
             }
           } else {
             let ca  = jet_coeff_fe(mandelbrotJetSuite[base]);
@@ -337,13 +342,14 @@ fn dbg_try_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, dc: fe, maxI
             let cd  = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
             let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
             let cf  = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+            let cn2 = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
             let ae = fe_add(ca, fe_cmul(cap, dc));
             let de = fe_add(cd, fe_cmul(cdp, dc));
             let den = fe_add(fe_add(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz)), fe_cmul(cf, dc));
             if (MOBIUS_PARANOIA_GUARD && (den.e < -10 || (den.e < 5 && dot(fe_to_vec(den), fe_to_vec(den)) < MOBIUS_DEN_GUARD2))) {
               denOk = false;
             } else {
-              phi = fe_cmul(fe_add(fe_cmul(ae, *dz), fe_cmul(cb, dc)), fe_cinv(den));
+              phi = fe_cmul(fe_add(fe_cmul(fe_add(fe_cmul(cn2, *dz), ae), *dz), fe_cmul(cb, dc)), fe_cinv(den));
             }
           }
           if (denOk) {
@@ -398,18 +404,19 @@ fn dbg_try_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, dc: fe, dc2
             } else {
               var ae = ca;
               var de = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
+              let cn2F = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
               var cfF = vec2<f32>(0.0);
               if (tag == 2) {
-                ae = ca + cmul(jet_coeff_f32(mandelbrotJetSuite[base + 3]), dcF);
-                de = de + cmul(jet_coeff_f32(mandelbrotJetSuite[base + 4]), dcF);
-                cfF = jet_coeff_f32(mandelbrotJetSuite[base + 5]);
+                ae = ca + cmul(jet_coeff_f32(mandelbrotJetSuite[base + 4]), dcF);
+                de = de + cmul(jet_coeff_f32(mandelbrotJetSuite[base + 5]), dcF);
+                cfF = jet_coeff_f32(mandelbrotJetSuite[base + 6]);
               }
-              // F-form: den = 1 + De·dz + F·dc.
+              // [2/1] F-form: num = (N₂·dz + Ae)·dz + B·dc; den = 1 + De·dz + F·dc.
               let den = vec2<f32>(1.0, 0.0) + cmul(de, dzF) + cmul(cfF, dcF);
               if (MOBIUS_PARANOIA_GUARD && dot(den, den) < MOBIUS_DEN_GUARD2) {
                 denOk = false;
               } else {
-                phi = fe_from_vec(cmul(cmul(ae, dzF) + cmul(cb, dcF), cinv(den)), 0);
+                phi = fe_from_vec(cmul(cmul(cmul(cn2F, dzF) + ae, dzF) + cmul(cb, dcF), cinv(den)), 0);
               }
             }
           } else {
@@ -419,34 +426,36 @@ fn dbg_try_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, dc: fe, dc2
               phi = fe_add(fe_cmul(ca, *dz), fe_cmul(cb, dc));
             } else if (tag <= 2) {
               let cd = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
+              let cn2 = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
               var ae = ca;
               var de = cd;
               var cf = fe(vec2<f32>(0.0), 0);
               if (tag == 2) {
-                ae = fe_add(ca, fe_cmul(jet_coeff_fe(mandelbrotJetSuite[base + 3]), dc));
-                de = fe_add(cd, fe_cmul(jet_coeff_fe(mandelbrotJetSuite[base + 4]), dc));
-                cf = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+                ae = fe_add(ca, fe_cmul(jet_coeff_fe(mandelbrotJetSuite[base + 4]), dc));
+                de = fe_add(cd, fe_cmul(jet_coeff_fe(mandelbrotJetSuite[base + 5]), dc));
+                cf = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
               }
-              // F-form: den = 1 + De·dz + F·dc.
+              // [2/1] F-form: num = (N₂·dz + Ae)·dz + B·dc; den = 1 + De·dz + F·dc.
               let den = fe_add3(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz), fe_cmul(cf, dc));
               if (MOBIUS_PARANOIA_GUARD && (den.e < -10 || (den.e < 5 && dot(fe_to_vec(den), fe_to_vec(den)) < MOBIUS_DEN_GUARD2))) {
                 denOk = false;
               } else {
-                phi = fe_cmul(fe_add(fe_cmul(ae, *dz), fe_cmul(cb, dc)), fe_cinv(den));
+                phi = fe_cmul(fe_add(fe_cmul(fe_add(fe_cmul(cn2, *dz), ae), *dz), fe_cmul(cb, dc)), fe_cinv(den));
               }
             } else {
-              // F-form identity reconstruction (see try_apply_unified).
+              // [2/1] F-form identity reconstruction (see try_apply_unified).
               let cd  = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
-              let cap = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
-              let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
-              let cf  = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
-              let a30 = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
+              let cn2 = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
+              let cap = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
+              let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+              let cf  = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
               let a12 = jet_coeff_fe(mandelbrotJetSuite[base + 7]);
               let a03 = jet_coeff_fe(mandelbrotJetSuite[base + 8]);
               let a02 = fe_neg(fe_cmul(cf, cb));
-              let a20 = fe_neg(fe_cmul(cd, ca));
+              let a20 = fe_add(cn2, fe_neg(fe_cmul(cd, ca)));
               let a11 = fe_add3(cap, fe_neg(fe_cmul(cb, cd)), fe_neg(fe_cmul(cf, ca)));
-              let a21 = fe_add3(fe_neg(fe_cmul(cdp, ca)), fe_neg(fe_cmul(cd, a11)), fe_cmul(fe_cmul(cf, cd), ca));
+              let a21 = fe_add3(fe_neg(fe_cmul(cdp, ca)), fe_neg(fe_cmul(cd, a11)), fe_neg(fe_cmul(cf, a20)));
+              let a30 = fe_neg(fe_cmul(cd, a20));
               let p0 = fe_add3(fe_cmul(cb, dc), fe_cmul(a02, dc2), fe_cmul(a03, dc3));
               let p1 = fe_add3(ca, fe_cmul(a11, dc), fe_cmul(a12, dc2));
               let p2 = fe_add(a20, fe_cmul(a21, dc));
@@ -488,6 +497,12 @@ fn skip_ramp(t: f32) -> vec3<f32> {
   if (x < 3.0) { return mix(vec3<f32>(0.1, 0.8, 0.2), vec3<f32>(1.0, 0.9, 0.1), x - 2.0); }
   return mix(vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(0.9, 0.1, 0.1), x - 3.0);
 }
+// Flat per-tier swatches for the "tier" view — kept in sync with the legend
+// rendered in Settings.vue (DEBUG_TIER_COLORS).
+const TIER_COLOR_EXACT: vec3<f32> = vec3<f32>(0.55, 0.55, 0.55);
+const TIER_COLOR_ORDER1: vec3<f32> = vec3<f32>(0.25, 0.55, 0.95);
+const TIER_COLOR_ORDER2: vec3<f32> = vec3<f32>(0.25, 0.85, 0.35);
+const TIER_COLOR_ORDER3: vec3<f32> = vec3<f32>(0.95, 0.6, 0.15);
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
@@ -601,9 +616,18 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   } else if (view == 3) {
     // Composition of covered iterations.
     rgb = vec3<f32>(f32(exactIters), f32(o1Iters), f32(o2Iters + o3Iters)) / fiters;
-  } else {
+  } else if (view == 4) {
     // Probes per turn (lookup overhead), mapped 0..8.
     rgb = heat(f32(probes) / fturns / 8.0);
+  } else {
+    // Tier: flat swatch for whichever tier covered the most iterations on
+    // this pixel (exact perturbation / affine·Padé / Möbius c+ / jet) —
+    // ties favour the higher (more expensive) tier.
+    var best = f32(exactIters);
+    rgb = TIER_COLOR_EXACT;
+    if (f32(o1Iters) >= best) { best = f32(o1Iters); rgb = TIER_COLOR_ORDER1; }
+    if (f32(o2Iters) >= best) { best = f32(o2Iters); rgb = TIER_COLOR_ORDER2; }
+    if (f32(o3Iters) >= best) { best = f32(o3Iters); rgb = TIER_COLOR_ORDER3; }
   }
   // Interior/budget-exhausted pixels: keep the metric but dim it so escape
   // structure stays readable.

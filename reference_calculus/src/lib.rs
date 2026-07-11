@@ -1453,7 +1453,7 @@ impl MandelbrotNavigator {
     }
 
     /// Build (or reuse) the Möbius-c+ table and expose the GPU buffers: a
-    /// coefficient buffer (`MobiusCoeffs`, 72 B/block), a radius sidecar
+    /// coefficient buffer (`MobiusCoeffs`, 84 B/block), a radius sidecar
     /// (`MobiusRadius`, 16 B vec4) and the level directory. The coefficient
     /// and radius arrays share the same flat block index.
     pub fn compute_mobius_reference(&mut self, max_iter: u32) -> MobiusBufferInfo {
@@ -1956,7 +1956,7 @@ pub struct UnifiedBufferInfo {
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct MobiusBufferInfo {
-    // Coefficient buffer: `MobiusCoeffs` records (72 B), orbit-keyed.
+    // Coefficient buffer: `MobiusCoeffs` records (84 B), orbit-keyed.
     pub coeffs_ptr: usize,
     pub coeffs_count: usize,
     // Radius sidecar: `MobiusRadius` records (16 B, vec4-packed), (ε, c_max)-keyed.

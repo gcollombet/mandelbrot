@@ -187,13 +187,15 @@ const JET_DER_EXP_FOLD: i32 = 16;
 // Block coefficient strides into the FLAT coefficient buffer (binding 8).
 // Jet records are 9 coefficients (108 B, degree-major: an order-k application
 // reads only the first k(k+3)/2 — slots 0/1 are the affine A/B); Möbius-c+
-// records are 5 (60 B: A, B, A', D, D'). Both tables ship in the SAME buffer
-// (identical 12 B element, exclusive modes) — the mode flag picks the stride.
-// Same flat block index as the radius buffer either way.
+// records are 7 (84 B: A, B, A', D, D', F, N₂ — the [2/1]-c+ form). Both
+// tables ship in the SAME buffer (identical 12 B element, exclusive modes) —
+// the mode flag picks the stride. Same flat block index as the radius buffer
+// either way.
 const JET_COEFF_STRIDE: i32 = 9;
-const MOBIUS_COEFF_STRIDE: i32 = 6;
-// Unified table (mode 5): 9 elements in PREFIX order [A, B, D, A', D', a02,
-// a30, a12, a03] — same element count as jet, tier-directed prefix reads.
+const MOBIUS_COEFF_STRIDE: i32 = 7;
+// Unified table (mode 5): 9 elements in PREFIX order [A, B, D, N₂, A', D', F,
+// a12, a03] ([2/1] record) — same element count as jet, tier-directed prefix
+// reads (affine 2, Padé 4, c+ 7, jet 9).
 const UNIFIED_COEFF_STRIDE: i32 = 9;
 
 // Level directory: maxR3 (log2) is the loosest top-order radius of the level —
@@ -1243,11 +1245,13 @@ fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<fun
 // m(z, c) = ((A + A'·c)·z + B·c) / (1 + (D + D'·c)·z + F·c): the Padé vehicle
 // plus three c-coefficients that annihilate the zc/z²c cross-terms guard (G)
 // exists for and the pure-c² term (F resums the pure-c channel — the shallow
-// cmax_c2 bind). ONE validity comparison log2|dz| < r per probed block — no
-// H2, no min_a, no beta·dcMag, no separate pole test (DEN > 0.5 is folded into
-// the certified radius). Records live in the jet coefficient buffer at stride
-// 6 (order A, B, A', D, D', F), radii in the same vec4 sidecar (x = r, y = the
-// f32-safe fast-path flag).
+// cmax_c2 bind), plus the N₂ numerator slot (round 7, [2/1]: D = −c₃₀/c₂₀
+// resums the z-channel pole — the §14 superconvergence). ONE validity
+// comparison log2|dz| < r per probed block — no H2, no min_a, no beta·dcMag,
+// no separate pole test (DEN > 0.5 is folded into the certified radius).
+// Records live in the jet coefficient buffer at stride 7 (order A, B, A', D,
+// D', F, N₂), radii in the same vec4 sidecar (x = r, y = the f32-safe
+// fast-path flag).
 
 fn fe_neg(a: fe) -> fe {
   return fe(-a.m, a.e);
@@ -1290,25 +1294,28 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
           var pdc: fe;
           var denOk = true;
           if (f32Ok && radii.y > 0.5 && log2_dz > -100.0) {
-            // Plain-f32 fast path: 6 ldexp reconstructions + the [1/1] form.
+            // Plain-f32 fast path: 7 ldexp reconstructions + the [2/1] form.
             let ca  = jet_coeff_f32(mandelbrotJetSuite[base]);
             let cb  = jet_coeff_f32(mandelbrotJetSuite[base + 1]);
             let cap = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
             let cd  = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
             let cdp = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
             let cf  = jet_coeff_f32(mandelbrotJetSuite[base + 5]);
+            let cn2 = jet_coeff_f32(mandelbrotJetSuite[base + 6]);
             let dzF = fe_to_vec(*dz);
             let ae = ca + cmul(cap, dcF);       // Ae = A + A'·dc
             let de = cd + cmul(cdp, dcF);       // De = D + D'·dc
+            let n2z = cmul(cn2, dzF);           // N₂·dz
             let den = vec2<f32>(1.0, 0.0) + cmul(de, dzF) + cmul(cf, dcF);
             if (MOBIUS_PARANOIA_GUARD && dot(den, den) < MOBIUS_DEN_GUARD2) {
               denOk = false;
             } else {
               let invDen = cinv(den);
-              let phiF = cmul(cmul(ae, dzF) + cmul(cb, dcF), invDen);
+              let phiF = cmul(cmul(n2z + ae, dzF) + cmul(cb, dcF), invDen);
               phi = fe_from_vec(phiF, 0);
-              // ∂m/∂z = (Ae − m·De)/den ; ∂m/∂c = (A'·z + B − m·(D'·z + F))/den
-              pdz = fe_from_vec(cmul(ae - cmul(phiF, de), invDen), 0);
+              // ∂m/∂z = (2N₂·z + Ae − m·De)/den ;
+              // ∂m/∂c = (A'·z + B − m·(D'·z + F))/den
+              pdz = fe_from_vec(cmul(2.0 * n2z + ae - cmul(phiF, de), invDen), 0);
               pdc = fe_from_vec(cmul(cmul(cap, dzF) + cb - cmul(phiF, cmul(cdp, dzF) + cf), invDen), 0);
             }
           } else {
@@ -1318,15 +1325,17 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
             let cd  = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
             let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
             let cf  = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+            let cn2 = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
             let ae = fe_add(ca, fe_cmul(cap, dc));
             let de = fe_add(cd, fe_cmul(cdp, dc));
+            let n2z = fe_cmul(cn2, *dz);
             let den = fe_add3(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz), fe_cmul(cf, dc));
             if (MOBIUS_PARANOIA_GUARD && (den.e < -10 || (den.e < 5 && fe_mag2_f32(den) < MOBIUS_DEN_GUARD2))) {
               denOk = false;
             } else {
               let invDen = fe_cinv(den);
-              phi = fe_cmul(fe_add(fe_cmul(ae, *dz), fe_cmul(cb, dc)), invDen);
-              pdz = fe_cmul(fe_add(ae, fe_neg(fe_cmul(phi, de))), invDen);
+              phi = fe_cmul(fe_add(fe_cmul(fe_add(n2z, ae), *dz), fe_cmul(cb, dc)), invDen);
+              pdz = fe_cmul(fe_add3(fe_scale(n2z, 2.0), ae, fe_neg(fe_cmul(phi, de))), invDen);
               pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, fe_add(fe_cmul(cdp, *dz), cf)))), invDen);
             }
           }
@@ -1362,12 +1371,14 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
 
 // ── unified block application (unify-jet-table-dispatch, task 2.6) ──────────
 // One sidecar probe (x = tagged tier's certified radius, y = tier tag,
-// z = f32-safe flag), then a TIER-DIRECTED prefix read of the 9-slot record
-// [A, B, D, A', D', a02, a30, a12, a03]: affine reads 2 slots, Padé 3, c+ 5,
-// jet all 9 (reconstructing a20 = −D·A, a11 = A' − B·D, a21 = −D'·A − D·a11 in
-// registers — the verified identities). Tags are block properties, so the
-// choice is warp-uniform. Rational tags (0-2) get the plain-f32 fast path;
-// the jet tag always evaluates in fe (deep is where it fires).
+// z = f32-safe flag), then a TIER-DIRECTED prefix read of the 9-slot [2/1]
+// record [A, B, D, N₂, A', D', F, a12, a03]: affine reads 2 slots, Padé 4
+// (the plain [2/1]), c+ 7, jet all 9 (reconstructing a20 = N₂ − D·A,
+// a11 = A' − B·D − F·A, a21 = −D'·A − D·a11 − F·a20, a02 = −F·B and
+// a30 = −D·a20 in registers — the verified identities). Tags are block
+// properties, so the choice is warp-uniform. Rational tags (0-2) get the
+// plain-f32 fast path; the jet tag always evaluates in fe (deep is where it
+// fires).
 fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
@@ -1413,32 +1424,35 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
             } else {
               var ae = ca;
               var de = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
+              let cn2F = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
               var capF = vec2<f32>(0.0);
               var cdpF = vec2<f32>(0.0);
               var cfF = vec2<f32>(0.0);
               if (tag == 2) {
-                capF = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
-                cdpF = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
-                cfF = jet_coeff_f32(mandelbrotJetSuite[base + 5]);
+                capF = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
+                cdpF = jet_coeff_f32(mandelbrotJetSuite[base + 5]);
+                cfF = jet_coeff_f32(mandelbrotJetSuite[base + 6]);
                 ae = ca + cmul(capF, dcF);
                 de = de + cmul(cdpF, dcF);
               }
-              // F-form: den = 1 + De·dz + F·dc; ∂den/∂c = D′·dz + F.
+              // [2/1] F-form: num = (N₂·dz + Ae)·dz + B·dc;
+              // den = 1 + De·dz + F·dc; ∂den/∂c = D′·dz + F.
               let den = vec2<f32>(1.0, 0.0) + cmul(de, dzF) + cmul(cfF, dcF);
               if (MOBIUS_PARANOIA_GUARD && dot(den, den) < MOBIUS_DEN_GUARD2) {
                 denOk = false;
               } else {
                 let invDen = cinv(den);
                 let dcdenF = cmul(cdpF, dzF) + cfF;
-                let phiF = cmul(cmul(ae, dzF) + cmul(cb, dcF), invDen);
+                let n2zF = cmul(cn2F, dzF);
+                let phiF = cmul(cmul(n2zF + ae, dzF) + cmul(cb, dcF), invDen);
                 phi = fe_from_vec(phiF, 0);
-                let mzF = cmul(ae - cmul(phiF, de), invDen);
+                let mzF = cmul(n2zF + n2zF + ae - cmul(phiF, de), invDen);
                 let mcF = cmul(cmul(capF, dzF) + cb - cmul(phiF, dcdenF), invDen);
                 pdz = fe_from_vec(mzF, 0);
                 pdc = fe_from_vec(mcF, 0);
-                // m_zz = −2·De·m_z/den ; m_cc = −2·(D′·z + F)·m_c/den ;
+                // m_zz = 2·(N₂ − De·m_z)/den ; m_cc = −2·(D′·z + F)·m_c/den ;
                 // m_zc = (A′ − m_c·De − φ·D′)/den − m_z·(D′·z + F)/den.
-                mzz = fe_from_vec(-2.0 * cmul(de, cmul(mzF, invDen)), 0);
+                mzz = fe_from_vec(2.0 * cmul(cn2F - cmul(de, mzF), invDen), 0);
                 mcc = fe_from_vec(-2.0 * cmul(dcdenF, cmul(mcF, invDen)), 0);
                 mzc = fe_from_vec(
                   cmul(capF - cmul(mcF, de) - cmul(phiF, cdpF), invDen)
@@ -1456,33 +1470,37 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               pdc = cb;
             } else if (tag <= 2) {
               let cd = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
+              let cn2 = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
               var ae = ca;
               var de = cd;
               var cap = fe(vec2<f32>(0.0), 0);
               var cdp = fe(vec2<f32>(0.0), 0);
               var cf = fe(vec2<f32>(0.0), 0);
               if (tag == 2) {
-                cap = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
-                cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
-                cf = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+                cap = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
+                cdp = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+                cf = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
                 ae = fe_add(ca, fe_cmul(cap, dc));
                 de = fe_add(cd, fe_cmul(cdp, dc));
               }
-              // F-form: den = 1 + De·dz + F·dc; ∂den/∂c = D′·dz + F.
+              // [2/1] F-form: num = (N₂·dz + Ae)·dz + B·dc;
+              // den = 1 + De·dz + F·dc; ∂den/∂c = D′·dz + F.
               let den = fe_add3(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(de, *dz), fe_cmul(cf, dc));
               if (MOBIUS_PARANOIA_GUARD && (den.e < -10 || (den.e < 5 && fe_mag2_f32(den) < MOBIUS_DEN_GUARD2))) {
                 denOk = false;
               } else {
                 let invDen = fe_cinv(den);
                 let dcden = fe_add(fe_cmul(cdp, *dz), cf);
-                phi = fe_cmul(fe_add(fe_cmul(ae, *dz), fe_cmul(cb, dc)), invDen);
-                pdz = fe_cmul(fe_add(ae, fe_neg(fe_cmul(phi, de))), invDen);
+                let n2z = fe_cmul(cn2, *dz);
+                phi = fe_cmul(fe_add(fe_cmul(fe_add(n2z, ae), *dz), fe_cmul(cb, dc)), invDen);
+                pdz = fe_cmul(fe_add3(fe_scale(n2z, 2.0), ae, fe_neg(fe_cmul(phi, de))), invDen);
                 if (tag == 2) {
                   pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, dcden))), invDen);
                 } else {
                   pdc = fe_cmul(cb, invDen);
                 }
-                mzz = fe_neg(fe_scale(fe_cmul(de, fe_cmul(pdz, invDen)), 2.0));
+                // m_zz = 2·(N₂ − De·m_z)/den.
+                mzz = fe_scale(fe_cmul(fe_add(cn2, fe_neg(fe_cmul(de, pdz))), invDen), 2.0);
                 mcc = fe_neg(fe_scale(fe_cmul(dcden, fe_cmul(pdc, invDen)), 2.0));
                 mzc = fe_add(
                   fe_cmul(fe_add3(cap, fe_neg(fe_cmul(pdc, de)), fe_neg(fe_cmul(phi, cdp))), invDen),
@@ -1490,21 +1508,22 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                 );
               }
             } else {
-              // Jet tier: full 108 B record, F-form identity reconstruction
-              // (a20 = −D·A, a11 = A′ − B·D − F·A, a21 = −D′·A − D·a11 + F·D·A,
-              // a02 = −F·B), order-3 Horner rows shared by the value and both
-              // partials.
+              // Jet tier: full 108 B record, [2/1] F-form identity
+              // reconstruction (a20 = N₂ − D·A, a11 = A′ − B·D − F·A,
+              // a21 = −D′·A − D·a11 − F·a20, a02 = −F·B, a30 = −D·a20),
+              // order-3 Horner rows shared by the value and both partials.
               let cd  = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
-              let cap = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
-              let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
-              let cf  = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
-              let a30 = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
+              let cn2 = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
+              let cap = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
+              let cdp = jet_coeff_fe(mandelbrotJetSuite[base + 5]);
+              let cf  = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
               let a12 = jet_coeff_fe(mandelbrotJetSuite[base + 7]);
               let a03 = jet_coeff_fe(mandelbrotJetSuite[base + 8]);
               let a02 = fe_neg(fe_cmul(cf, cb));
-              let a20 = fe_neg(fe_cmul(cd, ca));
+              let a20 = fe_add(cn2, fe_neg(fe_cmul(cd, ca)));
               let a11 = fe_add3(cap, fe_neg(fe_cmul(cb, cd)), fe_neg(fe_cmul(cf, ca)));
-              let a21 = fe_add3(fe_neg(fe_cmul(cdp, ca)), fe_neg(fe_cmul(cd, a11)), fe_cmul(fe_cmul(cf, cd), ca));
+              let a21 = fe_add3(fe_neg(fe_cmul(cdp, ca)), fe_neg(fe_cmul(cd, a11)), fe_neg(fe_cmul(cf, a20)));
+              let a30 = fe_neg(fe_cmul(cd, a20));
               let p0 = fe_add3(fe_cmul(cb, dc), fe_cmul(a02, dc2), fe_cmul(a03, dc3));
               let p1 = fe_add3(ca, fe_cmul(a11, dc), fe_cmul(a12, dc2));
               let p2 = fe_add(a20, fe_cmul(a21, dc));
