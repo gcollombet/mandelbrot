@@ -4,6 +4,9 @@ import LeanProofs.CPlus
 import LeanProofs.Bounds
 import LeanProofs.Cauchy
 import LeanProofs.Polydisc
+import LeanProofs.RationalCertificate
+import LeanProofs.PadeDominance
+import LeanProofs.ParabolicSuperconvergence
 import LeanProofs.Jets
 import LeanProofs.BivariateJets
 import LeanProofs.Periodic

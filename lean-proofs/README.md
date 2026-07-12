@@ -23,6 +23,15 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
   majorant par degré total et domination de la queue.
 - `Polydisc.lean` : estimation de Cauchy itérée, queue anisotrope exacte,
   branche diagonale stable, positivité et monotonie en chaque rayon.
+- `RationalCertificate.lean` : certificat résiduel générique `[2/1]-c⁺`,
+  spécialisation `[1/1]-c⁺`, marge de pôle, erreurs absolue et relative,
+  raccord au polydisque et règle radiale convexe.
+- `PadeDominance.lean` : dominance exacte du Padé `[1/1]` sur le jet affine,
+  sélecteur Padé/jet sans régression et caractérisation du résidu `[L/1]`
+  par les défauts d'une récurrence quasi géométrique.
+- `ParabolicSuperconvergence.lean` : flot parabolique exact, reste fermé de
+  tout jet polynomial, invariants de Hankel, gain Padé quantitatif et borne de
+  shadowing entre `z+z²` et le flot de Riccati.
 - `Jets.lean` : merge de degré 2, congruence de jets polynomiaux, récurrence
   pure-`c` et sensibilités.
 - `BivariateJets.lean` : troncature bivariée par degré total et preuve que la

@@ -1222,7 +1222,7 @@ export class Engine {
             return
         }
 
-        // ── blaReady — routed by refId, exactly like orbit chunks ──
+        // ── blaReady / radiiReady — routed by refId, exactly like orbit chunks ──
         // Stale-generation tables (built under pre-change ε/skip/gates/mode, in
         // flight when the setter was posted) are dropped in both branches: the
         // worker processes messages FIFO, so a build under the new params always
@@ -1231,7 +1231,14 @@ export class Engine {
             if (message.tableGeneration !== this.tableGeneration) {
                 return
             }
-            this.writeBlockTable(message)
+            if (message.type === 'radiiReady') {
+                // Radii-only re-solve: the GPU coefficient table is from the
+                // same build (worker guarantee) — rewrite just the sidecar +
+                // level directory.
+                this.writeRadiiSidecar(message.radii, message.levels, message.levelCount)
+            } else {
+                this.writeBlockTable(message)
+            }
             this.currentBlaLevelCount = message.levelCount
             this.referenceBlaReadyMaxIterations = message.maxIterations
             // A fresh block table changes what the debug overlay would draw
@@ -1240,7 +1247,7 @@ export class Engine {
             if (message.buildMs !== undefined) {
                 this.lastTableBuildMs = message.buildMs
                 this.lastTableBuildStages = message.buildStages ?? -1
-                console.log(`[REF] table landed: build ${message.buildMs.toFixed(0)}ms stages ${message.buildStages ?? -1} maxIter ${message.maxIterations}`)
+                console.log(`[REF] ${message.type === 'radiiReady' ? 'radii sidecar' : 'table'} landed: build ${message.buildMs.toFixed(0)}ms stages ${message.buildStages ?? -1} maxIter ${message.maxIterations}`)
             }
             this.isReferenceValidating = false
             if (this.pendingTableClear) {
@@ -1264,6 +1271,17 @@ export class Engine {
             }
         } else if (this.stagingRef && message.refId === this.stagingRef.refId) {
             if (message.tableGeneration !== this.tableGeneration) {
+                return
+            }
+            if (message.type === 'radiiReady') {
+                // Merge into the staged full table (its coefficients are from
+                // the same build); without one there is nothing to align with.
+                if (this.stagingRef.bla?.kind === 'unified') {
+                    this.stagingRef.bla.radii = message.radii
+                    this.stagingRef.bla.levels = message.levels
+                    this.stagingRef.bla.levelCount = message.levelCount
+                    this.stagingRef.bla.maxIterations = message.maxIterations
+                }
                 return
             }
             this.stagingRef.bla = {
@@ -1942,6 +1960,23 @@ export class Engine {
         }
         if (table.levels.length > 0 && this.mandelbrotBlaLevelBuffer) {
             this.device.queue.writeBuffer(this.mandelbrotBlaLevelBuffer, 0, table.levels, 0, table.levels.length)
+        }
+    }
+
+    /**
+     * Radii-only table update (unified `radiiReady`): rewrite the (ε, c_max)-
+     * keyed radius sidecar + level directory, leaving the orbit-keyed
+     * coefficient buffer untouched — the worker only sends this when the GPU
+     * coefficients are from the same build.
+     */
+    private writeRadiiSidecar(radii: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number) {
+        this.ensureJetRadiiBufferCapacity(Math.ceil(radii.length / 4))
+        this.ensureJetLevelBufferCapacity(levelCount)
+        if (radii.length > 0 && this.mandelbrotJetRadiiBuffer) {
+            this.device.queue.writeBuffer(this.mandelbrotJetRadiiBuffer, 0, radii, 0, radii.length)
+        }
+        if (levels.length > 0 && this.mandelbrotJetLevelBuffer) {
+            this.device.queue.writeBuffer(this.mandelbrotJetLevelBuffer, 0, levels, 0, levels.length)
         }
     }
 

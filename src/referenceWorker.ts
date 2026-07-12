@@ -134,6 +134,23 @@ type BlaReadyResponse = {
     tableGeneration: number
 }
 
+type RadiiReadyResponse = {
+    // Radii-only re-solve (unified, build stages == 4): the coefficient table
+    // last posted for this (refId, generation) is from the SAME build — only
+    // the (ε, c_max)-keyed radius sidecar + level directory ship (~1/8 of the
+    // full-table bytes; the win grows with depth as coefficients reach MBs).
+    type: 'radiiReady'
+    jobId: number
+    refId: number
+    maxIterations: number
+    radii: Float32Array<ArrayBuffer>
+    levels: Uint32Array<ArrayBuffer>
+    levelCount: number
+    buildMs?: number
+    buildStages?: number
+    tableGeneration: number
+}
+
 type ErrorResponse = {
     type: 'error'
     jobId: number
@@ -156,6 +173,7 @@ type MinibrotFoundResponse = {
 type ReferenceWorkerResponse =
     | OrbitChunkResponse
     | BlaReadyResponse
+    | RadiiReadyResponse
     | ErrorResponse
     | ReadyResponse
     | MinibrotFoundResponse
@@ -190,6 +208,11 @@ let currentRefId = 0
 // immediately (closed-form radii re-solve Rust-side, no orbit walk inside the
 // R_c headroom); ≥ 2 octaves below the rung re-posts for tightness only.
 let lastJetLog2CMax = Number.NaN
+// (refId, generation) of the last FULL unified table posted: a radii-only
+// re-solve (stages == 4) may then ship as `radiiReady` — the coefficient
+// buffer the Engine holds is from the same build (orbit stage warm).
+let lastFullTableRefId = -1
+let lastFullTableGeneration = -1
 
 const ORBIT_CHUNK_SIZE = 1000
 // Compute the reference orbit to HEADROOM× the display maxIter, so interactive zoom-in (which
@@ -254,6 +277,8 @@ function resetNavigator(message: ResetMessage) {
     navigator.set_max_bla_skip(message.maxBlaSkip)
     navigator.set_viewport_aspect(message.viewportAspect ?? Number.NaN)
     lastJetLog2CMax = navigator.current_log2_c_max()
+    lastFullTableRefId = -1
+    lastFullTableGeneration = -1
     void runComputeLoop(message.jobId)
 }
 
@@ -358,13 +383,6 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     const buildStages = isUnified ? navigator.unified_last_stages() : undefined
     console.log(`[REF worker] ${isMobius ? 'mobius' : isUnified ? 'unified' : 'jet'} table built in ${buildMs.toFixed(0)}ms (maxIter ${maxIterations}${buildStages !== undefined ? `, stages ${buildStages}` : ''})`)
 
-    // Strides must match the Rust #[repr(C)] JetCoeffs / MobiusCoeffs /
-    // JetRadii / MobiusRadius and Engine's *_FLOATS constants.
-    const coeffFloats = isMobius ? 21 : 27
-    const stepsSource = new Float32Array(wasmMemory.buffer, info.coeffs_ptr, info.coeffs_count * coeffFloats)
-    const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
-    steps.set(stepsSource)
-
     const radiiSource = new Float32Array(wasmMemory.buffer, info.radii_ptr, info.radii_count * 4)
     const radii: Float32Array<ArrayBuffer> = new Float32Array(radiiSource.length)
     radii.set(radiiSource)
@@ -374,6 +392,42 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     levels.set(levelsSource)
     lastBlaMaxIterations = maxIterations
 
+    // Radii-only re-solve against coefficients the Engine already holds from
+    // the SAME build (stages == 4 ⇒ the orbit stage stayed warm): skip the
+    // coefficient copy + upload — the sidecar is ~1/8 of the table, and the
+    // saving grows with depth (piste "radiiReady").
+    if (
+        isUnified
+        && buildStages === 4
+        && lastFullTableRefId === refId
+        && lastFullTableGeneration === tableGeneration
+    ) {
+        postResponse({
+            type: 'radiiReady',
+            jobId,
+            refId,
+            maxIterations,
+            radii,
+            levels,
+            levelCount: info.level_count,
+            buildMs,
+            buildStages,
+            tableGeneration,
+        }, [radii.buffer, levels.buffer])
+        return
+    }
+
+    // Strides must match the Rust #[repr(C)] JetCoeffs / MobiusCoeffs /
+    // JetRadii / MobiusRadius and Engine's *_FLOATS constants.
+    const coeffFloats = isMobius ? 21 : 27
+    const stepsSource = new Float32Array(wasmMemory.buffer, info.coeffs_ptr, info.coeffs_count * coeffFloats)
+    const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
+    steps.set(stepsSource)
+
+    if (isUnified) {
+        lastFullTableRefId = refId
+        lastFullTableGeneration = tableGeneration
+    }
     postResponse({
         type: 'blaReady',
         jobId,
