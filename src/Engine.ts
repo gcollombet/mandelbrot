@@ -245,6 +245,23 @@ type ReferenceWorkerResponse =
         tableGeneration: number
     }
     | {
+        // Radii-only re-solve (unified, build stages == 4): the coefficient
+        // table already on GPU is from the SAME build (orbit stage warm), so
+        // only the (ε, c_max)-keyed radius sidecar + level directory ship —
+        // ~1/8 of the full-table bytes, the dominant saving on deep-zoom
+        // re-posts where coefficients reach tens of MB.
+        type: 'radiiReady'
+        jobId: number
+        refId: number
+        maxIterations: number
+        radii: Float32Array<ArrayBuffer>
+        levels: Uint32Array<ArrayBuffer>
+        levelCount: number
+        buildMs?: number
+        buildStages?: number
+        tableGeneration: number
+    }
+    | {
         type: 'error'
         jobId: number
         message: string
