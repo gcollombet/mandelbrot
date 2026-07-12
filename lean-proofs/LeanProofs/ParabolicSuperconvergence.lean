@@ -33,6 +33,9 @@ variable {K : Type*} [Field K]
 /-- Time-`t` map of the parabolic Riccati flow `ż = z²`. -/
 def parabolicFlow (t z : K) : K := z / (1 - t * z)
 
+/-- The discrete parabolic germ to be compared with the flow. -/
+def parabolicDiscrete (z : K) : K := z + z ^ 2
+
 /-- Polynomial jet through degree `order` of the parabolic flow. -/
 def parabolicFlowJet (order : ℕ) (t z : K) : K :=
   z * ∑ n ∈ Finset.range order, (t * z) ^ n
@@ -86,6 +89,63 @@ theorem parabolicFlow_nat_succ
   symm
   simpa [Nat.cast_add, Nat.cast_one, add_comm] using
     parabolicFlow_add (1 : K) (n : K) z hn hst
+
+/-- The local discretization defect transported by the `m` remaining units
+of exact flow. -/
+def parabolicTransportDefect (m : ℕ) (z : K) : K :=
+  z ^ 3 /
+    ((1 - ((m + 1 : ℕ) : K) * z) *
+      (1 - (m : K) * parabolicDiscrete z))
+
+/-- Exact transported one-step defect.  Unlike a Lipschitz estimate, this
+keeps both remaining-time denominators without replacing them by a uniform
+worst case. -/
+theorem parabolicFlow_succ_sub_flow_discrete
+    (m : ℕ) (z : K)
+    (hnext : 1 - ((m + 1 : ℕ) : K) * z ≠ 0)
+    (hdisc : 1 - (m : K) * parabolicDiscrete z ≠ 0) :
+    parabolicFlow ((m + 1 : ℕ) : K) z -
+        parabolicFlow (m : K) (parabolicDiscrete z) =
+      parabolicTransportDefect m z := by
+  have hnext' : 1 - z * ((m + 1 : ℕ) : K) ≠ 0 := by
+    simpa [mul_comm] using hnext
+  have hdisc' : 1 - parabolicDiscrete z * (m : K) ≠ 0 := by
+    simpa [mul_comm] using hdisc
+  simp only [parabolicFlow, parabolicTransportDefect]
+  field_simp [hnext, hdisc, hnext', hdisc']
+  simp only [parabolicDiscrete]
+  push_cast
+  ring
+
+/-- Exact telescoping identity along an arbitrary discrete orbit. -/
+theorem parabolicFlow_sub_discrete_eq_sum_transport
+    (x : ℕ → K) (n : ℕ)
+    (hstep : ∀ j, x (j + 1) = parabolicDiscrete (x j))
+    (hnext : ∀ j, j < n →
+      1 - ((n - j : ℕ) : K) * x j ≠ 0)
+    (hdisc : ∀ j, j < n →
+      1 - ((n - j - 1 : ℕ) : K) * parabolicDiscrete (x j) ≠ 0) :
+    parabolicFlow (n : K) (x 0) - x n =
+      ∑ j ∈ Finset.range n,
+        parabolicTransportDefect (n - j - 1) (x j) := by
+  let H : ℕ → K := fun j => parabolicFlow ((n - j : ℕ) : K) (x j)
+  calc
+    parabolicFlow (n : K) (x 0) - x n = H 0 - H n := by
+      simp [H, parabolicFlow_zero]
+    _ = ∑ j ∈ Finset.range n, (H j - H (j + 1)) := by
+      symm
+      exact Finset.sum_range_sub' H n
+    _ = ∑ j ∈ Finset.range n,
+        parabolicTransportDefect (n - j - 1) (x j) := by
+      apply Finset.sum_congr rfl
+      intro j hj
+      have hjn : j < n := Finset.mem_range.mp hj
+      have htime1 : n - j = (n - j - 1) + 1 := by omega
+      have htime2 : n - (j + 1) = n - j - 1 := by omega
+      dsimp only [H]
+      rw [htime1, htime2, hstep j]
+      exact parabolicFlow_succ_sub_flow_discrete (n - j - 1) (x j)
+        (by rw [← htime1]; exact hnext j hjn) (hdisc j hjn)
 
 end Algebra
 
@@ -217,9 +277,6 @@ end QuantitativeTail
 
 section ComplexFlow
 
-/-- The discrete parabolic Mandelbrot germ. -/
-def parabolicDiscrete (z : ℂ) : ℂ := z + z ^ 2
-
 /-- The polynomial `[1/1]` evaluator with numerator `X` is exactly the
 parabolic time map. -/
 theorem padeL1_X_eq_parabolicFlow (t z : ℂ) :
@@ -259,6 +316,144 @@ theorem parabolic_den_lower
   have htri : 1 - ‖z‖ ≤ ‖1 - z‖ := by
     simpa using norm_sub_norm_le (1 : ℂ) z
   linarith
+
+/-- Denominator margin with an integer remaining time. -/
+theorem parabolic_nat_den_lower
+    (m : ℕ) (z : ℂ) (r : ℝ) (hz : ‖z‖ ≤ r) :
+    1 - (m : ℝ) * r ≤ ‖1 - (m : ℂ) * z‖ := by
+  have hreverse : 1 - ‖(m : ℂ) * z‖ ≤ ‖1 - (m : ℂ) * z‖ := by
+    simpa using norm_sub_norm_le (1 : ℂ) ((m : ℂ) * z)
+  have hreverse' : 1 - (m : ℝ) * ‖z‖ ≤ ‖1 - (m : ℂ) * z‖ := by
+    simpa [norm_mul] using hreverse
+  have hmul : (m : ℝ) * ‖z‖ ≤ (m : ℝ) * r :=
+    mul_le_mul_of_nonneg_left hz (Nat.cast_nonneg m)
+  exact le_trans (sub_le_sub_left hmul 1) hreverse'
+
+theorem norm_parabolicDiscrete_le
+    (z : ℂ) (r : ℝ) (hr : 0 ≤ r) (hz : ‖z‖ ≤ r) :
+    ‖parabolicDiscrete z‖ ≤ r + r ^ 2 := by
+  calc
+    ‖parabolicDiscrete z‖ ≤ ‖z‖ + ‖z ^ 2‖ := by
+      simpa only [parabolicDiscrete] using norm_add_le z (z ^ 2)
+    _ = ‖z‖ + ‖z‖ ^ 2 := by rw [norm_pow]
+    _ ≤ r + r ^ 2 := by nlinarith [norm_nonneg z]
+
+/-- Per-step majorant for the exactly transported defect. -/
+theorem norm_parabolicTransportDefect_le
+    (m : ℕ) (z : ℂ) (r : ℝ)
+    (hr : 0 ≤ r) (hz : ‖z‖ ≤ r)
+    (hmargin1 : 0 < 1 - (m + 1 : ℕ) * r)
+    (hmargin2 : 0 < 1 - (m : ℕ) * (r + r ^ 2)) :
+    ‖parabolicTransportDefect m z‖ ≤
+      r ^ 3 /
+        ((1 - (m + 1 : ℕ) * r) *
+          (1 - (m : ℕ) * (r + r ^ 2))) := by
+  have hzdisc := norm_parabolicDiscrete_le z r hr hz
+  have hden1 := parabolic_nat_den_lower (m + 1) z r hz
+  have hden2 := parabolic_nat_den_lower m (parabolicDiscrete z) (r + r ^ 2) hzdisc
+  have hprod :
+      (1 - (m + 1 : ℕ) * r) * (1 - (m : ℕ) * (r + r ^ 2)) ≤
+        ‖1 - ((m + 1 : ℕ) : ℂ) * z‖ *
+          ‖1 - (m : ℂ) * parabolicDiscrete z‖ := by
+    exact mul_le_mul hden1 hden2 hmargin2.le
+      (hmargin1.trans_le hden1).le
+  have hmargin : 0 <
+      (1 - (m + 1 : ℕ) * r) * (1 - (m : ℕ) * (r + r ^ 2)) :=
+    mul_pos hmargin1 hmargin2
+  have hz3 : ‖z‖ ^ 3 ≤ r ^ 3 := pow_le_pow_left₀ (norm_nonneg z) hz 3
+  simp only [parabolicTransportDefect, norm_div, norm_mul, norm_pow]
+  exact div_le_div₀ (pow_nonneg hr 3) hz3 hmargin hprod
+
+/-- Variable-radius majorant corresponding term by term to the exact
+telescoping identity. -/
+def parabolicVariableMajorant (n : ℕ) (r : ℕ → ℝ) : ℝ :=
+  ∑ j ∈ Finset.range n,
+    r j ^ 3 /
+      ((1 - (n - j : ℕ) * r j) *
+        (1 - (n - j - 1 : ℕ) * (r j + r j ^ 2)))
+
+/-- The scalar recurrence used by a builder really encloses the complex
+discrete orbit. -/
+theorem parabolic_radius_encloses_orbit
+    (x : ℕ → ℂ) (r : ℕ → ℝ)
+    (hstep : ∀ j, x (j + 1) = parabolicDiscrete (x j))
+    (hrstep : ∀ j, r (j + 1) = r j + r j ^ 2)
+    (hr : ∀ j, 0 ≤ r j) (hstart : ‖x 0‖ ≤ r 0) :
+    ∀ j, ‖x j‖ ≤ r j := by
+  intro j
+  induction j with
+  | zero => exact hstart
+  | succ j ih =>
+      rw [hstep j, hrstep j]
+      exact norm_parabolicDiscrete_le (x j) (r j) (hr j) ih
+
+/-- Sharpened shadowing bound with a separate orbit envelope at every step.
+There is no uniform geometric Lipschitz factor. -/
+theorem parabolic_discrete_shadowing_variable
+    (x : ℕ → ℂ) (r : ℕ → ℝ) (n : ℕ)
+    (hstep : ∀ j, x (j + 1) = parabolicDiscrete (x j))
+    (hr : ∀ j, j < n → 0 ≤ r j)
+    (hx : ∀ j, j < n → ‖x j‖ ≤ r j)
+    (hmargin1 : ∀ j, j < n → 0 < 1 - (n - j : ℕ) * r j)
+    (hmargin2 : ∀ j, j < n →
+      0 < 1 - (n - j - 1 : ℕ) * (r j + r j ^ 2)) :
+    ‖parabolicFlow (n : ℂ) (x 0) - x n‖ ≤
+      parabolicVariableMajorant n r := by
+  have hnext : ∀ j, j < n →
+      1 - ((n - j : ℕ) : ℂ) * x j ≠ 0 := by
+    intro j hj
+    apply norm_pos_iff.mp
+    exact (hmargin1 j hj).trans_le
+      (parabolic_nat_den_lower (n - j) (x j) (r j) (hx j hj))
+  have hdisc : ∀ j, j < n →
+      1 - ((n - j - 1 : ℕ) : ℂ) * parabolicDiscrete (x j) ≠ 0 := by
+    intro j hj
+    apply norm_pos_iff.mp
+    exact (hmargin2 j hj).trans_le
+      (parabolic_nat_den_lower (n - j - 1) (parabolicDiscrete (x j))
+        (r j + r j ^ 2) (norm_parabolicDiscrete_le (x j) (r j) (hr j hj) (hx j hj)))
+  rw [parabolicFlow_sub_discrete_eq_sum_transport x n hstep hnext hdisc]
+  calc
+    ‖∑ j ∈ Finset.range n, parabolicTransportDefect (n - j - 1) (x j)‖ ≤
+        ∑ j ∈ Finset.range n, ‖parabolicTransportDefect (n - j - 1) (x j)‖ :=
+      norm_sum_le _ _
+    _ ≤ ∑ j ∈ Finset.range n,
+        r j ^ 3 /
+          ((1 - (n - j : ℕ) * r j) *
+            (1 - (n - j - 1 : ℕ) * (r j + r j ^ 2))) := by
+      apply Finset.sum_le_sum
+      intro j hj
+      have hjn : j < n := Finset.mem_range.mp hj
+      have htime : n - j = (n - j - 1) + 1 := by omega
+      have hm1 : 0 < 1 - ((n - j - 1) + 1 : ℕ) * r j := by
+        rw [← htime]
+        exact hmargin1 j hjn
+      have hbound := norm_parabolicTransportDefect_le
+        (n - j - 1) (x j) (r j) (hr j hjn) (hx j hjn)
+        hm1 (hmargin2 j hjn)
+      rw [← htime] at hbound
+      exact hbound
+    _ = parabolicVariableMajorant n r := rfl
+
+/-- Builder-ready form: the radius recurrence itself discharges every orbit
+enclosure hypothesis of the variable shadowing theorem. -/
+theorem parabolic_discrete_shadowing_envelope
+    (x : ℕ → ℂ) (r : ℕ → ℝ) (n : ℕ)
+    (hstep : ∀ j, x (j + 1) = parabolicDiscrete (x j))
+    (hrstep : ∀ j, r (j + 1) = r j + r j ^ 2)
+    (hr : ∀ j, 0 ≤ r j) (hstart : ‖x 0‖ ≤ r 0)
+    (hmargin1 : ∀ j, j < n → 0 < 1 - (n - j : ℕ) * r j)
+    (hmargin2 : ∀ j, j < n →
+      0 < 1 - (n - j - 1 : ℕ) * (r j + r j ^ 2)) :
+    ‖parabolicFlow (n : ℂ) (x 0) - x n‖ ≤
+      parabolicVariableMajorant n r := by
+  apply parabolic_discrete_shadowing_variable x r n hstep
+  · intro j _
+    exact hr j
+  · intro j _
+    exact parabolic_radius_encloses_orbit x r hstep hrstep hr hstart j
+  · exact hmargin1
+  · exact hmargin2
 
 /-- Uniform local discretization error on `|z| ≤ r < 1`. -/
 theorem parabolic_local_error_le

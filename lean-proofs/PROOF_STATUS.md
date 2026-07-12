@@ -59,6 +59,13 @@ au runtime.
   discrète `z↦z+z²` à `z/(1-nz)`. Si les deux chemins restent dans `|z|≤r<1`,
   l'erreur après `n` pas est bornée par
   `(r³/(1-r)) * sum_(k<n) (1/(1-r)²)^k`.
+- Une version plus fine supprime ce facteur de Lipschitz uniforme.
+  `parabolicFlow_sub_discrete_eq_sum_transport` donne l'identité télescopique
+  exacte, terme par terme, avec le temps restant dans chaque dénominateur.
+  `parabolic_discrete_shadowing_variable` la majore avec des rayons distincts
+  `r_j`. Enfin `parabolic_discrete_shadowing_envelope` prouve que la simple
+  récurrence builder `r_(j+1)=r_j+r_j²` suffit à enclore l'orbite et à produire
+  le certificat variable complet, sous les deux marges de pôle explicites.
 
 Conséquence : une tolérance relative à la vraie carte doit employer le
 second rayon, plus petit. Substituer le premier change effectivement le
