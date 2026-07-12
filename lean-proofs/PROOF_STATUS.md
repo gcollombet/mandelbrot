@@ -73,6 +73,13 @@ pôle et son majorant sont différents.
   substitution dans un polynôme extérieur fixé. C'est le noyau algébrique de
   la propriété « tronquer l'entrée ne change pas les coefficients bas de la
   composée ».
+- La version réellement bivariée `TotalJetEq K`, indexée par les exposants de
+  `(z,c)` et filtrée par degré total, est stable par addition, produit,
+  puissance et pas quadratique.
+- `totalTrunc_step_commutes` prouve la commutation de la troncature avec un
+  pas ; `iterateTruncated_eq_totalTrunc_iterate` prouve par induction que
+  tronquer après chaque merge produit exactement le même jet final que
+  composer les polynômes finis complets puis tronquer une seule fois.
 - La récurrence de la série pure-`c` est prouvée coefficient par coefficient,
   notamment `b1' = a b1 + 1` et la convolution quadratique aux ordres suivants.
 - Les récurrences exactes de première et seconde sensibilité, ainsi que le
@@ -91,6 +98,27 @@ analytique exige encore un domaine et un reste certifiés.
   implique la validité sur tout l'intervalle.
 - La queue
   `Σ(k≥0) (D+k+1)θ^(D+k)` possède exactement la forme fermée annoncée.
+- Pour une fonction complexe différentiable sur un disque fermé, la série de
+  Cauchy représente la fonction sur le disque ouvert et son coefficient
+  d'ordre `n` est borné par `M/R^n` lorsque `M` borne la frontière.
+- Le regroupement bivarié par degré total est borné par
+  `(d+1) M theta^d`, et toute queue non négative dominée terme à terme est
+  bornée par la forme de Cauchy fermée.
+- L'estimation de Cauchy est itérée sur les deux cercles du bidisque et donne
+  `|a_ij| <= M Rz^-i Rc^-j` sous les hypothèses d'intégrabilité explicites.
+- La queue anisotrope exacte est prouvée :
+  `[u^(D+1)/(1-u)-v^(D+1)/(1-v)]/(u-v)` pour `u!=v`, avec la formule
+  historique en `theta` comme valeur diagonale amovible.
+- `anisotropicTailClosed` fournit une branche totale et numériquement sûre ;
+  sa positivité, sa monotonie séparée en `u,v` et sa domination par le cas
+  diagonal `theta >= max(u,v)` sont prouvées.
+- `iteratedCauchy_polydisc_tail_closed_le` relie bout en bout la borne sur la
+  frontière distinguée, les coefficients itérés, les tranches de degré total
+  et la queue infinie évaluée en `(x,y)`.
+- L'évaluation des applications multilinéaires sur les directions unité est
+  bornée par leur norme d'opérateur ;
+  `iteratedCauchyValue_polydisc_tail_closed_le` donne donc le même certificat
+  directement pour les coefficients de Taylor à valeurs complexes/vectorielles.
 - Une erreur récurrente constante est bornée par une somme géométrique, puis
   par `eps/(1-gamma)` sous contraction.
 - Une translation accumule au plus linéairement en `k`; la distorsion de la
@@ -111,11 +139,18 @@ bord ne suffit pas si l'intervalle admissible ne contient pas l'origine.
   l'itération `w_k=kappa^k w_0` sont prouvées.
 - La limite coalescente de Jordan
   `(lambda*(1+N))^k=lambda^k*(1+kN)` est prouvée lorsque `N²=0`.
+- Un domaine forward-invariant contient toute l'orbite exacte.
+- Si les orbites exacte et approchée restent dans ce domaine, si l'erreur de
+  modèle par bloc est `eps` et si le bloc est uniformément `gamma`-Lipschitz,
+  l'erreur est bornée par la somme géométrique puis uniformément par
+  `eps/(1-gamma)` lorsque `gamma<1`.
 
 Conséquence : le fast-forward par matrice `2x2` est justifié pour la forme
 `[1/1]`, y compris à la coalescence via Jordan. La forme `[2/1]`, bien que son
 équation de point fixe soit quadratique, n'est pas une transformation de
-Möbius et ne bénéficie pas de cette fermeture.
+Möbius et ne bénéficie pas de cette fermeture. La borne amortie demande bien
+une contraction uniforme et l'inclusion des deux chemins, pas seulement la
+valeur du multiplicateur au point fixe.
 
 ### Forme normale de Fatou
 
@@ -123,6 +158,9 @@ Möbius et ne bénéficie pas de cette fermeture.
 - Le reste rationnel après
   `t+1-(q-1)/t` est donné exactement.
 - Avec `rho=b/a²-1`, le terme dynamique est donc `-rho/t`.
+- Une translation approchée accumule son résidu linéairement. Sous une borne
+  de Lipschitz `L` de la carte de sortie sur le domaine certifié, l'erreur de
+  sortie est formellement bornée par `k L epsPsi`.
 
 Conséquence : sous cette convention, le premier terme logarithmique de la
 coordonnée de Fatou doit porter le signe `+rho log(t)`. Le signe opposé exige
@@ -132,14 +170,16 @@ la convention opposée `rho_alt=1-b/a²`.
 
 Les points suivants ne sont pas présentés comme certifiés par ce dossier :
 
-1. la clôture analytique bivariée complète des jets de séries infinies,
-   incluant simultanément la troncature des cartes intérieure et extérieure ;
-2. les estimations de Cauchy anisotropes sur un polydisque complexe et le lien
-   complet entre ces estimations, les coefficients stockés et `REST` ;
+1. le passage de la clôture bivariée maintenant prouvée pour les polynômes
+   finis à une formulation générique en séries formelles/analytique infinies ;
+2. le raccord entre l'hypothèse d'intégrabilité de la seconde section de
+   Cauchy, l'holomorphie conjointe du résidu polynomial `Q`, les coefficients
+   `REST` concrets du builder et la variante anisotrope de la queue `dQ/dz` ;
 3. le théorème d'erreur Mandelbrot global signalé comme incomplet dans la note
    source, ainsi que la preuve machine du solveur de rayon concret ;
-4. la contraction uniforme et l'invariance du domaine d'un bloc périodique ;
-   `|g'(zeta)|<1` au seul point fixe n'est pas une hypothèse suffisante ;
+4. la preuve que les tests runtime concrets impliquent les hypothèses
+   abstraites maintenant formalisées de contraction uniforme et d'invariance
+   du domaine pour chaque bloc périodique ;
 5. l'existence analytique des cartes sectorielles de Fatou, les données de
    corne, les branches de logarithme et une borne de Lipschitz de la carte de
    sortie ;
@@ -149,6 +189,6 @@ Les points suivants ne sont pas présentés comme certifiés par ce dossier :
    d'image, qui sont des résultats expérimentaux et non des théorèmes Lean.
 
 Ces obligations sont les prochaines candidates pertinentes. Les points 1 à 5
-demandent une couche d'analyse complexe et de séries formelles sensiblement
-plus lourde ; le point 6 demande un modèle d'arithmétique flottante et un audit
-du code concret.
+demandent désormais surtout de relier les structures analytiques abstraites aux
+données concrètes du builder et du runtime ; le point 6 demande un modèle
+d'arithmétique flottante et un audit du code concret.

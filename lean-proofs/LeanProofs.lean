@@ -2,6 +2,10 @@ import LeanProofs.Basic
 import LeanProofs.Algebra
 import LeanProofs.CPlus
 import LeanProofs.Bounds
+import LeanProofs.Cauchy
+import LeanProofs.Polydisc
 import LeanProofs.Jets
+import LeanProofs.BivariateJets
 import LeanProofs.Periodic
 import LeanProofs.Fatou
+import LeanProofs.Dynamics

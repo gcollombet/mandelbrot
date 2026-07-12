@@ -340,6 +340,11 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     }
 
     // Jet/mobius path: coefficient buffer + radius sidecar + level directory.
+    // NOTE: a header-first fast path exists Rust-side (compute_unified_header:
+    // SA + periodic behind an empty directory, ~2 ms — meant to arm the
+    // interior verdict ahead of the seconds-long cold build). Wiring it here
+    // coincided with a GPU hang on the first field run, so it ships UNPLUGGED
+    // until the hang is reproduced under a GPU debugger.
     const tableT0 = performance.now()
     const info = isMobius
         ? navigator.compute_mobius_reference(maxIterations)

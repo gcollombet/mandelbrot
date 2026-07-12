@@ -829,6 +829,25 @@ pub fn mobius_solve_derivative_radius(
     let rhs = epsilon.log2() - 1.0 + lse2(&[la, lap + log2_c_max]);
     let df = lf + log2_c_max;
     let den_f = if df > -80.0 { df.exp2() } else { 0.0 };
+    // Power-of-x rows (same precompute shape as MobiusVPre — this is what
+    // keeps the per-evaluation cost at a handful of exp2 instead of ten lse2):
+    // qpow[i] = Σ_j |q_ij|·c_max^j and qzpow[i−1] = Σ_j i·|q_ij|·c_max^j.
+    let mut qpow = [f64::NEG_INFINITY; JET_DS + 1];
+    let mut qzpow = [f64::NEG_INFINITY; JET_DS];
+    for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+        let l = blk.log2_q[n];
+        if !l.is_finite() {
+            continue;
+        }
+        let t = l + j as f64 * log2_c_max;
+        let slot = &mut qpow[i as usize];
+        *slot = if slot.is_finite() { lse2(&[*slot, t]) } else { t };
+        if i >= 1 {
+            let tz = t + (i as f64).log2();
+            let slot = &mut qzpow[i as usize - 1];
+            *slot = if slot.is_finite() { lse2(&[*slot, tz]) } else { tz };
+        }
+    }
     let mut best = f64::NEG_INFINITY;
 
     for c in 0..MOBIUS_NCAND {
@@ -848,7 +867,9 @@ pub fn mobius_solve_derivative_radius(
         // The (V′) bound is term-wise monotone increasing in x (every REST
         // and tail term carries a nonnegative x power, DEN decreases in x,
         // the rhs is x-free), so the admissible set is a prefix — bisect the
-        // upper crossing directly, floored at the running max.
+        // upper crossing directly, floored at the running max. The condition
+        // Q_z/DEN + |De|·Q/DEN² ≤ 2^rhs is evaluated in the linear domain
+        // relative to 2^rhs (positive terms, early exits), like holds_at.
         let cond = |x: f64| {
             let d1 = ld + x;
             let d2 = ldp + x + log2_c_max;
@@ -859,31 +880,39 @@ pub fn mobius_solve_derivative_radius(
             if den <= 0.5 {
                 return false;
             }
-            let mut q = f64::NEG_INFINITY;
-            let mut qz = f64::NEG_INFINITY;
-            for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
-                let l = blk.log2_q[n];
-                if !l.is_finite() {
-                    continue;
+            let log2_den = den.log2();
+            let base_z = rhs + log2_den; // Q_z channel: /DEN
+            let base_q = rhs + 2.0 * log2_den - ldeff; // Q channel: ·|De|/DEN²
+            let mut acc = 0.0f64;
+            let log2_theta = (x - log2_rz).max(log2_theta_c);
+            let mut push = |t: f64| -> bool {
+                if t > 62.0 {
+                    return false;
                 }
-                q = lse2(&[q, l + i as f64 * x + j as f64 * log2_c_max]);
-                if i >= 1 {
-                    qz = lse2(&[
-                        qz,
-                        l + (i as f64).log2() + (i as f64 - 1.0) * x
-                            + j as f64 * log2_c_max,
-                    ]);
+                if t > -62.0 {
+                    acc += t.exp2();
+                }
+                acc <= 1.0
+            };
+            for (i, &l) in qzpow.iter().enumerate() {
+                if l.is_finite() && !push(l + i as f64 * x - base_z) {
+                    return false;
                 }
             }
-            let log2_theta = (x - log2_rz).max(log2_theta_c);
-            q = lse2(&[q, mobius_cauchy_tail_log2(log2_mq, log2_theta)]);
-            qz = lse2(&[
-                qz,
-                mobius_cauchy_dz_tail_log2(log2_mq, log2_rz, log2_theta),
-            ]);
-            let log2_den = den.log2();
-            let bound = lse2(&[qz - log2_den, ldeff + q - 2.0 * log2_den]);
-            bound <= rhs
+            if !push(mobius_cauchy_dz_tail_log2(log2_mq, log2_rz, log2_theta) - base_z) {
+                return false;
+            }
+            if ldeff.is_finite() {
+                for (i, &l) in qpow.iter().enumerate() {
+                    if l.is_finite() && !push(l + i as f64 * x - base_q) {
+                        return false;
+                    }
+                }
+                if !push(mobius_cauchy_tail_log2(log2_mq, log2_theta) - base_q) {
+                    return false;
+                }
+            }
+            acc <= 1.0
         };
         best = best.max(bisect_last_success(start, SCAN_FLOOR_LOG2.max(best), cond));
     }
@@ -891,26 +920,102 @@ pub fn mobius_solve_derivative_radius(
 }
 
 /// Solve every block's Cauchy-certified ∂z radius, index-aligned with
-/// mobius_build_radii.
+/// mobius_build_radii. `value_gate` short-circuits blocks whose (V) VALUE
+/// radius is already −∞: the shipped radius is min(r, r′), so a dead value
+/// kills the tier whatever (V′) would say — solving it is pure build cost
+/// (interior references produce dead blocks in bulk: the cycle passes near
+/// Z ≈ 0). Pass None for the ungated build (censuses, diagnostics).
 pub fn mobius_build_derivative_radii(
     levels: &[MobiusLevel],
     bounds: &MobiusBoundsTable,
     epsilon: f64,
     log2_c_max: f64,
+    value_gate: Option<&[Vec<f64>]>,
 ) -> Vec<Vec<f64>> {
     levels
         .iter()
         .zip(bounds.per_level.iter())
-        .map(|(lvl, blv)| {
+        .enumerate()
+        .map(|(li, (lvl, blv))| {
             lvl.blocks
                 .iter()
                 .zip(blv.iter())
-                .map(|(blk, b)| {
+                .enumerate()
+                .map(|(s, (blk, b))| {
+                    if let Some(gate) = value_gate {
+                        if !gate[li][s].is_finite() {
+                            return f64::NEG_INFINITY;
+                        }
+                    }
                     mobius_solve_derivative_radius(blk, b, bounds, epsilon, log2_c_max)
                 })
                 .collect()
         })
         .collect()
+}
+
+/// Bounds for the cplus AND plain views of the same level geometry in ONE
+/// majorant pass: the bisected (R_z, M) per rung depend only on the seed
+/// segment and the rung — not on the block coefficients — so the two tables
+/// share them and only the M_Q assembly differs. Halves the unified bounds
+/// stage relative to two independent mobius_build_bounds calls.
+pub fn mobius_build_bounds_pair(
+    cplus: &[MobiusLevel],
+    plain: &[MobiusLevel],
+    orbit: &[(f64, f64)],
+    log2_c_max: f64,
+) -> (MobiusBoundsTable, MobiusBoundsTable) {
+    let twoz = mobius_twoz(orbit);
+    let log2_rc = mobius_rungs(log2_c_max);
+    let mut per_c: Vec<Vec<MobiusBounds>> = Vec::with_capacity(cplus.len());
+    let mut per_p: Vec<Vec<MobiusBounds>> = Vec::with_capacity(plain.len());
+    for (lc, lp) in cplus.iter().zip(plain.iter()) {
+        let mut row_c = Vec::with_capacity(lc.blocks.len());
+        let mut row_p = Vec::with_capacity(lp.blocks.len());
+        for slot in 0..lc.blocks.len() {
+            let first = 1 + slot * lc.skip;
+            let seg = &twoz[first..first + lc.skip];
+            let bc = &lc.blocks[slot];
+            let bp = &lp.blocks[slot];
+            let mut out_c = MobiusBounds {
+                log2_rz: [f64::NEG_INFINITY; MOBIUS_NCAND],
+                log2_mq: [f64::INFINITY; MOBIUS_NCAND],
+            };
+            let mut out_p = out_c;
+            if !bc.m.degenerate {
+                for c in 0..MOBIUS_NCAND {
+                    let (log2_rz, log2_m) = mobius_bisect_rz(seg, log2_rc[c]);
+                    if !log2_rz.is_finite() || !log2_m.is_finite() {
+                        continue; // rung saturates for this block
+                    }
+                    for (blk, out) in [(bc, &mut out_c), (bp, &mut out_p)] {
+                        let fac = lse2(&[
+                            0.0,
+                            cfe_log2(&blk.m.d) + log2_rz,
+                            cfe_log2(&blk.m.dp) + log2_rz + log2_rc[c],
+                            cfe_log2(&blk.m.f) + log2_rc[c],
+                        ]);
+                        out.log2_rz[c] = log2_rz;
+                        out.log2_mq[c] = lse2(&[
+                            fac + log2_m,
+                            cfe_log2(&blk.m.a) + log2_rz,
+                            cfe_log2(&blk.m.n2) + 2.0 * log2_rz,
+                            cfe_log2(&blk.m.ap) + log2_rz + log2_rc[c],
+                            cfe_log2(&blk.m.b) + log2_rc[c],
+                        ]);
+                    }
+                }
+            }
+            row_c.push(out_c);
+            row_p.push(out_p);
+        }
+        per_c.push(row_c);
+        per_p.push(row_p);
+    }
+    (
+        MobiusBoundsTable { log2_rc, per_level: per_c },
+        MobiusBoundsTable { log2_rc, per_level: per_p },
+    )
 }
 
 // ── full radii build ──────────────────────────────────────────────────────────

@@ -393,6 +393,12 @@ pub struct MandelbrotNavigator {
     // worker so build-latency reports can tell a keyframe radii re-solve from
     // a cold build (Phase F, 7.2).
     unified_last_build_stages: u32,
+    // Header-only sidecar buffers (compute_unified_header): SA + periodic
+    // behind an empty one-level directory, posted ahead of a cold full build.
+    // Separate storage so the header never clobbers the cached full table.
+    unified_header_result: Box<Vec<unified::UnifiedRadius>>,
+    unified_header_coeffs: Box<Vec<[jet::JetCoeffFe; unified::UNIFIED_GPU_COEFFS]>>,
+    unified_header_levels: Box<Vec<jet::JetLevel>>,
     // Ajout des vitesses pour l'animation
     vscale: DBig,
     vangle: f64,
@@ -481,6 +487,9 @@ impl MandelbrotNavigator {
             unified_radii_epsilon: 0.0,
             unified_radii_log2_c_max: f64::NAN,
             unified_last_build_stages: 0,
+            unified_header_result: Box::new(Vec::new()),
+            unified_header_coeffs: Box::new(Vec::new()),
+            unified_header_levels: Box::new(Vec::new()),
             vscale: DBig::try_from(1).unwrap(),
             vangle: 0.0,
             vtx: zero.clone(),
@@ -1516,6 +1525,7 @@ impl MandelbrotNavigator {
                 bounds,
                 epsilon,
                 log2_c_max,
+                Some(&value_radii),
             );
             *self.mobius_radii = value_radii
                 .into_iter()
@@ -1696,6 +1706,49 @@ impl MandelbrotNavigator {
             radii_count: self.unified_radii_result.len(),
             levels_ptr: self.unified_gpu_levels.as_ptr() as usize,
             level_count: self.unified_gpu_levels.len(),
+        }
+    }
+
+    /// True when the next compute_unified_reference will run its COLD stage
+    /// (levels recompose — seconds at deep budgets): the worker posts the
+    /// header-only table first in that case.
+    pub fn unified_is_cold(&self, max_iter: u32) -> bool {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        orbit_len > 2 && self.unified_source_len != orbit_len
+    }
+
+    /// Header-ONLY unified table: the SA prefix + periodic block behind an
+    /// empty one-level directory — zero block records (see
+    /// unified_serialize_header_only). ~2 ms: posted ahead of a cold full
+    /// build so interior pixels arm the periodic verdict (and the deep path
+    /// its SA seed) while the block build runs.
+    pub fn compute_unified_header(&mut self, max_iter: u32) -> UnifiedBufferInfo {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.unified_header_coeffs.clear();
+        if orbit_len <= 2 {
+            self.unified_header_result.clear();
+            self.unified_header_levels.clear();
+        } else {
+            let orbit: Vec<(f64, f64)> = self.result[..orbit_len]
+                .iter()
+                .map(|s| (s.zx as f64, s.zy as f64))
+                .collect();
+            let log2_c_max = self.jet_log2_c_max();
+            let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+            let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
+            let periodic = unified::periodic_build(&orbit, epsilon, log2_c_max);
+            let (side, dir) =
+                unified::unified_serialize_header_only(Some(&sa), periodic.as_ref());
+            *self.unified_header_result = side;
+            *self.unified_header_levels = dir;
+        }
+        UnifiedBufferInfo {
+            coeffs_ptr: self.unified_header_coeffs.as_ptr() as usize,
+            coeffs_count: self.unified_header_coeffs.len(),
+            radii_ptr: self.unified_header_result.as_ptr() as usize,
+            radii_count: self.unified_header_result.len(),
+            levels_ptr: self.unified_header_levels.as_ptr() as usize,
+            level_count: self.unified_header_levels.len(),
         }
     }
 
@@ -2666,6 +2719,7 @@ mod tests {
             nav.mobius_bounds.as_ref().as_ref().expect("mobius bounds built"),
             nav.bla_epsilon as f64,
             nav.jet_log2_c_max(),
+            None, // ungated: the referee wants the true certificate everywhere
         );
         for (value_row, derivative_row) in nav.mobius_radii.iter().zip(derivative_radii.iter()) {
             for (&value, &derivative) in value_row.iter().zip(derivative_row.iter()) {

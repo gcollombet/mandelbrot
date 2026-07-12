@@ -1223,6 +1223,7 @@ export class Engine {
             if (message.buildMs !== undefined) {
                 this.lastTableBuildMs = message.buildMs
                 this.lastTableBuildStages = message.buildStages ?? -1
+                console.log(`[REF] table landed: build ${message.buildMs.toFixed(0)}ms stages ${message.buildStages ?? -1} maxIter ${message.maxIterations}`)
             }
             this.isReferenceValidating = false
             if (this.pendingTableClear) {

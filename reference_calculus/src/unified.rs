@@ -45,7 +45,7 @@ use crate::jet::JetBlockBounds;
 // extraction (`mobius_from_jet`) remains the PERIODIC header's form (its
 // runtime fixed points stay a quadratic).
 use crate::mobius::{
-    mobius_build_bounds, mobius_build_derivative_radii, mobius_build_radii,
+    mobius_build_bounds_pair, mobius_build_derivative_radii, mobius_build_radii,
     mobius_certify_segment, mobius_from_jet, mobius_from_jet_k2, mobius_q,
     MobiusBlock, MobiusBoundsTable, MobiusCPlus, MobiusLevel,
     MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP,
@@ -539,11 +539,10 @@ pub fn unified_build_bounds(
                 .collect()
         })
         .collect();
-    UnifiedBounds {
-        cplus: mobius_build_bounds(&mlv, orbit, log2_c_max),
-        plain: mobius_build_bounds(&plv, orbit, log2_c_max),
-        jet,
-    }
+    // One shared majorant pass for both coefficient views (the bisected
+    // (R_z, M) depend only on the segments): halves this stage's cost.
+    let (cplus, plain) = mobius_build_bounds_pair(&mlv, &plv, orbit, log2_c_max);
+    UnifiedBounds { cplus, plain, jet }
 }
 
 /// Radii stage ((ε, c_max)-keyed, pure log2 solving): per block, the four tier
@@ -557,12 +556,40 @@ pub fn unified_solve_radii(
     eps: f64,
     log2_c_max: f64,
 ) -> UnifiedRadii {
+    unified_solve_radii_impl(levels, bounds, eps, log2_c_max, false)
+}
+
+/// Diagnostics variant: additionally runs the tail-free closed-form oracle on
+/// every block (the boost_pade/boost_cplus counters). Census/test only — the
+/// oracle is ~25 % of the interior radii stage and its result never reaches
+/// the GPU, so the production path (unified_solve_radii) skips it.
+pub fn unified_solve_radii_diag(
+    levels: &[UnifiedLevel],
+    bounds: &UnifiedBounds,
+    eps: f64,
+    log2_c_max: f64,
+) -> UnifiedRadii {
+    unified_solve_radii_impl(levels, bounds, eps, log2_c_max, true)
+}
+
+fn unified_solve_radii_impl(
+    levels: &[UnifiedLevel],
+    bounds: &UnifiedBounds,
+    eps: f64,
+    log2_c_max: f64,
+    diagnostics: bool,
+) -> UnifiedRadii {
     let mlv = to_mobius_levels(levels, false);
     let plv = to_mobius_levels(levels, true);
     let r_cv = mobius_build_radii(&mlv, &bounds.cplus, eps, log2_c_max);
     let r_pv = mobius_build_radii(&plv, &bounds.plain, eps, log2_c_max);
-    let rd_cv = mobius_build_derivative_radii(&mlv, &bounds.cplus, eps, log2_c_max);
-    let rd_pv = mobius_build_derivative_radii(&plv, &bounds.plain, eps, log2_c_max);
+    // (V′) only where (V) is alive: the shipped radius is min(r, r′), so a
+    // dead value kills the tier regardless — interior references produce dead
+    // blocks in bulk and their derivative solve is pure waste.
+    let rd_cv =
+        mobius_build_derivative_radii(&mlv, &bounds.cplus, eps, log2_c_max, Some(&r_cv));
+    let rd_pv =
+        mobius_build_derivative_radii(&plv, &bounds.plain, eps, log2_c_max, Some(&r_pv));
     let mut boost_pade = 0usize;
     let mut boost_cplus = 0usize;
     let mut tiers: Vec<Vec<[f64; 4]>> = Vec::with_capacity(levels.len());
@@ -583,13 +610,15 @@ pub fn unified_solve_radii(
                 m.f = CFe::ZERO;
                 m
             };
-            let cf_p = closed_form_radius(&plain_m, &md.log2_q_plain, eps, log2_c_max);
-            let cf_c = closed_form_radius(&blk.m, &md.log2_q_cplus, eps, log2_c_max);
-            if cf_p > r_pv[li][s] {
-                boost_pade += 1;
-            }
-            if cf_c > r_cv[li][s] {
-                boost_cplus += 1;
+            if diagnostics {
+                let cf_p = closed_form_radius(&plain_m, &md.log2_q_plain, eps, log2_c_max);
+                let cf_c = closed_form_radius(&blk.m, &md.log2_q_cplus, eps, log2_c_max);
+                if cf_p > r_pv[li][s] {
+                    boost_pade += 1;
+                }
+                if cf_c > r_cv[li][s] {
+                    boost_cplus += 1;
+                }
             }
             let value = [rj[0], r_pv[li][s], r_cv[li][s], rj[2]];
             // (V′): per-tier remainder moduli — affine drops only its two
@@ -614,11 +643,21 @@ pub fn unified_solve_radii(
                     q_jet[n] = f64::NEG_INFINITY;
                 }
             }
+            // Same dead-value gate as the rational tiers: min(r, r′) is −∞
+            // whatever (V′) returns, so skip the solve.
             let der = [
-                derivative_radius(&plain_m, &q_aff, eps, log2_c_max, false),
+                if value[0].is_finite() {
+                    derivative_radius(&plain_m, &q_aff, eps, log2_c_max, false)
+                } else {
+                    f64::NEG_INFINITY
+                },
                 rd_pv[li][s],
                 rd_cv[li][s],
-                derivative_radius(&blk.m, &q_jet, eps, log2_c_max, false),
+                if value[3].is_finite() {
+                    derivative_radius(&blk.m, &q_jet, eps, log2_c_max, false)
+                } else {
+                    f64::NEG_INFINITY
+                },
             ];
             row.push([
                 value[0].min(der[0]),
@@ -636,7 +675,8 @@ pub fn unified_solve_radii(
     UnifiedRadii { tiers, tiers_der, tiers_value, boost_pade, boost_cplus }
 }
 
-/// Convenience wrapper (tests, one-shot harnesses): both stages back to back.
+/// Convenience wrapper (tests, one-shot harnesses): both stages back to back,
+/// diagnostics on (the boost counters feed the census prints).
 #[allow(dead_code)] // one-shot convenience for tests/harnesses
 pub fn unified_build_radii(
     levels: &[UnifiedLevel],
@@ -646,7 +686,7 @@ pub fn unified_build_radii(
 ) -> UnifiedRadii {
     let l2c = c_max.log2();
     let bounds = unified_build_bounds(levels, orbit, l2c);
-    unified_solve_radii(levels, &bounds, eps, l2c)
+    unified_solve_radii_diag(levels, &bounds, eps, l2c)
 }
 
 /// Order-3 jet-tier evaluation from the unified record (prefix + identities):
@@ -1028,49 +1068,81 @@ pub fn unified_serialize_radii(
         });
     }
     if sa.is_some() || periodic.is_some() || !gates.is_empty() {
-        let zero = CFe::ZERO;
-        let sab = sa.map(|s| s.b).unwrap_or([zero; SA_APPLIED]);
-        let n0 = sa.map(|s| s.n0).unwrap_or(0);
-        for (j, b) in sab.iter().enumerate() {
-            let c = cfe_to_coeff(b);
-            out.push(UnifiedRadius {
-                r_log2: c.x,
-                tag: c.y,
-                f32_safe: c.e as f32,
-                pad: if j == 0 { n0 as f32 } else { 0.0 },
-            });
-        }
-        let pm = periodic.map(|p| p.m).unwrap_or(MobiusCPlus {
-            a: zero, b: zero, d: zero, ap: zero, dp: zero, f: zero, n2: zero, degenerate: true,
-        });
-        let metas = [
-            periodic.map(|p| p.start as f32).unwrap_or(0.0),
-            periodic.map(|p| p.p as f32).unwrap_or(0.0),
-            periodic.map(|p| p.log2_r as f32).unwrap_or(f32::NEG_INFINITY),
-            0.0,
-            0.0,
-            0.0,
-        ];
-        for (j, coef) in [pm.a, pm.b, pm.d, pm.ap, pm.dp, pm.f].iter().enumerate() {
-            let c = cfe_to_coeff(coef);
-            out.push(UnifiedRadius {
-                r_log2: c.x,
-                tag: c.y,
-                f32_safe: c.e as f32,
-                pad: metas[j],
-            });
-        }
-        // §18 gate blob (entry [10] = directory, count 0 when no gate — the
-        // shader reads it unconditionally in unified mode).
-        for v in crate::gates::gates_serialize_vec4(gates) {
-            out.push(UnifiedRadius {
-                r_log2: v[0],
-                tag: v[1],
-                f32_safe: v[2],
-                pad: v[3],
-            });
-        }
+        unified_push_header(&mut out, sa, periodic, gates);
     }
+    (out, dir)
+}
+
+/// Append the ten-entry SA/periodic header + gate blob (see
+/// unified_serialize_radii's layout doc) to a sidecar.
+fn unified_push_header(
+    out: &mut Vec<UnifiedRadius>,
+    sa: Option<&SaPrefix>,
+    periodic: Option<&PeriodicBlock>,
+    gates: &[crate::gates::Gate],
+) {
+    let zero = CFe::ZERO;
+    let sab = sa.map(|s| s.b).unwrap_or([zero; SA_APPLIED]);
+    let n0 = sa.map(|s| s.n0).unwrap_or(0);
+    for (j, b) in sab.iter().enumerate() {
+        let c = cfe_to_coeff(b);
+        out.push(UnifiedRadius {
+            r_log2: c.x,
+            tag: c.y,
+            f32_safe: c.e as f32,
+            pad: if j == 0 { n0 as f32 } else { 0.0 },
+        });
+    }
+    let pm = periodic.map(|p| p.m).unwrap_or(MobiusCPlus {
+        a: zero, b: zero, d: zero, ap: zero, dp: zero, f: zero, n2: zero, degenerate: true,
+    });
+    let metas = [
+        periodic.map(|p| p.start as f32).unwrap_or(0.0),
+        periodic.map(|p| p.p as f32).unwrap_or(0.0),
+        periodic.map(|p| p.log2_r as f32).unwrap_or(f32::NEG_INFINITY),
+        0.0,
+        0.0,
+        0.0,
+    ];
+    for (j, coef) in [pm.a, pm.b, pm.d, pm.ap, pm.dp, pm.f].iter().enumerate() {
+        let c = cfe_to_coeff(coef);
+        out.push(UnifiedRadius {
+            r_log2: c.x,
+            tag: c.y,
+            f32_safe: c.e as f32,
+            pad: metas[j],
+        });
+    }
+    // §18 gate blob (entry [10] = directory, count 0 when no gate — the
+    // shader reads it unconditionally in unified mode).
+    for v in crate::gates::gates_serialize_vec4(gates) {
+        out.push(UnifiedRadius {
+            r_log2: v[0],
+            tag: v[1],
+            f32_safe: v[2],
+            pad: v[3],
+        });
+    }
+}
+
+/// Header-ONLY sidecar: the SA/periodic header behind an empty one-level
+/// directory — zero block records, so the shader arms the interior verdict
+/// (and the deep path its SA seed) without any block acceleration. Built in
+/// ~2 ms and posted AHEAD of the full table (whose cold build is seconds at
+/// deep budgets on interior references): pure-interior views converge off the
+/// header alone while the block build runs.
+pub fn unified_serialize_header_only(
+    sa: Option<&SaPrefix>,
+    periodic: Option<&PeriodicBlock>,
+) -> (Vec<UnifiedRadius>, Vec<JetLevel>) {
+    let mut out = Vec::new();
+    unified_push_header(&mut out, sa, periodic, &[]);
+    let dir = vec![JetLevel {
+        offset: 0,
+        count: 0,
+        skip: MOBIUS_MIN_EMIT_SKIP as u32,
+        max_r3_log2: f32::NEG_INFINITY,
+    }];
     (out, dir)
 }
 
@@ -1734,7 +1806,7 @@ mod tests {
         println!("l2c = {l2c:.2}, band = {:.2}", l2c + 10.0);
         let levels = build_unified_levels(&orbit, 1 << 18);
         let bounds = unified_build_bounds(&levels, &orbit, l2c);
-        let rad = unified_solve_radii(&levels, &bounds, eps, l2c);
+        let rad = unified_solve_radii_diag(&levels, &bounds, eps, l2c);
         println!("boosts: padé {} c+ {}", rad.boost_pade, rad.boost_cplus);
         for (li, lvl) in levels.iter().enumerate() {
             if lvl.skip < MOBIUS_MIN_EMIT_SKIP {
@@ -2312,4 +2384,124 @@ mod tests {
 
 
 
+}
+
+#[cfg(test)]
+mod probe_tests {
+    use super::*;
+
+    fn probe_orbit(cx: f64, cy: f64, max_iter: usize) -> Vec<(f64, f64)> {
+        let mut out = Vec::with_capacity(max_iter + 1);
+        let (mut zx, mut zy) = (0.0_f64, 0.0_f64);
+        out.push((zx, zy));
+        for _ in 0..max_iter {
+            let nx = zx * zx - zy * zy + cx;
+            let ny = 2.0 * zx * zy + cy;
+            zx = nx;
+            zy = ny;
+            if zx * zx + zy * zy > 16.0 {
+                break;
+            }
+            out.push((zx, zy));
+        }
+        out
+    }
+
+    #[test]
+    #[ignore] // temporary field probe
+    fn interior_radii_breakdown_probe() {
+        use std::time::Instant;
+        let orbit = probe_orbit(-1.0, 0.1, 33220);
+        let l2c = ((2.06e-5_f64 * 1.01).log2() * 2.0).ceil() * 0.5;
+        let eps = 1e-3_f64;
+        let levels = build_unified_levels(&orbit, 1 << 18);
+        let bounds = unified_build_bounds(&levels, &orbit, l2c);
+        let mlv = to_mobius_levels(&levels, false);
+        let plv = to_mobius_levels(&levels, true);
+        let t = Instant::now();
+        let _r_cv = mobius_build_radii(&mlv, &bounds.cplus, eps, l2c);
+        let t_cv = t.elapsed();
+        let t = Instant::now();
+        let _r_pv = mobius_build_radii(&plv, &bounds.plain, eps, l2c);
+        let t_pv = t.elapsed();
+        let t = Instant::now();
+        let _rd_cv = mobius_build_derivative_radii(&mlv, &bounds.cplus, eps, l2c, None);
+        let t_dcv = t.elapsed();
+        let t = Instant::now();
+        let _rd_pv = mobius_build_derivative_radii(&plv, &bounds.plain, eps, l2c, None);
+        let t_dpv = t.elapsed();
+        let t = Instant::now();
+        let mut acc = 0.0f64;
+        for (li, lvl) in levels.iter().enumerate() {
+            for s in 0..lvl.blocks.len() {
+                let rj = jet_solve_radii(&bounds.jet[li][s], eps, l2c);
+                acc += rj[0];
+            }
+        }
+        let t_jet = t.elapsed();
+        let t = Instant::now();
+        for lvl in levels.iter() {
+            for (blk, md) in lvl.blocks.iter().zip(lvl.moduli.iter()) {
+                let plain_m = { let mut m = blk.m; m.ap = CFe::ZERO; m.dp = CFe::ZERO; m.f = CFe::ZERO; m };
+                acc += closed_form_radius(&plain_m, &md.log2_q_plain, eps, l2c);
+                acc += closed_form_radius(&blk.m, &md.log2_q_cplus, eps, l2c);
+            }
+        }
+        let t_cf = t.elapsed();
+        let t = Instant::now();
+        for lvl in levels.iter() {
+            for (blk, md) in lvl.blocks.iter().zip(lvl.moduli.iter()) {
+                let plain_m = { let mut m = blk.m; m.ap = CFe::ZERO; m.dp = CFe::ZERO; m.f = CFe::ZERO; m };
+                acc += derivative_radius(&plain_m, &md.log2_a, eps, l2c, false);
+                acc += derivative_radius(&blk.m, &md.log2_a, eps, l2c, false);
+            }
+        }
+        let t_dr = t.elapsed();
+        println!(
+            "PROBE radii breakdown: mobius V cplus {:?} plain {:?} | V' cplus {:?} plain {:?} | jet {:?} | cf-oracle {:?} | aff/jet V' {:?} (acc {:.1})",
+            t_cv, t_pv, t_dcv, t_dpv, t_jet, t_cf, t_dr, acc
+        );
+    }
+
+    #[test]
+    #[ignore] // temporary field probe
+    fn interior_build_cost_probe() {
+        use std::time::Instant;
+        let orbit = probe_orbit(-1.0, 0.1, 33220);
+        let l2c = ((2.06e-5_f64 * 1.01).log2() * 2.0).ceil() * 0.5;
+        let eps = 1e-3_f64;
+        let t0 = Instant::now();
+        let levels = build_unified_levels(&orbit, 1 << 18);
+        let t_lv = t0.elapsed();
+        let t1 = Instant::now();
+        let bounds = unified_build_bounds(&levels, &orbit, l2c);
+        let t_b = t1.elapsed();
+        let t2 = Instant::now();
+        let radii = unified_solve_radii(&levels, &bounds, eps, l2c);
+        let t_r = t2.elapsed();
+        let mut sat: Vec<(usize, usize)> = Vec::new();
+        for (li, lvl) in levels.iter().enumerate() {
+            let _ = li;
+            if lvl.skip < crate::mobius::MOBIUS_MIN_EMIT_SKIP {
+                continue;
+            }
+            for (s, t) in radii.tiers[li].iter().enumerate() {
+                if t.iter().all(|r| !r.is_finite()) {
+                    let first = 1 + s * lvl.skip;
+                    sat.push((first, first + lvl.skip));
+                }
+            }
+        }
+        let t3 = Instant::now();
+        let gates = if !sat.is_empty() {
+            crate::gates::build_gates(&orbit, (-1.0, 0.1), l2c, eps, &sat)
+        } else {
+            Vec::new()
+        };
+        let t_g = t3.elapsed();
+        println!(
+            "PROBE interior build: levels {:?} bounds {:?} radii {:?} | dead spans {} | gates {:?} -> {} gates",
+            t_lv, t_b, t_r, sat.len(), t_g, gates.len()
+        );
+    }
 }

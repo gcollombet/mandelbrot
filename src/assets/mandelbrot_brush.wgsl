@@ -714,11 +714,16 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     var blaZ = vec2<f32>(0.0);
     var jetLevelHint = JET_MAX_LEVELS; // (#5) start uncapped, then track accepts
     // Phase E periodic-interior state (auto mode): armed when the header
-    // carries a period block; one compare per loop turn, an attempt every p
-    // iterations at the aligned phase (O(1/p) amortized).
+    // carries a period block; one compare per loop turn, an attempt at the
+    // aligned phase with EXPONENTIAL BACKOFF on failure (perStride doubles,
+    // stays a multiple of p so retries keep phase alignment). Interior pixels
+    // pass on their first attempt and break; boundary/exterior pixels — the
+    // ones a small p would otherwise tax with the quadratic verdict every 1-2
+    // iterations for the whole budget — pay O(log maxIter) attempts total.
     var perP = 0;
     var perStart = 0;
     var perNext = 2147483647;
+    var perStride = 0;
     var perR = -3.0e38;
     var perHdr = 0;
     // §18 parabolic-gate state (unified tables ship the gate directory at
@@ -741,6 +746,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       perR = mandelbrotJetRadii[perHdr + 6].v.w;
       if (perP > 0) {
         perNext = perStart;
+        perStride = perP;
       }
       let gCount = i32(mandelbrotJetRadii[perHdr + 10].v.x + 0.5);
       if (gCount > 0) {
@@ -767,11 +773,14 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         let k = (ref_i - perStart + perP - 1) / perP;
         let aligned = perStart + k * perP;
         if (ref_i == aligned) {
-          perNext = aligned + perP;
           if (try_periodic_interior(perHdr, fe_from_vec(dz, 0), dcFe, perR)) {
             inside = true;
             break;
           }
+          // Failed verdict: back off — retry stride doubles, capped well
+          // below i32 overflow, always a multiple of p (phase-aligned).
+          perNext = aligned + perStride;
+          perStride = min(perStride * 2, 1 << 24);
         } else {
           perNext = aligned;
         }
@@ -2145,10 +2154,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   }
   var jetLevelHintDeep = JET_MAX_LEVELS; // (#5) per-pixel level hint
   var usedBla = false;
-  // Phase E periodic-interior state (see the shallow loop).
+  // Phase E periodic-interior state (see the shallow loop — same exponential
+  // backoff on failed verdicts).
   var perP = 0;
   var perStart = 0;
   var perNext = 2147483647;
+  var perStride = 0;
   var perR = -3.0e38;
   var perHdr = 0;
   if (isUnifiedDeep && useBlaDeep) {
@@ -2159,6 +2170,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     perR = mandelbrotJetRadii[perHdr + 6].v.w;
     if (perP > 0) {
       perNext = perStart;
+      perStride = perP;
     }
   }
 
@@ -2168,11 +2180,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       let k = (ref_i - perStart + perP - 1) / perP;
       let aligned = perStart + k * perP;
       if (ref_i == aligned) {
-        perNext = aligned + perP;
         if (try_periodic_interior(perHdr, dz, dc, perR)) {
           inside = true;
           break;
         }
+        perNext = aligned + perStride;
+        perStride = min(perStride * 2, 1 << 24);
       } else {
         perNext = aligned;
       }
