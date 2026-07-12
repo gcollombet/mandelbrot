@@ -149,6 +149,12 @@ struct WorkStats {
   tierPade: atomic<u32>,
   tierCplus: atomic<u32>,
   tierJet: atomic<u32>,
+  // §18 parabolic-gate observability: Ψ-jumps landed / degraded attempts,
+  // raw counts (rare events — no >>6 downscale). Zero while emission is
+  // dormant; the ONLY reliable "gates fired" signal (realizedSkip and the
+  // tier counters are mode-entangled).
+  gateJumps: atomic<u32>,
+  gateFails: atomic<u32>,
 };
 
 // ── bivariate jet mode (add-jet-approximation) ─────────────────────
@@ -225,6 +231,8 @@ struct JetLevel {
 var<private> g_workSteps: u32 = 0u;
 // Per-texel tier application counts (auto mode), flushed with the work stats.
 var<private> g_tierApps: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
+var<private> g_gateJumps: u32 = 0u;
+var<private> g_gateFails: u32 = 0u;
 
 // ── complex helpers (verbatim from mandelbrot.wgsl) ────────────────
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -588,6 +596,7 @@ fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
 
 // ── core computation (verbatim from mandelbrot.wgsl) ───────────────
 fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_ref_i: f32, prev_avg_direction: f32, prev_sndx: f32, prev_sndy: f32) -> TexelOut {
+
   let dc = vec2<f32>(x0, y0);
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
@@ -712,6 +721,18 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     var perNext = 2147483647;
     var perR = -3.0e38;
     var perHdr = 0;
+    // §18 parabolic-gate state (unified tables ship the gate directory at
+    // header entry [10]; v1 arms gate 0 — the count is kept in the record
+    // for multi-gate views later). dc-band check is per-pixel constant.
+    var gBase = -1;
+    var gStart = 0;
+    var gEnd = 0;
+    var gM = 0;
+    var gREntry = 0.0;
+    var gNfar = 0;
+    var gDBase = 0;
+    var gDb = vec2<f32>(0.0);
+    var gFails = 0;
     if (isUnified) {
       let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
       perHdr = i32(lastLvl.offset + lastLvl.count);
@@ -720,6 +741,24 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       perR = mandelbrotJetRadii[perHdr + 6].v.w;
       if (perP > 0) {
         perNext = perStart;
+      }
+      let gCount = i32(mandelbrotJetRadii[perHdr + 10].v.x + 0.5);
+      if (gCount > 0) {
+        let gb = perHdr + 11;
+        let ge0 = mandelbrotJetRadii[gb].v;
+        let ge1 = mandelbrotJetRadii[gb + 1].v;
+        if (dcMag <= ge1.y) {
+          gBase = gb;
+          gStart = i32(ge0.x + 0.5);
+          gEnd = gStart + i32(ge0.y + 0.5);
+          gM = i32(ge0.z + 0.5) * i32(ge0.w + 0.5);
+          gREntry = ge1.x;
+          gNfar = i32(ge1.z + 0.5);
+          gDBase = gb + i32(ge1.w + 0.5);
+          let gdc2 = cmul(dc, dc);
+          gDb = cmul(gate_unpack(mandelbrotJetRadii[gb + 3].v), dc)
+              + cmul(gate_unpack(mandelbrotJetRadii[gb + 4].v), gdc2);
+        }
       }
     }
     while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
@@ -738,7 +777,28 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         }
       }
       var skipped = 0;
-      if (isBlockTable) {
+      var gated = false;
+      // §18 gate move: aligned in-span offsets only (integer modulo, in-span
+      // turns are exactly the ones the ordinary loop crawls through). A
+      // positive return already advanced ref_i/dz/derM by k·m iterations.
+      if (gBase >= 0 && gFails < 3 && ref_i >= gStart && ref_i < gEnd
+          && ((ref_i - gStart) % gM) == 0) {
+        let adv = try_gate_jump(gBase, gStart, gEnd - gStart, gM, gREntry,
+                                gNfar, gDBase, gDb, &ref_i, &dz, dc,
+                                i32(mandelbrot.globalMaxIter - i), &derM);
+        if (adv > 0) {
+          skipped = adv;
+          gated = true;
+          blaZ = getOrbit(ref_i) + dz;
+          g_gateJumps += 1u;
+        } else if (adv < 0) {
+          gFails += 1;
+          g_gateFails += 1u;
+        }
+      }
+      if (gated) {
+        // gate jump done — skip the block probe this turn
+      } else if (isBlockTable) {
         // Global gate first (one log2 vs the table-wide bound), then convert dz
         // to floatexp for the shared evaluator (coefficient exponents exceed
         // f32 even shallow). Use length(), not dot(): |dz|² UNDERFLOWS f32 for
@@ -1702,6 +1762,318 @@ fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
   return true;
 }
 
+// ── §18 parabolic Fatou gates (gates.rs runtime, shallow f32 path) ────────────
+// Sidecar layout after the 10-entry SA/periodic header: entry [hdr+10] is the
+// gate directory (x = count, 0 when none — always shipped by unified tables),
+// gate 0's record at [hdr+11]:
+//   E0 (start, len, p, q) · E1 (r_entry, r_dc, nfar, dRel) · E2 eps bands ·
+//   per phase: β-tail 2 complexes, 8×3 P-coefficient Taylor complexes, nfar
+//   far-root seeds (each complex (x·2^e, y·2^e) packed (x, y, e, ·)) ·
+//   d[] channel as plain f32 pairs (two per vec4).
+// Attempts fire at phase-0-aligned span offsets only (one Ψ resolve per
+// attempt, amortized 1/m). All f32: the record's Taylor-in-dc slope carries
+// κ̃ at full mantissa accuracy, u/d are gate-scale quantities, and Ψ-phase
+// errors convert to value errors through the tiny |P| at the landing point.
+// The in-flight banded budget refuses uncertifiable jumps; ANY numeric
+// failure returns -1 and the pixel falls back to the ordinary certified loop.
+
+fn gate_clog(z: vec2<f32>) -> vec2<f32> {
+  return vec2<f32>(0.5 * log(max(dot(z, z), 1e-38)), atan2(z.y, z.x));
+}
+
+fn gate_csqrt(z: vec2<f32>) -> vec2<f32> {
+  let r = length(z);
+  let re = sqrt(max(0.5 * (r + z.x), 0.0));
+  var im = sqrt(max(0.5 * (r - z.x), 0.0));
+  if (z.y < 0.0) { im = -im; }
+  return vec2<f32>(re, im);
+}
+
+fn gate_unpack(e: vec4<f32>) -> vec2<f32> {
+  return vec2<f32>(e.x, e.y) * exp2(e.z);
+}
+
+// Returns k·m (> 0, iterations advanced; ref_i/dz/derM updated), 0 when the
+// gate move does not apply here, -1 on a degraded attempt (caller counts
+// toward disabling the gate for this pixel).
+// Everything per-gate-constant (record header, β-tail Taylor at the pixel's
+// dc) is hoisted by the caller once per pixel — a not-applicable attempt
+// costs ONE d[] read and a handful of flops.
+fn try_gate_jump(
+  g0: i32,
+  gStart: i32,
+  gLen: i32,
+  gM: i32,
+  rEntry: f32,
+  nfar: i32,
+  dBase: i32,
+  db: vec2<f32>,
+  refIdx: ptr<function, i32>,
+  dz: ptr<function, vec2<f32>>,
+  dc: vec2<f32>,
+  iterLeft: i32,
+  derM: ptr<function, vec2<f32>>,
+) -> i32 {
+  let off = *refIdx - gStart;
+  if (off + gM > gLen - 1) {
+    return 0;
+  }
+  // u from the d[] small-quantity channel (off is even — m is even and the
+  // attempt is aligned — so the pair is always .xy).
+  let dPair = mandelbrotJetRadii[dBase + off / 2].v;
+  let dn = vec2<f32>(dPair.x, dPair.y);
+  let dc2 = cmul(dc, dc);
+  var u = dn + *dz - db;
+  if (dot(u, u) > rEntry * rEntry) {
+    return 0;
+  }
+  let kMax = min(iterLeft / gM, (gLen - 1 - off) / gM);
+  // Profitability floor: a jump costs ~10-100 Ψ-hops (each a Newton over up
+  // to 8 log terms) ≈ the wall-clock of ~1-2k exact iterations. Below that
+  // budget the ordinary certified loop is already faster — the gate's value
+  // is high-iteration parabolic views (raised iteration multiplier), where
+  // one jump covers tens of thousands of iterations.
+  if (kMax < 2048) {
+    return 0;
+  }
+  let e2 = mandelbrotJetRadii[g0 + 2].v;
+  // ── resolve Ψ (phase 0): P(dc) Taylor eval, trim, cluster quadratic +
+  // far seeds Newton-polished on the full reduced polynomial, ρᵢ = 1/P′(rᵢ).
+  var pc: array<vec2<f32>, 8>;
+  var pscale = 0.0;
+  for (var k = 0; k < 8; k++) {
+    let b = g0 + 5 + 3 * k;
+    let v = gate_unpack(mandelbrotJetRadii[b].v)
+          + cmul(gate_unpack(mandelbrotJetRadii[b + 1].v), dc)
+          + cmul(gate_unpack(mandelbrotJetRadii[b + 2].v), dc2);
+    pc[k] = v;
+    pscale = max(pscale, max(abs(v.x), abs(v.y)));
+  }
+  if (pscale <= 0.0) {
+    return -1;
+  }
+  var nq = 8;
+  while (nq > 1 && max(abs(pc[nq - 1].x), abs(pc[nq - 1].y)) < 1e-12 * pscale) {
+    nq -= 1;
+  }
+  if (nq < 3 || nq - 3 > nfar) {
+    return -1;
+  }
+  var roots: array<vec2<f32>, 8>;
+  roots[0] = vec2<f32>(0.0);
+  let disc = gate_csqrt(cmul(pc[1], pc[1]) - 4.0 * cmul(pc[2], pc[0]));
+  let inv2p2 = cinv(2.0 * pc[2]);
+  roots[1] = cmul(-pc[1] + disc, inv2p2);
+  roots[2] = cmul(-pc[1] - disc, inv2p2);
+  let nroots = nq;
+  for (var j = 3; j < nroots; j++) {
+    roots[j] = gate_unpack(mandelbrotJetRadii[g0 + 29 + (j - 3)].v);
+  }
+  // Full Newton polish for the coalescing pair; ONE pass for the far seeds
+  // (they only feed the linearized correction and the ρ/droot scales).
+  for (var rI = 1; rI < nroots; rI++) {
+    var r = roots[rI];
+    let polishCap = select(1, 12, rI < 3);
+    for (var it = 0; it < polishCap; it++) {
+      var f = vec2<f32>(0.0);
+      var df = vec2<f32>(0.0);
+      for (var k = nq - 1; k >= 0; k--) {
+        df = cmul(df, r) + f;
+        f = cmul(f, r) + pc[k];
+      }
+      if (dot(df, df) < 1e-30) {
+        break;
+      }
+      let step = cmul(f, cinv(df));
+      r -= step;
+      if (dot(step, step) < 1e-11 * (1e-10 + dot(r, r))) {
+        break;
+      }
+    }
+    roots[rI] = r;
+  }
+  // Distinct poles or bust (dc → 0 collapses the cluster onto 0: fallback).
+  var rmax = 0.0;
+  for (var a = 0; a < nroots; a++) {
+    rmax = max(rmax, length(roots[a]));
+  }
+  for (var a = 0; a < nroots; a++) {
+    for (var b = a + 1; b < nroots; b++) {
+      if (length(roots[a] - roots[b]) < 3e-7 * (1.0 + rmax)) {
+        return -1;
+      }
+    }
+  }
+  var rhos: array<vec2<f32>, 8>;
+  for (var rI = 0; rI < nroots; rI++) {
+    var dp = vec2<f32>(0.0);
+    for (var k = nq - 1; k >= 0; k--) {
+      dp = cmul(dp, roots[rI]) + f32(k + 1) * pc[k];
+    }
+    if (dot(dp, dp) < 1e-30) {
+      return -1;
+    }
+    rhos[rI] = cinv(dp);
+  }
+  // P(u) at entry (for the derivative's flow-conjugacy factor).
+  var q0 = vec2<f32>(0.0);
+  for (var k = nq - 1; k >= 0; k--) {
+    q0 = cmul(q0, u) + pc[k];
+  }
+  let pu0 = cmul(u, q0);
+  // ── Ψ-plane hops: Euler predictor + Newton corrector on the per-hop
+  // principal-branch increment; |Δu| ≤ 0.2·distance-to-nearest-pole keeps
+  // every log unambiguous. Banded budget accumulates in flight.
+  var kDone = 0.0;
+  var budget = 0.0;
+  var hops = 0;
+  loop {
+    if (kDone >= f32(kMax) || dot(u, u) > rEntry * rEntry) {
+      break;
+    }
+    hops += 1;
+    if (hops > 160) {
+      return -1;
+    }
+    var qv = vec2<f32>(0.0);
+    for (var k = nq - 1; k >= 0; k--) {
+      qv = cmul(qv, u) + pc[k];
+    }
+    let sp = cmul(u, qv);
+    let spd = length(sp);
+    var droot = length(u);
+    for (var a = 1; a < nroots; a++) {
+      droot = min(droot, length(u - roots[a]));
+    }
+    if (spd < 1e-30 || droot < 1e-30) {
+      kDone = f32(kMax); // pinned at a fixed point: never exits
+      break;
+    }
+    let dk = min(0.35 * droot / spd, f32(kMax) - kDone);
+    // Far-field linearization: the far roots' log increment over
+    // |Δu| ≤ 0.35·droot ≪ |u − r_far| is (Δu)/(u−r) to second order — one
+    // cdiv per far root per HOP instead of one clog per Newton iteration
+    // (the SIMT cost sits in the transcendentals).
+    var cfar = vec2<f32>(0.0);
+    for (var a = 3; a < nroots; a++) {
+      cfar += cmul(rhos[a], cinv(u - roots[a]));
+    }
+    let ncl = min(nroots, 3);
+    var un = u + sp * dk;
+    var ok = false;
+    var lastG = 3.0e38;
+    for (var it = 0; it < 8; it++) {
+      var gsum = vec2<f32>(-dk, 0.0) + cmul(cfar, un - u);
+      for (var a = 0; a < ncl; a++) {
+        gsum += cmul(rhos[a], gate_clog(cmul(un - roots[a], cinv(u - roots[a]))));
+      }
+      lastG = dot(gsum, gsum);
+      // Early accept on a small phase residual — it converts to value error
+      // through the tiny |P| and the landing budget check.
+      if (lastG < 1e-10) {
+        ok = true;
+        break;
+      }
+      var qn = vec2<f32>(0.0);
+      for (var k = nq - 1; k >= 0; k--) {
+        qn = cmul(qn, un) + pc[k];
+      }
+      let step = cmul(gsum, cmul(un, qn));
+      un -= step;
+      // f32 exit: |step| ≲ 3e-6·|un| (the f64 CPU tolerance would spin at
+      // ±1 ulp forever here).
+      if (dot(step, step) < 1e-11 * (1e-10 + dot(un, un))) {
+        ok = true;
+        break;
+      }
+    }
+    if (!ok && lastG > 1e-6) {
+      return -1;
+    }
+    u = un;
+    kDone += dk;
+    let ua = length(u);
+    var eb = e2.w;
+    if (ua > rEntry * 0.5) {
+      eb = e2.x;
+    } else if (ua > rEntry * 0.25) {
+      eb = e2.y;
+    } else if (ua > rEntry * 0.125) {
+      eb = e2.z;
+    }
+    budget += dk * eb;
+    if (budget > 1e6) {
+      return -1;
+    }
+  }
+  let kInt = min(i32(floor(kDone)), kMax);
+  if (kInt < 2) {
+    return -1;
+  }
+  // Land on the integer k (the pixel applies the return exactly kInt times).
+  let back = f32(kInt) - kDone;
+  if (back != 0.0) {
+    var qv = vec2<f32>(0.0);
+    for (var k = nq - 1; k >= 0; k--) {
+      qv = cmul(qv, u) + pc[k];
+    }
+    var cfarB = vec2<f32>(0.0);
+    for (var a = 3; a < nroots; a++) {
+      cfarB += cmul(rhos[a], cinv(u - roots[a]));
+    }
+    let nclB = min(nroots, 3);
+    var un = u + cmul(u, qv) * back;
+    var ok = false;
+    var lastG = 3.0e38;
+    for (var it = 0; it < 8; it++) {
+      var gsum = vec2<f32>(-back, 0.0) + cmul(cfarB, un - u);
+      for (var a = 0; a < nclB; a++) {
+        gsum += cmul(rhos[a], gate_clog(cmul(un - roots[a], cinv(u - roots[a]))));
+      }
+      lastG = dot(gsum, gsum);
+      if (lastG < 1e-10) {
+        ok = true;
+        break;
+      }
+      var qn = vec2<f32>(0.0);
+      for (var k = nq - 1; k >= 0; k--) {
+        qn = cmul(qn, un) + pc[k];
+      }
+      let step = cmul(gsum, cmul(un, qn));
+      un -= step;
+      if (dot(step, step) < 1e-11 * (1e-10 + dot(un, un))) {
+        ok = true;
+        break;
+      }
+    }
+    if (!ok && lastG > 1e-6) {
+      return -1;
+    }
+    u = un;
+  }
+  // Certified budget: accumulated phase error × the value conversion at the
+  // landing point stays inside ε/2 (the block table owns the other half).
+  var qEnd = vec2<f32>(0.0);
+  for (var k = nq - 1; k >= 0; k--) {
+    qEnd = cmul(qEnd, u) + pc[k];
+  }
+  if (budget * length(qEnd) > mandelbrot.blaEpsilon * 0.5) {
+    return -1;
+  }
+  // Commit: dz at the landing index through the d[] channel; derivative gets
+  // the flow-conjugacy factor P(u_end)/P(u_entry) (the transit's ∂/∂z — its
+  // ∂/∂c term is dropped, shading-only approximation; the interior-ε test is
+  // already disabled once any block/gate applies).
+  let off2 = off + kInt * gM;
+  let dPair2 = mandelbrotJetRadii[dBase + off2 / 2].v;
+  *dz = u + db - vec2<f32>(dPair2.x, dPair2.y);
+  *refIdx = *refIdx + kInt * gM;
+  if (dot(pu0, pu0) > 1e-30) {
+    *derM = cmul(*derM, cmul(cmul(u, qEnd), cinv(pu0)));
+  }
+  return kInt * gM;
+}
+
 fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32) -> TexelOut {
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
@@ -1999,6 +2371,8 @@ var<workgroup> wgRealSum: atomic<u32>;  // Σ real loop steps over this workgrou
 var<workgroup> wgRealMax: atomic<u32>;  // max real loop steps among them (straggler)
 var<workgroup> wgCovSum: atomic<u32>;   // Σ covered iterations over them
 var<workgroup> wgTier: array<atomic<u32>, 4>; // Σ tier applications (auto mode)
+var<workgroup> wgGateJumps: atomic<u32>;
+var<workgroup> wgGateFails: atomic<u32>;
 
 @compute @workgroup_size(8, 8)
 fn cs_main(
@@ -2014,6 +2388,8 @@ fn cs_main(
     for (var t = 0; t < 4; t++) {
       atomicStore(&wgTier[t], 0u);
     }
+    atomicStore(&wgGateJumps, 0u);
+    atomicStore(&wgGateFails, 0u);
   }
   workgroupBarrier();
 
@@ -2069,6 +2445,8 @@ fn cs_main(
           // for a fresh compute request).
           g_workSteps = 0u;
           g_tierApps = array<u32, 4>(0u, 0u, 0u, 0u);
+          g_gateJumps = 0u;
+          g_gateFails = 0u;
           let startIter = select(iter_val, 0.0, is_compute_request);
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
           // AA sub-pixel jitter (neutral-space units); zero for sample 0 / AA off.
@@ -2171,6 +2549,12 @@ fn cs_main(
           for (var t = 0; t < 4; t++) {
             atomicAdd(&wgTier[t], g_tierApps[t]);
           }
+          if (g_gateJumps > 0u) {
+            atomicAdd(&wgGateJumps, g_gateJumps);
+          }
+          if (g_gateFails > 0u) {
+            atomicAdd(&wgGateFails, g_gateFails);
+          }
 
           // Count the written (post-iteration) state.
           iter_val = result.iter.r;
@@ -2235,6 +2619,8 @@ fn cs_main(
       atomicAdd(&workStats.tierPade, atomicLoad(&wgTier[1]));
       atomicAdd(&workStats.tierCplus, atomicLoad(&wgTier[2]));
       atomicAdd(&workStats.tierJet, atomicLoad(&wgTier[3]));
+      atomicAdd(&workStats.gateJumps, atomicLoad(&wgGateJumps));
+      atomicAdd(&workStats.gateFails, atomicLoad(&wgGateFails));
     }
   }
 }

@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub type JsValue = String;
 
+mod gates;
 mod jet;
 mod mobius;
 mod unified;
@@ -323,6 +324,15 @@ pub struct MandelbrotNavigator {
     // budget) triggers a full reference recompute. See the fix-reference-precision-budget change.
     budget_prec: usize,
     bla_epsilon: f32,
+    /// §18 gate emission into the unified sidecar (default ON since the
+    /// optimization round: parity at 33k-iteration parabolic views, −23 % at
+    /// 100k, zero cost elsewhere — kMax ≥ 2048 arming floor in the shader.
+    /// Runtime-switchable: `set_gate_emission(false)` is the kill switch).
+    gate_emission: bool,
+    /// Viewport aspect ratio (width/height) from the host, for the exact
+    /// per-view c_max bound (jet_log2_c_max). NaN (unset) keeps the legacy
+    /// 4×scale diagonal margin.
+    viewport_aspect: f64,
     // Largest single block jump emitted into the table (power-of-two cap). UI-tunable;
     // clamped to a power of two in [MIN_BLA_SKIP, 1<<20].
     max_bla_skip: usize,
@@ -431,6 +441,8 @@ impl MandelbrotNavigator {
             approximation_mode: ApproximationMode::Perturbation,
             budget_prec: DEFAULT_BUDGET_BITS,
             bla_epsilon: 1e-3,
+            gate_emission: true,
+            viewport_aspect: f64::NAN,
             max_bla_skip: 65536,
             bla_result: Box::new(Vec::with_capacity(20_000)),
             bla_levels: Box::new(Vec::with_capacity(32)),
@@ -676,6 +688,20 @@ impl MandelbrotNavigator {
 
     pub fn get_bla_epsilon(&self) -> f32 {
         self.bla_epsilon
+    }
+
+    /// §18 parabolic-gate emission toggle. Marks the unified radii stage
+    /// stale so the next table build re-serializes the sidecar with (or
+    /// without) the gate blob.
+    pub fn set_gate_emission(&mut self, on: bool) {
+        if self.gate_emission != on {
+            self.gate_emission = on;
+            self.unified_radii_log2_c_max = f64::NAN;
+        }
+    }
+
+    pub fn get_gate_emission(&self) -> bool {
+        self.gate_emission
     }
 
     pub fn set_max_bla_skip(&mut self, max_skip: u32) {
@@ -1259,12 +1285,66 @@ impl MandelbrotNavigator {
         }
     }
 
-    /// log2 of the per-view bound c_max ≥ |δC| over rendered pixels: the view
-    /// scale times a diagonal margin (deltas span ~±(extent·√2) around the
-    /// reference).
+    /// log2 of the per-view bound c_max ≥ |δC| over rendered pixels. With a
+    /// known viewport aspect (set_viewport_aspect): the exact screen bound
+    /// |Δ| + scale·√(aspect²+1)·1.01, where Δ = C_view − C_ref is the same
+    /// reference-relative offset the render path ships (view_floatexp), the
+    /// √ term is the screen half-diagonal in scale units (angle-invariant —
+    /// rotation preserves corner magnitude) and the 1 % margin absorbs the
+    /// sub-pixel AA jitter. Unlike the legacy 4×scale margin this stays sound
+    /// when the reference drifts off-center (pans), and is ~1 octave tighter
+    /// when it doesn't. Unknown aspect falls back to the legacy margin.
+    ///
+    /// Both paths quantize UP to a 0.5-octave rung: pans/zooms inside a rung
+    /// see a bit-identical c_max and reuse the solved radii; the radii
+    /// staleness test is ASYMMETRIC (any growth past the solved rung
+    /// re-solves — a c_max above the solve would uncertify border pixels;
+    /// ≥ 2 octaves below re-solves for tightness only).
     fn jet_log2_c_max(&self) -> f64 {
-        let (m, e) = dbig_frexp(&self.scale);
-        (m.abs().max(f64::MIN_POSITIVE)).log2() + e as f64 + 2.0
+        let l2 = |m: f64, e: i32| -> f64 {
+            let m = m.abs();
+            if m == 0.0 {
+                f64::NEG_INFINITY
+            } else {
+                m.log2() + e as f64
+            }
+        };
+        // log2(2^a + 2^b), −∞-safe.
+        let log2_add = |a: f64, b: f64| -> f64 {
+            let (hi, lo) = (a.max(b), a.min(b));
+            if !hi.is_finite() {
+                return hi;
+            }
+            hi + (1.0 + (lo - hi).exp2()).log2()
+        };
+        let (sm, se) = dbig_frexp(&self.scale);
+        let l2_scale = l2(sm.max(f64::MIN_POSITIVE), se);
+        let exact = if self.viewport_aspect.is_finite() {
+            let extent = self.viewport_aspect.hypot(1.0) * 1.01;
+            let (dxm, dxe) = dbig_frexp(&(&self.cx - &self.reference_cx));
+            let (dym, dye) = dbig_frexp(&(&self.cy - &self.reference_cy));
+            // |Δ| in log2: hypot as ½·log2(2^2a + 2^2b).
+            let l2_delta = 0.5 * log2_add(2.0 * l2(dxm, dxe), 2.0 * l2(dym, dye));
+            log2_add(l2_delta, l2_scale + extent.log2())
+        } else {
+            l2_scale + 2.0
+        };
+        (exact * 2.0).ceil() * 0.5
+    }
+
+    /// Viewport aspect ratio (width/height) from the host: tightens the
+    /// per-view c_max from the legacy 4×scale margin to the exact screen
+    /// bound. NaN or non-positive restores the fallback.
+    pub fn set_viewport_aspect(&mut self, aspect: f64) {
+        self.viewport_aspect = if aspect > 0.0 { aspect } else { f64::NAN };
+    }
+
+    /// The current quantized per-view log2 c_max — the worker's repost key:
+    /// growth past the last posted value means the GPU radii are no longer
+    /// certified for the view and must be re-posted (closed-form re-solve
+    /// Rust-side); ≥ 2 octaves below re-posts for tightness only.
+    pub fn current_log2_c_max(&self) -> f64 {
+        self.jet_log2_c_max()
     }
 
     /// Build (or reuse) the jet table for the current reference orbit: exact
@@ -1332,9 +1412,13 @@ impl MandelbrotNavigator {
             self.jet_radii_log2_c_max = f64::NAN; // cascade: radii now stale
         }
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        // Asymmetric: growth past the solved c_max would uncertify border
+        // pixels — re-solve immediately; shrink re-solves only past 2 octaves
+        // of looseness (radii stay sound under a smaller c_max).
         let radii_stale = !self.jet_radii_log2_c_max.is_finite()
             || (self.jet_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
-            || (self.jet_radii_log2_c_max - log2_c_max).abs() > 2.0;
+            || log2_c_max > self.jet_radii_log2_c_max
+            || log2_c_max < self.jet_radii_log2_c_max - 2.0;
         if radii_stale {
             *self.jet_radii = self
                 .jet_bounds
@@ -1412,9 +1496,11 @@ impl MandelbrotNavigator {
             self.mobius_radii_log2_c_max = f64::NAN; // cascade: radii stale
         }
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        // Asymmetric staleness — see ensure_jet_table.
         let radii_stale = !self.mobius_radii_log2_c_max.is_finite()
             || (self.mobius_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
-            || (self.mobius_radii_log2_c_max - log2_c_max).abs() > 2.0;
+            || log2_c_max > self.mobius_radii_log2_c_max
+            || log2_c_max < self.mobius_radii_log2_c_max - 2.0;
         if radii_stale {
             let bounds = self.mobius_bounds.as_ref().as_ref().expect("bounds built above");
             // The renderer transports dz/dc alongside dz for distance-estimate
@@ -1512,9 +1598,11 @@ impl MandelbrotNavigator {
             self.unified_radii_log2_c_max = f64::NAN; // cascade: radii stale
         }
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        // Asymmetric staleness — see ensure_jet_table.
         let radii_stale = !self.unified_radii_log2_c_max.is_finite()
             || (self.unified_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
-            || (self.unified_radii_log2_c_max - log2_c_max).abs() > 2.0;
+            || log2_c_max > self.unified_radii_log2_c_max
+            || log2_c_max < self.unified_radii_log2_c_max - 2.0;
         if radii_stale {
             self.unified_last_build_stages |= 4;
             let bounds = self.unified_bounds.as_ref().as_ref().expect("bounds built above");
@@ -1527,11 +1615,53 @@ impl MandelbrotNavigator {
             // Certified SA prefix ((ε, c_max)-keyed like the radii): the
             // common skip every compute-request pixel starts at (Phase C).
             let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
-            // The periodic fixed-point shortcut remains disabled until its
-            // tail-free radius oracle is replaced by a full Cauchy certificate.
-            // The serialized header carries p = 0, so the shader never enters
-            // that optional path.
-            let periodic: Option<unified::PeriodicBlock> = None;
+            // Periodic fixed-point shortcut (Phase E): ENABLED — the header's
+            // tail-free radius oracle was replaced by the full Cauchy
+            // certificate (mobius_certify_segment: bisected majorant over the
+            // p composed steps + strict (V)/(V′) solve, x = 0 gated). An
+            // escaping/aperiodic reference yields None and the serialized
+            // header carries p = 0, so the shader path stays dormant there.
+            let periodic = unified::periodic_build(&orbit, epsilon, log2_c_max);
+            // §18 parabolic Fatou gates ((ε, c_max)-keyed like the radii).
+            // Built only when DEAD sidecar blocks exist (no tier certified —
+            // the saturation coupling: quasi-parabolic transits are the only
+            // regime that produces them in numbers) and only at shallow
+            // c_max, where the f64 view of the reference c is far inside the
+            // Taylor band r_dc = 4·c_max (deep-zoom gates need the
+            // perturbed-reference build variant — see gates.rs).
+            // FIELD VERDICT (stage b round 1): the GPU gate runtime is
+            // pixel-exact (0.00 % diff vs Möbius on both parabolic views,
+            // zero validation errors) but not yet profitable in wall-clock —
+            // the Ψ-hop loop is transcendental-heavy under SIMT (cusp view
+            // 4× slower at a ×20 iteration budget; period2 at parity). It
+            // ships DORMANT until the hop loop is optimized (cost-aware
+            // entry-radius rung, coarser hops): `set_gate_emission(true)`
+            // re-arms at runtime — the whole path stays built and tested
+            // (gates.rs battery + tests/gates-mode.spec.ts + the workStats
+            // gateJumps/gateFails counters).
+            let mut gate_list: Vec<gates::Gate> = Vec::new();
+            if self.gate_emission && 4.0 * log2_c_max.exp2() >= 1e-12 {
+                let mut sat: Vec<(usize, usize)> = Vec::new();
+                for (li, lvl) in self.unified_levels.iter().enumerate() {
+                    if lvl.skip < mobius::MOBIUS_MIN_EMIT_SKIP {
+                        continue;
+                    }
+                    for (s, t) in radii.tiers[li].iter().enumerate() {
+                        if t.iter().all(|r| !r.is_finite()) {
+                            let first = 1 + s * lvl.skip;
+                            sat.push((first, first + lvl.skip));
+                        }
+                    }
+                }
+                if !sat.is_empty() {
+                    let c0 = (
+                        dbig_to_f64(&self.reference_cx),
+                        dbig_to_f64(&self.reference_cy),
+                    );
+                    gate_list =
+                        gates::build_gates(&orbit, c0, log2_c_max, epsilon, &sat);
+                }
+            }
             // Working band for the dispatch tags: the post-rebase delta band
             // sits ~10 bits above c_max (census note 5 placeholder — refined
             // from the replay-observed |dz| distribution when the GPU tier-mix
@@ -1542,6 +1672,7 @@ impl MandelbrotNavigator {
                 log2_c_max + 10.0,
                 Some(&sa),
                 periodic.as_ref(),
+                &gate_list,
             );
             *self.unified_radii = Some(radii);
             self.unified_radii_epsilon = epsilon;
@@ -2590,9 +2721,15 @@ mod tests {
         let info = nav.compute_unified_reference(512);
         assert!(info.level_count > 0, "unified table built no levels");
         assert!(info.coeffs_count > 0 && info.coeffs_ptr != 0, "coeff buffer empty");
-        // Sidecar = one entry per block + the 10-entry SA/periodic header
-        // (SA b1..b4 + n0, then the 6-coefficient F-form periodic block).
-        assert_eq!(info.coeffs_count + 10, info.radii_count, "buffers must be index-aligned (+header)");
+        // Sidecar = one entry per block + the ELEVEN-entry header (SA b1..b4
+        // + n0, the 6-coefficient F-form periodic block, then the §18 gate
+        // directory) + the optional gate blob.
+        assert!(
+            info.radii_count >= info.coeffs_count + 11,
+            "buffers must be index-aligned (+header): {} vs {}",
+            info.radii_count,
+            info.coeffs_count
+        );
         let src_len = nav.unified_source_len;
         let bounds_stamp = nav.unified_bounds_log2_c_max;
         assert!(src_len > 0 && bounds_stamp.is_finite());
@@ -3806,7 +3943,35 @@ mod tests {
         assert!((fe[1] - (-398.0)).abs() < 3.0, "scale exponent off: {}", fe[1]);
     }
 
+    // ── Exact per-view c_max (piste "c_max exact"): the aspect-aware bound
+    // must be ~1 octave under the legacy 4×scale margin with a centered
+    // reference, track the reference→center offset when panned (the legacy
+    // margin's soundness hole), quantize to 0.5-octave rungs, and fall back
+    // to the legacy margin when the aspect is unset.
     #[test]
+    fn c_max_exact_screen_bound() {
+        let mut nav = MandelbrotNavigator::new("-0.75", "0.1", "1e-6", 0.0);
+        let l2_scale = 1e-6f64.log2();
+        // Unset aspect: legacy 4×scale margin, now rung-quantized.
+        let legacy = nav.current_log2_c_max();
+        assert!((legacy - (l2_scale + 2.0)).abs() <= 0.5 + 1e-12, "legacy margin: {}", legacy);
+        // 16:9 viewport, reference at the view center: half-diagonal ≈ 2.06·scale.
+        nav.set_viewport_aspect(16.0 / 9.0);
+        let centered = nav.current_log2_c_max();
+        let expected = l2_scale + ((16.0f64 / 9.0).hypot(1.0) * 1.01).log2();
+        assert!(centered >= expected - 1e-12, "quantized below exact: {} < {}", centered, expected);
+        assert!(centered <= expected + 0.5 + 1e-12, "rung too coarse: {} vs {}", centered, expected);
+        assert!(centered < legacy, "exact bound not tighter than legacy");
+        // Pan the view 10 scales off the reference: the bound must follow |Δ|.
+        nav.origin("-0.75001", "0.1");
+        let panned = nav.current_log2_c_max();
+        let l2_delta = 1e-5f64.log2();
+        assert!(panned >= l2_delta, "panned bound {} below |delta| {}", panned, l2_delta);
+        // Restore: NaN aspect returns to the legacy margin.
+        nav.set_viewport_aspect(f64::NAN);
+        assert!((nav.current_log2_c_max() - legacy).abs() < 1e-12);
+    }
+
     // ── Instrumentation: does the DBig BUDGET change the f32-stored reference
     // (hence der) at all? The user sees budget fix the deep-zoom DE; the model
     // says f32 storage (24 bits) caps der regardless. This compares the actual

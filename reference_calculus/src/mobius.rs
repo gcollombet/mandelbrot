@@ -426,12 +426,10 @@ fn mobius_bisect_rz(twoz: &[(f64, i64)], log2_rc: f64) -> (f64, f64) {
 /// (peak ρ < 0.5), then assemble
 /// M_Q = (1 + |D|R_z + |D'|R_zR_c + |F|R_c)·M
 ///       + |A|R_z + |N₂|R_z² + |A'|R_zR_c + |B|R_c.
-pub fn mobius_build_bounds(
-    levels: &[MobiusLevel],
-    orbit: &[(f64, f64)],
-    log2_c_max: f64,
-) -> MobiusBoundsTable {
-    let twoz: Vec<(f64, i64)> = orbit
+/// The seed moduli 2|Z_i| in mantissa/exponent form — the majorant walk's
+/// input (shared by the table build and the single-segment certificate).
+fn mobius_twoz(orbit: &[(f64, f64)]) -> Vec<(f64, i64)> {
+    orbit
         .iter()
         .map(|&(zx, zy)| {
             let m = 2.0 * (zx * zx + zy * zy).sqrt();
@@ -443,54 +441,78 @@ pub fn mobius_build_bounds(
                 (0.0, i64::MIN / 2)
             }
         })
-        .collect();
+        .collect()
+}
+
+/// The anisotropy-rung R_c values for a given c_max (table headroom stamp).
+fn mobius_rungs(log2_c_max: f64) -> [f64; MOBIUS_NCAND] {
     let mut log2_rc = [0f64; MOBIUS_NCAND];
     for (is, &s) in MOBIUS_S.iter().enumerate() {
         log2_rc[is] = s.log2() + log2_c_max;
     }
+    log2_rc
+}
+
+/// One block's bisected-majorant bounds over its seed segment: per rung, the
+/// bisected R_z and the M_Q Cauchy majorant of the compensated remainder Q on
+/// the (R_z, R_c) polydisc (note §4.2).
+fn mobius_block_bounds(
+    blk: &MobiusBlock,
+    seg: &[(f64, i64)],
+    log2_rc: &[f64; MOBIUS_NCAND],
+) -> MobiusBounds {
+    let mut b = MobiusBounds {
+        log2_rz: [f64::NEG_INFINITY; MOBIUS_NCAND],
+        log2_mq: [f64::INFINITY; MOBIUS_NCAND],
+    };
+    if blk.m.degenerate {
+        return b;
+    }
+    let la = cfe_log2(&blk.m.a);
+    let lb = cfe_log2(&blk.m.b);
+    let ld = cfe_log2(&blk.m.d);
+    let lap = cfe_log2(&blk.m.ap);
+    let ldp = cfe_log2(&blk.m.dp);
+    let lf = cfe_log2(&blk.m.f);
+    let ln2 = cfe_log2(&blk.m.n2);
+    for c in 0..MOBIUS_NCAND {
+        let (log2_rz, log2_m) = mobius_bisect_rz(seg, log2_rc[c]);
+        if !log2_rz.is_finite() || !log2_m.is_finite() {
+            continue; // rung saturates for this block
+        }
+        b.log2_rz[c] = log2_rz;
+        let fac = lse2(&[
+            0.0,
+            ld + log2_rz,
+            ldp + log2_rz + log2_rc[c],
+            lf + log2_rc[c],
+        ]);
+        b.log2_mq[c] = lse2(&[
+            fac + log2_m,
+            la + log2_rz,
+            ln2 + 2.0 * log2_rz,
+            lap + log2_rz + log2_rc[c],
+            lb + log2_rc[c],
+        ]);
+    }
+    b
+}
+
+pub fn mobius_build_bounds(
+    levels: &[MobiusLevel],
+    orbit: &[(f64, f64)],
+    log2_c_max: f64,
+) -> MobiusBoundsTable {
+    let twoz = mobius_twoz(orbit);
+    let log2_rc = mobius_rungs(log2_c_max);
     let per_level = levels
         .iter()
         .map(|lvl| {
             (0..lvl.blocks.len())
                 .map(|slot| {
-                    let blk = &lvl.blocks[slot];
-                    let mut b = MobiusBounds {
-                        log2_rz: [f64::NEG_INFINITY; MOBIUS_NCAND],
-                        log2_mq: [f64::INFINITY; MOBIUS_NCAND],
-                    };
-                    if blk.m.degenerate {
-                        return b;
-                    }
                     let first = 1 + slot * lvl.skip;
                     let seg = &twoz[first..first + lvl.skip];
-                    let la = cfe_log2(&blk.m.a);
-                    let lb = cfe_log2(&blk.m.b);
-                    let ld = cfe_log2(&blk.m.d);
-                    let lap = cfe_log2(&blk.m.ap);
-                    let ldp = cfe_log2(&blk.m.dp);
-                    let lf = cfe_log2(&blk.m.f);
-                    let ln2 = cfe_log2(&blk.m.n2);
-                    for c in 0..MOBIUS_NCAND {
-                        let (log2_rz, log2_m) = mobius_bisect_rz(seg, log2_rc[c]);
-                        if !log2_rz.is_finite() || !log2_m.is_finite() {
-                            continue; // rung saturates for this block
-                        }
-                        b.log2_rz[c] = log2_rz;
-                        let fac = lse2(&[
-                            0.0,
-                            ld + log2_rz,
-                            ldp + log2_rz + log2_rc[c],
-                            lf + log2_rc[c],
-                        ]);
-                        b.log2_mq[c] = lse2(&[
-                            fac + log2_m,
-                            la + log2_rz,
-                            ln2 + 2.0 * log2_rz,
-                            lap + log2_rz + log2_rc[c],
-                            lb + log2_rc[c],
-                        ]);
-                    }
-                    b
+                    mobius_block_bounds(&lvl.blocks[slot], seg, &log2_rc)
                 })
                 .collect()
         })
@@ -498,18 +520,187 @@ pub fn mobius_build_bounds(
     MobiusBoundsTable { log2_rc, per_level }
 }
 
-// ── certified radius: condition (V) by descending geometric scan (note §4.3) ──
+/// Full Cauchy certificate for ONE composed block over an arbitrary seed
+/// segment — the periodic block Φ_p, composed from the seeds at
+/// orbit[start..start+p]. Runs the exact machinery the table blocks get:
+/// bisected-majorant bounds per anisotropy rung (M_Q over the p steps), then
+/// the strict (V) value solve (x = 0 gated — the radial-property endpoint)
+/// and the (V′) derivative solve. Returns log2 of the certified entry radius
+/// (min of the two), −∞ when no rung certifies. Replaces the tail-free
+/// closed-form oracle the periodic header shipped with — the reason the
+/// runtime shortcut stayed disabled.
+pub fn mobius_certify_segment(
+    blk: &MobiusBlock,
+    orbit_seg: &[(f64, f64)],
+    epsilon: f64,
+    log2_c_max: f64,
+) -> f64 {
+    if blk.m.degenerate || orbit_seg.is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let twoz = mobius_twoz(orbit_seg);
+    let log2_rc = mobius_rungs(log2_c_max);
+    let bounds = mobius_block_bounds(blk, &twoz, &log2_rc);
+    let table = MobiusBoundsTable { log2_rc, per_level: Vec::new() };
+    let r = mobius_solve_radius(blk, &bounds, &table, epsilon, log2_c_max);
+    let rd = mobius_solve_derivative_radius(blk, &bounds, &table, epsilon, log2_c_max);
+    r.min(rd)
+}
 
-/// Scan grid: 0.1 decade steps from 0.999·R_z down to 1e-16 (the note's grid).
-/// The condition is not guaranteed monotone in x, so bisection is UNSOUND here
-/// (unlike the jet's monotone H_k); the first success from above wins — validity
-/// at the accepted x is certified pointwise by (V) itself.
-const SCAN_STEP_LOG2: f64 = 0.332_192_809_488_736_2; // 0.1 decade
+// ── certified radius: condition (V) by upper-crossing bisection (note §4.3) ──
+
+/// Solve floor: 1e-16, the old scan grid's bottom — a radius below it is
+/// useless at runtime, so a candidate whose crossing sits under the floor
+/// emits nothing.
+///
+/// The raw condition is not guaranteed monotone in x, but REST − ½ε·S·DEN is
+/// convex in x (positive monomials plus a convex Cauchy tail, minus a concave
+/// quadratic while DEN > 0), so the admissible set is an INTERVAL that may
+/// exclude 0 (correctif §4.1). The runtime test |z| < r admits every |z| down
+/// to 0, so a candidate emits a radius only when (V) holds at x = 0 — its
+/// admissible set is then the prefix [0, x*] (the DEN > ½ cut is a prefix too:
+/// DEN decreases in x), and the upper crossing x* is found by bisection
+/// instead of the old 0.1-decade descending scan. Soundness is unchanged: the
+/// returned point is always verified true, and convexity + the x = 0 endpoint
+/// cover the whole interval below it, exactly as they covered the accepted
+/// scan point. A candidate failing at x = 0 (pure-c residual over the
+/// ½ε|B|c_max·DEN budget) contributes NO radius, whatever pointwise successes
+/// a search would find.
 const SCAN_FLOOR_LOG2: f64 = -53.150_849_518_197_8; // 1e-16
 
-/// Solve (V) for one block: largest log2 x with
-/// REST(x, c_max)/DEN(x, c_max) ≤ ½·ε·(|A|·x + |B|·c_max) and DEN > 0.5,
-/// maximized over the candidate polydiscs. −∞ when no scan point certifies.
+/// Largest log2 x in [floor, top] satisfying a prefix predicate (true on
+/// [0, x*], false above — monotonicity is the CALLER's certificate: convexity
+/// + an x = 0 success for (V), term-wise monotone bounds for (V′)). Returns
+/// top when it already holds there, −∞ when even floor fails (x* below the
+/// useful range — 2 evaluations, the common dead-candidate case at strict ε).
+/// Otherwise an exponential downward bracket from top (crossings cluster near
+/// R_z at loose ε, so the bracket usually closes in 1–2 probes) then bisection
+/// to a 0.02-log2 tolerance — ~16× finer than the old 0.1-decade grid at a
+/// fraction of its evaluations. The returned point is always verified true, so
+/// like mobius_bisect_rz this never over-certifies on its own.
+fn bisect_last_success(top: f64, floor: f64, cond: impl Fn(f64) -> bool) -> f64 {
+    const TOL: f64 = 0.02;
+    if cond(top) {
+        return top;
+    }
+    if !cond(floor) {
+        return f64::NEG_INFINITY;
+    }
+    // Bracket: hi is known false, lo known true; probe top−0.5, top−1, top−2…
+    let mut hi = top;
+    let mut lo = floor;
+    let mut off = 0.5;
+    while top - off > floor {
+        if cond(top - off) {
+            lo = top - off;
+            break;
+        }
+        hi = top - off;
+        off *= 2.0;
+    }
+    while hi - lo > TOL {
+        let mid = 0.5 * (lo + hi);
+        if cond(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
+/// Per-block precomputation for pointwise (V) evaluation, shared by the solver
+/// scan and the regression battery (`mobius_v_certified_at`).
+struct MobiusVPre {
+    la: f64,
+    lb: f64,
+    ld: f64,
+    ldp: f64,
+    den_f: f64,
+    log2_half_eps: f64,
+    log2_c_max: f64,
+    /// Power-of-x coefficients of the stored REST terms:
+    /// C_i = Σ_j |q_ij|·c_max^j (log2), shared by every candidate and point.
+    cpow: [f64; JET_DS + 1],
+}
+
+impl MobiusVPre {
+    fn new(blk: &MobiusBlock, epsilon: f64, log2_c_max: f64) -> Self {
+        let mut cpow = [f64::NEG_INFINITY; JET_DS + 1];
+        for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+            let l = blk.log2_q[n];
+            if l == f64::NEG_INFINITY {
+                continue;
+            }
+            let t = l + j as f64 * log2_c_max;
+            let slot = &mut cpow[i as usize];
+            *slot = if *slot == f64::NEG_INFINITY { t } else { lse2(&[*slot, t]) };
+        }
+        // The |F|·c_max DEN contribution is x-independent: hoist it out.
+        let df = cfe_log2(&blk.m.f) + log2_c_max;
+        MobiusVPre {
+            la: cfe_log2(&blk.m.a),
+            lb: cfe_log2(&blk.m.b),
+            ld: cfe_log2(&blk.m.d),
+            ldp: cfe_log2(&blk.m.dp),
+            den_f: if df > -80.0 { df.exp2() } else { 0.0 },
+            log2_half_eps: epsilon.log2() - 1.0,
+            log2_c_max,
+            cpow,
+        }
+    }
+
+    /// (V) at log2 x (`NEG_INFINITY` evaluates the x = 0 endpoint) on one
+    /// candidate polydisc: REST(x, c_max) ≤ ½·ε·(|A|·x + |B|·c_max)·DEN with
+    /// DEN(x, c_max) > 0.5.
+    fn holds_at(&self, log2_mq: f64, log2_rz: f64, log2_theta_c: f64, x: f64) -> bool {
+        // DEN(x, c_max) > 0.5, computed in linear domain (values ≤ O(1)).
+        let d1 = self.ld + x;
+        let d2 = self.ldp + x + self.log2_c_max;
+        let den = 1.0
+            - if d1 > -80.0 { d1.exp2() } else { 0.0 }
+            - if d2 > -80.0 { d2.exp2() } else { 0.0 }
+            - self.den_f;
+        if den <= 0.5 {
+            return false;
+        }
+        let rhs = self.log2_half_eps + lse2(&[self.la + x, self.lb + self.log2_c_max]);
+        // Σ REST terms / 2^rhs, accumulated in linear domain.
+        let mut acc = 0.0f64;
+        for (i, &ci) in self.cpow.iter().enumerate() {
+            if ci == f64::NEG_INFINITY {
+                continue;
+            }
+            // The pure-c row carries no x power (and 0·(−∞) would be NaN).
+            let t = if i == 0 { ci - rhs } else { ci + i as f64 * x - rhs };
+            if t > 62.0 {
+                return false;
+            }
+            if t > -62.0 {
+                acc += t.exp2();
+            }
+        }
+        if acc > den {
+            return false;
+        }
+        let ltheta = (x - log2_rz).max(log2_theta_c);
+        let t = mobius_cauchy_tail_log2(log2_mq, ltheta) - rhs;
+        if t > 62.0 {
+            return false;
+        }
+        if t > -62.0 {
+            acc += t.exp2();
+        }
+        acc <= den
+    }
+}
+
+/// Solve (V) for one block: largest log2 x such that the WHOLE interval [0, x]
+/// is certified — (V) at x = 0 AND at the returned bisection point on the same
+/// candidate polydisc (convexity closes the interval in between), maximized
+/// over candidates. −∞ when no candidate certifies, including every candidate
+/// whose pure-c residual fails the x = 0 budget (correctif §4.1: a pointwise
+/// success above such a gap would NOT cover the runtime test |z| < r).
 pub fn mobius_solve_radius(
     blk: &MobiusBlock,
     bounds: &MobiusBounds,
@@ -520,26 +711,11 @@ pub fn mobius_solve_radius(
     if blk.m.degenerate {
         return f64::NEG_INFINITY;
     }
-    let la = cfe_log2(&blk.m.a);
-    let lb = cfe_log2(&blk.m.b);
-    let ld = cfe_log2(&blk.m.d);
-    let ldp = cfe_log2(&blk.m.dp);
-    let lf = cfe_log2(&blk.m.f);
-    let log2_half_eps = epsilon.log2() - 1.0;
-    // The |F|·c_max DEN contribution is x-independent: hoist it out of the scan.
-    let df = lf + log2_c_max;
-    let den_f = if df > -80.0 { df.exp2() } else { 0.0 };
-    // Power-of-x coefficients of the stored REST terms: C_i = Σ_j |q_ij|·c_max^j,
-    // shared by every candidate and scan point.
-    let mut cpow = [f64::NEG_INFINITY; JET_DS + 1];
-    for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
-        let l = blk.log2_q[n];
-        if l == f64::NEG_INFINITY {
-            continue;
-        }
-        let t = l + j as f64 * log2_c_max;
-        let slot = &mut cpow[i as usize];
-        *slot = if *slot == f64::NEG_INFINITY { t } else { lse2(&[*slot, t]) };
+    let pre = MobiusVPre::new(blk, epsilon, log2_c_max);
+    // DEN(x) < DEN(0) = 1 − |F|·c_max: when the x = 0 margin already fails,
+    // no scan point can pass either.
+    if 1.0 - pre.den_f <= 0.5 {
+        return f64::NEG_INFINITY;
     }
     let mut best = f64::NEG_INFINITY;
     for c in 0..MOBIUS_NCAND {
@@ -559,54 +735,53 @@ pub fn mobius_solve_radius(
         if log2_theta_c >= -1e-9 {
             continue; // θ_c ≥ 1: the Cauchy tail diverges on this polydisc
         }
-        let mut x = start;
-        while x >= SCAN_FLOOR_LOG2 {
-            if x <= best {
-                break; // remaining scan points cannot improve the max
-            }
-            // DEN(x, c_max) > 0.5, computed in linear domain (values ≤ O(1)).
-            let d1 = ld + x;
-            let d2 = ldp + x + log2_c_max;
-            let den = 1.0
-                - if d1 > -80.0 { d1.exp2() } else { 0.0 }
-                - if d2 > -80.0 { d2.exp2() } else { 0.0 }
-                - den_f;
-            if den > 0.5 {
-                let rhs = log2_half_eps + lse2(&[la + x, lb + log2_c_max]);
-                // Σ REST terms / 2^rhs, accumulated in linear domain.
-                let mut acc = 0.0f64;
-                for (i, &ci) in cpow.iter().enumerate() {
-                    if ci == f64::NEG_INFINITY {
-                        continue;
-                    }
-                    let t = ci + i as f64 * x - rhs;
-                    if t > 62.0 {
-                        acc = f64::INFINITY;
-                        break;
-                    }
-                    if t > -62.0 {
-                        acc += t.exp2();
-                    }
-                }
-                if acc <= den {
-                    let ltheta = (x - log2_rz).max(log2_theta_c);
-                    let tail = mobius_cauchy_tail_log2(log2_mq, ltheta);
-                    let t = tail - rhs;
-                    if t <= 62.0 {
-                        if t > -62.0 {
-                            acc += t.exp2();
-                        }
-                        if acc <= den {
-                            best = best.max(x);
-                            break; // first success from above on this candidate
-                        }
-                    }
-                }
-            }
-            x -= SCAN_STEP_LOG2;
+        // (V) at the x = 0 endpoint: this candidate's admissible set is an
+        // interval; if it excludes 0, no radius it emits can cover |z| < r.
+        if !pre.holds_at(log2_mq, log2_rz, log2_theta_c, f64::NEG_INFINITY) {
+            continue;
         }
+        // With x = 0 certified the admissible set is the prefix [0, x*]:
+        // bisect the upper crossing. Floor at `best` — a crossing below the
+        // running max cannot improve it.
+        let r = bisect_last_success(start, SCAN_FLOOR_LOG2.max(best), |x| {
+            pre.holds_at(log2_mq, log2_rz, log2_theta_c, x)
+        });
+        best = best.max(r);
     }
     best
+}
+
+/// Pointwise (V) certificate at log2 x (`NEG_INFINITY` = the x = 0 endpoint):
+/// true when some candidate polydisc certifies the point. Regression-battery
+/// hook (correctif §13 item 2) — an emitted radius r promises this holds for
+/// EVERY x ≤ r, not just the accepted scan point.
+pub fn mobius_v_certified_at(
+    blk: &MobiusBlock,
+    bounds: &MobiusBounds,
+    table: &MobiusBoundsTable,
+    epsilon: f64,
+    log2_c_max: f64,
+    log2_x: f64,
+) -> bool {
+    if blk.m.degenerate {
+        return false;
+    }
+    let pre = MobiusVPre::new(blk, epsilon, log2_c_max);
+    for c in 0..MOBIUS_NCAND {
+        let log2_mq = bounds.log2_mq[c];
+        let log2_rz = bounds.log2_rz[c];
+        if !log2_mq.is_finite() || !log2_rz.is_finite() {
+            continue;
+        }
+        let log2_theta_c = log2_c_max - table.log2_rc[c];
+        if log2_theta_c >= -1e-9 {
+            continue;
+        }
+        if pre.holds_at(log2_mq, log2_rz, log2_theta_c, log2_x) {
+            return true;
+        }
+    }
+    false
 }
 
 /// Cauchy tail of Q after the stored total-degree-D_s prefix. theta is the
@@ -666,49 +841,51 @@ pub fn mobius_solve_derivative_radius(
         if log2_theta_c >= -1e-9 {
             continue;
         }
-        let mut x = log2_rz + (0.999f64).log2();
-        while x >= SCAN_FLOOR_LOG2 {
-            if x <= best {
-                break;
-            }
+        let start = log2_rz + (0.999f64).log2();
+        if start <= best {
+            continue;
+        }
+        // The (V′) bound is term-wise monotone increasing in x (every REST
+        // and tail term carries a nonnegative x power, DEN decreases in x,
+        // the rhs is x-free), so the admissible set is a prefix — bisect the
+        // upper crossing directly, floored at the running max.
+        let cond = |x: f64| {
             let d1 = ld + x;
             let d2 = ldp + x + log2_c_max;
             let den = 1.0
                 - if d1 > -80.0 { d1.exp2() } else { 0.0 }
                 - if d2 > -80.0 { d2.exp2() } else { 0.0 }
                 - den_f;
-            if den > 0.5 {
-                let mut q = f64::NEG_INFINITY;
-                let mut qz = f64::NEG_INFINITY;
-                for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
-                    let l = blk.log2_q[n];
-                    if !l.is_finite() {
-                        continue;
-                    }
-                    q = lse2(&[q, l + i as f64 * x + j as f64 * log2_c_max]);
-                    if i >= 1 {
-                        qz = lse2(&[
-                            qz,
-                            l + (i as f64).log2() + (i as f64 - 1.0) * x
-                                + j as f64 * log2_c_max,
-                        ]);
-                    }
+            if den <= 0.5 {
+                return false;
+            }
+            let mut q = f64::NEG_INFINITY;
+            let mut qz = f64::NEG_INFINITY;
+            for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+                let l = blk.log2_q[n];
+                if !l.is_finite() {
+                    continue;
                 }
-                let log2_theta = (x - log2_rz).max(log2_theta_c);
-                q = lse2(&[q, mobius_cauchy_tail_log2(log2_mq, log2_theta)]);
-                qz = lse2(&[
-                    qz,
-                    mobius_cauchy_dz_tail_log2(log2_mq, log2_rz, log2_theta),
-                ]);
-                let log2_den = den.log2();
-                let bound = lse2(&[qz - log2_den, ldeff + q - 2.0 * log2_den]);
-                if bound <= rhs {
-                    best = best.max(x);
-                    break;
+                q = lse2(&[q, l + i as f64 * x + j as f64 * log2_c_max]);
+                if i >= 1 {
+                    qz = lse2(&[
+                        qz,
+                        l + (i as f64).log2() + (i as f64 - 1.0) * x
+                            + j as f64 * log2_c_max,
+                    ]);
                 }
             }
-            x -= SCAN_STEP_LOG2;
-        }
+            let log2_theta = (x - log2_rz).max(log2_theta_c);
+            q = lse2(&[q, mobius_cauchy_tail_log2(log2_mq, log2_theta)]);
+            qz = lse2(&[
+                qz,
+                mobius_cauchy_dz_tail_log2(log2_mq, log2_rz, log2_theta),
+            ]);
+            let log2_den = den.log2();
+            let bound = lse2(&[qz - log2_den, ldeff + q - 2.0 * log2_den]);
+            bound <= rhs
+        };
+        best = best.max(bisect_last_success(start, SCAN_FLOOR_LOG2.max(best), cond));
     }
     best
 }
@@ -1670,6 +1847,119 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn mobius_radius_certifies_full_interval() {
+        // (correctif §4.1, battery item 2) Every emitted radius must certify
+        // the WHOLE closed interval [0, r], not the accepted scan point alone
+        // (the runtime comparison |z| < r admits any smaller |z|): sample each
+        // block's [0, r] geometrically — plus the exact x = 0 endpoint — and
+        // check the pointwise (V) certificate at every sample.
+        for (eps, c_max) in [(1e-6_f64, 1e-9_f64), (1e-4, 1e-5)] {
+            let log2_c_max = c_max.log2();
+            for (name, cx, cy) in [
+                ("feigenbaum", -1.401155_f64, 0.0_f64),
+                ("cusp", -0.75, 0.0),
+                ("period2", -1.25, 0.0),
+            ] {
+                let Some((_orbit, levels, bounds, radii)) = harness(cx, cy, 2048, eps, c_max)
+                else {
+                    panic!("[{}] escaped", name);
+                };
+                let mut checked = 0usize;
+                for (li, lvl) in levels.iter().enumerate() {
+                    for (s, blk) in lvl.blocks.iter().enumerate() {
+                        let r = radii[li][s];
+                        if !r.is_finite() {
+                            continue;
+                        }
+                        let b = &bounds.per_level[li][s];
+                        assert!(
+                            mobius_v_certified_at(
+                                blk, b, &bounds, eps, log2_c_max,
+                                f64::NEG_INFINITY,
+                            ),
+                            "[{}] skip {} slot {}: (V) fails at x = 0 under radius 2^{:.2}",
+                            name, lvl.skip, s, r
+                        );
+                        // 24 geometric samples spanning 40 log2 units up to r.
+                        for k in 0..=24 {
+                            let x = r - 40.0 * (1.0 - k as f64 / 24.0);
+                            assert!(
+                                mobius_v_certified_at(blk, b, &bounds, eps, log2_c_max, x),
+                                "[{}] skip {} slot {}: (V) fails at 2^{:.2} inside [0, 2^{:.2}]",
+                                name, lvl.skip, s, x, r
+                            );
+                            checked += 1;
+                        }
+                    }
+                }
+                println!(
+                    "[{}] eps {:e} c_max {:e}: {} interval samples certified",
+                    name, eps, c_max, checked
+                );
+                assert!(checked > 0, "[{}] no finite radii exercised", name);
+            }
+        }
+    }
+
+    #[test]
+    fn mobius_radius_zero_gate_synthetic() {
+        // (correctif §4.1, battery item 3) A block whose PURE-C residual fails
+        // (V) at x = 0 but passes at some x > 0: the admissible set is
+        // [x_min, x_max] with x_min > 0, which the single runtime comparison
+        // |z| < r cannot express — the solver must emit NO radius, even though
+        // the old first-success-from-above scan finds a pointwise success.
+        let eps = 1e-6_f64;
+        let c_max = 1e-6_f64;
+        let log2_c_max = c_max.log2();
+        // A = B = 1, D = D' = F = N₂ = 0: DEN ≡ 1, budget = ½ε·(x + c_max).
+        let m = MobiusCPlus {
+            a: CFe::from_c(1.0, 0.0),
+            b: CFe::from_c(1.0, 0.0),
+            d: CFe::ZERO,
+            ap: CFe::ZERO,
+            dp: CFe::ZERO,
+            f: CFe::ZERO,
+            n2: CFe::ZERO,
+            degenerate: false,
+        };
+        let mut log2_q = [f64::NEG_INFINITY; JET_NCOEFF];
+        // |q₀₃|·c_max³ = 1e6·1e-18 = 1e-12 > ½ε·c_max = 5e-13: fails at x = 0.
+        // At x ≈ 1e-5 the budget ½ε·(x + c_max) ≈ 5.5e-12 dominates: passes.
+        log2_q[jet_idx(0, 3)] = 1e6_f64.log2();
+        let blk = MobiusBlock { m, log2_q };
+        // One live candidate: R_z = 1e-3, M_Q = 1, R_c = 3e3·c_max (the tail
+        // is negligible at the scan points that matter).
+        let mut bounds = MobiusBounds {
+            log2_rz: [f64::NEG_INFINITY; MOBIUS_NCAND],
+            log2_mq: [f64::INFINITY; MOBIUS_NCAND],
+        };
+        bounds.log2_rz[0] = 1e-3_f64.log2();
+        bounds.log2_mq[0] = 0.0;
+        let table = MobiusBoundsTable {
+            log2_rc: [(3e3 * c_max).log2(); MOBIUS_NCAND],
+            per_level: Vec::new(),
+        };
+        // Sanity: x = 1e-5 passes POINTWISE — the pre-correctif scan would
+        // have emitted a radius covering it.
+        assert!(
+            mobius_v_certified_at(&blk, &bounds, &table, eps, log2_c_max, 1e-5_f64.log2()),
+            "synthetic block should pass pointwise at x = 1e-5"
+        );
+        // ...but x = 0 fails, so the single-comparison radius must be −∞.
+        assert!(
+            !mobius_v_certified_at(&blk, &bounds, &table, eps, log2_c_max, f64::NEG_INFINITY),
+            "synthetic block should fail (V) at x = 0"
+        );
+        let r = mobius_solve_radius(&blk, &bounds, &table, eps, log2_c_max);
+        assert_eq!(
+            r,
+            f64::NEG_INFINITY,
+            "zero-gate leak: emitted radius 2^{} over an admissible set excluding 0",
+            r
+        );
     }
 
     #[test]
@@ -2861,28 +3151,38 @@ mod tests {
                 println!("[{}] escaped early — skipped", name);
                 continue;
             }
-            // Production [1/1]-c+ baseline + Padé heuristic baseline.
+            // Baselines: production [2/1]-c+ build, TRUE [1/1]-c+ build
+            // (separate builders — correctif §13 item 4: a line labeled [1/1]
+            // that calls the production builder measures [2/1]), and the Padé
+            // heuristic.
             let levels1 = mobius_build_levels(&orbit, 1 << 18);
             let bounds1 = mobius_build_bounds(&levels1, &orbit, log2_c_max);
             let radii1 = mobius_build_radii(&levels1, &bounds1, eps, log2_c_max);
+            let levels_k1 = mobius_build_levels_k1(&orbit, 1 << 18);
+            let bounds_k1 = mobius_build_bounds(&levels_k1, &orbit, log2_c_max);
+            let radii_k1 = mobius_build_radii(&levels_k1, &bounds_k1, eps, log2_c_max);
             let pade_levels = crate::bench_build_levels(&orbit, eps, true, 1 << 18);
             let cm = log2_c_max.exp2();
 
             print!("\n=== [{}] eps={:e} c~1e{:.0} ===\n", name, eps, dec);
             let mut turn_line = String::new();
-            let (mut t_pade, mut t_m1) = (0u64, 0u64);
+            let (mut t_pade, mut t_m1, mut t_k1) = (0u64, 0u64, 0u64);
             for kpx in 0..16 {
                 let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
                 let dc = (t * cm * 0.7, 0.37 * t * cm);
                 let (ps, _, _) = crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
                 t_pade += ps as u64;
                 t_m1 += mobius_run_pixel(&levels1, &radii1, &orbit, dc, max_iter).steps as u64;
+                t_k1 += mobius_run_pixel(&levels_k1, &radii_k1, &orbit, dc, max_iter).steps
+                    as u64;
             }
             turn_line.push_str(&format!(
-                "turns: pade={} c+[1/1]={} ({:.2}x)",
+                "turns: pade={} c+[2/1] prod={} ({:.2}x) c+[1/1]={} ({:.2}x)",
                 t_pade,
                 t_m1,
-                t_m1 as f64 / t_pade.max(1) as f64
+                t_m1 as f64 / t_pade.max(1) as f64,
+                t_k1,
+                t_k1 as f64 / t_pade.max(1) as f64
             ));
 
             // [K/1] variants from the streamed jets (same level scaffold).

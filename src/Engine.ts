@@ -127,6 +127,10 @@ const TS_COUNT = PASS_SLOTS.length * 2
 // asynchronous, so this controls the compute/count pass frequency, not display FPS.
 const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
 const COUNTER_READBACK_BUFFER_COUNT = 3
+// Deferred-clear fallback (see pendingTableClear): generous enough for the
+// costliest unified builds (~3-5 s @40k iters) plus an in-flight orbit
+// extension; past it the re-render proceeds exact rather than never.
+const TABLE_CLEAR_FALLBACK_MS = 10_000
 const ORBIT_METRIC_EPSILON = 0.001
 
 type CounterReadbackSlot = {
@@ -146,9 +150,17 @@ type ReferenceWorkerRequest =
         angle: number
         approximationMode: ApproximationMode
         blaEpsilon: number
+        gateEmission?: boolean
         maxBlaSkip: number
         maxIterations: number
         precisionBudget: string
+        // Current table-parameter generation (see Engine.tableGeneration): a fresh
+        // worker starts at 0, so the reset must hand it the engine's counter or
+        // every blaReady it posts would be dropped as stale.
+        tableGeneration: number
+        // Canvas aspect (width/height): lets Rust tighten the per-view c_max
+        // from the 4×scale margin to the exact screen bound.
+        viewportAspect?: number
     }
     | {
         type: 'updateView'
@@ -158,21 +170,31 @@ type ReferenceWorkerRequest =
         scale: string
         angle: number
         maxIterations: number
+        viewportAspect?: number
     }
     | {
         type: 'setApproximationMode'
         jobId: number
         approximationMode: ApproximationMode
+        tableGeneration: number
     }
     | {
         type: 'setBlaEpsilon'
         jobId: number
         blaEpsilon: number
+        tableGeneration: number
+    }
+    | {
+        type: 'setGateEmission'
+        jobId: number
+        on: boolean
+        tableGeneration: number
     }
     | {
         type: 'setMaxBlaSkip'
         jobId: number
         maxBlaSkip: number
+        tableGeneration: number
     }
     | {
         type: 'findMinibrot'
@@ -216,6 +238,11 @@ type ReferenceWorkerResponse =
         // 2 = bounds, 4 = radii) — RenderStats' "Table build" debug row.
         buildMs?: number
         buildStages?: number
+        // Echo of the table-parameter generation the table was built under. A
+        // mismatch with Engine.tableGeneration means the build predates the
+        // latest ε/skip/gates/mode change (in-flight when the setter was posted)
+        // — dropped; the worker's FIFO guarantees a fresh build follows.
+        tableGeneration: number
     }
     | {
         type: 'error'
@@ -549,6 +576,10 @@ export class Engine {
     realLoopStepsApprox = -1
     // [affine, Padé, c+, jet] Σ applications (auto mode); -1 = unknown.
     tierAppsApprox: [number, number, number, number] = [-1, -1, -1, -1]
+    /** §18 gate observability: [Ψ-jumps landed, degraded attempts] over the
+     *  completed render session (raw counts). [-1,-1] = not yet read; stays
+     *  [0,0] while gate emission is dormant. */
+    gateStatsApprox: [number, number] = [-1, -1]
     /** Last block-table build wall-clock (worker-side, ms) and its unified
      *  stage mask (1 = coeffs, 2 = bounds, 4 = radii; −1 = non-unified table).
      *  A radii-only mask (4) is the Phase F keyframe path. */
@@ -650,6 +681,7 @@ export class Engine {
     private currentBlockTableKind: 'bla' | 'jet' | 'mobius' | 'unified' | null = null
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
+    private gateEmission = true
     private maxBlaSkip = 65536
     // Fixed precision budget as a target scale (max zoom depth navigation stays precise at).
     // Default 1e-30 keeps shallow use fast; the Settings slider can deepen it to 1e-1000.
@@ -674,6 +706,21 @@ export class Engine {
     private referenceJobId = 0
     private referenceAvailableOrbitLen = 0
     private referenceBlaReadyMaxIterations = 0
+    // ── Deferred invalidation clear (table "repose" race fix) ────────
+    // A table-parameter change (ε, maxSkip, gates, mode) used to clear history
+    // immediately: the whole re-render then converged in exact perturbation
+    // BEFORE the rebuilt table landed, so blocks/gates only ever served boots.
+    // Instead, the setter bumps `tableGeneration` (echoed by the worker in
+    // blaReady, so an in-flight table built under the old params is dropped)
+    // and arms `pendingTableClear`: the clear executes when the matching table
+    // is on GPU — the re-render starts with blocks active from dispatch #1.
+    // Until then the current image (identical content — tables are certified
+    // pure accelerations) stays on screen. `pendingTableClearDeadline` is the
+    // anti-deadlock fallback: worker failure or a throttled rebuild must not
+    // freeze the view forever — past it, clear anyway and render exact.
+    private tableGeneration = 0
+    private pendingTableClear = false
+    private pendingTableClearDeadline = 0
     private referenceWorkerFailed = false
     private referenceWorkerReady = false
     private pendingWorkerMessages: ReferenceWorkerRequest[] = []
@@ -931,6 +978,9 @@ export class Engine {
         this.referenceResetSerial++
         this.referenceResetFlashUntil = performance.now() + 900
         this.referenceOrbitWasReset = true
+        // Promotion clears history wholesale — a pending deferred table clear
+        // is superseded (staging's table was generation-checked at receipt).
+        this.pendingTableClear = false
         this.invalidateCounterReadback()
         this.needRender = true
 
@@ -956,6 +1006,7 @@ export class Engine {
         this.pendingWorkerMessages = []
         this.referenceAvailableOrbitLen = 0
         this.referenceBlaReadyMaxIterations = 0
+        this.pendingTableClear = false
         this.activeRef = null
         this.stagingRef = null
         this.referenceJobId++
@@ -1012,14 +1063,20 @@ export class Engine {
             angle: mandelbrot.angle,
             approximationMode: this.approximationMode,
             blaEpsilon: this.blaEpsilon,
+            gateEmission: this.gateEmission,
             maxBlaSkip: this.maxBlaSkip,
             maxIterations,
             precisionBudget: this.precisionBudget,
+            tableGeneration: this.tableGeneration,
+            viewportAspect: this.width / Math.max(1, this.height),
         })
     }
 
     private syncReferenceWorkerView(mandelbrot: Mandelbrot, scaleString: string, maxIterations: number) {
-        const nextKey = `${mandelbrot.cx}\n${mandelbrot.cy}\n${scaleString}\n${mandelbrot.angle}\n${maxIterations}`
+        // Aspect is part of the key: a resize alone moves the exact c_max bound,
+        // and the worker must get a chance to re-solve/re-post the radii.
+        const aspectKey = (this.width / Math.max(1, this.height)).toFixed(6)
+        const nextKey = `${mandelbrot.cx}\n${mandelbrot.cy}\n${scaleString}\n${mandelbrot.angle}\n${maxIterations}\n${aspectKey}`
         if (nextKey === this.referenceViewKey) {
             return
         }
@@ -1038,6 +1095,7 @@ export class Engine {
             scale: scaleString,
             angle: mandelbrot.angle,
             maxIterations,
+            viewportAspect: this.width / Math.max(1, this.height),
         })
     }
 
@@ -1148,7 +1206,14 @@ export class Engine {
         }
 
         // ── blaReady — routed by refId, exactly like orbit chunks ──
+        // Stale-generation tables (built under pre-change ε/skip/gates/mode, in
+        // flight when the setter was posted) are dropped in both branches: the
+        // worker processes messages FIFO, so a build under the new params always
+        // follows.
         if (this.activeRef && message.refId === this.activeRef.refId) {
+            if (message.tableGeneration !== this.tableGeneration) {
+                return
+            }
             this.writeBlockTable(message)
             this.currentBlaLevelCount = message.levelCount
             this.referenceBlaReadyMaxIterations = message.maxIterations
@@ -1160,13 +1225,29 @@ export class Engine {
                 this.lastTableBuildStages = message.buildStages ?? -1
             }
             this.isReferenceValidating = false
-            // BLA is a pure acceleration of the same perturbation result, so do not
-            // clear history when it arrives: already-computed pixels stay valid and
-            // continuations simply start using BLA. Clearing here caused a visible
-            // render cut (black screen) each time the BLA table was delivered.
-            this.needRender = true
-            this.invalidateCounterReadback(true)
+            if (this.pendingTableClear) {
+                // Deferred invalidation clear: the table for the new parameters
+                // is now on GPU, so restart the whole render with blocks active
+                // from the first dispatch. The completion snapshot (resolved →
+                // frozen) taken when the previous render finished serves as the
+                // visual fallback during reconvergence, exactly as it does for
+                // an immediate clear.
+                this.pendingTableClear = false
+                this.clearHistoryNextFrame = true
+                this.needRender = true
+                this.invalidateCounterReadback()
+            } else {
+                // BLA is a pure acceleration of the same perturbation result, so do not
+                // clear history when it arrives: already-computed pixels stay valid and
+                // continuations simply start using BLA. Clearing here caused a visible
+                // render cut (black screen) each time the BLA table was delivered.
+                this.needRender = true
+                this.invalidateCounterReadback(true)
+            }
         } else if (this.stagingRef && message.refId === this.stagingRef.refId) {
+            if (message.tableGeneration !== this.tableGeneration) {
+                return
+            }
             this.stagingRef.bla = {
                 kind: message.kind,
                 steps: message.steps,
@@ -1346,19 +1427,19 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
-        // Work-instrumentation buffer (in-place compute path): 8 × u32
-        // (realMean, covMean, maxAccum, maxSteps, tierAff/Pade/Cplus/Jet) —
-        // see WorkStats in the shader.
+        // Work-instrumentation buffer (in-place compute path): 10 × u32
+        // (realMean, covMean, maxAccum, maxSteps, tierAff/Pade/Cplus/Jet,
+        // gateJumps/gateFails) — see WorkStats in the shader.
         this.workStatsBuffer = this.device.createBuffer({
-            size: 32,
+            size: 40,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine WorkStats Storage',
         })
-        // Readback slots hold counter (8 B) + workStats (32 B) = 40 B, copied
-        // together each sampled in-place dispatch and read as 10 × u32.
+        // Readback slots hold counter (8 B) + workStats (40 B) = 48 B, copied
+        // together each sampled in-place dispatch and read as 12 × u32.
         this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
             buffer: this.device.createBuffer({
-                size: 40,
+                size: 48,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: `Engine Counter Readback ${index}`,
             }),
@@ -1936,7 +2017,7 @@ export class Engine {
         }
         if (!this.finalStatsBuffer) {
             this.finalStatsBuffer = this.device.createBuffer({
-                size: 40,
+                size: 48,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: 'Engine Final Stats Readback',
             })
@@ -1944,7 +2025,7 @@ export class Engine {
         const session = this.workStatsSessionSerial
         const encoder = this.device.createCommandEncoder({ label: 'Engine Final Stats Copy' })
         encoder.copyBufferToBuffer(this.counterBuffer, 0, this.finalStatsBuffer, 0, 8)
-        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 32)
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 40)
         this.device.queue.submit([encoder.finish()])
         this.finalStatsPending = true
         void (async () => {
@@ -1958,6 +2039,9 @@ export class Engine {
                 const data = new Uint32Array(this.finalStatsBuffer!.getMappedRange())
                 const realMean = data[2]
                 const covMean = data[3]
+                // Gate counters are raw events — no plausibility gate needed
+                // (the realMean condition protects the realizedSkip ratio).
+                this.gateStatsApprox = [data[10], data[11]]
                 if (realMean > 0 && covMean / realMean >= 1) {
                     this.realLoopStepsApprox = realMean * 64
                     this.tierAppsApprox = [data[6], data[7], data[8], data[9]]
@@ -2420,14 +2504,33 @@ export class Engine {
 
         this.approximationMode = mode
         this.currentBlaLevelCount = 0
+        this.tableGeneration++
         this.postReferenceWorker({
             type: 'setApproximationMode',
             jobId: this.referenceJobId,
             approximationMode: mode,
+            tableGeneration: this.tableGeneration,
         })
-        this.clearHistoryNextFrame = true
+        this.requestTableClear(mode !== 'perturbation')
         this.needRender = true
         this.invalidateCounterReadback()
+    }
+
+    /**
+     * Clear history for a table-parameter change. `deferred` (any block mode)
+     * arms the deferred clear — executed when the rebuilt table lands (blaReady
+     * with the current generation), so the re-render uses blocks from its first
+     * dispatch instead of converging exact before the table arrives (the table
+     * "repose" race). Perturbation expects no table: clear immediately.
+     */
+    private requestTableClear(deferred: boolean) {
+        if (deferred) {
+            this.pendingTableClear = true
+            this.pendingTableClearDeadline = performance.now() + TABLE_CLEAR_FALLBACK_MS
+        } else {
+            this.pendingTableClear = false
+            this.clearHistoryNextFrame = true
+        }
     }
 
     /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes, 5 tier. */
@@ -2445,6 +2548,28 @@ export class Engine {
         return this.approximationMode
     }
 
+    /** §18 parabolic-gate emission (default OFF — see lib.rs field verdict).
+     *  Rebuilds the unified sidecar and re-renders when toggled in auto. */
+    setGateEmission(on: boolean) {
+        if (on === this.gateEmission) {
+            return
+        }
+        this.mandelbrotNavigator.set_gate_emission(on)
+        this.gateEmission = on
+        this.tableGeneration++
+        this.postReferenceWorker({
+            type: 'setGateEmission',
+            jobId: this.referenceJobId,
+            on,
+            tableGeneration: this.tableGeneration,
+        })
+        if (this.approximationMode === 'auto') {
+            this.currentBlaLevelCount = 0
+            this.requestTableClear(true)
+            this.needRender = true
+        }
+    }
+
     setBlaEpsilon(epsilon: number) {
         const next = Math.max(Number.MIN_VALUE, epsilon)
         if (next === this.blaEpsilon) {
@@ -2452,17 +2577,19 @@ export class Engine {
         }
         this.mandelbrotNavigator.set_bla_epsilon(next)
         this.blaEpsilon = next
+        this.tableGeneration++
         this.postReferenceWorker({
             type: 'setBlaEpsilon',
             jobId: this.referenceJobId,
             blaEpsilon: next,
+            tableGeneration: this.tableGeneration,
         })
         // ε sets the validity radius (ε·|A| affine, √ε·|A| Padé, the certified
         // (V) radii for jet/mobius), so a change must rebuild the table and
         // re-render in any block-jump mode.
         if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius' || this.approximationMode === 'auto') {
             this.currentBlaLevelCount = 0
-            this.clearHistoryNextFrame = true
+            this.requestTableClear(true)
             this.needRender = true
             this.invalidateCounterReadback()
         }
@@ -2526,14 +2653,16 @@ export class Engine {
         }
         this.mandelbrotNavigator.set_max_bla_skip(pow2)
         this.maxBlaSkip = pow2
+        this.tableGeneration++
         this.postReferenceWorker({
             type: 'setMaxBlaSkip',
             jobId: this.referenceJobId,
             maxBlaSkip: pow2,
+            tableGeneration: this.tableGeneration,
         })
         if (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius' || this.approximationMode === 'auto') {
             this.currentBlaLevelCount = 0
-            this.clearHistoryNextFrame = true
+            this.requestTableClear(true)
             this.needRender = true
             this.invalidateCounterReadback()
         }
@@ -2579,23 +2708,37 @@ export class Engine {
             return
         }
 
+        // Deferred-clear fallback: the rebuilt table never landed (worker
+        // failure, throttled jet/mobius rebuild, orbit still extending past the
+        // deadline) — re-render exact rather than keeping the stale image up.
+        // The table still accelerates the tail when it eventually arrives.
+        if (this.pendingTableClear
+            && (this.referenceWorkerFailed || performance.now() > this.pendingTableClearDeadline)) {
+            this.pendingTableClear = false
+            this.clearHistoryNextFrame = true
+            this.needRender = true
+        }
+
         const navigatorApproximationMode: ApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 5 ? 'auto' : this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
             this.approximationMode = navigatorApproximationMode
             this.blaEpsilon = navigatorBlaEpsilon
             this.currentBlaLevelCount = 0
+            this.tableGeneration++
             this.postReferenceWorker({
                 type: 'setApproximationMode',
                 jobId: this.referenceJobId,
                 approximationMode: navigatorApproximationMode,
+                tableGeneration: this.tableGeneration,
             })
             this.postReferenceWorker({
                 type: 'setBlaEpsilon',
                 jobId: this.referenceJobId,
                 blaEpsilon: navigatorBlaEpsilon,
+                tableGeneration: this.tableGeneration,
             })
-            this.clearHistoryNextFrame = true
+            this.requestTableClear(navigatorApproximationMode !== 'perturbation')
             // Invalidate the frozen fallback: it still holds the OLD mode's
             // completed image. clearHistoryNextFrame wipes only the live texture,
             // so without this the color pass composites old-mode frozen pixels
@@ -3517,7 +3660,7 @@ export class Engine {
             // only on the generation's first in-place dispatch, then let every
             // dispatch atomicAdd into it (exact, sampling-independent totals).
             if (this.workStatsClearedSession !== this.workStatsSessionSerial) {
-                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 32)
+                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 40)
                 this.workStatsClearedSession = this.workStatsSessionSerial
             }
             const computePass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(3) })
@@ -3538,7 +3681,7 @@ export class Engine {
                 const sequence = ++this.counterReadbackSequence
                 const generation = this.counterReadbackGeneration
                 commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
-                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 32)
+                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 40)
                 this.lastCounterDispatchFrame = frameSerial
                 scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
             }
@@ -3996,6 +4139,7 @@ export class Engine {
             else if (isZoomActive(this.zoomState)) r = 'zoomActive'
             else if (this.isReferenceValidating) r = 'referenceValidating'
             else if (this.orbitIncomplete) r = 'orbitIncomplete'
+            else if (this.pendingTableClear) r = 'tablePending'
             return r !== ''
         }
 
@@ -4004,6 +4148,12 @@ export class Engine {
         else if (this.snapshotCallback) reason = 'snapshot'
         else if (isZoomActive(this.zoomState)) reason = 'zoomActive'
         else if (this.clearHistoryNextFrame) reason = 'clearHistory'
+        // Deferred invalidation clear armed: the view is a stale (identical)
+        // image awaiting its rebuilt table. Keep the loop alive so update()
+        // checks the fallback deadline and the session reads as "rendering"
+        // (specs and the completion timer span the whole param-change
+        // re-render, table build included).
+        else if (this.pendingTableClear) reason = 'tablePending'
         else if (this.needFreezeSnapshot) reason = 'freezeSnapshot'
         else if (this.needMergeSnapshot) reason = 'mergeSnapshot'
         else if (this.isReferenceValidating) reason = 'referenceValidating'

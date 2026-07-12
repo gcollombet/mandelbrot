@@ -46,8 +46,8 @@ use crate::jet::JetBlockBounds;
 // runtime fixed points stay a quadratic).
 use crate::mobius::{
     mobius_build_bounds, mobius_build_derivative_radii, mobius_build_radii,
-    mobius_from_jet, mobius_from_jet_k2, mobius_q, MobiusBlock,
-    MobiusBoundsTable, MobiusCPlus, MobiusLevel,
+    mobius_certify_segment, mobius_from_jet, mobius_from_jet_k2, mobius_q,
+    MobiusBlock, MobiusBoundsTable, MobiusCPlus, MobiusLevel,
     MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP,
 };
 
@@ -244,8 +244,13 @@ pub fn build_unified_levels(orbit: &[(f64, f64)], max_skip: usize) -> Vec<Unifie
 /// The proposed radius is the largest x with
 /// Σ_ij |q_ij|·x^i·y^j ≤ ε·(|A|·x + |B|·y), y = c_max, capped by the pole
 /// bound (|D| + |D'|·y)·x + |F|·y ≤ ¼ (den = 1 + De·z + F·c: the DEN budget
-/// loses the x-independent |F|·y slice up front). Descending scan (0.25 log2
-/// steps, first success from above).
+/// loses the x-independent |F|·y slice up front). Upper-crossing bisection
+/// (scan_first_success), GATED at x = 0 (correctif §4.1): the
+/// budget grows with x while the pure-c REST terms do not, so the admissible
+/// set (REST − εS convex in x) is an interval that may exclude 0 — an emitted
+/// radius must cover the whole runtime interval [0, r], so the pure-c residual
+/// must pass its ε·|B|·y budget first (matters for the periodic header, which
+/// consumes this radius at runtime).
 pub fn closed_form_radius(
     m: &MobiusCPlus,
     log2_q: &[f64; JET_NCOEFF],
@@ -261,6 +266,16 @@ pub fn closed_form_radius(
         return f64::NEG_INFINITY;
     }
     let l2eps = eps.log2() - 1.0;
+    // (V) at x = 0: pure-c stored terms against the ε·|B|·y budget.
+    let mut rest0 = f64::NEG_INFINITY;
+    for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+        if i == 0 && log2_q[n].is_finite() {
+            rest0 = lse2_pair(rest0, log2_q[n] + j as f64 * log2_cmax);
+        }
+    }
+    if rest0.is_finite() && !(rest0 - (l2b + log2_cmax) <= l2eps) {
+        return f64::NEG_INFINITY;
+    }
     let l2d = m.d.log2_mag().unwrap_or(f64::NEG_INFINITY);
     let l2dp_y = m.dp.log2_mag().unwrap_or(f64::NEG_INFINITY) + log2_cmax;
     let l2_deff = lse2_pair(l2d, l2dp_y);
@@ -287,7 +302,8 @@ pub fn closed_form_radius(
 /// cap |De|·x + |F|·y ≤ ¼ (DEN ≥ ¾) by
 /// (4/3)·Σ i·|q|·x^(i−1)·y^j + (16/9)·|De|·Σ|q|·x^i·y^j.
 /// Condition (V′): that ≤ ½ε·(|A| + |A′|·y) — the multiplier scale, the same
-/// c-channel-inclusive lesson as (V)'s value scale. Descending scan as (V).
+/// c-channel-inclusive lesson as (V)'s value scale. Upper-crossing bisection
+/// as (V) (the bound is term-wise monotone in x against an x-free budget).
 /// `rational` selects the DEN corrections; polynomial tiers skip the pole cap.
 pub fn derivative_radius(
     m: &MobiusCPlus,
@@ -367,32 +383,45 @@ pub fn unified_eval_jet3_dz(blk: &UnifiedBlock, z: CFe, c: CFe) -> CFe {
     p1.add(two_p2.add(three_p3.mul(z)).mul(z))
 }
 
-/// Descending first-success-from-above scan, coarse-to-fine: bracket with
-/// 4-log2 steps, refine at 0.25 inside the bracket. ~11× fewer condition
-/// evaluations than a flat 0.25 scan; conservative on non-monotone conditions
-/// (a missed finer success above the coarse bracket only shrinks the radius —
-/// soundness is per-returned-x, verified by the exact-stepping referees).
+/// Largest log2 x ≤ top satisfying a prefix predicate (true on [0, x*], false
+/// above), found by upper-crossing bisection — the callers certify the prefix
+/// shape: `closed_form_radius` via its x = 0 gate plus convexity of REST − εS
+/// (correctif §4.1), `derivative_radius` via term-wise monotone bounds against
+/// an x-free budget. Replaces the old coarse-to-fine descending scan: a dead
+/// candidate costs 2 evaluations (top + floor), a live one an exponential
+/// downward bracket (crossings cluster near top at loose ε) plus bisection to
+/// a 0.02-log2 tolerance — finer than the old 0.25 refine grid at fewer
+/// evaluations. Soundness is per-returned-x (always verified true), checked
+/// by the exact-stepping referees.
 fn scan_first_success(top: f64, cond: impl Fn(f64) -> bool) -> f64 {
-    const COARSE: f64 = 4.0;
-    const FINE: f64 = 0.25;
-    let mut lx = top;
-    while lx > -160.0 {
-        if cond(lx) {
-            // Refine upward inside (lx, lx + COARSE).
-            let mut best = lx;
-            let mut probe = lx + COARSE - FINE;
-            while probe > lx {
-                if cond(probe) {
-                    best = probe;
-                    break;
-                }
-                probe -= FINE;
-            }
-            return best.min(top);
-        }
-        lx -= COARSE;
+    const FLOOR: f64 = -160.0;
+    const TOL: f64 = 0.02;
+    if cond(top) {
+        return top;
     }
-    f64::NEG_INFINITY
+    if top <= FLOOR || !cond(FLOOR) {
+        return f64::NEG_INFINITY;
+    }
+    let mut hi = top;
+    let mut lo = FLOOR;
+    let mut off = 0.5;
+    while top - off > FLOOR {
+        if cond(top - off) {
+            lo = top - off;
+            break;
+        }
+        hi = top - off;
+        off *= 2.0;
+    }
+    while hi - lo > TOL {
+        let mid = 0.5 * (lo + hi);
+        if cond(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
 }
 
 /// log2 of the DEN pole budget left for the z-channel: ¼ − |F|·c_max
@@ -763,7 +792,6 @@ pub fn sa_profile(orbit: &[(f64, f64)], eps: f64, samples: &[usize]) -> Vec<(usi
 // ── interior/periodic regime (Phase E, design D8, findings §17) ─────────────────
 
 /// Longest reference period the build will detect.
-#[allow(dead_code)] // runtime path is disabled pending a full tail certificate
 pub const PERIODIC_MAX_P: usize = 512;
 
 /// The composed period block Φ_p in c+ form, with its certified entry radius:
@@ -775,15 +803,17 @@ pub struct PeriodicBlock {
     pub start: usize,
     pub p: usize,
     pub m: MobiusCPlus,
-    /// Certified entry radius, log2 |δ| — min of the value (V-style closed
-    /// form) and derivative (V′) radii: κ is a derivative object.
+    /// Certified entry radius, log2 |δ| — min of the strict (V) value and
+    /// (V′) derivative radii from the full Cauchy certificate
+    /// (mobius_certify_segment over the p composed steps): κ is a derivative
+    /// object, and the runtime |δ| < r test needs the whole interval covered
+    /// (x = 0 gate). Referee: periodic_certificate_sound_against_exact_walk.
     pub log2_r: f64,
 }
 
 /// Detect reference periodicity after the transient (sustained |Z_{k+p} − Z_k|
 /// < 1e-12 through the orbit tail) and compose Φ_p from p seed jets at the
 /// earliest converged phase. None for escaping/aperiodic references.
-#[allow(dead_code)] // retained for the CPU model test while runtime is disabled
 pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<PeriodicBlock> {
     const TOL2: f64 = 1e-24;
     let n = orbit.len();
@@ -844,9 +874,13 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
     // (findings §17: total err ≤ err_block/(1−|κ|); κ measured exact to 4
     // decimals at |c| = 1e-5 with err_block ~1e-5). Certify at ε_int = 1e-4.
     let eps_int = eps.max(1e-4);
-    let r = closed_form_radius(&m, &q, eps_int, log2_cmax);
-    let rd = derivative_radius(&m, &q, eps_int, log2_cmax, true);
-    let log2_r = r.min(rd);
+    // Full Cauchy certificate over the p composed steps (bisected majorant +
+    // strict (V)/(V′) solve, x = 0 gated) — the tail-free closed-form oracle
+    // this header used to ship could over-certify and kept the runtime path
+    // disabled.
+    let blk = MobiusBlock { m, log2_q: q };
+    let log2_r =
+        mobius_certify_segment(&blk, &orbit[start..start + period], eps_int, log2_cmax);
     if !log2_r.is_finite() {
         return None;
     }
@@ -941,19 +975,23 @@ pub fn unified_serialize_coeffs(levels: &[UnifiedLevel]) -> Vec<[JetCoeffFe; UNI
 /// Serialize the sidecar (tagged radius + tag + f32-safe) and the level
 /// directory. `log2_band` is the working band the tags are chosen at — the
 /// caller derives it from the replay-observed |dz| distribution (census note
-/// 5), NOT from a fixed c_max multiple. When `sa` or `periodic` is present, a
-/// TEN-entry header follows the block sidecar (base = total block count,
-/// computable in the shader from the last directory entry):
+/// 5), NOT from a fixed c_max multiple. When `sa`, `periodic` or `gates` is
+/// present, a TEN-entry header follows the block sidecar (base = total block
+/// count, computable in the shader from the last directory entry):
 ///   [0..4) SA prefix: entry j = (b_{j+1}.x, .y, exponent, j == 0 ? n0 : 0)
 ///   [4..10) periodic block: A(.., start), B(.., p), D(.., r_log2), A'(.., 0),
 ///          D'(.., 0), F(.., 0) — p == 0 in entry 5's w disables the runtime
 ///          attempt.
+/// Entry [10] is the §18 gate directory (x = gate count; ALWAYS emitted with
+/// the header so the shader never reads it out-of-bounds), followed by the
+/// packed gate records + d[] channels (`gates::gates_serialize_vec4` layout).
 pub fn unified_serialize_radii(
     levels: &[UnifiedLevel],
     radii: &UnifiedRadii,
     log2_band: f64,
     sa: Option<&SaPrefix>,
     periodic: Option<&PeriodicBlock>,
+    gates: &[crate::gates::Gate],
 ) -> (Vec<UnifiedRadius>, Vec<JetLevel>) {
     let mut out = Vec::new();
     let mut dir = Vec::new();
@@ -989,7 +1027,7 @@ pub fn unified_serialize_radii(
             max_r3_log2: max_r,
         });
     }
-    if sa.is_some() || periodic.is_some() {
+    if sa.is_some() || periodic.is_some() || !gates.is_empty() {
         let zero = CFe::ZERO;
         let sab = sa.map(|s| s.b).unwrap_or([zero; SA_APPLIED]);
         let n0 = sa.map(|s| s.n0).unwrap_or(0);
@@ -1020,6 +1058,16 @@ pub fn unified_serialize_radii(
                 tag: c.y,
                 f32_safe: c.e as f32,
                 pad: metas[j],
+            });
+        }
+        // §18 gate blob (entry [10] = directory, count 0 when no gate — the
+        // shader reads it unconditionally in unified mode).
+        for v in crate::gates::gates_serialize_vec4(gates) {
+            out.push(UnifiedRadius {
+                r_log2: v[0],
+                tag: v[1],
+                f32_safe: v[2],
+                pad: v[3],
             });
         }
     }
@@ -1273,7 +1321,7 @@ mod tests {
         let rad = unified_build_radii(&levels, &orbit, eps, c_max);
         let band = c_max.log2() + 10.0;
         let coeffs = unified_serialize_coeffs(&levels);
-        let (sidecar, dir) = unified_serialize_radii(&levels, &rad, band, None, None);
+        let (sidecar, dir) = unified_serialize_radii(&levels, &rad, band, None, None, &[]);
         assert_eq!(coeffs.len(), sidecar.len(), "buffers not index-aligned");
         let emitted: Vec<usize> = levels
             .iter()
@@ -1574,6 +1622,7 @@ mod tests {
             c_max.log2() + 10.0,
             Some(&sa),
             periodic.as_ref(),
+            &[],
         );
         let t_serialize = t5.elapsed();
         let nblocks: usize = levels.iter().map(|l| l.blocks.len()).sum();
@@ -1617,7 +1666,7 @@ mod tests {
         let bounds = unified_build_bounds(&levels, &orbit, l2c);
         let rad = unified_solve_radii(&levels, &bounds, eps, l2c);
         let sa = sa_build(&orbit, eps, l2c.exp2(), orbit.len() - 1);
-        let (side, dir) = unified_serialize_radii(&levels, &rad, l2c + 10.0, Some(&sa), None);
+        let (side, dir) = unified_serialize_radii(&levels, &rad, l2c + 10.0, Some(&sa), None, &[]);
         println!("SA n0 = {}", sa.n0);
         for d in &dir {
             let mut finite = 0usize;
@@ -1737,7 +1786,7 @@ mod tests {
         // Runtime dispatch mirror (greedy largest skip, tagged radius, band
         // tags as serialized): count applications per tier.
         let band = l2c + 10.0;
-        let (side, dir) = unified_serialize_radii(&levels, &rad, band, None, None);
+        let (side, dir) = unified_serialize_radii(&levels, &rad, band, None, None, &[]);
         let mut tier_apps = [0usize; 4];
         let mut skipped = 0usize;
         let max_iter = orbit.len() - 1;
@@ -1931,6 +1980,73 @@ mod tests {
             "periodic block: start {} p {} r_log2 {:.1}",
             per.start, per.p, per.log2_r
         );
+    }
+
+    #[test]
+    fn periodic_certificate_sound_against_exact_walk() {
+        // Referee for the ENABLED periodic path: the full-certificate radius
+        // (mobius_certify_segment) must uphold the (V)/(V′) contract against
+        // the exact p-step walk over the WHOLE certified interval — value
+        // error ≤ ½ε_int·(|A||δ| + |B||c|) and ∂δ error ≤ ½ε_int·(|A| +
+        // |A′|c_max) — at every sampled |δ| ≤ r down to 0 (the x = 0 gate's
+        // promise), not just at the solved crossing.
+        use crate::mobius::mobius_apply;
+        let eps = 1e-12_f64; // build ε; the header certifies at ε_int = 1e-4
+        let eps_int = 1e-4_f64;
+        let c_ref = (-1.0_f64, 0.1_f64);
+        let orbit = ref_orbit_f64(c_ref.0, c_ref.1, 4000);
+        let c_max = 1e-5_f64;
+        let per = periodic_build(&orbit, eps, c_max.log2()).expect("no periodic block");
+        let r = per.log2_r.exp2();
+        assert!(r > c_max, "certified radius unusably small: {:e}", r);
+        let la = per.m.a.to_f64();
+        let la = (la.0 * la.0 + la.1 * la.1).sqrt();
+        let lb = per.m.b.to_f64();
+        let lb = (lb.0 * lb.0 + lb.1 * lb.1).sqrt();
+        let lap = per.m.ap.to_f64();
+        let lap = (lap.0 * lap.0 + lap.1 * lap.1).sqrt();
+        let cm = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+        for &dm in &[1.0_f64, 0.5, 1.0 / 16.0, 1.0 / 256.0, 0.0] {
+            for &dphase in &[0.3_f64, 2.1, 4.4] {
+                for &cmm in &[1.0_f64, 0.125, 0.0] {
+                    let delta = (r * dm * dphase.cos(), r * dm * dphase.sin());
+                    let dc = (c_max * cmm * (dphase + 1.0).cos(), c_max * cmm * (dphase + 1.0).sin());
+                    // Exact p-step walk from phase `start`, value + ∂δ chain.
+                    let (mut z, mut dz) = (delta, (1.0_f64, 0.0_f64));
+                    for i in per.start..per.start + per.p {
+                        let zr = orbit[i];
+                        dz = cm((2.0 * (zr.0 + z.0), 2.0 * (zr.1 + z.1)), dz);
+                        z = (
+                            2.0 * (zr.0 * z.0 - zr.1 * z.1) + z.0 * z.0 - z.1 * z.1 + dc.0,
+                            2.0 * (zr.0 * z.1 + zr.1 * z.0) + 2.0 * z.0 * z.1 + dc.1,
+                        );
+                    }
+                    let (phi, ddz, _) = mobius_apply(
+                        &per.m,
+                        crate::jet::CFe::from_c(delta.0, delta.1),
+                        crate::jet::CFe::from_c(dc.0, dc.1),
+                    );
+                    let phi = phi.to_f64();
+                    let ddz = ddz.to_f64();
+                    let dmag = (delta.0 * delta.0 + delta.1 * delta.1).sqrt();
+                    let cmag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
+                    let verr = ((phi.0 - z.0).powi(2) + (phi.1 - z.1).powi(2)).sqrt();
+                    let vbudget = 0.5 * eps_int * (la * dmag + lb * cmag);
+                    assert!(
+                        verr <= vbudget + 1e-300,
+                        "(V) violated at |δ|={:e} |c|={:e}: err {:e} > budget {:e}",
+                        dmag, cmag, verr, vbudget
+                    );
+                    let derr = ((ddz.0 - dz.0).powi(2) + (ddz.1 - dz.1).powi(2)).sqrt();
+                    let dbudget = 0.5 * eps_int * (la + lap * c_max);
+                    assert!(
+                        derr <= dbudget + 1e-300,
+                        "(V′) violated at |δ|={:e} |c|={:e}: err {:e} > budget {:e}",
+                        dmag, cmag, derr, dbudget
+                    );
+                }
+            }
+        }
     }
 
     #[test]

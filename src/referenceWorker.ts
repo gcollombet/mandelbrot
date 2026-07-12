@@ -1,7 +1,6 @@
 import {MandelbrotNavigator} from 'mandelbrot'
 import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import type {ApproximationMode} from './Engine'
-import {log2FromDecimalString} from './floatexp'
 
 type ResetMessage = {
     type: 'reset'
@@ -12,11 +11,18 @@ type ResetMessage = {
     angle: number
     approximationMode: ApproximationMode
     blaEpsilon: number
+    gateEmission?: boolean
     maxBlaSkip: number
     maxIterations: number
     // Fixed precision budget as a target scale (e.g. "1e-30"). Sets the navigator's
     // descending-profile precision ahead of time; a budget change arrives as a fresh reset.
     precisionBudget: string
+    // Engine's table-parameter generation at reset time — a fresh worker starts
+    // at 0, so without this every blaReady it posts would be dropped as stale.
+    tableGeneration: number
+    // Canvas aspect (width/height): lets Rust replace the legacy 4×scale c_max
+    // margin with the exact screen bound (sound under off-center references).
+    viewportAspect?: number
 }
 
 type UpdateViewMessage = {
@@ -27,24 +33,35 @@ type UpdateViewMessage = {
     scale: string
     angle: number
     maxIterations: number
+    viewportAspect?: number
 }
 
 type SetApproximationModeMessage = {
     type: 'setApproximationMode'
     jobId: number
     approximationMode: ApproximationMode
+    tableGeneration: number
 }
 
 type SetBlaEpsilonMessage = {
     type: 'setBlaEpsilon'
     jobId: number
     blaEpsilon: number
+    tableGeneration: number
+}
+
+type SetGateEmissionMessage = {
+    type: 'setGateEmission'
+    jobId: number
+    on: boolean
+    tableGeneration: number
 }
 
 type SetMaxBlaSkipMessage = {
     type: 'setMaxBlaSkip'
     jobId: number
     maxBlaSkip: number
+    tableGeneration: number
 }
 
 type FindMinibrotMessage = {
@@ -63,6 +80,7 @@ type ReferenceWorkerMessage =
     | UpdateViewMessage
     | SetApproximationModeMessage
     | SetBlaEpsilonMessage
+    | SetGateEmissionMessage
     | SetMaxBlaSkipMessage
     | FindMinibrotMessage
     | DisposeMessage
@@ -110,6 +128,10 @@ type BlaReadyResponse = {
     // cold build (Phase F, 7.2).
     buildMs?: number
     buildStages?: number
+    // Echo of the table-parameter generation this table was built under (set by
+    // the reset/setter messages). The Engine drops mismatches: builds that were
+    // in flight when a parameter change was posted.
+    tableGeneration: number
 }
 
 type ErrorResponse = {
@@ -150,6 +172,10 @@ let navigator: MandelbrotNavigator | undefined
 let activeJobId = 0
 let disposed = false
 let lastBlaMaxIterations = 0
+// Table-parameter generation (ε/skip/gates/mode), set by reset and the setter
+// messages and echoed in every blaReady — lets the Engine drop tables whose
+// build was in flight when a parameter change was posted.
+let tableGeneration = 0
 let targetMaxIterations = 0
 let computeLoopRunning = false
 let needsReferenceValidation = false
@@ -157,12 +183,13 @@ let needsReferenceValidation = false
 // mints a fresh id, so consumers can order references globally.
 let refCounter = 0
 let currentRefId = 0
-// Jet-mode c_max lifecycle (add-jet-approximation D6): log2(scale) at the last
-// jet-table build. Zoom keeps existing radii VALID (they are monotone-sound
-// under a shrinking c_max); once the view has moved ≥ 2 octaves the table is
-// re-posted — the Rust side then re-solves radii in closed form (no orbit walk
-// inside the R_c headroom) and only re-walks bounds beyond it.
-let lastJetLog2Scale = Number.NaN
+// Jet-mode c_max lifecycle (add-jet-approximation D6): the navigator's
+// quantized log2 c_max at the last jet-table build. Zoom-in/pans inside the
+// rung keep existing radii VALID (monotone-sound under a shrinking c_max);
+// any GROWTH past the posted rung uncertifies the border pixels — re-post
+// immediately (closed-form radii re-solve Rust-side, no orbit walk inside the
+// R_c headroom); ≥ 2 octaves below the rung re-posts for tightness only.
+let lastJetLog2CMax = Number.NaN
 
 const ORBIT_CHUNK_SIZE = 1000
 // Compute the reference orbit to HEADROOM× the display maxIter, so interactive zoom-in (which
@@ -218,12 +245,15 @@ function resetNavigator(message: ResetMessage) {
     navigator.set_precision_budget(message.precisionBudget)
     activeJobId = message.jobId
     lastBlaMaxIterations = 0
+    tableGeneration = message.tableGeneration ?? 0
     targetMaxIterations = message.maxIterations
     needsReferenceValidation = false
     applyApproximationMode(message.approximationMode)
     navigator.set_bla_epsilon(message.blaEpsilon)
+    navigator.set_gate_emission(!!message.gateEmission)
     navigator.set_max_bla_skip(message.maxBlaSkip)
-    lastJetLog2Scale = log2FromDecimalString(message.scale)
+    navigator.set_viewport_aspect(message.viewportAspect ?? Number.NaN)
+    lastJetLog2CMax = navigator.current_log2_c_max()
     void runComputeLoop(message.jobId)
 }
 
@@ -304,6 +334,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
             steps,
             levels,
             levelCount: info.level_count,
+            tableGeneration,
         }, [steps.buffer, levels.buffer])
         return
     }
@@ -350,6 +381,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         levelCount: info.level_count,
         buildMs,
         buildStages,
+        tableGeneration,
     }, [steps.buffer, radii.buffer, levels.buffer])
 }
 
@@ -413,7 +445,16 @@ async function runComputeLoop(jobId: number) {
         computeLoopRunning = false
         if (!disposed && navigator) {
             const availableIter = Math.max(0, navigator.get_reference_orbit_len())
-            if (jobId !== activeJobId || availableIter < targetMaxIterations || needsReferenceValidation) {
+            // tableStale: a setter (or octave-drift repost) zeroed
+            // lastBlaMaxIterations while this loop was between its last
+            // postBlaIfReady and its exit — its own runComputeLoop call was a
+            // no-op (loop still running), so without a restart the rebuilt
+            // table would never be posted. Converges: the restarted loop posts
+            // once and lastBlaMaxIterations becomes non-zero. Perturbation
+            // (mode 0) posts no table — excluded to avoid restarting forever.
+            const tableStale = lastBlaMaxIterations === 0
+                && navigator.get_approximation_mode() !== 0
+            if (jobId !== activeJobId || availableIter < targetMaxIterations || needsReferenceValidation || tableStale) {
                 void runComputeLoop(activeJobId)
             }
         }
@@ -435,17 +476,25 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     navigator.origin(message.cx, message.cy)
                     navigator.scale(message.scale)
                     navigator.angle(message.angle)
+                    if (message.viewportAspect !== undefined) {
+                        navigator.set_viewport_aspect(message.viewportAspect)
+                    }
                     targetMaxIterations = message.maxIterations
                     needsReferenceValidation = true
-                    // Jet/mobius radii depend on the per-view c_max: after ≥ 2
-                    // octaves of scale drift, re-post the table (cheap
-                    // closed-form re-solve Rust-side; existing radii stay
-                    // sound meanwhile).
+                    // Jet/mobius radii depend on the per-view c_max (scale,
+                    // aspect AND reference→center offset). Growth past the
+                    // posted rung uncertifies border pixels — re-post NOW
+                    // (cheap closed-form re-solve Rust-side); ≥ 2 octaves of
+                    // shrink re-posts for tightness only.
                     const driftMode = navigator.get_approximation_mode()
                     if (driftMode === 3 || driftMode === 4 || driftMode === 5) {
-                        const log2Scale = log2FromDecimalString(message.scale)
-                        if (!Number.isFinite(lastJetLog2Scale) || Math.abs(log2Scale - lastJetLog2Scale) >= 2) {
-                            lastJetLog2Scale = log2Scale
+                        const log2CMax = navigator.current_log2_c_max()
+                        if (
+                            !Number.isFinite(lastJetLog2CMax)
+                            || log2CMax > lastJetLog2CMax
+                            || log2CMax < lastJetLog2CMax - 2
+                        ) {
+                            lastJetLog2CMax = log2CMax
                             lastBlaMaxIterations = 0
                         }
                     }
@@ -456,6 +505,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                 if (message.jobId === activeJobId) {
                     applyApproximationMode(message.approximationMode)
                     lastBlaMaxIterations = 0
+                    tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
                 }
                 break
@@ -463,6 +513,15 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                 if (navigator && message.jobId === activeJobId) {
                     navigator.set_bla_epsilon(message.blaEpsilon)
                     lastBlaMaxIterations = 0
+                    tableGeneration = message.tableGeneration
+                    void runComputeLoop(message.jobId)
+                }
+                break
+            case 'setGateEmission':
+                if (navigator && message.jobId === activeJobId) {
+                    navigator.set_gate_emission(message.on)
+                    lastBlaMaxIterations = 0
+                    tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
                 }
                 break
@@ -470,6 +529,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                 if (navigator && message.jobId === activeJobId) {
                     navigator.set_max_bla_skip(message.maxBlaSkip)
                     lastBlaMaxIterations = 0
+                    tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
                 }
                 break
