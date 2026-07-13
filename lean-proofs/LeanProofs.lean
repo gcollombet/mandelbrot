@@ -10,5 +10,6 @@ import LeanProofs.ParabolicSuperconvergence
 import LeanProofs.Jets
 import LeanProofs.BivariateJets
 import LeanProofs.Periodic
+import LeanProofs.NonautonomousPade
 import LeanProofs.Fatou
 import LeanProofs.Dynamics

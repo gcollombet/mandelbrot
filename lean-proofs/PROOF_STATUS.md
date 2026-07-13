@@ -66,6 +66,17 @@ au runtime.
   `r_j`. Enfin `parabolic_discrete_shadowing_envelope` prouve que la simple
   récurrence builder `r_(j+1)=r_j+r_j²` suffit à enclore l'orbite et à produire
   le certificat variable complet, sous les deux marges de pôle explicites.
+- La généralisation non autonome est formalisée. Le Padé du pas
+  `a_j(a_j z+c)/(a_j-z)` possède la matrice homogène
+  `[[a_j²,a_j c],[-1,a_j]]`. Les produits arrière canoniques représentent les
+  queues du bloc et transportent exactement le défaut local
+  `z_j(z_j²+c)/(a_j-z_j)` par leur déterminant et leurs deux dénominateurs.
+- `nonautonomous_pade_telescope` somme ces défauts exactement pour une suite
+  arbitraire `a_j` et pour `c≠0`. `nonautonomous_pade_shadowing_bound` fournit
+  ensuite un majorant calculable : l'enveloppe suit
+  `r_(j+1)=|a_j|r_j+r_j²+y`, les sorties exacte et Padé ont des rayons séparés,
+  et les marges des queues sont calculées depuis les quatre entrées de chaque
+  matrice.
 
 Conséquence : une tolérance relative à la vraie carte doit employer le
 second rayon, plus petit. Substituer le premier change effectivement le
@@ -75,6 +86,9 @@ et Padé est supérieur lorsque les défauts quasi géométriques sont assez pet
 Sur le flot parabolique cette supériorité est désormais stricte et exacte ; le
 théorème de shadowing explique quantitativement ce qui subsiste pour la
 dynamique discrète, sous une hypothèse explicite de confinement du domaine.
+La version non autonome montre que ni la variation de `2Z_j` ni le canal `c`
+ne sont des obstacles analytiques ; la difficulté runtime restante est la
+compression de la dépendance polynomiale en `c` du produit matriciel.
 
 ### Composition de Möbius
 

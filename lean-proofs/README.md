@@ -32,6 +32,9 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
 - `ParabolicSuperconvergence.lean` : flot parabolique exact, reste fermé de
   tout jet polynomial, invariants de Hankel, gain Padé quantitatif et borne de
   shadowing entre `z+z²` et le flot de Riccati.
+- `NonautonomousPade.lean` : produit matriciel des Padé élémentaires pour
+  `a_j=2Z_j` variable et `c≠0`, télescopage exact des défauts transportés et
+  majorant calculable par enveloppes et marges de dénominateur.
 - `Jets.lean` : merge de degré 2, congruence de jets polynomiaux, récurrence
   pure-`c` et sensibilités.
 - `BivariateJets.lean` : troncature bivariée par degré total et preuve que la
