@@ -220,6 +220,39 @@ theorem taylor2_orbit_remainder_bound
         (a n) (z n) c (u n) (q n) h rem r (E n)
         hr (hE n) hh hrem).trans (hnext n)
 
+/-- Exact geometric closed form behind the Cauchy remainder after retaining
+degrees `0..K`. -/
+theorem hasSum_geometric_taylor_tail
+    (M theta : ℝ) (K : ℕ) (htheta : |theta| < 1) :
+    HasSum (fun j : ℕ => M * theta ^ (K + 1 + j))
+      (M * theta ^ (K + 1) / (1 - theta)) := by
+  have hgeom : HasSum (fun j : ℕ => theta ^ j) (1 / (1 - theta)) := by
+    simpa [div_eq_mul_inv, Real.norm_eq_abs] using
+      (hasSum_geometric_of_norm_lt_one (ξ := theta)
+        (by simpa [Real.norm_eq_abs] using htheta))
+  have hscaled : HasSum
+      (fun j : ℕ => (M * theta ^ (K + 1)) * theta ^ j)
+      ((M * theta ^ (K + 1)) * (1 / (1 - theta))) :=
+    hgeom.mul_left (M * theta ^ (K + 1))
+  simpa only [pow_add, div_eq_mul_inv, mul_assoc, one_mul] using hscaled
+
+/-- A nonnegative Taylor tail dominated coefficientwise by the Cauchy
+geometric majorant is bounded by `M*theta^(K+1)/(1-theta)`. -/
+theorem taylor_tail_le_geometric
+    (slice : ℕ → ℝ) (M theta : ℝ) (K : ℕ)
+    (hM : 0 ≤ M) (htheta0 : 0 ≤ theta) (htheta : theta < 1)
+    (hslice0 : ∀ j, 0 ≤ slice j)
+    (hslice : ∀ j, slice j ≤ M * theta ^ (K + 1 + j)) :
+    (∑' j : ℕ, slice j) ≤ M * theta ^ (K + 1) / (1 - theta) := by
+  have habs : |theta| < 1 := by simpa [abs_of_nonneg htheta0] using htheta
+  have hmajor := hasSum_geometric_taylor_tail M theta K habs
+  have hmajor0 : ∀ j : ℕ, 0 ≤ M * theta ^ (K + 1 + j) := by
+    intro j
+    positivity
+  have hsmall : Summable slice :=
+    Summable.of_nonneg_of_le hslice0 hslice hmajor.summable
+  exact (hsmall.tsum_le_tsum hslice hmajor.summable).trans_eq hmajor.tsum_eq
+
 /-- Cauchy converts an outer-disk value bound for the concrete Taylor
 remainder into a first-derivative error bound on the inner disk. -/
 theorem taylor2Remainder_deriv_le_on_inner_disk

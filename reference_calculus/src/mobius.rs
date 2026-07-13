@@ -406,20 +406,36 @@ fn mobius_bisect_rz(twoz: &[(f64, i64)], log2_rc: f64) -> (f64, f64) {
     }
     let mut lo = lo0;
     let mut hi = hi0;
-    // 20 iters ⇒ R_z precision ≈ range/2^20 ≪ the 0.1-log2 scan step. Fewer
-    // iters only loosen the polydisc slightly; the walk is a valid majorant at
-    // any R_z, so this never over-certifies (the peak target is a tightness
-    // knob, not a soundness one — the polydisc-invariant test is the referee).
-    for _ in 0..20 {
+    // Tolerance 0.05 log2 (≈11 iters on the ~100-log2 range) instead of the
+    // former fixed 20: R_z precision stays ≪ the 0.1-log2 scan-step heritage,
+    // and each saved iteration is one full O(skip) majorant walk — this
+    // bisection is ~40 % of the cold build (§8.2 timing harness). Fewer iters
+    // only loosen the polydisc slightly; the walk is a valid majorant at any
+    // R_z, so this never over-certifies (the peak target is a tightness knob,
+    // not a soundness one — the polydisc-invariant test is the referee). The
+    // final M is reused from the last VALID evaluation (lo side) instead of a
+    // dedicated closing walk.
+    const RZ_TOL_LOG2: f64 = 0.05;
+    let mut m_lo = f64::INFINITY; // lo0's peak passed but its M was discarded
+    let mut lo_fresh = false; // m_lo valid for the current lo?
+    let mut iters = 0;
+    while hi - lo > RZ_TOL_LOG2 && iters < 20 {
+        iters += 1;
         let mid = 0.5 * (lo + hi);
-        if peak(mid).0 < MOBIUS_RHO_TARGET_LOG2 {
+        let (p, m) = peak(mid);
+        if p < MOBIUS_RHO_TARGET_LOG2 {
             lo = mid;
+            m_lo = m;
+            lo_fresh = true;
         } else {
             hi = mid;
         }
     }
-    let (_, final_m) = peak(lo);
-    (lo, final_m)
+    if !lo_fresh {
+        let (_, m) = peak(lo);
+        m_lo = m;
+    }
+    (lo, m_lo)
 }
 
 /// Per block, per R_c rung: bisect R_z to the tightest runaway-free polydisc
@@ -578,7 +594,7 @@ const SCAN_FLOOR_LOG2: f64 = -53.150_849_518_197_8; // 1e-16
 /// to a 0.02-log2 tolerance — ~16× finer than the old 0.1-decade grid at a
 /// fraction of its evaluations. The returned point is always verified true, so
 /// like mobius_bisect_rz this never over-certifies on its own.
-fn bisect_last_success(top: f64, floor: f64, cond: impl Fn(f64) -> bool) -> f64 {
+pub(crate) fn bisect_last_success(top: f64, floor: f64, cond: impl Fn(f64) -> bool) -> f64 {
     const TOL: f64 = 0.02;
     if cond(top) {
         return top;

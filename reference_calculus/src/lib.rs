@@ -11,6 +11,7 @@ pub type JsValue = String;
 
 mod gates;
 mod jet;
+mod matrix_c1;
 mod mobius;
 mod unified;
 
@@ -2583,6 +2584,31 @@ fn bench_run_pixel(levels: &[PadeLevel], orbit: &[(f64, f64)], dc: (f64, f64), m
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    #[ignore = "worker-hang repro at the 2026-07-13 field view — run with --ignored --nocapture"]
+    fn repro_worker_view_reference_and_table() {
+        let cx = "-1.977184178576372229230204442384786046447486549466987722536622699465955189688128648379386793474196048783336244796458088493481402544455998198180341552293098630542160846530097517964642590614843074692563683340326325167057641328027764045339322990429526636985266875019357324";
+        let cy = "-0.000000966627910562222430034574347571323996536578177218573331970140308191113381564000699188133383710631325492437079945868745537848197769155103892345818324836115483941409674332902666923846041697957982624832443687940375388328163115263413104410279756909387515569504188891085868";
+        let scale = "0.000000000040120751433176000420158403561625868793117508655927099265693855671683150280971646830475004554053886671053359023305361179";
+        let mut nav = MandelbrotNavigator::new(cx, cy, scale, 0.0);
+        nav.use_unified();
+        let t0 = std::time::Instant::now();
+        let mut last = 0usize;
+        loop {
+            let _info = nav.compute_reference_orbit_chunk(1024, 3458);
+            let len = nav.get_reference_orbit_len();
+            println!("  chunk -> len {} ({:?})", len, t0.elapsed());
+            if len == last || len >= 3458 {
+                break;
+            }
+            last = len;
+            assert!(t0.elapsed().as_secs() < 60, "orbit chunk loop stuck");
+        }
+        let t1 = std::time::Instant::now();
+        let _ = nav.compute_unified_reference(3458);
+        println!("table done in {:?}", t1.elapsed());
+    }
 
     #[test]
     fn construct_and_compute_orbit_simple() {

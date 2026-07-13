@@ -761,6 +761,17 @@ pub fn sa_build(orbit: &[(f64, f64)], eps: f64, c_max: f64, max_n: usize) -> SaP
         // Majorant walks per rung.
         let two_z_mag = fe_exp2((4.0 * (zx * zx + zy * zy)).max(1e-300).log2() * 0.5);
         for (g, r) in rho.iter_mut().enumerate() {
+            // Dead-rung freeze BEFORE the update: past the consumer's
+            // saturation cut (2^20) the square dominates (ρ² ≥ ρ for ρ ≥ 1),
+            // so the walk can only explode — it will never certify again.
+            // Updating it anyway doubles the CFe exponent every step (ρ²),
+            // overflowing the i64 in ~60 steps: a debug panic, and a SILENT
+            // wrap in release that can relaunder the saturated walk as a
+            // small ρ — a false certificate. Frozen, the rung stays above
+            // the cut and the (V_c) check skips it forever.
+            if r.log2_mag().unwrap_or(f64::NEG_INFINITY) > 20.0 {
+                continue;
+            }
             let rc = fe_exp2(l2y + RUNGS[g].log2());
             *r = two_z_mag.mul(*r).add(r.mul(*r)).add(rc);
         }
@@ -936,10 +947,15 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
 pub const UNIFIED_GPU_COEFFS: usize = 9;
 
 /// GPU radius sidecar entry, 16 B vec4-packed (one coalesced probe): x = the
-/// TAGGED tier's certified radius (log2, f32; −∞ ⇒ never applied), y = tier
-/// tag (0/1/2/3 = affine/Padé/c+/jet, exactly representable), z = f32-safe
-/// fast-path flag, w = spare (reserved: Phase B stores min(r, r′) in x when DE
-/// is enabled — same probe, zero extra comparisons).
+/// PRINCIPAL tier's certified radius (log2, f32; −∞ ⇒ never applied), y = its
+/// tag (0/1/2/3 = affine/Padé/c+/jet, exactly representable), z = the packed
+/// pair `f32_safe + 2·secours_tag` (values 0..7, exact in f32), w = the
+/// SECOURS tier's certified radius (−∞ ⇒ no fallback candidate). The
+/// portfolio rule (plan §8): principal = cheapest tier covering the working
+/// band; secours = the largest-radius tier when it strictly beats the
+/// principal's radius — the shader falls back to it when |dz| lands between
+/// the two radii, reading the same 9-slot record. Each radius is only ever
+/// used with its OWN tier (no cross-tier clamping).
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq)]
 pub struct UnifiedRadius {
@@ -949,10 +965,72 @@ pub struct UnifiedRadius {
     pub pad: f32,
 }
 
-/// Tag rule (design D3 + census note 5): the cheapest tier whose OWN radius
-/// covers the working band; when no tier covers the band, fall back to the
-/// tier with the largest radius (usually jet) so the block still serves
-/// entries below its radius instead of dying at the band boundary.
+/// §6.3 selection model. The shipped working band is a single quantile (and
+/// still the census-note-5 placeholder c_max + 10 in production), while the
+/// post-rebase |dz| distribution spans several octaves — so coverage is
+/// modeled as a SOFT logistic in log2 space around the band instead of a hard
+/// cliff: a tier whose radius sits at the band covers about half the entries,
+/// one 2-octave spread above covers most. Traffic cost per applied tier =
+/// prefix record bytes + the 16 B sidecar probe, plus an op weight in
+/// byte-equivalents (relative arithmetic of the tier's evaluation path).
+pub const UNIFIED_TIER_BYTES: [f64; 4] = [40.0, 64.0, 100.0, 124.0];
+pub const UNIFIED_TIER_OPS_W: [f64; 4] = [8.0, 28.0, 44.0, 72.0];
+pub const UNIFIED_BAND_SPREAD_LOG2: f64 = 2.0;
+
+fn unified_cover_prob(r_log2: f64, log2_band: f64) -> f64 {
+    if !r_log2.is_finite() {
+        return 0.0;
+    }
+    1.0 / (1.0 + ((log2_band - r_log2) / UNIFIED_BAND_SPREAD_LOG2).exp2())
+}
+
+/// §6.3 portfolio rule: principal = argmax P(cover)/cost — this is what stops
+/// affine from winning "because one application is cheaper" when a rational
+/// tier's much larger radius avoids level descents (its P ≈ 1 beats affine's
+/// P ≈ ½ at 2-3× the bytes); it also subsumes the old argmax-radius fallback
+/// (all P small ⇒ the largest radius dominates the scores). Secours = the
+/// largest-radius tier, kept only when its extra coverage is material
+/// (§6.2: no secours when it does not repay its traffic). Returns
+/// (principal, secours, secours_radius) — secours == principal with a −∞
+/// radius encodes "no fallback". None ⇔ every tier is dead.
+pub fn unified_portfolio_tags(
+    tiers: &[f64; 4],
+    log2_band: f64,
+) -> Option<(usize, usize, f64)> {
+    let mut principal: Option<usize> = None;
+    let mut best_score = 0.0f64;
+    for (t, &r) in tiers.iter().enumerate() {
+        let p = unified_cover_prob(r, log2_band);
+        let score = p / (UNIFIED_TIER_BYTES[t] + UNIFIED_TIER_OPS_W[t]);
+        if score > best_score {
+            best_score = score;
+            principal = Some(t);
+        }
+    }
+    let principal = principal?;
+    let (mut tag2, mut r2) = (principal, f64::NEG_INFINITY);
+    for (t, &r) in tiers.iter().enumerate() {
+        if t != principal && r.is_finite() && r > tiers[principal] && r > r2 {
+            tag2 = t;
+            r2 = r;
+        }
+    }
+    if tag2 != principal {
+        let gain =
+            unified_cover_prob(r2, log2_band) - unified_cover_prob(tiers[principal], log2_band);
+        if gain < 1e-3 {
+            tag2 = principal;
+            r2 = f64::NEG_INFINITY;
+        }
+    }
+    Some((principal, tag2, r2))
+}
+
+/// LEGACY tag rule (design D3 + census note 5): the cheapest tier whose OWN
+/// radius covers the working band; when no tier covers the band, fall back to
+/// the tier with the largest radius (usually jet). Superseded by
+/// `unified_portfolio_tags` for the shipped sidecar; kept for censuses and
+/// regression baselines.
 pub fn unified_tag(tiers: &[f64; 4], log2_band: f64) -> Option<usize> {
     for (t, &r) in tiers.iter().enumerate() {
         if log2_band < r {
@@ -1043,21 +1121,26 @@ pub fn unified_serialize_radii(
         let mut max_r = f32::NEG_INFINITY;
         for (s, md) in lvl.moduli.iter().enumerate() {
             let tiers = &radii.tiers[li][s];
-            let entry = match unified_tag(tiers, log2_band) {
+            let entry = match unified_portfolio_tags(tiers, log2_band) {
                 None => UnifiedRadius {
                     r_log2: f32::NEG_INFINITY,
                     tag: 0.0,
                     f32_safe: 0.0,
-                    pad: 0.0,
+                    pad: f32::NEG_INFINITY,
                 },
-                Some(tag) => UnifiedRadius {
-                    r_log2: tiers[tag] as f32,
-                    tag: tag as f32,
-                    f32_safe: if unified_f32_safe(md, &lvl.blocks[s].m) { 1.0 } else { 0.0 },
-                    pad: 0.0,
-                },
+                Some((tag, tag2, r2)) => {
+                    let safe =
+                        if unified_f32_safe(md, &lvl.blocks[s].m) { 1.0f32 } else { 0.0 };
+                    UnifiedRadius {
+                        r_log2: tiers[tag] as f32,
+                        tag: tag as f32,
+                        f32_safe: safe + 2.0 * tag2 as f32,
+                        pad: r2 as f32,
+                    }
+                }
             };
-            max_r = max_r.max(entry.r_log2);
+            // The level gate must admit the secours band too.
+            max_r = max_r.max(entry.r_log2).max(entry.pad);
             out.push(entry);
         }
         dir.push(JetLevel {
@@ -1425,14 +1508,14 @@ mod tests {
                         li, s, k
                     );
                 }
-                // Tag rule + radius f32 rounding + sentinels.
+                // Tag rule (§6.3 score) + radius f32 rounding + sentinels.
                 let tiers = &rad.tiers[li][s];
-                match unified_tag(tiers, band) {
+                match unified_portfolio_tags(tiers, band) {
                     None => {
                         dead += 1;
                         assert_eq!(side.r_log2, f32::NEG_INFINITY);
                     }
-                    Some(t) => {
+                    Some((t, _, _)) => {
                         if (band as f64) < tiers[t] {
                             covered += 1;
                         } else {
@@ -1452,6 +1535,165 @@ mod tests {
             covered, fallback, dead
         );
         assert!(covered > 0, "no band-covered blocks — band or radii broken");
+    }
+
+    #[test]
+    #[ignore = "cold-build stage timing (§8.2): cargo test --release -- --ignored --nocapture"]
+    fn unified_cold_build_stage_timing() {
+        use std::time::Instant;
+        for (name, cx, cy, iters, lcmax) in [
+            ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64, 32768usize, -40.0),
+            ("feigenbaum", -1.401155, 0.0, 32768, -44.0),
+            ("near-parab", -0.7499, 0.0001, 32768, -40.0),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, iters);
+            if orbit.len() < iters / 2 {
+                println!("[{name}] escaped — skipped");
+                continue;
+            }
+            let eps = 1e-6;
+            let t0 = Instant::now();
+            let levels = build_unified_levels(&orbit, 1 << 18);
+            let t_build = t0.elapsed();
+            let t1 = Instant::now();
+            let bounds = unified_build_bounds(&levels, &orbit, lcmax);
+            let t_bounds = t1.elapsed();
+            // Sub-stage split of bounds: jet per-block moduli walks vs the
+            // shared mobius majorant pair (which of the two to attack).
+            let tj = Instant::now();
+            let twoz: Vec<(f64, i64)> = orbit
+                .iter()
+                .map(|&(zx, zy)| sfe_norm(2.0 * (zx * zx + zy * zy).sqrt(), 0))
+                .collect();
+            for lvl in &levels {
+                for s in 0..lvl.blocks.len() {
+                    let first = 1 + s * lvl.skip;
+                    std::hint::black_box(jet_block_bounds_moduli(
+                        &lvl.moduli[s].log2_a,
+                        &twoz[first..first + lvl.skip],
+                        lcmax + 10.0,
+                    ));
+                }
+            }
+            let t_jetb = tj.elapsed();
+            let t2 = Instant::now();
+            let radii = unified_solve_radii(&levels, &bounds, eps, lcmax);
+            let t_radii = t2.elapsed();
+            let t3 = Instant::now();
+            let sa = sa_build(&orbit, eps, lcmax.exp2(), orbit.len() - 1);
+            let t_sa = t3.elapsed();
+            let t4 = Instant::now();
+            let band = lcmax + 10.0;
+            let (side, _dir) =
+                unified_serialize_radii(&levels, &radii, band, None, None, &[]);
+            let t_ser = t4.elapsed();
+            // Tag mix: §6.3 score vs the legacy cheapest-covering rule.
+            let (mut mix_new, mut mix_old) = ([0usize; 4], [0usize; 4]);
+            let (mut flips, mut secours_live) = (0usize, 0usize);
+            for (li, lvl) in levels.iter().enumerate() {
+                if lvl.skip < MOBIUS_MIN_EMIT_SKIP {
+                    continue;
+                }
+                for s in 0..lvl.blocks.len() {
+                    let tiers = &radii.tiers[li][s];
+                    let new = unified_portfolio_tags(tiers, band);
+                    let old = unified_tag(tiers, band);
+                    if let Some((t, t2x, r2)) = new {
+                        mix_new[t] += 1;
+                        if r2.is_finite() && t2x != t {
+                            secours_live += 1;
+                        }
+                    }
+                    if let Some(t) = old {
+                        mix_old[t] += 1;
+                    }
+                    if new.map(|(t, _, _)| t) != old {
+                        flips += 1;
+                    }
+                }
+            }
+            println!(
+                "[{name:>10}] n={} | build {:>6.1?} bounds {:>6.1?} (jet-part {:>6.1?}) \
+                 radii {:>6.1?} sa {:>6.1?} serialize {:>6.1?} (sa n0={}) | blocks {} | \
+                 tags new {:?} old {:?} flips {} secours {}",
+                orbit.len() - 1,
+                t_build,
+                t_bounds,
+                t_jetb,
+                t_radii,
+                t_sa,
+                t_ser,
+                sa.n0,
+                side.len(),
+                mix_new,
+                mix_old,
+                flips,
+                secours_live,
+            );
+        }
+    }
+
+    #[test]
+    fn unified_portfolio_secours_encoding() {
+        // Portfolio rule (plan §8): the sidecar packs a SECOURS candidate
+        // without growing past 16 B — w = its radius, z = f32_safe + 2·tag2.
+        // Checks the exact shader decode (floor(z·0.5) / z − 2·floor(z·0.5)),
+        // the argmax rule, strict improvement over the principal, and the
+        // level gate (max_r3 admits the secours band).
+        let eps = 1e-12_f64;
+        let c_max = 1e-14_f64;
+        let orbit = ref_orbit_f64(-1.401155, 0.0, 1024);
+        assert!(orbit.len() > 1024, "reference escaped");
+        let levels = build_unified_levels(&orbit, 1 << 18);
+        let rad = unified_build_radii(&levels, &orbit, eps, c_max);
+        let band = c_max.log2() + 10.0;
+        let (side, dir) = unified_serialize_radii(&levels, &rad, band, None, None, &[]);
+        let emitted: Vec<usize> = levels
+            .iter()
+            .enumerate()
+            .filter(|(_, l)| l.skip >= MOBIUS_MIN_EMIT_SKIP)
+            .map(|(i, _)| i)
+            .collect();
+        let mut with_secours = 0usize;
+        for (d, &li) in dir.iter().zip(emitted.iter()) {
+            let mut lvl_max = f32::NEG_INFINITY;
+            for s in 0..d.count as usize {
+                let e = &side[d.offset as usize + s];
+                lvl_max = lvl_max.max(e.r_log2).max(e.pad);
+                // Exact shader decode of the packed z slot.
+                let tag2 = (e.f32_safe * 0.5).floor();
+                let safe = e.f32_safe - 2.0 * tag2;
+                assert!(safe == 0.0 || safe == 1.0, "safe flag not 0/1: {}", e.f32_safe);
+                assert!((0.0..=3.0).contains(&tag2), "secours tag out of range");
+                let tiers = &rad.tiers[li][s];
+                // The serialized pair must be exactly the §6.3 policy output.
+                if let Some((pt, pt2, pr2)) = unified_portfolio_tags(tiers, band) {
+                    assert_eq!(e.tag, pt as f32, "principal is not the §6.3 argmax");
+                    assert_eq!(tag2 as usize, pt2, "secours tag mismatch");
+                    assert_eq!(e.pad, pr2 as f32, "secours radius mismatch");
+                }
+                if e.pad.is_finite() {
+                    with_secours += 1;
+                    assert!(e.pad > e.r_log2, "secours must strictly beat principal");
+                    assert_ne!(tag2, e.tag, "secours must differ from principal");
+                    assert_eq!(e.pad, tiers[tag2 as usize] as f32, "secours radius");
+                    // Argmax rule: no tier offers a strictly larger radius.
+                    for &r in tiers.iter() {
+                        assert!(
+                            (r as f32) <= e.pad,
+                            "secours is not the largest-radius tier"
+                        );
+                    }
+                } else if e.r_log2.is_finite() {
+                    // No secours ⇒ the principal is argmax, or the extra
+                    // coverage over the principal is immaterial (§6.2).
+                    assert_eq!(tag2, e.tag, "dead secours must alias the principal");
+                }
+            }
+            assert_eq!(d.max_r3_log2, lvl_max, "level gate must admit the secours band");
+        }
+        println!("portfolio: {} blocks carry a live secours", with_secours);
+        assert!(with_secours > 0, "no secours anywhere — portfolio inert on this view");
     }
 
     #[test]

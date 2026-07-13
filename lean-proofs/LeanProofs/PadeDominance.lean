@@ -124,6 +124,23 @@ theorem padeSeed_error_lt_affine_error_of_strict_half_radius
   apply padeSeed_error_lt_affine_error_of_closer a z hden hz
   linarith
 
+/-- Uniform disk form useful to a table builder: if the complete input disk
+fits strictly inside half the local reference multiplier, Padé is strictly
+more accurate than the affine jet at every noncentral point of that disk.
+The pole exclusion follows from the same scalar radius test. -/
+theorem padeSeed_strictly_dominates_affine_on_half_disk
+    (a : ℂ) (R : ℝ) (hhalf : 2 * R < ‖a‖) :
+    ∀ z : ℂ, ‖z‖ ≤ R → z ≠ 0 →
+      ‖padeSeed a z 0 - exactStep a z 0‖ <
+        ‖affineSeed a z 0 - exactStep a z 0‖ := by
+  intro z hz hz0
+  have hzhalf : 2 * ‖z‖ < ‖a‖ := by linarith
+  have hdenLower : ‖a‖ - ‖z‖ ≤ ‖a - z‖ := norm_sub_norm_le a z
+  have hgap : 0 < ‖a‖ - ‖z‖ := by nlinarith [norm_nonneg z]
+  have hdenPos : 0 < ‖a - z‖ := hgap.trans_le hdenLower
+  exact padeSeed_error_lt_affine_error_of_strict_half_radius
+    a z (norm_pos_iff.mp hdenPos) hz0 hzhalf
+
 end OneStep
 
 section Selector

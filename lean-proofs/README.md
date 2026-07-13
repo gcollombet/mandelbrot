@@ -41,16 +41,36 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
   affine en `c`, majorant récursif de toute la queue `c²+`, préservation des
   marges de dénominateur et certificat total `matrix-c1` contre Mandelbrot ;
   inclut la règle générale de merge lorsque les deux enfants ont une queue.
+- `MatrixC1Deriv.lean` : formule `det/den²`, perturbation du déterminant et du
+  dénominateur, shadowing dérivé non autonome avec le produit de chaîne exact,
+  puis certificat total « dérivée matrix-c1 contre dérivée Mandelbrot » sans
+  élargissement de Cauchy.
+- `RadiusSolver.lean` : contrat sémantique d’un rayon émis, preuve que le
+  certificat convexe centre+bord forme un prédicat préfixe, invariant et
+  réduction exacte de largeur de la bissection.
 - `Jets.lean` : merge de degré 2, congruence de jets polynomiaux, récurrence
   pure-`c` et sensibilités.
 - `BivariateJets.lean` : troncature bivariée par degré total et preuve que la
   troncature après chaque merge donne le même jet final.
+- `TilePropagation.lean` : propagation analytique locale d'une graine vers un
+  tile, sensibilités d'ordres 3 et 4, récurrence exacte et majorant du reste
+  quadratique, inclusion tile-disque, premier escape commun et transport de
+  l'erreur injectée au checkpoint.
 - `Periodic.lean` : points fixes, multiplicateur, birapport, itération et limite
   de Jordan.
 - `PeriodicRuntime.lean` : tests scalaires de marge, image et contraction
   uniforme d'un bloc périodique, invariance des deux orbites, erreur amortie
   `eps/(1-gamma)` et enclosure correcte du fast-forward en birapport.
+- `CriticalPeriodic.lean` : obstruction formelle du Padé pas-à-pas lorsque
+  `a=0`, regroupement polynomial du cycle superattractif de période 2,
+  dérivée centrale nulle et certificat scalaire de disque invariant.
 - `Fatou.lean` : changement de variable parabolique et signe exact du resiter.
+- `FatouSectorial.lean` : coordonnées exactes des modèles à un et deux pétales,
+  garde de branche logarithmique du hop runtime, translation exacte du flot à
+  fractions partielles, construction d'une vraie coordonnée d'Abel par
+  correction sommable, analyticité sectorielle sous majorant sommable des
+  dérivées, budget Lipschitz de sortie et changement de branche du modèle de
+  corne.
 - `Dynamics.lean` : domaine invariant, contraction uniforme, erreur de modèle
   amortie et distorsion de la carte de sortie d'une porte de Fatou.
 

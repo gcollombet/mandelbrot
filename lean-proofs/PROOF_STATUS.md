@@ -30,6 +30,10 @@ au runtime.
   celle du jet affine sur la région exacte `|z| <= |a-z|`, et strictement
   inférieure pour `z != 0` à l'intérieur. Le disque simple
   `2|z| <= |a|` est prouvé inclus dans cette région de dominance.
+- `padeSeed_strictly_dominates_affine_on_half_disk` donne la version uniforme
+  utilisable par le builder : si `2R<|a|`, Padé est strictement meilleur que
+  le jet affine en tout point non central de `|z|<=R`, et la même inégalité
+  exclut automatiquement le pôle.
 - `choosePadeOrJet_error_le_min` prouve qu'un sélecteur piloté par deux
   certificats possède la borne `min(E_Pade,E_jet)`. Sa spécialisation
   `cplus_or_jet_error_le_min` utilise directement le certificat résiduel
@@ -97,6 +101,17 @@ au runtime.
   dénominateurs, le majorant Padé–Mandelbrot non autonome et l'erreur complète
   de troncature matricielle. Il constitue le certificat exact-arithmétique du
   tier runtime proposé à huit coefficients complexes.
+- La route de dérivée directe est également fermée. La dérivée d'une
+  homographie est `det/den²`; `Homography.det_sub_det_le` et
+  `Homography.deriv_eval_sub_le` bornent respectivement la perturbation du
+  déterminant et celle des deux dénominateurs carrés.
+- `nonautonomous_pade_derivative_shadowing_bound` différentie le télescopage
+  non autonome. Chaque défaut local reçoit bien le facteur de chaîne
+  `prod_(k<j)(|a_k|+2r_k)`, puis les deux transports de suffixe utilisent leurs
+  marges Padé et exacte séparées.
+- `matrixC1_nonautonomous_total_derivative_error` additionne ce shadowing
+  dérivé à l'erreur de troncature du jet matriciel affine en `c`. C'est le
+  certificat complet de la route Rust directe, sans disque élargi de Cauchy.
 - `norm_iteratedDeriv_le_on_inner_disk` transforme une borne uniforme de valeur
   sur un disque extérieur en borne de toute dérivée sur un disque intérieur.
   Les corollaires donnent `M/gap` au premier ordre et `2M/gap²` au second.
@@ -170,10 +185,32 @@ pôle et son majorant sont différents.
   notamment `b1' = a b1 + 1` et la convolution quadratique aux ordres suivants.
 - Les récurrences exactes de première et seconde sensibilité, ainsi que le
   reste d'un transport quadratique d'ordre 2, sont prouvées.
+- Les récurrences de troisième et quatrième sensibilité sont maintenant
+  prouvées pour le pas non autonome `a*z+z²+c`.
+- `quadraticStep_taylor2_remainder` donne l'identité exacte du reste d'un
+  modèle local `z+u*h+q*h²`, avec `q=z''/2` :
+  `(a+2T)R+R²+2uqh³+q²h⁴`.
+- `norm_quadraticStep_taylor2_remainder_le` transforme cette identité en la
+  récurrence scalaire calculable
+  `(abs(a)+2S)E+E²+2 abs(u) abs(q) r³+abs(q)²r⁴`.
+- `taylor2_orbit_remainder_bound` propage ce certificat par induction sur une
+  orbite non autonome entière, pour tous les offsets `|h|<=r`.
+- La queue géométrique après l'ordre `K` possède la forme fermée
+  `M*theta^(K+1)/(1-theta)`, et les corollaires de Cauchy donnent les erreurs de
+  première et seconde dérivée du reste sur un disque intérieur.
+- `rectangular_tile_mem_closedBall` ramène un tile quelconque à un disque
+  certifié. `tile_same_first_escape` prouve les tests supérieur avant `n` et
+  inférieur à `n` qui imposent un premier escape commun à tout le tile.
+- `checkpoint_error_step` additionne enfin l'erreur injectée par la graine et
+  l'erreur locale du mouvement suivant selon
+  `eta+e*(abs(a)+2*rho+e)`.
 
 Conséquence : le jet et la série pure-`c` sont des références algébriques
-fiables pour construire les tables et l'anti-aliasing analytique. Leur erreur
-analytique exige encore un domaine et un reste certifiés.
+fiables pour construire les tables et l'anti-aliasing analytique. Le noyau
+exact-arithmétique d'une SA locale par tile est désormais certifié : une graine
+peut diffuser un checkpoint sur tout rectangle inclus dans son disque, et les
+pixels refusés conservent le fallback ordinaire. Restent le raccord au payload
+GPU concret, le budget de couleur/DE et les mesures d'acceptation des tiles.
 
 ### Majorants, condition radiale et erreurs
 
@@ -222,6 +259,14 @@ analytique exige encore un domaine et un reste certifiés.
 - `cplus_radial_rule` prouve abstraitement que la convexité du gap et sa
   validité aux deux extrémités certifient tout `[0,r]`; le théorème combiné
   applique ensuite ce rayon à l'erreur rationnelle.
+- `ValidEmittedRadius` formalise le vrai contrat du shader : tous les rayons
+  inférieurs à celui émis doivent être valides. Ce prédicat est prouvé
+  descendant. `ConvexRadiusCertificate` (centre, bord, convexité) implique ce
+  contrat et forme lui-même un prédicat préfixe.
+- `radiusBisectStep_preserves_bracket` et `radiusBisectStep_width` prouvent
+  l'invariant accepté/rejeté de la bissection et la division exacte de sa
+  largeur par deux. La bissection est donc justifiée lorsqu'elle sonde le
+  certificat complet, et non la seule valeur du gap au bord.
 - Une erreur récurrente constante est bornée par une somme géométrique, puis
   par `eps/(1-gamma)` sous contraction.
 - Une translation accumule au plus linéairement en `k`; la distorsion de la
@@ -260,6 +305,15 @@ bord ne suffit pas si l'intervalle admissible ne contient pas l'origine.
   si `|w_0|≤q<1` et `|kappa|≤1`, toute l'orbite reconstruite reste sous
   `|alpha|+|alpha-beta|q/(1-q)`. Ce majorant remplace le test heuristique
   `2 max(|alpha|,|z-alpha|)` du shader.
+- L'échec de `period2` pour le Padé pas-à-pas est maintenant un théorème :
+  lorsque `a=0`, aucune marge locale positive n'existe sur un disque centré et
+  le dénominateur de la matrice élémentaire s'annule exactement au centre.
+- Cet échec n'est pas dynamique. `periodTwoReturnFromMinusOne` regroupe les
+  pas `a=-2` puis `a=0` en le polynôme
+  `(-2z+z²+c)²+c`. Sa dérivée centrale est nulle à `c=0`,
+  `periodTwoGroupedRadius=(2r+r²+y)²+y` borne son image, et l'inégalité
+  `periodTwoGroupedRadius<=r` certifie un disque invariant. Le corollaire
+  simple `r<=1/9` est prouvé pour `c=0`.
 
 Conséquence : le fast-forward par matrice `2x2` est justifié pour la forme
 `[1/1]`, y compris à la coalescence via Jordan. La forme `[2/1]`, bien que son
@@ -277,6 +331,28 @@ valeur du multiplicateur au point fixe.
 - Une translation approchée accumule son résidu linéairement. Sous une borne
   de Lipschitz `L` de la carte de sortie sur le domaine certifié, l'erreur de
   sortie est formellement bornée par `k L epsPsi`.
+- Les flots modèles `u'=a u²` et `u'=a u³` possèdent les coordonnées exactes
+  `-1/(a u)` et `-1/(2a u²)` ; la seconde est indépendante du choix de la
+  racine carrée, qui ne sert qu'à sélectionner le pétale de sortie.
+- Pour la coordonnée à fractions partielles réellement utilisée par le
+  prototype, un hop vérifiant `|v-u|<|u-r_i|` place chaque quotient
+  `(v-r_i)/(u-r_i)` dans le plan fendu de la branche principale. La constante
+  runtime `0.2` laisse donc une marge stricte d'un facteur cinq.
+- Sur tout domaine de temps ouvert et connexe où ces gardes tiennent, la somme
+  de logarithmes a pour dérivée `1` le long du flot et son incrément vaut
+  exactement le temps écoulé.
+- Pour le vrai retour discret, la somme convergente des résidus futurs corrige
+  le modèle en une coordonnée satisfaisant exactement l'équation d'Abel. Une
+  décroissance géométrique `M theta^n`, `0≤theta<1`, suffit et donne la borne
+  de correction `M/(1-theta)`.
+- Sur un secteur ouvert préconnexe, la convergence en un point et un majorant
+  sommable uniforme des dérivées des résidus itérés propagent la convergence,
+  rendent cette coordonnée analytique et donnent l'équation d'Abel en tout
+  point du secteur.
+- La prémisse Lipschitz abstraite de la sortie est déchargée par une borne du
+  champ de vecteurs sur un domaine convexe. Les changements de branches du
+  modèle logarithmique ajoutent la constante explicite
+  `sum rho_i n_i 2πi`, laquelle commute avec les translations de Fatou.
 
 Conséquence : sous cette convention, le premier terme logarithmique de la
 coordonnée de Fatou doit porter le signe `+rho log(t)`. Le signe opposé exige
@@ -292,15 +368,20 @@ Les points suivants ne sont pas présentés comme certifiés par ce dossier :
    hypothèses d'intégrabilité, puis que les coefficients `REST` du builder
    représentent bien le morceau de série omis (`hseries`) ; la variante
    anisotrope de la queue `dQ/dz` reste aussi à raccorder ;
-3. le théorème d'erreur Mandelbrot global signalé comme incomplet dans la note
-   source, ainsi que la preuve que le solveur concret implémente exactement le
-   certificat radial maintenant formalisé ;
+3. le raccord ligne à ligne du solveur Rust concret au prédicat préfixe
+   formalisé (notamment une preuve de convexité ou une enclosure par intervalles
+   de chacun de ses gaps composés), et le théorème global au-delà du bloc
+   `matrix-c1` maintenant certifié en valeur et en dérivée ;
 4. l'implémentation dans le builder/shader des tests périodiques maintenant
    prouvés (`mu>0`, `I+eps≤r`, `gamma<1`) et le remplacement de l'ancien test
    de chemin en birapport, qui n'impliquait pas l'enclosure annoncée ;
-5. l'existence analytique des cartes sectorielles de Fatou, les données de
-   corne, les branches de logarithme et une borne de Lipschitz de la carte de
-   sortie ;
+5. pour Fatou, le noyau utile au runtime est maintenant prouvé : modèles à un
+   et deux pétales, branches principales sous la garde de hop, translation du
+   flot, correction d'Abel sous décroissance géométrique et sortie Lipschitz.
+   Restent la production des majorants uniformes en `(u,c)` pour le retour
+   concret, leur raccord ligne à ligne aux bornes numériques du builder, et les
+   invariants de corne non linéaires d'Écalle--Voronin du vrai germe (une
+   donnée analytique qui n'est pas déterminée par un jet fini) ;
 6. l'arithmétique flottante : arrondis dirigés, erreurs `f64`/WGSL, stabilité
    des divisions et conformité exacte entre Rust, TypeScript et shaders ;
 7. les mesures de vitesse, nombres de tours, gains de rayon et qualité
