@@ -35,6 +35,9 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
 - `NonautonomousPade.lean` : produit matriciel des Padé élémentaires pour
   `a_j=2Z_j` variable et `c≠0`, télescopage exact des défauts transportés et
   majorant calculable par enveloppes et marges de dénominateur.
+- `MatrixC1.lean` : récurrence exacte des huit coefficients du jet matriciel
+  affine en `c`, majorant récursif de toute la queue `c²+`, préservation des
+  marges de dénominateur et certificat total `matrix-c1` contre Mandelbrot.
 - `Jets.lean` : merge de degré 2, congruence de jets polynomiaux, récurrence
   pure-`c` et sensibilités.
 - `BivariateJets.lean` : troncature bivariée par degré total et preuve que la

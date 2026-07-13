@@ -11,5 +11,6 @@ import LeanProofs.Jets
 import LeanProofs.BivariateJets
 import LeanProofs.Periodic
 import LeanProofs.NonautonomousPade
+import LeanProofs.MatrixC1
 import LeanProofs.Fatou
 import LeanProofs.Dynamics

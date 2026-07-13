@@ -77,6 +77,22 @@ au runtime.
   `r_(j+1)=|a_j|r_j+r_j²+y`, les sorties exacte et Padé ont des rayons séparés,
   et les marges des queues sont calculées depuis les quatre entrées de chaque
   matrice.
+- La compression `matrix-c1` de ce produit est maintenant formalisée.
+  `MatrixC1.comp` donne la récurrence exacte des parties constante et linéaire
+  des quatre entrées. Le terme perdu lors d'une composition est exactement
+  `c² M₁N₁`.
+- `padeMatrixC1TailBound` transporte récursivement l'erreur déjà omise et
+  ajoute ce nouveau terme quadratique. `padeMatrixC1_tail_le` prouve que cette
+  quantité majore toute la queue polynomiale `c²+...` sur `|c|≤y`.
+- Une erreur matricielle `E` perturbe numérateur et dénominateur d'au plus
+  `E(R+1)` sur `|z|≤R`. `exact_den_margin_of_matrixC1` prouve donc que la
+  matrice exacte conserve la marge affichée par la matrice tronquée, diminuée
+  de `E(R+1)`. `MatrixC1.uniformDenMargin` minore en plus cette marge
+  simultanément pour tout `|c|≤y`, à partir des seuls huit coefficients.
+- `matrixC1_nonautonomous_total_error` additionne enfin, sans identifier leurs
+  dénominateurs, le majorant Padé–Mandelbrot non autonome et l'erreur complète
+  de troncature matricielle. Il constitue le certificat exact-arithmétique du
+  tier runtime proposé à huit coefficients complexes.
 
 Conséquence : une tolérance relative à la vraie carte doit employer le
 second rayon, plus petit. Substituer le premier change effectivement le
@@ -87,8 +103,9 @@ Sur le flot parabolique cette supériorité est désormais stricte et exacte ; l
 théorème de shadowing explique quantitativement ce qui subsiste pour la
 dynamique discrète, sous une hypothèse explicite de confinement du domaine.
 La version non autonome montre que ni la variation de `2Z_j` ni le canal `c`
-ne sont des obstacles analytiques ; la difficulté runtime restante est la
-compression de la dépendance polynomiale en `c` du produit matriciel.
+ne sont des obstacles analytiques. La compression affine en `c` et sa perte de
+marge sont désormais certifiées ; restent son implémentation concrète dans le
+builder et la mesure de son intérêt face à `[2/1]-c⁺`.
 
 ### Composition de Möbius
 
