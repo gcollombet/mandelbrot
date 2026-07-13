@@ -150,6 +150,94 @@ en Julia, mais pas en Mandelbrot sans faire dépendre ses coefficients de `c`.
 Les anciennes récurrences sans normalisation ne peuvent donc être annoncées
 comme une composition exacte pour `c≠0`.
 
+### Image exacte d'un disque par Möbius
+
+- `mobius_disk_pole_margin` prouve, pour `R≥0`, l'équivalence exacte entre
+  `Delta = |Cc+D|²-|C|²R² > 0` et l'absence de zéro de `Cz+D` sur tout le
+  disque fermé `D(c,R)`. La réciproque construit explicitement le pôle lorsque
+  la marge est non positive, y compris le cas dégénéré `C=0`.
+- `mobius_image_disk_exact` prouve les formules
+  `centre=(p conj(q)-A conj(C)R²)/Delta` et
+  `rayon=|AD-BC|R/Delta` via une identité hermitienne signée exacte.
+- Sous `Delta>0` et `det≠0`, l'appartenance au disque source est équivalente
+  à l'appartenance de l'image au disque calculé pour tout point fini hors du
+  pôle ; le disque fermé est transporté vers ce disque et le cercle frontière
+  vers son cercle frontière.
+
+Conséquence : le prototype Schwarz--Pick peut employer un transport de disque
+exact pour chaque bloc Möbius au lieu d'un majorant euclidien par normes.
+
+### Matrice affine en `c`, repères mobiles et métrique hyperbolique
+
+- `MatrixC1Disk.lean` généralise la queue ponctuelle à tout disque
+  `D(z₀,R)` par `E(|z₀|+R+1)` et prouve que
+  `queue < diskPoleMargin` implique `Delta_exact>0` pour toute matrice exacte
+  dans cette queue.
+- `MatrixC1.mapsTo_closedBall_uniform_all` quantifie le résultat sur tout
+  `|c|≤y` à partir de la marge uniforme des huit coefficients. Pour chaque
+  `c`, la carte exacte est incluse dans le disque image exact de
+  `M₀+cM₁`, gonflé du majorant de valeur déjà prouvé.
+- `MatrixC1.norm_deriv_exact_le_uniform` fournit simultanément la borne de
+  dérivée directe, avec le déterminant et la marge de pôle uniformes du
+  builder. Aucun disque de Cauchy élargi n'est requis.
+- `MovingDisks.lean` formalise les frames `(centre,rayon)`. La composition de
+  deux blocs transporte exactement la frame intermédiaire, les deux facteurs
+  hermitiens se multiplient, et leurs certificats locaux d'absence de pôle
+  impliquent celui de la matrice composée.
+- La positivité de `Delta` et la marge de pôle sont invariantes par
+  normalisation projective non nulle.
+- `HyperbolicTelescope.lean` prouve le lemme de Schwarz centré entre deux
+  disques, le télescopage additif de défauts dans une suite arbitraire de
+  métriques mobiles et les conversions
+  `eps/(R(1-q²))` puis `R(1+q²)delta` entre erreurs euclidienne et
+  pseudohyperbolique sur l'intérieur `qR`.
+- `SchwarzPick.lean` construit l'automorphisme explicite envoyant un point
+  arbitraire sur zéro, son adjugée inverse, leurs exclusions de pôle et
+  l'identité de birapport. `DiskFrame.schwarzPick` prouve alors, pour toute
+  application holomorphe `f : D₁ → D₂` et tous `z,w∈D₁`,
+
+  ```text
+  pseudoDist_D2(f(z),f(w)) <= pseudoDist_D1(z,w).
+  ```
+
+- `Homography.schwarzPick_imageFrame` spécialise ce résultat : tout bloc
+  Möbius non dégénéré est non expansif entre un disque et sa frame image
+  exacte. `mapsTo_ball_imageFrame` ferme le passage des disques fermés aux
+  intérieurs ouverts requis par le théorème analytique.
+
+Conséquence : l'obligation analytique Schwarz--Pick à deux points est fermée.
+Le prochain travail est désormais une intégration build-only : choisir les
+frames et marges intérieures, calculer les défauts locaux, puis comparer le
+rayon issu du télescope au certificat euclidien existant.
+
+### Perturbation exacte et rebasing Zhuoran
+
+- `mandelbrot_perturbation_identity` raccorde explicitement les orbites
+  complètes à `exactStep` :
+  `(Z+dz)²+(C+dc)-(Z²+C)=2Z*dz+dz²+dc`.
+- `PerturbationState` sépare le compteur d'itération physique, l'index de
+  référence, `dz` et ses deux premières dérivées en `dc`.
+- Le pas exact préserve simultanément la valeur physique et les récurrences
+  des dérivées première et seconde.
+- Le rebase `dz <- Z_m+dz, m <- 0` conserve valeur, compteur et dérivées ; la
+  garde Zhuoran prouve en plus la diminution stricte de `|dz|`.
+- `PerturbationAction.run_initial_correct` prouve par induction la correction
+  de toute suite finie de pas exacts et de rebases depuis l'état initial.
+- `ValueWithin` et `DifferentialWithin` étendent l'invariant à des sauts
+  approchés possédant un budget non nul. Le rebase conserve exactement ces
+  trois budgets.
+- `CertifiedTransition.comp` compose les certificats de tiers successifs et
+  `then_rebase` prouve qu'un rebase après affine, Padé ou jet ne consomme aucun
+  budget supplémentaire.
+- Bailout, lissage, distance estimation et observables d'AA qui ne dépendent
+  que de la valeur physique et de ses dérivées sont invariants par rebase.
+
+Conséquence : la sémantique employée par `unified_replay_band`, les boucles de
+perturbation/rebasing et le portefeuille `auto` est maintenant formalisée au
+niveau exact et au niveau « saut approché certifié ». Les sauts approximatifs
+gardent leurs certificats propres ; le rebase ne les transforme pas en
+égalités exactes, mais prouve qu'il n'ajoute aucune erreur.
+
 ### Formes c⁺
 
 - L'extraction `[1/1]-c⁺` annule exactement

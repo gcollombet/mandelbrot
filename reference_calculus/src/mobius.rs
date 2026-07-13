@@ -389,7 +389,68 @@ fn lse2(terms: &[f64]) -> f64 {
 /// block, independent of R_z). Also returns the final M (log2) at the chosen
 /// R_z. Exact log bisection: the peak is monotone increasing in R_z.
 fn mobius_bisect_rz(twoz: &[(f64, i64)], log2_rc: f64) -> (f64, f64) {
+    mobius_bisect_rz_hinted(twoz, log2_rc, f64::INFINITY)
+}
+
+/// `mobius_bisect_rz` with a parent→child warm start (§8.2). `hint` is the
+/// bisected R_z of the block's FIRST CHILD at the same rung: the parent's
+/// majorant walk contains the first child's walk as a PREFIX, so
+/// peak_parent(R) ≥ peak_child(R) for every R and the parent's admissible R_z
+/// cannot exceed the child's (+tolerance). A hint of −∞ (dead child rung)
+/// proves the parent rung dead for free; a finite hint replaces the wide
+/// [R_c−80, −1] bisection with an exponential DOWNWARD probe from the hint
+/// (~2-4 walks instead of ~11). Soundness is untouched: every returned point
+/// is verified valid, and validity at any R_z is a sound polydisc.
+fn mobius_bisect_rz_hinted(twoz: &[(f64, i64)], log2_rc: f64, hint: f64) -> (f64, f64) {
     let peak = |lrz: f64| jet::jet_majorant_peak_pre(twoz, fe_exp2(lrz), fe_exp2(log2_rc));
+    const RZ_TOL_LOG2: f64 = 0.05;
+    if hint == f64::NEG_INFINITY {
+        return (f64::NEG_INFINITY, f64::INFINITY);
+    }
+    if hint.is_finite() {
+        let lo0 = log2_rc - 80.0;
+        // The child's returned lo underestimates its crossing by ≤ tol, so
+        // the parent's crossing is ≤ hint + tol: check the hint itself first.
+        let (p_h, m_h) = peak(hint);
+        if p_h < MOBIUS_RHO_TARGET_LOG2 {
+            return (hint, m_h);
+        }
+        // Downward bracket: hi known invalid, probe hint−0.5, −1, −2, …
+        let mut hi = hint;
+        let mut off = 0.5;
+        let (mut lo, mut m_lo) = (f64::NEG_INFINITY, f64::INFINITY);
+        while hint - off > lo0 {
+            let x = hint - off;
+            let (p, m) = peak(x);
+            if p < MOBIUS_RHO_TARGET_LOG2 {
+                lo = x;
+                m_lo = m;
+                break;
+            }
+            hi = x;
+            off *= 2.0;
+        }
+        if lo == f64::NEG_INFINITY {
+            // Even the deepest probe failed: fall back to the lo0 endpoint.
+            let (p0, m0) = peak(lo0);
+            if !(p0 < MOBIUS_RHO_TARGET_LOG2) {
+                return (f64::NEG_INFINITY, f64::INFINITY);
+            }
+            lo = lo0;
+            m_lo = m0;
+        }
+        while hi - lo > RZ_TOL_LOG2 {
+            let mid = 0.5 * (lo + hi);
+            let (p, m) = peak(mid);
+            if p < MOBIUS_RHO_TARGET_LOG2 {
+                lo = mid;
+                m_lo = m;
+            } else {
+                hi = mid;
+            }
+        }
+        return (lo, m_lo);
+    }
     // R_z ≪ R_c isolates the R_c contribution. If the peak already hits the
     // target here, no R_z helps.
     let lo0 = log2_rc - 80.0;
@@ -415,7 +476,6 @@ fn mobius_bisect_rz(twoz: &[(f64, i64)], log2_rc: f64) -> (f64, f64) {
     // not a soundness one — the polydisc-invariant test is the referee). The
     // final M is reused from the last VALID evaluation (lo side) instead of a
     // dedicated closing walk.
-    const RZ_TOL_LOG2: f64 = 0.05;
     let mut m_lo = f64::INFINITY; // lo0's peak passed but its M was discarded
     let mut lo_fresh = false; // m_lo valid for the current lo?
     let mut iters = 0;
@@ -985,9 +1045,18 @@ pub fn mobius_build_bounds_pair(
     let log2_rc = mobius_rungs(log2_c_max);
     let mut per_c: Vec<Vec<MobiusBounds>> = Vec::with_capacity(cplus.len());
     let mut per_p: Vec<Vec<MobiusBounds>> = Vec::with_capacity(plain.len());
+    // Warm-start bookkeeping (§8.2): the bisected (R_z, M) depend only on the
+    // segment+rung, and a parent's walk contains its FIRST child's walk as a
+    // prefix — so the child's R_z upper-bounds the parent's. Kept per level
+    // for the next one; slots of the base emitted level get no hint (their
+    // children live below the emit floor and are never bounded).
+    let mut prev_rz: Vec<[f64; MOBIUS_NCAND]> = Vec::new();
+    let mut prev_skip = 0usize;
     for (lc, lp) in cplus.iter().zip(plain.iter()) {
         let mut row_c = Vec::with_capacity(lc.blocks.len());
         let mut row_p = Vec::with_capacity(lp.blocks.len());
+        let mut cur_rz: Vec<[f64; MOBIUS_NCAND]> = Vec::with_capacity(lc.blocks.len());
+        let hinted = prev_skip * 2 == lc.skip && !prev_rz.is_empty();
         for slot in 0..lc.blocks.len() {
             let first = 1 + slot * lc.skip;
             let seg = &twoz[first..first + lc.skip];
@@ -998,9 +1067,19 @@ pub fn mobius_build_bounds_pair(
                 log2_mq: [f64::INFINITY; MOBIUS_NCAND],
             };
             let mut out_p = out_c;
+            // +∞ = "no information" (degenerate block: the SEGMENT walk was
+            // never run, so the parent must not inherit a dead-rung verdict);
+            // −∞ from the bisection = segment-dead, which IS inheritable.
+            let mut rz_row = [f64::INFINITY; MOBIUS_NCAND];
             if !bc.m.degenerate {
                 for c in 0..MOBIUS_NCAND {
-                    let (log2_rz, log2_m) = mobius_bisect_rz(seg, log2_rc[c]);
+                    let hint = if hinted {
+                        prev_rz.get(2 * slot).map(|r| r[c]).unwrap_or(f64::INFINITY)
+                    } else {
+                        f64::INFINITY
+                    };
+                    let (log2_rz, log2_m) = mobius_bisect_rz_hinted(seg, log2_rc[c], hint);
+                    rz_row[c] = log2_rz;
                     if !log2_rz.is_finite() || !log2_m.is_finite() {
                         continue; // rung saturates for this block
                     }
@@ -1024,9 +1103,12 @@ pub fn mobius_build_bounds_pair(
             }
             row_c.push(out_c);
             row_p.push(out_p);
+            cur_rz.push(rz_row);
         }
         per_c.push(row_c);
         per_p.push(row_p);
+        prev_rz = cur_rz;
+        prev_skip = lc.skip;
     }
     (
         MobiusBoundsTable { log2_rc, per_level: per_c },

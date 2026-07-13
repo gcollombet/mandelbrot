@@ -48,6 +48,20 @@ const stats = reactive({
 
   // Dispatch
   tierApps: [-1, -1, -1, -1] as [number, number, number, number],
+  secoursStats: [-1, -1] as [number, number],
+  f32Apps: -1,
+  gateStats: [-1, -1] as [number, number],
+  realizedSkip: -1,
+  workgroupWaste: -1,
+  maxPixelSteps: -1,
+  realLoopSteps: -1,
+  portfolioEnabled: true,
+  // Table (worker's last unified build)
+  tableSaN0: -1,
+  tablePeriodicP: -1,
+  tableBandLog2: Number.NaN,
+  tableBandSpread: Number.NaN,
+  tableGateCount: -1,
   shaderApproxFlag: 0,
   shaderBlaLevelCount: 0,
   aaFrontierStamped: -1,
@@ -163,14 +177,75 @@ function formatRefOrbit(count: number, max: number): string {
   return `${formatCondensedNumber(c)} / ${formatCondensedNumber(m)}`;
 }
 
-// Tier mix (auto mode): live per-tier Σ applications [affine, Padé, c+, jet].
-function tierMix(): string {
+// Form mix: live per-form Σ applications. Slot meaning is MODE-dependent
+// (mirrors the shader's per-mode counters): auto = the four unified tiers;
+// jet = its three applied orders; Möbius/Padé/BLA = their single form.
+type TierMeta = { label: string; color: string } | null;
+const TIER_META_BY_MODE: Record<number, TierMeta[]> = {
+  5: [
+    { label: 'Affine (BLA)', color: '#7dd3a8' },
+    { label: 'Padé [2/1]', color: '#e0b45c' },
+    { label: 'Möbius-c⁺ [2/1]', color: '#6fb7e8' },
+    { label: 'Jet ordre 3', color: '#b58ae0' },
+  ],
+  3: [
+    { label: 'Jet ordre 1', color: '#7dd3a8' },
+    { label: 'Jet ordre 2', color: '#e0b45c' },
+    { label: 'Jet ordre 3', color: '#b58ae0' },
+    null,
+  ],
+  4: [null, null, { label: 'Möbius-c⁺ [2/1]', color: '#6fb7e8' }, null],
+  2: [null, { label: 'Padé [1/1]', color: '#e0b45c' }, null, null],
+  1: [{ label: 'BLA affine', color: '#7dd3a8' }, null, null, null],
+};
+const tierTotal = computed(() => {
   const t = stats.tierApps;
-  const total = t[0] + t[1] + t[2] + t[3];
-  if (total <= 0) return '';
-  const pct = (v: number) => (100 * v / total).toFixed(0) + '%';
-  // Affine + Padé share the ≤48 B path (affine is census-dead anyway).
-  return `≤48B ${pct(t[0] + t[1])} · c+ ${pct(t[2])} · jet ${pct(t[3])}`;
+  return t[0] < 0 ? -1 : t[0] + t[1] + t[2] + t[3];
+});
+const tierRows = computed(() => {
+  const total = tierTotal.value;
+  const meta = TIER_META_BY_MODE[stats.shaderApproxFlag];
+  if (total <= 0 || !meta) return [];
+  return meta
+    .map((m, i) => (m ? { ...m, count: stats.tierApps[i], pct: (100 * stats.tierApps[i]) / total } : null))
+    .filter((r): r is NonNullable<typeof r> => r !== null && r.count > 0);
+});
+// Secours (portfolio): fallback applications + iterations they covered.
+function secoursLine(): string {
+  const [apps, iters] = stats.secoursStats;
+  const total = tierTotal.value;
+  if (apps < 0 || total <= 0) return '';
+  return `${formatOps(apps)} (${((100 * apps) / total).toFixed(0)}%) · ${formatOps(iters)} iters`;
+}
+// Plain-f32 fast-path share of the applications (the rest ran in floatexp).
+function f32Line(): string {
+  const total = tierTotal.value;
+  if (stats.f32Apps < 0 || total <= 0) return '';
+  return `${((100 * stats.f32Apps) / total).toFixed(0)}% f32 · ${(100 - (100 * stats.f32Apps) / total).toFixed(0)}% fe`;
+}
+// Whole-render skip metrics: iterations covered per real loop turn, loop
+// turns per pixel, iterations covered per pixel.
+function turnsPerPixel(): number {
+  if (stats.realLoopSteps < 0 || stats.totalPixels <= 0) return -1;
+  return stats.realLoopSteps / stats.totalPixels;
+}
+function itersPerPixel(): number {
+  const t = turnsPerPixel();
+  if (t < 0 || stats.realizedSkip < 0) return -1;
+  return t * stats.realizedSkip;
+}
+// §18 gates: jumps landed / degraded attempts (+ emitted count when armed).
+function gatesLine(): string {
+  const [j, f] = stats.gateStats;
+  if (j < 0) return '';
+  if (stats.tableGateCount === 0 && j === 0 && f === 0) return 'dormantes';
+  const emitted = stats.tableGateCount > 0 ? ` · ${stats.tableGateCount} émises` : '';
+  return `${formatOps(j)} sauts Ψ · ${formatOps(f)} échecs${emitted}`;
+}
+// Replay-observed |dz| band the dispatch tags were chosen at.
+function bandLine(): string {
+  if (!Number.isFinite(stats.tableBandLog2)) return '';
+  return `2^${stats.tableBandLog2.toFixed(1)} ± ${stats.tableBandSpread.toFixed(1)} oct`;
 }
 
 // Analytic AA frontier: re-iterated texels / boundary-band texels at the last
@@ -238,6 +313,19 @@ function readLive(e: any) {
 
   // Dispatch
   stats.tierApps = e.tierAppsApprox ?? [-1, -1, -1, -1];
+  stats.secoursStats = e.secoursStatsApprox ?? [-1, -1];
+  stats.f32Apps = e.f32AppsApprox ?? -1;
+  stats.gateStats = e.gateStatsApprox ?? [-1, -1];
+  stats.realizedSkip = e.realizedSkip ?? -1;
+  stats.workgroupWaste = e.workgroupWaste ?? -1;
+  stats.maxPixelSteps = e.maxPixelSteps ?? -1;
+  stats.realLoopSteps = e.realLoopStepsApprox ?? -1;
+  stats.portfolioEnabled = e.portfolioEnabled ?? true;
+  stats.tableSaN0 = e.tableSaN0 ?? -1;
+  stats.tablePeriodicP = e.tablePeriodicP ?? -1;
+  stats.tableBandLog2 = e.tableBandLog2 ?? Number.NaN;
+  stats.tableBandSpread = e.tableBandSpread ?? Number.NaN;
+  stats.tableGateCount = e.tableGateCount ?? -1;
   stats.shaderApproxFlag = e.lastShaderApproxFlag ?? 0;
   stats.shaderBlaLevelCount = e.lastShaderBlaLevelCount ?? 0;
   stats.aaFrontierStamped = e.aaFrontierStamped ?? -1;
@@ -562,14 +650,63 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 
     <!-- Dispatch: which approximation tier/mode is actually feeding the shader -->
     <div class="perf-sub">Dispatch</div>
-    <div v-if="stats.shaderApproxFlag === 5 && tierMix()" class="perf-stat-row">
-      <span class="perf-stat-label">Tier mix</span>
-      <span class="perf-stat-value">{{ tierMix() }}</span>
-    </div>
     <div class="perf-stat-row">
       <span class="perf-stat-label">Shader mode</span>
       <span class="perf-stat-value">{{ shaderModeLabel }} · {{ stats.shaderBlaLevelCount }} lvl</span>
     </div>
+    <template v-if="stats.shaderApproxFlag >= 1">
+      <div v-if="stats.realizedSkip > 0" class="perf-stat-row">
+        <span class="perf-stat-label">Saut moyen / tour</span>
+        <span class="perf-stat-value">×{{ stats.realizedSkip.toFixed(1) }}</span>
+      </div>
+      <div v-if="turnsPerPixel() >= 0" class="perf-stat-row">
+        <span class="perf-stat-label">Par pixel (cumul rendu)</span>
+        <span class="perf-stat-value">{{ turnsPerPixel() < 10 ? turnsPerPixel().toFixed(2) : formatOps(Math.round(turnsPerPixel())) }} tours · {{ itersPerPixel() < 1000 ? itersPerPixel().toFixed(1) : formatOps(Math.round(itersPerPixel())) }} iters</span>
+      </div>
+      <div v-if="tierRows.length" class="perf-stat-row perf-stat-row--progress">
+        <div class="perf-progress-header">
+          <span class="perf-stat-label">Formes appliquées</span>
+          <span class="perf-stat-value">{{ formatOps(tierTotal) }} apps</span>
+        </div>
+        <div class="perf-tier-bar">
+          <div v-for="r in tierRows" :key="r.label" class="perf-tier-seg"
+               :style="{ width: Math.max(0.5, r.pct) + '%', background: r.color }"
+               :title="`${r.label}: ${r.count} (${r.pct.toFixed(1)}%)`"></div>
+        </div>
+      </div>
+      <div v-for="r in tierRows" :key="'row-' + r.label" class="perf-stat-row">
+        <span class="perf-stat-label"><span class="perf-tier-dot" :style="{ background: r.color }"></span>{{ r.label }}</span>
+        <span class="perf-stat-value">{{ formatOps(r.count) }} · {{ r.pct.toFixed(1) }}%</span>
+      </div>
+      <div v-if="stats.shaderApproxFlag === 5 && secoursLine()" class="perf-stat-row">
+        <span class="perf-stat-label">Secours {{ stats.portfolioEnabled ? '' : '(OFF)' }}</span>
+        <span class="perf-stat-value">{{ secoursLine() }}</span>
+      </div>
+      <div v-if="f32Line()" class="perf-stat-row">
+        <span class="perf-stat-label">Chemin arithmétique</span>
+        <span class="perf-stat-value">{{ f32Line() }}</span>
+      </div>
+      <div v-if="stats.shaderApproxFlag === 5 && stats.tableSaN0 >= 0" class="perf-stat-row">
+        <span class="perf-stat-label">SA préfixe commun</span>
+        <span class="perf-stat-value">{{ stats.tableSaN0 > 0 ? formatOps(stats.tableSaN0) + ' iters' : '—' }}</span>
+      </div>
+      <div v-if="stats.shaderApproxFlag === 5 && stats.tablePeriodicP >= 0" class="perf-stat-row">
+        <span class="perf-stat-label">Header périodique</span>
+        <span class="perf-stat-value">{{ stats.tablePeriodicP > 0 ? 'p = ' + stats.tablePeriodicP : 'dormant' }}</span>
+      </div>
+      <div v-if="stats.shaderApproxFlag === 5 && gatesLine()" class="perf-stat-row">
+        <span class="perf-stat-label">Portes paraboliques</span>
+        <span class="perf-stat-value">{{ gatesLine() }}</span>
+      </div>
+      <div v-if="stats.shaderApproxFlag === 5 && bandLine()" class="perf-stat-row">
+        <span class="perf-stat-label">Bande |dz| (replay)</span>
+        <span class="perf-stat-value">{{ bandLine() }}</span>
+      </div>
+      <div v-if="stats.workgroupWaste > 0" class="perf-stat-row">
+        <span class="perf-stat-label">Lockstep / straggler</span>
+        <span class="perf-stat-value">×{{ stats.workgroupWaste.toFixed(2) }} · {{ formatOps(stats.maxPixelSteps) }} tours max</span>
+      </div>
+    </template>
     <div v-if="aaFrontier()" class="perf-stat-row">
       <span class="perf-stat-label">AA frontier</span>
       <span class="perf-stat-value">{{ aaFrontier() }}</span>
@@ -772,6 +909,27 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 }
 .pe-btn:hover:not(:disabled) { background: rgba(56, 189, 248, 0.22); }
 .pe-btn:disabled { opacity: 0.4; cursor: default; }
+
+/* --- Tier mix bar (Dispatch) --- */
+.perf-tier-bar {
+  display: flex;
+  width: 100%;
+  height: 6px;
+  border-radius: 3px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.06);
+}
+.perf-tier-seg {
+  height: 100%;
+}
+.perf-tier-dot {
+  display: inline-block;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  margin-right: 6px;
+  vertical-align: baseline;
+}
 
 /* --- Relocated stat rows (Rendu / Dispatch / Référence / Debug) --- */
 .perf-stat-row {

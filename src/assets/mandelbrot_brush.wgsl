@@ -77,6 +77,12 @@ const LN2: f32 = 0.6931471805599453;
 // DEEP_EXP). Default true keeps the deep-capable kernel identical to before.
 override ENABLE_DEEP: bool = true;
 
+// Portfolio A/B switch: when false the driver folds the secours fallback out
+// of try_apply_unified (principal-only dispatch, the pre-portfolio behavior),
+// for clean GPU-time / descent-count comparisons. Same specialization-cache
+// pattern as ENABLE_DEEP.
+override ENABLE_PORTFOLIO: bool = true;
+
 struct BlaStep {
   // floatexp form: a = (ax,ay)·2^ab_exp, b = (bx,by)·2^ab_exp,
   // alpha = radius_alpha·2^alpha_exp, beta = radius_beta (O(1)).
@@ -143,8 +149,11 @@ struct WorkStats {
   covMean: atomic<u32>,
   maxAccum: atomic<u32>,
   maxSteps: atomic<u32>,
-  // Tier mix (auto mode): Σ applications per dispatch tier, same >>6 scale as
-  // realMean — [affine, Padé, c+, jet]; zero outside mode 5.
+  // Form mix: Σ applications per form, RAW counts. Slot meaning is
+  // MODE-dependent (the panel labels accordingly): mode 5 = [affine, Padé
+  // [2/1], c+, jet]; mode 3 = [jet o1, jet o2, jet o3, —]; mode 4 =
+  // [—, —, Möbius-c⁺, —]; mode 1 = [BLA, —, —, —]; mode 2 = [—, Padé [1/1],
+  // —, —]. Zero in mode 0 (exact).
   tierAff: atomic<u32>,
   tierPade: atomic<u32>,
   tierCplus: atomic<u32>,
@@ -155,6 +164,15 @@ struct WorkStats {
   // tier counters are mode-entangled).
   gateJumps: atomic<u32>,
   gateFails: atomic<u32>,
+  // Portfolio observability (mode 5): secours applications and the iterations
+  // they covered — the A/B signal "descents avoided" the per-tier counters
+  // cannot provide (they mix principal and secours under the applied tag).
+  // Raw counts, same no->>6 rationale as the gate counters.
+  secoursApps: atomic<u32>,
+  secoursIters: atomic<u32>,
+  // Applications served by the plain-f32 fast path (mode 5; the complement
+  // ran in fe) — the per-application cost mix the panel surfaces.
+  appsF32: atomic<u32>,
 };
 
 // ── bivariate jet mode (add-jet-approximation) ─────────────────────
@@ -229,10 +247,19 @@ struct JetLevel {
 // incremented once per iteration-loop turn (a block-apply or an exact step both
 // count as 1). Reset in cs_main before each texel's compute.
 var<private> g_workSteps: u32 = 0u;
+// Per-dispatch WORK budget (batch): each loop turn adds the WEIGHT of the
+// move it executed — exact step 1, block applications by form cost (fe ≈ ×2),
+// Ψ-gate hops 8 — so `maxIteration` bounds homogeneous work ≈ GPU time and
+// the adaptive batch controller stays stable across block/exact mix swings
+// while navigating. g_workSteps (1/turn) keeps the honest turn stats.
+var<private> g_workBudget: u32 = 0u;
 // Per-texel tier application counts (auto mode), flushed with the work stats.
 var<private> g_tierApps: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
 var<private> g_gateJumps: u32 = 0u;
 var<private> g_gateFails: u32 = 0u;
+var<private> g_secoursApps: u32 = 0u;
+var<private> g_secoursIters: u32 = 0u;
+var<private> g_appsF32: u32 = 0u;
 
 // ── complex helpers (verbatim from mandelbrot.wgsl) ────────────────
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -454,6 +481,10 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
                 *derM = cmul(cmul(aMantissa, invM2), *derM) + cmul(bMantissa, invM) * (*derInvScale);
                 der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
                 der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
+                // Form counter (mode 2 = Padé [1/1], shallow = plain f32).
+                g_tierApps[1] += 1u;
+                g_appsF32 += 1u;
+                g_workBudget += 2u;
                 *ref_i += skip;
                 return skip;
               }
@@ -469,6 +500,10 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
               *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
               der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
               der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
+              // Form counter (mode 1 = affine BLA, shallow = plain f32).
+              g_tierApps[0] += 1u;
+              g_appsF32 += 1u;
+              g_workBudget += 1u;
               *ref_i += skip;
               return skip;
             }
@@ -707,9 +742,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     // Möbius products are degree-1 in dc (no dc²/dc³), so its f32-path gate
     // only needs dc itself clear of the subnormal band.
     let mobiusF32Ok = isMobius && dcMag > 1e-30;
-    // Unified fast path serves the RATIONAL tags only (degree-1 in dc): same
-    // gate as Möbius; the jet tag always evaluates in fe.
+    // Unified fast path: the rational tags are degree-1 in dc (same gate as
+    // Möbius); the JET tag reconstructs dc²/dc³ products, so its f32 branch
+    // takes the jet-mode gate. The old "jet tag always evaluates in fe" rule
+    // was a placeholder-band assumption — the form counters showed the jet
+    // tag firing massively at f32-scale |dz| via the secours.
     let unifiedF32Ok = isUnified && dcMag > 1e-30;
+    let unifiedJetF32Ok = isUnified && dcMag > 2.3e-13;
     var usedBla = false;
     var blaZ = vec2<f32>(0.0);
     var jetLevelHint = JET_MAX_LEVELS; // (#5) start uncapped, then track accepts
@@ -767,8 +806,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         }
       }
     }
-    while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+    while (g_workBudget < u32(max_iteration) && ref_i < globalMaxIterI) {
       g_workSteps += 1u;
+      g_workBudget += 1u;
       if (perP > 0 && ref_i >= perNext) {
         let k = (ref_i - perStart + perP - 1) / perP;
         let aligned = perStart + k * perP;
@@ -800,6 +840,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           gated = true;
           blaZ = getOrbit(ref_i) + dz;
           g_gateJumps += 1u;
+          g_workBudget += 8u;
         } else if (adv < 0) {
           gFails += 1;
           g_gateFails += 1u;
@@ -819,7 +860,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         if (dzMag < 1.2e-38 || log2(dzMag) < jetMaxR3) {
           var dzFe = fe_from_vec(dz, 0);
           if (isUnified) {
-            skipped = try_apply_unified(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, unifiedF32Ok, &jetLevelHint, &sndM);
+            skipped = try_apply_unified(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, dcF2, dcF3, unifiedF32Ok, unifiedJetF32Ok, &jetLevelHint, &sndM);
           } else if (isMobius) {
             skipped = try_apply_mobius(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, mobiusF32Ok, &jetLevelHint);
           } else {
@@ -903,8 +944,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       }
     }
   } else {
-    while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+    while (g_workBudget < u32(max_iteration) && ref_i < globalMaxIterI) {
       g_workSteps += 1u;
+      g_workBudget += 1u;
       let zPrev = refZ + dz;
       dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
       ref_i += 1;
@@ -1078,6 +1120,9 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
                   der_scale_add(derS, derSLo, f32(aOverM2.e) * LN2);
                   *derM = *derM + bOverM.m * exp(clamp(f32(bOverM.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
                   der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
+                  // Form counter (mode 2 = Padé [1/1], deep = fe).
+                  g_tierApps[1] += 1u;
+                  g_workBudget += 5u;
                   *ref_i += skip;
                   return skip;
                 }
@@ -1091,6 +1136,9 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
                 *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
                 der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
                 der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
+                // Form counter (mode 1 = affine BLA, deep = fe).
+                g_tierApps[0] += 1u;
+                g_workBudget += 3u;
                 *ref_i += skip;
                 return skip;
               }
@@ -1262,11 +1310,13 @@ fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<fun
           var pdz: fe;
           var pdc: fe;
           var phi: fe;
+          var usedF32 = false;
           // (#4) Plain-f32 fast path: radii.w is the build-side "all shipped
           // coefficient exponents fit f32" flag — free, it rides the same vec4
           // load as the radii. log2_dz > -100 keeps the dz-side products clear
           // of the f32 subnormal band; everything else pays the fe evaluator.
           if (f32Ok && radii.w > 0.5 && log2_dz > -100.0) {
+            usedF32 = true;
             var pdzF = vec2<f32>(0.0);
             var pdcF = vec2<f32>(0.0);
             let phiF = jet_apply_f32(entry, k, fe_to_vec(*dz), dcF, dcF2, dcF3, &pdzF, &pdcF);
@@ -1298,6 +1348,14 @@ fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<fun
               *derM = *derM + pdc.m * exp(clamp(f32(pdc.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
               der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
             }
+            // Form counters (mode 3 = jet order k; f32 when the fast path ran).
+            g_tierApps[0] += select(0u, 1u, k == 1);
+            g_tierApps[1] += select(0u, 1u, k == 2);
+            g_tierApps[2] += select(0u, 1u, k == 3);
+            g_appsF32 += select(0u, 1u, usedF32);
+            var wx = select(0u, 1u, k == 1) + select(0u, 2u, k == 2) + select(0u, 4u, k == 3);
+            wx += select(0u, wx + 1u, !usedF32);
+            g_workBudget += wx;
             *ref_i += skip;
             *hint = level; // (#5) seed next turn's descent
             return skip;
@@ -1362,7 +1420,9 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
           var pdz: fe;
           var pdc: fe;
           var denOk = true;
+          var usedF32 = false;
           if (f32Ok && radii.y > 0.5 && log2_dz > -100.0) {
+            usedF32 = true;
             // Plain-f32 fast path: 7 ldexp reconstructions + the [2/1] form.
             let ca  = jet_coeff_f32(mandelbrotJetSuite[base]);
             let cb  = jet_coeff_f32(mandelbrotJetSuite[base + 1]);
@@ -1425,6 +1485,11 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
                 *derM = *derM + pdc.m * exp(clamp(f32(pdc.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
                 der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
               }
+              // Form counter (mode 4 = Möbius-c⁺ [2/1]; f32 when the fast
+              // path ran).
+              g_tierApps[2] += 1u;
+              g_appsF32 += select(0u, 1u, usedF32);
+              g_workBudget += select(7u, 3u, usedF32);
               *ref_i += skip;
               *hint = level; // (#5) seed next turn's descent
               return skip;
@@ -1439,16 +1504,21 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
 }
 
 // ── unified block application (unify-jet-table-dispatch, task 2.6) ──────────
-// One sidecar probe (x = tagged tier's certified radius, y = tier tag,
-// z = f32-safe flag), then a TIER-DIRECTED prefix read of the 9-slot [2/1]
-// record [A, B, D, N₂, A', D', F, a12, a03]: affine reads 2 slots, Padé 4
-// (the plain [2/1]), c+ 7, jet all 9 (reconstructing a20 = N₂ − D·A,
+// One sidecar probe (x = PRINCIPAL tier's certified radius, y = its tag,
+// z = f32_safe + 2·secours_tag packed, w = SECOURS tier's radius, −∞ ⇒ no
+// fallback), then a TIER-DIRECTED prefix read of the 9-slot [2/1] record
+// [A, B, D, N₂, A', D', F, a12, a03]: affine reads 2 slots, Padé 4 (the plain
+// [2/1]), c+ 7, jet all 9 (reconstructing a20 = N₂ − D·A,
 // a11 = A' − B·D − F·A, a21 = −D'·A − D·a11 − F·a20, a02 = −F·B and
-// a30 = −D·a20 in registers — the verified identities). Tags are block
-// properties, so the choice is warp-uniform. Rational tags (0-2) get the
-// plain-f32 fast path; the jet tag always evaluates in fe (deep is where it
-// fires).
-fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>) -> i32 {
+// a30 = −D·a20 in registers — the verified identities). Portfolio rule
+// (plan §8): when |dz| exceeds the cheap principal's radius but fits the
+// secours' (the largest-radius tier), apply the secours AT THE SAME LEVEL
+// instead of descending — same record, one extra compare. The candidate PAIR
+// is a block property (warp-uniform); which of the two fires depends on the
+// per-thread |dz|, exactly like the pre-existing radius test. Rational tags
+// (0-2) get the plain-f32 fast path; the jet tag always evaluates in fe (deep
+// is where it fires).
+fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, dcF2: vec2<f32>, dcF3: vec2<f32>, f32Ok: bool, f32OkJet: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
@@ -1468,8 +1538,15 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
         // One coalesced 16 B probe; the record is read only on application,
         // and only the tagged tier's prefix of it.
         let radii = mandelbrotJetRadii[entry].v;
-        if (log2_dz < radii.x) {
-          let tag = i32(radii.y + 0.5);
+        // Principal (x/y) first; secours (w, tag in z's high bits) when the
+        // principal's band is exceeded. r2 > r1 by construction, so a single
+        // max() gates the whole portfolio. ENABLE_PORTFOLIO = false folds the
+        // fallback out entirely (A/B baseline).
+        let useSnd = ENABLE_PORTFOLIO && log2_dz >= radii.x;
+        if (log2_dz < select(radii.x, max(radii.x, radii.w), ENABLE_PORTFOLIO)) {
+          let sndTag = floor(radii.z * 0.5);
+          let safeFlag = radii.z - 2.0 * sndTag;
+          let tag = i32(select(radii.y, sndTag, useSnd) + 0.5);
           let base = entry * UNIFIED_COEFF_STRIDE;
           var phi: fe;
           var pdz: fe;
@@ -1480,8 +1557,11 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
           var mzc = fe(vec2<f32>(0.0), 0);
           var mcc = fe(vec2<f32>(0.0), 0);
           var denOk = true;
-          if (tag <= 2 && f32Ok && radii.z > 0.5 && log2_dz > -100.0) {
-            // Plain-f32 fast path, rational tiers (2-5 ldexp reconstructions).
+          var usedF32 = false;
+          if (f32Ok && safeFlag > 0.5 && log2_dz > -100.0 && (tag <= 2 || f32OkJet)) {
+            usedF32 = true;
+            // Plain-f32 fast path — every tier: the build-side safe flag
+            // covers the rational slots AND the jet identity reconstructions.
             let ca = jet_coeff_f32(mandelbrotJetSuite[base]);
             let cb = jet_coeff_f32(mandelbrotJetSuite[base + 1]);
             let dzF = fe_to_vec(*dz);
@@ -1490,7 +1570,7 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               phi = fe_from_vec(cmul(ca, dzF) + cmul(cb, dcF), 0);
               pdz = fe_from_vec(ca, 0);
               pdc = fe_from_vec(cb, 0);
-            } else {
+            } else if (tag <= 2) {
               var ae = ca;
               var de = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
               let cn2F = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
@@ -1529,6 +1609,36 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                   0,
                 );
               }
+            } else {
+              // Jet tier, plain-f32: the same identity reconstruction and
+              // order-3 Horner rows as the fe branch below (a20 = N₂ − D·A,
+              // a11 = A′ − B·D − F·A, a21 = −D′·A − D·a11 − F·a20,
+              // a02 = −F·B, a30 = −D·a20); the safe flag certifies every
+              // reconstruction and dc-power product fits f32 with headroom.
+              let cdF  = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
+              let cn2F = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
+              let capF = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
+              let cdpF = jet_coeff_f32(mandelbrotJetSuite[base + 5]);
+              let cfF  = jet_coeff_f32(mandelbrotJetSuite[base + 6]);
+              let a12F = jet_coeff_f32(mandelbrotJetSuite[base + 7]);
+              let a03F = jet_coeff_f32(mandelbrotJetSuite[base + 8]);
+              let a02F = -cmul(cfF, cb);
+              let a20F = cn2F - cmul(cdF, ca);
+              let a11F = capF - cmul(cb, cdF) - cmul(cfF, ca);
+              let a21F = -cmul(cdpF, ca) - cmul(cdF, a11F) - cmul(cfF, a20F);
+              let a30F = -cmul(cdF, a20F);
+              let p0 = cmul(cb, dcF) + cmul(a02F, dcF2) + cmul(a03F, dcF3);
+              let p1 = ca + cmul(a11F, dcF) + cmul(a12F, dcF2);
+              let p2 = a20F + cmul(a21F, dcF);
+              let phiF = p0 + cmul(dzF, p1 + cmul(dzF, p2 + cmul(dzF, a30F)));
+              phi = fe_from_vec(phiF, 0);
+              pdz = fe_from_vec(p1 + cmul(dzF, 2.0 * p2 + cmul(dzF, 3.0 * a30F)), 0);
+              let q0 = cb + 2.0 * cmul(a02F, dcF) + 3.0 * cmul(a03F, dcF2);
+              let q1 = a11F + 2.0 * cmul(a12F, dcF);
+              pdc = fe_from_vec(q0 + cmul(dzF, q1 + cmul(dzF, a21F)), 0);
+              mzz = fe_from_vec(2.0 * p2 + 6.0 * cmul(a30F, dzF), 0);
+              mzc = fe_from_vec(q1 + 2.0 * cmul(a21F, dzF), 0);
+              mcc = fe_from_vec(2.0 * a02F + 6.0 * cmul(a03F, dcF) + 2.0 * cmul(a12F, dzF), 0);
             }
           } else {
             let ca = jet_coeff_fe(mandelbrotJetSuite[base]);
@@ -1618,6 +1728,19 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               g_tierApps[1] += select(0u, 1u, tag == 1);
               g_tierApps[2] += select(0u, 1u, tag == 2);
               g_tierApps[3] += select(0u, 1u, tag == 3);
+              // Portfolio observability: a secours hit is a descent avoided;
+              // the covered iterations are the A/B payoff signal.
+              g_secoursApps += select(0u, 1u, useSnd);
+              g_secoursIters += select(0u, u32(skip), useSnd);
+              g_appsF32 += select(0u, 1u, usedF32);
+              // Batch weight: the turn's base 1 is already counted; add the
+              // form surcharge (fe evaluation ≈ ×2 the f32 path).
+              var wx = select(0u, 1u, tag == 0)
+                     + select(0u, 2u, tag == 1)
+                     + select(0u, 3u, tag == 2)
+                     + select(0u, 4u, tag == 3);
+              wx += select(0u, wx + 1u, !usedF32);
+              g_workBudget += wx;
               // Phase D: z″ tier update, computed term by term at the NEW
               // 2·derS scale with BOTH the fe exponents AND the running
               // mantissa magnitudes folded into one exp() argument (mantissas
@@ -2174,8 +2297,9 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     }
   }
 
-  while (g_workSteps < u32(max_iteration) && ref_i < globalMaxIterI) {
+  while (g_workBudget < u32(max_iteration) && ref_i < globalMaxIterI) {
     g_workSteps += 1u;
+    g_workBudget += 1u;
     if (perP > 0 && ref_i >= perNext) {
       let k = (ref_i - perStart + perP - 1) / perP;
       let aligned = perStart + k * perP;
@@ -2196,7 +2320,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       if (isBlockTableDeep) {
         if (log2(max(length(dz.m), 1e-30)) + f32(dz.e) < jetMaxR3Deep) {
           if (isUnifiedDeep) {
-            skipped = try_apply_unified(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep, &sndM);
+            skipped = try_apply_unified(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), false, false, &jetLevelHintDeep, &sndM);
           } else if (isMobiusDeep) {
             skipped = try_apply_mobius(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep);
           } else {
@@ -2386,6 +2510,9 @@ var<workgroup> wgCovSum: atomic<u32>;   // Σ covered iterations over them
 var<workgroup> wgTier: array<atomic<u32>, 4>; // Σ tier applications (auto mode)
 var<workgroup> wgGateJumps: atomic<u32>;
 var<workgroup> wgGateFails: atomic<u32>;
+var<workgroup> wgSecoursApps: atomic<u32>;
+var<workgroup> wgSecoursIters: atomic<u32>;
+var<workgroup> wgAppsF32: atomic<u32>;
 
 @compute @workgroup_size(8, 8)
 fn cs_main(
@@ -2403,6 +2530,9 @@ fn cs_main(
     }
     atomicStore(&wgGateJumps, 0u);
     atomicStore(&wgGateFails, 0u);
+    atomicStore(&wgSecoursApps, 0u);
+    atomicStore(&wgSecoursIters, 0u);
+    atomicStore(&wgAppsF32, 0u);
   }
   workgroupBarrier();
 
@@ -2457,9 +2587,13 @@ fn cs_main(
           // iterations it covers this dispatch (covered base = prior iter, or 0
           // for a fresh compute request).
           g_workSteps = 0u;
+          g_workBudget = 0u;
           g_tierApps = array<u32, 4>(0u, 0u, 0u, 0u);
           g_gateJumps = 0u;
           g_gateFails = 0u;
+          g_secoursApps = 0u;
+          g_secoursIters = 0u;
+          g_appsF32 = 0u;
           let startIter = select(iter_val, 0.0, is_compute_request);
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
           // AA sub-pixel jitter (neutral-space units); zero for sample 0 / AA off.
@@ -2568,6 +2702,13 @@ fn cs_main(
           if (g_gateFails > 0u) {
             atomicAdd(&wgGateFails, g_gateFails);
           }
+          if (g_secoursApps > 0u) {
+            atomicAdd(&wgSecoursApps, g_secoursApps);
+            atomicAdd(&wgSecoursIters, g_secoursIters);
+          }
+          if (g_appsF32 > 0u) {
+            atomicAdd(&wgAppsF32, g_appsF32);
+          }
 
           // Count the written (post-iteration) state.
           iter_val = result.iter.r;
@@ -2634,6 +2775,9 @@ fn cs_main(
       atomicAdd(&workStats.tierJet, atomicLoad(&wgTier[3]));
       atomicAdd(&workStats.gateJumps, atomicLoad(&wgGateJumps));
       atomicAdd(&workStats.gateFails, atomicLoad(&wgGateFails));
+      atomicAdd(&workStats.secoursApps, atomicLoad(&wgSecoursApps));
+      atomicAdd(&workStats.secoursIters, atomicLoad(&wgSecoursIters));
+      atomicAdd(&workStats.appsF32, atomicLoad(&wgAppsF32));
     }
   }
 }

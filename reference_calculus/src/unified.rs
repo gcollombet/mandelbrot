@@ -965,65 +965,187 @@ pub struct UnifiedRadius {
     pub pad: f32,
 }
 
-/// §6.3 selection model. The shipped working band is a single quantile (and
-/// still the census-note-5 placeholder c_max + 10 in production), while the
-/// post-rebase |dz| distribution spans several octaves — so coverage is
-/// modeled as a SOFT logistic in log2 space around the band instead of a hard
-/// cliff: a tier whose radius sits at the band covers about half the entries,
-/// one 2-octave spread above covers most. Traffic cost per applied tier =
-/// prefix record bytes + the 16 B sidecar probe, plus an op weight in
-/// byte-equivalents (relative arithmetic of the tier's evaluation path).
+/// §6.3 selection model. The working band is the REPLAY-observed |dz|
+/// distribution (`unified_replay_band`; the census-note-5 placeholder
+/// c_max + 10 remains the fallback), summarized as a (median, spread)
+/// pair — so coverage is modeled as a SOFT logistic in log2 space around the
+/// median instead of a hard cliff: a tier whose radius sits at the median
+/// covers about half the entries, one spread above covers most. Traffic cost
+/// per applied tier = prefix record bytes + the 16 B sidecar probe, plus an
+/// op weight in byte-equivalents (relative arithmetic of the tier's
+/// evaluation path).
 pub const UNIFIED_TIER_BYTES: [f64; 4] = [40.0, 64.0, 100.0, 124.0];
-pub const UNIFIED_TIER_OPS_W: [f64; 4] = [8.0, 28.0, 44.0, 72.0];
+/// Op weights at f32-path cost. The jet weight reflects the order-3 Horner +
+/// identity reconstruction + second partials (heavier than c⁺ even in f32).
+pub const UNIFIED_TIER_OPS_W: [f64; 4] = [8.0, 28.0, 44.0, 90.0];
+/// Floatexp evaluator multiplier on the op weights (blocks whose coefficients
+/// fail the f32-safe check, and every deep-loop application).
+pub const UNIFIED_FE_OPS_MULT: f64 = 2.5;
+/// Sidecar probe (16 B, always paid once per attempt).
+pub const UNIFIED_PROBE_COST: f64 = 16.0;
+/// λ_fail stand-in: expected cost of descending a level (another probe plus
+/// a smaller-skip application chain). Calibratable from the panel counters.
+pub const UNIFIED_DESCEND_COST: f64 = 256.0;
+/// λ_div: extra cost of the secours' divergent record read within a warp.
+pub const UNIFIED_DIV_PENALTY: f64 = 16.0;
+/// Fallback spread when no replay distribution is available.
 pub const UNIFIED_BAND_SPREAD_LOG2: f64 = 2.0;
 
-fn unified_cover_prob(r_log2: f64, log2_band: f64) -> f64 {
+fn unified_cover_prob(r_log2: f64, log2_band: f64, log2_spread: f64) -> f64 {
     if !r_log2.is_finite() {
         return 0.0;
     }
-    1.0 / (1.0 + ((log2_band - r_log2) / UNIFIED_BAND_SPREAD_LOG2).exp2())
+    1.0 / (1.0 + ((log2_band - r_log2) / log2_spread).exp2())
 }
 
-/// §6.3 portfolio rule: principal = argmax P(cover)/cost — this is what stops
-/// affine from winning "because one application is cheaper" when a rational
-/// tier's much larger radius avoids level descents (its P ≈ 1 beats affine's
-/// P ≈ ½ at 2-3× the bytes); it also subsumes the old argmax-radius fallback
-/// (all P small ⇒ the largest radius dominates the scores). Secours = the
-/// largest-radius tier, kept only when its extra coverage is material
-/// (§6.2: no secours when it does not repay its traffic). Returns
-/// (principal, secours, secours_radius) — secours == principal with a −∞
-/// radius encodes "no fallback". None ⇔ every tier is dead.
+/// §6.3 replay-derived working band. Replays the exact perturbation
+/// recurrence dz′ = 2Z·dz + dz² + dc — WITH the Zhuoran rebase
+/// (|Z + dz| < |dz| ⇒ dz ← Z + dz, reference back to index 0), which is what
+/// keeps the runtime |dz| in the band the block probes actually see — for a
+/// ring of sample pixels at |dc| = c_max and c_max/4, collecting log2|dz| at
+/// every step. Arithmetic is CFe, so any zoom depth is in range. Returns
+/// (median, spread) of the observed distribution in log2, spread =
+/// max(1, p90 − p50) octaves; falls back to (c_max + 10, 2) when the orbit is
+/// too short to replay.
+pub fn unified_replay_band(orbit: &[(f64, f64)], log2_c_max: f64) -> (f64, f64) {
+    let n = orbit.len();
+    if n < 8 {
+        return (log2_c_max + 10.0, UNIFIED_BAND_SPREAD_LOG2);
+    }
+    let e_int = log2_c_max.floor();
+    let frac = (log2_c_max - e_int).exp2();
+    let mk_dc = |ring: f64, ang: f64| -> CFe {
+        let mut v = CFe::from_c(ring * frac * ang.cos(), ring * frac * ang.sin());
+        if !v.is_zero() {
+            v.e += e_int as i64;
+        }
+        v
+    };
+    let mut samples: Vec<f64> = Vec::new();
+    // The quantiles converge long before the full orbit: cap the replay at 8k
+    // steps per sample (16 samples × 8k CFe steps ≈ 25 ms native).
+    let steps = n.min(8192);
+    for ring in [1.0f64, 0.25] {
+        for k in 0..8 {
+            let ang = (k as f64 + 0.37) * core::f64::consts::PI / 4.0;
+            let dc = mk_dc(ring, ang);
+            let mut dz = dc;
+            let mut m = 1usize; // reference index (dz_1 = dc after Z_0 = 0)
+            for _ in 1..steps {
+                if m >= n {
+                    break;
+                }
+                let (zx, zy) = orbit[m];
+                let two_z = CFe::from_c(2.0 * zx, 2.0 * zy);
+                dz = two_z.mul(dz).add(dz.mul(dz)).add(dc);
+                m += 1;
+                let l = dz.log2_mag().unwrap_or(f64::NEG_INFINITY);
+                if l > 1.0 {
+                    break; // escaped: past every block radius anyway
+                }
+                if l.is_finite() {
+                    samples.push(l);
+                }
+                // Zhuoran rebase against the NEXT reference point.
+                if m < n {
+                    let (zx1, zy1) = orbit[m];
+                    let full = CFe::from_c(zx1, zy1).add(dz);
+                    let lf = full.log2_mag().unwrap_or(f64::NEG_INFINITY);
+                    if lf < l {
+                        dz = full;
+                        m = 0;
+                    }
+                }
+            }
+        }
+    }
+    if samples.len() < 32 {
+        return (log2_c_max + 10.0, UNIFIED_BAND_SPREAD_LOG2);
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let p = |q: f64| samples[((samples.len() - 1) as f64 * q) as usize];
+    let med = p(0.5);
+    let spread = (p(0.9) - med).max(1.0);
+    (med, spread)
+}
+
+/// §6.2 + §6.3 portfolio rule, full expected-cost form. The PAIR
+/// (principal, secours) is chosen jointly by enumerating every combination
+/// (4 principals × {none ∪ tiers with a strictly larger radius}) and scoring
+///
+///   score = E[couverture] / E[coût]
+///   E[couverture] = P_p + (1 − P_p)·P_s                (skip is level-constant)
+///   E[coût]       = probe
+///                 + P_p·C_p
+///                 + (1 − P_p)·( P_s·(C_s + λ_div) + (1 − P_s)·C_desc )
+///
+/// which instantiates the master-plan formula: the λ_fail term is the real
+/// cost of a failed principal (the secours application or the level descent),
+/// λ_div penalizes the divergent record read when the secours differs from
+/// the principal, and the per-tier op weights are FE-AWARE: a block whose
+/// coefficients fail the f32-safe check pays the floatexp evaluator on every
+/// tier (the jet tag now has an f32 fast path too, so f32-safe blocks price
+/// all four tiers at their f32 cost). This is what routes mid-band fallback
+/// traffic to c⁺/Padé instead of funneling everything to the most expensive
+/// tier — the panel measured 91 % secours = jet-fe under the argmax rule.
+/// Returns (principal, secours, secours_radius); secours == principal with a
+/// −∞ radius encodes "no fallback". None ⇔ every tier is dead.
+pub fn unified_portfolio_tags_with(
+    tiers: &[f64; 4],
+    log2_band: f64,
+    log2_spread: f64,
+    f32_safe: bool,
+) -> Option<(usize, usize, f64)> {
+    if tiers.iter().all(|r| !r.is_finite()) {
+        return None;
+    }
+    let fe_mult = if f32_safe { 1.0 } else { UNIFIED_FE_OPS_MULT };
+    let cost = |t: usize| UNIFIED_TIER_BYTES[t] + UNIFIED_TIER_OPS_W[t] * fe_mult;
+    let p: Vec<f64> = tiers
+        .iter()
+        .map(|&r| unified_cover_prob(r, log2_band, log2_spread))
+        .collect();
+    let mut best: Option<(usize, usize, f64)> = None;
+    let mut best_score = f64::NEG_INFINITY;
+    for pr in 0..4 {
+        if !tiers[pr].is_finite() {
+            continue;
+        }
+        // s == pr encodes "no secours".
+        for sc in 0..4 {
+            if sc != pr && !(tiers[sc].is_finite() && tiers[sc] > tiers[pr]) {
+                continue;
+            }
+            let (ps, cs) = if sc == pr {
+                (0.0, 0.0)
+            } else {
+                (p[sc], cost(sc) + UNIFIED_DIV_PENALTY)
+            };
+            let cover = p[pr] + (1.0 - p[pr]) * ps;
+            let ecost = UNIFIED_PROBE_COST
+                + p[pr] * cost(pr)
+                + (1.0 - p[pr]) * (ps * cs + (1.0 - ps) * UNIFIED_DESCEND_COST);
+            let score = cover / ecost;
+            if score > best_score {
+                best_score = score;
+                best = Some((
+                    pr,
+                    sc,
+                    if sc == pr { f64::NEG_INFINITY } else { tiers[sc] },
+                ));
+            }
+        }
+    }
+    best
+}
+
+/// Back-compat wrapper (censuses, tests): pair selection assuming f32-safe.
 pub fn unified_portfolio_tags(
     tiers: &[f64; 4],
     log2_band: f64,
+    log2_spread: f64,
 ) -> Option<(usize, usize, f64)> {
-    let mut principal: Option<usize> = None;
-    let mut best_score = 0.0f64;
-    for (t, &r) in tiers.iter().enumerate() {
-        let p = unified_cover_prob(r, log2_band);
-        let score = p / (UNIFIED_TIER_BYTES[t] + UNIFIED_TIER_OPS_W[t]);
-        if score > best_score {
-            best_score = score;
-            principal = Some(t);
-        }
-    }
-    let principal = principal?;
-    let (mut tag2, mut r2) = (principal, f64::NEG_INFINITY);
-    for (t, &r) in tiers.iter().enumerate() {
-        if t != principal && r.is_finite() && r > tiers[principal] && r > r2 {
-            tag2 = t;
-            r2 = r;
-        }
-    }
-    if tag2 != principal {
-        let gain =
-            unified_cover_prob(r2, log2_band) - unified_cover_prob(tiers[principal], log2_band);
-        if gain < 1e-3 {
-            tag2 = principal;
-            r2 = f64::NEG_INFINITY;
-        }
-    }
-    Some((principal, tag2, r2))
+    unified_portfolio_tags_with(tiers, log2_band, log2_spread, true)
 }
 
 /// LEGACY tag rule (design D3 + census note 5): the cheapest tier whose OWN
@@ -1107,6 +1229,7 @@ pub fn unified_serialize_radii(
     levels: &[UnifiedLevel],
     radii: &UnifiedRadii,
     log2_band: f64,
+    log2_band_spread: f64,
     sa: Option<&SaPrefix>,
     periodic: Option<&PeriodicBlock>,
     gates: &[crate::gates::Gate],
@@ -1121,7 +1244,13 @@ pub fn unified_serialize_radii(
         let mut max_r = f32::NEG_INFINITY;
         for (s, md) in lvl.moduli.iter().enumerate() {
             let tiers = &radii.tiers[li][s];
-            let entry = match unified_portfolio_tags(tiers, log2_band) {
+            let is_safe = unified_f32_safe(md, &lvl.blocks[s].m);
+            let entry = match unified_portfolio_tags_with(
+                tiers,
+                log2_band,
+                log2_band_spread,
+                is_safe,
+            ) {
                 None => UnifiedRadius {
                     r_log2: f32::NEG_INFINITY,
                     tag: 0.0,
@@ -1129,8 +1258,7 @@ pub fn unified_serialize_radii(
                     pad: f32::NEG_INFINITY,
                 },
                 Some((tag, tag2, r2)) => {
-                    let safe =
-                        if unified_f32_safe(md, &lvl.blocks[s].m) { 1.0f32 } else { 0.0 };
+                    let safe = if is_safe { 1.0f32 } else { 0.0 };
                     UnifiedRadius {
                         r_log2: tiers[tag] as f32,
                         tag: tag as f32,
@@ -1476,7 +1604,7 @@ mod tests {
         let rad = unified_build_radii(&levels, &orbit, eps, c_max);
         let band = c_max.log2() + 10.0;
         let coeffs = unified_serialize_coeffs(&levels);
-        let (sidecar, dir) = unified_serialize_radii(&levels, &rad, band, None, None, &[]);
+        let (sidecar, dir) = unified_serialize_radii(&levels, &rad, band, UNIFIED_BAND_SPREAD_LOG2, None, None, &[]);
         assert_eq!(coeffs.len(), sidecar.len(), "buffers not index-aligned");
         let emitted: Vec<usize> = levels
             .iter()
@@ -1510,7 +1638,8 @@ mod tests {
                 }
                 // Tag rule (§6.3 score) + radius f32 rounding + sentinels.
                 let tiers = &rad.tiers[li][s];
-                match unified_portfolio_tags(tiers, band) {
+                let is_safe = unified_f32_safe(&lvl.moduli[s], &blk.m);
+                match unified_portfolio_tags_with(tiers, band, UNIFIED_BAND_SPREAD_LOG2, is_safe) {
                     None => {
                         dead += 1;
                         assert_eq!(side.r_log2, f32::NEG_INFINITY);
@@ -1579,13 +1708,51 @@ mod tests {
             let t2 = Instant::now();
             let radii = unified_solve_radii(&levels, &bounds, eps, lcmax);
             let t_radii = t2.elapsed();
+            // Sub-stage split of radii: the four mobius solves vs the
+            // per-block jet/affine solves.
+            {
+                use crate::mobius::{mobius_build_derivative_radii, mobius_build_radii};
+                let ts = Instant::now();
+                let mlv = to_mobius_levels(&levels, false);
+                let plv = to_mobius_levels(&levels, true);
+                let t_views = ts.elapsed();
+                let ts = Instant::now();
+                let r_cv = mobius_build_radii(&mlv, &bounds.cplus, eps, lcmax);
+                let r_pv = mobius_build_radii(&plv, &bounds.plain, eps, lcmax);
+                let t_val = ts.elapsed();
+                let ts = Instant::now();
+                let _ = mobius_build_derivative_radii(&mlv, &bounds.cplus, eps, lcmax, Some(&r_cv));
+                let _ = mobius_build_derivative_radii(&plv, &bounds.plain, eps, lcmax, Some(&r_pv));
+                let t_der = ts.elapsed();
+                let ts = Instant::now();
+                let mut acc = 0f64;
+                for (li, lvl) in levels.iter().enumerate() {
+                    for s in 0..lvl.blocks.len() {
+                        let rj = jet_solve_radii(&bounds.jet[li][s], eps, lcmax);
+                        acc += rj[0];
+                    }
+                }
+                std::hint::black_box(acc);
+                let t_jet = ts.elapsed();
+                println!(
+                    "[{name:>10}] radii split: views {t_views:.1?} mobius-V {t_val:.1?} \
+                     mobius-V' {t_der:.1?} jet-part {t_jet:.1?}"
+                );
+            }
             let t3 = Instant::now();
             let sa = sa_build(&orbit, eps, lcmax.exp2(), orbit.len() - 1);
             let t_sa = t3.elapsed();
             let t4 = Instant::now();
-            let band = lcmax + 10.0;
+            let (band, spread) = unified_replay_band(&orbit, lcmax);
+            let t_replay = t4.elapsed();
+            println!(
+                "[{name:>10}] replay band {band:.1} (placeholder {:.1}) spread {spread:.1} \
+                 in {t_replay:.1?}",
+                lcmax + 10.0
+            );
+            let t4 = Instant::now();
             let (side, _dir) =
-                unified_serialize_radii(&levels, &radii, band, None, None, &[]);
+                unified_serialize_radii(&levels, &radii, band, spread, None, None, &[]);
             let t_ser = t4.elapsed();
             // Tag mix: §6.3 score vs the legacy cheapest-covering rule.
             let (mut mix_new, mut mix_old) = ([0usize; 4], [0usize; 4]);
@@ -1596,7 +1763,7 @@ mod tests {
                 }
                 for s in 0..lvl.blocks.len() {
                     let tiers = &radii.tiers[li][s];
-                    let new = unified_portfolio_tags(tiers, band);
+                    let new = unified_portfolio_tags(tiers, band, spread);
                     let old = unified_tag(tiers, band);
                     if let Some((t, t2x, r2)) = new {
                         mix_new[t] += 1;
@@ -1634,6 +1801,30 @@ mod tests {
     }
 
     #[test]
+    fn unified_replay_band_sane() {
+        for (name, cx, cy, lcmax) in [
+            ("feigenbaum", -1.401155_f64, 0.0_f64, -44.0_f64),
+            ("near-parab", -0.7499, 0.0001, -40.0),
+            ("seahorse", -0.743643887037151, 0.131825904205330, -40.0),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, 2048);
+            let (band, spread) = unified_replay_band(&orbit, lcmax);
+            assert!(band.is_finite(), "[{name}] band not finite");
+            // Zhuoran-rebased |dz| lives at pixel scale: at or a few octaves
+            // above c_max, never below |dc| and never past escape scale.
+            assert!(
+                band >= lcmax - 2.0 && band <= 2.0,
+                "[{name}] band {band} out of range (c_max {lcmax})"
+            );
+            assert!((1.0..=40.0).contains(&spread), "[{name}] spread {spread}");
+        }
+        // Short orbit falls back to the census-note-5 placeholder.
+        let (b, s) = unified_replay_band(&[(0.0, 0.0); 4], -40.0);
+        assert_eq!(b, -30.0);
+        assert_eq!(s, UNIFIED_BAND_SPREAD_LOG2);
+    }
+
+    #[test]
     fn unified_portfolio_secours_encoding() {
         // Portfolio rule (plan §8): the sidecar packs a SECOURS candidate
         // without growing past 16 B — w = its radius, z = f32_safe + 2·tag2.
@@ -1647,7 +1838,7 @@ mod tests {
         let levels = build_unified_levels(&orbit, 1 << 18);
         let rad = unified_build_radii(&levels, &orbit, eps, c_max);
         let band = c_max.log2() + 10.0;
-        let (side, dir) = unified_serialize_radii(&levels, &rad, band, None, None, &[]);
+        let (side, dir) = unified_serialize_radii(&levels, &rad, band, UNIFIED_BAND_SPREAD_LOG2, None, None, &[]);
         let emitted: Vec<usize> = levels
             .iter()
             .enumerate()
@@ -1666,9 +1857,13 @@ mod tests {
                 assert!(safe == 0.0 || safe == 1.0, "safe flag not 0/1: {}", e.f32_safe);
                 assert!((0.0..=3.0).contains(&tag2), "secours tag out of range");
                 let tiers = &rad.tiers[li][s];
-                // The serialized pair must be exactly the §6.3 policy output.
-                if let Some((pt, pt2, pr2)) = unified_portfolio_tags(tiers, band) {
-                    assert_eq!(e.tag, pt as f32, "principal is not the §6.3 argmax");
+                // The serialized pair must be exactly the §6.2/§6.3 policy
+                // output (pair selection at the block's own f32-safe flag).
+                let is_safe = unified_f32_safe(&levels[li].moduli[s], &levels[li].blocks[s].m);
+                if let Some((pt, pt2, pr2)) =
+                    unified_portfolio_tags_with(tiers, band, UNIFIED_BAND_SPREAD_LOG2, is_safe)
+                {
+                    assert_eq!(e.tag, pt as f32, "principal is not the policy pick");
                     assert_eq!(tag2 as usize, pt2, "secours tag mismatch");
                     assert_eq!(e.pad, pr2 as f32, "secours radius mismatch");
                 }
@@ -1677,16 +1872,7 @@ mod tests {
                     assert!(e.pad > e.r_log2, "secours must strictly beat principal");
                     assert_ne!(tag2, e.tag, "secours must differ from principal");
                     assert_eq!(e.pad, tiers[tag2 as usize] as f32, "secours radius");
-                    // Argmax rule: no tier offers a strictly larger radius.
-                    for &r in tiers.iter() {
-                        assert!(
-                            (r as f32) <= e.pad,
-                            "secours is not the largest-radius tier"
-                        );
-                    }
                 } else if e.r_log2.is_finite() {
-                    // No secours ⇒ the principal is argmax, or the extra
-                    // coverage over the principal is immaterial (§6.2).
                     assert_eq!(tag2, e.tag, "dead secours must alias the principal");
                 }
             }
@@ -1934,6 +2120,7 @@ mod tests {
             &levels,
             &rad,
             c_max.log2() + 10.0,
+            UNIFIED_BAND_SPREAD_LOG2,
             Some(&sa),
             periodic.as_ref(),
             &[],
@@ -1980,7 +2167,7 @@ mod tests {
         let bounds = unified_build_bounds(&levels, &orbit, l2c);
         let rad = unified_solve_radii(&levels, &bounds, eps, l2c);
         let sa = sa_build(&orbit, eps, l2c.exp2(), orbit.len() - 1);
-        let (side, dir) = unified_serialize_radii(&levels, &rad, l2c + 10.0, Some(&sa), None, &[]);
+        let (side, dir) = unified_serialize_radii(&levels, &rad, l2c + 10.0, UNIFIED_BAND_SPREAD_LOG2, Some(&sa), None, &[]);
         println!("SA n0 = {}", sa.n0);
         for d in &dir {
             let mut finite = 0usize;
@@ -2100,7 +2287,7 @@ mod tests {
         // Runtime dispatch mirror (greedy largest skip, tagged radius, band
         // tags as serialized): count applications per tier.
         let band = l2c + 10.0;
-        let (side, dir) = unified_serialize_radii(&levels, &rad, band, None, None, &[]);
+        let (side, dir) = unified_serialize_radii(&levels, &rad, band, UNIFIED_BAND_SPREAD_LOG2, None, None, &[]);
         let mut tier_apps = [0usize; 4];
         let mut skipped = 0usize;
         let max_iter = orbit.len() - 1;

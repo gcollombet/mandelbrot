@@ -128,6 +128,10 @@ type BlaReadyResponse = {
     // cold build (Phase F, 7.2).
     buildMs?: number
     buildStages?: number
+    // Table observability for the perf panel (unified only): certified SA
+    // prefix skip, periodic period (0 = dormant), replay |dz| band
+    // (log2 median / spread) and emitted §18 gate count.
+    tableStats?: { saN0: number; periodicP: number; bandLog2: number; bandSpread: number; gateCount: number }
     // Echo of the table-parameter generation this table was built under (set by
     // the reset/setter messages). The Engine drops mismatches: builds that were
     // in flight when a parameter change was posted.
@@ -148,6 +152,7 @@ type RadiiReadyResponse = {
     levelCount: number
     buildMs?: number
     buildStages?: number
+    tableStats?: { saN0: number; periodicP: number; bandLog2: number; bandSpread: number; gateCount: number }
     tableGeneration: number
 }
 
@@ -381,6 +386,13 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     // tell build latency from per-application cost.
     const buildMs = performance.now() - tableT0
     const buildStages = isUnified ? navigator.unified_last_stages() : undefined
+    const tableStats = isUnified ? {
+        saN0: navigator.unified_last_sa_n0(),
+        periodicP: navigator.unified_last_periodic_p(),
+        bandLog2: navigator.unified_last_band_log2(),
+        bandSpread: navigator.unified_last_band_spread(),
+        gateCount: navigator.unified_last_gate_count(),
+    } : undefined
     console.log(`[REF worker] ${isMobius ? 'mobius' : isUnified ? 'unified' : 'jet'} table built in ${buildMs.toFixed(0)}ms (maxIter ${maxIterations}${buildStages !== undefined ? `, stages ${buildStages}` : ''})`)
 
     const radiiSource = new Float32Array(wasmMemory.buffer, info.radii_ptr, info.radii_count * 4)
@@ -412,6 +424,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
             levelCount: info.level_count,
             buildMs,
             buildStages,
+            tableStats,
             tableGeneration,
         }, [radii.buffer, levels.buffer])
         return
@@ -440,6 +453,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         levelCount: info.level_count,
         buildMs,
         buildStages,
+        tableStats,
         tableGeneration,
     }, [steps.buffer, radii.buffer, levels.buffer])
 }

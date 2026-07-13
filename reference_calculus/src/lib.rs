@@ -394,6 +394,14 @@ pub struct MandelbrotNavigator {
     // worker so build-latency reports can tell a keyframe radii re-solve from
     // a cold build (Phase F, 7.2).
     unified_last_build_stages: u32,
+    // Table observability (perf panel): SA prefix skip, periodic period,
+    // replay-observed |dz| band (log2 median + spread) and emitted gate count
+    // of the LAST unified serialization. −1/NaN before the first build.
+    unified_last_sa_n0: u32,
+    unified_last_periodic_p: u32,
+    unified_last_band_log2: f64,
+    unified_last_band_spread: f64,
+    unified_last_gate_count: u32,
     // Header-only sidecar buffers (compute_unified_header): SA + periodic
     // behind an empty one-level directory, posted ahead of a cold full build.
     // Separate storage so the header never clobbers the cached full table.
@@ -488,6 +496,11 @@ impl MandelbrotNavigator {
             unified_radii_epsilon: 0.0,
             unified_radii_log2_c_max: f64::NAN,
             unified_last_build_stages: 0,
+            unified_last_sa_n0: 0,
+            unified_last_periodic_p: 0,
+            unified_last_band_log2: f64::NAN,
+            unified_last_band_spread: f64::NAN,
+            unified_last_gate_count: 0,
             unified_header_result: Box::new(Vec::new()),
             unified_header_coeffs: Box::new(Vec::new()),
             unified_header_levels: Box::new(Vec::new()),
@@ -1673,18 +1686,27 @@ impl MandelbrotNavigator {
                         gates::build_gates(&orbit, c0, log2_c_max, epsilon, &sat);
                 }
             }
-            // Working band for the dispatch tags: the post-rebase delta band
-            // sits ~10 bits above c_max (census note 5 placeholder — refined
-            // from the replay-observed |dz| distribution when the GPU tier-mix
-            // counters land).
+            // Working band for the dispatch tags: the REPLAY-observed |dz|
+            // distribution (§6.3 — median + spread over Zhuoran-rebased
+            // sample-pixel replays; the c_max + 10 placeholder is only the
+            // short-orbit fallback inside unified_replay_band).
+            let (log2_band, log2_spread) =
+                unified::unified_replay_band(&orbit, log2_c_max);
             let (radii_side, dir) = unified::unified_serialize_radii(
                 &self.unified_levels,
                 &radii,
-                log2_c_max + 10.0,
+                log2_band,
+                log2_spread,
                 Some(&sa),
                 periodic.as_ref(),
                 &gate_list,
             );
+            // Table observability for the perf panel.
+            self.unified_last_sa_n0 = sa.n0 as u32;
+            self.unified_last_periodic_p = periodic.as_ref().map(|p| p.p as u32).unwrap_or(0);
+            self.unified_last_band_log2 = log2_band;
+            self.unified_last_band_spread = log2_spread;
+            self.unified_last_gate_count = gate_list.len() as u32;
             *self.unified_radii = Some(radii);
             self.unified_radii_epsilon = epsilon;
             self.unified_radii_log2_c_max = log2_c_max;
@@ -1758,6 +1780,26 @@ impl MandelbrotNavigator {
     /// build-latency report (cold build vs keyframe radii re-solve).
     pub fn unified_last_stages(&self) -> u32 {
         self.unified_last_build_stages
+    }
+
+    /// Perf-panel table observability (last unified serialization): certified
+    /// SA common-prefix skip, periodic-header period (0 = dormant), the
+    /// replay-observed |dz| band (log2 median / spread) and the emitted §18
+    /// gate count.
+    pub fn unified_last_sa_n0(&self) -> u32 {
+        self.unified_last_sa_n0
+    }
+    pub fn unified_last_periodic_p(&self) -> u32 {
+        self.unified_last_periodic_p
+    }
+    pub fn unified_last_band_log2(&self) -> f64 {
+        self.unified_last_band_log2
+    }
+    pub fn unified_last_band_spread(&self) -> f64 {
+        self.unified_last_band_spread
+    }
+    pub fn unified_last_gate_count(&self) -> u32 {
+        self.unified_last_gate_count
     }
 
     /// Retourne la taille du buffer en nombre de MandelbrotStep

@@ -238,6 +238,9 @@ type ReferenceWorkerResponse =
         // 2 = bounds, 4 = radii) — RenderStats' "Table build" debug row.
         buildMs?: number
         buildStages?: number
+        // Table observability (unified only): SA prefix skip, periodic period,
+        // replay |dz| band (log2 median / spread), emitted gate count.
+        tableStats?: { saN0: number; periodicP: number; bandLog2: number; bandSpread: number; gateCount: number }
         // Echo of the table-parameter generation the table was built under. A
         // mismatch with Engine.tableGeneration means the build predates the
         // latest ε/skip/gates/mode change (in-flight when the setter was posted)
@@ -259,6 +262,7 @@ type ReferenceWorkerResponse =
         levelCount: number
         buildMs?: number
         buildStages?: number
+        tableStats?: { saN0: number; periodicP: number; bandLog2: number; bandSpread: number; gateCount: number }
         tableGeneration: number
     }
     | {
@@ -597,6 +601,25 @@ export class Engine {
      *  completed render session (raw counts). [-1,-1] = not yet read; stays
      *  [0,0] while gate emission is dormant. */
     gateStatsApprox: [number, number] = [-1, -1]
+    /** Portfolio observability (mode 5): [secours applications, iterations
+     *  they covered] — descents avoided by the fallback candidate. [-1,-1] =
+     *  not yet read; stays [0,0] with ENABLE_PORTFOLIO off. */
+    secoursStatsApprox: [number, number] = [-1, -1]
+    /** Portfolio A/B switch: picks the ENABLE_PORTFOLIO pipeline variant at
+     *  the next in-place dispatch (specialization cache, same as deep). */
+    portfolioEnabled = true
+    /** Applications served by the plain-f32 fast path (mode 5; the rest ran
+     *  in fe). -1 = unknown. */
+    f32AppsApprox = -1
+    /** Table observability from the worker's last unified build: certified SA
+     *  common-prefix skip, periodic-header period (0 = dormant), the
+     *  replay-observed |dz| band (log2 median / spread) and emitted §18 gate
+     *  count. -1/NaN before the first table. */
+    tableSaN0 = -1
+    tablePeriodicP = -1
+    tableBandLog2 = Number.NaN
+    tableBandSpread = Number.NaN
+    tableGateCount = -1
     /** Last block-table build wall-clock (worker-side, ms) and its unified
      *  stage mask (1 = coeffs, 2 = bounds, 4 = radii; −1 = non-unified table).
      *  A radii-only mask (4) is the Phase F keyframe path. */
@@ -1247,6 +1270,13 @@ export class Engine {
             if (message.buildMs !== undefined) {
                 this.lastTableBuildMs = message.buildMs
                 this.lastTableBuildStages = message.buildStages ?? -1
+                if (message.tableStats) {
+                    this.tableSaN0 = message.tableStats.saN0 ?? -1
+                    this.tablePeriodicP = message.tableStats.periodicP ?? -1
+                    this.tableBandLog2 = message.tableStats.bandLog2 ?? Number.NaN
+                    this.tableBandSpread = message.tableStats.bandSpread ?? Number.NaN
+                    this.tableGateCount = message.tableStats.gateCount ?? -1
+                }
                 console.log(`[REF] ${message.type === 'radiiReady' ? 'radii sidecar' : 'table'} landed: build ${message.buildMs.toFixed(0)}ms stages ${message.buildStages ?? -1} maxIter ${message.maxIterations}`)
             }
             this.isReferenceValidating = false
@@ -1463,19 +1493,20 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
-        // Work-instrumentation buffer (in-place compute path): 10 × u32
+        // Work-instrumentation buffer (in-place compute path): 13 × u32
         // (realMean, covMean, maxAccum, maxSteps, tierAff/Pade/Cplus/Jet,
-        // gateJumps/gateFails) — see WorkStats in the shader.
+        // gateJumps/gateFails, secoursApps/secoursIters, appsF32) — see
+        // WorkStats in the shader.
         this.workStatsBuffer = this.device.createBuffer({
-            size: 40,
+            size: 52,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine WorkStats Storage',
         })
-        // Readback slots hold counter (8 B) + workStats (40 B) = 48 B, copied
-        // together each sampled in-place dispatch and read as 12 × u32.
+        // Readback slots hold counter (8 B) + workStats (52 B) = 60 B, copied
+        // together each sampled in-place dispatch and read as 15 × u32.
         this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
             buffer: this.device.createBuffer({
-                size: 48,
+                size: 60,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: `Engine Counter Readback ${index}`,
             }),
@@ -1846,8 +1877,8 @@ export class Engine {
     // Lazily build + cache a specialized in-place kernel for the given override
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
-    private getInplacePipeline(deep: boolean): GPUComputePipeline {
-        const key = `d${deep ? 1 : 0}`
+    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled): GPUComputePipeline {
+        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}`
         let pipeline = this.inplacePipelineCache.get(key)
         if (!pipeline) {
             pipeline = this.device.createComputePipeline({
@@ -1855,9 +1886,9 @@ export class Engine {
                 compute: {
                     module: this.inplaceModule!,
                     entryPoint: 'cs_main',
-                    constants: { ENABLE_DEEP: deep ? 1 : 0 },
+                    constants: { ENABLE_DEEP: deep ? 1 : 0, ENABLE_PORTFOLIO: portfolio ? 1 : 0 },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio})`,
             })
             this.inplacePipelineCache.set(key, pipeline)
         }
@@ -2070,7 +2101,7 @@ export class Engine {
         }
         if (!this.finalStatsBuffer) {
             this.finalStatsBuffer = this.device.createBuffer({
-                size: 48,
+                size: 60,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: 'Engine Final Stats Readback',
             })
@@ -2078,7 +2109,7 @@ export class Engine {
         const session = this.workStatsSessionSerial
         const encoder = this.device.createCommandEncoder({ label: 'Engine Final Stats Copy' })
         encoder.copyBufferToBuffer(this.counterBuffer, 0, this.finalStatsBuffer, 0, 8)
-        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 40)
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 52)
         this.device.queue.submit([encoder.finish()])
         this.finalStatsPending = true
         void (async () => {
@@ -2095,6 +2126,8 @@ export class Engine {
                 // Gate counters are raw events — no plausibility gate needed
                 // (the realMean condition protects the realizedSkip ratio).
                 this.gateStatsApprox = [data[10], data[11]]
+                this.secoursStatsApprox = [data[12], data[13]]
+                this.f32AppsApprox = data[14]
                 if (realMean > 0 && covMean / realMean >= 1) {
                     this.realLoopStepsApprox = realMean * 64
                     this.tierAppsApprox = [data[6], data[7], data[8], data[9]]
@@ -2125,6 +2158,8 @@ export class Engine {
         if (!preserveWorkStats) {
             this.realLoopStepsApprox = -1
             this.tierAppsApprox = [-1, -1, -1, -1]
+            this.secoursStatsApprox = [-1, -1]
+            this.f32AppsApprox = -1
             // Next in-place dispatch re-clears workStats for the new session.
             this.workStatsSessionSerial++
         }
@@ -2171,7 +2206,9 @@ export class Engine {
                 const maxAccum = data[4]
                 const maxSteps = data[5]
                 const tierApps: [number, number, number, number] = [data[6], data[7], data[8], data[9]]
-                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps, tierApps)
+                const secours: [number, number] = [data[12], data[13]]
+                const appsF32 = data[14]
+                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
             } finally {
@@ -2183,7 +2220,7 @@ export class Engine {
         })()
     }
 
-    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0]) {
+    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0) {
         if (generation !== this.counterReadbackGeneration) {
             return
         }
@@ -2219,6 +2256,8 @@ export class Engine {
                 // counters (no downscale shader-side: block applications per
                 // workgroup per dispatch are small and would round to zero).
                 this.tierAppsApprox = [tierApps[0], tierApps[1], tierApps[2], tierApps[3]]
+                this.secoursStatsApprox = [secours[0], secours[1]]
+                this.f32AppsApprox = appsF32
             } else {
                 this.realizedSkip = -1
                 this.workgroupWaste = -1
@@ -2296,11 +2335,14 @@ export class Engine {
     }
 
     private getEffectiveMaxBatchSize(): number {
-        // The shader batch now budgets loop TURNS (work), not covered iterations,
-        // so block-skipping modes no longer need an inflated iteration cap — one
-        // turn is ~one unit of work in every mode. The adaptive ramp (FPS-driven)
-        // settles the actual turn count below this cap; Padé turns cost a bit more
-        // (~3× ops) so it just settles a little lower on its own.
+        // The shader batch budgets WEIGHTED work units, not raw turns: each
+        // loop turn adds the cost of the move it executed (exact step 1,
+        // block applications by form — affine 2, Padé 3, c+ 4, jet 5 —
+        // doubled on the floatexp path, Ψ-gate hops 8). maxIteration thus
+        // bounds near-constant GPU time per dispatch whatever the block/exact
+        // mix, which is what keeps navigation smooth when the view crosses
+        // between block-rich and exact-stepping regions. The adaptive ramp
+        // (FPS-driven) settles the work budget below this cap.
         return MAX_BATCH_SIZE
     }
 
@@ -3713,7 +3755,7 @@ export class Engine {
             // only on the generation's first in-place dispatch, then let every
             // dispatch atomicAdd into it (exact, sampling-independent totals).
             if (this.workStatsClearedSession !== this.workStatsSessionSerial) {
-                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 40)
+                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 52)
                 this.workStatsClearedSession = this.workStatsSessionSerial
             }
             const computePass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(3) })
@@ -3734,7 +3776,7 @@ export class Engine {
                 const sequence = ++this.counterReadbackSequence
                 const generation = this.counterReadbackGeneration
                 commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
-                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 40)
+                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 52)
                 this.lastCounterDispatchFrame = frameSerial
                 scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
             }

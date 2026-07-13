@@ -45,6 +45,26 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
   dénominateur, shadowing dérivé non autonome avec le produit de chaîne exact,
   puis certificat total « dérivée matrix-c1 contre dérivée Mandelbrot » sans
   élargissement de Cauchy.
+- `MobiusDisk.lean` : discriminant exact d'exclusion du pôle, centre et rayon
+  de l'image d'un disque par une homographie complexe, identité hermitienne
+  signée et transport exact de l'intérieur et du cercle frontière.
+- `MatrixC1Disk.lean` : raccord uniforme entre la queue `M₀+cM₁+E` et le
+  discriminant de disque, image nominale gonflée par l'erreur certifiée, et
+  enveloppe directe de dérivée utilisant la même marge de pôle.
+- `MovingDisks.lean` : repères disque mobiles, composition exacte des
+  transports, multiplication des formes hermitiennes signées et invariance
+  projective du gate de discriminant.
+- `HyperbolicTelescope.lean` : Schwarz centré entre disques, coordonnées
+  pseudohyperboliques, conversions euclidiennes sur un intérieur strict et
+  télescopage additif des défauts dans une métrique mobile.
+- `SchwarzPick.lean` : automorphismes explicites des disques, inverse
+  projectif sans pôle, Schwarz--Pick complet à deux points arbitraires et
+  spécialisation non expansive des blocs Möbius entre leurs frames exactes.
+- `Rebasing.lean` : raccord exact entre orbites Mandelbrot et récurrence de
+  perturbation, invariant de valeur physique, rebasing Zhuoran, dérivées
+  première et seconde, garde de diminution, correction de toute suite finie
+  de pas exacts et de rebases, et composition de sauts approchés certifiés sans
+  coût d'erreur supplémentaire au rebase.
 - `RadiusSolver.lean` : contrat sémantique d’un rayon émis, preuve que le
   certificat convexe centre+bord forme un prédicat préfixe, invariant et
   réduction exacte de largeur de la bissection.
