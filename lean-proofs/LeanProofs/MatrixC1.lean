@@ -285,7 +285,7 @@ def MatrixC1.uniformDenMargin (j : MatrixC1 ℂ) (y R : ℝ) : ℝ :=
 
 theorem MatrixC1.uniformDenMargin_le
     (j : MatrixC1 ℂ) (c : ℂ) (y R : ℝ)
-    (hy : 0 ≤ y) (hR : 0 ≤ R) (hc : ‖c‖ ≤ y) :
+    (_hy : 0 ≤ y) (hR : 0 ≤ R) (hc : ‖c‖ ≤ y) :
     j.uniformDenMargin y R ≤ truncatedMatrixDenMargin (j.eval c) R := by
   have hD : ‖j.constant.D‖ - y * ‖j.linear.D‖ ≤ ‖(j.eval c).D‖ := by
     have hreverse : ‖j.constant.D‖ - ‖c * j.linear.D‖ ≤

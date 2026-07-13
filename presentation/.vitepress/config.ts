@@ -37,12 +37,14 @@ export default defineConfig({
         nav: [
             {text: 'Home', link: '/'},
             {text: 'Optimisations', link: '/optimisation'},
+            {text: 'Mathématiques', link: '/mathematiques'},
         ],
         sidebar: [
             {
                 items: [
                     {text: 'Présentation', link: '/'},
                     {text: 'Optimisations de rendu', link: '/optimisation'},
+                    {text: 'Mathématiques et preuves Lean', link: '/mathematiques'},
                 ]
             }
         ],

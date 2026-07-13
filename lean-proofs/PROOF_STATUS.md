@@ -237,6 +237,19 @@ bord ne suffit pas si l'intervalle admissible ne contient pas l'origine.
   modèle par bloc est `eps` et si le bloc est uniformément `gamma`-Lipschitz,
   l'erreur est bornée par la somme géométrique puis uniformément par
   `eps/(1-gamma)` lorsque `gamma<1`.
+- Les hypothèses abstraites sont désormais déchargées par trois tests scalaires
+  directement calculables pour
+  `g(z)=(Ae*z+Bc)/(De*z+K0)` sur `|z|≤r`. La marge est
+  `mu=|K0|-|De|r`, la borne d'image est
+  `I=(|Ae|r+|Bc|)/mu`, et la constante uniforme est
+  `gamma=|Ae*K0-Bc*De|/mu²`.
+- `periodic_runtime_certificate` prouve que `mu>0`, `I+eps≤r` et `gamma<1`
+  impliquent simultanément l'invariance des orbites Möbius et exacte, puis
+  l'erreur uniforme `eps/(1-gamma)` à tout horizon.
+- `periodic_cross_ratio_orbit_enclosed` prouve le vrai test du chemin fermé :
+  si `|w_0|≤q<1` et `|kappa|≤1`, toute l'orbite reconstruite reste sous
+  `|alpha|+|alpha-beta|q/(1-q)`. Ce majorant remplace le test heuristique
+  `2 max(|alpha|,|z-alpha|)` du shader.
 
 Conséquence : le fast-forward par matrice `2x2` est justifié pour la forme
 `[1/1]`, y compris à la coalescence via Jordan. La forme `[2/1]`, bien que son
@@ -272,9 +285,9 @@ Les points suivants ne sont pas présentés comme certifiés par ce dossier :
 3. le théorème d'erreur Mandelbrot global signalé comme incomplet dans la note
    source, ainsi que la preuve que le solveur concret implémente exactement le
    certificat radial maintenant formalisé ;
-4. la preuve que les tests runtime concrets impliquent les hypothèses
-   abstraites maintenant formalisées de contraction uniforme et d'invariance
-   du domaine pour chaque bloc périodique ;
+4. l'implémentation dans le builder/shader des tests périodiques maintenant
+   prouvés (`mu>0`, `I+eps≤r`, `gamma<1`) et le remplacement de l'ancien test
+   de chemin en birapport, qui n'impliquait pas l'enclosure annoncée ;
 5. l'existence analytique des cartes sectorielles de Fatou, les données de
    corne, les branches de logarithme et une borne de Lipschitz de la carte de
    sortie ;

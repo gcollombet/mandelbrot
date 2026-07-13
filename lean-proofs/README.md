@@ -44,6 +44,9 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
   troncature après chaque merge donne le même jet final.
 - `Periodic.lean` : points fixes, multiplicateur, birapport, itération et limite
   de Jordan.
+- `PeriodicRuntime.lean` : tests scalaires de marge, image et contraction
+  uniforme d'un bloc périodique, invariance des deux orbites, erreur amortie
+  `eps/(1-gamma)` et enclosure correcte du fast-forward en birapport.
 - `Fatou.lean` : changement de variable parabolique et signe exact du resiter.
 - `Dynamics.lean` : domaine invariant, contraction uniforme, erreur de modèle
   amortie et distorsion de la carte de sortie d'une porte de Fatou.
