@@ -171,6 +171,111 @@ theorem MatrixC1.entryNorm_eval_le
       linarith
     _ = j.evalNormBound y := rfl
 
+/-- An exact matrix is bounded by an approximate representative plus their
+entrywise distance. -/
+theorem Homography.entryNorm_le_add_sub (m q : Homography ℂ) :
+    m.entryNorm ≤ q.entryNorm + (m.sub q).entryNorm := by
+  simp only [Homography.entryNorm, Homography.sub]
+  have hA : ‖m.A‖ ≤ ‖q.A‖ + ‖m.A - q.A‖ := by
+    calc
+      ‖m.A‖ = ‖q.A + (m.A - q.A)‖ := by congr 1; ring
+      _ ≤ ‖q.A‖ + ‖m.A - q.A‖ := norm_add_le _ _
+  have hB : ‖m.B‖ ≤ ‖q.B‖ + ‖m.B - q.B‖ := by
+    calc
+      ‖m.B‖ = ‖q.B + (m.B - q.B)‖ := by congr 1; ring
+      _ ≤ ‖q.B‖ + ‖m.B - q.B‖ := norm_add_le _ _
+  have hC : ‖m.C‖ ≤ ‖q.C‖ + ‖m.C - q.C‖ := by
+    calc
+      ‖m.C‖ = ‖q.C + (m.C - q.C)‖ := by congr 1; ring
+      _ ≤ ‖q.C‖ + ‖m.C - q.C‖ := norm_add_le _ _
+  have hD : ‖m.D‖ ≤ ‖q.D‖ + ‖m.D - q.D‖ := by
+    calc
+      ‖m.D‖ = ‖q.D + (m.D - q.D)‖ := by congr 1; ring
+      _ ≤ ‖q.D‖ + ‖m.D - q.D‖ := norm_add_le _ _
+  linarith
+
+/-- Tail recurrence for a genuine merge of two already-composed blocks.
+Both inputs may have a nonzero `c²+` tail. -/
+def matrixC1MergeTailBound
+    (outer inner : MatrixC1 ℂ) (Eouter Einner y : ℝ) : ℝ :=
+  Eouter * (inner.evalNormBound y + Einner) +
+    outer.evalNormBound y * Einner +
+    y ^ 2 * (outer.linear.comp inner.linear).entryNorm
+
+/-- Sound `O(1)` block-by-block merge rule.  This is the theorem required by
+the balanced runtime merge tree; the older sequential recurrence is its
+special case `Einner = 0`. -/
+theorem matrixC1_comp_tail_le
+    (exactOuter exactInner : Homography ℂ)
+    (outer inner : MatrixC1 ℂ) (c : ℂ)
+    (Eouter Einner y : ℝ)
+    (hy : 0 ≤ y) (hc : ‖c‖ ≤ y)
+    (hEouter0 : 0 ≤ Eouter)
+    (houter : (exactOuter.sub (outer.eval c)).entryNorm ≤ Eouter)
+    (hinner : (exactInner.sub (inner.eval c)).entryNorm ≤ Einner) :
+    ((exactOuter.comp exactInner).sub ((outer.comp inner).eval c)).entryNorm ≤
+      matrixC1MergeTailBound outer inner Eouter Einner y := by
+  have hdecomp :
+      (exactOuter.comp exactInner).sub ((outer.comp inner).eval c) =
+        ((exactOuter.sub (outer.eval c)).comp exactInner).add
+          (((outer.eval c).comp (exactInner.sub (inner.eval c))).add
+            (Homography.scale (c ^ 2) (outer.linear.comp inner.linear))) := by
+    ext <;> simp [MatrixC1.eval, MatrixC1.comp, Homography.comp,
+      Homography.add, Homography.sub, Homography.scale] <;> ring
+  have houterEval : (outer.eval c).entryNorm ≤ outer.evalNormBound y :=
+    outer.entryNorm_eval_le c y hy hc
+  have hinnerEval : (inner.eval c).entryNorm ≤ inner.evalNormBound y :=
+    inner.entryNorm_eval_le c y hy hc
+  have hinnerExact : exactInner.entryNorm ≤ inner.evalNormBound y + Einner := by
+    calc
+      exactInner.entryNorm ≤ (inner.eval c).entryNorm +
+          (exactInner.sub (inner.eval c)).entryNorm :=
+        Homography.entryNorm_le_add_sub _ _
+      _ ≤ inner.evalNormBound y + Einner := add_le_add hinnerEval hinner
+  have houterEval0 : 0 ≤ outer.evalNormBound y := by
+    exact add_nonneg outer.constant.entryNorm_nonneg
+      (mul_nonneg hy outer.linear.entryNorm_nonneg)
+  have hcross0 := (outer.linear.comp inner.linear).entryNorm_nonneg
+  have hc2 : ‖c ^ 2‖ ≤ y ^ 2 := by
+    rw [norm_pow]
+    nlinarith [norm_nonneg c]
+  rw [hdecomp]
+  calc
+    (((exactOuter.sub (outer.eval c)).comp exactInner).add
+        (((outer.eval c).comp (exactInner.sub (inner.eval c))).add
+          (Homography.scale (c ^ 2)
+            (outer.linear.comp inner.linear)))).entryNorm ≤
+      ((exactOuter.sub (outer.eval c)).comp exactInner).entryNorm +
+        (((outer.eval c).comp (exactInner.sub (inner.eval c))).add
+          (Homography.scale (c ^ 2)
+            (outer.linear.comp inner.linear))).entryNorm :=
+      Homography.entryNorm_add_le _ _
+    _ ≤ ((exactOuter.sub (outer.eval c)).comp exactInner).entryNorm +
+        ((outer.eval c).comp (exactInner.sub (inner.eval c))).entryNorm +
+        (Homography.scale (c ^ 2)
+          (outer.linear.comp inner.linear)).entryNorm := by
+      linarith [Homography.entryNorm_add_le
+        ((outer.eval c).comp (exactInner.sub (inner.eval c)))
+        (Homography.scale (c ^ 2) (outer.linear.comp inner.linear))]
+    _ ≤ (exactOuter.sub (outer.eval c)).entryNorm * exactInner.entryNorm +
+        (outer.eval c).entryNorm *
+          (exactInner.sub (inner.eval c)).entryNorm +
+        ‖c ^ 2‖ * (outer.linear.comp inner.linear).entryNorm := by
+      rw [Homography.entryNorm_scale]
+      exact add_le_add
+        (add_le_add (Homography.entryNorm_comp_le _ _)
+          (Homography.entryNorm_comp_le _ _)) le_rfl
+    _ ≤ Eouter * (inner.evalNormBound y + Einner) +
+        outer.evalNormBound y * Einner +
+        y ^ 2 * (outer.linear.comp inner.linear).entryNorm := by
+      exact add_le_add
+        (add_le_add
+          (mul_le_mul houter hinnerExact exactInner.entryNorm_nonneg hEouter0)
+          (mul_le_mul houterEval hinner
+            (exactInner.sub (inner.eval c)).entryNorm_nonneg houterEval0))
+        (mul_le_mul_of_nonneg_right hc2 hcross0)
+    _ = matrixC1MergeTailBound outer inner Eouter Einner y := rfl
+
 /-- Builder recurrence for the complete omitted `c²+` matrix tail. -/
 def padeMatrixC1TailBound
     (a : ℕ → ℂ) (start : ℕ) (y : ℝ) : ℕ → ℝ
@@ -562,6 +667,295 @@ theorem matrixC1_nonautonomous_total_error
           (padeMatrixC1TailBound a 0 y n) R := by
       dsimp only [tail, q, E]
       ring
+
+/-! ## Projective normalization
+
+The runtime renormalizes matrix blocks by a nonzero scalar to keep the
+stored coefficients in floating-point range.  Scaling all four entries by
+`s` leaves the induced Möbius map unchanged, multiplies every entrywise
+quantity by `‖s‖`, and therefore leaves the evaluation-error majorant
+invariant. -/
+
+theorem Homography.sub_scale (s : ℂ) (m q : Homography ℂ) :
+    (Homography.scale s m).sub (Homography.scale s q) =
+      Homography.scale s (m.sub q) := by
+  ext <;> simp [Homography.scale, Homography.sub] <;> ring
+
+theorem Homography.num_scale (s : ℂ) (m : Homography ℂ) (z : ℂ) :
+    (Homography.scale s m).num z = s * m.num z := by
+  simp only [Homography.num, Homography.scale]
+  ring
+
+theorem Homography.den_scale (s : ℂ) (m : Homography ℂ) (z : ℂ) :
+    (Homography.scale s m).den z = s * m.den z := by
+  simp only [Homography.den, Homography.scale]
+  ring
+
+theorem Homography.det_scale (s : ℂ) (m : Homography ℂ) :
+    (Homography.scale s m).det = s ^ 2 * m.det := by
+  simp only [Homography.det, Homography.scale]
+  ring
+
+theorem Homography.eval_scale (s : ℂ) (m : Homography ℂ) (z : ℂ)
+    (hs : s ≠ 0) :
+    (Homography.scale s m).eval z = m.eval z := by
+  simp only [Homography.eval, Homography.scale]
+  rw [show s * m.A * z + s * m.B = s * (m.A * z + m.B) by ring,
+    show s * m.C * z + s * m.D = s * (m.C * z + m.D) by ring,
+    mul_div_mul_left _ _ hs]
+
+/-- Scaling both matrix coefficients of a first-order jet by `s`. -/
+def MatrixC1.scale (s : ℂ) (j : MatrixC1 ℂ) : MatrixC1 ℂ where
+  constant := Homography.scale s j.constant
+  linear := Homography.scale s j.linear
+
+theorem MatrixC1.eval_scale (s : ℂ) (j : MatrixC1 ℂ) (c : ℂ) :
+    (MatrixC1.scale s j).eval c = Homography.scale s (j.eval c) := by
+  ext <;> simp [MatrixC1.scale, MatrixC1.eval, Homography.add,
+    Homography.scale] <;> ring
+
+/-- The entrywise tail certificate survives projective normalization. -/
+theorem MatrixC1.tail_le_scale
+    (j : MatrixC1 ℂ) (m : Homography ℂ) (s c : ℂ) (E : ℝ)
+    (h : (m.sub (j.eval c)).entryNorm ≤ E) :
+    ((Homography.scale s m).sub ((MatrixC1.scale s j).eval c)).entryNorm ≤
+      ‖s‖ * E := by
+  rw [MatrixC1.eval_scale, Homography.sub_scale, Homography.entryNorm_scale]
+  exact mul_le_mul_of_nonneg_left h (norm_nonneg s)
+
+theorem MatrixC1.uniformDenMargin_scale (s : ℂ) (j : MatrixC1 ℂ) (y R : ℝ) :
+    (MatrixC1.scale s j).uniformDenMargin y R =
+      ‖s‖ * j.uniformDenMargin y R := by
+  simp only [MatrixC1.uniformDenMargin, MatrixC1.scale, Homography.scale,
+    norm_mul]
+  ring
+
+theorem truncatedMatrixDenMargin_scale (s : ℂ) (q : Homography ℂ) (R : ℝ) :
+    truncatedMatrixDenMargin (Homography.scale s q) R =
+      ‖s‖ * truncatedMatrixDenMargin q R := by
+  simp only [truncatedMatrixDenMargin, Homography.scale, norm_mul]
+  ring
+
+theorem truncatedMatrixNumBound_scale (s : ℂ) (q : Homography ℂ) (R : ℝ) :
+    truncatedMatrixNumBound (Homography.scale s q) R =
+      ‖s‖ * truncatedMatrixNumBound q R := by
+  simp only [truncatedMatrixNumBound, Homography.scale, norm_mul]
+  ring
+
+theorem matrixC1PointTail_scale (s : ℂ) (E R : ℝ) :
+    matrixC1PointTail (‖s‖ * E) R = ‖s‖ * matrixC1PointTail E R := by
+  simp only [matrixC1PointTail]
+  ring
+
+/-- The evaluation-error majorant is invariant under projective
+normalization of the truncated matrix, provided the tail certificate is
+scaled accordingly. -/
+theorem matrixC1EvalMajorant_scale
+    (q : Homography ℂ) (s : ℂ) (E R : ℝ) (hs : s ≠ 0) :
+    matrixC1EvalMajorant (Homography.scale s q) (‖s‖ * E) R =
+      matrixC1EvalMajorant q E R := by
+  have hs' : ‖s‖ ≠ 0 := norm_ne_zero_iff.mpr hs
+  have hdef : ∀ (q' : Homography ℂ) (E' : ℝ),
+      matrixC1EvalMajorant q' E' R =
+        matrixC1PointTail E' R /
+            (truncatedMatrixDenMargin q' R - matrixC1PointTail E' R) +
+          truncatedMatrixNumBound q' R * matrixC1PointTail E' R /
+            ((truncatedMatrixDenMargin q' R - matrixC1PointTail E' R) *
+              truncatedMatrixDenMargin q' R) := fun _ _ => rfl
+  rw [hdef, hdef, matrixC1PointTail_scale, truncatedMatrixDenMargin_scale,
+    truncatedMatrixNumBound_scale]
+  congr 1
+  · rw [show ‖s‖ * truncatedMatrixDenMargin q R -
+        ‖s‖ * matrixC1PointTail E R =
+        ‖s‖ * (truncatedMatrixDenMargin q R - matrixC1PointTail E R) by ring,
+      mul_div_mul_left _ _ hs']
+  · rw [show ‖s‖ * truncatedMatrixNumBound q R *
+        (‖s‖ * matrixC1PointTail E R) =
+        ‖s‖ * ‖s‖ *
+          (truncatedMatrixNumBound q R * matrixC1PointTail E R) by ring,
+      show (‖s‖ * truncatedMatrixDenMargin q R -
+            ‖s‖ * matrixC1PointTail E R) *
+          (‖s‖ * truncatedMatrixDenMargin q R) =
+        ‖s‖ * ‖s‖ *
+          ((truncatedMatrixDenMargin q R - matrixC1PointTail E R) *
+            truncatedMatrixDenMargin q R) by ring,
+      mul_div_mul_left _ _ (mul_ne_zero hs' hs')]
+
+/-- A certificate produced entirely from the normalized (scaled) matrix
+still bounds the error of the original, unscaled evaluation. -/
+theorem Homography.eval_matrixC1_error_le_scaled
+    (m q : Homography ℂ) (s z : ℂ) (E R : ℝ)
+    (hs : s ≠ 0) (hR : 0 ≤ R) (hz : ‖z‖ ≤ R)
+    (hE : ((Homography.scale s m).sub (Homography.scale s q)).entryNorm ≤
+      ‖s‖ * E)
+    (hmargin : matrixC1PointTail (‖s‖ * E) R <
+      truncatedMatrixDenMargin (Homography.scale s q) R) :
+    ‖m.eval z - q.eval z‖ ≤ matrixC1EvalMajorant q E R := by
+  have h := Homography.eval_matrixC1_error_le (Homography.scale s m)
+    (Homography.scale s q) z (‖s‖ * E) R hR hz hE hmargin
+  rwa [Homography.eval_scale s m z hs, Homography.eval_scale s q z hs,
+    matrixC1EvalMajorant_scale q s E R hs] at h
+
+/-! ## Uniform-at-build corollary
+
+Every quantity in the evaluation-error certificate can be majorized by
+data available while the table is built, before any concrete parameter
+`c` is chosen.  The abstract majorant `matrixC1EvalMajorantOf` is
+antitone in the denominator margin and monotone in the numerator bound,
+so substituting the uniform build-time bounds is sound. -/
+
+/-- Numerator bound of an affine matrix jet, uniform on `|c|≤y`, `|z|≤R`. -/
+def MatrixC1.uniformNumBound (j : MatrixC1 ℂ) (y R : ℝ) : ℝ :=
+  (‖j.constant.A‖ + y * ‖j.linear.A‖) * R +
+    (‖j.constant.B‖ + y * ‖j.linear.B‖)
+
+theorem MatrixC1.truncatedMatrixNumBound_le
+    (j : MatrixC1 ℂ) (c : ℂ) (y R : ℝ)
+    (_hy : 0 ≤ y) (hR : 0 ≤ R) (hc : ‖c‖ ≤ y) :
+    truncatedMatrixNumBound (j.eval c) R ≤ j.uniformNumBound y R := by
+  have hA : ‖(j.eval c).A‖ ≤ ‖j.constant.A‖ + y * ‖j.linear.A‖ := by
+    change ‖j.constant.A + c * j.linear.A‖ ≤ _
+    calc
+      ‖j.constant.A + c * j.linear.A‖ ≤
+          ‖j.constant.A‖ + ‖c * j.linear.A‖ := norm_add_le _ _
+      _ = ‖j.constant.A‖ + ‖c‖ * ‖j.linear.A‖ := by rw [norm_mul]
+      _ ≤ ‖j.constant.A‖ + y * ‖j.linear.A‖ := by
+        have hmul := mul_le_mul_of_nonneg_right hc (norm_nonneg j.linear.A)
+        linarith
+  have hB : ‖(j.eval c).B‖ ≤ ‖j.constant.B‖ + y * ‖j.linear.B‖ := by
+    change ‖j.constant.B + c * j.linear.B‖ ≤ _
+    calc
+      ‖j.constant.B + c * j.linear.B‖ ≤
+          ‖j.constant.B‖ + ‖c * j.linear.B‖ := norm_add_le _ _
+      _ = ‖j.constant.B‖ + ‖c‖ * ‖j.linear.B‖ := by rw [norm_mul]
+      _ ≤ ‖j.constant.B‖ + y * ‖j.linear.B‖ := by
+        have hmul := mul_le_mul_of_nonneg_right hc (norm_nonneg j.linear.B)
+        linarith
+  unfold truncatedMatrixNumBound MatrixC1.uniformNumBound
+  have hAR := mul_le_mul_of_nonneg_right hA hR
+  linarith
+
+/-- Evaluation majorant expressed through abstract numerator and margin
+bounds. -/
+def matrixC1EvalMajorantOf (Nb mg E R : ℝ) : ℝ :=
+  matrixC1PointTail E R / (mg - matrixC1PointTail E R) +
+    Nb * matrixC1PointTail E R /
+      ((mg - matrixC1PointTail E R) * mg)
+
+theorem matrixC1EvalMajorant_eq_of (q : Homography ℂ) (E R : ℝ) :
+    matrixC1EvalMajorant q E R =
+      matrixC1EvalMajorantOf (truncatedMatrixNumBound q R)
+        (truncatedMatrixDenMargin q R) E R := rfl
+
+/-- The abstract majorant only grows when the numerator bound grows and
+the denominator margin shrinks (while staying above the point tail). -/
+theorem matrixC1EvalMajorantOf_anti
+    (Nb Nb' mg mu E R : ℝ)
+    (hE : 0 ≤ E) (hR : 0 ≤ R) (hNb : 0 ≤ Nb) (hNbLe : Nb ≤ Nb')
+    (hp : matrixC1PointTail E R < mu) (hle : mu ≤ mg) :
+    matrixC1EvalMajorantOf Nb mg E R ≤ matrixC1EvalMajorantOf Nb' mu E R := by
+  have hp0 : 0 ≤ matrixC1PointTail E R := by
+    simp only [matrixC1PointTail]
+    exact mul_nonneg hE (by linarith)
+  have hmup : 0 < mu - matrixC1PointTail E R := sub_pos.mpr hp
+  have hmgp : 0 < mg - matrixC1PointTail E R := by linarith
+  have hmu0 : 0 < mu := hp0.trans_lt hp
+  have hmg0 : 0 < mg := hmu0.trans_le hle
+  unfold matrixC1EvalMajorantOf
+  apply add_le_add
+  · exact div_le_div₀ hp0 le_rfl hmup (by linarith)
+  · exact div_le_div₀ (mul_nonneg (hNb.trans hNbLe) hp0)
+      (mul_le_mul_of_nonneg_right hNbLe hp0)
+      (mul_pos hmup hmu0)
+      (mul_le_mul (by linarith) hle hmu0.le hmgp.le)
+
+/-- Builder-facing certificate: every hypothesis and the majorant use only
+quantities available at table-build time, uniformly in `|c|≤y`. -/
+theorem MatrixC1.eval_error_le_uniform
+    (j : MatrixC1 ℂ) (m : Homography ℂ) (c z : ℂ) (E y R : ℝ)
+    (hy : 0 ≤ y) (hc : ‖c‖ ≤ y) (hR : 0 ≤ R) (hz : ‖z‖ ≤ R) (hE0 : 0 ≤ E)
+    (hE : (m.sub (j.eval c)).entryNorm ≤ E)
+    (hmargin : matrixC1PointTail E R < j.uniformDenMargin y R) :
+    ‖m.eval z - (j.eval c).eval z‖ ≤
+      matrixC1EvalMajorantOf (j.uniformNumBound y R)
+        (j.uniformDenMargin y R) E R := by
+  have hmarginActual : matrixC1PointTail E R <
+      truncatedMatrixDenMargin (j.eval c) R :=
+    hmargin.trans_le (j.uniformDenMargin_le c y R hy hR hc)
+  have h := Homography.eval_matrixC1_error_le m (j.eval c) z E R hR hz hE
+    hmarginActual
+  rw [matrixC1EvalMajorant_eq_of] at h
+  refine h.trans (matrixC1EvalMajorantOf_anti
+    (truncatedMatrixNumBound (j.eval c) R) (j.uniformNumBound y R)
+    (truncatedMatrixDenMargin (j.eval c) R) (j.uniformDenMargin y R) E R
+    hE0 hR ?_ ?_ hmargin (j.uniformDenMargin_le c y R hy hR hc))
+  · unfold truncatedMatrixNumBound
+    exact add_nonneg (mul_nonneg (norm_nonneg _) hR) (norm_nonneg _)
+  · exact j.truncatedMatrixNumBound_le c y R hy hR hc
+
+/-- Uniform lower bound for a tail denominator margin at an abstract
+output bound `W`, computed from the jet coefficients and the entrywise
+tail certificate alone. -/
+theorem tailDenMargin_ge_uniform
+    (tail : Homography ℂ) (j : MatrixC1 ℂ) (c : ℂ) (E W y : ℝ)
+    (_hy : 0 ≤ y) (hc : ‖c‖ ≤ y) (hW : 0 ≤ W)
+    (hE : (tail.sub (j.eval c)).entryNorm ≤ E) :
+    (‖j.constant.D‖ - y * ‖j.linear.D‖ - E) -
+      (‖j.constant.C‖ + y * ‖j.linear.C‖ + E) * W ≤
+    ‖tail.D‖ - ‖tail.C‖ * W := by
+  have hDsub : ‖tail.D - (j.eval c).D‖ ≤ E :=
+    (tail.sub (j.eval c)).entry_norm_D_le.trans hE
+  have hCsub : ‖tail.C - (j.eval c).C‖ ≤ E :=
+    (tail.sub (j.eval c)).entry_norm_C_le.trans hE
+  have hDeval : ‖j.constant.D‖ - y * ‖j.linear.D‖ ≤ ‖(j.eval c).D‖ := by
+    have hreverse : ‖j.constant.D‖ - ‖c * j.linear.D‖ ≤
+        ‖j.constant.D + c * j.linear.D‖ := by
+      have h := norm_sub_norm_le j.constant.D (-c * j.linear.D)
+      simpa [sub_eq_add_neg] using h
+    have hmul : ‖c * j.linear.D‖ ≤ y * ‖j.linear.D‖ := by
+      rw [norm_mul]
+      exact mul_le_mul_of_nonneg_right hc (norm_nonneg _)
+    change ‖j.constant.D‖ - y * ‖j.linear.D‖ ≤
+      ‖j.constant.D + c * j.linear.D‖
+    linarith
+  have hCeval : ‖(j.eval c).C‖ ≤ ‖j.constant.C‖ + y * ‖j.linear.C‖ := by
+    change ‖j.constant.C + c * j.linear.C‖ ≤ _
+    calc
+      ‖j.constant.C + c * j.linear.C‖ ≤
+          ‖j.constant.C‖ + ‖c * j.linear.C‖ := norm_add_le _ _
+      _ = ‖j.constant.C‖ + ‖c‖ * ‖j.linear.C‖ := by rw [norm_mul]
+      _ ≤ ‖j.constant.C‖ + y * ‖j.linear.C‖ := by
+        have hmul := mul_le_mul_of_nonneg_right hc (norm_nonneg j.linear.C)
+        linarith
+  have hD : ‖(j.eval c).D‖ - E ≤ ‖tail.D‖ := by
+    have h := norm_sub_norm_le ((j.eval c).D) tail.D
+    rw [norm_sub_rev] at h
+    linarith
+  have hC : ‖tail.C‖ ≤ ‖j.constant.C‖ + y * ‖j.linear.C‖ + E := by
+    have h : ‖tail.C‖ ≤ ‖(j.eval c).C‖ + ‖tail.C - (j.eval c).C‖ := by
+      calc
+        ‖tail.C‖ = ‖(j.eval c).C + (tail.C - (j.eval c).C)‖ := by
+          congr 1
+          ring
+        _ ≤ ‖(j.eval c).C‖ + ‖tail.C - (j.eval c).C‖ := norm_add_le _ _
+    linarith
+  have hCW := mul_le_mul_of_nonneg_right hC hW
+  linarith
+
+theorem padeStepHomography_det (a c : ℂ) :
+    (padeStepHomography a c).det = a * (a ^ 2 + c) := by
+  simp only [Homography.det, padeStepHomography]
+  ring
+
+theorem norm_padeStepHomography_det_le (a c : ℂ) (y : ℝ)
+    (_hy : 0 ≤ y) (hc : ‖c‖ ≤ y) :
+    ‖(padeStepHomography a c).det‖ ≤ ‖a‖ * (‖a‖ ^ 2 + y) := by
+  rw [padeStepHomography_det, norm_mul]
+  refine mul_le_mul_of_nonneg_left ?_ (norm_nonneg a)
+  calc
+    ‖a ^ 2 + c‖ ≤ ‖a ^ 2‖ + ‖c‖ := norm_add_le _ _
+    _ = ‖a‖ ^ 2 + ‖c‖ := by rw [norm_pow]
+    _ ≤ ‖a‖ ^ 2 + y := by linarith
 
 end ComplexTail
 

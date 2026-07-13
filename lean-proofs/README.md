@@ -21,6 +21,8 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
   propagation d'erreur et queue de Cauchy.
 - `Cauchy.lean` : représentation analytique sur un disque, borne `M/R^n`,
   majorant par degré total et domination de la queue.
+- `CauchyDerivatives.lean` : estimées de Cauchy sur disques emboîtés pour les
+  dérivées première, seconde et mixte d'une erreur uniforme.
 - `Polydisc.lean` : estimation de Cauchy itérée, queue anisotrope exacte,
   branche diagonale stable, positivité et monotonie en chaque rayon.
 - `RationalCertificate.lean` : certificat résiduel générique `[2/1]-c⁺`,
@@ -37,7 +39,8 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
   majorant calculable par enveloppes et marges de dénominateur.
 - `MatrixC1.lean` : récurrence exacte des huit coefficients du jet matriciel
   affine en `c`, majorant récursif de toute la queue `c²+`, préservation des
-  marges de dénominateur et certificat total `matrix-c1` contre Mandelbrot.
+  marges de dénominateur et certificat total `matrix-c1` contre Mandelbrot ;
+  inclut la règle générale de merge lorsque les deux enfants ont une queue.
 - `Jets.lean` : merge de degré 2, congruence de jets polynomiaux, récurrence
   pure-`c` et sensibilités.
 - `BivariateJets.lean` : troncature bivariée par degré total et preuve que la

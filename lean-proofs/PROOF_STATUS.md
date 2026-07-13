@@ -84,6 +84,10 @@ au runtime.
 - `padeMatrixC1TailBound` transporte récursivement l'erreur déjà omise et
   ajoute ce nouveau terme quadratique. `padeMatrixC1_tail_le` prouve que cette
   quantité majore toute la queue polynomiale `c²+...` sur `|c|≤y`.
+- `matrixC1_comp_tail_le` traite maintenant le merge équilibré de deux blocs
+  portant chacun une queue. Le majorant contient les transports des deux
+  erreurs, leur produit `E_outer*E_inner`, et le défaut neuf `c² M₁N₁`. Cette
+  règle est calculable en temps constant par nœud du merge-tree.
 - Une erreur matricielle `E` perturbe numérateur et dénominateur d'au plus
   `E(R+1)` sur `|z|≤R`. `exact_den_margin_of_matrixC1` prouve donc que la
   matrice exacte conserve la marge affichée par la matrice tronquée, diminuée
@@ -93,6 +97,12 @@ au runtime.
   dénominateurs, le majorant Padé–Mandelbrot non autonome et l'erreur complète
   de troncature matricielle. Il constitue le certificat exact-arithmétique du
   tier runtime proposé à huit coefficients complexes.
+- `norm_iteratedDeriv_le_on_inner_disk` transforme une borne uniforme de valeur
+  sur un disque extérieur en borne de toute dérivée sur un disque intérieur.
+  Les corollaires donnent `M/gap` au premier ordre et `2M/gap²` au second.
+  `cauchy_runtime_partial_bounds` couvre `z`, `c`, `zz` et `cc` sur un bidisque,
+  tandis que `norm_mixedDeriv_le_on_inner_polydisc` donne
+  `(M/gapZ)/gapC` pour la dérivée mixte.
 
 Conséquence : une tolérance relative à la vraie carte doit employer le
 second rayon, plus petit. Substituer le premier change effectivement le

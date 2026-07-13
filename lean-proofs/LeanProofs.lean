@@ -3,6 +3,8 @@ import LeanProofs.Algebra
 import LeanProofs.CPlus
 import LeanProofs.Bounds
 import LeanProofs.Cauchy
+import LeanProofs.CauchyDerivatives
+import LeanProofs.TilePropagation
 import LeanProofs.Polydisc
 import LeanProofs.RationalCertificate
 import LeanProofs.PadeDominance

@@ -54,7 +54,7 @@ function draw() {
   ctx.fillStyle = '#1e1e2e';
   ctx.fillRect(0, 0, W, H);
 
-  const { ref_, pert, dc } = computeOrbits();
+  const { ref_, pert } = computeOrbits();
 
   // --- Panneau gauche : orbites dans le plan complexe ---
   const planeW = W * 0.55;

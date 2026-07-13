@@ -208,8 +208,10 @@ onMounted(() => {
   });
 });
 
-function onCoef(refVal: typeof A, e: Event) {
-  refVal.value = parseFloat((e.target as HTMLInputElement).value);
+const coefs = { A, B, C, D };
+
+function onCoef(key: keyof typeof coefs, e: Event) {
+  coefs[key].value = parseFloat((e.target as HTMLInputElement).value);
   draw();
 }
 function applyPreset(key: string) {
@@ -238,22 +240,22 @@ function applyPreset(key: string) {
     <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 4px 16px; padding: 0 4px;">
       <div style="display: flex; align-items: center; gap: 8px;">
         <label style="font-size: 12px; font-family: monospace; color: #aaa; width: 20px;">A</label>
-        <input type="range" min="-2" max="2" step="0.1" :value="A" @input="onCoef(A, $event)" style="flex: 1;" />
+        <input type="range" min="-2" max="2" step="0.1" :value="A" @input="onCoef('A', $event)" style="flex: 1;" />
         <span style="font-size: 12px; font-family: monospace; min-width: 36px; text-align: right; color: #aaa;">{{ A.toFixed(1) }}</span>
       </div>
       <div style="display: flex; align-items: center; gap: 8px;">
         <label style="font-size: 12px; font-family: monospace; color: #aaa; width: 20px;">B</label>
-        <input type="range" min="-2" max="2" step="0.1" :value="B" @input="onCoef(B, $event)" style="flex: 1;" />
+        <input type="range" min="-2" max="2" step="0.1" :value="B" @input="onCoef('B', $event)" style="flex: 1;" />
         <span style="font-size: 12px; font-family: monospace; min-width: 36px; text-align: right; color: #aaa;">{{ B.toFixed(1) }}</span>
       </div>
       <div style="display: flex; align-items: center; gap: 8px;">
         <label style="font-size: 12px; font-family: monospace; color: #aaa; width: 20px;">C</label>
-        <input type="range" min="-2" max="2" step="0.1" :value="C" @input="onCoef(C, $event)" style="flex: 1;" />
+        <input type="range" min="-2" max="2" step="0.1" :value="C" @input="onCoef('C', $event)" style="flex: 1;" />
         <span style="font-size: 12px; font-family: monospace; min-width: 36px; text-align: right; color: #aaa;">{{ C.toFixed(1) }}</span>
       </div>
       <div style="display: flex; align-items: center; gap: 8px;">
         <label style="font-size: 12px; font-family: monospace; color: #aaa; width: 20px;">D</label>
-        <input type="range" min="-2" max="2" step="0.1" :value="D" @input="onCoef(D, $event)" style="flex: 1;" />
+        <input type="range" min="-2" max="2" step="0.1" :value="D" @input="onCoef('D', $event)" style="flex: 1;" />
         <span style="font-size: 12px; font-family: monospace; min-width: 36px; text-align: right; color: #aaa;">{{ D.toFixed(1) }}</span>
       </div>
     </div>
