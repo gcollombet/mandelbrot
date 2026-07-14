@@ -20,6 +20,10 @@ import LeanProofs.MatrixC1Disk
 import LeanProofs.MovingDisks
 import LeanProofs.HyperbolicTelescope
 import LeanProofs.SchwarzPick
+import LeanProofs.HyperbolicPade
+import LeanProofs.PhaseAwareTransport
+import LeanProofs.RenormalizedTransport
+import LeanProofs.FeigenbaumRenormalization
 import LeanProofs.Rebasing
 import LeanProofs.RadiusSolver
 import LeanProofs.PeriodicRuntime

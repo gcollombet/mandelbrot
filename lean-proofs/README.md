@@ -60,6 +60,22 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
 - `SchwarzPick.lean` : automorphismes explicites des disques, inverse
   projectif sans pôle, Schwarz--Pick complet à deux points arbitraires et
   spécialisation non expansive des blocs Möbius entre leurs frames exactes.
+- `HyperbolicPade.lean` : loi triangulaire pseudohyperbolique forte, pliage
+  non linéaire fini des défauts, identité `tanh(sum artanh)`, certificat Padé
+  non autonome sur disques mobiles, conversion euclidienne finale et
+  extraction de Cauchy unique pour les dérivées première et seconde du bloc.
+- `PhaseAwareTransport.lean` : transport « homographie complexe + inflation »,
+  merge conservant les phases et les annulations du produit matriciel,
+  certificat total par télescope pseudohyperbolique non linéaire, invariance
+  des jauges mobiles et de la normalisation projective des matrices.
+- `RenormalizedTransport.lean` : conjugaison par changements d'échelle
+  projectifs, annulation des jauges intermédiaires lors des merges, formule
+  finie pour une hiérarchie entière avec renormalisations scalaires par bloc,
+  et retour certifié de l'erreur vers les coordonnées physiques.
+- `FeigenbaumRenormalization.lean` : théorème exact des rayons
+  Newton--Kantorovich sur une boule fermée, équivalence entre point fixe de la
+  carte de Newton et zéro du résidu, raccord à l'équation symétrique de
+  Feigenbaum--Cvitanović et enveloppe rationnelle du certificat publié `m=2`.
 - `Rebasing.lean` : raccord exact entre orbites Mandelbrot et récurrence de
   perturbation, invariant de valeur physique, rebasing Zhuoran, dérivées
   première et seconde, garde de diminution, correction de toute suite finie

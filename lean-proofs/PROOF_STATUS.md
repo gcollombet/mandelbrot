@@ -204,11 +204,107 @@ exact pour chaque bloc Möbius au lieu d'un majorant euclidien par normes.
   Möbius non dégénéré est non expansif entre un disque et sa frame image
   exacte. `mapsTo_ball_imageFrame` ferme le passage des disques fermés aux
   intérieurs ouverts requis par le théorème analytique.
+- `HyperbolicPade.lean` prouve la loi triangulaire forte
 
-Conséquence : l'obligation analytique Schwarz--Pick à deux points est fermée.
-Le prochain travail est désormais une intégration build-only : choisir les
-frames et marges intérieures, calculer les défauts locaux, puis comparer le
-rayon issu du télescope au certificat euclidien existant.
+  ```text
+  rho(x,z) <= (rho(x,y)+rho(y,z))/(1+rho(x,y)rho(y,z)),
+  ```
+
+  d'abord sur le disque unité, puis sur tout disque par l'isométrie explicite
+  de l'automorphisme de normalisation. Le pliage fini des défauts locaux est
+  donc la récurrence `delta_(j+1)=eta_j ⊕ delta_j`, et non la somme plus
+  faible des `eta_j`.
+- Cette récurrence reste automatiquement dans `[0,1)` lorsque le seed et les
+  défauts locaux y sont, et sa forme fermée est prouvée :
+
+  ```text
+  delta_n = tanh(artanh(delta_0) + sum_j artanh(eta_j)).
+  ```
+
+- `nonautonomous_pade_hyperbolic_shadowing_bound` raccorde ce pliage aux vrais
+  pas `a_j z+z²+c`, aux seeds Padé `[1/1]`, à leur défaut local scalaire
+  déjà certifié et à une suite finie de disques mobiles. Il retourne
+  directement la borne euclidienne finale
+  `R_n(1+q_n²)delta_n`, sans produit de dérivées euclidiennes.
+- Enfin, `pade_hyperbolic_value_and_derivative_error_le` applique Cauchy une
+  seule fois au bloc total : un certificat valeur uniforme `E` sur le disque
+  extérieur donne `E/(R_out-R_in)` pour la dérivée sur le disque intérieur.
+  La borne seconde `2E/(R_out-R_in)²`, utile à l'AA analytique, est aussi
+  formalisée.
+- `PhaseAwareTransport.lean` ferme le merge phase-aware. Un bloc stocke son
+  homographie complexe nominale, son disque image exact et une inflation
+  euclidienne certifiée. Au merge, l'inflation interne est transportée par
+  `|det(M_outer)|/poleMargin(M_outer,D_inner)²`, calculé sur la vraie matrice
+  complexe extérieure ; la matrice nominale devient exactement
+  `M_outer ∘ M_inner`. Les rotations et annulations ne sont donc plus
+  remplacées par un produit de majorants pas-à-pas.
+- `phaseAware_hyperbolic_shadowing_bound` est le certificat total correspondant.
+  Les frames sont les sorties gonflées récursives, les défauts locaux sont
+  convertis dans leur propre frame puis pliés par `⊕`; la sortie est la borne
+  euclidienne finale `R_N(1+q_N²)delta_N`.
+- La jauge est mathématiquement neutre à deux niveaux. Deux choix arbitraires
+  d'ancres `S_j` donnent exactement les mêmes distances pseudohyperboliques.
+  Une normalisation projective complexe non nulle conserve le disque image,
+  le facteur determinant/marge, l'inflation et le budget local du transport.
+  Les puissances de deux peuvent donc servir au conditionnement sans modifier
+  le certificat.
+- `RenormalizedTransport.lean` formalise maintenant le changement d'échelle
+  complet. Le bloc `M_j` dans les coordonnées `S_j,S_(j+1)` est
+
+  ```text
+  M̃_j = S_(j+1) ∘ M_j ∘ adj(S_j).
+  ```
+
+  `Homography.renormalize_comp` prouve que deux tels blocs fusionnent en
+  `det(S_middle)` fois la renormalisation du bloc composé. Le déterminant est
+  un scalaire projectif : si la jauge est inversible, la carte évaluée est
+  strictement identique.
+- `renormalizedProduct_eq_scale` généralise l'annulation à une chaîne finie :
+  toutes les jauges intérieures disparaissent et seules `S_0`, `S_N` ainsi que
+  le produit de leurs déterminants subsistent. Une normalisation non nulle
+  indépendante à chaque bloc est également absorbée dans un unique scalaire
+  final par `eval_renormalizedProduct_with_normalization`.
+- Le raccord quantitatif est fermé dans les deux directions utiles. Les
+  normalisations projectives laissent exactement inchangé le budget
+  phase-aware total. Une erreur obtenue dans les coordonnées renormalisées est
+  ramenée aux coordonnées physiques en ne payant qu'une fois le facteur
+  `|det(adj S_N)|/poleMargin(adj S_N,D_N)²` de la jauge inverse finale.
+
+Conséquence : l'obligation analytique Schwarz--Pick à deux points, le
+télescope non linéaire concret Padé, le merge phase-aware, son certificat
+total, ses invariances de jauge et l'algèbre d'une hiérarchie renormalisée sont
+fermés. Cela ne prouve pas encore qu'une orbite donnée possède une fenêtre de
+renormalisation de Feigenbaum, ni la proximité à une carte universelle : ces
+deux faits demandent un certificat dynamique supplémentaire. Le prochain
+travail immédiat reste l'intégration build-only et le census des frames
+phase-aware ; le prototype Feigenbaum peut désormais réutiliser l'algèbre
+prouvée sans nouvelle obligation de composition.
+
+### Renormalisation de Feigenbaum
+
+- `FeigenbaumRenormalization.lean` formalise la carte de Newton
+  `T(x)=x-A Phi(x)` et prouve, lorsque `A` est injective, que ses points fixes
+  sont exactement les zéros de `Phi`.
+- `RadiiCertificate` transforme les seules données `Y`, `Z`, `r`, la borne de
+  défaut et la borne de Lipschitz sur la boule en invariance, contraction,
+  existence, unicité et erreur a posteriori `Y/(1-Z)`.
+- Le système carré avec phase `h(0)=1` est relié exactement à l'équation
+  symétrique de Feigenbaum--Cvitanović : le résidu à l'origine force
+  `alpha=h^[m](0)`, puis le résidu fonctionnel nul donne `R_m(h)=h` si
+  `alpha!=0`.
+- Le certificat publié `m=2`, `rho=2`, `K=21`, `r*=10^-15` a été reproduit :
+  `Y=5.202782432174514...e-18`, `Z=0.367994497872518...` et
+  `Y/(1-Z)=8.232179015310324...e-18`.
+- Lean remplace ces flottants par les enveloppes rationnelles
+  `Yq=520279/10^23`, `Zq=73599/200000` et prouve `Zq<1`,
+  `Yq+Zq*10^-15<=10^-15` ainsi que l'enclosure finale `<8.24e-18`.
+
+Conséquence : la logique de la preuve d'existence locale du point fixe
+universel est fermée. La preuve Lean de bout en bout attend encore un checker
+rationnel des calculs fini/queue qui produisent `hDefect` et `hLipschitz`.
+Même ce point fermé, un tier Mandelbrot demanderait encore un théorème de
+reconnaissance : le retour quadratique concret doit entrer dans le domaine
+stable local et fournir des jauges `S_n` et une erreur de conjugaison.
 
 ### Perturbation exacte et rebasing Zhuoran
 
