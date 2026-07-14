@@ -184,7 +184,10 @@ fn verify_index(orbit: &[(f64, f64)], n: usize, m: usize) -> bool {
     if cabs(c30) <= PETAL_TOL {
         return false;
     }
-    let sq = csqrt(csub(cm(c20, c20), (4.0 * cm(c30, kt).0, 4.0 * cm(c30, kt).1)));
+    let sq = csqrt(csub(
+        cm(c20, c20),
+        (4.0 * cm(c30, kt).0, 4.0 * cm(c30, kt).1),
+    ));
     let den = (2.0 * c30.0, 2.0 * c30.1);
     let r1 = cdiv(cadd((-c20.0, -c20.1), sq), den);
     let r2 = cdiv(csub((-c20.0, -c20.1), sq), den);
@@ -426,13 +429,7 @@ fn dk_roots(p: &[C]) -> Vec<C> {
 
 /// Full f64 gate data at one dc sample (build side): per-phase β and log-flow
 /// coefficients.
-fn sample_gate(
-    c0: C,
-    dc: C,
-    p: usize,
-    q: usize,
-    seed: C,
-) -> Option<(Vec<C>, Vec<Vec<C>>)> {
+fn sample_gate(c0: C, dc: C, p: usize, q: usize, seed: C) -> Option<(Vec<C>, Vec<Vec<C>>)> {
     let c = cadd(c0, dc);
     let cycle = cycle_newton(c, p, seed)?;
     let mut pcs = Vec::with_capacity(p);
@@ -454,10 +451,7 @@ fn quantize(v: C) -> C {
     }
     let ex = e.log2().floor();
     let s = (-ex).exp2();
-    (
-        ((v.0 * s) as f32) as f64 / s,
-        ((v.1 * s) as f32) as f64 / s,
-    )
+    (((v.0 * s) as f32) as f64 / s, ((v.1 * s) as f32) as f64 / s)
 }
 
 /// Build the gate table for a reference orbit: detector (two stages) COUPLED
@@ -488,10 +482,7 @@ pub fn build_gates(
     let r_dc = 4.0 * log2_c_max.exp2();
     for (s0, s1, m) in detect_spans(orbit) {
         // Saturation coupling.
-        if !saturated
-            .iter()
-            .any(|&(b0, b1)| b0 < s1 && s0 < b1)
-        {
+        if !saturated.iter().any(|&(b0, b1)| b0 < s1 && s0 < b1) {
             continue;
         }
         let Some(p) = detect_period(orbit, (s0, s1), m) else {
@@ -616,8 +607,7 @@ fn certify_gate(gate: &mut Gate, c0: C, cyc0: &[C], eps: f64) -> bool {
             for l in 0..NDC {
                 // Offset phases: avoid the L = 8 fit grid.
                 let th = std::f64::consts::TAU * (l as f64 + 0.5) / NDC as f64;
-                let dc =
-                    (gate.r_dc * half * th.cos(), gate.r_dc * half * th.sin());
+                let dc = (gate.r_dc * half * th.cos(), gate.r_dc * half * th.sin());
                 let c = cadd(c0, dc);
                 for j in 0..gate.p {
                     let Some(rt) = gate_resolve(gate, j, dc) else {
@@ -637,9 +627,7 @@ fn certify_gate(gate: &mut Gate, c0: C, cyc0: &[C], eps: f64) -> bool {
                         for ri in 0..2 {
                             let rad = hi * if ri == 0 { 1.0 } else { 0.75 };
                             for a in 0..NANG {
-                                let ph = std::f64::consts::TAU
-                                    * (a as f64 + 0.31)
-                                    / NANG as f64;
+                                let ph = std::f64::consts::TAU * (a as f64 + 0.31) / NANG as f64;
                                 let u = (rad * ph.cos(), rad * ph.sin());
                                 // True return in the shipped coordinate.
                                 let mut z = cadd(bj, u);
@@ -649,16 +637,8 @@ fn certify_gate(gate: &mut Gate, c0: C, cyc0: &[C], eps: f64) -> bool {
                                 let u2 = csub(z, bj);
                                 let mut res = (-1.0f64, 0.0f64);
                                 for (r, rho) in rt.roots.iter().zip(&rt.rhos) {
-                                    res = cadd(
-                                        res,
-                                        cm(
-                                            *rho,
-                                            clog(cdiv(
-                                                csub(u2, *r),
-                                                csub(u, *r),
-                                            )),
-                                        ),
-                                    );
+                                    res =
+                                        cadd(res, cm(*rho, clog(cdiv(csub(u2, *r), csub(u, *r)))));
                                 }
                                 let ra = cabs(res);
                                 if !ra.is_finite() || ra * 2.0 > 1e-2 {
@@ -801,7 +781,10 @@ pub fn gate_resolve(gate: &Gate, j: usize, dc: C) -> Option<GateResolved> {
     let mut roots: Vec<C> = vec![(0.0, 0.0)];
     let sq = csqrt(csub(
         cm(pcoef[1], pcoef[1]),
-        (4.0 * cm(pcoef[2], pcoef[0]).0, 4.0 * cm(pcoef[2], pcoef[0]).1),
+        (
+            4.0 * cm(pcoef[2], pcoef[0]).0,
+            4.0 * cm(pcoef[2], pcoef[0]).1,
+        ),
     ));
     let den = (2.0 * pcoef[2].0, 2.0 * pcoef[2].1);
     roots.push(newton(cdiv(cadd((-pcoef[1].0, -pcoef[1].1), sq), den)));
@@ -859,13 +842,7 @@ fn poly_pow(u: C, k: usize) -> C {
 /// budget = Σ dk·eps_band(|u|) along the hop path; the jump is refused when
 /// budget·|P(u_end)/u_end| > ε/2 (value-error conversion at the landing
 /// point). Returns the INTEGER F-step count and the landing u.
-pub fn gate_jump(
-    gate: &Gate,
-    rt: &GateResolved,
-    u0: C,
-    k_max: u64,
-    eps: f64,
-) -> Option<(u64, C)> {
+pub fn gate_jump(gate: &Gate, rt: &GateResolved, u0: C, k_max: u64, eps: f64) -> Option<(u64, C)> {
     if k_max == 0 {
         return None;
     }
@@ -888,7 +865,10 @@ pub fn gate_jump(
             for i in 0..ncl {
                 g = cadd(
                     g,
-                    cm(rt.rhos[i], clog(cdiv(csub(un, rt.roots[i]), csub(u, rt.roots[i])))),
+                    cm(
+                        rt.rhos[i],
+                        clog(cdiv(csub(un, rt.roots[i]), csub(u, rt.roots[i]))),
+                    ),
                 );
             }
             g = cadd(g, cm(cfar, csub(un, u)));
@@ -945,7 +925,14 @@ pub fn gate_jump(
         k_done += dk;
         budget += dk * band(cabs(u));
         if std::env::var("GATE_TRACE").is_ok() {
-            println!("    hop {}: k_done {:.1} |u| {:.4e} dk {:.2e} droot {:.2e}", hops, k_done, cabs(u), dk, droot);
+            println!(
+                "    hop {}: k_done {:.1} |u| {:.4e} dk {:.2e} droot {:.2e}",
+                hops,
+                k_done,
+                cabs(u),
+                dk,
+                droot
+            );
         }
         if budget > 1e6 {
             return None; // hopeless — bail before burning hops
@@ -1138,7 +1125,19 @@ pub fn gate_deserialize(f: &[f32]) -> Gate {
         d.push((f[off] as f64, f[off + 1] as f64));
         off += 2;
     }
-    Gate { start, len, p, q, r_entry, r_dc, eps_band, beta, pc, far, d }
+    Gate {
+        start,
+        len,
+        p,
+        q,
+        r_entry,
+        r_dc,
+        eps_band,
+        beta,
+        pc,
+        far,
+        d,
+    }
 }
 
 // ── sidecar serialization (vec4 lane, rides the unified radius buffer) ─────────
@@ -1173,12 +1172,7 @@ pub fn gates_serialize_vec4(gates: &[Gate]) -> Vec<[f32; 4]> {
         let per_phase = 2 + GATE_DEG * GATE_TAYLOR + nfar;
         let d_rel = 3 + g.p * per_phase;
         out.push([g.start as f32, g.len as f32, g.p as f32, g.q as f32]);
-        out.push([
-            g.r_entry as f32,
-            g.r_dc as f32,
-            nfar as f32,
-            d_rel as f32,
-        ]);
+        out.push([g.r_entry as f32, g.r_dc as f32, nfar as f32, d_rel as f32]);
         out.push([
             g.eps_band[0] as f32,
             g.eps_band[1] as f32,
@@ -1215,8 +1209,12 @@ pub fn gates_deserialize_vec4(v: &[[f32; 4]]) -> Vec<Gate> {
         let e0 = v[base];
         let e1 = v[base + 1];
         let e2 = v[base + 2];
-        let (start, len, p, q) =
-            (e0[0] as usize, e0[1] as usize, e0[2] as usize, e0[3] as usize);
+        let (start, len, p, q) = (
+            e0[0] as usize,
+            e0[1] as usize,
+            e0[2] as usize,
+            e0[3] as usize,
+        );
         let nfar = e1[2] as usize;
         let unpack = |f: [f32; 4]| -> C {
             let s = (f[2] as f64).exp2();
@@ -1264,12 +1262,7 @@ pub fn gates_deserialize_vec4(v: &[[f32; 4]]) -> Vec<Gate> {
             q,
             r_entry: e1[0] as f64,
             r_dc: e1[1] as f64,
-            eps_band: [
-                e2[0] as f64,
-                e2[1] as f64,
-                e2[2] as f64,
-                e2[3] as f64,
-            ],
+            eps_band: [e2[0] as f64, e2[1] as f64, e2[2] as f64, e2[3] as f64],
             beta,
             pc,
             far,
@@ -1309,10 +1302,7 @@ mod tests {
 
     /// Saturated-block spans from the production Möbius bounds (the detector
     /// coupling input — round-6 classification).
-    fn saturated_spans(
-        orbit: &[(f64, f64)],
-        log2_c_max: f64,
-    ) -> Vec<(usize, usize)> {
+    fn saturated_spans(orbit: &[(f64, f64)], log2_c_max: f64) -> Vec<(usize, usize)> {
         let levels = mobius_build_levels(orbit, 1 << 18);
         let bounds = mobius_build_bounds(&levels, orbit, log2_c_max);
         let mut spans = Vec::new();
@@ -1354,7 +1344,10 @@ mod tests {
         let sat = saturated_spans(&orbit, log2_c_max);
         let gates = build_gates(&orbit, (-0.75, 0.0), log2_c_max, 1e-3, &sat);
         for g in &gates {
-            println!("gate: start {} len {} r_entry {}", g.start, g.len, g.r_entry);
+            println!(
+                "gate: start {} len {} r_entry {}",
+                g.start, g.len, g.r_entry
+            );
         }
     }
 
@@ -1402,7 +1395,13 @@ mod tests {
         for (name, cx, cy, dec, expect) in [
             ("cusp", -0.75_f64, 0.0_f64, -5.0_f64, true),
             ("period2", -1.25, 0.0, -5.0, true),
-            ("seahorse", -0.743643887037151, 0.131825904205330, -10.0, false),
+            (
+                "seahorse",
+                -0.743643887037151,
+                0.131825904205330,
+                -10.0,
+                false,
+            ),
             ("feigenbaum", -1.401155, 0.0, -9.0, false),
         ] {
             let log2_c_max = dec * std::f64::consts::LOG2_10;
@@ -1465,15 +1464,7 @@ mod tests {
             let mut jumped = false;
             if fallbacks < 8 {
                 for (gi, g) in gates.iter().enumerate() {
-                    match gate_attempt(
-                        g,
-                        &mut scratch[gi],
-                        ref_i,
-                        dz,
-                        dc,
-                        max_iter - iter,
-                        eps,
-                    ) {
+                    match gate_attempt(g, &mut scratch[gi], ref_i, dz, dc, max_iter - iter, eps) {
                         GateOutcome::Jump(k, dz2) => {
                             let adv = k as usize * g.m();
                             iter += adv;
@@ -1495,8 +1486,11 @@ mod tests {
                 if ref_i > 0 {
                     let shifted = ref_i - 1;
                     let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                    let log2_dz =
-                        if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                    let log2_dz = if dz2 > 0.0 {
+                        0.5 * dz2.log2()
+                    } else {
+                        f64::NEG_INFINITY
+                    };
                     for (li, lvl) in levels.iter().enumerate().rev() {
                         if shifted % lvl.skip != 0 {
                             continue;
@@ -1520,9 +1514,7 @@ mod tests {
                         let cand = phi.to_f64();
                         let zi = orbit[ref_i + lvl.skip];
                         let candz = (zi.0 + cand.0, zi.1 + cand.1);
-                        if lvl.skip > 1
-                            && candz.0 * candz.0 + candz.1 * candz.1 > bailout2
-                        {
+                        if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 {
                             continue;
                         }
                         dz = cand;
@@ -1608,15 +1600,11 @@ mod tests {
             for kpx in 0..16 {
                 let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
                 let dc = (t * cmx * 0.7, 0.37 * t * cmx);
-                let (turns, iters, esc, j) = gate_table_run_pixel(
-                    &levels, &radii, &orbit, &gates, dc, max_iter, eps,
-                );
-                let (ps, _, _) =
-                    crate::bench_run_pixel(&pade, &orbit, dc, max_iter, true);
+                let (turns, iters, esc, j) =
+                    gate_table_run_pixel(&levels, &radii, &orbit, &gates, dc, max_iter, eps);
+                let (ps, _, _) = crate::bench_run_pixel(&pade, &orbit, dc, max_iter, true);
                 t_pade += ps as u64;
-                t_mob +=
-                    mobius_run_pixel(&levels, &radii, &orbit, dc, max_iter).steps
-                        as u64;
+                t_mob += mobius_run_pixel(&levels, &radii, &orbit, dc, max_iter).steps as u64;
                 t_gate += turns;
                 jumps += j;
                 let (e_esc, e_iter) = exact_pixel((cx + dc.0, cy + dc.1), max_iter);
@@ -1664,13 +1652,10 @@ mod tests {
             // escapes in 263). Their VALUE error stays inside the certified
             // budget; their iteration count is untestable. The probes below
             // are single-transit.
-            for dcp in [(0.0, 0.7e-5_f64), (0.0, -0.7e-5), (0.0, 3e-5), (1e-5, 1e-5)]
-            {
-                let (turns, iters, esc, j) = gate_table_run_pixel(
-                    &[], &[], &lorbit, &lgates, dcp, long_iter, eps,
-                );
-                let (e_esc, e_iter) =
-                    exact_pixel((cx + dcp.0, cy + dcp.1), long_iter);
+            for dcp in [(0.0, 0.7e-5_f64), (0.0, -0.7e-5), (0.0, 3e-5), (1e-5, 1e-5)] {
+                let (turns, iters, esc, j) =
+                    gate_table_run_pixel(&[], &[], &lorbit, &lgates, dcp, long_iter, eps);
+                let (e_esc, e_iter) = exact_pixel((cx + dcp.0, cy + dcp.1), long_iter);
                 println!(
                     "  probe dc=({:.1e},{:.1e}): {} iters {} (turns {}, jumps {}) | exact {} iters {} | Δiter {}",
                     dcp.0,
@@ -1719,15 +1704,7 @@ mod tests {
         assert_eq!(g.d, g2.d, "d channel");
         let dc = (0.4e-5, 0.6e-5);
         let a = gate_table_run_pixel(&[], &[], &orbit, &gates, dc, 3000, 1e-3);
-        let b = gate_table_run_pixel(
-            &[],
-            &[],
-            &orbit,
-            std::slice::from_ref(&g2),
-            dc,
-            3000,
-            1e-3,
-        );
+        let b = gate_table_run_pixel(&[], &[], &orbit, std::slice::from_ref(&g2), dc, 3000, 1e-3);
         assert_eq!(a, b, "probe run through the deserialized gate diverged");
     }
 

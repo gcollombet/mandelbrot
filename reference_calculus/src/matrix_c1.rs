@@ -857,10 +857,7 @@ impl MatC2 {
     /// Ghost-certified c²⁺ tail of the C1 view (what the shader would
     /// evaluate): ‖M(c) − (M0 + c·M1)‖ ≤ y²·‖M2‖ + E₃ — the §3.1 bound.
     pub fn log2_c1_tail(&self, log2_y: f64) -> f64 {
-        lse(&[
-            2.0 * log2_y + self.m2.log2_entry_norm(),
-            self.log2_tail3,
-        ])
+        lse(&[2.0 * log2_y + self.m2.log2_entry_norm(), self.log2_tail3])
     }
 
     /// C1 view of the ghost: same coefficients, ghost-certified tail. Feeds
@@ -1856,7 +1853,14 @@ mod tests {
                         continue;
                     }
                     assert_value_and_deriv_promise(
-                        name, &orbit, first, skip, &pre, radii.log2_r_eff, lcmax, eps,
+                        name,
+                        &orbit,
+                        first,
+                        skip,
+                        &pre,
+                        radii.log2_r_eff,
+                        lcmax,
+                        eps,
                     );
                 }
             }
@@ -1895,7 +1899,14 @@ mod tests {
                         continue;
                     }
                     assert_value_and_deriv_promise(
-                        name, &orbit, first, skip, &pre, hyp.log2_r_eff, lcmax, eps,
+                        name,
+                        &orbit,
+                        first,
+                        skip,
+                        &pre,
+                        hyp.log2_r_eff,
+                        lcmax,
+                        eps,
                     );
                 }
             }
@@ -2412,8 +2423,7 @@ mod debug_tests {
             println!(
                 "delta_tot={ltot:.2}  exit err = 2^{:.2}  vs rhs = 2^{:.2}",
                 1.0 + lrd + ltot,
-                1e-6f64.log2() - 1.0
-                    + lse(&[pre.log2_a_blk + lx, pre.log2_b_blk + lcmax])
+                1e-6f64.log2() - 1.0 + lse(&[pre.log2_a_blk + lx, pre.log2_b_blk + lcmax])
             );
         }
     }

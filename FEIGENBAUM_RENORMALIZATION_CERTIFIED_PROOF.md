@@ -13,11 +13,13 @@ fois les bornes analytiques `Y` et `Z` fournies, Lean prouve sans `sorry`,
 5. l'équivalence de ce zéro avec l'équation de Feigenbaum--Cvitanović ;
 6. l'enveloppe rationnelle finale du cas classique `m=2`.
 
-Le certificat numérique publié a également été reproduit avec succès. La
-preuve n'est cependant **pas encore une preuve Lean de bout en bout** : les
-cinq inégalités analytiques produites par l'arithmétique d'intervalles Julia
-ne sont pas encore recalculées par le noyau Lean. C'est désormais la seule
-frontière de confiance pour l'existence locale du point fixe.
+Le certificat numérique publié a également été reproduit avec succès. Lean
+dispose maintenant d'un checker rationnel minimal pour rejouer l'arithmétique
+des bornes, les produits complexes, les normes `ell¹` pondérées, les normes
+matricielles induites et l'agrégation des cinq composantes `Y/Z`. La preuve
+n'est cependant **pas encore une preuve Lean de bout en bout** : l'export des
+22 coefficients, de la matrice inverse approchée et de toutes les entrées
+intervalle vers ce checker reste à produire.
 
 Cette preuve d'existence ne suffit pas, à elle seule, à activer un saut
 Feigenbaum dans le runtime Mandelbrot. Il faut en plus certifier qu'un retour
@@ -194,7 +196,30 @@ Lip(T, closedBall(xbar,rq)) <= Zq,
 Lean conclut à un unique point fixe réel analytique à moins de
 `8.24e-18` du polynôme de degré 42.
 
-## 6. Ce qu'il manque pour une preuve Lean réellement complète
+## 6. Checker rationnel maintenant prouvé, et dernière frontière
+
+`LeanProofs/VerifiedRationalBounds.lean` prouve sans flottant :
+
+1. la fermeture des bornes rationnelles positives par somme et produit ;
+2. la validité des majorants de norme d'une somme et d'un produit complexes ;
+3. la norme `ell¹` pondérée finie ;
+4. le critère par sommes de colonnes pour la norme matricielle induite ;
+5. sa version où chaque entrée est fournie par une enveloppe rationnelle ;
+6. l'agrégation exacte des cinq bornes reproduites :
+
+```text
+Y_K + Y_inf <= Yq,
+Z_KK + Z_Kinf + Z_inf <= Zq.
+```
+
+La structure `AnalyticComponents` réduit désormais l'interface non fermée à
+deux faits sémantiques : la somme des composantes borne le défaut de la carte
+concrète et leur somme matricielle borne sa constante de Lipschitz. Son
+théorème `toRadiiCertificate` assemble ensuite automatiquement le certificat
+de rayons final.
+
+Ce qu'il manque pour une preuve Lean réellement complète est donc le **fichier
+de données rationnelles exhaustif**, et non plus l'algèbre du checker :
 
 Il reste à faire vérifier par Lean, ou par un checker minimal dont Lean vérifie
 la sortie, les deux faits suivants :
@@ -205,9 +230,9 @@ la sortie, les deux faits suivants :
 
 Cela demande les composants concrets suivants :
 
-1. une représentation portable rationnelle des 22 coefficients de `hbar` et
-   de la matrice approchée `A` ;
-2. le Banach pondéré `R × ell1_even(rho)` avec
+1. l'export portable rationnel des 22 coefficients de `hbar`, de la matrice
+   approchée `A` et des intervalles intermédiaires ;
+2. l'instanciation concrète du Banach pondéré `R × ell1_even(rho)` avec
    `||(alpha,h)||=|alpha|+|h_0|+2 sum |h_k|rho^k` ;
 3. les identités exactes de produit, composition et interpolation de
    Chebyshev ;
@@ -215,14 +240,14 @@ Cela demande les composants concrets suivants :
    de Bernstein ;
 5. les majorants de queue des sections 3 à 5 de l'article ;
 6. l'injectivité de l'extension de `A` utilisée sur la queue ;
-7. l'instanciation finale de `PublishedM2Certificate.exists_unique_fixedPoint`.
+7. l'instanciation finale de `AnalyticComponents` avec ces données.
 
 Le bon format n'est pas de formaliser Julia ou MPFR. Le builder externe doit
 exporter des intervalles à bornes rationnelles ; un petit checker Lean recalcule
 les inclusions et les sommes. Cette architecture laisse hors de la base de
 confiance Julia, MPFR, le DFT flottant et la sérialisation.
 
-## 7. Obligation supplémentaire pour le runtime Mandelbrot
+## 7. Retour Mandelbrot fini maintenant formalisé
 
 Même après fermeture du checker précédent, on ne possède qu'un point fixe
 universel isolé. Pour remplacer `2^n` itérations concrètes par un bloc
@@ -237,10 +262,27 @@ retour quadratique concret
   -> retour aux coordonnées physiques avec budget d'erreur.
 ```
 
-Le dernier raccord algébrique est déjà couvert par
-`RenormalizedTransport.lean`. Les nouvelles mathématiques sont donc surtout
-le **théorème de reconnaissance/stable-manifold** pour la famille quadratique,
-pas l'existence du point fixe universel elle-même.
+`LeanProofs/FeigenbaumFiniteReturn.lean` ferme maintenant la partie finie et
+générique de ce raccord :
+
+- `P_c(z)=z²+c`, son itéré et l'échelle critique `s_n=P_c^[2^n](0)` ;
+- le retour normalisé `G_n(z)=P_c^[2^n](s_n z)/s_n` et `G_n(0)=1` ;
+- la conjugaison affine exacte au format `1-mu z²` au premier niveau ;
+- les jauges et la conversion exacte erreur normalisée/physique ;
+- le théorème `FiniteGridWitness.uniform_error`, qui transforme des bornes
+  finies par cellule en une borne uniforme sur le disque ;
+- l'extension d'un paramètre central à une fenêtre en `c` ;
+- la sémantique de repli : sans certificat accepté, le choix est exactement
+  le portefeuille existant.
+
+Le builder `reference_calculus/src/feigenbaum.rs` produit déjà les propositions
+numériques correspondantes, mais son type de jeton vérifié est opaque et aucun
+chemin de promotion flottant n'existe. Il ne peut donc pas activer
+accidentellement le tier rapide.
+
+La reconnaissance globale de la variété stable est remplacée ici par un
+certificat direct à profondeur finie. C'est moins ambitieux, mais suffisant au
+runtime : on prouve exactement le bloc que l'on veut sauter.
 
 ## 8. État exact
 
@@ -252,7 +294,9 @@ pas l'existence du point fixe universel elle-même.
 | Résidu nul ⇔ équation de Feigenbaum | prouvé dans Lean |
 | Arithmétique rationnelle finale `m=2` | prouvée dans Lean |
 | Calcul intervalle `Y,Z` publié | reproduit, hors noyau Lean |
-| Checker Lean des bornes `Y,Z` | à écrire |
-| Reconnaissance d'un retour Mandelbrot concret | à prouver |
-| Tier runtime renormalisé | non justifié avant reconnaissance + census |
-
+| Algèbre du checker Lean des bornes `Y,Z` | prouvée dans Lean |
+| Données exhaustives `hbar/A/intervalles` | export rationnel à faire |
+| Théorème de reconnaissance finie | prouvé dans Lean |
+| Builder/probe de retour quadratique | implémenté, build-only |
+| Certificat concret accepté par le noyau | à produire |
+| Tier runtime renormalisé | repli forcé jusqu'au certificat + census |

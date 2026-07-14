@@ -21,8 +21,8 @@
 #![allow(dead_code)] // consumed progressively by the add-mobius-cplus tasks
 
 use crate::jet::{
-    self, cfe_to_coeff, fe_exp2, jet_idx, CFe, JetCoeffFe, JetF64, JetLevel, JET_DS,
-    JET_MONOMIALS, JET_NCOEFF,
+    self, cfe_to_coeff, fe_exp2, jet_idx, CFe, JetCoeffFe, JetF64, JetLevel, JET_DS, JET_MONOMIALS,
+    JET_NCOEFF,
 };
 
 // ── coefficient extraction (note §3) ───────────────────────────────────────────
@@ -61,7 +61,10 @@ pub fn mobius_from_jet(jet: &JetF64) -> MobiusCPlus {
     let c10 = jet.coeff(1, 0);
     let c01 = jet.coeff(0, 1);
     if c10.is_zero() {
-        return MobiusCPlus { b: c01, ..MOBIUS_DEGENERATE };
+        return MobiusCPlus {
+            b: c01,
+            ..MOBIUS_DEGENERATE
+        };
     }
     let c20 = jet.coeff(2, 0);
     let c11 = jet.coeff(1, 1);
@@ -73,10 +76,23 @@ pub fn mobius_from_jet(jet: &JetF64) -> MobiusCPlus {
     // B = c₀₁ can vanish in principle (never observed on real orbits); F = 0
     // falls back to the 5-coefficient form — q₀₂ = c₀₂ then stays a live REST
     // term, which is sound (just not resummed).
-    let f = if c01.is_zero() { CFe::ZERO } else { c02.div(c01).neg() };
+    let f = if c01.is_zero() {
+        CFe::ZERO
+    } else {
+        c02.div(c01).neg()
+    };
     let ap = c11.add(d.mul(b)).add(f.mul(a));
     let dp = c21.add(d.mul(c11)).add(f.mul(c20)).div(a).neg();
-    MobiusCPlus { a, b, d, ap, dp, f, n2: CFe::ZERO, degenerate: false }
+    MobiusCPlus {
+        a,
+        b,
+        d,
+        ap,
+        dp,
+        f,
+        n2: CFe::ZERO,
+        degenerate: false,
+    }
 }
 
 /// [2/1] extraction (round 7, findings §14): D = −c₃₀/c₂₀ resums the
@@ -88,7 +104,10 @@ pub fn mobius_from_jet(jet: &JetF64) -> MobiusCPlus {
 pub fn mobius_from_jet_k2(jet: &JetF64) -> MobiusCPlus {
     let c10 = jet.coeff(1, 0);
     if c10.is_zero() {
-        return MobiusCPlus { b: jet.coeff(0, 1), ..MOBIUS_DEGENERATE };
+        return MobiusCPlus {
+            b: jet.coeff(0, 1),
+            ..MOBIUS_DEGENERATE
+        };
     }
     let c20 = jet.coeff(2, 0);
     if c20.is_zero() {
@@ -102,11 +121,24 @@ pub fn mobius_from_jet_k2(jet: &JetF64) -> MobiusCPlus {
     let a = c10;
     let b = c01;
     let d = c30.div(c20).neg();
-    let f = if c01.is_zero() { CFe::ZERO } else { c02.div(c01).neg() };
+    let f = if c01.is_zero() {
+        CFe::ZERO
+    } else {
+        c02.div(c01).neg()
+    };
     let n2 = c20.add(d.mul(c10));
     let ap = c11.add(d.mul(b)).add(f.mul(a));
     let dp = c21.add(d.mul(c11)).add(f.mul(c20)).div(a).neg();
-    MobiusCPlus { a, b, d, ap, dp, f, n2, degenerate: false }
+    MobiusCPlus {
+        a,
+        b,
+        d,
+        ap,
+        dp,
+        f,
+        n2,
+        degenerate: false,
+    }
 }
 
 // ── compensated remainder Q (note §4.1) ────────────────────────────────────────
@@ -198,8 +230,7 @@ pub fn mobius_q_integrity_log2(
 
 /// The slots annihilated by the [1/1] extraction (`mobius_from_jet` — the
 /// unified table's form).
-pub const MOBIUS_Q_ZEROS: &[(usize, usize)] =
-    &[(1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (2, 1)];
+pub const MOBIUS_Q_ZEROS: &[(usize, usize)] = &[(1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (2, 1)];
 
 /// The slots annihilated by the [2/1] extraction (`mobius_from_jet_k2` — the
 /// standalone mode): + (3,0), D-annihilated (superconvergence).
@@ -294,8 +325,11 @@ pub fn mobius_build_levels_with(
     max_skip: usize,
     plain: bool,
 ) -> Vec<MobiusLevel> {
-    let extract: fn(&JetF64) -> MobiusBlock =
-        if plain { block_from_jet_plain } else { block_from_jet };
+    let extract: fn(&JetF64) -> MobiusBlock = if plain {
+        block_from_jet_plain
+    } else {
+        block_from_jet
+    };
     mobius_build_levels_extract(orbit, max_skip, extract)
 }
 
@@ -309,9 +343,13 @@ fn mobius_build_levels_extract(
     if orbit_len < 3 {
         return out;
     }
-    let mut prev: Vec<JetF64> =
-        (1..orbit_len).map(|i| crate::jet::jet_seed(orbit[i].0, orbit[i].1)).collect();
-    out.push(MobiusLevel { skip: 1, blocks: prev.iter().map(extract).collect() });
+    let mut prev: Vec<JetF64> = (1..orbit_len)
+        .map(|i| crate::jet::jet_seed(orbit[i].0, orbit[i].1))
+        .collect();
+    out.push(MobiusLevel {
+        skip: 1,
+        blocks: prev.iter().map(extract).collect(),
+    });
     let mut skip = 1usize;
     while skip < max_skip && skip * 2 < orbit_len {
         let n = prev.len() / 2;
@@ -322,7 +360,10 @@ fn mobius_build_levels_extract(
             .map(|i| crate::jet::jet_compose(&prev[2 * i], &prev[2 * i + 1]))
             .collect();
         skip *= 2;
-        out.push(MobiusLevel { skip, blocks: cur.iter().map(extract).collect() });
+        out.push(MobiusLevel {
+            skip,
+            blocks: cur.iter().map(extract).collect(),
+        });
         prev = cur;
     }
     out
@@ -512,7 +553,10 @@ fn mobius_twoz(orbit: &[(f64, f64)]) -> Vec<(f64, i64)> {
             if m > 0.0 {
                 let bits = m.to_bits();
                 let be = ((bits >> 52) & 0x7ff) as i64 - 1023;
-                (f64::from_bits((bits & !(0x7ffu64 << 52)) | (1023u64 << 52)), be)
+                (
+                    f64::from_bits((bits & !(0x7ffu64 << 52)) | (1023u64 << 52)),
+                    be,
+                )
             } else {
                 (0.0, i64::MIN / 2)
             }
@@ -617,7 +661,10 @@ pub fn mobius_certify_segment(
     let twoz = mobius_twoz(orbit_seg);
     let log2_rc = mobius_rungs(log2_c_max);
     let bounds = mobius_block_bounds(blk, &twoz, &log2_rc);
-    let table = MobiusBoundsTable { log2_rc, per_level: Vec::new() };
+    let table = MobiusBoundsTable {
+        log2_rc,
+        per_level: Vec::new(),
+    };
     let r = mobius_solve_radius(blk, &bounds, &table, epsilon, log2_c_max);
     let rd = mobius_solve_derivative_radius(blk, &bounds, &table, epsilon, log2_c_max);
     r.min(rd)
@@ -710,7 +757,11 @@ impl MobiusVPre {
             }
             let t = l + j as f64 * log2_c_max;
             let slot = &mut cpow[i as usize];
-            *slot = if *slot == f64::NEG_INFINITY { t } else { lse2(&[*slot, t]) };
+            *slot = if *slot == f64::NEG_INFINITY {
+                t
+            } else {
+                lse2(&[*slot, t])
+            };
         }
         // The |F|·c_max DEN contribution is x-independent: hoist it out.
         let df = cfe_log2(&blk.m.f) + log2_c_max;
@@ -748,7 +799,11 @@ impl MobiusVPre {
                 continue;
             }
             // The pure-c row carries no x power (and 0·(−∞) would be NaN).
-            let t = if i == 0 { ci - rhs } else { ci + i as f64 * x - rhs };
+            let t = if i == 0 {
+                ci - rhs
+            } else {
+                ci + i as f64 * x - rhs
+            };
             if t > 62.0 {
                 return false;
             }
@@ -865,9 +920,7 @@ pub fn mobius_v_certified_at(
 fn mobius_cauchy_tail_log2(log2_mq: f64, log2_theta: f64) -> f64 {
     let theta = log2_theta.exp2();
     let n = (JET_DS + 1) as f64;
-    log2_mq
-        + n * log2_theta
-        + (((n + 1.0) - n * theta) / ((1.0 - theta) * (1.0 - theta))).log2()
+    log2_mq + n * log2_theta + (((n + 1.0) - n * theta) / ((1.0 - theta) * (1.0 - theta))).log2()
 }
 
 /// Cauchy tail of ∂Q/∂z after the stored total-degree-D_s prefix:
@@ -875,9 +928,8 @@ fn mobius_cauchy_tail_log2(log2_mq: f64, log2_theta: f64) -> f64 {
 fn mobius_cauchy_dz_tail_log2(log2_mq: f64, log2_rz: f64, log2_theta: f64) -> f64 {
     let theta = log2_theta.exp2();
     let n = (JET_DS + 1) as f64;
-    let numerator = n * (n + 1.0)
-        - 2.0 * (n + 1.0) * (n - 1.0) * theta
-        + n * (n - 1.0) * theta * theta;
+    let numerator =
+        n * (n + 1.0) - 2.0 * (n + 1.0) * (n - 1.0) * theta + n * (n - 1.0) * theta * theta;
     let factor = numerator / (2.0 * (1.0 - theta).powi(3));
     log2_mq - log2_rz + (n - 1.0) * log2_theta + factor.log2()
 }
@@ -917,11 +969,19 @@ pub fn mobius_solve_derivative_radius(
         }
         let t = l + j as f64 * log2_c_max;
         let slot = &mut qpow[i as usize];
-        *slot = if slot.is_finite() { lse2(&[*slot, t]) } else { t };
+        *slot = if slot.is_finite() {
+            lse2(&[*slot, t])
+        } else {
+            t
+        };
         if i >= 1 {
             let tz = t + (i as f64).log2();
             let slot = &mut qzpow[i as usize - 1];
-            *slot = if slot.is_finite() { lse2(&[*slot, tz]) } else { tz };
+            *slot = if slot.is_finite() {
+                lse2(&[*slot, tz])
+            } else {
+                tz
+            };
         }
     }
     let mut best = f64::NEG_INFINITY;
@@ -1111,8 +1171,14 @@ pub fn mobius_build_bounds_pair(
         prev_skip = lc.skip;
     }
     (
-        MobiusBoundsTable { log2_rc, per_level: per_c },
-        MobiusBoundsTable { log2_rc, per_level: per_p },
+        MobiusBoundsTable {
+            log2_rc,
+            per_level: per_c,
+        },
+        MobiusBoundsTable {
+            log2_rc,
+            per_level: per_p,
+        },
     )
 }
 
@@ -1190,10 +1256,12 @@ pub const MOBIUS_F32_SAFE_LOG2: f64 = 96.0;
 /// True when all seven coefficients reconstruct inside the f32 range with
 /// Horner headroom — the build-side gate for the shallow fast-path flag.
 pub fn mobius_f32_safe(m: &MobiusCPlus) -> bool {
-    [&m.a, &m.b, &m.ap, &m.d, &m.dp, &m.f, &m.n2].iter().all(|c| match c.log2_mag() {
-        None => true,
-        Some(l) => l.abs() <= MOBIUS_F32_SAFE_LOG2,
-    })
+    [&m.a, &m.b, &m.ap, &m.d, &m.dp, &m.f, &m.n2]
+        .iter()
+        .all(|c| match c.log2_mag() {
+            None => true,
+            Some(l) => l.abs() <= MOBIUS_F32_SAFE_LOG2,
+        })
 }
 
 /// Smallest emitted skip: matches the BLA/jet tables (MIN_BLA_SKIP) — levels
@@ -1241,7 +1309,11 @@ pub fn mobius_serialize_radii(
         let mut max_r = f32::NEG_INFINITY;
         for (slot, blk) in lvl.blocks.iter().enumerate() {
             let r = radii[li][slot];
-            let r32 = if r.is_finite() { r as f32 } else { f32::NEG_INFINITY };
+            let r32 = if r.is_finite() {
+                r as f32
+            } else {
+                f32::NEG_INFINITY
+            };
             max_r = max_r.max(r32);
             out.push(MobiusRadius {
                 r_log2: r32,
@@ -1323,10 +1395,7 @@ pub fn block_from_jet_plain_k2(jet: &JetF64) -> MobiusBlock {
 }
 
 /// Plain-[2/1] level builder (unified-dispatch censuses — the Padé-tier model).
-pub fn mobius_build_levels_plain_k2(
-    orbit: &[(f64, f64)],
-    max_skip: usize,
-) -> Vec<MobiusLevel> {
+pub fn mobius_build_levels_plain_k2(orbit: &[(f64, f64)], max_skip: usize) -> Vec<MobiusLevel> {
     mobius_build_levels_extract(orbit, max_skip, block_from_jet_plain_k2)
 }
 
@@ -1342,7 +1411,11 @@ pub fn mobius_apply(m: &MobiusCPlus, z: CFe, c: CFe) -> (CFe, CFe, CFe) {
     let den = CFe::ONE.add(de.mul(z)).add(m.f.mul(c));
     let phi = n2z.add(ae).mul(z).add(m.b.mul(c)).div(den);
     let ddz = n2z.add(n2z).add(ae).sub(phi.mul(de)).div(den);
-    let ddc = m.ap.mul(z).add(m.b).sub(phi.mul(m.dp.mul(z).add(m.f))).div(den);
+    let ddc =
+        m.ap.mul(z)
+            .add(m.b)
+            .sub(phi.mul(m.dp.mul(z).add(m.f)))
+            .div(den);
     (phi, ddz, ddc)
 }
 
@@ -1391,7 +1464,11 @@ pub fn mobius_run_pixel(
         if ref_i > 0 {
             let shifted = ref_i - 1;
             let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-            let log2_dz = if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+            let log2_dz = if dz2 > 0.0 {
+                0.5 * dz2.log2()
+            } else {
+                f64::NEG_INFINITY
+            };
             for (li, lvl) in levels.iter().enumerate().rev() {
                 if shifted % lvl.skip != 0 {
                     continue;
@@ -1434,7 +1511,10 @@ pub fn mobius_run_pixel(
                 2.0 * (fz.0 * der.0 - fz.1 * der.1) + 1.0,
                 2.0 * (fz.0 * der.1 + fz.1 * der.0),
             );
-            let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+            let m2 = (
+                2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+            );
             let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
             dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
             ref_i += 1;
@@ -1497,16 +1577,37 @@ fn p_cm(a: C64, b: C64) -> C64 {
 pub fn mobius_pow_stable(m: &MobiusCPlus, c: C64, k: u64) -> [C64; 4] {
     let ac = m.ap.to_f64();
     let dc = m.dp.to_f64();
-    let ae = { let a = m.a.to_f64(); (a.0 + p_cm(ac, c).0, a.1 + p_cm(ac, c).1) };
-    let de = { let d = m.d.to_f64(); (d.0 + p_cm(dc, c).0, d.1 + p_cm(dc, c).1) };
+    let ae = {
+        let a = m.a.to_f64();
+        (a.0 + p_cm(ac, c).0, a.1 + p_cm(ac, c).1)
+    };
+    let de = {
+        let d = m.d.to_f64();
+        (d.0 + p_cm(dc, c).0, d.1 + p_cm(dc, c).1)
+    };
     let bc = p_cm(m.b.to_f64(), c);
-    let ff = { let f = p_cm(m.f.to_f64(), c); (1.0 + f.0, f.1) };
+    let ff = {
+        let f = p_cm(m.f.to_f64(), c);
+        (1.0 + f.0, f.1)
+    };
     let mmul = |x: &[C64; 4], y: &[C64; 4]| -> [C64; 4] {
         [
-            (p_cm(x[0], y[0]).0 + p_cm(x[1], y[2]).0, p_cm(x[0], y[0]).1 + p_cm(x[1], y[2]).1),
-            (p_cm(x[0], y[1]).0 + p_cm(x[1], y[3]).0, p_cm(x[0], y[1]).1 + p_cm(x[1], y[3]).1),
-            (p_cm(x[2], y[0]).0 + p_cm(x[3], y[2]).0, p_cm(x[2], y[0]).1 + p_cm(x[3], y[2]).1),
-            (p_cm(x[2], y[1]).0 + p_cm(x[3], y[3]).0, p_cm(x[2], y[1]).1 + p_cm(x[3], y[3]).1),
+            (
+                p_cm(x[0], y[0]).0 + p_cm(x[1], y[2]).0,
+                p_cm(x[0], y[0]).1 + p_cm(x[1], y[2]).1,
+            ),
+            (
+                p_cm(x[0], y[1]).0 + p_cm(x[1], y[3]).0,
+                p_cm(x[0], y[1]).1 + p_cm(x[1], y[3]).1,
+            ),
+            (
+                p_cm(x[2], y[0]).0 + p_cm(x[3], y[2]).0,
+                p_cm(x[2], y[0]).1 + p_cm(x[3], y[2]).1,
+            ),
+            (
+                p_cm(x[2], y[1]).0 + p_cm(x[3], y[3]).0,
+                p_cm(x[2], y[1]).1 + p_cm(x[3], y[3]).1,
+            ),
         ]
     };
     let norm = |x: &mut [C64; 4]| {
@@ -1557,7 +1658,14 @@ mod tests {
     fn assert_close(got: C, want: C, tol: f64, what: &str) {
         let d = ((got.0 - want.0).powi(2) + (got.1 - want.1).powi(2)).sqrt();
         let m = (want.0 * want.0 + want.1 * want.1).sqrt().max(1e-300);
-        assert!(d / m < tol, "{}: got {:?} want {:?} (rel {})", what, got, want, d / m);
+        assert!(
+            d / m < tol,
+            "{}: got {:?} want {:?} (rel {})",
+            what,
+            got,
+            want,
+            d / m
+        );
     }
 
     fn ref_orbit_f64(cx: f64, cy: f64, max_iter: usize) -> Vec<(f64, f64)> {
@@ -1599,8 +1707,14 @@ mod tests {
             let c11 = jet.coeff(1, 1).to_f64();
             let c21 = jet.coeff(2, 1).to_f64();
             let c02 = jet.coeff(0, 2).to_f64();
-            let d = { let t = cdiv(c20, c10); (-t.0, -t.1) };
-            let f = { let t = cdiv(c02, c01); (-t.0, -t.1) };
+            let d = {
+                let t = cdiv(c20, c10);
+                (-t.0, -t.1)
+            };
+            let f = {
+                let t = cdiv(c02, c01);
+                (-t.0, -t.1)
+            };
             let ap = {
                 let t = cm(d, c01);
                 let u = cm(f, c10);
@@ -1647,9 +1761,18 @@ mod tests {
             let c11 = jet.coeff(1, 1).to_f64();
             let c21 = jet.coeff(2, 1).to_f64();
             let c02 = jet.coeff(0, 2).to_f64();
-            let d = { let t = cdiv(c30, c20); (-t.0, -t.1) };
-            let f = { let t = cdiv(c02, c01); (-t.0, -t.1) };
-            let n2 = { let t = cm(d, c10); (c20.0 + t.0, c20.1 + t.1) };
+            let d = {
+                let t = cdiv(c30, c20);
+                (-t.0, -t.1)
+            };
+            let f = {
+                let t = cdiv(c02, c01);
+                (-t.0, -t.1)
+            };
+            let n2 = {
+                let t = cm(d, c10);
+                (c20.0 + t.0, c20.1 + t.1)
+            };
             let ap = {
                 let t = cm(d, c01);
                 let u = cm(f, c10);
@@ -1756,7 +1879,11 @@ mod tests {
                         assert!(
                             integ <= tol_log2,
                             "[{}] skip {} block ({} zeros): q-zero integrity 2^{:.1} (rel {:.2e})",
-                            name, lvl.skip, zeros.len(), integ, integ.exp2()
+                            name,
+                            lvl.skip,
+                            zeros.len(),
+                            integ,
+                            integ.exp2()
                         );
                         checked += 1;
                     }
@@ -1796,8 +1923,7 @@ mod tests {
             let dq03 = q2[jet_idx(0, 3)].sub(want_q03);
             assert!(
                 dq03.is_zero()
-                    || dq03.log2_mag().unwrap()
-                        < want_q03.log2_mag().unwrap_or(0.0) - 40.0,
+                    || dq03.log2_mag().unwrap() < want_q03.log2_mag().unwrap_or(0.0) - 40.0,
                 "[{}] q03 closed form",
                 name
             );
@@ -1805,13 +1931,7 @@ mod tests {
     }
 
     // Exact block walk w ← 2Z·w + w² + c in extended-exponent arithmetic.
-    fn exact_block_walk(
-        orbit: &[(f64, f64)],
-        first: usize,
-        skip: usize,
-        z0: CFe,
-        c: CFe,
-    ) -> CFe {
+    fn exact_block_walk(orbit: &[(f64, f64)], first: usize, skip: usize, z0: CFe, c: CFe) -> CFe {
         let mut w = z0;
         for j in 0..skip {
             let (zx, zy) = orbit[first + j];
@@ -1828,7 +1948,12 @@ mod tests {
         max_iter: usize,
         eps: f64,
         c_max: f64,
-    ) -> Option<(Vec<(f64, f64)>, Vec<MobiusLevel>, MobiusBoundsTable, Vec<Vec<f64>>)> {
+    ) -> Option<(
+        Vec<(f64, f64)>,
+        Vec<MobiusLevel>,
+        MobiusBoundsTable,
+        Vec<Vec<f64>>,
+    )> {
         let orbit = ref_orbit_f64(cx, cy, max_iter);
         if orbit.len() <= max_iter {
             return None;
@@ -1851,8 +1976,7 @@ mod tests {
                 ("cusp", -0.75, 0.0),
                 ("period2", -1.25, 0.0),
             ] {
-                let Some((orbit, levels, _bounds, radii)) =
-                    harness(cx, cy, 4096, eps, c_max)
+                let Some((orbit, levels, _bounds, radii)) = harness(cx, cy, 4096, eps, c_max)
                 else {
                     panic!("[{}] reference escaped", name);
                 };
@@ -1879,7 +2003,11 @@ mod tests {
                         ] {
                             let x_log2 = log2_r + fx.log2();
                             let x = fe_exp2(x_log2);
-                            let z = CFe { x: x.x * ph.cos(), y: x.x * ph.sin(), e: x.e };
+                            let z = CFe {
+                                x: x.x * ph.cos(),
+                                y: x.x * ph.sin(),
+                                e: x.e,
+                            };
                             let cmag = fe_exp2(log2_c_max + fc.log2());
                             let c = CFe {
                                 x: cmag.x * (ph * 1.7).cos(),
@@ -1889,7 +2017,9 @@ mod tests {
                             let (applied, _, _) = mobius_apply(&blk.m, z, c);
                             let exact = exact_block_walk(&orbit, first, lvl.skip, z, c);
                             let err = applied.sub(exact);
-                            let Some(err_log2) = err.log2_mag() else { continue };
+                            let Some(err_log2) = err.log2_mag() else {
+                                continue;
+                            };
                             // The (V) certificate: err ≤ ε·(|A|·r + |B|·c_max)
                             // for EVERY |z| ≤ r. The tighter |z|-scaled form
                             // holds at the boundary (fx ≈ 1) but is not implied
@@ -1898,13 +2028,20 @@ mod tests {
                             // referees those). Assert the |z|-scaled budget at
                             // the boundary sample, the certified budget inside.
                             let scale_x = if fx > 0.9 { x_log2 } else { log2_r };
-                            let budget =
-                                lse2(&[la + scale_x, lb + log2_c_max]) + eps.log2();
+                            let budget = lse2(&[la + scale_x, lb + log2_c_max]) + eps.log2();
                             assert!(
                                 err_log2 <= budget + 1e-6,
                                 "[{}] eps={:e} c_max={:e} skip {} slot {} fx={} fc={}: \
                                  err 2^{:.2} > budget 2^{:.2}",
-                                name, eps, c_max, lvl.skip, slot, fx, fc, err_log2, budget
+                                name,
+                                eps,
+                                c_max,
+                                lvl.skip,
+                                slot,
+                                fx,
+                                fc,
+                                err_log2,
+                                budget
                             );
                         }
                     }
@@ -1918,7 +2055,11 @@ mod tests {
                 assert!(
                     positive * 8 > solved,
                     "[{}] eps={:e} c_max={:e}: radius population collapsed ({}/{})",
-                    name, eps, c_max, positive, solved
+                    name,
+                    eps,
+                    c_max,
+                    positive,
+                    solved
                 );
             }
         }
@@ -1937,7 +2078,10 @@ mod tests {
             if m > 0.0 {
                 let bits = m.to_bits();
                 let be = ((bits >> 52) & 0x7ff) as i64 - 1023;
-                (f64::from_bits((bits & !(0x7ffu64 << 52)) | (1023u64 << 52)), be)
+                (
+                    f64::from_bits((bits & !(0x7ffu64 << 52)) | (1023u64 << 52)),
+                    be,
+                )
             } else {
                 (0.0, i64::MIN / 2)
             }
@@ -1973,7 +2117,10 @@ mod tests {
                             assert!(
                                 log2_m <= 0.0 + 1e-9,
                                 "[{}] skip {} rung {}: M 2^{:.2} > 0.5 despite ρ<0.5",
-                                name, lvl.skip, s, log2_m
+                                name,
+                                lvl.skip,
+                                s,
+                                log2_m
                             );
                             // Sample the true block map on the polydisc boundary
                             // and interior; |w_out| must not exceed M.
@@ -2009,7 +2156,10 @@ mod tests {
                 }
             }
         }
-        println!("polydisc invariant checked on {} (block, rung) polydiscs", checked);
+        println!(
+            "polydisc invariant checked on {} (block, rung) polydiscs",
+            checked
+        );
         assert!(checked > 200, "too few polydiscs exercised ({})", checked);
     }
 
@@ -2024,11 +2174,12 @@ mod tests {
         // would break; it stays green.
         let eps = 1e-6_f64;
         let c_max = 1e-9_f64;
-        for (name, cx, cy) in
-            [("feigenbaum", -1.401155_f64, 0.0_f64), ("cusp", -0.75, 0.0), ("period2", -1.25, 0.0)]
-        {
-            let Some((_orbit, levels, bounds, radii)) = harness(cx, cy, 2048, eps, c_max)
-            else {
+        for (name, cx, cy) in [
+            ("feigenbaum", -1.401155_f64, 0.0_f64),
+            ("cusp", -0.75, 0.0),
+            ("period2", -1.25, 0.0),
+        ] {
+            let Some((_orbit, levels, bounds, radii)) = harness(cx, cy, 2048, eps, c_max) else {
                 panic!("[{}] escaped", name);
             };
             for (li, lvl) in levels.iter().enumerate() {
@@ -2045,7 +2196,11 @@ mod tests {
                         (got == f64::NEG_INFINITY && formula == f64::NEG_INFINITY)
                             || (got - formula).abs() < 1e-12,
                         "[{}] skip {} slot {}: built {} != formula {}",
-                        name, lvl.skip, s, got, formula
+                        name,
+                        lvl.skip,
+                        s,
+                        got,
+                        formula
                     );
                 }
             }
@@ -2080,11 +2235,18 @@ mod tests {
                         let b = &bounds.per_level[li][s];
                         assert!(
                             mobius_v_certified_at(
-                                blk, b, &bounds, eps, log2_c_max,
+                                blk,
+                                b,
+                                &bounds,
+                                eps,
+                                log2_c_max,
                                 f64::NEG_INFINITY,
                             ),
                             "[{}] skip {} slot {}: (V) fails at x = 0 under radius 2^{:.2}",
-                            name, lvl.skip, s, r
+                            name,
+                            lvl.skip,
+                            s,
+                            r
                         );
                         // 24 geometric samples spanning 40 log2 units up to r.
                         for k in 0..=24 {
@@ -2092,7 +2254,11 @@ mod tests {
                             assert!(
                                 mobius_v_certified_at(blk, b, &bounds, eps, log2_c_max, x),
                                 "[{}] skip {} slot {}: (V) fails at 2^{:.2} inside [0, 2^{:.2}]",
-                                name, lvl.skip, s, x, r
+                                name,
+                                lvl.skip,
+                                s,
+                                x,
+                                r
                             );
                             checked += 1;
                         }
@@ -2185,8 +2351,16 @@ mod tests {
                 2.0 * (zx * zx + zy * zy).sqrt()
             })
             .fold(f64::INFINITY, f64::min);
-        println!("min |2Z| over steps {}..{} = {:.3e}", first, first + skip, min_2z);
-        assert!(min_2z < 1e-2, "block does not straddle the near-critical step");
+        println!(
+            "min |2Z| over steps {}..{} = {:.3e}",
+            first,
+            first + skip,
+            min_2z
+        );
+        assert!(
+            min_2z < 1e-2,
+            "block does not straddle the near-critical step"
+        );
         let mut jet = jet_seed(orbit[first].0, orbit[first].1);
         for i in first + 1..first + skip {
             jet = jet_compose(&jet, &jet_seed(orbit[i].0, orbit[i].1));
@@ -2211,15 +2385,24 @@ mod tests {
             );
         }
         // The historical numbers: plain fails ε by ~3 decades, c+ passes.
-        assert!(errs[0].0 > 1e-10, "plain Möbius unexpectedly good: {:.3e}", errs[0].0);
+        assert!(
+            errs[0].0 > 1e-10,
+            "plain Möbius unexpectedly good: {:.3e}",
+            errs[0].0
+        );
         // F-form: the residual sits at the f64 rounding floor, 3 decades under
         // the 5-coefficient form's 1.3e-12 on this block.
-        assert!(errs[0].1 < 1e-14, "Möbius-c+ above the rounding floor: {:.3e}", errs[0].1);
+        assert!(
+            errs[0].1 < 1e-14,
+            "Möbius-c+ above the rounding floor: {:.3e}",
+            errs[0].1
+        );
         // Deeper |c| must never be worse (floor-limited, no strict c² scaling).
         assert!(
             errs[1].1 <= errs[0].1 * 1.5,
             "c+ residual grows with depth: {:.3e} → {:.3e}",
-            errs[0].1, errs[1].1
+            errs[0].1,
+            errs[1].1
         );
     }
 
@@ -2239,15 +2422,13 @@ mod tests {
             }
             let m = mobius_from_jet(&jet);
             let q = mobius_q(&jet, &m);
-            let predicted = q[jet_idx(3, 0)].log2_mag().unwrap()
-                - m.a.log2_mag().unwrap();
+            let predicted = q[jet_idx(3, 0)].log2_mag().unwrap() - m.a.log2_mag().unwrap();
             let c0 = CFe::ZERO;
             for x in [1e-6_f64, 3e-7] {
                 let z = CFe::from_c(x, 0.0);
                 let (applied, _, _) = mobius_apply(&m, z, c0);
                 let exact = exact_block_walk(&orbit, first, len, z, c0);
-                let rel = applied.sub(exact).log2_mag().unwrap()
-                    - exact.log2_mag().unwrap();
+                let rel = applied.sub(exact).log2_mag().unwrap() - exact.log2_mag().unwrap();
                 let measured = rel - 2.0 * x.log2();
                 println!(
                     "L={:>3} x={:e}: err_rel/x² = {:.6} (predicted |q₃₀|/|c₁₀| = {:.6})",
@@ -2261,7 +2442,10 @@ mod tests {
                 assert!(
                     (measured - predicted).abs() < 0.01,
                     "L={} x={}: constant 2^{:.4} vs predicted 2^{:.4}",
-                    len, x, measured, predicted
+                    len,
+                    x,
+                    measured,
+                    predicted
                 );
             }
         }
@@ -2289,7 +2473,12 @@ mod tests {
                 // preperiodic (repelling), so its f64 orbit drifts and escapes
                 // at iteration 446 — its harness run stays below that.
                 for (name, cx, cy, max_iter) in [
-                    ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64, 2500usize),
+                    (
+                        "seahorse",
+                        -0.743643887037151_f64,
+                        0.131825904205330_f64,
+                        2500usize,
+                    ),
                     ("near-parab", -0.7499, 0.0001, 2500),
                     ("spiral", -0.77568377, 0.13646737, 400),
                     ("feigenbaum", -1.401155, 0.0, 2500),
@@ -2354,18 +2543,27 @@ mod tests {
                     } else if mismatches > 0 {
                         println!(
                             "  [{}] {} escape-time shifts at coarse eps (N·ε = {:.2}) — allowed",
-                            name, mismatches, max_iter as f64 * eps
+                            name,
+                            mismatches,
+                            max_iter as f64 * eps
                         );
                     }
                     assert!(
                         worst <= bound,
                         "[{}] eps={:e} c={:e}: ρ_N {:.3e} > 5·N·ε {:.3e}",
-                        name, eps, c_max, worst, bound
+                        name,
+                        eps,
+                        c_max,
+                        worst,
+                        bound
                     );
                     assert!(
                         skipping > 12,
                         "[{}] eps={:e} c={:e}: blocks barely used ({}/24)",
-                        name, eps, c_max, skipping
+                        name,
+                        eps,
+                        c_max,
+                        skipping
                     );
                 }
             }
@@ -2396,8 +2594,7 @@ mod tests {
             let bounds = mobius_build_bounds(&levels, &orbit, c_max.log2());
             let plain_bounds = mobius_build_bounds(&plain_levels, &orbit, c_max.log2());
             let radii = mobius_build_radii(&levels, &bounds, eps, c_max.log2());
-            let plain_radii =
-                mobius_build_radii(&plain_levels, &plain_bounds, eps, c_max.log2());
+            let plain_radii = mobius_build_radii(&plain_levels, &plain_bounds, eps, c_max.log2());
             // Per-block radius dominance (the "by construction" claim, verified).
             let (mut dominated, mut total_finite) = (0usize, 0usize);
             for (li, lvl) in radii.iter().enumerate() {
@@ -2461,7 +2658,9 @@ mod tests {
             assert!(
                 dead * 4 <= finite,
                 "[{}] too many blocks below the delta band ({}/{})",
-                name, dead, finite
+                name,
+                dead,
+                finite
             );
         }
     }
@@ -2474,8 +2673,7 @@ mod tests {
         // uncertified blocks with −∞, and carry a correct f32-safe flag.
         let eps = 1e-6_f64;
         let c_max = 1e-9_f64;
-        let Some((_orbit, levels, _bounds, radii)) =
-            harness(-1.401155, 0.0, 2048, eps, c_max)
+        let Some((_orbit, levels, _bounds, radii)) = harness(-1.401155, 0.0, 2048, eps, c_max)
         else {
             panic!("reference escaped");
         };
@@ -2506,7 +2704,10 @@ mod tests {
                     assert!(
                         (r.r_log2 as f64 - want).abs() < 1e-3,
                         "skip {} slot {}: r {} vs {}",
-                        lvl.skip, slot, r.r_log2, want
+                        lvl.skip,
+                        slot,
+                        r.r_log2,
+                        want
                     );
                 } else {
                     assert_eq!(r.r_log2, f32::NEG_INFINITY);
@@ -2532,7 +2733,11 @@ mod tests {
                             assert!(
                                 (l - want).abs() < 1e-5,
                                 "skip {} slot {} {}: log2 {} vs {}",
-                                lvl.skip, slot, name, l, want
+                                lvl.skip,
+                                slot,
+                                name,
+                                l,
+                                want
                             );
                         }
                     }
@@ -2541,14 +2746,21 @@ mod tests {
                     }
                 }
             }
-            assert_eq!(d.max_r3_log2, max_r, "level skip {} max_r directory", lvl.skip);
+            assert_eq!(
+                d.max_r3_log2, max_r,
+                "level skip {} max_r directory",
+                lvl.skip
+            );
         }
         // A degenerate block serializes to −∞ radius and zero coefficients.
         let dg = MobiusBlock {
             m: mobius_from_jet(&jet_seed(0.0, 0.0)),
             log2_q: [f64::NEG_INFINITY; JET_NCOEFF],
         };
-        let lv = vec![MobiusLevel { skip: 4, blocks: vec![dg] }];
+        let lv = vec![MobiusLevel {
+            skip: 4,
+            blocks: vec![dg],
+        }];
         let (r0, _) = mobius_serialize_radii(&lv, &[vec![f64::NEG_INFINITY]]);
         assert_eq!(r0[0].r_log2, f32::NEG_INFINITY);
     }
@@ -2563,7 +2775,12 @@ mod tests {
     #[ignore] // diagnostic — run with -- --ignored --nocapture
     fn mobius_vs_pade_user_regime_census() {
         let max_iter = 3000usize;
-        for (eps, c_max) in [(1e-3_f64, 1e-5_f64), (1e-4, 1e-5), (1e-4, 1e-9), (1e-6, 1e-9)] {
+        for (eps, c_max) in [
+            (1e-3_f64, 1e-5_f64),
+            (1e-4, 1e-5),
+            (1e-4, 1e-9),
+            (1e-6, 1e-9),
+        ] {
             for (name, cx, cy) in [
                 ("cusp", -0.75_f64, 0.0_f64),
                 ("period2", -1.25, 0.0),
@@ -2573,8 +2790,7 @@ mod tests {
                 if orbit.len() <= max_iter {
                     continue;
                 }
-                let pade_levels =
-                    crate::bench_build_levels(&orbit, eps, true, 1 << 18);
+                let pade_levels = crate::bench_build_levels(&orbit, eps, true, 1 << 18);
                 let levels = mobius_build_levels(&orbit, 1 << 18);
                 let bounds = mobius_build_bounds(&levels, &orbit, c_max.log2());
                 let radii = mobius_build_radii(&levels, &bounds, eps, c_max.log2());
@@ -2681,7 +2897,9 @@ mod tests {
                     let gt = mobius_run_pixel(&[], &[], &orbit_gt, dc, nn);
                     let dp = mobius_run_pixel(&[], &[], &orbit_p, dc, nn);
                     // der (dz/dc) relative error.
-                    let dg = (gt.der.0 * gt.der.0 + gt.der.1 * gt.der.1).sqrt().max(1e-300);
+                    let dg = (gt.der.0 * gt.der.0 + gt.der.1 * gt.der.1)
+                        .sqrt()
+                        .max(1e-300);
                     let dd = ((dp.der.0 - gt.der.0).powi(2) + (dp.der.1 - gt.der.1).powi(2)).sqrt();
                     der_err = der_err.max(dd / dg);
                     // DE = |z|·ln|z| / |der|; compare the estimator itself.
@@ -2741,7 +2959,14 @@ mod tests {
                 let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
                 let dc = (t * cm * 0.7, 0.37 * t * cm);
                 applied_lengths_mobius(&levels, &radii, &orbit, dc, max_iter, &mut hist_mob);
-                applied_lengths_pade(&pade_levels, &orbit, dc, max_iter, &mut hist_mob_noop(), &mut hist_pade);
+                applied_lengths_pade(
+                    &pade_levels,
+                    &orbit,
+                    dc,
+                    max_iter,
+                    &mut hist_mob_noop(),
+                    &mut hist_pade,
+                );
             }
             let sum = |h: &std::collections::BTreeMap<usize, u64>| -> (u64, u64) {
                 let apps: u64 = h.values().filter(|_| true).sum();
@@ -2776,7 +3001,14 @@ mod tests {
                         continue;
                     }
                     refused += 1;
-                    let term = binding_term(blk, &bounds.per_level[li][s], &bounds, eps, log2_c_max, probe);
+                    let term = binding_term(
+                        blk,
+                        &bounds.per_level[li][s],
+                        &bounds,
+                        eps,
+                        log2_c_max,
+                        probe,
+                    );
                     *census.entry(term).or_insert(0) += 1;
                 }
             }
@@ -2804,14 +3036,17 @@ mod tests {
     ) {
         let orbit_len = orbit.len();
         let cfe = CFe::from_c(dc.0, dc.1);
-        let (mut dz, mut ref_i, mut iter, mut steps) =
-            ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
+        let (mut dz, mut ref_i, mut iter, mut steps) = ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
         while iter < max_iter {
             let mut applied = false;
             if ref_i > 0 {
                 let shifted = ref_i - 1;
                 let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                let log2_dz = if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                let log2_dz = if dz2 > 0.0 {
+                    0.5 * dz2.log2()
+                } else {
+                    f64::NEG_INFINITY
+                };
                 for (li, lvl) in levels.iter().enumerate().rev() {
                     if shifted % lvl.skip != 0 {
                         continue;
@@ -2826,7 +3061,8 @@ mod tests {
                     if !(log2_dz < radii[li][slot]) {
                         continue;
                     }
-                    let (phi, _, _) = mobius_apply(&lvl.blocks[slot].m, CFe::from_c(dz.0, dz.1), cfe);
+                    let (phi, _, _) =
+                        mobius_apply(&lvl.blocks[slot].m, CFe::from_c(dz.0, dz.1), cfe);
                     let cand = phi.to_f64();
                     let zi = orbit[ref_i + lvl.skip];
                     let candz = (zi.0 + cand.0, zi.1 + cand.1);
@@ -2843,7 +3079,10 @@ mod tests {
             }
             if !applied {
                 let z = orbit[ref_i];
-                let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+                let m2 = (
+                    2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                    2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+                );
                 let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
                 dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
                 ref_i += 1;
@@ -2882,8 +3121,7 @@ mod tests {
         // Mirrors bench_run_pixel but records applied skip lengths.
         let orbit_len = orbit.len();
         let dc_mag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
-        let (mut dz, mut ref_i, mut iter, mut steps) =
-            ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
+        let (mut dz, mut ref_i, mut iter, mut steps) = ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
         while iter < max_iter {
             let mut applied = false;
             if ref_i != 0 {
@@ -2922,7 +3160,10 @@ mod tests {
             }
             if !applied {
                 let z = orbit[ref_i];
-                let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+                let m2 = (
+                    2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                    2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+                );
                 let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
                 dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
                 ref_i += 1;
@@ -2975,7 +3216,11 @@ mod tests {
             }
             let t = l + j as f64 * log2_c_max;
             let slot = &mut cpow[i as usize];
-            *slot = if *slot == f64::NEG_INFINITY { t } else { lse2(&[*slot, t]) };
+            *slot = if *slot == f64::NEG_INFINITY {
+                t
+            } else {
+                lse2(&[*slot, t])
+            };
         }
         // Best candidate = the one giving the smallest REST/DEN excess at x
         // (its DEN passes and its tail is finite).
@@ -3031,14 +3276,24 @@ mod tests {
                     .log2();
             let tail_lin = {
                 let e = tail_log2 - rhs;
-                if e > -62.0 && e < 62.0 { e.exp2() } else if e >= 62.0 { f64::INFINITY } else { 0.0 }
+                if e > -62.0 && e < 62.0 {
+                    e.exp2()
+                } else if e >= 62.0 {
+                    f64::INFINITY
+                } else {
+                    0.0
+                }
             };
             let total = q_lin + tail_lin;
             let excess = total / den;
             if excess < best_excess {
                 best_excess = excess;
                 best_term = if !total.is_finite() {
-                    if q_lin.is_finite() { "cauchy" } else { "storedq" }
+                    if q_lin.is_finite() {
+                        "cauchy"
+                    } else {
+                        "storedq"
+                    }
                 } else if tail_lin > q_lin {
                     "cauchy"
                 } else if worst_deg == 0 {
@@ -3092,7 +3347,11 @@ mod tests {
             }
             let t = l + j as f64 * log2_c_max;
             let slot = &mut cpow[i as usize];
-            *slot = if *slot == f64::NEG_INFINITY { t } else { lse2(&[*slot, t]) };
+            *slot = if *slot == f64::NEG_INFINITY {
+                t
+            } else {
+                lse2(&[*slot, t])
+            };
         }
         let mut best: Option<f64> = None;
         for c in 0..MOBIUS_NCAND {
@@ -3203,7 +3462,11 @@ mod tests {
         }
         let d = jet.coeff(k + 1, 0).div(ck0).neg();
         let b = jet.coeff(0, 1);
-        let f = if b.is_zero() { CFe::ZERO } else { jet.coeff(0, 2).div(b).neg() };
+        let f = if b.is_zero() {
+            CFe::ZERO
+        } else {
+            jet.coeff(0, 2).div(b).neg()
+        };
         let c11 = jet.coeff(1, 1);
         let ap = c11.add(d.mul(b)).add(f.mul(c10));
         let dp = jet
@@ -3212,9 +3475,19 @@ mod tests {
             .add(f.mul(jet.coeff(2, 0)))
             .div(c10)
             .neg();
-        let nhi: Vec<CFe> =
-            (2..=k).map(|i| jet.coeff(i, 0).add(d.mul(jet.coeff(i - 1, 0)))).collect();
-        let m = MobiusCPlus { a: c10, b, d, ap, dp, f, n2: CFe::ZERO, degenerate: false };
+        let nhi: Vec<CFe> = (2..=k)
+            .map(|i| jet.coeff(i, 0).add(d.mul(jet.coeff(i - 1, 0))))
+            .collect();
+        let m = MobiusCPlus {
+            a: c10,
+            b,
+            d,
+            ap,
+            dp,
+            f,
+            n2: CFe::ZERO,
+            degenerate: false,
+        };
         // Compensated remainder moduli: q_ij = c_ij + D·c_{i−1,j} + D'·c_{i−1,j−1}
         // + F·c_{i,j−1} − N slots. Constructed zeros: (i,0) i ≤ K+1, (0,1),
         // (1,1), (2,1), (0,2) when F is live.
@@ -3275,7 +3548,11 @@ mod tests {
             if ref_i > 0 {
                 let shifted = ref_i - 1;
                 let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                let log2_dz = if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                let log2_dz = if dz2 > 0.0 {
+                    0.5 * dz2.log2()
+                } else {
+                    f64::NEG_INFINITY
+                };
                 for (li, lvl) in levels.iter().enumerate().rev() {
                     if shifted % lvl.skip != 0 {
                         continue;
@@ -3307,8 +3584,10 @@ mod tests {
             }
             if !applied {
                 let z = orbit[ref_i];
-                let m2 =
-                    (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+                let m2 = (
+                    2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                    2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+                );
                 let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
                 dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
                 ref_i += 1;
@@ -3346,7 +3625,13 @@ mod tests {
             ("cusp", -0.75, 0.0, 1e-3, -5.0),
             ("period2", -1.25, 0.0, 1e-3, -5.0),
             ("cusp", -0.75, 0.0, 1e-6, -9.0),
-            ("seahorse", -0.743643887037151, 0.131825904205330, 1e-4, -10.0),
+            (
+                "seahorse",
+                -0.743643887037151,
+                0.131825904205330,
+                1e-4,
+                -10.0,
+            ),
         ] {
             let log2_c_max = dec * LOG2_10_LOCAL;
             let orbit = ref_orbit_f64(cx, cy, max_iter);
@@ -3376,8 +3661,7 @@ mod tests {
                 let (ps, _, _) = crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
                 t_pade += ps as u64;
                 t_m1 += mobius_run_pixel(&levels1, &radii1, &orbit, dc, max_iter).steps as u64;
-                t_k1 += mobius_run_pixel(&levels_k1, &radii_k1, &orbit, dc, max_iter).steps
-                    as u64;
+                t_k1 += mobius_run_pixel(&levels_k1, &radii_k1, &orbit, dc, max_iter).steps as u64;
             }
             turn_line.push_str(&format!(
                 "turns: pade={} c+[2/1] prod={} ({:.2}x) c+[1/1]={} ({:.2}x)",
@@ -3401,7 +3685,10 @@ mod tests {
                         blocks.push(b);
                         nh.push(n);
                     }
-                    levels_k.push(MobiusLevel { skip: jl.skip, blocks });
+                    levels_k.push(MobiusLevel {
+                        skip: jl.skip,
+                        blocks,
+                    });
                     nhis.push(nh);
                 }
                 let mut bounds_k = mobius_build_bounds(&levels_k, &orbit, log2_c_max);
@@ -3450,7 +3737,10 @@ mod tests {
                     }
                 }
                 gain_decades.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                let med = gain_decades.get(gain_decades.len() / 2).copied().unwrap_or(0.0);
+                let med = gain_decades
+                    .get(gain_decades.len() / 2)
+                    .copied()
+                    .unwrap_or(0.0);
                 let mut t_mk = 0u64;
                 for kpx in 0..16 {
                     let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
@@ -3487,7 +3777,13 @@ mod tests {
             ("cusp", -0.75, 0.0, 1e-3, -5.0),
             ("period2", -1.25, 0.0, 1e-3, -5.0),
             ("cusp", -0.75, 0.0, 1e-6, -9.0),
-            ("seahorse", -0.743643887037151, 0.131825904205330, 1e-4, -10.0),
+            (
+                "seahorse",
+                -0.743643887037151,
+                0.131825904205330,
+                1e-4,
+                -10.0,
+            ),
         ] {
             let log2_c_max = dec * LOG2_10_LOCAL;
             let orbit = ref_orbit_f64(cx, cy, max_iter);
@@ -3534,7 +3830,11 @@ mod tests {
                         continue;
                     }
                     let r_tri = radii[li][s];
-                    let gap = if r_tri.is_finite() { start - r_tri } else { f64::INFINITY };
+                    let gap = if r_tri.is_finite() {
+                        start - r_tri
+                    } else {
+                        f64::INFINITY
+                    };
                     if gap < GAP_LOG2 || walk_steps > STEP_BUDGET {
                         continue;
                     }
@@ -3608,9 +3908,11 @@ mod tests {
                 let med = rs[rs.len() / 2];
                 println!(
                     "    {:>10}: n={:3} recovered={:3} conservatism median 2^{:.1} (×{:.1})",
-                    term, rs.len(),
+                    term,
+                    rs.len(),
                     recovered.get(term).copied().unwrap_or(0),
-                    med, med.exp2()
+                    med,
+                    med.exp2()
                 );
             }
             println!(
@@ -3659,7 +3961,8 @@ mod tests {
                 for kpx in 0..16 {
                     let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
                     let dc = (t * cm * 0.7, 0.37 * t * cm);
-                    let (ps, _, _) = crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
+                    let (ps, _, _) =
+                        crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
                     let m = mobius_run_pixel(&levels, &radii, &orbit, dc, max_iter);
                     t_pade += ps as u64;
                     t_mob += m.steps as u64;
@@ -3706,12 +4009,22 @@ mod tests {
                     .collect()
             })
             .collect();
-        println!("per-level radii (log2 median) at eps={:e} c_max={:e}:", eps, c_max);
+        println!(
+            "per-level radii (log2 median) at eps={:e} c_max={:e}:",
+            eps, c_max
+        );
         for (li, lvl) in levels.iter().enumerate() {
             let med = |v: &Vec<f64>| -> (f64, usize) {
                 let mut f: Vec<f64> = v.iter().cloned().filter(|r| r.is_finite()).collect();
                 f.sort_by(|a, b| a.partial_cmp(b).unwrap());
-                (if f.is_empty() { f64::NEG_INFINITY } else { f[f.len() / 2] }, f.len())
+                (
+                    if f.is_empty() {
+                        f64::NEG_INFINITY
+                    } else {
+                        f[f.len() / 2]
+                    },
+                    f.len(),
+                )
             };
             let (mf, nf) = med(&formula[li]);
             let (mc, nc) = med(&chained[li]);
@@ -3751,8 +4064,11 @@ mod tests {
                 if ref_i > 0 {
                     let shifted = ref_i - 1;
                     let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                    let log2_dz =
-                        if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                    let log2_dz = if dz2 > 0.0 {
+                        0.5 * dz2.log2()
+                    } else {
+                        f64::NEG_INFINITY
+                    };
                     for (li, lvl) in levels.iter().enumerate().rev() {
                         if shifted % lvl.skip != 0 {
                             continue;
@@ -3824,7 +4140,11 @@ mod tests {
 
     fn log2_hint(dz: (f64, f64)) -> f64 {
         let m = (dz.0 * dz.0 + dz.1 * dz.1).sqrt();
-        if m > 0.0 { m.log2() } else { f64::NEG_INFINITY }
+        if m > 0.0 {
+            m.log2()
+        } else {
+            f64::NEG_INFINITY
+        }
     }
 
     // ── Build-time benchmark — cargo test --release mobius_build_time -- --ignored --nocapture
@@ -3878,7 +4198,12 @@ mod tests {
                 continue;
             }
             let levels = build_jet_levels(&orbit, 2, 1 << 18);
-            println!("\n[{}] orbit_len={} levels={}", name, orbit.len(), levels.len());
+            println!(
+                "\n[{}] orbit_len={} levels={}",
+                name,
+                orbit.len(),
+                levels.len()
+            );
             println!(
                 "   {:>7} {:>7} | worst spread AB A' | worst spread D D' | A-B | A-A' | D-D'",
                 "skip", "blocks"
@@ -3998,8 +4323,11 @@ mod tests {
             if ref_i > 0 {
                 let shifted = ref_i - 1;
                 let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                let log2_dz =
-                    if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                let log2_dz = if dz2 > 0.0 {
+                    0.5 * dz2.log2()
+                } else {
+                    f64::NEG_INFINITY
+                };
                 for (li, lvl) in mlv.iter().enumerate().rev() {
                     if shifted % lvl.skip != 0 {
                         continue;
@@ -4108,7 +4436,12 @@ mod tests {
         use crate::jet::{build_jet_levels, jet_build_radii, jet_run_pixel};
         let eps = 1e-12_f64;
         for (name, cx, cy, max_iter) in [
-            ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64, 2500usize),
+            (
+                "seahorse",
+                -0.743643887037151_f64,
+                0.131825904205330_f64,
+                2500usize,
+            ),
             ("near-parab", -0.7499, 0.0001, 2500),
             ("feigenbaum", -1.401155, 0.0, 2500),
             ("spiral", -0.77568377, 0.13646737, 400),
@@ -4173,8 +4506,7 @@ mod tests {
                         emitted += 1;
                         let t = &tiers[li][s];
                         for w in 0..3 {
-                            if t[w].is_finite() && t[w + 1].is_finite() && t[w] > t[w + 1] + 1e-9
-                            {
+                            if t[w].is_finite() && t[w + 1].is_finite() && t[w] > t[w + 1] + 1e-9 {
                                 ladder_viol += 1;
                                 break;
                             }
@@ -4231,14 +4563,19 @@ mod tests {
                     assert!(
                         a_steps as f64 <= st as f64 * 1.02 + 8.0,
                         "[{} c_max={:e}] auto ({} steps) slower than {} ({} steps)",
-                        name, c_max, a_steps, mode, st
+                        name,
+                        c_max,
+                        a_steps,
+                        mode,
+                        st
                     );
                 }
                 if c_max <= 1e-9 {
                     assert!(
                         apps_total > 0,
                         "[{} c_max={:e}] dispatch never applied a block",
-                        name, c_max
+                        name,
+                        c_max
                     );
                 }
             }
@@ -4363,8 +4700,11 @@ mod tests {
         let c30 = jet.coeff(3, 0).to_f64();
         let kt = (c10.0 - 1.0, c10.1);
         if cabs(c30) < 1e-9 {
-            let g =
-                if cabs(c20) > 0.0 { cabs(cdiv(kt, c20)) } else { f64::INFINITY };
+            let g = if cabs(c20) > 0.0 {
+                cabs(cdiv(kt, c20))
+            } else {
+                f64::INFINITY
+            };
             return (g, cabs(c20), cabs(c30));
         }
         let four_c30_kt = cm((4.0 * c30.0, 4.0 * c30.1), kt);
@@ -4416,8 +4756,11 @@ mod tests {
             if ref_i > 0 {
                 let shifted = ref_i - 1;
                 let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                let log2_dz =
-                    if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                let log2_dz = if dz2 > 0.0 {
+                    0.5 * dz2.log2()
+                } else {
+                    f64::NEG_INFINITY
+                };
                 for (li, lvl) in levels.iter().enumerate().rev() {
                     if shifted % lvl.skip != 0 {
                         continue;
@@ -4433,13 +4776,11 @@ mod tests {
                         continue;
                     }
                     let blk = &lvl.blocks[slot];
-                    let (phi, _, _) =
-                        mobius_apply(&blk.m, CFe::from_c(dz.0, dz.1), cfe);
+                    let (phi, _, _) = mobius_apply(&blk.m, CFe::from_c(dz.0, dz.1), cfe);
                     let cand = phi.to_f64();
                     let zi = orbit[ref_i + lvl.skip];
                     let candz = (zi.0 + cand.0, zi.1 + cand.1);
-                    if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2
-                    {
+                    if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 {
                         continue;
                     }
                     dz = cand;
@@ -4575,8 +4916,10 @@ mod tests {
             .enumerate()
             .map(|(k, c)| ((k as f64 + 1.0) * c.0, (k as f64 + 1.0) * c.1))
             .collect();
-        let rhos: Vec<C> =
-            roots.iter().map(|r| cdiv((1.0, 0.0), poly_eval(&dp, *r))).collect();
+        let rhos: Vec<C> = roots
+            .iter()
+            .map(|r| cdiv((1.0, 0.0), poly_eval(&dp, *r)))
+            .collect();
         if rhos.iter().any(|r| !r.0.is_finite() || !r.1.is_finite()) {
             return None;
         }
@@ -4782,8 +5125,11 @@ mod tests {
         let (_n0, j0) = entry?;
         let lin = gate_lin(&cycle, j0, q);
         let full = gate_series(&lin, 8);
-        let ps: [Vec<C>; 3] =
-            [gate_log_flow(&full, 3), gate_log_flow(&full, 5), gate_log_flow(&full, 8)];
+        let ps: [Vec<C>; 3] = [
+            gate_log_flow(&full, 3),
+            gate_log_flow(&full, 5),
+            gate_log_flow(&full, 8),
+        ];
         let psis = [flow_psi(&ps[0])?, flow_psi(&ps[1])?, flow_psi(&ps[2])?];
         // Transit with the exact recentered steps.
         let mut u = (zx - cycle[j0].0, zy - cycle[j0].1);
@@ -4897,8 +5243,7 @@ mod tests {
                 };
                 let eig_rel = {
                     let dk = cdiv(csub(powc(l1, k), powc(l2, k)), csub(l1, l2));
-                    let dk1 =
-                        cdiv(csub(powc(l1, k - 1), powc(l2, k - 1)), csub(l1, l2));
+                    let dk1 = cdiv(csub(powc(l1, k - 1), powc(l2, k - 1)), csub(l1, l2));
                     let q = cm(det, dk1);
                     let ge = cdiv(
                         cadd(cm(csub(cm(dk, ae), q), delta0), cm(dk, bc)),
@@ -4909,10 +5254,7 @@ mod tests {
                 // §17 w-form: fixed points of g, w ↦ κ^k·w.
                 let w_rel = {
                     let b = csub(ff, ae);
-                    let d2 = csqrt(cadd(
-                        cm(b, b),
-                        (4.0 * cm(de, bc).0, 4.0 * cm(de, bc).1),
-                    ));
+                    let d2 = csqrt(cadd(cm(b, b), (4.0 * cm(de, bc).0, 4.0 * cm(de, bc).1)));
                     let den2 = (2.0 * de.0, 2.0 * de.1);
                     let za = cdiv(cadd((-b.0, -b.1), d2), den2);
                     let zr = cdiv(csub((-b.0, -b.1), d2), den2);
@@ -4932,7 +5274,9 @@ mod tests {
                 assert!(
                     rel < 1e-12,
                     "stable power drifted: dc={:?} k={} rel {:.2e}",
-                    dc, k, rel
+                    dc,
+                    k,
+                    rel
                 );
             }
         }
@@ -4954,13 +5298,7 @@ mod tests {
     /// corrector on the per-hop increment, |Δu| ≤ 0.2·distance-to-nearest-
     /// pole so every log stays on the principal branch). None ⇒ caller falls
     /// back to ordinary iteration.
-    fn gate_jump(
-        ps: &[C],
-        psi: &FlowPsi,
-        u0: C,
-        r_exit: f64,
-        k_max: u64,
-    ) -> Option<(u64, C)> {
+    fn gate_jump(ps: &[C], psi: &FlowPsi, u0: C, r_exit: f64, k_max: u64) -> Option<(u64, C)> {
         if k_max == 0 {
             return None;
         }
@@ -5072,8 +5410,7 @@ mod tests {
                         j0 = j;
                     }
                 }
-                let k_max =
-                    ((max_iter - iter) / m).min((span.1.min(orbit_len - 1) - ref_i) / m);
+                let k_max = ((max_iter - iter) / m).min((span.1.min(orbit_len - 1) - ref_i) / m);
                 if bd < r_entry && k_max >= 4 {
                     let ent = psis[j0].get_or_insert_with(|| {
                         let lin = gate_lin(&cycle, j0, q);
@@ -5088,10 +5425,7 @@ mod tests {
                                 iter += k as usize * m;
                                 ref_i += k as usize * m;
                                 let zi = orbit[ref_i];
-                                dz = (
-                                    cycle[j0].0 + un.0 - zi.0,
-                                    cycle[j0].1 + un.1 - zi.1,
-                                );
+                                dz = (cycle[j0].0 + un.0 - zi.0, cycle[j0].1 + un.1 - zi.1);
                                 st.jumps += 1;
                                 jumped = true;
                             }
@@ -5106,8 +5440,11 @@ mod tests {
                 if ref_i > 0 {
                     let shifted = ref_i - 1;
                     let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                    let log2_dz =
-                        if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                    let log2_dz = if dz2 > 0.0 {
+                        0.5 * dz2.log2()
+                    } else {
+                        f64::NEG_INFINITY
+                    };
                     for (li, lvl) in levels.iter().enumerate().rev() {
                         if shifted % lvl.skip != 0 {
                             continue;
@@ -5123,14 +5460,11 @@ mod tests {
                             continue;
                         }
                         let blk = &lvl.blocks[slot];
-                        let (phi, _, _) =
-                            mobius_apply(&blk.m, CFe::from_c(dz.0, dz.1), cfe);
+                        let (phi, _, _) = mobius_apply(&blk.m, CFe::from_c(dz.0, dz.1), cfe);
                         let cand = phi.to_f64();
                         let zi = orbit[ref_i + lvl.skip];
                         let candz = (zi.0 + cand.0, zi.1 + cand.1);
-                        if lvl.skip > 1
-                            && candz.0 * candz.0 + candz.1 * candz.1 > bailout2
-                        {
+                        if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 {
                             continue;
                         }
                         dz = cand;
@@ -5240,11 +5574,18 @@ mod tests {
                 let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
                 let dc = (t * cmx * 0.7, 0.37 * t * cmx);
                 let pr = fatou_run_pixel(
-                    &levels, &radii, &orbit, span, name, 2, (cx, cy), dc,
-                    max_iter, r_entry,
+                    &levels,
+                    &radii,
+                    &orbit,
+                    span,
+                    name,
+                    2,
+                    (cx, cy),
+                    dc,
+                    max_iter,
+                    r_entry,
                 );
-                let (ps, _, _) =
-                    crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
+                let (ps, _, _) = crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
                 let mb = mobius_run_pixel(&levels, &radii, &orbit, dc, max_iter);
                 t_pade += ps as u64;
                 t_mob += mb.steps as u64;
@@ -5275,12 +5616,15 @@ mod tests {
             assert!(
                 (t_proto as f64) < (t_pade as f64) * 2.0,
                 "[{}] prototype ({} turns) not under 2x pade ({})",
-                name, t_proto, t_pade
+                name,
+                t_proto,
+                t_pade
             );
             assert!(
                 worst_diter <= 2,
                 "[{}] escape-iteration drift {} beyond the ε budget",
-                name, worst_diter
+                name,
+                worst_diter
             );
 
             // Long escape probes: table-less, gate only, true exits.
@@ -5309,7 +5653,15 @@ mod tests {
             }
             for dcp in [(0.0, 3e-5_f64), (0.0, -3e-5), (0.0, 1e-4), (2e-5, 2e-5)] {
                 let pr = fatou_run_pixel(
-                    &[], &[], &lorbit, lspan, name, 2, (cx, cy), dcp, long_iter,
+                    &[],
+                    &[],
+                    &lorbit,
+                    lspan,
+                    name,
+                    2,
+                    (cx, cy),
+                    dcp,
+                    long_iter,
                     r_entry,
                 );
                 let (e_esc, e_iter) = exact_pixel((cx + dcp.0, cy + dcp.1), long_iter);
@@ -5345,7 +5697,14 @@ mod tests {
         for (name, cx, cy, eps, dec, coarse) in [
             ("cusp", -0.75_f64, 0.0_f64, 1e-3_f64, -5.0_f64, true),
             ("period2", -1.25, 0.0, 1e-3, -5.0, true),
-            ("seahorse", -0.743643887037151, 0.131825904205330, 1e-4, -10.0, false),
+            (
+                "seahorse",
+                -0.743643887037151,
+                0.131825904205330,
+                1e-4,
+                -10.0,
+                false,
+            ),
             ("feigenbaum", -1.401155, 0.0, 1e-6, -9.0, false),
         ] {
             let log2_c_max = dec * LOG2_10_LOCAL;
@@ -5386,8 +5745,7 @@ mod tests {
                     continue; // noise span — never verified
                 }
                 let samples = [s0, (s0 + s1) / 2, (s1 - 1).max(s0)];
-                let (mut gaps, mut c20s, mut c30s) =
-                    (Vec::new(), Vec::new(), Vec::new());
+                let (mut gaps, mut c20s, mut c30s) = (Vec::new(), Vec::new(), Vec::new());
                 for &n in &samples {
                     if let Some(m) = gate[n] {
                         if n + m < orbit.len() {
@@ -5479,8 +5837,7 @@ mod tests {
                 let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
                 let dc = (t * cmx * 0.7, 0.37 * t * cmx);
                 let st = gate_pixel_turns(&levels, &radii, &orbit, &vg, dc, max_iter);
-                let (ps, _, _) =
-                    crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
+                let (ps, _, _) = crate::bench_run_pixel(&pade_levels, &orbit, dc, max_iter, true);
                 t_pade += ps as u64;
                 agg.turns += st.turns;
                 agg.turns_in_gate += st.turns_in_gate;
@@ -5520,9 +5877,9 @@ mod tests {
                     for kpx in [0usize, 15] {
                         let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
                         let dc = (t * cmx * 0.7, 0.37 * t * cmx);
-                        let Some(r) = gate_transit_residual(
-                            name, (cx, cy), dc, 2, max_iter, r_gate,
-                        ) else {
+                        let Some(r) =
+                            gate_transit_residual(name, (cx, cy), dc, 2, max_iter, r_gate)
+                        else {
                             println!(
                                 "    r={:.2} px{:2}: no entry (or Ψ degenerate)",
                                 r_gate, kpx
@@ -5549,16 +5906,11 @@ mod tests {
                 // transits: K to exit is finite and the exit conversion
                 // happens at |u| = r_gate where |P| is NOT small. These are
                 // the §18 value-transport numbers.
-                for dcp in [
-                    (0.0, 0.7e-5_f64),
-                    (0.0, -0.7e-5),
-                    (0.0, 3e-5),
-                    (0.0, 1e-4),
-                ] {
+                for dcp in [(0.0, 0.7e-5_f64), (0.0, -0.7e-5), (0.0, 3e-5), (0.0, 1e-4)] {
                     for r_gate in [0.02_f64, 0.01] {
-                        let Some(r) = gate_transit_residual(
-                            name, (cx, cy), dcp, 2, max_iter, r_gate,
-                        ) else {
+                        let Some(r) =
+                            gate_transit_residual(name, (cx, cy), dcp, 2, max_iter, r_gate)
+                        else {
                             println!(
                                 "    esc dc=({:.1e},{:.1e}) r={:.2}: no entry",
                                 dcp.0, dcp.1, r_gate
@@ -5582,17 +5934,15 @@ mod tests {
                 // reaches (cusp: |u| ~ n^{−1/2} only gets to ~9e-3 at 3000
                 // iterations, so 0.01 never triggers there): the GO numbers.
                 let r_go = if name == "cusp" { 0.02 } else { 0.01 };
-                let (mut worst_tri, mut worst_exit, mut n_entered) =
-                    (0.0f64, 0.0f64, 0u64);
+                let (mut worst_tri, mut worst_exit, mut n_entered) = (0.0f64, 0.0f64, 0u64);
                 for kpx in 0..16 {
                     if kpx == 8 {
                         continue; // dc = 0: the reference itself (κ̃ = 0, Ψ degenerate)
                     }
                     let t = (kpx as f64 / 16.0) * 2.0 - 1.0;
                     let dc = (t * cmx * 0.7, 0.37 * t * cmx);
-                    let Some(r) = gate_transit_residual(
-                        name, (cx, cy), dc, 2, max_iter, r_go,
-                    ) else {
+                    let Some(r) = gate_transit_residual(name, (cx, cy), dc, 2, max_iter, r_go)
+                    else {
                         continue;
                     };
                     n_entered += 1;

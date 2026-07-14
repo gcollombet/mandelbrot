@@ -64,8 +64,16 @@ pub struct CFe {
 }
 
 impl CFe {
-    pub const ZERO: CFe = CFe { x: 0.0, y: 0.0, e: 0 };
-    pub const ONE: CFe = CFe { x: 1.0, y: 0.0, e: 0 };
+    pub const ZERO: CFe = CFe {
+        x: 0.0,
+        y: 0.0,
+        e: 0,
+    };
+    pub const ONE: CFe = CFe {
+        x: 1.0,
+        y: 0.0,
+        e: 0,
+    };
 
     #[inline]
     pub fn from_c(x: f64, y: f64) -> CFe {
@@ -132,14 +140,22 @@ impl CFe {
             return hi; // lo is below f64 rounding of hi
         }
         let f = 2f64.powi(-(d as i32));
-        let mut r = CFe { x: hi.x + lo.x * f, y: hi.y + lo.y * f, e: hi.e };
+        let mut r = CFe {
+            x: hi.x + lo.x * f,
+            y: hi.y + lo.y * f,
+            e: hi.e,
+        };
         r.normalize();
         r
     }
 
     #[inline]
     pub fn neg(self) -> CFe {
-        CFe { x: -self.x, y: -self.y, e: self.e }
+        CFe {
+            x: -self.x,
+            y: -self.y,
+            e: self.e,
+        }
     }
 
     #[inline]
@@ -156,7 +172,11 @@ impl CFe {
             return CFe::ZERO;
         }
         if o.is_zero() {
-            return CFe { x: 0.0, y: 0.0, e: i64::MAX / 2 };
+            return CFe {
+                x: 0.0,
+                y: 0.0,
+                e: i64::MAX / 2,
+            };
         }
         let d = o.x * o.x + o.y * o.y;
         let mut r = CFe {
@@ -195,7 +215,9 @@ pub struct JetF64 {
 }
 
 impl JetF64 {
-    pub const ZERO: JetF64 = JetF64 { a: [CFe::ZERO; JET_NCOEFF] };
+    pub const ZERO: JetF64 = JetF64 {
+        a: [CFe::ZERO; JET_NCOEFF],
+    };
 
     #[inline]
     pub fn coeff(&self, i: usize, j: usize) -> CFe {
@@ -302,22 +324,30 @@ pub fn build_jet_levels(
     if orbit_len < 3 {
         return out;
     }
-    let mut prev: Vec<JetF64> =
-        (1..orbit_len).map(|i| jet_seed(orbit[i].0, orbit[i].1)).collect();
+    let mut prev: Vec<JetF64> = (1..orbit_len)
+        .map(|i| jet_seed(orbit[i].0, orbit[i].1))
+        .collect();
     let mut skip = 1usize;
     if skip >= min_skip {
-        out.push(JetLevelF64 { skip, entries: prev.clone() });
+        out.push(JetLevelF64 {
+            skip,
+            entries: prev.clone(),
+        });
     }
     while skip < max_skip && skip * 2 < orbit_len {
         let n = prev.len() / 2;
         if n == 0 {
             break;
         }
-        let cur: Vec<JetF64> =
-            (0..n).map(|i| jet_compose(&prev[2 * i], &prev[2 * i + 1])).collect();
+        let cur: Vec<JetF64> = (0..n)
+            .map(|i| jet_compose(&prev[2 * i], &prev[2 * i + 1]))
+            .collect();
         skip *= 2;
         if skip >= min_skip {
-            out.push(JetLevelF64 { skip, entries: cur.clone() });
+            out.push(JetLevelF64 {
+                skip,
+                entries: cur.clone(),
+            });
         }
         prev = cur;
     }
@@ -333,7 +363,11 @@ pub fn build_jet_levels(
 /// swallows the validity test).
 const MAJORANT_SATURATION_LOG2: i64 = 1 << 24;
 /// Saturated majorant sentinel (treated as +∞ by the (V) solver).
-pub const MAJORANT_INF: CFe = CFe { x: 1.0, y: 0.0, e: i64::MAX / 2 };
+pub const MAJORANT_INF: CFe = CFe {
+    x: 1.0,
+    y: 0.0,
+    e: i64::MAX / 2,
+};
 
 #[inline]
 pub fn fe_is_inf(v: &CFe) -> bool {
@@ -344,7 +378,11 @@ pub fn fe_is_inf(v: &CFe) -> bool {
 #[inline]
 pub fn fe_exp2(l: f64) -> CFe {
     let e = l.floor();
-    CFe { x: (l - e).exp2(), y: 0.0, e: e as i64 }
+    CFe {
+        x: (l - e).exp2(),
+        y: 0.0,
+        e: e as i64,
+    }
 }
 
 /// |Φ_L| majorant on the polydisc |z| ≤ R_z, |c| ≤ R_c for the block applying the
@@ -371,7 +409,10 @@ pub(crate) fn sfe_norm(m: f64, e: i64) -> (f64, i64) {
     }
     let bits = m.to_bits();
     let be = ((bits >> 52) & 0x7ff) as i64 - 1023;
-    (f64::from_bits((bits & !(0x7ffu64 << 52)) | (1023u64 << 52)), e + be)
+    (
+        f64::from_bits((bits & !(0x7ffu64 << 52)) | (1023u64 << 52)),
+        e + be,
+    )
 }
 
 // a + b for normalized positive values: align the smaller into the larger's
@@ -383,7 +424,10 @@ fn sfe_add(a: (f64, i64), b: (f64, i64)) -> (f64, i64) {
     if d > 60 || lo.0 == 0.0 {
         return hi;
     }
-    sfe_norm(hi.0 + lo.0 * f64::from_bits(((1023 - d) as u64) << 52), hi.1)
+    sfe_norm(
+        hi.0 + lo.0 * f64::from_bits(((1023 - d) as u64) << 52),
+        hi.1,
+    )
 }
 
 #[inline(always)]
@@ -408,7 +452,11 @@ pub fn jet_majorant_pre(twoz: &[(f64, i64)], rz: CFe, rc: CFe) -> CFe {
     if rho.0 <= 0.0 {
         return CFe::ZERO;
     }
-    CFe { x: rho.0 * 0.5, y: 0.0, e: rho.1 + 1 } // mantissa back to [0.5, 1)
+    CFe {
+        x: rho.0 * 0.5,
+        y: 0.0,
+        e: rho.1 + 1,
+    } // mantissa back to [0.5, 1)
 }
 
 /// Peak ρ (log2 magnitude) reached anywhere along the majorant walk, and the
@@ -423,7 +471,11 @@ pub fn jet_majorant_peak_pre(twoz: &[(f64, i64)], rz: CFe, rc: CFe) -> (f64, f64
     let rce = sfe_from_cfe(&rc);
     let mut rho = sfe_from_cfe(&rz);
     let l2 = |m: f64, e: i64| -> f64 {
-        if m > 0.0 { m.log2() + e as f64 } else { f64::NEG_INFINITY }
+        if m > 0.0 {
+            m.log2() + e as f64
+        } else {
+            f64::NEG_INFINITY
+        }
     };
     let mut peak = l2(rho.0, rho.1);
     for &(am, ae) in twoz {
@@ -557,7 +609,11 @@ pub fn jet_block_bounds_moduli(
     let log2_a20 = moduli_log2(2, 0);
     let mut log2_min_2z = f64::INFINITY;
     for &(m, e) in twoz {
-        let l = if m > 0.0 { m.log2() + e as f64 } else { f64::NEG_INFINITY };
+        let l = if m > 0.0 {
+            m.log2() + e as f64
+        } else {
+            f64::NEG_INFINITY
+        };
         log2_min_2z = log2_min_2z.min(l);
     }
     // Nonlinearity-scale anchor; a degenerate a10 (Z ≈ 0 block start) or a20
@@ -607,9 +663,7 @@ pub fn jet_block_bounds_moduli(
             let mut terms = [f64::NEG_INFINITY; JET_DS];
             for i in 1..=d {
                 let j = d - i;
-                terms[i - 1] = moduli_log2(i, j)
-                    + i as f64 * log2_rz
-                    + j as f64 * c.log2_rc;
+                terms[i - 1] = moduli_log2(i, j) + i as f64 * log2_rz + j as f64 * c.log2_rc;
             }
             c.log2_t[d - 2] = lse2(&terms[..d]);
         }
@@ -661,9 +715,8 @@ pub fn jet_solve_radii(b: &JetBlockBounds, epsilon: f64, log2_c_max: f64) -> [f6
             for d in (k + 1)..=JET_DS {
                 bterms[d - 2] = b.log2_a0[d - 2] + d as f64 * log2_c_max;
             }
-            bterms[JET_DS - 1] = c.log2_mc
-                + (JET_DS + 1) as f64 * log2_theta_c
-                - (1.0 - theta_c).log2();
+            bterms[JET_DS - 1] =
+                c.log2_mc + (JET_DS + 1) as f64 * log2_theta_c - (1.0 - theta_c).log2();
             if lse2(&bterms) > log2_half_eps + b.log2_a01 + log2_c_max {
                 continue;
             }
@@ -855,12 +908,20 @@ pub struct JetLevel {
 
 pub(crate) fn cfe_to_coeff(c: &CFe) -> JetCoeffFe {
     if c.is_zero() || c.e < -(i32::MAX as i64) / 2 {
-        return JetCoeffFe { x: 0.0, y: 0.0, e: 0 };
+        return JetCoeffFe {
+            x: 0.0,
+            y: 0.0,
+            e: 0,
+        };
     }
     // A saturated exponent can't be represented; the block's radii are −∞ in that
     // case anyway (saturated majorant), so the value never gets read.
     let e = c.e.clamp(-(i32::MAX as i64) / 2, (i32::MAX as i64) / 2) as i32;
-    JetCoeffFe { x: c.x as f32, y: c.y as f32, e }
+    JetCoeffFe {
+        x: c.x as f32,
+        y: c.y as f32,
+        e,
+    }
 }
 
 /// Serialize one block's radii (log2, f32) + its f32-safe fast-path flag.
@@ -881,7 +942,13 @@ pub fn jet_to_radii(radii_log2: &[f64; JET_K], f32_safe: bool) -> JetRadii {
 
 /// Serialize one block's degree ≤ K coefficient prefix.
 pub fn jet_to_coeffs(jet: &JetF64) -> JetCoeffs {
-    let mut c = JetCoeffs { coeffs: [JetCoeffFe { x: 0.0, y: 0.0, e: 0 }; JET_GPU_COEFFS] };
+    let mut c = JetCoeffs {
+        coeffs: [JetCoeffFe {
+            x: 0.0,
+            y: 0.0,
+            e: 0,
+        }; JET_GPU_COEFFS],
+    };
     for (n, slot) in c.coeffs.iter_mut().enumerate() {
         *slot = cfe_to_coeff(&jet.a[n]); // degree-major prefix: same flat order
     }
@@ -1010,7 +1077,11 @@ pub fn jet_run_pixel(
         if ref_i > 0 {
             let shifted = ref_i - 1;
             let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-            let log2_dz = if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+            let log2_dz = if dz2 > 0.0 {
+                0.5 * dz2.log2()
+            } else {
+                f64::NEG_INFINITY
+            };
             for (li, lvl) in levels.iter().enumerate().rev() {
                 if shifted % lvl.skip != 0 {
                     continue;
@@ -1025,8 +1096,7 @@ pub fn jet_run_pixel(
                 }
                 let k = (1..=JET_K).find(|&k| log2_dz < rk[k - 1]).unwrap_or(JET_K);
                 let jet = &lvl.entries[slot];
-                let (phi, pdz, pdc) =
-                    jet_eval_deriv(jet, CFe::from_c(dz.0, dz.1), cfe, k);
+                let (phi, pdz, pdc) = jet_eval_deriv(jet, CFe::from_c(dz.0, dz.1), cfe, k);
                 let cand = phi.to_f64();
                 let zi = orbit[ref_i + lvl.skip];
                 let candz = (zi.0 + cand.0, zi.1 + cand.1);
@@ -1051,7 +1121,10 @@ pub fn jet_run_pixel(
                 2.0 * (fz.0 * der.0 - fz.1 * der.1) + 1.0,
                 2.0 * (fz.0 * der.1 + fz.1 * der.0),
             );
-            let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+            let m2 = (
+                2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+            );
             let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
             dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
             ref_i += 1;
@@ -1146,7 +1219,14 @@ mod tests {
     fn assert_close(got: C, want: C, tol: f64, what: &str) {
         let d = ((got.0 - want.0).powi(2) + (got.1 - want.1).powi(2)).sqrt();
         let m = (want.0 * want.0 + want.1 * want.1).sqrt().max(1.0);
-        assert!(d / m < tol, "{}: got {:?} want {:?} (rel {})", what, got, want, d / m);
+        assert!(
+            d / m < tol,
+            "{}: got {:?} want {:?} (rel {})",
+            what,
+            got,
+            want,
+            d / m
+        );
     }
 
     // The two-step Z values used across the closure tests (arbitrary, O(1)).
@@ -1158,7 +1238,11 @@ mod tests {
     fn jet_seed_is_exact_single_step() {
         // f(z, c) = 2Z·z + z² + c has total degree 2 ≤ D_s: the seed jet IS the map.
         let s = jet_seed(Z1.0, Z1.1);
-        for (z, c) in [((0.2, -0.1), (0.05, 0.03)), ((-0.7, 0.4), (0.0, 0.0)), ((1.1, 0.9), (-0.2, 0.6))] {
+        for (z, c) in [
+            ((0.2, -0.1), (0.05, 0.03)),
+            ((-0.7, 0.4), (0.0, 0.0)),
+            ((1.1, 0.9), (-0.2, 0.6)),
+        ] {
             let w = jet_eval(&s, CFe::from_c(z.0, z.1), CFe::from_c(c.0, c.1), JET_DS).to_f64();
             let a = (2.0 * Z1.0, 2.0 * Z1.1);
             let exact = {
@@ -1189,10 +1273,25 @@ mod tests {
         }
         // Paper, didactic interlude 2: closed forms of the order-2 coefficients.
         assert_close(jet.coeff(1, 0).to_f64(), cm(a2, a1), 1e-14, "A10 = a2·a1");
-        assert_close(jet.coeff(0, 1).to_f64(), (a2.0 + 1.0, a2.1), 1e-14, "A01 = a2+1");
+        assert_close(
+            jet.coeff(0, 1).to_f64(),
+            (a2.0 + 1.0, a2.1),
+            1e-14,
+            "A01 = a2+1",
+        );
         let a1sq = cm(a1, a1);
-        assert_close(jet.coeff(2, 0).to_f64(), (a2.0 + a1sq.0, a2.1 + a1sq.1), 1e-14, "A20 = a2+a1²");
-        assert_close(jet.coeff(1, 1).to_f64(), (2.0 * a1.0, 2.0 * a1.1), 1e-14, "A11 = 2a1");
+        assert_close(
+            jet.coeff(2, 0).to_f64(),
+            (a2.0 + a1sq.0, a2.1 + a1sq.1),
+            1e-14,
+            "A20 = a2+a1²",
+        );
+        assert_close(
+            jet.coeff(1, 1).to_f64(),
+            (2.0 * a1.0, 2.0 * a1.1),
+            1e-14,
+            "A11 = 2a1",
+        );
         assert_close(jet.coeff(0, 2).to_f64(), (1.0, 0.0), 1e-14, "A02 = 1");
     }
 
@@ -1309,7 +1408,10 @@ mod tests {
                         assert!(
                             w_log2 <= m_log2 + 1e-9,
                             "skip {} sample {}: |Φ| 2^{:.3} > M 2^{:.3}",
-                            skip, p, w_log2, m_log2
+                            skip,
+                            p,
+                            w_log2,
+                            m_log2
                         );
                     }
                 }
@@ -1346,81 +1448,99 @@ mod tests {
         // and across (ε, c_max) regimes including the coarse one where the
         // anisotropy ladder's s = 32 fallback engages.)
         for (eps, c_max) in [(1e-6_f64, 1e-9_f64), (1e-4, 1e-5)] {
-        let s_aniso = 1024.0_f64;
-        let log2_c_max = c_max.log2();
-        let log2_rc = log2_c_max + s_aniso.log2();
-        for (cx, cy) in [(-1.401155_f64, 0.0_f64), (-0.75, 0.0), (-1.25, 0.0)] {
-        let orbit = ref_orbit_f64(cx, cy, 4096);
-        assert!(orbit.len() > 4096);
-        let levels = build_jet_levels(&orbit, 4, 1 << 18);
-        let mut solved = 0usize;
-        let mut positive = 0usize;
-        for lvl in levels.iter() {
-            let step = (lvl.entries.len() / 8).max(1);
-            for slot in (0..lvl.entries.len()).step_by(step) {
-                let first = 1 + slot * lvl.skip;
-                let jet = &lvl.entries[slot];
-                let bounds = jet_block_bounds(jet, &orbit, first, lvl.skip, log2_rc);
-                let radii = jet_solve_radii(&bounds, eps, log2_c_max);
-                solved += 1;
-                assert!(
-                    radii[0] <= radii[1] + 1e-9 && radii[1] <= radii[2] + 1e-9,
-                    "skip {} slot {}: radii not monotone {:?}",
-                    lvl.skip, slot, radii
-                );
-                for (k, &log2_rk) in radii.iter().enumerate() {
-                    let k = k + 1;
-                    if !log2_rk.is_finite() {
-                        continue;
-                    }
-                    positive += 1;
-                    let budget_a10 = bounds.log2_a10;
-                    let budget_a01 = bounds.log2_a01;
-                    for (fx, fc, ph) in [
-                        (0.95_f64, 1.0_f64, 0.7_f64),
-                        (0.5, 1.0, 2.1),
-                        (0.95, 0.125, 4.0),
-                        (0.1, 1.0, 5.3),
-                    ] {
-                        let x_log2 = log2_rk + (fx as f64).log2();
-                        let x = fe_exp2(x_log2);
-                        let z = CFe { x: x.x * ph.cos(), y: x.x * ph.sin(), e: x.e };
-                        let cmag = fe_exp2(log2_c_max + (fc as f64).log2());
-                        let c = CFe {
-                            x: cmag.x * (ph * 1.7).cos(),
-                            y: cmag.x * (ph * 1.7).sin(),
-                            e: cmag.e,
-                        };
-                        let applied = jet_eval(jet, z, c, k);
-                        let exact = exact_block_walk(&orbit, first, lvl.skip, z, c);
-                        let err = applied.add(CFe { x: -exact.x, y: -exact.y, e: exact.e });
-                        let err_log2 = match err.log2_mag() {
-                            Some(l) => l,
-                            None => continue,
-                        };
-                        let budget = lse2(&[
-                            budget_a10 + x_log2,
-                            budget_a01 + log2_c_max,
-                        ]) + eps.log2() - 1.0;
+            let s_aniso = 1024.0_f64;
+            let log2_c_max = c_max.log2();
+            let log2_rc = log2_c_max + s_aniso.log2();
+            for (cx, cy) in [(-1.401155_f64, 0.0_f64), (-0.75, 0.0), (-1.25, 0.0)] {
+                let orbit = ref_orbit_f64(cx, cy, 4096);
+                assert!(orbit.len() > 4096);
+                let levels = build_jet_levels(&orbit, 4, 1 << 18);
+                let mut solved = 0usize;
+                let mut positive = 0usize;
+                for lvl in levels.iter() {
+                    let step = (lvl.entries.len() / 8).max(1);
+                    for slot in (0..lvl.entries.len()).step_by(step) {
+                        let first = 1 + slot * lvl.skip;
+                        let jet = &lvl.entries[slot];
+                        let bounds = jet_block_bounds(jet, &orbit, first, lvl.skip, log2_rc);
+                        let radii = jet_solve_radii(&bounds, eps, log2_c_max);
+                        solved += 1;
                         assert!(
+                            radii[0] <= radii[1] + 1e-9 && radii[1] <= radii[2] + 1e-9,
+                            "skip {} slot {}: radii not monotone {:?}",
+                            lvl.skip,
+                            slot,
+                            radii
+                        );
+                        for (k, &log2_rk) in radii.iter().enumerate() {
+                            let k = k + 1;
+                            if !log2_rk.is_finite() {
+                                continue;
+                            }
+                            positive += 1;
+                            let budget_a10 = bounds.log2_a10;
+                            let budget_a01 = bounds.log2_a01;
+                            for (fx, fc, ph) in [
+                                (0.95_f64, 1.0_f64, 0.7_f64),
+                                (0.5, 1.0, 2.1),
+                                (0.95, 0.125, 4.0),
+                                (0.1, 1.0, 5.3),
+                            ] {
+                                let x_log2 = log2_rk + (fx as f64).log2();
+                                let x = fe_exp2(x_log2);
+                                let z = CFe {
+                                    x: x.x * ph.cos(),
+                                    y: x.x * ph.sin(),
+                                    e: x.e,
+                                };
+                                let cmag = fe_exp2(log2_c_max + (fc as f64).log2());
+                                let c = CFe {
+                                    x: cmag.x * (ph * 1.7).cos(),
+                                    y: cmag.x * (ph * 1.7).sin(),
+                                    e: cmag.e,
+                                };
+                                let applied = jet_eval(jet, z, c, k);
+                                let exact = exact_block_walk(&orbit, first, lvl.skip, z, c);
+                                let err = applied.add(CFe {
+                                    x: -exact.x,
+                                    y: -exact.y,
+                                    e: exact.e,
+                                });
+                                let err_log2 = match err.log2_mag() {
+                                    Some(l) => l,
+                                    None => continue,
+                                };
+                                let budget = lse2(&[budget_a10 + x_log2, budget_a01 + log2_c_max])
+                                    + eps.log2()
+                                    - 1.0;
+                                assert!(
                             err_log2 <= budget + 1e-6,
                             "skip {} slot {} k={} fx={} fc={}: err 2^{:.2} > budget 2^{:.2}",
                             lvl.skip, slot, k, fx, fc, err_log2, budget
                         );
+                            }
+                        }
                     }
                 }
-            }
-        }
-        println!(
-            "radii solve: {} blocks sampled, {} positive (block, order) radii",
-            solved, positive
-        );
-        // Deep regime: most sampled blocks certify. Coarse regime (c/ε ~ 0.1):
-        // only short-to-mid blocks can — long ones carry genuine O(1) c-channel
-        // remainders — so just require a usable population.
-        let floor = if c_max <= 1e-8 { solved / 2 } else { solved / 8 };
-        assert!(positive > floor, "too few positive radii ({}/{})", positive, solved);
-        } // centers
+                println!(
+                    "radii solve: {} blocks sampled, {} positive (block, order) radii",
+                    solved, positive
+                );
+                // Deep regime: most sampled blocks certify. Coarse regime (c/ε ~ 0.1):
+                // only short-to-mid blocks can — long ones carry genuine O(1) c-channel
+                // remainders — so just require a usable population.
+                let floor = if c_max <= 1e-8 {
+                    solved / 2
+                } else {
+                    solved / 8
+                };
+                assert!(
+                    positive > floor,
+                    "too few positive radii ({}/{})",
+                    positive,
+                    solved
+                );
+            } // centers
         } // (eps, c_max) regimes
     }
 
@@ -1437,8 +1557,7 @@ mod tests {
             return None; // escaping reference: not a perturbation use case
         }
         let levels = build_jet_levels(&orbit, 4, 1 << 18);
-        let radii =
-            jet_build_radii(&levels, &orbit, c_max.log2() + 10.0, eps, c_max.log2());
+        let radii = jet_build_radii(&levels, &orbit, c_max.log2() + 10.0, eps, c_max.log2());
         Some((orbit, levels, radii))
     }
 
@@ -1470,7 +1589,11 @@ mod tests {
                 max_r3 = max_r3.max(s.r_log2[JET_K - 1]);
                 // The f32-safe fast-path flag matches a direct recompute, and a
                 // flagged block's shipped coefficients all fit the f32 range.
-                assert_eq!(s.f32_safe > 0.5, jet_f32_safe(jet), "f32_safe flag mismatch");
+                assert_eq!(
+                    s.f32_safe > 0.5,
+                    jet_f32_safe(jet),
+                    "f32_safe flag mismatch"
+                );
                 if s.f32_safe > 0.5 {
                     for c in &cb.coeffs {
                         assert!(
@@ -1486,7 +1609,11 @@ mod tests {
                         assert!(
                             (s.r_log2[k] as f64 - want).abs() < 1e-3,
                             "skip {} slot {} r{}: {} vs {}",
-                            lvl.skip, slot, k + 1, s.r_log2[k], want
+                            lvl.skip,
+                            slot,
+                            k + 1,
+                            s.r_log2[k],
+                            want
                         );
                     } else {
                         assert_eq!(s.r_log2[k], f32::NEG_INFINITY);
@@ -1501,7 +1628,11 @@ mod tests {
                             assert!(
                                 (got - want).abs() < 1e-5,
                                 "skip {} slot {} coeff {}: log2 {} vs {}",
-                                lvl.skip, slot, n, got, want
+                                lvl.skip,
+                                slot,
+                                n,
+                                got,
+                                want
                             );
                         }
                     }
@@ -1509,8 +1640,7 @@ mod tests {
                 // Prefix property: first two slots are the affine data.
                 let a10 = jet.coeff(1, 0);
                 assert!(
-                    (cb.coeffs[0].x as f64 - a10.x).abs() < 1e-6
-                        && cb.coeffs[0].e as i64 == a10.e,
+                    (cb.coeffs[0].x as f64 - a10.x).abs() < 1e-6 && cb.coeffs[0].e as i64 == a10.e,
                     "coeffs[0] is not a10"
                 );
                 assert!(!jet.coeff(0, 1).is_zero() && cb.coeffs[1].e as i64 == jet.coeff(0, 1).e);
@@ -1527,9 +1657,11 @@ mod tests {
         let eps = 1e-6_f64;
         let c_max = 1e-9_f64;
         let max_iter = 3000usize;
-        for (name, cx, cy) in
-            [("cusp", -0.75_f64, 0.0_f64), ("period2", -1.25, 0.0), ("feigenbaum", -1.401155, 0.0)]
-        {
+        for (name, cx, cy) in [
+            ("cusp", -0.75_f64, 0.0_f64),
+            ("period2", -1.25, 0.0),
+            ("feigenbaum", -1.401155, 0.0),
+        ] {
             let Some((orbit, levels, radii)) = harness(cx, cy, max_iter, eps, c_max) else {
                 println!("[{}] escaped — skipped", name);
                 continue;
@@ -1564,7 +1696,9 @@ mod tests {
             assert!(
                 skipped_px > n / 2,
                 "[{}] jet blocks barely used ({}/{} pixels)",
-                name, skipped_px, n
+                name,
+                skipped_px,
+                n
             );
         }
     }
@@ -1614,21 +1748,33 @@ mod tests {
                 // order-1 application against the exact walk at |z| = 0.9·r₁.
                 let jet = &lvl.entries[slot];
                 let x = fe_exp2(rk[0] - 0.152); // ×0.9
-                let z = CFe { x: x.x * 0.28, y: -x.x * 0.96, e: x.e };
+                let z = CFe {
+                    x: x.x * 0.28,
+                    y: -x.x * 0.96,
+                    e: x.e,
+                };
                 let c = CFe::from_c(0.6 * c_max, 0.8 * c_max);
                 let applied = jet_eval(jet, z, c, 1);
                 let exact = exact_block_walk(&orbit, first, lvl.skip, z, c);
-                let err = applied.add(CFe { x: -exact.x, y: -exact.y, e: exact.e });
+                let err = applied.add(CFe {
+                    x: -exact.x,
+                    y: -exact.y,
+                    e: exact.e,
+                });
                 if let Some(err_log2) = err.log2_mag() {
                     let budget = lse2(&[
                         coeff_log2(jet, 1, 0) + rk[0] - 0.152,
                         coeff_log2(jet, 0, 1) + log2_c_max,
-                    ]) + eps.log2() - 1.0;
+                    ]) + eps.log2()
+                        - 1.0;
                     assert!(
                         err_log2 <= budget + 1e-6,
                         "skip {} slot {}: disputed order-1 application UNSOUND \
                          (err 2^{:.2} > budget 2^{:.2})",
-                        lvl.skip, slot, err_log2, budget
+                        lvl.skip,
+                        slot,
+                        err_log2,
+                        budget
                     );
                 }
                 disputed_checked += 1;
@@ -1638,11 +1784,15 @@ mod tests {
             "guarded blocks={} | r1=0 on {} | disputed-but-sound {} | order ≥2 passes on {}",
             guarded, guarded_r1_zero, disputed_checked, guarded_high_pass
         );
-        assert!(guarded > 0, "no near-critical blocks found — oracle vacuous");
+        assert!(
+            guarded > 0,
+            "no near-critical blocks found — oracle vacuous"
+        );
         assert!(
             guarded_r1_zero * 2 > guarded,
             "(V) rediscovers the guard on too few blocks ({}/{})",
-            guarded_r1_zero, guarded
+            guarded_r1_zero,
+            guarded
         );
         assert!(
             guarded_high_pass > 0,
@@ -1674,7 +1824,11 @@ mod tests {
                     }
                     let first = 1 + slot * lvl.skip;
                     let x = fe_exp2(log2_rk - 1.0); // |z| = r_k / 2
-                    let z = CFe { x: x.x * 0.6, y: x.x * 0.8, e: x.e };
+                    let z = CFe {
+                        x: x.x * 0.6,
+                        y: x.x * 0.8,
+                        e: x.e,
+                    };
                     let c = CFe::from_c(0.3 * c_max, -0.4 * c_max);
                     let der_in = (0.7_f64, -0.3_f64);
                     // Jet-side update.
@@ -1691,7 +1845,11 @@ mod tests {
                     for j in 0..lvl.skip {
                         let (zx, zy) = orbit[first + j];
                         let fz = CFe::from_c(zx, zy).add(w);
-                        let two_fz = CFe { x: 2.0 * fz.x, y: 2.0 * fz.y, e: fz.e };
+                        let two_fz = CFe {
+                            x: 2.0 * fz.x,
+                            y: 2.0 * fz.y,
+                            e: fz.e,
+                        };
                         der = two_fz.mul(der).add(CFe::ONE);
                         let a = CFe::from_c(2.0 * zx, 2.0 * zy);
                         w = a.mul(w).add(w.mul(w)).add(c);
@@ -1702,14 +1860,21 @@ mod tests {
                     assert!(
                         diff / mag < 100.0 * eps,
                         "skip {} slot {} k={}: der rel err {:.2e}",
-                        lvl.skip, slot, k, diff / mag
+                        lvl.skip,
+                        slot,
+                        k,
+                        diff / mag
                     );
                     checked += 1;
                 }
             }
         }
         println!("derivative checked on {} (block, order) pairs", checked);
-        assert!(checked > 20, "too few admitted blocks exercised ({})", checked);
+        assert!(
+            checked > 20,
+            "too few admitted blocks exercised ({})",
+            checked
+        );
     }
 
     #[test]
@@ -1719,9 +1884,11 @@ mod tests {
         let eps = 1e-6_f64;
         let c_max = 1e-9_f64;
         let max_iter = 3000usize;
-        for (name, cx, cy) in
-            [("cusp", -0.75_f64, 0.0_f64), ("period2", -1.25, 0.0), ("feigenbaum", -1.401155, 0.0)]
-        {
+        for (name, cx, cy) in [
+            ("cusp", -0.75_f64, 0.0_f64),
+            ("period2", -1.25, 0.0),
+            ("feigenbaum", -1.401155, 0.0),
+        ] {
             let Some((orbit, levels, radii)) = harness(cx, cy, max_iter, eps, c_max) else {
                 println!("[{}] escaped — skipped", name);
                 continue;
@@ -1746,12 +1913,19 @@ mod tests {
                 assert!(
                     rel <= bound,
                     "[{}] pixel {}: rel err {:.3e} > e·N·ε = {:.3e}",
-                    name, kpx, rel, bound
+                    name,
+                    kpx,
+                    rel,
+                    bound
                 );
             }
             println!(
                 "[{}] {} non-escaping pixels, worst rel err {:.3e} (bound {:.3e}, ratio {:.4})",
-                name, compared, worst, bound, worst / bound
+                name,
+                compared,
+                worst,
+                bound,
+                worst / bound
             );
             assert!(compared > 10, "[{}] too few non-escaping pixels", name);
         }
@@ -1769,7 +1943,12 @@ mod tests {
         assert_eq!(levels[0].skip, 4);
         let mut expect_count = (orbit.len() - 1) / 2 / 2; // two merges below skip 4
         for lvl in &levels {
-            assert_eq!(lvl.entries.len(), expect_count, "count at skip {}", lvl.skip);
+            assert_eq!(
+                lvl.entries.len(),
+                expect_count,
+                "count at skip {}",
+                lvl.skip
+            );
             expect_count /= 2;
         }
         // Spot-check blocks across levels against the direct seed chain.
@@ -1787,15 +1966,26 @@ mod tests {
                     match (g.log2_mag(), w.log2_mag()) {
                         (None, None) => {}
                         (Some(_), Some(we)) => {
-                            let diff = g.add(CFe { x: -w.x, y: -w.y, e: w.e });
+                            let diff = g.add(CFe {
+                                x: -w.x,
+                                y: -w.y,
+                                e: w.e,
+                            });
                             let derr = diff.log2_mag().unwrap_or(f64::NEG_INFINITY);
                             assert!(
                                 derr < we - 35.0,
                                 "skip {} slot {} a[{},{}]: rel err 2^{:.0}",
-                                lvl.skip, slot, i, j, derr - we
+                                lvl.skip,
+                                slot,
+                                i,
+                                j,
+                                derr - we
                             );
                         }
-                        _ => panic!("skip {} slot {} a[{},{}]: zero mismatch", lvl.skip, slot, i, j),
+                        _ => panic!(
+                            "skip {} slot {} a[{},{}]: zero mismatch",
+                            lvl.skip, slot, i, j
+                        ),
                     }
                 }
             }
@@ -1815,8 +2005,7 @@ mod tests {
         for eps in [1e-4_f64, 1e-6] {
             for c_max in [1e-3_f64, 1e-5, 1e-9, 1e-12, 1e-51] {
                 let log2_c_max = c_max.log2();
-                let radii =
-                    jet_build_radii(&levels, &orbit, log2_c_max + 10.0, eps, log2_c_max);
+                let radii = jet_build_radii(&levels, &orbit, log2_c_max + 10.0, eps, log2_c_max);
                 let mut fin = [0usize; JET_K];
                 let mut skip_weighted = 0u64;
                 let mut skip_total = 0u64;
@@ -1857,7 +2046,10 @@ mod tests {
         assert!(orbit.len() > 4096);
         let levels = build_jet_levels(&orbit, 4, 1 << 18);
         let k = JET_K; // top order
-        println!("gate failure census at eps={:e} c_max={:e} (order {})", eps, c_max, k);
+        println!(
+            "gate failure census at eps={:e} c_max={:e} (order {})",
+            eps, c_max, k
+        );
         for lvl in &levels {
             let (mut ok, mut sat, mut gate_b, mut gate_a, mut cap0) = (0, 0, 0, 0, 0);
             for slot in 0..lvl.entries.len() {
@@ -1920,24 +2112,38 @@ mod tests {
             // Re-run the loop manually to log applied skips.
             let bailout2 = 4.0_f64;
             let cfe = CFe::from_c(dc.0, dc.1);
-            let (mut dz, mut ref_i, mut iter, mut steps) = ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
+            let (mut dz, mut ref_i, mut iter, mut steps) =
+                ((0.0_f64, 0.0_f64), 0usize, 0usize, 0usize);
             while iter < max_iter {
                 let mut applied = false;
                 if ref_i > 0 {
                     let shifted = ref_i - 1;
                     let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                    let log2_dz = if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                    let log2_dz = if dz2 > 0.0 {
+                        0.5 * dz2.log2()
+                    } else {
+                        f64::NEG_INFINITY
+                    };
                     for (li, lvl) in levels.iter().enumerate().rev() {
-                        if shifted % lvl.skip != 0 { continue; }
+                        if shifted % lvl.skip != 0 {
+                            continue;
+                        }
                         let slot = shifted / lvl.skip;
-                        if slot >= lvl.entries.len() || ref_i + lvl.skip > max_iter { continue; }
+                        if slot >= lvl.entries.len() || ref_i + lvl.skip > max_iter {
+                            continue;
+                        }
                         let rk = &radii[li][slot];
-                        if !(log2_dz < rk[JET_K - 1]) { continue; }
+                        if !(log2_dz < rk[JET_K - 1]) {
+                            continue;
+                        }
                         let k = (1..=JET_K).find(|&k| log2_dz < rk[k - 1]).unwrap_or(JET_K);
-                        let cand = jet_eval(&lvl.entries[slot], CFe::from_c(dz.0, dz.1), cfe, k).to_f64();
+                        let cand =
+                            jet_eval(&lvl.entries[slot], CFe::from_c(dz.0, dz.1), cfe, k).to_f64();
                         let zi = orbit[ref_i + lvl.skip];
                         let candz = (zi.0 + cand.0, zi.1 + cand.1);
-                        if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 { continue; }
+                        if lvl.skip > 1 && candz.0 * candz.0 + candz.1 * candz.1 > bailout2 {
+                            continue;
+                        }
                         *hist.entry(lvl.skip).or_insert(0) += 1;
                         dz = cand;
                         ref_i += lvl.skip;
@@ -1948,7 +2154,10 @@ mod tests {
                 }
                 if !applied {
                     let z = orbit[ref_i];
-                    let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+                    let m2 = (
+                        2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                        2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+                    );
                     let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
                     dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
                     ref_i += 1;
@@ -1956,19 +2165,36 @@ mod tests {
                     exact_steps += 1;
                 }
                 steps += 1;
-                if ref_i > orbit.len() - 1 { ref_i = orbit.len() - 1; }
+                if ref_i > orbit.len() - 1 {
+                    ref_i = orbit.len() - 1;
+                }
                 let z = orbit[ref_i];
                 let full = (z.0 + dz.0, z.1 + dz.1);
                 let full2 = full.0 * full.0 + full.1 * full.1;
-                if full2 > bailout2 { break; }
+                if full2 > bailout2 {
+                    break;
+                }
                 let dz2 = dz.0 * dz.0 + dz.1 * dz.1;
-                if full2 < dz2 || ref_i == orbit.len() - 1 { dz = full; ref_i = 0; }
-                if steps > max_iter * 2 + 16 { break; }
+                if full2 < dz2 || ref_i == orbit.len() - 1 {
+                    dz = full;
+                    ref_i = 0;
+                }
+                if steps > max_iter * 2 + 16 {
+                    break;
+                }
             }
         }
-        println!("jet applied-skip histogram (eps=1e-4, c_max=1e-5, cusp): exact={}", exact_steps);
+        println!(
+            "jet applied-skip histogram (eps=1e-4, c_max=1e-5, cusp): exact={}",
+            exact_steps
+        );
         for (skip, n) in &hist {
-            println!("  skip {:>5}: {:>7} applications ({} iters)", skip, n, *n * *skip as u64);
+            println!(
+                "  skip {:>5}: {:>7} applications ({} iters)",
+                skip,
+                n,
+                *n * *skip as u64
+            );
         }
     }
 

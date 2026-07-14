@@ -32,11 +32,11 @@
 //! BANDWIDTH is the axis the plateau punishes — duplicated per-tier records
 //! were rejected for exactly that reason.)
 
-use crate::jet::{
-    cfe_to_coeff, fe_exp2, jet_block_bounds_moduli, jet_idx, jet_seed, jet_solve_radii,
-    sfe_norm, CFe, JetCoeffFe, JetF64, JetLevel, JET_MONOMIALS, JET_NCOEFF,
-};
 use crate::jet::JetBlockBounds;
+use crate::jet::{
+    cfe_to_coeff, fe_exp2, jet_block_bounds_moduli, jet_idx, jet_seed, jet_solve_radii, sfe_norm,
+    CFe, JetCoeffFe, JetF64, JetLevel, JET_MONOMIALS, JET_NCOEFF,
+};
 // The unified record shares the 7-coefficient [2/1] F-form extraction with
 // the standalone mobius mode (`mobius_from_jet_k2`, numerator (N₂z + A + A'c)z
 // + Bc, denominator 1 + (D+D'c)z + Fc): slots 3/6 ship N₂/F, the displaced
@@ -46,9 +46,8 @@ use crate::jet::JetBlockBounds;
 // runtime fixed points stay a quadratic).
 use crate::mobius::{
     mobius_build_bounds_pair, mobius_build_derivative_radii, mobius_build_radii,
-    mobius_certify_segment, mobius_from_jet, mobius_from_jet_k2, mobius_q,
-    MobiusBlock, MobiusBoundsTable, MobiusCPlus, MobiusLevel,
-    MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP,
+    mobius_certify_segment, mobius_from_jet, mobius_from_jet_k2, mobius_q, MobiusBlock,
+    MobiusBoundsTable, MobiusCPlus, MobiusLevel, MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP,
 };
 
 /// One unified block: the [2/1] c+ extraction (tiers 0–2, N₂/F included) plus
@@ -83,7 +82,10 @@ impl UnifiedBlock {
     }
     #[allow(dead_code)]
     pub fn a11(&self) -> CFe {
-        self.m.ap.sub(self.m.b.mul(self.m.d)).sub(self.m.f.mul(self.m.a))
+        self.m
+            .ap
+            .sub(self.m.b.mul(self.m.d))
+            .sub(self.m.f.mul(self.m.a))
     }
     #[allow(dead_code)]
     pub fn a21(&self) -> CFe {
@@ -137,11 +139,9 @@ pub struct UnifiedLevel {
 /// c₀₁ = 0 fallback (F = 0) — and q₃₀ only when the [2/1] extraction is live
 /// (c₂₀ ≠ 0), mirroring `block_from_jet`. The periodic header keeps the [1/1]
 /// extraction, whose zero list has no (3, 0).
-const Q_ZEROS_CPLUS: [(usize, usize); 7] =
-    [(1, 0), (0, 1), (2, 0), (3, 0), (1, 1), (0, 2), (2, 1)];
+const Q_ZEROS_CPLUS: [(usize, usize); 7] = [(1, 0), (0, 1), (2, 0), (3, 0), (1, 1), (0, 2), (2, 1)];
 const Q_ZEROS_PLAIN: [(usize, usize); 4] = [(1, 0), (0, 1), (2, 0), (3, 0)];
-const Q_ZEROS_PERIODIC: [(usize, usize); 6] =
-    [(1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (2, 1)];
+const Q_ZEROS_PERIODIC: [(usize, usize); 6] = [(1, 0), (0, 1), (2, 0), (1, 1), (0, 2), (2, 1)];
 
 fn q_moduli(jet: &JetF64, m: &MobiusCPlus, zeros: &[(usize, usize)]) -> [f64; JET_NCOEFF] {
     let mut out = [f64::NEG_INFINITY; JET_NCOEFF];
@@ -202,7 +202,11 @@ pub fn build_unified_levels(orbit: &[(f64, f64)], max_skip: usize) -> Vec<Unifie
     // but leave it empty; every downstream stage then costs zero there.
     let extract = |jets: &[JetF64], skip: usize| -> UnifiedLevel {
         if skip < MOBIUS_MIN_EMIT_SKIP {
-            return UnifiedLevel { skip, blocks: Vec::new(), moduli: Vec::new() };
+            return UnifiedLevel {
+                skip,
+                blocks: Vec::new(),
+                moduli: Vec::new(),
+            };
         }
         let blocks: Vec<UnifiedBlock> = jets.iter().map(UnifiedBlock::from_jet).collect();
         let moduli = jets
@@ -210,15 +214,20 @@ pub fn build_unified_levels(orbit: &[(f64, f64)], max_skip: usize) -> Vec<Unifie
             .zip(blocks.iter())
             .map(|(jet, b)| moduli_from_jet(jet, &b.m))
             .collect();
-        UnifiedLevel { skip, blocks, moduli }
+        UnifiedLevel {
+            skip,
+            blocks,
+            moduli,
+        }
     };
     let orbit_len = orbit.len();
     let mut out = Vec::new();
     if orbit_len < 3 {
         return out;
     }
-    let mut prev: Vec<JetF64> =
-        (1..orbit_len).map(|i| jet_seed(orbit[i].0, orbit[i].1)).collect();
+    let mut prev: Vec<JetF64> = (1..orbit_len)
+        .map(|i| jet_seed(orbit[i].0, orbit[i].1))
+        .collect();
     out.push(extract(&prev, 1));
     let mut skip = 1usize;
     while skip < max_skip && skip * 2 < orbit_len {
@@ -282,7 +291,11 @@ pub fn closed_form_radius(
     let Some(l2_quarter) = pole_budget_log2(m, log2_cmax) else {
         return f64::NEG_INFINITY;
     };
-    let pole_cap = if l2_deff.is_finite() { l2_quarter - l2_deff } else { 0.0 };
+    let pole_cap = if l2_deff.is_finite() {
+        l2_quarter - l2_deff
+    } else {
+        0.0
+    };
     scan_first_success(pole_cap.min(-1.0), |lx| {
         let l2s = lse2_pair(l2a + lx, l2b + log2_cmax);
         let mut rest = f64::NEG_INFINITY;
@@ -346,15 +359,14 @@ pub fn derivative_radius(
                 if i >= 1 {
                     restd = lse2_pair(
                         restd,
-                        log2_q[n] + (i as f64).log2() + (i as f64 - 1.0) * lx
+                        log2_q[n]
+                            + (i as f64).log2()
+                            + (i as f64 - 1.0) * lx
                             + j as f64 * log2_cmax,
                     );
                 }
                 if rational {
-                    rest = lse2_pair(
-                        rest,
-                        log2_q[n] + i as f64 * lx + j as f64 * log2_cmax,
-                    );
+                    rest = lse2_pair(rest, log2_q[n] + i as f64 * lx + j as f64 * log2_cmax);
                 }
             }
         }
@@ -378,8 +390,16 @@ pub fn unified_eval_jet3_dz(blk: &UnifiedBlock, z: CFe, c: CFe) -> CFe {
     let c2 = c.mul(c);
     let p1 = blk.m.a.add(a11.mul(c)).add(blk.a12.mul(c2));
     let p2 = a20.add(a21.mul(c));
-    let two_p2 = CFe { x: 2.0 * p2.x, y: 2.0 * p2.y, e: p2.e };
-    let three_p3 = CFe { x: 3.0 * a30.x, y: 3.0 * a30.y, e: a30.e };
+    let two_p2 = CFe {
+        x: 2.0 * p2.x,
+        y: 2.0 * p2.y,
+        e: p2.e,
+    };
+    let three_p3 = CFe {
+        x: 3.0 * a30.x,
+        y: 3.0 * a30.y,
+        e: a30.e,
+    };
     p1.add(two_p2.add(three_p3.mul(z)).mul(z))
 }
 
@@ -586,10 +606,8 @@ fn unified_solve_radii_impl(
     // (V′) only where (V) is alive: the shipped radius is min(r, r′), so a
     // dead value kills the tier regardless — interior references produce dead
     // blocks in bulk and their derivative solve is pure waste.
-    let rd_cv =
-        mobius_build_derivative_radii(&mlv, &bounds.cplus, eps, log2_c_max, Some(&r_cv));
-    let rd_pv =
-        mobius_build_derivative_radii(&plv, &bounds.plain, eps, log2_c_max, Some(&r_pv));
+    let rd_cv = mobius_build_derivative_radii(&mlv, &bounds.cplus, eps, log2_c_max, Some(&r_cv));
+    let rd_pv = mobius_build_derivative_radii(&plv, &bounds.plain, eps, log2_c_max, Some(&r_pv));
     let mut boost_pade = 0usize;
     let mut boost_cplus = 0usize;
     let mut tiers: Vec<Vec<[f64; 4]>> = Vec::with_capacity(levels.len());
@@ -672,7 +690,13 @@ fn unified_solve_radii_impl(
         tiers_der.push(row_der);
         tiers_value.push(row_value);
     }
-    UnifiedRadii { tiers, tiers_der, tiers_value, boost_pade, boost_cplus }
+    UnifiedRadii {
+        tiers,
+        tiers_der,
+        tiers_value,
+        boost_pade,
+        boost_cplus,
+    }
 }
 
 /// Convenience wrapper (tests, one-shot harnesses): both stages back to back,
@@ -741,7 +765,10 @@ pub fn sa_build(orbit: &[(f64, f64)], eps: f64, c_max: f64, max_n: usize) -> SaP
     let max_n = max_n.min(orbit.len().saturating_sub(1));
     let mut b = [CFe::ZERO; SA_STORED];
     let mut rho: [CFe; RUNGS.len()] = [CFe::ZERO; RUNGS.len()];
-    let mut best = SaPrefix { n0: 0, b: [CFe::ZERO; SA_APPLIED] };
+    let mut best = SaPrefix {
+        n0: 0,
+        b: [CFe::ZERO; SA_APPLIED],
+    };
     for n in 0..max_n {
         let (zx, zy) = orbit[n];
         let two_z = CFe::from_c(2.0 * zx, 2.0 * zy);
@@ -800,15 +827,18 @@ pub fn sa_build(orbit: &[(f64, f64)], eps: f64, c_max: f64, max_n: usize) -> SaP
             if zmag + rho_lin > 1.9 {
                 continue;
             }
-            let queue = l2m + (SA_STORED as f64 + 1.0) * theta
-                - (1.0 - theta.exp2()).max(1e-12).log2();
+            let queue =
+                l2m + (SA_STORED as f64 + 1.0) * theta - (1.0 - theta.exp2()).max(1e-12).log2();
             if lse2_pair(stored, queue) <= scale {
                 ok = true;
                 break;
             }
         }
         if ok {
-            best = SaPrefix { n0: n + 1, b: [b[0], b[1], b[2], b[3]] };
+            best = SaPrefix {
+                n0: n + 1,
+                b: [b[0], b[1], b[2], b[3]],
+            };
         } else if best.n0 > 0 && n + 1 > best.n0 + 64 {
             // The profile collapsed 64 steps ago (first quasi-critical
             // passage): later recoveries would skip OVER the passage with a
@@ -930,12 +960,16 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
     // this header used to ship could over-certify and kept the runtime path
     // disabled.
     let blk = MobiusBlock { m, log2_q: q };
-    let log2_r =
-        mobius_certify_segment(&blk, &orbit[start..start + period], eps_int, log2_cmax);
+    let log2_r = mobius_certify_segment(&blk, &orbit[start..start + period], eps_int, log2_cmax);
     if !log2_r.is_finite() {
         return None;
     }
-    Some(PeriodicBlock { start, p: period, m, log2_r })
+    Some(PeriodicBlock {
+        start,
+        p: period,
+        m,
+        log2_r,
+    })
 }
 
 // ── GPU serialization (task 2.3, designs D2/D3) ─────────────────────────────────
@@ -1131,7 +1165,11 @@ pub fn unified_portfolio_tags_with(
                 best = Some((
                     pr,
                     sc,
-                    if sc == pr { f64::NEG_INFINITY } else { tiers[sc] },
+                    if sc == pr {
+                        f64::NEG_INFINITY
+                    } else {
+                        tiers[sc]
+                    },
                 ));
             }
         }
@@ -1178,13 +1216,15 @@ fn unified_f32_safe(md: &UnifiedModuli, m: &MobiusCPlus) -> bool {
         None => true,
         Some(l) => l.abs() <= MOBIUS_F32_SAFE_LOG2,
     };
-    slot_ok(&m.f) && slot_ok(&m.n2) && JET_MONOMIALS.iter().enumerate().all(|(n, &(i, j))| {
-        if (i as usize) + (j as usize) > 3 {
-            return true;
-        }
-        let l = md.log2_a[n];
-        !l.is_finite() || l.abs() <= MOBIUS_F32_SAFE_LOG2
-    })
+    slot_ok(&m.f)
+        && slot_ok(&m.n2)
+        && JET_MONOMIALS.iter().enumerate().all(|(n, &(i, j))| {
+            if (i as usize) + (j as usize) > 3 {
+                return true;
+            }
+            let l = md.log2_a[n];
+            !l.is_finite() || l.abs() <= MOBIUS_F32_SAFE_LOG2
+        })
 }
 
 /// Serialize the emitted (skip ≥ 4) levels' coefficient records, index-aligned
@@ -1245,28 +1285,24 @@ pub fn unified_serialize_radii(
         for (s, md) in lvl.moduli.iter().enumerate() {
             let tiers = &radii.tiers[li][s];
             let is_safe = unified_f32_safe(md, &lvl.blocks[s].m);
-            let entry = match unified_portfolio_tags_with(
-                tiers,
-                log2_band,
-                log2_band_spread,
-                is_safe,
-            ) {
-                None => UnifiedRadius {
-                    r_log2: f32::NEG_INFINITY,
-                    tag: 0.0,
-                    f32_safe: 0.0,
-                    pad: f32::NEG_INFINITY,
-                },
-                Some((tag, tag2, r2)) => {
-                    let safe = if is_safe { 1.0f32 } else { 0.0 };
-                    UnifiedRadius {
-                        r_log2: tiers[tag] as f32,
-                        tag: tag as f32,
-                        f32_safe: safe + 2.0 * tag2 as f32,
-                        pad: r2 as f32,
+            let entry =
+                match unified_portfolio_tags_with(tiers, log2_band, log2_band_spread, is_safe) {
+                    None => UnifiedRadius {
+                        r_log2: f32::NEG_INFINITY,
+                        tag: 0.0,
+                        f32_safe: 0.0,
+                        pad: f32::NEG_INFINITY,
+                    },
+                    Some((tag, tag2, r2)) => {
+                        let safe = if is_safe { 1.0f32 } else { 0.0 };
+                        UnifiedRadius {
+                            r_log2: tiers[tag] as f32,
+                            tag: tag as f32,
+                            f32_safe: safe + 2.0 * tag2 as f32,
+                            pad: r2 as f32,
+                        }
                     }
-                }
-            };
+                };
             // The level gate must admit the secours band too.
             max_r = max_r.max(entry.r_log2).max(entry.pad);
             out.push(entry);
@@ -1305,12 +1341,21 @@ fn unified_push_header(
         });
     }
     let pm = periodic.map(|p| p.m).unwrap_or(MobiusCPlus {
-        a: zero, b: zero, d: zero, ap: zero, dp: zero, f: zero, n2: zero, degenerate: true,
+        a: zero,
+        b: zero,
+        d: zero,
+        ap: zero,
+        dp: zero,
+        f: zero,
+        n2: zero,
+        degenerate: true,
     });
     let metas = [
         periodic.map(|p| p.start as f32).unwrap_or(0.0),
         periodic.map(|p| p.p as f32).unwrap_or(0.0),
-        periodic.map(|p| p.log2_r as f32).unwrap_or(f32::NEG_INFINITY),
+        periodic
+            .map(|p| p.log2_r as f32)
+            .unwrap_or(f32::NEG_INFINITY),
         0.0,
         0.0,
         0.0,
@@ -1407,8 +1452,9 @@ mod tests {
             assert!(orbit.len() > 512, "[{}] escaped", name);
             // Walk the same streaming compose the builder uses, keeping the
             // full jet next to the extracted record.
-            let mut prev: Vec<JetF64> =
-                (1..orbit.len()).map(|i| jet_seed(orbit[i].0, orbit[i].1)).collect();
+            let mut prev: Vec<JetF64> = (1..orbit.len())
+                .map(|i| jet_seed(orbit[i].0, orbit[i].1))
+                .collect();
             let mut skip = 1usize;
             loop {
                 for jet in &prev {
@@ -1461,8 +1507,7 @@ mod tests {
                             // The chain is −D·(N₂ − D·A): its rounding scale is
                             // |D| times a₂₀'s operand scale (the N₂ ↔ D·A
                             // cancellation amplified by D).
-                            mag(blk.m.d.mul(blk.m.n2))
-                                .max(mag(blk.m.d.mul(blk.m.d).mul(blk.m.a))),
+                            mag(blk.m.d.mul(blk.m.n2)).max(mag(blk.m.d.mul(blk.m.d).mul(blk.m.a))),
                         ));
                     }
                     for (what, got, want, scale) in checks {
@@ -1476,7 +1521,10 @@ mod tests {
                         assert!(
                             d / s < 1e-11,
                             "[{} skip {}] {} reconstruction off by {:e} at operand scale",
-                            name, skip, what, d / s
+                            name,
+                            skip,
+                            what,
+                            d / s
                         );
                     }
                 }
@@ -1571,8 +1619,7 @@ mod tests {
                                     _ => unified_eval_jet3(blk, zfe, cfe),
                                 };
                                 let (gx, gy) = got.to_f64();
-                                let err =
-                                    ((gx - wx).powi(2) + (gy - wy).powi(2)).sqrt();
+                                let err = ((gx - wx).powi(2) + (gy - wy).powi(2)).sqrt();
                                 checked += 1;
                                 assert!(
                                     err <= 5.0 * eps * scale,
@@ -1583,8 +1630,16 @@ mod tests {
                         }
                     }
                 }
-                println!("[{} c_max={:e}] soundness samples: {}", name, c_max, checked);
-                assert!(checked > 100, "[{} c_max={:e}] too few samples", name, c_max);
+                println!(
+                    "[{} c_max={:e}] soundness samples: {}",
+                    name, c_max, checked
+                );
+                assert!(
+                    checked > 100,
+                    "[{} c_max={:e}] too few samples",
+                    name,
+                    c_max
+                );
             }
         }
     }
@@ -1604,7 +1659,15 @@ mod tests {
         let rad = unified_build_radii(&levels, &orbit, eps, c_max);
         let band = c_max.log2() + 10.0;
         let coeffs = unified_serialize_coeffs(&levels);
-        let (sidecar, dir) = unified_serialize_radii(&levels, &rad, band, UNIFIED_BAND_SPREAD_LOG2, None, None, &[]);
+        let (sidecar, dir) = unified_serialize_radii(
+            &levels,
+            &rad,
+            band,
+            UNIFIED_BAND_SPREAD_LOG2,
+            None,
+            None,
+            &[],
+        );
         assert_eq!(coeffs.len(), sidecar.len(), "buffers not index-aligned");
         let emitted: Vec<usize> = levels
             .iter()
@@ -1625,15 +1688,17 @@ mod tests {
                 let blk = &lvl.blocks[s];
                 // Prefix order, exact deterministic round-trip.
                 let want = [
-                    &blk.m.a, &blk.m.b, &blk.m.d, &blk.m.n2, &blk.m.ap, &blk.m.dp,
-                    &blk.m.f, &blk.a12, &blk.a03,
+                    &blk.m.a, &blk.m.b, &blk.m.d, &blk.m.n2, &blk.m.ap, &blk.m.dp, &blk.m.f,
+                    &blk.a12, &blk.a03,
                 ];
                 for (k, w) in want.iter().enumerate() {
                     assert_eq!(
                         rec[k],
                         crate::jet::cfe_to_coeff(w),
                         "level {} slot {} coeff {} not prefix-ordered",
-                        li, s, k
+                        li,
+                        s,
+                        k
                     );
                 }
                 // Tag rule (§6.3 score) + radius f32 rounding + sentinels.
@@ -1671,7 +1736,13 @@ mod tests {
     fn unified_cold_build_stage_timing() {
         use std::time::Instant;
         for (name, cx, cy, iters, lcmax) in [
-            ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64, 32768usize, -40.0),
+            (
+                "seahorse",
+                -0.743643887037151_f64,
+                0.131825904205330_f64,
+                32768usize,
+                -40.0,
+            ),
             ("feigenbaum", -1.401155, 0.0, 32768, -44.0),
             ("near-parab", -0.7499, 0.0001, 32768, -40.0),
         ] {
@@ -1838,7 +1909,15 @@ mod tests {
         let levels = build_unified_levels(&orbit, 1 << 18);
         let rad = unified_build_radii(&levels, &orbit, eps, c_max);
         let band = c_max.log2() + 10.0;
-        let (side, dir) = unified_serialize_radii(&levels, &rad, band, UNIFIED_BAND_SPREAD_LOG2, None, None, &[]);
+        let (side, dir) = unified_serialize_radii(
+            &levels,
+            &rad,
+            band,
+            UNIFIED_BAND_SPREAD_LOG2,
+            None,
+            None,
+            &[],
+        );
         let emitted: Vec<usize> = levels
             .iter()
             .enumerate()
@@ -1854,7 +1933,11 @@ mod tests {
                 // Exact shader decode of the packed z slot.
                 let tag2 = (e.f32_safe * 0.5).floor();
                 let safe = e.f32_safe - 2.0 * tag2;
-                assert!(safe == 0.0 || safe == 1.0, "safe flag not 0/1: {}", e.f32_safe);
+                assert!(
+                    safe == 0.0 || safe == 1.0,
+                    "safe flag not 0/1: {}",
+                    e.f32_safe
+                );
                 assert!((0.0..=3.0).contains(&tag2), "secours tag out of range");
                 let tiers = &rad.tiers[li][s];
                 // The serialized pair must be exactly the §6.2/§6.3 policy
@@ -1876,10 +1959,16 @@ mod tests {
                     assert_eq!(tag2, e.tag, "dead secours must alias the principal");
                 }
             }
-            assert_eq!(d.max_r3_log2, lvl_max, "level gate must admit the secours band");
+            assert_eq!(
+                d.max_r3_log2, lvl_max,
+                "level gate must admit the secours band"
+            );
         }
         println!("portfolio: {} blocks carry a live secours", with_secours);
-        assert!(with_secours > 0, "no secours anywhere — portfolio inert on this view");
+        assert!(
+            with_secours > 0,
+            "no secours anywhere — portfolio inert on this view"
+        );
     }
 
     #[test]
@@ -1952,14 +2041,9 @@ mod tests {
                                 for j in first..first + lvl.skip {
                                     let (zx2, zy2) = orbit[j];
                                     let (mx, my) = (zx2 + wx, zy2 + wy);
-                                    let nd = (
-                                        2.0 * (mx * dx - my * dy),
-                                        2.0 * (mx * dy + my * dx),
-                                    );
-                                    let m2 = (
-                                        2.0 * (zx2 * wx - zy2 * wy),
-                                        2.0 * (zx2 * wy + zy2 * wx),
-                                    );
+                                    let nd = (2.0 * (mx * dx - my * dy), 2.0 * (mx * dy + my * dx));
+                                    let m2 =
+                                        (2.0 * (zx2 * wx - zy2 * wy), 2.0 * (zx2 * wy + zy2 * wx));
                                     let sq = (wx * wx - wy * wy, 2.0 * wx * wy);
                                     wx = m2.0 + sq.0 + c.0;
                                     wy = m2.1 + sq.1 + c.1;
@@ -1996,7 +2080,12 @@ mod tests {
                     "[{} c_max={:e}] der soundness: {} samples | of {:?} value-alive blocks per tier: der-limited {:?}, der-DEAD {:?}",
                     name, c_max, checked, finite, der_limited, der_dead
                 );
-                assert!(checked > 100, "[{} c_max={:e}] too few samples", name, c_max);
+                assert!(
+                    checked > 100,
+                    "[{} c_max={:e}] too few samples",
+                    name,
+                    c_max
+                );
             }
         }
     }
@@ -2010,7 +2099,12 @@ mod tests {
         // profile collapses at the first quasi-critical passage (diagnostic).
         let eps = 1e-12_f64;
         for (name, cx, cy, cmaxes) in [
-            ("seahorse", -0.743643887037151_f64, 0.131825904205330_f64, [1e-14_f64, 1e-9]),
+            (
+                "seahorse",
+                -0.743643887037151_f64,
+                0.131825904205330_f64,
+                [1e-14_f64, 1e-9],
+            ),
             ("near-parab", -0.7499, 0.0001, [1e-14, 1e-9]),
             ("feigenbaum", -1.401155, 0.0, [1e-14, 1e-9]),
         ] {
@@ -2065,7 +2159,11 @@ mod tests {
                     assert!(
                         err <= 5.0 * scale,
                         "[{} c_max={:e}] SA value err {:e} > 5ε·scale {:e} at n0={}",
-                        name, c_max, err, 5.0 * scale, sa.n0
+                        name,
+                        c_max,
+                        err,
+                        5.0 * scale,
+                        sa.n0
                     );
                     let (gx, gy) = d.to_f64();
                     let derr = ((gx - dx).powi(2) + (gy - dy).powi(2)).sqrt();
@@ -2073,7 +2171,10 @@ mod tests {
                     assert!(
                         derr <= 50.0 * dscale,
                         "[{} c_max={:e}] SA der err {:e} > 50ε·|b1| {:e}",
-                        name, c_max, derr, 50.0 * dscale
+                        name,
+                        c_max,
+                        derr,
+                        50.0 * dscale
                     );
                 }
             }
@@ -2167,7 +2268,15 @@ mod tests {
         let bounds = unified_build_bounds(&levels, &orbit, l2c);
         let rad = unified_solve_radii(&levels, &bounds, eps, l2c);
         let sa = sa_build(&orbit, eps, l2c.exp2(), orbit.len() - 1);
-        let (side, dir) = unified_serialize_radii(&levels, &rad, l2c + 10.0, UNIFIED_BAND_SPREAD_LOG2, Some(&sa), None, &[]);
+        let (side, dir) = unified_serialize_radii(
+            &levels,
+            &rad,
+            l2c + 10.0,
+            UNIFIED_BAND_SPREAD_LOG2,
+            Some(&sa),
+            None,
+            &[],
+        );
         println!("SA n0 = {}", sa.n0);
         for d in &dir {
             let mut finite = 0usize;
@@ -2188,7 +2297,10 @@ mod tests {
         if let Some(d) = dir.iter().find(|d| d.skip == 16) {
             for k in (0..d.count as usize).step_by((d.count as usize / 6).max(1)) {
                 let e = &side[d.offset as usize + k];
-                println!("  skip16 slot {}: r={:.1} tag={} f32safe={}", k, e.r_log2, e.tag, e.f32_safe);
+                println!(
+                    "  skip16 slot {}: r={:.1} tag={} f32safe={}",
+                    k, e.r_log2, e.tag, e.f32_safe
+                );
             }
         }
     }
@@ -2255,14 +2367,26 @@ mod tests {
                 let b = &bounds.jet[li][s];
                 println!(
                     "        jet bounds: a10 {:.1} a01 {:.1} min2z {:.1} a0 {:?}",
-                    b.log2_a10, b.log2_a01, b.log2_min_2z,
-                    b.log2_a0.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>()
+                    b.log2_a10,
+                    b.log2_a01,
+                    b.log2_min_2z,
+                    b.log2_a0
+                        .iter()
+                        .map(|x| (x * 10.0).round() / 10.0)
+                        .collect::<Vec<_>>()
                 );
                 for (g, c) in b.cand.iter().enumerate().take(3) {
                     println!(
                         "        cand {}: rz {:.1} rc {:.1} M {:.1} Mc {:.1} T {:?}",
-                        g, c.log2_rz, c.log2_rc, c.log2_m, c.log2_mc,
-                        c.log2_t.iter().map(|x| (x * 10.0).round() / 10.0).collect::<Vec<_>>()
+                        g,
+                        c.log2_rz,
+                        c.log2_rc,
+                        c.log2_m,
+                        c.log2_mc,
+                        c.log2_t
+                            .iter()
+                            .map(|x| (x * 10.0).round() / 10.0)
+                            .collect::<Vec<_>>()
                     );
                 }
             }
@@ -2287,7 +2411,15 @@ mod tests {
         // Runtime dispatch mirror (greedy largest skip, tagged radius, band
         // tags as serialized): count applications per tier.
         let band = l2c + 10.0;
-        let (side, dir) = unified_serialize_radii(&levels, &rad, band, UNIFIED_BAND_SPREAD_LOG2, None, None, &[]);
+        let (side, dir) = unified_serialize_radii(
+            &levels,
+            &rad,
+            band,
+            UNIFIED_BAND_SPREAD_LOG2,
+            None,
+            None,
+            &[],
+        );
         let mut tier_apps = [0usize; 4];
         let mut skipped = 0usize;
         let max_iter = orbit.len() - 1;
@@ -2299,7 +2431,11 @@ mod tests {
             if ref_i > 0 {
                 let shifted = ref_i - 1;
                 let dz2 = wx * wx + wy * wy;
-                let l2dz = if dz2 > 0.0 { 0.5 * dz2.log2() } else { f64::NEG_INFINITY };
+                let l2dz = if dz2 > 0.0 {
+                    0.5 * dz2.log2()
+                } else {
+                    f64::NEG_INFINITY
+                };
                 for d in dir.iter().rev() {
                     let skip = d.skip as usize;
                     if shifted % skip != 0 {
@@ -2367,7 +2503,7 @@ mod tests {
         );
     }
 
-   #[test]
+    #[test]
     fn periodic_interior_model_matches_cycle_multiplier() {
         // CPU model check for the dormant Phase-E path. On the period-2 disk reference
         // C = −1 + 0.1i: detection finds p = 2; the composed block's fixed-
@@ -2441,13 +2577,23 @@ mod tests {
             assert!(
                 err < 1e-6,
                 "κ = ({:.6}, {:.6}) vs analytic 4(c+1) = ({:.6}, {:.6}): rel err {:e}",
-                ka.0, ka.1, lam.0, lam.1, err
+                ka.0,
+                ka.1,
+                lam.0,
+                lam.1,
+                err
             );
-            assert!((ka.0 * ka.0 + ka.1 * ka.1).sqrt() < 1.0, "disk pixel must be attracting");
+            assert!(
+                (ka.0 * ka.0 + ka.1 * ka.1).sqrt() < 1.0,
+                "disk pixel must be attracting"
+            );
             // Closed form vs block iteration: k periods, k-independent error.
             let zr = if za == z1 { z2 } else { z1 };
             let delta0 = (za.0 + 1e-7, za.1 - 5e-8);
-            let w0 = cdiv((delta0.0 - za.0, delta0.1 - za.1), (delta0.0 - zr.0, delta0.1 - zr.1));
+            let w0 = cdiv(
+                (delta0.0 - za.0, delta0.1 - za.1),
+                (delta0.0 - zr.0, delta0.1 - zr.1),
+            );
             for k in [10usize, 1000] {
                 // Iterate the block map exactly (f64 c+ F-form).
                 let (mut zx2, mut zy2) = delta0;
@@ -2468,12 +2614,16 @@ mod tests {
                     kp = cm(kp, ka);
                 }
                 wk = cm(wk, kp);
-                let dk = cdiv((za.0 - cm(zr, wk).0, za.1 - cm(zr, wk).1), (1.0 - wk.0, -wk.1));
+                let dk = cdiv(
+                    (za.0 - cm(zr, wk).0, za.1 - cm(zr, wk).1),
+                    (1.0 - wk.0, -wk.1),
+                );
                 let err_k = ((dk.0 - zx2).powi(2) + (dk.1 - zy2).powi(2)).sqrt();
                 assert!(
                     err_k < 1e-9,
                     "closed form vs iteration at k={}: err {:e}",
-                    k, err_k
+                    k,
+                    err_k
                 );
             }
         }
@@ -2511,7 +2661,10 @@ mod tests {
             for &dphase in &[0.3_f64, 2.1, 4.4] {
                 for &cmm in &[1.0_f64, 0.125, 0.0] {
                     let delta = (r * dm * dphase.cos(), r * dm * dphase.sin());
-                    let dc = (c_max * cmm * (dphase + 1.0).cos(), c_max * cmm * (dphase + 1.0).sin());
+                    let dc = (
+                        c_max * cmm * (dphase + 1.0).cos(),
+                        c_max * cmm * (dphase + 1.0).sin(),
+                    );
                     // Exact p-step walk from phase `start`, value + ∂δ chain.
                     let (mut z, mut dz) = (delta, (1.0_f64, 0.0_f64));
                     for i in per.start..per.start + per.p {
@@ -2536,14 +2689,20 @@ mod tests {
                     assert!(
                         verr <= vbudget + 1e-300,
                         "(V) violated at |δ|={:e} |c|={:e}: err {:e} > budget {:e}",
-                        dmag, cmag, verr, vbudget
+                        dmag,
+                        cmag,
+                        verr,
+                        vbudget
                     );
                     let derr = ((ddz.0 - dz.0).powi(2) + (ddz.1 - dz.1).powi(2)).sqrt();
                     let dbudget = 0.5 * eps_int * (la + lap * c_max);
                     assert!(
                         derr <= dbudget + 1e-300,
                         "(V′) violated at |δ|={:e} |c|={:e}: err {:e} > budget {:e}",
-                        dmag, cmag, derr, dbudget
+                        dmag,
+                        cmag,
+                        derr,
+                        dbudget
                     );
                 }
             }
@@ -2643,8 +2802,14 @@ mod tests {
                             let p1 = cadd(cadd(a, cm(a11, c)), cm(a12, c2));
                             let p2 = cadd(a20, cm(a21, c));
                             m_v = cadd(p0, cm(z0, cadd(p1, cm(z0, cadd(p2, cm(z0, a30))))));
-                            m_z = cadd(p1, cm(z0, cadd(cm((2.0, 0.0), p2), cm(z0, cm((3.0, 0.0), a30)))));
-                            let q0 = cadd(cadd(b, cm((2.0, 0.0), cm(a02, c))), cm((3.0, 0.0), cm(a03, c2)));
+                            m_z = cadd(
+                                p1,
+                                cm(z0, cadd(cm((2.0, 0.0), p2), cm(z0, cm((3.0, 0.0), a30)))),
+                            );
+                            let q0 = cadd(
+                                cadd(b, cm((2.0, 0.0), cm(a02, c))),
+                                cm((3.0, 0.0), cm(a03, c2)),
+                            );
                             let q1 = cadd(a11, cm((2.0, 0.0), cm(a12, c)));
                             m_c = cadd(q0, cm(z0, cadd(q1, cm(z0, a21))));
                             m_zz = cadd(cm((2.0, 0.0), p2), cm((6.0, 0.0), cm(a30, z0)));
@@ -2681,15 +2846,9 @@ mod tests {
                                 csub(cadd(cm((2.0, 0.0), cm(n2x, z0)), ae), cm(m_v, de)),
                                 den,
                             );
-                            m_c = cdiv(
-                                csub(cadd(cm(apx, z0), b), cm(m_v, dcden)),
-                                den,
-                            );
+                            m_c = cdiv(csub(cadd(cm(apx, z0), b), cm(m_v, dcden)), den);
                             // m_zz = (2·N₂ − 2·De·m_z)/den.
-                            m_zz = cdiv(
-                                cm((2.0, 0.0), csub(n2x, cm(de, m_z))),
-                                den,
-                            );
+                            m_zz = cdiv(cm((2.0, 0.0), csub(n2x, cm(de, m_z))), den);
                             m_cc = cm((-2.0, 0.0), cdiv(cm(dcden, m_c), den));
                             m_zc = csub(
                                 cdiv(csub(csub(apx, cm(m_c, de)), cm(m_v, dpx)), den),
@@ -2709,7 +2868,11 @@ mod tests {
                         assert!(
                             ed < 1e-6,
                             "[{} l{} s{} t{}] z' propagation off by {:e}",
-                            name, li, sidx, tier, ed
+                            name,
+                            li,
+                            sidx,
+                            tier,
+                            ed
                         );
                         // z″ is uncertified REST territory — (V)/(V′) cover
                         // value and z′ only — and the [2/1] radii are wide
@@ -2719,12 +2882,19 @@ mod tests {
                         assert!(
                             es < 1e-3,
                             "[{} l{} s{} t{}] z'' propagation off by {:e}",
-                            name, li, sidx, tier, es
+                            name,
+                            li,
+                            sidx,
+                            tier,
+                            es
                         );
                     }
                 }
             }
-            println!("[{}] second-derivative propagation samples: {}", name, checked);
+            println!(
+                "[{}] second-derivative propagation samples: {}",
+                name, checked
+            );
             assert!(checked > 40, "[{}] too few samples", name);
         }
     }
@@ -2744,8 +2914,9 @@ mod tests {
         assert_eq!(unified.len(), cplus.len(), "scaffold mismatch");
         // Rebuild the jets once more to compare evaluations (streaming, level
         // by level, same shape as the builder).
-        let mut jets: Vec<JetF64> =
-            (1..orbit.len()).map(|i| jet_seed(orbit[i].0, orbit[i].1)).collect();
+        let mut jets: Vec<JetF64> = (1..orbit.len())
+            .map(|i| jet_seed(orbit[i].0, orbit[i].1))
+            .collect();
         for (li, (ul, cl)) in unified.iter().zip(cplus.iter()).enumerate() {
             assert_eq!(ul.skip, cl.skip);
             if ul.skip < MOBIUS_MIN_EMIT_SKIP {
@@ -2776,7 +2947,9 @@ mod tests {
                     assert!(
                         rel_err(*got, *want) < 1e-15,
                         "level {} slot {}: {} differs from c+ build",
-                        li, s, what
+                        li,
+                        s,
+                        what
                     );
                 }
                 // Plain (Padé) tier = the record's own plain view: A/B/D/N₂
@@ -2796,7 +2969,9 @@ mod tests {
                         assert!(
                             e < 1e-11,
                             "level {} slot {}: jet3 eval off by {:e}",
-                            li, s, e
+                            li,
+                            s,
+                            e
                         );
                     }
                 }
@@ -2809,10 +2984,6 @@ mod tests {
             }
         }
     }
-
-
-
-
 }
 
 #[cfg(test)]
@@ -2871,7 +3042,13 @@ mod probe_tests {
         let t = Instant::now();
         for lvl in levels.iter() {
             for (blk, md) in lvl.blocks.iter().zip(lvl.moduli.iter()) {
-                let plain_m = { let mut m = blk.m; m.ap = CFe::ZERO; m.dp = CFe::ZERO; m.f = CFe::ZERO; m };
+                let plain_m = {
+                    let mut m = blk.m;
+                    m.ap = CFe::ZERO;
+                    m.dp = CFe::ZERO;
+                    m.f = CFe::ZERO;
+                    m
+                };
                 acc += closed_form_radius(&plain_m, &md.log2_q_plain, eps, l2c);
                 acc += closed_form_radius(&blk.m, &md.log2_q_cplus, eps, l2c);
             }
@@ -2880,7 +3057,13 @@ mod probe_tests {
         let t = Instant::now();
         for lvl in levels.iter() {
             for (blk, md) in lvl.blocks.iter().zip(lvl.moduli.iter()) {
-                let plain_m = { let mut m = blk.m; m.ap = CFe::ZERO; m.dp = CFe::ZERO; m.f = CFe::ZERO; m };
+                let plain_m = {
+                    let mut m = blk.m;
+                    m.ap = CFe::ZERO;
+                    m.dp = CFe::ZERO;
+                    m.f = CFe::ZERO;
+                    m
+                };
                 acc += derivative_radius(&plain_m, &md.log2_a, eps, l2c, false);
                 acc += derivative_radius(&blk.m, &md.log2_a, eps, l2c, false);
             }

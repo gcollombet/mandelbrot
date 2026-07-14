@@ -9,6 +9,7 @@ use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub type JsValue = String;
 
+mod feigenbaum;
 mod gates;
 mod jet;
 mod matrix_c1;
@@ -58,7 +59,10 @@ const DEFAULT_BUDGET_BITS: usize = 64;
 // Per-step precision from the amplified-bit count G_n. Clamped to [FLOOR, budget].
 fn profile_precision(budget: usize, g_bits: f64) -> usize {
     let shed = (g_bits - PRECISION_MARGIN_BITS as f64).floor().max(0.0) as usize;
-    budget.saturating_sub(shed).max(PRECISION_FLOOR_BITS).min(budget.max(PRECISION_FLOOR_BITS))
+    budget
+        .saturating_sub(shed)
+        .max(PRECISION_FLOOR_BITS)
+        .min(budget.max(PRECISION_FLOOR_BITS))
 }
 
 // Complex value in extended-exponent form: (x, y) · 2^e. Used to carry dZ_n/dC, whose
@@ -72,7 +76,11 @@ struct FExpC {
 
 impl FExpC {
     fn zero() -> Self {
-        FExpC { x: 0.0, y: 0.0, e: 0 }
+        FExpC {
+            x: 0.0,
+            y: 0.0,
+            e: 0,
+        }
     }
 
     // Pull the mantissa back to O(1), folding the magnitude into the exponent.
@@ -192,8 +200,8 @@ const LOG2_10: f64 = 3.321928094887362;
 fn dbig_frexp(v: &DBig) -> (f64, i32) {
     let repr = v.repr();
     let exp10 = repr.exponent(); // value = significand · 10^exp10
-    // Magnitude of the significand (UBig); sign is taken from v directly to avoid naming the
-    // dashu Sign type (not re-exported by dashu-float).
+                                 // Magnitude of the significand (UBig); sign is taken from v directly to avoid naming the
+                                 // dashu Sign type (not re-exported by dashu-float).
     let (_, mag) = repr.significand().clone().into_parts();
     if mag == UBig::from(0u8) {
         return (0.0, 0); // value is exactly zero
@@ -415,7 +423,7 @@ pub struct MandelbrotNavigator {
     vtx: DBig,
     vty: DBig,
     last_step_time: Option<f64>, // timestamp en ms
-    
+
     // Champs de transition/voyage
     transition_start_cx: Option<DBig>,
     transition_start_cy: Option<DBig>,
@@ -561,7 +569,9 @@ impl MandelbrotNavigator {
         // budget P at any zoom. The shared FRONT navigator keeps a modest default budget, so it
         // tracks the view — its per-frame coordinate strings stay view-length, never the deep
         // budget (which would make per-frame DBig→string serialization cost ∝ budget).
-        let prec = precision_bits_for_scale(&self.scale).max(self.budget_prec).max(64);
+        let prec = precision_bits_for_scale(&self.scale)
+            .max(self.budget_prec)
+            .max(64);
         self.cx = raise_precision(self.cx.clone(), prec);
         self.cy = raise_precision(self.cy.clone(), prec);
         self.cx_continuous = raise_precision(self.cx_continuous.clone(), prec);
@@ -612,7 +622,7 @@ impl MandelbrotNavigator {
         let scale = &self.scale;
         let delta_x = (&dx_big * &cos_a - &dy_big * &sin_a) * scale;
         let delta_y = (&dx_big * &sin_a + &dy_big * &cos_a) * scale;
-        
+
         self.cx_continuous = &self.cx_continuous + delta_x;
         self.cy_continuous = &self.cy_continuous + delta_y;
 
@@ -620,33 +630,35 @@ impl MandelbrotNavigator {
             let aspect = w / h;
             let neutral_extent = (aspect * aspect + 1.0).sqrt();
             let tex_size = (w * w + h * h).sqrt().ceil();
-            
+
             let dcx = &self.cx_continuous - &self.reference_cx;
             let dcy = &self.cy_continuous - &self.reference_cy;
-            
+
             let rx_big = &dcx / scale;
             let ry_big = &dcy / scale;
-            
+
             let rx = dbig_to_f64(&rx_big);
             let ry = dbig_to_f64(&ry_big);
-            
+
             let cos_a_f64 = angle.cos();
             let sin_a_f64 = angle.sin();
-            
+
             let px_factor = tex_size / (2.0 * neutral_extent);
             let dpx = (cos_a_f64 * rx + sin_a_f64 * ry) * px_factor;
             let dpy = (sin_a_f64 * rx - cos_a_f64 * ry) * px_factor;
-            
+
             let rounded_dpx = dpx.round();
             let rounded_dpy = dpy.round();
-            
+
             let factor = 2.0 * neutral_extent / tex_size;
             let snapped_rx = (cos_a_f64 * rounded_dpx + sin_a_f64 * rounded_dpy) * factor;
             let snapped_ry = (sin_a_f64 * rounded_dpx - cos_a_f64 * rounded_dpy) * factor;
-            
-            let snapped_rx_big = DBig::from_str(&snapped_rx.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap());
-            let snapped_ry_big = DBig::from_str(&snapped_ry.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap());
-            
+
+            let snapped_rx_big = DBig::from_str(&snapped_rx.to_string())
+                .unwrap_or_else(|_| DBig::try_from(0).unwrap());
+            let snapped_ry_big = DBig::from_str(&snapped_ry.to_string())
+                .unwrap_or_else(|_| DBig::try_from(0).unwrap());
+
             self.cx = &self.reference_cx + &snapped_rx_big * scale;
             self.cy = &self.reference_cy + &snapped_ry_big * scale;
             // Sync cx_continuous so subsequent steps start from an exact pixel boundary.
@@ -770,8 +782,9 @@ impl MandelbrotNavigator {
         if len < 8 {
             return PadeBenchmark::default();
         }
-        let orbit: Vec<(f64, f64)> =
-            (0..len).map(|i| (self.result[i].zx as f64, self.result[i].zy as f64)).collect();
+        let orbit: Vec<(f64, f64)> = (0..len)
+            .map(|i| (self.result[i].zx as f64, self.result[i].zy as f64))
+            .collect();
         let eps = (self.bla_epsilon.max(f32::MIN_POSITIVE)) as f64;
         let max_skip = self.max_bla_skip;
         let aff = bench_build_levels(&orbit, eps, false, max_skip);
@@ -816,11 +829,7 @@ impl MandelbrotNavigator {
         self.vscale = &self.vscale * factor_big;
     }
 
-    pub fn step(
-        &mut self,
-        canvas_width: Option<f64>,
-        canvas_height: Option<f64>,
-    ) -> Vec<String> {
+    pub fn step(&mut self, canvas_width: Option<f64>, canvas_height: Option<f64>) -> Vec<String> {
         // Calcul du temps écoulé depuis le dernier appel
         let delta_time = {
             #[cfg(target_arch = "wasm32")]
@@ -898,13 +907,15 @@ impl MandelbrotNavigator {
                 let ratio = target_scale / start_scale;
                 let ratio_f64 = dbig_to_f64(&ratio);
                 let factor = ratio_f64.powf(t_eased);
-                let factor_big = DBig::from_str(&factor.to_string()).unwrap_or_else(|_| DBig::try_from(1).unwrap());
+                let factor_big = DBig::from_str(&factor.to_string())
+                    .unwrap_or_else(|_| DBig::try_from(1).unwrap());
                 self.scale = start_scale * &factor_big;
 
                 // Pour la position (cx, cy), afin d'avoir une vitesse visuelle de translation uniforme,
                 // on interpole linéairement par rapport au SCALE (qui évolue exponentiellement) plutôt qu'au temps.
                 let t_pos_big = if (ratio_f64 - 1.0).abs() < 1e-6 {
-                    DBig::from_str(&t_eased.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap())
+                    DBig::from_str(&t_eased.to_string())
+                        .unwrap_or_else(|_| DBig::try_from(0).unwrap())
                 } else {
                     (&self.scale - start_scale) / (target_scale - start_scale)
                 };
@@ -969,12 +980,12 @@ impl MandelbrotNavigator {
             let k = std::f64::consts::LN_2 / 0.05;
             let displacement_factor_f64 = (1.0 - damping_base) / k;
             let displacement_factor = DBig::from_str(&displacement_factor_f64.to_string()).unwrap();
-            
+
             self.cx_continuous = &self.cx_continuous + &self.vtx * &displacement_factor;
             self.cy_continuous = &self.cy_continuous + &self.vty * &displacement_factor;
             self.cx = self.cx_continuous.clone();
             self.cy = self.cy_continuous.clone();
-            
+
             self.vtx = &self.vtx * &damping;
             self.vty = &self.vty * &damping;
 
@@ -994,10 +1005,9 @@ impl MandelbrotNavigator {
         }
 
         if let (Some(w), Some(h)) = (canvas_width, canvas_height) {
-            let is_zooming = if let (Some(start_scale), Some(target_scale)) = (
-                &self.transition_start_scale,
-                &self.transition_target_scale,
-            ) {
+            let is_zooming = if let (Some(start_scale), Some(target_scale)) =
+                (&self.transition_start_scale, &self.transition_target_scale)
+            {
                 start_scale != target_scale
             } else {
                 self.vscale != DBig::try_from(1).unwrap()
@@ -1007,33 +1017,35 @@ impl MandelbrotNavigator {
                 let aspect = w / h;
                 let neutral_extent = (aspect * aspect + 1.0).sqrt();
                 let tex_size = (w * w + h * h).sqrt().ceil();
-                
+
                 let dcx = &self.cx_continuous - &self.reference_cx;
                 let dcy = &self.cy_continuous - &self.reference_cy;
-                
+
                 let rx_big = &dcx / &self.scale;
                 let ry_big = &dcy / &self.scale;
-                
+
                 let rx = dbig_to_f64(&rx_big);
                 let ry = dbig_to_f64(&ry_big);
-                
+
                 let cos_a_f64 = self.angle.cos();
                 let sin_a_f64 = self.angle.sin();
-                
+
                 let px_factor = tex_size / (2.0 * neutral_extent);
                 let dpx = (cos_a_f64 * rx + sin_a_f64 * ry) * px_factor;
                 let dpy = (sin_a_f64 * rx - cos_a_f64 * ry) * px_factor;
-                
+
                 let rounded_dpx = dpx.round();
                 let rounded_dpy = dpy.round();
-                
+
                 let factor = 2.0 * neutral_extent / tex_size;
                 let snapped_rx = (cos_a_f64 * rounded_dpx + sin_a_f64 * rounded_dpy) * factor;
                 let snapped_ry = (sin_a_f64 * rounded_dpx - cos_a_f64 * rounded_dpy) * factor;
-                
-                let snapped_rx_big = DBig::from_str(&snapped_rx.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap());
-                let snapped_ry_big = DBig::from_str(&snapped_ry.to_string()).unwrap_or_else(|_| DBig::try_from(0).unwrap());
-                
+
+                let snapped_rx_big = DBig::from_str(&snapped_rx.to_string())
+                    .unwrap_or_else(|_| DBig::try_from(0).unwrap());
+                let snapped_ry_big = DBig::from_str(&snapped_ry.to_string())
+                    .unwrap_or_else(|_| DBig::try_from(0).unwrap());
+
                 self.cx = &self.reference_cx + &snapped_rx_big * &self.scale;
                 self.cy = &self.reference_cy + &snapped_ry_big * &self.scale;
                 // Keep cx_continuous in sync with the snapped position so that
@@ -1151,7 +1163,12 @@ impl MandelbrotNavigator {
         let reference_cy = &self.reference_cy;
 
         if self.result.is_empty() {
-            self.result.push(MandelbrotStep { zx: dbig_to_f32(&zx), zy: dbig_to_f32(&zy), pad0: 0.0, pad1: 0.0 });
+            self.result.push(MandelbrotStep {
+                zx: dbig_to_f32(&zx),
+                zy: dbig_to_f32(&zy),
+                pad0: 0.0,
+                pad1: 0.0,
+            });
         }
 
         while self.last_iter < total_iter {
@@ -1172,8 +1189,12 @@ impl MandelbrotNavigator {
             } else {
                 let zx_n = zx.with_precision(p_n).value();
                 let zy_n = zy.with_precision(p_n).value();
-                let zx_new = (&zx_n * &zx_n - &zy_n * &zy_n + reference_cx).with_precision(p_n).value();
-                let zy_new = (&two * &zx_n * &zy_n + reference_cy).with_precision(p_n).value();
+                let zx_new = (&zx_n * &zx_n - &zy_n * &zy_n + reference_cx)
+                    .with_precision(p_n)
+                    .value();
+                let zy_new = (&two * &zx_n * &zy_n + reference_cy)
+                    .with_precision(p_n)
+                    .value();
                 // der_{n+1} = 2·Z_n·der_n + 1 (uses Z_n, the pre-update f32-precision value).
                 der.step(zx_f, zy_f);
                 zx = zx_new;
@@ -1182,7 +1203,12 @@ impl MandelbrotNavigator {
             self.last_iter += 1;
             let sx = dbig_to_f32(&zx);
             let sy = dbig_to_f32(&zy);
-            self.result.push(MandelbrotStep { zx: sx, zy: sy, pad0: 0.0, pad1: 0.0 });
+            self.result.push(MandelbrotStep {
+                zx: sx,
+                zy: sy,
+                pad0: 0.0,
+                pad1: 0.0,
+            });
             // Carry z_{n+1}'s f32 for the next iteration's derivative step.
             zx_f = sx as f64;
             zy_f = sy as f64;
@@ -1256,7 +1282,8 @@ impl MandelbrotNavigator {
         let mut skip = 1usize;
         let mut level_start = 0usize;
         if skip >= MIN_BLA_SKIP {
-            self.bla_result.extend(previous_level.iter().map(bla_f64_to_fe));
+            self.bla_result
+                .extend(previous_level.iter().map(bla_f64_to_fe));
             self.bla_levels.push(BlaLevel {
                 offset: level_start as u32,
                 count: previous_level.len() as u32,
@@ -1281,7 +1308,8 @@ impl MandelbrotNavigator {
             }
 
             if merged_skip >= MIN_BLA_SKIP && merged_skip <= max_bla_skip {
-                self.bla_result.extend(current_level.iter().map(bla_f64_to_fe));
+                self.bla_result
+                    .extend(current_level.iter().map(bla_f64_to_fe));
                 self.bla_levels.push(BlaLevel {
                     offset: level_start as u32,
                     count: current_level.len() as u32,
@@ -1397,8 +1425,8 @@ impl MandelbrotNavigator {
             *self.jet_levels = jet::build_jet_levels(&orbit, MIN_BLA_SKIP, max_skip);
             self.jet_source_len = orbit_len;
             self.jet_bounds_log2_rc = f64::NAN; // cascade: bounds now stale
-            // Coefficients depend only on the orbit — serialize them once here,
-            // not on every radius re-solve (the whole point of the split buffer).
+                                                // Coefficients depend only on the orbit — serialize them once here,
+                                                // not on every radius re-solve (the whole point of the split buffer).
             *self.jet_coeffs_result = jet::jet_serialize_coeffs(&self.jet_levels);
         }
         let log2_c_max = self.jet_log2_c_max();
@@ -1447,7 +1475,9 @@ impl MandelbrotNavigator {
                 .jet_bounds
                 .iter()
                 .map(|lvl| {
-                    lvl.iter().map(|b| jet::jet_solve_radii(b, epsilon, log2_c_max)).collect()
+                    lvl.iter()
+                        .map(|b| jet::jet_solve_radii(b, epsilon, log2_c_max))
+                        .collect()
                 })
                 .collect();
             self.jet_radii_epsilon = epsilon;
@@ -1500,8 +1530,8 @@ impl MandelbrotNavigator {
             *self.mobius_levels = mobius::mobius_build_levels(&orbit, max_skip);
             self.mobius_source_len = orbit_len;
             self.mobius_bounds_log2_c_max = f64::NAN; // cascade: bounds stale
-            // Coefficients are orbit-keyed: serialized once here, never on a
-            // radius re-solve (the split-buffer point).
+                                                      // Coefficients are orbit-keyed: serialized once here, never on a
+                                                      // radius re-solve (the split-buffer point).
             *self.mobius_coeffs_result = mobius::mobius_serialize_coeffs(&self.mobius_levels);
         }
         let log2_c_max = self.jet_log2_c_max();
@@ -1513,8 +1543,11 @@ impl MandelbrotNavigator {
             || log2_c_max > self.mobius_bounds_log2_c_max
             || log2_c_max < self.mobius_bounds_log2_c_max - 4.0;
         if bounds_stale {
-            *self.mobius_bounds =
-                Some(mobius::mobius_build_bounds(&self.mobius_levels, &orbit, log2_c_max));
+            *self.mobius_bounds = Some(mobius::mobius_build_bounds(
+                &self.mobius_levels,
+                &orbit,
+                log2_c_max,
+            ));
             self.mobius_bounds_log2_c_max = log2_c_max;
             self.mobius_radii_log2_c_max = f64::NAN; // cascade: radii stale
         }
@@ -1525,7 +1558,11 @@ impl MandelbrotNavigator {
             || log2_c_max > self.mobius_radii_log2_c_max
             || log2_c_max < self.mobius_radii_log2_c_max - 2.0;
         if radii_stale {
-            let bounds = self.mobius_bounds.as_ref().as_ref().expect("bounds built above");
+            let bounds = self
+                .mobius_bounds
+                .as_ref()
+                .as_ref()
+                .expect("bounds built above");
             // The renderer transports dz/dc alongside dz for distance-estimate
             // shading.  A value-only radius can therefore accept a block whose
             // displayed derivative is no longer within epsilon.  Keep the
@@ -1599,10 +1636,9 @@ impl MandelbrotNavigator {
             *self.unified_levels = unified::build_unified_levels(&orbit, max_skip);
             self.unified_source_len = orbit_len;
             self.unified_bounds_log2_c_max = f64::NAN; // cascade: bounds stale
-            // Coefficients are orbit-keyed: serialized once here, never on a
-            // radius re-solve (the split-buffer point).
-            *self.unified_coeffs_result =
-                unified::unified_serialize_coeffs(&self.unified_levels);
+                                                       // Coefficients are orbit-keyed: serialized once here, never on a
+                                                       // radius re-solve (the split-buffer point).
+            *self.unified_coeffs_result = unified::unified_serialize_coeffs(&self.unified_levels);
         }
         let log2_c_max = self.jet_log2_c_max();
         // Same headroom rule as the mobius/jet stages: bounds stay sound for
@@ -1629,13 +1665,13 @@ impl MandelbrotNavigator {
             || log2_c_max < self.unified_radii_log2_c_max - 2.0;
         if radii_stale {
             self.unified_last_build_stages |= 4;
-            let bounds = self.unified_bounds.as_ref().as_ref().expect("bounds built above");
-            let radii = unified::unified_solve_radii(
-                &self.unified_levels,
-                bounds,
-                epsilon,
-                log2_c_max,
-            );
+            let bounds = self
+                .unified_bounds
+                .as_ref()
+                .as_ref()
+                .expect("bounds built above");
+            let radii =
+                unified::unified_solve_radii(&self.unified_levels, bounds, epsilon, log2_c_max);
             // Certified SA prefix ((ε, c_max)-keyed like the radii): the
             // common skip every compute-request pixel starts at (Phase C).
             let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
@@ -1682,16 +1718,14 @@ impl MandelbrotNavigator {
                         dbig_to_f64(&self.reference_cx),
                         dbig_to_f64(&self.reference_cy),
                     );
-                    gate_list =
-                        gates::build_gates(&orbit, c0, log2_c_max, epsilon, &sat);
+                    gate_list = gates::build_gates(&orbit, c0, log2_c_max, epsilon, &sat);
                 }
             }
             // Working band for the dispatch tags: the REPLAY-observed |dz|
             // distribution (§6.3 — median + spread over Zhuoran-rebased
             // sample-pixel replays; the c_max + 10 placeholder is only the
             // short-orbit fallback inside unified_replay_band).
-            let (log2_band, log2_spread) =
-                unified::unified_replay_band(&orbit, log2_c_max);
+            let (log2_band, log2_spread) = unified::unified_replay_band(&orbit, log2_c_max);
             let (radii_side, dir) = unified::unified_serialize_radii(
                 &self.unified_levels,
                 &radii,
@@ -1760,8 +1794,7 @@ impl MandelbrotNavigator {
             let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
             let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
             let periodic = unified::periodic_build(&orbit, epsilon, log2_c_max);
-            let (side, dir) =
-                unified::unified_serialize_header_only(Some(&sa), periodic.as_ref());
+            let (side, dir) = unified::unified_serialize_header_only(Some(&sa), periodic.as_ref());
             *self.unified_header_result = side;
             *self.unified_header_levels = dir;
         }
@@ -1862,7 +1895,14 @@ impl MandelbrotNavigator {
 
         let max_distance = &self.scale * dbig_i(1000);
         let tolerance = self.scale.clone();
-        match newton_nucleus(&self.cx, &self.cy, period, NEWTON_STEPS, &max_distance, &tolerance) {
+        match newton_nucleus(
+            &self.cx,
+            &self.cy,
+            period,
+            NEWTON_STEPS,
+            &max_distance,
+            &tolerance,
+        ) {
             Some(reference) => reference,
             None => (self.cx.clone(), self.cy.clone()),
         }
@@ -1933,8 +1973,8 @@ impl MandelbrotNavigator {
         const NEWTON_STEPS: usize = 80;
         self.ensure_precision();
 
-        let factor = DBig::from_str(&radius_factor.max(1e-6).to_string())
-            .unwrap_or_else(|_| dbig_i(4));
+        let factor =
+            DBig::from_str(&radius_factor.max(1e-6).to_string()).unwrap_or_else(|_| dbig_i(4));
         let radius = &self.scale * &factor;
 
         let Some(period) = self.detect_period_ball(max_iter as usize, &radius) else {
@@ -1956,11 +1996,21 @@ impl MandelbrotNavigator {
         // that many digits of headroom to converge into; `margin_digits`
         // reserves some of it for the rounding noise that accumulates over
         // `period` squarings per Newton step.
-        let prec = precision_bits_for_scale(&self.scale).max(self.budget_prec).max(64);
+        let prec = precision_bits_for_scale(&self.scale)
+            .max(self.budget_prec)
+            .max(64);
         let margin_digits = 24 + (period as f64).log10().ceil().max(0.0) as usize;
         let tol_digits = prec.saturating_sub(margin_digits).max(16);
-        let tolerance = DBig::from_str(&format!("1e-{tol_digits}")).unwrap_or_else(|_| self.scale.clone());
-        match newton_nucleus(&self.cx, &self.cy, period, NEWTON_STEPS, &max_distance, &tolerance) {
+        let tolerance =
+            DBig::from_str(&format!("1e-{tol_digits}")).unwrap_or_else(|_| self.scale.clone());
+        match newton_nucleus(
+            &self.cx,
+            &self.cy,
+            period,
+            NEWTON_STEPS,
+            &max_distance,
+            &tolerance,
+        ) {
             Some((ncx, ncy)) => vec![
                 "ok".to_string(),
                 ncx.to_string(),
@@ -2100,9 +2150,12 @@ impl MandelbrotNavigator {
         self.transition_start_scale = Some(self.scale.clone());
         self.transition_start_angle = Some(self.angle);
 
-        self.transition_target_cx = Some(DBig::from_str(target_cx).unwrap_or_else(|_| self.cx.clone()));
-        self.transition_target_cy = Some(DBig::from_str(target_cy).unwrap_or_else(|_| self.cy.clone()));
-        self.transition_target_scale = Some(DBig::from_str(target_scale).unwrap_or_else(|_| self.scale.clone()));
+        self.transition_target_cx =
+            Some(DBig::from_str(target_cx).unwrap_or_else(|_| self.cx.clone()));
+        self.transition_target_cy =
+            Some(DBig::from_str(target_cy).unwrap_or_else(|_| self.cy.clone()));
+        self.transition_target_scale =
+            Some(DBig::from_str(target_scale).unwrap_or_else(|_| self.scale.clone()));
 
         let mut diff = (target_angle - self.angle) % (2.0 * std::f64::consts::PI);
         if diff > std::f64::consts::PI {
@@ -2194,7 +2247,6 @@ pub struct MobiusBufferInfo {
     pub level_count: usize,
 }
 
-
 // BLA coefficients during the build, in f64 so the merge (product of derivatives,
 // up to ~1e154 at ~1e-308 depth) and the shrinking radii don't over/underflow
 // f32. Converted to the extended-exponent BlaStep for the shader at storage.
@@ -2258,7 +2310,17 @@ fn bla_seed(zx: f64, zy: f64, epsilon: f64, pade: bool) -> BlaF64 {
     } else {
         (epsilon * mag, 0.0, 0.0)
     };
-    BlaF64 { ax: 2.0 * zx, ay: 2.0 * zy, bx: 1.0, by: 0.0, alpha, beta: 0.0, dx, dy, min_a: 2.0 * mag }
+    BlaF64 {
+        ax: 2.0 * zx,
+        ay: 2.0 * zy,
+        bx: 1.0,
+        by: 0.0,
+        alpha,
+        beta: 0.0,
+        dx,
+        dy,
+        min_a: 2.0 * mag,
+    }
 }
 
 // Merge two consecutive blocks: x = left (first), y = right (second). The affine
@@ -2285,7 +2347,17 @@ fn bla_merge(left: BlaF64, right: BlaF64, pade: bool) -> BlaF64 {
     } else {
         (0.0, 0.0)
     };
-    BlaF64 { ax, ay, bx: abx + right.bx, by: aby + right.by, alpha, beta, dx, dy, min_a: left.min_a.min(right.min_a) }
+    BlaF64 {
+        ax,
+        ay,
+        bx: abx + right.bx,
+        by: aby + right.by,
+        alpha,
+        beta,
+        dx,
+        dy,
+        min_a: left.min_a.min(right.min_a),
+    }
 }
 
 // (exponent, 2^-exponent) such that |x|·2^-exponent ∈ [0.5, 1); (0, 1.0) for 0.
@@ -2328,7 +2400,6 @@ fn bla_f64_to_fe(s: &BlaF64) -> BlaStep {
 fn max_alpha_bits(entries: &[BlaF64]) -> u32 {
     (entries.iter().fold(0.0f64, |m, s| m.max(s.alpha)) as f32).to_bits()
 }
-
 
 fn detect_period_f64(cx: f64, cy: f64, max_iter: usize, max_period: usize) -> Option<usize> {
     if !cx.is_finite() || !cy.is_finite() {
@@ -2508,24 +2579,34 @@ struct PadeLevel {
     entries: Vec<BlaF64>,
 }
 
-fn bench_build_levels(orbit: &[(f64, f64)], epsilon: f64, pade: bool, max_skip: usize) -> Vec<PadeLevel> {
+fn bench_build_levels(
+    orbit: &[(f64, f64)],
+    epsilon: f64,
+    pade: bool,
+    max_skip: usize,
+) -> Vec<PadeLevel> {
     let n = orbit.len();
     let mut levels = Vec::new();
     if n < 3 {
         return levels;
     }
-    let mut prev: Vec<BlaF64> =
-        (1..n).map(|i| bla_seed(orbit[i].0, orbit[i].1, epsilon, pade)).collect();
+    let mut prev: Vec<BlaF64> = (1..n)
+        .map(|i| bla_seed(orbit[i].0, orbit[i].1, epsilon, pade))
+        .collect();
     let mut skip = 1usize;
     while skip * 2 < n && skip < max_skip {
         let m = prev.len() / 2;
         if m == 0 {
             break;
         }
-        let cur: Vec<BlaF64> =
-            (0..m).map(|i| bla_merge(prev[2 * i], prev[2 * i + 1], pade)).collect();
+        let cur: Vec<BlaF64> = (0..m)
+            .map(|i| bla_merge(prev[2 * i], prev[2 * i + 1], pade))
+            .collect();
         skip *= 2;
-        levels.push(PadeLevel { skip, entries: cur.clone() });
+        levels.push(PadeLevel {
+            skip,
+            entries: cur.clone(),
+        });
         prev = cur;
     }
     levels
@@ -2548,7 +2629,13 @@ fn bench_block(e: &BlaF64, dz: (f64, f64), dc: (f64, f64), pade: bool) -> Option
 
 // One pixel: exact perturbation + block jumps + rebasing. Empty `levels` ⇒ exact.
 // Returns (loop steps, mandelbrot iteration reached, escaped).
-fn bench_run_pixel(levels: &[PadeLevel], orbit: &[(f64, f64)], dc: (f64, f64), max_iter: usize, pade: bool) -> (usize, usize, bool) {
+fn bench_run_pixel(
+    levels: &[PadeLevel],
+    orbit: &[(f64, f64)],
+    dc: (f64, f64),
+    max_iter: usize,
+    pade: bool,
+) -> (usize, usize, bool) {
     let bailout2 = 4.0_f64;
     let orbit_len = orbit.len();
     let dc_mag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
@@ -2706,9 +2793,18 @@ mod tests {
         nav.use_jet();
         let info = nav.compute_jet_reference(512);
         assert!(info.level_count > 0, "jet table built no levels");
-        assert!(info.coeffs_count > 0 && info.coeffs_ptr != 0, "jet coeff buffer empty");
-        assert!(info.radii_count > 0 && info.radii_ptr != 0, "jet radius buffer empty");
-        assert_eq!(info.coeffs_count, info.radii_count, "coeff/radius buffers must be index-aligned");
+        assert!(
+            info.coeffs_count > 0 && info.coeffs_ptr != 0,
+            "jet coeff buffer empty"
+        );
+        assert!(
+            info.radii_count > 0 && info.radii_ptr != 0,
+            "jet radius buffer empty"
+        );
+        assert_eq!(
+            info.coeffs_count, info.radii_count,
+            "coeff/radius buffers must be index-aligned"
+        );
         let positive_radii = nav
             .jet_radii
             .iter()
@@ -2743,8 +2839,15 @@ mod tests {
         let orbit_len_before = nav.result.len();
         nav.scale = DBig::from_str("0.00000005").unwrap(); // ×0.5 zoom in
         nav.compute_jet_reference(512);
-        assert_eq!(nav.jet_bounds_log2_rc, bounds_rc, "bounds re-walked inside headroom");
-        assert_eq!(nav.result.len(), orbit_len_before, "reference orbit rebuilt");
+        assert_eq!(
+            nav.jet_bounds_log2_rc, bounds_rc,
+            "bounds re-walked inside headroom"
+        );
+        assert_eq!(
+            nav.result.len(),
+            orbit_len_before,
+            "reference orbit rebuilt"
+        );
     }
 
     #[test]
@@ -2769,9 +2872,18 @@ mod tests {
         assert_eq!(nav.get_approximation_mode(), ApproximationMode::MobiusCPlus);
         let info = nav.compute_mobius_reference(512);
         assert!(info.level_count > 0, "mobius table built no levels");
-        assert!(info.coeffs_count > 0 && info.coeffs_ptr != 0, "coeff buffer empty");
-        assert!(info.radii_count > 0 && info.radii_ptr != 0, "radius buffer empty");
-        assert_eq!(info.coeffs_count, info.radii_count, "buffers must be index-aligned");
+        assert!(
+            info.coeffs_count > 0 && info.coeffs_ptr != 0,
+            "coeff buffer empty"
+        );
+        assert!(
+            info.radii_count > 0 && info.radii_ptr != 0,
+            "radius buffer empty"
+        );
+        assert_eq!(
+            info.coeffs_count, info.radii_count,
+            "buffers must be index-aligned"
+        );
         let positive = nav
             .mobius_radii
             .iter()
@@ -2784,7 +2896,10 @@ mod tests {
         // certificate for that derivative channel.
         let derivative_radii = mobius::mobius_build_derivative_radii(
             &nav.mobius_levels,
-            nav.mobius_bounds.as_ref().as_ref().expect("mobius bounds built"),
+            nav.mobius_bounds
+                .as_ref()
+                .as_ref()
+                .expect("mobius bounds built"),
             nav.bla_epsilon as f64,
             nav.jet_log2_c_max(),
             None, // ungated: the referee wants the true certificate everywhere
@@ -2807,7 +2922,10 @@ mod tests {
         nav.use_jet();
         nav.compute_jet_reference(512);
         assert_eq!(nav.jet_source_len, jet_len, "jet levels rebuilt");
-        assert_eq!(nav.jet_radii_result[0].r_log2, jet_marker, "jet radii re-solved");
+        assert_eq!(
+            nav.jet_radii_result[0].r_log2, jet_marker,
+            "jet radii re-solved"
+        );
 
         // And the mobius cache survives the detour (orbit unchanged).
         let mob_len = nav.mobius_source_len;
@@ -2822,8 +2940,15 @@ mod tests {
         let coeffs_ptr_before = nav.mobius_coeffs_result.as_ptr() as usize;
         nav.scale = DBig::from_str("0.00000005").unwrap(); // ×0.5 zoom in
         nav.compute_mobius_reference(512);
-        assert_eq!(nav.mobius_bounds_log2_c_max, bounds_stamp, "bounds re-walked inside headroom");
-        assert_eq!(nav.result.len(), orbit_len_before, "reference orbit rebuilt");
+        assert_eq!(
+            nav.mobius_bounds_log2_c_max, bounds_stamp,
+            "bounds re-walked inside headroom"
+        );
+        assert_eq!(
+            nav.result.len(),
+            orbit_len_before,
+            "reference orbit rebuilt"
+        );
         assert_eq!(
             nav.mobius_coeffs_result.as_ptr() as usize,
             coeffs_ptr_before,
@@ -2842,7 +2967,10 @@ mod tests {
         nav.compute_reference_orbit_ptr(512);
         let info = nav.compute_unified_reference(512);
         assert!(info.level_count > 0, "unified table built no levels");
-        assert!(info.coeffs_count > 0 && info.coeffs_ptr != 0, "coeff buffer empty");
+        assert!(
+            info.coeffs_count > 0 && info.coeffs_ptr != 0,
+            "coeff buffer empty"
+        );
         // Sidecar = one entry per block + the ELEVEN-entry header (SA b1..b4
         // + n0, the 6-coefficient F-form periodic block, then the §18 gate
         // directory) + the optional gate blob.
@@ -2862,7 +2990,10 @@ mod tests {
         nav.use_mobius_cplus();
         nav.compute_mobius_reference(512);
         nav.compute_unified_reference(512);
-        assert_eq!(nav.unified_source_len, src_len, "unified levels rebuilt on detour");
+        assert_eq!(
+            nav.unified_source_len, src_len,
+            "unified levels rebuilt on detour"
+        );
         assert_eq!(
             nav.unified_bounds_log2_c_max, bounds_stamp,
             "unified bounds re-walked on detour"
@@ -2878,7 +3009,11 @@ mod tests {
             nav.unified_bounds_log2_c_max, bounds_stamp,
             "bounds re-walked inside headroom"
         );
-        assert_eq!(nav.result.len(), orbit_len_before, "reference orbit rebuilt");
+        assert_eq!(
+            nav.result.len(),
+            orbit_len_before,
+            "reference orbit rebuilt"
+        );
         assert_eq!(
             nav.unified_coeffs_result.as_ptr() as usize,
             coeffs_ptr_before,
@@ -2905,10 +3040,16 @@ mod tests {
             DBig::from_str("0.0").unwrap(),
         );
         assert_eq!(nav.unified_source_len, 0, "reset left unified levels warm");
-        assert!(!nav.unified_bounds_log2_c_max.is_finite(), "reset left bounds stamp");
+        assert!(
+            !nav.unified_bounds_log2_c_max.is_finite(),
+            "reset left bounds stamp"
+        );
         nav.compute_reference_orbit_ptr(512);
         nav.compute_unified_reference(512);
-        assert!(nav.unified_source_len > 0, "unified table not rebuilt after reset");
+        assert!(
+            nav.unified_source_len > 0,
+            "unified table not rebuilt after reset"
+        );
     }
 
     #[test]
@@ -2920,7 +3061,11 @@ mod tests {
         let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
         nav.compute_reference_orbit_ptr(512);
         nav.compute_unified_reference(512);
-        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4, "cold build runs all stages");
+        assert_eq!(
+            nav.unified_last_stages(),
+            1 | 2 | 4,
+            "cold build runs all stages"
+        );
 
         // 32 keyframes × ×2^-0.25 zoom-in = 8 octaves at constant reference.
         let mut coeffs_runs = 0u32;
@@ -2937,7 +3082,10 @@ mod tests {
             bounds_runs += (stages >> 1) & 1;
             radii_runs += (stages >> 2) & 1;
         }
-        assert_eq!(coeffs_runs, 0, "coefficients rebuilt during a constant-reference zoom");
+        assert_eq!(
+            coeffs_runs, 0,
+            "coefficients rebuilt during a constant-reference zoom"
+        );
         assert!(
             bounds_runs <= 3,
             "bounds re-walked {bounds_runs}× over 8 octaves (expected ≤ every ~4 octaves)"
@@ -2946,7 +3094,10 @@ mod tests {
             radii_runs <= 5,
             "radii re-solved {radii_runs}× over 8 octaves (expected ≤ every ~2 octaves)"
         );
-        assert!(radii_runs >= 2, "radii never re-solved — staleness rule broken");
+        assert!(
+            radii_runs >= 2,
+            "radii never re-solved — staleness rule broken"
+        );
     }
 
     #[test]
@@ -2979,18 +3130,27 @@ mod tests {
         println!(
             "nav orbit len {} | blocks {} | eps {} | l2c {:.1}",
             nav.result.len(),
-            nav.unified_levels.iter().map(|l| l.blocks.len()).sum::<usize>(),
+            nav.unified_levels
+                .iter()
+                .map(|l| l.blocks.len())
+                .sum::<usize>(),
             nav.bla_epsilon,
             nav.jet_log2_c_max(),
         );
 
         // One radii-only keyframe: 3 octaves of zoom-in (past the ±2 slack,
         // inside the 4-octave bounds headroom).
-        nav.scale = (&nav.scale * &DBig::from_str("0.125").unwrap()).with_precision(30).value();
+        nav.scale = (&nav.scale * &DBig::from_str("0.125").unwrap())
+            .with_precision(30)
+            .value();
         let t1 = Instant::now();
         nav.compute_unified_reference(40_000);
         let keyframe = t1.elapsed();
-        assert_eq!(nav.unified_last_stages(), 4, "keyframe should re-solve radii alone");
+        assert_eq!(
+            nav.unified_last_stages(),
+            4,
+            "keyframe should re-solve radii alone"
+        );
         println!(
             "unified keyframe budget @40k: cold build {:?} | radii-only keyframe {:?} (×{:.1} less)",
             cold,
@@ -3073,10 +3233,14 @@ mod tests {
             if n == 0 {
                 break;
             }
-            let cur: Vec<BlaF64> =
-                (0..n).map(|i| bla_merge(prev[2 * i], prev[2 * i + 1], pade)).collect();
+            let cur: Vec<BlaF64> = (0..n)
+                .map(|i| bla_merge(prev[2 * i], prev[2 * i + 1], pade))
+                .collect();
             skip *= 2;
-            levels.push(LevelF64 { skip, entries: cur.clone() });
+            levels.push(LevelF64 {
+                skip,
+                entries: cur.clone(),
+            });
             prev = cur;
         }
         levels
@@ -3108,7 +3272,9 @@ mod tests {
     }
 
     fn total_skip_reach(levels: &[LevelF64], orbit_len: usize, dz_mag: f64) -> u64 {
-        (1..orbit_len).map(|m| max_aligned_skip(levels, m, dz_mag) as u64).sum()
+        (1..orbit_len)
+            .map(|m| max_aligned_skip(levels, m, dz_mag) as u64)
+            .sum()
     }
 
     #[test]
@@ -3123,7 +3289,12 @@ mod tests {
             let orbit = ref_orbit_f64(cx, cy, 4096);
             let aff = build_levels(&orbit, eps, false);
             let pad = build_levels(&orbit, eps, true);
-            println!("\n[{}] orbit_len={} levels={}", name, orbit.len(), aff.len());
+            println!(
+                "\n[{}] orbit_len={} levels={}",
+                name,
+                orbit.len(),
+                aff.len()
+            );
             let mut best_ratio = 1.0_f64;
             for k in 0..15 {
                 let dz_mag = 1e-9 * 10f64.powf(k as f64 * 0.5);
@@ -3181,7 +3352,11 @@ mod tests {
         let wm = pade_block_apply(&merged, z, c).unwrap();
         let err = ((wm.0 - w2.0).powi(2) + (wm.1 - w2.1).powi(2)).sqrt();
         let mag = (w2.0 * w2.0 + w2.1 * w2.1).sqrt().max(1e-30);
-        assert!(err / mag < 1e-10, "merged vs sequential rel err {}", err / mag);
+        assert!(
+            err / mag < 1e-10,
+            "merged vs sequential rel err {}",
+            err / mag
+        );
         // D_z = D_x + A_x·D_y exactly
         let axdy = cmul64((x.ax, x.ay), (y.dx, y.dy));
         assert!((merged.dx - (x.dx + axdy.0)).abs() < 1e-12);
@@ -3193,7 +3368,11 @@ mod tests {
         // der_out = (A − B·c·D)/M²·der_in + B/M, M = 1 + D·z. Validate against a
         // central finite difference of w(z(c),c) with z(c) = z0 + der_in·(c−c0). (D4)
         let eps = 1e-6;
-        let e = bla_merge(bla_seed(0.35, -0.22, eps, true), bla_seed(-0.15, 0.4, eps, true), true);
+        let e = bla_merge(
+            bla_seed(0.35, -0.22, eps, true),
+            bla_seed(-0.15, 0.4, eps, true),
+            true,
+        );
         let a = (e.ax, e.ay);
         let b = (e.bx, e.by);
         let d = (e.dx, e.dy);
@@ -3226,15 +3405,33 @@ mod tests {
         let wm = w((c0.0 - h, c0.1));
         let fd = ((wp.0 - wm.0) / (2.0 * h), (wp.1 - wm.1) / (2.0 * h));
         let err = ((der_out.0 - fd.0).powi(2) + (der_out.1 - fd.1).powi(2)).sqrt();
-        let mag = (der_out.0 * der_out.0 + der_out.1 * der_out.1).sqrt().max(1e-30);
-        assert!(err / mag < 1e-5, "derivative mismatch: analytic {:?} fd {:?} rel {}", der_out, fd, err / mag);
+        let mag = (der_out.0 * der_out.0 + der_out.1 * der_out.1)
+            .sqrt()
+            .max(1e-30);
+        assert!(
+            err / mag < 1e-5,
+            "derivative mismatch: analytic {:?} fd {:?} rel {}",
+            der_out,
+            fd,
+            err / mag
+        );
     }
 
     // ── full per-pixel loop: exact vs affine vs Padé (CPU port of the shader) ────
     // Real iteration/step counts (not just radius capacity) AND a correctness
     // cross-check that blocks (affine or Padé) reach the same escape result as exact
     // perturbation. Empty `levels` ⇒ exact stepping. (tasks 6.1/6.2 on CPU)
-    fn try_skip_cpu(levels: &[LevelF64], ref_i: usize, dz: (f64, f64), dc: (f64, f64), dc_mag: f64, orbit: &[(f64, f64)], bailout2: f64, max_iter: usize, pade: bool) -> Option<((f64, f64), usize)> {
+    fn try_skip_cpu(
+        levels: &[LevelF64],
+        ref_i: usize,
+        dz: (f64, f64),
+        dc: (f64, f64),
+        dc_mag: f64,
+        orbit: &[(f64, f64)],
+        bailout2: f64,
+        max_iter: usize,
+        pade: bool,
+    ) -> Option<((f64, f64), usize)> {
         if ref_i == 0 {
             return None;
         }
@@ -3274,7 +3471,13 @@ mod tests {
 
     // Returns (loop steps, iterations, escaped, weighted ops). Ops use the paper
     // convention: exact step 2, affine lookup 2, Möbius/Padé lookup 6.
-    fn run_pixel_cpu(levels: &[LevelF64], orbit: &[(f64, f64)], dc: (f64, f64), max_iter: usize, pade: bool) -> (usize, usize, bool, u64, (f64, f64)) {
+    fn run_pixel_cpu(
+        levels: &[LevelF64],
+        orbit: &[(f64, f64)],
+        dc: (f64, f64),
+        max_iter: usize,
+        pade: bool,
+    ) -> (usize, usize, bool, u64, (f64, f64)) {
         let bailout2 = 4.0_f64;
         let orbit_len = orbit.len();
         let dc_mag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
@@ -3285,7 +3488,9 @@ mod tests {
         let mut ops = 0u64;
         let mut escaped = false;
         while iter < max_iter {
-            if let Some((cand, skip)) = try_skip_cpu(levels, ref_i, dz, dc, dc_mag, orbit, bailout2, max_iter, pade) {
+            if let Some((cand, skip)) = try_skip_cpu(
+                levels, ref_i, dz, dc, dc_mag, orbit, bailout2, max_iter, pade,
+            ) {
                 dz = cand;
                 ref_i += skip;
                 iter += skip;
@@ -3337,7 +3542,11 @@ mod tests {
             // Perturbation needs a bounded reference; an escaping center is a misuse
             // (you'd pick a nearby nucleus). Skip so the benchmark stays meaningful.
             if orbit.len() <= max_iter {
-                println!("\n[{}] reference escaped at iter {} — skipped (need a bounded reference)", name, orbit.len() - 1);
+                println!(
+                    "\n[{}] reference escaped at iter {} — skipped (need a bounded reference)",
+                    name,
+                    orbit.len() - 1
+                );
                 continue;
             }
             let aff = build_levels(&orbit, eps, false);
@@ -3366,7 +3575,11 @@ mod tests {
             }
             println!(
                 "\n[{}] pixels={} | steps exact={} affine={} pade={} | pade vs affine x{:.2}",
-                name, n, steps_exact, steps_aff, steps_pad,
+                name,
+                n,
+                steps_exact,
+                steps_aff,
+                steps_pad,
                 steps_aff as f64 / steps_pad.max(1) as f64
             );
             println!(
@@ -3378,11 +3591,21 @@ mod tests {
             // escape differences near edge-of-chaos points (e.g. Feigenbaum), where
             // it operates at larger |dz| and its ε-level error amplifies. A real
             // regression — a near-pole blowup — would show a large max |Δiter|.
-            assert!(mismatch_pad <= n / 8 && max_d <= 64,
-                "[{}] Padé diverges from exact beyond tolerance: {} mismatches, max |Δiter|={}", name, mismatch_pad, max_d);
+            assert!(
+                mismatch_pad <= n / 8 && max_d <= 64,
+                "[{}] Padé diverges from exact beyond tolerance: {} mismatches, max |Δiter|={}",
+                name,
+                mismatch_pad,
+                max_d
+            );
             // Padé should never take more steps than affine.
-            assert!(steps_pad <= steps_aff,
-                "[{}] Padé took more steps than affine ({} > {})", name, steps_pad, steps_aff);
+            assert!(
+                steps_pad <= steps_aff,
+                "[{}] Padé took more steps than affine ({} > {})",
+                name,
+                steps_pad,
+                steps_aff
+            );
         }
     }
 
@@ -3403,73 +3626,78 @@ mod tests {
         ];
         println!("\nops convention: exact 2 | affine 2 | möbius 6 | jet k(k+3)/2");
         for (eps, c_max) in [(1e-4_f64, 1e-5_f64), (1e-6, 1e-9)] {
-        println!("-- eps={:e} c_max={:e}", eps, c_max);
-        for (name, cx, cy) in centers {
-            let orbit = ref_orbit_f64(cx, cy, max_iter);
-            if orbit.len() <= max_iter {
-                println!("[{}] reference escaped — skipped", name);
-                continue;
-            }
-            let aff = build_levels(&orbit, eps, false);
-            let pad = build_levels(&orbit, eps, true);
-            let jlv = jet::build_jet_levels(&orbit, 4, 1 << 18);
-            let jrad =
-                jet::jet_build_radii(&jlv, &orbit, c_max.log2() + 10.0, eps, c_max.log2());
-            let n = 64usize;
-            let (mut ops_e, mut ops_a, mut ops_p, mut ops_j) = (0u64, 0u64, 0u64, 0u64);
-            let (mut jet_mismatch, mut jet_max_d) = (0usize, 0usize);
-            for kpx in 0..n {
-                let t = (kpx as f64 / n as f64) * 2.0 - 1.0;
-                let dc = (t * c_max * 0.7, 0.37 * t * c_max);
-                let (_, ie, ee, oe, _) = run_pixel_cpu(&[], &orbit, dc, max_iter, false);
-                let (_, _, _, oa, _) = run_pixel_cpu(&aff, &orbit, dc, max_iter, false);
-                let (_, _, _, op, _) = run_pixel_cpu(&pad, &orbit, dc, max_iter, true);
-                let jr = jet::jet_run_pixel(&jlv, &jrad, &orbit, dc, max_iter);
-                ops_e += oe;
-                ops_a += oa;
-                ops_p += op;
-                ops_j += jr.ops;
-                if jr.iters != ie || jr.escaped != ee {
-                    jet_mismatch += 1;
-                    jet_max_d = jet_max_d.max((jr.iters as i64 - ie as i64).unsigned_abs() as usize);
+            println!("-- eps={:e} c_max={:e}", eps, c_max);
+            for (name, cx, cy) in centers {
+                let orbit = ref_orbit_f64(cx, cy, max_iter);
+                if orbit.len() <= max_iter {
+                    println!("[{}] reference escaped — skipped", name);
+                    continue;
                 }
+                let aff = build_levels(&orbit, eps, false);
+                let pad = build_levels(&orbit, eps, true);
+                let jlv = jet::build_jet_levels(&orbit, 4, 1 << 18);
+                let jrad =
+                    jet::jet_build_radii(&jlv, &orbit, c_max.log2() + 10.0, eps, c_max.log2());
+                let n = 64usize;
+                let (mut ops_e, mut ops_a, mut ops_p, mut ops_j) = (0u64, 0u64, 0u64, 0u64);
+                let (mut jet_mismatch, mut jet_max_d) = (0usize, 0usize);
+                for kpx in 0..n {
+                    let t = (kpx as f64 / n as f64) * 2.0 - 1.0;
+                    let dc = (t * c_max * 0.7, 0.37 * t * c_max);
+                    let (_, ie, ee, oe, _) = run_pixel_cpu(&[], &orbit, dc, max_iter, false);
+                    let (_, _, _, oa, _) = run_pixel_cpu(&aff, &orbit, dc, max_iter, false);
+                    let (_, _, _, op, _) = run_pixel_cpu(&pad, &orbit, dc, max_iter, true);
+                    let jr = jet::jet_run_pixel(&jlv, &jrad, &orbit, dc, max_iter);
+                    ops_e += oe;
+                    ops_a += oa;
+                    ops_p += op;
+                    ops_j += jr.ops;
+                    if jr.iters != ie || jr.escaped != ee {
+                        jet_mismatch += 1;
+                        jet_max_d =
+                            jet_max_d.max((jr.iters as i64 - ie as i64).unsigned_abs() as usize);
+                    }
+                }
+                println!(
+                    "[{}] jet mismatches={} max|Δiter|={}",
+                    name, jet_mismatch, jet_max_d
+                );
+                println!(
+                    "[{}] ops exact={} | affine={} (x{:.1}) | pade={} (x{:.1}) | jet={} (x{:.1})",
+                    name,
+                    ops_e,
+                    ops_a,
+                    ops_e as f64 / ops_a.max(1) as f64,
+                    ops_p,
+                    ops_e as f64 / ops_p.max(1) as f64,
+                    ops_j,
+                    ops_e as f64 / ops_j.max(1) as f64
+                );
+                // Same tolerance as the Padé harness: ε-level per-block errors shift
+                // escape iterations by a few near edge-of-chaos references (the drift
+                // scales with ε — at ε = 1e-4 the coarse regime shows it, at 1e-6 it
+                // vanishes). A real bug shows as a large |Δiter|.
+                assert!(
+                    jet_mismatch <= n * 3 / 4 && jet_max_d <= 64,
+                    "[{}] jet diverges beyond tolerance: {} mismatches, max |Δiter| = {}",
+                    name,
+                    jet_mismatch,
+                    jet_max_d
+                );
+                // ×2 floor (skipping demonstrably active): at the coarse-c_max
+                // regime (c/ε ~ 0.1) rigorous radii certify only short-to-mid
+                // blocks — long ones genuinely carry O(1) c-channel remainders, and
+                // every mode compresses poorly (feigenbaum: jet ×2.7 still beats
+                // pade ×2.0 / affine ×1.3 there). NB: the harness Padé/affine
+                // columns lack the shader's H2/G gates and are flattered.
+                assert!(
+                    ops_j * 2 < ops_e,
+                    "[{}] jet ops {} not even ×2 under exact {}",
+                    name,
+                    ops_j,
+                    ops_e
+                );
             }
-            println!(
-                "[{}] jet mismatches={} max|Δiter|={}",
-                name, jet_mismatch, jet_max_d
-            );
-            println!(
-                "[{}] ops exact={} | affine={} (x{:.1}) | pade={} (x{:.1}) | jet={} (x{:.1})",
-                name,
-                ops_e,
-                ops_a,
-                ops_e as f64 / ops_a.max(1) as f64,
-                ops_p,
-                ops_e as f64 / ops_p.max(1) as f64,
-                ops_j,
-                ops_e as f64 / ops_j.max(1) as f64
-            );
-            // Same tolerance as the Padé harness: ε-level per-block errors shift
-            // escape iterations by a few near edge-of-chaos references (the drift
-            // scales with ε — at ε = 1e-4 the coarse regime shows it, at 1e-6 it
-            // vanishes). A real bug shows as a large |Δiter|.
-            assert!(
-                jet_mismatch <= n * 3 / 4 && jet_max_d <= 64,
-                "[{}] jet diverges beyond tolerance: {} mismatches, max |Δiter| = {}",
-                name, jet_mismatch, jet_max_d
-            );
-            // ×2 floor (skipping demonstrably active): at the coarse-c_max
-            // regime (c/ε ~ 0.1) rigorous radii certify only short-to-mid
-            // blocks — long ones genuinely carry O(1) c-channel remainders, and
-            // every mode compresses poorly (feigenbaum: jet ×2.7 still beats
-            // pade ×2.0 / affine ×1.3 there). NB: the harness Padé/affine
-            // columns lack the shader's H2/G gates and are flattered.
-            assert!(
-                ops_j * 2 < ops_e,
-                "[{}] jet ops {} not even ×2 under exact {}",
-                name, ops_j, ops_e
-            );
-        }
         }
     }
 
@@ -3513,14 +3741,12 @@ mod tests {
                     worst
                 );
             };
-            for (mode, eps) in [
-                ("bla", 1e-6), ("bla", 1e-4),
-                ("pade", 1e-6), ("pade", 1e-4),
-            ] {
+            for (mode, eps) in [("bla", 1e-6), ("bla", 1e-4), ("pade", 1e-6), ("pade", 1e-4)] {
                 let lv = build_levels(&orbit, eps, mode == "pade");
                 let (mut ops, mut worst) = (0u64, 0f64);
                 for k in 0..n {
-                    let (_, _, esc, o, fz) = run_pixel_cpu(&lv, &orbit, pixel(k), max_iter, mode == "pade");
+                    let (_, _, esc, o, fz) =
+                        run_pixel_cpu(&lv, &orbit, pixel(k), max_iter, mode == "pade");
                     ops += o;
                     let (ex, ey) = exact[k].4;
                     if !esc && !exact[k].2 {
@@ -3578,9 +3804,21 @@ mod tests {
             info_a.count, info_a.level_count, alpha_a, e_a.ax
         );
 
-        assert!(alpha_p > 0.0 && alpha_p.is_finite(), "pade entry0 alpha broken: {}", alpha_p);
-        assert!(alpha_p > alpha_a, "pade alpha {:.3e} not larger than affine {:.3e}", alpha_p, alpha_a);
-        assert!(e_p.dx != 0.0 || e_p.dy != 0.0, "pade entry0 D is zero (not a real pade table)");
+        assert!(
+            alpha_p > 0.0 && alpha_p.is_finite(),
+            "pade entry0 alpha broken: {}",
+            alpha_p
+        );
+        assert!(
+            alpha_p > alpha_a,
+            "pade alpha {:.3e} not larger than affine {:.3e}",
+            alpha_p,
+            alpha_a
+        );
+        assert!(
+            e_p.dx != 0.0 || e_p.dy != 0.0,
+            "pade entry0 D is zero (not a real pade table)"
+        );
     }
 
     #[test]
@@ -3594,8 +3832,14 @@ mod tests {
             b.steps_affine / b.steps_pade.max(1.0), b.pade_mismatches, b.max_iter_delta
         );
         assert!(b.pixels > 0);
-        assert!(b.steps_pade <= b.steps_affine + 1.0, "Padé worse than affine");
-        assert!(b.pade_mismatches <= b.pixels / 4, "too many Padé mismatches");
+        assert!(
+            b.steps_pade <= b.steps_affine + 1.0,
+            "Padé worse than affine"
+        );
+        assert!(
+            b.pade_mismatches <= b.pixels / 4,
+            "too many Padé mismatches"
+        );
     }
 
     #[test]
@@ -3609,7 +3853,8 @@ mod tests {
         assert!(shallow.bla_level_count >= 1);
         assert_eq!(
             shallow.bla_levels[0].skip, MIN_BLA_SKIP as u32,
-            "smallest skip is L_min = {}", MIN_BLA_SKIP
+            "smallest skip is L_min = {}",
+            MIN_BLA_SKIP
         );
 
         // Deep zoom: auto-sizing opens several levels, all powers of two starting
@@ -3620,13 +3865,15 @@ mod tests {
         assert!(bla.count >= 4, "expected a populated BLA table at depth");
         assert!(
             nav.bla_level_count >= 4,
-            "deep zoom should open several levels, got {}", nav.bla_level_count
+            "deep zoom should open several levels, got {}",
+            nav.bla_level_count
         );
         assert_ne!(bla.levels_ptr, 0);
         assert_eq!(nav.bla_levels[0].skip, MIN_BLA_SKIP as u32);
         for i in 1..nav.bla_level_count {
             assert_eq!(
-                nav.bla_levels[i].skip, nav.bla_levels[i - 1].skip * 2,
+                nav.bla_levels[i].skip,
+                nav.bla_levels[i - 1].skip * 2,
                 "levels double from L_min"
             );
         }
@@ -3814,8 +4061,16 @@ mod tests {
         let _ = nav.compute_reference_orbit_ptr(64);
         // The center must still be carried at full precision, not collapsed to ~17.
         let result = nav.pixel_to_complex(500.0, 500.0, 1000.0, 1000.0);
-        assert!(result[0].len() > 200, "re truncated at 1e-300: {} chars", result[0].len());
-        assert!(result[1].len() > 200, "im truncated at 1e-300: {} chars", result[1].len());
+        assert!(
+            result[0].len() > 200,
+            "re truncated at 1e-300: {} chars",
+            result[0].len()
+        );
+        assert!(
+            result[1].len() > 200,
+            "im truncated at 1e-300: {} chars",
+            result[1].len()
+        );
     }
 
     #[test]
@@ -3832,8 +4087,16 @@ mod tests {
         // Project another point, then project it back
         let complex = nav.pixel_to_complex(120.0, 450.0, 800.0, 600.0);
         let px_back = nav.coordinate_to_pixel(&complex[0], &complex[1], 800.0, 600.0);
-        assert!((px_back[0] - 120.0).abs() < 1e-9, "expected 120, got {}", px_back[0]);
-        assert!((px_back[1] - 450.0).abs() < 1e-9, "expected 450, got {}", px_back[1]);
+        assert!(
+            (px_back[0] - 120.0).abs() < 1e-9,
+            "expected 120, got {}",
+            px_back[0]
+        );
+        assert!(
+            (px_back[1] - 450.0).abs() < 1e-9,
+            "expected 450, got {}",
+            px_back[1]
+        );
     }
 
     #[test]
@@ -3870,7 +4133,6 @@ mod tests {
         assert_eq!(nav.angle, 1.0);
     }
 
-
     #[test]
     fn precision_scales_with_zoom_depth() {
         // Deepen the view step by step (like navigation) and nudge the center at
@@ -3887,7 +4149,6 @@ mod tests {
         assert!(cx.len() > 110, "center capped at {} chars", cx.len());
     }
 
-
     #[test]
     fn precision_not_reduced_on_zoom_out() {
         // Go deep (accumulate many center digits), then zoom back out. The center
@@ -3898,13 +4159,16 @@ mod tests {
             nav.translate_direct(0.123456789, -0.234567891, None, None);
         }
         let deep_len = nav.get_params()[0].len();
-        nav.scale("1e-2");               // zoom back out to a shallow scale
-        nav.translate_direct(0.0, 0.0, None, None);  // runs ensure_precision at shallow
+        nav.scale("1e-2"); // zoom back out to a shallow scale
+        nav.translate_direct(0.0, 0.0, None, None); // runs ensure_precision at shallow
         let shallow_len = nav.get_params()[0].len();
-        assert!(shallow_len >= deep_len - 5,
-            "center precision dropped on zoom-out: {} -> {}", deep_len, shallow_len);
+        assert!(
+            shallow_len >= deep_len - 5,
+            "center precision dropped on zoom-out: {} -> {}",
+            deep_len,
+            shallow_len
+        );
     }
-
 
     #[test]
     fn bla_build_is_range_safe_at_deep_zoom() {
@@ -3921,15 +4185,29 @@ mod tests {
         let _ = nav.compute_bla_reference_ptr(3000);
         assert!(!nav.bla_result.is_empty());
         for st in nav.bla_result.iter() {
-            assert!(st.ax.is_finite() && st.ay.is_finite() && st.bx.is_finite() && st.by.is_finite());
+            assert!(
+                st.ax.is_finite() && st.ay.is_finite() && st.bx.is_finite() && st.by.is_finite()
+            );
             assert!(st.radius_alpha.is_finite() && st.radius_beta.is_finite());
-            let abm = st.ax.abs().max(st.ay.abs()).max(st.bx.abs()).max(st.by.abs());
+            let abm = st
+                .ax
+                .abs()
+                .max(st.ay.abs())
+                .max(st.bx.abs())
+                .max(st.by.abs());
             // [0.5, 1), but an f32 cast of a near-1 value can round up to 1.0.
-            assert!(abm == 0.0 || (abm >= 0.5 && abm <= 1.0), "ab mantissa not normalized: {}", abm);
+            assert!(
+                abm == 0.0 || (abm >= 0.5 && abm <= 1.0),
+                "ab mantissa not normalized: {}",
+                abm
+            );
         }
         // The fe exponents are actually populated (not all zero) — the extraction
         // is doing real work, and would carry the range if the orbit expanded.
-        assert!(nav.bla_result.iter().any(|st| st.alpha_exp != 0 || st.ab_exp != 0));
+        assert!(nav
+            .bla_result
+            .iter()
+            .any(|st| st.alpha_exp != 0 || st.ab_exp != 0));
     }
 
     // Brute-force reference orbit at a UNIFORM precision (no descending profile), as the
@@ -3975,7 +4253,11 @@ mod tests {
             let dy = (nav.result[i].zy - baseline[i].1).abs();
             max_err = max_err.max(dx).max(dy);
         }
-        assert!(max_err < 1e-3, "profile diverged from uniform precision: max_err={}", max_err);
+        assert!(
+            max_err < 1e-3,
+            "profile diverged from uniform precision: max_err={}",
+            max_err
+        );
     }
 
     #[test]
@@ -3994,8 +4276,16 @@ mod tests {
         let g = der.log2_mag();
         assert!(g > 50.0, "derivative did not amplify: G={}", g);
         let p_late = profile_precision(budget, g);
-        assert!(p_late < budget, "precision did not shed after amplification: {}", p_late);
-        assert!(p_late >= PRECISION_FLOOR_BITS, "precision dropped below floor: {}", p_late);
+        assert!(
+            p_late < budget,
+            "precision did not shed after amplification: {}",
+            p_late
+        );
+        assert!(
+            p_late >= PRECISION_FLOOR_BITS,
+            "precision dropped below floor: {}",
+            p_late
+        );
     }
 
     #[test]
@@ -4008,18 +4298,35 @@ mod tests {
         let n1 = 800usize;
         let n2 = 2500usize;
         let _ = nav.compute_reference_orbit_ptr(n1 as u32);
-        let snapshot: Vec<(f32, f32)> =
-            (0..=n1).map(|i| (nav.result[i].zx, nav.result[i].zy)).collect();
+        let snapshot: Vec<(f32, f32)> = (0..=n1)
+            .map(|i| (nav.result[i].zx, nav.result[i].zy))
+            .collect();
         let _ = nav.compute_reference_orbit_ptr(n2 as u32);
         for i in 0..=n1 {
-            assert_eq!(nav.result[i].zx, snapshot[i].0, "step {} zx changed on extend", i);
-            assert_eq!(nav.result[i].zy, snapshot[i].1, "step {} zy changed on extend", i);
+            assert_eq!(
+                nav.result[i].zx, snapshot[i].0,
+                "step {} zx changed on extend",
+                i
+            );
+            assert_eq!(
+                nav.result[i].zy, snapshot[i].1,
+                "step {} zy changed on extend",
+                i
+            );
         }
         let mut fresh = MandelbrotNavigator::new(cx, cy, "1e-60", 0.0);
         let _ = fresh.compute_reference_orbit_ptr(n2 as u32);
         for i in 0..=n2 {
-            assert_eq!(nav.result[i].zx, fresh.result[i].zx, "extend != fresh at {} zx", i);
-            assert_eq!(nav.result[i].zy, fresh.result[i].zy, "extend != fresh at {} zy", i);
+            assert_eq!(
+                nav.result[i].zx, fresh.result[i].zx,
+                "extend != fresh at {} zx",
+                i
+            );
+            assert_eq!(
+                nav.result[i].zy, fresh.result[i].zy,
+                "extend != fresh at {} zy",
+                i
+            );
         }
     }
 
@@ -4029,14 +4336,28 @@ mod tests {
         // including far below the f64 floor (deep zoom). Cross-check against a direct f64
         // reference where representable, and the invariant everywhere.
         let cases = [
-            "1.0", "2.0", "0.5", "-0.5", "3.0", "-7.5",
+            "1.0",
+            "2.0",
+            "0.5",
+            "-0.5",
+            "3.0",
+            "-7.5",
             "0.7436438870371587047521915061147741580450975735832",
-            "1e-30", "1e-100", "-1e-100", "1e-300", "5e-321",
+            "1e-30",
+            "1e-100",
+            "-1e-100",
+            "1e-300",
+            "5e-321",
         ];
         for s in cases {
             let v = DBig::from_str(s).unwrap();
             let (m, e) = dbig_frexp(&v);
-            assert!(m == 0.0 || (m.abs() >= 0.5 && m.abs() < 1.0), "mantissa out of [0.5,1): {} for {}", m, s);
+            assert!(
+                m == 0.0 || (m.abs() >= 0.5 && m.abs() < 1.0),
+                "mantissa out of [0.5,1): {} for {}",
+                m,
+                s
+            );
             // Reconstruct value ≈ m · 2^e and compare to the true value in log space.
             let log2_recon = m.abs().log2() + e as f64;
             // True log2 from the string: leading digits + decimal exponent.
@@ -4044,7 +4365,13 @@ mod tests {
             // Only cross-check where f64 itself is accurate (normal range); subnormals (e.g.
             // 5e-321) lose mantissa bits, so there the exact-DBig result is the more accurate one.
             if f.is_normal() {
-                assert!((log2_recon - f.log2()).abs() < 1e-6, "log2 mismatch for {}: {} vs {}", s, log2_recon, f.log2());
+                assert!(
+                    (log2_recon - f.log2()).abs() < 1e-6,
+                    "log2 mismatch for {}: {} vs {}",
+                    s,
+                    log2_recon,
+                    f.log2()
+                );
             }
         }
     }
@@ -4062,7 +4389,11 @@ mod tests {
         assert_eq!(fe[0], scale_m);
         assert_eq!(fe[1], scale_e as f64);
         // scale 1e-120 → log2 ≈ -398.6; exponent must be in that ballpark.
-        assert!((fe[1] - (-398.0)).abs() < 3.0, "scale exponent off: {}", fe[1]);
+        assert!(
+            (fe[1] - (-398.0)).abs() < 3.0,
+            "scale exponent off: {}",
+            fe[1]
+        );
     }
 
     // ── Exact per-view c_max (piste "c_max exact"): the aspect-aware bound
@@ -4076,19 +4407,38 @@ mod tests {
         let l2_scale = 1e-6f64.log2();
         // Unset aspect: legacy 4×scale margin, now rung-quantized.
         let legacy = nav.current_log2_c_max();
-        assert!((legacy - (l2_scale + 2.0)).abs() <= 0.5 + 1e-12, "legacy margin: {}", legacy);
+        assert!(
+            (legacy - (l2_scale + 2.0)).abs() <= 0.5 + 1e-12,
+            "legacy margin: {}",
+            legacy
+        );
         // 16:9 viewport, reference at the view center: half-diagonal ≈ 2.06·scale.
         nav.set_viewport_aspect(16.0 / 9.0);
         let centered = nav.current_log2_c_max();
         let expected = l2_scale + ((16.0f64 / 9.0).hypot(1.0) * 1.01).log2();
-        assert!(centered >= expected - 1e-12, "quantized below exact: {} < {}", centered, expected);
-        assert!(centered <= expected + 0.5 + 1e-12, "rung too coarse: {} vs {}", centered, expected);
+        assert!(
+            centered >= expected - 1e-12,
+            "quantized below exact: {} < {}",
+            centered,
+            expected
+        );
+        assert!(
+            centered <= expected + 0.5 + 1e-12,
+            "rung too coarse: {} vs {}",
+            centered,
+            expected
+        );
         assert!(centered < legacy, "exact bound not tighter than legacy");
         // Pan the view 10 scales off the reference: the bound must follow |Δ|.
         nav.origin("-0.75001", "0.1");
         let panned = nav.current_log2_c_max();
         let l2_delta = 1e-5f64.log2();
-        assert!(panned >= l2_delta, "panned bound {} below |delta| {}", panned, l2_delta);
+        assert!(
+            panned >= l2_delta,
+            "panned bound {} below |delta| {}",
+            panned,
+            l2_delta
+        );
         // Restore: NaN aspect returns to the legacy margin.
         nav.set_viewport_aspect(f64::NAN);
         assert!((nav.current_log2_c_max() - legacy).abs() < 1e-12);
@@ -4116,7 +4466,10 @@ mod tests {
         let refs: Vec<(&str, Vec<(f64, f64)>)> =
             budgets.iter().map(|&b| (b, read_f32(b))).collect();
         let (_, gt) = &refs[refs.len() - 1]; // highest budget = ground truth
-        println!("\nf32-stored reference vs budget (center {}, N target {}):", center, n);
+        println!(
+            "\nf32-stored reference vs budget (center {}, N target {}):",
+            center, n
+        );
         for (b, orbit) in &refs {
             let len = orbit.len().min(gt.len());
             let (mut max_diff, mut first_div) = (0.0f64, None::<usize>);
@@ -4137,8 +4490,14 @@ mod tests {
             while iter < n && ref_i < ol - 1 {
                 let z = orbit[ref_i];
                 let fz = (z.0 + dz.0, z.1 + dz.1);
-                der = (2.0 * (fz.0 * der.0 - fz.1 * der.1) + 1.0, 2.0 * (fz.0 * der.1 + fz.1 * der.0));
-                let m2 = (2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1, 2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0);
+                der = (
+                    2.0 * (fz.0 * der.0 - fz.1 * der.1) + 1.0,
+                    2.0 * (fz.0 * der.1 + fz.1 * der.0),
+                );
+                let m2 = (
+                    2.0 * z.0 * dz.0 - 2.0 * z.1 * dz.1,
+                    2.0 * z.0 * dz.1 + 2.0 * z.1 * dz.0,
+                );
                 let sq = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
                 dz = (m2.0 + sq.0 + dc.0, m2.1 + sq.1 + dc.1);
                 ref_i += 1;
@@ -4175,7 +4534,10 @@ mod tests {
         let prec_before = nav.budget_prec;
         nav.set_precision_budget("1e-300");
         assert!(nav.budget_prec > prec_before, "deeper budget must raise P");
-        assert_eq!(nav.last_iter, 0, "changing the budget must drop the orbit for recompute");
+        assert_eq!(
+            nav.last_iter, 0,
+            "changing the budget must drop the orbit for recompute"
+        );
         // And it rebuilds correctly from zero.
         let info = nav.compute_reference_orbit_ptr(500);
         assert_eq!(info.offset, 0, "recompute must restart at offset 0");

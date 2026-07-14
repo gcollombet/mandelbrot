@@ -24,6 +24,8 @@ import LeanProofs.HyperbolicPade
 import LeanProofs.PhaseAwareTransport
 import LeanProofs.RenormalizedTransport
 import LeanProofs.FeigenbaumRenormalization
+import LeanProofs.VerifiedRationalBounds
+import LeanProofs.FeigenbaumFiniteReturn
 import LeanProofs.Rebasing
 import LeanProofs.RadiusSolver
 import LeanProofs.PeriodicRuntime
