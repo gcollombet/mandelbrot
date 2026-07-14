@@ -83,6 +83,13 @@ override ENABLE_DEEP: bool = true;
 // pattern as ENABLE_DEEP.
 override ENABLE_PORTFOLIO: bool = true;
 
+// Renormalized Feigenbaum-return tier (additive, off by default). When true,
+// a critical rebase (ref_i == 0) tries a single 2^n block whose map is the
+// universal stored model H, gauged by s_n = orbit[2^n]. Specialization switch
+// like ENABLE_DEEP/ENABLE_PORTFOLIO: dead-code-eliminated when false, so the
+// working tiers are byte-identical unless a driver enables it.
+override ENABLE_RENORM: bool = true;
+
 struct BlaStep {
   // floatexp form: a = (ax,ay)·2^ab_exp, b = (bx,by)·2^ab_exp,
   // alpha = radius_alpha·2^alpha_exp, beta = radius_beta (O(1)).
@@ -173,6 +180,11 @@ struct WorkStats {
   // Applications served by the plain-f32 fast path (mode 5; the complement
   // ran in fe) — the per-application cost mix the panel surfaces.
   appsF32: atomic<u32>,
+  // Renormalized Feigenbaum-return tier (ENABLE_RENORM): block applications
+  // and the iterations they covered (Σ 2^n). Raw counts, zero while the tier
+  // is off. This is the A/B signal for the renorm tier's wall gain.
+  renormApps: atomic<u32>,
+  renormIters: atomic<u32>,
 };
 
 // ── bivariate jet mode (add-jet-approximation) ─────────────────────
@@ -260,6 +272,8 @@ var<private> g_gateFails: u32 = 0u;
 var<private> g_secoursApps: u32 = 0u;
 var<private> g_secoursIters: u32 = 0u;
 var<private> g_appsF32: u32 = 0u;
+var<private> g_renormApps: u32 = 0u;
+var<private> g_renormIters: u32 = 0u;
 
 // ── complex helpers (verbatim from mandelbrot.wgsl) ────────────────
 fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
@@ -405,6 +419,119 @@ fn getOrbit(index: i32) -> vec2<f32> {
     mandelbrotOrbitPointSuite[index].zx,
     mandelbrotOrbitPointSuite[index].zy,
   );
+}
+
+// ── Renormalized Feigenbaum return tier: shared constants ───────────────
+// The universal stored model h(x) is an even Chebyshev series, which is a
+// plain Chebyshev series in u = 2x²-1 (since T_{2k}(x) = T_k(2x²-1)):
+//   h(x) = Σ_k a_k T_k(u),  a_0 = h0,  a_k = 2 h_k (k≥1).
+// Coefficients emitted by feigenbaum.rs::print_wgsl_chebyshev_table and
+// validated against the certified model (clenshaw_matches_chebyshev_model).
+// Declared here (before the shallow kernel) so both the f32 and fe renorm
+// paths can reference them.
+const RENORM_H_NCOEFF: i32 = 22;
+const RENORM_H_A: array<f32, 22> = array<f32, 22>(
+  2.82895431636247141e-1,
+  -7.00391573973713766e-1,
+  1.73621867222441828e-2,
+  6.23655913694090851e-4,
+  -2.52664143762083088e-5,
+  2.78126060429247940e-7,
+  7.79368199634042862e-9,
+  -3.27785722586730129e-10,
+  6.38421007870543245e-13,
+  1.77810711459458750e-13,
+  -2.79904315501524320e-15,
+  -6.59877657064237416e-17,
+  3.11574620476084591e-18,
+  -2.62888173525654476e-20,
+  -1.32615575292353235e-21,
+  4.56892132858756487e-23,
+  -2.61669143830041813e-25,
+  -1.94839417192415847e-26,
+  5.48861828421866049e-28,
+  -8.03619305335911877e-31,
+  -2.72885855283361466e-31,
+  5.58026820379403788e-33
+);
+// Normalized certified disk (census domain_radius) and level bounds.
+const RENORM_RADIUS: f32 = 0.25;
+const RENORM_MIN_LEVEL: i32 = 2;   // smallest jump 2^2 = 4
+const RENORM_MAX_LEVEL: i32 = 24;
+// Parameter-window gate (measured census law): the certificate only holds
+// for |c - c_∞| ≤ δ_max(n), with δ_max(2) ≈ 7.7e-8 (K_c·δ ≤ 10% of the 1e-4
+// budget) shrinking ×8.5 per level (K_c ladder). A pixel's c is offset from
+// the reference by dc, so gate each level on |dc| ≤ δ_max(n). Without this
+// the model gets applied at parameters where it is plain WRONG (e.g. shallow
+// views, |dc| ~ 1e-3) and produces garbage classifications.
+const RENORM_DC_BASE: f32 = 7.7e-8;
+const RENORM_DC_LOG2_RATIO: f32 = 3.09;   // log2(8.5)
+// Structural cascade gate: on the doubling cascade the critical scales
+// contract by 1/α ≈ 0.40 per level (|s_n| ≈ α⁻¹|s_{n-1}|). Requiring two
+// consecutive ratios ≤ 0.45 keeps the tier quiet when the REFERENCE center
+// is not on a period-doubling cascade at that depth (|dc| alone cannot see
+// that, e.g. deep zooms elsewhere in the needle).
+const RENORM_LADDER_RATIO: f32 = 0.45;
+
+// f32 renorm path (shallow kernel). Near the critical rebase every quantity is
+// O(1): x = dz/s_n ≤ 0.25, s_n ~ O(0.2), H ~ O(1), so plain f32 (roundoff
+// ~1e-7) is ~500× under the certified model error (~5e-5) — no need for fe.
+struct RenormEvalF32 { value: vec2<f32>, deriv: vec2<f32> };
+
+// (h(x), h'(x)) at f32 complex x, via Clenshaw in u and its derivative
+// recurrence. h'(x) = h_u(u) · du/dx = h_u · 4x.
+fn renorm_eval_h_f32(x: vec2<f32>) -> RenormEvalF32 {
+  let u = 2.0 * cmul(x, x) - vec2<f32>(1.0, 0.0);
+  let two_u = 2.0 * u;
+  var a: array<f32, 22> = RENORM_H_A;
+  var b1 = vec2<f32>(0.0, 0.0);
+  var b2 = vec2<f32>(0.0, 0.0);
+  var d1 = vec2<f32>(0.0, 0.0);
+  var d2 = vec2<f32>(0.0, 0.0);
+  for (var k = RENORM_H_NCOEFF - 1; k >= 1; k = k - 1) {
+    let ak = vec2<f32>(a[k], 0.0);
+    let b0 = ak + cmul(two_u, b1) - b2;
+    let dd0 = 2.0 * b1 + cmul(two_u, d1) - d2;
+    b2 = b1; b1 = b0;
+    d2 = d1; d1 = dd0;
+  }
+  var out: RenormEvalF32;
+  out.value = vec2<f32>(a[0], 0.0) + cmul(u, b1) - b2;
+  let h_u = b1 + cmul(u, d1) - d2;
+  out.deriv = cmul(h_u, 4.0 * x);
+  return out;
+}
+
+// Shallow-path renorm block: at a critical rebase (ref_i == 0, dz = full
+// state z since orbit[0] = 0), apply the largest qualifying block. Same
+// contract as the fe try_apply_renorm but entirely in f32. `dcMag` gates the
+// parameter window per level; the s-ladder gate checks the reference is
+// actually on a doubling cascade at that depth.
+fn try_apply_renorm_f32(dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, i: ptr<function, f32>, maxIterI: i32, dcMag: f32) -> i32 {
+  let dzMag = length(*dz);
+  for (var n = RENORM_MAX_LEVEL; n >= RENORM_MIN_LEVEL; n = n - 1) {
+    let skip = 1 << u32(n);
+    if (i32(skip) >= maxIterI) { continue; }
+    // Parameter window: |dc| must fit this level's certified c-window.
+    if (dcMag > RENORM_DC_BASE * exp2(f32(2 - n) * RENORM_DC_LOG2_RATIO)) { continue; }
+    let sn = getOrbit(i32(skip));
+    let snMag2 = dot(sn, sn);
+    if (!(snMag2 > 0.0)) { continue; }
+    let snMag = sqrt(snMag2);
+    // Cascade-ladder gate: two consecutive contractions ≈ 1/α.
+    let sPrev = length(getOrbit(i32(skip) / 2));
+    let sPrev2 = length(getOrbit(i32(skip) / 4));
+    if (snMag > RENORM_LADDER_RATIO * sPrev || sPrev > RENORM_LADDER_RATIO * sPrev2) { continue; }
+    if (dzMag > RENORM_RADIUS * snMag) { continue; }
+    let invSn = vec2<f32>(sn.x, -sn.y) / snMag2;
+    let x = cmul(invSn, *dz);
+    let ev = renorm_eval_h_f32(x);
+    *dz = cmul(sn, ev.value);
+    *derM = cmul(ev.deriv, *derM);
+    *i += f32(skip);
+    return i32(skip);
+  }
+  return 0;
 }
 
 // Complex reciprocal 1/z (Padé block application).
@@ -827,10 +954,26 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       }
       var skipped = 0;
       var gated = false;
+      var renormApplied = false;
+      // Renormalized Feigenbaum tier (f32 shallow path). Same contract as the
+      // deep path: at a critical rebase (ref_i == 0) jump 2^n via the universal
+      // model; no usedBla (the derivative is propagated, so the interior test
+      // stays valid); backstop on globalMaxIter (the reference orbit at c_∞ is
+      // bounded, so orbitComplete may never hold).
+      if (ENABLE_RENORM && ref_i == 0) {
+        let rskip = try_apply_renorm_f32(&dz, &derM, &i, globalMaxIterI, dcMag);
+        if (rskip > 0) {
+          renormApplied = true;
+          z = refZ + dz; // ref_i = 0, refZ = getOrbit(0) = 0 → z = dz
+          g_renormApps += 1u;
+          g_renormIters += u32(rskip);
+          if (prev_iter + i >= mandelbrot.globalMaxIter) { inside = true; break; }
+        }
+      }
       // §18 gate move: aligned in-span offsets only (integer modulo, in-span
       // turns are exactly the ones the ordinary loop crawls through). A
       // positive return already advanced ref_i/dz/derM by k·m iterations.
-      if (gBase >= 0 && gFails < 3 && ref_i >= gStart && ref_i < gEnd
+      if (!renormApplied && gBase >= 0 && gFails < 3 && ref_i >= gStart && ref_i < gEnd
           && ((ref_i - gStart) % gM) == 0) {
         let adv = try_gate_jump(gBase, gStart, gEnd - gStart, gM, gREntry,
                                 gNfar, gDBase, gDb, &ref_i, &dz, dc,
@@ -846,8 +989,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           g_gateFails += 1u;
         }
       }
-      if (gated) {
-        // gate jump done — skip the block probe this turn
+      if (renormApplied || gated) {
+        // renorm or gate jump done — skip the block probe this turn
       } else if (isBlockTable) {
         // Global gate first (one log2 vs the table-wide bound), then convert dz
         // to floatexp for the shared evaluator (coefficient exponents exceed
@@ -892,7 +1035,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           avgDirSum += orbit_direction_sample(z) * f32(skipped);
           avgCount += f32(skipped);
         }
-      } else {
+      } else if (!renormApplied) {
         let zPrev = refZ + dz;
         dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
         ref_i += 1;
@@ -2206,6 +2349,72 @@ fn try_gate_jump(
   return kInt * gM;
 }
 
+// ── Renormalized Feigenbaum return tier: fe (deep) path ─────────────────
+// Constants (RENORM_H_A, radius, levels) and the f32 path are declared above
+// getOrbit's neighbours, before the shallow kernel. The fe variants below are
+// used by the deep kernel where dz falls below the f32 normal range.
+struct RenormEval { value: fe, deriv: fe };
+
+// (h(x), h'(x)) at fe complex x, via Clenshaw in u and its derivative
+// recurrence. h'(x) = h_u(u) · du/dx = h_u · 4x.
+fn renorm_eval_h(x: fe) -> RenormEval {
+  let u = fe_add(fe_scale(fe_cmul(x, x), 2.0), fe_from_vec(vec2<f32>(-1.0, 0.0), 0));
+  let two_u = fe_scale(u, 2.0);
+  var a: array<f32, 22> = RENORM_H_A;
+  var b1 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
+  var b2 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
+  var d1 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
+  var d2 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
+  for (var k = RENORM_H_NCOEFF - 1; k >= 1; k = k - 1) {
+    let ak = fe_from_vec(vec2<f32>(a[k], 0.0), 0);
+    let b0 = fe_add3(ak, fe_cmul(two_u, b1), fe_neg(b2));
+    let dd0 = fe_add3(fe_scale(b1, 2.0), fe_cmul(two_u, d1), fe_neg(d2));
+    b2 = b1; b1 = b0;
+    d2 = d1; d1 = dd0;
+  }
+  let a0 = fe_from_vec(vec2<f32>(a[0], 0.0), 0);
+  var out: RenormEval;
+  out.value = fe_add3(a0, fe_cmul(u, b1), fe_neg(b2));
+  let h_u = fe_add3(b1, fe_cmul(u, d1), fe_neg(d2));
+  out.deriv = fe_cmul(h_u, fe_scale(x, 4.0));
+  return out;
+}
+
+// At a critical rebase (ref_i == 0, so dz is the full state z since
+// orbit[0] = 0), apply the largest qualifying renormalized block. It jumps
+// 2^n iterations by dz ← s_n · H(dz/s_n) with s_n = orbit[2^n], and carries
+// the derivative multiplicatively der ← H'(dz/s_n) · der (the O(K_c·dc)
+// parameter term is dropped — valid deep on the cascade, keeps distance
+// shading approximately right). Returns the skip, or 0 if none qualifies.
+fn try_apply_renorm(dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, i: ptr<function, f32>, maxIterI: i32, dcMag: f32) -> i32 {
+  let dzMag = sqrt(fe_mag2_f32(*dz));
+  for (var n = RENORM_MAX_LEVEL; n >= RENORM_MIN_LEVEL; n = n - 1) {
+    let skip = 1 << u32(n);
+    if (i32(skip) >= maxIterI) { continue; }
+    // Parameter window: |dc| must fit this level's certified c-window.
+    // (dcMag underflowing f32 to 0 at extreme depth passes — correct.)
+    if (dcMag > RENORM_DC_BASE * exp2(f32(2 - n) * RENORM_DC_LOG2_RATIO)) { continue; }
+    let sn = getOrbit(i32(skip));
+    let snMag2 = dot(sn, sn);
+    if (!(snMag2 > 0.0)) { continue; }
+    let snMag = sqrt(snMag2);
+    // Cascade-ladder gate: two consecutive contractions ≈ 1/α.
+    let sPrev = length(getOrbit(i32(skip) / 2));
+    let sPrev2 = length(getOrbit(i32(skip) / 4));
+    if (snMag > RENORM_LADDER_RATIO * sPrev || sPrev > RENORM_LADDER_RATIO * sPrev2) { continue; }
+    if (dzMag > RENORM_RADIUS * snMag) { continue; }
+    // x = dz / s_n  (s_n plain O(1) complex; 1/s_n = conj(s_n)/|s_n|²)
+    let invSn = vec2<f32>(sn.x, -sn.y) / snMag2;
+    let x = fe_cmul_f32(invSn, *dz);
+    let ev = renorm_eval_h(x);
+    *dz = fe_cmul_f32(sn, ev.value);
+    *derM = cmul(fe_to_vec(ev.deriv), *derM);
+    *i += f32(skip);
+    return i32(skip);
+  }
+  return 0;
+}
+
 fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32) -> TexelOut {
   let max_iteration = mandelbrot.maxIteration;
   let muLimit = mandelbrot.mu;
@@ -2315,7 +2524,40 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       }
     }
     var skipped = 0;
-    if (useBlaDeep) {
+    if (ENABLE_RENORM && ref_i == 0) {
+      // fe_to_vec underflowing to 0 at extreme depth is correct here (tiny
+      // |dc| passes every window gate).
+      skipped = try_apply_renorm(&dz, &derM, &i, globalMaxIterI, length(fe_to_vec(dc)));
+      if (skipped > 0) {
+        // Deliberately do NOT set usedBla: the renorm block keeps ref_i = 0
+        // (it operates at the critical rebase point), so the ref_i-based
+        // termination and rebase never fire for it. Interior cascade pixels
+        // must instead resolve via the derivative interior test below — which
+        // is valid here because try_apply_renorm propagates the exact 2^n-map
+        // derivative H'(x)·der through the jump (an attracting component gives
+        // derMM → 0). Without this, interior pixels never finish and the
+        // adaptive maxIter chases them forever (render stalls < 100%).
+        // ref_i stays 0; orbit[0] = 0 so z = dz. refZ is already getOrbit(0).
+        z = fe_to_vec(dz);
+        refZ = getOrbit(0);
+        g_renormApps += 1u;
+        g_renormIters += u32(skipped);
+        // Termination: a renorm pixel bounded past globalMaxIter is interior.
+        // Crucially this does NOT require orbitComplete (unlike the
+        // perturbation path at line ~2536): at the Feigenbaum point the
+        // reference orbit is bounded and caps below a deep view's maxIter, so
+        // orbitComplete stays false forever. But renorm's boundedness is
+        // certified by the H model itself (independent of the reference orbit
+        // length), so reaching globalMaxIter bounded is a valid interior
+        // verdict on its own. Without this the render stalls < 100% (interior
+        // cascade pixels, non-hyperbolic near c_∞, never resolve).
+        if (prev_iter + i >= mandelbrot.globalMaxIter) {
+          inside = true;
+          break;
+        }
+      }
+    }
+    if (skipped == 0 && useBlaDeep) {
       var blaZ = vec2<f32>(0.0);
       if (isBlockTableDeep) {
         if (log2(max(length(dz.m), 1e-30)) + f32(dz.e) < jetMaxR3Deep) {
@@ -2513,6 +2755,8 @@ var<workgroup> wgGateFails: atomic<u32>;
 var<workgroup> wgSecoursApps: atomic<u32>;
 var<workgroup> wgSecoursIters: atomic<u32>;
 var<workgroup> wgAppsF32: atomic<u32>;
+var<workgroup> wgRenormApps: atomic<u32>;
+var<workgroup> wgRenormIters: atomic<u32>;
 
 @compute @workgroup_size(8, 8)
 fn cs_main(
@@ -2533,6 +2777,8 @@ fn cs_main(
     atomicStore(&wgSecoursApps, 0u);
     atomicStore(&wgSecoursIters, 0u);
     atomicStore(&wgAppsF32, 0u);
+    atomicStore(&wgRenormApps, 0u);
+    atomicStore(&wgRenormIters, 0u);
   }
   workgroupBarrier();
 
@@ -2594,6 +2840,8 @@ fn cs_main(
           g_secoursApps = 0u;
           g_secoursIters = 0u;
           g_appsF32 = 0u;
+          g_renormApps = 0u;
+          g_renormIters = 0u;
           let startIter = select(iter_val, 0.0, is_compute_request);
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
           // AA sub-pixel jitter (neutral-space units); zero for sample 0 / AA off.
@@ -2709,6 +2957,10 @@ fn cs_main(
           if (g_appsF32 > 0u) {
             atomicAdd(&wgAppsF32, g_appsF32);
           }
+          if (g_renormApps > 0u) {
+            atomicAdd(&wgRenormApps, g_renormApps);
+            atomicAdd(&wgRenormIters, g_renormIters);
+          }
 
           // Count the written (post-iteration) state.
           iter_val = result.iter.r;
@@ -2778,6 +3030,8 @@ fn cs_main(
       atomicAdd(&workStats.secoursApps, atomicLoad(&wgSecoursApps));
       atomicAdd(&workStats.secoursIters, atomicLoad(&wgSecoursIters));
       atomicAdd(&workStats.appsF32, atomicLoad(&wgAppsF32));
+      atomicAdd(&workStats.renormApps, atomicLoad(&wgRenormApps));
+      atomicAdd(&workStats.renormIters, atomicLoad(&wgRenormIters));
     }
   }
 }

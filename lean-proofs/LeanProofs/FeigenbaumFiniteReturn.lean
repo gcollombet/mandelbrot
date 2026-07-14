@@ -5,6 +5,7 @@ Authors: Guillaume Collombet
 -/
 import LeanProofs.VerifiedRationalBounds
 import Mathlib.Analysis.Complex.Basic
+import Mathlib.Analysis.Calculus.MeanValue
 
 /-!
 # Certified finite-depth Feigenbaum returns
@@ -284,6 +285,185 @@ theorem Accepted.sound {returnMap model : ℂ → ℂ}
   (w.uniform_error hz).trans accepted.total_le
 
 end FiniteGridWitness
+
+/-! ## Second-order difference certificate
+
+The first-order grid witness transports the return and the model separately,
+so its floor is `Lip(H)·h + variation`.  The observed convergence lives on the
+difference `D = G - H`; certifying `D`, its derivative at cell centers and a
+curvature majorant keeps the quasi-cancellation.  The remainder inequality is
+proved from the mean value theorem, not assumed. -/
+
+/-- Mean-value bridge: a complex-differentiable function whose derivative
+stays within `C` of its value at the cell center satisfies the first-order
+Taylor enclosure used by the difference witness.  Applied with
+`C = curvature · radius`, this is the `M₂ h²` cell remainder. -/
+theorem taylor_remainder_of_deriv_bound
+    {D D' : ℂ → ℂ} {s : Set ℂ} (hConvex : Convex ℝ s)
+    (hDeriv : ∀ w ∈ s, HasDerivWithinAt D (D' w) s w)
+    {x₀ x : ℂ} (hx₀ : x₀ ∈ s) (hx : x ∈ s) {C : ℝ}
+    (hBound : ∀ w ∈ s, ‖D' w - D' x₀‖ ≤ C) :
+    ‖D x - D x₀ - (x - x₀) * D' x₀‖ ≤ C * ‖x - x₀‖ := by
+  set φ : ℂ →L[ℝ] ℂ :=
+    (ContinuousLinearMap.restrictScalars ℝ
+      ((1 : ℂ →L[ℂ] ℂ).smulRight (D' x₀)))
+  have hF : ∀ w ∈ s, HasFDerivWithinAt D
+      (ContinuousLinearMap.restrictScalars ℝ
+        ((1 : ℂ →L[ℂ] ℂ).smulRight (D' w))) s w := fun w hw =>
+    ((hDeriv w hw).hasFDerivWithinAt).restrictScalars ℝ
+  have hOp : ∀ w ∈ s,
+      ‖ContinuousLinearMap.restrictScalars ℝ
+          ((1 : ℂ →L[ℂ] ℂ).smulRight (D' w)) - φ‖ ≤ C := by
+    intro w hw
+    have hPointwise : ∀ v : ℂ,
+        ‖(ContinuousLinearMap.restrictScalars ℝ
+            ((1 : ℂ →L[ℂ] ℂ).smulRight (D' w)) - φ) v‖ ≤
+          ‖D' w - D' x₀‖ * ‖v‖ := by
+      intro v
+      have hApply :
+          (ContinuousLinearMap.restrictScalars ℝ
+              ((1 : ℂ →L[ℂ] ℂ).smulRight (D' w)) - φ) v =
+            v * (D' w - D' x₀) := by
+        simp [φ, mul_sub]
+      rw [hApply, norm_mul, mul_comm]
+    have := ContinuousLinearMap.opNorm_le_bound _ (norm_nonneg (D' w - D' x₀))
+      hPointwise
+    exact this.trans (hBound w hw)
+  have hMean :=
+    hConvex.norm_image_sub_le_of_norm_hasFDerivWithin_le' hF hOp hx₀ hx
+  have hφApply : φ (x - x₀) = (x - x₀) * D' x₀ := by
+    simp [φ]
+  rw [hφApply] at hMean
+  exact hMean
+
+/-- Aggregating one cell of the difference certificate: a sampled value, a
+sampled derivative and the proved Taylor remainder give the local bound
+`v + d·h + M·h²` replayed by the rational checker. -/
+theorem difference_cell_bound {D D' : ℂ → ℂ} {x₀ x : ℂ}
+    {v d M h : ℝ}
+    (hValue : ‖D x₀‖ ≤ v) (hDerivBound : ‖D' x₀‖ ≤ d)
+    (hRadius : ‖x - x₀‖ ≤ h)
+    (hRemainder : ‖D x - D x₀ - (x - x₀) * D' x₀‖ ≤ M * h * h) :
+    ‖D x‖ ≤ v + d * h + M * h * h := by
+  have hh : (0 : ℝ) ≤ h := (norm_nonneg _).trans hRadius
+  have hLinear : ‖(x - x₀) * D' x₀‖ ≤ h * d := by
+    rw [norm_mul]
+    exact mul_le_mul hRadius hDerivBound (norm_nonneg _) hh
+  calc
+    ‖D x‖ = ‖D x₀ + (x - x₀) * D' x₀ +
+        (D x - D x₀ - (x - x₀) * D' x₀)‖ := by ring_nf
+    _ ≤ ‖D x₀ + (x - x₀) * D' x₀‖ +
+        ‖D x - D x₀ - (x - x₀) * D' x₀‖ := norm_add_le _ _
+    _ ≤ (‖D x₀‖ + ‖(x - x₀) * D' x₀‖) +
+        ‖D x - D x₀ - (x - x₀) * D' x₀‖ := by
+      exact add_le_add (norm_add_le _ _) le_rfl
+    _ ≤ (v + h * d) + M * h * h := by
+      exact add_le_add (add_le_add hValue hLinear) hRemainder
+    _ = v + d * h + M * h * h := by ring
+
+/-- Semantic output of the adaptive second-order checker.  Cells carry their
+own radius (quadtree subdivision), a value bound and a derivative bound at
+the center, and a curvature majorant valid on the whole cell.  The `taylor`
+field is exactly what `taylor_remainder_of_deriv_bound` proves for the
+difference `returnMap - model` once the builder bounds `sup ‖D''‖`. -/
+structure DifferenceGridWitness (returnMap model : ℂ → ℂ) where
+  domain : Set ℂ
+  Cell : Type*
+  center : Cell → ℂ
+  radius : Cell → ℝ
+  valueBound : Cell → ℝ
+  derivBound : Cell → ℝ
+  curvature : Cell → ℝ
+  deriv : ℂ → ℂ
+  radius_nonneg : ∀ i, 0 ≤ radius i
+  cover : ∀ z ∈ domain, ∃ i : Cell, dist z (center i) ≤ radius i
+  value_le : ∀ i : Cell,
+    ‖returnMap (center i) - model (center i)‖ ≤ valueBound i
+  deriv_le : ∀ i : Cell, ‖deriv (center i)‖ ≤ derivBound i
+  taylor : ∀ i : Cell, ∀ z ∈ domain, dist z (center i) ≤ radius i →
+    ‖(returnMap z - model z) -
+        (returnMap (center i) - model (center i)) -
+        (z - center i) * deriv (center i)‖ ≤
+      curvature i * radius i * radius i
+
+namespace DifferenceGridWitness
+
+/-- The per-cell bound the adaptive builder subdivides against. -/
+def localBound {returnMap model : ℂ → ℂ}
+    (w : DifferenceGridWitness returnMap model) (i : w.Cell) : ℝ :=
+  w.valueBound i + w.derivBound i * w.radius i +
+    w.curvature i * w.radius i * w.radius i
+
+/-- Every cell within budget yields the uniform difference bound.  This is
+the second-order replacement of `FiniteGridWitness.uniform_error`. -/
+theorem uniform_error {returnMap model : ℂ → ℂ}
+    (w : DifferenceGridWitness returnMap model) {budget : ℝ}
+    (hBudget : ∀ i : w.Cell, w.localBound i ≤ budget)
+    {z : ℂ} (hz : z ∈ w.domain) :
+    dist (returnMap z) (model z) ≤ budget := by
+  obtain ⟨i, hzi⟩ := w.cover z hz
+  have hCell :=
+    difference_cell_bound (D := fun z => returnMap z - model z)
+      (D' := fun z => w.deriv z)
+      (w.value_le i) (w.deriv_le i)
+      (by simpa [Complex.dist_eq] using hzi)
+      (w.taylor i z hz hzi)
+  rw [Complex.dist_eq]
+  exact hCell.trans (hBudget i)
+
+end DifferenceGridWitness
+
+/-! ### Rational replay of the per-cell sums
+
+The builder exports every endpoint as an exact dyadic rational.  The local
+sum `v + d·h + M·h²` is then re-aggregated inside the kernel through the
+`RatUpper` algebra, so no floating-point evaluation is trusted. -/
+
+/-- An exact dyadic upper endpoint `mantissa · 2^exponent`, the certificate
+format emitted by the Rust builder (every finite `f64` is such a number). -/
+def RatUpper.dyadic (mantissa : ℕ) (exponent : ℤ) : RatUpper :=
+  ⟨(mantissa : ℚ) * (2 : ℚ) ^ exponent, by positivity⟩
+
+/-- One exported cell: rational value, derivative, radius and curvature
+upper endpoints. -/
+structure RationalCellRecord where
+  value : RatUpper
+  deriv : RatUpper
+  radius : RatUpper
+  curvature : RatUpper
+
+namespace RationalCellRecord
+
+/-- Kernel-replayed local sum `v + d·h + M·h·h`. -/
+def localBound (r : RationalCellRecord) : RatUpper :=
+  r.value.add ((r.deriv.mul r.radius).add
+    ((r.curvature.mul r.radius).mul r.radius))
+
+/-- Componentwise enclosures aggregate soundly to the local cell bound. -/
+theorem localBound_holds (r : RationalCellRecord) {v d h M : ℝ}
+    (hv : r.value.Holds v) (hd : r.deriv.Holds d)
+    (hh : r.radius.Holds h) (hM : r.curvature.Holds M) :
+    r.localBound.Holds (v + (d * h + M * h * h)) :=
+  RatUpper.add_holds hv
+    (RatUpper.add_holds (RatUpper.mul_holds hd hh)
+      (RatUpper.mul_holds (RatUpper.mul_holds hM hh) hh))
+
+/-- A rational per-cell acceptance transfers to the real local bound used by
+`DifferenceGridWitness.uniform_error`. -/
+theorem localBound_le_budget (r : RationalCellRecord) {v d h M : ℝ}
+    {budget : ℚ}
+    (hv : r.value.Holds v) (hd : r.deriv.Holds d)
+    (hh : r.radius.Holds h) (hM : r.curvature.Holds M)
+    (hAccept : r.localBound.value ≤ budget) :
+    v + d * h + M * h * h ≤ (budget : ℝ) := by
+  have hHolds := r.localBound_holds hv hd hh hM
+  have hReal : v + (d * h + M * h * h) ≤ (r.localBound.value : ℝ) :=
+    hHolds.2
+  have hBudget : (r.localBound.value : ℝ) ≤ (budget : ℝ) := by
+    exact_mod_cast hAccept
+  linarith
+
+end RationalCellRecord
 
 /-! ## Parameter windows and runtime fallback -/
 

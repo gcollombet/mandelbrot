@@ -85,8 +85,9 @@ const MOBIUS_COEFF_FLOATS = 21
 // Step capacity of the GPU reference buffer (the 8·CAPACITY-byte
 // mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts, where the orbit
 // is computed to 2× the display maxIter (interactive zoom-in headroom) but never
-// beyond this cap.
-const ORBIT_STEP_CAPACITY = 1_000_000
+// beyond this cap. 10M steps = an 80 MB storage buffer, within the WebGPU
+// default maxStorageBufferBindingSize (128 MiB) — no requiredLimits needed.
+const ORBIT_STEP_CAPACITY = 10_000_000
 const COLOR_UNIFORM_FLOAT_COUNT = 64
 const TAU = Math.PI * 2
 
@@ -608,6 +609,13 @@ export class Engine {
     /** Portfolio A/B switch: picks the ENABLE_PORTFOLIO pipeline variant at
      *  the next in-place dispatch (specialization cache, same as deep). */
     portfolioEnabled = true
+    /** Renormalized Feigenbaum-return tier A/B switch: picks the ENABLE_RENORM
+     *  pipeline variant. Off by default (the tier is only valid deep on the
+     *  period-doubling cascade near c_∞); toggle for measurement. */
+    renormEnabled = false
+    /** Renormalized-tier observability: [block applications, iterations they
+     *  covered]. [-1,-1] = not yet read; stays [0,0] with the tier off. */
+    renormStatsApprox: [number, number] = [-1, -1]
     /** Applications served by the plain-f32 fast path (mode 5; the rest ran
      *  in fe). -1 = unknown. */
     f32AppsApprox = -1
@@ -1493,20 +1501,20 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
-        // Work-instrumentation buffer (in-place compute path): 13 × u32
+        // Work-instrumentation buffer (in-place compute path): 15 × u32
         // (realMean, covMean, maxAccum, maxSteps, tierAff/Pade/Cplus/Jet,
-        // gateJumps/gateFails, secoursApps/secoursIters, appsF32) — see
-        // WorkStats in the shader.
+        // gateJumps/gateFails, secoursApps/secoursIters, appsF32,
+        // renormApps/renormIters) — see WorkStats in the shader.
         this.workStatsBuffer = this.device.createBuffer({
-            size: 52,
+            size: 60,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine WorkStats Storage',
         })
-        // Readback slots hold counter (8 B) + workStats (52 B) = 60 B, copied
-        // together each sampled in-place dispatch and read as 15 × u32.
+        // Readback slots hold counter (8 B) + workStats (60 B) = 68 B, copied
+        // together each sampled in-place dispatch and read as 17 × u32.
         this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
             buffer: this.device.createBuffer({
-                size: 60,
+                size: 68,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: `Engine Counter Readback ${index}`,
             }),
@@ -1877,8 +1885,8 @@ export class Engine {
     // Lazily build + cache a specialized in-place kernel for the given override
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
-    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled): GPUComputePipeline {
-        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}`
+    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled): GPUComputePipeline {
+        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}`
         let pipeline = this.inplacePipelineCache.get(key)
         if (!pipeline) {
             pipeline = this.device.createComputePipeline({
@@ -1886,9 +1894,9 @@ export class Engine {
                 compute: {
                     module: this.inplaceModule!,
                     entryPoint: 'cs_main',
-                    constants: { ENABLE_DEEP: deep ? 1 : 0, ENABLE_PORTFOLIO: portfolio ? 1 : 0 },
+                    constants: { ENABLE_DEEP: deep ? 1 : 0, ENABLE_PORTFOLIO: portfolio ? 1 : 0, ENABLE_RENORM: renorm ? 1 : 0 },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm})`,
             })
             this.inplacePipelineCache.set(key, pipeline)
         }
@@ -2101,7 +2109,7 @@ export class Engine {
         }
         if (!this.finalStatsBuffer) {
             this.finalStatsBuffer = this.device.createBuffer({
-                size: 60,
+                size: 68,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: 'Engine Final Stats Readback',
             })
@@ -2109,7 +2117,7 @@ export class Engine {
         const session = this.workStatsSessionSerial
         const encoder = this.device.createCommandEncoder({ label: 'Engine Final Stats Copy' })
         encoder.copyBufferToBuffer(this.counterBuffer, 0, this.finalStatsBuffer, 0, 8)
-        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 52)
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 60)
         this.device.queue.submit([encoder.finish()])
         this.finalStatsPending = true
         void (async () => {
@@ -2128,6 +2136,7 @@ export class Engine {
                 this.gateStatsApprox = [data[10], data[11]]
                 this.secoursStatsApprox = [data[12], data[13]]
                 this.f32AppsApprox = data[14]
+                this.renormStatsApprox = [data[15], data[16]]
                 if (realMean > 0 && covMean / realMean >= 1) {
                     this.realLoopStepsApprox = realMean * 64
                     this.tierAppsApprox = [data[6], data[7], data[8], data[9]]
@@ -2160,6 +2169,7 @@ export class Engine {
             this.tierAppsApprox = [-1, -1, -1, -1]
             this.secoursStatsApprox = [-1, -1]
             this.f32AppsApprox = -1
+            this.renormStatsApprox = [-1, -1]
             // Next in-place dispatch re-clears workStats for the new session.
             this.workStatsSessionSerial++
         }
@@ -2208,7 +2218,8 @@ export class Engine {
                 const tierApps: [number, number, number, number] = [data[6], data[7], data[8], data[9]]
                 const secours: [number, number] = [data[12], data[13]]
                 const appsF32 = data[14]
-                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32)
+                const renorm: [number, number] = [data[15], data[16]]
+                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
             } finally {
@@ -2220,7 +2231,7 @@ export class Engine {
         })()
     }
 
-    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0) {
+    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0, renorm: [number, number] = [0, 0]) {
         if (generation !== this.counterReadbackGeneration) {
             return
         }
@@ -2258,6 +2269,7 @@ export class Engine {
                 this.tierAppsApprox = [tierApps[0], tierApps[1], tierApps[2], tierApps[3]]
                 this.secoursStatsApprox = [secours[0], secours[1]]
                 this.f32AppsApprox = appsF32
+                this.renormStatsApprox = [renorm[0], renorm[1]]
             } else {
                 this.realizedSkip = -1
                 this.workgroupWaste = -1
@@ -3755,7 +3767,7 @@ export class Engine {
             // only on the generation's first in-place dispatch, then let every
             // dispatch atomicAdd into it (exact, sampling-independent totals).
             if (this.workStatsClearedSession !== this.workStatsSessionSerial) {
-                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 52)
+                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 60)
                 this.workStatsClearedSession = this.workStatsSessionSerial
             }
             const computePass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(3) })
@@ -3776,7 +3788,7 @@ export class Engine {
                 const sequence = ++this.counterReadbackSequence
                 const generation = this.counterReadbackGeneration
                 commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
-                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 52)
+                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 60)
                 this.lastCounterDispatchFrame = frameSerial
                 scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
             }

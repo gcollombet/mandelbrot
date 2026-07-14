@@ -223,9 +223,9 @@ const ORBIT_CHUNK_SIZE = 1000
 // Compute the reference orbit to HEADROOM× the display maxIter, so interactive zoom-in (which
 // raises maxIter) finds the orbit already long enough — no transient black frame while it
 // catches up. The BLA table is still built only to the display maxIter (what the shader uses).
-// Capped at the GPU reference buffer's step capacity (mirrors Engine's 1M-step buffer).
+// Capped at the GPU reference buffer's step capacity (mirrors Engine's 10M-step buffer).
 const REFERENCE_ITER_HEADROOM = 2
-const ORBIT_STEP_CAPACITY = 1_000_000
+const ORBIT_STEP_CAPACITY = 10_000_000
 
 function postResponse(message: ReferenceWorkerResponse, transfer?: Transferable[]) {
     ctx.postMessage(message, transfer ?? [])

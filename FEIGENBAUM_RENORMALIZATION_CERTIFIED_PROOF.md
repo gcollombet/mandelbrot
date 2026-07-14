@@ -271,9 +271,45 @@ générique de ce raccord :
 - les jauges et la conversion exacte erreur normalisée/physique ;
 - le théorème `FiniteGridWitness.uniform_error`, qui transforme des bornes
   finies par cellule en une borne uniforme sur le disque ;
+- le certificat d'ordre 2 sur la différence `D_n = G_n - H` :
+  `taylor_remainder_of_deriv_bound` (pont valeur moyenne, prouvé depuis
+  Mathlib, pas supposé), `difference_cell_bound` (agrégation
+  `v + d·h + M₂h²`), `DifferenceGridWitness.uniform_error` (cellules
+  adaptatives à rayons hétérogènes) et le rejeu rationnel des sommes locales
+  (`RationalCellRecord.localBound_le_budget`, extrémités dyadiques exactes
+  via `RatUpper.dyadic`) ;
 - l'extension d'un paramètre central à une fenêtre en `c` ;
 - la sémantique de repli : sans certificat accepté, le choix est exactement
   le portefeuille existant.
+
+`LeanProofs/FeigenbaumRationalReplay.lean` franchit maintenant la dernière
+marche conceptuelle : le **rejeu noyau** d'une inclusion concrète. Sur une
+cellule dyadique (`x₀ = 1/32 + i/32`, `skip = 4`), le théorème
+`pilot_cell_inclusion` prouve
+
+```text
+dist(normalizedReturn c 4 x₀, chebyshevLimitModel x₀) ≤ 10⁻⁶
+```
+
+où `normalizedReturn` est la **vraie** définition du retour renormalisé (pas
+un modèle numérique) et `chebyshevLimitModel` le modèle stocké concret aux
+22 coefficients dyadiques exacts. Toute la chaîne — orbite critique de
+profondeur 4, jauge, retour, somme de Tchebychev — est rejouée en
+arithmétique dyadique exacte sur primitives `Int`/`Nat` (`Dyadic`, `DyC`),
+et les deux seules comparaisons (`pilot_numerator_check`,
+`pilot_scale_check`) sont des `decide` du noyau sur des `normSq` rationnels,
+sans racine ni flottant. Le décalage `2^k` passe par `Nat.shiftLeft`
+(accéléré GMP dans le noyau) pour que `decide` évalue les entiers de ~1000
+bits que produit la profondeur 4. Les constantes (`c`, les 22 `h̄`) sont
+générées par le test Rust `print_lean_pilot_constants`, donc l'export
+dyadique du builder et l'entrée du checker Lean sont le même objet.
+
+C'est un **pilote** : il décharge l'obligation `FiniteGridWitness.samples`
+pour une cellule. Le certificat runtime complet exige encore le rejeu de
+toutes les cellules du recouvrement et des obligations de cellule
+(variation, dérivée, courbure). Mais la trajectoire critique — « un nombre
+flottant découvert peut-il devenir une preuve noyau ? » — est désormais
+démontrée de bout en bout.
 
 Le builder `reference_calculus/src/feigenbaum.rs` produit déjà les propositions
 numériques correspondantes, mais son type de jeton vérifié est opaque et aucun
@@ -297,6 +333,11 @@ runtime : on prouve exactement le bloc que l'on veut sauter.
 | Algèbre du checker Lean des bornes `Y,Z` | prouvée dans Lean |
 | Données exhaustives `hbar/A/intervalles` | export rationnel à faire |
 | Théorème de reconnaissance finie | prouvé dans Lean |
+| Certificat ordre 2 sur la différence (Taylor + rejeu rationnel) | prouvé dans Lean |
 | Builder/probe de retour quadratique | implémenté, build-only |
-| Certificat concret accepté par le noyau | à produire |
+| Builder adaptatif de la différence + export dyadique | intervalles à arrondi dirigé (arrondis inclus) ; plancher `1.06e-2 → 5.03e-5` certifié |
+| Builder fenêtre en `c` (marge certifiée sur `s_n(c)`) | intervalles à arrondi dirigé ; `K_c` par niveau mesuré (×8,5/niveau) |
+| Census §7.1–7.3 (erreur+fenêtre, sauts vs Padé, succès rebasing) | mesuré : 2–7× le meilleur bloc Padé, 75–100 % de succès |
+| Rejeu noyau d'une inclusion concrète (pilote 1 cellule, skip 4) | prouvé dans Lean (`pilot_cell_inclusion`, 0 sorry, `decide` exact) |
+| Certificat concret complet accepté par le noyau | à produire (étendre le pilote à toutes les cellules + obligations variation/dérivée/courbure) |
 | Tier runtime renormalisé | repli forcé jusqu'au certificat + census |

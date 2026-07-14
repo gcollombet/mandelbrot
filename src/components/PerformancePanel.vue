@@ -51,6 +51,8 @@ const stats = reactive({
   secoursStats: [-1, -1] as [number, number],
   f32Apps: -1,
   gateStats: [-1, -1] as [number, number],
+  renormStats: [-1, -1] as [number, number],
+  renormEnabled: false,
   realizedSkip: -1,
   workgroupWaste: -1,
   maxPixelSteps: -1,
@@ -217,6 +219,19 @@ function secoursLine(): string {
   if (apps < 0 || total <= 0) return '';
   return `${formatOps(apps)} (${((100 * apps) / total).toFixed(0)}%) · ${formatOps(iters)} iters`;
 }
+// Renormalized Feigenbaum tier: block applications + iterations they covered,
+// with the mean jump per block (2^n averaged). The A/B measurement.
+function renormLine(): string {
+  const [apps, iters] = stats.renormStats;
+  if (apps < 0) return '';
+  if (apps === 0) return '0 (aucun saut qualifié)';
+  return `${formatOps(apps)} sauts · ${formatOps(iters)} iters · ×${(iters / apps).toFixed(0)}/saut`;
+}
+function setRenorm(on: boolean) {
+  const e = props.engine;
+  if (e) e.renormEnabled = on;
+  stats.renormEnabled = on;
+}
 // Plain-f32 fast-path share of the applications (the rest ran in floatexp).
 function f32Line(): string {
   const total = tierTotal.value;
@@ -316,6 +331,8 @@ function readLive(e: any) {
   stats.secoursStats = e.secoursStatsApprox ?? [-1, -1];
   stats.f32Apps = e.f32AppsApprox ?? -1;
   stats.gateStats = e.gateStatsApprox ?? [-1, -1];
+  stats.renormStats = e.renormStatsApprox ?? [-1, -1];
+  stats.renormEnabled = e.renormEnabled ?? false;
   stats.realizedSkip = e.realizedSkip ?? -1;
   stats.workgroupWaste = e.workgroupWaste ?? -1;
   stats.maxPixelSteps = e.maxPixelSteps ?? -1;
@@ -654,6 +671,17 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       <span class="perf-stat-label">Shader mode</span>
       <span class="perf-stat-value">{{ shaderModeLabel }} · {{ stats.shaderBlaLevelCount }} lvl</span>
     </div>
+    <!-- Renormalized Feigenbaum-return tier A/B toggle (only fires deep on the
+         cascade near c_∞; enable then navigate a deep cascade view). -->
+    <div class="perf-stat-row perf-debug-row">
+      <span class="perf-stat-label">Tier renorm (Feigenbaum)</span>
+      <div class="perf-debug-switch-wrap">
+        <label class="perf-debug-switch">
+          <input type="checkbox" :checked="stats.renormEnabled" @change="setRenorm(($event.target as HTMLInputElement).checked)" />
+          <span class="perf-debug-switch-slider"></span>
+        </label>
+      </div>
+    </div>
     <template v-if="stats.shaderApproxFlag >= 1">
       <div v-if="stats.realizedSkip > 0" class="perf-stat-row">
         <span class="perf-stat-label">Saut moyen / tour</span>
@@ -685,6 +713,10 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       <div v-if="f32Line()" class="perf-stat-row">
         <span class="perf-stat-label">Chemin arithmétique</span>
         <span class="perf-stat-value">{{ f32Line() }}</span>
+      </div>
+      <div v-if="renormLine()" class="perf-stat-row">
+        <span class="perf-stat-label">Tier renorm {{ stats.renormEnabled ? '' : '(OFF)' }}</span>
+        <span class="perf-stat-value">{{ renormLine() }}</span>
       </div>
       <div v-if="stats.shaderApproxFlag === 5 && stats.tableSaN0 >= 0" class="perf-stat-row">
         <span class="perf-stat-label">SA préfixe commun</span>

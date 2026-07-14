@@ -26,6 +26,7 @@ import LeanProofs.RenormalizedTransport
 import LeanProofs.FeigenbaumRenormalization
 import LeanProofs.VerifiedRationalBounds
 import LeanProofs.FeigenbaumFiniteReturn
+import LeanProofs.FeigenbaumRationalReplay
 import LeanProofs.Rebasing
 import LeanProofs.RadiusSolver
 import LeanProofs.PeriodicRuntime
