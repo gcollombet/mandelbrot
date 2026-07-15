@@ -1,8 +1,9 @@
 import {GoogleAuthProvider, onAuthStateChanged, signInWithPopup, signOut, type User} from 'firebase/auth';
 import {doc, getDoc} from 'firebase/firestore';
 import {getFirebaseServices, isFirebaseConfigured} from './firebaseConfig';
+import {GUEST_SCOPE, userScope, type LibraryScope} from './personalLibraryTypes';
 
-export type UserRole = 'guest' | 'admin';
+export type UserRole = 'guest' | 'user' | 'admin';
 
 export interface AuthState {
   user: User | null;
@@ -10,7 +11,15 @@ export interface AuthState {
 }
 
 function isUserRole(value: unknown): value is UserRole {
-  return value === 'guest' || value === 'admin';
+  return value === 'guest' || value === 'user' || value === 'admin';
+}
+
+export function normalizeAuthenticatedRole(value: unknown): Exclude<UserRole, 'guest'> {
+  return value === 'admin' ? 'admin' : 'user';
+}
+
+export function libraryScopeForUser(user: Pick<User, 'uid'> | null): LibraryScope {
+  return user ? userScope(user.uid) : GUEST_SCOPE;
 }
 
 export function isAuthConfigured(): boolean {
@@ -33,7 +42,7 @@ export async function resolveUserRole(user: User | null): Promise<UserRole> {
   if (!user) return 'guest';
 
   const services = getFirebaseServices();
-  if (!services) return 'guest';
+  if (!services) return 'user';
 
   if (!import.meta.env.VITE_FIREBASE_ROLE_ENDPOINT) {
     return resolveFirestoreAdminRole(user.uid);
@@ -46,7 +55,7 @@ export async function resolveUserRole(user: User | null): Promise<UserRole> {
     });
     if (!response.ok) return resolveFirestoreAdminRole(user.uid);
     const payload = await response.json() as {role?: unknown};
-    return isUserRole(payload.role) ? payload.role : resolveFirestoreAdminRole(user.uid);
+    return isUserRole(payload.role) ? normalizeAuthenticatedRole(payload.role) : resolveFirestoreAdminRole(user.uid);
   } catch {
     return resolveFirestoreAdminRole(user.uid);
   }
@@ -54,12 +63,12 @@ export async function resolveUserRole(user: User | null): Promise<UserRole> {
 
 async function resolveFirestoreAdminRole(uid: string): Promise<UserRole> {
   const services = getFirebaseServices();
-  if (!services) return 'guest';
+  if (!services) return 'user';
   try {
     const snapshot = await getDoc(doc(services.db, 'admins', uid));
-    return snapshot.exists() ? 'admin' : 'guest';
+    return snapshot.exists() ? 'admin' : 'user';
   } catch {
-    return 'guest';
+    return 'user';
   }
 }
 

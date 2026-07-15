@@ -3,6 +3,18 @@ import {isStopTransferCurve} from './ColorStop';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import type {EffectFieldName} from './effectFieldConfig';
 import {EFFECT_FIELD_NAMES} from './effectFieldConfig';
+import {
+  deletedCacheFields,
+  isVisibleCacheRecord,
+  localCacheFields,
+  openScopedDatabase,
+  publicCacheFields,
+  resolveLegacyCacheFields,
+  shouldQueuePersonalDelete,
+  syncedPersonalCacheFields,
+  type ScopedCacheFields,
+} from './scopedCache';
+import {notifyPersonalCacheChanged} from './personalSyncTrigger';
 
 const DB_NAME = 'mandelbrot-stop-presets';
 const DB_VERSION = 1;
@@ -14,7 +26,7 @@ export type StopPresetValues =
   & Pick<Partial<ColorStop>, 'transferCurve' | 'iridescenceColor'>
   & Partial<Record<EffectFieldName, number>>;
 
-export interface StopPresetRecord {
+export interface StopPresetRecord extends ScopedCacheFields {
   guid?: string;
   name: string;
   values: StopPresetValues;
@@ -24,23 +36,14 @@ export interface StopPresetRecord {
   remote?: CatalogRemoteState;
 }
 
-let _dbPromise: Promise<IDBDatabase> | null = null;
-
 function openDB(): Promise<IDBDatabase> {
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+  return openScopedDatabase(DB_NAME, DB_VERSION, (_event, req) => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, {keyPath: 'name'});
         store.createIndex('guid', 'guid', {unique: true});
       }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
   });
-  return _dbPromise;
 }
 
 function tx(mode: IDBTransactionMode): Promise<{ store: IDBObjectStore; done: Promise<void> }> {
@@ -72,7 +75,14 @@ export async function getAllStopPresetEntries(): Promise<StopPresetRecord[]> {
   const {store, done} = await tx('readonly');
   const all: StopPresetRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all.sort((a, b) => b.date.localeCompare(a.date));
+  return all.map(resolveLegacyCacheFields).filter(isVisibleCacheRecord).sort((a, b) => b.date.localeCompare(a.date));
+}
+
+export async function getAllStopPresetCacheRecords(): Promise<StopPresetRecord[]> {
+  const {store, done} = await tx('readonly');
+  const all: StopPresetRecord[] = await reqToPromise(store.getAll());
+  await done;
+  return all.map(resolveLegacyCacheFields);
 }
 
 export async function saveStopPresetEntry(record: StopPresetRecord): Promise<void> {
@@ -86,10 +96,12 @@ export async function saveStopPresetEntry(record: StopPresetRecord): Promise<voi
     date,
     lastUpdated: record.lastUpdated || date,
     favorite: record.favorite ?? false,
+    ...localCacheFields(record),
   };
   const {store, done} = await tx('readwrite');
   store.put(next);
   await done;
+  notifyPersonalCacheChanged(next);
 }
 
 export async function getStopPresetByName(name: string): Promise<StopPresetRecord | null> {
@@ -105,6 +117,7 @@ export async function getStopPresetByGuid(guid: string): Promise<StopPresetRecor
 }
 
 export async function saveRemoteStopPresetEntry(record: StopPresetRecord): Promise<void> {
+  Object.assign(record, publicCacheFields(record));
   if (!record.guid) record.guid = createGuid();
   const existing = await getStopPresetByGuid(record.guid);
   if (existing) {
@@ -122,11 +135,40 @@ export async function saveRemoteStopPresetEntry(record: StopPresetRecord): Promi
 
 export async function deleteStopPresetEntry(name: string): Promise<void> {
   const {store, done} = await tx('readwrite');
-  store.delete(name);
+  const record: StopPresetRecord | undefined = await reqToPromise(store.get(name));
+  if (record && shouldQueuePersonalDelete(resolveLegacyCacheFields(record))) {
+    store.put({...record, ...deletedCacheFields(record)});
+  } else {
+    store.delete(name);
+  }
   await done;
+  notifyPersonalCacheChanged(record);
 }
 
 export async function ensureDefaultStopPresetEntries(): Promise<void> {
+}
+
+export async function applyCloudStopPresetEntry(record: StopPresetRecord, revision: number): Promise<void> {
+  const existing = await getStopPresetByGuid(record.guid || '');
+  const next = {...record, ...syncedPersonalCacheFields(record, revision)};
+  const {store, done} = await tx('readwrite');
+  if (existing && existing.name !== next.name) store.delete(existing.name);
+  store.put(next);
+  await done;
+}
+
+export async function acknowledgeStopPresetEntry(guid: string, revision: number): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: StopPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  await done;
+}
+
+export async function purgeStopPresetEntryByGuid(guid: string): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: StopPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.delete(record.name);
+  await done;
 }
 
 export function valuesFromStop(stop: ColorStop): StopPresetValues {

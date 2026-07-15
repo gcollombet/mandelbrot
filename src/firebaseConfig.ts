@@ -2,12 +2,14 @@ import {getApp, getApps, initializeApp, type FirebaseApp, type FirebaseOptions} 
 import {getAuth, type Auth} from 'firebase/auth';
 import {getFirestore, type Firestore} from 'firebase/firestore';
 import {getStorage, type FirebaseStorage} from 'firebase/storage';
+import {getFunctions, type Functions} from 'firebase/functions';
 
 export interface FirebaseServices {
   app: FirebaseApp;
   auth: Auth;
   db: Firestore;
   storage: FirebaseStorage;
+  functions: Functions;
 }
 
 const firebaseConfig: FirebaseOptions = {
@@ -41,6 +43,7 @@ export function getFirebaseServices(): FirebaseServices | null {
     auth: getAuth(app),
     db: getFirestore(app),
     storage: getStorage(app),
+    functions: getFunctions(app, 'europe-west1'),
   };
   return services;
 }

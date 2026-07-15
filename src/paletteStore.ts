@@ -14,6 +14,18 @@ import type {ColorStop} from './ColorStop';
 import type {InterpolationMode} from './Mandelbrot';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import type {TextureMappingConfig} from './TextureMapping';
+import {
+  deletedCacheFields,
+  isVisibleCacheRecord,
+  localCacheFields,
+  openScopedDatabase,
+  publicCacheFields,
+  resolveLegacyCacheFields,
+  shouldQueuePersonalDelete,
+  syncedPersonalCacheFields,
+  type ScopedCacheFields,
+} from './scopedCache';
+import {notifyPersonalCacheChanged} from './personalSyncTrigger';
 
 const DB_NAME = 'mandelbrot-palettes';
 const DB_VERSION = 2;
@@ -26,7 +38,7 @@ const STORE_NAME = 'palettes';
 // ---------------------------------------------------------------------------
 
 /** Full record stored in IndexedDB. */
-export interface PaletteRecord {
+export interface PaletteRecord extends ScopedCacheFields {
   guid?: string;
   name: string;
   colorStops: ColorStop[];
@@ -68,13 +80,8 @@ export type PaletteMetadata = PaletteRecord;
 // DB helpers
 // ---------------------------------------------------------------------------
 
-let _dbPromise: Promise<IDBDatabase> | null = null;
-
 function openDB(): Promise<IDBDatabase> {
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+  return openScopedDatabase(DB_NAME, DB_VERSION, (_event, req) => {
       const db = req.result;
       const transaction = req.transaction;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -100,11 +107,7 @@ function openDB(): Promise<IDBDatabase> {
           cursor.continue();
         };
       }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
   });
-  return _dbPromise;
 }
 
 function tx(
@@ -144,7 +147,14 @@ export async function getAllPaletteEntries(): Promise<PaletteRecord[]> {
   const { store, done } = await tx('readonly');
   const all: PaletteRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all.sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+  return all.map(resolveLegacyCacheFields).filter(isVisibleCacheRecord).sort((a, b) => (b.date ?? '').localeCompare(a.date ?? ''));
+}
+
+export async function getAllPaletteCacheRecords(): Promise<PaletteRecord[]> {
+  const {store, done} = await tx('readonly');
+  const all: PaletteRecord[] = await reqToPromise(store.getAll());
+  await done;
+  return all.map(resolveLegacyCacheFields);
 }
 
 async function uniquePaletteName(name: string, guid?: string): Promise<string> {
@@ -168,6 +178,7 @@ export async function getPaletteByGuid(guid: string): Promise<PaletteRecord | nu
 }
 
 export async function saveRemotePaletteEntry(record: PaletteRecord): Promise<void> {
+  Object.assign(record, publicCacheFields(record));
   if (!record.guid) record.guid = createGuid();
   const existing = await getPaletteByGuid(record.guid);
   if (existing) {
@@ -194,9 +205,11 @@ export async function savePaletteEntry(record: PaletteRecord): Promise<void> {
   storable.date = storable.date ?? new Date().toISOString();
   storable.lastUpdated = storable.lastUpdated ?? storable.date;
   storable.favorite = storable.favorite ?? false;
+  Object.assign(storable, localCacheFields(storable));
   const { store, done } = await tx('readwrite');
   store.put(storable);
   await done;
+  notifyPersonalCacheChanged(storable);
 }
 
 /**
@@ -204,8 +217,14 @@ export async function savePaletteEntry(record: PaletteRecord): Promise<void> {
  */
 export async function deletePaletteEntry(name: string): Promise<void> {
   const { store, done } = await tx('readwrite');
-  store.delete(name);
+  const record: PaletteRecord | undefined = await reqToPromise(store.get(name));
+  if (record && shouldQueuePersonalDelete(resolveLegacyCacheFields(record))) {
+    store.put({...record, ...deletedCacheFields(record)});
+  } else {
+    store.delete(name);
+  }
   await done;
+  notifyPersonalCacheChanged(record);
 }
 
 /**
@@ -218,3 +237,25 @@ export async function getPaletteCount(): Promise<number> {
   return count;
 }
 
+export async function applyCloudPaletteEntry(record: PaletteRecord, revision: number): Promise<void> {
+  const existing = await getPaletteByGuid(record.guid || '');
+  const next = {...clonePaletteRecord(record), ...syncedPersonalCacheFields(record, revision)};
+  const {store, done} = await tx('readwrite');
+  if (existing && existing.name !== next.name) store.delete(existing.name);
+  store.put(next);
+  await done;
+}
+
+export async function acknowledgePaletteEntry(guid: string, revision: number): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: PaletteRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  await done;
+}
+
+export async function purgePaletteEntryByGuid(guid: string): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: PaletteRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.delete(record.name);
+  await done;
+}

@@ -2,7 +2,9 @@ import type {TextureMetadata} from './textureStore';
 import {
   getAllTextureEntries,
   getTextureBlob,
+  getTextureMetadataByName,
 } from './textureStore';
+import {ensurePersonalTextureCached} from './personalTextureSync';
 
 export const TEXTURE_SELECTED_KEY = 'mandelbrot_selected_texture';
 export const SKYBOX_SELECTED_KEY = 'mandelbrot_selected_skybox';
@@ -47,6 +49,12 @@ export function textureSourceKey(name: string, textures: TextureMetadata[]): str
 export async function storedTextureObjectUrl(name: string): Promise<string | null> {
   const builtInTexture = BUILT_IN_TEXTURES.find(texture => texture.name === name);
   if (builtInTexture) return builtInTexture.url;
-  const blob = await getTextureBlob(name);
+  let blob = await getTextureBlob(name);
+  if (!blob) {
+    const metadata = await getTextureMetadataByName(name);
+    if (metadata?.origin === 'personal' && metadata.storagePath) {
+      blob = await ensurePersonalTextureCached(metadata);
+    }
+  }
   return blob ? URL.createObjectURL(blob) : null;
 }

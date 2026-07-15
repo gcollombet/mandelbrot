@@ -11,11 +11,11 @@ describe('textureNormalization', () => {
   });
 
   it('caps landscape textures without changing aspect ratio', () => {
-    expect(normalizeTextureDimensions(4096, 1024)).toEqual({width: 2048, height: 512});
+    expect(normalizeTextureDimensions(4096, 1024)).toEqual({width: 1024, height: 256});
   });
 
   it('caps portrait textures without changing aspect ratio', () => {
-    expect(normalizeTextureDimensions(1000, 3000)).toEqual({width: 683, height: 2048});
+    expect(normalizeTextureDimensions(1000, 3000)).toEqual({width: 341, height: 1024});
   });
 
   it('does not upscale textures already within the limit', () => {
@@ -48,12 +48,12 @@ describe('textureNormalization', () => {
 
     expect(result.blob.type).toBe('image/webp');
     expect(result.width).toBe(MAX_IMPORTED_TEXTURE_SIDE);
-    expect(result.height).toBe(512);
+    expect(result.height).toBe(256);
     expect(result.originalWidth).toBe(4096);
     expect(result.originalHeight).toBe(1024);
-    expect(canvas.width).toBe(2048);
-    expect(canvas.height).toBe(512);
-    expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 2048, 512);
+    expect(canvas.width).toBe(1024);
+    expect(canvas.height).toBe(256);
+    expect(drawImage).toHaveBeenCalledWith(expect.anything(), 0, 0, 1024, 256);
     expect(toBlob).toHaveBeenCalledWith(expect.any(Function), 'image/webp', expect.any(Number));
     expect(close).toHaveBeenCalled();
   });

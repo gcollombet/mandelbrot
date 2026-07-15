@@ -10,7 +10,8 @@ export function canDeleteCatalogEntry(role: UserRole, remote?: CatalogRemoteStat
 }
 
 export function canOverwriteCatalogPayload(role: UserRole, remote?: CatalogRemoteState): boolean {
-  return !remote || role === 'admin';
+  void role;
+  return !remote;
 }
 
 export function canEditLocalDisplayName(): boolean {

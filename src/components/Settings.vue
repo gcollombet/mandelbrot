@@ -80,6 +80,7 @@ import type {UserRole} from '../authService';
 import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
 import {nameForCatalogReference} from '../catalogIdentity';
 import {MAX_IMPORTED_TEXTURE_SIDE, normalizeTextureBlob} from '../textureNormalization';
+import {assertActivePresetImportCapacity, PersonalPresetQuotaError} from '../personalQuotaGuard';
 
 import type {Engine} from '../Engine.ts';
 const props = defineProps<{
@@ -1266,6 +1267,8 @@ async function uploadTexture(texture: TextureMetadata): Promise<void> {
   }
   if (!blob) return;
   try {
+    const normalized = await normalizeTextureBlob(blob);
+    blob = normalized.blob;
     const uploaded = await uploadRemoteTextureEntry({
       guid: texture.guid,
       name: texture.name,
@@ -1274,10 +1277,22 @@ async function uploadTexture(texture: TextureMetadata): Promise<void> {
       contentType: blob.type,
       size: blob.size,
     }, blob);
-    await saveTextureEntry(texture.name, blob, texture.thumbnail, texture.date, texture.guid, texture.favorite ?? false, {
-      publishedName: uploaded.name,
-      lastUpdated: uploaded.lastUpdated,
-    });
+    await saveTextureEntry(
+      texture.name,
+      blob,
+      texture.thumbnail,
+      texture.date,
+      texture.guid,
+      texture.favorite ?? false,
+      {publishedName: uploaded.name, lastUpdated: uploaded.lastUpdated},
+      {
+        kind: texture.kind,
+        contentType: 'image/webp',
+        width: normalized.width,
+        height: normalized.height,
+        byteSize: blob.size,
+      },
+    );
     textures.value = await ensureTextureLibrary();
     showUploadSuccess(uploadSuccessKey('texture', texture.guid));
   } catch (error) {
@@ -1296,31 +1311,6 @@ async function toggleTextureFavorite(texture: TextureMetadata): Promise<void> {
     texture.favorite = previous;
     console.warn('Failed to save texture favorite:', error);
   }
-}
-
-async function deleteAllPresets(): Promise<void> {
-  if (presets.value.length === 0) return;
-  if (!window.confirm(`Delete all ${presets.value.length} presets? This cannot be undone.`)) return;
-  for (const preset of presets.value) {
-    await deletePresetEntry(preset.id);
-  }
-  presetCache.clear();
-  presets.value = await getAllPresetEntries();
-  selectedPreset.value = null;
-  selectedNavPreset.value = null;
-  selectedPalettePreset.value = null;
-  presetName.value = '';
-}
-
-async function deleteAllPalettes(): Promise<void> {
-  if (palettes.value.length === 0) return;
-  if (!window.confirm(`Delete all ${palettes.value.length} palettes? This cannot be undone.`)) return;
-  for (const palette of palettes.value) {
-    await deletePaletteEntry(palette.name);
-  }
-  palettes.value = await getAllPaletteEntries();
-  selectedPalette.value = '';
-  paletteName.value = '';
 }
 
 async function selectPreset(id: number) {
@@ -1512,6 +1502,7 @@ async function exportFavoriteNavigationPresets() {
 
 const presetFileInput = ref<HTMLInputElement | null>(null);
 function triggerImportPresets() {
+  if (!isAdmin.value) return;
   presetFileInput.value?.click();
 }
 
@@ -1544,6 +1535,7 @@ async function importPresets(event: Event) {
         if (!preset || typeof preset !== 'object' || !('value' in preset)) continue;
         hadValid = true;
         const record = preset as {
+          guid?: string;
           value: MandelbrotParams;
           thumbnail?: string;
           name?: string;
@@ -1558,16 +1550,22 @@ async function importPresets(event: Event) {
         stripExplorationStateFields(value);
         value.textureMapping = normalizeTextureMappingFromLegacy(value);
         delete (value as any).textureMappingMode;
+        await assertActivePresetImportCapacity(record.guid);
         await savePresetEntry(
           value,
           record.thumbnail ?? '',
           name,
           record.date,
           record.favorite ?? false,
+          record.guid,
         );
         importedCount += 1;
       }
     } catch (error) {
+      if (error instanceof PersonalPresetQuotaError) {
+        window.alert(error.message);
+        break;
+      }
       console.warn(`[Settings] Skipping preset import file "${file.name}"`, error);
     }
   }
@@ -1610,6 +1608,7 @@ function exportFavoritePalettes() {
 
 const paletteFileInput = ref<HTMLInputElement | null>(null);
 function triggerImportPalettes() {
+  if (!isAdmin.value) return;
   paletteFileInput.value?.click();
 }
 async function importPalettes(event: Event) {
@@ -1633,10 +1632,15 @@ async function importPalettes(event: Event) {
         const name = record.name ?? '';
         const date = record.date ?? '';
         if (existing.some(e => e.name === name && e.date === date)) continue;
+        await assertActivePresetImportCapacity(record.guid);
         await savePaletteEntry(record);
         importedCount += 1;
       }
     } catch (error) {
+      if (error instanceof PersonalPresetQuotaError) {
+        window.alert(error.message);
+        break;
+      }
       console.warn(`[Settings] Skipping palette import file "${file.name}"`, error);
     }
   }
@@ -2159,7 +2163,13 @@ async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
     URL.revokeObjectURL(thumbUrl);
 
     // Store blob in IndexedDB
-    await saveTextureEntry(name, normalized.blob, thumbnail);
+    await saveTextureEntry(name, normalized.blob, thumbnail, undefined, undefined, false, undefined, {
+      kind: target === 'skybox' ? 'skybox' : 'texture',
+      contentType: 'image/webp',
+      width: normalized.width,
+      height: normalized.height,
+      byteSize: normalized.blob.size,
+    });
 
     // Refresh metadata list
     textures.value = await ensureTextureLibrary();
@@ -2365,7 +2375,7 @@ async function importSkyboxTexture(event: Event) {
       </button>
       <p class="load-note">Applies Cx, Cy, zoom &amp; angle from the selected preset.</p>
 
-      <div class="transfer">
+      <div v-if="isAdmin" class="transfer">
         <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
         <button class="mini-btn" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
         <button class="mini-btn" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
@@ -2442,7 +2452,7 @@ async function importSkyboxTexture(event: Event) {
               @click.stop.prevent="togglePresetFavorite(preset.id)">
               <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
             </button>
-            <button class="abtn" title="Export" @click.stop.prevent="exportPresetById(preset.id)">
+            <button v-if="isAdmin" class="abtn" title="Export" @click.stop.prevent="exportPresetById(preset.id)">
               <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
             </button>
             <button class="abtn del" title="Delete" @click.stop.prevent="deletePresetById(preset.id)">
@@ -2466,6 +2476,7 @@ async function importSkyboxTexture(event: Event) {
 
       <!-- ============ 3. TRANSFER ============ -->
       <DenseSection
+        v-if="isAdmin"
         title="Transfert"
         scope="Import / export"
         icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'
@@ -2475,7 +2486,6 @@ async function importSkyboxTexture(event: Event) {
         <button class="mini-btn" @click="exportPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
         <button class="mini-btn" @click="exportSelectedPreset" :disabled="!selectedPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
         <button class="mini-btn" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
-        <button class="mini-btn danger" @click="deleteAllPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete all</button>
         <input ref="presetFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPresets" />
       </div>
       </DenseSection>
@@ -2718,7 +2728,7 @@ async function importSkyboxTexture(event: Event) {
       <DenseSection group="params" :hue="175" title="Texture · Environnement" scope="Réflexions ambiantes" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M3 12h18M12 3a14 14 0 010 18 14 14 0 010-18z&quot;/>'>
       <p class="section-help">Select the image used for glossy and ambient environment reflections.</p>
       <div class="grid texture-grid">
-        <div v-for="tex in textures" :key="'skybox-card-' + tex.name" class="card texture-card" :class="{ sel: selectedSkyboxTexture === tex.name }" @click="selectSkyboxFromDropdown(tex)">
+        <div v-for="tex in textures" :key="'skybox-card-' + tex.name" class="card texture-card" :class="{ sel: selectedSkyboxTexture === tex.name, unavailable: tex.unavailable }" @click="selectSkyboxFromDropdown(tex)">
           <span class="sel-badge">Applied</span>
           <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
@@ -2733,7 +2743,7 @@ async function importSkyboxTexture(event: Event) {
               <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
             </button>
           </div>
-          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in map' : 'Saved map' }}</span></div></div>
+          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? 'Unavailable — safe fallback active' : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in map' : 'Saved map' }}</span></div></div>
         </div>
         <div v-if="textures.length === 0" class="empty">No environment maps available.</div>
       </div>
@@ -2747,7 +2757,7 @@ async function importSkyboxTexture(event: Event) {
       <DenseSection group="params" :hue="175" title="Texture · Images" scope="Images à mélanger dans la surface" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><circle cx=&quot;9&quot; cy=&quot;10&quot; r=&quot;2&quot;/><path d=&quot;M21 15l-5-5-11 9&quot;/>'>
       <p class="section-help">Click a texture to use it as the image layer.</p>
       <div class="grid texture-grid">
-        <div v-for="tex in textures" :key="tex.name" class="card texture-card" :class="{ sel: selectedTexture === tex.name }" @click="selectTextureFromDropdown(tex)">
+        <div v-for="tex in textures" :key="tex.name" class="card texture-card" :class="{ sel: selectedTexture === tex.name, unavailable: tex.unavailable }" @click="selectTextureFromDropdown(tex)">
           <span class="sel-badge">Applied</span>
           <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
@@ -2762,7 +2772,7 @@ async function importSkyboxTexture(event: Event) {
               <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
             </button>
           </div>
-          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in texture' : 'Saved texture' }}</span></div></div>
+          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? 'Unavailable — safe fallback active' : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in texture' : 'Saved texture' }}</span></div></div>
         </div>
         <div v-if="textures.length === 0" class="empty">No image textures available.</div>
       </div>
@@ -2837,7 +2847,7 @@ async function importSkyboxTexture(event: Event) {
             <button class="abtn heart" :class="{ faved: palette.favorite }" title="Favorite" @click.stop.prevent="togglePaletteFavorite(palette.name)">
               <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
             </button>
-            <button class="abtn" title="Export" @click.stop.prevent="exportPaletteByName(palette.name)">
+            <button v-if="isAdmin" class="abtn" title="Export" @click.stop.prevent="exportPaletteByName(palette.name)">
               <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
             </button>
             <button v-if="canDeleteCatalogEntry(userRole, palette.remote)" class="abtn del" title="Delete" @click.stop.prevent="deletePaletteByName(palette.name)">
@@ -2879,7 +2889,7 @@ async function importSkyboxTexture(event: Event) {
             <button class="abtn heart" :class="{ faved: preset.favorite }" title="Favorite" @click.stop.prevent="togglePresetFavorite(preset.id)">
               <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
             </button>
-            <button class="abtn" title="Export" @click.stop.prevent="exportPresetById(preset.id)">
+            <button v-if="isAdmin" class="abtn" title="Export" @click.stop.prevent="exportPresetById(preset.id)">
               <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
             </button>
             <button class="abtn del" title="Delete" @click.stop.prevent="deletePresetById(preset.id)">
@@ -2895,13 +2905,12 @@ async function importSkyboxTexture(event: Event) {
       </div>
       </DenseSection>
 
-      <DenseSection group="library" :hue="300" title="Transfert" scope="Import / export" icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'>
+      <DenseSection v-if="isAdmin" group="library" :hue="300" title="Transfert" scope="Import / export" icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'>
       <div class="transfer">
         <button class="tbtn primary" @click="triggerImportPalettes"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
         <button class="tbtn" @click="exportPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
         <button class="tbtn" @click="exportSelectedPalette" :disabled="!selectedPalette"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
         <button class="tbtn" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
-        <button class="tbtn danger" @click="deleteAllPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete all</button>
         <input ref="paletteFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPalettes" />
       </div>
       </DenseSection>

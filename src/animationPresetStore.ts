@@ -4,12 +4,24 @@ import {
   type AnimationConfig,
 } from './AnimationConfig';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
+import {
+  deletedCacheFields,
+  isVisibleCacheRecord,
+  localCacheFields,
+  openScopedDatabase,
+  publicCacheFields,
+  resolveLegacyCacheFields,
+  shouldQueuePersonalDelete,
+  syncedPersonalCacheFields,
+  type ScopedCacheFields,
+} from './scopedCache';
+import {notifyPersonalCacheChanged} from './personalSyncTrigger';
 
 const DB_NAME = 'mandelbrot-animation-presets';
 const DB_VERSION = 1;
 const STORE_NAME = 'animationPresets';
 
-export interface AnimationPresetRecord {
+export interface AnimationPresetRecord extends ScopedCacheFields {
   guid: string;
   name: string;
   animation: AnimationConfig;
@@ -19,23 +31,14 @@ export interface AnimationPresetRecord {
   remote?: CatalogRemoteState;
 }
 
-let _dbPromise: Promise<IDBDatabase> | null = null;
-
 function openDB(): Promise<IDBDatabase> {
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+  return openScopedDatabase(DB_NAME, DB_VERSION, (_event, req) => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, {keyPath: 'name'});
         store.createIndex('guid', 'guid', {unique: true});
       }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
   });
-  return _dbPromise;
 }
 
 function tx(mode: IDBTransactionMode): Promise<{store: IDBObjectStore; done: Promise<void>}> {
@@ -74,7 +77,14 @@ export async function getAllAnimationPresetEntries(): Promise<AnimationPresetRec
   const {store, done} = await tx('readonly');
   const all: AnimationPresetRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all.map(cloneRecord).sort((a, b) => b.date.localeCompare(a.date));
+  return all.map(cloneRecord).map(resolveLegacyCacheFields).filter(isVisibleCacheRecord).sort((a, b) => b.date.localeCompare(a.date));
+}
+
+export async function getAllAnimationPresetCacheRecords(): Promise<AnimationPresetRecord[]> {
+  const {store, done} = await tx('readonly');
+  const all: AnimationPresetRecord[] = await reqToPromise(store.getAll());
+  await done;
+  return all.map(cloneRecord).map(resolveLegacyCacheFields);
 }
 
 export async function getAnimationPresetByName(name: string): Promise<AnimationPresetRecord | null> {
@@ -101,13 +111,16 @@ export async function saveAnimationPresetEntry(record: AnimationPresetRecord): P
     date,
     lastUpdated: record.lastUpdated || date,
     favorite: record.favorite ?? false,
+    ...localCacheFields(record),
   };
   const {store, done} = await tx('readwrite');
   store.put(next);
   await done;
+  notifyPersonalCacheChanged(next);
 }
 
 export async function saveRemoteAnimationPresetEntry(record: AnimationPresetRecord): Promise<void> {
+  Object.assign(record, publicCacheFields(record));
   const existing = await getAnimationPresetByGuid(record.guid);
   await saveAnimationPresetEntry({
     ...record,
@@ -120,6 +133,35 @@ export async function saveRemoteAnimationPresetEntry(record: AnimationPresetReco
 
 export async function deleteAnimationPresetEntry(name: string): Promise<void> {
   const {store, done} = await tx('readwrite');
-  store.delete(name);
+  const record: AnimationPresetRecord | undefined = await reqToPromise(store.get(name));
+  if (record && shouldQueuePersonalDelete(resolveLegacyCacheFields(record))) {
+    store.put({...record, ...deletedCacheFields(record)});
+  } else {
+    store.delete(name);
+  }
+  await done;
+  notifyPersonalCacheChanged(record);
+}
+
+export async function applyCloudAnimationPresetEntry(record: AnimationPresetRecord, revision: number): Promise<void> {
+  const existing = await getAnimationPresetByGuid(record.guid);
+  const next = {...cloneRecord(record), ...syncedPersonalCacheFields(record, revision)};
+  const {store, done} = await tx('readwrite');
+  if (existing && existing.name !== next.name) store.delete(existing.name);
+  store.put(next);
+  await done;
+}
+
+export async function acknowledgeAnimationPresetEntry(guid: string, revision: number): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: AnimationPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  await done;
+}
+
+export async function purgeAnimationPresetEntryByGuid(guid: string): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: AnimationPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.delete(record.name);
   await done;
 }

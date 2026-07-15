@@ -16,8 +16,9 @@
  * explains the amplification fallback for measuring a single pass.
  */
 import { onMounted, onUnmounted, reactive, ref, computed } from 'vue';
+import { formatPeriodicHeaderStatus } from '../periodicHeaderStatus';
 
-const props = defineProps<{ engine: any }>();
+const props = withDefaults(defineProps<{ engine: any; isAdmin?: boolean }>(), {isAdmin: false});
 const emit = defineEmits<{ (e: 'close'): void }>();
 
 const debugShading = defineModel<boolean>('debugShading', { default: false });
@@ -61,6 +62,8 @@ const stats = reactive({
   // Table (worker's last unified build)
   tableSaN0: -1,
   tablePeriodicP: -1,
+  tablePeriodicStatus: 0,
+  tablePeriodicDetectedP: -1,
   tableBandLog2: Number.NaN,
   tableBandSpread: Number.NaN,
   tableGateCount: -1,
@@ -263,6 +266,16 @@ function bandLine(): string {
   return `2^${stats.tableBandLog2.toFixed(1)} ± ${stats.tableBandSpread.toFixed(1)} oct`;
 }
 
+// Rust periodic diagnostic: keep "pending" distinct from a completed dormant
+// decision so centering/rebuilding never leaves a misleading stale label.
+function periodicHeaderLine(): string {
+  return formatPeriodicHeaderStatus(
+    stats.tablePeriodicStatus,
+    stats.tablePeriodicP,
+    stats.tablePeriodicDetectedP,
+  );
+}
+
 // Analytic AA frontier: re-iterated texels / boundary-band texels at the last
 // reseed — margin-passing texels expand their Taylor payload instead.
 function aaFrontier(): string {
@@ -340,6 +353,8 @@ function readLive(e: any) {
   stats.portfolioEnabled = e.portfolioEnabled ?? true;
   stats.tableSaN0 = e.tableSaN0 ?? -1;
   stats.tablePeriodicP = e.tablePeriodicP ?? -1;
+  stats.tablePeriodicStatus = e.tablePeriodicStatus ?? 0;
+  stats.tablePeriodicDetectedP = e.tablePeriodicDetectedP ?? -1;
   stats.tableBandLog2 = e.tableBandLog2 ?? Number.NaN;
   stats.tableBandSpread = e.tableBandSpread ?? Number.NaN;
   stats.tableGateCount = e.tableGateCount ?? -1;
@@ -722,9 +737,9 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
         <span class="perf-stat-label">SA préfixe commun</span>
         <span class="perf-stat-value">{{ stats.tableSaN0 > 0 ? formatOps(stats.tableSaN0) + ' iters' : '—' }}</span>
       </div>
-      <div v-if="stats.shaderApproxFlag === 5 && stats.tablePeriodicP >= 0" class="perf-stat-row">
+      <div v-if="stats.shaderApproxFlag === 5 && stats.tablePeriodicStatus >= 0" class="perf-stat-row">
         <span class="perf-stat-label">Header périodique</span>
-        <span class="perf-stat-value">{{ stats.tablePeriodicP > 0 ? 'p = ' + stats.tablePeriodicP : 'dormant' }}</span>
+        <span class="perf-stat-value">{{ periodicHeaderLine() }}</span>
       </div>
       <div v-if="stats.shaderApproxFlag === 5 && gatesLine()" class="perf-stat-row">
         <span class="perf-stat-label">Portes paraboliques</span>
@@ -807,7 +822,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     <div class="perf-export">
       <span class="pe-count">{{ history.length }} échant. / 30 s</span>
       <button class="pe-btn" type="button" :disabled="history.length < 2" @click="exportCsv">Export CSV</button>
-      <button class="pe-btn" type="button" :disabled="history.length < 2" @click="exportJson">JSON</button>
+      <button v-if="props.isAdmin" class="pe-btn" type="button" :disabled="history.length < 2" @click="exportJson">JSON</button>
     </div>
   </div>
 </template>

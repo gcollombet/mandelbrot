@@ -16,6 +16,8 @@ defineProps<{
   authConfigured?: boolean;
   /** Signed-in user's email, if any. Empty/undefined renders the "Login" state. */
   authUserEmail?: string;
+  syncState?: 'idle' | 'syncing' | 'synced' | 'error';
+  syncError?: string;
 }>();
 
 const emit = defineEmits<{
@@ -54,6 +56,13 @@ function onHeaderPointerDown(e: PointerEvent) {
     </div>
     <span class="spacer"></span>
     <slot name="actions" />
+    <span
+      v-if="authUserEmail && syncState && syncState !== 'idle'"
+      class="sync-state"
+      :class="syncState"
+      :title="syncState === 'error' ? (syncError || 'Cloud sync failed; retry scheduled') : syncState === 'syncing' ? 'Synchronisation cloud…' : 'Bibliothèque synchronisée'"
+      :aria-label="syncState === 'error' ? 'Erreur de synchronisation cloud' : syncState === 'syncing' ? 'Synchronisation cloud en cours' : 'Bibliothèque synchronisée'"
+    ></span>
     <button
       v-if="authConfigured"
       class="tb-btn auth-btn"
@@ -73,3 +82,17 @@ function onHeaderPointerDown(e: PointerEvent) {
     <DenseViewMenu v-if="menuOpen && isAdmin" @close="menuOpen = false" />
   </header>
 </template>
+
+<style scoped>
+.sync-state {
+  width: 7px;
+  height: 7px;
+  border-radius: 999px;
+  background: var(--muted, #777);
+  box-shadow: 0 0 0 2px color-mix(in srgb, currentColor 16%, transparent);
+}
+.sync-state.syncing { background: #e6a93d; animation: sync-pulse 1s ease-in-out infinite; }
+.sync-state.synced { background: #46bf78; }
+.sync-state.error { background: #e35d6a; }
+@keyframes sync-pulse { 50% { opacity: .4; } }
+</style>

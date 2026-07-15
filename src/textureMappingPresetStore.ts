@@ -5,12 +5,25 @@ import {
   normalizeTextureMappingConfig,
   type TextureMappingConfig,
 } from './TextureMapping';
+import {
+  builtInCacheFields,
+  deletedCacheFields,
+  isVisibleCacheRecord,
+  localCacheFields,
+  openScopedDatabase,
+  publicCacheFields,
+  resolveLegacyCacheFields,
+  shouldQueuePersonalDelete,
+  syncedPersonalCacheFields,
+  type ScopedCacheFields,
+} from './scopedCache';
+import {notifyPersonalCacheChanged} from './personalSyncTrigger';
 
 const DB_NAME = 'mandelbrot-texture-mapping-presets';
 const DB_VERSION = 1;
 const STORE_NAME = 'textureMappingPresets';
 
-export interface TextureMappingPresetRecord {
+export interface TextureMappingPresetRecord extends ScopedCacheFields {
   guid: string;
   name: string;
   mapping: TextureMappingConfig;
@@ -21,23 +34,14 @@ export interface TextureMappingPresetRecord {
   builtIn?: boolean;
 }
 
-let _dbPromise: Promise<IDBDatabase> | null = null;
-
 function openDB(): Promise<IDBDatabase> {
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+  return openScopedDatabase(DB_NAME, DB_VERSION, (_event, req) => {
       const db = req.result;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
         const store = db.createObjectStore(STORE_NAME, {keyPath: 'name'});
         store.createIndex('guid', 'guid', {unique: true});
       }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
   });
-  return _dbPromise;
 }
 
 function tx(mode: IDBTransactionMode): Promise<{store: IDBObjectStore; done: Promise<void>}> {
@@ -77,6 +81,7 @@ function builtInRecords(): TextureMappingPresetRecord[] {
     lastUpdated: now,
     favorite: false,
     builtIn: true,
+    ...builtInCacheFields(),
   }));
 }
 
@@ -84,7 +89,14 @@ export async function getAllStoredTextureMappingPresetEntries(): Promise<Texture
   const {store, done} = await tx('readonly');
   const all: TextureMappingPresetRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all.map(cloneRecord).sort((a, b) => b.date.localeCompare(a.date));
+  return all.map(cloneRecord).map(resolveLegacyCacheFields).filter(isVisibleCacheRecord).sort((a, b) => b.date.localeCompare(a.date));
+}
+
+export async function getAllTextureMappingPresetCacheRecords(): Promise<TextureMappingPresetRecord[]> {
+  const {store, done} = await tx('readonly');
+  const all: TextureMappingPresetRecord[] = await reqToPromise(store.getAll());
+  await done;
+  return all.map(cloneRecord).map(resolveLegacyCacheFields);
 }
 
 export async function getAllTextureMappingPresetEntries(): Promise<TextureMappingPresetRecord[]> {
@@ -129,13 +141,16 @@ export async function saveTextureMappingPresetEntry(record: TextureMappingPreset
     lastUpdated: record.lastUpdated || date,
     favorite: record.favorite ?? false,
     builtIn: false,
+    ...localCacheFields(record),
   };
   const {store, done} = await tx('readwrite');
   store.put(next);
   await done;
+  notifyPersonalCacheChanged(next);
 }
 
 export async function saveRemoteTextureMappingPresetEntry(record: TextureMappingPresetRecord): Promise<void> {
+  Object.assign(record, publicCacheFields(record));
   const existing = await getTextureMappingPresetByGuid(record.guid);
   if (existing && !existing.builtIn) {
     await saveTextureMappingPresetEntry({
@@ -159,6 +174,35 @@ export async function deleteTextureMappingPresetEntry(name: string): Promise<voi
   const record = await getTextureMappingPresetByName(name);
   if (record?.builtIn) throw new Error('Built-in texture mapping presets cannot be deleted.');
   const {store, done} = await tx('readwrite');
-  store.delete(name);
+  const stored: TextureMappingPresetRecord | undefined = await reqToPromise(store.get(name));
+  if (stored && shouldQueuePersonalDelete(resolveLegacyCacheFields(stored))) {
+    store.put({...stored, ...deletedCacheFields(stored)});
+  } else {
+    store.delete(name);
+  }
+  await done;
+  notifyPersonalCacheChanged(stored);
+}
+
+export async function applyCloudTextureMappingPresetEntry(record: TextureMappingPresetRecord, revision: number): Promise<void> {
+  const existing = await getTextureMappingPresetByGuid(record.guid);
+  const next = {...cloneRecord(record), builtIn: false, ...syncedPersonalCacheFields(record, revision)};
+  const {store, done} = await tx('readwrite');
+  if (existing && !existing.builtIn && existing.name !== next.name) store.delete(existing.name);
+  store.put(next);
+  await done;
+}
+
+export async function acknowledgeTextureMappingPresetEntry(guid: string, revision: number): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: TextureMappingPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  await done;
+}
+
+export async function purgeTextureMappingPresetEntryByGuid(guid: string): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: TextureMappingPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.delete(record.name);
   await done;
 }

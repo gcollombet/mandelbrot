@@ -44,7 +44,12 @@ import {
   TEXTURE_SELECTED_KEY,
   textureSourceKey,
 } from '../textureLibrary';
-import {isAuthConfigured, observeAuthState, signInWithGoogle, signOutCurrentUser, type UserRole} from '../authService';
+import {isAuthConfigured, libraryScopeForUser, observeAuthState, signInWithGoogle, signOutCurrentUser, type AuthState, type UserRole} from '../authService';
+import {setActiveLibraryScope} from '../scopedCache';
+import {observePersonalSyncStatus, startPersonalPresetSync, stopPersonalPresetSync, type PersonalSyncStatus} from '../personalPresetSync';
+import {startPersonalTextureSync, stopPersonalTextureSync} from '../personalTextureSync';
+import {guestPresetCounts, importGuestLibrary, prepareGuestImport, snapshotGuestLibrary, type GuestImportPlan} from '../guestLibraryImport';
+import {personalLibraryFeatureFlags} from '../personalLibraryFeatureFlags';
 import {getKeyboardLayout, getSettingsTabs} from '../keyboardShortcuts';
 import AboutPanel from './AboutPanel.vue';
 
@@ -95,6 +100,70 @@ const authUserEmail = ref('');
 const userRole = ref<UserRole>('guest');
 const isAdmin = computed(() => userRole.value === 'admin');
 let stopAuthObserver: (() => void) | null = null;
+let stopSyncObserver: (() => void) | null = null;
+const personalSyncStatus = ref<PersonalSyncStatus>({state: 'idle', pending: 0});
+const guestImportPlan = ref<GuestImportPlan | null>(null);
+const guestImportBusy = ref(false);
+const guestImportError = ref('');
+const guestImportCounts = computed(() => guestImportPlan.value ? guestPresetCounts({
+  presets: guestImportPlan.value.missingPresets,
+  textures: guestImportPlan.value.missingTextures,
+}) : null);
+let authStateGeneration = 0;
+
+async function handleAuthState(state: AuthState): Promise<void> {
+  const generation = ++authStateGeneration;
+  stopPersonalPresetSync();
+  stopPersonalTextureSync();
+  guestImportPlan.value = null;
+  guestImportError.value = '';
+
+  const guestSnapshot = state.user && personalLibraryFeatureFlags.guestImport ? await snapshotGuestLibrary() : null;
+  if (generation !== authStateGeneration) return;
+  setActiveLibraryScope(personalLibraryFeatureFlags.scopedCache ? libraryScopeForUser(state.user) : {kind: 'guest'});
+  authUserEmail.value = state.user?.email ?? '';
+  userRole.value = state.role;
+  if (state.user && personalLibraryFeatureFlags.scopedCache) {
+    if (personalLibraryFeatureFlags.presetSync) startPersonalPresetSync(state.user.uid);
+    if (personalLibraryFeatureFlags.textureSync) startPersonalTextureSync(state.user.uid);
+    if (guestSnapshot && (guestSnapshot.presets.length || guestSnapshot.textures.length)) {
+      try {
+        const plan = await prepareGuestImport(state.user.uid, guestSnapshot);
+        if (generation === authStateGeneration && (plan.missingPresets.length || plan.missingTextures.length)) {
+          guestImportPlan.value = plan;
+        }
+      } catch (error) {
+        console.warn('Failed to prepare guest-library import:', error);
+      }
+    }
+  }
+  for (const settings of Object.values(settingsRefs.value)) {
+    void settings?.refreshPresets?.();
+  }
+}
+
+function declineGuestImport(): void {
+  guestImportPlan.value = null;
+  guestImportError.value = '';
+}
+
+async function acceptGuestImport(): Promise<void> {
+  const plan = guestImportPlan.value;
+  if (!plan || !plan.canImport || guestImportBusy.value) return;
+  guestImportBusy.value = true;
+  guestImportError.value = '';
+  try {
+    await importGuestLibrary(plan);
+    if (personalLibraryFeatureFlags.presetSync) startPersonalPresetSync(plan.uid);
+    if (personalLibraryFeatureFlags.textureSync) startPersonalTextureSync(plan.uid);
+    guestImportPlan.value = null;
+    for (const settings of Object.values(settingsRefs.value)) await settings?.refreshPresets?.();
+  } catch (error) {
+    guestImportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    guestImportBusy.value = false;
+  }
+}
 
 async function loginWithGoogle() {
   await signInWithGoogle();
@@ -415,10 +484,10 @@ onMounted(() => {
     openTabs.add('palettes');
     popupPositions['palettes'] = { x: -1, y: -1 };
   }
-  stopAuthObserver = observeAuthState((state) => {
-    authUserEmail.value = state.user?.email ?? '';
-    userRole.value = state.role;
+  stopSyncObserver = observePersonalSyncStatus(status => {
+    personalSyncStatus.value = status;
   });
+  stopAuthObserver = observeAuthState(state => void handleAuthState(state));
   window.addEventListener('keydown', handleGlobalKeydown);
   window.addEventListener('pointerdown', handleOutsidePointerDown);
   // Navigation detection listeners for HUD hide
@@ -484,6 +553,9 @@ onMounted(() => {
 });
 onUnmounted(() => {
   stopAuthObserver?.();
+  stopSyncObserver?.();
+  stopPersonalPresetSync();
+  stopPersonalTextureSync();
   window.removeEventListener('keydown', handleGlobalKeydown);
   window.removeEventListener('pointerdown', handleOutsidePointerDown);
   window.removeEventListener('keydown', handleNavKeydown);
@@ -1505,6 +1577,7 @@ function startTravelToPreset(preset: PresetRecord) {
     >
       <PerformancePanel
         :engine="mandelbrotEngine"
+        :is-admin="isAdmin"
         v-model:debugShading="mandelbrotParams.debugShading"
         @close="togglePerfPanel"
       />
@@ -1811,6 +1884,8 @@ function startTravelToPreset(preset: PresetRecord) {
           :is-admin="isAdmin"
           :auth-configured="authConfigured"
           :auth-user-email="authUserEmail"
+          :sync-state="personalSyncStatus.state"
+          :sync-error="personalSyncStatus.lastError"
           @update:primary="(v: string) => primaryByTab[tab.key] = v"
           @close="closeTab(tab.key)"
           @drag-start="startDrag(tab.key, $event)"
@@ -1879,10 +1954,66 @@ function startTravelToPreset(preset: PresetRecord) {
       </div>
     </template>
 
+    <div v-if="guestImportPlan" class="guest-import-backdrop" role="presentation">
+      <section class="guest-import-dialog" role="dialog" aria-modal="true" aria-labelledby="guest-import-title">
+        <h2 id="guest-import-title">Import your guest library?</h2>
+        <p>
+          This device has {{ guestImportPlan.missingPresets.length }} preset{{ guestImportPlan.missingPresets.length === 1 ? '' : 's' }}
+          and {{ guestImportPlan.missingTextures.length }} texture{{ guestImportPlan.missingTextures.length === 1 ? '' : 's' }} not yet in this account.
+        </p>
+        <p v-if="guestImportCounts" class="guest-import-breakdown">
+          {{ guestImportCounts.completePreset }} complete · {{ guestImportCounts.palettePreset }} palette ·
+          {{ guestImportCounts.stopPreset }} stop · {{ guestImportCounts.textureMappingPreset }} mapping ·
+          {{ guestImportCounts.animationPreset }} animation
+        </p>
+        <p v-if="guestImportPlan.blockingReason" class="guest-import-error">
+          Import all is unavailable: {{ guestImportPlan.blockingReason }}. Your guest library remains unchanged.
+        </p>
+        <p v-else>The import copies everything. The guest library stays on this device and will return unchanged when you sign out.</p>
+        <p v-if="guestImportError" class="guest-import-error">{{ guestImportError }}</p>
+        <div class="guest-import-actions">
+          <button type="button" class="guest-import-primary" :disabled="!guestImportPlan.canImport || guestImportBusy" @click="acceptGuestImport">
+            {{ guestImportBusy ? 'Importing…' : 'Import all' }}
+          </button>
+          <button type="button" :disabled="guestImportBusy" @click="declineGuestImport">Not now</button>
+        </div>
+      </section>
+    </div>
+
   </div>
 </template>
 
 <style scoped>
+.guest-import-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: 20px;
+  background: rgba(3, 7, 18, 0.72);
+  backdrop-filter: blur(8px);
+}
+
+.guest-import-dialog {
+  width: min(460px, 100%);
+  padding: 22px;
+  border: 1px solid rgba(255, 255, 255, 0.16);
+  border-radius: 14px;
+  color: #f8fafc;
+  background: #111827;
+  box-shadow: 0 24px 70px rgba(0, 0, 0, 0.5);
+}
+
+.guest-import-dialog h2 { margin: 0 0 12px; font-size: 20px; }
+.guest-import-dialog p { color: #cbd5e1; line-height: 1.45; }
+.guest-import-breakdown { font-size: 12px; }
+.guest-import-error { color: #fca5a5 !important; }
+.guest-import-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 18px; }
+.guest-import-actions button { padding: 9px 14px; border: 0; border-radius: 8px; cursor: pointer; }
+.guest-import-actions button:disabled { cursor: not-allowed; opacity: 0.5; }
+.guest-import-primary { color: #fff; background: #2563eb; }
+
 /* === HUD animation: fade out during navigation === */
 .top-settings-bar,
 .render-stats-wrapper {

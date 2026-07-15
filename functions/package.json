@@ -6,7 +6,8 @@
     "node": "22"
   },
   "scripts": {
-    "set-admin": "node scripts/set-admin.js"
+    "set-admin": "node scripts/set-admin.js",
+    "test": "node --test tests/*.test.js"
   },
   "dependencies": {
     "firebase-admin": "^13.6.0",

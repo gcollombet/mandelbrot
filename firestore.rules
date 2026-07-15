@@ -24,6 +24,31 @@ service cloud.firestore {
         && request.resource.data.name.size() > 0;
     }
 
+    match /users/{uid}/presets/{guid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /users/{uid}/textures/{guid} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /users/{uid}/usage/{document} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /users/{uid}/textureReservations/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
+    match /users/{uid}/importBatches/{batchId} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if false;
+    }
+
     match /{document=**} {
       allow read, write: if false;
     }

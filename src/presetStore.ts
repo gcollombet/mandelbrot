@@ -14,6 +14,18 @@
 import type { MandelbrotParams } from './Mandelbrot';
 import {createGuid, defaultPresetName, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import {log10FromDecimalString} from './floatexp';
+import {
+  deletedCacheFields,
+  isVisibleCacheRecord,
+  localCacheFields,
+  openScopedDatabase,
+  publicCacheFields,
+  resolveLegacyCacheFields,
+  shouldQueuePersonalDelete,
+  syncedPersonalCacheFields,
+  type ScopedCacheFields,
+} from './scopedCache';
+import {notifyPersonalCacheChanged} from './personalSyncTrigger';
 
 const DB_NAME = 'mandelbrot-presets';
 const DB_VERSION = 3;
@@ -26,7 +38,7 @@ const STORE_NAME = 'presets';
 // ---------------------------------------------------------------------------
 
 /** Lightweight entry returned for listings (no full params). */
-export interface PresetMetadata {
+export interface PresetMetadata extends ScopedCacheFields {
   id: number;
   guid: string;
   name: string;
@@ -47,13 +59,8 @@ export interface PresetRecord extends PresetMetadata {
 // DB helpers
 // ---------------------------------------------------------------------------
 
-let _dbPromise: Promise<IDBDatabase> | null = null;
-
 function openDB(): Promise<IDBDatabase> {
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = () => {
+  return openScopedDatabase(DB_NAME, DB_VERSION, (_event, req) => {
       const db = req.result;
       const transaction = req.transaction;
       if (!db.objectStoreNames.contains(STORE_NAME)) {
@@ -80,11 +87,7 @@ function openDB(): Promise<IDBDatabase> {
           cursor.continue();
         };
       }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
   });
-  return _dbPromise;
 }
 
 function tx(
@@ -134,7 +137,14 @@ export async function getAllPresetRecords(): Promise<PresetRecord[]> {
   const { store, done } = await tx('readonly');
   const all: PresetRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all;
+  return all.map(resolveLegacyCacheFields).filter(isVisibleCacheRecord);
+}
+
+export async function getAllPresetCacheRecords(): Promise<PresetRecord[]> {
+  const {store, done} = await tx('readonly');
+  const all: PresetRecord[] = await reqToPromise(store.getAll());
+  await done;
+  return all.map(resolveLegacyCacheFields);
 }
 
 async function uniquePresetName(name: string, guid?: string): Promise<string> {
@@ -192,6 +202,7 @@ export function buildRemotePresetMerge(existing: PresetRecord, record: Omit<Pres
     scaleExponent: computeScaleExponent(record.value.scale),
     favorite: existing.favorite ?? false,
     remote: record.remote,
+    ...publicCacheFields(existing),
   };
 }
 
@@ -202,7 +213,7 @@ export async function saveRemotePresetEntry(record: Omit<PresetRecord, 'id'> & {
     await updatePresetEntry(next);
     return next.id;
   }
-  return savePresetEntry(record.value, record.thumbnail, record.name, record.date, record.favorite ?? false, record.guid, record.remote);
+  return savePresetEntry(record.value, record.thumbnail, record.name, record.date, record.favorite ?? false, record.guid, record.remote, publicCacheFields(record));
 }
 
 /**
@@ -216,6 +227,7 @@ export async function savePresetEntry(
   favorite = false,
   guid = createGuid(),
   remote?: CatalogRemoteState,
+  cacheFields?: ScopedCacheFields,
 ): Promise<number> {
   const now = date ?? new Date().toISOString();
   const resolvedName = await uniquePresetName((name || defaultPresetName(now)).trim(), guid);
@@ -229,10 +241,12 @@ export async function savePresetEntry(
     scaleExponent: computeScaleExponent(value.scale),
     favorite,
     remote,
+    ...localCacheFields(cacheFields),
   };
   const { store, done } = await tx('readwrite');
   const id = await reqToPromise(store.add(record) as IDBRequest<number>);
   await done;
+  notifyPersonalCacheChanged(record);
   return id;
 }
 
@@ -243,8 +257,9 @@ export async function updatePresetEntry(record: PresetRecord): Promise<void> {
   record.name = await uniquePresetName(record.name || defaultPresetName(record.date), record.guid);
   record.lastUpdated = record.lastUpdated || record.date || new Date().toISOString();
   const { store, done } = await tx('readwrite');
-  store.put(record);
+  store.put({...record, ...localCacheFields(record)});
   await done;
+  notifyPersonalCacheChanged(record);
 }
 
 /**
@@ -252,8 +267,39 @@ export async function updatePresetEntry(record: PresetRecord): Promise<void> {
  */
 export async function deletePresetEntry(id: number): Promise<void> {
   const { store, done } = await tx('readwrite');
-  store.delete(id);
+  const record: PresetRecord | undefined = await reqToPromise(store.get(id));
+  if (record && shouldQueuePersonalDelete(record)) {
+    store.put({...record, ...deletedCacheFields(record)});
+  } else {
+    store.delete(id);
+  }
+  await done;
+  notifyPersonalCacheChanged(record);
+}
+
+export async function applyCloudPresetEntry(record: Omit<PresetRecord, 'id'> & {id?: number}, revision: number): Promise<void> {
+  const existing = await getPresetByGuid(record.guid);
+  const next = {
+    ...record,
+    id: existing?.id ?? record.id,
+    ...syncedPersonalCacheFields(record, revision),
+  };
+  const {store, done} = await tx('readwrite');
+  if (existing) store.put({...next, id: existing.id});
+  else store.add(next);
   await done;
 }
 
+export async function acknowledgePresetEntry(guid: string, revision: number): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: PresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  await done;
+}
 
+export async function purgePresetEntryByGuid(guid: string): Promise<void> {
+  const {store, done} = await tx('readwrite');
+  const record: PresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (record) store.delete(record.id);
+  await done;
+}

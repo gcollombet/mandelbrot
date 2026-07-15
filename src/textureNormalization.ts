@@ -1,5 +1,5 @@
-export const MAX_IMPORTED_TEXTURE_SIDE = 2048;
-export const IMPORTED_TEXTURE_WEBP_QUALITY = 0.92;
+export const MAX_IMPORTED_TEXTURE_SIDE = 1024;
+export const IMPORTED_TEXTURE_WEBP_QUALITY = 0.82;
 
 export interface TextureDimensions {
   width: number;

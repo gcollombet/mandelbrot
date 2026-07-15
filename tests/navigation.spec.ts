@@ -100,6 +100,20 @@ test.describe("Mandelbrot navigation", () => {
     );
   });
 
+  test("guest UI omits JSON tools but keeps image imports", async ({ page }) => {
+    await page.locator(".top-tab-btn", {hasText: "Presets"}).click();
+    await expect(page.locator('input[accept=".json"]')).toHaveCount(0);
+    await page.locator(".top-tab-btn", {hasText: "Presets"}).click();
+
+    await page.locator(".top-tab-btn", {hasText: "Palettes"}).click();
+    await expect(page.locator('input[accept=".json"]')).toHaveCount(0);
+    await expect(page.locator('input[accept="image/*"]')).toHaveCount(2);
+    await expect(page.getByRole('button', {name: 'Import image'})).toHaveCount(2);
+
+    await page.keyboard.press('m');
+    await expect(page.getByRole('button', {name: 'JSON'})).toHaveCount(0);
+  });
+
   // -----------------------------------------------------------------------
   // 3. Clicking tab buttons opens/closes settings
   // -----------------------------------------------------------------------

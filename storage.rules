@@ -16,6 +16,16 @@ service firebase.storage {
       allow write: if isAdmin();
     }
 
+    match /users/{uid}/textures/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow create, update: if request.auth != null
+        && request.auth.uid == uid
+        && request.resource.contentType == 'image/webp'
+        && request.resource.size <= 5 * 1024 * 1024
+        && firestore.exists(/databases/(default)/documents/users/$(uid)/textureReservations/$(fileName));
+      allow delete: if false;
+    }
+
     match /{path=**} {
       allow read, write: if false;
     }

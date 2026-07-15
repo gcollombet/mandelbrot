@@ -10,6 +10,18 @@
  */
 
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
+import {
+  deletedCacheFields,
+  isVisibleCacheRecord,
+  localCacheFields,
+  openScopedDatabase,
+  publicCacheFields,
+  resolveLegacyCacheFields,
+  shouldQueuePersonalDelete,
+  syncedPersonalCacheFields,
+  type ScopedCacheFields,
+} from './scopedCache';
+import {notifyPersonalTextureChanged} from './personalTextureSyncTrigger';
 
 const DB_NAME = 'mandelbrot-textures';
 const DB_VERSION = 3;
@@ -24,7 +36,7 @@ const BLOB_STORE_NAME = 'textureBlobs';
 // ---------------------------------------------------------------------------
 
 /** Lightweight entry returned for listings (no blob). */
-export interface TextureMetadata {
+export interface TextureMetadata extends ScopedCacheFields {
   guid?: string;
   name: string;
   thumbnail: string;   // small data-URL (~5-15 KB)
@@ -32,6 +44,23 @@ export interface TextureMetadata {
   lastUpdated?: string;
   favorite?: boolean;
   remote?: CatalogRemoteState;
+  kind?: 'texture' | 'skybox';
+  contentType?: string;
+  width?: number;
+  height?: number;
+  byteSize?: number;
+  storagePath?: string;
+  unavailable?: boolean;
+}
+
+export interface TextureStorageDetails {
+  kind?: 'texture' | 'skybox';
+  contentType?: string;
+  width?: number;
+  height?: number;
+  byteSize?: number;
+  storagePath?: string;
+  unavailable?: boolean;
 }
 
 /** Full record stored in IndexedDB. */
@@ -43,13 +72,8 @@ export interface TextureRecord extends TextureMetadata {
 // DB helpers
 // ---------------------------------------------------------------------------
 
-let _dbPromise: Promise<IDBDatabase> | null = null;
-
 function openDB(): Promise<IDBDatabase> {
-  if (_dbPromise) return _dbPromise;
-  _dbPromise = new Promise<IDBDatabase>((resolve, reject) => {
-    const req = indexedDB.open(DB_NAME, DB_VERSION);
-    req.onupgradeneeded = (event) => {
+  return openScopedDatabase(DB_NAME, DB_VERSION, (event, req) => {
       const db = req.result;
       const transaction = req.transaction;
       if (!db.objectStoreNames.contains(METADATA_STORE_NAME)) {
@@ -98,11 +122,7 @@ function openDB(): Promise<IDBDatabase> {
           cursor.continue();
         };
       }
-    };
-    req.onsuccess = () => resolve(req.result);
-    req.onerror = () => reject(req.error);
   });
-  return _dbPromise;
 }
 
 function tx(
@@ -139,7 +159,14 @@ export async function getAllTextureEntries(): Promise<TextureMetadata[]> {
   const { store, done } = await tx(METADATA_STORE_NAME, 'readonly');
   const all: TextureMetadata[] = await reqToPromise(store.getAll());
   await done;
-  return all;
+  return all.map(resolveLegacyCacheFields).filter(isVisibleCacheRecord);
+}
+
+export async function getAllTextureCacheRecords(): Promise<TextureMetadata[]> {
+  const {store, done} = await tx(METADATA_STORE_NAME, 'readonly');
+  const all: TextureMetadata[] = await reqToPromise(store.getAll());
+  await done;
+  return all.map(resolveLegacyCacheFields);
 }
 
 export async function getTextureMetadataByName(name: string): Promise<TextureMetadata | null> {
@@ -161,8 +188,10 @@ export async function updateTextureMetadata(metadata: TextureMetadata): Promise<
     guid: metadata.guid || createGuid(),
     lastUpdated: metadata.lastUpdated || metadata.date,
     favorite: metadata.favorite ?? false,
+    ...localCacheFields(metadata),
   });
   await done;
+  notifyPersonalTextureChanged(metadata);
 }
 
 async function uniqueTextureName(name: string, guid?: string): Promise<string> {
@@ -191,6 +220,8 @@ export async function saveTextureEntry(
   guid = createGuid(),
   favorite = false,
   remote?: CatalogRemoteState,
+  details: TextureStorageDetails = {},
+  cacheFields?: ScopedCacheFields,
 ): Promise<void> {
   if (!name.trim()) throw new Error('Texture name is required.');
   const resolvedDate = date ?? new Date().toISOString();
@@ -203,6 +234,10 @@ export async function saveTextureEntry(
     lastUpdated: resolvedDate,
     favorite,
     remote,
+    ...details,
+    contentType: details.contentType ?? blob.type,
+    byteSize: details.byteSize ?? blob.size,
+    ...localCacheFields(cacheFields),
   };
   const db = await openDB();
   const transaction = db.transaction([METADATA_STORE_NAME, BLOB_STORE_NAME], 'readwrite');
@@ -214,9 +249,11 @@ export async function saveTextureEntry(
     transaction.onabort = () => reject(transaction.error);
   });
   await done;
+  notifyPersonalTextureChanged(metadata);
 }
 
 export async function saveRemoteTextureEntry(metadata: TextureMetadata, blob: Blob): Promise<void> {
+  Object.assign(metadata, publicCacheFields(metadata));
   if (!metadata.guid) metadata.guid = createGuid();
   const existing = await getTextureMetadataByGuid(metadata.guid);
   await saveTextureEntry(
@@ -227,6 +264,16 @@ export async function saveRemoteTextureEntry(metadata: TextureMetadata, blob: Bl
     metadata.guid,
     existing?.favorite ?? false,
     metadata.remote,
+    {
+      kind: metadata.kind,
+      contentType: metadata.contentType,
+      width: metadata.width,
+      height: metadata.height,
+      byteSize: metadata.byteSize,
+      storagePath: metadata.storagePath,
+      unavailable: metadata.unavailable,
+    },
+    metadata,
   );
 }
 
@@ -236,14 +283,22 @@ export async function saveRemoteTextureEntry(metadata: TextureMetadata, blob: Bl
 export async function deleteTextureEntry(name: string): Promise<void> {
   const db = await openDB();
   const transaction = db.transaction([METADATA_STORE_NAME, BLOB_STORE_NAME], 'readwrite');
-  transaction.objectStore(METADATA_STORE_NAME).delete(name);
-  transaction.objectStore(BLOB_STORE_NAME).delete(name);
+  const metadataStore = transaction.objectStore(METADATA_STORE_NAME);
+  const blobStore = transaction.objectStore(BLOB_STORE_NAME);
+  const metadata: TextureMetadata | undefined = await reqToPromise(metadataStore.get(name));
+  if (metadata && shouldQueuePersonalDelete(resolveLegacyCacheFields(metadata))) {
+    metadataStore.put({...metadata, ...deletedCacheFields(metadata)});
+  } else {
+    metadataStore.delete(name);
+    blobStore.delete(name);
+  }
   const done = new Promise<void>((resolve, reject) => {
     transaction.oncomplete = () => resolve();
     transaction.onerror = () => reject(transaction.error);
     transaction.onabort = () => reject(transaction.error);
   });
   await done;
+  notifyPersonalTextureChanged(metadata);
 }
 
 /**
@@ -272,4 +327,64 @@ export async function getTextureCount(): Promise<number> {
   return count;
 }
 
+export async function getTextureBlobByGuid(guid: string): Promise<Blob | null> {
+  const metadata = await getTextureMetadataByGuid(guid);
+  return metadata ? getTextureBlob(metadata.name) : null;
+}
 
+export async function applyCloudTextureEntry(metadata: TextureMetadata, blob: Blob, revision: number): Promise<void> {
+  if (!metadata.guid) throw new Error('Cloud texture is missing a GUID.');
+  const existing = await getTextureMetadataByGuid(metadata.guid);
+  const next = {
+    ...metadata,
+    contentType: 'image/webp',
+    byteSize: blob.size,
+    unavailable: false,
+    ...syncedPersonalCacheFields(metadata, revision),
+  };
+  const db = await openDB();
+  const transaction = db.transaction([METADATA_STORE_NAME, BLOB_STORE_NAME], 'readwrite');
+  const metadataStore = transaction.objectStore(METADATA_STORE_NAME);
+  const blobStore = transaction.objectStore(BLOB_STORE_NAME);
+  if (existing && existing.name !== next.name) {
+    metadataStore.delete(existing.name);
+    blobStore.delete(existing.name);
+  }
+  metadataStore.put(next);
+  blobStore.put({name: next.name, blob});
+  await transactionDone(transaction);
+}
+
+export async function acknowledgeTextureEntry(guid: string, revision: number, details: TextureStorageDetails = {}): Promise<void> {
+  const {store, done} = await tx(METADATA_STORE_NAME, 'readwrite');
+  const metadata: TextureMetadata | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (metadata) store.put({...metadata, ...details, unavailable: false, ...syncedPersonalCacheFields(metadata, revision)});
+  await done;
+}
+
+export async function markTextureUnavailable(guid: string): Promise<void> {
+  const {store, done} = await tx(METADATA_STORE_NAME, 'readwrite');
+  const metadata: TextureMetadata | undefined = await reqToPromise(store.index('guid').get(guid));
+  if (metadata) store.put({...metadata, unavailable: true});
+  await done;
+}
+
+export async function purgeTextureEntryByGuid(guid: string): Promise<void> {
+  const {store, done} = await tx(METADATA_STORE_NAME, 'readonly');
+  const metadata: TextureMetadata | undefined = await reqToPromise(store.index('guid').get(guid));
+  await done;
+  if (!metadata) return;
+  const db = await openDB();
+  const transaction = db.transaction([METADATA_STORE_NAME, BLOB_STORE_NAME], 'readwrite');
+  transaction.objectStore(METADATA_STORE_NAME).delete(metadata.name);
+  transaction.objectStore(BLOB_STORE_NAME).delete(metadata.name);
+  await transactionDone(transaction);
+}
+
+function transactionDone(transaction: IDBTransaction): Promise<void> {
+  return new Promise((resolve, reject) => {
+    transaction.oncomplete = () => resolve();
+    transaction.onerror = () => reject(transaction.error);
+    transaction.onabort = () => reject(transaction.error);
+  });
+}

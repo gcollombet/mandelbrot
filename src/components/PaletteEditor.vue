@@ -15,6 +15,7 @@ import {
 import type {StopPresetRecord} from '../stopPresetStore.ts';
 import {canDeleteCatalogEntry} from '../catalogPermissions.ts';
 import { DenseField, DenseSection } from './dense';
+import {assertActivePresetImportCapacity, PersonalPresetQuotaError} from '../personalQuotaGuard';
 
 // Per-effect value formatter for dense fields (mirrors the old toFixed logic).
 function effectFmt(field: EffectFieldName) {
@@ -236,6 +237,7 @@ function exportAllStopPresets() {
 
 const stopPresetFileInput = ref<HTMLInputElement | null>(null);
 function triggerImportStopPresets() {
+  if (!props.isAdmin) return;
   stopPresetFileInput.value?.click();
 }
 
@@ -250,15 +252,17 @@ function importStopPresets(event: Event) {
       const records = Array.isArray(imported) ? imported : [imported];
       for (const record of records) {
         if (!record || typeof record.name !== 'string' || !record.values || typeof record.values.color !== 'string') continue;
+        await assertActivePresetImportCapacity(typeof record.guid === 'string' ? record.guid : undefined);
         await saveStopPresetEntry({
+          guid: typeof record.guid === 'string' ? record.guid : undefined,
           name: record.name,
           values: record.values,
           date: typeof record.date === 'string' ? record.date : new Date().toISOString(),
         });
       }
       refreshStopPresets();
-    } catch {
-      window.alert('Invalid stop preset file.');
+    } catch (error) {
+      window.alert(error instanceof PersonalPresetQuotaError ? error.message : 'Invalid stop preset file.');
     }
   };
   reader.readAsText(file);
@@ -311,13 +315,13 @@ function importStopPresets(event: Event) {
       <div class="transfer">
         <button class="mini-btn primary" :disabled="!selectedStopPresetRecord" @click="applySelectedStopPreset">Appliquer</button>
         <button class="mini-btn danger" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">Supprimer</button>
-        <button class="mini-btn" :disabled="!selectedStopPresetRecord" @click="exportSelectedStopPreset">Exporter</button>
+        <button v-if="isAdmin" class="mini-btn" :disabled="!selectedStopPresetRecord" @click="exportSelectedStopPreset">Exporter</button>
       </div>
       <div class="save-row">
         <input class="txt-in" v-model="stopPresetName" type="text" placeholder="Nom du preset…" @keyup.enter="saveCurrentStopPreset" />
         <button class="mini-btn primary" :disabled="!stopPresetName.trim()" @click="saveCurrentStopPreset">Enregistrer</button>
       </div>
-      <div class="transfer">
+      <div v-if="isAdmin" class="transfer">
         <button class="mini-btn" :disabled="stopPresets.length === 0" @click="exportAllStopPresets">Exporter tout</button>
         <button class="mini-btn" @click="triggerImportStopPresets">Importer</button>
         <input ref="stopPresetFileInput" type="file" accept=".json" style="display:none;" @change="importStopPresets" />
