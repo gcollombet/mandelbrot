@@ -86,6 +86,8 @@ async function reconverge(page: Page, mode: string) {
       flag: engine.lastShaderApproxFlag,
       totalApps: engine.lastCompletionTotalApps ?? -1,
       tierApps: engine.tierAppsApprox ?? [-1, -1, -1, -1],
+      periodicP: engine.tablePeriodicP ?? -1,
+      periodicStatus: engine.tablePeriodicStatus ?? -1,
     };
   }, Date.now() - t0);
 }
@@ -219,23 +221,42 @@ test("auto renders the deep fe path with SA and A/Bs the single modes", async ({
   const intJet = await reconverge(page, "jet");
   const intJetContent = await contentStats(page, "unified-deep-05-interior-jet");
   console.log(
-    `interior disk — auto: ${intAuto.ms}ms apps=${intAuto.totalApps}`
+    `interior disk — auto: ${intAuto.ms}ms apps=${intAuto.totalApps} p=${intAuto.periodicP}`
     + ` content ${intAutoContent.mean.toFixed(1)}/${intAutoContent.std.toFixed(1)}`
     + ` | jet: ${intJet.ms}ms apps=${intJet.totalApps}`
     + ` content ${intJetContent.mean.toFixed(1)}/${intJetContent.std.toFixed(1)}`,
   );
   expect(intAuto.flag).toBe(5);
+  expect(intAuto.periodicStatus).toBe(1);
+  expect(intAuto.periodicP).toBe(2);
   // Same all-interior image (both certified: in-set coloring).
   expect(Math.abs(intAutoContent.mean - intJetContent.mean)).toBeLessThan(10);
   // The O(p) short-circuit: a couple of applications per pixel at most
   // (measured 0.2/px), where maxiter modes do px × maxIter loop turns.
   expect(intAuto.totalApps).toBeGreaterThan(0);
   expect(intAuto.totalApps).toBeLessThan(2_600_000 * 4);
-  // Jet on an all-interior view runs every pixel to maxIter: it either WRAPS
-  // the u32 work counters (totalApps −1 — the documented deep-interior guard,
-  // itself evidence of the ≥10⁴× workload) or dwarfs auto.
+  // Jet may either land its table and run pixels to maxIter (possibly wrapping
+  // the counter), or lose the table race and finish through the ordinary
+  // derivative-interior test. The periodic header must still save at least an
+  // order of magnitude in the latter, cheapest Jet case.
   if (intJet.totalApps > 0) {
-    expect(intAuto.totalApps).toBeLessThan(intJet.totalApps * 0.05);
+    expect(intAuto.totalApps).toBeLessThan(intJet.totalApps * 0.1);
   }
+
+  // Exact period-2 nucleus: its cycle multiplier is zero, so the [1/1]
+  // Möbius extraction is singular. The denominator-free scalar-majorant
+  // fallback must nevertheless arm the same GPU header and finish the view.
+  await teleport(page, "-1", "0", "1e-6");
+  await reconverge(page, "pade");
+  const nucleusAuto = await reconverge(page, "auto");
+  console.log(
+    `period-2 nucleus — auto: ${nucleusAuto.ms}ms apps=${nucleusAuto.totalApps}`
+    + ` p=${nucleusAuto.periodicP} status=${nucleusAuto.periodicStatus}`,
+  );
+  expect(nucleusAuto.flag).toBe(5);
+  expect(nucleusAuto.periodicStatus).toBe(1);
+  expect(nucleusAuto.periodicP).toBe(2);
+  expect(nucleusAuto.totalApps).toBeGreaterThan(0);
+  expect(nucleusAuto.totalApps).toBeLessThan(2_600_000 * 4);
   expect(gpuErrors, `WebGPU errors:\n${gpuErrors.join("\n")}`).toEqual([]);
 });
