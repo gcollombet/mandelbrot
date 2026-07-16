@@ -85,6 +85,16 @@ type ReferenceWorkerMessage =
     | FindMinibrotMessage
     | DisposeMessage
 
+type UnifiedTableStats = {
+    saN0: number
+    periodicP: number
+    periodicStatus: number
+    periodicDetectedP: number
+    bandLog2: number
+    bandSpread: number
+    gateCount: number
+}
+
 type OrbitChunkResponse = {
     type: 'orbitChunk'
     jobId: number
@@ -99,6 +109,21 @@ type OrbitChunkResponse = {
     referenceCx: string
     referenceCy: string
     orbit: Float32Array<ArrayBuffer>
+}
+
+type TableKind = 'bla' | 'jet' | 'mobius' | 'unified'
+type TableBuildStage = 'coefficients' | 'bounds' | 'radii' | 'transfer'
+
+type TableProgressResponse = {
+    type: 'tableProgress'
+    jobId: number
+    refId: number
+    tableGeneration: number
+    kind: TableKind
+    /** Stage progress in [0, 1]. It is deliberately milestone-based, not a
+     *  fabricated time estimate: Unified exposes three cooperative WASM phases. */
+    progress: number
+    stage: TableBuildStage
 }
 
 type BlaReadyResponse = {
@@ -116,7 +141,7 @@ type BlaReadyResponse = {
     // 'unified': prefix-ordered records (27 floats each: 9 × (x, y,
     // e-as-i32-bits) — [A, B, D, A', D', a02, a30, a12, a03]) in `steps` +
     // the tagged-radius sidecar (4 floats: r, tag, f32safe, spare).
-    kind: 'bla' | 'jet' | 'mobius' | 'unified'
+    kind: TableKind
     steps: Float32Array<ArrayBuffer>
     // Jet/mobius only: per-block radii (vec4-packed), index-aligned with `steps`.
     radii?: Float32Array<ArrayBuffer>
@@ -131,7 +156,7 @@ type BlaReadyResponse = {
     // Table observability for the perf panel (unified only): certified SA
     // prefix skip, periodic period (0 = dormant), replay |dz| band
     // (log2 median / spread) and emitted §18 gate count.
-    tableStats?: { saN0: number; periodicP: number; bandLog2: number; bandSpread: number; gateCount: number }
+    tableStats?: UnifiedTableStats
     // Echo of the table-parameter generation this table was built under (set by
     // the reset/setter messages). The Engine drops mismatches: builds that were
     // in flight when a parameter change was posted.
@@ -152,7 +177,7 @@ type RadiiReadyResponse = {
     levelCount: number
     buildMs?: number
     buildStages?: number
-    tableStats?: { saN0: number; periodicP: number; bandLog2: number; bandSpread: number; gateCount: number }
+    tableStats?: UnifiedTableStats
     tableGeneration: number
 }
 
@@ -177,6 +202,7 @@ type MinibrotFoundResponse = {
 
 type ReferenceWorkerResponse =
     | OrbitChunkResponse
+    | TableProgressResponse
     | BlaReadyResponse
     | RadiiReadyResponse
     | ErrorResponse
@@ -345,9 +371,23 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     const isJet = mode === 3
     const isMobius = mode === 4
     const isUnified = mode === 5
+    const kind: TableKind = isUnified ? 'unified' : isMobius ? 'mobius' : isJet ? 'jet' : 'bla'
+    const postTableProgress = (progress: number, stage: TableBuildStage) => {
+        postResponse({
+            type: 'tableProgress',
+            jobId,
+            refId,
+            tableGeneration,
+            kind,
+            progress,
+            stage,
+        })
+    }
+    postTableProgress(0, 'coefficients')
     if (!isJet && !isMobius && !isUnified) {
         // BLA / Padé path: one 12-float BlaStep table.
         const info = navigator.compute_bla_reference_ptr(maxIterations)
+        postTableProgress(0.9, 'transfer')
         const stepsSource = new Float32Array(wasmMemory.buffer, info.ptr, info.count * 12)
         const steps: Float32Array<ArrayBuffer> = new Float32Array(stepsSource.length)
         steps.set(stepsSource)
@@ -376,11 +416,19 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     // coincided with a GPU hang on the first field run, so it ships UNPLUGGED
     // until the hang is reproduced under a GPU debugger.
     const tableT0 = performance.now()
-    const info = isMobius
-        ? navigator.compute_mobius_reference(maxIterations)
-        : isUnified
-            ? navigator.compute_unified_reference(maxIterations)
+    let info
+    if (isUnified) {
+        navigator.begin_unified_reference(maxIterations)
+        postTableProgress(1 / 3, 'bounds')
+        navigator.continue_unified_reference_bounds(maxIterations)
+        postTableProgress(2 / 3, 'radii')
+        info = navigator.finish_unified_reference(maxIterations)
+    } else {
+        info = isMobius
+            ? navigator.compute_mobius_reference(maxIterations)
             : navigator.compute_jet_reference(maxIterations)
+    }
+    postTableProgress(0.9, 'transfer')
     // These builds are the worker's single big synchronous chunk (exact
     // degree-6 merges + majorant walks): surface it so slow-mode reports can
     // tell build latency from per-application cost.
@@ -389,6 +437,8 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     const tableStats = isUnified ? {
         saN0: navigator.unified_last_sa_n0(),
         periodicP: navigator.unified_last_periodic_p(),
+        periodicStatus: navigator.unified_last_periodic_status(),
+        periodicDetectedP: navigator.unified_last_periodic_detected_p(),
         bandLog2: navigator.unified_last_band_log2(),
         bandSpread: navigator.unified_last_band_spread(),
         gateCount: navigator.unified_last_gate_count(),

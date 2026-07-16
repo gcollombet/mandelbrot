@@ -5,6 +5,7 @@ import GeometricTailDemo from '../src/components/GeometricTailDemo.vue'
 import PolydiscDemo from '../src/components/PolydiscDemo.vue'
 import PadeVsJetDemo from '../src/components/PadeVsJetDemo.vue'
 import MobiusDemo from '../src/components/MobiusDemo.vue'
+import PeriodicCertificateDemo from '../src/components/PeriodicCertificateDemo.vue'
 import ParabolicShadowingDemo from '../src/components/ParabolicShadowingDemo.vue'
 import DynamicsGlossaryDemo from '../src/components/DynamicsGlossaryDemo.vue'
 </script>
@@ -139,7 +140,7 @@ gère les *arrondis*.
 | `PadeDominance` | Padé ≥ jet, sélecteur, récurrence | Dominance |
 | `ParabolicSuperconvergence` | Flot $\dot z = z^2$, shadowing | Superconvergence |
 | `NonautonomousPade` | Produits de matrices de Padé | Télescopage |
-| `Periodic` | Points fixes, multiplicateur, Jordan | Birapport |
+| `Periodic`, `PeriodicRuntime`, `CriticalPeriodic` | Points fixes, multiplicateur, disques invariants, noyaux critiques | Birapport et invariance |
 | `Fatou`, `Dynamics`, `FatouSectorial` | Forme normale parabolique, contraction | Coordonnées de Fatou |
 | `MobiusDisk`, `MovingDisks` | Image exacte d'un disque, marge de pôle | Disques mobiles |
 | `SchwarzPick`, `HyperbolicPade`, `HyperbolicTelescope` | Pas non-expansifs, distance pseudo-hyperbolique | Métrique hyperbolique |
@@ -879,7 +880,125 @@ contraction uniforme sur un domaine certifié contenant **les deux** chemins (ex
 approché) — pas seulement la valeur du multiplicateur au point fixe. Sous cette
 hypothèse, l'erreur reste bornée par $\varepsilon/(1 - \gamma)$, uniformément en $k$.
 
-::: details Théorèmes Lean correspondants (modules `Algebra`, `CPlus`, `RationalCertificate`, `Periodic`, `Dynamics`)
+### Certifier l'intérieur : pourquoi « dérivée petite » ne suffit pas
+
+Une ancienne optimisation arrêtait un pixel lorsque sa dérivée devenait plus petite
+qu'un seuil `epsilon`. Elle est aujourd'hui désactivée, pour une raison précise : le
+shader transporte la **dérivée par rapport au paramètre**
+
+$$
+d_n=\frac{\partial z_n}{\partial c},
+\qquad d_{n+1}=2z_n d_n+1,
+$$
+
+alors que le multiplicateur du cycle est la **dérivée dynamique**
+$\lambda=(P_c^p)'(z_0)=\prod_k 2z_k$. Ce ne sont pas les mêmes objets. Même connaître
+$|\lambda|<1$ prouve seulement que le cycle est localement attractif : cela ne prouve
+ni que le pixel courant appartient à son bassin certifié, ni que l'erreur de
+l'approximant est restée assez petite. Un seuil fixe peut être un bon **déclencheur**,
+jamais un verdict mathématique universel.
+
+Le test utilisé par le moteur repose donc sur une propriété plus simple et plus forte.
+Pour le retour exact d'une période $\Phi_p$ et le disque
+$D_r=\{\delta z:|\delta z|\le r\}$, il suffit de montrer
+
+$$
+\Phi_p(D_r)\subseteq D_r.
+$$
+
+Si le pixel arrive avec $|\delta z|<r$, chaque retour suivant reste dans le même disque :
+il ne peut pas s'échapper. **Aucune borne sur la dérivée ni contraction uniforme n'est
+nécessaire pour ce verdict binaire.** Ces informations restent utiles pour transporter
+une erreur pendant un fast-forward ou certifier une dérivée, mais elles ne doivent pas
+faire refuser un disque déjà invariant.
+
+Pour le modèle Möbius
+
+$$
+m(\delta z)=\frac{A_e\delta z+B\delta c}{D_e\delta z+K},
+\qquad K=1+F\delta c,
+$$
+
+la marge de pôle et l'image du disque sont bornées par
+
+$$
+\mu=|K|-|D_e|r>0,
+\qquad
+\frac{|A_e|r+|B\delta c|}{\mu}+E<r,
+$$
+
+où $E$ majore l'erreur de **valeur** entre le retour exact et le modèle. C'est tout ce
+qu'il faut : le certificat de dérivée $V'$ et un taux $\gamma<1$ seraient ici des
+hypothèses supplémentaires, donc des causes de refus inutiles.
+
+### Le cas qui cassait au centre d'un minibrot
+
+Au noyau super-attractif, le cycle contient le point critique $Z=0$, donc
+$\lambda=0$. C'est précisément le meilleur cas dynamique — mais l'extraction
+Möbius $[1/1]$ devient singulière, car elle divise par un coefficient linéaire nul.
+Ce refus ne signifiait donc pas « intérieur non prouvé » ; il révélait seulement que
+la mauvaise carte rationnelle était utilisée au point critique.
+
+Le repli actuel contourne toute division. Pour chaque pas du cycle, il propage le
+majorant scalaire exact
+
+$$
+\rho_{k+1}=2|Z_k|\rho_k+\rho_k^2+c_{\max}.
+$$
+
+L'inégalité triangulaire donne par récurrence
+$|\delta z_k|\le\rho_k$ pour tout pixel de la vue
+($|\delta c|\le c_{\max}$). Si, après une période,
+$\rho_p\le\rho_0=r$, le disque revient dans lui-même et le pixel est certifié intérieur.
+Le théorème Lean `scalar_majorant_return_le` formalise exactement cette implication.
+
+::: info Démonstration — le disque invariant du noyau period‑2
+
+La courbe $M(r)$ est le rayon majoré après un retour complet. Là où elle passe sous la
+diagonale $M(r)=r$, un disque invariant existe. Comparez les deux phases du même cycle
+$\{0,-1\}$ : commencer au point critique supprime le premier terme linéaire et agrandit
+fortement le rayon. Faites aussi tendre la marge $q$ vers $1$ pour voir la borne se
+rapprocher de l'optimum **dans la famille des disques radiaux**.
+
+<ClientOnly><PeriodicCertificateDemo /></ClientOnly>
+
+:::
+
+### Conservateur, optimal… dans quel sens ?
+
+Pour une phase fixée et ce majorant scalaire, la limite radiale est la plus grande
+solution de $M(r)=r$. La recherche par dichotomie s'en approche, mais le moteur demande
+actuellement $M(r)/r\le0{,}95$ à la construction puis conserve une marge runtime à
+$0{,}98$ pour absorber sérialisation et arrondis. Le résultat est donc volontairement
+**conservateur**. À $c_{\max}=10^{-5}$ sur le period‑2, choisir la phase critique fait
+déjà passer le rayon d'environ $0{,}197$ à $0{,}434$, soit un gain $\times2{,}21$, sans
+ajouter la moindre opération au shader.
+
+Ce n'est pas l'optimum géométrique du bassin : les valeurs absolues oublient les angles
+et toutes les compensations complexes, un disque centré ne suit pas une frontière
+anisotrope, et seules la phase détectée et la phase la plus critique sont essayées.
+Tester les $p$ phases avec une résolution complète coûterait $O(p^2)$ ; le choix actuel
+reste $O(p)$ et, même à $p=512$, représente au plus environ 231 000 pas scalaires lors
+du montage, uniquement lorsque le chemin Möbius échoue. Le runtime direct, lui, se
+réduit à une lecture de rayon et une comparaison.
+
+Les deux étapes raisonnables pour se rapprocher davantage de l'optimal sont :
+
+1. remplacer les marges fixes par une évaluation par intervalles à arrondi dirigé ; on
+   pourrait alors approcher la racine $M(r)=r$ à quelques ulp près sans changer le WGSL ;
+2. remplacer le disque scalaire par un disque complexe mobile, une ellipse ou un test
+   de Krawczyk/Newton par intervalles autour du cycle ; cela récupère les compensations,
+   mais augmente le coût de construction et les métadonnées GPU.
+
+::: warning Frontière de la preuve
+Lean prouve l'implication mathématique « majorant invariant $\Rightarrow$ retour dans le
+disque ». Il ne prouve pas automatiquement les appels `f64`, `log2` et `exp2` du builder
+Rust. Le code garde donc aujourd'hui des marges de 5 % / 2 % et revalide le rayon après
+sa conversion en `f32`. Une arithmétique d'intervalles à arrondi dirigé supprimerait ce
+dernier écart entre théorème formel et certificat machine.
+:::
+
+::: details Théorèmes Lean correspondants (modules `Algebra`, `Bounds`, `CPlus`, `RationalCertificate`, `Periodic`, `PeriodicRuntime`, `CriticalPeriodic`, `Dynamics`)
 - `Homography.eval_comp`, `Homography.det_comp` : composition = produit matriciel,
   déterminant multiplicatif (module `NonautonomousPade`).
 - `mobius_composition_julia` : la fermeture exacte à $c = 0$.
@@ -896,6 +1015,12 @@ hypothèse, l'erreur reste bornée par $\varepsilon/(1 - \gamma)$, uniformément
 - `jordan_power` : $(\lambda(I+N))^k = \lambda^k(I + kN)$ à la coalescence.
 - `periodic_model_error_contraction_on` : la borne $\varepsilon/(1-\gamma)$ sous
   contraction uniforme et confinement des deux orbites.
+- `exactPeriodicBlock_mapsTo_disk` : l'erreur de valeur et l'invariance du modèle
+  suffisent à rendre le disque invariant pour le retour exact, sans certificat $V'$.
+- `scalar_majorant`, `scalar_majorant_return_le` : l'enveloppe pas à pas et son
+  corollaire de retour, sans dérivée ni contraction.
+- `periodTwo_grouped_disk_invariance` : le repli direct au noyau period‑2, là où
+  l'extraction Möbius est dégénérée.
 :::
 
 ## Les coordonnées de Fatou
@@ -1330,7 +1455,7 @@ Le fil complet, de la théorie au pixel :
 | Marge de pôle | $\text{DEN} > 0$ sur le bidisque | Inégalité triangulaire inversée (`cplusDenLower_le_norm`) |
 | Choix Padé/jet | Sélecteur par bornes certifiées | Jamais pire que le jet (`choosePadeOrJet_error_le_min`) |
 | Zones paraboliques | Superconvergence, shadowing, Fatou | Télescopage exact + majorants (`nonautonomous_pade_shadowing_bound`) |
-| Cycles périodiques | Birapport, $\kappa^k$, Jordan | Fast-forward certifié (`periodic_model_error_contraction_on`) |
+| Cycles périodiques | Birapport, $\kappa^k$, disque invariant et repli critique | Fast-forward + verdict intérieur (`periodic_model_error_contraction_on`, `scalar_majorant_return_le`) |
 | Survie des blocs | Métrique hyperbolique, Schwarz–Pick | Pas non-expansifs, budget = somme (`nonautonomous_pade_hyperbolic_shadowing_bound`) |
 | Dérivée (DE, AA) | Jet en $c$ des matrices, $\det/\text{den}^2$ | Erreur de dérivée bornée (`MatrixC1.norm_deriv_exact_le_uniform`) |
 | Changements d'échelle | Rebasing de Zhuoran, gauges projectives | Valeur+dérivées préservées (`rebase_preserves_derivative`) |

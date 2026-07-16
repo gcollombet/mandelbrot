@@ -640,15 +640,33 @@ pub fn mobius_build_bounds(
     MobiusBoundsTable { log2_rc, per_level }
 }
 
-/// Full Cauchy certificate for ONE composed block over an arbitrary seed
-/// segment — the periodic block Φ_p, composed from the seeds at
-/// orbit[start..start+p]. Runs the exact machinery the table blocks get:
-/// bisected-majorant bounds per anisotropy rung (M_Q over the p steps), then
-/// the strict (V) value solve (x = 0 gated — the radial-property endpoint)
-/// and the (V′) derivative solve. Returns log2 of the certified entry radius
-/// (min of the two), −∞ when no rung certifies. Replaces the tail-free
-/// closed-form oracle the periodic header shipped with — the reason the
-/// runtime shortcut stayed disabled.
+/// Value-only Cauchy certificate for ONE composed block over an arbitrary seed
+/// segment.  This is sufficient when the consumer only needs to prove that the
+/// exact return maps a disk into itself; no derivative estimate participates in
+/// that implication.
+pub fn mobius_certify_segment_value(
+    blk: &MobiusBlock,
+    orbit_seg: &[(f64, f64)],
+    epsilon: f64,
+    log2_c_max: f64,
+) -> f64 {
+    if blk.m.degenerate || orbit_seg.is_empty() {
+        return f64::NEG_INFINITY;
+    }
+    let twoz = mobius_twoz(orbit_seg);
+    let log2_rc = mobius_rungs(log2_c_max);
+    let bounds = mobius_block_bounds(blk, &twoz, &log2_rc);
+    let table = MobiusBoundsTable {
+        log2_rc,
+        per_level: Vec::new(),
+    };
+    mobius_solve_radius(blk, &bounds, &table, epsilon, log2_c_max)
+}
+
+/// Full value-and-derivative Cauchy certificate for ONE composed block over an
+/// arbitrary seed segment. Returns the minimum of (V) and (V′); consumers that
+/// only need disk invariance should use `mobius_certify_segment_value` so a
+/// derivative-only failure cannot suppress a valid interior certificate.
 pub fn mobius_certify_segment(
     blk: &MobiusBlock,
     orbit_seg: &[(f64, f64)],

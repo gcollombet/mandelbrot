@@ -143,12 +143,18 @@ fn sqrt_down(a: f64) -> f64 {
 
 /// Upper bound for `|z|` (exact complex value given by an exact f64 pair).
 fn abs_up_c(z: C64) -> f64 {
-    sqrt_up(add_up(mul_up(z.re.abs(), z.re.abs()), mul_up(z.im.abs(), z.im.abs())))
+    sqrt_up(add_up(
+        mul_up(z.re.abs(), z.re.abs()),
+        mul_up(z.im.abs(), z.im.abs()),
+    ))
 }
 
 /// Lower bound for `|z|`.
 fn abs_down_c(z: C64) -> f64 {
-    sqrt_down(add_down(mul_down(z.re.abs(), z.re.abs()), mul_down(z.im.abs(), z.im.abs())))
+    sqrt_down(add_down(
+        mul_down(z.re.abs(), z.re.abs()),
+        mul_down(z.im.abs(), z.im.abs()),
+    ))
 }
 
 /// `|re| + |im|`, rounded up: dominates every partial product magnitude in a
@@ -175,7 +181,10 @@ impl Ball {
     };
 
     fn exact(center: C64) -> Ball {
-        Ball { center, radius: 0.0 }
+        Ball {
+            center,
+            radius: 0.0,
+        }
     }
 
     fn abs_up(self) -> f64 {
@@ -894,8 +903,7 @@ pub fn propose_difference_return(
             };
         let (model, model_d) = chebyshev_model_jet_ball(center);
         // Model curvature on the farthest point of the cell from the origin.
-        let model_second =
-            chebyshev_second_derivative_bound_up(add_up(abs_up_c(center), radius));
+        let model_second = chebyshev_second_derivative_bound_up(add_up(abs_up_c(center), radius));
         // D = (w_k - s·H)/s and D' = (u_k - s·H')/s: bounding the numerators
         // and dividing by the certified lower scale avoids ball division.
         let value_bound = div_up(
@@ -1393,11 +1401,13 @@ mod tests {
         // The first-order 64×64 census floor is ~1.06e-2. The second-order
         // difference certificate must land well below it without subdividing
         // to absurd depth.
-        let proposal =
-            propose_difference_return(FEIGENBAUM_C, 0.0, 8, 0.25, 8, 1e-4, 8);
+        let proposal = propose_difference_return(FEIGENBAUM_C, 0.0, 8, 0.25, 8, 1e-4, 8);
         assert!(proposal.failure.is_none(), "{:?}", proposal.failure);
-        assert!(proposal.accepted, "over budget: {} cells over, uniform {:.3e}",
-            proposal.cells_over_budget, proposal.uniform_error);
+        assert!(
+            proposal.accepted,
+            "over budget: {} cells over, uniform {:.3e}",
+            proposal.cells_over_budget, proposal.uniform_error
+        );
         assert!(proposal.uniform_error <= 1e-4);
         assert!(proposal.uniform_error < 1.06e-2 / 10.0);
         // Directed-rounding ball arithmetic: rounding is included, the
@@ -1451,8 +1461,7 @@ mod tests {
         // by re-running the window builder at that δ.
         let budget = 1e-4;
         for level in 2..=8 {
-            let proposal =
-                propose_difference_return(FEIGENBAUM_C, 0.0, level, 0.25, 8, budget, 10);
+            let proposal = propose_difference_return(FEIGENBAUM_C, 0.0, level, 0.25, 8, budget, 10);
             assert!(proposal.failure.is_none(), "level {}", level);
             assert!(!proposal.roundoff_omitted);
             let mut max_value: f64 = 0.0;
@@ -1507,18 +1516,23 @@ mod tests {
         assert!(Dyadic::from_f64_exact(f64::INFINITY).is_none());
         assert_eq!(
             Dyadic::from_f64_exact(0.5).unwrap(),
-            Dyadic { mantissa: 1, exponent: -1 }
+            Dyadic {
+                mantissa: 1,
+                exponent: -1
+            }
         );
         assert_eq!(
             Dyadic::from_f64_exact(-6.0).unwrap(),
-            Dyadic { mantissa: -3, exponent: 1 }
+            Dyadic {
+                mantissa: -3,
+                exponent: 1
+            }
         );
     }
 
     #[test]
     fn dyadic_export_round_trips_every_cell() {
-        let proposal =
-            propose_difference_return(FEIGENBAUM_C, 0.0, 6, 0.25, 8, 1e-3, 8);
+        let proposal = propose_difference_return(FEIGENBAUM_C, 0.0, 6, 0.25, 8, 1e-3, 8);
         assert!(proposal.failure.is_none());
         let certificate = export_dyadic_certificate(&proposal).unwrap();
         assert_eq!(certificate.cells.len(), proposal.cells.len());
@@ -1658,7 +1672,11 @@ mod tests {
         // Emit the WGSL constant table for mandelbrot_brush.wgsl: the u-space
         // Clenshaw coefficients a_k (a_0 = h0, a_k = 2 h_k). Run with --nocapture.
         println!("const RENORM_H_NCOEFF: i32 = {};", H_BAR.len());
-        println!("const RENORM_H_A: array<f32, {}> = array<f32, {}>(", H_BAR.len(), H_BAR.len());
+        println!(
+            "const RENORM_H_A: array<f32, {}> = array<f32, {}>(",
+            H_BAR.len(),
+            H_BAR.len()
+        );
         for (k, h) in H_BAR.iter().enumerate() {
             let a_k = if k == 0 { *h } else { 2.0 * h };
             let sep = if k + 1 == H_BAR.len() { "" } else { "," };

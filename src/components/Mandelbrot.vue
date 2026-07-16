@@ -9,6 +9,7 @@ import {
 } from '../TextureMapping.ts';
 import {normalizeAnimationConfig, type AnimationConfig} from '../AnimationConfig.ts';
 import {log2FromDecimalString} from '../floatexp.ts';
+import type {KeyboardNavigationInput} from '../types/MandelbrotExposed.ts';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let canvas: HTMLCanvasElement | null = null;
@@ -16,6 +17,16 @@ let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
 let _lastScaleLog = '';
+
+// Keyboard state is sampled by draw(), rather than in an independent timer.
+// draw() is paced to the GPU's real frame cadence, so input cannot accumulate
+// several invisible velocity impulses while a complex view is rendering.
+let keyboardNavigation: KeyboardNavigationInput = {
+  translateX: 0,
+  translateY: 0,
+  rotation: 0,
+  zoom: 0,
+};
 
 const refPixelX = ref<number | null>(null);
 const refPixelY = ref<number | null>(null);
@@ -215,6 +226,16 @@ watch(
 
 async function draw() {
   if (!engine || !navigator) return;
+
+    if (keyboardNavigation.translateX || keyboardNavigation.translateY) {
+      navigator.translate(keyboardNavigation.translateX, keyboardNavigation.translateY);
+    }
+    if (keyboardNavigation.rotation) {
+      navigator.rotate(keyboardNavigation.rotation);
+    }
+    if (keyboardNavigation.zoom) {
+      navigator.zoom(keyboardNavigation.zoom);
+    }
 
     const canvas = canvasRef.value;
     const step = navigator.step(canvas ? canvas.width : undefined, canvas ? canvas.height : undefined);
@@ -457,6 +478,9 @@ defineExpose({
   rotate: (da: number) => navigator?.rotate(da),
   angle: (a: number) => navigator?.angle(a),
   zoom: (f: number) => { console.log('[REF] zoom() called factor', f); navigator?.zoom(f); },
+  setKeyboardNavigation: (input: KeyboardNavigationInput) => {
+    keyboardNavigation = input;
+  },
   // Snap the navigator exactly onto a target and force a fresh reference orbit.
   // Used when a "travel to preset" animation completes: the travel finalises
   // cx/cy/scale through the draw loop (isUpdating, which the param watcher

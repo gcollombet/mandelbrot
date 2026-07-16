@@ -67,6 +67,10 @@ const stats = reactive({
   tableBandLog2: Number.NaN,
   tableBandSpread: Number.NaN,
   tableGateCount: -1,
+  tableBuildActive: false,
+  tableBuildProgress: 0,
+  tableBuildStage: 'idle',
+  tableBuildKind: '',
   shaderApproxFlag: 0,
   shaderBlaLevelCount: 0,
   aaFrontierStamped: -1,
@@ -108,6 +112,31 @@ const pendingRefPercent = computed(() => {
   const max = stats.pendingRefMaxIterations || 0;
   if (max <= 0) return 0;
   return Math.min(100, Math.max(0, (len / max) * 100));
+});
+
+const tableBuildPercent = computed(() =>
+  Math.round(Math.min(1, Math.max(0, stats.tableBuildProgress || 0)) * 100)
+);
+
+const tableBuildLine = computed(() => {
+  if (!stats.tableBuildActive) return stats.tableBuildStage === 'ready' ? 'prête' : '';
+  const stages: Record<string, string> = {
+    coefficients: 'coefficients',
+    bounds: 'bornes',
+    radii: 'rayons',
+    transfer: 'transfert GPU',
+  };
+  return `${tableBuildPercent.value} % · ${stages[stats.tableBuildStage] ?? stats.tableBuildStage}`;
+});
+
+const tableKindLabel = computed(() => {
+  const labels: Record<string, string> = {
+    unified: 'Auto',
+    mobius: 'Möbius+',
+    jet: 'Jet',
+    bla: 'BLA/Padé',
+  };
+  return labels[stats.tableBuildKind] ?? 'blocs';
 });
 
 function completionPercent(): string {
@@ -358,6 +387,10 @@ function readLive(e: any) {
   stats.tableBandLog2 = e.tableBandLog2 ?? Number.NaN;
   stats.tableBandSpread = e.tableBandSpread ?? Number.NaN;
   stats.tableGateCount = e.tableGateCount ?? -1;
+  stats.tableBuildActive = e.tableBuildActive ?? false;
+  stats.tableBuildProgress = e.tableBuildProgress ?? 0;
+  stats.tableBuildStage = e.tableBuildStage ?? 'idle';
+  stats.tableBuildKind = e.tableBuildKind ?? '';
   stats.shaderApproxFlag = e.lastShaderApproxFlag ?? 0;
   stats.shaderBlaLevelCount = e.lastShaderBlaLevelCount ?? 0;
   stats.aaFrontierStamped = e.aaFrontierStamped ?? -1;
@@ -795,6 +828,19 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
         <div class="perf-progress-fill perf-progress-fill--pending" :style="{ width: pendingRefPercent + '%' }"></div>
       </div>
     </div>
+    <div v-if="stats.tableBuildKind" class="perf-stat-row perf-stat-row--progress">
+      <div class="perf-progress-header">
+        <span class="perf-stat-label perf-stat-label--table">Table {{ tableKindLabel }}</span>
+        <span class="perf-stat-value perf-stat-value--table">{{ tableBuildLine }}</span>
+      </div>
+      <div class="perf-progress-track">
+        <div
+          class="perf-progress-fill perf-progress-fill--table"
+          :class="{ 'perf-progress-fill--building': stats.tableBuildActive }"
+          :style="{ width: tableBuildPercent + '%' }"
+        ></div>
+      </div>
+    </div>
     <div class="perf-stat-row">
       <span class="perf-stat-label">Référence</span>
       <span class="perf-stat-value" :class="{ 'perf-stat-value--reference': stats.referenceResetActive }">
@@ -998,6 +1044,12 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
   opacity: 1;
 }
 
+.perf-stat-label--table,
+.perf-stat-value--table {
+  color: #f59e0b;
+  opacity: 1;
+}
+
 .perf-stat-value {
   font-variant-numeric: tabular-nums;
   font-weight: 500;
@@ -1050,6 +1102,14 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 
 .perf-progress-fill--pending {
   box-shadow: 0 0 4px #ec3d7a;
+}
+
+.perf-progress-fill--table {
+  background: linear-gradient(90deg, #f59e0b, #facc15);
+}
+
+.perf-progress-fill--building {
+  box-shadow: 0 0 5px rgba(245, 158, 11, 0.85);
 }
 
 .perf-debug-row {

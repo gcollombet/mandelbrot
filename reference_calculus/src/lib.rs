@@ -56,6 +56,15 @@ const PRECISION_MARGIN_BITS: usize = 24;
 // so this floor never lowers it. Deep diving raises the budget explicitly (preset / slider).
 const DEFAULT_BUDGET_BITS: usize = 64;
 
+// Manual navigation is sampled once per displayed frame.  Complex views may
+// take several tens of milliseconds to render, so a short half-life makes each
+// keyboard impulse die before the next visible frame.  Keep enough momentum to
+// interpolate smoothly across those sparse frames while retaining a responsive
+// stop after key release.
+const NAVIGATION_DAMPING_HALF_LIFE_SECONDS: f64 = 0.18;
+const NAVIGATION_TRANSLATION_GAIN: f64 = 70.0;
+const NAVIGATION_ZOOM_RATE: i32 = 10;
+
 // Per-step precision from the amplified-bit count G_n. Clamped to [FLOOR, budget].
 fn profile_precision(budget: usize, g_bits: f64) -> usize {
     let shed = (g_bits - PRECISION_MARGIN_BITS as f64).floor().max(0.0) as usize;
@@ -402,11 +411,13 @@ pub struct MandelbrotNavigator {
     // worker so build-latency reports can tell a keyframe radii re-solve from
     // a cold build (Phase F, 7.2).
     unified_last_build_stages: u32,
-    // Table observability (perf panel): SA prefix skip, periodic period,
-    // replay-observed |dz| band (log2 median + spread) and emitted gate count
-    // of the LAST unified serialization. −1/NaN before the first build.
+    // Table observability (perf panel): SA prefix skip, active periodic period,
+    // detailed periodic diagnostic + detected period, replay-observed |dz|
+    // band and emitted gate count of the LAST unified serialization.
     unified_last_sa_n0: u32,
     unified_last_periodic_p: u32,
+    unified_last_periodic_status: u32,
+    unified_last_periodic_detected_p: u32,
     unified_last_band_log2: f64,
     unified_last_band_spread: f64,
     unified_last_gate_count: u32,
@@ -506,6 +517,8 @@ impl MandelbrotNavigator {
             unified_last_build_stages: 0,
             unified_last_sa_n0: 0,
             unified_last_periodic_p: 0,
+            unified_last_periodic_status: unified::PeriodicBuildStatus::Pending.code(),
+            unified_last_periodic_detected_p: 0,
             unified_last_band_log2: f64::NAN,
             unified_last_band_spread: f64::NAN,
             unified_last_gate_count: 0,
@@ -591,8 +604,8 @@ impl MandelbrotNavigator {
         let angle = self.angle;
         let cos_a = DBig::from_str(&angle.cos().to_string()).unwrap();
         let sin_a = DBig::from_str(&angle.sin().to_string()).unwrap();
-        let dx_big = DBig::from_str(&(dx * 40.0).to_string()).unwrap();
-        let dy_big = DBig::from_str(&(dy * 40.0).to_string()).unwrap();
+        let dx_big = DBig::from_str(&(dx * NAVIGATION_TRANSLATION_GAIN).to_string()).unwrap();
+        let dy_big = DBig::from_str(&(dy * NAVIGATION_TRANSLATION_GAIN).to_string()).unwrap();
         let scale = &self.scale;
         let delta_x = (&dx_big * &cos_a - &dy_big * &sin_a) * scale;
         let delta_y = (&dx_big * &sin_a + &dy_big * &cos_a) * scale;
@@ -932,7 +945,9 @@ impl MandelbrotNavigator {
             }
         } else {
             // Animation translation avec vitesse et damping (manuel)
-            let damping_base = exp_f64(-std::f64::consts::LN_2 * delta_time / 0.05); // (1.0 - 25.0 * delta_time).max(0.01);
+            let damping_base = exp_f64(
+                -std::f64::consts::LN_2 * delta_time / NAVIGATION_DAMPING_HALF_LIFE_SECONDS,
+            );
             let damping = DBig::from_str(&damping_base.to_string()).unwrap();
             let delta_time_big = DBig::from_str(&delta_time.to_string()).unwrap();
 
@@ -940,9 +955,9 @@ impl MandelbrotNavigator {
             if self.vscale != DBig::try_from(1).unwrap() {
                 if delta_time_big > DBig::try_from(0).unwrap() {
                     self.scale = &self.scale
-                        * self
-                            .vscale
-                            .powf(&(&delta_time_big * DBig::try_from(10).unwrap()));
+                        * self.vscale.powf(
+                            &(&delta_time_big * DBig::try_from(NAVIGATION_ZOOM_RATE).unwrap()),
+                        );
                 }
                 self.vscale = DBig::try_from(1).unwrap()
                     + ((&self.vscale - DBig::try_from(1).unwrap()) * &damping);
@@ -977,7 +992,7 @@ impl MandelbrotNavigator {
             }
 
             // Rendre damping dépendant du temps
-            let k = std::f64::consts::LN_2 / 0.05;
+            let k = std::f64::consts::LN_2 / NAVIGATION_DAMPING_HALF_LIFE_SECONDS;
             let displacement_factor_f64 = (1.0 - damping_base) / k;
             let displacement_factor = DBig::from_str(&displacement_factor_f64.to_string()).unwrap();
 
@@ -1616,14 +1631,24 @@ impl MandelbrotNavigator {
         }
     }
 
-    fn ensure_unified_table(&mut self, orbit_len: usize) {
-        self.unified_last_build_stages = 0;
+    fn ensure_unified_table_through(
+        &mut self,
+        orbit_len: usize,
+        max_stage: u32,
+        reset_stages: bool,
+    ) {
+        if reset_stages {
+            self.unified_last_build_stages = 0;
+        }
         let orbit_len = orbit_len.min(self.result.len());
         if orbit_len <= 2 {
             self.unified_levels.clear();
             *self.unified_bounds = None;
             *self.unified_radii = None;
             self.unified_source_len = 0;
+            self.unified_last_periodic_p = 0;
+            self.unified_last_periodic_status = unified::PeriodicBuildStatus::OrbitTooShort.code();
+            self.unified_last_periodic_detected_p = 0;
             return;
         }
         let orbit: Vec<(f64, f64)> = self.result[..orbit_len]
@@ -1639,6 +1664,9 @@ impl MandelbrotNavigator {
                                                        // Coefficients are orbit-keyed: serialized once here, never on a
                                                        // radius re-solve (the split-buffer point).
             *self.unified_coeffs_result = unified::unified_serialize_coeffs(&self.unified_levels);
+        }
+        if max_stage < 2 {
+            return;
         }
         let log2_c_max = self.jet_log2_c_max();
         // Same headroom rule as the mobius/jet stages: bounds stay sound for
@@ -1656,6 +1684,9 @@ impl MandelbrotNavigator {
             ));
             self.unified_bounds_log2_c_max = log2_c_max;
             self.unified_radii_log2_c_max = f64::NAN; // cascade: radii stale
+        }
+        if max_stage < 4 {
+            return;
         }
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
         // Asymmetric staleness — see ensure_jet_table.
@@ -1675,13 +1706,13 @@ impl MandelbrotNavigator {
             // Certified SA prefix ((ε, c_max)-keyed like the radii): the
             // common skip every compute-request pixel starts at (Phase C).
             let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
-            // Periodic fixed-point shortcut (Phase E): ENABLED — the header's
-            // tail-free radius oracle was replaced by the full Cauchy
-            // certificate (mobius_certify_segment: bisected majorant over the
-            // p composed steps + strict (V)/(V′) solve, x = 0 gated). An
-            // escaping/aperiodic reference yields None and the serialized
-            // header carries p = 0, so the shader path stays dormant there.
-            let periodic = unified::periodic_build(&orbit, epsilon, log2_c_max);
+            // Periodic shortcut (Phase E): retain a detailed dormant reason
+            // for the performance panel. Detection may scan above the runtime
+            // p cap, but composition/certification never does.
+            let periodic_outcome = unified::periodic_build_diagnostic(&orbit, epsilon, log2_c_max);
+            let periodic_status = periodic_outcome.status.code();
+            let periodic_detected_p = periodic_outcome.detected_period as u32;
+            let periodic = periodic_outcome.block;
             // §18 parabolic Fatou gates ((ε, c_max)-keyed like the radii).
             // Built only when DEAD sidecar blocks exist (no tier certified —
             // the saturation coupling: quasi-parabolic transits are the only
@@ -1738,6 +1769,8 @@ impl MandelbrotNavigator {
             // Table observability for the perf panel.
             self.unified_last_sa_n0 = sa.n0 as u32;
             self.unified_last_periodic_p = periodic.as_ref().map(|p| p.p as u32).unwrap_or(0);
+            self.unified_last_periodic_status = periodic_status;
+            self.unified_last_periodic_detected_p = periodic_detected_p;
             self.unified_last_band_log2 = log2_band;
             self.unified_last_band_spread = log2_spread;
             self.unified_last_gate_count = gate_list.len() as u32;
@@ -1749,13 +1782,7 @@ impl MandelbrotNavigator {
         }
     }
 
-    /// Build (or reuse) the unified table and expose the GPU buffers: the
-    /// prefix-ordered coefficient records (108 B/block, tier prefixes
-    /// 24/36/60/108 B), the tagged-radius sidecar (16 B vec4) and the level
-    /// directory. Coefficient and sidecar arrays share the flat block index.
-    pub fn compute_unified_reference(&mut self, max_iter: u32) -> UnifiedBufferInfo {
-        let orbit_len = self.result.len().min(max_iter as usize + 1);
-        self.ensure_unified_table(orbit_len);
+    fn unified_buffer_info(&self) -> UnifiedBufferInfo {
         UnifiedBufferInfo {
             coeffs_ptr: self.unified_coeffs_result.as_ptr() as usize,
             coeffs_count: self.unified_coeffs_result.len(),
@@ -1764,6 +1791,37 @@ impl MandelbrotNavigator {
             levels_ptr: self.unified_gpu_levels.as_ptr() as usize,
             level_count: self.unified_gpu_levels.len(),
         }
+    }
+
+    /// Build (or reuse) the unified table and expose the GPU buffers: the
+    /// prefix-ordered coefficient records (108 B/block, tier prefixes
+    /// 24/36/60/108 B), the tagged-radius sidecar (16 B vec4) and the level
+    /// directory. Coefficient and sidecar arrays share the flat block index.
+    pub fn compute_unified_reference(&mut self, max_iter: u32) -> UnifiedBufferInfo {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.ensure_unified_table_through(orbit_len, 4, true);
+        self.unified_buffer_info()
+    }
+
+    /// First cooperative Unified-build phase. Splitting the three cache stages
+    /// lets the worker report honest progress between long WASM calls without
+    /// changing the table contents or cache keys.
+    pub fn begin_unified_reference(&mut self, max_iter: u32) {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.ensure_unified_table_through(orbit_len, 1, true);
+    }
+
+    /// Second cooperative Unified-build phase: majorant/bound walk.
+    pub fn continue_unified_reference_bounds(&mut self, max_iter: u32) {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.ensure_unified_table_through(orbit_len, 2, false);
+    }
+
+    /// Final cooperative Unified-build phase: certified radii and GPU sidecar.
+    pub fn finish_unified_reference(&mut self, max_iter: u32) -> UnifiedBufferInfo {
+        let orbit_len = self.result.len().min(max_iter as usize + 1);
+        self.ensure_unified_table_through(orbit_len, 4, false);
+        self.unified_buffer_info()
     }
 
     /// True when the next compute_unified_reference will run its COLD stage
@@ -1785,6 +1843,9 @@ impl MandelbrotNavigator {
         if orbit_len <= 2 {
             self.unified_header_result.clear();
             self.unified_header_levels.clear();
+            self.unified_last_periodic_p = 0;
+            self.unified_last_periodic_status = unified::PeriodicBuildStatus::OrbitTooShort.code();
+            self.unified_last_periodic_detected_p = 0;
         } else {
             let orbit: Vec<(f64, f64)> = self.result[..orbit_len]
                 .iter()
@@ -1793,7 +1854,12 @@ impl MandelbrotNavigator {
             let log2_c_max = self.jet_log2_c_max();
             let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
             let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
-            let periodic = unified::periodic_build(&orbit, epsilon, log2_c_max);
+            let periodic_outcome = unified::periodic_build_diagnostic(&orbit, epsilon, log2_c_max);
+            self.unified_last_periodic_status = periodic_outcome.status.code();
+            self.unified_last_periodic_detected_p = periodic_outcome.detected_period as u32;
+            let periodic = periodic_outcome.block;
+            self.unified_last_periodic_p =
+                periodic.as_ref().map(|block| block.p as u32).unwrap_or(0);
             let (side, dir) = unified::unified_serialize_header_only(Some(&sa), periodic.as_ref());
             *self.unified_header_result = side;
             *self.unified_header_levels = dir;
@@ -1815,15 +1881,18 @@ impl MandelbrotNavigator {
         self.unified_last_build_stages
     }
 
-    /// Perf-panel table observability (last unified serialization): certified
-    /// SA common-prefix skip, periodic-header period (0 = dormant), the
-    /// replay-observed |dz| band (log2 median / spread) and the emitted §18
-    /// gate count.
+    /// Perf-panel table observability for the last unified serialization.
     pub fn unified_last_sa_n0(&self) -> u32 {
         self.unified_last_sa_n0
     }
     pub fn unified_last_periodic_p(&self) -> u32 {
         self.unified_last_periodic_p
+    }
+    pub fn unified_last_periodic_status(&self) -> u32 {
+        self.unified_last_periodic_status
+    }
+    pub fn unified_last_periodic_detected_p(&self) -> u32 {
+        self.unified_last_periodic_detected_p
     }
     pub fn unified_last_band_log2(&self) -> f64 {
         self.unified_last_band_log2
@@ -1877,6 +1946,9 @@ impl MandelbrotNavigator {
         self.unified_source_len = 0;
         self.unified_bounds_log2_c_max = f64::NAN;
         self.unified_radii_log2_c_max = f64::NAN;
+        self.unified_last_periodic_p = 0;
+        self.unified_last_periodic_status = unified::PeriodicBuildStatus::Pending.code();
+        self.unified_last_periodic_detected_p = 0;
     }
 
     fn choose_reference_near_view(&self) -> (DBig, DBig) {
@@ -2954,6 +3026,29 @@ mod tests {
             coeffs_ptr_before,
             "coefficient buffer re-serialized by a radius re-solve"
         );
+    }
+
+    #[test]
+    fn unified_cooperative_phases_preserve_cache_semantics() {
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.compute_reference_orbit_ptr(512);
+
+        nav.begin_unified_reference(512);
+        assert_eq!(nav.unified_last_stages(), 1);
+        assert!(!nav.unified_coeffs_result.is_empty());
+        assert!(nav.unified_bounds.as_ref().is_none());
+
+        nav.continue_unified_reference_bounds(512);
+        assert_eq!(nav.unified_last_stages(), 1 | 2);
+        assert!(nav.unified_bounds.as_ref().is_some());
+
+        let info = nav.finish_unified_reference(512);
+        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4);
+        assert!(info.coeffs_count > 0 && info.radii_count > 0 && info.level_count > 0);
+
+        // The ordinary one-shot API sees the exact same now-warm cache.
+        nav.compute_unified_reference(512);
+        assert_eq!(nav.unified_last_stages(), 0);
     }
 
     #[test]

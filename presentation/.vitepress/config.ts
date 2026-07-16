@@ -37,6 +37,7 @@ export default defineConfig({
         nav: [
             {text: 'Home', link: '/'},
             {text: 'Optimisations', link: '/optimisation'},
+            {text: 'Tables', link: '/tables-approximation'},
             {text: 'Mathématiques', link: '/mathematiques'},
         ],
         sidebar: [
@@ -44,6 +45,7 @@ export default defineConfig({
                 items: [
                     {text: 'Présentation', link: '/'},
                     {text: 'Optimisations de rendu', link: '/optimisation'},
+                    {text: "Tables d'approximation", link: '/tables-approximation'},
                     {text: 'Mathématiques et preuves Lean', link: '/mathematiques'},
                 ]
             }

@@ -125,6 +125,20 @@ theorem scalar_majorant
         have hsquare : 0 ≤ rho n ^ 2 := sq_nonneg _
         linarith
 
+/-- Runtime corollary used by the denominator-free periodic header: if the
+scalar majorant after a grouped return is no larger than its entry radius,
+then every exact perturbation admitted by that entry disk returns to it.  No
+derivative or contraction hypothesis is required. -/
+theorem scalar_majorant_return_le
+    (a z : ℕ → ℂ) (c : ℂ) (rho : ℕ → ℝ) (Rc : ℝ) (p : ℕ)
+    (hc : ‖c‖ ≤ Rc)
+    (hz0 : ‖z 0‖ ≤ rho 0)
+    (hzstep : ∀ n, z (n + 1) = exactStep (a n) (z n) c)
+    (hrstep : ∀ n, rho (n + 1) = ‖a n‖ * rho n + (rho n) ^ 2 + Rc)
+    (hreturn : rho p ≤ rho 0) :
+    ‖z p‖ ≤ rho 0 := by
+  exact (scalar_majorant a z c rho Rc hc hz0 hzstep hrstep p).1.trans hreturn
+
 /-- Convex radial certificates need only the centre and boundary values. -/
 theorem convex_radial_disk_certificate
     (h : ℝ → ℝ) (r x : ℝ)

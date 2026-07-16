@@ -7,6 +7,7 @@ export type MandelbrotExposed = {
   rotate: (da: number) => void,
   angle: (a: number) => void,
   zoom: (f: number) => void,
+  setKeyboardNavigation?: (input: KeyboardNavigationInput) => void,
   step: () => [number, number, number, number] | undefined,
   getParams: () => [string, string, string, string] | undefined,
   drawOnce: () => Promise<void>,
@@ -20,4 +21,11 @@ export type MandelbrotExposed = {
   setPrecisionBudget?: (targetScale: string) => void,
   getPrecisionBudget?: () => string | undefined,
   resetReferenceTo?: (cx: string, cy: string, scaleStr: string, angleVal: number) => void,
+};
+
+export type KeyboardNavigationInput = {
+  translateX: number,
+  translateY: number,
+  rotation: number,
+  zoom: number,
 };

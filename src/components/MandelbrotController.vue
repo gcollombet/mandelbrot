@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import {onMounted, onUnmounted, ref} from 'vue';
+import {onMounted, onUnmounted, ref, watch} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
 import MobileNavigationControls from './MobileNavigationControls.vue';
 import type {MandelbrotExposed} from "../types/MandelbrotExposed.ts";
@@ -90,8 +90,6 @@ let pinchPrevDist = 0;
 const moveStep = 0.01;
 const angleStep = 0.025;
 
-let updateTimer: number | null = null;
-
 // Double-tap detection for mobile
 let lastTapTime = 0;
 let lastTapX = 0;
@@ -133,10 +131,31 @@ function handleKeydown(e: KeyboardEvent) {
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select' || (e.target as HTMLElement)?.isContentEditable) return;
   pressedKeys[e.code] = true;
+  syncKeyboardNavigation();
 }
 function handleKeyup(e: KeyboardEvent) {
   // Toujours relâcher la touche pour éviter les touches "collées"
   pressedKeys[e.code] = false;
+  syncKeyboardNavigation();
+}
+
+function handleWindowBlur() {
+  for (const code in pressedKeys) pressedKeys[code] = false;
+  syncKeyboardNavigation();
+}
+
+function syncKeyboardNavigation() {
+  if (props.pickerMode) {
+    mandelbrotRef.value?.setKeyboardNavigation?.({ translateX: 0, translateY: 0, rotation: 0, zoom: 0 });
+    return;
+  }
+  const zoomFactor = 0.97;
+  mandelbrotRef.value?.setKeyboardNavigation?.({
+    translateX: (pressedKeys['KeyD'] ? moveStep : 0) - (pressedKeys['KeyA'] ? moveStep : 0),
+    translateY: (pressedKeys['KeyW'] ? moveStep : 0) - (pressedKeys['KeyS'] ? moveStep : 0),
+    rotation: (pressedKeys['KeyQ'] ? angleStep : 0) - (pressedKeys['KeyE'] ? angleStep : 0),
+    zoom: pressedKeys['KeyR'] ? zoomFactor : pressedKeys['KeyF'] ? 1 / zoomFactor : 0,
+  });
 }
 
 function handleWheel(e: WheelEvent) {
@@ -335,22 +354,6 @@ function handleTouchEnd(e: TouchEvent) {
   }
 }
 
-function updateLoop() {
-  // En mode pipette, pas de navigation clavier
-  if (!props.pickerMode) {
-    if (pressedKeys['KeyW']) mandelbrotRef.value?.translate(0, moveStep);
-    if (pressedKeys['KeyS']) mandelbrotRef.value?.translate(0, -moveStep);
-    if (pressedKeys['KeyA']) mandelbrotRef.value?.translate(-moveStep, 0);
-    if (pressedKeys['KeyD']) mandelbrotRef.value?.translate(moveStep, 0);
-    if (pressedKeys['KeyQ']) mandelbrotRef.value?.rotate(angleStep);
-    if (pressedKeys['KeyE']) mandelbrotRef.value?.rotate(-angleStep);
-    const zoomFactor = 0.97;
-    if (pressedKeys['KeyR']) mandelbrotRef.value?.zoom(zoomFactor);
-    if (pressedKeys['KeyF']) mandelbrotRef.value?.zoom(1 / zoomFactor);
-  }
-  updateTimer = window.setTimeout(updateLoop, 16);
-}
-
 onMounted(async () => {
   // Les listeners souris/tactile sont posés sur le wrapper (stable au hot-reload),
   // pas sur le <canvas> qui, lui, est recréé quand Mandelbrot.vue est hot-reloadé.
@@ -360,6 +363,7 @@ onMounted(async () => {
   // clavier
   window.addEventListener('keydown', handleKeydown);
   window.addEventListener('keyup', handleKeyup);
+  window.addEventListener('blur', handleWindowBlur);
 
   // souris / touchpad
   wrapper.addEventListener('wheel', handleWheel, { passive: false });
@@ -375,18 +379,16 @@ onMounted(async () => {
   wrapper.addEventListener('touchend', handleTouchEnd, { passive: false });
   wrapper.addEventListener('touchend', handleTouchEndForDoubleTap, { passive: false });
 
-  // boucle clavier (la boucle de rendu est gérée par l'engine via Mandelbrot.vue)
-  updateLoop();
+  // The engine samples this state immediately before each actual draw.
+  syncKeyboardNavigation();
 });
 
 onUnmounted(() => {
-  // stop keyboard loop
-  if (updateTimer !== null) clearTimeout(updateTimer);
-
   const wrapper = wrapperRef.value;
   // remove listeners
   window.removeEventListener('keydown', handleKeydown);
   window.removeEventListener('keyup', handleKeyup);
+  window.removeEventListener('blur', handleWindowBlur);
   window.removeEventListener('mousemove', handleMouseMove);
   window.removeEventListener('mouseup', handleMouseUp);
   if (wrapper) {
@@ -400,6 +402,8 @@ onUnmounted(() => {
     wrapper.removeEventListener('touchend', handleTouchEndForDoubleTap as EventListener);
   }
 });
+
+watch(() => props.pickerMode, syncKeyboardNavigation);
 </script>
 
 <template>

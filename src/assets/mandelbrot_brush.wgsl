@@ -1944,42 +1944,31 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
   return 0;
 }
 // ── interior/periodic verdict (Phase E, design D8, findings §17) ─────────────
-fn fe_csqrt(a: fe) -> fe {
-  var m = a.m;
-  var e = a.e;
-  if ((e & 1) != 0) {
-    m = m * 2.0;
-    e = e - 1;
-  }
-  let r = length(m);
-  let re = sqrt(max(0.5 * (r + m.x), 0.0));
-  var im = sqrt(max(0.5 * (r - m.x), 0.0));
-  if (m.y < 0.0) {
-    im = -im;
-  }
-  return fe_renorm(fe(vec2<f32>(re, im), e / 2));
-}
-
-// Certified interiority attempt at a periodic phase point. The period block
-// Φ_p (sidecar header entries hdrBase+4..9, c+ F-form: den = 1 + De·δ + F·c)
-// is a FIXED Möbius map of the delta for this pixel's dc: fixed points ζ± from
-// De·δ² + (1 + Fc − Ae)·δ − Bc = 0, multiplier
-// κ = (Ae·(1+Fc) − Bc·De)/((1+Fc)+De·ζ)². TRUE ⇒ provably interior: |κ| <
-// 0.98 (κ is the pixel's own cycle multiplier, certified to ~1e-4 by the
-// block radius), |w₀| = |(δ−ζa)/(δ−ζr)| < 0.5 (well inside the basin), and
-// the whole contraction path stays inside the certified radius
-// (max(|ζa|, |δ−ζa|)·2 ≤ r ⇒ |δ_j| ≤ |ζa| + |δ−ζa| ≤ r for all j).
+// Certified interiority attempt at a periodic phase point.  This is the
+// scalar disk certificate proved by PeriodicRuntime.lean for the fixed
+// period map m(δ) = (Ae·δ + Bc)/(De·δ + K), K = 1 + F·c:
+//   μ     = |K| - |De|·r                                      > 0
+//   image = (|Ae|·r + |Bc|) / μ
+//   image + err_block                                             < r
+// Together with |δ| < r, the first two tests prove that the exact period-block
+// orbit remains in the disk.  Uniform contraction is stronger than needed for
+// this binary interior verdict and no longer rejects a valid invariant disk.
+// A direct-majorant header (F.w == 1) has already proved exact invariance for
+// every |dc| in the view and needs only the entry-radius comparison here.
 fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
   let log2_dz = log2(max(length(dz.m), 1e-30)) + f32(dz.e);
   if (!(log2_dz < rLog2)) {
     return false;
+  }
+  let hF = mandelbrotJetRadii[hdrBase + 9].v;
+  if (hF.w > 0.5) {
+    return true;
   }
   let hA = mandelbrotJetRadii[hdrBase + 4].v;
   let hB = mandelbrotJetRadii[hdrBase + 5].v;
   let hD = mandelbrotJetRadii[hdrBase + 6].v;
   let hAp = mandelbrotJetRadii[hdrBase + 7].v;
   let hDp = mandelbrotJetRadii[hdrBase + 8].v;
-  let hF = mandelbrotJetRadii[hdrBase + 9].v;
   let cA = fe(vec2<f32>(hA.x, hA.y), i32(hA.z));
   let cB = fe(vec2<f32>(hB.x, hB.y), i32(hB.z));
   let cD = fe(vec2<f32>(hD.x, hD.y), i32(hD.z));
@@ -1989,51 +1978,26 @@ fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
   let ae = fe_add(cA, fe_cmul(cAp, dc));
   let de = fe_add(cD, fe_cmul(cDp, dc));
   let bc = fe_cmul(cB, dc);
-  if (length(de.m) < 1e-20) {
-    return false; // degenerate quadratic — no certified verdict
-  }
   let one = fe(vec2<f32>(1.0, 0.0), 0);
   let onePlusFc = fe_add(one, fe_cmul(cF, dc));
-  let uMinusAe = fe_add(onePlusFc, fe_neg(ae)); // 1 + Fc − Ae
-  let disc = fe_add(fe_cmul(uMinusAe, uMinusAe), fe_scale(fe_cmul(de, bc), 4.0));
-  let sq = fe_csqrt(disc);
-  let inv2De = fe_cinv(fe_scale(de, 2.0));
-  let negU = fe_neg(uMinusAe); // Ae − 1 − Fc
-  let z1 = fe_cmul(fe_add(negU, sq), inv2De);
-  let z2 = fe_cmul(fe_add(negU, fe_neg(sq)), inv2De);
-  let num = fe_add(fe_cmul(ae, onePlusFc), fe_neg(fe_cmul(bc, de)));
-  let d1 = fe_add(onePlusFc, fe_cmul(de, z1));
-  let k1 = fe_cmul(num, fe_cinv(fe_cmul(d1, d1)));
-  let d2 = fe_add(onePlusFc, fe_cmul(de, z2));
-  let k2 = fe_cmul(num, fe_cinv(fe_cmul(d2, d2)));
-  let l2k1 = log2(max(length(k1.m), 1e-30)) + f32(k1.e);
-  let l2k2 = log2(max(length(k2.m), 1e-30)) + f32(k2.e);
-  var za = z1;
-  var zr = z2;
-  var l2ka = l2k1;
-  if (l2k2 < l2k1) {
-    za = z2;
-    zr = z1;
-    l2ka = l2k2;
+
+  let l2K = log2(max(length(onePlusFc.m), 1e-30)) + f32(onePlusFc.e);
+  let l2De = log2(max(length(de.m), 1e-30)) + f32(de.e);
+  let deROverK = exp2(l2De + rLog2 - l2K);
+  if (!(deROverK < 0.98)) {
+    return false; // no safely positive denominator margin μ
   }
-  if (!(l2ka < -0.03)) {
-    return false; // not attracting with margin (|κ| ≥ ~0.98)
+  let l2Mu = l2K + log2(1.0 - deROverK);
+
+  let l2Ae = log2(max(length(ae.m), 1e-30)) + f32(ae.e);
+  let l2Bc = log2(max(length(bc.m), 1e-30)) + f32(bc.e);
+  let imageOverR = exp2(l2Ae - l2Mu)
+                 + exp2(l2Bc - l2Mu - rLog2);
+  let errOverR = exp2(hAp.w); // serialized ½·ε_int·(|A| + |B|·c_max/r)
+  if (!(imageOverR + errOverR < 0.98)) {
+    return false; // exact block does not map the disk strictly inside itself
   }
-  let dza = fe_add(dz, fe_neg(za));
-  let dzr = fe_add(dz, fe_neg(zr));
-  if (length(dzr.m) < 1e-20) {
-    return false;
-  }
-  let w0 = fe_cmul(dza, fe_cinv(dzr));
-  let l2w = log2(max(length(w0.m), 1e-30)) + f32(w0.e);
-  if (!(l2w < -1.0)) {
-    return false; // outside the safe basin margin (|w₀| ≥ 0.5)
-  }
-  let l2za = log2(max(length(za.m), 1e-30)) + f32(za.e);
-  let l2dza = log2(max(length(dza.m), 1e-30)) + f32(dza.e);
-  if (!(max(l2za, l2dza) + 1.0 < rLog2)) {
-    return false; // contraction path not provably inside the radius
-  }
+
   return true;
 }
 
@@ -2937,7 +2901,11 @@ fn cs_main(
 
           // Accumulate work metrics for this texel into the workgroup partials.
           let realSteps = g_workSteps;
-          let covered = u32(max(0.0, result.iter.r - startIter));
+          // Interior verdicts deliberately store iter=0.  Their loop turns did
+          // nevertheless cover at least one iteration each; retain that
+          // invariant so an all-interior render does not look like a wrapped
+          // counter to the readback plausibility gate.
+          let covered = max(realSteps, u32(max(0.0, result.iter.r - startIter)));
           atomicAdd(&wgRealSum, realSteps);
           atomicMax(&wgRealMax, realSteps);
           atomicAdd(&wgCovSum, covered);

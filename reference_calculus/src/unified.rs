@@ -46,7 +46,7 @@ use crate::jet::{
 // runtime fixed points stay a quadratic).
 use crate::mobius::{
     mobius_build_bounds_pair, mobius_build_derivative_radii, mobius_build_radii,
-    mobius_certify_segment, mobius_from_jet, mobius_from_jet_k2, mobius_q, MobiusBlock,
+    mobius_certify_segment_value, mobius_from_jet, mobius_from_jet_k2, mobius_q, MobiusBlock,
     MobiusBoundsTable, MobiusCPlus, MobiusLevel, MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP,
 };
 
@@ -875,35 +875,243 @@ pub fn sa_profile(orbit: &[(f64, f64)], eps: f64, samples: &[usize]) -> Vec<(usi
 /// Longest reference period the build will detect.
 pub const PERIODIC_MAX_P: usize = 512;
 
+/// Runtime proof used by a periodic header.  The direct majorant is the
+/// critical-point fallback: unlike the Möbius chart it remains valid when the
+/// cycle multiplier A is exactly zero at a minibrot nucleus.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeriodicCertificateKind {
+    MobiusInvariant,
+    DirectMajorant,
+}
+
+impl PeriodicCertificateKind {
+    fn header_code(self) -> f32 {
+        match self {
+            PeriodicCertificateKind::MobiusInvariant => 0.0,
+            PeriodicCertificateKind::DirectMajorant => 1.0,
+        }
+    }
+}
+
 /// The composed period block Φ_p in c+ form, with its certified entry radius:
-/// for a pixel in the periodic phase, Φ_p is a FIXED Möbius map of the delta —
-/// fixed points ζ±, multiplier κ — giving a certified interiority verdict at
-/// cost O(p) instead of maxiter (|κ| is the pixel's own cycle multiplier).
+/// for a pixel in the periodic phase, Φ_p is a fixed Möbius map of the delta.
+/// A proved exact disk-invariance certificate gives an interiority verdict at
+/// cost O(p) instead of maxiter.  Uniform contraction remains optional.
 #[derive(Clone, Debug)]
 pub struct PeriodicBlock {
     pub start: usize,
     pub p: usize,
+    pub kind: PeriodicCertificateKind,
     pub m: MobiusCPlus,
-    /// Certified entry radius, log2 |δ| — min of the strict (V) value and
-    /// (V′) derivative radii from the full Cauchy certificate
-    /// (mobius_certify_segment over the p composed steps): κ is a derivative
-    /// object, and the runtime |δ| < r test needs the whole interval covered
-    /// (x = 0 gate). Referee: periodic_certificate_sound_against_exact_walk.
+    /// Certified entry radius, log2 |δ|.  For the Möbius path this is the
+    /// strict (V) value radius over the whole interval from zero; for the
+    /// direct path it is a trapping radius for the exact scalar recurrence.
     pub log2_r: f64,
+    /// Uniform block-model error divided by the certified disk radius:
+    ///   err/r ≤ ½·ε_int·(|A| + |B|·c_max/r).
+    /// Serialized with the periodic header so the GPU can apply the proved
+    /// disk-invariance test without rebuilding a Cauchy bound per pixel.
+    pub log2_err_over_r: f64,
+}
+
+/// Log2 of the exact scalar majorant after one complete period:
+///
+///   ρ₀ = r,
+///   ρₖ₊₁ = 2|Zₖ|ρₖ + ρₖ² + c_max.
+///
+/// `Bounds.scalar_majorant` proves by induction that this encloses every exact
+/// perturbation with |δ₀|≤r and |dc|≤c_max.  The small per-step log slack is
+/// vastly dominated by the 5% build margin and covers f64/libm evaluation
+/// noise without changing the useful radius.
+fn periodic_direct_image_log2(orbit_seg: &[(f64, f64)], log2_r: f64, log2_cmax: f64) -> f64 {
+    const STEP_LOG2_SLACK: f64 = 1e-12;
+    let mut rho = log2_r;
+    for &(zx, zy) in orbit_seg {
+        let two_z = 2.0 * zx.hypot(zy);
+        let linear = if two_z > 0.0 {
+            two_z.log2() + rho
+        } else {
+            f64::NEG_INFINITY
+        };
+        rho = lse2_pair(lse2_pair(linear, 2.0 * rho), log2_cmax) + STEP_LOG2_SLACK;
+    }
+    rho
+}
+
+/// A large trapping radius for the exact grouped period return.  The
+/// log-ratio `log2(image/r)` is convex because the scalar return majorant is a
+/// positive-coefficient polynomial in r.  Ternary search finds its minimum;
+/// bisection then takes the large-radius crossing.  Search failure merely
+/// declines the optimization, while the returned candidate is independently
+/// rechecked after f32 serialization.
+fn periodic_direct_radius(orbit_seg: &[(f64, f64)], log2_cmax: f64) -> f64 {
+    const SEARCH_ITERS: usize = 72;
+    const BISECT_ITERS: usize = 80;
+    const IMAGE_RATIO: f64 = 0.95;
+    const SERIALIZED_LIMIT: f64 = 0.98;
+    if orbit_seg.is_empty() || !log2_cmax.is_finite() || log2_cmax >= 0.0 {
+        return f64::NEG_INFINITY;
+    }
+    let defect = |x: f64| periodic_direct_image_log2(orbit_seg, x, log2_cmax) - x;
+    let mut left = log2_cmax;
+    let mut right = 0.0;
+    for _ in 0..SEARCH_ITERS {
+        let x1 = (2.0 * left + right) / 3.0;
+        let x2 = (left + 2.0 * right) / 3.0;
+        if defect(x1) <= defect(x2) {
+            right = x2;
+        } else {
+            left = x1;
+        }
+    }
+    let minimum = 0.5 * (left + right);
+    let target = IMAGE_RATIO.log2();
+    if defect(minimum).partial_cmp(&target) != Some(core::cmp::Ordering::Less) {
+        return f64::NEG_INFINITY;
+    }
+
+    // The r=1 endpoint cannot pass because every exact step contains ρ².
+    left = minimum;
+    right = 0.0;
+    for _ in 0..BISECT_ITERS {
+        let mid = 0.5 * (left + right);
+        if defect(mid) < target {
+            left = mid;
+        } else {
+            right = mid;
+        }
+    }
+    // Store exactly the f32 radius consumed by WGSL, with a small inward nudge
+    // before conversion; the final check is the executable proof obligation.
+    let serialized = (left - 1e-5) as f32 as f64;
+    if defect(serialized) < SERIALIZED_LIMIT.log2() {
+        serialized
+    } else {
+        f64::NEG_INFINITY
+    }
+}
+
+/// Choose a useful phase for the direct scalar certificate without an O(p²)
+/// all-phase search.  Besides the detector's phase, try the point of the cycle
+/// closest to the critical point: its small linear factor 2|Z| usually gives
+/// the largest radial trapping disk at a minibrot nucleus.  Both candidates
+/// are fully certified and the larger one wins, so the heuristic can never
+/// make the baseline phase worse.  The extra build work is at most one more
+/// O(p) radius solve and the GPU runtime is unchanged.
+fn periodic_direct_certificate(
+    orbit: &[(f64, f64)],
+    start: usize,
+    period: usize,
+    log2_cmax: f64,
+) -> Option<(usize, f64)> {
+    if period == 0 || start + period > orbit.len() {
+        return None;
+    }
+    let critical_phase = (0..period)
+        .min_by(|&i, &j| {
+            let zi = orbit[start + i];
+            let zj = orbit[start + j];
+            zi.0.hypot(zi.1)
+                .partial_cmp(&zj.0.hypot(zj.1))
+                .unwrap_or(core::cmp::Ordering::Equal)
+        })
+        .unwrap_or(0);
+    let mut best: Option<(usize, f64)> = None;
+    for phase in [0, critical_phase] {
+        let candidate_start = start + phase;
+        if candidate_start + period > orbit.len()
+            || best
+                .map(|(best_start, _)| best_start == candidate_start)
+                .unwrap_or(false)
+        {
+            continue;
+        }
+        let radius =
+            periodic_direct_radius(&orbit[candidate_start..candidate_start + period], log2_cmax);
+        if radius.is_finite() && best.map(|(_, r)| radius > r).unwrap_or(true) {
+            best = Some((candidate_start, radius));
+        }
+    }
+    best
+}
+
+/// Why the periodic header is active or was left dormant.  The numeric values
+/// are part of the WASM/TypeScript observability contract.
+#[repr(u32)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PeriodicBuildStatus {
+    /// No completed diagnostic has been published yet (frontend "pending").
+    Pending = 0,
+    /// A certified periodic block is present in the header.
+    Active = 1,
+    /// The reference orbit is below the minimum diagnostic length.
+    OrbitTooShort = 2,
+    /// No sustained periodic tail was found in the available orbit.
+    NoConvergedPeriod = 3,
+    /// A tail period was found, but exceeds the runtime composition cap.
+    PeriodTooLarge = 4,
+    /// The period was found, but the Möbius/Cauchy certificate was rejected.
+    CertificateRejected = 5,
+}
+
+impl PeriodicBuildStatus {
+    pub fn code(self) -> u32 {
+        self as u32
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PeriodicBuildOutcome {
+    pub block: Option<PeriodicBlock>,
+    pub status: PeriodicBuildStatus,
+    /// Fundamental tail period, or a nucleus-return candidate when the orbit
+    /// is still too short to contain the four-cycle confirmation window.
+    pub detected_period: usize,
+}
+
+fn periodic_outcome(
+    block: Option<PeriodicBlock>,
+    status: PeriodicBuildStatus,
+    detected_period: usize,
+) -> PeriodicBuildOutcome {
+    PeriodicBuildOutcome {
+        block,
+        status,
+        detected_period,
+    }
 }
 
 /// Detect reference periodicity after the transient (sustained |Z_{k+p} − Z_k|
 /// < 1e-12 through the orbit tail) and compose Φ_p from p seed jets at the
 /// earliest converged phase. None for escaping/aperiodic references.
-pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<PeriodicBlock> {
+pub fn periodic_build_diagnostic(
+    orbit: &[(f64, f64)],
+    eps: f64,
+    log2_cmax: f64,
+) -> PeriodicBuildOutcome {
     const TOL2: f64 = 1e-24;
     let n = orbit.len();
+    // A Find-minibrot recenter puts the reference at a super-attracting
+    // nucleus, so z_p ≈ 0 already exposes p after one cycle. This is diagnostic
+    // only: block construction still requires the sustained tail below.
+    let nucleus_period = || {
+        orbit
+            .iter()
+            .enumerate()
+            .skip(1)
+            .find(|(_, z)| z.0 * z.0 + z.1 * z.1 < TOL2)
+            .map(|(i, _)| i)
+            .unwrap_or(0)
+    };
     if n < 256 {
-        return None;
+        return periodic_outcome(None, PeriodicBuildStatus::OrbitTooShort, nucleus_period());
     }
     let last = n - 1;
     let mut period = 0usize;
-    'outer: for p in 1..=PERIODIC_MAX_P.min((n / 4).max(1)) {
+    // Scan beyond the runtime cap for observability only.  Almost every wrong
+    // p fails on k=0, so this remains an O(n) tail scan in practice; expensive
+    // jet composition still never runs above PERIODIC_MAX_P.
+    'outer: for p in 1..=(n / 4).max(1) {
         let window = (2 * p).min(last - p);
         for k in 0..window {
             let a = orbit[last - k];
@@ -917,7 +1125,17 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
         break;
     }
     if period == 0 {
-        return None;
+        let candidate = nucleus_period();
+        if candidate > PERIODIC_MAX_P {
+            return periodic_outcome(None, PeriodicBuildStatus::PeriodTooLarge, candidate);
+        }
+        if candidate > 0 && n < candidate.saturating_mul(4) {
+            return periodic_outcome(None, PeriodicBuildStatus::OrbitTooShort, candidate);
+        }
+        return periodic_outcome(None, PeriodicBuildStatus::NoConvergedPeriod, candidate);
+    }
+    if period > PERIODIC_MAX_P {
+        return periodic_outcome(None, PeriodicBuildStatus::PeriodTooLarge, period);
     }
     // Earliest start where the periodicity is already converged below tol.
     let mut start = last - period;
@@ -931,45 +1149,99 @@ pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<
         start -= 1;
     }
     if start + period >= n {
-        return None;
+        return periodic_outcome(None, PeriodicBuildStatus::OrbitTooShort, period);
     }
+    let orbit_seg = &orbit[start..start + period];
+
     // Compose Φ_p at phase `start` (seeds start..start+p−1: δ ← 2Z_i·δ + δ² + c).
-    // c+ F-form: the runtime fixed points come from
-    // De·δ² + (1 + F·c − Ae)·δ − B·c = 0 with den = 1 + De·δ + F·c.
+    // c+ F-form used by the proved runtime disk certificate:
+    // m(δ) = (Ae·δ + Bc)/(1 + De·δ + Fc).
     let mut jet = jet_seed(orbit[start].0, orbit[start].1);
     for i in (start + 1)..(start + period) {
         jet = crate::jet::jet_compose(&jet, &jet_seed(orbit[i].0, orbit[i].1));
     }
-    // The periodic header STAYS on the [1/1] extraction: its runtime verdict
-    // solves the fixed points of the block map, a quadratic for a [1/1]
-    // numerator (De·δ² + (1 + Fc − Ae)·δ − Bc = 0) but a CUBIC for the [2/1]
-    // one — not worth the shader surgery for a κ-accuracy verdict.
+    // The periodic header stays on the [1/1] extraction: the runtime theorem
+    // applies to a Möbius self-map of a disk. The [2/1] numerator is no longer
+    // Möbius and would need a separate enclosure/contraction proof.
     let m = mobius_from_jet(&jet);
     if m.degenerate {
-        return None;
+        // The grouped exact recurrence is the denominator-free fallback at a
+        // super-attracting nucleus (A = 0).  Compute it lazily: the normal
+        // Möbius path must not pay its O(search_iters * p) construction cost.
+        if let Some((direct_start, direct_log2_r)) =
+            periodic_direct_certificate(orbit, start, period, log2_cmax)
+        {
+            return periodic_outcome(
+                Some(PeriodicBlock {
+                    start: direct_start,
+                    p: period,
+                    kind: PeriodicCertificateKind::DirectMajorant,
+                    m,
+                    log2_r: direct_log2_r,
+                    log2_err_over_r: f64::NEG_INFINITY,
+                }),
+                PeriodicBuildStatus::Active,
+                period,
+            );
+        }
+        return periodic_outcome(None, PeriodicBuildStatus::CertificateRejected, period);
     }
     let q = q_moduli(&jet, &m, &Q_ZEROS_PERIODIC);
-    // The interiority verdict does not need ε-exact VALUES — it needs κ and
-    // the basin geometry accurate enough that the runtime margins (|κ| < 0.98,
-    // |w₀| < 0.5) dominate, and the contraction amortizes the per-block error
-    // (findings §17: total err ≤ err_block/(1−|κ|); κ measured exact to 4
-    // decimals at |c| = 1e-5 with err_block ~1e-5). Certify at ε_int = 1e-4.
+    // The interiority verdict only needs a sound value-error bound and disk
+    // invariance; V′ and a contraction-rate estimate are optional stronger
+    // properties and must not suppress a valid trapping disk.
     let eps_int = eps.max(1e-4);
-    // Full Cauchy certificate over the p composed steps (bisected majorant +
-    // strict (V)/(V′) solve, x = 0 gated) — the tail-free closed-form oracle
-    // this header used to ship could over-certify and kept the runtime path
-    // disabled.
+    // The Cauchy solve is performed from f64-composed jets.  Keep a separate
+    // 5% construction reserve for coefficient/libm rounding; the serialized
+    // model-error bound below still uses the full eps_int budget.
+    const VALUE_CERT_BUILD_SLACK: f64 = 1.05;
+    let cert_eps = eps_int / VALUE_CERT_BUILD_SLACK;
+    // Full Cauchy value certificate over the p composed steps (bisected
+    // majorant + strict (V) solve, x = 0 gated).
     let blk = MobiusBlock { m, log2_q: q };
-    let log2_r = mobius_certify_segment(&blk, &orbit[start..start + period], eps_int, log2_cmax);
+    let log2_r = mobius_certify_segment_value(&blk, orbit_seg, cert_eps, log2_cmax);
     if !log2_r.is_finite() {
-        return None;
+        // A value-certificate failure can still admit the exact scalar
+        // trapping proof.  This is the only other point at which the more
+        // expensive direct construction is attempted.
+        if let Some((direct_start, direct_log2_r)) =
+            periodic_direct_certificate(orbit, start, period, log2_cmax)
+        {
+            return periodic_outcome(
+                Some(PeriodicBlock {
+                    start: direct_start,
+                    p: period,
+                    kind: PeriodicCertificateKind::DirectMajorant,
+                    m,
+                    log2_r: direct_log2_r,
+                    log2_err_over_r: f64::NEG_INFINITY,
+                }),
+                PeriodicBuildStatus::Active,
+                period,
+            );
+        }
+        return periodic_outcome(None, PeriodicBuildStatus::CertificateRejected, period);
     }
-    Some(PeriodicBlock {
+    // (V) certifies |g(z)-m(z)| ≤ ½·ε_int·(|A|·r+|B|·c_max)
+    // throughout |z| ≤ r.  Keep the ratio in log2 form so extreme-deep
+    // c_max values never underflow while crossing the Rust→WGSL boundary.
+    let log2_a = m.a.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let log2_bc_over_r = m.b.log2_mag().unwrap_or(f64::NEG_INFINITY) + log2_cmax - log2_r;
+    let log2_err_over_r = (0.5 * eps_int).log2() + lse2_pair(log2_a, log2_bc_over_r);
+    let block = PeriodicBlock {
         start,
         p: period,
+        kind: PeriodicCertificateKind::MobiusInvariant,
         m,
         log2_r,
-    })
+        log2_err_over_r,
+    };
+    periodic_outcome(Some(block), PeriodicBuildStatus::Active, period)
+}
+
+#[allow(dead_code)]
+pub fn periodic_build(orbit: &[(f64, f64)], eps: f64, log2_cmax: f64) -> Option<PeriodicBlock> {
+    periodic_build_diagnostic(orbit, eps, log2_cmax).block
 }
 
 // ── GPU serialization (task 2.3, designs D2/D3) ─────────────────────────────────
@@ -1259,9 +1531,11 @@ pub fn unified_serialize_coeffs(levels: &[UnifiedLevel]) -> Vec<[JetCoeffFe; UNI
 /// present, a TEN-entry header follows the block sidecar (base = total block
 /// count, computable in the shader from the last directory entry):
 ///   [0..4) SA prefix: entry j = (b_{j+1}.x, .y, exponent, j == 0 ? n0 : 0)
-///   [4..10) periodic block: A(.., start), B(.., p), D(.., r_log2), A'(.., 0),
-///          D'(.., 0), F(.., 0) — p == 0 in entry 5's w disables the runtime
-///          attempt.
+///   [4..10) periodic block: A(.., start), B(.., p), D(.., r_log2),
+///          A'(.., log2(err/r)),
+///          D'(.., 0), F(.., certificate kind) — p == 0 in entry 5's w
+///          disables the runtime attempt; F.w == 1 selects the direct exact
+///          scalar-majorant proof.
 /// Entry [10] is the §18 gate directory (x = gate count; ALWAYS emitted with
 /// the header so the shader never reads it out-of-bounds), followed by the
 /// packed gate records + d[] channels (`gates::gates_serialize_vec4` layout).
@@ -1356,9 +1630,13 @@ fn unified_push_header(
         periodic
             .map(|p| p.log2_r as f32)
             .unwrap_or(f32::NEG_INFINITY),
+        periodic
+            .map(|p| p.log2_err_over_r as f32)
+            .unwrap_or(f32::NEG_INFINITY),
         0.0,
-        0.0,
-        0.0,
+        periodic
+            .map(|p| p.kind.header_code())
+            .unwrap_or(PeriodicCertificateKind::MobiusInvariant.header_code()),
     ];
     for (j, coef) in [pm.a, pm.b, pm.d, pm.ap, pm.dp, pm.f].iter().enumerate() {
         let c = cfe_to_coeff(coef);
@@ -2504,6 +2782,60 @@ mod tests {
     }
 
     #[test]
+    fn periodic_diagnostic_reports_lightweight_dormant_reasons() {
+        assert_eq!(PeriodicBuildStatus::Pending.code(), 0);
+        assert_eq!(PeriodicBuildStatus::Active.code(), 1);
+        assert_eq!(PeriodicBuildStatus::OrbitTooShort.code(), 2);
+        assert_eq!(PeriodicBuildStatus::NoConvergedPeriod.code(), 3);
+        assert_eq!(PeriodicBuildStatus::PeriodTooLarge.code(), 4);
+        assert_eq!(PeriodicBuildStatus::CertificateRejected.code(), 5);
+
+        let short: Vec<(f64, f64)> = (0..255)
+            .map(|i| if i == 0 { (0.0, 0.0) } else { (i as f64, 1.0) })
+            .collect();
+        let out = periodic_build_diagnostic(&short, 1e-3, -20.0);
+        assert_eq!(out.status, PeriodicBuildStatus::OrbitTooShort);
+        assert_eq!(out.detected_period, 0);
+        assert!(out.block.is_none());
+
+        let mut one_cycle: Vec<(f64, f64)> = (0..100).map(|i| (i as f64, i as f64 + 1.0)).collect();
+        one_cycle[0] = (0.0, 0.0);
+        one_cycle[37] = (0.0, 0.0);
+        let out = periodic_build_diagnostic(&one_cycle, 1e-3, -20.0);
+        assert_eq!(out.status, PeriodicBuildStatus::OrbitTooShort);
+        assert_eq!(out.detected_period, 37);
+
+        let p_above_cap = PERIODIC_MAX_P + 88;
+        let mut large_nucleus: Vec<(f64, f64)> = (0..=p_above_cap)
+            .map(|i| (i as f64, i as f64 + 1.0))
+            .collect();
+        large_nucleus[0] = (0.0, 0.0);
+        large_nucleus[p_above_cap] = (0.0, 0.0);
+        let out = periodic_build_diagnostic(&large_nucleus, 1e-3, -20.0);
+        assert_eq!(out.status, PeriodicBuildStatus::PeriodTooLarge);
+        assert_eq!(out.detected_period, p_above_cap);
+
+        let aperiodic: Vec<(f64, f64)> = (0..1024).map(|i| (i as f64, (i * i) as f64)).collect();
+        let out = periodic_build_diagnostic(&aperiodic, 1e-3, -20.0);
+        assert_eq!(out.status, PeriodicBuildStatus::NoConvergedPeriod);
+        assert_eq!(out.detected_period, 0);
+
+        // The tail scan may diagnose a large minibrot period, but must stop
+        // before composing its block so the observability path stays cheap.
+        let p = p_above_cap;
+        let repeated: Vec<(f64, f64)> = (0..(5 * p))
+            .map(|i| {
+                let phase = (i % p) as f64;
+                (phase, phase * 0.25 + 1.0)
+            })
+            .collect();
+        let out = periodic_build_diagnostic(&repeated, 1e-3, -20.0);
+        assert_eq!(out.status, PeriodicBuildStatus::PeriodTooLarge);
+        assert_eq!(out.detected_period, p);
+        assert!(out.block.is_none());
+    }
+
+    #[test]
     fn periodic_interior_model_matches_cycle_multiplier() {
         // CPU model check for the dormant Phase-E path. On the period-2 disk reference
         // C = −1 + 0.1i: detection finds p = 2; the composed block's fixed-
@@ -2587,6 +2919,21 @@ mod tests {
                 (ka.0 * ka.0 + ka.1 * ka.1).sqrt() < 1.0,
                 "disk pixel must be attracting"
             );
+            // Mirror the lightweight GPU disk certificate.  This guards the
+            // Rust→header metadata contract as well as the proved scalar
+            // inequalities used by try_periodic_interior.
+            let norm = |z: (f64, f64)| (z.0 * z.0 + z.1 * z.1).sqrt();
+            let r = per.log2_r.exp2();
+            let mu = norm(one_p_fc) - norm(de) * r;
+            assert!(mu > 0.0, "periodic disk reaches the Möbius pole");
+            let image_over_r = (norm(ae) * r + norm(bc)) / (mu * r);
+            let err_over_r = per.log2_err_over_r.exp2();
+            assert!(
+                image_over_r + err_over_r < 0.98,
+                "runtime invariance margin failed: image/r={:e}, err/r={:e}",
+                image_over_r,
+                err_over_r,
+            );
             // Closed form vs block iteration: k periods, k-independent error.
             let zr = if za == z1 { z2 } else { z1 };
             let delta0 = (za.0 + 1e-7, za.1 - 5e-8);
@@ -2634,13 +2981,118 @@ mod tests {
     }
 
     #[test]
-    fn periodic_certificate_sound_against_exact_walk() {
-        // Referee for the ENABLED periodic path: the full-certificate radius
-        // (mobius_certify_segment) must uphold the (V)/(V′) contract against
-        // the exact p-step walk over the WHOLE certified interval — value
-        // error ≤ ½ε_int·(|A||δ| + |B||c|) and ∂δ error ≤ ½ε_int·(|A| +
-        // |A′|c_max) — at every sampled |δ| ≤ r down to 0 (the x = 0 gate's
-        // promise), not just at the solved crossing.
+    fn periodic_runtime_disk_certificate_accepts_gpu_orbit_precision() {
+        // Production builds the header from the f32 orbit uploaded to WebGPU,
+        // not from the f64 reference used by the analytic test above.
+        let orbit: Vec<(f64, f64)> = ref_orbit_f64(-1.0, 0.1, 4000)
+            .into_iter()
+            .map(|(x, y)| (x as f32 as f64, y as f32 as f64))
+            .collect();
+        let c_max = 1e-5_f64;
+        // Match the frontend's default BLA_LINEARIZATION_EPSILON: the runtime
+        // regression must exercise the certificate actually shipped to WGSL.
+        let per = periodic_build(&orbit, 1e-3, c_max.log2()).expect("no periodic block");
+        assert_eq!(per.p, 2);
+        let (header, levels) = unified_serialize_header_only(None, Some(&per));
+        assert_eq!(levels.len(), 1);
+        assert_eq!(levels[0].offset, 0);
+        assert_eq!(levels[0].count, 0);
+        assert_eq!(header[5].pad, 2.0, "serialized periodic p");
+        assert_eq!(header[9].pad, 0.0, "Möbius invariant certificate kind");
+        assert_eq!(
+            header[7].pad, per.log2_err_over_r as f32,
+            "serialized err/r metadata"
+        );
+        // Read the exact f32 mantissa/exponent representation consumed by
+        // WGSL, rather than retesting the higher-precision builder values.
+        let unpack = |entry: &UnifiedRadius| {
+            let scale = 2.0_f64.powi(entry.f32_safe as i32);
+            (entry.r_log2 as f64 * scale, entry.tag as f64 * scale)
+        };
+        let a = unpack(&header[4]);
+        let b = unpack(&header[5]);
+        let d = unpack(&header[6]);
+        let ap = unpack(&header[7]);
+        let dp = unpack(&header[8]);
+        let f = unpack(&header[9]);
+        let norm = |z: (f64, f64)| (z.0 * z.0 + z.1 * z.1).sqrt();
+        let cm = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
+        let r = (header[6].pad as f64).exp2();
+        let err_over_r = (header[7].pad as f64).exp2();
+        for i in 0..64 {
+            let phase = core::f64::consts::TAU * i as f64 / 64.0;
+            let dc = (
+                (c_max * phase.cos()) as f32 as f64,
+                (c_max * phase.sin()) as f32 as f64,
+            );
+            let ae = (a.0 + cm(ap, dc).0, a.1 + cm(ap, dc).1);
+            let de = (d.0 + cm(dp, dc).0, d.1 + cm(dp, dc).1);
+            let bc = cm(b, dc);
+            let fc = cm(f, dc);
+            let k = (1.0 + fc.0, fc.1);
+            let mu = norm(k) - norm(de) * r;
+            assert!(mu > 0.0, "phase {}: pole margin {}", i, mu);
+            let image_over_r = (norm(ae) * r + norm(bc)) / (mu * r);
+            assert!(
+                image_over_r + err_over_r < 0.98,
+                "phase {}: room {} + {}",
+                i,
+                image_over_r,
+                err_over_r
+            );
+        }
+    }
+
+    #[test]
+    fn periodic_direct_majorant_certifies_superattracting_nucleus() {
+        // At c=-1 the period-two multiplier A is exactly zero.  The Möbius
+        // extraction must be degenerate, but the grouped exact recurrence has
+        // the trapping radius proved in CriticalPeriodic.lean.
+        let orbit = ref_orbit_f64(-1.0, 0.0, 1024);
+        let c_max = 1e-5_f64;
+        let out = periodic_build_diagnostic(&orbit, 1e-3, c_max.log2());
+        assert_eq!(out.status, PeriodicBuildStatus::Active);
+        let per = out.block.expect("direct periodic certificate missing");
+        assert_eq!(per.p, 2);
+        assert_eq!(per.kind, PeriodicCertificateKind::DirectMajorant);
+        assert!(
+            per.m.degenerate,
+            "nucleus must exercise the critical fallback"
+        );
+        assert!(per.log2_r.is_finite());
+        assert_eq!(
+            orbit[per.start],
+            (0.0, 0.0),
+            "the lightweight phase choice should certify at the critical point"
+        );
+        let noncritical_r = periodic_direct_radius(&orbit[1..3], c_max.log2());
+        assert!(
+            per.log2_r > noncritical_r,
+            "critical phase did not improve the certified radius"
+        );
+
+        let image = periodic_direct_image_log2(
+            &orbit[per.start..per.start + per.p],
+            per.log2_r,
+            c_max.log2(),
+        );
+        assert!(
+            image - per.log2_r < 0.98_f64.log2(),
+            "serialized direct radius is not strictly invariant"
+        );
+        let (header, _) = unified_serialize_header_only(None, Some(&per));
+        assert_eq!(header[5].pad, 2.0);
+        assert_eq!(header[9].pad, 1.0, "direct-majorant certificate kind");
+    }
+
+    #[test]
+    fn periodic_value_certificate_sound_against_exact_walk() {
+        // Referee for the enabled Möbius-invariance path: the value-only
+        // radius must uphold (V) against the exact p-step walk over the WHOLE
+        // certified interval — error ≤ ½ε_int·(|A||δ| + |B||c|) at every
+        // sampled |δ| ≤ r down to 0 (the x = 0 gate's promise), not just at
+        // the solved crossing. V′ has its own, generally smaller, radius and
+        // is intentionally not an interior-verdict hypothesis.
         use crate::mobius::mobius_apply;
         let eps = 1e-12_f64; // build ε; the header certifies at ε_int = 1e-4
         let eps_int = 1e-4_f64;
@@ -2654,9 +3106,6 @@ mod tests {
         let la = (la.0 * la.0 + la.1 * la.1).sqrt();
         let lb = per.m.b.to_f64();
         let lb = (lb.0 * lb.0 + lb.1 * lb.1).sqrt();
-        let lap = per.m.ap.to_f64();
-        let lap = (lap.0 * lap.0 + lap.1 * lap.1).sqrt();
-        let cm = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0);
         for &dm in &[1.0_f64, 0.5, 1.0 / 16.0, 1.0 / 256.0, 0.0] {
             for &dphase in &[0.3_f64, 2.1, 4.4] {
                 for &cmm in &[1.0_f64, 0.125, 0.0] {
@@ -2665,23 +3114,21 @@ mod tests {
                         c_max * cmm * (dphase + 1.0).cos(),
                         c_max * cmm * (dphase + 1.0).sin(),
                     );
-                    // Exact p-step walk from phase `start`, value + ∂δ chain.
-                    let (mut z, mut dz) = (delta, (1.0_f64, 0.0_f64));
+                    // Exact p-step value walk from phase `start`.
+                    let mut z = delta;
                     for i in per.start..per.start + per.p {
                         let zr = orbit[i];
-                        dz = cm((2.0 * (zr.0 + z.0), 2.0 * (zr.1 + z.1)), dz);
                         z = (
                             2.0 * (zr.0 * z.0 - zr.1 * z.1) + z.0 * z.0 - z.1 * z.1 + dc.0,
                             2.0 * (zr.0 * z.1 + zr.1 * z.0) + 2.0 * z.0 * z.1 + dc.1,
                         );
                     }
-                    let (phi, ddz, _) = mobius_apply(
+                    let (phi, _, _) = mobius_apply(
                         &per.m,
                         crate::jet::CFe::from_c(delta.0, delta.1),
                         crate::jet::CFe::from_c(dc.0, dc.1),
                     );
                     let phi = phi.to_f64();
-                    let ddz = ddz.to_f64();
                     let dmag = (delta.0 * delta.0 + delta.1 * delta.1).sqrt();
                     let cmag = (dc.0 * dc.0 + dc.1 * dc.1).sqrt();
                     let verr = ((phi.0 - z.0).powi(2) + (phi.1 - z.1).powi(2)).sqrt();
@@ -2693,16 +3140,6 @@ mod tests {
                         cmag,
                         verr,
                         vbudget
-                    );
-                    let derr = ((ddz.0 - dz.0).powi(2) + (ddz.1 - dz.1).powi(2)).sqrt();
-                    let dbudget = 0.5 * eps_int * (la + lap * c_max);
-                    assert!(
-                        derr <= dbudget + 1e-300,
-                        "(V′) violated at |δ|={:e} |c|={:e}: err {:e} > budget {:e}",
-                        dmag,
-                        cmag,
-                        derr,
-                        dbudget
                     );
                 }
             }
