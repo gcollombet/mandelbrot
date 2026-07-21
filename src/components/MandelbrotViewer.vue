@@ -342,10 +342,11 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   animationSpeed: 1.0,
   ambientOcclusionStrength: 0,
   microBumpStrength: 0,
-  subsurfaceStrength: 0.0,
   reliefDepth: 1,
   localShadowStrength: 0,
   varnishStrength: 0,
+  gradeContrast: 1.18,
+  gradeSaturation: 1.12,
   orbitTrapStrength: 0,
   phaseColoringStrength: 0,
   stripeFrequency: 8,
@@ -1433,10 +1434,11 @@ function tickTravelAnimation() {
     mandelbrotParams.value.displacementAmount = target.displacementAmount ?? 0;
     mandelbrotParams.value.ambientOcclusionStrength = target.ambientOcclusionStrength ?? 0;
     mandelbrotParams.value.microBumpStrength = target.microBumpStrength ?? 0;
-    mandelbrotParams.value.subsurfaceStrength = target.subsurfaceStrength ?? 0;
     mandelbrotParams.value.reliefDepth = target.reliefDepth ?? 1;
     mandelbrotParams.value.localShadowStrength = target.localShadowStrength ?? 0;
     mandelbrotParams.value.varnishStrength = target.varnishStrength ?? 0;
+    mandelbrotParams.value.gradeContrast = target.gradeContrast ?? 1.18;
+    mandelbrotParams.value.gradeSaturation = target.gradeSaturation ?? 1.12;
     mandelbrotParams.value.orbitTrapStrength = target.orbitTrapStrength ?? 0;
     mandelbrotParams.value.phaseColoringStrength = target.phaseColoringStrength ?? 0;
     mandelbrotParams.value.heightPaletteShift = target.heightPaletteShift ?? 0;
@@ -1643,11 +1645,12 @@ function startTravelToPreset(preset: PresetRecord) {
       :animationSpeed="mandelbrotParams.animationSpeed"
       :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
       :microBumpStrength="mandelbrotParams.microBumpStrength"
-      :subsurfaceStrength="mandelbrotParams.subsurfaceStrength"
       :reliefDepth="mandelbrotParams.reliefDepth"
       :localShadowStrength="mandelbrotParams.localShadowStrength"
       :lightAngle="mandelbrotParams.lightAngle"
       :varnishStrength="mandelbrotParams.varnishStrength"
+      :gradeContrast="mandelbrotParams.gradeContrast"
+      :gradeSaturation="mandelbrotParams.gradeSaturation"
       :orbitTrapStrength="mandelbrotParams.orbitTrapStrength"
       :phaseColoringStrength="mandelbrotParams.phaseColoringStrength"
       :stripeFrequency="mandelbrotParams.stripeFrequency"

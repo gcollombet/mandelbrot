@@ -34,10 +34,11 @@ const props = withDefaults(defineProps<{
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
   microBumpStrength?: number;
-  subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
+  gradeContrast?: number;
+  gradeSaturation?: number;
   orbitTrapStrength?: number;
   phaseColoringStrength?: number;
   textureMapping?: TextureMappingConfig;
@@ -55,10 +56,11 @@ const props = withDefaults(defineProps<{
   displacementAmount: 0,
   ambientOcclusionStrength: 0,
   microBumpStrength: 0,
-  subsurfaceStrength: 0.0,
   reliefDepth: 1,
   localShadowStrength: 0,
   varnishStrength: 0,
+  gradeContrast: 1.18,
+  gradeSaturation: 1.12,
   orbitTrapStrength: 0,
   phaseColoringStrength: 0,
   textureMapping: undefined,
@@ -106,9 +108,13 @@ const EFFECT_LABEL_FR: Record<EffectFieldName, string> = {
   skybox: 'Réflexion',
   shadingLevel: 'Intensité lumière',
   specularPower: 'Spéculaire',
+  dielectricSpecular: 'Réflexion diélectrique',
   metallic: 'Métallicité',
   roughness: 'Rugosité',
   anisotropy: 'Anisotropie',
+  directionalVolume: 'Volume directionnel',
+  metalReflectance: 'Réflectance métal',
+  metalEnvironmentTint: 'Teinte environnement',
   tessellation: 'Mélange image',
   webcam: 'Mélange webcam',
 };
@@ -128,10 +134,14 @@ const EFFECT_DESC_FR: Record<EffectFieldName, string> = {
   stripeRelief: 'Transforme les rayures en relief local',
   directionCoherenceRelief: 'Transforme la cohérence de direction en relief',
   shadingLevel: 'Intensité de la lumière directe pour ce point',
-  specularPower: 'Force et finesse des reflets spéculaires',
+  specularPower: 'Intensité du reflet spéculaire direct ; zéro le désactive',
+  dielectricSpecular: 'Réflectance neutre à incidence normale (F0) pour pierre, verre, céramique ou plastique ; sans effet coloré métallique',
   metallic: 'À quel point ce point se comporte comme un métal',
-  roughness: 'Adoucit ou durcit les reflets',
+  roughness: 'Contrôle la finesse des reflets : faible = fins et nets, élevée = larges et diffus',
   anisotropy: 'Étire les reflets selon la direction de la surface',
+  directionalVolume: 'Réintroduit progressivement le volume généreux orienté par l’angle de la dérivée, sans remplacer le relief mesuré',
+  metalReflectance: 'Multiplie la réflectance du métal sans modifier directement sa teinte',
+  metalEnvironmentTint: 'Mélange entre la réponse métal historique et perceptuelle (0) et une réponse physique linéaire, colorée et compensée en rugosité (1)',
 };
 
 // Point sections mirroring the mockup (fields keyed by their uiGroup), merged

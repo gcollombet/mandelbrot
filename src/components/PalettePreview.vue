@@ -5,6 +5,7 @@ import type {InterpolationMode} from '../Mandelbrot.ts';
 import {Palette} from '../Palette.ts';
 import colorShader from '../assets/color.wgsl?raw';
 import {getDefaultSkyboxTextureUrl, getDefaultTileTextureUrl} from '../textureLibrary';
+import {generateMipmaps, mipLevelCountFor} from '../mipmaps';
 import {
   normalizeTextureMappingFromLegacy,
   type TextureMappingConfig,
@@ -41,7 +42,7 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 
 const LAYER_COUNT = 8;
 const PREVIEW_MU = 1000000;
-const COLOR_UNIFORM_FLOAT_COUNT = 64;
+const COLOR_UNIFORM_FLOAT_COUNT = 68;
 const ORBIT_DIRECTION_SCALE = 4095;
 const ORBIT_DIRECTION_BASE = 4096;
 /** Number of synthetic iterations to display. */
@@ -66,10 +67,11 @@ const props = defineProps<{
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
   microBumpStrength?: number;
-  subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
+  gradeContrast?: number;
+  gradeSaturation?: number;
   orbitTrapStrength?: number;
   phaseColoringStrength?: number;
   textureMapping?: TextureMappingConfig;
@@ -118,8 +120,8 @@ let aaTargetTextureGpu: GPUTexture | null = null;
 let currentW = 0;
 let currentH = 0;
 
-/** Load an image URL into a GPUTexture (rgba8unorm). */
-async function loadTexture(dev: GPUDevice, url: string): Promise<GPUTexture> {
+/** Load an image URL into a GPUTexture (rgba8unorm). withMips: prefiltered levels for rough reflections. */
+async function loadTexture(dev: GPUDevice, url: string, withMips = false): Promise<GPUTexture> {
   const img = new Image();
   img.src = url;
   await img.decode();
@@ -127,10 +129,12 @@ async function loadTexture(dev: GPUDevice, url: string): Promise<GPUTexture> {
   const tex = dev.createTexture({
     size: [bitmap.width, bitmap.height, 1],
     format: 'rgba8unorm',
+    mipLevelCount: withMips ? mipLevelCountFor(bitmap.width, bitmap.height) : 1,
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
     label: 'PalettePreview LoadedTexture',
   });
   dev.queue.copyExternalImageToTexture({ source: bitmap }, { texture: tex }, [bitmap.width, bitmap.height]);
+  if (withMips) generateMipmaps(dev, tex);
   return tex;
 }
 
@@ -315,7 +319,7 @@ async function init() {
   const skyboxUrl = props.skyboxTextureUrl || getDefaultSkyboxTextureUrl();
   const [tileTexGpu, skyboxTexGpu] = await Promise.all([
     tileUrl ? loadTexture(device, tileUrl) : Promise.resolve(create1x1Texture(device, 255, 255, 255, 255)),
-    skyboxUrl ? loadTexture(device, skyboxUrl) : Promise.resolve(create1x1Texture(device, 255, 255, 255, 255)),
+    skyboxUrl ? loadTexture(device, skyboxUrl, true) : Promise.resolve(create1x1Texture(device, 255, 255, 255, 255)),
   ]);
   tileTextureGpu = tileTexGpu;
   skyboxTextureGpu = skyboxTexGpu;
@@ -326,7 +330,7 @@ async function init() {
   // ── AA-target placeholder (1×1 r32float = 0 → AA accumulation gate disabled) ──
   aaTargetTextureGpu = create1x1R32F(device, 0);
 
-  // ── Palette texture (4096 x 6 rgba16float) ──
+  // ── Palette texture (4096 x 7 rgba16float) ──
   const initialPalette = new Palette(props.colorStops, props.interpolationMode ?? 'lab').generateTexture();
   paletteTexture = device.createTexture({
     size: [initialPalette.width, initialPalette.height, 1],
@@ -339,13 +343,14 @@ async function init() {
     magFilter: 'linear',
     minFilter: 'linear',
     addressModeU: 'repeat',
-    addressModeV: 'clamp-to-edge',
+    addressModeV: 'repeat',
   });
   skyboxSampler = device.createSampler({
     magFilter: 'linear',
     minFilter: 'linear',
+    mipmapFilter: 'linear',
     addressModeU: 'repeat',
-    addressModeV: 'repeat',
+    addressModeV: 'clamp-to-edge',
   });
   uploadPalette();
 
@@ -380,7 +385,7 @@ async function init() {
     1e-10,        // epsilon (interior detection, not relevant for preview)
     props.ambientOcclusionStrength ?? 0, // ambientOcclusionStrength
     props.microBumpStrength ?? 0, // microBumpStrength
-    props.subsurfaceStrength ?? 0.0, // subsurfaceStrength
+    0, // reserved (was subsurfaceStrength)
     props.reliefDepth ?? 0, // reliefDepth
     props.localShadowStrength ?? 0, // localShadowStrength
     previewLightAngle, // lightAngle
@@ -404,7 +409,7 @@ async function init() {
     -0.7, // centerX
     0, // centerY
     1.2, // scale
-    0, // _pad
+    props.gradeContrast ?? 1.18, // gradeContrast
     0, // textureDriftX
     0, // textureDriftY
     0, // skyDriftX
@@ -425,6 +430,10 @@ async function init() {
     0, // aaJitterHatY
     0, // aaJitterLogMag
     0, // aaAnalytic
+    props.gradeSaturation ?? 1.12, // gradeSaturation
+    0, // _pad2
+    0, // _pad3
+    0, // _pad4
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -537,7 +546,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.subsurfaceStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = PREVIEW_LIGHT_ANGLE;
@@ -550,7 +559,7 @@ watch(
       1e-10,
       props.ambientOcclusionStrength ?? 0,
       props.microBumpStrength ?? 0,
-      props.subsurfaceStrength ?? 0.0,
+      0, // reserved (was subsurfaceStrength)
       props.reliefDepth ?? 1,
       props.localShadowStrength ?? 0,
       previewLightAngle,
@@ -574,9 +583,10 @@ watch(
       -0.7,
       0,
       1.2,
-      0,
+      props.gradeContrast ?? 1.18,
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
+    device.queue.writeBuffer(uniformBuffer, 64 * 4, new Float32Array([props.gradeSaturation ?? 1.12]).buffer as ArrayBuffer);
     render();
   },
 );
@@ -610,7 +620,7 @@ watch(
     try {
       const oldSkybox = skyboxTextureGpu;
       skyboxTextureGpu = resolvedUrl
-        ? await loadTexture(device, resolvedUrl)
+        ? await loadTexture(device, resolvedUrl, true)
         : create1x1Texture(device, 255, 255, 255, 255);
       oldSkybox?.destroy();
       rebuildBindGroup();

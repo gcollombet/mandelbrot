@@ -62,10 +62,11 @@ export interface PaletteRecord extends ScopedCacheFields {
   displacementAmount?: number;
   ambientOcclusionStrength?: number;
   microBumpStrength?: number;
-  subsurfaceStrength?: number;
   reliefDepth?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
+  gradeContrast?: number;
+  gradeSaturation?: number;
   orbitTrapStrength?: number;
   phaseColoringStrength?: number;
   stripeFrequency?: number;

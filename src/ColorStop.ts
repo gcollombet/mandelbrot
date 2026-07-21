@@ -85,14 +85,22 @@ export type ColorStop = {
 
   /** Shading diffuse/ambient level, range [0, 3] (default 0) */
   shadingLevel?: number;
-  /** Specular intensity, range [1, 64] (default 0) */
+  /** Direct specular intensity, range [0, 64] (default 0); roughness controls highlight width */
   specularPower?: number;
+  /** Neutral dielectric reflectance at normal incidence (F0), range [0, 1] (default 0.04) */
+  dielectricSpecular?: number;
   /** Metallic response, range [0, 1] (default 0) */
   metallic?: number;
   /** Per-stop roughness, range [0.02, 1] (default 0) */
   roughness?: number;
   /** Anisotropic highlight strength, range [0, 1] (default 0) */
   anisotropy?: number;
+  /** Artistic macro-volume driven by the derivative direction, range [0, 1] (legacy default 1) */
+  directionalVolume?: number;
+  /** Conductor F0 gain independent of its tint, range [0, 2] (default 1) */
+  metalReflectance?: number;
+  /** Blend from legacy perceptual metal response to physical conductor response, range [0, 1] (legacy default 0) */
+  metalEnvironmentTint?: number;
   /** Iridescence intensity, range [0, 1] (default 0) */
   iridescencePower?: number;
 };

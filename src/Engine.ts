@@ -11,6 +11,7 @@ import aaTargetShader from './assets/aa_target.wgsl?raw'
 import aaReseedShader from './assets/aa_reseed.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
+import {generateMipmaps, mipLevelCountFor} from './mipmaps'
 import {Palette} from './Palette.ts'
 import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString} from './floatexp'
 import type {ZoomState} from './zoomState'
@@ -89,7 +90,7 @@ const MOBIUS_COEFF_FLOATS = 21
 // beyond this cap. 10M steps = an 80 MB storage buffer, within the WebGPU
 // default maxStorageBufferBindingSize (128 MiB) — no requiredLimits needed.
 const ORBIT_STEP_CAPACITY = 10_000_000
-const COLOR_UNIFORM_FLOAT_COUNT = 64
+const COLOR_UNIFORM_FLOAT_COUNT = 68
 const TAU = Math.PI * 2
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
@@ -442,11 +443,12 @@ export type RenderOptions = {
     animationSpeed: number,
     ambientOcclusionStrength: number,
     microBumpStrength: number,
-    subsurfaceStrength: number,
     reliefDepth: number,
     localShadowStrength: number,
     lightAngle: number,
     varnishStrength: number,
+    gradeContrast?: number,
+    gradeSaturation?: number,
     orbitTrapStrength: number,
     phaseColoringStrength: number,
     stripeFrequency: number,
@@ -773,6 +775,7 @@ export class Engine {
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private gateEmission = true
+    private dynamicBlockValidity = false
     private maxBlaSkip = 65536
     // Fixed precision budget as a target scale (max zoom depth navigation stays precise at).
     // Default 1e-30 keeps shallow use fast; the Settings slider can deepen it to 1e-1000.
@@ -1533,13 +1536,14 @@ export class Engine {
             magFilter: 'linear',
             minFilter: 'linear',
             addressModeU: 'repeat',
-            addressModeV: 'clamp-to-edge',
+            addressModeV: 'repeat',
         })
         this.skyboxSampler = this.device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
+            mipmapFilter: 'linear',
             addressModeU: 'repeat',
-            addressModeV: 'repeat',
+            addressModeV: 'clamp-to-edge',
         })
 
         // Webcam : initialisation (optionnel, activer webcamEnabled pour l'utiliser)
@@ -1999,6 +2003,7 @@ export class Engine {
                         : spanMs
                 }
                 if (iterationPassMs !== undefined) {
+                    this.lastIterationPassMs = iterationPassMs
                     this.applyIterationPassTiming(
                         iterationPassMs,
                         sampledBatchSize,
@@ -2241,7 +2246,7 @@ export class Engine {
         }
         if (!this.finalStatsBuffer) {
             this.finalStatsBuffer = this.device.createBuffer({
-                size: 68,
+                size: COUNTER_READBACK_BYTES,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: 'Engine Final Stats Readback',
             })
@@ -2875,6 +2880,7 @@ export class Engine {
         })
         if (this.approximationMode === 'auto') {
             this.currentBlaLevelCount = 0
+            this.clearDynamicValidityGpuState()
             this.requestTableClear(true)
             this.needRender = true
         }
@@ -3319,7 +3325,7 @@ export class Engine {
             mandelbrot.epsilon,             // 16: epsilon
             renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
             effectiveMicroBumpStrength,     // 18: microBumpStrength
-            renderOptions.subsurfaceStrength, // 19: subsurfaceStrength
+            0,                                // 19: reserved (was subsurfaceStrength)
             renderOptions.reliefDepth,       // 20: reliefDepth
             renderOptions.localShadowStrength, // 21: localShadowStrength
             effectiveLightAngle,              // 22: lightAngle
@@ -3343,7 +3349,7 @@ export class Engine {
             parseFloat(mandelbrot.cx),            // 40: centerX
             parseFloat(mandelbrot.cy),            // 41: centerY
             mandelbrot.scale,                     // 42: scale
-            0.0,                                  // 43: _pad
+            renderOptions.gradeContrast ?? 1.18,  // 43: gradeContrast (display grade)
             0.03 * textureDriftAnimX,             // 44: textureDriftX
             0.03 * textureDriftAnimY,             // 45: textureDriftY
             0.02 * skyReflectionDriftAnimX,       // 46: skyDriftX
@@ -3364,6 +3370,8 @@ export class Engine {
             aaJitterMag > 0 ? this.aaOffsetY / aaJitterMag : 0, // 61: aaJitterHatY
             Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
             0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
+            renderOptions.gradeSaturation ?? 1.12, // 64: gradeSaturation (display grade)
+            0, 0, 0,                              // 65-67: padding
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -4611,7 +4619,8 @@ export class Engine {
      */
     async updateSkyboxTexture(url: string, sourceKey = url): Promise<void> {
         if (this.skyboxTextureSourceKey === sourceKey) return
-        const newTexture = await this._loadTexture(url)
+        // Mips : les reflets rugueux lisent un niveau préfiltré (color.wgsl).
+        const newTexture = await this._loadTexture(url, true)
         this.skyboxTexture?.destroy?.()
         this.skyboxTexture = newTexture
         this.skyboxTextureView = this.skyboxTexture.createView()
@@ -4657,7 +4666,7 @@ export class Engine {
     }
 
     // Méthode utilitaire pour charger une image et la convertir en GPUTexture
-    private async _loadTexture(url: string): Promise<GPUTexture> {
+    private async _loadTexture(url: string, withMips = false): Promise<GPUTexture> {
         const img = new Image()
         img.src = url
         try {
@@ -4670,6 +4679,7 @@ export class Engine {
         const texture = this.device.createTexture({
             size: [bitmap.width, bitmap.height, 1],
             format: 'rgba8unorm',
+            mipLevelCount: withMips ? mipLevelCountFor(bitmap.width, bitmap.height) : 1,
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
             label: 'Engine LoadedTexture ' + url,
         })
@@ -4678,6 +4688,7 @@ export class Engine {
             { texture: texture },
             [bitmap.width, bitmap.height]
         )
+        if (withMips) generateMipmaps(this.device, texture)
         return texture
     }
 

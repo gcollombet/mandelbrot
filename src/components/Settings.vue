@@ -220,10 +220,11 @@ const model =  defineModel<MandelbrotParams>({
       animationSpeed: 1.0,
      ambientOcclusionStrength: 0,
      microBumpStrength: 0,
-       subsurfaceStrength: 0.0,
      reliefDepth: 1,
      localShadowStrength: 0,
      varnishStrength: 0,
+     gradeContrast: 1.18,
+     gradeSaturation: 1.12,
      orbitTrapStrength: 0,
      phaseColoringStrength: 0,
      stripeFrequency: 8,
@@ -1030,10 +1031,11 @@ async function savePalette() {
     displacementAmount: model.value.displacementAmount,
     ambientOcclusionStrength: model.value.ambientOcclusionStrength,
     microBumpStrength: model.value.microBumpStrength,
-    subsurfaceStrength: model.value.subsurfaceStrength,
     reliefDepth: model.value.reliefDepth,
     localShadowStrength: model.value.localShadowStrength,
     varnishStrength: model.value.varnishStrength,
+    gradeContrast: model.value.gradeContrast,
+    gradeSaturation: model.value.gradeSaturation,
     orbitTrapStrength: model.value.orbitTrapStrength,
     phaseColoringStrength: model.value.phaseColoringStrength,
     stripeFrequency: model.value.stripeFrequency,
@@ -1049,10 +1051,11 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.displacementAmount = source.displacementAmount ?? 0;
   model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
   model.value.microBumpStrength = source.microBumpStrength ?? 0;
-  model.value.subsurfaceStrength = source.subsurfaceStrength ?? 0;
   model.value.reliefDepth = source.reliefDepth ?? 1;
   model.value.localShadowStrength = source.localShadowStrength ?? 0;
   model.value.varnishStrength = source.varnishStrength ?? 0;
+  model.value.gradeContrast = source.gradeContrast ?? 1.18;
+  model.value.gradeSaturation = source.gradeSaturation ?? 1.12;
   model.value.orbitTrapStrength = source.orbitTrapStrength ?? 0;
   model.value.phaseColoringStrength = source.phaseColoringStrength ?? 0;
   model.value.stripeFrequency = source.stripeFrequency ?? 8;
@@ -2604,10 +2607,11 @@ async function importSkyboxTexture(event: Event) {
           :displacementAmount="model.displacementAmount"
           :ambientOcclusionStrength="model.ambientOcclusionStrength"
           :microBumpStrength="model.microBumpStrength"
-          :subsurfaceStrength="model.subsurfaceStrength"
           :reliefDepth="model.reliefDepth"
           :localShadowStrength="model.localShadowStrength"
           :varnishStrength="model.varnishStrength"
+          :gradeContrast="model.gradeContrast"
+          :gradeSaturation="model.gradeSaturation"
           :orbitTrapStrength="model.orbitTrapStrength"
           :phaseColoringStrength="model.phaseColoringStrength"
           :textureMapping="model.textureMapping"
@@ -2667,10 +2671,11 @@ async function importSkyboxTexture(event: Event) {
         :displacement-amount="model.displacementAmount"
         :ambient-occlusion-strength="model.ambientOcclusionStrength"
         :micro-bump-strength="model.microBumpStrength"
-        :subsurface-strength="model.subsurfaceStrength"
         :relief-depth="model.reliefDepth"
         :local-shadow-strength="model.localShadowStrength"
         :varnish-strength="model.varnishStrength"
+        :grade-contrast="model.gradeContrast"
+        :grade-saturation="model.gradeSaturation"
         :orbit-trap-strength="model.orbitTrapStrength"
         :phase-coloring-strength="model.phaseColoringStrength"
         :texture-mapping="model.textureMapping"
@@ -2697,8 +2702,10 @@ async function importSkyboxTexture(event: Event) {
             :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
           <DenseField label="Vernis" :min="0" :max="10" :step="0.01" f="p2"
             :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
-          <DenseField label="Sous-surface" :min="0" :max="10" :step="0.05" f="p2"
-            :model-value="model.subsurfaceStrength ?? 0" @update:model-value="(v: number) => model.subsurfaceStrength = v" />
+          <DenseField label="Contraste" :min="0.5" :max="2" :step="0.01" f="p2"
+            :model-value="model.gradeContrast ?? 1.18" @update:model-value="(v: number) => model.gradeContrast = v" />
+          <DenseField label="Saturation" :min="0" :max="2" :step="0.01" f="p2"
+            :model-value="model.gradeSaturation ?? 1.12" @update:model-value="(v: number) => model.gradeSaturation = v" />
         </div>
       </DenseSection>
 

@@ -44,11 +44,12 @@ const props = defineProps<{
   animationSpeed?: number,
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
-  subsurfaceStrength?: number,
   reliefDepth?: number,
   localShadowStrength?: number,
   lightAngle?: number,
   varnishStrength?: number,
+  gradeContrast?: number,
+  gradeSaturation?: number,
   orbitTrapStrength?: number,
   phaseColoringStrength?: number,
   stripeFrequency?: number,
@@ -439,11 +440,12 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :animationSpeed="props.animationSpeed"
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :microBumpStrength="props.microBumpStrength"
-      :subsurfaceStrength="props.subsurfaceStrength"
       :reliefDepth="props.reliefDepth"
       :localShadowStrength="props.localShadowStrength"
       :lightAngle="props.lightAngle"
       :varnishStrength="props.varnishStrength"
+      :gradeContrast="props.gradeContrast"
+      :gradeSaturation="props.gradeSaturation"
       :orbitTrapStrength="props.orbitTrapStrength"
       :phaseColoringStrength="props.phaseColoringStrength"
       :stripeFrequency="props.stripeFrequency"

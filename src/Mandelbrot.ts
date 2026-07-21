@@ -48,10 +48,11 @@ export interface MandelbrotParams {
     animationSpeed?: number;
     ambientOcclusionStrength?: number;
     microBumpStrength?: number;
-    subsurfaceStrength?: number;
     reliefDepth?: number;
     localShadowStrength?: number;
     varnishStrength?: number;
+    gradeContrast?: number;
+    gradeSaturation?: number;
     orbitTrapStrength?: number;
     phaseColoringStrength?: number;
     textureName?: string;
