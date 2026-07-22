@@ -6,6 +6,8 @@
   "scripts": {
     "dev": "vite",
     "build": "cd reference_calculus && wasm-pack build && cd .. && vue-tsc -b && vite build && vitepress build presentation && git add docs",
+    "benchmark:navigation": "MANDELBROT_RUN_NAVIGATION_BENCHMARK=1 playwright test tests/benchmarks/legacy-auto-navigation.spec.ts",
+    "benchmark:dynamic-validity": "MANDELBROT_RUN_DYNAMIC_VALIDITY_BENCHMARK=1 playwright test tests/benchmarks/dynamic-validity-matrix.spec.ts",
     "test:unit": "vitest run tests/unit",
     "preview": "vite preview",
     "docs:dev": "vitepress dev presentation",

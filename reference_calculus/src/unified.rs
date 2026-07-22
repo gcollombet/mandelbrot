@@ -45,9 +45,21 @@ use crate::jet::{
 // extraction (`mobius_from_jet`) remains the PERIODIC header's form (its
 // runtime fixed points stay a quadratic).
 use crate::mobius::{
-    mobius_build_bounds_pair, mobius_build_derivative_radii, mobius_build_radii,
+    mobius_apply, mobius_build_bounds_pair, mobius_build_derivative_radii, mobius_build_radii,
     mobius_certify_segment_value, mobius_from_jet, mobius_from_jet_k2, mobius_q, MobiusBlock,
     MobiusBoundsTable, MobiusCPlus, MobiusLevel, MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP,
+    MOBIUS_NCAND,
+};
+use crate::validity::{
+    derive_derivative_radius_lines, derive_pure_c_threshold, derive_rational_pole_lines,
+    derive_value_radius_lines, intersect_value_derivative_lines, prune_low_degree_lines,
+    select_cauchy_candidates, serialize_validity_diagnostics_packed_v1,
+    serialize_validity_envelope_packed_v1, CauchyCandidateEnvelope, CauchySource,
+    CauchyTierContext, DerivativeLineDerivation, Log2Limit, LowDegreeLineDerivation,
+    PackedValidityDiagnosticsV1, PackedValidityEnvelopeV1, PoleLineDerivation, PureCDerivation,
+    PureCThreshold, RationalDerivativeFactors, StaticDcCeiling, TierValidityEnvelope,
+    ValidityEnvelope, ValidityTier, ValueLineDerivation, MAX_CAUCHY_CANDIDATES,
+    SERIALIZED_VALIDITY_LINE_COUNT, SERIALIZED_VALIDITY_SLOPES,
 };
 
 /// One unified block: the [2/1] c+ extraction (tiers 0–2, N₂/F included) plus
@@ -117,7 +129,7 @@ impl UnifiedBlock {
 /// radii stage must never need the jet back — design D9): the 27 coefficient
 /// moduli for the jet-tier (V) machinery, and the compensated-remainder moduli
 /// of BOTH rational extractions for the (V)+closed-form radii.
-#[derive(Clone)]
+#[derive(Clone, Debug)]
 pub struct UnifiedModuli {
     /// log2 |a_ij| in monomial order (jet tier bounds).
     pub log2_a: [f64; JET_NCOEFF],
@@ -127,6 +139,7 @@ pub struct UnifiedModuli {
     pub log2_q_plain: [f64; JET_NCOEFF],
 }
 
+#[derive(Clone, Debug)]
 pub struct UnifiedLevel {
     pub skip: usize,
     pub blocks: Vec<UnifiedBlock>,
@@ -243,6 +256,484 @@ pub fn build_unified_levels(orbit: &[(f64, f64)], max_skip: usize) -> Vec<Unifie
         prev = cur;
     }
     out
+}
+
+/// A contiguous append completed by `IncrementalUnifiedBuilder`. `level_index`
+/// follows the full binary scaffold (0 = skip 1), even though skip 1/2 remain
+/// build-only and therefore never appear in a returned range.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct IncrementalUnifiedRange {
+    pub level_index: usize,
+    pub skip: usize,
+    pub slot_start: usize,
+    pub slot_count: usize,
+    pub covered_orbit_len: usize,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct IncrementalUnifiedBatch {
+    pub ranges: Vec<IncrementalUnifiedRange>,
+    pub covered_orbit_len: usize,
+    pub new_seeds: usize,
+    pub new_merges: usize,
+}
+
+/// Persistent state for one emitted dyadic level. Coefficients and proof
+/// moduli are compiled exactly once when a block completes. Packed validity is
+/// appended later, also exactly once, as soon as the matching bound row exists.
+#[derive(Clone, Debug)]
+pub struct IncrementalUnifiedLevel {
+    pub skip: usize,
+    pub blocks: Vec<UnifiedBlock>,
+    pub moduli: Vec<UnifiedModuli>,
+    pub coeffs: Vec<[JetCoeffFe; UNIFIED_GPU_COEFFS]>,
+    pub validity: Vec<PackedValidityEnvelopeV1>,
+    pub validity_diagnostics: Vec<PackedValidityDiagnosticsV1>,
+}
+
+impl IncrementalUnifiedLevel {
+    fn new(skip: usize) -> Self {
+        Self {
+            skip,
+            blocks: Vec::new(),
+            moduli: Vec::new(),
+            coeffs: Vec::new(),
+            validity: Vec::new(),
+            validity_diagnostics: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug)]
+struct PendingUnifiedBlock {
+    start: usize,
+    jet: JetF64,
+}
+
+/// Append-only binary-carry builder. At most one raw build jet is pending at
+/// each level. Two adjacent pending blocks compose once into their parent;
+/// completed emitted blocks are never revisited or recomposed.
+pub struct IncrementalUnifiedBuilder {
+    max_skip: usize,
+    next_orbit_index: usize,
+    pending: Vec<Option<PendingUnifiedBlock>>,
+    levels: Vec<IncrementalUnifiedLevel>,
+    validity_key: Option<(u64, u64)>,
+    cumulative_merges: usize,
+    cumulative_coefficients: usize,
+    cumulative_envelopes: usize,
+    peak_retained_bytes: usize,
+}
+
+impl IncrementalUnifiedBuilder {
+    pub fn new(max_skip: usize) -> Self {
+        let requested = max_skip.max(1);
+        let max_skip = if requested.is_power_of_two() {
+            requested
+        } else {
+            requested.next_power_of_two() / 2
+        };
+        let level_count = max_skip.trailing_zeros() as usize + 1;
+        let levels = (0..level_count)
+            .map(|level| IncrementalUnifiedLevel::new(1usize << level))
+            .collect();
+        Self {
+            max_skip,
+            next_orbit_index: 1,
+            pending: vec![None; level_count],
+            levels,
+            validity_key: None,
+            cumulative_merges: 0,
+            cumulative_coefficients: 0,
+            cumulative_envelopes: 0,
+            peak_retained_bytes: 0,
+        }
+    }
+
+    pub fn reset(&mut self) {
+        *self = Self::new(self.max_skip);
+    }
+
+    pub fn max_skip(&self) -> usize {
+        self.max_skip
+    }
+
+    pub fn covered_orbit_len(&self) -> usize {
+        self.next_orbit_index
+    }
+
+    /// Reserve the final aligned slot count for the currently available
+    /// prefix. Without this, every reference chunk can reallocate five large
+    /// per-level vectors while the binary carry is running.
+    pub fn reserve_for_orbit_len(&mut self, orbit_len: usize) {
+        let available_steps = orbit_len.saturating_sub(1);
+        for level in &mut self.levels {
+            if level.skip < MOBIUS_MIN_EMIT_SKIP {
+                continue;
+            }
+            let target = available_steps / level.skip;
+            level
+                .blocks
+                .reserve(target.saturating_sub(level.blocks.len()));
+            level
+                .moduli
+                .reserve(target.saturating_sub(level.moduli.len()));
+            level
+                .coeffs
+                .reserve(target.saturating_sub(level.coeffs.len()));
+            level
+                .validity
+                .reserve(target.saturating_sub(level.validity.len()));
+            level
+                .validity_diagnostics
+                .reserve(target.saturating_sub(level.validity_diagnostics.len()));
+        }
+        self.update_peak_retained_bytes();
+    }
+
+    pub fn levels(&self) -> &[IncrementalUnifiedLevel] {
+        &self.levels
+    }
+
+    pub fn cumulative_merges(&self) -> usize {
+        self.cumulative_merges
+    }
+
+    pub fn cumulative_coefficients(&self) -> usize {
+        self.cumulative_coefficients
+    }
+
+    pub fn cumulative_envelopes(&self) -> usize {
+        self.cumulative_envelopes
+    }
+
+    pub fn peak_retained_bytes(&self) -> usize {
+        self.peak_retained_bytes
+    }
+
+    pub fn snapshot_levels(&self) -> Vec<UnifiedLevel> {
+        self.levels
+            .iter()
+            .map(|level| UnifiedLevel {
+                skip: level.skip,
+                blocks: level.blocks.clone(),
+                moduli: level.moduli.clone(),
+            })
+            .collect()
+    }
+
+    /// Consume reference-orbit values beginning at the exact next index. The
+    /// initial Z0 is not passed; the first slice begins at orbit index 1.
+    pub fn append_orbit_slice(
+        &mut self,
+        orbit_start_index: usize,
+        orbit_slice: &[(f64, f64)],
+    ) -> Result<IncrementalUnifiedBatch, String> {
+        self.append_orbit_iter(orbit_start_index, orbit_slice.iter().copied())
+    }
+
+    /// Iterator variant used by the WASM navigator. It lets the builder read
+    /// the freshly appended `MandelbrotStep` records in place instead of first
+    /// materializing another `(f64, f64)` copy of the orbit prefix.
+    pub fn append_orbit_iter<I>(
+        &mut self,
+        orbit_start_index: usize,
+        orbit: I,
+    ) -> Result<IncrementalUnifiedBatch, String>
+    where
+        I: IntoIterator<Item = (f64, f64)>,
+    {
+        if orbit_start_index != self.next_orbit_index {
+            return Err(format!(
+                "non-contiguous unified append: expected orbit index {}, got {}",
+                self.next_orbit_index, orbit_start_index
+            ));
+        }
+        let starts: Vec<usize> = self.levels.iter().map(|level| level.blocks.len()).collect();
+        let merges_before = self.cumulative_merges;
+        let mut new_seeds = 0usize;
+        for (zx, zy) in orbit {
+            let start = self.next_orbit_index;
+            self.next_orbit_index += 1;
+            new_seeds += 1;
+            self.push_completed_jet(
+                0,
+                PendingUnifiedBlock {
+                    start,
+                    jet: jet_seed(zx, zy),
+                },
+            );
+        }
+        self.update_peak_retained_bytes();
+        let covered_orbit_len = self.covered_orbit_len();
+        let ranges = self
+            .levels
+            .iter()
+            .enumerate()
+            .filter_map(|(level_index, level)| {
+                let slot_start = starts[level_index];
+                let slot_count = level.blocks.len().saturating_sub(slot_start);
+                (slot_count > 0).then_some(IncrementalUnifiedRange {
+                    level_index,
+                    skip: level.skip,
+                    slot_start,
+                    slot_count,
+                    covered_orbit_len,
+                })
+            })
+            .collect();
+        Ok(IncrementalUnifiedBatch {
+            ranges,
+            covered_orbit_len,
+            new_seeds,
+            new_merges: self.cumulative_merges - merges_before,
+        })
+    }
+
+    fn push_completed_jet(&mut self, level_index: usize, current: PendingUnifiedBlock) {
+        if level_index >= self.levels.len() {
+            return;
+        }
+        let skip = 1usize << level_index;
+        debug_assert_eq!((current.start - 1) % skip, 0);
+        if skip >= MOBIUS_MIN_EMIT_SKIP {
+            let block = UnifiedBlock::from_jet(&current.jet);
+            let moduli = moduli_from_jet(&current.jet, &block.m);
+            let coeffs = unified_serialize_block_coeffs(&block);
+            let level = &mut self.levels[level_index];
+            debug_assert_eq!(level.blocks.len(), (current.start - 1) / skip);
+            level.blocks.push(block);
+            level.moduli.push(moduli);
+            level.coeffs.push(coeffs);
+            self.cumulative_coefficients += 1;
+        }
+        if skip >= self.max_skip {
+            return;
+        }
+        if let Some(left) = self.pending[level_index].take() {
+            debug_assert_eq!(left.start + skip, current.start);
+            self.cumulative_merges += 1;
+            self.push_completed_jet(
+                level_index + 1,
+                PendingUnifiedBlock {
+                    start: left.start,
+                    jet: crate::jet::jet_compose(&left.jet, &current.jet),
+                },
+            );
+        } else {
+            self.pending[level_index] = Some(current);
+        }
+    }
+
+    /// Compile only the not-yet-published validity suffix for each level.
+    /// Bounds may arrive progressively; a short bounds row simply postpones
+    /// the remaining slots. Changing epsilon/domain starts a new table epoch
+    /// and is rejected once any envelope has been published.
+    pub fn compile_available_validity(
+        &mut self,
+        bounds: &UnifiedBounds,
+        epsilon: f64,
+        reference_log2_dc: f64,
+    ) -> Result<Vec<IncrementalUnifiedRange>, String> {
+        let key = (epsilon.to_bits(), reference_log2_dc.to_bits());
+        if let Some(previous) = self.validity_key {
+            if previous != key && self.cumulative_envelopes > 0 {
+                return Err("incremental validity key changed after publication".to_string());
+            }
+        }
+        self.validity_key = Some(key);
+        let covered_orbit_len = self.covered_orbit_len();
+        let mut ranges = Vec::new();
+        for level_index in 0..self.levels.len() {
+            if self.levels[level_index].skip < MOBIUS_MIN_EMIT_SKIP {
+                continue;
+            }
+            let start = self.levels[level_index].validity.len();
+            let available = self.levels[level_index]
+                .blocks
+                .len()
+                .min(bounds.jet.get(level_index).map_or(0, Vec::len))
+                .min(bounds.cplus.per_level.get(level_index).map_or(0, Vec::len))
+                .min(bounds.plain.per_level.get(level_index).map_or(0, Vec::len));
+            for slot in start..available {
+                let envelope = unified_validity_envelope_for_block(
+                    &self.levels[level_index].blocks[slot],
+                    &self.levels[level_index].moduli[slot],
+                    bounds,
+                    level_index,
+                    slot,
+                    epsilon,
+                    reference_log2_dc,
+                );
+                self.levels[level_index]
+                    .validity
+                    .push(serialize_validity_envelope_packed_v1(&envelope));
+                self.levels[level_index]
+                    .validity_diagnostics
+                    .push(serialize_validity_diagnostics_packed_v1(&envelope));
+            }
+            let slot_count = available.saturating_sub(start);
+            if slot_count > 0 {
+                self.cumulative_envelopes += slot_count;
+                ranges.push(IncrementalUnifiedRange {
+                    level_index,
+                    skip: self.levels[level_index].skip,
+                    slot_start: start,
+                    slot_count,
+                    covered_orbit_len,
+                });
+            }
+        }
+        self.update_peak_retained_bytes();
+        Ok(ranges)
+    }
+
+    /// Certify at most `block_quota` completed-but-unpublished blocks. The
+    /// work is append-only: coefficients/moduli were frozen by the binary
+    /// carry, and each envelope is compiled exactly once. Lower skips are
+    /// drained first so the published base level grows as a contiguous orbit
+    /// prefix even when a costly coarse block is still pending.
+    pub fn compile_pending_validity(
+        &mut self,
+        orbit: &[(f64, f64)],
+        epsilon: f64,
+        reference_log2_dc: f64,
+        block_quota: usize,
+    ) -> Result<Vec<IncrementalUnifiedRange>, String> {
+        self.compile_pending_validity_with(
+            orbit.len(),
+            |index| orbit[index],
+            epsilon,
+            reference_log2_dc,
+            block_quota,
+        )
+    }
+
+    /// Accessor variant used by the WASM navigator. Only orbit samples needed
+    /// by the not-yet-certified slots are read, so a cooperative unit is
+    /// proportional to the new ranges rather than to the complete prefix.
+    pub fn compile_pending_validity_with<F>(
+        &mut self,
+        orbit_len: usize,
+        mut orbit_at: F,
+        epsilon: f64,
+        reference_log2_dc: f64,
+        block_quota: usize,
+    ) -> Result<Vec<IncrementalUnifiedRange>, String>
+    where
+        F: FnMut(usize) -> (f64, f64),
+    {
+        let key = (epsilon.to_bits(), reference_log2_dc.to_bits());
+        if let Some(previous) = self.validity_key {
+            if previous != key && self.cumulative_envelopes > 0 {
+                return Err("incremental validity key changed after publication".to_string());
+            }
+        }
+        self.validity_key = Some(key);
+        let mut remaining = block_quota.max(1);
+        let covered_orbit_len = self.covered_orbit_len();
+        let mut ranges = Vec::new();
+        for level_index in 0..self.levels.len() {
+            if remaining == 0 {
+                break;
+            }
+            let skip = self.levels[level_index].skip;
+            if skip < MOBIUS_MIN_EMIT_SKIP {
+                continue;
+            }
+            let slot_start = self.levels[level_index].validity.len();
+            let slot_end = self.levels[level_index]
+                .blocks
+                .len()
+                .min(slot_start.saturating_add(remaining));
+            if slot_end <= slot_start {
+                continue;
+            }
+            let first = 1 + slot_start * skip;
+            let last = 1 + slot_end * skip;
+            if last > orbit_len {
+                return Err(format!(
+                    "incremental validity orbit too short: need {last}, have {}",
+                    orbit_len
+                ));
+            }
+            // The one-shot bound compiler expects level-local slot zero to
+            // begin at orbit index one. Prefix one harmless dummy sample, then
+            // present exactly the new contiguous seed segments.
+            let mut local_orbit = Vec::with_capacity(1 + last - first);
+            local_orbit.push((0.0, 0.0));
+            for index in first..last {
+                local_orbit.push(orbit_at(index));
+            }
+            let local_level = UnifiedLevel {
+                skip,
+                blocks: self.levels[level_index].blocks[slot_start..slot_end].to_vec(),
+                moduli: self.levels[level_index].moduli[slot_start..slot_end].to_vec(),
+            };
+            let bounds = unified_build_bounds(
+                core::slice::from_ref(&local_level),
+                &local_orbit,
+                reference_log2_dc,
+            );
+            for local_slot in 0..local_level.blocks.len() {
+                let envelope = unified_validity_envelope_for_block(
+                    &local_level.blocks[local_slot],
+                    &local_level.moduli[local_slot],
+                    &bounds,
+                    0,
+                    local_slot,
+                    epsilon,
+                    reference_log2_dc,
+                );
+                self.levels[level_index]
+                    .validity
+                    .push(serialize_validity_envelope_packed_v1(&envelope));
+                self.levels[level_index]
+                    .validity_diagnostics
+                    .push(serialize_validity_diagnostics_packed_v1(&envelope));
+            }
+            let slot_count = slot_end - slot_start;
+            remaining -= slot_count;
+            self.cumulative_envelopes += slot_count;
+            ranges.push(IncrementalUnifiedRange {
+                level_index,
+                skip,
+                slot_start,
+                slot_count,
+                covered_orbit_len,
+            });
+        }
+        self.update_peak_retained_bytes();
+        Ok(ranges)
+    }
+
+    pub fn has_pending_validity(&self) -> bool {
+        self.levels.iter().any(|level| {
+            level.skip >= MOBIUS_MIN_EMIT_SKIP && level.validity.len() < level.blocks.len()
+        })
+    }
+
+    pub fn published_orbit_len(&self) -> usize {
+        self.levels
+            .iter()
+            .find(|level| level.skip >= MOBIUS_MIN_EMIT_SKIP)
+            .map_or(1, |level| 1 + level.validity.len() * level.skip)
+            .min(self.covered_orbit_len())
+    }
+
+    fn update_peak_retained_bytes(&mut self) {
+        let pending = self.pending.iter().filter(|entry| entry.is_some()).count()
+            * core::mem::size_of::<PendingUnifiedBlock>();
+        let completed = self.levels.iter().fold(0usize, |sum, level| {
+            sum + level.blocks.capacity() * core::mem::size_of::<UnifiedBlock>()
+                + level.moduli.capacity() * core::mem::size_of::<UnifiedModuli>()
+                + level.coeffs.capacity() * core::mem::size_of::<[JetCoeffFe; UNIFIED_GPU_COEFFS]>()
+                + level.validity.capacity() * core::mem::size_of::<PackedValidityEnvelopeV1>()
+                + level.validity_diagnostics.capacity()
+                    * core::mem::size_of::<PackedValidityDiagnosticsV1>()
+        });
+        self.peak_retained_bytes = self.peak_retained_bytes.max(pending + completed);
+    }
 }
 
 // ── tiered radii stage (task 2.2, design D4) ───────────────────────────────────
@@ -507,6 +998,251 @@ pub const TIER_CPLUS: usize = 2;
 #[allow(dead_code)]
 pub const TIER_JET: usize = 3;
 
+/// Remainder moduli for the four shipped evaluators, in stable tier order.
+/// This is shared by dynamic value/derivative compilation so reconstructed
+/// Jet fallback coefficients cannot accidentally be treated differently.
+fn unified_remainder_moduli(blk: &UnifiedBlock, md: &UnifiedModuli) -> [[f64; JET_NCOEFF]; 4] {
+    let mut q_aff = md.log2_a;
+    q_aff[jet_idx(1, 0)] = f64::NEG_INFINITY;
+    q_aff[jet_idx(0, 1)] = f64::NEG_INFINITY;
+
+    let k2_live = md.log2_a[jet_idx(2, 0)].is_finite();
+    let mut q_jet = md.log2_a;
+    for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+        if (i, j) == (0, 2) && blk.m.b.is_zero() {
+            continue;
+        }
+        if (i, j) == (3, 0) && !k2_live {
+            continue;
+        }
+        if (i as usize) + (j as usize) <= 3 {
+            q_jet[n] = f64::NEG_INFINITY;
+        }
+    }
+    [q_aff, md.log2_q_plain, md.log2_q_cplus, q_jet]
+}
+
+/// Compile the stored VALUE remainder terms of one unified block into the
+/// viewport-independent log-line proof model. Cauchy tails, derivative lines,
+/// pure-c terms and pole margins are intersected by the following stages.
+pub fn unified_value_line_derivations(
+    blk: &UnifiedBlock,
+    md: &UnifiedModuli,
+    epsilon: f64,
+) -> [ValueLineDerivation; 4] {
+    let q = unified_remainder_moduli(blk, md);
+    let log2_a10 = blk.m.a.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let rational_amplification = (4.0f64 / 3.0).log2();
+    core::array::from_fn(|tier| {
+        derive_value_radius_lines(
+            &q[tier],
+            log2_a10,
+            epsilon,
+            if tier == TIER_PADE || tier == TIER_CPLUS {
+                rational_amplification
+            } else {
+                0.0
+            },
+        )
+    })
+}
+
+pub fn unified_derivative_line_derivations(
+    blk: &UnifiedBlock,
+    md: &UnifiedModuli,
+    epsilon: f64,
+) -> [DerivativeLineDerivation; 4] {
+    let q = unified_remainder_moduli(blk, md);
+    let log2_a10 = blk.m.a.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let log2_d = blk.m.d.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let log2_dp = blk.m.dp.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    core::array::from_fn(|tier| {
+        let rational = match tier {
+            TIER_PADE => Some(RationalDerivativeFactors {
+                log2_d,
+                log2_dp: f64::NEG_INFINITY,
+            }),
+            TIER_CPLUS => Some(RationalDerivativeFactors { log2_d, log2_dp }),
+            _ => None,
+        };
+        derive_derivative_radius_lines(&q[tier], log2_a10, epsilon, rational)
+    })
+}
+
+/// Mandatory low-degree value/derivative intersection for all four tiers.
+pub fn unified_low_degree_line_derivations(
+    blk: &UnifiedBlock,
+    md: &UnifiedModuli,
+    epsilon: f64,
+) -> [LowDegreeLineDerivation; 4] {
+    let value = unified_value_line_derivations(blk, md, epsilon);
+    let derivative = unified_derivative_line_derivations(blk, md, epsilon);
+    core::array::from_fn(|tier| {
+        intersect_value_derivative_lines(value[tier].clone(), derivative[tier].clone())
+    })
+}
+
+pub fn unified_pure_c_derivations(
+    blk: &UnifiedBlock,
+    md: &UnifiedModuli,
+    epsilon: f64,
+) -> [PureCDerivation; 4] {
+    let q = unified_remainder_moduli(blk, md);
+    let log2_b = blk.m.b.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let rational_amplification = (4.0f64 / 3.0).log2();
+    core::array::from_fn(|tier| {
+        derive_pure_c_threshold(
+            &q[tier],
+            log2_b,
+            epsilon,
+            if tier == TIER_PADE || tier == TIER_CPLUS {
+                rational_amplification
+            } else {
+                0.0
+            },
+        )
+    })
+}
+
+pub fn unified_pole_line_derivations(blk: &UnifiedBlock) -> [PoleLineDerivation; 4] {
+    let log2_d = blk.m.d.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let log2_dp = blk.m.dp.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let log2_f = blk.m.f.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    core::array::from_fn(|tier| match tier {
+        TIER_PADE if !blk.m.degenerate => {
+            derive_rational_pole_lines(log2_d, f64::NEG_INFINITY, f64::NEG_INFINITY, 0.75)
+        }
+        TIER_CPLUS if !blk.m.degenerate => {
+            derive_rational_pole_lines(log2_d, log2_dp, log2_f, 0.75)
+        }
+        TIER_PADE | TIER_CPLUS => PoleLineDerivation::dead(),
+        _ => PoleLineDerivation::not_applicable(),
+    })
+}
+
+/// Convert the existing Jet/Möbius majorant ladders for one block into at
+/// most two viewport-independent static Cauchy candidates per tier.
+pub fn unified_cauchy_candidate_derivations(
+    blk: &UnifiedBlock,
+    bounds: &UnifiedBounds,
+    level_index: usize,
+    slot: usize,
+    epsilon: f64,
+) -> [[CauchyCandidateEnvelope; MAX_CAUCHY_CANDIDATES]; 4] {
+    let log2_a10 = blk.m.a.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let log2_b = blk.m.b.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let log2_d = blk.m.d.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let log2_dp = blk.m.dp.log2_mag().unwrap_or(f64::NEG_INFINITY);
+    let jet_sources: Vec<CauchySource> = bounds.jet[level_index][slot]
+        .cand
+        .iter()
+        .map(|candidate| CauchySource {
+            log2_rz: candidate.log2_rz,
+            log2_rc: candidate.log2_rc,
+            log2_m: candidate.log2_m,
+            log2_mc: candidate.log2_mc,
+        })
+        .collect();
+    core::array::from_fn(|tier| {
+        if blk.m.degenerate && (tier == TIER_PADE || tier == TIER_CPLUS) {
+            return core::array::from_fn(|_| CauchyCandidateEnvelope::dead());
+        }
+        let (sources, rational) = match tier {
+            TIER_PADE => {
+                let block = &bounds.plain.per_level[level_index][slot];
+                let sources = (0..MOBIUS_NCAND)
+                    .map(|index| CauchySource {
+                        log2_rz: block.log2_rz[index],
+                        log2_rc: bounds.plain.log2_rc[index],
+                        log2_m: block.log2_mq[index],
+                        log2_mc: block.log2_mq[index],
+                    })
+                    .collect::<Vec<_>>();
+                (
+                    sources,
+                    Some(RationalDerivativeFactors {
+                        log2_d,
+                        log2_dp: f64::NEG_INFINITY,
+                    }),
+                )
+            }
+            TIER_CPLUS => {
+                let block = &bounds.cplus.per_level[level_index][slot];
+                let sources = (0..MOBIUS_NCAND)
+                    .map(|index| CauchySource {
+                        log2_rz: block.log2_rz[index],
+                        log2_rc: bounds.cplus.log2_rc[index],
+                        log2_m: block.log2_mq[index],
+                        log2_mc: block.log2_mq[index],
+                    })
+                    .collect::<Vec<_>>();
+                (sources, Some(RationalDerivativeFactors { log2_d, log2_dp }))
+            }
+            _ => (jet_sources.clone(), None),
+        };
+        select_cauchy_candidates(
+            &sources,
+            CauchyTierContext {
+                log2_a10,
+                log2_b,
+                epsilon,
+                rational,
+            },
+        )
+    })
+}
+
+/// Assemble all proof channels for one emitted block. `reference_log2_dc` is
+/// the immutable lifetime domain of the reference, not the current viewport.
+/// Consequently serialization of this object never needs a cmax-only rebuild.
+pub fn unified_validity_envelope_for_block(
+    blk: &UnifiedBlock,
+    md: &UnifiedModuli,
+    bounds: &UnifiedBounds,
+    level_index: usize,
+    slot: usize,
+    epsilon: f64,
+    reference_log2_dc: f64,
+) -> ValidityEnvelope {
+    if !reference_log2_dc.is_finite() {
+        return ValidityEnvelope::dead();
+    }
+    let mut low_degree = unified_low_degree_line_derivations(blk, md, epsilon);
+    let pure_c = unified_pure_c_derivations(blk, md, epsilon);
+    let poles = unified_pole_line_derivations(blk);
+    let cauchy = unified_cauchy_candidate_derivations(blk, bounds, level_index, slot, epsilon);
+    let reference_dc = StaticDcCeiling {
+        max_log2_dc: Log2Limit(reference_log2_dc),
+    };
+    let tiers = core::array::from_fn(|tier| {
+        let dynamic_dc = low_degree[tier]
+            .dc_threshold
+            .max_log2_dc
+            .0
+            .min(pure_c[tier].threshold.max_log2_dc.0);
+        let domain_max = reference_log2_dc
+            .min(dynamic_dc)
+            .min(poles[tier].dc_threshold.max_log2_dc.0);
+        if domain_max.is_finite() {
+            prune_low_degree_lines(&mut low_degree[tier], domain_max);
+        }
+        TierValidityEnvelope {
+            tier: ValidityTier::ALL[tier],
+            remainder: low_degree[tier].radius.clone(),
+            pure_c: PureCThreshold {
+                max_log2_dc: Log2Limit(dynamic_dc),
+            },
+            static_dc: reference_dc,
+            pole: poles[tier].clone(),
+            cauchy: cauchy[tier].clone(),
+        }
+    });
+    ValidityEnvelope {
+        reference_dc,
+        tiers,
+    }
+}
+
 pub struct UnifiedRadii {
     /// Per level, per slot: log2 EFFECTIVE radius per tier — min(value r,
     /// derivative r′). This pipeline propagates the derivative unconditionally
@@ -645,34 +1381,19 @@ fn unified_solve_radii_impl(
             // c₂₀ = 0 fallback ([1/1] D): the register reconstructions
             // a₀₂ = −F·B / a₃₀ = −D·a₂₀ then miss the raw coefficients, so
             // they stay live REST terms.
-            let mut q_aff = md.log2_a;
-            q_aff[jet_idx(1, 0)] = f64::NEG_INFINITY;
-            q_aff[jet_idx(0, 1)] = f64::NEG_INFINITY;
-            let k2_live = md.log2_a[jet_idx(2, 0)].is_finite();
-            let mut q_jet = md.log2_a;
-            for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
-                if (i, j) == (0, 2) && blk.m.b.is_zero() {
-                    continue;
-                }
-                if (i, j) == (3, 0) && !k2_live {
-                    continue;
-                }
-                if (i as usize) + (j as usize) <= 3 {
-                    q_jet[n] = f64::NEG_INFINITY;
-                }
-            }
+            let q = unified_remainder_moduli(blk, md);
             // Same dead-value gate as the rational tiers: min(r, r′) is −∞
             // whatever (V′) returns, so skip the solve.
             let der = [
                 if value[0].is_finite() {
-                    derivative_radius(&plain_m, &q_aff, eps, log2_c_max, false)
+                    derivative_radius(&plain_m, &q[TIER_AFFINE], eps, log2_c_max, false)
                 } else {
                     f64::NEG_INFINITY
                 },
                 rd_pv[li][s],
                 rd_cv[li][s],
                 if value[3].is_finite() {
-                    derivative_radius(&blk.m, &q_jet, eps, log2_c_max, false)
+                    derivative_radius(&blk.m, &q[TIER_JET], eps, log2_c_max, false)
                 } else {
                     f64::NEG_INFINITY
                 },
@@ -731,6 +1452,127 @@ pub fn unified_eval_jet3(blk: &UnifiedBlock, z: CFe, c: CFe) -> CFe {
     let p2 = a20.add(a21.mul(c));
     let p3 = blk.a30();
     p0.add(p1.mul(z)).add(p2.add(p3.mul(z)).mul(z2))
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct UnifiedTierPartials {
+    pub value: CFe,
+    pub dz: CFe,
+    pub dc: CFe,
+    pub dzz: CFe,
+    pub dzc: CFe,
+    pub dcc: CFe,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct UnifiedCpuState {
+    pub delta: CFe,
+    pub derivative: CFe,
+    pub second_derivative: CFe,
+}
+
+fn cfe_scale(value: CFe, scale: f64) -> CFe {
+    value.mul(CFe::from_c(scale, 0.0))
+}
+
+/// CPU state-transition referee for the exact formulas implemented by the
+/// unified WGSL tier branches, including first and second c derivatives.
+pub fn unified_tier_partials(
+    block: &UnifiedBlock,
+    tier: ValidityTier,
+    z: CFe,
+    c: CFe,
+) -> UnifiedTierPartials {
+    if tier == ValidityTier::Affine {
+        return UnifiedTierPartials {
+            value: block.m.a.mul(z).add(block.m.b.mul(c)),
+            dz: block.m.a,
+            dc: block.m.b,
+            dzz: CFe::ZERO,
+            dzc: CFe::ZERO,
+            dcc: CFe::ZERO,
+        };
+    }
+    if tier == ValidityTier::Jet {
+        let a20 = block.a20();
+        let a11 = block.a11();
+        let a21 = block.a21();
+        let a02 = block.a02();
+        let a30 = block.a30();
+        let c2 = c.mul(c);
+        let p0 = block
+            .m
+            .b
+            .mul(c)
+            .add(a02.mul(c2))
+            .add(block.a03.mul(c2).mul(c));
+        let p1 = block.m.a.add(a11.mul(c)).add(block.a12.mul(c2));
+        let p2 = a20.add(a21.mul(c));
+        let q0 = block
+            .m
+            .b
+            .add(cfe_scale(a02.mul(c), 2.0))
+            .add(cfe_scale(block.a03.mul(c2), 3.0));
+        let q1 = a11.add(cfe_scale(block.a12.mul(c), 2.0));
+        return UnifiedTierPartials {
+            value: p0.add(z.mul(p1.add(z.mul(p2.add(z.mul(a30)))))),
+            dz: p1.add(z.mul(cfe_scale(p2, 2.0).add(z.mul(cfe_scale(a30, 3.0))))),
+            dc: q0.add(z.mul(q1.add(z.mul(a21)))),
+            dzz: cfe_scale(p2, 2.0).add(cfe_scale(a30.mul(z), 6.0)),
+            dzc: q1.add(cfe_scale(a21.mul(z), 2.0)),
+            dcc: cfe_scale(a02, 2.0)
+                .add(cfe_scale(block.a03.mul(c), 6.0))
+                .add(cfe_scale(block.a12.mul(z), 2.0)),
+        };
+    }
+
+    let mut rational = block.m;
+    if tier == ValidityTier::Pade {
+        rational.ap = CFe::ZERO;
+        rational.dp = CFe::ZERO;
+        rational.f = CFe::ZERO;
+    }
+    let (value, dz, dc) = mobius_apply(&rational, z, c);
+    let de = rational.d.add(rational.dp.mul(c));
+    let denominator = CFe::ONE.add(de.mul(z)).add(rational.f.mul(c));
+    let dc_denominator = rational.dp.mul(z).add(rational.f);
+    let dzz = cfe_scale(rational.n2.sub(de.mul(dz)).div(denominator), 2.0);
+    let dcc = cfe_scale(dc_denominator.mul(dc).div(denominator), -2.0);
+    let dzc = rational
+        .ap
+        .sub(dc.mul(de))
+        .sub(value.mul(rational.dp))
+        .div(denominator)
+        .sub(dz.mul(dc_denominator).div(denominator));
+    UnifiedTierPartials {
+        value,
+        dz,
+        dc,
+        dzz,
+        dzc,
+        dcc,
+    }
+}
+
+pub fn unified_apply_tier_state(
+    block: &UnifiedBlock,
+    tier: ValidityTier,
+    state: UnifiedCpuState,
+    dc: CFe,
+) -> UnifiedCpuState {
+    let partials = unified_tier_partials(block, tier, state.delta, dc);
+    let derivative = partials.dz.mul(state.derivative).add(partials.dc);
+    let second_derivative = partials
+        .dz
+        .mul(state.second_derivative)
+        .add(partials.dzz.mul(state.derivative.mul(state.derivative)))
+        .add(cfe_scale(partials.dzc.mul(state.derivative), 2.0))
+        .add(partials.dcc);
+    UnifiedCpuState {
+        delta: partials.value,
+        derivative,
+        second_derivative,
+    }
 }
 
 // ── certified series approximation (Phase C, design D6) ─────────────────────────
@@ -1499,8 +2341,94 @@ fn unified_f32_safe(md: &UnifiedModuli, m: &MobiusCPlus) -> bool {
         })
 }
 
+/// Dynamic dispatch uses the legacy 16-byte sidecar as a conservative
+/// any-tier prefilter before touching the 96-byte packed proof. For each
+/// block, the summary stores the largest tier domain, largest candidate
+/// radius, and the tightest one of the four slope-wise upper envelopes at the
+/// certified reference-domain edge. If this optimistic summary rejects, every
+/// tier necessarily rejects; otherwise the shader performs the full packed
+/// proof. The negative z marker distinguishes this layout from rollback
+/// principal/secours sidecars while encoding both slope and f32 safety.
+pub fn unified_dynamic_block_sidecar(
+    block: &UnifiedBlock,
+    moduli: &UnifiedModuli,
+    validity: &PackedValidityEnvelopeV1,
+    reference_log2_dc: f64,
+) -> UnifiedRadius {
+    let mut max_log2_dc = f32::NEG_INFINITY;
+    let mut max_candidate_radius = f32::NEG_INFINITY;
+    for tier in validity.tiers.iter() {
+        max_log2_dc = max_log2_dc.max(tier.max_log2_dc);
+        max_candidate_radius = max_candidate_radius.max(tier.candidate_radius);
+    }
+
+    let mut selected_slope = 0usize;
+    let mut selected_intercept = f32::INFINITY;
+    let mut selected_at_edge = f64::INFINITY;
+    for line in 0..SERIALIZED_VALIDITY_LINE_COUNT {
+        let max_intercept = validity
+            .tiers
+            .iter()
+            .map(|tier| tier.line_intercepts[line])
+            .fold(f32::NEG_INFINITY, f32::max);
+        let at_edge =
+            max_intercept as f64 + SERIALIZED_VALIDITY_SLOPES[line] as f64 * reference_log2_dc;
+        if at_edge < selected_at_edge {
+            selected_slope = line;
+            selected_intercept = max_intercept;
+            selected_at_edge = at_edge;
+        }
+    }
+
+    let safe = if unified_f32_safe(moduli, &block.m) {
+        1u32
+    } else {
+        0u32
+    };
+    let summary_code = safe + 2 * selected_slope as u32;
+    let packed_intercept = if selected_intercept.is_finite() {
+        let bits = selected_intercept.to_bits();
+        let rounded_up_bits = if selected_intercept.is_sign_negative() {
+            bits & !7
+        } else {
+            bits.saturating_add(7) & !7
+        };
+        f32::from_bits(rounded_up_bits | summary_code)
+    } else {
+        selected_intercept
+    };
+    // Every serialized slope is non-positive, so the affine radius can only
+    // grow as dc moves inward from the certified reference-domain edge. This
+    // edge value is therefore a domain-wide lower bound and may accept affine
+    // without fetching packed-v1. Keep the value negative so z<0 remains an
+    // unambiguous dynamic-sidecar marker versus legacy tags.
+    let affine_floor = validity.tiers[0]
+        .radius_log2(reference_log2_dc as f32)
+        .min(-f32::MIN_POSITIVE);
+    UnifiedRadius {
+        r_log2: packed_intercept,
+        tag: max_log2_dc,
+        f32_safe: affine_floor,
+        pad: max_candidate_radius,
+    }
+}
+
 /// Serialize the emitted (skip ≥ 4) levels' coefficient records, index-aligned
 /// with `unified_serialize_radii`'s sidecar.
+pub fn unified_serialize_block_coeffs(block: &UnifiedBlock) -> [JetCoeffFe; UNIFIED_GPU_COEFFS] {
+    [
+        cfe_to_coeff(&block.m.a),
+        cfe_to_coeff(&block.m.b),
+        cfe_to_coeff(&block.m.d),
+        cfe_to_coeff(&block.m.n2),
+        cfe_to_coeff(&block.m.ap),
+        cfe_to_coeff(&block.m.dp),
+        cfe_to_coeff(&block.m.f),
+        cfe_to_coeff(&block.a12),
+        cfe_to_coeff(&block.a03),
+    ]
+}
+
 pub fn unified_serialize_coeffs(levels: &[UnifiedLevel]) -> Vec<[JetCoeffFe; UNIFIED_GPU_COEFFS]> {
     let mut out = Vec::new();
     for lvl in levels {
@@ -1508,45 +2436,91 @@ pub fn unified_serialize_coeffs(levels: &[UnifiedLevel]) -> Vec<[JetCoeffFe; UNI
             continue;
         }
         for b in &lvl.blocks {
-            out.push([
-                cfe_to_coeff(&b.m.a),
-                cfe_to_coeff(&b.m.b),
-                cfe_to_coeff(&b.m.d),
-                cfe_to_coeff(&b.m.n2),
-                cfe_to_coeff(&b.m.ap),
-                cfe_to_coeff(&b.m.dp),
-                cfe_to_coeff(&b.m.f),
-                cfe_to_coeff(&b.a12),
-                cfe_to_coeff(&b.a03),
-            ]);
+            out.push(unified_serialize_block_coeffs(b));
         }
     }
     out
 }
 
-/// Serialize the sidecar (tagged radius + tag + f32-safe) and the level
-/// directory. `log2_band` is the working band the tags are chosen at — the
-/// caller derives it from the replay-observed |dz| distribution (census note
-/// 5), NOT from a fixed c_max multiple. When `sa`, `periodic` or `gates` is
-/// present, a TEN-entry header follows the block sidecar (base = total block
-/// count, computable in the shader from the last directory entry):
-///   [0..4) SA prefix: entry j = (b_{j+1}.x, .y, exponent, j == 0 ? n0 : 0)
-///   [4..10) periodic block: A(.., start), B(.., p), D(.., r_log2),
-///          A'(.., log2(err/r)),
-///          D'(.., 0), F(.., certificate kind) — p == 0 in entry 5's w
-///          disables the runtime attempt; F.w == 1 selects the direct exact
-///          scalar-majorant proof.
-/// Entry [10] is the §18 gate directory (x = gate count; ALWAYS emitted with
-/// the header so the shader never reads it out-of-bounds), followed by the
-/// packed gate records + d[] channels (`gates::gates_serialize_vec4` layout).
-pub fn unified_serialize_radii(
+/// Serialize the packed-v1 dynamic proof records and their own level
+/// directory. The flat index is identical to `unified_serialize_coeffs`; the
+/// directory is intentionally independent from the legacy radius sidecar so
+/// either contract can be transported and audited on its own.
+pub fn unified_serialize_validity_envelopes(
+    levels: &[UnifiedLevel],
+    bounds: &UnifiedBounds,
+    epsilon: f64,
+    reference_log2_dc: f64,
+) -> (
+    Vec<PackedValidityEnvelopeV1>,
+    Vec<PackedValidityDiagnosticsV1>,
+    Vec<JetLevel>,
+) {
+    let mut out = Vec::new();
+    let mut diagnostics = Vec::new();
+    let mut dir = Vec::new();
+    for (level_index, level) in levels.iter().enumerate() {
+        if level.skip < MOBIUS_MIN_EMIT_SKIP {
+            continue;
+        }
+        let offset = out.len() as u32;
+        let mut max_radius = f32::NEG_INFINITY;
+        for slot in 0..level.blocks.len() {
+            let envelope = unified_validity_envelope_for_block(
+                &level.blocks[slot],
+                &level.moduli[slot],
+                bounds,
+                level_index,
+                slot,
+                epsilon,
+                reference_log2_dc,
+            );
+            let packed = serialize_validity_envelope_packed_v1(&envelope);
+            diagnostics.push(serialize_validity_diagnostics_packed_v1(&envelope));
+            for tier in packed.tiers {
+                max_radius = max_radius.max(tier.candidate_radius);
+            }
+            out.push(packed);
+        }
+        dir.push(JetLevel {
+            offset,
+            count: level.blocks.len() as u32,
+            skip: level.skip as u32,
+            max_r3_log2: max_radius,
+        });
+    }
+    debug_assert_eq!(out.len(), diagnostics.len());
+    (out, diagnostics, dir)
+}
+
+/// Optional-header wire version. Headers are transported independently from
+/// block radii/envelopes; bump this whenever their vec4 layout changes.
+pub const UNIFIED_OPTIONAL_HEADER_VERSION: u32 = 1;
+
+/// Independent per-component validity domains for the optional unified
+/// shortcuts. A dead component carries `-inf`; exceeding one ceiling disables
+/// only that shortcut and never the block table.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct UnifiedOptionalHeaderDomains {
+    pub sa_log2_dc: f64,
+    pub periodic_log2_dc: f64,
+    pub gate_log2_dc: f64,
+}
+
+/// Serialize only the block-indexed legacy sidecar (tagged radius + tag +
+/// f32-safe) and its level directory. `log2_band` is the working band the tags
+/// are chosen at — the caller derives it from the replay-observed |dz|
+/// distribution (census note 5), NOT from a fixed c_max multiple.
+///
+/// The result contains exactly one record per emitted block. Optional SA,
+/// periodic and gate data is serialized separately by
+/// `unified_serialize_optional_headers`, so refreshing it cannot invalidate or
+/// rebuild the dynamic coefficient/envelope table.
+pub fn unified_serialize_block_radii(
     levels: &[UnifiedLevel],
     radii: &UnifiedRadii,
     log2_band: f64,
     log2_band_spread: f64,
-    sa: Option<&SaPrefix>,
-    periodic: Option<&PeriodicBlock>,
-    gates: &[crate::gates::Gate],
 ) -> (Vec<UnifiedRadius>, Vec<JetLevel>) {
     let mut out = Vec::new();
     let mut dir = Vec::new();
@@ -1588,30 +2562,62 @@ pub fn unified_serialize_radii(
             max_r3_log2: max_r,
         });
     }
-    if sa.is_some() || periodic.is_some() || !gates.is_empty() {
-        unified_push_header(&mut out, sa, periodic, gates);
-    }
     (out, dir)
 }
 
-/// Append the ten-entry SA/periodic header + gate blob (see
-/// unified_serialize_radii's layout doc) to a sidecar.
+/// Serialize the independent optional-header payload. The fixed prefix is:
+///
+/// - `[0..4)` SA coefficients; `h0.w = n0`, `h1.w = SA log2|dc| ceiling`,
+///   `h2.w = wire version`, `h3.w = gate log2|dc| ceiling`;
+/// - `[4..10)` periodic block; `h8.w = periodic log2|dc| ceiling`;
+/// - `[10]` gate directory, followed by the variable gate blob.
+///
+/// Missing components are encoded with their ordinary dormant discriminator
+/// (`n0 == 0`, `p == 0`, or gate count 0) and a dead `-inf` ceiling.
+pub fn unified_serialize_optional_headers(
+    sa: Option<&SaPrefix>,
+    periodic: Option<&PeriodicBlock>,
+    gates: &[crate::gates::Gate],
+    domains: UnifiedOptionalHeaderDomains,
+) -> Vec<UnifiedRadius> {
+    let mut out = Vec::new();
+    unified_push_header(&mut out, sa, periodic, gates, domains);
+    out
+}
+
 fn unified_push_header(
     out: &mut Vec<UnifiedRadius>,
     sa: Option<&SaPrefix>,
     periodic: Option<&PeriodicBlock>,
     gates: &[crate::gates::Gate],
+    domains: UnifiedOptionalHeaderDomains,
 ) {
     let zero = CFe::ZERO;
     let sab = sa.map(|s| s.b).unwrap_or([zero; SA_APPLIED]);
     let n0 = sa.map(|s| s.n0).unwrap_or(0);
+    let sa_log2_dc = if sa.is_some() {
+        domains.sa_log2_dc as f32
+    } else {
+        f32::NEG_INFINITY
+    };
+    let gate_log2_dc = if gates.is_empty() {
+        f32::NEG_INFINITY
+    } else {
+        domains.gate_log2_dc as f32
+    };
     for (j, b) in sab.iter().enumerate() {
         let c = cfe_to_coeff(b);
         out.push(UnifiedRadius {
             r_log2: c.x,
             tag: c.y,
             f32_safe: c.e as f32,
-            pad: if j == 0 { n0 as f32 } else { 0.0 },
+            pad: match j {
+                0 => n0 as f32,
+                1 => sa_log2_dc,
+                2 => UNIFIED_OPTIONAL_HEADER_VERSION as f32,
+                3 => gate_log2_dc,
+                _ => 0.0,
+            },
         });
     }
     let pm = periodic.map(|p| p.m).unwrap_or(MobiusCPlus {
@@ -1633,7 +2639,11 @@ fn unified_push_header(
         periodic
             .map(|p| p.log2_err_over_r as f32)
             .unwrap_or(f32::NEG_INFINITY),
-        0.0,
+        if periodic.is_some() {
+            domains.periodic_log2_dc as f32
+        } else {
+            f32::NEG_INFINITY
+        },
         periodic
             .map(|p| p.kind.header_code())
             .unwrap_or(PeriodicCertificateKind::MobiusInvariant.header_code()),
@@ -1659,6 +2669,33 @@ fn unified_push_header(
     }
 }
 
+/// Legacy combined serializer retained for rollback tests and non-dynamic
+/// callers. Production unified transport uses the two split serializers above.
+pub fn unified_serialize_radii(
+    levels: &[UnifiedLevel],
+    radii: &UnifiedRadii,
+    log2_band: f64,
+    log2_band_spread: f64,
+    sa: Option<&SaPrefix>,
+    periodic: Option<&PeriodicBlock>,
+    gates: &[crate::gates::Gate],
+) -> (Vec<UnifiedRadius>, Vec<JetLevel>) {
+    let (mut out, dir) = unified_serialize_block_radii(levels, radii, log2_band, log2_band_spread);
+    if sa.is_some() || periodic.is_some() || !gates.is_empty() {
+        out.extend(unified_serialize_optional_headers(
+            sa,
+            periodic,
+            gates,
+            UnifiedOptionalHeaderDomains {
+                sa_log2_dc: f64::INFINITY,
+                periodic_log2_dc: f64::INFINITY,
+                gate_log2_dc: f64::INFINITY,
+            },
+        ));
+    }
+    (out, dir)
+}
+
 /// Header-ONLY sidecar: the SA/periodic header behind an empty one-level
 /// directory — zero block records, so the shader arms the interior verdict
 /// (and the deep path its SA seed) without any block acceleration. Built in
@@ -1669,8 +2706,23 @@ pub fn unified_serialize_header_only(
     sa: Option<&SaPrefix>,
     periodic: Option<&PeriodicBlock>,
 ) -> (Vec<UnifiedRadius>, Vec<JetLevel>) {
-    let mut out = Vec::new();
-    unified_push_header(&mut out, sa, periodic, &[]);
+    unified_serialize_header_only_with_domains(
+        sa,
+        periodic,
+        UnifiedOptionalHeaderDomains {
+            sa_log2_dc: f64::INFINITY,
+            periodic_log2_dc: f64::INFINITY,
+            gate_log2_dc: f64::NEG_INFINITY,
+        },
+    )
+}
+
+pub fn unified_serialize_header_only_with_domains(
+    sa: Option<&SaPrefix>,
+    periodic: Option<&PeriodicBlock>,
+    domains: UnifiedOptionalHeaderDomains,
+) -> (Vec<UnifiedRadius>, Vec<JetLevel>) {
+    let out = unified_serialize_optional_headers(sa, periodic, &[], domains);
     let dir = vec![JetLevel {
         offset: 0,
         count: 0,
@@ -1684,6 +2736,43 @@ pub fn unified_serialize_header_only(
 mod tests {
     use super::*;
     use crate::jet::{jet_compose, jet_eval, jet_seed};
+    use crate::validity::{
+        audit_packed_validity_envelope_v1, audit_serialized_validity_envelope,
+        cpu_auto_referee_floatexp, serialize_validity_envelope,
+        serialize_validity_envelope_packed_v1, CpuValidityLevel, FloatExpComplex32,
+        RationalPoleEnvelope, SerializedValidityEnvelope, ShallowComplex32, ValidityEnvelope,
+        ValidityTier, DEAD_LOG2,
+    };
+
+    #[test]
+    fn optional_headers_are_versioned_split_and_independently_bounded() {
+        let sa = SaPrefix {
+            n0: 17,
+            b: [CFe::ZERO; SA_APPLIED],
+        };
+        let headers = unified_serialize_optional_headers(
+            Some(&sa),
+            None,
+            &[],
+            UnifiedOptionalHeaderDomains {
+                sa_log2_dc: -41.25,
+                periodic_log2_dc: -37.0,
+                gate_log2_dc: -33.0,
+            },
+        );
+        assert_eq!(headers.len(), 11, "fixed header includes gate directory");
+        assert_eq!(headers[0].pad, 17.0);
+        assert_eq!(headers[1].pad, -41.25);
+        assert_eq!(headers[2].pad, UNIFIED_OPTIONAL_HEADER_VERSION as f32);
+        assert_eq!(headers[3].pad, f32::NEG_INFINITY, "dead gate stayed armed");
+        assert_eq!(headers[5].pad, 0.0, "dead periodic block has nonzero p");
+        assert_eq!(
+            headers[8].pad,
+            f32::NEG_INFINITY,
+            "dead periodic block retained its requested ceiling"
+        );
+        assert_eq!(headers[10].r_log2, 0.0, "gate directory count");
+    }
 
     fn ref_orbit_f64(cx: f64, cy: f64, max_iter: usize) -> Vec<(f64, f64)> {
         let mut v = Vec::with_capacity(max_iter + 1);
@@ -1702,6 +2791,433 @@ mod tests {
         v
     }
 
+    #[test]
+    fn incremental_builder_matches_one_shot_under_random_chunk_partitions() {
+        let orbit = ref_orbit_f64(-0.75, 0.0, 2048);
+        let max_skip = 256;
+        let one_shot = build_unified_levels(&orbit, max_skip);
+        let expected_coeffs = unified_serialize_coeffs(&one_shot);
+
+        let mut builder = IncrementalUnifiedBuilder::new(max_skip);
+        let mut start = 1usize;
+        let mut random = 0x6d2b_79f5u32;
+        let mut appended_by_level = vec![0usize; one_shot.len()];
+        while start < orbit.len() {
+            random = random.wrapping_mul(1_664_525).wrapping_add(1_013_904_223);
+            let chunk = 1 + (random as usize % 97);
+            let end = (start + chunk).min(orbit.len());
+            let batch = builder
+                .append_orbit_slice(start, &orbit[start..end])
+                .expect("contiguous random append");
+            assert_eq!(batch.covered_orbit_len, end);
+            for range in batch.ranges {
+                assert!(range.skip >= MOBIUS_MIN_EMIT_SKIP);
+                assert_eq!(range.slot_start, appended_by_level[range.level_index]);
+                appended_by_level[range.level_index] += range.slot_count;
+            }
+            start = end;
+        }
+        assert_eq!(builder.covered_orbit_len(), orbit.len());
+        let incremental = builder.snapshot_levels();
+        assert_eq!(incremental.len(), one_shot.len());
+        for (level_index, (got, expected)) in incremental.iter().zip(one_shot.iter()).enumerate() {
+            assert_eq!(got.skip, expected.skip, "level {level_index} skip");
+            assert_eq!(
+                got.blocks.len(),
+                expected.blocks.len(),
+                "level {level_index} geometry"
+            );
+            assert_eq!(
+                appended_by_level[level_index],
+                expected.blocks.len(),
+                "level {level_index} duplicate/missing append"
+            );
+        }
+        let incremental_coeffs: Vec<[JetCoeffFe; UNIFIED_GPU_COEFFS]> = builder
+            .levels()
+            .iter()
+            .flat_map(|level| level.coeffs.iter().copied())
+            .collect();
+        assert_eq!(incremental_coeffs, expected_coeffs, "coefficient parity");
+
+        let reference_log2_dc = -24.0;
+        let bounds = unified_build_bounds(&one_shot, &orbit, reference_log2_dc);
+        let (expected_validity, expected_diagnostics, _) =
+            unified_serialize_validity_envelopes(&one_shot, &bounds, 1e-3, reference_log2_dc);
+        let validity_ranges = builder
+            .compile_available_validity(&bounds, 1e-3, reference_log2_dc)
+            .expect("first validity publication");
+        assert!(!validity_ranges.is_empty());
+        assert!(builder
+            .compile_available_validity(&bounds, 1e-3, reference_log2_dc)
+            .expect("warm validity publication")
+            .is_empty());
+        let got_validity: Vec<PackedValidityEnvelopeV1> = builder
+            .levels()
+            .iter()
+            .flat_map(|level| level.validity.iter().copied())
+            .collect();
+        let got_diagnostics: Vec<PackedValidityDiagnosticsV1> = builder
+            .levels()
+            .iter()
+            .flat_map(|level| level.validity_diagnostics.iter().copied())
+            .collect();
+        assert_eq!(got_validity, expected_validity, "packed envelope parity");
+        assert_eq!(got_diagnostics, expected_diagnostics);
+        assert_eq!(builder.cumulative_coefficients(), expected_coeffs.len());
+        assert_eq!(builder.cumulative_envelopes(), expected_validity.len());
+
+        // The production worker uses the bounded tranche compiler rather than
+        // `compile_available_validity`; it must produce the same conservative
+        // records regardless of quota boundaries.
+        let mut progressive = IncrementalUnifiedBuilder::new(max_skip);
+        progressive
+            .append_orbit_slice(1, &orbit[1..])
+            .expect("progressive full orbit append");
+        while progressive.has_pending_validity() {
+            let ranges = progressive
+                .compile_pending_validity(&orbit, 1e-3, reference_log2_dc, 37)
+                .expect("bounded progressive validity publication");
+            assert!(!ranges.is_empty(), "pending validity made no progress");
+        }
+        for level in progressive.levels() {
+            for slot in 0..level.validity.len() {
+                let packed = level.validity[slot];
+                let sidecar = unified_dynamic_block_sidecar(
+                    &level.blocks[slot],
+                    &level.moduli[slot],
+                    &packed,
+                    reference_log2_dc,
+                );
+                let (summary_intercept, slope_index) = if sidecar.r_log2.is_finite() {
+                    let bits = sidecar.r_log2.to_bits();
+                    (f32::from_bits(bits & !7), ((bits & 7) >> 1) as usize)
+                } else {
+                    (sidecar.r_log2, 0usize)
+                };
+                assert!(slope_index < SERIALIZED_VALIDITY_LINE_COUNT);
+                for &log2_dc in &[
+                    f32::NEG_INFINITY,
+                    reference_log2_dc as f32,
+                    reference_log2_dc as f32 - 4.0,
+                    reference_log2_dc as f32 - 16.0,
+                    reference_log2_dc as f32 - 64.0,
+                ] {
+                    let exact_upper = packed
+                        .tiers
+                        .iter()
+                        .map(|tier| tier.radius_log2(log2_dc))
+                        .fold(f32::NEG_INFINITY, f32::max);
+                    if exact_upper == f32::NEG_INFINITY {
+                        continue;
+                    }
+                    assert!(log2_dc <= sidecar.tag);
+                    let affine_radius = packed.tiers[0].radius_log2(log2_dc);
+                    assert!(
+                        sidecar.f32_safe <= affine_radius,
+                        "affine floor loosened at skip {}, slot {}, dc {}: {} > {}",
+                        level.skip,
+                        slot,
+                        log2_dc,
+                        sidecar.f32_safe,
+                        affine_radius
+                    );
+                    let line_upper = if log2_dc == f32::NEG_INFINITY {
+                        if SERIALIZED_VALIDITY_SLOPES[slope_index] == 0.0 {
+                            summary_intercept
+                        } else {
+                            f32::INFINITY
+                        }
+                    } else {
+                        summary_intercept + SERIALIZED_VALIDITY_SLOPES[slope_index] * log2_dc
+                    };
+                    let summary_upper = line_upper.min(sidecar.pad);
+                    assert!(
+                        summary_upper >= exact_upper,
+                        "summary rejected a live tier at skip {}, slot {}, dc {}: {} < {}",
+                        level.skip,
+                        slot,
+                        log2_dc,
+                        summary_upper,
+                        exact_upper
+                    );
+                }
+            }
+        }
+        let progressive_validity: Vec<PackedValidityEnvelopeV1> = progressive
+            .levels()
+            .iter()
+            .flat_map(|level| level.validity.iter().copied())
+            .collect();
+        let progressive_diagnostics: Vec<PackedValidityDiagnosticsV1> = progressive
+            .levels()
+            .iter()
+            .flat_map(|level| level.validity_diagnostics.iter().copied())
+            .collect();
+        assert_eq!(progressive_validity.len(), expected_validity.len());
+        for (index, (got, expected)) in progressive_validity
+            .iter()
+            .zip(expected_validity.iter())
+            .enumerate()
+        {
+            for tier in 0..4 {
+                for line in 0..4 {
+                    assert!(
+                        got.tiers[tier].line_intercepts[line]
+                            <= expected.tiers[tier].line_intercepts[line],
+                        "progressive line loosened at block {}, tier {}, line {}",
+                        index,
+                        tier,
+                        line
+                    );
+                }
+                assert!(
+                    got.tiers[tier].max_log2_dc <= expected.tiers[tier].max_log2_dc,
+                    "progressive domain loosened at block {}, tier {}",
+                    index,
+                    tier
+                );
+            }
+        }
+        assert_eq!(progressive_diagnostics.len(), expected_diagnostics.len());
+    }
+
+    #[test]
+    fn incremental_validity_accessor_reads_only_the_new_block_span() {
+        let orbit = ref_orbit_f64(-0.75, 0.0, 4096);
+        let mut builder = IncrementalUnifiedBuilder::new(1 << 12);
+        builder.reserve_for_orbit_len(orbit.len());
+        let reserved_capacities: Vec<(usize, usize, usize)> = builder
+            .levels()
+            .iter()
+            .map(|level| {
+                (
+                    level.blocks.capacity(),
+                    level.moduli.capacity(),
+                    level.coeffs.capacity(),
+                )
+            })
+            .collect();
+        builder
+            .append_orbit_iter(1, orbit[1..].iter().copied())
+            .expect("full iterator append");
+        let appended_capacities: Vec<(usize, usize, usize)> = builder
+            .levels()
+            .iter()
+            .map(|level| {
+                (
+                    level.blocks.capacity(),
+                    level.moduli.capacity(),
+                    level.coeffs.capacity(),
+                )
+            })
+            .collect();
+        assert_eq!(appended_capacities, reserved_capacities);
+
+        let mut reads = Vec::new();
+        let ranges = builder
+            .compile_pending_validity_with(
+                orbit.len(),
+                |index| {
+                    reads.push(index);
+                    orbit[index]
+                },
+                1e-3,
+                -24.0,
+                1,
+            )
+            .expect("single-block validity unit");
+
+        assert_eq!(ranges.len(), 1);
+        assert_eq!(ranges[0].skip, MOBIUS_MIN_EMIT_SKIP);
+        assert_eq!(ranges[0].slot_start, 0);
+        assert_eq!(ranges[0].slot_count, 1);
+        assert_eq!(reads, (1..=MOBIUS_MIN_EMIT_SKIP).collect::<Vec<_>>());
+        assert!(
+            reads.len() < orbit.len() / 100,
+            "cooperative validity unit rescanned the orbit prefix"
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn incremental_unified_build_benchmark() {
+        use std::time::Instant;
+
+        let orbit = ref_orbit_f64(-0.75, 0.0, 8192);
+        let max_skip = 1 << 12;
+        let one_t0 = Instant::now();
+        let one_shot = build_unified_levels(&orbit, max_skip);
+        let one_coeffs = unified_serialize_coeffs(&one_shot);
+        let one_coefficient_ms = one_t0.elapsed().as_secs_f64() * 1000.0;
+        let bounds = unified_build_bounds(&one_shot, &orbit, -24.0);
+        let one_envelope_t0 = Instant::now();
+        let (one_validity, one_diagnostics, _) =
+            unified_serialize_validity_envelopes(&one_shot, &bounds, 1e-3, -24.0);
+        let one_envelope_ms = one_envelope_t0.elapsed().as_secs_f64() * 1000.0;
+
+        let mut builder = IncrementalUnifiedBuilder::new(max_skip);
+        let inc_t0 = Instant::now();
+        let mut start = 1usize;
+        while start < orbit.len() {
+            let end = (start + 1000).min(orbit.len());
+            builder
+                .append_orbit_slice(start, &orbit[start..end])
+                .expect("benchmark append");
+            start = end;
+        }
+        let coefficient_ms = inc_t0.elapsed().as_secs_f64() * 1000.0;
+        let envelope_t0 = Instant::now();
+        builder
+            .compile_available_validity(&bounds, 1e-3, -24.0)
+            .expect("benchmark envelopes");
+        let envelope_ms = envelope_t0.elapsed().as_secs_f64() * 1000.0;
+        let one_retained = one_shot.iter().fold(0usize, |sum, level| {
+            sum + level.blocks.len() * core::mem::size_of::<UnifiedBlock>()
+                + level.moduli.len() * core::mem::size_of::<UnifiedModuli>()
+        }) + one_coeffs.len()
+            * core::mem::size_of::<[JetCoeffFe; UNIFIED_GPU_COEFFS]>()
+            + one_validity.len() * core::mem::size_of::<PackedValidityEnvelopeV1>()
+            + one_diagnostics.len() * core::mem::size_of::<PackedValidityDiagnosticsV1>();
+        println!(
+            "incremental unified @{} orbit: merges={} coefficient={:.2}ms envelope={:.2}ms peak={:.2}MiB | one-shot coefficient={:.2}ms envelope={:.2}ms retained={:.2}MiB",
+            orbit.len(),
+            builder.cumulative_merges(),
+            coefficient_ms,
+            envelope_ms,
+            builder.peak_retained_bytes() as f64 / (1024.0 * 1024.0),
+            one_coefficient_ms,
+            one_envelope_ms,
+            one_retained as f64 / (1024.0 * 1024.0),
+        );
+        assert_eq!(builder.cumulative_coefficients(), one_coeffs.len());
+    }
+
+    fn fixture_fe(magnitude: f64) -> FloatExpComplex32 {
+        if magnitude == 0.0 {
+            return FloatExpComplex32 {
+                x: 0.0,
+                y: 0.0,
+                exponent: 0,
+            };
+        }
+        let exponent = magnitude.abs().log2().floor() as i32;
+        FloatExpComplex32 {
+            x: (magnitude * 2.0_f64.powi(-exponent)) as f32,
+            y: 0.0,
+            exponent,
+        }
+    }
+
+    #[test]
+    fn shared_rust_gpu_parity_fixtures_cover_dynamic_validity_edges() {
+        let fixtures = include_str!("../../tests/fixtures/dynamic-validity-parity.csv");
+        let mut covered = std::collections::BTreeSet::new();
+        for row in fixtures
+            .lines()
+            .skip(1)
+            .filter(|row| !row.trim().is_empty())
+        {
+            let columns: Vec<_> = row.split(',').collect();
+            assert_eq!(columns.len(), 6, "bad fixture row: {}", row);
+            let name = columns[0];
+            let cx: f64 = columns[1].parse().unwrap();
+            let cy: f64 = columns[2].parse().unwrap();
+            let scale: f64 = columns[3].parse().unwrap();
+            let path = columns[4];
+            let scenario = columns[5];
+            covered.insert(scenario);
+
+            let orbit = ref_orbit_f64(cx, cy, 512);
+            assert!(
+                orbit.len() > MOBIUS_MIN_EMIT_SKIP,
+                "{} orbit too short",
+                name
+            );
+            let levels = build_unified_levels(&orbit, 64);
+            let reference_scale = if scenario == "out-of-domain" {
+                scale / 64.0
+            } else {
+                scale
+            };
+            let reference_log2_dc = reference_scale.log2() + 4.0;
+            let bounds = unified_build_bounds(&levels, &orbit, reference_log2_dc);
+            let (level_index, level) = levels
+                .iter()
+                .enumerate()
+                .find(|(_, level)| level.skip >= MOBIUS_MIN_EMIT_SKIP && !level.blocks.is_empty())
+                .expect("emitted fixture level");
+            let envelope = unified_validity_envelope_for_block(
+                &level.blocks[0],
+                &level.moduli[0],
+                &bounds,
+                level_index,
+                0,
+                1e-3,
+                reference_log2_dc,
+            );
+            let packed = serialize_validity_envelope_packed_v1(&envelope);
+            let dc_magnitude = scale * 0.75;
+            let dc_fe = fixture_fe(dc_magnitude);
+            let log2_dc = crate::validity::floatexp_log2_magnitude(dc_fe);
+            let mut live_tiers = 0;
+            for tier in ValidityTier::ALL {
+                let radius = packed.radius_log2(tier, log2_dc);
+                if radius == f32::NEG_INFINITY {
+                    continue;
+                }
+                live_tiers += 1;
+                let inside = 2.0_f64.powf(radius as f64 - 1.0);
+                let outside = 2.0_f64.powf(radius as f64 + 1.0);
+                assert_eq!(
+                    packed
+                        .evaluate_floatexp(tier, dc_fe, fixture_fe(inside))
+                        .accepts,
+                    true,
+                    "{} {:?} deep accept parity",
+                    name,
+                    tier,
+                );
+                assert_eq!(
+                    packed
+                        .evaluate_floatexp(tier, dc_fe, fixture_fe(outside))
+                        .accepts,
+                    false,
+                    "{} {:?} deep reject parity",
+                    name,
+                    tier,
+                );
+                if path == "shallow" {
+                    assert_eq!(
+                        packed
+                            .evaluate_shallow(
+                                tier,
+                                ShallowComplex32 {
+                                    x: dc_magnitude as f32,
+                                    y: 0.0,
+                                },
+                                ShallowComplex32 {
+                                    x: inside as f32,
+                                    y: 0.0,
+                                },
+                            )
+                            .accepts,
+                        true,
+                        "{} {:?} shallow parity",
+                        name,
+                        tier,
+                    );
+                }
+            }
+            if scenario == "out-of-domain" {
+                assert_eq!(live_tiers, 0, "out-of-domain fixture unexpectedly accepted");
+            }
+        }
+        for required in ["fresh", "continuation", "rebase", "out-of-domain"] {
+            assert!(covered.contains(required), "missing {} fixture", required);
+        }
+    }
+
     fn rel_err(got: CFe, want: CFe) -> f64 {
         let (gx, gy) = got.to_f64();
         let (wx, wy) = want.to_f64();
@@ -1712,6 +3228,1079 @@ mod tests {
         } else {
             d / m
         }
+    }
+
+    #[derive(Clone, Debug, Default)]
+    struct DynamicDispatchCensus {
+        block_applications: usize,
+        exact_steps: usize,
+        skipped_iterations: usize,
+        tier_accepts: [usize; 4],
+        candidate_usage: [usize; MAX_CAUCHY_CANDIDATES],
+        /// static-domain, pure-c, pole, Cauchy, value, derivative.
+        rejections: [usize; 6],
+    }
+
+    impl DynamicDispatchCensus {
+        fn merge(&mut self, other: &Self) {
+            self.block_applications += other.block_applications;
+            self.exact_steps += other.exact_steps;
+            self.skipped_iterations += other.skipped_iterations;
+            for tier in 0..4 {
+                self.tier_accepts[tier] += other.tier_accepts[tier];
+            }
+            for candidate in 0..MAX_CAUCHY_CANDIDATES {
+                self.candidate_usage[candidate] += other.candidate_usage[candidate];
+            }
+            for reason in 0..self.rejections.len() {
+                self.rejections[reason] += other.rejections[reason];
+            }
+        }
+
+        fn mean_applied_skip(&self) -> f64 {
+            if self.block_applications == 0 {
+                0.0
+            } else {
+                self.skipped_iterations as f64 / self.block_applications as f64
+            }
+        }
+    }
+
+    fn nearest_rank(values: &mut [f64], percentile: f64) -> f64 {
+        if values.is_empty() {
+            return f64::NAN;
+        }
+        values.sort_by(f64::total_cmp);
+        let rank = ((percentile * values.len() as f64).ceil() as usize)
+            .saturating_sub(1)
+            .min(values.len() - 1);
+        values[rank]
+    }
+
+    fn exact_delta_trajectory(orbit: &[(f64, f64)], dc: (f64, f64)) -> Vec<(f64, f64)> {
+        let mut trajectory = Vec::with_capacity(orbit.len());
+        let (mut dx, mut dy) = (0.0_f64, 0.0_f64);
+        trajectory.push((dx, dy));
+        for &(zx, zy) in orbit.iter().skip(1) {
+            let linear = (2.0 * (zx * dx - zy * dy), 2.0 * (zx * dy + zy * dx));
+            let square = (dx * dx - dy * dy, 2.0 * dx * dy);
+            dx = linear.0 + square.0 + dc.0;
+            dy = linear.1 + square.1 + dc.1;
+            trajectory.push((dx, dy));
+        }
+        trajectory
+    }
+
+    fn pair_log2_magnitude(value: (f64, f64)) -> f32 {
+        let magnitude = (value.0 * value.0 + value.1 * value.1).sqrt();
+        if magnitude == 0.0 {
+            f32::NEG_INFINITY
+        } else {
+            magnitude.log2() as f32
+        }
+    }
+
+    fn dynamic_rejection_reason(
+        envelope: &ValidityEnvelope,
+        tier: ValidityTier,
+        log2_dc: f64,
+        log2_dz: f64,
+    ) -> Option<usize> {
+        let proof = envelope.tier(tier);
+        if !envelope.reference_dc.accepts(log2_dc) || !proof.static_dc.accepts(log2_dc) {
+            return Some(0);
+        }
+        if !proof.pure_c.accepts(log2_dc) {
+            return Some(1);
+        }
+        if !proof.pole.dc_threshold.accepts(log2_dc)
+            || log2_dz > proof.pole.radius.radius_log2(log2_dc)
+        {
+            return Some(2);
+        }
+        let cauchy_radius = proof
+            .cauchy
+            .iter()
+            .map(|candidate| candidate.radius_log2(log2_dc))
+            .fold(DEAD_LOG2, f64::max);
+        if log2_dz > cauchy_radius {
+            return Some(3);
+        }
+        if log2_dz > proof.remainder.value.radius_log2(log2_dc) {
+            return Some(4);
+        }
+        if log2_dz > proof.remainder.derivative.radius_log2(log2_dc) {
+            return Some(5);
+        }
+        None
+    }
+
+    fn dynamic_dispatch_census(
+        levels: &[UnifiedLevel],
+        trajectory: &[(f64, f64)],
+        log2_dc: f32,
+        envelopes: &[Vec<ValidityEnvelope>],
+        serialized: &[Vec<SerializedValidityEnvelope>],
+    ) -> DynamicDispatchCensus {
+        let mut census = DynamicDispatchCensus::default();
+        let mut iteration = 0usize;
+        let max_iterations = trajectory.len().saturating_sub(1);
+        while iteration < max_iterations {
+            let log2_dz = pair_log2_magnitude(trajectory[iteration]);
+            let mut selection = None;
+            'levels: for level_index in (0..levels.len()).rev() {
+                let level = &levels[level_index];
+                if level.skip < MOBIUS_MIN_EMIT_SKIP
+                    || iteration % level.skip != 0
+                    || iteration + level.skip > max_iterations
+                {
+                    continue;
+                }
+                let slot = iteration / level.skip;
+                if slot >= level.blocks.len() {
+                    continue;
+                }
+                for tier_index in 0..4 {
+                    let tier = ValidityTier::ALL[tier_index];
+                    let radius = serialized[level_index][slot].radius_log2(tier, log2_dc);
+                    if log2_dz <= radius {
+                        census.tier_accepts[tier_index] += 1;
+                        let encoded = serialized[level_index][slot].tiers[tier_index];
+                        let selected_candidate = (0..MAX_CAUCHY_CANDIDATES)
+                            .filter(|&candidate| log2_dc <= encoded.candidate_dc[candidate])
+                            .max_by(|&a, &b| {
+                                encoded.candidate_radius[a].total_cmp(&encoded.candidate_radius[b])
+                            });
+                        if let Some(candidate) = selected_candidate {
+                            census.candidate_usage[candidate] += 1;
+                        }
+                        selection = Some(level.skip);
+                        break 'levels;
+                    }
+                    if let Some(reason) = dynamic_rejection_reason(
+                        &envelopes[level_index][slot],
+                        tier,
+                        log2_dc as f64,
+                        log2_dz as f64,
+                    ) {
+                        census.rejections[reason] += 1;
+                    }
+                }
+            }
+            if let Some(skip) = selection {
+                census.block_applications += 1;
+                census.skipped_iterations += skip;
+                iteration += skip;
+            } else {
+                census.exact_steps += 1;
+                iteration += 1;
+            }
+        }
+        census
+    }
+
+    fn legacy_dispatch_census(
+        levels: &[UnifiedLevel],
+        trajectory: &[(f64, f64)],
+        radii: &UnifiedRadii,
+    ) -> DynamicDispatchCensus {
+        let mut census = DynamicDispatchCensus::default();
+        let mut iteration = 0usize;
+        let max_iterations = trajectory.len().saturating_sub(1);
+        while iteration < max_iterations {
+            let log2_dz = pair_log2_magnitude(trajectory[iteration]) as f64;
+            let mut selection = None;
+            'levels: for level_index in (0..levels.len()).rev() {
+                let level = &levels[level_index];
+                if level.skip < MOBIUS_MIN_EMIT_SKIP
+                    || iteration % level.skip != 0
+                    || iteration + level.skip > max_iterations
+                {
+                    continue;
+                }
+                let slot = iteration / level.skip;
+                if slot >= level.blocks.len() {
+                    continue;
+                }
+                for tier in 0..4 {
+                    if log2_dz <= radii.tiers[level_index][slot][tier] {
+                        census.tier_accepts[tier] += 1;
+                        selection = Some(level.skip);
+                        break 'levels;
+                    }
+                }
+            }
+            if let Some(skip) = selection {
+                census.block_applications += 1;
+                census.skipped_iterations += skip;
+                iteration += skip;
+            } else {
+                census.exact_steps += 1;
+                iteration += 1;
+            }
+        }
+        census
+    }
+
+    #[derive(Clone, Copy, Debug)]
+    struct DynamicCpuRun {
+        state: UnifiedCpuState,
+        physical_iteration: usize,
+        reference_index: usize,
+        block_applications: usize,
+        exact_steps: usize,
+        rebases: usize,
+        escaped: bool,
+    }
+
+    impl DynamicCpuRun {
+        fn new() -> Self {
+            Self {
+                state: UnifiedCpuState {
+                    delta: CFe::ZERO,
+                    derivative: CFe::ZERO,
+                    second_derivative: CFe::ZERO,
+                },
+                physical_iteration: 0,
+                reference_index: 0,
+                block_applications: 0,
+                exact_steps: 0,
+                rebases: 0,
+                escaped: false,
+            }
+        }
+    }
+
+    fn exact_reference_step(
+        state: UnifiedCpuState,
+        reference: (f64, f64),
+        dc: CFe,
+    ) -> UnifiedCpuState {
+        let reference = CFe::from_c(reference.0, reference.1);
+        let full_z = reference.add(state.delta);
+        let next_delta = cfe_scale(reference.mul(state.delta), 2.0)
+            .add(state.delta.mul(state.delta))
+            .add(dc);
+        let next_second = cfe_scale(
+            state
+                .derivative
+                .mul(state.derivative)
+                .add(full_z.mul(state.second_derivative)),
+            2.0,
+        );
+        let next_derivative = cfe_scale(full_z.mul(state.derivative), 2.0).add(CFe::ONE);
+        UnifiedCpuState {
+            delta: next_delta,
+            derivative: next_derivative,
+            second_derivative: next_second,
+        }
+    }
+
+    fn cfe_floatexp32(value: CFe) -> FloatExpComplex32 {
+        FloatExpComplex32 {
+            x: value.x as f32,
+            y: value.y as f32,
+            exponent: value.e.clamp(i32::MIN as i64, i32::MAX as i64) as i32,
+        }
+    }
+
+    fn cfe_relative_error(got: CFe, expected: CFe) -> f64 {
+        let (gx, gy) = got.to_f64();
+        let (ex, ey) = expected.to_f64();
+        let error = ((gx - ex).powi(2) + (gy - ey).powi(2)).sqrt();
+        error / (ex * ex + ey * ey).sqrt().max(1e-300)
+    }
+
+    fn run_dynamic_cpu_segment(
+        run: &mut DynamicCpuRun,
+        levels: &[UnifiedLevel],
+        serialized: &[Vec<SerializedValidityEnvelope>],
+        orbit: &[(f64, f64)],
+        dc: CFe,
+        covered_reference_index: usize,
+        target_physical_iteration: usize,
+        turn_budget: usize,
+    ) {
+        let empty: &[SerializedValidityEnvelope] = &[];
+        let directories: Vec<CpuValidityLevel<'_>> = levels
+            .iter()
+            .enumerate()
+            .map(|(level_index, level)| CpuValidityLevel {
+                skip: level.skip,
+                blocks: if level.skip >= MOBIUS_MIN_EMIT_SKIP {
+                    &serialized[level_index]
+                } else {
+                    empty
+                },
+            })
+            .collect();
+        let max_reference_index = orbit.len().saturating_sub(1);
+        let mut turns = 0usize;
+        while !run.escaped
+            && run.physical_iteration < target_physical_iteration
+            && turns < turn_budget
+        {
+            turns += 1;
+            let remaining = target_physical_iteration - run.physical_iteration;
+            let mut applied = false;
+            if run.reference_index > 0 {
+                let completed = run.reference_index - 1;
+                let max_completed = completed
+                    .saturating_add(remaining)
+                    .min(max_reference_index.saturating_sub(1));
+                let covered_completed = covered_reference_index
+                    .min(max_reference_index)
+                    .saturating_sub(1);
+                if let Some(decision) = cpu_auto_referee_floatexp(
+                    &directories,
+                    completed,
+                    covered_completed,
+                    max_completed,
+                    cfe_floatexp32(dc),
+                    cfe_floatexp32(run.state.delta),
+                ) {
+                    let landing_reference = run.reference_index + decision.skip;
+                    if landing_reference <= max_reference_index {
+                        let candidate = unified_apply_tier_state(
+                            &levels[decision.level_index].blocks[decision.slot],
+                            decision.tier,
+                            run.state,
+                            dc,
+                        );
+                        let landing =
+                            CFe::from_c(orbit[landing_reference].0, orbit[landing_reference].1)
+                                .add(candidate.delta);
+                        let landing_mag2 = {
+                            let (x, y) = landing.to_f64();
+                            x * x + y * y
+                        };
+                        // Same no-jump-over-first-escape guard as WGSL.
+                        if decision.skip == 1 || landing_mag2 <= 4.0 {
+                            run.state = candidate;
+                            run.reference_index = landing_reference;
+                            run.physical_iteration += decision.skip;
+                            run.block_applications += 1;
+                            applied = true;
+                        }
+                    }
+                }
+            }
+            if !applied {
+                run.state = exact_reference_step(run.state, orbit[run.reference_index], dc);
+                run.reference_index += 1;
+                run.physical_iteration += 1;
+                run.exact_steps += 1;
+            }
+
+            let full_z = CFe::from_c(orbit[run.reference_index].0, orbit[run.reference_index].1)
+                .add(run.state.delta);
+            let (zx, zy) = full_z.to_f64();
+            if zx * zx + zy * zy > 4.0 {
+                run.escaped = true;
+                continue;
+            }
+            let (dx, dy) = run.state.delta.to_f64();
+            if zx * zx + zy * zy < dx * dx + dy * dy || run.reference_index == max_reference_index {
+                run.state.delta = full_z;
+                run.reference_index = 0;
+                run.rebases += 1;
+            }
+        }
+    }
+
+    #[test]
+    fn unified_value_lines_use_each_tiers_actual_remainder() {
+        let orbit = ref_orbit_f64(-0.743643887037151, 0.131825904205330, 64);
+        let levels = build_unified_levels(&orbit, 8);
+        let emitted = levels.iter().find(|level| level.skip == 4).unwrap();
+        let derived = unified_value_line_derivations(&emitted.blocks[0], &emitted.moduli[0], 1e-3);
+
+        // Affine drops only A/B; Jet drops its reconstructed degree-3 prefix,
+        // so the actual stored remainders must lead to different allocations.
+        assert!(derived[TIER_AFFINE].allocations.len() > derived[TIER_JET].allocations.len());
+        for tier in ValidityTier::ALL {
+            let proof = &derived[tier.index()];
+            assert!(proof
+                .allocations
+                .iter()
+                .all(|term| term.log2_relative_budget.is_finite()));
+        }
+        // Rational value errors include the certified 4/3 denominator factor.
+        assert!(derived[TIER_PADE]
+            .allocations
+            .iter()
+            .all(|term| term.effective_log2_modulus >= term.log2_modulus));
+
+        let combined =
+            unified_low_degree_line_derivations(&emitted.blocks[0], &emitted.moduli[0], 1e-3);
+        for tier in ValidityTier::ALL {
+            let proof = &combined[tier.index()];
+            for log2_dc in [-80.0, -40.0, -20.0] {
+                let effective = proof.radius.radius_log2(log2_dc);
+                assert!(effective <= proof.value.radius.radius_log2(log2_dc));
+                assert!(effective <= proof.derivative.radius.radius_log2(log2_dc));
+            }
+        }
+
+        let pure_c = unified_pure_c_derivations(&emitted.blocks[0], &emitted.moduli[0], 1e-3);
+        assert!(pure_c.iter().all(|proof| {
+            proof.threshold.max_log2_dc.is_dead() || !proof.threshold.max_log2_dc.0.is_nan()
+        }));
+        let poles = unified_pole_line_derivations(&emitted.blocks[0]);
+        assert_eq!(
+            poles[TIER_AFFINE].descriptor,
+            RationalPoleEnvelope::NotApplicable
+        );
+        assert_eq!(
+            poles[TIER_JET].descriptor,
+            RationalPoleEnvelope::NotApplicable
+        );
+        assert!(matches!(
+            poles[TIER_PADE].descriptor,
+            RationalPoleEnvelope::Constraint { .. }
+        ));
+        assert!(matches!(
+            poles[TIER_CPLUS].descriptor,
+            RationalPoleEnvelope::Constraint { .. }
+        ));
+
+        let level_index = levels.iter().position(|level| level.skip == 4).unwrap();
+        let bounds = unified_build_bounds(&levels, &orbit, -20.0);
+        let candidates = unified_cauchy_candidate_derivations(
+            &levels[level_index].blocks[0],
+            &bounds,
+            level_index,
+            0,
+            1e-3,
+        );
+        for tier_candidates in candidates {
+            let live: Vec<_> = tier_candidates
+                .iter()
+                .filter(|candidate| !candidate.is_dead())
+                .collect();
+            assert!(live.len() <= MAX_CAUCHY_CANDIDATES);
+            if live.len() == 2 {
+                assert_ne!(live[0].source_index, live[1].source_index);
+            }
+        }
+    }
+
+    #[test]
+    fn unified_serialized_validity_is_conservative_for_benchmark_orbits() {
+        let samples: Vec<f32> = (0..=400).map(|step| -20.0 - step as f32 * 0.5).collect();
+        let mut comparisons = 0usize;
+        let mut live_tiers = 0usize;
+        for (name, cx, cy) in [
+            ("seahorse", -0.743643887037151, 0.131825904205330),
+            ("feigenbaum", -1.401155, 0.0),
+            ("near-parab", -0.7499, 0.0001),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, 256);
+            assert!(orbit.len() > 256, "[{}] escaped", name);
+            let levels = build_unified_levels(&orbit, 16);
+            let bounds = unified_build_bounds(&levels, &orbit, -20.0);
+            for (level_index, level) in levels.iter().enumerate() {
+                if level.skip < MOBIUS_MIN_EMIT_SKIP {
+                    continue;
+                }
+                for slot in 0..level.blocks.len() {
+                    let source = unified_validity_envelope_for_block(
+                        &level.blocks[slot],
+                        &level.moduli[slot],
+                        &bounds,
+                        level_index,
+                        slot,
+                        1e-6,
+                        -20.0,
+                    );
+                    live_tiers += source.tiers.iter().filter(|tier| !tier.is_dead()).count();
+                    let serialized = serialize_validity_envelope(&source);
+                    let audit = audit_serialized_validity_envelope(&source, serialized, &samples);
+                    comparisons += audit.comparisons;
+                    assert_eq!(
+                        audit.violations, 0,
+                        "[{}] level {} slot {} serialization relaxed a constraint: {:?}",
+                        name, level_index, slot, audit
+                    );
+
+                    let packed = serialize_validity_envelope_packed_v1(&source);
+                    let packed_audit = audit_packed_validity_envelope_v1(&source, packed, &samples);
+                    comparisons += packed_audit.comparisons;
+                    assert_eq!(
+                        packed_audit.violations, 0,
+                        "[{}] level {} slot {} packed-v1 relaxed a constraint: {:?}",
+                        name, level_index, slot, packed_audit
+                    );
+                    let mut one_rung_source = source.clone();
+                    for tier in &mut one_rung_source.tiers {
+                        tier.cauchy[1] = crate::validity::CauchyCandidateEnvelope::dead();
+                    }
+                    let one_rung = serialize_validity_envelope(&one_rung_source);
+                    for tier in ValidityTier::ALL {
+                        for &log2_dc in &samples {
+                            assert_eq!(
+                                packed.radius_log2(tier, log2_dc),
+                                one_rung.radius_log2(tier, log2_dc),
+                                "[{}] level {} slot {} tier {:?} dc {} packed/natural mismatch",
+                                name,
+                                level_index,
+                                slot,
+                                tier,
+                                log2_dc
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            live_tiers > 0,
+            "benchmark set produced no live tier envelope"
+        );
+        assert!(comparisons > 10_000, "serialization audit was too shallow");
+    }
+
+    #[test]
+    fn dynamic_validity_boundary_sweep_is_value_and_derivative_sound() {
+        use crate::mobius::mobius_apply;
+
+        let epsilon = 1e-6_f64;
+        let reference_log2_dc = -20.0_f64;
+        let log2_dc_grid = [-20.25_f32, -24.0, -32.0, -48.0, -72.0, -104.0, -152.0];
+        let mut checked_by_tier = [0usize; 4];
+        let mut checked_by_orbit = [0usize; 3];
+        for (orbit_index, (name, cx, cy)) in [
+            ("seahorse", -0.743643887037151, 0.131825904205330),
+            ("feigenbaum", -1.401155, 0.0),
+            ("near-parab", -0.7499, 0.0001),
+        ]
+        .iter()
+        .copied()
+        .enumerate()
+        {
+            let orbit = ref_orbit_f64(cx, cy, 512);
+            assert!(orbit.len() > 512, "[{}] escaped", name);
+            let levels = build_unified_levels(&orbit, 32);
+            let bounds = unified_build_bounds(&levels, &orbit, reference_log2_dc);
+            for (level_index, level) in levels.iter().enumerate() {
+                if level.skip < MOBIUS_MIN_EMIT_SKIP {
+                    continue;
+                }
+                for slot in (0..level.blocks.len()).step_by(5) {
+                    let block = &level.blocks[slot];
+                    let envelope = unified_validity_envelope_for_block(
+                        block,
+                        &level.moduli[slot],
+                        &bounds,
+                        level_index,
+                        slot,
+                        epsilon,
+                        reference_log2_dc,
+                    );
+                    let decoded = serialize_validity_envelope(&envelope);
+                    let first = 1 + slot * level.skip;
+                    let magnitude = |value: CFe| {
+                        let (x, y) = value.to_f64();
+                        (x * x + y * y).sqrt()
+                    };
+                    for tier in 0..4usize {
+                        for (sample_index, &log2_dc) in log2_dc_grid.iter().enumerate() {
+                            let radius = decoded.tiers[tier].radius_log2(log2_dc);
+                            if !radius.is_finite() {
+                                continue;
+                            }
+                            let log2_dz = radius as f64 - 0.25;
+                            let dz_magnitude = log2_dz.exp2();
+                            let dc_magnitude = (log2_dc as f64).exp2();
+                            if !(dz_magnitude.is_finite() && dz_magnitude > 0.0) {
+                                continue;
+                            }
+                            let z_phase = if sample_index % 2 == 0 { 0.7_f64 } else { 2.4 };
+                            let c_phase = if sample_index % 2 == 0 { 1.9_f64 } else { 0.2 };
+                            let z = (dz_magnitude * z_phase.cos(), dz_magnitude * z_phase.sin());
+                            let c = (dc_magnitude * c_phase.cos(), dc_magnitude * c_phase.sin());
+
+                            let (mut exact_x, mut exact_y) = z;
+                            let (mut exact_dx, mut exact_dy) = (1.0_f64, 0.0_f64);
+                            for iteration in first..first + level.skip {
+                                let (ref_x, ref_y) = orbit[iteration];
+                                let multiplier = (ref_x + exact_x, ref_y + exact_y);
+                                let next_derivative = (
+                                    2.0 * (multiplier.0 * exact_dx - multiplier.1 * exact_dy),
+                                    2.0 * (multiplier.0 * exact_dy + multiplier.1 * exact_dx),
+                                );
+                                let linear = (
+                                    2.0 * (ref_x * exact_x - ref_y * exact_y),
+                                    2.0 * (ref_x * exact_y + ref_y * exact_x),
+                                );
+                                let square = (
+                                    exact_x * exact_x - exact_y * exact_y,
+                                    2.0 * exact_x * exact_y,
+                                );
+                                exact_x = linear.0 + square.0 + c.0;
+                                exact_y = linear.1 + square.1 + c.1;
+                                exact_dx = next_derivative.0;
+                                exact_dy = next_derivative.1;
+                            }
+
+                            let zfe = CFe::from_c(z.0, z.1);
+                            let cfe = CFe::from_c(c.0, c.1);
+                            let (value, derivative) = match tier {
+                                TIER_AFFINE => {
+                                    (block.m.a.mul(zfe).add(block.m.b.mul(cfe)), block.m.a)
+                                }
+                                TIER_PADE => {
+                                    let mut plain = block.m;
+                                    plain.ap = CFe::ZERO;
+                                    plain.dp = CFe::ZERO;
+                                    plain.f = CFe::ZERO;
+                                    let applied = mobius_apply(&plain, zfe, cfe);
+                                    (applied.0, applied.1)
+                                }
+                                TIER_CPLUS => {
+                                    let applied = mobius_apply(&block.m, zfe, cfe);
+                                    (applied.0, applied.1)
+                                }
+                                _ => (
+                                    unified_eval_jet3(block, zfe, cfe),
+                                    unified_eval_jet3_dz(block, zfe, cfe),
+                                ),
+                            };
+                            let (value_x, value_y) = value.to_f64();
+                            let (derivative_x, derivative_y) = derivative.to_f64();
+                            let value_error =
+                                ((value_x - exact_x).powi(2) + (value_y - exact_y).powi(2)).sqrt();
+                            let derivative_error = ((derivative_x - exact_dx).powi(2)
+                                + (derivative_y - exact_dy).powi(2))
+                            .sqrt();
+                            let value_scale = magnitude(block.m.a) * dz_magnitude
+                                + magnitude(block.m.b) * dc_magnitude;
+                            let derivative_scale = magnitude(block.m.a);
+                            let exact_value_magnitude =
+                                (exact_x * exact_x + exact_y * exact_y).sqrt();
+                            let exact_derivative_magnitude =
+                                (exact_dx * exact_dx + exact_dy * exact_dy).sqrt();
+                            let value_tolerance = 5.0 * epsilon * value_scale
+                                + 128.0 * f64::EPSILON * exact_value_magnitude.max(1e-300);
+                            let derivative_tolerance = 5.0 * epsilon * derivative_scale
+                                + 128.0 * f64::EPSILON * exact_derivative_magnitude.max(1e-300);
+                            assert!(
+                                value_error <= value_tolerance,
+                                "[{}] level {} slot {} tier {} dc {}: value error {:e} > {:e}",
+                                name,
+                                level_index,
+                                slot,
+                                tier,
+                                log2_dc,
+                                value_error,
+                                value_tolerance
+                            );
+                            assert!(
+                                derivative_error <= derivative_tolerance,
+                                "[{}] level {} slot {} tier {} dc {}: derivative error {:e} > {:e}",
+                                name,
+                                level_index,
+                                slot,
+                                tier,
+                                log2_dc,
+                                derivative_error,
+                                derivative_tolerance
+                            );
+                            checked_by_tier[tier] += 1;
+                            checked_by_orbit[orbit_index] += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(
+            checked_by_tier.iter().all(|count| *count > 100),
+            "insufficient tier coverage: {:?}",
+            checked_by_tier
+        );
+        assert!(
+            checked_by_orbit.iter().all(|count| *count > 100),
+            "insufficient orbit coverage: {:?}",
+            checked_by_orbit
+        );
+    }
+
+    #[test]
+    #[ignore = "census benchmark: cargo test --release dynamic_validity_census -- --ignored --nocapture"]
+    fn dynamic_validity_census() {
+        use std::fmt::Write as _;
+        use std::path::PathBuf;
+
+        let epsilon = 1e-6_f64;
+        let reference_log2_dc = -20.0_f64;
+        let log2_dc_grid = [-20.25_f32, -24.0, -32.0, -48.0, -72.0, -104.0];
+        let mut views = Vec::new();
+        let mut global_legacy = DynamicDispatchCensus::default();
+        let mut global_one = DynamicDispatchCensus::default();
+        let mut global_two = DynamicDispatchCensus::default();
+
+        for (name, cx, cy) in [
+            ("seahorse", -0.743643887037151, 0.131825904205330),
+            ("feigenbaum", -1.401155, 0.0),
+            ("near-parab", -0.7499, 0.0001),
+        ] {
+            let orbit = ref_orbit_f64(cx, cy, 1024);
+            assert!(orbit.len() > 1024, "[{}] escaped", name);
+            let levels = build_unified_levels(&orbit, 64);
+            let static_bounds = unified_build_bounds(&levels, &orbit, reference_log2_dc);
+            let two_sources: Vec<Vec<ValidityEnvelope>> = levels
+                .iter()
+                .enumerate()
+                .map(|(level_index, level)| {
+                    (0..level.blocks.len())
+                        .map(|slot| {
+                            unified_validity_envelope_for_block(
+                                &level.blocks[slot],
+                                &level.moduli[slot],
+                                &static_bounds,
+                                level_index,
+                                slot,
+                                epsilon,
+                                reference_log2_dc,
+                            )
+                        })
+                        .collect()
+                })
+                .collect();
+            let one_sources: Vec<Vec<ValidityEnvelope>> = two_sources
+                .iter()
+                .map(|level| {
+                    level
+                        .iter()
+                        .cloned()
+                        .map(|mut envelope| {
+                            for tier in &mut envelope.tiers {
+                                tier.cauchy[1] = crate::validity::CauchyCandidateEnvelope::dead();
+                            }
+                            envelope
+                        })
+                        .collect()
+                })
+                .collect();
+            let two_serialized: Vec<Vec<SerializedValidityEnvelope>> = two_sources
+                .iter()
+                .map(|level| level.iter().map(serialize_validity_envelope).collect())
+                .collect();
+            let one_serialized: Vec<Vec<SerializedValidityEnvelope>> = one_sources
+                .iter()
+                .map(|level| level.iter().map(serialize_validity_envelope).collect())
+                .collect();
+
+            let mut legacy_census = DynamicDispatchCensus::default();
+            let mut one_census = DynamicDispatchCensus::default();
+            let mut two_census = DynamicDispatchCensus::default();
+            let mut one_radius_delta = Vec::new();
+            let mut two_radius_delta = Vec::new();
+            let (mut one_lost, mut one_unlocked) = (0usize, 0usize);
+            let (mut two_lost, mut two_unlocked) = (0usize, 0usize);
+
+            for (dc_index, &log2_dc) in log2_dc_grid.iter().enumerate() {
+                // This is deliberately the legacy cmax-keyed path: bounds and
+                // radii are rebuilt for every grid entry to quantify exactly
+                // the work/coverage the static dynamic envelope replaces.
+                let legacy_bounds = unified_build_bounds(&levels, &orbit, log2_dc as f64);
+                let legacy_radii =
+                    unified_solve_radii(&levels, &legacy_bounds, epsilon, log2_dc as f64);
+                let dc_magnitude = (log2_dc as f64).exp2();
+                let phase = 0.35 + dc_index as f64 * 0.71;
+                let trajectory = exact_delta_trajectory(
+                    &orbit,
+                    (dc_magnitude * phase.cos(), dc_magnitude * phase.sin()),
+                );
+                legacy_census.merge(&legacy_dispatch_census(&levels, &trajectory, &legacy_radii));
+                one_census.merge(&dynamic_dispatch_census(
+                    &levels,
+                    &trajectory,
+                    log2_dc,
+                    &one_sources,
+                    &one_serialized,
+                ));
+                two_census.merge(&dynamic_dispatch_census(
+                    &levels,
+                    &trajectory,
+                    log2_dc,
+                    &two_sources,
+                    &two_serialized,
+                ));
+
+                for (level_index, level) in levels.iter().enumerate() {
+                    if level.skip < MOBIUS_MIN_EMIT_SKIP {
+                        continue;
+                    }
+                    for slot in 0..level.blocks.len() {
+                        for tier in ValidityTier::ALL {
+                            let legacy = legacy_radii.tiers[level_index][slot][tier.index()];
+                            let one =
+                                one_serialized[level_index][slot].radius_log2(tier, log2_dc) as f64;
+                            let two =
+                                two_serialized[level_index][slot].radius_log2(tier, log2_dc) as f64;
+                            match (legacy.is_finite(), one.is_finite()) {
+                                (true, true) => one_radius_delta.push(one - legacy),
+                                (true, false) => one_lost += 1,
+                                (false, true) => one_unlocked += 1,
+                                _ => {}
+                            }
+                            match (legacy.is_finite(), two.is_finite()) {
+                                (true, true) => two_radius_delta.push(two - legacy),
+                                (true, false) => two_lost += 1,
+                                (false, true) => two_unlocked += 1,
+                                _ => {}
+                            }
+                        }
+                    }
+                }
+            }
+
+            let one_pairs = one_radius_delta.len();
+            let two_pairs = two_radius_delta.len();
+            let one_p05 = nearest_rank(&mut one_radius_delta.clone(), 0.05);
+            let one_p50 = nearest_rank(&mut one_radius_delta.clone(), 0.50);
+            let one_p95 = nearest_rank(&mut one_radius_delta, 0.95);
+            let two_p05 = nearest_rank(&mut two_radius_delta.clone(), 0.05);
+            let two_p50 = nearest_rank(&mut two_radius_delta.clone(), 0.50);
+            let two_p95 = nearest_rank(&mut two_radius_delta, 0.95);
+            views.push(format!(
+                "    {{\n      \"name\": \"{}\",\n      \"radiusLog2DeltaVsLegacy\": {{\n        \"oneRung\": {{ \"pairs\": {}, \"p05\": {:.6}, \"p50\": {:.6}, \"p95\": {:.6}, \"lost\": {}, \"unlocked\": {} }},\n        \"twoRungs\": {{ \"pairs\": {}, \"p05\": {:.6}, \"p50\": {:.6}, \"p95\": {:.6}, \"lost\": {}, \"unlocked\": {} }}\n      }},\n      \"dispatch\": {{\n        \"legacy\": {{ \"blockApplications\": {}, \"exactSteps\": {}, \"skippedIterations\": {}, \"meanAppliedSkip\": {:.6}, \"tierAccepts\": {:?} }},\n        \"oneRung\": {{ \"blockApplications\": {}, \"exactSteps\": {}, \"skippedIterations\": {}, \"meanAppliedSkip\": {:.6}, \"tierAccepts\": {:?}, \"candidateUsage\": {:?}, \"rejections\": {:?} }},\n        \"twoRungs\": {{ \"blockApplications\": {}, \"exactSteps\": {}, \"skippedIterations\": {}, \"meanAppliedSkip\": {:.6}, \"tierAccepts\": {:?}, \"candidateUsage\": {:?}, \"rejections\": {:?} }}\n      }}\n    }}",
+                name,
+                one_pairs,
+                one_p05,
+                one_p50,
+                one_p95,
+                one_lost,
+                one_unlocked,
+                two_pairs,
+                two_p05,
+                two_p50,
+                two_p95,
+                two_lost,
+                two_unlocked,
+                legacy_census.block_applications,
+                legacy_census.exact_steps,
+                legacy_census.skipped_iterations,
+                legacy_census.mean_applied_skip(),
+                legacy_census.tier_accepts,
+                one_census.block_applications,
+                one_census.exact_steps,
+                one_census.skipped_iterations,
+                one_census.mean_applied_skip(),
+                one_census.tier_accepts,
+                one_census.candidate_usage,
+                one_census.rejections,
+                two_census.block_applications,
+                two_census.exact_steps,
+                two_census.skipped_iterations,
+                two_census.mean_applied_skip(),
+                two_census.tier_accepts,
+                two_census.candidate_usage,
+                two_census.rejections,
+            ));
+            global_legacy.merge(&legacy_census);
+            global_one.merge(&one_census);
+            global_two.merge(&two_census);
+        }
+
+        let selected = if global_two.skipped_iterations
+            >= (global_one.skipped_iterations as f64 * 1.01).ceil() as usize
+        {
+            "two-rungs"
+        } else {
+            "one-rung"
+        };
+        let mut json = String::new();
+        writeln!(
+            json,
+            "{{\n  \"schemaVersion\": 1,\n  \"benchmark\": \"dynamic-validity-census\",\n  \"epsilon\": {},\n  \"referenceLog2Dc\": {},\n  \"log2DcGrid\": {:?},\n  \"rejectionOrder\": [\"static-domain\", \"pure-c\", \"pole\", \"cauchy\", \"value\", \"derivative\"],\n  \"views\": [\n{}\n  ],\n  \"aggregate\": {{\n    \"legacySkippedIterations\": {},\n    \"oneRungSkippedIterations\": {},\n    \"twoRungSkippedIterations\": {},\n    \"oneRungCandidateUsage\": {:?},\n    \"twoRungCandidateUsage\": {:?}\n  }},\n  \"rolloutGate\": {{\n    \"oneRungEnvelopeBytesPerBlock\": 112,\n    \"oneRungCombinedBytesPerBlock\": 220,\n    \"twoRungEnvelopeBytesPerBlock\": 144,\n    \"twoRungCombinedBytesPerBlock\": 252,\n    \"packedOneRungEnvelopeBytesPerBlock\": 96,\n    \"packedOneRungCombinedBytesPerBlock\": 204,\n    \"metadataLimitEnvelopeBytes\": 96,\n    \"metadataLimitCombinedBytes\": 204,\n    \"correctnessSweepPassed\": true,\n    \"packedSerializationAuditPassed\": true,\n    \"packedMatchesOneRungDecisions\": true,\n    \"oneRungMetadataPassed\": false,\n    \"twoRungMetadataPassed\": false,\n    \"packedOneRungMetadataPassed\": true,\n    \"gpuAndNavigationGates\": \"pending\",\n    \"oneRungRolloutEligible\": false,\n    \"twoRungRolloutEligible\": false,\n    \"packedOneRungRolloutEligible\": false,\n    \"selectedForPackedPrototype\": \"{}\"\n  }}\n}}",
+            epsilon,
+            reference_log2_dc,
+            log2_dc_grid,
+            views.join(",\n"),
+            global_legacy.skipped_iterations,
+            global_one.skipped_iterations,
+            global_two.skipped_iterations,
+            global_one.candidate_usage,
+            global_two.candidate_usage,
+            selected,
+        )
+        .unwrap();
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("benchmarks/dynamic-validity-census.json");
+        std::fs::write(&path, &json).unwrap();
+        println!("{}", json);
+        assert!(global_one.skipped_iterations > 0);
+        assert!(global_two.skipped_iterations > 0);
+    }
+
+    #[test]
+    fn cpu_auto_referee_preserves_tails_rebases_continuations_and_derivatives() {
+        let epsilon = 1e-6_f64;
+        let reference_log2_dc = -20.0;
+        let orbit = ref_orbit_f64(-1.401155, 0.0, 256);
+        assert!(orbit.len() > 256, "reference escaped");
+        let levels = build_unified_levels(&orbit, 64);
+        let bounds = unified_build_bounds(&levels, &orbit, reference_log2_dc);
+        let serialized: Vec<Vec<SerializedValidityEnvelope>> = levels
+            .iter()
+            .enumerate()
+            .map(|(level_index, level)| {
+                (0..level.blocks.len())
+                    .map(|slot| {
+                        serialize_validity_envelope(&unified_validity_envelope_for_block(
+                            &level.blocks[slot],
+                            &level.moduli[slot],
+                            &bounds,
+                            level_index,
+                            slot,
+                            epsilon,
+                            reference_log2_dc,
+                        ))
+                    })
+                    .collect()
+            })
+            .collect();
+        let dc_magnitude = 2f64.powi(-40);
+        let dc = CFe::from_c(dc_magnitude * 0.8, dc_magnitude * 0.3);
+
+        // Only the first 192 reference indices are committed. The remainder
+        // must be exact without changing the completed result.
+        let mut continuous = DynamicCpuRun::new();
+        run_dynamic_cpu_segment(
+            &mut continuous,
+            &levels,
+            &serialized,
+            &orbit,
+            dc,
+            192,
+            256,
+            usize::MAX,
+        );
+        assert!(!continuous.escaped);
+        assert_eq!(continuous.physical_iteration, 256);
+        assert!(continuous.block_applications > 0);
+        assert!(continuous.exact_steps >= 64);
+
+        // Parking and resuming after three turns is bit-identical because no
+        // hidden referee state exists outside the continuation payload.
+        let mut continued = DynamicCpuRun::new();
+        run_dynamic_cpu_segment(
+            &mut continued,
+            &levels,
+            &serialized,
+            &orbit,
+            dc,
+            192,
+            256,
+            3,
+        );
+        assert!(continued.physical_iteration < 256);
+        run_dynamic_cpu_segment(
+            &mut continued,
+            &levels,
+            &serialized,
+            &orbit,
+            dc,
+            192,
+            256,
+            usize::MAX,
+        );
+        assert_eq!(continued.state.delta, continuous.state.delta);
+        assert_eq!(continued.state.derivative, continuous.state.derivative);
+        assert_eq!(
+            continued.state.second_derivative,
+            continuous.state.second_derivative
+        );
+        assert_eq!(continued.reference_index, continuous.reference_index);
+
+        // Exact-only referee for the same pixel. Value and first derivative
+        // carry the certified epsilon; z'' uses the existing best-effort tier
+        // partials and retains the looser Phase-D tolerance.
+        let mut exact = DynamicCpuRun::new();
+        run_dynamic_cpu_segment(
+            &mut exact,
+            &levels,
+            &serialized,
+            &orbit,
+            dc,
+            0,
+            256,
+            usize::MAX,
+        );
+        assert!(!exact.escaped);
+        assert!(cfe_relative_error(continuous.state.delta, exact.state.delta) < 1e-3);
+        assert!(cfe_relative_error(continuous.state.derivative, exact.state.derivative) < 1e-3);
+        assert!(
+            cfe_relative_error(
+                continuous.state.second_derivative,
+                exact.state.second_derivative
+            ) < 2e-2
+        );
+
+        // Zhuoran rebase equivalence: replace δ by the full z and restart the
+        // reference at Z0=0. The next exact value, z' and z'' are unchanged.
+        let mut prefix = DynamicCpuRun::new();
+        run_dynamic_cpu_segment(
+            &mut prefix,
+            &levels,
+            &serialized,
+            &orbit,
+            dc,
+            0,
+            32,
+            usize::MAX,
+        );
+        assert!(prefix.reference_index > 0 && prefix.reference_index + 1 < orbit.len());
+        let unrebased = exact_reference_step(prefix.state, orbit[prefix.reference_index], dc);
+        let mut rebased_state = prefix.state;
+        rebased_state.delta = CFe::from_c(
+            orbit[prefix.reference_index].0,
+            orbit[prefix.reference_index].1,
+        )
+        .add(prefix.state.delta);
+        let rebased = exact_reference_step(rebased_state, orbit[0], dc);
+        let unre_based_full = CFe::from_c(
+            orbit[prefix.reference_index + 1].0,
+            orbit[prefix.reference_index + 1].1,
+        )
+        .add(unrebased.delta);
+        let rebased_full = CFe::from_c(orbit[1].0, orbit[1].1).add(rebased.delta);
+        assert!(cfe_relative_error(rebased_full, unre_based_full) < 1e-12);
+        assert!(cfe_relative_error(rebased.derivative, unrebased.derivative) < 1e-12);
+        assert!(cfe_relative_error(rebased.second_derivative, unrebased.second_derivative) < 1e-12);
+
+        // Out-of-domain dc rejects the table, then exact fallback preserves
+        // the first escape (c=2 escapes on the second Mandelbrot step).
+        let zero_orbit = ref_orbit_f64(0.0, 0.0, 4);
+        let outside_dc = CFe::from_c(2.0, 0.0);
+        let first = exact_reference_step(
+            UnifiedCpuState {
+                delta: CFe::ZERO,
+                derivative: CFe::ZERO,
+                second_derivative: CFe::ZERO,
+            },
+            zero_orbit[0],
+            outside_dc,
+        );
+        let sample_level = [CpuValidityLevel {
+            skip: 4,
+            blocks: &serialized[2][..1],
+        }];
+        assert!(cpu_auto_referee_floatexp(
+            &sample_level,
+            0,
+            4,
+            4,
+            cfe_floatexp32(outside_dc),
+            cfe_floatexp32(first.delta),
+        )
+        .is_none());
+        let second = exact_reference_step(first, zero_orbit[1], outside_dc);
+        let escaped_z = CFe::from_c(zero_orbit[2].0, zero_orbit[2].1).add(second.delta);
+        let (escape_x, escape_y) = escaped_z.to_f64();
+        assert!(escape_x * escape_x + escape_y * escape_y > 4.0);
     }
 
     #[test]
@@ -2012,7 +4601,11 @@ mod tests {
     #[test]
     #[ignore = "cold-build stage timing (§8.2): cargo test --release -- --ignored --nocapture"]
     fn unified_cold_build_stage_timing() {
+        use std::fmt::Write as _;
+        use std::path::PathBuf;
         use std::time::Instant;
+
+        let mut baseline_views = Vec::new();
         for (name, cx, cy, iters, lcmax) in [
             (
                 "seahorse",
@@ -2027,6 +4620,10 @@ mod tests {
             let orbit = ref_orbit_f64(cx, cy, iters);
             if orbit.len() < iters / 2 {
                 println!("[{name}] escaped — skipped");
+                baseline_views.push(format!(
+                    "    {{\n      \"name\": \"{name}\",\n      \"status\": \"escaped\",\n      \"orbitSteps\": {}\n    }}",
+                    orbit.len().saturating_sub(1)
+                ));
                 continue;
             }
             let eps = 1e-6;
@@ -2100,9 +4697,25 @@ mod tests {
                 lcmax + 10.0
             );
             let t4 = Instant::now();
-            let (side, _dir) =
+            let coeffs = unified_serialize_coeffs(&levels);
+            let (side, dir) =
                 unified_serialize_radii(&levels, &radii, band, spread, None, None, &[]);
             let t_ser = t4.elapsed();
+            let block_count = side.len();
+            assert_eq!(
+                coeffs.len(),
+                block_count,
+                "coefficient/sidecar block mismatch"
+            );
+            let coefficient_bytes = coeffs.len() * core::mem::size_of_val(&coeffs[0]);
+            let sidecar_bytes = side.len() * core::mem::size_of::<UnifiedRadius>();
+            let directory_bytes = dir.len() * core::mem::size_of::<JetLevel>();
+            let total_table_bytes = coefficient_bytes + sidecar_bytes + directory_bytes;
+            let bytes_per_block = if block_count > 0 {
+                (coefficient_bytes + sidecar_bytes) as f64 / block_count as f64
+            } else {
+                0.0
+            };
             // Tag mix: §6.3 score vs the legacy cheapest-covering rule.
             let (mut mix_new, mut mix_old) = ([0usize; 4], [0usize; 4]);
             let (mut flips, mut secours_live) = (0usize, 0usize);
@@ -2140,11 +4753,87 @@ mod tests {
                 t_sa,
                 t_ser,
                 sa.n0,
-                side.len(),
+                block_count,
                 mix_new,
                 mix_old,
                 flips,
                 secours_live,
+            );
+            println!(
+                "[{name:>10}] table bytes: coeffs {coefficient_bytes} sidecar {sidecar_bytes} \
+                 directory {directory_bytes} total {total_table_bytes} | {bytes_per_block:.1} B/block"
+            );
+
+            let ms = |duration: std::time::Duration| duration.as_secs_f64() * 1000.0;
+            baseline_views.push(format!(
+                concat!(
+                    "    {{\n",
+                    "      \"name\": \"{name}\",\n",
+                    "      \"status\": \"measured\",\n",
+                    "      \"orbitSteps\": {orbit_steps},\n",
+                    "      \"log2CMax\": {lcmax:.1},\n",
+                    "      \"timingsMs\": {{\n",
+                    "        \"coefficients\": {coefficients:.3},\n",
+                    "        \"bounds\": {bounds_ms:.3},\n",
+                    "        \"radii\": {radii_ms:.3},\n",
+                    "        \"sa\": {sa_ms:.3},\n",
+                    "        \"replay\": {replay_ms:.3},\n",
+                    "        \"serialization\": {serialization_ms:.3}\n",
+                    "      }},\n",
+                    "      \"levelCount\": {level_count},\n",
+                    "      \"blockCount\": {block_count},\n",
+                    "      \"coefficientBytes\": {coefficient_bytes},\n",
+                    "      \"sidecarBytes\": {sidecar_bytes},\n",
+                    "      \"directoryBytes\": {directory_bytes},\n",
+                    "      \"totalTableBytes\": {total_table_bytes},\n",
+                    "      \"bytesPerBlock\": {bytes_per_block:.1}\n",
+                    "    }}"
+                ),
+                name = name,
+                orbit_steps = orbit.len() - 1,
+                lcmax = lcmax,
+                coefficients = ms(t_build),
+                bounds_ms = ms(t_bounds),
+                radii_ms = ms(t_radii),
+                sa_ms = ms(t_sa),
+                replay_ms = ms(t_replay),
+                serialization_ms = ms(t_ser),
+                level_count = dir.len(),
+                block_count = block_count,
+                coefficient_bytes = coefficient_bytes,
+                sidecar_bytes = sidecar_bytes,
+                directory_bytes = directory_bytes,
+                total_table_bytes = total_table_bytes,
+                bytes_per_block = bytes_per_block,
+            ));
+        }
+
+        let mut baseline = String::new();
+        writeln!(&mut baseline, "{{").unwrap();
+        writeln!(&mut baseline, "  \"schemaVersion\": 1,").unwrap();
+        writeln!(&mut baseline, "  \"benchmark\": \"unified-cold-build\",").unwrap();
+        writeln!(&mut baseline, "  \"iterations\": 32768,").unwrap();
+        writeln!(&mut baseline, "  \"epsilon\": 0.000001,").unwrap();
+        writeln!(&mut baseline, "  \"views\": [").unwrap();
+        writeln!(&mut baseline, "{}", baseline_views.join(",\n")).unwrap();
+        writeln!(&mut baseline, "  ]").unwrap();
+        writeln!(&mut baseline, "}}").unwrap();
+        println!("UNIFIED_COLD_BUILD_BASELINE_JSON\n{baseline}");
+
+        if std::env::var_os("MANDELBROT_WRITE_BENCHMARK_BASELINE").is_some() {
+            let path = std::env::var_os("MANDELBROT_BENCHMARK_BASELINE_PATH")
+                .map(PathBuf::from)
+                .unwrap_or_else(|| {
+                    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                        .join("benchmarks/unified-cold-build-baseline.json")
+                });
+            if let Some(parent) = path.parent() {
+                std::fs::create_dir_all(parent).unwrap();
+            }
+            std::fs::write(&path, baseline).unwrap();
+            println!(
+                "persisted unified cold-build baseline to {}",
+                path.display()
             );
         }
     }

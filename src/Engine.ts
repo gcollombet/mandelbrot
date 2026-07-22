@@ -76,6 +76,13 @@ const JET_COEFF_FLOATS = 27
 // Its own buffer so a radius re-solve re-uploads only these, not the whole
 // coefficient table.
 const JET_RADII_FLOATS = 4
+const DYNAMIC_VALIDITY_VERSION = 1
+const DYNAMIC_VALIDITY_WORDS_PER_BLOCK = 24
+const DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK = 2
+const dynamicValidityStorageWords = (blockCount: number) =>
+    Math.ceil((Math.max(1, blockCount) * (
+        DYNAMIC_VALIDITY_WORDS_PER_BLOCK + DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK
+    )) / 4) * 4
 // Floats per Möbius-c+ COEFFICIENT record — must match the Rust #[repr(C)]
 // MobiusCoeffs: 7 coefficients × (x, y, e), 84 B ([2/1]-c+: A, B, A', D, D',
 // F, N₂). Mobius tables ship in the SAME GPU buffers as jet ones (the element
@@ -130,6 +137,9 @@ const TS_COUNT = PASS_SLOTS.length * 2
 // asynchronous, so this controls the compute/count pass frequency, not display FPS.
 const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
 const COUNTER_READBACK_BUFFER_COUNT = 3
+const WORK_STATS_WORDS = 35
+const WORK_STATS_BYTES = WORK_STATS_WORDS * Uint32Array.BYTES_PER_ELEMENT
+const COUNTER_READBACK_BYTES = 2 * Uint32Array.BYTES_PER_ELEMENT + WORK_STATS_BYTES
 // Deferred-clear fallback (see pendingTableClear): generous enough for the
 // costliest unified builds (~3-5 s @40k iters) plus an in-flight orbit
 // extension; past it the re-render proceeds exact rather than never.
@@ -143,7 +153,19 @@ type CounterReadbackSlot = {
     generation: number
 }
 
+type DynamicValidityRuntimeStats = {
+    tierAttempts: [number, number, number, number]
+    tierAccepts: [number, number, number, number]
+    skipBuckets: [number, number, number, number]
+    candidateUses: number
+    rejectionReasons: [number, number, number, number, number, number]
+    exactFallbacks: number
+}
+
 type UnifiedTableStats = {
+    coefficientsMs: number
+    boundsMs: number
+    radiiMs: number
     saN0: number
     periodicP: number
     periodicStatus: number
@@ -156,6 +178,57 @@ type UnifiedTableStats = {
 type TableBuildKind = 'bla' | 'jet' | 'mobius' | 'unified'
 type TableBuildStage = 'idle' | 'coefficients' | 'bounds' | 'radii' | 'transfer' | 'ready' | 'error'
 
+type DynamicValidityPayload = {
+    version: number
+    wordsPerBlock: number
+    diagnosticsWordsPerBlock: number
+    referenceLog2Dc: number
+    envelopes: Float32Array<ArrayBuffer>
+    diagnostics: Uint32Array<ArrayBuffer>
+    levels: Uint32Array<ArrayBuffer>
+    levelCount: number
+}
+
+type OptionalHeadersPayload = {
+    version: number
+    revision: number
+    saLog2Dc: number
+    periodicLog2Dc: number
+    gateLog2Dc: number
+    data: Float32Array<ArrayBuffer>
+}
+
+type IncrementalTableRangeResponse = {
+    type: 'tableRange'
+    jobId: number
+    refId: number
+    tableGeneration: number
+    maxIterations: number
+    capacityOrbitLength: number
+    coveredOrbitLength: number
+    builtOrbitLength: number
+    reset: boolean
+    hasMore: boolean
+    /** Six u32s/range: level, skip, slotStart, slotCount, payloadOffset, committedCount. */
+    ranges: Uint32Array<ArrayBuffer>
+    coefficients: Float32Array<ArrayBuffer>
+    radii: Float32Array<ArrayBuffer>
+    envelopes: Float32Array<ArrayBuffer>
+    diagnostics: Uint32Array<ArrayBuffer>
+    validityVersion: number
+    validityWordsPerBlock: number
+    diagnosticsWordsPerBlock: number
+    referenceLog2Dc: number
+    cumulativeMerges: number
+    cumulativeCoefficients: number
+    cumulativeEnvelopes: number
+    peakRetainedBytes: number
+    cumulativeMergeCoefficientsMs: number
+    cumulativeEnvelopeMs: number
+    yields: number
+    cancellations: number
+}
+
 type ReferenceWorkerRequest =
     | {
         type: 'reset'
@@ -167,6 +240,8 @@ type ReferenceWorkerRequest =
         approximationMode: ApproximationMode
         blaEpsilon: number
         gateEmission?: boolean
+        dynamicBlockValidity?: boolean
+        incrementalReferenceTable?: boolean
         maxBlaSkip: number
         maxIterations: number
         precisionBudget: string
@@ -202,6 +277,18 @@ type ReferenceWorkerRequest =
     }
     | {
         type: 'setGateEmission'
+        jobId: number
+        on: boolean
+        tableGeneration: number
+    }
+    | {
+        type: 'setDynamicBlockValidity'
+        jobId: number
+        on: boolean
+        tableGeneration: number
+    }
+    | {
+        type: 'setIncrementalReferenceTable'
         jobId: number
         on: boolean
         tableGeneration: number
@@ -257,10 +344,12 @@ type ReferenceWorkerResponse =
         kind: TableBuildKind
         steps: Float32Array<ArrayBuffer>
         radii?: Float32Array<ArrayBuffer>
+        optionalHeaders?: OptionalHeadersPayload
+        validity?: DynamicValidityPayload
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
         // Worker-side table build wall-clock + unified stage mask (1 = coeffs,
-        // 2 = bounds, 4 = radii) — RenderStats' "Table build" debug row.
+        // 2 = bounds, 4 = radii, 8 = packed validity) — RenderStats' table row.
         buildMs?: number
         buildStages?: number
         // Table observability (unified only): SA prefix, periodic diagnostic,
@@ -283,6 +372,7 @@ type ReferenceWorkerResponse =
         refId: number
         maxIterations: number
         radii: Float32Array<ArrayBuffer>
+        optionalHeaders?: OptionalHeadersPayload
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
         buildMs?: number
@@ -290,6 +380,18 @@ type ReferenceWorkerResponse =
         tableStats?: UnifiedTableStats
         tableGeneration: number
     }
+    | {
+        type: 'headersReady'
+        jobId: number
+        refId: number
+        maxIterations: number
+        optionalHeaders: OptionalHeadersPayload
+        buildMs?: number
+        buildStages?: number
+        tableStats?: UnifiedTableStats
+        tableGeneration: number
+    }
+    | IncrementalTableRangeResponse
     | {
         type: 'error'
         jobId: number
@@ -326,10 +428,31 @@ type ReferenceSlot = {
         kind: 'bla' | 'jet' | 'mobius' | 'unified'
         steps: Float32Array<ArrayBuffer>
         radii?: Float32Array<ArrayBuffer>
+        optionalHeaders?: OptionalHeadersPayload
+        validity?: DynamicValidityPayload
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
         maxIterations: number
+        tableGeneration: number
     } | null
+    /** Progressive table ranges retained CPU-side until a staging reference promotes. */
+    incrementalRanges: IncrementalTableRangeResponse[]
+}
+
+type IncrementalTableLayout = {
+    refId: number
+    tableGeneration: number
+    capacityOrbitLength: number
+    offsets: number[]
+    capacities: number[]
+    skips: number[]
+    committed: number[]
+    /** Per-level upper bound of every committed dynamic candidate radius.
+     * A dz above this value cannot pass any packed tier in the level. */
+    maxDynamicRadius: number[]
+    totalBlockCapacity: number
+    coveredOrbitLength: number
+    builtOrbitLength: number
 }
 
 export type MinibrotResult = {
@@ -526,11 +649,30 @@ export class Engine {
     mandelbrotJetBuffer?: GPUBuffer // storage buffer: jet coefficient records (add-jet-approximation)
     mandelbrotJetRadiiBuffer?: GPUBuffer // storage buffer: jet radii (the split "buffer de rayons")
     mandelbrotJetLevelBuffer?: GPUBuffer // storage buffer: jet level directory
+    mandelbrotValidityBuffer?: GPUBuffer // packed-v1 dynamic validity, multiplexed on BLA-level binding in Auto
     private mandelbrotBlaBufferCapacity = 0
     private mandelbrotBlaLevelBufferCapacity = 0
     private mandelbrotJetBufferCapacity = 0
     private mandelbrotJetRadiiBufferCapacity = 0
     private mandelbrotJetLevelBufferCapacity = 0
+    private mandelbrotValidityBufferCapacity = 0
+    private dynamicValidityReady = false
+    private dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
+    private dynamicValidityGeneration = -1
+    /** A/B referee: evaluate packed certificates and counters, but dispatch
+     * with the legacy principal/secours sidecar. Incremental ranges carry a
+     * dormant legacy sidecar, so shadow mode intentionally uses one-shot. */
+    dynamicValidityShadow = false
+    /** Expensive per-proof GPU instrumentation. Kept out of production
+     * pipelines; the performance panel/tests can opt into a specialized
+     * diagnostic kernel without slowing ordinary block rendering. */
+    private dynamicValidityStatsEnabled = false
+    private incrementalReferenceTable = true
+    private incrementalTableLayout: IncrementalTableLayout | null = null
+    private currentOptionalHeaders?: OptionalHeadersPayload
+    private currentUnifiedBlockCount = 0
+    private currentUnifiedBlockRadii?: Float32Array<ArrayBuffer>
+    private optionalHeaderRevision = -1
 
     // pipelines / bindgroups
     pipelineResolve?: GPURenderPipeline
@@ -644,6 +786,14 @@ export class Engine {
     /** Applications served by the plain-f32 fast path (mode 5; the rest ran
      *  in fe). -1 = unknown. */
     f32AppsApprox = -1
+    /** Dynamic Auto proof instrumentation. Rejection order is value,
+     * derivative, pure-c, static/reference domain, Cauchy, rational pole. */
+    dynamicTierAttemptsApprox: [number, number, number, number] = [-1, -1, -1, -1]
+    dynamicTierAcceptsApprox: [number, number, number, number] = [-1, -1, -1, -1]
+    dynamicSkipBucketsApprox: [number, number, number, number] = [-1, -1, -1, -1]
+    dynamicCandidateUsesApprox = -1
+    dynamicRejectionReasonsApprox: [number, number, number, number, number, number] = [-1, -1, -1, -1, -1, -1]
+    dynamicExactFallbacksApprox = -1
     /** Table observability from the worker's last unified build. Periodic
      *  status codes: 0 pending, 1 active, 2 short orbit, 3 no converged
      *  period, 4 period above cap, 5 certificate rejected. */
@@ -659,6 +809,25 @@ export class Engine {
      *  A radii-only mask (4) is the Phase F keyframe path. */
     lastTableBuildMs = -1
     lastTableBuildStages = -1
+    lastTableCoefficientsMs = -1
+    lastTableBoundsMs = -1
+    lastTableRadiiMs = -1
+    /** Monotonic table-arrival counters used by navigation benchmarks. A
+     *  `radiiReady` publication is the legacy Auto cmax-only re-solve path:
+     *  coefficients and proof bounds stayed warm and only radii changed. */
+    tableBuildCompletionSerial = 0
+    cmaxOnlyTableRebuildCount = 0
+    optionalHeaderRefreshCount = 0
+    incrementalTableOrbitCoverage = 0
+    incrementalTableBuiltOrbit = 0
+    incrementalTableLevelBlocks: number[] = []
+    incrementalTableTransferredBytes = 0
+    incrementalTableYields = 0
+    incrementalTableCancellations = 0
+    incrementalTableCapacityGrowths = 0
+    incrementalTablePeakRetainedBytes = 0
+    incrementalTableMergeCoefficientsMs = 0
+    incrementalTableEnvelopeMs = 0
     /** Live worker-side table build milestone. Unified reports its three real
      *  cache phases; the other modes expose start/transfer/completion. */
     tableBuildActive = false
@@ -717,6 +886,10 @@ export class Engine {
     passActive: Record<string, boolean> = {}    // did each pass run in the last measured frame
     passGpuSumMs = 0                            // Σ timed passes that ran (breakdown; may overlap)
     passGpuSpanMs = 0                          // authoritative GPU frame time = max(end) − min(begin)
+    /** Latest raw timestamp-query duration for the iteration pass. The serial
+     *  lets an external benchmark record each asynchronous sample once. */
+    lastIterationPassMs = -1
+    iterationPassTimingSerial = 0
     /** EMA of the active timed passes other than compute, used to reserve frame budget. */
     private otherPassesGpuMs = 0
     frameSerial = 0                            // monotonic, ++ per actually-rendered frame (one submit)
@@ -775,7 +948,7 @@ export class Engine {
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private gateEmission = true
-    private dynamicBlockValidity = false
+    private dynamicBlockValidity = true
     private maxBlaSkip = 65536
     // Fixed precision budget as a target scale (max zoom depth navigation stays precise at).
     // Default 1e-30 keeps shallow use fast; the Settings slider can deepen it to 1e-1000.
@@ -1040,9 +1213,24 @@ export class Engine {
         // previous reference must never survive the switch. Without a table the
         // shader falls back to exact perturbation (correct, just slower) until
         // the worker's blaReady for this refId lands.
-        if (staging.bla) {
+        if (staging.incrementalRanges.length > 0) {
+            this.incrementalTableLayout = null
+            for (const range of staging.incrementalRanges) {
+                this.writeIncrementalTableRange(range)
+            }
+            staging.incrementalRanges = []
+            this.currentBlaLevelCount = this.incrementalActiveLevelCount()
+            this.referenceBlaReadyMaxIterations = Math.max(
+                0,
+                (this.incrementalTableLayout?.coveredOrbitLength ?? 1) - 1,
+            )
+        } else if (staging.bla) {
             this.writeBlockTable(staging.bla)
-            this.currentBlaLevelCount = staging.bla.levelCount
+            const dynamicPairReady = !this.dynamicBlockValidity
+                || staging.bla.kind !== 'unified'
+                || (this.dynamicValidityReady
+                    && this.dynamicValidityGeneration === this.tableGeneration)
+            this.currentBlaLevelCount = dynamicPairReady ? staging.bla.levelCount : 0
             this.referenceBlaReadyMaxIterations = staging.bla.maxIterations
         } else {
             this.currentBlaLevelCount = 0
@@ -1176,6 +1364,8 @@ export class Engine {
             approximationMode: this.approximationMode,
             blaEpsilon: this.blaEpsilon,
             gateEmission: this.gateEmission,
+            dynamicBlockValidity: this.dynamicBlockValidity,
+            incrementalReferenceTable: this.incrementalReferenceTable,
             maxBlaSkip: this.maxBlaSkip,
             maxIterations,
             precisionBudget: this.precisionBudget,
@@ -1325,6 +1515,7 @@ export class Engine {
                     orbitLen: message.count,
                     chunks: [message.orbit],
                     bla: null,
+                    incrementalRanges: [],
                 }
                 this.isReferenceValidating = false
                 return
@@ -1335,13 +1526,91 @@ export class Engine {
             return
         }
 
-        // ── blaReady / radiiReady — routed by refId, exactly like orbit chunks ──
+        // ── tables / optional headers — routed by refId like orbit chunks ──
         // Stale-generation tables (built under pre-change ε/skip/gates/mode, in
         // flight when the setter was posted) are dropped in both branches: the
         // worker processes messages FIFO, so a build under the new params always
         // follows.
         if (this.activeRef && message.refId === this.activeRef.refId) {
             if (message.tableGeneration !== this.tableGeneration) {
+                return
+            }
+            if (message.type === 'tableRange') {
+                const activatesFirstAutoTable = this.approximationMode === 'auto'
+                    && this.currentBlaLevelCount <= 0
+                    && message.ranges.length > 0
+                if (!this.writeIncrementalTableRange(message)) {
+                    return
+                }
+                this.currentBlaLevelCount = this.incrementalActiveLevelCount()
+                this.referenceBlaReadyMaxIterations = Math.max(0, message.coveredOrbitLength - 1)
+                this.incrementalTableOrbitCoverage = message.coveredOrbitLength
+                this.incrementalTableBuiltOrbit = message.builtOrbitLength
+                this.incrementalTableLevelBlocks = this.incrementalTableLayout?.committed.slice() ?? []
+                this.incrementalTableYields = message.yields
+                this.incrementalTableCancellations = message.cancellations
+                this.incrementalTablePeakRetainedBytes = message.peakRetainedBytes
+                this.incrementalTableMergeCoefficientsMs = message.cumulativeMergeCoefficientsMs
+                this.incrementalTableEnvelopeMs = message.cumulativeEnvelopeMs
+                this.tableBuildActive = message.hasMore
+                this.tableBuildProgress = Math.min(
+                    1,
+                    message.coveredOrbitLength / Math.max(1, message.maxIterations + 1),
+                )
+                this.tableBuildStage = message.hasMore ? 'bounds' : 'ready'
+                this.tableBuildKind = 'unified'
+                this.dynamicValidityReferenceLog2Dc = message.referenceLog2Dc
+                this.dynamicValidityGeneration = message.tableGeneration
+                this.dynamicValidityReady = this.currentBlaLevelCount > 0
+                this.debugViewDirty = true
+                this.isReferenceValidating = false
+                if (message.ranges.length === 0) {
+                    return
+                }
+                if (this.pendingTableClear) {
+                    this.pendingTableClear = false
+                    this.clearHistoryNextFrame = true
+                    this.needRender = true
+                    this.invalidateCounterReadback()
+                } else if (activatesFirstAutoTable) {
+                    if (this.unfinishedPixelCount >= 0) this.needFreezeSnapshot = true
+                    this.clearHistoryNextFrame = true
+                    this.needRender = true
+                    this.invalidateCounterReadback()
+                } else {
+                    // Appending certified ranges changes only future scheduling.
+                    // Existing texels/history remain mathematically valid.
+                    this.needRender = true
+                    this.invalidateCounterReadback(true)
+                }
+                return
+            }
+            if (message.type === 'headersReady') {
+                if (this.currentBlockTableKind !== 'unified') {
+                    return
+                }
+                if (!this.writeOptionalHeaders(message.optionalHeaders)) {
+                    return
+                }
+                this.optionalHeaderRefreshCount++
+                this.tableBuildActive = false
+                this.tableBuildProgress = 1
+                this.tableBuildStage = 'ready'
+                this.lastTableBuildMs = message.buildMs ?? this.lastTableBuildMs
+                this.lastTableBuildStages = message.buildStages ?? 16
+                if (message.tableStats) {
+                    this.tableSaN0 = message.tableStats.saN0
+                    this.tablePeriodicP = message.tableStats.periodicP
+                    this.tablePeriodicStatus = message.tableStats.periodicStatus
+                    this.tablePeriodicDetectedP = message.tableStats.periodicDetectedP
+                    this.tableGateCount = message.tableStats.gateCount
+                }
+                // Optional shortcuts preserve the exact result and the entire
+                // dynamic table. Existing history/counters remain valid; only
+                // unfinished pixels need another dispatch opportunity.
+                this.debugViewDirty = true
+                this.needRender = true
+                this.isReferenceValidating = false
                 return
             }
             // Cold-start Auto can finish its first image in exact perturbation
@@ -1358,12 +1627,31 @@ export class Engine {
                 // Radii-only re-solve: the GPU coefficient table is from the
                 // same build (worker guarantee) — rewrite just the sidecar +
                 // level directory.
-                this.writeRadiiSidecar(message.radii, message.levels, message.levelCount)
+                this.writeRadiiSidecar(
+                    message.radii,
+                    message.levels,
+                    message.levelCount,
+                    message.optionalHeaders,
+                )
             } else {
                 this.writeBlockTable(message)
             }
-            this.currentBlaLevelCount = message.levelCount
+            const dynamicPairReady = !this.dynamicBlockValidity
+                || this.approximationMode !== 'auto'
+                || (this.currentBlockTableKind === 'unified'
+                    && this.dynamicValidityReady
+                    && this.dynamicValidityGeneration === this.tableGeneration)
+            this.currentBlaLevelCount = dynamicPairReady ? message.levelCount : 0
             this.referenceBlaReadyMaxIterations = message.maxIterations
+            this.tableBuildCompletionSerial++
+            if (
+                message.type === 'radiiReady'
+                && message.buildStages !== undefined
+                && (message.buildStages & 4) !== 0
+                && (message.buildStages & ~(4 | 16)) === 0
+            ) {
+                this.cmaxOnlyTableRebuildCount++
+            }
             this.tableBuildActive = false
             this.tableBuildProgress = 1
             this.tableBuildStage = 'ready'
@@ -1377,6 +1665,9 @@ export class Engine {
                 this.lastTableBuildMs = message.buildMs
                 this.lastTableBuildStages = message.buildStages ?? -1
                 if (message.tableStats) {
+                    this.lastTableCoefficientsMs = message.tableStats.coefficientsMs ?? -1
+                    this.lastTableBoundsMs = message.tableStats.boundsMs ?? -1
+                    this.lastTableRadiiMs = message.tableStats.radiiMs ?? -1
                     this.tableSaN0 = message.tableStats.saN0 ?? -1
                     this.tablePeriodicP = message.tableStats.periodicP ?? -1
                     this.tablePeriodicStatus = message.tableStats.periodicStatus ?? 0
@@ -1421,14 +1712,40 @@ export class Engine {
             if (message.tableGeneration !== this.tableGeneration) {
                 return
             }
+            if (message.type === 'tableRange') {
+                if (message.reset) this.stagingRef.incrementalRanges = []
+                this.stagingRef.incrementalRanges.push(message)
+                this.tableBuildActive = message.hasMore
+                this.tableBuildProgress = Math.min(
+                    1,
+                    message.coveredOrbitLength / Math.max(1, message.maxIterations + 1),
+                )
+                this.tableBuildStage = message.hasMore ? 'bounds' : 'ready'
+                this.tableBuildKind = 'unified'
+                return
+            }
             if (message.type === 'radiiReady') {
                 // Merge into the staged full table (its coefficients are from
                 // the same build); without one there is nothing to align with.
                 if (this.stagingRef.bla?.kind === 'unified') {
                     this.stagingRef.bla.radii = message.radii
+                    this.stagingRef.bla.optionalHeaders = message.optionalHeaders
                     this.stagingRef.bla.levels = message.levels
                     this.stagingRef.bla.levelCount = message.levelCount
                     this.stagingRef.bla.maxIterations = message.maxIterations
+                }
+                this.tableBuildActive = false
+                this.tableBuildProgress = 1
+                this.tableBuildStage = 'ready'
+                return
+            }
+            if (message.type === 'headersReady') {
+                if (
+                    this.stagingRef.bla?.kind === 'unified'
+                    && (!this.stagingRef.bla.optionalHeaders
+                        || message.optionalHeaders.revision > this.stagingRef.bla.optionalHeaders.revision)
+                ) {
+                    this.stagingRef.bla.optionalHeaders = message.optionalHeaders
                 }
                 this.tableBuildActive = false
                 this.tableBuildProgress = 1
@@ -1439,9 +1756,12 @@ export class Engine {
                 kind: message.kind,
                 steps: message.steps,
                 radii: message.radii,
+                optionalHeaders: message.optionalHeaders,
+                validity: message.validity,
                 levels: message.levels,
                 levelCount: message.levelCount,
                 maxIterations: message.maxIterations,
+                tableGeneration: message.tableGeneration,
             }
             this.tableBuildActive = false
             this.tableBuildProgress = 1
@@ -1459,6 +1779,11 @@ export class Engine {
         // the worker navigator (set via the reset message), which builds the reference orbit.
         this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 5 ? 'auto' : this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
+        // Rollout defaults are owned by Engine. Mirror them into the front
+        // navigator before the worker reset so UI/debug getters and the worker
+        // start from the same dynamic+incremental contract.
+        this.mandelbrotNavigator.set_dynamic_block_validity(this.dynamicBlockValidity)
+        this.mandelbrotNavigator.set_incremental_reference_table(this.incrementalReferenceTable)
         this.initializeReferenceWorker()
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
         this.adapter = await navigator.gpu.requestAdapter()
@@ -1609,9 +1934,15 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot Jet Level Storage Buffer',
         })
+        this.mandelbrotValidityBuffer = this.device.createBuffer({
+            size: dynamicValidityStorageWords(1) * Uint32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Dynamic Validity Storage Buffer',
+        })
         this.mandelbrotJetBufferCapacity = 1
         this.mandelbrotJetRadiiBufferCapacity = 1
         this.mandelbrotJetLevelBufferCapacity = 1
+        this.mandelbrotValidityBufferCapacity = 1
 
         // Counter buffers for GPU pixel-completion readback (2 × u32: total unfinished + active)
         this.counterBuffer = this.device.createBuffer({
@@ -1619,20 +1950,19 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
-        // Work-instrumentation buffer (in-place compute path): 15 × u32
+        // Work-instrumentation buffer (in-place compute path): 35 × u32
         // (realMean, covMean, maxAccum, maxSteps, tierAff/Pade/Cplus/Jet,
         // gateJumps/gateFails, secoursApps/secoursIters, appsF32,
-        // renormApps/renormIters) — see WorkStats in the shader.
+        // renormApps/renormIters + dynamic proof counters) — see WorkStats.
         this.workStatsBuffer = this.device.createBuffer({
-            size: 60,
+            size: WORK_STATS_BYTES,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine WorkStats Storage',
         })
-        // Readback slots hold counter (8 B) + workStats (60 B) = 68 B, copied
-        // together each sampled in-place dispatch and read as 17 × u32.
+        // Readback slots hold the 8 B completion counter followed by WorkStats.
         this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
             buffer: this.device.createBuffer({
-                size: 68,
+                size: COUNTER_READBACK_BYTES,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: `Engine Counter Readback ${index}`,
             }),
@@ -2004,6 +2334,7 @@ export class Engine {
                 }
                 if (iterationPassMs !== undefined) {
                     this.lastIterationPassMs = iterationPassMs
+                    this.iterationPassTimingSerial++
                     this.applyIterationPassTiming(
                         iterationPassMs,
                         sampledBatchSize,
@@ -2023,7 +2354,10 @@ export class Engine {
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
     private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled): GPUComputePipeline {
-        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}`
+        const dynamicValidity = this.dynamicBlockValidity && this.approximationMode === 'auto'
+        const dynamicStats = dynamicValidity
+            && (this.dynamicValidityStatsEnabled || this.dynamicValidityShadow)
+        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}v${dynamicValidity ? 1 : 0}s${dynamicStats ? 1 : 0}`
         let pipeline = this.inplacePipelineCache.get(key)
         if (!pipeline) {
             pipeline = this.device.createComputePipeline({
@@ -2031,18 +2365,39 @@ export class Engine {
                 compute: {
                     module: this.inplaceModule!,
                     entryPoint: 'cs_main',
-                    constants: { ENABLE_DEEP: deep ? 1 : 0, ENABLE_PORTFOLIO: portfolio ? 1 : 0, ENABLE_RENORM: renorm ? 1 : 0 },
+                    constants: {
+                        ENABLE_DEEP: deep ? 1 : 0,
+                        ENABLE_PORTFOLIO: portfolio ? 1 : 0,
+                        ENABLE_RENORM: renorm ? 1 : 0,
+                        ENABLE_DYNAMIC_VALIDITY: dynamicValidity ? 1 : 0,
+                        ENABLE_DYNAMIC_STATS: dynamicStats ? 1 : 0,
+                    },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, dynamic=${dynamicValidity}, dynamicStats=${dynamicStats})`,
             })
             this.inplacePipelineCache.set(key, pipeline)
         }
         return pipeline
     }
 
+    private iterationAuxiliaryLevelBuffer(): GPUBuffer | undefined {
+        return this.dynamicBlockValidity
+            && this.approximationMode === 'auto'
+            // Incremental buffer replacement rebuilds the bind group before
+            // the first published range is marked ready by the message
+            // handler. The layout already proves that binding 3 is the packed
+            // validity stream; blaLevelCount remains zero until publication,
+            // so binding it early is safe and avoids one frame reading the
+            // legacy BLA directory as validity records.
+            && (this.dynamicValidityReady || this.incrementalTableLayout !== null)
+            ? this.mandelbrotValidityBuffer
+            : this.mandelbrotBlaLevelBuffer
+    }
+
     private rebuildInplaceBindGroup() {
+        const auxiliaryLevelBuffer = this.iterationAuxiliaryLevelBuffer()
         if (!this.pipelineInplace || !this.rawArrayView || !this.uniformBufferMandelbrot
-            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
+            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !auxiliaryLevelBuffer
             || !this.mandelbrotJetBuffer || !this.mandelbrotJetRadiiBuffer || !this.mandelbrotJetLevelBuffer
             || !this.uniformBufferBrush || !this.counterBuffer || !this.workStatsBuffer) {
             return
@@ -2055,7 +2410,7 @@ export class Engine {
                 { binding: 0, resource: { buffer: this.uniformBufferMandelbrot } },
                 { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
                 { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
-                { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
+                { binding: 3, resource: { buffer: auxiliaryLevelBuffer } },
                 { binding: 4, resource: this.rawArrayView },
                 { binding: 5, resource: { buffer: this.uniformBufferBrush } },
                 { binding: 6, resource: { buffer: this.counterBuffer } },
@@ -2071,8 +2426,9 @@ export class Engine {
     // Rebuild the bind groups sharing the orbit/BLA/jet buffers (debug overlay
     // + in-place compute) — called whenever one of those buffers reallocates.
     private rebuildIterationBindGroups() {
+        const auxiliaryLevelBuffer = this.iterationAuxiliaryLevelBuffer()
         if (!this.uniformBufferMandelbrot
-            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
+            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !auxiliaryLevelBuffer
             || !this.mandelbrotJetBuffer || !this.mandelbrotJetRadiiBuffer || !this.mandelbrotJetLevelBuffer) {
             return
         }
@@ -2084,7 +2440,7 @@ export class Engine {
                     { binding: 0, resource: { buffer: this.uniformBufferMandelbrot } },
                     { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
                     { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
-                    { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
+                    { binding: 3, resource: { buffer: auxiliaryLevelBuffer } },
                     { binding: 5, resource: { buffer: this.mandelbrotJetBuffer } },
                     { binding: 6, resource: { buffer: this.mandelbrotJetLevelBuffer } },
                     { binding: 7, resource: { buffer: this.mandelbrotJetRadiiBuffer } },
@@ -2096,10 +2452,381 @@ export class Engine {
         this.rebuildInplaceBindGroup()
     }
 
+    private createIncrementalLayout(
+        refId: number,
+        tableGeneration: number,
+        capacityOrbitLength: number,
+    ): IncrementalTableLayout {
+        const capacity = Math.max(8, 2 ** Math.ceil(Math.log2(Math.max(2, capacityOrbitLength))))
+        const offsets: number[] = []
+        const capacities: number[] = []
+        const skips: number[] = []
+        let offset = 0
+        for (let skip = 4; skip < capacity && skip <= (1 << 18); skip *= 2) {
+            const count = Math.floor((capacity - 1) / skip)
+            if (count <= 0) break
+            offsets.push(offset)
+            capacities.push(count)
+            skips.push(skip)
+            offset += count
+        }
+        return {
+            refId,
+            tableGeneration,
+            capacityOrbitLength: capacity,
+            offsets,
+            capacities,
+            skips,
+            committed: new Array(offset > 0 ? offsets.length : 0).fill(0),
+            maxDynamicRadius: new Array(offset > 0 ? offsets.length : 0).fill(Number.NEGATIVE_INFINITY),
+            totalBlockCapacity: offset,
+            coveredOrbitLength: 1,
+            builtOrbitLength: 1,
+        }
+    }
+
+    private incrementalActiveLevelCount(): number {
+        const committed = this.incrementalTableLayout?.committed
+        if (!committed) return 0
+        for (let level = committed.length - 1; level >= 0; level--) {
+            if (committed[level] > 0) return level + 1
+        }
+        return 0
+    }
+
+    private incrementalHeaderBase(): number {
+        const layout = this.incrementalTableLayout
+        const levelCount = this.incrementalActiveLevelCount()
+        if (!layout || levelCount <= 0) return 0
+        const level = levelCount - 1
+        return layout.offsets[level] + layout.committed[level]
+    }
+
+    /** Replace all four table buffers in one bind-group swap. On growth, only
+     * committed level prefixes are copied; reserved holes and old header tails
+     * are intentionally ignored. */
+    private replaceIncrementalBuffers(next: IncrementalTableLayout, copyCommitted: boolean) {
+        const oldLayout = this.incrementalTableLayout
+        const oldJet = this.mandelbrotJetBuffer
+        const oldRadii = this.mandelbrotJetRadiiBuffer
+        const oldLevels = this.mandelbrotJetLevelBuffer
+        const oldValidity = this.mandelbrotValidityBuffer
+        const headerRecords = Math.max(256, (this.currentOptionalHeaders?.data.length ?? 0) / JET_RADII_FLOATS)
+        const nextJet = this.device.createBuffer({
+            size: Math.max(4, next.totalBlockCapacity * JET_COEFF_FLOATS * Float32Array.BYTES_PER_ELEMENT),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Coefficients',
+        })
+        const nextRadiiCapacity = Math.max(1, next.totalBlockCapacity + Math.ceil(headerRecords))
+        const nextRadii = this.device.createBuffer({
+            size: nextRadiiCapacity * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Sidecar',
+        })
+        const nextLevels = this.device.createBuffer({
+            size: Math.max(16, next.offsets.length * 4 * Uint32Array.BYTES_PER_ELEMENT),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Directory',
+        })
+        const nextValidity = this.device.createBuffer({
+            size: Math.max(4, dynamicValidityStorageWords(next.totalBlockCapacity) * Uint32Array.BYTES_PER_ELEMENT),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Validity',
+        })
+
+        if (copyCommitted && oldLayout && oldJet && oldRadii && oldValidity) {
+            const encoder = this.device.createCommandEncoder({ label: 'Grow Incremental Unified Table' })
+            for (let level = 0; level < oldLayout.committed.length; level++) {
+                const count = oldLayout.committed[level]
+                if (count <= 0 || level >= next.offsets.length) continue
+                next.committed[level] = count
+                next.maxDynamicRadius[level] = oldLayout.maxDynamicRadius[level]
+                encoder.copyBufferToBuffer(
+                    oldJet,
+                    oldLayout.offsets[level] * JET_COEFF_FLOATS * 4,
+                    nextJet,
+                    next.offsets[level] * JET_COEFF_FLOATS * 4,
+                    count * JET_COEFF_FLOATS * 4,
+                )
+                encoder.copyBufferToBuffer(
+                    oldRadii,
+                    oldLayout.offsets[level] * JET_RADII_FLOATS * 4,
+                    nextRadii,
+                    next.offsets[level] * JET_RADII_FLOATS * 4,
+                    count * JET_RADII_FLOATS * 4,
+                )
+                encoder.copyBufferToBuffer(
+                    oldValidity,
+                    oldLayout.offsets[level] * DYNAMIC_VALIDITY_WORDS_PER_BLOCK * 4,
+                    nextValidity,
+                    next.offsets[level] * DYNAMIC_VALIDITY_WORDS_PER_BLOCK * 4,
+                    count * DYNAMIC_VALIDITY_WORDS_PER_BLOCK * 4,
+                )
+                encoder.copyBufferToBuffer(
+                    oldValidity,
+                    (oldLayout.totalBlockCapacity * DYNAMIC_VALIDITY_WORDS_PER_BLOCK
+                        + oldLayout.offsets[level] * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK) * 4,
+                    nextValidity,
+                    (next.totalBlockCapacity * DYNAMIC_VALIDITY_WORDS_PER_BLOCK
+                        + next.offsets[level] * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK) * 4,
+                    count * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK * 4,
+                )
+            }
+            this.device.queue.submit([encoder.finish()])
+            this.incrementalTableCapacityGrowths++
+        }
+
+        this.mandelbrotJetBuffer = nextJet
+        this.mandelbrotJetRadiiBuffer = nextRadii
+        this.mandelbrotJetLevelBuffer = nextLevels
+        this.mandelbrotValidityBuffer = nextValidity
+        this.mandelbrotJetBufferCapacity = next.totalBlockCapacity
+        this.mandelbrotJetRadiiBufferCapacity = nextRadiiCapacity
+        this.mandelbrotJetLevelBufferCapacity = next.offsets.length
+        this.mandelbrotValidityBufferCapacity = next.totalBlockCapacity
+        this.incrementalTableLayout = next
+        this.rebuildIterationBindGroups()
+        if (oldJet || oldRadii || oldLevels || oldValidity) {
+            void this.device.queue.onSubmittedWorkDone().then(() => {
+                oldJet?.destroy?.()
+                oldRadii?.destroy?.()
+                oldLevels?.destroy?.()
+                oldValidity?.destroy?.()
+            })
+        }
+    }
+
+    private ensureIncrementalHeaderCapacity(requiredEntries: number) {
+        if (requiredEntries <= this.mandelbrotJetRadiiBufferCapacity || !this.mandelbrotJetRadiiBuffer) return
+        const old = this.mandelbrotJetRadiiBuffer
+        const oldCapacity = this.mandelbrotJetRadiiBufferCapacity
+        const capacity = 2 ** Math.ceil(Math.log2(Math.max(1, requiredEntries)))
+        const replacement = this.device.createBuffer({
+            size: capacity * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Sidecar Growth',
+        })
+        const encoder = this.device.createCommandEncoder({ label: 'Grow Incremental Header Tail' })
+        encoder.copyBufferToBuffer(old, 0, replacement, 0, oldCapacity * JET_RADII_FLOATS * 4)
+        this.device.queue.submit([encoder.finish()])
+        this.mandelbrotJetRadiiBuffer = replacement
+        this.mandelbrotJetRadiiBufferCapacity = capacity
+        this.incrementalTableCapacityGrowths++
+        this.rebuildIterationBindGroups()
+        void this.device.queue.onSubmittedWorkDone().then(() => old.destroy?.())
+    }
+
+    private writeIncrementalDirectoryAndHeader() {
+        const layout = this.incrementalTableLayout
+        if (!layout || !this.mandelbrotJetLevelBuffer || !this.mandelbrotJetRadiiBuffer) return
+        const levelCount = this.incrementalActiveLevelCount()
+        if (levelCount <= 0) return
+        const directory = new Uint32Array(levelCount * 4)
+        const directoryFloat = new Float32Array(directory.buffer)
+        for (let level = 0; level < levelCount; level++) {
+            directory[level * 4] = layout.offsets[level]
+            directory[level * 4 + 1] = layout.committed[level]
+            directory[level * 4 + 2] = layout.skips[level]
+            directoryFloat[level * 4 + 3] = layout.maxDynamicRadius[level]
+        }
+        this.device.queue.writeBuffer(this.mandelbrotJetLevelBuffer, 0, directory)
+        const headerBase = this.incrementalHeaderBase()
+        const header = this.currentOptionalHeaders?.data ?? new Float32Array(11 * JET_RADII_FLOATS)
+        this.ensureIncrementalHeaderCapacity(headerBase + header.length / JET_RADII_FLOATS)
+        this.device.queue.writeBuffer(
+            this.mandelbrotJetRadiiBuffer!,
+            headerBase * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            header,
+        )
+        this.currentUnifiedBlockCount = headerBase
+    }
+
+    private writeIncrementalTableRange(message: IncrementalTableRangeResponse): boolean {
+        if (
+            message.validityVersion !== DYNAMIC_VALIDITY_VERSION
+            || message.validityWordsPerBlock !== DYNAMIC_VALIDITY_WORDS_PER_BLOCK
+            || message.diagnosticsWordsPerBlock !== DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK
+            || message.ranges.length % 6 !== 0
+            || message.coefficients.length % JET_COEFF_FLOATS !== 0
+        ) return false
+        const payloadBlocks = message.coefficients.length / JET_COEFF_FLOATS
+        if (
+            message.radii.length !== payloadBlocks * JET_RADII_FLOATS
+            || message.envelopes.length !== payloadBlocks * DYNAMIC_VALIDITY_WORDS_PER_BLOCK
+            || message.diagnostics.length !== payloadBlocks * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK
+        ) return false
+
+        const layoutMismatch = !this.incrementalTableLayout
+            || this.incrementalTableLayout.refId !== message.refId
+            || this.incrementalTableLayout.tableGeneration !== message.tableGeneration
+        if (message.reset || layoutMismatch) {
+            const next = this.createIncrementalLayout(
+                message.refId,
+                message.tableGeneration,
+                message.capacityOrbitLength,
+            )
+            this.currentOptionalHeaders = undefined
+            this.optionalHeaderRevision = -1
+            this.replaceIncrementalBuffers(next, false)
+            this.currentBlaLevelCount = 0
+            this.currentUnifiedBlockCount = 0
+            this.currentUnifiedBlockRadii = undefined
+            this.dynamicValidityReady = false
+        } else if (message.capacityOrbitLength > this.incrementalTableLayout.capacityOrbitLength) {
+            const next = this.createIncrementalLayout(
+                message.refId,
+                message.tableGeneration,
+                message.capacityOrbitLength,
+            )
+            next.coveredOrbitLength = this.incrementalTableLayout.coveredOrbitLength
+            next.builtOrbitLength = this.incrementalTableLayout.builtOrbitLength
+            this.replaceIncrementalBuffers(next, true)
+        }
+        const layout = this.incrementalTableLayout!
+        for (let index = 0; index < message.ranges.length; index += 6) {
+            const level = message.ranges[index]
+            const skip = message.ranges[index + 1]
+            const slotStart = message.ranges[index + 2]
+            const slotCount = message.ranges[index + 3]
+            const payloadOffset = message.ranges[index + 4]
+            const committedCount = message.ranges[index + 5]
+            if (
+                level >= layout.offsets.length
+                || layout.skips[level] !== skip
+                || layout.committed[level] !== slotStart
+                || committedCount !== slotStart + slotCount
+                || committedCount > layout.capacities[level]
+                || payloadOffset + slotCount > payloadBlocks
+            ) return false
+            const absoluteBlock = layout.offsets[level] + slotStart
+            this.device.queue.writeBuffer(
+                this.mandelbrotJetBuffer!,
+                absoluteBlock * JET_COEFF_FLOATS * 4,
+                message.coefficients,
+                payloadOffset * JET_COEFF_FLOATS,
+                slotCount * JET_COEFF_FLOATS,
+            )
+            this.device.queue.writeBuffer(
+                this.mandelbrotJetRadiiBuffer!,
+                absoluteBlock * JET_RADII_FLOATS * 4,
+                message.radii,
+                payloadOffset * JET_RADII_FLOATS,
+                slotCount * JET_RADII_FLOATS,
+            )
+            this.device.queue.writeBuffer(
+                this.mandelbrotValidityBuffer!,
+                absoluteBlock * DYNAMIC_VALIDITY_WORDS_PER_BLOCK * 4,
+                message.envelopes,
+                payloadOffset * DYNAMIC_VALIDITY_WORDS_PER_BLOCK,
+                slotCount * DYNAMIC_VALIDITY_WORDS_PER_BLOCK,
+            )
+            this.device.queue.writeBuffer(
+                this.mandelbrotValidityBuffer!,
+                (layout.totalBlockCapacity * DYNAMIC_VALIDITY_WORDS_PER_BLOCK
+                    + absoluteBlock * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK) * 4,
+                message.diagnostics,
+                payloadOffset * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK,
+                slotCount * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK,
+            )
+            // sidecar.w is the maximum candidate radius across all four
+            // tiers. The effective dynamic radius is an intersection with
+            // that candidate, so this maximum is a sound whole-level reject
+            // bound and avoids opening packed envelopes for impossible dz.
+            let maxDynamicRadius = layout.maxDynamicRadius[level]
+            for (let block = 0; block < slotCount; block++) {
+                maxDynamicRadius = Math.max(
+                    maxDynamicRadius,
+                    message.radii[(payloadOffset + block) * JET_RADII_FLOATS + 3],
+                )
+            }
+            layout.maxDynamicRadius[level] = maxDynamicRadius
+            // Queue ordering is the commit barrier: directory counts are
+            // updated only after coefficient, sidecar and proof writes above.
+            layout.committed[level] = committedCount
+        }
+        layout.coveredOrbitLength = Math.max(layout.coveredOrbitLength, message.coveredOrbitLength)
+        layout.builtOrbitLength = Math.max(layout.builtOrbitLength, message.builtOrbitLength)
+        this.writeIncrementalDirectoryAndHeader()
+        this.currentBlockTableKind = 'unified'
+        this.incrementalTableTransferredBytes += message.ranges.byteLength
+            + message.coefficients.byteLength
+            + message.radii.byteLength
+            + message.envelopes.byteLength
+            + message.diagnostics.byteLength
+        return true
+    }
+
+    private auditDynamicValidityPayload(table: {
+        kind: 'bla' | 'jet' | 'mobius' | 'unified'
+        steps: Float32Array<ArrayBuffer>
+        levels: Uint32Array<ArrayBuffer>
+        levelCount: number
+        validity?: DynamicValidityPayload
+        tableGeneration: number
+    }): string | null {
+        const validity = table.validity
+        if (table.kind !== 'unified') return 'coefficient table is not unified'
+        if (table.tableGeneration !== this.tableGeneration) return 'table generation is stale'
+        if (!validity) return 'validity payload is missing'
+        if (validity.version !== DYNAMIC_VALIDITY_VERSION) return `unsupported validity version ${validity.version}`
+        if (validity.wordsPerBlock !== DYNAMIC_VALIDITY_WORDS_PER_BLOCK) {
+            return `unexpected validity stride ${validity.wordsPerBlock}`
+        }
+        if (validity.diagnosticsWordsPerBlock !== DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK) {
+            return `unexpected validity diagnostic stride ${validity.diagnosticsWordsPerBlock}`
+        }
+        if (!Number.isFinite(validity.referenceLog2Dc)) return 'certified reference domain is not finite'
+        if (table.steps.length % JET_COEFF_FLOATS !== 0) return 'unified coefficient payload is misaligned'
+        const blockCount = table.steps.length / JET_COEFF_FLOATS
+        if (validity.envelopes.length !== blockCount * validity.wordsPerBlock) {
+            return `validity/coefficient block mismatch ${validity.envelopes.length / validity.wordsPerBlock}/${blockCount}`
+        }
+        if (validity.diagnostics.length !== blockCount * validity.diagnosticsWordsPerBlock) {
+            return `validity diagnostic block mismatch ${validity.diagnostics.length / validity.diagnosticsWordsPerBlock}/${blockCount}`
+        }
+        if (
+            table.levels.length !== table.levelCount * 4
+            || validity.levelCount !== table.levelCount
+            || validity.levels.length !== validity.levelCount * 4
+        ) {
+            return 'validity/coefficient level count mismatch'
+        }
+        for (let level = 0; level < table.levelCount; level++) {
+            const base = level * 4
+            for (let field = 0; field < 3; field++) {
+                if (validity.levels[base + field] !== table.levels[base + field]) {
+                    return `validity directory mismatch at level ${level}, field ${field}`
+                }
+            }
+        }
+        return null
+    }
+
+    private clearDynamicValidityGpuState() {
+        const changed = this.dynamicValidityReady
+            || this.dynamicValidityGeneration !== -1
+            || this.dynamicValidityReferenceLog2Dc !== Number.NEGATIVE_INFINITY
+        this.dynamicValidityReady = false
+        this.dynamicValidityGeneration = -1
+        this.dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
+        if (changed) this.rebuildIterationBindGroups()
+    }
+
     // Upload a worker-built block table into the buffers of its kind. The level
     // directories share the 4-u32 stride; only the step stride differs. Jet
     // tables carry a second array (`radii`, the split "buffer de rayons").
-    private writeBlockTable(table: { kind: 'bla' | 'jet' | 'mobius' | 'unified', steps: Float32Array<ArrayBuffer>, radii?: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number }) {
+    private writeBlockTable(table: {
+        kind: 'bla' | 'jet' | 'mobius' | 'unified'
+        steps: Float32Array<ArrayBuffer>
+        radii?: Float32Array<ArrayBuffer>
+        optionalHeaders?: OptionalHeadersPayload
+        validity?: DynamicValidityPayload
+        levels: Uint32Array<ArrayBuffer>
+        levelCount: number
+        tableGeneration: number
+    }) {
+        this.incrementalTableLayout = null
+        this.currentOptionalHeaders = undefined
         this.currentBlockTableKind = table.kind
         if (table.kind === 'jet' || table.kind === 'mobius' || table.kind === 'unified') {
             // Mobius tables live in the jet buffers (same 12 B element type,
@@ -2111,13 +2838,19 @@ export class Engine {
             const blockCount = Math.ceil(
                 table.steps.length / (table.kind === 'mobius' ? MOBIUS_COEFF_FLOATS : JET_COEFF_FLOATS), // unified = 27 floats = jet stride
             )
-            this.ensureJetBufferCapacity(Math.ceil(table.steps.length / JET_COEFF_FLOATS))
-            // Unified sidecars carry 10 extra entries (the SA prefix +
-            // periodic-block header) beyond the per-block records — size on
-            // the actual array.
-            this.ensureJetRadiiBufferCapacity(Math.max(blockCount, Math.ceil((table.radii?.length ?? 0) / 4)))
-            this.ensureJetLevelBufferCapacity(table.levelCount)
             const radii = table.radii
+            const optionalHeaderEntries = table.optionalHeaders?.data.length ?? 0
+            if (table.kind === 'unified') {
+                if (!radii || radii.length !== blockCount * JET_RADII_FLOATS) {
+                    throw new Error(`invalid unified block sidecar: ${radii?.length ?? 0} floats for ${blockCount} blocks`)
+                }
+                if (!table.optionalHeaders) {
+                    throw new Error('unified block table omitted its optional-header payload')
+                }
+            }
+            this.ensureJetBufferCapacity(Math.ceil(table.steps.length / JET_COEFF_FLOATS))
+            this.ensureJetRadiiBufferCapacity(blockCount + Math.ceil(optionalHeaderEntries / 4))
+            this.ensureJetLevelBufferCapacity(table.levelCount)
             if (table.steps.length > 0 && this.mandelbrotJetBuffer) {
                 this.device.queue.writeBuffer(this.mandelbrotJetBuffer, 0, table.steps, 0, table.steps.length)
             }
@@ -2127,8 +2860,66 @@ export class Engine {
             if (table.levels.length > 0 && this.mandelbrotJetLevelBuffer) {
                 this.device.queue.writeBuffer(this.mandelbrotJetLevelBuffer, 0, table.levels, 0, table.levels.length)
             }
+            if (table.kind === 'unified') {
+                this.currentUnifiedBlockCount = blockCount
+                this.currentUnifiedBlockRadii = radii
+                this.optionalHeaderRevision = -1
+                this.writeOptionalHeaders(table.optionalHeaders!, blockCount)
+            } else {
+                this.currentUnifiedBlockCount = 0
+                this.currentUnifiedBlockRadii = undefined
+                this.optionalHeaderRevision = -1
+            }
+            if (this.dynamicBlockValidity) {
+                const auditError = this.auditDynamicValidityPayload(table)
+                if (auditError) {
+                    console.warn(`[validity] dynamic table disabled: ${auditError}`)
+                    this.clearDynamicValidityGpuState()
+                } else {
+                    const validity = table.validity!
+                    const blockCount = validity.envelopes.length / validity.wordsPerBlock
+                    this.ensureValidityBufferCapacity(blockCount)
+                    this.device.queue.writeBuffer(
+                        this.mandelbrotValidityBuffer!,
+                        0,
+                        validity.envelopes,
+                        0,
+                        validity.envelopes.length,
+                    )
+                    this.device.queue.writeBuffer(
+                        this.mandelbrotValidityBuffer!,
+                        validity.envelopes.byteLength,
+                        validity.diagnostics,
+                        0,
+                        validity.diagnostics.length,
+                    )
+                    if (!this.dynamicValidityShadow && validity.levels.length > 0) {
+                        // The validity directory has the same offset/count/skip
+                        // geometry as the coefficient directory, but its last
+                        // field is the sound max-candidate radius used by the
+                        // dynamic shader's global and per-level fast rejects.
+                        this.device.queue.writeBuffer(
+                            this.mandelbrotJetLevelBuffer!,
+                            0,
+                            validity.levels,
+                            0,
+                            validity.levels.length,
+                        )
+                    }
+                    this.dynamicValidityReferenceLog2Dc = validity.referenceLog2Dc
+                    this.dynamicValidityGeneration = table.tableGeneration
+                    this.dynamicValidityReady = true
+                    this.rebuildIterationBindGroups()
+                }
+            } else {
+                this.clearDynamicValidityGpuState()
+            }
             return
         }
+        this.currentUnifiedBlockCount = 0
+        this.currentUnifiedBlockRadii = undefined
+        this.optionalHeaderRevision = -1
+        this.clearDynamicValidityGpuState()
         this.ensureBlaBufferCapacity(table.steps.length / BLA_STEP_FLOATS)
         this.ensureBlaLevelBufferCapacity(table.levelCount)
         if (table.steps.length > 0 && this.mandelbrotBlaBuffer) {
@@ -2145,8 +2936,15 @@ export class Engine {
      * coefficient buffer untouched — the worker only sends this when the GPU
      * coefficients are from the same build.
      */
-    private writeRadiiSidecar(radii: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number) {
-        this.ensureJetRadiiBufferCapacity(Math.ceil(radii.length / 4))
+    private writeRadiiSidecar(
+        radii: Float32Array<ArrayBuffer>,
+        levels: Uint32Array<ArrayBuffer>,
+        levelCount: number,
+        optionalHeaders?: OptionalHeadersPayload,
+    ) {
+        this.incrementalTableLayout = null
+        const blockCount = Math.ceil(radii.length / JET_RADII_FLOATS)
+        this.ensureJetRadiiBufferCapacity(blockCount + Math.ceil((optionalHeaders?.data.length ?? 0) / 4))
         this.ensureJetLevelBufferCapacity(levelCount)
         if (radii.length > 0 && this.mandelbrotJetRadiiBuffer) {
             this.device.queue.writeBuffer(this.mandelbrotJetRadiiBuffer, 0, radii, 0, radii.length)
@@ -2154,6 +2952,63 @@ export class Engine {
         if (levels.length > 0 && this.mandelbrotJetLevelBuffer) {
             this.device.queue.writeBuffer(this.mandelbrotJetLevelBuffer, 0, levels, 0, levels.length)
         }
+        this.currentUnifiedBlockCount = blockCount
+        this.currentUnifiedBlockRadii = radii
+        if (optionalHeaders) {
+            this.writeOptionalHeaders(optionalHeaders, blockCount)
+        }
+    }
+
+    /** Upload only the versioned SA/periodic/gate tail. This deliberately does
+     * not alter table kind/generation, level counts, history, or validity.
+     * Should the variable gate blob outgrow the buffer, the cached block
+     * sidecar is restored into the replacement before the header write. */
+    private writeOptionalHeaders(headers: OptionalHeadersPayload, blockCount = this.currentUnifiedBlockCount): boolean {
+        if (
+            headers.version !== 1
+            || headers.revision <= this.optionalHeaderRevision
+            || headers.data.length < 11 * JET_RADII_FLOATS
+            || headers.data.length % JET_RADII_FLOATS !== 0
+            || blockCount <= 0
+        ) {
+            return false
+        }
+        this.currentOptionalHeaders = headers
+        if (this.incrementalTableLayout) {
+            const headerBase = this.incrementalHeaderBase()
+            this.ensureIncrementalHeaderCapacity(headerBase + headers.data.length / JET_RADII_FLOATS)
+            if (!this.mandelbrotJetRadiiBuffer) return false
+            this.device.queue.writeBuffer(
+                this.mandelbrotJetRadiiBuffer,
+                headerBase * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+                headers.data,
+            )
+            this.currentUnifiedBlockCount = headerBase
+            this.optionalHeaderRevision = headers.revision
+            return true
+        }
+        const grew = this.ensureJetRadiiBufferCapacity(blockCount + headers.data.length / JET_RADII_FLOATS)
+        if (grew && this.currentUnifiedBlockRadii && this.mandelbrotJetRadiiBuffer) {
+            this.device.queue.writeBuffer(
+                this.mandelbrotJetRadiiBuffer,
+                0,
+                this.currentUnifiedBlockRadii,
+                0,
+                this.currentUnifiedBlockRadii.length,
+            )
+        }
+        if (!this.mandelbrotJetRadiiBuffer) {
+            return false
+        }
+        this.device.queue.writeBuffer(
+            this.mandelbrotJetRadiiBuffer,
+            blockCount * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            headers.data,
+            0,
+            headers.data.length,
+        )
+        this.optionalHeaderRevision = headers.revision
+        return true
     }
 
     private ensureBlaBufferCapacity(requiredEntries: number) {
@@ -2206,10 +3061,10 @@ export class Engine {
         this.rebuildIterationBindGroups()
     }
 
-    private ensureJetRadiiBufferCapacity(requiredEntries: number) {
+    private ensureJetRadiiBufferCapacity(requiredEntries: number): boolean {
         const safeRequiredEntries = Math.max(1, Math.ceil(requiredEntries))
         if (safeRequiredEntries <= this.mandelbrotJetRadiiBufferCapacity) {
-            return
+            return false
         }
         this.mandelbrotJetRadiiBuffer?.destroy?.()
         this.mandelbrotJetRadiiBuffer = this.device.createBuffer({
@@ -2219,6 +3074,7 @@ export class Engine {
         })
         this.mandelbrotJetRadiiBufferCapacity = safeRequiredEntries
         this.rebuildIterationBindGroups()
+        return true
     }
 
     private ensureJetLevelBufferCapacity(requiredEntries: number) {
@@ -2233,6 +3089,21 @@ export class Engine {
             label: 'Engine Mandelbrot Jet Level Storage Buffer',
         })
         this.mandelbrotJetLevelBufferCapacity = safeRequiredEntries
+        this.rebuildIterationBindGroups()
+    }
+
+    private ensureValidityBufferCapacity(requiredBlocks: number) {
+        const safeRequiredBlocks = Math.max(1, Math.ceil(requiredBlocks))
+        if (safeRequiredBlocks <= this.mandelbrotValidityBufferCapacity) {
+            return
+        }
+        this.mandelbrotValidityBuffer?.destroy?.()
+        this.mandelbrotValidityBuffer = this.device.createBuffer({
+            size: dynamicValidityStorageWords(safeRequiredBlocks) * Uint32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Dynamic Validity Storage Buffer',
+        })
+        this.mandelbrotValidityBufferCapacity = safeRequiredBlocks
         this.rebuildIterationBindGroups()
     }
 
@@ -2254,7 +3125,7 @@ export class Engine {
         const session = this.workStatsSessionSerial
         const encoder = this.device.createCommandEncoder({ label: 'Engine Final Stats Copy' })
         encoder.copyBufferToBuffer(this.counterBuffer, 0, this.finalStatsBuffer, 0, 8)
-        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 60)
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, WORK_STATS_BYTES)
         this.device.queue.submit([encoder.finish()])
         this.finalStatsPending = true
         void (async () => {
@@ -2274,6 +3145,13 @@ export class Engine {
                 this.secoursStatsApprox = [data[12], data[13]]
                 this.f32AppsApprox = data[14]
                 this.renormStatsApprox = [data[15], data[16]]
+                const dynamic = this.dynamicValidityStatsFromReadback(data)
+                this.dynamicTierAttemptsApprox = dynamic.tierAttempts
+                this.dynamicTierAcceptsApprox = dynamic.tierAccepts
+                this.dynamicSkipBucketsApprox = dynamic.skipBuckets
+                this.dynamicCandidateUsesApprox = dynamic.candidateUses
+                this.dynamicRejectionReasonsApprox = dynamic.rejectionReasons
+                this.dynamicExactFallbacksApprox = dynamic.exactFallbacks
                 if (realMean > 0 && covMean / realMean >= 1) {
                     this.realLoopStepsApprox = realMean * 64
                     this.tierAppsApprox = [data[6], data[7], data[8], data[9]]
@@ -2288,6 +3166,99 @@ export class Engine {
                 this.finalStatsPending = false
             }
         })()
+    }
+
+    private dynamicValidityStatsFromReadback(data: Uint32Array, workStatsOffset = 2): DynamicValidityRuntimeStats {
+        const base = workStatsOffset + 15
+        return {
+            tierAttempts: [data[base], data[base + 1], data[base + 2], data[base + 3]],
+            tierAccepts: [data[base + 4], data[base + 5], data[base + 6], data[base + 7]],
+            skipBuckets: [data[base + 8], data[base + 9], data[base + 10], data[base + 11]],
+            candidateUses: data[base + 12],
+            rejectionReasons: [data[base + 13], data[base + 14], data[base + 15], data[base + 16], data[base + 17], data[base + 18]],
+            exactFallbacks: data[base + 19],
+        }
+    }
+
+    /** One-shot debug/benchmark snapshot that is independent from the render
+     * generation mirrors. The copy is ordered after already-submitted compute
+     * work, so an adaptive maxIter invalidation cannot erase the returned data. */
+    async readDynamicValidityCounters(): Promise<DynamicValidityRuntimeStats> {
+        if (!this.device || !this.workStatsBuffer) {
+            return {
+                tierAttempts: [-1, -1, -1, -1],
+                tierAccepts: [-1, -1, -1, -1],
+                skipBuckets: [-1, -1, -1, -1],
+                candidateUses: -1,
+                rejectionReasons: [-1, -1, -1, -1, -1, -1],
+                exactFallbacks: -1,
+            }
+        }
+        const readback = this.device.createBuffer({
+            size: WORK_STATS_BYTES,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            label: 'Engine Dynamic Validity Counter Snapshot',
+        })
+        const encoder = this.device.createCommandEncoder({ label: 'Engine Dynamic Validity Counter Copy' })
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, readback, 0, WORK_STATS_BYTES)
+        this.device.queue.submit([encoder.finish()])
+        try {
+            await readback.mapAsync(GPUMapMode.READ)
+            return this.dynamicValidityStatsFromReadback(
+                new Uint32Array(readback.getMappedRange()).slice(),
+                0,
+            )
+        } finally {
+            if (readback.mapState === 'mapped') readback.unmap()
+            readback.destroy()
+        }
+    }
+
+    /** Complete one-shot work snapshot for A/B benchmarks. Unlike the polled
+     * mirrors it does not require the render to have fully converged. */
+    async readWorkStatsSnapshot(): Promise<{
+        realMean: number
+        coveredMean: number
+        realizedSkip: number
+        totalApps: number
+        tierApps: [number, number, number, number]
+        dynamic: DynamicValidityRuntimeStats
+    }> {
+        if (!this.device || !this.workStatsBuffer) {
+            return {
+                realMean: -1,
+                coveredMean: -1,
+                realizedSkip: -1,
+                totalApps: -1,
+                tierApps: [-1, -1, -1, -1],
+                dynamic: await this.readDynamicValidityCounters(),
+            }
+        }
+        const readback = this.device.createBuffer({
+            size: WORK_STATS_BYTES,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            label: 'Engine Work Stats Benchmark Snapshot',
+        })
+        const encoder = this.device.createCommandEncoder({ label: 'Engine Work Stats Benchmark Copy' })
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, readback, 0, WORK_STATS_BYTES)
+        this.device.queue.submit([encoder.finish()])
+        try {
+            await readback.mapAsync(GPUMapMode.READ)
+            const data = new Uint32Array(readback.getMappedRange()).slice()
+            const realMean = data[0]
+            const coveredMean = data[1]
+            return {
+                realMean,
+                coveredMean,
+                realizedSkip: realMean > 0 ? coveredMean / realMean : -1,
+                totalApps: realMean > 0 ? realMean * 64 : -1,
+                tierApps: [data[4], data[5], data[6], data[7]],
+                dynamic: this.dynamicValidityStatsFromReadback(data, 0),
+            }
+        } finally {
+            if (readback.mapState === 'mapped') readback.unmap()
+            readback.destroy()
+        }
     }
 
     // `preserveWorkStats = true` is the TABLE-POST variant: a blaReady mid-
@@ -2307,6 +3278,12 @@ export class Engine {
             this.secoursStatsApprox = [-1, -1]
             this.f32AppsApprox = -1
             this.renormStatsApprox = [-1, -1]
+            this.dynamicTierAttemptsApprox = [-1, -1, -1, -1]
+            this.dynamicTierAcceptsApprox = [-1, -1, -1, -1]
+            this.dynamicSkipBucketsApprox = [-1, -1, -1, -1]
+            this.dynamicCandidateUsesApprox = -1
+            this.dynamicRejectionReasonsApprox = [-1, -1, -1, -1, -1, -1]
+            this.dynamicExactFallbacksApprox = -1
             // Next in-place dispatch re-clears workStats for the new session.
             this.workStatsSessionSerial++
         }
@@ -2356,7 +3333,8 @@ export class Engine {
                 const secours: [number, number] = [data[12], data[13]]
                 const appsF32 = data[14]
                 const renorm: [number, number] = [data[15], data[16]]
-                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm)
+                const dynamic = this.dynamicValidityStatsFromReadback(data)
+                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm, dynamic)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
             } finally {
@@ -2368,7 +3346,14 @@ export class Engine {
         })()
     }
 
-    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0, renorm: [number, number] = [0, 0]) {
+    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0, renorm: [number, number] = [0, 0], dynamic: DynamicValidityRuntimeStats = {
+        tierAttempts: [0, 0, 0, 0],
+        tierAccepts: [0, 0, 0, 0],
+        skipBuckets: [0, 0, 0, 0],
+        candidateUses: 0,
+        rejectionReasons: [0, 0, 0, 0, 0, 0],
+        exactFallbacks: 0,
+    }) {
         if (generation !== this.counterReadbackGeneration) {
             return
         }
@@ -2407,6 +3392,12 @@ export class Engine {
                 this.secoursStatsApprox = [secours[0], secours[1]]
                 this.f32AppsApprox = appsF32
                 this.renormStatsApprox = [renorm[0], renorm[1]]
+                this.dynamicTierAttemptsApprox = dynamic.tierAttempts
+                this.dynamicTierAcceptsApprox = dynamic.tierAccepts
+                this.dynamicSkipBucketsApprox = dynamic.skipBuckets
+                this.dynamicCandidateUsesApprox = dynamic.candidateUses
+                this.dynamicRejectionReasonsApprox = dynamic.rejectionReasons
+                this.dynamicExactFallbacksApprox = dynamic.exactFallbacks
             } else {
                 this.realizedSkip = -1
                 this.workgroupWaste = -1
@@ -2804,6 +3795,7 @@ export class Engine {
         }
 
         this.approximationMode = mode
+        this.rebuildIterationBindGroups()
         this.currentBlaLevelCount = 0
         this.tableBuildActive = false
         this.tableBuildProgress = 0
@@ -2871,13 +3863,99 @@ export class Engine {
         }
         this.mandelbrotNavigator.set_gate_emission(on)
         this.gateEmission = on
-        this.tableGeneration++
+        const headerOnly = this.approximationMode === 'auto' && this.dynamicBlockValidity
+        if (!headerOnly) this.tableGeneration++
         this.postReferenceWorker({
             type: 'setGateEmission',
             jobId: this.referenceJobId,
             on,
             tableGeneration: this.tableGeneration,
         })
+        if (this.approximationMode === 'auto' && !headerOnly) {
+            this.currentBlaLevelCount = 0
+            this.requestTableClear(true)
+            this.needRender = true
+        }
+    }
+
+    /** Runtime rollout toggle for packed per-pixel validity. The legacy radius
+     * sidecar remains available for A/B regression and shadow comparisons. */
+    setDynamicBlockValidity(on: boolean) {
+        if (on === this.dynamicBlockValidity) {
+            return
+        }
+        if (!on) this.dynamicValidityShadow = false
+        this.mandelbrotNavigator.set_dynamic_block_validity(on)
+        this.dynamicBlockValidity = on
+        this.clearDynamicValidityGpuState()
+        this.tableGeneration++
+        this.postReferenceWorker({
+            type: 'setDynamicBlockValidity',
+            jobId: this.referenceJobId,
+            on,
+            tableGeneration: this.tableGeneration,
+        })
+        if (this.approximationMode === 'auto') {
+            this.currentBlaLevelCount = 0
+            this.requestTableClear(true)
+            this.needRender = true
+        }
+    }
+
+    getIncrementalReferenceTable(): boolean {
+        return this.incrementalReferenceTable
+    }
+
+    getDynamicValidityShadow(): boolean {
+        return this.dynamicValidityShadow
+    }
+
+    getDynamicValidityStatsEnabled(): boolean {
+        return this.dynamicValidityStatsEnabled
+    }
+
+    setDynamicValidityStatsEnabled(on: boolean) {
+        if (on === this.dynamicValidityStatsEnabled) return
+        this.dynamicValidityStatsEnabled = on
+        this.invalidateCounterReadback()
+        this.clearHistoryNextFrame = true
+        this.needRender = true
+    }
+
+    setDynamicValidityShadow(on: boolean) {
+        if (on) {
+            // Incremental publications deliberately carry only f32-safety in
+            // their legacy sidecar. The one-shot table is the rollback referee
+            // with real replay tags/radii, so switch to it before shadowing.
+            if (this.incrementalReferenceTable) this.setIncrementalReferenceTable(false)
+            if (!this.dynamicBlockValidity) this.setDynamicBlockValidity(true)
+        }
+        if (on === this.dynamicValidityShadow) return
+        this.dynamicValidityShadow = on
+        if (this.unfinishedPixelCount >= 0) this.needFreezeSnapshot = true
+        this.clearHistoryNextFrame = true
+        this.needRender = true
+        this.invalidateCounterReadback()
+    }
+
+    setIncrementalReferenceTable(on: boolean) {
+        if (on === this.incrementalReferenceTable) return
+        if (on) this.dynamicValidityShadow = false
+        this.mandelbrotNavigator.set_incremental_reference_table(on)
+        this.incrementalReferenceTable = on
+        this.tableGeneration++
+        this.postReferenceWorker({
+            type: 'setIncrementalReferenceTable',
+            jobId: this.referenceJobId,
+            on,
+            tableGeneration: this.tableGeneration,
+        })
+        if (!on) {
+            this.incrementalTableLayout = null
+            this.incrementalTableOrbitCoverage = 0
+            this.incrementalTableBuiltOrbit = 0
+            this.incrementalTableLevelBlocks = []
+        }
         if (this.approximationMode === 'auto') {
             this.currentBlaLevelCount = 0
             this.clearDynamicValidityGpuState()
@@ -2887,17 +3965,20 @@ export class Engine {
     }
 
     setBlaEpsilon(epsilon: number) {
-        const next = Math.max(Number.MIN_VALUE, epsilon)
+        const next = Math.fround(Math.max(1.1754943508222875e-38, epsilon))
         if (next === this.blaEpsilon) {
             return
         }
         this.mandelbrotNavigator.set_bla_epsilon(next)
-        this.blaEpsilon = next
+        // Rust stores ε as f32. Mirror the rounded value immediately so the
+        // per-frame front-navigator audit does not manufacture a second table
+        // generation from 0.001 !== f32(0.001) while a build is in flight.
+        this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         this.tableGeneration++
         this.postReferenceWorker({
             type: 'setBlaEpsilon',
             jobId: this.referenceJobId,
-            blaEpsilon: next,
+            blaEpsilon: this.blaEpsilon,
             tableGeneration: this.tableGeneration,
         })
         // ε sets the validity radius (ε·|A| affine, √ε·|A| Padé, the certified
@@ -3449,6 +4530,11 @@ export class Engine {
         // Track whether the orbit is still being built (used by needsMoreFrames).
         this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < maxIterations
         const orbitComplete = availableIter >= maxIterations
+        const incrementalAutoPrefixReady = this.incrementalReferenceTable
+            && this.approximationMode === 'auto'
+            && this.incrementalTableLayout?.refId === this.activeRef?.refId
+            && (this.incrementalTableLayout?.coveredOrbitLength ?? 0) > 1
+        const blockOrbitReady = orbitComplete || incrementalAutoPrefixReady
 
         // BLA now runs in the deep (floatexp) path too: a/b/radii are stored in
         // fe form and try_apply_bla_deep does its radius test in log space.
@@ -3475,12 +4561,20 @@ export class Engine {
             : this.approximationMode === 'auto' ? 'unified'
             : 'bla'
         const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius' || this.approximationMode === 'auto')
-            && orbitComplete
+            && blockOrbitReady
             && this.currentBlaLevelCount > 0
             && this.currentBlockTableKind === expectedTableKind
+            && (this.approximationMode !== 'auto'
+                || !this.dynamicBlockValidity
+                || (this.dynamicValidityReady
+                    && this.dynamicValidityGeneration === this.tableGeneration))
             && tableCoversView
         const approximationModeFlag = blocksReady
-            ? (this.approximationMode === 'auto' ? 5 : this.approximationMode === 'mobius' ? 4 : this.approximationMode === 'jet' ? 3 : this.approximationMode === 'pade' ? 2 : 1)
+            ? (this.approximationMode === 'auto'
+                ? (this.dynamicBlockValidity ? (this.dynamicValidityShadow ? 7 : 6) : 5)
+                : this.approximationMode === 'mobius' ? 4
+                : this.approximationMode === 'jet' ? 3
+                : this.approximationMode === 'pade' ? 2 : 1)
             : 0
         const blaLevelCount = blocksReady ? this.currentBlaLevelCount : 0
         // Diagnostic mirror of exactly what the shader receives this frame: the mode
@@ -3994,7 +5088,7 @@ export class Engine {
             // only on the generation's first in-place dispatch, then let every
             // dispatch atomicAdd into it (exact, sampling-independent totals).
             if (this.workStatsClearedSession !== this.workStatsSessionSerial) {
-                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 60)
+                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, WORK_STATS_BYTES)
                 this.workStatsClearedSession = this.workStatsSessionSerial
             }
             const computePass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(3) })
@@ -4015,7 +5109,7 @@ export class Engine {
                 const sequence = ++this.counterReadbackSequence
                 const generation = this.counterReadbackGeneration
                 commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
-                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 60)
+                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, WORK_STATS_BYTES)
                 this.lastCounterDispatchFrame = frameSerial
                 scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
             }
@@ -4439,6 +5533,10 @@ export class Engine {
         this.mandelbrotReferenceBuffer?.destroy?.()
         this.mandelbrotBlaBuffer?.destroy?.()
         this.mandelbrotBlaLevelBuffer?.destroy?.()
+        this.mandelbrotJetBuffer?.destroy?.()
+        this.mandelbrotJetRadiiBuffer?.destroy?.()
+        this.mandelbrotJetLevelBuffer?.destroy?.()
+        this.mandelbrotValidityBuffer?.destroy?.()
         this.uniformBufferMandelbrot?.destroy?.()
         this.uniformBufferColor?.destroy?.()
         this.uniformBufferBrush?.destroy?.()
@@ -4452,6 +5550,7 @@ export class Engine {
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()
         this.paletteTexture?.destroy?.()
+        this.device?.destroy?.()
     }
 
     // ── Self-managing render loop ─────────────────────────────────────

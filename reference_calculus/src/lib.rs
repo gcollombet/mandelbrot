@@ -15,6 +15,7 @@ mod jet;
 mod matrix_c1;
 mod mobius;
 mod unified;
+pub mod validity;
 
 // Fonction utilitaire pour convertir DBig en f32 de manière sûre
 fn dbig_to_f32(bf: &DBig) -> f32 {
@@ -23,6 +24,21 @@ fn dbig_to_f32(bf: &DBig) -> f32 {
 
 fn dbig_to_f64(bf: &DBig) -> f64 {
     bf.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
+fn wall_clock_ms() -> f64 {
+    #[cfg(target_arch = "wasm32")]
+    {
+        js_sys::Date::now()
+    }
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        use std::time::{SystemTime, UNIX_EPOCH};
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|duration| duration.as_secs_f64() * 1000.0)
+            .unwrap_or(0.0)
+    }
 }
 
 // Significant-bit budget needed to resolve detail at a given view scale: roughly
@@ -396,18 +412,53 @@ pub struct MandelbrotNavigator {
     // Unified table (unify-jet-table-dispatch): same three-stage cache —
     // levels+coeffs orbit-keyed, bounds R_c-headroom-keyed, radii+tags
     // (ε, c_max)-keyed.
+    dynamic_block_validity: bool,
+    /// Independent rollout switch for append-only reference-table publication.
+    /// It deliberately does not imply dynamic validity so both axes can be
+    /// benchmarked and rolled back separately.
+    incremental_reference_table: bool,
+    unified_incremental_builder: Box<unified::IncrementalUnifiedBuilder>,
+    unified_incremental_ranges: Box<Vec<IncrementalUnifiedRangeInfo>>,
+    unified_incremental_coeffs: Box<Vec<[jet::JetCoeffFe; unified::UNIFIED_GPU_COEFFS]>>,
+    unified_incremental_radii: Box<Vec<unified::UnifiedRadius>>,
+    unified_incremental_validity: Box<Vec<validity::PackedValidityEnvelopeV1>>,
+    unified_incremental_diagnostics: Box<Vec<validity::PackedValidityDiagnosticsV1>>,
+    unified_incremental_epsilon: f64,
+    unified_incremental_reference_log2_dc: f64,
+    unified_incremental_reset_pending: bool,
+    unified_incremental_merge_coefficients_ms: f64,
+    unified_incremental_envelope_ms: f64,
     unified_levels: Box<Vec<unified::UnifiedLevel>>,
     unified_bounds: Box<Option<unified::UnifiedBounds>>,
     unified_radii: Box<Option<unified::UnifiedRadii>>,
     unified_coeffs_result: Box<Vec<[jet::JetCoeffFe; unified::UNIFIED_GPU_COEFFS]>>,
+    // Block-indexed rollback sidecar only. SA/periodic/gate headers live in a
+    // separately versioned payload so cmax-only header refreshes cannot touch
+    // dynamic coefficients, bounds, or envelopes.
     unified_radii_result: Box<Vec<unified::UnifiedRadius>>,
     unified_gpu_levels: Box<Vec<jet::JetLevel>>,
+    unified_optional_headers_result: Box<Vec<unified::UnifiedRadius>>,
+    unified_optional_headers_log2_c_max: f64,
+    unified_optional_headers_epsilon: f64,
+    unified_optional_sa_log2_dc: f64,
+    unified_optional_periodic_log2_dc: f64,
+    unified_optional_gate_log2_dc: f64,
+    // Packed-v1 proof records and a separate directory. They are stable while
+    // the view remains inside `unified_validity_reference_log2_dc`; legacy
+    // radii/levels above remain available for shadow and rollback operation.
+    unified_validity_result: Box<Vec<validity::PackedValidityEnvelopeV1>>,
+    unified_validity_diagnostics: Box<Vec<validity::PackedValidityDiagnosticsV1>>,
+    unified_validity_gpu_levels: Box<Vec<jet::JetLevel>>,
+    unified_validity_epsilon: f64,
+    unified_validity_reference_log2_dc: f64,
     unified_source_len: usize,
     unified_bounds_log2_c_max: f64,
     unified_radii_epsilon: f64,
     unified_radii_log2_c_max: f64,
     // Stage mask of the LAST ensure_unified_table call (1 = coeffs+levels,
-    // 2 = bounds, 4 = radii+SA+periodic; 0 = everything warm). Surfaced to the
+    // 2 = bounds, 4 = legacy block radii, 8 = packed validity,
+    // 16 = optional SA/periodic/gate headers; 0 = warm).
+    // Surfaced to the
     // worker so build-latency reports can tell a keyframe radii re-solve from
     // a cold build (Phase F, 7.2).
     unified_last_build_stages: u32,
@@ -504,12 +555,36 @@ impl MandelbrotNavigator {
             mobius_bounds_log2_c_max: f64::NAN,
             mobius_radii_epsilon: 0.0,
             mobius_radii_log2_c_max: f64::NAN,
+            dynamic_block_validity: false,
+            incremental_reference_table: false,
+            unified_incremental_builder: Box::new(unified::IncrementalUnifiedBuilder::new(1 << 18)),
+            unified_incremental_ranges: Box::new(Vec::new()),
+            unified_incremental_coeffs: Box::new(Vec::new()),
+            unified_incremental_radii: Box::new(Vec::new()),
+            unified_incremental_validity: Box::new(Vec::new()),
+            unified_incremental_diagnostics: Box::new(Vec::new()),
+            unified_incremental_epsilon: f64::NAN,
+            unified_incremental_reference_log2_dc: f64::NAN,
+            unified_incremental_reset_pending: true,
+            unified_incremental_merge_coefficients_ms: 0.0,
+            unified_incremental_envelope_ms: 0.0,
             unified_levels: Box::new(Vec::new()),
             unified_bounds: Box::new(None),
             unified_radii: Box::new(None),
             unified_coeffs_result: Box::new(Vec::new()),
             unified_radii_result: Box::new(Vec::new()),
             unified_gpu_levels: Box::new(Vec::new()),
+            unified_optional_headers_result: Box::new(Vec::new()),
+            unified_optional_headers_log2_c_max: f64::NAN,
+            unified_optional_headers_epsilon: f64::NAN,
+            unified_optional_sa_log2_dc: f64::NEG_INFINITY,
+            unified_optional_periodic_log2_dc: f64::NEG_INFINITY,
+            unified_optional_gate_log2_dc: f64::NEG_INFINITY,
+            unified_validity_result: Box::new(Vec::new()),
+            unified_validity_diagnostics: Box::new(Vec::new()),
+            unified_validity_gpu_levels: Box::new(Vec::new()),
+            unified_validity_epsilon: f64::NAN,
+            unified_validity_reference_log2_dc: f64::NAN,
             unified_source_len: 0,
             unified_bounds_log2_c_max: f64::NAN,
             unified_radii_epsilon: 0.0,
@@ -730,6 +805,7 @@ impl MandelbrotNavigator {
         if (next - self.bla_epsilon).abs() > f32::EPSILON {
             self.bla_source_len = 0;
             self.bla_level_count = 0;
+            self.reset_unified_incremental_builder();
         }
         self.bla_epsilon = next;
     }
@@ -738,18 +814,69 @@ impl MandelbrotNavigator {
         self.bla_epsilon
     }
 
-    /// §18 parabolic-gate emission toggle. Marks the unified radii stage
-    /// stale so the next table build re-serializes the sidecar with (or
-    /// without) the gate blob.
+    /// §18 parabolic-gate emission toggle. Dynamic mode invalidates only the
+    /// independently transported optional header; legacy mode still rebuilds
+    /// its cmax-keyed radius sidecar.
     pub fn set_gate_emission(&mut self, on: bool) {
         if self.gate_emission != on {
             self.gate_emission = on;
-            self.unified_radii_log2_c_max = f64::NAN;
+            self.unified_optional_headers_log2_c_max = f64::NAN;
+            if !self.dynamic_block_validity {
+                self.unified_radii_log2_c_max = f64::NAN;
+            }
         }
     }
 
     pub fn get_gate_emission(&self) -> bool {
         self.gate_emission
+    }
+
+    /// Transport for the packed-v1 per-pixel proof table. The native library
+    /// starts disabled for explicit callers; the WebGPU Engine enables it by
+    /// default after the GPU parity and navigation rollout gates passed.
+    pub fn set_dynamic_block_validity(&mut self, on: bool) {
+        if self.dynamic_block_validity == on {
+            return;
+        }
+        self.dynamic_block_validity = on;
+        self.reset_unified_incremental_builder();
+        self.unified_validity_epsilon = f64::NAN;
+        self.unified_validity_reference_log2_dc = f64::NAN;
+        self.unified_validity_result.clear();
+        self.unified_validity_diagnostics.clear();
+        self.unified_validity_gpu_levels.clear();
+        self.unified_optional_headers_result.clear();
+        self.unified_optional_headers_log2_c_max = f64::NAN;
+        self.unified_optional_headers_epsilon = f64::NAN;
+        self.unified_optional_sa_log2_dc = f64::NEG_INFINITY;
+        self.unified_optional_periodic_log2_dc = f64::NEG_INFINITY;
+        self.unified_optional_gate_log2_dc = f64::NEG_INFINITY;
+        if on {
+            // Re-walk once at the +4-octave reference-domain ceiling instead
+            // of inheriting the tighter legacy cmax stamp.
+            self.unified_bounds_log2_c_max = f64::NAN;
+        }
+        // Dynamic operation intentionally lets the legacy block radii go
+        // stale. Re-entering legacy must therefore solve them before use.
+        if !on {
+            self.unified_radii_log2_c_max = f64::NAN;
+        }
+    }
+
+    pub fn get_dynamic_block_validity(&self) -> bool {
+        self.dynamic_block_validity
+    }
+
+    pub fn set_incremental_reference_table(&mut self, on: bool) {
+        if self.incremental_reference_table == on {
+            return;
+        }
+        self.incremental_reference_table = on;
+        self.reset_unified_incremental_builder();
+    }
+
+    pub fn get_incremental_reference_table(&self) -> bool {
+        self.incremental_reference_table
     }
 
     pub fn set_max_bla_skip(&mut self, max_skip: u32) {
@@ -760,6 +887,7 @@ impl MandelbrotNavigator {
         if clamped != self.max_bla_skip {
             self.bla_source_len = 0;
             self.bla_level_count = 0;
+            self.reset_unified_incremental_builder();
         }
         self.max_bla_skip = clamped;
     }
@@ -1631,6 +1759,155 @@ impl MandelbrotNavigator {
         }
     }
 
+    fn reset_unified_incremental_builder(&mut self) {
+        self.unified_incremental_builder.reset();
+        self.unified_incremental_ranges.clear();
+        self.unified_incremental_coeffs.clear();
+        self.unified_incremental_radii.clear();
+        self.unified_incremental_validity.clear();
+        self.unified_incremental_diagnostics.clear();
+        self.unified_incremental_epsilon = f64::NAN;
+        self.unified_incremental_reference_log2_dc = f64::NAN;
+        self.unified_incremental_reset_pending = true;
+        self.unified_incremental_merge_coefficients_ms = 0.0;
+        self.unified_incremental_envelope_ms = 0.0;
+    }
+
+    /// One bounded append/certification unit for progressive Auto tables.
+    /// Coefficients and proof records are returned only as matched ranges;
+    /// callers may commit a directory count after queueing both uploads.
+    pub fn advance_incremental_unified_reference(
+        &mut self,
+        max_iter: u32,
+        orbit_quota: u32,
+        envelope_quota: u32,
+    ) -> IncrementalUnifiedBufferInfo {
+        self.unified_incremental_ranges.clear();
+        self.unified_incremental_coeffs.clear();
+        self.unified_incremental_radii.clear();
+        self.unified_incremental_validity.clear();
+        self.unified_incremental_diagnostics.clear();
+
+        // A table prefix belongs to the reference, not to the instantaneous
+        // viewport.  Zooming out may lower max_iter, but it must never shrink
+        // the already composed dyadic tree (or expose pending validity work to
+        // an orbit slice shorter than the builder state).
+        let requested_orbit_len = max_iter as usize + 1;
+        let orbit_len = self
+            .result
+            .len()
+            .min(requested_orbit_len.max(self.unified_incremental_builder.covered_orbit_len()));
+        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        let log2_c_max = self.jet_log2_c_max();
+        const REFERENCE_DOMAIN_HEADROOM_LOG2: f64 = 4.0;
+        let epoch_stale = !self.unified_incremental_reference_log2_dc.is_finite()
+            || !self.unified_incremental_epsilon.is_finite()
+            || (self.unified_incremental_epsilon - epsilon).abs() > f64::EPSILON * epsilon;
+        if epoch_stale {
+            self.reset_unified_incremental_builder();
+            self.unified_incremental_epsilon = epsilon;
+            self.unified_incremental_reference_log2_dc =
+                log2_c_max + REFERENCE_DOMAIN_HEADROOM_LOG2;
+        }
+        self.unified_incremental_builder
+            .reserve_for_orbit_len(orbit_len);
+
+        let append_start = self.unified_incremental_builder.covered_orbit_len();
+        if append_start < orbit_len {
+            let append_end = (append_start + orbit_quota.max(1) as usize).min(orbit_len);
+            let started = wall_clock_ms();
+            let result = &self.result;
+            self.unified_incremental_builder
+                .append_orbit_iter(
+                    append_start,
+                    result[append_start..append_end]
+                        .iter()
+                        .map(|step| (step.zx as f64, step.zy as f64)),
+                )
+                .unwrap_or_else(|message| panic!("incremental unified append failed: {}", message));
+            self.unified_incremental_merge_coefficients_ms += wall_clock_ms() - started;
+        }
+        let started = wall_clock_ms();
+        let result = &self.result;
+        let published_ranges = self
+            .unified_incremental_builder
+            .compile_pending_validity_with(
+                orbit_len,
+                |index| {
+                    let step = result[index];
+                    (step.zx as f64, step.zy as f64)
+                },
+                epsilon,
+                self.unified_incremental_reference_log2_dc,
+                envelope_quota.max(1) as usize,
+            )
+            .unwrap_or_else(|message| panic!("incremental unified validity failed: {}", message));
+        self.unified_incremental_envelope_ms += wall_clock_ms() - started;
+
+        for range in published_ranges {
+            let level = &self.unified_incremental_builder.levels()[range.level_index];
+            let payload_offset = self.unified_incremental_coeffs.len();
+            let slot_end = range.slot_start + range.slot_count;
+            self.unified_incremental_coeffs
+                .extend_from_slice(&level.coeffs[range.slot_start..slot_end]);
+            let reference_log2_dc = self.unified_incremental_reference_log2_dc;
+            self.unified_incremental_radii
+                .extend((range.slot_start..slot_end).map(|slot| {
+                    unified::unified_dynamic_block_sidecar(
+                        &level.blocks[slot],
+                        &level.moduli[slot],
+                        &level.validity[slot],
+                        reference_log2_dc,
+                    )
+                }));
+            self.unified_incremental_validity
+                .extend_from_slice(&level.validity[range.slot_start..slot_end]);
+            self.unified_incremental_diagnostics
+                .extend_from_slice(&level.validity_diagnostics[range.slot_start..slot_end]);
+            self.unified_incremental_ranges
+                .push(IncrementalUnifiedRangeInfo {
+                    level: range.level_index.saturating_sub(2) as u32,
+                    skip: range.skip as u32,
+                    slot_start: range.slot_start as u32,
+                    slot_count: range.slot_count as u32,
+                    payload_offset: payload_offset as u32,
+                    committed_count: level.validity.len() as u32,
+                });
+        }
+
+        let covered_orbit_len = self.unified_incremental_builder.covered_orbit_len();
+        let published_orbit_len = self.unified_incremental_builder.published_orbit_len();
+        let has_more = covered_orbit_len < orbit_len
+            || self.unified_incremental_builder.has_pending_validity();
+        let reset = core::mem::replace(&mut self.unified_incremental_reset_pending, false);
+        IncrementalUnifiedBufferInfo {
+            ranges_ptr: self.unified_incremental_ranges.as_ptr() as usize,
+            range_count: self.unified_incremental_ranges.len(),
+            coeffs_ptr: self.unified_incremental_coeffs.as_ptr() as usize,
+            coeffs_count: self.unified_incremental_coeffs.len(),
+            radii_ptr: self.unified_incremental_radii.as_ptr() as usize,
+            radii_count: self.unified_incremental_radii.len(),
+            validity_ptr: self.unified_incremental_validity.as_ptr() as usize,
+            validity_count: self.unified_incremental_validity.len(),
+            diagnostics_ptr: self.unified_incremental_diagnostics.as_ptr() as usize,
+            diagnostics_count: self.unified_incremental_diagnostics.len(),
+            validity_version: validity::PACKED_VALIDITY_VERSION,
+            validity_words_per_block: validity::PACKED_VALIDITY_WORDS,
+            diagnostics_words_per_block: validity::PACKED_VALIDITY_DIAGNOSTIC_WORDS,
+            reference_log2_dc: self.unified_incremental_reference_log2_dc,
+            covered_orbit_len,
+            published_orbit_len,
+            reset: u32::from(reset),
+            has_more: u32::from(has_more),
+            cumulative_merges: self.unified_incremental_builder.cumulative_merges(),
+            cumulative_coefficients: self.unified_incremental_builder.cumulative_coefficients(),
+            cumulative_envelopes: self.unified_incremental_builder.cumulative_envelopes(),
+            peak_retained_bytes: self.unified_incremental_builder.peak_retained_bytes(),
+            cumulative_merge_coefficients_ms: self.unified_incremental_merge_coefficients_ms,
+            cumulative_envelope_ms: self.unified_incremental_envelope_ms,
+        }
+    }
+
     fn ensure_unified_table_through(
         &mut self,
         orbit_len: usize,
@@ -1640,11 +1917,32 @@ impl MandelbrotNavigator {
         if reset_stages {
             self.unified_last_build_stages = 0;
         }
-        let orbit_len = orbit_len.min(self.result.len());
+        let requested_orbit_len = orbit_len.min(self.result.len());
+        // Dynamic tables are reference-owned and monotonic.  A smaller
+        // viewport max_iter reuses the existing prefix; only a larger covered
+        // orbit or a new reference may change the level geometry.
+        let orbit_len = if self.dynamic_block_validity {
+            requested_orbit_len
+                .max(self.unified_source_len)
+                .min(self.result.len())
+        } else {
+            requested_orbit_len
+        };
         if orbit_len <= 2 {
             self.unified_levels.clear();
             *self.unified_bounds = None;
             *self.unified_radii = None;
+            self.unified_validity_result.clear();
+            self.unified_validity_diagnostics.clear();
+            self.unified_validity_gpu_levels.clear();
+            self.unified_validity_epsilon = f64::NAN;
+            self.unified_validity_reference_log2_dc = f64::NAN;
+            self.unified_optional_headers_result.clear();
+            self.unified_optional_headers_log2_c_max = f64::NAN;
+            self.unified_optional_headers_epsilon = f64::NAN;
+            self.unified_optional_sa_log2_dc = f64::NEG_INFINITY;
+            self.unified_optional_periodic_log2_dc = f64::NEG_INFINITY;
+            self.unified_optional_gate_log2_dc = f64::NEG_INFINITY;
             self.unified_source_len = 0;
             self.unified_last_periodic_p = 0;
             self.unified_last_periodic_status = unified::PeriodicBuildStatus::OrbitTooShort.code();
@@ -1660,40 +1958,88 @@ impl MandelbrotNavigator {
             self.unified_last_build_stages |= 1;
             *self.unified_levels = unified::build_unified_levels(&orbit, max_skip);
             self.unified_source_len = orbit_len;
-            self.unified_bounds_log2_c_max = f64::NAN; // cascade: bounds stale
-                                                       // Coefficients are orbit-keyed: serialized once here, never on a
-                                                       // radius re-solve (the split-buffer point).
+            // The proof walk must be repeated for the new orbit prefix, but
+            // its certified dc ceiling remains fixed for the lifetime of the
+            // reference.  Legacy mode still keys the walk to the view cmax.
+            *self.unified_bounds = None;
+            if !self.dynamic_block_validity {
+                self.unified_bounds_log2_c_max = f64::NAN;
+            }
+            // The rollback sidecar is block-indexed, so an orbit extension
+            // must resize it even though dynamic dispatch does not use its
+            // cmax-solved radii for acceptance.
+            *self.unified_radii = None;
+            self.unified_radii_result.clear();
+            self.unified_gpu_levels.clear();
+            self.unified_radii_log2_c_max = f64::NAN;
+            self.unified_validity_epsilon = f64::NAN;
+            self.unified_validity_reference_log2_dc = f64::NAN;
+            self.unified_validity_result.clear();
+            self.unified_validity_diagnostics.clear();
+            self.unified_validity_gpu_levels.clear();
+            self.unified_optional_headers_result.clear();
+            self.unified_optional_headers_log2_c_max = f64::NAN;
+            self.unified_optional_headers_epsilon = f64::NAN;
+            self.unified_optional_sa_log2_dc = f64::NEG_INFINITY;
+            self.unified_optional_periodic_log2_dc = f64::NEG_INFINITY;
+            self.unified_optional_gate_log2_dc = f64::NEG_INFINITY;
+            // Coefficients are orbit-keyed: serialized once here, never on a
+            // radius re-solve (the split-buffer point).
             *self.unified_coeffs_result = unified::unified_serialize_coeffs(&self.unified_levels);
         }
         if max_stage < 2 {
             return;
         }
         let log2_c_max = self.jet_log2_c_max();
-        // Same headroom rule as the mobius/jet stages: bounds stay sound for
-        // any c_max at or below the walk stamp; re-walk on zoom-out past it or
-        // after 4 octaves of zoom-in.
-        let bounds_stale = !self.unified_bounds_log2_c_max.is_finite()
-            || log2_c_max > self.unified_bounds_log2_c_max
-            || log2_c_max < self.unified_bounds_log2_c_max - 4.0;
+        const REFERENCE_DOMAIN_HEADROOM_LOG2: f64 = 4.0;
+        // Dynamic bounds are walked once at the whole certified reference
+        // domain ceiling. Moving further inward can never stale them; only
+        // leaving that ceiling (or changing the orbit) rebuilds them. Legacy
+        // operation keeps its tighter four-octave cadence.
+        let bounds_target_log2_c_max = if self.dynamic_block_validity {
+            if self.unified_bounds_log2_c_max.is_finite() {
+                self.unified_bounds_log2_c_max
+            } else {
+                log2_c_max + REFERENCE_DOMAIN_HEADROOM_LOG2
+            }
+        } else {
+            log2_c_max
+        };
+        let bounds_stale = self.unified_bounds.as_ref().as_ref().is_none()
+            || !self.unified_bounds_log2_c_max.is_finite()
+            || if self.dynamic_block_validity {
+                false
+            } else {
+                bounds_target_log2_c_max > self.unified_bounds_log2_c_max
+                    || bounds_target_log2_c_max < self.unified_bounds_log2_c_max - 4.0
+            };
         if bounds_stale {
             self.unified_last_build_stages |= 2;
             *self.unified_bounds = Some(unified::unified_build_bounds(
                 &self.unified_levels,
                 &orbit,
-                log2_c_max,
+                bounds_target_log2_c_max,
             ));
-            self.unified_bounds_log2_c_max = log2_c_max;
-            self.unified_radii_log2_c_max = f64::NAN; // cascade: radii stale
+            self.unified_bounds_log2_c_max = bounds_target_log2_c_max;
+            if !self.dynamic_block_validity {
+                self.unified_radii_log2_c_max = f64::NAN;
+            }
         }
         if max_stage < 4 {
             return;
         }
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
-        // Asymmetric staleness — see ensure_jet_table.
-        let radii_stale = !self.unified_radii_log2_c_max.is_finite()
-            || (self.unified_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
-            || log2_c_max > self.unified_radii_log2_c_max
-            || log2_c_max < self.unified_radii_log2_c_max - 2.0;
+        // Dynamic dispatch reads only the orbit-static f32-safe bit from this
+        // rollback sidecar; all tier validity lives in the packed envelope.
+        // Build legacy radii once per orbit, but never re-solve them for cmax
+        // or epsilon motion while dynamic validity is active.
+        let radii_stale = self.unified_radii_result.is_empty()
+            || self.unified_radii.as_ref().as_ref().is_none()
+            || (!self.dynamic_block_validity
+                && (!self.unified_radii_log2_c_max.is_finite()
+                    || (self.unified_radii_epsilon - epsilon).abs() > f64::EPSILON * epsilon
+                    || log2_c_max > self.unified_radii_log2_c_max
+                    || log2_c_max < self.unified_radii_log2_c_max - 2.0));
         if radii_stale {
             self.unified_last_build_stages |= 4;
             let bounds = self
@@ -1703,44 +2049,59 @@ impl MandelbrotNavigator {
                 .expect("bounds built above");
             let radii =
                 unified::unified_solve_radii(&self.unified_levels, bounds, epsilon, log2_c_max);
-            // Certified SA prefix ((ε, c_max)-keyed like the radii): the
-            // common skip every compute-request pixel starts at (Phase C).
+            // Working band for the dispatch tags: the REPLAY-observed |dz|
+            // distribution (§6.3 — median + spread over Zhuoran-rebased
+            // sample-pixel replays; the c_max + 10 placeholder is only the
+            // short-orbit fallback inside unified_replay_band).
+            let (log2_band, log2_spread) = unified::unified_replay_band(&orbit, log2_c_max);
+            let (radii_side, dir) = unified::unified_serialize_block_radii(
+                &self.unified_levels,
+                &radii,
+                log2_band,
+                log2_spread,
+            );
+            self.unified_last_band_log2 = log2_band;
+            self.unified_last_band_spread = log2_spread;
+            *self.unified_radii = Some(radii);
+            self.unified_radii_epsilon = epsilon;
+            self.unified_radii_log2_c_max = log2_c_max;
+            *self.unified_radii_result = radii_side;
+            *self.unified_gpu_levels = dir;
+        }
+
+        // SA, periodicity and gates are cheap, cmax-keyed optional shortcuts.
+        // Their payload/version/domain is independent of every block-indexed
+        // buffer, so this refresh is safe while pixels keep using the current
+        // dynamic table.
+        let headers_stale = self.unified_optional_headers_result.is_empty()
+            || self.unified_optional_headers_log2_c_max.to_bits() != log2_c_max.to_bits()
+            || (self.unified_optional_headers_epsilon - epsilon).abs() > f64::EPSILON * epsilon;
+        if headers_stale {
+            self.unified_last_build_stages |= 16;
             let sa = unified::sa_build(&orbit, epsilon, log2_c_max.exp2(), orbit_len - 1);
-            // Periodic shortcut (Phase E): retain a detailed dormant reason
-            // for the performance panel. Detection may scan above the runtime
-            // p cap, but composition/certification never does.
             let periodic_outcome = unified::periodic_build_diagnostic(&orbit, epsilon, log2_c_max);
             let periodic_status = periodic_outcome.status.code();
             let periodic_detected_p = periodic_outcome.detected_period as u32;
             let periodic = periodic_outcome.block;
-            // §18 parabolic Fatou gates ((ε, c_max)-keyed like the radii).
-            // Built only when DEAD sidecar blocks exist (no tier certified —
-            // the saturation coupling: quasi-parabolic transits are the only
-            // regime that produces them in numbers) and only at shallow
-            // c_max, where the f64 view of the reference c is far inside the
-            // Taylor band r_dc = 4·c_max (deep-zoom gates need the
-            // perturbed-reference build variant — see gates.rs).
-            // FIELD VERDICT (stage b round 1): the GPU gate runtime is
-            // pixel-exact (0.00 % diff vs Möbius on both parabolic views,
-            // zero validation errors) but not yet profitable in wall-clock —
-            // the Ψ-hop loop is transcendental-heavy under SIMT (cusp view
-            // 4× slower at a ×20 iteration budget; period2 at parity). It
-            // ships DORMANT until the hop loop is optimized (cost-aware
-            // entry-radius rung, coarser hops): `set_gate_emission(true)`
-            // re-arms at runtime — the whole path stays built and tested
-            // (gates.rs battery + tests/gates-mode.spec.ts + the workStats
-            // gateJumps/gateFails counters).
+
+            // Gate span discovery reuses the last legacy-radius proof. In
+            // dynamic mode that proof may be tighter/looser than the current
+            // view, but it is only a candidate selector: build_gates performs
+            // the complete current-cmax certification and the shader enforces
+            // both the header and per-gate dc ceilings.
             let mut gate_list: Vec<gates::Gate> = Vec::new();
             if self.gate_emission && 4.0 * log2_c_max.exp2() >= 1e-12 {
                 let mut sat: Vec<(usize, usize)> = Vec::new();
-                for (li, lvl) in self.unified_levels.iter().enumerate() {
-                    if lvl.skip < mobius::MOBIUS_MIN_EMIT_SKIP {
-                        continue;
-                    }
-                    for (s, t) in radii.tiers[li].iter().enumerate() {
-                        if t.iter().all(|r| !r.is_finite()) {
-                            let first = 1 + s * lvl.skip;
-                            sat.push((first, first + lvl.skip));
+                if let Some(radii) = self.unified_radii.as_ref().as_ref() {
+                    for (li, lvl) in self.unified_levels.iter().enumerate() {
+                        if lvl.skip < mobius::MOBIUS_MIN_EMIT_SKIP {
+                            continue;
+                        }
+                        for (s, t) in radii.tiers[li].iter().enumerate() {
+                            if t.iter().all(|r| !r.is_finite()) {
+                                let first = 1 + s * lvl.skip;
+                                sat.push((first, first + lvl.skip));
+                            }
                         }
                     }
                 }
@@ -1752,33 +2113,72 @@ impl MandelbrotNavigator {
                     gate_list = gates::build_gates(&orbit, c0, log2_c_max, epsilon, &sat);
                 }
             }
-            // Working band for the dispatch tags: the REPLAY-observed |dz|
-            // distribution (§6.3 — median + spread over Zhuoran-rebased
-            // sample-pixel replays; the c_max + 10 placeholder is only the
-            // short-orbit fallback inside unified_replay_band).
-            let (log2_band, log2_spread) = unified::unified_replay_band(&orbit, log2_c_max);
-            let (radii_side, dir) = unified::unified_serialize_radii(
-                &self.unified_levels,
-                &radii,
-                log2_band,
-                log2_spread,
+            let gate_log2_dc = gate_list
+                .iter()
+                .map(|gate| gate.r_dc.log2())
+                .fold(f64::INFINITY, f64::min);
+            let gate_log2_dc = if gate_log2_dc.is_finite() {
+                gate_log2_dc
+            } else {
+                f64::NEG_INFINITY
+            };
+            let domains = unified::UnifiedOptionalHeaderDomains {
+                sa_log2_dc: if sa.n0 > 0 {
+                    log2_c_max
+                } else {
+                    f64::NEG_INFINITY
+                },
+                periodic_log2_dc: if periodic.is_some() {
+                    log2_c_max
+                } else {
+                    f64::NEG_INFINITY
+                },
+                gate_log2_dc,
+            };
+            *self.unified_optional_headers_result = unified::unified_serialize_optional_headers(
                 Some(&sa),
                 periodic.as_ref(),
                 &gate_list,
+                domains,
             );
-            // Table observability for the perf panel.
+            self.unified_optional_headers_log2_c_max = log2_c_max;
+            self.unified_optional_headers_epsilon = epsilon;
+            self.unified_optional_sa_log2_dc = domains.sa_log2_dc;
+            self.unified_optional_periodic_log2_dc = domains.periodic_log2_dc;
+            self.unified_optional_gate_log2_dc = domains.gate_log2_dc;
             self.unified_last_sa_n0 = sa.n0 as u32;
             self.unified_last_periodic_p = periodic.as_ref().map(|p| p.p as u32).unwrap_or(0);
             self.unified_last_periodic_status = periodic_status;
             self.unified_last_periodic_detected_p = periodic_detected_p;
-            self.unified_last_band_log2 = log2_band;
-            self.unified_last_band_spread = log2_spread;
             self.unified_last_gate_count = gate_list.len() as u32;
-            *self.unified_radii = Some(radii);
-            self.unified_radii_epsilon = epsilon;
-            self.unified_radii_log2_c_max = log2_c_max;
-            *self.unified_radii_result = radii_side;
-            *self.unified_gpu_levels = dir;
+        }
+
+        if self.dynamic_block_validity {
+            let validity_stale = self.unified_validity_result.is_empty()
+                || (self.unified_validity_epsilon - epsilon).abs() > f64::EPSILON * epsilon
+                || !self.unified_validity_reference_log2_dc.is_finite();
+            if validity_stale {
+                self.unified_last_build_stages |= 8;
+                let bounds = self
+                    .unified_bounds
+                    .as_ref()
+                    .as_ref()
+                    .expect("bounds built above");
+                let reference_log2_dc = self.unified_bounds_log2_c_max;
+                let (validity, diagnostics, levels) = unified::unified_serialize_validity_envelopes(
+                    &self.unified_levels,
+                    bounds,
+                    epsilon,
+                    reference_log2_dc,
+                );
+                debug_assert_eq!(validity.len(), self.unified_coeffs_result.len());
+                debug_assert_eq!(diagnostics.len(), validity.len());
+                *self.unified_validity_result = validity;
+                *self.unified_validity_diagnostics = diagnostics;
+                *self.unified_validity_gpu_levels = levels;
+                self.unified_validity_epsilon = epsilon;
+                self.unified_validity_reference_log2_dc = reference_log2_dc;
+            }
         }
     }
 
@@ -1790,6 +2190,34 @@ impl MandelbrotNavigator {
             radii_count: self.unified_radii_result.len(),
             levels_ptr: self.unified_gpu_levels.as_ptr() as usize,
             level_count: self.unified_gpu_levels.len(),
+            optional_headers_ptr: self.unified_optional_headers_result.as_ptr() as usize,
+            optional_headers_count: self.unified_optional_headers_result.len(),
+            optional_headers_version: if self.unified_optional_headers_result.is_empty() {
+                0
+            } else {
+                unified::UNIFIED_OPTIONAL_HEADER_VERSION
+            },
+            optional_sa_log2_dc: self.unified_optional_sa_log2_dc,
+            optional_periodic_log2_dc: self.unified_optional_periodic_log2_dc,
+            optional_gate_log2_dc: self.unified_optional_gate_log2_dc,
+            validity_ptr: self.unified_validity_result.as_ptr() as usize,
+            validity_count: self.unified_validity_result.len(),
+            validity_diagnostics_ptr: self.unified_validity_diagnostics.as_ptr() as usize,
+            validity_diagnostics_count: self.unified_validity_diagnostics.len(),
+            validity_diagnostics_words_per_block: validity::PACKED_VALIDITY_DIAGNOSTIC_WORDS,
+            validity_levels_ptr: self.unified_validity_gpu_levels.as_ptr() as usize,
+            validity_level_count: self.unified_validity_gpu_levels.len(),
+            validity_version: if self.unified_validity_result.is_empty() {
+                0
+            } else {
+                validity::PACKED_VALIDITY_VERSION
+            },
+            validity_words_per_block: validity::PACKED_VALIDITY_WORDS,
+            validity_reference_log2_dc: if self.unified_validity_result.is_empty() {
+                f64::NEG_INFINITY
+            } else {
+                self.unified_validity_reference_log2_dc
+            },
         }
     }
 
@@ -1840,6 +2268,8 @@ impl MandelbrotNavigator {
     pub fn compute_unified_header(&mut self, max_iter: u32) -> UnifiedBufferInfo {
         let orbit_len = self.result.len().min(max_iter as usize + 1);
         self.unified_header_coeffs.clear();
+        let mut sa_log2_dc = f64::NEG_INFINITY;
+        let mut periodic_log2_dc = f64::NEG_INFINITY;
         if orbit_len <= 2 {
             self.unified_header_result.clear();
             self.unified_header_levels.clear();
@@ -1860,7 +2290,21 @@ impl MandelbrotNavigator {
             let periodic = periodic_outcome.block;
             self.unified_last_periodic_p =
                 periodic.as_ref().map(|block| block.p as u32).unwrap_or(0);
-            let (side, dir) = unified::unified_serialize_header_only(Some(&sa), periodic.as_ref());
+            if sa.n0 > 0 {
+                sa_log2_dc = log2_c_max;
+            }
+            if periodic.is_some() {
+                periodic_log2_dc = log2_c_max;
+            }
+            let (side, dir) = unified::unified_serialize_header_only_with_domains(
+                Some(&sa),
+                periodic.as_ref(),
+                unified::UnifiedOptionalHeaderDomains {
+                    sa_log2_dc,
+                    periodic_log2_dc,
+                    gate_log2_dc: f64::NEG_INFINITY,
+                },
+            );
             *self.unified_header_result = side;
             *self.unified_header_levels = dir;
         }
@@ -1871,6 +2315,27 @@ impl MandelbrotNavigator {
             radii_count: self.unified_header_result.len(),
             levels_ptr: self.unified_header_levels.as_ptr() as usize,
             level_count: self.unified_header_levels.len(),
+            optional_headers_ptr: self.unified_header_result.as_ptr() as usize,
+            optional_headers_count: self.unified_header_result.len(),
+            optional_headers_version: if self.unified_header_result.is_empty() {
+                0
+            } else {
+                unified::UNIFIED_OPTIONAL_HEADER_VERSION
+            },
+            optional_sa_log2_dc: sa_log2_dc,
+            optional_periodic_log2_dc: periodic_log2_dc,
+            optional_gate_log2_dc: f64::NEG_INFINITY,
+            validity_ptr: core::ptr::null::<validity::PackedValidityEnvelopeV1>() as usize,
+            validity_count: 0,
+            validity_diagnostics_ptr: core::ptr::null::<validity::PackedValidityDiagnosticsV1>()
+                as usize,
+            validity_diagnostics_count: 0,
+            validity_diagnostics_words_per_block: validity::PACKED_VALIDITY_DIAGNOSTIC_WORDS,
+            validity_levels_ptr: core::ptr::null::<jet::JetLevel>() as usize,
+            validity_level_count: 0,
+            validity_version: 0,
+            validity_words_per_block: validity::PACKED_VALIDITY_WORDS,
+            validity_reference_log2_dc: f64::NEG_INFINITY,
         }
     }
 
@@ -1943,12 +2408,24 @@ impl MandelbrotNavigator {
         self.unified_levels.clear();
         *self.unified_bounds = None;
         *self.unified_radii = None;
+        self.unified_validity_result.clear();
+        self.unified_validity_diagnostics.clear();
+        self.unified_validity_gpu_levels.clear();
+        self.unified_validity_epsilon = f64::NAN;
+        self.unified_validity_reference_log2_dc = f64::NAN;
+        self.unified_optional_headers_result.clear();
+        self.unified_optional_headers_log2_c_max = f64::NAN;
+        self.unified_optional_headers_epsilon = f64::NAN;
+        self.unified_optional_sa_log2_dc = f64::NEG_INFINITY;
+        self.unified_optional_periodic_log2_dc = f64::NEG_INFINITY;
+        self.unified_optional_gate_log2_dc = f64::NEG_INFINITY;
         self.unified_source_len = 0;
         self.unified_bounds_log2_c_max = f64::NAN;
         self.unified_radii_log2_c_max = f64::NAN;
         self.unified_last_periodic_p = 0;
         self.unified_last_periodic_status = unified::PeriodicBuildStatus::Pending.code();
         self.unified_last_periodic_detected_p = 0;
+        self.reset_unified_incremental_builder();
     }
 
     fn choose_reference_near_view(&self) -> (DBig, DBig) {
@@ -2294,6 +2771,51 @@ pub struct JetBufferInfo {
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+#[repr(C)]
+#[derive(Copy, Clone, Debug, Default, PartialEq, Eq)]
+pub struct IncrementalUnifiedRangeInfo {
+    /// GPU-visible level index (0 = skip 4; skip 1/2 remain build-only).
+    pub level: u32,
+    pub skip: u32,
+    pub slot_start: u32,
+    pub slot_count: u32,
+    /// Block offset into this unit's coefficient/radius/envelope arrays.
+    pub payload_offset: u32,
+    /// New committed prefix count for the level after this unit.
+    pub committed_count: u32,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub struct IncrementalUnifiedBufferInfo {
+    pub ranges_ptr: usize,
+    pub range_count: usize,
+    pub coeffs_ptr: usize,
+    pub coeffs_count: usize,
+    pub radii_ptr: usize,
+    pub radii_count: usize,
+    pub validity_ptr: usize,
+    pub validity_count: usize,
+    pub diagnostics_ptr: usize,
+    pub diagnostics_count: usize,
+    pub validity_version: u32,
+    pub validity_words_per_block: usize,
+    pub diagnostics_words_per_block: usize,
+    pub reference_log2_dc: f64,
+    /// Orbit consumed by the binary-carry builder (includes Z0).
+    pub covered_orbit_len: usize,
+    /// Contiguous orbit prefix covered by committed skip-4 blocks.
+    pub published_orbit_len: usize,
+    pub reset: u32,
+    pub has_more: u32,
+    pub cumulative_merges: usize,
+    pub cumulative_coefficients: usize,
+    pub cumulative_envelopes: usize,
+    pub peak_retained_bytes: usize,
+    pub cumulative_merge_coefficients_ms: f64,
+    pub cumulative_envelope_ms: f64,
+}
+
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 pub struct UnifiedBufferInfo {
     // Coefficient buffer: 9 × 12 B prefix-ordered records, orbit-keyed.
     pub coeffs_ptr: usize,
@@ -2304,6 +2826,30 @@ pub struct UnifiedBufferInfo {
     pub radii_count: usize,
     pub levels_ptr: usize,
     pub level_count: usize,
+    // Versioned optional SA/periodic/gate header. It is uploaded immediately
+    // after the block-indexed sidecar but transported independently so a
+    // refresh never changes coefficients, bounds, envelopes, or directories.
+    pub optional_headers_ptr: usize,
+    pub optional_headers_count: usize,
+    pub optional_headers_version: u32,
+    pub optional_sa_log2_dc: f64,
+    pub optional_periodic_log2_dc: f64,
+    pub optional_gate_log2_dc: f64,
+    // Packed-v1 dynamic validity records (24 f32 / 96 B per block) and their
+    // independent 4-word level directory. Empty/version 0 while the opt-in
+    // debug path is disabled.
+    pub validity_ptr: usize,
+    pub validity_count: usize,
+    // Debug-only packed provenance (2 u32 / block), index-aligned with the
+    // proof records. It never participates in the validity decision.
+    pub validity_diagnostics_ptr: usize,
+    pub validity_diagnostics_count: usize,
+    pub validity_diagnostics_words_per_block: usize,
+    pub validity_levels_ptr: usize,
+    pub validity_level_count: usize,
+    pub validity_version: u32,
+    pub validity_words_per_block: usize,
+    pub validity_reference_log2_dc: f64,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -3043,12 +3589,170 @@ mod tests {
         assert!(nav.unified_bounds.as_ref().is_some());
 
         let info = nav.finish_unified_reference(512);
-        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4);
+        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4 | 16);
         assert!(info.coeffs_count > 0 && info.radii_count > 0 && info.level_count > 0);
+        assert_eq!(info.validity_count, 0);
 
         // The ordinary one-shot API sees the exact same now-warm cache.
         nav.compute_unified_reference(512);
         assert_eq!(nav.unified_last_stages(), 0);
+    }
+
+    #[test]
+    fn unified_dynamic_validity_buffers_are_opt_in_versioned_and_domain_stable() {
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.compute_reference_orbit_ptr(512);
+
+        assert!(!nav.get_dynamic_block_validity());
+        assert!(!nav.get_incremental_reference_table());
+        let legacy = nav.compute_unified_reference(512);
+        assert!(legacy.radii_count > 0 && legacy.level_count > 0);
+        assert_eq!(legacy.validity_count, 0);
+        assert_eq!(legacy.validity_level_count, 0);
+        assert_eq!(legacy.validity_version, 0);
+        assert_eq!(
+            legacy.validity_words_per_block,
+            validity::PACKED_VALIDITY_WORDS
+        );
+
+        nav.set_dynamic_block_validity(true);
+        assert!(nav.get_dynamic_block_validity());
+        let dynamic = nav.compute_unified_reference(512);
+        assert_eq!(nav.unified_last_stages(), 2 | 8 | 16);
+        assert_eq!(dynamic.validity_version, validity::PACKED_VALIDITY_VERSION);
+        assert_eq!(dynamic.validity_count, dynamic.coeffs_count);
+        assert_eq!(dynamic.validity_level_count, dynamic.level_count);
+        assert!(dynamic.validity_ptr != 0 && dynamic.validity_levels_ptr != 0);
+        assert!(dynamic.validity_reference_log2_dc.is_finite());
+        assert_eq!(dynamic.radii_count, dynamic.coeffs_count);
+        assert!(dynamic.optional_headers_count >= 11);
+        assert_eq!(dynamic.optional_headers_version, 1);
+
+        let mut covered = 0usize;
+        for (index, level) in nav.unified_validity_gpu_levels.iter().enumerate() {
+            assert_eq!(level.offset as usize, covered);
+            assert_eq!(
+                level.skip, nav.unified_gpu_levels[index].skip,
+                "validity and coefficient directories diverged"
+            );
+            covered += level.count as usize;
+        }
+        assert_eq!(covered, dynamic.validity_count);
+
+        let validity_ptr = dynamic.validity_ptr;
+        let validity_domain = dynamic.validity_reference_log2_dc;
+        nav.scale = DBig::from_str("0.00000005").unwrap();
+        let zoomed = nav.compute_unified_reference(512);
+        assert_eq!(nav.unified_last_stages() & 8, 0);
+        assert_eq!(zoomed.validity_ptr, validity_ptr);
+        assert_eq!(zoomed.validity_reference_log2_dc, validity_domain);
+
+        nav.set_dynamic_block_validity(false);
+        let restored = nav.compute_unified_reference(512);
+        assert_eq!(restored.validity_count, 0);
+        assert_eq!(restored.validity_version, 0);
+        assert!(restored.radii_count > 0, "legacy sidecar was not preserved");
+    }
+
+    #[test]
+    fn unified_dynamic_cmax_motion_refreshes_only_optional_headers() {
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.set_gate_emission(false);
+        nav.set_dynamic_block_validity(true);
+        nav.compute_reference_orbit_ptr(512);
+        let cold = nav.compute_unified_reference(512);
+        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4 | 8 | 16);
+
+        let coeffs_ptr = cold.coeffs_ptr;
+        let radii_ptr = cold.radii_ptr;
+        let validity_ptr = cold.validity_ptr;
+        let bounds_stamp = nav.unified_bounds_log2_c_max;
+        let validity_domain = cold.validity_reference_log2_dc;
+        let first_header = nav.unified_optional_headers_result.as_ref().clone();
+
+        // Zoom both inward and outward while remaining below the certified
+        // reference-domain ceiling. Every move refreshes the cmax-keyed
+        // optional tail, and no block-indexed phase is scheduled.
+        for scale in ["0.00000005", "0.000000001", "0.0000002"] {
+            nav.scale = DBig::from_str(scale).unwrap();
+            let moved = nav.compute_unified_reference(512);
+            assert_eq!(
+                nav.unified_last_stages(),
+                16,
+                "cmax-only motion rebuilt a block-indexed phase at scale {}",
+                scale
+            );
+            assert_eq!(moved.coeffs_ptr, coeffs_ptr, "coefficients moved");
+            assert_eq!(moved.radii_ptr, radii_ptr, "rollback sidecar moved");
+            assert_eq!(moved.validity_ptr, validity_ptr, "envelopes moved");
+            assert_eq!(
+                nav.unified_bounds_log2_c_max, bounds_stamp,
+                "proof bounds re-walked inside the reference domain"
+            );
+            assert_eq!(moved.validity_reference_log2_dc, validity_domain);
+            assert_eq!(moved.radii_count, moved.coeffs_count);
+            assert_eq!(moved.optional_headers_version, 1);
+            assert_eq!(moved.optional_gate_log2_dc, f64::NEG_INFINITY);
+        }
+        assert_ne!(
+            nav.unified_optional_headers_result.as_ref(),
+            &first_header,
+            "the independent optional header did not refresh"
+        );
+
+        // A large zoom-out can put the whole viewport outside the immutable
+        // proof domain while the reference itself remains unchanged.  The
+        // table stays resident: its per-pixel domain gates reject blocks and
+        // exact perturbation takes over.  Lowering max_iter at the same time
+        // must not shrink/recompose the already covered dyadic prefix.
+        let source_len = nav.unified_source_len;
+        nav.scale = DBig::from_str("0.1").unwrap();
+        let outside = nav.compute_unified_reference(64);
+        assert_eq!(
+            nav.unified_last_stages(),
+            16,
+            "out-of-domain zoom rebuilt reference-owned block data"
+        );
+        assert_eq!(nav.unified_source_len, source_len, "zoom-out shrank levels");
+        assert_eq!(outside.coeffs_ptr, coeffs_ptr, "coefficients moved");
+        assert_eq!(outside.radii_ptr, radii_ptr, "rollback sidecar moved");
+        assert_eq!(outside.validity_ptr, validity_ptr, "envelopes moved");
+        assert_eq!(nav.unified_bounds_log2_c_max, bounds_stamp);
+        assert_eq!(outside.validity_reference_log2_dc, validity_domain);
+    }
+
+    #[test]
+    fn incremental_dynamic_table_survives_cmax_growth_and_maxiter_shrink() {
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.set_dynamic_block_validity(true);
+        nav.set_incremental_reference_table(true);
+        nav.compute_reference_orbit_ptr(512);
+
+        let built = nav.advance_incremental_unified_reference(512, 1024, 4096);
+        assert_eq!(built.has_more, 0, "fixture did not finish its table unit");
+        assert_eq!(built.reset, 1, "initial publication did not start an epoch");
+        let covered = built.covered_orbit_len;
+        let published = built.published_orbit_len;
+        let domain = built.reference_log2_dc;
+        let merges = built.cumulative_merges;
+        assert!(covered > 64 && published > 64 && domain.is_finite());
+
+        nav.scale = DBig::from_str("0.1").unwrap();
+        assert!(
+            nav.jet_log2_c_max() > domain,
+            "fixture did not leave the certified table domain"
+        );
+        let moved = nav.advance_incremental_unified_reference(64, 1024, 4096);
+        assert_eq!(moved.reset, 0, "cmax growth reset the incremental table");
+        assert_eq!(moved.range_count, 0, "old blocks were republished");
+        assert_eq!(moved.has_more, 0);
+        assert_eq!(moved.covered_orbit_len, covered, "coverage shrank");
+        assert_eq!(
+            moved.published_orbit_len, published,
+            "published prefix shrank"
+        );
+        assert_eq!(moved.reference_log2_dc, domain, "proof domain changed");
+        assert_eq!(moved.cumulative_merges, merges, "blocks were recomposed");
     }
 
     #[test]
@@ -3059,6 +3763,9 @@ mod tests {
         // orbit, and the orbit-keyed coefficient buffer untouched); a
         // reference reset invalidates every stage.
         let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        // This test isolates the legacy cmax-solved radii cache. Dynamic
+        // validity has its own domain-stability coverage above.
+        nav.set_dynamic_block_validity(false);
         nav.compute_reference_orbit_ptr(512);
         let info = nav.compute_unified_reference(512);
         assert!(info.level_count > 0, "unified table built no levels");
@@ -3066,15 +3773,9 @@ mod tests {
             info.coeffs_count > 0 && info.coeffs_ptr != 0,
             "coeff buffer empty"
         );
-        // Sidecar = one entry per block + the ELEVEN-entry header (SA b1..b4
-        // + n0, the 6-coefficient F-form periodic block, then the §18 gate
-        // directory) + the optional gate blob.
-        assert!(
-            info.radii_count >= info.coeffs_count + 11,
-            "buffers must be index-aligned (+header): {} vs {}",
-            info.radii_count,
-            info.coeffs_count
-        );
+        assert_eq!(info.radii_count, info.coeffs_count);
+        assert!(info.optional_headers_count >= 11);
+        assert_eq!(info.optional_headers_version, 1);
         let src_len = nav.unified_source_len;
         let bounds_stamp = nav.unified_bounds_log2_c_max;
         assert!(src_len > 0 && bounds_stamp.is_finite());
@@ -3154,11 +3855,13 @@ mod tests {
         // octaves of zoom-in, radii re-solve only every ~2 octaves — the
         // per-keyframe table cost is the light radii scan, not the build.
         let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        // Preserve the legacy radii cadence as the A/B rollback baseline.
+        nav.set_dynamic_block_validity(false);
         nav.compute_reference_orbit_ptr(512);
         nav.compute_unified_reference(512);
         assert_eq!(
             nav.unified_last_stages(),
-            1 | 2 | 4,
+            1 | 2 | 4 | 16,
             "cold build runs all stages"
         );
 
@@ -3221,7 +3924,7 @@ mod tests {
         let t0 = Instant::now();
         nav.compute_unified_reference(40_000);
         let cold = t0.elapsed();
-        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4);
+        assert_eq!(nav.unified_last_stages(), 1 | 2 | 4 | 16);
         println!(
             "nav orbit len {} | blocks {} | eps {} | l2c {:.1}",
             nav.result.len(),
@@ -3243,8 +3946,8 @@ mod tests {
         let keyframe = t1.elapsed();
         assert_eq!(
             nav.unified_last_stages(),
-            4,
-            "keyframe should re-solve radii alone"
+            4 | 16,
+            "keyframe should re-solve radii and refresh only optional headers"
         );
         println!(
             "unified keyframe budget @40k: cold build {:?} | radii-only keyframe {:?} (×{:.1} less)",

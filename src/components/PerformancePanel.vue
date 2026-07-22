@@ -49,6 +49,12 @@ const stats = reactive({
 
   // Dispatch
   tierApps: [-1, -1, -1, -1] as [number, number, number, number],
+  dynamicTierAttempts: [-1, -1, -1, -1] as [number, number, number, number],
+  dynamicTierAccepts: [-1, -1, -1, -1] as [number, number, number, number],
+  dynamicSkipBuckets: [-1, -1, -1, -1] as [number, number, number, number],
+  dynamicCandidateUses: -1,
+  dynamicRejectionReasons: [-1, -1, -1, -1, -1, -1] as [number, number, number, number, number, number],
+  dynamicExactFallbacks: -1,
   secoursStats: [-1, -1] as [number, number],
   f32Apps: -1,
   gateStats: [-1, -1] as [number, number],
@@ -67,10 +73,29 @@ const stats = reactive({
   tableBandLog2: Number.NaN,
   tableBandSpread: Number.NaN,
   tableGateCount: -1,
+  lastTableBuildMs: -1,
+  lastTableBuildStages: -1,
+  lastTableCoefficientsMs: -1,
+  lastTableBoundsMs: -1,
+  lastTableRadiiMs: -1,
   tableBuildActive: false,
   tableBuildProgress: 0,
   tableBuildStage: 'idle',
   tableBuildKind: '',
+  dynamicBlockValidity: true,
+  dynamicValidityShadow: false,
+  dynamicValidityStatsEnabled: false,
+  incrementalReferenceTable: true,
+  incrementalTableOrbitCoverage: 0,
+  incrementalTableBuiltOrbit: 0,
+  incrementalTableLevelBlocks: [] as number[],
+  incrementalTableTransferredBytes: 0,
+  incrementalTableYields: 0,
+  incrementalTableCancellations: 0,
+  incrementalTableCapacityGrowths: 0,
+  incrementalTablePeakRetainedBytes: 0,
+  incrementalTableMergeCoefficientsMs: 0,
+  incrementalTableEnvelopeMs: 0,
   shaderApproxFlag: 0,
   shaderBlaLevelCount: 0,
   aaFrontierStamped: -1,
@@ -91,6 +116,8 @@ const stats = reactive({
 
 const shaderModeLabel = computed(() => {
   switch (stats.shaderApproxFlag) {
+    case 7: return 'Auto shadow (tags legacy)';
+    case 6: return 'Auto dynamique';
     case 5: return 'Auto';
     case 4: return 'Möbius+';
     case 3: return 'Jet';
@@ -137,6 +164,23 @@ const tableKindLabel = computed(() => {
     bla: 'BLA/Padé',
   };
   return labels[stats.tableBuildKind] ?? 'blocs';
+});
+
+const tablePhaseTimingsLine = computed(() => {
+  if (stats.lastTableBuildStages < 0 || stats.lastTableBuildMs < 0) return '';
+  const phases: string[] = [];
+  if ((stats.lastTableBuildStages & 1) !== 0 && stats.lastTableCoefficientsMs >= 0) {
+    phases.push(`coeff. ${fmt(stats.lastTableCoefficientsMs)} ms`);
+  }
+  if ((stats.lastTableBuildStages & 2) !== 0 && stats.lastTableBoundsMs >= 0) {
+    phases.push(`bornes ${fmt(stats.lastTableBoundsMs)} ms`);
+  }
+  if ((stats.lastTableBuildStages & 4) !== 0 && stats.lastTableRadiiMs >= 0) {
+    phases.push(`rayons ${fmt(stats.lastTableRadiiMs)} ms`);
+  }
+  return phases.length > 0
+    ? `${phases.join(' · ')} · total ${fmt(stats.lastTableBuildMs)} ms`
+    : `total ${fmt(stats.lastTableBuildMs)} ms`;
 });
 
 function completionPercent(): string {
@@ -186,6 +230,13 @@ function formatCondensedNumber(val: number | null | undefined): string {
   return formatted.replace('.', ',') + suffix;
 }
 
+function formatMemory(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 o';
+  if (bytes < 1024) return `${Math.round(bytes)} o`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} Kio`;
+  return `${(bytes / (1024 * 1024)).toFixed(2)} Mio`;
+}
+
 function formatPixelCount(n: number): string {
   if (n < 0) return '--';
   if (n >= 1_000_000) return (n / 1_000_000).toFixed(1) + 'M';
@@ -216,6 +267,12 @@ function formatRefOrbit(count: number, max: number): string {
 // jet = its three applied orders; Möbius/Padé/BLA = their single form.
 type TierMeta = { label: string; color: string } | null;
 const TIER_META_BY_MODE: Record<number, TierMeta[]> = {
+  6: [
+    { label: 'Affine (BLA)', color: '#7dd3a8' },
+    { label: 'Padé [2/1]', color: '#e0b45c' },
+    { label: 'Möbius-c⁺ [2/1]', color: '#6fb7e8' },
+    { label: 'Jet ordre 3', color: '#b58ae0' },
+  ],
   5: [
     { label: 'Affine (BLA)', color: '#7dd3a8' },
     { label: 'Padé [2/1]', color: '#e0b45c' },
@@ -244,6 +301,29 @@ const tierRows = computed(() => {
     .map((m, i) => (m ? { ...m, count: stats.tierApps[i], pct: (100 * stats.tierApps[i]) / total } : null))
     .filter((r): r is NonNullable<typeof r> => r !== null && r.count > 0);
 });
+const dynamicTierRows = computed(() => {
+  if (stats.shaderApproxFlag !== 6 || stats.dynamicTierAttempts[0] < 0) return [];
+  const meta = TIER_META_BY_MODE[6];
+  return meta.map((m, i) => ({
+    label: m!.label,
+    color: m!.color,
+    attempts: stats.dynamicTierAttempts[i],
+    accepts: stats.dynamicTierAccepts[i],
+    rate: stats.dynamicTierAttempts[i] > 0
+      ? 100 * stats.dynamicTierAccepts[i] / stats.dynamicTierAttempts[i]
+      : 0,
+  }));
+});
+const dynamicAcceptedTotal = computed(() =>
+  stats.dynamicTierAccepts[0] < 0 ? -1 : stats.dynamicTierAccepts.reduce((sum, value) => sum + value, 0)
+);
+const dynamicSkipTotal = computed(() =>
+  stats.dynamicSkipBuckets[0] < 0 ? -1 : stats.dynamicSkipBuckets.reduce((sum, value) => sum + value, 0)
+);
+const DYNAMIC_REJECTION_LABELS = ['valeur', 'dérivée', 'pure-c', 'domaine statique', 'Cauchy', 'pôle'];
+const dynamicRejectionRows = computed(() => stats.dynamicRejectionReasons
+  .map((count, index) => ({ label: DYNAMIC_REJECTION_LABELS[index], count }))
+  .filter(row => row.count > 0));
 // Secours (portfolio): fallback applications + iterations they covered.
 function secoursLine(): string {
   const [apps, iters] = stats.secoursStats;
@@ -263,6 +343,22 @@ function setRenorm(on: boolean) {
   const e = props.engine;
   if (e) e.renormEnabled = on;
   stats.renormEnabled = on;
+}
+
+function setDynamicValidity(on: boolean) {
+  props.engine?.setDynamicBlockValidity(on);
+}
+
+function setDynamicShadow(on: boolean) {
+  props.engine?.setDynamicValidityShadow(on);
+}
+
+function setDynamicStats(on: boolean) {
+  props.engine?.setDynamicValidityStatsEnabled(on);
+}
+
+function setIncrementalTable(on: boolean) {
+  props.engine?.setIncrementalReferenceTable(on);
 }
 // Plain-f32 fast-path share of the applications (the rest ran in floatexp).
 function f32Line(): string {
@@ -370,6 +466,12 @@ function readLive(e: any) {
 
   // Dispatch
   stats.tierApps = e.tierAppsApprox ?? [-1, -1, -1, -1];
+  stats.dynamicTierAttempts = e.dynamicTierAttemptsApprox ?? [-1, -1, -1, -1];
+  stats.dynamicTierAccepts = e.dynamicTierAcceptsApprox ?? [-1, -1, -1, -1];
+  stats.dynamicSkipBuckets = e.dynamicSkipBucketsApprox ?? [-1, -1, -1, -1];
+  stats.dynamicCandidateUses = e.dynamicCandidateUsesApprox ?? -1;
+  stats.dynamicRejectionReasons = e.dynamicRejectionReasonsApprox ?? [-1, -1, -1, -1, -1, -1];
+  stats.dynamicExactFallbacks = e.dynamicExactFallbacksApprox ?? -1;
   stats.secoursStats = e.secoursStatsApprox ?? [-1, -1];
   stats.f32Apps = e.f32AppsApprox ?? -1;
   stats.gateStats = e.gateStatsApprox ?? [-1, -1];
@@ -387,10 +489,29 @@ function readLive(e: any) {
   stats.tableBandLog2 = e.tableBandLog2 ?? Number.NaN;
   stats.tableBandSpread = e.tableBandSpread ?? Number.NaN;
   stats.tableGateCount = e.tableGateCount ?? -1;
+  stats.lastTableBuildMs = e.lastTableBuildMs ?? -1;
+  stats.lastTableBuildStages = e.lastTableBuildStages ?? -1;
+  stats.lastTableCoefficientsMs = e.lastTableCoefficientsMs ?? -1;
+  stats.lastTableBoundsMs = e.lastTableBoundsMs ?? -1;
+  stats.lastTableRadiiMs = e.lastTableRadiiMs ?? -1;
   stats.tableBuildActive = e.tableBuildActive ?? false;
   stats.tableBuildProgress = e.tableBuildProgress ?? 0;
   stats.tableBuildStage = e.tableBuildStage ?? 'idle';
   stats.tableBuildKind = e.tableBuildKind ?? '';
+  stats.dynamicBlockValidity = e.dynamicBlockValidity ?? false;
+  stats.dynamicValidityShadow = e.getDynamicValidityShadow?.() ?? false;
+  stats.dynamicValidityStatsEnabled = e.getDynamicValidityStatsEnabled?.() ?? false;
+  stats.incrementalReferenceTable = e.getIncrementalReferenceTable?.() ?? false;
+  stats.incrementalTableOrbitCoverage = e.incrementalTableOrbitCoverage ?? 0;
+  stats.incrementalTableBuiltOrbit = e.incrementalTableBuiltOrbit ?? 0;
+  stats.incrementalTableLevelBlocks = e.incrementalTableLevelBlocks ?? [];
+  stats.incrementalTableTransferredBytes = e.incrementalTableTransferredBytes ?? 0;
+  stats.incrementalTableYields = e.incrementalTableYields ?? 0;
+  stats.incrementalTableCancellations = e.incrementalTableCancellations ?? 0;
+  stats.incrementalTableCapacityGrowths = e.incrementalTableCapacityGrowths ?? 0;
+  stats.incrementalTablePeakRetainedBytes = e.incrementalTablePeakRetainedBytes ?? 0;
+  stats.incrementalTableMergeCoefficientsMs = e.incrementalTableMergeCoefficientsMs ?? 0;
+  stats.incrementalTableEnvelopeMs = e.incrementalTableEnvelopeMs ?? 0;
   stats.shaderApproxFlag = e.lastShaderApproxFlag ?? 0;
   stats.shaderBlaLevelCount = e.lastShaderBlaLevelCount ?? 0;
   stats.aaFrontierStamped = e.aaFrontierStamped ?? -1;
@@ -754,6 +875,34 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
         <span class="perf-stat-label"><span class="perf-tier-dot" :style="{ background: r.color }"></span>{{ r.label }}</span>
         <span class="perf-stat-value">{{ formatOps(r.count) }} · {{ r.pct.toFixed(1) }}%</span>
       </div>
+      <template v-if="stats.shaderApproxFlag === 6 || stats.shaderApproxFlag === 7">
+        <div class="perf-stat-row perf-stat-row--progress">
+          <div class="perf-progress-header">
+            <span class="perf-stat-label">Certificats dynamiques</span>
+            <span class="perf-stat-value">acceptés / tentés</span>
+          </div>
+        </div>
+        <div v-for="r in dynamicTierRows" :key="'dynamic-' + r.label" class="perf-stat-row">
+          <span class="perf-stat-label"><span class="perf-tier-dot" :style="{ background: r.color }"></span>{{ r.label }}</span>
+          <span class="perf-stat-value">{{ formatOps(r.accepts) }} / {{ formatOps(r.attempts) }} · {{ r.rate.toFixed(1) }}%</span>
+        </div>
+        <div v-if="dynamicSkipTotal >= 0" class="perf-stat-row">
+          <span class="perf-stat-label">Distribution des sauts</span>
+          <span class="perf-stat-value">&lt;16 {{ formatOps(stats.dynamicSkipBuckets[0]) }} · 16–255 {{ formatOps(stats.dynamicSkipBuckets[1]) }} · 256–4095 {{ formatOps(stats.dynamicSkipBuckets[2]) }} · ≥4096 {{ formatOps(stats.dynamicSkipBuckets[3]) }}</span>
+        </div>
+        <div v-if="stats.dynamicCandidateUses >= 0" class="perf-stat-row">
+          <span class="perf-stat-label">Rung Cauchy limitante</span>
+          <span class="perf-stat-value">{{ formatOps(stats.dynamicCandidateUses) }}<template v-if="dynamicAcceptedTotal > 0"> · {{ (100 * stats.dynamicCandidateUses / dynamicAcceptedTotal).toFixed(1) }}%</template></span>
+        </div>
+        <div v-for="r in dynamicRejectionRows" :key="'reject-' + r.label" class="perf-stat-row">
+          <span class="perf-stat-label">Refus · {{ r.label }}</span>
+          <span class="perf-stat-value">{{ formatOps(r.count) }}</span>
+        </div>
+        <div v-if="stats.dynamicExactFallbacks >= 0" class="perf-stat-row">
+          <span class="perf-stat-label">Repli perturbation exacte</span>
+          <span class="perf-stat-value">{{ formatOps(stats.dynamicExactFallbacks) }} pas</span>
+        </div>
+      </template>
       <div v-if="stats.shaderApproxFlag === 5 && secoursLine()" class="perf-stat-row">
         <span class="perf-stat-label">Secours {{ stats.portfolioEnabled ? '' : '(OFF)' }}</span>
         <span class="perf-stat-value">{{ secoursLine() }}</span>
@@ -841,6 +990,32 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
         ></div>
       </div>
     </div>
+    <div v-if="tablePhaseTimingsLine" class="perf-stat-row">
+      <span class="perf-stat-label">Phases table WASM</span>
+      <span class="perf-stat-value">{{ tablePhaseTimingsLine }}</span>
+    </div>
+    <template v-if="stats.incrementalReferenceTable">
+      <div class="perf-stat-row">
+        <span class="perf-stat-label">Couverture table / construite</span>
+        <span class="perf-stat-value">{{ formatCondensedNumber(stats.incrementalTableOrbitCoverage) }} / {{ formatCondensedNumber(stats.incrementalTableBuiltOrbit) }}</span>
+      </div>
+      <div v-if="stats.incrementalTableLevelBlocks.length" class="perf-stat-row">
+        <span class="perf-stat-label">Blocs engagés / niveau</span>
+        <span class="perf-stat-value">{{ stats.incrementalTableLevelBlocks.join(' · ') }}</span>
+      </div>
+      <div class="perf-stat-row">
+        <span class="perf-stat-label">Publication incrémentale</span>
+        <span class="perf-stat-value">{{ formatMemory(stats.incrementalTableTransferredBytes) }} · {{ stats.incrementalTableYields }} yields · {{ stats.incrementalTableCancellations }} annulations</span>
+      </div>
+      <div class="perf-stat-row">
+        <span class="perf-stat-label">CPU fusion / enveloppes</span>
+        <span class="perf-stat-value">{{ stats.incrementalTableMergeCoefficientsMs.toFixed(1) }} ms · {{ stats.incrementalTableEnvelopeMs.toFixed(1) }} ms</span>
+      </div>
+      <div class="perf-stat-row">
+        <span class="perf-stat-label">Mémoire builder / croissance</span>
+        <span class="perf-stat-value">{{ formatMemory(stats.incrementalTablePeakRetainedBytes) }} · {{ stats.incrementalTableCapacityGrowths }}×</span>
+      </div>
+    </template>
     <div class="perf-stat-row">
       <span class="perf-stat-label">Référence</span>
       <span class="perf-stat-value" :class="{ 'perf-stat-value--reference': stats.referenceResetActive }">
@@ -860,6 +1035,42 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       <div class="perf-debug-switch-wrap">
         <label class="perf-debug-switch">
           <input type="checkbox" v-model="debugShading" />
+          <span class="perf-debug-switch-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="perf-stat-row perf-debug-row">
+      <span class="perf-stat-label">Validité dynamique</span>
+      <div class="perf-debug-switch-wrap">
+        <label class="perf-debug-switch">
+          <input type="checkbox" :checked="stats.dynamicBlockValidity" @change="setDynamicValidity(($event.target as HTMLInputElement).checked)" />
+          <span class="perf-debug-switch-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="perf-stat-row perf-debug-row">
+      <span class="perf-stat-label">Shadow (tags legacy)</span>
+      <div class="perf-debug-switch-wrap">
+        <label class="perf-debug-switch">
+          <input type="checkbox" :checked="stats.dynamicValidityShadow" @change="setDynamicShadow(($event.target as HTMLInputElement).checked)" />
+          <span class="perf-debug-switch-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="perf-stat-row perf-debug-row">
+      <span class="perf-stat-label">Compteurs validité (coûteux)</span>
+      <div class="perf-debug-switch-wrap">
+        <label class="perf-debug-switch">
+          <input type="checkbox" :checked="stats.dynamicValidityStatsEnabled" @change="setDynamicStats(($event.target as HTMLInputElement).checked)" />
+          <span class="perf-debug-switch-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="perf-stat-row perf-debug-row">
+      <span class="perf-stat-label">Table incrémentale</span>
+      <div class="perf-debug-switch-wrap">
+        <label class="perf-debug-switch">
+          <input type="checkbox" :checked="stats.incrementalReferenceTable" @change="setIncrementalTable(($event.target as HTMLInputElement).checked)" />
           <span class="perf-debug-switch-slider"></span>
         </label>
       </div>

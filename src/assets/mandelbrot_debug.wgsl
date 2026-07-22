@@ -59,10 +59,140 @@ struct JetLevel { offset: u32, count: u32, skip: u32, maxR3: f32 };
 @group(0) @binding(0) var<uniform> mandelbrot: Mandelbrot;
 @group(0) @binding(1) var<storage, read> mandelbrotOrbitPointSuite: array<MandelbrotStep>;
 @group(0) @binding(2) var<storage, read> mandelbrotBlaSuite: array<BlaStep>;
+// Packed dynamic validity reuses this binding in Auto; BLA levels are unused
+// in that mode, so the diagnostic pipeline also stays at eight storage buffers.
 @group(0) @binding(3) var<storage, read> mandelbrotBlaLevels: array<BlaLevel>;
 @group(0) @binding(5) var<storage, read> mandelbrotJetSuite: array<JetCoeff>;
 @group(0) @binding(6) var<storage, read> mandelbrotJetLevels: array<JetLevel>;
 @group(0) @binding(7) var<storage, read> mandelbrotJetRadii: array<JetRadii>;
+
+const VALIDITY_VERSION: u32 = 1u;
+const VALIDITY_WORDS_PER_BLOCK: u32 = 24u;
+const VALIDITY_WORDS_PER_TIER: u32 = 6u;
+const VALIDITY_SLOPES: array<f32, 4> = array<f32, 4>(0.0, -0.5, -1.0, -2.0);
+
+struct DynamicValidityEvaluation {
+  log2Dc: f32,
+  log2Dz: f32,
+  radiusLog2: f32,
+  accepts: bool,
+};
+
+fn validity_pos_inf() -> f32 { return 3.4028234e38; }
+fn validity_neg_inf() -> f32 { return -3.4028234e38; }
+fn validity_is_pos_inf(value: f32) -> bool { return bitcast<u32>(value) == 0x7f800000u; }
+fn validity_is_neg_inf(value: f32) -> bool { return bitcast<u32>(value) == 0xff800000u; }
+
+fn validity_next_up(value: f32) -> f32 {
+  let bits = bitcast<u32>(value);
+  let absBits = bits & 0x7fffffffu;
+  if (absBits > 0x7f800000u || bits == 0x7f800000u) { return value; }
+  if (absBits == 0u) { return bitcast<f32>(1u); }
+  if (value > 0.0) { return bitcast<f32>(bits + 1u); }
+  return bitcast<f32>(bits - 1u);
+}
+
+fn validity_next_down(value: f32) -> f32 {
+  let bits = bitcast<u32>(value);
+  let absBits = bits & 0x7fffffffu;
+  if (absBits > 0x7f800000u || bits == 0xff800000u) { return value; }
+  if (absBits == 0u) { return bitcast<f32>(0x80000001u); }
+  if (value > 0.0) { return bitcast<f32>(bits - 1u); }
+  return bitcast<f32>(bits + 1u);
+}
+
+fn validity_log2_complex(value: vec2<f32>, exponent: i32) -> f32 {
+  let xBits = bitcast<u32>(value.x) & 0x7fffffffu;
+  let yBits = bitcast<u32>(value.y) & 0x7fffffffu;
+  if (xBits >= 0x7f800000u || yBits >= 0x7f800000u) { return validity_pos_inf(); }
+  let axis = max(abs(value.x), abs(value.y));
+  if (axis == 0.0) { return validity_neg_inf(); }
+  let sx = value.x / axis;
+  let sy = value.y / axis;
+  let norm2 = validity_next_up(sx * sx + sy * sy);
+  let angular = validity_next_up(0.5 * validity_next_up(log2(norm2)));
+  let radial = validity_next_up(log2(axis));
+  return validity_next_up(validity_next_up(radial + angular) + f32(exponent));
+}
+
+fn validity_log2_complex_shallow(value: vec2<f32>) -> f32 {
+  return validity_log2_complex(value, 0);
+}
+
+fn validity_log2_complex_floatexp(value: fe) -> f32 {
+  return validity_log2_complex(value.m, value.e);
+}
+
+fn validity_packed_word(blockIndex: u32, tier: u32, word: u32) -> f32 {
+  let absoluteWord = blockIndex * VALIDITY_WORDS_PER_BLOCK
+    + tier * VALIDITY_WORDS_PER_TIER + word;
+  let packed = mandelbrotBlaLevels[absoluteWord >> 2u];
+  switch (absoluteWord & 3u) {
+    case 0u: { return bitcast<f32>(packed.offset); }
+    case 1u: { return bitcast<f32>(packed.count); }
+    case 2u: { return bitcast<f32>(packed.skip); }
+    default: { return packed.maxRadius; }
+  }
+}
+
+fn evaluate_dynamic_validity_logs(
+  blockIndex: u32,
+  tier: u32,
+  log2Dc: f32,
+  log2Dz: f32,
+) -> DynamicValidityEvaluation {
+  let maxLog2Dc = validity_packed_word(blockIndex, tier, 4u);
+  var radiusLog2 = validity_neg_inf();
+  if (!validity_is_neg_inf(maxLog2Dc) && log2Dc == log2Dc && log2Dc <= maxLog2Dc) {
+    var commonRadius = validity_pos_inf();
+    for (var line = 0u; line < 4u; line++) {
+      let intercept = validity_packed_word(blockIndex, tier, line);
+      if (validity_is_pos_inf(intercept)) { continue; }
+      var evaluated = validity_pos_inf();
+      if (log2Dc == validity_neg_inf()) {
+        if (VALIDITY_SLOPES[line] == 0.0) { evaluated = intercept; }
+      } else {
+        evaluated = intercept + VALIDITY_SLOPES[line] * log2Dc;
+      }
+      commonRadius = min(commonRadius, validity_next_down(evaluated));
+    }
+    radiusLog2 = min(commonRadius, validity_packed_word(blockIndex, tier, 5u));
+  }
+  return DynamicValidityEvaluation(
+    log2Dc,
+    log2Dz,
+    radiusLog2,
+    radiusLog2 != validity_neg_inf() && log2Dz == log2Dz && log2Dz <= radiusLog2,
+  );
+}
+
+fn evaluate_dynamic_validity_shallow(
+  blockIndex: u32,
+  tier: u32,
+  dc: vec2<f32>,
+  dz: vec2<f32>,
+) -> DynamicValidityEvaluation {
+  return evaluate_dynamic_validity_logs(
+    blockIndex,
+    tier,
+    validity_log2_complex_shallow(dc),
+    validity_log2_complex_shallow(dz),
+  );
+}
+
+fn evaluate_dynamic_validity_floatexp(
+  blockIndex: u32,
+  tier: u32,
+  dc: fe,
+  dz: fe,
+) -> DynamicValidityEvaluation {
+  return evaluate_dynamic_validity_logs(
+    blockIndex,
+    tier,
+    validity_log2_complex_floatexp(dc),
+    validity_log2_complex_floatexp(dz),
+  );
+}
 
 const DEEP_EXP: i32 = -100;
 const LN2: f32 = 0.6931471805599453;
@@ -377,21 +507,40 @@ fn dbg_try_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, dc: fe, maxI
 // shares.
 fn dbg_try_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, dc: fe, dc2: fe, dc3: fe, maxIterI: i32, skip0Log: i32, order: ptr<function, i32>, probes: ptr<function, u32>, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>) -> i32 {
   if (*ref_i <= 0) { return 0; }
+  let dynamicValidity = mandelbrot.approximationMode >= 5.5;
   let log2_dz = fe_log2(*dz);
+  var dynamicLog2Dc = 0.0;
+  var dynamicLog2Dz = 0.0;
+  if (dynamicValidity) {
+    dynamicLog2Dc = validity_log2_complex_floatexp(dc);
+    dynamicLog2Dz = validity_log2_complex_floatexp(*dz);
+  }
   let shiftedRef = *ref_i - 1;
   var level = min(min(i32(mandelbrot.blaLevelCount), JET_MAX_LEVELS) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
-  level = min(level, *hint + JET_LEVEL_HINT_UP);
+  if (!dynamicValidity) { level = min(level, *hint + JET_LEVEL_HINT_UP); }
   while (level >= 0) {
     *probes = *probes + 1u;
     let skip = i32(1u << u32(skip0Log + level));
-    if (log2_dz < (*lvlR)[level] && *ref_i + skip <= maxIterI) {
+    if ((dynamicValidity || log2_dz < (*lvlR)[level]) && *ref_i + skip <= maxIterI) {
       let levelInfo = mandelbrotJetLevels[level];
       let slot = shiftedRef >> u32(skip0Log + level);
       if (u32(slot) < levelInfo.count) {
         let entry = i32(levelInfo.offset) + slot;
         let radii = mandelbrotJetRadii[entry].v;
-        if (log2_dz < radii.x) {
-          let tag = i32(radii.y + 0.5);
+        var tag = -1;
+        if (dynamicValidity) {
+          for (var tier = 0u; tier < 4u; tier++) {
+            if (evaluate_dynamic_validity_logs(
+              u32(entry), tier, dynamicLog2Dc, dynamicLog2Dz,
+            ).accepts) {
+              tag = i32(tier);
+              break;
+            }
+          }
+        } else if (log2_dz < radii.x) {
+          tag = i32(radii.y + 0.5);
+        }
+        if (tag >= 0) {
           let base = entry * UNIFIED_COEFF_STRIDE;
           var phi: fe;
           var denOk = true;
@@ -529,10 +678,10 @@ fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   let dcF3 = cmul(dcF2, dcF);
   let jetF32Ok = length(dcF) > 2.3e-13;
 
-  let mode = i32(mandelbrot.approximationMode + 0.5); // 0..5 requested mode
+  let mode = i32(mandelbrot.approximationMode + 0.5); // 0..6, 6 = dynamic Auto
   let isJet = mode == 3;
   let isMobius = mode == 4;
-  let isUnified = mode == 5;
+  let isUnified = mode >= 5;
   let isBlockTable = isJet || isMobius || isUnified;
   // Möbius products are degree-1 in dc: looser f32-path gate than the jet's.
   let mobiusF32Ok = length(fe_to_vec(dc)) > 1e-30;

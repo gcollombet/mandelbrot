@@ -1,0 +1,74 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "dynamic-validity-census",
+  "epsilon": 0.000001,
+  "referenceLog2Dc": -20,
+  "log2DcGrid": [-20.25, -24.0, -32.0, -48.0, -72.0, -104.0],
+  "rejectionOrder": ["static-domain", "pure-c", "pole", "cauchy", "value", "derivative"],
+  "views": [
+    {
+      "name": "seahorse",
+      "radiusLog2DeltaVsLegacy": {
+        "oneRung": { "pairs": 8838, "p05": -5.318886, "p50": -2.253726, "p95": 0.912751, "lost": 1071, "unlocked": 235 },
+        "twoRungs": { "pairs": 8838, "p05": -5.318886, "p50": -2.251431, "p95": 0.912751, "lost": 1071, "unlocked": 235 }
+      },
+      "dispatch": {
+        "legacy": { "blockApplications": 218, "exactSteps": 336, "skippedIterations": 5808, "meanAppliedSkip": 26.642202, "tierAccepts": [49, 31, 135, 3] },
+        "oneRung": { "blockApplications": 264, "exactSteps": 492, "skippedIterations": 5652, "meanAppliedSkip": 21.409091, "tierAccepts": [51, 24, 175, 14], "candidateUsage": [258, 0], "rejections": [0, 1335, 49, 480, 112, 96] },
+        "twoRungs": { "blockApplications": 266, "exactSteps": 484, "skippedIterations": 5660, "meanAppliedSkip": 21.278195, "tierAccepts": [51, 24, 175, 16], "candidateUsage": [157, 103], "rejections": [0, 1335, 49, 440, 150, 96] }
+      }
+    },
+    {
+      "name": "feigenbaum",
+      "radiusLog2DeltaVsLegacy": {
+        "oneRung": { "pairs": 8398, "p05": -5.317657, "p50": -2.375656, "p95": 1.008513, "lost": 879, "unlocked": 263 },
+        "twoRungs": { "pairs": 8398, "p05": -5.317657, "p50": -2.256508, "p95": 1.467021, "lost": 879, "unlocked": 263 }
+      },
+      "dispatch": {
+        "legacy": { "blockApplications": 203, "exactSteps": 212, "skippedIterations": 5932, "meanAppliedSkip": 29.221675, "tierAccepts": [51, 0, 132, 20] },
+        "oneRung": { "blockApplications": 238, "exactSteps": 324, "skippedIterations": 5820, "meanAppliedSkip": 24.453782, "tierAccepts": [48, 2, 103, 85], "candidateUsage": [235, 0], "rejections": [0, 1274, 0, 258, 79, 68] },
+        "twoRungs": { "blockApplications": 239, "exactSteps": 284, "skippedIterations": 5860, "meanAppliedSkip": 24.518828, "tierAccepts": [48, 2, 93, 96], "candidateUsage": [120, 116], "rejections": [0, 1236, 0, 165, 140, 75] }
+      }
+    },
+    {
+      "name": "near-parab",
+      "radiusLog2DeltaVsLegacy": {
+        "oneRung": { "pairs": 8825, "p05": -5.317909, "p50": -2.250913, "p95": 1.039843, "lost": 291, "unlocked": 906 },
+        "twoRungs": { "pairs": 8825, "p05": -5.317877, "p50": -2.249909, "p95": 1.039843, "lost": 291, "unlocked": 906 }
+      },
+      "dispatch": {
+        "legacy": { "blockApplications": 109, "exactSteps": 0, "skippedIterations": 6144, "meanAppliedSkip": 56.366972, "tierAccepts": [66, 0, 42, 1] },
+        "oneRung": { "blockApplications": 111, "exactSteps": 0, "skippedIterations": 6144, "meanAppliedSkip": 55.351351, "tierAccepts": [15, 36, 60, 0], "candidateUsage": [109, 0], "rejections": [0, 146, 0, 69, 0, 1] },
+        "twoRungs": { "blockApplications": 110, "exactSteps": 0, "skippedIterations": 6144, "meanAppliedSkip": 55.854545, "tierAccepts": [15, 36, 58, 1], "candidateUsage": [104, 4], "rejections": [0, 142, 0, 68, 0, 1] }
+      }
+    }
+  ],
+  "aggregate": {
+    "legacySkippedIterations": 17884,
+    "oneRungSkippedIterations": 17616,
+    "twoRungSkippedIterations": 17664,
+    "oneRungCandidateUsage": [602, 0],
+    "twoRungCandidateUsage": [381, 223]
+  },
+  "rolloutGate": {
+    "oneRungEnvelopeBytesPerBlock": 112,
+    "oneRungCombinedBytesPerBlock": 220,
+    "twoRungEnvelopeBytesPerBlock": 144,
+    "twoRungCombinedBytesPerBlock": 252,
+    "packedOneRungEnvelopeBytesPerBlock": 96,
+    "packedOneRungCombinedBytesPerBlock": 204,
+    "metadataLimitEnvelopeBytes": 96,
+    "metadataLimitCombinedBytes": 204,
+    "correctnessSweepPassed": true,
+    "packedSerializationAuditPassed": true,
+    "packedMatchesOneRungDecisions": true,
+    "oneRungMetadataPassed": false,
+    "twoRungMetadataPassed": false,
+    "packedOneRungMetadataPassed": true,
+    "gpuAndNavigationGates": "pending",
+    "oneRungRolloutEligible": false,
+    "twoRungRolloutEligible": false,
+    "packedOneRungRolloutEligible": false,
+    "selectedForPackedPrototype": "one-rung"
+  }
+}

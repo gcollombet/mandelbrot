@@ -90,6 +90,16 @@ override ENABLE_PORTFOLIO: bool = true;
 // working tiers are byte-identical unless a driver enables it.
 override ENABLE_RENORM: bool = true;
 
+// Dynamic validity is specialized per pipeline. Legacy BLA/Padé/Jet/Möbius
+// and exact perturbation compile this whole proof dispatcher out instead of
+// carrying its control flow and private state in every block-mode invocation.
+override ENABLE_DYNAMIC_VALIDITY: bool = false;
+
+// Detailed proof counters are diagnostic instrumentation, not production
+// rendering work. They add up to twenty workgroup atomics per active texel;
+// keep them in a separate specialized pipeline and enable them only on demand.
+override ENABLE_DYNAMIC_STATS: bool = false;
+
 struct BlaStep {
   // floatexp form: a = (ax,ay)·2^ab_exp, b = (bx,by)·2^ab_exp,
   // alpha = radius_alpha·2^alpha_exp, beta = radius_beta (O(1)).
@@ -185,6 +195,15 @@ struct WorkStats {
   // is off. This is the A/B signal for the renorm tier's wall gain.
   renormApps: atomic<u32>,
   renormIters: atomic<u32>,
+  // Dynamic Auto observability (mode 6), raw session totals.
+  dynamicTierAttempts: array<atomic<u32>, 4>,
+  dynamicTierAccepts: array<atomic<u32>, 4>,
+  // Applied skip buckets: <16, 16..255, 256..4095, >=4096.
+  dynamicSkipBuckets: array<atomic<u32>, 4>,
+  dynamicCandidateUses: atomic<u32>,
+  // value, derivative, pure-c, static/reference domain, Cauchy, pole.
+  dynamicRejects: array<atomic<u32>, 6>,
+  dynamicExactFallbacks: atomic<u32>,
 };
 
 // ── bivariate jet mode (add-jet-approximation) ─────────────────────
@@ -246,6 +265,9 @@ struct JetLevel {
 @group(0) @binding(0) var<uniform> mandelbrot: Mandelbrot;
 @group(0) @binding(1) var<storage, read> mandelbrotOrbitPointSuite: array<MandelbrotStep>;
 @group(0) @binding(2) var<storage, read> mandelbrotBlaSuite: array<BlaStep>;
+// Auto dynamic-validity multiplexes its packed vec4 words onto this binding:
+// BLA levels are unused in mode 5, preserving the WebGPU-minimum limit of
+// eight storage buffers while legacy Unified radii remain bound for shadowing.
 @group(0) @binding(3) var<storage, read> mandelbrotBlaLevels: array<BlaLevel>;
 @group(0) @binding(4) var raw: texture_storage_2d_array<r32float, read_write>;
 @group(0) @binding(5) var<uniform> brush: BrushUniforms;
@@ -254,6 +276,243 @@ struct JetLevel {
 @group(0) @binding(8) var<storage, read> mandelbrotJetSuite: array<JetCoeff>;
 @group(0) @binding(9) var<storage, read> mandelbrotJetLevels: array<JetLevel>;
 @group(0) @binding(10) var<storage, read> mandelbrotJetRadii: array<JetRadii>;
+
+const VALIDITY_VERSION: u32 = 1u;
+const VALIDITY_WORDS_PER_BLOCK: u32 = 24u;
+const VALIDITY_WORDS_PER_TIER: u32 = 6u;
+const VALIDITY_SLOPES: array<f32, 4> = array<f32, 4>(0.0, -0.5, -1.0, -2.0);
+
+struct DynamicValidityEvaluation {
+  log2Dc: f32,
+  log2Dz: f32,
+  radiusLog2: f32,
+  accepts: bool,
+  rejectionReason: u32,
+  candidateLimited: bool,
+};
+
+const VALIDITY_REJECT_VALUE: u32 = 0u;
+const VALIDITY_REJECT_DERIVATIVE: u32 = 1u;
+const VALIDITY_REJECT_PURE_C: u32 = 2u;
+const VALIDITY_REJECT_STATIC: u32 = 3u;
+const VALIDITY_REJECT_CAUCHY: u32 = 4u;
+const VALIDITY_REJECT_POLE: u32 = 5u;
+const VALIDITY_REJECT_NONE: u32 = 6u;
+const OPTIONAL_HEADER_VERSION: i32 = 1;
+
+// WGSL source constants may not be non-finite. These finite sentinels are used
+// only for local initialization/zero handling; packed +/-inf values are still
+// loaded from storage and detected by their bits.
+fn validity_pos_inf() -> f32 { return 3.4028234e38; }
+fn validity_neg_inf() -> f32 { return -3.4028234e38; }
+fn validity_is_pos_inf(value: f32) -> bool { return bitcast<u32>(value) == 0x7f800000u; }
+fn validity_is_neg_inf(value: f32) -> bool { return bitcast<u32>(value) == 0xff800000u; }
+
+fn validity_next_up(value: f32) -> f32 {
+  let bits = bitcast<u32>(value);
+  let absBits = bits & 0x7fffffffu;
+  if (absBits > 0x7f800000u || bits == 0x7f800000u) { return value; }
+  if (absBits == 0u) { return bitcast<f32>(1u); }
+  if (value > 0.0) { return bitcast<f32>(bits + 1u); }
+  return bitcast<f32>(bits - 1u);
+}
+
+fn validity_next_down(value: f32) -> f32 {
+  let bits = bitcast<u32>(value);
+  let absBits = bits & 0x7fffffffu;
+  if (absBits > 0x7f800000u || bits == 0xff800000u) { return value; }
+  if (absBits == 0u) { return bitcast<f32>(0x80000001u); }
+  if (value > 0.0) { return bitcast<f32>(bits - 1u); }
+  return bitcast<f32>(bits + 1u);
+}
+
+// Operation-for-operation mirror of validity::conservative_complex_log2.
+// Rounding |dc| and |dz| upward can only make certification stricter.
+fn validity_log2_complex(value: vec2<f32>, exponent: i32) -> f32 {
+  let xBits = bitcast<u32>(value.x) & 0x7fffffffu;
+  let yBits = bitcast<u32>(value.y) & 0x7fffffffu;
+  if (xBits >= 0x7f800000u || yBits >= 0x7f800000u) { return validity_pos_inf(); }
+  let axis = max(abs(value.x), abs(value.y));
+  if (axis == 0.0) { return validity_neg_inf(); }
+  let sx = value.x / axis;
+  let sy = value.y / axis;
+  let norm2 = validity_next_up(sx * sx + sy * sy);
+  let angular = validity_next_up(0.5 * validity_next_up(log2(norm2)));
+  let radial = validity_next_up(log2(axis));
+  return validity_next_up(validity_next_up(radial + angular) + f32(exponent));
+}
+
+fn validity_log2_complex_shallow(value: vec2<f32>) -> f32 {
+  return validity_log2_complex(value, 0);
+}
+
+fn validity_log2_complex_floatexp(value: fe) -> f32 {
+  return validity_log2_complex(value.m, value.e);
+}
+
+// Binding 3 is physically an f32 stream in Auto. BlaLevel's first three u32
+// fields preserve those bits verbatim; its fourth field is already f32.
+fn validity_raw_word(absoluteWord: u32) -> u32 {
+  let packed = mandelbrotBlaLevels[absoluteWord >> 2u];
+  switch (absoluteWord & 3u) {
+    case 0u: { return packed.offset; }
+    case 1u: { return packed.count; }
+    case 2u: { return packed.skip; }
+    default: { return bitcast<u32>(packed.maxRadius); }
+  }
+}
+
+fn validity_packed_word(blockIndex: u32, tier: u32, word: u32) -> f32 {
+  let absoluteWord = blockIndex * VALIDITY_WORDS_PER_BLOCK
+    + tier * VALIDITY_WORDS_PER_TIER + word;
+  return bitcast<f32>(validity_raw_word(absoluteWord));
+}
+
+struct PackedValidityTierGpu {
+  lines: vec4<f32>,
+  maxLog2Dc: f32,
+  candidateRadius: f32,
+}
+
+fn validity_level_vec(index: u32) -> vec4<f32> {
+  let packed = mandelbrotBlaLevels[index];
+  return vec4<f32>(
+    bitcast<f32>(packed.offset),
+    bitcast<f32>(packed.count),
+    bitcast<f32>(packed.skip),
+    packed.maxRadius,
+  );
+}
+
+// Packed-v1 stores six consecutive f32s per tier. Because a block is exactly
+// 24 words, even tiers start on a vec4 boundary and odd tiers start at word 2;
+// either case needs exactly two coalesced 16-byte reads.
+fn validity_packed_tier(blockIndex: u32, tier: u32) -> PackedValidityTierGpu {
+  let absoluteWord = blockIndex * VALIDITY_WORDS_PER_BLOCK
+    + tier * VALIDITY_WORDS_PER_TIER;
+  let first = validity_level_vec(absoluteWord >> 2u);
+  let second = validity_level_vec((absoluteWord >> 2u) + 1u);
+  if ((tier & 1u) == 0u) {
+    return PackedValidityTierGpu(first, second.x, second.y);
+  }
+  return PackedValidityTierGpu(
+    vec4<f32>(first.z, first.w, second.x, second.y),
+    second.z,
+    second.w,
+  );
+}
+
+fn validity_diagnostic_word(blockIndex: u32, word: u32) -> u32 {
+  let lastLevel = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
+  let blockCount = lastLevel.offset + lastLevel.count;
+  return validity_raw_word(blockCount * VALIDITY_WORDS_PER_BLOCK + blockIndex * 2u + word);
+}
+
+fn validity_domain_rejection(blockIndex: u32, tier: u32) -> u32 {
+  let encoded = (validity_diagnostic_word(blockIndex, 0u) >> (tier * 2u)) & 3u;
+  switch (encoded) {
+    case 1u: { return VALIDITY_REJECT_PURE_C; }
+    case 2u: { return VALIDITY_REJECT_POLE; }
+    case 3u: { return VALIDITY_REJECT_CAUCHY; }
+    default: { return VALIDITY_REJECT_STATIC; }
+  }
+}
+
+fn validity_line_rejection(blockIndex: u32, tier: u32, bucket: u32) -> u32 {
+  let shift = (tier * 4u + bucket) * 2u;
+  let encoded = (validity_diagnostic_word(blockIndex, 1u) >> shift) & 3u;
+  switch (encoded) {
+    case 0u: { return VALIDITY_REJECT_VALUE; }
+    case 1u: { return VALIDITY_REJECT_DERIVATIVE; }
+    case 2u: { return VALIDITY_REJECT_POLE; }
+    default: { return VALIDITY_REJECT_CAUCHY; }
+  }
+}
+
+fn evaluate_dynamic_validity_logs(
+  blockIndex: u32,
+  tier: u32,
+  log2Dc: f32,
+  log2Dz: f32,
+  detailedDiagnostics: bool,
+) -> DynamicValidityEvaluation {
+  let packedTier = validity_packed_tier(blockIndex, tier);
+  let maxLog2Dc = packedTier.maxLog2Dc;
+  var radiusLog2 = validity_neg_inf();
+  var rejectionReason = VALIDITY_REJECT_STATIC;
+  if (detailedDiagnostics) {
+    rejectionReason = validity_domain_rejection(blockIndex, tier);
+  }
+  var candidateLimited = false;
+  if (!validity_is_neg_inf(maxLog2Dc) && log2Dc == log2Dc && log2Dc <= maxLog2Dc) {
+    var commonRadius = validity_pos_inf();
+    var limitingBucket = 0u;
+    for (var line = 0u; line < 4u; line++) {
+      let intercept = packedTier.lines[line];
+      if (validity_is_pos_inf(intercept)) { continue; }
+      var evaluated = validity_pos_inf();
+      if (log2Dc == validity_neg_inf()) {
+        if (VALIDITY_SLOPES[line] == 0.0) { evaluated = intercept; }
+      } else {
+        evaluated = intercept + VALIDITY_SLOPES[line] * log2Dc;
+      }
+      let evaluatedDown = validity_next_down(evaluated);
+      if (evaluatedDown < commonRadius) {
+        commonRadius = evaluatedDown;
+        limitingBucket = line;
+      }
+    }
+    let candidateRadius = packedTier.candidateRadius;
+    candidateLimited = candidateRadius <= commonRadius;
+    radiusLog2 = min(commonRadius, candidateRadius);
+    if (candidateLimited) {
+      rejectionReason = VALIDITY_REJECT_CAUCHY;
+    } else if (detailedDiagnostics) {
+      rejectionReason = validity_line_rejection(blockIndex, tier, limitingBucket);
+    } else {
+      rejectionReason = VALIDITY_REJECT_VALUE;
+    }
+  }
+  let accepts = radiusLog2 != validity_neg_inf() && log2Dz == log2Dz && log2Dz <= radiusLog2;
+  return DynamicValidityEvaluation(
+    log2Dc,
+    log2Dz,
+    radiusLog2,
+    accepts,
+    select(rejectionReason, VALIDITY_REJECT_NONE, accepts),
+    candidateLimited,
+  );
+}
+
+fn evaluate_dynamic_validity_shallow(
+  blockIndex: u32,
+  tier: u32,
+  dc: vec2<f32>,
+  dz: vec2<f32>,
+) -> DynamicValidityEvaluation {
+  return evaluate_dynamic_validity_logs(
+    blockIndex,
+    tier,
+    validity_log2_complex_shallow(dc),
+    validity_log2_complex_shallow(dz),
+    true,
+  );
+}
+
+fn evaluate_dynamic_validity_floatexp(
+  blockIndex: u32,
+  tier: u32,
+  dc: fe,
+  dz: fe,
+) -> DynamicValidityEvaluation {
+  return evaluate_dynamic_validity_logs(
+    blockIndex,
+    tier,
+    validity_log2_complex_floatexp(dc),
+    validity_log2_complex_floatexp(dz),
+    true,
+  );
+}
 
 // Per-invocation real loop-step counter (work done by this texel this dispatch),
 // incremented once per iteration-loop turn (a block-apply or an exact step both
@@ -267,6 +526,12 @@ var<private> g_workSteps: u32 = 0u;
 var<private> g_workBudget: u32 = 0u;
 // Per-texel tier application counts (auto mode), flushed with the work stats.
 var<private> g_tierApps: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
+var<private> g_dynamicTierAttempts: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
+var<private> g_dynamicTierAccepts: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
+var<private> g_dynamicSkipBuckets: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
+var<private> g_dynamicCandidateUses: u32 = 0u;
+var<private> g_dynamicRejects: array<u32, 6> = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+var<private> g_dynamicExactFallbacks: u32 = 0u;
 var<private> g_gateJumps: u32 = 0u;
 var<private> g_gateFails: u32 = 0u;
 var<private> g_secoursApps: u32 = 0u;
@@ -824,7 +1089,6 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   let isJet = mandelbrot.approximationMode >= 2.5 && !isMobius && !isUnified;
   let isBlockTable = isJet || isMobius || isUnified;
   let useBla = mandelbrot.approximationMode >= 0.5
-            && mandelbrot.orbitComplete >= 0.5
             && mandelbrot.blaLevelCount >= 1.0;
 
   if (useBla) {
@@ -876,6 +1140,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     // tag firing massively at f32-scale |dz| via the secours.
     let unifiedF32Ok = isUnified && dcMag > 1e-30;
     let unifiedJetF32Ok = isUnified && dcMag > 2.3e-13;
+    // |dc| is invariant for this invocation and optional Auto headers already
+    // need the conservative value. Keep it in a register for every later
+    // dynamic block probe instead of recomputing two log2 operations per turn.
+    var unifiedLog2Dc = 0.0;
+    if (isUnified) {
+      unifiedLog2Dc = validity_log2_complex_shallow(dc);
+    }
     var usedBla = false;
     var blaZ = vec2<f32>(0.0);
     var jetLevelHint = JET_MAX_LEVELS; // (#5) start uncapped, then track accepts
@@ -907,15 +1178,21 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     if (isUnified) {
       let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
       perHdr = i32(lastLvl.offset + lastLvl.count);
-      perStart = i32(mandelbrotJetRadii[perHdr + 4].v.w);
-      perP = i32(mandelbrotJetRadii[perHdr + 5].v.w);
-      perR = mandelbrotJetRadii[perHdr + 6].v.w;
-      if (perP > 0) {
-        perNext = perStart;
-        perStride = perP;
+      let headerVersion = i32(mandelbrotJetRadii[perHdr + 2].v.w + 0.5);
+      if (headerVersion == OPTIONAL_HEADER_VERSION
+          && unifiedLog2Dc <= mandelbrotJetRadii[perHdr + 8].v.w) {
+        perStart = i32(mandelbrotJetRadii[perHdr + 4].v.w);
+        perP = i32(mandelbrotJetRadii[perHdr + 5].v.w);
+        perR = mandelbrotJetRadii[perHdr + 6].v.w;
+        if (perP > 0) {
+          perNext = perStart;
+          perStride = perP;
+        }
       }
       let gCount = i32(mandelbrotJetRadii[perHdr + 10].v.x + 0.5);
-      if (gCount > 0) {
+      if (headerVersion == OPTIONAL_HEADER_VERSION
+          && unifiedLog2Dc <= mandelbrotJetRadii[perHdr + 3].v.w
+          && gCount > 0) {
         let gb = perHdr + 11;
         let ge0 = mandelbrotJetRadii[gb].v;
         let ge1 = mandelbrotJetRadii[gb + 1].v;
@@ -999,11 +1276,23 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         // log2 would over-estimate |dz| and reject everything. When even
         // length() underflows, pass the gate — the fe-domain test inside
         // try_apply_jet/try_apply_mobius is exact.
-        let dzMag = length(dz);
-        if (dzMag < 1.2e-38 || log2(dzMag) < jetMaxR3) {
+        var unifiedLog2Dz = 0.0;
+        var probeBlockTable = false;
+        if (ENABLE_DYNAMIC_VALIDITY && isUnified) {
+          unifiedLog2Dz = validity_log2_complex_shallow(dz);
+          // Mode 7 is a legacy-output shadow referee and deliberately keeps
+          // probing every legacy candidate. Production dynamic mode uses the
+          // validity directory's max-candidate bound (never a cmax radius).
+          probeBlockTable = mandelbrot.approximationMode >= 6.5
+            || unifiedLog2Dz <= jetMaxR3;
+        } else {
+          let dzMag = length(dz);
+          probeBlockTable = dzMag < 1.2e-38 || log2(dzMag) < jetMaxR3;
+        }
+        if (probeBlockTable) {
           var dzFe = fe_from_vec(dz, 0);
           if (isUnified) {
-            skipped = try_apply_unified(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, dcF2, dcF3, unifiedF32Ok, unifiedJetF32Ok, &jetLevelHint, &sndM);
+            skipped = try_apply_unified(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, unifiedLog2Dc, unifiedLog2Dz, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, dcF2, dcF3, unifiedF32Ok, unifiedJetF32Ok, &jetLevelHint, &sndM);
           } else if (isMobius) {
             skipped = try_apply_mobius(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, mobiusF32Ok, &jetLevelHint);
           } else {
@@ -1036,6 +1325,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           avgCount += f32(skipped);
         }
       } else if (!renormApplied) {
+        if (ENABLE_DYNAMIC_STATS && isUnified && ENABLE_DYNAMIC_VALIDITY) {
+          g_dynamicExactFallbacks += 1u;
+        }
         let zPrev = refZ + dz;
         dz = 2.0 * cmul(dz, refZ) + cmul(dz, dz) + dc;
         ref_i += 1;
@@ -1661,35 +1953,149 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
 // per-thread |dz|, exactly like the pre-existing radius test. Rational tags
 // (0-2) get the plain-f32 fast path; the jet tag always evaluates in fe (deep
 // is where it fires).
-fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, dcF2: vec2<f32>, dcF3: vec2<f32>, f32Ok: bool, f32OkJet: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>) -> i32 {
+fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, dynamicLog2Dc: f32, dynamicLog2Dz: f32, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, dcF2: vec2<f32>, dcF3: vec2<f32>, f32Ok: bool, f32OkJet: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
-  let log2_dz = log2(max(length((*dz).m), 1e-30)) + f32((*dz).e);
+  let dynamicValidity = ENABLE_DYNAMIC_VALIDITY;
+  // Mode 7 is the rollout referee: packed certificates are evaluated and
+  // counted, while the applied tag/radius remains the legacy replay choice.
+  let dynamicShadow = ENABLE_DYNAMIC_VALIDITY && mandelbrot.approximationMode >= 6.5;
+  var log2_dz = dynamicLog2Dz;
+  if (!dynamicValidity) {
+    log2_dz = log2(max(length((*dz).m), 1e-30)) + f32((*dz).e);
+  }
   let shiftedRef = *ref_i - 1;
   var level = min(min(i32(mandelbrot.blaLevelCount), JET_MAX_LEVELS) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
   level = min(level, *hint + JET_LEVEL_HINT_UP);
+  var shadowDecisionResolved = false;
   while (level >= 0) {
     let skip = i32(1u << u32(skip0Log + level));
-    if (log2_dz < (*lvlR)[level] && *ref_i + skip <= maxIterI) {
+    let withinLevelRadius = select(
+      log2_dz < (*lvlR)[level],
+      dynamicLog2Dz <= (*lvlR)[level],
+      dynamicValidity,
+    );
+    if ((dynamicShadow || withinLevelRadius) && *ref_i + skip <= maxIterI) {
 
 
       let levelInfo = mandelbrotJetLevels[level];
       let slot = shiftedRef >> u32(skip0Log + level);
       if (u32(slot) < levelInfo.count) {
         let entry = i32(levelInfo.offset) + slot;
-        // One coalesced 16 B probe; the record is read only on application,
-        // and only the tagged tier's prefix of it.
+        // The legacy vec4 remains bound for rollback/shadowing. Dynamic mode
+        // uses only its orbit-static f32-safe bit; tier validity comes from the
+        // packed proof before any coefficient prefix is fetched.
         let radii = mandelbrotJetRadii[entry].v;
-        // Principal (x/y) first; secours (w, tag in z's high bits) when the
-        // principal's band is exceeded. r2 > r1 by construction, so a single
-        // max() gates the whole portfolio. ENABLE_PORTFOLIO = false folds the
-        // fallback out entirely (A/B baseline).
-        let useSnd = ENABLE_PORTFOLIO && log2_dz >= radii.x;
-        if (log2_dz < select(radii.x, max(radii.x, radii.w), ENABLE_PORTFOLIO)) {
-          let sndTag = floor(radii.z * 0.5);
-          let safeFlag = radii.z - 2.0 * sndTag;
-          let tag = i32(select(radii.y, sndTag, useSnd) + 0.5);
+        var sndTag = floor(radii.z * 0.5);
+        var safeFlag = radii.z - 2.0 * sndTag;
+        var dynamicSummaryReject = false;
+        var dynamicAffineFastAccept = false;
+        if (dynamicValidity && radii.z < 0.0) {
+          // Incremental tables reuse the dormant legacy sidecar fields as an
+          // optimistic any-tier summary. A rejection here proves every packed
+          // tier rejects and avoids the 96-byte envelope fetch entirely. The
+          // low bits of x encode slope + f32 safety; z<0 is both the dynamic
+          // marker and a domain-wide affine lower bound.
+          let summaryBits = bitcast<u32>(radii.x);
+          var summaryIntercept = radii.x;
+          sndTag = 0.0;
+          safeFlag = 0.0;
+          if (!validity_is_neg_inf(radii.x) && !validity_is_pos_inf(radii.x)) {
+            let summaryCode = summaryBits & 7u;
+            summaryIntercept = bitcast<f32>(summaryBits & 0xfffffff8u);
+            sndTag = f32(summaryCode >> 1u);
+            safeFlag = f32(summaryCode & 1u);
+          }
+          let summaryLineRadius = summaryIntercept
+            + VALIDITY_SLOPES[u32(sndTag)] * dynamicLog2Dc;
+          let summaryDomainReject = dynamicLog2Dc > radii.y;
+          let summaryCandidateReject = dynamicLog2Dz > radii.w;
+          let summaryLineReject = dynamicLog2Dz > summaryLineRadius;
+          dynamicSummaryReject = summaryDomainReject
+            || summaryCandidateReject
+            || summaryLineReject;
+          dynamicAffineFastAccept = !dynamicSummaryReject
+            && dynamicLog2Dz <= radii.z;
+          // A rejected summary replaces four two-vec4 tier probes. Preserve
+          // their budget weight even though the memory/evaluation work was
+          // skipped; this keeps pass boundaries stable while making their GPU
+          // cost genuinely smaller.
+          g_workBudget += select(0u, 8u, dynamicSummaryReject);
+          if (ENABLE_DYNAMIC_STATS) {
+            g_dynamicRejects[0] += select(0u, 1u, summaryLineReject);
+            g_dynamicRejects[3] += select(0u, 1u, summaryDomainReject);
+            g_dynamicRejects[4] += select(0u, 1u, summaryCandidateReject);
+          }
+        }
+        var useSnd = false;
+        var tag = -1;
+        var dynamicTag = select(-1, 0, dynamicAffineFastAccept);
+        if (dynamicAffineFastAccept) {
+          g_workBudget += 2u;
+          if (ENABLE_DYNAMIC_STATS) {
+            g_dynamicTierAttempts[0] += 1u;
+            g_dynamicTierAccepts[0] += 1u;
+          }
+        }
+        if (dynamicValidity && !dynamicSummaryReject && !dynamicAffineFastAccept
+            && (!dynamicShadow || !shadowDecisionResolved)) {
+          // Fixed cheapest-first tier order at this (largest aligned) skip.
+          for (var tier = 0u; tier < 4u; tier++) {
+            // Packed-proof probes are real GPU work (two vec4 reads plus four
+            // line evaluations). Charge them to the per-dispatch budget so
+            // the time controller does not size dynamic batches as if a
+            // rejected four-tier descent cost the same as one exact step.
+            g_workBudget += 2u;
+            if (ENABLE_DYNAMIC_STATS) {
+              g_dynamicTierAttempts[0] += select(0u, 1u, tier == 0u);
+              g_dynamicTierAttempts[1] += select(0u, 1u, tier == 1u);
+              g_dynamicTierAttempts[2] += select(0u, 1u, tier == 2u);
+              g_dynamicTierAttempts[3] += select(0u, 1u, tier == 3u);
+            }
+            let validity = evaluate_dynamic_validity_logs(
+              u32(entry), tier, dynamicLog2Dc, dynamicLog2Dz, dynamicShadow,
+            );
+            if (validity.accepts) {
+              if (ENABLE_DYNAMIC_STATS) {
+                g_dynamicTierAccepts[0] += select(0u, 1u, tier == 0u);
+                g_dynamicTierAccepts[1] += select(0u, 1u, tier == 1u);
+                g_dynamicTierAccepts[2] += select(0u, 1u, tier == 2u);
+                g_dynamicTierAccepts[3] += select(0u, 1u, tier == 3u);
+                g_dynamicCandidateUses += select(0u, 1u, validity.candidateLimited);
+              }
+              dynamicTag = i32(tier);
+              if (dynamicShadow) {
+                shadowDecisionResolved = true;
+                if (ENABLE_DYNAMIC_STATS) {
+                  g_dynamicSkipBuckets[0] += select(0u, 1u, skip < 16);
+                  g_dynamicSkipBuckets[1] += select(0u, 1u, skip >= 16 && skip < 256);
+                  g_dynamicSkipBuckets[2] += select(0u, 1u, skip >= 256 && skip < 4096);
+                  g_dynamicSkipBuckets[3] += select(0u, 1u, skip >= 4096);
+                }
+              }
+              break;
+            }
+            if (ENABLE_DYNAMIC_STATS) {
+              g_dynamicRejects[0] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_VALUE);
+              g_dynamicRejects[1] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_DERIVATIVE);
+              g_dynamicRejects[2] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_PURE_C);
+              g_dynamicRejects[3] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_STATIC);
+              g_dynamicRejects[4] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_CAUCHY);
+              g_dynamicRejects[5] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_POLE);
+            }
+          }
+        }
+        if (dynamicShadow || !dynamicValidity) {
+          // Legacy principal/secours portfolio, retained as rollback referee.
+          useSnd = ENABLE_PORTFOLIO && log2_dz >= radii.x;
+          if (log2_dz < select(radii.x, max(radii.x, radii.w), ENABLE_PORTFOLIO)) {
+            tag = i32(select(radii.y, sndTag, useSnd) + 0.5);
+          }
+        } else {
+          tag = dynamicTag;
+        }
+        if (tag >= 0) {
           let base = entry * UNIFIED_COEFF_STRIDE;
           var phi: fe;
           var pdz: fe;
@@ -1871,6 +2277,12 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               g_tierApps[1] += select(0u, 1u, tag == 1);
               g_tierApps[2] += select(0u, 1u, tag == 2);
               g_tierApps[3] += select(0u, 1u, tag == 3);
+              if (ENABLE_DYNAMIC_STATS && dynamicValidity && !dynamicShadow) {
+                g_dynamicSkipBuckets[0] += select(0u, 1u, skip < 16);
+                g_dynamicSkipBuckets[1] += select(0u, 1u, skip >= 16 && skip < 256);
+                g_dynamicSkipBuckets[2] += select(0u, 1u, skip >= 256 && skip < 4096);
+                g_dynamicSkipBuckets[3] += select(0u, 1u, skip >= 4096);
+              }
               // Portfolio observability: a secours hit is a descent avoided;
               // the covered iterations are the A/B payoff signal.
               g_secoursApps += select(0u, 1u, useSnd);
@@ -2420,7 +2832,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   let isMobiusDeep = mandelbrot.approximationMode >= 3.5 && !isUnifiedDeep;
   let isJetDeep = mandelbrot.approximationMode >= 2.5 && !isMobiusDeep && !isUnifiedDeep;
   let isBlockTableDeep = isJetDeep || isMobiusDeep || isUnifiedDeep;
-  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5;
+  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0;
   var skip0Log = 0;
   var log_dcMag = 0.0;
   if (useBlaDeep) {
@@ -2448,6 +2860,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       jetMaxR3Deep = max(jetMaxR3Deep, r);
     }
   }
+  // Same invariant cache as the shallow path; this value also gates the
+  // optional header, so dynamic block probes get it for free.
+  var unifiedDeepLog2Dc = 0.0;
+  if (isUnifiedDeep) {
+    unifiedDeepLog2Dc = validity_log2_complex_floatexp(dc);
+  }
   var jetLevelHintDeep = JET_MAX_LEVELS; // (#5) per-pixel level hint
   var usedBla = false;
   // Phase E periodic-interior state (see the shallow loop — same exponential
@@ -2461,12 +2879,16 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   if (isUnifiedDeep && useBlaDeep) {
     let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
     perHdr = i32(lastLvl.offset + lastLvl.count);
-    perStart = i32(mandelbrotJetRadii[perHdr + 4].v.w);
-    perP = i32(mandelbrotJetRadii[perHdr + 5].v.w);
-    perR = mandelbrotJetRadii[perHdr + 6].v.w;
-    if (perP > 0) {
-      perNext = perStart;
-      perStride = perP;
+    let headerVersion = i32(mandelbrotJetRadii[perHdr + 2].v.w + 0.5);
+    if (headerVersion == OPTIONAL_HEADER_VERSION
+        && unifiedDeepLog2Dc <= mandelbrotJetRadii[perHdr + 8].v.w) {
+      perStart = i32(mandelbrotJetRadii[perHdr + 4].v.w);
+      perP = i32(mandelbrotJetRadii[perHdr + 5].v.w);
+      perR = mandelbrotJetRadii[perHdr + 6].v.w;
+      if (perP > 0) {
+        perNext = perStart;
+        perStride = perP;
+      }
     }
   }
 
@@ -2524,9 +2946,18 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     if (skipped == 0 && useBlaDeep) {
       var blaZ = vec2<f32>(0.0);
       if (isBlockTableDeep) {
-        if (log2(max(length(dz.m), 1e-30)) + f32(dz.e) < jetMaxR3Deep) {
+        var unifiedDeepLog2Dz = 0.0;
+        var probeBlockTableDeep = false;
+        if (ENABLE_DYNAMIC_VALIDITY && isUnifiedDeep) {
+          unifiedDeepLog2Dz = validity_log2_complex_floatexp(dz);
+          probeBlockTableDeep = mandelbrot.approximationMode >= 6.5
+            || unifiedDeepLog2Dz <= jetMaxR3Deep;
+        } else {
+          probeBlockTableDeep = log2(max(length(dz.m), 1e-30)) + f32(dz.e) < jetMaxR3Deep;
+        }
+        if (probeBlockTableDeep) {
           if (isUnifiedDeep) {
-            skipped = try_apply_unified(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), false, false, &jetLevelHintDeep, &sndM);
+            skipped = try_apply_unified(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, unifiedDeepLog2Dc, unifiedDeepLog2Dz, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), false, false, &jetLevelHintDeep, &sndM);
           } else if (isMobiusDeep) {
             skipped = try_apply_mobius(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep);
           } else {
@@ -2544,6 +2975,9 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       }
     }
     if (skipped == 0) {
+      if (ENABLE_DYNAMIC_STATS && isUnifiedDeep && ENABLE_DYNAMIC_VALIDITY) {
+        g_dynamicExactFallbacks += 1u;
+      }
       let zPrev = refZ + fe_to_vec(dz);
       // dz' = 2·z_n·dz + dz² + dc   (z_n = refZ is O(1) f32)
       dz = fe_add3(fe_cmul_f32(2.0 * refZ, dz), fe_cmul(dz, dz), dc);
@@ -2721,6 +3155,12 @@ var<workgroup> wgSecoursIters: atomic<u32>;
 var<workgroup> wgAppsF32: atomic<u32>;
 var<workgroup> wgRenormApps: atomic<u32>;
 var<workgroup> wgRenormIters: atomic<u32>;
+var<workgroup> wgDynamicTierAttempts: array<atomic<u32>, 4>;
+var<workgroup> wgDynamicTierAccepts: array<atomic<u32>, 4>;
+var<workgroup> wgDynamicSkipBuckets: array<atomic<u32>, 4>;
+var<workgroup> wgDynamicCandidateUses: atomic<u32>;
+var<workgroup> wgDynamicRejects: array<atomic<u32>, 6>;
+var<workgroup> wgDynamicExactFallbacks: atomic<u32>;
 
 @compute @workgroup_size(8, 8)
 fn cs_main(
@@ -2735,6 +3175,11 @@ fn cs_main(
     atomicStore(&wgCovSum, 0u);
     for (var t = 0; t < 4; t++) {
       atomicStore(&wgTier[t], 0u);
+      if (ENABLE_DYNAMIC_STATS) {
+        atomicStore(&wgDynamicTierAttempts[t], 0u);
+        atomicStore(&wgDynamicTierAccepts[t], 0u);
+        atomicStore(&wgDynamicSkipBuckets[t], 0u);
+      }
     }
     atomicStore(&wgGateJumps, 0u);
     atomicStore(&wgGateFails, 0u);
@@ -2743,6 +3188,13 @@ fn cs_main(
     atomicStore(&wgAppsF32, 0u);
     atomicStore(&wgRenormApps, 0u);
     atomicStore(&wgRenormIters, 0u);
+    if (ENABLE_DYNAMIC_STATS) {
+      for (var reason = 0; reason < 6; reason++) {
+        atomicStore(&wgDynamicRejects[reason], 0u);
+      }
+      atomicStore(&wgDynamicCandidateUses, 0u);
+      atomicStore(&wgDynamicExactFallbacks, 0u);
+    }
   }
   workgroupBarrier();
 
@@ -2799,6 +3251,14 @@ fn cs_main(
           g_workSteps = 0u;
           g_workBudget = 0u;
           g_tierApps = array<u32, 4>(0u, 0u, 0u, 0u);
+          if (ENABLE_DYNAMIC_STATS) {
+            g_dynamicTierAttempts = array<u32, 4>(0u, 0u, 0u, 0u);
+            g_dynamicTierAccepts = array<u32, 4>(0u, 0u, 0u, 0u);
+            g_dynamicSkipBuckets = array<u32, 4>(0u, 0u, 0u, 0u);
+            g_dynamicCandidateUses = 0u;
+            g_dynamicRejects = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+            g_dynamicExactFallbacks = 0u;
+          }
           g_gateJumps = 0u;
           g_gateFails = 0u;
           g_secoursApps = 0u;
@@ -2842,12 +3302,14 @@ fn cs_main(
                 let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
                 let saBase = i32(lastLvl.offset + lastLvl.count);
                 let h0 = mandelbrotJetRadii[saBase].v;
+                let h1 = mandelbrotJetRadii[saBase + 1].v;
+                let h2 = mandelbrotJetRadii[saBase + 2].v;
                 let n0 = i32(h0.w);
-                if (n0 > 0 && f32(n0) < mandelbrot.maxIteration) {
+                if (i32(h2.w + 0.5) == OPTIONAL_HEADER_VERSION
+                    && validity_log2_complex_floatexp(dc) <= h1.w
+                    && n0 > 0 && f32(n0) < mandelbrot.maxIteration) {
                   let b1 = fe(vec2<f32>(h0.x, h0.y), i32(h0.z));
-                  let h1 = mandelbrotJetRadii[saBase + 1].v;
                   let b2 = fe(vec2<f32>(h1.x, h1.y), i32(h1.z));
-                  let h2 = mandelbrotJetRadii[saBase + 2].v;
                   let b3 = fe(vec2<f32>(h2.x, h2.y), i32(h2.z));
                   let h3 = mandelbrotJetRadii[saBase + 3].v;
                   let b4 = fe(vec2<f32>(h3.x, h3.y), i32(h3.z));
@@ -2911,6 +3373,30 @@ fn cs_main(
           atomicAdd(&wgCovSum, covered);
           for (var t = 0; t < 4; t++) {
             atomicAdd(&wgTier[t], g_tierApps[t]);
+          }
+          if (ENABLE_DYNAMIC_STATS) {
+            for (var t = 0; t < 4; t++) {
+              if (g_dynamicTierAttempts[t] > 0u) {
+                atomicAdd(&wgDynamicTierAttempts[t], g_dynamicTierAttempts[t]);
+              }
+              if (g_dynamicTierAccepts[t] > 0u) {
+                atomicAdd(&wgDynamicTierAccepts[t], g_dynamicTierAccepts[t]);
+              }
+              if (g_dynamicSkipBuckets[t] > 0u) {
+                atomicAdd(&wgDynamicSkipBuckets[t], g_dynamicSkipBuckets[t]);
+              }
+            }
+            for (var reason = 0; reason < 6; reason++) {
+              if (g_dynamicRejects[reason] > 0u) {
+                atomicAdd(&wgDynamicRejects[reason], g_dynamicRejects[reason]);
+              }
+            }
+            if (g_dynamicCandidateUses > 0u) {
+              atomicAdd(&wgDynamicCandidateUses, g_dynamicCandidateUses);
+            }
+            if (g_dynamicExactFallbacks > 0u) {
+              atomicAdd(&wgDynamicExactFallbacks, g_dynamicExactFallbacks);
+            }
           }
           if (g_gateJumps > 0u) {
             atomicAdd(&wgGateJumps, g_gateJumps);
@@ -3000,6 +3486,18 @@ fn cs_main(
       atomicAdd(&workStats.appsF32, atomicLoad(&wgAppsF32));
       atomicAdd(&workStats.renormApps, atomicLoad(&wgRenormApps));
       atomicAdd(&workStats.renormIters, atomicLoad(&wgRenormIters));
+      if (ENABLE_DYNAMIC_STATS) {
+        for (var t = 0; t < 4; t++) {
+          atomicAdd(&workStats.dynamicTierAttempts[t], atomicLoad(&wgDynamicTierAttempts[t]));
+          atomicAdd(&workStats.dynamicTierAccepts[t], atomicLoad(&wgDynamicTierAccepts[t]));
+          atomicAdd(&workStats.dynamicSkipBuckets[t], atomicLoad(&wgDynamicSkipBuckets[t]));
+        }
+        atomicAdd(&workStats.dynamicCandidateUses, atomicLoad(&wgDynamicCandidateUses));
+        for (var reason = 0; reason < 6; reason++) {
+          atomicAdd(&workStats.dynamicRejects[reason], atomicLoad(&wgDynamicRejects[reason]));
+        }
+        atomicAdd(&workStats.dynamicExactFallbacks, atomicLoad(&wgDynamicExactFallbacks));
+      }
     }
   }
 }
