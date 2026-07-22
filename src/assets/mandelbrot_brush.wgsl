@@ -201,8 +201,9 @@ struct WorkStats {
   // Applied skip buckets: <16, 16..255, 256..4095, >=4096.
   dynamicSkipBuckets: array<atomic<u32>, 4>,
   dynamicCandidateUses: atomic<u32>,
-  // value, derivative, pure-c, static/reference domain, Cauchy, pole.
-  dynamicRejects: array<atomic<u32>, 6>,
+  // Detailed: value, derivative, pure-c, reference, Cauchy, pole.
+  // Coarse: packed proof without provenance, optimistic summary prefilter.
+  dynamicRejects: array<atomic<u32>, 8>,
   dynamicExactFallbacks: atomic<u32>,
 };
 
@@ -297,7 +298,12 @@ const VALIDITY_REJECT_PURE_C: u32 = 2u;
 const VALIDITY_REJECT_STATIC: u32 = 3u;
 const VALIDITY_REJECT_CAUCHY: u32 = 4u;
 const VALIDITY_REJECT_POLE: u32 = 5u;
-const VALIDITY_REJECT_NONE: u32 = 6u;
+// The active dynamic path intentionally avoids the diagnostics sidecar. A
+// rejection whose exact packed-proof source was not loaded must remain
+// explicitly unattributed instead of being mislabeled as static/reference.
+const VALIDITY_REJECT_PACKED_UNKNOWN: u32 = 6u;
+const VALIDITY_REJECT_SUMMARY: u32 = 7u;
+const VALIDITY_REJECT_NONE: u32 = 8u;
 const OPTIONAL_HEADER_VERSION: i32 = 1;
 
 // WGSL source constants may not be non-finite. These finite sentinels are used
@@ -439,7 +445,7 @@ fn evaluate_dynamic_validity_logs(
   let packedTier = validity_packed_tier(blockIndex, tier);
   let maxLog2Dc = packedTier.maxLog2Dc;
   var radiusLog2 = validity_neg_inf();
-  var rejectionReason = VALIDITY_REJECT_STATIC;
+  var rejectionReason = VALIDITY_REJECT_PACKED_UNKNOWN;
   if (detailedDiagnostics) {
     rejectionReason = validity_domain_rejection(blockIndex, tier);
   }
@@ -469,8 +475,6 @@ fn evaluate_dynamic_validity_logs(
       rejectionReason = VALIDITY_REJECT_CAUCHY;
     } else if (detailedDiagnostics) {
       rejectionReason = validity_line_rejection(blockIndex, tier, limitingBucket);
-    } else {
-      rejectionReason = VALIDITY_REJECT_VALUE;
     }
   }
   let accepts = radiusLog2 != validity_neg_inf() && log2Dz == log2Dz && log2Dz <= radiusLog2;
@@ -530,7 +534,7 @@ var<private> g_dynamicTierAttempts: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u
 var<private> g_dynamicTierAccepts: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
 var<private> g_dynamicSkipBuckets: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
 var<private> g_dynamicCandidateUses: u32 = 0u;
-var<private> g_dynamicRejects: array<u32, 6> = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+var<private> g_dynamicRejects: array<u32, 8> = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
 var<private> g_dynamicExactFallbacks: u32 = 0u;
 var<private> g_gateJumps: u32 = 0u;
 var<private> g_gateFails: u32 = 0u;
@@ -2017,15 +2021,17 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
             || summaryLineReject;
           dynamicAffineFastAccept = !dynamicSummaryReject
             && dynamicLog2Dz <= radii.z;
-          // A rejected summary replaces four two-vec4 tier probes. Preserve
-          // their budget weight even though the memory/evaluation work was
-          // skipped; this keeps pass boundaries stable while making their GPU
-          // cost genuinely smaller.
-          g_workBudget += select(0u, 8u, dynamicSummaryReject);
+          // A rejected summary replaces four two-vec4 tier probes in the live
+          // path. Preserve their budget weight even though that work was
+          // skipped. Validation/shadow still opens the packed proof below, so
+          // its real probes account for their own cost.
+          g_workBudget += select(0u, 8u, dynamicSummaryReject && !dynamicShadow);
           if (ENABLE_DYNAMIC_STATS) {
-            g_dynamicRejects[0] += select(0u, 1u, summaryLineReject);
-            g_dynamicRejects[3] += select(0u, 1u, summaryDomainReject);
-            g_dynamicRejects[4] += select(0u, 1u, summaryCandidateReject);
+            // The summary deliberately avoids the packed proof and its
+            // diagnostics. Count one mutually-exclusive prefilter rejection;
+            // attributing its component tests to value/reference/Cauchy made
+            // the panel claim provenance the shader had not actually read.
+            g_dynamicRejects[VALIDITY_REJECT_SUMMARY] += select(0u, 1u, dynamicSummaryReject);
           }
         }
         var useSnd = false;
@@ -2038,7 +2044,10 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
             g_dynamicTierAccepts[0] += 1u;
           }
         }
-        if (dynamicValidity && !dynamicSummaryReject && !dynamicAffineFastAccept
+        // Validation/shadow deliberately opens the packed proof and diagnostic
+        // sidecar even when the live prefilter would reject. This makes the six
+        // named causes observable without taxing the active dynamic path.
+        if (dynamicValidity && (!dynamicSummaryReject || dynamicShadow) && !dynamicAffineFastAccept
             && (!dynamicShadow || !shadowDecisionResolved)) {
           // Fixed cheapest-first tier order at this (largest aligned) skip.
           for (var tier = 0u; tier < 4u; tier++) {
@@ -2076,13 +2085,8 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               }
               break;
             }
-            if (ENABLE_DYNAMIC_STATS) {
-              g_dynamicRejects[0] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_VALUE);
-              g_dynamicRejects[1] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_DERIVATIVE);
-              g_dynamicRejects[2] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_PURE_C);
-              g_dynamicRejects[3] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_STATIC);
-              g_dynamicRejects[4] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_CAUCHY);
-              g_dynamicRejects[5] += select(0u, 1u, validity.rejectionReason == VALIDITY_REJECT_POLE);
+            if (ENABLE_DYNAMIC_STATS && validity.rejectionReason < VALIDITY_REJECT_NONE) {
+              g_dynamicRejects[validity.rejectionReason] += 1u;
             }
           }
         }
@@ -3159,7 +3163,7 @@ var<workgroup> wgDynamicTierAttempts: array<atomic<u32>, 4>;
 var<workgroup> wgDynamicTierAccepts: array<atomic<u32>, 4>;
 var<workgroup> wgDynamicSkipBuckets: array<atomic<u32>, 4>;
 var<workgroup> wgDynamicCandidateUses: atomic<u32>;
-var<workgroup> wgDynamicRejects: array<atomic<u32>, 6>;
+var<workgroup> wgDynamicRejects: array<atomic<u32>, 8>;
 var<workgroup> wgDynamicExactFallbacks: atomic<u32>;
 
 @compute @workgroup_size(8, 8)
@@ -3189,7 +3193,7 @@ fn cs_main(
     atomicStore(&wgRenormApps, 0u);
     atomicStore(&wgRenormIters, 0u);
     if (ENABLE_DYNAMIC_STATS) {
-      for (var reason = 0; reason < 6; reason++) {
+      for (var reason = 0; reason < 8; reason++) {
         atomicStore(&wgDynamicRejects[reason], 0u);
       }
       atomicStore(&wgDynamicCandidateUses, 0u);
@@ -3256,7 +3260,7 @@ fn cs_main(
             g_dynamicTierAccepts = array<u32, 4>(0u, 0u, 0u, 0u);
             g_dynamicSkipBuckets = array<u32, 4>(0u, 0u, 0u, 0u);
             g_dynamicCandidateUses = 0u;
-            g_dynamicRejects = array<u32, 6>(0u, 0u, 0u, 0u, 0u, 0u);
+            g_dynamicRejects = array<u32, 8>(0u, 0u, 0u, 0u, 0u, 0u, 0u, 0u);
             g_dynamicExactFallbacks = 0u;
           }
           g_gateJumps = 0u;
@@ -3386,7 +3390,7 @@ fn cs_main(
                 atomicAdd(&wgDynamicSkipBuckets[t], g_dynamicSkipBuckets[t]);
               }
             }
-            for (var reason = 0; reason < 6; reason++) {
+            for (var reason = 0; reason < 8; reason++) {
               if (g_dynamicRejects[reason] > 0u) {
                 atomicAdd(&wgDynamicRejects[reason], g_dynamicRejects[reason]);
               }
@@ -3493,7 +3497,7 @@ fn cs_main(
           atomicAdd(&workStats.dynamicSkipBuckets[t], atomicLoad(&wgDynamicSkipBuckets[t]));
         }
         atomicAdd(&workStats.dynamicCandidateUses, atomicLoad(&wgDynamicCandidateUses));
-        for (var reason = 0; reason < 6; reason++) {
+        for (var reason = 0; reason < 8; reason++) {
           atomicAdd(&workStats.dynamicRejects[reason], atomicLoad(&wgDynamicRejects[reason]));
         }
         atomicAdd(&workStats.dynamicExactFallbacks, atomicLoad(&wgDynamicExactFallbacks));

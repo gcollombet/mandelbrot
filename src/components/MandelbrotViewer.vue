@@ -388,7 +388,14 @@ function revokeObjectUrl(url: string | null) {
 }
 
 function getTextureEntries(): Promise<TextureMetadata[]> {
-  textureEntriesPromise ??= ensureTextureLibrary();
+  // Only coalesce concurrent reads. The personal texture sync can update
+  // IndexedDB after the engine starts, so retaining the first resolved list
+  // makes a preset's textures look missing until another UI path applies them.
+  if (!textureEntriesPromise) {
+    textureEntriesPromise = ensureTextureLibrary().finally(() => {
+      textureEntriesPromise = null;
+    });
+  }
   return textureEntriesPromise;
 }
 

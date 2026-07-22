@@ -325,6 +325,56 @@ pub struct IncrementalUnifiedBuilder {
     peak_retained_bytes: usize,
 }
 
+/// One independently certified view-domain rung over the immutable
+/// coefficient tree.  Rungs deliberately retain only the cmax-dependent
+/// proof records: blocks, moduli and GPU coefficients stay owned by
+/// `IncrementalUnifiedBuilder` and are therefore never recomposed when the
+/// viewport crosses a rung boundary.
+pub struct IncrementalUnifiedValidityBank {
+    epsilon_bits: u64,
+    reference_log2_dc: f64,
+    validity: Vec<Vec<PackedValidityEnvelopeV1>>,
+    validity_diagnostics: Vec<Vec<PackedValidityDiagnosticsV1>>,
+    cumulative_envelopes: usize,
+}
+
+impl IncrementalUnifiedValidityBank {
+    pub fn new(level_count: usize, epsilon: f64, reference_log2_dc: f64) -> Self {
+        Self {
+            epsilon_bits: epsilon.to_bits(),
+            reference_log2_dc,
+            validity: (0..level_count).map(|_| Vec::new()).collect(),
+            validity_diagnostics: (0..level_count).map(|_| Vec::new()).collect(),
+            cumulative_envelopes: 0,
+        }
+    }
+
+    pub fn matches(&self, epsilon: f64, reference_log2_dc: f64) -> bool {
+        self.epsilon_bits == epsilon.to_bits()
+            && self.reference_log2_dc.to_bits() == reference_log2_dc.to_bits()
+    }
+
+    pub fn reference_log2_dc(&self) -> f64 {
+        self.reference_log2_dc
+    }
+
+    pub fn cumulative_envelopes(&self) -> usize {
+        self.cumulative_envelopes
+    }
+
+    pub fn validity(&self, level_index: usize) -> &[PackedValidityEnvelopeV1] {
+        self.validity
+            .get(level_index)
+            .map_or(&[], |records| records.as_slice())
+    }
+
+    pub fn diagnostics(&self, level_index: usize) -> &[PackedValidityDiagnosticsV1] {
+        self.validity_diagnostics
+            .get(level_index)
+            .map_or(&[], |records| records.as_slice())
+    }
+}
+
 impl IncrementalUnifiedBuilder {
     pub fn new(max_skip: usize) -> Self {
         let requested = max_skip.max(1);
@@ -718,6 +768,120 @@ impl IncrementalUnifiedBuilder {
             .iter()
             .find(|level| level.skip >= MOBIUS_MIN_EMIT_SKIP)
             .map_or(1, |level| 1 + level.validity.len() * level.skip)
+            .min(self.covered_orbit_len())
+    }
+
+    /// Certify one bounded suffix for a second cmax rung without touching the
+    /// primary bank stored in `levels[*].validity`.  This is the background
+    /// half of the double-buffered runtime contract: it shares every expensive
+    /// orbit/merge/coefficient artifact and creates only bounds/envelopes.
+    pub fn compile_pending_validity_bank_with<F>(
+        &self,
+        bank: &mut IncrementalUnifiedValidityBank,
+        orbit_len: usize,
+        mut orbit_at: F,
+        epsilon: f64,
+        reference_log2_dc: f64,
+        block_quota: usize,
+    ) -> Result<Vec<IncrementalUnifiedRange>, String>
+    where
+        F: FnMut(usize) -> (f64, f64),
+    {
+        if !bank.matches(epsilon, reference_log2_dc) {
+            return Err("incremental rung validity key mismatch".to_string());
+        }
+        if bank.validity.len() != self.levels.len()
+            || bank.validity_diagnostics.len() != self.levels.len()
+        {
+            return Err("incremental rung level geometry mismatch".to_string());
+        }
+        let mut remaining = block_quota.max(1);
+        let covered_orbit_len = self.covered_orbit_len();
+        let mut ranges = Vec::new();
+        for level_index in 0..self.levels.len() {
+            if remaining == 0 {
+                break;
+            }
+            let level = &self.levels[level_index];
+            let skip = level.skip;
+            if skip < MOBIUS_MIN_EMIT_SKIP {
+                continue;
+            }
+            let slot_start = bank.validity[level_index].len();
+            let slot_end = level
+                .blocks
+                .len()
+                .min(slot_start.saturating_add(remaining));
+            if slot_end <= slot_start {
+                continue;
+            }
+            let first = 1 + slot_start * skip;
+            let last = 1 + slot_end * skip;
+            if last > orbit_len {
+                return Err(format!(
+                    "incremental rung orbit too short: need {last}, have {}",
+                    orbit_len
+                ));
+            }
+            let mut local_orbit = Vec::with_capacity(1 + last - first);
+            local_orbit.push((0.0, 0.0));
+            for index in first..last {
+                local_orbit.push(orbit_at(index));
+            }
+            let local_level = UnifiedLevel {
+                skip,
+                blocks: level.blocks[slot_start..slot_end].to_vec(),
+                moduli: level.moduli[slot_start..slot_end].to_vec(),
+            };
+            let bounds = unified_build_bounds(
+                core::slice::from_ref(&local_level),
+                &local_orbit,
+                reference_log2_dc,
+            );
+            for local_slot in 0..local_level.blocks.len() {
+                let envelope = unified_validity_envelope_for_block(
+                    &local_level.blocks[local_slot],
+                    &local_level.moduli[local_slot],
+                    &bounds,
+                    0,
+                    local_slot,
+                    epsilon,
+                    reference_log2_dc,
+                );
+                bank.validity[level_index]
+                    .push(serialize_validity_envelope_packed_v1(&envelope));
+                bank.validity_diagnostics[level_index]
+                    .push(serialize_validity_diagnostics_packed_v1(&envelope));
+            }
+            let slot_count = slot_end - slot_start;
+            remaining -= slot_count;
+            bank.cumulative_envelopes += slot_count;
+            ranges.push(IncrementalUnifiedRange {
+                level_index,
+                skip,
+                slot_start,
+                slot_count,
+                covered_orbit_len,
+            });
+        }
+        Ok(ranges)
+    }
+
+    pub fn bank_has_pending_validity(&self, bank: &IncrementalUnifiedValidityBank) -> bool {
+        self.levels.iter().enumerate().any(|(level_index, level)| {
+            level.skip >= MOBIUS_MIN_EMIT_SKIP
+                && bank.validity(level_index).len() < level.blocks.len()
+        })
+    }
+
+    pub fn bank_published_orbit_len(&self, bank: &IncrementalUnifiedValidityBank) -> usize {
+        self.levels
+            .iter()
+            .enumerate()
+            .find(|(_, level)| level.skip >= MOBIUS_MIN_EMIT_SKIP)
+            .map_or(1, |(level_index, level)| {
+                1 + bank.validity(level_index).len() * level.skip
+            })
             .min(self.covered_orbit_len())
     }
 

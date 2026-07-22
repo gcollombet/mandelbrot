@@ -7,6 +7,13 @@ import topLevelAwait from "vite-plugin-top-level-await";
 // https://vite.dev/config/
 export default defineConfig({
   base: './',  // Chemins relatifs pour servir depuis n'importe quel dossier
+  // `referenceWorker.ts` imports both the wasm-bindgen classes and their
+  // exported linear memory for zero-copy buffer reads. Pre-bundling the linked
+  // local package can instantiate a second copy of the WASM module after a
+  // rebuild, leaving class pointers and `memory.buffer` unrelated.
+  optimizeDeps: {
+      exclude: ['mandelbrot']
+  },
   plugins: [
       vue(),
       wasm(),

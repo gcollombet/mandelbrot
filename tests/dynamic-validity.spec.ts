@@ -97,7 +97,7 @@ test("dynamic Auto waits for and activates a matching packed validity table", as
   expect(state.accepts.every((value: number, index: number) => value <= state.attempts[index])).toBe(true);
   expect(state.skipBuckets).toHaveLength(4);
   expect(state.candidateUses).toBeGreaterThanOrEqual(0);
-  expect(state.rejectionReasons).toHaveLength(6);
+  expect(state.rejectionReasons).toHaveLength(8);
   expect(state.exactFallbacks).toBeGreaterThanOrEqual(0);
   expect(criticalErrors).toEqual([]);
 });

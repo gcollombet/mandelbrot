@@ -161,6 +161,8 @@ type DynamicValidityPayload = {
 type OptionalHeadersPayload = {
     version: number
     revision: number
+    /** Quantized log2 cmax of the view for which these headers were solved. */
+    currentLog2CMax: number
     saLog2Dc: number
     periodicLog2Dc: number
     gateLog2Dc: number
@@ -263,6 +265,8 @@ type TableRangeResponse = {
     validityWordsPerBlock: number
     diagnosticsWordsPerBlock: number
     referenceLog2Dc: number
+    /** Current quantized view extent; may exceed the immutable table domain. */
+    currentLog2CMax: number
     cumulativeMerges: number
     cumulativeCoefficients: number
     cumulativeEnvelopes: number
@@ -457,7 +461,7 @@ function copyOptionalHeaders(info: {
     optional_sa_log2_dc: number
     optional_periodic_log2_dc: number
     optional_gate_log2_dc: number
-}): OptionalHeadersPayload | undefined {
+}, currentLog2CMax: number): OptionalHeadersPayload | undefined {
     if (info.optional_headers_count <= 0) {
         return undefined
     }
@@ -467,6 +471,7 @@ function copyOptionalHeaders(info: {
         || Number.isNaN(info.optional_sa_log2_dc)
         || Number.isNaN(info.optional_periodic_log2_dc)
         || Number.isNaN(info.optional_gate_log2_dc)
+        || !Number.isFinite(currentLog2CMax)
     ) {
         throw new Error(
             `invalid optional-header contract: version=${info.optional_headers_version} `
@@ -484,6 +489,7 @@ function copyOptionalHeaders(info: {
     return {
         version: info.optional_headers_version,
         revision: ++optionalHeaderRevision,
+        currentLog2CMax,
         saLog2Dc: info.optional_sa_log2_dc,
         periodicLog2Dc: info.optional_periodic_log2_dc,
         gateLog2Dc: info.optional_gate_log2_dc,
@@ -528,6 +534,7 @@ function postIncrementalUnifiedUnit(
     }
     const refId = currentRefId
     const generation = tableGeneration
+    const currentLog2CMax = unitNavigator.current_log2_c_max()
     if (!incrementalUnitIsCurrent(unitNavigator, jobId, refId, generation)) {
         incrementalCancellationCount++
         return { hasMore: false, published: false }
@@ -613,6 +620,7 @@ function postIncrementalUnifiedUnit(
                 validityWordsPerBlock: info.validity_words_per_block,
                 diagnosticsWordsPerBlock: info.diagnostics_words_per_block,
                 referenceLog2Dc: info.reference_log2_dc,
+                currentLog2CMax,
                 cumulativeMerges: info.cumulative_merges,
                 cumulativeCoefficients: info.cumulative_coefficients,
                 cumulativeEnvelopes: info.cumulative_envelopes,
@@ -640,7 +648,8 @@ function postIncrementalHeadersIfNeeded(jobId: number, maxIterations: number) {
     if (!unitNavigator) return
     const refId = currentRefId
     const generation = tableGeneration
-    const key = `${jobId}/${refId}/${generation}/${maxIterations}/${unitNavigator.current_log2_c_max()}`
+    const currentLog2CMax = unitNavigator.current_log2_c_max()
+    const key = `${jobId}/${refId}/${generation}/${maxIterations}/${currentLog2CMax}`
     if (key === lastIncrementalHeaderKey) return
     const started = performance.now()
     const info = unitNavigator.compute_unified_header(maxIterations)
@@ -649,7 +658,7 @@ function postIncrementalHeadersIfNeeded(jobId: number, maxIterations: number) {
             incrementalCancellationCount++
             return
         }
-        const optionalHeaders = copyOptionalHeaders(info)
+        const optionalHeaders = copyOptionalHeaders(info, currentLog2CMax)
         if (!optionalHeaders) return
         lastIncrementalHeaderKey = key
         postResponse({
@@ -816,7 +825,9 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
     } : undefined
     console.log(`[REF worker] ${isMobius ? 'mobius' : isUnified ? 'unified' : 'jet'} table built in ${buildMs.toFixed(0)}ms (maxIter ${tableMaxIterations}${buildStages !== undefined ? `, stages ${buildStages}` : ''})`)
 
-    const optionalHeaders = isUnified ? copyOptionalHeaders(info) : undefined
+    const optionalHeaders = isUnified
+        ? copyOptionalHeaders(info, navigator.current_log2_c_max())
+        : undefined
     if (isUnified && !optionalHeaders) {
         throw new Error('unified table omitted its mandatory optional-header payload')
     }

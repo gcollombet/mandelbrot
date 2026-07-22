@@ -53,7 +53,7 @@ const stats = reactive({
   dynamicTierAccepts: [-1, -1, -1, -1] as [number, number, number, number],
   dynamicSkipBuckets: [-1, -1, -1, -1] as [number, number, number, number],
   dynamicCandidateUses: -1,
-  dynamicRejectionReasons: [-1, -1, -1, -1, -1, -1] as [number, number, number, number, number, number],
+  dynamicRejectionReasons: [-1, -1, -1, -1, -1, -1, -1, -1] as [number, number, number, number, number, number, number, number],
   dynamicExactFallbacks: -1,
   secoursStats: [-1, -1] as [number, number],
   f32Apps: -1,
@@ -85,6 +85,8 @@ const stats = reactive({
   dynamicBlockValidity: true,
   dynamicValidityShadow: false,
   dynamicValidityStatsEnabled: false,
+  dynamicValidityReferenceLog2Dc: Number.NaN,
+  dynamicValidityCurrentLog2CMax: Number.NaN,
   incrementalReferenceTable: true,
   incrementalTableOrbitCoverage: 0,
   incrementalTableBuiltOrbit: 0,
@@ -320,10 +322,37 @@ const dynamicAcceptedTotal = computed(() =>
 const dynamicSkipTotal = computed(() =>
   stats.dynamicSkipBuckets[0] < 0 ? -1 : stats.dynamicSkipBuckets.reduce((sum, value) => sum + value, 0)
 );
-const DYNAMIC_REJECTION_LABELS = ['valeur', 'dérivée', 'pure-c', 'domaine statique', 'Cauchy', 'pôle'];
+const DYNAMIC_REJECTION_LABELS = [
+  'valeur (diagnostic)',
+  'dérivée (diagnostic)',
+  'pure-c (diagnostic)',
+  'référence (diagnostic)',
+  'Cauchy',
+  'pôle (diagnostic)',
+  'preuve compacte · cause non lue',
+  'préfiltre agrégé',
+];
 const dynamicRejectionRows = computed(() => stats.dynamicRejectionReasons
   .map((count, index) => ({ label: DYNAMIC_REJECTION_LABELS[index], count }))
   .filter(row => row.count > 0));
+const dynamicDomainMarginOctaves = computed(() => {
+  const domain = stats.dynamicValidityReferenceLog2Dc;
+  const cmax = stats.dynamicValidityCurrentLog2CMax;
+  return Number.isFinite(domain) && Number.isFinite(cmax) ? domain - cmax : Number.NaN;
+});
+const dynamicDomainOutOfRange = computed(() =>
+  Number.isFinite(dynamicDomainMarginOctaves.value) && dynamicDomainMarginOctaves.value < 0
+);
+function formatLog2Extent(value: number): string {
+  return Number.isFinite(value) ? `2^${value.toFixed(1)}` : '—';
+}
+function dynamicDomainStatusLine(): string {
+  const margin = dynamicDomainMarginOctaves.value;
+  if (!Number.isFinite(margin)) return '';
+  return margin < 0
+    ? `HORS DOMAINE · dépassement ${(-margin).toFixed(1)} oct`
+    : `OK · marge ${margin.toFixed(1)} oct`;
+}
 // Secours (portfolio): fallback applications + iterations they covered.
 function secoursLine(): string {
   const [apps, iters] = stats.secoursStats;
@@ -470,7 +499,7 @@ function readLive(e: any) {
   stats.dynamicTierAccepts = e.dynamicTierAcceptsApprox ?? [-1, -1, -1, -1];
   stats.dynamicSkipBuckets = e.dynamicSkipBucketsApprox ?? [-1, -1, -1, -1];
   stats.dynamicCandidateUses = e.dynamicCandidateUsesApprox ?? -1;
-  stats.dynamicRejectionReasons = e.dynamicRejectionReasonsApprox ?? [-1, -1, -1, -1, -1, -1];
+  stats.dynamicRejectionReasons = e.dynamicRejectionReasonsApprox ?? [-1, -1, -1, -1, -1, -1, -1, -1];
   stats.dynamicExactFallbacks = e.dynamicExactFallbacksApprox ?? -1;
   stats.secoursStats = e.secoursStatsApprox ?? [-1, -1];
   stats.f32Apps = e.f32AppsApprox ?? -1;
@@ -501,6 +530,8 @@ function readLive(e: any) {
   stats.dynamicBlockValidity = e.dynamicBlockValidity ?? false;
   stats.dynamicValidityShadow = e.getDynamicValidityShadow?.() ?? false;
   stats.dynamicValidityStatsEnabled = e.getDynamicValidityStatsEnabled?.() ?? false;
+  stats.dynamicValidityReferenceLog2Dc = e.dynamicValidityReferenceLog2Dc ?? Number.NaN;
+  stats.dynamicValidityCurrentLog2CMax = e.dynamicValidityCurrentLog2CMax ?? Number.NaN;
   stats.incrementalReferenceTable = e.getIncrementalReferenceTable?.() ?? false;
   stats.incrementalTableOrbitCoverage = e.incrementalTableOrbitCoverage ?? 0;
   stats.incrementalTableBuiltOrbit = e.incrementalTableBuiltOrbit ?? 0;
@@ -860,6 +891,16 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
         <span class="perf-stat-label">Par pixel (cumul rendu)</span>
         <span class="perf-stat-value">{{ turnsPerPixel() < 10 ? turnsPerPixel().toFixed(2) : formatOps(Math.round(turnsPerPixel())) }} tours · {{ itersPerPixel() < 1000 ? itersPerPixel().toFixed(1) : formatOps(Math.round(itersPerPixel())) }} iters</span>
       </div>
+      <template v-if="stats.shaderApproxFlag >= 6 && Number.isFinite(dynamicDomainMarginOctaves)">
+        <div class="perf-stat-row">
+          <span class="perf-stat-label">Domaine table / cmax vue</span>
+          <span class="perf-stat-value">{{ formatLog2Extent(stats.dynamicValidityReferenceLog2Dc) }} / {{ formatLog2Extent(stats.dynamicValidityCurrentLog2CMax) }}</span>
+        </div>
+        <div class="perf-stat-row" :class="{ 'perf-stat-row--danger': dynamicDomainOutOfRange }">
+          <span class="perf-stat-label">Validité domaine</span>
+          <span class="perf-stat-value" :class="{ 'perf-stat-value--danger': dynamicDomainOutOfRange }">{{ dynamicDomainStatusLine() }}</span>
+        </div>
+      </template>
       <div v-if="tierRows.length" class="perf-stat-row perf-stat-row--progress">
         <div class="perf-progress-header">
           <span class="perf-stat-label">Formes appliquées</span>
@@ -1279,6 +1320,15 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 
 .perf-stat-value--floatexp {
   color: #38bdf8;
+  font-weight: 700;
+}
+
+.perf-stat-row--danger {
+  background: rgba(244, 63, 94, 0.08);
+}
+
+.perf-stat-value--danger {
+  color: #fb7185;
   font-weight: 700;
 }
 

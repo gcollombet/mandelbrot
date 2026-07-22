@@ -247,7 +247,7 @@ for (const fixture of fixtures) {
       `${fixture.name}: integer escape-iteration aggregate (${exact.hash}/${dynamic.hash})`,
     ).toBeLessThan(3e-3);
     expect(counters.tierAttempts).toHaveLength(4);
-    expect(counters.rejectionReasons).toHaveLength(6);
+    expect(counters.rejectionReasons).toHaveLength(8);
     expect(counters.exactFallbacks).toBeGreaterThanOrEqual(0);
     expect(gpuErrors, `${fixture.name}: GPU errors\n${gpuErrors.join("\n")}`).toEqual([]);
   });

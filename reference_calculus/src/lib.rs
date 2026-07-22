@@ -425,6 +425,9 @@ pub struct MandelbrotNavigator {
     unified_incremental_diagnostics: Box<Vec<validity::PackedValidityDiagnosticsV1>>,
     unified_incremental_epsilon: f64,
     unified_incremental_reference_log2_dc: f64,
+    unified_incremental_rung_center_log2_c_max: f64,
+    unified_incremental_rung_banks: Box<Vec<CachedIncrementalUnifiedRung>>,
+    unified_incremental_rung_use_clock: u64,
     unified_incremental_reset_pending: bool,
     unified_incremental_merge_coefficients_ms: f64,
     unified_incremental_envelope_ms: f64,
@@ -499,6 +502,12 @@ pub struct MandelbrotNavigator {
     transition_elapsed: f64,
 }
 
+struct CachedIncrementalUnifiedRung {
+    center_log2_c_max: f64,
+    last_used: u64,
+    bank: unified::IncrementalUnifiedValidityBank,
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl MandelbrotNavigator {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
@@ -565,6 +574,9 @@ impl MandelbrotNavigator {
             unified_incremental_diagnostics: Box::new(Vec::new()),
             unified_incremental_epsilon: f64::NAN,
             unified_incremental_reference_log2_dc: f64::NAN,
+            unified_incremental_rung_center_log2_c_max: f64::NAN,
+            unified_incremental_rung_banks: Box::new(Vec::new()),
+            unified_incremental_rung_use_clock: 0,
             unified_incremental_reset_pending: true,
             unified_incremental_merge_coefficients_ms: 0.0,
             unified_incremental_envelope_ms: 0.0,
@@ -1768,6 +1780,9 @@ impl MandelbrotNavigator {
         self.unified_incremental_diagnostics.clear();
         self.unified_incremental_epsilon = f64::NAN;
         self.unified_incremental_reference_log2_dc = f64::NAN;
+        self.unified_incremental_rung_center_log2_c_max = f64::NAN;
+        self.unified_incremental_rung_banks.clear();
+        self.unified_incremental_rung_use_clock = 0;
         self.unified_incremental_reset_pending = true;
         self.unified_incremental_merge_coefficients_ms = 0.0;
         self.unified_incremental_envelope_ms = 0.0;
@@ -1799,15 +1814,19 @@ impl MandelbrotNavigator {
             .min(requested_orbit_len.max(self.unified_incremental_builder.covered_orbit_len()));
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
         let log2_c_max = self.jet_log2_c_max();
-        const REFERENCE_DOMAIN_HEADROOM_LOG2: f64 = 4.0;
+        // Rung centres are four octaves apart.  A bank's immutable proof
+        // ceiling sits at the +2-octave Voronoi edge, so the current bank is
+        // sound until the adjacent bank becomes the closest one.
+        const REFERENCE_DOMAIN_HALF_RUNG_LOG2: f64 = 2.0;
         let epoch_stale = !self.unified_incremental_reference_log2_dc.is_finite()
             || !self.unified_incremental_epsilon.is_finite()
             || (self.unified_incremental_epsilon - epsilon).abs() > f64::EPSILON * epsilon;
         if epoch_stale {
             self.reset_unified_incremental_builder();
             self.unified_incremental_epsilon = epsilon;
+            self.unified_incremental_rung_center_log2_c_max = log2_c_max;
             self.unified_incremental_reference_log2_dc =
-                log2_c_max + REFERENCE_DOMAIN_HEADROOM_LOG2;
+                log2_c_max + REFERENCE_DOMAIN_HALF_RUNG_LOG2;
         }
         self.unified_incremental_builder
             .reserve_for_orbit_len(orbit_len);
@@ -1895,6 +1914,7 @@ impl MandelbrotNavigator {
             validity_words_per_block: validity::PACKED_VALIDITY_WORDS,
             diagnostics_words_per_block: validity::PACKED_VALIDITY_DIAGNOSTIC_WORDS,
             reference_log2_dc: self.unified_incremental_reference_log2_dc,
+            rung_center_log2_c_max: self.unified_incremental_rung_center_log2_c_max,
             covered_orbit_len,
             published_orbit_len,
             reset: u32::from(reset),
@@ -1905,6 +1925,190 @@ impl MandelbrotNavigator {
             peak_retained_bytes: self.unified_incremental_builder.peak_retained_bytes(),
             cumulative_merge_coefficients_ms: self.unified_incremental_merge_coefficients_ms,
             cumulative_envelope_ms: self.unified_incremental_envelope_ms,
+        }
+    }
+
+    /// Progress one cmax-rung certificate bank while reusing the already
+    /// composed reference-owned block tree.  The complete payload is exposed
+    /// only after every currently available block has a matching certificate;
+    /// the host can therefore fill fresh GPU buffers and swap them atomically.
+    pub fn advance_incremental_unified_rung(
+        &mut self,
+        center_log2_c_max: f64,
+        envelope_quota: u32,
+    ) -> IncrementalUnifiedRungInfo {
+        const REFERENCE_DOMAIN_HALF_RUNG_LOG2: f64 = 2.0;
+        const MAX_CACHED_RUNG_BANKS: usize = 3;
+
+        self.unified_incremental_ranges.clear();
+        self.unified_incremental_coeffs.clear();
+        self.unified_incremental_radii.clear();
+        self.unified_incremental_validity.clear();
+        self.unified_incremental_diagnostics.clear();
+
+        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
+        let reference_log2_dc = center_log2_c_max + REFERENCE_DOMAIN_HALF_RUNG_LOG2;
+        let is_primary = center_log2_c_max.to_bits()
+            == self.unified_incremental_rung_center_log2_c_max.to_bits();
+        self.unified_incremental_rung_use_clock =
+            self.unified_incremental_rung_use_clock.wrapping_add(1);
+        let use_clock = self.unified_incremental_rung_use_clock;
+
+        let mut build_ms = 0.0;
+        let bank_index = if is_primary {
+            None
+        } else {
+            let existing = self
+                .unified_incremental_rung_banks
+                .iter()
+                .position(|cached| {
+                    cached.bank.matches(epsilon, reference_log2_dc)
+                        && cached.center_log2_c_max.to_bits() == center_log2_c_max.to_bits()
+                });
+            let index = if let Some(index) = existing {
+                index
+            } else {
+                if self.unified_incremental_rung_banks.len() >= MAX_CACHED_RUNG_BANKS {
+                    let evict = self
+                        .unified_incremental_rung_banks
+                        .iter()
+                        .enumerate()
+                        .max_by(|(_, a), (_, b)| {
+                            let da = (a.center_log2_c_max - center_log2_c_max).abs();
+                            let db = (b.center_log2_c_max - center_log2_c_max).abs();
+                            da.partial_cmp(&db)
+                                .unwrap_or(core::cmp::Ordering::Equal)
+                                .then_with(|| b.last_used.cmp(&a.last_used))
+                        })
+                        .map_or(0, |(index, _)| index);
+                    self.unified_incremental_rung_banks.swap_remove(evict);
+                }
+                self.unified_incremental_rung_banks
+                    .push(CachedIncrementalUnifiedRung {
+                        center_log2_c_max,
+                        last_used: use_clock,
+                        bank: unified::IncrementalUnifiedValidityBank::new(
+                            self.unified_incremental_builder.levels().len(),
+                            epsilon,
+                            reference_log2_dc,
+                        ),
+                    });
+                self.unified_incremental_rung_banks.len() - 1
+            };
+            self.unified_incremental_rung_banks[index].last_used = use_clock;
+            let started = wall_clock_ms();
+            {
+                let builder = &self.unified_incremental_builder;
+                let result = &self.result;
+                let bank = &mut self.unified_incremental_rung_banks[index].bank;
+                builder
+                    .compile_pending_validity_bank_with(
+                        bank,
+                        builder.covered_orbit_len().min(result.len()),
+                        |orbit_index| {
+                            let step = result[orbit_index];
+                            (step.zx as f64, step.zy as f64)
+                        },
+                        epsilon,
+                        reference_log2_dc,
+                        envelope_quota.max(1) as usize,
+                    )
+                    .unwrap_or_else(|message| {
+                        panic!("incremental unified rung validity failed: {}", message)
+                    });
+            }
+            build_ms = wall_clock_ms() - started;
+            Some(index)
+        };
+
+        let builder = &self.unified_incremental_builder;
+        let total_blocks = builder
+            .levels()
+            .iter()
+            .filter(|level| level.skip >= unified::MOBIUS_MIN_EMIT_SKIP)
+            .map(|level| level.blocks.len())
+            .sum::<usize>();
+        let certified_blocks = if let Some(index) = bank_index {
+            self.unified_incremental_rung_banks[index]
+                .bank
+                .cumulative_envelopes()
+        } else {
+            builder.cumulative_envelopes()
+        };
+        let has_more = if let Some(index) = bank_index {
+            builder.bank_has_pending_validity(&self.unified_incremental_rung_banks[index].bank)
+        } else {
+            builder.has_pending_validity()
+        };
+        let published_orbit_len = if let Some(index) = bank_index {
+            builder.bank_published_orbit_len(&self.unified_incremental_rung_banks[index].bank)
+        } else {
+            builder.published_orbit_len()
+        };
+
+        // Serialize a complete bank only.  Partial work remains Rust-side and
+        // cannot accidentally replace a sound active GPU bank.
+        if !has_more && total_blocks > 0 {
+            for (level_index, level) in builder.levels().iter().enumerate() {
+                if level.skip < unified::MOBIUS_MIN_EMIT_SKIP {
+                    continue;
+                }
+                let (validity, diagnostics) = if let Some(index) = bank_index {
+                    let bank = &self.unified_incremental_rung_banks[index].bank;
+                    (bank.validity(level_index), bank.diagnostics(level_index))
+                } else {
+                    (level.validity.as_slice(), level.validity_diagnostics.as_slice())
+                };
+                if validity.is_empty() {
+                    continue;
+                }
+                let payload_offset = self.unified_incremental_radii.len();
+                self.unified_incremental_radii.extend(
+                    validity.iter().enumerate().map(|(slot, packed)| {
+                        unified::unified_dynamic_block_sidecar(
+                            &level.blocks[slot],
+                            &level.moduli[slot],
+                            packed,
+                            reference_log2_dc,
+                        )
+                    }),
+                );
+                self.unified_incremental_validity.extend_from_slice(validity);
+                self.unified_incremental_diagnostics
+                    .extend_from_slice(diagnostics);
+                self.unified_incremental_ranges
+                    .push(IncrementalUnifiedRangeInfo {
+                        level: level_index.saturating_sub(2) as u32,
+                        skip: level.skip as u32,
+                        slot_start: 0,
+                        slot_count: validity.len() as u32,
+                        payload_offset: payload_offset as u32,
+                        committed_count: validity.len() as u32,
+                    });
+            }
+        }
+
+        IncrementalUnifiedRungInfo {
+            ranges_ptr: self.unified_incremental_ranges.as_ptr() as usize,
+            range_count: self.unified_incremental_ranges.len(),
+            radii_ptr: self.unified_incremental_radii.as_ptr() as usize,
+            radii_count: self.unified_incremental_radii.len(),
+            validity_ptr: self.unified_incremental_validity.as_ptr() as usize,
+            validity_count: self.unified_incremental_validity.len(),
+            diagnostics_ptr: self.unified_incremental_diagnostics.as_ptr() as usize,
+            diagnostics_count: self.unified_incremental_diagnostics.len(),
+            validity_version: validity::PACKED_VALIDITY_VERSION,
+            validity_words_per_block: validity::PACKED_VALIDITY_WORDS,
+            diagnostics_words_per_block: validity::PACKED_VALIDITY_DIAGNOSTIC_WORDS,
+            center_log2_c_max,
+            reference_log2_dc,
+            covered_orbit_len: builder.covered_orbit_len(),
+            published_orbit_len,
+            certified_blocks,
+            total_blocks,
+            cached_rung_count: self.unified_incremental_rung_banks.len() + 1,
+            has_more: u32::from(has_more),
+            build_ms,
         }
     }
 

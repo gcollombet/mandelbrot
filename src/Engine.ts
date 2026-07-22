@@ -137,7 +137,7 @@ const TS_COUNT = PASS_SLOTS.length * 2
 // asynchronous, so this controls the compute/count pass frequency, not display FPS.
 const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
 const COUNTER_READBACK_BUFFER_COUNT = 3
-const WORK_STATS_WORDS = 35
+const WORK_STATS_WORDS = 37
 const WORK_STATS_BYTES = WORK_STATS_WORDS * Uint32Array.BYTES_PER_ELEMENT
 const COUNTER_READBACK_BYTES = 2 * Uint32Array.BYTES_PER_ELEMENT + WORK_STATS_BYTES
 // Deferred-clear fallback (see pendingTableClear): generous enough for the
@@ -158,7 +158,7 @@ type DynamicValidityRuntimeStats = {
     tierAccepts: [number, number, number, number]
     skipBuckets: [number, number, number, number]
     candidateUses: number
-    rejectionReasons: [number, number, number, number, number, number]
+    rejectionReasons: [number, number, number, number, number, number, number, number]
     exactFallbacks: number
 }
 
@@ -192,6 +192,7 @@ type DynamicValidityPayload = {
 type OptionalHeadersPayload = {
     version: number
     revision: number
+    currentLog2CMax: number
     saLog2Dc: number
     periodicLog2Dc: number
     gateLog2Dc: number
@@ -219,6 +220,7 @@ type IncrementalTableRangeResponse = {
     validityWordsPerBlock: number
     diagnosticsWordsPerBlock: number
     referenceLog2Dc: number
+    currentLog2CMax: number
     cumulativeMerges: number
     cumulativeCoefficients: number
     cumulativeEnvelopes: number
@@ -657,7 +659,11 @@ export class Engine {
     private mandelbrotJetLevelBufferCapacity = 0
     private mandelbrotValidityBufferCapacity = 0
     private dynamicValidityReady = false
-    private dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
+    /** Immutable packed-proof domain and current quantized view extent. Their
+     * difference is exposed to the performance panel to diagnose history-
+     * dependent out-of-domain fallback. */
+    dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
+    dynamicValidityCurrentLog2CMax = Number.NaN
     private dynamicValidityGeneration = -1
     /** A/B referee: evaluate packed certificates and counters, but dispatch
      * with the legacy principal/secours sidecar. Incremental ranges carry a
@@ -792,7 +798,7 @@ export class Engine {
     dynamicTierAcceptsApprox: [number, number, number, number] = [-1, -1, -1, -1]
     dynamicSkipBucketsApprox: [number, number, number, number] = [-1, -1, -1, -1]
     dynamicCandidateUsesApprox = -1
-    dynamicRejectionReasonsApprox: [number, number, number, number, number, number] = [-1, -1, -1, -1, -1, -1]
+    dynamicRejectionReasonsApprox: [number, number, number, number, number, number, number, number] = [-1, -1, -1, -1, -1, -1, -1, -1]
     dynamicExactFallbacksApprox = -1
     /** Table observability from the worker's last unified build. Periodic
      *  status codes: 0 pending, 1 active, 2 short orbit, 3 no converged
@@ -1560,6 +1566,7 @@ export class Engine {
                 this.tableBuildStage = message.hasMore ? 'bounds' : 'ready'
                 this.tableBuildKind = 'unified'
                 this.dynamicValidityReferenceLog2Dc = message.referenceLog2Dc
+                this.dynamicValidityCurrentLog2CMax = message.currentLog2CMax
                 this.dynamicValidityGeneration = message.tableGeneration
                 this.dynamicValidityReady = this.currentBlaLevelCount > 0
                 this.debugViewDirty = true
@@ -1950,7 +1957,7 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
-        // Work-instrumentation buffer (in-place compute path): 35 × u32
+        // Work-instrumentation buffer (in-place compute path): 37 × u32
         // (realMean, covMean, maxAccum, maxSteps, tierAff/Pade/Cplus/Jet,
         // gateJumps/gateFails, secoursApps/secoursIters, appsF32,
         // renormApps/renormIters + dynamic proof counters) — see WorkStats.
@@ -2753,6 +2760,8 @@ export class Engine {
             + message.radii.byteLength
             + message.envelopes.byteLength
             + message.diagnostics.byteLength
+        this.dynamicValidityReferenceLog2Dc = message.referenceLog2Dc
+        this.dynamicValidityCurrentLog2CMax = message.currentLog2CMax
         return true
     }
 
@@ -2809,6 +2818,7 @@ export class Engine {
         this.dynamicValidityReady = false
         this.dynamicValidityGeneration = -1
         this.dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
+        this.dynamicValidityCurrentLog2CMax = Number.NaN
         if (changed) this.rebuildIterationBindGroups()
     }
 
@@ -2985,6 +2995,7 @@ export class Engine {
             )
             this.currentUnifiedBlockCount = headerBase
             this.optionalHeaderRevision = headers.revision
+            this.dynamicValidityCurrentLog2CMax = headers.currentLog2CMax
             return true
         }
         const grew = this.ensureJetRadiiBufferCapacity(blockCount + headers.data.length / JET_RADII_FLOATS)
@@ -3008,6 +3019,7 @@ export class Engine {
             headers.data.length,
         )
         this.optionalHeaderRevision = headers.revision
+        this.dynamicValidityCurrentLog2CMax = headers.currentLog2CMax
         return true
     }
 
@@ -3175,8 +3187,8 @@ export class Engine {
             tierAccepts: [data[base + 4], data[base + 5], data[base + 6], data[base + 7]],
             skipBuckets: [data[base + 8], data[base + 9], data[base + 10], data[base + 11]],
             candidateUses: data[base + 12],
-            rejectionReasons: [data[base + 13], data[base + 14], data[base + 15], data[base + 16], data[base + 17], data[base + 18]],
-            exactFallbacks: data[base + 19],
+            rejectionReasons: [data[base + 13], data[base + 14], data[base + 15], data[base + 16], data[base + 17], data[base + 18], data[base + 19], data[base + 20]],
+            exactFallbacks: data[base + 21],
         }
     }
 
@@ -3190,7 +3202,7 @@ export class Engine {
                 tierAccepts: [-1, -1, -1, -1],
                 skipBuckets: [-1, -1, -1, -1],
                 candidateUses: -1,
-                rejectionReasons: [-1, -1, -1, -1, -1, -1],
+                rejectionReasons: [-1, -1, -1, -1, -1, -1, -1, -1],
                 exactFallbacks: -1,
             }
         }
@@ -3282,7 +3294,7 @@ export class Engine {
             this.dynamicTierAcceptsApprox = [-1, -1, -1, -1]
             this.dynamicSkipBucketsApprox = [-1, -1, -1, -1]
             this.dynamicCandidateUsesApprox = -1
-            this.dynamicRejectionReasonsApprox = [-1, -1, -1, -1, -1, -1]
+            this.dynamicRejectionReasonsApprox = [-1, -1, -1, -1, -1, -1, -1, -1]
             this.dynamicExactFallbacksApprox = -1
             // Next in-place dispatch re-clears workStats for the new session.
             this.workStatsSessionSerial++
@@ -3351,7 +3363,7 @@ export class Engine {
         tierAccepts: [0, 0, 0, 0],
         skipBuckets: [0, 0, 0, 0],
         candidateUses: 0,
-        rejectionReasons: [0, 0, 0, 0, 0, 0],
+        rejectionReasons: [0, 0, 0, 0, 0, 0, 0, 0],
         exactFallbacks: 0,
     }) {
         if (generation !== this.counterReadbackGeneration) {
