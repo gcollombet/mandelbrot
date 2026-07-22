@@ -72,6 +72,13 @@ const PRECISION_MARGIN_BITS: usize = 24;
 // so this floor never lowers it. Deep diving raises the budget explicitly (preset / slider).
 const DEFAULT_BUDGET_BITS: usize = 64;
 
+/// Immutable block-certificate headroom for one reference epoch.  The domain
+/// is anchored once, when the epoch is created, and is never retargeted by
+/// viewport-only navigation.  Four octaves preserves the already-shipped
+/// dynamic-validity coverage while leaving exact perturbation as the sound
+/// fallback outside it.
+const REFERENCE_CERTIFICATE_HEADROOM_LOG2: f64 = 4.0;
+
 // Manual navigation is sampled once per displayed frame.  Complex views may
 // take several tens of milliseconds to render, so a short half-life makes each
 // keyboard impulse die before the next visible frame.  Keep enough momentum to
@@ -421,13 +428,8 @@ pub struct MandelbrotNavigator {
     unified_incremental_ranges: Box<Vec<IncrementalUnifiedRangeInfo>>,
     unified_incremental_coeffs: Box<Vec<[jet::JetCoeffFe; unified::UNIFIED_GPU_COEFFS]>>,
     unified_incremental_radii: Box<Vec<unified::UnifiedRadius>>,
-    unified_incremental_validity: Box<Vec<validity::PackedValidityEnvelopeV1>>,
-    unified_incremental_diagnostics: Box<Vec<validity::PackedValidityDiagnosticsV1>>,
+    unified_incremental_certificates: Box<Vec<validity::RadialValidityV3>>,
     unified_incremental_epsilon: f64,
-    unified_incremental_reference_log2_dc: f64,
-    unified_incremental_rung_center_log2_c_max: f64,
-    unified_incremental_rung_banks: Box<Vec<CachedIncrementalUnifiedRung>>,
-    unified_incremental_rung_use_clock: u64,
     unified_incremental_reset_pending: bool,
     unified_incremental_merge_coefficients_ms: f64,
     unified_incremental_envelope_ms: f64,
@@ -502,12 +504,6 @@ pub struct MandelbrotNavigator {
     transition_elapsed: f64,
 }
 
-struct CachedIncrementalUnifiedRung {
-    center_log2_c_max: f64,
-    last_used: u64,
-    bank: unified::IncrementalUnifiedValidityBank,
-}
-
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 impl MandelbrotNavigator {
     #[cfg_attr(target_arch = "wasm32", wasm_bindgen(constructor))]
@@ -570,13 +566,8 @@ impl MandelbrotNavigator {
             unified_incremental_ranges: Box::new(Vec::new()),
             unified_incremental_coeffs: Box::new(Vec::new()),
             unified_incremental_radii: Box::new(Vec::new()),
-            unified_incremental_validity: Box::new(Vec::new()),
-            unified_incremental_diagnostics: Box::new(Vec::new()),
+            unified_incremental_certificates: Box::new(Vec::new()),
             unified_incremental_epsilon: f64::NAN,
-            unified_incremental_reference_log2_dc: f64::NAN,
-            unified_incremental_rung_center_log2_c_max: f64::NAN,
-            unified_incremental_rung_banks: Box::new(Vec::new()),
-            unified_incremental_rung_use_clock: 0,
             unified_incremental_reset_pending: true,
             unified_incremental_merge_coefficients_ms: 0.0,
             unified_incremental_envelope_ms: 0.0,
@@ -817,7 +808,11 @@ impl MandelbrotNavigator {
         if (next - self.bla_epsilon).abs() > f32::EPSILON {
             self.bla_source_len = 0;
             self.bla_level_count = 0;
-            self.reset_unified_incremental_builder();
+            if self.dynamic_block_validity && self.incremental_reference_table {
+                self.reset_unified_incremental_certificates();
+            } else {
+                self.reset_unified_incremental_builder();
+            }
         }
         self.bla_epsilon = next;
     }
@@ -1776,15 +1771,21 @@ impl MandelbrotNavigator {
         self.unified_incremental_ranges.clear();
         self.unified_incremental_coeffs.clear();
         self.unified_incremental_radii.clear();
-        self.unified_incremental_validity.clear();
-        self.unified_incremental_diagnostics.clear();
+        self.unified_incremental_certificates.clear();
         self.unified_incremental_epsilon = f64::NAN;
-        self.unified_incremental_reference_log2_dc = f64::NAN;
-        self.unified_incremental_rung_center_log2_c_max = f64::NAN;
-        self.unified_incremental_rung_banks.clear();
-        self.unified_incremental_rung_use_clock = 0;
         self.unified_incremental_reset_pending = true;
         self.unified_incremental_merge_coefficients_ms = 0.0;
+        self.unified_incremental_envelope_ms = 0.0;
+    }
+
+    fn reset_unified_incremental_certificates(&mut self) {
+        self.unified_incremental_builder.reset_certificates();
+        self.unified_incremental_ranges.clear();
+        self.unified_incremental_coeffs.clear();
+        self.unified_incremental_radii.clear();
+        self.unified_incremental_certificates.clear();
+        self.unified_incremental_epsilon = f64::NAN;
+        self.unified_incremental_reset_pending = true;
         self.unified_incremental_envelope_ms = 0.0;
     }
 
@@ -1800,8 +1801,7 @@ impl MandelbrotNavigator {
         self.unified_incremental_ranges.clear();
         self.unified_incremental_coeffs.clear();
         self.unified_incremental_radii.clear();
-        self.unified_incremental_validity.clear();
-        self.unified_incremental_diagnostics.clear();
+        self.unified_incremental_certificates.clear();
 
         // A table prefix belongs to the reference, not to the instantaneous
         // viewport.  Zooming out may lower max_iter, but it must never shrink
@@ -1813,20 +1813,11 @@ impl MandelbrotNavigator {
             .len()
             .min(requested_orbit_len.max(self.unified_incremental_builder.covered_orbit_len()));
         let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
-        let log2_c_max = self.jet_log2_c_max();
-        // Rung centres are four octaves apart.  A bank's immutable proof
-        // ceiling sits at the +2-octave Voronoi edge, so the current bank is
-        // sound until the adjacent bank becomes the closest one.
-        const REFERENCE_DOMAIN_HALF_RUNG_LOG2: f64 = 2.0;
-        let epoch_stale = !self.unified_incremental_reference_log2_dc.is_finite()
-            || !self.unified_incremental_epsilon.is_finite()
-            || (self.unified_incremental_epsilon - epsilon).abs() > f64::EPSILON * epsilon;
-        if epoch_stale {
-            self.reset_unified_incremental_builder();
+        if !self.unified_incremental_epsilon.is_finite() {
             self.unified_incremental_epsilon = epsilon;
-            self.unified_incremental_rung_center_log2_c_max = log2_c_max;
-            self.unified_incremental_reference_log2_dc =
-                log2_c_max + REFERENCE_DOMAIN_HALF_RUNG_LOG2;
+        } else if (self.unified_incremental_epsilon - epsilon).abs() > f64::EPSILON * epsilon {
+            self.reset_unified_incremental_certificates();
+            self.unified_incremental_epsilon = epsilon;
         }
         self.unified_incremental_builder
             .reserve_for_orbit_len(orbit_len);
@@ -1857,7 +1848,6 @@ impl MandelbrotNavigator {
                     (step.zx as f64, step.zy as f64)
                 },
                 epsilon,
-                self.unified_incremental_reference_log2_dc,
                 envelope_quota.max(1) as usize,
             )
             .unwrap_or_else(|message| panic!("incremental unified validity failed: {}", message));
@@ -1869,20 +1859,16 @@ impl MandelbrotNavigator {
             let slot_end = range.slot_start + range.slot_count;
             self.unified_incremental_coeffs
                 .extend_from_slice(&level.coeffs[range.slot_start..slot_end]);
-            let reference_log2_dc = self.unified_incremental_reference_log2_dc;
             self.unified_incremental_radii
                 .extend((range.slot_start..slot_end).map(|slot| {
-                    unified::unified_dynamic_block_sidecar(
+                    unified::unified_radial_block_sidecar(
                         &level.blocks[slot],
                         &level.moduli[slot],
-                        &level.validity[slot],
-                        reference_log2_dc,
+                        &level.radial[slot],
                     )
                 }));
-            self.unified_incremental_validity
-                .extend_from_slice(&level.validity[range.slot_start..slot_end]);
-            self.unified_incremental_diagnostics
-                .extend_from_slice(&level.validity_diagnostics[range.slot_start..slot_end]);
+            self.unified_incremental_certificates
+                .extend_from_slice(&level.radial[range.slot_start..slot_end]);
             self.unified_incremental_ranges
                 .push(IncrementalUnifiedRangeInfo {
                     level: range.level_index.saturating_sub(2) as u32,
@@ -1890,7 +1876,7 @@ impl MandelbrotNavigator {
                     slot_start: range.slot_start as u32,
                     slot_count: range.slot_count as u32,
                     payload_offset: payload_offset as u32,
-                    committed_count: level.validity.len() as u32,
+                    committed_count: level.radial.len() as u32,
                 });
         }
 
@@ -1906,15 +1892,14 @@ impl MandelbrotNavigator {
             coeffs_count: self.unified_incremental_coeffs.len(),
             radii_ptr: self.unified_incremental_radii.as_ptr() as usize,
             radii_count: self.unified_incremental_radii.len(),
-            validity_ptr: self.unified_incremental_validity.as_ptr() as usize,
-            validity_count: self.unified_incremental_validity.len(),
-            diagnostics_ptr: self.unified_incremental_diagnostics.as_ptr() as usize,
-            diagnostics_count: self.unified_incremental_diagnostics.len(),
-            validity_version: validity::PACKED_VALIDITY_VERSION,
-            validity_words_per_block: validity::PACKED_VALIDITY_WORDS,
-            diagnostics_words_per_block: validity::PACKED_VALIDITY_DIAGNOSTIC_WORDS,
-            reference_log2_dc: self.unified_incremental_reference_log2_dc,
-            rung_center_log2_c_max: self.unified_incremental_rung_center_log2_c_max,
+            certificates_ptr: self.unified_incremental_certificates.as_ptr() as usize,
+            certificates_count: self.unified_incremental_certificates.len(),
+            certificate_version: validity::RADIAL_VALIDITY_VERSION,
+            certificate_words_per_block: validity::RADIAL_VALIDITY_WORDS,
+            // Retained as an ABI field for radial-v2/packed-v1 diagnostics.
+            // V3 has only per-block intrinsic caps and deliberately publishes
+            // no reference-wide dc domain.
+            reference_log2_dc: f64::NAN,
             covered_orbit_len,
             published_orbit_len,
             reset: u32::from(reset),
@@ -1925,190 +1910,6 @@ impl MandelbrotNavigator {
             peak_retained_bytes: self.unified_incremental_builder.peak_retained_bytes(),
             cumulative_merge_coefficients_ms: self.unified_incremental_merge_coefficients_ms,
             cumulative_envelope_ms: self.unified_incremental_envelope_ms,
-        }
-    }
-
-    /// Progress one cmax-rung certificate bank while reusing the already
-    /// composed reference-owned block tree.  The complete payload is exposed
-    /// only after every currently available block has a matching certificate;
-    /// the host can therefore fill fresh GPU buffers and swap them atomically.
-    pub fn advance_incremental_unified_rung(
-        &mut self,
-        center_log2_c_max: f64,
-        envelope_quota: u32,
-    ) -> IncrementalUnifiedRungInfo {
-        const REFERENCE_DOMAIN_HALF_RUNG_LOG2: f64 = 2.0;
-        const MAX_CACHED_RUNG_BANKS: usize = 3;
-
-        self.unified_incremental_ranges.clear();
-        self.unified_incremental_coeffs.clear();
-        self.unified_incremental_radii.clear();
-        self.unified_incremental_validity.clear();
-        self.unified_incremental_diagnostics.clear();
-
-        let epsilon = self.bla_epsilon.max(f32::MIN_POSITIVE) as f64;
-        let reference_log2_dc = center_log2_c_max + REFERENCE_DOMAIN_HALF_RUNG_LOG2;
-        let is_primary = center_log2_c_max.to_bits()
-            == self.unified_incremental_rung_center_log2_c_max.to_bits();
-        self.unified_incremental_rung_use_clock =
-            self.unified_incremental_rung_use_clock.wrapping_add(1);
-        let use_clock = self.unified_incremental_rung_use_clock;
-
-        let mut build_ms = 0.0;
-        let bank_index = if is_primary {
-            None
-        } else {
-            let existing = self
-                .unified_incremental_rung_banks
-                .iter()
-                .position(|cached| {
-                    cached.bank.matches(epsilon, reference_log2_dc)
-                        && cached.center_log2_c_max.to_bits() == center_log2_c_max.to_bits()
-                });
-            let index = if let Some(index) = existing {
-                index
-            } else {
-                if self.unified_incremental_rung_banks.len() >= MAX_CACHED_RUNG_BANKS {
-                    let evict = self
-                        .unified_incremental_rung_banks
-                        .iter()
-                        .enumerate()
-                        .max_by(|(_, a), (_, b)| {
-                            let da = (a.center_log2_c_max - center_log2_c_max).abs();
-                            let db = (b.center_log2_c_max - center_log2_c_max).abs();
-                            da.partial_cmp(&db)
-                                .unwrap_or(core::cmp::Ordering::Equal)
-                                .then_with(|| b.last_used.cmp(&a.last_used))
-                        })
-                        .map_or(0, |(index, _)| index);
-                    self.unified_incremental_rung_banks.swap_remove(evict);
-                }
-                self.unified_incremental_rung_banks
-                    .push(CachedIncrementalUnifiedRung {
-                        center_log2_c_max,
-                        last_used: use_clock,
-                        bank: unified::IncrementalUnifiedValidityBank::new(
-                            self.unified_incremental_builder.levels().len(),
-                            epsilon,
-                            reference_log2_dc,
-                        ),
-                    });
-                self.unified_incremental_rung_banks.len() - 1
-            };
-            self.unified_incremental_rung_banks[index].last_used = use_clock;
-            let started = wall_clock_ms();
-            {
-                let builder = &self.unified_incremental_builder;
-                let result = &self.result;
-                let bank = &mut self.unified_incremental_rung_banks[index].bank;
-                builder
-                    .compile_pending_validity_bank_with(
-                        bank,
-                        builder.covered_orbit_len().min(result.len()),
-                        |orbit_index| {
-                            let step = result[orbit_index];
-                            (step.zx as f64, step.zy as f64)
-                        },
-                        epsilon,
-                        reference_log2_dc,
-                        envelope_quota.max(1) as usize,
-                    )
-                    .unwrap_or_else(|message| {
-                        panic!("incremental unified rung validity failed: {}", message)
-                    });
-            }
-            build_ms = wall_clock_ms() - started;
-            Some(index)
-        };
-
-        let builder = &self.unified_incremental_builder;
-        let total_blocks = builder
-            .levels()
-            .iter()
-            .filter(|level| level.skip >= unified::MOBIUS_MIN_EMIT_SKIP)
-            .map(|level| level.blocks.len())
-            .sum::<usize>();
-        let certified_blocks = if let Some(index) = bank_index {
-            self.unified_incremental_rung_banks[index]
-                .bank
-                .cumulative_envelopes()
-        } else {
-            builder.cumulative_envelopes()
-        };
-        let has_more = if let Some(index) = bank_index {
-            builder.bank_has_pending_validity(&self.unified_incremental_rung_banks[index].bank)
-        } else {
-            builder.has_pending_validity()
-        };
-        let published_orbit_len = if let Some(index) = bank_index {
-            builder.bank_published_orbit_len(&self.unified_incremental_rung_banks[index].bank)
-        } else {
-            builder.published_orbit_len()
-        };
-
-        // Serialize a complete bank only.  Partial work remains Rust-side and
-        // cannot accidentally replace a sound active GPU bank.
-        if !has_more && total_blocks > 0 {
-            for (level_index, level) in builder.levels().iter().enumerate() {
-                if level.skip < unified::MOBIUS_MIN_EMIT_SKIP {
-                    continue;
-                }
-                let (validity, diagnostics) = if let Some(index) = bank_index {
-                    let bank = &self.unified_incremental_rung_banks[index].bank;
-                    (bank.validity(level_index), bank.diagnostics(level_index))
-                } else {
-                    (level.validity.as_slice(), level.validity_diagnostics.as_slice())
-                };
-                if validity.is_empty() {
-                    continue;
-                }
-                let payload_offset = self.unified_incremental_radii.len();
-                self.unified_incremental_radii.extend(
-                    validity.iter().enumerate().map(|(slot, packed)| {
-                        unified::unified_dynamic_block_sidecar(
-                            &level.blocks[slot],
-                            &level.moduli[slot],
-                            packed,
-                            reference_log2_dc,
-                        )
-                    }),
-                );
-                self.unified_incremental_validity.extend_from_slice(validity);
-                self.unified_incremental_diagnostics
-                    .extend_from_slice(diagnostics);
-                self.unified_incremental_ranges
-                    .push(IncrementalUnifiedRangeInfo {
-                        level: level_index.saturating_sub(2) as u32,
-                        skip: level.skip as u32,
-                        slot_start: 0,
-                        slot_count: validity.len() as u32,
-                        payload_offset: payload_offset as u32,
-                        committed_count: validity.len() as u32,
-                    });
-            }
-        }
-
-        IncrementalUnifiedRungInfo {
-            ranges_ptr: self.unified_incremental_ranges.as_ptr() as usize,
-            range_count: self.unified_incremental_ranges.len(),
-            radii_ptr: self.unified_incremental_radii.as_ptr() as usize,
-            radii_count: self.unified_incremental_radii.len(),
-            validity_ptr: self.unified_incremental_validity.as_ptr() as usize,
-            validity_count: self.unified_incremental_validity.len(),
-            diagnostics_ptr: self.unified_incremental_diagnostics.as_ptr() as usize,
-            diagnostics_count: self.unified_incremental_diagnostics.len(),
-            validity_version: validity::PACKED_VALIDITY_VERSION,
-            validity_words_per_block: validity::PACKED_VALIDITY_WORDS,
-            diagnostics_words_per_block: validity::PACKED_VALIDITY_DIAGNOSTIC_WORDS,
-            center_log2_c_max,
-            reference_log2_dc,
-            covered_orbit_len: builder.covered_orbit_len(),
-            published_orbit_len,
-            certified_blocks,
-            total_blocks,
-            cached_rung_count: self.unified_incremental_rung_banks.len() + 1,
-            has_more: u32::from(has_more),
-            build_ms,
         }
     }
 
@@ -2195,7 +1996,6 @@ impl MandelbrotNavigator {
             return;
         }
         let log2_c_max = self.jet_log2_c_max();
-        const REFERENCE_DOMAIN_HEADROOM_LOG2: f64 = 4.0;
         // Dynamic bounds are walked once at the whole certified reference
         // domain ceiling. Moving further inward can never stale them; only
         // leaving that ceiling (or changing the orbit) rebuilds them. Legacy
@@ -2204,7 +2004,7 @@ impl MandelbrotNavigator {
             if self.unified_bounds_log2_c_max.is_finite() {
                 self.unified_bounds_log2_c_max
             } else {
-                log2_c_max + REFERENCE_DOMAIN_HEADROOM_LOG2
+                log2_c_max + REFERENCE_CERTIFICATE_HEADROOM_LOG2
             }
         } else {
             log2_c_max
@@ -2997,13 +2797,10 @@ pub struct IncrementalUnifiedBufferInfo {
     pub coeffs_count: usize,
     pub radii_ptr: usize,
     pub radii_count: usize,
-    pub validity_ptr: usize,
-    pub validity_count: usize,
-    pub diagnostics_ptr: usize,
-    pub diagnostics_count: usize,
-    pub validity_version: u32,
-    pub validity_words_per_block: usize,
-    pub diagnostics_words_per_block: usize,
+    pub certificates_ptr: usize,
+    pub certificates_count: usize,
+    pub certificate_version: u32,
+    pub certificate_words_per_block: usize,
     pub reference_log2_dc: f64,
     /// Orbit consumed by the binary-carry builder (includes Z0).
     pub covered_orbit_len: usize,
@@ -3159,10 +2956,10 @@ fn bla_merge(left: BlaF64, right: BlaF64, pade: bool) -> BlaF64 {
     // Conservative line-min: smallest alpha, largest beta. Padé uses the same `min`
     // (philosophy A) with the √ε seed — the CPU loop benchmark found the reciprocal-
     // quadrature alternative (D3-B) does NOT reduce the residual accuracy tail near
-    // edge-of-chaos points, so the simpler `min` stays. Clamp beta finite (a ≈ 0 ⇒
-    // degenerate block, radius goes negative → not applied, the correct outcome).
+    // edge-of-chaos points, so the simpler `min` stays. Never clamp beta downward:
+    // an overflow/non-finite beta denotes a dead block and is serialized as such.
     let alpha = left.alpha.min(merged_alpha);
-    let beta = left.beta.max(merged_beta).min(1e30);
+    let beta = left.beta.max(merged_beta);
     let (dx, dy) = if pade {
         let (adyx, adyy) = cmul64((left.ax, left.ay), (right.dx, right.dy));
         (left.dx + adyx, left.dy + adyy)
@@ -3200,19 +2997,56 @@ fn bla_f64_to_fe(s: &BlaF64) -> BlaStep {
     // D carries its own exponent (|D| ~ 1/|A|, unrelated to the a/b scale).
     let d_max = s.dx.abs().max(s.dy.abs());
     let (d_exp, d_scale) = frexp_scale(d_max);
+    // The GPU accepts when |dz| <= alpha - beta*|dc|. Serialization must therefore
+    // shrink alpha and enlarge beta. A non-representable bound is a dead block,
+    // never a reason to clamp beta downward and accidentally enlarge its domain.
+    let valid_coefficients = s.ax.is_finite()
+        && s.ay.is_finite()
+        && s.bx.is_finite()
+        && s.by.is_finite()
+        && s.dx.is_finite()
+        && s.dy.is_finite();
+    let valid_radius = valid_coefficients
+        && s.alpha > 0.0
+        && s.alpha.is_finite()
+        && s.beta >= 0.0
+        && s.beta.is_finite()
+        && s.beta <= f32::MAX as f64;
+    let radius_alpha = if valid_radius {
+        validity::f64_to_f32_down(s.alpha * alpha_scale)
+    } else {
+        0.0
+    };
+    let radius_beta = if valid_radius {
+        validity::f64_to_f32_up(s.beta)
+    } else {
+        f32::MAX
+    };
+    let log2_min_a = if s.min_a > 0.0 && s.min_a.is_finite() {
+        validity::f64_to_f32_down(s.min_a.log2())
+    } else {
+        f32::NEG_INFINITY
+    };
+    let serialize_coefficient = |value: f64, scale: f64| -> f32 {
+        if valid_coefficients {
+            (value * scale) as f32
+        } else {
+            0.0
+        }
+    };
     BlaStep {
-        ax: (s.ax * ab_scale) as f32,
-        ay: (s.ay * ab_scale) as f32,
-        bx: (s.bx * ab_scale) as f32,
-        by: (s.by * ab_scale) as f32,
-        ab_exp,
-        radius_alpha: (s.alpha * alpha_scale) as f32,
-        alpha_exp,
-        radius_beta: s.beta as f32,
-        dx: (s.dx * d_scale) as f32,
-        dy: (s.dy * d_scale) as f32,
-        d_exp,
-        log2_min_a: s.min_a.max(1e-300).log2() as f32,
+        ax: serialize_coefficient(s.ax, ab_scale),
+        ay: serialize_coefficient(s.ay, ab_scale),
+        bx: serialize_coefficient(s.bx, ab_scale),
+        by: serialize_coefficient(s.by, ab_scale),
+        ab_exp: if valid_coefficients { ab_exp } else { 0 },
+        radius_alpha,
+        alpha_exp: if valid_radius { alpha_exp } else { 0 },
+        radius_beta,
+        dx: serialize_coefficient(s.dx, d_scale),
+        dy: serialize_coefficient(s.dy, d_scale),
+        d_exp: if valid_coefficients { d_exp } else { 0 },
+        log2_min_a,
     }
 }
 
@@ -3220,7 +3054,7 @@ fn bla_f64_to_fe(s: &BlaF64) -> BlaStep {
 // whole-level fast-reject bound). Underflows to 0 in the deep regime, where the
 // shader uses the per-entry fe radius instead.
 fn max_alpha_bits(entries: &[BlaF64]) -> u32 {
-    (entries.iter().fold(0.0f64, |m, s| m.max(s.alpha)) as f32).to_bits()
+    validity::f64_to_f32_up(entries.iter().fold(0.0f64, |m, s| m.max(s.alpha))).to_bits()
 }
 
 fn detect_period_f64(cx: f64, cy: f64, max_iter: usize, max_period: usize) -> Option<usize> {
@@ -3926,7 +3760,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_dynamic_table_survives_cmax_growth_and_maxiter_shrink() {
+    fn incremental_dynamic_table_is_cmax_independent_and_survives_maxiter_shrink() {
         let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
         nav.set_dynamic_block_validity(true);
         nav.set_incremental_reference_table(true);
@@ -3937,15 +3771,25 @@ mod tests {
         assert_eq!(built.reset, 1, "initial publication did not start an epoch");
         let covered = built.covered_orbit_len;
         let published = built.published_orbit_len;
-        let domain = built.reference_log2_dc;
         let merges = built.cumulative_merges;
-        assert!(covered > 64 && published > 64 && domain.is_finite());
+        assert!(covered > 64 && published > 64);
+        assert!(
+            built.reference_log2_dc.is_nan(),
+            "radial-v3 unexpectedly published a global dc domain"
+        );
+
+        // Nested views and translations may change the instantaneous cmax but
+        // cannot retarget intrinsic per-block certificates.
+        for scale in ["0.00000001", "0.000000001", "0.0000000001"] {
+            nav.scale = DBig::from_str(scale).unwrap();
+            let nested = nav.advance_incremental_unified_reference(64, 1024, 4096);
+            assert_eq!(nested.reset, 0);
+            assert_eq!(nested.range_count, 0);
+            assert!(nested.reference_log2_dc.is_nan());
+            assert_eq!(nested.covered_orbit_len, covered);
+        }
 
         nav.scale = DBig::from_str("0.1").unwrap();
-        assert!(
-            nav.jet_log2_c_max() > domain,
-            "fixture did not leave the certified table domain"
-        );
         let moved = nav.advance_incremental_unified_reference(64, 1024, 4096);
         assert_eq!(moved.reset, 0, "cmax growth reset the incremental table");
         assert_eq!(moved.range_count, 0, "old blocks were republished");
@@ -3955,8 +3799,42 @@ mod tests {
             moved.published_orbit_len, published,
             "published prefix shrank"
         );
-        assert_eq!(moved.reference_log2_dc, domain, "proof domain changed");
+        assert!(moved.reference_log2_dc.is_nan());
         assert_eq!(moved.cumulative_merges, merges, "blocks were recomposed");
+    }
+
+    #[test]
+    fn incremental_epsilon_epoch_recertifies_without_recomposing_coefficients() {
+        let mut nav = MandelbrotNavigator::new("-1.25", "0.0", "0.0000001", 0.0);
+        nav.set_dynamic_block_validity(true);
+        nav.set_incremental_reference_table(true);
+        nav.compute_reference_orbit_ptr(512);
+
+        let first = nav.advance_incremental_unified_reference(512, 1024, 4096);
+        assert_eq!(first.has_more, 0);
+        let covered = first.covered_orbit_len;
+        let coefficients = first.cumulative_coefficients;
+        let merges = first.cumulative_merges;
+        assert!(first.reference_log2_dc.is_nan());
+        assert!(coefficients > 0 && first.certificates_count > 0);
+
+        nav.set_bla_epsilon(5e-4);
+        let recertified = nav.advance_incremental_unified_reference(512, 1024, 4096);
+        assert_eq!(
+            recertified.reset, 1,
+            "epsilon did not mint a certificate epoch"
+        );
+        assert!(recertified.range_count > 0 && recertified.certificates_count > 0);
+        assert_eq!(recertified.covered_orbit_len, covered);
+        assert!(recertified.reference_log2_dc.is_nan());
+        assert_eq!(
+            recertified.cumulative_coefficients, coefficients,
+            "epsilon-only work recomposed coefficients"
+        );
+        assert_eq!(
+            recertified.cumulative_merges, merges,
+            "epsilon-only work repeated binary carries"
+        );
     }
 
     #[test]
@@ -4588,6 +4466,11 @@ mod tests {
                 "   correctness vs exact: affine mismatches={} pade mismatches={} (max |Δiter|={})",
                 mismatch_aff, mismatch_pad, max_d
             );
+            assert_eq!(
+                mismatch_aff, 0,
+                "[{}] certified affine BLA changed escape classification",
+                name
+            );
             // Padé matches exact stepping in well-behaved regions (cusp, bulb: 0
             // mismatches) and is allowed a small, bounded tail of few-iteration
             // escape differences near edge-of-chaos points (e.g. Feigenbaum), where
@@ -4820,6 +4703,90 @@ mod tests {
         assert!(
             e_p.dx != 0.0 || e_p.dy != 0.0,
             "pade entry0 D is zero (not a real pade table)"
+        );
+    }
+
+    #[test]
+    fn classic_bla_serialization_shrinks_the_acceptance_domain() {
+        let source = BlaF64 {
+            ax: 3.25,
+            ay: -0.75,
+            bx: 1.125,
+            by: 0.25,
+            alpha: 0.7_f64 * 2f64.powi(-17),
+            beta: 1.000_000_06,
+            dx: 0.125,
+            dy: -0.25,
+            min_a: 0.3,
+        };
+        let serialized = bla_f64_to_fe(&source);
+        let alpha = serialized.radius_alpha as f64 * 2f64.powi(serialized.alpha_exp);
+        assert!(
+            alpha <= source.alpha,
+            "alpha rounded outward: {} > {}",
+            alpha,
+            source.alpha
+        );
+        assert!(
+            serialized.radius_beta as f64 >= source.beta,
+            "beta rounded inward: {} < {}",
+            serialized.radius_beta,
+            source.beta
+        );
+        assert!(
+            serialized.log2_min_a as f64 <= source.min_a.log2(),
+            "near-critical lower bound rounded upward"
+        );
+
+        let level_max = f32::from_bits(max_alpha_bits(&[source])) as f64;
+        assert!(
+            level_max >= source.alpha,
+            "level fast-reject bound rounded downward"
+        );
+    }
+
+    #[test]
+    fn classic_bla_invalid_beta_serializes_as_a_dead_block() {
+        let mut left = bla_seed(0.5, 0.0, 1e-6, false);
+        left.ax = f64::MIN_POSITIVE;
+        left.ay = 0.0;
+        left.bx = 1.0;
+        let right = bla_seed(0.5, 0.0, 1e-6, false);
+        let merged = bla_merge(left, right, false);
+        assert!(
+            merged.beta > f32::MAX as f64,
+            "an unrepresentable beta must not be clamped into a live domain"
+        );
+
+        let serialized = bla_f64_to_fe(&merged);
+        assert_eq!(serialized.radius_alpha, 0.0);
+        assert_eq!(serialized.alpha_exp, 0);
+        assert_eq!(serialized.radius_beta, f32::MAX);
+
+        let mut invalid_coefficient = right;
+        invalid_coefficient.ax = f64::INFINITY;
+        let serialized = bla_f64_to_fe(&invalid_coefficient);
+        assert_eq!(serialized.radius_alpha, 0.0);
+        assert_eq!(serialized.ax, 0.0);
+        assert_eq!(serialized.bx, 0.0);
+        assert_eq!(serialized.ab_exp, 0);
+    }
+
+    #[test]
+    fn classic_bla_block64_has_a_live_radius_beyond_the_f32_coefficient_range() {
+        // On the c=-2 reference, Z=2 after the first return and every seed has
+        // A=4. A 64-step block is the smallest power-of-two block whose A=2^128
+        // overflows f32 while its validity radius is still a live subnormal.
+        let mut block = bla_seed(2.0, 0.0, 1e-6, false);
+        for _ in 0..6 {
+            block = bla_merge(block, block, false);
+        }
+        let serialized = bla_f64_to_fe(&block);
+        assert!(serialized.ab_exp > 120);
+        assert!(serialized.radius_alpha > 0.0);
+        assert!(
+            f32::from_bits(max_alpha_bits(&[block])) > 0.0,
+            "the level gate still considers this block live"
         );
     }
 

@@ -95,6 +95,10 @@ override ENABLE_RENORM: bool = true;
 // carrying its control flow and private state in every block-mode invocation.
 override ENABLE_DYNAMIC_VALIDITY: bool = false;
 
+// Reference-owned intrinsic radial layout v3. When false, Auto keeps evaluating the
+// packed-v1 envelopes used by the explicit rollback path.
+override ENABLE_RADIAL_VALIDITY: bool = false;
+
 // Detailed proof counters are diagnostic instrumentation, not production
 // rendering work. They add up to twenty workgroup atomics per active texel;
 // keep them in a separate specialized pipeline and enable them only on demand.
@@ -282,6 +286,8 @@ const VALIDITY_VERSION: u32 = 1u;
 const VALIDITY_WORDS_PER_BLOCK: u32 = 24u;
 const VALIDITY_WORDS_PER_TIER: u32 = 6u;
 const VALIDITY_SLOPES: array<f32, 4> = array<f32, 4>(0.0, -0.5, -1.0, -2.0);
+const RADIAL_VALIDITY_VERSION: u32 = 3u;
+const RADIAL_VALIDITY_WORDS_PER_BLOCK: u32 = 21u;
 
 struct DynamicValidityEvaluation {
   log2Dc: f32,
@@ -311,8 +317,12 @@ const OPTIONAL_HEADER_VERSION: i32 = 1;
 // loaded from storage and detected by their bits.
 fn validity_pos_inf() -> f32 { return 3.4028234e38; }
 fn validity_neg_inf() -> f32 { return -3.4028234e38; }
-fn validity_is_pos_inf(value: f32) -> bool { return bitcast<u32>(value) == 0x7f800000u; }
-fn validity_is_neg_inf(value: f32) -> bool { return bitcast<u32>(value) == 0xff800000u; }
+fn validity_is_pos_inf(value: f32) -> bool {
+  return value == validity_pos_inf() || bitcast<u32>(value) == 0x7f800000u;
+}
+fn validity_is_neg_inf(value: f32) -> bool {
+  return value == validity_neg_inf() || bitcast<u32>(value) == 0xff800000u;
+}
 
 fn validity_next_up(value: f32) -> f32 {
   let bits = bitcast<u32>(value);
@@ -485,6 +495,133 @@ fn evaluate_dynamic_validity_logs(
     accepts,
     select(rejectionReason, VALIDITY_REJECT_NONE, accepts),
     candidateLimited,
+  );
+}
+
+fn radial_validity_word(blockIndex: u32, word: u32) -> u32 {
+  return validity_raw_word(blockIndex * RADIAL_VALIDITY_WORDS_PER_BLOCK + word);
+}
+
+fn radial_validity_float(blockIndex: u32, word: u32) -> f32 {
+  return bitcast<f32>(radial_validity_word(blockIndex, word));
+}
+
+// Operation-for-operation mirror of RadialValidityV3::affine_radius_log2.
+// alpha was rounded down and beta up by Rust before serialization.
+fn conservative_affine_radius_log2(alpha: f32, alphaExp: i32, beta: f32, log2Dc: f32) -> f32 {
+  let alphaBits = bitcast<u32>(alpha) & 0x7fffffffu;
+  let betaBits = bitcast<u32>(beta) & 0x7fffffffu;
+  if (!(alpha > 0.0) || alphaBits >= 0x7f800000u
+      || !(beta >= 0.0) || betaBits >= 0x7f800000u) {
+    return validity_neg_inf();
+  }
+  let log2Alpha = validity_next_down(
+    validity_next_down(log2(alpha)) + f32(alphaExp),
+  );
+  if (log2Dc == validity_neg_inf() || beta == 0.0) {
+    return log2Alpha;
+  }
+  if (log2Dc != log2Dc || log2Dc == validity_pos_inf()) {
+    return validity_neg_inf();
+  }
+  let log2BetaDc = validity_next_up(validity_next_up(log2(beta)) + log2Dc);
+  let relative = validity_next_up(log2BetaDc - log2Alpha);
+  if (relative >= 0.0) {
+    return validity_neg_inf();
+  }
+  let remaining = validity_next_down(1.0 - validity_next_up(exp2(relative)));
+  if (!(remaining > 0.0) || remaining != remaining) {
+    return validity_neg_inf();
+  }
+  return validity_next_down(log2Alpha + validity_next_down(log2(remaining)));
+}
+
+fn radial_affine_radius_log2(blockIndex: u32, log2Dc: f32) -> f32 {
+  return conservative_affine_radius_log2(
+    radial_validity_float(blockIndex, 0u),
+    bitcast<i32>(radial_validity_word(blockIndex, 1u)),
+    radial_validity_float(blockIndex, 2u),
+    log2Dc,
+  );
+}
+
+fn bla_affine_radius_log2(block: BlaStep, log2Dc: f32) -> f32 {
+  return conservative_affine_radius_log2(
+    block.radius_alpha,
+    block.alpha_exp,
+    block.radius_beta,
+    log2Dc,
+  );
+}
+
+fn evaluate_radial_validity_logs(
+  blockIndex: u32,
+  tier: u32,
+  log2Dc: f32,
+  log2Dz: f32,
+) -> DynamicValidityEvaluation {
+  let negativeInfinity = validity_neg_inf();
+  if (log2Dc != log2Dc || log2Dz != log2Dz) {
+    return DynamicValidityEvaluation(
+      log2Dc, log2Dz, negativeInfinity, false, VALIDITY_REJECT_CAUCHY, false,
+    );
+  }
+  if (tier == 0u) {
+    let radius = radial_affine_radius_log2(blockIndex, log2Dc);
+    let accepts = !validity_is_neg_inf(radius) && log2Dz <= radius;
+    return DynamicValidityEvaluation(
+      log2Dc,
+      log2Dz,
+      radius,
+      accepts,
+      select(VALIDITY_REJECT_VALUE, VALIDITY_REJECT_NONE, accepts),
+      false,
+    );
+  }
+
+  let tierBase = 3u + (tier - 1u) * 6u;
+  var anyLive = false;
+  var anyDc = false;
+  var anyPole = false;
+  var bestRadius = negativeInfinity;
+  for (var candidate = 0u; candidate < 2u; candidate++) {
+    let base = tierBase + candidate * 3u;
+    let maxDz = radial_validity_float(blockIndex, base);
+    let maxDc = radial_validity_float(blockIndex, base + 1u);
+    let pole = radial_validity_float(blockIndex, base + 2u);
+    if (validity_is_neg_inf(maxDz) || validity_is_neg_inf(maxDc)
+        || maxDz != maxDz || maxDc != maxDc || pole != pole) {
+      continue;
+    }
+    anyLive = true;
+    let radius = min(maxDz, pole);
+    bestRadius = max(bestRadius, radius);
+    if (log2Dc > maxDc) {
+      continue;
+    }
+    anyDc = true;
+    if (log2Dz > pole) {
+      continue;
+    }
+    anyPole = true;
+    if (log2Dz <= maxDz) {
+      return DynamicValidityEvaluation(
+        log2Dc, log2Dz, radius, true, VALIDITY_REJECT_NONE, candidate == 1u,
+      );
+    }
+  }
+  let rejection = select(
+    select(VALIDITY_REJECT_DERIVATIVE, VALIDITY_REJECT_PURE_C, anyDc && !anyPole),
+    VALIDITY_REJECT_CAUCHY,
+    !anyLive,
+  );
+  return DynamicValidityEvaluation(
+    log2Dc,
+    log2Dz,
+    bestRadius,
+    false,
+    rejection,
+    false,
   );
 }
 
@@ -808,8 +945,21 @@ fn cinv(z: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(z.x, -z.y) / dot(z, z);
 }
 const PADE_POLE2: f32 = 1e-4;
+const BLA_F32_EXP_LIMIT: i32 = 120;
 
-fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: vec2<f32>, dcMag: f32, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
+fn bla_vec2_is_finite(value: vec2<f32>) -> bool {
+  let xBits = bitcast<u32>(value.x) & 0x7fffffffu;
+  let yBits = bitcast<u32>(value.y) & 0x7fffffffu;
+  return xBits < 0x7f800000u && yBits < 0x7f800000u;
+}
+
+fn bla_coefficients_fit_f32(block: BlaStep, pade: bool) -> bool {
+  let abOk = block.ab_exp >= -BLA_F32_EXP_LIMIT && block.ab_exp <= BLA_F32_EXP_LIMIT;
+  let dOk = !pade || (block.d_exp >= -BLA_F32_EXP_LIMIT && block.d_exp <= BLA_F32_EXP_LIMIT);
+  return abOk && dOk;
+}
+
+fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: vec2<f32>, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
@@ -822,9 +972,12 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
   // test below (with its own dead-block guard) is what actually validates.
   let dzMag = length(*dz);
   let dzMagTiny = dzMag < 1.2e-38;
+  let log2Dc = validity_log2_complex_shallow(dc);
+  let log2Dz = validity_log2_complex_shallow(*dz);
+  let log2BlaEpsilon = validity_next_down(log2(max(mandelbrot.blaEpsilon, 1e-30)));
   // (G) near-critical guard: a Möbius block may only span steps with
   // |2Z_k| ≥ mu = √(|c|/ε); in log2, min_k log2|2Z_k| ≥ log2(mu).
-  let log2_mu = 0.5 * (log2(max(dcMag, 1e-30)) - log2(max(mandelbrot.blaEpsilon, 1e-30)));
+  let log2_mu = 0.5 * (log2Dc - log2BlaEpsilon);
   let shiftedRef = *ref_i - 1;
   var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
   while (level >= 0) {
@@ -837,69 +990,122 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
       if (u32(slot) < levelInfo.count) {
         let entryIndex = i32(levelInfo.offset) + slot;
         let bla = mandelbrotBlaSuite[entryIndex];
-        // Reconstruct the f32 coefficients from their floatexp storage (exact in
-        // the shallow regime where this BLA path runs).
-        let a = ldexp(vec2<f32>(bla.ax, bla.ay), vec2<i32>(bla.ab_exp, bla.ab_exp));
-        let b = ldexp(vec2<f32>(bla.bx, bla.by), vec2<i32>(bla.ab_exp, bla.ab_exp));
-        let alpha = ldexp(bla.radius_alpha, bla.alpha_exp);
-        let radius = max(0.0, alpha - bla.radius_beta * dcMag);
-        // (dead-block) a collapsed radius rejects unconditionally. Without
-        // this, dz == 0 (or a fully-underflowed dzMag) would pass a naive
-        // log2(radius) = -inf comparison — the same "0 <= 0" degeneracy this
-        // gate exists to remove, just relocated to -infinity.
-        if (radius > 0.0 && (dzMagTiny || log2(dzMag) <= log2(radius))) {
+        // The serialized radius is outward-rounded (alpha down, beta up), and
+        // every gate operation is directed toward rejection. This also makes a
+        // dead/non-finite Rust bound unconditionally reject.
+        let radiusLog2 = bla_affine_radius_log2(bla, log2Dc);
+        if (!validity_is_neg_inf(radiusLog2) && log2Dz <= radiusLog2) {
           if (mandelbrot.approximationMode >= 1.5) {
             // ── Padé [1/1] (in-place compute path) ──
-            let d = ldexp(vec2<f32>(bla.dx, bla.dy), vec2<i32>(bla.d_exp, bla.d_exp));
-            let m = vec2<f32>(1.0, 0.0) + cmul(d, *dz);   // 1 + D·dz
             // (H2) c-truncation bound (|B|·|c| < ε) + (G) near-critical guard
             // (block's min |2Z_k| ≥ mu) + pole guard. Any failing ⇒ descend a level.
-            if (length(b) * dcMag < mandelbrot.blaEpsilon && bla.log2_min_a >= log2_mu && dot(m, m) >= PADE_POLE2) {
-              let invM = cinv(m);
-              let num = cmul(a, *dz) + cmul(b, dc);
-              let candidate = cmul(num, invM);
-              let candidateZ = getOrbit(*ref_i + skip) + candidate;
-              if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
-                *dz = candidate;
-                *zOut = candidateZ;
-                // D4 derivative der' = (A/M²)·der + B/M, folded in derM/derS
-                // space (mirrors try_apply_bla_deep's aOverM2/bOverM split):
-                // multiply the raw (unscaled) mantissas by invM²/invM — both
-                // O(1)-bounded by the PADE_POLE2 pole guard above — and fold
-                // the shared exponent ab_exp into derS afterward. This keeps
-                // the mantissa product itself from ever overflowing/
-                // underflowing, which using the already-ldexp'd a/b (as the
-                // value branch above does) would not: ab_exp can be large
-                // even in the "shallow" regime once many blocks compound.
-                let aMantissa = vec2<f32>(bla.ax, bla.ay);
-                let bMantissa = vec2<f32>(bla.bx, bla.by);
-                let invM2 = cmul(invM, invM);
-                *derM = cmul(cmul(aMantissa, invM2), *derM) + cmul(bMantissa, invM) * (*derInvScale);
-                der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
-                der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
-                // Form counter (mode 2 = Padé [1/1], shallow = plain f32).
-                g_tierApps[1] += 1u;
-                g_appsF32 += 1u;
-                g_workBudget += 2u;
-                *ref_i += skip;
-                return skip;
+            let log2B = validity_log2_complex(vec2<f32>(bla.bx, bla.by), bla.ab_exp);
+            let h2Ok = validity_is_neg_inf(log2Dc)
+              || validity_next_up(log2B + log2Dc) < log2BlaEpsilon;
+            if (h2Ok && bla.log2_min_a >= log2_mu) {
+              let useF32 = bla_coefficients_fit_f32(bla, true);
+              let aMantissa = vec2<f32>(bla.ax, bla.ay);
+              let bMantissa = vec2<f32>(bla.bx, bla.by);
+              var candidate = vec2<f32>(0.0);
+              var padeReady = false;
+              var invMF32 = vec2<f32>(0.0);
+              var qMantissaF32 = vec2<f32>(0.0);
+              var pdzFe = fe(vec2<f32>(0.0), FE_ZERO_E);
+              var pdcFe = fe(vec2<f32>(0.0), FE_ZERO_E);
+              if (useF32) {
+                let a = ldexp(aMantissa, vec2<i32>(bla.ab_exp));
+                let b = ldexp(bMantissa, vec2<i32>(bla.ab_exp));
+                let d = ldexp(vec2<f32>(bla.dx, bla.dy), vec2<i32>(bla.d_exp));
+                let m = vec2<f32>(1.0, 0.0) + cmul(d, *dz);
+                if (bla_vec2_is_finite(m) && dot(m, m) >= PADE_POLE2) {
+                  invMF32 = cinv(m);
+                  candidate = cmul(cmul(a, *dz) + cmul(b, dc), invMF32);
+                  // ∂Φ/∂z = (A − D·B·dc)/M². A and B share ab_exp,
+                  // so the correction stays in their common mantissa scale.
+                  qMantissaF32 = aMantissa - cmul(cmul(bMantissa, dc), d);
+                  padeReady = bla_vec2_is_finite(candidate)
+                    && bla_vec2_is_finite(invMF32)
+                    && bla_vec2_is_finite(qMantissaF32);
+                }
+              } else {
+                // Large exponents are common even above DEEP_EXP. Evaluate the
+                // products in floatexp instead of materializing Inf/0 in f32.
+                let a = fe(aMantissa, bla.ab_exp);
+                let b = fe(bMantissa, bla.ab_exp);
+                let d = fe(vec2<f32>(bla.dx, bla.dy), bla.d_exp);
+                let dzFe = fe_from_vec(*dz, 0);
+                let dcFe = fe_from_vec(dc, 0);
+                let m = fe_add(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(d, dzFe));
+                if (fe_mag2_f32(m) >= PADE_POLE2) {
+                  let invM = fe_cinv(m);
+                  let num = fe_add(fe_cmul(a, dzFe), fe_cmul(b, dcFe));
+                  let candidateFe = fe_cmul(num, invM);
+                  candidate = fe_to_vec(candidateFe);
+                  let bdcD = fe_cmul(fe_cmul(b, dcFe), d);
+                  let q = fe_add(a, fe(-bdcD.m, bdcD.e));
+                  pdzFe = fe_cmul(q, fe_cmul(invM, invM));
+                  pdcFe = fe_cmul(b, invM);
+                  padeReady = bla_vec2_is_finite(candidate)
+                    && bla_vec2_is_finite(pdzFe.m)
+                    && bla_vec2_is_finite(pdcFe.m);
+                }
+              }
+              if (padeReady) {
+                let candidateZ = getOrbit(*ref_i + skip) + candidate;
+                // NaN compares false against bailout, so finiteness must be an
+                // explicit fail-closed condition before accepting the block.
+                if (bla_vec2_is_finite(candidateZ) && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+                  *dz = candidate;
+                  *zOut = candidateZ;
+                  if (useF32) {
+                    let invM2 = cmul(invMF32, invMF32);
+                    *derM = cmul(cmul(qMantissaF32, invM2), *derM)
+                      + cmul(bMantissa, invMF32) * (*derInvScale);
+                    der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
+                  } else {
+                    *derM = cmul(*derM, pdzFe.m);
+                    der_scale_add(derS, derSLo, f32(pdzFe.e) * LN2);
+                    *derM = *derM + pdcFe.m * exp(clamp(f32(pdcFe.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
+                  }
+                  der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
+                  // Form counter (mode 2 = Padé [1/1]).
+                  g_tierApps[1] += 1u;
+                  g_appsF32 += select(0u, 1u, useF32);
+                  g_workBudget += select(5u, 2u, useF32);
+                  *ref_i += skip;
+                  return skip;
+                }
               }
             }
           } else {
             // ── affine BLA: z ← A·z + B·c ──
-            let candidate = cmul(a, *dz) + cmul(b, dc);
+            let useF32 = bla_coefficients_fit_f32(bla, false);
+            var candidate = vec2<f32>(0.0);
+            if (useF32) {
+              let a = ldexp(vec2<f32>(bla.ax, bla.ay), vec2<i32>(bla.ab_exp));
+              let b = ldexp(vec2<f32>(bla.bx, bla.by), vec2<i32>(bla.ab_exp));
+              candidate = cmul(a, *dz) + cmul(b, dc);
+            } else {
+              let a = fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp);
+              let b = fe(vec2<f32>(bla.bx, bla.by), bla.ab_exp);
+              candidate = fe_to_vec(fe_add(
+                fe_cmul(a, fe_from_vec(*dz, 0)),
+                fe_cmul(b, fe_from_vec(dc, 0)),
+              ));
+            }
             let candidateZ = getOrbit(*ref_i + skip) + candidate;
-            if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+            if (bla_vec2_is_finite(candidate) && bla_vec2_is_finite(candidateZ)
+                && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
               *dz = candidate;
               *zOut = candidateZ;
               // Mantissa-only update + derS fold — see the Padé branch note above.
               *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
               der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
               der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
-              // Form counter (mode 1 = affine BLA, shallow = plain f32).
+              // Form counter (mode 1 = affine BLA).
               g_tierApps[0] += 1u;
-              g_appsF32 += 1u;
-              g_workBudget += 1u;
+              g_appsF32 += select(0u, 1u, useF32);
+              g_workBudget += select(3u, 1u, useF32);
               *ref_i += skip;
               return skip;
             }
@@ -1312,7 +1518,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         // f32 itself, no fe conversion needed on this path).
         let dzMagOuter = length(dz);
         if (dzMagOuter < 1.2e-38 || log2(dzMagOuter) <= logMaxBlaR) {
-          skipped = try_apply_bla(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcMag, muLimit, skip0Log, globalMaxIterI);
+          skipped = try_apply_bla(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI);
         }
       }
       if (skipped > 0) {
@@ -1512,14 +1718,16 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 // the resumable dz is parked as (mantissa in zx/zy, exponent in avgDirection),
 // so orbit-direction metrics are unavailable on the deep path.
 // BLA in the deep (floatexp) path — see mandelbrot.wgsl for the derivation.
-fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, log_dcMag: f32, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
+fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
-  let log_dz = log(max(length((*dz).m), 1e-30)) + f32((*dz).e) * LN2;
+  let log2_dz = validity_log2_complex_floatexp(*dz);
+  let log2_dc = validity_log2_complex_floatexp(dc);
+  let log2_bla_epsilon = validity_next_down(log2(max(mandelbrot.blaEpsilon, 1e-30)));
   // (G) near-critical guard threshold in log2: min_k log2|2Z_k| ≥ log2(mu),
-  // mu = √(|c|/ε). log_dcMag is natural-log |c|, so convert via /LN2.
-  let log2_mu = 0.5 * (log_dcMag - log(max(mandelbrot.blaEpsilon, 1e-30))) / LN2;
+  // mu = √(|c|/ε).
+  let log2_mu = 0.5 * (log2_dc - log2_bla_epsilon);
   let shiftedRef = *ref_i - 1;
   var level = min(i32(mandelbrot.blaLevelCount) - 1, i32(countTrailingZeros(u32(shiftedRef))) - skip0Log);
   while (level >= 0) {
@@ -1529,34 +1737,35 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
       let slot = shiftedRef >> u32(skip0Log + level);
       if (u32(slot) < levelInfo.count) {
         let bla = mandelbrotBlaSuite[i32(levelInfo.offset) + slot];
-        let log_alpha = log(bla.radius_alpha) + f32(bla.alpha_exp) * LN2;
-        let log_betaDc = log(max(bla.radius_beta, 1e-30)) + log_dcMag;
-        if (log_betaDc < log_alpha) {
-          let ratio = exp(log_betaDc - log_alpha);
-          let log_radius = log_alpha + log(max(1.0 - ratio, 1e-30));
-          if (log_dz <= log_radius) {
-            let a = fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp);
-            let b = fe(vec2<f32>(bla.bx, bla.by), bla.ab_exp);
-            let num = fe_add(fe_cmul(a, *dz), fe_cmul(b, dc));
-            if (mandelbrot.approximationMode >= 1.5) {
+        let radiusLog2 = bla_affine_radius_log2(bla, log2_dc);
+        if (!validity_is_neg_inf(radiusLog2) && log2_dz <= radiusLog2) {
+          let a = fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp);
+          let b = fe(vec2<f32>(bla.bx, bla.by), bla.ab_exp);
+          let num = fe_add(fe_cmul(a, *dz), fe_cmul(b, dc));
+          if (mandelbrot.approximationMode >= 1.5) {
               // ── Padé [1/1] in floatexp: dz ← num/(1 + D·dz) ──
               let d = fe(vec2<f32>(bla.dx, bla.dy), bla.d_exp);
               let m = fe_add(fe(vec2<f32>(1.0, 0.0), 0), fe_cmul(d, *dz));   // 1 + D·dz
               // (H2) c-truncation bound in log space (|B|·|c| < ε) + (G)
               // near-critical guard (min |2Z_k| ≥ mu) + pole guard.
-              let log_bDc = log(max(length(b.m), 1e-30)) + f32(b.e) * LN2 + log_dcMag;
-              if (log_bDc < log(max(mandelbrot.blaEpsilon, 1e-30)) && bla.log2_min_a >= log2_mu && fe_mag2_f32(m) >= PADE_POLE2) {
+              let log2_b = validity_log2_complex(b.m, b.e);
+              let h2Ok = validity_is_neg_inf(log2_dc)
+                || validity_next_up(log2_b + log2_dc) < log2_bla_epsilon;
+              if (h2Ok && bla.log2_min_a >= log2_mu && fe_mag2_f32(m) >= PADE_POLE2) {
                 let invM = fe_cinv(m);
                 let candidate = fe_cmul(num, invM);
                 let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(candidate);
-                if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+                if (bla_vec2_is_finite(candidate.m) && bla_vec2_is_finite(candidateZ)
+                    && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
                   *dz = candidate;
                   *zOut = candidateZ;
-                  // D4 derivative der' = (A/M²)·der + B/M, in derM/derS space.
-                  let aOverM2 = fe_cmul(a, fe_cmul(invM, invM));   // A/M²
+                  // D4: ∂Φ/∂z = (A − D·B·dc)/M², ∂Φ/∂c = B/M.
+                  let bdcD = fe_cmul(fe_cmul(b, dc), d);
+                  let q = fe_add(a, fe(-bdcD.m, bdcD.e));
+                  let qOverM2 = fe_cmul(q, fe_cmul(invM, invM));
                   let bOverM = fe_cmul(b, invM);                   // B/M
-                  *derM = cmul(*derM, aOverM2.m);
-                  der_scale_add(derS, derSLo, f32(aOverM2.e) * LN2);
+                  *derM = cmul(*derM, qOverM2.m);
+                  der_scale_add(derS, derSLo, f32(qOverM2.e) * LN2);
                   *derM = *derM + bOverM.m * exp(clamp(f32(bOverM.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
                   der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
                   // Form counter (mode 2 = Padé [1/1], deep = fe).
@@ -1566,10 +1775,11 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
                   return skip;
                 }
               }
-            } else {
+          } else {
               // ── affine: dz ← A·dz + B·dc ──
               let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(num);
-              if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+              if (bla_vec2_is_finite(num.m) && bla_vec2_is_finite(candidateZ)
+                  && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
                 *dz = num;
                 *zOut = candidateZ;
                 *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
@@ -1581,7 +1791,6 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
                 *ref_i += skip;
                 return skip;
               }
-            }
           }
         }
       }
@@ -1995,7 +2204,25 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
         var safeFlag = radii.z - 2.0 * sndTag;
         var dynamicSummaryReject = false;
         var dynamicAffineFastAccept = false;
-        if (dynamicValidity && radii.z < 0.0) {
+        if (dynamicValidity && ENABLE_RADIAL_VALIDITY) {
+          // Radial-v3 sidecar: y/w are per-block maxima across the intrinsic
+          // Affine/Padé/c+/Jet certificates, and z is the coefficient f32-safe
+          // bit. This is only a rejection prefilter; the accepting tier always
+          // comes from the 21-word two-candidate certificate.
+          sndTag = 0.0;
+          safeFlag = radii.z;
+          let intrinsicCapReject = dynamicLog2Dc > radii.y;
+          let radiusReject = dynamicLog2Dz > radii.w;
+          dynamicSummaryReject = intrinsicCapReject || radiusReject;
+          g_workBudget += 1u;
+          if (ENABLE_DYNAMIC_STATS && dynamicSummaryReject) {
+            // The sidecar proves only that every intrinsic candidate rejects;
+            // it does not identify which candidate/tier proof was limiting.
+            // Keep the attribution honest and leave detailed causes to the
+            // full 21-word certificate evaluator.
+            g_dynamicRejects[VALIDITY_REJECT_SUMMARY] += 1u;
+          }
+        } else if (dynamicValidity && radii.z < 0.0) {
           // Incremental tables reuse the dormant legacy sidecar fields as an
           // optimistic any-tier summary. A rejection here proves every packed
           // tier rejects and avoids the 96-byte envelope fetch entirely. The
@@ -2062,9 +2289,16 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               g_dynamicTierAttempts[2] += select(0u, 1u, tier == 2u);
               g_dynamicTierAttempts[3] += select(0u, 1u, tier == 3u);
             }
-            let validity = evaluate_dynamic_validity_logs(
-              u32(entry), tier, dynamicLog2Dc, dynamicLog2Dz, dynamicShadow,
-            );
+            var validity: DynamicValidityEvaluation;
+            if (ENABLE_RADIAL_VALIDITY) {
+              validity = evaluate_radial_validity_logs(
+                u32(entry), tier, dynamicLog2Dc, dynamicLog2Dz,
+              );
+            } else {
+              validity = evaluate_dynamic_validity_logs(
+                u32(entry), tier, dynamicLog2Dc, dynamicLog2Dz, dynamicShadow,
+              );
+            }
             if (validity.accepts) {
               if (ENABLE_DYNAMIC_STATS) {
                 g_dynamicTierAccepts[0] += select(0u, 1u, tier == 0u);
@@ -2838,14 +3072,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   let isBlockTableDeep = isJetDeep || isMobiusDeep || isUnifiedDeep;
   let useBlaDeep = mandelbrot.blaLevelCount >= 1.0;
   var skip0Log = 0;
-  var log_dcMag = 0.0;
   if (useBlaDeep) {
     if (isBlockTableDeep) {
       skip0Log = i32(countTrailingZeros(max(mandelbrotJetLevels[0].skip, 1u)));
     } else {
       skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
     }
-    log_dcMag = log(max(length(dc.m), 1e-30)) + f32(dc.e) * LN2;
   }
   var jetMaxR3Deep = -3.0e38;
   var dcDeep2 = fe(vec2<f32>(0.0, 0.0), 0);
@@ -2969,7 +3201,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
           }
         }
       } else {
-        skipped = try_apply_bla_deep(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, log_dcMag, muLimit, skip0Log, globalMaxIterI);
+        skipped = try_apply_bla_deep(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI);
       }
       if (skipped > 0) {
         usedBla = true;

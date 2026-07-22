@@ -1,6 +1,12 @@
 import {MandelbrotNavigator} from 'mandelbrot'
 import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import type {ApproximationMode} from './Engine'
+import {
+    radialBuildCause,
+    radialTriggerQueuesBlockWork,
+    sameIncrementalCertificateEpoch,
+    validRadialRangePayloadShape,
+} from './radialCertificateContract'
 
 type ResetMessage = {
     type: 'reset'
@@ -259,20 +265,22 @@ type TableRangeResponse = {
     ranges: Uint32Array<ArrayBuffer>
     coefficients: Float32Array<ArrayBuffer>
     radii: Float32Array<ArrayBuffer>
-    envelopes: Float32Array<ArrayBuffer>
-    diagnostics: Uint32Array<ArrayBuffer>
-    validityVersion: number
-    validityWordsPerBlock: number
-    diagnosticsWordsPerBlock: number
+    certificates: Uint32Array<ArrayBuffer>
+    certificateVersion: number
+    certificateWordsPerBlock: number
+    /** Deprecated radial-v2 field. V3 publishes NaN: caps are per block. */
     referenceLog2Dc: number
-    /** Current quantized view extent; may exceed the immutable table domain. */
+    /** Current quantized view extent, retained for observability only. */
     currentLog2CMax: number
     cumulativeMerges: number
     cumulativeCoefficients: number
-    cumulativeEnvelopes: number
+    cumulativeCertificates: number
     peakRetainedBytes: number
     cumulativeMergeCoefficientsMs: number
-    cumulativeEnvelopeMs: number
+    cumulativeCertificateMs: number
+    referenceGrowthCertificates: number
+    viewportOnlyCertificateBuilds: number
+    lastCertificateBuildCause: 'epoch-reset' | 'reference-growth' | 'none'
     yields: number
     cancellations: number
 }
@@ -349,9 +357,16 @@ let lastFullTableGeneration = -1
 let optionalHeaderRevision = 0
 let incrementalYieldCount = 0
 let incrementalCancellationCount = 0
+let incrementalReferenceGrowthCertificates = 0
+// Regression trip-wire: this is intentionally never incremented by
+// updateView. Any non-zero value means a future code path has reintroduced a
+// viewport-keyed block-certificate build.
+let incrementalViewportOnlyCertificateBuilds = 0
+let lastIncrementalCertificateBuildCause: 'epoch-reset' | 'reference-growth' | 'none' = 'none'
+let incrementalScheduledCertificateCause: 'epoch-reset' | 'reference-growth' | 'none' = 'none'
 let lastIncrementalHeaderKey = ''
 
-const ORBIT_CHUNK_SIZE = 100
+const ORBIT_CHUNK_SIZE = 50
 // Compute the reference orbit to HEADROOM× the display maxIter, so interactive zoom-in (which
 // raises maxIter) finds the orbit already long enough — no transient black frame while it
 // catches up. Incremental Auto builds the matching table headroom from the same chunks; legacy
@@ -428,6 +443,10 @@ function resetNavigator(message: ResetMessage) {
     lastFullTableGeneration = -1
     incrementalYieldCount = 0
     incrementalCancellationCount = 0
+    incrementalReferenceGrowthCertificates = 0
+    incrementalViewportOnlyCertificateBuilds = 0
+    lastIncrementalCertificateBuildCause = 'none'
+    incrementalScheduledCertificateCause = 'epoch-reset'
     lastIncrementalHeaderKey = ''
     void runComputeLoop(message.jobId)
 }
@@ -512,9 +531,10 @@ function incrementalUnitIsCurrent(
 ): boolean {
     return !disposed
         && navigator === unitNavigator
-        && activeJobId === jobId
-        && currentRefId === refId
-        && tableGeneration === generation
+        && sameIncrementalCertificateEpoch(
+            { jobId: activeJobId, refId: currentRefId, tableGeneration },
+            { jobId, refId, tableGeneration: generation },
+        )
 }
 
 /** Run one synchronous Rust unit, then copy/transfer only if all three epoch
@@ -563,28 +583,28 @@ function postIncrementalUnifiedUnit(
             info.radii_count * 4,
         )
         const radii: Float32Array<ArrayBuffer> = new Float32Array(radiiSource)
-        const envelopesSource = new Float32Array(
-            wasmMemory.buffer,
-            info.validity_ptr,
-            info.validity_count * info.validity_words_per_block,
-        )
-        const envelopes: Float32Array<ArrayBuffer> = new Float32Array(envelopesSource)
-        const diagnosticsSource = new Uint32Array(
-            wasmMemory.buffer,
-            info.diagnostics_ptr,
-            info.diagnostics_count * info.diagnostics_words_per_block,
-        )
-        const diagnostics: Uint32Array<ArrayBuffer> = new Uint32Array(diagnosticsSource)
-        if (
-            info.coeffs_count !== info.radii_count
-            || info.coeffs_count !== info.validity_count
-            || info.coeffs_count !== info.diagnostics_count
-        ) {
+        if (!validRadialRangePayloadShape({
+            version: info.certificate_version,
+            wordsPerBlock: info.certificate_words_per_block,
+            rangesWords: ranges.length,
+            coefficientFloats: coefficients.length,
+            sidecarFloats: radii.length,
+            certificateWords: info.certificates_count * info.certificate_words_per_block,
+            referenceLog2Dc: info.reference_log2_dc,
+        }) || info.coeffs_count !== info.certificates_count) {
             throw new Error(
-                `incremental table payload mismatch ${info.coeffs_count}/${info.radii_count}/`
-                + `${info.validity_count}/${info.diagnostics_count}`,
+                `incremental radial payload mismatch version=${info.certificate_version} `
+                + `words=${info.certificate_words_per_block} records=`
+                + `${info.coeffs_count}/${info.radii_count}/${info.certificates_count} `
+                + `domain=${info.reference_log2_dc}`,
             )
         }
+        const certificatesSource = new Uint32Array(
+            wasmMemory.buffer,
+            info.certificates_ptr,
+            info.certificates_count * info.certificate_words_per_block,
+        )
+        const certificates: Uint32Array<ArrayBuffer> = new Uint32Array(certificatesSource)
         if (!incrementalUnitIsCurrent(unitNavigator, jobId, refId, generation)) {
             incrementalCancellationCount++
             return { hasMore: false, published: false }
@@ -596,6 +616,18 @@ function postIncrementalUnifiedUnit(
             || info.covered_orbit_len < targetIterations + 1
         const published = ranges.length > 0 || info.reset !== 0
         if (published) {
+            const inferredCause = radialBuildCause(info.reset !== 0, info.certificates_count)
+            const buildCause = info.reset !== 0
+                ? 'epoch-reset'
+                : (incrementalScheduledCertificateCause === 'none'
+                    ? inferredCause
+                    : incrementalScheduledCertificateCause)
+            if (info.certificates_count > 0 && buildCause === 'reference-growth') {
+                incrementalReferenceGrowthCertificates += info.certificates_count
+            }
+            if (buildCause !== 'none') {
+                lastIncrementalCertificateBuildCause = buildCause
+            }
             const tableMaxIterations = Math.max(
                 targetIterations,
                 Math.max(0, info.covered_orbit_len - 1),
@@ -614,29 +646,30 @@ function postIncrementalUnifiedUnit(
                 ranges,
                 coefficients,
                 radii,
-                envelopes,
-                diagnostics,
-                validityVersion: info.validity_version,
-                validityWordsPerBlock: info.validity_words_per_block,
-                diagnosticsWordsPerBlock: info.diagnostics_words_per_block,
+                certificates,
+                certificateVersion: info.certificate_version,
+                certificateWordsPerBlock: info.certificate_words_per_block,
                 referenceLog2Dc: info.reference_log2_dc,
                 currentLog2CMax,
                 cumulativeMerges: info.cumulative_merges,
                 cumulativeCoefficients: info.cumulative_coefficients,
-                cumulativeEnvelopes: info.cumulative_envelopes,
+                cumulativeCertificates: info.cumulative_envelopes,
                 peakRetainedBytes: info.peak_retained_bytes,
                 cumulativeMergeCoefficientsMs: info.cumulative_merge_coefficients_ms,
-                cumulativeEnvelopeMs: info.cumulative_envelope_ms,
+                cumulativeCertificateMs: info.cumulative_envelope_ms,
+                referenceGrowthCertificates: incrementalReferenceGrowthCertificates,
+                viewportOnlyCertificateBuilds: incrementalViewportOnlyCertificateBuilds,
+                lastCertificateBuildCause: lastIncrementalCertificateBuildCause,
                 yields: incrementalYieldCount,
                 cancellations: incrementalCancellationCount,
             }, [
                 ranges.buffer,
                 coefficients.buffer,
                 radii.buffer,
-                envelopes.buffer,
-                diagnostics.buffer,
+                certificates.buffer,
             ])
         }
+        if (!hasMore) incrementalScheduledCertificateCause = 'none'
         return { hasMore, published }
     } finally {
         info.free()
@@ -994,11 +1027,14 @@ function computeAndPostOrbitChunk(jobId: number, maxIterations: number, orbitTar
     const orbit = copyOrbitSlice(info.ptr, info.offset, info.count)
     const [referenceCx, referenceCy] = navigator.get_reference_params()
     if (info.offset === 0) {
+        incrementalScheduledCertificateCause = 'epoch-reset'
         currentRefId = ++refCounter
         lastBlaMaxIterations = 0
         tableViewRefreshPending = false
         lastIncrementalHeaderKey = ''
         console.log('[REF worker] orbit (re)start refId=', currentRefId, 'ref=', referenceCx.slice(0, 14))
+    } else if (incrementalScheduledCertificateCause === 'none') {
+        incrementalScheduledCertificateCause = 'reference-growth'
     }
     const availableIter = Math.max(0, info.count - 1)
     postResponse({
@@ -1153,11 +1189,10 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     }
                     targetMaxIterations = message.maxIterations
                     needsReferenceValidation = true
-                    // Jet/mobius radii depend on the per-view c_max (scale,
-                    // aspect AND reference→center offset). Growth past the
-                    // posted rung uncertifies border pixels — re-post NOW
-                    // (cheap closed-form re-solve Rust-side); ≥ 2 octaves of
-                    // shrink re-posts for tightness only.
+                    // Legacy Jet/Möbius and packed-v1 radii remain keyed by
+                    // per-view c_max. Reference-owned radial certificates do
+                    // not: viewport motion may refresh optional headers and
+                    // instrumentation, but MUST NOT queue block work.
                     const driftMode = navigator.get_approximation_mode()
                     if (driftMode === 3 || driftMode === 4 || driftMode === 5) {
                         const log2CMax = navigator.current_log2_c_max()
@@ -1170,7 +1205,11 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                             const incremental = driftMode === 5
                                 && navigator.get_dynamic_block_validity()
                                 && navigator.get_incremental_reference_table()
-                            if (!incremental) tableViewRefreshPending = true
+                            const viewportQueuesBlockWork = radialTriggerQueuesBlockWork('viewport-update')
+                            if (!incremental || viewportQueuesBlockWork) tableViewRefreshPending = true
+                            if (incremental && viewportQueuesBlockWork) {
+                                incrementalViewportOnlyCertificateBuilds++
+                            }
                         }
                     }
                     void runComputeLoop(message.jobId)
@@ -1186,6 +1225,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     lastBlaMaxIterations = 0
                     tableViewRefreshPending = false
                     lastIncrementalHeaderKey = ''
+                    incrementalScheduledCertificateCause = 'epoch-reset'
                     tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
                 }
@@ -1196,6 +1236,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     lastBlaMaxIterations = 0
                     tableViewRefreshPending = false
                     lastIncrementalHeaderKey = ''
+                    incrementalScheduledCertificateCause = 'epoch-reset'
                     tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
                 }
@@ -1216,6 +1257,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     lastBlaMaxIterations = 0
                     tableViewRefreshPending = false
                     lastIncrementalHeaderKey = ''
+                    incrementalScheduledCertificateCause = 'epoch-reset'
                     tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
                 }
@@ -1226,6 +1268,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     lastBlaMaxIterations = 0
                     tableViewRefreshPending = false
                     lastIncrementalHeaderKey = ''
+                    incrementalScheduledCertificateCause = 'epoch-reset'
                     tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
                 }
@@ -1236,6 +1279,7 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                     lastBlaMaxIterations = 0
                     tableViewRefreshPending = false
                     lastIncrementalHeaderKey = ''
+                    incrementalScheduledCertificateCause = 'epoch-reset'
                     tableGeneration = message.tableGeneration
                     void runComputeLoop(message.jobId)
                 }

@@ -17,6 +17,13 @@
  */
 import { onMounted, onUnmounted, reactive, ref, computed } from 'vue';
 import { formatPeriodicHeaderStatus } from '../periodicHeaderStatus';
+import {
+  RADIAL_CERTIFICATE_LAYOUT_VERSION,
+  RADIAL_REJECTION_LABELS,
+  hasViewportCertificateRegression,
+  radialBuildCauseLabel,
+  radialDomainStatus,
+} from '../radialCertificateStatus';
 
 const props = withDefaults(defineProps<{ engine: any; isAdmin?: boolean }>(), {isAdmin: false});
 const emit = defineEmits<{ (e: 'close'): void }>();
@@ -97,7 +104,12 @@ const stats = reactive({
   incrementalTableCapacityGrowths: 0,
   incrementalTablePeakRetainedBytes: 0,
   incrementalTableMergeCoefficientsMs: 0,
-  incrementalTableEnvelopeMs: 0,
+  incrementalTableCertificateMs: 0,
+  radialCertificateVersion: 0,
+  radialCertificateWordsPerBlock: 0,
+  radialCertificateReferenceGrowthCount: 0,
+  radialCertificateViewportBuildCount: 0,
+  radialCertificateLastBuildCause: 'none' as 'epoch-reset' | 'reference-growth' | 'none',
   shaderApproxFlag: 0,
   shaderBlaLevelCount: 0,
   aaFrontierStamped: -1,
@@ -332,26 +344,31 @@ const DYNAMIC_REJECTION_LABELS = [
   'preuve compacte · cause non lue',
   'préfiltre agrégé',
 ];
+const radialCertificateActive = computed(() =>
+  stats.radialCertificateVersion === RADIAL_CERTIFICATE_LAYOUT_VERSION
+);
 const dynamicRejectionRows = computed(() => stats.dynamicRejectionReasons
-  .map((count, index) => ({ label: DYNAMIC_REJECTION_LABELS[index], count }))
+  .map((count, index) => ({
+    label: radialCertificateActive.value
+      ? RADIAL_REJECTION_LABELS[index]
+      : DYNAMIC_REJECTION_LABELS[index],
+    count,
+  }))
   .filter(row => row.count > 0));
-const dynamicDomainMarginOctaves = computed(() => {
-  const domain = stats.dynamicValidityReferenceLog2Dc;
-  const cmax = stats.dynamicValidityCurrentLog2CMax;
-  return Number.isFinite(domain) && Number.isFinite(cmax) ? domain - cmax : Number.NaN;
-});
-const dynamicDomainOutOfRange = computed(() =>
-  Number.isFinite(dynamicDomainMarginOctaves.value) && dynamicDomainMarginOctaves.value < 0
+const dynamicDomain = computed(() => radialDomainStatus(
+  stats.dynamicValidityReferenceLog2Dc,
+  stats.dynamicValidityCurrentLog2CMax,
+));
+const dynamicDomainMarginOctaves = computed(() => dynamicDomain.value.margin);
+const dynamicDomainOutOfRange = computed(() => dynamicDomain.value.outOfRange);
+const viewportCertificateRegression = computed(() =>
+  hasViewportCertificateRegression(stats.radialCertificateViewportBuildCount)
 );
 function formatLog2Extent(value: number): string {
   return Number.isFinite(value) ? `2^${value.toFixed(1)}` : '—';
 }
 function dynamicDomainStatusLine(): string {
-  const margin = dynamicDomainMarginOctaves.value;
-  if (!Number.isFinite(margin)) return '';
-  return margin < 0
-    ? `HORS DOMAINE · dépassement ${(-margin).toFixed(1)} oct`
-    : `OK · marge ${margin.toFixed(1)} oct`;
+  return dynamicDomain.value.label;
 }
 // Secours (portfolio): fallback applications + iterations they covered.
 function secoursLine(): string {
@@ -542,7 +559,12 @@ function readLive(e: any) {
   stats.incrementalTableCapacityGrowths = e.incrementalTableCapacityGrowths ?? 0;
   stats.incrementalTablePeakRetainedBytes = e.incrementalTablePeakRetainedBytes ?? 0;
   stats.incrementalTableMergeCoefficientsMs = e.incrementalTableMergeCoefficientsMs ?? 0;
-  stats.incrementalTableEnvelopeMs = e.incrementalTableEnvelopeMs ?? 0;
+  stats.incrementalTableCertificateMs = e.incrementalTableCertificateMs ?? 0;
+  stats.radialCertificateVersion = e.radialCertificateVersion ?? 0;
+  stats.radialCertificateWordsPerBlock = e.radialCertificateWordsPerBlock ?? 0;
+  stats.radialCertificateReferenceGrowthCount = e.radialCertificateReferenceGrowthCount ?? 0;
+  stats.radialCertificateViewportBuildCount = e.radialCertificateViewportBuildCount ?? 0;
+  stats.radialCertificateLastBuildCause = e.radialCertificateLastBuildCause ?? 'none';
   stats.shaderApproxFlag = e.lastShaderApproxFlag ?? 0;
   stats.shaderBlaLevelCount = e.lastShaderBlaLevelCount ?? 0;
   stats.aaFrontierStamped = e.aaFrontierStamped ?? -1;
@@ -891,7 +913,11 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
         <span class="perf-stat-label">Par pixel (cumul rendu)</span>
         <span class="perf-stat-value">{{ turnsPerPixel() < 10 ? turnsPerPixel().toFixed(2) : formatOps(Math.round(turnsPerPixel())) }} tours · {{ itersPerPixel() < 1000 ? itersPerPixel().toFixed(1) : formatOps(Math.round(itersPerPixel())) }} iters</span>
       </div>
-      <template v-if="stats.shaderApproxFlag >= 6 && Number.isFinite(dynamicDomainMarginOctaves)">
+      <div v-if="stats.shaderApproxFlag >= 6 && radialCertificateActive" class="perf-stat-row">
+        <span class="perf-stat-label">Domaine certificats</span>
+        <span class="perf-stat-value">intrinsèque par bloc · indépendant du cmax</span>
+      </div>
+      <template v-else-if="stats.shaderApproxFlag >= 6 && Number.isFinite(dynamicDomainMarginOctaves)">
         <div class="perf-stat-row">
           <span class="perf-stat-label">Domaine table / cmax vue</span>
           <span class="perf-stat-value">{{ formatLog2Extent(stats.dynamicValidityReferenceLog2Dc) }} / {{ formatLog2Extent(stats.dynamicValidityCurrentLog2CMax) }}</span>
@@ -919,7 +945,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       <template v-if="stats.shaderApproxFlag === 6 || stats.shaderApproxFlag === 7">
         <div class="perf-stat-row perf-stat-row--progress">
           <div class="perf-progress-header">
-            <span class="perf-stat-label">Certificats dynamiques</span>
+            <span class="perf-stat-label">{{ radialCertificateActive ? 'Certificats radiaux' : 'Certificats dynamiques' }}</span>
             <span class="perf-stat-value">acceptés / tentés</span>
           </div>
         </div>
@@ -932,7 +958,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
           <span class="perf-stat-value">&lt;16 {{ formatOps(stats.dynamicSkipBuckets[0]) }} · 16–255 {{ formatOps(stats.dynamicSkipBuckets[1]) }} · 256–4095 {{ formatOps(stats.dynamicSkipBuckets[2]) }} · ≥4096 {{ formatOps(stats.dynamicSkipBuckets[3]) }}</span>
         </div>
         <div v-if="stats.dynamicCandidateUses >= 0" class="perf-stat-row">
-          <span class="perf-stat-label">Rung Cauchy limitante</span>
+          <span class="perf-stat-label">{{ radialCertificateActive ? 'Second candidat Pareto' : 'Rung Cauchy limitante' }}</span>
           <span class="perf-stat-value">{{ formatOps(stats.dynamicCandidateUses) }}<template v-if="dynamicAcceptedTotal > 0"> · {{ (100 * stats.dynamicCandidateUses / dynamicAcceptedTotal).toFixed(1) }}%</template></span>
         </div>
         <div v-for="r in dynamicRejectionRows" :key="'reject-' + r.label" class="perf-stat-row">
@@ -1037,6 +1063,10 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     </div>
     <template v-if="stats.incrementalReferenceTable">
       <div class="perf-stat-row">
+        <span class="perf-stat-label">Layout certificats</span>
+        <span class="perf-stat-value">radial v{{ stats.radialCertificateVersion || '—' }} · {{ stats.radialCertificateWordsPerBlock || '—' }} mots/bloc</span>
+      </div>
+      <div class="perf-stat-row">
         <span class="perf-stat-label">Couverture table / construite</span>
         <span class="perf-stat-value">{{ formatCondensedNumber(stats.incrementalTableOrbitCoverage) }} / {{ formatCondensedNumber(stats.incrementalTableBuiltOrbit) }}</span>
       </div>
@@ -1049,12 +1079,24 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
         <span class="perf-stat-value">{{ formatMemory(stats.incrementalTableTransferredBytes) }} · {{ stats.incrementalTableYields }} yields · {{ stats.incrementalTableCancellations }} annulations</span>
       </div>
       <div class="perf-stat-row">
-        <span class="perf-stat-label">CPU fusion / enveloppes</span>
-        <span class="perf-stat-value">{{ stats.incrementalTableMergeCoefficientsMs.toFixed(1) }} ms · {{ stats.incrementalTableEnvelopeMs.toFixed(1) }} ms</span>
+        <span class="perf-stat-label">CPU fusion / certificats</span>
+        <span class="perf-stat-value">{{ stats.incrementalTableMergeCoefficientsMs.toFixed(1) }} ms · {{ stats.incrementalTableCertificateMs.toFixed(1) }} ms</span>
       </div>
       <div class="perf-stat-row">
         <span class="perf-stat-label">Mémoire builder / croissance</span>
         <span class="perf-stat-value">{{ formatMemory(stats.incrementalTablePeakRetainedBytes) }} · {{ stats.incrementalTableCapacityGrowths }}×</span>
+      </div>
+      <div class="perf-stat-row">
+        <span class="perf-stat-label">Dernière construction cert.</span>
+        <span class="perf-stat-value">{{ radialBuildCauseLabel(stats.radialCertificateLastBuildCause) }}</span>
+      </div>
+      <div class="perf-stat-row">
+        <span class="perf-stat-label">Certificats · croissance réf.</span>
+        <span class="perf-stat-value">{{ formatOps(stats.radialCertificateReferenceGrowthCount) }}</span>
+      </div>
+      <div class="perf-stat-row" :class="{ 'perf-stat-row--danger': viewportCertificateRegression }">
+        <span class="perf-stat-label">Reconstructions viewport seul</span>
+        <span class="perf-stat-value" :class="{ 'perf-stat-value--danger': viewportCertificateRegression }">{{ stats.radialCertificateViewportBuildCount }}</span>
       </div>
     </template>
     <div class="perf-stat-row">
@@ -1108,7 +1150,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       </div>
     </div>
     <div class="perf-stat-row perf-debug-row">
-      <span class="perf-stat-label">Table incrémentale</span>
+      <span class="perf-stat-label" title="Désactivé : chemin packed-v1 historique de repli">Certificats radiaux incrémentaux</span>
       <div class="perf-debug-switch-wrap">
         <label class="perf-debug-switch">
           <input type="checkbox" :checked="stats.incrementalReferenceTable" @change="setIncrementalTable(($event.target as HTMLInputElement).checked)" />

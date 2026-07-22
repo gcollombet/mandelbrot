@@ -14,6 +14,11 @@ import {WebcamTexture} from './WebcamTexture'
 import {generateMipmaps, mipLevelCountFor} from './mipmaps'
 import {Palette} from './Palette.ts'
 import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString} from './floatexp'
+import {
+    RADIAL_CERTIFICATE_LAYOUT_VERSION,
+    RADIAL_CERTIFICATE_WORDS_PER_BLOCK,
+    validRadialRangePayloadShape,
+} from './radialCertificateContract'
 import type {ZoomState} from './zoomState'
 import {
     getFrozenScale,
@@ -83,6 +88,8 @@ const dynamicValidityStorageWords = (blockCount: number) =>
     Math.ceil((Math.max(1, blockCount) * (
         DYNAMIC_VALIDITY_WORDS_PER_BLOCK + DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK
     )) / 4) * 4
+const radialCertificateStorageWords = (blockCount: number) =>
+    Math.ceil((Math.max(1, blockCount) * RADIAL_CERTIFICATE_WORDS_PER_BLOCK) / 4) * 4
 // Floats per Möbius-c+ COEFFICIENT record — must match the Rust #[repr(C)]
 // MobiusCoeffs: 7 coefficients × (x, y, e), 84 B ([2/1]-c+: A, B, A', D, D',
 // F, N₂). Mobius tables ship in the SAME GPU buffers as jet ones (the element
@@ -214,19 +221,21 @@ type IncrementalTableRangeResponse = {
     ranges: Uint32Array<ArrayBuffer>
     coefficients: Float32Array<ArrayBuffer>
     radii: Float32Array<ArrayBuffer>
-    envelopes: Float32Array<ArrayBuffer>
-    diagnostics: Uint32Array<ArrayBuffer>
-    validityVersion: number
-    validityWordsPerBlock: number
-    diagnosticsWordsPerBlock: number
+    certificates: Uint32Array<ArrayBuffer>
+    certificateVersion: number
+    certificateWordsPerBlock: number
+    /** Deprecated radial-v2 diagnostic. Radial-v3 publishes NaN. */
     referenceLog2Dc: number
     currentLog2CMax: number
     cumulativeMerges: number
     cumulativeCoefficients: number
-    cumulativeEnvelopes: number
+    cumulativeCertificates: number
     peakRetainedBytes: number
     cumulativeMergeCoefficientsMs: number
-    cumulativeEnvelopeMs: number
+    cumulativeCertificateMs: number
+    referenceGrowthCertificates: number
+    viewportOnlyCertificateBuilds: number
+    lastCertificateBuildCause: 'epoch-reset' | 'reference-growth' | 'none'
     yields: number
     cancellations: number
 }
@@ -659,9 +668,8 @@ export class Engine {
     private mandelbrotJetLevelBufferCapacity = 0
     private mandelbrotValidityBufferCapacity = 0
     private dynamicValidityReady = false
-    /** Immutable packed-proof domain and current quantized view extent. Their
-     * difference is exposed to the performance panel to diagnose history-
-     * dependent out-of-domain fallback. */
+    /** Packed-v1/radial-v2 compatibility diagnostic. Radial v3 is governed by
+     * per-block intrinsic caps and deliberately leaves this non-finite. */
     dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
     dynamicValidityCurrentLog2CMax = Number.NaN
     private dynamicValidityGeneration = -1
@@ -833,7 +841,14 @@ export class Engine {
     incrementalTableCapacityGrowths = 0
     incrementalTablePeakRetainedBytes = 0
     incrementalTableMergeCoefficientsMs = 0
+    incrementalTableCertificateMs = 0
+    /** @deprecated benchmark compatibility; equals certificate construction time. */
     incrementalTableEnvelopeMs = 0
+    radialCertificateVersion = 0
+    radialCertificateWordsPerBlock = 0
+    radialCertificateReferenceGrowthCount = 0
+    radialCertificateViewportBuildCount = 0
+    radialCertificateLastBuildCause: 'epoch-reset' | 'reference-growth' | 'none' = 'none'
     /** Live worker-side table build milestone. Unified reports its three real
      *  cache phases; the other modes expose start/transfer/completion. */
     tableBuildActive = false
@@ -1557,7 +1572,13 @@ export class Engine {
                 this.incrementalTableCancellations = message.cancellations
                 this.incrementalTablePeakRetainedBytes = message.peakRetainedBytes
                 this.incrementalTableMergeCoefficientsMs = message.cumulativeMergeCoefficientsMs
-                this.incrementalTableEnvelopeMs = message.cumulativeEnvelopeMs
+                this.incrementalTableCertificateMs = message.cumulativeCertificateMs
+                this.incrementalTableEnvelopeMs = message.cumulativeCertificateMs
+                this.radialCertificateVersion = message.certificateVersion
+                this.radialCertificateWordsPerBlock = message.certificateWordsPerBlock
+                this.radialCertificateReferenceGrowthCount = message.referenceGrowthCertificates
+                this.radialCertificateViewportBuildCount = message.viewportOnlyCertificateBuilds
+                this.radialCertificateLastBuildCause = message.lastCertificateBuildCause
                 this.tableBuildActive = message.hasMore
                 this.tableBuildProgress = Math.min(
                     1,
@@ -1565,7 +1586,7 @@ export class Engine {
                 )
                 this.tableBuildStage = message.hasMore ? 'bounds' : 'ready'
                 this.tableBuildKind = 'unified'
-                this.dynamicValidityReferenceLog2Dc = message.referenceLog2Dc
+                this.dynamicValidityReferenceLog2Dc = Number.NaN
                 this.dynamicValidityCurrentLog2CMax = message.currentLog2CMax
                 this.dynamicValidityGeneration = message.tableGeneration
                 this.dynamicValidityReady = this.currentBlaLevelCount > 0
@@ -2362,9 +2383,12 @@ export class Engine {
     // constants map here and precompiling the new hot combo at init.
     private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled): GPUComputePipeline {
         const dynamicValidity = this.dynamicBlockValidity && this.approximationMode === 'auto'
+        const radialValidity = dynamicValidity
+            && this.incrementalReferenceTable
+            && this.incrementalTableLayout !== null
         const dynamicStats = dynamicValidity
             && (this.dynamicValidityStatsEnabled || this.dynamicValidityShadow)
-        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}v${dynamicValidity ? 1 : 0}s${dynamicStats ? 1 : 0}`
+        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}`
         let pipeline = this.inplacePipelineCache.get(key)
         if (!pipeline) {
             pipeline = this.device.createComputePipeline({
@@ -2377,10 +2401,11 @@ export class Engine {
                         ENABLE_PORTFOLIO: portfolio ? 1 : 0,
                         ENABLE_RENORM: renorm ? 1 : 0,
                         ENABLE_DYNAMIC_VALIDITY: dynamicValidity ? 1 : 0,
+                        ENABLE_RADIAL_VALIDITY: radialValidity ? 1 : 0,
                         ENABLE_DYNAMIC_STATS: dynamicStats ? 1 : 0,
                     },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, dynamic=${dynamicValidity}, dynamicStats=${dynamicStats})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats})`,
             })
             this.inplacePipelineCache.set(key, pipeline)
         }
@@ -2536,9 +2561,9 @@ export class Engine {
             label: 'Engine Incremental Unified Directory',
         })
         const nextValidity = this.device.createBuffer({
-            size: Math.max(4, dynamicValidityStorageWords(next.totalBlockCapacity) * Uint32Array.BYTES_PER_ELEMENT),
+            size: Math.max(4, radialCertificateStorageWords(next.totalBlockCapacity) * Uint32Array.BYTES_PER_ELEMENT),
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
-            label: 'Engine Incremental Unified Validity',
+            label: 'Engine Incremental Unified Radial Certificates',
         })
 
         if (copyCommitted && oldLayout && oldJet && oldRadii && oldValidity) {
@@ -2564,19 +2589,10 @@ export class Engine {
                 )
                 encoder.copyBufferToBuffer(
                     oldValidity,
-                    oldLayout.offsets[level] * DYNAMIC_VALIDITY_WORDS_PER_BLOCK * 4,
+                    oldLayout.offsets[level] * RADIAL_CERTIFICATE_WORDS_PER_BLOCK * 4,
                     nextValidity,
-                    next.offsets[level] * DYNAMIC_VALIDITY_WORDS_PER_BLOCK * 4,
-                    count * DYNAMIC_VALIDITY_WORDS_PER_BLOCK * 4,
-                )
-                encoder.copyBufferToBuffer(
-                    oldValidity,
-                    (oldLayout.totalBlockCapacity * DYNAMIC_VALIDITY_WORDS_PER_BLOCK
-                        + oldLayout.offsets[level] * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK) * 4,
-                    nextValidity,
-                    (next.totalBlockCapacity * DYNAMIC_VALIDITY_WORDS_PER_BLOCK
-                        + next.offsets[level] * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK) * 4,
-                    count * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK * 4,
+                    next.offsets[level] * RADIAL_CERTIFICATE_WORDS_PER_BLOCK * 4,
+                    count * RADIAL_CERTIFICATE_WORDS_PER_BLOCK * 4,
                 )
             }
             this.device.queue.submit([encoder.finish()])
@@ -2650,18 +2666,21 @@ export class Engine {
 
     private writeIncrementalTableRange(message: IncrementalTableRangeResponse): boolean {
         if (
-            message.validityVersion !== DYNAMIC_VALIDITY_VERSION
-            || message.validityWordsPerBlock !== DYNAMIC_VALIDITY_WORDS_PER_BLOCK
-            || message.diagnosticsWordsPerBlock !== DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK
+            message.certificateVersion !== RADIAL_CERTIFICATE_LAYOUT_VERSION
+            || message.certificateWordsPerBlock !== RADIAL_CERTIFICATE_WORDS_PER_BLOCK
             || message.ranges.length % 6 !== 0
             || message.coefficients.length % JET_COEFF_FLOATS !== 0
         ) return false
         const payloadBlocks = message.coefficients.length / JET_COEFF_FLOATS
-        if (
-            message.radii.length !== payloadBlocks * JET_RADII_FLOATS
-            || message.envelopes.length !== payloadBlocks * DYNAMIC_VALIDITY_WORDS_PER_BLOCK
-            || message.diagnostics.length !== payloadBlocks * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK
-        ) return false
+        if (!validRadialRangePayloadShape({
+            version: message.certificateVersion,
+            wordsPerBlock: message.certificateWordsPerBlock,
+            rangesWords: message.ranges.length,
+            coefficientFloats: message.coefficients.length,
+            sidecarFloats: message.radii.length,
+            certificateWords: message.certificates.length,
+            referenceLog2Dc: message.referenceLog2Dc,
+        })) return false
 
         const layoutMismatch = !this.incrementalTableLayout
             || this.incrementalTableLayout.refId !== message.refId
@@ -2722,18 +2741,10 @@ export class Engine {
             )
             this.device.queue.writeBuffer(
                 this.mandelbrotValidityBuffer!,
-                absoluteBlock * DYNAMIC_VALIDITY_WORDS_PER_BLOCK * 4,
-                message.envelopes,
-                payloadOffset * DYNAMIC_VALIDITY_WORDS_PER_BLOCK,
-                slotCount * DYNAMIC_VALIDITY_WORDS_PER_BLOCK,
-            )
-            this.device.queue.writeBuffer(
-                this.mandelbrotValidityBuffer!,
-                (layout.totalBlockCapacity * DYNAMIC_VALIDITY_WORDS_PER_BLOCK
-                    + absoluteBlock * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK) * 4,
-                message.diagnostics,
-                payloadOffset * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK,
-                slotCount * DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK,
+                absoluteBlock * RADIAL_CERTIFICATE_WORDS_PER_BLOCK * 4,
+                message.certificates,
+                payloadOffset * RADIAL_CERTIFICATE_WORDS_PER_BLOCK,
+                slotCount * RADIAL_CERTIFICATE_WORDS_PER_BLOCK,
             )
             // sidecar.w is the maximum candidate radius across all four
             // tiers. The effective dynamic radius is an intersection with
@@ -2758,9 +2769,8 @@ export class Engine {
         this.incrementalTableTransferredBytes += message.ranges.byteLength
             + message.coefficients.byteLength
             + message.radii.byteLength
-            + message.envelopes.byteLength
-            + message.diagnostics.byteLength
-        this.dynamicValidityReferenceLog2Dc = message.referenceLog2Dc
+            + message.certificates.byteLength
+        this.dynamicValidityReferenceLog2Dc = Number.NaN
         this.dynamicValidityCurrentLog2CMax = message.currentLog2CMax
         return true
     }
@@ -2819,6 +2829,11 @@ export class Engine {
         this.dynamicValidityGeneration = -1
         this.dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
         this.dynamicValidityCurrentLog2CMax = Number.NaN
+        this.radialCertificateVersion = 0
+        this.radialCertificateWordsPerBlock = 0
+        this.radialCertificateReferenceGrowthCount = 0
+        this.radialCertificateViewportBuildCount = 0
+        this.radialCertificateLastBuildCause = 'none'
         if (changed) this.rebuildIterationBindGroups()
     }
 

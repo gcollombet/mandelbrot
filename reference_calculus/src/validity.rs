@@ -439,6 +439,34 @@ pub fn select_cauchy_candidates(
     selected
 }
 
+/// Select the single Cauchy source used by the reference-owned radial layout.
+/// A source is eligible only when its fully solved c cap covers the immutable
+/// reference domain.  Among eligible sources, the widest certified z cap at
+/// that domain wins.  This is deliberately different from the legacy
+/// two-candidate census, which optimized complementary viewport rungs.
+pub fn select_reference_domain_cauchy_candidate(
+    sources: &[CauchySource],
+    context: CauchyTierContext,
+    reference_log2_dc: f64,
+) -> CauchyCandidateEnvelope {
+    if !reference_log2_dc.is_finite() {
+        return CauchyCandidateEnvelope::dead();
+    }
+    sources
+        .iter()
+        .enumerate()
+        .map(|(index, source)| compile_cauchy_candidate(index as u8, *source, context))
+        .filter(|candidate| {
+            !candidate.is_dead() && candidate.dc.max_log2_dc.accepts(reference_log2_dc)
+        })
+        .max_by(|a, b| {
+            a.radius_log2(reference_log2_dc)
+                .total_cmp(&b.radius_log2(reference_log2_dc))
+                .then_with(|| b.source_index.cmp(&a.source_index))
+        })
+        .unwrap_or_else(CauchyCandidateEnvelope::dead)
+}
+
 /// `strict` is pointwise no larger than `loose` over
 /// `log2_dc <= domain_max`. Slopes are non-positive. The slope ordering makes
 /// the difference monotone, so checking the finite upper endpoint proves the
@@ -1543,6 +1571,708 @@ pub struct PackedValidityDiagnosticsV1 {
 pub const PACKED_VALIDITY_DIAGNOSTIC_WORDS: usize = 2;
 pub const PACKED_VALIDITY_DIAGNOSTIC_BYTES: usize =
     core::mem::size_of::<PackedValidityDiagnosticsV1>();
+
+/// Reference-owned radial record. Version 2 follows packed-validity v1 and is
+/// intentionally half its size (12 words / 48 bytes instead of 24 / 96).
+/// There is exactly one Cauchy source per non-affine tier and no viewport,
+/// bank, or octave-rung identifier.
+pub const RADIAL_VALIDITY_V2_VERSION: u32 = 2;
+pub const RADIAL_VALIDITY_V2_WORDS: usize = 12;
+pub const RADIAL_VALIDITY_VERSION: u32 = 3;
+pub const RADIAL_VALIDITY_WORDS: usize = 21;
+pub const RADIAL_VALIDITY_BYTES: usize = RADIAL_VALIDITY_WORDS * core::mem::size_of::<u32>();
+
+const RADIAL_SOURCE_DEAD: u8 = u8::MAX;
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RadialRejectionReason {
+    None,
+    NonFinite,
+    OutOfDomain,
+    AffineRadius,
+    RadialCap,
+    RationalPole,
+    Dead,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialValidityEvaluation {
+    pub accepts: bool,
+    pub radius_log2: f32,
+    pub rejection: RadialRejectionReason,
+}
+
+/// GPU word order:
+///
+/// ```text
+///  0 affine alpha mantissa (positive f32, rounded down)
+///  1 affine alpha exponent (i32 bits)
+///  2 affine beta (non-negative f32, rounded up)
+///  3..5  Padé   maxDz, maxDc, poleMaxDz
+///  6..8  c+     maxDz, maxDc, poleMaxDz
+///  9..10 Jet    maxDz, maxDc
+/// 11 source ids: Padé | c+<<8 | Jet<<16
+/// ```
+///
+/// Affine is evaluated with `alpha - beta*|dc|`. The other tiers use one
+/// axis-aligned radial rectangle; rational pole caps remain separate so debug
+/// counters can distinguish a mathematical pole rejection from a tail cap.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialValidityV2 {
+    pub affine_alpha: f32,
+    pub affine_alpha_exp: i32,
+    pub affine_beta: f32,
+    pub pade_max_log2_dz: f32,
+    pub pade_max_log2_dc: f32,
+    pub pade_pole_max_log2_dz: f32,
+    pub cplus_max_log2_dz: f32,
+    pub cplus_max_log2_dc: f32,
+    pub cplus_pole_max_log2_dz: f32,
+    pub jet_max_log2_dz: f32,
+    pub jet_max_log2_dc: f32,
+    pub source_ids: u32,
+}
+
+impl RadialValidityV2 {
+    pub const DEAD: Self = Self {
+        affine_alpha: 0.0,
+        affine_alpha_exp: 0,
+        affine_beta: f32::INFINITY,
+        pade_max_log2_dz: f32::NEG_INFINITY,
+        pade_max_log2_dc: f32::NEG_INFINITY,
+        pade_pole_max_log2_dz: f32::NEG_INFINITY,
+        cplus_max_log2_dz: f32::NEG_INFINITY,
+        cplus_max_log2_dc: f32::NEG_INFINITY,
+        cplus_pole_max_log2_dz: f32::NEG_INFINITY,
+        jet_max_log2_dz: f32::NEG_INFINITY,
+        jet_max_log2_dc: f32::NEG_INFINITY,
+        source_ids: u32::MAX,
+    };
+
+    pub fn to_words(self) -> [u32; RADIAL_VALIDITY_V2_WORDS] {
+        [
+            self.affine_alpha.to_bits(),
+            self.affine_alpha_exp as u32,
+            self.affine_beta.to_bits(),
+            self.pade_max_log2_dz.to_bits(),
+            self.pade_max_log2_dc.to_bits(),
+            self.pade_pole_max_log2_dz.to_bits(),
+            self.cplus_max_log2_dz.to_bits(),
+            self.cplus_max_log2_dc.to_bits(),
+            self.cplus_pole_max_log2_dz.to_bits(),
+            self.jet_max_log2_dz.to_bits(),
+            self.jet_max_log2_dc.to_bits(),
+            self.source_ids,
+        ]
+    }
+
+    pub fn from_words(words: [u32; RADIAL_VALIDITY_V2_WORDS]) -> Self {
+        Self {
+            affine_alpha: f32::from_bits(words[0]),
+            affine_alpha_exp: words[1] as i32,
+            affine_beta: f32::from_bits(words[2]),
+            pade_max_log2_dz: f32::from_bits(words[3]),
+            pade_max_log2_dc: f32::from_bits(words[4]),
+            pade_pole_max_log2_dz: f32::from_bits(words[5]),
+            cplus_max_log2_dz: f32::from_bits(words[6]),
+            cplus_max_log2_dc: f32::from_bits(words[7]),
+            cplus_pole_max_log2_dz: f32::from_bits(words[8]),
+            jet_max_log2_dz: f32::from_bits(words[9]),
+            jet_max_log2_dc: f32::from_bits(words[10]),
+            source_ids: words[11],
+        }
+    }
+
+    pub fn source_index(self, tier: ValidityTier) -> Option<u8> {
+        let shift = match tier {
+            ValidityTier::Pade => 0,
+            ValidityTier::MobiusCPlus => 8,
+            ValidityTier::Jet => 16,
+            ValidityTier::Affine => return None,
+        };
+        let source = ((self.source_ids >> shift) & 0xff) as u8;
+        (source != RADIAL_SOURCE_DEAD).then_some(source)
+    }
+
+    fn affine_radius_log2(self, log2_dc: f32) -> f32 {
+        if !(self.affine_alpha > 0.0 && self.affine_alpha.is_finite())
+            || !(self.affine_beta >= 0.0 && self.affine_beta.is_finite())
+        {
+            return f32::NEG_INFINITY;
+        }
+        let log2_alpha =
+            next_down_f32(next_down_f32(self.affine_alpha.log2()) + self.affine_alpha_exp as f32);
+        if log2_dc == f32::NEG_INFINITY || self.affine_beta == 0.0 {
+            return log2_alpha;
+        }
+        if !log2_dc.is_finite() {
+            return f32::NEG_INFINITY;
+        }
+        let log2_beta_dc = next_up_f32(next_up_f32(self.affine_beta.log2()) + log2_dc);
+        let relative = next_up_f32(log2_beta_dc - log2_alpha);
+        if relative >= 0.0 {
+            return f32::NEG_INFINITY;
+        }
+        let remaining = next_down_f32(1.0 - next_up_f32(relative.exp2()));
+        if !(remaining > 0.0 && remaining.is_finite()) {
+            return f32::NEG_INFINITY;
+        }
+        next_down_f32(log2_alpha + next_down_f32(remaining.log2()))
+    }
+
+    pub fn evaluate_logs(
+        self,
+        tier: ValidityTier,
+        reference_log2_dc: f32,
+        log2_dc: f32,
+        log2_dz: f32,
+    ) -> RadialValidityEvaluation {
+        if !reference_log2_dc.is_finite() || log2_dc.is_nan() || log2_dz.is_nan() {
+            return RadialValidityEvaluation {
+                accepts: false,
+                radius_log2: f32::NEG_INFINITY,
+                rejection: RadialRejectionReason::NonFinite,
+            };
+        }
+        if log2_dc > reference_log2_dc || log2_dc == f32::INFINITY {
+            return RadialValidityEvaluation {
+                accepts: false,
+                radius_log2: f32::NEG_INFINITY,
+                rejection: RadialRejectionReason::OutOfDomain,
+            };
+        }
+        if tier == ValidityTier::Affine {
+            let radius = self.affine_radius_log2(log2_dc);
+            let accepts = radius != f32::NEG_INFINITY && log2_dz <= radius;
+            return RadialValidityEvaluation {
+                accepts,
+                radius_log2: radius,
+                rejection: if accepts {
+                    RadialRejectionReason::None
+                } else if radius == f32::NEG_INFINITY {
+                    RadialRejectionReason::Dead
+                } else {
+                    RadialRejectionReason::AffineRadius
+                },
+            };
+        }
+        let (max_dz, max_dc, pole) = match tier {
+            ValidityTier::Pade => (
+                self.pade_max_log2_dz,
+                self.pade_max_log2_dc,
+                self.pade_pole_max_log2_dz,
+            ),
+            ValidityTier::MobiusCPlus => (
+                self.cplus_max_log2_dz,
+                self.cplus_max_log2_dc,
+                self.cplus_pole_max_log2_dz,
+            ),
+            ValidityTier::Jet => (self.jet_max_log2_dz, self.jet_max_log2_dc, f32::INFINITY),
+            ValidityTier::Affine => unreachable!(),
+        };
+        if max_dz == f32::NEG_INFINITY || max_dc == f32::NEG_INFINITY {
+            return RadialValidityEvaluation {
+                accepts: false,
+                radius_log2: f32::NEG_INFINITY,
+                rejection: RadialRejectionReason::Dead,
+            };
+        }
+        if log2_dc > max_dc {
+            return RadialValidityEvaluation {
+                accepts: false,
+                radius_log2: max_dz.min(pole),
+                rejection: RadialRejectionReason::RadialCap,
+            };
+        }
+        if log2_dz > pole {
+            return RadialValidityEvaluation {
+                accepts: false,
+                radius_log2: max_dz.min(pole),
+                rejection: RadialRejectionReason::RationalPole,
+            };
+        }
+        let accepts = log2_dz <= max_dz;
+        RadialValidityEvaluation {
+            accepts,
+            radius_log2: max_dz.min(pole),
+            rejection: if accepts {
+                RadialRejectionReason::None
+            } else {
+                RadialRejectionReason::RadialCap
+            },
+        }
+    }
+}
+
+/// One intrinsic, viewport-independent radial rectangle.  The candidate is
+/// valid for every pixel satisfying both axis caps; `pole_max_log2_dz` is a
+/// separately serialized rational-denominator guard (infinite for Jet).
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialCandidateV3 {
+    pub max_log2_dz: f32,
+    pub max_log2_dc: f32,
+    pub pole_max_log2_dz: f32,
+}
+
+impl RadialCandidateV3 {
+    pub const DEAD: Self = Self {
+        max_log2_dz: f32::NEG_INFINITY,
+        max_log2_dc: f32::NEG_INFINITY,
+        pole_max_log2_dz: f32::NEG_INFINITY,
+    };
+
+    pub fn is_dead(self) -> bool {
+        self.max_log2_dz == f32::NEG_INFINITY
+            || self.max_log2_dc == f32::NEG_INFINITY
+            || self.max_log2_dz.is_nan()
+            || self.max_log2_dc.is_nan()
+            || self.pole_max_log2_dz.is_nan()
+    }
+
+    fn effective_max_log2_dz(self) -> f32 {
+        self.max_log2_dz.min(self.pole_max_log2_dz)
+    }
+}
+
+/// Active radial layout.  Affine keeps its exact `alpha - beta*|dc|`
+/// certificate; Padé, Möbius-c+ and Jet each retain two non-dominated
+/// intrinsic rectangles (widest dc and widest dz).  No word is derived from
+/// an instantaneous or epoch-start viewport extent.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RadialValidityV3 {
+    pub affine_alpha: f32,
+    pub affine_alpha_exp: i32,
+    pub affine_beta: f32,
+    /// Tier order: Padé, Möbius-c+, Jet. Candidate 0 is the widest-dc endpoint
+    /// of the Pareto frontier; candidate 1 is the widest-dz endpoint.
+    pub candidates: [[RadialCandidateV3; MAX_CAUCHY_CANDIDATES]; 3],
+}
+
+impl RadialValidityV3 {
+    pub const DEAD: Self = Self {
+        affine_alpha: 0.0,
+        affine_alpha_exp: 0,
+        affine_beta: f32::INFINITY,
+        candidates: [[RadialCandidateV3::DEAD; MAX_CAUCHY_CANDIDATES]; 3],
+    };
+
+    pub fn to_words(self) -> [u32; RADIAL_VALIDITY_WORDS] {
+        let mut words = [0u32; RADIAL_VALIDITY_WORDS];
+        words[0] = self.affine_alpha.to_bits();
+        words[1] = self.affine_alpha_exp as u32;
+        words[2] = self.affine_beta.to_bits();
+        let mut word = 3usize;
+        for tier in self.candidates {
+            for candidate in tier {
+                words[word] = candidate.max_log2_dz.to_bits();
+                words[word + 1] = candidate.max_log2_dc.to_bits();
+                words[word + 2] = candidate.pole_max_log2_dz.to_bits();
+                word += 3;
+            }
+        }
+        words
+    }
+
+    pub fn from_words(words: [u32; RADIAL_VALIDITY_WORDS]) -> Self {
+        let mut candidates = [[RadialCandidateV3::DEAD; MAX_CAUCHY_CANDIDATES]; 3];
+        let mut word = 3usize;
+        for tier in &mut candidates {
+            for candidate in tier {
+                *candidate = RadialCandidateV3 {
+                    max_log2_dz: f32::from_bits(words[word]),
+                    max_log2_dc: f32::from_bits(words[word + 1]),
+                    pole_max_log2_dz: f32::from_bits(words[word + 2]),
+                };
+                word += 3;
+            }
+        }
+        Self {
+            affine_alpha: f32::from_bits(words[0]),
+            affine_alpha_exp: words[1] as i32,
+            affine_beta: f32::from_bits(words[2]),
+            candidates,
+        }
+    }
+
+    fn affine_radius_log2(self, log2_dc: f32) -> f32 {
+        RadialValidityV2 {
+            affine_alpha: self.affine_alpha,
+            affine_alpha_exp: self.affine_alpha_exp,
+            affine_beta: self.affine_beta,
+            ..RadialValidityV2::DEAD
+        }
+        .affine_radius_log2(log2_dc)
+    }
+
+    pub fn affine_max_log2_dc(self) -> f32 {
+        if !(self.affine_alpha > 0.0 && self.affine_alpha.is_finite())
+            || !(self.affine_beta >= 0.0 && self.affine_beta.is_finite())
+        {
+            return f32::NEG_INFINITY;
+        }
+        if self.affine_beta == 0.0 {
+            return f32::INFINITY;
+        }
+        next_down_f32(
+            next_down_f32(self.affine_alpha.log2()) + self.affine_alpha_exp as f32
+                - next_up_f32(self.affine_beta.log2()),
+        )
+    }
+
+    pub fn max_log2_dc(self) -> f32 {
+        self.candidates
+            .iter()
+            .flatten()
+            .filter(|candidate| !candidate.is_dead())
+            .map(|candidate| candidate.max_log2_dc)
+            .fold(self.affine_max_log2_dc(), f32::max)
+    }
+
+    pub fn max_log2_dz(self) -> f32 {
+        let affine = self.affine_radius_log2(f32::NEG_INFINITY);
+        self.candidates
+            .iter()
+            .flatten()
+            .filter(|candidate| !candidate.is_dead())
+            .map(|candidate| candidate.effective_max_log2_dz())
+            .fold(affine, f32::max)
+    }
+
+    pub fn evaluate_logs(
+        self,
+        tier: ValidityTier,
+        log2_dc: f32,
+        log2_dz: f32,
+    ) -> RadialValidityEvaluation {
+        if log2_dc.is_nan() || log2_dz.is_nan() {
+            return RadialValidityEvaluation {
+                accepts: false,
+                radius_log2: f32::NEG_INFINITY,
+                rejection: RadialRejectionReason::NonFinite,
+            };
+        }
+        if tier == ValidityTier::Affine {
+            let radius = self.affine_radius_log2(log2_dc);
+            let accepts = radius != f32::NEG_INFINITY && log2_dz <= radius;
+            return RadialValidityEvaluation {
+                accepts,
+                radius_log2: radius,
+                rejection: if accepts {
+                    RadialRejectionReason::None
+                } else if radius == f32::NEG_INFINITY {
+                    RadialRejectionReason::Dead
+                } else {
+                    RadialRejectionReason::AffineRadius
+                },
+            };
+        }
+
+        let tier_index = tier.index() - 1;
+        let mut any_live = false;
+        let mut any_dc = false;
+        let mut any_pole = false;
+        let mut best_radius = f32::NEG_INFINITY;
+        for candidate in self.candidates[tier_index] {
+            if candidate.is_dead() {
+                continue;
+            }
+            any_live = true;
+            let effective_radius = candidate.effective_max_log2_dz();
+            best_radius = best_radius.max(effective_radius);
+            if log2_dc > candidate.max_log2_dc {
+                continue;
+            }
+            any_dc = true;
+            if log2_dz > candidate.pole_max_log2_dz {
+                continue;
+            }
+            any_pole = true;
+            if log2_dz <= candidate.max_log2_dz {
+                return RadialValidityEvaluation {
+                    accepts: true,
+                    radius_log2: effective_radius,
+                    rejection: RadialRejectionReason::None,
+                };
+            }
+        }
+        RadialValidityEvaluation {
+            accepts: false,
+            radius_log2: best_radius,
+            rejection: if !any_live {
+                RadialRejectionReason::Dead
+            } else if !any_dc {
+                RadialRejectionReason::RadialCap
+            } else if !any_pole {
+                RadialRejectionReason::RationalPole
+            } else {
+                RadialRejectionReason::RadialCap
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct AffineCertificateSource {
+    pub alpha: f64,
+    pub beta: f64,
+}
+
+fn encode_positive_fe_down(value: f64) -> Option<(f32, i32)> {
+    if !(value > 0.0 && value.is_finite()) {
+        return None;
+    }
+    let exponent_f64 = value.log2().floor() + 1.0;
+    if exponent_f64 < i32::MIN as f64 || exponent_f64 > i32::MAX as f64 {
+        return None;
+    }
+    let exponent = exponent_f64 as i32;
+    let mantissa = f64_to_f32_down(value * 2.0f64.powi(-exponent));
+    (mantissa > 0.0 && mantissa.is_finite()).then_some((mantissa, exponent))
+}
+
+pub(crate) fn f64_to_f32_up(value: f64) -> f32 {
+    if value.is_nan() || value == f64::INFINITY {
+        return f32::INFINITY;
+    }
+    if value == f64::NEG_INFINITY {
+        return f32::NEG_INFINITY;
+    }
+    let rounded = value as f32;
+    if (rounded as f64) < value {
+        next_up_f32(rounded)
+    } else {
+        rounded
+    }
+}
+
+fn radial_tier_caps(
+    envelope: &ValidityEnvelope,
+    tier: ValidityTier,
+    candidate: &CauchyCandidateEnvelope,
+) -> Option<(f32, f32, f32)> {
+    let reference = envelope.reference_dc.max_log2_dc.0;
+    let proof = envelope.tier(tier);
+    if !reference.is_finite()
+        || proof.is_dead()
+        || candidate.is_dead()
+        || !proof.static_dc.accepts(reference)
+        || !proof.pure_c.accepts(reference)
+        || !proof.pole.dc_threshold.accepts(reference)
+        || !candidate.dc.accepts(reference)
+    {
+        return None;
+    }
+    let max_dz = proof
+        .remainder
+        .radius_log2(reference)
+        .min(candidate.radius_log2(reference));
+    let pole = proof.pole.radius.radius_log2(reference);
+    if !max_dz.is_finite() || (!pole.is_finite() && pole != f64::INFINITY) {
+        return None;
+    }
+    Some((
+        f64_to_f32_down(max_dz),
+        f64_to_f32_down(reference.min(candidate.dc.max_log2_dc.0)),
+        f64_to_f32_down(pole),
+    ))
+}
+
+/// Collapse the uncompressed proof into one conservative rectangle per radial
+/// tier. `candidates` must already be selected from all build-side sources by
+/// `select_reference_domain_cauchy_candidate`.
+pub fn serialize_radial_validity_v2(
+    envelope: &ValidityEnvelope,
+    affine: AffineCertificateSource,
+    candidates: &[CauchyCandidateEnvelope; 4],
+) -> RadialValidityV2 {
+    let mut out = RadialValidityV2::DEAD;
+    if let Some((mantissa, exponent)) = encode_positive_fe_down(affine.alpha) {
+        if affine.beta >= 0.0 && affine.beta.is_finite() {
+            out.affine_alpha = mantissa;
+            out.affine_alpha_exp = exponent;
+            out.affine_beta = f64_to_f32_up(affine.beta);
+        }
+    }
+
+    let mut source_ids = u32::from(RADIAL_SOURCE_DEAD)
+        | (u32::from(RADIAL_SOURCE_DEAD) << 8)
+        | (u32::from(RADIAL_SOURCE_DEAD) << 16);
+    if let Some((dz, dc, pole)) = radial_tier_caps(
+        envelope,
+        ValidityTier::Pade,
+        &candidates[ValidityTier::Pade.index()],
+    ) {
+        out.pade_max_log2_dz = dz;
+        out.pade_max_log2_dc = dc;
+        out.pade_pole_max_log2_dz = pole;
+        source_ids =
+            (source_ids & !0xff) | u32::from(candidates[ValidityTier::Pade.index()].source_index);
+    }
+    if let Some((dz, dc, pole)) = radial_tier_caps(
+        envelope,
+        ValidityTier::MobiusCPlus,
+        &candidates[ValidityTier::MobiusCPlus.index()],
+    ) {
+        out.cplus_max_log2_dz = dz;
+        out.cplus_max_log2_dc = dc;
+        out.cplus_pole_max_log2_dz = pole;
+        source_ids = (source_ids & !(0xff << 8))
+            | (u32::from(candidates[ValidityTier::MobiusCPlus.index()].source_index) << 8);
+    }
+    if let Some((dz, dc, _)) = radial_tier_caps(
+        envelope,
+        ValidityTier::Jet,
+        &candidates[ValidityTier::Jet.index()],
+    ) {
+        out.jet_max_log2_dz = dz;
+        out.jet_max_log2_dc = dc;
+        source_ids = (source_ids & !(0xff << 16))
+            | (u32::from(candidates[ValidityTier::Jet.index()].source_index) << 16);
+    }
+    out.source_ids = source_ids;
+    out
+}
+
+fn radial_candidate_v3(
+    low_degree: &LowDegreeLineDerivation,
+    pure_c: &PureCDerivation,
+    pole: &PoleLineDerivation,
+    candidate: &CauchyCandidateEnvelope,
+) -> RadialCandidateV3 {
+    if candidate.is_dead()
+        || low_degree.dc_threshold.max_log2_dc.is_dead()
+        || pure_c.threshold.max_log2_dc.is_dead()
+        || pole.dc_threshold.max_log2_dc.is_dead()
+    {
+        return RadialCandidateV3::DEAD;
+    }
+    let max_log2_dc = candidate
+        .dc
+        .max_log2_dc
+        .0
+        .min(low_degree.dc_threshold.max_log2_dc.0)
+        .min(pure_c.threshold.max_log2_dc.0)
+        .min(pole.dc_threshold.max_log2_dc.0);
+    if !max_log2_dc.is_finite() {
+        return RadialCandidateV3::DEAD;
+    }
+    // Every stored line has a non-positive dc slope. Evaluating at the widest
+    // admitted dc therefore gives a lower z cap valid for the complete nested
+    // rectangle. The Cauchy candidate is already an intrinsic radial
+    // rectangle; no viewport endpoint participates in this intersection.
+    let max_log2_dz = low_degree
+        .radius
+        .radius_log2(max_log2_dc)
+        .min(candidate.radius_log2(max_log2_dc));
+    let pole_max_log2_dz = pole.radius.radius_log2(max_log2_dc);
+    if !max_log2_dz.is_finite()
+        || (!pole_max_log2_dz.is_finite() && pole_max_log2_dz != f64::INFINITY)
+    {
+        return RadialCandidateV3::DEAD;
+    }
+    RadialCandidateV3 {
+        max_log2_dz: f64_to_f32_down(max_log2_dz),
+        max_log2_dc: f64_to_f32_down(max_log2_dc),
+        pole_max_log2_dz: f64_to_f32_down(pole_max_log2_dz),
+    }
+}
+
+fn radial_candidate_dominates(a: RadialCandidateV3, b: RadialCandidateV3) -> bool {
+    !a.is_dead()
+        && !b.is_dead()
+        && a.max_log2_dc >= b.max_log2_dc
+        && a.effective_max_log2_dz() >= b.effective_max_log2_dz()
+}
+
+/// Reduce all sound rectangles for one tier to the two Pareto endpoints used
+/// by v3: widest dc first, then widest effective dz. Dominated candidates can
+/// never accept a pixel rejected by their dominator and are discarded.
+fn radial_pareto_endpoints(
+    candidates: impl IntoIterator<Item = RadialCandidateV3>,
+) -> [RadialCandidateV3; MAX_CAUCHY_CANDIDATES] {
+    let live: Vec<RadialCandidateV3> = candidates
+        .into_iter()
+        .filter(|candidate| !candidate.is_dead())
+        .collect();
+    let frontier: Vec<RadialCandidateV3> = live
+        .iter()
+        .copied()
+        .enumerate()
+        .filter(|(index, candidate)| {
+            !live.iter().enumerate().any(|(other_index, other)| {
+                other_index != *index
+                    && radial_candidate_dominates(*other, *candidate)
+                    && (other.max_log2_dc > candidate.max_log2_dc
+                        || other.effective_max_log2_dz() > candidate.effective_max_log2_dz())
+            })
+        })
+        .map(|(_, candidate)| candidate)
+        .collect();
+    if frontier.is_empty() {
+        return [RadialCandidateV3::DEAD; MAX_CAUCHY_CANDIDATES];
+    }
+    let widest_dc = frontier
+        .iter()
+        .copied()
+        .max_by(|a, b| {
+            a.max_log2_dc.total_cmp(&b.max_log2_dc).then_with(|| {
+                a.effective_max_log2_dz()
+                    .total_cmp(&b.effective_max_log2_dz())
+            })
+        })
+        .unwrap();
+    let widest_dz = frontier
+        .iter()
+        .copied()
+        .filter(|candidate| *candidate != widest_dc)
+        .max_by(|a, b| {
+            a.effective_max_log2_dz()
+                .total_cmp(&b.effective_max_log2_dz())
+                .then_with(|| a.max_log2_dc.total_cmp(&b.max_log2_dc))
+        })
+        .unwrap_or(RadialCandidateV3::DEAD);
+    [widest_dc, widest_dz]
+}
+
+/// Serialize a viewport-independent two-candidate Pareto frontier. Sources
+/// must be derived solely from the reference/block geometry. The function
+/// compiles every source independently, intersects its intrinsic caps with the
+/// stored low-degree, pure-c and pole proofs, then retains the two endpoints.
+pub fn serialize_radial_validity_v3(
+    affine: AffineCertificateSource,
+    low_degree: &[LowDegreeLineDerivation; 4],
+    pure_c: &[PureCDerivation; 4],
+    poles: &[PoleLineDerivation; 4],
+    sources: &[Vec<CauchySource>; 4],
+    contexts: &[CauchyTierContext; 4],
+) -> RadialValidityV3 {
+    let mut out = RadialValidityV3::DEAD;
+    if let Some((mantissa, exponent)) = encode_positive_fe_down(affine.alpha) {
+        if affine.beta >= 0.0 && affine.beta.is_finite() {
+            out.affine_alpha = mantissa;
+            out.affine_alpha_exp = exponent;
+            out.affine_beta = f64_to_f32_up(affine.beta);
+        }
+    }
+    for tier in 1..4usize {
+        let rectangles = sources[tier]
+            .iter()
+            .enumerate()
+            .map(|(source_index, source)| {
+                let candidate = compile_cauchy_candidate(
+                    source_index.min(u8::MAX as usize) as u8,
+                    *source,
+                    contexts[tier],
+                );
+                radial_candidate_v3(&low_degree[tier], &pure_c[tier], &poles[tier], &candidate)
+            });
+        out.candidates[tier - 1] = radial_pareto_endpoints(rectangles);
+    }
+    out
+}
 
 const DIAGNOSTIC_DOMAIN_STATIC: u32 = 0;
 const DIAGNOSTIC_DOMAIN_PURE_C: u32 = 1;
@@ -2973,5 +3703,333 @@ mod tests {
             assert_eq!(diagnostics.reasons, expected);
             assert!(!diagnostics.accepts());
         }
+    }
+
+    #[test]
+    fn radial_v2_layout_is_compact_versioned_and_has_no_viewport_bank_word() {
+        let record = RadialValidityV2 {
+            affine_alpha: 0.5,
+            affine_alpha_exp: -20,
+            affine_beta: 2.0,
+            pade_max_log2_dz: -30.0,
+            pade_max_log2_dc: -24.0,
+            pade_pole_max_log2_dz: -28.0,
+            cplus_max_log2_dz: -26.0,
+            cplus_max_log2_dc: -24.0,
+            cplus_pole_max_log2_dz: -25.0,
+            jet_max_log2_dz: -22.0,
+            jet_max_log2_dc: -24.0,
+            source_ids: 3 | (5 << 8) | (7 << 16),
+        };
+        assert_eq!(RADIAL_VALIDITY_V2_VERSION, 2);
+        assert_eq!(RADIAL_VALIDITY_V2_WORDS, 12);
+        assert_eq!(core::mem::size_of::<RadialValidityV2>(), 48);
+        assert_eq!(RadialValidityV2::from_words(record.to_words()), record);
+        assert_eq!(record.source_index(ValidityTier::Affine), None);
+        assert_eq!(record.source_index(ValidityTier::Pade), Some(3));
+        assert_eq!(record.source_index(ValidityTier::MobiusCPlus), Some(5));
+        assert_eq!(record.source_index(ValidityTier::Jet), Some(7));
+        // All twelve words are proof fields or source provenance. There is no
+        // slot in v2 for a viewport bank/rung selector.
+    }
+
+    #[test]
+    fn radial_v3_layout_is_two_intrinsic_candidates_without_a_global_domain() {
+        let wide_dc = RadialCandidateV3 {
+            max_log2_dz: -30.0,
+            max_log2_dc: 2.0,
+            pole_max_log2_dz: f32::INFINITY,
+        };
+        let wide_dz = RadialCandidateV3 {
+            max_log2_dz: -10.0,
+            max_log2_dc: -20.0,
+            pole_max_log2_dz: f32::INFINITY,
+        };
+        let record = RadialValidityV3 {
+            affine_alpha: 0.5,
+            affine_alpha_exp: -20,
+            affine_beta: 2.0,
+            candidates: [
+                [wide_dc, wide_dz],
+                [RadialCandidateV3::DEAD; MAX_CAUCHY_CANDIDATES],
+                [RadialCandidateV3::DEAD; MAX_CAUCHY_CANDIDATES],
+            ],
+        };
+
+        assert_eq!(RADIAL_VALIDITY_VERSION, 3);
+        assert_eq!(RADIAL_VALIDITY_WORDS, 21);
+        assert_eq!(RADIAL_VALIDITY_BYTES, 84);
+        assert_eq!(core::mem::size_of::<RadialValidityV3>(), 84);
+        assert_eq!(RadialValidityV3::from_words(record.to_words()), record);
+
+        // Near the reference, the narrow-dc/wide-dz rectangle wins.
+        assert!(
+            record
+                .evaluate_logs(ValidityTier::Pade, -24.0, -11.0)
+                .accepts
+        );
+        // Farther away, the wide-dc endpoint remains useful.
+        assert!(record.evaluate_logs(ValidityTier::Pade, 0.0, -31.0).accepts);
+        let rejected = record.evaluate_logs(ValidityTier::Pade, 0.0, -11.0);
+        assert_eq!(rejected.rejection, RadialRejectionReason::RadialCap);
+        assert_ne!(rejected.rejection, RadialRejectionReason::OutOfDomain);
+    }
+
+    #[test]
+    fn radial_v3_pareto_reduction_keeps_only_the_two_useful_endpoints() {
+        let wide_dc = RadialCandidateV3 {
+            max_log2_dz: -30.0,
+            max_log2_dc: 2.0,
+            pole_max_log2_dz: f32::INFINITY,
+        };
+        let wide_dz = RadialCandidateV3 {
+            max_log2_dz: -10.0,
+            max_log2_dc: -20.0,
+            pole_max_log2_dz: f32::INFINITY,
+        };
+        let dominated = RadialCandidateV3 {
+            max_log2_dz: -35.0,
+            max_log2_dc: -4.0,
+            pole_max_log2_dz: f32::INFINITY,
+        };
+        assert_eq!(
+            radial_pareto_endpoints([dominated, wide_dz, wide_dc]),
+            [wide_dc, wide_dz]
+        );
+    }
+
+    #[test]
+    fn radial_v2_directed_boundaries_and_non_finite_inputs_reject_safely() {
+        let record = RadialValidityV2 {
+            pade_max_log2_dz: -20.0,
+            pade_max_log2_dc: -10.0,
+            pade_pole_max_log2_dz: -18.0,
+            ..RadialValidityV2::DEAD
+        };
+        let at = record.evaluate_logs(ValidityTier::Pade, -10.0, -10.0, -20.0);
+        assert!(
+            at.accepts,
+            "equality with both radial caps must be accepted"
+        );
+        let above_z = record.evaluate_logs(ValidityTier::Pade, -10.0, -10.0, next_up_f32(-20.0));
+        assert_eq!(above_z.rejection, RadialRejectionReason::RadialCap);
+        let above_dc = record.evaluate_logs(
+            ValidityTier::Pade,
+            -10.0,
+            next_up_f32(-10.0),
+            f32::NEG_INFINITY,
+        );
+        assert_eq!(above_dc.rejection, RadialRejectionReason::OutOfDomain);
+        assert_eq!(
+            record
+                .evaluate_logs(ValidityTier::Pade, -10.0, f32::NAN, -30.0)
+                .rejection,
+            RadialRejectionReason::NonFinite
+        );
+        assert_eq!(
+            record
+                .evaluate_logs(ValidityTier::Pade, -10.0, -20.0, f32::NAN)
+                .rejection,
+            RadialRejectionReason::NonFinite
+        );
+    }
+
+    #[test]
+    fn serialized_radial_evaluator_matches_uncompressed_caps_at_all_boundaries() {
+        let reference = -10.0_f64;
+        let envelope = ValidityEnvelope {
+            reference_dc: StaticDcCeiling {
+                max_log2_dc: Log2Limit(reference),
+            },
+            tiers: core::array::from_fn(|index| serializable_tier(ValidityTier::ALL[index])),
+        };
+        let candidates =
+            core::array::from_fn(|index| constant_candidate(index as u8, reference, -8.125));
+        let record = serialize_radial_validity_v2(
+            &envelope,
+            AffineCertificateSource {
+                alpha: 0.25,
+                beta: 2.0,
+            },
+            &candidates,
+        );
+
+        for tier in [
+            ValidityTier::Pade,
+            ValidityTier::MobiusCPlus,
+            ValidityTier::Jet,
+        ] {
+            let uncompressed = envelope.tiers[tier.index()]
+                .remainder
+                .radius_log2(reference)
+                .min(candidates[tier.index()].radius_log2(reference))
+                .min(
+                    envelope.tiers[tier.index()]
+                        .pole
+                        .radius
+                        .radius_log2(reference),
+                );
+            let edge =
+                record.evaluate_logs(tier, reference as f32, reference as f32, f32::NEG_INFINITY);
+            assert!(edge.radius_log2 as f64 <= uncompressed);
+            let radius = edge.radius_log2;
+            for (dz, expected) in [
+                (f32::NEG_INFINITY, true),
+                (next_down_f32(radius), true),
+                (radius, true),
+                (next_up_f32(radius), false),
+                (f32::INFINITY, false),
+                (f32::NAN, false),
+            ] {
+                assert_eq!(
+                    record
+                        .evaluate_logs(tier, reference as f32, reference as f32, dz)
+                        .accepts,
+                    expected,
+                    "tier {:?} dz {:?}",
+                    tier,
+                    dz
+                );
+            }
+            assert!(
+                record
+                    .evaluate_logs(
+                        tier,
+                        reference as f32,
+                        next_down_f32(reference as f32),
+                        radius,
+                    )
+                    .accepts
+            );
+            assert!(
+                !record
+                    .evaluate_logs(
+                        tier,
+                        reference as f32,
+                        next_up_f32(reference as f32),
+                        f32::NEG_INFINITY,
+                    )
+                    .accepts
+            );
+        }
+    }
+
+    #[test]
+    fn radial_affine_uses_reference_owned_alpha_minus_beta_dc() {
+        let envelope = diagnostic_envelope();
+        let candidates = core::array::from_fn(|_| constant_candidate(0, 0.0, 0.0));
+        let record = serialize_radial_validity_v2(
+            &envelope,
+            AffineCertificateSource {
+                alpha: 0.25,
+                beta: 2.0,
+            },
+            &candidates,
+        );
+        let zero_radius = record
+            .evaluate_logs(
+                ValidityTier::Affine,
+                0.0,
+                f32::NEG_INFINITY,
+                f32::NEG_INFINITY,
+            )
+            .radius_log2;
+        let zero_dc =
+            record.evaluate_logs(ValidityTier::Affine, 0.0, f32::NEG_INFINITY, zero_radius);
+        assert!(zero_dc.accepts);
+        let positive = record.evaluate_logs(ValidityTier::Affine, 0.0, -4.0, -4.0);
+        assert!(positive.accepts); // alpha-beta*dc = 1/8
+        let collapsed = record.evaluate_logs(ValidityTier::Affine, 0.0, -1.0, -40.0);
+        assert!(!collapsed.accepts);
+        assert_eq!(collapsed.rejection, RadialRejectionReason::Dead);
+    }
+
+    #[test]
+    fn reference_domain_selector_prefers_widest_z_cap_that_covers_domain() {
+        let sources = [
+            CauchySource {
+                log2_rz: 8.0,
+                log2_rc: -30.0,
+                log2_m: -40.0,
+                log2_mc: -40.0,
+            },
+            CauchySource {
+                log2_rz: 2.0,
+                log2_rc: -8.0,
+                log2_m: -40.0,
+                log2_mc: -40.0,
+            },
+            CauchySource {
+                log2_rz: 4.0,
+                log2_rc: -8.0,
+                log2_m: -40.0,
+                log2_mc: -40.0,
+            },
+        ];
+        let selected = select_reference_domain_cauchy_candidate(
+            &sources,
+            CauchyTierContext {
+                log2_a10: 0.0,
+                log2_b: 0.0,
+                epsilon: 1e-3,
+                rational: None,
+            },
+            -12.0,
+        );
+        assert_eq!(selected.source_index, 2);
+        assert!(selected.dc.accepts(-12.0));
+    }
+
+    #[test]
+    fn radial_rectangle_for_maximal_domain_is_sound_for_nested_domains() {
+        let envelope = ValidityEnvelope {
+            reference_dc: StaticDcCeiling {
+                max_log2_dc: Log2Limit(-8.0),
+            },
+            tiers: core::array::from_fn(|index| serializable_tier(ValidityTier::ALL[index])),
+        };
+        let candidates = core::array::from_fn(|_| constant_candidate(0, -8.0, -12.0));
+        let record = serialize_radial_validity_v2(
+            &envelope,
+            AffineCertificateSource {
+                alpha: 0.25,
+                beta: 0.0,
+            },
+            &candidates,
+        );
+        for log2_dc in [-8.0, -16.0, -64.0, f32::NEG_INFINITY] {
+            let edge = record.evaluate_logs(ValidityTier::Jet, -8.0, log2_dc, -20.0);
+            assert!(edge.accepts, "nested domain {} rejected", log2_dc);
+        }
+    }
+
+    #[test]
+    fn pure_c_and_degenerate_rational_proofs_emit_dead_radial_tiers() {
+        let mut envelope = diagnostic_envelope();
+        envelope.tiers[ValidityTier::Pade.index()] = serializable_tier(ValidityTier::Pade);
+        envelope.tiers[ValidityTier::Pade.index()]
+            .pure_c
+            .max_log2_dc = Log2Limit(-20.0);
+        let candidates = core::array::from_fn(|_| constant_candidate(0, 0.0, 0.0));
+        let record = serialize_radial_validity_v2(
+            &envelope,
+            AffineCertificateSource {
+                alpha: 0.25,
+                beta: 0.0,
+            },
+            &candidates,
+        );
+        assert_eq!(record.pade_max_log2_dz, f32::NEG_INFINITY);
+
+        envelope.tiers[ValidityTier::Pade.index()] = TierValidityEnvelope::dead(ValidityTier::Pade);
+        let degenerate = serialize_radial_validity_v2(
+            &envelope,
+            AffineCertificateSource {
+                alpha: 0.25,
+                beta: 0.0,
+            },
+            &candidates,
+        );
+        assert_eq!(degenerate.pade_pole_max_log2_dz, f32::NEG_INFINITY);
     }
 }

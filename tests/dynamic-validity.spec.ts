@@ -235,6 +235,9 @@ test("incremental Auto publishes a visible prefix before headroom and survives g
       activeRefId: engine.activeRef?.refId,
       levels: engine.incrementalTableLevelBlocks,
       levelMaxRadii: [...(engine.incrementalTableLayout?.maxDynamicRadius ?? [])],
+      certificateVersion: engine.radialCertificateVersion,
+      certificateWords: engine.radialCertificateWordsPerBlock,
+      viewportCertificateBuilds: engine.radialCertificateViewportBuildCount,
       flag: engine.lastShaderApproxFlag,
     };
   });
@@ -245,6 +248,9 @@ test("incremental Auto publishes a visible prefix before headroom and survives g
   expect(firstPrefix.levels[0]).toBeGreaterThan(0);
   expect(firstPrefix.levelMaxRadii.length).toBeGreaterThanOrEqual(firstPrefix.levels.length);
   expect(firstPrefix.levelMaxRadii.some((value: number) => Number.isFinite(value))).toBe(true);
+  expect(firstPrefix.certificateVersion).toBe(2);
+  expect(firstPrefix.certificateWords).toBe(12);
+  expect(firstPrefix.viewportCertificateBuilds).toBe(0);
   expect(firstPrefix.flag).toBe(6);
 
   await page.waitForFunction(() => {
@@ -283,6 +289,7 @@ test("incremental Auto publishes a visible prefix before headroom and survives g
       refId: engine.incrementalTableLayout?.refId,
       referenceResets: engine.referenceResetSerial,
       headerRefreshes: engine.optionalHeaderRefreshCount,
+      viewportCertificateBuilds: engine.radialCertificateViewportBuildCount,
       scale: frame.scaleStr ?? String(frame.scale),
       maxIterations: engine.currentMaxIterations,
     };
@@ -314,9 +321,12 @@ test("incremental Auto publishes a visible prefix before headroom and survives g
       refId: engine.incrementalTableLayout?.refId,
       referenceResets: engine.referenceResetSerial,
       headerRefreshes: engine.optionalHeaderRefreshCount,
+      viewportCertificateBuilds: engine.radialCertificateViewportBuildCount,
     };
   });
   expect(lifetimeAfter.headerRefreshes).toBeGreaterThan(lifetimeBefore.headerRefreshes);
+  expect(lifetimeAfter.viewportCertificateBuilds).toBe(0);
+  expect(lifetimeAfter.viewportCertificateBuilds).toBe(lifetimeBefore.viewportCertificateBuilds);
   expect(lifetimeAfter.coverage).toBeGreaterThanOrEqual(lifetimeBefore.coverage);
   expect(lifetimeAfter.built).toBeGreaterThanOrEqual(lifetimeBefore.built);
   expect(lifetimeAfter.capacity).toBe(lifetimeBefore.capacity);

@@ -618,6 +618,49 @@ fn mobius_block_bounds(
     b
 }
 
+/// Build the two rational views for one block over an explicit, intrinsic Rc
+/// ladder. Unlike `mobius_build_bounds_pair`, these rungs are supplied by the
+/// block/reference geometry and are not scaled from a viewport `c_max`.
+pub(crate) fn mobius_block_bounds_pair_for_rungs(
+    cplus: &MobiusBlock,
+    plain: &MobiusBlock,
+    orbit_seg: &[(f64, f64)],
+    log2_rc: &[f64; MOBIUS_NCAND],
+) -> (MobiusBounds, MobiusBounds) {
+    let seg = mobius_twoz(orbit_seg);
+    let mut out_c = MobiusBounds {
+        log2_rz: [f64::NEG_INFINITY; MOBIUS_NCAND],
+        log2_mq: [f64::INFINITY; MOBIUS_NCAND],
+    };
+    let mut out_p = out_c;
+    if cplus.m.degenerate || plain.m.degenerate {
+        return (out_c, out_p);
+    }
+    for index in 0..MOBIUS_NCAND {
+        let (log2_rz, log2_m) = mobius_bisect_rz(&seg, log2_rc[index]);
+        if !log2_rz.is_finite() || !log2_m.is_finite() {
+            continue;
+        }
+        for (block, output) in [(cplus, &mut out_c), (plain, &mut out_p)] {
+            let fac = lse2(&[
+                0.0,
+                cfe_log2(&block.m.d) + log2_rz,
+                cfe_log2(&block.m.dp) + log2_rz + log2_rc[index],
+                cfe_log2(&block.m.f) + log2_rc[index],
+            ]);
+            output.log2_rz[index] = log2_rz;
+            output.log2_mq[index] = lse2(&[
+                fac + log2_m,
+                cfe_log2(&block.m.a) + log2_rz,
+                cfe_log2(&block.m.n2) + 2.0 * log2_rz,
+                cfe_log2(&block.m.ap) + log2_rz + log2_rc[index],
+                cfe_log2(&block.m.b) + log2_rc[index],
+            ]);
+        }
+    }
+    (out_c, out_p)
+}
+
 pub fn mobius_build_bounds(
     levels: &[MobiusLevel],
     orbit: &[(f64, f64)],
