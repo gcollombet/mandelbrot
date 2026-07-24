@@ -291,26 +291,63 @@ fn solve_log2_theta(rhs: f64, bound: impl Fn(f64) -> f64) -> f64 {
     // the 159-wide bracket reaches it in ~27 halvings instead of 64. This is
     // the hottest transcendental loop of the block-certificate build.
     const RELATIVE_TOL: f64 = 1e-7;
+    // Bisection needs ~27 halvings on the 159-octave bracket while the target
+    // is nearly affine: every channel is `k * log2(theta)` plus a log-factor
+    // whose total variation over the whole bracket is ~1.2 octave, giving a
+    // slope in [6, 8.3] (`k` is JET_DS or JET_DS + 1). False position therefore
+    // lands within ~0.2 of the root on its first step and converges in a
+    // handful of evaluations.
+    //
+    // Two safeguards keep that robust rather than merely fast: a step that is
+    // not strictly inside the bracket falls back to bisection, and three
+    // consecutive steps retained on the same side force one bisection, which
+    // removes the stationary-endpoint stall of plain false position. The
+    // bracket invariant is unchanged, so `lo` is still a valid theta at every
+    // point and every early exit stays conservative.
+    const SAME_SIDE_LIMIT: u32 = 3;
+    // Distance to the root is at most `residual / slope`, and the slope is at
+    // least 6. Dividing by 1 instead keeps the test valid for any channel whose
+    // leading term is not weaker than `log2(theta)`.
     if !rhs.is_finite() {
         return DEAD_LOG2;
     }
-    if bound(THETA_MAX) <= rhs {
+    let bound_hi = bound(THETA_MAX);
+    if bound_hi <= rhs {
         return THETA_MAX;
     }
-    if bound(FLOOR) > rhs {
+    let bound_lo = bound(FLOOR);
+    if bound_lo > rhs {
         return DEAD_LOG2;
     }
     let mut lo = FLOOR;
     let mut hi = THETA_MAX;
+    let mut residual_lo = rhs - bound_lo; // >= 0: `lo` satisfies the bound
+    let mut residual_hi = rhs - bound_hi; // < 0: `hi` does not
+    let mut lo_streak = 0u32;
+    let mut hi_streak = 0u32;
     for _ in 0..64 {
-        if hi - lo <= RELATIVE_TOL * (1.0 + lo.abs()) {
+        let tolerance = RELATIVE_TOL * (1.0 + lo.abs());
+        if residual_lo <= tolerance || hi - lo <= tolerance {
             break;
         }
-        let mid = 0.5 * (lo + hi);
-        if bound(mid) <= rhs {
-            lo = mid;
+        let mut next = lo + residual_lo * (hi - lo) / (residual_lo - residual_hi);
+        let stalled = lo_streak >= SAME_SIDE_LIMIT || hi_streak >= SAME_SIDE_LIMIT;
+        if stalled || !(next > lo && next < hi) {
+            next = 0.5 * (lo + hi);
+            lo_streak = 0;
+            hi_streak = 0;
+        }
+        let residual = rhs - bound(next);
+        if residual >= 0.0 {
+            lo = next;
+            residual_lo = residual;
+            lo_streak += 1;
+            hi_streak = 0;
         } else {
-            hi = mid;
+            hi = next;
+            residual_hi = residual;
+            hi_streak += 1;
+            lo_streak = 0;
         }
     }
     lo
