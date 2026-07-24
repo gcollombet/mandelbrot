@@ -604,9 +604,12 @@ pub fn jet_block_bounds_moduli(
     twoz: &[(f64, i64)],
     log2_rc: f64,
 ) -> JetBlockBounds {
-    let moduli_log2 = |i: usize, j: usize| log2_a[jet_idx(i, j)];
-    let log2_a10 = moduli_log2(1, 0);
-    let log2_a20 = moduli_log2(2, 0);
+    jet_block_bounds_moduli_with_min(log2_a, twoz, log2_rc, jet_log2_min_2z(twoz))
+}
+
+/// `min_j log2 |2Z_j|` over a block segment. It depends only on the segment, so
+/// callers evaluating several R_c rungs of one block hoist it out of the loop.
+pub fn jet_log2_min_2z(twoz: &[(f64, i64)]) -> f64 {
     let mut log2_min_2z = f64::INFINITY;
     for &(m, e) in twoz {
         let l = if m > 0.0 {
@@ -616,6 +619,19 @@ pub fn jet_block_bounds_moduli(
         };
         log2_min_2z = log2_min_2z.min(l);
     }
+    log2_min_2z
+}
+
+/// `jet_block_bounds_moduli` with an externally hoisted `log2_min_2z`.
+pub fn jet_block_bounds_moduli_with_min(
+    log2_a: &[f64; JET_NCOEFF],
+    twoz: &[(f64, i64)],
+    log2_rc: f64,
+    log2_min_2z: f64,
+) -> JetBlockBounds {
+    let moduli_log2 = |i: usize, j: usize| log2_a[jet_idx(i, j)];
+    let log2_a10 = moduli_log2(1, 0);
+    let log2_a20 = moduli_log2(2, 0);
     // Nonlinearity-scale anchor; a degenerate a10 (Z ≈ 0 block start) or a20
     // leaves radii at zero via the solve, the anchor just needs to be finite.
     let base = if log2_a10.is_finite() && log2_a20.is_finite() {

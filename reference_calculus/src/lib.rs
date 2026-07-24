@@ -1838,18 +1838,9 @@ impl MandelbrotNavigator {
             self.unified_incremental_merge_coefficients_ms += wall_clock_ms() - started;
         }
         let started = wall_clock_ms();
-        let result = &self.result;
         let published_ranges = self
             .unified_incremental_builder
-            .compile_pending_validity_with(
-                orbit_len,
-                |index| {
-                    let step = result[index];
-                    (step.zx as f64, step.zy as f64)
-                },
-                epsilon,
-                envelope_quota.max(1) as usize,
-            )
+            .compile_pending_validity_for_len(orbit_len, epsilon, envelope_quota.max(1) as usize)
             .unwrap_or_else(|message| panic!("incremental unified validity failed: {}", message));
         self.unified_incremental_envelope_ms += wall_clock_ms() - started;
 

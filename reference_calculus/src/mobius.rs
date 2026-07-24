@@ -545,7 +545,7 @@ fn mobius_bisect_rz_hinted(twoz: &[(f64, i64)], log2_rc: f64, hint: f64) -> (f64
 ///       + |A|R_z + |N₂|R_z² + |A'|R_zR_c + |B|R_c.
 /// The seed moduli 2|Z_i| in mantissa/exponent form — the majorant walk's
 /// input (shared by the table build and the single-segment certificate).
-fn mobius_twoz(orbit: &[(f64, f64)]) -> Vec<(f64, i64)> {
+pub(crate) fn mobius_twoz(orbit: &[(f64, f64)]) -> Vec<(f64, i64)> {
     orbit
         .iter()
         .map(|&(zx, zy)| {
@@ -621,13 +621,14 @@ fn mobius_block_bounds(
 /// Build the two rational views for one block over an explicit, intrinsic Rc
 /// ladder. Unlike `mobius_build_bounds_pair`, these rungs are supplied by the
 /// block/reference geometry and are not scaled from a viewport `c_max`.
+/// `seg` carries the block's precomputed |2Z_j| values. The caller owns that
+/// array for the whole orbit, so a block certificate never rebuilds it.
 pub(crate) fn mobius_block_bounds_pair_for_rungs(
     cplus: &MobiusBlock,
     plain: &MobiusBlock,
-    orbit_seg: &[(f64, f64)],
+    seg: &[(f64, i64)],
     log2_rc: &[f64; MOBIUS_NCAND],
 ) -> (MobiusBounds, MobiusBounds) {
-    let seg = mobius_twoz(orbit_seg);
     let mut out_c = MobiusBounds {
         log2_rz: [f64::NEG_INFINITY; MOBIUS_NCAND],
         log2_mq: [f64::INFINITY; MOBIUS_NCAND],
@@ -637,7 +638,7 @@ pub(crate) fn mobius_block_bounds_pair_for_rungs(
         return (out_c, out_p);
     }
     for index in 0..MOBIUS_NCAND {
-        let (log2_rz, log2_m) = mobius_bisect_rz(&seg, log2_rc[index]);
+        let (log2_rz, log2_m) = mobius_bisect_rz(seg, log2_rc[index]);
         if !log2_rz.is_finite() || !log2_m.is_finite() {
             continue;
         }

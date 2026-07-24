@@ -284,6 +284,13 @@ fn log2_cauchy_pure_c_relative_factor(log2_theta: f64) -> f64 {
 fn solve_log2_theta(rhs: f64, bound: impl Fn(f64) -> f64) -> f64 {
     const FLOOR: f64 = -160.0;
     const THETA_MAX: f64 = -1.0;
+    // Every returned `lo` satisfies `bound(lo) <= rhs`, so stopping the
+    // bisection early is conservative by construction, never unsound. The
+    // solved theta only reaches the GPU through f32 log2 caps, whose ulp is
+    // ~1.2e-7 relative: refining below that cannot change an emitted bit, and
+    // the 159-wide bracket reaches it in ~27 halvings instead of 64. This is
+    // the hottest transcendental loop of the block-certificate build.
+    const RELATIVE_TOL: f64 = 1e-7;
     if !rhs.is_finite() {
         return DEAD_LOG2;
     }
@@ -296,6 +303,9 @@ fn solve_log2_theta(rhs: f64, bound: impl Fn(f64) -> f64) -> f64 {
     let mut lo = FLOOR;
     let mut hi = THETA_MAX;
     for _ in 0..64 {
+        if hi - lo <= RELATIVE_TOL * (1.0 + lo.abs()) {
+            break;
+        }
         let mid = 0.5 * (lo + hi);
         if bound(mid) <= rhs {
             lo = mid;
@@ -306,6 +316,38 @@ fn solve_log2_theta(rhs: f64, bound: impl Fn(f64) -> f64) -> f64 {
     lo
 }
 
+/// Memoizes `solve_log2_theta` within one block/tier compilation. Every solved
+/// channel has the shape `shift + factor_kind(theta) <= rhs`, so the solution
+/// depends only on `(kind, shift, rhs)`. The intrinsic Jet ladder emits 4 rungs
+/// x 8 R_z candidates per block, and the pure-c channel is shared by all
+/// candidates of one rung, so the same key recurs several times per block.
+#[derive(Default)]
+pub struct ThetaSolveCache {
+    entries: Vec<(u8, u64, u64, f64)>,
+}
+
+const THETA_KIND_VALUE: u8 = 0;
+const THETA_KIND_DERIVATIVE: u8 = 1;
+const THETA_KIND_CORRECTION: u8 = 2;
+const THETA_KIND_PURE_C: u8 = 3;
+
+impl ThetaSolveCache {
+    fn solve(&mut self, kind: u8, shift: f64, rhs: f64, factor: impl Fn(f64) -> f64) -> f64 {
+        let shift_bits = shift.to_bits();
+        let rhs_bits = rhs.to_bits();
+        if let Some(&(.., theta)) = self
+            .entries
+            .iter()
+            .find(|entry| entry.0 == kind && entry.1 == shift_bits && entry.2 == rhs_bits)
+        {
+            return theta;
+        }
+        let theta = solve_log2_theta(rhs, |log2_theta| shift + factor(log2_theta));
+        self.entries.push((kind, shift_bits, rhs_bits, theta));
+        theta
+    }
+}
+
 /// Convert one existing majorant polydisc into an independently sound static
 /// candidate. All tail factors are bounded on `theta <= 1/2`; the resulting
 /// value/derivative caps are emitted as slope-zero validity lines, while the
@@ -314,6 +356,39 @@ pub fn compile_cauchy_candidate(
     source_index: u8,
     source: CauchySource,
     context: CauchyTierContext,
+) -> CauchyCandidateEnvelope {
+    compile_cauchy_candidate_cached(
+        source_index,
+        source,
+        context,
+        true,
+        &mut ThetaSolveCache::default(),
+    )
+}
+
+/// `compile_cauchy_candidate` with an explicit solve cache and an optional
+/// value-tail line.
+///
+/// Dropping the value line is exact, not an approximation. The value and
+/// derivative channels share the same left-hand shift and the same `rhs`, and
+/// `log2_cauchy_derivative_factor >= log2_cauchy_value_factor + 2` holds over
+/// the whole `theta <= 1/2` bracket, so `theta_derivative <= theta_value`
+/// always. Consequently:
+///
+/// - `CombinedRadiusEnvelope::radius_log2` takes the min of both lines, which
+///   is the derivative line at every `dc`;
+/// - `domain_theta` mins both, which is again the derivative one;
+/// - the value channel can only be dead when the derivative channel is.
+///
+/// An empty value envelope means "unbounded by this channel" and reproduces
+/// those three results bit for bit. Callers that inspect `tail.value` as a
+/// standalone certificate (the legacy v2 selection path) must keep it live.
+pub fn compile_cauchy_candidate_cached(
+    source_index: u8,
+    source: CauchySource,
+    context: CauchyTierContext,
+    value_line: bool,
+    cache: &mut ThetaSolveCache,
 ) -> CauchyCandidateEnvelope {
     if !source.log2_rz.is_finite()
         || !source.log2_rc.is_finite()
@@ -332,13 +407,24 @@ pub fn compile_cauchy_candidate(
         0.0
     };
     let value_rhs = log2_tail_budget + context.log2_a10;
-    let value_theta = solve_log2_theta(value_rhs, |theta| {
-        source.log2_m - source.log2_rz + rational_value_amp + log2_cauchy_value_factor(theta)
-    });
+    let tail_shift = source.log2_m - source.log2_rz + rational_value_amp;
+    let value_theta = if value_line {
+        cache.solve(
+            THETA_KIND_VALUE,
+            tail_shift,
+            value_rhs,
+            log2_cauchy_value_factor,
+        )
+    } else {
+        f64::INFINITY
+    };
 
-    let derivative_theta_qz = solve_log2_theta(value_rhs, |theta| {
-        source.log2_m - source.log2_rz + rational_value_amp + log2_cauchy_derivative_factor(theta)
-    });
+    let derivative_theta_qz = cache.solve(
+        THETA_KIND_DERIVATIVE,
+        tail_shift,
+        value_rhs,
+        log2_cauchy_derivative_factor,
+    );
     let derivative_theta = if let Some(factors) = context.rational {
         // Bound |D + D'c| over the full static theta<=1/2 rung, then solve the
         // Q/DEN² correction independently. Zero D/D' makes it disappear.
@@ -354,9 +440,12 @@ pub fn compile_cauchy_candidate(
             }
         };
         if log2_de.is_finite() {
-            let correction_theta = solve_log2_theta(value_rhs, |theta| {
-                source.log2_m + log2_de + (16.0f64 / 9.0).log2() + log2_cauchy_total_factor(theta)
-            });
+            let correction_theta = cache.solve(
+                THETA_KIND_CORRECTION,
+                source.log2_m + log2_de + (16.0f64 / 9.0).log2(),
+                value_rhs,
+                log2_cauchy_total_factor,
+            );
             derivative_theta_qz.min(correction_theta)
         } else {
             derivative_theta_qz
@@ -365,11 +454,12 @@ pub fn compile_cauchy_candidate(
         derivative_theta_qz
     };
     let pure_c_rhs = log2_tail_budget + context.log2_b;
-    let pure_c_theta = solve_log2_theta(pure_c_rhs, |theta| {
-        source.log2_mc - source.log2_rc
-            + rational_value_amp
-            + log2_cauchy_pure_c_relative_factor(theta)
-    });
+    let pure_c_theta = cache.solve(
+        THETA_KIND_PURE_C,
+        source.log2_mc - source.log2_rc + rational_value_amp,
+        pure_c_rhs,
+        log2_cauchy_pure_c_relative_factor,
+    );
     if value_theta == DEAD_LOG2 || derivative_theta == DEAD_LOG2 || pure_c_theta == DEAD_LOG2 {
         return CauchyCandidateEnvelope::dead();
     }
@@ -385,11 +475,18 @@ pub fn compile_cauchy_candidate(
         },
         max_log2_dz: Log2Limit(source.log2_rz - 1.0),
         tail: CombinedRadiusEnvelope {
+            // Empty = unbounded by this channel. See the doc comment: the
+            // derivative line is pointwise below the value line, so omitting
+            // the latter leaves every consumed quantity unchanged.
             value: RadiusLineEnvelope {
-                lines: vec![ValidityLine {
-                    intercept: source.log2_rz + value_theta,
-                    dc_slope: 0.0,
-                }],
+                lines: if value_line {
+                    vec![ValidityLine {
+                        intercept: source.log2_rz + value_theta,
+                        dc_slope: 0.0,
+                    }]
+                } else {
+                    Vec::new()
+                },
             },
             derivative: RadiusLineEnvelope {
                 lines: vec![ValidityLine {
@@ -2258,17 +2355,24 @@ pub fn serialize_radial_validity_v3(
         }
     }
     for tier in 1..4usize {
-        let rectangles = sources[tier]
+        // One cache per tier: `rhs` is a tier constant, so every solve of this
+        // loop is keyed by its shift alone. The Jet ladder shares one pure-c
+        // channel across the 8 R_z candidates of a rung.
+        let mut cache = ThetaSolveCache::default();
+        let rectangles: Vec<RadialCandidateV3> = sources[tier]
             .iter()
             .enumerate()
             .map(|(source_index, source)| {
-                let candidate = compile_cauchy_candidate(
+                let candidate = compile_cauchy_candidate_cached(
                     source_index.min(u8::MAX as usize) as u8,
                     *source,
                     contexts[tier],
+                    false,
+                    &mut cache,
                 );
                 radial_candidate_v3(&low_degree[tier], &pure_c[tier], &poles[tier], &candidate)
-            });
+            })
+            .collect();
         out.candidates[tier - 1] = radial_pareto_endpoints(rectangles);
     }
     out

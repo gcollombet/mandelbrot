@@ -34,8 +34,9 @@
 
 use crate::jet::JetBlockBounds;
 use crate::jet::{
-    cfe_to_coeff, fe_exp2, jet_block_bounds_moduli, jet_idx, jet_seed, jet_solve_radii, sfe_norm,
-    CFe, JetCoeffFe, JetF64, JetLevel, JET_MONOMIALS, JET_NCOEFF,
+    cfe_to_coeff, fe_exp2, jet_block_bounds_moduli, jet_block_bounds_moduli_with_min, jet_idx,
+    jet_log2_min_2z, jet_seed, jet_solve_radii, sfe_norm, CFe, JetCoeffFe, JetF64, JetLevel,
+    JET_MONOMIALS, JET_NCOEFF, JET_RZ_CANDIDATES,
 };
 // The unified record shares the 7-coefficient [2/1] F-form extraction with
 // the standalone mobius mode (`mobius_from_jet_k2`, numerator (N₂z + A + A'c)z
@@ -47,8 +48,8 @@ use crate::jet::{
 use crate::mobius::{
     mobius_apply, mobius_block_bounds_pair_for_rungs, mobius_build_bounds_pair,
     mobius_build_derivative_radii, mobius_build_radii, mobius_certify_segment_value,
-    mobius_from_jet, mobius_from_jet_k2, mobius_q, MobiusBlock, MobiusBoundsTable, MobiusCPlus,
-    MobiusLevel, MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP, MOBIUS_NCAND,
+    mobius_from_jet, mobius_from_jet_k2, mobius_q, MobiusBlock, MobiusBounds, MobiusBoundsTable,
+    MobiusCPlus, MobiusLevel, MOBIUS_F32_SAFE_LOG2, MOBIUS_MIN_EMIT_SKIP, MOBIUS_NCAND,
 };
 use crate::validity::{
     derive_derivative_radius_lines, derive_pure_c_threshold, derive_rational_pole_lines,
@@ -407,6 +408,10 @@ fn merge_affine_reference_certificate(
 pub struct IncrementalUnifiedBuilder {
     max_skip: usize,
     next_orbit_index: usize,
+    /// |2Z_j| for the whole appended orbit suffix, `twoz[k]` covering orbit
+    /// index `k + 1`. Certificates slice it instead of rebuilding it per block
+    /// and per level, which is where the old build paid an extra O(n log n).
+    twoz: Vec<(f64, i64)>,
     pending: Vec<Option<PendingUnifiedBlock>>,
     levels: Vec<IncrementalUnifiedLevel>,
     validity_key: Option<u64>,
@@ -431,6 +436,7 @@ impl IncrementalUnifiedBuilder {
         Self {
             max_skip,
             next_orbit_index: 1,
+            twoz: Vec::new(),
             pending: vec![None; level_count],
             levels,
             validity_key: None,
@@ -471,6 +477,8 @@ impl IncrementalUnifiedBuilder {
     /// per-level vectors while the binary carry is running.
     pub fn reserve_for_orbit_len(&mut self, orbit_len: usize) {
         let available_steps = orbit_len.saturating_sub(1);
+        self.twoz
+            .reserve(available_steps.saturating_sub(self.twoz.len()));
         for level in &mut self.levels {
             if level.skip < MOBIUS_MIN_EMIT_SKIP {
                 continue;
@@ -560,6 +568,10 @@ impl IncrementalUnifiedBuilder {
             let start = self.next_orbit_index;
             self.next_orbit_index += 1;
             new_seeds += 1;
+            // Same expression as `mobius_twoz`, so Möbius and Jet majorant
+            // walks keep reading one shared array.
+            self.twoz
+                .push(crate::jet::sfe_norm(2.0 * (zx * zx + zy * zy).sqrt(), 0));
             self.push_completed_jet(
                 0,
                 PendingUnifiedBlock {
@@ -706,22 +718,19 @@ impl IncrementalUnifiedBuilder {
         epsilon: f64,
         block_quota: usize,
     ) -> Result<Vec<IncrementalUnifiedRange>, String> {
-        self.compile_pending_validity_with(orbit.len(), |index| orbit[index], epsilon, block_quota)
+        self.compile_pending_validity_for_len(orbit.len(), epsilon, block_quota)
     }
 
-    /// Accessor variant used by the WASM navigator. Only orbit samples needed
-    /// by the not-yet-certified slots are read, so a cooperative unit is
-    /// proportional to the new ranges rather than to the complete prefix.
-    pub fn compile_pending_validity_with<F>(
+    /// Variant used by the WASM navigator. `orbit_len` is only the caller's
+    /// coverage claim: the |2Z_j| values themselves come from the builder's own
+    /// array, appended once when the orbit was consumed, so a cooperative unit
+    /// re-reads no orbit sample at all.
+    pub fn compile_pending_validity_for_len(
         &mut self,
         orbit_len: usize,
-        mut orbit_at: F,
         epsilon: f64,
         block_quota: usize,
-    ) -> Result<Vec<IncrementalUnifiedRange>, String>
-    where
-        F: FnMut(usize) -> (f64, f64),
-    {
+    ) -> Result<Vec<IncrementalUnifiedRange>, String> {
         let key = epsilon.to_bits();
         if let Some(previous) = self.validity_key {
             if previous != key && self.cumulative_envelopes > 0 {
@@ -750,26 +759,24 @@ impl IncrementalUnifiedBuilder {
             }
             let first = 1 + slot_start * skip;
             let last = 1 + slot_end * skip;
-            if last > orbit_len {
+            if last > orbit_len || last > self.twoz.len() + 1 {
                 return Err(format!(
                     "incremental validity orbit too short: need {last}, have {}",
-                    orbit_len
+                    orbit_len.min(self.twoz.len() + 1)
                 ));
-            }
-            let mut local_orbit = Vec::with_capacity(last - first);
-            for index in first..last {
-                local_orbit.push(orbit_at(index));
             }
             let mut compiled = Vec::with_capacity(slot_end - slot_start);
             for local_slot in 0..(slot_end - slot_start) {
                 let global_slot = slot_start + local_slot;
-                let segment_start = local_slot * skip;
+                // twoz[k] is orbit index k+1, so the block segment starts at
+                // its own first orbit step minus that offset.
+                let segment_start = first - 1 + local_slot * skip;
                 let segment_end = segment_start + skip;
                 let radial = unified_intrinsic_radial_validity_for_block(
                     &self.levels[level_index].blocks[global_slot],
                     &self.levels[level_index].moduli[global_slot],
                     self.levels[level_index].affine[slot_start + local_slot],
-                    &local_orbit[segment_start..segment_end],
+                    &self.twoz[segment_start..segment_end],
                     epsilon,
                 );
                 compiled.push(radial);
@@ -806,7 +813,8 @@ impl IncrementalUnifiedBuilder {
 
     fn update_peak_retained_bytes(&mut self) {
         let pending = self.pending.iter().filter(|entry| entry.is_some()).count()
-            * core::mem::size_of::<PendingUnifiedBlock>();
+            * core::mem::size_of::<PendingUnifiedBlock>()
+            + self.twoz.capacity() * core::mem::size_of::<(f64, i64)>();
         let completed = self.levels.iter().fold(0usize, |sum, level| {
             sum + level.blocks.capacity() * core::mem::size_of::<UnifiedBlock>()
                 + level.moduli.capacity() * core::mem::size_of::<UnifiedModuli>()
@@ -1283,10 +1291,13 @@ fn intrinsic_log2_rc_rungs(blk: &UnifiedBlock, md: &UnifiedModuli) -> [f64; MOBI
     }
 }
 
+/// `twoz` is the block segment of the reference-wide |2Z_j| array owned by the
+/// caller. Both the Möbius bisection and the Jet ladder read it directly, so a
+/// block certificate performs no per-rung and no per-tier recomputation of it.
 fn unified_intrinsic_cauchy_sources(
     blk: &UnifiedBlock,
     md: &UnifiedModuli,
-    orbit_segment: &[(f64, f64)],
+    twoz: &[(f64, i64)],
 ) -> [Vec<CauchySource>; 4] {
     let log2_rc = intrinsic_log2_rc_rungs(blk, md);
     let cplus = MobiusBlock {
@@ -1302,50 +1313,47 @@ fn unified_intrinsic_cauchy_sources(
         log2_q: md.log2_q_plain,
     };
     let (cplus_bounds, plain_bounds) =
-        mobius_block_bounds_pair_for_rungs(&cplus, &plain, orbit_segment, &log2_rc);
+        mobius_block_bounds_pair_for_rungs(&cplus, &plain, twoz, &log2_rc);
 
-    let twoz: Vec<(f64, i64)> = orbit_segment
-        .iter()
-        .map(|&(zx, zy)| sfe_norm(2.0 * zx.hypot(zy), 0))
-        .collect();
-    let jet_sources: Vec<CauchySource> = log2_rc
-        .iter()
-        .flat_map(|&rung| {
-            IntoIterator::into_iter(jet_block_bounds_moduli(&md.log2_a, &twoz, rung).cand)
-                .map(|candidate| CauchySource {
-                    log2_rz: candidate.log2_rz,
-                    log2_rc: candidate.log2_rc,
-                    log2_m: candidate.log2_m,
-                    log2_mc: candidate.log2_mc,
-                })
-                .collect::<Vec<_>>()
-        })
-        .collect();
+    // Hoisted out of the rung loop: it depends on the segment alone.
+    let log2_min_2z = jet_log2_min_2z(twoz);
+    let mut jet_sources: Vec<CauchySource> = Vec::with_capacity(MOBIUS_NCAND * JET_RZ_CANDIDATES);
+    for &rung in &log2_rc {
+        jet_sources.extend(
+            IntoIterator::into_iter(
+                jet_block_bounds_moduli_with_min(&md.log2_a, twoz, rung, log2_min_2z).cand,
+            )
+            .map(|candidate| CauchySource {
+                log2_rz: candidate.log2_rz,
+                log2_rc: candidate.log2_rc,
+                log2_m: candidate.log2_m,
+                log2_mc: candidate.log2_mc,
+            }),
+        );
+    }
 
-    core::array::from_fn(|tier| {
-        if blk.m.degenerate && (tier == TIER_PADE || tier == TIER_CPLUS) {
+    let rational_sources = |bounds: &MobiusBounds| -> Vec<CauchySource> {
+        if blk.m.degenerate {
             return Vec::new();
         }
-        match tier {
-            TIER_PADE => (0..MOBIUS_NCAND)
-                .map(|index| CauchySource {
-                    log2_rz: plain_bounds.log2_rz[index],
-                    log2_rc: log2_rc[index],
-                    log2_m: plain_bounds.log2_mq[index],
-                    log2_mc: plain_bounds.log2_mq[index],
-                })
-                .collect(),
-            TIER_CPLUS => (0..MOBIUS_NCAND)
-                .map(|index| CauchySource {
-                    log2_rz: cplus_bounds.log2_rz[index],
-                    log2_rc: log2_rc[index],
-                    log2_m: cplus_bounds.log2_mq[index],
-                    log2_mc: cplus_bounds.log2_mq[index],
-                })
-                .collect(),
-            _ => jet_sources.clone(),
-        }
-    })
+        (0..MOBIUS_NCAND)
+            .map(|index| CauchySource {
+                log2_rz: bounds.log2_rz[index],
+                log2_rc: log2_rc[index],
+                log2_m: bounds.log2_mq[index],
+                log2_mc: bounds.log2_mq[index],
+            })
+            .collect()
+    };
+    // Affine reads no Cauchy source (`serialize_radial_validity_v3` starts at
+    // tier 1): its slot stays empty rather than carrying a clone of the Jet
+    // ladder, which the serializer would never open.
+    [
+        Vec::new(),
+        rational_sources(&plain_bounds),
+        rational_sources(&cplus_bounds),
+        jet_sources,
+    ]
 }
 
 fn unified_cauchy_contexts(blk: &UnifiedBlock, epsilon: f64) -> [CauchyTierContext; 4] {
@@ -1513,10 +1521,10 @@ pub fn unified_intrinsic_radial_validity_for_block(
     blk: &UnifiedBlock,
     md: &UnifiedModuli,
     affine: AffineReferenceCertificate,
-    orbit_segment: &[(f64, f64)],
+    twoz_segment: &[(f64, i64)],
     epsilon: f64,
 ) -> RadialValidityV3 {
-    let sources = unified_intrinsic_cauchy_sources(blk, md, orbit_segment);
+    let sources = unified_intrinsic_cauchy_sources(blk, md, twoz_segment);
     unified_radial_validity_v3_from_sources(blk, md, affine, epsilon, sources)
 }
 
@@ -3195,7 +3203,7 @@ mod tests {
     }
 
     #[test]
-    fn incremental_validity_accessor_reads_only_the_new_block_span() {
+    fn incremental_validity_unit_rescans_no_orbit_sample() {
         let orbit = ref_orbit_f64(-0.75, 0.0, 4096);
         let mut builder = IncrementalUnifiedBuilder::new(1 << 12);
         builder.reserve_for_orbit_len(orbit.len());
@@ -3226,27 +3234,56 @@ mod tests {
             .collect();
         assert_eq!(appended_capacities, reserved_capacities);
 
-        let mut reads = Vec::new();
+        // |2Z_j| is derived once, when the orbit is appended. A certificate
+        // unit therefore consumes no orbit sample at all: it slices the
+        // builder's own array, which is what removes the per-block, per-level
+        // rebuild the earlier accessor contract still paid for.
         let ranges = builder
-            .compile_pending_validity_with(
-                orbit.len(),
-                |index| {
-                    reads.push(index);
-                    orbit[index]
-                },
-                1e-3,
-                1,
-            )
+            .compile_pending_validity_for_len(orbit.len(), 1e-3, 1)
             .expect("single-block validity unit");
 
         assert_eq!(ranges.len(), 1);
         assert_eq!(ranges[0].skip, MOBIUS_MIN_EMIT_SKIP);
         assert_eq!(ranges[0].slot_start, 0);
         assert_eq!(ranges[0].slot_count, 1);
-        assert_eq!(reads, (1..=MOBIUS_MIN_EMIT_SKIP).collect::<Vec<_>>());
-        assert!(
-            reads.len() < orbit.len() / 100,
-            "cooperative validity unit rescanned the orbit prefix"
+        assert_eq!(builder.twoz.len(), orbit.len() - 1);
+    }
+
+    #[test]
+    fn shared_twoz_matches_the_per_block_derivation() {
+        let orbit = ref_orbit_f64(-0.743643887037151, 0.131825904205330, 512);
+        let mut builder = IncrementalUnifiedBuilder::new(1 << 8);
+        builder
+            .append_orbit_slice(1, &orbit[1..])
+            .expect("append orbit");
+        let expected = crate::mobius::mobius_twoz(&orbit[1..]);
+        assert_eq!(builder.twoz, expected);
+    }
+
+    #[test]
+    #[ignore]
+    fn intrinsic_certificate_build_timing() {
+        use std::time::Instant;
+
+        let orbit = ref_orbit_f64(-0.75, 0.0, 32768);
+        let mut builder = IncrementalUnifiedBuilder::new(1 << 15);
+        builder.reserve_for_orbit_len(orbit.len());
+        let append_t0 = Instant::now();
+        builder
+            .append_orbit_slice(1, &orbit[1..])
+            .expect("timing append");
+        let append_ms = append_t0.elapsed().as_secs_f64() * 1000.0;
+        let certify_t0 = Instant::now();
+        builder
+            .compile_pending_validity(&orbit, 1e-3, usize::MAX)
+            .expect("timing certificates");
+        let certify_ms = certify_t0.elapsed().as_secs_f64() * 1000.0;
+        println!(
+            "intrinsic build @{}: carry={:.1}ms certificates={:.1}ms blocks={}",
+            orbit.len(),
+            append_ms,
+            certify_ms,
+            builder.cumulative_envelopes(),
         );
     }
 
