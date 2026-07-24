@@ -681,6 +681,15 @@ export class Engine {
      * pipelines; the performance panel/tests can opt into a specialized
      * diagnostic kernel without slowing ordinary block rendering. */
     private dynamicValidityStatsEnabled = false
+    /** Work instrumentation (realMean/covMean/maxAccum/tier mix). Feeds the
+     *  performance panel only — no render decision reads it — so it is compiled
+     *  out of the kernel until a consumer asks for it. */
+    private workStatsEnabled = false
+    /** Workgroup-aligned bounding box of the rotated viewport inside the neutral
+     *  square, in texels. The iteration kernel is dispatched over it instead of
+     *  the whole square; every texel left out is one `is_inside_rotated_screen`
+     *  already rejects, so no computed state is ever dropped or invalidated. */
+    private dispatchBox = { x: 0, y: 0, width: 0, height: 0 }
     private incrementalReferenceTable = true
     private incrementalTableLayout: IncrementalTableLayout | null = null
     private currentOptionalHeaders?: OptionalHeadersPayload
@@ -1921,7 +1930,7 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 12, // 10 floats + padding to 16-byte alignment (48 bytes)
+            size: 4 * 16, // 14 floats padded to 16-byte alignment (64 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
@@ -2388,7 +2397,10 @@ export class Engine {
             && this.incrementalTableLayout !== null
         const dynamicStats = dynamicValidity
             && (this.dynamicValidityStatsEnabled || this.dynamicValidityShadow)
-        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}`
+        // Work instrumentation is panel-only; keep it out of the production
+        // kernel so ordinary rendering pays none of its workgroup atomics.
+        const workStats = this.workStatsEnabled || dynamicStats
+        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}w${workStats ? 1 : 0}`
         let pipeline = this.inplacePipelineCache.get(key)
         if (!pipeline) {
             pipeline = this.device.createComputePipeline({
@@ -2403,9 +2415,10 @@ export class Engine {
                         ENABLE_DYNAMIC_VALIDITY: dynamicValidity ? 1 : 0,
                         ENABLE_RADIAL_VALIDITY: radialValidity ? 1 : 0,
                         ENABLE_DYNAMIC_STATS: dynamicStats ? 1 : 0,
+                        ENABLE_WORK_STATS: workStats ? 1 : 0,
                     },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats})`,
             })
             this.inplacePipelineCache.set(key, pipeline)
         }
@@ -3941,6 +3954,19 @@ export class Engine {
         return this.dynamicValidityStatsEnabled
     }
 
+    getWorkStatsEnabled(): boolean {
+        return this.workStatsEnabled
+    }
+
+    /** Enable the panel-only work counters. Off by default: they cost seven
+     *  workgroup atomics per active texel plus a per-workgroup init/flush. */
+    setWorkStatsEnabled(on: boolean) {
+        if (on === this.workStatsEnabled) return
+        this.workStatsEnabled = on
+        this.invalidateCounterReadback()
+        this.needRender = true
+    }
+
     setDynamicValidityStatsEnabled(on: boolean) {
         if (on === this.dynamicValidityStatsEnabled) return
         this.dynamicValidityStatsEnabled = on
@@ -4901,6 +4927,29 @@ export class Engine {
 
         const allowRefinement = gateOpen ? 1 : 0
 
+        // Bounding box of the rotated viewport: the visible rectangle spans
+        // ±aspect × ±1 in rotated neutral units, so its axis-aligned half
+        // extents are aspect·|cos| + |sin| and aspect·|sin| + |cos|, divided by
+        // the neutral extent and scaled to texels. Snapped outward to the 8×8
+        // workgroup grid.
+        const angleForBox = this.previousMandelbrot.angle
+        const neutralExtent = Math.sqrt(aspect * aspect + 1)
+        const absCos = Math.abs(Math.cos(angleForBox))
+        const absSin = Math.abs(Math.sin(angleForBox))
+        const halfTexels = this.neutralSize / 2
+        const halfX = ((aspect * absCos + absSin) / neutralExtent) * halfTexels
+        const halfY = ((aspect * absSin + absCos) / neutralExtent) * halfTexels
+        const boxX = Math.max(0, Math.floor((halfTexels - halfX) / 8) * 8)
+        const boxY = Math.max(0, Math.floor((halfTexels - halfY) / 8) * 8)
+        const boxRight = Math.min(this.neutralSize, Math.ceil((halfTexels + halfX) / 8) * 8)
+        const boxBottom = Math.min(this.neutralSize, Math.ceil((halfTexels + halfY) / 8) * 8)
+        this.dispatchBox = {
+            x: boxX,
+            y: boxY,
+            width: Math.max(8, boxRight - boxX),
+            height: Math.max(8, boxBottom - boxY),
+        }
+
         const brushUniforms = new Float32Array([
             aspect,
             this.previousMandelbrot.angle,
@@ -4914,6 +4963,8 @@ export class Engine {
             gridOffsetY,
             isZoomActive(this.zoomState) ? zoomMinBrushStep : 0,
             allowRefinement,
+            this.dispatchBox.x,
+            this.dispatchBox.y,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
@@ -5126,8 +5177,14 @@ export class Engine {
             computePass.setBindGroup(0, this.bindGroupInplace!)
             // cs_main is @workgroup_size(8,8) — smaller tiles reduce intra-workgroup
             // lockstep divergence waste (one deep straggler holds 64 lanes, not 256).
-            const workgroups = Math.ceil(this.neutralSize / 8)
-            computePass.dispatchWorkgroups(workgroups, workgroups)
+            // The grid covers the rotated viewport's bounding box rather than the
+            // whole neutral square: cs_main offsets its global id by
+            // brush.dispatchOrigin, and the texels outside the box are exactly
+            // those it already culls.
+            computePass.dispatchWorkgroups(
+                Math.max(1, Math.ceil(this.dispatchBox.width / 8)),
+                Math.max(1, Math.ceil(this.dispatchBox.height / 8)),
+            )
             computePass.end()
 
             // The fused pass accumulates the counters every frame; only the
@@ -5175,19 +5232,16 @@ export class Engine {
             && !this.hasPendingCounterReadbackForCurrentGeneration()
 
         if (!skipResolve) {
-            // Pre-fill resolved with A so resolve.wgsl can discard pass-through
-            // pixels and only write sentinels / unfinished anchors that need snapping.
-            // A has 9 layers, resolved 8 — the continuation-only layer 8 is
-            // never displayed, copy the 8 display layers.
-            commandEncoder.copyTextureToTexture(
-                { texture: this.rawTexture },
-                { texture: this.resolvedTexture },
-                { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: DISPLAY_LAYERS },
-            )
-
-            // Pass 2: resolve des sentinelles (A -> resolved)
+            // Pass 2: resolve des sentinelles (A -> resolved).
+            // resolve.wgsl writes EVERY texel — snapped sentinels and verbatim
+            // pass-through alike — so the former copyTextureToTexture pre-fill
+            // is gone and the attachments need no load. On a tile-based GPU that
+            // takes the stage from four traversals of the 8 r32float display
+            // layers (copy read + copy write + attachment load + attachment
+            // store) down to two. Discarding never saved the store, so the
+            // pass-through writes cost nothing that was not already paid.
             const rpassResolve = commandEncoder.beginRenderPass({
-                colorAttachments: makeMrtAttachments(this.resolvedLayerViews, 'load'),
+                colorAttachments: makeMrtAttachments(this.resolvedLayerViews, 'clear'),
                 timestampWrites: this.tsWrites(4),
             })
             rpassResolve.setPipeline(this.pipelineResolve)

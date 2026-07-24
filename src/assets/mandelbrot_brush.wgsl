@@ -104,6 +104,14 @@ override ENABLE_RADIAL_VALIDITY: bool = false;
 // keep them in a separate specialized pipeline and enable them only on demand.
 override ENABLE_DYNAMIC_STATS: bool = false;
 
+// Work instrumentation (realMean / covMean / maxAccum / maxSteps and the tier
+// application mix). Same nature as ENABLE_DYNAMIC_STATS: it feeds the
+// performance panel only — no render decision reads it — yet it used to cost
+// seven UNGUARDED workgroup atomics per active texel, all 64 lanes hitting the
+// same handful of addresses, plus ~20 init stores and ~13 global atomics per
+// workgroup per dispatch. Enabled on demand by the panel.
+override ENABLE_WORK_STATS: bool = false;
+
 struct BlaStep {
   // floatexp form: a = (ax,ay)·2^ab_exp, b = (bx,by)·2^ab_exp,
   // alpha = radius_alpha·2^alpha_exp, beta = radius_beta (O(1)).
@@ -149,6 +157,16 @@ struct BrushUniforms {
   gridOffsetY: f32,
   minBrushStep: f32,    // minimum sentinel refinement step (0 = no limit)
   allowRefinement: f32, // 1.0 = refine sentinels normally, 0.0 = freeze grid
+  // Origin of the dispatched region, in texels, workgroup-aligned. The neutral
+  // texture is the square circumscribing the rotated viewport, so at low
+  // rotation angles more than half its texels can never satisfy
+  // `is_inside_rotated_screen` and every one of their workgroups launches only
+  // to cull itself. The host dispatches the viewport's bounding box instead and
+  // passes its origin here. Nothing is cleared or invalidated: the texels left
+  // out are exactly those the per-texel test already rejects, so rotating the
+  // view simply moves the box and keeps every previously computed texel.
+  dispatchOriginX: f32,
+  dispatchOriginY: f32,
 };
 
 struct CounterBuffer {
@@ -3400,31 +3418,38 @@ var<workgroup> wgDynamicExactFallbacks: atomic<u32>;
 
 @compute @workgroup_size(8, 8)
 fn cs_main(
-  @builtin(global_invocation_id) gid: vec3<u32>,
+  @builtin(global_invocation_id) local_gid: vec3<u32>,
   @builtin(local_invocation_index) lidx: u32,
 ) {
+  let gid = vec3<u32>(
+    local_gid.x + u32(brush.dispatchOriginX),
+    local_gid.y + u32(brush.dispatchOriginY),
+    local_gid.z,
+  );
   if (lidx == 0u) {
     atomicStore(&wgCount, 0u);
     atomicStore(&wgActive, 0u);
-    atomicStore(&wgRealSum, 0u);
-    atomicStore(&wgRealMax, 0u);
-    atomicStore(&wgCovSum, 0u);
-    for (var t = 0; t < 4; t++) {
-      atomicStore(&wgTier[t], 0u);
-      if (ENABLE_DYNAMIC_STATS) {
-        atomicStore(&wgDynamicTierAttempts[t], 0u);
-        atomicStore(&wgDynamicTierAccepts[t], 0u);
-        atomicStore(&wgDynamicSkipBuckets[t], 0u);
+    if (ENABLE_WORK_STATS) {
+      atomicStore(&wgRealSum, 0u);
+      atomicStore(&wgRealMax, 0u);
+      atomicStore(&wgCovSum, 0u);
+      for (var t = 0; t < 4; t++) {
+        atomicStore(&wgTier[t], 0u);
+        if (ENABLE_DYNAMIC_STATS) {
+          atomicStore(&wgDynamicTierAttempts[t], 0u);
+          atomicStore(&wgDynamicTierAccepts[t], 0u);
+          atomicStore(&wgDynamicSkipBuckets[t], 0u);
+        }
       }
+      atomicStore(&wgGateJumps, 0u);
+      atomicStore(&wgGateFails, 0u);
+      atomicStore(&wgSecoursApps, 0u);
+      atomicStore(&wgSecoursIters, 0u);
+      atomicStore(&wgAppsF32, 0u);
+      atomicStore(&wgRenormApps, 0u);
+      atomicStore(&wgRenormIters, 0u);
     }
-    atomicStore(&wgGateJumps, 0u);
-    atomicStore(&wgGateFails, 0u);
-    atomicStore(&wgSecoursApps, 0u);
-    atomicStore(&wgSecoursIters, 0u);
-    atomicStore(&wgAppsF32, 0u);
-    atomicStore(&wgRenormApps, 0u);
-    atomicStore(&wgRenormIters, 0u);
-    if (ENABLE_DYNAMIC_STATS) {
+    if (ENABLE_WORK_STATS && ENABLE_DYNAMIC_STATS) {
       for (var reason = 0; reason < 8; reason++) {
         atomicStore(&wgDynamicRejects[reason], 0u);
       }
@@ -3598,58 +3623,62 @@ fn cs_main(
           storeTexel(coord, result);
 
           // Accumulate work metrics for this texel into the workgroup partials.
-          let realSteps = g_workSteps;
-          // Interior verdicts deliberately store iter=0.  Their loop turns did
-          // nevertheless cover at least one iteration each; retain that
-          // invariant so an all-interior render does not look like a wrapped
-          // counter to the readback plausibility gate.
-          let covered = max(realSteps, u32(max(0.0, result.iter.r - startIter)));
-          atomicAdd(&wgRealSum, realSteps);
-          atomicMax(&wgRealMax, realSteps);
-          atomicAdd(&wgCovSum, covered);
-          for (var t = 0; t < 4; t++) {
-            atomicAdd(&wgTier[t], g_tierApps[t]);
-          }
-          if (ENABLE_DYNAMIC_STATS) {
+          if (ENABLE_WORK_STATS) {
+            let realSteps = g_workSteps;
+            // Interior verdicts deliberately store iter=0.  Their loop turns did
+            // nevertheless cover at least one iteration each; retain that
+            // invariant so an all-interior render does not look like a wrapped
+            // counter to the readback plausibility gate.
+            let covered = max(realSteps, u32(max(0.0, result.iter.r - startIter)));
+            atomicAdd(&wgRealSum, realSteps);
+            atomicMax(&wgRealMax, realSteps);
+            atomicAdd(&wgCovSum, covered);
             for (var t = 0; t < 4; t++) {
-              if (g_dynamicTierAttempts[t] > 0u) {
-                atomicAdd(&wgDynamicTierAttempts[t], g_dynamicTierAttempts[t]);
-              }
-              if (g_dynamicTierAccepts[t] > 0u) {
-                atomicAdd(&wgDynamicTierAccepts[t], g_dynamicTierAccepts[t]);
-              }
-              if (g_dynamicSkipBuckets[t] > 0u) {
-                atomicAdd(&wgDynamicSkipBuckets[t], g_dynamicSkipBuckets[t]);
+              if (g_tierApps[t] > 0u) {
+                atomicAdd(&wgTier[t], g_tierApps[t]);
               }
             }
-            for (var reason = 0; reason < 8; reason++) {
-              if (g_dynamicRejects[reason] > 0u) {
-                atomicAdd(&wgDynamicRejects[reason], g_dynamicRejects[reason]);
+            if (ENABLE_DYNAMIC_STATS) {
+              for (var t = 0; t < 4; t++) {
+                if (g_dynamicTierAttempts[t] > 0u) {
+                  atomicAdd(&wgDynamicTierAttempts[t], g_dynamicTierAttempts[t]);
+                }
+                if (g_dynamicTierAccepts[t] > 0u) {
+                  atomicAdd(&wgDynamicTierAccepts[t], g_dynamicTierAccepts[t]);
+                }
+                if (g_dynamicSkipBuckets[t] > 0u) {
+                  atomicAdd(&wgDynamicSkipBuckets[t], g_dynamicSkipBuckets[t]);
+                }
+              }
+              for (var reason = 0; reason < 8; reason++) {
+                if (g_dynamicRejects[reason] > 0u) {
+                  atomicAdd(&wgDynamicRejects[reason], g_dynamicRejects[reason]);
+                }
+              }
+              if (g_dynamicCandidateUses > 0u) {
+                atomicAdd(&wgDynamicCandidateUses, g_dynamicCandidateUses);
+              }
+              if (g_dynamicExactFallbacks > 0u) {
+                atomicAdd(&wgDynamicExactFallbacks, g_dynamicExactFallbacks);
               }
             }
-            if (g_dynamicCandidateUses > 0u) {
-              atomicAdd(&wgDynamicCandidateUses, g_dynamicCandidateUses);
+            if (g_gateJumps > 0u) {
+              atomicAdd(&wgGateJumps, g_gateJumps);
             }
-            if (g_dynamicExactFallbacks > 0u) {
-              atomicAdd(&wgDynamicExactFallbacks, g_dynamicExactFallbacks);
+            if (g_gateFails > 0u) {
+              atomicAdd(&wgGateFails, g_gateFails);
             }
-          }
-          if (g_gateJumps > 0u) {
-            atomicAdd(&wgGateJumps, g_gateJumps);
-          }
-          if (g_gateFails > 0u) {
-            atomicAdd(&wgGateFails, g_gateFails);
-          }
-          if (g_secoursApps > 0u) {
-            atomicAdd(&wgSecoursApps, g_secoursApps);
-            atomicAdd(&wgSecoursIters, g_secoursIters);
-          }
-          if (g_appsF32 > 0u) {
-            atomicAdd(&wgAppsF32, g_appsF32);
-          }
-          if (g_renormApps > 0u) {
-            atomicAdd(&wgRenormApps, g_renormApps);
-            atomicAdd(&wgRenormIters, g_renormIters);
+            if (g_secoursApps > 0u) {
+              atomicAdd(&wgSecoursApps, g_secoursApps);
+              atomicAdd(&wgSecoursIters, g_secoursIters);
+            }
+            if (g_appsF32 > 0u) {
+              atomicAdd(&wgAppsF32, g_appsF32);
+            }
+            if (g_renormApps > 0u) {
+              atomicAdd(&wgRenormApps, g_renormApps);
+              atomicAdd(&wgRenormIters, g_renormIters);
+            }
           }
 
           // Count the written (post-iteration) state.
@@ -3699,9 +3728,9 @@ fn cs_main(
     // work (workgroup lockstep waste); covMean/realMean = realized skip;
     // maxSteps = worst single-texel straggler. The absolute Total-apps count
     // recovers Σ g_workSteps as realMean << 6.
-    let rs = atomicLoad(&wgRealSum);
-    let rm = atomicLoad(&wgRealMax);
-    let cv = atomicLoad(&wgCovSum);
+    let rs = select(0u, atomicLoad(&wgRealSum), ENABLE_WORK_STATS);
+    let rm = select(0u, atomicLoad(&wgRealMax), ENABLE_WORK_STATS);
+    let cv = select(0u, atomicLoad(&wgCovSum), ENABLE_WORK_STATS);
     if (rm > 0u) {
       atomicAdd(&workStats.realMean, (rs + 32u) >> 6u);
       atomicAdd(&workStats.covMean, (cv + 32u) >> 6u);

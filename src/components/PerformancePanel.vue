@@ -621,8 +621,17 @@ function tick() {
   rafId = requestAnimationFrame(tick);
 }
 
-onMounted(() => { rafId = requestAnimationFrame(tick); });
-onUnmounted(() => { if (rafId) cancelAnimationFrame(rafId); });
+// The work counters (realMean/covMean/maxAccum, tier mix) are compiled out of
+// the iteration kernel unless something reads them — this panel is that
+// consumer, so it turns them on while mounted and off again on close.
+onMounted(() => {
+  props.engine?.setWorkStatsEnabled(true);
+  rafId = requestAnimationFrame(tick);
+});
+onUnmounted(() => {
+  if (rafId) cancelAnimationFrame(rafId);
+  props.engine?.setWorkStatsEnabled(false);
+});
 
 // Aggregate stats over the visible window.
 const windowStats = computed(() => {
