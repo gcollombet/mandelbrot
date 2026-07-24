@@ -542,6 +542,115 @@ Conséquence : sous cette convention, le premier terme logarithmique de la
 coordonnée de Fatou doit porter le signe `+rho log(t)`. Le signe opposé exige
 la convention opposée `rho_alt=1-b/a²`.
 
+### Itération fractionnaire — théorèmes locaux analytiques
+
+- T3.1 est fermé sous sa forme locale : la coordonnée de Kœnigs normalisée est
+  construite par une série de corrections uniformément convergente, possède
+  un inverse analytique local, puis est transportée au point fixe de
+  `z²+c`. Son unicité comme germe analytique est prouvée.
+- La famille fractionnaire de Kœnigs vérifie comme égalités de germ le temps
+  zéro, le temps un et la loi de composition additive, pour une branche
+  logarithmique explicitement choisie.
+- T4.1 est fermé sous sa forme locale complète près de l'infini. Le changement
+  `u=1/z` donne `h_c(u)=u²/(1+cu²)` sur un disque invariant explicite. La
+  série
+  `S(u)=sum_n -log(1+c(h_c^[n](u))²)/2^(n+1)` est dominée uniformément par
+  une série géométrique, donc holomorphe, et
+  `beta(u)=u exp(S(u))` vérifie exactement `beta(h_c(u))=beta(u)²`,
+  `beta(0)=0` et `beta'(0)=1`.
+- L'inverse analytique local de `beta` fournit un rayon où elle est injective.
+  Après retour à `z`, la fonction
+  `psi(z)=1/beta(1/z)` est holomorphe et injective sur un domaine
+  `|z|>R`, satisfait `psi(z²+c)=psi(z)²` et
+  `psi(z)/z -> 1` au filtre coborné.
+- L'unicité n'est pas postulée : pour une carte de transition `k` commutant
+  avec le carré, un premier terme non nul d'ordre `m≥2` aurait ordre `2m`
+  après composition à gauche et `m+1` à droite. Cette contradiction prouve
+  `k=id` comme germe, puis l'unicité éventuelle de la coordonnée à l'infini
+  parmi les germes réciproques analytiques normalisés. Pour une carte
+  extérieure arbitraire, la normalisation `psi(z)/z -> 1` donne
+  `beta(u)/u -> 1`; le théorème de singularité amovible rend alors
+  `beta(u)=1/psi(1/u)` analytique en zéro avec `beta'(0)=1`. Toute carte
+  satisfaisant T4.1 appartient donc à cette classe, ce qui prouve l'unicité
+  extérieure générale.
+- T4.2 est fermé : sur tout segment d'orbite fini restant dans le domaine
+  extérieur, `psi(q_c^[n](z))=psi(z)^(2^n)`.
+- T4.3 est fermé par l'identité finie
+  `L_N/2^N=L_0+sum_{n<N} ell_n/2^(n+1)` sous la seule récurrence cohérente
+  `L_{n+1}=2L_n+ell_n`.
+- T4.4 est fermé dans sa formulation analytique conditionnelle. Une structure
+  enregistre simultanément les lifts `exp(L_n)=z_n`,
+  `exp(ell_n)=1+c/z_n²`, la non-annulation de l'orbite, la récurrence
+  cohérente et `L_0=log z`. Si `L_N/2^N -> log psi(z)` et si la série des
+  corrections est sommable, l'unicité de la limite donne exactement
+  `log psi(z)=log z+sum_n ell_n/2^(n+1)`. Aucune branche principale n'est
+  réintroduite indépendamment aux temps intermédiaires.
+- T4.6 est fermé par l'action inconditionnelle
+  `H_t(u)=exp(t log 2)u` sur le revêtement logarithmique :
+  `H_0=id`, `H_1(u)=2u` et `H_s(H_t(u))=H_(s+t)(u)`.
+- T4.7 est fermé comme théorème conditionnel de carte. Toute restriction de
+  la carte analytique T4.1 à un domaine coupé fournit, par `invFunOn`, un
+  inverse exact sur son image. Une branche vérifiant `exp(Log w)=w` y définit
+  `F_t(z)=psi⁻¹(exp(H_t(Log psi(z))))`. Lean prouve `F_0(z)=z`,
+  `F_1(z)=q_c(z)` lorsque les points concernés restent dans le domaine, et
+  `F_s(F_t(z))=F_(s+t)(z)` sous l'admissibilité du premier lift et l'identité
+  de branche
+  `Log(exp(H_t(Log psi(z))))=H_t(Log psi(z))`. Il prouve aussi l'équivalence
+  exacte entre la garde du second pas et celle du temps composé.
+- T5.1 et T5.2 sont fermés. Toute famille indexée par tous les temps réels,
+  vérifiant `F_0=id` et `F_(s+t)=F_s∘F_t`, possède `F_(-t)` comme inverse
+  bilatère de `F_t`. Comme `z²+c` n'est pas injective, elle ne peut être le
+  temps un d'un tel groupe global. Cela ne prétend rien contre un simple
+  semi-groupe de temps positifs.
+- T6.2 est fermé dans une formulation exacte de recollement. Une courbe
+  globale qui coïncide avec `Gamma_n(s)` sur chaque intervalle unité passe par
+  l'orbite à tous les temps naturels. Lean construit aussi cette courbe par
+  `Gamma_floor(t)(t-floor(t))`; la compatibilité des extrémités traite
+  exactement le choix du segment droit aux temps entiers. Pour les segments
+  indexés par `ℤ`, les intervalles fermés `[n,n+1]` forment un recouvrement
+  localement fini de `ℝ`; si chaque segment est continu, le théorème de
+  recollement Mathlib donne la continuité globale, coutures comprises.
+- T6.3 est fermé point par point et sur les intervalles orbitaux. Le segment
+  idéal de Kœnigs est `Gamma_n(s)=phi⁻¹(exp(sL)phi(z_n))`; ses extrémités et
+  sa composition locale sont prouvées sous les identités exactes de Schröder
+  et d'inversion aux points concernés. La carte analytique construite en T3.1
+  fournit ces identités dans un voisinage du point fixe.
+- T6.4 est fermé à partir de T4.7. Le segment idéal de Böttcher a exactement
+  pour extrémités `z_n` et `z_(n+1)` lorsque ces deux points restent dans le
+  domaine coupé. Sa loi locale réutilise sans affaiblissement les gardes de
+  domaine et de branche de T4.7.
+- T6.5 est fermé avec ses deux contenus exacts : les polynômes de
+  Catmull--Rom atteignent les deux extrémités annoncées, mais aucune loi
+  dynamique n'en découle. Lean vérifie un contre-exemple à `s=1/2` sur
+  l'orbite réelle `2,4,16,256,65536` de `z↦z²`.
+- Le noyau d'un atlas numériquement exploitable est formalisé séparément.
+  Tout segment graine joignant `z₀` à `q_c(z₀)`, propagé point par point par
+  les itérés de `q_c`, possède les bonnes extrémités sur chaque intervalle et
+  vérifie exactement `q_c(Γ_n(s))=Γ_(n+1)(s)`. Un relèvement rétrograde par
+  une branche inverse conserve cette identité, ses conditions d'extrémité et
+  sa continuité étant laissées explicites. Cela ne revendique pas la loi
+  fractionnaire complète hors des cartes analytiques.
+- Les deux modèles neutres de la démo sont maintenant raccordés à ce noyau.
+  Dans une carte de Fatou--Abel, Lean prouve les temps zéro et un et la loi
+  additive pour `Psi⁻¹(Psi(z)+t)`; la correction infinie déjà construite dans
+  `FatouSectorial.lean` fournit exactement l'équation d'Abel nécessaire. Dans
+  une carte de Siegel, Lean prouve les mêmes identités pour
+  `Phi⁻¹(exp(tL)Phi(z))`, avec `exp(L)=lambda`. Ces résultats certifient le
+  transport lorsqu'une carte locale et son inverse sont valides; ils ne
+  prétendent pas que la série de Siegel tronquée de la démo converge pour
+  tout multiplicateur indifférent.
+- T5.3 est fermé. `CompleteAutonomousODE` enregistre une solution intégrale
+  choisie sur tout `ℝ` par point initial ; `CompleteUniqueAutonomousODE`
+  ajoute l'unicité parmi les solutions globales. La translation temporelle
+  d'une solution autonome et cette unicité donnent
+  `F_(s+t)=F_s∘F_t`, donc `F_(-t)` est l'inverse de `F_t`. Le temps un ne
+  peut ainsi être `z²+c`, qui n'est pas injective. Un second théorème utilise
+  `ODE_solution_unique_univ` de Mathlib pour déduire l'unicité d'un champ
+  globalement lipschitzien, tout en conservant l'existence globale comme
+  hypothèse explicite ; un troisième donne directement le corollaire pour
+  `Flow ℝ ℂ`. La précision flottante et les seuils JavaScript restent
+  volontairement hors du périmètre mathématique exact.
+
 ## Ce qui reste hors du lot facile à modéré
 
 Les points suivants ne sont pas présentés comme certifiés par ce dossier :
