@@ -1,9 +1,11 @@
-import {collection, doc, getDoc, getDocs, type DocumentData, type Timestamp} from 'firebase/firestore';
+import {collection, doc, getDoc, getDocs, query, where, type DocumentData, type Timestamp} from 'firebase/firestore';
 import {httpsCallable} from 'firebase/functions';
 import {getBlob, ref, uploadBytes} from 'firebase/storage';
 import {getFirebaseServices} from './firebaseConfig';
 import type {
   GuestImportBatch,
+  PersonalPresetManifest,
+  PersonalPresetManifestEntry,
   PersonalRecordEnvelope,
   PersonalTextureMetadata,
   PersonalUsage,
@@ -41,10 +43,31 @@ function personalRecordFromDoc(data: DocumentData, guid: string): PersonalRecord
   };
 }
 
-export async function listPersonalPresetRecords(uid: string): Promise<PersonalRecordEnvelope[]> {
+export async function getPersonalPresetManifest(): Promise<PersonalPresetManifest> {
+  const {functions} = requireServices();
+  const call = httpsCallable<Record<string, never>, PersonalPresetManifest>(functions, 'getPersonalPresetManifest');
+  const data = (await call({})).data;
+  const entries = Array.isArray(data.entries)
+    ? data.entries.filter((entry): entry is PersonalPresetManifestEntry => (
+      typeof entry?.guid === 'string'
+      && typeof entry?.type === 'string'
+      && Number.isFinite(Number(entry?.revision))
+    ))
+    : [];
+  return {
+    revision: Math.max(0, Number(data.revision || 0)),
+    entries: entries.map(entry => ({
+      guid: entry.guid,
+      type: entry.type,
+      revision: Math.max(0, Number(entry.revision || 0)),
+    })),
+  };
+}
+
+export async function getPersonalPresetRecord(uid: string, guid: string): Promise<PersonalRecordEnvelope | null> {
   const {db} = requireServices();
-  const snapshot = await getDocs(collection(db, 'users', uid, 'presets'));
-  return snapshot.docs.map(entry => personalRecordFromDoc(entry.data(), entry.id));
+  const snapshot = await getDoc(doc(db, 'users', uid, 'presets', guid));
+  return snapshot.exists() ? personalRecordFromDoc(snapshot.data(), snapshot.id) : null;
 }
 
 export async function getPersonalUsage(uid: string): Promise<PersonalUsage> {
@@ -123,6 +146,34 @@ export async function savePersonalImportBatch(batch: GuestImportBatch): Promise<
   const {functions} = requireServices();
   const call = httpsCallable<{batch: GuestImportBatch}, {id: string}>(functions, 'savePersonalImportBatch');
   await call({batch});
+}
+
+export async function listPersonalImportBatches(uid: string): Promise<GuestImportBatch[]> {
+  const {db} = requireServices();
+  const snapshot = await getDocs(query(
+    collection(db, 'users', uid, 'importBatches'),
+    where('status', 'in', ['pending', 'running', 'error']),
+  ));
+  return snapshot.docs.flatMap(entry => {
+    const data = entry.data();
+    const status = data.status;
+    if (status !== 'pending' && status !== 'running' && status !== 'complete' && status !== 'error') return [];
+    return [{
+      id: entry.id,
+      uid,
+      status,
+      presetGuids: Array.isArray(data.presetGuids) ? data.presetGuids.filter((guid): guid is string => typeof guid === 'string') : [],
+      textureGuids: Array.isArray(data.textureGuids) ? data.textureGuids.filter((guid): guid is string => typeof guid === 'string') : [],
+      completedPresetGuids: Array.isArray(data.completedPresetGuids)
+        ? data.completedPresetGuids.filter((guid): guid is string => typeof guid === 'string')
+        : [],
+      completedTextureGuids: Array.isArray(data.completedTextureGuids)
+        ? data.completedTextureGuids.filter((guid): guid is string => typeof guid === 'string')
+        : [],
+      updatedAt: timestampToIso(data.updatedAt),
+      lastError: typeof data.lastError === 'string' ? data.lastError : undefined,
+    }];
+  });
 }
 
 export async function repairExpiredPersonalTextureReservations(): Promise<number> {

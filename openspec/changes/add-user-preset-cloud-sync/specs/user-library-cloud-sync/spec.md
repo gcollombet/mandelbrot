@@ -11,6 +11,10 @@ The system SHALL use Firebase as the durable source of truth for an authenticate
 - **WHEN** an authenticated user opens the application on a device whose cache does not contain the user's cloud presets
 - **THEN** the system downloads the user's personal records and populates the owner-scoped cache with their content, thumbnails, favorites, and stable GUIDs
 
+#### Scenario: Cached preset revision is current
+- **WHEN** synchronization finds a cached personal preset whose trusted revision matches the account manifest
+- **THEN** the system does not download that preset's full payload or thumbnail again
+
 #### Scenario: Firebase is temporarily unavailable
 - **WHEN** an authenticated user changes a personal preset while Firebase is unavailable
 - **THEN** the system retains the change in the user's cache as pending and retries synchronization without blocking local use
@@ -81,7 +85,7 @@ The system SHALL offer an authenticated user a single choice to import all eligi
 
 #### Scenario: Import is retried
 - **WHEN** a guest-library import is retried after interruption
-- **THEN** the system uses owner scope and GUID identity to resume without duplicating records already persisted for that account
+- **THEN** the system reloads the matching incomplete batch for that owner, reuses its batch ID and recorded progress, and resumes without duplicating records already present for that account
 
 ### Requirement: Whole-record conflict handling
 The system SHALL reconcile personal records by owner scope, GUID, trusted revision, and update timestamp while preserving pending local changes until they are acknowledged or explicitly superseded.
@@ -97,6 +101,10 @@ The system SHALL reconcile personal records by owner scope, GUID, trusted revisi
 #### Scenario: Delete is queued offline
 - **WHEN** an authenticated user deletes a personal preset while offline
 - **THEN** the cache hides the record, retains a pending deletion, and prevents an older cloud copy from reappearing before the deletion is resolved
+
+#### Scenario: Preset was deleted on another device
+- **WHEN** a clean synchronized personal cache record is absent from the account's complete remote manifest
+- **THEN** the system purges that owner-scoped cached record without removing pending writes, tombstones, guest records, or public records
 
 ### Requirement: Personal and public libraries remain distinct
 The system SHALL present personal records and public catalog defaults as a combined view without copying public defaults into personal Firebase collections.

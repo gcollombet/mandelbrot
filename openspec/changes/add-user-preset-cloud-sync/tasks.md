@@ -71,3 +71,10 @@
 - [ ] 8.6 Review Firebase indexes, rules, function deployment order, quota repair path, logging, and measured thumbnail/texture transfer volume before broad enablement.
 
 Verification note: the new guest/admin visibility E2E passes. The full navigation suite is currently blocked by legacy `.settings-popup` assertions after the existing dense-panel migration; live account-switch/rollback and transfer-volume checks require a deployed Firebase staging environment.
+
+## 9. Corrective Conformance
+
+- [x] 9.1 Add a backward-compatible per-account preset manifest and change synchronization, quota checks, and guest-import inventory to avoid downloading unchanged preset payloads and thumbnails.
+- [x] 9.2 Reconcile the complete remote manifest against IndexedDB and purge only clean synchronized personal records deleted on another device, preserving pending writes and local tombstones.
+- [x] 9.3 Reload and reuse matching incomplete guest-import batches, reconcile progress from already-copied account GUIDs, and persist the running state before processing remaining records.
+- [x] 9.4 Add focused frontend and function tests for manifest maintenance, remote-deletion planning, batch matching, interrupted progress reconciliation, and account isolation.

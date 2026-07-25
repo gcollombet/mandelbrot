@@ -14,7 +14,7 @@ import {
 } from "../Mandelbrot.ts";
 import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry, getAllPresetRecords} from '../presetStore';
 import type {PresetRecord} from '../presetStore';
-import {syncRemoteCatalog} from '../remoteCatalogSync';
+import {syncActiveLibrary} from '../activeLibrarySync';
 import {log10FromDecimalString} from '../floatexp';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
 import {getLatestRemotePreset} from '../remoteCatalog';
@@ -46,8 +46,8 @@ import {
 } from '../textureLibrary';
 import {isAuthConfigured, libraryScopeForUser, observeAuthState, signInWithGoogle, signOutCurrentUser, type AuthState, type UserRole} from '../authService';
 import {setActiveLibraryScope} from '../scopedCache';
-import {observePersonalSyncStatus, startPersonalPresetSync, stopPersonalPresetSync, type PersonalSyncStatus} from '../personalPresetSync';
-import {startPersonalTextureSync, stopPersonalTextureSync} from '../personalTextureSync';
+import {observePersonalSyncStatus, stopPersonalPresetSync, type PersonalSyncStatus} from '../personalPresetSync';
+import {stopPersonalTextureSync} from '../personalTextureSync';
 import {guestPresetCounts, importGuestLibrary, prepareGuestImport, snapshotGuestLibrary, type GuestImportPlan} from '../guestLibraryImport';
 import {personalLibraryFeatureFlags} from '../personalLibraryFeatureFlags';
 import {getKeyboardLayout, getSettingsTabs} from '../keyboardShortcuts';
@@ -110,11 +110,21 @@ const guestImportCounts = computed(() => guestImportPlan.value ? guestPresetCoun
   textures: guestImportPlan.value.missingTextures,
 }) : null);
 let authStateGeneration = 0;
+let authStateTransition: Promise<void> = Promise.resolve();
 
-async function handleAuthState(state: AuthState): Promise<void> {
-  const generation = ++authStateGeneration;
-  stopPersonalPresetSync();
-  stopPersonalTextureSync();
+async function refreshOpenSettingsLibraries(): Promise<void> {
+  await Promise.all(
+    Object.values(settingsRefs.value).map(settings => settings?.refreshLibrary?.()),
+  );
+}
+
+async function applyAuthState(state: AuthState, generation: number): Promise<void> {
+  await Promise.all([
+    stopPersonalPresetSync(),
+    stopPersonalTextureSync(),
+  ]);
+  if (generation !== authStateGeneration) return;
+
   guestImportPlan.value = null;
   guestImportError.value = '';
 
@@ -123,9 +133,20 @@ async function handleAuthState(state: AuthState): Promise<void> {
   setActiveLibraryScope(personalLibraryFeatureFlags.scopedCache ? libraryScopeForUser(state.user) : {kind: 'guest'});
   authUserEmail.value = state.user?.email ?? '';
   userRole.value = state.role;
+
+  const personalUid = state.user && personalLibraryFeatureFlags.scopedCache
+    ? state.user.uid
+    : null;
+  await syncActiveLibrary(
+    personalUid,
+    {
+      presetSync: personalLibraryFeatureFlags.presetSync,
+      textureSync: personalLibraryFeatureFlags.textureSync,
+    },
+  );
+  if (generation !== authStateGeneration) return;
+
   if (state.user && personalLibraryFeatureFlags.scopedCache) {
-    if (personalLibraryFeatureFlags.presetSync) startPersonalPresetSync(state.user.uid);
-    if (personalLibraryFeatureFlags.textureSync) startPersonalTextureSync(state.user.uid);
     if (guestSnapshot && (guestSnapshot.presets.length || guestSnapshot.textures.length)) {
       try {
         const plan = await prepareGuestImport(state.user.uid, guestSnapshot);
@@ -137,9 +158,18 @@ async function handleAuthState(state: AuthState): Promise<void> {
       }
     }
   }
-  for (const settings of Object.values(settingsRefs.value)) {
-    void settings?.refreshPresets?.();
-  }
+  if (generation !== authStateGeneration) return;
+  await refreshOpenSettingsLibraries();
+}
+
+function handleAuthState(state: AuthState): Promise<void> {
+  const generation = ++authStateGeneration;
+  authStateTransition = authStateTransition
+    .then(() => applyAuthState(state, generation))
+    .catch(error => {
+      console.warn('Failed to switch the active preset library:', error);
+    });
+  return authStateTransition;
 }
 
 function declineGuestImport(): void {
@@ -154,10 +184,15 @@ async function acceptGuestImport(): Promise<void> {
   guestImportError.value = '';
   try {
     await importGuestLibrary(plan);
-    if (personalLibraryFeatureFlags.presetSync) startPersonalPresetSync(plan.uid);
-    if (personalLibraryFeatureFlags.textureSync) startPersonalTextureSync(plan.uid);
+    await syncActiveLibrary(
+      plan.uid,
+      {
+        presetSync: personalLibraryFeatureFlags.presetSync,
+        textureSync: personalLibraryFeatureFlags.textureSync,
+      },
+    );
     guestImportPlan.value = null;
-    for (const settings of Object.values(settingsRefs.value)) await settings?.refreshPresets?.();
+    await refreshOpenSettingsLibraries();
   } catch (error) {
     guestImportError.value = error instanceof Error ? error.message : String(error);
   } finally {
@@ -513,7 +548,9 @@ onMounted(() => {
   }, 120);
   window.addEventListener('resize', invalidateDiscoveryLayout, { passive: true });
 
-  // If no navigation history is present (first-time visitor), sync remote catalog & load the first preset
+  // If no navigation history is present (first-time visitor), load the latest
+  // shared preset immediately. The auth-state transition hydrates the full
+  // catalog for the selected guest/user cache.
   if (isFirstLoad) {
     void (async () => {
       try {
@@ -537,10 +574,6 @@ onMounted(() => {
             });
             list = await getAllPresetEntries();
           }
-          // Trigger full catalog sync in the background
-          void syncRemoteCatalog().catch(error => {
-            console.warn('Background remote catalog sync failed:', error);
-          });
         }
         if (list.length > 0) {
           const record = await getPresetById(list[0].id);
@@ -562,8 +595,8 @@ onMounted(() => {
 onUnmounted(() => {
   stopAuthObserver?.();
   stopSyncObserver?.();
-  stopPersonalPresetSync();
-  stopPersonalTextureSync();
+  void stopPersonalPresetSync();
+  void stopPersonalTextureSync();
   window.removeEventListener('keydown', handleGlobalKeydown);
   window.removeEventListener('pointerdown', handleOutsidePointerDown);
   window.removeEventListener('keydown', handleNavKeydown);

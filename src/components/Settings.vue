@@ -43,6 +43,7 @@ import {
   computeScaleExponent,
   deletePresetEntry,
   getAllPresetEntries,
+  getAllPresetRecords,
   getPresetById,
   savePresetEntry,
   updatePresetEntry,
@@ -53,7 +54,6 @@ import {
   getAllPaletteEntries,
   savePaletteEntry,
 } from '../paletteStore';
-import {syncRemoteCatalog} from '../remoteCatalogSync';
 import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry, uploadRemoteTextureEntry} from '../remoteCatalog';
 import type {TextureMappingPresetRecord} from '../textureMappingPresetStore';
 import {
@@ -78,9 +78,20 @@ import {
 } from '../animationPresetStore';
 import type {UserRole} from '../authService';
 import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
-import {nameForCatalogReference} from '../catalogIdentity';
+import {createGuid, nameForCatalogReference} from '../catalogIdentity';
 import {MAX_IMPORTED_TEXTURE_SIDE, normalizeTextureBlob} from '../textureNormalization';
-import {assertActivePresetImportCapacity, PersonalPresetQuotaError} from '../personalQuotaGuard';
+import {
+  assertActivePresetImportCapacity,
+  createActivePresetImportBudget,
+  PersonalPresetQuotaError,
+  type PersonalPresetImportBudget,
+} from '../personalQuotaGuard';
+import {PERSONAL_PRESET_LIMIT} from '../personalLibraryTypes';
+import {
+  addPresetImportIdentity,
+  buildPresetImportIdentitySet,
+  hasPresetImportIdentity,
+} from '../presetImportIdentity';
 
 import type {Engine} from '../Engine.ts';
 const props = defineProps<{
@@ -392,6 +403,7 @@ const debugViewOptions = [
   { label: 'Mix', value: 3 },
   { label: 'Probes', value: 4 },
   { label: 'Tier', value: 5 },
+  { label: 'Portee', value: 6 },
 ];
 
 // Color scales for the debug view legend — kept in sync by hand with
@@ -423,6 +435,9 @@ const debugViewLegends: Record<number, {
   ticks?: string[];
   note?: string;
   swatches?: { color: string; label: string }[];
+  /** Extra flat swatches shown UNDER a gradient legend — used by the reach
+   *  view to name each "no data" color, so a bug report identifies the cause. */
+  extraSwatches?: { color: string; label: string }[];
 }> = {
   1: {
     kind: 'gradient',
@@ -460,6 +475,28 @@ const debugViewLegends: Record<number, {
       { color: 'rgb(242, 153, 38)', label: 'Jet (ordre 3)' },
     ],
     note: 'Couleur plate = tier dominant par pixel (le plus utile en mode Auto).',
+  },
+  6: {
+    kind: 'gradient',
+    gradient: skipRampGradient,
+    ticks: ['≤ 1 px (sans intérêt)', '8 px', '64+ px'],
+    // Diagnostic colors, mirrored from color.wgsl's reach branch: each "no
+    // data" cause has its own color so a report says WHY, not just "c'est gris".
+    extraSwatches: [
+      { color: 'rgb(242, 128, 26)', label: 'Orange = mode Exact → bascule en Auto' },
+      { color: 'rgb(242, 217, 64)', label: 'Jaune = Auto, mais table pas prête (attends la référence)' },
+      { color: 'rgb(115, 89, 26)', label: 'Brun = table active, mais ce pixel n\'a pas porté z″' },
+      { color: 'rgb(38, 51, 115)', label: 'Bleu sombre = payload hors plage' },
+      { color: 'rgb(217, 26, 191)', label: 'Magenta = mauvaise texture liée (bug)' },
+      { color: 'rgb(26, 26, 31)', label: 'Presque noir = intérieur / pas encore calculé' },
+    ],
+    note: 'Portée du développement de Taylor du pixel (z + z′·δc + ½z″·δc²) en '
+      + 'PIXELS : jusqu\'où un pixel calculé pourrait servir ses voisins. Relit '
+      + 'le payload déjà stocké par le rendu courant (aucun recalcul), donc '
+      + 'toujours cohérent avec l\'image affichée. ESTIMATION (critère du '
+      + 'dernier terme retenu), pas un certificat — un rayon prouvé sera plus '
+      + 'petit. Gris = pixel intérieur ou sans payload (z″ n\'est accumulé '
+      + 'qu\'en mode Auto).',
   },
 };
 const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);
@@ -601,6 +638,7 @@ const presetCache = new Map<number, PresetRecord>();
 // Palette management
 const paletteName = ref('');
 const paletteEditorRef = ref<InstanceType<typeof PaletteEditor> | null>(null);
+const animationPanelRef = ref<InstanceType<typeof AnimationPanel> | null>(null);
 const palettes = ref<PaletteRecord[]>([]);
 const selectedPalette = ref('');
 const showPaletteDropdown = ref(false);
@@ -970,8 +1008,31 @@ async function quickSnapshot() {
   });
 }
 
-// Expose quickSnapshot and refreshPresets so parent can call them via ref
-defineExpose({ quickSnapshot, refreshPresets: async () => { presets.value = await getAllPresetEntries(); } });
+async function refreshLibrary(): Promise<void> {
+  presetCache.clear();
+  selectedPreset.value = null;
+  selectedNavPreset.value = null;
+  selectedPalettePreset.value = null;
+  selectedPalette.value = '';
+  selectedStopPresetName.value = '';
+
+  await Promise.all([
+    loadPresets(),
+    loadPalettes(),
+    loadTextureMappingPresets(),
+    loadTextures(),
+    refreshStopPresets(),
+    animationPanelRef.value?.refreshPresets(),
+  ]);
+}
+
+// Expose cache refresh helpers so the parent can update an already-open tab
+// after the active guest/user scope changes.
+defineExpose({
+  quickSnapshot,
+  refreshPresets: loadPresets,
+  refreshLibrary,
+});
 
 
 async function loadPresets() {
@@ -1369,11 +1430,6 @@ onMounted(async () => {
   await loadTextureMappingPresets();
   await loadTextures();
   await refreshStopPresets();
-  await syncRemoteCatalog();
-  await loadPresets();
-  await loadPalettes();
-  await loadTextureMappingPresets();
-  await loadTextures();
 });
 
 onUnmounted(() => {
@@ -1527,16 +1583,38 @@ async function importPresets(event: Event) {
   const files = Array.from(input.files ?? []);
   if (files.length === 0) return;
 
-  const existing = await getAllPresetEntries();
+  let budget: PersonalPresetImportBudget | null;
+  try {
+    budget = await createActivePresetImportBudget();
+  } catch (error) {
+    console.warn('[Settings] Unable to verify personal preset quota before import.', error);
+    window.alert('Unable to verify the personal preset quota. Check the Firebase Functions deployment and try again.');
+    input.value = '';
+    return;
+  }
+  const identities = buildPresetImportIdentitySet(await getAllPresetRecords());
   let importedCount = 0;
-  let hadValid = false;
+  let duplicateCount = 0;
+  let failedCount = 0;
+  let validCount = 0;
+  let quotaReached = false;
+  let firstFailure = '';
+  let stopImport = false;
   for (const file of files) {
+    let records: unknown[];
     try {
       const imported = await readJsonFile(file);
-      const records = Array.isArray(imported) ? imported : [imported];
-      for (const preset of records) {
-        if (!preset || typeof preset !== 'object' || !('value' in preset)) continue;
-        hadValid = true;
+      records = Array.isArray(imported) ? imported : [imported];
+    } catch (error) {
+      failedCount += 1;
+      firstFailure ||= error instanceof Error ? error.message : String(error);
+      console.warn(`[Settings] Skipping invalid preset import file "${file.name}"`, error);
+      continue;
+    }
+    for (const preset of records) {
+      if (!preset || typeof preset !== 'object' || !('value' in preset)) continue;
+      validCount += 1;
+      try {
         const record = preset as {
           guid?: string;
           value: MandelbrotParams;
@@ -1547,38 +1625,76 @@ async function importPresets(event: Event) {
         };
         const name = record.name ?? '';
         const date = record.date ?? '';
-        if (existing.some(e => e.name === name && e.date === date)) continue;
         const value = structuredClone(record.value);
         stripSessionPerformanceFields(value);
         stripExplorationStateFields(value);
         value.textureMapping = normalizeTextureMappingFromLegacy(value);
         delete (value as any).textureMappingMode;
-        await assertActivePresetImportCapacity(record.guid);
+        const guid = record.guid || createGuid();
+        const identityRecord = {guid: record.guid, name, date, value};
+        if (
+          hasPresetImportIdentity(identities, identityRecord)
+          || (record.guid && budget?.existingGuids.has(record.guid))
+        ) {
+          duplicateCount += 1;
+          continue;
+        }
+        if (budget && budget.remaining < 1) {
+          quotaReached = true;
+          stopImport = true;
+          break;
+        }
         await savePresetEntry(
           value,
           record.thumbnail ?? '',
           name,
           record.date,
           record.favorite ?? false,
-          record.guid,
+          guid,
         );
+        addPresetImportIdentity(identities, {...identityRecord, guid});
+        if (budget) {
+          budget.existingGuids.add(guid);
+          budget.remaining -= 1;
+        }
         importedCount += 1;
+      } catch (error) {
+        if (error instanceof PersonalPresetQuotaError) {
+          quotaReached = true;
+          stopImport = true;
+          break;
+        }
+        failedCount += 1;
+        firstFailure ||= error instanceof Error ? error.message : String(error);
+        console.warn(`[Settings] Skipping one preset from "${file.name}"`, error);
       }
-    } catch (error) {
-      if (error instanceof PersonalPresetQuotaError) {
-        window.alert(error.message);
-        break;
-      }
-      console.warn(`[Settings] Skipping preset import file "${file.name}"`, error);
     }
+    if (stopImport) break;
   }
 
   if (importedCount > 0) {
     presets.value = await getAllPresetEntries();
-  } else if (hadValid) {
-    window.alert('All presets were already imported (same name + date).');
-  } else {
+  }
+
+  const summary: string[] = [];
+  if (importedCount > 0) summary.push(`${importedCount} preset${importedCount === 1 ? '' : 's'} imported.`);
+  if (duplicateCount > 0) summary.push(`${duplicateCount} exact duplicate${duplicateCount === 1 ? '' : 's'} skipped.`);
+  if (failedCount > 0) {
+    summary.push(`${failedCount} entr${failedCount === 1 ? 'y' : 'ies'} failed${firstFailure ? `: ${firstFailure}` : '.'}`);
+  }
+  if (quotaReached) {
+    summary.push(`The account has reached its ${PERSONAL_PRESET_LIMIT}-preset limit.`);
+  }
+  if (showOnlyFavoritePresets.value && presets.value.length > visiblePresets.value.length) {
+    summary.push(`Favorites filter active: ${visiblePresets.value.length} of ${presets.value.length} presets are visible.`);
+  }
+
+  if (summary.length > 0) {
+    window.alert(summary.join('\n'));
+  } else if (validCount === 0) {
     window.alert('Invalid file format.');
+  } else {
+    window.alert('No preset was imported.');
   }
 
   // Reset pour pouvoir réimporter les mêmes fichiers
@@ -2426,7 +2542,10 @@ async function importSkyboxTexture(event: Event) {
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
           Favorites
         </button>
-        <span class="count">{{ visiblePresets.length }} preset{{ visiblePresets.length === 1 ? '' : 's' }}</span>
+        <span class="count">
+          {{ visiblePresets.length }}<template v-if="showOnlyFavoritePresets"> / {{ presets.length }}</template>
+          preset{{ visiblePresets.length === 1 && !showOnlyFavoritePresets ? '' : 's' }}
+        </span>
       </div>
 
       <div class="grid">
@@ -2497,6 +2616,7 @@ async function importSkyboxTexture(event: Event) {
     <!-- Animation tab -->
     <div v-else-if="activeTab === 'animation'" class="animation-tab">
       <AnimationPanel
+        ref="animationPanelRef"
         v-model="model"
         :user-role="userRole"
         :is-admin="isAdmin"
@@ -2882,7 +3002,10 @@ async function importSkyboxTexture(event: Event) {
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
           Favorites
         </button>
-        <span class="count">{{ visiblePalettePresets.length }} preset{{ visiblePalettePresets.length === 1 ? '' : 's' }}</span>
+        <span class="count">
+          {{ visiblePalettePresets.length }}<template v-if="showOnlyFavoritePalettePresets"> / {{ presets.length }}</template>
+          preset{{ visiblePalettePresets.length === 1 && !showOnlyFavoritePalettePresets ? '' : 's' }}
+        </span>
       </div>
       <div class="grid palette-library-grid full-preset-grid" style="max-height:264px;">
         <div v-for="preset in visiblePalettePresets" :key="preset.id" class="card" :class="{ sel: selectedPalettePreset === preset.id }" @click="selectPalettePresetFromDropdown(preset)">
@@ -3019,6 +3142,11 @@ async function importSkyboxTexture(event: Event) {
           <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-bar" :style="{ background: debugViewLegend.gradient }"></div>
           <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-ticks">
             <span v-for="tick in debugViewLegend.ticks" :key="tick">{{ tick }}</span>
+          </div>
+          <div v-if="debugViewLegend.extraSwatches" class="dbgview-legend-swatches">
+            <span v-for="sw in debugViewLegend.extraSwatches" :key="sw.label" class="dbgview-legend-swatch">
+              <i :style="{ background: sw.color }"></i>{{ sw.label }}
+            </span>
           </div>
           <div v-if="debugViewLegend.kind === 'swatches'" class="dbgview-legend-swatches">
             <span v-for="sw in debugViewLegend.swatches" :key="sw.label" class="dbgview-legend-swatch">

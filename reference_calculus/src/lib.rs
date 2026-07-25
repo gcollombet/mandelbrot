@@ -11,8 +11,10 @@ pub type JsValue = String;
 
 mod feigenbaum;
 mod gates;
+mod hankel;
 mod jet;
 mod matrix_c1;
+mod reach;
 mod mobius;
 mod unified;
 pub mod validity;

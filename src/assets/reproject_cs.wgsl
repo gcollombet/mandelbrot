@@ -52,11 +52,14 @@ fn store_layer(coord: vec2<i32>, layer: i32, v: f32) {
   textureStore(dstRaw, coord, layer, vec4<f32>(v, 0.0, 0.0, 0.0));
 }
 
-fn store_cleared(coord: vec2<i32>, sentinel: f32, layers: i32) {
+// A cleared texel carries `iter < 0`, so the iteration kernel treats it as a
+// compute request and reads none of layers 2..N before overwriting them, and
+// the resolve pass leaves a sentinel corner after reading layer 0 alone. Only
+// layers 0 and 1 are ever observed in that state, so the remaining eleven
+// stores were pure write bandwidth — the dominant cost of a clear frame.
+fn store_cleared(coord: vec2<i32>, sentinel: f32) {
   store_layer(coord, 0, sentinel);
-  for (var l = 1; l < layers; l++) {
-    store_layer(coord, l, 0.0);
-  }
+  store_layer(coord, 1, 0.0);
 }
 
 fn store_copied(coord_out: vec2<i32>, coord_in: vec2<i32>, layers: i32) {
@@ -72,6 +75,34 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   if (coord_out.x >= dims.x || coord_out.y >= dims.y) {
     return;
   }
+
+  // The neutral square circumscribes the rotated viewport, whose corners sit
+  // exactly on the inscribed circle. Rotating about the centre can therefore
+  // never bring a texel outside that disc into view, at any angle — so those
+  // texels are neither displayed nor computed, and reprojecting them is pure
+  // bandwidth (the square is 4/pi the area of the disc).
+  //
+  // The disc, and NOT the current viewport's bounding box, is the safe bound
+  // here: unlike the iteration kernel, this pass is what keeps out-of-frame
+  // texels aligned with the view. Skipping the box would leave texels a later
+  // rotation brings back unshifted, and the iteration kernel would read them as
+  // valid state. Two texels of margin cover partial coverage at the rim.
+  //
+  // Such a texel is stamped as a plain sentinel rather than left untouched:
+  // skipping the write outright would leave stale content that the resolve
+  // pass could pick up as a finished anchor while climbing from a texel on the
+  // rim. A sentinel is what the iteration kernel would have left there anyway
+  // — it never computes outside the viewport — so this loses nothing, and it
+  // costs two stores instead of the thirteen loads plus thirteen stores of a
+  // full copy.
+  let centre = vec2<f32>(dims) * 0.5;
+  let offset = vec2<f32>(coord_out) + vec2<f32>(0.5) - centre;
+  let reach = centre.x + 2.0;
+  if (dot(offset, offset) > reach * reach) {
+    store_cleared(coord_out, -uni.baseSentinel);
+    return;
+  }
+
   let layers = i32(textureNumLayers(dstRaw));
 
   // Full reset when needed.
@@ -79,7 +110,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     let step = i32(max(1.0, uni.seedStep));
     let is_anchor = (coord_out.x % step == 0) && (coord_out.y % step == 0);
     let sentinel = select(-uni.baseSentinel, -1.0, is_anchor);
-    store_cleared(coord_out, sentinel, layers);
+    store_cleared(coord_out, sentinel);
     return;
   }
 
@@ -89,7 +120,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let coord_in = coord_out - shift;
 
   if (coord_in.x < 0 || coord_in.y < 0 || coord_in.x >= dims.x || coord_in.y >= dims.y) {
-    store_cleared(coord_out, -uni.baseSentinel, layers);
+    store_cleared(coord_out, -uni.baseSentinel);
     return;
   }
 

@@ -33,6 +33,12 @@ import type {InterpolationMode} from './Mandelbrot.ts'
 import {computeAaJitterOffset, normalizePowerOfTwoStep} from './Mandelbrot.ts'
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
+
+/** Debug view 6. Unlike views 1-5 it does not replace the frame with an
+ *  instrumented recompute: it recolors the ordinary progressive render from the
+ *  Taylor payload that render already stored (raw layers 8/11/12), so it costs
+ *  a texture fetch and always agrees with what is on screen. */
+export const DEBUG_VIEW_REACH = 6
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -637,6 +643,8 @@ export class Engine {
     private rawPayloadView?: GPUTextureView
     rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B) — r32float array, written via textureStore only
     rawBrushArrayView?: GPUTextureView // full 2d-array view for sampling
+    rawBrushIterStorageView?: GPUTextureView // layer 0 storage view (mirrors A)
+    rawBrushPayloadView?: GPUTextureView // layers 8..12 sampled view (mirrors A)
     resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 8-layer r32float array
     resolvedArrayView?: GPUTextureView // full 2d-array view for sampling
     resolvedLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
@@ -3477,7 +3485,7 @@ export class Engine {
         // The debug overlay recomputes every pixel from scratch on top of the
         // normal frame. Keep it out of completion timing and frame pacing; the
         // per-pass batch controller is independently guarded as well.
-        if (this.debugViewMode > 0) {
+        if (this.debugPipelineActive) {
             return
         }
 
@@ -3518,7 +3526,7 @@ export class Engine {
         sampledGeneration: number,
         sampledActivePixelCount: number,
     ) {
-        if (this.debugViewMode > 0
+        if (this.debugPipelineActive
             || elapsed <= 0
             || sampledGeneration !== this.batchControllerGeneration) {
             return
@@ -3668,6 +3676,16 @@ export class Engine {
         const brushResult = createLayeredTexture('Engine RawBrushTexture (B)', RAW_LAYERS, GPUTextureUsage.STORAGE_BINDING)
         this.rawBrushTexture = brushResult.texture
         this.rawBrushArrayView = brushResult.arrayView
+        // B carries the same derived views as A: the reprojection swaps the two
+        // instead of copying B back over A, so either one has to be able to take
+        // the front role on the next frame.
+        this.rawBrushIterStorageView = brushResult.layerViews[0]
+        this.rawBrushPayloadView = this.rawBrushTexture.createView({
+            dimension: '2d-array',
+            baseArrayLayer: 8,
+            arrayLayerCount: 5,
+            label: 'Engine RawBrushTexture (B) PayloadView',
+        })
 
         const resolvedResult = createLayeredTexture('Engine ResolvedTexture', DISPLAY_LAYERS)
         this.resolvedTexture = resolvedResult.texture
@@ -3704,6 +3722,24 @@ export class Engine {
             label: 'Engine AaTargetTexture',
         })
         this.aaTargetTextureView = this.aaTargetTexture.createView({ label: 'Engine AaTargetTexture View' })
+        this.rebuildRawTextureBindGroups()
+
+        // Resetting textures invalidates any in-flight AA accumulation.
+        this.resetAaState()
+
+        // Reset zoom reprojection state on resize
+        this.zoomState = resetZoomState()
+
+        this.prevFrameMandelbrot = undefined // plus de frame précédente après resize
+        this.previousMandelbrot = undefined  // force update() to re-write all uniforms
+        this.previousRenderOptions = undefined
+        this.needRender = true
+        this.invalidateCounterReadback() // reset: not yet known after resize
+    }
+
+    /** Every bind group that names A or B. The reprojection swaps the two, so
+     *  these are rebuilt on each swap as well as on resize. */
+    private rebuildRawTextureBindGroups() {
         if (this.pipelineAaTarget && this.rawArrayView && this.uniformBufferAaTarget && this.accumTextureView) {
             this.bindGroupAaTarget = this.device.createBindGroup({
                 layout: this.pipelineAaTarget.getBindGroupLayout(0),
@@ -3730,12 +3766,6 @@ export class Engine {
                 label: 'Engine BindGroup AaReseed',
             })
         }
-        // Resetting textures invalidates any in-flight AA accumulation.
-        this.resetAaState()
-
-        // Reset zoom reprojection state on resize
-        this.zoomState = resetZoomState()
-
         // Re-création des bind groups dépendant des textures
         this.rebuildIterationBindGroups()
 
@@ -3780,12 +3810,26 @@ export class Engine {
                 label: 'Engine BindGroup Merge',
             })
         }
+    }
 
-        this.prevFrameMandelbrot = undefined // plus de frame précédente après resize
-        this.previousMandelbrot = undefined  // force update() to re-write all uniforms
-        this.previousRenderOptions = undefined
-        this.needRender = true
-        this.invalidateCounterReadback() // reset: not yet known after resize
+    /** Ping-pong the neutral state textures. The reprojection pass reads A and
+     *  writes B; swapping the two roles here is what replaces the former
+     *  full-size copyTextureToTexture(B -> A) — half the traffic of a pan frame,
+     *  on 13 r32float layers over the whole neutral square. */
+    private swapRawTextures() {
+        const texture = this.rawTexture
+        this.rawTexture = this.rawBrushTexture
+        this.rawBrushTexture = texture
+        const arrayView = this.rawArrayView
+        this.rawArrayView = this.rawBrushArrayView
+        this.rawBrushArrayView = arrayView
+        const iterView = this.rawIterStorageView
+        this.rawIterStorageView = this.rawBrushIterStorageView
+        this.rawBrushIterStorageView = iterView
+        const payloadView = this.rawPayloadView
+        this.rawPayloadView = this.rawBrushPayloadView
+        this.rawBrushPayloadView = payloadView
+        this.rebuildRawTextureBindGroups()
     }
 
     areObjectsEqual(obj1: any, obj2: any): boolean {
@@ -3880,7 +3924,21 @@ export class Engine {
         }
     }
 
-    /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes, 5 tier. */
+    /** True while a debug view uses the standalone recompute pipeline (1-5).
+     *  The reach view (6) is NOT one of them: it is a color-pass readout of the
+     *  payload the ordinary progressive render already stored, so that render
+     *  must keep running normally underneath it. */
+    /** Reference orbit long enough for the current view (mirrors the uniform's
+     *  orbitComplete). The debug overlay must not draw before this. */
+    private debugOrbitReady = false
+
+    private get debugPipelineActive(): boolean {
+        return this.debugViewMode > 0 && this.debugViewMode !== DEBUG_VIEW_REACH
+    }
+
+    /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes,
+     *  5 tier, 6 reach. 1-5 replace the frame with an instrumented recompute;
+     *  6 recolors the ordinary render from its stored Taylor payload. */
     setDebugView(mode: number) {
         const next = Math.max(0, Math.round(mode))
         if (next === this.debugViewMode) {
@@ -4505,7 +4563,17 @@ export class Engine {
             Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
             0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
             renderOptions.gradeSaturation ?? 1.12, // 64: gradeSaturation (display grade)
-            0, 0, 0,                              // 65-67: padding
+            this.debugViewMode === DEBUG_VIEW_REACH ? 1 : 0, // 65: reachDebug (super-pixel reach heatmap)
+            Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
+            // 67: why the reach view may have no z″ this frame. z″ is only
+            // accumulated when the shader runs unified (flag >= 4.5), and the
+            // flag falls back to 0 whenever the block table is not ready — so a
+            // user sitting in Auto can still be rendered in exact. Without this
+            // the view cannot tell "you chose Exact" from "the table is still
+            // building", and both look like the same empty screen.
+            this.approximationMode === 'auto'
+                ? (this.lastShaderApproxFlag >= 5 ? 2 : 1)
+                : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -4583,6 +4651,12 @@ export class Engine {
         // Track whether the orbit is still being built (used by needsMoreFrames).
         this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < maxIterations
         const orbitComplete = availableIter >= maxIterations
+        // The debug overlay (views 1-5) recomputes from the orbit buffer while
+        // reading the CURRENT view uniform. During a reference rebuild those two
+        // disagree, and the recompute paints the previous position — the "vue
+        // figée sur une ancienne vue" report. Gate the overlay on the same
+        // readiness signal the block table uses.
+        this.debugOrbitReady = orbitComplete
         const incrementalAutoPrefixReady = this.incrementalReferenceTable
             && this.approximationMode === 'auto'
             && this.incrementalTableLayout?.refId === this.activeRef?.refId
@@ -5117,11 +5191,13 @@ export class Engine {
                 const uwg = Math.ceil(this.neutralSize / 16)
                 utilPass.dispatchWorkgroups(uwg, uwg)
                 utilPass.end()
-                commandEncoder.copyTextureToTexture(
-                    { texture: this.rawBrushTexture },
-                    { texture: this.rawTexture },
-                    { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: RAW_LAYERS },
-                )
+                // Ping-pong instead of copying B back over A: B now holds the
+                // reprojected state, so it becomes the front texture and A the
+                // next frame's scratch. This removes a full-size 13-layer copy —
+                // read and write — from every pan and clear frame, and it also
+                // brings the whole reprojection inside the pass timer, which
+                // previously measured only the compute half of the work.
+                this.swapRawTextures()
             }
             // Stage B selective reseed: stamp the boundary sliver (target > sample
             // index) as compute requests so only it reconverges with the new jitter;
@@ -5205,12 +5281,17 @@ export class Engine {
         // to A: skip the copy + resolve pass and let color read A directly.
         // Frames requesting a frozen snapshot or merge keep the resolve so
         // resolvedTexture is guaranteed fresh for the next frame's copy.
-        const skipResolve = !!this.bindGroupColorRaw
-            && !this.needFreezeSnapshot
+        // The reach view reads the Taylor payload in layers 8/11/12, which
+        // only exist in rawTexture (13 layers) — resolvedTexture carries 8. So
+        // it takes the raw path unconditionally instead of waiting for full
+        // convergence; pixels not yet computed simply read as "no data".
+        const converged = !this.needFreezeSnapshot
             && !this.needMergeSnapshot
             && this.unfinishedPixelCount === 0
             && this.activePixelCount === 0
             && this.counterSampleFrame >= this.lastRawMutationFrame
+        const skipResolve = !!this.bindGroupColorRaw
+            && (this.debugViewMode === DEBUG_VIEW_REACH || converged)
         this.resolveSkipped = skipResolve
 
         // Fully converged: safe to capture an AA sample. No pending history clear,
@@ -5362,7 +5443,17 @@ export class Engine {
         }
 
         // ── Debug overlay: instrumented recompute straight onto the frame ──
-        if (this.debugViewMode > 0 && this.pipelineDebug && this.bindGroupDebug) {
+        // The overlay must not draw from an orbit that does not yet cover the
+        // current view (it would paint the previous position). But skipping is
+        // only half the job: needsMoreFrames()'s debug branch has no "the
+        // reference just became ready" trigger, so without re-arming the dirty
+        // flag the loop would stop and leave the last — wrong — overlay frozen
+        // on screen. Staying dirty keeps frames coming until it can draw truthfully.
+        if (this.debugPipelineActive && !this.debugOrbitReady) {
+            this.debugViewDirty = true
+        }
+        if (this.debugPipelineActive && this.debugOrbitReady
+            && this.pipelineDebug && this.bindGroupDebug) {
             const rpassDebug = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: swapView,

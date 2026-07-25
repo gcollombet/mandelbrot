@@ -547,6 +547,135 @@ passer par le certificat existant.
 Cette approche transforme Padé en compression adaptative de structure plutôt
 qu'en famille de tiers fixés à la main.
 
+### 5.4 Résultat (25 juillet 2026) — IMPLÉMENTÉ, verdict double
+
+Implémenté build-only dans `reference_calculus/src/hankel.rs` : sections de
+Hankel des coefficients pur-`z` `a_{k,0}` (k = 1..6) du jet de bloc, valeurs
+singulières par **Jacobi unilatéral complexe** (jamais `HᴴH` : σ_{M+1} garde sa
+précision relative des décades sous σ₁, ce qui est exactement le régime lu).
+
+**La borne employée n'est PAS AAK.** Les tiers rationnels expédiés portent une
+marge de pôle — le dénominateur ne s'annule pas sur le disque —, donc les
+approximants sont analytiques sur le disque fermé et la statistique
+d'Adamjan–Arov–Krein (qui mesure l'approximation par des fonctions à pôles
+*dans* le disque) ne s'applique pas. L'argument retenu est élémentaire et,
+lui, exactement adapté à cette géométrie :
+
+```text
+g(w) = Φ(r·w, 0) sur |w| ≤ 1,  b_k = a_k r^k ;
+R = [L/M] analytique sur |w| ≤ 1,  E = sup |g − R| ;
+(i)   rang H_ρ ≤ M          (Kronecker, après division du tête polynomiale)
+(ii)  |b_k − ρ_k| ≤ E       (Cauchy)
+(iii) σ_{M+1}(H_b) ≤ ‖H_b − H_ρ‖_F ≤ √(rows·cols)·E   (Eckart–Young)
+⇒     E ≥ σ_{M+1}(H_b) / √(rows·cols).                              (★)
+```
+
+(★) est une borne INFÉRIEURE sur l'erreur de toute forme de degré `M` : c'est
+un veto, jamais une licence. Converti contre le budget de la règle (V) gate (a)
+(`½ε|a₁₀|R_z`) par bissection, il produit un **rayon plafond** `r_M` dans les
+unités exactes de `UnifiedRadii::tiers_value`.
+
+Deux pièges réglés, tous deux capables de rendre le diagnostic muet :
+- **le décalage.** Un `[2/1]` n'est pas strictement propre ; son Hankel non
+  décalé est de rang 2 et ne retombe à 1 qu'après division de la tête
+  polynomiale de degré 1. Lire le décalage 0 pour le tier Padé vetterait des
+  formes en fait exactes (test `shift_convention`) ;
+- **le bracket haut.** À rayon absurde la section dégénère vers son unique
+  entrée dominante, paraît de rang 1 et simule un veto absent. La bissection
+  est bornée au domaine où la troncature stockée décrit encore la carte
+  (`|a_k|r^k ≤ |a₁|r` pour tout k stocké).
+
+**Census** (`hankel_rank_census`, ε = 1e-6, six vues standard) :
+
+| Vue | headroom [2/1] | deg2gain [3/2] | deg2sat | veto |
+|---|---:|---:|---:|---:|
+| cusp (skip 4–32) | 0.55–0.66 | 3.7–4.6 | 0 % | 0 % |
+| cusp (skip 256–1024) | 2.40–3.46 | 3.0–3.4 | 0 % | 0 % |
+| seahorse (skip 4–32) | 0.54–0.60 | 2.5–3.1 | 9–67 % | 0 % |
+| seahorse (skip 64–128) | 0.54 | 3.0–3.4 | 0–16 % | 4–6 % |
+| feigenbaum (tous skips) | 0.54 | 3.18 | 23–25 % | 0 % puis 37–44 % |
+
+- `headroom` = `r_M([2/1]) − ` meilleur rayon certifié de degré 1 ;
+- `deg2gain` = `r_M([3/2]) − r_M([2/1])`, même décalage ;
+- `deg2sat` = part des blocs où `[3/2]` est exact à la précision stockée alors
+  que `[2/1]` ne l'est pas ;
+- `veto` = part des blocs où le degré 1 ne peut pas atteindre le MEILLEUR rayon
+  certifié tous tiers confondus.
+
+**Verdict 1 — la question « améliorer les tiers rationnels existants » est
+close, négativement.** Le headroom médian est 0.54–0.66 log2, c'est-à-dire
+SOUS le `log2 √(rows·cols) = 1.585` que (★) traîne elle-même : à la résolution
+du diagnostic, le `[2/1]` expédié est déjà tout ce qu'un modèle à un pôle peut
+faire. Aucun raffinement d'extraction ne rendra ces blocs meilleurs. Seule
+exception mesurée : les longs blocs paraboliques (`cusp` skip ≥ 256, headroom
+2.4 à 3.5) où ~1 à 2 log2 nets restent accessibles.
+
+**Verdict 2 — un tier `[L/2]` franchit la porte de décision §9 (« candidats
+certifiés vivants »).** Le plafond du degré 2 est 2.3 à 4.7 log2 au-dessus du
+degré 1, et surtout `deg2sat` atteint 67 % à `seahorse` skip 32 et 23–25 % sur
+toute la cascade Feigenbaum : sur un quart à deux tiers des blocs, un modèle à
+deux pôles est EXACT là où un seul pôle ne l'est pas. Les deux termes étant des
+plafonds, cela autorise à construire un candidat et à le certifier — pas à
+annoncer le gain.
+
+**Sous-produit immédiat, sans nouveau tier** : sur la cascade Feigenbaum à
+skip ≥ 32, 37 à 44 % des blocs sont vettés — le degré 1 y est prouvé incapable
+d'atteindre le rayon du tier gagnant, donc les deux probes rationnelles y sont
+du coût pur. C'est le terme `Nprobe·Cprobe` du plan maître, récupérable en
+lisant σ₂ au build.
+
+**Non concluant** : `period2` (`c = −1`) sort 100 % dead — l'orbite passe par
+`z = 0`, donc `a₁₀ = Π|2Z_k| = 0`. Dégénérescence pré-existante, déjà connue du
+census `matrix-c1`, sans rapport avec cette piste.
+
+### 5.5 Ce que les log2 achètent — replay en tours de boucle
+
+Un rayon n'est pas le livrable ; les tours de boucle le sont. Le change entre
+les deux est la géométrie de l'arbre de merge : **combien de log2 de rayon coûte
+une octave de skip**. `hankel_gain_in_turns` mesure les deux bouts — le taux de
+change, et un replay pixel à pixel comptant un tour par bloc appliqué (le `dz`
+avance par itération exacte, donc la trajectoire reste vraie).
+
+| Vue | coût d'une octave | tours actuels | tours plafond | Δ | it/tour |
+|---|---:|---:|---:|---:|---|
+| cusp | 0.65 log2 | 74 736 | 52 848 | **−29 %** | 7.9 → 11.2 |
+| seahorse | 2.62 log2 | 27 485 | 18 841 | **−31 %** | 16.5 → 24.1 |
+| feigenbaum | 2.61 log2 | 15 120 | 7 632 | **−50 %** | 39.0 → 77.3 |
+| cusp-deep | 0.68 log2 | 148 464 | 53 424 | **−64 %** | 7.9 → 22.1 |
+
+Le taux de change explique l'essentiel et **varie d'un facteur 4 selon la vue** :
+sur `cusp` une octave de skip ne coûte que 0.65 log2 de rayon, donc les ~3 log2
+de plafond du degré 2 valent ≈ 4.6 octaves (blocs 24× plus longs) ; sur
+`seahorse` et `feigenbaum` une octave coûte 2.6 log2, et les mêmes 3 log2 ne
+valent plus qu'≈ 1.15 octave (blocs 2.2× plus longs). Un même gain en log2 n'a
+donc pas du tout la même valeur selon la géométrie locale.
+
+Trois réserves, toutes structurelles :
+
+1. **`hyp` est un plafond, deux fois.** `r_M` majore ce qu'un `[3/2]` pourrait
+   certifier, et ne borne que le canal VALEUR — un vrai tier devrait aussi
+   passer son certificat de dérivée, qui sur les tiers expédiés est le facteur
+   limitant environ une fois sur deux.
+2. **Mais il est conservateur sur les blocs saturés.** Là où le degré 2 ne
+   reçoit aucun veto (jusqu'à 67 % à `seahorse` skip 32), il n'y a pas de
+   plafond à rejouer : ces blocs gardent leur rayon actuel. Le chiffre est donc
+   mixte, pas purement optimiste.
+3. **Des tours en moins ne sont pas du temps en moins.** Un `[3/2]` coûte plus
+   d'octets et plus de flops par application qu'un `[2/1]` — le terme
+   `Napply[t]·Capply[t]` du plan maître. À −30 % de tours pour +30 % de coût
+   d'application, l'opération est blanche. Le seul verdict qui compte au bout
+   est le temps mur, et il exige le tier construit.
+
+Piège mesuré en chemin, à ne pas reproduire : donner aux blocs saturés le rayon
+de leur domaine de série (jusqu'à 2^40) fait explorer un régime où la discipline
+de rebase change, et le replay renvoyait alors **+46 % de tours** sur
+`feigenbaum`. Un plafond n'est pas une politique.
+
+**Reste** : construire l'extraction `[3/2]`, la faire passer par le certificat
+existant (résidu + queue + marge de pôle), mesurer le rayon réellement atteint
+contre le plafond `r_M([3/2])` ET son canal de dérivée ; puis seulement, un
+budget d'octets GPU et un temps mur.
+
 ## 6. Logarithme de composition et linéarisation de Carleman
 
 ### 6.1 Généraliser `gate_log_flow`

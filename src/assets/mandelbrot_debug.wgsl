@@ -16,6 +16,12 @@
 //   5 "tier"    — flat swatch: which tier covered the most iterations on this
 //                 pixel (exact / affine·Padé / Möbius c+ / jet), most useful
 //                 in unified (Auto) mode to see which algorithm was picked.
+// View 6 ("reach", the super-pixel Taylor radius) deliberately does NOT live
+// here: this pipeline recomputes every pixel in its own loop, so it is both
+// slow and free to disagree with what the progressive renderer actually put on
+// screen. The reach only needs z, z′ and z″ at escape, which the production
+// path already stores per pixel (raw layers 8-12) — so that view reads them in
+// the COLOR pass instead (see color.wgsl, parameters.reachDebug).
 
 struct MandelbrotStep { zx: f32, zy: f32 };
 
@@ -656,9 +662,20 @@ const TIER_COLOR_ORDER3: vec3<f32> = vec3<f32>(0.95, 0.6, 0.15);
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> @location(0) vec4<f32> {
   let globalMaxIterI = i32(mandelbrot.globalMaxIter);
-  let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
-  let xy_neutral = (uv - vec2<f32>(0.5, 0.5)) * 2.0 * vec2<f32>(mandelbrot.aspect, 1.0) / neutralExtent;
-  let local_rot = xy_neutral * neutralExtent;
+  // Screen → neutral. The compute path stores the scene UNROTATED (its
+  // `local_rot` is neutral space) and the scene rotation is applied at display
+  // time by the color pass, `rotate_sincos(local, sceneSin, sceneCos)`. This
+  // pipeline writes straight to the swapchain, so it has to do that rotation
+  // itself — without it the overlay samples a different part of the plane than
+  // the frame it is drawn over, which reads as "the debug views are somewhere
+  // else entirely". (The reach view does not have this problem: it lives in the
+  // color pass and inherits the mapping.)
+  let xy_screen = (uv - vec2<f32>(0.5, 0.5)) * 2.0;
+  let local = vec2<f32>(xy_screen.x * mandelbrot.aspect, xy_screen.y);
+  let rotS = sin(mandelbrot.angle);
+  let rotC = cos(mandelbrot.angle);
+  let local_rot = vec2<f32>(rotC * local.x - rotS * local.y,
+                            rotS * local.x + rotC * local.y);
   let scaleExp = i32(mandelbrot.scaleExp);
 
   // dc in fe, from either uniform regime (deep: fe mantissas share scaleExp).
