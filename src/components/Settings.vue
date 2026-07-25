@@ -485,7 +485,7 @@ const debugViewLegends: Record<number, {
     extraSwatches: [
       { color: 'rgb(242, 128, 26)', label: 'Orange = mode Exact → bascule en Auto' },
       { color: 'rgb(242, 217, 64)', label: 'Jaune = Auto, mais table pas prête (attends la référence)' },
-      { color: 'rgb(115, 89, 26)', label: 'Brun = table active, mais ce pixel n\'a pas porté z″' },
+      { color: 'rgb(107, 41, 77)', label: 'Prune = critère quadratique inopérant (z″ sous le plancher f32) : portée NON mesurable depuis ce payload, elle y dépend de z‴. Ni petite ni grande — inconnue. C\'est le disque SA, sa taille suit ε.' },
       { color: 'rgb(38, 51, 115)', label: 'Bleu sombre = payload hors plage' },
       { color: 'rgb(217, 26, 191)', label: 'Magenta = mauvaise texture liée (bug)' },
       { color: 'rgb(26, 26, 31)', label: 'Presque noir = intérieur / pas encore calculé' },

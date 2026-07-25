@@ -96,6 +96,7 @@ struct VertexOutput {
 // roughly ε/(|z|·ln|z|·ln2), so at the bailout |z| ≈ 2 a relative 1e-3 holds ν
 // inside ~1/500 of an iteration — well under a palette quantum.
 const REACH_TOL: f32 = 1e-3;
+const LOG2E_: f32 = 1.4426950408889634;
 
 // Blue → cyan → green → yellow → red, mirroring mandelbrot_debug.wgsl's
 // skip_ramp so the legend in Settings.vue serves both.
@@ -1258,34 +1259,59 @@ fn colorize_pixel(
     let S = textureLoad(sourceTex, sourceCoord, 8, 0).r;
     let m2 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 11, 0).r,
                        textureLoad(sourceTex, sourceCoord, 12, 0).r);
-    // z″ is zero here. It is only accumulated on the unified path
-    // (mandelbrot_brush, `if (isUnified)`), and the engine drops the shader
-    // flag back to exact whenever the block table is not ready — so a user
-    // sitting in Auto can still get nothing. The two causes need different
-    // actions, hence two colors. A zero would otherwise read as ρ = ∞ and
-    // paint everything red, i.e. flatter the idea with an artifact.
+    // z″ reads as zero. Three different situations, and only two are faults.
+    //
+    // With the table live it is NOT an error: the stored mantissa is z″/|z′|²,
+    // and |z′| and the pixel footprint δ are conjugate in deep zoom (e^S·δ is
+    // O(1)), so a mantissa under the f32 floor means the quadratic term really
+    // is negligible against the linear one — the same reading aa_reseed relies
+    // on when it lets m2 = 0 PASS its margin. The reach is then not bounded by
+    // the quadratic criterion at all; this payload simply cannot measure it,
+    // because what would bind is z‴, which is not stored. Hence a colour of its
+    // own rather than a place on the ramp: neither "no reach" nor "huge reach".
+    // (Field note: this is the ε-sized disk seen around a minibrot — the SA
+    // prefix covers a parameter disk whose radius scales with ε, and inside it
+    // the seed ∂²(SA)/∂c² lands under the floor. Changing ε moves the disk,
+    // which is what identified the mechanism.)
     if (!(dot(m2, m2) > 0.0)) {
       if (parameters.reachReady < 0.5) {
-        return vec4<f32>(0.95, 0.5, 0.1, 1.0);  // ORANGE — switch to Auto
+        return vec4<f32>(0.95, 0.5, 0.1, 1.0);  // ORANGE — not in Auto: no data
       }
       if (parameters.reachReady < 1.5) {
         return vec4<f32>(0.95, 0.85, 0.25, 1.0); // YELLOW — table still building
       }
-      return vec4<f32>(0.45, 0.35, 0.1, 1.0);    // BROWN — unified live, but this
-                                                 // pixel never carried z″
+      // Table live. A lower bound IS derivable here — |m2| under the f32 floor
+      // F gives ρ_last > √(2·tol·|z|/(F·e^{2S})) — but it is worthless, and an
+      // earlier revision made the mistake of painting it on the ramp:
+      //   √(2·tol·|z|/F) ≈ 5.8e17, and the bound in pixels is that over
+      //   (|z′|·δ)/m1, with |z′|·δ ≲ 1 by the distance-estimator relation.
+      // So it saturates at ~1e17 px on every pixel of the region. A value that
+      // saturates uniformly across a heterogeneous area is not a measurement,
+      // and a ramp colour invites reading it as one — the true reach here is
+      // set by z‴ and may well be a single pixel.
+      //
+      // It is not even reliably a bound: the UPPER clamp (+80) caps the scale
+      // multiplier, so a saturated fold can store a small mantissa for a LARGE
+      // true z″ — the inequality then points the wrong way.
+      //
+      // Hence a flat colour that cannot be mistaken for the ramp. What this
+      // region needs is a direct measurement (fit a neighbour's Taylor against
+      // its computed z), not a sharper bound.
+      return vec4<f32>(0.42, 0.16, 0.30, 1.0);   // PLUM — quadratic criterion
+                                                 // inoperative: reach NOT
+                                                 // measurable from this payload
     }
     // DARK BLUE — payload present but out of range (overflowed mantissa or
     // scale); the pixel is unusable but the mode is right.
     if (!(abs(S) < 1e6) || !(abs(m2.x) < 1e30) || !(abs(m2.y) < 1e30)) {
       return vec4<f32>(0.15, 0.2, 0.45, 1.0);
     }
-    let LOG2E = 1.4426950408889634;
     // |z″| = |m2|·e^{2S}; keep it in log2 so the exponent never materializes.
-    let log2Snd = log2(max(length(m2), 1e-30)) + 2.0 * S * LOG2E;
+    let log2Snd = log2(max(length(m2), 1e-30)) + 2.0 * S * LOG2E_;
     let log2Rho = 0.5 * (log2(2.0 * REACH_TOL * max(length(z), 1e-30)) - log2Snd);
     // One neutral texel spans 2/texHeight of the [-1,1] vertical extent, times
     // the true (deep-safe) scale.
-    let log2Pix = (log(2.0 / max(f32(sourceTexSize.y), 1.0)) + parameters.lnScale) * LOG2E;
+    let log2Pix = (log(2.0 / max(f32(sourceTexSize.y), 1.0)) + parameters.lnScale) * LOG2E_;
     return vec4<f32>(reach_ramp((log2Rho - log2Pix) / 6.0), 1.0);
   }
 

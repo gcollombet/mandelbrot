@@ -5,9 +5,12 @@ const {
   PERSONAL_TEXTURE_LIMIT,
   MAX_TEXTURE_BYTES,
   isAdminClaims,
+  normalizePresetManifestEntries,
   quotaCountAfter,
+  removePresetManifestEntry,
   requireGuid,
   requirePresetType,
+  upsertPresetManifestEntry,
   validateTextureMetadata,
 } = require('./personalLibraryCore');
 
@@ -87,6 +90,37 @@ function presetRef(uid, guid) {
   return admin.firestore().doc(`users/${uid}/presets/${guid}`);
 }
 
+function presetManifestRef(uid) {
+  return admin.firestore().doc(`users/${uid}/manifests/presets`);
+}
+
+function presetCollection(uid) {
+  return admin.firestore().collection(`users/${uid}/presets`);
+}
+
+function presetManifestEntriesFromSnapshot(snapshot) {
+  return normalizePresetManifestEntries(snapshot.docs.map((entry) => ({
+    guid: entry.id,
+    type: entry.data()?.type,
+    revision: entry.data()?.revision,
+  })));
+}
+
+async function presetManifestState(transaction, uid, manifestSnapshot) {
+  if (manifestSnapshot.exists) {
+    const data = manifestSnapshot.data() || {};
+    return {
+      revision: Math.max(0, Math.floor(Number(data.revision) || 0)),
+      entries: normalizePresetManifestEntries(data.entries),
+    };
+  }
+  const presets = await transaction.get(presetCollection(uid));
+  return {
+    revision: 0,
+    entries: presetManifestEntriesFromSnapshot(presets),
+  };
+}
+
 function textureRef(uid, guid) {
   return admin.firestore().doc(`users/${uid}/textures/${guid}`);
 }
@@ -99,6 +133,24 @@ function textureFileName(guid) {
   return `${guid}.webp`;
 }
 
+exports.getPersonalPresetManifest = onCall({region: 'europe-west1'}, async (request) => {
+  const uid = requireUser(request);
+  return admin.firestore().runTransaction(async (transaction) => {
+    const target = presetManifestRef(uid);
+    const snapshot = await transaction.get(target);
+    const manifest = await presetManifestState(transaction, uid, snapshot);
+    if (!snapshot.exists) {
+      manifest.revision = 1;
+      transaction.set(target, {
+        entries: manifest.entries,
+        revision: manifest.revision,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
+    }
+    return manifest;
+  });
+});
+
 exports.upsertPersonalPreset = onCall({region: 'europe-west1'}, async (request) => {
   const uid = requireUser(request);
   try {
@@ -110,10 +162,13 @@ exports.upsertPersonalPreset = onCall({region: 'europe-west1'}, async (request) 
     return await admin.firestore().runTransaction(async (transaction) => {
       const target = presetRef(uid, guid);
       const usage = usageRef(uid);
-      const [targetSnapshot, usageSnapshot] = await Promise.all([
+      const manifestTarget = presetManifestRef(uid);
+      const [targetSnapshot, usageSnapshot, manifestSnapshot] = await Promise.all([
         transaction.get(target),
         transaction.get(usage),
+        transaction.get(manifestTarget),
       ]);
+      const manifest = await presetManifestState(transaction, uid, manifestSnapshot);
       const currentUsage = usageSnapshot.data() || {};
       const presetCount = quotaCountAfter({
         count: currentUsage.presetCount || 0,
@@ -122,6 +177,7 @@ exports.upsertPersonalPreset = onCall({region: 'europe-west1'}, async (request) 
         action: 'upsert',
       });
       const revision = (targetSnapshot.data()?.revision || 0) + 1;
+      const manifestEntries = upsertPresetManifestEntry(manifest.entries, {guid, type, revision});
       transaction.set(target, {
         ...record,
         guid,
@@ -136,6 +192,11 @@ exports.upsertPersonalPreset = onCall({region: 'europe-west1'}, async (request) 
         revision: (currentUsage.revision || 0) + 1,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, {merge: true});
+      transaction.set(manifestTarget, {
+        entries: manifestEntries,
+        revision: manifest.revision + 1,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
       return {guid, revision, presetCount};
     });
   } catch (error) {
@@ -150,10 +211,13 @@ exports.deletePersonalPreset = onCall({region: 'europe-west1'}, async (request) 
     return await admin.firestore().runTransaction(async (transaction) => {
       const target = presetRef(uid, guid);
       const usage = usageRef(uid);
-      const [targetSnapshot, usageSnapshot] = await Promise.all([
+      const manifestTarget = presetManifestRef(uid);
+      const [targetSnapshot, usageSnapshot, manifestSnapshot] = await Promise.all([
         transaction.get(target),
         transaction.get(usage),
+        transaction.get(manifestTarget),
       ]);
+      const manifest = await presetManifestState(transaction, uid, manifestSnapshot);
       const currentUsage = usageSnapshot.data() || {};
       const presetCount = quotaCountAfter({
         count: currentUsage.presetCount || 0,
@@ -168,6 +232,11 @@ exports.deletePersonalPreset = onCall({region: 'europe-west1'}, async (request) 
         revision: (currentUsage.revision || 0) + 1,
         updatedAt: admin.firestore.FieldValue.serverTimestamp(),
       }, {merge: true});
+      transaction.set(manifestTarget, {
+        entries: removePresetManifestEntry(manifest.entries, guid),
+        revision: manifest.revision + 1,
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      });
       return {guid, deleted: targetSnapshot.exists, presetCount};
     });
   } catch (error) {
@@ -359,6 +428,7 @@ exports.savePersonalImportBatch = onCall({region: 'europe-west1'}, async (reques
       id,
       uid,
       ownerUid: uid,
+      lastError: typeof batch.lastError === 'string' ? batch.lastError : null,
       updatedAt: admin.firestore.FieldValue.serverTimestamp(),
     }, {merge: true});
     return {id};
@@ -374,11 +444,19 @@ exports.repairPersonalUsage = onCall({region: 'europe-west1'}, async (request) =
     admin.firestore().collection(`users/${targetUid}/presets`).get(),
     admin.firestore().collection(`users/${targetUid}/textures`).get(),
   ]);
-  await usageRef(targetUid).set({
-    presetCount: presets.size,
-    textureCount: textures.size,
-    revision: admin.firestore.FieldValue.increment(1),
-    repairedAt: admin.firestore.FieldValue.serverTimestamp(),
-  }, {merge: true});
+  await Promise.all([
+    usageRef(targetUid).set({
+      presetCount: presets.size,
+      textureCount: textures.size,
+      revision: admin.firestore.FieldValue.increment(1),
+      repairedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, {merge: true}),
+    presetManifestRef(targetUid).set({
+      entries: presetManifestEntriesFromSnapshot(presets),
+      revision: admin.firestore.FieldValue.increment(1),
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      repairedAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, {merge: true}),
+  ]);
   return {uid: targetUid, presetCount: presets.size, textureCount: textures.size};
 });

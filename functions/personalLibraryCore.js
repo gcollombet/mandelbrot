@@ -39,6 +39,38 @@ function requirePresetType(value) {
   return value;
 }
 
+function normalizePresetManifestEntries(entries) {
+  if (!Array.isArray(entries)) return [];
+  const normalized = new Map();
+  for (const candidate of entries) {
+    try {
+      const guid = requireGuid(candidate?.guid);
+      const type = requirePresetType(candidate?.type);
+      const revision = Math.max(0, Math.floor(Number(candidate?.revision) || 0));
+      normalized.set(guid, {guid, type, revision});
+    } catch {
+      // Ignore malformed legacy manifest entries.
+    }
+  }
+  return [...normalized.values()].sort((left, right) => left.guid.localeCompare(right.guid));
+}
+
+function upsertPresetManifestEntry(entries, entry) {
+  const normalized = normalizePresetManifestEntries(entries);
+  const next = normalized.filter(candidate => candidate.guid !== entry.guid);
+  next.push({
+    guid: requireGuid(entry.guid),
+    type: requirePresetType(entry.type),
+    revision: Math.max(0, Math.floor(Number(entry.revision) || 0)),
+  });
+  return next.sort((left, right) => left.guid.localeCompare(right.guid));
+}
+
+function removePresetManifestEntry(entries, guid) {
+  const safeGuid = requireGuid(guid);
+  return normalizePresetManifestEntries(entries).filter(entry => entry.guid !== safeGuid);
+}
+
 function validateTextureMetadata(metadata) {
   if (!metadata || metadata.contentType !== 'image/webp') throw new Error('invalid-content-type');
   const width = Number(metadata.width);
@@ -74,8 +106,11 @@ module.exports = {
   canAccessOwner,
   isAdminClaims,
   isReservationExpired,
+  normalizePresetManifestEntries,
   quotaCountAfter,
+  removePresetManifestEntry,
   requireGuid,
   requirePresetType,
+  upsertPresetManifestEntry,
   validateTextureMetadata,
 };
