@@ -74,6 +74,10 @@ struct Uniforms {
   reachDebug: f32,       // 1 = super-pixel reach heatmap (debug view 6)
   lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)
   reachReady: f32,       // 0 = user in Exact, 1 = Auto but table not ready, 2 = unified live
+  coverageDebug: f32,    // 1 = exact/Taylor/bilinear/no-data origin map (debug view 7)
+  _pad69: f32,
+  _pad70: f32,
+  _pad71: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
@@ -957,6 +961,19 @@ fn load_pixel_sample(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> Pixe
   return pixelSample;
 }
 
+fn coverage_debug_color(step: f32) -> vec4<f32> {
+  if (!(step > 0.0)) {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);       // no resolved data
+  }
+  if (abs(fract(step) - 0.5) < 0.125) {
+    return vec4<f32>(1.0, 0.2, 0.85, 1.0);      // terminal Taylor value
+  }
+  if (step <= 1.125) {
+    return vec4<f32>(0.235, 1.0, 0.235, 1.0);   // computed pixel
+  }
+  return vec4<f32>(0.95, 0.5, 0.1, 1.0);       // temporary bilinear fill
+}
+
 fn load_pixel_extras(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelExtras {
   var extras: PixelExtras;
   extras.der_x = textureLoad(sourceTex, coord, 4, 0).r;
@@ -1801,6 +1818,29 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   let scaleRatio = select(1.0, zf / lzf, lzf > 0.0);
   let effectiveFrozenStep = frozenCompositeStep * scaleRatio;
 
+  // Debug view 7 classifies the marker stored by the resolved pipeline itself.
+  // Screen-space bilinear magnification is deliberately ignored: it is only a
+  // display filter, not a third producer of progressive pixel values.
+  if (parameters.coverageDebug > 0.5) {
+    let liveCoverage = liveStep > 0.0;
+    let frozenCoverage = useFrozen && frozenStep > 0.0;
+    if (liveCoverage && frozenCoverage) {
+      let effectiveFrozenCoverageStep = frozenStep * scaleRatio;
+      return select(
+        coverage_debug_color(frozenStep),
+        coverage_debug_color(liveStep),
+        liveStep <= effectiveFrozenCoverageStep,
+      );
+    }
+    if (liveCoverage) {
+      return coverage_debug_color(liveStep);
+    }
+    if (frozenCoverage) {
+      return coverage_debug_color(frozenStep);
+    }
+    return coverage_debug_color(0.0);
+  }
+
   if (liveHasData && frozenHasData) {
     // Both have data — pick the one with finer resolution (smaller step).
     if (liveCompositeStep <= effectiveFrozenStep) {
@@ -1920,5 +1960,8 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 @fragment
 fn fs_main_direct(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
   let c = shade_srgb(fragCoord, false);
+  if (parameters.coverageDebug > 0.5) {
+    return c;
+  }
   return vec4<f32>(clamp(c.rgb + vec3<f32>(dither_8bit(pos.xy)), vec3<f32>(0.0), vec3<f32>(1.0)), c.a);
 }

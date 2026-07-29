@@ -1,6 +1,6 @@
 // Resolve pass: replaces remaining sentinels with a snapped parent pixel.
 //
-// Input: the RAW state texture (9 r32float layers — see mandelbrot_brush.wgsl);
+// Input: the RAW state texture (13 r32float layers — see mandelbrot_brush.wgsl);
 // output: the 8-layer resolved texture (MRT). Only FINISHED pixels are ever
 // interpreted here (sentinels and budget-exhausted continuations are replaced
 // by finished ancestors), so the in-progress raw derivative in layers 4/5/8
@@ -39,6 +39,14 @@ struct ResolveUniforms {
   mu: f32,
   gridOffsetX: f32,
   gridOffsetY: f32,
+  // ln(c-units per raw-texture texel), kept in log space for deep zoom.
+  logTexelC: f32,
+  // 1 = evaluate terminal analytic value coverage for sentinel texels.
+  taylorOverlayEnabled: f32,
+  // Relative tolerance on |ẑ − z| for the truncation gate below. The gate binds
+  // as ρ ∝ √tol, so loosening it is the cheapest radius there is — see
+  // TAYLOR_OVERLAY_TOL in Engine.ts for how far it may go.
+  taylorTol: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: ResolveUniforms;
@@ -146,6 +154,147 @@ fn smooth_frac(z_sq: f32, logMu: f32) -> f32 {
   return clamp(1.0 - log(max(log_z2 / logMu, 1e-12)) / LN_2, 0.0, 1.0);
 }
 
+fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
+  return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
+}
+
+struct TaylorCandidate {
+  valid: u32,
+  score: f32,
+  iter: f32,
+  z: vec2<f32>,
+};
+
+fn invalid_taylor_candidate() -> TaylorCandidate {
+  return TaylorCandidate(0u, 1e30, 0.0, vec2<f32>(0.0));
+}
+
+// Test one completed integer-grid anchor. The score is the squared normalized
+// distance to the current value gate; lower is better. This is a gather
+// equivalent of splatting the anchor over its accepted neighbourhood, without
+// an owner texture or inverse-coordinate lookup.
+fn try_taylor_candidate(
+  anchorCoord: vec2<i32>,
+  targetCoord: vec2<i32>,
+  logMu: f32,
+) -> TaylorCandidate {
+  if (textureNumLayers(rawTex) <= 12u) {
+    return invalid_taylor_candidate();
+  }
+
+  let deltaTexel = vec2<f32>(targetCoord - anchorCoord);
+  let deltaLen = length(deltaTexel);
+  if (deltaLen <= 0.0) {
+    return invalid_taylor_candidate();
+  }
+
+  let anchorIter = loadLayer(anchorCoord, 0);
+  let anchorZ = vec2<f32>(loadLayer(anchorCoord, 2), loadLayer(anchorCoord, 3));
+  let s = loadLayer(anchorCoord, 8);
+  let m1 = vec2<f32>(loadLayer(anchorCoord, 9), loadLayer(anchorCoord, 10));
+  let m2 = vec2<f32>(loadLayer(anchorCoord, 11), loadLayer(anchorCoord, 12));
+  // `dot(m2, m2) > 0` is a REQUIREMENT, not a finiteness check. A z″ mantissa
+  // that reads as zero means "unmeasurable", never "no error": the stored value
+  // is z″/|z′|², so under the f32 floor the quadratic term is negligible against
+  // the LINEAR one while the actual truncation is then set by z‴, which is not
+  // stored and may bind at a single pixel. color.wgsl's reach view paints that
+  // region its own flat colour for exactly this reason. Accepting it here would
+  // let the gate below pass trivially (a zero term is trivially small) on a
+  // model whose error nobody can see — the ε-sized disk around a minibrot.
+  // Rejecting costs refinement there and buys correctness.
+  let finitePayload = anchorIter > 0.0
+    && dot(anchorZ, anchorZ) >= uni.mu
+    && abs(s) < 1e6
+    && abs(m1.x) < 1e30 && abs(m1.y) < 1e30
+    && abs(m2.x) < 1e30 && abs(m2.y) < 1e30
+    && length(m1) > 0.0
+    && dot(m2, m2) > 0.0;
+  if (!finitePayload) {
+    return invalid_taylor_candidate();
+  }
+
+  let hat = deltaTexel / deltaLen;
+  let logDelta = uni.logTexelC + log(deltaLen);
+  // No clamp on the folds. A clamp SATURATES — it returns e^80 where the true
+  // factor is e^200 — so a saturated high fold reports a small quadratic term
+  // for a large true z″ and the gate below would be fed a lie that points the
+  // wrong way. Left alone, the same case overflows to inf, and inf fails every
+  // comparison in the gate, which is the answer we want. The low side needs no
+  // guard either: exp() underflowing to 0 IS the correct limit (the neighbour
+  // genuinely carries the anchor's value).
+  let logFold = s + logDelta;
+  let e1 = exp(logFold);
+  let e2 = exp(2.0 * logFold);
+  let linear = cmul(m1, hat) * e1;
+  // Exactly ½·z″·δc², the last term the model RETAINS: m2 = z″/|z′|² and
+  // e2 = (|z′|·|δc|)².
+  let quadratic = cmul(cmul(m2, hat), hat) * (0.5 * e2);
+
+  // ── truncation gate ───────────────────────────────────────────────────────
+  //
+  // Without this, acceptance was "payload finite AND the prediction still looks
+  // escaped" — plausibility, not validity. Measured at σ = 1e-3
+  // (reach_census), the honest radius medians
+  // 7.5 px at misiurewicz, 5.9 px at seahorse, 2.3 px at elephant and 0.32 px on
+  // the triple spiral, against the 5.7 px a step-8 cell asks of its corner — so
+  // on two of those four views the median texel was already out of range.
+  //
+  // The criterion is ρ_last (½|z″|ρ² = tol·|z|), which is the first term that
+  // WOULD be dropped if the model were linear, not the first one dropped by the
+  // quadratic model — that would be z‴, which is not in the payload. The census
+  // measured ρ_last at 1.85 log2 (×3.6) BELOW the honest ρ_next, so the gate is
+  // conservative by a bounded, known factor: it refines more than strictly
+  // necessary, never less.
+  let anchorZSq = dot(anchorZ, anchorZ);
+  let tol = max(uni.taylorTol, 0.0);
+  let score = dot(quadratic, quadratic) / max(tol * tol * anchorZSq, 1e-30);
+  if (!(score <= 1.0)) {
+    return invalid_taylor_candidate();
+  }
+
+  let zhat = anchorZ + linear + quadratic;
+  let zhatSq = dot(zhat, zhat);
+  // Taylor is evaluated at the anchor's escape iteration. If the predicted
+  // target is no longer escaped there, the target changed iteration branch;
+  // keep the complete spatial resolve instead of extrapolating log-log below
+  // bailout. The upper bound is what rejects an overflowed fold: inf passes
+  // `>= mu` trivially and would render as a flat band at fraction 0.
+  if (!(zhatSq >= uni.mu && zhatSq < 1e30)) {
+    return invalid_taylor_candidate();
+  }
+
+  let fracOut = smooth_frac(zhatSq, logMu);
+
+  // Synthetic escaped magnitude that reproduces fracOut in color.wgsl,
+  // while retaining the Taylor-predicted direction.
+  let logZ2Out = logMu * exp2(1.0 - fracOut);
+  let zhatLen = sqrt(zhatSq);
+  let zOut = zhat * (exp(0.5 * logZ2Out) / zhatLen);
+
+  return TaylorCandidate(1u, score, anchorIter, zOut);
+}
+
+// Overlay only the analytically continuable value channels. A half-unit in the
+// positive resolved step is the terminal-coverage handshake read by the next
+// fused compute frame: integer step = bilinear temporary fill; step + 0.5 =
+// Taylor final approximation. Distance/derivative shading and orbit averages
+// remain spatial.
+fn taylor_overlay(
+  spatial: FragOut,
+  candidate: TaylorCandidate,
+  cellStep: u32,
+) -> FragOut {
+  if (candidate.valid == 0u || cellStep <= 1u) {
+    return spatial;
+  }
+  var o = spatial;
+  o.iter = pack(candidate.iter);
+  o.genuine = pack(f32(cellStep) + 0.5);
+  o.zx = pack(candidate.z.x);
+  o.zy = pack(candidate.z.y);
+  return o;
+}
+
 fn decode_avg_dir(encoded: f32) -> vec2<f32> {
   let xq = floor(encoded / ORBIT_DIRECTION_BASE);
   let yq = encoded - xq * ORBIT_DIRECTION_BASE;
@@ -199,12 +348,14 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
 
   // -1 should not remain after Mandelbrot pass, but if it does: keep as-is.
   var step_u: u32;
+  var requested_step = 0u;
   if (iter_val < 0.0) {
     let step_f = -iter_val;
     if (step_f <= 1.0) {
       return passthrough(coord);
     }
     step_u = floor_power_of_two(u32(step_f));
+    requested_step = step_u;
   } else {
     // Budget-exhausted anchor: start climbing from the next coarser grid level.
     step_u = 2u;
@@ -283,6 +434,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // (e.g. the pixel sits exactly on an unfinished anchor).
     var hasFinished = false;
     var firstFinishedCoord = vec2<i32>(0);
+    var bestTaylor = invalid_taylor_candidate();
 
     for (var i = 0u; i < 4u; i = i + 1u) {
       let ccoord = candidates[i];
@@ -327,6 +479,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       }
 
       // Escaped — accumulate.
+      if (uni.taylorOverlayEnabled >= 0.5 && requested_step > 1u) {
+        let taylor = try_taylor_candidate(ccoord, coord, logMu);
+        if (taylor.valid != 0u && taylor.score < bestTaylor.score) {
+          bestTaylor = taylor;
+        }
+      }
       if (!hasFinished) {
         hasFinished = true;
         firstFinishedCoord = ccoord;
@@ -409,7 +567,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       o.dzy       = pack(angleOut);
       o.ref_i     = pack(refOut);
       o.avgDirection = pack(encode_avg_dir(clamp(avgDirSum * invW, vec2<f32>(-1.0), vec2<f32>(1.0))));
-      return o;
+      return taylor_overlay(o, bestTaylor, requested_step);
       }
 
       // >= 3 resolved corners but all of them carry zero bilinear weight

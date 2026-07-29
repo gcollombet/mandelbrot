@@ -57,6 +57,11 @@ The crate lives at `reference_calculus/` and uses `dashu-float` for arbitrary pr
   - `tests/visual.spec.ts` — 6 screenshot-based tests (default view, zoom reprojection, frozen alignment, interior, palette preview, console errors)
   - Screenshots go to `tests/screenshots/`
 - **Rust**: `cargo test --manifest-path reference_calculus/Cargo.toml`
+- **Censuses** (field measurements, `#[ignore]`d because they run for minutes): add
+  `--release ... -- --ignored --nocapture`, e.g.
+  `cargo test --release --manifest-path reference_calculus/Cargo.toml --lib box_dimension_census -- --ignored --nocapture`.
+  Current ones: `reach_census`, `nu_branch_census` (`reach.rs`), `box_dimension_census`,
+  `skip_ceiling_census` (`boxdim.rs`). Findings live in the root `*.md` notes.
 - No JS/TS unit test runner configured (no Vitest/Jest).
 
 ## Architecture
@@ -122,3 +127,5 @@ Use codegraph for **structural** questions — what calls what, what would break
 
 The MCP server returns "not initialized." Ask the user: *"I notice this project doesn't have CodeGraph initialized. Want me to run `codegraph init -i` to build the index?"*
 <!-- CODEGRAPH_END -->
+
+## Imported Claude Cowork project instructions

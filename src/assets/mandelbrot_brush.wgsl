@@ -11,7 +11,7 @@
 // r32float is the only texture format supporting read_write storage access
 // in core WebGPU — this shader depends on it.
 //
-// Layer layout (9-layer raw format — display-side textures stay at 8; the
+// Layer layout (13-layer raw format — display-side textures stay at 8; the
 // resolve/color passes never read in-progress derivative layers):
 //   0 : sentinel / iteration count (integer part)
 //   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied)
@@ -167,6 +167,9 @@ struct BrushUniforms {
   // view simply moves the box and keeps every previously computed texel.
   dispatchOriginX: f32,
   dispatchOriginY: f32,
+  // 1 = read terminal Taylor coverage from the previous resolved frame.
+  // Disabled on clear/translation frames because those coordinates are stale.
+  taylorCoverageEnabled: f32,
 };
 
 struct CounterBuffer {
@@ -299,6 +302,7 @@ struct JetLevel {
 @group(0) @binding(8) var<storage, read> mandelbrotJetSuite: array<JetCoeff>;
 @group(0) @binding(9) var<storage, read> mandelbrotJetLevels: array<JetLevel>;
 @group(0) @binding(10) var<storage, read> mandelbrotJetRadii: array<JetRadii>;
+@group(0) @binding(11) var previousResolved: texture_2d_array<f32>;
 
 const VALIDITY_VERSION: u32 = 1u;
 const VALIDITY_WORDS_PER_BLOCK: u32 = 24u;
@@ -819,6 +823,19 @@ fn der_to_polar(m: vec2<f32>, s: f32) -> vec2<f32> {
   return vec2<f32>(atan2(m.y, m.x), s + 0.5 * log(mm));
 }
 
+// Exterior distance in SCREEN units, as -log: |z|·ln|z| / (2·|z'|·scale). That
+// is the Koebe estimate 2|z|ln|z|/|z'| divided by 4, i.e. the guaranteed LOWER
+// bound on the true distance — deliberately conservative, so the AA ramp that
+// reads it never under-samples. (Measured: the undivided estimate hits exactly
+// 4× the true distance at a tip, the extremal Koebe case.)
+//
+// It is only meaningful when the pixel escaped well past |z| = 1: the formula is
+// asymptotic in |z|, and its ln(ln|z|) term blows up as |z| → 1. Measured against
+// a bailout of 1e12, the share of pixels off by more than 2× is 0–2 % at
+// mu = 4, 10–27 % at mu = 2 and 43–100 % at mu = 1 (median error ×1484 there).
+// The Mu slider is therefore floored at 4 in Settings.vue; the 1.000002 clamp
+// below only catches a preset that predates that floor, and it clamps rather
+// than fixes — a mu < 4 preset still gets a corrupt height field.
 fn distance_height(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
   let logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
   let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - log(max(mandelbrot.scale, 1e-30));
@@ -1138,6 +1155,9 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
 }
 
 const IGNORE_EPSILON: bool = true;
+// Escaped layers 11/12 normally contain the finite z″ mantissa. This marker
+// distinguishes "z″ was not tracked" from a valid mathematical zero.
+const INVALID_TAYLOR_PAYLOAD: f32 = 1e35;
 
 // ── per-texel output (plain struct, stored via textureStore) ───────
 struct TexelOut {
@@ -1182,6 +1202,17 @@ fn storeTexel(coord: vec2<i32>, out: TexelOut) {
   textureStore(raw, coord, 10, out.aa10);
   textureStore(raw, coord, 11, out.aa11);
   textureStore(raw, coord, 12, out.aa12);
+}
+
+// Spatial fills use integer steps. Taylor terminal coverage uses step + 0.5.
+// The marker lives only in resolved state: raw remains a sentinel, so a real
+// compute request can always take priority.
+fn has_taylor_coverage(coord: vec2<i32>) -> bool {
+  if (brush.taylorCoverageEnabled < 0.5) {
+    return false;
+  }
+  let resolvedStep = textureLoad(previousResolved, coord, 1, 0).r;
+  return resolvedStep > 1.0 && abs(fract(resolvedStep) - 0.5) < 0.125;
 }
 
 const ORBIT_METRIC_EMA_ALPHA: f32 = 0.18;
@@ -1693,8 +1724,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     out.derS      = pack(derS + derSLo);
     out.aa9       = pack(derM.x);
     out.aa10      = pack(derM.y);
-    out.aa11      = pack(sndM.x);
-    out.aa12      = pack(sndM.y);
+    let escapedSndM = select(
+      vec2<f32>(INVALID_TAYLOR_PAYLOAD),
+      sndM,
+      isUnified,
+    );
+    out.aa11      = pack(escapedSndM.x);
+    out.aa12      = pack(escapedSndM.y);
     return out;
   }
 
@@ -3306,8 +3342,13 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     out.derS      = pack(derS + derSLo);
     out.aa9       = pack(derM.x);
     out.aa10      = pack(derM.y);
-    out.aa11      = pack(sndM.x);
-    out.aa12      = pack(sndM.y);
+    let escapedSndM = select(
+      vec2<f32>(INVALID_TAYLOR_PAYLOAD),
+      sndM,
+      isUnifiedDeep,
+    );
+    out.aa11      = pack(escapedSndM.x);
+    out.aa12      = pack(escapedSndM.y);
     return out;
   }
 
@@ -3370,6 +3411,10 @@ fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
   let step = -si;
   if (step <= 1) {
     return -1.0;
+  }
+
+  if (has_taylor_coverage(coord_out)) {
+    return s;
   }
 
   if (brush.allowRefinement < 0.5) {
@@ -3691,7 +3736,9 @@ fn cs_main(
 
       // ── count stage (same classification as count_unfinished.wgsl) ──
       if (iter_val < 0.0) {
-        needs = true;
+        // A covered sentinel is final for this render: it stays negative in raw
+        // but neither refines nor keeps the render loop alive.
+        needs = !has_taylor_coverage(coord);
         isActive = iter_val == -1.0;
       } else if (iter_val > 0.0) {
         if (!zLoaded) {

@@ -39,6 +39,9 @@ import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfi
  *  Taylor payload that render already stored (raw layers 8/11/12), so it costs
  *  a texture fetch and always agrees with what is on screen. */
 export const DEBUG_VIEW_REACH = 6
+/** Debug view 7 reads the resolved step marker produced by the ordinary
+ *  progressive pipeline: exact / Taylor / bilinear / no data. */
+export const DEBUG_VIEW_TAYLOR_COVERAGE = 7
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -75,6 +78,28 @@ const MAX_BATCH_SIZE = 10_000
 // below a pixel while letting high-skip BLA levels accept far more often than
 // the previous 1e-6 (which made BLA slower than plain perturbation).
 const BLA_LINEARIZATION_EPSILON = 1e-3
+
+/**
+ * Relative tolerance on |ẑ − z| for the Taylor superpixel overlay's truncation
+ * gate (resolve.wgsl). NOT the same quantity as BLA_LINEARIZATION_EPSILON above,
+ * which bounds a PER-STEP linearization whose error is re-amplified by every
+ * derivative that follows — the two must not be tuned against each other.
+ *
+ * This one is applied ONCE, at the anchor's escape iteration, to a value that
+ * goes straight into the palette, so it can be compared against what the screen
+ * can show. 1e-3 holds the smooth iteration inside ~1/500 of an iteration
+ * (reach::nu_tolerance_at_bailout), while one palette texel at period 256 is
+ * 1/32 and the app's default period gives 0.23 — i.e. this is 16× to 100×
+ * tighter than the visual budget.
+ *
+ * The gate binds as ρ ∝ √tol, so spending that headroom is the cheapest radius
+ * available: ×16 on tol is ×4 on the served radius and ×16 on the served area.
+ * It starts at the conservative value because the instrument that certifies the
+ * trade already exists and has not been re-run at a looser one — `cargo test
+ * --release nu_branch_census -- --ignored --nocapture`, whose `proxyFail` column
+ * must stay at zero.
+ */
+const TAYLOR_OVERLAY_TOL = 1e-3
 // Floats per floatexp BlaStep uploaded to the GPU. Matches the Rust `BlaStep`
 // (#[repr(C)] of 11 × 4-byte fields): ax,ay,bx,by,ab_exp,radius_alpha,alpha_exp,
 // radius_beta + the Padé D coefficient dx,dy,d_exp.
@@ -110,7 +135,7 @@ const MOBIUS_COEFF_FLOATS = 21
 // beyond this cap. 10M steps = an 80 MB storage buffer, within the WebGPU
 // default maxStorageBufferBindingSize (128 MiB) — no requiredLimits needed.
 const ORBIT_STEP_CAPACITY = 10_000_000
-const COLOR_UNIFORM_FLOAT_COUNT = 68
+const COLOR_UNIFORM_FLOAT_COUNT = 72
 const TAU = Math.PI * 2
 
 // Adaptive refinement gating: sentinel grid refinement (halving the step
@@ -139,7 +164,7 @@ const PASS_SLOTS: { key: string; label: string; help: string }[] = [
     { key: 'reproject', label: 'Reprojection',   help: 'Décalage entier des pixels lors d\'un pan + effacement des bords (réutilise le calcul).' },
     { key: 'reseed',    label: 'AA reseed',      help: 'Ré-amorçage sélectif de la frontière pour un échantillon d\'anti-aliasing. Actif seulement en accumulation AA.' },
     { key: 'compute',   label: 'Itération',      help: 'Kernel fusionné brush+mandelbrot+comptage (perturbation/BLA/jet…). C\'est le cœur du coût.' },
-    { key: 'resolve',   label: 'Resolve',        help: 'Conversion de l\'état sentinelle en état échappé (distance, angle de relief).' },
+    { key: 'resolve',   label: 'Resolve',        help: 'Bilinéaire temporaire et couverture Taylor opportuniste des sentinelles.' },
     { key: 'aaAccum',   label: 'Couleur (AA)',   help: 'Passe couleur accumulée dans le buffer AA (linéaire) pendant l\'accumulation.' },
     { key: 'color',     label: 'Couleur',        help: 'Passe couleur directe : palette, relief, skybox, iridescence → écran.' },
     { key: 'present',   label: 'Present (AA)',   help: 'Division de l\'accumulateur AA par le nombre d\'échantillons + sRGB → écran.' },
@@ -321,6 +346,8 @@ type ReferenceWorkerRequest =
         jobId: number
         maxIter: number
         radiusFactor: number
+        /** When set, also frame the copy: the reply carries the target view scale. */
+        fill?: number
     }
     | { type: 'dispose' }
 
@@ -417,10 +444,11 @@ type ReferenceWorkerResponse =
     | {
         type: 'minibrotFound'
         jobId: number
-        status: 'ok' | 'none' | 'nonewton'
+        status: 'ok' | 'none' | 'nonewton' | 'nosize'
         cx: string | null
         cy: string | null
         period: number | null
+        scale: string | null
     }
     | {
         type: 'ready'
@@ -473,11 +501,17 @@ type IncrementalTableLayout = {
 }
 
 export type MinibrotResult = {
-    /** 'ok' = nucleus found; 'none' = no atom under the view; 'nonewton' = period found but Newton did not converge. */
-    status: 'ok' | 'none' | 'nonewton'
+    /**
+     * 'ok' = nucleus found; 'none' = no atom under the view; 'nonewton' = period found but
+     * Newton did not converge; 'nosize' = nucleus found but the size estimate degenerated
+     * (framed request only).
+     */
+    status: 'ok' | 'none' | 'nonewton' | 'nosize'
     cx: string | null
     cy: string | null
     period: number | null
+    /** Framed request only: view half-height (decimal string) that frames the copy. */
+    scale: string | null
 }
 
 function shouldTrackOrbitMetrics(colorStops: ColorStop[]): boolean {
@@ -594,6 +628,8 @@ export type RenderOptions = {
     stripeFrequency: number,
     zoomMinBrushStep: number,
     sentinelSeedStep: number,
+    /** Terminal Taylor coverage for safe sentinels during ordinary refinement. */
+    taylorSuperpixelEnabled: boolean,
     textureMapping: TextureMappingConfig,
     textureMappingMode?: number,
 }
@@ -1043,7 +1079,7 @@ export class Engine {
     // machine and repaying the heavy recompute every frame. Starts true so the
     // first frame after enabling a view draws.
     debugViewDirty = true
-    // Console/devtools override: __mandelbrotEngine.debugViewOverride = 1..5
+    // Console/devtools override: __mandelbrotEngine.debugViewOverride = 1..7
     // wins over the Settings value (0 = follow Settings).
     debugViewOverride = 0
     private pipelineDebug?: GPURenderPipeline
@@ -1448,6 +1484,7 @@ export class Engine {
                 cx: message.cx,
                 cy: message.cy,
                 period: message.period,
+                scale: message.scale,
             })
             return
         }
@@ -1938,12 +1975,12 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 16, // 14 floats padded to 16-byte alignment (64 bytes)
+            size: 4 * 16, // 15 floats padded to 16-byte alignment (64 bytes)
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
         this.uniformBufferResolve = this.device.createBuffer({
-            size: 4 * 4, // 3 floats (mu, gridOffsetX, gridOffsetY) padded to 16-byte alignment
+            size: 4 * 8, // 6 floats (mu, grid offsets, logTexelC, Taylor enabled + tol), padded to 32 bytes
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Resolve',
         })
@@ -2150,6 +2187,7 @@ export class Engine {
                 { binding: 8, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 9, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
                 { binding: 10, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'read-only-storage' } },
+                { binding: 11, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
             ],
             label: 'Engine BindGroupLayout InplaceCompute',
         })
@@ -2452,7 +2490,8 @@ export class Engine {
         if (!this.pipelineInplace || !this.rawArrayView || !this.uniformBufferMandelbrot
             || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !auxiliaryLevelBuffer
             || !this.mandelbrotJetBuffer || !this.mandelbrotJetRadiiBuffer || !this.mandelbrotJetLevelBuffer
-            || !this.uniformBufferBrush || !this.counterBuffer || !this.workStatsBuffer) {
+            || !this.uniformBufferBrush || !this.counterBuffer || !this.workStatsBuffer
+            || !this.resolvedArrayView) {
             return
         }
 
@@ -2471,6 +2510,7 @@ export class Engine {
                 { binding: 8, resource: { buffer: this.mandelbrotJetBuffer } },
                 { binding: 9, resource: { buffer: this.mandelbrotJetLevelBuffer } },
                 { binding: 10, resource: { buffer: this.mandelbrotJetRadiiBuffer } },
+                { binding: 11, resource: this.resolvedArrayView },
             ],
             label: 'Engine BindGroup InplaceCompute',
         })
@@ -3359,7 +3399,12 @@ export class Engine {
         return undefined
     }
 
-    private scheduleCounterReadback(slot: CounterReadbackSlot, sequence: number, generation: number, frame: number) {
+    private scheduleCounterReadback(
+        slot: CounterReadbackSlot,
+        sequence: number,
+        generation: number,
+        frame: number,
+    ) {
         slot.pending = true
         slot.sequence = sequence
         slot.generation = generation
@@ -3925,26 +3970,30 @@ export class Engine {
     }
 
     /** True while a debug view uses the standalone recompute pipeline (1-5).
-     *  The reach view (6) is NOT one of them: it is a color-pass readout of the
-     *  payload the ordinary progressive render already stored, so that render
-     *  must keep running normally underneath it. */
+     *  The reach and coverage views (6-7) are color-pass readouts of the
+     *  ordinary progressive render, which must keep running underneath them. */
     /** Reference orbit long enough for the current view (mirrors the uniform's
      *  orbitComplete). The debug overlay must not draw before this. */
     private debugOrbitReady = false
 
     private get debugPipelineActive(): boolean {
-        return this.debugViewMode > 0 && this.debugViewMode !== DEBUG_VIEW_REACH
+        return this.debugViewMode > 0
+            && this.debugViewMode !== DEBUG_VIEW_REACH
+            && this.debugViewMode !== DEBUG_VIEW_TAYLOR_COVERAGE
     }
 
     /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes,
-     *  5 tier, 6 reach. 1-5 replace the frame with an instrumented recompute;
-     *  6 recolors the ordinary render from its stored Taylor payload. */
+     *  5 tier, 6 reach, 7 resolved coverage. 1-5 replace the frame with an
+     *  instrumented recompute; 6-7 recolor the ordinary progressive render. */
     setDebugView(mode: number) {
         const next = Math.max(0, Math.round(mode))
         if (next === this.debugViewMode) {
             return
         }
         this.debugViewMode = next
+        // A persisted AA composite would otherwise cover color-pass debug modes
+        // 6-7 with the previous palette image.
+        this.resetAaState()
         this.debugViewDirty = true
         this.needRender = true
     }
@@ -4136,8 +4185,13 @@ export class Engine {
     // the exact nucleus coordinates so the caller can recentre the view on it.
     // `radiusFactor` scales the view radius used by the ball test (~2–4 covers a
     // centred minibrot; larger snaps to a bigger parent atom).
-    findMinibrot(radiusFactor = 4): Promise<MinibrotResult> {
-        const empty: MinibrotResult = { status: 'none', cx: null, cy: null, period: null }
+    //
+    // With `fill` set, the worker also runs the size estimate and returns a
+    // *framing* instead of a bare nucleus: `cx`/`cy` is the copy's centre and
+    // `scale` the view half-height that makes the copy span `fill` of the
+    // limiting screen axis (0.5 = half the screen).
+    findMinibrot(radiusFactor = 4, fill?: number): Promise<MinibrotResult> {
+        const empty: MinibrotResult = { status: 'none', cx: null, cy: null, period: null, scale: null }
         // Supersede any in-flight request so its caller does not hang.
         this.pendingMinibrotResolve?.(empty)
         this.pendingMinibrotResolve = null
@@ -4148,6 +4202,7 @@ export class Engine {
                 jobId: this.referenceJobId,
                 maxIter: this.currentMaxIterations,
                 radiusFactor,
+                fill,
             })
         })
     }
@@ -4268,6 +4323,8 @@ export class Engine {
 
         const mandelbrotChanged = !this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
         const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
+        const taylorSuperpixelChanged = !!this.previousRenderOptions
+            && renderOptions.taylorSuperpixelEnabled !== this.previousRenderOptions.taylorSuperpixelEnabled
         const stripeFrequencyChanged = renderOptions.stripeFrequency !== this.previousRenderOptions?.stripeFrequency
         const orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
         const orbitMetricsChanged = this.previousOrbitMetricsEnabled !== undefined
@@ -4287,6 +4344,14 @@ export class Engine {
         this.aaAuto = renderOptions.aaAuto ?? false
         if (mandelbrotChanged || activeStripeFrequencyChanged || orbitMetricsChanged) {
             this.invalidateCounterReadback() // unknown — new fractal params, GPU counter not read yet
+        }
+        if (taylorSuperpixelChanged) {
+            // Terminal Taylor coverage and exact refinement are different history
+            // regimes. Never reuse one as if it belonged to the other.
+            this.clearHistoryNextFrame = true
+            this.frozenAligned = false
+            this.needFreezeSnapshot = false
+            this.invalidateCounterReadback()
         }
         if (activeStripeFrequencyChanged || orbitMetricsChanged) {
             this.clearHistoryNextFrame = true
@@ -4574,6 +4639,10 @@ export class Engine {
             this.approximationMode === 'auto'
                 ? (this.lastShaderApproxFlag >= 5 ? 2 : 1)
                 : 0,
+            this.debugViewMode === DEBUG_VIEW_TAYLOR_COVERAGE ? 1 : 0, // 68: coverageDebug
+            0,                                    // 69: uniform padding
+            0,                                    // 70: uniform padding
+            0,                                    // 71: uniform padding
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -4853,6 +4922,12 @@ export class Engine {
      * never starts automatically; any navigation/param change aborts it.
      */
     triggerAaAccumulation() {
+        // Terminal Taylor coverage is intentionally approximate and must never
+        // be captured as an exactly converged AA sample.
+        if (this.isTaylorSuperpixelActive()) {
+            this.resetAaState()
+            return
+        }
         this.resetAaState()
         // A previous accumulation left the boundary band at its LAST sample's
         // jitter; recompute so sample 0 is the unjittered base again (unbiased
@@ -4906,6 +4981,7 @@ export class Engine {
         const aspect = (this.width / Math.max(1, this.height))
         // All paths now use the same configurable seed step for progressive refinement.
         const zoomMinBrushStep = normalizePowerOfTwoStep(renderOptions.zoomMinBrushStep, 1, 1, 64)
+        const taylorSuperpixelEnabled = renderOptions.taylorSuperpixelEnabled === true
         const seedStep = Math.max(
             normalizePowerOfTwoStep(renderOptions.sentinelSeedStep, 64, 1, 4096),
             zoomMinBrushStep,
@@ -4978,9 +5054,9 @@ export class Engine {
         // prevents pixel-count avalanches while guaranteeing convergence:
         // if the batch has room to shrink, the gate stays open and the batch
         // controller absorbs the ×4 spike.  A structurally slow GPU (high DPR)
-        // will stabilise its batch above MIN, so refinement proceeds. While a
-        // counter readback is pending, refinement pauses so that the delayed
-        // count cannot become optimistic relative to newer sentinels.
+        // will stabilise its batch above MIN, so refinement proceeds. Ordinary
+        // refinement pauses while a counter readback is pending so that the
+        // delayed count cannot become optimistic relative to newer sentinels.
         const gateOpen =
             !counterReadbackPending
             && (
@@ -5039,12 +5115,9 @@ export class Engine {
             allowRefinement,
             this.dispatchBox.x,
             this.dispatchBox.y,
+            taylorSuperpixelEnabled && clearFlag === 0 && !hasTranslationShift ? 1 : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
-
-        // Write resolve uniforms (mu for budget-exhaustion detection + grid offset)
-        const resolveUniforms = new Float32Array([this.previousMandelbrot.mu, gridOffsetX, gridOffsetY])
-        this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
         const shouldDispatchCounter =
             !counterReadbackPending
@@ -5056,6 +5129,23 @@ export class Engine {
         const counterReadbackSlot = shouldDispatchCounter
             ? this.acquireCounterReadbackSlot()
             : undefined
+        // Resolve Taylor offsets stay in log space so a one-texel δc remains
+        // representable at deep zoom. One raw texel spans
+        // 2·neutralExtent/neutralSize times the view half-height.
+        const lnScale = this.currentLnScale()
+        const logTexelC = Number.isFinite(lnScale)
+            ? lnScale + Math.log(2 * neutralExtent / Math.max(1, this.neutralSize))
+            : 0
+        const resolveUniforms = new Float32Array([
+            this.previousMandelbrot.mu,
+            gridOffsetX,
+            gridOffsetY,
+            logTexelC,
+            taylorSuperpixelEnabled ? 1 : 0,
+            TAYLOR_OVERLAY_TOL,
+        ])
+        this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
+
         let scheduledCounterReadback: {
             slot: CounterReadbackSlot,
             sequence: number,
@@ -5262,17 +5352,6 @@ export class Engine {
                 Math.max(1, Math.ceil(this.dispatchBox.height / 8)),
             )
             computePass.end()
-
-            // The fused pass accumulates the counters every frame; only the
-            // readback copy is sampled at the usual interval.
-            if (counterReadbackSlot) {
-                const sequence = ++this.counterReadbackSequence
-                const generation = this.counterReadbackGeneration
-                commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
-                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, WORK_STATS_BYTES)
-                this.lastCounterDispatchFrame = frameSerial
-                scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
-            }
         }
 
         // ── Resolve gating (C1) ──────────────────────────────────────────
@@ -5287,10 +5366,12 @@ export class Engine {
         // convergence; pixels not yet computed simply read as "no data".
         const converged = !this.needFreezeSnapshot
             && !this.needMergeSnapshot
+            && !taylorSuperpixelEnabled
             && this.unfinishedPixelCount === 0
             && this.activePixelCount === 0
             && this.counterSampleFrame >= this.lastRawMutationFrame
         const skipResolve = !!this.bindGroupColorRaw
+            && this.debugViewMode !== DEBUG_VIEW_TAYLOR_COVERAGE
             && (this.debugViewMode === DEBUG_VIEW_REACH || converged)
         this.resolveSkipped = skipResolve
 
@@ -5304,6 +5385,7 @@ export class Engine {
             !this.clearHistoryNextFrame
             && !this.needFreezeSnapshot
             && !this.needMergeSnapshot
+            && !taylorSuperpixelEnabled
             && !isZoomActive(this.zoomState)
             && !this.orbitIncomplete
             && this.unfinishedPixelCount >= 0
@@ -5329,6 +5411,20 @@ export class Engine {
             rpassResolve.setBindGroup(0, this.bindGroupResolve)
             rpassResolve.draw(6, 1, 0, 0)
             rpassResolve.end()
+        }
+
+        if (counterReadbackSlot) {
+            const sequence = ++this.counterReadbackSequence
+            const generation = this.counterReadbackGeneration
+            commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
+            commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, WORK_STATS_BYTES)
+            this.lastCounterDispatchFrame = frameSerial
+            scheduledCounterReadback = {
+                slot: counterReadbackSlot,
+                sequence,
+                generation,
+                frame: frameSerial,
+            }
         }
 
         // ── Pass 3 (color) + Pass 4 (AA present) ──────────────────────────
@@ -5533,11 +5629,11 @@ export class Engine {
         this.cpuRenderMs = performance.now() - renderStartMs
         this.frameSerial++   // one actually-rendered frame → one measurement for the panel
         if (tsResolvedThisFrame) this.readbackTimestamps()
-        // Debug overlay active: surface the GPU frame time. The debug pass strips
+        // Recompute debug overlay active: surface the GPU frame time. The pass strips
         // the derivative/f32-path/lockstep asymmetries for every mode, so this
         // number compares the pure skipping algorithms wall-clock — switch modes
         // and read the console.
-        if (this.debugViewMode > 0) {
+        if (this.debugPipelineActive) {
             const dbgT0 = performance.now()
             void this.device.queue.onSubmittedWorkDone().then(() => {
                 console.log(`[debug view] GPU frame ${(performance.now() - dbgT0).toFixed(1)}ms (mode ${this.approximationMode}, view ${this.debugViewMode})`)
@@ -5731,6 +5827,10 @@ export class Engine {
      * Returns true if the engine has work to do (parameter change,
      * unfinished pixels, incomplete orbit, or continuous-render mode).
      */
+    private isTaylorSuperpixelActive(): boolean {
+        return this.previousRenderOptions?.taylorSuperpixelEnabled === true
+    }
+
     needsMoreFrames(): boolean {
         // Debug overlay active: it's a from-scratch recompute that ignores the
         // progressive textures, so the progressive machine's unfinished pixels
@@ -5739,7 +5839,7 @@ export class Engine {
         // explicit request / dirty snapshot, a live zoom, a pending capture, or
         // a reference/table still being built. debugViewDirty is cleared once
         // the debug pass has drawn (see render()).
-        if (this.debugViewMode > 0) {
+        if (this.debugPipelineActive) {
             let r = ''
             if (this.needRender || this.debugViewDirty) r = 'debugDirty'
             else if (this.snapshotCallback) r = 'snapshot'
@@ -5767,8 +5867,10 @@ export class Engine {
         else if (this.needMergeSnapshot) reason = 'mergeSnapshot'
         else if (this.isReferenceValidating) reason = 'referenceValidating'
         else if (this.orbitIncomplete) reason = 'orbitIncomplete'
-        else if (this.unfinishedPixelCount < 0
-            || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD) {
+        else if (
+            this.unfinishedPixelCount < 0
+            || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD
+        ) {
             reason = `unfinished=${this.unfinishedPixelCount}`
         }
         else if (this.aaActive) reason = 'aaAccumulating'
@@ -5777,6 +5879,7 @@ export class Engine {
         // fullyConverged check incl. the async counter) gets a chance to fire,
         // instead of idling on the exact frame convergence completes.
         else if (this.aaAuto
+            && !this.isTaylorSuperpixelActive()
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
             // Same idle threshold as the convergence gates: requiring exactly 0

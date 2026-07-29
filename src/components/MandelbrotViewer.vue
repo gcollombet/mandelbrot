@@ -372,6 +372,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   gpuLoadMultiplier: 1.0,
   zoomMinBrushStep: 1,
   sentinelSeedStep: 64,
+  taylorSuperpixelEnabled: false,
   interpolationMode: 'lab',
   animation: normalizeAnimationConfig(null, 1.0),
   animationSpeed: 1.0,
@@ -406,6 +407,10 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
     normalizePowerOfTwoStep(params.sentinelSeedStep, 64, 1, 4096),
     params.zoomMinBrushStep,
   );
+  const legacyTaylorFreeze = (params as unknown as Record<string, unknown>).taylorFreezeEnabled === true;
+  params.taylorSuperpixelEnabled = params.taylorSuperpixelEnabled === true || legacyTaylorFreeze;
+  delete (params as unknown as Record<string, unknown>).taylorFreezeEnabled;
+  delete (params as unknown as Record<string, unknown>).taylorFreezeStep;
   return params;
 }
 
@@ -1678,6 +1683,7 @@ function startTravelToPreset(preset: PresetRecord) {
       :gpuLoadMultiplier="mandelbrotParams.gpuLoadMultiplier"
       :zoomMinBrushStep="mandelbrotParams.zoomMinBrushStep"
       :sentinelSeedStep="mandelbrotParams.sentinelSeedStep"
+      :taylorSuperpixelEnabled="mandelbrotParams.taylorSuperpixelEnabled"
       :interpolationMode="mandelbrotParams.interpolationMode"
       :tessellationLevel="mandelbrotParams.tessellationLevel"
       :displacementAmount="mandelbrotParams.displacementAmount"

@@ -108,6 +108,7 @@ const props = withDefaults(defineProps<{
   gpuLoadMultiplier?: number,
   zoomMinBrushStep?: number,
   sentinelSeedStep?: number,
+  taylorSuperpixelEnabled?: boolean,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   tessellationLevel?: number,
   displacementAmount?: number,
@@ -177,6 +178,7 @@ const props = withDefaults(defineProps<{
        gpuLoadMultiplier: 1.0,
        zoomMinBrushStep: 1,
        sentinelSeedStep: 64,
+       taylorSuperpixelEnabled: false,
        interpolationMode: 'lab',
        tessellationLevel: 0,
        displacementAmount: 0,
@@ -316,6 +318,7 @@ async function draw() {
         stripeFrequency: props.stripeFrequency,
         zoomMinBrushStep: props.zoomMinBrushStep,
         sentinelSeedStep: props.sentinelSeedStep,
+        taylorSuperpixelEnabled: props.taylorSuperpixelEnabled,
         textureMapping: normalizeTextureMappingFromLegacy(props),
         textureMappingMode: props.textureMappingMode,
       }
@@ -419,6 +422,7 @@ async function initWebGPU() {
     stripeFrequency: props.stripeFrequency,
     zoomMinBrushStep: props.zoomMinBrushStep,
     sentinelSeedStep: props.sentinelSeedStep,
+    taylorSuperpixelEnabled: props.taylorSuperpixelEnabled,
     textureMapping: normalizeTextureMappingFromLegacy(props),
     textureMappingMode: props.textureMappingMode,
   });

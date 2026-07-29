@@ -174,7 +174,6 @@ const sentinelSeedStepIndex = computed({
     model.value.sentinelSeedStep = nextValue;
   },
 });
-
 // BLA/Padé radius ε on a log10 scale: slider value is the exponent (R = ε·|A| for
 // affine, √ε·|A| for Padé). Bounded to the safe band [1e-8, 1e-4]: above 1e-4 the
 // Padé √ε radius admits blocks beyond the rational map's validity (slight distortion).
@@ -241,6 +240,7 @@ const model =  defineModel<MandelbrotParams>({
      stripeFrequency: 8,
      zoomMinBrushStep: 1,
      sentinelSeedStep: 64,
+     taylorSuperpixelEnabled: false,
      textureName: 'Gold',
       skyboxName: 'Window',
       textureMapping: normalizeTextureMappingFromLegacy({ textureMappingMode: 0 }),
@@ -404,12 +404,13 @@ const debugViewOptions = [
   { label: 'Probes', value: 4 },
   { label: 'Tier', value: 5 },
   { label: 'Portee', value: 6 },
+  { label: 'Couverture Taylor', value: 7 },
 ];
 
 // Color scales for the debug view legend — kept in sync by hand with
-// mandelbrot_debug.wgsl's heat()/skip_ramp()/TIER_COLOR_* (WGSL can't be
-// imported here). Gradient stops sample the same functions at fixed t;
-// the tier swatches are literal copies of the shader's flat constants.
+// mandelbrot_debug.wgsl's heat()/skip_ramp()/TIER_COLOR_* and color.wgsl's
+// resolved-coverage colors (WGSL can't be imported here). Gradient stops sample
+// the same functions at fixed t; flat swatches copy the shader constants.
 function heatColor(t: number): string {
   const x = Math.min(1, Math.max(0, t));
   const r = Math.min(1, Math.max(0, 2.2 * x - 0.1));
@@ -498,6 +499,18 @@ const debugViewLegends: Record<number, {
       + 'petit. Gris = pixel intérieur ou sans payload (z″ n\'est accumulé '
       + 'qu\'en mode Auto).',
   },
+  7: {
+    kind: 'swatches',
+    swatches: [
+      { color: 'rgb(60, 255, 60)', label: 'Exact calculé' },
+      { color: 'rgb(255, 51, 217)', label: 'Taylor terminal' },
+      { color: 'rgb(242, 128, 26)', label: 'Bilinéaire temporaire' },
+      { color: 'rgb(0, 0, 0)', label: 'Aucune donnée résolue' },
+    ],
+    note: 'Origine de la valeur résolue actuellement affichée. Cette vue relit '
+      + 'le marqueur du resolve et suit le raffinement progressif ; elle ne '
+      + 'mesure ni l\'erreur ni la visibilité dans la palette.',
+  },
 };
 const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);
 // Primary control (post 2.8 ship gate): Auto = unified per-block dispatch,
@@ -571,8 +584,12 @@ function updateCy(val: string) {
 // view (full-precision period detection + Newton nucleus), then recentre the
 // view exactly on its nucleus, keeping the current zoom.
 const findingMinibrot = ref(false);
+const zoomingMinibrot = ref(false);
 const findMinibrotStatus = ref<string | null>(null);
 let findMinibrotStatusTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Fraction of the limiting screen axis the framed zoom gives the minibrot.
+const MINIBROT_FILL = 0.5;
 
 function setMinibrotStatus(text: string) {
   findMinibrotStatus.value = text;
@@ -581,7 +598,7 @@ function setMinibrotStatus(text: string) {
 }
 
 async function findMinibrot() {
-  if (!props.engine || findingMinibrot.value) return;
+  if (!props.engine || findingMinibrot.value || zoomingMinibrot.value) return;
   findingMinibrot.value = true;
   findMinibrotStatus.value = null;
   try {
@@ -600,6 +617,45 @@ async function findMinibrot() {
     setMinibrotStatus('Find minibrot failed');
   } finally {
     findingMinibrot.value = false;
+  }
+}
+
+// Neighbour of "Find minibrot": same detection, but the view is *framed* on the
+// copy instead of merely centred on its nucleus. The worker adds the Munafo/Jung
+// size estimate Λ, so it returns the copy's centre (the nucleus sits well off it
+// — the tail runs out to w = −2·Λ) and the view half-height that makes the copy
+// span MINIBROT_FILL of the limiting screen axis.
+async function zoomToMinibrot() {
+  if (!props.engine || findingMinibrot.value || zoomingMinibrot.value) return;
+  zoomingMinibrot.value = true;
+  findMinibrotStatus.value = null;
+  try {
+    const res = await props.engine.findMinibrot(4, MINIBROT_FILL);
+    if (res.status === 'ok' && res.cx && res.cy && res.scale) {
+      const next = { ...model.value, cx: res.cx, cy: res.cy, scale: res.scale };
+      // The framing can land far deeper than the current view. Past the
+      // navigation precision budget the worker rebuilds the reference with too
+      // few digits and the frame smears, so carry the budget along (same field
+      // the Performance "Nav precision" slider drives).
+      const depth = Math.ceil(-scaleLog10(res.scale)) + 5;
+      if (depth > precisionBudgetExp.value) {
+        next.precisionBudget = `1e-${Math.min(1000, depth)}`;
+      }
+      // One model replacement ⇒ the parent watcher applies centre + scale in the
+      // same sync pass (teleport, then the new zoom), instead of two teleports.
+      model.value = next;
+      setMinibrotStatus(`Framed period-${res.period} minibrot`);
+    } else if (res.status === 'nosize') {
+      setMinibrotStatus(`Period ${res.period} found, but its size estimate degenerated`);
+    } else if (res.status === 'nonewton') {
+      setMinibrotStatus(`Period ${res.period} found, but the nucleus did not converge`);
+    } else {
+      setMinibrotStatus('No minibrot under this view — zoom onto one first');
+    }
+  } catch {
+    setMinibrotStatus('Zoom to minibrot failed');
+  } finally {
+    zoomingMinibrot.value = false;
   }
 }
 
@@ -1404,10 +1460,24 @@ async function selectPreset(id: number) {
   }
 }
 
+// Escape radius SQUARED, on a log10 scale. The slider floor is log10(4), i.e.
+// |z| = 2, and that is a correctness bound rather than taste: below it the
+// escape test fires on orbits that have not escaped, and — measured, see
+// MANDELBROT_BOX_DIMENSION_CENSUS.md — the exterior distance estimate the
+// renderer stores in layer 4 collapses. Against a reference bailout of 1e12,
+// the share of pixels whose distance is wrong by more than 2× runs 0–2 % at
+// mu = 4, 10–27 % at mu = 2, and 43–100 % at mu = 1, where the median error
+// reaches ×1484. That field drives the relief shading AND the adaptive-AA
+// target, so a corrupt one silently pins every escaped pixel at the full
+// sample count — adaptive AA paying full price for nothing.
+// The getter stays faithful: a preset saved before this floor keeps showing the
+// value it actually carries (the slider pins at its left edge) rather than a
+// number the model does not hold. Only a user edit snaps it back into range.
+const MU_MIN_LOG10 = Math.log10(4);
 const muSlider = computed({
-  get: () => Math.log10(model.value.mu ?? 1.0),
+  get: () => Math.log10(model.value.mu ?? 4.0),
   set: (val: number) => {
-    model.value.mu = Math.pow(10, val);
+    model.value.mu = Math.pow(10, Math.max(val, MU_MIN_LOG10));
   }
 });
 const epsilonSlider = computed({
@@ -2369,12 +2439,21 @@ async function importSkyboxTexture(event: Event) {
         <div class="find-minibrot-row">
           <button
             class="mini-btn"
-            :disabled="!props.engine || findingMinibrot"
+            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
             title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
             @click="findMinibrot"
           >
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             {{ findingMinibrot ? 'Searching…' : 'Find minibrot' }}
+          </button>
+          <button
+            class="mini-btn"
+            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
+            title="Same detection, then frame the whole minibrot at the centre of the screen (~50 % of it)"
+            @click="zoomToMinibrot"
+          >
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>
+            {{ zoomingMinibrot ? 'Framing…' : 'Zoom on minibrot' }}
           </button>
           <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
         </div>
@@ -2403,7 +2482,7 @@ async function importSkyboxTexture(event: Event) {
       >
         <div class="mu-row">
           <DenseField
-            label="Mu" :min="0" :max="5" :step="0.01"
+            label="Mu" :min="0.602" :max="5" :step="0.01"
             :f="muFmt"
             :model-value="muSlider"
             @update:model-value="(v: number) => muSlider = v"
@@ -3091,6 +3170,11 @@ async function importSkyboxTexture(event: Event) {
             :f="sentinelStepFmt"
             :model-value="sentinelSeedStepIndex"
             @update:model-value="(v: number) => sentinelSeedStepIndex = v"
+          />
+          <DenseToggle
+            label="Taylor opportuniste (exp.)"
+            :model-value="model.taylorSuperpixelEnabled === true"
+            @update:model-value="(v: boolean) => model.taylorSuperpixelEnabled = v"
           />
         </div>
 

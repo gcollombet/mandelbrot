@@ -9,13 +9,15 @@ use wasm_bindgen::prelude::*;
 #[cfg(not(target_arch = "wasm32"))]
 pub type JsValue = String;
 
+mod boxdim;
 mod feigenbaum;
 mod gates;
 mod hankel;
+mod interior;
 mod jet;
 mod matrix_c1;
-mod reach;
 mod mobius;
+mod reach;
 mod unified;
 pub mod validity;
 
@@ -24,7 +26,7 @@ fn dbig_to_f32(bf: &DBig) -> f32 {
     bf.to_string().parse::<f32>().unwrap_or(0.0)
 }
 
-fn dbig_to_f64(bf: &DBig) -> f64 {
+pub(crate) fn dbig_to_f64(bf: &DBig) -> f64 {
     bf.to_string().parse::<f64>().unwrap_or(0.0)
 }
 
@@ -178,7 +180,7 @@ impl FExpC {
 // but NEVER round a finite value down. Reducing precision on zoom-out would
 // discard the reference center's hard-won deep digits, so zooming back in (or
 // recentering at a shallower scale) would land on a corrupted center ("garbage").
-fn raise_precision(v: DBig, prec: usize) -> DBig {
+pub(crate) fn raise_precision(v: DBig, prec: usize) -> DBig {
     let cur = v.precision();
     if cur == 0 || cur < prec {
         v.with_precision(prec).value()
@@ -187,8 +189,18 @@ fn raise_precision(v: DBig, prec: usize) -> DBig {
     }
 }
 
-fn dbig_i(value: i32) -> DBig {
+pub(crate) fn dbig_i(value: i32) -> DBig {
     DBig::try_from(value).unwrap()
+}
+
+/// Exact-ish DBig from an f64 shape factor (aspect, fill, orientation cosines).
+/// Goes through the decimal string so the value keeps the f64's 17 significant
+/// digits — plenty for a framing coefficient, and it never panics.
+fn dbig_f64(value: f64) -> DBig {
+    if !value.is_finite() {
+        return dbig_i(0);
+    }
+    DBig::from_str(&format!("{value:.17e}")).unwrap_or_else(|_| dbig_i(0))
 }
 
 // BLA/Padé block-table sizing.
@@ -2464,42 +2476,7 @@ impl MandelbrotNavigator {
     /// containing the view centre. Returns `None` if the orbit escapes
     /// (`|z| > 2`) before any such `n`, meaning no minibrot sits under the view.
     fn detect_period_ball(&self, max_iter: usize, radius: &DBig) -> Option<usize> {
-        let two = dbig_i(2);
-        let one = dbig_i(1);
-        let four = dbig_i(4);
-        let radius_sq = radius * radius;
-        let cx = &self.cx;
-        let cy = &self.cy;
-
-        let mut zx = dbig_i(0);
-        let mut zy = dbig_i(0);
-        // dz/dc, tracked in DBig so the (huge) derivative magnitude at depth
-        // never overflows — the comparison stays exact.
-        let mut dx = dbig_i(0);
-        let mut dy = dbig_i(0);
-
-        for n in 1..=max_iter {
-            // Derivative recurrence uses the *previous* z: dz' = 2·z·dz + 1.
-            let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
-            let dy_new = &two * (&zx * &dy + &zy * &dx);
-            let zx_new = &zx * &zx - &zy * &zy + cx;
-            let zy_new = &two * &zx * &zy + cy;
-            zx = zx_new;
-            zy = zy_new;
-            dx = dx_new;
-            dy = dy_new;
-
-            let z2 = &zx * &zx + &zy * &zy;
-            let d2 = &dx * &dx + &dy * &dy;
-            // |z|² ≤ radius² · |dz|²  ⇔  the view-disk's n-th image covers 0.
-            if z2 <= &radius_sq * &d2 {
-                return Some(n);
-            }
-            if z2 > four {
-                return None;
-            }
-        }
-        None
+        detect_period_ball_at(&self.cx, &self.cy, max_iter, radius)
     }
 
     /// Locate the minibrot under the current view and return its exact nucleus.
@@ -2516,6 +2493,100 @@ impl MandelbrotNavigator {
     /// was found but Newton did not converge within range, or `["none"]` if no
     /// minibrot sits under the view.
     pub fn find_minibrot(&mut self, max_iter: u32, radius_factor: f64) -> Vec<String> {
+        match self.locate_minibrot(max_iter, radius_factor) {
+            Ok((period, ncx, ncy)) => vec![
+                "ok".to_string(),
+                ncx.to_string(),
+                ncy.to_string(),
+                period.to_string(),
+            ],
+            Err(Some(period)) => vec!["nonewton".to_string(), period.to_string()],
+            Err(None) => vec!["none".to_string()],
+        }
+    }
+
+    /// Same detection as [`find_minibrot`], plus the view framing that puts the
+    /// whole minibrot in the middle of the screen at a given fill fraction.
+    ///
+    /// The extra stage is the Munafo/Jung *size estimate* `Λ` (see
+    /// [`minibrot_size_estimate`]): to first order the small copy is the whole
+    /// Mandelbrot set mapped by `w ↦ nucleus + Λ·w`. So the copy's centre is
+    /// `nucleus + Λ·(-0.75)` (the set's bounding box is centred on `-0.75`) and
+    /// its on-screen half-extents follow from `|Λ|` and `arg Λ − view angle`.
+    ///
+    /// `fill` is the fraction of the limiting screen axis the copy should span
+    /// (0.5 ≈ half the screen). Returns `["ok", cx, cy, period, scale]`, where
+    /// `cx`/`cy` is the *copy centre* (not the nucleus) and `scale` the view
+    /// half-height to set; `["nonewton", period]` / `["none"]` as above, and
+    /// `["nosize", period]` if the size estimate degenerated.
+    pub fn find_minibrot_framed(
+        &mut self,
+        max_iter: u32,
+        radius_factor: f64,
+        fill: f64,
+    ) -> Vec<String> {
+        let (period, ncx, ncy) = match self.locate_minibrot(max_iter, radius_factor) {
+            Ok(found) => found,
+            Err(Some(period)) => return vec!["nonewton".to_string(), period.to_string()],
+            Err(None) => return vec!["none".to_string()],
+        };
+
+        let prec = self.working_precision();
+        let Some((size_x, size_y)) = minibrot_size_estimate(&ncx, &ncy, period, prec) else {
+            return vec!["nosize".to_string(), period.to_string()];
+        };
+
+        // |Λ| and arg Λ, kept safe at any depth: the magnitude stays in DBig
+        // (|Λ| can be far below the f64 range), only the *direction* — a ratio
+        // of comparable components — goes through f64.
+        let abs_x = size_x.clone().abs();
+        let abs_y = size_y.clone().abs();
+        let largest = if abs_x >= abs_y { abs_x } else { abs_y };
+        if largest == dbig_i(0) {
+            return vec!["nosize".to_string(), period.to_string()];
+        }
+        let ux = dbig_to_f64(&(&size_x / &largest));
+        let uy = dbig_to_f64(&(&size_y / &largest));
+        let magnitude = &largest * dbig_f64(ux.hypot(uy));
+        let theta = uy.atan2(ux);
+
+        let aspect = if self.viewport_aspect.is_finite() && self.viewport_aspect > 0.0 {
+            self.viewport_aspect
+        } else {
+            1.0
+        };
+        let factor = minibrot_frame_scale_factor(theta, self.angle, aspect, fill);
+        let scale = (&magnitude * dbig_f64(factor)).with_precision(12).value();
+
+        // Centre the *copy*, not the nucleus: the nucleus sits at w = 0, well
+        // right of the box centre (the tail runs out to w = −2).
+        let offset = dbig_f64(MINIBROT_BOX_CENTRE);
+        let cx = &ncx + &size_x * &offset;
+        let cy = &ncy + &size_y * &offset;
+
+        vec![
+            "ok".to_string(),
+            cx.to_string(),
+            cy.to_string(),
+            period.to_string(),
+            scale.to_string(),
+        ]
+    }
+
+    fn working_precision(&self) -> usize {
+        precision_bits_for_scale(&self.scale)
+            .max(self.budget_prec)
+            .max(64)
+    }
+
+    /// Ball-detection + Newton refinement shared by the two `find_minibrot*`
+    /// entry points. `Err(None)` = nothing under the view, `Err(Some(p))` = the
+    /// period was found but Newton did not converge.
+    fn locate_minibrot(
+        &mut self,
+        max_iter: u32,
+        radius_factor: f64,
+    ) -> Result<(usize, DBig, DBig), Option<usize>> {
         const NEWTON_STEPS: usize = 80;
         self.ensure_precision();
 
@@ -2524,7 +2595,7 @@ impl MandelbrotNavigator {
         let radius = &self.scale * &factor;
 
         let Some(period) = self.detect_period_ball(max_iter as usize, &radius) else {
-            return vec!["none".to_string()];
+            return Err(None);
         };
 
         // The nucleus is within ~scale of the view centre; bound Newton's reach
@@ -2542,9 +2613,7 @@ impl MandelbrotNavigator {
         // that many digits of headroom to converge into; `margin_digits`
         // reserves some of it for the rounding noise that accumulates over
         // `period` squarings per Newton step.
-        let prec = precision_bits_for_scale(&self.scale)
-            .max(self.budget_prec)
-            .max(64);
+        let prec = self.working_precision();
         let margin_digits = 24 + (period as f64).log10().ceil().max(0.0) as usize;
         let tol_digits = prec.saturating_sub(margin_digits).max(16);
         let tolerance =
@@ -2557,13 +2626,8 @@ impl MandelbrotNavigator {
             &max_distance,
             &tolerance,
         ) {
-            Some((ncx, ncy)) => vec![
-                "ok".to_string(),
-                ncx.to_string(),
-                ncy.to_string(),
-                period.to_string(),
-            ],
-            None => vec!["nonewton".to_string(), period.to_string()],
+            Some((ncx, ncy)) => Ok((period, ncx, ncy)),
+            None => Err(Some(period)),
         }
     }
 
@@ -3115,6 +3179,136 @@ fn critical_value_and_derivative(cx: &DBig, cy: &DBig, period: usize) -> (DBig, 
     (zx, zy, dx, dy)
 }
 
+// Bounding box of the whole Mandelbrot set in the `w` frame of a small copy
+// (c ≈ nucleus + Λ·w): real ∈ [−2, 0.47], imag ∈ ±1.13, plus a small margin.
+// The box centre is what the framed zoom puts at the middle of the screen —
+// the nucleus itself (w = 0) is far off-centre, the tail runs out to w = −2.
+const MINIBROT_BOX_CENTRE: f64 = -0.75;
+pub(crate) const MINIBROT_BOX_HALF_RE: f64 = 1.30;
+const MINIBROT_BOX_HALF_IM: f64 = 1.20;
+
+/// Munafo/Jung size estimate of the minibrot with nucleus `(cx, cy)` and period
+/// `period`: the complex `Λ = 1/(b·l²)` with
+/// `l = ∏_{i=1}^{p−1} 2·z_i` and `b = 1 + Σ 1/l_i`.
+///
+/// To first order the small copy is the whole Mandelbrot set under the affine
+/// map `w ↦ nucleus + Λ·w`, so `|Λ|` is its linear size and `arg Λ` its
+/// orientation. Everything runs in DBig: `l` overflows f64 within a few dozen
+/// iterations at depth, and the orbit loses ~log|l| digits of accuracy, which
+/// the caller's working precision (∝ zoom depth) covers.
+///
+/// Returns `None` if `l` or `b·l²` collapses to zero (non-primitive period).
+pub(crate) fn minibrot_size_estimate(
+    cx: &DBig,
+    cy: &DBig,
+    period: usize,
+    prec: usize,
+) -> Option<(DBig, DBig)> {
+    let zero = raise_precision(dbig_i(0), prec);
+    let one = raise_precision(dbig_i(1), prec);
+    let two = raise_precision(dbig_i(2), prec);
+
+    let mut zx = zero.clone();
+    let mut zy = zero.clone();
+    let mut lx = one.clone();
+    let mut ly = zero.clone();
+    let mut bx = one.clone();
+    let mut by = zero.clone();
+
+    for _ in 1..period {
+        let zx_new = &zx * &zx - &zy * &zy + cx;
+        let zy_new = &two * &zx * &zy + cy;
+        zx = zx_new;
+        zy = zy_new;
+        let lx_new = &two * (&zx * &lx - &zy * &ly);
+        let ly_new = &two * (&zx * &ly + &zy * &lx);
+        lx = lx_new;
+        ly = ly_new;
+        let norm = &lx * &lx + &ly * &ly;
+        if norm == zero {
+            return None;
+        }
+        // b += 1/l  (conjugate over |l|²)
+        bx = &bx + &lx / &norm;
+        by = &by - &ly / &norm;
+    }
+
+    let l2x = &lx * &lx - &ly * &ly;
+    let l2y = &two * &lx * &ly;
+    let dx = &bx * &l2x - &by * &l2y;
+    let dy = &bx * &l2y + &by * &l2x;
+    let norm = &dx * &dx + &dy * &dy;
+    if norm == zero {
+        return None;
+    }
+    Some((&dx / &norm, &zero - &dy / &norm))
+}
+
+/// How many `|Λ|` the view half-height must span so the minibrot's bounding box
+/// covers `fill` of the limiting screen axis.
+///
+/// `theta` = `arg Λ`, `view_angle` = the view rotation: the box appears on
+/// screen rotated by `theta − view_angle` (screen `+x` maps to the complex
+/// direction `e^{i·view_angle}`), which widens its axis-aligned extents.
+fn minibrot_frame_scale_factor(theta: f64, view_angle: f64, aspect: f64, fill: f64) -> f64 {
+    let phi = theta - view_angle;
+    let (sin_phi, cos_phi) = (phi.sin().abs(), phi.cos().abs());
+    let half_x = MINIBROT_BOX_HALF_RE * cos_phi + MINIBROT_BOX_HALF_IM * sin_phi;
+    let half_y = MINIBROT_BOX_HALF_RE * sin_phi + MINIBROT_BOX_HALF_IM * cos_phi;
+    let aspect = if aspect.is_finite() && aspect > 0.0 {
+        aspect
+    } else {
+        1.0
+    };
+    // Half-width of the view is `scale·aspect`, half-height is `scale`.
+    (half_x / aspect).max(half_y) / fill.clamp(0.05, 1.0)
+}
+
+/// Ball-arithmetic period detection at an arbitrary centre, extracted from
+/// `MandelbrotNavigator::detect_period_ball` so build-only censuses can drive the
+/// production path instead of a copy of it.
+pub(crate) fn detect_period_ball_at(
+    cx: &DBig,
+    cy: &DBig,
+    max_iter: usize,
+    radius: &DBig,
+) -> Option<usize> {
+    let two = dbig_i(2);
+    let one = dbig_i(1);
+    let four = dbig_i(4);
+    let radius_sq = radius * radius;
+
+    let mut zx = dbig_i(0);
+    let mut zy = dbig_i(0);
+    // dz/dc, tracked in DBig so the (huge) derivative magnitude at depth
+    // never overflows — the comparison stays exact.
+    let mut dx = dbig_i(0);
+    let mut dy = dbig_i(0);
+
+    for n in 1..=max_iter {
+        // Derivative recurrence uses the *previous* z: dz' = 2·z·dz + 1.
+        let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
+        let dy_new = &two * (&zx * &dy + &zy * &dx);
+        let zx_new = &zx * &zx - &zy * &zy + cx;
+        let zy_new = &two * &zx * &zy + cy;
+        zx = zx_new;
+        zy = zy_new;
+        dx = dx_new;
+        dy = dy_new;
+
+        let z2 = &zx * &zx + &zy * &zy;
+        let d2 = &dx * &dx + &dy * &dy;
+        // |z|² ≤ radius² · |dz|²  ⇔  the view-disk's n-th image covers 0.
+        if z2 <= &radius_sq * &d2 {
+            return Some(n);
+        }
+        if z2 > four {
+            return None;
+        }
+    }
+    None
+}
+
 /// Newton's method for the period-`period` nucleus (`z_period(c) = 0`), starting
 /// from `(start_cx, start_cy)`.
 ///
@@ -3125,7 +3319,7 @@ fn critical_value_and_derivative(cx: &DBig, cy: &DBig, period: usize) -> (DBig, 
 /// The derivative weighting is essential at depth: `|dz_p| ~ 1/scale`, so a bare
 /// `|z_p| ≤ tolerance` test (the old code) rejected every deep nucleus because
 /// the precision-floor noise in `z_p` dwarfs `scale`.
-fn newton_nucleus(
+pub(crate) fn newton_nucleus(
     start_cx: &DBig,
     start_cy: &DBig,
     period: usize,
@@ -4930,6 +5124,82 @@ mod tests {
             "nucleus only resolved to view-scale precision: offset²={}",
             offset_sq
         );
+    }
+
+    #[test]
+    fn minibrot_size_estimate_matches_period_three_island() {
+        // The period-3 island on the real axis: nucleus ≈ -1.7548776662466927,
+        // Λ real positive (the copy is upright and unrotated there).
+        let cx = DBig::from_str("-1.7548776662466927").unwrap();
+        let cy = DBig::from_str("0.0").unwrap();
+        let (size_x, size_y) =
+            minibrot_size_estimate(&cx, &cy, 3, 64).expect("size estimate should converge");
+        let sx = dbig_to_f64(&size_x);
+        let sy = dbig_to_f64(&size_y);
+        assert!((sx - 0.019035515913).abs() < 1e-9, "Λ_re={}", sx);
+        assert!(sy.abs() < 1e-9, "Λ_im={}", sy);
+    }
+
+    #[test]
+    fn minibrot_size_estimate_is_one_for_the_whole_set() {
+        // Period 1 is the main cardioid: the "copy" is the set itself, Λ = 1.
+        let (size_x, size_y) =
+            minibrot_size_estimate(&dbig_i(0), &dbig_i(0), 1, 64).expect("period 1 is trivial");
+        assert!((dbig_to_f64(&size_x) - 1.0).abs() < 1e-12);
+        assert!(dbig_to_f64(&size_y).abs() < 1e-12);
+    }
+
+    #[test]
+    fn frame_scale_factor_fills_the_limiting_axis() {
+        // Unrotated, square viewport: the box is 1.30 wide / 1.20 tall in |Λ|,
+        // so the real axis limits and a 50 % fill needs half-height 2.6·|Λ|.
+        let k = minibrot_frame_scale_factor(0.0, 0.0, 1.0, 0.5);
+        assert!((k - 2.6).abs() < 1e-12, "k={}", k);
+        // Wide viewport: the vertical axis limits instead.
+        let wide = minibrot_frame_scale_factor(0.0, 0.0, 16.0 / 9.0, 0.5);
+        assert!((wide - 2.4).abs() < 1e-12, "k={}", wide);
+        // A copy rotated 90° relative to the view swaps the box extents.
+        let quarter = minibrot_frame_scale_factor(std::f64::consts::FRAC_PI_2, 0.0, 1.0, 0.5);
+        assert!((quarter - 2.6).abs() < 1e-12, "k={}", quarter);
+        // …and a view rotated with it cancels back to the unrotated framing.
+        let cancelled = minibrot_frame_scale_factor(
+            std::f64::consts::FRAC_PI_2,
+            std::f64::consts::FRAC_PI_2,
+            16.0 / 9.0,
+            0.5,
+        );
+        assert!((cancelled - 2.4).abs() < 1e-12, "k={}", cancelled);
+    }
+
+    #[test]
+    fn find_minibrot_framed_centres_the_copy_and_sets_the_zoom() {
+        // View sitting just off the period-3 island's nucleus.
+        let mut nav = MandelbrotNavigator::new("-1.75487", "0.00001", "1e-3", 0.0);
+        let res = nav.find_minibrot_framed(4096, 4.0, 0.5);
+        assert_eq!(res[0], "ok", "expected a framed hit, got {:?}", res);
+        assert_eq!(res[3].parse::<usize>().unwrap(), 3, "period {}", res[3]);
+
+        let size = 0.019035515913_f64;
+        let nucleus = -1.7548776662466927_f64;
+        let cx = res[1].parse::<f64>().unwrap();
+        let cy = res[2].parse::<f64>().unwrap();
+        let scale = res[4].parse::<f64>().unwrap();
+        // Centre = nucleus + Λ·(−0.75), i.e. left of the nucleus, on the body.
+        assert!(
+            (cx - (nucleus + MINIBROT_BOX_CENTRE * size)).abs() < 1e-9,
+            "cx={}",
+            cx
+        );
+        assert!(cy.abs() < 1e-9, "cy={}", cy);
+        // No viewport aspect set ⇒ square ⇒ 2.6·|Λ| at 50 % fill.
+        assert!((scale / (2.6 * size) - 1.0).abs() < 1e-6, "scale={}", scale);
+    }
+
+    #[test]
+    fn find_minibrot_framed_reports_the_same_failures() {
+        let mut nav = MandelbrotNavigator::new("0.4", "0.3", "1e-5", 0.0);
+        let res = nav.find_minibrot_framed(4096, 4.0, 0.5);
+        assert_eq!(res[0], "none", "expected no minibrot, got {:?}", res);
     }
 
     #[test]

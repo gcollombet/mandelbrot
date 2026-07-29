@@ -22,6 +22,7 @@ describe('performance settings helpers', () => {
       gpuLoadMultiplier: 2,
       zoomMinBrushStep: 8,
       sentinelSeedStep: 512,
+      taylorSuperpixelEnabled: true,
     } as const;
 
     const merged = preserveSessionPerformanceFields(
@@ -42,6 +43,7 @@ describe('performance settings helpers', () => {
       gpuLoadMultiplier: 2,
       zoomMinBrushStep: 8,
       sentinelSeedStep: 512,
+      taylorSuperpixelEnabled: true,
     }));
   });
 
@@ -55,6 +57,7 @@ describe('performance settings helpers', () => {
       gpuLoadMultiplier: 2,
       zoomMinBrushStep: 8,
       sentinelSeedStep: 512,
+      taylorSuperpixelEnabled: true,
     } as Record<string, unknown>;
 
     const stripped = stripSessionPerformanceFields(payload);
@@ -82,6 +85,7 @@ describe('performance settings helpers', () => {
       gpuLoadMultiplier: 2,
       zoomMinBrushStep: 8,
       sentinelSeedStep: 512,
+      taylorSuperpixelEnabled: true,
       showPresetPins: true,
     } as const;
 

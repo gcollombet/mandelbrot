@@ -20,6 +20,7 @@ export interface MandelbrotParams {
     aaAdaptive?: boolean;
     zoomMinBrushStep: number;
     sentinelSeedStep: number;
+    taylorSuperpixelEnabled: boolean;
     palettePeriod: number;
     paletteOffset: number;
     heightPaletteShift: number;
@@ -73,6 +74,7 @@ export const SESSION_PERFORMANCE_FIELDS = [
     'gpuLoadMultiplier',
     'zoomMinBrushStep',
     'sentinelSeedStep',
+    'taylorSuperpixelEnabled',
 ] as const satisfies readonly (keyof MandelbrotParams)[];
 
 export const EXPLORATION_STATE_FIELDS = [
@@ -149,5 +151,6 @@ export function preserveSessionPerformanceFields<T extends Partial<MandelbrotPar
         gpuLoadMultiplier: current.gpuLoadMultiplier,
         zoomMinBrushStep: current.zoomMinBrushStep,
         sentinelSeedStep: current.sentinelSeedStep,
+        taylorSuperpixelEnabled: current.taylorSuperpixelEnabled,
     };
 }
