@@ -42,6 +42,9 @@ export const DEBUG_VIEW_REACH = 6
 /** Debug view 7 reads the resolved step marker produced by the ordinary
  *  progressive pipeline: exact / Taylor / bilinear / no data. */
 export const DEBUG_VIEW_TAYLOR_COVERAGE = 7
+/** Debug view 8 decodes the structural rejection tag written into the resolved
+ *  derivative angle: payload / radius / branch / topology / interior. */
+export const DEBUG_VIEW_TAYLOR_REJECTIONS = 8
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per texture array.
@@ -49,8 +52,9 @@ export const DEBUG_VIEW_TAYLOR_COVERAGE = 7
 // scale derS for in-progress pixels (all-compute-der-cartesian). Display-side
 // textures (resolved/frozen) and their 8-target MRT pipelines stay at 8 —
 // they only ever consume the escaped format.
-// 13 = 9 iteration layers + the Phase D analytic-AA extras (9/10 in-progress
-// z″ mantissa; 8..12 escaped Taylor payload). Allocated unconditionally for
+// 13 = 9 iteration layers + the Phase D analytic-AA extras (9/10/11 carry the
+// independently scaled in-progress z″ and 12 its validity bit; 8..12 carry
+// the escaped polar-log Taylor payload). Allocated unconditionally for
 // now — writes are cheap and reproject copies by destination layer count;
 // FOLLOW-UP: gate to 9 when antialiasLevel == 1 (saves 4 × texSize² × 4 B × 2
 // textures; needs a realloc path on the AA toggle).
@@ -3970,7 +3974,7 @@ export class Engine {
     }
 
     /** True while a debug view uses the standalone recompute pipeline (1-5).
-     *  The reach and coverage views (6-7) are color-pass readouts of the
+     *  The reach, coverage and rejection views (6-8) are color-pass readouts of the
      *  ordinary progressive render, which must keep running underneath them. */
     /** Reference orbit long enough for the current view (mirrors the uniform's
      *  orbitComplete). The debug overlay must not draw before this. */
@@ -3980,11 +3984,13 @@ export class Engine {
         return this.debugViewMode > 0
             && this.debugViewMode !== DEBUG_VIEW_REACH
             && this.debugViewMode !== DEBUG_VIEW_TAYLOR_COVERAGE
+            && this.debugViewMode !== DEBUG_VIEW_TAYLOR_REJECTIONS
     }
 
     /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes,
-     *  5 tier, 6 reach, 7 resolved coverage. 1-5 replace the frame with an
-     *  instrumented recompute; 6-7 recolor the ordinary progressive render. */
+     *  5 tier, 6 reach, 7 resolved coverage, 8 Taylor rejection reasons. 1-5
+     *  replace the frame with an instrumented recompute; 6-8 recolor the
+     *  ordinary progressive render. */
     setDebugView(mode: number) {
         const next = Math.max(0, Math.round(mode))
         if (next === this.debugViewMode) {
@@ -3992,7 +3998,7 @@ export class Engine {
         }
         this.debugViewMode = next
         // A persisted AA composite would otherwise cover color-pass debug modes
-        // 6-7 with the previous palette image.
+        // 6-8 with the previous palette image.
         this.resetAaState()
         this.debugViewDirty = true
         this.needRender = true
@@ -4640,7 +4646,7 @@ export class Engine {
                 ? (this.lastShaderApproxFlag >= 5 ? 2 : 1)
                 : 0,
             this.debugViewMode === DEBUG_VIEW_TAYLOR_COVERAGE ? 1 : 0, // 68: coverageDebug
-            0,                                    // 69: uniform padding
+            this.debugViewMode === DEBUG_VIEW_TAYLOR_REJECTIONS ? 1 : 0, // 69: rejectionDebug
             0,                                    // 70: uniform padding
             0,                                    // 71: uniform padding
         ])
@@ -5115,7 +5121,7 @@ export class Engine {
             allowRefinement,
             this.dispatchBox.x,
             this.dispatchBox.y,
-            taylorSuperpixelEnabled && clearFlag === 0 && !hasTranslationShift ? 1 : 0,
+            taylorSuperpixelEnabled && clearFlag === 0 ? 1 : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
@@ -5372,6 +5378,7 @@ export class Engine {
             && this.counterSampleFrame >= this.lastRawMutationFrame
         const skipResolve = !!this.bindGroupColorRaw
             && this.debugViewMode !== DEBUG_VIEW_TAYLOR_COVERAGE
+            && this.debugViewMode !== DEBUG_VIEW_TAYLOR_REJECTIONS
             && (this.debugViewMode === DEBUG_VIEW_REACH || converged)
         this.resolveSkipped = skipResolve
 
