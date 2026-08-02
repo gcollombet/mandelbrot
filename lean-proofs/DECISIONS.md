@@ -111,3 +111,66 @@ Cette avancée ferme l'entrée Fatou et l'unicité dynamique, mais ne remplace
 pas la réciproque algébrique encore manquante : une racine de l'équation
 résultante en `(c, μ)` doit encore être reliée dans Lean à un point périodique
 dont le multiplicateur est exactement `μ`.
+
+## 2026-08-02 — amorcer la série sur les centres par une formule locale générale
+
+`GeneralCenterCoefficient.lean` formalise la dérivée de l'orbite critique
+`D_{j+1}=2 z_j D_j+1`, le produit multiplicateur du cycle et leur élimination
+à un centre superattractif arbitraire. Pour une branche locale normalisée par
+le multiplicateur et de période `p`, Lean obtient
+
+```text
+c'(0) = 1 / (2^p D_p(c₀) ∏_{j=1}^{p-1} z_j(c₀)).
+```
+
+La vérification donne `1/2` pour la cardioïde et `1/4` pour le bulbe de
+période 2. Cette décision sépare trois niveaux : la formule locale est
+prouvée ; l'existence et l'uniformisation de toutes les branches ne le sont
+pas encore ; la convergence ou l'identification à l'aire d'une série globale
+sur les composantes n'est pas revendiquée. Une somme des carrés des seuls
+premiers coefficients produit naturellement un minorant, pas l'aire exacte
+sans contrôle des coefficients de Taylor suivants.
+
+## 2026-08-02 — définir `H_P` avant de parler de sa limite
+
+`FiniteCenterEnergy.lean` remplace l'ancienne formulation informelle par trois
+objets séparés :
+
+1. le polynôme entier récursif `Pₙ` de l'orbite critique, avec preuve que sa
+   dérivée formelle est la récurrence `Dₙ` ;
+2. le `Finset` de toutes ses racines complexes dont la période critique est
+   exactement `p` ;
+3. la somme finie croissante `truncatedCenterEnergy P` des carrés des premiers
+   coefficients jusqu'à la période `P`.
+
+L'addition à l'aire passe par une interface distincte
+`CertifiedCenterSheet`. Ainsi la somme algébrique peut être construite et
+calculée sans prétendre prématurément que toutes ses racines disposent déjà de
+feuilles globales certifiées. Le théorème d'aire demande explicitement
+l'injectivité, l'inclusion dans `Mandelbrot`, la mesurabilité et la disjonction,
+puis conclut `ofReal (π R² H_S) ≤ volume Mandelbrot`.
+
+Cette séparation rend également visible le prochain obstacle : ce n'est plus
+la définition ou la monotonie de `H_P`, mais l'uniformisation simultanée des
+centres de période arbitraire et un contrôle effectif de la queue en période.
+
+## 2026-08-03 — contrôler d'abord la queue qualitativement
+
+`CenterEnergyTail.lean` formalise le niveau intermédiaire entre les sommes
+finies et une estimation numérique de la queue. Sous la seule hypothèse
+uniforme `ofReal (π R² H_P) ≤ volume Mandelbrot` à un rayon fixe positif,
+l'aire finie de `Mandelbrot` borne `H_P`. Lean définit alors `H` comme le
+supremum des troncatures et prouve
+
+```text
+H_P → H,                 H - H_P ↓ 0.
+```
+
+La formulation epsilon est existentielle, non algorithmique. Elle ne doit pas
+être présentée comme une vitesse de convergence ou un calcul de la queue.
+
+La queue en période `H-H_P` est distincte de l'énergie de Taylor supérieure.
+La première oublie les composantes de grande période; la seconde oublie, dans
+chaque composante déjà comptée, les termes `π n |aₙ|²` pour `n≥2`. Même un
+contrôle parfait de `H-H_P` ne transforme donc pas la somme des premiers
+coefficients en aire exacte.

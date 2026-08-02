@@ -48,11 +48,14 @@ import LeanProofs.LowPeriodCenterIsolation
 import LeanProofs.LowPeriodCovering
 import LeanProofs.LowPeriodDynamics
 import LeanProofs.FiniteCycleFatou
+import LeanProofs.GeneralCenterCoefficient
 import LeanProofs.LowPeriodSheetArea
 import LeanProofs.LowPeriodFinalArea
 import LeanProofs.FiniteEscapeArea
 import LeanProofs.EffectiveAreaGap
 import LeanProofs.CertifiedAreaBackends
+import LeanProofs.FiniteCenterEnergy
+import LeanProofs.CenterEnergyTail
 import LeanProofs.FractionalIteration.Basic
 import LeanProofs.FractionalIteration.BottcherAnalytic
 import LeanProofs.FractionalIteration.BottcherUniqueness

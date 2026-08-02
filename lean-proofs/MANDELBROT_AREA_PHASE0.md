@@ -86,6 +86,18 @@ Le développement dispose maintenant de quatre blocs supplémentaires :
   finie, prouve l'entrée puis la convergence de l'orbite critique, l'unicité
   du cycle attractif, et l'appartenance à `Mandelbrot` des témoins
   dynatomiques attractifs de périodes 3 et 4 ;
+- `GeneralCenterCoefficient.lean` dérive, à toute période `p = n+1`, le
+  premier coefficient local d'une branche paramétrée par le multiplicateur.
+  Si `z_j(c)` est l'orbite critique, `D_0(c)=0` et
+  `D_{j+1}(c)=2 z_j(c) D_j(c)+1`, alors au centre `c₀` :
+
+  ```text
+  c'(0) = 1 / (2^p D_p(c₀) ∏_{j=1}^{p-1} z_j(c₀)).
+  ```
+
+  La preuve Lean ne suppose que la branche locale différentiable, l'équation
+  périodique et la normalisation du multiplicateur. Elle retrouve exactement
+  `c'(0)=1/2` en période 1 et `c'(0)=1/4` au centre `c=-1` de période 2 ;
 - `FiniteEscapeArea.lean`, `EffectiveAreaGap.lean` et
   `CertifiedAreaBackends.lean` fournissent les ensembles extérieurs décroissants,
   la convergence de leurs aires, le critère de module effectif et des
@@ -100,3 +112,97 @@ ce minorant : la factorisation du discriminant de période 4 comme déterminant
 Mathlib reste à certifier. La convergence
 monotone des bornes extérieures ne constitue pas non plus un algorithme d'aire
 sans module effectif de l'écart supérieur-inférieur.
+
+Cette formule arbitraire fournit les termes locaux naturels d'une future
+série sur les centres hyperboliques. Elle ne prouve pas encore l'existence des
+branches globales à toute période, leur énumération effective, ni la
+convergence d'une somme sur tous les centres. De plus, le seul premier
+coefficient donne une minoration de l'aire d'une composante ; l'égalité d'aire
+fait intervenir toute l'énergie de Taylor de sa paramétrisation conforme.
+
+`FiniteCenterEnergy.lean` formalise maintenant l'étape finie suivante. Les
+polynômes entiers de l'orbite critique sont construits récursivement par
+
+```text
+P₀ = 0,                 Pₙ₊₁ = Pₙ² + X,
+```
+
+et Lean vérifie simultanément `Pₙ(c)=zₙ(c)` et `Pₙ'(c)=Dₙ(c)`. Pour chaque
+période `p`, les racines complexes de `Pₚ` forment un `Finset`; un filtre sur
+les temps `1 ≤ q < p` en extrait exactement les centres de période `p`. Cela
+donne la définition canonique finie
+
+```text
+H_P = ∑_{0≤p≤P} ∑_{c : période exacte p} |a(c)|²,
+```
+
+dont la monotonie en `P` est prouvée. Le catalogue explicite des centres `0`
+et `-1` a pour énergie exacte `1/4 + 1/16 = 5/16`.
+
+Enfin, une structure `CertifiedCenterSheet` regroupe les obligations globales
+d'une feuille sur un disque multiplicateur compact : équations périodique et
+multiplicateur, holomorphie, injectivité, mesurabilité, inclusion dans
+`Mandelbrot` et disjonction. Pour toute famille finie certifiée de rayon commun
+`R`, Lean prouve directement
+
+```text
+ofReal (π R² H_S) ≤ volume Mandelbrot.
+```
+
+Le chaînon restant avant d'appliquer ce théorème au `H_P` canonique est donc
+précis : construire uniformément une `CertifiedCenterSheet` pour chaque centre
+du `Finset`, puis prouver la disjonction de toute la famille. La convergence de
+`H_P` est encore une question séparée.
+
+## Un premier contrôle fondamental de la queue de `H_P`
+
+`CenterEnergyTail.lean` sépare contrôle qualitatif et contrôle effectif. Il
+prouve d'abord que `volume Mandelbrot ≠ ∞` grâce à l'inclusion dans le disque
+fermé de rayon 2. Il suppose ensuite qu'un rayon multiplicateur fixe `R > 0`
+fournit, pour toute troncature, la borne géométrique attendue
+
+```text
+ofReal (π R² H_P) ≤ volume Mandelbrot.
+```
+
+Cette seule hypothèse borne la suite réelle croissante `H_P`. En définissant
+
+```text
+H = sup_P H_P,                 tail(P) = H - H_P,
+```
+
+Lean prouve `H_P → H`, `0 ≤ tail(P)`, la décroissance de `tail`, puis
+`tail(P) → 0`. Il en déduit que pour tout `ε > 0`, il existe un `P` après
+lequel toute la queue est inférieure à `ε`.
+
+Ce résultat n'est pas encore un module effectif : il ne calcule pas ce `P` en
+fonction de `ε`. Le bloc analytique manquant est exactement l'établissement
+de la borne d'aire uniforme pour le catalogue canonique de toutes les périodes;
+le bloc quantitatif supplémentaire serait une vitesse explicite de décroissance.
+
+## Énergie de Taylor supérieure
+
+Pour une composante hyperbolique uniformisée par le multiplicateur,
+
+```text
+c(μ) = c₀ + a₁ μ + a₂ μ² + a₃ μ³ + ⋯,
+```
+
+la formule d'aire complète est
+
+```text
+area = π ∑_{n≥1} n |aₙ|².
+```
+
+Le terme `π|a₁|²` est l'énergie linéaire déjà utilisée dans `H_P`. L'énergie
+de Taylor supérieure est le reste positif
+
+```text
+π ∑_{n≥2} n |aₙ|².
+```
+
+Elle mesure la déformation non linéaire de la composante au-delà de son disque
+tangent central. Pour la cardioïde
+`c(μ)=μ/2-μ²/4`, l'énergie linéaire vaut `π/4`, l'énergie supérieure vaut
+`π/8`, et leur somme redonne l'aire exacte `3π/8`. Pour le bulbe de période 2,
+la paramétrisation est affine et l'énergie supérieure est nulle.
