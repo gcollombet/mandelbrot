@@ -9,8 +9,16 @@ const brushShader = readFileSync(
   new URL('../../src/assets/mandelbrot_brush.wgsl', import.meta.url),
   'utf8',
 );
+const reprojectShader = readFileSync(
+  new URL('../../src/assets/reproject_cs.wgsl', import.meta.url),
+  'utf8',
+);
 const colorShader = readFileSync(
   new URL('../../src/assets/color.wgsl', import.meta.url),
+  'utf8',
+);
+const aaReseedShader = readFileSync(
+  new URL('../../src/assets/aa_reseed.wgsl', import.meta.url),
   'utf8',
 );
 const engineSource = readFileSync(
@@ -27,11 +35,13 @@ describe('opportunistic superpixel Taylor contract', () => {
     expect(resolveShader).toContain('fn try_taylor_candidate(');
     expect(resolveShader).toContain('let s = loadLayer(anchorCoord, 8);');
     expect(resolveShader).toContain('let m1 = vec2<f32>(loadLayer(anchorCoord, 9), loadLayer(anchorCoord, 10));');
-    expect(resolveShader).toContain('let m2 = vec2<f32>(loadLayer(anchorCoord, 11), loadLayer(anchorCoord, 12));');
-    expect(resolveShader).toContain('let quadratic = cmul(cmul(m2, hat), hat) * (0.5 * e2);');
+    expect(resolveShader).toContain('let sndLog = loadLayer(anchorCoord, 11);');
+    expect(resolveShader).toContain('let sndAngle = loadLayer(anchorCoord, 12);');
+    expect(resolveShader).toContain('let quadraticLogMag = log(0.5) + sndLog + 2.0 * logDelta;');
+    expect(resolveShader).toContain('* vec2<f32>(cos(quadraticAngle), sin(quadraticAngle));');
     expect(brushShader).toContain('const INVALID_TAYLOR_PAYLOAD: f32 = 1e35;');
     expect(resolveShader).not.toContain('o.dzx =');
-    expect(resolveShader).not.toContain('o.dzy =');
+    expect(resolveShader).not.toContain('o.dzy = pack(candidate');
   });
 
   it('rejects unusable payloads and escape-branch changes', () => {
@@ -39,12 +49,16 @@ describe('opportunistic superpixel Taylor contract', () => {
     expect(resolveShader).toContain('if (!finitePayload) {');
     expect(resolveShader).toContain('if (!(score <= 1.0)) {');
     expect(resolveShader).toContain('if (!(zhatSq >= uni.mu && zhatSq < 1e30)) {');
-    expect(resolveShader).toContain('return invalid_taylor_candidate();');
+    expect(resolveShader).toContain('invalid_taylor_candidate(TAYLOR_REJECT_PAYLOAD, 1e30)');
+    expect(resolveShader).toContain('invalid_taylor_candidate(TAYLOR_REJECT_RADIUS, score)');
+    expect(resolveShader).toContain('invalid_taylor_candidate(TAYLOR_REJECT_BRANCH, score)');
     expect(resolveShader).not.toContain('smooth_frac_extrapolated');
   });
 
   it('selects the best valid corner without blending Taylor predictions', () => {
-    expect(resolveShader).toContain('var bestTaylor = invalid_taylor_candidate();');
+    expect(resolveShader).toContain(
+      'var bestTaylor = invalid_taylor_candidate(TAYLOR_REJECT_NONE, 1e30);',
+    );
     expect(resolveShader).toContain('if (taylor.valid != 0u && taylor.score < bestTaylor.score) {');
     expect(resolveShader).toContain('bestTaylor = taylor;');
     expect(resolveShader).toContain('return taylor_overlay(o, bestTaylor, requested_step);');
@@ -67,9 +81,24 @@ describe('opportunistic superpixel Taylor contract', () => {
     expect(brushShader).toContain('isActive = iter_val == -1.0;');
   });
 
-  it('ignores stale coverage on clear and translation frames', () => {
+  it('reindexes previous coverage during integer translations and ignores it on clears', () => {
     expect(engineSource).toContain(
-      'taylorSuperpixelEnabled && clearFlag === 0 && !hasTranslationShift ? 1 : 0',
+      'taylorSuperpixelEnabled && clearFlag === 0 ? 1 : 0',
+    );
+    expect(engineSource).not.toContain(
+      'taylorSuperpixelEnabled && clearFlag === 0 && !hasTranslationShift',
+    );
+    expect(reprojectShader).toContain(
+      'let shift = vec2<i32>(i32(round(uni.shiftTexX)), i32(round(uni.shiftTexY)));',
+    );
+    expect(reprojectShader).toContain('let coord_in = coord_out - shift;');
+    expect(brushShader).toContain('i32(round(brush.shiftTexX))');
+    expect(brushShader).toContain('i32(round(brush.shiftTexY))');
+    expect(brushShader).toContain('let coverageCoord = coord_out - shift;');
+    expect(brushShader).toContain('let dims = vec2<i32>(textureDimensions(previousResolved));');
+    expect(brushShader).toContain('coverageCoord.x < 0 || coverageCoord.y < 0');
+    expect(brushShader).toContain(
+      'textureLoad(previousResolved, coverageCoord, 1, 0).r',
     );
   });
 
@@ -109,5 +138,55 @@ describe('opportunistic superpixel Taylor contract', () => {
     expect(settingsSource).toContain("{ label: 'Couverture Taylor', value: 7 }");
     expect(settingsSource).toContain("label: 'Taylor terminal'");
     expect(settingsSource).toContain("label: 'Bilinéaire temporaire'");
+  });
+
+  it('uses the production neutral-texel scale in the reach view', () => {
+    expect(colorShader).toContain(
+      'let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);',
+    );
+    expect(colorShader).toContain(
+      'log(2.0 * neutralExtent / max(f32(sourceTexSize.y), 1.0))',
+    );
+  });
+
+  it('exposes structural Taylor rejection reasons without another texture', () => {
+    expect(engineSource).toContain('export const DEBUG_VIEW_TAYLOR_REJECTIONS = 8');
+    expect(engineSource).toContain('this.debugViewMode !== DEBUG_VIEW_TAYLOR_REJECTIONS');
+    expect(engineSource).toContain('this.debugViewMode === DEBUG_VIEW_TAYLOR_REJECTIONS ? 1 : 0');
+    expect(resolveShader).toContain('const TAYLOR_REJECTION_STRIDE: f32 = 50.26548245743669;');
+    expect(resolveShader).toContain('fn tag_taylor_rejection(');
+    expect(resolveShader).toContain('TAYLOR_REJECT_PAYLOAD');
+    expect(resolveShader).toContain('TAYLOR_REJECT_RADIUS');
+    expect(resolveShader).toContain('TAYLOR_REJECT_BRANCH');
+    expect(resolveShader).toContain('TAYLOR_REJECT_SPARSE_CELL');
+    expect(resolveShader).toContain('TAYLOR_REJECT_INSIDE_DOMINANT');
+    expect(resolveShader).toContain('TAYLOR_REJECT_NO_ESCAPED');
+    expect(colorShader).toContain('fn taylor_rejection_debug_color(');
+    expect(colorShader).toContain('parameters.rejectionDebug > 0.5');
+    expect(settingsSource).toContain("{ label: 'Rejets Taylor', value: 8 }");
+    expect(settingsSource).toContain("label: 'Rayon hors du gate'");
+    expect(settingsSource).toContain("label: 'Changement de branche d’échappement'");
+  });
+
+  it('keeps z-double-prime independently scaled and emits a polar-log escaped payload', () => {
+    expect(brushShader).toContain('struct ScaledComplex {');
+    expect(brushShader).toContain('fn scaled_complex_add(');
+    expect(brushShader).toContain('var sndS = prev_snds;');
+    expect(brushShader).toContain('snd_exact_step(derM, derS + derSLo, zPrev, &sndM, &sndS);');
+    expect(brushShader).toContain('f32(pdz.e) * LN2 + *sndScale');
+    expect(brushShader).toContain('scaled_complex_log_length(sndM, sndS)');
+    expect(brushShader).toContain('out.aa11      = pack(sndS);');
+    expect(brushShader).toContain('var sndValid = prev_snd_valid >= 0.5;');
+    expect(brushShader).toContain('out.aa12      = pack(select(0.0, 1.0, isUnified && sndValid));');
+    expect(brushShader).toContain('let taylorPayloadValid = isUnified && sndValid;');
+    expect((brushShader.match(/sndValid = false;/g) ?? []).length).toBeGreaterThanOrEqual(3);
+    expect(brushShader).not.toContain('sndM = sndM * exp(clamp(-2.0 *');
+
+    expect(resolveShader).toContain('&& abs(sndLog) < 1e30 && abs(sndAngle) < 1e30');
+    expect(colorShader).toContain('let log2Snd = sndLog * LOG2E_;');
+    expect(colorShader).toContain('let quadraticLogMag = log(0.5) + sndLog + 2.0 * parameters.aaJitterLogMag;');
+    expect(aaReseedShader).toContain('fn log_complex_length_floor(v: vec2<f32>, floorValue: f32)');
+    expect(aaReseedShader).toContain('+ s - sndLog - params.aaLogDelta;');
+    expect(aaReseedShader).not.toContain('let m2 =');
   });
 });

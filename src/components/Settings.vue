@@ -405,6 +405,7 @@ const debugViewOptions = [
   { label: 'Tier', value: 5 },
   { label: 'Portee', value: 6 },
   { label: 'Couverture Taylor', value: 7 },
+  { label: 'Rejets Taylor', value: 8 },
 ];
 
 // Color scales for the debug view legend — kept in sync by hand with
@@ -486,8 +487,8 @@ const debugViewLegends: Record<number, {
     extraSwatches: [
       { color: 'rgb(242, 128, 26)', label: 'Orange = mode Exact → bascule en Auto' },
       { color: 'rgb(242, 217, 64)', label: 'Jaune = Auto, mais table pas prête (attends la référence)' },
-      { color: 'rgb(107, 41, 77)', label: 'Prune = critère quadratique inopérant (z″ sous le plancher f32) : portée NON mesurable depuis ce payload, elle y dépend de z‴. Ni petite ni grande — inconnue. C\'est le disque SA, sa taille suit ε.' },
-      { color: 'rgb(38, 51, 115)', label: 'Bleu sombre = payload hors plage' },
+      { color: 'rgb(107, 41, 77)', label: 'Prune = z″ mathématiquement nul : portée non mesurable sans z‴' },
+      { color: 'rgb(38, 51, 115)', label: 'Bleu sombre = payload absent ou non fini (anomalie si la table Auto est active)' },
       { color: 'rgb(217, 26, 191)', label: 'Magenta = mauvaise texture liée (bug)' },
       { color: 'rgb(26, 26, 31)', label: 'Presque noir = intérieur / pas encore calculé' },
     ],
@@ -510,6 +511,24 @@ const debugViewLegends: Record<number, {
     note: 'Origine de la valeur résolue actuellement affichée. Cette vue relit '
       + 'le marqueur du resolve et suit le raffinement progressif ; elle ne '
       + 'mesure ni l\'erreur ni la visibilité dans la palette.',
+  },
+  8: {
+    kind: 'swatches',
+    swatches: [
+      { color: 'rgb(60, 255, 60)', label: 'Exact calculé' },
+      { color: 'rgb(255, 51, 217)', label: 'Taylor accepté' },
+      { color: 'rgb(38, 89, 255)', label: 'Payload Taylor inutilisable' },
+      { color: 'rgb(255, 46, 20)', label: 'Rayon hors du gate' },
+      { color: 'rgb(0, 217, 255)', label: 'Changement de branche d’échappement' },
+      { color: 'rgb(255, 217, 26)', label: 'Moins de 3 coins résolus au pas fin' },
+      { color: 'rgb(140, 51, 191)', label: 'Groupe intérieur dominant' },
+      { color: 'rgb(140, 140, 140)', label: 'Aucune ancre échappée' },
+      { color: 'rgb(242, 128, 26)', label: 'Bilinéaire non tagué / Taylor désactivé' },
+      { color: 'rgb(0, 0, 0)', label: 'Aucune donnée résolue' },
+    ],
+    note: 'Cause structurelle qui a empêché la couverture Taylor. Active '
+      + '« Taylor opportuniste » pour produire les tags. Cette vue ne mesure '
+      + 'ni l’erreur visuelle ni la sensibilité de la palette.',
   },
 };
 const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);

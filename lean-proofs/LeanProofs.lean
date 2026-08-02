@@ -34,6 +34,9 @@ import LeanProofs.CriticalPeriodic
 import LeanProofs.Fatou
 import LeanProofs.FatouSectorial
 import LeanProofs.Dynamics
+import LeanProofs.MandelbrotArea
+import LeanProofs.CardioidArea
+import LeanProofs.MandelbrotLowerBound
 import LeanProofs.FractionalIteration.Basic
 import LeanProofs.FractionalIteration.BottcherAnalytic
 import LeanProofs.FractionalIteration.BottcherUniqueness

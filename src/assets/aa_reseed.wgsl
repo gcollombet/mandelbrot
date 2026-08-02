@@ -50,11 +50,20 @@ struct FrontierStats {
 @group(0) @binding(1) var rawIterTex: texture_storage_2d<r32float, write>;
 @group(0) @binding(2) var<uniform> params: AaParams;
 // Raw layers 8..12 viewed as a 5-layer array (disjoint from the layer-0 storage
-// view above): 0 = S, 1/2 = z′ mantissa, 3/4 = z″ mantissa.
+// view above): 0 = S, 1/2 = z′ mantissa, 3 = ln|z″|, 4 = arg(z″).
 @group(0) @binding(3) var payloadTex: texture_2d_array<f32>;
 @group(0) @binding(4) var<storage, read_write> stats: FrontierStats;
 
 const LN_MARGIN_THRESHOLD: f32 = 1.6094379; // ln 5
+
+fn log_complex_length_floor(v: vec2<f32>, floorValue: f32) -> f32 {
+  let scale = max(abs(v.x), abs(v.y));
+  if (!(scale > floorValue)) {
+    return log(floorValue);
+  }
+  let unit = v / scale;
+  return log(scale) + 0.5 * log(dot(unit, unit));
+}
 
 @compute @workgroup_size(16, 16)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
@@ -79,20 +88,20 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let s = textureLoad(payloadTex, coord, 0, 0).r;
         let m1 = vec2<f32>(textureLoad(payloadTex, coord, 1, 0).r,
                            textureLoad(payloadTex, coord, 2, 0).r);
-        let m2 = vec2<f32>(textureLoad(payloadTex, coord, 3, 0).r,
-                           textureLoad(payloadTex, coord, 4, 0).r);
-        // Margin in log space: ln|z′| − ln|z″| − S − ln δ > ln 5.
-        // m1 = 0 (no payload / saturated fold) fails → honest re-iteration;
-        // m2 = 0 (genuinely negligible z″) passes.
+        let sndLog = textureLoad(payloadTex, coord, 3, 0).r;
+        let sndAngle = textureLoad(payloadTex, coord, 4, 0).r;
+        // Margin in log space: ln|z′| − ln|z″| − ln δ > ln 5.
+        // z′ = m1·exp(s); z″ already stores its independent ln-magnitude.
         // Finite guard first: max() LAUNDERS NaN on Metal (max(NaN, x) = x),
-        // which once turned a NaN z″ into an auto-passing margin. |x| < big is
+        // which once turned a NaN payload into an auto-passing margin. |x| < big is
         // false for both NaN and inf without relying on x != x semantics.
         let finiteOk = abs(s) < 1e6
           && abs(m1.x) < 1e30 && abs(m1.y) < 1e30
-          && abs(m2.x) < 1e30 && abs(m2.y) < 1e30;
-        let marginLog = log(max(length(m1), 1e-38)) - log(max(length(m2), 1e-38))
-                      - s - params.aaLogDelta;
-        if (finiteOk && length(m1) > 0.0 && marginLog > LN_MARGIN_THRESHOLD) {
+          && abs(sndLog) < 1e30 && abs(sndAngle) < 1e30;
+        let marginLog = log_complex_length_floor(m1, 1e-38)
+                      + s - sndLog - params.aaLogDelta;
+        if (finiteOk && max(abs(m1.x), abs(m1.y)) > 0.0
+            && marginLog > LN_MARGIN_THRESHOLD) {
           textureStore(aaTargetTex, coord, vec4<f32>(tgt + 0.5, 0.0, 0.0, 0.0));
           return;
         }

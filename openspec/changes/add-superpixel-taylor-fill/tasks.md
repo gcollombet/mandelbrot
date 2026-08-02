@@ -98,3 +98,29 @@
 - [x] 13.1 Définir dans les specs et le design la classification `exact / Taylor / bilinéaire / absent`
 - [x] 13.2 Ajouter la vue de couverture au shader couleur, au routage progressif du moteur et à la légende de l'interface
 - [x] 13.3 Étendre le contrat statique puis exécuter la validation WGSL, les tests ciblés, le typecheck et `git diff --check`
+
+## 14. Correction de l'underflow du payload profond
+
+- [x] 14.1 Spécifier qu'une mantisse `m2` non nulle ne doit pas être rejetée parce que sa norme au carré sous-déborde
+- [x] 14.2 Rendre deep-safe les tests et normes de `m2` dans le resolve, la vue Portée et le gate AA
+- [x] 14.3 Étendre le contrat statique puis valider les shaders, les tests ciblés, le typecheck et `git diff --check`
+
+## 15. Échelle indépendante et payload polaire-log de `z″`
+
+- [x] 15.1 Spécifier l'échelle indépendante de `z″` en vol et son encodage échappé `ln|z″| + arg(z″)` dans les 13 couches existantes
+- [x] 15.2 Porter la mantisse et l'échelle indépendantes de `z″` à travers les itérations shallow/deep, les reprises, le préfixe SA et les sauts Unified
+- [x] 15.3 Adapter le resolve, la vue Portée et le gate AA à l'encodage polaire-log, puis étendre le contrat statique
+- [x] 15.4 Valider les shaders concernés, les tests ciblés, le typecheck et `git diff --check`
+
+## 16. Cohérence de la portée et diagnostic des rejets
+
+- [x] 16.1 Spécifier que la vue Portée utilise exactement le pas complexe du resolve et définir les catégories de rejet Taylor sans seuil perceptuel
+- [x] 16.2 Corriger la conversion de la portée en pixels neutres pour inclure `neutralExtent`
+- [x] 16.3 Encoder sans allocation les raisons de rejet dans le resolve et ajouter une vue/légende `Rejets Taylor`
+- [x] 16.4 Étendre le contrat statique puis valider les shaders, les tests ciblés, le typecheck et `git diff --check`
+
+## 17. Conservation de la couverture pendant une translation entière
+
+- [x] 17.1 Spécifier que le marqueur Taylor précédent est relu à la même coordonnée source que l'état brut reprojeté, avec repli normal hors texture
+- [x] 17.2 Conserver la couverture sur les frames de translation et appliquer le décalage entier au lookup dans le kernel fusionné
+- [x] 17.3 Étendre le contrat statique puis valider le shader, les tests ciblés, le typecheck et `git diff --check`

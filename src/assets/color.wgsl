@@ -75,7 +75,7 @@ struct Uniforms {
   lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)
   reachReady: f32,       // 0 = user in Exact, 1 = Auto but table not ready, 2 = unified live
   coverageDebug: f32,    // 1 = exact/Taylor/bilinear/no-data origin map (debug view 7)
-  _pad69: f32,
+  rejectionDebug: f32,   // 1 = structural Taylor rejection map (debug view 8)
   _pad70: f32,
   _pad71: f32,
 };
@@ -974,6 +974,50 @@ fn coverage_debug_color(step: f32) -> vec4<f32> {
   return vec4<f32>(0.95, 0.5, 0.1, 1.0);       // temporary bilinear fill
 }
 
+const TAYLOR_REJECTION_STRIDE: f32 = 50.26548245743669;
+
+fn taylor_rejection_reason(encodedAngle: f32) -> u32 {
+  // The genuine derivative angle is in [-pi, pi]. Each tag is eight complete
+  // turns away, so rounding remains robust without perturbing periodic uses.
+  let code = i32(round(encodedAngle / TAYLOR_REJECTION_STRIDE));
+  if (code < 1 || code > 6) {
+    return 0u;
+  }
+  return u32(code);
+}
+
+fn taylor_rejection_debug_color(step: f32, encodedAngle: f32) -> vec4<f32> {
+  if (!(step > 0.0)) {
+    return vec4<f32>(0.0, 0.0, 0.0, 1.0);       // no resolved data
+  }
+  if (abs(fract(step) - 0.5) < 0.125) {
+    return vec4<f32>(1.0, 0.2, 0.85, 1.0);      // accepted Taylor value
+  }
+  if (step <= 1.125) {
+    return vec4<f32>(0.235, 1.0, 0.235, 1.0);   // computed pixel
+  }
+
+  let reason = taylor_rejection_reason(encodedAngle);
+  if (reason == 1u) { return vec4<f32>(0.15, 0.35, 1.0, 1.0); } // unusable payload
+  if (reason == 2u) { return vec4<f32>(1.0, 0.18, 0.08, 1.0); } // radius gate
+  if (reason == 3u) { return vec4<f32>(0.0, 0.85, 1.0, 1.0); }  // branch change
+  if (reason == 4u) { return vec4<f32>(1.0, 0.85, 0.1, 1.0); }  // sparse fine cell
+  if (reason == 5u) { return vec4<f32>(0.55, 0.2, 0.75, 1.0); } // inside dominant
+  if (reason == 6u) { return vec4<f32>(0.55, 0.55, 0.55, 1.0); }// no escaped anchor
+  return vec4<f32>(0.95, 0.5, 0.1, 1.0);       // untagged bilinear / Taylor off
+}
+
+fn resolved_debug_color(
+  sourceTex: texture_2d_array<f32>,
+  coord: vec2<i32>,
+  step: f32,
+) -> vec4<f32> {
+  if (parameters.rejectionDebug > 0.5) {
+    return taylor_rejection_debug_color(step, textureLoad(sourceTex, coord, 5, 0).r);
+  }
+  return coverage_debug_color(step);
+}
+
 fn load_pixel_extras(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelExtras {
   var extras: PixelExtras;
   extras.der_x = textureLoad(sourceTex, coord, 4, 0).r;
@@ -1274,68 +1318,47 @@ fn colorize_pixel(
       return vec4<f32>(0.85, 0.1, 0.75, 1.0);
     }
     let S = textureLoad(sourceTex, sourceCoord, 8, 0).r;
-    let m2 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 11, 0).r,
-                       textureLoad(sourceTex, sourceCoord, 12, 0).r);
-    // z″ reads as zero. Three different situations, and only two are faults.
-    //
-    // With the table live it is NOT an error: the stored mantissa is z″/|z′|²,
-    // and |z′| and the pixel footprint δ are conjugate in deep zoom (e^S·δ is
-    // O(1)), so a mantissa under the f32 floor means the quadratic term really
-    // is negligible against the linear one — the same reading aa_reseed relies
-    // on when it lets m2 = 0 PASS its margin. The reach is then not bounded by
-    // the quadratic criterion at all; this payload simply cannot measure it,
-    // because what would bind is z‴, which is not stored. Hence a colour of its
-    // own rather than a place on the ramp: neither "no reach" nor "huge reach".
-    // (Field note: this is the ε-sized disk seen around a minibrot — the SA
-    // prefix covers a parameter disk whose radius scales with ε, and inside it
-    // the seed ∂²(SA)/∂c² lands under the floor. Changing ε moves the disk,
-    // which is what identified the mechanism.)
-    if (!(dot(m2, m2) > 0.0)) {
+    let sndLog = textureLoad(sourceTex, sourceCoord, 11, 0).r;
+    let sndAngle = textureLoad(sourceTex, sourceCoord, 12, 0).r;
+    // +marker = z″ not tracked / payload invalid. Keep mode readiness visible
+    // before calling a live-table invalid payload a numerical failure.
+    if (!(sndLog < 1e30)) {
       if (parameters.reachReady < 0.5) {
         return vec4<f32>(0.95, 0.5, 0.1, 1.0);  // ORANGE — not in Auto: no data
       }
       if (parameters.reachReady < 1.5) {
         return vec4<f32>(0.95, 0.85, 0.25, 1.0); // YELLOW — table still building
       }
-      // Table live. A lower bound IS derivable here — |m2| under the f32 floor
-      // F gives ρ_last > √(2·tol·|z|/(F·e^{2S})) — but it is worthless, and an
-      // earlier revision made the mistake of painting it on the ramp:
-      //   √(2·tol·|z|/F) ≈ 5.8e17, and the bound in pixels is that over
-      //   (|z′|·δ)/m1, with |z′|·δ ≲ 1 by the distance-estimator relation.
-      // So it saturates at ~1e17 px on every pixel of the region. A value that
-      // saturates uniformly across a heterogeneous area is not a measurement,
-      // and a ramp colour invites reading it as one — the true reach here is
-      // set by z‴ and may well be a single pixel.
-      //
-      // It is not even reliably a bound: the UPPER clamp (+80) caps the scale
-      // multiplier, so a saturated fold can store a small mantissa for a LARGE
-      // true z″ — the inequality then points the wrong way.
-      //
-      // Hence a flat colour that cannot be mistaken for the ramp. What this
-      // region needs is a direct measurement (fit a neighbour's Taylor against
-      // its computed z), not a sharper bound.
+      return vec4<f32>(0.15, 0.2, 0.45, 1.0); // DARK BLUE — unusable payload
+    }
+    // A tracked mathematical zero is distinct from an absent payload. z‴ then
+    // sets the first omitted term, so the current payload cannot measure reach.
+    if (sndLog < -1e30) {
       return vec4<f32>(0.42, 0.16, 0.30, 1.0);   // PLUM — quadratic criterion
                                                  // inoperative: reach NOT
                                                  // measurable from this payload
     }
-    // DARK BLUE — payload present but out of range (overflowed mantissa or
-    // scale); the pixel is unusable but the mode is right.
-    if (!(abs(S) < 1e6) || !(abs(m2.x) < 1e30) || !(abs(m2.y) < 1e30)) {
+    if (!(abs(S) < 1e6) || !(abs(sndAngle) < 1e30)) {
       return vec4<f32>(0.15, 0.2, 0.45, 1.0);
     }
-    // |z″| = |m2|·e^{2S}; keep it in log2 so the exponent never materializes.
-    let log2Snd = log2(max(length(m2), 1e-30)) + 2.0 * S * LOG2E_;
+    let log2Snd = sndLog * LOG2E_;
     let log2Rho = 0.5 * (log2(2.0 * REACH_TOL * max(length(z), 1e-30)) - log2Snd);
-    // One neutral texel spans 2/texHeight of the [-1,1] vertical extent, times
-    // the true (deep-safe) scale.
-    let log2Pix = (log(2.0 / max(f32(sourceTexSize.y), 1.0)) + parameters.lnScale) * LOG2E_;
+    // Match resolve.wgsl exactly: the raw source is the square neutral texture,
+    // whose texel spans 2·neutralExtent/neutralSize times the view half-height.
+    // Omitting neutralExtent made this debug view overstate reach on wide views.
+    let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);
+    let log2Pix = (
+      log(2.0 * neutralExtent / max(f32(sourceTexSize.y), 1.0))
+      + parameters.lnScale
+    ) * LOG2E_;
     return vec4<f32>(reach_ramp((log2Rho - log2Pix) / 6.0), 1.0);
   }
 
   // Phase D analytic AA: pixels the reseed tagged analytic-OK were frozen at
   // their sample-0 state; reconstruct this sample's sub-pixel value
   // ẑ(δc) = z + z′·δc + ½·z″·δc² from the raw Taylor payload
-  // (layer 8 = S, 9/10 = z′ mantissa ·e^S, 11/12 = z″ mantissa ·e^{2S}) and
+  // (layer 8 = S, 9/10 = z′ mantissa ·e^S,
+  //  layer 11 = ln|z″|, layer 12 = arg(z″)) and
   // derive the subsample's smooth iteration / escape-z from ẑ — the log-log
   // formula extrapolates below bailout, no re-iteration. The extrapolated ν̂ is
   // then renormalized like the bilinear resolve: iter = floor(ν̂) + a synthetic
@@ -1349,19 +1372,22 @@ fn colorize_pixel(
     let S = textureLoad(sourceTex, sourceCoord, 8, 0).r;
     let m1 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 9, 0).r,
                        textureLoad(sourceTex, sourceCoord, 10, 0).r);
-    let m2 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 11, 0).r,
-                       textureLoad(sourceTex, sourceCoord, 12, 0).r);
+    let sndLog = textureLoad(sourceTex, sourceCoord, 11, 0).r;
+    let sndAngle = textureLoad(sourceTex, sourceCoord, 12, 0).r;
     // Finite guard (mirrors the reseed): a non-finite payload must fall back
     // to the center color, never feed the reconstruction.
     if (abs(S) < 1e6
       && abs(m1.x) < 1e30 && abs(m1.y) < 1e30
-      && abs(m2.x) < 1e30 && abs(m2.y) < 1e30) {
+      && abs(sndLog) < 1e30 && abs(sndAngle) < 1e30) {
     let hat = vec2<f32>(parameters.aaJitterHatX, parameters.aaJitterHatY);
     // Exponent-summed magnitudes: e^{S+ln|δc|} stays finite where e^S alone
     // would overflow f32.
     let e1 = exp(clamp(S + parameters.aaJitterLogMag, -80.0, 80.0));
-    let e2 = exp(clamp(2.0 * (S + parameters.aaJitterLogMag), -80.0, 80.0));
-    let zhat = z + cmul_c(m1, hat) * e1 + cmul_c(cmul_c(m2, hat), hat) * (0.5 * e2);
+    let quadraticLogMag = log(0.5) + sndLog + 2.0 * parameters.aaJitterLogMag;
+    let quadraticAngle = sndAngle + 2.0 * atan2(hat.y, hat.x);
+    let quadratic = exp(quadraticLogMag)
+      * vec2<f32>(cos(quadraticAngle), sin(quadraticAngle));
+    let zhat = z + cmul_c(m1, hat) * e1 + quadratic;
     let zhat_sq = dot(zhat, zhat);
     let nuHat = iter_val + smooth_escape_fraction(zhat_sq);
     var iterEff = floor(nuHat);
@@ -1818,25 +1844,25 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   let scaleRatio = select(1.0, zf / lzf, lzf > 0.0);
   let effectiveFrozenStep = frozenCompositeStep * scaleRatio;
 
-  // Debug view 7 classifies the marker stored by the resolved pipeline itself.
+  // Debug views 7-8 classify metadata stored by the resolved pipeline itself.
   // Screen-space bilinear magnification is deliberately ignored: it is only a
   // display filter, not a third producer of progressive pixel values.
-  if (parameters.coverageDebug > 0.5) {
+  if (parameters.coverageDebug > 0.5 || parameters.rejectionDebug > 0.5) {
     let liveCoverage = liveStep > 0.0;
     let frozenCoverage = useFrozen && frozenStep > 0.0;
     if (liveCoverage && frozenCoverage) {
       let effectiveFrozenCoverageStep = frozenStep * scaleRatio;
       return select(
-        coverage_debug_color(frozenStep),
-        coverage_debug_color(liveStep),
+        resolved_debug_color(texFrozen, frozenCoord, frozenStep),
+        resolved_debug_color(tex, liveCoord, liveStep),
         liveStep <= effectiveFrozenCoverageStep,
       );
     }
     if (liveCoverage) {
-      return coverage_debug_color(liveStep);
+      return resolved_debug_color(tex, liveCoord, liveStep);
     }
     if (frozenCoverage) {
-      return coverage_debug_color(frozenStep);
+      return resolved_debug_color(texFrozen, frozenCoord, frozenStep);
     }
     return coverage_debug_color(0.0);
   }
@@ -1960,7 +1986,7 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 @fragment
 fn fs_main_direct(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
   let c = shade_srgb(fragCoord, false);
-  if (parameters.coverageDebug > 0.5) {
+  if (parameters.coverageDebug > 0.5 || parameters.rejectionDebug > 0.5) {
     return c;
   }
   return vec4<f32>(clamp(c.rgb + vec3<f32>(dither_8bit(pos.xy)), vec3<f32>(0.0), vec3<f32>(1.0)), c.a);

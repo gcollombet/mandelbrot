@@ -144,6 +144,31 @@ const LN_2: f32 = 0.6931471805599453;
 const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
 const ORBIT_DIRECTION_BASE: f32 = 4096.0;
 
+// Rejection diagnostics are stored as whole turns in the derivative angle.
+// Sixteen pi = eight full turns, leaving ample distance from the genuine
+// [-pi, pi] angle while remaining exactly periodic for every normal consumer.
+const TAYLOR_REJECTION_STRIDE: f32 = 50.26548245743669;
+const TAYLOR_REJECT_NONE: u32 = 0u;
+const TAYLOR_REJECT_PAYLOAD: u32 = 1u;
+const TAYLOR_REJECT_RADIUS: u32 = 2u;
+const TAYLOR_REJECT_BRANCH: u32 = 3u;
+const TAYLOR_REJECT_SPARSE_CELL: u32 = 4u;
+const TAYLOR_REJECT_INSIDE_DOMINANT: u32 = 5u;
+const TAYLOR_REJECT_NO_ESCAPED: u32 = 6u;
+
+fn tag_taylor_rejection(
+  spatial: FragOut,
+  reason: u32,
+  requestedStep: u32,
+) -> FragOut {
+  if (uni.taylorOverlayEnabled < 0.5 || requestedStep <= 1u || reason == TAYLOR_REJECT_NONE) {
+    return spatial;
+  }
+  var o = spatial;
+  o.dzy = pack(o.dzy.r + f32(reason) * TAYLOR_REJECTION_STRIDE);
+  return o;
+}
+
 // Smooth escape fraction, identical to color.wgsl's escape_nu fraction.
 // Returned separately from the iteration count so that nu can be
 // interpolated relative to a local base iteration: at deep zooms the
@@ -158,15 +183,20 @@ fn cmul(a: vec2<f32>, b: vec2<f32>) -> vec2<f32> {
   return vec2<f32>(a.x * b.x - a.y * b.y, a.x * b.y + a.y * b.x);
 }
 
+fn complex_max_abs(v: vec2<f32>) -> f32 {
+  return max(abs(v.x), abs(v.y));
+}
+
 struct TaylorCandidate {
   valid: u32,
+  rejectReason: u32,
   score: f32,
   iter: f32,
   z: vec2<f32>,
 };
 
-fn invalid_taylor_candidate() -> TaylorCandidate {
-  return TaylorCandidate(0u, 1e30, 0.0, vec2<f32>(0.0));
+fn invalid_taylor_candidate(reason: u32, score: f32) -> TaylorCandidate {
+  return TaylorCandidate(0u, reason, score, 0.0, vec2<f32>(0.0));
 }
 
 // Test one completed integer-grid anchor. The score is the squared normalized
@@ -179,38 +209,34 @@ fn try_taylor_candidate(
   logMu: f32,
 ) -> TaylorCandidate {
   if (textureNumLayers(rawTex) <= 12u) {
-    return invalid_taylor_candidate();
+    return invalid_taylor_candidate(TAYLOR_REJECT_PAYLOAD, 1e30);
   }
 
   let deltaTexel = vec2<f32>(targetCoord - anchorCoord);
   let deltaLen = length(deltaTexel);
   if (deltaLen <= 0.0) {
-    return invalid_taylor_candidate();
+    return invalid_taylor_candidate(TAYLOR_REJECT_PAYLOAD, 1e30);
   }
 
   let anchorIter = loadLayer(anchorCoord, 0);
   let anchorZ = vec2<f32>(loadLayer(anchorCoord, 2), loadLayer(anchorCoord, 3));
   let s = loadLayer(anchorCoord, 8);
   let m1 = vec2<f32>(loadLayer(anchorCoord, 9), loadLayer(anchorCoord, 10));
-  let m2 = vec2<f32>(loadLayer(anchorCoord, 11), loadLayer(anchorCoord, 12));
-  // `dot(m2, m2) > 0` is a REQUIREMENT, not a finiteness check. A z″ mantissa
-  // that reads as zero means "unmeasurable", never "no error": the stored value
-  // is z″/|z′|², so under the f32 floor the quadratic term is negligible against
-  // the LINEAR one while the actual truncation is then set by z‴, which is not
-  // stored and may bind at a single pixel. color.wgsl's reach view paints that
-  // region its own flat colour for exactly this reason. Accepting it here would
-  // let the gate below pass trivially (a zero term is trivially small) on a
-  // model whose error nobody can see — the ε-sized disk around a minibrot.
-  // Rejecting costs refinement there and buys correctness.
+  // Escaped z″ uses an independent polar-log representation. This avoids the
+  // old m2=z″/exp(2S) saturation, which invalidated finite payloads before the
+  // gate on the ε-sized SA disk.
+  let sndLog = loadLayer(anchorCoord, 11);
+  let sndAngle = loadLayer(anchorCoord, 12);
+  let m1Scale = complex_max_abs(m1);
   let finitePayload = anchorIter > 0.0
     && dot(anchorZ, anchorZ) >= uni.mu
     && abs(s) < 1e6
     && abs(m1.x) < 1e30 && abs(m1.y) < 1e30
-    && abs(m2.x) < 1e30 && abs(m2.y) < 1e30
-    && length(m1) > 0.0
-    && dot(m2, m2) > 0.0;
+    && abs(sndLog) < 1e30 && abs(sndAngle) < 1e30
+    && m1Scale > 0.0
+    && sndLog > -1e30;
   if (!finitePayload) {
-    return invalid_taylor_candidate();
+    return invalid_taylor_candidate(TAYLOR_REJECT_PAYLOAD, 1e30);
   }
 
   let hat = deltaTexel / deltaLen;
@@ -224,11 +250,12 @@ fn try_taylor_candidate(
   // genuinely carries the anchor's value).
   let logFold = s + logDelta;
   let e1 = exp(logFold);
-  let e2 = exp(2.0 * logFold);
   let linear = cmul(m1, hat) * e1;
-  // Exactly ½·z″·δc², the last term the model RETAINS: m2 = z″/|z′|² and
-  // e2 = (|z′|·|δc|)².
-  let quadratic = cmul(cmul(m2, hat), hat) * (0.5 * e2);
+  // Exactly ½·z″·δc², reconstructed without materializing z″ itself.
+  let quadraticLogMag = log(0.5) + sndLog + 2.0 * logDelta;
+  let quadraticAngle = sndAngle + 2.0 * atan2(hat.y, hat.x);
+  let quadratic = exp(quadraticLogMag)
+    * vec2<f32>(cos(quadraticAngle), sin(quadraticAngle));
 
   // ── truncation gate ───────────────────────────────────────────────────────
   //
@@ -249,7 +276,7 @@ fn try_taylor_candidate(
   let tol = max(uni.taylorTol, 0.0);
   let score = dot(quadratic, quadratic) / max(tol * tol * anchorZSq, 1e-30);
   if (!(score <= 1.0)) {
-    return invalid_taylor_candidate();
+    return invalid_taylor_candidate(TAYLOR_REJECT_RADIUS, score);
   }
 
   let zhat = anchorZ + linear + quadratic;
@@ -260,7 +287,7 @@ fn try_taylor_candidate(
   // bailout. The upper bound is what rejects an overflowed fold: inf passes
   // `>= mu` trivially and would render as a flat band at fraction 0.
   if (!(zhatSq >= uni.mu && zhatSq < 1e30)) {
-    return invalid_taylor_candidate();
+    return invalid_taylor_candidate(TAYLOR_REJECT_BRANCH, score);
   }
 
   let fracOut = smooth_frac(zhatSq, logMu);
@@ -271,7 +298,7 @@ fn try_taylor_candidate(
   let zhatLen = sqrt(zhatSq);
   let zOut = zhat * (exp(0.5 * logZ2Out) / zhatLen);
 
-  return TaylorCandidate(1u, score, anchorIter, zOut);
+  return TaylorCandidate(1u, TAYLOR_REJECT_NONE, score, anchorIter, zOut);
 }
 
 // Overlay only the analytically continuable value channels. A half-unit in the
@@ -372,6 +399,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let gy = i32(uni.gridOffsetY);
 
   let logMu = log(max(uni.mu, 1.0001));
+  var requestedCellSparse = false;
 
   // Climb through coarser grid levels. The maximum number of doublings
   // before step_u exceeds the texture size is bounded by log2(max(dims)).
@@ -434,7 +462,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // (e.g. the pixel sits exactly on an unfinished anchor).
     var hasFinished = false;
     var firstFinishedCoord = vec2<i32>(0);
-    var bestTaylor = invalid_taylor_candidate();
+    var bestTaylor = invalid_taylor_candidate(TAYLOR_REJECT_NONE, 1e30);
+    var bestTaylorReject = TAYLOR_REJECT_NONE;
 
     for (var i = 0u; i < 4u; i = i + 1u) {
       let ccoord = candidates[i];
@@ -483,6 +512,11 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
         let taylor = try_taylor_candidate(ccoord, coord, logMu);
         if (taylor.valid != 0u && taylor.score < bestTaylor.score) {
           bestTaylor = taylor;
+        } else if (taylor.valid == 0u) {
+          // The numeric codes are ordered by how far the candidate progressed:
+          // payload < radius < same-branch. Keep the most informative failure
+          // when different corners stop at different gates.
+          bestTaylorReject = max(bestTaylorReject, taylor.rejectReason);
         }
       }
       if (!hasFinished) {
@@ -520,10 +554,22 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     // frames identical: once every corner is escaped/inside, nResolved == 4
     // everywhere and nothing climbs.  See design.md of this change.
     let nResolved = nEscaped + nInside;
+    if (level == 0u && nResolved < 3u) {
+      requestedCellSparse = true;
+    }
     if (nResolved >= 3u) {
       // The cell straddles the set boundary: the dominant group wins.
       if (wInside > wEscaped) {
-        return loadAllLayersAsCopy(bestInsideCoord, step_u);
+        let rejectionReason = select(
+          TAYLOR_REJECT_INSIDE_DOMINANT,
+          TAYLOR_REJECT_NO_ESCAPED,
+          nEscaped == 0u,
+        );
+        return tag_taylor_rejection(
+          loadAllLayersAsCopy(bestInsideCoord, step_u),
+          rejectionReason,
+          requested_step,
+        );
       }
 
       if (wEscaped > 1e-6) {
@@ -567,14 +613,31 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       o.dzy       = pack(angleOut);
       o.ref_i     = pack(refOut);
       o.avgDirection = pack(encode_avg_dir(clamp(avgDirSum * invW, vec2<f32>(-1.0), vec2<f32>(1.0))));
-      return taylor_overlay(o, bestTaylor, requested_step);
+      if (bestTaylor.valid != 0u) {
+        return taylor_overlay(o, bestTaylor, requested_step);
+      }
+      let rejectionReason = select(
+        select(TAYLOR_REJECT_NO_ESCAPED, bestTaylorReject, bestTaylorReject != TAYLOR_REJECT_NONE),
+        TAYLOR_REJECT_SPARSE_CELL,
+        requestedCellSparse,
+      );
+      return tag_taylor_rejection(o, rejectionReason, requested_step);
       }
 
       // >= 3 resolved corners but all of them carry zero bilinear weight
       // (pixel sits exactly on the lone unresolved corner) — snap to the first
       // resolved corner instead of producing nothing.
       if (hasFinished) {
-        return loadAllLayersAsCopy(firstFinishedCoord, step_u);
+        let rejectionReason = select(
+          TAYLOR_REJECT_NO_ESCAPED,
+          TAYLOR_REJECT_SPARSE_CELL,
+          requestedCellSparse,
+        );
+        return tag_taylor_rejection(
+          loadAllLayersAsCopy(firstFinishedCoord, step_u),
+          rejectionReason,
+          requested_step,
+        );
       }
     }
 

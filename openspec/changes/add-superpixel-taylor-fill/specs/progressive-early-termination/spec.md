@@ -59,9 +59,26 @@ d'indistinguabilité.
 ### Requirement: Invalidation spatiale sûre
 
 La couverture lue par le kernel SHALL appartenir aux mêmes coordonnées que
-l'état brut. Une frame qui efface ou translate l'historique SHALL ignorer les
-marqueurs de la frame précédente ; le resolve recalculé SHALL fournir les
-marqueurs alignés pour la frame suivante.
+l'état brut. Une frame qui efface l'historique SHALL ignorer les marqueurs de
+la frame précédente. Une frame de translation entière SHALL relire le marqueur
+à la même coordonnée source que celle utilisée pour reprojeter l'état brut,
+`coord_out - round(shiftTex)`. Si cette coordonnée sort de la texture, aucune
+couverture précédente SHALL être retenue et le raffinement ordinaire SHALL
+s'appliquer. Le resolve recalculé SHALL produire les marqueurs alignés aux
+coordonnées de sortie pour la frame suivante.
+
+#### Scenario: Translation entière d'une sentinelle couverte
+
+- **WHEN** l'état brut d'un texel est reprojeté depuis une coordonnée source
+  valide lors d'une translation entière
+- **THEN** le kernel SHALL tester le marqueur Taylor de cette même coordonnée
+  source et SHALL conserver la sentinelle si elle était couverte
+
+#### Scenario: Bande nouvellement exposée
+
+- **WHEN** la coordonnée source reprojetée sort de la texture
+- **THEN** aucun marqueur Taylor SHALL être lu et le texel SHALL suivre le
+  chemin de calcul ou de raffinement ordinaire
 
 ### Requirement: Anti-aliasing non assimilé à une complétion exacte
 

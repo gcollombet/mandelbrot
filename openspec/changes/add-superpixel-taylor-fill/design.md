@@ -65,6 +65,44 @@ smallest normalized ratio
 This gate is independent of the palette and is not presented as a proof of
 visual indistinguishability.
 
+Deep normalized payloads must not be rejected through `dot(m2, m2) > 0`:
+squaring a small but representable `m2` can underflow to zero before either
+component does. Payload presence is tested component-wise, while magnitude and
+log-magnitude diagnostics use a max-component rescaling before the dot product.
+A genuinely zero or non-finite `m2` remains unusable.
+
+`z″` is not kept on the derivative's `2·S` scale while a pixel is in flight.
+That shared scale can saturate even when both derivatives are finite, causing
+the reach view to report an out-of-range payload before the Taylor gate is
+evaluated. The in-flight state therefore uses an independently normalized
+complex mantissa and logarithmic scale:
+
+```text
+z′ = m1·exp(S1)
+z″ = m2·exp(S2)
+```
+
+At an exact iteration or Unified block jump, the terms contributing to `z″`
+are added after shifting them to their largest logarithmic scale. Positive
+exponents never materialize; terms that underflow after the shift are already
+negligible relative to the retained term.
+
+The raw texture allocation remains 13 layers. Its logical payload depends on
+pixel state:
+
+```text
+in progress: 8 = S1, 9/10 = m2.x/y, 11 = S2, 12 = z″-valid bit
+escaped:     8 = S1, 9/10 = m1.x/y, 11 = ln|z″|, 12 = arg(z″)
+```
+
+The escaped polar-log pair is not bit packing. It is the representation the
+resolve and AA gates consume directly: `ln|z″·δc²| = ln|z″| + 2ln|δc|` and
+`arg(z″·δc²) = arg(z″) + 2arg(δc)`. No extra texture layer or binding is added.
+Legacy renormalization and gate jumps currently expose only their first
+derivative. If either jump is applied, the in-progress validity bit is cleared
+and the escaped anchor publishes the invalid-payload marker instead of a stale
+Taylor certificate. Exact steps and Unified blocks preserve the bit.
+
 ## Refinement and completion
 
 There is no Taylor-specific refinement pass. An uncovered sentinel continues
@@ -80,9 +118,13 @@ coverage is an approximate final value, not an exact per-pixel orbit.
 
 ## Invalidation
 
-The fused kernel ignores previous coverage on a history-clear or integer
-translation frame. The resolve produced later in that same frame is aligned
-with the new raw coordinates and becomes readable on the following frame.
+The fused kernel ignores previous coverage on a history-clear frame. On an
+integer translation frame, raw reprojection gathers from
+`coord_out - round(shiftTex)`, so the coverage lookup gathers the previous
+resolved marker from that exact same source coordinate. An out-of-bounds source
+has no previous coverage and follows ordinary computation or dyadic refinement.
+The resolve produced later in the frame writes markers aligned with the output
+coordinates for the next frame.
 
 Changing the opportunistic toggle invalidates progressive history. The disabled
 mode therefore returns to exact step-1 convergence.
@@ -104,6 +146,28 @@ shading and does not classify the screen-space bilinear magnification filter as
 a new source. Unlike debug views 1–5, it keeps the ordinary progressive loop
 running; unlike reach view 6, it always binds the resolved texture because the
 half-step marker does not exist in raw state.
+
+## Reach units and rejection debug view
+
+The reach heatmap and production resolve use the same complex distance per raw
+texel:
+
+```text
+pixelC = scale · 2·neutralExtent/neutralSize
+neutralExtent = sqrt(aspect² + 1)
+```
+
+The raw texture is the square neutral texture, so dividing only by its height
+without `neutralExtent` overstates the displayed reach on non-square canvases.
+
+Debug view 8 reads the same resolved live/frozen source as the coverage view
+and classifies failed Taylor attempts as payload, radius, branch, sparse fine
+cell, inside-dominant, or no escaped anchor. The resolve stores the reason in
+the derivative-angle channel by adding an integer multiple of `16π`. All normal
+consumers use that angle periodically (`sin`, `cos`, or `fract(angle/2π)`), so
+the tag is display-neutral and does not alter the resolved step or its
+live/frozen priority. Successful Taylor coverage keeps the half-step marker and
+is shown separately.
 
 ## Removed architecture
 

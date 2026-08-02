@@ -8,8 +8,9 @@ marqueur de couverture Taylor produit par le resolve précédent.
 
 #### Scenario: Couverture précédente valide
 
-- **WHEN** le mode opportuniste est actif, que l'historique n'est ni effacé ni
-  translaté et que le texel résolu précédent porte le marqueur Taylor
+- **WHEN** le mode opportuniste est actif, que l'historique n'est pas effacé et
+  que le texel résolu précédent porte le marqueur Taylor à la coordonnée source
+  de l'état brut courant, y compris après une translation entière
 - **THEN** `refine_sentinel` SHALL conserver le pas brut actuel
 
 #### Scenario: Pas de couverture
@@ -67,3 +68,27 @@ l'absence de donnée en noir.
 - **WHEN** la vue de couverture est désactivée
 - **THEN** la classification SHALL n'avoir aucun effet sur la couleur normale
   ni sur la sélection des ancres
+
+### Requirement: Diagnostic structurel des rejets Taylor
+
+Le moteur SHALL proposer une vue de debug distincte qui explique pourquoi une
+sentinelle affichée par le resolve spatial n'a pas reçu de marqueur Taylor. La
+classification SHALL distinguer au minimum : payload inutilisable, gate de
+rayon dépassé, changement de branche d'échappement, cellule fine insuffisamment
+résolue, intérieur dominant et absence d'ancre échappée exploitable.
+
+La raison MAY être encodée dans un canal résolu existant si cet encodage laisse
+la couleur normale et la priorité des pas inchangées. Elle SHALL NOT ajouter de
+seuil dépendant de la palette ni être présentée comme une mesure perceptuelle.
+
+#### Scenario: Lecture après convergence
+
+- **WHEN** la vue des rejets est sélectionnée après un rendu Taylor
+- **THEN** elle SHALL relire la source résolue live/frozen effectivement
+  affichée sans relancer un pipeline Mandelbrot de debug
+
+#### Scenario: Rendu normal
+
+- **WHEN** la vue des rejets est désactivée
+- **THEN** les tags de diagnostic SHALL être neutres pour les calculs de
+  palette, d'ombrage et de priorité live/frozen

@@ -18,6 +18,36 @@ Le remplissage d'un texel non-ancre SHALL évaluer la continuation de Taylor du 
 - **THEN** le remplissage SHALL retomber spatialement pour la frame courante et
   la sentinelle SHALL rester éligible au raffinement dyadique ordinaire
 
+#### Scenario: Mantisse quadratique profonde non nulle
+
+- **WHEN** au moins une composante finie de la mantisse normalisée de `z″` est
+  non nulle mais que sa norme au carré sous-déborde en `f32`
+- **THEN** le payload SHALL rester éligible au gate Taylor et SHALL NOT être
+  confondu avec une mantisse réellement nulle
+
+#### Scenario: Exposant de `z″` hors de l'échelle de `z′²`
+
+- **WHEN** `z″` reste fini mais que sa représentation normalisée relativement à
+  `2·log|z′|` sortirait de la plage utile `f32`
+- **THEN** le calcul SHALL conserver `z″` avec une échelle indépendante et le
+  payload échappé SHALL encoder sa magnitude en espace logarithmique, sans
+  saturer ni invalider la continuation Taylor
+
+#### Scenario: Reprise d'un pixel non terminé
+
+- **WHEN** un pixel Auto épuise son budget de frame avant son verdict
+- **THEN** sa mantisse complexe `z″` et son échelle indépendante SHALL être
+  stockées dans les couches brutes de continuation puis relues sans les
+  rattacher à l'échelle de `z′`
+
+#### Scenario: Saut sans dérivée seconde disponible
+
+- **WHEN** un accélérateur propage `z′` mais n'expose pas la dérivée seconde
+  de son application de saut
+- **THEN** le pixel SHALL conserver son calcul principal mais son état Taylor
+  SHALL être marqué invalide à travers les reprises et SHALL NOT produire de
+  certificat à l'échappement
+
 #### Scenario: Prédiction changeant de branche d'itération
 
 - **WHEN** la continuation à l'itération d'échappement de l'ancre produit
@@ -78,3 +108,16 @@ texture de palette SHALL NOT être utilisée comme seuil visuel.
 - **WHEN** une palette contient une transition dure
 - **THEN** le resolve SHALL afficher la conséquence de l'approximation sans
   prétendre qu'elle est invisible
+
+### Requirement: Unité cohérente de la portée diagnostique
+
+La vue Portée SHALL convertir le rayon complexe avec le même pas par texel que
+le resolve Taylor, soit `2·neutralExtent/neutralSize` fois l'échelle de vue.
+Elle SHALL NOT omettre `neutralExtent` lorsque la texture brute est la texture
+neutre carrée.
+
+#### Scenario: Canevas non carré
+
+- **WHEN** le rapport largeur/hauteur diffère de 1
+- **THEN** une portée affichée de `r` pixels SHALL correspondre au même offset
+  complexe de `r` texels que celui testé par `try_taylor_candidate`

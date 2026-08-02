@@ -156,8 +156,10 @@ implemented Taylor value path is structurally usable.
   toggle for A/B comparison.
 - `lean-proofs/`: untouched.
 - No change to the raw texture layout, no worker protocol change and no extra
-  per-pixel GPU allocation. The resolved step channel carries the coverage
-  marker.
+  per-pixel GPU allocation. The five existing Taylor layers gain a state-aware
+  logical encoding: an independent `z″` scale while iteration is in progress,
+  then `ln|z″| + arg(z″)` after escape. The resolved step channel carries the
+  coverage marker.
 
 ## Non-goals
 

@@ -469,7 +469,10 @@ mod tests {
                 seed_period,
                 0.5,
                 8,
-                3,
+                // Worst-cell-first refinement makes depth cheap and decisive: the
+                // §4 defect only reaches the true pointwise value when the
+                // allowance is spent on the cell that sets it.
+                12,
             );
 
             if let Some((period, ncx, ncy)) = &nucleus {
@@ -502,19 +505,115 @@ mod tests {
             }
             // The ported row reuses the same trapping test on the same pixels;
             // only the certified band differs, which is the whole comparison.
-            if let (Some(renorm), Some((period, ncx, ncy))) = (renorm, &nucleus) {
-                let orbit = tiled_nucleus_orbit(ncx, ncy, *period, digits, 1024.max(4 * period));
-                let band_log2 = renorm.band_c.log2();
-                let outcome = periodic_build_diagnostic(&orbit, EPS, band_log2);
+            if let (Some(renorm), Some((period, _ncx, _ncy))) = (renorm, &nucleus) {
+                // No `block` for this row on purpose. The ported band is WIDER than
+                // anything the scalar builder can certify, so handing it to
+                // `periodic_build_diagnostic` only makes it print `rejected` — the
+                // shader-side verdict for this band has to come from the ported
+                // certificate, not from the scalar block. `cov%` below is computed
+                // analytically from the band, so it stays meaningful.
                 rows.push(Row {
                     label: "nucleus+Λ",
-                    block: outcome.block.clone(),
-                    status: outcome.status,
-                    band_log2: Some(band_log2),
-                    orbit: Some(orbit),
+                    block: None,
+                    status: PeriodicBuildStatus::Active,
+                    band_log2: Some(renorm.band_c.log2()),
+                    orbit: None,
                     anchor_c: nucleus_f64,
-                    detected_p: outcome.detected_period,
+                    detected_p: *period,
                 });
+                // The geometry change: tile ĉ instead of measuring a radius, so
+                // the certified set can take the cardioid's shape. Compared on
+                // AREA, which is what a radius cannot express.
+                let card = crate::feigenbaum::propose_cardioid_window(
+                    nucleus_f64.0,
+                    nucleus_f64.1,
+                    seed_period,
+                    0.5,
+                    24,
+                    96,
+                    5,
+                    renorm.delta_hat,
+                );
+                if card.failure.is_none() {
+                    // MEASURE the coverage instead of scaling the disk's number by
+                    // the area ratio: map each frame cell into ĉ and test membership
+                    // in the accepted tiling. `escaping_captured` is the soundness
+                    // readout — the tiling must never claim a pixel that escapes.
+                    let (lre, lim) = card.lambda;
+                    let lnorm = lre * lre + lim * lim;
+                    let to_c_hat = |pc: (f64, f64)| -> (f64, f64) {
+                        let (dre, dim) = (pc.0 - nucleus_f64.0, pc.1 - nucleus_f64.1);
+                        // (dre + i·dim) / (lre + i·lim)
+                        (
+                            (dre * lre + dim * lim) / lnorm,
+                            (dim * lre - dre * lim) / lnorm,
+                        )
+                    };
+                    let inside = |ch: (f64, f64)| -> bool {
+                        card.cells.iter().any(|cell| {
+                            (ch.0 - cell.center.0).abs() <= cell.half_width
+                                && (ch.1 - cell.center.1).abs() <= cell.half_height
+                        })
+                    };
+                    let mut captured = 0usize;
+                    for &pc in &budget_cells {
+                        if inside(to_c_hat(pc)) {
+                            captured += 1;
+                        }
+                    }
+                    let mut escaping_captured = 0usize;
+                    for gy in 0..G {
+                        for gx in 0..G {
+                            let tx = (gx as f64 + 0.5) / G as f64 * 2.0 - 1.0;
+                            let ty = (gy as f64 + 0.5) / G as f64 * 2.0 - 1.0;
+                            let pc = (cx + tx * sigma, cy + ty * sigma);
+                            if inside(to_c_hat(pc)) && !burns_budget(pc.0, pc.1, budget) {
+                                escaping_captured += 1;
+                            }
+                        }
+                    }
+                    let cov = if budget_cells.is_empty() {
+                        f64::NAN
+                    } else {
+                        100.0 * captured as f64 / budget_cells.len() as f64
+                    };
+                    println!(
+                        " cardCov  | {:<14} {:>6.0e} | p={:<3} | captured {:>5}/{:<5} interior cells = {:>5.1}% | escaping captured {} (must be 0)",
+                        name,
+                        sigma,
+                        card.p,
+                        captured,
+                        budget_cells.len(),
+                        cov,
+                        escaping_captured,
+                    );
+                    assert_eq!(
+                        escaping_captured, 0,
+                        "[{}] cardioid tiling captured escaping pixels",
+                        name
+                    );
+                    println!(
+                        " cardioid | {:<14} {:>6.0e} | p={:<3} cells {:>5}/{:<5} | area {:>8.4} vs disk(band) {:>9.3e} → {:>7.1}× | vs inscribed {:>8.4} → {:>5.2}× | ĉ reach [{:>6.3}, {:>5.3}] | defect {:>8.2e}",
+                        name,
+                        sigma,
+                        card.p,
+                        card.cells.len(),
+                        card.cells_tested,
+                        card.accepted_area,
+                        std::f64::consts::PI * renorm.delta_hat * renorm.delta_hat,
+                        card.area_gain_over_band,
+                        card.inscribed_disk_area,
+                        card.accepted_area / card.inscribed_disk_area,
+                        card.reach_negative,
+                        card.reach_positive,
+                        card.defect,
+                    );
+                } else {
+                    println!(
+                        " cardioid | {:<14} {:>6.0e} | refused: {:?}",
+                        name, sigma, card.failure
+                    );
+                }
                 println!(
                     " renorm   | {:<14} {:>6.0e} | p={:<3} |a|={:>9.3e} |Λ|={:>8.2e} | ε₀={:>8.2e} K_ĉ={:>7.2} | δ̂=band/Λ={:>7.4} | band {:>9.3e} vs scalar {:>9.3e} → {:>6.2}×",
                     name,
