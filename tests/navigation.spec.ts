@@ -373,15 +373,17 @@ test.describe("Mandelbrot navigation", () => {
     const paramsBeforeReload = await getStoredParams(page);
     expect(paramsBeforeReload).not.toBeNull();
     const scaleBeforeReload = paramsBeforeReload?.scale as string;
-    expect(paramsBeforeReload?.zoomMinBrushStep).toBe(1);
-    expect(paramsBeforeReload?.sentinelSeedStep).toBe(64);
 
+    // Legacy progressive-render keys may still exist in an older browser
+    // profile. Loading must ignore and subsequently stop persisting them.
     await page.evaluate((key) => {
       const raw = localStorage.getItem(key);
       if (!raw) return;
       const params = JSON.parse(raw) as Record<string, unknown>;
       params.zoomMinBrushStep = 8;
       params.sentinelSeedStep = 512;
+      params.taylorSuperpixelEnabled = true;
+      params.gpuLoadMultiplier = 4;
       localStorage.setItem(key, JSON.stringify(params));
     }, LS_KEY);
 
@@ -392,8 +394,10 @@ test.describe("Mandelbrot navigation", () => {
 
     const paramsAfterReload = await getStoredParams(page);
     expect(paramsAfterReload?.scale).toBe(scaleBeforeReload);
-    expect(paramsAfterReload?.zoomMinBrushStep).toBe(8);
-    expect(paramsAfterReload?.sentinelSeedStep).toBe(512);
+    expect(paramsAfterReload).not.toHaveProperty('zoomMinBrushStep');
+    expect(paramsAfterReload).not.toHaveProperty('sentinelSeedStep');
+    expect(paramsAfterReload).not.toHaveProperty('taylorSuperpixelEnabled');
+    expect(paramsAfterReload).not.toHaveProperty('gpuLoadMultiplier');
   });
 
   // -----------------------------------------------------------------------

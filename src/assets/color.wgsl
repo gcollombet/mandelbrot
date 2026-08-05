@@ -1,8 +1,5 @@
-// Working precision for the bounded shading math (lighting lobes, AO, edge
-// shading math). Default f32; the engine swaps this to f16 (and prepends
-// `enable f16;`) when the device supports shader-f16, doubling ALU throughput
-// on mobile. Only values in a safe [~1e-3, ~1e3] range use hcol — iteration
-// counts, distance estimates and palette phase stay f32.
+// All color arithmetic uses one f32 path. The alias keeps the bounded shading
+// expressions readable without creating a second shader variant.
 alias hcol = f32;
 
 struct Uniforms {
@@ -71,11 +68,11 @@ struct Uniforms {
   aaJitterLogMag: f32,   // ln|δc| in c units (exponent-summed with the payload's S)
   aaAnalytic: f32,       // 1 = analytic AA expansion enabled (auto mode, raw payload bound)
   gradeSaturation: f32,  // display-grade saturation (1.0 = neutral)
-  reachDebug: f32,       // 1 = super-pixel reach heatmap (debug view 6)
+  reachDebug: f32,       // 1 = analytic-AA reach heatmap (debug view 6)
   lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)
   reachReady: f32,       // 0 = user in Exact, 1 = Auto but table not ready, 2 = unified live
-  coverageDebug: f32,    // 1 = exact/Taylor/bilinear/no-data origin map (debug view 7)
-  rejectionDebug: f32,   // 1 = structural Taylor rejection map (debug view 8)
+  _pad68: f32,
+  _pad69: f32,
   _pad70: f32,
   _pad71: f32,
 };
@@ -961,63 +958,6 @@ fn load_pixel_sample(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> Pixe
   return pixelSample;
 }
 
-fn coverage_debug_color(step: f32) -> vec4<f32> {
-  if (!(step > 0.0)) {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);       // no resolved data
-  }
-  if (abs(fract(step) - 0.5) < 0.125) {
-    return vec4<f32>(1.0, 0.2, 0.85, 1.0);      // terminal Taylor value
-  }
-  if (step <= 1.125) {
-    return vec4<f32>(0.235, 1.0, 0.235, 1.0);   // computed pixel
-  }
-  return vec4<f32>(0.95, 0.5, 0.1, 1.0);       // temporary bilinear fill
-}
-
-const TAYLOR_REJECTION_STRIDE: f32 = 50.26548245743669;
-
-fn taylor_rejection_reason(encodedAngle: f32) -> u32 {
-  // The genuine derivative angle is in [-pi, pi]. Each tag is eight complete
-  // turns away, so rounding remains robust without perturbing periodic uses.
-  let code = i32(round(encodedAngle / TAYLOR_REJECTION_STRIDE));
-  if (code < 1 || code > 6) {
-    return 0u;
-  }
-  return u32(code);
-}
-
-fn taylor_rejection_debug_color(step: f32, encodedAngle: f32) -> vec4<f32> {
-  if (!(step > 0.0)) {
-    return vec4<f32>(0.0, 0.0, 0.0, 1.0);       // no resolved data
-  }
-  if (abs(fract(step) - 0.5) < 0.125) {
-    return vec4<f32>(1.0, 0.2, 0.85, 1.0);      // accepted Taylor value
-  }
-  if (step <= 1.125) {
-    return vec4<f32>(0.235, 1.0, 0.235, 1.0);   // computed pixel
-  }
-
-  let reason = taylor_rejection_reason(encodedAngle);
-  if (reason == 1u) { return vec4<f32>(0.15, 0.35, 1.0, 1.0); } // unusable payload
-  if (reason == 2u) { return vec4<f32>(1.0, 0.18, 0.08, 1.0); } // radius gate
-  if (reason == 3u) { return vec4<f32>(0.0, 0.85, 1.0, 1.0); }  // branch change
-  if (reason == 4u) { return vec4<f32>(1.0, 0.85, 0.1, 1.0); }  // sparse fine cell
-  if (reason == 5u) { return vec4<f32>(0.55, 0.2, 0.75, 1.0); } // inside dominant
-  if (reason == 6u) { return vec4<f32>(0.55, 0.55, 0.55, 1.0); }// no escaped anchor
-  return vec4<f32>(0.95, 0.5, 0.1, 1.0);       // untagged bilinear / Taylor off
-}
-
-fn resolved_debug_color(
-  sourceTex: texture_2d_array<f32>,
-  coord: vec2<i32>,
-  step: f32,
-) -> vec4<f32> {
-  if (parameters.rejectionDebug > 0.5) {
-    return taylor_rejection_debug_color(step, textureLoad(sourceTex, coord, 5, 0).r);
-  }
-  return coverage_debug_color(step);
-}
-
 fn load_pixel_extras(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelExtras {
   var extras: PixelExtras;
   extras.der_x = textureLoad(sourceTex, coord, 4, 0).r;
@@ -1291,7 +1231,7 @@ fn colorize_pixel(
   var z_sq = dot(z, z);
   var mu_val = smooth_escape_fraction(z_sq);
 
-  // Debug view 6 — super-pixel reach. How far, IN PIXELS, this pixel's own
+  // Debug view 6 — analytic-AA reach. How far, IN PIXELS, this pixel's own
   // Taylor payload ẑ(δc) = z + z′·δc + ½·z″·δc² stays inside tolerance; i.e.
   // how many neighbours one computed pixel could serve without iterating.
   //
@@ -1844,29 +1784,6 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   let scaleRatio = select(1.0, zf / lzf, lzf > 0.0);
   let effectiveFrozenStep = frozenCompositeStep * scaleRatio;
 
-  // Debug views 7-8 classify metadata stored by the resolved pipeline itself.
-  // Screen-space bilinear magnification is deliberately ignored: it is only a
-  // display filter, not a third producer of progressive pixel values.
-  if (parameters.coverageDebug > 0.5 || parameters.rejectionDebug > 0.5) {
-    let liveCoverage = liveStep > 0.0;
-    let frozenCoverage = useFrozen && frozenStep > 0.0;
-    if (liveCoverage && frozenCoverage) {
-      let effectiveFrozenCoverageStep = frozenStep * scaleRatio;
-      return select(
-        resolved_debug_color(texFrozen, frozenCoord, frozenStep),
-        resolved_debug_color(tex, liveCoord, liveStep),
-        liveStep <= effectiveFrozenCoverageStep,
-      );
-    }
-    if (liveCoverage) {
-      return resolved_debug_color(tex, liveCoord, liveStep);
-    }
-    if (frozenCoverage) {
-      return resolved_debug_color(texFrozen, frozenCoord, frozenStep);
-    }
-    return coverage_debug_color(0.0);
-  }
-
   if (liveHasData && frozenHasData) {
     // Both have data — pick the one with finer resolution (smaller step).
     if (liveCompositeStep <= effectiveFrozenStep) {
@@ -1986,8 +1903,5 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 @fragment
 fn fs_main_direct(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
   let c = shade_srgb(fragCoord, false);
-  if (parameters.coverageDebug > 0.5 || parameters.rejectionDebug > 0.5) {
-    return c;
-  }
   return vec4<f32>(clamp(c.rgb + vec3<f32>(dither_8bit(pos.xy)), vec3<f32>(0.0), vec3<f32>(1.0)), c.a);
 }

@@ -7,7 +7,6 @@ import PerformancePanel from './PerformancePanel.vue';
 import { DenseTopbar, DenseTip, useDenseView, denseAttrs } from './dense';
 import type {ApproximationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
-  normalizePowerOfTwoStep,
   preserveSessionPerformanceFields,
   stripExplorationStateFields,
   stripSessionPerformanceFields,
@@ -369,10 +368,6 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   dprMultiplier: 1.0,
   maxIterationMultiplier: 0.1,
   targetFps: 30,
-  gpuLoadMultiplier: 1.0,
-  zoomMinBrushStep: 1,
-  sentinelSeedStep: 64,
-  taylorSuperpixelEnabled: false,
   interpolationMode: 'lab',
   animation: normalizeAnimationConfig(null, 1.0),
   animationSpeed: 1.0,
@@ -402,15 +397,17 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   params.animation = normalizeAnimationConfig(params.animation, params.animationSpeed);
   params.textureMapping = normalizeTextureMappingFromLegacy(params);
   stripExplorationStateFields(params);
-  params.zoomMinBrushStep = normalizePowerOfTwoStep(params.zoomMinBrushStep, 1, 1, 64);
-  params.sentinelSeedStep = Math.max(
-    normalizePowerOfTwoStep(params.sentinelSeedStep, 64, 1, 4096),
-    params.zoomMinBrushStep,
-  );
-  const legacyTaylorFreeze = (params as unknown as Record<string, unknown>).taylorFreezeEnabled === true;
-  params.taylorSuperpixelEnabled = params.taylorSuperpixelEnabled === true || legacyTaylorFreeze;
-  delete (params as unknown as Record<string, unknown>).taylorFreezeEnabled;
-  delete (params as unknown as Record<string, unknown>).taylorFreezeStep;
+  const stored = params as unknown as Record<string, unknown>;
+  for (const obsoleteKey of [
+    'gpuLoadMultiplier',
+    'zoomMinBrushStep',
+    'sentinelSeedStep',
+    'taylorSuperpixelEnabled',
+    'taylorFreezeEnabled',
+    'taylorFreezeStep',
+  ]) {
+    delete stored[obsoleteKey];
+  }
   return params;
 }
 
@@ -1680,10 +1677,6 @@ function startTravelToPreset(preset: PresetRecord) {
       :dprMultiplier="mandelbrotParams.dprMultiplier"
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
       :targetFps="mandelbrotParams.targetFps"
-      :gpuLoadMultiplier="mandelbrotParams.gpuLoadMultiplier"
-      :zoomMinBrushStep="mandelbrotParams.zoomMinBrushStep"
-      :sentinelSeedStep="mandelbrotParams.sentinelSeedStep"
-      :taylorSuperpixelEnabled="mandelbrotParams.taylorSuperpixelEnabled"
       :interpolationMode="mandelbrotParams.interpolationMode"
       :tessellationLevel="mandelbrotParams.tessellationLevel"
       :displacementAmount="mandelbrotParams.displacementAmount"

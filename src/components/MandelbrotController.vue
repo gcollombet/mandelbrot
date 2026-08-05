@@ -32,10 +32,6 @@ const props = defineProps<{
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
   targetFps?: number,
-  gpuLoadMultiplier?: number,
-  zoomMinBrushStep?: number,
-  sentinelSeedStep?: number,
-  taylorSuperpixelEnabled?: boolean,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   pickerMode?: boolean,
   uiHidden?: boolean,
@@ -431,10 +427,6 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :dprMultiplier="props.dprMultiplier"
       :maxIterationMultiplier="props.maxIterationMultiplier"
       :targetFps="props.targetFps"
-      :gpuLoadMultiplier="props.gpuLoadMultiplier"
-      :zoomMinBrushStep="props.zoomMinBrushStep"
-      :sentinelSeedStep="props.sentinelSeedStep"
-      :taylorSuperpixelEnabled="props.taylorSuperpixelEnabled"
       :interpolationMode="props.interpolationMode"
       :tessellationLevel="props.tessellationLevel"
       :displacementAmount="props.displacementAmount"

@@ -1,28 +1,17 @@
 import {describe, expect, it} from 'vitest';
 import {
-  normalizePowerOfTwoStep,
   preserveSessionPerformanceFields,
   stripExplorationStateFields,
   stripSessionPerformanceFields,
 } from '../../src/Mandelbrot';
 
 describe('performance settings helpers', () => {
-  it('normalizes step values to the supported power-of-two bounds', () => {
-    expect(normalizePowerOfTwoStep(undefined, 64, 1, 4096)).toBe(64);
-    expect(normalizePowerOfTwoStep(3, 1, 1, 64)).toBe(2);
-    expect(normalizePowerOfTwoStep(128, 1, 1, 64)).toBe(64);
-  });
-
   it('preserves session-scoped performance fields when applying a preset', () => {
     const current = {
       dprMultiplier: 1.5,
       maxIterationMultiplier: 0.2,
       antialiasLevel: 4,
       targetFps: 30,
-      gpuLoadMultiplier: 2,
-      zoomMinBrushStep: 8,
-      sentinelSeedStep: 512,
-      taylorSuperpixelEnabled: true,
     } as const;
 
     const merged = preserveSessionPerformanceFields(
@@ -40,10 +29,6 @@ describe('performance settings helpers', () => {
       maxIterationMultiplier: 0.2,
       antialiasLevel: 4,
       targetFps: 30,
-      gpuLoadMultiplier: 2,
-      zoomMinBrushStep: 8,
-      sentinelSeedStep: 512,
-      taylorSuperpixelEnabled: true,
     }));
   });
 
@@ -54,10 +39,6 @@ describe('performance settings helpers', () => {
       maxIterationMultiplier: 0.2,
       antialiasLevel: 4,
       targetFps: 30,
-      gpuLoadMultiplier: 2,
-      zoomMinBrushStep: 8,
-      sentinelSeedStep: 512,
-      taylorSuperpixelEnabled: true,
     } as Record<string, unknown>;
 
     const stripped = stripSessionPerformanceFields(payload);
@@ -82,10 +63,6 @@ describe('performance settings helpers', () => {
       maxIterationMultiplier: 0.2,
       antialiasLevel: 4,
       targetFps: 30,
-      gpuLoadMultiplier: 2,
-      zoomMinBrushStep: 8,
-      sentinelSeedStep: 512,
-      taylorSuperpixelEnabled: true,
       showPresetPins: true,
     } as const;
 
@@ -99,15 +76,15 @@ describe('performance settings helpers', () => {
     expect(current.showPresetPins).toBe(true);
   });
 
-  it('keeps sentinel seed step at least as large as the zoom brush step', () => {
-    const zoomMinBrushStep = 16;
-    const sentinelSeedStep = 8;
+  it('strips obsolete progressive-render settings from stored payloads', () => {
+    const payload = {
+      scale: '1.0',
+      gpuLoadMultiplier: 2,
+      zoomMinBrushStep: 8,
+      sentinelSeedStep: 512,
+      taylorSuperpixelEnabled: true,
+    } as Record<string, unknown>;
 
-    const adjusted = Math.max(
-      normalizePowerOfTwoStep(sentinelSeedStep, 64, 1, 4096),
-      zoomMinBrushStep,
-    );
-
-    expect(adjusted).toBe(16);
+    expect(stripSessionPerformanceFields(payload)).toEqual({scale: '1.0'});
   });
 });

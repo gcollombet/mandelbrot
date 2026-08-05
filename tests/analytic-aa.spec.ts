@@ -85,7 +85,7 @@ async function runAaAccumulation(page: Page, analytic: boolean, timeout = 150_00
       return {
         ...engine.aaProgress,
         unfinished: engine.unfinishedPixelCount,
-        activePx: engine.activePixelCount,
+        remainingPx: engine.unfinishedPixelCount,
         needRender: engine.needRender,
         clearPending: engine.clearHistoryNextFrame,
         sampleIndex: engine.aaSampleIndex,

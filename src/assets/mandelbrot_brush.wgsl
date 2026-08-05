@@ -1,20 +1,19 @@
 // Fused brush + mandelbrot + count compute pass, working IN PLACE on the
 // neutral texture A (rawTexture) via a read_write storage texture — the
 // SINGLE production iteration path. Pan/clear frames are prepared by the
-// reproject_cs utility pass (ping-pong A→B + copy back) in the same frame.
+// reproject_cs utility pass (ping-pong A→B) in the same frame.
 //
 // ⚠ STRICTLY RAW-TEXEL-LOCAL: each invocation may only read and write ITS OWN
-// raw texel, otherwise in-place execution races. Reads from the immutable
-// previous resolved texture may use the reprojection source coordinate.
-// Neighbour-dependent raw operations still belong in reproject_cs.wgsl.
+// raw texel, otherwise in-place execution races. Neighbour-dependent raw
+// operations still belong in reproject_cs.wgsl.
 //
 // r32float is the only texture format supporting read_write storage access
 // in core WebGPU — this shader depends on it.
 //
 // Layer layout (13-layer raw format — display-side textures stay at 8; the
 // resolve/color passes never read in-progress derivative layers):
-//   0 : sentinel / iteration count (integer part)
-//   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied)
+//   0 : exact request (-1) / iteration count
+//   1 : resolution step (1.0 for computed raw pixels)
 //   2 : z.x (escaped) or dz.x (continuation)
 //   3 : z.y (escaped) or dz.y (continuation)
 //   4 : escaped: distance height,          in-progress: derM.x (RAW)
@@ -30,11 +29,10 @@
 // for the escaped format).
 //
 // Pixel state (iter-only):
-//   iter == -1                  : sentinel, needs computation
+//   iter == -1                  : exact step-1 request
 //   iter == 0                   : confirmed inside the set
 //   iter > 0  AND  |z|² >= mu   : escaped
 //   iter > 0  AND  |z|² < mu    : budget exhausted → continuation
-//   iter < 0  AND  iter != -1   : resolution sentinel (refined here)
 
 struct MandelbrotStep {
   zx: f32,
@@ -141,22 +139,13 @@ struct BlaLevel {
   maxRadius: f32,
 };
 
-// Same layout as reproject.wgsl — the CPU-side uniform buffer is shared.
-// shiftTexX/shiftTexY align previous resolved Taylor markers with the source
-// coordinate gathered by reproject_cs on integer translation frames.
+// Same layout as reproject_cs.wgsl — the CPU-side uniform buffer is shared.
 struct BrushUniforms {
   aspect: f32,
   angle: f32,
   clearHistory: f32,
-  seedStep: f32,
-  baseSentinel: f32,
   shiftTexX: f32,
   shiftTexY: f32,
-  mu: f32,
-  gridOffsetX: f32,
-  gridOffsetY: f32,
-  minBrushStep: f32,    // minimum sentinel refinement step (0 = no limit)
-  allowRefinement: f32, // 1.0 = refine sentinels normally, 0.0 = freeze grid
   // Origin of the dispatched region, in texels, workgroup-aligned. The neutral
   // texture is the square circumscribing the rotated viewport, so at low
   // rotation angles more than half its texels can never satisfy
@@ -167,14 +156,12 @@ struct BrushUniforms {
   // view simply moves the box and keeps every previously computed texel.
   dispatchOriginX: f32,
   dispatchOriginY: f32,
-  // 1 = read terminal Taylor coverage from the previous resolved frame.
-  // Disabled on clear frames; translation reads are reindexed below.
-  taylorCoverageEnabled: f32,
+  _padding: f32,
 };
 
 struct CounterBuffer {
   count: atomic<u32>,
-  active_count: atomic<u32>,
+  _padding: u32,
 };
 
 // Per-dispatch work instrumentation (in-place path only). realMean/covMean are
@@ -302,7 +289,6 @@ struct JetLevel {
 @group(0) @binding(8) var<storage, read> mandelbrotJetSuite: array<JetCoeff>;
 @group(0) @binding(9) var<storage, read> mandelbrotJetLevels: array<JetLevel>;
 @group(0) @binding(10) var<storage, read> mandelbrotJetRadii: array<JetRadii>;
-@group(0) @binding(11) var previousResolved: texture_2d_array<f32>;
 
 const VALIDITY_VERSION: u32 = 1u;
 const VALIDITY_WORDS_PER_BLOCK: u32 = 24u;
@@ -1268,33 +1254,6 @@ fn storeTexel(coord: vec2<i32>, out: TexelOut) {
   textureStore(raw, coord, 10, out.aa10);
   textureStore(raw, coord, 11, out.aa11);
   textureStore(raw, coord, 12, out.aa12);
-}
-
-// Spatial fills use integer steps. Taylor terminal coverage uses step + 0.5.
-// The marker lives only in resolved state: raw remains a sentinel, so a real
-// compute request can always take priority. On translation frames, raw state
-// was gathered from coord_out - round(shiftTex), so coverage must use the same
-// previous-frame coordinate.
-fn has_taylor_coverage(coord_out: vec2<i32>) -> bool {
-  if (brush.taylorCoverageEnabled < 0.5) {
-    return false;
-  }
-
-  let shift = vec2<i32>(
-    i32(round(brush.shiftTexX)),
-    i32(round(brush.shiftTexY)),
-  );
-  let coverageCoord = coord_out - shift;
-  let dims = vec2<i32>(textureDimensions(previousResolved));
-  if (
-    coverageCoord.x < 0 || coverageCoord.y < 0
-    || coverageCoord.x >= dims.x || coverageCoord.y >= dims.y
-  ) {
-    return false;
-  }
-
-  let resolvedStep = textureLoad(previousResolved, coverageCoord, 1, 0).r;
-  return resolvedStep > 1.0 && abs(fract(resolvedStep) - 0.5) < 0.125;
 }
 
 const ORBIT_METRIC_EMA_ALPHA: f32 = 0.18;
@@ -3486,49 +3445,12 @@ fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
   return inside_x && inside_y;
 }
 
-fn refine_sentinel(s: f32, coord_out: vec2<i32>) -> f32 {
-  let si = i32(round(s));
-  if (si >= 0) {
-    return s;
-  }
-  if (si == -1) {
-    return -1.0;
-  }
-
-  let step = -si;
-  if (step <= 1) {
-    return -1.0;
-  }
-
-  if (has_taylor_coverage(coord_out)) {
-    return s;
-  }
-
-  if (brush.allowRefinement < 0.5) {
-    return s;
-  }
-
-  let minStep = i32(brush.minBrushStep);
-  let next_step = max(max(1, minStep), step / 2);
-
-  if (next_step >= step) {
-    return s;
-  }
-
-  let gx = i32(brush.gridOffsetX);
-  let gy = i32(brush.gridOffsetY);
-  let is_anchor = (((coord_out.x - gx) % next_step + next_step) % next_step == 0)
-               && (((coord_out.y - gy) % next_step + next_step) % next_step == 0);
-  return select(-f32(next_step), -1.0, is_anchor);
-}
-
 // ── fused compute entry ─────────────────────────────────────────────
 // Workgroup-local partial counters (pattern from count_unfinished.wgsl):
-// each 16×16 workgroup reduces locally and issues at most two global
-// atomicAdds.  Barriers stay in uniform control flow — the per-texel work
+// each 8×8 workgroup reduces locally and issues at most one global atomicAdd.
+// Barriers stay in uniform control flow — the per-texel work
 // is wrapped in ifs, never early-returned.
 var<workgroup> wgCount: atomic<u32>;
-var<workgroup> wgActive: atomic<u32>;
 // Work-instrumentation partials (reduced once per workgroup, like the counters).
 var<workgroup> wgRealSum: atomic<u32>;  // Σ real loop steps over this workgroup's texels
 var<workgroup> wgRealMax: atomic<u32>;  // max real loop steps among them (straggler)
@@ -3560,7 +3482,6 @@ fn cs_main(
   );
   if (lidx == 0u) {
     atomicStore(&wgCount, 0u);
-    atomicStore(&wgActive, 0u);
     if (ENABLE_WORK_STATS) {
       atomicStore(&wgRealSum, 0u);
       atomicStore(&wgRealMax, 0u);
@@ -3593,7 +3514,6 @@ fn cs_main(
 
   // Post-iteration classification of this texel (for the fused counter).
   var needs = false;
-  var isActive = false;
 
   let dims = textureDimensions(raw);
   if (gid.x < dims.x && gid.y < dims.y) {
@@ -3608,15 +3528,8 @@ fn cs_main(
     if (is_inside_rotated_screen(xy_neutral)) {
       let coord = vec2<i32>(i32(gid.x), i32(gid.y));
 
-      // ── brush stage: sentinel refinement (texel-local) ─────────────
+      // A negative value is always the single exact step-1 request.
       var iter_val = loadLayer(coord, 0);
-      if (iter_val < 0.0) {
-        let refined = refine_sentinel(iter_val, coord);
-        if (refined != iter_val) {
-          textureStore(raw, coord, 0, pack(refined));
-        }
-        iter_val = refined;
-      }
 
       // ── mandelbrot stage: iterate active texels only ───────────────
       // Layer 2/3 values of the post-iteration state, for the counter's
@@ -3829,10 +3742,7 @@ fn cs_main(
 
       // ── count stage (same classification as count_unfinished.wgsl) ──
       if (iter_val < 0.0) {
-        // A covered sentinel is final for this render: it stays negative in raw
-        // but neither refines nor keeps the render loop alive.
-        needs = !has_taylor_coverage(coord);
-        isActive = iter_val == -1.0;
+        needs = true;
       } else if (iter_val > 0.0) {
         if (!zLoaded) {
           zx = loadLayer(coord, 2);
@@ -3840,7 +3750,6 @@ fn cs_main(
         }
         let needs_continuation = (zx * zx + zy * zy) < mandelbrot.mu;
         needs = needs_continuation;
-        isActive = needs_continuation;
       }
     }
   }
@@ -3848,19 +3757,12 @@ fn cs_main(
   if (needs) {
     atomicAdd(&wgCount, 1u);
   }
-  if (isActive) {
-    atomicAdd(&wgActive, 1u);
-  }
   workgroupBarrier();
 
   if (lidx == 0u) {
     let c = atomicLoad(&wgCount);
-    let a = atomicLoad(&wgActive);
     if (c > 0u) {
       atomicAdd(&counter.count, c);
-    }
-    if (a > 0u) {
-      atomicAdd(&counter.active_count, a);
     }
     // Work-instrumentation reduction. Downscale the per-workgroup sums by 64
     // (via >>6, rounded) so the global u32 accumulators can't overflow; the

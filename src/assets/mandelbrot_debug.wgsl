@@ -16,7 +16,7 @@
 //   5 "tier"    — flat swatch: which tier covered the most iterations on this
 //                 pixel (exact / affine·Padé / Möbius c+ / jet), most useful
 //                 in unified (Auto) mode to see which algorithm was picked.
-// View 6 ("reach", the super-pixel Taylor radius) deliberately does NOT live
+// View 6 (analytic-AA reach from z′/z″) deliberately does NOT live
 // here: this pipeline recomputes every pixel in its own loop, so it is both
 // slow and free to disagree with what the progressive renderer actually put on
 // screen. The reach only needs z, z′ and z″ at escape, which the production

@@ -1,20 +1,12 @@
 // Utility compute pass (all-compute-der-cartesian): ping-pong A→B port of the
 // fragment brush (reproject.wgsl). Runs only on pan / clear frames; every
 // texel writes ALL layers of B (full rewrite is this pass's job), then the
-// engine copies B→A and the same frame's in-place dispatch continues
-// iteration. Reading A while writing B makes the neighbour gather race-free.
-//
-// Deliberate difference from the fragment brush: NO sentinel refinement here.
-// The fused in-place shader (mandelbrot_brush.wgsl cs_main) refines sentinels
-// on every dispatch — including the one that follows this pass in the same
-// frame — so refining here too would halve the sentinel step twice per pan
-// frame (the 4× pixel-spike the allowRefinement gate exists to prevent).
-// The fragment flow had the same one-refinement-per-frame budget, just
-// distributed differently (brush refined, the iterate pass did not).
+// engine swaps A/B and the same frame's in-place dispatch continues iteration
+// on the new front texture. Reading A while writing B makes the gather race-free.
 //
 // Layer layout (r32float array, layer count read from the destination so the
-// same shader serves the 8-layer and 9-layer formats):
-//   0 : sentinel / iteration count (integer part)
+// same shader serves every raw continuation layer):
+//   0 : exact request (-1) / iteration count
 //   1 : resolution step (1.0 = genuine pixel, >= 2 = resolve-copied, 0.0 = no data)
 //   2 : z.x
 //   3 : z.y
@@ -24,24 +16,19 @@
 //   7 : packed average orbit direction
 //   8+: continuation extras (Cartesian derS) — copied like any other layer
 //
-// Sentinels in layer 0 are negative integers (-1 = compute, -2/-4/... =
-// resolve with that step). Budget-exhausted pixels (iter > 0, |z|² < 4) pass
-// through unchanged — continuation is the iteration shader's job, verbatim
-// from the fragment brush.
+// There is a single unfinished representation: -1 asks for an exact texel.
+// Budget-exhausted pixels (iter > 0, |z|² < mu) pass through unchanged;
+// continuation is the fused iteration shader's job.
 
 struct BrushUniforms {
   aspect: f32,
   angle: f32,
   clearHistory: f32,
-  seedStep: f32,
-  baseSentinel: f32,
   shiftTexX: f32,
   shiftTexY: f32,
-  mu: f32,
-  gridOffsetX: f32,
-  gridOffsetY: f32,
-  minBrushStep: f32,    // minimum sentinel refinement step (0 = no limit)
-  allowRefinement: f32, // 1.0 = refine sentinels normally, 0.0 = freeze grid (GPU under pressure)
+  dispatchOriginX: f32,
+  dispatchOriginY: f32,
+  _padding: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;
@@ -57,8 +44,8 @@ fn store_layer(coord: vec2<i32>, layer: i32, v: f32) {
 // the resolve pass leaves a sentinel corner after reading layer 0 alone. Only
 // layers 0 and 1 are ever observed in that state, so the remaining eleven
 // stores were pure write bandwidth — the dominant cost of a clear frame.
-fn store_cleared(coord: vec2<i32>, sentinel: f32) {
-  store_layer(coord, 0, sentinel);
+fn store_cleared(coord: vec2<i32>) {
+  store_layer(coord, 0, -1.0);
   store_layer(coord, 1, 0.0);
 }
 
@@ -99,7 +86,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let offset = vec2<f32>(coord_out) + vec2<f32>(0.5) - centre;
   let reach = centre.x + 2.0;
   if (dot(offset, offset) > reach * reach) {
-    store_cleared(coord_out, -uni.baseSentinel);
+    store_cleared(coord_out);
     return;
   }
 
@@ -107,10 +94,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   // Full reset when needed.
   if (uni.clearHistory >= 0.5) {
-    let step = i32(max(1.0, uni.seedStep));
-    let is_anchor = (coord_out.x % step == 0) && (coord_out.y % step == 0);
-    let sentinel = select(-uni.baseSentinel, -1.0, is_anchor);
-    store_cleared(coord_out, sentinel);
+    store_cleared(coord_out);
     return;
   }
 
@@ -120,7 +104,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let coord_in = coord_out - shift;
 
   if (coord_in.x < 0 || coord_in.y < 0 || coord_in.x >= dims.x || coord_in.y >= dims.y) {
-    store_cleared(coord_out, -uni.baseSentinel);
+    store_cleared(coord_out);
     return;
   }
 

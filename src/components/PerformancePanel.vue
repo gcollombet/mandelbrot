@@ -44,7 +44,6 @@ const stats = reactive({
   gpuSpanMs: 0,   // authoritative GPU frame time (max end − min begin)
   gpuSumMs: 0,    // Σ of measured passes (breakdown; may overlap/exceed span)
   unfinished: -1,
-  active: -1,
   totalPixels: 0,
   passes: [] as PassRow[],
 
@@ -464,8 +463,8 @@ function appsPerGpuMs(): number {
 }
 
 function opsPerFrame(): number {
-  if (stats.active < 0 || stats.batchSize <= 0) return -1;
-  return stats.active * stats.batchSize;
+  if (stats.unfinished < 0 || stats.batchSize <= 0) return -1;
+  return stats.unfinished * stats.batchSize;
 }
 
 interface Sample {
@@ -492,7 +491,6 @@ function readLive(e: any) {
   stats.gpuSpanMs = e.passGpuSpanMs ?? 0;
   stats.gpuSumMs = e.passGpuSumMs ?? 0;
   stats.unfinished = e.unfinishedPixelCount ?? -1;
-  stats.active = e.activePixelCount ?? -1;
   const ns = e.neutralSize ?? 0;
   stats.totalPixels = ns * ns;
   const meta: { key: string; label: string; help: string }[] = e.passMeta ?? [];
@@ -886,10 +884,6 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     <div class="perf-stat-row">
       <span class="perf-stat-label">Pixels restants</span>
       <span class="perf-stat-value">{{ formatPixelCount(stats.unfinished) }}</span>
-    </div>
-    <div class="perf-stat-row">
-      <span class="perf-stat-label">Pixels actifs</span>
-      <span class="perf-stat-value">{{ formatPixelCount(stats.active) }}</span>
     </div>
     <div class="perf-stat-row">
       <span class="perf-stat-label">Total pixels</span>

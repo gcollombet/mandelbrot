@@ -153,27 +153,6 @@ function canUploadTexture(texture: TextureMetadata): boolean {
   return !!texture.guid;
 }
 
-const zoomMinBrushStepOptions = [1, 2, 4, 8, 16, 32, 64];
-const sentinelSeedStepOptions = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
-const zoomMinBrushStepIndex = computed({
-  get: () => Math.max(0, zoomMinBrushStepOptions.indexOf(model.value.zoomMinBrushStep)),
-  set: (index: number) => {
-    const value = zoomMinBrushStepOptions[Math.min(Math.max(Math.round(index), 0), zoomMinBrushStepOptions.length - 1)] ?? 1;
-    model.value.zoomMinBrushStep = value;
-    if (model.value.sentinelSeedStep < value) {
-      model.value.sentinelSeedStep = sentinelSeedStepOptions.find(step => step >= value) ?? sentinelSeedStepOptions[sentinelSeedStepOptions.length - 1];
-    }
-  },
-});
-const sentinelSeedStepIndex = computed({
-  get: () => Math.max(0, sentinelSeedStepOptions.indexOf(model.value.sentinelSeedStep)),
-  set: (index: number) => {
-    const minAllowed = model.value.zoomMinBrushStep;
-    const value = sentinelSeedStepOptions[Math.min(Math.max(Math.round(index), 0), sentinelSeedStepOptions.length - 1)] ?? 64;
-    const nextValue = sentinelSeedStepOptions.find(step => step >= Math.max(value, minAllowed)) ?? sentinelSeedStepOptions[sentinelSeedStepOptions.length - 1];
-    model.value.sentinelSeedStep = nextValue;
-  },
-});
 // BLA/Padé radius ε on a log10 scale: slider value is the exponent (R = ε·|A| for
 // affine, √ε·|A| for Padé). Bounded to the safe band [1e-8, 1e-4]: above 1e-4 the
 // Padé √ε radius admits blocks beyond the rational map's validity (slight distortion).
@@ -238,9 +217,6 @@ const model =  defineModel<MandelbrotParams>({
      orbitTrapStrength: 0,
      phaseColoringStrength: 0,
      stripeFrequency: 8,
-     zoomMinBrushStep: 1,
-     sentinelSeedStep: 64,
-     taylorSuperpixelEnabled: false,
      textureName: 'Gold',
       skyboxName: 'Window',
       textureMapping: normalizeTextureMappingFromLegacy({ textureMappingMode: 0 }),
@@ -249,7 +225,6 @@ const model =  defineModel<MandelbrotParams>({
      interpolationMode: 'lab',
      approximationMode: 'auto',
      targetFps: 60,
-     gpuLoadMultiplier: 1.0,
   }
 });
 
@@ -392,10 +367,6 @@ const precisionBudgetFmt = (v: number) => `1e-${Math.round(v)}`;
 const resolutionFmt = (v: number) => 'DPR ×' + v.toFixed(2);
 const iterationsFmt = (v: number) => '×' + Math.pow(10, v).toPrecision(3);
 const fpsFmt = (v: number) => v + ' fps';
-const gpuLoadFmt = (v: number) => '×' + v.toFixed(2);
-// These read the resolved model value (the slider carries an index, not the step).
-const zoomBrushFmt = () => String(model.value.zoomMinBrushStep);
-const sentinelStepFmt = () => String(model.value.sentinelSeedStep);
 const debugViewOptions = [
   { label: 'Off', value: 0 },
   { label: 'Cout', value: 1 },
@@ -403,9 +374,7 @@ const debugViewOptions = [
   { label: 'Mix', value: 3 },
   { label: 'Probes', value: 4 },
   { label: 'Tier', value: 5 },
-  { label: 'Portee', value: 6 },
-  { label: 'Couverture Taylor', value: 7 },
-  { label: 'Rejets Taylor', value: 8 },
+  { label: 'Portee analytique', value: 6 },
 ];
 
 // Color scales for the debug view legend — kept in sync by hand with
@@ -499,36 +468,6 @@ const debugViewLegends: Record<number, {
       + 'dernier terme retenu), pas un certificat — un rayon prouvé sera plus '
       + 'petit. Gris = pixel intérieur ou sans payload (z″ n\'est accumulé '
       + 'qu\'en mode Auto).',
-  },
-  7: {
-    kind: 'swatches',
-    swatches: [
-      { color: 'rgb(60, 255, 60)', label: 'Exact calculé' },
-      { color: 'rgb(255, 51, 217)', label: 'Taylor terminal' },
-      { color: 'rgb(242, 128, 26)', label: 'Bilinéaire temporaire' },
-      { color: 'rgb(0, 0, 0)', label: 'Aucune donnée résolue' },
-    ],
-    note: 'Origine de la valeur résolue actuellement affichée. Cette vue relit '
-      + 'le marqueur du resolve et suit le raffinement progressif ; elle ne '
-      + 'mesure ni l\'erreur ni la visibilité dans la palette.',
-  },
-  8: {
-    kind: 'swatches',
-    swatches: [
-      { color: 'rgb(60, 255, 60)', label: 'Exact calculé' },
-      { color: 'rgb(255, 51, 217)', label: 'Taylor accepté' },
-      { color: 'rgb(38, 89, 255)', label: 'Payload Taylor inutilisable' },
-      { color: 'rgb(255, 46, 20)', label: 'Rayon hors du gate' },
-      { color: 'rgb(0, 217, 255)', label: 'Changement de branche d’échappement' },
-      { color: 'rgb(255, 217, 26)', label: 'Moins de 3 coins résolus au pas fin' },
-      { color: 'rgb(140, 51, 191)', label: 'Groupe intérieur dominant' },
-      { color: 'rgb(140, 140, 140)', label: 'Aucune ancre échappée' },
-      { color: 'rgb(242, 128, 26)', label: 'Bilinéaire non tagué / Taylor désactivé' },
-      { color: 'rgb(0, 0, 0)', label: 'Aucune donnée résolue' },
-    ],
-    note: 'Cause structurelle qui a empêché la couverture Taylor. Active '
-      + '« Taylor opportuniste » pour produire les tags. Cette vue ne mesure '
-      + 'ni l’erreur visuelle ni la sensibilité de la palette.',
   },
 };
 const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);
@@ -3178,23 +3117,6 @@ async function importSkyboxTexture(event: Event) {
             :model-value="model.aaAdaptive !== false"
             @update:model-value="(v: boolean) => model.aaAdaptive = v"
           />
-          <DenseField
-            label="Zoom brush step" :min="0" :max="6" :step="1"
-            :f="zoomBrushFmt"
-            :model-value="zoomMinBrushStepIndex"
-            @update:model-value="(v: number) => zoomMinBrushStepIndex = v"
-          />
-          <DenseField
-            label="Sentinel seed step" :min="0" :max="12" :step="1"
-            :f="sentinelStepFmt"
-            :model-value="sentinelSeedStepIndex"
-            @update:model-value="(v: number) => sentinelSeedStepIndex = v"
-          />
-          <DenseToggle
-            label="Taylor opportuniste (exp.)"
-            :model-value="model.taylorSuperpixelEnabled === true"
-            @update:model-value="(v: boolean) => model.taylorSuperpixelEnabled = v"
-          />
         </div>
 
         <DenseSeg
@@ -3287,12 +3209,6 @@ async function importSkyboxTexture(event: Event) {
             :f="fpsFmt"
             :model-value="model.targetFps ?? 60"
             @update:model-value="(v: number) => model.targetFps = v"
-          />
-          <DenseField
-            label="Max GPU load" :min="0.25" :max="4" :step="0.25"
-            :f="gpuLoadFmt"
-            :model-value="model.gpuLoadMultiplier ?? 1"
-            @update:model-value="(v: number) => model.gpuLoadMultiplier = v"
           />
         </div>
       </DenseSection>
