@@ -70,22 +70,27 @@ struct Uniforms {
   gradeSaturation: f32,  // display-grade saturation (1.0 = neutral)
   reachDebug: f32,       // 1 = analytic-AA reach heatmap (debug view 6)
   lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)
-  reachReady: f32,       // 0 = user in Exact, 1 = Auto but table not ready, 2 = unified live
+  reachReady: f32,       // 2 = z″ payload carried by every production path
   _pad68: f32,
   _pad69: f32,
   _pad70: f32,
   _pad71: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
-@group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
+@group(0) @binding(1) var tex: texture_2d_array<f32>; // live values: iter, z.x, z.y
 @group(0) @binding(2) var tileTex: texture_2d<f32>;
 @group(0) @binding(3) var skyboxTex: texture_2d<f32>;
 @group(0) @binding(4) var webcamTex: texture_2d<f32>;
 @group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 7 rgba16float
-@group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
+@group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen values
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
 @group(0) @binding(8) var skyboxSampler: sampler;  // bilinear sampler for skybox
 @group(0) @binding(9) var aaTargetTex: texture_2d<f32>; // per-neutral-texel AA target sample count (r32float)
+@group(0) @binding(10) var geometryTex: texture_2d<f32>;
+@group(0) @binding(11) var frozenGeometryTex: texture_2d<f32>;
+@group(0) @binding(12) var metadataTex: texture_2d<u32>;
+@group(0) @binding(13) var frozenMetadataTex: texture_2d<u32>;
+@group(0) @binding(14) var rawTex: texture_2d_array<f32>; // analytic-AA payload only
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -305,9 +310,8 @@ fn ggx_geometry_smith(nDotV: f32, nDotL: f32, roughness: f32) -> f32 {
   return ggx_geometry_schlick(nDotV, roughness) * ggx_geometry_schlick(nDotL, roughness);
 }
 
-// The derivative angle is a flow direction, not a geometric slope. Keep it in
-// the tangent plane so it orients anisotropic highlights without deforming the
-// surface normal.
+// The cached distance-gradient direction stays in the tangent plane so it can
+// orient anisotropic highlights without independently deforming the normal.
 fn anisotropy_tangent_from_dir(angleDir: vec2<f32>, normal: vec3<f32>) -> vec3<f32> {
   let flow = vec3<f32>(-angleDir.y, angleDir.x, 0.0);
   let projected = flow - normal * dot(flow, normal);
@@ -420,7 +424,7 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
   return textureLoad(tex_, coord, 0);
 }
 
-fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, angle_der: f32, dx: f32, dy: f32, tess_depth: f32, disp: f32) -> f32 {
+fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, geometryAngle: f32, dx: f32, dy: f32, tess_depth: f32, disp: f32) -> f32 {
   let id = i32(variableId + 0.5);
   let z_len = max(length(z), 1e-12);
   if (id == 0) {
@@ -435,7 +439,7 @@ fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f
     return u - iterRaw;
   }
   if (id == 3) {
-    return sin(angle_der);
+    return sin(geometryAngle);
   }
   if (id == 4) {
     return dx;
@@ -509,8 +513,8 @@ struct PixelState {
 fn load_pixel_state(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelState {
   var state: PixelState;
   state.iter = textureLoad(sourceTex, coord, 0, 0).r;
-  state.zx = textureLoad(sourceTex, coord, 2, 0).r;
-  state.zy = textureLoad(sourceTex, coord, 3, 0).r;
+  state.zx = textureLoad(sourceTex, coord, 1, 0).r;
+  state.zy = textureLoad(sourceTex, coord, 2, 0).r;
   return state;
 }
 
@@ -522,33 +526,13 @@ fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32
   return clamp(storedHeight, -64.0, 64.0);
 }
 
-fn distance_height_scale_offset(zoomFactor: f32) -> f32 {
-  return -log(max(zoomFactor, 1e-30));
-}
-
-fn distance_height_gradient_scale(zoomFactor: f32) -> f32 {
-  return 1.0 / max(zoomFactor, 1e-30);
-}
-
-fn sample_distance_height_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, heightOffset: f32) -> f32 {
-  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
-    return -1e6;
-  }
-  let state = load_pixel_state(sourceTex, coord);
-  let storedHeight = textureLoad(sourceTex, coord, 4, 0).r + heightOffset;
-  return distance_height_from_values(state.iter, state.zx, state.zy, storedHeight);
-}
-
-fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerHeight: f32, heightOffset: f32, gradientScale: f32) -> vec2<f32> {
-  let xr = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize, heightOffset);
-  let xl = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize, heightOffset);
-  let yu = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize, heightOffset);
-  let yd = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize, heightOffset);
-  let rightHeight = select(centerHeight, xr, xr > -1e5);
-  let leftHeight = select(centerHeight, xl, xl > -1e5);
-  let upHeight = select(centerHeight, yu, yu > -1e5);
-  let downHeight = select(centerHeight, yd, yd > -1e5);
-  return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 12.0 * gradientScale;
+fn normalize_geometry(stored: vec4<f32>, zoomFactor: f32) -> vec4<f32> {
+  let ratio = 1.0 / max(zoomFactor, 1e-30);
+  return vec4<f32>(
+    clamp(stored.xy * ratio, vec2<f32>(-64.0), vec2<f32>(64.0)),
+    clamp(stored.z * ratio * ratio, -64.0, 64.0),
+    clamp(stored.w + log(ratio), -64.0, 64.0)
+  );
 }
 
 fn smooth_escape_fraction(z_sq: f32) -> f32 {
@@ -557,11 +541,11 @@ fn smooth_escape_fraction(z_sq: f32) -> f32 {
   return 1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0);
 }
 
-fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, distanceHeightOffset: f32, distanceHeightGradientScale: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32, uv_screen: vec2<f32>, uv_tex: vec2<f32>, magnified: bool) -> vec3<f32> {
+fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32, uv_screen: vec2<f32>, uv_tex: vec2<f32>, magnified: bool) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
-  let phaseColoringShift = (1.0 - abs(fract(angle_der / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
+  let phaseColoringShift = (1.0 - abs(fract(geometryAngle / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
   let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset() + heightPhaseShift + phaseColoringShift);
 
   // ── Sample all effect channels from the palette texture ──
@@ -587,8 +571,8 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   var tess_u = 0.0;
   var tess_v = 0.0;
 
-  tess_u = texture_mapping_value(parameters.textureMappingXVariable, iterRaw, v_smooth, z, distanceHeightStored, angle_der, dx, dy, tess_depth, disp) * parameters.textureMappingXScale;
-  tess_v = texture_mapping_value(parameters.textureMappingYVariable, iterRaw, v_smooth, z, distanceHeightStored, angle_der, dx, dy, tess_depth, disp) * parameters.textureMappingYScale;
+  tess_u = texture_mapping_value(parameters.textureMappingXVariable, iterRaw, v_smooth, z, distanceHeightStored, geometryAngle, dx, dy, tess_depth, disp) * parameters.textureMappingXScale;
+  tess_v = texture_mapping_value(parameters.textureMappingYVariable, iterRaw, v_smooth, z, distanceHeightStored, geometryAngle, dx, dy, tess_depth, disp) * parameters.textureMappingYScale;
 
   let tile_drift = vec2<f32>(parameters.textureDriftX, parameters.textureDriftY);
   let tessCoord = vec2<f32>(tess_u, tess_v) + tile_drift;
@@ -643,7 +627,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     // keeps its historical sRGB look.
     let colorLin = srgb_to_linear(color);
     let iridLin = srgb_to_linear(fx.iridescenceColor);
-    let angleDir = vec2<f32>(cos(angle_der), sin(angle_der));
+    let angleDir = vec2<f32>(cos(geometryAngle), sin(geometryAngle));
     let reliefDepth = parameters.reliefDepth * effShading;
     let relief = clamp(reliefDepth, 0.0, 2.0);
     let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
@@ -658,40 +642,39 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let needsDirectionCoherenceGradient = directionCoherenceStrength > 0.001;
     let needsFractalGradient = relief > 0.001;
     var distanceHeight = 0.0;
-    var grad = vec2<f32>(0.0);
+    // Cached geometry stores the analytic derivative per source texel and the
+    // branch-local analytic Laplacian. Historical relief gains are applied
+    // here, after source-to-display normalization, without neighbor reads.
+    var grad = cachedGradient * 24.0;
     var stripeGrad = vec2<f32>(0.0);
     var directionCoherenceGrad = vec2<f32>(0.0);
-    var depthGrad = vec2<f32>(0.0);
-    var heightCurvature = 0.0;
+    var depthGrad = cachedGradient * 16.0;
+    var heightCurvature = cachedCurvature * 6.0;
     var slope = 0.0;
     if (needsFractalGradient) {
       distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
     }
-    // The three fields (fractal height, stripe phase, direction coherence)
-    // share the same 4 neighbour texels. Fetch each neighbour once and derive
-    // whichever gradients are needed together, instead of reloading layers
-    // 0/2/3 and recomputing escape_nu three times per neighbour.
-    if (needsFractalGradient || needsStripeGradient || needsDirectionCoherenceGradient || needsDepthGradient) {
+    if (needsFractalGradient) {
+      grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
+      slope = length(grad);
+    }
+    // Stripe/coherence relief remains effect-dependent and may read packed
+    // metadata neighbours. Base distance geometry never does.
+    if (needsStripeGradient || needsDirectionCoherenceGradient) {
       if (magnified) {
-        field_gradients_bilinear(
-          sourceTex, uv_tex, sourceTexSize,
-          distanceHeight, stripeAverage, directionCoherence, tess_depth,
-          distanceHeightOffset, distanceHeightGradientScale,
-          needsFractalGradient, needsStripeGradient, needsDirectionCoherenceGradient, needsDepthGradient,
-          &grad, &stripeGrad, &directionCoherenceGrad, &depthGrad
+        orbit_metric_gradients_bilinear(
+          sourceTex, sourceMetadata, uv_tex, sourceTexSize,
+          stripeAverage, directionCoherence,
+          needsStripeGradient, needsDirectionCoherenceGradient,
+          &stripeGrad, &directionCoherenceGrad
         );
       } else {
-        field_gradients_at_coord(
-          sourceTex, sourceCoord, sourceTexSize,
-          distanceHeight, stripeAverage, directionCoherence, tess_depth,
-          distanceHeightOffset, distanceHeightGradientScale,
-          needsFractalGradient, needsStripeGradient, needsDirectionCoherenceGradient, needsDepthGradient,
-          &grad, &stripeGrad, &directionCoherenceGrad, &depthGrad, &heightCurvature
+        orbit_metric_gradients_at_coord(
+          sourceTex, sourceMetadata, sourceCoord, sourceTexSize,
+          stripeAverage, directionCoherence,
+          needsStripeGradient, needsDirectionCoherenceGradient,
+          &stripeGrad, &directionCoherenceGrad
         );
-      }
-      if (needsFractalGradient) {
-        grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
-        slope = length(grad);
       }
     }
     var textureGradient = vec2<f32>(0.0);
@@ -909,32 +892,31 @@ fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
 
 
 
-fn decode_stripe_phase(refWithStripe: f32) -> f32 {
-  return fract(max(refWithStripe, 0.0));
+const QUANTIZED_FIELD_MAX: f32 = 16383.0;
+
+fn decode_support_step(metadata: u32) -> f32 {
+  return exp2(f32(metadata & 0xfu));
+}
+
+fn decode_stripe_phase(metadata: u32) -> f32 {
+  return f32((metadata >> 4u) & 0x3fffu) / QUANTIZED_FIELD_MAX;
 }
 
 fn stripe_phase_delta(a: f32, b: f32) -> f32 {
   return fract(a - b + 0.5) - 0.5;
 }
 
-const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
-const ORBIT_DIRECTION_BASE: f32 = 4096.0;
-
-fn decode_direction_coherence(encoded: f32) -> f32 {
-  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
-  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
-  let avgDir = vec2<f32>(
-    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-  );
-  return clamp(length(avgDir), 0.0, 1.0);
+fn decode_direction_coherence(metadata: u32) -> f32 {
+  return f32((metadata >> 18u) & 0x3fffu) / QUANTIZED_FIELD_MAX;
 }
 
 struct PixelExtras {
-  der_x: f32,
-  der_y: f32,
-  refWithStripe: f32,
-  avgDirection: f32,
+  height: f32,
+  geometryAngle: f32,
+  gradient: vec2<f32>,
+  curvature: f32,
+  stripePhase: f32,
+  directionCoherence: f32,
 };
 
 struct PixelSample {
@@ -944,13 +926,13 @@ struct PixelSample {
   zy: f32,
 };
 
-fn load_pixel_sample(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelSample {
+fn load_pixel_sample(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, coord: vec2<i32>) -> PixelSample {
   var pixelSample: PixelSample;
   pixelSample.iter = textureLoad(sourceTex, coord, 0, 0).r;
-  pixelSample.step = textureLoad(sourceTex, coord, 1, 0).r;
+  pixelSample.step = decode_support_step(textureLoad(sourceMetadata, coord, 0).r);
   if (pixelSample.iter > 0.0) {
-    pixelSample.zx = textureLoad(sourceTex, coord, 2, 0).r;
-    pixelSample.zy = textureLoad(sourceTex, coord, 3, 0).r;
+    pixelSample.zx = textureLoad(sourceTex, coord, 1, 0).r;
+    pixelSample.zy = textureLoad(sourceTex, coord, 2, 0).r;
   } else {
     pixelSample.zx = 0.0;
     pixelSample.zy = 0.0;
@@ -958,12 +940,16 @@ fn load_pixel_sample(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> Pixe
   return pixelSample;
 }
 
-fn load_pixel_extras(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelExtras {
+fn load_pixel_extras(sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, coord: vec2<i32>, zoomFactor: f32) -> PixelExtras {
   var extras: PixelExtras;
-  extras.der_x = textureLoad(sourceTex, coord, 4, 0).r;
-  extras.der_y = textureLoad(sourceTex, coord, 5, 0).r;
-  extras.refWithStripe = textureLoad(sourceTex, coord, 6, 0).r;
-  extras.avgDirection = textureLoad(sourceTex, coord, 7, 0).r;
+  let geometry = normalize_geometry(textureLoad(sourceGeometry, coord, 0), zoomFactor);
+  extras.height = clamp(geometry.w, -64.0, 64.0);
+  extras.gradient = geometry.xy;
+  extras.curvature = geometry.z;
+  extras.geometryAngle = select(0.0, atan2(geometry.y, geometry.x), dot(geometry.xy, geometry.xy) > 1e-12);
+  let metadata = textureLoad(sourceMetadata, coord, 0).r;
+  extras.stripePhase = decode_stripe_phase(metadata);
+  extras.directionCoherence = decode_direction_coherence(metadata);
   return extras;
 }
 
@@ -990,35 +976,27 @@ fn bilinear_cell(uv: vec2<f32>, texSize: vec2<i32>) -> BilinearCell {
   return cell;
 }
 
-// ── Shared neighbour fetch ──────────────────────────────────────────
-// The fractal-height, stripe-phase and direction-coherence fields all live
-// in the same source texel (layers 4 / 6 / 7) and share the same validity
-// test (in-bounds + escaped). Fetching a neighbour once and decoding only the
-// requested channels avoids reloading layers 0/2/3 and recomputing escape_nu
-// separately for each field.
-struct NeighborFields {
+// ── Optional orbit-metric neighbour fetch ───────────────────────────
+// Distance geometry is already cached and never enters this path. Only the
+// effect-dependent stripe/coherence relief samples neighbouring metadata.
+struct NeighborOrbitFields {
   valid: bool,       // in-bounds AND escaped → usable; otherwise fall back to center
-  height: f32,
   stripe: f32,
   coherence: f32,
-  depth: f32,        // same distance-height field used by Screen + Depth
 };
 
-fn sample_neighbor_fields(
+fn sample_neighbor_orbit_fields(
   sourceTex: texture_2d_array<f32>,
+  sourceMetadata: texture_2d<u32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
-  heightOffset: f32,
-  needHeight: bool,
   needStripe: bool,
   needCoh: bool
-) -> NeighborFields {
-  var nf: NeighborFields;
+) -> NeighborOrbitFields {
+  var nf: NeighborOrbitFields;
   nf.valid = false;
-  nf.height = 0.0;
   nf.stripe = 0.0;
   nf.coherence = 0.0;
-  nf.depth = 0.0;
   if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
     return nf;
   }
@@ -1028,57 +1006,33 @@ fn sample_neighbor_fields(
     return nf;
   }
   nf.valid = true;
-  if (needHeight) {
-    let storedHeight = textureLoad(sourceTex, coord, 4, 0).r + heightOffset;
-    nf.height = clamp(storedHeight, -64.0, 64.0);
-    nf.depth = nf.height;
-  }
   if (needStripe) {
-    nf.stripe = decode_stripe_phase(textureLoad(sourceTex, coord, 6, 0).r);
+    nf.stripe = decode_stripe_phase(textureLoad(sourceMetadata, coord, 0).r);
   }
   if (needCoh) {
-    nf.coherence = decode_direction_coherence(textureLoad(sourceTex, coord, 7, 0).r);
+    nf.coherence = decode_direction_coherence(textureLoad(sourceMetadata, coord, 0).r);
   }
   return nf;
 }
 
-// Central-difference gradients of any subset of the three fields, sharing the
-// four neighbour fetches. Scales match the former per-field functions:
-// height ×12·scale, stripe ×8, coherence ×8. Outputs left untouched when their
-// need flag is false.
-fn field_gradients_at_coord(
+// Central-difference gradients of the packed orbit metrics. Outputs are left
+// untouched when their corresponding effect is disabled.
+fn orbit_metric_gradients_at_coord(
   sourceTex: texture_2d_array<f32>,
+  sourceMetadata: texture_2d<u32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
-  centerHeight: f32,
   centerStripe: f32,
   centerCoherence: f32,
-  centerDepth: f32,
-  heightOffset: f32,
-  heightGradientScale: f32,
-  needHeight: bool,
   needStripe: bool,
   needCoh: bool,
-  needDepth: bool,
-  heightGrad: ptr<function, vec2<f32>>,
   stripeGrad: ptr<function, vec2<f32>>,
-  cohGrad: ptr<function, vec2<f32>>,
-  depthGrad: ptr<function, vec2<f32>>,
-  heightCurvature: ptr<function, f32>
+  cohGrad: ptr<function, vec2<f32>>
 ) {
-  let needDistanceField = needHeight || needDepth;
-  let nR = sample_neighbor_fields(sourceTex, coord + vec2<i32>(1, 0), texSize, heightOffset, needDistanceField, needStripe, needCoh);
-  let nL = sample_neighbor_fields(sourceTex, coord - vec2<i32>(1, 0), texSize, heightOffset, needDistanceField, needStripe, needCoh);
-  let nU = sample_neighbor_fields(sourceTex, coord + vec2<i32>(0, 1), texSize, heightOffset, needDistanceField, needStripe, needCoh);
-  let nD = sample_neighbor_fields(sourceTex, coord - vec2<i32>(0, 1), texSize, heightOffset, needDistanceField, needStripe, needCoh);
-  if (needHeight) {
-    let r = select(centerHeight, nR.height, nR.valid);
-    let l = select(centerHeight, nL.height, nL.valid);
-    let u = select(centerHeight, nU.height, nU.valid);
-    let d = select(centerHeight, nD.height, nD.valid);
-    *heightGrad = vec2<f32>(r - l, u - d) * 12.0 * heightGradientScale;
-    *heightCurvature = (r + l + u + d - 4.0 * centerHeight) * 6.0 * heightGradientScale;
-  }
+  let nR = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord + vec2<i32>(1, 0), texSize, needStripe, needCoh);
+  let nL = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord - vec2<i32>(1, 0), texSize, needStripe, needCoh);
+  let nU = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord + vec2<i32>(0, 1), texSize, needStripe, needCoh);
+  let nD = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord - vec2<i32>(0, 1), texSize, needStripe, needCoh);
   if (needStripe) {
     let r = select(centerStripe, nR.stripe, nR.valid);
     let l = select(centerStripe, nL.stripe, nL.valid);
@@ -1093,52 +1047,26 @@ fn field_gradients_at_coord(
     let d = select(centerCoherence, nD.coherence, nD.valid);
     *cohGrad = vec2<f32>(r - l, u - d) * 8.0;
   }
-  if (needDepth) {
-    let r = select(centerDepth, nR.depth, nR.valid);
-    let l = select(centerDepth, nL.depth, nL.valid);
-    let u = select(centerDepth, nU.depth, nU.valid);
-    let d = select(centerDepth, nD.depth, nD.valid);
-    *depthGrad = vec2<f32>(r - l, u - d) * 8.0 * heightGradientScale;
-  }
 }
 
-// Bilinear (magnified) counterpart: analytic gradient of the bilinearly
-// interpolated field over the enclosing cell, sharing the four corner fetches.
-// Scales match the former per-field functions: height ×24·scale, others ×16.
-fn field_gradients_bilinear(
+// Bilinear (magnified) counterpart for the packed orbit metrics.
+fn orbit_metric_gradients_bilinear(
   sourceTex: texture_2d_array<f32>,
+  sourceMetadata: texture_2d<u32>,
   uv: vec2<f32>,
   texSize: vec2<i32>,
-  centerHeight: f32,
   centerStripe: f32,
   centerCoherence: f32,
-  centerDepth: f32,
-  heightOffset: f32,
-  heightGradientScale: f32,
-  needHeight: bool,
   needStripe: bool,
   needCoh: bool,
-  needDepth: bool,
-  heightGrad: ptr<function, vec2<f32>>,
   stripeGrad: ptr<function, vec2<f32>>,
-  cohGrad: ptr<function, vec2<f32>>,
-  depthGrad: ptr<function, vec2<f32>>
+  cohGrad: ptr<function, vec2<f32>>
 ) {
   let cell = bilinear_cell(uv, texSize);
-  let needDistanceField = needHeight || needDepth;
-  let n00 = sample_neighbor_fields(sourceTex, cell.base, texSize, heightOffset, needDistanceField, needStripe, needCoh);
-  let n10 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(1, 0), texSize, heightOffset, needDistanceField, needStripe, needCoh);
-  let n01 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(0, 1), texSize, heightOffset, needDistanceField, needStripe, needCoh);
-  let n11 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(1, 1), texSize, heightOffset, needDistanceField, needStripe, needCoh);
-  if (needHeight) {
-    let h00 = select(centerHeight, n00.height, n00.valid);
-    let h10 = select(centerHeight, n10.height, n10.valid);
-    let h01 = select(centerHeight, n01.height, n01.valid);
-    let h11 = select(centerHeight, n11.height, n11.valid);
-    let gx = mix(h10 - h00, h11 - h01, cell.f.y);
-    let gy = mix(h01 - h00, h11 - h10, cell.f.x);
-    *heightGrad = vec2<f32>(gx, gy) * 24.0 * heightGradientScale;
-  }
+  let n00 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base, texSize, needStripe, needCoh);
+  let n10 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(1, 0), texSize, needStripe, needCoh);
+  let n01 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(0, 1), texSize, needStripe, needCoh);
+  let n11 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(1, 1), texSize, needStripe, needCoh);
   if (needStripe) {
     let s00 = select(centerStripe, n00.stripe, n00.valid);
     let s10 = select(centerStripe, n10.stripe, n10.valid);
@@ -1156,15 +1084,6 @@ fn field_gradients_bilinear(
     let gx = mix(c10 - c00, c11 - c01, cell.f.y);
     let gy = mix(c01 - c00, c11 - c10, cell.f.x);
     *cohGrad = vec2<f32>(gx, gy) * 16.0;
-  }
-  if (needDepth) {
-    let d00 = select(centerDepth, n00.depth, n00.valid);
-    let d10 = select(centerDepth, n10.depth, n10.valid);
-    let d01 = select(centerDepth, n01.depth, n01.valid);
-    let d11 = select(centerDepth, n11.depth, n11.valid);
-    let gx = mix(d10 - d00, d11 - d01, cell.f.y);
-    let gy = mix(d01 - d00, d11 - d10, cell.f.x);
-    *depthGrad = vec2<f32>(gx, gy) * 16.0 * heightGradientScale;
   }
 }
 
@@ -1195,14 +1114,14 @@ fn debug_wheel_sector(uv: vec2<f32>) -> i32 {
 // ── Colorize a single pixel from its raw layer values ──────────────
 fn colorize_pixel(
   sourceTex: texture_2d_array<f32>,
+  sourceGeometry: texture_2d<f32>,
+  sourceMetadata: texture_2d<u32>,
   sourceCoord: vec2<i32>,
   sourceTexSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
   extras: PixelExtras,
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
-  distanceHeightOffset: f32,
-  distanceHeightGradientScale: f32,
   uv_tex: vec2<f32>,
   magnified: bool,
   analyticTag: bool
@@ -1248,18 +1167,15 @@ fn colorize_pixel(
   // spatial distribution: if this view is blue everywhere, no amount of rigour
   // rescues the idea.
   if (parameters.reachDebug > 0.5) {
+    if (!analyticTag) {
+      return vec4<f32>(0.15, 0.2, 0.45, 1.0);
+    }
     // The "no data" cases are given DISTINCT colors rather than one grey: with
     // three different causes (wrong texture bound / z″ never accumulated /
     // payload corrupt) a single grey turns a bug report into a guessing game.
-    // MAGENTA — the color pass is reading the 8-layer resolved texture instead
-    // of the 13-layer raw one. Should be impossible (the reach view forces the
-    // raw path); if it shows, the bind-group selection is broken.
-    if (textureNumLayers(sourceTex) <= 12u) {
-      return vec4<f32>(0.85, 0.1, 0.75, 1.0);
-    }
-    let S = textureLoad(sourceTex, sourceCoord, 8, 0).r;
-    let sndLog = textureLoad(sourceTex, sourceCoord, 11, 0).r;
-    let sndAngle = textureLoad(sourceTex, sourceCoord, 12, 0).r;
+    let S = textureLoad(rawTex, sourceCoord, 8, 0).r;
+    let sndLog = textureLoad(rawTex, sourceCoord, 11, 0).r;
+    let sndAngle = textureLoad(rawTex, sourceCoord, 12, 0).r;
     // +marker = z″ not tracked / payload invalid. Keep mode readiness visible
     // before calling a live-table invalid payload a numerical failure.
     if (!(sndLog < 1e30)) {
@@ -1305,15 +1221,15 @@ fn colorize_pixel(
   // |z| reproducing fract(ν̂), so integer-parity coloring (zebra) and the escape
   // gates see a genuinely-escaped-at-that-iteration sample — a re-iterated
   // subsample crossing an iteration line gets iter±1, and the analytic one must
-  // match. Height/angle keep the center pixel's values (DE varies slowly at
-  // sub-pixel scale); the escape-z DIRECTION stays the center's (like the
+  // match. Cached geometry keeps the center pixel's values at sub-pixel scale;
+  // the escape-z DIRECTION stays the center's (like the
   // bilinear path, no per-iteration angle doubling).
-  if (analyticTag && parameters.aaAnalytic > 0.5 && textureNumLayers(sourceTex) > 12u) {
-    let S = textureLoad(sourceTex, sourceCoord, 8, 0).r;
-    let m1 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 9, 0).r,
-                       textureLoad(sourceTex, sourceCoord, 10, 0).r);
-    let sndLog = textureLoad(sourceTex, sourceCoord, 11, 0).r;
-    let sndAngle = textureLoad(sourceTex, sourceCoord, 12, 0).r;
+  if (analyticTag && parameters.aaAnalytic > 0.5) {
+    let S = textureLoad(rawTex, sourceCoord, 8, 0).r;
+    let m1 = vec2<f32>(textureLoad(rawTex, sourceCoord, 9, 0).r,
+                       textureLoad(rawTex, sourceCoord, 10, 0).r);
+    let sndLog = textureLoad(rawTex, sourceCoord, 11, 0).r;
+    let sndAngle = textureLoad(rawTex, sourceCoord, 12, 0).r;
     // Finite guard (mirrors the reseed): a non-finite payload must fall back
     // to the center color, never feed the reconstruction.
     if (abs(S) < 1e6
@@ -1370,8 +1286,8 @@ fn colorize_pixel(
   let wZebra = row1.r;
   let isEvenIter = 1.0 - abs(floor(iter_v) % 2.0);
 
-  let distanceHeightStored = extras.der_x + distanceHeightOffset;
-  let angle_der = extras.der_y;
+  let distanceHeightStored = extras.height;
+  let geometryAngle = extras.geometryAngle;
 
   if (parameters.debugShading >= 0.5) {
     let sector = debug_wheel_sector(uv_screen);
@@ -1383,18 +1299,17 @@ fn colorize_pixel(
       return vec4<f32>(debug_heat(debug_distance_scale(distanceHeight)), 1.0);
     }
     if (sector == 2) {
-      let distanceHeight = distance_height_from_values(iter_v, z.x, z.y, distanceHeightStored);
-      let grad = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
+      let grad = extras.gradient * 24.0;
       return vec4<f32>(debug_heat(debug_gradient_scale(length(grad))), 1.0);
     }
-    return vec4<f32>(debug_heat(fract(angle_der / (2.0 * 3.141592653589793) + 0.5)), 1.0);
+    return vec4<f32>(debug_heat(fract(geometryAngle / (2.0 * 3.141592653589793) + 0.5)), 1.0);
   }
 
   let v = nu;
   let v_smooth = nu_smooth;
-  let stripePhase = decode_stripe_phase(extras.refWithStripe);
-  let directionCoherence = decode_direction_coherence(extras.avgDirection);
-  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_v, v, v_smooth, z, distanceHeightStored, distanceHeightOffset, distanceHeightGradientScale, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y, uv_screen, uv_tex, magnified);
+  let stripePhase = extras.stripePhase;
+  let directionCoherence = extras.directionCoherence;
+  var color = palette(sourceTex, sourceMetadata, sourceCoord, sourceTexSize, iter_v, v, v_smooth, z, distanceHeightStored, extras.gradient, extras.curvature, geometryAngle, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y, uv_screen, uv_tex, magnified);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -1410,28 +1325,12 @@ fn colorize_pixel(
 //   - nu interpolated continuously, re-encoded as iter = floor(nu) plus a
 //     synthetic |z| that reproduces fract(nu) through smooth_escape_fraction;
 //   - z direction interpolated as unit vectors;
-//   - distance height lerped; derivative angle and stripe phase lerped
-//     circularly; average orbit direction unpacked, lerped, repacked.
+//   - cached geometry lerped linearly, stripe phase circularly, coherence
+//     linearly, and provenance reduced to the coarsest contributing support.
 // Non-escaped corners (sentinel, inside, budget-exhausted, no data) are
 // masked out; if they dominate, the caller keeps its nearest sample.
 
 const TWO_PI: f32 = 6.283185307179586;
-
-fn decode_avg_dir_vec(encoded: f32) -> vec2<f32> {
-  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
-  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
-  return vec2<f32>(
-    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-  );
-}
-
-fn encode_avg_dir_vec(avgDir: vec2<f32>) -> f32 {
-  let phase = clamp(avgDir * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
-  let xq = floor(phase.x * ORBIT_DIRECTION_SCALE + 0.5);
-  let yq = floor(phase.y * ORBIT_DIRECTION_SCALE + 0.5);
-  return xq * ORBIT_DIRECTION_BASE + yq;
-}
 
 struct InterpPixel {
   kind: i32, // 0 = not interpolable (caller keeps nearest), 1 = escaped interpolated
@@ -1442,7 +1341,7 @@ struct InterpPixel {
   extras: PixelExtras,
 };
 
-fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>) -> InterpPixel {
+fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, uv: vec2<f32>, texSize: vec2<i32>, zoomFactor: f32) -> InterpPixel {
   var out: InterpPixel;
   out.kind = 0;
 
@@ -1469,21 +1368,17 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
   // iteration counts are large.
   var baseIter = -1.0;
   var nuSum = 0.0;
-  var distSum = 0.0;
+  var geometrySum = vec4<f32>(0.0);
   var zDirSum = vec2<f32>(0.0);
-  var angleDirSum = vec2<f32>(0.0);
   var stripeDirSum = vec2<f32>(0.0);
-  var avgDirSum = vec2<f32>(0.0);
-  var bestW = -1.0;
-  var bestRefInt = 0.0;
-  var bestAngle = 0.0;
-  var bestStripe = 0.0;
+  var coherenceSum = 0.0;
 
   for (var i = 0u; i < 4u; i = i + 1u) {
     let ccoord = clamp(base + offsets[i], vec2<i32>(0), texSize - vec2<i32>(1));
     let w = weights[i];
     let citer = textureLoad(sourceTex, ccoord, 0, 0).r;
-    let cstep = textureLoad(sourceTex, ccoord, 1, 0).r;
+    let metadata = textureLoad(sourceMetadata, ccoord, 0).r;
+    let cstep = decode_support_step(metadata);
     // Sentinel or no data: this corner simply contributes no weight.
     if (citer < 0.0 || cstep <= 0.0) {
       continue;
@@ -1494,8 +1389,8 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
       wInside = wInside + w;
       continue;
     }
-    let zx = textureLoad(sourceTex, ccoord, 2, 0).r;
-    let zy = textureLoad(sourceTex, ccoord, 3, 0).r;
+    let zx = textureLoad(sourceTex, ccoord, 1, 0).r;
+    let zy = textureLoad(sourceTex, ccoord, 2, 0).r;
     let z_sq = zx * zx + zy * zy;
     if (z_sq < parameters.mu) {
       // Budget-exhausted: not displayable as escaped, contributes no weight.
@@ -1508,22 +1403,13 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
     }
     wEscaped = wEscaped + w;
     nuSum = nuSum + w * ((citer - baseIter) + clamp(smooth_escape_fraction(z_sq), 0.0, 1.0));
-    distSum = distSum + w * textureLoad(sourceTex, ccoord, 4, 0).r;
-    let angle = textureLoad(sourceTex, ccoord, 5, 0).r;
-    angleDirSum = angleDirSum + w * vec2<f32>(cos(angle), sin(angle));
+    geometrySum = geometrySum + w * normalize_geometry(textureLoad(sourceGeometry, ccoord, 0), zoomFactor);
     let zLen = max(sqrt(z_sq), 1e-12);
     zDirSum = zDirSum + w * vec2<f32>(zx, zy) / zLen;
-    let refVal = max(textureLoad(sourceTex, ccoord, 6, 0).r, 0.0);
-    let stripePhase = fract(refVal);
+    let stripePhase = decode_stripe_phase(metadata);
     let stripeAngle = stripePhase * TWO_PI;
     stripeDirSum = stripeDirSum + w * vec2<f32>(cos(stripeAngle), sin(stripeAngle));
-    avgDirSum = avgDirSum + w * decode_avg_dir_vec(textureLoad(sourceTex, ccoord, 7, 0).r);
-    if (w > bestW) {
-      bestW = w;
-      bestRefInt = floor(refVal);
-      bestAngle = angle;
-      bestStripe = stripePhase;
-    }
+    coherenceSum = coherenceSum + w * decode_direction_coherence(metadata);
   }
 
   // The interior keeps priority over escaped interpolation (no halo inside
@@ -1557,15 +1443,17 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
   out.zx = zDir.x * zLenOut;
   out.zy = zDir.y * zLenOut;
   out.step = minStep;
-  out.extras.der_x = distSum * invW;
-  out.extras.der_y = select(bestAngle, atan2(angleDirSum.y, angleDirSum.x), length(angleDirSum) > 1e-5);
-  let stripeOut = select(
-    bestStripe,
+  let geometry = geometrySum * invW;
+  out.extras.height = geometry.w;
+  out.extras.gradient = geometry.xy;
+  out.extras.curvature = geometry.z;
+  out.extras.geometryAngle = select(0.0, atan2(geometry.y, geometry.x), dot(geometry.xy, geometry.xy) > 1e-12);
+  out.extras.stripePhase = select(
+    0.0,
     fract(atan2(stripeDirSum.y, stripeDirSum.x) / TWO_PI + 1.0),
     length(stripeDirSum) > 1e-5
   );
-  out.extras.refWithStripe = bestRefInt + min(stripeOut, 0.999999);
-  out.extras.avgDirection = encode_avg_dir_vec(clamp(avgDirSum * invW, vec2<f32>(-1.0), vec2<f32>(1.0)));
+  out.extras.directionCoherence = clamp(coherenceSum * invW, 0.0, 1.0);
   return out;
 }
 
@@ -1573,6 +1461,8 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
 // pre-computed bilinear interpolation when one is available (magnified case).
 fn colorize_sampled(
   sourceTex: texture_2d_array<f32>,
+  sourceGeometry: texture_2d<f32>,
+  sourceMetadata: texture_2d<u32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
@@ -1581,14 +1471,13 @@ fn colorize_sampled(
   magnified: bool,
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
-  distanceHeightOffset: f32,
-  distanceHeightGradientScale: f32,
+  zoomFactor: f32,
   analyticTag: bool
 ) -> vec4<f32> {
   var it = iter_val;
   var zx = zx_val;
   var zy = zy_val;
-  var extras = load_pixel_extras(sourceTex, coord);
+  var extras = load_pixel_extras(sourceGeometry, sourceMetadata, coord, zoomFactor);
   var analytic = analyticTag;
   if (interp.kind == 1) {
     it = interp.iter;
@@ -1599,8 +1488,8 @@ fn colorize_sampled(
     analytic = false;
   }
   return colorize_pixel(
-    sourceTex, coord, texSize, it, zx, zy, extras,
-    uv_screen, uv_neutral, distanceHeightOffset, distanceHeightGradientScale,
+    sourceTex, sourceGeometry, sourceMetadata, coord, texSize, it, zx, zy, extras,
+    uv_screen, uv_neutral,
     uv_tex, magnified, analytic
   );
 }
@@ -1651,16 +1540,11 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   // Texture magnified on screen → bilinear interpolation of the samples.
   let liveMagnified = lzf > 1.001;
   let frozenMagnified = zf > 1.001;
-  let liveDistanceHeightOffset = distance_height_scale_offset(lzf);
-  let frozenDistanceHeightOffset = distance_height_scale_offset(zf);
-  let liveDistanceHeightGradientScale = distance_height_gradient_scale(lzf);
-  let frozenDistanceHeightGradientScale = distance_height_gradient_scale(zf);
-
   // ── Unified path: min-step-wins compositing ──────────────────────
-  // Layer 1 stores the resolution step: 1 = genuine pixel (best),
-  // >= 2 = resolve-copied from a grid neighbor (coarser = worse),
-  // 0 = no data (sentinel / uncomputed).
-  // The pixel with the smallest positive step wins.
+  // Packed metadata stores log2 of the support step: 0 means an exact
+  // step-1 pixel, positive values are progressively coarser dyadic support.
+  // iter < 0 remains the independent no-data marker. The pixel with the
+  // smallest effective support step wins.
   // When not zooming (zf=1, lzf=1), UV math reduces to identity, so the
   // same logic works seamlessly for both zoom and non-zoom rendering.
 
@@ -1700,7 +1584,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         discard;
       }
     }
-    let liveSample = load_pixel_sample(tex, liveCoord);
+    let liveSample = load_pixel_sample(tex, metadataTex, liveCoord);
     live_iter = liveSample.iter;
     liveStep = liveSample.step;
     live_zx = liveSample.zx;
@@ -1714,8 +1598,9 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   var liveInterp: InterpPixel;
   liveInterp.kind = 0;
   if (liveInBounds && liveMagnified) {
-    liveInterp = sample_escaped_bilinear(tex, uv_live, texSize);
+    liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, uv_live, texSize, lzf);
   }
+  liveAnalyticTag = liveAnalyticTag || parameters.reachDebug > 0.5;
 
   let liveEscaped = live_iter > 0.0 && (live_zx * live_zx + live_zy * live_zy) >= parameters.mu;
   var liveHasData = liveEscaped && liveStep > 0.0;
@@ -1756,13 +1641,13 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
         i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
       );
-      let frozenSample = load_pixel_sample(texFrozen, frozenCoord);
+      let frozenSample = load_pixel_sample(texFrozen, frozenMetadataTex, frozenCoord);
       frozen_iter = frozenSample.iter;
       frozenStep = frozenSample.step;
       frozen_zx = frozenSample.zx;
       frozen_zy = frozenSample.zy;
       if (frozenMagnified) {
-        frozenInterp = sample_escaped_bilinear(texFrozen, uv_frozen, texSize);
+        frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, uv_frozen, texSize, zf);
       }
     }
   }
@@ -1781,14 +1666,16 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   // values are not directly comparable. A frozen genuine pixel (step=1) at
   // frozenScale is zf/lzf times coarser per axis than a live genuine pixel
   // (step=1) at liveScale.  Scale the frozen step to live-resolution units.
-  let scaleRatio = select(1.0, zf / lzf, lzf > 0.0);
-  let effectiveFrozenStep = frozenCompositeStep * scaleRatio;
+  let effectiveLiveStep = liveCompositeStep * max(lzf, 1e-30);
+  let effectiveFrozenStep = frozenCompositeStep * max(zf, 1e-30);
 
   if (liveHasData && frozenHasData) {
     // Both have data — pick the one with finer resolution (smaller step).
-    if (liveCompositeStep <= effectiveFrozenStep) {
+    if (effectiveLiveStep <= effectiveFrozenStep) {
       let liveColor = colorize_sampled(
         tex,
+        geometryTex,
+        metadataTex,
         liveCoord,
         texSize,
         live_iter,
@@ -1799,8 +1686,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         liveMagnified,
         uv_screen,
         uv_neutral,
-        liveDistanceHeightOffset,
-        liveDistanceHeightGradientScale,
+        lzf,
         liveAnalyticTag
       );
       if (DEBUG_SHOW_LIVE_NEGATIVE) {
@@ -1811,6 +1697,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     } else {
       let frozenColor = colorize_sampled(
         texFrozen,
+        frozenGeometryTex,
+        frozenMetadataTex,
         frozenCoord,
         texSize,
         frozen_iter,
@@ -1821,8 +1709,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         frozenMagnified,
         uv_screen,
         uv_neutral,
-        frozenDistanceHeightOffset,
-        frozenDistanceHeightGradientScale,
+        zf,
         false
       );
       return vec4<f32>(frozenColor.rgb, 1.0);
@@ -1832,6 +1719,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   if (liveHasData) {
     let liveColor = colorize_sampled(
       tex,
+      geometryTex,
+      metadataTex,
       liveCoord,
       texSize,
       live_iter,
@@ -1842,8 +1731,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       liveMagnified,
       uv_screen,
       uv_neutral,
-      liveDistanceHeightOffset,
-      liveDistanceHeightGradientScale,
+      lzf,
       liveAnalyticTag
     );
     if (DEBUG_SHOW_LIVE_NEGATIVE) {
@@ -1860,6 +1748,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   if (frozenHasData) {
     let frozenColor = colorize_sampled(
       texFrozen,
+      frozenGeometryTex,
+      frozenMetadataTex,
       frozenCoord,
       texSize,
       frozen_iter,
@@ -1870,8 +1760,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       frozenMagnified,
       uv_screen,
       uv_neutral,
-      frozenDistanceHeightOffset,
-      frozenDistanceHeightGradientScale,
+      zf,
       false
     );
     return vec4<f32>(frozenColor.rgb, 1.0);

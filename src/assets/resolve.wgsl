@@ -1,14 +1,16 @@
 // Presentation-only resolve pass.
 //
-// Raw terminal texels are exact step-1 values. An exact request (iter == -1)
-// or a budget-exhausted continuation may temporarily borrow finished dyadic
-// support, starting at step 2. This pass never writes back into raw orbit state.
+// Raw terminal texels are exact step-1 values. An incomplete texel may borrow
+// finished dyadic support starting at step 2. The compact display ABI is:
+//   values[0..2] = iteration, z.x, z.y
+//   geometry      = analytic gradient.xy, Laplacian, distance height
+//   metadata      = provenance exponent | stripe phase | coherence
 
 struct ResolveUniforms {
   mu: f32,
+  aspect: f32,
+  angle: f32,
   _padding0: f32,
-  _padding1: f32,
-  _padding2: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: ResolveUniforms;
@@ -22,109 +24,138 @@ struct VSOut {
 @vertex
 fn vs_main(@builtin(vertex_index) vid: u32) -> VSOut {
   var pos = array<vec2<f32>, 6>(
-    vec2<f32>(-1.0, -1.0),
-    vec2<f32>( 1.0, -1.0),
-    vec2<f32>(-1.0,  1.0),
-    vec2<f32>(-1.0,  1.0),
-    vec2<f32>( 1.0, -1.0),
-    vec2<f32>( 1.0,  1.0)
+    vec2<f32>(-1.0, -1.0), vec2<f32>(1.0, -1.0),
+    vec2<f32>(-1.0, 1.0), vec2<f32>(-1.0, 1.0),
+    vec2<f32>(1.0, -1.0), vec2<f32>(1.0, 1.0)
   );
-  var o: VSOut;
-  o.position = vec4<f32>(pos[vid], 0.0, 1.0);
-  o.uv = (pos[vid] + vec2<f32>(1.0)) * 0.5;
-  return o;
+  var out: VSOut;
+  out.position = vec4<f32>(pos[vid], 0.0, 1.0);
+  out.uv = (pos[vid] + vec2<f32>(1.0)) * 0.5;
+  return out;
 }
 
 struct FragOut {
-  @location(0) iter: vec4<f32>,
-  @location(1) genuine: vec4<f32>,
-  @location(2) zx: vec4<f32>,
-  @location(3) zy: vec4<f32>,
-  @location(4) dzx: vec4<f32>,
-  @location(5) dzy: vec4<f32>,
-  @location(6) ref_i: vec4<f32>,
-  @location(7) avgDirection: vec4<f32>,
+  @location(0) iter: f32,
+  @location(1) zx: f32,
+  @location(2) zy: f32,
+  @location(3) geometry: vec4<f32>,
+  @location(4) metadata: u32,
 };
-
-fn pack(v: f32) -> vec4<f32> {
-  return vec4<f32>(v, 0.0, 0.0, 0.0);
-}
-
-fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
-  return textureLoad(rawTex, coord, layer, 0).r;
-}
-
-fn load_finished(coord: vec2<i32>, step: u32) -> FragOut {
-  var o: FragOut;
-  o.iter = pack(loadLayer(coord, 0));
-  o.genuine = pack(f32(step));
-  o.zx = pack(loadLayer(coord, 2));
-  o.zy = pack(loadLayer(coord, 3));
-  o.dzx = pack(loadLayer(coord, 4));
-  o.dzy = pack(loadLayer(coord, 5));
-  o.ref_i = pack(loadLayer(coord, 6));
-  o.avgDirection = pack(loadLayer(coord, 7));
-  return o;
-}
-
-fn no_data() -> FragOut {
-  var o: FragOut;
-  o.iter = pack(-1.0);
-  o.genuine = pack(0.0);
-  o.zx = pack(0.0);
-  o.zy = pack(0.0);
-  o.dzx = pack(0.0);
-  o.dzy = pack(0.0);
-  o.ref_i = pack(0.0);
-  o.avgDirection = pack(0.0);
-  return o;
-}
 
 const TWO_PI: f32 = 6.283185307179586;
 const LN_2: f32 = 0.6931471805599453;
-const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
-const ORBIT_DIRECTION_BASE: f32 = 4096.0;
+const QUANTIZED_MAX: u32 = 16383u;
 
-fn smooth_frac(z_sq: f32, logMu: f32) -> f32 {
-  let log_z2 = log(max(z_sq, 1e-12));
-  return clamp(1.0 - log(max(log_z2 / logMu, 1e-12)) / LN_2, 0.0, 1.0);
+fn finite_scalar(value: f32) -> bool {
+  return value == value && abs(value) < 3.402823e38;
 }
 
-fn decode_avg_dir(encoded: f32) -> vec2<f32> {
-  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
-  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
-  return vec2<f32>(
-    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-  );
+fn load_layer(coord: vec2<i32>, layer: i32) -> f32 {
+  return textureLoad(rawTex, coord, layer, 0).r;
 }
 
-fn encode_avg_dir(avgDir: vec2<f32>) -> f32 {
-  let phase = clamp(avgDir * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
-  let xq = floor(phase.x * ORBIT_DIRECTION_SCALE + 0.5);
-  let yq = floor(phase.y * ORBIT_DIRECTION_SCALE + 0.5);
-  return xq * ORBIT_DIRECTION_BASE + yq;
+fn quantize_unit(value: f32) -> u32 {
+  let finite = select(0.0, value, finite_scalar(value));
+  return u32(round(clamp(finite, 0.0, 1.0) * f32(QUANTIZED_MAX)));
+}
+
+fn provenance_exponent(step: u32) -> u32 {
+  var value = max(step, 1u);
+  var exponent = 0u;
+  loop {
+    if (value <= 1u || exponent >= 15u) { break; }
+    value = value / 2u;
+    exponent = exponent + 1u;
+  }
+  return exponent;
+}
+
+fn pack_metadata(step: u32, stripePhase: f32, coherence: f32) -> u32 {
+  let stripe = quantize_unit(fract(stripePhase + 1.0));
+  let coherenceBits = quantize_unit(coherence);
+  return provenance_exponent(step) | (stripe << 4u) | (coherenceBits << 18u);
+}
+
+fn smooth_frac(zSquared: f32, logMu: f32) -> f32 {
+  let logZ2 = log(max(zSquared, 1e-12));
+  return clamp(1.0 - log(max(logZ2 / logMu, 1e-12)) / LN_2, 0.0, 1.0);
+}
+
+fn decode_terminal_stripe(word: u32) -> f32 {
+  return f32(word & QUANTIZED_MAX) / f32(QUANTIZED_MAX);
+}
+
+fn decode_terminal_coherence(word: u32) -> f32 {
+  return f32((word >> 14u) & QUANTIZED_MAX) / f32(QUANTIZED_MAX);
 }
 
 fn phase_to_dir(phase: f32) -> vec2<f32> {
-  let a = phase * TWO_PI;
-  return vec2<f32>(cos(a), sin(a));
+  let angle = phase * TWO_PI;
+  return vec2<f32>(cos(angle), sin(angle));
+}
+
+fn rotate_inverse(point: vec2<f32>, angle: f32) -> vec2<f32> {
+  let c = cos(angle);
+  let s = sin(angle);
+  return vec2<f32>(c * point.x + s * point.y, -s * point.x + c * point.y);
+}
+
+fn is_inside_rotated_screen(xyNeutral: vec2<f32>) -> bool {
+  let neutralExtent = sqrt(uni.aspect * uni.aspect + 1.0);
+  let local = rotate_inverse(xyNeutral * neutralExtent, uni.angle);
+  return abs(local.x) <= uni.aspect && abs(local.y) <= 1.0;
+}
+
+fn finite_or_zero(value: f32, minimum: f32, maximum: f32) -> f32 {
+  return clamp(select(0.0, value, finite_scalar(value)), minimum, maximum);
+}
+
+fn load_terminal_geometry(coord: vec2<i32>) -> vec4<f32> {
+  return vec4<f32>(
+    finite_or_zero(load_layer(coord, 1), -64.0, 64.0),
+    finite_or_zero(load_layer(coord, 5), -64.0, 64.0),
+    finite_or_zero(load_layer(coord, 7), 0.0, 64.0),
+    finite_or_zero(load_layer(coord, 4), -64.0, 64.0),
+  );
 }
 
 fn is_finished(coord: vec2<i32>) -> bool {
-  let iter = loadLayer(coord, 0);
-  if (iter == 0.0) {
-    return true;
-  }
-  if (iter < 0.0) {
-    return false;
-  }
-  let z = vec2<f32>(loadLayer(coord, 2), loadLayer(coord, 3));
+  let iter = load_layer(coord, 0);
+  if (iter == 0.0) { return true; }
+  if (iter < 0.0) { return false; }
+  let z = vec2<f32>(load_layer(coord, 2), load_layer(coord, 3));
   return dot(z, z) >= uni.mu;
+}
+
+fn load_finished(coord: vec2<i32>, step: u32) -> FragOut {
+  var out: FragOut;
+  out.iter = load_layer(coord, 0);
+  out.zx = load_layer(coord, 2);
+  out.zy = load_layer(coord, 3);
+  let escaped = out.iter > 0.0;
+  out.geometry = select(vec4<f32>(0.0), load_terminal_geometry(coord), escaped);
+  let terminalMetrics = bitcast<u32>(load_layer(coord, 6));
+  let stripe = select(0.0, decode_terminal_stripe(terminalMetrics), escaped);
+  let coherence = select(0.0, decode_terminal_coherence(terminalMetrics), escaped);
+  out.metadata = pack_metadata(step, stripe, coherence);
+  return out;
+}
+
+fn no_data() -> FragOut {
+  var out: FragOut;
+  out.iter = -1.0;
+  out.zx = 0.0;
+  out.zy = 0.0;
+  out.geometry = vec4<f32>(0.0);
+  out.metadata = 0u;
+  return out;
 }
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
+  if (!is_inside_rotated_screen(uv * 2.0 - vec2<f32>(1.0))) {
+    return no_data();
+  }
   let dims = vec2<u32>(textureDimensions(rawTex));
   let x = u32(clamp(uv.x * f32(dims.x), 0.0, f32(dims.x - 1u)));
   let y = u32(clamp((1.0 - uv.y) * f32(dims.y), 0.0, f32(dims.y - 1u)));
@@ -135,151 +166,104 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   }
 
   let logMu = log(max(uni.mu, 1.0001));
-  var step_u = 2u;
-
-  for (var level = 0u; level < 31u; level = level + 1u) {
-    if (step_u >= dims.x || step_u >= dims.y) {
-      return no_data();
-    }
-
-    let step_i = i32(step_u);
-    let mx = i32(x) % step_i;
-    let my = i32(y) % step_i;
-    let base_x = i32(x) - mx;
-    let base_y = i32(y) - my;
-    let fx = f32(mx) / f32(step_i);
-    let fy = f32(my) / f32(step_i);
+  var step = 2u;
+  for (var level = 0u; level < 15u; level = level + 1u) {
+    if (step >= dims.x || step >= dims.y) { return no_data(); }
+    let stepI = i32(step);
+    let base = vec2<i32>(i32(x) - i32(x) % stepI, i32(y) - i32(y) % stepI);
+    let fraction = vec2<f32>(f32(i32(x) % stepI), f32(i32(y) % stepI)) / f32(stepI);
     let weights = array<f32, 4>(
-      (1.0 - fx) * (1.0 - fy),
-      fx * (1.0 - fy),
-      (1.0 - fx) * fy,
-      fx * fy
+      (1.0 - fraction.x) * (1.0 - fraction.y),
+      fraction.x * (1.0 - fraction.y),
+      (1.0 - fraction.x) * fraction.y,
+      fraction.x * fraction.y
     );
     let candidates = array<vec2<i32>, 4>(
-      vec2<i32>(base_x, base_y),
-      vec2<i32>(base_x + step_i, base_y),
-      vec2<i32>(base_x, base_y + step_i),
-      vec2<i32>(base_x + step_i, base_y + step_i)
+      base, base + vec2<i32>(stepI, 0),
+      base + vec2<i32>(0, stepI), base + vec2<i32>(stepI)
     );
 
-    var wEscaped = 0.0;
-    var nEscaped = 0u;
+    var escapedWeight = 0.0;
+    var escapedCount = 0u;
+    var insideWeight = 0.0;
+    var insideCount = 0u;
     var baseIter = -1.0;
     var nuSum = 0.0;
-    var distSum = 0.0;
-    var zDirSum = vec2<f32>(0.0);
-    var angleDirSum = vec2<f32>(0.0);
-    var stripeDirSum = vec2<f32>(0.0);
-    var avgDirSum = vec2<f32>(0.0);
-    var bestEscapedW = -1.0;
-    var bestRefInt = 0.0;
-    var bestAngle = 0.0;
-    var bestStripe = 0.0;
-
-    var wInside = 0.0;
-    var nInside = 0u;
-    var bestInsideW = -1.0;
+    var geometrySum = vec4<f32>(0.0);
+    var zDirectionSum = vec2<f32>(0.0);
+    var stripeDirectionSum = vec2<f32>(0.0);
+    var coherenceSum = 0.0;
+    var bestInsideWeight = -1.0;
     var bestInsideCoord = vec2<i32>(0);
-    var hasFinished = false;
     var firstFinishedCoord = vec2<i32>(0);
+    var hasFinished = false;
 
     for (var i = 0u; i < 4u; i = i + 1u) {
-      let ccoord = candidates[i];
-      if (ccoord.x < 0 || ccoord.y < 0 || ccoord.x >= i32(dims.x) || ccoord.y >= i32(dims.y)) {
+      let candidate = candidates[i];
+      if (candidate.x < 0 || candidate.y < 0 || candidate.x >= i32(dims.x) || candidate.y >= i32(dims.y)
+          || !is_finished(candidate)) {
         continue;
       }
-      if (!is_finished(ccoord)) {
-        continue;
-      }
-
-      let w = weights[i];
-      let citer = loadLayer(ccoord, 0);
+      let weight = weights[i];
+      let iter = load_layer(candidate, 0);
       if (!hasFinished) {
         hasFinished = true;
-        firstFinishedCoord = ccoord;
+        firstFinishedCoord = candidate;
       }
-
-      if (citer == 0.0) {
-        nInside = nInside + 1u;
-        wInside = wInside + w;
-        if (w > bestInsideW) {
-          bestInsideW = w;
-          bestInsideCoord = ccoord;
+      if (iter == 0.0) {
+        insideCount = insideCount + 1u;
+        insideWeight = insideWeight + weight;
+        if (weight > bestInsideWeight) {
+          bestInsideWeight = weight;
+          bestInsideCoord = candidate;
         }
         continue;
       }
 
-      let z = vec2<f32>(loadLayer(ccoord, 2), loadLayer(ccoord, 3));
-      let z_sq = dot(z, z);
-      if (baseIter < 0.0) {
-        baseIter = citer;
-      }
-      nEscaped = nEscaped + 1u;
-      wEscaped = wEscaped + w;
-      nuSum = nuSum + w * ((citer - baseIter) + smooth_frac(z_sq, logMu));
-      distSum = distSum + w * loadLayer(ccoord, 4);
-      let angle = loadLayer(ccoord, 5);
-      angleDirSum = angleDirSum + w * vec2<f32>(cos(angle), sin(angle));
-      zDirSum = zDirSum + w * z / max(length(z), 1e-12);
-      let refVal = max(loadLayer(ccoord, 6), 0.0);
-      let stripePhase = fract(refVal);
-      stripeDirSum = stripeDirSum + w * phase_to_dir(stripePhase);
-      avgDirSum = avgDirSum + w * decode_avg_dir(loadLayer(ccoord, 7));
-      if (w > bestEscapedW) {
-        bestEscapedW = w;
-        bestRefInt = floor(refVal);
-        bestAngle = angle;
-        bestStripe = stripePhase;
-      }
+      let z = vec2<f32>(load_layer(candidate, 2), load_layer(candidate, 3));
+      if (baseIter < 0.0) { baseIter = iter; }
+      escapedCount = escapedCount + 1u;
+      escapedWeight = escapedWeight + weight;
+      nuSum = nuSum + weight * ((iter - baseIter) + smooth_frac(dot(z, z), logMu));
+      geometrySum = geometrySum + weight * load_terminal_geometry(candidate);
+      zDirectionSum = zDirectionSum + weight * z / max(length(z), 1e-12);
+      let terminalMetrics = bitcast<u32>(load_layer(candidate, 6));
+      stripeDirectionSum = stripeDirectionSum + weight * phase_to_dir(decode_terminal_stripe(terminalMetrics));
+      coherenceSum = coherenceSum + weight * decode_terminal_coherence(terminalMetrics);
     }
 
-    let nResolved = nEscaped + nInside;
-    if (nResolved >= 3u) {
-      if (wInside > wEscaped) {
-        return load_finished(bestInsideCoord, step_u);
-      }
-
-      if (wEscaped > 1e-6) {
-        let invW = 1.0 / wEscaped;
-        let nuRel = nuSum * invW;
-        let relFloor = floor(nuRel);
-        var iterOut = baseIter + relFloor;
-        var frac = clamp(nuRel - relFloor, 0.0, 0.9999);
+    if (escapedCount + insideCount >= 3u) {
+      if (insideWeight > escapedWeight) { return load_finished(bestInsideCoord, step); }
+      if (escapedWeight > 1e-6) {
+        let inverseWeight = 1.0 / escapedWeight;
+        let relativeNu = nuSum * inverseWeight;
+        let relativeFloor = floor(relativeNu);
+        var iterOut = baseIter + relativeFloor;
+        var fractionNu = clamp(relativeNu - relativeFloor, 0.0, 0.9999);
         if (iterOut < 1.0) {
           iterOut = 1.0;
-          frac = 0.0;
+          fractionNu = 0.0;
         }
-        let log_z2 = logMu * exp2(1.0 - frac);
-        let zLenOut = exp(0.5 * log_z2);
-        let zDirLen = length(zDirSum);
-        let zDir = select(vec2<f32>(1.0, 0.0), zDirSum / zDirLen, zDirLen > 1e-5);
-        let zOut = zDir * zLenOut;
-        let angleOut = select(bestAngle, atan2(angleDirSum.y, angleDirSum.x), length(angleDirSum) > 1e-5);
-        let stripeOut = select(
-          bestStripe,
-          fract(atan2(stripeDirSum.y, stripeDirSum.x) / TWO_PI + 1.0),
-          length(stripeDirSum) > 1e-5
+        let logZ2 = logMu * exp2(1.0 - fractionNu);
+        let zLength = exp(0.5 * logZ2);
+        let directionLength = length(zDirectionSum);
+        let direction = select(vec2<f32>(1.0, 0.0), zDirectionSum / directionLength, directionLength > 1e-5);
+        let stripe = select(0.0, fract(atan2(stripeDirectionSum.y, stripeDirectionSum.x) / TWO_PI + 1.0), length(stripeDirectionSum) > 1e-5);
+        var out: FragOut;
+        out.iter = iterOut;
+        out.zx = direction.x * zLength;
+        out.zy = direction.y * zLength;
+        out.geometry = clamp(
+          geometrySum * inverseWeight,
+          vec4<f32>(-64.0, -64.0, 0.0, -64.0),
+          vec4<f32>(64.0),
         );
-
-        var o: FragOut;
-        o.iter = pack(iterOut);
-        o.genuine = pack(f32(step_u));
-        o.zx = pack(zOut.x);
-        o.zy = pack(zOut.y);
-        o.dzx = pack(distSum * invW);
-        o.dzy = pack(angleOut);
-        o.ref_i = pack(bestRefInt + min(stripeOut, 0.999999));
-        o.avgDirection = pack(encode_avg_dir(clamp(avgDirSum * invW, vec2<f32>(-1.0), vec2<f32>(1.0))));
-        return o;
+        out.metadata = pack_metadata(step, stripe, coherenceSum * inverseWeight);
+        return out;
       }
-
-      if (hasFinished) {
-        return load_finished(firstFinishedCoord, step_u);
-      }
+      if (hasFinished) { return load_finished(firstFinishedCoord, step); }
     }
-
-    step_u = step_u * 2u;
+    step = step * 2u;
   }
-
   return no_data();
 }

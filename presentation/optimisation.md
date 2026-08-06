@@ -13,7 +13,8 @@ Le caractère progressif est désormais **temporel** :
 2. le GPU effectue un nombre adaptatif de tours de calcul par image ;
 3. les pixels qui n’ont pas terminé conservent leur état pour l’image suivante ;
 4. une passe bilinéaire fabrique seulement une présentation provisoire ;
-5. quand tout est terminé, la couleur lit directement les données exactes.
+5. quand tout est terminé, la couleur réutilise le dernier cache d’affichage
+   typé, cohérent avec ces données exactes.
 
 ~~~text
 réinitialisation / bord de pan / AA
@@ -47,10 +48,10 @@ La couche 0 de la texture brute suffit à distinguer les états principaux.
 | > 0, avec valeur de z sous le seuil | calcul commencé, budget de l’image épuisé |
 | > 0, avec valeur de z au-dessus du seuil | pixel échappé et terminé |
 
-Il n’existe plus de valeurs négatives -2, -4, -8, etc. La couche 1 vaut 1 pour
-une donnée brute exacte. Les valeurs supérieures ou égales à 2 n’apparaissent
-que dans la texture d’affichage résolue et indiquent la finesse du support
-bilinéaire provisoire.
+Il n’existe plus de valeurs négatives -2, -4, -8, etc. Dans l’état brut, la
+couche 1 vaut 1 pour une donnée exacte. Dans le cache d’affichage, la finesse
+du support bilinéaire est un exposant dyadique compact dans les métadonnées ;
+elle n’occupe plus une couche flottante.
 
 ## Une seule passe d’itération
 
@@ -100,8 +101,9 @@ raffinement.
 
 ## Resolve bilinéaire temporaire
 
-Le resolve est une passe de présentation, de la texture brute vers une texture
-résolue à huit couches.
+Le resolve est une passe de présentation, de la texture brute vers un cache
+typé de cinq attachements logiques : trois scalaires `iter`, `z.x`, `z.y`, une
+géométrie `gradient.xy, courbure, hauteur` et un mot de métadonnées.
 
 - Un pixel terminé passe avec un pas exact égal à 1.
 - Une requête ou une continuation incomplète cherche quatre voisins terminés
@@ -112,8 +114,14 @@ résolue à huit couches.
 
 Les quantités continues sont interpolées dans une représentation adaptée :
 nu lisse relativement à une itération locale, direction complexe normalisée,
-angle de dérivée et phase de bande sur le cercle. Le groupe intérieur ou
-extérieur dominant évite de fabriquer une fausse bordure.
+géométrie analytique et phase de bande sur le cercle. Le gradient et le
+Laplacien de la hauteur ont déjà été calculés en f32 au point d’échappement ; le
+resolve les copie pour un pixel exact et les interpole pour une présentation
+provisoire. Le groupe intérieur ou extérieur dominant évite de fabriquer une
+fausse bordure.
+
+Le détail du contrat et de ses unités est décrit dans
+[Cache géométrique compact](./cache-geometrique.md).
 
 Cette approximation ne retourne jamais dans la texture brute. Elle ne marque
 aucun pixel comme terminé et n’influence pas le compteur. Dès que la donnée
@@ -156,7 +164,7 @@ Les mesures séparent les coûts :
 
 - **Itération** : calcul fractal, piloté par le lot adaptatif ;
 - **Reprojection** : uniquement lors d’un pan ou d’une réinitialisation ;
-- **Resolve** : interpolation temporaire des données encore incomplètes ;
+- **Resolve** : copie ou interpolation temporaire des valeurs et de la géométrie analytique ;
 - **Couleur** et **Present** : shading, palette et accumulation AA.
 
 Le nombre « Pixels restants » agrège les requêtes exactes et les continuations.
