@@ -33,17 +33,14 @@ import type {InterpolationMode} from './Mandelbrot.ts'
 import {computeAaJitterOffset} from './Mandelbrot.ts'
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
+import {DISPLAY_VALUE_LAYERS, float16ToFloat32, isDisplaySetCurrent} from './displayGeometry'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
 export const DEBUG_VIEW_REACH = 6
 // ── Constants ────────────────────────────────────────────────────────
 
-// Number of r32float layers per texture array.
-// Raw state textures (A/B) carry a 9th layer: the Cartesian derivative log
-// scale derS for in-progress pixels (all-compute-der-cartesian). Display-side
-// textures (resolved/frozen) and their 8-target MRT pipelines stay at 8 —
-// they only ever consume the escaped format.
+// Number of r32float layers per raw texture array.
 // 13 = 9 iteration layers + the analytic-AA/future-geometry extras (9/10/11 carry the
 // independently scaled in-progress z″ and 12 its validity bit; 8..12 carry
 // the escaped polar-log derivative payload). Allocated unconditionally for
@@ -51,7 +48,6 @@ export const DEBUG_VIEW_REACH = 6
 // FOLLOW-UP: gate to 9 when antialiasLevel == 1 (saves 4 × texSize² × 4 B × 2
 // textures; needs a realloc path on the AA toggle).
 const RAW_LAYERS = 13
-const DISPLAY_LAYERS = 8
 
 // Adaptive iteration batch sizing — only the fused iteration pass is controlled.
 // Leave part of the frame budget to reprojection, resolve and color, which do not
@@ -622,6 +618,16 @@ export type Mandelbrot = {
     viewFloatexp?: Float64Array,
 }
 
+interface DisplaySet {
+    valuesTexture: GPUTexture
+    valuesArrayView: GPUTextureView
+    valueLayerViews: GPUTextureView[]
+    geometryTexture: GPUTexture
+    geometryView: GPUTextureView
+    metadataTexture: GPUTexture
+    metadataView: GPUTextureView
+}
+
 export class Engine {
     private snapshotCallback?: (png: string) => void;
     private snapshotDestWidth?: number;
@@ -645,12 +651,14 @@ export class Engine {
     rawBrushArrayView?: GPUTextureView // full 2d-array view for sampling
     rawBrushIterStorageView?: GPUTextureView // layer 0 storage view (mirrors A)
     rawBrushPayloadView?: GPUTextureView // layers 8..12 sampled view (mirrors A)
-    resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 8-layer r32float array
-    resolvedArrayView?: GPUTextureView // full 2d-array view for sampling
-    resolvedLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
-    frozenTexture?: GPUTexture // frozen snapshot of resolved texture for zoom reprojection
-    frozenArrayView?: GPUTextureView // full 2d-array view for sampling the frozen snapshot
-    frozenLayerViews: GPUTextureView[] = [] // per-layer 2d views for merge MRT
+    private resolvedDisplay?: DisplaySet
+    private frozenDisplay?: DisplaySet
+    /** Format-compatible frozen-geometry read copy used only during merge. */
+    private geometryScratchTexture?: GPUTexture
+    private geometryScratchView?: GPUTextureView
+    /** Frozen metadata read copy used while merge writes the frozen set. */
+    private metadataScratchTexture?: GPUTexture
+    private metadataScratchView?: GPUTextureView
 
     // merge pass (fuse resolved + frozen at zoom stop)
     pipelineMerge?: GPURenderPipeline
@@ -755,11 +763,9 @@ export class Engine {
     // Utility compute pass (pan shift / clear stamp), ping-pong A→B.
     private pipelineReprojectCs?: GPUComputePipeline
     private bindGroupReprojectCs?: GPUBindGroup
-    /** Alternative color bind group reading rawTexture (A) instead of resolved,
-     *  used when the resolve pass is skipped (image fully converged). */
-    private bindGroupColorRaw?: GPUBindGroup
-    /** True when the last rendered frame skipped copy A→resolved + resolve. */
-    private resolveSkipped = false
+    private rawFieldVersion = 0
+    private resolvedDisplayVersion = -1
+    private frozenDisplayVersion = -1
     /** frameSerial of the last frame that may have mutated rawTexture (A). */
     private lastRawMutationFrame = 0
     /** frameSerial at which the last applied counter readback was sampled. */
@@ -2045,18 +2051,29 @@ export class Engine {
                 { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 10, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 12, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
+                { binding: 13, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
+                // Raw is retained only for analytic-AA Taylor expansion/reach;
+                // ordinary color values always come from the typed display set.
+                { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
 
-        // 8 MRT targets for the display-side passes (resolve/merge). The raw
-        // iteration path writes via textureStore and never touches MRT.
-        const mrtTargets: GPUColorTargetState[] = Array.from({ length: DISPLAY_LAYERS }, () => ({ format: 'r32float' as GPUTextureFormat }))
+        const displayTargets: GPUColorTargetState[] = [
+            { format: 'r32float' },
+            { format: 'r32float' },
+            { format: 'r32float' },
+            { format: 'rgba16float' },
+            { format: 'r32uint' },
+        ]
 
         this.pipelineResolve = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
             vertex: { module: moduleResolve, entryPoint: 'vs_main' },
-            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: mrtTargets },
+            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: displayTargets },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Resolve',
         })
@@ -2153,14 +2170,18 @@ export class Engine {
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
+                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout Merge',
         })
         this.pipelineMerge = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMerge] }),
             vertex: { module: moduleMerge, entryPoint: 'vs_main' },
-            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: mrtTargets },
+            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: displayTargets },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Merge',
         })
@@ -2186,10 +2207,11 @@ export class Engine {
         const layoutAaTarget = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
                 // Sample-0 composite (rgba16float, screen res) for the contrast ramp.
-                { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout AaTarget',
         })
@@ -2243,7 +2265,6 @@ export class Engine {
         // bind groups seront (ré)créés dans resize car dépend des textures
         this.bindGroupResolve = undefined
         this.bindGroupColor = undefined
-        this.bindGroupColorRaw = undefined
         this.bindGroupMerge = undefined
         this.bindGroupInplace = undefined
         this.bindGroupReprojectCs = undefined
@@ -3571,8 +3592,10 @@ export class Engine {
         const textureSize = this.neutralSize
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
-        this.resolvedTexture?.destroy?.()
-        this.frozenTexture?.destroy?.()
+        this.destroyDisplaySet(this.resolvedDisplay)
+        this.destroyDisplaySet(this.frozenDisplay)
+        this.geometryScratchTexture?.destroy?.()
+        this.metadataScratchTexture?.destroy?.()
         this.accumTexture?.destroy?.()
         this.aaTargetTexture?.destroy?.()
 
@@ -3637,15 +3660,51 @@ export class Engine {
             label: 'Engine RawBrushTexture (B) PayloadView',
         })
 
-        const resolvedResult = createLayeredTexture('Engine ResolvedTexture', DISPLAY_LAYERS)
-        this.resolvedTexture = resolvedResult.texture
-        this.resolvedArrayView = resolvedResult.arrayView
-        this.resolvedLayerViews = resolvedResult.layerViews
+        const createDisplaySet = (label: string): DisplaySet => {
+            const values = createLayeredTexture(label + ' Values', DISPLAY_VALUE_LAYERS)
+            const geometryTexture = this.device.createTexture({
+                size: { width: textureSize, height: textureSize },
+                format: 'rgba16float',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+                    | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                label: label + ' Geometry',
+            })
+            const metadataTexture = this.device.createTexture({
+                size: { width: textureSize, height: textureSize },
+                format: 'r32uint',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+                    | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                label: label + ' Metadata',
+            })
+            return {
+                valuesTexture: values.texture,
+                valuesArrayView: values.arrayView,
+                valueLayerViews: values.layerViews,
+                geometryTexture,
+                geometryView: geometryTexture.createView({ label: label + ' GeometryView' }),
+                metadataTexture,
+                metadataView: metadataTexture.createView({ label: label + ' MetadataView' }),
+            }
+        }
 
-        const frozenResult = createLayeredTexture('Engine FrozenTexture', DISPLAY_LAYERS)
-        this.frozenTexture = frozenResult.texture
-        this.frozenArrayView = frozenResult.arrayView
-        this.frozenLayerViews = frozenResult.layerViews
+        this.resolvedDisplay = createDisplaySet('Engine ResolvedDisplay')
+        this.frozenDisplay = createDisplaySet('Engine FrozenDisplay')
+        this.geometryScratchTexture = this.device.createTexture({
+            size: { width: textureSize, height: textureSize },
+            format: 'rgba16float',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+            label: 'Engine MergeGeometryScratch',
+        })
+        this.geometryScratchView = this.geometryScratchTexture.createView({ label: 'Engine MergeGeometryScratch View' })
+        this.metadataScratchTexture = this.device.createTexture({
+            size: { width: textureSize, height: textureSize },
+            format: 'r32uint',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+            label: 'Engine MetadataScratch',
+        })
+        this.metadataScratchView = this.metadataScratchTexture.createView({ label: 'Engine MetadataScratch View' })
+        this.resolvedDisplayVersion = -1
+        this.frozenDisplayVersion = -1
 
         // AA accumulation texture: screen-resolution (matches the color pass output),
         // rgba16float to hold the linear-RGB sum + per-pixel sample count in alpha.
@@ -3687,17 +3746,24 @@ export class Engine {
         this.invalidateCounterReadback() // reset: not yet known after resize
     }
 
+    private destroyDisplaySet(display?: DisplaySet) {
+        display?.valuesTexture.destroy?.()
+        display?.geometryTexture.destroy?.()
+        display?.metadataTexture.destroy?.()
+    }
+
     /** Every bind group that names A or B. The reprojection swaps the two, so
      *  these are rebuilt on each swap as well as on resize. */
     private rebuildRawTextureBindGroups() {
-        if (this.pipelineAaTarget && this.rawArrayView && this.uniformBufferAaTarget && this.accumTextureView) {
+        if (this.pipelineAaTarget && this.resolvedDisplay && this.uniformBufferAaTarget && this.accumTextureView) {
             this.bindGroupAaTarget = this.device.createBindGroup({
                 layout: this.pipelineAaTarget.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: this.rawArrayView },
-                    { binding: 1, resource: this.aaTargetTextureView },
-                    { binding: 2, resource: { buffer: this.uniformBufferAaTarget } },
-                    { binding: 3, resource: this.accumTextureView },
+                    { binding: 0, resource: this.resolvedDisplay.valuesArrayView },
+                    { binding: 1, resource: this.resolvedDisplay.geometryView },
+                    { binding: 2, resource: this.aaTargetTextureView },
+                    { binding: 3, resource: { buffer: this.uniformBufferAaTarget } },
+                    { binding: 4, resource: this.accumTextureView },
                 ],
                 label: 'Engine BindGroup AaTarget',
             })
@@ -3745,17 +3811,21 @@ export class Engine {
 
         this.rebuildColorBindGroup()
 
-        // Merge pass bind group: reads resolved (binding 1) + rawBrushTexture as
-        // frozen-copy (binding 2).  At zoom stop we copyTexture(frozen→rawBrush)
-        // first so the merge can safely read frozen data while writing to frozen.
-        if (this.pipelineMerge && this.uniformBufferMerge) {
+        // Merge reads the coherent live set plus temporary frozen copies while
+        // writing the frozen set. Raw B supplies the three value-copy layers.
+        if (this.pipelineMerge && this.uniformBufferMerge && this.resolvedDisplay
+            && this.rawBrushArrayView && this.geometryScratchView && this.metadataScratchView) {
             const layout = this.pipelineMerge.getBindGroupLayout(0)
             this.bindGroupMerge = this.device.createBindGroup({
                 layout,
                 entries: [
                     { binding: 0, resource: { buffer: this.uniformBufferMerge } },
-                    { binding: 1, resource: this.resolvedArrayView! },
-                    { binding: 2, resource: this.rawBrushArrayView! },
+                    { binding: 1, resource: this.resolvedDisplay.valuesArrayView },
+                    { binding: 2, resource: this.resolvedDisplay.geometryView },
+                    { binding: 3, resource: this.resolvedDisplay.metadataView },
+                    { binding: 4, resource: this.rawBrushArrayView },
+                    { binding: 5, resource: this.geometryScratchView },
+                    { binding: 6, resource: this.metadataScratchView },
                 ],
                 label: 'Engine BindGroup Merge',
             })
@@ -4521,15 +4591,7 @@ export class Engine {
             renderOptions.gradeSaturation ?? 1.12, // 64: gradeSaturation (display grade)
             this.debugViewMode === DEBUG_VIEW_REACH ? 1 : 0, // 65: analytic-AA reach heatmap
             Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
-            // 67: why the reach view may have no z″ this frame. z″ is only
-            // accumulated when the shader runs unified (flag >= 4.5), and the
-            // flag falls back to 0 whenever the block table is not ready — so a
-            // user sitting in Auto can still be rendered in exact. Without this
-            // the view cannot tell "you chose Exact" from "the table is still
-            // building", and both look like the same empty screen.
-            this.approximationMode === 'auto'
-                ? (this.lastShaderApproxFlag >= 5 ? 2 : 1)
-                : 0,
+            2,                                    // 67: z″ is carried by every production path
             0,                                    // 68: reserved
             0,                                    // 69: reserved
             0,                                    // 70: uniform padding
@@ -4959,8 +5021,8 @@ export class Engine {
             : undefined
         const resolveUniforms = new Float32Array([
             this.previousMandelbrot.mu,
-            0,
-            0,
+            aspect,
+            this.previousMandelbrot.angle,
             0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
@@ -5002,14 +5064,26 @@ export class Engine {
         // writing to frozen. rawBrushTexture will be overwritten by the brush pass.
         if (this.needMergeSnapshot
             && this.pipelineMerge && this.bindGroupMerge
-            && this.resolvedTexture && this.frozenTexture && this.rawBrushTexture) {
+            && this.resolvedDisplay && this.frozenDisplay && this.rawBrushTexture
+            && this.geometryScratchTexture && this.metadataScratchTexture
+            && this.frozenDisplayVersion >= 0) {
             const texSize = this.neutralSize
-            // 1) Copy frozen → rawBrushTexture (temp read-only copy of frozen;
-            //    B has 9 layers, frozen 8 — copy the 8 display layers)
+            // Copy the frozen set to format-compatible temporary resources so
+            // the merge may read it while writing the frozen destination.
             commandEncoder.copyTextureToTexture(
-                { texture: this.frozenTexture },
+                { texture: this.frozenDisplay.valuesTexture },
                 { texture: this.rawBrushTexture },
-                { width: texSize, height: texSize, depthOrArrayLayers: DISPLAY_LAYERS },
+                { width: texSize, height: texSize, depthOrArrayLayers: DISPLAY_VALUE_LAYERS },
+            )
+            commandEncoder.copyTextureToTexture(
+                { texture: this.frozenDisplay.geometryTexture },
+                { texture: this.geometryScratchTexture },
+                { width: texSize, height: texSize },
+            )
+            commandEncoder.copyTextureToTexture(
+                { texture: this.frozenDisplay.metadataTexture },
+                { texture: this.metadataScratchTexture },
+                { width: texSize, height: texSize },
             )
             // 2) Write merge uniforms (captured at zoom stop before state reset)
             const mergeData = new Float32Array([
@@ -5021,15 +5095,16 @@ export class Engine {
                 this.mergeUniforms.angle,
             ])
             this.device.queue.writeBuffer(this.uniformBufferMerge!, 0, mergeData.buffer)
-            // 3) MRT render pass: reads resolved + rawBrushTexture(frozen copy),
-            //    writes directly into frozen's 8 layer views.
-            const mergeAttachments: GPURenderPassColorAttachment[] =
-                this.frozenLayerViews.map(view => ({
-                    view,
-                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                    loadOp: 'clear' as GPULoadOp,
-                    storeOp: 'store' as GPUStoreOp,
-                }))
+            const mergeAttachments: GPURenderPassColorAttachment[] = [
+                ...this.frozenDisplay.valueLayerViews,
+                this.frozenDisplay.geometryView,
+                this.frozenDisplay.metadataView,
+            ].map(view => ({
+                view,
+                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                loadOp: 'clear' as GPULoadOp,
+                storeOp: 'store' as GPUStoreOp,
+            }))
             const rpassMerge = commandEncoder.beginRenderPass({
                 colorAttachments: mergeAttachments,
                 timestampWrites: this.tsWrites(0),
@@ -5038,6 +5113,7 @@ export class Engine {
             rpassMerge.setBindGroup(0, this.bindGroupMerge)
             rpassMerge.draw(6, 1, 0, 0)
             rpassMerge.end()
+            this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needMergeSnapshot = false
             this.frozenAligned = true
             this.frozenPanShiftX = 0
@@ -5045,14 +5121,24 @@ export class Engine {
         }
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
-        if (this.needFreezeSnapshot && this.resolvedTexture && this.frozenTexture) {
-            const layerCount = DISPLAY_LAYERS
+        if (this.needFreezeSnapshot && this.resolvedDisplay && this.frozenDisplay) {
             const texSize = this.neutralSize
             commandEncoder.copyTextureToTexture(
-                { texture: this.resolvedTexture },
-                { texture: this.frozenTexture },
-                { width: texSize, height: texSize, depthOrArrayLayers: layerCount },
+                { texture: this.resolvedDisplay.valuesTexture },
+                { texture: this.frozenDisplay.valuesTexture },
+                { width: texSize, height: texSize, depthOrArrayLayers: DISPLAY_VALUE_LAYERS },
             )
+            commandEncoder.copyTextureToTexture(
+                { texture: this.resolvedDisplay.geometryTexture },
+                { texture: this.frozenDisplay.geometryTexture },
+                { width: texSize, height: texSize },
+            )
+            commandEncoder.copyTextureToTexture(
+                { texture: this.resolvedDisplay.metadataTexture },
+                { texture: this.frozenDisplay.metadataTexture },
+                { width: texSize, height: texSize },
+            )
+            this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needFreezeSnapshot = false
             this.frozenAligned = true
             this.frozenPanShiftX = 0
@@ -5063,12 +5149,11 @@ export class Engine {
             }
         }
 
-        // Helper: build 8 MRT color attachments from per-layer views
-        const makeMrtAttachments = (
-            layerViews: GPUTextureView[],
+        const makeDisplayAttachments = (
+            display: DisplaySet,
             loadOp: GPULoadOp = 'clear',
         ): GPURenderPassColorAttachment[] =>
-            layerViews.map(view => ({
+            [...display.valueLayerViews, display.geometryView, display.metadataView].map(view => ({
                 view,
                 clearValue: { r: 0, g: 0, b: 0, a: 0 },
                 loadOp,
@@ -5086,8 +5171,9 @@ export class Engine {
         // Track frames that may mutate A: utility frames rewrite it wholesale;
         // in-place frames only write when work remains (unknown counts are
         // conservatively treated as a mutation).
-        if (utilityNeeded || this.unfinishedPixelCount !== 0) {
+        if (utilityNeeded || this.aaReseedPending || this.unfinishedPixelCount !== 0) {
             this.lastRawMutationFrame = frameSerial
+            this.rawFieldVersion++
         }
 
         {
@@ -5173,23 +5259,14 @@ export class Engine {
             computePass.end()
         }
 
-        // ── Resolve gating (C1) ──────────────────────────────────────────
-        // When the image is fully converged (0 remaining, sampled
-        // after the last frame that mutated A), resolved would be identical
-        // to A: skip the copy + resolve pass and let color read A directly.
-        // Frames requesting a frozen snapshot or merge keep the resolve so
-        // resolvedTexture is guaranteed fresh for the next frame's copy.
-        // The reach view reads the analytic payload in layers 8/11/12, which
-        // only exist in rawTexture (13 layers) — resolvedTexture carries 8. So
-        // it takes the raw path unconditionally instead of waiting for full
-        // convergence; pixels not yet computed simply read as "no data".
+        // Reuse the typed display set on color-only frames. Raw is never a
+        // display ABI bypass: resolve may be skipped only when the cached
+        // geometry version matches the field version.
         const converged = !this.needFreezeSnapshot
             && !this.needMergeSnapshot
             && this.unfinishedPixelCount === 0
             && this.counterSampleFrame >= this.lastRawMutationFrame
-        const skipResolve = !!this.bindGroupColorRaw
-            && (this.debugViewMode === DEBUG_VIEW_REACH || converged)
-        this.resolveSkipped = skipResolve
+        const skipResolve = converged && isDisplaySetCurrent(this.rawFieldVersion, this.resolvedDisplayVersion)
 
         // Fully converged: safe to capture an AA sample. No pending history clear,
         // no freeze/merge, not zooming, orbit complete, pixel counts known and at
@@ -5208,22 +5285,18 @@ export class Engine {
             && !this.hasPendingCounterReadbackForCurrentGeneration()
 
         if (!skipResolve) {
-            // Pass 2: temporary bilinear presentation (A -> resolved).
-            // resolve.wgsl writes every texel — temporary support and verbatim
-            // pass-through alike — so the former copyTextureToTexture pre-fill
-            // is gone and the attachments need no load. On a tile-based GPU that
-            // takes the stage from four traversals of the 8 r32float display
-            // layers (copy read + copy write + attachment load + attachment
-            // store) down to two. Discarding never saved the store, so the
-            // pass-through writes cost nothing that was not already paid.
+            // Resolve only copies/interpolates terminal analytic geometry and
+            // packs display provenance; no neighbour finalization pass remains.
             const rpassResolve = commandEncoder.beginRenderPass({
-                colorAttachments: makeMrtAttachments(this.resolvedLayerViews, 'clear'),
+                colorAttachments: makeDisplayAttachments(this.resolvedDisplay!, 'clear'),
                 timestampWrites: this.tsWrites(4),
             })
             rpassResolve.setPipeline(this.pipelineResolve)
             rpassResolve.setBindGroup(0, this.bindGroupResolve)
             rpassResolve.draw(6, 1, 0, 0)
             rpassResolve.end()
+
+            this.resolvedDisplayVersion = this.rawFieldVersion
         }
 
         if (counterReadbackSlot) {
@@ -5241,7 +5314,7 @@ export class Engine {
         }
 
         // ── Pass 3 (color) + Pass 4 (AA present) ──────────────────────────
-        const colorBindGroup = (skipResolve ? this.bindGroupColorRaw! : this.bindGroupColor)!
+        const colorBindGroup = this.bindGroupColor!
         const swapView = this.ctx.getCurrentTexture().createView()
 
         const antialiasLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
@@ -5289,7 +5362,7 @@ export class Engine {
         // payload layers 8..12, which exist only on the raw texture binding.
         // The ACCUM pass always binds raw (below), so the flag only needs the
         // binding to exist. update() pre-wrote 0; this lands before submit.
-        if (aaCompositeThisFrame && !!this.bindGroupColorRaw && this.aaSampleIndex > 0
+        if (aaCompositeThisFrame && this.aaSampleIndex > 0
             && (this.aaOffsetX !== 0 || this.aaOffsetY !== 0)
             && this.aaAnalyticParams(aspect).enabled) {
             this.device.queue.writeBuffer(this.uniformBufferColor!, 63 * 4, new Float32Array([1]).buffer)
@@ -5307,13 +5380,10 @@ export class Engine {
                 timestampWrites: this.tsWrites(5),
             })
             rpassAccum.setPipeline(firstSample ? this.pipelineColorAccumClear! : this.pipelineColorAccum!)
-            // Accumulation reads the RAW binding directly: composites may now run
-            // with a few idle-threshold unfinished pixels (skipResolve false), and
-            // the analytic z″ payload (layers 8..12) only exists on raw —
-            // falling back to the resolved 8-layer binding would silently disable
-            // the expansion for the whole sample. Raw genuine values are what the
-            // accumulator wants anyway (resolve is a display nicety).
-            rpassAccum.setBindGroup(0, this.bindGroupColorRaw ?? colorBindGroup)
+            // Accumulation reads the coherent typed display set. The raw texture
+            // remains separately bound only for the analytic-AA Taylor payload
+            // (layers 8..12); it is never used as the display-value ABI.
+            rpassAccum.setBindGroup(0, colorBindGroup)
             rpassAccum.draw(6, 1, 0, 0)
             rpassAccum.end()
         } else if (!aaShowAccum) {
@@ -5382,8 +5452,8 @@ export class Engine {
         }
 
         // Bake the AA target map once, right after sample 0 has converged and been
-        // composited (reads the converged neutral DE in rawTexture). Reused by the
-        // color gate and the selective reseed for all subsequent samples.
+        // composited (reads the converged typed values and cached height). Reused
+        // by the color gate and selective reseed for all subsequent samples.
         const aaBakeThisFrame = aaCompositeThisFrame
             && this.aaSampleIndex === 0
             && !!this.pipelineAaTarget
@@ -5392,7 +5462,7 @@ export class Engine {
         if (aaBakeThisFrame) {
             // Contrast/moiré predictor inputs (design D-contrast): the bake
             // Sobels the sample-0 composite (encoded just above in this same
-            // frame) and reads the palette-phase frequency from the raw layers.
+            // frame) and reads palette frequency from the typed value layers.
             const bakeMandelbrot = this.previousMandelbrot!
             this.device.queue.writeBuffer(
                 this.uniformBufferAaTarget!,
@@ -5607,8 +5677,10 @@ export class Engine {
         this.referenceWorker = undefined
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
-        this.resolvedTexture?.destroy?.()
-        this.frozenTexture?.destroy?.()
+        this.destroyDisplaySet(this.resolvedDisplay)
+        this.destroyDisplaySet(this.frozenDisplay)
+        this.geometryScratchTexture?.destroy?.()
+        this.metadataScratchTexture?.destroy?.()
         this.mandelbrotReferenceBuffer?.destroy?.()
         this.mandelbrotBlaBuffer?.destroy?.()
         this.mandelbrotBlaLevelBuffer?.destroy?.()
@@ -5812,34 +5884,30 @@ export class Engine {
     }
 
     private rebuildColorBindGroup() {
-        if (this.pipelineColor && this.resolvedArrayView && this.frozenArrayView) {
+        if (this.pipelineColor && this.resolvedDisplay && this.frozenDisplay && this.rawArrayView) {
             const layout = this.pipelineColor.getBindGroupLayout(0)
-            const makeEntries = (neutralView: GPUTextureView): GPUBindGroupEntry[] => [
+            const entries: GPUBindGroupEntry[] = [
                 { binding: 0, resource: { buffer: this.uniformBufferColor! } },
-                { binding: 1, resource: neutralView },
+                { binding: 1, resource: this.resolvedDisplay.valuesArrayView },
                 { binding: 2, resource: this.tileTextureView! },
                 { binding: 3, resource: this.skyboxTextureView! },
                 { binding: 4, resource: this.webcamTextureView! },
                 { binding: 5, resource: this.paletteTextureView! },
-                { binding: 6, resource: this.frozenArrayView! },
+                { binding: 6, resource: this.frozenDisplay.valuesArrayView },
                 { binding: 7, resource: this.paletteSampler! },
                 { binding: 8, resource: this.skyboxSampler! },
                 { binding: 9, resource: this.aaTargetTextureView! },
+                { binding: 10, resource: this.resolvedDisplay.geometryView },
+                { binding: 11, resource: this.frozenDisplay.geometryView },
+                { binding: 12, resource: this.resolvedDisplay.metadataView },
+                { binding: 13, resource: this.frozenDisplay.metadataView },
+                { binding: 14, resource: this.rawArrayView },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,
-                entries: makeEntries(this.resolvedArrayView),
+                entries,
                 label: 'Engine BindGroup Color',
             })
-            // Alternative bind group reading rawTexture (A) directly, used when
-            // the resolve pass is skipped (fully converged image).
-            this.bindGroupColorRaw = this.rawArrayView
-                ? this.device.createBindGroup({
-                    layout,
-                    entries: makeEntries(this.rawArrayView),
-                    label: 'Engine BindGroup Color (raw)',
-                })
-                : undefined
         }
     }
 
@@ -5870,13 +5938,7 @@ export class Engine {
         return texture
     }
 
-    // ── Readback d'un pixel d'itération depuis la texture resolved ────
-    // Convertit les coordonnées écran (CSS) en coordonnées texture neutre,
-    // lit les couches 0 (iter), 2 (zx), 3 (zy), 4/5 (hauteur/angle si échappé, dérivée si reprise)
-    // et renvoie les données brutes nécessaires au calcul de la phase palette.
-
-    /** Données d'itération lues depuis le GPU pour un pixel. */
-    static readonly ITER_PIXEL_LAYERS = [0, 2, 3, 4, 5] as const
+    // ── Readback d'un pixel depuis le display set typé ───────────────
 
     /**
      * Lit les données d'itération en un point écran (coordonnées CSS, relatives au canvas).
@@ -5892,14 +5954,18 @@ export class Engine {
         cssY: number,
         canvasWidth: number,
         canvasHeight: number,
-    ): Promise<{ iter: number; zx: number; zy: number; derX: number; derY: number } | null> {
-        if (!this.resolvedTexture || !this.device) return null
-
-        // When the resolve pass is gated (fully converged image), resolvedTexture
-        // is stale — read the same data from rawTexture (A) instead.
-        const pickSourceTexture = this.resolveSkipped && this.rawTexture
-            ? this.rawTexture
-            : this.resolvedTexture
+    ): Promise<{
+        iter: number
+        zx: number
+        zy: number
+        derX: number
+        derY: number
+        gradientX: number
+        gradientY: number
+        curvature: number
+        metadata: number
+    } | null> {
+        if (!this.resolvedDisplay || !this.device || this.resolvedDisplayVersion < 0) return null
 
         const aspect = this.width / Math.max(1, this.height)
         const angle = this.previousMandelbrot?.angle ?? 0
@@ -5936,13 +6002,12 @@ export class Engine {
         const texelX = Math.floor(Math.max(0, Math.min(texSize - 1, uvNeutralX * texSize)))
         const texelY = Math.floor(Math.max(0, Math.min(texSize - 1, (1 - uvNeutralY) * texSize)))
 
-        // Lecture GPU: copier les 5 couches nécessaires (1 texel chacune) dans un buffer
-        const layerIndices = Engine.ITER_PIXEL_LAYERS
-        const floatsPerLayer = 1
-        const bytesPerFloat = 4
+        // Three scalar value layers, one rgba16 geometry texel and one uint
+        // metadata word are copied into independently aligned rows.
         const align256 = (n: number) => ((n + 255) & ~255)
-        const bytesPerRow = align256(floatsPerLayer * bytesPerFloat) // 256 minimum pour WebGPU
-        const totalBytes = bytesPerRow * layerIndices.length
+        const bytesPerRow = align256(8)
+        const fieldCount = 5
+        const totalBytes = bytesPerRow * fieldCount
 
         const readBuffer = this.device.createBuffer({
             size: totalBytes,
@@ -5951,38 +6016,68 @@ export class Engine {
         })
 
         const encoder = this.device.createCommandEncoder()
-        for (let i = 0; i < layerIndices.length; i++) {
+        for (let layer = 0; layer < DISPLAY_VALUE_LAYERS; layer++) {
             encoder.copyTextureToBuffer(
                 {
-                    texture: pickSourceTexture,
-                    origin: { x: texelX, y: texelY, z: layerIndices[i] },
+                    texture: this.resolvedDisplay.valuesTexture,
+                    origin: { x: texelX, y: texelY, z: layer },
                 },
                 {
                     buffer: readBuffer,
-                    offset: bytesPerRow * i,
+                    offset: bytesPerRow * layer,
                     bytesPerRow,
                 },
                 { width: 1, height: 1, depthOrArrayLayers: 1 },
             )
         }
+        encoder.copyTextureToBuffer(
+            { texture: this.resolvedDisplay.geometryTexture, origin: { x: texelX, y: texelY } },
+            { buffer: readBuffer, offset: bytesPerRow * 3, bytesPerRow },
+            { width: 1, height: 1 },
+        )
+        encoder.copyTextureToBuffer(
+            { texture: this.resolvedDisplay.metadataTexture, origin: { x: texelX, y: texelY } },
+            { buffer: readBuffer, offset: bytesPerRow * 4, bytesPerRow },
+            { width: 1, height: 1 },
+        )
         this.device.queue.submit([encoder.finish()])
 
         await readBuffer.mapAsync(GPUMapMode.READ)
-        const mapped = new Float32Array(readBuffer.getMappedRange())
-        // Extraire les valeurs depuis chaque couche (séparées par bytesPerRow/4 floats)
-        const stride = bytesPerRow / bytesPerFloat
-        const iter = mapped[0 * stride]
-        const zx   = mapped[1 * stride]
-        const zy   = mapped[2 * stride]
-        const derX = mapped[3 * stride]
-        const derY = mapped[4 * stride]
+        const mappedRange = readBuffer.getMappedRange()
+        const floats = new Float32Array(mappedRange)
+        const halves = new Uint16Array(mappedRange)
+        const words = new Uint32Array(mappedRange)
+        const floatStride = bytesPerRow / 4
+        const halfStride = bytesPerRow / 2
+        const iter = floats[0]
+        const zx = floats[floatStride]
+        const zy = floats[2 * floatStride]
+        const geometryOffset = 3 * halfStride
+        const gradientX = float16ToFloat32(halves[geometryOffset])
+        const gradientY = float16ToFloat32(halves[geometryOffset + 1])
+        const curvature = float16ToFloat32(halves[geometryOffset + 2])
+        const distanceHeight = float16ToFloat32(halves[geometryOffset + 3])
+        const metadata = words[(4 * bytesPerRow) / 4] >>> 0
         readBuffer.unmap()
         readBuffer.destroy()
 
         // Pixel sentinelle ou non calculé
         if (iter < 0) return null
 
-        return { iter, zx, zy, derX, derY }
+        const gradientAngle = Math.hypot(gradientX, gradientY) > 1e-8
+            ? Math.atan2(gradientY, gradientX)
+            : 0
+        return {
+            iter,
+            zx,
+            zy,
+            derX: distanceHeight,
+            derY: gradientAngle,
+            gradientX,
+            gradientY,
+            curvature,
+            metadata,
+        }
     }
 
     // Met à jour la texture GPU à partir de la webcam (à appeler à chaque frame si webcamEnabled)

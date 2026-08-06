@@ -11,6 +11,10 @@ import {
   type TextureMappingConfig,
   textureMappingVariableId,
 } from '../TextureMapping';
+import {
+  DISPLAY_VALUE_LAYERS,
+  packDisplayMetadata,
+} from '../displayGeometry';
 
 // ── Float32 → Float16 (copied from Engine.ts) ──
 const _f32 = new Float32Array(1);
@@ -40,11 +44,8 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
   return dst;
 }
 
-const LAYER_COUNT = 8;
 const PREVIEW_MU = 1000000;
-const COLOR_UNIFORM_FLOAT_COUNT = 68;
-const ORBIT_DIRECTION_SCALE = 4095;
-const ORBIT_DIRECTION_BASE = 4096;
+const COLOR_UNIFORM_FLOAT_COUNT = 72;
 /** Number of synthetic iterations to display. */
 const ITER_COUNT = 100;
 /**
@@ -100,8 +101,12 @@ let uniformBuffer: GPUBuffer | null = null;
 let paletteTexture: GPUTexture | null = null;
 let paletteTextureView: GPUTextureView | null = null;
 let paletteSampler: GPUSampler | null = null;
-let syntheticTexture: GPUTexture | null = null;
-let syntheticArrayView: GPUTextureView | null = null;
+let syntheticValuesTexture: GPUTexture | null = null;
+let syntheticValuesView: GPUTextureView | null = null;
+let syntheticGeometryTexture: GPUTexture | null = null;
+let syntheticGeometryView: GPUTextureView | null = null;
+let syntheticMetadataTexture: GPUTexture | null = null;
+let syntheticMetadataView: GPUTextureView | null = null;
 let ctx: GPUCanvasContext | null = null;
 let format: GPUTextureFormat = 'bgra8unorm';
 // sRGB view format so the GPU applies linear→sRGB on write — matching the real
@@ -114,7 +119,6 @@ let tileTextureGpu: GPUTexture | null = null;
 let skyboxTextureGpu: GPUTexture | null = null;
 let skyboxSampler: GPUSampler | null = null;
 let webcamTextureGpu: GPUTexture | null = null;
-let frozenTextureGpu: GPUTexture | null = null;
 let aaTargetTextureGpu: GPUTexture | null = null;
 // Current backing size (physical px); applySize() rebuilds when it changes.
 let currentW = 0;
@@ -163,26 +167,29 @@ function create1x1R32F(dev: GPUDevice, value = 0): GPUTexture {
 }
 
 /**
- * Build the 8-layer r32float synthetic texture.
+ * Build the same typed display set as the renderer: three r32float value
+ * layers, one rgba16float geometry field and one packed r32uint metadata field.
  *
  * Width = canvas pixel width, height = canvas pixel height (64 CSS px * dpr).
  * Each column of ~(width/ITER_COUNT) pixels represents one iteration (1..100).
  * The vertical axis varies the synthetic shading angle to show relief variation.
  *
- * Layer 0: iter (1..ITER_COUNT)
- * Layer 1: sentinel (0 — not used)
- * Layer 2: zx — real(z), on escape circle
- * Layer 3: zy — imag(z), on escape circle
- * Layer 4: distance height
- * Layer 5: derivative angle
- * Layer 6: ref_i + fractional stripe phase
- * Layer 7: packed average orbit direction
+ * Value layers: iter, z.x, z.y.
+ * Geometry: d(height)/dx, d(height)/dy, Laplacian(height), height.
+ * Metadata: support exponent, stripe phase, direction coherence.
  */
-function buildSyntheticData(w: number, h: number, mu: number): Float32Array[] {
-  const layers: Float32Array[] = [];
-  for (let l = 0; l < LAYER_COUNT; l++) {
-    layers.push(new Float32Array(w * h));
-  }
+function buildSyntheticData(w: number, h: number, mu: number): {
+  values: Float32Array[];
+  geometry: Float32Array;
+  metadata: Uint32Array;
+} {
+  const values = Array.from(
+    { length: DISPLAY_VALUE_LAYERS },
+    () => new Float32Array(w * h),
+  );
+  const height = new Float32Array(w * h);
+  const geometry = new Float32Array(w * h * 4);
+  const metadata = new Uint32Array(w * h);
 
   const escapeRadius = Math.sqrt(mu) * 1.1; // just outside escape
 
@@ -203,32 +210,44 @@ function buildSyntheticData(w: number, h: number, mu: number): Float32Array[] {
       // centre → 0 at the top/bottom edges); its vertical gradient tilts the normal
       // like a rounded rod — bright toward the centre, curving away (darker) to the
       // edges. The SSAA resolve pass smooths the reflection that used to block up here.
-      // angle_der stays near the light (base orientation) with only a light horizontal
-      // drift so the palette progression reads cleanly.
+      // The cached gradient and Laplacian are derived from this same field below.
       const cyl = 2 * vFrac - 1;                                // -1 (top) .. +1 (bottom)
       const cylProfile = Math.sqrt(Math.max(0, 1 - cyl * cyl)); // 1 at centre → 0 at edges
       const CYL_HEIGHT = 60.0;   // curvature strength (usable ≈20–60; shader clamps height at ±64)
       const distanceHeight = 4.0 + cylProfile * CYL_HEIGHT;
-      const angleDer = PREVIEW_LIGHT_ANGLE + (iterFloat / ITER_COUNT) * 0.6;
-
-      layers[0][idx] = iterFloat;  // iter
-      layers[1][idx] = 1;          // genuine flag (1.0 = genuinely computed)
-      layers[2][idx] = zx;
-      layers[3][idx] = zy;
-      layers[4][idx] = distanceHeight;
-      layers[5][idx] = angleDer;
+      values[0][idx] = iterFloat;
+      values[1][idx] = zx;
+      values[2][idx] = zy;
+      // A slight longitudinal wave keeps phase-coloring visible while the
+      // dominant cylinder profile exercises the cached relief geometry.
+      height[idx] = distanceHeight + 0.4 * Math.sin(iterFloat * 0.3);
       const stripePhase = 0.5 + 0.5 * Math.sin(iterFloat * 0.2);
       const coherence = Math.abs(Math.sin(iterFloat * 0.065 + vFrac * Math.PI));
-      const avgDirAngle = iterFloat * 0.08 + vFrac * Math.PI;
-      const avgDirX = Math.cos(avgDirAngle) * coherence;
-      const avgDirY = Math.sin(avgDirAngle) * coherence;
-      const avgDirXQ = Math.round(Math.max(0, Math.min(1, avgDirX * 0.5 + 0.5)) * ORBIT_DIRECTION_SCALE);
-      const avgDirYQ = Math.round(Math.max(0, Math.min(1, avgDirY * 0.5 + 0.5)) * ORBIT_DIRECTION_SCALE);
-      layers[6][idx] = stripePhase;
-      layers[7][idx] = avgDirXQ * ORBIT_DIRECTION_BASE + avgDirYQ;
+      metadata[idx] = packDisplayMetadata(1, stripePhase, coherence);
     }
   }
-  return layers;
+
+  const sampleHeight = (x: number, y: number, fallback: number): number => {
+    if (x < 0 || x >= w || y < 0 || y >= h) return fallback;
+    return height[y * w + x];
+  };
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const idx = y * w + x;
+      const center = height[idx];
+      const left = sampleHeight(x - 1, y, center);
+      const right = sampleHeight(x + 1, y, center);
+      const up = sampleHeight(x, y - 1, center);
+      const down = sampleHeight(x, y + 1, center);
+      const geometryOffset = idx * 4;
+      geometry[geometryOffset] = (right - left) * 0.5;
+      geometry[geometryOffset + 1] = (up - down) * 0.5;
+      geometry[geometryOffset + 2] = right + left + up + down - 4 * center;
+      geometry[geometryOffset + 3] = center;
+    }
+  }
+
+  return { values, geometry, metadata };
 }
 
 /** Upload palette to GPU. */
@@ -268,28 +287,31 @@ function render() {
 
 /** Rebuild the bind group from current GPU resources. */
 function rebuildBindGroup() {
-  if (!device || !bindGroupLayout || !uniformBuffer || !syntheticArrayView
+  if (!device || !bindGroupLayout || !uniformBuffer || !syntheticValuesView
+      || !syntheticGeometryView || !syntheticMetadataView
       || !tileTextureGpu || !skyboxTextureGpu || !webcamTextureGpu
-      || !paletteTextureView || !frozenTextureGpu || !paletteSampler || !skyboxSampler
+      || !paletteTextureView || !paletteSampler || !skyboxSampler
       || !aaTargetTextureGpu) return;
-  const frozenView = frozenTextureGpu.createView({
-    dimension: '2d-array',
-    baseArrayLayer: 0,
-    arrayLayerCount: LAYER_COUNT,
-  });
   bindGroup = device.createBindGroup({
     layout: bindGroupLayout,
     entries: [
       { binding: 0, resource: { buffer: uniformBuffer } },
-      { binding: 1, resource: syntheticArrayView },
+      { binding: 1, resource: syntheticValuesView },
       { binding: 2, resource: tileTextureGpu.createView() },
       { binding: 3, resource: skyboxTextureGpu.createView() },
       { binding: 4, resource: webcamTextureGpu.createView() },
       { binding: 5, resource: paletteTextureView },
-      { binding: 6, resource: frozenView },
+      { binding: 6, resource: syntheticValuesView },
       { binding: 7, resource: paletteSampler },
       { binding: 8, resource: skyboxSampler },
       { binding: 9, resource: aaTargetTextureGpu.createView() },
+      { binding: 10, resource: syntheticGeometryView },
+      { binding: 11, resource: syntheticGeometryView },
+      { binding: 12, resource: syntheticMetadataView },
+      { binding: 13, resource: syntheticMetadataView },
+      // Analytic AA is disabled in the preview; a valid array binding is still
+      // required by the shared shader and the value texture is sufficient.
+      { binding: 14, resource: syntheticValuesView },
     ],
     label: 'PalettePreview BindGroup',
   });
@@ -450,6 +472,11 @@ async function init() {
       { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 10, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 12, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint' } },
+      { binding: 13, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint' } },
+      { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
     ],
     label: 'PalettePreview BindGroupLayout',
   });
@@ -494,38 +521,58 @@ function applySize() {
   canvas.width = w;
   canvas.height = h;
 
-  // Synthetic texture (8 layers of r32float) at the real size.
-  const layerData = buildSyntheticData(w, h, PREVIEW_MU);
-  syntheticTexture?.destroy();
-  syntheticTexture = device.createTexture({
-    size: { width: w, height: h, depthOrArrayLayers: LAYER_COUNT },
+  // Synthetic typed display set at the real size.
+  const syntheticData = buildSyntheticData(w, h, PREVIEW_MU);
+  syntheticValuesTexture?.destroy();
+  syntheticGeometryTexture?.destroy();
+  syntheticMetadataTexture?.destroy();
+  syntheticValuesTexture = device.createTexture({
+    size: { width: w, height: h, depthOrArrayLayers: DISPLAY_VALUE_LAYERS },
     format: 'r32float',
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    label: 'PalettePreview SyntheticTexture',
+    label: 'PalettePreview SyntheticValues',
   });
-  for (let l = 0; l < LAYER_COUNT; l++) {
+  for (let l = 0; l < DISPLAY_VALUE_LAYERS; l++) {
     device.queue.writeTexture(
-      { texture: syntheticTexture, origin: { x: 0, y: 0, z: l } },
-      layerData[l].buffer as ArrayBuffer,
+      { texture: syntheticValuesTexture, origin: { x: 0, y: 0, z: l } },
+      syntheticData.values[l].buffer as ArrayBuffer,
       { bytesPerRow: w * 4 },
       { width: w, height: h, depthOrArrayLayers: 1 },
     );
   }
-  syntheticArrayView = syntheticTexture.createView({
+  syntheticValuesView = syntheticValuesTexture.createView({
     dimension: '2d-array',
     baseArrayLayer: 0,
-    arrayLayerCount: LAYER_COUNT,
-    label: 'PalettePreview SyntheticArrayView',
+    arrayLayerCount: DISPLAY_VALUE_LAYERS,
+    label: 'PalettePreview SyntheticValuesView',
   });
-
-  // Frozen placeholder (same size, dummy).
-  frozenTextureGpu?.destroy();
-  frozenTextureGpu = device.createTexture({
-    size: { width: w, height: h, depthOrArrayLayers: LAYER_COUNT },
-    format: 'r32float',
+  syntheticGeometryTexture = device.createTexture({
+    size: { width: w, height: h },
+    format: 'rgba16float',
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
-    label: 'PalettePreview FrozenTexture',
+    label: 'PalettePreview SyntheticGeometry',
   });
+  const geometryF16 = float32ArrayToFloat16(syntheticData.geometry);
+  device.queue.writeTexture(
+    { texture: syntheticGeometryTexture },
+    geometryF16.buffer as ArrayBuffer,
+    { bytesPerRow: w * 8 },
+    { width: w, height: h },
+  );
+  syntheticGeometryView = syntheticGeometryTexture.createView();
+  syntheticMetadataTexture = device.createTexture({
+    size: { width: w, height: h },
+    format: 'r32uint',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'PalettePreview SyntheticMetadata',
+  });
+  device.queue.writeTexture(
+    { texture: syntheticMetadataTexture },
+    syntheticData.metadata.buffer as ArrayBuffer,
+    { bytesPerRow: w * 4 },
+    { width: w, height: h },
+  );
+  syntheticMetadataView = syntheticMetadataTexture.createView();
 
   // Update aspect (uniform index 4) and rebuild.
   device.queue.writeBuffer(uniformBuffer, 4 * 4, new Float32Array([w / h]).buffer as ArrayBuffer);

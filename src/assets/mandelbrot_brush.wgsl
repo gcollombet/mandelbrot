@@ -10,16 +10,15 @@
 // r32float is the only texture format supporting read_write storage access
 // in core WebGPU — this shader depends on it.
 //
-// Layer layout (13-layer raw format — display-side textures stay at 8; the
-// resolve/color passes never read in-progress derivative layers):
+// Layer layout (13-layer raw format; terminal and continuation meanings differ):
 //   0 : exact request (-1) / iteration count
-//   1 : resolution step (1.0 for computed raw pixels)
+//   1 : escaped: analytic gradient.x,       in-progress: computed marker
 //   2 : z.x (escaped) or dz.x (continuation)
 //   3 : z.y (escaped) or dz.y (continuation)
 //   4 : escaped: distance height,          in-progress: derM.x (RAW)
-//   5 : escaped: visual derivative angle,  in-progress: derM.y (RAW)
-//   6 : ref_i + fractional stripe phase
-//   7 : packed average orbit direction (deep continuation: dz exponent)
+//   5 : escaped: analytic gradient.y,       in-progress: derM.y (RAW)
+//   6 : escaped: stripe/coherence bitpack,  in-progress: ref_i + stripe
+//   7 : escaped: analytic Laplacian,        in-progress: orbit dir / dz exponent
 //   8 : in-progress: derS (RAW log scale); dead for finished pixels
 //
 // The derivative continuation state is carried RAW (register copies, zero
@@ -87,6 +86,11 @@ override ENABLE_PORTFOLIO: bool = true;
 // like ENABLE_DEEP/ENABLE_PORTFOLIO: dead-code-eliminated when false, so the
 // working tiers are byte-identical unless a driver enables it.
 override ENABLE_RENORM: bool = true;
+
+// The parabolic gate currently omits the map's parameter derivatives. Until
+// its complete first/second c-chain is available it cannot be used by the
+// all-analytic geometry path; ordinary blocks/exact steps remain available.
+const ENABLE_SECOND_ORDER_GATE: bool = false;
 
 // Dynamic validity is specialized per pipeline. Legacy BLA/Padé/Jet/Möbius
 // and exact perturbation compile this whole proof dispatcher out instead of
@@ -818,6 +822,34 @@ fn fe_add3(a: fe, b: fe, c: fe) -> fe {
   return fe_add(fe_add(a, b), c);
 }
 
+// Second-order chain rule shared by every accepted approximation map.
+// All map partials are floatexp while z' and z'' keep independent natural-log
+// scales, so the four terms are normalized before their sum.
+fn snd_apply_map(
+  mz: fe,
+  mzz: fe,
+  mzc: fe,
+  mcc: fe,
+  derOld: vec2<f32>,
+  derOldScale: f32,
+  snd: ptr<function, vec2<f32>>,
+  sndScale: ptr<function, f32>,
+) {
+  let t1 = scaled_complex_normalize(
+    cmul(mz.m, *snd), f32(mz.e) * LN2 + *sndScale,
+  );
+  let t2 = scaled_complex_normalize(
+    cmul(mzz.m, cmul(derOld, derOld)), f32(mzz.e) * LN2 + 2.0 * derOldScale,
+  );
+  let t3 = scaled_complex_normalize(
+    2.0 * cmul(mzc.m, derOld), f32(mzc.e) * LN2 + derOldScale,
+  );
+  let t4 = scaled_complex_normalize(mcc.m, f32(mcc.e) * LN2);
+  let next = scaled_complex_add4(t1, t2, t3, t4);
+  *snd = next.m;
+  *sndScale = next.s;
+}
+
 fn fe_mag2_f32(v: fe) -> f32 {
   return ldexp(dot(v.m, v.m), 2 * v.e);
 }
@@ -905,8 +937,60 @@ fn distance_height_deep(z: vec2<f32>, derPolar: vec2<f32>, scaleExp: i32) -> f32
   return clamp(-logScreenDistance, -64.0, 64.0);
 }
 
-fn visual_derivative_angle(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
-  return angle_wrap(derPolar.x - atan2(z.y, z.x));
+fn finite_scalar(value: f32) -> bool {
+  let bits = bitcast<u32>(value) & 0x7fffffffu;
+  return bits < 0x7f800000u;
+}
+
+fn finite_vec2(value: vec2<f32>) -> bool {
+  return finite_scalar(value.x) && finite_scalar(value.y);
+}
+
+// Fixed-escape-branch geometry for
+// H = log|z'| - log|z| - log(log|z|) + constant.
+// The vector is expressed per source neutral texel; texture y grows down, so
+// its second component is +Im(A) for A = z''/z'-(1+1/log|z|)z'/z.
+// The scalar trace simplifies without z''': Delta H = |z'/z|^2/log^2|z|.
+fn analytic_terminal_geometry(
+  z: vec2<f32>,
+  derM: vec2<f32>,
+  derS: f32,
+  sndM: vec2<f32>,
+  sndS: f32,
+  deepScaleExp: i32,
+) -> vec3<f32> {
+  let z2 = dot(z, z);
+  let der2 = dot(derM, derM);
+  if (!(z2 > 1.0) || !(der2 > 1e-30) || !finite_vec2(z)
+      || !finite_vec2(derM) || !finite_vec2(sndM)
+      || !finite_scalar(derS) || !finite_scalar(sndS)) {
+    return vec3<f32>(0.0);
+  }
+  let logZ = 0.5 * log(z2);
+  if (!(logZ > 0.0)) { return vec3<f32>(0.0); }
+  let dims = textureDimensions(raw);
+  let logTexelDelta = log(max(mandelbrot.scale, 1e-30))
+    + f32(deepScaleExp) * LN2
+    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / f32(dims.x));
+
+  let invDer = vec2<f32>(derM.x, -derM.y) / der2;
+  let invZ = vec2<f32>(z.x, -z.y) / z2;
+  let first = cmul(sndM, invDer)
+    * exp(clamp(sndS - derS + logTexelDelta, -80.0, 80.0));
+  let second = cmul(derM, invZ)
+    * ((1.0 + 1.0 / logZ) * exp(clamp(derS + logTexelDelta, -80.0, 80.0)));
+  let gradient = first - second;
+
+  let derivativeLog = derS + 0.5 * log(der2);
+  let laplacianLog = 2.0 * (derivativeLog - logZ - log(logZ) + logTexelDelta);
+  let laplacian = exp(clamp(laplacianLog, -80.0, log(64.0)));
+  if (!finite_vec2(gradient) || !finite_scalar(laplacian)) {
+    return vec3<f32>(0.0);
+  }
+  return vec3<f32>(
+    clamp(gradient, vec2<f32>(-64.0), vec2<f32>(64.0)),
+    clamp(laplacian, 0.0, 64.0),
+  );
 }
 
 fn getOrbit(index: i32) -> vec2<f32> {
@@ -971,7 +1055,7 @@ const RENORM_LADDER_RATIO: f32 = 0.45;
 // f32 renorm path (shallow kernel). Near the critical rebase every quantity is
 // O(1): x = dz/s_n ≤ 0.25, s_n ~ O(0.2), H ~ O(1), so plain f32 (roundoff
 // ~1e-7) is ~500× under the certified model error (~5e-5) — no need for fe.
-struct RenormEvalF32 { value: vec2<f32>, deriv: vec2<f32> };
+struct RenormEvalF32 { value: vec2<f32>, deriv: vec2<f32>, second: vec2<f32> };
 
 // (h(x), h'(x)) at f32 complex x, via Clenshaw in u and its derivative
 // recurrence. h'(x) = h_u(u) · du/dx = h_u · 4x.
@@ -983,17 +1067,23 @@ fn renorm_eval_h_f32(x: vec2<f32>) -> RenormEvalF32 {
   var b2 = vec2<f32>(0.0, 0.0);
   var d1 = vec2<f32>(0.0, 0.0);
   var d2 = vec2<f32>(0.0, 0.0);
+  var dd1 = vec2<f32>(0.0, 0.0);
+  var dd2 = vec2<f32>(0.0, 0.0);
   for (var k = RENORM_H_NCOEFF - 1; k >= 1; k = k - 1) {
     let ak = vec2<f32>(a[k], 0.0);
     let b0 = ak + cmul(two_u, b1) - b2;
     let dd0 = 2.0 * b1 + cmul(two_u, d1) - d2;
+    let ddd0 = 4.0 * d1 + cmul(two_u, dd1) - dd2;
     b2 = b1; b1 = b0;
     d2 = d1; d1 = dd0;
+    dd2 = dd1; dd1 = ddd0;
   }
   var out: RenormEvalF32;
   out.value = vec2<f32>(a[0], 0.0) + cmul(u, b1) - b2;
   let h_u = b1 + cmul(u, d1) - d2;
+  let h_uu = 2.0 * d1 + cmul(u, dd1) - dd2;
   out.deriv = cmul(h_u, 4.0 * x);
+  out.second = cmul(h_uu, cmul(4.0 * x, 4.0 * x)) + 4.0 * h_u;
   return out;
 }
 
@@ -1002,7 +1092,7 @@ fn renorm_eval_h_f32(x: vec2<f32>) -> RenormEvalF32 {
 // contract as the fe try_apply_renorm but entirely in f32. `dcMag` gates the
 // parameter window per level; the s-ladder gate checks the reference is
 // actually on a doubling cascade at that depth.
-fn try_apply_renorm_f32(dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, i: ptr<function, f32>, maxIterI: i32, dcMag: f32) -> i32 {
+fn try_apply_renorm_f32(dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derScale: f32, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>, i: ptr<function, f32>, maxIterI: i32, dcMag: f32) -> i32 {
   let dzMag = length(*dz);
   for (var n = RENORM_MAX_LEVEL; n >= RENORM_MIN_LEVEL; n = n - 1) {
     let skip = 1 << u32(n);
@@ -1021,7 +1111,13 @@ fn try_apply_renorm_f32(dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f
     let invSn = vec2<f32>(sn.x, -sn.y) / snMag2;
     let x = cmul(invSn, *dz);
     let ev = renorm_eval_h_f32(x);
+    let derOld = *derM;
     *dz = cmul(sn, ev.value);
+    snd_apply_map(
+      fe_from_vec(ev.deriv, 0), fe_from_vec(cmul(ev.second, invSn), 0),
+      fe(vec2<f32>(0.0), 0), fe(vec2<f32>(0.0), 0),
+      derOld, derScale, snd, sndScale,
+    );
     *derM = cmul(ev.deriv, *derM);
     *i += f32(skip);
     return i32(skip);
@@ -1048,7 +1144,7 @@ fn bla_coefficients_fit_f32(block: BlaStep, pade: bool) -> bool {
   return abOk && dOk;
 }
 
-fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: vec2<f32>, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
+fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: vec2<f32>, bailout: f32, skip0Log: i32, maxIterI: i32, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
@@ -1101,6 +1197,8 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
               var qMantissaF32 = vec2<f32>(0.0);
               var pdzFe = fe(vec2<f32>(0.0), FE_ZERO_E);
               var pdcFe = fe(vec2<f32>(0.0), FE_ZERO_E);
+              var mzzFe = fe(vec2<f32>(0.0), 0);
+              var mzcFe = fe(vec2<f32>(0.0), 0);
               if (useF32) {
                 let a = ldexp(aMantissa, vec2<i32>(bla.ab_exp));
                 let b = ldexp(bMantissa, vec2<i32>(bla.ab_exp));
@@ -1112,6 +1210,12 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
                   // ∂Φ/∂z = (A − D·B·dc)/M². A and B share ab_exp,
                   // so the correction stays in their common mantissa scale.
                   qMantissaF32 = aMantissa - cmul(cmul(bMantissa, dc), d);
+                  let invM2 = cmul(invMF32, invMF32);
+                  pdzFe = fe_renorm(fe(cmul(qMantissaF32, invM2), bla.ab_exp));
+                  pdcFe = fe_renorm(fe(cmul(bMantissa, invMF32), bla.ab_exp));
+                  let dFe = fe_from_vec(d, 0);
+                  mzzFe = fe_scale(fe_cmul(fe_cmul(dFe, pdzFe), fe_from_vec(invMF32, 0)), -2.0);
+                  mzcFe = fe_scale(fe_cmul(fe_cmul(dFe, pdcFe), fe_from_vec(invMF32, 0)), -1.0);
                   padeReady = bla_vec2_is_finite(candidate)
                     && bla_vec2_is_finite(invMF32)
                     && bla_vec2_is_finite(qMantissaF32);
@@ -1134,6 +1238,8 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
                   let q = fe_add(a, fe(-bdcD.m, bdcD.e));
                   pdzFe = fe_cmul(q, fe_cmul(invM, invM));
                   pdcFe = fe_cmul(b, invM);
+                  mzzFe = fe_scale(fe_cmul(fe_cmul(d, pdzFe), invM), -2.0);
+                  mzcFe = fe_scale(fe_cmul(fe_cmul(d, pdcFe), invM), -1.0);
                   padeReady = bla_vec2_is_finite(candidate)
                     && bla_vec2_is_finite(pdzFe.m)
                     && bla_vec2_is_finite(pdcFe.m);
@@ -1144,8 +1250,11 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
                 // NaN compares false against bailout, so finiteness must be an
                 // explicit fail-closed condition before accepting the block.
                 if (bla_vec2_is_finite(candidateZ) && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+                  let derOld = *derM;
+                  let derOldScale = *derS + *derSLo;
                   *dz = candidate;
                   *zOut = candidateZ;
+                  snd_apply_map(pdzFe, mzzFe, mzcFe, fe(vec2<f32>(0.0), 0), derOld, derOldScale, snd, sndScale);
                   if (useF32) {
                     let invM2 = cmul(invMF32, invMF32);
                     *derM = cmul(cmul(qMantissaF32, invM2), *derM)
@@ -1185,8 +1294,15 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
             let candidateZ = getOrbit(*ref_i + skip) + candidate;
             if (bla_vec2_is_finite(candidate) && bla_vec2_is_finite(candidateZ)
                 && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+              let derOld = *derM;
+              let derOldScale = *derS + *derSLo;
               *dz = candidate;
               *zOut = candidateZ;
+              snd_apply_map(
+                fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp),
+                fe(vec2<f32>(0.0), 0), fe(vec2<f32>(0.0), 0), fe(vec2<f32>(0.0), 0),
+                derOld, derOldScale, snd, sndScale,
+              );
               // Mantissa-only update + derS fold — see the Padé branch note above.
               *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
               der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
@@ -1259,6 +1375,7 @@ fn storeTexel(coord: vec2<i32>, out: TexelOut) {
 const ORBIT_METRIC_EMA_ALPHA: f32 = 0.18;
 const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
 const ORBIT_DIRECTION_BASE: f32 = 4096.0;
+const TERMINAL_QUANTIZED_MAX: f32 = 16383.0;
 
 fn stripe_phase_from_ema(stripeEma: f32) -> f32 {
   return clamp(0.5 + 0.5 * stripeEma, 0.0, 0.999999);
@@ -1289,6 +1406,14 @@ fn encode_avg_dir(avgDir: vec2<f32>) -> f32 {
   let xq = floor(phase.x * ORBIT_DIRECTION_SCALE + 0.5);
   let yq = floor(phase.y * ORBIT_DIRECTION_SCALE + 0.5);
   return xq * ORBIT_DIRECTION_BASE + yq;
+}
+
+fn terminal_orbit_metrics(stripeEma: f32, avgDir: vec2<f32>) -> f32 {
+  let stripe = u32(round(stripe_phase_from_ema(stripeEma) * TERMINAL_QUANTIZED_MAX));
+  let coherence = u32(round(clamp(length(avgDir), 0.0, 1.0) * TERMINAL_QUANTIZED_MAX));
+  // A fixed high nibble keeps the carrier normal (never a flushable subnormal);
+  // resolve masks the 28 payload bits back out exactly.
+  return bitcast<f32>(0x30000000u | stripe | (coherence << 14u));
 }
 
 fn decode_avg_dir(encoded: f32, totalIter: f32) -> vec2<f32> {
@@ -1354,10 +1479,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   // Phase D: z″ = sndM·exp(sndS), independently normalized from z′.
   var sndM = vec2<f32>(prev_sndx, prev_sndy);
   var sndS = prev_snds;
-  // Some legacy accelerators propagate z′ but expose no second derivative of
-  // their jump map. Once one fires, keep computing the pixel normally but do
-  // not publish a Taylor certificate from the stale z″ state. Layer 12
-  // carries this bit while the texel is in progress.
+  // Layer 12 carries the resumable validity bit. Every selectable production
+  // move preserves it; derivative-incomplete moves are rejected or disabled.
   var sndValid = prev_snd_valid >= 0.5;
   var derInvScale = 0.0;
   var epsThreshold = 0.0;
@@ -1379,7 +1502,6 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var escaped = false;
   var inside = false;
   var shadingHeight = 0.0;
-  var shadingAngle = 0.0;
 
   // This is the in-place COMPUTE iteration path (the progressive-continuation
   // workhorse) — NOT a throwaway preview. BLA (affine) and Padé (rational) both
@@ -1542,10 +1664,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       // stays valid); backstop on globalMaxIter (the reference orbit at c_∞ is
       // bounded, so orbitComplete may never hold).
       if (ENABLE_RENORM && ref_i == 0) {
-        let rskip = try_apply_renorm_f32(&dz, &derM, &i, globalMaxIterI, dcMag);
+        let rskip = try_apply_renorm_f32(&dz, &derM, derS + derSLo, &sndM, &sndS, &i, globalMaxIterI, dcMag);
         if (rskip > 0) {
           renormApplied = true;
-          sndValid = false;
           z = refZ + dz; // ref_i = 0, refZ = getOrbit(0) = 0 → z = dz
           g_renormApps += 1u;
           g_renormIters += u32(rskip);
@@ -1555,7 +1676,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       // §18 gate move: aligned in-span offsets only (integer modulo, in-span
       // turns are exactly the ones the ordinary loop crawls through). A
       // positive return already advanced ref_i/dz/derM by k·m iterations.
-      if (!renormApplied && gBase >= 0 && gFails < 3 && ref_i >= gStart && ref_i < gEnd
+      if (ENABLE_SECOND_ORDER_GATE && !renormApplied && gBase >= 0 && gFails < 3 && ref_i >= gStart && ref_i < gEnd
           && ((ref_i - gStart) % gM) == 0) {
         let adv = try_gate_jump(gBase, gStart, gEnd - gStart, gM, gREntry,
                                 gNfar, gDBase, gDb, &ref_i, &dz, dc,
@@ -1563,7 +1684,6 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         if (adv > 0) {
           skipped = adv;
           gated = true;
-          sndValid = false;
           blaZ = getOrbit(ref_i) + dz;
           g_gateJumps += 1u;
           g_workBudget += 8u;
@@ -1600,9 +1720,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           if (isUnified) {
             skipped = try_apply_unified(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, unifiedLog2Dc, unifiedLog2Dz, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, dcF2, dcF3, unifiedF32Ok, unifiedJetF32Ok, &jetLevelHint, &sndM, &sndS);
           } else if (isMobius) {
-            skipped = try_apply_mobius(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, mobiusF32Ok, &jetLevelHint);
+            skipped = try_apply_mobius(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, mobiusF32Ok, &jetLevelHint, &sndM, &sndS);
           } else {
-            skipped = try_apply_jet(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, dcF2, dcF3, jetF32Ok, &jetLevelHint);
+            skipped = try_apply_jet(&ref_i, &dzFe, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dcFe, dcFe2, dcFe3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3, dc, dcF2, dcF3, jetF32Ok, &jetLevelHint, &sndM, &sndS);
           }
           if (skipped > 0) {
             dz = fe_to_vec(dzFe);
@@ -1614,7 +1734,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         // f32 itself, no fe conversion needed on this path).
         let dzMagOuter = length(dz);
         if (dzMagOuter < 1.2e-38 || log2(dzMagOuter) <= logMaxBlaR) {
-          skipped = try_apply_bla(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI);
+          skipped = try_apply_bla(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI, &sndM, &sndS);
         }
       }
       if (skipped > 0) {
@@ -1639,7 +1759,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         ref_i += 1;
         refZ = getOrbit(ref_i);
         z = refZ + dz;
-        if (isUnified && sndValid) {
+        if (sndValid) {
           // z″ ← 2(z′² + z·z″), using the OLD derivative state.
           snd_exact_step(derM, derS + derSLo, zPrev, &sndM, &sndS);
         }
@@ -1660,7 +1780,6 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       if (dot_z > muLimit) {
         let derPolar = der_to_polar(derM, derS + derSLo);
         shadingHeight = distance_height(z, derPolar);
-        shadingAngle = visual_derivative_angle(z, derPolar);
         escaped = true;
         break;
       }
@@ -1688,6 +1807,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       ref_i += 1;
       refZ = getOrbit(ref_i);
       z = refZ + dz;
+      if (sndValid) {
+        snd_exact_step(derM, derS + derSLo, zPrev, &sndM, &sndS);
+      }
       derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
       i += 1.0;
       if (trackOrbitMetrics) {
@@ -1704,7 +1826,6 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       if (dot_z > muLimit) {
         let derPolar = der_to_polar(derM, derS + derSLo);
         shadingHeight = distance_height(z, derPolar);
-        shadingAngle = visual_derivative_angle(z, derPolar);
         escaped = true;
         break;
       }
@@ -1732,13 +1853,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 
   if (inside) {
     out.iter      = pack(0.0);
-    out.genuine   = pack(1.0);
+    out.genuine   = pack(0.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(derPolarOut.x);
-    out.dzy       = pack(derPolarOut.y);
-    out.ref_i     = pack(ref_i_with_stripe(prev_iter + i, stripeEma));
-    out.avgDirection = pack(encode_avg_dir(avgDir));
+    out.dzx       = pack(0.0);
+    out.dzy       = pack(0.0);
+    out.ref_i     = pack(0.0);
+    out.avgDirection = pack(0.0);
     out.derS      = pack(0.0); // finished — layer 8 dead
     return out;
   }
@@ -1751,22 +1872,21 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     let previousAvgDir = previousAvgDirSum / max(previousAvgCount, 1.0);
     let smoothAvgDir = mix(previousAvgDir, avgDir, escapeBlend);
 
-    let deHeight = shadingHeight;
-    let angleDer = shadingAngle;
+    let geometry = analytic_terminal_geometry(z, derM, derS + derSLo, sndM, sndS, 0);
     out.iter      = pack(total_iter);
-    out.genuine   = pack(1.0);
+    out.genuine   = pack(geometry.x);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(deHeight);
-    out.dzy       = pack(angleDer);
-    out.ref_i     = pack(ref_i_with_stripe(0.0, smoothStripeEma));
-    out.avgDirection = pack(encode_avg_dir(smoothAvgDir));
+    out.dzx       = pack(shadingHeight);
+    out.dzy       = pack(geometry.y);
+    out.ref_i     = pack(terminal_orbit_metrics(smoothStripeEma, smoothAvgDir));
+    out.avgDirection = pack(geometry.z);
     // Phase D escaped payload: z′ keeps its normalized Cartesian form;
     // z″ becomes polar-log so its independent exponent cannot overflow.
     out.derS      = pack(derS + derSLo);
     out.aa9       = pack(derM.x);
     out.aa10      = pack(derM.y);
-    let taylorPayloadValid = isUnified && sndValid;
+    let taylorPayloadValid = sndValid;
     let escapedSndLog = select(
       INVALID_TAYLOR_PAYLOAD,
       scaled_complex_log_length(sndM, sndS),
@@ -1786,13 +1906,13 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 
   if (total_iter >= globalMax && mandelbrot.orbitComplete >= 0.5) {
     out.iter      = pack(0.0);
-    out.genuine   = pack(1.0);
+    out.genuine   = pack(0.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(derPolarOut.x);
-    out.dzy       = pack(derPolarOut.y);
-    out.ref_i     = pack(ref_i_with_stripe(total_iter, stripeEma));
-    out.avgDirection = pack(encode_avg_dir(avgDir));
+    out.dzx       = pack(0.0);
+    out.dzy       = pack(0.0);
+    out.ref_i     = pack(0.0);
+    out.avgDirection = pack(0.0);
     out.derS      = pack(0.0); // finished — layer 8 dead
     return out;
   }
@@ -1811,7 +1931,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   out.aa9       = pack(sndM.x);
   out.aa10      = pack(sndM.y);
   out.aa11      = pack(sndS);
-  out.aa12      = pack(select(0.0, 1.0, isUnified && sndValid));
+  out.aa12      = pack(select(0.0, 1.0, sndValid));
   return out;
 }
 
@@ -1822,7 +1942,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 // the resumable dz is parked as (mantissa in zx/zy, exponent in avgDirection),
 // so orbit-direction metrics are unavailable on the deep path.
 // BLA in the deep (floatexp) path — see mandelbrot.wgsl for the derivation.
-fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, bailout: f32, skip0Log: i32, maxIterI: i32) -> i32 {
+fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, bailout: f32, skip0Log: i32, maxIterI: i32, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
@@ -1861,6 +1981,8 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
                 let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(candidate);
                 if (bla_vec2_is_finite(candidate.m) && bla_vec2_is_finite(candidateZ)
                     && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+                  let derOld = *derM;
+                  let derOldScale = *derS + *derSLo;
                   *dz = candidate;
                   *zOut = candidateZ;
                   // D4: ∂Φ/∂z = (A − D·B·dc)/M², ∂Φ/∂c = B/M.
@@ -1868,6 +1990,9 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
                   let q = fe_add(a, fe(-bdcD.m, bdcD.e));
                   let qOverM2 = fe_cmul(q, fe_cmul(invM, invM));
                   let bOverM = fe_cmul(b, invM);                   // B/M
+                  let mzz = fe_scale(fe_cmul(fe_cmul(d, qOverM2), invM), -2.0);
+                  let mzc = fe_scale(fe_cmul(fe_cmul(d, bOverM), invM), -1.0);
+                  snd_apply_map(qOverM2, mzz, mzc, fe(vec2<f32>(0.0), 0), derOld, derOldScale, snd, sndScale);
                   *derM = cmul(*derM, qOverM2.m);
                   der_scale_add(derS, derSLo, f32(qOverM2.e) * LN2);
                   *derM = *derM + bOverM.m * exp(clamp(f32(bOverM.e) * LN2 - (*derS + *derSLo), -80.0, 80.0));
@@ -1884,8 +2009,11 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
               let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(num);
               if (bla_vec2_is_finite(num.m) && bla_vec2_is_finite(candidateZ)
                   && !(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+                let derOld = *derM;
+                let derOldScale = *derS + *derSLo;
                 *dz = num;
                 *zOut = candidateZ;
+                snd_apply_map(a, fe(vec2<f32>(0.0), 0), fe(vec2<f32>(0.0), 0), fe(vec2<f32>(0.0), 0), derOld, derOldScale, snd, sndScale);
                 *derM = cmul(*derM, vec2<f32>(bla.ax, bla.ay)) + vec2<f32>(bla.bx, bla.by) * (*derInvScale);
                 der_scale_add(derS, derSLo, f32(bla.ab_exp) * LN2);
                 der_refresh_cache(derM, derS, derSLo, derInvScale, epsThreshold, logEpsilon);
@@ -1927,7 +2055,7 @@ fn fe_scale(a: fe, s: f32) -> fe {
 //   ∂Φ/∂z  = P1 + dz·(2·P2 + dz·3·P3)
 //   ∂Φ/∂c  = Q0 + dz·(Q1 + dz·Q2),  Q_i = ∂P_i/∂c
 // Reads only the degree ≤ k coefficient prefix (design D1).
-fn jet_apply(entry: i32, k: i32, dz: fe, dc: fe, dc2: fe, dc3: fe, pdz: ptr<function, fe>, pdc: ptr<function, fe>) -> fe {
+fn jet_apply(entry: i32, k: i32, dz: fe, dc: fe, dc2: fe, dc3: fe, pdz: ptr<function, fe>, pdc: ptr<function, fe>, mzz: ptr<function, fe>, mzc: ptr<function, fe>, mcc: ptr<function, fe>) -> fe {
   let a10 = jet_coeff_fe(mandelbrotJetSuite[entry * JET_COEFF_STRIDE + 0]);
   let a01 = jet_coeff_fe(mandelbrotJetSuite[entry * JET_COEFF_STRIDE + 1]);
   var p0 = fe_cmul(a01, dc);
@@ -1936,6 +2064,9 @@ fn jet_apply(entry: i32, k: i32, dz: fe, dc: fe, dc2: fe, dc3: fe, pdz: ptr<func
   if (k < 2) {
     *pdz = p1;
     *pdc = q0;
+    *mzz = fe(vec2<f32>(0.0), 0);
+    *mzc = fe(vec2<f32>(0.0), 0);
+    *mcc = fe(vec2<f32>(0.0), 0);
     return fe_add(p0, fe_cmul(p1, dz));
   }
   let a20 = jet_coeff_fe(mandelbrotJetSuite[entry * JET_COEFF_STRIDE + 2]);
@@ -1950,6 +2081,9 @@ fn jet_apply(entry: i32, k: i32, dz: fe, dc: fe, dc2: fe, dc3: fe, pdz: ptr<func
   if (k < 3) {
     *pdz = fe_add(p1, fe_scale(fe_cmul(p2, dz), 2.0));
     *pdc = fe_add(q0, fe_cmul(q1, dz));
+    *mzz = fe_scale(p2, 2.0);
+    *mzc = q1;
+    *mcc = fe_scale(a02, 2.0);
     return fe_add(p0, fe_cmul(fe_add(p1, fe_cmul(p2, dz)), dz));
   }
   let a30 = jet_coeff_fe(mandelbrotJetSuite[entry * JET_COEFF_STRIDE + 5]);
@@ -1966,6 +2100,9 @@ fn jet_apply(entry: i32, k: i32, dz: fe, dc: fe, dc2: fe, dc3: fe, pdz: ptr<func
   let q2 = a21;
   *pdz = fe_add(p1, fe_cmul(fe_add(fe_scale(p2, 2.0), fe_scale(fe_cmul(p3, dz), 3.0)), dz));
   *pdc = fe_add(q0, fe_cmul(fe_add(q1, fe_cmul(q2, dz)), dz));
+  *mzz = fe_add(fe_scale(p2, 2.0), fe_scale(fe_cmul(p3, dz), 6.0));
+  *mzc = fe_add(q1, fe_scale(fe_cmul(q2, dz), 2.0));
+  *mcc = fe_add3(fe_scale(a02, 2.0), fe_scale(fe_cmul(a03, dc), 6.0), fe_scale(fe_cmul(a12, dz), 2.0));
   return fe_add(p0, fe_cmul(fe_add(p1, fe_cmul(fe_add(p2, fe_cmul(p3, dz)), dz)), dz));
 }
 
@@ -1980,7 +2117,7 @@ fn jet_coeff_f32(c: JetCoeff) -> vec2<f32> {
 // when the block's radii.w flag certifies every shipped coefficient fits f32
 // AND the caller certifies dz/dc powers are f32-scaled; |dz|,|dc| < 1 on
 // applied blocks then caps every Horner intermediate at ~2^99 « f32 max.
-fn jet_apply_f32(entry: i32, k: i32, dz: vec2<f32>, dc: vec2<f32>, dc2: vec2<f32>, dc3: vec2<f32>, pdz: ptr<function, vec2<f32>>, pdc: ptr<function, vec2<f32>>) -> vec2<f32> {
+fn jet_apply_f32(entry: i32, k: i32, dz: vec2<f32>, dc: vec2<f32>, dc2: vec2<f32>, dc3: vec2<f32>, pdz: ptr<function, vec2<f32>>, pdc: ptr<function, vec2<f32>>, mzz: ptr<function, vec2<f32>>, mzc: ptr<function, vec2<f32>>, mcc: ptr<function, vec2<f32>>) -> vec2<f32> {
   let a10 = jet_coeff_f32(mandelbrotJetSuite[entry * JET_COEFF_STRIDE + 0]);
   let a01 = jet_coeff_f32(mandelbrotJetSuite[entry * JET_COEFF_STRIDE + 1]);
   var p0 = cmul(a01, dc);
@@ -1989,6 +2126,9 @@ fn jet_apply_f32(entry: i32, k: i32, dz: vec2<f32>, dc: vec2<f32>, dc2: vec2<f32
   if (k < 2) {
     *pdz = p1;
     *pdc = q0;
+    *mzz = vec2<f32>(0.0);
+    *mzc = vec2<f32>(0.0);
+    *mcc = vec2<f32>(0.0);
     return p0 + cmul(p1, dz);
   }
   let a20 = jet_coeff_f32(mandelbrotJetSuite[entry * JET_COEFF_STRIDE + 2]);
@@ -2003,6 +2143,9 @@ fn jet_apply_f32(entry: i32, k: i32, dz: vec2<f32>, dc: vec2<f32>, dc2: vec2<f32
   if (k < 3) {
     *pdz = p1 + 2.0 * cmul(p2, dz);
     *pdc = q0 + cmul(q1, dz);
+    *mzz = 2.0 * p2;
+    *mzc = q1;
+    *mcc = 2.0 * a02;
     return p0 + cmul(p1 + cmul(p2, dz), dz);
   }
   let a30 = jet_coeff_f32(mandelbrotJetSuite[entry * JET_COEFF_STRIDE + 5]);
@@ -2019,6 +2162,9 @@ fn jet_apply_f32(entry: i32, k: i32, dz: vec2<f32>, dc: vec2<f32>, dc2: vec2<f32
   let q2 = a21;
   *pdz = p1 + cmul(2.0 * p2 + 3.0 * cmul(p3, dz), dz);
   *pdc = q0 + cmul(q1 + cmul(q2, dz), dz);
+  *mzz = 2.0 * p2 + 6.0 * cmul(p3, dz);
+  *mzc = q1 + 2.0 * cmul(q2, dz);
+  *mcc = 2.0 * a02 + 6.0 * cmul(a03, dc) + 2.0 * cmul(a12, dz);
   return p0 + cmul(p1 + cmul(p2 + cmul(p3, dz), dz), dz);
 }
 
@@ -2031,7 +2177,7 @@ fn jet_apply_f32(entry: i32, k: i32, dz: vec2<f32>, dc: vec2<f32>, dc2: vec2<f32
 // `dcF/dcF2/dcF3` + `f32Ok` drive the plain-f32 fast path (#4): the caller sets
 // f32Ok only when its dz/dc live at f32 scale (shallow loop, |dc| > 2^-42 so
 // the dc powers clear the subnormal band); the deep loop passes zeros + false.
-fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR3: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, dcF2: vec2<f32>, dcF3: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>) -> i32 {
+fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR3: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, dcF2: vec2<f32>, dcF3: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
@@ -2061,6 +2207,9 @@ fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<fun
           }
           var pdz: fe;
           var pdc: fe;
+          var mzz: fe;
+          var mzc: fe;
+          var mcc: fe;
           var phi: fe;
           var usedF32 = false;
           // (#4) Plain-f32 fast path: radii.w is the build-side "all shipped
@@ -2071,18 +2220,27 @@ fn try_apply_jet(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<fun
             usedF32 = true;
             var pdzF = vec2<f32>(0.0);
             var pdcF = vec2<f32>(0.0);
-            let phiF = jet_apply_f32(entry, k, fe_to_vec(*dz), dcF, dcF2, dcF3, &pdzF, &pdcF);
+            var mzzF = vec2<f32>(0.0);
+            var mzcF = vec2<f32>(0.0);
+            var mccF = vec2<f32>(0.0);
+            let phiF = jet_apply_f32(entry, k, fe_to_vec(*dz), dcF, dcF2, dcF3, &pdzF, &pdcF, &mzzF, &mzcF, &mccF);
             phi = fe_from_vec(phiF, 0);
             pdz = fe_from_vec(pdzF, 0);
             pdc = fe_from_vec(pdcF, 0);
+            mzz = fe_from_vec(mzzF, 0);
+            mzc = fe_from_vec(mzcF, 0);
+            mcc = fe_from_vec(mccF, 0);
           } else {
-            phi = jet_apply(entry, k, *dz, dc, dc2, dc3, &pdz, &pdc);
+            phi = jet_apply(entry, k, *dz, dc, dc2, dc3, &pdz, &pdc, &mzz, &mzc, &mcc);
           }
           let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(phi);
           // Do not jump over the first escape (same rule as the BLA paths).
           if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+            let derOld = *derM;
+            let derOldScale = *derS + *derSLo;
             *dz = phi;
             *zOut = candidateZ;
+            snd_apply_map(pdz, mzz, mzc, mcc, derOld, derOldScale, snd, sndScale);
             // der' = ∂Φ/∂z·der + ∂Φ/∂c. (#3) Small ∂Φ/∂z exponents — the norm
             // on the slow dynamics that dominate wall-clock — fold into the
             // MANTISSA (ldexp, exact) instead of derS: derS and its exp()
@@ -2148,7 +2306,7 @@ const MOBIUS_DEN_GUARD2: f32 = 1e-6;
 // [1/1] application. `dcF`/`f32Ok` drive the plain-f32 fast path (only
 // degree-1 dc products here, so the dc gate is far looser than the jet's);
 // the deep loop passes zeros + false and pays the fe evaluation.
-fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>) -> i32 {
+fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, f32Ok: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
   }
@@ -2171,6 +2329,9 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
           var phi: fe;
           var pdz: fe;
           var pdc: fe;
+          var mzz: fe;
+          var mzc: fe;
+          var mcc: fe;
           var denOk = true;
           var usedF32 = false;
           if (f32Ok && radii.y > 0.5 && log2_dz > -100.0) {
@@ -2196,8 +2357,18 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
               phi = fe_from_vec(phiF, 0);
               // ∂m/∂z = (2N₂·z + Ae − m·De)/den ;
               // ∂m/∂c = (A'·z + B − m·(D'·z + F))/den
-              pdz = fe_from_vec(cmul(2.0 * n2z + ae - cmul(phiF, de), invDen), 0);
-              pdc = fe_from_vec(cmul(cmul(cap, dzF) + cb - cmul(phiF, cmul(cdp, dzF) + cf), invDen), 0);
+              let mzF = cmul(2.0 * n2z + ae - cmul(phiF, de), invDen);
+              let dcdenF = cmul(cdp, dzF) + cf;
+              let mcF = cmul(cmul(cap, dzF) + cb - cmul(phiF, dcdenF), invDen);
+              pdz = fe_from_vec(mzF, 0);
+              pdc = fe_from_vec(mcF, 0);
+              mzz = fe_from_vec(2.0 * cmul(cn2 - cmul(de, mzF), invDen), 0);
+              mcc = fe_from_vec(-2.0 * cmul(dcdenF, cmul(mcF, invDen)), 0);
+              mzc = fe_from_vec(
+                cmul(cap - cmul(mcF, de) - cmul(phiF, cdp), invDen)
+                  - cmul(mzF, cmul(dcdenF, invDen)),
+                0,
+              );
             }
           } else {
             let ca  = jet_coeff_fe(mandelbrotJetSuite[base]);
@@ -2217,15 +2388,25 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
               let invDen = fe_cinv(den);
               phi = fe_cmul(fe_add(fe_cmul(fe_add(n2z, ae), *dz), fe_cmul(cb, dc)), invDen);
               pdz = fe_cmul(fe_add3(fe_scale(n2z, 2.0), ae, fe_neg(fe_cmul(phi, de))), invDen);
-              pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, fe_add(fe_cmul(cdp, *dz), cf)))), invDen);
+              let dcden = fe_add(fe_cmul(cdp, *dz), cf);
+              pdc = fe_cmul(fe_add3(fe_cmul(cap, *dz), cb, fe_neg(fe_cmul(phi, dcden))), invDen);
+              mzz = fe_scale(fe_cmul(fe_add(cn2, fe_neg(fe_cmul(de, pdz))), invDen), 2.0);
+              mcc = fe_neg(fe_scale(fe_cmul(dcden, fe_cmul(pdc, invDen)), 2.0));
+              mzc = fe_add(
+                fe_cmul(fe_add3(cap, fe_neg(fe_cmul(pdc, de)), fe_neg(fe_cmul(phi, cdp))), invDen),
+                fe_neg(fe_cmul(pdz, fe_cmul(dcden, invDen))),
+              );
             }
           }
           if (denOk) {
             let candidateZ = getOrbit(*ref_i + skip) + fe_to_vec(phi);
             // Do not jump over the first escape (same rule as the BLA paths).
             if (!(skip > 1 && dot(candidateZ, candidateZ) > bailout)) {
+              let derOld = *derM;
+              let derOldScale = *derS + *derSLo;
               *dz = phi;
               *zOut = candidateZ;
+              snd_apply_map(pdz, mzz, mzc, mcc, derOld, derOldScale, snd, sndScale);
               // der' = ∂m/∂z·der + ∂m/∂c, with the (#3) exponent-fold
               // discipline shared with the jet path.
               if (abs(pdz.e) <= JET_DER_EXP_FOLD) {
@@ -3062,7 +3243,7 @@ fn try_gate_jump(
 // Constants (RENORM_H_A, radius, levels) and the f32 path are declared above
 // getOrbit's neighbours, before the shallow kernel. The fe variants below are
 // used by the deep kernel where dz falls below the f32 normal range.
-struct RenormEval { value: fe, deriv: fe };
+struct RenormEval { value: fe, deriv: fe, second: fe };
 
 // (h(x), h'(x)) at fe complex x, via Clenshaw in u and its derivative
 // recurrence. h'(x) = h_u(u) · du/dx = h_u · 4x.
@@ -3074,18 +3255,24 @@ fn renorm_eval_h(x: fe) -> RenormEval {
   var b2 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
   var d1 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
   var d2 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
+  var dd1 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
+  var dd2 = fe(vec2<f32>(0.0, 0.0), FE_ZERO_E);
   for (var k = RENORM_H_NCOEFF - 1; k >= 1; k = k - 1) {
     let ak = fe_from_vec(vec2<f32>(a[k], 0.0), 0);
     let b0 = fe_add3(ak, fe_cmul(two_u, b1), fe_neg(b2));
     let dd0 = fe_add3(fe_scale(b1, 2.0), fe_cmul(two_u, d1), fe_neg(d2));
+    let ddd0 = fe_add3(fe_scale(d1, 4.0), fe_cmul(two_u, dd1), fe_neg(dd2));
     b2 = b1; b1 = b0;
     d2 = d1; d1 = dd0;
+    dd2 = dd1; dd1 = ddd0;
   }
   let a0 = fe_from_vec(vec2<f32>(a[0], 0.0), 0);
   var out: RenormEval;
   out.value = fe_add3(a0, fe_cmul(u, b1), fe_neg(b2));
   let h_u = fe_add3(b1, fe_cmul(u, d1), fe_neg(d2));
+  let h_uu = fe_add3(fe_scale(d1, 2.0), fe_cmul(u, dd1), fe_neg(dd2));
   out.deriv = fe_cmul(h_u, fe_scale(x, 4.0));
+  out.second = fe_add(fe_cmul(h_uu, fe_cmul(fe_scale(x, 4.0), fe_scale(x, 4.0))), fe_scale(h_u, 4.0));
   return out;
 }
 
@@ -3095,7 +3282,7 @@ fn renorm_eval_h(x: fe) -> RenormEval {
 // the derivative multiplicatively der ← H'(dz/s_n) · der (the O(K_c·dc)
 // parameter term is dropped — valid deep on the cascade, keeps distance
 // shading approximately right). Returns the skip, or 0 if none qualifies.
-fn try_apply_renorm(dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, i: ptr<function, f32>, maxIterI: i32, dcMag: f32) -> i32 {
+fn try_apply_renorm(dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derScale: f32, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>, i: ptr<function, f32>, maxIterI: i32, dcMag: f32) -> i32 {
   let dzMag = sqrt(fe_mag2_f32(*dz));
   for (var n = RENORM_MAX_LEVEL; n >= RENORM_MIN_LEVEL; n = n - 1) {
     let skip = 1 << u32(n);
@@ -3116,7 +3303,13 @@ fn try_apply_renorm(dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, i: pt
     let invSn = vec2<f32>(sn.x, -sn.y) / snMag2;
     let x = fe_cmul_f32(invSn, *dz);
     let ev = renorm_eval_h(x);
+    let derOld = *derM;
     *dz = fe_cmul_f32(sn, ev.value);
+    snd_apply_map(
+      ev.deriv, fe_cmul_f32(invSn, ev.second),
+      fe(vec2<f32>(0.0), 0), fe(vec2<f32>(0.0), 0),
+      derOld, derScale, snd, sndScale,
+    );
     *derM = cmul(fe_to_vec(ev.deriv), *derM);
     *i += f32(skip);
     return i32(skip);
@@ -3156,7 +3349,6 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   var escaped = false;
   var inside = false;
   var shadingHeight = 0.0;
-  var shadingAngle = 0.0;
 
   // Affine BLA and Padé share try_apply_bla_deep (mode ≥ 1.5 branches to
   // Padé); jet (3) and Möbius-c+ (4) use the shared jet buffers and their own
@@ -3244,9 +3436,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     if (ENABLE_RENORM && ref_i == 0) {
       // fe_to_vec underflowing to 0 at extreme depth is correct here (tiny
       // |dc| passes every window gate).
-      skipped = try_apply_renorm(&dz, &derM, &i, globalMaxIterI, length(fe_to_vec(dc)));
+      skipped = try_apply_renorm(&dz, &derM, derS + derSLo, &sndM, &sndS, &i, globalMaxIterI, length(fe_to_vec(dc)));
       if (skipped > 0) {
-        sndValid = false;
         // Deliberately do NOT set usedBla: the renorm block keeps ref_i = 0
         // (it operates at the critical rebase point), so the ref_i-based
         // termination and rebase never fire for it. Interior cascade pixels
@@ -3291,13 +3482,13 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
           if (isUnifiedDeep) {
             skipped = try_apply_unified(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, unifiedDeepLog2Dc, unifiedDeepLog2Dz, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), false, false, &jetLevelHintDeep, &sndM, &sndS);
           } else if (isMobiusDeep) {
-            skipped = try_apply_mobius(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep);
+            skipped = try_apply_mobius(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), false, &jetLevelHintDeep, &sndM, &sndS);
           } else {
-            skipped = try_apply_jet(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), false, &jetLevelHintDeep);
+            skipped = try_apply_jet(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, dcDeep2, dcDeep3, muLimit, skip0Log, globalMaxIterI, &jetLvlR3Deep, vec2<f32>(0.0), vec2<f32>(0.0), vec2<f32>(0.0), false, &jetLevelHintDeep, &sndM, &sndS);
           }
         }
       } else {
-        skipped = try_apply_bla_deep(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI);
+        skipped = try_apply_bla_deep(&ref_i, &dz, &derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon, &blaZ, dc, muLimit, skip0Log, globalMaxIterI, &sndM, &sndS);
       }
       if (skipped > 0) {
         usedBla = true;
@@ -3316,7 +3507,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       ref_i += 1;
       refZ = getOrbit(ref_i);
       z = refZ + fe_to_vec(dz);
-      if (isUnifiedDeep && sndValid) {
+      if (sndValid) {
         snd_exact_step(derM, derS + derSLo, zPrev, &sndM, &sndS);
       }
       derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
@@ -3328,7 +3519,6 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     if (dot_z > muLimit) {
       let derPolar = der_to_polar(derM, derS + derSLo);
       shadingHeight = distance_height_deep(z, derPolar, scaleExp);
-      shadingAngle = visual_derivative_angle(z, derPolar);
       escaped = true;
       break;
     }
@@ -3354,12 +3544,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
 
   if (inside) {
     out.iter      = pack(0.0);
-    out.genuine   = pack(1.0);
+    out.genuine   = pack(0.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(derPolarOut.x);
-    out.dzy       = pack(derPolarOut.y);
-    out.ref_i     = pack(ref_i_with_stripe(prev_iter + i, 0.0));
+    out.dzx       = pack(0.0);
+    out.dzy       = pack(0.0);
+    out.ref_i     = pack(0.0);
     out.avgDirection = pack(0.0);
     out.derS      = pack(0.0); // finished — layer 8 dead
     return out;
@@ -3368,19 +3558,20 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   let total_iter = prev_iter + i;
 
   if (escaped) {
+    let geometry = analytic_terminal_geometry(z, derM, derS + derSLo, sndM, sndS, scaleExp);
     out.iter      = pack(total_iter);
-    out.genuine   = pack(1.0);
+    out.genuine   = pack(geometry.x);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
     out.dzx       = pack(shadingHeight);
-    out.dzy       = pack(shadingAngle);
-    out.ref_i     = pack(ref_i_with_stripe(0.0, 0.0));
-    out.avgDirection = pack(0.0);
+    out.dzy       = pack(geometry.y);
+    out.ref_i     = pack(terminal_orbit_metrics(0.0, vec2<f32>(0.0)));
+    out.avgDirection = pack(geometry.z);
     // Phase D polar-log Taylor payload — see the shallow exit.
     out.derS      = pack(derS + derSLo);
     out.aa9       = pack(derM.x);
     out.aa10      = pack(derM.y);
-    let taylorPayloadValid = isUnifiedDeep && sndValid;
+    let taylorPayloadValid = sndValid;
     let escapedSndLog = select(
       INVALID_TAYLOR_PAYLOAD,
       scaled_complex_log_length(sndM, sndS),
@@ -3398,12 +3589,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
 
   if (total_iter >= mandelbrot.globalMaxIter && mandelbrot.orbitComplete >= 0.5) {
     out.iter      = pack(0.0);
-    out.genuine   = pack(1.0);
+    out.genuine   = pack(0.0);
     out.zx        = pack(z.x);
     out.zy        = pack(z.y);
-    out.dzx       = pack(derPolarOut.x);
-    out.dzy       = pack(derPolarOut.y);
-    out.ref_i     = pack(ref_i_with_stripe(total_iter, 0.0));
+    out.dzx       = pack(0.0);
+    out.dzy       = pack(0.0);
+    out.ref_i     = pack(0.0);
     out.avgDirection = pack(0.0);
     out.derS      = pack(0.0); // finished — layer 8 dead
     return out;
@@ -3425,7 +3616,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   out.aa9       = pack(sndM.x);
   out.aa10      = pack(sndM.y);
   out.aa11      = pack(sndS);
-  out.aa12      = pack(select(0.0, 1.0, isUnifiedDeep && sndValid));
+  out.aa12      = pack(select(0.0, 1.0, sndValid));
   return out;
 }
 
