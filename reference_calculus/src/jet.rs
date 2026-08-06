@@ -459,6 +459,59 @@ pub fn jet_majorant_pre(twoz: &[(f64, i64)], rz: CFe, rc: CFe) -> CFe {
     } // mantissa back to [0.5, 1)
 }
 
+/// `jet_majorant_pre` for `N` R_z starts sharing one R_c, evaluated in a single
+/// pass over the segment.
+///
+/// The recurrence is a strict serial dependency chain (~5 dependent operations
+/// per orbit step for 3 flops), so one walk leaves the core latency-bound and
+/// mostly idle. Interleaving `N` independent chains in the same loop body fills
+/// those stalls; the segment is read once instead of `N` times as a bonus.
+/// Every state runs the same operations in the same order as the scalar walk,
+/// so each result is bit-identical to `jet_majorant_pre` — only the loop nesting
+/// changes. Saturation becomes a per-state flag instead of an early return.
+pub fn jet_majorant_pre_multi<const N: usize>(
+    twoz: &[(f64, i64)],
+    rz: &[CFe; N],
+    rc: CFe,
+) -> [CFe; N] {
+    let rce = sfe_from_cfe(&rc);
+    let mut rho = [(0.0f64, 0i64); N];
+    let mut live = [true; N];
+    for (slot, start) in rho.iter_mut().zip(rz.iter()) {
+        *slot = sfe_from_cfe(start);
+    }
+    for &(am, ae) in twoz {
+        for (state, alive) in rho.iter_mut().zip(live.iter_mut()) {
+            if !*alive {
+                continue;
+            }
+            let lin = sfe_norm(am * state.0, ae + state.1);
+            let sq = sfe_norm(state.0 * state.0, 2 * state.1);
+            let next = sfe_add(sfe_add(lin, sq), rce);
+            // A saturated walk returns MAJORANT_INF whatever follows, and its
+            // exponent must stop growing before it can overflow i64.
+            if next.1 > MAJORANT_SATURATION_LOG2 {
+                *alive = false;
+                continue;
+            }
+            *state = next;
+        }
+    }
+    core::array::from_fn(|index| {
+        if !live[index] {
+            MAJORANT_INF
+        } else if rho[index].0 <= 0.0 {
+            CFe::ZERO
+        } else {
+            CFe {
+                x: rho[index].0 * 0.5,
+                y: 0.0,
+                e: rho[index].1 + 1,
+            }
+        }
+    })
+}
+
 /// Peak ρ (log2 magnitude) reached anywhere along the majorant walk, and the
 /// final M (log2). Same recurrence as `jet_majorant_pre` — the majorant itself
 /// is unchanged; this only reports the peak the walk passes through, for the
@@ -477,7 +530,15 @@ pub fn jet_majorant_peak_pre(twoz: &[(f64, i64)], rz: CFe, rc: CFe) -> (f64, f64
             f64::NEG_INFINITY
         }
     };
-    let mut peak = l2(rho.0, rho.1);
+    // The peak is tracked as the argmax pair rather than as a log2 value, so
+    // the inner loop holds no transcendental at all. This is exact, not an
+    // approximation: `sfe_norm` leaves every mantissa in {0} u [1,2), where
+    // `log2(m) + e` has `log2(m)` in [0,1) — so `l2` is strictly increasing in
+    // `e`, and at equal `e` strictly increasing in `m`. Ordering the pairs
+    // lexicographically therefore orders them exactly as `l2` does, and
+    // `l2(argmax) == max l2` bit for bit. The zero mantissa carries
+    // `e = i64::MIN / 2`, which is smallest under the same order.
+    let mut peak = rho;
     for &(am, ae) in twoz {
         let lin = sfe_norm(am * rho.0, ae + rho.1);
         let sq = sfe_norm(rho.0 * rho.0, 2 * rho.1);
@@ -485,12 +546,11 @@ pub fn jet_majorant_peak_pre(twoz: &[(f64, i64)], rz: CFe, rc: CFe) -> (f64, f64
         if rho.1 > MAJORANT_SATURATION_LOG2 {
             return (f64::INFINITY, f64::INFINITY);
         }
-        let cur = l2(rho.0, rho.1);
-        if cur > peak {
-            peak = cur;
+        if rho.1 > peak.1 || (rho.1 == peak.1 && rho.0 > peak.0) {
+            peak = rho;
         }
     }
-    (peak, l2(rho.0, rho.1))
+    (l2(peak.0, peak.1), l2(rho.0, rho.1))
 }
 
 // ── rule (V): per-block bound data and radii solve ─────────────────────────────
@@ -604,9 +664,12 @@ pub fn jet_block_bounds_moduli(
     twoz: &[(f64, i64)],
     log2_rc: f64,
 ) -> JetBlockBounds {
-    let moduli_log2 = |i: usize, j: usize| log2_a[jet_idx(i, j)];
-    let log2_a10 = moduli_log2(1, 0);
-    let log2_a20 = moduli_log2(2, 0);
+    jet_block_bounds_moduli_with_min(log2_a, twoz, log2_rc, jet_log2_min_2z(twoz))
+}
+
+/// `min_j log2 |2Z_j|` over a block segment. It depends only on the segment, so
+/// callers evaluating several R_c rungs of one block hoist it out of the loop.
+pub fn jet_log2_min_2z(twoz: &[(f64, i64)]) -> f64 {
     let mut log2_min_2z = f64::INFINITY;
     for &(m, e) in twoz {
         let l = if m > 0.0 {
@@ -616,6 +679,19 @@ pub fn jet_block_bounds_moduli(
         };
         log2_min_2z = log2_min_2z.min(l);
     }
+    log2_min_2z
+}
+
+/// `jet_block_bounds_moduli` with an externally hoisted `log2_min_2z`.
+pub fn jet_block_bounds_moduli_with_min(
+    log2_a: &[f64; JET_NCOEFF],
+    twoz: &[(f64, i64)],
+    log2_rc: f64,
+    log2_min_2z: f64,
+) -> JetBlockBounds {
+    let moduli_log2 = |i: usize, j: usize| log2_a[jet_idx(i, j)];
+    let log2_a10 = moduli_log2(1, 0);
+    let log2_a20 = moduli_log2(2, 0);
     // Nonlinearity-scale anchor; a degenerate a10 (Z ≈ 0 block start) or a20
     // leaves radii at zero via the solve, the anchor just needs to be finite.
     let base = if log2_a10.is_finite() && log2_a20.is_finite() {
@@ -634,20 +710,36 @@ pub fn jet_block_bounds_moduli(
     // the majorant saturates at the primary (the ladder minimum also bounds the
     // zoom-out headroom the caller may assume — see ensure_jet_table).
     let ladder = [log2_rc, log2_rc - 5.0];
-    // C-axis majorants per rung (z = 0 start), shared across R_z candidates.
-    let mc_rung: [f64; 2] = core::array::from_fn(|i| {
-        let m = jet_majorant_pre(twoz, CFe::ZERO, fe_exp2(ladder[i]));
-        if fe_is_inf(&m) {
+    let majorant_log2 = |m: &CFe| {
+        if fe_is_inf(m) {
             f64::INFINITY
         } else {
             m.log2_mag().unwrap_or(f64::NEG_INFINITY)
         }
-    });
+    };
+    // Primary rung in ONE pass: the c-axis majorant (z = 0 start) and all
+    // JET_RZ_CANDIDATES R_z starts are independent walks over the same segment
+    // and the same R_c. The fallback rung stays scalar because it is only
+    // reached by the candidates the primary rung saturated, which is rare.
+    let mut primary_starts = [CFe::ZERO; JET_RZ_CANDIDATES + 1];
+    for (g, start) in primary_starts.iter_mut().skip(1).enumerate() {
+        *start = fe_exp2(base + 2.0 - 4.0 * g as f64);
+    }
+    let primary = jet_majorant_pre_multi(twoz, &primary_starts, fe_exp2(ladder[0]));
+    // C-axis majorants per rung (z = 0 start), shared across R_z candidates.
+    let mc_rung: [f64; 2] = [
+        majorant_log2(&primary[0]),
+        majorant_log2(&jet_majorant_pre(twoz, CFe::ZERO, fe_exp2(ladder[1]))),
+    ];
     for (g, c) in cand.iter_mut().enumerate() {
         let log2_rz = base + 2.0 - 4.0 * g as f64;
         c.log2_rz = log2_rz;
         for (ri, &cand_log2_rc) in ladder.iter().enumerate() {
-            let m = jet_majorant_pre(twoz, fe_exp2(log2_rz), fe_exp2(cand_log2_rc));
+            let m = if ri == 0 {
+                primary[g + 1]
+            } else {
+                jet_majorant_pre(twoz, fe_exp2(log2_rz), fe_exp2(cand_log2_rc))
+            };
             if fe_is_inf(&m) || !mc_rung[ri].is_finite() {
                 continue;
             }

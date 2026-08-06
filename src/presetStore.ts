@@ -12,6 +12,7 @@
  */
 
 import type { MandelbrotParams } from './Mandelbrot';
+import {normalizeColorStops} from './ColorStop';
 import {createGuid, defaultPresetName, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import {log10FromDecimalString} from './floatexp';
 import {
@@ -133,18 +134,28 @@ export function computeScaleExponent(scale: string | number): number {
   return Math.floor(Math.log10(1 / scale));
 }
 
+function normalizePresetValue(value: MandelbrotParams): MandelbrotParams {
+  const normalized = JSON.parse(JSON.stringify(value)) as MandelbrotParams;
+  normalized.colorStops = normalizeColorStops(Array.isArray(normalized.colorStops) ? normalized.colorStops : []);
+  return normalized;
+}
+
+function normalizePresetRecord(record: PresetRecord): PresetRecord {
+  return {...record, value: normalizePresetValue(record.value)};
+}
+
 export async function getAllPresetRecords(): Promise<PresetRecord[]> {
   const { store, done } = await tx('readonly');
   const all: PresetRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all.map(resolveLegacyCacheFields).filter(isVisibleCacheRecord);
+  return all.map(resolveLegacyCacheFields).map(normalizePresetRecord).filter(isVisibleCacheRecord);
 }
 
 export async function getAllPresetCacheRecords(): Promise<PresetRecord[]> {
   const {store, done} = await tx('readonly');
   const all: PresetRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all.map(resolveLegacyCacheFields);
+  return all.map(resolveLegacyCacheFields).map(normalizePresetRecord);
 }
 
 async function uniquePresetName(name: string, guid?: string): Promise<string> {
@@ -184,7 +195,7 @@ export async function getPresetById(id: number): Promise<PresetRecord | null> {
   const { store, done } = await tx('readonly');
   const record: PresetRecord | undefined = await reqToPromise(store.get(id));
   await done;
-  return record ?? null;
+  return record ? normalizePresetRecord(record) : null;
 }
 
 export async function getPresetByGuid(guid: string): Promise<PresetRecord | null> {
@@ -193,13 +204,14 @@ export async function getPresetByGuid(guid: string): Promise<PresetRecord | null
 }
 
 export function buildRemotePresetMerge(existing: PresetRecord, record: Omit<PresetRecord, 'id'> & { id?: number }): PresetRecord {
+  const value = normalizePresetValue(record.value);
   return {
     ...existing,
-    value: record.value,
+    value,
     thumbnail: record.thumbnail,
     date: existing.date || record.date,
     lastUpdated: record.lastUpdated,
-    scaleExponent: computeScaleExponent(record.value.scale),
+    scaleExponent: computeScaleExponent(value.scale),
     favorite: existing.favorite ?? false,
     remote: record.remote,
     ...publicCacheFields(existing),
@@ -231,14 +243,15 @@ export async function savePresetEntry(
 ): Promise<number> {
   const now = date ?? new Date().toISOString();
   const resolvedName = await uniquePresetName((name || defaultPresetName(now)).trim(), guid);
+  const normalizedValue = normalizePresetValue(value);
   const record: Omit<PresetRecord, 'id'> & { id?: number } = {
     guid,
     name: resolvedName,
-    value,
+    value: normalizedValue,
     thumbnail,
     date: now,
     lastUpdated: now,
-    scaleExponent: computeScaleExponent(value.scale),
+    scaleExponent: computeScaleExponent(normalizedValue.scale),
     favorite,
     remote,
     ...localCacheFields(cacheFields),
@@ -254,12 +267,13 @@ export async function savePresetEntry(
  * Overwrite an existing preset (e.g. to rename it).
  */
 export async function updatePresetEntry(record: PresetRecord): Promise<void> {
-  record.name = await uniquePresetName(record.name || defaultPresetName(record.date), record.guid);
-  record.lastUpdated = record.lastUpdated || record.date || new Date().toISOString();
+  const normalized = normalizePresetRecord(record);
+  normalized.name = await uniquePresetName(normalized.name || defaultPresetName(normalized.date), normalized.guid);
+  normalized.lastUpdated = normalized.lastUpdated || normalized.date || new Date().toISOString();
   const { store, done } = await tx('readwrite');
-  store.put({...record, ...localCacheFields(record)});
+  store.put({...normalized, ...localCacheFields(normalized)});
   await done;
-  notifyPersonalCacheChanged(record);
+  notifyPersonalCacheChanged(normalized);
 }
 
 /**
@@ -269,7 +283,8 @@ export async function deletePresetEntry(id: number): Promise<void> {
   const { store, done } = await tx('readwrite');
   const record: PresetRecord | undefined = await reqToPromise(store.get(id));
   if (record && shouldQueuePersonalDelete(record)) {
-    store.put({...record, ...deletedCacheFields(record)});
+    const normalized = normalizePresetRecord(record);
+    store.put({...normalized, ...deletedCacheFields(normalized)});
   } else {
     store.delete(id);
   }
@@ -279,8 +294,11 @@ export async function deletePresetEntry(id: number): Promise<void> {
 
 export async function applyCloudPresetEntry(record: Omit<PresetRecord, 'id'> & {id?: number}, revision: number): Promise<void> {
   const existing = await getPresetByGuid(record.guid);
+  const value = normalizePresetValue(record.value);
   const next = {
     ...record,
+    value,
+    scaleExponent: computeScaleExponent(value.scale),
     id: existing?.id ?? record.id,
     ...syncedPersonalCacheFields(record, revision),
   };
@@ -293,7 +311,10 @@ export async function applyCloudPresetEntry(record: Omit<PresetRecord, 'id'> & {
 export async function acknowledgePresetEntry(guid: string, revision: number): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: PresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  if (record) {
+    const normalized = normalizePresetRecord(record);
+    store.put({...normalized, ...syncedPersonalCacheFields(normalized, revision)});
+  }
   await done;
 }
 

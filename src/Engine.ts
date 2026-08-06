@@ -11,8 +11,14 @@ import aaTargetShader from './assets/aa_target.wgsl?raw'
 import aaReseedShader from './assets/aa_reseed.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
+import {generateMipmaps, mipLevelCountFor} from './mipmaps'
 import {Palette} from './Palette.ts'
 import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString} from './floatexp'
+import {
+    RADIAL_CERTIFICATE_LAYOUT_VERSION,
+    RADIAL_CERTIFICATE_WORDS_PER_BLOCK,
+    validRadialRangePayloadShape,
+} from './radialCertificateContract'
 import type {ZoomState} from './zoomState'
 import {
     getFrozenScale,
@@ -24,29 +30,38 @@ import {
 } from './zoomState'
 import type {ColorStop} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
-import {computeAaJitterOffset, normalizePowerOfTwoStep} from './Mandelbrot.ts'
+import {computeAaJitterOffset} from './Mandelbrot.ts'
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
+import {DISPLAY_VALUE_LAYERS, float16ToFloat32, isDisplaySetCurrent} from './displayGeometry'
+import {
+    PASS_SLOT_INDEX,
+    PASS_SLOTS,
+    TS_COUNT,
+    partitionGpuPassTimestamps,
+    selectRawUtilityPassKey,
+    shouldEncodeTimestampBoundary,
+} from './gpuPassTimings'
+
+/** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
+ * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
+export const DEBUG_VIEW_REACH = 6
 // ── Constants ────────────────────────────────────────────────────────
 
-// Number of r32float layers per texture array.
-// Raw state textures (A/B) carry a 9th layer: the Cartesian derivative log
-// scale derS for in-progress pixels (all-compute-der-cartesian). Display-side
-// textures (resolved/frozen) and their 8-target MRT pipelines stay at 8 —
-// they only ever consume the escaped format.
-// 13 = 9 iteration layers + the Phase D analytic-AA extras (9/10 in-progress
-// z″ mantissa; 8..12 escaped Taylor payload). Allocated unconditionally for
+// Number of r32float layers per raw texture array.
+// 13 = 9 iteration layers + the analytic-AA/future-geometry extras (9/10/11 carry the
+// independently scaled in-progress z″ and 12 its validity bit; 8..12 carry
+// the escaped polar-log derivative payload). Allocated unconditionally for
 // now — writes are cheap and reproject copies by destination layer count;
 // FOLLOW-UP: gate to 9 when antialiasLevel == 1 (saves 4 × texSize² × 4 B × 2
 // textures; needs a realloc path on the AA toggle).
 const RAW_LAYERS = 13
-const DISPLAY_LAYERS = 8
 
 // Adaptive iteration batch sizing — only the fused iteration pass is controlled.
 // Leave part of the frame budget to reprojection, resolve and color, which do not
 // scale with iterationBatchSize.
-const MIN_BATCH_SIZE = 4
-const MIN_ITERATION_TARGET_MS = 15
+const MIN_BATCH_SIZE = 1
+const MIN_ITERATION_TARGET_MS = 1
 const ITERATION_SAFETY_MARGIN_MS = 2
 const BATCH_OVERSHOOT_RATIO = 1.15
 const BATCH_UNDERSHOOT_RATIO = 0.8
@@ -63,6 +78,7 @@ const MAX_BATCH_SIZE = 10_000
 // below a pixel while letting high-skip BLA levels accept far more often than
 // the previous 1e-6 (which made BLA slower than plain perturbation).
 const BLA_LINEARIZATION_EPSILON = 1e-3
+
 // Floats per floatexp BlaStep uploaded to the GPU. Matches the Rust `BlaStep`
 // (#[repr(C)] of 11 × 4-byte fields): ax,ay,bx,by,ab_exp,radius_alpha,alpha_exp,
 // radius_beta + the Padé D coefficient dx,dy,d_exp.
@@ -75,6 +91,15 @@ const JET_COEFF_FLOATS = 27
 // Its own buffer so a radius re-solve re-uploads only these, not the whole
 // coefficient table.
 const JET_RADII_FLOATS = 4
+const DYNAMIC_VALIDITY_VERSION = 1
+const DYNAMIC_VALIDITY_WORDS_PER_BLOCK = 24
+const DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK = 2
+const dynamicValidityStorageWords = (blockCount: number) =>
+    Math.ceil((Math.max(1, blockCount) * (
+        DYNAMIC_VALIDITY_WORDS_PER_BLOCK + DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK
+    )) / 4) * 4
+const radialCertificateStorageWords = (blockCount: number) =>
+    Math.ceil((Math.max(1, blockCount) * RADIAL_CERTIFICATE_WORDS_PER_BLOCK) / 4) * 4
 // Floats per Möbius-c+ COEFFICIENT record — must match the Rust #[repr(C)]
 // MobiusCoeffs: 7 coefficients × (x, y, e), 84 B ([2/1]-c+: A, B, A', D, D',
 // F, N₂). Mobius tables ship in the SAME GPU buffers as jet ones (the element
@@ -89,46 +114,24 @@ const MOBIUS_COEFF_FLOATS = 21
 // beyond this cap. 10M steps = an 80 MB storage buffer, within the WebGPU
 // default maxStorageBufferBindingSize (128 MiB) — no requiredLimits needed.
 const ORBIT_STEP_CAPACITY = 10_000_000
-const COLOR_UNIFORM_FLOAT_COUNT = 64
+const COLOR_UNIFORM_FLOAT_COUNT = 72
 const TAU = Math.PI * 2
 
-// Adaptive refinement gating: sentinel grid refinement (halving the step
-// each frame) is paused when the batch controller is at its minimum AND
-// the number of active pixels (those the fused compute pass actually processes:
-// iter == -1 or continuations) exceeds this threshold.  This prevents
-// pixel-count avalanches while still guaranteeing convergence — the gate
-// only closes when the GPU truly cannot absorb more work.
-const ACTIVE_PIXEL_GATE_THRESHOLD = 5_000_000
 // Minimum number of unfinished pixels below which we consider the image
-// fully converged.  A few stray pixels can linger indefinitely due to
-// floating-point rounding at the sentinel boundaries — not worth spinning
+// fully converged. A few stray pixels can linger indefinitely near numerically
+// ambiguous fractal boundaries — not worth spinning
 // the GPU for.
 const UNFINISHED_PIXEL_DONE_THRESHOLD = 10
 // EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
 const GPU_TIME_EMA_ALPHA = 0.25
 
-// Per-pass GPU timing (PerformancePanel). Each timed pass gets a begin/end
-// timestamp pair via GPUComputePass/RenderPassTimestampWrites — recorded inline
-// by the GPU, so NO pipeline barrier is added to the measured pass. The values
-// are resolved and read back asynchronously off the critical path (like the
-// counter readback). Order here defines slot indices and the panel's display
-// order. `label` is shown to the user; `help` explains the metric.
-const PASS_SLOTS: { key: string; label: string; help: string }[] = [
-    { key: 'merge',     label: 'Merge (zoom)',   help: 'Fusion résolu+figé en fin de zoom (MRT min-step). Ne tourne qu\'à l\'arrêt d\'un zoom.' },
-    { key: 'reproject', label: 'Reprojection',   help: 'Décalage entier des pixels lors d\'un pan + effacement des bords (réutilise le calcul).' },
-    { key: 'reseed',    label: 'AA reseed',      help: 'Ré-amorçage sélectif de la frontière pour un échantillon d\'anti-aliasing. Actif seulement en accumulation AA.' },
-    { key: 'compute',   label: 'Itération',      help: 'Kernel fusionné brush+mandelbrot+comptage (perturbation/BLA/jet…). C\'est le cœur du coût.' },
-    { key: 'resolve',   label: 'Resolve',        help: 'Conversion de l\'état sentinelle en état échappé (distance, angle de relief).' },
-    { key: 'aaAccum',   label: 'Couleur (AA)',   help: 'Passe couleur accumulée dans le buffer AA (linéaire) pendant l\'accumulation.' },
-    { key: 'color',     label: 'Couleur',        help: 'Passe couleur directe : palette, relief, skybox, iridescence → écran.' },
-    { key: 'present',   label: 'Present (AA)',   help: 'Division de l\'accumulateur AA par le nombre d\'échantillons + sRGB → écran.' },
-]
-const TS_COUNT = PASS_SLOTS.length * 2
-
 // Count unfinished pixels less often than every render frame.  The readback is
 // asynchronous, so this controls the compute/count pass frequency, not display FPS.
 const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
 const COUNTER_READBACK_BUFFER_COUNT = 3
+const WORK_STATS_WORDS = 37
+const WORK_STATS_BYTES = WORK_STATS_WORDS * Uint32Array.BYTES_PER_ELEMENT
+const COUNTER_READBACK_BYTES = 2 * Uint32Array.BYTES_PER_ELEMENT + WORK_STATS_BYTES
 // Deferred-clear fallback (see pendingTableClear): generous enough for the
 // costliest unified builds (~3-5 s @40k iters) plus an in-flight orbit
 // extension; past it the re-render proceeds exact rather than never.
@@ -142,7 +145,19 @@ type CounterReadbackSlot = {
     generation: number
 }
 
+type DynamicValidityRuntimeStats = {
+    tierAttempts: [number, number, number, number]
+    tierAccepts: [number, number, number, number]
+    skipBuckets: [number, number, number, number]
+    candidateUses: number
+    rejectionReasons: [number, number, number, number, number, number, number, number]
+    exactFallbacks: number
+}
+
 type UnifiedTableStats = {
+    coefficientsMs: number
+    boundsMs: number
+    radiiMs: number
     saN0: number
     periodicP: number
     periodicStatus: number
@@ -155,6 +170,61 @@ type UnifiedTableStats = {
 type TableBuildKind = 'bla' | 'jet' | 'mobius' | 'unified'
 type TableBuildStage = 'idle' | 'coefficients' | 'bounds' | 'radii' | 'transfer' | 'ready' | 'error'
 
+type DynamicValidityPayload = {
+    version: number
+    wordsPerBlock: number
+    diagnosticsWordsPerBlock: number
+    referenceLog2Dc: number
+    envelopes: Float32Array<ArrayBuffer>
+    diagnostics: Uint32Array<ArrayBuffer>
+    levels: Uint32Array<ArrayBuffer>
+    levelCount: number
+}
+
+type OptionalHeadersPayload = {
+    version: number
+    revision: number
+    currentLog2CMax: number
+    saLog2Dc: number
+    periodicLog2Dc: number
+    gateLog2Dc: number
+    data: Float32Array<ArrayBuffer>
+}
+
+type IncrementalTableRangeResponse = {
+    type: 'tableRange'
+    jobId: number
+    refId: number
+    tableGeneration: number
+    maxIterations: number
+    capacityOrbitLength: number
+    coveredOrbitLength: number
+    builtOrbitLength: number
+    reset: boolean
+    hasMore: boolean
+    /** Six u32s/range: level, skip, slotStart, slotCount, payloadOffset, committedCount. */
+    ranges: Uint32Array<ArrayBuffer>
+    coefficients: Float32Array<ArrayBuffer>
+    radii: Float32Array<ArrayBuffer>
+    certificates: Uint32Array<ArrayBuffer>
+    certificateVersion: number
+    certificateWordsPerBlock: number
+    /** Deprecated radial-v2 diagnostic. Radial-v3 publishes NaN. */
+    referenceLog2Dc: number
+    currentLog2CMax: number
+    cumulativeMerges: number
+    cumulativeCoefficients: number
+    cumulativeCertificates: number
+    peakRetainedBytes: number
+    cumulativeMergeCoefficientsMs: number
+    cumulativeCertificateMs: number
+    referenceGrowthCertificates: number
+    viewportOnlyCertificateBuilds: number
+    lastCertificateBuildCause: 'epoch-reset' | 'reference-growth' | 'none'
+    yields: number
+    cancellations: number
+}
+
 type ReferenceWorkerRequest =
     | {
         type: 'reset'
@@ -166,6 +236,8 @@ type ReferenceWorkerRequest =
         approximationMode: ApproximationMode
         blaEpsilon: number
         gateEmission?: boolean
+        dynamicBlockValidity?: boolean
+        incrementalReferenceTable?: boolean
         maxBlaSkip: number
         maxIterations: number
         precisionBudget: string
@@ -206,6 +278,18 @@ type ReferenceWorkerRequest =
         tableGeneration: number
     }
     | {
+        type: 'setDynamicBlockValidity'
+        jobId: number
+        on: boolean
+        tableGeneration: number
+    }
+    | {
+        type: 'setIncrementalReferenceTable'
+        jobId: number
+        on: boolean
+        tableGeneration: number
+    }
+    | {
         type: 'setMaxBlaSkip'
         jobId: number
         maxBlaSkip: number
@@ -216,6 +300,8 @@ type ReferenceWorkerRequest =
         jobId: number
         maxIter: number
         radiusFactor: number
+        /** When set, also frame the copy: the reply carries the target view scale. */
+        fill?: number
     }
     | { type: 'dispose' }
 
@@ -256,10 +342,12 @@ type ReferenceWorkerResponse =
         kind: TableBuildKind
         steps: Float32Array<ArrayBuffer>
         radii?: Float32Array<ArrayBuffer>
+        optionalHeaders?: OptionalHeadersPayload
+        validity?: DynamicValidityPayload
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
         // Worker-side table build wall-clock + unified stage mask (1 = coeffs,
-        // 2 = bounds, 4 = radii) — RenderStats' "Table build" debug row.
+        // 2 = bounds, 4 = radii, 8 = packed validity) — RenderStats' table row.
         buildMs?: number
         buildStages?: number
         // Table observability (unified only): SA prefix, periodic diagnostic,
@@ -282,6 +370,7 @@ type ReferenceWorkerResponse =
         refId: number
         maxIterations: number
         radii: Float32Array<ArrayBuffer>
+        optionalHeaders?: OptionalHeadersPayload
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
         buildMs?: number
@@ -290,6 +379,18 @@ type ReferenceWorkerResponse =
         tableGeneration: number
     }
     | {
+        type: 'headersReady'
+        jobId: number
+        refId: number
+        maxIterations: number
+        optionalHeaders: OptionalHeadersPayload
+        buildMs?: number
+        buildStages?: number
+        tableStats?: UnifiedTableStats
+        tableGeneration: number
+    }
+    | IncrementalTableRangeResponse
+    | {
         type: 'error'
         jobId: number
         message: string
@@ -297,10 +398,11 @@ type ReferenceWorkerResponse =
     | {
         type: 'minibrotFound'
         jobId: number
-        status: 'ok' | 'none' | 'nonewton'
+        status: 'ok' | 'none' | 'nonewton' | 'nosize'
         cx: string | null
         cy: string | null
         period: number | null
+        scale: string | null
     }
     | {
         type: 'ready'
@@ -325,18 +427,45 @@ type ReferenceSlot = {
         kind: 'bla' | 'jet' | 'mobius' | 'unified'
         steps: Float32Array<ArrayBuffer>
         radii?: Float32Array<ArrayBuffer>
+        optionalHeaders?: OptionalHeadersPayload
+        validity?: DynamicValidityPayload
         levels: Uint32Array<ArrayBuffer>
         levelCount: number
         maxIterations: number
+        tableGeneration: number
     } | null
+    /** Progressive table ranges retained CPU-side until a staging reference promotes. */
+    incrementalRanges: IncrementalTableRangeResponse[]
+}
+
+type IncrementalTableLayout = {
+    refId: number
+    tableGeneration: number
+    capacityOrbitLength: number
+    offsets: number[]
+    capacities: number[]
+    skips: number[]
+    committed: number[]
+    /** Per-level upper bound of every committed dynamic candidate radius.
+     * A dz above this value cannot pass any packed tier in the level. */
+    maxDynamicRadius: number[]
+    totalBlockCapacity: number
+    coveredOrbitLength: number
+    builtOrbitLength: number
 }
 
 export type MinibrotResult = {
-    /** 'ok' = nucleus found; 'none' = no atom under the view; 'nonewton' = period found but Newton did not converge. */
-    status: 'ok' | 'none' | 'nonewton'
+    /**
+     * 'ok' = nucleus found; 'none' = no atom under the view; 'nonewton' = period found but
+     * Newton did not converge; 'nosize' = nucleus found but the size estimate degenerated
+     * (framed request only).
+     */
+    status: 'ok' | 'none' | 'nonewton' | 'nosize'
     cx: string | null
     cy: string | null
     period: number | null
+    /** Framed request only: view half-height (decimal string) that frames the copy. */
+    scale: string | null
 }
 
 function shouldTrackOrbitMetrics(colorStops: ColorStop[]): boolean {
@@ -442,16 +571,15 @@ export type RenderOptions = {
     animationSpeed: number,
     ambientOcclusionStrength: number,
     microBumpStrength: number,
-    subsurfaceStrength: number,
     reliefDepth: number,
     localShadowStrength: number,
     lightAngle: number,
     varnishStrength: number,
+    gradeContrast?: number,
+    gradeSaturation?: number,
     orbitTrapStrength: number,
     phaseColoringStrength: number,
     stripeFrequency: number,
-    zoomMinBrushStep: number,
-    sentinelSeedStep: number,
     textureMapping: TextureMappingConfig,
     textureMappingMode?: number,
 }
@@ -480,6 +608,16 @@ export type Mandelbrot = {
     viewFloatexp?: Float64Array,
 }
 
+interface DisplaySet {
+    valuesTexture: GPUTexture
+    valuesArrayView: GPUTextureView
+    valueLayerViews: GPUTextureView[]
+    geometryTexture: GPUTexture
+    geometryView: GPUTextureView
+    metadataTexture: GPUTexture
+    metadataView: GPUTextureView
+}
+
 export class Engine {
     private snapshotCallback?: (png: string) => void;
     private snapshotDestWidth?: number;
@@ -497,16 +635,20 @@ export class Engine {
     rawArrayView?: GPUTextureView // full 2d-array view for sampling
     /** Raw layer 0 (iter) as a 2d storage view — the reseed's write target. */
     private rawIterStorageView?: GPUTextureView
-    /** Raw layers 8..12 (Taylor payload) as a 5-layer sampled array view (disjoint from layer 0). */
+    /** Raw layers 8..12 (analytic-AA/future-geometry payload) as a sampled view. */
     private rawPayloadView?: GPUTextureView
     rawBrushTexture?: GPUTexture // texture "neutre" intermédiaire (B) — r32float array, written via textureStore only
     rawBrushArrayView?: GPUTextureView // full 2d-array view for sampling
-    resolvedTexture?: GPUTexture // texture neutre sans sentinelles visibles — 8-layer r32float array
-    resolvedArrayView?: GPUTextureView // full 2d-array view for sampling
-    resolvedLayerViews: GPUTextureView[] = [] // per-layer 2d views for MRT
-    frozenTexture?: GPUTexture // frozen snapshot of resolved texture for zoom reprojection
-    frozenArrayView?: GPUTextureView // full 2d-array view for sampling the frozen snapshot
-    frozenLayerViews: GPUTextureView[] = [] // per-layer 2d views for merge MRT
+    rawBrushIterStorageView?: GPUTextureView // layer 0 storage view (mirrors A)
+    rawBrushPayloadView?: GPUTextureView // layers 8..12 sampled view (mirrors A)
+    private resolvedDisplay?: DisplaySet
+    private frozenDisplay?: DisplaySet
+    /** Format-compatible frozen-geometry read copy used only during merge. */
+    private geometryScratchTexture?: GPUTexture
+    private geometryScratchView?: GPUTextureView
+    /** Frozen metadata read copy used while merge writes the frozen set. */
+    private metadataScratchTexture?: GPUTexture
+    private metadataScratchView?: GPUTextureView
 
     // merge pass (fuse resolved + frozen at zoom stop)
     pipelineMerge?: GPURenderPipeline
@@ -516,19 +658,50 @@ export class Engine {
     // buffers
     uniformBufferMandelbrot?: GPUBuffer // passe Mandelbrot (calc -1)
     uniformBufferColor?: GPUBuffer // passe color (écran)
-    uniformBufferBrush?: GPUBuffer // passe pinceau (sentinelles)
-    uniformBufferResolve?: GPUBuffer // passe resolve (sentinel snapping)
+    uniformBufferBrush?: GPUBuffer // reprojection + dispatch origin
+    uniformBufferResolve?: GPUBuffer // temporary bilinear presentation
     mandelbrotReferenceBuffer?: GPUBuffer // storage buffer contenant l'orbite
     mandelbrotBlaBuffer?: GPUBuffer // storage buffer contenant les sauts BLA
     mandelbrotBlaLevelBuffer?: GPUBuffer // storage buffer contenant les metadonnees BLA
     mandelbrotJetBuffer?: GPUBuffer // storage buffer: jet coefficient records (add-jet-approximation)
     mandelbrotJetRadiiBuffer?: GPUBuffer // storage buffer: jet radii (the split "buffer de rayons")
     mandelbrotJetLevelBuffer?: GPUBuffer // storage buffer: jet level directory
+    mandelbrotValidityBuffer?: GPUBuffer // packed-v1 dynamic validity, multiplexed on BLA-level binding in Auto
     private mandelbrotBlaBufferCapacity = 0
     private mandelbrotBlaLevelBufferCapacity = 0
     private mandelbrotJetBufferCapacity = 0
     private mandelbrotJetRadiiBufferCapacity = 0
     private mandelbrotJetLevelBufferCapacity = 0
+    private mandelbrotValidityBufferCapacity = 0
+    private dynamicValidityReady = false
+    /** Packed-v1/radial-v2 compatibility diagnostic. Radial v3 is governed by
+     * per-block intrinsic caps and deliberately leaves this non-finite. */
+    dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
+    dynamicValidityCurrentLog2CMax = Number.NaN
+    private dynamicValidityGeneration = -1
+    /** A/B referee: evaluate packed certificates and counters, but dispatch
+     * with the legacy principal/secours sidecar. Incremental ranges carry a
+     * dormant legacy sidecar, so shadow mode intentionally uses one-shot. */
+    dynamicValidityShadow = false
+    /** Expensive per-proof GPU instrumentation. Kept out of production
+     * pipelines; the performance panel/tests can opt into a specialized
+     * diagnostic kernel without slowing ordinary block rendering. */
+    private dynamicValidityStatsEnabled = false
+    /** Work instrumentation (realMean/covMean/maxAccum/tier mix). Feeds the
+     *  performance panel only — no render decision reads it — so it is compiled
+     *  out of the kernel until a consumer asks for it. */
+    private workStatsEnabled = false
+    /** Workgroup-aligned bounding box of the rotated viewport inside the neutral
+     *  square, in texels. The iteration kernel is dispatched over it instead of
+     *  the whole square; every texel left out is one `is_inside_rotated_screen`
+     *  already rejects, so no computed state is ever dropped or invalidated. */
+    private dispatchBox = { x: 0, y: 0, width: 0, height: 0 }
+    private incrementalReferenceTable = true
+    private incrementalTableLayout: IncrementalTableLayout | null = null
+    private currentOptionalHeaders?: OptionalHeadersPayload
+    private currentUnifiedBlockCount = 0
+    private currentUnifiedBlockRadii?: Float32Array<ArrayBuffer>
+    private optionalHeaderRevision = -1
 
     // pipelines / bindgroups
     pipelineResolve?: GPURenderPipeline
@@ -580,11 +753,9 @@ export class Engine {
     // Utility compute pass (pan shift / clear stamp), ping-pong A→B.
     private pipelineReprojectCs?: GPUComputePipeline
     private bindGroupReprojectCs?: GPUBindGroup
-    /** Alternative color bind group reading rawTexture (A) instead of resolved,
-     *  used when the resolve pass is skipped (image fully converged). */
-    private bindGroupColorRaw?: GPUBindGroup
-    /** True when the last rendered frame skipped copy A→resolved + resolve. */
-    private resolveSkipped = false
+    private rawFieldVersion = 0
+    private resolvedDisplayVersion = -1
+    private frozenDisplayVersion = -1
     /** frameSerial of the last frame that may have mutated rawTexture (A). */
     private lastRawMutationFrame = 0
     /** frameSerial at which the last applied counter readback was sampled. */
@@ -602,10 +773,6 @@ export class Engine {
     private lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
     /** Number of pixels still needing work. -1 = not yet known, 0 = fully converged. */
     unfinishedPixelCount = -1
-    /** Number of pixels the fused compute pass actually processes (iter == -1 + continuations).
-     *  Used for adaptive refinement gating. -1 = not yet known. */
-    activePixelCount = -1
-
     // ── Work instrumentation (in-place compute path), latest sampled dispatch ──
     /** covered iterations ÷ real loop steps — the true on-GPU BLA/Padé compression
      *  (≈1 in perturbation mode; >1 with blocks). -1 = not yet known. */
@@ -642,6 +809,14 @@ export class Engine {
     /** Applications served by the plain-f32 fast path (mode 5; the rest ran
      *  in fe). -1 = unknown. */
     f32AppsApprox = -1
+    /** Dynamic Auto proof instrumentation. Rejection order is value,
+     * derivative, pure-c, static/reference domain, Cauchy, rational pole. */
+    dynamicTierAttemptsApprox: [number, number, number, number] = [-1, -1, -1, -1]
+    dynamicTierAcceptsApprox: [number, number, number, number] = [-1, -1, -1, -1]
+    dynamicSkipBucketsApprox: [number, number, number, number] = [-1, -1, -1, -1]
+    dynamicCandidateUsesApprox = -1
+    dynamicRejectionReasonsApprox: [number, number, number, number, number, number, number, number] = [-1, -1, -1, -1, -1, -1, -1, -1]
+    dynamicExactFallbacksApprox = -1
     /** Table observability from the worker's last unified build. Periodic
      *  status codes: 0 pending, 1 active, 2 short orbit, 3 no converged
      *  period, 4 period above cap, 5 certificate rejected. */
@@ -657,6 +832,32 @@ export class Engine {
      *  A radii-only mask (4) is the Phase F keyframe path. */
     lastTableBuildMs = -1
     lastTableBuildStages = -1
+    lastTableCoefficientsMs = -1
+    lastTableBoundsMs = -1
+    lastTableRadiiMs = -1
+    /** Monotonic table-arrival counters used by navigation benchmarks. A
+     *  `radiiReady` publication is the legacy Auto cmax-only re-solve path:
+     *  coefficients and proof bounds stayed warm and only radii changed. */
+    tableBuildCompletionSerial = 0
+    cmaxOnlyTableRebuildCount = 0
+    optionalHeaderRefreshCount = 0
+    incrementalTableOrbitCoverage = 0
+    incrementalTableBuiltOrbit = 0
+    incrementalTableLevelBlocks: number[] = []
+    incrementalTableTransferredBytes = 0
+    incrementalTableYields = 0
+    incrementalTableCancellations = 0
+    incrementalTableCapacityGrowths = 0
+    incrementalTablePeakRetainedBytes = 0
+    incrementalTableMergeCoefficientsMs = 0
+    incrementalTableCertificateMs = 0
+    /** @deprecated benchmark compatibility; equals certificate construction time. */
+    incrementalTableEnvelopeMs = 0
+    radialCertificateVersion = 0
+    radialCertificateWordsPerBlock = 0
+    radialCertificateReferenceGrowthCount = 0
+    radialCertificateViewportBuildCount = 0
+    radialCertificateLastBuildCause: 'epoch-reset' | 'reference-growth' | 'none' = 'none'
     /** Live worker-side table build milestone. Unified reports its three real
      *  cache phases; the other modes expose start/transfer/completion. */
     tableBuildActive = false
@@ -686,12 +887,10 @@ export class Engine {
     isRendering = false
     /** Last measured GPU frame time in milliseconds. */
     gpuFrameTimeMs = 0
-    /** Exponentially smoothed GPU frame time (for adaptive refinement gating). */
+    /** Exponentially smoothed GPU frame time (for render-loop pacing). */
     smoothedGpuTimeMs = 0
     /** True while a delayed GPU timing sample is waiting for queue completion. */
     private pendingGpuTiming = false
-    /** Whether refinement was gated (blocked) on the previous frame. */
-    private refinementWasGated = false
     // FPS from the interval between actually-rendered frames (EMA). Counts every
     // rendered frame, not just iteration frames, and rejects the idle-resume gap.
     private _emaFrameMs = 0
@@ -705,7 +904,6 @@ export class Engine {
 
     // shader sources (optionnellement remplaçables)
     shaderPassColor: string
-    private f16Supported = false
 
     // ── Per-pass GPU timing (PerformancePanel data source) ──────────────
     // Polled by PerformancePanel.vue, same pattern as RenderStats.
@@ -715,6 +913,10 @@ export class Engine {
     passActive: Record<string, boolean> = {}    // did each pass run in the last measured frame
     passGpuSumMs = 0                            // Σ timed passes that ran (breakdown; may overlap)
     passGpuSpanMs = 0                          // authoritative GPU frame time = max(end) − min(begin)
+    /** Latest raw timestamp-query duration for the iteration pass. The serial
+     *  lets an external benchmark record each asynchronous sample once. */
+    lastIterationPassMs = -1
+    iterationPassTimingSerial = 0
     /** EMA of the active timed passes other than compute, used to reserve frame budget. */
     private otherPassesGpuMs = 0
     frameSerial = 0                            // monotonic, ++ per actually-rendered frame (one submit)
@@ -722,6 +924,8 @@ export class Engine {
     frameIntervalMs = 0                         // wall time between successive render() calls
     private timestampsEnabled = false
     private timestampQuerySet?: GPUQuerySet
+    /** One-thread no-op dispatch: prevents browsers from eliminating timestamp-only marker passes. */
+    private timestampMarkerPipeline?: GPUComputePipeline
     private tsResolveBuffer?: GPUBuffer
     private tsReadBuffer?: GPUBuffer
     private tsReadbackFree = true
@@ -730,14 +934,14 @@ export class Engine {
     /** Batch/controller epoch used by the frame currently in timestamp readback. */
     private tsPendingBatchSize = MIN_BATCH_SIZE
     private tsPendingBatchGeneration = 0
-    private tsPendingActivePixelCount = -1
-    /** Invalidates delayed timing samples when a clear changes the active-pixel population. */
+    private tsPendingRemainingPixelCount = -1
+    /** Invalidates delayed timing samples when a clear changes the remaining population. */
     private batchControllerGeneration = 0
     /** Prevents repeated resets while one clear is waiting to be consumed by render(). */
     private batchResetForPendingClear = false
-    /** Conservative AIMD growth state and last measured active population. */
+    /** Conservative AIMD growth state and last measured remaining population. */
     private batchUnderBudgetStreak = 0
-    private batchLastActivePixelCount = -1
+    private batchLastRemainingPixelCount = -1
     private lastRenderStartMs = 0
 
     // config
@@ -773,6 +977,7 @@ export class Engine {
     private approximationMode: ApproximationMode = 'perturbation'
     private blaEpsilon = BLA_LINEARIZATION_EPSILON
     private gateEmission = true
+    private dynamicBlockValidity = true
     private maxBlaSkip = 65536
     // Fixed precision budget as a target scale (max zoom depth navigation stays precise at).
     // Default 1e-30 keeps shallow use fast; the Settings slider can deepen it to 1e-1000.
@@ -829,7 +1034,7 @@ export class Engine {
     // machine and repaying the heavy recompute every frame. Starts true so the
     // first frame after enabling a view draws.
     debugViewDirty = true
-    // Console/devtools override: __mandelbrotEngine.debugViewOverride = 1..5
+    // Console/devtools override: __mandelbrotEngine.debugViewOverride = 1..7
     // wins over the Settings value (0 = follow Settings).
     debugViewOverride = 0
     private pipelineDebug?: GPURenderPipeline
@@ -884,7 +1089,7 @@ export class Engine {
     private rawJittered = false
     /** When true, AA accumulation auto-starts as soon as the view is fully converged. */
     aaAuto = false
-    // ── Phase D: analytic AA (Taylor-payload expansion in the color pass) ──
+    // ── Analytic AA (z″ expansion in the color pass) ──
     /** Master switch (auto mode only — the payload's z″ is tracked by the unified kernel). */
     aaAnalyticEnabled = true
     /** Contrast + moiré AA-target predictors (design D-contrast): Sobel on the
@@ -897,11 +1102,6 @@ export class Engine {
     private aaFrontierBuffer?: GPUBuffer
     private aaFrontierReadback?: GPUBuffer
     private aaFrontierMapPending = false
-
-    // Cumulative texel shift since last clearHistory – used to keep the
-    // sentinel grid aligned after translation reprojection (Option B).
-    cumulativeShiftX = 0
-    cumulativeShiftY = 0
 
     // ── Zoom reprojection state machine ───────────────────────────────
     /** Configurable magnification threshold before swapping (default ×2). */
@@ -916,7 +1116,7 @@ export class Engine {
     /** Initial live-texel offset between a frozen snapshot and the display when zoom starts. */
     private frozenBaseShiftX = 0
     private frozenBaseShiftY = 0
-    /** Rounded live-texel pan accumulated since the current frozen snapshot. Unlike cumulativeShift, it survives clears. */
+    /** Rounded live-texel pan accumulated since the current frozen snapshot. */
     private frozenPanShiftX = 0
     private frozenPanShiftY = 0
     /** True when the frozen texture is spatially aligned with the live texture.
@@ -953,9 +1153,6 @@ export class Engine {
 
     // Target FPS for the adaptive batch controller (adjustable from UI, default 60)
     targetFps = 60
-
-    // GPU load multiplier: scales the active-pixel gate threshold (default 1.0)
-    gpuLoadMultiplier = 1.0
 
     constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
         this.canvas = canvas
@@ -1037,9 +1234,24 @@ export class Engine {
         // previous reference must never survive the switch. Without a table the
         // shader falls back to exact perturbation (correct, just slower) until
         // the worker's blaReady for this refId lands.
-        if (staging.bla) {
+        if (staging.incrementalRanges.length > 0) {
+            this.incrementalTableLayout = null
+            for (const range of staging.incrementalRanges) {
+                this.writeIncrementalTableRange(range)
+            }
+            staging.incrementalRanges = []
+            this.currentBlaLevelCount = this.incrementalActiveLevelCount()
+            this.referenceBlaReadyMaxIterations = Math.max(
+                0,
+                (this.incrementalTableLayout?.coveredOrbitLength ?? 1) - 1,
+            )
+        } else if (staging.bla) {
             this.writeBlockTable(staging.bla)
-            this.currentBlaLevelCount = staging.bla.levelCount
+            const dynamicPairReady = !this.dynamicBlockValidity
+                || staging.bla.kind !== 'unified'
+                || (this.dynamicValidityReady
+                    && this.dynamicValidityGeneration === this.tableGeneration)
+            this.currentBlaLevelCount = dynamicPairReady ? staging.bla.levelCount : 0
             this.referenceBlaReadyMaxIterations = staging.bla.maxIterations
         } else {
             this.currentBlaLevelCount = 0
@@ -1173,6 +1385,8 @@ export class Engine {
             approximationMode: this.approximationMode,
             blaEpsilon: this.blaEpsilon,
             gateEmission: this.gateEmission,
+            dynamicBlockValidity: this.dynamicBlockValidity,
+            incrementalReferenceTable: this.incrementalReferenceTable,
             maxBlaSkip: this.maxBlaSkip,
             maxIterations,
             precisionBudget: this.precisionBudget,
@@ -1217,6 +1431,7 @@ export class Engine {
                 cx: message.cx,
                 cy: message.cy,
                 period: message.period,
+                scale: message.scale,
             })
             return
         }
@@ -1322,6 +1537,7 @@ export class Engine {
                     orbitLen: message.count,
                     chunks: [message.orbit],
                     bla: null,
+                    incrementalRanges: [],
                 }
                 this.isReferenceValidating = false
                 return
@@ -1332,13 +1548,98 @@ export class Engine {
             return
         }
 
-        // ── blaReady / radiiReady — routed by refId, exactly like orbit chunks ──
+        // ── tables / optional headers — routed by refId like orbit chunks ──
         // Stale-generation tables (built under pre-change ε/skip/gates/mode, in
         // flight when the setter was posted) are dropped in both branches: the
         // worker processes messages FIFO, so a build under the new params always
         // follows.
         if (this.activeRef && message.refId === this.activeRef.refId) {
             if (message.tableGeneration !== this.tableGeneration) {
+                return
+            }
+            if (message.type === 'tableRange') {
+                const activatesFirstAutoTable = this.approximationMode === 'auto'
+                    && this.currentBlaLevelCount <= 0
+                    && message.ranges.length > 0
+                if (!this.writeIncrementalTableRange(message)) {
+                    return
+                }
+                this.currentBlaLevelCount = this.incrementalActiveLevelCount()
+                this.referenceBlaReadyMaxIterations = Math.max(0, message.coveredOrbitLength - 1)
+                this.incrementalTableOrbitCoverage = message.coveredOrbitLength
+                this.incrementalTableBuiltOrbit = message.builtOrbitLength
+                this.incrementalTableLevelBlocks = this.incrementalTableLayout?.committed.slice() ?? []
+                this.incrementalTableYields = message.yields
+                this.incrementalTableCancellations = message.cancellations
+                this.incrementalTablePeakRetainedBytes = message.peakRetainedBytes
+                this.incrementalTableMergeCoefficientsMs = message.cumulativeMergeCoefficientsMs
+                this.incrementalTableCertificateMs = message.cumulativeCertificateMs
+                this.incrementalTableEnvelopeMs = message.cumulativeCertificateMs
+                this.radialCertificateVersion = message.certificateVersion
+                this.radialCertificateWordsPerBlock = message.certificateWordsPerBlock
+                this.radialCertificateReferenceGrowthCount = message.referenceGrowthCertificates
+                this.radialCertificateViewportBuildCount = message.viewportOnlyCertificateBuilds
+                this.radialCertificateLastBuildCause = message.lastCertificateBuildCause
+                this.tableBuildActive = message.hasMore
+                this.tableBuildProgress = Math.min(
+                    1,
+                    message.coveredOrbitLength / Math.max(1, message.maxIterations + 1),
+                )
+                this.tableBuildStage = message.hasMore ? 'bounds' : 'ready'
+                this.tableBuildKind = 'unified'
+                this.dynamicValidityReferenceLog2Dc = Number.NaN
+                this.dynamicValidityCurrentLog2CMax = message.currentLog2CMax
+                this.dynamicValidityGeneration = message.tableGeneration
+                this.dynamicValidityReady = this.currentBlaLevelCount > 0
+                this.debugViewDirty = true
+                this.isReferenceValidating = false
+                if (message.ranges.length === 0) {
+                    return
+                }
+                if (this.pendingTableClear) {
+                    this.pendingTableClear = false
+                    this.clearHistoryNextFrame = true
+                    this.needRender = true
+                    this.invalidateCounterReadback()
+                } else if (activatesFirstAutoTable) {
+                    if (this.unfinishedPixelCount >= 0) this.needFreezeSnapshot = true
+                    this.clearHistoryNextFrame = true
+                    this.needRender = true
+                    this.invalidateCounterReadback()
+                } else {
+                    // Appending certified ranges changes only future scheduling.
+                    // Existing texels/history remain mathematically valid.
+                    this.needRender = true
+                    this.invalidateCounterReadback(true)
+                }
+                return
+            }
+            if (message.type === 'headersReady') {
+                if (this.currentBlockTableKind !== 'unified') {
+                    return
+                }
+                if (!this.writeOptionalHeaders(message.optionalHeaders)) {
+                    return
+                }
+                this.optionalHeaderRefreshCount++
+                this.tableBuildActive = false
+                this.tableBuildProgress = 1
+                this.tableBuildStage = 'ready'
+                this.lastTableBuildMs = message.buildMs ?? this.lastTableBuildMs
+                this.lastTableBuildStages = message.buildStages ?? 16
+                if (message.tableStats) {
+                    this.tableSaN0 = message.tableStats.saN0
+                    this.tablePeriodicP = message.tableStats.periodicP
+                    this.tablePeriodicStatus = message.tableStats.periodicStatus
+                    this.tablePeriodicDetectedP = message.tableStats.periodicDetectedP
+                    this.tableGateCount = message.tableStats.gateCount
+                }
+                // Optional shortcuts preserve the exact result and the entire
+                // dynamic table. Existing history/counters remain valid; only
+                // unfinished pixels need another dispatch opportunity.
+                this.debugViewDirty = true
+                this.needRender = true
+                this.isReferenceValidating = false
                 return
             }
             // Cold-start Auto can finish its first image in exact perturbation
@@ -1355,12 +1656,31 @@ export class Engine {
                 // Radii-only re-solve: the GPU coefficient table is from the
                 // same build (worker guarantee) — rewrite just the sidecar +
                 // level directory.
-                this.writeRadiiSidecar(message.radii, message.levels, message.levelCount)
+                this.writeRadiiSidecar(
+                    message.radii,
+                    message.levels,
+                    message.levelCount,
+                    message.optionalHeaders,
+                )
             } else {
                 this.writeBlockTable(message)
             }
-            this.currentBlaLevelCount = message.levelCount
+            const dynamicPairReady = !this.dynamicBlockValidity
+                || this.approximationMode !== 'auto'
+                || (this.currentBlockTableKind === 'unified'
+                    && this.dynamicValidityReady
+                    && this.dynamicValidityGeneration === this.tableGeneration)
+            this.currentBlaLevelCount = dynamicPairReady ? message.levelCount : 0
             this.referenceBlaReadyMaxIterations = message.maxIterations
+            this.tableBuildCompletionSerial++
+            if (
+                message.type === 'radiiReady'
+                && message.buildStages !== undefined
+                && (message.buildStages & 4) !== 0
+                && (message.buildStages & ~(4 | 16)) === 0
+            ) {
+                this.cmaxOnlyTableRebuildCount++
+            }
             this.tableBuildActive = false
             this.tableBuildProgress = 1
             this.tableBuildStage = 'ready'
@@ -1374,6 +1694,9 @@ export class Engine {
                 this.lastTableBuildMs = message.buildMs
                 this.lastTableBuildStages = message.buildStages ?? -1
                 if (message.tableStats) {
+                    this.lastTableCoefficientsMs = message.tableStats.coefficientsMs ?? -1
+                    this.lastTableBoundsMs = message.tableStats.boundsMs ?? -1
+                    this.lastTableRadiiMs = message.tableStats.radiiMs ?? -1
                     this.tableSaN0 = message.tableStats.saN0 ?? -1
                     this.tablePeriodicP = message.tableStats.periodicP ?? -1
                     this.tablePeriodicStatus = message.tableStats.periodicStatus ?? 0
@@ -1418,14 +1741,40 @@ export class Engine {
             if (message.tableGeneration !== this.tableGeneration) {
                 return
             }
+            if (message.type === 'tableRange') {
+                if (message.reset) this.stagingRef.incrementalRanges = []
+                this.stagingRef.incrementalRanges.push(message)
+                this.tableBuildActive = message.hasMore
+                this.tableBuildProgress = Math.min(
+                    1,
+                    message.coveredOrbitLength / Math.max(1, message.maxIterations + 1),
+                )
+                this.tableBuildStage = message.hasMore ? 'bounds' : 'ready'
+                this.tableBuildKind = 'unified'
+                return
+            }
             if (message.type === 'radiiReady') {
                 // Merge into the staged full table (its coefficients are from
                 // the same build); without one there is nothing to align with.
                 if (this.stagingRef.bla?.kind === 'unified') {
                     this.stagingRef.bla.radii = message.radii
+                    this.stagingRef.bla.optionalHeaders = message.optionalHeaders
                     this.stagingRef.bla.levels = message.levels
                     this.stagingRef.bla.levelCount = message.levelCount
                     this.stagingRef.bla.maxIterations = message.maxIterations
+                }
+                this.tableBuildActive = false
+                this.tableBuildProgress = 1
+                this.tableBuildStage = 'ready'
+                return
+            }
+            if (message.type === 'headersReady') {
+                if (
+                    this.stagingRef.bla?.kind === 'unified'
+                    && (!this.stagingRef.bla.optionalHeaders
+                        || message.optionalHeaders.revision > this.stagingRef.bla.optionalHeaders.revision)
+                ) {
+                    this.stagingRef.bla.optionalHeaders = message.optionalHeaders
                 }
                 this.tableBuildActive = false
                 this.tableBuildProgress = 1
@@ -1436,9 +1785,12 @@ export class Engine {
                 kind: message.kind,
                 steps: message.steps,
                 radii: message.radii,
+                optionalHeaders: message.optionalHeaders,
+                validity: message.validity,
                 levels: message.levels,
                 levelCount: message.levelCount,
                 maxIterations: message.maxIterations,
+                tableGeneration: message.tableGeneration,
             }
             this.tableBuildActive = false
             this.tableBuildProgress = 1
@@ -1456,27 +1808,19 @@ export class Engine {
         // the worker navigator (set via the reset message), which builds the reference orbit.
         this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 5 ? 'auto' : this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
+        // Rollout defaults are owned by Engine. Mirror them into the front
+        // navigator before the worker reset so UI/debug getters and the worker
+        // start from the same dynamic+incremental contract.
+        this.mandelbrotNavigator.set_dynamic_block_validity(this.dynamicBlockValidity)
+        this.mandelbrotNavigator.set_incremental_reference_table(this.incrementalReferenceTable)
         this.initializeReferenceWorker()
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
         this.adapter = await navigator.gpu.requestAdapter()
         if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
-        // shader-f16 doubles ALU throughput and halves register use for the
-        // bounded shading math in the color pass (mobile win). Opt in only if
-        // the adapter exposes it; the color source falls back to f32 otherwise.
-        // A/B DEBUG OVERRIDE: append `?f16=off` to the URL (or run
-        //   localStorage.setItem('f16','off')  / 'on' / 'auto', then reload)
-        // to force the f32 path on an f16-capable device — lets you measure the
-        // color-pass f16 win vs regression on a real device in ~30 s. `off`
-        // forces f32; `on`/`auto`/absent = default (f16 when the adapter has it).
-        const f16Override = this.readF16Override()
-        const f16Available = this.adapter.features.has('shader-f16')
-        this.f16Supported = f16Override === 'off' ? false : f16Available
-        console.info(`[Engine] shader-f16: available=${f16Available} override=${f16Override ?? 'auto'} → active=${this.f16Supported}`)
         // Per-pass GPU timing needs the optional 'timestamp-query' feature. Often
         // absent on mobile (iOS/Safari) — the panel degrades to global metrics.
         this.timestampCapable = this.adapter.features.has('timestamp-query')
         const requiredFeatures: GPUFeatureName[] = []
-        if (this.f16Supported) requiredFeatures.push('shader-f16')
         if (this.timestampCapable) requiredFeatures.push('timestamp-query')
         this.device = await this.adapter.requestDevice({ requiredFeatures })
         this.timestampsEnabled = this.timestampCapable
@@ -1491,6 +1835,17 @@ export class Engine {
             this.timestampQuerySet = this.device.createQuerySet({ type: 'timestamp', count: TS_COUNT, label: 'Engine PerfTimestamps' })
             this.tsResolveBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC, label: 'Engine TS Resolve' })
             this.tsReadBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'Engine TS Readback' })
+            this.timestampMarkerPipeline = this.device.createComputePipeline({
+                label: 'Engine Timestamp Marker Pipeline',
+                layout: 'auto',
+                compute: {
+                    module: this.device.createShaderModule({
+                        label: 'Engine Timestamp Marker Shader',
+                        code: '@compute @workgroup_size(1) fn main() {}',
+                    }),
+                    entryPoint: 'main',
+                },
+            })
         }
         this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext
         this.format = navigator.gpu.getPreferredCanvasFormat()
@@ -1533,13 +1888,14 @@ export class Engine {
             magFilter: 'linear',
             minFilter: 'linear',
             addressModeU: 'repeat',
-            addressModeV: 'clamp-to-edge',
+            addressModeV: 'repeat',
         })
         this.skyboxSampler = this.device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
+            mipmapFilter: 'linear',
             addressModeU: 'repeat',
-            addressModeV: 'repeat',
+            addressModeV: 'clamp-to-edge',
         })
 
         // Webcam : initialisation (optionnel, activer webcamEnabled pour l'utiliser)
@@ -1564,12 +1920,12 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 12, // 10 floats + padding to 16-byte alignment (48 bytes)
+            size: 4 * 8,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
         this.uniformBufferResolve = this.device.createBuffer({
-            size: 4 * 4, // 3 floats (mu, gridOffsetX, gridOffsetY) padded to 16-byte alignment
+            size: 4 * 4,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Resolve',
         })
@@ -1605,30 +1961,35 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
             label: 'Engine Mandelbrot Jet Level Storage Buffer',
         })
+        this.mandelbrotValidityBuffer = this.device.createBuffer({
+            size: dynamicValidityStorageWords(1) * Uint32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Dynamic Validity Storage Buffer',
+        })
         this.mandelbrotJetBufferCapacity = 1
         this.mandelbrotJetRadiiBufferCapacity = 1
         this.mandelbrotJetLevelBufferCapacity = 1
+        this.mandelbrotValidityBufferCapacity = 1
 
-        // Counter buffers for GPU pixel-completion readback (2 × u32: total unfinished + active)
+        // One remaining-work counter plus one padding word keeps readback alignment stable.
         this.counterBuffer = this.device.createBuffer({
             size: 8,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
-        // Work-instrumentation buffer (in-place compute path): 15 × u32
+        // Work-instrumentation buffer (in-place compute path): 37 × u32
         // (realMean, covMean, maxAccum, maxSteps, tierAff/Pade/Cplus/Jet,
         // gateJumps/gateFails, secoursApps/secoursIters, appsF32,
-        // renormApps/renormIters) — see WorkStats in the shader.
+        // renormApps/renormIters + dynamic proof counters) — see WorkStats.
         this.workStatsBuffer = this.device.createBuffer({
-            size: 60,
+            size: WORK_STATS_BYTES,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine WorkStats Storage',
         })
-        // Readback slots hold counter (8 B) + workStats (60 B) = 68 B, copied
-        // together each sampled in-place dispatch and read as 17 × u32.
+        // Readback slots hold the 8 B completion counter followed by WorkStats.
         this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
             buffer: this.device.createBuffer({
-                size: 68,
+                size: COUNTER_READBACK_BYTES,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: `Engine Counter Readback ${index}`,
             }),
@@ -1648,15 +2009,7 @@ export class Engine {
 
     private async _createPipelines() {
         const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
-        // Precision specialization for the color pass. The shader declares
-        // `alias hcol = f32;` (valid f32 default, used for bounded shading math);
-        // when the device supports shader-f16 we enable it and swap the alias to
-        // f16 so those helpers run at 2× ALU rate. Structure is identical either
-        // way — only the working precision of the shading lobes changes.
-        const colorCode = this.f16Supported
-            ? 'enable f16;\n' + this.shaderPassColor.replace('alias hcol = f32;', 'alias hcol = f16;')
-            : this.shaderPassColor
-        const moduleColor = this.device.createShaderModule({ code: colorCode, label: 'Engine ShaderModule Color' })
+        const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
         const moduleDebug = this.device.createShaderModule({ code: debugViewShader, label: 'Engine ShaderModule DebugView' })
 
         // Diagnostic overlay pipeline (block-skipping debug views). Renders a
@@ -1701,18 +2054,29 @@ export class Engine {
                 { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 10, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 11, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 12, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
+                { binding: 13, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
+                // Raw is retained only for analytic-AA Taylor expansion/reach;
+                // ordinary color values always come from the typed display set.
+                { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
 
-        // 8 MRT targets for the display-side passes (resolve/merge). The raw
-        // iteration path writes via textureStore and never touches MRT.
-        const mrtTargets: GPUColorTargetState[] = Array.from({ length: DISPLAY_LAYERS }, () => ({ format: 'r32float' as GPUTextureFormat }))
+        const displayTargets: GPUColorTargetState[] = [
+            { format: 'r32float' },
+            { format: 'r32float' },
+            { format: 'r32float' },
+            { format: 'rgba16float' },
+            { format: 'r32uint' },
+        ]
 
         this.pipelineResolve = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
             vertex: { module: moduleResolve, entryPoint: 'vs_main' },
-            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: mrtTargets },
+            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: displayTargets },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Resolve',
         })
@@ -1809,14 +2173,18 @@ export class Engine {
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT | GPUShaderStage.VERTEX, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
+                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout Merge',
         })
         this.pipelineMerge = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMerge] }),
             vertex: { module: moduleMerge, entryPoint: 'vs_main' },
-            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: mrtTargets },
+            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: displayTargets },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Merge',
         })
@@ -1842,10 +2210,11 @@ export class Engine {
         const layoutAaTarget = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
-                { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d' } },
+                { binding: 3, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
                 // Sample-0 composite (rgba16float, screen res) for the contrast ramp.
-                { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
+                { binding: 4, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout AaTarget',
         })
@@ -1899,38 +2268,46 @@ export class Engine {
         // bind groups seront (ré)créés dans resize car dépend des textures
         this.bindGroupResolve = undefined
         this.bindGroupColor = undefined
-        this.bindGroupColorRaw = undefined
         this.bindGroupMerge = undefined
         this.bindGroupInplace = undefined
         this.bindGroupReprojectCs = undefined
         this.bindGroupPresent = undefined
     }
 
-    // Debug A/B override for the color-pass f16 path. Reads `?f16=` from the URL
-    // first (easiest on mobile — just edit the address bar), then localStorage.
-    // Returns 'off' | 'on' | 'auto' | null (null = no override → default).
-    private readF16Override(): 'off' | 'on' | 'auto' | null {
-        const normalize = (v: string | null): 'off' | 'on' | 'auto' | null => {
-            const s = (v ?? '').trim().toLowerCase()
-            return s === 'off' || s === 'on' || s === 'auto' ? s : null
-        }
-        try {
-            const fromUrl = normalize(new URLSearchParams(window.location.search).get('f16'))
-            if (fromUrl) return fromUrl
-            return normalize(window.localStorage.getItem('f16'))
-        } catch {
-            return null
-        }
-    }
-
-    // Timestamp-write descriptor for a timed pass (slot = index into PASS_SLOTS).
-    // Returns undefined when timestamps are off, so callers can spread it into a
-    // pass descriptor unconditionally. The shape is shared by compute and render
-    // pass timestampWrites. Records the slot as used this frame.
+    // Timestamp-write descriptor for an ordinary timed pass. Explicit copy or
+    // compound spans use robust end-of-pass boundaries below instead.
     private tsWrites(slot: number): GPUComputePassTimestampWrites | undefined {
         if (!this.timestampsEnabled || !this.timestampQuerySet) return undefined
         this.tsSlotsUsedThisFrame |= (1 << slot)
         return { querySet: this.timestampQuerySet, beginningOfPassWriteIndex: slot * 2, endOfPassWriteIndex: slot * 2 + 1 }
+    }
+
+    /**
+     * Encode one robust timestamp boundary around commands (notably texture
+     * copies) which cannot carry pass timestampWrites themselves. Its one-thread
+     * no-op dispatch prevents browser elimination; only the END marker is observed.
+     */
+    private tsSpanBoundary(commandEncoder: GPUCommandEncoder, slot: number, edge: 'start' | 'end') {
+        if (!shouldEncodeTimestampBoundary(this.timestampsEnabled, !!this.timestampQuerySet)
+            || !this.timestampMarkerPipeline) return
+        this.tsSlotsUsedThisFrame |= (1 << slot)
+        const marker = commandEncoder.beginComputePass({
+            label: `Engine timing boundary ${PASS_SLOTS[slot].key}:${edge}`,
+            timestampWrites: {
+                querySet: this.timestampQuerySet!,
+                endOfPassWriteIndex: slot * 2 + (edge === 'start' ? 0 : 1),
+            },
+        })
+        marker.setPipeline(this.timestampMarkerPipeline)
+        marker.dispatchWorkgroups(1)
+        marker.end()
+    }
+
+    /** Write only the robust END marker of an explicit span on a real pass. */
+    private tsExplicitSpanEnd(slot: number): GPUComputePassTimestampWrites | undefined {
+        if (!this.timestampsEnabled || !this.timestampQuerySet) return undefined
+        this.tsSlotsUsedThisFrame |= (1 << slot)
+        return {querySet: this.timestampQuerySet, endOfPassWriteIndex: slot * 2 + 1}
     }
 
     // Deferred, off-critical-path readback of the resolved timestamps → per-pass
@@ -1942,12 +2319,11 @@ export class Engine {
         const pending = this.tsPendingSlots
         const sampledBatchSize = this.tsPendingBatchSize
         const sampledBatchGeneration = this.tsPendingBatchGeneration
-        const sampledActivePixelCount = this.tsPendingActivePixelCount
+        const sampledRemainingPixelCount = this.tsPendingRemainingPixelCount
         void buf.mapAsync(GPUMapMode.READ).then(() => {
             try {
                 const data = new BigInt64Array(buf.getMappedRange().slice(0))
                 const timings: Record<string, number> = { ...this.passTimingsMs }
-                const active: Record<string, boolean> = {}
                 let iterationPassMs: number | undefined
 
                 // Per-pass end−begin is UNRELIABLE on tiled/mobile GPUs: the begin
@@ -1955,31 +2331,14 @@ export class Engine {
                 // fragment execution), so end−begin reads as cumulative-from-start
                 // rather than a real pass duration. Passes run SEQUENTIALLY on the
                 // GPU timeline, so the robust partition is the gap between
-                // consecutive END markers: pass duration = end − previous end (first
-                // = end − min begin = frame start). This sums exactly to the frame
-                // span and gives true per-shader time regardless of begin clustering.
-                // (Any inter-pass copy/clear falls into the following pass's gap.)
-                const ranPasses: { key: string; end: bigint }[] = []
-                let minBegin = 0n, have = false
-                for (let i = 0; i < PASS_SLOTS.length; i++) {
-                    const key = PASS_SLOTS[i].key
-                    const ran = (pending & (1 << i)) !== 0
-                    active[key] = ran
-                    if (!ran) continue
-                    const begin = data[i * 2]
-                    if (!have) { minBegin = begin; have = true }
-                    else if (begin < minBegin) minBegin = begin
-                    ranPasses.push({ key, end: data[i * 2 + 1] })
-                }
-                // Sort by end → the GPU execution order (robust to any overlap).
-                ranPasses.sort((a, b) => (a.end < b.end ? -1 : a.end > b.end ? 1 : 0))
-                let prevEnd = minBegin
+                // consecutive END markers. Explicit copy/compound spans carry
+                // their own pair of robust END boundaries and their post-marker
+                // becomes the predecessor of the following ordinary pass.
+                const partition = partitionGpuPassTimestamps(data, pending)
                 let sum = 0
                 let otherPassesMs = 0
-                for (const rp of ranPasses) {
-                    let ms = Number(rp.end - prevEnd) / 1e6
-                    prevEnd = rp.end
-                    if (!Number.isFinite(ms) || ms < 0) ms = 0
+                for (const rp of partition.samples) {
+                    const ms = rp.durationMs
                     if (rp.key === 'compute') iterationPassMs = ms
                     else otherPassesMs += ms
                     const prev = timings[rp.key]
@@ -1990,20 +2349,22 @@ export class Engine {
                     ? this.otherPassesGpuMs * 0.8 + otherPassesMs * 0.2
                     : otherPassesMs
                 this.passTimingsMs = timings
-                this.passActive = active
+                this.passActive = partition.active
                 this.passGpuSumMs = sum
-                if (have && ranPasses.length) {
-                    const spanMs = Number(ranPasses[ranPasses.length - 1].end - minBegin) / 1e6
+                if (partition.samples.length) {
+                    const spanMs = partition.spanMs
                     this.passGpuSpanMs = this.passGpuSpanMs > 0
                         ? this.passGpuSpanMs * 0.8 + spanMs * 0.2
                         : spanMs
                 }
                 if (iterationPassMs !== undefined) {
+                    this.lastIterationPassMs = iterationPassMs
+                    this.iterationPassTimingSerial++
                     this.applyIterationPassTiming(
                         iterationPassMs,
                         sampledBatchSize,
                         sampledBatchGeneration,
-                        sampledActivePixelCount,
+                        sampledRemainingPixelCount,
                     )
                 }
             } catch { /* mapping raced with device loss */ }
@@ -2018,7 +2379,16 @@ export class Engine {
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
     private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled): GPUComputePipeline {
-        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}`
+        const dynamicValidity = this.dynamicBlockValidity && this.approximationMode === 'auto'
+        const radialValidity = dynamicValidity
+            && this.incrementalReferenceTable
+            && this.incrementalTableLayout !== null
+        const dynamicStats = dynamicValidity
+            && (this.dynamicValidityStatsEnabled || this.dynamicValidityShadow)
+        // Work instrumentation is panel-only; keep it out of the production
+        // kernel so ordinary rendering pays none of its workgroup atomics.
+        const workStats = this.workStatsEnabled || dynamicStats
+        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}w${workStats ? 1 : 0}`
         let pipeline = this.inplacePipelineCache.get(key)
         if (!pipeline) {
             pipeline = this.device.createComputePipeline({
@@ -2026,18 +2396,41 @@ export class Engine {
                 compute: {
                     module: this.inplaceModule!,
                     entryPoint: 'cs_main',
-                    constants: { ENABLE_DEEP: deep ? 1 : 0, ENABLE_PORTFOLIO: portfolio ? 1 : 0, ENABLE_RENORM: renorm ? 1 : 0 },
+                    constants: {
+                        ENABLE_DEEP: deep ? 1 : 0,
+                        ENABLE_PORTFOLIO: portfolio ? 1 : 0,
+                        ENABLE_RENORM: renorm ? 1 : 0,
+                        ENABLE_DYNAMIC_VALIDITY: dynamicValidity ? 1 : 0,
+                        ENABLE_RADIAL_VALIDITY: radialValidity ? 1 : 0,
+                        ENABLE_DYNAMIC_STATS: dynamicStats ? 1 : 0,
+                        ENABLE_WORK_STATS: workStats ? 1 : 0,
+                    },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats})`,
             })
             this.inplacePipelineCache.set(key, pipeline)
         }
         return pipeline
     }
 
+    private iterationAuxiliaryLevelBuffer(): GPUBuffer | undefined {
+        return this.dynamicBlockValidity
+            && this.approximationMode === 'auto'
+            // Incremental buffer replacement rebuilds the bind group before
+            // the first published range is marked ready by the message
+            // handler. The layout already proves that binding 3 is the packed
+            // validity stream; blaLevelCount remains zero until publication,
+            // so binding it early is safe and avoids one frame reading the
+            // legacy BLA directory as validity records.
+            && (this.dynamicValidityReady || this.incrementalTableLayout !== null)
+            ? this.mandelbrotValidityBuffer
+            : this.mandelbrotBlaLevelBuffer
+    }
+
     private rebuildInplaceBindGroup() {
+        const auxiliaryLevelBuffer = this.iterationAuxiliaryLevelBuffer()
         if (!this.pipelineInplace || !this.rawArrayView || !this.uniformBufferMandelbrot
-            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
+            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !auxiliaryLevelBuffer
             || !this.mandelbrotJetBuffer || !this.mandelbrotJetRadiiBuffer || !this.mandelbrotJetLevelBuffer
             || !this.uniformBufferBrush || !this.counterBuffer || !this.workStatsBuffer) {
             return
@@ -2050,7 +2443,7 @@ export class Engine {
                 { binding: 0, resource: { buffer: this.uniformBufferMandelbrot } },
                 { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
                 { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
-                { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
+                { binding: 3, resource: { buffer: auxiliaryLevelBuffer } },
                 { binding: 4, resource: this.rawArrayView },
                 { binding: 5, resource: { buffer: this.uniformBufferBrush } },
                 { binding: 6, resource: { buffer: this.counterBuffer } },
@@ -2066,8 +2459,9 @@ export class Engine {
     // Rebuild the bind groups sharing the orbit/BLA/jet buffers (debug overlay
     // + in-place compute) — called whenever one of those buffers reallocates.
     private rebuildIterationBindGroups() {
+        const auxiliaryLevelBuffer = this.iterationAuxiliaryLevelBuffer()
         if (!this.uniformBufferMandelbrot
-            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer
+            || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !auxiliaryLevelBuffer
             || !this.mandelbrotJetBuffer || !this.mandelbrotJetRadiiBuffer || !this.mandelbrotJetLevelBuffer) {
             return
         }
@@ -2079,7 +2473,7 @@ export class Engine {
                     { binding: 0, resource: { buffer: this.uniformBufferMandelbrot } },
                     { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
                     { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
-                    { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
+                    { binding: 3, resource: { buffer: auxiliaryLevelBuffer } },
                     { binding: 5, resource: { buffer: this.mandelbrotJetBuffer } },
                     { binding: 6, resource: { buffer: this.mandelbrotJetLevelBuffer } },
                     { binding: 7, resource: { buffer: this.mandelbrotJetRadiiBuffer } },
@@ -2091,10 +2485,374 @@ export class Engine {
         this.rebuildInplaceBindGroup()
     }
 
+    private createIncrementalLayout(
+        refId: number,
+        tableGeneration: number,
+        capacityOrbitLength: number,
+    ): IncrementalTableLayout {
+        const capacity = Math.max(8, 2 ** Math.ceil(Math.log2(Math.max(2, capacityOrbitLength))))
+        const offsets: number[] = []
+        const capacities: number[] = []
+        const skips: number[] = []
+        let offset = 0
+        for (let skip = 4; skip < capacity && skip <= (1 << 18); skip *= 2) {
+            const count = Math.floor((capacity - 1) / skip)
+            if (count <= 0) break
+            offsets.push(offset)
+            capacities.push(count)
+            skips.push(skip)
+            offset += count
+        }
+        return {
+            refId,
+            tableGeneration,
+            capacityOrbitLength: capacity,
+            offsets,
+            capacities,
+            skips,
+            committed: new Array(offset > 0 ? offsets.length : 0).fill(0),
+            maxDynamicRadius: new Array(offset > 0 ? offsets.length : 0).fill(Number.NEGATIVE_INFINITY),
+            totalBlockCapacity: offset,
+            coveredOrbitLength: 1,
+            builtOrbitLength: 1,
+        }
+    }
+
+    private incrementalActiveLevelCount(): number {
+        const committed = this.incrementalTableLayout?.committed
+        if (!committed) return 0
+        for (let level = committed.length - 1; level >= 0; level--) {
+            if (committed[level] > 0) return level + 1
+        }
+        return 0
+    }
+
+    private incrementalHeaderBase(): number {
+        const layout = this.incrementalTableLayout
+        const levelCount = this.incrementalActiveLevelCount()
+        if (!layout || levelCount <= 0) return 0
+        const level = levelCount - 1
+        return layout.offsets[level] + layout.committed[level]
+    }
+
+    /** Replace all four table buffers in one bind-group swap. On growth, only
+     * committed level prefixes are copied; reserved holes and old header tails
+     * are intentionally ignored. */
+    private replaceIncrementalBuffers(next: IncrementalTableLayout, copyCommitted: boolean) {
+        const oldLayout = this.incrementalTableLayout
+        const oldJet = this.mandelbrotJetBuffer
+        const oldRadii = this.mandelbrotJetRadiiBuffer
+        const oldLevels = this.mandelbrotJetLevelBuffer
+        const oldValidity = this.mandelbrotValidityBuffer
+        const headerRecords = Math.max(256, (this.currentOptionalHeaders?.data.length ?? 0) / JET_RADII_FLOATS)
+        const nextJet = this.device.createBuffer({
+            size: Math.max(4, next.totalBlockCapacity * JET_COEFF_FLOATS * Float32Array.BYTES_PER_ELEMENT),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Coefficients',
+        })
+        const nextRadiiCapacity = Math.max(1, next.totalBlockCapacity + Math.ceil(headerRecords))
+        const nextRadii = this.device.createBuffer({
+            size: nextRadiiCapacity * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Sidecar',
+        })
+        const nextLevels = this.device.createBuffer({
+            size: Math.max(16, next.offsets.length * 4 * Uint32Array.BYTES_PER_ELEMENT),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Directory',
+        })
+        const nextValidity = this.device.createBuffer({
+            size: Math.max(4, radialCertificateStorageWords(next.totalBlockCapacity) * Uint32Array.BYTES_PER_ELEMENT),
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Radial Certificates',
+        })
+
+        if (copyCommitted && oldLayout && oldJet && oldRadii && oldValidity) {
+            const encoder = this.device.createCommandEncoder({ label: 'Grow Incremental Unified Table' })
+            for (let level = 0; level < oldLayout.committed.length; level++) {
+                const count = oldLayout.committed[level]
+                if (count <= 0 || level >= next.offsets.length) continue
+                next.committed[level] = count
+                next.maxDynamicRadius[level] = oldLayout.maxDynamicRadius[level]
+                encoder.copyBufferToBuffer(
+                    oldJet,
+                    oldLayout.offsets[level] * JET_COEFF_FLOATS * 4,
+                    nextJet,
+                    next.offsets[level] * JET_COEFF_FLOATS * 4,
+                    count * JET_COEFF_FLOATS * 4,
+                )
+                encoder.copyBufferToBuffer(
+                    oldRadii,
+                    oldLayout.offsets[level] * JET_RADII_FLOATS * 4,
+                    nextRadii,
+                    next.offsets[level] * JET_RADII_FLOATS * 4,
+                    count * JET_RADII_FLOATS * 4,
+                )
+                encoder.copyBufferToBuffer(
+                    oldValidity,
+                    oldLayout.offsets[level] * RADIAL_CERTIFICATE_WORDS_PER_BLOCK * 4,
+                    nextValidity,
+                    next.offsets[level] * RADIAL_CERTIFICATE_WORDS_PER_BLOCK * 4,
+                    count * RADIAL_CERTIFICATE_WORDS_PER_BLOCK * 4,
+                )
+            }
+            this.device.queue.submit([encoder.finish()])
+            this.incrementalTableCapacityGrowths++
+        }
+
+        this.mandelbrotJetBuffer = nextJet
+        this.mandelbrotJetRadiiBuffer = nextRadii
+        this.mandelbrotJetLevelBuffer = nextLevels
+        this.mandelbrotValidityBuffer = nextValidity
+        this.mandelbrotJetBufferCapacity = next.totalBlockCapacity
+        this.mandelbrotJetRadiiBufferCapacity = nextRadiiCapacity
+        this.mandelbrotJetLevelBufferCapacity = next.offsets.length
+        this.mandelbrotValidityBufferCapacity = next.totalBlockCapacity
+        this.incrementalTableLayout = next
+        this.rebuildIterationBindGroups()
+        if (oldJet || oldRadii || oldLevels || oldValidity) {
+            void this.device.queue.onSubmittedWorkDone().then(() => {
+                oldJet?.destroy?.()
+                oldRadii?.destroy?.()
+                oldLevels?.destroy?.()
+                oldValidity?.destroy?.()
+            })
+        }
+    }
+
+    private ensureIncrementalHeaderCapacity(requiredEntries: number) {
+        if (requiredEntries <= this.mandelbrotJetRadiiBufferCapacity || !this.mandelbrotJetRadiiBuffer) return
+        const old = this.mandelbrotJetRadiiBuffer
+        const oldCapacity = this.mandelbrotJetRadiiBufferCapacity
+        const capacity = 2 ** Math.ceil(Math.log2(Math.max(1, requiredEntries)))
+        const replacement = this.device.createBuffer({
+            size: capacity * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST | GPUBufferUsage.COPY_SRC,
+            label: 'Engine Incremental Unified Sidecar Growth',
+        })
+        const encoder = this.device.createCommandEncoder({ label: 'Grow Incremental Header Tail' })
+        encoder.copyBufferToBuffer(old, 0, replacement, 0, oldCapacity * JET_RADII_FLOATS * 4)
+        this.device.queue.submit([encoder.finish()])
+        this.mandelbrotJetRadiiBuffer = replacement
+        this.mandelbrotJetRadiiBufferCapacity = capacity
+        this.incrementalTableCapacityGrowths++
+        this.rebuildIterationBindGroups()
+        void this.device.queue.onSubmittedWorkDone().then(() => old.destroy?.())
+    }
+
+    private writeIncrementalDirectoryAndHeader() {
+        const layout = this.incrementalTableLayout
+        if (!layout || !this.mandelbrotJetLevelBuffer || !this.mandelbrotJetRadiiBuffer) return
+        const levelCount = this.incrementalActiveLevelCount()
+        if (levelCount <= 0) return
+        const directory = new Uint32Array(levelCount * 4)
+        const directoryFloat = new Float32Array(directory.buffer)
+        for (let level = 0; level < levelCount; level++) {
+            directory[level * 4] = layout.offsets[level]
+            directory[level * 4 + 1] = layout.committed[level]
+            directory[level * 4 + 2] = layout.skips[level]
+            directoryFloat[level * 4 + 3] = layout.maxDynamicRadius[level]
+        }
+        this.device.queue.writeBuffer(this.mandelbrotJetLevelBuffer, 0, directory)
+        const headerBase = this.incrementalHeaderBase()
+        const header = this.currentOptionalHeaders?.data ?? new Float32Array(11 * JET_RADII_FLOATS)
+        this.ensureIncrementalHeaderCapacity(headerBase + header.length / JET_RADII_FLOATS)
+        this.device.queue.writeBuffer(
+            this.mandelbrotJetRadiiBuffer!,
+            headerBase * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            header,
+        )
+        this.currentUnifiedBlockCount = headerBase
+    }
+
+    private writeIncrementalTableRange(message: IncrementalTableRangeResponse): boolean {
+        if (
+            message.certificateVersion !== RADIAL_CERTIFICATE_LAYOUT_VERSION
+            || message.certificateWordsPerBlock !== RADIAL_CERTIFICATE_WORDS_PER_BLOCK
+            || message.ranges.length % 6 !== 0
+            || message.coefficients.length % JET_COEFF_FLOATS !== 0
+        ) return false
+        const payloadBlocks = message.coefficients.length / JET_COEFF_FLOATS
+        if (!validRadialRangePayloadShape({
+            version: message.certificateVersion,
+            wordsPerBlock: message.certificateWordsPerBlock,
+            rangesWords: message.ranges.length,
+            coefficientFloats: message.coefficients.length,
+            sidecarFloats: message.radii.length,
+            certificateWords: message.certificates.length,
+            referenceLog2Dc: message.referenceLog2Dc,
+        })) return false
+
+        const layoutMismatch = !this.incrementalTableLayout
+            || this.incrementalTableLayout.refId !== message.refId
+            || this.incrementalTableLayout.tableGeneration !== message.tableGeneration
+        if (message.reset || layoutMismatch) {
+            const next = this.createIncrementalLayout(
+                message.refId,
+                message.tableGeneration,
+                message.capacityOrbitLength,
+            )
+            this.currentOptionalHeaders = undefined
+            this.optionalHeaderRevision = -1
+            this.replaceIncrementalBuffers(next, false)
+            this.currentBlaLevelCount = 0
+            this.currentUnifiedBlockCount = 0
+            this.currentUnifiedBlockRadii = undefined
+            this.dynamicValidityReady = false
+        } else if (message.capacityOrbitLength > this.incrementalTableLayout.capacityOrbitLength) {
+            const next = this.createIncrementalLayout(
+                message.refId,
+                message.tableGeneration,
+                message.capacityOrbitLength,
+            )
+            next.coveredOrbitLength = this.incrementalTableLayout.coveredOrbitLength
+            next.builtOrbitLength = this.incrementalTableLayout.builtOrbitLength
+            this.replaceIncrementalBuffers(next, true)
+        }
+        const layout = this.incrementalTableLayout!
+        for (let index = 0; index < message.ranges.length; index += 6) {
+            const level = message.ranges[index]
+            const skip = message.ranges[index + 1]
+            const slotStart = message.ranges[index + 2]
+            const slotCount = message.ranges[index + 3]
+            const payloadOffset = message.ranges[index + 4]
+            const committedCount = message.ranges[index + 5]
+            if (
+                level >= layout.offsets.length
+                || layout.skips[level] !== skip
+                || layout.committed[level] !== slotStart
+                || committedCount !== slotStart + slotCount
+                || committedCount > layout.capacities[level]
+                || payloadOffset + slotCount > payloadBlocks
+            ) return false
+            const absoluteBlock = layout.offsets[level] + slotStart
+            this.device.queue.writeBuffer(
+                this.mandelbrotJetBuffer!,
+                absoluteBlock * JET_COEFF_FLOATS * 4,
+                message.coefficients,
+                payloadOffset * JET_COEFF_FLOATS,
+                slotCount * JET_COEFF_FLOATS,
+            )
+            this.device.queue.writeBuffer(
+                this.mandelbrotJetRadiiBuffer!,
+                absoluteBlock * JET_RADII_FLOATS * 4,
+                message.radii,
+                payloadOffset * JET_RADII_FLOATS,
+                slotCount * JET_RADII_FLOATS,
+            )
+            this.device.queue.writeBuffer(
+                this.mandelbrotValidityBuffer!,
+                absoluteBlock * RADIAL_CERTIFICATE_WORDS_PER_BLOCK * 4,
+                message.certificates,
+                payloadOffset * RADIAL_CERTIFICATE_WORDS_PER_BLOCK,
+                slotCount * RADIAL_CERTIFICATE_WORDS_PER_BLOCK,
+            )
+            // sidecar.w is the maximum candidate radius across all four
+            // tiers. The effective dynamic radius is an intersection with
+            // that candidate, so this maximum is a sound whole-level reject
+            // bound and avoids opening packed envelopes for impossible dz.
+            let maxDynamicRadius = layout.maxDynamicRadius[level]
+            for (let block = 0; block < slotCount; block++) {
+                maxDynamicRadius = Math.max(
+                    maxDynamicRadius,
+                    message.radii[(payloadOffset + block) * JET_RADII_FLOATS + 3],
+                )
+            }
+            layout.maxDynamicRadius[level] = maxDynamicRadius
+            // Queue ordering is the commit barrier: directory counts are
+            // updated only after coefficient, sidecar and proof writes above.
+            layout.committed[level] = committedCount
+        }
+        layout.coveredOrbitLength = Math.max(layout.coveredOrbitLength, message.coveredOrbitLength)
+        layout.builtOrbitLength = Math.max(layout.builtOrbitLength, message.builtOrbitLength)
+        this.writeIncrementalDirectoryAndHeader()
+        this.currentBlockTableKind = 'unified'
+        this.incrementalTableTransferredBytes += message.ranges.byteLength
+            + message.coefficients.byteLength
+            + message.radii.byteLength
+            + message.certificates.byteLength
+        this.dynamicValidityReferenceLog2Dc = Number.NaN
+        this.dynamicValidityCurrentLog2CMax = message.currentLog2CMax
+        return true
+    }
+
+    private auditDynamicValidityPayload(table: {
+        kind: 'bla' | 'jet' | 'mobius' | 'unified'
+        steps: Float32Array<ArrayBuffer>
+        levels: Uint32Array<ArrayBuffer>
+        levelCount: number
+        validity?: DynamicValidityPayload
+        tableGeneration: number
+    }): string | null {
+        const validity = table.validity
+        if (table.kind !== 'unified') return 'coefficient table is not unified'
+        if (table.tableGeneration !== this.tableGeneration) return 'table generation is stale'
+        if (!validity) return 'validity payload is missing'
+        if (validity.version !== DYNAMIC_VALIDITY_VERSION) return `unsupported validity version ${validity.version}`
+        if (validity.wordsPerBlock !== DYNAMIC_VALIDITY_WORDS_PER_BLOCK) {
+            return `unexpected validity stride ${validity.wordsPerBlock}`
+        }
+        if (validity.diagnosticsWordsPerBlock !== DYNAMIC_VALIDITY_DIAGNOSTIC_WORDS_PER_BLOCK) {
+            return `unexpected validity diagnostic stride ${validity.diagnosticsWordsPerBlock}`
+        }
+        if (!Number.isFinite(validity.referenceLog2Dc)) return 'certified reference domain is not finite'
+        if (table.steps.length % JET_COEFF_FLOATS !== 0) return 'unified coefficient payload is misaligned'
+        const blockCount = table.steps.length / JET_COEFF_FLOATS
+        if (validity.envelopes.length !== blockCount * validity.wordsPerBlock) {
+            return `validity/coefficient block mismatch ${validity.envelopes.length / validity.wordsPerBlock}/${blockCount}`
+        }
+        if (validity.diagnostics.length !== blockCount * validity.diagnosticsWordsPerBlock) {
+            return `validity diagnostic block mismatch ${validity.diagnostics.length / validity.diagnosticsWordsPerBlock}/${blockCount}`
+        }
+        if (
+            table.levels.length !== table.levelCount * 4
+            || validity.levelCount !== table.levelCount
+            || validity.levels.length !== validity.levelCount * 4
+        ) {
+            return 'validity/coefficient level count mismatch'
+        }
+        for (let level = 0; level < table.levelCount; level++) {
+            const base = level * 4
+            for (let field = 0; field < 3; field++) {
+                if (validity.levels[base + field] !== table.levels[base + field]) {
+                    return `validity directory mismatch at level ${level}, field ${field}`
+                }
+            }
+        }
+        return null
+    }
+
+    private clearDynamicValidityGpuState() {
+        const changed = this.dynamicValidityReady
+            || this.dynamicValidityGeneration !== -1
+            || this.dynamicValidityReferenceLog2Dc !== Number.NEGATIVE_INFINITY
+        this.dynamicValidityReady = false
+        this.dynamicValidityGeneration = -1
+        this.dynamicValidityReferenceLog2Dc = Number.NEGATIVE_INFINITY
+        this.dynamicValidityCurrentLog2CMax = Number.NaN
+        this.radialCertificateVersion = 0
+        this.radialCertificateWordsPerBlock = 0
+        this.radialCertificateReferenceGrowthCount = 0
+        this.radialCertificateViewportBuildCount = 0
+        this.radialCertificateLastBuildCause = 'none'
+        if (changed) this.rebuildIterationBindGroups()
+    }
+
     // Upload a worker-built block table into the buffers of its kind. The level
     // directories share the 4-u32 stride; only the step stride differs. Jet
     // tables carry a second array (`radii`, the split "buffer de rayons").
-    private writeBlockTable(table: { kind: 'bla' | 'jet' | 'mobius' | 'unified', steps: Float32Array<ArrayBuffer>, radii?: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number }) {
+    private writeBlockTable(table: {
+        kind: 'bla' | 'jet' | 'mobius' | 'unified'
+        steps: Float32Array<ArrayBuffer>
+        radii?: Float32Array<ArrayBuffer>
+        optionalHeaders?: OptionalHeadersPayload
+        validity?: DynamicValidityPayload
+        levels: Uint32Array<ArrayBuffer>
+        levelCount: number
+        tableGeneration: number
+    }) {
+        this.incrementalTableLayout = null
+        this.currentOptionalHeaders = undefined
         this.currentBlockTableKind = table.kind
         if (table.kind === 'jet' || table.kind === 'mobius' || table.kind === 'unified') {
             // Mobius tables live in the jet buffers (same 12 B element type,
@@ -2106,13 +2864,19 @@ export class Engine {
             const blockCount = Math.ceil(
                 table.steps.length / (table.kind === 'mobius' ? MOBIUS_COEFF_FLOATS : JET_COEFF_FLOATS), // unified = 27 floats = jet stride
             )
-            this.ensureJetBufferCapacity(Math.ceil(table.steps.length / JET_COEFF_FLOATS))
-            // Unified sidecars carry 10 extra entries (the SA prefix +
-            // periodic-block header) beyond the per-block records — size on
-            // the actual array.
-            this.ensureJetRadiiBufferCapacity(Math.max(blockCount, Math.ceil((table.radii?.length ?? 0) / 4)))
-            this.ensureJetLevelBufferCapacity(table.levelCount)
             const radii = table.radii
+            const optionalHeaderEntries = table.optionalHeaders?.data.length ?? 0
+            if (table.kind === 'unified') {
+                if (!radii || radii.length !== blockCount * JET_RADII_FLOATS) {
+                    throw new Error(`invalid unified block sidecar: ${radii?.length ?? 0} floats for ${blockCount} blocks`)
+                }
+                if (!table.optionalHeaders) {
+                    throw new Error('unified block table omitted its optional-header payload')
+                }
+            }
+            this.ensureJetBufferCapacity(Math.ceil(table.steps.length / JET_COEFF_FLOATS))
+            this.ensureJetRadiiBufferCapacity(blockCount + Math.ceil(optionalHeaderEntries / 4))
+            this.ensureJetLevelBufferCapacity(table.levelCount)
             if (table.steps.length > 0 && this.mandelbrotJetBuffer) {
                 this.device.queue.writeBuffer(this.mandelbrotJetBuffer, 0, table.steps, 0, table.steps.length)
             }
@@ -2122,8 +2886,66 @@ export class Engine {
             if (table.levels.length > 0 && this.mandelbrotJetLevelBuffer) {
                 this.device.queue.writeBuffer(this.mandelbrotJetLevelBuffer, 0, table.levels, 0, table.levels.length)
             }
+            if (table.kind === 'unified') {
+                this.currentUnifiedBlockCount = blockCount
+                this.currentUnifiedBlockRadii = radii
+                this.optionalHeaderRevision = -1
+                this.writeOptionalHeaders(table.optionalHeaders!, blockCount)
+            } else {
+                this.currentUnifiedBlockCount = 0
+                this.currentUnifiedBlockRadii = undefined
+                this.optionalHeaderRevision = -1
+            }
+            if (this.dynamicBlockValidity) {
+                const auditError = this.auditDynamicValidityPayload(table)
+                if (auditError) {
+                    console.warn(`[validity] dynamic table disabled: ${auditError}`)
+                    this.clearDynamicValidityGpuState()
+                } else {
+                    const validity = table.validity!
+                    const blockCount = validity.envelopes.length / validity.wordsPerBlock
+                    this.ensureValidityBufferCapacity(blockCount)
+                    this.device.queue.writeBuffer(
+                        this.mandelbrotValidityBuffer!,
+                        0,
+                        validity.envelopes,
+                        0,
+                        validity.envelopes.length,
+                    )
+                    this.device.queue.writeBuffer(
+                        this.mandelbrotValidityBuffer!,
+                        validity.envelopes.byteLength,
+                        validity.diagnostics,
+                        0,
+                        validity.diagnostics.length,
+                    )
+                    if (!this.dynamicValidityShadow && validity.levels.length > 0) {
+                        // The validity directory has the same offset/count/skip
+                        // geometry as the coefficient directory, but its last
+                        // field is the sound max-candidate radius used by the
+                        // dynamic shader's global and per-level fast rejects.
+                        this.device.queue.writeBuffer(
+                            this.mandelbrotJetLevelBuffer!,
+                            0,
+                            validity.levels,
+                            0,
+                            validity.levels.length,
+                        )
+                    }
+                    this.dynamicValidityReferenceLog2Dc = validity.referenceLog2Dc
+                    this.dynamicValidityGeneration = table.tableGeneration
+                    this.dynamicValidityReady = true
+                    this.rebuildIterationBindGroups()
+                }
+            } else {
+                this.clearDynamicValidityGpuState()
+            }
             return
         }
+        this.currentUnifiedBlockCount = 0
+        this.currentUnifiedBlockRadii = undefined
+        this.optionalHeaderRevision = -1
+        this.clearDynamicValidityGpuState()
         this.ensureBlaBufferCapacity(table.steps.length / BLA_STEP_FLOATS)
         this.ensureBlaLevelBufferCapacity(table.levelCount)
         if (table.steps.length > 0 && this.mandelbrotBlaBuffer) {
@@ -2140,8 +2962,15 @@ export class Engine {
      * coefficient buffer untouched — the worker only sends this when the GPU
      * coefficients are from the same build.
      */
-    private writeRadiiSidecar(radii: Float32Array<ArrayBuffer>, levels: Uint32Array<ArrayBuffer>, levelCount: number) {
-        this.ensureJetRadiiBufferCapacity(Math.ceil(radii.length / 4))
+    private writeRadiiSidecar(
+        radii: Float32Array<ArrayBuffer>,
+        levels: Uint32Array<ArrayBuffer>,
+        levelCount: number,
+        optionalHeaders?: OptionalHeadersPayload,
+    ) {
+        this.incrementalTableLayout = null
+        const blockCount = Math.ceil(radii.length / JET_RADII_FLOATS)
+        this.ensureJetRadiiBufferCapacity(blockCount + Math.ceil((optionalHeaders?.data.length ?? 0) / 4))
         this.ensureJetLevelBufferCapacity(levelCount)
         if (radii.length > 0 && this.mandelbrotJetRadiiBuffer) {
             this.device.queue.writeBuffer(this.mandelbrotJetRadiiBuffer, 0, radii, 0, radii.length)
@@ -2149,6 +2978,65 @@ export class Engine {
         if (levels.length > 0 && this.mandelbrotJetLevelBuffer) {
             this.device.queue.writeBuffer(this.mandelbrotJetLevelBuffer, 0, levels, 0, levels.length)
         }
+        this.currentUnifiedBlockCount = blockCount
+        this.currentUnifiedBlockRadii = radii
+        if (optionalHeaders) {
+            this.writeOptionalHeaders(optionalHeaders, blockCount)
+        }
+    }
+
+    /** Upload only the versioned SA/periodic/gate tail. This deliberately does
+     * not alter table kind/generation, level counts, history, or validity.
+     * Should the variable gate blob outgrow the buffer, the cached block
+     * sidecar is restored into the replacement before the header write. */
+    private writeOptionalHeaders(headers: OptionalHeadersPayload, blockCount = this.currentUnifiedBlockCount): boolean {
+        if (
+            headers.version !== 1
+            || headers.revision <= this.optionalHeaderRevision
+            || headers.data.length < 11 * JET_RADII_FLOATS
+            || headers.data.length % JET_RADII_FLOATS !== 0
+            || blockCount <= 0
+        ) {
+            return false
+        }
+        this.currentOptionalHeaders = headers
+        if (this.incrementalTableLayout) {
+            const headerBase = this.incrementalHeaderBase()
+            this.ensureIncrementalHeaderCapacity(headerBase + headers.data.length / JET_RADII_FLOATS)
+            if (!this.mandelbrotJetRadiiBuffer) return false
+            this.device.queue.writeBuffer(
+                this.mandelbrotJetRadiiBuffer,
+                headerBase * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+                headers.data,
+            )
+            this.currentUnifiedBlockCount = headerBase
+            this.optionalHeaderRevision = headers.revision
+            this.dynamicValidityCurrentLog2CMax = headers.currentLog2CMax
+            return true
+        }
+        const grew = this.ensureJetRadiiBufferCapacity(blockCount + headers.data.length / JET_RADII_FLOATS)
+        if (grew && this.currentUnifiedBlockRadii && this.mandelbrotJetRadiiBuffer) {
+            this.device.queue.writeBuffer(
+                this.mandelbrotJetRadiiBuffer,
+                0,
+                this.currentUnifiedBlockRadii,
+                0,
+                this.currentUnifiedBlockRadii.length,
+            )
+        }
+        if (!this.mandelbrotJetRadiiBuffer) {
+            return false
+        }
+        this.device.queue.writeBuffer(
+            this.mandelbrotJetRadiiBuffer,
+            blockCount * JET_RADII_FLOATS * Float32Array.BYTES_PER_ELEMENT,
+            headers.data,
+            0,
+            headers.data.length,
+        )
+        this.optionalHeaderRevision = headers.revision
+        this.dynamicValidityCurrentLog2CMax = headers.currentLog2CMax
+        return true
     }
 
     private ensureBlaBufferCapacity(requiredEntries: number) {
@@ -2201,10 +3089,10 @@ export class Engine {
         this.rebuildIterationBindGroups()
     }
 
-    private ensureJetRadiiBufferCapacity(requiredEntries: number) {
+    private ensureJetRadiiBufferCapacity(requiredEntries: number): boolean {
         const safeRequiredEntries = Math.max(1, Math.ceil(requiredEntries))
         if (safeRequiredEntries <= this.mandelbrotJetRadiiBufferCapacity) {
-            return
+            return false
         }
         this.mandelbrotJetRadiiBuffer?.destroy?.()
         this.mandelbrotJetRadiiBuffer = this.device.createBuffer({
@@ -2214,6 +3102,7 @@ export class Engine {
         })
         this.mandelbrotJetRadiiBufferCapacity = safeRequiredEntries
         this.rebuildIterationBindGroups()
+        return true
     }
 
     private ensureJetLevelBufferCapacity(requiredEntries: number) {
@@ -2231,6 +3120,21 @@ export class Engine {
         this.rebuildIterationBindGroups()
     }
 
+    private ensureValidityBufferCapacity(requiredBlocks: number) {
+        const safeRequiredBlocks = Math.max(1, Math.ceil(requiredBlocks))
+        if (safeRequiredBlocks <= this.mandelbrotValidityBufferCapacity) {
+            return
+        }
+        this.mandelbrotValidityBuffer?.destroy?.()
+        this.mandelbrotValidityBuffer = this.device.createBuffer({
+            size: dynamicValidityStorageWords(safeRequiredBlocks) * Uint32Array.BYTES_PER_ELEMENT,
+            usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
+            label: 'Engine Mandelbrot Dynamic Validity Storage Buffer',
+        })
+        this.mandelbrotValidityBufferCapacity = safeRequiredBlocks
+        this.rebuildIterationBindGroups()
+    }
+
     // One-off exact stats copy at render completion: counter+workStats hold
     // the session totals on the GPU; a standalone 40 B copy + map gives the
     // deterministic Σ regardless of readback sampling alignment. Discarded if
@@ -2241,7 +3145,7 @@ export class Engine {
         }
         if (!this.finalStatsBuffer) {
             this.finalStatsBuffer = this.device.createBuffer({
-                size: 68,
+                size: COUNTER_READBACK_BYTES,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: 'Engine Final Stats Readback',
             })
@@ -2249,7 +3153,7 @@ export class Engine {
         const session = this.workStatsSessionSerial
         const encoder = this.device.createCommandEncoder({ label: 'Engine Final Stats Copy' })
         encoder.copyBufferToBuffer(this.counterBuffer, 0, this.finalStatsBuffer, 0, 8)
-        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, 60)
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, WORK_STATS_BYTES)
         this.device.queue.submit([encoder.finish()])
         this.finalStatsPending = true
         void (async () => {
@@ -2269,6 +3173,13 @@ export class Engine {
                 this.secoursStatsApprox = [data[12], data[13]]
                 this.f32AppsApprox = data[14]
                 this.renormStatsApprox = [data[15], data[16]]
+                const dynamic = this.dynamicValidityStatsFromReadback(data)
+                this.dynamicTierAttemptsApprox = dynamic.tierAttempts
+                this.dynamicTierAcceptsApprox = dynamic.tierAccepts
+                this.dynamicSkipBucketsApprox = dynamic.skipBuckets
+                this.dynamicCandidateUsesApprox = dynamic.candidateUses
+                this.dynamicRejectionReasonsApprox = dynamic.rejectionReasons
+                this.dynamicExactFallbacksApprox = dynamic.exactFallbacks
                 if (realMean > 0 && covMean / realMean >= 1) {
                     this.realLoopStepsApprox = realMean * 64
                     this.tierAppsApprox = [data[6], data[7], data[8], data[9]]
@@ -2285,6 +3196,99 @@ export class Engine {
         })()
     }
 
+    private dynamicValidityStatsFromReadback(data: Uint32Array, workStatsOffset = 2): DynamicValidityRuntimeStats {
+        const base = workStatsOffset + 15
+        return {
+            tierAttempts: [data[base], data[base + 1], data[base + 2], data[base + 3]],
+            tierAccepts: [data[base + 4], data[base + 5], data[base + 6], data[base + 7]],
+            skipBuckets: [data[base + 8], data[base + 9], data[base + 10], data[base + 11]],
+            candidateUses: data[base + 12],
+            rejectionReasons: [data[base + 13], data[base + 14], data[base + 15], data[base + 16], data[base + 17], data[base + 18], data[base + 19], data[base + 20]],
+            exactFallbacks: data[base + 21],
+        }
+    }
+
+    /** One-shot debug/benchmark snapshot that is independent from the render
+     * generation mirrors. The copy is ordered after already-submitted compute
+     * work, so an adaptive maxIter invalidation cannot erase the returned data. */
+    async readDynamicValidityCounters(): Promise<DynamicValidityRuntimeStats> {
+        if (!this.device || !this.workStatsBuffer) {
+            return {
+                tierAttempts: [-1, -1, -1, -1],
+                tierAccepts: [-1, -1, -1, -1],
+                skipBuckets: [-1, -1, -1, -1],
+                candidateUses: -1,
+                rejectionReasons: [-1, -1, -1, -1, -1, -1, -1, -1],
+                exactFallbacks: -1,
+            }
+        }
+        const readback = this.device.createBuffer({
+            size: WORK_STATS_BYTES,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            label: 'Engine Dynamic Validity Counter Snapshot',
+        })
+        const encoder = this.device.createCommandEncoder({ label: 'Engine Dynamic Validity Counter Copy' })
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, readback, 0, WORK_STATS_BYTES)
+        this.device.queue.submit([encoder.finish()])
+        try {
+            await readback.mapAsync(GPUMapMode.READ)
+            return this.dynamicValidityStatsFromReadback(
+                new Uint32Array(readback.getMappedRange()).slice(),
+                0,
+            )
+        } finally {
+            if (readback.mapState === 'mapped') readback.unmap()
+            readback.destroy()
+        }
+    }
+
+    /** Complete one-shot work snapshot for A/B benchmarks. Unlike the polled
+     * mirrors it does not require the render to have fully converged. */
+    async readWorkStatsSnapshot(): Promise<{
+        realMean: number
+        coveredMean: number
+        realizedSkip: number
+        totalApps: number
+        tierApps: [number, number, number, number]
+        dynamic: DynamicValidityRuntimeStats
+    }> {
+        if (!this.device || !this.workStatsBuffer) {
+            return {
+                realMean: -1,
+                coveredMean: -1,
+                realizedSkip: -1,
+                totalApps: -1,
+                tierApps: [-1, -1, -1, -1],
+                dynamic: await this.readDynamicValidityCounters(),
+            }
+        }
+        const readback = this.device.createBuffer({
+            size: WORK_STATS_BYTES,
+            usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+            label: 'Engine Work Stats Benchmark Snapshot',
+        })
+        const encoder = this.device.createCommandEncoder({ label: 'Engine Work Stats Benchmark Copy' })
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, readback, 0, WORK_STATS_BYTES)
+        this.device.queue.submit([encoder.finish()])
+        try {
+            await readback.mapAsync(GPUMapMode.READ)
+            const data = new Uint32Array(readback.getMappedRange()).slice()
+            const realMean = data[0]
+            const coveredMean = data[1]
+            return {
+                realMean,
+                coveredMean,
+                realizedSkip: realMean > 0 ? coveredMean / realMean : -1,
+                totalApps: realMean > 0 ? realMean * 64 : -1,
+                tierApps: [data[4], data[5], data[6], data[7]],
+                dynamic: this.dynamicValidityStatsFromReadback(data, 0),
+            }
+        } finally {
+            if (readback.mapState === 'mapped') readback.unmap()
+            readback.destroy()
+        }
+    }
+
     // `preserveWorkStats = true` is the TABLE-POST variant: a blaReady mid-
     // render continues the SAME work session, so the GPU-side Σ apps keeps
     // accumulating and the CPU mirrors stay provisional instead of resetting —
@@ -2292,7 +3296,6 @@ export class Engine {
     // post-table reconvergence ended before any sampled readback landed).
     private invalidateCounterReadback(preserveWorkStats = false) {
         this.unfinishedPixelCount = -1
-        this.activePixelCount = -1
         this.realizedSkip = -1
         this.workgroupWaste = -1
         this.maxPixelSteps = -1
@@ -2302,6 +3305,12 @@ export class Engine {
             this.secoursStatsApprox = [-1, -1]
             this.f32AppsApprox = -1
             this.renormStatsApprox = [-1, -1]
+            this.dynamicTierAttemptsApprox = [-1, -1, -1, -1]
+            this.dynamicTierAcceptsApprox = [-1, -1, -1, -1]
+            this.dynamicSkipBucketsApprox = [-1, -1, -1, -1]
+            this.dynamicCandidateUsesApprox = -1
+            this.dynamicRejectionReasonsApprox = [-1, -1, -1, -1, -1, -1, -1, -1]
+            this.dynamicExactFallbacksApprox = -1
             // Next in-place dispatch re-clears workStats for the new session.
             this.workStatsSessionSerial++
         }
@@ -2329,7 +3338,12 @@ export class Engine {
         return undefined
     }
 
-    private scheduleCounterReadback(slot: CounterReadbackSlot, sequence: number, generation: number, frame: number) {
+    private scheduleCounterReadback(
+        slot: CounterReadbackSlot,
+        sequence: number,
+        generation: number,
+        frame: number,
+    ) {
         slot.pending = true
         slot.sequence = sequence
         slot.generation = generation
@@ -2341,7 +3355,6 @@ export class Engine {
                 mapped = true
                 const data = new Uint32Array(slot.buffer.getMappedRange())
                 const unfinished = data[0]
-                const active = data[1]
                 // Work stats (data[2..5]); 0 on non-in-place frames (buffer cleared).
                 const realMean = data[2]
                 const covMean = data[3]
@@ -2351,7 +3364,8 @@ export class Engine {
                 const secours: [number, number] = [data[12], data[13]]
                 const appsF32 = data[14]
                 const renorm: [number, number] = [data[15], data[16]]
-                this.applyCounterReadback(sequence, generation, frame, unfinished, active, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm)
+                const dynamic = this.dynamicValidityStatsFromReadback(data)
+                this.applyCounterReadback(sequence, generation, frame, unfinished, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm, dynamic)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
             } finally {
@@ -2363,7 +3377,14 @@ export class Engine {
         })()
     }
 
-    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, active: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0, renorm: [number, number] = [0, 0]) {
+    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0, renorm: [number, number] = [0, 0], dynamic: DynamicValidityRuntimeStats = {
+        tierAttempts: [0, 0, 0, 0],
+        tierAccepts: [0, 0, 0, 0],
+        skipBuckets: [0, 0, 0, 0],
+        candidateUses: 0,
+        rejectionReasons: [0, 0, 0, 0, 0, 0, 0, 0],
+        exactFallbacks: 0,
+    }) {
         if (generation !== this.counterReadbackGeneration) {
             return
         }
@@ -2374,7 +3395,6 @@ export class Engine {
 
         const prevUnfinished = this.unfinishedPixelCount
         this.unfinishedPixelCount = unfinished
-        this.activePixelCount = active
         this.counterSampleFrame = frame
 
         // Work instrumentation (in-place path). realMean/covMean/maxAccum are the
@@ -2402,6 +3422,12 @@ export class Engine {
                 this.secoursStatsApprox = [secours[0], secours[1]]
                 this.f32AppsApprox = appsF32
                 this.renormStatsApprox = [renorm[0], renorm[1]]
+                this.dynamicTierAttemptsApprox = dynamic.tierAttempts
+                this.dynamicTierAcceptsApprox = dynamic.tierAccepts
+                this.dynamicSkipBucketsApprox = dynamic.skipBuckets
+                this.dynamicCandidateUsesApprox = dynamic.candidateUses
+                this.dynamicRejectionReasonsApprox = dynamic.rejectionReasons
+                this.dynamicExactFallbacksApprox = dynamic.exactFallbacks
             } else {
                 this.realizedSkip = -1
                 this.workgroupWaste = -1
@@ -2441,7 +3467,7 @@ export class Engine {
         // The debug overlay recomputes every pixel from scratch on top of the
         // normal frame. Keep it out of completion timing and frame pacing; the
         // per-pass batch controller is independently guarded as well.
-        if (this.debugViewMode > 0) {
+        if (this.debugPipelineActive) {
             return
         }
 
@@ -2466,7 +3492,7 @@ export class Engine {
                 elapsed,
                 this.iterationBatchSize,
                 this.batchControllerGeneration,
-                this.activePixelCount,
+                this.unfinishedPixelCount,
             )
         }
     }
@@ -2480,9 +3506,9 @@ export class Engine {
         elapsed: number,
         sampledBatchSize: number,
         sampledGeneration: number,
-        sampledActivePixelCount: number,
+        sampledRemainingPixelCount: number,
     ) {
-        if (this.debugViewMode > 0
+        if (this.debugPipelineActive
             || elapsed <= 0
             || sampledGeneration !== this.batchControllerGeneration) {
             return
@@ -2498,17 +3524,17 @@ export class Engine {
         )
         const maxBatchSize = this.getEffectiveMaxBatchSize()
 
-        // A sudden population increase (usually sentinel refinement) invalidates
-        // the timing regime learned from the preceding sparse dispatch.
-        if (sampledActivePixelCount >= 0) {
-            if (this.batchLastActivePixelCount >= 0
-                && sampledActivePixelCount > this.batchLastActivePixelCount * ACTIVE_PIXEL_RESET_RATIO) {
+        // A sudden population increase (clear, pan exposure, or AA reseed)
+        // invalidates the timing regime learned from the preceding dispatch.
+        if (sampledRemainingPixelCount >= 0) {
+            if (this.batchLastRemainingPixelCount >= 0
+                && sampledRemainingPixelCount > this.batchLastRemainingPixelCount * ACTIVE_PIXEL_RESET_RATIO) {
                 this.iterationBatchSize = MIN_BATCH_SIZE
                 this.batchUnderBudgetStreak = 0
-                this.batchLastActivePixelCount = sampledActivePixelCount
+                this.batchLastRemainingPixelCount = sampledRemainingPixelCount
                 return
             }
-            this.batchLastActivePixelCount = sampledActivePixelCount
+            this.batchLastRemainingPixelCount = sampledRemainingPixelCount
         }
 
         if (elapsed > targetIterationMs * BATCH_OVERSHOOT_RATIO) {
@@ -2577,8 +3603,10 @@ export class Engine {
         const textureSize = this.neutralSize
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
-        this.resolvedTexture?.destroy?.()
-        this.frozenTexture?.destroy?.()
+        this.destroyDisplaySet(this.resolvedDisplay)
+        this.destroyDisplaySet(this.frozenDisplay)
+        this.geometryScratchTexture?.destroy?.()
+        this.metadataScratchTexture?.destroy?.()
         this.accumTexture?.destroy?.()
         this.aaTargetTexture?.destroy?.()
 
@@ -2618,7 +3646,7 @@ export class Engine {
         this.rawTexture = rawResult.texture
         this.rawArrayView = rawResult.arrayView
         // Phase D reseed views: layer 0 storage (stamp target) + layers 8..12
-        // sampled (Taylor payload) — disjoint subresources, usable in one dispatch.
+        // sampled (analytic z″ payload) — disjoint subresources, usable in one dispatch.
         this.rawIterStorageView = rawResult.layerViews[0]
         this.rawPayloadView = this.rawTexture.createView({
             dimension: '2d-array',
@@ -2632,16 +3660,62 @@ export class Engine {
         const brushResult = createLayeredTexture('Engine RawBrushTexture (B)', RAW_LAYERS, GPUTextureUsage.STORAGE_BINDING)
         this.rawBrushTexture = brushResult.texture
         this.rawBrushArrayView = brushResult.arrayView
+        // B carries the same derived views as A: the reprojection swaps the two
+        // instead of copying B back over A, so either one has to be able to take
+        // the front role on the next frame.
+        this.rawBrushIterStorageView = brushResult.layerViews[0]
+        this.rawBrushPayloadView = this.rawBrushTexture.createView({
+            dimension: '2d-array',
+            baseArrayLayer: 8,
+            arrayLayerCount: 5,
+            label: 'Engine RawBrushTexture (B) PayloadView',
+        })
 
-        const resolvedResult = createLayeredTexture('Engine ResolvedTexture', DISPLAY_LAYERS)
-        this.resolvedTexture = resolvedResult.texture
-        this.resolvedArrayView = resolvedResult.arrayView
-        this.resolvedLayerViews = resolvedResult.layerViews
+        const createDisplaySet = (label: string): DisplaySet => {
+            const values = createLayeredTexture(label + ' Values', DISPLAY_VALUE_LAYERS)
+            const geometryTexture = this.device.createTexture({
+                size: { width: textureSize, height: textureSize },
+                format: 'rgba16float',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+                    | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                label: label + ' Geometry',
+            })
+            const metadataTexture = this.device.createTexture({
+                size: { width: textureSize, height: textureSize },
+                format: 'r32uint',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+                    | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                label: label + ' Metadata',
+            })
+            return {
+                valuesTexture: values.texture,
+                valuesArrayView: values.arrayView,
+                valueLayerViews: values.layerViews,
+                geometryTexture,
+                geometryView: geometryTexture.createView({ label: label + ' GeometryView' }),
+                metadataTexture,
+                metadataView: metadataTexture.createView({ label: label + ' MetadataView' }),
+            }
+        }
 
-        const frozenResult = createLayeredTexture('Engine FrozenTexture', DISPLAY_LAYERS)
-        this.frozenTexture = frozenResult.texture
-        this.frozenArrayView = frozenResult.arrayView
-        this.frozenLayerViews = frozenResult.layerViews
+        this.resolvedDisplay = createDisplaySet('Engine ResolvedDisplay')
+        this.frozenDisplay = createDisplaySet('Engine FrozenDisplay')
+        this.geometryScratchTexture = this.device.createTexture({
+            size: { width: textureSize, height: textureSize },
+            format: 'rgba16float',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+            label: 'Engine MergeGeometryScratch',
+        })
+        this.geometryScratchView = this.geometryScratchTexture.createView({ label: 'Engine MergeGeometryScratch View' })
+        this.metadataScratchTexture = this.device.createTexture({
+            size: { width: textureSize, height: textureSize },
+            format: 'r32uint',
+            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+            label: 'Engine MetadataScratch',
+        })
+        this.metadataScratchView = this.metadataScratchTexture.createView({ label: 'Engine MetadataScratch View' })
+        this.resolvedDisplayVersion = -1
+        this.frozenDisplayVersion = -1
 
         // AA accumulation texture: screen-resolution (matches the color pass output),
         // rgba16float to hold the linear-RGB sum + per-pixel sample count in alpha.
@@ -2668,14 +3742,39 @@ export class Engine {
             label: 'Engine AaTargetTexture',
         })
         this.aaTargetTextureView = this.aaTargetTexture.createView({ label: 'Engine AaTargetTexture View' })
-        if (this.pipelineAaTarget && this.rawArrayView && this.uniformBufferAaTarget && this.accumTextureView) {
+        this.rebuildRawTextureBindGroups()
+
+        // Resetting textures invalidates any in-flight AA accumulation.
+        this.resetAaState()
+
+        // Reset zoom reprojection state on resize
+        this.zoomState = resetZoomState()
+
+        this.prevFrameMandelbrot = undefined // plus de frame précédente après resize
+        this.previousMandelbrot = undefined  // force update() to re-write all uniforms
+        this.previousRenderOptions = undefined
+        this.needRender = true
+        this.invalidateCounterReadback() // reset: not yet known after resize
+    }
+
+    private destroyDisplaySet(display?: DisplaySet) {
+        display?.valuesTexture.destroy?.()
+        display?.geometryTexture.destroy?.()
+        display?.metadataTexture.destroy?.()
+    }
+
+    /** Every bind group that names A or B. The reprojection swaps the two, so
+     *  these are rebuilt on each swap as well as on resize. */
+    private rebuildRawTextureBindGroups() {
+        if (this.pipelineAaTarget && this.resolvedDisplay && this.uniformBufferAaTarget && this.accumTextureView) {
             this.bindGroupAaTarget = this.device.createBindGroup({
                 layout: this.pipelineAaTarget.getBindGroupLayout(0),
                 entries: [
-                    { binding: 0, resource: this.rawArrayView },
-                    { binding: 1, resource: this.aaTargetTextureView },
-                    { binding: 2, resource: { buffer: this.uniformBufferAaTarget } },
-                    { binding: 3, resource: this.accumTextureView },
+                    { binding: 0, resource: this.resolvedDisplay.valuesArrayView },
+                    { binding: 1, resource: this.resolvedDisplay.geometryView },
+                    { binding: 2, resource: this.aaTargetTextureView },
+                    { binding: 3, resource: { buffer: this.uniformBufferAaTarget } },
+                    { binding: 4, resource: this.accumTextureView },
                 ],
                 label: 'Engine BindGroup AaTarget',
             })
@@ -2694,12 +3793,6 @@ export class Engine {
                 label: 'Engine BindGroup AaReseed',
             })
         }
-        // Resetting textures invalidates any in-flight AA accumulation.
-        this.resetAaState()
-
-        // Reset zoom reprojection state on resize
-        this.zoomState = resetZoomState()
-
         // Re-création des bind groups dépendant des textures
         this.rebuildIterationBindGroups()
 
@@ -2729,27 +3822,45 @@ export class Engine {
 
         this.rebuildColorBindGroup()
 
-        // Merge pass bind group: reads resolved (binding 1) + rawBrushTexture as
-        // frozen-copy (binding 2).  At zoom stop we copyTexture(frozen→rawBrush)
-        // first so the merge can safely read frozen data while writing to frozen.
-        if (this.pipelineMerge && this.uniformBufferMerge) {
+        // Merge reads the coherent live set plus temporary frozen copies while
+        // writing the frozen set. Raw B supplies the three value-copy layers.
+        if (this.pipelineMerge && this.uniformBufferMerge && this.resolvedDisplay
+            && this.rawBrushArrayView && this.geometryScratchView && this.metadataScratchView) {
             const layout = this.pipelineMerge.getBindGroupLayout(0)
             this.bindGroupMerge = this.device.createBindGroup({
                 layout,
                 entries: [
                     { binding: 0, resource: { buffer: this.uniformBufferMerge } },
-                    { binding: 1, resource: this.resolvedArrayView! },
-                    { binding: 2, resource: this.rawBrushArrayView! },
+                    { binding: 1, resource: this.resolvedDisplay.valuesArrayView },
+                    { binding: 2, resource: this.resolvedDisplay.geometryView },
+                    { binding: 3, resource: this.resolvedDisplay.metadataView },
+                    { binding: 4, resource: this.rawBrushArrayView },
+                    { binding: 5, resource: this.geometryScratchView },
+                    { binding: 6, resource: this.metadataScratchView },
                 ],
                 label: 'Engine BindGroup Merge',
             })
         }
+    }
 
-        this.prevFrameMandelbrot = undefined // plus de frame précédente après resize
-        this.previousMandelbrot = undefined  // force update() to re-write all uniforms
-        this.previousRenderOptions = undefined
-        this.needRender = true
-        this.invalidateCounterReadback() // reset: not yet known after resize
+    /** Ping-pong the neutral state textures. The reprojection pass reads A and
+     *  writes B; swapping the two roles here is what replaces the former
+     *  full-size copyTextureToTexture(B -> A) — half the traffic of a pan frame,
+     *  on 13 r32float layers over the whole neutral square. */
+    private swapRawTextures() {
+        const texture = this.rawTexture
+        this.rawTexture = this.rawBrushTexture
+        this.rawBrushTexture = texture
+        const arrayView = this.rawArrayView
+        this.rawArrayView = this.rawBrushArrayView
+        this.rawBrushArrayView = arrayView
+        const iterView = this.rawIterStorageView
+        this.rawIterStorageView = this.rawBrushIterStorageView
+        this.rawBrushIterStorageView = iterView
+        const payloadView = this.rawPayloadView
+        this.rawPayloadView = this.rawBrushPayloadView
+        this.rawBrushPayloadView = payloadView
+        this.rebuildRawTextureBindGroups()
     }
 
     areObjectsEqual(obj1: any, obj2: any): boolean {
@@ -2799,6 +3910,7 @@ export class Engine {
         }
 
         this.approximationMode = mode
+        this.rebuildIterationBindGroups()
         this.currentBlaLevelCount = 0
         this.tableBuildActive = false
         this.tableBuildProgress = 0
@@ -2843,13 +3955,27 @@ export class Engine {
         }
     }
 
-    /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes, 5 tier. */
+    /** True while a debug view uses the standalone recompute pipeline (1-5).
+     * Reach (6) is a color-pass readout of the ordinary progressive render. */
+    /** Reference orbit long enough for the current view (mirrors the uniform's
+     *  orbitComplete). The debug overlay must not draw before this. */
+    private debugOrbitReady = false
+
+    private get debugPipelineActive(): boolean {
+        return this.debugViewMode > 0
+            && this.debugViewMode !== DEBUG_VIEW_REACH
+    }
+
+    /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix,
+     * 4 probes, 5 tier, 6 analytic-AA reach. */
     setDebugView(mode: number) {
         const next = Math.max(0, Math.round(mode))
         if (next === this.debugViewMode) {
             return
         }
         this.debugViewMode = next
+        // A persisted AA composite would otherwise cover the reach view.
+        this.resetAaState()
         this.debugViewDirty = true
         this.needRender = true
     }
@@ -2866,9 +3992,34 @@ export class Engine {
         }
         this.mandelbrotNavigator.set_gate_emission(on)
         this.gateEmission = on
-        this.tableGeneration++
+        const headerOnly = this.approximationMode === 'auto' && this.dynamicBlockValidity
+        if (!headerOnly) this.tableGeneration++
         this.postReferenceWorker({
             type: 'setGateEmission',
+            jobId: this.referenceJobId,
+            on,
+            tableGeneration: this.tableGeneration,
+        })
+        if (this.approximationMode === 'auto' && !headerOnly) {
+            this.currentBlaLevelCount = 0
+            this.requestTableClear(true)
+            this.needRender = true
+        }
+    }
+
+    /** Runtime rollout toggle for packed per-pixel validity. The legacy radius
+     * sidecar remains available for A/B regression and shadow comparisons. */
+    setDynamicBlockValidity(on: boolean) {
+        if (on === this.dynamicBlockValidity) {
+            return
+        }
+        if (!on) this.dynamicValidityShadow = false
+        this.mandelbrotNavigator.set_dynamic_block_validity(on)
+        this.dynamicBlockValidity = on
+        this.clearDynamicValidityGpuState()
+        this.tableGeneration++
+        this.postReferenceWorker({
+            type: 'setDynamicBlockValidity',
             jobId: this.referenceJobId,
             on,
             tableGeneration: this.tableGeneration,
@@ -2880,18 +4031,96 @@ export class Engine {
         }
     }
 
+    getIncrementalReferenceTable(): boolean {
+        return this.incrementalReferenceTable
+    }
+
+    getDynamicValidityShadow(): boolean {
+        return this.dynamicValidityShadow
+    }
+
+    getDynamicValidityStatsEnabled(): boolean {
+        return this.dynamicValidityStatsEnabled
+    }
+
+    getWorkStatsEnabled(): boolean {
+        return this.workStatsEnabled
+    }
+
+    /** Enable the panel-only work counters. Off by default: they cost seven
+     *  workgroup atomics per active texel plus a per-workgroup init/flush. */
+    setWorkStatsEnabled(on: boolean) {
+        if (on === this.workStatsEnabled) return
+        this.workStatsEnabled = on
+        this.invalidateCounterReadback()
+        this.needRender = true
+    }
+
+    setDynamicValidityStatsEnabled(on: boolean) {
+        if (on === this.dynamicValidityStatsEnabled) return
+        this.dynamicValidityStatsEnabled = on
+        this.invalidateCounterReadback()
+        this.clearHistoryNextFrame = true
+        this.needRender = true
+    }
+
+    setDynamicValidityShadow(on: boolean) {
+        if (on) {
+            // Incremental publications deliberately carry only f32-safety in
+            // their legacy sidecar. The one-shot table is the rollback referee
+            // with real replay tags/radii, so switch to it before shadowing.
+            if (this.incrementalReferenceTable) this.setIncrementalReferenceTable(false)
+            if (!this.dynamicBlockValidity) this.setDynamicBlockValidity(true)
+        }
+        if (on === this.dynamicValidityShadow) return
+        this.dynamicValidityShadow = on
+        if (this.unfinishedPixelCount >= 0) this.needFreezeSnapshot = true
+        this.clearHistoryNextFrame = true
+        this.needRender = true
+        this.invalidateCounterReadback()
+    }
+
+    setIncrementalReferenceTable(on: boolean) {
+        if (on === this.incrementalReferenceTable) return
+        if (on) this.dynamicValidityShadow = false
+        this.mandelbrotNavigator.set_incremental_reference_table(on)
+        this.incrementalReferenceTable = on
+        this.tableGeneration++
+        this.postReferenceWorker({
+            type: 'setIncrementalReferenceTable',
+            jobId: this.referenceJobId,
+            on,
+            tableGeneration: this.tableGeneration,
+        })
+        if (!on) {
+            this.incrementalTableLayout = null
+            this.incrementalTableOrbitCoverage = 0
+            this.incrementalTableBuiltOrbit = 0
+            this.incrementalTableLevelBlocks = []
+        }
+        if (this.approximationMode === 'auto') {
+            this.currentBlaLevelCount = 0
+            this.clearDynamicValidityGpuState()
+            this.requestTableClear(true)
+            this.needRender = true
+        }
+    }
+
     setBlaEpsilon(epsilon: number) {
-        const next = Math.max(Number.MIN_VALUE, epsilon)
+        const next = Math.fround(Math.max(1.1754943508222875e-38, epsilon))
         if (next === this.blaEpsilon) {
             return
         }
         this.mandelbrotNavigator.set_bla_epsilon(next)
-        this.blaEpsilon = next
+        // Rust stores ε as f32. Mirror the rounded value immediately so the
+        // per-frame front-navigator audit does not manufacture a second table
+        // generation from 0.001 !== f32(0.001) while a build is in flight.
+        this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         this.tableGeneration++
         this.postReferenceWorker({
             type: 'setBlaEpsilon',
             jobId: this.referenceJobId,
-            blaEpsilon: next,
+            blaEpsilon: this.blaEpsilon,
             tableGeneration: this.tableGeneration,
         })
         // ε sets the validity radius (ε·|A| affine, √ε·|A| Padé, the certified
@@ -2938,8 +4167,13 @@ export class Engine {
     // the exact nucleus coordinates so the caller can recentre the view on it.
     // `radiusFactor` scales the view radius used by the ball test (~2–4 covers a
     // centred minibrot; larger snaps to a bigger parent atom).
-    findMinibrot(radiusFactor = 4): Promise<MinibrotResult> {
-        const empty: MinibrotResult = { status: 'none', cx: null, cy: null, period: null }
+    //
+    // With `fill` set, the worker also runs the size estimate and returns a
+    // *framing* instead of a bare nucleus: `cx`/`cy` is the copy's centre and
+    // `scale` the view half-height that makes the copy span `fill` of the
+    // limiting screen axis (0.5 = half the screen).
+    findMinibrot(radiusFactor = 4, fill?: number): Promise<MinibrotResult> {
+        const empty: MinibrotResult = { status: 'none', cx: null, cy: null, period: null, scale: null }
         // Supersede any in-flight request so its caller does not hang.
         this.pendingMinibrotResolve?.(empty)
         this.pendingMinibrotResolve = null
@@ -2950,6 +4184,7 @@ export class Engine {
                 jobId: this.referenceJobId,
                 maxIter: this.currentMaxIterations,
                 radiusFactor,
+                fill,
             })
         })
     }
@@ -3319,7 +4554,7 @@ export class Engine {
             mandelbrot.epsilon,             // 16: epsilon
             renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
             effectiveMicroBumpStrength,     // 18: microBumpStrength
-            renderOptions.subsurfaceStrength, // 19: subsurfaceStrength
+            0,                                // 19: reserved (was subsurfaceStrength)
             renderOptions.reliefDepth,       // 20: reliefDepth
             renderOptions.localShadowStrength, // 21: localShadowStrength
             effectiveLightAngle,              // 22: lightAngle
@@ -3343,7 +4578,7 @@ export class Engine {
             parseFloat(mandelbrot.cx),            // 40: centerX
             parseFloat(mandelbrot.cy),            // 41: centerY
             mandelbrot.scale,                     // 42: scale
-            0.0,                                  // 43: _pad
+            renderOptions.gradeContrast ?? 1.18,  // 43: gradeContrast (display grade)
             0.03 * textureDriftAnimX,             // 44: textureDriftX
             0.03 * textureDriftAnimY,             // 45: textureDriftY
             0.02 * skyReflectionDriftAnimX,       // 46: skyDriftX
@@ -3364,6 +4599,14 @@ export class Engine {
             aaJitterMag > 0 ? this.aaOffsetY / aaJitterMag : 0, // 61: aaJitterHatY
             Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
             0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
+            renderOptions.gradeSaturation ?? 1.12, // 64: gradeSaturation (display grade)
+            this.debugViewMode === DEBUG_VIEW_REACH ? 1 : 0, // 65: analytic-AA reach heatmap
+            Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
+            2,                                    // 67: z″ is carried by every production path
+            0,                                    // 68: reserved
+            0,                                    // 69: reserved
+            0,                                    // 70: uniform padding
+            0,                                    // 71: uniform padding
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -3441,6 +4684,17 @@ export class Engine {
         // Track whether the orbit is still being built (used by needsMoreFrames).
         this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < maxIterations
         const orbitComplete = availableIter >= maxIterations
+        // The debug overlay (views 1-5) recomputes from the orbit buffer while
+        // reading the CURRENT view uniform. During a reference rebuild those two
+        // disagree, and the recompute paints the previous position — the "vue
+        // figée sur une ancienne vue" report. Gate the overlay on the same
+        // readiness signal the block table uses.
+        this.debugOrbitReady = orbitComplete
+        const incrementalAutoPrefixReady = this.incrementalReferenceTable
+            && this.approximationMode === 'auto'
+            && this.incrementalTableLayout?.refId === this.activeRef?.refId
+            && (this.incrementalTableLayout?.coveredOrbitLength ?? 0) > 1
+        const blockOrbitReady = orbitComplete || incrementalAutoPrefixReady
 
         // BLA now runs in the deep (floatexp) path too: a/b/radii are stored in
         // fe form and try_apply_bla_deep does its radius test in log space.
@@ -3467,12 +4721,20 @@ export class Engine {
             : this.approximationMode === 'auto' ? 'unified'
             : 'bla'
         const blocksReady = (this.approximationMode === 'bla' || this.approximationMode === 'pade' || this.approximationMode === 'jet' || this.approximationMode === 'mobius' || this.approximationMode === 'auto')
-            && orbitComplete
+            && blockOrbitReady
             && this.currentBlaLevelCount > 0
             && this.currentBlockTableKind === expectedTableKind
+            && (this.approximationMode !== 'auto'
+                || !this.dynamicBlockValidity
+                || (this.dynamicValidityReady
+                    && this.dynamicValidityGeneration === this.tableGeneration))
             && tableCoversView
         const approximationModeFlag = blocksReady
-            ? (this.approximationMode === 'auto' ? 5 : this.approximationMode === 'mobius' ? 4 : this.approximationMode === 'jet' ? 3 : this.approximationMode === 'pade' ? 2 : 1)
+            ? (this.approximationMode === 'auto'
+                ? (this.dynamicBlockValidity ? (this.dynamicValidityShadow ? 7 : 6) : 5)
+                : this.approximationMode === 'mobius' ? 4
+                : this.approximationMode === 'jet' ? 3
+                : this.approximationMode === 'pade' ? 2 : 1)
             : 0
         const blaLevelCount = blocksReady ? this.currentBlaLevelCount : 0
         // Diagnostic mirror of exactly what the shader receives this frame: the mode
@@ -3491,7 +4753,7 @@ export class Engine {
             this.batchControllerGeneration++
             this.batchResetForPendingClear = true
             this.batchUnderBudgetStreak = 0
-            this.batchLastActivePixelCount = -1
+            this.batchLastRemainingPixelCount = -1
         }
 
         // Re-write the mandelbrot uniform with the guarded globalMaxIter.
@@ -3675,13 +4937,6 @@ export class Engine {
         }
 
         const aspect = (this.width / Math.max(1, this.height))
-        // All paths now use the same configurable seed step for progressive refinement.
-        const zoomMinBrushStep = normalizePowerOfTwoStep(renderOptions.zoomMinBrushStep, 1, 1, 64)
-        const seedStep = Math.max(
-            normalizePowerOfTwoStep(renderOptions.sentinelSeedStep, 64, 1, 4096),
-            zoomMinBrushStep,
-        )
-        const baseSentinel = seedStep
         const clearFlag = this.clearHistoryNextFrame ? 1 : 0
         if (this.clearHistoryNextFrame) {
             this.invalidateCounterReadback()
@@ -3710,15 +4965,7 @@ export class Engine {
         const roundedShiftTexY = Math.round(shiftTexY)
         const hasTranslationShift = roundedShiftTexX !== 0 || roundedShiftTexY !== 0
 
-        // Accumulate cumulative texel shift for sentinel grid alignment.
-        // We accumulate the *rounded* shift (what the shader actually applies)
-        // to avoid drift between the JS cumulative total and the GPU reality.
-        if (this.clearHistoryNextFrame) {
-            this.cumulativeShiftX = 0
-            this.cumulativeShiftY = 0
-        } else {
-            this.cumulativeShiftX += roundedShiftTexX
-            this.cumulativeShiftY += roundedShiftTexY
+        if (!this.clearHistoryNextFrame) {
             if (isZoomActive(this.zoomState)) {
                 this.frozenPanShiftX += roundedShiftTexX
                 this.frozenPanShiftY += roundedShiftTexY
@@ -3737,71 +4984,60 @@ export class Engine {
             this.needFreezeSnapshot = false
         }
 
-        // Grid offset passed to the shader: cumulative shift mod baseSentinel,
-        // using WGSL-friendly positive modular arithmetic.
-        const gridOffsetX = ((this.cumulativeShiftX % baseSentinel) + baseSentinel) % baseSentinel
-        const gridOffsetY = ((this.cumulativeShiftY % baseSentinel) + baseSentinel) % baseSentinel
         const counterReadbackPending = this.hasPendingCounterReadbackForCurrentGeneration()
 
-        // Adaptive refinement gating: pause sentinel halving only when the
-        // batch controller is already at its minimum AND there are too many
-        // active pixels (those the fused compute pass actually processes).  This
-        // prevents pixel-count avalanches while guaranteeing convergence:
-        // if the batch has room to shrink, the gate stays open and the batch
-        // controller absorbs the ×4 spike.  A structurally slow GPU (high DPR)
-        // will stabilise its batch above MIN, so refinement proceeds. While a
-        // counter readback is pending, refinement pauses so that the delayed
-        // count cannot become optimistic relative to newer sentinels.
-        const gateOpen =
-            !counterReadbackPending
-            && (
-                this.clearHistoryNextFrame
-                || this.activePixelCount < 0
-                || this.iterationBatchSize > MIN_BATCH_SIZE
-                || this.activePixelCount < ACTIVE_PIXEL_GATE_THRESHOLD * this.gpuLoadMultiplier
-            )
-
-        // When the gate reopens after being closed, the next refinement step
-        // will ~4× the pixel count.  Pre-emptively drop the iteration batch
-        // size to MIN so the combined cost stays manageable.  The batch
-        // controller will ramp it back up over the following frames.
-        if (gateOpen && this.refinementWasGated) {
-            this.iterationBatchSize = MIN_BATCH_SIZE
+        // Bounding box of the rotated viewport: the visible rectangle spans
+        // ±aspect × ±1 in rotated neutral units, so its axis-aligned half
+        // extents are aspect·|cos| + |sin| and aspect·|sin| + |cos|, divided by
+        // the neutral extent and scaled to texels. Snapped outward to the 8×8
+        // workgroup grid.
+        const angleForBox = this.previousMandelbrot.angle
+        const neutralExtent = Math.sqrt(aspect * aspect + 1)
+        const absCos = Math.abs(Math.cos(angleForBox))
+        const absSin = Math.abs(Math.sin(angleForBox))
+        const halfTexels = this.neutralSize / 2
+        const halfX = ((aspect * absCos + absSin) / neutralExtent) * halfTexels
+        const halfY = ((aspect * absSin + absCos) / neutralExtent) * halfTexels
+        const boxX = Math.max(0, Math.floor((halfTexels - halfX) / 8) * 8)
+        const boxY = Math.max(0, Math.floor((halfTexels - halfY) / 8) * 8)
+        const boxRight = Math.min(this.neutralSize, Math.ceil((halfTexels + halfX) / 8) * 8)
+        const boxBottom = Math.min(this.neutralSize, Math.ceil((halfTexels + halfY) / 8) * 8)
+        this.dispatchBox = {
+            x: boxX,
+            y: boxY,
+            width: Math.max(8, boxRight - boxX),
+            height: Math.max(8, boxBottom - boxY),
         }
-        this.refinementWasGated = !gateOpen
-
-        const allowRefinement = gateOpen ? 1 : 0
 
         const brushUniforms = new Float32Array([
             aspect,
             this.previousMandelbrot.angle,
             clearFlag,
-            seedStep,
-            baseSentinel,
             shiftTexX,
             shiftTexY,
-            this.previousMandelbrot.mu,
-            gridOffsetX,
-            gridOffsetY,
-            isZoomActive(this.zoomState) ? zoomMinBrushStep : 0,
-            allowRefinement,
+            this.dispatchBox.x,
+            this.dispatchBox.y,
+            0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
-
-        // Write resolve uniforms (mu for budget-exhaustion detection + grid offset)
-        const resolveUniforms = new Float32Array([this.previousMandelbrot.mu, gridOffsetX, gridOffsetY])
-        this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
         const shouldDispatchCounter =
             !counterReadbackPending
             && (
                 this.unfinishedPixelCount < 0
-                || this.activePixelCount < 0
                 || frameSerial - this.lastCounterDispatchFrame >= COUNTER_SAMPLE_INTERVAL_FRAMES
             )
         const counterReadbackSlot = shouldDispatchCounter
             ? this.acquireCounterReadbackSlot()
             : undefined
+        const resolveUniforms = new Float32Array([
+            this.previousMandelbrot.mu,
+            aspect,
+            this.previousMandelbrot.angle,
+            0,
+        ])
+        this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
+
         let scheduledCounterReadback: {
             slot: CounterReadbackSlot,
             sequence: number,
@@ -3839,14 +5075,27 @@ export class Engine {
         // writing to frozen. rawBrushTexture will be overwritten by the brush pass.
         if (this.needMergeSnapshot
             && this.pipelineMerge && this.bindGroupMerge
-            && this.resolvedTexture && this.frozenTexture && this.rawBrushTexture) {
+            && this.resolvedDisplay && this.frozenDisplay && this.rawBrushTexture
+            && this.geometryScratchTexture && this.metadataScratchTexture
+            && this.frozenDisplayVersion >= 0) {
             const texSize = this.neutralSize
-            // 1) Copy frozen → rawBrushTexture (temp read-only copy of frozen;
-            //    B has 9 layers, frozen 8 — copy the 8 display layers)
+            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.merge, 'start')
+            // Copy the frozen set to format-compatible temporary resources so
+            // the merge may read it while writing the frozen destination.
             commandEncoder.copyTextureToTexture(
-                { texture: this.frozenTexture },
+                { texture: this.frozenDisplay.valuesTexture },
                 { texture: this.rawBrushTexture },
-                { width: texSize, height: texSize, depthOrArrayLayers: DISPLAY_LAYERS },
+                { width: texSize, height: texSize, depthOrArrayLayers: DISPLAY_VALUE_LAYERS },
+            )
+            commandEncoder.copyTextureToTexture(
+                { texture: this.frozenDisplay.geometryTexture },
+                { texture: this.geometryScratchTexture },
+                { width: texSize, height: texSize },
+            )
+            commandEncoder.copyTextureToTexture(
+                { texture: this.frozenDisplay.metadataTexture },
+                { texture: this.metadataScratchTexture },
+                { width: texSize, height: texSize },
             )
             // 2) Write merge uniforms (captured at zoom stop before state reset)
             const mergeData = new Float32Array([
@@ -3858,23 +5107,25 @@ export class Engine {
                 this.mergeUniforms.angle,
             ])
             this.device.queue.writeBuffer(this.uniformBufferMerge!, 0, mergeData.buffer)
-            // 3) MRT render pass: reads resolved + rawBrushTexture(frozen copy),
-            //    writes directly into frozen's 8 layer views.
-            const mergeAttachments: GPURenderPassColorAttachment[] =
-                this.frozenLayerViews.map(view => ({
-                    view,
-                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                    loadOp: 'clear' as GPULoadOp,
-                    storeOp: 'store' as GPUStoreOp,
-                }))
+            const mergeAttachments: GPURenderPassColorAttachment[] = [
+                ...this.frozenDisplay.valueLayerViews,
+                this.frozenDisplay.geometryView,
+                this.frozenDisplay.metadataView,
+            ].map(view => ({
+                view,
+                clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                loadOp: 'clear' as GPULoadOp,
+                storeOp: 'store' as GPUStoreOp,
+            }))
             const rpassMerge = commandEncoder.beginRenderPass({
                 colorAttachments: mergeAttachments,
-                timestampWrites: this.tsWrites(0),
+                timestampWrites: this.tsExplicitSpanEnd(PASS_SLOT_INDEX.merge),
             })
             rpassMerge.setPipeline(this.pipelineMerge)
             rpassMerge.setBindGroup(0, this.bindGroupMerge)
             rpassMerge.draw(6, 1, 0, 0)
             rpassMerge.end()
+            this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needMergeSnapshot = false
             this.frozenAligned = true
             this.frozenPanShiftX = 0
@@ -3882,14 +5133,26 @@ export class Engine {
         }
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
-        if (this.needFreezeSnapshot && this.resolvedTexture && this.frozenTexture) {
-            const layerCount = DISPLAY_LAYERS
+        if (this.needFreezeSnapshot && this.resolvedDisplay && this.frozenDisplay) {
             const texSize = this.neutralSize
+            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'start')
             commandEncoder.copyTextureToTexture(
-                { texture: this.resolvedTexture },
-                { texture: this.frozenTexture },
-                { width: texSize, height: texSize, depthOrArrayLayers: layerCount },
+                { texture: this.resolvedDisplay.valuesTexture },
+                { texture: this.frozenDisplay.valuesTexture },
+                { width: texSize, height: texSize, depthOrArrayLayers: DISPLAY_VALUE_LAYERS },
             )
+            commandEncoder.copyTextureToTexture(
+                { texture: this.resolvedDisplay.geometryTexture },
+                { texture: this.frozenDisplay.geometryTexture },
+                { width: texSize, height: texSize },
+            )
+            commandEncoder.copyTextureToTexture(
+                { texture: this.resolvedDisplay.metadataTexture },
+                { texture: this.frozenDisplay.metadataTexture },
+                { width: texSize, height: texSize },
+            )
+            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'end')
+            this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needFreezeSnapshot = false
             this.frozenAligned = true
             this.frozenPanShiftX = 0
@@ -3900,12 +5163,11 @@ export class Engine {
             }
         }
 
-        // Helper: build 8 MRT color attachments from per-layer views
-        const makeMrtAttachments = (
-            layerViews: GPUTextureView[],
+        const makeDisplayAttachments = (
+            display: DisplaySet,
             loadOp: GPULoadOp = 'clear',
         ): GPURenderPassColorAttachment[] =>
-            layerViews.map(view => ({
+            [...display.valueLayerViews, display.geometryView, display.metadataView].map(view => ({
                 view,
                 clearValue: { r: 0, g: 0, b: 0, a: 0 },
                 loadOp,
@@ -3923,31 +5185,37 @@ export class Engine {
         // Track frames that may mutate A: utility frames rewrite it wholesale;
         // in-place frames only write when work remains (unknown counts are
         // conservatively treated as a mutation).
-        if (utilityNeeded || this.unfinishedPixelCount !== 0 || this.activePixelCount !== 0) {
+        if (utilityNeeded || this.aaReseedPending || this.unfinishedPixelCount !== 0) {
             this.lastRawMutationFrame = frameSerial
+            this.rawFieldVersion++
         }
 
         {
             if (utilityNeeded) {
-                // Utility pass: pan gather / clear stamp / sentinel refinement,
-                // A→B, then B is copied back so iteration proceeds on A.
-                const utilPass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(1) })
+                // Utility pass: pan gather or exact step-1 clear stamp,
+                // A→B, then the texture roles swap so iteration proceeds on B.
+                const utilityTimingKey = selectRawUtilityPassKey(this.clearHistoryNextFrame)
+                const utilPass = commandEncoder.beginComputePass({
+                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX[utilityTimingKey]),
+                })
                 utilPass.setPipeline(this.pipelineReprojectCs!)
                 utilPass.setBindGroup(0, this.bindGroupReprojectCs!)
                 const uwg = Math.ceil(this.neutralSize / 16)
                 utilPass.dispatchWorkgroups(uwg, uwg)
                 utilPass.end()
-                commandEncoder.copyTextureToTexture(
-                    { texture: this.rawBrushTexture },
-                    { texture: this.rawTexture },
-                    { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: RAW_LAYERS },
-                )
+                // Ping-pong instead of copying B back over A: B now holds the
+                // reprojected state, so it becomes the front texture and A the
+                // next frame's scratch. This removes a full-size 13-layer copy —
+                // read and write — from every pan and clear frame, and it also
+                // brings the whole reprojection inside the pass timer, which
+                // previously measured only the compute half of the work.
+                this.swapRawTextures()
             }
             // Stage B selective reseed: stamp the boundary sliver (target > sample
             // index) as compute requests so only it reconverges with the new jitter;
             // frozen texels are left as-is and skipped by the fused pass below.
-            // Phase D: margin-passing escaped texels are tagged analytic-OK instead
-            // of stamped — the color pass expands their Taylor payload per sample.
+            // Margin-passing escaped texels are tagged analytic-OK instead of
+            // stamped; the color pass expands their z″ payload per sample.
             if (this.aaReseedPending && this.pipelineAaReseed && this.bindGroupAaReseed && this.uniformBufferAaTarget) {
                 const aaLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
                 const aaAnalytic = this.aaAnalyticParams(aspect)
@@ -3964,7 +5232,9 @@ export class Engine {
                 if (this.aaFrontierBuffer) {
                     commandEncoder.clearBuffer(this.aaFrontierBuffer, 0, 8)
                 }
-                const reseedPass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(2) })
+                const reseedPass = commandEncoder.beginComputePass({
+                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX.reseed),
+                })
                 reseedPass.setPipeline(this.pipelineAaReseed)
                 reseedPass.setBindGroup(0, this.bindGroupAaReseed)
                 const rwg = Math.ceil(this.neutralSize / 16)
@@ -3986,10 +5256,12 @@ export class Engine {
             // only on the generation's first in-place dispatch, then let every
             // dispatch atomicAdd into it (exact, sampling-independent totals).
             if (this.workStatsClearedSession !== this.workStatsSessionSerial) {
-                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, 60)
+                commandEncoder.clearBuffer(this.workStatsBuffer!, 0, WORK_STATS_BYTES)
                 this.workStatsClearedSession = this.workStatsSessionSerial
             }
-            const computePass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(3) })
+            const computePass = commandEncoder.beginComputePass({
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.compute),
+            })
             // Shallow views (scaleExp > DEEP_EXP) never enter the floatexp deep
             // path, so run the DCE'd shallow kernel; floatExpActive is set from
             // expScale <= DEEP_EXP_THRESHOLD earlier this frame.
@@ -3997,35 +5269,25 @@ export class Engine {
             computePass.setBindGroup(0, this.bindGroupInplace!)
             // cs_main is @workgroup_size(8,8) — smaller tiles reduce intra-workgroup
             // lockstep divergence waste (one deep straggler holds 64 lanes, not 256).
-            const workgroups = Math.ceil(this.neutralSize / 8)
-            computePass.dispatchWorkgroups(workgroups, workgroups)
+            // The grid covers the rotated viewport's bounding box rather than the
+            // whole neutral square: cs_main offsets its global id by
+            // brush.dispatchOrigin, and the texels outside the box are exactly
+            // those it already culls.
+            computePass.dispatchWorkgroups(
+                Math.max(1, Math.ceil(this.dispatchBox.width / 8)),
+                Math.max(1, Math.ceil(this.dispatchBox.height / 8)),
+            )
             computePass.end()
-
-            // The fused pass accumulates the counters every frame; only the
-            // readback copy is sampled at the usual interval.
-            if (counterReadbackSlot) {
-                const sequence = ++this.counterReadbackSequence
-                const generation = this.counterReadbackGeneration
-                commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
-                commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, 60)
-                this.lastCounterDispatchFrame = frameSerial
-                scheduledCounterReadback = { slot: counterReadbackSlot, sequence, generation, frame: frameSerial }
-            }
         }
 
-        // ── Resolve gating (C1) ──────────────────────────────────────────
-        // When the image is fully converged (0 unfinished, 0 active, sampled
-        // after the last frame that mutated A), resolved would be identical
-        // to A: skip the copy + resolve pass and let color read A directly.
-        // Frames requesting a frozen snapshot or merge keep the resolve so
-        // resolvedTexture is guaranteed fresh for the next frame's copy.
-        const skipResolve = !!this.bindGroupColorRaw
-            && !this.needFreezeSnapshot
+        // Reuse the typed display set on color-only frames. Raw is never a
+        // display ABI bypass: resolve may be skipped only when the cached
+        // geometry version matches the field version.
+        const converged = !this.needFreezeSnapshot
             && !this.needMergeSnapshot
             && this.unfinishedPixelCount === 0
-            && this.activePixelCount === 0
             && this.counterSampleFrame >= this.lastRawMutationFrame
-        this.resolveSkipped = skipResolve
+        const skipResolve = converged && isDisplaySetCurrent(this.rawFieldVersion, this.resolvedDisplayVersion)
 
         // Fully converged: safe to capture an AA sample. No pending history clear,
         // no freeze/merge, not zooming, orbit complete, pixel counts known and at
@@ -4041,34 +5303,39 @@ export class Engine {
             && !this.orbitIncomplete
             && this.unfinishedPixelCount >= 0
             && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
-            && this.activePixelCount >= 0
-            && this.activePixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
             && !this.hasPendingCounterReadbackForCurrentGeneration()
 
         if (!skipResolve) {
-            // Pre-fill resolved with A so resolve.wgsl can discard pass-through
-            // pixels and only write sentinels / unfinished anchors that need snapping.
-            // A has 9 layers, resolved 8 — the continuation-only layer 8 is
-            // never displayed, copy the 8 display layers.
-            commandEncoder.copyTextureToTexture(
-                { texture: this.rawTexture },
-                { texture: this.resolvedTexture },
-                { width: this.neutralSize, height: this.neutralSize, depthOrArrayLayers: DISPLAY_LAYERS },
-            )
-
-            // Pass 2: resolve des sentinelles (A -> resolved)
+            // Resolve only copies/interpolates terminal analytic geometry and
+            // packs display provenance; no neighbour finalization pass remains.
             const rpassResolve = commandEncoder.beginRenderPass({
-                colorAttachments: makeMrtAttachments(this.resolvedLayerViews, 'load'),
-                timestampWrites: this.tsWrites(4),
+                colorAttachments: makeDisplayAttachments(this.resolvedDisplay!, 'clear'),
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.resolve),
             })
             rpassResolve.setPipeline(this.pipelineResolve)
             rpassResolve.setBindGroup(0, this.bindGroupResolve)
             rpassResolve.draw(6, 1, 0, 0)
             rpassResolve.end()
+
+            this.resolvedDisplayVersion = this.rawFieldVersion
+        }
+
+        if (counterReadbackSlot) {
+            const sequence = ++this.counterReadbackSequence
+            const generation = this.counterReadbackGeneration
+            commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
+            commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, WORK_STATS_BYTES)
+            this.lastCounterDispatchFrame = frameSerial
+            scheduledCounterReadback = {
+                slot: counterReadbackSlot,
+                sequence,
+                generation,
+                frame: frameSerial,
+            }
         }
 
         // ── Pass 3 (color) + Pass 4 (AA present) ──────────────────────────
-        const colorBindGroup = (skipResolve ? this.bindGroupColorRaw! : this.bindGroupColor)!
+        const colorBindGroup = this.bindGroupColor!
         const swapView = this.ctx.getCurrentTexture().createView()
 
         const antialiasLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
@@ -4116,7 +5383,7 @@ export class Engine {
         // payload layers 8..12, which exist only on the raw texture binding.
         // The ACCUM pass always binds raw (below), so the flag only needs the
         // binding to exist. update() pre-wrote 0; this lands before submit.
-        if (aaCompositeThisFrame && !!this.bindGroupColorRaw && this.aaSampleIndex > 0
+        if (aaCompositeThisFrame && this.aaSampleIndex > 0
             && (this.aaOffsetX !== 0 || this.aaOffsetY !== 0)
             && this.aaAnalyticParams(aspect).enabled) {
             this.device.queue.writeBuffer(this.uniformBufferColor!, 63 * 4, new Float32Array([1]).buffer)
@@ -4131,16 +5398,13 @@ export class Engine {
                     loadOp: firstSample ? 'clear' : 'load',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(5),
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.aaAccum),
             })
             rpassAccum.setPipeline(firstSample ? this.pipelineColorAccumClear! : this.pipelineColorAccum!)
-            // Accumulation reads the RAW binding directly: composites may now run
-            // with a few idle-threshold unfinished pixels (skipResolve false), and
-            // the analytic Taylor payload (layers 8..12) only exists on raw —
-            // falling back to the resolved 8-layer binding would silently disable
-            // the expansion for the whole sample. Raw genuine values are what the
-            // accumulator wants anyway (resolve is a display nicety).
-            rpassAccum.setBindGroup(0, this.bindGroupColorRaw ?? colorBindGroup)
+            // Accumulation reads the coherent typed display set. The raw texture
+            // remains separately bound only for the analytic-AA Taylor payload
+            // (layers 8..12); it is never used as the display-value ABI.
+            rpassAccum.setBindGroup(0, colorBindGroup)
             rpassAccum.draw(6, 1, 0, 0)
             rpassAccum.end()
         } else if (!aaShowAccum) {
@@ -4153,7 +5417,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(6),
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.color),
             })
             rpassColor.setPipeline(this.pipelineColor)
             rpassColor.setBindGroup(0, colorBindGroup)
@@ -4170,7 +5434,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(7),
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.present),
             })
             rpassPresent.setPipeline(this.pipelinePresent)
             rpassPresent.setBindGroup(0, this.bindGroupPresent)
@@ -4179,7 +5443,17 @@ export class Engine {
         }
 
         // ── Debug overlay: instrumented recompute straight onto the frame ──
-        if (this.debugViewMode > 0 && this.pipelineDebug && this.bindGroupDebug) {
+        // The overlay must not draw from an orbit that does not yet cover the
+        // current view (it would paint the previous position). But skipping is
+        // only half the job: needsMoreFrames()'s debug branch has no "the
+        // reference just became ready" trigger, so without re-arming the dirty
+        // flag the loop would stop and leave the last — wrong — overlay frozen
+        // on screen. Staying dirty keeps frames coming until it can draw truthfully.
+        if (this.debugPipelineActive && !this.debugOrbitReady) {
+            this.debugViewDirty = true
+        }
+        if (this.debugPipelineActive && this.debugOrbitReady
+            && this.pipelineDebug && this.bindGroupDebug) {
             const rpassDebug = commandEncoder.beginRenderPass({
                 colorAttachments: [{
                     view: swapView,
@@ -4199,8 +5473,8 @@ export class Engine {
         }
 
         // Bake the AA target map once, right after sample 0 has converged and been
-        // composited (reads the converged neutral DE in rawTexture). Reused by the
-        // color gate and the selective reseed for all subsequent samples.
+        // composited (reads the converged typed values and cached height). Reused
+        // by the color gate and selective reseed for all subsequent samples.
         const aaBakeThisFrame = aaCompositeThisFrame
             && this.aaSampleIndex === 0
             && !!this.pipelineAaTarget
@@ -4209,7 +5483,7 @@ export class Engine {
         if (aaBakeThisFrame) {
             // Contrast/moiré predictor inputs (design D-contrast): the bake
             // Sobels the sample-0 composite (encoded just above in this same
-            // frame) and reads the palette-phase frequency from the raw layers.
+            // frame) and reads palette frequency from the typed value layers.
             const bakeMandelbrot = this.previousMandelbrot!
             this.device.queue.writeBuffer(
                 this.uniformBufferAaTarget!,
@@ -4249,7 +5523,7 @@ export class Engine {
             this.tsPendingSlots = this.tsSlotsUsedThisFrame
             this.tsPendingBatchSize = this.iterationBatchSize
             this.tsPendingBatchGeneration = this.batchControllerGeneration
-            this.tsPendingActivePixelCount = this.activePixelCount
+            this.tsPendingRemainingPixelCount = this.unfinishedPixelCount
             tsResolvedThisFrame = true
         }
 
@@ -4259,11 +5533,11 @@ export class Engine {
         this.cpuRenderMs = performance.now() - renderStartMs
         this.frameSerial++   // one actually-rendered frame → one measurement for the panel
         if (tsResolvedThisFrame) this.readbackTimestamps()
-        // Debug overlay active: surface the GPU frame time. The debug pass strips
+        // Recompute debug overlay active: surface the GPU frame time. The pass strips
         // the derivative/f32-path/lockstep asymmetries for every mode, so this
         // number compares the pure skipping algorithms wall-clock — switch modes
         // and read the console.
-        if (this.debugViewMode > 0) {
+        if (this.debugPipelineActive) {
             const dbgT0 = performance.now()
             void this.device.queue.onSubmittedWorkDone().then(() => {
                 console.log(`[debug view] GPU frame ${(performance.now() - dbgT0).toFixed(1)}ms (mode ${this.approximationMode}, view ${this.debugViewMode})`)
@@ -4318,16 +5592,14 @@ export class Engine {
                 this.aaOffsetX = j.x * 2 * neutralExtentColor / Math.max(1, this.neutralSize)
                 this.aaOffsetY = j.y * 2 * neutralExtentColor / Math.max(1, this.neutralSize)
                 // Stage B: reconverge only the boundary sliver via a selective reseed.
-                // Requires the grid at its finest step (1) and the reseed pipeline.
-                // Otherwise fall back to Stage A's full reconverge.
+                // Every raw request is already exact step 1.
                 const canSelectiveReseed = this.useAaSelectiveReseed
-                    && zoomMinBrushStep <= 1
                     && !!this.pipelineAaReseed
                     && !!this.bindGroupAaReseed
                 if (canSelectiveReseed) {
                     this.aaReseedPending = true
-                    // The reseed marks the boundary sliver as active again; without
-                    // invalidating the (async) pixel counter, the stale "0 active"
+                    // The reseed marks the boundary sliver as unfinished again; without
+                    // invalidating the async pixel counter, the stale zero
                     // from the previous convergence would make fullyConverged fire
                     // immediately and composite a half-computed sample. Force a fresh
                     // count so the next composite waits for the sliver to reconverge.
@@ -4426,11 +5698,17 @@ export class Engine {
         this.referenceWorker = undefined
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
-        this.resolvedTexture?.destroy?.()
-        this.frozenTexture?.destroy?.()
+        this.destroyDisplaySet(this.resolvedDisplay)
+        this.destroyDisplaySet(this.frozenDisplay)
+        this.geometryScratchTexture?.destroy?.()
+        this.metadataScratchTexture?.destroy?.()
         this.mandelbrotReferenceBuffer?.destroy?.()
         this.mandelbrotBlaBuffer?.destroy?.()
         this.mandelbrotBlaLevelBuffer?.destroy?.()
+        this.mandelbrotJetBuffer?.destroy?.()
+        this.mandelbrotJetRadiiBuffer?.destroy?.()
+        this.mandelbrotJetLevelBuffer?.destroy?.()
+        this.mandelbrotValidityBuffer?.destroy?.()
         this.uniformBufferMandelbrot?.destroy?.()
         this.uniformBufferColor?.destroy?.()
         this.uniformBufferBrush?.destroy?.()
@@ -4444,6 +5722,7 @@ export class Engine {
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()
         this.paletteTexture?.destroy?.()
+        this.device?.destroy?.()
     }
 
     // ── Self-managing render loop ─────────────────────────────────────
@@ -4460,7 +5739,7 @@ export class Engine {
         // explicit request / dirty snapshot, a live zoom, a pending capture, or
         // a reference/table still being built. debugViewDirty is cleared once
         // the debug pass has drawn (see render()).
-        if (this.debugViewMode > 0) {
+        if (this.debugPipelineActive) {
             let r = ''
             if (this.needRender || this.debugViewDirty) r = 'debugDirty'
             else if (this.snapshotCallback) r = 'snapshot'
@@ -4488,8 +5767,10 @@ export class Engine {
         else if (this.needMergeSnapshot) reason = 'mergeSnapshot'
         else if (this.isReferenceValidating) reason = 'referenceValidating'
         else if (this.orbitIncomplete) reason = 'orbitIncomplete'
-        else if (this.unfinishedPixelCount < 0
-            || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD) {
+        else if (
+            this.unfinishedPixelCount < 0
+            || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD
+        ) {
             reason = `unfinished=${this.unfinishedPixelCount}`
         }
         else if (this.aaActive) reason = 'aaAccumulating'
@@ -4505,8 +5786,6 @@ export class Engine {
             // stuck unfinished pixels.
             && this.unfinishedPixelCount >= 0
             && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
-            && this.activePixelCount >= 0
-            && this.activePixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
             && !this.orbitIncomplete
             && !isZoomActive(this.zoomState)) {
             reason = 'aaAutoPending'
@@ -4611,7 +5890,8 @@ export class Engine {
      */
     async updateSkyboxTexture(url: string, sourceKey = url): Promise<void> {
         if (this.skyboxTextureSourceKey === sourceKey) return
-        const newTexture = await this._loadTexture(url)
+        // Mips : les reflets rugueux lisent un niveau préfiltré (color.wgsl).
+        const newTexture = await this._loadTexture(url, true)
         this.skyboxTexture?.destroy?.()
         this.skyboxTexture = newTexture
         this.skyboxTextureView = this.skyboxTexture.createView()
@@ -4625,39 +5905,35 @@ export class Engine {
     }
 
     private rebuildColorBindGroup() {
-        if (this.pipelineColor && this.resolvedArrayView && this.frozenArrayView) {
+        if (this.pipelineColor && this.resolvedDisplay && this.frozenDisplay && this.rawArrayView) {
             const layout = this.pipelineColor.getBindGroupLayout(0)
-            const makeEntries = (neutralView: GPUTextureView): GPUBindGroupEntry[] => [
+            const entries: GPUBindGroupEntry[] = [
                 { binding: 0, resource: { buffer: this.uniformBufferColor! } },
-                { binding: 1, resource: neutralView },
+                { binding: 1, resource: this.resolvedDisplay.valuesArrayView },
                 { binding: 2, resource: this.tileTextureView! },
                 { binding: 3, resource: this.skyboxTextureView! },
                 { binding: 4, resource: this.webcamTextureView! },
                 { binding: 5, resource: this.paletteTextureView! },
-                { binding: 6, resource: this.frozenArrayView! },
+                { binding: 6, resource: this.frozenDisplay.valuesArrayView },
                 { binding: 7, resource: this.paletteSampler! },
                 { binding: 8, resource: this.skyboxSampler! },
                 { binding: 9, resource: this.aaTargetTextureView! },
+                { binding: 10, resource: this.resolvedDisplay.geometryView },
+                { binding: 11, resource: this.frozenDisplay.geometryView },
+                { binding: 12, resource: this.resolvedDisplay.metadataView },
+                { binding: 13, resource: this.frozenDisplay.metadataView },
+                { binding: 14, resource: this.rawArrayView },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,
-                entries: makeEntries(this.resolvedArrayView),
+                entries,
                 label: 'Engine BindGroup Color',
             })
-            // Alternative bind group reading rawTexture (A) directly, used when
-            // the resolve pass is skipped (fully converged image).
-            this.bindGroupColorRaw = this.rawArrayView
-                ? this.device.createBindGroup({
-                    layout,
-                    entries: makeEntries(this.rawArrayView),
-                    label: 'Engine BindGroup Color (raw)',
-                })
-                : undefined
         }
     }
 
     // Méthode utilitaire pour charger une image et la convertir en GPUTexture
-    private async _loadTexture(url: string): Promise<GPUTexture> {
+    private async _loadTexture(url: string, withMips = false): Promise<GPUTexture> {
         const img = new Image()
         img.src = url
         try {
@@ -4670,6 +5946,7 @@ export class Engine {
         const texture = this.device.createTexture({
             size: [bitmap.width, bitmap.height, 1],
             format: 'rgba8unorm',
+            mipLevelCount: withMips ? mipLevelCountFor(bitmap.width, bitmap.height) : 1,
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
             label: 'Engine LoadedTexture ' + url,
         })
@@ -4678,16 +5955,11 @@ export class Engine {
             { texture: texture },
             [bitmap.width, bitmap.height]
         )
+        if (withMips) generateMipmaps(this.device, texture)
         return texture
     }
 
-    // ── Readback d'un pixel d'itération depuis la texture resolved ────
-    // Convertit les coordonnées écran (CSS) en coordonnées texture neutre,
-    // lit les couches 0 (iter), 2 (zx), 3 (zy), 4/5 (hauteur/angle si échappé, dérivée si reprise)
-    // et renvoie les données brutes nécessaires au calcul de la phase palette.
-
-    /** Données d'itération lues depuis le GPU pour un pixel. */
-    static readonly ITER_PIXEL_LAYERS = [0, 2, 3, 4, 5] as const
+    // ── Readback d'un pixel depuis le display set typé ───────────────
 
     /**
      * Lit les données d'itération en un point écran (coordonnées CSS, relatives au canvas).
@@ -4703,14 +5975,18 @@ export class Engine {
         cssY: number,
         canvasWidth: number,
         canvasHeight: number,
-    ): Promise<{ iter: number; zx: number; zy: number; derX: number; derY: number } | null> {
-        if (!this.resolvedTexture || !this.device) return null
-
-        // When the resolve pass is gated (fully converged image), resolvedTexture
-        // is stale — read the same data from rawTexture (A) instead.
-        const pickSourceTexture = this.resolveSkipped && this.rawTexture
-            ? this.rawTexture
-            : this.resolvedTexture
+    ): Promise<{
+        iter: number
+        zx: number
+        zy: number
+        derX: number
+        derY: number
+        gradientX: number
+        gradientY: number
+        curvature: number
+        metadata: number
+    } | null> {
+        if (!this.resolvedDisplay || !this.device || this.resolvedDisplayVersion < 0) return null
 
         const aspect = this.width / Math.max(1, this.height)
         const angle = this.previousMandelbrot?.angle ?? 0
@@ -4747,13 +6023,12 @@ export class Engine {
         const texelX = Math.floor(Math.max(0, Math.min(texSize - 1, uvNeutralX * texSize)))
         const texelY = Math.floor(Math.max(0, Math.min(texSize - 1, (1 - uvNeutralY) * texSize)))
 
-        // Lecture GPU: copier les 5 couches nécessaires (1 texel chacune) dans un buffer
-        const layerIndices = Engine.ITER_PIXEL_LAYERS
-        const floatsPerLayer = 1
-        const bytesPerFloat = 4
+        // Three scalar value layers, one rgba16 geometry texel and one uint
+        // metadata word are copied into independently aligned rows.
         const align256 = (n: number) => ((n + 255) & ~255)
-        const bytesPerRow = align256(floatsPerLayer * bytesPerFloat) // 256 minimum pour WebGPU
-        const totalBytes = bytesPerRow * layerIndices.length
+        const bytesPerRow = align256(8)
+        const fieldCount = 5
+        const totalBytes = bytesPerRow * fieldCount
 
         const readBuffer = this.device.createBuffer({
             size: totalBytes,
@@ -4762,38 +6037,68 @@ export class Engine {
         })
 
         const encoder = this.device.createCommandEncoder()
-        for (let i = 0; i < layerIndices.length; i++) {
+        for (let layer = 0; layer < DISPLAY_VALUE_LAYERS; layer++) {
             encoder.copyTextureToBuffer(
                 {
-                    texture: pickSourceTexture,
-                    origin: { x: texelX, y: texelY, z: layerIndices[i] },
+                    texture: this.resolvedDisplay.valuesTexture,
+                    origin: { x: texelX, y: texelY, z: layer },
                 },
                 {
                     buffer: readBuffer,
-                    offset: bytesPerRow * i,
+                    offset: bytesPerRow * layer,
                     bytesPerRow,
                 },
                 { width: 1, height: 1, depthOrArrayLayers: 1 },
             )
         }
+        encoder.copyTextureToBuffer(
+            { texture: this.resolvedDisplay.geometryTexture, origin: { x: texelX, y: texelY } },
+            { buffer: readBuffer, offset: bytesPerRow * 3, bytesPerRow },
+            { width: 1, height: 1 },
+        )
+        encoder.copyTextureToBuffer(
+            { texture: this.resolvedDisplay.metadataTexture, origin: { x: texelX, y: texelY } },
+            { buffer: readBuffer, offset: bytesPerRow * 4, bytesPerRow },
+            { width: 1, height: 1 },
+        )
         this.device.queue.submit([encoder.finish()])
 
         await readBuffer.mapAsync(GPUMapMode.READ)
-        const mapped = new Float32Array(readBuffer.getMappedRange())
-        // Extraire les valeurs depuis chaque couche (séparées par bytesPerRow/4 floats)
-        const stride = bytesPerRow / bytesPerFloat
-        const iter = mapped[0 * stride]
-        const zx   = mapped[1 * stride]
-        const zy   = mapped[2 * stride]
-        const derX = mapped[3 * stride]
-        const derY = mapped[4 * stride]
+        const mappedRange = readBuffer.getMappedRange()
+        const floats = new Float32Array(mappedRange)
+        const halves = new Uint16Array(mappedRange)
+        const words = new Uint32Array(mappedRange)
+        const floatStride = bytesPerRow / 4
+        const halfStride = bytesPerRow / 2
+        const iter = floats[0]
+        const zx = floats[floatStride]
+        const zy = floats[2 * floatStride]
+        const geometryOffset = 3 * halfStride
+        const gradientX = float16ToFloat32(halves[geometryOffset])
+        const gradientY = float16ToFloat32(halves[geometryOffset + 1])
+        const curvature = float16ToFloat32(halves[geometryOffset + 2])
+        const distanceHeight = float16ToFloat32(halves[geometryOffset + 3])
+        const metadata = words[(4 * bytesPerRow) / 4] >>> 0
         readBuffer.unmap()
         readBuffer.destroy()
 
         // Pixel sentinelle ou non calculé
         if (iter < 0) return null
 
-        return { iter, zx, zy, derX, derY }
+        const gradientAngle = Math.hypot(gradientX, gradientY) > 1e-8
+            ? Math.atan2(gradientY, gradientX)
+            : 0
+        return {
+            iter,
+            zx,
+            zy,
+            derX: distanceHeight,
+            derY: gradientAngle,
+            gradientX,
+            gradientY,
+            curvature,
+            metadata,
+        }
     }
 
     // Met à jour la texture GPU à partir de la webcam (à appeler à chaque frame si webcamEnabled)

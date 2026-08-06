@@ -1271,6 +1271,1244 @@ pub fn select_finite_return(
     }
 }
 
+/* ───────────────────────────────────────────────────────────────────────────
+ * §4–§5 ported to k = p with the minibrot gauge Λ.
+ *
+ * WHY A PORT AND NOT A PARAMETER. The Feigenbaum builders above gauge by
+ * `s_n = P_c^[2^n](0)`, the critical value at time 2^n. At a minibrot nucleus
+ * that quantity is *exactly zero* — `P_{c*}^p(0) = 0` is the definition of the
+ * nucleus — so `critical_scale_ball` returns a ball straddling the origin and
+ * both builders correctly refuse with "critical scale is zero". The gauge has to
+ * change, not the skip.
+ *
+ * THE TWO GAUGES. Write `Z_k` for the critical orbit of `c*` (`Z_0 = 0`,
+ * `Z_p = 0`). Because `Z_0 = 0`, `d/dz P_c^p(0) = 0` for EVERY `c`: the
+ * dynamical linear term is structurally absent and the leading behaviour is
+ * quadratic, with
+ *
+ *     a := ½·d²/dz² P_{c*}^p(0) = ∏_{k=1}^{p-1} 2 Z_k,
+ *     σ_p := ∂c P_c^p(0)|_{c*}   from  σ_{k+1} = 2 Z_k σ_k + 1,
+ *     Λ := 1/(a·σ_p).
+ *
+ * `a` is the dynamical gauge (`z = ζ/a`) and `Λ` the parameter gauge
+ * (`c = c* + Λ·ĉ`). `Λ` is not a new invention: expanding the shipped
+ * Munafo/Jung estimate `1/(b·l²)` with `l = a` and `b·a = σ_p` gives exactly
+ * `1/(a·σ_p)`, which `minibrot_gauge_matches_shipped_size_estimate` checks
+ * against the DBig implementation in `lib.rs`.
+ *
+ * THE SUBSTITUTION IS ONE LINE. The renormalized return is
+ *
+ *     Ĝ_c(ζ) = a · P_c^p(ζ/a) = w_p / scale     with  scale := 1/a,
+ *
+ * which is the same `w_k / scale` shape §4–§5 already use. So `return_jet_ball`
+ * is reused verbatim with `scale = 1/a` in place of `s_n`, and the Chebyshev
+ * table is replaced by the quadratic family itself:
+ *
+ *     H(ζ) = ζ² + ĉ,   H' = 2ζ,   H'' = 2.
+ *
+ * That is the content of straightening made finite: the defect `Ĝ - H` is the
+ * amount by which this minibrot's p-fold return fails to BE the quadratic
+ * family in its own coordinate.
+ *
+ * WHAT THIS BUYS. `MANDELBROT_INTERIOR_ANCHOR_CENSUS.md` measured
+ * `band ≈ Λ / ∏2|Z_k|` for the scalar majorant: it injects `c_max` at each of
+ * the p steps and pays the cycle's own amplification. Here the amplification is
+ * absorbed into the gauge before the window is measured, so the window is stated
+ * in `ĉ` where the constants are O(1).
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/// Rigorous reciprocal of a ball that excludes the origin.
+///
+/// For `|w - z| ≤ r` and `|z| - r > 0`,
+/// `|1/w - 1/z| = |w - z|/(|w||z|) ≤ r/((|z| - r)·|z|)`.
+fn ball_inv(a: Ball) -> Option<Ball> {
+    let center_abs = abs_down_c(a.center);
+    let denom = sub_down(center_abs, a.radius);
+    if !(denom > 0.0) {
+        return None;
+    }
+    let product = mul_down(denom, center_abs);
+    if !(product > 0.0) {
+        return None;
+    }
+    let center = C64::new(1.0, 0.0).div(a.center);
+    // `C64::div` is 4 products, 3 sums and 2 divisions per component.
+    let radius = add_up(div_up(a.radius, product), center_rounding(center, 12.0));
+    let out = Ball { center, radius };
+    if out.finite() {
+        Some(out)
+    } else {
+        None
+    }
+}
+
+/// The two renormalization gauges of a period-`p` nucleus, as rigorous
+/// enclosures.
+#[derive(Clone, Copy, Debug)]
+pub struct MinibrotGauges {
+    /// `a = ∏_{k=1}^{p-1} 2 Z_k` — the dynamical gauge, `z = ζ/a`.
+    pub a: (f64, f64),
+    /// Certified lower bound on `|a|`. Zero means the nucleus is degenerate
+    /// (some `Z_k = 0`, i.e. the period is not primitive) and no gauge exists.
+    pub a_margin: f64,
+    /// `σ_p = ∂c P_c^p(0)` at the nucleus.
+    pub sigma_p: (f64, f64),
+    /// `Λ = 1/(a·σ_p)` — the parameter gauge, `c = c* + Λ·ĉ`.
+    pub lambda: (f64, f64),
+    /// Outward bound on `|Λ|`, the one used to convert a `ĉ` window into `c`.
+    pub lambda_abs_up: f64,
+    /// Inward bound on `|Λ|`.
+    pub lambda_abs_down: f64,
+}
+
+/// Ball enclosures of `a`, `σ_p` and `Λ` at a period-`p` nucleus.
+///
+/// `c*` is taken as an exact f64 pair: the caller is responsible for it being a
+/// nucleus (`newton_nucleus` refines one). Everything the enclosure needs about
+/// that assumption is checked here — a non-nucleus makes `|Z_p|` large, which
+/// shows up as a large `residual`.
+fn minibrot_gauge_balls(c: C64, p: usize) -> Option<(Ball, Ball, Ball, f64)> {
+    if p == 0 {
+        return None;
+    }
+    let mut z = Ball::ZERO;
+    let mut a = Ball::exact(C64::new(1.0, 0.0));
+    let mut sigma = Ball::ZERO;
+    let one = Ball::exact(C64::new(1.0, 0.0));
+    for k in 0..p {
+        // σ_{k+1} = 2 Z_k σ_k + 1, taken before Z advances.
+        sigma = ball_add(ball_double(ball_mul(z, sigma)), one);
+        z = ball_add(ball_mul(z, z), Ball::exact(c));
+        // a multiplies 2Z_k for k = 1..p-1, i.e. every step but the last.
+        if k + 1 < p {
+            a = ball_mul(a, ball_double(z));
+        }
+        if !z.finite() || !a.finite() || !sigma.finite() {
+            return None;
+        }
+    }
+    // `z` now encloses Z_p, which is 0 at an exact nucleus: its magnitude is the
+    // residual of the caller's root.
+    let residual = z.abs_up();
+    Some((a, sigma, z, residual))
+}
+
+/// Public gauge computation. Returns `None` when no gauge exists: `a` straddling
+/// zero (non-primitive period) or an overflowing product.
+pub fn minibrot_gauges(c_re: f64, c_im: f64, p: usize) -> Option<MinibrotGauges> {
+    let c = C64::new(c_re, c_im);
+    let (a, sigma, _z_p, _residual) = minibrot_gauge_balls(c, p)?;
+    let a_margin = a.abs_down();
+    if !(a_margin > 0.0) {
+        return None;
+    }
+    let denominator = ball_mul(a, sigma);
+    let lambda = ball_inv(denominator)?;
+    Some(MinibrotGauges {
+        a: (a.center.re, a.center.im),
+        a_margin,
+        sigma_p: (sigma.center.re, sigma.center.im),
+        lambda: (lambda.center.re, lambda.center.im),
+        lambda_abs_up: lambda.abs_up(),
+        lambda_abs_down: lambda.abs_down(),
+    })
+}
+
+/// §4 ported: adaptive order-2 certificate for the straightening defect
+/// `D(ζ) = Ĝ(ζ) - (ζ² + ĉ)` of a minibrot's p-fold return.
+#[derive(Clone, Debug)]
+pub struct MinibrotReturnProposal {
+    pub nucleus: (f64, f64),
+    pub p: usize,
+    /// `a`, the dynamical gauge actually used.
+    pub gauge: (f64, f64),
+    /// Residual `|P_{c*}^p(0)|` of the caller's nucleus. A large value means the
+    /// certificate is about a point that is not a nucleus.
+    pub nucleus_residual: f64,
+    /// Radius of the ζ-disk the certificate covers. `2` is the quadratic-family
+    /// bailout, i.e. the whole renormalized dynamical domain.
+    pub domain_radius: f64,
+    pub budget: f64,
+    pub max_depth: u32,
+    pub cells: Vec<DifferenceCell>,
+    pub uniform_error: f64,
+    pub max_curvature: f64,
+    pub cells_over_budget: usize,
+    pub accepted: bool,
+    pub roundoff_omitted: bool,
+    pub failure: Option<&'static str>,
+}
+
+/// Adaptive §4 refinement in the renormalized coordinate, refining the WORST
+/// cell first.
+///
+/// A LIFO queue was pathological here. With a tight budget it tried to refine
+/// every cell, exhausted the cell allowance, and then — because the cap disabled
+/// subdivision for everything popped afterwards — accepted the remaining cells at
+/// `depth 0`. Measured on `mini-seahorse` (p = 66), the cell that SET
+/// `uniform_error` came back at depth 0 with `curvature·h²` at 99 % of its local
+/// bound: the allowance was spent everywhere except where the answer was decided.
+/// A max-heap on `local_bound` fixes it — pop the worst cell, and if it is under
+/// budget then so is every other, since it is the maximum.
+///
+/// A variant propagating the second derivative as a WINDOW BALL, to recover phase
+/// cancellation the way the drift channel did, was tried and REGRESSED:
+/// re-inflating `w` by the cell envelope at every step makes the ball radii
+/// compound multiplicatively where the scalar majorant only adds, taking cert/f64
+/// from 4.96 to 6.22 at `R = 1/2` and 262 to 392 at `R = 0.05`.
+///
+/// Otherwise structurally identical to `propose_difference_return`: same
+/// `value + deriv·h + curvature·h²` local bound (the Lean
+/// `DifferenceGridWitness.localBound`), same outward-rounded ball arithmetic, so
+/// `roundoff_omitted` stays `false`. Only the gauge and the model change.
+pub fn propose_minibrot_return(
+    nucleus_re: f64,
+    nucleus_im: f64,
+    p: usize,
+    domain_radius: f64,
+    initial_side: usize,
+    budget: f64,
+    max_depth: u32,
+) -> MinibrotReturnProposal {
+    let c = C64::new(nucleus_re, nucleus_im);
+    let failed = |reason: &'static str| MinibrotReturnProposal {
+        nucleus: (nucleus_re, nucleus_im),
+        p,
+        gauge: (f64::NAN, f64::NAN),
+        nucleus_residual: f64::INFINITY,
+        domain_radius,
+        budget,
+        max_depth,
+        cells: Vec::new(),
+        uniform_error: f64::INFINITY,
+        max_curvature: f64::INFINITY,
+        cells_over_budget: 0,
+        accepted: false,
+        roundoff_omitted: false,
+        failure: Some(reason),
+    };
+    if p == 0 {
+        return failed("period is zero");
+    }
+    if initial_side == 0 || domain_radius <= 0.0 || !domain_radius.is_finite() {
+        return failed("invalid domain or grid");
+    }
+    if !(budget > 0.0) {
+        return failed("invalid budget");
+    }
+    let Some((a_ball, _sigma, _z_p, residual)) = minibrot_gauge_balls(c, p) else {
+        return failed("gauge enclosure overflow");
+    };
+    if !(a_ball.abs_down() > 0.0) {
+        return failed("dynamical gauge straddles zero");
+    }
+    // scale = 1/a: this is the ONLY substitution the §4 machinery needs.
+    let Some(scale_ball) = ball_inv(a_ball) else {
+        return failed("gauge is not invertible");
+    };
+    let scale_lower = scale_ball.abs_down();
+    if !(scale_lower > 0.0) {
+        return failed("gauge reciprocal straddles zero");
+    }
+
+    // Subdivision has to be capped, not just depth-limited: a budget slightly
+    // below the irreducible floor of `|D|` in some small region makes every cell
+    // there recurse to `max_depth` — measured, 5e-3 costs 856 cells and 1e-3
+    // costs 61 784 188.
+    const MAX_CELLS: usize = 200_000;
+
+    let width = pow2_at_least(2.0 * domain_radius / initial_side as f64);
+    let half_side = initial_side as f64 / 2.0;
+
+    // f64 -> sortable key: for nonnegative finite values the IEEE bit pattern is
+    // monotone, so a plain integer max-heap orders local bounds correctly.
+    let key_of = |v: f64| -> u64 {
+        if v.is_nan() {
+            u64::MAX
+        } else {
+            v.max(0.0).to_bits()
+        }
+    };
+
+    struct Pending {
+        key: u64,
+        center: C64,
+        half_width: f64,
+        depth: u32,
+        cell: DifferenceCell,
+    }
+    impl PartialEq for Pending {
+        fn eq(&self, other: &Self) -> bool {
+            self.key == other.key
+        }
+    }
+    impl Eq for Pending {}
+    impl PartialOrd for Pending {
+        fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+            Some(self.cmp(other))
+        }
+    }
+    impl Ord for Pending {
+        fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+            self.key.cmp(&other.key)
+        }
+    }
+
+    let evaluate = |center: C64, half_width: f64, depth: u32| -> Option<Pending> {
+        let radius = mul_up(half_width, SQRT_2).next_up();
+        if abs_down_c(center) > add_up(domain_radius, radius) {
+            return None;
+        }
+        let (w_ball, u_ball, second_sup) = return_jet_ball(c, scale_ball, center, radius, p)?;
+        // H(ζ) = ζ² + ĉ with ĉ = a·P_{c*}^p(0) = 0 at the nucleus, so at the
+        // anchor the model is exactly ζ² and its two derivatives are 2ζ and 2.
+        let model = ball_mul(Ball::exact(center), Ball::exact(center));
+        let model_d = Ball::exact(center.scale(2.0));
+        const MODEL_SECOND: f64 = 2.0;
+        // D = (w_p - scale·H)/scale, D' = (u_p - scale·H')/scale — bound the
+        // numerators and divide by the certified lower gauge, as §4 does, so no
+        // ball division is needed.
+        let value_bound = div_up(
+            ball_sub(w_ball, ball_mul(scale_ball, model)).abs_up(),
+            scale_lower,
+        );
+        let deriv_bound = div_up(
+            ball_sub(u_ball, ball_mul(scale_ball, model_d)).abs_up(),
+            scale_lower,
+        );
+        let curvature = add_up(div_up(second_sup, scale_lower), MODEL_SECOND);
+        let local_bound = add_up(
+            add_up(value_bound, mul_up(deriv_bound, radius)),
+            mul_up(mul_up(curvature, radius), radius),
+        );
+        if !local_bound.is_finite() {
+            return None;
+        }
+        Some(Pending {
+            key: key_of(local_bound),
+            center,
+            half_width,
+            depth,
+            cell: DifferenceCell {
+                center: (center.re, center.im),
+                half_width,
+                radius,
+                value_bound,
+                deriv_bound,
+                curvature,
+                local_bound,
+                depth,
+            },
+        })
+    };
+
+    let mut heap: std::collections::BinaryHeap<Pending> = std::collections::BinaryHeap::new();
+    for iy in 0..initial_side {
+        let y = (iy as f64 - half_side + 0.5) * width;
+        for ix in 0..initial_side {
+            let x = (ix as f64 - half_side + 0.5) * width;
+            if let Some(pending) = evaluate(C64::new(x, y), 0.5 * width, 0) {
+                heap.push(pending);
+            }
+        }
+    }
+    if heap.is_empty() {
+        return failed("no cell encloses the domain");
+    }
+
+    let mut cells: Vec<DifferenceCell> = Vec::new();
+    let mut uniform_error: f64 = 0.0;
+    let mut max_curvature: f64 = 0.0;
+    let mut cells_over_budget = 0usize;
+
+    while let Some(worst) = heap.pop() {
+        let refinable = worst.depth < max_depth && cells.len() + heap.len() < MAX_CELLS;
+        if worst.cell.local_bound <= budget {
+            // It is the maximum, so every remaining cell is under budget too.
+            for pending in std::iter::once(worst).chain(std::mem::take(&mut heap).into_iter()) {
+                uniform_error = uniform_error.max(pending.cell.local_bound);
+                max_curvature = max_curvature.max(pending.cell.curvature);
+                cells.push(pending.cell);
+            }
+            break;
+        }
+        if !refinable {
+            cells_over_budget += 1;
+            uniform_error = uniform_error.max(worst.cell.local_bound);
+            max_curvature = max_curvature.max(worst.cell.curvature);
+            cells.push(worst.cell);
+            continue;
+        }
+        let quarter = 0.5 * worst.half_width;
+        for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+            let child = worst.center.add(C64::new(sx * quarter, sy * quarter));
+            if let Some(pending) = evaluate(child, quarter, worst.depth + 1) {
+                heap.push(pending);
+            }
+        }
+    }
+
+    let accepted = cells_over_budget == 0 && !cells.is_empty() && uniform_error <= budget;
+    MinibrotReturnProposal {
+        nucleus: (nucleus_re, nucleus_im),
+        p,
+        gauge: (a_ball.center.re, a_ball.center.im),
+        nucleus_residual: residual,
+        domain_radius,
+        budget,
+        max_depth,
+        cells,
+        uniform_error,
+        max_curvature,
+        cells_over_budget,
+        accepted,
+        roundoff_omitted: false,
+        failure: None,
+    }
+}
+
+/// §5 ported: parameter window stated in the renormalized parameter `ĉ`.
+#[derive(Clone, Copy, Debug)]
+pub struct MinibrotWindowProposal {
+    pub nucleus: (f64, f64),
+    pub p: usize,
+    /// Requested half-width of the window in `ĉ` units.
+    pub delta_hat: f64,
+    /// The same window measured in `c`: `δ = δ̂·|Λ|`. This is the number the
+    /// interior census calls `band`.
+    pub delta_c: f64,
+    pub lambda_abs_up: f64,
+    /// `sup |a(c) - a(c*)|` over the window.
+    pub gauge_drift: f64,
+    /// Certified lower bound on `|a(c)|` over the window — the analogue of §5's
+    /// `scale_margin`. Non-positive means the window destroys the gauge.
+    pub gauge_margin: f64,
+    /// `sup |∂c a|` over the window.
+    pub gauge_deriv_sup: f64,
+    /// `K_ĉ = sup |∂ĉ Ĝ|` over domain × window.
+    pub lipschitz_hat: f64,
+    pub base_error: f64,
+    /// `K_ĉ·δ̂ + E₀`, the Lean `parameter_window` conclusion in `ĉ`.
+    pub extended_error: f64,
+    /// Inflation the phase-preserving drift candidate needed; `+inf` means the
+    /// induction never closed and the compounding majorant was used.
+    pub drift_kappa: f64,
+    /// True when the drift fell back to §5's modulus majorant.
+    pub drift_fell_back: bool,
+    /// `|σ_p|·δ` — the first-order drift with cancellation preserved. Compare it
+    /// against `gauge_drift` to see what the majorant costs.
+    pub first_order_drift: f64,
+    /// `ε_p` actually used.
+    pub used_drift: f64,
+    /// `min_k |Z_k|` over the cycle: the drift must stay well under this or the
+    /// gauge factor `2Z_k` becomes a ball containing zero.
+    pub min_orbit_modulus: f64,
+    pub roundoff_omitted: bool,
+    pub failure: Option<&'static str>,
+}
+
+/// Bound `K_ĉ` with the §5 envelope recurrences, re-derived for the Λ gauge.
+///
+/// The critical-orbit envelopes are unchanged:
+///
+/// ```text
+/// ε_(j+1) = (2|o_j| + ε_j) ε_j + δ        (orbit drift over the window)
+/// Σ_(j+1) = 2 (|o_j| + ε_j) Σ_j + 1       (sup |∂c o_j|)
+/// e'_(j+1) = (2|w_j| + e'_j) e'_j + δ     (cell × window orbit envelope)
+/// Q_(j+1) = 2 (|w_j| + e'_j) Q_j + 1      (sup |∂c w_j|)
+/// ```
+///
+/// What changes is the gauge channel. `a = ∏ 2 Z_k` needs its own magnitude and
+/// derivative majorants,
+///
+/// ```text
+/// Ā_k = Ā_(k-1) · 2(|Z_k| + ε_k)
+/// Ȧ_k = Ȧ_(k-1) · 2(|Z_k| + ε_k) + Ā_(k-1) · 2 Σ_k
+/// ```
+///
+/// and then, because `Ĝ = a · w_p` is a PRODUCT rather than a quotient,
+///
+/// ```text
+/// |∂c Ĝ| ≤ Ȧ · sup|w_p| + sup|a| · Q,        K_ĉ = |Λ| · K_c
+/// ```
+///
+/// which avoids §5's `1/m_s²` term entirely — the quotient form was an artefact
+/// of gauging by `s_n`.
+pub fn propose_minibrot_window(
+    nucleus_re: f64,
+    nucleus_im: f64,
+    p: usize,
+    domain_radius: f64,
+    grid_side: usize,
+    delta_hat: f64,
+    base_error: f64,
+) -> MinibrotWindowProposal {
+    let c = C64::new(nucleus_re, nucleus_im);
+    let failed = |reason: &'static str| MinibrotWindowProposal {
+        nucleus: (nucleus_re, nucleus_im),
+        p,
+        delta_hat,
+        delta_c: f64::NAN,
+        lambda_abs_up: f64::NAN,
+        gauge_drift: f64::INFINITY,
+        gauge_margin: 0.0,
+        gauge_deriv_sup: f64::INFINITY,
+        lipschitz_hat: f64::INFINITY,
+        base_error,
+        extended_error: f64::INFINITY,
+        drift_kappa: f64::NAN,
+        drift_fell_back: true,
+        first_order_drift: f64::NAN,
+        used_drift: f64::NAN,
+        min_orbit_modulus: f64::NAN,
+        roundoff_omitted: false,
+        failure: Some(reason),
+    };
+    if p == 0 {
+        return failed("period is zero");
+    }
+    if grid_side == 0 || domain_radius <= 0.0 || !domain_radius.is_finite() {
+        return failed("invalid domain or grid");
+    }
+    if !(delta_hat >= 0.0) || !delta_hat.is_finite() {
+        return failed("invalid parameter window");
+    }
+
+    // Pass 1 — the gauges at the nucleus, to convert the ĉ window into c.
+    let Some(gauges) = minibrot_gauges(nucleus_re, nucleus_im, p) else {
+        return failed("no gauge at this nucleus");
+    };
+    let delta = mul_up(delta_hat, gauges.lambda_abs_up);
+    if !delta.is_finite() {
+        return failed("window overflows in c");
+    }
+
+    // Pass 2 — the drift channel, phase-preserving where the induction allows it.
+    let Some(drift) = window_drift(c, p, delta) else {
+        return failed("critical orbit drift overflow");
+    };
+    // `A_k = A_{k-1}·2Z_k` and `Ȧ_k = Ȧ_{k-1}·2Z_k + A_{k-1}·2σ_k` are both LINEAR
+    // and exact, so both go through ball arithmetic on the window balls. Bounding
+    // `Ȧ` in moduli instead was the next 2–7× of the same phase loss: it is what
+    // made `K_ĉ` climb 2.4 → 15.5 with the period.
+    let mut gauge_window = Ball::exact(C64::new(1.0, 0.0));
+    let mut gauge_deriv = Ball::ZERO;
+    for k in 1..p {
+        let factor = ball_double(drift.z_window[k]);
+        let sigma_factor = ball_double(drift.sigma_window[k]);
+        gauge_deriv = ball_add(
+            ball_mul(gauge_deriv, factor),
+            ball_mul(gauge_window, sigma_factor),
+        );
+        gauge_window = ball_mul(gauge_window, factor);
+        if !gauge_window.finite() {
+            return failed("gauge product overflow");
+        }
+        if !gauge_deriv.finite() {
+            return failed("gauge derivative overflow");
+        }
+    }
+    let gauge_abs_sup = gauge_window.abs_up();
+    let gauge_deriv_sup = gauge_deriv.abs_up();
+    let gauge_margin = gauge_window.abs_down();
+    if !(gauge_margin > 0.0) {
+        return failed("window destroys the gauge margin");
+    }
+    let Some(scale_window) = ball_inv(gauge_window) else {
+        return failed("window gauge is not invertible");
+    };
+
+    let width = pow2_at_least(2.0 * domain_radius / grid_side as f64);
+    let half_side = grid_side as f64 / 2.0;
+    let cell_radius = mul_up(0.5 * width, SQRT_2).next_up();
+    let one_ball = Ball::exact(C64::new(1.0, 0.0));
+    let mut lipschitz: f64 = 0.0;
+    for iy in 0..grid_side {
+        let y = (iy as f64 - half_side + 0.5) * width;
+        for ix in 0..grid_side {
+            let x = (ix as f64 - half_side + 0.5) * width;
+            let center = C64::new(x, y);
+            if abs_down_c(center) > add_up(domain_radius, cell_radius) {
+                continue;
+            }
+            // w_0 = ζ/a over the window; the gauge ball already carries the
+            // drift, so the cell envelope only adds the cell's own radius.
+            let mut w = ball_mul(scale_window, Ball::exact(center));
+            let mut e = mul_up(scale_window.abs_up(), cell_radius);
+            // ∂c w_0 = -ζ·(∂c a)/a², a BALL: keeping its phase matters for the
+            // same reason it did for σ. §5's seed was `Σ·|ζ|` because there
+            // w_0 = s_n·ζ; here the gauge divides.
+            let Some(inv_gauge_sq) = ball_inv(ball_mul(gauge_window, gauge_window)) else {
+                return failed("gauge square is not invertible");
+            };
+            let mut q = ball_mul(
+                ball_mul(Ball::exact(center.scale(-1.0)), gauge_deriv),
+                inv_gauge_sq,
+            );
+            for _ in 0..p {
+                let w_abs = w.abs_up();
+                // q_{j+1} = 2 w_j q_j + 1 is linear and exact; propagate it on the
+                // window ball of w so the sup keeps its cancellation.
+                let w_win = Ball {
+                    center: w.center,
+                    radius: add_up(w.radius, e),
+                };
+                q = ball_add(ball_double(ball_mul(w_win, q)), one_ball);
+                e = add_up(mul_up(add_up(2.0 * w_abs, e), e), delta);
+                w = ball_add(ball_mul(w, w), Ball::exact(c));
+                // One message per channel: a single "envelope overflow" hid which
+                // of the three actually diverged, and the trace showed it was not
+                // the one that looked guilty.
+                if !w.finite() {
+                    return failed("cell orbit ball overflow");
+                }
+                if !e.is_finite() {
+                    return failed("cell drift envelope overflow");
+                }
+                if !q.finite() {
+                    return failed("cell parameter-derivative overflow");
+                }
+            }
+            let q = q.abs_up();
+            let w_sup = add_up(w.abs_up(), e);
+            // Ĝ = a·w_p is a product: no 1/m_s² term.
+            let k_cell = add_up(
+                mul_up(gauge_deriv_sup, w_sup),
+                mul_up(gauge_abs_sup, q),
+            );
+            lipschitz = lipschitz.max(k_cell);
+        }
+    }
+    let lipschitz_hat = mul_up(lipschitz, gauges.lambda_abs_up);
+    if !lipschitz_hat.is_finite() {
+        return failed("window Lipschitz overflow");
+    }
+
+    MinibrotWindowProposal {
+        nucleus: (nucleus_re, nucleus_im),
+        p,
+        delta_hat,
+        delta_c: delta,
+        lambda_abs_up: gauges.lambda_abs_up,
+        gauge_drift: sub_down(gauge_abs_sup, gauge_margin).max(0.0),
+        gauge_margin,
+        gauge_deriv_sup,
+        lipschitz_hat,
+        base_error,
+        extended_error: add_up(mul_up(lipschitz_hat, delta_hat), base_error),
+        drift_kappa: drift.kappa,
+        drift_fell_back: drift.fell_back,
+        first_order_drift: drift.first_order[p],
+        used_drift: drift.epsilon[p],
+        min_orbit_modulus: drift.min_orbit_modulus,
+        roundoff_omitted: false,
+        failure: None,
+    }
+}
+
+/// Phase-preserving drift bounds for the critical orbit over a `c`-window.
+///
+/// §5 bounds the drift with the compounding positive majorant
+/// `ε_{j+1} = (2|o_j| + ε_j)ε_j + δ` and the derivative with
+/// `Σ_{j+1} = 2(|o_j| + ε_j)Σ_j + 1`. Both take moduli, so they assume every
+/// phase along the orbit aligns. Measured on the `mini-seahorse` nucleus
+/// (p = 66) that costs a factor **63**: `Σ_p = 1.17e4` against the true
+/// `|σ_p| = 185`. The consequence is fatal rather than merely loose — at the
+/// close approach (`min|Z_k| = 0.021`) the inflated drift `0.057` exceeds
+/// `|Z_k|` itself, so the gauge factor `2Z_k` becomes a ball containing zero
+/// and `∏ 2Z_k` loses all information.
+///
+/// A first attempt proposed `ε_j = κ·|σ_j|·δ` and checked it against the exact
+/// drift induction `ε_{j+1} ≥ (2|Z_j| + ε_j)ε_j + δ`. That route provably cannot
+/// work: the induction is itself modulus-based, so it must dominate the very
+/// recursion whose cancellation the candidate exploits, and no κ closes it. It
+/// was removed.
+///
+/// What does work is `window_drift_taylor`: expand the drift in δ and carry the
+/// coefficients as balls, leaving only the third-order remainder in moduli. Both
+/// bounds are valid, so this returns their elementwise minimum.
+#[derive(Clone, Debug)]
+struct WindowDrift {
+    /// `ε_j` for `j = 0..=p`, verified against the drift induction.
+    epsilon: Vec<f64>,
+    /// `sup |∂c Z_j|` over the window, `j = 0..=p`.
+    sigma_sup: Vec<f64>,
+    /// Unused sentinel kept for the diagnostic printout; the a-posteriori
+    /// candidate/verify route was removed after it was shown it can never close.
+    kappa: f64,
+    /// True when the order-2 Taylor bound did not beat §5's majorant anywhere.
+    fell_back: bool,
+    /// `|σ_j|·δ`, the first-order drift with cancellation preserved.
+    first_order: Vec<f64>,
+    /// `min_k |Z_k|` over `1..p`.
+    min_orbit_modulus: f64,
+    /// `Z_j` over the window: nucleus centre, radius absorbing `ε_j`. Carrying the
+    /// BALL rather than its modulus is what lets the gauge product and its
+    /// derivative keep their cancellation too.
+    z_window: Vec<Ball>,
+    /// `∂c Z_j` over the window, same construction.
+    sigma_window: Vec<Ball>,
+}
+
+/// Order-2 δ-Taylor of the drift with ball-propagated coefficients.
+///
+/// Writing `d_j(dc) = Z_j(c*+dc) - Z_j(c*)`, the exact recursion is
+/// `d_{j+1} = d_j(2Z_j + d_j) + dc` (the `Z_j` is at the NUCLEUS: the square
+/// difference factors as `d_j(Z_j(c) + Z_j(c*)) = d_j(2Z_j + d_j)`). Expanding
+/// `d_j = σ_j·dc + ½τ_j·dc² + R_j` gives the two coefficient recurrences
+///
+/// ```text
+/// σ_0 = 0,  σ_{j+1} = 2 Z_j σ_j + 1
+/// τ_0 = 0,  τ_{j+1} = 2 Z_j τ_j + 2 σ_j²
+/// ```
+///
+/// both LINEAR and exact, hence carried as balls with their cancellation intact.
+/// Subtracting them from the exact recursion leaves the remainder in closed form
+///
+/// ```text
+/// R_{j+1} = 2 Z_j R_j + d_j² - σ_j²·dc²
+///         = 2 Z_j R_j + (½τ_j·dc² + R_j)(d_j + σ_j·dc)
+/// ```
+///
+/// so only `R` is bounded in moduli, and it starts at zero driven by an `O(δ²)`
+/// source — i.e. the modulus majorant is pushed from the leading term (where it
+/// cost 29×) out to third order (where it costs nothing).
+///
+/// The window-valid derivative comes from the same idea: `∂c Z_j` obeys the exact
+/// linear recurrence `s_{j+1}(c) = 2 Z_j(c) s_j(c) + 1`, so propagating it as a
+/// ball whose centre is the nucleus value and whose radius absorbs `E_j` keeps
+/// the phase while remaining a sup over the window.
+fn window_drift_taylor(
+    c: C64,
+    p: usize,
+    delta: f64,
+) -> Option<(Vec<f64>, Vec<f64>, Vec<Ball>, Vec<Ball>)> {
+    let delta_sq = mul_up(delta, delta);
+    let one = Ball::exact(C64::new(1.0, 0.0));
+    let mut z = Ball::ZERO;
+    let mut sigma = Ball::ZERO;
+    let mut tau = Ball::ZERO;
+    let mut rho = 0.0f64;
+    // `s` is ∂c Z_j propagated over the WINDOW: centre at the nucleus, radius
+    // absorbing the orbit's own drift, so `abs_up` is a genuine sup.
+    let mut s_window = Ball::ZERO;
+    let mut epsilon = Vec::with_capacity(p + 1);
+    let mut sigma_sup = Vec::with_capacity(p + 1);
+    let mut z_windows = Vec::with_capacity(p + 1);
+    let mut sigma_windows = Vec::with_capacity(p + 1);
+    for _ in 0..=p {
+        let sigma_abs = sigma.abs_up();
+        let tau_abs = tau.abs_up();
+        // E_j = |σ_j|δ + ½|τ_j|δ² + ρ_j dominates |d_j| by the triangle
+        // inequality on the Taylor decomposition.
+        let half_tau_delta_sq = mul_up(0.5, mul_up(tau_abs, delta_sq));
+        let e_j = add_up(add_up(mul_up(sigma_abs, delta), half_tau_delta_sq), rho);
+        epsilon.push(e_j);
+        sigma_sup.push(s_window.abs_up());
+        if !e_j.is_finite() {
+            return None;
+        }
+
+        let z_abs = z.abs_up();
+        let z_window = Ball {
+            center: z.center,
+            radius: add_up(z.radius, e_j),
+        };
+        z_windows.push(z_window);
+        sigma_windows.push(s_window);
+        let s_next = ball_add(ball_double(ball_mul(z_window, s_window)), one);
+        // ρ_{j+1} = 2|Z_j|ρ_j + (½|τ_j|δ² + ρ_j)(E_j + |σ_j|δ)
+        let rho_next = add_up(
+            mul_up(2.0 * z_abs, rho),
+            mul_up(
+                add_up(half_tau_delta_sq, rho),
+                add_up(e_j, mul_up(sigma_abs, delta)),
+            ),
+        );
+        let tau_next = ball_add(
+            ball_double(ball_mul(z, tau)),
+            ball_double(ball_mul(sigma, sigma)),
+        );
+        let sigma_next = ball_add(ball_double(ball_mul(z, sigma)), one);
+        z = ball_add(ball_mul(z, z), Ball::exact(c));
+
+        sigma = sigma_next;
+        tau = tau_next;
+        rho = rho_next;
+        s_window = s_next;
+        if !z.finite() || !sigma.finite() || !tau.finite() || !rho.is_finite() || !s_window.finite()
+        {
+            return None;
+        }
+    }
+    Some((epsilon, sigma_sup, z_windows, sigma_windows))
+}
+
+fn window_drift(c: C64, p: usize, delta: f64) -> Option<WindowDrift> {
+    // Phase-preserving pass: orbit and σ as balls at the nucleus.
+    let mut orbit = Ball::ZERO;
+    let mut sigma = Ball::ZERO;
+    let one = Ball::exact(C64::new(1.0, 0.0));
+    let mut orbit_abs = Vec::with_capacity(p + 1);
+    let mut sigma_abs = Vec::with_capacity(p + 1);
+    let mut min_orbit_modulus = f64::INFINITY;
+    for j in 0..=p {
+        orbit_abs.push(orbit.abs_up());
+        sigma_abs.push(sigma.abs_up());
+        if j >= 1 && j < p {
+            min_orbit_modulus = min_orbit_modulus.min(orbit.abs_down());
+        }
+        sigma = ball_add(ball_double(ball_mul(orbit, sigma)), one);
+        orbit = ball_add(ball_mul(orbit, orbit), Ball::exact(c));
+        if !orbit.finite() || !sigma.finite() {
+            return None;
+        }
+    }
+
+    // §5's compounding majorant.
+    let mut epsilon = vec![0.0f64; p + 1];
+    let mut sigma_sup = vec![0.0f64; p + 1];
+    for j in 0..p {
+        let o_env = add_up(orbit_abs[j], epsilon[j]);
+        sigma_sup[j + 1] = 2.0 * add_up(mul_up(o_env, sigma_sup[j]), 0.5);
+        epsilon[j + 1] = add_up(
+            mul_up(add_up(2.0 * orbit_abs[j], epsilon[j]), epsilon[j]),
+            delta,
+        );
+        if !epsilon[j + 1].is_finite() || !sigma_sup[j + 1].is_finite() {
+            return None;
+        }
+    }
+    let first_order: Vec<f64> = (0..=p).map(|j| mul_up(sigma_abs[j], delta)).collect();
+
+    // The order-2 Taylor bound and the majorant are BOTH valid bounds of the same
+    // quantity, so taking the elementwise minimum is sound and cannot regress.
+    let mut fell_back = true;
+    let (mut z_window, mut sigma_window) = (Vec::new(), Vec::new());
+    if let Some((taylor_eps, taylor_sigma, zw, sw)) = window_drift_taylor(c, p, delta) {
+        let mut improved = false;
+        for j in 0..=p {
+            if taylor_eps[j] < epsilon[j] {
+                epsilon[j] = taylor_eps[j];
+                improved = true;
+            }
+            if taylor_sigma[j] < sigma_sup[j] {
+                sigma_sup[j] = taylor_sigma[j];
+            }
+        }
+        fell_back = !improved;
+        z_window = zw;
+        sigma_window = sw;
+    }
+    if z_window.len() != p + 1 {
+        return None;
+    }
+    Some(WindowDrift {
+        epsilon,
+        sigma_sup,
+        kappa: f64::NAN,
+        fell_back,
+        first_order,
+        min_orbit_modulus,
+        z_window,
+        sigma_window,
+    })
+}
+
+/* ───────────────────────────────────────────────────────────────────────────
+ * Cardioid-shaped parameter domain.
+ *
+ * WHY THE `1/4` CAP IS REAL. `renormalized_trapping_band` reports a RADIUS: the
+ * certified set is a disk in `ĉ` centred on the nucleus. The main cardioid of
+ * `ζ² + ĉ` has its cusp at `ĉ = 1/4`, so any subset of it — however tightly
+ * certified — contains no centred disk of radius beyond `1/4`. The cap is the
+ * geometry of the cardioid in the PARAMETER plane, not slack in the dynamical
+ * bound, and no amount of arithmetic moves it.
+ *
+ * SO TILE `ĉ` INSTEAD OF MEASURING A RADIUS. §4 already tiles the `ζ`-disk with
+ * adaptive cells; this does the same to the parameter. Each `ĉ`-cell is certified
+ * on its own, so the accepted set takes the shape of whatever is certifiable —
+ * reaching to `ĉ ≈ -0.75` along the negative axis while failing near the cusp —
+ * instead of being clipped to the inscribed disk. The comparison number is AREA:
+ * the inscribed disk is `π/16 = 0.196`, the cardioid is `3π/8 = 1.178`, so the
+ * headroom of the change is up to 6×.
+ *
+ * THE PER-CELL TEST needs no fixed-point solve and no square root. Iterate the
+ * critical orbit in ball arithmetic (one ball covers the whole cell) and, at each
+ * step, try to trap it: for an orbit ball `O` with `m = sup|O|` and residual
+ * `d = sup|Ĝ(O) - O|`, the disk `D(centre(O), ρ)` satisfies `Ĝ(D) ⊆ D` when
+ *
+ *     d + ρ·(2m + ρ) + ε ≤ ρ,
+ *
+ * `ε` being the straightening defect. That is solvable exactly when
+ * `(1 - 2m)² ≥ 4(d + ε)`, and `ρ = (1 - 2m)/2` maximizes the slack. It is the
+ * same `defect + contraction·radius ≤ radius` shape as `RadiiCertificate`, so a
+ * cell that passes has a genuine invariant disk and its whole `ĉ`-cell is
+ * interior.
+ * ─────────────────────────────────────────────────────────────────────────── */
+
+/// One accepted parameter cell, in renormalized `ĉ` coordinates.
+#[derive(Clone, Copy, Debug)]
+pub struct CardioidCell {
+    pub center: (f64, f64),
+    /// Half-extent along Re. Kept separate from the Im one: the ĉ tiling is
+    /// anisotropic (the bounding box is 1.2 × 1.5), and collapsing the two into a
+    /// single `half_width` would make a membership test either unsound or
+    /// needlessly small.
+    pub half_width: f64,
+    pub half_height: f64,
+    /// Critical-orbit step at which the trap closed.
+    pub entry_step: usize,
+    /// Radius of the certified invariant disk in `ζ`.
+    pub trap_radius: f64,
+}
+
+/// Cardioid-shaped certified parameter domain of a minibrot.
+#[derive(Clone, Debug)]
+pub struct CardioidWindowProposal {
+    pub nucleus: (f64, f64),
+    pub p: usize,
+    /// Complex Λ, needed to map a pixel's `c` into the renormalized `ĉ` the cells
+    /// live in. `|Λ|` alone is not enough — the map is a complex division.
+    pub lambda: (f64, f64),
+    pub lambda_abs_up: f64,
+    /// Straightening defect used as the slack in every cell test.
+    pub defect: f64,
+    pub cells: Vec<CardioidCell>,
+    /// Total accepted area in `ĉ` units.
+    pub accepted_area: f64,
+    /// `π/16` — the area of the best centred disk, i.e. what
+    /// `renormalized_trapping_band` can reach at its `1/4` cap.
+    pub inscribed_disk_area: f64,
+    /// `accepted_area / (π·band²)` against the band actually certified by the
+    /// disk route: the honest gain of changing the geometry.
+    pub area_gain_over_band: f64,
+    /// Extreme accepted `ĉ` along the real axis, which is where the cardioid is
+    /// longest and the disk route is most wasteful.
+    pub reach_negative: f64,
+    pub reach_positive: f64,
+    pub cells_tested: usize,
+    pub failure: Option<&'static str>,
+}
+
+/// Certify one `ĉ`-cell by trapping the renormalized critical orbit.
+///
+/// Returns the step at which the trap closed and the invariant radius.
+fn cardioid_cell_certifies(
+    c_hat: Ball,
+    defect: f64,
+    max_steps: usize,
+) -> Option<(usize, f64)> {
+    let mut orbit = Ball::ZERO;
+    for step in 0..max_steps {
+        let m = orbit.abs_up();
+        let one_minus_two_m = sub_down(1.0, 2.0 * m);
+        if one_minus_two_m > 0.0 {
+            // ρ maximizing the slack of `d + ρ(2m+ρ) + ε ≤ ρ`.
+            let rho = 0.5 * one_minus_two_m;
+            if rho >= orbit.radius {
+                let image = ball_add(ball_mul(orbit, orbit), c_hat);
+                let d = ball_sub(image, orbit).abs_up();
+                let required = add_up(add_up(d, mul_up(rho, add_up(2.0 * m, rho))), defect);
+                if required <= rho {
+                    return Some((step, rho));
+                }
+            }
+        }
+        orbit = ball_add(ball_mul(orbit, orbit), c_hat);
+        // The model plus its defect: once the ball leaves the bailout it can
+        // never return, so stop instead of overflowing.
+        if !orbit.finite() || sub_down(orbit.abs_down(), defect) > 2.0 {
+            return None;
+        }
+    }
+    None
+}
+
+/// Tile the `ĉ`-plane and certify each cell, giving the accepted set the shape of
+/// the cardioid instead of an inscribed disk.
+///
+/// `band` is the radius the disk route certified for the same nucleus, passed in
+/// so the area gain is reported against a measured baseline rather than the
+/// theoretical `1/4`.
+pub fn propose_cardioid_window(
+    nucleus_re: f64,
+    nucleus_im: f64,
+    p: usize,
+    radius: f64,
+    grid_side: usize,
+    max_steps: usize,
+    max_depth: u32,
+    band_hat: f64,
+) -> CardioidWindowProposal {
+    let failed = |reason: &'static str| CardioidWindowProposal {
+        nucleus: (nucleus_re, nucleus_im),
+        p,
+        lambda: (f64::NAN, f64::NAN),
+        lambda_abs_up: f64::NAN,
+        defect: f64::NAN,
+        cells: Vec::new(),
+        accepted_area: 0.0,
+        inscribed_disk_area: std::f64::consts::PI / 16.0,
+        area_gain_over_band: 0.0,
+        reach_negative: 0.0,
+        reach_positive: 0.0,
+        cells_tested: 0,
+        failure: Some(reason),
+    };
+    let Some(gauges) = minibrot_gauges(nucleus_re, nucleus_im, p) else {
+        return failed("no gauge at this nucleus");
+    };
+    let headroom = radius - radius * radius;
+    if !(headroom > 0.0) {
+        return failed("invalid dynamical radius");
+    }
+    let defect_proposal = propose_minibrot_return(
+        nucleus_re,
+        nucleus_im,
+        p,
+        radius,
+        8,
+        0.02 * headroom,
+        12,
+    );
+    if defect_proposal.failure.is_some() {
+        return failed("defect proposal failed");
+    }
+    let defect = defect_proposal.uniform_error;
+    if !(defect < 0.25) {
+        return failed("defect leaves no cardioid slack");
+    }
+    if grid_side == 0 {
+        return failed("invalid grid");
+    }
+
+    // Bounding box of the main cardioid: ĉ ∈ [-0.75, 0.25] × [-0.65, 0.65].
+    // A margin lets the tiling show where acceptance actually stops.
+    const BOX_LO_RE: f64 = -0.85;
+    const BOX_HI_RE: f64 = 0.35;
+    const BOX_HALF_IM: f64 = 0.75;
+    let width_re = (BOX_HI_RE - BOX_LO_RE) / grid_side as f64;
+    let width_im = 2.0 * BOX_HALF_IM / grid_side as f64;
+    let half_re = 0.5 * width_re;
+    let half_im = 0.5 * width_im;
+    // One ball covering the cell: centre plus the half-diagonal.
+    let cell_radius = mul_up((half_re * half_re + half_im * half_im).sqrt(), 1.0).next_up();
+
+    // Adaptive, exactly like §4's ζ-tiling and for the same reason. A cell of
+    // radius 0.02 spreads the orbit ball to ~0.074 where the multiplier is close
+    // to 1, and the trap residual `d ≈ |2z-1|·spread` then exceeds ρ. Coarse cells
+    // pass deep inside the cardioid; the boundary and the slow-convergence lobes
+    // need subdivision, and refusing to subdivide is what made the accepted set
+    // come out as a disk of radius 0.21 instead of a cardioid.
+    const MAX_CARDIOID_CELLS: usize = 400_000;
+    let mut queue: Vec<(C64, f64, f64, u32)> = Vec::new();
+    for iy in 0..grid_side {
+        let y = -BOX_HALF_IM + (iy as f64 + 0.5) * width_im;
+        for ix in 0..grid_side {
+            let x = BOX_LO_RE + (ix as f64 + 0.5) * width_re;
+            queue.push((C64::new(x, y), half_re, half_im, 0));
+        }
+    }
+
+    let mut cells = Vec::new();
+    let mut accepted_area = 0.0f64;
+    let mut reach_negative = 0.0f64;
+    let mut reach_positive = 0.0f64;
+    let mut cells_tested = 0usize;
+    while let Some((center, hre, him, depth)) = queue.pop() {
+        cells_tested += 1;
+        let radius = mul_up((hre * hre + him * him).sqrt(), 1.0).next_up();
+        let cell = Ball { center, radius };
+        if let Some((entry_step, trap_radius)) = cardioid_cell_certifies(cell, defect, max_steps) {
+            accepted_area += 4.0 * hre * him;
+            if center.re < reach_negative {
+                reach_negative = center.re;
+            }
+            if center.re > reach_positive {
+                reach_positive = center.re;
+            }
+            cells.push(CardioidCell {
+                center: (center.re, center.im),
+                half_width: hre,
+                half_height: him,
+                entry_step,
+                trap_radius,
+            });
+            continue;
+        }
+        if depth < max_depth && cells.len() + queue.len() < MAX_CARDIOID_CELLS {
+            let (qre, qim) = (0.5 * hre, 0.5 * him);
+            for (sx, sy) in [(-1.0, -1.0), (1.0, -1.0), (-1.0, 1.0), (1.0, 1.0)] {
+                queue.push((
+                    center.add(C64::new(sx * qre, sy * qim)),
+                    qre,
+                    qim,
+                    depth + 1,
+                ));
+            }
+        }
+    }
+    let _ = cell_radius;
+
+    let band_area = std::f64::consts::PI * band_hat * band_hat;
+    CardioidWindowProposal {
+        nucleus: (nucleus_re, nucleus_im),
+        p,
+        lambda: gauges.lambda,
+        lambda_abs_up: gauges.lambda_abs_up,
+        defect,
+        cells,
+        accepted_area,
+        inscribed_disk_area: std::f64::consts::PI / 16.0,
+        area_gain_over_band: if band_area > 0.0 {
+            accepted_area / band_area
+        } else {
+            f64::INFINITY
+        },
+        reach_negative,
+        reach_positive,
+        cells_tested,
+        failure: None,
+    }
+}
+
+/// Certified trapping band of a minibrot in its own renormalized coordinate.
+#[derive(Clone, Copy, Debug)]
+pub struct RenormalizedBand {
+    pub p: usize,
+    /// `|a|`, the dynamical gauge magnitude.
+    pub gauge_abs: f64,
+    pub lambda_abs_up: f64,
+    /// §4 defect of the straightening at the nucleus, on `|ζ| ≤ radius`.
+    pub defect_at_nucleus: f64,
+    /// §5 Lipschitz constant in the renormalized parameter. This is the number
+    /// that matters: it is O(1) and does NOT grow with the period, which is
+    /// exactly what the scalar majorant could not achieve.
+    pub lipschitz_hat: f64,
+    /// Half-width of the certified window in `ĉ`. Equals `band/Λ`.
+    pub delta_hat: f64,
+    /// The same band in `c` units.
+    pub band_c: f64,
+}
+
+/// Solve the trapping fixed point for a minibrot's renormalized return.
+///
+/// `ζ ↦ ζ² + ĉ` maps `|ζ| ≤ R` into itself when `R² + |ĉ| + ε ≤ R`, and the
+/// admissible `|ĉ|` is itself the window the defect `ε` was measured over, so
+/// the band is the solution of
+///
+/// ```text
+/// δ̂ ≤ R - R² - (K_ĉ·δ̂ + ε₀)     ⟺     δ̂ ≤ (R - R² - ε₀) / (1 + K_ĉ).
+/// ```
+///
+/// `R = 1/2` maximizes `R - R²`. Because `K_ĉ = |Λ|·K_c` and `K_c` is of order
+/// `|a|·σ_p = 1/|Λ|`, the ratio is O(1) regardless of how deep the minibrot is:
+/// `δ̂ = band/Λ` no longer decays with the period.
+pub fn renormalized_trapping_band(
+    nucleus_re: f64,
+    nucleus_im: f64,
+    p: usize,
+    radius: f64,
+    grid_side: usize,
+    max_depth: u32,
+) -> Option<RenormalizedBand> {
+    let gauges = minibrot_gauges(nucleus_re, nucleus_im, p)?;
+    let headroom = radius - radius * radius;
+    if !(headroom > 0.0) {
+        return None;
+    }
+    // Give §4 a real budget: with `f64::MAX` no cell ever exceeds it, the adaptive
+    // subdivision never fires, and the defect is whatever the coarse grid happens
+    // to give. 2 % of the headroom, not 25 %: with worst-cell-first refinement the
+    // bound converges to the TRUE pointwise defect (cert/f64 = 1.00 measured), and
+    // a loose budget just stops the refinement early — 6.25e-2 instead of 2.07e-2
+    // on `mini-seahorse`, a factor 3 of band thrown away.
+    let defect = propose_minibrot_return(
+        nucleus_re,
+        nucleus_im,
+        p,
+        radius,
+        grid_side,
+        0.02 * headroom,
+        max_depth,
+    );
+    if defect.failure.is_some() || !defect.uniform_error.is_finite() {
+        return None;
+    }
+    let slack = headroom - defect.uniform_error;
+    if !(slack > 0.0) {
+        return None;
+    }
+    // `δ̂` and `K_ĉ(δ̂)` are COUPLED: `K_ĉ` grows with the window, so evaluating it
+    // once on the widest window and dividing by it is badly pessimistic —
+    // measured, a probe at `δ̂ = slack` reads `K_ĉ ≈ 534` while the window it then
+    // claims reads `1.61`, costing two orders of magnitude of band.
+    //
+    // Bisect instead. The predicate
+    //
+    //     δ̂ + K_ĉ(δ̂)·δ̂ + ε₀ ≤ R - R²
+    //
+    // is monotone in `δ̂` (both terms increase), so bisection finds the largest
+    // window that closes the trapping fixed point, and every accepted value has
+    // been VERIFIED at its own width rather than extrapolated from another.
+    let closes = |delta_hat: f64| -> Option<MinibrotWindowProposal> {
+        let window = propose_minibrot_window(
+            nucleus_re,
+            nucleus_im,
+            p,
+            radius,
+            grid_side,
+            delta_hat,
+            defect.uniform_error,
+        );
+        if window.failure.is_some() || !window.extended_error.is_finite() {
+            return None;
+        }
+        if add_up(delta_hat, window.extended_error) <= headroom {
+            Some(window)
+        } else {
+            None
+        }
+    };
+    // A window far below the defect floor must close if anything does.
+    let mut lo = slack * 1e-6;
+    let Some(mut best) = closes(lo) else {
+        return None;
+    };
+    let mut hi = slack;
+    if let Some(window) = closes(hi) {
+        // The whole slack closes; nothing to bisect.
+        lo = hi;
+        best = window;
+    } else {
+        for _ in 0..24 {
+            let mid = 0.5 * (lo + hi);
+            match closes(mid) {
+                Some(window) => {
+                    lo = mid;
+                    best = window;
+                }
+                None => hi = mid,
+            }
+        }
+    }
+    let delta_hat = lo;
+    let final_window = best;
+    if !(delta_hat > 0.0) {
+        return None;
+    }
+    Some(RenormalizedBand {
+        p,
+        gauge_abs: C64::new(gauges.a.0, gauges.a.1).abs(),
+        lambda_abs_up: gauges.lambda_abs_up,
+        defect_at_nucleus: defect.uniform_error,
+        lipschitz_hat: final_window.lipschitz_hat,
+        delta_hat,
+        band_c: delta_hat * gauges.lambda_abs_up,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1864,6 +3102,583 @@ mod tests {
         // fail instead of emitting a bogus margin.
         let broken = propose_parameter_window(FEIGENBAUM_C, 0.0, 8, 0.25, 8, 1e-2, 1e-3);
         assert!(broken.failure.is_some());
+    }
+
+    /// `Λ = 1/(a·σ_p)` must be the same object the renderer already ships as
+    /// the Munafo/Jung size estimate `1/(b·l²)`. If these disagree, the port is
+    /// gauging by something that is not the minibrot's scale.
+    #[test]
+    fn minibrot_gauge_matches_shipped_size_estimate() {
+        use crate::{dbig_to_f64, minibrot_size_estimate, raise_precision};
+        use dashu_float::DBig;
+        use std::str::FromStr;
+
+        // (nucleus, period): period 2 at c = -1 is exact; period 3 and 4 on the
+        // real axis are Newton-refined values.
+        let cases: [(f64, f64, usize); 3] = [
+            (-1.0, 0.0, 2),
+            (-1.754_877_666_246_692_8, 0.0, 3),
+            (-1.940_799_806_529_207_6, 0.0, 4),
+        ];
+        for (cx, cy, p) in cases {
+            let gauges = minibrot_gauges(cx, cy, p)
+                .unwrap_or_else(|| panic!("no gauge at p={} nucleus {}", p, cx));
+            let prec = 80usize;
+            let dx = raise_precision(DBig::from_str(&format!("{cx:.17e}")).unwrap(), prec);
+            let dy = raise_precision(DBig::from_str(&format!("{cy:.17e}")).unwrap(), prec);
+            let (sx, sy) = minibrot_size_estimate(&dx, &dy, p, prec)
+                .unwrap_or_else(|| panic!("no size estimate at p={}", p));
+            let shipped = dbig_to_f64(&sx).hypot(dbig_to_f64(&sy));
+            let ported = C64::new(gauges.lambda.0, gauges.lambda.1).abs();
+            let relative = (ported - shipped).abs() / shipped;
+            assert!(
+                relative < 1e-9,
+                "p={}: ported |Λ| {:e} vs shipped {:e} (rel {:e})",
+                p,
+                ported,
+                shipped,
+                relative
+            );
+            // The gauge must be usable, not merely finite.
+            assert!(gauges.a_margin > 0.0, "p={} has no dynamical gauge", p);
+            assert!(gauges.lambda_abs_down > 0.0);
+            assert!(gauges.lambda_abs_down <= gauges.lambda_abs_up);
+        }
+    }
+
+    /// The Feigenbaum gauge is unusable at a nucleus and must say so, which is
+    /// the whole reason the port exists.
+    #[test]
+    fn feigenbaum_gauge_refuses_a_nucleus_but_the_port_does_not() {
+        // Period-2 nucleus c = -1: s_2 = P^2(0) = 0 exactly.
+        let scale = critical_scale_ball(C64::new(-1.0, 0.0), 2).expect("enclosure");
+        assert_eq!(
+            scale.abs_down(),
+            0.0,
+            "the critical scale at a nucleus must vanish"
+        );
+        // Every §4/§5 entry point refuses on that basis…
+        let difference = propose_difference_return(-1.0, 0.0, 1, 0.25, 4, 1e-3, 2);
+        assert_eq!(difference.failure, Some("critical scale is zero or non-finite"));
+        // …while the ported builders produce a gauge and a defect bound.
+        let ported = propose_minibrot_return(-1.0, 0.0, 2, 1.0, 4, 1e30, 0);
+        assert!(ported.failure.is_none(), "port failed: {:?}", ported.failure);
+        assert!(ported.uniform_error.is_finite());
+        // The centre is exactly 0; what is left is the ball's own accumulated
+        // rounding radius (~10·EPSILON on an orbit of magnitude 1), so this
+        // asserts the residual sits at the arithmetic floor, not that it is 0.
+        assert!(
+            ported.nucleus_residual < 1e-14,
+            "c=-1 is an exact nucleus, residual {:e}",
+            ported.nucleus_residual
+        );
+    }
+
+    /// At the nucleus the model is `ζ²` and the defect is the cubic-and-above
+    /// tail, which the gauge divides by `a²`. So a deeper minibrot (larger `a`)
+    /// must straighten BETTER on the same ζ-disk — that is the mechanism the
+    /// interior census said was missing.
+    #[test]
+    fn straightening_defect_improves_with_the_gauge() {
+        let cases: [(f64, usize); 3] = [
+            (-1.0, 2),
+            (-1.754_877_666_246_692_8, 3),
+            (-1.940_799_806_529_207_6, 4),
+        ];
+        let mut rows = Vec::new();
+        for (cx, p) in cases {
+            let gauges = minibrot_gauges(cx, 0.0, p).expect("gauge");
+            let a = C64::new(gauges.a.0, gauges.a.1).abs();
+            // Small ζ-disk: the point is the defect's SCALE, not the domain.
+            let proposal = propose_minibrot_return(cx, 0.0, p, 0.25, 4, 1e30, 0);
+            assert!(proposal.failure.is_none());
+            rows.push((p, a, proposal.uniform_error));
+        }
+        // |a| grows with the period on this family, and the defect must not grow
+        // with it: the gauge is doing its job.
+        assert!(rows[0].1 < rows[1].1 && rows[1].1 < rows[2].1, "gauge order {:?}", rows);
+        assert!(
+            rows[2].2 < rows[0].2,
+            "defect should shrink as the gauge grows: {:?}",
+            rows
+        );
+    }
+
+    /// Two questions that decide whether any of this could be wired: what does the
+    /// build actually COST, and does the accepted `ĉ` region depend on the nucleus
+    /// at all? If it does not, the tiling is a one-off constant rather than
+    /// per-view work, and the runtime test collapses to a lookup.
+    ///
+    /// Run with: cargo test --release wiring_cost_and_universality -- --ignored --nocapture
+    #[test]
+    #[ignore = "diagnostic: run with --ignored --nocapture"]
+    fn wiring_cost_and_universality() {
+        use std::time::Instant;
+        let cases: [(&str, f64, f64, usize); 4] = [
+            ("p3-island", -1.754_877_666_246_692_8, 0.0, 3),
+            ("elephant-mini", 0.2912695272319882, 0.0148034311412361, 15),
+            ("seahorse-mini", -0.7412767706103194, 0.11587976042299918, 27),
+            ("mini-seahorse", -1.769198041115771, 0.002383831241173447, 66),
+        ];
+
+        println!("\n cost | view           p | gauges | §4 defect (cells) | cardioid tiling (cells tested)");
+        for (name, cx, cy, p) in cases {
+            let t0 = Instant::now();
+            let _ = minibrot_gauges(cx, cy, p);
+            let t_gauge = t0.elapsed();
+            let t1 = Instant::now();
+            let d = propose_minibrot_return(cx, cy, p, 0.5, 8, 0.02 * 0.25, 12);
+            let t_defect = t1.elapsed();
+            let t2 = Instant::now();
+            let card = propose_cardioid_window(cx, cy, p, 0.5, 24, 96, 5, 0.05);
+            let t_card = t2.elapsed();
+            println!(
+                " cost | {:<14} {:>2} | {:>6.1?} | {:>8.1?} ({:>7}) | {:>8.1?} ({:>7})",
+                name,
+                p,
+                t_gauge,
+                t_defect,
+                d.cells.len(),
+                t_card,
+                card.cells_tested,
+            );
+        }
+
+        // Universality: run the tiling with the SAME fixed defect on every nucleus.
+        // If the accepted set is nucleus-independent, it is a constant, not per-view
+        // work — and that changes the whole cost story.
+        println!("\n universal | fixed ε | view           p |  area | ĉ reach          | cells");
+        for fixed_eps in [2.5e-2f64, 5.0e-3] {
+            for (name, cx, cy, p) in cases {
+                // Feed the fixed ε by asking for a tiling whose own defect is below
+                // it, then re-testing every cell against `fixed_eps`.
+                let mut accepted_area = 0.0f64;
+                let mut cells = 0usize;
+                let (mut lo, mut hi) = (0.0f64, 0.0f64);
+                const G: usize = 96;
+                let (wre, wim) = (1.2 / G as f64, 1.5 / G as f64);
+                for iy in 0..G {
+                    let y = -0.75 + (iy as f64 + 0.5) * wim;
+                    for ix in 0..G {
+                        let x = -0.85 + (ix as f64 + 0.5) * wre;
+                        let cell = Ball {
+                            center: C64::new(x, y),
+                            radius: (0.25 * wre * wre + 0.25 * wim * wim).sqrt(),
+                        };
+                        if cardioid_cell_certifies(cell, fixed_eps, 96).is_some() {
+                            accepted_area += wre * wim;
+                            cells += 1;
+                            if x < lo {
+                                lo = x;
+                            }
+                            if x > hi {
+                                hi = x;
+                            }
+                        }
+                    }
+                }
+                println!(
+                    " universal | {:>7.1e} | {:<14} {:>2} | {:>5.3} | [{:>6.3}, {:>5.3}] | {:>5}",
+                    fixed_eps, name, p, accepted_area, lo, hi, cells
+                );
+            }
+        }
+    }
+
+    /// The cardioid tiling must never accept a parameter outside the Mandelbrot
+    /// set of the model family, and it must reach past the `1/4` cusp cap along
+    /// the negative axis where a centred disk cannot.
+    #[test]
+    fn cardioid_tiling_is_sound_and_beats_the_inscribed_disk() {
+        // Zero defect isolates the geometry from the straightening error.
+        let escapes = |cx: f64, cy: f64| -> bool {
+            let (mut zx, mut zy) = (0.0f64, 0.0f64);
+            for _ in 0..200_000 {
+                let nx = zx * zx - zy * zy + cx;
+                let ny = 2.0 * zx * zy + cy;
+                zx = nx;
+                zy = ny;
+                if zx * zx + zy * zy > 4.0 {
+                    return true;
+                }
+            }
+            false
+        };
+        let mut accepted = 0usize;
+        let mut max_negative = 0.0f64;
+        for iy in 0..40 {
+            for ix in 0..60 {
+                let x = -0.9 + (ix as f64 + 0.5) * (1.3 / 60.0);
+                let y = -0.7 + (iy as f64 + 0.5) * (1.4 / 40.0);
+                let cell = Ball {
+                    center: C64::new(x, y),
+                    radius: 1e-9,
+                };
+                if cardioid_cell_certifies(cell, 0.0, 64).is_some() {
+                    accepted += 1;
+                    assert!(
+                        !escapes(x, y),
+                        "cardioid tiling accepted an escaping parameter ĉ = ({}, {})",
+                        x,
+                        y
+                    );
+                    if x < max_negative {
+                        max_negative = x;
+                    }
+                }
+            }
+        }
+        assert!(accepted > 0, "the tiling must accept something");
+
+        // Same check against the real, subdividing proposal: every accepted cell
+        // centre must be in M. `Re ĉ ≤ 1/4` is the sharpest cheap witness — the
+        // cusp is the rightmost point of the whole Mandelbrot set.
+        let proposal = propose_cardioid_window(-1.754_877_666_246_692_8, 0.0, 3, 0.5, 24, 96, 5, 0.1);
+        assert!(proposal.failure.is_none(), "{:?}", proposal.failure);
+        let extreme = proposal
+            .cells
+            .iter()
+            .max_by(|a, b| a.center.0.partial_cmp(&b.center.0).unwrap())
+            .unwrap();
+        println!(
+            " extreme accepted cell: ĉ = ({:.6}, {:.6}) half {:.6} entry {} rho {:.4}",
+            extreme.center.0, extreme.center.1, extreme.half_width, extreme.entry_step, extreme.trap_radius
+        );
+        for cell in &proposal.cells {
+            // NOT `Re ĉ ≤ 1/4`. The cusp is the rightmost point of the cardioid on
+            // the REAL AXIS only: `Re ĉ(θ) = cos θ/2 - cos 2θ/4` has
+            // `dRe/dθ = sin θ(2cos θ - 1)/2`, so besides θ = 0 it is stationary at
+            // `cos θ = 1/2`, where `ĉ = 0.375 + 0.2165i`. The cardioid bulges right
+            // of the cusp for complex multipliers, and the tiling is entitled to
+            // accept there. What still holds is that the cusp is the NEAREST
+            // boundary point to the origin, which is why a centred disk caps at 1/4.
+            assert!(
+                cell.center.0 <= 0.375 + cell.half_width,
+                "accepted ĉ = ({}, {}) is right of the cardioid's rightmost point",
+                cell.center.0,
+                cell.center.1
+            );
+            assert!(
+                !escapes(cell.center.0, cell.center.1),
+                "accepted an escaping ĉ = ({}, {})",
+                cell.center.0,
+                cell.center.1
+            );
+        }
+        // A centred disk stops at ĉ = -1/4; the tiling must go well past it.
+        assert!(
+            max_negative < -0.4,
+            "tiling only reached ĉ = {} on the negative axis",
+            max_negative
+        );
+    }
+
+    /// Why does `ε₀` stall near 0.10 for p ≥ 15? Two candidates: the defect is
+    /// genuinely that large, or the ball enclosures inflate it. And if it is real,
+    /// `D(ζ) = c₃ζ³/a² + …` should collapse towards the origin — which would mean
+    /// a single GLOBAL `ε` over `|ζ| ≤ 1/2` is the wrong quantity to feed the
+    /// cardioid cells.
+    ///
+    /// Run with: cargo test --release defect_radial_profile -- --ignored --nocapture
+    #[test]
+    #[ignore = "diagnostic: run with --ignored --nocapture"]
+    fn defect_radial_profile() {
+        let cases: [(&str, f64, f64, usize); 4] = [
+            ("p3-island", -1.754_877_666_246_692_8, 0.0, 3),
+            ("elephant-mini", 0.291_269_527_231_988_2, 0.014_803_431_141_236_1, 15),
+            ("seahorse-mini", -0.7412767706103194, 0.11587976042299918, 27),
+            ("mini-seahorse", -1.769198041115771, 0.002383831241173447, 66),
+        ];
+        println!("\n profile | view           p |    R |  certified ε |     f64 |D| | cert/f64 | ε/R³");
+        for (name, cx, cy, p) in cases {
+            let c = C64::new(cx, cy);
+            let Some((a_ball, _s, _z, _r)) = minibrot_gauge_balls(c, p) else {
+                println!(" profile | {:<14} {} | no gauge", name, p);
+                continue;
+            };
+            let a = a_ball.center;
+            for r in [0.5f64, 0.35, 0.25, 0.15, 0.1, 0.05] {
+                let proposal = propose_minibrot_return(cx, cy, p, r, 8, 1e-6, 10);
+                if proposal.failure.is_some() {
+                    println!(" profile | {:<14} {} | {:>4} FAILED {:?}", name, p, r, proposal.failure);
+                    continue;
+                }
+                // Direct f64 probe of |Ĝ(ζ) - ζ²| on the boundary circle, which is
+                // where a `ζ³` defect is largest. If the certified bound tracks
+                // this, the defect is real; if it dwarfs it, the enclosure is.
+                let mut worst = 0.0f64;
+                for k in 0..64 {
+                    let theta = k as f64 / 64.0 * std::f64::consts::TAU;
+                    let zeta = C64::new(r * theta.cos(), r * theta.sin());
+                    let z0 = zeta.div(a);
+                    let wp = iterate(c, z0, p);
+                    let g = a.mul(wp);
+                    let d = g.sub(zeta.mul(zeta)).abs();
+                    if d > worst {
+                        worst = d;
+                    }
+                }
+                // Which of the three terms of `local_bound` actually dominates?
+                // Optimizing the wrong one is how the window-ball attempt lost.
+                let worst_cell = proposal
+                    .cells
+                    .iter()
+                    .max_by(|a, b| a.local_bound.partial_cmp(&b.local_bound).unwrap())
+                    .unwrap();
+                println!(
+                    " profile | {:<14} {} | {:>4} | {:>12.4e} | {:>11.4e} | {:>8.2} | {:>8.3e} | value {:>10.3e} deriv·h {:>10.3e} curv·h² {:>10.3e} | h {:>8.2e} depth {}",
+                    name,
+                    p,
+                    r,
+                    proposal.uniform_error,
+                    worst,
+                    proposal.uniform_error / worst.max(1e-300),
+                    proposal.uniform_error / (r * r * r),
+                    worst_cell.value_bound,
+                    worst_cell.deriv_bound * worst_cell.radius,
+                    worst_cell.curvature * worst_cell.radius * worst_cell.radius,
+                    worst_cell.radius,
+                    worst_cell.depth,
+                );
+            }
+        }
+    }
+
+    /// The trapping statement in the renormalized coordinate, and the number the
+    /// interior census needs: `ζ ↦ ζ² + ĉ` maps `|ζ| ≤ R` into itself when
+    /// `R² + |ĉ| + ε ≤ R`, so at `R = 1/2` the certified parameter band is
+    /// `|ĉ| ≤ 1/4 - ε` — O(1) in `ĉ`, i.e. `band/Λ = 1/4 - ε` in `c`.
+    ///
+    /// Printed rather than asserted tight: this is the measurement that decides
+    /// whether the port beats the scalar majorant's `band ≈ Λ/∏2|Z|`.
+    #[test]
+    fn renormalized_trapping_band_is_order_one() {
+        const R: f64 = 0.5;
+        let cases: [(f64, usize); 3] = [
+            (-1.0, 2),
+            (-1.754_877_666_246_692_8, 3),
+            (-1.940_799_806_529_207_6, 4),
+        ];
+        println!("\n renorm band | p |        |a| |     |Λ| |    ε₀ |     K_ĉ |    ε |  band/Λ");
+        for (cx, p) in cases {
+            let gauges = minibrot_gauges(cx, 0.0, p).expect("gauge");
+            let a = C64::new(gauges.a.0, gauges.a.1).abs();
+            let defect = propose_minibrot_return(cx, 0.0, p, R, 8, 1e30, 3);
+            assert!(defect.failure.is_none(), "{:?}", defect.failure);
+            let window = propose_minibrot_window(cx, 0.0, p, R, 8, 0.25, defect.uniform_error);
+            let band_over_lambda = if window.failure.is_none() {
+                (0.25 - window.extended_error).max(0.0)
+            } else {
+                0.0
+            };
+            println!(
+                " renorm band | {} | {:>10.3e} | {:>7.1e} | {:>5.2e} | {:>7.1e} | {:>4.1e} | {:>7.4}",
+                p,
+                a,
+                gauges.lambda_abs_up,
+                defect.uniform_error,
+                window.lipschitz_hat,
+                window.extended_error,
+                band_over_lambda
+            );
+        }
+    }
+
+    /// Is the straightening defect `ε₀` limited by the cell size or by the
+    /// curvature majorant? `local_bound = |D| + |D'|·h + M₂·h²` falls as `h²`
+    /// under subdivision, so if depth buys nothing the majorant is the wall.
+    #[test]
+    #[ignore = "diagnostic: run with --ignored --nocapture"]
+    fn defect_vs_subdivision_depth() {
+        let cases: [(&str, f64, f64, usize); 3] = [
+            ("p3-island", -1.754_877_666_246_692_8, 0.0, 3),
+            ("elephant-mini", 0.291_269_527_231_988_2, 0.014_803_431_141_236_1, 15),
+            ("mini-seahorse", -1.769198041115771, 0.002383831241173447, 66),
+        ];
+        println!("\n defect | view           p |  budget   cells | uniform_error | maxCurvature");
+        for (name, cx, cy, p) in cases {
+            for budget in [0.0625f64, 0.02, 0.005, 0.001] {
+                let depth = 12u32;
+                let d = propose_minibrot_return(cx, cy, p, 0.5, 8, budget, depth);
+                if d.failure.is_some() {
+                    println!(" defect | {:<14} {} | {:>7.0e} FAILED {:?}", name, p, budget, d.failure);
+                    continue;
+                }
+                println!(
+                    " defect | {:<14} {} | {:>7.0e} {:>7} | {:>13.4e} | {:>12.3e}",
+                    name,
+                    p,
+                    budget,
+                    d.cells.len(),
+                    d.uniform_error,
+                    d.max_curvature
+                );
+            }
+        }
+    }
+
+    /// Where the drift channel actually breaks. Replicates the §5 cell loop step
+    /// by step on the two nuclei the interior census could not certify, and
+    /// prints the trace instead of guessing at it.
+    #[test]
+    #[ignore = "diagnostic: run with --ignored --nocapture"]
+    fn trace_drift_channel_blowup() {
+        let cases: [(&str, f64, f64, usize, f64); 2] = [
+            ("seahorse-mini", -0.7412767706103194, 0.11587976042299918, 27, 2.8871894935571575e-3),
+            ("mini-seahorse", -1.769198041115771, 0.002383831241173447, 66, 7.245538807878007e-5),
+        ];
+        for (name, cx, cy, p, lambda) in cases {
+            let c = C64::new(cx, cy);
+            let (a_ball, _s, _z, _r) = minibrot_gauge_balls(c, p).expect("gauge");
+            let inv_a = ball_inv(a_ball).expect("invertible");
+            let defect = propose_minibrot_return(cx, cy, p, 0.5, 8, f64::MAX, 3);
+            let delta_hat = (0.25 - defect.uniform_error).max(0.0);
+            let delta = delta_hat * lambda;
+            // The drift channel: what the modulus majorant costs against the
+            // phase-preserving first order, and whether that gap is what puts
+            // the drift above the close-approach threshold min|Z_k|.
+            if let Some(drift) = window_drift(c, p, delta) {
+                let sigma_true = 1.0 / (a_ball.abs_up() * lambda);
+                println!(
+                    " trace {} | DRIFT κ={} fallback={} | ε_p={:.3e} vs |σ_p|δ={:.3e} ({:.1}× loose) | Σ_p={:.3e} vs σ_p≈{:.3e} ({:.1}× loose) | min|Z|={:.3e}",
+                    name,
+                    drift.kappa,
+                    drift.fell_back,
+                    drift.epsilon[p],
+                    drift.first_order[p],
+                    drift.epsilon[p] / drift.first_order[p],
+                    drift.sigma_sup[p],
+                    sigma_true,
+                    drift.sigma_sup[p] / sigma_true,
+                    drift.min_orbit_modulus,
+                );
+                // The decisive comparison: does the drift clear the threshold?
+                println!(
+                    " trace {} | VERDICT majorant {} threshold, first order {} threshold",
+                    name,
+                    if drift.epsilon[p] < drift.min_orbit_modulus { "clears" } else { "EXCEEDS" },
+                    if drift.first_order[p] < drift.min_orbit_modulus { "clears" } else { "EXCEEDS" },
+                );
+            }
+
+            // The gauge channel, which the split failure messages identified as
+            // the common root: its drift radius inflates `1/a`, which seeds the
+            // cell envelope.
+            {
+                let mut orbit = Ball::ZERO;
+                let mut epsilon = 0.0f64;
+                let mut sigma_sup = 0.0f64;
+                let mut gauge = Ball::exact(C64::new(1.0, 0.0));
+                let mut worst: (usize, f64) = (0, 0.0);
+                let mut min_z = f64::INFINITY;
+                for k in 0..p {
+                    let o_abs = orbit.abs_up();
+                    let o_env = add_up(o_abs, epsilon);
+                    sigma_sup = 2.0 * add_up(mul_up(o_env, sigma_sup), 0.5);
+                    epsilon = add_up(mul_up(add_up(2.0 * o_abs, epsilon), epsilon), delta);
+                    orbit = ball_add(ball_mul(orbit, orbit), Ball::exact(c));
+                    if k + 1 < p {
+                        let factor = Ball {
+                            center: orbit.center.scale(2.0),
+                            radius: add_up(2.0 * orbit.radius, 2.0 * epsilon),
+                        };
+                        let relative = factor.radius / abs_down_c(factor.center).max(1e-300);
+                        if relative > worst.1 {
+                            worst = (k, relative);
+                        }
+                        min_z = min_z.min(orbit.abs_down());
+                        gauge = ball_mul(gauge, factor);
+                    }
+                }
+                println!(
+                    " trace {} | GAUGE |a|={:.4} radius={:.3e} rel={:.3e} margin={:.3e} | ε_p={:.3e} Σ_p={:.3e} min|Z|={:.3e} worst factor k={} rel={:.3e}",
+                    name,
+                    abs_up_c(gauge.center),
+                    gauge.radius,
+                    gauge.radius / abs_up_c(gauge.center),
+                    gauge.abs_down(),
+                    epsilon,
+                    sigma_sup,
+                    min_z,
+                    worst.0,
+                    worst.1
+                );
+            }
+
+            // Worst cell: the outer edge of the ζ-disk.
+            let center = C64::new(0.5, 0.0);
+            let cell_radius = 0.125 / 2.0 * SQRT_2;
+            let mut w = ball_mul(inv_a, Ball::exact(center));
+            let mut e = mul_up(inv_a.abs_up(), cell_radius);
+            println!(
+                "\n trace {} | p={} |a|={:.4} δ̂={:.4e} δ={:.3e} | w0={:.3e} e0={:.3e}",
+                name,
+                p,
+                a_ball.abs_up(),
+                delta_hat,
+                delta,
+                w.abs_up(),
+                e
+            );
+            for j in 0..p {
+                let w_abs = w.abs_up();
+                e = add_up(mul_up(add_up(2.0 * w_abs, e), e), delta);
+                w = ball_add(ball_mul(w, w), Ball::exact(c));
+                if j < 6 || !e.is_finite() || e > 0.5 || j + 4 > p {
+                    println!(
+                        " trace {} | j={:>3} |w|={:>10.3e} e'={:>10.3e}",
+                        name, j, w_abs, e
+                    );
+                }
+                if !e.is_finite() {
+                    println!(" trace {} | BLEW UP at step {} of {}", name, j, p);
+                    break;
+                }
+            }
+        }
+    }
+
+    /// A `ĉ` window wide enough to swallow the gauge must fail rather than emit
+    /// a bogus margin — the §5 contract, preserved.
+    #[test]
+    fn minibrot_window_rejects_a_gauge_destroying_window() {
+        let ok = propose_minibrot_window(-1.754_877_666_246_692_8, 0.0, 3, 1.0, 4, 1e-3, 1e-6);
+        assert!(ok.failure.is_none(), "tight window failed: {:?}", ok.failure);
+        assert!(ok.gauge_margin > 0.0);
+        assert!(ok.lipschitz_hat.is_finite());
+
+        let broken =
+            propose_minibrot_window(-1.754_877_666_246_692_8, 0.0, 3, 1.0, 4, 1e9, 1e-6);
+        assert!(broken.failure.is_some(), "a huge ĉ window must be refused");
+    }
+
+    /// `ball_inv` must actually enclose the reciprocal, including the rounding
+    /// of its own centre.
+    #[test]
+    fn ball_inv_encloses_the_reciprocal() {
+        let a = Ball {
+            center: C64::new(3.0, -4.0),
+            radius: 0.25,
+        };
+        let inv = ball_inv(a).expect("invertible");
+        for t in 0..64 {
+            let angle = t as f64 / 64.0 * std::f64::consts::TAU;
+            let probe = a
+                .center
+                .add(C64::new(0.25 * angle.cos(), 0.25 * angle.sin()));
+            let exact = C64::new(1.0, 0.0).div(probe);
+            assert!(
+                exact.sub(inv.center).abs() <= inv.radius,
+                "1/({:?}) outside the ball",
+                probe
+            );
+        }
+        // A ball straddling the origin has no reciprocal.
+        assert!(ball_inv(Ball {
+            center: C64::new(0.1, 0.0),
+            radius: 0.2
+        })
+        .is_none());
     }
 
     #[test]

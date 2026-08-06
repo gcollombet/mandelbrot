@@ -1,8 +1,5 @@
-// Working precision for the bounded shading math (lighting lobes, AO, edge
-// wear, subsurface). Default f32; the engine swaps this to f16 (and prepends
-// `enable f16;`) when the device supports shader-f16, doubling ALU throughput
-// on mobile. Only values in a safe [~1e-3, ~1e3] range use hcol — iteration
-// counts, distance estimates and palette phase stay f32.
+// All color arithmetic uses one f32 path. The alias keeps the bounded shading
+// expressions readable without creating a second shader variant.
 alias hcol = f32;
 
 struct Uniforms {
@@ -25,7 +22,7 @@ struct Uniforms {
   epsilon: f32,           // interior detection threshold (|der|² < epsilon)
   ambientOcclusionStrength: f32,
   microBumpStrength: f32,
-  subsurfaceStrength: f32,
+  _pad19: f32,           // reserved (was subsurfaceStrength — effect removed)
   reliefDepth: f32,
   localShadowStrength: f32,
   lightAngle: f32,
@@ -49,7 +46,7 @@ struct Uniforms {
   centerX: f32,
   centerY: f32,
   scale: f32,
-  _pad: f32,
+  gradeContrast: f32,   // display-grade S-contrast around mid-grey (1.0 = neutral)
   textureDriftX: f32,
   textureDriftY: f32,
   skyDriftX: f32,
@@ -70,22 +67,52 @@ struct Uniforms {
   aaJitterHatY: f32,
   aaJitterLogMag: f32,   // ln|δc| in c units (exponent-summed with the payload's S)
   aaAnalytic: f32,       // 1 = analytic AA expansion enabled (auto mode, raw payload bound)
+  gradeSaturation: f32,  // display-grade saturation (1.0 = neutral)
+  reachDebug: f32,       // 1 = analytic-AA reach heatmap (debug view 6)
+  lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)
+  reachReady: f32,       // 2 = z″ payload carried by every production path
+  _pad68: f32,
+  _pad69: f32,
+  _pad70: f32,
+  _pad71: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
-@group(0) @binding(1) var tex: texture_2d_array<f32>; // resolved neutral texture (8 r32float layers)
+@group(0) @binding(1) var tex: texture_2d_array<f32>; // live values: iter, z.x, z.y
 @group(0) @binding(2) var tileTex: texture_2d<f32>;
 @group(0) @binding(3) var skyboxTex: texture_2d<f32>;
 @group(0) @binding(4) var webcamTex: texture_2d<f32>;
-@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 6 rgba16float
-@group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen snapshot for zoom reprojection
+@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 7 rgba16float
+@group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen values
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
 @group(0) @binding(8) var skyboxSampler: sampler;  // bilinear sampler for skybox
 @group(0) @binding(9) var aaTargetTex: texture_2d<f32>; // per-neutral-texel AA target sample count (r32float)
+@group(0) @binding(10) var geometryTex: texture_2d<f32>;
+@group(0) @binding(11) var frozenGeometryTex: texture_2d<f32>;
+@group(0) @binding(12) var metadataTex: texture_2d<u32>;
+@group(0) @binding(13) var frozenMetadataTex: texture_2d<u32>;
+@group(0) @binding(14) var rawTex: texture_2d_array<f32>; // analytic-AA payload only
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
   @location(0) fragCoord: vec2<f32>,
 };
+
+// Relative tolerance on |ẑ − z| for the reach view. The color is driven by the
+// smooth iteration ν = n + 1 − log2(log|z|/log B); an error ε on z moves ν by
+// roughly ε/(|z|·ln|z|·ln2), so at the bailout |z| ≈ 2 a relative 1e-3 holds ν
+// inside ~1/500 of an iteration — well under a palette quantum.
+const REACH_TOL: f32 = 1e-3;
+const LOG2E_: f32 = 1.4426950408889634;
+
+// Blue → cyan → green → yellow → red, mirroring mandelbrot_debug.wgsl's
+// skip_ramp so the legend in Settings.vue serves both.
+fn reach_ramp(t: f32) -> vec3<f32> {
+  let x = clamp(t, 0.0, 1.0) * 4.0;
+  if (x < 1.0) { return mix(vec3<f32>(0.1, 0.15, 0.7), vec3<f32>(0.0, 0.7, 0.9), x); }
+  if (x < 2.0) { return mix(vec3<f32>(0.0, 0.7, 0.9), vec3<f32>(0.1, 0.8, 0.2), x - 1.0); }
+  if (x < 3.0) { return mix(vec3<f32>(0.1, 0.8, 0.2), vec3<f32>(1.0, 0.9, 0.1), x - 2.0); }
+  return mix(vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(0.9, 0.1, 0.1), x - 3.0);
+}
 
 // ── Per-pixel effect weights & parameters, read from palette texture ──
 struct EffectParams {
@@ -100,11 +127,16 @@ struct EffectParams {
   wWebcam: f32,
   wSmoothness: f32,
   shadingLevel: f32,    // [0, 3]
-  specularPower: f32,   // [1, 64]
+  specularPower: f32,   // intensity [0, 64]; roughness controls highlight width
   // Row 3
+  dielectricSpecular: f32, // neutral dielectric F0 [0, 1]
   metallic: f32,        // [0, 1]
   roughness: f32,       // [0.02, 1]
   anisotropy: f32,      // [0, 1]
+  // Row 6
+  reliefGain: f32,            // log-domain control [0, 2], neutral at 1
+  metalReflectance: f32,     // conductor F0 gain [0, 2]
+  metalEnvironmentTint: f32, // [0, 1], 0 preserves env hue, 1 is physical tint
   iridescenceColor: vec3<f32>,
   wIridescence: f32,
   wStripeAverage: f32,
@@ -113,8 +145,12 @@ struct EffectParams {
   wDirectionCoherenceRelief: f32,
 };
 
+fn palette_row_y(row: f32) -> f32 {
+  return (row + 0.5) / 7.0;
+}
+
 fn samplePaletteColor(palettePhase: f32) -> vec3<f32> {
-  return textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.083333333), 0.0).rgb;
+  return textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(0.0)), 0.0).rgb;
 }
 
 fn animatedPaletteOffset() -> f32 {
@@ -134,29 +170,29 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   var e: EffectParams;
 
   // Row 0: R, G, B, palette weight
-  let row0 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.083333333), 0.0);
+  let row0 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(0.0)), 0.0);
   e.paletteColor = row0.rgb;
   e.wPalette = row0.a;
 
   // Row 1: zebra, tessellation, shading, skybox
-  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.25), 0.0);
+  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(1.0)), 0.0);
   e.wTessellation = row1.g;
   e.wShading = row1.b;
   e.wSkybox = row1.a;
 
-  // Row 2: webcam, smoothness, shadingLevel [0,3], specularPower [1,64]
-  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.416666667), 0.0);
+  // Row 2: webcam, smoothness, shadingLevel [0,3], specularPower [0,64]
+  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(2.0)), 0.0);
   e.wWebcam = row2.r;
   e.wSmoothness = row2.g;
   e.shadingLevel = row2.b;       // direct: natural range [0, 3]
-  e.specularPower = max(row2.a, 1.0); // direct: natural range [1, 64]
+  e.specularPower = clamp(row2.a, 0.0, 64.0); // intensity only; 0 disables the direct specular lobe
 
   // Rows 3 (metallic/roughness/anisotropy) and 4 (iridescence) are only read
   // inside the shading branch, so they are sampled lazily there via
   // sampleShadingMaterial() rather than for every pixel.
 
   // Row 5: stripe color blend, direction coherence color blend, stripe relief, direction coherence relief
-  let row5 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.916666667), 0.0);
+  let row5 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(5.0)), 0.0);
   e.wStripeAverage = clamp(row5.r, 0.0, 1.0);
   e.wRotationMean = clamp(row5.g, 0.0, 1.0);
   e.wStripeRelief = clamp(row5.b, 0.0, 1.0);
@@ -168,16 +204,23 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
 // Rows 3 & 4 of the palette texture (material + iridescence). Sampled lazily
 // from inside the shading branch since no other code path reads these fields.
 fn sampleShadingMaterial(palettePhase: f32, e: ptr<function, EffectParams>) {
-  // Row 3: reserved, metallic, roughness, anisotropy
-  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.583333333), 0.0);
+  // Row 3: dielectric F0, metallic, roughness, anisotropy
+  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(3.0)), 0.0);
+  (*e).dielectricSpecular = clamp(row3.r, 0.0, 1.0);
   (*e).metallic = clamp(row3.g, 0.0, 1.0);
   (*e).roughness = clamp(row3.b, 0.02, 1.0);
   (*e).anisotropy = clamp(row3.a, 0.0, 1.0);
 
   // Row 4: iridescence R, G, B, strength
-  let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, 0.75), 0.0);
+  let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(4.0)), 0.0);
   (*e).iridescenceColor = row4.rgb;
   (*e).wIridescence = clamp(row4.a, 0.0, 1.0);
+
+  // Row 6: per-material analytic relief gain and conductor controls.
+  let row6 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(6.0)), 0.0);
+  (*e).reliefGain = clamp(row6.r, 0.0, 2.0);
+  (*e).metalReflectance = clamp(row6.g, 0.0, 2.0);
+  (*e).metalEnvironmentTint = clamp(row6.b, 0.0, 1.0);
 }
 
 @vertex
@@ -209,6 +252,11 @@ fn rotate_surface_vector_sincos(v: vec3<f32>, s: f32, c: f32) -> vec3<f32> {
   return vec3<f32>(xy.x, xy.y, v.z);
 }
 
+fn rotate_surface_vector_inverse_sincos(v: vec3<f32>, s: f32, c: f32) -> vec3<f32> {
+  let xy = rotate_inverse_sincos(v.xy, s, c);
+  return vec3<f32>(xy.x, xy.y, v.z);
+}
+
 fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, sceneSin: f32, sceneCos: f32) -> bool {
   let xy_neutral = (uv - vec2<f32>(0.5, 0.5)) * 2.0;
   let local_rot  = xy_neutral * neutralExtent;
@@ -216,15 +264,17 @@ fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, sceneSin: f32,
   return abs(local.x) <= aspect && abs(local.y) <= 1.0;
 }
 
-fn dir_to_skybox_uv(dir: vec3<f32>, dx: f32, dy: f32) -> vec2<f32> {
-  let d = normalize(dir);
-  let u = abs((dx + atan2(d.z, d.x) / (2.0 * 3.14159265)) % 2.0 - 1.0) / 2.0;
-  let v = abs((dy + asin(d.y) / 3.14159265) % 2.0 - 1.0) / 2.0;
-  return vec2<f32>(u, v);
-}
-
-fn mandelbrot_normal_from_dir(angleDir: vec2<f32>) -> vec3<f32> {
-  return normalize(vec3<f32>(angleDir.x, angleDir.y, 0.5));
+fn skybox_reflection_uv(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>) -> vec2<f32> {
+  // The environment image is anchored to the viewport. The reflected direction
+  // only distorts that fixed image, so translating the fractal does not carry
+  // the environment along like an albedo texture.
+  let d = normalize(reflectionDir);
+  let shifted = screenUv + vec2<f32>(d.x, -d.y) * 0.32 + drift;
+  let mirrored = vec2<f32>(
+    1.0 - abs(fract(shifted.x * 0.5) * 2.0 - 1.0),
+    1.0 - abs(fract(shifted.y * 0.5) * 2.0 - 1.0)
+  );
+  return vec2<f32>(0.001) + mirrored * 0.998;
 }
 
 fn fresnel_schlick(cosTheta: f32, f0: vec3<f32>) -> vec3<f32> {
@@ -260,21 +310,13 @@ fn ggx_geometry_smith(nDotV: f32, nDotL: f32, roughness: f32) -> f32 {
   return ggx_geometry_schlick(nDotV, roughness) * ggx_geometry_schlick(nDotL, roughness);
 }
 
-fn mandelbrot_tangent_from_dir(angleDir: vec2<f32>, normal: vec3<f32>) -> vec3<f32> {
+// The cached distance-gradient direction stays in the tangent plane so it can
+// orient anisotropic highlights without independently deforming the normal.
+fn anisotropy_tangent_from_dir(angleDir: vec2<f32>, normal: vec3<f32>) -> vec3<f32> {
   let flow = vec3<f32>(-angleDir.y, angleDir.x, 0.0);
   let projected = flow - normal * dot(flow, normal);
   let projectedLen = length(projected);
-  return select(vec3<f32>(1.0, 0.0, 0.0), projected / projectedLen, projectedLen > 1e-5);
-}
-
-fn distance_tangent(grad: vec2<f32>, fallbackTangent: vec3<f32>, fallbackBitangent: vec3<f32>, normal: vec3<f32>) -> vec3<f32> {
-  let gradLen = length(grad);
-  let contour2d = vec2<f32>(-grad.y, grad.x) / max(gradLen, 1e-5);
-  let tangentRaw = fallbackTangent * contour2d.x + fallbackBitangent * contour2d.y;
-  let tangentFromDistance = tangentRaw / max(length(tangentRaw), 1e-5);
-  let projected = tangentFromDistance - normal * dot(tangentFromDistance, normal);
-  let projectedLen = length(projected);
-  return select(fallbackTangent, projected / max(projectedLen, 1e-5), gradLen > 1e-4 && projectedLen > 1e-5);
+  return select(vec3<f32>(1.0, 0.0, 0.0), projected / max(projectedLen, 1e-5), projectedLen > 1e-5);
 }
 
 fn anisotropic_highlight(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, halfDir: vec3<f32>, nDotL: f32, nDotV: f32, roughness: f32) -> f32 {
@@ -296,65 +338,71 @@ fn anisotropic_highlight(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<
   return f32(lobe * visibility);
 }
 
-fn pseudo_ambient_occlusion(normal: vec3<f32>, v_smooth: f32, z: vec2<f32>) -> f32 {
-  // exp(-v_smooth*0.035) and length(z)/2.5 both saturate their clamps, so the
-  // large-magnitude inputs (v_smooth, |z|) are computed in f32 and only the
-  // already-bounded results enter hcol.
-  let cavity = pow(clamp(hcol(1.0) - hcol(normal.z), hcol(0.0), hcol(1.0)), hcol(1.35));
-  let depthMask = clamp(hcol(1.0 - exp(-v_smooth * 0.035)), hcol(0.0), hcol(1.0));
-  let basinMask = clamp(hcol(length(z)) / hcol(2.5), hcol(0.0), hcol(1.0));
-  let strength = clamp(hcol(parameters.ambientOcclusionStrength), hcol(0.0), hcol(2.0));
-  let ao = hcol(1.0) - (hcol(0.55) * cavity + hcol(0.25) * depthMask + hcol(0.20) * basinMask) * hcol(0.45) * strength;
-  return f32(clamp(ao, hcol(0.08), hcol(1.0)));
+// Display grade for the shaded path: gentle S-contrast around photographic
+// mid-grey plus a touch of saturation, in linear light, before the highlight
+// roll-off. Restores the gamma-era punch the linear pipeline flattened
+// (gamma-space lighting over-darkened shadows and over-saturated products)
+// without re-breaking the material response.
+fn display_grade(c: vec3<f32>) -> vec3<f32> {
+  let contrast = clamp(parameters.gradeContrast, 0.25, 3.0);
+  let sat = clamp(parameters.gradeSaturation, 0.0, 3.0);
+  let pivot = 0.18;
+  var g = pow(max(c, vec3<f32>(0.0)) / pivot, vec3<f32>(contrast)) * pivot;
+  g = mix(vec3<f32>(luminance(g)), g, sat);
+  return max(g, vec3<f32>(0.0));
+}
+
+// Soft highlight compression: identity below the knee, Reinhard shoulder above
+// with an asymptote at 1 (C1-continuous at the knee). Replaces the hard clamp
+// that flattened colored HDR highlights to white.
+fn tonemap_highlights(c: vec3<f32>) -> vec3<f32> {
+  let knee = 0.8;
+  let over = max(c - vec3<f32>(knee), vec3<f32>(0.0));
+  return min(c, vec3<f32>(knee)) + over / (over + vec3<f32>(1.0 - knee)) * (1.0 - knee);
+}
+
+fn fresnel_schlick_roughness(cosTheta: f32, f0: vec3<f32>, roughness: f32) -> vec3<f32> {
+  let f90 = max(vec3<f32>(1.0 - roughness), f0);
+  return f0 + (f90 - f0) * pow(clamp(1.0 - cosTheta, 0.0, 1.0), 5.0);
+}
+
+// Thin-film interference tint: relative phase of three representative
+// wavelengths (R 610 nm, G 545 nm, B 465 nm) after a round trip through a film
+// of optical thickness `cycles` (in green-wavelength cycles at normal
+// incidence) seen at cosTheta. n≈1.45 bends the in-film path; each channel's
+// phase scales as 1/λ, so the spectrum slides as the view/normal tilts.
+fn thin_film_tint(cosTheta: f32, cycles: f32) -> vec3<f32> {
+  let sin2 = 1.0 - cosTheta * cosTheta;
+  let cosRefract = sqrt(max(1.0 - sin2 / (1.45 * 1.45), 0.0));
+  let phi = cycles * cosRefract * TWO_PI * vec3<f32>(545.0 / 610.0, 1.0, 545.0 / 465.0);
+  return 0.5 + 0.5 * cos(phi);
+}
+
+fn curvature_ambient_occlusion(curvature: f32, relief: f32, strength: f32) -> f32 {
+  let concavity = max(curvature * relief, 0.0);
+  let cavity = smoothstep(0.025, 1.35, concavity);
+  let amount = 1.0 - exp(-max(strength, 0.0));
+  return clamp(1.0 - cavity * amount * 0.72, 0.28, 1.0);
+}
+
+fn specular_occlusion(nDotV: f32, ao: f32, roughness: f32) -> f32 {
+  return clamp(pow(max(nDotV + ao, 0.0), exp2(-16.0 * roughness - 1.0)) - 1.0 + ao, 0.0, 1.0);
 }
 
 fn luminance(color: vec3<f32>) -> f32 {
   return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
-fn sample_skybox(dir: vec3<f32>, dx: f32, dy: f32) -> vec3<f32> {
-  return textureSampleLevel(skyboxTex, skyboxSampler, dir_to_skybox_uv(dir, dx, dy), 0.0).rgb;
+fn sample_skybox(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>, lod: f32) -> vec3<f32> {
+  // The skybox texture is sRGB-encoded rgba8unorm; lighting runs in linear.
+  return srgb_to_linear(textureSampleLevel(skyboxTex, skyboxSampler, skybox_reflection_uv(screenUv, reflectionDir, drift), lod).rgb);
 }
 
-fn rough_skybox_reflection(dir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, roughness: f32, dx: f32, dy: f32) -> vec3<f32> {
-  let center = sample_skybox(dir, dx, dy);
-  let spread = roughness * roughness * 0.45;
-  let blur = (
-    center * 2.0
-    + sample_skybox(normalize(dir + tangent * spread), dx, dy)
-    + sample_skybox(normalize(dir - tangent * spread), dx, dy)
-    + sample_skybox(normalize(dir + bitangent * spread), dx, dy)
-    + sample_skybox(normalize(dir - bitangent * spread), dx, dy)
-  ) / 6.0;
-  return mix(center, blur, clamp(roughness * 1.25, 0.0, 1.0));
-}
-
-fn curvature_edge_wear(angle_der: f32, v_smooth: f32) -> f32 {
-  let directionalBase = abs(sin(angle_der * 2.0 + v_smooth * 0.035));
-  let directionalBase2 = directionalBase * directionalBase;
-  let directionalRidge = directionalBase2 * directionalBase2 * directionalBase2;
-  let iterationBase = 1.0 - abs(fract(v_smooth * 0.125) * 2.0 - 1.0);
-  let iterationRidge = iterationBase * iterationBase * iterationBase;
-  return clamp(directionalRidge * 0.65 + iterationRidge * 0.35, 0.0, 1.0);
-}
-
-fn fake_subsurface_scattering(color: vec3<f32>, normal: vec3<f32>, lightDir: vec3<f32>, nDotV: f32, ao: f32, edgeWear: f32, metallic: f32, strength: f32, distanceHeight: f32, slope: f32) -> vec3<f32> {
-  // Bounded lighting terms → hcol. distanceHeight/slope enter only through
-  // smoothstep (saturating), so their large range is harmless.
-  let nrm = vec3<hcol>(normal);
-  let lgt = vec3<hcol>(lightDir);
-  let backLight = pow(max(dot(nrm, -lgt), hcol(0.0)), hcol(1.35));
-  let rimScatter = pow(clamp(hcol(1.0) - hcol(nDotV), hcol(0.0), hcol(1.0)), hcol(2.15));
-  let wrapBase = clamp(dot(nrm, lgt) * hcol(0.5) + hcol(0.5), hcol(0.0), hcol(1.0));
-  let wrapLight = wrapBase * wrapBase;
-  let heightThinness = hcol(1.0) - smoothstep(hcol(4.0), hcol(13.0), hcol(distanceHeight));
-  let slopeThinness = smoothstep(hcol(0.15), hcol(1.6), hcol(slope));
-  let thinness = clamp(heightThinness * hcol(0.55) + slopeThinness * hcol(0.45), hcol(0.0), hcol(1.0));
-  let thickness = clamp(thinness * hcol(0.62) + (hcol(1.0) - hcol(ao)) * hcol(0.23) + hcol(edgeWear) * hcol(0.15), hcol(0.0), hcol(1.0));
-  let mask = (backLight * hcol(0.35) + rimScatter * hcol(0.25) + wrapLight * hcol(0.40)) * thickness;
-  let col = vec3<hcol>(color);
-  let scatterColor = mix(col, sqrt(max(col, vec3<hcol>(0.0))), hcol(0.35));
-  return vec3<f32>(scatterColor * mask * hcol(clamp(strength, 0.0, 10.0)) * hcol(1.0 - metallic));
+fn rough_skybox_reflection(screenUv: vec2<f32>, reflectionDir: vec3<f32>, roughness: f32, drift: vec2<f32>) -> vec3<f32> {
+  // Ordinary mips provide a stable decorative blur. Avoid the last flat levels,
+  // which turn arbitrary reflection cards into a uniform milky veil.
+  let maxLod = max(f32(textureNumLevels(skyboxTex)) - 4.0, 0.0);
+  return sample_skybox(screenUv, reflectionDir, drift, roughness * maxLod);
 }
 
 fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec4<f32> {
@@ -376,7 +424,7 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
   return textureLoad(tex_, coord, 0);
 }
 
-fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, angle_der: f32, dx: f32, dy: f32, tess_depth: f32, disp: f32) -> f32 {
+fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, geometryAngle: f32, dx: f32, dy: f32, tess_depth: f32, disp: f32) -> f32 {
   let id = i32(variableId + 0.5);
   let z_len = max(length(z), 1e-12);
   if (id == 0) {
@@ -391,7 +439,7 @@ fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f
     return u - iterRaw;
   }
   if (id == 3) {
-    return sin(angle_der);
+    return sin(geometryAngle);
   }
   if (id == 4) {
     return dx;
@@ -412,61 +460,48 @@ fn visible_tile_rgb(tile: vec4<f32>) -> vec3<f32> {
   return tile.rgb * tile.a;
 }
 
-fn texture_bump_normal(tex_: texture_2d<f32>, normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, v: f32, dist: f32, repeat: f32, strength: f32) -> vec3<f32> {
+fn texture_bump_gradient(
+  tex_: texture_2d<f32>,
+  v: f32,
+  dist: f32,
+  repeat: f32,
+  mappingDx: vec2<f32>,
+  mappingDy: vec2<f32>,
+  strength: f32
+) -> vec2<f32> {
   let safeRepeat = max(repeat, 0.1);
-  let stepSize = 1.0 / (safeRepeat * 96.0);
-  let lpx = luminance(visible_tile_rgb(tile_tessellation(tex_, v + stepSize, dist, repeat)));
-  let lnx = luminance(visible_tile_rgb(tile_tessellation(tex_, v - stepSize, dist, repeat)));
-  let lpy = luminance(visible_tile_rgb(tile_tessellation(tex_, v, dist + stepSize, repeat)));
-  let lny = luminance(visible_tile_rgb(tile_tessellation(tex_, v, dist - stepSize, repeat)));
-  let grad = vec2<f32>(lpx - lnx, lpy - lny);
-  let bump = (tangent * grad.x + bitangent * grad.y) * clamp(strength, 0.0, 2.0) * 0.85;
-  return normalize(normal - bump);
+  let texSize = max(vec2<f32>(textureDimensions(tex_, 0)), vec2<f32>(1.0));
+  let stepSize = vec2<f32>(1.0) / (safeRepeat * texSize);
+  let lpx = luminance(visible_tile_rgb(tile_tessellation(tex_, v + stepSize.x, dist, repeat)));
+  let lnx = luminance(visible_tile_rgb(tile_tessellation(tex_, v - stepSize.x, dist, repeat)));
+  let lpy = luminance(visible_tile_rgb(tile_tessellation(tex_, v, dist + stepSize.y, repeat)));
+  let lny = luminance(visible_tile_rgb(tile_tessellation(tex_, v, dist - stepSize.y, repeat)));
+  let textureGradient = vec2<f32>(lpx - lnx, lpy - lny);
+  let screenGradient = vec2<f32>(
+    dot(textureGradient, mappingDx),
+    dot(textureGradient, mappingDy)
+  );
+  return screenGradient * clamp(strength, 0.0, 2.0) * 0.85;
 }
 
-fn fractal_height_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, grad: vec2<f32>, relief: f32) -> vec3<f32> {
-  // grad is clamped to [-6,6] and relief to [0,2] upstream, so every term is
-  // well within f16 range.
-  let rl = hcol(relief);
-  let n = vec3<hcol>(normal)
-    - vec3<hcol>(tangent) * hcol(grad.x) * hcol(0.34) * rl
-    - vec3<hcol>(bitangent) * hcol(grad.y) * hcol(0.34) * rl;
-  return vec3<f32>(normalize(n));
+fn surface_normal_from_gradient(gradient: vec2<f32>) -> vec3<f32> {
+  // Kept in f32: direction-coherence relief may legitimately create slopes
+  // above the bounded hcol range before normalization.
+  return normalize(vec3<f32>(-gradient.x, -gradient.y, 1.0));
 }
 
-fn fractal_height_ao(slope: f32, relief: f32, occStrength: f32) -> f32 {
-  let occ = smoothstep(hcol(0.12), hcol(2.75), hcol(slope) * hcol(relief)) * hcol(occStrength);
-  return f32(clamp(hcol(1.0) - occ * hcol(0.72), hcol(0.16), hcol(1.0)));
-}
-
-fn surface_cavity(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, relief: f32, occStrength: f32) -> f32 {
-  // Light-plane projection computed in f32 (unit-vector dots), then the bounded
-  // geometry runs in hcol.
-  let lightPlane = vec2<hcol>(vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent)));
+fn local_height_shadow(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, relief: f32, strength: f32) -> f32 {
+  let lightPlane = vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent));
   let lightPlaneLen = length(lightPlane);
-  if (lightPlaneLen < hcol(1.0e-4) || occStrength <= 0.0 || relief <= 0.0) {
-    return 1.0;
-  }
-  let g = vec2<hcol>(grad);
-  let lightPlaneDir = lightPlane / lightPlaneLen;
-  let crossDir = vec2<hcol>(-lightPlaneDir.y, lightPlaneDir.x);
-  let uphillTowardLight = max(dot(g, lightPlaneDir), hcol(0.0));
-  let sideCavity = abs(dot(g, crossDir)) * hcol(0.18);
-  let amount = smoothstep(hcol(0.04), hcol(1.45), (uphillTowardLight + sideCavity) * hcol(relief)) * hcol(occStrength);
-  return f32(clamp(hcol(1.0) - amount * hcol(0.48), hcol(0.26), hcol(1.0)));
-}
-
-fn fractal_height_shadow(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, relief: f32, occStrength: f32) -> f32 {
-  let lightPlane = vec2<hcol>(vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent)));
-  let lightPlaneLen = length(lightPlane);
-  if (lightPlaneLen < hcol(1.0e-4) || occStrength <= 0.0 || relief <= 0.0) {
+  if (lightPlaneLen < 1e-4 || strength <= 0.0 || relief <= 0.0) {
     return 1.0;
   }
   let lightPlaneDir = lightPlane / lightPlaneLen;
-  let uphillTowardLight = max(dot(vec2<hcol>(grad), lightPlaneDir), hcol(0.0));
-  let grazing = hcol(1.0) / max(hcol(lightDir.z) + hcol(0.35), hcol(0.35));
-  let shadow = uphillTowardLight * hcol(0.22) * grazing * hcol(relief) * hcol(occStrength);
-  return f32(clamp(hcol(1.0) - shadow, hcol(0.22), hcol(1.0)));
+  let uphillSlope = max(dot(grad, lightPlaneDir), 0.0) * 0.34 * relief;
+  let lightSlope = max(lightDir.z / lightPlaneLen, 0.0);
+  let blocker = smoothstep(lightSlope * 0.35, lightSlope + 1.25, uphillSlope);
+  let amount = 1.0 - exp(-0.35 * max(strength, 0.0));
+  return mix(1.0, 1.0 - blocker * 0.78, amount);
 }
 
 struct PixelState {
@@ -478,8 +513,8 @@ struct PixelState {
 fn load_pixel_state(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelState {
   var state: PixelState;
   state.iter = textureLoad(sourceTex, coord, 0, 0).r;
-  state.zx = textureLoad(sourceTex, coord, 2, 0).r;
-  state.zy = textureLoad(sourceTex, coord, 3, 0).r;
+  state.zx = textureLoad(sourceTex, coord, 1, 0).r;
+  state.zy = textureLoad(sourceTex, coord, 2, 0).r;
   return state;
 }
 
@@ -491,33 +526,13 @@ fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32
   return clamp(storedHeight, -64.0, 64.0);
 }
 
-fn distance_height_scale_offset(zoomFactor: f32) -> f32 {
-  return -log(max(zoomFactor, 1e-30));
-}
-
-fn distance_height_gradient_scale(zoomFactor: f32) -> f32 {
-  return 1.0 / max(zoomFactor, 1e-30);
-}
-
-fn sample_distance_height_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, heightOffset: f32) -> f32 {
-  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
-    return -1e6;
-  }
-  let state = load_pixel_state(sourceTex, coord);
-  let storedHeight = textureLoad(sourceTex, coord, 4, 0).r + heightOffset;
-  return distance_height_from_values(state.iter, state.zx, state.zy, storedHeight);
-}
-
-fn distance_height_gradient_at_coord(sourceTex: texture_2d_array<f32>, coord: vec2<i32>, texSize: vec2<i32>, centerHeight: f32, heightOffset: f32, gradientScale: f32) -> vec2<f32> {
-  let xr = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(1, 0), texSize, heightOffset);
-  let xl = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(1, 0), texSize, heightOffset);
-  let yu = sample_distance_height_at_coord(sourceTex, coord + vec2<i32>(0, 1), texSize, heightOffset);
-  let yd = sample_distance_height_at_coord(sourceTex, coord - vec2<i32>(0, 1), texSize, heightOffset);
-  let rightHeight = select(centerHeight, xr, xr > -1e5);
-  let leftHeight = select(centerHeight, xl, xl > -1e5);
-  let upHeight = select(centerHeight, yu, yu > -1e5);
-  let downHeight = select(centerHeight, yd, yd > -1e5);
-  return vec2<f32>(rightHeight - leftHeight, upHeight - downHeight) * 12.0 * gradientScale;
+fn normalize_geometry(stored: vec4<f32>, zoomFactor: f32) -> vec4<f32> {
+  let ratio = 1.0 / max(zoomFactor, 1e-30);
+  return vec4<f32>(
+    clamp(stored.xy * ratio, vec2<f32>(-64.0), vec2<f32>(64.0)),
+    clamp(stored.z * ratio * ratio, -64.0, 64.0),
+    clamp(stored.w + log(ratio), -64.0, 64.0)
+  );
 }
 
 fn smooth_escape_fraction(z_sq: f32) -> f32 {
@@ -526,11 +541,11 @@ fn smooth_escape_fraction(z_sq: f32) -> f32 {
   return 1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0);
 }
 
-fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, distanceHeightOffset: f32, distanceHeightGradientScale: f32, angle_der: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32, uv_tex: vec2<f32>, magnified: bool) -> vec3<f32> {
+fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32, uv_screen: vec2<f32>, uv_tex: vec2<f32>, magnified: bool) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
-  let phaseColoringShift = (1.0 - abs(fract(angle_der / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
+  let phaseColoringShift = (1.0 - abs(fract(geometryAngle / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
   let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset() + heightPhaseShift + phaseColoringShift);
 
   // ── Sample all effect channels from the palette texture ──
@@ -544,16 +559,23 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     // Palette is always the base. Other sources overlay on top with their weight as opacity.
     var color = fx.paletteColor * fx.wPalette;
 
-  // ── Tessellation depth: always smooth, independent of palette period ──
-  let tess_depth = v_smooth * 2.0;
+  // Screen + Depth follows the same scalar height as the visible relief.
+  // Using smooth iteration here made the texture slide along iteration bands
+  // while the normal followed distance height, visually detaching both fields.
+  let tess_depth = clamp(
+    distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored),
+    -16.0,
+    16.0
+  );
   let disp = parameters.displacementAmount;
   var tess_u = 0.0;
   var tess_v = 0.0;
 
-  tess_u = texture_mapping_value(parameters.textureMappingXVariable, iterRaw, v_smooth, z, distanceHeightStored, angle_der, dx, dy, tess_depth, disp) * parameters.textureMappingXScale;
-  tess_v = texture_mapping_value(parameters.textureMappingYVariable, iterRaw, v_smooth, z, distanceHeightStored, angle_der, dx, dy, tess_depth, disp) * parameters.textureMappingYScale;
+  tess_u = texture_mapping_value(parameters.textureMappingXVariable, iterRaw, v_smooth, z, distanceHeightStored, geometryAngle, dx, dy, tess_depth, disp) * parameters.textureMappingXScale;
+  tess_v = texture_mapping_value(parameters.textureMappingYVariable, iterRaw, v_smooth, z, distanceHeightStored, geometryAngle, dx, dy, tess_depth, disp) * parameters.textureMappingYScale;
 
   let tile_drift = vec2<f32>(parameters.textureDriftX, parameters.textureDriftY);
+  let tessCoord = vec2<f32>(tess_u, tess_v) + tile_drift;
 
 
 
@@ -599,94 +621,126 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
   if (effShading > 0.001) {
     // Material + iridescence rows are only needed here: sample them lazily.
     sampleShadingMaterial(palettePhase, &fx);
-    let angleDir = vec2<f32>(cos(angle_der), sin(angle_der));
+    // PBR runs in linear light: gamma-space products distort hues and harden
+    // falloffs. Only the shaded result converts back to sRGB (with a highlight
+    // roll-off) at the end of the block — the unshaded palette compositing
+    // keeps its historical sRGB look.
+    let colorLin = srgb_to_linear(color);
+    let iridLin = srgb_to_linear(fx.iridescenceColor);
+    let angleDir = vec2<f32>(cos(geometryAngle), sin(geometryAngle));
     let reliefDepth = parameters.reliefDepth * effShading;
     let relief = clamp(reliefDepth, 0.0, 2.0);
-    let surfaceRelief = relief * 0.5;
-    let occStrength = pow(clamp(parameters.localShadowStrength, 0.0, 10.0), 1.15);
-    let needsDistanceHeight = parameters.subsurfaceStrength > 0.001;
+    // Log-domain control: 0 -> 0.25x, 1 -> 1x, 2 -> 4x. The multiplier is
+    // strictly positive, so it can never reverse the cached analytic slope.
+    let reliefGain = exp2(2.0 * (fx.reliefGain - 1.0));
+    let effectiveAnalyticRelief = relief * reliefGain;
+    let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
     let stripeReliefStrength = fx.wStripeRelief * effShading;
     let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
+    let bumpStrength = parameters.microBumpStrength * effTess;
+    let mappingXId = i32(parameters.textureMappingXVariable + 0.5);
+    let mappingYId = i32(parameters.textureMappingYVariable + 0.5);
+    let needsDepthGradient = bumpStrength > 0.001 &&
+      (mappingXId == 0 || mappingXId == 1 || mappingYId == 0 || mappingYId == 1);
     let needsStripeGradient = stripeReliefStrength > 0.001;
     let needsDirectionCoherenceGradient = directionCoherenceStrength > 0.001;
-    let needsFractalGradient = relief > 0.001 || occStrength > 0.001;
+    let needsFractalGradient = effectiveAnalyticRelief > 0.001;
     var distanceHeight = 0.0;
-    var grad = vec2<f32>(0.0);
+    // Cached geometry stores the analytic derivative per source texel and the
+    // branch-local analytic Laplacian. Historical relief gains are applied
+    // here, after source-to-display normalization, without neighbor reads.
+    var grad = cachedGradient * 24.0;
     var stripeGrad = vec2<f32>(0.0);
     var directionCoherenceGrad = vec2<f32>(0.0);
+    var depthGrad = cachedGradient * 16.0;
+    var heightCurvature = cachedCurvature * 6.0;
     var slope = 0.0;
-    if (needsDistanceHeight || needsFractalGradient) {
+    if (needsFractalGradient) {
       distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
     }
-    // The three fields (fractal height, stripe phase, direction coherence)
-    // share the same 4 neighbour texels. Fetch each neighbour once and derive
-    // whichever gradients are needed together, instead of reloading layers
-    // 0/2/3 and recomputing escape_nu three times per neighbour.
-    if (needsFractalGradient || needsStripeGradient || needsDirectionCoherenceGradient) {
+    if (needsFractalGradient) {
+      grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
+      slope = length(grad);
+    }
+    // Stripe/coherence relief remains effect-dependent and may read packed
+    // metadata neighbours. Base distance geometry never does.
+    if (needsStripeGradient || needsDirectionCoherenceGradient) {
       if (magnified) {
-        field_gradients_bilinear(
-          sourceTex, uv_tex, sourceTexSize,
-          distanceHeight, stripeAverage, directionCoherence,
-          distanceHeightOffset, distanceHeightGradientScale,
-          needsFractalGradient, needsStripeGradient, needsDirectionCoherenceGradient,
-          &grad, &stripeGrad, &directionCoherenceGrad
+        orbit_metric_gradients_bilinear(
+          sourceTex, sourceMetadata, uv_tex, sourceTexSize,
+          stripeAverage, directionCoherence,
+          needsStripeGradient, needsDirectionCoherenceGradient,
+          &stripeGrad, &directionCoherenceGrad
         );
       } else {
-        field_gradients_at_coord(
-          sourceTex, sourceCoord, sourceTexSize,
-          distanceHeight, stripeAverage, directionCoherence,
-          distanceHeightOffset, distanceHeightGradientScale,
-          needsFractalGradient, needsStripeGradient, needsDirectionCoherenceGradient,
-          &grad, &stripeGrad, &directionCoherenceGrad
+        orbit_metric_gradients_at_coord(
+          sourceTex, sourceMetadata, sourceCoord, sourceTexSize,
+          stripeAverage, directionCoherence,
+          needsStripeGradient, needsDirectionCoherenceGradient,
+          &stripeGrad, &directionCoherenceGrad
         );
       }
-      if (needsFractalGradient) {
-        grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
-        slope = length(grad);
-      }
     }
-    let edgeWear = curvature_edge_wear(angle_der, v_smooth);
-    let flatNormal = vec3<f32>(0.0, 0.0, 1.0);
-    let baseNormal = normalize(mix(flatNormal, mandelbrot_normal_from_dir(angleDir), surfaceRelief));
-    let baseTangent = mandelbrot_tangent_from_dir(angleDir, baseNormal);
-    let baseBitangent = normalize(cross(baseNormal, baseTangent));
-    var bumpedNormal = baseNormal;
-    let bumpStrength = parameters.microBumpStrength * effTess;
+    var textureGradient = vec2<f32>(0.0);
+    var textureMappingDx = vec2<f32>(1.0, 0.0);
+    var textureMappingDy = vec2<f32>(0.0, 1.0);
+    if (needsDepthGradient) {
+      let boundedDepthGrad = clamp(depthGrad, vec2<f32>(-8.0), vec2<f32>(8.0));
+      let depthWarpGrad = boundedDepthGrad * (4.0 * disp);
+      var uGrad = vec2<f32>(1.0, 0.0);
+      var vGrad = vec2<f32>(0.0, 1.0);
+      if (mappingXId == 0) {
+        uGrad = (vec2<f32>(1.0, 0.0) + depthWarpGrad) * parameters.textureMappingXScale;
+      } else if (mappingXId == 1) {
+        uGrad = (vec2<f32>(0.0, 1.0) + depthWarpGrad) * parameters.textureMappingXScale;
+      }
+      if (mappingYId == 0) {
+        vGrad = (vec2<f32>(1.0, 0.0) + depthWarpGrad) * parameters.textureMappingYScale;
+      } else if (mappingYId == 1) {
+        vGrad = (vec2<f32>(0.0, 1.0) + depthWarpGrad) * parameters.textureMappingYScale;
+      }
+      textureMappingDx = vec2<f32>(uGrad.x, vGrad.x);
+      textureMappingDy = vec2<f32>(uGrad.y, vGrad.y);
+    }
     if (bumpStrength > 0.001) {
-      bumpedNormal = texture_bump_normal(
+      textureGradient = texture_bump_gradient(
         tileTex,
-        baseNormal,
-        baseTangent,
-        baseBitangent,
-        tess_u + tile_drift.x,
-        tess_v + tile_drift.y,
+        tessCoord.x,
+        tessCoord.y,
         parameters.tessellationLevel,
+        textureMappingDx,
+        textureMappingDy,
         bumpStrength
       );
     }
-    let heightNormal = fractal_height_normal(bumpedNormal, baseTangent, baseBitangent, grad, relief);
-    let stripeNormal = direction_coherence_normal(heightNormal, baseTangent, baseBitangent, stripeGrad, stripeReliefStrength);
-    let directionNormal = direction_coherence_normal(stripeNormal, baseTangent, baseBitangent, directionCoherenceGrad, directionCoherenceStrength);
+    // One scalar surface drives one normal. The stripe phase is circular, so use
+    // Hstripe = 0.5 - 0.5*cos(2πp); its derivative is π*sin(2πp), continuous at
+    // the phase wrap. Coherence and texture luminance are already scalar fields.
+    let stripeProfileDerivative = 3.141592653589793 * sin(TWO_PI * stripeAverage);
+    let heightGradient = grad * (0.34 * effectiveAnalyticRelief);
+    let stripeHeightGradient = stripeGrad * stripeProfileDerivative * (0.75 * clamp(stripeReliefStrength, 0.0, 1.0));
+    let coherenceHeightGradient = directionCoherenceGrad * (0.75 * clamp(directionCoherenceStrength, 0.0, 100.0));
+    // Material bumps remain independent of the analytic relief multiplier.
+    let surfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;
+    let anisotropy = clamp(fx.anisotropy, 0.0, 1.0);
+    let surfaceNormalLocal = surface_normal_from_gradient(surfaceGradient);
+    let geometricTangentLocal = normalize(vec3<f32>(1.0, 0.0, surfaceGradient.x));
+    let geometricBitangentLocal = normalize(cross(surfaceNormalLocal, geometricTangentLocal));
+    let anisotropyTangentLocal = anisotropy_tangent_from_dir(angleDir, surfaceNormalLocal);
     let sceneSin = parameters.sceneSin;
     let sceneCos = parameters.sceneCos;
-    let normal = normalize(rotate_surface_vector_sincos(directionNormal, sceneSin, sceneCos));
-    let baseTangentWorld = normalize(rotate_surface_vector_sincos(baseTangent, sceneSin, sceneCos));
-    let baseBitangentWorld = normalize(rotate_surface_vector_sincos(baseBitangent, sceneSin, sceneCos));
-    let heightAo = fractal_height_ao(slope, relief, occStrength);
-    let normalCavity = clamp(
-      1.0 - smoothstep(0.02, 0.62, 1.0 - normal.z) * 0.58 * occStrength,
-      0.16,
-      1.0
-    );
+    // uv_neutral = R(scene) * uv_screen, therefore vectors from the neutral
+    // fractal surface must use R^-1 to enter screen/world space.
+    let normal = normalize(rotate_surface_vector_inverse_sincos(surfaceNormalLocal, sceneSin, sceneCos));
+    let geometricTangentWorld = normalize(rotate_surface_vector_inverse_sincos(geometricTangentLocal, sceneSin, sceneCos));
+    let geometricBitangentWorld = normalize(rotate_surface_vector_inverse_sincos(geometricBitangentLocal, sceneSin, sceneCos));
+    let anisotropyTangent = normalize(rotate_surface_vector_inverse_sincos(anisotropyTangentLocal, sceneSin, sceneCos));
     let lightDir = vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ);
-    let cavity = min(surface_cavity(grad, lightDir, baseTangentWorld, baseBitangentWorld, relief, occStrength), normalCavity);
-    let cavityAmount = 1.0 - cavity;
-    let ao = min(pseudo_ambient_occlusion(normal, v_smooth, z), mix(heightAo, 1.0, 0.45));
+    // The magnified bilinear path has no extra curvature fetch: AO fades out
+    // during reprojection instead of adding four more texture reads per pixel.
+    let ao = curvature_ambient_occlusion(heightCurvature, effectiveAnalyticRelief, parameters.ambientOcclusionStrength);
     let viewDir = vec3<f32>(0.0, 0.0, 1.0);
     let halfDir = normalize(lightDir + viewDir);
-    let tangent = normalize(rotate_surface_vector_sincos(mandelbrot_tangent_from_dir(angleDir, directionNormal), sceneSin, sceneCos));
-    let bitangent = normalize(cross(normal, tangent));
-    let anisotropyTangent = distance_tangent(grad, baseTangentWorld, baseBitangentWorld, normal);
     let anisotropyBitangent = normalize(cross(normal, anisotropyTangent));
     let nDotL = max(dot(normal, lightDir), 0.0);
     let nDotV = max(dot(normal, viewDir), 0.0);
@@ -694,41 +748,45 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
     let vDotH = max(dot(viewDir, halfDir), 0.0);
     let metallic = clamp(fx.metallic, 0.0, 1.0);
     let roughness = clamp(fx.roughness, 0.02, 1.0);
-    let anisotropy = clamp(fx.anisotropy, 0.0, 1.0);
-    let specularGain = clamp(fx.specularPower / 16.0, 0.15, 4.0);
-    let f0 = mix(vec3<f32>(0.04), color, metallic);
+    // Gamma-era gain retuned down: in linear light the GGX peak already reads
+    // brighter once encoded to sRGB. Floor is 0 so Spéculaire = 0 truly
+    // disables the lobe.
+    let specularGain = clamp(fx.specularPower / 19.0, 0.0, 3.4);
+    // Dielectrics keep an achromatic Fresnel reflection; only conductors tint
+    // their reflection with the base color.
+    // Tint=0 is the legacy preset path: the historical shader used the sRGB
+    // palette value directly as conductor F0. Tint=1 selects linear-light F0.
+    let legacyMetalF0 = clamp(color * fx.metalReflectance, vec3<f32>(0.0), vec3<f32>(1.0));
+    let physicalMetalF0 = clamp(colorLin * fx.metalReflectance, vec3<f32>(0.0), vec3<f32>(1.0));
+    let metalResponse = clamp(fx.metalEnvironmentTint, 0.0, 1.0);
+    let metalF0 = mix(legacyMetalF0, physicalMetalF0, metalResponse);
+    let f0 = mix(vec3<f32>(fx.dielectricSpecular), metalF0, metallic);
+    // Cheap multiple-scattering compensation: single-scatter GGX otherwise
+    // loses too much energy as a conductor becomes rough.
+    let roughMetalEnergy = vec3<f32>(1.0) + (vec3<f32>(1.0) - f0) * (metallic * roughness * 0.75 * metalResponse);
     let fresnelSpec = fresnel_schlick(vDotH, f0);
     let distribution = ggx_distribution(nDotH, roughness);
     let geometry = ggx_geometry_smith(nDotV, nDotL, roughness);
     let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
     let anisotropicTerm = anisotropic_highlight(normal, anisotropyTangent, anisotropyBitangent, halfDir, nDotL, nDotV, roughness);
     let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
-    let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL;
-    let diffuseColor = color * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
-    let localShadow = fractal_height_shadow(grad, lightDir, baseTangentWorld, baseBitangentWorld, relief, occStrength);
+    let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL * roughMetalEnergy;
+    let diffuseColor = colorLin * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
+    let localShadow = local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, effectiveAnalyticRelief, localShadowControl);
     let shadowedNDotL = nDotL * localShadow;
     let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
     let reflectionSide = mix(0.08, 1.0, litSide);
-    let diffuseLight = diffuseColor * (0.14 + 0.86 * shadowedNDotL) * ao;
+    let ambientDiffuse = diffuseColor * 0.14 * ao;
+    let directDiffuse = diffuseColor * 0.86 * shadowedNDotL;
     let brightness = max(fx.shadingLevel, 0.0);
-    var materialColor = diffuseLight + directSpecular * ao * mix(1.0, localShadow, 0.45);
-    let reliefAccent = clamp(occStrength * effShading, 0.0, 2.0);
-    let ridge = smoothstep(0.10, 1.55, slope * relief) * litSide * reliefAccent;
-    let cavityTint = mix(color, sqrt(max(color, vec3<f32>(0.0))), 0.42);
-    materialColor = mix(materialColor, materialColor * cavityTint, cavityAmount * reliefAccent * 0.22);
-    materialColor += mix(color, vec3<f32>(1.0), 0.38) * ridge * 0.16 * (1.0 - metallic * 0.45);
-
+    var materialColor = ambientDiffuse + directDiffuse + directSpecular * localShadow;
+    let reliefAccent = clamp((1.0 - exp(-0.35 * localShadowControl)) * effShading * 2.0, 0.0, 2.0);
+    let ridge = smoothstep(0.10, 1.55, slope * effectiveAnalyticRelief) * litSide * reliefAccent;
+    materialColor += mix(colorLin, vec3<f32>(1.0), 0.38) * ridge * 0.10 * (1.0 - metallic * 0.45);
     let varnish = clamp(parameters.varnishStrength, 0.0, 10.0) * 0.1;
-    if (varnish > 0.001) {
-      let wetDarken = mix(1.0, 0.78, varnish);
-      let wetTint = mix(color, color * vec3<f32>(0.86, 0.90, 0.96), varnish * 0.35);
-      let coatPower = mix(110.0, 260.0, varnish) * mix(1.0, 0.75, roughness);
-      let coatFresnel = fresnel_schlick(nDotV, vec3<f32>(0.025));
-      let coatLobe = pow(max(nDotH, 0.0), coatPower) * (0.20 + 0.80 * shadowedNDotL) * ao;
-      let coatHighlight = coatFresnel * coatLobe * (0.30 + 0.85 * varnish) * (1.0 - metallic * 0.25);
-      materialColor = mix(materialColor * wetDarken, wetTint, varnish * 0.25);
-      materialColor += coatHighlight;
-    }
+    // Clear coat is a true top layer: it is applied at the very end of this
+    // block, once the base material (iridescence, SSS, wear, env… included)
+    // is fully assembled.
 
     if (fx.wIridescence > 0.001) {
       let viewShift = smoothstep(0.04, 0.86, 1.0 - nDotV);
@@ -739,58 +797,87 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceCoord: vec2<i32>, sourceTexSi
       let facingPearl = dot(orientationPlane, lightPlane) * 0.5 + 0.5;
       let crossPearl = dot(orientationPlane, tangentPlane) * 0.5 + 0.5;
       let orientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
-      let slopeShift = smoothstep(0.025, 1.15, slope * max(relief, 0.18));
+      let slopeShift = smoothstep(0.025, 1.15, slope * effectiveAnalyticRelief);
       let tiltShift = smoothstep(0.025, 0.55, length(normal.xy));
       let surfaceShift = max(slopeShift, tiltShift * 0.65);
       let pearlAngle = clamp(0.05 + viewShift * 0.12 + lightShift * 0.10 + orientationShift * 0.56 + surfaceShift * 0.32, 0.0, 1.0);
-      let pearlLighting = (0.18 + 0.82 * shadowedNDotL) * ao * mix(0.45, 1.0, localShadow) * mix(0.55, 1.0, cavity);
+      let pearlLighting = 0.18 * ao + 0.82 * shadowedNDotL;
       let coatWeight = fx.wIridescence * pearlAngle * mix(0.45, 1.45, orientationShift) * mix(0.60, 1.25, surfaceShift) * pearlLighting * (1.0 - metallic * 0.35);
+      // Thin-film interference: optical thickness varies across the surface,
+      // the view/normal tilt slides the spectrum (soap-bubble hue drift).
+      // iridescenceColor acts as the filter the interference plays under.
+      let filmCycles = 1.3 + 2.2 * orientationShift + 1.1 * surfaceShift;
+      let filmColor = iridLin * (0.30 + 1.40 * thin_film_tint(nDotV, filmCycles));
       let pearlTint = 0.18 + 0.74 * orientationShift + 0.18 * surfaceShift;
-      let pearlColor = mix(color, fx.iridescenceColor, pearlTint) * (0.78 + 0.36 * max(luminance(color), 0.25));
+      let pearlColor = mix(colorLin, filmColor, pearlTint) * (0.78 + 0.36 * max(luminance(colorLin), 0.25));
       let pearlSheen = pow(nDotH, mix(2.5, 7.5, 1.0 - roughness)) * fx.wIridescence * pearlLighting * mix(0.45, 1.35, orientationShift);
       materialColor = mix(materialColor, pearlColor, clamp(coatWeight, 0.0, 0.92));
-      materialColor += fx.iridescenceColor * pearlSheen * (0.28 + 0.46 * (1.0 - roughness)) * (1.0 - metallic * 0.25);
-    }
-
-    if (parameters.subsurfaceStrength > 0.001) {
-      materialColor += fake_subsurface_scattering(
-        color,
-        normal,
-        lightDir,
-        nDotV,
-        ao,
-        edgeWear,
-        metallic,
-        parameters.subsurfaceStrength,
-        distanceHeight,
-        slope
-      );
+      // Sheen interferes at the half-vector angle (specular path through the film).
+      materialColor += iridLin * thin_film_tint(vDotH, filmCycles) * pearlSheen * (0.56 + 0.92 * (1.0 - roughness)) * (1.0 - metallic * 0.25);
     }
 
     var envColor = vec3<f32>(0.0);
     if (fx.wSkybox > 0.001) {
-      let skyboxDir = reflect(-viewDir, normal);
-      let skyboxColor = rough_skybox_reflection(skyboxDir, tangent, bitangent, roughness, dx + parameters.skyDriftX, dy + parameters.skyDriftY);
-      let fresnelEnv = fresnel_schlick(nDotV, f0);
-      let fresnelReflection = clamp(luminance(fresnelEnv), 0.0, 1.0);
-      let polishReflection = 0.10 * varnish * (1.0 - roughness * 0.55) * (1.0 - metallic * 0.35);
-      let reflectionStrength = fx.wSkybox * max(fresnelReflection, polishReflection);
-      let envVisibility = mix(reflectionSide, mix(0.55, 1.0, litSide), metallic);
-      envColor = skyboxColor * reflectionStrength * mix(0.55, 1.25, metallic) * envVisibility;
+      // Keep analytic relief authoritative for geometry, but give the base
+      // environment reflection the derivative-angle flow that also orients
+      // the anisotropic direct lobe. At full anisotropy the magnitude-2 offset
+      // reproduces the historical flat-zone tilt; it never feeds AO, shadows,
+      // direct lighting, iridescence slope, or clearcoat. Roughness remains
+      // only an isotropic mip choice, so the base environment keeps one sample.
+      let environmentReflectionGradient = surfaceGradient - angleDir * (2.0 * anisotropy);
+      let environmentReflectionNormalLocal = surface_normal_from_gradient(environmentReflectionGradient);
+      let environmentReflectionNormal = normalize(rotate_surface_vector_inverse_sincos(environmentReflectionNormalLocal, sceneSin, sceneCos));
+      let environmentReflectDir = reflect(-viewDir, environmentReflectionNormal);
+      let skyboxColor = rough_skybox_reflection(
+        uv_screen,
+        environmentReflectDir,
+        roughness,
+        vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
+      );
+      let environmentFresnel = fresnel_schlick_roughness(nDotV, f0, roughness);
+      let neutralEnvironmentFresnel = vec3<f32>(luminance(environmentFresnel));
+      let environmentTint = clamp(metalResponse * metallic, 0.0, 1.0);
+      let reflectionStrength = fx.wSkybox * mix(neutralEnvironmentFresnel, environmentFresnel, environmentTint);
+      let envVisibility = specular_occlusion(nDotV, ao, roughness);
+      // Fresnel already carries the dielectric/metal energy difference. Do not
+      // suppress polished stone a second time with a dielectric-only factor.
+      envColor = skyboxColor * reflectionStrength * roughMetalEnergy * mix(1.0, 1.10, metallic) * envVisibility;
     }
 
-    let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading * reflectionSide;
-    let rimBaseColor = mix(color, vec3<f32>(1.0), 0.45);
-    let rimPearlColor = mix(rimBaseColor, fx.iridescenceColor, fx.wIridescence * 0.65);
-    let rimColor = rimPearlColor * rim * (0.08 + 0.22 * fx.wSkybox + 0.12 * fx.wIridescence);
-    let wearColor = mix(color, vec3<f32>(1.0, 0.92, 0.74), 0.5 + 0.3 * metallic);
-    let wear = edgeWear * (0.15 + 0.35 * metallic) * effShading * mix(0.35, 1.0, litSide);
-    materialColor = mix(materialColor, materialColor + wearColor * wear, clamp(edgeWear, 0.0, 1.0));
+    // Rim is a stylised Fresnel: same rule as the env term — matte kills it.
+    let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading * reflectionSide * mix(1.0, 0.25, roughness);
+    let rimBaseColor = mix(colorLin, vec3<f32>(1.0), 0.45);
+    let rimPearlColor = mix(rimBaseColor, iridLin, fx.wIridescence * 0.65);
+    let rimColor = rimPearlColor * rim * (0.04 + 0.12 * fx.wSkybox + 0.07 * fx.wIridescence);
 
-    materialColor *= mix(1.0, cavity, 0.22);
-
-    let pbrColor = (materialColor + envColor * mix(1.0, cavity, 0.16) + rimColor) * (0.55 + brightness * 0.45);
-    color = mix(color * mix(ao, 1.0, 0.35), pbrColor, effShading);
+    var pbrColor = (materialColor + envColor + rimColor) * (0.55 + brightness * 0.45);
+    if (varnish > 0.001) {
+      // Clear coat: an achromatic dielectric film over whatever material lies
+      // underneath. It never tints the base — it deepens it (wet look),
+      // attenuates it by the coat Fresnel (energy conservation), and adds its
+      // own untinted highlight + glossy environment mirror on top. No metallic
+      // dependency: the coat is the same film regardless of the base.
+      // The coat's own smoothness is independent of the base roughness: a
+      // rough material under varnish still gets a glossy film on top.
+      let coatFresnel = fresnel_schlick(nDotV, vec3<f32>(0.025)).x;
+      let coatPower = mix(200.0, 320.0, varnish);
+      let coatSpec = pow(max(nDotH, 0.0), coatPower) * (0.20 + 0.80 * shadowedNDotL) * (0.30 + 0.85 * varnish);
+      var coatEnvironment = vec3<f32>(0.0);
+      if (fx.wSkybox > 0.001) {
+        let coatReflectDir = reflect(-viewDir, normal);
+        let coatSky = rough_skybox_reflection(
+          uv_screen,
+          coatReflectDir,
+          0.05,
+          vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
+        );
+        coatEnvironment = coatSky * fresnel_schlick_roughness(nDotV, vec3<f32>(0.025), 0.05) * fx.wSkybox * specular_occlusion(nDotV, ao, 0.05);
+      }
+      // Wet look: internal reflections darken and saturate, hue untouched.
+      pbrColor *= mix(vec3<f32>(1.0), clamp(pbrColor, vec3<f32>(0.0), vec3<f32>(1.0)), varnish * 0.30);
+      pbrColor = pbrColor * (1.0 - coatFresnel * varnish) + (coatEnvironment + vec3<f32>(coatSpec * coatFresnel)) * varnish;
+    }
+    color = mix(color, linear_to_sRGB(tonemap_highlights(display_grade(pbrColor))), effShading);
   }
 
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
@@ -816,32 +903,31 @@ fn escape_nu(iter_val: f32, zx_val: f32, zy_val: f32) -> f32 {
 
 
 
-fn decode_stripe_phase(refWithStripe: f32) -> f32 {
-  return fract(max(refWithStripe, 0.0));
+const QUANTIZED_FIELD_MAX: f32 = 16383.0;
+
+fn decode_support_step(metadata: u32) -> f32 {
+  return exp2(f32(metadata & 0xfu));
+}
+
+fn decode_stripe_phase(metadata: u32) -> f32 {
+  return f32((metadata >> 4u) & 0x3fffu) / QUANTIZED_FIELD_MAX;
 }
 
 fn stripe_phase_delta(a: f32, b: f32) -> f32 {
   return fract(a - b + 0.5) - 0.5;
 }
 
-const ORBIT_DIRECTION_SCALE: f32 = 4095.0;
-const ORBIT_DIRECTION_BASE: f32 = 4096.0;
-
-fn decode_direction_coherence(encoded: f32) -> f32 {
-  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
-  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
-  let avgDir = vec2<f32>(
-    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-  );
-  return clamp(length(avgDir), 0.0, 1.0);
+fn decode_direction_coherence(metadata: u32) -> f32 {
+  return f32((metadata >> 18u) & 0x3fffu) / QUANTIZED_FIELD_MAX;
 }
 
 struct PixelExtras {
-  der_x: f32,
-  der_y: f32,
-  refWithStripe: f32,
-  avgDirection: f32,
+  height: f32,
+  geometryAngle: f32,
+  gradient: vec2<f32>,
+  curvature: f32,
+  stripePhase: f32,
+  directionCoherence: f32,
 };
 
 struct PixelSample {
@@ -851,13 +937,13 @@ struct PixelSample {
   zy: f32,
 };
 
-fn load_pixel_sample(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelSample {
+fn load_pixel_sample(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, coord: vec2<i32>) -> PixelSample {
   var pixelSample: PixelSample;
   pixelSample.iter = textureLoad(sourceTex, coord, 0, 0).r;
-  pixelSample.step = textureLoad(sourceTex, coord, 1, 0).r;
+  pixelSample.step = decode_support_step(textureLoad(sourceMetadata, coord, 0).r);
   if (pixelSample.iter > 0.0) {
-    pixelSample.zx = textureLoad(sourceTex, coord, 2, 0).r;
-    pixelSample.zy = textureLoad(sourceTex, coord, 3, 0).r;
+    pixelSample.zx = textureLoad(sourceTex, coord, 1, 0).r;
+    pixelSample.zy = textureLoad(sourceTex, coord, 2, 0).r;
   } else {
     pixelSample.zx = 0.0;
     pixelSample.zy = 0.0;
@@ -865,12 +951,16 @@ fn load_pixel_sample(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> Pixe
   return pixelSample;
 }
 
-fn load_pixel_extras(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelExtras {
+fn load_pixel_extras(sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, coord: vec2<i32>, zoomFactor: f32) -> PixelExtras {
   var extras: PixelExtras;
-  extras.der_x = textureLoad(sourceTex, coord, 4, 0).r;
-  extras.der_y = textureLoad(sourceTex, coord, 5, 0).r;
-  extras.refWithStripe = textureLoad(sourceTex, coord, 6, 0).r;
-  extras.avgDirection = textureLoad(sourceTex, coord, 7, 0).r;
+  let geometry = normalize_geometry(textureLoad(sourceGeometry, coord, 0), zoomFactor);
+  extras.height = clamp(geometry.w, -64.0, 64.0);
+  extras.gradient = geometry.xy;
+  extras.curvature = geometry.z;
+  extras.geometryAngle = select(0.0, atan2(geometry.y, geometry.x), dot(geometry.xy, geometry.xy) > 1e-12);
+  let metadata = textureLoad(sourceMetadata, coord, 0).r;
+  extras.stripePhase = decode_stripe_phase(metadata);
+  extras.directionCoherence = decode_direction_coherence(metadata);
   return extras;
 }
 
@@ -897,85 +987,63 @@ fn bilinear_cell(uv: vec2<f32>, texSize: vec2<i32>) -> BilinearCell {
   return cell;
 }
 
-// ── Shared neighbour fetch ──────────────────────────────────────────
-// The fractal-height, stripe-phase and direction-coherence fields all live
-// in the same source texel (layers 4 / 6 / 7) and share the same validity
-// test (in-bounds + escaped). Fetching a neighbour once and decoding only the
-// requested channels avoids reloading layers 0/2/3 and recomputing escape_nu
-// separately for each field.
-struct NeighborFields {
+// ── Optional orbit-metric neighbour fetch ───────────────────────────
+// Distance geometry is already cached and never enters this path. Only the
+// effect-dependent stripe/coherence relief samples neighbouring metadata.
+struct NeighborOrbitFields {
   valid: bool,       // in-bounds AND escaped → usable; otherwise fall back to center
-  height: f32,
   stripe: f32,
   coherence: f32,
 };
 
-fn sample_neighbor_fields(
+fn sample_neighbor_orbit_fields(
   sourceTex: texture_2d_array<f32>,
+  sourceMetadata: texture_2d<u32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
-  heightOffset: f32,
-  needHeight: bool,
   needStripe: bool,
   needCoh: bool
-) -> NeighborFields {
-  var nf: NeighborFields;
+) -> NeighborOrbitFields {
+  var nf: NeighborOrbitFields;
   nf.valid = false;
-  nf.height = 0.0;
   nf.stripe = 0.0;
   nf.coherence = 0.0;
   if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
     return nf;
   }
   let state = load_pixel_state(sourceTex, coord);
-  if (escape_nu(state.iter, state.zx, state.zy) < 0.0) {
+  let nu = escape_nu(state.iter, state.zx, state.zy);
+  if (nu < 0.0) {
     return nf;
   }
   nf.valid = true;
-  if (needHeight) {
-    let storedHeight = textureLoad(sourceTex, coord, 4, 0).r + heightOffset;
-    nf.height = clamp(storedHeight, -64.0, 64.0);
-  }
   if (needStripe) {
-    nf.stripe = decode_stripe_phase(textureLoad(sourceTex, coord, 6, 0).r);
+    nf.stripe = decode_stripe_phase(textureLoad(sourceMetadata, coord, 0).r);
   }
   if (needCoh) {
-    nf.coherence = decode_direction_coherence(textureLoad(sourceTex, coord, 7, 0).r);
+    nf.coherence = decode_direction_coherence(textureLoad(sourceMetadata, coord, 0).r);
   }
   return nf;
 }
 
-// Central-difference gradients of any subset of the three fields, sharing the
-// four neighbour fetches. Scales match the former per-field functions:
-// height ×12·scale, stripe ×8, coherence ×8. Outputs left untouched when their
-// need flag is false.
-fn field_gradients_at_coord(
+// Central-difference gradients of the packed orbit metrics. Outputs are left
+// untouched when their corresponding effect is disabled.
+fn orbit_metric_gradients_at_coord(
   sourceTex: texture_2d_array<f32>,
+  sourceMetadata: texture_2d<u32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
-  centerHeight: f32,
   centerStripe: f32,
   centerCoherence: f32,
-  heightOffset: f32,
-  heightGradientScale: f32,
-  needHeight: bool,
   needStripe: bool,
   needCoh: bool,
-  heightGrad: ptr<function, vec2<f32>>,
   stripeGrad: ptr<function, vec2<f32>>,
   cohGrad: ptr<function, vec2<f32>>
 ) {
-  let nR = sample_neighbor_fields(sourceTex, coord + vec2<i32>(1, 0), texSize, heightOffset, needHeight, needStripe, needCoh);
-  let nL = sample_neighbor_fields(sourceTex, coord - vec2<i32>(1, 0), texSize, heightOffset, needHeight, needStripe, needCoh);
-  let nU = sample_neighbor_fields(sourceTex, coord + vec2<i32>(0, 1), texSize, heightOffset, needHeight, needStripe, needCoh);
-  let nD = sample_neighbor_fields(sourceTex, coord - vec2<i32>(0, 1), texSize, heightOffset, needHeight, needStripe, needCoh);
-  if (needHeight) {
-    let r = select(centerHeight, nR.height, nR.valid);
-    let l = select(centerHeight, nL.height, nL.valid);
-    let u = select(centerHeight, nU.height, nU.valid);
-    let d = select(centerHeight, nD.height, nD.valid);
-    *heightGrad = vec2<f32>(r - l, u - d) * 12.0 * heightGradientScale;
-  }
+  let nR = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord + vec2<i32>(1, 0), texSize, needStripe, needCoh);
+  let nL = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord - vec2<i32>(1, 0), texSize, needStripe, needCoh);
+  let nU = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord + vec2<i32>(0, 1), texSize, needStripe, needCoh);
+  let nD = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord - vec2<i32>(0, 1), texSize, needStripe, needCoh);
   if (needStripe) {
     let r = select(centerStripe, nR.stripe, nR.valid);
     let l = select(centerStripe, nL.stripe, nL.valid);
@@ -992,39 +1060,24 @@ fn field_gradients_at_coord(
   }
 }
 
-// Bilinear (magnified) counterpart: analytic gradient of the bilinearly
-// interpolated field over the enclosing cell, sharing the four corner fetches.
-// Scales match the former per-field functions: height ×24·scale, others ×16.
-fn field_gradients_bilinear(
+// Bilinear (magnified) counterpart for the packed orbit metrics.
+fn orbit_metric_gradients_bilinear(
   sourceTex: texture_2d_array<f32>,
+  sourceMetadata: texture_2d<u32>,
   uv: vec2<f32>,
   texSize: vec2<i32>,
-  centerHeight: f32,
   centerStripe: f32,
   centerCoherence: f32,
-  heightOffset: f32,
-  heightGradientScale: f32,
-  needHeight: bool,
   needStripe: bool,
   needCoh: bool,
-  heightGrad: ptr<function, vec2<f32>>,
   stripeGrad: ptr<function, vec2<f32>>,
   cohGrad: ptr<function, vec2<f32>>
 ) {
   let cell = bilinear_cell(uv, texSize);
-  let n00 = sample_neighbor_fields(sourceTex, cell.base, texSize, heightOffset, needHeight, needStripe, needCoh);
-  let n10 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(1, 0), texSize, heightOffset, needHeight, needStripe, needCoh);
-  let n01 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(0, 1), texSize, heightOffset, needHeight, needStripe, needCoh);
-  let n11 = sample_neighbor_fields(sourceTex, cell.base + vec2<i32>(1, 1), texSize, heightOffset, needHeight, needStripe, needCoh);
-  if (needHeight) {
-    let h00 = select(centerHeight, n00.height, n00.valid);
-    let h10 = select(centerHeight, n10.height, n10.valid);
-    let h01 = select(centerHeight, n01.height, n01.valid);
-    let h11 = select(centerHeight, n11.height, n11.valid);
-    let gx = mix(h10 - h00, h11 - h01, cell.f.y);
-    let gy = mix(h01 - h00, h11 - h10, cell.f.x);
-    *heightGrad = vec2<f32>(gx, gy) * 24.0 * heightGradientScale;
-  }
+  let n00 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base, texSize, needStripe, needCoh);
+  let n10 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(1, 0), texSize, needStripe, needCoh);
+  let n01 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(0, 1), texSize, needStripe, needCoh);
+  let n11 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(1, 1), texSize, needStripe, needCoh);
   if (needStripe) {
     let s00 = select(centerStripe, n00.stripe, n00.valid);
     let s10 = select(centerStripe, n10.stripe, n10.valid);
@@ -1043,11 +1096,6 @@ fn field_gradients_bilinear(
     let gy = mix(c01 - c00, c11 - c10, cell.f.x);
     *cohGrad = vec2<f32>(gx, gy) * 16.0;
   }
-}
-
-fn direction_coherence_normal(normal: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, grad: vec2<f32>, strength: f32) -> vec3<f32> {
-  let bump = tangent * grad.x + bitangent * grad.y;
-  return normalize(normal - bump * clamp(strength, 0.0, 100.0) * 0.75);
 }
 
 fn debug_mirror_phase(t: f32) -> f32 {
@@ -1077,14 +1125,14 @@ fn debug_wheel_sector(uv: vec2<f32>) -> i32 {
 // ── Colorize a single pixel from its raw layer values ──────────────
 fn colorize_pixel(
   sourceTex: texture_2d_array<f32>,
+  sourceGeometry: texture_2d<f32>,
+  sourceMetadata: texture_2d<u32>,
   sourceCoord: vec2<i32>,
   sourceTexSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
   extras: PixelExtras,
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
-  distanceHeightOffset: f32,
-  distanceHeightGradientScale: f32,
   uv_tex: vec2<f32>,
   magnified: bool,
   analyticTag: bool
@@ -1095,11 +1143,15 @@ fn colorize_pixel(
   }
 
   // Budget exhausted: z hasn't escaped. Treat as interior — same coloring.
+  // The Taylor payload is only written at escape, so the reach view marks
+  // these rather than reading a stale one.
   if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
+    if (parameters.reachDebug > 0.5) { return vec4<f32>(0.10, 0.10, 0.12, 1.0); }
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
   if (iter_val == 0.0) {
+    if (parameters.reachDebug > 0.5) { return vec4<f32>(0.10, 0.10, 0.12, 1.0); }
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
@@ -1109,36 +1161,100 @@ fn colorize_pixel(
   var z_sq = dot(z, z);
   var mu_val = smooth_escape_fraction(z_sq);
 
+  // Debug view 6 — analytic-AA reach. How far, IN PIXELS, this pixel's own
+  // Taylor payload ẑ(δc) = z + z′·δc + ½·z″·δc² stays inside tolerance; i.e.
+  // how many neighbours one computed pixel could serve without iterating.
+  //
+  // It reads the payload the production path ALREADY stored (layers 8/11/12),
+  // so it costs one texture fetch, needs no re-iteration, and by construction
+  // shows the state of the very render on screen. An earlier attempt put this
+  // in the standalone debug pipeline, which recomputes every pixel in its own
+  // loop: slow, and free to disagree with the displayed frame.
+  //
+  // READ IT AS AN ESTIMATE, NOT A CERTIFICATE. ρ solves the last-RETAINED-term
+  // criterion ½|z″|ρ² = tol·|z|, which gauges the truncation by the last term
+  // kept rather than the first one dropped. A rigorous radius (via z‴ or a
+  // Cauchy tail) will be SMALLER. The point is the order of magnitude and the
+  // spatial distribution: if this view is blue everywhere, no amount of rigour
+  // rescues the idea.
+  if (parameters.reachDebug > 0.5) {
+    if (!analyticTag) {
+      return vec4<f32>(0.15, 0.2, 0.45, 1.0);
+    }
+    // The "no data" cases are given DISTINCT colors rather than one grey: with
+    // three different causes (wrong texture bound / z″ never accumulated /
+    // payload corrupt) a single grey turns a bug report into a guessing game.
+    let S = textureLoad(rawTex, sourceCoord, 8, 0).r;
+    let sndLog = textureLoad(rawTex, sourceCoord, 11, 0).r;
+    let sndAngle = textureLoad(rawTex, sourceCoord, 12, 0).r;
+    // +marker = z″ not tracked / payload invalid. Keep mode readiness visible
+    // before calling a live-table invalid payload a numerical failure.
+    if (!(sndLog < 1e30)) {
+      if (parameters.reachReady < 0.5) {
+        return vec4<f32>(0.95, 0.5, 0.1, 1.0);  // ORANGE — not in Auto: no data
+      }
+      if (parameters.reachReady < 1.5) {
+        return vec4<f32>(0.95, 0.85, 0.25, 1.0); // YELLOW — table still building
+      }
+      return vec4<f32>(0.15, 0.2, 0.45, 1.0); // DARK BLUE — unusable payload
+    }
+    // A tracked mathematical zero is distinct from an absent payload. z‴ then
+    // sets the first omitted term, so the current payload cannot measure reach.
+    if (sndLog < -1e30) {
+      return vec4<f32>(0.42, 0.16, 0.30, 1.0);   // PLUM — quadratic criterion
+                                                 // inoperative: reach NOT
+                                                 // measurable from this payload
+    }
+    if (!(abs(S) < 1e6) || !(abs(sndAngle) < 1e30)) {
+      return vec4<f32>(0.15, 0.2, 0.45, 1.0);
+    }
+    let log2Snd = sndLog * LOG2E_;
+    let log2Rho = 0.5 * (log2(2.0 * REACH_TOL * max(length(z), 1e-30)) - log2Snd);
+    // Match resolve.wgsl exactly: the raw source is the square neutral texture,
+    // whose texel spans 2·neutralExtent/neutralSize times the view half-height.
+    // Omitting neutralExtent made this debug view overstate reach on wide views.
+    let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);
+    let log2Pix = (
+      log(2.0 * neutralExtent / max(f32(sourceTexSize.y), 1.0))
+      + parameters.lnScale
+    ) * LOG2E_;
+    return vec4<f32>(reach_ramp((log2Rho - log2Pix) / 6.0), 1.0);
+  }
+
   // Phase D analytic AA: pixels the reseed tagged analytic-OK were frozen at
   // their sample-0 state; reconstruct this sample's sub-pixel value
   // ẑ(δc) = z + z′·δc + ½·z″·δc² from the raw Taylor payload
-  // (layer 8 = S, 9/10 = z′ mantissa ·e^S, 11/12 = z″ mantissa ·e^{2S}) and
+  // (layer 8 = S, 9/10 = z′ mantissa ·e^S,
+  //  layer 11 = ln|z″|, layer 12 = arg(z″)) and
   // derive the subsample's smooth iteration / escape-z from ẑ — the log-log
   // formula extrapolates below bailout, no re-iteration. The extrapolated ν̂ is
   // then renormalized like the bilinear resolve: iter = floor(ν̂) + a synthetic
   // |z| reproducing fract(ν̂), so integer-parity coloring (zebra) and the escape
   // gates see a genuinely-escaped-at-that-iteration sample — a re-iterated
   // subsample crossing an iteration line gets iter±1, and the analytic one must
-  // match. Height/angle keep the center pixel's values (DE varies slowly at
-  // sub-pixel scale); the escape-z DIRECTION stays the center's (like the
+  // match. Cached geometry keeps the center pixel's values at sub-pixel scale;
+  // the escape-z DIRECTION stays the center's (like the
   // bilinear path, no per-iteration angle doubling).
-  if (analyticTag && parameters.aaAnalytic > 0.5 && textureNumLayers(sourceTex) > 12u) {
-    let S = textureLoad(sourceTex, sourceCoord, 8, 0).r;
-    let m1 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 9, 0).r,
-                       textureLoad(sourceTex, sourceCoord, 10, 0).r);
-    let m2 = vec2<f32>(textureLoad(sourceTex, sourceCoord, 11, 0).r,
-                       textureLoad(sourceTex, sourceCoord, 12, 0).r);
+  if (analyticTag && parameters.aaAnalytic > 0.5) {
+    let S = textureLoad(rawTex, sourceCoord, 8, 0).r;
+    let m1 = vec2<f32>(textureLoad(rawTex, sourceCoord, 9, 0).r,
+                       textureLoad(rawTex, sourceCoord, 10, 0).r);
+    let sndLog = textureLoad(rawTex, sourceCoord, 11, 0).r;
+    let sndAngle = textureLoad(rawTex, sourceCoord, 12, 0).r;
     // Finite guard (mirrors the reseed): a non-finite payload must fall back
     // to the center color, never feed the reconstruction.
     if (abs(S) < 1e6
       && abs(m1.x) < 1e30 && abs(m1.y) < 1e30
-      && abs(m2.x) < 1e30 && abs(m2.y) < 1e30) {
+      && abs(sndLog) < 1e30 && abs(sndAngle) < 1e30) {
     let hat = vec2<f32>(parameters.aaJitterHatX, parameters.aaJitterHatY);
     // Exponent-summed magnitudes: e^{S+ln|δc|} stays finite where e^S alone
     // would overflow f32.
     let e1 = exp(clamp(S + parameters.aaJitterLogMag, -80.0, 80.0));
-    let e2 = exp(clamp(2.0 * (S + parameters.aaJitterLogMag), -80.0, 80.0));
-    let zhat = z + cmul_c(m1, hat) * e1 + cmul_c(cmul_c(m2, hat), hat) * (0.5 * e2);
+    let quadraticLogMag = log(0.5) + sndLog + 2.0 * parameters.aaJitterLogMag;
+    let quadraticAngle = sndAngle + 2.0 * atan2(hat.y, hat.x);
+    let quadratic = exp(quadraticLogMag)
+      * vec2<f32>(cos(quadraticAngle), sin(quadraticAngle));
+    let zhat = z + cmul_c(m1, hat) * e1 + quadratic;
     let zhat_sq = dot(zhat, zhat);
     let nuHat = iter_val + smooth_escape_fraction(zhat_sq);
     var iterEff = floor(nuHat);
@@ -1172,17 +1288,17 @@ fn colorize_pixel(
   // apply it to select between iter_val and nu.
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let prelimPhase = palettePhaseFromRaw(nu * 2.0 / paletteRepeat + animatedPaletteOffset());
-  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.416666667), 0.0);
+  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, palette_row_y(2.0)), 0.0);
   let wSmoothness = row2.g;
   nu = mix(iter_v, nu, wSmoothness);
 
   // ── Zebra: continuous application (darkens even iterations) ──
-  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, 0.25), 0.0);
+  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, palette_row_y(1.0)), 0.0);
   let wZebra = row1.r;
   let isEvenIter = 1.0 - abs(floor(iter_v) % 2.0);
 
-  let distanceHeightStored = extras.der_x + distanceHeightOffset;
-  let angle_der = extras.der_y;
+  let distanceHeightStored = extras.height;
+  let geometryAngle = extras.geometryAngle;
 
   if (parameters.debugShading >= 0.5) {
     let sector = debug_wheel_sector(uv_screen);
@@ -1194,18 +1310,17 @@ fn colorize_pixel(
       return vec4<f32>(debug_heat(debug_distance_scale(distanceHeight)), 1.0);
     }
     if (sector == 2) {
-      let distanceHeight = distance_height_from_values(iter_v, z.x, z.y, distanceHeightStored);
-      let grad = distance_height_gradient_at_coord(sourceTex, sourceCoord, sourceTexSize, distanceHeight, distanceHeightOffset, distanceHeightGradientScale);
+      let grad = extras.gradient * 24.0;
       return vec4<f32>(debug_heat(debug_gradient_scale(length(grad))), 1.0);
     }
-    return vec4<f32>(debug_heat(fract(angle_der / (2.0 * 3.141592653589793) + 0.5)), 1.0);
+    return vec4<f32>(debug_heat(fract(geometryAngle / (2.0 * 3.141592653589793) + 0.5)), 1.0);
   }
 
   let v = nu;
   let v_smooth = nu_smooth;
-  let stripePhase = decode_stripe_phase(extras.refWithStripe);
-  let directionCoherence = decode_direction_coherence(extras.avgDirection);
-  var color = palette(sourceTex, sourceCoord, sourceTexSize, iter_v, v, v_smooth, z, distanceHeightStored, distanceHeightOffset, distanceHeightGradientScale, angle_der, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y, uv_tex, magnified);
+  let stripePhase = extras.stripePhase;
+  let directionCoherence = extras.directionCoherence;
+  var color = palette(sourceTex, sourceMetadata, sourceCoord, sourceTexSize, iter_v, v, v_smooth, z, distanceHeightStored, extras.gradient, extras.curvature, geometryAngle, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y, uv_screen, uv_tex, magnified);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -1221,28 +1336,12 @@ fn colorize_pixel(
 //   - nu interpolated continuously, re-encoded as iter = floor(nu) plus a
 //     synthetic |z| that reproduces fract(nu) through smooth_escape_fraction;
 //   - z direction interpolated as unit vectors;
-//   - distance height lerped; derivative angle and stripe phase lerped
-//     circularly; average orbit direction unpacked, lerped, repacked.
+//   - cached geometry lerped linearly, stripe phase circularly, coherence
+//     linearly, and provenance reduced to the coarsest contributing support.
 // Non-escaped corners (sentinel, inside, budget-exhausted, no data) are
 // masked out; if they dominate, the caller keeps its nearest sample.
 
 const TWO_PI: f32 = 6.283185307179586;
-
-fn decode_avg_dir_vec(encoded: f32) -> vec2<f32> {
-  let xq = floor(encoded / ORBIT_DIRECTION_BASE);
-  let yq = encoded - xq * ORBIT_DIRECTION_BASE;
-  return vec2<f32>(
-    (xq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-    (yq / ORBIT_DIRECTION_SCALE - 0.5) * 2.0,
-  );
-}
-
-fn encode_avg_dir_vec(avgDir: vec2<f32>) -> f32 {
-  let phase = clamp(avgDir * 0.5 + vec2<f32>(0.5), vec2<f32>(0.0), vec2<f32>(1.0));
-  let xq = floor(phase.x * ORBIT_DIRECTION_SCALE + 0.5);
-  let yq = floor(phase.y * ORBIT_DIRECTION_SCALE + 0.5);
-  return xq * ORBIT_DIRECTION_BASE + yq;
-}
 
 struct InterpPixel {
   kind: i32, // 0 = not interpolable (caller keeps nearest), 1 = escaped interpolated
@@ -1253,7 +1352,7 @@ struct InterpPixel {
   extras: PixelExtras,
 };
 
-fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texSize: vec2<i32>) -> InterpPixel {
+fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, uv: vec2<f32>, texSize: vec2<i32>, zoomFactor: f32) -> InterpPixel {
   var out: InterpPixel;
   out.kind = 0;
 
@@ -1280,21 +1379,17 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
   // iteration counts are large.
   var baseIter = -1.0;
   var nuSum = 0.0;
-  var distSum = 0.0;
+  var geometrySum = vec4<f32>(0.0);
   var zDirSum = vec2<f32>(0.0);
-  var angleDirSum = vec2<f32>(0.0);
   var stripeDirSum = vec2<f32>(0.0);
-  var avgDirSum = vec2<f32>(0.0);
-  var bestW = -1.0;
-  var bestRefInt = 0.0;
-  var bestAngle = 0.0;
-  var bestStripe = 0.0;
+  var coherenceSum = 0.0;
 
   for (var i = 0u; i < 4u; i = i + 1u) {
     let ccoord = clamp(base + offsets[i], vec2<i32>(0), texSize - vec2<i32>(1));
     let w = weights[i];
     let citer = textureLoad(sourceTex, ccoord, 0, 0).r;
-    let cstep = textureLoad(sourceTex, ccoord, 1, 0).r;
+    let metadata = textureLoad(sourceMetadata, ccoord, 0).r;
+    let cstep = decode_support_step(metadata);
     // Sentinel or no data: this corner simply contributes no weight.
     if (citer < 0.0 || cstep <= 0.0) {
       continue;
@@ -1305,8 +1400,8 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
       wInside = wInside + w;
       continue;
     }
-    let zx = textureLoad(sourceTex, ccoord, 2, 0).r;
-    let zy = textureLoad(sourceTex, ccoord, 3, 0).r;
+    let zx = textureLoad(sourceTex, ccoord, 1, 0).r;
+    let zy = textureLoad(sourceTex, ccoord, 2, 0).r;
     let z_sq = zx * zx + zy * zy;
     if (z_sq < parameters.mu) {
       // Budget-exhausted: not displayable as escaped, contributes no weight.
@@ -1319,22 +1414,13 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
     }
     wEscaped = wEscaped + w;
     nuSum = nuSum + w * ((citer - baseIter) + clamp(smooth_escape_fraction(z_sq), 0.0, 1.0));
-    distSum = distSum + w * textureLoad(sourceTex, ccoord, 4, 0).r;
-    let angle = textureLoad(sourceTex, ccoord, 5, 0).r;
-    angleDirSum = angleDirSum + w * vec2<f32>(cos(angle), sin(angle));
+    geometrySum = geometrySum + w * normalize_geometry(textureLoad(sourceGeometry, ccoord, 0), zoomFactor);
     let zLen = max(sqrt(z_sq), 1e-12);
     zDirSum = zDirSum + w * vec2<f32>(zx, zy) / zLen;
-    let refVal = max(textureLoad(sourceTex, ccoord, 6, 0).r, 0.0);
-    let stripePhase = fract(refVal);
+    let stripePhase = decode_stripe_phase(metadata);
     let stripeAngle = stripePhase * TWO_PI;
     stripeDirSum = stripeDirSum + w * vec2<f32>(cos(stripeAngle), sin(stripeAngle));
-    avgDirSum = avgDirSum + w * decode_avg_dir_vec(textureLoad(sourceTex, ccoord, 7, 0).r);
-    if (w > bestW) {
-      bestW = w;
-      bestRefInt = floor(refVal);
-      bestAngle = angle;
-      bestStripe = stripePhase;
-    }
+    coherenceSum = coherenceSum + w * decode_direction_coherence(metadata);
   }
 
   // The interior keeps priority over escaped interpolation (no halo inside
@@ -1368,15 +1454,17 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
   out.zx = zDir.x * zLenOut;
   out.zy = zDir.y * zLenOut;
   out.step = minStep;
-  out.extras.der_x = distSum * invW;
-  out.extras.der_y = select(bestAngle, atan2(angleDirSum.y, angleDirSum.x), length(angleDirSum) > 1e-5);
-  let stripeOut = select(
-    bestStripe,
+  let geometry = geometrySum * invW;
+  out.extras.height = geometry.w;
+  out.extras.gradient = geometry.xy;
+  out.extras.curvature = geometry.z;
+  out.extras.geometryAngle = select(0.0, atan2(geometry.y, geometry.x), dot(geometry.xy, geometry.xy) > 1e-12);
+  out.extras.stripePhase = select(
+    0.0,
     fract(atan2(stripeDirSum.y, stripeDirSum.x) / TWO_PI + 1.0),
     length(stripeDirSum) > 1e-5
   );
-  out.extras.refWithStripe = bestRefInt + min(stripeOut, 0.999999);
-  out.extras.avgDirection = encode_avg_dir_vec(clamp(avgDirSum * invW, vec2<f32>(-1.0), vec2<f32>(1.0)));
+  out.extras.directionCoherence = clamp(coherenceSum * invW, 0.0, 1.0);
   return out;
 }
 
@@ -1384,6 +1472,8 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, uv: vec2<f32>, texS
 // pre-computed bilinear interpolation when one is available (magnified case).
 fn colorize_sampled(
   sourceTex: texture_2d_array<f32>,
+  sourceGeometry: texture_2d<f32>,
+  sourceMetadata: texture_2d<u32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
@@ -1392,14 +1482,13 @@ fn colorize_sampled(
   magnified: bool,
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
-  distanceHeightOffset: f32,
-  distanceHeightGradientScale: f32,
+  zoomFactor: f32,
   analyticTag: bool
 ) -> vec4<f32> {
   var it = iter_val;
   var zx = zx_val;
   var zy = zy_val;
-  var extras = load_pixel_extras(sourceTex, coord);
+  var extras = load_pixel_extras(sourceGeometry, sourceMetadata, coord, zoomFactor);
   var analytic = analyticTag;
   if (interp.kind == 1) {
     it = interp.iter;
@@ -1410,8 +1499,8 @@ fn colorize_sampled(
     analytic = false;
   }
   return colorize_pixel(
-    sourceTex, coord, texSize, it, zx, zy, extras,
-    uv_screen, uv_neutral, distanceHeightOffset, distanceHeightGradientScale,
+    sourceTex, sourceGeometry, sourceMetadata, coord, texSize, it, zx, zy, extras,
+    uv_screen, uv_neutral,
     uv_tex, magnified, analytic
   );
 }
@@ -1462,16 +1551,11 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   // Texture magnified on screen → bilinear interpolation of the samples.
   let liveMagnified = lzf > 1.001;
   let frozenMagnified = zf > 1.001;
-  let liveDistanceHeightOffset = distance_height_scale_offset(lzf);
-  let frozenDistanceHeightOffset = distance_height_scale_offset(zf);
-  let liveDistanceHeightGradientScale = distance_height_gradient_scale(lzf);
-  let frozenDistanceHeightGradientScale = distance_height_gradient_scale(zf);
-
   // ── Unified path: min-step-wins compositing ──────────────────────
-  // Layer 1 stores the resolution step: 1 = genuine pixel (best),
-  // >= 2 = resolve-copied from a grid neighbor (coarser = worse),
-  // 0 = no data (sentinel / uncomputed).
-  // The pixel with the smallest positive step wins.
+  // Packed metadata stores log2 of the support step: 0 means an exact
+  // step-1 pixel, positive values are progressively coarser dyadic support.
+  // iter < 0 remains the independent no-data marker. The pixel with the
+  // smallest effective support step wins.
   // When not zooming (zf=1, lzf=1), UV math reduces to identity, so the
   // same logic works seamlessly for both zoom and non-zoom rendering.
 
@@ -1511,7 +1595,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         discard;
       }
     }
-    let liveSample = load_pixel_sample(tex, liveCoord);
+    let liveSample = load_pixel_sample(tex, metadataTex, liveCoord);
     live_iter = liveSample.iter;
     liveStep = liveSample.step;
     live_zx = liveSample.zx;
@@ -1525,8 +1609,9 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   var liveInterp: InterpPixel;
   liveInterp.kind = 0;
   if (liveInBounds && liveMagnified) {
-    liveInterp = sample_escaped_bilinear(tex, uv_live, texSize);
+    liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, uv_live, texSize, lzf);
   }
+  liveAnalyticTag = liveAnalyticTag || parameters.reachDebug > 0.5;
 
   let liveEscaped = live_iter > 0.0 && (live_zx * live_zx + live_zy * live_zy) >= parameters.mu;
   var liveHasData = liveEscaped && liveStep > 0.0;
@@ -1567,13 +1652,13 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         i32(clamp(uv_frozen.x * texSizeF.x, 0.0, texSizeF.x - 1.0)),
         i32(clamp((1.0 - uv_frozen.y) * texSizeF.y, 0.0, texSizeF.y - 1.0))
       );
-      let frozenSample = load_pixel_sample(texFrozen, frozenCoord);
+      let frozenSample = load_pixel_sample(texFrozen, frozenMetadataTex, frozenCoord);
       frozen_iter = frozenSample.iter;
       frozenStep = frozenSample.step;
       frozen_zx = frozenSample.zx;
       frozen_zy = frozenSample.zy;
       if (frozenMagnified) {
-        frozenInterp = sample_escaped_bilinear(texFrozen, uv_frozen, texSize);
+        frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, uv_frozen, texSize, zf);
       }
     }
   }
@@ -1592,14 +1677,16 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   // values are not directly comparable. A frozen genuine pixel (step=1) at
   // frozenScale is zf/lzf times coarser per axis than a live genuine pixel
   // (step=1) at liveScale.  Scale the frozen step to live-resolution units.
-  let scaleRatio = select(1.0, zf / lzf, lzf > 0.0);
-  let effectiveFrozenStep = frozenCompositeStep * scaleRatio;
+  let effectiveLiveStep = liveCompositeStep * max(lzf, 1e-30);
+  let effectiveFrozenStep = frozenCompositeStep * max(zf, 1e-30);
 
   if (liveHasData && frozenHasData) {
     // Both have data — pick the one with finer resolution (smaller step).
-    if (liveCompositeStep <= effectiveFrozenStep) {
+    if (effectiveLiveStep <= effectiveFrozenStep) {
       let liveColor = colorize_sampled(
         tex,
+        geometryTex,
+        metadataTex,
         liveCoord,
         texSize,
         live_iter,
@@ -1610,8 +1697,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         liveMagnified,
         uv_screen,
         uv_neutral,
-        liveDistanceHeightOffset,
-        liveDistanceHeightGradientScale,
+        lzf,
         liveAnalyticTag
       );
       if (DEBUG_SHOW_LIVE_NEGATIVE) {
@@ -1622,6 +1708,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     } else {
       let frozenColor = colorize_sampled(
         texFrozen,
+        frozenGeometryTex,
+        frozenMetadataTex,
         frozenCoord,
         texSize,
         frozen_iter,
@@ -1632,8 +1720,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
         frozenMagnified,
         uv_screen,
         uv_neutral,
-        frozenDistanceHeightOffset,
-        frozenDistanceHeightGradientScale,
+        zf,
         false
       );
       return vec4<f32>(frozenColor.rgb, 1.0);
@@ -1643,6 +1730,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   if (liveHasData) {
     let liveColor = colorize_sampled(
       tex,
+      geometryTex,
+      metadataTex,
       liveCoord,
       texSize,
       live_iter,
@@ -1653,8 +1742,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       liveMagnified,
       uv_screen,
       uv_neutral,
-      liveDistanceHeightOffset,
-      liveDistanceHeightGradientScale,
+      lzf,
       liveAnalyticTag
     );
     if (DEBUG_SHOW_LIVE_NEGATIVE) {
@@ -1671,6 +1759,8 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   if (frozenHasData) {
     let frozenColor = colorize_sampled(
       texFrozen,
+      frozenGeometryTex,
+      frozenMetadataTex,
       frozenCoord,
       texSize,
       frozen_iter,
@@ -1681,8 +1771,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       frozenMagnified,
       uv_screen,
       uv_neutral,
-      frozenDistanceHeightOffset,
-      frozenDistanceHeightGradientScale,
+      zf,
       false
     );
     return vec4<f32>(frozenColor.rgb, 1.0);
@@ -1692,8 +1781,16 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   return vec4<f32>(0.05, 0.05, 0.05, 1.0);
 }
 
+// Interleaved-gradient-noise dither: ±0.5 LSB at 8 bits, applied right before
+// quantization to break banding on slow palette ramps.
+fn dither_8bit(pixelCoord: vec2<f32>) -> f32 {
+  let n = fract(52.9829189 * fract(dot(pixelCoord, vec2<f32>(0.06711056, 0.00583715))));
+  return (n - 0.5) / 255.0;
+}
+
 // AA-accumulation path: output linear RGB with alpha = 1.0 so additive blending
 // sums colors in linear space and accumulates a per-pixel sample count in alpha.
+// No dither here: the accumulation target is float, present.wgsl dithers.
 @fragment
 fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   let c = shade_srgb(fragCoord, true);
@@ -1701,8 +1798,10 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 }
 
 // Direct path: unmodified sRGB output (no linear roundtrip, no AA gate) for the
-// legacy direct-to-swapchain render and the PNG/snapshot export.
+// legacy direct-to-swapchain render and the PNG/snapshot export — both 8-bit,
+// hence the dither.
 @fragment
-fn fs_main_direct(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
-  return shade_srgb(fragCoord, false);
+fn fs_main_direct(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let c = shade_srgb(fragCoord, false);
+  return vec4<f32>(clamp(c.rgb + vec3<f32>(dither_8bit(pos.xy)), vec3<f32>(0.0), vec3<f32>(1.0)), c.a);
 }

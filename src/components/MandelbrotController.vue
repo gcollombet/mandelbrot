@@ -32,9 +32,6 @@ const props = defineProps<{
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
   targetFps?: number,
-  gpuLoadMultiplier?: number,
-  zoomMinBrushStep?: number,
-  sentinelSeedStep?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   pickerMode?: boolean,
   uiHidden?: boolean,
@@ -44,11 +41,12 @@ const props = defineProps<{
   animationSpeed?: number,
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
-  subsurfaceStrength?: number,
   reliefDepth?: number,
   localShadowStrength?: number,
   lightAngle?: number,
   varnishStrength?: number,
+  gradeContrast?: number,
+  gradeSaturation?: number,
   orbitTrapStrength?: number,
   phaseColoringStrength?: number,
   stripeFrequency?: number,
@@ -429,9 +427,6 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :dprMultiplier="props.dprMultiplier"
       :maxIterationMultiplier="props.maxIterationMultiplier"
       :targetFps="props.targetFps"
-      :gpuLoadMultiplier="props.gpuLoadMultiplier"
-      :zoomMinBrushStep="props.zoomMinBrushStep"
-      :sentinelSeedStep="props.sentinelSeedStep"
       :interpolationMode="props.interpolationMode"
       :tessellationLevel="props.tessellationLevel"
       :displacementAmount="props.displacementAmount"
@@ -439,11 +434,12 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :animationSpeed="props.animationSpeed"
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :microBumpStrength="props.microBumpStrength"
-      :subsurfaceStrength="props.subsurfaceStrength"
       :reliefDepth="props.reliefDepth"
       :localShadowStrength="props.localShadowStrength"
       :lightAngle="props.lightAngle"
       :varnishStrength="props.varnishStrength"
+      :gradeContrast="props.gradeContrast"
+      :gradeSaturation="props.gradeSaturation"
       :orbitTrapStrength="props.orbitTrapStrength"
       :phaseColoringStrength="props.phaseColoringStrength"
       :stripeFrequency="props.stripeFrequency"

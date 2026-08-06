@@ -8,9 +8,12 @@ const {
   canAccessOwner,
   isAdminClaims,
   isReservationExpired,
+  normalizePresetManifestEntries,
   quotaCountAfter,
+  removePresetManifestEntry,
   requireGuid,
   requirePresetType,
+  upsertPresetManifestEntry,
   validateTextureMetadata,
 } = require('../personalLibraryCore');
 
@@ -60,4 +63,25 @@ test('reservation recovery only selects expired reservations', () => {
   assert.equal(isReservationExpired(1_000, 1_000), true);
   assert.equal(isReservationExpired(999, 1_000), true);
   assert.equal(isReservationExpired(1_001, 1_000), false);
+});
+
+test('preset manifests are deterministic, deduplicated, and ignore malformed legacy entries', () => {
+  assert.deepEqual(normalizePresetManifestEntries([
+    {guid: 'b', type: 'palettePreset', revision: 2},
+    {guid: 'a', type: 'completePreset', revision: 1},
+    {guid: 'b', type: 'palettePreset', revision: 3},
+    {guid: '../unsafe', type: 'completePreset', revision: 1},
+  ]), [
+    {guid: 'a', type: 'completePreset', revision: 1},
+    {guid: 'b', type: 'palettePreset', revision: 3},
+  ]);
+});
+
+test('preset manifest updates replace revisions and deletions remove entries', () => {
+  const updated = upsertPresetManifestEntry(
+    [{guid: 'preset-a', type: 'completePreset', revision: 1}],
+    {guid: 'preset-a', type: 'stopPreset', revision: 4},
+  );
+  assert.deepEqual(updated, [{guid: 'preset-a', type: 'stopPreset', revision: 4}]);
+  assert.deepEqual(removePresetManifestEntry(updated, 'preset-a'), []);
 });

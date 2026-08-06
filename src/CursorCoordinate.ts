@@ -152,8 +152,14 @@ export interface IterationData {
   iter: number;
   zx: number;
   zy: number;
+  /** Distance-height retained for backward-compatible palette picking. */
   derX: number;
+  /** Cached-gradient angle retained for backward-compatible palette picking. */
   derY: number;
+  gradientX?: number;
+  gradientY?: number;
+  curvature?: number;
+  metadata?: number;
 }
 
 /** Résultat du calcul de phase palette. */

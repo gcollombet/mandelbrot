@@ -80,6 +80,8 @@ Cache partitioning can use scope-aware compound keys or per-scope database names
 
 Whole-record last-write-wins reconciliation is used for acknowledged revisions. A cloud pull may replace a clean cache record; it must not silently discard a newer pending local operation. This matches the document-like preset payloads and avoids brittle field-level merging.
 
+Preset discovery uses one complete per-owner manifest containing only GUID, type, and trusted revision. Preset create/delete transactions update that manifest atomically with the canonical documents. For accounts created before the manifest exists, the first authenticated manifest request builds it once from the existing collection. Subsequent synchronizations fetch full payloads only for missing or older cache revisions. Because the manifest is a complete snapshot, a clean synchronized cache record absent from it is purged as a cross-device deletion; pending writes and tombstones remain authoritative until submitted.
+
 Alternative considered: write Firebase first and update IndexedDB only after success. Rejected because it would make saving feel slow and remove useful offline behavior.
 
 ### D6 - Preserve thumbnails in personal cloud documents
@@ -102,7 +104,7 @@ Alternative considered: retain originals locally and upload a separate derivativ
 
 After authentication and initial account usage sync, detect guest GUIDs absent from that account. Show only `Import all` and `Not now`; do not provide item selection or deletion. Before starting, preflight the number of missing presets and textures against both remaining quotas and validate that guest textures can be normalized. If either complete set cannot fit, start no new import and explain the blocking quota.
 
-The user decision is all-or-nothing, while network execution is resumable rather than a cross-service distributed transaction. An import job/batch ID records progress; retries skip account records already present by GUID and finish remaining entries. Guest source records are never modified, removed, relabeled, or hidden. On sign-out the same guest scope is restored, and another account may independently import it.
+The user decision is all-or-nothing, while network execution is resumable rather than a cross-service distributed transaction. An import job/batch ID records progress; later sign-in preparation reloads the latest incomplete batch for the same account and matching guest source, reuses its ID, and finishes remaining entries. Progress is reconciled with account GUIDs so a crash after a local copy but before the progress write does not duplicate work. Guest source records are never modified, removed, relabeled, or hidden. On sign-out the same guest scope is restored, and another account may independently import it.
 
 Alternative considered: claim or move guest records into the first signed-in account. Rejected because login may use the wrong account, the device may be shared, and implicit deletion is surprising. Alternative considered: per-item selection. Deferred to keep the initial experience simple.
 

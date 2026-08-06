@@ -1,6 +1,12 @@
 import {getAllAnimationPresetCacheRecords, saveAnimationPresetEntry, type AnimationPresetRecord} from './animationPresetStore';
 import {createGuid} from './catalogIdentity';
-import {getPersonalUsage, listPersonalPresetRecords, listPersonalTextureMetadata, savePersonalImportBatch} from './personalLibraryRemote';
+import {
+  getPersonalPresetManifest,
+  getPersonalUsage,
+  listPersonalImportBatches,
+  listPersonalTextureMetadata,
+  savePersonalImportBatch,
+} from './personalLibraryRemote';
 import {PERSONAL_PRESET_LIMIT, PERSONAL_TEXTURE_LIMIT, type GuestImportBatch, type PersonalPresetType} from './personalLibraryTypes';
 import {getAllPaletteCacheRecords, savePaletteEntry, type PaletteRecord} from './paletteStore';
 import {getAllPresetCacheRecords, savePresetEntry, type PresetRecord} from './presetStore';
@@ -36,6 +42,7 @@ export interface GuestImportPlan {
   textureCount: number;
   canImport: boolean;
   blockingReason?: string;
+  resumeBatch?: GuestImportBatch;
 }
 
 function isGuestRecord(record: ScopedCacheFields): boolean {
@@ -104,9 +111,10 @@ export function buildGuestImportPlan(
 }
 
 export async function prepareGuestImport(uid: string, snapshot: GuestLibrarySnapshot): Promise<GuestImportPlan> {
-  const [remotePresets, remoteTextures, usage, localComplete, localPalettes, localStops, localMappings, localAnimations, localTextures] = await Promise.all([
-    listPersonalPresetRecords(uid),
+  const [manifest, remoteTextures, batches, usage, localComplete, localPalettes, localStops, localMappings, localAnimations, localTextures] = await Promise.all([
+    getPersonalPresetManifest(),
     listPersonalTextureMetadata(uid),
+    listPersonalImportBatches(uid),
     getPersonalUsage(uid),
     getAllPresetCacheRecords(),
     getAllPaletteCacheRecords(),
@@ -123,9 +131,9 @@ export async function prepareGuestImport(uid: string, snapshot: GuestLibrarySnap
   const localTextureGuids = localTextures
     .filter(record => record.origin === 'personal' && !record.tombstone && !!record.guid)
     .map(record => record.guid!);
-  const existingPresetGuids = new Set([...remotePresets.map(record => record.guid), ...localPresetGuids]);
+  const existingPresetGuids = new Set([...manifest.entries.map(record => record.guid), ...localPresetGuids]);
   const existingTextureGuids = new Set([...remoteTextures.map(record => record.guid), ...localTextureGuids]);
-  return buildGuestImportPlan(
+  const plan = buildGuestImportPlan(
     uid,
     snapshot,
     existingPresetGuids,
@@ -135,6 +143,14 @@ export async function prepareGuestImport(uid: string, snapshot: GuestLibrarySnap
       textureCount: Math.max(usage.textureCount, existingTextureGuids.size),
     },
   );
+  const resumeBatch = resumableBatchForPlan(plan, batches, existingPresetGuids, existingTextureGuids);
+  if (resumeBatch && isGuestImportBatchComplete(resumeBatch)) {
+    resumeBatch.status = 'complete';
+    await savePersonalImportBatch(resumeBatch);
+  } else {
+    plan.resumeBatch = resumeBatch;
+  }
+  return plan;
 }
 
 function personalCopy<T extends Record<string, unknown>>(record: T): T {
@@ -164,7 +180,81 @@ async function copyPreset(entry: GuestPresetRecord): Promise<void> {
   }
 }
 
-function batchFor(plan: GuestImportPlan): GuestImportBatch {
+export function findResumableGuestImportBatch(
+  uid: string,
+  snapshot: GuestLibrarySnapshot,
+  batches: GuestImportBatch[],
+): GuestImportBatch | undefined {
+  const presetGuids = new Set(snapshot.presets.map(entry => entry.record.guid));
+  const textureGuids = new Set(snapshot.textures.map(entry => entry.record.guid!));
+  return batches
+    .filter(batch => (
+      batch.uid === uid
+      && batch.status !== 'complete'
+      && (batch.presetGuids.length > 0 || batch.textureGuids.length > 0)
+      && batch.presetGuids.every(guid => presetGuids.has(guid))
+      && batch.textureGuids.every(guid => textureGuids.has(guid))
+    ))
+    .sort((left, right) => Date.parse(right.updatedAt) - Date.parse(left.updatedAt))[0];
+}
+
+export function resumableBatchForPlan(
+  plan: GuestImportPlan,
+  batches: GuestImportBatch[],
+  existingPresetGuids: ReadonlySet<string>,
+  existingTextureGuids: ReadonlySet<string>,
+): GuestImportBatch | undefined {
+  const previous = findResumableGuestImportBatch(plan.uid, plan.snapshot, batches);
+  if (!previous) return undefined;
+  const presetGuids = [...new Set([
+    ...previous.presetGuids,
+    ...plan.missingPresets.map(entry => entry.record.guid),
+  ])];
+  const textureGuids = [...new Set([
+    ...previous.textureGuids,
+    ...plan.missingTextures.map(entry => entry.record.guid!),
+  ])];
+  const completedPresetGuids = new Set(
+    previous.completedPresetGuids.filter(guid => existingPresetGuids.has(guid)),
+  );
+  const completedTextureGuids = new Set(
+    previous.completedTextureGuids.filter(guid => existingTextureGuids.has(guid)),
+  );
+  for (const guid of previous.presetGuids) {
+    if (existingPresetGuids.has(guid)) completedPresetGuids.add(guid);
+  }
+  for (const guid of previous.textureGuids) {
+    if (existingTextureGuids.has(guid)) completedTextureGuids.add(guid);
+  }
+  const resumed: GuestImportBatch = {
+    ...previous,
+    status: 'pending',
+    presetGuids,
+    textureGuids,
+    completedPresetGuids: [...completedPresetGuids].filter(guid => presetGuids.includes(guid)),
+    completedTextureGuids: [...completedTextureGuids].filter(guid => textureGuids.includes(guid)),
+  };
+  delete resumed.lastError;
+  return resumed;
+}
+
+export function isGuestImportBatchComplete(batch: GuestImportBatch): boolean {
+  const completedPresetGuids = new Set(batch.completedPresetGuids);
+  const completedTextureGuids = new Set(batch.completedTextureGuids);
+  return batch.presetGuids.every(guid => completedPresetGuids.has(guid))
+    && batch.textureGuids.every(guid => completedTextureGuids.has(guid));
+}
+
+export function batchFor(plan: GuestImportPlan): GuestImportBatch {
+  if (plan.resumeBatch) {
+    return {
+      ...plan.resumeBatch,
+      presetGuids: [...plan.resumeBatch.presetGuids],
+      textureGuids: [...plan.resumeBatch.textureGuids],
+      completedPresetGuids: [...plan.resumeBatch.completedPresetGuids],
+      completedTextureGuids: [...plan.resumeBatch.completedTextureGuids],
+    };
+  }
   return {
     id: createGuid(),
     uid: plan.uid,
@@ -188,6 +278,7 @@ export async function importGuestLibrary(plan: GuestImportPlan): Promise<void> {
   setActiveLibraryScope({kind: 'user', uid: plan.uid});
   await persistBatch(batch);
   batch.status = 'running';
+  await persistBatch(batch);
   try {
     for (const entry of plan.missingPresets) {
       if (batch.completedPresetGuids.includes(entry.record.guid)) continue;

@@ -42,11 +42,12 @@ BLA et Padé éliminent directement les niveaux 1 et 2, car un bloc linéaire ou
 | **Padé** | vue rationnelle `[1/1]` avec dénominateur $1+D\delta z$ | même format BLA, avec $D\neq0$ | rayon propre au bloc et garde de distance au pôle |
 | **Jet** | polynôme bivarié tronqué, ordre adaptatif jusqu’au degré 3 au runtime | 27 `f32` de coefficients + sidecar de rayons de 16 octets | rayons certifiés par majorants de la queue omise |
 | **Möbius c+** | rationnelle augmentée en $\delta c$, issue du jet | 21 `f32` de coefficients + sidecar de rayons de 16 octets | rayon certifié et marge sur le dénominateur |
-| **Auto** | un enregistrement commun, tagué bloc par bloc | 9 coefficients `CFe` = 27 `f32` + sidecar de 16 octets | quatre rayons indépendants, un tier principal et un secours |
+| **Auto legacy / shadow** | un enregistrement commun, tagué bloc par bloc | 9 coefficients `CFe` = 27 `f32` + sidecar principal/secours de 16 octets | quatre rayons résolus pour le `cmax` courant |
+| **Auto dynamique** | le même enregistrement commun, tier choisi par pixel | coefficients + enveloppe certifiée de 24 mots `f32` (96 octets) + provenance de 8 octets | fonction certifiée de `|δc|` et `|δz|`, valide dans un domaine de référence statique |
 
-## Exemple concret de structure d’une table
+## Exemple concret de structure d’une table legacy
 
-Prenons une petite table **Auto** couvrant 32 itérations. Les valeurs ci-dessous sont volontairement fictives et arrondies : elles servent à montrer l’organisation en mémoire, pas à reproduire une orbite particulière. La table possède d’abord un répertoire de niveaux. Chaque niveau indique où commencent ses blocs dans le buffer, combien il en contient et combien d’itérations chaque bloc permet de sauter.
+Prenons une petite table **Auto legacy**, qui sert aussi de référence au mode `shadow`, couvrant 32 itérations. Les valeurs ci-dessous sont volontairement fictives et arrondies : elles montrent l’organisation en mémoire, pas une orbite particulière. La table possède d’abord un répertoire de niveaux. Chaque niveau indique où commencent ses blocs dans le buffer, combien il en contient et combien d’itérations chaque bloc permet de sauter.
 
 | Niveau | `offset` dans le buffer | `count` | `skip` | Indices de départ représentés |
 |---:|---:|---:|---:|---|
@@ -114,7 +115,7 @@ Möbius c+ est extrait du jet, mais représente le bloc sous une forme rationnel
 
 Les bornes sont obtenues par une marche de majorants sur le segment, puis les rayons sont résolus pour $(\varepsilon,c_{\max})$. Comme pour Padé, l’application vérifie la distance au pôle ; comme pour Jet, le rayon est certifié à partir des restes non représentés.
 
-### Auto : une table unifiée, pas un mode choisi une fois pour toute
+### Auto : un enregistrement unifié, trois politiques de décision
 
 Auto correspond au mode Rust `Unified`. Chaque bloc possède un seul enregistrement préfixé :
 
@@ -126,78 +127,81 @@ Auto correspond au mode Rust `Unified`. Chaque bloc possède un seul enregistrem
  └────────── Jet ordre 3 ──────────┘
 ```
 
-Les tiers lisent donc seulement le préfixe nécessaire : 24 octets pour l’affine, 48 pour Padé, 84 pour Möbius c+ et 108 pour le Jet. Les coefficients de Jet qui ne sont pas stockés directement sont reconstruits dans les registres à partir d’identités algébriques.
+Les tiers lisent seulement le préfixe nécessaire : 24 octets pour l’affine, 48 pour Padé, 84 pour Möbius c+ et 108 pour le Jet. Les coefficients de Jet absents du buffer sont reconstruits dans les registres à partir d’identités algébriques. Ce buffer dépend de l’orbite, jamais de la position instantanée de la caméra.
 
-Pour chaque bloc, Rust calcule quatre rayons indépendants, dans l’ordre affine, Padé, Möbius c+, Jet. Le rayon effectif de chaque tier est
+Trois politiques utilisent aujourd’hui cet enregistrement :
+
+1. **legacy** résout quatre rayons pour $(\varepsilon,c_{max})$, rejoue des pixels échantillons, puis stocke un couple principal/secours dans le sidecar de 16 octets décrit plus haut ;
+2. **dynamique** charge une enveloppe de preuve et choisit, pour le pixel courant, le premier tier certifié dans l’ordre affine, Padé, Möbius c+, Jet ;
+3. **shadow** évalue exactement les mêmes enveloppes et incrémente leurs compteurs, mais ignore leur choix et applique les tags legacy. Il sert de référence A/B.
+
+Le mode dynamique compile chaque inégalité de reste comportant une puissance $i>0$ de $\delta z$ sous la forme
 
 $$
-R_{eff}=\min(R_{valeur},R_{dérivée}).
+\log_2 |\delta z|\le A_{ij}-\frac{j}{i}\log_2|\delta c|.
 $$
 
-Les rayons ne sont jamais échangés entre tiers : une évaluation Padé utilise le rayon Padé, une évaluation Jet le rayon Jet.
+Les pentes possibles sont partagées globalement (`0`, `-1/2`, `-1`, `-2`). Chaque tier stocke quatre intercepts arrondis dans le sens conservateur, un plafond de domaine pur en $\delta c$ et un rayon de candidat de Cauchy. Les quatre tiers occupent exactement **24 mots `f32`, soit 96 octets par bloc**. Un flux de provenance séparé de 8 octets explique les refus mais ne participe jamais à l’acceptation.
 
-Auto rejoue ensuite la récurrence exacte de perturbation sur seize pixels échantillons, aux rayons $c_{\max}$ et $c_{\max}/4$, avec le même rebase que le shader. Il en extrait la médiane de $\log_2\lvert\delta z\rvert$ et une dispersion basée sur `p90 - p50`. Cette bande de travail sert à estimer, pour chaque tier, sa probabilité de couvrir un bloc.
+À un niveau donné, le shader calcule `log2|δc|` et `log2|δz|`, teste les tiers du moins cher au plus cher et charge seulement le préfixe de coefficients du premier tier accepté. Il cherche toujours le plus grand saut aligné avant d’optimiser le coût du tier : un Jet valide pour 1024 itérations est donc préféré à une affine valide pour 4.
 
-Le couple **principal + secours** est choisi conjointement en maximisant une couverture attendue par coût attendu. Le coût inclut la lecture du préfixe, le poids arithmétique, le surcoût floatexp, la descente vers un niveau inférieur après échec et la divergence éventuelle du secours. Le secours n’est retenu que s’il possède un rayon strictement plus grand.
+Les accélérateurs optionnels — préfixe SA, certificat périodique et gates paraboliques lorsqu’elles sont disponibles — vivent après les blocs dans un header versionné séparément. Leur domaine `|δc|` est explicite. Un header périmé est désactivé ou rafraîchi sans invalider les coefficients ni les enveloppes.
 
-Le sidecar de 16 octets encode alors :
+## Où `cmax` intervient encore
 
-| Composante | Contenu |
-|---|---|
-| `x` | $\log_2 R$ du tier principal |
-| `y` | tag principal : 0 affine, 1 Padé, 2 Möbius c+, 3 Jet |
-| `z` | drapeau `f32-safe` et tag du secours empaquetés |
-| `w` | $\log_2 R$ du secours, ou $-\infty$ s’il n’existe pas |
-
-Le shader sonde d’abord le principal. Si $\lvert\delta z\rvert$ dépasse son rayon mais reste sous celui du secours, il lit le même enregistrement avec le second tag. Si les deux échouent, il descend de niveau.
-
-Le sidecar unifié transporte également, après les blocs, les données du préfixe SA, le certificat périodique et le répertoire des gates. Ces accélérations sont propres à Auto et ne changent pas la règle fondamentale : chaque saut doit passer sa garde locale.
-
-## Pourquoi les rayons dépendent de `cmax`
-
-`cmax` est une borne supérieure de $\lvert\delta c\rvert$ sur tout le viewport par rapport à la référence courante. Pour certifier un reste contenant un terme $q_{ij}\delta z^i\delta c^j$, Rust doit le majorer pour tous les pixels :
+`cmax` est une borne supérieure de $\lvert\delta c\rvert$ sur tout le viewport par rapport à la référence courante. Le pipeline legacy l’injecte dans une certification uniforme :
 
 $$
 |q_{ij}|\,R_z^i\,c_{max}^j.
 $$
 
-Augmenter `cmax` augmente ces restes, rapproche potentiellement les formes rationnelles de leurs pôles et réduit les rayons valides. C’est pour cela que Jet, Möbius et Auto séparent trois couches de cache :
+Augmenter `cmax` augmente les restes, rapproche potentiellement les formes rationnelles de leurs pôles et réduit les rayons legacy. Jet, Möbius et Auto legacy séparent donc trois couches de cache :
 
 1. **niveaux et coefficients**, indexés par l’orbite et sa longueur ;
 2. **bornes/majorants**, indexés par la réserve de $c_{\max}$ ;
 3. **rayons, tags et sidecar**, indexés par $(\varepsilon,c_{\max})$.
 
-Un changement de zoom ne force donc pas systématiquement la recomposition complète. Si l’orbite est identique, les coefficients restent réutilisables. Si la réserve de majorants couvre encore la nouvelle vue, seuls les rayons et tags sont résolus de nouveau. Dans Auto, ce cas produit un message `radiiReady` : le moteur réécrit le petit sidecar sans renvoyer les coefficients.
+Un changement de zoom ne force pas la recomposition des coefficients. En legacy, si la réserve de majorants couvre encore la vue, seuls les rayons et tags sont résolus ; Auto peut envoyer un `radiiReady` sans renvoyer les coefficients.
 
-## Construction et progression affichée
+En **Auto dynamique**, `cmax` ne choisit plus le rayon d’un bloc. Les majorants sont construits une fois pour un plafond de domaine rattaché à la référence courante — actuellement quatre octaves de réserve — puis le GPU substitue le `|δc|` réel de chaque pixel dans l’enveloppe. Un mouvement interne à ce domaine ne reconstruit ni coefficients, ni bornes, ni enveloppes. Si un pixel sort du domaine, ses blocs sont simplement refusés et la perturbation exacte continue jusqu’à la prochaine référence.
 
-Le worker ne lance la table qu’une fois l’orbite disponible au moins jusqu’au `maxIterations` demandé. L’orbite elle-même est calculée avec une réserve pouvant aller jusqu’à deux fois cette valeur pour absorber une prochaine hausse du budget.
+BLA et Padé restent un cas distinct : leurs gardes utilisent déjà directement le `|δc|` du pixel et leur table n’a pas de clé globale `cmax` comparable au sidecar Jet/Möbius.
 
-Pour Auto, la construction coopérative est découpée ainsi :
+## Construction incrémentale et publication partielle
 
-| Progression | Étape | Travail |
-|---|---|---|
-| 0 → 1/3 | `coefficients` | jets de fusion, niveaux, extraction des neuf coefficients unifiés |
-| 1/3 → 2/3 | `bounds` | marches de majorants Jet et rationnelles |
-| 2/3 → 0,9 | `radii` | quatre rayons, rayons de dérivée, tags, SA, périodique et gates |
-| 0,9 → 1 | `transfer` puis `ready` | copie WASM, transfert au thread principal et upload GPU |
+Le builder incrémental conserve un bloc en attente par niveau, comme les retenues d’une addition binaire. Chaque nouveau pas d’orbite crée une graine `skip=1`. Deux voisins complets fusionnent une seule fois en `skip=2`, puis deux `skip=2` en `skip=4`, etc. Les niveaux 1 et 2 restent internes ; seuls les blocs `skip≥4` sont publiés.
 
-Le masque de build interne vaut `1` pour coefficients/niveaux, `2` pour bornes et `4` pour rayons/sidecar. Un masque `4` seul signifie que les coefficients et les bornes étaient encore chauds. Si la référence et la génération correspondent déjà à la table GPU, le worker envoie alors uniquement `radiiReady`.
+Après $N$ pas disponibles, le niveau de saut $S$ contient exactement
 
-Jet, Möbius et Auto sont beaucoup plus coûteux à reconstruire que BLA/Padé. Le worker conserve donc une table de préfixe tant que le nouveau `maxIterations` ne dépasse pas environ 1,5 fois la couverture construite. Le préfixe reste valide ; sa fin est calculée en perturbation exacte. BLA et Padé exigent en revanche que leur table couvre le budget gardé courant.
+$$
+\left\lfloor\frac{N}{S}\right\rfloor
+$$
 
-Dans tous les modes à blocs, le moteur n’active le flag shader que lorsque l’orbite visible est complète, qu’une table du bon type est présente et qu’au moins un niveau existe. Au premier atterrissage d’une table Auto, le rendu est relancé une fois avec cette table active ; l’image exacte déjà résolue peut rester comme texture gelée pendant la reconvergence.
+blocs alignés commençant en $1+sS$. Il n’existe aucune fenêtre glissante et aucun bloc terminé n’est recalculé.
+
+Le worker répète des unités bornées — actuellement 128 pas d’orbite et 32 enveloppes au maximum — et rend la main à sa file d’événements après chacune. Sa priorité est :
+
+1. orbite nécessaire au viewport visible ;
+2. coefficients et enveloppes du préfixe visible ;
+3. réserve d’orbite pour le prochain zoom ;
+4. headers optionnels et diagnostics.
+
+Chaque message `tableRange` transporte `jobId`, `refId`, génération, niveau, premier slot, nombre de slots, couverture d’orbite et les payloads correspondants. Ces trois identités sont vérifiées avant le calcul, après le calcul et avant le transfert. Une unité devenue périmée est comptée puis jetée.
+
+Côté GPU, la capacité d’orbite est une puissance de deux. Chaque niveau possède une plage réservée et un compteur `committed`. Le moteur écrit d’abord coefficients, sidecar et enveloppes, puis publie le nouveau compteur dans le répertoire : l’ordre de la queue GPU constitue la barrière de commit. Lors d’un doublement de capacité, seules les plages déjà validées sont copiées GPU→GPU vers de nouveaux buffers ; le bind group est remplacé dans l’ordre de queue, sans effacer l’historique de rendu.
+
+Auto peut donc s’activer dès le premier préfixe certifié, avant la fin de l’orbite et des niveaux supérieurs. Le shader reçoit à la fois la longueur d’orbite réellement disponible et les comptes de slots publiés. Au-delà, il exécute la perturbation exacte. Le premier préfixe relance une fois la convergence ; les extensions suivantes ne vident ni la texture progressive ni les compteurs déjà valides.
 
 ## Application dans le shader
 
 À chaque tour de la boucle WGSL :
 
-1. le shader cherche le plus grand niveau aligné qui ne dépasse ni la fin de la table ni `globalMaxIter` ;
-2. il rejette rapidement un niveau si $\lvert\delta z\rvert$ dépasse son rayon maximal ;
-3. il charge le sidecar du bloc et teste le rayon local, $\lvert\delta c\rvert$, les gardes critiques et, pour les formes rationnelles, la marge au pôle ;
-4. en Auto, il tente le principal puis éventuellement le secours ;
+1. le shader cherche le plus grand niveau aligné dont le slot est `committed` et dont la fin ne dépasse ni le préfixe publié ni `globalMaxIter` ;
+2. en BLA, Padé, Jet, Möbius ou Auto legacy, il applique le test de rayon correspondant au mode ;
+3. en Auto dynamique, il évalue l’enveloppe avec les `log2|δc|` et `log2|δz|` du pixel, puis choisit le premier tier certifié ;
+4. il teste les gardes critiques communes et, pour les formes rationnelles, la marge au pôle ;
 5. si un tier passe, il met à jour $\delta z$, la dérivée, la dérivée seconde utile à Auto et l’indice de référence en un saut ;
-6. sinon il descend de niveau ; si aucun bloc ne passe, il exécute exactement
+6. sinon il descend de niveau ; si aucun bloc publié ne passe, il exécute exactement
 
 $$
 \delta z\leftarrow2Z\delta z+\delta z^2+\delta c.
@@ -207,13 +211,15 @@ Le rebase de Zhuoran reste actif après les sauts comme après les pas exacts : 
 
 ## Quand une table est-elle réellement reconstruite ?
 
-| Changement | BLA / Padé | Jet / Möbius / Auto |
-|---|---|---|
-| Nouvelle orbite de référence | reconstruction complète | reconstruction complète |
-| Hausse importante de `maxIterations` | reconstruction pour couvrir le budget | reconstruction différée ; ancien préfixe utilisable |
-| Changement de $\varepsilon$ | reconstruction de la table classique | nouvelle résolution des rayons ; coefficients réutilisables |
-| Changement de `cmax` dans la réserve | pas une clé globale ; gardes par pixel | rayons/tags seulement |
-| `cmax` sort de la réserve des bornes | pas applicable | nouvelles bornes puis nouveaux rayons |
-| Changement de mode | table BLA ou Padé distincte | stockage propre à Jet/Möbius ; Auto réutilise ses quatre tiers unifiés |
+| Changement | BLA / Padé | Jet / Möbius legacy | Auto dynamique + incrémental |
+|---|---|---|---|
+| Nouvelle orbite de référence | nouvelle table | nouveaux coefficients et rayons | nouveau builder ; ancien `refId` rejeté |
+| Hausse de `maxIterations` | extension/rebuild pour couvrir le budget | ancien préfixe utilisable, extension one-shot différée | append de l’orbite et des seuls nouveaux blocs |
+| Changement de $\varepsilon$ | nouvelle table | nouveaux rayons, coefficients réutilisés | nouvelles enveloppes ; coefficients conservables conceptuellement, génération séparée par sécurité |
+| Mouvement `cmax` dans le domaine | gardes par pixel | nouveaux rayons/tags si le bucket change | aucun rebuild de bloc ; header optionnel seulement si nécessaire |
+| Sortie du domaine de référence | pas de domaine global comparable | nouvelles bornes/rayons | blocs hors domaine refusés, puis nouvelle référence/enveloppe |
+| Changement de mode | table BLA/Padé distincte | stockage propre à Jet/Möbius | génération changée ; aucune plage d’un mode précédent n’est mélangée |
 
-Ainsi, la « table Auto » n’est ni une table Jet choisie automatiquement, ni cinq tables complètes en parallèle. C’est une seule géométrie de blocs et un seul enregistrement de coefficients par bloc, accompagnés de rayons propres à quatre évaluateurs et d’une décision principal/secours précalculée.
+Le panneau de performance expose séparément la couverture d’orbite construite par Rust, la couverture de table publiée, les blocs `committed` par niveau, les octets transférés, les yields, annulations, croissances de capacité et le pic mémoire du builder. `validation`, à côté du nombre de références, désigne la vérification/recentrage de l’orbite ; ce n’est pas une seconde passe de preuve des enveloppes.
+
+Ainsi, Auto n’est ni une table Jet choisie automatiquement, ni cinq tables complètes en parallèle. C’est une géométrie dyadique, un enregistrement de coefficients partagé par quatre évaluateurs et, selon le drapeau de rollout, soit un sidecar principal/secours legacy, soit une enveloppe de preuve évaluée pour chaque pixel. La perturbation exacte reste le dernier maillon dans tous les cas.

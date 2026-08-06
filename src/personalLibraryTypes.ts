@@ -26,6 +26,17 @@ export interface PersonalRecordEnvelope<T = unknown> {
   revision: number;
 }
 
+export interface PersonalPresetManifestEntry {
+  guid: string;
+  type: PersonalPresetType;
+  revision: number;
+}
+
+export interface PersonalPresetManifest {
+  revision: number;
+  entries: PersonalPresetManifestEntry[];
+}
+
 export interface PersonalTextureMetadata {
   guid: string;
   name: string;

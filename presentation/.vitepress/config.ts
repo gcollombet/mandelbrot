@@ -39,6 +39,7 @@ export default defineConfig({
             {text: 'Optimisations', link: '/optimisation'},
             {text: 'Tables', link: '/tables-approximation'},
             {text: 'Mathématiques', link: '/mathematiques'},
+            {text: 'Dérivée, orbite, lambda', link: '/dynamique-orbite-derivee-lambda'},
         ],
         sidebar: [
             {
@@ -47,6 +48,7 @@ export default defineConfig({
                     {text: 'Optimisations de rendu', link: '/optimisation'},
                     {text: "Tables d'approximation", link: '/tables-approximation'},
                     {text: 'Mathématiques et preuves Lean', link: '/mathematiques'},
+                    {text: 'Dérivée, orbite, lambda', link: '/dynamique-orbite-derivee-lambda'},
                 ]
             }
         ],

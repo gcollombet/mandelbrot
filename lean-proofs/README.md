@@ -109,6 +109,92 @@ Le build utilise Lean 4.31.0 et Mathlib 4.31.0. Il ne contient ni `sorry`, ni
   corne.
 - `Dynamics.lean` : domaine invariant, contraction uniforme, erreur de modèle
   amortie et distorsion de la carte de sortie d'une porte de Fatou.
+- `FractionalIteration/Basic.lean` : définition centrale de `z ↦ z²+c`,
+  orbites entières, points fixes et discriminant complet, dérivée, point
+  critique, parité et non-injectivité.
+- `FractionalIteration/Escape.lean` : rayon d'évasion
+  `max 2 (|c|+1)`, croissance linéaire stricte de toute orbite qui le franchit,
+  divergence et certificat fini de non-appartenance à Mandelbrot.
+- `FractionalIteration/Conjugacy.lean`,
+  `FractionalIteration/LinearModels.lean` et
+  `FractionalIteration/GlobalObstruction.lean` : transport d'un semi-groupe
+  par conjugaison, modèles linéaires de Kœnigs et du relèvement de Böttcher,
+  dépendance à la branche logarithmique, accord aux temps entiers et
+  impossibilité d'un groupe réel global dont `z²+c` serait le temps un.
+- `FractionalIteration/ODEObstruction.lean` : T5.3, formalisation des
+  solutions globales d'une ODE autonome, loi de groupe déduite de la
+  translation temporelle et de l'unicité, obstruction au temps un pour
+  `z²+c`, puis corollaires pour un champ globalement lipschitzien et pour les
+  flots réels de Mathlib. L'existence globale reste une hypothèse explicite.
+- `FractionalIteration/KoenigsSeries.lean` : comparaison formelle des
+  coefficients dans l'équation de Schröder, récurrence exacte sur
+  `ceil(n/2) ≤ k < n`, non-résonance attractive et formule
+  `a₂ = 1/(λ(1-λ))`.
+- `FractionalIteration/KoenigsAnalytic.lean` : construction effective de la
+  coordonnée de Kœnigs par série de corrections, disque invariant, majorant
+  géométrique, convergence et holomorphie, équation de Schröder,
+  normalisation `φ(0)=0`, `φ'(0)=1`, inverse analytique local, puis transport
+  au point fixe `p` de `z²+c`.
+- `FractionalIteration/KoenigsUniqueness.lean` : lemme de rigidité d'un germe
+  tangent à zéro et équivariant par une contraction complexe, identité de la
+  carte de transition entre deux coordonnées normalisées, puis unicité locale
+  au point fixe. Avec `KoenigsAnalytic.lean`, T3.1 est ainsi fermé.
+- `FractionalIteration/KoenigsFractional.lean` : famille locale
+  `φ⁻¹(exp(tL)φ(z))` et preuves comme égalités de germ des identités de
+  temps zéro, temps un et composition additive, dans la coordonnée centrée
+  puis dans la coordonnée originale au point fixe.
+- `FractionalIteration/BottcherAnalytic.lean` : preuve constructive de T4.1
+  par la variable réciproque `u=1/z`, disque invariant pour
+  `u²/(1+cu²)`, série logarithmique uniformément convergente, holomorphie,
+  équation de Böttcher, normalisation, inverse local, transport à un domaine
+  extérieur et extraction d'un rayon où la coordonnée est univalente.
+- `FractionalIteration/BottcherUniqueness.lean` : rigidité par ordre
+  d'annulation de tout germe normalisé commutant avec le carré, unicité de la
+  coordonnée réciproque, puis unicité éventuelle de la coordonnée transportée
+  au voisinage de l'infini parmi les germes réciproques analytiques normalisés.
+- `FractionalIteration/BottcherInfinityUniqueness.lean` : singularité
+  amovible de `1/ψ(1/u)` en `u=0` déduite de `ψ(z)/z→1`, dérivée normalisée,
+  transfert de l'équation au germe réciproque et unicité près de l'infini de
+  deux cartes extérieures arbitraires satisfaisant T4.1. T4.1 est ainsi fermé
+  dans sa formulation complète.
+- `FractionalIteration/BottcherInteger.lean` : T4.2,
+  `ψ(q_c^[n](z))=ψ(z)^(2^n)`, par induction exacte sur tout segment d'orbite
+  restant dans le domaine extérieur de la carte.
+- `FractionalIteration/BottcherInfiniteLog.lean` : T4.4, passage rigoureux du
+  télescope fini à la somme infinie, structure des relèvements logarithmiques
+  cohérents et formule
+  `log ψ(z)=log z+∑ ell_n/2^(n+1)` sous les hypothèses explicites de
+  convergence et de branche.
+- `FractionalIteration/BottcherFractional.lean` : T4.7, restriction de la
+  carte analytique de Böttcher à un domaine coupé, inverse exact sur son image,
+  famille `ψ⁻¹(exp(2^t Log ψ(z)))`, identités aux temps zéro et un, puis loi
+  de composition sous les gardes explicites de domaine et de cohérence de la
+  branche logarithmique.
+- `FractionalIteration/LogTelescoping.lean` et
+  `FractionalIteration/Connectors.lean` : identité logarithmique finie derrière
+  la coordonnée de Böttcher, extrémités exactes du connecteur Catmull--Rom et
+  contre-exemple exact montrant que ces connecteurs ne sont pas
+  semi-conjugués à `z ↦ z²`.
+- `FractionalIteration/DynamicAtlas.lean` : noyau exact de l'atlas numérique,
+  propagation point par point d'un segment graine avec résidu dynamique nul,
+  extrémités orbitales à tout rang, et relèvement rétrograde conditionnel par
+  une branche inverse choisie explicitement.
+- `FractionalIteration/NeutralCharts.lean` : modèles fractionnaires neutres
+  employés par la démo. La translation dans une coordonnée de Fatou--Abel et
+  la rotation `exp(tL)` dans une coordonnée de Siegel ont des extrémités et
+  une loi de composition exactes sous les identités locales de carte et
+  d'inverse. La correction sommable de `FatouSectorial.lean` alimente
+  directement le cas Abel. Pour Siegel, l'existence analytique de la carte
+  reste conditionnelle aux hypothèses arithmétiques appropriées.
+- `FractionalIteration/Segments.lean` : T6.2, passage exact de la courbe
+  recollée par tous les points de l'orbite, construction canonique par la
+  partie entière, égalité des coutures et continuité globale par le théorème
+  de recollement sur le recouvrement localement fini des intervalles fermés
+  `[n,n+1]`.
+- `FractionalIteration/IdealSegments.lean` : T6.3 et T6.4, segments idéaux de
+  Kœnigs et Böttcher, extrémités orbitales exactes, loi de composition locale
+  sous les identités d'inverse, de domaine et de branche, puis raccord à toute
+  courbe globale construite à partir de ces segments.
 
 Voir [PROOF_STATUS.md](PROOF_STATUS.md) pour la correspondance avec la note,
 les conséquences pour chaque forme et les obligations qui restent analytiques

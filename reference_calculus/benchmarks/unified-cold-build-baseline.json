@@ -1,0 +1,55 @@
+{
+  "schemaVersion": 1,
+  "benchmark": "unified-cold-build",
+  "iterations": 32768,
+  "epsilon": 0.000001,
+  "views": [
+    {
+      "name": "seahorse",
+      "status": "escaped",
+      "orbitSteps": 3091
+    },
+    {
+      "name": "feigenbaum",
+      "status": "measured",
+      "orbitSteps": 32768,
+      "log2CMax": -44.0,
+      "timingsMs": {
+        "coefficients": 292.733,
+        "bounds": 478.078,
+        "radii": 652.655,
+        "sa": 53.547,
+        "replay": 31.183,
+        "serialization": 2.462
+      },
+      "levelCount": 14,
+      "blockCount": 16383,
+      "coefficientBytes": 1769364,
+      "sidecarBytes": 262128,
+      "directoryBytes": 224,
+      "totalTableBytes": 2031716,
+      "bytesPerBlock": 124.0
+    },
+    {
+      "name": "near-parab",
+      "status": "measured",
+      "orbitSteps": 32768,
+      "log2CMax": -40.0,
+      "timingsMs": {
+        "coefficients": 296.786,
+        "bounds": 352.515,
+        "radii": 562.887,
+        "sa": 38.982,
+        "replay": 19.149,
+        "serialization": 2.207
+      },
+      "levelCount": 14,
+      "blockCount": 16383,
+      "coefficientBytes": 1769364,
+      "sidecarBytes": 262128,
+      "directoryBytes": 224,
+      "totalTableBytes": 2031716,
+      "bytesPerBlock": 124.0
+    }
+  ]
+}

@@ -15,10 +15,8 @@
 //      full sample budget (averaging toward the palette mean is the correct
 //      output there).
 //
-// Neutral layer layout (see mandelbrot_brush.wgsl):
-//   layer 0 = iter  (> 0 escaped, == 0 interior/in-set)
-//   layer 2/3 = escape z (for ν)
-//   layer 4 = distance_height = clamp(-log(DE_texels), -64, 64); high → near boundary.
+// Typed display input: values layers are iter/z.x/z.y and geometry.w is the
+// cached distance height.
 //
 // Result: target sample count in [1, antialiasLevel].
 
@@ -60,12 +58,13 @@ const EDGE_HI: f32 = 0.8;
 // saturates to the full budget (Nyquist = half a period per pixel).
 const NYQUIST_PHASE_STEP: f32 = 0.5;
 
-@group(0) @binding(0) var src: texture_2d_array<f32>;
-@group(0) @binding(1) var dst: texture_storage_2d<r32float, write>;
-@group(0) @binding(2) var<uniform> params: AaParams;
+@group(0) @binding(0) var valuesTex: texture_2d_array<f32>;
+@group(0) @binding(1) var geometryTex: texture_2d<f32>;
+@group(0) @binding(2) var dst: texture_storage_2d<r32float, write>;
+@group(0) @binding(3) var<uniform> params: AaParams;
 // Sample-0 composite: linear RGB, alpha = 1 (single accumulated sample),
 // device-pixel resolution.
-@group(0) @binding(3) var accumTex: texture_2d<f32>;
+@group(0) @binding(4) var accumTex: texture_2d<f32>;
 
 fn linear_to_srgb_vec(c: vec3<f32>) -> vec3<f32> {
   let cl = max(c, vec3<f32>(0.0));
@@ -88,12 +87,12 @@ fn nu_at(coord: vec2<i32>, dim: vec2<i32>) -> f32 {
   if (coord.x < 0 || coord.x >= dim.x || coord.y < 0 || coord.y >= dim.y) {
     return -1.0;
   }
-  let iter = textureLoad(src, coord, 0, 0).r;
+  let iter = textureLoad(valuesTex, coord, 0, 0).r;
   if (iter <= 0.0) {
     return -1.0;
   }
-  let zx = textureLoad(src, coord, 2, 0).r;
-  let zy = textureLoad(src, coord, 3, 0).r;
+  let zx = textureLoad(valuesTex, coord, 1, 0).r;
+  let zy = textureLoad(valuesTex, coord, 2, 0).r;
   let z_sq = zx * zx + zy * zy;
   if (z_sq < params.mu) {
     return -1.0;
@@ -110,8 +109,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
   let coord = vec2<i32>(i32(gid.x), i32(gid.y));
-  let iter = textureLoad(src, coord, 0, 0).r;
-  let height = textureLoad(src, coord, 4, 0).r;
+  let iter = textureLoad(valuesTex, coord, 0, 0).r;
+  let height = textureLoad(geometryTex, coord, 0).w;
   let level = max(params.antialiasLevel, 1.0);
   let dimI = vec2<i32>(i32(dim.x), i32(dim.y));
 

@@ -18,15 +18,12 @@ export interface MandelbrotParams {
     antialiasLevel: number;
     aaAuto?: boolean;
     aaAdaptive?: boolean;
-    zoomMinBrushStep: number;
-    sentinelSeedStep: number;
     palettePeriod: number;
     paletteOffset: number;
     heightPaletteShift: number;
     paletteMirror: boolean;
     dprMultiplier: number;
     targetFps: number;
-    gpuLoadMultiplier: number;
     stripeFrequency: number;
     activateAnimate: boolean;
     debugShading: boolean;
@@ -48,10 +45,11 @@ export interface MandelbrotParams {
     animationSpeed?: number;
     ambientOcclusionStrength?: number;
     microBumpStrength?: number;
-    subsurfaceStrength?: number;
     reliefDepth?: number;
     localShadowStrength?: number;
     varnishStrength?: number;
+    gradeContrast?: number;
+    gradeSaturation?: number;
     orbitTrapStrength?: number;
     phaseColoringStrength?: number;
     textureName?: string;
@@ -69,24 +67,27 @@ export const SESSION_PERFORMANCE_FIELDS = [
     'aaAuto',
     'aaAdaptive',
     'targetFps',
-    'gpuLoadMultiplier',
-    'zoomMinBrushStep',
-    'sentinelSeedStep',
 ] as const satisfies readonly (keyof MandelbrotParams)[];
 
 export const EXPLORATION_STATE_FIELDS = [
     'showPresetPins',
 ] as const satisfies readonly (keyof MandelbrotParams)[];
 
-export function normalizePowerOfTwoStep(value: number | undefined, defaultValue: number, minValue: number, maxValue: number): number {
-    const raw = typeof value === 'number' && Number.isFinite(value) ? value : defaultValue;
-    const normalized = 2 ** Math.floor(Math.log2(Math.max(1, Math.floor(raw))));
-    return Math.min(Math.max(normalized, minValue), maxValue);
-}
+const OBSOLETE_RENDER_FIELDS = [
+    'gpuLoadMultiplier',
+    'zoomMinBrushStep',
+    'sentinelSeedStep',
+    'taylorSuperpixelEnabled',
+    'taylorFreezeEnabled',
+    'taylorFreezeStep',
+] as const;
 
 export function stripSessionPerformanceFields<T extends object>(value: T): T {
     const record = value as Record<string, unknown>;
     for (const field of SESSION_PERFORMANCE_FIELDS) {
+        delete record[field];
+    }
+    for (const field of OBSOLETE_RENDER_FIELDS) {
         delete record[field];
     }
     return value;
@@ -145,8 +146,5 @@ export function preserveSessionPerformanceFields<T extends Partial<MandelbrotPar
         aaAuto: current.aaAuto,
         aaAdaptive: current.aaAdaptive,
         targetFps: current.targetFps,
-        gpuLoadMultiplier: current.gpuLoadMultiplier,
-        zoomMinBrushStep: current.zoomMinBrushStep,
-        sentinelSeedStep: current.sentinelSeedStep,
     };
 }

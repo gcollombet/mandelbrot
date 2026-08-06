@@ -37,11 +37,19 @@ fn linear_to_sRGB(c: vec3<f32>) -> vec3<f32> {
   return select(high, low, cutoff);
 }
 
+// Interleaved-gradient-noise dither: ±0.5 LSB at 8 bits, applied after the
+// linear→sRGB conversion (the last step before swapchain quantization) to
+// break banding on slow gradients.
+fn dither_8bit(pixelCoord: vec2<f32>) -> f32 {
+  let n = fract(52.9829189 * fract(dot(pixelCoord, vec2<f32>(0.06711056, 0.00583715))));
+  return (n - 0.5) / 255.0;
+}
+
 @fragment
 fn fs_main(@builtin(position) fragPos: vec4<f32>) -> @location(0) vec4<f32> {
   let coord = vec2<i32>(i32(fragPos.x), i32(fragPos.y));
   let acc = textureLoad(accumTex, coord, 0);
   let n = max(acc.a, 1.0);
   let lin = acc.rgb / n;
-  return vec4<f32>(linear_to_sRGB(lin), 1.0);
+  return vec4<f32>(linear_to_sRGB(lin) + vec3<f32>(dither_8bit(fragPos.xy)), 1.0);
 }

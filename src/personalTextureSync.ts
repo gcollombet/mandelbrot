@@ -116,19 +116,19 @@ export async function syncPersonalTextures(uid: string): Promise<void> {
   }
 }
 
-export function startPersonalTextureSync(uid: string): void {
+export function startPersonalTextureSync(uid: string): Promise<void> {
   activeUid = uid;
   setPersonalTextureSyncRequester(requestPersonalTextureSync);
   if (retryTimer) clearTimeout(retryTimer);
-  requestPersonalTextureSync();
+  return requestPersonalTextureSync();
 }
 
-export function requestPersonalTextureSync(): void {
+export function requestPersonalTextureSync(): Promise<void> {
   const uid = activeUid;
-  if (!uid) return;
+  if (!uid) return Promise.resolve();
   if (syncInFlight) {
     syncAgain = true;
-    return;
+    return syncInFlight;
   }
   syncInFlight = syncPersonalTextures(uid)
     .catch(error => {
@@ -142,12 +142,15 @@ export function requestPersonalTextureSync(): void {
         requestPersonalTextureSync();
       }
     });
+  return syncInFlight;
 }
 
-export function stopPersonalTextureSync(): void {
+export function stopPersonalTextureSync(): Promise<void> {
+  const pending = syncInFlight;
   activeUid = null;
   if (retryTimer) clearTimeout(retryTimer);
   retryTimer = null;
   syncAgain = false;
   setPersonalTextureSyncRequester(null);
+  return pending ?? Promise.resolve();
 }

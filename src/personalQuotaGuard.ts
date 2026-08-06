@@ -1,5 +1,5 @@
 import {getAllAnimationPresetCacheRecords} from './animationPresetStore';
-import {getPersonalUsage, listPersonalPresetRecords} from './personalLibraryRemote';
+import {getPersonalPresetManifest, getPersonalUsage} from './personalLibraryRemote';
 import {PERSONAL_PRESET_LIMIT} from './personalLibraryTypes';
 import {getAllPaletteCacheRecords} from './paletteStore';
 import {getAllPresetCacheRecords} from './presetStore';
@@ -14,24 +14,42 @@ export class PersonalPresetQuotaError extends Error {
   }
 }
 
-export async function assertActivePresetImportCapacity(candidateGuid?: string): Promise<void> {
+export interface PersonalPresetImportBudget {
+  existingGuids: Set<string>;
+  remaining: number;
+}
+
+export function personalPresetRemainingCapacity(usageCount: number, existingCount: number): number {
+  return Math.max(0, PERSONAL_PRESET_LIMIT - Math.max(usageCount, existingCount));
+}
+
+export async function createActivePresetImportBudget(): Promise<PersonalPresetImportBudget | null> {
   const scope = getActiveLibraryScope();
-  if (scope.kind !== 'user') return;
-  const [usage, remote, complete, palettes, stops, mappings, animations] = await Promise.all([
+  if (scope.kind !== 'user') return null;
+  const [usage, manifest, complete, palettes, stops, mappings, animations] = await Promise.all([
     getPersonalUsage(scope.uid),
-    listPersonalPresetRecords(scope.uid),
+    getPersonalPresetManifest(),
     getAllPresetCacheRecords(),
     getAllPaletteCacheRecords(),
     getAllStopPresetCacheRecords(),
     getAllTextureMappingPresetCacheRecords(),
     getAllAnimationPresetCacheRecords(),
   ]);
-  const existing = new Set(remote.map(record => record.guid));
+  const existing = new Set(manifest.entries.map(record => record.guid));
   for (const record of [complete, palettes, stops, mappings, animations].flat()) {
     if (record.origin === 'personal' && !record.tombstone && record.guid) existing.add(record.guid);
   }
-  const consumesNewSlot = !candidateGuid || !existing.has(candidateGuid);
-  if (Math.max(usage.presetCount, existing.size) + Number(consumesNewSlot) > PERSONAL_PRESET_LIMIT) {
+  return {
+    existingGuids: existing,
+    remaining: personalPresetRemainingCapacity(usage.presetCount, existing.size),
+  };
+}
+
+export async function assertActivePresetImportCapacity(candidateGuid?: string): Promise<void> {
+  const budget = await createActivePresetImportBudget();
+  if (!budget) return;
+  const consumesNewSlot = !candidateGuid || !budget.existingGuids.has(candidateGuid);
+  if (consumesNewSlot && budget.remaining < 1) {
     throw new PersonalPresetQuotaError();
   }
 }

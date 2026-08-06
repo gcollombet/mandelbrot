@@ -1,5 +1,9 @@
 import {describe, expect, it} from 'vitest';
-import {personalEnvelope, planPersonalRecordSync} from '../../src/personalPresetSync';
+import {
+  personalEnvelope,
+  planPersonalRecordSync,
+  shouldPurgePersonalRecord,
+} from '../../src/personalPresetSync';
 
 describe('personal preset synchronization planning', () => {
   it('hydrates an empty device from a cloud revision', () => {
@@ -14,6 +18,23 @@ describe('personal preset synchronization planning', () => {
   it('pulls a newer cross-device revision only over a clean cache', () => {
     expect(planPersonalRecordSync({name: 'A', syncState: 'synced', revision: 1}, 2)).toBe('pull');
     expect(planPersonalRecordSync({name: 'A', syncState: 'synced', revision: 2}, 2)).toBe('none');
+  });
+
+  it('purges only clean personal cache records missing from the remote manifest', () => {
+    const synced = {guid: 'preset-1', name: 'A', origin: 'personal' as const, syncState: 'synced' as const};
+    expect(shouldPurgePersonalRecord(synced, 'completePreset')).toBe(true);
+    expect(shouldPurgePersonalRecord(
+      synced,
+      'completePreset',
+      {guid: 'preset-1', type: 'completePreset', revision: 1},
+    )).toBe(false);
+    expect(shouldPurgePersonalRecord(
+      synced,
+      'completePreset',
+      {guid: 'preset-1', type: 'palettePreset', revision: 1},
+    )).toBe(true);
+    expect(shouldPurgePersonalRecord({...synced, syncState: 'pending'}, 'completePreset')).toBe(false);
+    expect(shouldPurgePersonalRecord({...synced, origin: 'public'}, 'completePreset')).toBe(false);
   });
 
   it('serializes thumbnails and favorites without local cache fields', () => {

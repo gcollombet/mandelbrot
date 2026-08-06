@@ -1,5 +1,5 @@
 import type {ColorStop} from './ColorStop';
-import {isStopTransferCurve} from './ColorStop';
+import {isStopTransferCurve, normalizeColorStop} from './ColorStop';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import type {EffectFieldName} from './effectFieldConfig';
 import {EFFECT_FIELD_NAMES} from './effectFieldConfig';
@@ -71,32 +71,56 @@ async function uniqueStopPresetName(name: string, guid?: string): Promise<string
   return makeUniqueName(name, all.filter(record => record.guid !== guid).map(record => record.name));
 }
 
+export function normalizeStopPresetValues(values: StopPresetValues): StopPresetValues {
+  const normalizedStop = normalizeColorStop({
+    ...(values as StopPresetValues & Pick<ColorStop, 'directionalVolume'>),
+    position: 0,
+  });
+  const normalized: StopPresetValues = {color: normalizedStop.color};
+  if (normalizedStop.iridescenceColor) normalized.iridescenceColor = normalizedStop.iridescenceColor;
+  if (isStopTransferCurve(normalizedStop.transferCurve)) normalized.transferCurve = normalizedStop.transferCurve;
+  for (const field of EFFECT_FIELD_NAMES) {
+    const value = normalizedStop[field];
+    if (value !== undefined) normalized[field] = value;
+  }
+  return normalized;
+}
+
+function normalizeStopPresetRecord(record: StopPresetRecord): StopPresetRecord {
+  return {...record, values: normalizeStopPresetValues(record.values)};
+}
+
 export async function getAllStopPresetEntries(): Promise<StopPresetRecord[]> {
   const {store, done} = await tx('readonly');
   const all: StopPresetRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all.map(resolveLegacyCacheFields).filter(isVisibleCacheRecord).sort((a, b) => b.date.localeCompare(a.date));
+  return all
+    .map(resolveLegacyCacheFields)
+    .map(normalizeStopPresetRecord)
+    .filter(isVisibleCacheRecord)
+    .sort((a, b) => b.date.localeCompare(a.date));
 }
 
 export async function getAllStopPresetCacheRecords(): Promise<StopPresetRecord[]> {
   const {store, done} = await tx('readonly');
   const all: StopPresetRecord[] = await reqToPromise(store.getAll());
   await done;
-  return all.map(resolveLegacyCacheFields);
+  return all.map(resolveLegacyCacheFields).map(normalizeStopPresetRecord);
 }
 
 export async function saveStopPresetEntry(record: StopPresetRecord): Promise<void> {
-  if (!record.name.trim()) throw new Error('Stop preset name is required.');
-  const date = record.date || new Date().toISOString();
-  const guid = record.guid || createGuid();
+  const normalizedRecord = normalizeStopPresetRecord(record);
+  if (!normalizedRecord.name.trim()) throw new Error('Stop preset name is required.');
+  const date = normalizedRecord.date || new Date().toISOString();
+  const guid = normalizedRecord.guid || createGuid();
   const next: StopPresetRecord = {
-    ...record,
+    ...normalizedRecord,
     guid,
-    name: await uniqueStopPresetName(record.name.trim(), guid),
+    name: await uniqueStopPresetName(normalizedRecord.name.trim(), guid),
     date,
     lastUpdated: record.lastUpdated || date,
     favorite: record.favorite ?? false,
-    ...localCacheFields(record),
+    ...localCacheFields(normalizedRecord),
   };
   const {store, done} = await tx('readwrite');
   store.put(next);
@@ -108,7 +132,7 @@ export async function getStopPresetByName(name: string): Promise<StopPresetRecor
   const {store, done} = await tx('readonly');
   const record: StopPresetRecord | undefined = await reqToPromise(store.get(name));
   await done;
-  return record ?? null;
+  return record ? normalizeStopPresetRecord(record) : null;
 }
 
 export async function getStopPresetByGuid(guid: string): Promise<StopPresetRecord | null> {
@@ -137,7 +161,8 @@ export async function deleteStopPresetEntry(name: string): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: StopPresetRecord | undefined = await reqToPromise(store.get(name));
   if (record && shouldQueuePersonalDelete(resolveLegacyCacheFields(record))) {
-    store.put({...record, ...deletedCacheFields(record)});
+    const normalized = normalizeStopPresetRecord(record);
+    store.put({...normalized, ...deletedCacheFields(normalized)});
   } else {
     store.delete(name);
   }
@@ -150,7 +175,8 @@ export async function ensureDefaultStopPresetEntries(): Promise<void> {
 
 export async function applyCloudStopPresetEntry(record: StopPresetRecord, revision: number): Promise<void> {
   const existing = await getStopPresetByGuid(record.guid || '');
-  const next = {...record, ...syncedPersonalCacheFields(record, revision)};
+  const normalized = normalizeStopPresetRecord(record);
+  const next = {...normalized, ...syncedPersonalCacheFields(normalized, revision)};
   const {store, done} = await tx('readwrite');
   if (existing && existing.name !== next.name) store.delete(existing.name);
   store.put(next);
@@ -160,7 +186,10 @@ export async function applyCloudStopPresetEntry(record: StopPresetRecord, revisi
 export async function acknowledgeStopPresetEntry(guid: string, revision: number): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: StopPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  if (record) {
+    const normalized = normalizeStopPresetRecord(record);
+    store.put({...normalized, ...syncedPersonalCacheFields(normalized, revision)});
+  }
   await done;
 }
 
@@ -172,15 +201,16 @@ export async function purgeStopPresetEntryByGuid(guid: string): Promise<void> {
 }
 
 export function valuesFromStop(stop: ColorStop): StopPresetValues {
-  const values: StopPresetValues = {color: stop.color};
-  if (stop.iridescenceColor) {
-    values.iridescenceColor = stop.iridescenceColor;
+  const normalizedStop = normalizeColorStop(stop);
+  const values: StopPresetValues = {color: normalizedStop.color};
+  if (normalizedStop.iridescenceColor) {
+    values.iridescenceColor = normalizedStop.iridescenceColor;
   }
-  if (isStopTransferCurve(stop.transferCurve)) {
-    values.transferCurve = stop.transferCurve;
+  if (isStopTransferCurve(normalizedStop.transferCurve)) {
+    values.transferCurve = normalizedStop.transferCurve;
   }
   for (const field of EFFECT_FIELD_NAMES) {
-    const value = stop[field];
+    const value = normalizedStop[field];
     if (value !== undefined) {
       values[field] = value;
     }
@@ -189,20 +219,21 @@ export function valuesFromStop(stop: ColorStop): StopPresetValues {
 }
 
 export function applyStopPresetValues(stop: ColorStop, values: StopPresetValues): ColorStop {
-  const next: ColorStop = {...stop, color: values.color};
-  if (values.iridescenceColor) {
-    next.iridescenceColor = values.iridescenceColor;
+  const normalizedValues = normalizeStopPresetValues(values);
+  const next: ColorStop = {...normalizeColorStop(stop), color: normalizedValues.color};
+  if (normalizedValues.iridescenceColor) {
+    next.iridescenceColor = normalizedValues.iridescenceColor;
   } else {
     delete next.iridescenceColor;
   }
-  if (isStopTransferCurve(values.transferCurve)) {
-    next.transferCurve = values.transferCurve;
+  if (isStopTransferCurve(normalizedValues.transferCurve)) {
+    next.transferCurve = normalizedValues.transferCurve;
   }
   for (const field of EFFECT_FIELD_NAMES) {
-    const value = values[field];
+    const value = normalizedValues[field];
     if (value !== undefined) {
       next[field] = value;
     }
   }
-  return next;
+  return normalizeColorStop(next);
 }

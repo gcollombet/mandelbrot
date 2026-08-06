@@ -72,6 +72,9 @@ async function teleport(page: Page, cx: string, cy: string, scale: string) {
 async function reconverge(page: Page, mode: string) {
   await page.evaluate((m) => {
     const engine = (window as any).__mandelbrotEngine;
+    // totalApps below comes from the panel-only work counters, which the
+    // iteration kernel compiles out unless a consumer asks for them.
+    engine.setWorkStatsEnabled?.(true);
     engine.setApproximationMode(m);
   }, mode);
   await page.waitForTimeout(300);

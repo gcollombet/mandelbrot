@@ -1,7 +1,7 @@
 import { interpolateLab, interpolateRgb, interpolateHcl, interpolateHsl, interpolateCubehelix } from 'd3-interpolate';
 import { rgb } from 'd3-color';
 import type { ColorStop } from './ColorStop.ts';
-import { applyStopTransferCurve, getEffectValue, getStopTransferCurve } from './ColorStop.ts';
+import { applyStopTransferCurve, getEffectValue, getStopTransferCurve, normalizeColorStops } from './ColorStop.ts';
 import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG } from './effectFieldConfig';
 import type { EffectFieldName } from './effectFieldConfig';
 import type { InterpolationMode } from './Mandelbrot.ts';
@@ -18,9 +18,9 @@ const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: num
 const TEXTURE_WIDTH = 4096;
 
 /** Height of the palette texture (6 rows for RGB+effects+iridescence+orbit metrics). */
-const TEXTURE_HEIGHT = 6;
+const TEXTURE_HEIGHT = 7;
 
-/** Effect-only texture rows (1, 2, 3, 5) — fields grouped by row. */
+/** Effect-only texture rows (1, 2, 3, 5, 6) — fields grouped by row. */
 const EFFECT_ROWS: Array<{ row: number; fields: EffectFieldName[] }> = [];
 {
   const rowFields = new Map<number, EffectFieldName[]>();
@@ -51,7 +51,7 @@ export class Palette {
   private interpolate: (a: string, b: string) => (t: number) => string;
 
   constructor(points: ColorStop[], mode: InterpolationMode = 'lab') {
-    this.points = points.slice().sort((a, b) => a.position - b.position);
+    this.points = normalizeColorStops(points).sort((a, b) => a.position - b.position);
     this.interpolate = interpolators[mode] ?? interpolateLab;
   }
 
@@ -136,17 +136,18 @@ export class Palette {
   }
 
   /**
-   * Generate a 4096 x 6 float texture as a Float32Array.
+   * Generate a 4096 x 7 float texture as a Float32Array.
    * All values are stored in their natural ranges — no normalization.
    * The Engine will encode these as float16 for the GPU texture.
    *
-   * Layout (6 rows of 4096 RGBA texels):
+   * Layout (7 rows of 4096 RGBA texels):
    *   Row 0: R [0,1], G [0,1], B [0,1], palette weight [0,1]
    *   Row 1: zebra, tessellation, shading, skybox
    *   Row 2: webcam, smoothness, shadingLevel, specularPower
-   *   Row 3: (reserved), metallic, roughness, anisotropy
+   *   Row 3: dielectric F0, metallic, roughness, anisotropy
    *   Row 4: iridescence R, G, B, strength
    *   Row 5: stripeAverage, rotationMean, stripeRelief, directionCoherenceRelief
+   *   Row 6: reliefGain, metalReflectance, metalEnvironmentTint, reserved
    */
   generateTexture(): { data: Float32Array; width: number; height: number } {
     const width = TEXTURE_WIDTH;

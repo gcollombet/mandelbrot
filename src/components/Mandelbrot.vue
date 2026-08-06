@@ -105,9 +105,6 @@ const props = withDefaults(defineProps<{
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
   targetFps?: number,
-  gpuLoadMultiplier?: number,
-  zoomMinBrushStep?: number,
-  sentinelSeedStep?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   tessellationLevel?: number,
   displacementAmount?: number,
@@ -115,11 +112,12 @@ const props = withDefaults(defineProps<{
   animationSpeed?: number,
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
-  subsurfaceStrength?: number,
   reliefDepth?: number,
   localShadowStrength?: number,
   lightAngle?: number,
   varnishStrength?: number,
+  gradeContrast?: number,
+  gradeSaturation?: number,
   orbitTrapStrength?: number,
   phaseColoringStrength?: number,
   stripeFrequency?: number,
@@ -173,9 +171,6 @@ const props = withDefaults(defineProps<{
        dprMultiplier: 1.0,
        maxIterationMultiplier: 0.1,
        targetFps: 60,
-       gpuLoadMultiplier: 1.0,
-       zoomMinBrushStep: 1,
-       sentinelSeedStep: 64,
        interpolationMode: 'lab',
        tessellationLevel: 0,
        displacementAmount: 0,
@@ -183,11 +178,12 @@ const props = withDefaults(defineProps<{
         animationSpeed: 1.0,
         ambientOcclusionStrength: 0,
         microBumpStrength: 0,
-        subsurfaceStrength: 0.0,
         reliefDepth: 1,
         localShadowStrength: 0,
         lightAngle: 0,
         varnishStrength: 0,
+        gradeContrast: 1.18,
+        gradeSaturation: 1.12,
         orbitTrapStrength: 0,
         phaseColoringStrength: 0,
         stripeFrequency: 8,
@@ -211,15 +207,6 @@ watch(
   (val) => {
     if (!engine) return;
     engine.targetFps = val;
-  }
-);
-
-// Quand le multiplicateur de charge GPU change, mettre à jour l'engine.
-watch(
-  () => props.gpuLoadMultiplier,
-  (val) => {
-    if (!engine) return;
-    engine.gpuLoadMultiplier = val;
   }
 );
 
@@ -303,16 +290,15 @@ async function draw() {
         animationSpeed: props.animationSpeed,
         ambientOcclusionStrength: props.ambientOcclusionStrength,
         microBumpStrength: props.microBumpStrength,
-        subsurfaceStrength: props.subsurfaceStrength,
         reliefDepth: props.reliefDepth,
         localShadowStrength: props.localShadowStrength,
         lightAngle: props.lightAngle,
         varnishStrength: props.varnishStrength,
+        gradeContrast: props.gradeContrast,
+        gradeSaturation: props.gradeSaturation,
         orbitTrapStrength: props.orbitTrapStrength,
         phaseColoringStrength: props.phaseColoringStrength,
         stripeFrequency: props.stripeFrequency,
-        zoomMinBrushStep: props.zoomMinBrushStep,
-        sentinelSeedStep: props.sentinelSeedStep,
         textureMapping: normalizeTextureMappingFromLegacy(props),
         textureMappingMode: props.textureMappingMode,
       }
@@ -405,22 +391,20 @@ async function initWebGPU() {
     animationSpeed: props.animationSpeed,
     ambientOcclusionStrength: props.ambientOcclusionStrength,
     microBumpStrength: props.microBumpStrength,
-    subsurfaceStrength: props.subsurfaceStrength,
     reliefDepth: props.reliefDepth,
     localShadowStrength: props.localShadowStrength,
     lightAngle: props.lightAngle,
     varnishStrength: props.varnishStrength,
+    gradeContrast: props.gradeContrast,
+    gradeSaturation: props.gradeSaturation,
     orbitTrapStrength: props.orbitTrapStrength,
     phaseColoringStrength: props.phaseColoringStrength,
     stripeFrequency: props.stripeFrequency,
-    zoomMinBrushStep: props.zoomMinBrushStep,
-    sentinelSeedStep: props.sentinelSeedStep,
     textureMapping: normalizeTextureMappingFromLegacy(props),
     textureMappingMode: props.textureMappingMode,
   });
   engine.dprMultiplier = props.dprMultiplier ?? 1.0;
   engine.targetFps = props.targetFps ?? 60;
-  engine.gpuLoadMultiplier = props.gpuLoadMultiplier ?? 1.0;
   return engine.initialize(navigator)
 }
 

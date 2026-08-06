@@ -76,6 +76,8 @@ async function loadAnimationPresets() {
   animationPresets.value = await getAllAnimationPresetEntries();
 }
 
+defineExpose({refreshPresets: loadAnimationPresets});
+
 async function saveAnimationPreset() {
   const name = animationPresetName.value.trim();
   if (!name) return;

@@ -2,18 +2,22 @@
 import {computed, nextTick, onBeforeUnmount, onMounted, ref, watch} from 'vue'
 
 type Mode = 'bla' | 'pade' | 'jet' | 'mobius' | 'auto'
+type AutoPolicy = 'legacy' | 'dynamic' | 'incremental'
 type Tier = 0 | 1 | 2 | 3
 
 const canvas = ref<HTMLCanvasElement | null>(null)
 const mode = ref<Mode>('auto')
+const autoPolicy = ref<AutoPolicy>('incremental')
 const log2CMax = ref(-16)
 const dcRatio = ref(0.72)
 const dzRatio = ref(0.54)
+const publishedIterations = ref(33)
 const referenceIndex = ref(1)
 const running = ref(false)
 const lastAction = ref('Prêt à sonder la table depuis le plus grand niveau.')
 
 const totalIterations = 65
+const referenceDomainLog2Dc = -8
 const levelSkips = [32, 16, 8, 4]
 const tierNames = ['affine', 'Padé', 'Möbius c+', 'jet'] as const
 const modeTier: Record<Exclude<Mode, 'auto'>, Tier> = {
@@ -41,6 +45,20 @@ function radiiFor(skip: number): [number, number, number, number] {
   ]
 }
 
+function dynamicRadiiFor(skip: number): [number, number, number, number] {
+  // Pedagogical mirror of the packed lower envelope: the runtime radius is a
+  // function of this pixel's |dc|, not of the viewport-wide cmax.
+  const log2Dc = log2CMax.value + Math.log2(Math.max(dcRatio.value, 1e-6))
+  const dcPressure = clamp((log2Dc + 28) / 24, 0, 1.5)
+  const skipPenalty = Math.log2(skip / 4) * 0.05
+  return [
+    clamp(0.64 - dcPressure * 0.20 - skipPenalty, 0.06, 1.2),
+    clamp(0.78 - dcPressure * 0.17 - skipPenalty, 0.06, 1.2),
+    clamp(0.93 - dcPressure * 0.14 - skipPenalty, 0.06, 1.2),
+    clamp(1.08 - dcPressure * 0.11 - skipPenalty, 0.06, 1.2),
+  ]
+}
+
 function poleIsSafe(tier: Tier) {
   if (tier !== 1 && tier !== 2) return true
   return dzRatio.value + dcRatio.value * (tier === 1 ? 0.18 : 0.12) < 1.18
@@ -48,6 +66,11 @@ function poleIsSafe(tier: Tier) {
 
 function tierAccepts(tier: Tier, radius: number) {
   return dcRatio.value <= 1 && dzRatio.value < radius && poleIsSafe(tier)
+}
+
+function dynamicTierAccepts(tier: Tier, radius: number) {
+  const log2Dc = log2CMax.value + Math.log2(Math.max(dcRatio.value, 1e-6))
+  return log2Dc <= referenceDomainLog2Dc && dzRatio.value < radius && poleIsSafe(tier)
 }
 
 function chooseAutoTiers(radii: [number, number, number, number]) {
@@ -61,34 +84,55 @@ function chooseAutoTiers(radii: [number, number, number, number]) {
   return {principal, secours}
 }
 
+const dynamicAuto = computed(() => mode.value === 'auto' && autoPolicy.value !== 'legacy')
+const tableCoverage = computed(() => mode.value === 'auto' && autoPolicy.value === 'incremental'
+  ? publishedIterations.value
+  : totalIterations)
+
 const candidate = computed(() => {
   const remaining = totalIterations - referenceIndex.value
-  const skip = levelSkips.find(value => value <= remaining && (referenceIndex.value - 1) % value === 0) ?? 1
-  if (skip === 1) {
-    return {skip, principal: 0 as Tier, used: 0 as Tier, radius: 0, accepted: false, usedSecours: false}
-  }
-
-  const radii = radiiFor(skip)
-  if (mode.value !== 'auto') {
-    const tier = modeTier[mode.value]
-    return {
-      skip,
-      principal: tier,
-      used: tier,
-      radius: radii[tier],
-      accepted: tierAccepts(tier, radii[tier]),
-      usedSecours: false,
+  const probes: {skip: number; accepted: boolean}[] = []
+  let lastTier: Tier = mode.value === 'auto' ? 0 : modeTier[mode.value]
+  let lastRadius = 0
+  for (const skip of levelSkips) {
+    const aligned = (referenceIndex.value - 1) % skip === 0
+    const published = referenceIndex.value + skip <= tableCoverage.value
+    if (!aligned || skip > remaining || !published) continue
+    const radii = dynamicAuto.value ? dynamicRadiiFor(skip) : radiiFor(skip)
+    if (mode.value !== 'auto') {
+      const tier = modeTier[mode.value]
+      const accepted = tierAccepts(tier, radii[tier])
+      probes.push({skip, accepted})
+      lastTier = tier
+      lastRadius = radii[tier]
+      if (accepted) return {skip, principal: tier, used: tier, radius: radii[tier], accepted, usedSecours: false, probes}
+      continue
     }
+    if (dynamicAuto.value) {
+      let acceptedTier = -1
+      for (let tier = 0; tier < 4; tier++) {
+        if (dynamicTierAccepts(tier as Tier, radii[tier]!)) {
+          acceptedTier = tier
+          break
+        }
+      }
+      const accepted = acceptedTier >= 0
+      probes.push({skip, accepted})
+      lastTier = (accepted ? acceptedTier : 3) as Tier
+      lastRadius = radii[lastTier]
+      if (accepted) return {skip, principal: lastTier, used: lastTier, radius: lastRadius, accepted, usedSecours: false, probes}
+      continue
+    }
+    const {principal, secours} = chooseAutoTiers(radii)
+    const principalOk = tierAccepts(principal, radii[principal])
+    const secoursOk = secours !== principal && tierAccepts(secours, radii[secours])
+    const accepted = principalOk || secoursOk
+    probes.push({skip, accepted})
+    lastTier = secoursOk ? secours : principal
+    lastRadius = radii[lastTier]
+    if (accepted) return {skip, principal, used: lastTier, radius: lastRadius, accepted, usedSecours: secoursOk, probes}
   }
-
-  const {principal, secours} = chooseAutoTiers(radii)
-  if (tierAccepts(principal, radii[principal])) {
-    return {skip, principal, used: principal, radius: radii[principal], accepted: true, usedSecours: false}
-  }
-  if (secours !== principal && tierAccepts(secours, radii[secours])) {
-    return {skip, principal, used: secours, radius: radii[secours], accepted: true, usedSecours: true}
-  }
-  return {skip, principal, used: principal, radius: radii[principal], accepted: false, usedSecours: false}
+  return {skip: 1, principal: lastTier, used: lastTier, radius: lastRadius, accepted: false, usedSecours: false, probes}
 })
 
 const accessibleSummary = computed(() => {
@@ -117,7 +161,7 @@ function draw() {
   const element = canvas.value
   if (!element) return
   const width = Math.max(320, element.clientWidth)
-  const height = width < 520 ? 470 : 420
+  const height = width < 520 ? 500 : 440
   const dpr = Math.min(window.devicePixelRatio || 1, 2)
   element.width = Math.round(width * dpr)
   element.height = Math.round(height * dpr)
@@ -135,6 +179,7 @@ function draw() {
   const success = cssColor('--vp-c-green-1', '#18794e')
   const danger = cssColor('--vp-c-red-1', '#cd2b31')
   const warning = cssColor('--vp-c-yellow-1', '#946800')
+  const background = cssColor('--vp-c-bg', '#ffffff')
 
   ctx.clearRect(0, 0, width, height)
   ctx.font = '12px system-ui, sans-serif'
@@ -147,11 +192,11 @@ function draw() {
 
   ctx.fillStyle = foreground
   ctx.font = '500 13px system-ui, sans-serif'
-  ctx.fillText(`Référence : n = ${referenceIndex.value}`, left, 20)
+  ctx.fillText(`Référence : n = ${referenceIndex.value} · table ≤ ${tableCoverage.value - 1}`, left, 20)
   ctx.fillStyle = muted
   ctx.font = '12px system-ui, sans-serif'
   ctx.textAlign = 'right'
-  ctx.fillText(`cmax = 2^${log2CMax.value} · |δc|/cmax = ${dcRatio.value.toFixed(2)} · |δz|/R = ${dzRatio.value.toFixed(2)}`, width - right, 20)
+  ctx.fillText(`|δc| ≈ 2^${(log2CMax.value + Math.log2(Math.max(dcRatio.value, 1e-6))).toFixed(1)} · |δz|/R = ${dzRatio.value.toFixed(2)}`, width - right, 20)
   ctx.textAlign = 'left'
 
   const axisY = 62
@@ -180,6 +225,21 @@ function draw() {
   ctx.lineTo(currentX, 292)
   ctx.stroke()
 
+  if (tableCoverage.value < totalIterations) {
+    const coverageX = xForIteration(tableCoverage.value)
+    ctx.strokeStyle = warning
+    ctx.setLineDash([4, 4])
+    ctx.beginPath()
+    ctx.moveTo(coverageX, 42)
+    ctx.lineTo(coverageX, 292)
+    ctx.stroke()
+    ctx.setLineDash([])
+    ctx.fillStyle = warning
+    ctx.textAlign = 'right'
+    ctx.fillText('préfixe publié', coverageX - 4, 42)
+    ctx.textAlign = 'left'
+  }
+
   const selected = candidate.value
   levelSkips.forEach((skip, row) => {
     const y = 96 + row * 47
@@ -190,15 +250,19 @@ function draw() {
     for (let start = 1; start + skip <= totalIterations; start += skip) {
       const x = xForIteration(start)
       const endX = xForIteration(start + skip)
-      const isCandidate = skip === selected.skip && start === referenceIndex.value
+      const probe = selected.probes.find(value => value.skip === skip)
+      const isCandidate = start === referenceIndex.value && !!probe
+      const published = start + skip <= tableCoverage.value
       drawRoundedRect(ctx, x + 1, y, Math.max(2, endX - x - 2), 24, 5)
-      ctx.fillStyle = isCandidate ? (selected.accepted ? success : danger) : soft
+      ctx.fillStyle = isCandidate ? (probe!.accepted ? success : danger) : soft
+      ctx.globalAlpha = published ? 1 : 0.28
       ctx.fill()
+      ctx.globalAlpha = 1
       if (isCandidate) {
-        ctx.strokeStyle = selected.usedSecours ? warning : brand
+        ctx.strokeStyle = probe!.accepted ? (selected.usedSecours ? warning : brand) : danger
         ctx.lineWidth = 2
         ctx.stroke()
-        ctx.fillStyle = '#ffffff'
+        ctx.fillStyle = background
         ctx.textAlign = 'center'
         const label = mode.value === 'auto' ? tierNames[selected.used] : mode.value
         if (endX - x > 38) ctx.fillText(label, (x + endX) / 2, y + 12)
@@ -215,9 +279,10 @@ function draw() {
   ctx.lineTo(width - right, panelY - 12)
   ctx.stroke()
 
+  const pixelInsideDomain = log2CMax.value + Math.log2(Math.max(dcRatio.value, 1e-6)) <= referenceDomainLog2Dc
   const guardRows = [
-    ['Alignement et fin de référence', selected.skip > 1],
-    ['|δc| ≤ cmax', dcRatio.value <= 1],
+    ['Alignement et préfixe publié', selected.skip > 1],
+    [dynamicAuto.value ? '|δc| dans le domaine de référence' : '|δc| ≤ cmax', dynamicAuto.value ? pixelInsideDomain : dcRatio.value <= 1],
     [`|δz| < R(${tierNames[selected.used]})`, selected.skip > 1 && dzRatio.value < selected.radius],
     ['Distance au pôle rationnel', poleIsSafe(selected.used)],
   ] as const
@@ -237,7 +302,7 @@ function draw() {
     ctx.fillText(label, x + 16, y)
   })
 
-  const actionY = width < 520 ? 410 : 384
+  const actionY = width < 520 ? 438 : 404
   ctx.fillStyle = selected.accepted ? success : danger
   ctx.font = '500 13px system-ui, sans-serif'
   const action = selected.accepted
@@ -291,7 +356,7 @@ function reset() {
   lastAction.value = 'Retour au début de la référence.'
 }
 
-watch([mode, log2CMax, dcRatio, dzRatio, referenceIndex, lastAction], () => nextTick(draw))
+watch([mode, autoPolicy, log2CMax, dcRatio, dzRatio, publishedIterations, referenceIndex, lastAction], () => nextTick(draw))
 
 onMounted(() => {
   resizeObserver = new ResizeObserver(draw)
@@ -319,6 +384,14 @@ onBeforeUnmount(() => {
           <option value="auto">Auto</option>
         </select>
       </label>
+      <label v-if="mode === 'auto'">
+        Stratégie Auto
+        <select v-model="autoPolicy">
+          <option value="legacy">Legacy / shadow</option>
+          <option value="dynamic">Validité dynamique</option>
+          <option value="incremental">Dynamique + incrémentale</option>
+        </select>
+      </label>
       <label>
         <span>log₂(cmax) <output>{{ log2CMax }}</output></span>
         <input v-model.number="log2CMax" type="range" min="-28" max="-2" step="1">
@@ -330,6 +403,10 @@ onBeforeUnmount(() => {
       <label>
         <span>|δz| / R <output>{{ dzRatio.toFixed(2) }}</output></span>
         <input v-model.number="dzRatio" type="range" min="0.04" max="1.45" step="0.01">
+      </label>
+      <label v-if="mode === 'auto' && autoPolicy === 'incremental'">
+        <span>Préfixe publié <output>{{ publishedIterations - 1 }} it.</output></span>
+        <input v-model.number="publishedIterations" type="range" min="5" max="65" step="4">
       </label>
     </div>
     <canvas

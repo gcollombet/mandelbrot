@@ -43,6 +43,7 @@ import {
   computeScaleExponent,
   deletePresetEntry,
   getAllPresetEntries,
+  getAllPresetRecords,
   getPresetById,
   savePresetEntry,
   updatePresetEntry,
@@ -53,7 +54,6 @@ import {
   getAllPaletteEntries,
   savePaletteEntry,
 } from '../paletteStore';
-import {syncRemoteCatalog} from '../remoteCatalogSync';
 import {RemoteCatalogNameConflictError, uploadRemoteCatalogEntry, uploadRemoteTextureEntry} from '../remoteCatalog';
 import type {TextureMappingPresetRecord} from '../textureMappingPresetStore';
 import {
@@ -78,9 +78,20 @@ import {
 } from '../animationPresetStore';
 import type {UserRole} from '../authService';
 import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
-import {nameForCatalogReference} from '../catalogIdentity';
+import {createGuid, nameForCatalogReference} from '../catalogIdentity';
 import {MAX_IMPORTED_TEXTURE_SIDE, normalizeTextureBlob} from '../textureNormalization';
-import {assertActivePresetImportCapacity, PersonalPresetQuotaError} from '../personalQuotaGuard';
+import {
+  assertActivePresetImportCapacity,
+  createActivePresetImportBudget,
+  PersonalPresetQuotaError,
+  type PersonalPresetImportBudget,
+} from '../personalQuotaGuard';
+import {PERSONAL_PRESET_LIMIT} from '../personalLibraryTypes';
+import {
+  addPresetImportIdentity,
+  buildPresetImportIdentitySet,
+  hasPresetImportIdentity,
+} from '../presetImportIdentity';
 
 import type {Engine} from '../Engine.ts';
 const props = defineProps<{
@@ -142,28 +153,6 @@ function canUploadTexture(texture: TextureMetadata): boolean {
   return !!texture.guid;
 }
 
-const zoomMinBrushStepOptions = [1, 2, 4, 8, 16, 32, 64];
-const sentinelSeedStepOptions = [1, 2, 4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096];
-const zoomMinBrushStepIndex = computed({
-  get: () => Math.max(0, zoomMinBrushStepOptions.indexOf(model.value.zoomMinBrushStep)),
-  set: (index: number) => {
-    const value = zoomMinBrushStepOptions[Math.min(Math.max(Math.round(index), 0), zoomMinBrushStepOptions.length - 1)] ?? 1;
-    model.value.zoomMinBrushStep = value;
-    if (model.value.sentinelSeedStep < value) {
-      model.value.sentinelSeedStep = sentinelSeedStepOptions.find(step => step >= value) ?? sentinelSeedStepOptions[sentinelSeedStepOptions.length - 1];
-    }
-  },
-});
-const sentinelSeedStepIndex = computed({
-  get: () => Math.max(0, sentinelSeedStepOptions.indexOf(model.value.sentinelSeedStep)),
-  set: (index: number) => {
-    const minAllowed = model.value.zoomMinBrushStep;
-    const value = sentinelSeedStepOptions[Math.min(Math.max(Math.round(index), 0), sentinelSeedStepOptions.length - 1)] ?? 64;
-    const nextValue = sentinelSeedStepOptions.find(step => step >= Math.max(value, minAllowed)) ?? sentinelSeedStepOptions[sentinelSeedStepOptions.length - 1];
-    model.value.sentinelSeedStep = nextValue;
-  },
-});
-
 // BLA/Padé radius ε on a log10 scale: slider value is the exponent (R = ε·|A| for
 // affine, √ε·|A| for Padé). Bounded to the safe band [1e-8, 1e-4]: above 1e-4 the
 // Padé √ε radius admits blocks beyond the rational map's validity (slight distortion).
@@ -220,15 +209,14 @@ const model =  defineModel<MandelbrotParams>({
       animationSpeed: 1.0,
      ambientOcclusionStrength: 0,
      microBumpStrength: 0,
-       subsurfaceStrength: 0.0,
      reliefDepth: 1,
      localShadowStrength: 0,
      varnishStrength: 0,
+     gradeContrast: 1.18,
+     gradeSaturation: 1.12,
      orbitTrapStrength: 0,
      phaseColoringStrength: 0,
      stripeFrequency: 8,
-     zoomMinBrushStep: 1,
-     sentinelSeedStep: 64,
      textureName: 'Gold',
       skyboxName: 'Window',
       textureMapping: normalizeTextureMappingFromLegacy({ textureMappingMode: 0 }),
@@ -237,7 +225,6 @@ const model =  defineModel<MandelbrotParams>({
      interpolationMode: 'lab',
      approximationMode: 'auto',
      targetFps: 60,
-     gpuLoadMultiplier: 1.0,
   }
 });
 
@@ -380,10 +367,6 @@ const precisionBudgetFmt = (v: number) => `1e-${Math.round(v)}`;
 const resolutionFmt = (v: number) => 'DPR ×' + v.toFixed(2);
 const iterationsFmt = (v: number) => '×' + Math.pow(10, v).toPrecision(3);
 const fpsFmt = (v: number) => v + ' fps';
-const gpuLoadFmt = (v: number) => '×' + v.toFixed(2);
-// These read the resolved model value (the slider carries an index, not the step).
-const zoomBrushFmt = () => String(model.value.zoomMinBrushStep);
-const sentinelStepFmt = () => String(model.value.sentinelSeedStep);
 const debugViewOptions = [
   { label: 'Off', value: 0 },
   { label: 'Cout', value: 1 },
@@ -391,12 +374,13 @@ const debugViewOptions = [
   { label: 'Mix', value: 3 },
   { label: 'Probes', value: 4 },
   { label: 'Tier', value: 5 },
+  { label: 'Portee analytique', value: 6 },
 ];
 
 // Color scales for the debug view legend — kept in sync by hand with
-// mandelbrot_debug.wgsl's heat()/skip_ramp()/TIER_COLOR_* (WGSL can't be
-// imported here). Gradient stops sample the same functions at fixed t;
-// the tier swatches are literal copies of the shader's flat constants.
+// mandelbrot_debug.wgsl's heat()/skip_ramp()/TIER_COLOR_* and color.wgsl's
+// resolved-coverage colors (WGSL can't be imported here). Gradient stops sample
+// the same functions at fixed t; flat swatches copy the shader constants.
 function heatColor(t: number): string {
   const x = Math.min(1, Math.max(0, t));
   const r = Math.min(1, Math.max(0, 2.2 * x - 0.1));
@@ -422,6 +406,9 @@ const debugViewLegends: Record<number, {
   ticks?: string[];
   note?: string;
   swatches?: { color: string; label: string }[];
+  /** Extra flat swatches shown UNDER a gradient legend — used by the reach
+   *  view to name each "no data" color, so a bug report identifies the cause. */
+  extraSwatches?: { color: string; label: string }[];
 }> = {
   1: {
     kind: 'gradient',
@@ -459,6 +446,28 @@ const debugViewLegends: Record<number, {
       { color: 'rgb(242, 153, 38)', label: 'Jet (ordre 3)' },
     ],
     note: 'Couleur plate = tier dominant par pixel (le plus utile en mode Auto).',
+  },
+  6: {
+    kind: 'gradient',
+    gradient: skipRampGradient,
+    ticks: ['≤ 1 px (sans intérêt)', '8 px', '64+ px'],
+    // Diagnostic colors, mirrored from color.wgsl's reach branch: each "no
+    // data" cause has its own color so a report says WHY, not just "c'est gris".
+    extraSwatches: [
+      { color: 'rgb(242, 128, 26)', label: 'Orange = mode Exact → bascule en Auto' },
+      { color: 'rgb(242, 217, 64)', label: 'Jaune = Auto, mais table pas prête (attends la référence)' },
+      { color: 'rgb(107, 41, 77)', label: 'Prune = z″ mathématiquement nul : portée non mesurable sans z‴' },
+      { color: 'rgb(38, 51, 115)', label: 'Bleu sombre = payload absent ou non fini (anomalie si la table Auto est active)' },
+      { color: 'rgb(217, 26, 191)', label: 'Magenta = mauvaise texture liée (bug)' },
+      { color: 'rgb(26, 26, 31)', label: 'Presque noir = intérieur / pas encore calculé' },
+    ],
+    note: 'Portée du développement de Taylor du pixel (z + z′·δc + ½z″·δc²) en '
+      + 'PIXELS : jusqu\'où un pixel calculé pourrait servir ses voisins. Relit '
+      + 'le payload déjà stocké par le rendu courant (aucun recalcul), donc '
+      + 'toujours cohérent avec l\'image affichée. ESTIMATION (critère du '
+      + 'dernier terme retenu), pas un certificat — un rayon prouvé sera plus '
+      + 'petit. Gris = pixel intérieur ou sans payload (z″ n\'est accumulé '
+      + 'qu\'en mode Auto).',
   },
 };
 const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);
@@ -533,8 +542,12 @@ function updateCy(val: string) {
 // view (full-precision period detection + Newton nucleus), then recentre the
 // view exactly on its nucleus, keeping the current zoom.
 const findingMinibrot = ref(false);
+const zoomingMinibrot = ref(false);
 const findMinibrotStatus = ref<string | null>(null);
 let findMinibrotStatusTimer: ReturnType<typeof setTimeout> | null = null;
+
+// Fraction of the limiting screen axis the framed zoom gives the minibrot.
+const MINIBROT_FILL = 0.5;
 
 function setMinibrotStatus(text: string) {
   findMinibrotStatus.value = text;
@@ -543,7 +556,7 @@ function setMinibrotStatus(text: string) {
 }
 
 async function findMinibrot() {
-  if (!props.engine || findingMinibrot.value) return;
+  if (!props.engine || findingMinibrot.value || zoomingMinibrot.value) return;
   findingMinibrot.value = true;
   findMinibrotStatus.value = null;
   try {
@@ -562,6 +575,45 @@ async function findMinibrot() {
     setMinibrotStatus('Find minibrot failed');
   } finally {
     findingMinibrot.value = false;
+  }
+}
+
+// Neighbour of "Find minibrot": same detection, but the view is *framed* on the
+// copy instead of merely centred on its nucleus. The worker adds the Munafo/Jung
+// size estimate Λ, so it returns the copy's centre (the nucleus sits well off it
+// — the tail runs out to w = −2·Λ) and the view half-height that makes the copy
+// span MINIBROT_FILL of the limiting screen axis.
+async function zoomToMinibrot() {
+  if (!props.engine || findingMinibrot.value || zoomingMinibrot.value) return;
+  zoomingMinibrot.value = true;
+  findMinibrotStatus.value = null;
+  try {
+    const res = await props.engine.findMinibrot(4, MINIBROT_FILL);
+    if (res.status === 'ok' && res.cx && res.cy && res.scale) {
+      const next = { ...model.value, cx: res.cx, cy: res.cy, scale: res.scale };
+      // The framing can land far deeper than the current view. Past the
+      // navigation precision budget the worker rebuilds the reference with too
+      // few digits and the frame smears, so carry the budget along (same field
+      // the Performance "Nav precision" slider drives).
+      const depth = Math.ceil(-scaleLog10(res.scale)) + 5;
+      if (depth > precisionBudgetExp.value) {
+        next.precisionBudget = `1e-${Math.min(1000, depth)}`;
+      }
+      // One model replacement ⇒ the parent watcher applies centre + scale in the
+      // same sync pass (teleport, then the new zoom), instead of two teleports.
+      model.value = next;
+      setMinibrotStatus(`Framed period-${res.period} minibrot`);
+    } else if (res.status === 'nosize') {
+      setMinibrotStatus(`Period ${res.period} found, but its size estimate degenerated`);
+    } else if (res.status === 'nonewton') {
+      setMinibrotStatus(`Period ${res.period} found, but the nucleus did not converge`);
+    } else {
+      setMinibrotStatus('No minibrot under this view — zoom onto one first');
+    }
+  } catch {
+    setMinibrotStatus('Zoom to minibrot failed');
+  } finally {
+    zoomingMinibrot.value = false;
   }
 }
 
@@ -600,6 +652,7 @@ const presetCache = new Map<number, PresetRecord>();
 // Palette management
 const paletteName = ref('');
 const paletteEditorRef = ref<InstanceType<typeof PaletteEditor> | null>(null);
+const animationPanelRef = ref<InstanceType<typeof AnimationPanel> | null>(null);
 const palettes = ref<PaletteRecord[]>([]);
 const selectedPalette = ref('');
 const showPaletteDropdown = ref(false);
@@ -969,8 +1022,31 @@ async function quickSnapshot() {
   });
 }
 
-// Expose quickSnapshot and refreshPresets so parent can call them via ref
-defineExpose({ quickSnapshot, refreshPresets: async () => { presets.value = await getAllPresetEntries(); } });
+async function refreshLibrary(): Promise<void> {
+  presetCache.clear();
+  selectedPreset.value = null;
+  selectedNavPreset.value = null;
+  selectedPalettePreset.value = null;
+  selectedPalette.value = '';
+  selectedStopPresetName.value = '';
+
+  await Promise.all([
+    loadPresets(),
+    loadPalettes(),
+    loadTextureMappingPresets(),
+    loadTextures(),
+    refreshStopPresets(),
+    animationPanelRef.value?.refreshPresets(),
+  ]);
+}
+
+// Expose cache refresh helpers so the parent can update an already-open tab
+// after the active guest/user scope changes.
+defineExpose({
+  quickSnapshot,
+  refreshPresets: loadPresets,
+  refreshLibrary,
+});
 
 
 async function loadPresets() {
@@ -1030,10 +1106,11 @@ async function savePalette() {
     displacementAmount: model.value.displacementAmount,
     ambientOcclusionStrength: model.value.ambientOcclusionStrength,
     microBumpStrength: model.value.microBumpStrength,
-    subsurfaceStrength: model.value.subsurfaceStrength,
     reliefDepth: model.value.reliefDepth,
     localShadowStrength: model.value.localShadowStrength,
     varnishStrength: model.value.varnishStrength,
+    gradeContrast: model.value.gradeContrast,
+    gradeSaturation: model.value.gradeSaturation,
     orbitTrapStrength: model.value.orbitTrapStrength,
     phaseColoringStrength: model.value.phaseColoringStrength,
     stripeFrequency: model.value.stripeFrequency,
@@ -1049,10 +1126,11 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.displacementAmount = source.displacementAmount ?? 0;
   model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
   model.value.microBumpStrength = source.microBumpStrength ?? 0;
-  model.value.subsurfaceStrength = source.subsurfaceStrength ?? 0;
   model.value.reliefDepth = source.reliefDepth ?? 1;
   model.value.localShadowStrength = source.localShadowStrength ?? 0;
   model.value.varnishStrength = source.varnishStrength ?? 0;
+  model.value.gradeContrast = source.gradeContrast ?? 1.18;
+  model.value.gradeSaturation = source.gradeSaturation ?? 1.12;
   model.value.orbitTrapStrength = source.orbitTrapStrength ?? 0;
   model.value.phaseColoringStrength = source.phaseColoringStrength ?? 0;
   model.value.stripeFrequency = source.stripeFrequency ?? 8;
@@ -1340,10 +1418,24 @@ async function selectPreset(id: number) {
   }
 }
 
+// Escape radius SQUARED, on a log10 scale. The slider floor is log10(4), i.e.
+// |z| = 2, and that is a correctness bound rather than taste: below it the
+// escape test fires on orbits that have not escaped, and — measured, see
+// MANDELBROT_BOX_DIMENSION_CENSUS.md — the exterior distance estimate the
+// renderer stores in layer 4 collapses. Against a reference bailout of 1e12,
+// the share of pixels whose distance is wrong by more than 2× runs 0–2 % at
+// mu = 4, 10–27 % at mu = 2, and 43–100 % at mu = 1, where the median error
+// reaches ×1484. That field drives the relief shading AND the adaptive-AA
+// target, so a corrupt one silently pins every escaped pixel at the full
+// sample count — adaptive AA paying full price for nothing.
+// The getter stays faithful: a preset saved before this floor keeps showing the
+// value it actually carries (the slider pins at its left edge) rather than a
+// number the model does not hold. Only a user edit snaps it back into range.
+const MU_MIN_LOG10 = Math.log10(4);
 const muSlider = computed({
-  get: () => Math.log10(model.value.mu ?? 1.0),
+  get: () => Math.log10(model.value.mu ?? 4.0),
   set: (val: number) => {
-    model.value.mu = Math.pow(10, val);
+    model.value.mu = Math.pow(10, Math.max(val, MU_MIN_LOG10));
   }
 });
 const epsilonSlider = computed({
@@ -1366,11 +1458,6 @@ onMounted(async () => {
   await loadTextureMappingPresets();
   await loadTextures();
   await refreshStopPresets();
-  await syncRemoteCatalog();
-  await loadPresets();
-  await loadPalettes();
-  await loadTextureMappingPresets();
-  await loadTextures();
 });
 
 onUnmounted(() => {
@@ -1524,16 +1611,38 @@ async function importPresets(event: Event) {
   const files = Array.from(input.files ?? []);
   if (files.length === 0) return;
 
-  const existing = await getAllPresetEntries();
+  let budget: PersonalPresetImportBudget | null;
+  try {
+    budget = await createActivePresetImportBudget();
+  } catch (error) {
+    console.warn('[Settings] Unable to verify personal preset quota before import.', error);
+    window.alert('Unable to verify the personal preset quota. Check the Firebase Functions deployment and try again.');
+    input.value = '';
+    return;
+  }
+  const identities = buildPresetImportIdentitySet(await getAllPresetRecords());
   let importedCount = 0;
-  let hadValid = false;
+  let duplicateCount = 0;
+  let failedCount = 0;
+  let validCount = 0;
+  let quotaReached = false;
+  let firstFailure = '';
+  let stopImport = false;
   for (const file of files) {
+    let records: unknown[];
     try {
       const imported = await readJsonFile(file);
-      const records = Array.isArray(imported) ? imported : [imported];
-      for (const preset of records) {
-        if (!preset || typeof preset !== 'object' || !('value' in preset)) continue;
-        hadValid = true;
+      records = Array.isArray(imported) ? imported : [imported];
+    } catch (error) {
+      failedCount += 1;
+      firstFailure ||= error instanceof Error ? error.message : String(error);
+      console.warn(`[Settings] Skipping invalid preset import file "${file.name}"`, error);
+      continue;
+    }
+    for (const preset of records) {
+      if (!preset || typeof preset !== 'object' || !('value' in preset)) continue;
+      validCount += 1;
+      try {
         const record = preset as {
           guid?: string;
           value: MandelbrotParams;
@@ -1544,38 +1653,76 @@ async function importPresets(event: Event) {
         };
         const name = record.name ?? '';
         const date = record.date ?? '';
-        if (existing.some(e => e.name === name && e.date === date)) continue;
         const value = structuredClone(record.value);
         stripSessionPerformanceFields(value);
         stripExplorationStateFields(value);
         value.textureMapping = normalizeTextureMappingFromLegacy(value);
         delete (value as any).textureMappingMode;
-        await assertActivePresetImportCapacity(record.guid);
+        const guid = record.guid || createGuid();
+        const identityRecord = {guid: record.guid, name, date, value};
+        if (
+          hasPresetImportIdentity(identities, identityRecord)
+          || (record.guid && budget?.existingGuids.has(record.guid))
+        ) {
+          duplicateCount += 1;
+          continue;
+        }
+        if (budget && budget.remaining < 1) {
+          quotaReached = true;
+          stopImport = true;
+          break;
+        }
         await savePresetEntry(
           value,
           record.thumbnail ?? '',
           name,
           record.date,
           record.favorite ?? false,
-          record.guid,
+          guid,
         );
+        addPresetImportIdentity(identities, {...identityRecord, guid});
+        if (budget) {
+          budget.existingGuids.add(guid);
+          budget.remaining -= 1;
+        }
         importedCount += 1;
+      } catch (error) {
+        if (error instanceof PersonalPresetQuotaError) {
+          quotaReached = true;
+          stopImport = true;
+          break;
+        }
+        failedCount += 1;
+        firstFailure ||= error instanceof Error ? error.message : String(error);
+        console.warn(`[Settings] Skipping one preset from "${file.name}"`, error);
       }
-    } catch (error) {
-      if (error instanceof PersonalPresetQuotaError) {
-        window.alert(error.message);
-        break;
-      }
-      console.warn(`[Settings] Skipping preset import file "${file.name}"`, error);
     }
+    if (stopImport) break;
   }
 
   if (importedCount > 0) {
     presets.value = await getAllPresetEntries();
-  } else if (hadValid) {
-    window.alert('All presets were already imported (same name + date).');
-  } else {
+  }
+
+  const summary: string[] = [];
+  if (importedCount > 0) summary.push(`${importedCount} preset${importedCount === 1 ? '' : 's'} imported.`);
+  if (duplicateCount > 0) summary.push(`${duplicateCount} exact duplicate${duplicateCount === 1 ? '' : 's'} skipped.`);
+  if (failedCount > 0) {
+    summary.push(`${failedCount} entr${failedCount === 1 ? 'y' : 'ies'} failed${firstFailure ? `: ${firstFailure}` : '.'}`);
+  }
+  if (quotaReached) {
+    summary.push(`The account has reached its ${PERSONAL_PRESET_LIMIT}-preset limit.`);
+  }
+  if (showOnlyFavoritePresets.value && presets.value.length > visiblePresets.value.length) {
+    summary.push(`Favorites filter active: ${visiblePresets.value.length} of ${presets.value.length} presets are visible.`);
+  }
+
+  if (summary.length > 0) {
+    window.alert(summary.join('\n'));
+  } else if (validCount === 0) {
     window.alert('Invalid file format.');
+  } else {
+    window.alert('No preset was imported.');
   }
 
   // Reset pour pouvoir réimporter les mêmes fichiers
@@ -2250,12 +2397,21 @@ async function importSkyboxTexture(event: Event) {
         <div class="find-minibrot-row">
           <button
             class="mini-btn"
-            :disabled="!props.engine || findingMinibrot"
+            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
             title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
             @click="findMinibrot"
           >
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
             {{ findingMinibrot ? 'Searching…' : 'Find minibrot' }}
+          </button>
+          <button
+            class="mini-btn"
+            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
+            title="Same detection, then frame the whole minibrot at the centre of the screen (~50 % of it)"
+            @click="zoomToMinibrot"
+          >
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>
+            {{ zoomingMinibrot ? 'Framing…' : 'Zoom on minibrot' }}
           </button>
           <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
         </div>
@@ -2284,7 +2440,7 @@ async function importSkyboxTexture(event: Event) {
       >
         <div class="mu-row">
           <DenseField
-            label="Mu" :min="0" :max="5" :step="0.01"
+            label="Mu" :min="0.602" :max="5" :step="0.01"
             :f="muFmt"
             :model-value="muSlider"
             @update:model-value="(v: number) => muSlider = v"
@@ -2423,7 +2579,10 @@ async function importSkyboxTexture(event: Event) {
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
           Favorites
         </button>
-        <span class="count">{{ visiblePresets.length }} preset{{ visiblePresets.length === 1 ? '' : 's' }}</span>
+        <span class="count">
+          {{ visiblePresets.length }}<template v-if="showOnlyFavoritePresets"> / {{ presets.length }}</template>
+          preset{{ visiblePresets.length === 1 && !showOnlyFavoritePresets ? '' : 's' }}
+        </span>
       </div>
 
       <div class="grid">
@@ -2494,6 +2653,7 @@ async function importSkyboxTexture(event: Event) {
     <!-- Animation tab -->
     <div v-else-if="activeTab === 'animation'" class="animation-tab">
       <AnimationPanel
+        ref="animationPanelRef"
         v-model="model"
         :user-role="userRole"
         :is-admin="isAdmin"
@@ -2604,10 +2764,11 @@ async function importSkyboxTexture(event: Event) {
           :displacementAmount="model.displacementAmount"
           :ambientOcclusionStrength="model.ambientOcclusionStrength"
           :microBumpStrength="model.microBumpStrength"
-          :subsurfaceStrength="model.subsurfaceStrength"
           :reliefDepth="model.reliefDepth"
           :localShadowStrength="model.localShadowStrength"
           :varnishStrength="model.varnishStrength"
+          :gradeContrast="model.gradeContrast"
+          :gradeSaturation="model.gradeSaturation"
           :orbitTrapStrength="model.orbitTrapStrength"
           :phaseColoringStrength="model.phaseColoringStrength"
           :textureMapping="model.textureMapping"
@@ -2667,10 +2828,11 @@ async function importSkyboxTexture(event: Event) {
         :displacement-amount="model.displacementAmount"
         :ambient-occlusion-strength="model.ambientOcclusionStrength"
         :micro-bump-strength="model.microBumpStrength"
-        :subsurface-strength="model.subsurfaceStrength"
         :relief-depth="model.reliefDepth"
         :local-shadow-strength="model.localShadowStrength"
         :varnish-strength="model.varnishStrength"
+        :grade-contrast="model.gradeContrast"
+        :grade-saturation="model.gradeSaturation"
         :orbit-trap-strength="model.orbitTrapStrength"
         :phase-coloring-strength="model.phaseColoringStrength"
         :texture-mapping="model.textureMapping"
@@ -2697,8 +2859,10 @@ async function importSkyboxTexture(event: Event) {
             :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
           <DenseField label="Vernis" :min="0" :max="10" :step="0.01" f="p2"
             :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
-          <DenseField label="Sous-surface" :min="0" :max="10" :step="0.05" f="p2"
-            :model-value="model.subsurfaceStrength ?? 0" @update:model-value="(v: number) => model.subsurfaceStrength = v" />
+          <DenseField label="Contraste" :min="0.5" :max="2" :step="0.01" f="p2"
+            :model-value="model.gradeContrast ?? 1.18" @update:model-value="(v: number) => model.gradeContrast = v" />
+          <DenseField label="Saturation" :min="0" :max="2" :step="0.01" f="p2"
+            :model-value="model.gradeSaturation ?? 1.12" @update:model-value="(v: number) => model.gradeSaturation = v" />
         </div>
       </DenseSection>
 
@@ -2875,7 +3039,10 @@ async function importSkyboxTexture(event: Event) {
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
           Favorites
         </button>
-        <span class="count">{{ visiblePalettePresets.length }} preset{{ visiblePalettePresets.length === 1 ? '' : 's' }}</span>
+        <span class="count">
+          {{ visiblePalettePresets.length }}<template v-if="showOnlyFavoritePalettePresets"> / {{ presets.length }}</template>
+          preset{{ visiblePalettePresets.length === 1 && !showOnlyFavoritePalettePresets ? '' : 's' }}
+        </span>
       </div>
       <div class="grid palette-library-grid full-preset-grid" style="max-height:264px;">
         <div v-for="preset in visiblePalettePresets" :key="preset.id" class="card" :class="{ sel: selectedPalettePreset === preset.id }" @click="selectPalettePresetFromDropdown(preset)">
@@ -2950,18 +3117,6 @@ async function importSkyboxTexture(event: Event) {
             :model-value="model.aaAdaptive !== false"
             @update:model-value="(v: boolean) => model.aaAdaptive = v"
           />
-          <DenseField
-            label="Zoom brush step" :min="0" :max="6" :step="1"
-            :f="zoomBrushFmt"
-            :model-value="zoomMinBrushStepIndex"
-            @update:model-value="(v: number) => zoomMinBrushStepIndex = v"
-          />
-          <DenseField
-            label="Sentinel seed step" :min="0" :max="12" :step="1"
-            :f="sentinelStepFmt"
-            :model-value="sentinelSeedStepIndex"
-            @update:model-value="(v: number) => sentinelSeedStepIndex = v"
-          />
         </div>
 
         <DenseSeg
@@ -3013,6 +3168,11 @@ async function importSkyboxTexture(event: Event) {
           <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-ticks">
             <span v-for="tick in debugViewLegend.ticks" :key="tick">{{ tick }}</span>
           </div>
+          <div v-if="debugViewLegend.extraSwatches" class="dbgview-legend-swatches">
+            <span v-for="sw in debugViewLegend.extraSwatches" :key="sw.label" class="dbgview-legend-swatch">
+              <i :style="{ background: sw.color }"></i>{{ sw.label }}
+            </span>
+          </div>
           <div v-if="debugViewLegend.kind === 'swatches'" class="dbgview-legend-swatches">
             <span v-for="sw in debugViewLegend.swatches" :key="sw.label" class="dbgview-legend-swatch">
               <i :style="{ background: sw.color }"></i>{{ sw.label }}
@@ -3049,12 +3209,6 @@ async function importSkyboxTexture(event: Event) {
             :f="fpsFmt"
             :model-value="model.targetFps ?? 60"
             @update:model-value="(v: number) => model.targetFps = v"
-          />
-          <DenseField
-            label="Max GPU load" :min="0.25" :max="4" :step="0.25"
-            :f="gpuLoadFmt"
-            :model-value="model.gpuLoadMultiplier ?? 1"
-            @update:model-value="(v: number) => model.gpuLoadMultiplier = v"
           />
         </div>
       </DenseSection>
