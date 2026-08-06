@@ -779,11 +779,11 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
         <div class="pc-val">{{ fmt(stats.frameIntervalMs) }}<span class="pc-u">ms</span></div>
         <div class="pc-lbl">Frame</div>
       </div>
-      <div class="perf-card compact" title="Temps GPU RÉEL de la frame = dernier end − premier begin des passes (timeline GPU). C'est le total autoritaire : les passes tournent séquentiellement, donc ce span les englobe (copies inter-passes comprises).">
+      <div class="perf-card compact" title="Temps GPU RÉEL de la frame = dernier marqueur − premier marqueur sur la timeline GPU. C'est le total autoritaire, incluant le travail GPU situé entre les catégories mesurées.">
         <div class="pc-val">{{ fmt(stats.gpuSpanMs) }}<span class="pc-u">ms</span></div>
         <div class="pc-lbl">GPU span</div>
       </div>
-      <div class="perf-card compact" title="Σ des durées par passe, mesurées comme l'écart entre fins de passe consécutives (partition de la timeline GPU). Sum ≈ span par construction. Toute copie/clear inter-passe tombe dans la passe suivante.">
+      <div class="perf-card compact" title="Σ des durées par catégorie : écarts entre fins de passes ordinaires, spans explicites pour Snapshot et Merge. La somme peut différer légèrement du span à cause du lissage et des marqueurs.">
         <div class="pc-val">{{ fmt(stats.gpuSumMs) }}<span class="pc-u">ms</span></div>
         <div class="pc-lbl">Σ passes</div>
       </div>

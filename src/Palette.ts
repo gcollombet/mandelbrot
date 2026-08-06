@@ -1,7 +1,7 @@
 import { interpolateLab, interpolateRgb, interpolateHcl, interpolateHsl, interpolateCubehelix } from 'd3-interpolate';
 import { rgb } from 'd3-color';
 import type { ColorStop } from './ColorStop.ts';
-import { applyStopTransferCurve, getEffectValue, getStopTransferCurve } from './ColorStop.ts';
+import { applyStopTransferCurve, getEffectValue, getStopTransferCurve, normalizeColorStops } from './ColorStop.ts';
 import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG } from './effectFieldConfig';
 import type { EffectFieldName } from './effectFieldConfig';
 import type { InterpolationMode } from './Mandelbrot.ts';
@@ -51,7 +51,7 @@ export class Palette {
   private interpolate: (a: string, b: string) => (t: number) => string;
 
   constructor(points: ColorStop[], mode: InterpolationMode = 'lab') {
-    this.points = points.slice().sort((a, b) => a.position - b.position);
+    this.points = normalizeColorStops(points).sort((a, b) => a.position - b.position);
     this.interpolate = interpolators[mode] ?? interpolateLab;
   }
 
@@ -147,7 +147,7 @@ export class Palette {
    *   Row 3: dielectric F0, metallic, roughness, anisotropy
    *   Row 4: iridescence R, G, B, strength
    *   Row 5: stripeAverage, rotationMean, stripeRelief, directionCoherenceRelief
-   *   Row 6: directionalVolume, metalReflectance, metalEnvironmentTint, reserved
+   *   Row 6: reliefGain, metalReflectance, metalEnvironmentTint, reserved
    */
   generateTexture(): { data: Float32Array; width: number; height: number } {
     const width = TEXTURE_WIDTH;

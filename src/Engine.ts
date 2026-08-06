@@ -34,6 +34,14 @@ import {computeAaJitterOffset} from './Mandelbrot.ts'
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
 import {DISPLAY_VALUE_LAYERS, float16ToFloat32, isDisplaySetCurrent} from './displayGeometry'
+import {
+    PASS_SLOT_INDEX,
+    PASS_SLOTS,
+    TS_COUNT,
+    partitionGpuPassTimestamps,
+    selectRawUtilityPassKey,
+    shouldEncodeTimestampBoundary,
+} from './gpuPassTimings'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
@@ -116,24 +124,6 @@ const TAU = Math.PI * 2
 const UNFINISHED_PIXEL_DONE_THRESHOLD = 10
 // EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
 const GPU_TIME_EMA_ALPHA = 0.25
-
-// Per-pass GPU timing (PerformancePanel). Each timed pass gets a begin/end
-// timestamp pair via GPUComputePass/RenderPassTimestampWrites — recorded inline
-// by the GPU, so NO pipeline barrier is added to the measured pass. The values
-// are resolved and read back asynchronously off the critical path (like the
-// counter readback). Order here defines slot indices and the panel's display
-// order. `label` is shown to the user; `help` explains the metric.
-const PASS_SLOTS: { key: string; label: string; help: string }[] = [
-    { key: 'merge',     label: 'Merge (zoom)',   help: 'Fusion résolu+figé en fin de zoom (MRT min-step). Ne tourne qu\'à l\'arrêt d\'un zoom.' },
-    { key: 'reproject', label: 'Reprojection',   help: 'Décalage entier des pixels lors d\'un pan + effacement des bords (réutilise le calcul).' },
-    { key: 'reseed',    label: 'AA reseed',      help: 'Ré-amorçage sélectif de la frontière pour un échantillon d\'anti-aliasing. Actif seulement en accumulation AA.' },
-    { key: 'compute',   label: 'Itération',      help: 'Kernel fusionné brush+mandelbrot+comptage (perturbation/BLA/jet…). C\'est le cœur du coût.' },
-    { key: 'resolve',   label: 'Resolve',        help: 'Présentation bilinéaire temporaire des pixels exacts encore incomplets.' },
-    { key: 'aaAccum',   label: 'Couleur (AA)',   help: 'Passe couleur accumulée dans le buffer AA (linéaire) pendant l\'accumulation.' },
-    { key: 'color',     label: 'Couleur',        help: 'Passe couleur directe : palette, relief, skybox, iridescence → écran.' },
-    { key: 'present',   label: 'Present (AA)',   help: 'Division de l\'accumulateur AA par le nombre d\'échantillons + sRGB → écran.' },
-]
-const TS_COUNT = PASS_SLOTS.length * 2
 
 // Count unfinished pixels less often than every render frame.  The readback is
 // asynchronous, so this controls the compute/count pass frequency, not display FPS.
@@ -934,6 +924,8 @@ export class Engine {
     frameIntervalMs = 0                         // wall time between successive render() calls
     private timestampsEnabled = false
     private timestampQuerySet?: GPUQuerySet
+    /** One-thread no-op dispatch: prevents browsers from eliminating timestamp-only marker passes. */
+    private timestampMarkerPipeline?: GPUComputePipeline
     private tsResolveBuffer?: GPUBuffer
     private tsReadBuffer?: GPUBuffer
     private tsReadbackFree = true
@@ -1843,6 +1835,17 @@ export class Engine {
             this.timestampQuerySet = this.device.createQuerySet({ type: 'timestamp', count: TS_COUNT, label: 'Engine PerfTimestamps' })
             this.tsResolveBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC, label: 'Engine TS Resolve' })
             this.tsReadBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ, label: 'Engine TS Readback' })
+            this.timestampMarkerPipeline = this.device.createComputePipeline({
+                label: 'Engine Timestamp Marker Pipeline',
+                layout: 'auto',
+                compute: {
+                    module: this.device.createShaderModule({
+                        label: 'Engine Timestamp Marker Shader',
+                        code: '@compute @workgroup_size(1) fn main() {}',
+                    }),
+                    entryPoint: 'main',
+                },
+            })
         }
         this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext
         this.format = navigator.gpu.getPreferredCanvasFormat()
@@ -2271,14 +2274,40 @@ export class Engine {
         this.bindGroupPresent = undefined
     }
 
-    // Timestamp-write descriptor for a timed pass (slot = index into PASS_SLOTS).
-    // Returns undefined when timestamps are off, so callers can spread it into a
-    // pass descriptor unconditionally. The shape is shared by compute and render
-    // pass timestampWrites. Records the slot as used this frame.
+    // Timestamp-write descriptor for an ordinary timed pass. Explicit copy or
+    // compound spans use robust end-of-pass boundaries below instead.
     private tsWrites(slot: number): GPUComputePassTimestampWrites | undefined {
         if (!this.timestampsEnabled || !this.timestampQuerySet) return undefined
         this.tsSlotsUsedThisFrame |= (1 << slot)
         return { querySet: this.timestampQuerySet, beginningOfPassWriteIndex: slot * 2, endOfPassWriteIndex: slot * 2 + 1 }
+    }
+
+    /**
+     * Encode one robust timestamp boundary around commands (notably texture
+     * copies) which cannot carry pass timestampWrites themselves. Its one-thread
+     * no-op dispatch prevents browser elimination; only the END marker is observed.
+     */
+    private tsSpanBoundary(commandEncoder: GPUCommandEncoder, slot: number, edge: 'start' | 'end') {
+        if (!shouldEncodeTimestampBoundary(this.timestampsEnabled, !!this.timestampQuerySet)
+            || !this.timestampMarkerPipeline) return
+        this.tsSlotsUsedThisFrame |= (1 << slot)
+        const marker = commandEncoder.beginComputePass({
+            label: `Engine timing boundary ${PASS_SLOTS[slot].key}:${edge}`,
+            timestampWrites: {
+                querySet: this.timestampQuerySet!,
+                endOfPassWriteIndex: slot * 2 + (edge === 'start' ? 0 : 1),
+            },
+        })
+        marker.setPipeline(this.timestampMarkerPipeline)
+        marker.dispatchWorkgroups(1)
+        marker.end()
+    }
+
+    /** Write only the robust END marker of an explicit span on a real pass. */
+    private tsExplicitSpanEnd(slot: number): GPUComputePassTimestampWrites | undefined {
+        if (!this.timestampsEnabled || !this.timestampQuerySet) return undefined
+        this.tsSlotsUsedThisFrame |= (1 << slot)
+        return {querySet: this.timestampQuerySet, endOfPassWriteIndex: slot * 2 + 1}
     }
 
     // Deferred, off-critical-path readback of the resolved timestamps → per-pass
@@ -2295,7 +2324,6 @@ export class Engine {
             try {
                 const data = new BigInt64Array(buf.getMappedRange().slice(0))
                 const timings: Record<string, number> = { ...this.passTimingsMs }
-                const active: Record<string, boolean> = {}
                 let iterationPassMs: number | undefined
 
                 // Per-pass end−begin is UNRELIABLE on tiled/mobile GPUs: the begin
@@ -2303,31 +2331,14 @@ export class Engine {
                 // fragment execution), so end−begin reads as cumulative-from-start
                 // rather than a real pass duration. Passes run SEQUENTIALLY on the
                 // GPU timeline, so the robust partition is the gap between
-                // consecutive END markers: pass duration = end − previous end (first
-                // = end − min begin = frame start). This sums exactly to the frame
-                // span and gives true per-shader time regardless of begin clustering.
-                // (Any inter-pass copy/clear falls into the following pass's gap.)
-                const ranPasses: { key: string; end: bigint }[] = []
-                let minBegin = 0n, have = false
-                for (let i = 0; i < PASS_SLOTS.length; i++) {
-                    const key = PASS_SLOTS[i].key
-                    const ran = (pending & (1 << i)) !== 0
-                    active[key] = ran
-                    if (!ran) continue
-                    const begin = data[i * 2]
-                    if (!have) { minBegin = begin; have = true }
-                    else if (begin < minBegin) minBegin = begin
-                    ranPasses.push({ key, end: data[i * 2 + 1] })
-                }
-                // Sort by end → the GPU execution order (robust to any overlap).
-                ranPasses.sort((a, b) => (a.end < b.end ? -1 : a.end > b.end ? 1 : 0))
-                let prevEnd = minBegin
+                // consecutive END markers. Explicit copy/compound spans carry
+                // their own pair of robust END boundaries and their post-marker
+                // becomes the predecessor of the following ordinary pass.
+                const partition = partitionGpuPassTimestamps(data, pending)
                 let sum = 0
                 let otherPassesMs = 0
-                for (const rp of ranPasses) {
-                    let ms = Number(rp.end - prevEnd) / 1e6
-                    prevEnd = rp.end
-                    if (!Number.isFinite(ms) || ms < 0) ms = 0
+                for (const rp of partition.samples) {
+                    const ms = rp.durationMs
                     if (rp.key === 'compute') iterationPassMs = ms
                     else otherPassesMs += ms
                     const prev = timings[rp.key]
@@ -2338,10 +2349,10 @@ export class Engine {
                     ? this.otherPassesGpuMs * 0.8 + otherPassesMs * 0.2
                     : otherPassesMs
                 this.passTimingsMs = timings
-                this.passActive = active
+                this.passActive = partition.active
                 this.passGpuSumMs = sum
-                if (have && ranPasses.length) {
-                    const spanMs = Number(ranPasses[ranPasses.length - 1].end - minBegin) / 1e6
+                if (partition.samples.length) {
+                    const spanMs = partition.spanMs
                     this.passGpuSpanMs = this.passGpuSpanMs > 0
                         ? this.passGpuSpanMs * 0.8 + spanMs * 0.2
                         : spanMs
@@ -5068,6 +5079,7 @@ export class Engine {
             && this.geometryScratchTexture && this.metadataScratchTexture
             && this.frozenDisplayVersion >= 0) {
             const texSize = this.neutralSize
+            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.merge, 'start')
             // Copy the frozen set to format-compatible temporary resources so
             // the merge may read it while writing the frozen destination.
             commandEncoder.copyTextureToTexture(
@@ -5107,7 +5119,7 @@ export class Engine {
             }))
             const rpassMerge = commandEncoder.beginRenderPass({
                 colorAttachments: mergeAttachments,
-                timestampWrites: this.tsWrites(0),
+                timestampWrites: this.tsExplicitSpanEnd(PASS_SLOT_INDEX.merge),
             })
             rpassMerge.setPipeline(this.pipelineMerge)
             rpassMerge.setBindGroup(0, this.bindGroupMerge)
@@ -5123,6 +5135,7 @@ export class Engine {
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
         if (this.needFreezeSnapshot && this.resolvedDisplay && this.frozenDisplay) {
             const texSize = this.neutralSize
+            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'start')
             commandEncoder.copyTextureToTexture(
                 { texture: this.resolvedDisplay.valuesTexture },
                 { texture: this.frozenDisplay.valuesTexture },
@@ -5138,6 +5151,7 @@ export class Engine {
                 { texture: this.frozenDisplay.metadataTexture },
                 { width: texSize, height: texSize },
             )
+            this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'end')
             this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needFreezeSnapshot = false
             this.frozenAligned = true
@@ -5179,8 +5193,11 @@ export class Engine {
         {
             if (utilityNeeded) {
                 // Utility pass: pan gather or exact step-1 clear stamp,
-                // A→B, then B is copied back so iteration proceeds on A.
-                const utilPass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(1) })
+                // A→B, then the texture roles swap so iteration proceeds on B.
+                const utilityTimingKey = selectRawUtilityPassKey(this.clearHistoryNextFrame)
+                const utilPass = commandEncoder.beginComputePass({
+                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX[utilityTimingKey]),
+                })
                 utilPass.setPipeline(this.pipelineReprojectCs!)
                 utilPass.setBindGroup(0, this.bindGroupReprojectCs!)
                 const uwg = Math.ceil(this.neutralSize / 16)
@@ -5215,7 +5232,9 @@ export class Engine {
                 if (this.aaFrontierBuffer) {
                     commandEncoder.clearBuffer(this.aaFrontierBuffer, 0, 8)
                 }
-                const reseedPass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(2) })
+                const reseedPass = commandEncoder.beginComputePass({
+                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX.reseed),
+                })
                 reseedPass.setPipeline(this.pipelineAaReseed)
                 reseedPass.setBindGroup(0, this.bindGroupAaReseed)
                 const rwg = Math.ceil(this.neutralSize / 16)
@@ -5240,7 +5259,9 @@ export class Engine {
                 commandEncoder.clearBuffer(this.workStatsBuffer!, 0, WORK_STATS_BYTES)
                 this.workStatsClearedSession = this.workStatsSessionSerial
             }
-            const computePass = commandEncoder.beginComputePass({ timestampWrites: this.tsWrites(3) })
+            const computePass = commandEncoder.beginComputePass({
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.compute),
+            })
             // Shallow views (scaleExp > DEEP_EXP) never enter the floatexp deep
             // path, so run the DCE'd shallow kernel; floatExpActive is set from
             // expScale <= DEEP_EXP_THRESHOLD earlier this frame.
@@ -5289,7 +5310,7 @@ export class Engine {
             // packs display provenance; no neighbour finalization pass remains.
             const rpassResolve = commandEncoder.beginRenderPass({
                 colorAttachments: makeDisplayAttachments(this.resolvedDisplay!, 'clear'),
-                timestampWrites: this.tsWrites(4),
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.resolve),
             })
             rpassResolve.setPipeline(this.pipelineResolve)
             rpassResolve.setBindGroup(0, this.bindGroupResolve)
@@ -5377,7 +5398,7 @@ export class Engine {
                     loadOp: firstSample ? 'clear' : 'load',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(5),
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.aaAccum),
             })
             rpassAccum.setPipeline(firstSample ? this.pipelineColorAccumClear! : this.pipelineColorAccum!)
             // Accumulation reads the coherent typed display set. The raw texture
@@ -5396,7 +5417,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(6),
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.color),
             })
             rpassColor.setPipeline(this.pipelineColor)
             rpassColor.setBindGroup(0, colorBindGroup)
@@ -5413,7 +5434,7 @@ export class Engine {
                     loadOp: 'clear',
                     storeOp: 'store',
                 }],
-                timestampWrites: this.tsWrites(7),
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.present),
             })
             rpassPresent.setPipeline(this.pipelinePresent)
             rpassPresent.setBindGroup(0, this.bindGroupPresent)

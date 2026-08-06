@@ -134,7 +134,7 @@ struct EffectParams {
   roughness: f32,       // [0.02, 1]
   anisotropy: f32,      // [0, 1]
   // Row 6
-  directionalVolume: f32,    // [0, 1]
+  reliefGain: f32,            // log-domain control [0, 2], neutral at 1
   metalReflectance: f32,     // conductor F0 gain [0, 2]
   metalEnvironmentTint: f32, // [0, 1], 0 preserves env hue, 1 is physical tint
   iridescenceColor: vec3<f32>,
@@ -216,9 +216,9 @@ fn sampleShadingMaterial(palettePhase: f32, e: ptr<function, EffectParams>) {
   (*e).iridescenceColor = row4.rgb;
   (*e).wIridescence = clamp(row4.a, 0.0, 1.0);
 
-  // Row 6: artistic macro-volume and conductor controls.
+  // Row 6: per-material analytic relief gain and conductor controls.
   let row6 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(6.0)), 0.0);
-  (*e).directionalVolume = clamp(row6.r, 0.0, 1.0);
+  (*e).reliefGain = clamp(row6.r, 0.0, 2.0);
   (*e).metalReflectance = clamp(row6.g, 0.0, 2.0);
   (*e).metalEnvironmentTint = clamp(row6.b, 0.0, 1.0);
 }
@@ -630,6 +630,10 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
     let angleDir = vec2<f32>(cos(geometryAngle), sin(geometryAngle));
     let reliefDepth = parameters.reliefDepth * effShading;
     let relief = clamp(reliefDepth, 0.0, 2.0);
+    // Log-domain control: 0 -> 0.25x, 1 -> 1x, 2 -> 4x. The multiplier is
+    // strictly positive, so it can never reverse the cached analytic slope.
+    let reliefGain = exp2(2.0 * (fx.reliefGain - 1.0));
+    let effectiveAnalyticRelief = relief * reliefGain;
     let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
     let stripeReliefStrength = fx.wStripeRelief * effShading;
     let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
@@ -640,7 +644,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
       (mappingXId == 0 || mappingXId == 1 || mappingYId == 0 || mappingYId == 1);
     let needsStripeGradient = stripeReliefStrength > 0.001;
     let needsDirectionCoherenceGradient = directionCoherenceStrength > 0.001;
-    let needsFractalGradient = relief > 0.001;
+    let needsFractalGradient = effectiveAnalyticRelief > 0.001;
     var distanceHeight = 0.0;
     // Cached geometry stores the analytic derivative per source texel and the
     // branch-local analytic Laplacian. Historical relief gains are applied
@@ -713,14 +717,12 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
     // Hstripe = 0.5 - 0.5*cos(2πp); its derivative is π*sin(2πp), continuous at
     // the phase wrap. Coherence and texture luminance are already scalar fields.
     let stripeProfileDerivative = 3.141592653589793 * sin(TWO_PI * stripeAverage);
-    let heightGradient = grad * (0.34 * relief);
+    let heightGradient = grad * (0.34 * effectiveAnalyticRelief);
     let stripeHeightGradient = stripeGrad * stripeProfileDerivative * (0.75 * clamp(stripeReliefStrength, 0.0, 1.0));
     let coherenceHeightGradient = directionCoherenceGrad * (0.75 * clamp(directionCoherenceStrength, 0.0, 100.0));
-    // At 1 this term reproduces the old angle-derived macro slope (|g| = 2),
-    // but it now composes with the measured scalar fields instead of replacing
-    // their normal.
-    let directionalVolumeGradient = -angleDir * (2.0 * fx.directionalVolume * clamp(relief, 0.0, 1.0));
-    let surfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient + directionalVolumeGradient;
+    // Material bumps remain independent of the analytic relief multiplier.
+    let surfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;
+    let anisotropy = clamp(fx.anisotropy, 0.0, 1.0);
     let surfaceNormalLocal = surface_normal_from_gradient(surfaceGradient);
     let geometricTangentLocal = normalize(vec3<f32>(1.0, 0.0, surfaceGradient.x));
     let geometricBitangentLocal = normalize(cross(surfaceNormalLocal, geometricTangentLocal));
@@ -736,7 +738,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
     let lightDir = vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ);
     // The magnified bilinear path has no extra curvature fetch: AO fades out
     // during reprojection instead of adding four more texture reads per pixel.
-    let ao = curvature_ambient_occlusion(heightCurvature, relief, parameters.ambientOcclusionStrength);
+    let ao = curvature_ambient_occlusion(heightCurvature, effectiveAnalyticRelief, parameters.ambientOcclusionStrength);
     let viewDir = vec3<f32>(0.0, 0.0, 1.0);
     let halfDir = normalize(lightDir + viewDir);
     let anisotropyBitangent = normalize(cross(normal, anisotropyTangent));
@@ -746,7 +748,6 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
     let vDotH = max(dot(viewDir, halfDir), 0.0);
     let metallic = clamp(fx.metallic, 0.0, 1.0);
     let roughness = clamp(fx.roughness, 0.02, 1.0);
-    let anisotropy = clamp(fx.anisotropy, 0.0, 1.0);
     // Gamma-era gain retuned down: in linear light the GGX peak already reads
     // brighter once encoded to sRGB. Floor is 0 so Spéculaire = 0 truly
     // disables the lobe.
@@ -771,7 +772,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
     let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
     let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL * roughMetalEnergy;
     let diffuseColor = colorLin * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
-    let localShadow = local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, relief, localShadowControl);
+    let localShadow = local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, effectiveAnalyticRelief, localShadowControl);
     let shadowedNDotL = nDotL * localShadow;
     let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
     let reflectionSide = mix(0.08, 1.0, litSide);
@@ -780,10 +781,9 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
     let brightness = max(fx.shadingLevel, 0.0);
     var materialColor = ambientDiffuse + directDiffuse + directSpecular * localShadow;
     let reliefAccent = clamp((1.0 - exp(-0.35 * localShadowControl)) * effShading * 2.0, 0.0, 2.0);
-    let ridge = smoothstep(0.10, 1.55, slope * relief) * litSide * reliefAccent;
+    let ridge = smoothstep(0.10, 1.55, slope * effectiveAnalyticRelief) * litSide * reliefAccent;
     materialColor += mix(colorLin, vec3<f32>(1.0), 0.38) * ridge * 0.10 * (1.0 - metallic * 0.45);
     let varnish = clamp(parameters.varnishStrength, 0.0, 10.0) * 0.1;
-    let reflectDir = reflect(-viewDir, normal);
     // Clear coat is a true top layer: it is applied at the very end of this
     // block, once the base material (iridescence, SSS, wear, env… included)
     // is fully assembled.
@@ -797,7 +797,7 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
       let facingPearl = dot(orientationPlane, lightPlane) * 0.5 + 0.5;
       let crossPearl = dot(orientationPlane, tangentPlane) * 0.5 + 0.5;
       let orientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
-      let slopeShift = smoothstep(0.025, 1.15, slope * max(relief, 0.18));
+      let slopeShift = smoothstep(0.025, 1.15, slope * effectiveAnalyticRelief);
       let tiltShift = smoothstep(0.025, 0.55, length(normal.xy));
       let surfaceShift = max(slopeShift, tiltShift * 0.65);
       let pearlAngle = clamp(0.05 + viewShift * 0.12 + lightShift * 0.10 + orientationShift * 0.56 + surfaceShift * 0.32, 0.0, 1.0);
@@ -818,9 +818,19 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
 
     var envColor = vec3<f32>(0.0);
     if (fx.wSkybox > 0.001) {
+      // Keep analytic relief authoritative for geometry, but give the base
+      // environment reflection the derivative-angle flow that also orients
+      // the anisotropic direct lobe. At full anisotropy the magnitude-2 offset
+      // reproduces the historical flat-zone tilt; it never feeds AO, shadows,
+      // direct lighting, iridescence slope, or clearcoat. Roughness remains
+      // only an isotropic mip choice, so the base environment keeps one sample.
+      let environmentReflectionGradient = surfaceGradient - angleDir * (2.0 * anisotropy);
+      let environmentReflectionNormalLocal = surface_normal_from_gradient(environmentReflectionGradient);
+      let environmentReflectionNormal = normalize(rotate_surface_vector_inverse_sincos(environmentReflectionNormalLocal, sceneSin, sceneCos));
+      let environmentReflectDir = reflect(-viewDir, environmentReflectionNormal);
       let skyboxColor = rough_skybox_reflection(
         uv_screen,
-        reflectDir,
+        environmentReflectDir,
         roughness,
         vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
       );
@@ -854,9 +864,10 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
       let coatSpec = pow(max(nDotH, 0.0), coatPower) * (0.20 + 0.80 * shadowedNDotL) * (0.30 + 0.85 * varnish);
       var coatEnvironment = vec3<f32>(0.0);
       if (fx.wSkybox > 0.001) {
+        let coatReflectDir = reflect(-viewDir, normal);
         let coatSky = rough_skybox_reflection(
           uv_screen,
-          reflectDir,
+          coatReflectDir,
           0.05,
           vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
         );

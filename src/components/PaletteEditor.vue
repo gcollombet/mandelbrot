@@ -112,7 +112,7 @@ const EFFECT_LABEL_FR: Record<EffectFieldName, string> = {
   metallic: 'Métallicité',
   roughness: 'Rugosité',
   anisotropy: 'Anisotropie',
-  directionalVolume: 'Volume directionnel',
+  reliefGain: 'Gain de relief',
   metalReflectance: 'Réflectance métal',
   metalEnvironmentTint: 'Teinte environnement',
   tessellation: 'Mélange image',
@@ -139,7 +139,7 @@ const EFFECT_DESC_FR: Record<EffectFieldName, string> = {
   metallic: 'À quel point ce point se comporte comme un métal',
   roughness: 'Contrôle la finesse des reflets : faible = fins et nets, élevée = larges et diffus',
   anisotropy: 'Étire les reflets selon la direction de la surface',
-  directionalVolume: 'Réintroduit progressivement le volume généreux orienté par l’angle de la dérivée, sans remplacer le relief mesuré',
+  reliefGain: 'Multiplie le relief analytique pour ce matériau ; 1 est neutre, indépendamment de la Profondeur relief globale',
   metalReflectance: 'Multiplie la réflectance du métal sans modifier directement sa teinte',
   metalEnvironmentTint: 'Mélange entre la réponse métal historique et perceptuelle (0) et une réponse physique linéaire, colorée et compensée en rugosité (1)',
 };

@@ -95,7 +95,9 @@ export type ColorStop = {
   roughness?: number;
   /** Anisotropic highlight strength, range [0, 1] (default 0) */
   anisotropy?: number;
-  /** Artistic macro-volume driven by the derivative direction, range [0, 1] (legacy default 1) */
+  /** Log-domain analytic relief gain control, range [0, 2] (default and neutral 1) */
+  reliefGain?: number;
+  /** @deprecated Input-only alias migrated to `reliefGain`; never emitted by normalized output. */
   directionalVolume?: number;
   /** Conductor F0 gain independent of its tint, range [0, 2] (default 1) */
   metalReflectance?: number;
@@ -110,7 +112,50 @@ export type ColorStop = {
  * falling back to the default if the field is undefined.
  */
 export function getEffectValue(stop: ColorStop, field: EffectFieldName): number {
+  if (field === 'reliefGain') return resolveReliefGainControl(stop);
   return stop[field] ?? DEFAULT_VALUES[field];
+}
+
+export const RELIEF_GAIN_CONTROL_MIN = 0;
+export const RELIEF_GAIN_CONTROL_MAX = 2;
+export const RELIEF_GAIN_CONTROL_NEUTRAL = 1;
+
+function clampReliefGainControl(value: number): number {
+  return Math.max(RELIEF_GAIN_CONTROL_MIN, Math.min(RELIEF_GAIN_CONTROL_MAX, value));
+}
+
+/** Resolve a current or legacy stop to the bounded log-domain relief control. */
+export function resolveReliefGainControl(stop: ColorStop): number {
+  if (Number.isFinite(stop.reliefGain)) {
+    return clampReliefGainControl(stop.reliefGain as number);
+  }
+  if (Number.isFinite(stop.directionalVolume)) {
+    return Math.max(0, Math.min(1, stop.directionalVolume as number));
+  }
+  return RELIEF_GAIN_CONTROL_NEUTRAL;
+}
+
+/** Decode the log-domain control exactly as the color shader does. */
+export function decodeReliefGainControl(control: number): number {
+  const bounded = Number.isFinite(control)
+    ? clampReliefGainControl(control)
+    : RELIEF_GAIN_CONTROL_NEUTRAL;
+  return Math.pow(2, 2 * (bounded - RELIEF_GAIN_CONTROL_NEUTRAL));
+}
+
+/** Clone one stop into the current schema and remove deprecated material keys. */
+export function normalizeColorStop(stop: ColorStop): ColorStop {
+  const normalized: ColorStop = {
+    ...stop,
+    reliefGain: resolveReliefGainControl(stop),
+  };
+  delete normalized.directionalVolume;
+  return normalized;
+}
+
+/** Normalize a stop collection without mutating imported, cached, or reactive input. */
+export function normalizeColorStops(stops: readonly ColorStop[]): ColorStop[] {
+  return stops.map(normalizeColorStop);
 }
 
 function clamp01(value: number): number {

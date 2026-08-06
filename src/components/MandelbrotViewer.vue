@@ -21,7 +21,7 @@ import type {IterationData} from '../CursorCoordinate';
 import {computePalettePhase} from '../CursorCoordinate';
 import {Palette} from '../Palette';
 import {normalizeAnimationConfig} from '../AnimationConfig';
-import {createInterpolatedColorStop, getEffectValue, type ColorStop} from '../ColorStop';
+import {createInterpolatedColorStop, getEffectValue, normalizeColorStops, type ColorStop} from '../ColorStop';
 import {EFFECT_FIELD_NAMES} from '../effectFieldConfig';
 import {interpolateRgb} from 'd3-interpolate';
 import {nameForCatalogReference} from '../catalogIdentity';
@@ -350,12 +350,14 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
     {
       "color": "#ffffff",
       "position": 0,
-      "zebra": 1.0
+      "zebra": 1.0,
+      "reliefGain": 1
     },
     {
       "color": "#ffffff",
       "position": 1,
-      "zebra": 1.0
+      "zebra": 1.0,
+      "reliefGain": 1
     }
   ],
   activateAnimate: false,
@@ -396,6 +398,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Window';
   params.animation = normalizeAnimationConfig(params.animation, params.animationSpeed);
   params.textureMapping = normalizeTextureMappingFromLegacy(params);
+  params.colorStops = normalizeColorStops(Array.isArray(params.colorStops) ? params.colorStops : DEFAULT_MANDELBROT_PARAMS.colorStops);
   stripExplorationStateFields(params);
   const stored = params as unknown as Record<string, unknown>;
   for (const obsoleteKey of [
@@ -626,6 +629,7 @@ function clonePlain<T>(value: T): T {
 
 watch(mandelbrotParams, (params) => {
   const saved = clonePlain(params);
+  saved.colorStops = normalizeColorStops(saved.colorStops);
   stripExplorationStateFields(saved);
   localStorage.setItem(LOCAL_STORAGE_CURRENT_KEY, JSON.stringify(saved));
 }, { deep: true });
