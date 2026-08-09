@@ -50,23 +50,19 @@ Les shaders de colorisation SHALL utiliser un seul chemin arithmétique f32 et S
 ## MODIFIED Requirements
 
 ### Requirement: Sélection du chemin de rendu par frame
-Le moteur SHALL sélectionner, à chaque frame, entre le chemin compute in-place et le chemin render ping-pong : le chemin compute in-place SHALL être utilisé quand la frame n'a ni translation (`shiftTexX == 0 && shiftTexY == 0`), ni `clearHistory`, et que le flag `useInplaceCompute` est actif ; le chemin render ping-pong SHALL être utilisé dans tous les autres cas. Les deux chemins SHALL amorcer les texels sans historique comme des requêtes exactes au pas 1.
+Le moteur SHALL exécuter directement le compute in-place quand la frame n'a ni translation (`shiftTexX == 0 && shiftTexY == 0`) ni `clearHistory`. Dans les autres cas, une passe utility compute SHALL préparer B depuis A — copie décalée ou clear exact — puis les rôles A/B SHALL être échangés avant le même compute in-place d'itération. Les deux topologies SHALL amorcer les texels sans historique comme des requêtes exactes au pas 1.
 
 #### Scenario: Frame de convergence sans interaction
-- **WHEN** une frame est rendue avec shift nul, sans clearHistory et flag actif
+- **WHEN** une frame est rendue avec shift nul et sans clearHistory
 - **THEN** le moteur exécute un unique dispatch compute in-place sur `rawTexture` et n'exécute ni passe brush render, ni copie B→A, ni passe mandelbrot render, ni passe count séparée
 
 #### Scenario: Frame de pan
 - **WHEN** une frame est rendue avec `shiftTexX` ou `shiftTexY` non nul
-- **THEN** le moteur exécute le chemin render ping-pong et marque chaque texel nouvellement exposé comme requête exacte au pas 1
+- **THEN** la passe utility compute rassemble A→B, marque chaque texel nouvellement exposé comme requête exacte au pas 1, échange A/B, puis l'itération continue in-place
 
 #### Scenario: Frame de reset
 - **WHEN** une frame est rendue avec `clearHistory` actif
-- **THEN** le moteur exécute le chemin render ping-pong et initialise toute la zone active avec des requêtes exactes au pas 1
-
-#### Scenario: Flag désactivé
-- **WHEN** le flag `useInplaceCompute` est désactivé
-- **THEN** toutes les frames utilisent le chemin render ping-pong avec la même topologie de requêtes exactes que le chemin compute
+- **THEN** la passe utility compute initialise B avec des requêtes exactes au pas 1, échange A/B, puis l'itération continue in-place
 
 ### Requirement: Écritures proportionnelles aux pixels actifs
 Sur le chemin compute in-place, le shader SHALL n'écrire (`textureStore`) que les texels actifs — requête exacte ou continuation (`iter > 0` et `|z|² < mu`) — et SHALL ne produire aucune écriture pour les texels finis ou hors ROI. Aucun cas de sentinelle de raffinement spatial SHALL subsister.
@@ -83,8 +79,8 @@ Sur le chemin compute in-place, le shader SHALL n'écrire (`textureStore`) que l
 - **WHEN** le compute traite un texel hors de l'écran tourné (`is_inside_rotated_screen` faux)
 - **THEN** aucune écriture n'est émise pour ce texel
 
-### Requirement: Équivalence des deux chemins
-Le chemin compute in-place SHALL produire un contenu de `rawTexture` équivalent à celui du chemin render ping-pong pour toute frame éligible : mêmes requêtes exactes au pas 1, mêmes continuations, mêmes états terminaux et même payload brut, au bruit de contraction FMA près entre les compilations fragment et compute du même code WGSL.
+### Requirement: Équivalence des deux topologies
+Le chemin compute in-place direct SHALL produire un contenu brut cohérent avec la topologie utility A→B + swap + compute in-place : mêmes requêtes exactes au pas 1, mêmes continuations, mêmes états terminaux et même payload brut pour un historique équivalent.
 
 #### Scenario: Comparaison visuelle à convergence
 - **WHEN** une même scène converge entièrement avec le flag actif puis avec le flag inactif
@@ -108,3 +104,61 @@ Sur le chemin compute in-place, un unique compteur post-itération SHALL comptab
 #### Scenario: Reset au pas 1
 - **WHEN** un reset marque toute la zone active comme requêtes exactes
 - **THEN** le compteur et le batch adaptatif traitent cette vague complète sans réintroduire de compteur de raffinement spatial
+
+### Requirement: Contrôleur temporel prédictif
+Le moteur SHALL associer le timestamp de la passe d'itération au compteur de travail réel de la même frame. Lorsque plus de 10% des pixels visibles restent actifs, il SHALL mettre à jour une EMA d'applications pondérées par milliseconde et prédire le batch suivant depuis ce débit et la population active. Il SHALL demander au moins 10 ms de budget d'itération lorsque du travail reste, sans interpréter ce budget comme une durée GPU garantie, et SHALL borner le batch au domaine valide du shader.
+
+#### Scenario: Correction après une mesure GPU
+- **WHEN** une passe d'itération valide est mesurée hors de la zone morte autour de son budget demandé
+- **THEN** le batch suivant est obtenu depuis le débit pondéré appris et la population restante; sans débit représentatif disponible, la correction proportionnelle sert de repli
+
+#### Scenario: Budget FPS sans place pour l'itération
+- **WHEN** les passes fixes et la marge consomment la durée de frame sélectionnée
+- **THEN** le contrôleur demande encore 10 ms d'itération au lieu de converger artificiellement vers le batch 1
+
+#### Scenario: Budget sous-rempli
+- **WHEN** la population restante ou le batch maximal ne fournit pas assez de travail pour consommer les 10 ms demandées
+- **THEN** la passe peut finir plus vite sans que ce sous-remplissage soit classé comme une erreur de budget
+
+#### Scenario: Nouvelle vague dense
+- **WHEN** un clear ou un full-frame remplace une population clairsemée par une vague dense
+- **THEN** les anciens readbacks de l'époque brute précédente sont invalidés et le batch est amorcé depuis l'EMA persistante, s'il en existe une, sans reset inconditionnel à 1
+
+#### Scenario: Apprentissage représentatif
+- **WHEN** le timestamp et le compteur appariés rapportent du travail pondéré réel et plus de 10% des pixels visibles encore actifs
+- **THEN** le moteur met à jour l'EMA `travail pondéré réel / temps d'itération`
+
+#### Scenario: Queue clairsemée
+- **WHEN** 10% ou moins des pixels visibles restent actifs
+- **THEN** la mesure peut ajuster le batch courant mais SHALL NOT polluer l'EMA persistante
+
+#### Scenario: Passe de translation
+- **WHEN** une translation expose une nouvelle bande de texels
+- **THEN** la frame reprend immédiatement un batch prédit depuis l'EMA et sa mesure appariée peut actualiser ce débit si la population reste représentative
+
+#### Scenario: Zoom continu
+- **WHEN** seule l’échelle d’affichage change entre deux frontières de clear/swap du champ brut
+- **THEN** le moteur conserve la génération des compteurs afin que la mesure asynchrone de la frame précédente puisse être appariée et appliquée
+
+#### Scenario: Readback timestamp différé
+- **WHEN** le transfert `mapAsync` des timestamps vers le CPU reste en attente alors qu’une durée GPU valide est déjà connue
+- **THEN** le moteur cadence les nouvelles frames depuis la durée GPU lissée sans attendre le retour CPU et sans attribuer sa latence aux passes GPU
+
+#### Scenario: Adaptateur sans timestamps
+- **WHEN** les timestamp queries ne sont pas disponibles
+- **THEN** le moteur conserve `onSubmittedWorkDone()` comme barrière de fin conservative et comme source de durée globale
+
+#### Scenario: Temps de frame hors passes GPU
+- **WHEN** l’intervalle réel de frame dépasse nettement la somme et le span des passes GPU
+- **THEN** la télémétrie distingue navigation, propagation des modèles Vue, `Engine.update()` et encodage `Engine.render()` sans journalisation synchrone à chaque pas de zoom
+
+### Requirement: Cinématique de zoom indépendante de la profondeur
+Le navigateur SHALL calculer le facteur cinématique sans évaluer de fonction transcendante à la précision arbitraire de la vue. Il SHALL conserver la précision profonde de l'échelle lors de l'application de ce facteur.
+
+#### Scenario: Pas de zoom manuel
+- **WHEN** une impulsion de zoom est intégrée pendant une frame
+- **THEN** son exponentiation est calculée en f64 puis le facteur obtenu est multiplié dans l'échelle `DBig` sans réduire la précision de cette dernière
+
+#### Scenario: Vue profonde
+- **WHEN** `ensure_precision()` augmente la précision des coordonnées et de l'échelle
+- **THEN** la vitesse de zoom sans dimension n'est pas promue au budget profond

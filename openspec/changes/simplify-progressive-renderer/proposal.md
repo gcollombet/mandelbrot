@@ -7,6 +7,8 @@ Super Pixel and dyadic spatial refinement add a second convergence strategy, fee
 - **BREAKING** Remove the Super Pixel/Taylor terminal-fill feature, its controls, resolved markers, feedback loop, counters, and dedicated debug classifications.
 - **BREAKING** Remove dyadic sentinel seeding/refinement and always seed the raw grid at step 1 so every texel is an exact compute request.
 - Retain temporal convergence through adaptive iteration batches and retain bilinear resolve as a temporary display fallback for budget-exhausted/incomplete orbits.
+- Replace the slow additive batch ramp and batch-1 full-frame resets with a persistent EMA of actual weighted iteration work, a fixed 10 ms minimum requested iteration budget, and immediate density-aware batch prediction.
+- Keep manual zoom kinematics at f64 precision and reserve arbitrary precision for the view scale, avoiding a depth-dependent transcendental on the main thread.
 - Retain live/frozen reprojection and the distinct idle/on-demand adaptive AA path, including analytic AA where applicable.
 - Simplify unfinished-work accounting and remove spatial-refinement-only state from the engine and shaders.
 - **BREAKING** Remove the user-facing zoom brush step and sentinel seed step settings and their persisted values.
@@ -26,5 +28,5 @@ Super Pixel and dyadic spatial refinement add a second convergence strategy, fee
 ## Impact
 
 - Affects progressive scheduling and resource setup in `src/Engine.ts`, raw/resolve/merge/color WGSL contracts, Super Pixel controls and debug views, performance-setting persistence, and related documentation/tests.
-- Preserves the Rust/WASM reference calculus, palette/material behavior, navigation reprojection, and the independent adaptive AA feature.
+- Preserves the Rust/WASM reference calculus, palette/material behavior, navigation reprojection, and the independent adaptive AA feature while optimizing the dimensionless manual-zoom controller.
 - Requires focused GPU timing and visual comparison before declaring a performance win; static/build validation alone will only establish structural correctness.

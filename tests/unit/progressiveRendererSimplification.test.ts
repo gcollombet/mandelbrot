@@ -20,12 +20,81 @@ describe('simplified progressive renderer contract', () => {
     expect(brushShader).not.toContain('allowRefinement');
   });
 
+  it('fast-clears copied sentinels and gates Taylor-only reprojection layers', () => {
+    expect(reprojectShader).toContain('let iter = textureLoad(prevRaw, coord_in, 0, 0).r;');
+    expect(reprojectShader).toContain('if (iter < 0.0) {\n    store_cleared(coord_out);');
+    expect(reprojectShader).toContain('for (var l = 1; l < layers; l++)');
+    expect(reprojectShader).toContain('uni.copyLayerCount');
+    expect(reprojectShader).toContain('let needsContinuation = zx * zx + zy * zy < uni.mu;');
+    expect(reprojectShader).toContain('let actualLayers = select(layers, totalLayers, needsContinuation);');
+    expect(engineSource).toContain('const RAW_BASE_LAYERS = 9');
+    expect(engineSource).toContain('analyticRawPayloadNeeded ? RAW_LAYERS : RAW_BASE_LAYERS');
+    expect(engineSource).toContain('analyticRawPayloadNeeded && !this.rawAnalyticPayloadAligned');
+  });
+
+  it('uses the utility clear, readback ring, and non-blocking timestamp pacing', () => {
+    expect(reprojectShader).toContain('if (uni.clearHistory >= 0.5) {\n    store_cleared(coord_out);');
+    expect(engineSource).not.toContain('rawBrushStepView');
+    expect(engineSource).not.toContain('counterReadbackPending');
+    expect(engineSource).toContain('const COUNTER_READBACK_BUFFER_COUNT = 3');
+    expect(engineSource).toContain('? this.acquireCounterReadbackSlot()');
+    expect(engineSource).toContain('this.applyGpuFrameTiming(spanMs, sampledBatchContext)');
+    expect(engineSource).not.toContain('gpuPacingUsesTimestamps');
+    expect(engineSource).not.toContain('? this.tsReadbackFree');
+    expect(engineSource).toContain('const fallbackFrameComplete = this.timestampsEnabled || !this.pendingGpuTiming');
+    expect(engineSource).toContain('if (fallbackFrameComplete && now - this._lastDrawMs >= minInterval)');
+    expect(engineSource).toContain('if (!this.timestampsEnabled) {\n            this.scheduleGpuTiming');
+    expect(engineSource).not.toContain('&& counterReadbackSlot !== undefined');
+  });
+
+  it('selects the nearest min-step source before bilinear color gathers', () => {
+    const shadeStart = colorShader.indexOf('fn shade_srgb(');
+    const shadeEnd = colorShader.indexOf('// Interleaved-gradient-noise dither', shadeStart);
+    const shadeBody = colorShader.slice(shadeStart, shadeEnd);
+    expect(shadeStart).toBeGreaterThanOrEqual(0);
+    expect(shadeBody).toContain('let selectLiveNearest = liveHasNearestData');
+    expect(shadeBody.indexOf('let selectLiveNearest = liveHasNearestData'))
+      .toBeLessThan(shadeBody.indexOf('sample_escaped_bilinear('));
+    expect(shadeBody).toContain('if (selectLiveNearest) {');
+    expect(shadeBody).toContain('if (frozenHasNearestData) {');
+    expect(shadeBody).toContain('Neither nearest texel is usable');
+  });
+
   it('uses one remaining-work counter for exact requests and continuations', () => {
     expect(brushShader).toContain('count: atomic<u32>');
+    expect(brushShader).toContain('weightedWork: atomic<u32>');
+    expect(brushShader).toContain('wgWeightedWork[lidx] = weightedWork;');
     expect(brushShader).not.toContain('active_count');
     expect(brushShader).not.toContain('wgActive');
     expect(brushShader).toContain('if (iter_val < 0.0) {\n        needs = true;');
-    expect(engineSource).toContain('this.tsPendingRemainingPixelCount = this.unfinishedPixelCount');
+    expect(engineSource).toContain('this.tsPendingBatchContext = batchTimingContext');
+  });
+
+  it('uses predictive batching without batch-1 clear or population resets', () => {
+    expect(engineSource).toContain('requestedIterationBudgetMs(');
+    expect(engineSource).toContain('this.iterationWorkRate');
+    expect(engineSource).toContain('updateIterationWorkRateEma(');
+    expect(engineSource).toContain('isRepresentativeIterationPopulation(');
+    expect(engineSource).toContain('sample.actualWeightedWork');
+    expect(engineSource).toContain('sample.remainingPixelCount');
+    expect(engineSource).toContain('recordIterationCounterSample(');
+    expect(engineSource).toContain('tryApplyPairedIterationSample(');
+    expect(engineSource).toContain('const COUNTER_SAMPLE_INTERVAL_FRAMES = 1');
+    expect(engineSource).not.toContain('sample.translation');
+    expect(engineSource.indexOf('this.iterationWorkRate = updateIterationWorkRateEma('))
+      .toBeLessThan(engineSource.indexOf('if (sample.generation !== this.batchControllerGeneration) return'));
+    expect(engineSource).toContain('if (!(this.iterationWorkRate > 0)) {');
+    expect(engineSource).not.toContain('if (this.debugPipelineActive || elapsed <= 0)');
+    expect(engineSource).toContain('MANDELBROT_BATCH_UNIFORM_OFFSET');
+    expect(engineSource).not.toContain('ACTIVE_PIXEL_RESET_RATIO');
+    expect(engineSource).not.toContain('this.iterationBatchSize = MIN_BATCH_SIZE');
+    expect(engineSource).not.toContain('tsPendingRemainingPixelCount');
+  });
+
+  it('keeps asynchronous work samples alive during continuous zoom reprojection', () => {
+    expect(engineSource).toContain('private isZoomReprojectionOnlyChange(');
+    expect(engineSource).toContain('&& !zoomReprojectionOnlyChange)');
+    expect(engineSource).toContain('render() invalidates at the actual clear boundary instead');
   });
 
   it('keeps resolve presentation-only and begins incomplete support at step 2', () => {

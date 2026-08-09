@@ -16,7 +16,6 @@ let canvas: HTMLCanvasElement | null = null;
 let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
-let _lastScaleLog = '';
 
 // Keyboard state is sampled by draw(), rather than in an independent timer.
 // draw() is paced to the GPU's real frame cadence, so input cannot accumulate
@@ -54,9 +53,6 @@ const angle = defineModel<number>('angle', { default: 0 })
 watch(
   () => [cx.value, cy.value, scale.value, angle.value] as const,
   ([nextCx, nextCy, nextScale, nextAngle], [prevCx, prevCy, prevScale, prevAngle]) => {
-    if ((nextCx !== prevCx || nextCy !== prevCy)) {
-      console.log('[REF] Mandelbrot.vue watcher cx change', String(nextCx).slice(0, 14), 'isUpdating', isUpdating);
-    }
     if (isUpdating) {
       return;
     }
@@ -214,6 +210,8 @@ watch(
 async function draw() {
   if (!engine || !navigator) return;
 
+    const cpuFrameStartMs = performance.now();
+
     if (keyboardNavigation.translateX || keyboardNavigation.translateY) {
       navigator.translate(keyboardNavigation.translateX, keyboardNavigation.translateY);
     }
@@ -232,10 +230,7 @@ async function draw() {
     // O(1) float-exponent decomposition of scale/dx/dy computed in Rust (no decimal-string
     // re-parse each frame): [scaleM, scaleE, dxM, dxE, dyM, dyE]. Read after step() updated cx.
     const viewFloatexp = navigator.view_floatexp() as Float64Array;
-    if (scale_string !== _lastScaleLog) {
-      _lastScaleLog = scale_string;
-      console.log('[REF] draw scale', scale_string, 'dx', String(dx).slice(0, 12), 'cx', String(cx_string).slice(0, 14));
-    }
+    const navigationEndMs = performance.now();
     isUpdating = true;
     cx.value = cx_string;
     cy.value = cy_string;
@@ -252,6 +247,7 @@ async function draw() {
       Math.max(100, 1000 * props.maxIterationMultiplier * -log2FromDecimalString(scale_string)) + bailoutExtraIterations,
       10_000_000
     );
+    const updateStartMs = performance.now();
     await engine.update({
           cx: cx_string,
           cy: cy_string,
@@ -303,6 +299,11 @@ async function draw() {
         textureMappingMode: props.textureMappingMode,
       }
     )
+    const updateEndMs = performance.now();
+    engine.cpuNavigationMs = navigationEndMs - cpuFrameStartMs;
+    engine.cpuModelSyncMs = updateStartMs - navigationEndMs;
+    engine.cpuUpdateMs = updateEndMs - updateStartMs;
+    engine.cpuFramePreparationMs = updateEndMs - cpuFrameStartMs;
     await engine.render()
 
     if (props.debugShading && navigator && canvasRef.value) {
@@ -461,7 +462,7 @@ defineExpose({
   },
   rotate: (da: number) => navigator?.rotate(da),
   angle: (a: number) => navigator?.angle(a),
-  zoom: (f: number) => { console.log('[REF] zoom() called factor', f); navigator?.zoom(f); },
+  zoom: (f: number) => navigator?.zoom(f),
   setKeyboardNavigation: (input: KeyboardNavigationInput) => {
     keyboardNavigation = input;
   },

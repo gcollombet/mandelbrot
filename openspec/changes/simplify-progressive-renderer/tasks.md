@@ -6,11 +6,17 @@
 
 ## 2. Exact step-1 grid and scheduling
 
-- [x] 2.1 Change history clear, initial seed, pan exposure, and reprojection holes to emit exact `iter == -1` requests at step 1 on both in-place and ping-pong paths.
+- [x] 2.1 Change history clear, initial seed, pan exposure, and reprojection holes to emit exact `iter == -1` requests at step 1 on both direct in-place and utility A→B + swap paths.
 - [x] 2.2 Remove negative power-of-two sentinel generation, `refine_sentinel`, grid-offset/minimum-step decisions, and their uniforms from the raw iteration shaders.
 - [x] 2.3 Collapse uncovered-sentinel and active-continuation accounting into one post-dispatch remaining-work count used by `needsMoreFrames()` and adaptive batching.
 - [x] 2.4 Retune the adaptive controller model for a full-grid initial wave while retaining a one-iteration minimum batch and explicit reserve for fixed passes.
-- [x] 2.5 Verify that in-place and ping-pong paths classify the same texels as requests, continuations, and terminal results after equal iteration work.
+- [x] 2.5 Verify that direct in-place and utility A→B + swap paths classify the same texels as requests, continuations, and terminal results after equal iteration work.
+- [x] 2.6 Replace additive batch ramping and batch-1 population resets with proportional timing correction, a fixed 10 ms minimum requested budget, and reusable full-frame seeding.
+- [x] 2.7 Learn a persistent actual-work EMA only from paired samples with more than 10% active pixels, including valid translation and continuous-zoom samples.
+- [x] 2.8 Remove unhelpful attachment-clear and single-readback serialization experiments while retaining timestamp/counter pairing and the validated zoom-generation fix.
+- [x] 2.9 Stop using timestamp `mapAsync` completion as a frame fence; pace from the smoothed GPU span and retain the completion fence only for the no-timestamp fallback.
+- [x] 2.10 Remove hot-path zoom logging and expose navigation, Vue synchronization, update, and command-encoding CPU timings beside the GPU pass timings.
+- [x] 2.11 Compute manual zoom factors in f64, keep `vscale` outside the deep precision budget, and cover scale/velocity precision with focused Rust tests.
 
 ## 3. Resolve and Super Pixel removal
 

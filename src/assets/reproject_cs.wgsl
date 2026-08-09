@@ -28,7 +28,11 @@ struct BrushUniforms {
   shiftTexY: f32,
   dispatchOriginX: f32,
   dispatchOriginY: f32,
-  _padding: f32,
+  copyLayerCount: f32,
+  mu: f32,
+  workCounterShift: f32,
+  _padding1: f32,
+  _padding2: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;
@@ -50,7 +54,34 @@ fn store_cleared(coord: vec2<i32>) {
 }
 
 fn store_copied(coord_out: vec2<i32>, coord_in: vec2<i32>, layers: i32) {
-  for (var l = 0; l < layers; l++) {
+  // A sentinel exposes only layers 0 and 1 to the downstream kernels. Avoid
+  // copying eleven stale continuation/payload layers for the large part of the
+  // neutral disc that has never been computed.
+  let iter = textureLoad(prevRaw, coord_in, 0, 0).r;
+  if (iter < 0.0) {
+    store_cleared(coord_out);
+    return;
+  }
+
+  store_layer(coord_out, 0, iter);
+  let totalLayers = i32(textureNumLayers(dstRaw));
+  if (layers < totalLayers && iter > 0.0) {
+    let zx = textureLoad(prevRaw, coord_in, 2, 0).r;
+    let zy = textureLoad(prevRaw, coord_in, 3, 0).r;
+    // Layers 9..12 are also the in-progress z″ continuation state used to
+    // produce terminal analytic geometry. They may be omitted only after the
+    // texel has escaped; a budget-exhausted texel must retain all 13 layers.
+    let needsContinuation = zx * zx + zy * zy < uni.mu;
+    let actualLayers = select(layers, totalLayers, needsContinuation);
+    store_layer(coord_out, 1, textureLoad(prevRaw, coord_in, 1, 0).r);
+    store_layer(coord_out, 2, zx);
+    store_layer(coord_out, 3, zy);
+    for (var l = 4; l < actualLayers; l++) {
+      store_layer(coord_out, l, textureLoad(prevRaw, coord_in, l, 0).r);
+    }
+    return;
+  }
+  for (var l = 1; l < layers; l++) {
     store_layer(coord_out, l, textureLoad(prevRaw, coord_in, l, 0).r);
   }
 }
@@ -90,7 +121,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
 
-  let layers = i32(textureNumLayers(dstRaw));
+  // The first nine layers suffice for terminal display data when analytic AA is
+  // inactive. store_copied still promotes unfinished continuations to all 13.
+  let layers = clamp(i32(round(uni.copyLayerCount)), 9, i32(textureNumLayers(dstRaw)));
 
   // Full reset when needed.
   if (uni.clearHistory >= 0.5) {

@@ -160,12 +160,18 @@ struct BrushUniforms {
   // view simply moves the box and keeps every previously computed texel.
   dispatchOriginX: f32,
   dispatchOriginY: f32,
-  _padding: f32,
+  copyLayerCount: f32, // reproject_cs only
+  reprojectMu: f32,    // reproject_cs only
+  workCounterShift: f32,
+  _padding1: f32,
+  _padding2: f32,
 };
 
 struct CounterBuffer {
   count: atomic<u32>,
-  _padding: u32,
+  weightedWork: atomic<u32>,
+  _padding0: u32,
+  _padding1: u32,
 };
 
 // Per-dispatch work instrumentation (in-place path only). realMean/covMean are
@@ -3642,6 +3648,10 @@ fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
 // Barriers stay in uniform control flow — the per-texel work
 // is wrapped in ifs, never early-returned.
 var<workgroup> wgCount: atomic<u32>;
+// Exact per-lane g_workBudget, reduced by lane 0. This avoids a contended
+// workgroup atomic in every active invocation; only one global atomic remains
+// per 8x8 workgroup.
+var<workgroup> wgWeightedWork: array<u32, 64>;
 // Work-instrumentation partials (reduced once per workgroup, like the counters).
 var<workgroup> wgRealSum: atomic<u32>;  // Σ real loop steps over this workgroup's texels
 var<workgroup> wgRealMax: atomic<u32>;  // max real loop steps among them (straggler)
@@ -3705,6 +3715,7 @@ fn cs_main(
 
   // Post-iteration classification of this texel (for the fused counter).
   var needs = false;
+  var weightedWork = 0u;
 
   let dims = textureDimensions(raw);
   if (gid.x < dims.x && gid.y < dims.y) {
@@ -3863,6 +3874,7 @@ fn cs_main(
             }
           }
           storeTexel(coord, result);
+          weightedWork = g_workBudget;
 
           // Accumulate work metrics for this texel into the workgroup partials.
           if (ENABLE_WORK_STATS) {
@@ -3945,6 +3957,7 @@ fn cs_main(
     }
   }
 
+  wgWeightedWork[lidx] = weightedWork;
   if (needs) {
     atomicAdd(&wgCount, 1u);
   }
@@ -3954,6 +3967,15 @@ fn cs_main(
     let c = atomicLoad(&wgCount);
     if (c > 0u) {
       atomicAdd(&counter.count, c);
+    }
+    var workSum = 0u;
+    for (var lane = 0u; lane < 64u; lane++) {
+      workSum += wgWeightedWork[lane];
+    }
+    let workShift = min(u32(max(0.0, brush.workCounterShift)), 31u);
+    let scaledWork = workSum >> workShift;
+    if (scaledWork > 0u) {
+      atomicAdd(&counter.weightedWork, scaledWork);
     }
     // Work-instrumentation reduction. Downscale the per-workgroup sums by 64
     // (via >>6, rounded) so the global u32 accumulators can't overflow; the

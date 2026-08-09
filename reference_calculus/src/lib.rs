@@ -1,6 +1,6 @@
 use core::convert::TryFrom;
 use core::str::FromStr;
-use dashu_float::ops::Abs;
+use dashu_float::ops::{Abs, SquareRoot};
 use dashu_float::DBig;
 use dashu_int::UBig;
 #[cfg(target_arch = "wasm32")]
@@ -52,12 +52,18 @@ fn wall_clock_ms() -> f64 {
 // precision cliff (e.g. ~1e-95). Scaling the precision with depth keeps the
 // reference accurate as far as the orbit/host scale allow.
 fn precision_bits_for_scale(scale: &DBig) -> usize {
-    let s = dbig_to_f64(scale).abs();
-    let depth = if s > 0.0 && s.is_finite() {
-        (-s.log2()).ceil().max(0.0) as usize
-    } else {
-        // Below the f64 normal range (~1e-308): use a generous fixed budget.
+    // log2|scale| from the O(1) float-exponent decomposition (value = mantissa ·
+    // 2^exponent, |mantissa| ∈ [0.5, 1)). This used to go through `dbig_to_f64`,
+    // i.e. serialize the whole significand to a decimal string — on EVERY
+    // ensure_precision(), so on every step/translate/origin/scale call — and the
+    // cost of that round-trip grew with the very precision it was sizing.
+    let (mantissa, exponent) = dbig_frexp(scale);
+    // Reproduce the old round-trip's domain exactly: it fell back to a generous
+    // fixed depth whenever the f64 conversion left the finite non-zero range.
+    let depth = if mantissa == 0.0 || exponent < -1074 || exponent > 1024 {
         4096
+    } else {
+        (-(exponent as f64 + mantissa.abs().log2())).ceil().max(0.0) as usize
     };
     depth + 64
 }
@@ -89,8 +95,9 @@ const REFERENCE_CERTIFICATE_HEADROOM_LOG2: f64 = 4.0;
 // interpolate smoothly across those sparse frames while retaining a responsive
 // stop after key release.
 const NAVIGATION_DAMPING_HALF_LIFE_SECONDS: f64 = 0.18;
-const NAVIGATION_TRANSLATION_GAIN: f64 = 70.0;
-const NAVIGATION_ZOOM_RATE: i32 = 10;
+const NAVIGATION_TRANSLATION_GAIN: f64 = 35.0;
+const NAVIGATION_ROTATION_GAIN: f64 = 10.0;
+const NAVIGATION_ZOOM_RATE: i32 = 5;
 
 // Per-step precision from the amplified-bit count G_n. Clamped to [FLOOR, budget].
 fn profile_precision(budget: usize, g_bits: f64) -> usize {
@@ -186,6 +193,17 @@ pub(crate) fn raise_precision(v: DBig, prec: usize) -> DBig {
         v.with_precision(prec).value()
     } else {
         v
+    }
+}
+
+/// In-place variant for the per-frame path. `raise_precision` takes its operand
+/// by value, so every call site had to `clone()` first — paying a full
+/// significand copy even on the common no-op (precision already sufficient).
+pub(crate) fn raise_precision_in_place(v: &mut DBig, prec: usize) {
+    let cur = v.precision();
+    if cur == 0 || cur < prec {
+        let current = core::mem::replace(v, DBig::ZERO);
+        *v = current.with_precision(prec).value();
     }
 }
 
@@ -677,16 +695,18 @@ impl MandelbrotNavigator {
         let prec = precision_bits_for_scale(&self.scale)
             .max(self.budget_prec)
             .max(64);
-        self.cx = raise_precision(self.cx.clone(), prec);
-        self.cy = raise_precision(self.cy.clone(), prec);
-        self.cx_continuous = raise_precision(self.cx_continuous.clone(), prec);
-        self.cy_continuous = raise_precision(self.cy_continuous.clone(), prec);
-        self.scale = raise_precision(self.scale.clone(), prec);
-        self.reference_cx = raise_precision(self.reference_cx.clone(), prec);
-        self.reference_cy = raise_precision(self.reference_cy.clone(), prec);
-        self.vtx = raise_precision(self.vtx.clone(), prec);
-        self.vty = raise_precision(self.vty.clone(), prec);
-        self.vscale = raise_precision(self.vscale.clone(), prec);
+        raise_precision_in_place(&mut self.cx, prec);
+        raise_precision_in_place(&mut self.cy, prec);
+        raise_precision_in_place(&mut self.cx_continuous, prec);
+        raise_precision_in_place(&mut self.cy_continuous, prec);
+        raise_precision_in_place(&mut self.scale, prec);
+        raise_precision_in_place(&mut self.reference_cx, prec);
+        raise_precision_in_place(&mut self.reference_cy, prec);
+        raise_precision_in_place(&mut self.vtx, prec);
+        raise_precision_in_place(&mut self.vty, prec);
+        // vscale is dimensionless controller state. Keeping it at input/f64
+        // precision avoids making the per-frame zoom factor depend on the deep
+        // coordinate budget; only the resulting scale needs arbitrary precision.
     }
 
     pub fn translate(&mut self, dx: f64, dy: f64) {
@@ -707,7 +727,7 @@ impl MandelbrotNavigator {
 
     pub fn rotate(&mut self, delta_angle: f64) {
         // On ajoute à la vitesse angulaire
-        self.vangle += delta_angle * 20.0;
+        self.vangle += delta_angle * NAVIGATION_ROTATION_GAIN;
     }
 
     pub fn translate_direct(
@@ -1098,52 +1118,67 @@ impl MandelbrotNavigator {
                 -std::f64::consts::LN_2 * delta_time / NAVIGATION_DAMPING_HALF_LIFE_SECONDS,
             );
             let damping = DBig::from_str(&damping_base.to_string()).unwrap();
-            let delta_time_big = DBig::from_str(&delta_time.to_string()).unwrap();
 
             // On anime l'échelle avec la vitesse et damping
-            if self.vscale != DBig::try_from(1).unwrap() {
-                if delta_time_big > DBig::try_from(0).unwrap() {
-                    self.scale = &self.scale
-                        * self.vscale.powf(
-                            &(&delta_time_big * DBig::try_from(NAVIGATION_ZOOM_RATE).unwrap()),
-                        );
+            let one = dbig_i(1);
+            if self.vscale != one {
+                if delta_time > 0.0 {
+                    // vscale is a dimensionless input velocity. Computing this
+                    // tiny per-frame factor at the view's DBig precision used to
+                    // run exp(y * ln(x)) on the main thread and made zoom cost
+                    // grow with depth. Apply an f64 factor to the precise scale;
+                    // Dashu multiplication retains the larger (scale) precision.
+                    let velocity = dbig_to_f64(&self.vscale);
+                    let factor = velocity.powf(delta_time * f64::from(NAVIGATION_ZOOM_RATE));
+                    if factor.is_finite() && factor > 0.0 {
+                        let factor_big = DBig::from_str(&factor.to_string())
+                            .unwrap_or_else(|_| one.clone());
+                        self.scale = &self.scale * &factor_big;
+                    }
                 }
-                self.vscale = DBig::try_from(1).unwrap()
-                    + ((&self.vscale - DBig::try_from(1).unwrap()) * &damping);
+                self.vscale = &one + ((&self.vscale - &one) * &damping);
 
                 // si vsclale plus petit que 0.5 ou plus grand que 2, on le clamp à 0.5 ou 2 pour éviter les valeurs extrêmes
-                if self.vscale.clone() > DBig::from_str("2").unwrap() {
-                    self.vscale = DBig::from_str("2").unwrap();
-                }
-                if self.vscale.clone() < DBig::from_str("0.5").unwrap() {
-                    self.vscale = DBig::from_str("0.5").unwrap();
+                let upper = dbig_f64(2.0);
+                let lower = dbig_f64(0.5);
+                if self.vscale > upper {
+                    self.vscale = upper;
+                } else if self.vscale < lower {
+                    self.vscale = lower;
                 }
 
-                if self.vscale.clone().abs() > DBig::from_str("0.999").unwrap()
-                    && self.vscale.clone().abs() < DBig::from_str("1.001").unwrap()
-                {
-                    self.vscale = DBig::try_from(1).unwrap();
+                let vscale_abs = self.vscale.clone().abs();
+                if vscale_abs > dbig_f64(0.999) && vscale_abs < dbig_f64(1.001) {
+                    self.vscale = one;
                 }
             }
 
-            let epsilon = &self.scale / DBig::try_from(1000000).unwrap();
-
-            // Clamp vitesse plus gros que scale
-            let norm = self.vtx.clone() * self.vtx.clone() + self.vty.clone() * self.vty.clone();
-            if norm.clone() > DBig::try_from(0).unwrap() {
-                let norm = norm.clone().sqr();
-                let threshold = self.scale.clone() * DBig::from_str("2.0").unwrap();
-                if norm.clone() > threshold {
-                    let factor = norm.clone() / threshold.clone();
-                    self.vtx = self.vtx.clone() / factor.clone();
-                    self.vty = self.vty.clone() / factor.clone();
-                }
-            }
+            let epsilon = &self.scale * dbig_f64(1e-6);
 
             // Rendre damping dépendant du temps
             let k = std::f64::consts::LN_2 / NAVIGATION_DAMPING_HALF_LIFE_SECONDS;
             let displacement_factor_f64 = (1.0 - damping_base) / k;
             let displacement_factor = DBig::from_str(&displacement_factor_f64.to_string()).unwrap();
+
+            // Anti-teleport guard: one frame must never move the centre by more
+            // than a view half-height, whatever the frame interval.
+            // The previous test squared an ALREADY squared norm (`.sqr()` applied
+            // to vtx² + vty²) and compared |v|⁴ against 2·scale, so it fired at
+            // |v| > (2·scale)^¼ — inside the normal velocity range when shallow,
+            // and never at depth (at scale 1e-28 that threshold is ~1e21·scale).
+            // Comparing squares keeps the test itself free of a square root; the
+            // rare rescale pays for one.
+            let speed_sq = &self.vtx * &self.vtx + &self.vty * &self.vty;
+            // Both divisions below are guarded: a zero scale or a zero frame
+            // interval would panic the navigator inside the per-frame path.
+            if speed_sq > dbig_i(0) && displacement_factor_f64 > 0.0 && self.scale > dbig_i(0) {
+                let max_speed_sq = (&self.scale / &displacement_factor).sqr();
+                if speed_sq > max_speed_sq {
+                    let factor = (&speed_sq / &max_speed_sq).sqrt();
+                    self.vtx = &self.vtx / &factor;
+                    self.vty = &self.vty / &factor;
+                }
+            }
 
             self.cx_continuous = &self.cx_continuous + &self.vtx * &displacement_factor;
             self.cy_continuous = &self.cy_continuous + &self.vty * &displacement_factor;
@@ -5230,22 +5265,102 @@ mod tests {
 
     #[test]
     fn zoom_then_step_increases_scale() {
-        // Utiliser des valeurs différentes et tester zoom + step
         let mut nav = MandelbrotNavigator::new("-1.1000000000000001", "-0.20001", "0.5", 0.97);
-        // Appliquer un zoom (change vscale)
-        nav.zoom(1.5);
-        nav.angle(0.7);
-        nav.zoom(0.5);
-        nav.step(None, None);
-        nav.zoom(2.0);
-        nav.step(None, None);
+        let before = dbig_to_f64(&nav.scale);
         nav.zoom(1.2);
+        nav.step(None, None);
 
-        // Vérifier que l'échelle a changé
-        // Appeler step pour que l'update soit appliqué
-        let _params = nav.step(None, None);
-        // On attend que l'échelle ait augmenté
-        assert!(1 == 1, "scale should have increased after zoom+step");
+        let after = dbig_to_f64(&nav.scale);
+        let expected = before * 1.2f64.powf(NAVIGATION_ZOOM_RATE as f64 / 60.0);
+        assert!(
+            after > before,
+            "scale should increase after a zoom-out impulse"
+        );
+        assert!(
+            ((after - expected) / expected).abs() < 1e-14,
+            "scale should follow the f64 navigation factor: actual={}, expected={}",
+            after,
+            expected
+        );
+    }
+
+    #[test]
+    fn zoom_velocity_stays_outside_deep_precision_budget() {
+        let mut nav = MandelbrotNavigator::new("-0.75", "0", "1e-100", 0.0);
+        let scale_precision = nav.scale.precision();
+        assert!(scale_precision > 300, "test requires a deep scale budget");
+        assert!(nav.vscale.precision() < scale_precision);
+
+        nav.zoom(1.2);
+        let velocity_precision = nav.vscale.precision();
+        nav.ensure_precision();
+        assert_eq!(nav.vscale.precision(), velocity_precision);
+
+        nav.step(None, None);
+        assert_eq!(nav.scale.precision(), scale_precision);
+        assert!(nav.vscale.precision() < nav.scale.precision());
+    }
+
+    // Bootstrap delta_time of the first step() on a fresh navigator.
+    const BOOTSTRAP_DT: f64 = 1.0 / 60.0;
+
+    fn displacement_factor_at(dt: f64) -> f64 {
+        let k = std::f64::consts::LN_2 / NAVIGATION_DAMPING_HALF_LIFE_SECONDS;
+        (1.0 - (-std::f64::consts::LN_2 * dt / NAVIGATION_DAMPING_HALF_LIFE_SECONDS).exp()) / k
+    }
+
+    #[test]
+    fn one_frame_never_moves_the_centre_by_more_than_a_view_half_height() {
+        // The previous guard compared |v|⁴ against 2·scale, so at depth it fired
+        // ~1e21·scale too late and a velocity spike teleported the view.
+        let mut nav = MandelbrotNavigator::new("-0.75", "0.0", "1e-30", 0.0);
+        let before = nav.cx.clone();
+        // Far beyond any keyboard impulse (moveStep is 0.01).
+        nav.translate(10.0, 0.0);
+        nav.step(None, None);
+
+        let moved = dbig_to_f64(&((&nav.cx - &before).abs() / &nav.scale));
+        assert!(
+            moved <= 1.0 + 1e-9,
+            "one frame moved {moved} view half-heights",
+        );
+    }
+
+    #[test]
+    fn a_realistic_keyboard_impulse_is_left_untouched_by_the_guard() {
+        // The guard must sit above the velocity a held key actually reaches, so
+        // re-arming it changes nothing about the pan feel.
+        let mut nav = MandelbrotNavigator::new("-0.75", "0.0", "1e-30", 0.0);
+        nav.translate(0.01, 0.0); // MandelbrotController's moveStep
+        let requested = dbig_to_f64(&(&nav.vtx / &nav.scale));
+        assert!(requested < 1.0 / displacement_factor_at(BOOTSTRAP_DT));
+
+        nav.step(None, None);
+        let after = dbig_to_f64(&(&nav.vtx / &nav.scale));
+        let expected = requested
+            * (-std::f64::consts::LN_2 * BOOTSTRAP_DT / NAVIGATION_DAMPING_HALF_LIFE_SECONDS).exp();
+        assert!(
+            ((after - expected) / expected).abs() < 1e-12,
+            "the guard rescaled a normal impulse: {after} vs {expected}",
+        );
+    }
+
+    #[test]
+    fn precision_budget_matches_the_f64_round_trip_it_replaced() {
+        for text in ["1", "0.5", "1e-5", "1e-28", "1e-100", "1e-300", "1e-320", "0"] {
+            let scale = DBig::from_str(text).unwrap();
+            // The decimal-string round-trip this function used to perform.
+            let legacy = {
+                let v = scale.to_string().parse::<f64>().unwrap_or(0.0).abs();
+                let depth = if v > 0.0 && v.is_finite() {
+                    (-v.log2()).ceil().max(0.0) as usize
+                } else {
+                    4096
+                };
+                depth + 64
+            };
+            assert_eq!(precision_bits_for_scale(&scale), legacy, "scale {text}");
+        }
     }
 
     #[test]

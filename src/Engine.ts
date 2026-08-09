@@ -42,6 +42,15 @@ import {
     selectRawUtilityPassKey,
     shouldEncodeTimestampBoundary,
 } from './gpuPassTimings'
+import {
+    batchSizeForWorkRate,
+    isRepresentativeIterationPopulation,
+    iterationWorkCounterShift,
+    measureIterationWorkRate,
+    predictIterationBatchSize,
+    requestedIterationBudgetMs,
+    updateIterationWorkRateEma,
+} from './iterationBatchController'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
@@ -51,24 +60,18 @@ export const DEBUG_VIEW_REACH = 6
 // Number of r32float layers per raw texture array.
 // 13 = 9 iteration layers + the analytic-AA/future-geometry extras (9/10/11 carry the
 // independently scaled in-progress z″ and 12 its validity bit; 8..12 carry
-// the escaped polar-log derivative payload). Allocated unconditionally for
-// now — writes are cheap and reproject copies by destination layer count;
-// FOLLOW-UP: gate to 9 when antialiasLevel == 1 (saves 4 × texSize² × 4 B × 2
-// textures; needs a realloc path on the AA toggle).
+// the escaped polar-log derivative payload). Allocation stays fixed so AA can
+// toggle without rebuilding every raw view. Reprojection copies nine layers
+// for terminal pixels while the analytic payload is unused, but preserves all
+// 13 for unfinished pixels because z″ also feeds terminal cached geometry.
+const RAW_BASE_LAYERS = 9
 const RAW_LAYERS = 13
 
 // Adaptive iteration batch sizing — only the fused iteration pass is controlled.
 // Leave part of the frame budget to reprojection, resolve and color, which do not
 // scale with iterationBatchSize.
 const MIN_BATCH_SIZE = 1
-const MIN_ITERATION_TARGET_MS = 1
-const ITERATION_SAFETY_MARGIN_MS = 2
-const BATCH_OVERSHOOT_RATIO = 1.15
-const BATCH_UNDERSHOOT_RATIO = 0.8
-const BATCH_DECREASE_FACTOR = 0.5
-const BATCH_INCREASE_FACTOR = 0.25
-const BATCH_INCREASE_STREAK = 1
-const ACTIVE_PIXEL_RESET_RATIO = 1.25
+const MANDELBROT_BATCH_UNIFORM_OFFSET = 6 * Float32Array.BYTES_PER_ELEMENT
 // Per-dispatch budget, in loop TURNS (work units): one BLA/Padé block-apply or one
 // exact step each count as 1, so the cap bounds GPU work per frame uniformly across
 // modes. (Was a covered-iteration cap with a 10× BLA fudge — that throttled long
@@ -125,13 +128,16 @@ const UNFINISHED_PIXEL_DONE_THRESHOLD = 10
 // EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
 const GPU_TIME_EMA_ALPHA = 0.25
 
-// Count unfinished pixels less often than every render frame.  The readback is
-// asynchronous, so this controls the compute/count pass frequency, not display FPS.
-const COUNTER_SAMPLE_INTERVAL_FRAMES = 3
+// The fused compute pass already counts unfinished pixels every frame; copy its
+// tiny result every frame through the three-slot asynchronous readback ring.
+const COUNTER_SAMPLE_INTERVAL_FRAMES = 1
 const COUNTER_READBACK_BUFFER_COUNT = 3
+const ITERATION_SAMPLE_PAIR_RETENTION = 64
+const COUNTER_WORDS = 4
+const COUNTER_BYTES = COUNTER_WORDS * Uint32Array.BYTES_PER_ELEMENT
 const WORK_STATS_WORDS = 37
 const WORK_STATS_BYTES = WORK_STATS_WORDS * Uint32Array.BYTES_PER_ELEMENT
-const COUNTER_READBACK_BYTES = 2 * Uint32Array.BYTES_PER_ELEMENT + WORK_STATS_BYTES
+const COUNTER_READBACK_BYTES = COUNTER_BYTES + WORK_STATS_BYTES
 // Deferred-clear fallback (see pendingTableClear): generous enough for the
 // costliest unified builds (~3-5 s @40k iters) plus an in-flight orbit
 // extension; past it the re-render proceeds exact rather than never.
@@ -143,6 +149,16 @@ type CounterReadbackSlot = {
     pending: boolean
     sequence: number
     generation: number
+}
+
+type IterationBatchTimingContext = {
+    frame: number
+    batchSize: number
+    generation: number
+    activePixelCount: number
+    visiblePixelCount: number
+    actualWeightedWork?: number
+    remainingPixelCount?: number
 }
 
 type DynamicValidityRuntimeStats = {
@@ -889,7 +905,7 @@ export class Engine {
     gpuFrameTimeMs = 0
     /** Exponentially smoothed GPU frame time (for render-loop pacing). */
     smoothedGpuTimeMs = 0
-    /** True while a delayed GPU timing sample is waiting for queue completion. */
+    /** True while the no-timestamp fallback waits for queue completion. */
     private pendingGpuTiming = false
     // FPS from the interval between actually-rendered frames (EMA). Counts every
     // rendered frame, not just iteration frames, and rejects the idle-resume gap.
@@ -920,6 +936,10 @@ export class Engine {
     /** EMA of the active timed passes other than compute, used to reserve frame budget. */
     private otherPassesGpuMs = 0
     frameSerial = 0                            // monotonic, ++ per actually-rendered frame (one submit)
+    cpuFramePreparationMs = 0                  // navigator + Vue sync + update(), before render()
+    cpuNavigationMs = 0                        // input/step + precise parameter extraction
+    cpuModelSyncMs = 0                         // reactive propagation + derived frame inputs
+    cpuUpdateMs = 0                            // Engine.update() before command encoding
     cpuRenderMs = 0                             // render() JS wall time (CPU side of the frame)
     frameIntervalMs = 0                         // wall time between successive render() calls
     private timestampsEnabled = false
@@ -931,17 +951,34 @@ export class Engine {
     private tsReadbackFree = true
     private tsSlotsUsedThisFrame = 0
     private tsPendingSlots = 0
-    /** Batch/controller epoch used by the frame currently in timestamp readback. */
-    private tsPendingBatchSize = MIN_BATCH_SIZE
-    private tsPendingBatchGeneration = 0
-    private tsPendingRemainingPixelCount = -1
+    /** Controller context paired exactly with the frame currently in timestamp readback. */
+    private tsPendingBatchContext: IterationBatchTimingContext = {
+        frame: -1,
+        batchSize: MIN_BATCH_SIZE,
+        generation: 0,
+        activePixelCount: -1,
+        visiblePixelCount: 1,
+    }
     /** Invalidates delayed timing samples when a clear changes the remaining population. */
     private batchControllerGeneration = 0
-    /** Prevents repeated resets while one clear is waiting to be consumed by render(). */
-    private batchResetForPendingClear = false
-    /** Conservative AIMD growth state and last measured remaining population. */
-    private batchUnderBudgetStreak = 0
-    private batchLastRemainingPixelCount = -1
+    /** Prevents repeated first-wave seeding while one clear waits to be consumed. */
+    private batchSeededForPendingClear = false
+    /** Invalidates pre-pan samples once while retaining live pan samples afterward. */
+    private batchTranslationActive = false
+    /** EMA of weighted iteration applications per GPU millisecond. */
+    private iterationWorkRate = 0
+    /** Timestamp and counter maps are joined by render-frame serial because
+     *  their asynchronous WebGPU mappings may complete in either order. */
+    private pendingIterationTimings = new Map<number, {
+        elapsedMs: number
+        fixedPassesMs: number
+        context: IterationBatchTimingContext
+    }>()
+    private pendingIterationCounters = new Map<number, {
+        generation: number
+        actualWeightedWork: number
+        remainingPixelCount: number
+    }>()
     private lastRenderStartMs = 0
 
     // config
@@ -1092,6 +1129,9 @@ export class Engine {
     // ── Analytic AA (z″ expansion in the color pass) ──
     /** Master switch (auto mode only — the payload's z″ is tracked by the unified kernel). */
     aaAnalyticEnabled = true
+    /** False after a 9-layer pan: layers 9..12 then belong to the old scratch
+     * texture role. Re-enabling analytic AA must clear/recompute before use. */
+    private rawAnalyticPayloadAligned = true
     /** Contrast + moiré AA-target predictors (design D-contrast): Sobel on the
      *  colorized sample-0 + palette-phase Nyquist saturation, fused with the DE
      *  ramp via max in target space. Toggle for A/B tests. */
@@ -1920,7 +1960,7 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 8,
+            size: 4 * 12,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
@@ -1971,9 +2011,10 @@ export class Engine {
         this.mandelbrotJetLevelBufferCapacity = 1
         this.mandelbrotValidityBufferCapacity = 1
 
-        // One remaining-work counter plus one padding word keeps readback alignment stable.
+        // Remaining pixels + actual weighted work consumed by this dispatch,
+        // padded to 16 B so WorkStats keeps a naturally aligned readback offset.
         this.counterBuffer = this.device.createBuffer({
-            size: 8,
+            size: COUNTER_BYTES,
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine Counter Storage',
         })
@@ -1986,7 +2027,7 @@ export class Engine {
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_SRC | GPUBufferUsage.COPY_DST,
             label: 'Engine WorkStats Storage',
         })
-        // Readback slots hold the 8 B completion counter followed by WorkStats.
+        // Readback slots hold the 16 B dispatch counters followed by WorkStats.
         this.counterReadbackSlots = Array.from({ length: COUNTER_READBACK_BUFFER_COUNT }, (_, index) => ({
             buffer: this.device.createBuffer({
                 size: COUNTER_READBACK_BYTES,
@@ -2317,9 +2358,7 @@ export class Engine {
         if (!buf) return
         this.tsReadbackFree = false
         const pending = this.tsPendingSlots
-        const sampledBatchSize = this.tsPendingBatchSize
-        const sampledBatchGeneration = this.tsPendingBatchGeneration
-        const sampledRemainingPixelCount = this.tsPendingRemainingPixelCount
+        const sampledBatchContext = this.tsPendingBatchContext
         void buf.mapAsync(GPUMapMode.READ).then(() => {
             try {
                 const data = new BigInt64Array(buf.getMappedRange().slice(0))
@@ -2356,15 +2395,19 @@ export class Engine {
                     this.passGpuSpanMs = this.passGpuSpanMs > 0
                         ? this.passGpuSpanMs * 0.8 + spanMs * 0.2
                         : spanMs
+                    // On timestamp-capable adapters this is the authoritative
+                    // duration of the submitted GPU frame. In particular it
+                    // excludes browser/queue notification latency which can
+                    // make onSubmittedWorkDone() arrive much later on zooms.
+                    this.applyGpuFrameTiming(spanMs, sampledBatchContext)
                 }
                 if (iterationPassMs !== undefined) {
                     this.lastIterationPassMs = iterationPassMs
                     this.iterationPassTimingSerial++
-                    this.applyIterationPassTiming(
+                    this.recordIterationPassTiming(
                         iterationPassMs,
-                        sampledBatchSize,
-                        sampledBatchGeneration,
-                        sampledRemainingPixelCount,
+                        sampledBatchContext,
+                        otherPassesMs,
                     )
                 }
             } catch { /* mapping raced with device loss */ }
@@ -3136,7 +3179,7 @@ export class Engine {
     }
 
     // One-off exact stats copy at render completion: counter+workStats hold
-    // the session totals on the GPU; a standalone 40 B copy + map gives the
+    // the session totals on the GPU; a standalone copy + map gives the
     // deterministic Σ regardless of readback sampling alignment. Discarded if
     // a new session starts before it lands.
     private requestFinalStatsReadback() {
@@ -3152,8 +3195,8 @@ export class Engine {
         }
         const session = this.workStatsSessionSerial
         const encoder = this.device.createCommandEncoder({ label: 'Engine Final Stats Copy' })
-        encoder.copyBufferToBuffer(this.counterBuffer, 0, this.finalStatsBuffer, 0, 8)
-        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, 8, WORK_STATS_BYTES)
+        encoder.copyBufferToBuffer(this.counterBuffer, 0, this.finalStatsBuffer, 0, COUNTER_BYTES)
+        encoder.copyBufferToBuffer(this.workStatsBuffer, 0, this.finalStatsBuffer, COUNTER_BYTES, WORK_STATS_BYTES)
         this.device.queue.submit([encoder.finish()])
         this.finalStatsPending = true
         void (async () => {
@@ -3165,15 +3208,16 @@ export class Engine {
                     return // a new session started: totals belong to it now
                 }
                 const data = new Uint32Array(this.finalStatsBuffer!.getMappedRange())
-                const realMean = data[2]
-                const covMean = data[3]
+                const workStats = data.subarray(COUNTER_WORDS)
+                const realMean = workStats[0]
+                const covMean = workStats[1]
                 // Gate counters are raw events — no plausibility gate needed
                 // (the realMean condition protects the realizedSkip ratio).
-                this.gateStatsApprox = [data[10], data[11]]
-                this.secoursStatsApprox = [data[12], data[13]]
-                this.f32AppsApprox = data[14]
-                this.renormStatsApprox = [data[15], data[16]]
-                const dynamic = this.dynamicValidityStatsFromReadback(data)
+                this.gateStatsApprox = [workStats[8], workStats[9]]
+                this.secoursStatsApprox = [workStats[10], workStats[11]]
+                this.f32AppsApprox = workStats[12]
+                this.renormStatsApprox = [workStats[13], workStats[14]]
+                const dynamic = this.dynamicValidityStatsFromReadback(workStats, 0)
                 this.dynamicTierAttemptsApprox = dynamic.tierAttempts
                 this.dynamicTierAcceptsApprox = dynamic.tierAccepts
                 this.dynamicSkipBucketsApprox = dynamic.skipBuckets
@@ -3182,7 +3226,7 @@ export class Engine {
                 this.dynamicExactFallbacksApprox = dynamic.exactFallbacks
                 if (realMean > 0 && covMean / realMean >= 1) {
                     this.realLoopStepsApprox = realMean * 64
-                    this.tierAppsApprox = [data[6], data[7], data[8], data[9]]
+                    this.tierAppsApprox = [workStats[4], workStats[5], workStats[6], workStats[7]]
                     this.lastCompletionTotalApps = this.realLoopStepsApprox
                 }
             } catch {
@@ -3196,7 +3240,7 @@ export class Engine {
         })()
     }
 
-    private dynamicValidityStatsFromReadback(data: Uint32Array, workStatsOffset = 2): DynamicValidityRuntimeStats {
+    private dynamicValidityStatsFromReadback(data: Uint32Array, workStatsOffset = 0): DynamicValidityRuntimeStats {
         const base = workStatsOffset + 15
         return {
             tierAttempts: [data[base], data[base + 1], data[base + 2], data[base + 3]],
@@ -3343,6 +3387,8 @@ export class Engine {
         sequence: number,
         generation: number,
         frame: number,
+        batchGeneration: number,
+        workCounterShift: number,
     ) {
         slot.pending = true
         slot.sequence = sequence
@@ -3355,16 +3401,24 @@ export class Engine {
                 mapped = true
                 const data = new Uint32Array(slot.buffer.getMappedRange())
                 const unfinished = data[0]
-                // Work stats (data[2..5]); 0 on non-in-place frames (buffer cleared).
-                const realMean = data[2]
-                const covMean = data[3]
-                const maxAccum = data[4]
-                const maxSteps = data[5]
-                const tierApps: [number, number, number, number] = [data[6], data[7], data[8], data[9]]
-                const secours: [number, number] = [data[12], data[13]]
-                const appsF32 = data[14]
-                const renorm: [number, number] = [data[15], data[16]]
-                const dynamic = this.dynamicValidityStatsFromReadback(data)
+                const actualWeightedWork = data[1] * 2 ** workCounterShift
+                const workStats = data.subarray(COUNTER_WORDS)
+                // Work stats; 0 on non-in-place frames (buffer cleared).
+                const realMean = workStats[0]
+                const covMean = workStats[1]
+                const maxAccum = workStats[2]
+                const maxSteps = workStats[3]
+                const tierApps: [number, number, number, number] = [workStats[4], workStats[5], workStats[6], workStats[7]]
+                const secours: [number, number] = [workStats[10], workStats[11]]
+                const appsF32 = workStats[12]
+                const renorm: [number, number] = [workStats[13], workStats[14]]
+                const dynamic = this.dynamicValidityStatsFromReadback(workStats, 0)
+                this.recordIterationCounterSample(
+                    frame,
+                    batchGeneration,
+                    actualWeightedWork,
+                    unfinished,
+                )
                 this.applyCounterReadback(sequence, generation, frame, unfinished, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm, dynamic)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
@@ -3445,7 +3499,10 @@ export class Engine {
         }
     }
 
-    private scheduleGpuTiming(submitStartMs: number) {
+    private scheduleGpuTiming(
+        submitStartMs: number,
+        batchContext: IterationBatchTimingContext,
+    ) {
         if (this.pendingGpuTiming) {
             return
         }
@@ -3454,14 +3511,76 @@ export class Engine {
         void this.device.queue.onSubmittedWorkDone()
             .then(() => {
                 this.pendingGpuTiming = false
-                this.applyGpuFrameTiming(performance.now() - submitStartMs)
+                this.applyGpuFrameTiming(performance.now() - submitStartMs, batchContext)
             })
             .catch(() => {
                 this.pendingGpuTiming = false
             })
     }
 
-    private applyGpuFrameTiming(elapsed: number) {
+    private trimPendingIterationSamples() {
+        while (this.pendingIterationTimings.size > ITERATION_SAMPLE_PAIR_RETENTION) {
+            for (const frame of this.pendingIterationTimings.keys()) {
+                this.pendingIterationTimings.delete(frame)
+                break
+            }
+        }
+        while (this.pendingIterationCounters.size > ITERATION_SAMPLE_PAIR_RETENTION) {
+            for (const frame of this.pendingIterationCounters.keys()) {
+                this.pendingIterationCounters.delete(frame)
+                break
+            }
+        }
+    }
+
+    private recordIterationPassTiming(
+        elapsedMs: number,
+        context: IterationBatchTimingContext,
+        fixedPassesMs: number,
+    ) {
+        this.pendingIterationTimings.set(context.frame, {elapsedMs, fixedPassesMs, context})
+        this.tryApplyPairedIterationSample(context.frame)
+        this.trimPendingIterationSamples()
+    }
+
+    private recordIterationCounterSample(
+        frame: number,
+        generation: number,
+        actualWeightedWork: number,
+        remainingPixelCount: number,
+    ) {
+        this.pendingIterationCounters.set(frame, {
+            generation,
+            actualWeightedWork,
+            remainingPixelCount,
+        })
+        this.tryApplyPairedIterationSample(frame)
+        this.trimPendingIterationSamples()
+    }
+
+    private tryApplyPairedIterationSample(frame: number) {
+        const timing = this.pendingIterationTimings.get(frame)
+        const counter = this.pendingIterationCounters.get(frame)
+        if (!timing || !counter) return
+        this.pendingIterationTimings.delete(frame)
+        this.pendingIterationCounters.delete(frame)
+        if (timing.context.generation !== counter.generation) return
+        this.applyIterationPassTiming(
+            timing.elapsedMs,
+            {
+                ...timing.context,
+                actualWeightedWork: counter.actualWeightedWork,
+                remainingPixelCount: counter.remainingPixelCount,
+            },
+            timing.fixedPassesMs,
+            true,
+        )
+    }
+
+    private applyGpuFrameTiming(
+        elapsed: number,
+        batchContext: IterationBatchTimingContext,
+    ) {
         this.gpuFrameTimeMs = elapsed
 
         // The debug overlay recomputes every pixel from scratch on top of the
@@ -3490,9 +3609,9 @@ export class Engine {
         if (!this.timestampsEnabled) {
             this.applyIterationPassTiming(
                 elapsed,
-                this.iterationBatchSize,
-                this.batchControllerGeneration,
-                this.unfinishedPixelCount,
+                batchContext,
+                this.otherPassesGpuMs,
+                false,
             )
         }
     }
@@ -3504,61 +3623,82 @@ export class Engine {
      */
     private applyIterationPassTiming(
         elapsed: number,
-        sampledBatchSize: number,
-        sampledGeneration: number,
-        sampledRemainingPixelCount: number,
+        sample: IterationBatchTimingContext,
+        sampledFixedPassesMs = this.otherPassesGpuMs,
+        computePassOnly = true,
     ) {
-        if (this.debugPipelineActive
-            || elapsed <= 0
-            || sampledGeneration !== this.batchControllerGeneration) {
+        if (elapsed <= 0) {
             return
         }
 
-        const frameTargetMs = 1000 / this.targetFps
-        const targetIterationMs = Math.min(
+        const frameTargetMs = 1000 / Math.max(1, this.targetFps)
+        const targetIterationMs = requestedIterationBudgetMs(
             frameTargetMs,
-            Math.max(
-                MIN_ITERATION_TARGET_MS,
-                frameTargetMs - this.otherPassesGpuMs - ITERATION_SAFETY_MARGIN_MS,
-            ),
+            sampledFixedPassesMs,
         )
         const maxBatchSize = this.getEffectiveMaxBatchSize()
 
-        // A sudden population increase (clear, pan exposure, or AA reseed)
-        // invalidates the timing regime learned from the preceding dispatch.
-        if (sampledRemainingPixelCount >= 0) {
-            if (this.batchLastRemainingPixelCount >= 0
-                && sampledRemainingPixelCount > this.batchLastRemainingPixelCount * ACTIVE_PIXEL_RESET_RATIO) {
-                this.iterationBatchSize = MIN_BATCH_SIZE
-                this.batchUnderBudgetStreak = 0
-                this.batchLastRemainingPixelCount = sampledRemainingPixelCount
-                return
-            }
-            this.batchLastRemainingPixelCount = sampledRemainingPixelCount
-        }
-
-        if (elapsed > targetIterationMs * BATCH_OVERSHOOT_RATIO) {
-            this.iterationBatchSize = Math.max(
-                MIN_BATCH_SIZE,
-                Math.floor(Math.min(this.iterationBatchSize, sampledBatchSize) * BATCH_DECREASE_FACTOR),
+        // Learn only from the real weighted work consumed by this exact timed
+        // dispatch. The post-pass unfinished count enforces the 10% rule on
+        // pixels that still need work; zoom frames that cheaply finish most of
+        // the image can no longer masquerade as enormous throughput.
+        const remainingPixelCount = sample.remainingPixelCount
+            ?? sample.activePixelCount
+        if (computePassOnly && isRepresentativeIterationPopulation(
+            remainingPixelCount,
+            sample.visiblePixelCount,
+        ) && sample.actualWeightedWork !== undefined) {
+            const sampledRate = measureIterationWorkRate(
+                sample.actualWeightedWork,
+                elapsed,
             )
-            this.batchUnderBudgetStreak = 0
+            this.iterationWorkRate = updateIterationWorkRateEma(
+                this.iterationWorkRate,
+                sampledRate,
+            )
+        }
+
+        if (sample.generation !== this.batchControllerGeneration) return
+
+        if (!computePassOnly) {
+            // Timestamp queries are optional. Keep the proportional full-frame
+            // fallback, but never feed its mixed fixed-pass time into the EMA.
+            this.iterationBatchSize = predictIterationBatchSize({
+                elapsedMs: elapsed,
+                requestedBudgetMs: targetIterationMs,
+                sampledBatchSize: sample.batchSize,
+                currentBatchSize: this.iterationBatchSize,
+                minBatchSize: MIN_BATCH_SIZE,
+                maxBatchSize,
+            })
             return
         }
 
-        if (elapsed < targetIterationMs * BATCH_UNDERSHOOT_RATIO) {
-            this.batchUnderBudgetStreak++
-            if (this.batchUnderBudgetStreak >= BATCH_INCREASE_STREAK) {
-                const increase = Math.max(1, Math.ceil(this.iterationBatchSize * BATCH_INCREASE_FACTOR))
-                this.iterationBatchSize = Math.min(maxBatchSize, this.iterationBatchSize + increase)
-                this.batchUnderBudgetStreak = 0
-            }
+        // A hot reload or an already-sparse view may provide no representative
+        // population with which to initialize the persistent rate. Still let
+        // the isolated compute timestamp escape batch 1, without storing that
+        // sparse measurement in the EMA.
+        if (!(this.iterationWorkRate > 0)) {
+            this.iterationBatchSize = predictIterationBatchSize({
+                elapsedMs: elapsed,
+                requestedBudgetMs: targetIterationMs,
+                sampledBatchSize: sample.batchSize,
+                currentBatchSize: this.iterationBatchSize,
+                minBatchSize: MIN_BATCH_SIZE,
+                maxBatchSize,
+            })
             return
         }
 
-        // Dead band: keep the current batch and require a fresh cheap-sample
-        // streak before allowing another increase.
-        this.batchUnderBudgetStreak = 0
+        if (this.iterationWorkRate > 0 && remainingPixelCount > 0) {
+            this.iterationBatchSize = batchSizeForWorkRate(
+                this.iterationWorkRate,
+                targetIterationMs,
+                remainingPixelCount,
+                MIN_BATCH_SIZE,
+                maxBatchSize,
+            )
+        }
     }
 
     private getEffectiveMaxBatchSize(): number {
@@ -3568,9 +3708,24 @@ export class Engine {
         // doubled on the floatexp path, Ψ-gate hops 8). maxIteration thus
         // bounds near-constant GPU time per dispatch whatever the block/exact
         // mix, which is what keeps navigation smooth when the view crosses
-        // between block-rich and exact-stepping regions. The adaptive ramp
-        // (FPS-driven) settles the work budget below this cap.
+        // between block-rich and exact-stepping regions. The timing estimator
+        // settles the requested work budget below this cap when work is abundant.
         return MAX_BATCH_SIZE
+    }
+
+    private learnedBatchSizeFor(activePixelCount: number): number | null {
+        if (!(this.iterationWorkRate > 0) || !(activePixelCount > 0)) return null
+        const targetIterationMs = requestedIterationBudgetMs(
+            1000 / Math.max(1, this.targetFps),
+            this.otherPassesGpuMs,
+        )
+        return batchSizeForWorkRate(
+            this.iterationWorkRate,
+            targetIterationMs,
+            activePixelCount,
+            MIN_BATCH_SIZE,
+            this.getEffectiveMaxBatchSize(),
+        )
     }
 
     resize() {
@@ -3868,6 +4023,44 @@ export class Engine {
             return false
         }
         return JSON.stringify(obj1) === JSON.stringify(obj2)
+    }
+
+    private isTranslationOnlyChange(next: Mandelbrot, previous?: Mandelbrot): boolean {
+        if (!previous) return false
+        const positionChanged = next.cx !== previous.cx
+            || next.cy !== previous.cy
+            || next.dx !== previous.dx
+            || next.dy !== previous.dy
+            || next.dxStr !== previous.dxStr
+            || next.dyStr !== previous.dyStr
+        return positionChanged
+            && next.scale === previous.scale
+            && next.scaleStr === previous.scaleStr
+            && next.angle === previous.angle
+            && next.maxIterations === previous.maxIterations
+            && next.mu === previous.mu
+            && next.epsilon === previous.epsilon
+    }
+
+    /** A continuous zoom changes the display scale (and its derived iteration
+     * ceiling) while the raw live field stays at zoomState.liveScale until the
+     * next clear/swap boundary. Counter samples from those frames therefore
+     * remain valid and must be allowed to reach the batch-rate estimator. */
+    private isZoomReprojectionOnlyChange(next: Mandelbrot, previous?: Mandelbrot): boolean {
+        if (!previous) return false
+        const scaleChanged = next.scale !== previous.scale
+            || next.scaleStr !== previous.scaleStr
+        const positionUnchanged = next.cx === previous.cx
+            && next.cy === previous.cy
+            && next.dx === previous.dx
+            && next.dy === previous.dy
+            && next.dxStr === previous.dxStr
+            && next.dyStr === previous.dyStr
+        return scaleChanged
+            && positionUnchanged
+            && next.angle === previous.angle
+            && next.mu === previous.mu
+            && next.epsilon === previous.epsilon
     }
 
     areColorStopsEqual(
@@ -4304,6 +4497,10 @@ export class Engine {
         }
 
         const mandelbrotChanged = !this.areObjectsEqual(mandelbrot, this.previousMandelbrot)
+        const translationOnlyChange = mandelbrotChanged
+            && this.isTranslationOnlyChange(mandelbrot, this.previousMandelbrot)
+        const zoomReprojectionOnlyChange = mandelbrotChanged
+            && this.isZoomReprojectionOnlyChange(mandelbrot, this.previousMandelbrot)
         const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
         const stripeFrequencyChanged = renderOptions.stripeFrequency !== this.previousRenderOptions?.stripeFrequency
         const orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
@@ -4322,7 +4519,14 @@ export class Engine {
             this.resetAaState()
         }
         this.aaAuto = renderOptions.aaAuto ?? false
-        if (mandelbrotChanged || activeStripeFrequencyChanged || orbitMetricsChanged) {
+        // Continuous zoom is display-only between raw-field clear/swap
+        // boundaries. Invalidating here every tick discarded the preceding
+        // counter before its asynchronous map completed, so timestamp+work
+        // samples never paired and the zoom controller stayed near batch 1.
+        // render() invalidates at the actual clear boundary instead.
+        if ((mandelbrotChanged && !translationOnlyChange && !zoomReprojectionOnlyChange)
+            || activeStripeFrequencyChanged
+            || orbitMetricsChanged) {
             this.invalidateCounterReadback() // unknown — new fractal params, GPU counter not read yet
         }
         if (activeStripeFrequencyChanged || orbitMetricsChanged) {
@@ -4744,18 +4948,6 @@ export class Engine {
         this.lastShaderApproxFlag = approximationModeFlag
         this.lastShaderBlaLevelCount = blaLevelCount
 
-        // A clear turns a sparse, nearly-converged texture back into a dense
-        // full-screen dispatch. Start that new population at the minimum batch;
-        // the timestamp feedback arrives one frame later and ramps from there.
-        // Bump the epoch so an older sparse-frame readback cannot undo the reset.
-        if (this.clearHistoryNextFrame && !this.batchResetForPendingClear) {
-            this.iterationBatchSize = MIN_BATCH_SIZE
-            this.batchControllerGeneration++
-            this.batchResetForPendingClear = true
-            this.batchUnderBudgetStreak = 0
-            this.batchLastRemainingPixelCount = -1
-        }
-
         // Re-write the mandelbrot uniform with the guarded globalMaxIter.
         // During zoom reprojection, override scale with liveScale so the GPU
         // computes at the fixed target scale for this cycle.
@@ -4862,6 +5054,12 @@ export class Engine {
         return { logDelta, enabled }
     }
 
+    private analyticRawPayloadNeeded(renderOptions: RenderOptions, aspect: number): boolean {
+        const antialiasLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
+        return this.debugViewMode === DEBUG_VIEW_REACH
+            || (antialiasLevel > 1 && this.aaAnalyticParams(aspect).enabled)
+    }
+
     /** Map the frontier stats readback (once per reseed; skipped while a map is in flight). */
     private readbackAaFrontier() {
         const buf = this.aaFrontierReadback
@@ -4937,6 +5135,13 @@ export class Engine {
         }
 
         const aspect = (this.width / Math.max(1, this.height))
+        const analyticRawPayloadNeeded = this.analyticRawPayloadNeeded(renderOptions, aspect)
+        if (analyticRawPayloadNeeded && !this.rawAnalyticPayloadAligned) {
+            // A previous 9-layer pan left the Taylor-only layers in the old
+            // scratch role. Rebuild once before any analytic consumer can read.
+            this.clearHistoryNextFrame = true
+            this.invalidateCounterReadback()
+        }
         const clearFlag = this.clearHistoryNextFrame ? 1 : 0
         if (this.clearHistoryNextFrame) {
             this.invalidateCounterReadback()
@@ -4964,6 +5169,53 @@ export class Engine {
         const roundedShiftTexX = Math.round(shiftTexX)
         const roundedShiftTexY = Math.round(shiftTexY)
         const hasTranslationShift = roundedShiftTexX !== 0 || roundedShiftTexY !== 0
+        const enteringTranslation = hasTranslationShift && !this.batchTranslationActive
+        if (enteringTranslation) {
+            // Discard a pre-pan count once. Subsequent pan frames keep this new
+            // generation so dense translations can contribute fresh samples.
+            this.invalidateCounterReadback()
+        }
+        const visiblePixelCount = Math.max(1, this.width * this.height)
+        const exposedX = Math.min(this.width, Math.abs(roundedShiftTexX))
+        const exposedY = Math.min(this.height, Math.abs(roundedShiftTexY))
+        const exposedPixelCount = Math.min(
+            visiblePixelCount,
+            exposedX * this.height + exposedY * this.width - exposedX * exposedY,
+        )
+        const activePixelCount = clearFlag !== 0
+            ? visiblePixelCount
+            : this.unfinishedPixelCount >= 0
+                ? Math.min(
+                    visiblePixelCount,
+                    this.unfinishedPixelCount + exposedPixelCount,
+                )
+                : exposedPixelCount > 0 ? exposedPixelCount : -1
+
+        // Frame topology is known only here. Clears start with a dense active
+        // population; pans add the exposed strip to the latest counter value.
+        // Both can reuse the persistent throughput EMA immediately.
+        if (clearFlag !== 0 && !this.batchSeededForPendingClear) {
+            this.batchControllerGeneration++
+            this.batchSeededForPendingClear = true
+        }
+        if (enteringTranslation) {
+            this.batchControllerGeneration++
+        }
+        this.batchTranslationActive = hasTranslationShift
+
+        if (clearFlag !== 0 || hasTranslationShift) {
+            const learnedBatchSize = this.learnedBatchSizeFor(activePixelCount)
+            if (learnedBatchSize !== null && learnedBatchSize !== this.iterationBatchSize) {
+                this.iterationBatchSize = learnedBatchSize
+                // update() already uploaded the complete uniform block; patch the
+                // single batch scalar now that render() knows this frame topology.
+                this.device.queue.writeBuffer(
+                    this.uniformBufferMandelbrot!,
+                    MANDELBROT_BATCH_UNIFORM_OFFSET,
+                    new Float32Array([learnedBatchSize]),
+                )
+            }
+        }
 
         if (!this.clearHistoryNextFrame) {
             if (isZoomActive(this.zoomState)) {
@@ -4983,8 +5235,6 @@ export class Engine {
             // translated live texture.
             this.needFreezeSnapshot = false
         }
-
-        const counterReadbackPending = this.hasPendingCounterReadbackForCurrentGeneration()
 
         // Bounding box of the rotated viewport: the visible rectangle spans
         // ±aspect × ±1 in rotated neutral units, so its axis-aligned half
@@ -5008,6 +5258,10 @@ export class Engine {
             width: Math.max(8, boxRight - boxX),
             height: Math.max(8, boxBottom - boxY),
         }
+        const workCounterShift = iterationWorkCounterShift(
+            this.iterationBatchSize,
+            this.dispatchBox.width * this.dispatchBox.height,
+        )
 
         const brushUniforms = new Float32Array([
             aspect,
@@ -5017,16 +5271,20 @@ export class Engine {
             shiftTexY,
             this.dispatchBox.x,
             this.dispatchBox.y,
+            analyticRawPayloadNeeded ? RAW_LAYERS : RAW_BASE_LAYERS,
+            this.previousMandelbrot.mu,
+            workCounterShift,
+            0,
             0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
 
-        const shouldDispatchCounter =
-            !counterReadbackPending
-            && (
-                this.unfinishedPixelCount < 0
-                || frameSerial - this.lastCounterDispatchFrame >= COUNTER_SAMPLE_INTERVAL_FRAMES
-            )
+        // Use the readback ring as intended: mapping one slot must not suppress
+        // the next frame's sample while another slot remains available.
+        const shouldDispatchCounter = (
+            this.unfinishedPixelCount < 0
+            || frameSerial - this.lastCounterDispatchFrame >= COUNTER_SAMPLE_INTERVAL_FRAMES
+        )
         const counterReadbackSlot = shouldDispatchCounter
             ? this.acquireCounterReadbackSlot()
             : undefined
@@ -5043,6 +5301,8 @@ export class Engine {
             sequence: number,
             generation: number,
             frame: number,
+            batchGeneration: number,
+            workCounterShift: number,
         } | undefined
         let aaFrontierCopyScheduled = false
 
@@ -5176,10 +5436,8 @@ export class Engine {
 
         // ── Frame passes ─────────────────────────────────────────────────
         // Single production iteration path: the fused in-place compute.
-        // Pan and clear frames first run the ping-pong utility pass
-        // (reproject_cs A→B + copy B→A) — the neighbour gather is race-free
-        // because A is read-only during that pass — then the same frame's
-        // in-place dispatch continues iteration on A.
+        // Pan and clear frames prepare B through the same utility kernel, then
+        // swap it to the front before the in-place iteration dispatch.
         const utilityNeeded = this.clearHistoryNextFrame || hasTranslationShift
 
         // Track frames that may mutate A: utility frames rewrite it wholesale;
@@ -5192,8 +5450,8 @@ export class Engine {
 
         {
             if (utilityNeeded) {
-                // Utility pass: pan gather or exact step-1 clear stamp,
-                // A→B, then the texture roles swap so iteration proceeds on B.
+                // Utility pass writes B, then the texture roles swap so
+                // iteration proceeds on the freshly prepared front texture.
                 const utilityTimingKey = selectRawUtilityPassKey(this.clearHistoryNextFrame)
                 const utilPass = commandEncoder.beginComputePass({
                     timestampWrites: this.tsWrites(PASS_SLOT_INDEX[utilityTimingKey]),
@@ -5204,12 +5462,14 @@ export class Engine {
                 utilPass.dispatchWorkgroups(uwg, uwg)
                 utilPass.end()
                 // Ping-pong instead of copying B back over A: B now holds the
-                // reprojected state, so it becomes the front texture and A the
-                // next frame's scratch. This removes a full-size 13-layer copy —
-                // read and write — from every pan and clear frame, and it also
-                // brings the whole reprojection inside the pass timer, which
-                // previously measured only the compute half of the work.
+                // reprojected or cleared state, so it becomes the front texture
+                // and A the next frame's scratch.
                 this.swapRawTextures()
+                // Clears establish a fresh payload as the in-place pass fills
+                // requested texels. A 9-layer translation deliberately does not
+                // preserve the Taylor-only layers in the new front texture.
+                this.rawAnalyticPayloadAligned = this.clearHistoryNextFrame
+                    || analyticRawPayloadNeeded
             }
             // Stage B selective reseed: stamp the boundary sliver (target > sample
             // index) as compute requests so only it reconverges with the new jitter;
@@ -5251,7 +5511,7 @@ export class Engine {
             // Fused brush+mandelbrot+count: a single compute dispatch working
             // in place on A.  Finished texels generate zero texture writes,
             // replacing passes 0/1, the B→A copy and the count pass.
-            commandEncoder.clearBuffer(this.counterBuffer!, 0, 8)
+            commandEncoder.clearBuffer(this.counterBuffer!, 0, COUNTER_BYTES)
             // workStats accumulates across the whole render generation — clear it
             // only on the generation's first in-place dispatch, then let every
             // dispatch atomicAdd into it (exact, sampling-independent totals).
@@ -5323,14 +5583,16 @@ export class Engine {
         if (counterReadbackSlot) {
             const sequence = ++this.counterReadbackSequence
             const generation = this.counterReadbackGeneration
-            commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, 8)
-            commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, 8, WORK_STATS_BYTES)
+            commandEncoder.copyBufferToBuffer(this.counterBuffer!, 0, counterReadbackSlot.buffer, 0, COUNTER_BYTES)
+            commandEncoder.copyBufferToBuffer(this.workStatsBuffer!, 0, counterReadbackSlot.buffer, COUNTER_BYTES, WORK_STATS_BYTES)
             this.lastCounterDispatchFrame = frameSerial
             scheduledCounterReadback = {
                 slot: counterReadbackSlot,
                 sequence,
                 generation,
                 frame: frameSerial,
+                batchGeneration: this.batchControllerGeneration,
+                workCounterShift,
             }
         }
 
@@ -5515,15 +5777,20 @@ export class Engine {
         // Per-pass timing: resolve the timestamp pairs into a buffer and copy to
         // a mappable readback (both GPU-side, no stall). Only when the previous
         // readback has completed — otherwise skip this frame's sample.
+        const batchTimingContext: IterationBatchTimingContext = {
+            frame: frameSerial,
+            batchSize: this.iterationBatchSize,
+            generation: this.batchControllerGeneration,
+            activePixelCount,
+            visiblePixelCount,
+        }
         let tsResolvedThisFrame = false
         if (this.timestampsEnabled && this.timestampQuerySet && this.tsResolveBuffer && this.tsReadBuffer
             && this.tsReadbackFree && this.tsSlotsUsedThisFrame !== 0) {
             commandEncoder.resolveQuerySet(this.timestampQuerySet, 0, TS_COUNT, this.tsResolveBuffer, 0)
             commandEncoder.copyBufferToBuffer(this.tsResolveBuffer, 0, this.tsReadBuffer, 0, TS_COUNT * 8)
             this.tsPendingSlots = this.tsSlotsUsedThisFrame
-            this.tsPendingBatchSize = this.iterationBatchSize
-            this.tsPendingBatchGeneration = this.batchControllerGeneration
-            this.tsPendingRemainingPixelCount = this.unfinishedPixelCount
+            this.tsPendingBatchContext = batchTimingContext
             tsResolvedThisFrame = true
         }
 
@@ -5544,14 +5811,20 @@ export class Engine {
             })
         }
 
-        // Delayed GPU timing + counter readback: do not block this frame on GPU completion.
-        this.scheduleGpuTiming(submitStartMs)
+        // Timestamp-capable adapters pace from the query span read above. The
+        // submit-to-done wall clock is only a fallback: on Safari/WebKit it can
+        // include notification latency far beyond the actual GPU frame.
+        if (!this.timestampsEnabled) {
+            this.scheduleGpuTiming(submitStartMs, batchTimingContext)
+        }
         if (scheduledCounterReadback) {
             this.scheduleCounterReadback(
                 scheduledCounterReadback.slot,
                 scheduledCounterReadback.sequence,
                 scheduledCounterReadback.generation,
                 scheduledCounterReadback.frame,
+                scheduledCounterReadback.batchGeneration,
+                scheduledCounterReadback.workCounterShift,
             )
         }
         if (aaFrontierCopyScheduled) {
@@ -5564,7 +5837,7 @@ export class Engine {
             // offset (0 outside AA accumulation → the base is unjittered again).
             // Pan gathers COPY pixels, so they deliberately don't touch this.
             this.rawJittered = this.aaOffsetX !== 0 || this.aaOffsetY !== 0
-            this.batchResetForPendingClear = false
+            this.batchSeededForPendingClear = false
         }
         this.clearHistoryNextFrame = false
 
@@ -5793,7 +6066,7 @@ export class Engine {
         return reason !== ''
     }
 
-    /** Current GPU iteration batch size (auto-adjusted to target ~16ms/frame). */
+    /** Current GPU iteration batch size (auto-adjusted to the requested compute budget). */
     getIterationBatchSize(): number {
         return this.iterationBatchSize
     }
@@ -5827,7 +6100,7 @@ export class Engine {
 
         // Pace stepping + rendering to the *real* GPU frame time rather than the
         // raw rAF interval. Rendering is fire-and-forget (queue.submit returns
-        // before the GPU is done — see scheduleGpuTiming), so rAF keeps firing at
+        // before the GPU is done), so rAF keeps firing at
         // ~display rate even when a deep-zoom frame takes hundreds of ms on the
         // GPU. Without this gate the navigator would advance ~60×/s while the
         // screen only updates a handful of times per second, so the animation
@@ -5840,7 +6113,13 @@ export class Engine {
         // cap at 500 ms so we stay responsive if a frame spikes.
         const now = performance.now()
         const minInterval = Math.min(this.smoothedGpuTimeMs, 500)
-        if (now - this._lastDrawMs >= minInterval) {
+        // Timestamp mapAsync completion is telemetry, not a GPU frame fence:
+        // its CPU notification can arrive tens of milliseconds after the timed
+        // GPU work completed. Timestamp-capable adapters therefore pace from the
+        // last smoothed query span even while its readback is mapped. Without
+        // timestamp queries, retain the conservative onSubmittedWorkDone fence.
+        const fallbackFrameComplete = this.timestampsEnabled || !this.pendingGpuTiming
+        if (fallbackFrameComplete && now - this._lastDrawMs >= minInterval) {
             this._lastDrawMs = now
 
             const active = this.needsMoreFrames()

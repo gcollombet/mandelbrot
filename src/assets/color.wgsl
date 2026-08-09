@@ -1602,24 +1602,10 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     live_zy = liveSample.zy;
   }
 
-  // When magnified, the bilinear interpolation both smooths the display and
-  // serves as a data source where the nearest texel is unusable (sentinel,
-  // budget-exhausted) — this fills the flat blocks that otherwise flash
-  // when the compositing alternates between live and frozen during zoom.
-  var liveInterp: InterpPixel;
-  liveInterp.kind = 0;
-  if (liveInBounds && liveMagnified) {
-    liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, uv_live, texSize, lzf);
-  }
   liveAnalyticTag = liveAnalyticTag || parameters.reachDebug > 0.5;
 
   let liveEscaped = live_iter > 0.0 && (live_zx * live_zx + live_zy * live_zy) >= parameters.mu;
-  var liveHasData = liveEscaped && liveStep > 0.0;
-  var liveCompositeStep = liveStep;
-  if (liveInterp.kind == 1) {
-    liveHasData = true;
-    liveCompositeStep = liveInterp.step;
-  }
+  let liveHasNearestData = liveEscaped && liveStep > 0.0;
 
   // ── Sample frozen texture ──
   // The frozen texture is only usable when it is aligned with the live texture
@@ -1633,13 +1619,11 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   var frozen_zx = 0.0;
   var frozen_zy = 0.0;
   var uv_frozen = vec2<f32>(0.0);
-  var frozenInterp: InterpPixel;
-  frozenInterp.kind = 0;
+  var frozenInBounds = false;
   if (useFrozen) {
     uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
                 - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
-    var frozenInBounds: bool;
     if (zf < 1.0) {
       frozenInBounds = isInsideScreen(uv_frozen, aspect, neutralExtent, sceneSin, sceneCos);
     } else {
@@ -1657,77 +1641,32 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       frozenStep = frozenSample.step;
       frozen_zx = frozenSample.zx;
       frozen_zy = frozenSample.zy;
-      if (frozenMagnified) {
-        frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, uv_frozen, texSize, zf);
-      }
     }
   }
   let frozenEscaped = frozen_iter > 0.0 && (frozen_zx * frozen_zx + frozen_zy * frozen_zy) >= parameters.mu;
   let frozenInterior = frozen_iter == 0.0;
-  var frozenHasData = (frozenEscaped || frozenInterior) && frozenStep > 0.0;
-  var frozenCompositeStep = frozenStep;
-  if (frozenInterp.kind == 1) {
-    frozenHasData = true;
-    frozenCompositeStep = frozenInterp.step;
-  }
+  let frozenHasNearestData = (frozenEscaped || frozenInterior) && frozenStep > 0.0;
 
-  // ── Pick the best pixel: smallest positive step wins ──
-  // step > 0 means the pixel has data; step = 0 means no data.
+  // ── Pick the best nearest source BEFORE any four-texel read ────────
+  // Bilinear interpolation is presentation work, not source selection. Pick
+  // live versus frozen from their already-loaded nearest samples first, then
+  // interpolate only the winner. This avoids paying two 4-corner gathers for
+  // a result of which one was immediately discarded.
   // The frozen and live textures live at different scales, so their raw step
   // values are not directly comparable. A frozen genuine pixel (step=1) at
   // frozenScale is zf/lzf times coarser per axis than a live genuine pixel
   // (step=1) at liveScale.  Scale the frozen step to live-resolution units.
-  let effectiveLiveStep = liveCompositeStep * max(lzf, 1e-30);
-  let effectiveFrozenStep = frozenCompositeStep * max(zf, 1e-30);
+  let effectiveLiveStep = liveStep * max(lzf, 1e-30);
+  let effectiveFrozenStep = frozenStep * max(zf, 1e-30);
+  let selectLiveNearest = liveHasNearestData
+    && (!frozenHasNearestData || effectiveLiveStep <= effectiveFrozenStep);
 
-  if (liveHasData && frozenHasData) {
-    // Both have data — pick the one with finer resolution (smaller step).
-    if (effectiveLiveStep <= effectiveFrozenStep) {
-      let liveColor = colorize_sampled(
-        tex,
-        geometryTex,
-        metadataTex,
-        liveCoord,
-        texSize,
-        live_iter,
-        live_zx,
-        live_zy,
-        liveInterp,
-        uv_live,
-        liveMagnified,
-        uv_screen,
-        uv_neutral,
-        lzf,
-        liveAnalyticTag
-      );
-      if (DEBUG_SHOW_LIVE_NEGATIVE) {
-        let neg = vec3<f32>(1.0) - liveColor.rgb;
-        return vec4<f32>(neg.r * 0.3, neg.g, neg.b * 0.3, 1.0);
-      }
-      return vec4<f32>(liveColor.rgb, 1.0);
-    } else {
-      let frozenColor = colorize_sampled(
-        texFrozen,
-        frozenGeometryTex,
-        frozenMetadataTex,
-        frozenCoord,
-        texSize,
-        frozen_iter,
-        frozen_zx,
-        frozen_zy,
-        frozenInterp,
-        uv_frozen,
-        frozenMagnified,
-        uv_screen,
-        uv_neutral,
-        zf,
-        false
-      );
-      return vec4<f32>(frozenColor.rgb, 1.0);
+  if (selectLiveNearest) {
+    var liveInterp: InterpPixel;
+    liveInterp.kind = 0;
+    if (liveMagnified) {
+      liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, uv_live, texSize, lzf);
     }
-  }
-
-  if (liveHasData) {
     let liveColor = colorize_sampled(
       tex,
       geometryTex,
@@ -1756,7 +1695,12 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     return vec4<f32>(liveColor.rgb, 1.0);
   }
 
-  if (frozenHasData) {
+  if (frozenHasNearestData) {
+    var frozenInterp: InterpPixel;
+    frozenInterp.kind = 0;
+    if (frozenMagnified) {
+      frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, uv_frozen, texSize, zf);
+    }
     let frozenColor = colorize_sampled(
       texFrozen,
       frozenGeometryTex,
@@ -1773,6 +1717,42 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       uv_neutral,
       zf,
       false
+    );
+    return vec4<f32>(frozenColor.rgb, 1.0);
+  }
+
+  // Neither nearest texel is usable. Preserve the historical hole-filling
+  // fallback: only this exceptional path may inspect both bilinear candidates,
+  // then min-step-wins is applied to their reconstructed support.
+  var liveInterp: InterpPixel;
+  liveInterp.kind = 0;
+  if (liveInBounds && liveMagnified) {
+    liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, uv_live, texSize, lzf);
+  }
+  var frozenInterp: InterpPixel;
+  frozenInterp.kind = 0;
+  if (frozenInBounds && frozenMagnified) {
+    frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, uv_frozen, texSize, zf);
+  }
+
+  let liveInterpHasData = liveInterp.kind == 1;
+  let frozenInterpHasData = frozenInterp.kind == 1;
+  let selectLiveInterp = liveInterpHasData
+    && (!frozenInterpHasData
+      || liveInterp.step * max(lzf, 1e-30) <= frozenInterp.step * max(zf, 1e-30));
+  if (selectLiveInterp) {
+    let liveColor = colorize_sampled(
+      tex, geometryTex, metadataTex, liveCoord, texSize,
+      live_iter, live_zx, live_zy, liveInterp,
+      uv_live, liveMagnified, uv_screen, uv_neutral, lzf, liveAnalyticTag
+    );
+    return vec4<f32>(liveColor.rgb, 1.0);
+  }
+  if (frozenInterpHasData) {
+    let frozenColor = colorize_sampled(
+      texFrozen, frozenGeometryTex, frozenMetadataTex, frozenCoord, texSize,
+      frozen_iter, frozen_zx, frozen_zy, frozenInterp,
+      uv_frozen, frozenMagnified, uv_screen, uv_neutral, zf, false
     );
     return vec4<f32>(frozenColor.rgb, 1.0);
   }

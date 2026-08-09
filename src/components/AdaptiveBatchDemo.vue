@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { ref, onMounted, nextTick, onUnmounted } from 'vue';
+import {MIN_ITERATION_BUDGET_MS, predictIterationBatchSize} from '../iterationBatchController';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 const containerRef = ref<HTMLDivElement | null>(null);
@@ -10,10 +11,9 @@ const complexity = ref(50); // 0-100: simulated scene complexity
 const running = ref(true);
 
 // Simulation state
-const TARGET_MS = 16;
-const MIN_BATCH = 10;
+const TARGET_MS = MIN_ITERATION_BUDGET_MS;
+const MIN_BATCH = 1;
 const MAX_BATCH = 10000;
-const ALPHA = 0.3;
 const HISTORY_LEN = 200;
 
 let batchSize = 5000;
@@ -35,14 +35,15 @@ function step() {
   // Simulate one frame
   const elapsed = simulateFrameTime(batchSize, complexity.value);
 
-  // Adaptive adjustment (mirrors Engine.ts:758-775)
-  if (elapsed > 0) {
-    const ratio = TARGET_MS / elapsed;
-    const ideal = batchSize * ratio;
-    batchSize = Math.round(
-      Math.min(MAX_BATCH, Math.max(MIN_BATCH, batchSize * 0.7 + ideal * ALPHA))
-    );
-  }
+  // Same one-step proportional correction as the renderer controller.
+  batchSize = predictIterationBatchSize({
+    elapsedMs: elapsed,
+    requestedBudgetMs: TARGET_MS,
+    sampledBatchSize: batchSize,
+    currentBatchSize: batchSize,
+    minBatchSize: MIN_BATCH,
+    maxBatchSize: MAX_BATCH,
+  });
 
   // Store history
   frameTimeHistory.push(elapsed);
@@ -73,7 +74,7 @@ function draw() {
   ctx.fillStyle = '#1a1a2a';
   ctx.fillRect(margin.left, margin.top, chartW, chartH);
 
-  // Target line at 16ms
+  // Requested iteration-budget line.
   const maxTime = 50;
   const targetY = margin.top + chartH * (1 - TARGET_MS / maxTime);
   ctx.strokeStyle = 'rgba(255, 60, 60, 0.5)';
@@ -88,7 +89,7 @@ function draw() {
   ctx.font = '10px monospace';
   ctx.fillStyle = '#ff3c3c';
   ctx.textAlign = 'left';
-  ctx.fillText('cible 16ms', margin.left + 4, targetY - 4);
+  ctx.fillText(`budget ${TARGET_MS}ms`, margin.left + 4, targetY - 4);
 
   // Y axis labels (frame time, left)
   ctx.fillStyle = '#50b4ff';

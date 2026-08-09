@@ -39,6 +39,10 @@ const stats = reactive({
   timestampCapable: false,
   fps: 0,
   frameIntervalMs: 0,
+  cpuFramePreparationMs: 0,
+  cpuNavigationMs: 0,
+  cpuModelSyncMs: 0,
+  cpuUpdateMs: 0,
   cpuRenderMs: 0,
   gpuSubmitMs: 0, // engine.gpuFrameTimeMs (CPU-measured submit→done wall)
   gpuSpanMs: 0,   // authoritative GPU frame time (max end − min begin)
@@ -470,6 +474,7 @@ function opsPerFrame(): number {
 interface Sample {
   t: number; fps: number; frameMs: number;
   gpuSpanMs: number; gpuSumMs: number; gpuSubmitMs: number; cpuMs: number;
+  cpuPrepareMs: number; cpuNavigationMs: number; cpuModelSyncMs: number; cpuUpdateMs: number;
   passMs: Record<string, number>;
 }
 
@@ -486,6 +491,10 @@ function readLive(e: any) {
   stats.timestampCapable = !!e.timestampCapable;
   stats.fps = e.fps ?? 0;
   stats.frameIntervalMs = e.frameIntervalMs ?? 0;
+  stats.cpuFramePreparationMs = e.cpuFramePreparationMs ?? 0;
+  stats.cpuNavigationMs = e.cpuNavigationMs ?? 0;
+  stats.cpuModelSyncMs = e.cpuModelSyncMs ?? 0;
+  stats.cpuUpdateMs = e.cpuUpdateMs ?? 0;
   stats.cpuRenderMs = e.cpuRenderMs ?? 0;
   stats.gpuSubmitMs = e.isRendering ? (e.gpuFrameTimeMs ?? 0) : 0;
   stats.gpuSpanMs = e.passGpuSpanMs ?? 0;
@@ -591,6 +600,10 @@ function pushSample() {
   h.push({
     t, fps: stats.fps, frameMs: stats.frameIntervalMs,
     gpuSpanMs: stats.gpuSpanMs, gpuSumMs: stats.gpuSumMs, gpuSubmitMs: stats.gpuSubmitMs, cpuMs: stats.cpuRenderMs,
+    cpuPrepareMs: stats.cpuFramePreparationMs,
+    cpuNavigationMs: stats.cpuNavigationMs,
+    cpuModelSyncMs: stats.cpuModelSyncMs,
+    cpuUpdateMs: stats.cpuUpdateMs,
     passMs,
   });
   const cutoff = t - HISTORY_MS;
@@ -721,12 +734,17 @@ function stamp(): string {
 
 function exportCsv() {
   const keys = stats.passes.map(p => p.key);
-  const head = ['t_ms', 'fps', 'frame_ms', 'gpu_span_ms', 'gpu_sum_ms', 'gpu_submit_ms', 'cpu_ms', ...keys.map(k => `${k}_ms`)];
+  const head = [
+    't_ms', 'fps', 'frame_ms', 'gpu_span_ms', 'gpu_sum_ms', 'gpu_submit_ms',
+    'cpu_render_ms', 'cpu_prepare_ms', 'cpu_navigation_ms', 'cpu_model_sync_ms',
+    'cpu_update_ms', ...keys.map(k => `${k}_ms`),
+  ];
   const lines = [head.join(',')];
   for (const s of history.value) {
     const row = [
       s.t.toFixed(0), s.fps, s.frameMs.toFixed(3),
       s.gpuSpanMs.toFixed(3), s.gpuSumMs.toFixed(3), s.gpuSubmitMs.toFixed(3), s.cpuMs.toFixed(3),
+      s.cpuPrepareMs.toFixed(3), s.cpuNavigationMs.toFixed(3), s.cpuModelSyncMs.toFixed(3), s.cpuUpdateMs.toFixed(3),
       ...keys.map(k => (s.passMs[k] ?? 0).toFixed(3)),
     ];
     lines.push(row.join(','));
@@ -868,6 +886,14 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     <div class="perf-stat-row">
       <span class="perf-stat-label">Last render</span>
       <span class="perf-stat-value">{{ stats.completionWallMs.toFixed(0) }}ms · gpu {{ stats.completionGpuMs.toFixed(0) }}ms</span>
+    </div>
+    <div class="perf-stat-row" title="Temps CPU avant engine.render(): navigation précise, propagation Vue puis préparation Engine.update().">
+      <span class="perf-stat-label">CPU avant GPU</span>
+      <span class="perf-stat-value">{{ fmt(stats.cpuFramePreparationMs) }}ms</span>
+    </div>
+    <div class="perf-stat-row" title="Détail du temps CPU hors passes GPU : navigateur / modèles Vue / Engine.update / encodage et soumission WebGPU.">
+      <span class="perf-stat-label">CPU détail</span>
+      <span class="perf-stat-value">nav {{ fmt(stats.cpuNavigationMs) }} · vue {{ fmt(stats.cpuModelSyncMs) }} · update {{ fmt(stats.cpuUpdateMs) }} · submit {{ fmt(stats.cpuRenderMs) }}ms</span>
     </div>
     <div v-if="stats.completionTotalApps >= 0" class="perf-stat-row">
       <span class="perf-stat-label">Total apps</span>

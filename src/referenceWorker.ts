@@ -1184,7 +1184,10 @@ ctx.onmessage = (event: MessageEvent<ReferenceWorkerMessage>) => {
                 break
             case 'updateView':
                 if (navigator && message.jobId === activeJobId) {
-                    console.log('[REF worker] updateView (reuse navigator)', message.cx.slice(0, 14), 'scale', message.scale.slice(0, 10))
+                    // No log here: updateView arrives on EVERY navigation frame,
+                    // so a console call (plus its string slicing and devtools
+                    // serialization) would sit in the per-frame path. The
+                    // reset/orbit-restart logs below are event-rate instead.
                     navigator.origin(message.cx, message.cy)
                     navigator.scale(message.scale)
                     navigator.angle(message.angle)
