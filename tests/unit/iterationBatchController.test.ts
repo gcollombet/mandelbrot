@@ -7,8 +7,10 @@ import {
     iterationWorkCounterShift,
     measureIterationWorkRate,
     predictIterationBatchSize,
+    predictZoomRefreshBatchSize,
     requestedIterationBudgetMs,
     updateIterationWorkRateEma,
+    updateZoomRefreshCostModel,
 } from '../../src/iterationBatchController'
 
 describe('predictive iteration batch controller', () => {
@@ -95,6 +97,41 @@ describe('predictive iteration batch controller', () => {
         expect(secondRate).toBe(30_000_000)
         expect(updateIterationWorkRateEma(firstRate, secondRate)).toBe(25_000_000)
         expect(updateIterationWorkRateEma(0, firstRate)).toBe(firstRate)
+    })
+
+    it('reacts immediately to slower zoom refreshes and caps recovery', () => {
+        const slower = updateZoomRefreshCostModel(
+            {workRate: 100, fixedPassesMs: 4},
+            60,
+            8,
+        )
+        expect(slower).toEqual({workRate: 60, fixedPassesMs: 8})
+
+        const faster = updateZoomRefreshCostModel(slower, 1_000, 10)
+        expect(faster).toEqual({workRate: 90, fixedPassesMs: 10})
+    })
+
+    it('seeds a zoom refresh from its matching fixed and dense costs', () => {
+        const common = {
+            frameTargetMs: 1000 / 30,
+            fallbackFixedPassesMs: 5,
+            activePixelCount: 1_000_000,
+            minBatchSize: 1,
+            maxBatchSize: 10_000,
+        }
+        expect(predictZoomRefreshBatchSize({
+            ...common,
+            model: {workRate: 20_000_000, fixedPassesMs: 5},
+            fallbackWorkRate: 10_000_000,
+        })).toBe(421)
+        expect(predictZoomRefreshBatchSize({
+            ...common,
+            fallbackWorkRate: 20_000_000,
+        })).toBe(369)
+        expect(predictZoomRefreshBatchSize({
+            ...common,
+            fallbackWorkRate: 0,
+        })).toBeNull()
     })
 
     it('keeps the GPU weighted-work accumulator in range without scaling ordinary frames', () => {

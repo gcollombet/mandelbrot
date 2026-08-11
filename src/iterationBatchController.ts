@@ -6,6 +6,10 @@ export const ITERATION_BATCH_DEADBAND_LOW = 0.9
 export const ITERATION_BATCH_DEADBAND_HIGH = 1.1
 export const ITERATION_WORK_RATE_EMA_ALPHA = 0.5
 export const ITERATION_WORK_RATE_MIN_ACTIVE_RATIO = 0.1
+export const ZOOM_REFRESH_MODEL_HEADROOM = 0.8
+export const ZOOM_REFRESH_FALLBACK_HEADROOM = 0.7
+export const ZOOM_REFRESH_RATE_MAX_GROWTH = 1.5
+export const ZOOM_REFRESH_FIXED_COST_EMA_ALPHA = 0.5
 const ITERATION_WORK_COUNTER_SAFE_MAX = 0x7fff_ffff
 const ITERATION_WORK_MAX_OVERSHOOT = 8
 
@@ -159,6 +163,94 @@ export function updateIterationWorkRateEma(
     if (!(previousRate > 0) || !Number.isFinite(previousRate)) return sampledRate
     return previousRate * (1 - ITERATION_WORK_RATE_EMA_ALPHA)
         + sampledRate * ITERATION_WORK_RATE_EMA_ALPHA
+}
+
+export type ZoomRefreshCostModel = {
+    workRate: number
+    fixedPassesMs: number
+}
+
+/**
+ * Track the first dense frame of matching zoom-refresh cycles. A slower sample
+ * replaces the rate immediately so the next texture cannot repeat the hitch;
+ * recovery is equally direct but capped to reject implausible timestamp spikes.
+ */
+export function updateZoomRefreshCostModel(
+    previous: ZoomRefreshCostModel | undefined,
+    sampledWorkRate: number,
+    sampledFixedPassesMs: number,
+): ZoomRefreshCostModel | undefined {
+    if (!(sampledWorkRate > 0) || !Number.isFinite(sampledWorkRate)) {
+        return previous
+    }
+
+    const validFixedPassesMs = Number.isFinite(sampledFixedPassesMs)
+        ? Math.max(0, sampledFixedPassesMs)
+        : previous?.fixedPassesMs ?? 0
+    if (!previous || !(previous.workRate > 0)) {
+        return {
+            workRate: sampledWorkRate,
+            fixedPassesMs: validFixedPassesMs,
+        }
+    }
+
+    const workRate = sampledWorkRate < previous.workRate
+        ? sampledWorkRate
+        : Math.min(
+            sampledWorkRate,
+            previous.workRate * ZOOM_REFRESH_RATE_MAX_GROWTH,
+        )
+    return {
+        workRate,
+        // A larger transition overhead must reserve room immediately. Recovery
+        // remains smoothed so one cheap frame cannot recreate the next hitch.
+        fixedPassesMs: validFixedPassesMs > previous.fixedPassesMs
+            ? validFixedPassesMs
+            : previous.fixedPassesMs
+                * (1 - ZOOM_REFRESH_FIXED_COST_EMA_ALPHA)
+                + validFixedPassesMs * ZOOM_REFRESH_FIXED_COST_EMA_ALPHA,
+    }
+}
+
+export type PredictZoomRefreshBatchInput = {
+    model?: ZoomRefreshCostModel
+    fallbackWorkRate: number
+    frameTargetMs: number
+    fallbackFixedPassesMs: number
+    activePixelCount: number
+    minBatchSize: number
+    maxBatchSize: number
+}
+
+/** Seed a new live zoom texture from the previous matching dense refresh. */
+export function predictZoomRefreshBatchSize(
+    input: PredictZoomRefreshBatchInput,
+): number | null {
+    const modelReady = !!input.model
+        && input.model.workRate > 0
+        && Number.isFinite(input.model.workRate)
+    const workRate = modelReady
+        ? input.model!.workRate
+        : input.fallbackWorkRate
+    if (!(workRate > 0) || !(input.activePixelCount > 0)) return null
+
+    const fixedPassesMs = modelReady
+        ? input.model!.fixedPassesMs
+        : input.fallbackFixedPassesMs
+    const requestedBudgetMs = requestedIterationBudgetMs(
+        input.frameTargetMs,
+        fixedPassesMs,
+    )
+    const firstFrameHeadroom = modelReady
+        ? ZOOM_REFRESH_MODEL_HEADROOM
+        : ZOOM_REFRESH_FALLBACK_HEADROOM
+    return batchSizeForWorkRate(
+        workRate * firstFrameHeadroom,
+        requestedBudgetMs,
+        input.activePixelCount,
+        input.minBatchSize,
+        input.maxBatchSize,
+    )
 }
 
 export function batchSizeForWorkRate(

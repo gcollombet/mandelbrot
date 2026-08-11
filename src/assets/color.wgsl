@@ -91,6 +91,10 @@ struct Uniforms {
 @group(0) @binding(12) var metadataTex: texture_2d<u32>;
 @group(0) @binding(13) var frozenMetadataTex: texture_2d<u32>;
 @group(0) @binding(14) var rawTex: texture_2d_array<f32>; // analytic-AA payload only
+// Analytic gradients of the two orbit metrics, per source texel. A 1x1 dummy is
+// bound when no stop asks for stripe/coherence relief.
+@group(0) @binding(15) var orbitGradientTex: texture_2d<f32>;
+@group(0) @binding(16) var frozenOrbitGradientTex: texture_2d<f32>;
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -141,9 +145,23 @@ struct EffectParams {
   wIridescence: f32,
   wStripeAverage: f32,
   wRotationMean: f32,
-  wStripeRelief: f32,
-  wDirectionCoherenceRelief: f32,
+  wStripeRelief: f32,            // decoded slope [0, 1]
+  wDirectionCoherenceRelief: f32, // decoded slope [0, 100]
 };
+
+// ── Relief amplitude controls ───────────────────────────────────────
+// What the eye reads is the tilt of the normal, theta = atan(w * |grad H|),
+// not the amplitude w: past a slope of ~1 the surface barely keeps turning.
+// The stored control is therefore theta normalized to [0, 1], which is the
+// quantity the palette interpolates between two stops; w is recovered here.
+// u = 0 stays exactly 0 (relief off) and u = 1 keeps each field's historical
+// maximum, so no preset changes range.
+const STRIPE_RELIEF_TILT_MAX: f32 = 0.7853981633974483;    // atan(1)
+const COHERENCE_RELIEF_TILT_MAX: f32 = 1.5607966601082315; // atan(100)
+
+fn decode_relief_tilt(control: f32, tiltMax: f32) -> f32 {
+  return tan(clamp(control, 0.0, 1.0) * tiltMax);
+}
 
 fn palette_row_y(row: f32) -> f32 {
   return (row + 0.5) / 7.0;
@@ -191,12 +209,13 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   // inside the shading branch, so they are sampled lazily there via
   // sampleShadingMaterial() rather than for every pixel.
 
-  // Row 5: stripe color blend, direction coherence color blend, stripe relief, direction coherence relief
+  // Row 5: stripe color blend, direction coherence color blend, then the two
+  // relief tilt controls (decoded to slopes on read)
   let row5 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(5.0)), 0.0);
   e.wStripeAverage = clamp(row5.r, 0.0, 1.0);
   e.wRotationMean = clamp(row5.g, 0.0, 1.0);
-  e.wStripeRelief = clamp(row5.b, 0.0, 1.0);
-  e.wDirectionCoherenceRelief = clamp(row5.a, 0.0, 100.0);
+  e.wStripeRelief = decode_relief_tilt(row5.b, STRIPE_RELIEF_TILT_MAX);
+  e.wDirectionCoherenceRelief = decode_relief_tilt(row5.a, COHERENCE_RELIEF_TILT_MAX);
 
   return e;
 }
@@ -504,20 +523,6 @@ fn local_height_shadow(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>,
   return mix(1.0, 1.0 - blocker * 0.78, amount);
 }
 
-struct PixelState {
-  iter: f32,
-  zx: f32,
-  zy: f32,
-};
-
-fn load_pixel_state(sourceTex: texture_2d_array<f32>, coord: vec2<i32>) -> PixelState {
-  var state: PixelState;
-  state.iter = textureLoad(sourceTex, coord, 0, 0).r;
-  state.zx = textureLoad(sourceTex, coord, 1, 0).r;
-  state.zy = textureLoad(sourceTex, coord, 2, 0).r;
-  return state;
-}
-
 fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32) -> f32 {
   if (escape_nu(iterVal, zx, zy) < 0.0) {
     return -1e6;
@@ -541,7 +546,7 @@ fn smooth_escape_fraction(z_sq: f32) -> f32 {
   return 1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0);
 }
 
-fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, sourceCoord: vec2<i32>, sourceTexSize: vec2<i32>, iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, dx: f32, dy: f32, uv_screen: vec2<f32>, uv_tex: vec2<f32>, magnified: bool) -> vec3<f32> {
+fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, cachedStripeGradient: vec2<f32>, cachedCoherenceGradient: vec2<f32>, dx: f32, dy: f32, uv_screen: vec2<f32>) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
@@ -642,16 +647,18 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
     let mappingYId = i32(parameters.textureMappingYVariable + 0.5);
     let needsDepthGradient = bumpStrength > 0.001 &&
       (mappingXId == 0 || mappingXId == 1 || mappingYId == 0 || mappingYId == 1);
-    let needsStripeGradient = stripeReliefStrength > 0.001;
-    let needsDirectionCoherenceGradient = directionCoherenceStrength > 0.001;
     let needsFractalGradient = effectiveAnalyticRelief > 0.001;
     var distanceHeight = 0.0;
     // Cached geometry stores the analytic derivative per source texel and the
     // branch-local analytic Laplacian. Historical relief gains are applied
     // here, after source-to-display normalization, without neighbor reads.
     var grad = cachedGradient * 24.0;
-    var stripeGrad = vec2<f32>(0.0);
-    var directionCoherenceGrad = vec2<f32>(0.0);
+    // Both orbit slopes are cached per source texel and already normalized to
+    // display scale, exactly like cachedGradient. The historical display gains
+    // are what the neighbour differences used to carry (x8 central / x16
+    // forward, and dp = dS/2 for the stripe phase).
+    let stripeGrad = cachedStripeGradient * 8.0;
+    let directionCoherenceGrad = cachedCoherenceGradient * 16.0;
     var depthGrad = cachedGradient * 16.0;
     var heightCurvature = cachedCurvature * 6.0;
     var slope = 0.0;
@@ -661,25 +668,6 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
     if (needsFractalGradient) {
       grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
       slope = length(grad);
-    }
-    // Stripe/coherence relief remains effect-dependent and may read packed
-    // metadata neighbours. Base distance geometry never does.
-    if (needsStripeGradient || needsDirectionCoherenceGradient) {
-      if (magnified) {
-        orbit_metric_gradients_bilinear(
-          sourceTex, sourceMetadata, uv_tex, sourceTexSize,
-          stripeAverage, directionCoherence,
-          needsStripeGradient, needsDirectionCoherenceGradient,
-          &stripeGrad, &directionCoherenceGrad
-        );
-      } else {
-        orbit_metric_gradients_at_coord(
-          sourceTex, sourceMetadata, sourceCoord, sourceTexSize,
-          stripeAverage, directionCoherence,
-          needsStripeGradient, needsDirectionCoherenceGradient,
-          &stripeGrad, &directionCoherenceGrad
-        );
-      }
     }
     var textureGradient = vec2<f32>(0.0);
     var textureMappingDx = vec2<f32>(1.0, 0.0);
@@ -713,9 +701,11 @@ fn palette(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2d<u32>, so
         bumpStrength
       );
     }
-    // One scalar surface drives one normal. The stripe phase is circular, so use
-    // Hstripe = 0.5 - 0.5*cos(2πp); its derivative is π*sin(2πp), continuous at
-    // the phase wrap. Coherence and texture luminance are already scalar fields.
+    // One scalar surface drives one normal. The stripe height keeps its
+    // Hstripe = 0.5 - 0.5*cos(2πp) profile, derivative π*sin(2πp): the cached
+    // gradient no longer has a wrap to survive, but the profile is what gives
+    // the relief its shape, so changing it would change every existing preset.
+    // Coherence and texture luminance are already scalar fields.
     let stripeProfileDerivative = 3.141592653589793 * sin(TWO_PI * stripeAverage);
     let heightGradient = grad * (0.34 * effectiveAnalyticRelief);
     let stripeHeightGradient = stripeGrad * stripeProfileDerivative * (0.75 * clamp(stripeReliefStrength, 0.0, 1.0));
@@ -913,10 +903,6 @@ fn decode_stripe_phase(metadata: u32) -> f32 {
   return f32((metadata >> 4u) & 0x3fffu) / QUANTIZED_FIELD_MAX;
 }
 
-fn stripe_phase_delta(a: f32, b: f32) -> f32 {
-  return fract(a - b + 0.5) - 0.5;
-}
-
 fn decode_direction_coherence(metadata: u32) -> f32 {
   return f32((metadata >> 18u) & 0x3fffu) / QUANTIZED_FIELD_MAX;
 }
@@ -928,6 +914,8 @@ struct PixelExtras {
   curvature: f32,
   stripePhase: f32,
   directionCoherence: f32,
+  stripeGradient: vec2<f32>,
+  coherenceGradient: vec2<f32>,
 };
 
 struct PixelSample {
@@ -951,7 +939,14 @@ fn load_pixel_sample(sourceTex: texture_2d_array<f32>, sourceMetadata: texture_2
   return pixelSample;
 }
 
-fn load_pixel_extras(sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, coord: vec2<i32>, zoomFactor: f32) -> PixelExtras {
+fn normalize_orbit_gradient(stored: vec4<f32>, zoomFactor: f32) -> vec4<f32> {
+  // Per-source-texel slopes, so they take the same source-to-display ratio as
+  // the cached distance gradient. This is what the neighbour differences they
+  // replace never did: their amplitude stayed frozen at source resolution.
+  return clamp(stored / max(zoomFactor, 1e-30), vec4<f32>(-64.0), vec4<f32>(64.0));
+}
+
+fn load_pixel_extras(sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, sourceOrbitGradient: texture_2d<f32>, coord: vec2<i32>, zoomFactor: f32) -> PixelExtras {
   var extras: PixelExtras;
   let geometry = normalize_geometry(textureLoad(sourceGeometry, coord, 0), zoomFactor);
   extras.height = clamp(geometry.w, -64.0, 64.0);
@@ -961,141 +956,10 @@ fn load_pixel_extras(sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d
   let metadata = textureLoad(sourceMetadata, coord, 0).r;
   extras.stripePhase = decode_stripe_phase(metadata);
   extras.directionCoherence = decode_direction_coherence(metadata);
+  let orbitGradient = normalize_orbit_gradient(textureLoad(sourceOrbitGradient, coord, 0), zoomFactor);
+  extras.stripeGradient = orbitGradient.xy;
+  extras.coherenceGradient = orbitGradient.zw;
   return extras;
-}
-
-// ── Bilinear (magnified) variants of the gradient functions ─────────
-// When the source texture is magnified on screen, the per-texel finite
-// differences above produce normals that are constant inside each texel
-// (faceted relief).  These variants compute the analytic gradient of the
-// bilinearly-interpolated field instead: continuous inside each cell.
-// The 1-texel-span cell differences are scaled ×2 to match the magnitude
-// of the 2-texel-span central differences used by the nearest variants.
-
-struct BilinearCell {
-  base: vec2<i32>,
-  f: vec2<f32>,
-};
-
-fn bilinear_cell(uv: vec2<f32>, texSize: vec2<i32>) -> BilinearCell {
-  let texSizeF = vec2<f32>(f32(texSize.x), f32(texSize.y));
-  let p = vec2<f32>(uv.x * texSizeF.x, (1.0 - uv.y) * texSizeF.y) - vec2<f32>(0.5);
-  let baseF = floor(p);
-  var cell: BilinearCell;
-  cell.base = vec2<i32>(i32(baseF.x), i32(baseF.y));
-  cell.f = p - baseF;
-  return cell;
-}
-
-// ── Optional orbit-metric neighbour fetch ───────────────────────────
-// Distance geometry is already cached and never enters this path. Only the
-// effect-dependent stripe/coherence relief samples neighbouring metadata.
-struct NeighborOrbitFields {
-  valid: bool,       // in-bounds AND escaped → usable; otherwise fall back to center
-  stripe: f32,
-  coherence: f32,
-};
-
-fn sample_neighbor_orbit_fields(
-  sourceTex: texture_2d_array<f32>,
-  sourceMetadata: texture_2d<u32>,
-  coord: vec2<i32>,
-  texSize: vec2<i32>,
-  needStripe: bool,
-  needCoh: bool
-) -> NeighborOrbitFields {
-  var nf: NeighborOrbitFields;
-  nf.valid = false;
-  nf.stripe = 0.0;
-  nf.coherence = 0.0;
-  if (coord.x < 0 || coord.x >= texSize.x || coord.y < 0 || coord.y >= texSize.y) {
-    return nf;
-  }
-  let state = load_pixel_state(sourceTex, coord);
-  let nu = escape_nu(state.iter, state.zx, state.zy);
-  if (nu < 0.0) {
-    return nf;
-  }
-  nf.valid = true;
-  if (needStripe) {
-    nf.stripe = decode_stripe_phase(textureLoad(sourceMetadata, coord, 0).r);
-  }
-  if (needCoh) {
-    nf.coherence = decode_direction_coherence(textureLoad(sourceMetadata, coord, 0).r);
-  }
-  return nf;
-}
-
-// Central-difference gradients of the packed orbit metrics. Outputs are left
-// untouched when their corresponding effect is disabled.
-fn orbit_metric_gradients_at_coord(
-  sourceTex: texture_2d_array<f32>,
-  sourceMetadata: texture_2d<u32>,
-  coord: vec2<i32>,
-  texSize: vec2<i32>,
-  centerStripe: f32,
-  centerCoherence: f32,
-  needStripe: bool,
-  needCoh: bool,
-  stripeGrad: ptr<function, vec2<f32>>,
-  cohGrad: ptr<function, vec2<f32>>
-) {
-  let nR = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord + vec2<i32>(1, 0), texSize, needStripe, needCoh);
-  let nL = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord - vec2<i32>(1, 0), texSize, needStripe, needCoh);
-  let nU = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord + vec2<i32>(0, 1), texSize, needStripe, needCoh);
-  let nD = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, coord - vec2<i32>(0, 1), texSize, needStripe, needCoh);
-  if (needStripe) {
-    let r = select(centerStripe, nR.stripe, nR.valid);
-    let l = select(centerStripe, nL.stripe, nL.valid);
-    let u = select(centerStripe, nU.stripe, nU.valid);
-    let d = select(centerStripe, nD.stripe, nD.valid);
-    *stripeGrad = vec2<f32>(stripe_phase_delta(r, l), stripe_phase_delta(u, d)) * 8.0;
-  }
-  if (needCoh) {
-    let r = select(centerCoherence, nR.coherence, nR.valid);
-    let l = select(centerCoherence, nL.coherence, nL.valid);
-    let u = select(centerCoherence, nU.coherence, nU.valid);
-    let d = select(centerCoherence, nD.coherence, nD.valid);
-    *cohGrad = vec2<f32>(r - l, u - d) * 8.0;
-  }
-}
-
-// Bilinear (magnified) counterpart for the packed orbit metrics.
-fn orbit_metric_gradients_bilinear(
-  sourceTex: texture_2d_array<f32>,
-  sourceMetadata: texture_2d<u32>,
-  uv: vec2<f32>,
-  texSize: vec2<i32>,
-  centerStripe: f32,
-  centerCoherence: f32,
-  needStripe: bool,
-  needCoh: bool,
-  stripeGrad: ptr<function, vec2<f32>>,
-  cohGrad: ptr<function, vec2<f32>>
-) {
-  let cell = bilinear_cell(uv, texSize);
-  let n00 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base, texSize, needStripe, needCoh);
-  let n10 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(1, 0), texSize, needStripe, needCoh);
-  let n01 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(0, 1), texSize, needStripe, needCoh);
-  let n11 = sample_neighbor_orbit_fields(sourceTex, sourceMetadata, cell.base + vec2<i32>(1, 1), texSize, needStripe, needCoh);
-  if (needStripe) {
-    let s00 = select(centerStripe, n00.stripe, n00.valid);
-    let s10 = select(centerStripe, n10.stripe, n10.valid);
-    let s01 = select(centerStripe, n01.stripe, n01.valid);
-    let s11 = select(centerStripe, n11.stripe, n11.valid);
-    let gx = mix(stripe_phase_delta(s10, s00), stripe_phase_delta(s11, s01), cell.f.y);
-    let gy = mix(stripe_phase_delta(s01, s00), stripe_phase_delta(s11, s10), cell.f.x);
-    *stripeGrad = vec2<f32>(gx, gy) * 16.0;
-  }
-  if (needCoh) {
-    let c00 = select(centerCoherence, n00.coherence, n00.valid);
-    let c10 = select(centerCoherence, n10.coherence, n10.valid);
-    let c01 = select(centerCoherence, n01.coherence, n01.valid);
-    let c11 = select(centerCoherence, n11.coherence, n11.valid);
-    let gx = mix(c10 - c00, c11 - c01, cell.f.y);
-    let gy = mix(c01 - c00, c11 - c10, cell.f.x);
-    *cohGrad = vec2<f32>(gx, gy) * 16.0;
-  }
 }
 
 fn debug_mirror_phase(t: f32) -> f32 {
@@ -1124,17 +988,12 @@ fn debug_wheel_sector(uv: vec2<f32>) -> i32 {
 
 // ── Colorize a single pixel from its raw layer values ──────────────
 fn colorize_pixel(
-  sourceTex: texture_2d_array<f32>,
-  sourceGeometry: texture_2d<f32>,
-  sourceMetadata: texture_2d<u32>,
   sourceCoord: vec2<i32>,
   sourceTexSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
   extras: PixelExtras,
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
-  uv_tex: vec2<f32>,
-  magnified: bool,
   analyticTag: bool
 ) -> vec4<f32> {
   // Sentinel: iter_val < 0 => uncomputed pixel.
@@ -1320,7 +1179,7 @@ fn colorize_pixel(
   let v_smooth = nu_smooth;
   let stripePhase = extras.stripePhase;
   let directionCoherence = extras.directionCoherence;
-  var color = palette(sourceTex, sourceMetadata, sourceCoord, sourceTexSize, iter_v, v, v_smooth, z, distanceHeightStored, extras.gradient, extras.curvature, geometryAngle, stripePhase, directionCoherence, uv_neutral.x, uv_neutral.y, uv_screen, uv_tex, magnified);
+  var color = palette(iter_v, v, v_smooth, z, distanceHeightStored, extras.gradient, extras.curvature, geometryAngle, stripePhase, directionCoherence, extras.stripeGradient, extras.coherenceGradient, uv_neutral.x, uv_neutral.y, uv_screen);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -1352,7 +1211,7 @@ struct InterpPixel {
   extras: PixelExtras,
 };
 
-fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, uv: vec2<f32>, texSize: vec2<i32>, zoomFactor: f32) -> InterpPixel {
+fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, sourceOrbitGradient: texture_2d<f32>, uv: vec2<f32>, texSize: vec2<i32>, zoomFactor: f32) -> InterpPixel {
   var out: InterpPixel;
   out.kind = 0;
 
@@ -1380,6 +1239,7 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
   var baseIter = -1.0;
   var nuSum = 0.0;
   var geometrySum = vec4<f32>(0.0);
+  var orbitGradientSum = vec4<f32>(0.0);
   var zDirSum = vec2<f32>(0.0);
   var stripeDirSum = vec2<f32>(0.0);
   var coherenceSum = 0.0;
@@ -1415,6 +1275,7 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
     wEscaped = wEscaped + w;
     nuSum = nuSum + w * ((citer - baseIter) + clamp(smooth_escape_fraction(z_sq), 0.0, 1.0));
     geometrySum = geometrySum + w * normalize_geometry(textureLoad(sourceGeometry, ccoord, 0), zoomFactor);
+    orbitGradientSum = orbitGradientSum + w * normalize_orbit_gradient(textureLoad(sourceOrbitGradient, ccoord, 0), zoomFactor);
     let zLen = max(sqrt(z_sq), 1e-12);
     zDirSum = zDirSum + w * vec2<f32>(zx, zy) / zLen;
     let stripePhase = decode_stripe_phase(metadata);
@@ -1465,21 +1326,22 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
     length(stripeDirSum) > 1e-5
   );
   out.extras.directionCoherence = clamp(coherenceSum * invW, 0.0, 1.0);
+  let orbitGradient = orbitGradientSum * invW;
+  out.extras.stripeGradient = orbitGradient.xy;
+  out.extras.coherenceGradient = orbitGradient.zw;
   return out;
 }
 
 // Colorize from a source texture, replacing the nearest sample with a
 // pre-computed bilinear interpolation when one is available (magnified case).
 fn colorize_sampled(
-  sourceTex: texture_2d_array<f32>,
   sourceGeometry: texture_2d<f32>,
   sourceMetadata: texture_2d<u32>,
+  sourceOrbitGradient: texture_2d<f32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
   interp: InterpPixel,
-  uv_tex: vec2<f32>,
-  magnified: bool,
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
   zoomFactor: f32,
@@ -1488,7 +1350,7 @@ fn colorize_sampled(
   var it = iter_val;
   var zx = zx_val;
   var zy = zy_val;
-  var extras = load_pixel_extras(sourceGeometry, sourceMetadata, coord, zoomFactor);
+  var extras = load_pixel_extras(sourceGeometry, sourceMetadata, sourceOrbitGradient, coord, zoomFactor);
   var analytic = analyticTag;
   if (interp.kind == 1) {
     it = interp.iter;
@@ -1499,9 +1361,8 @@ fn colorize_sampled(
     analytic = false;
   }
   return colorize_pixel(
-    sourceTex, sourceGeometry, sourceMetadata, coord, texSize, it, zx, zy, extras,
-    uv_screen, uv_neutral,
-    uv_tex, magnified, analytic
+    coord, texSize, it, zx, zy, extras,
+    uv_screen, uv_neutral, analytic
   );
 }
 
@@ -1665,20 +1526,18 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     var liveInterp: InterpPixel;
     liveInterp.kind = 0;
     if (liveMagnified) {
-      liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, uv_live, texSize, lzf);
+      liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, orbitGradientTex, uv_live, texSize, lzf);
     }
     let liveColor = colorize_sampled(
-      tex,
       geometryTex,
       metadataTex,
+      orbitGradientTex,
       liveCoord,
       texSize,
       live_iter,
       live_zx,
       live_zy,
       liveInterp,
-      uv_live,
-      liveMagnified,
       uv_screen,
       uv_neutral,
       lzf,
@@ -1699,20 +1558,18 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     var frozenInterp: InterpPixel;
     frozenInterp.kind = 0;
     if (frozenMagnified) {
-      frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, uv_frozen, texSize, zf);
+      frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, frozenOrbitGradientTex, uv_frozen, texSize, zf);
     }
     let frozenColor = colorize_sampled(
-      texFrozen,
       frozenGeometryTex,
       frozenMetadataTex,
+      frozenOrbitGradientTex,
       frozenCoord,
       texSize,
       frozen_iter,
       frozen_zx,
       frozen_zy,
       frozenInterp,
-      uv_frozen,
-      frozenMagnified,
       uv_screen,
       uv_neutral,
       zf,
@@ -1727,12 +1584,12 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   var liveInterp: InterpPixel;
   liveInterp.kind = 0;
   if (liveInBounds && liveMagnified) {
-    liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, uv_live, texSize, lzf);
+    liveInterp = sample_escaped_bilinear(tex, geometryTex, metadataTex, orbitGradientTex, uv_live, texSize, lzf);
   }
   var frozenInterp: InterpPixel;
   frozenInterp.kind = 0;
   if (frozenInBounds && frozenMagnified) {
-    frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, uv_frozen, texSize, zf);
+    frozenInterp = sample_escaped_bilinear(texFrozen, frozenGeometryTex, frozenMetadataTex, frozenOrbitGradientTex, uv_frozen, texSize, zf);
   }
 
   let liveInterpHasData = liveInterp.kind == 1;
@@ -1742,17 +1599,17 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       || liveInterp.step * max(lzf, 1e-30) <= frozenInterp.step * max(zf, 1e-30));
   if (selectLiveInterp) {
     let liveColor = colorize_sampled(
-      tex, geometryTex, metadataTex, liveCoord, texSize,
+      geometryTex, metadataTex, orbitGradientTex, liveCoord, texSize,
       live_iter, live_zx, live_zy, liveInterp,
-      uv_live, liveMagnified, uv_screen, uv_neutral, lzf, liveAnalyticTag
+      uv_screen, uv_neutral, lzf, liveAnalyticTag
     );
     return vec4<f32>(liveColor.rgb, 1.0);
   }
   if (frozenInterpHasData) {
     let frozenColor = colorize_sampled(
-      texFrozen, frozenGeometryTex, frozenMetadataTex, frozenCoord, texSize,
+      frozenGeometryTex, frozenMetadataTex, frozenOrbitGradientTex, frozenCoord, texSize,
       frozen_iter, frozen_zx, frozen_zy, frozenInterp,
-      uv_frozen, frozenMagnified, uv_screen, uv_neutral, zf, false
+      uv_screen, uv_neutral, zf, false
     );
     return vec4<f32>(frozenColor.rgb, 1.0);
   }

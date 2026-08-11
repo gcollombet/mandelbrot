@@ -107,6 +107,8 @@ let syntheticGeometryTexture: GPUTexture | null = null;
 let syntheticGeometryView: GPUTextureView | null = null;
 let syntheticMetadataTexture: GPUTexture | null = null;
 let syntheticMetadataView: GPUTextureView | null = null;
+let syntheticOrbitGradientTexture: GPUTexture | null = null;
+let syntheticOrbitGradientView: GPUTextureView | null = null;
 let ctx: GPUCanvasContext | null = null;
 let format: GPUTextureFormat = 'bgra8unorm';
 // sRGB view format so the GPU applies linear→sRGB on write — matching the real
@@ -168,7 +170,8 @@ function create1x1R32F(dev: GPUDevice, value = 0): GPUTexture {
 
 /**
  * Build the same typed display set as the renderer: three r32float value
- * layers, one rgba16float geometry field and one packed r32uint metadata field.
+ * layers, one rgba16float geometry field, one packed r32uint metadata field
+ * and one rgba16float orbit-gradient field.
  *
  * Width = canvas pixel width, height = canvas pixel height (64 CSS px * dpr).
  * Each column of ~(width/ITER_COUNT) pixels represents one iteration (1..100).
@@ -177,11 +180,14 @@ function create1x1R32F(dev: GPUDevice, value = 0): GPUTexture {
  * Value layers: iter, z.x, z.y.
  * Geometry: d(height)/dx, d(height)/dy, Laplacian(height), height.
  * Metadata: support exponent, stripe phase, direction coherence.
+ * Orbit gradient: grad(stripe EMA), grad(coherence) — differentiated in closed
+ * form from the same synthetic formulas, as the renderer does from the orbit.
  */
 function buildSyntheticData(w: number, h: number, mu: number): {
   values: Float32Array[];
   geometry: Float32Array;
   metadata: Uint32Array;
+  orbitGradient: Float32Array;
 } {
   const values = Array.from(
     { length: DISPLAY_VALUE_LAYERS },
@@ -190,6 +196,10 @@ function buildSyntheticData(w: number, h: number, mu: number): {
   const height = new Float32Array(w * h);
   const geometry = new Float32Array(w * h * 4);
   const metadata = new Uint32Array(w * h);
+  const orbitGradient = new Float32Array(w * h * 4);
+  // d(iterFloat)/dx and d(vFrac)/dy of the synthetic parameterization below.
+  const dIterDx = (ITER_COUNT - 1) / Math.max(w - 1, 1);
+  const dVFracDy = 1 / Math.max(h - 1, 1);
 
   const escapeRadius = Math.sqrt(mu) * 1.1; // just outside escape
 
@@ -222,8 +232,21 @@ function buildSyntheticData(w: number, h: number, mu: number): {
       // dominant cylinder profile exercises the cached relief geometry.
       height[idx] = distanceHeight + 0.4 * Math.sin(iterFloat * 0.3);
       const stripePhase = 0.5 + 0.5 * Math.sin(iterFloat * 0.2);
-      const coherence = Math.abs(Math.sin(iterFloat * 0.065 + vFrac * Math.PI));
+      const coherencePhase = iterFloat * 0.065 + vFrac * Math.PI;
+      const coherenceRaw = Math.sin(coherencePhase);
+      const coherence = Math.abs(coherenceRaw);
       metadata[idx] = packDisplayMetadata(1, stripePhase, coherence);
+      // stripePhase = 0.5 + 0.5*S with S = sin(0.2*iterFloat) — the shader
+      // wants grad S, not grad p. y grows down here, and the geometry block
+      // below stores (up - down), so both keep the same upward-y sign.
+      const stripeGradX = 0.2 * Math.cos(iterFloat * 0.2) * dIterDx;
+      const coherenceSign = coherenceRaw >= 0 ? 1 : -1;
+      const coherenceDerivative = coherenceSign * Math.cos(coherencePhase);
+      const orbitOffset = idx * 4;
+      orbitGradient[orbitOffset] = stripeGradX;
+      orbitGradient[orbitOffset + 1] = 0;
+      orbitGradient[orbitOffset + 2] = coherenceDerivative * 0.065 * dIterDx;
+      orbitGradient[orbitOffset + 3] = -coherenceDerivative * Math.PI * dVFracDy;
     }
   }
 
@@ -247,7 +270,7 @@ function buildSyntheticData(w: number, h: number, mu: number): {
     }
   }
 
-  return { values, geometry, metadata };
+  return { values, geometry, metadata, orbitGradient };
 }
 
 /** Upload palette to GPU. */
@@ -288,7 +311,7 @@ function render() {
 /** Rebuild the bind group from current GPU resources. */
 function rebuildBindGroup() {
   if (!device || !bindGroupLayout || !uniformBuffer || !syntheticValuesView
-      || !syntheticGeometryView || !syntheticMetadataView
+      || !syntheticGeometryView || !syntheticMetadataView || !syntheticOrbitGradientView
       || !tileTextureGpu || !skyboxTextureGpu || !webcamTextureGpu
       || !paletteTextureView || !paletteSampler || !skyboxSampler
       || !aaTargetTextureGpu) return;
@@ -312,6 +335,8 @@ function rebuildBindGroup() {
       // Analytic AA is disabled in the preview; a valid array binding is still
       // required by the shared shader and the value texture is sufficient.
       { binding: 14, resource: syntheticValuesView },
+      { binding: 15, resource: syntheticOrbitGradientView },
+      { binding: 16, resource: syntheticOrbitGradientView },
     ],
     label: 'PalettePreview BindGroup',
   });
@@ -477,6 +502,8 @@ async function init() {
       { binding: 12, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint' } },
       { binding: 13, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint' } },
       { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+      { binding: 15, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
     ],
     label: 'PalettePreview BindGroupLayout',
   });
@@ -526,6 +553,7 @@ function applySize() {
   syntheticValuesTexture?.destroy();
   syntheticGeometryTexture?.destroy();
   syntheticMetadataTexture?.destroy();
+  syntheticOrbitGradientTexture?.destroy();
   syntheticValuesTexture = device.createTexture({
     size: { width: w, height: h, depthOrArrayLayers: DISPLAY_VALUE_LAYERS },
     format: 'r32float',
@@ -573,6 +601,19 @@ function applySize() {
     { width: w, height: h },
   );
   syntheticMetadataView = syntheticMetadataTexture.createView();
+  syntheticOrbitGradientTexture = device.createTexture({
+    size: { width: w, height: h },
+    format: 'rgba16float',
+    usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
+    label: 'PalettePreview SyntheticOrbitGradient',
+  });
+  device.queue.writeTexture(
+    { texture: syntheticOrbitGradientTexture },
+    float32ArrayToFloat16(syntheticData.orbitGradient).buffer as ArrayBuffer,
+    { bytesPerRow: w * 8 },
+    { width: w, height: h },
+  );
+  syntheticOrbitGradientView = syntheticOrbitGradientTexture.createView();
 
   // Update aspect (uniform index 4) and rebuild.
   device.queue.writeBuffer(uniformBuffer, 4 * 4, new Float32Array([w / h]).buffer as ArrayBuffer);

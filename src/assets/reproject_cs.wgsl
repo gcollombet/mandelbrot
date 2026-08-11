@@ -15,6 +15,9 @@
 //   6 : ref_i + fractional stripe phase
 //   7 : packed average orbit direction
 //   8+: continuation extras (Cartesian derS) — copied like any other layer
+//  13..16: orbit-metric gradients, when allocated. They are terminal values
+//          for escaped texels, so copyLayerCount must cover them whenever
+//          orbit metrics are tracked (see Engine.rawCopyLayerCount).
 //
 // There is a single unfinished representation: -1 asks for an exact texel.
 // Budget-exhausted pixels (iter > 0, |z|² < mu) pass through unchanged;

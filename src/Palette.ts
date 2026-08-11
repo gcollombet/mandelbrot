@@ -146,7 +146,7 @@ export class Palette {
    *   Row 2: webcam, smoothness, shadingLevel, specularPower
    *   Row 3: dielectric F0, metallic, roughness, anisotropy
    *   Row 4: iridescence R, G, B, strength
-   *   Row 5: stripeAverage, rotationMean, stripeRelief, directionCoherenceRelief
+   *   Row 5: stripeAverage, rotationMean, stripeReliefTilt, directionCoherenceReliefTilt
    *   Row 6: reliefGain, metalReflectance, metalEnvironmentTint, reserved
    */
   generateTexture(): { data: Float32Array; width: number; height: number } {

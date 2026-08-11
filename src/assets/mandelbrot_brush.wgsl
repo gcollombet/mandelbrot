@@ -20,6 +20,15 @@
 //   6 : escaped: stripe/coherence bitpack,  in-progress: ref_i + stripe
 //   7 : escaped: analytic Laplacian,        in-progress: orbit dir / dz exponent
 //   8 : in-progress: derS (RAW log scale); dead for finished pixels
+//  13/14 : grad(stripe EMA).x/.y            — allocated only while orbit
+//  15/16 : grad(direction coherence).x/.y     metrics are tracked
+//
+// Layers 13..16 hold the same thing escaped and in-progress: a running
+// gradient accumulator whose value at escape IS the terminal value. They exist
+// so the color pass never rebuilds a stripe/coherence slope from neighbouring
+// texels — a finite difference survives none of the three interpolation stages
+// (resolve dyadic support, magnified reprojection, frozen merge), whereas a
+// per-texel gradient interpolates exactly like the cached analytic geometry.
 //
 // The derivative continuation state is carried RAW (register copies, zero
 // transcendentals at pass boundaries — all-compute-der-cartesian). Polar
@@ -1368,6 +1377,10 @@ struct TexelOut {
   aa10: vec4<f32>,
   aa11: vec4<f32>,
   aa12: vec4<f32>,
+  // Layers 13..16 — written only while orbit metrics are tracked, which is
+  // also the only time the engine allocates them.
+  orbitGradStripe: vec2<f32>,
+  orbitGradCoherence: vec2<f32>,
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -1390,6 +1403,12 @@ fn storeTexel(coord: vec2<i32>, out: TexelOut) {
   textureStore(raw, coord, 10, out.aa10);
   textureStore(raw, coord, 11, out.aa11);
   textureStore(raw, coord, 12, out.aa12);
+  if (mandelbrot.trackOrbitMetrics >= 0.5) {
+    textureStore(raw, coord, 13, pack(out.orbitGradStripe.x));
+    textureStore(raw, coord, 14, pack(out.orbitGradStripe.y));
+    textureStore(raw, coord, 15, pack(out.orbitGradCoherence.x));
+    textureStore(raw, coord, 16, pack(out.orbitGradCoherence.y));
+  }
 }
 
 const ORBIT_METRIC_EMA_ALPHA: f32 = 0.18;
@@ -1448,17 +1467,108 @@ fn decode_avg_dir(encoded: f32, totalIter: f32) -> vec2<f32> {
   );
 }
 
-fn update_orbit_ema(previous: f32, sample: f32, count: f32) -> f32 {
+// ── Analytic gradients of the orbit metrics ─────────────────────────
+// Both metrics are functions of A_k = arg(z_k) alone. log z is holomorphic in
+// c along the orbit, so with w = z'/z the texel-space gradient (texture y grows
+// down — the convention of analytic_terminal_geometry) is
+//   grad log|z| = w        and        grad A = -i*w = (w.y, -w.x),
+// the Cauchy-Riemann pair of the slope the distance relief already uses.
+//
+// The scale factor is folded in HERE rather than at the end: |texelDelta * z'|
+// is O(1) near escape whatever the zoom, so the accumulators stay in f32 range
+// and need none of the derivative's separate exponent. Early iterations, where
+// the factor underflows, are exactly the ones the decay makes negligible.
+fn orbit_arg_gradient(z: vec2<f32>, derM: vec2<f32>, derS: f32, logTexelDelta: f32) -> vec2<f32> {
+  let z2 = dot(z, z);
+  let der2 = dot(derM, derM);
+  if (!(z2 > 1e-30) || !(der2 > 1e-30) || !finite_vec2(z)
+      || !finite_vec2(derM) || !finite_scalar(derS)) {
+    return vec2<f32>(0.0);
+  }
+  let invZ = vec2<f32>(z.x, -z.y) / z2;
+  let w = cmul(derM, invZ) * exp(clamp(derS + logTexelDelta, -80.0, 80.0));
+  if (!finite_vec2(w)) {
+    return vec2<f32>(0.0);
+  }
+  return clamp(vec2<f32>(w.y, -w.x), vec2<f32>(-64.0), vec2<f32>(64.0));
+}
+
+// Running orbit-metric state. The two gradients obey the same recurrences as
+// the two values they differentiate, so a skipped block of `count` steps
+// decays them with the same (1-alpha)^count — no per-iteration replay.
+struct OrbitMetrics {
+  stripeEma: f32,
+  avgCount: f32,
+  avgDirSum: vec2<f32>,
+  stripeGrad: vec2<f32>,
+  dirGradSum: vec2<f32>,
+};
+
+fn empty_orbit_metrics() -> OrbitMetrics {
+  var m: OrbitMetrics;
+  m.stripeEma = 0.0;
+  m.avgCount = 0.0;
+  m.avgDirSum = vec2<f32>(0.0);
+  m.stripeGrad = vec2<f32>(0.0);
+  m.dirGradSum = vec2<f32>(0.0);
+  return m;
+}
+
+// One tracked step (or one skipped block of `count` steps, sampled at its
+// landing point exactly like the values are).
+//
+// Stripe: s = sin(f*A), so grad s = f*cos(f*A)*grad A, carried through the very
+// same exponential decay as the value — the result is grad(stripeEma) exactly.
+//
+// Coherence: C = |D| with D the running mean of u_k = z_k/|z_k|. Since
+// du/dA = perp(u), grad C = (1/n) * sum (D^*perp(u_k)) * grad A_k. D^ is taken
+// at step k instead of at escape: a running mean moves by O(1/n) per step, and
+// the sum is dominated by its last terms — where |z'| is largest — so the two
+// agree to O(1/n) precisely where the relief is visible.
+fn advance_orbit_metrics(
+  m: ptr<function, OrbitMetrics>,
+  previous: ptr<function, OrbitMetrics>,
+  z: vec2<f32>,
+  derM: vec2<f32>,
+  derS: f32,
+  logTexelDelta: f32,
+  count: f32,
+) {
+  *previous = *m;
+  let frequency = max(mandelbrot.stripeFrequency, 0.0);
+  let angle = atan2(z.y, z.x);
   let decay = pow(1.0 - ORBIT_METRIC_EMA_ALPHA, max(count, 1.0));
-  return sample + (previous - sample) * decay;
+
+  let sample = sin(frequency * angle);
+  (*m).stripeEma = sample + ((*m).stripeEma - sample) * decay;
+
+  let gradA = orbit_arg_gradient(z, derM, derS, logTexelDelta);
+  let gradSample = (frequency * cos(frequency * angle)) * gradA;
+  (*m).stripeGrad = gradSample + ((*m).stripeGrad - gradSample) * decay;
+
+  let u = orbit_direction_sample(z);
+  let mean = select(u, normalize((*m).avgDirSum), dot((*m).avgDirSum, (*m).avgDirSum) > 1e-24);
+  (*m).dirGradSum += ((mean.y * u.x - mean.x * u.y) * count) * gradA;
+  (*m).avgDirSum += u * count;
+  (*m).avgCount += count;
 }
 
-fn update_orbit_ema_unit(previous: f32, sample: f32) -> f32 {
-  return sample + (previous - sample) * (1.0 - ORBIT_METRIC_EMA_ALPHA);
+fn orbit_metrics_dir_gradient(m: OrbitMetrics) -> vec2<f32> {
+  return m.dirGradSum / max(m.avgCount, 1.0);
 }
 
-fn stripe_metric_sample(z: vec2<f32>) -> f32 {
-  return sin(max(mandelbrot.stripeFrequency, 0.0) * atan2(z.y, z.x));
+fn orbit_metrics_avg_dir(m: OrbitMetrics) -> vec2<f32> {
+  return m.avgDirSum / max(m.avgCount, 1.0);
+}
+
+// c-units size of one source neutral texel, in log domain: the normalization
+// that makes every stored gradient a per-texel slope (analytic_terminal_geometry
+// builds the same quantity for the distance gradient).
+fn orbit_log_texel_delta(deepScaleExp: i32) -> f32 {
+  let dims = textureDimensions(raw);
+  return log(max(mandelbrot.scale, 1e-30))
+    + f32(deepScaleExp) * LN2
+    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / f32(dims.x));
 }
 
 fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
@@ -1467,7 +1577,7 @@ fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
 }
 
 // ── core computation (verbatim from mandelbrot.wgsl) ───────────────
-fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_ref_i: f32, prev_avg_direction: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32) -> TexelOut {
+fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_ref_i: f32, prev_avg_direction: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32, prev_stripe_grad: vec2<f32>, prev_dir_grad: vec2<f32>) -> TexelOut {
 
   let dc = vec2<f32>(x0, y0);
   let max_iteration = mandelbrot.maxIteration;
@@ -1507,17 +1617,21 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   der_refresh_cache(&derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon);
 
   let trackOrbitMetrics = mandelbrot.trackOrbitMetrics >= 0.5;
-  var stripeEma = 0.0;
-  var avgDirSum = vec2<f32>(0.0);
-  var avgCount = 0.0;
+  var metrics = empty_orbit_metrics();
+  var previousMetrics = metrics;
+  var logTexelDelta = 0.0;
   if (trackOrbitMetrics) {
-    stripeEma = decode_stripe_ema(prev_ref_i, prev_iter);
-    avgCount = max(prev_iter, 0.0);
-    avgDirSum = decode_avg_dir(prev_avg_direction, prev_iter) * avgCount;
+    metrics.stripeEma = decode_stripe_ema(prev_ref_i, prev_iter);
+    metrics.avgCount = max(prev_iter, 0.0);
+    metrics.avgDirSum = decode_avg_dir(prev_avg_direction, prev_iter) * metrics.avgCount;
+    // Parked alongside the derivative registers: the accumulators resume
+    // without a replay, so a pass boundary is invisible in the relief. The
+    // coherence layer holds the mean (its terminal meaning), not the sum.
+    metrics.stripeGrad = prev_stripe_grad;
+    metrics.dirGradSum = prev_dir_grad * metrics.avgCount;
+    previousMetrics = metrics;
+    logTexelDelta = orbit_log_texel_delta(0);
   }
-  var previousStripeEma = stripeEma;
-  var previousAvgDirSum = avgDirSum;
-  var previousAvgCount = avgCount;
 
   var escaped = false;
   var inside = false;
@@ -1776,12 +1890,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         i += f32(skipped);
         refZ = getOrbit(ref_i); // ref_i jumped past the block — resync carried orbit
         if (trackOrbitMetrics) {
-          previousStripeEma = stripeEma;
-          previousAvgDirSum = avgDirSum;
-          previousAvgCount = avgCount;
-          stripeEma = update_orbit_ema(stripeEma, stripe_metric_sample(z), f32(skipped));
-          avgDirSum += orbit_direction_sample(z) * f32(skipped);
-          avgCount += f32(skipped);
+          advance_orbit_metrics(&metrics, &previousMetrics, z, derM, derS + derSLo, logTexelDelta, f32(skipped));
         }
       } else if (!renormApplied) {
         if (ENABLE_DYNAMIC_STATS && isUnified && ENABLE_DYNAMIC_VALIDITY) {
@@ -1799,12 +1908,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
         i += 1.0;
         if (trackOrbitMetrics) {
-          previousStripeEma = stripeEma;
-          previousAvgDirSum = avgDirSum;
-          previousAvgCount = avgCount;
-          stripeEma = update_orbit_ema_unit(stripeEma, stripe_metric_sample(z));
-          avgDirSum += orbit_direction_sample(z);
-          avgCount += 1.0;
+          advance_orbit_metrics(&metrics, &previousMetrics, z, derM, derS + derSLo, logTexelDelta, 1.0);
         }
       }
 
@@ -1846,12 +1950,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       derM = 2.0 * cmul(zPrev, derM) + vec2<f32>(derInvScale, 0.0);
       i += 1.0;
       if (trackOrbitMetrics) {
-        previousStripeEma = stripeEma;
-        previousAvgDirSum = avgDirSum;
-        previousAvgCount = avgCount;
-        stripeEma = update_orbit_ema_unit(stripeEma, stripe_metric_sample(z));
-        avgDirSum += orbit_direction_sample(z);
-        avgCount += 1.0;
+        advance_orbit_metrics(&metrics, &previousMetrics, z, derM, derS + derSLo, logTexelDelta, 1.0);
       }
 
       let derMM = dot(derM, derM);
@@ -1880,9 +1979,11 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   }
 
   var out: TexelOut;
+  out.orbitGradStripe = vec2<f32>(0.0);
+  out.orbitGradCoherence = vec2<f32>(0.0);
 
   let derPolarOut = der_to_polar(derM, derS + derSLo);
-  let avgDir = avgDirSum / max(avgCount, 1.0);
+  let avgDir = orbit_metrics_avg_dir(metrics);
 
   if (inside) {
     out.iter      = pack(0.0);
@@ -1901,9 +2002,17 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
 
   if (escaped) {
     let escapeBlend = escape_fraction(z, muLimit);
-    let smoothStripeEma = mix(previousStripeEma, stripeEma, escapeBlend);
-    let previousAvgDir = previousAvgDirSum / max(previousAvgCount, 1.0);
+    let smoothStripeEma = mix(previousMetrics.stripeEma, metrics.stripeEma, escapeBlend);
+    let previousAvgDir = orbit_metrics_avg_dir(previousMetrics);
     let smoothAvgDir = mix(previousAvgDir, avgDir, escapeBlend);
+    // The gradients take the SAME terminal blend as the values they
+    // differentiate — otherwise the relief would step where the color does not.
+    out.orbitGradStripe = mix(previousMetrics.stripeGrad, metrics.stripeGrad, escapeBlend);
+    out.orbitGradCoherence = mix(
+      orbit_metrics_dir_gradient(previousMetrics),
+      orbit_metrics_dir_gradient(metrics),
+      escapeBlend,
+    );
 
     let geometry = analytic_terminal_geometry(z, derM, derS + derSLo, sndM, sndS, 0);
     out.iter      = pack(total_iter);
@@ -1958,8 +2067,10 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   out.zy        = pack(dz.y);
   out.dzx       = pack(derM.x);
   out.dzy       = pack(derM.y);
-  out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), stripeEma));
+  out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), metrics.stripeEma));
   out.avgDirection = pack(encode_avg_dir(avgDir));
+  out.orbitGradStripe = metrics.stripeGrad;
+  out.orbitGradCoherence = orbit_metrics_dir_gradient(metrics);
   out.derS      = pack(derS + derSLo);
   out.aa9       = pack(sndM.x);
   out.aa10      = pack(sndM.y);
@@ -3641,6 +3752,10 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   }
 
   var out: TexelOut;
+  // The deep path parks dz's exponent where the orbit direction lives, so it
+  // tracks no orbit metric and therefore carries no metric gradient either.
+  out.orbitGradStripe = vec2<f32>(0.0);
+  out.orbitGradCoherence = vec2<f32>(0.0);
   let derPolarOut = der_to_polar(derM, derS + derSLo);
 
   if (inside) {
@@ -3960,7 +4075,7 @@ fn cs_main(
             let x0 = local_rot.x * mandelbrot.scale + mandelbrot.cx;
             let y0 = local_rot.y * mandelbrot.scale + mandelbrot.cy;
             if (is_compute_request) {
-              result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, SCALED_ZERO_S, 1.0);
+              result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, SCALED_ZERO_S, 1.0, vec2<f32>(0.0), vec2<f32>(0.0));
             } else {
               // Continuation: layers 4/5/8 hold the raw derivative registers.
               let stored_derx = loadLayer(coord, 4);
@@ -3968,7 +4083,15 @@ fn cs_main(
               let stored_ders = loadLayer(coord, 8);
               let prev_ref_i = loadLayer(coord, 6);
               let prev_avg_direction = loadLayer(coord, 7);
-              result = mandelbrot_compute(x0, y0, iter_val, zx, zy, stored_derx, stored_dery, stored_ders, prev_ref_i, prev_avg_direction, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12));
+              // Layers 13..16 exist only while orbit metrics are tracked; an
+              // out-of-range load reads zero, which is the empty accumulator.
+              var prev_stripe_grad = vec2<f32>(0.0);
+              var prev_dir_grad = vec2<f32>(0.0);
+              if (mandelbrot.trackOrbitMetrics >= 0.5) {
+                prev_stripe_grad = vec2<f32>(loadLayer(coord, 13), loadLayer(coord, 14));
+                prev_dir_grad = vec2<f32>(loadLayer(coord, 15), loadLayer(coord, 16));
+              }
+              result = mandelbrot_compute(x0, y0, iter_val, zx, zy, stored_derx, stored_dery, stored_ders, prev_ref_i, prev_avg_direction, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12), prev_stripe_grad, prev_dir_grad);
             }
           }
           storeTexel(coord, result);

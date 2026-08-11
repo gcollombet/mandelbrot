@@ -63,9 +63,29 @@ describe('typed display consumers', () => {
     expect(color).toContain('var grad = cachedGradient * 24.0;')
     expect(color).toContain('var heightCurvature = cachedCurvature * 6.0;')
     expect(color).toContain('atan2(geometry.y, geometry.x)')
-    expect(color).toContain('fn orbit_metric_gradients_at_coord(')
+    expect(color).not.toContain('fn orbit_metric_gradients_at_coord(')
+    expect(color).not.toContain('fn orbit_metric_gradients_bilinear(')
     expect(color).not.toContain('sample_neighbor_fields')
+    expect(color).not.toContain('sample_neighbor_orbit_fields')
     expect(color).not.toContain('fn palette(sourceTex: texture_2d_array<f32>, sourceGeometry:')
+  })
+
+  it('reads both orbit-metric slopes from the cached per-texel field', () => {
+    expect(brush).toContain('fn orbit_arg_gradient(')
+    expect(brush).toContain('fn advance_orbit_metrics(')
+    expect(resolve).toContain('@location(5) orbitGradient: vec4<f32>')
+    expect(resolve).toContain('orbitGradientSum = orbitGradientSum + weight * load_terminal_orbit_gradient(candidate);')
+    expect(merge).toContain('@location(5) orbitGradient: vec4<f32>')
+    expect(color).toContain('let stripeGrad = cachedStripeGradient * 8.0;')
+    expect(color).toContain('let directionCoherenceGrad = cachedCoherenceGradient * 16.0;')
+    expect(color).toContain('fn normalize_orbit_gradient(')
+    expect(engine).toContain('const RAW_ORBIT_GRADIENT_LAYERS = 17')
+  })
+
+  it('interpolates relief amplitude in the tilt domain', () => {
+    expect(color).toContain('fn decode_relief_tilt(control: f32, tiltMax: f32) -> f32')
+    expect(color).toContain('e.wStripeRelief = decode_relief_tilt(row5.b, STRIPE_RELIEF_TILT_MAX);')
+    expect(color).toContain('e.wDirectionCoherenceRelief = decode_relief_tilt(row5.a, COHERENCE_RELIEF_TILT_MAX);')
   })
 
   it('retains z.xy for escape, mappings, and raw only for analytic AA', () => {

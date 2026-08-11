@@ -107,8 +107,12 @@ describe('simplified progressive renderer contract', () => {
     expect(engineSource).toContain('tryApplyPairedIterationSample(');
     expect(engineSource).toContain('const COUNTER_SAMPLE_INTERVAL_FRAMES = 1');
     expect(engineSource).not.toContain('sample.translation');
-    expect(engineSource.indexOf('this.iterationWorkRate = updateIterationWorkRateEma('))
-      .toBeLessThan(engineSource.indexOf('if (sample.generation !== this.batchControllerGeneration) return'));
+    expect(engineSource.indexOf('if (sample.generation !== this.batchControllerGeneration) return'))
+      .toBeLessThan(engineSource.indexOf('this.iterationWorkRate = updateIterationWorkRateEma('));
+    expect(engineSource).toContain('private zoomRefreshCostModels = new Map');
+    expect(engineSource).toContain('sample.zoomRefresh && sampledRate > 0');
+    expect(engineSource).toContain('this.learnedZoomRefreshBatchSizeFor(');
+    expect(engineSource).toContain('zoomRefreshRegimeKey');
     expect(engineSource).toContain('if (!(this.iterationWorkRate > 0)) {');
     expect(engineSource).not.toContain('if (this.debugPipelineActive || elapsed <= 0)');
     expect(engineSource).toContain('MANDELBROT_BATCH_UNIFORM_OFFSET');

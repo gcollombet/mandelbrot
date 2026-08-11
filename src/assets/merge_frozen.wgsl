@@ -1,5 +1,6 @@
 // Merge a live and frozen typed display set into the frozen destination.
-// The selected value, geometry, and metadata always travel together.
+// The selected value, geometry, metadata and orbit gradient always travel
+// together — a candidate is picked whole, never channel by channel.
 
 struct MergeUniforms {
   zoomFactor: f32,
@@ -14,9 +15,11 @@ struct MergeUniforms {
 @group(0) @binding(1) var liveValues: texture_2d_array<f32>;
 @group(0) @binding(2) var liveGeometry: texture_2d<f32>;
 @group(0) @binding(3) var liveMetadata: texture_2d<u32>;
+@group(0) @binding(7) var liveOrbitGradient: texture_2d<f32>;
 @group(0) @binding(4) var frozenValues: texture_2d_array<f32>;
 @group(0) @binding(5) var frozenGeometry: texture_2d<f32>;
 @group(0) @binding(6) var frozenMetadata: texture_2d<u32>;
+@group(0) @binding(8) var frozenOrbitGradient: texture_2d<f32>;
 
 struct VSOut {
   @builtin(position) position: vec4<f32>,
@@ -42,6 +45,7 @@ struct FragOut {
   @location(2) zy: f32,
   @location(3) geometry: vec4<f32>,
   @location(4) metadata: u32,
+  @location(5) orbitGradient: vec4<f32>,
 };
 
 struct Candidate {
@@ -51,6 +55,7 @@ struct Candidate {
   zy: f32,
   geometry: vec4<f32>,
   metadata: u32,
+  orbitGradient: vec4<f32>,
   effectiveStep: f32,
 };
 
@@ -95,6 +100,7 @@ fn empty_candidate() -> Candidate {
   candidate.zy = 0.0;
   candidate.geometry = vec4<f32>(0.0);
   candidate.metadata = 0u;
+  candidate.orbitGradient = vec4<f32>(0.0);
   candidate.effectiveStep = 1e30;
   return candidate;
 }
@@ -103,6 +109,7 @@ fn load_candidate(
   values: texture_2d_array<f32>,
   geometryTex: texture_2d<f32>,
   metadataTex: texture_2d<u32>,
+  orbitGradientTex: texture_2d<f32>,
   coord: vec2<i32>,
   zoomFactor: f32
 ) -> Candidate {
@@ -116,6 +123,12 @@ fn load_candidate(
   candidate.zx = textureLoad(values, coord, 1, 0).r;
   candidate.zy = textureLoad(values, coord, 2, 0).r;
   candidate.geometry = normalize_geometry(textureLoad(geometryTex, coord, 0), zoomFactor);
+  // Both halves are per-texel slopes, so they rescale like gradient.xy above.
+  candidate.orbitGradient = clamp(
+    textureLoad(orbitGradientTex, coord, 0) / max(zoomFactor, 1e-30),
+    vec4<f32>(-64.0),
+    vec4<f32>(64.0),
+  );
   candidate.metadata = metadata_with_step(metadata, effectiveStep);
   candidate.effectiveStep = effectiveStep;
   return candidate;
@@ -128,6 +141,7 @@ fn emit(candidate: Candidate) -> FragOut {
   out.zy = candidate.zy;
   out.geometry = candidate.geometry;
   out.metadata = candidate.metadata;
+  out.orbitGradient = candidate.orbitGradient;
   return out;
 }
 
@@ -149,7 +163,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       i32(clamp(liveUv.x * dimsF.x, 0.0, dimsF.x - 1.0)),
       i32(clamp((1.0 - liveUv.y) * dimsF.y, 0.0, dimsF.y - 1.0))
     );
-    live = load_candidate(liveValues, liveGeometry, liveMetadata, coord, uni.liveZoomFactor);
+    live = load_candidate(liveValues, liveGeometry, liveMetadata, liveOrbitGradient, coord, uni.liveZoomFactor);
   }
 
   let frozenUv = (uv - vec2<f32>(0.5)) / uni.zoomFactor + vec2<f32>(0.5)
@@ -165,7 +179,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       i32(clamp(frozenUv.x * dimsF.x, 0.0, dimsF.x - 1.0)),
       i32(clamp((1.0 - frozenUv.y) * dimsF.y, 0.0, dimsF.y - 1.0))
     );
-    frozen = load_candidate(frozenValues, frozenGeometry, frozenMetadata, coord, uni.zoomFactor);
+    frozen = load_candidate(frozenValues, frozenGeometry, frozenMetadata, frozenOrbitGradient, coord, uni.zoomFactor);
   }
 
   if (live.valid && (!frozen.valid || live.effectiveStep <= frozen.effectiveStep)) {

@@ -5,6 +5,10 @@
 //   values[0..2] = iteration, z.x, z.y
 //   geometry      = analytic gradient.xy, Laplacian, distance height
 //   metadata      = provenance exponent | stripe phase | coherence
+//   orbitGradient = grad(stripe EMA).xy, grad(direction coherence).xy
+//
+// orbitGradient exists only while orbit metrics are tracked; the pipeline
+// binds a null target otherwise and the raw layers are not even allocated.
 
 struct ResolveUniforms {
   mu: f32,
@@ -40,6 +44,7 @@ struct FragOut {
   @location(2) zy: f32,
   @location(3) geometry: vec4<f32>,
   @location(4) metadata: u32,
+  @location(5) orbitGradient: vec4<f32>,
 };
 
 const TWO_PI: f32 = 6.283185307179586;
@@ -119,6 +124,18 @@ fn load_terminal_geometry(coord: vec2<i32>) -> vec4<f32> {
   );
 }
 
+// Per-texel gradients of the two orbit metrics. Unlike the stripe phase and
+// the coherence they differentiate, these are plain vectors: every support
+// rule below can average them the way it averages the cached geometry.
+fn load_terminal_orbit_gradient(coord: vec2<i32>) -> vec4<f32> {
+  return vec4<f32>(
+    finite_or_zero(load_layer(coord, 13), -64.0, 64.0),
+    finite_or_zero(load_layer(coord, 14), -64.0, 64.0),
+    finite_or_zero(load_layer(coord, 15), -64.0, 64.0),
+    finite_or_zero(load_layer(coord, 16), -64.0, 64.0),
+  );
+}
+
 fn is_finished(coord: vec2<i32>) -> bool {
   let iter = load_layer(coord, 0);
   if (iter == 0.0) { return true; }
@@ -134,6 +151,7 @@ fn load_finished(coord: vec2<i32>, step: u32) -> FragOut {
   out.zy = load_layer(coord, 3);
   let escaped = out.iter > 0.0;
   out.geometry = select(vec4<f32>(0.0), load_terminal_geometry(coord), escaped);
+  out.orbitGradient = select(vec4<f32>(0.0), load_terminal_orbit_gradient(coord), escaped);
   let terminalMetrics = bitcast<u32>(load_layer(coord, 6));
   let stripe = select(0.0, decode_terminal_stripe(terminalMetrics), escaped);
   let coherence = select(0.0, decode_terminal_coherence(terminalMetrics), escaped);
@@ -148,6 +166,7 @@ fn no_data() -> FragOut {
   out.zy = 0.0;
   out.geometry = vec4<f32>(0.0);
   out.metadata = 0u;
+  out.orbitGradient = vec4<f32>(0.0);
   return out;
 }
 
@@ -190,6 +209,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     var baseIter = -1.0;
     var nuSum = 0.0;
     var geometrySum = vec4<f32>(0.0);
+    var orbitGradientSum = vec4<f32>(0.0);
     var zDirectionSum = vec2<f32>(0.0);
     var stripeDirectionSum = vec2<f32>(0.0);
     var coherenceSum = 0.0;
@@ -226,6 +246,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       escapedWeight = escapedWeight + weight;
       nuSum = nuSum + weight * ((iter - baseIter) + smooth_frac(dot(z, z), logMu));
       geometrySum = geometrySum + weight * load_terminal_geometry(candidate);
+      orbitGradientSum = orbitGradientSum + weight * load_terminal_orbit_gradient(candidate);
       zDirectionSum = zDirectionSum + weight * z / max(length(z), 1e-12);
       let terminalMetrics = bitcast<u32>(load_layer(candidate, 6));
       stripeDirectionSum = stripeDirectionSum + weight * phase_to_dir(decode_terminal_stripe(terminalMetrics));
@@ -259,6 +280,11 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
           vec4<f32>(64.0),
         );
         out.metadata = pack_metadata(step, stripe, coherenceSum * inverseWeight);
+        out.orbitGradient = clamp(
+          orbitGradientSum * inverseWeight,
+          vec4<f32>(-64.0),
+          vec4<f32>(64.0),
+        );
         return out;
       }
       if (hasFinished) { return load_finished(firstFinishedCoord, step); }

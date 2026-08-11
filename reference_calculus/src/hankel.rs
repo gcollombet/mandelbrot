@@ -213,7 +213,13 @@ pub fn hankel_sigmas_log2(a: &[CFe; JET_DS], shift: usize, log2_r: f64) -> Vec<f
         .collect();
     jacobi_columns(&mut cols)
         .into_iter()
-        .map(|s| if s > 0.0 { s.log2() + emax as f64 } else { f64::NEG_INFINITY })
+        .map(|s| {
+            if s > 0.0 {
+                s.log2() + emax as f64
+            } else {
+                f64::NEG_INFINITY
+            }
+        })
         .collect()
 }
 
@@ -551,12 +557,7 @@ mod tests {
         ]);
         let r1 = hankel_radius_log2(&a, 1, 0, 1e-6);
         let r2 = hankel_radius_log2(&a, 2, 0, 1e-6);
-        assert!(
-            r2 >= r1 - 1e-9,
-            "M=2 radius {} below M=1 radius {}",
-            r2,
-            r1
-        );
+        assert!(r2 >= r1 - 1e-9, "M=2 radius {} below M=1 radius {}", r2, r1);
     }
 
     /// The veto must dominate what the certificate actually claims, on real
@@ -739,7 +740,11 @@ mod tests {
             // Exchange rate: median log2 radius lost per skip octave.
             let mut med_r: Vec<(usize, f64)> = Vec::new();
             for li in 0..nlev {
-                let mut v: Vec<f64> = r_now[li].iter().cloned().filter(|x| x.is_finite()).collect();
+                let mut v: Vec<f64> = r_now[li]
+                    .iter()
+                    .cloned()
+                    .filter(|x| x.is_finite())
+                    .collect();
                 if v.len() < 4 {
                     continue;
                 }

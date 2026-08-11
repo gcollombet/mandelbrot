@@ -80,7 +80,10 @@ pub(crate) fn certified_dc_band_log2(
     eps: f64,
     log2_cmax_hi: f64,
 ) -> Option<f64> {
-    if periodic_build_diagnostic(orbit, eps, log2_cmax_hi).block.is_some() {
+    if periodic_build_diagnostic(orbit, eps, log2_cmax_hi)
+        .block
+        .is_some()
+    {
         return Some(log2_cmax_hi);
     }
     let mut lo = log2_cmax_hi - 64.0;
@@ -205,7 +208,11 @@ mod tests {
         let ncy = dbig(0.0, 64);
         let orbit = tiled_nucleus_orbit(&ncx, &ncy, 2, 64, 512);
         assert!(orbit.len() >= 512);
-        assert_eq!(orbit[0], (0.0, 0.0), "cycle must start at the critical point");
+        assert_eq!(
+            orbit[0],
+            (0.0, 0.0),
+            "cycle must start at the critical point"
+        );
         for k in 0..orbit.len() - 2 {
             assert_eq!(orbit[k], orbit[k + 2], "tiling broke periodicity at {}", k);
         }
@@ -305,7 +312,13 @@ mod tests {
         // mixed frame and makes the views comparable across minibrot scales.
         let seeds: [(&str, f64, f64, f64, usize); 5] = [
             ("p3-island", -1.7548, 0.0006, 2.0e-3, 4_000),
-            ("seahorse-mini", -0.743643887037151, 0.131825904205330, 1.0e-3, 8_000),
+            (
+                "seahorse-mini",
+                -0.743643887037151,
+                0.131825904205330,
+                1.0e-3,
+                8_000,
+            ),
             ("mini-seahorse", -1.7690332504, 0.0025093773, 2.0e-5, 20_000),
             ("elephant-mini", 0.2925755, 0.0149977, 1.0e-3, 8_000),
             ("triple-spiral", -0.7269, 0.1889, 1.0e-3, 8_000),
@@ -342,18 +355,18 @@ mod tests {
                     80,
                     &dbig(seed_sigma * 1000.0, seed_digits),
                     &raise_precision(
-                        DBig::from_str(&format!(
-                            "1e-{}",
-                            seed_digits.saturating_sub(24).max(16)
-                        ))
-                        .unwrap(),
+                        DBig::from_str(&format!("1e-{}", seed_digits.saturating_sub(24).max(16)))
+                            .unwrap(),
                         seed_digits,
                     ),
                 )
                 .map(|(ncx, ncy)| (period, ncx, ncy))
             });
             let Some((seed_period, seed_ncx, seed_ncy)) = seed_nucleus else {
-                println!(" interior | {:<14} {:>6.0e} | no nucleus under the seed", name, seed_sigma);
+                println!(
+                    " interior | {:<14} {:>6.0e} | no nucleus under the seed",
+                    name, seed_sigma
+                );
                 continue;
             };
             let seed_orbit = tiled_nucleus_orbit(
@@ -363,8 +376,7 @@ mod tests {
                 seed_digits,
                 1024.max(4 * seed_period),
             );
-            let Some(seed_band_log2) =
-                certified_dc_band_log2(&seed_orbit, EPS, seed_sigma.log2())
+            let Some(seed_band_log2) = certified_dc_band_log2(&seed_orbit, EPS, seed_sigma.log2())
             else {
                 println!(
                     " interior | {:<14} {:>6.0e} | p={} certifies no band",
@@ -383,8 +395,7 @@ mod tests {
                 );
                 continue;
             };
-            let lambda =
-                crate::dbig_to_f64(&lambda_x).hypot(crate::dbig_to_f64(&lambda_y));
+            let lambda = crate::dbig_to_f64(&lambda_x).hypot(crate::dbig_to_f64(&lambda_y));
             // Why the band comes out narrow: the direct majorant is
             //   ρ₀ = r,  ρ_{k+1} = 2|Z_k|ρ_k + ρ_k² + c_max,
             // so `c_max` is injected at EVERY one of the p steps and then
@@ -405,10 +416,7 @@ mod tests {
                 .sum();
             let sigma = FRAME_LAMBDAS * lambda;
             let nucleus_f64 = (crate::dbig_to_f64(&seed_ncx), crate::dbig_to_f64(&seed_ncy));
-            let (cx, cy) = (
-                nucleus_f64.0 + 0.5 * sigma,
-                nucleus_f64.1 + 0.3 * sigma,
-            );
+            let (cx, cy) = (nucleus_f64.0 + 0.5 * sigma, nucleus_f64.1 + 0.3 * sigma);
             let pixel = 2.0 * sigma / H;
             let digits = 64 + 3 * (-sigma.log10()).ceil().max(0.0) as usize;
 
@@ -481,8 +489,7 @@ mod tests {
                 // σ: the band is a property of the minibrot, and the radius the
                 // build returns depends on which band it was asked for.
                 let band = Some(seed_band_log2);
-                let outcome =
-                    periodic_build_diagnostic(&orbit, EPS, band.unwrap_or(sigma.log2()));
+                let outcome = periodic_build_diagnostic(&orbit, EPS, band.unwrap_or(sigma.log2()));
                 rows.push(Row {
                     label: "nucleus",
                     block: outcome.block.clone(),
@@ -632,11 +639,8 @@ mod tests {
                 // Why it refused, not just that it did. The crossover between the
                 // two bands is at |a| ≈ 1/0.07 ≈ 14, so a refusal at |a| well
                 // above that is a defect of the enclosure, not of the idea.
-                let g = crate::feigenbaum::minibrot_gauges(
-                    nucleus_f64.0,
-                    nucleus_f64.1,
-                    seed_period,
-                );
+                let g =
+                    crate::feigenbaum::minibrot_gauges(nucleus_f64.0, nucleus_f64.1, seed_period);
                 let d = crate::feigenbaum::propose_minibrot_return(
                     nucleus_f64.0,
                     nucleus_f64.1,

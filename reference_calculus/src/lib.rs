@@ -95,9 +95,11 @@ const REFERENCE_CERTIFICATE_HEADROOM_LOG2: f64 = 4.0;
 // interpolate smoothly across those sparse frames while retaining a responsive
 // stop after key release.
 const NAVIGATION_DAMPING_HALF_LIFE_SECONDS: f64 = 0.18;
-const NAVIGATION_TRANSLATION_GAIN: f64 = 35.0;
-const NAVIGATION_ROTATION_GAIN: f64 = 10.0;
-const NAVIGATION_ZOOM_RATE: i32 = 5;
+const NAVIGATION_TRANSLATION_GAIN: f64 = 17.5;
+const NAVIGATION_ROTATION_GAIN: f64 = 5.0;
+const NAVIGATION_ZOOM_RATE: f64 = 2.5;
+const NAVIGATION_REFERENCE_FPS: f64 = 60.0;
+const NAVIGATION_MAX_INPUT_DT_SECONDS: f64 = 0.5;
 
 // Per-step precision from the amplified-bit count G_n. Clamped to [FLOOR, budget].
 fn profile_precision(budget: usize, g_bits: f64) -> usize {
@@ -1143,36 +1145,71 @@ impl MandelbrotNavigator {
     }
 
     pub fn step(&mut self, canvas_width: Option<f64>, canvas_height: Option<f64>) -> Vec<String> {
-        // Calcul du temps écoulé depuis le dernier appel
-        let delta_time = {
-            #[cfg(target_arch = "wasm32")]
-            {
-                let now = js_sys::Date::now(); // ms
-                let dt = if let Some(last) = self.last_step_time {
-                    (now - last) / 1000.0
-                } else {
-                    1.0 / 60.0
-                };
-                self.last_step_time = Some(now);
-                dt
+        let delta_time = self.take_step_delta_time();
+        self.step_with_delta_time(canvas_width, canvas_height, delta_time)
+    }
+
+    /// Advance one rendered frame while treating held keyboard controls as a
+    /// continuous input. Values are expressed in legacy 60 Hz frame units so
+    /// the existing feel is preserved at 60 fps and normalized elsewhere.
+    pub fn step_with_input(
+        &mut self,
+        translate_x: f64,
+        translate_y: f64,
+        rotation: f64,
+        zoom_factor: f64,
+        canvas_width: Option<f64>,
+        canvas_height: Option<f64>,
+    ) -> Vec<String> {
+        let delta_time = self.take_step_delta_time();
+        let input_delta_time = delta_time.clamp(0.0, NAVIGATION_MAX_INPUT_DT_SECONDS);
+        let frame_units = input_delta_time * NAVIGATION_REFERENCE_FPS;
+
+        if frame_units > 0.0 {
+            if translate_x != 0.0 || translate_y != 0.0 {
+                self.translate(translate_x * frame_units, translate_y * frame_units);
             }
-            #[cfg(not(target_arch = "wasm32"))]
-            {
-                use std::time::{SystemTime, UNIX_EPOCH};
-                let now = SystemTime::now()
-                    .duration_since(UNIX_EPOCH)
-                    .unwrap()
-                    .as_millis() as f64;
-                let dt = if let Some(last) = self.last_step_time {
-                    (now - last) / 1000.0
-                } else {
-                    1.0 / 60.0
-                };
-                self.last_step_time = Some(now);
-                dt
+            if rotation != 0.0 {
+                self.rotate(rotation * frame_units);
             }
+            if zoom_factor.is_finite() && zoom_factor > 0.0 && zoom_factor != 1.0 {
+                let timed_zoom_factor = zoom_factor.powf(frame_units);
+                if timed_zoom_factor.is_finite() && timed_zoom_factor > 0.0 {
+                    self.zoom(timed_zoom_factor);
+                }
+            }
+        }
+
+        self.step_with_delta_time(canvas_width, canvas_height, delta_time)
+    }
+
+    fn take_step_delta_time(&mut self) -> f64 {
+        #[cfg(target_arch = "wasm32")]
+        let now = js_sys::Date::now();
+        #[cfg(not(target_arch = "wasm32"))]
+        let now = {
+            use std::time::{SystemTime, UNIX_EPOCH};
+            SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .unwrap()
+                .as_millis() as f64
         };
 
+        let delta_time = if let Some(last) = self.last_step_time {
+            (now - last) / 1000.0
+        } else {
+            1.0 / NAVIGATION_REFERENCE_FPS
+        };
+        self.last_step_time = Some(now);
+        delta_time
+    }
+
+    fn step_with_delta_time(
+        &mut self,
+        canvas_width: Option<f64>,
+        canvas_height: Option<f64>,
+        delta_time: f64,
+    ) -> Vec<String> {
         // Si une transition/voyage est en cours, on effectue l'interpolation
         if let (
             Some(start_cx),
@@ -1260,7 +1297,7 @@ impl MandelbrotNavigator {
                     // grow with depth. Apply an f64 factor to the precise scale;
                     // Dashu multiplication retains the larger (scale) precision.
                     let velocity = dbig_to_f64(&self.vscale);
-                    let factor = velocity.powf(delta_time * f64::from(NAVIGATION_ZOOM_RATE));
+                    let factor = velocity.powf(delta_time * NAVIGATION_ZOOM_RATE);
                     if factor.is_finite() && factor > 0.0 {
                         let factor_big = DBig::from_str(&factor.to_string())
                             .unwrap_or_else(|_| one.clone());

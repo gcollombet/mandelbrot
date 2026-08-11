@@ -8,8 +8,8 @@ export const EFFECT_FIELD_NAMES = [
   'smoothness',
   'stripeAverage',
   'rotationMean',
-  'stripeRelief',
-  'directionCoherenceRelief',
+  'stripeReliefTilt',
+  'directionCoherenceReliefTilt',
   'shadingLevel',
   'specularPower',
   'dielectricSpecular',
@@ -46,8 +46,11 @@ export const EFFECT_FIELD_CONFIG: Record<EffectFieldName, EffectFieldMeta> = {
   smoothness:         { label: 'Smooth Iterations', defaultValue: 1.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 2, textureChannel: 1, uiGroup: 'iteration' },
   stripeAverage:      { label: 'Stripe Average',    defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 5, textureChannel: 0, uiGroup: 'iteration' },
   rotationMean:       { label: 'Direction Coherence', defaultValue: 0.0, min: 0, max: 1,   step: 0.01, unit: '', textureRow: 5, textureChannel: 1, uiGroup: 'iteration' },
-  stripeRelief:       { label: 'Stripe Relief',     defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 5, textureChannel: 2, uiGroup: 'iteration' },
-  directionCoherenceRelief: { label: 'Direction Relief', defaultValue: 0.0, min: 0, max: 100, step: 0.1, unit: '', textureRow: 5, textureChannel: 3, uiGroup: 'iteration' },
+  // Both reliefs are stored as a normalized surface-tilt control in [0, 1]:
+  // the eye reads the tilt, not the slope, so this is the domain where a lerp
+  // between two stops is perceptually uniform (see decodeStripeReliefTilt).
+  stripeReliefTilt:   { label: 'Stripe Relief',     defaultValue: 0.0, min: 0, max: 1,     step: 0.01, unit: '', textureRow: 5, textureChannel: 2, uiGroup: 'iteration' },
+  directionCoherenceReliefTilt: { label: 'Direction Relief', defaultValue: 0.0, min: 0, max: 1, step: 0.01, unit: '', textureRow: 5, textureChannel: 3, uiGroup: 'iteration' },
   shadingLevel:       { label: 'Light Intensity',   defaultValue: 0.0, min: 0, max: 3,     step: 0.05, unit: '', textureRow: 2, textureChannel: 2, uiGroup: 'lighting' },
   specularPower:      { label: 'Direct Specular',   defaultValue: 0,   min: 0, max: 64,    step: 0.5,  unit: '', textureRow: 2, textureChannel: 3, uiGroup: 'lighting' },
   dielectricSpecular: { label: 'Dielectric F0',     defaultValue: 0.04, min: 0, max: 1,    step: 0.01, unit: '', textureRow: 3, textureChannel: 0, uiGroup: 'lighting' },

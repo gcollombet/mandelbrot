@@ -29,18 +29,19 @@ import {
     resetZoomState
 } from './zoomState'
 import type {ColorStop} from './ColorStop.ts'
+import {resolveDirectionCoherenceReliefTilt, resolveStripeReliefTilt} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import {computeAaJitterOffset} from './Mandelbrot.ts'
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
 import {DISPLAY_VALUE_LAYERS, float16ToFloat32, isDisplaySetCurrent} from './displayGeometry'
 import {
+    partitionGpuPassTimestamps,
     PASS_SLOT_INDEX,
     PASS_SLOTS,
-    TS_COUNT,
-    partitionGpuPassTimestamps,
     selectRawUtilityPassKey,
     shouldEncodeTimestampBoundary,
+    TS_COUNT,
 } from './gpuPassTimings'
 import {
     batchSizeForWorkRate,
@@ -48,8 +49,11 @@ import {
     iterationWorkCounterShift,
     measureIterationWorkRate,
     predictIterationBatchSize,
+    predictZoomRefreshBatchSize,
     requestedIterationBudgetMs,
     updateIterationWorkRateEma,
+    updateZoomRefreshCostModel,
+    type ZoomRefreshCostModel,
 } from './iterationBatchController'
 import {advanceFramePacer} from './framePacing'
 
@@ -67,6 +71,11 @@ export const DEBUG_VIEW_REACH = 6
 // 13 for unfinished pixels because z″ also feeds terminal cached geometry.
 const RAW_BASE_LAYERS = 9
 const RAW_LAYERS = 13
+// Layers 13..16 carry the analytic gradients of the two orbit metrics. They are
+// allocated only while a stop asks for stripe/direction coloring or relief:
+// four more r32float layers over the neutral square is not a cost to pay for
+// the palettes that never ask for them.
+const RAW_ORBIT_GRADIENT_LAYERS = 17
 
 // Adaptive iteration batch sizing — only the fused iteration pass is controlled.
 // Leave part of the frame budget to reprojection, resolve and color, which do not
@@ -77,7 +86,7 @@ const MANDELBROT_BATCH_UNIFORM_OFFSET = 6 * Float32Array.BYTES_PER_ELEMENT
 // exact step each count as 1, so the cap bounds GPU work per frame uniformly across
 // modes. (Was a covered-iteration cap with a 10× BLA fudge — that throttled long
 // blocks in smooth regions; turn-budgeting lets them run, capped only by frame time.)
-const MAX_BATCH_SIZE = 10_000
+const MAX_BATCH_SIZE = 100_000
 // Validity radii scale linearly with this epsilon; 1e-4 keeps the error well
 // below a pixel while letting high-skip BLA levels accept far more often than
 // the previous 1e-6 (which made BLA slower than plain perturbation).
@@ -158,6 +167,8 @@ type IterationBatchTimingContext = {
     generation: number
     activePixelCount: number
     visiblePixelCount: number
+    zoomRefresh: boolean
+    zoomRefreshRegimeKey: string
     actualWeightedWork?: number
     remainingPixelCount?: number
     effectiveRemainingPixelCount?: number
@@ -491,8 +502,8 @@ function shouldTrackOrbitMetrics(colorStops: ColorStop[]): boolean {
     return colorStops.some(stop =>
         (stop.stripeAverage ?? 0) > ORBIT_METRIC_EPSILON
         || (stop.rotationMean ?? 0) > ORBIT_METRIC_EPSILON
-        || (stop.stripeRelief ?? 0) > ORBIT_METRIC_EPSILON
-        || (stop.directionCoherenceRelief ?? 0) > ORBIT_METRIC_EPSILON
+        || resolveStripeReliefTilt(stop) > ORBIT_METRIC_EPSILON
+        || resolveDirectionCoherenceReliefTilt(stop) > ORBIT_METRIC_EPSILON
     )
 }
 
@@ -635,6 +646,9 @@ interface DisplaySet {
     geometryView: GPUTextureView
     metadataTexture: GPUTexture
     metadataView: GPUTextureView
+    /** Present only while orbit metrics are tracked (see orbitGradientAllocated). */
+    orbitGradientTexture?: GPUTexture
+    orbitGradientView?: GPUTextureView
 }
 
 export class Engine {
@@ -668,9 +682,20 @@ export class Engine {
     /** Frozen metadata read copy used while merge writes the frozen set. */
     private metadataScratchTexture?: GPUTexture
     private metadataScratchView?: GPUTextureView
+    /** Frozen orbit-gradient read copy used while merge writes the frozen set. */
+    private orbitGradientScratchTexture?: GPUTexture
+    private orbitGradientScratchView?: GPUTextureView
+    /** 1x1 stand-in bound wherever an orbit-gradient texture is absent. */
+    private orbitGradientDummyView?: GPUTextureView
+    /** Whether the CURRENT textures carry the orbit-gradient resources. */
+    private orbitGradientAllocated = false
+    /** Whether the CURRENT palette asks for them. */
+    private orbitMetricsEnabled = false
 
     // merge pass (fuse resolved + frozen at zoom stop)
     pipelineMerge?: GPURenderPipeline
+    /** Same module, sixth target enabled (orbit gradients allocated). */
+    pipelineMergeOrbit?: GPURenderPipeline
     bindGroupMerge?: GPUBindGroup
     uniformBufferMerge?: GPUBuffer
 
@@ -724,6 +749,8 @@ export class Engine {
 
     // pipelines / bindgroups
     pipelineResolve?: GPURenderPipeline
+    /** Same module, sixth target enabled (orbit gradients allocated). */
+    pipelineResolveOrbit?: GPURenderPipeline
     bindGroupResolve?: GPUBindGroup
     pipelineColor?: GPURenderPipeline
     bindGroupColor?: GPUBindGroup
@@ -979,6 +1006,8 @@ export class Engine {
         generation: 0,
         activePixelCount: -1,
         visiblePixelCount: 1,
+        zoomRefresh: false,
+        zoomRefreshRegimeKey: '',
     }
     /** Invalidates delayed timing samples when a clear changes the remaining population. */
     private batchControllerGeneration = 0
@@ -988,6 +1017,8 @@ export class Engine {
     private batchTranslationActive = false
     /** EMA of weighted iteration applications per GPU millisecond. */
     private iterationWorkRate = 0
+    /** First-dense-frame models, isolated from sparse continuation and pan. */
+    private zoomRefreshCostModels = new Map<string, ZoomRefreshCostModel>()
     /** Timestamp and counter maps are joined by render-frame serial because
      *  their asynchronous WebGPU mappings may complete in either order. */
     private pendingIterationTimings = new Map<number, {
@@ -2125,6 +2156,8 @@ export class Engine {
                 // Raw is retained only for analytic-AA Taylor expansion/reach;
                 // ordinary color values always come from the typed display set.
                 { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 15, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
@@ -2137,12 +2170,29 @@ export class Engine {
             { format: 'r32uint' },
         ]
 
+        // The orbit gradient is a sixth target only while it is allocated; the
+        // null variant lets the same shader run with that output discarded,
+        // which is what keeps the attachment budget at 24 bytes per sample for
+        // every palette that asks for no stripe/direction effect.
+        const displayTargetsWithOrbit: (GPUColorTargetState | null)[] = [
+            ...displayTargets,
+            { format: 'rgba16float' },
+        ]
+        const displayTargetsWithoutOrbit: (GPUColorTargetState | null)[] = [...displayTargets, null]
+
         this.pipelineResolve = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
             vertex: { module: moduleResolve, entryPoint: 'vs_main' },
-            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: displayTargets },
+            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: displayTargetsWithoutOrbit },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Resolve',
+        })
+        this.pipelineResolveOrbit = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutResolve] }),
+            vertex: { module: moduleResolve, entryPoint: 'vs_main' },
+            fragment: { module: moduleResolve, entryPoint: 'fs_main', targets: displayTargetsWithOrbit },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline Resolve (orbit gradient)',
         })
 
         // Direct path: sRGB straight to the swapchain (fs_main_direct), byte-identical
@@ -2242,15 +2292,24 @@ export class Engine {
                 { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
                 { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
+                { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout Merge',
         })
         this.pipelineMerge = this.device.createRenderPipeline({
             layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMerge] }),
             vertex: { module: moduleMerge, entryPoint: 'vs_main' },
-            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: displayTargets },
+            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: displayTargetsWithoutOrbit },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Merge',
+        })
+        this.pipelineMergeOrbit = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutMerge] }),
+            vertex: { module: moduleMerge, entryPoint: 'vs_main' },
+            fragment: { module: moduleMerge, entryPoint: 'fs_main', targets: displayTargetsWithOrbit },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline Merge (orbit gradient)',
         })
 
         // ── Present pipeline (accumTexture → swapchain, AA only) ─────────
@@ -3668,6 +3727,10 @@ export class Engine {
         if (elapsed <= 0) {
             return
         }
+        // A clear starts a new population immediately, while timestamp and
+        // counter maps may resolve later. Reject the old texture before it can
+        // contaminate either the global rate or the zoom-refresh model.
+        if (sample.generation !== this.batchControllerGeneration) return
 
         const frameTargetMs = 1000 / Math.max(1, this.targetFps)
         const targetIterationMs = requestedIterationBudgetMs(
@@ -3684,21 +3747,34 @@ export class Engine {
             ?? sample.activePixelCount
         const effectiveRemainingPixelCount = sample.effectiveRemainingPixelCount
             ?? remainingPixelCount
+        const sampledRate = sample.actualWeightedWork !== undefined
+            ? measureIterationWorkRate(sample.actualWeightedWork, elapsed)
+            : 0
+        if (computePassOnly && sample.zoomRefresh && sampledRate > 0) {
+            const previousModel = this.zoomRefreshCostModels.get(
+                sample.zoomRefreshRegimeKey,
+            )
+            const nextModel = updateZoomRefreshCostModel(
+                previousModel,
+                sampledRate,
+                sampledFixedPassesMs,
+            )
+            if (nextModel) {
+                this.zoomRefreshCostModels.set(
+                    sample.zoomRefreshRegimeKey,
+                    nextModel,
+                )
+            }
+        }
         if (computePassOnly && isRepresentativeIterationPopulation(
             remainingPixelCount,
             sample.visiblePixelCount,
-        ) && sample.actualWeightedWork !== undefined) {
-            const sampledRate = measureIterationWorkRate(
-                sample.actualWeightedWork,
-                elapsed,
-            )
+        ) && sampledRate > 0) {
             this.iterationWorkRate = updateIterationWorkRateEma(
                 this.iterationWorkRate,
                 sampledRate,
             )
         }
-
-        if (sample.generation !== this.batchControllerGeneration) return
 
         if (!computePassOnly) {
             // Timestamp queries are optional. Keep the proportional full-frame
@@ -3768,6 +3844,83 @@ export class Engine {
         )
     }
 
+    private learnedZoomRefreshBatchSizeFor(
+        activePixelCount: number,
+        regimeKey: string,
+    ): number | null {
+        return predictZoomRefreshBatchSize({
+            model: this.zoomRefreshCostModels.get(regimeKey),
+            fallbackWorkRate: this.iterationWorkRate,
+            frameTargetMs: 1000 / Math.max(1, this.targetFps),
+            fallbackFixedPassesMs: this.otherPassesGpuMs,
+            activePixelCount,
+            minBatchSize: MIN_BATCH_SIZE,
+            maxBatchSize: this.getEffectiveMaxBatchSize(),
+        })
+    }
+
+    private computeIterationDispatchBox(aspect: number, angle: number) {
+        // Bounding box of the rotated viewport, snapped outwards to the 8×8
+        // iteration workgroup grid.
+        const neutralExtent = Math.sqrt(aspect * aspect + 1)
+        const absCos = Math.abs(Math.cos(angle))
+        const absSin = Math.abs(Math.sin(angle))
+        const halfTexels = this.neutralSize / 2
+        const halfX = ((aspect * absCos + absSin) / neutralExtent) * halfTexels
+        const halfY = ((aspect * absSin + absCos) / neutralExtent) * halfTexels
+        const x = Math.max(0, Math.floor((halfTexels - halfX) / 8) * 8)
+        const y = Math.max(0, Math.floor((halfTexels - halfY) / 8) * 8)
+        const right = Math.min(
+            this.neutralSize,
+            Math.ceil((halfTexels + halfX) / 8) * 8,
+        )
+        const bottom = Math.min(
+            this.neutralSize,
+            Math.ceil((halfTexels + halfY) / 8) * 8,
+        )
+        return {
+            x,
+            y,
+            width: Math.max(8, right - x),
+            height: Math.max(8, bottom - y),
+        }
+    }
+
+    /** Layers reprojection must copy for a TERMINAL texel. Layers 13..16 are
+     *  terminal values, not continuation state, so they have to be inside this
+     *  count whenever they exist — an escaped texel never revisits them. */
+    private rawCopyLayerCount(analyticRawPayloadNeeded: boolean): number {
+        if (this.orbitGradientAllocated) return RAW_ORBIT_GRADIENT_LAYERS
+        return analyticRawPayloadNeeded ? RAW_LAYERS : RAW_BASE_LAYERS
+    }
+
+    private iterationBatchRegimeKey(
+        analyticRawPayloadNeeded: boolean,
+        zoomRefreshHasSnapshot: boolean,
+        dispatchPixelCount: number,
+        visiblePixelCount: number,
+    ): string {
+        // Quarter-step buckets retain rotation/dispatch-area differences without
+        // creating one model for every sub-pixel view change.
+        const dispatchAreaBucket = Math.max(
+            1,
+            Math.round(4 * dispatchPixelCount / Math.max(1, visiblePixelCount)),
+        )
+        const dynamicStats = this.dynamicValidityStatsEnabled
+            || this.dynamicValidityShadow
+        return [
+            `d${this.floatExpActive ? 1 : 0}`,
+            `a${this.lastShaderApproxFlag}`,
+            `l${this.rawCopyLayerCount(analyticRawPayloadNeeded)}`,
+            `p${this.portfolioEnabled ? 1 : 0}`,
+            `r${this.renormEnabled ? 1 : 0}`,
+            `i${this.periodicSchedulingEnabled ? 1 : 0}`,
+            `w${this.workStatsEnabled || dynamicStats ? 1 : 0}`,
+            `s${zoomRefreshHasSnapshot ? 1 : 0}`,
+            `x${dispatchAreaBucket}`,
+        ].join(':')
+    }
+
     resize() {
         const dpr = (window.devicePixelRatio || 1) * this.dprMultiplier
         // Lire la taille CSS du canvas (pas du parent) pour respecter les contraintes CSS
@@ -3802,6 +3955,7 @@ export class Engine {
         this.destroyDisplaySet(this.frozenDisplay)
         this.geometryScratchTexture?.destroy?.()
         this.metadataScratchTexture?.destroy?.()
+        this.orbitGradientScratchTexture?.destroy?.()
         this.accumTexture?.destroy?.()
         this.aaTargetTexture?.destroy?.()
 
@@ -3835,9 +3989,23 @@ export class Engine {
             return { texture, arrayView, layerViews }
         }
 
+        if (!this.orbitGradientDummyView) {
+            this.orbitGradientDummyView = this.device.createTexture({
+                size: { width: 1, height: 1 },
+                format: 'rgba16float',
+                usage: GPUTextureUsage.TEXTURE_BINDING,
+                label: 'Engine OrbitGradientDummy',
+            }).createView({ label: 'Engine OrbitGradientDummy View' })
+        }
+
         // STORAGE_BINDING: the in-place compute path writes A as a read_write
         // storage texture (r32float is the only format allowing this).
-        const rawResult = createLayeredTexture('Engine RawTexture (A)', RAW_LAYERS, GPUTextureUsage.STORAGE_BINDING)
+        // Latched here rather than read per frame: every raw view, display
+        // attachment and pipeline choice below depends on it, so it may only
+        // change through a full re-creation (update() calls resize() on flip).
+        this.orbitGradientAllocated = this.orbitMetricsEnabled
+        const rawLayers = this.orbitGradientAllocated ? RAW_ORBIT_GRADIENT_LAYERS : RAW_LAYERS
+        const rawResult = createLayeredTexture('Engine RawTexture (A)', rawLayers, GPUTextureUsage.STORAGE_BINDING)
         this.rawTexture = rawResult.texture
         this.rawArrayView = rawResult.arrayView
         // Phase D reseed views: layer 0 storage (stamp target) + layers 8..12
@@ -3852,7 +4020,7 @@ export class Engine {
 
         // STORAGE_BINDING: the utility compute pass (reproject_cs) writes B
         // as a write-only storage texture array.
-        const brushResult = createLayeredTexture('Engine RawBrushTexture (B)', RAW_LAYERS, GPUTextureUsage.STORAGE_BINDING)
+        const brushResult = createLayeredTexture('Engine RawBrushTexture (B)', rawLayers, GPUTextureUsage.STORAGE_BINDING)
         this.rawBrushTexture = brushResult.texture
         this.rawBrushArrayView = brushResult.arrayView
         // B carries the same derived views as A: the reprojection swaps the two
@@ -3882,6 +4050,15 @@ export class Engine {
                     | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
                 label: label + ' Metadata',
             })
+            const orbitGradientTexture = this.orbitGradientAllocated
+                ? this.device.createTexture({
+                    size: { width: textureSize, height: textureSize },
+                    format: 'rgba16float',
+                    usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
+                        | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                    label: label + ' OrbitGradient',
+                })
+                : undefined
             return {
                 valuesTexture: values.texture,
                 valuesArrayView: values.arrayView,
@@ -3890,6 +4067,8 @@ export class Engine {
                 geometryView: geometryTexture.createView({ label: label + ' GeometryView' }),
                 metadataTexture,
                 metadataView: metadataTexture.createView({ label: label + ' MetadataView' }),
+                orbitGradientTexture,
+                orbitGradientView: orbitGradientTexture?.createView({ label: label + ' OrbitGradientView' }),
             }
         }
 
@@ -3909,6 +4088,15 @@ export class Engine {
             label: 'Engine MetadataScratch',
         })
         this.metadataScratchView = this.metadataScratchTexture.createView({ label: 'Engine MetadataScratch View' })
+        this.orbitGradientScratchTexture = this.orbitGradientAllocated
+            ? this.device.createTexture({
+                size: { width: textureSize, height: textureSize },
+                format: 'rgba16float',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                label: 'Engine MergeOrbitGradientScratch',
+            })
+            : undefined
+        this.orbitGradientScratchView = this.orbitGradientScratchTexture?.createView({ label: 'Engine MergeOrbitGradientScratch View' })
         this.resolvedDisplayVersion = -1
         this.frozenDisplayVersion = -1
 
@@ -3956,6 +4144,7 @@ export class Engine {
         display?.valuesTexture.destroy?.()
         display?.geometryTexture.destroy?.()
         display?.metadataTexture.destroy?.()
+        display?.orbitGradientTexture?.destroy?.()
     }
 
     /** Every bind group that names A or B. The reprojection swaps the two, so
@@ -4032,6 +4221,8 @@ export class Engine {
                     { binding: 4, resource: this.rawBrushArrayView },
                     { binding: 5, resource: this.geometryScratchView },
                     { binding: 6, resource: this.metadataScratchView },
+                    { binding: 7, resource: this.resolvedDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
+                    { binding: 8, resource: this.orbitGradientScratchView ?? this.orbitGradientDummyView! },
                 ],
                 label: 'Engine BindGroup Merge',
             })
@@ -4485,6 +4676,15 @@ export class Engine {
             this.requestFinalStatsReadback()
         }
 
+        // Orbit metrics decide the raw layer count and the sixth display
+        // attachment, so a flip has to re-create the textures. Done here, before
+        // any previous-state comparison: resize() clears the render anyway, which
+        // is what the flip already forced through clearHistoryNextFrame.
+        this.orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
+        if (this.orbitMetricsEnabled !== this.orbitGradientAllocated && this.rawTexture) {
+            this.resize()
+        }
+
         this.debugShadingActive = renderOptions.debugShading
         if (this.debugViewOverride > 0) {
             this.debugViewMode = this.debugViewOverride
@@ -4552,7 +4752,7 @@ export class Engine {
             && this.isZoomReprojectionOnlyChange(mandelbrot, this.previousMandelbrot)
         const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
         const stripeFrequencyChanged = renderOptions.stripeFrequency !== this.previousRenderOptions?.stripeFrequency
-        const orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
+        const orbitMetricsEnabled = this.orbitMetricsEnabled
         const orbitMetricsChanged = this.previousOrbitMetricsEnabled !== undefined
             && orbitMetricsEnabled !== this.previousOrbitMetricsEnabled
         const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
@@ -5192,6 +5392,8 @@ export class Engine {
             this.invalidateCounterReadback()
         }
         const clearFlag = this.clearHistoryNextFrame ? 1 : 0
+        const zoomRefreshFrame = clearFlag !== 0 && isZoomActive(this.zoomState)
+        const zoomRefreshHasSnapshot = zoomRefreshFrame && this.needFreezeSnapshot
         if (this.clearHistoryNextFrame) {
             this.invalidateCounterReadback()
         }
@@ -5239,10 +5441,20 @@ export class Engine {
                     this.unfinishedPixelCount + exposedPixelCount,
                 )
                 : exposedPixelCount > 0 ? exposedPixelCount : -1
+        this.dispatchBox = this.computeIterationDispatchBox(
+            aspect,
+            this.previousMandelbrot.angle,
+        )
+        const dispatchPixelCount = this.dispatchBox.width * this.dispatchBox.height
+        const zoomRefreshRegimeKey = this.iterationBatchRegimeKey(
+            analyticRawPayloadNeeded,
+            zoomRefreshHasSnapshot,
+            dispatchPixelCount,
+            visiblePixelCount,
+        )
 
-        // Frame topology is known only here. Clears start with a dense active
-        // population; pans add the exposed strip to the latest counter value.
-        // Both can reuse the persistent throughput EMA immediately.
+        // Frame topology is known only here. Zoom clears use their matching
+        // first-dense-frame model; other clears and pans use the global rate.
         if (clearFlag !== 0 && !this.batchSeededForPendingClear) {
             this.batchControllerGeneration++
             this.batchSeededForPendingClear = true
@@ -5253,7 +5465,12 @@ export class Engine {
         this.batchTranslationActive = hasTranslationShift
 
         if (clearFlag !== 0 || hasTranslationShift) {
-            const learnedBatchSize = this.learnedBatchSizeFor(activePixelCount)
+            const learnedBatchSize = zoomRefreshFrame
+                ? this.learnedZoomRefreshBatchSizeFor(
+                    activePixelCount,
+                    zoomRefreshRegimeKey,
+                )
+                : this.learnedBatchSizeFor(activePixelCount)
             if (learnedBatchSize !== null && learnedBatchSize !== this.iterationBatchSize) {
                 this.iterationBatchSize = learnedBatchSize
                 // update() already uploaded the complete uniform block; patch the
@@ -5285,31 +5502,9 @@ export class Engine {
             this.needFreezeSnapshot = false
         }
 
-        // Bounding box of the rotated viewport: the visible rectangle spans
-        // ±aspect × ±1 in rotated neutral units, so its axis-aligned half
-        // extents are aspect·|cos| + |sin| and aspect·|sin| + |cos|, divided by
-        // the neutral extent and scaled to texels. Snapped outward to the 8×8
-        // workgroup grid.
-        const angleForBox = this.previousMandelbrot.angle
-        const neutralExtent = Math.sqrt(aspect * aspect + 1)
-        const absCos = Math.abs(Math.cos(angleForBox))
-        const absSin = Math.abs(Math.sin(angleForBox))
-        const halfTexels = this.neutralSize / 2
-        const halfX = ((aspect * absCos + absSin) / neutralExtent) * halfTexels
-        const halfY = ((aspect * absSin + absCos) / neutralExtent) * halfTexels
-        const boxX = Math.max(0, Math.floor((halfTexels - halfX) / 8) * 8)
-        const boxY = Math.max(0, Math.floor((halfTexels - halfY) / 8) * 8)
-        const boxRight = Math.min(this.neutralSize, Math.ceil((halfTexels + halfX) / 8) * 8)
-        const boxBottom = Math.min(this.neutralSize, Math.ceil((halfTexels + halfY) / 8) * 8)
-        this.dispatchBox = {
-            x: boxX,
-            y: boxY,
-            width: Math.max(8, boxRight - boxX),
-            height: Math.max(8, boxBottom - boxY),
-        }
         const workCounterShift = iterationWorkCounterShift(
             this.iterationBatchSize,
-            this.dispatchBox.width * this.dispatchBox.height,
+            dispatchPixelCount,
         )
 
         const brushUniforms = new Float32Array([
@@ -5320,7 +5515,7 @@ export class Engine {
             shiftTexY,
             this.dispatchBox.x,
             this.dispatchBox.y,
-            analyticRawPayloadNeeded ? RAW_LAYERS : RAW_BASE_LAYERS,
+            this.rawCopyLayerCount(analyticRawPayloadNeeded),
             this.previousMandelbrot.mu,
             workCounterShift,
             0,
@@ -5406,6 +5601,13 @@ export class Engine {
                 { texture: this.metadataScratchTexture },
                 { width: texSize, height: texSize },
             )
+            if (this.frozenDisplay.orbitGradientTexture && this.orbitGradientScratchTexture) {
+                commandEncoder.copyTextureToTexture(
+                    { texture: this.frozenDisplay.orbitGradientTexture },
+                    { texture: this.orbitGradientScratchTexture },
+                    { width: texSize, height: texSize },
+                )
+            }
             // 2) Write merge uniforms (captured at zoom stop before state reset)
             const mergeData = new Float32Array([
                 this.mergeUniforms.zf,
@@ -5420,6 +5622,7 @@ export class Engine {
                 ...this.frozenDisplay.valueLayerViews,
                 this.frozenDisplay.geometryView,
                 this.frozenDisplay.metadataView,
+                ...(this.frozenDisplay.orbitGradientView ? [this.frozenDisplay.orbitGradientView] : []),
             ].map(view => ({
                 view,
                 clearValue: { r: 0, g: 0, b: 0, a: 0 },
@@ -5430,7 +5633,9 @@ export class Engine {
                 colorAttachments: mergeAttachments,
                 timestampWrites: this.tsExplicitSpanEnd(PASS_SLOT_INDEX.merge),
             })
-            rpassMerge.setPipeline(this.pipelineMerge)
+            rpassMerge.setPipeline(
+                this.orbitGradientAllocated ? this.pipelineMergeOrbit! : this.pipelineMerge!,
+            )
             rpassMerge.setBindGroup(0, this.bindGroupMerge)
             rpassMerge.draw(6, 1, 0, 0)
             rpassMerge.end()
@@ -5460,6 +5665,13 @@ export class Engine {
                 { texture: this.frozenDisplay.metadataTexture },
                 { width: texSize, height: texSize },
             )
+            if (this.resolvedDisplay.orbitGradientTexture && this.frozenDisplay.orbitGradientTexture) {
+                commandEncoder.copyTextureToTexture(
+                    { texture: this.resolvedDisplay.orbitGradientTexture },
+                    { texture: this.frozenDisplay.orbitGradientTexture },
+                    { width: texSize, height: texSize },
+                )
+            }
             this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'end')
             this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needFreezeSnapshot = false
@@ -5476,7 +5688,12 @@ export class Engine {
             display: DisplaySet,
             loadOp: GPULoadOp = 'clear',
         ): GPURenderPassColorAttachment[] =>
-            [...display.valueLayerViews, display.geometryView, display.metadataView].map(view => ({
+            [
+                ...display.valueLayerViews,
+                display.geometryView,
+                display.metadataView,
+                ...(display.orbitGradientView ? [display.orbitGradientView] : []),
+            ].map(view => ({
                 view,
                 clearValue: { r: 0, g: 0, b: 0, a: 0 },
                 loadOp,
@@ -5621,7 +5838,9 @@ export class Engine {
                 colorAttachments: makeDisplayAttachments(this.resolvedDisplay!, 'clear'),
                 timestampWrites: this.tsWrites(PASS_SLOT_INDEX.resolve),
             })
-            rpassResolve.setPipeline(this.pipelineResolve)
+            rpassResolve.setPipeline(
+                this.orbitGradientAllocated ? this.pipelineResolveOrbit! : this.pipelineResolve!,
+            )
             rpassResolve.setBindGroup(0, this.bindGroupResolve)
             rpassResolve.draw(6, 1, 0, 0)
             rpassResolve.end()
@@ -5832,6 +6051,8 @@ export class Engine {
             generation: this.batchControllerGeneration,
             activePixelCount,
             visiblePixelCount,
+            zoomRefresh: zoomRefreshFrame,
+            zoomRefreshRegimeKey,
         }
         let tsResolvedThisFrame = false
         if (this.timestampsEnabled && this.timestampQuerySet && this.tsResolveBuffer && this.tsReadBuffer
@@ -6292,6 +6513,8 @@ export class Engine {
                 { binding: 12, resource: this.resolvedDisplay.metadataView },
                 { binding: 13, resource: this.frozenDisplay.metadataView },
                 { binding: 14, resource: this.rawArrayView },
+                { binding: 15, resource: this.resolvedDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
+                { binding: 16, resource: this.frozenDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,

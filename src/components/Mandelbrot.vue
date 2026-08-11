@@ -18,8 +18,8 @@ let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
 
 // Keyboard state is sampled by draw(), rather than in an independent timer.
-// draw() is paced to the GPU's real frame cadence, so input cannot accumulate
-// several invisible velocity impulses while a complex view is rendering.
+// Rust applies it with the same delta-time as navigation integration, so held
+// controls keep the same speed at different rendered-frame cadences.
 let keyboardNavigation: KeyboardNavigationInput = {
   translateX: 0,
   translateY: 0,
@@ -212,18 +212,15 @@ async function draw() {
 
     const cpuFrameStartMs = performance.now();
 
-    if (keyboardNavigation.translateX || keyboardNavigation.translateY) {
-      navigator.translate(keyboardNavigation.translateX, keyboardNavigation.translateY);
-    }
-    if (keyboardNavigation.rotation) {
-      navigator.rotate(keyboardNavigation.rotation);
-    }
-    if (keyboardNavigation.zoom) {
-      navigator.zoom(keyboardNavigation.zoom);
-    }
-
     const canvas = canvasRef.value;
-    const step = navigator.step(canvas ? canvas.width : undefined, canvas ? canvas.height : undefined);
+    const step = navigator.step_with_input(
+      keyboardNavigation.translateX,
+      keyboardNavigation.translateY,
+      keyboardNavigation.rotation,
+      keyboardNavigation.zoom || 1,
+      canvas ? canvas.width : undefined,
+      canvas ? canvas.height : undefined,
+    );
     if (!step) return;
     const [dx, dy] = step as [string, string];
     const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];

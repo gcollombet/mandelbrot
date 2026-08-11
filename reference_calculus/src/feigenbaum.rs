@@ -1872,10 +1872,7 @@ pub fn propose_minibrot_window(
             let q = q.abs_up();
             let w_sup = add_up(w.abs_up(), e);
             // Ĝ = a·w_p is a product: no 1/m_s² term.
-            let k_cell = add_up(
-                mul_up(gauge_deriv_sup, w_sup),
-                mul_up(gauge_abs_sup, q),
-            );
+            let k_cell = add_up(mul_up(gauge_deriv_sup, w_sup), mul_up(gauge_abs_sup, q));
             lipschitz = lipschitz.max(k_cell);
         }
     }
@@ -2194,11 +2191,7 @@ pub struct CardioidWindowProposal {
 /// Certify one `ĉ`-cell by trapping the renormalized critical orbit.
 ///
 /// Returns the step at which the trap closed and the invariant radius.
-fn cardioid_cell_certifies(
-    c_hat: Ball,
-    defect: f64,
-    max_steps: usize,
-) -> Option<(usize, f64)> {
+fn cardioid_cell_certifies(c_hat: Ball, defect: f64, max_steps: usize) -> Option<(usize, f64)> {
     let mut orbit = Ball::ZERO;
     for step in 0..max_steps {
         let m = orbit.abs_up();
@@ -2263,15 +2256,8 @@ pub fn propose_cardioid_window(
     if !(headroom > 0.0) {
         return failed("invalid dynamical radius");
     }
-    let defect_proposal = propose_minibrot_return(
-        nucleus_re,
-        nucleus_im,
-        p,
-        radius,
-        8,
-        0.02 * headroom,
-        12,
-    );
+    let defect_proposal =
+        propose_minibrot_return(nucleus_re, nucleus_im, p, radius, 8, 0.02 * headroom, 12);
     if defect_proposal.failure.is_some() {
         return failed("defect proposal failed");
     }
@@ -3159,10 +3145,17 @@ mod tests {
         );
         // Every §4/§5 entry point refuses on that basis…
         let difference = propose_difference_return(-1.0, 0.0, 1, 0.25, 4, 1e-3, 2);
-        assert_eq!(difference.failure, Some("critical scale is zero or non-finite"));
+        assert_eq!(
+            difference.failure,
+            Some("critical scale is zero or non-finite")
+        );
         // …while the ported builders produce a gauge and a defect bound.
         let ported = propose_minibrot_return(-1.0, 0.0, 2, 1.0, 4, 1e30, 0);
-        assert!(ported.failure.is_none(), "port failed: {:?}", ported.failure);
+        assert!(
+            ported.failure.is_none(),
+            "port failed: {:?}",
+            ported.failure
+        );
         assert!(ported.uniform_error.is_finite());
         // The centre is exactly 0; what is left is the ball's own accumulated
         // rounding radius (~10·EPSILON on an orbit of magnitude 1), so this
@@ -3196,7 +3189,11 @@ mod tests {
         }
         // |a| grows with the period on this family, and the defect must not grow
         // with it: the gauge is doing its job.
-        assert!(rows[0].1 < rows[1].1 && rows[1].1 < rows[2].1, "gauge order {:?}", rows);
+        assert!(
+            rows[0].1 < rows[1].1 && rows[1].1 < rows[2].1,
+            "gauge order {:?}",
+            rows
+        );
         assert!(
             rows[2].2 < rows[0].2,
             "defect should shrink as the gauge grows: {:?}",
@@ -3217,8 +3214,18 @@ mod tests {
         let cases: [(&str, f64, f64, usize); 4] = [
             ("p3-island", -1.754_877_666_246_692_8, 0.0, 3),
             ("elephant-mini", 0.2912695272319882, 0.0148034311412361, 15),
-            ("seahorse-mini", -0.7412767706103194, 0.11587976042299918, 27),
-            ("mini-seahorse", -1.769198041115771, 0.002383831241173447, 66),
+            (
+                "seahorse-mini",
+                -0.7412767706103194,
+                0.11587976042299918,
+                27,
+            ),
+            (
+                "mini-seahorse",
+                -1.769198041115771,
+                0.002383831241173447,
+                66,
+            ),
         ];
 
         println!("\n cost | view           p | gauges | §4 defect (cells) | cardioid tiling (cells tested)");
@@ -3333,7 +3340,8 @@ mod tests {
         // Same check against the real, subdividing proposal: every accepted cell
         // centre must be in M. `Re ĉ ≤ 1/4` is the sharpest cheap witness — the
         // cusp is the rightmost point of the whole Mandelbrot set.
-        let proposal = propose_cardioid_window(-1.754_877_666_246_692_8, 0.0, 3, 0.5, 24, 96, 5, 0.1);
+        let proposal =
+            propose_cardioid_window(-1.754_877_666_246_692_8, 0.0, 3, 0.5, 24, 96, 5, 0.1);
         assert!(proposal.failure.is_none(), "{:?}", proposal.failure);
         let extreme = proposal
             .cells
@@ -3342,7 +3350,11 @@ mod tests {
             .unwrap();
         println!(
             " extreme accepted cell: ĉ = ({:.6}, {:.6}) half {:.6} entry {} rho {:.4}",
-            extreme.center.0, extreme.center.1, extreme.half_width, extreme.entry_step, extreme.trap_radius
+            extreme.center.0,
+            extreme.center.1,
+            extreme.half_width,
+            extreme.entry_step,
+            extreme.trap_radius
         );
         for cell in &proposal.cells {
             // NOT `Re ĉ ≤ 1/4`. The cusp is the rightmost point of the cardioid on
@@ -3385,11 +3397,28 @@ mod tests {
     fn defect_radial_profile() {
         let cases: [(&str, f64, f64, usize); 4] = [
             ("p3-island", -1.754_877_666_246_692_8, 0.0, 3),
-            ("elephant-mini", 0.291_269_527_231_988_2, 0.014_803_431_141_236_1, 15),
-            ("seahorse-mini", -0.7412767706103194, 0.11587976042299918, 27),
-            ("mini-seahorse", -1.769198041115771, 0.002383831241173447, 66),
+            (
+                "elephant-mini",
+                0.291_269_527_231_988_2,
+                0.014_803_431_141_236_1,
+                15,
+            ),
+            (
+                "seahorse-mini",
+                -0.7412767706103194,
+                0.11587976042299918,
+                27,
+            ),
+            (
+                "mini-seahorse",
+                -1.769198041115771,
+                0.002383831241173447,
+                66,
+            ),
         ];
-        println!("\n profile | view           p |    R |  certified ε |     f64 |D| | cert/f64 | ε/R³");
+        println!(
+            "\n profile | view           p |    R |  certified ε |     f64 |D| | cert/f64 | ε/R³"
+        );
         for (name, cx, cy, p) in cases {
             let c = C64::new(cx, cy);
             let Some((a_ball, _s, _z, _r)) = minibrot_gauge_balls(c, p) else {
@@ -3400,7 +3429,10 @@ mod tests {
             for r in [0.5f64, 0.35, 0.25, 0.15, 0.1, 0.05] {
                 let proposal = propose_minibrot_return(cx, cy, p, r, 8, 1e-6, 10);
                 if proposal.failure.is_some() {
-                    println!(" profile | {:<14} {} | {:>4} FAILED {:?}", name, p, r, proposal.failure);
+                    println!(
+                        " profile | {:<14} {} | {:>4} FAILED {:?}",
+                        name, p, r, proposal.failure
+                    );
                     continue;
                 }
                 // Direct f64 probe of |Ĝ(ζ) - ζ²| on the boundary circle, which is
@@ -3492,8 +3524,18 @@ mod tests {
     fn defect_vs_subdivision_depth() {
         let cases: [(&str, f64, f64, usize); 3] = [
             ("p3-island", -1.754_877_666_246_692_8, 0.0, 3),
-            ("elephant-mini", 0.291_269_527_231_988_2, 0.014_803_431_141_236_1, 15),
-            ("mini-seahorse", -1.769198041115771, 0.002383831241173447, 66),
+            (
+                "elephant-mini",
+                0.291_269_527_231_988_2,
+                0.014_803_431_141_236_1,
+                15,
+            ),
+            (
+                "mini-seahorse",
+                -1.769198041115771,
+                0.002383831241173447,
+                66,
+            ),
         ];
         println!("\n defect | view           p |  budget   cells | uniform_error | maxCurvature");
         for (name, cx, cy, p) in cases {
@@ -3501,7 +3543,10 @@ mod tests {
                 let depth = 12u32;
                 let d = propose_minibrot_return(cx, cy, p, 0.5, 8, budget, depth);
                 if d.failure.is_some() {
-                    println!(" defect | {:<14} {} | {:>7.0e} FAILED {:?}", name, p, budget, d.failure);
+                    println!(
+                        " defect | {:<14} {} | {:>7.0e} FAILED {:?}",
+                        name, p, budget, d.failure
+                    );
                     continue;
                 }
                 println!(
@@ -3524,8 +3569,20 @@ mod tests {
     #[ignore = "diagnostic: run with --ignored --nocapture"]
     fn trace_drift_channel_blowup() {
         let cases: [(&str, f64, f64, usize, f64); 2] = [
-            ("seahorse-mini", -0.7412767706103194, 0.11587976042299918, 27, 2.8871894935571575e-3),
-            ("mini-seahorse", -1.769198041115771, 0.002383831241173447, 66, 7.245538807878007e-5),
+            (
+                "seahorse-mini",
+                -0.7412767706103194,
+                0.11587976042299918,
+                27,
+                2.8871894935571575e-3,
+            ),
+            (
+                "mini-seahorse",
+                -1.769198041115771,
+                0.002383831241173447,
+                66,
+                7.245538807878007e-5,
+            ),
         ];
         for (name, cx, cy, p, lambda) in cases {
             let c = C64::new(cx, cy);
@@ -3556,8 +3613,16 @@ mod tests {
                 println!(
                     " trace {} | VERDICT majorant {} threshold, first order {} threshold",
                     name,
-                    if drift.epsilon[p] < drift.min_orbit_modulus { "clears" } else { "EXCEEDS" },
-                    if drift.first_order[p] < drift.min_orbit_modulus { "clears" } else { "EXCEEDS" },
+                    if drift.epsilon[p] < drift.min_orbit_modulus {
+                        "clears"
+                    } else {
+                        "EXCEEDS"
+                    },
+                    if drift.first_order[p] < drift.min_orbit_modulus {
+                        "clears"
+                    } else {
+                        "EXCEEDS"
+                    },
                 );
             }
 
@@ -3643,12 +3708,15 @@ mod tests {
     #[test]
     fn minibrot_window_rejects_a_gauge_destroying_window() {
         let ok = propose_minibrot_window(-1.754_877_666_246_692_8, 0.0, 3, 1.0, 4, 1e-3, 1e-6);
-        assert!(ok.failure.is_none(), "tight window failed: {:?}", ok.failure);
+        assert!(
+            ok.failure.is_none(),
+            "tight window failed: {:?}",
+            ok.failure
+        );
         assert!(ok.gauge_margin > 0.0);
         assert!(ok.lipschitz_hat.is_finite());
 
-        let broken =
-            propose_minibrot_window(-1.754_877_666_246_692_8, 0.0, 3, 1.0, 4, 1e9, 1e-6);
+        let broken = propose_minibrot_window(-1.754_877_666_246_692_8, 0.0, 3, 1.0, 4, 1e9, 1e-6);
         assert!(broken.failure.is_some(), "a huge ĉ window must be refused");
     }
 

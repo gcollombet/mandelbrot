@@ -76,9 +76,13 @@ export type ColorStop = {
   stripeAverage?: number;
   /** Average orbit-direction coherence coloring blend weight (default 0) */
   rotationMean?: number;
-  /** Stripe average normal relief strength (default 0) */
+  /** Stripe average normal relief, as a normalized tilt control in [0, 1] (default 0) */
+  stripeReliefTilt?: number;
+  /** @deprecated Input-only alias: the legacy [0, 1] slope, migrated to `stripeReliefTilt`. */
   stripeRelief?: number;
-  /** Average orbit-direction coherence normal relief strength, range [0, 100] (default 0) */
+  /** Direction-coherence normal relief, as a normalized tilt control in [0, 1] (default 0) */
+  directionCoherenceReliefTilt?: number;
+  /** @deprecated Input-only alias: the legacy [0, 100] slope, migrated to `directionCoherenceReliefTilt`. */
   directionCoherenceRelief?: number;
 
   // ── Continuous effect parameters (natural ranges) ──
@@ -113,7 +117,62 @@ export type ColorStop = {
  */
 export function getEffectValue(stop: ColorStop, field: EffectFieldName): number {
   if (field === 'reliefGain') return resolveReliefGainControl(stop);
+  if (field === 'stripeReliefTilt') return resolveStripeReliefTilt(stop);
+  if (field === 'directionCoherenceReliefTilt') return resolveDirectionCoherenceReliefTilt(stop);
   return stop[field] ?? DEFAULT_VALUES[field];
+}
+
+// ── Relief tilt controls ───────────────────────────────────────────
+// The visible amount of relief is the tilt of the surface normal,
+// theta = atan(slope), not the slope itself: past a slope of ~1 the normal
+// barely keeps turning, so lerping the slope between two stops spends most of
+// its range on a change nobody sees. The stored control is theta normalized by
+// the field's historical maximum, which is the domain the palette interpolates;
+// the shader recovers slope = tan(control * tiltMax). 0 stays exactly 0 and 1
+// still means the historical maximum, so no preset changes range.
+export const STRIPE_RELIEF_MAX_SLOPE = 1;
+export const DIRECTION_COHERENCE_RELIEF_MAX_SLOPE = 100;
+const STRIPE_RELIEF_TILT_MAX = Math.atan(STRIPE_RELIEF_MAX_SLOPE);
+const DIRECTION_COHERENCE_RELIEF_TILT_MAX = Math.atan(DIRECTION_COHERENCE_RELIEF_MAX_SLOPE);
+
+/** Convert a legacy slope to the bounded tilt control the palette interpolates. */
+export function encodeReliefTilt(slope: number, tiltMax: number): number {
+  if (!Number.isFinite(slope) || slope <= 0) return 0;
+  return clamp01(Math.atan(slope) / tiltMax);
+}
+
+/** Decode a tilt control to a slope exactly as the color shader does. */
+export function decodeReliefTilt(control: number, tiltMax: number): number {
+  const bounded = Number.isFinite(control) ? clamp01(control) : 0;
+  return Math.tan(bounded * tiltMax);
+}
+
+export function decodeStripeReliefTilt(control: number): number {
+  return decodeReliefTilt(control, STRIPE_RELIEF_TILT_MAX);
+}
+
+export function decodeDirectionCoherenceReliefTilt(control: number): number {
+  return decodeReliefTilt(control, DIRECTION_COHERENCE_RELIEF_TILT_MAX);
+}
+
+/** Resolve a current or legacy stop to the bounded stripe relief control. */
+export function resolveStripeReliefTilt(stop: ColorStop): number {
+  if (Number.isFinite(stop.stripeReliefTilt)) return clamp01(stop.stripeReliefTilt as number);
+  if (Number.isFinite(stop.stripeRelief)) {
+    return encodeReliefTilt(stop.stripeRelief as number, STRIPE_RELIEF_TILT_MAX);
+  }
+  return 0;
+}
+
+/** Resolve a current or legacy stop to the bounded direction relief control. */
+export function resolveDirectionCoherenceReliefTilt(stop: ColorStop): number {
+  if (Number.isFinite(stop.directionCoherenceReliefTilt)) {
+    return clamp01(stop.directionCoherenceReliefTilt as number);
+  }
+  if (Number.isFinite(stop.directionCoherenceRelief)) {
+    return encodeReliefTilt(stop.directionCoherenceRelief as number, DIRECTION_COHERENCE_RELIEF_TILT_MAX);
+  }
+  return 0;
 }
 
 export const RELIEF_GAIN_CONTROL_MIN = 0;
@@ -148,8 +207,12 @@ export function normalizeColorStop(stop: ColorStop): ColorStop {
   const normalized: ColorStop = {
     ...stop,
     reliefGain: resolveReliefGainControl(stop),
+    stripeReliefTilt: resolveStripeReliefTilt(stop),
+    directionCoherenceReliefTilt: resolveDirectionCoherenceReliefTilt(stop),
   };
   delete normalized.directionalVolume;
+  delete normalized.stripeRelief;
+  delete normalized.directionCoherenceRelief;
   return normalized;
 }
 

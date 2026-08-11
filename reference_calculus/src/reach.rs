@@ -599,9 +599,15 @@ mod tests {
         // claims: one P=256 texel is ~15× the ν budget REACH_TOL implies, and a
         // cubic reach converts that into ~2.5× radius, ~6× fewer anchors.
         let visual = tol_for_nu_budget(palette_nu_quantum(256.0));
-        assert!((visual / REACH_TOL - 14.74).abs() < 0.05, "visual tol {visual}");
+        assert!(
+            (visual / REACH_TOL - 14.74).abs() < 0.05,
+            "visual tol {visual}"
+        );
         let radius_gain = cubic_reach_log2_shift(REACH_TOL, visual).exp2();
-        assert!((radius_gain - 2.452).abs() < 0.01, "radius gain {radius_gain}");
+        assert!(
+            (radius_gain - 2.452).abs() < 0.01,
+            "radius gain {radius_gain}"
+        );
         assert!((radius_gain * radius_gain - 6.01).abs() < 0.05);
     }
 
@@ -965,9 +971,7 @@ mod tests {
             ("P=256 texel", tol_for_nu_budget(quantum_period_256)),
             ("P=def texel", tol_for_nu_budget(quantum_default)),
         ];
-        println!(
-            " nu sweep   | tolerance          tol      ×base  ρ×   | budget(own)"
-        );
+        println!(" nu sweep   | tolerance          tol      ×base  ρ×   | budget(own)");
         for (label, tol) in sweep {
             println!(
                 " nu sweep   | {:<16} {:>9.3e} {:>6.2} {:>5.2} | {:>11.6}",
