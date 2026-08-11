@@ -79,7 +79,10 @@ describe('typed display consumers', () => {
     expect(color).toContain('let stripeGrad = cachedStripeGradient * 8.0;')
     expect(color).toContain('let directionCoherenceGrad = cachedCoherenceGradient * 16.0;')
     expect(color).toContain('fn normalize_orbit_gradient(')
-    expect(engine).toContain('const RAW_ORBIT_GRADIENT_LAYERS = 17')
+    expect(engine).toContain('const RAW_ORBIT_GRADIENT_LAYERS = 18')
+    // The deep kernel tracks the same metrics from the same w = z'/z.
+    expect(brush).toContain('advance_orbit_metrics(&metrics, &previousMetrics, z, derM, derS + derSLo, logTexelDelta, f32(max(skipped, 1)));')
+    expect(brush).not.toContain('terminal_orbit_metrics(0.0, vec2<f32>(0.0))')
   })
 
   it('interpolates relief amplitude in the tilt domain', () => {

@@ -71,11 +71,12 @@ export const DEBUG_VIEW_REACH = 6
 // 13 for unfinished pixels because z″ also feeds terminal cached geometry.
 const RAW_BASE_LAYERS = 9
 const RAW_LAYERS = 13
-// Layers 13..16 carry the analytic gradients of the two orbit metrics. They are
-// allocated only while a stop asks for stripe/direction coloring or relief:
-// four more r32float layers over the neutral square is not a cost to pay for
-// the palettes that never ask for them.
-const RAW_ORBIT_GRADIENT_LAYERS = 17
+// Layers 13..16 carry the analytic gradients of the two orbit metrics, and 17
+// the deep path's average orbit direction (the shallow path keeps that one in
+// layer 7, which floatexp needs for dz's exponent). Allocated only while a stop
+// asks for stripe/direction coloring or relief: five more r32float layers over
+// the neutral square is not a cost to pay for the palettes that never ask.
+const RAW_ORBIT_GRADIENT_LAYERS = 18
 
 // Adaptive iteration batch sizing — only the fused iteration pass is controlled.
 // Leave part of the frame budget to reprojection, resolve and color, which do not

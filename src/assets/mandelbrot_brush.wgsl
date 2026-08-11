@@ -22,6 +22,10 @@
 //   8 : in-progress: derS (RAW log scale); dead for finished pixels
 //  13/14 : grad(stripe EMA).x/.y            — allocated only while orbit
 //  15/16 : grad(direction coherence).x/.y     metrics are tracked
+//     17 : deep path only: packed average orbit direction (the shallow path
+//          keeps it in layer 7, which the deep path needs for dz's exponent).
+//          The stripe EMA needs no carrier of its own on either path: it rides
+//          the fractional part of layer 6.
 //
 // Layers 13..16 hold the same thing escaped and in-progress: a running
 // gradient accumulator whose value at escape IS the terminal value. They exist
@@ -1381,6 +1385,9 @@ struct TexelOut {
   // also the only time the engine allocates them.
   orbitGradStripe: vec2<f32>,
   orbitGradCoherence: vec2<f32>,
+  // Layer 17 — deep continuations only; the shallow path parks the same value
+  // in layer 7 and leaves this at 0 (which reads as "no metrics parked").
+  deepAvgDirection: f32,
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
@@ -1408,6 +1415,7 @@ fn storeTexel(coord: vec2<i32>, out: TexelOut) {
     textureStore(raw, coord, 14, pack(out.orbitGradStripe.y));
     textureStore(raw, coord, 15, pack(out.orbitGradCoherence.x));
     textureStore(raw, coord, 16, pack(out.orbitGradCoherence.y));
+    textureStore(raw, coord, 17, pack(out.deepAvgDirection));
   }
 }
 
@@ -1981,6 +1989,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   var out: TexelOut;
   out.orbitGradStripe = vec2<f32>(0.0);
   out.orbitGradCoherence = vec2<f32>(0.0);
+  out.deepAvgDirection = 0.0; // shallow parks the direction in layer 7
 
   let derPolarOut = der_to_polar(derM, derS + derSLo);
   let avgDir = orbit_metrics_avg_dir(metrics);
@@ -3516,7 +3525,7 @@ fn try_apply_renorm(dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derSc
   return 0;
 }
 
-fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32) -> TexelOut {
+fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32, prev_ref_i_raw: f32, prev_avg_direction: f32, prev_stripe_grad: vec2<f32>, prev_dir_grad: vec2<f32>) -> TexelOut {
   let max_iteration = mandelbrot.maxIteration;
   var localWorkLimit = max(1u, u32(max_iteration));
   let muLimit = mandelbrot.mu;
@@ -3545,6 +3554,31 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   var derInvScale = 0.0;
   var epsThreshold = 0.0;
   der_refresh_cache(&derM, &derS, &derSLo, &derInvScale, &epsThreshold, logEpsilon);
+
+  // Orbit metrics on the deep path. z_n stays O(1) f32 here and derM/derS are
+  // propagated exactly as in the shallow kernel, so arg(z) and w = z'/z — and
+  // therefore both metrics and both of their gradients — are computed by the
+  // very same code; only the parking differs.
+  //
+  // encode_avg_dir never produces 0.0, so a zero carrier means "no metrics
+  // parked yet". That distinguishes a resumed continuation from a fresh texel
+  // seeded by the series approximation, whose prev_iter counts iterations the
+  // metrics never saw: those restart the running mean instead of diluting it.
+  let trackOrbitMetrics = mandelbrot.trackOrbitMetrics >= 0.5;
+  var metrics = empty_orbit_metrics();
+  var previousMetrics = metrics;
+  var logTexelDelta = 0.0;
+  if (trackOrbitMetrics) {
+    if (prev_avg_direction != 0.0) {
+      metrics.stripeEma = decode_stripe_ema(prev_ref_i_raw, prev_iter);
+      metrics.avgCount = max(prev_iter, 0.0);
+      metrics.avgDirSum = decode_avg_dir(prev_avg_direction, prev_iter) * metrics.avgCount;
+      metrics.stripeGrad = prev_stripe_grad;
+      metrics.dirGradSum = prev_dir_grad * metrics.avgCount;
+    }
+    previousMetrics = metrics;
+    logTexelDelta = orbit_log_texel_delta(scaleExp);
+  }
 
   var escaped = false;
   var inside = false;
@@ -3726,6 +3760,13 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       i += 1.0;
     }
 
+    // Renorm block, table block and exact step all reach this point with z and
+    // the derivative up to date, so the deep path needs one update site where
+    // the shallow kernel needs three.
+    if (trackOrbitMetrics) {
+      advance_orbit_metrics(&metrics, &previousMetrics, z, derM, derS + derSLo, logTexelDelta, f32(max(skipped, 1)));
+    }
+
     let derMM = dot(derM, derM);
     let dot_z = dot(z, z);
     if (dot_z > muLimit) {
@@ -3752,11 +3793,11 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   }
 
   var out: TexelOut;
-  // The deep path parks dz's exponent where the orbit direction lives, so it
-  // tracks no orbit metric and therefore carries no metric gradient either.
   out.orbitGradStripe = vec2<f32>(0.0);
   out.orbitGradCoherence = vec2<f32>(0.0);
+  out.deepAvgDirection = 0.0;
   let derPolarOut = der_to_polar(derM, derS + derSLo);
+  let avgDir = orbit_metrics_avg_dir(metrics);
 
   if (inside) {
     out.iter      = pack(0.0);
@@ -3774,6 +3815,16 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   let total_iter = prev_iter + i;
 
   if (escaped) {
+    let escapeBlend = escape_fraction(z, muLimit);
+    let smoothStripeEma = mix(previousMetrics.stripeEma, metrics.stripeEma, escapeBlend);
+    let smoothAvgDir = mix(orbit_metrics_avg_dir(previousMetrics), avgDir, escapeBlend);
+    out.orbitGradStripe = mix(previousMetrics.stripeGrad, metrics.stripeGrad, escapeBlend);
+    out.orbitGradCoherence = mix(
+      orbit_metrics_dir_gradient(previousMetrics),
+      orbit_metrics_dir_gradient(metrics),
+      escapeBlend,
+    );
+
     let geometry = analytic_terminal_geometry(z, derM, derS + derSLo, sndM, sndS, scaleExp);
     out.iter      = pack(total_iter);
     out.genuine   = pack(geometry.x);
@@ -3781,7 +3832,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     out.zy        = pack(z.y);
     out.dzx       = pack(shadingHeight);
     out.dzy       = pack(geometry.y);
-    out.ref_i     = pack(terminal_orbit_metrics(0.0, vec2<f32>(0.0)));
+    out.ref_i     = pack(terminal_orbit_metrics(smoothStripeEma, smoothAvgDir));
     out.avgDirection = pack(geometry.z);
     // Phase D polar-log Taylor payload — see the shallow exit.
     out.derS      = pack(derS + derSLo);
@@ -3826,8 +3877,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   out.zy        = pack(dzN.m.y);
   out.dzx       = pack(derM.x);
   out.dzy       = pack(derM.y);
-  out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), 0.0));
+  out.ref_i     = pack(ref_i_with_stripe(f32(ref_i), metrics.stripeEma));
   out.avgDirection = pack(f32(dzN.e));
+  out.orbitGradStripe = metrics.stripeGrad;
+  out.orbitGradCoherence = orbit_metrics_dir_gradient(metrics);
+  // Layer 7 is taken by dz's exponent here, so the direction rides layer 17.
+  out.deepAvgDirection = select(0.0, encode_avg_dir(avgDir), trackOrbitMetrics);
   out.derS      = pack(derS + derSLo);
   out.aa9       = pack(sndM.x);
   out.aa10      = pack(sndM.y);
@@ -4058,7 +4113,10 @@ fn cs_main(
                   );
                 }
               }
-              result = mandelbrot_compute_deep(dc, saIter, saDz, saDzE, saRef, saDerx, saDery, saDers, saSndx, saSndy, saSnds, 1.0);
+              // Series-approximation seed: prev_iter counts iterations no
+              // metric ever saw, so the zero direction carrier tells the kernel
+              // to start its running mean here rather than dilute it.
+              result = mandelbrot_compute_deep(dc, saIter, saDz, saDzE, saRef, saDerx, saDery, saDers, saSndx, saSndy, saSnds, 1.0, 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0));
             } else {
               // Deep continuation: layers 2/3 hold the dz mantissa, layer 7 its
               // exponent; layers 4/5/8 the raw derivative (derM.x, derM.y, derS).
@@ -4066,10 +4124,19 @@ fn cs_main(
               let stored_derx = loadLayer(coord, 4);
               let stored_dery = loadLayer(coord, 5);
               let stored_ders = loadLayer(coord, 8);
-              let prev_ref_i = decode_ref_i(loadLayer(coord, 6));
+              let prev_ref_i_raw = loadLayer(coord, 6);
+              let prev_ref_i = decode_ref_i(prev_ref_i_raw);
+              var deep_avg_direction = 0.0;
+              var deep_stripe_grad = vec2<f32>(0.0);
+              var deep_dir_grad = vec2<f32>(0.0);
+              if (mandelbrot.trackOrbitMetrics >= 0.5) {
+                deep_stripe_grad = vec2<f32>(loadLayer(coord, 13), loadLayer(coord, 14));
+                deep_dir_grad = vec2<f32>(loadLayer(coord, 15), loadLayer(coord, 16));
+                deep_avg_direction = loadLayer(coord, 17);
+              }
               // Phase D: independent z″ state rides layers 9/10/11; layer
               // 12 remembers whether every applied jump propagated z″.
-              result = mandelbrot_compute_deep(dc, iter_val, vec2<f32>(zx, zy), dz_e, prev_ref_i, stored_derx, stored_dery, stored_ders, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12));
+              result = mandelbrot_compute_deep(dc, iter_val, vec2<f32>(zx, zy), dz_e, prev_ref_i, stored_derx, stored_dery, stored_ders, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12), prev_ref_i_raw, deep_avg_direction, deep_stripe_grad, deep_dir_grad);
             }
           } else {
             let x0 = local_rot.x * mandelbrot.scale + mandelbrot.cx;
