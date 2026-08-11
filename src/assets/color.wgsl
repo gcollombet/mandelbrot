@@ -71,8 +71,8 @@ struct Uniforms {
   reachDebug: f32,       // 1 = analytic-AA reach heatmap (debug view 6)
   lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)
   reachReady: f32,       // 2 = z″ payload carried by every production path
-  _pad68: f32,
-  _pad69: f32,
+  protrusionPhase: f32,     // wrapped global phase offset [0, 1)
+  protrusionSharpness: f32, // global lobe exponent [0.25, 16], default 2
   _pad70: f32,
   _pad71: f32,
 };
@@ -139,6 +139,7 @@ struct EffectParams {
   anisotropy: f32,      // [0, 1]
   // Row 6
   reliefGain: f32,            // log-domain control [0, 2], neutral at 1
+  protrusion: f32,           // smooth-escape relief modulation [0, 1], neutral at 0
   metalReflectance: f32,     // conductor F0 gain [0, 2]
   metalEnvironmentTint: f32, // [0, 1], 0 preserves env hue, 1 is physical tint
   iridescenceColor: vec3<f32>,
@@ -240,6 +241,7 @@ fn sampleShadingMaterial(palettePhase: f32, e: ptr<function, EffectParams>) {
   (*e).reliefGain = clamp(row6.r, 0.0, 2.0);
   (*e).metalReflectance = clamp(row6.g, 0.0, 2.0);
   (*e).metalEnvironmentTint = clamp(row6.b, 0.0, 1.0);
+  (*e).protrusion = clamp(row6.a, 0.0, 1.0);
 }
 
 @vertex
@@ -639,6 +641,15 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     // strictly positive, so it can never reverse the cached analytic slope.
     let reliefGain = exp2(2.0 * (fx.reliefGain - 1.0));
     let effectiveAnalyticRelief = relief * reliefGain;
+    // Controlled descendant of the historical crossing-interpolation artefact:
+    // a broad lobe peaks where the smooth escape phase wraps, while a positive
+    // log-domain gain preserves the canonical analytic gradient direction.
+    let protrusionPhase = fract(parameters.protrusionPhase);
+    let protrusionSharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
+    let protrusionWave = 0.5 + 0.5 * cos(TWO_PI * fract(v_smooth - protrusionPhase));
+    let protrusionLobe = pow(max(protrusionWave, 0.0), protrusionSharpness);
+    let protrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
+    let styledAnalyticRelief = effectiveAnalyticRelief * protrusionGain;
     let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
     let stripeReliefStrength = fx.wStripeRelief * effShading;
     let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
@@ -647,7 +658,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     let mappingYId = i32(parameters.textureMappingYVariable + 0.5);
     let needsDepthGradient = bumpStrength > 0.001 &&
       (mappingXId == 0 || mappingXId == 1 || mappingYId == 0 || mappingYId == 1);
-    let needsFractalGradient = effectiveAnalyticRelief > 0.001;
+    let needsFractalGradient = styledAnalyticRelief > 0.001;
     var distanceHeight = 0.0;
     // Cached geometry stores the analytic derivative per source texel and the
     // branch-local analytic Laplacian. Historical relief gains are applied
@@ -707,7 +718,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     // the relief its shape, so changing it would change every existing preset.
     // Coherence and texture luminance are already scalar fields.
     let stripeProfileDerivative = 3.141592653589793 * sin(TWO_PI * stripeAverage);
-    let heightGradient = grad * (0.34 * effectiveAnalyticRelief);
+    let heightGradient = grad * (0.34 * styledAnalyticRelief);
     let stripeHeightGradient = stripeGrad * stripeProfileDerivative * (0.75 * clamp(stripeReliefStrength, 0.0, 1.0));
     let coherenceHeightGradient = directionCoherenceGrad * (0.75 * clamp(directionCoherenceStrength, 0.0, 100.0));
     // Material bumps remain independent of the analytic relief multiplier.
@@ -728,7 +739,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     let lightDir = vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ);
     // The magnified bilinear path has no extra curvature fetch: AO fades out
     // during reprojection instead of adding four more texture reads per pixel.
-    let ao = curvature_ambient_occlusion(heightCurvature, effectiveAnalyticRelief, parameters.ambientOcclusionStrength);
+    let ao = curvature_ambient_occlusion(heightCurvature, styledAnalyticRelief, parameters.ambientOcclusionStrength);
     let viewDir = vec3<f32>(0.0, 0.0, 1.0);
     let halfDir = normalize(lightDir + viewDir);
     let anisotropyBitangent = normalize(cross(normal, anisotropyTangent));
@@ -762,7 +773,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
     let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL * roughMetalEnergy;
     let diffuseColor = colorLin * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
-    let localShadow = local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, effectiveAnalyticRelief, localShadowControl);
+    let localShadow = local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, styledAnalyticRelief, localShadowControl);
     let shadowedNDotL = nDotL * localShadow;
     let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
     let reflectionSide = mix(0.08, 1.0, litSide);
@@ -771,7 +782,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     let brightness = max(fx.shadingLevel, 0.0);
     var materialColor = ambientDiffuse + directDiffuse + directSpecular * localShadow;
     let reliefAccent = clamp((1.0 - exp(-0.35 * localShadowControl)) * effShading * 2.0, 0.0, 2.0);
-    let ridge = smoothstep(0.10, 1.55, slope * effectiveAnalyticRelief) * litSide * reliefAccent;
+    let ridge = smoothstep(0.10, 1.55, slope * styledAnalyticRelief) * litSide * reliefAccent;
     materialColor += mix(colorLin, vec3<f32>(1.0), 0.38) * ridge * 0.10 * (1.0 - metallic * 0.45);
     let varnish = clamp(parameters.varnishStrength, 0.0, 10.0) * 0.1;
     // Clear coat is a true top layer: it is applied at the very end of this
@@ -787,7 +798,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
       let facingPearl = dot(orientationPlane, lightPlane) * 0.5 + 0.5;
       let crossPearl = dot(orientationPlane, tangentPlane) * 0.5 + 0.5;
       let orientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
-      let slopeShift = smoothstep(0.025, 1.15, slope * effectiveAnalyticRelief);
+      let slopeShift = smoothstep(0.025, 1.15, slope * styledAnalyticRelief);
       let tiltShift = smoothstep(0.025, 0.55, length(normal.xy));
       let surfaceShift = max(slopeShift, tiltShift * 0.65);
       let pearlAngle = clamp(0.05 + viewShift * 0.12 + lightShift * 0.10 + orientationShift * 0.56 + surfaceShift * 0.32, 0.0, 1.0);

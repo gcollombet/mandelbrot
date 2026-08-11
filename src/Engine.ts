@@ -603,6 +603,8 @@ export type RenderOptions = {
     ambientOcclusionStrength: number,
     microBumpStrength: number,
     reliefDepth: number,
+    protrusionPhase: number,
+    protrusionSharpness: number,
     localShadowStrength: number,
     lightAngle: number,
     varnishStrength: number,
@@ -5057,8 +5059,8 @@ export class Engine {
             this.debugViewMode === DEBUG_VIEW_REACH ? 1 : 0, // 65: analytic-AA reach heatmap
             Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
             2,                                    // 67: z″ is carried by every production path
-            0,                                    // 68: reserved
-            0,                                    // 69: reserved
+            renderOptions.protrusionPhase ?? 0,   // 68: protrusionPhase [0, 1]
+            renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
             0,                                    // 70: uniform padding
             0,                                    // 71: uniform padding
         ])

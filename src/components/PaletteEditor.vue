@@ -113,6 +113,7 @@ const EFFECT_LABEL_FR: Record<EffectFieldName, string> = {
   roughness: 'Rugosité',
   anisotropy: 'Anisotropie',
   reliefGain: 'Gain de relief',
+  protrusion: 'Protubérances',
   metalReflectance: 'Réflectance métal',
   metalEnvironmentTint: 'Teinte environnement',
   tessellation: 'Mélange image',
@@ -140,6 +141,7 @@ const EFFECT_DESC_FR: Record<EffectFieldName, string> = {
   roughness: 'Contrôle la finesse des reflets : faible = fins et nets, élevée = larges et diffus',
   anisotropy: 'Étire les reflets selon la direction de la surface',
   reliefGain: 'Multiplie le relief analytique pour ce matériau ; 1 est neutre, indépendamment de la Profondeur relief globale',
+  protrusion: 'Accentue le relief près des passages entre itérations lissées ; 0 est neutre',
   metalReflectance: 'Multiplie la réflectance du métal sans modifier directement sa teinte',
   metalEnvironmentTint: 'Mélange entre la réponse métal historique et perceptuelle (0) et une réponse physique linéaire, colorée et compensée en rugosité (1)',
 };

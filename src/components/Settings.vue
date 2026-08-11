@@ -210,6 +210,8 @@ const model =  defineModel<MandelbrotParams>({
      ambientOcclusionStrength: 0,
      microBumpStrength: 0,
      reliefDepth: 1,
+     protrusionPhase: 0,
+     protrusionSharpness: 2,
      localShadowStrength: 0,
      varnishStrength: 0,
      gradeContrast: 1.18,
@@ -1107,6 +1109,8 @@ async function savePalette() {
     ambientOcclusionStrength: model.value.ambientOcclusionStrength,
     microBumpStrength: model.value.microBumpStrength,
     reliefDepth: model.value.reliefDepth,
+    protrusionPhase: model.value.protrusionPhase,
+    protrusionSharpness: model.value.protrusionSharpness,
     localShadowStrength: model.value.localShadowStrength,
     varnishStrength: model.value.varnishStrength,
     gradeContrast: model.value.gradeContrast,
@@ -1127,6 +1131,8 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
   model.value.microBumpStrength = source.microBumpStrength ?? 0;
   model.value.reliefDepth = source.reliefDepth ?? 1;
+  model.value.protrusionPhase = source.protrusionPhase ?? 0;
+  model.value.protrusionSharpness = source.protrusionSharpness ?? 2;
   model.value.localShadowStrength = source.localShadowStrength ?? 0;
   model.value.varnishStrength = source.varnishStrength ?? 0;
   model.value.gradeContrast = source.gradeContrast ?? 1.18;
@@ -2765,6 +2771,8 @@ async function importSkyboxTexture(event: Event) {
           :ambientOcclusionStrength="model.ambientOcclusionStrength"
           :microBumpStrength="model.microBumpStrength"
           :reliefDepth="model.reliefDepth"
+          :protrusionPhase="model.protrusionPhase"
+          :protrusionSharpness="model.protrusionSharpness"
           :localShadowStrength="model.localShadowStrength"
           :varnishStrength="model.varnishStrength"
           :gradeContrast="model.gradeContrast"
@@ -2849,6 +2857,10 @@ async function importSkyboxTexture(event: Event) {
             :model-value="model.orbitTrapStrength ?? 0" @update:model-value="(v: number) => model.orbitTrapStrength = v" />
           <DenseField label="Profondeur relief" :min="0" :max="2" :step="0.01" f="p2"
             :model-value="model.reliefDepth ?? 1" @update:model-value="(v: number) => model.reliefDepth = v" />
+          <DenseField label="Phase protubérances" :min="0" :max="1" :step="0.001" f="p3"
+            :model-value="model.protrusionPhase ?? 0" @update:model-value="(v: number) => model.protrusionPhase = v" />
+          <DenseField label="Netteté protubérances" :min="0.25" :max="16" :step="0.05" f="p2"
+            :model-value="model.protrusionSharpness ?? 2" @update:model-value="(v: number) => model.protrusionSharpness = v" />
           <DenseField label="Occlusion relief" :min="0" :max="10" :step="0.01" f="p2"
             :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
           <DenseField label="Occlusion ambiante" :min="0" :max="2" :step="0.01" f="p2"

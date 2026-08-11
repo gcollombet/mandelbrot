@@ -69,6 +69,8 @@ const props = defineProps<{
   ambientOcclusionStrength?: number;
   microBumpStrength?: number;
   reliefDepth?: number;
+  protrusionPhase?: number;
+  protrusionSharpness?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
   gradeContrast?: number;
@@ -478,9 +480,13 @@ async function init() {
     0, // aaJitterLogMag
     0, // aaAnalytic
     props.gradeSaturation ?? 1.12, // gradeSaturation
-    0, // _pad2
-    0, // _pad3
-    0, // _pad4
+    0, // reachDebug
+    0, // lnScale
+    0, // reachReady
+    props.protrusionPhase ?? 0, // protrusionPhase
+    props.protrusionSharpness ?? 2, // protrusionSharpness
+    0, // uniform padding
+    0, // uniform padding
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -634,7 +640,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = PREVIEW_LIGHT_ANGLE;
@@ -675,6 +681,10 @@ watch(
     ]);
     device.queue.writeBuffer(uniformBuffer, 13 * 4, patch.buffer as ArrayBuffer);
     device.queue.writeBuffer(uniformBuffer, 64 * 4, new Float32Array([props.gradeSaturation ?? 1.12]).buffer as ArrayBuffer);
+    device.queue.writeBuffer(uniformBuffer, 68 * 4, new Float32Array([
+      props.protrusionPhase ?? 0,
+      props.protrusionSharpness ?? 2,
+    ]).buffer as ArrayBuffer);
     render();
   },
 );

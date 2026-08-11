@@ -46,6 +46,8 @@ export interface MandelbrotParams {
     ambientOcclusionStrength?: number;
     microBumpStrength?: number;
     reliefDepth?: number;
+    protrusionPhase?: number;
+    protrusionSharpness?: number;
     localShadowStrength?: number;
     varnishStrength?: number;
     gradeContrast?: number;

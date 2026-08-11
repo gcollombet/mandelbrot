@@ -101,6 +101,8 @@ export type ColorStop = {
   anisotropy?: number;
   /** Log-domain analytic relief gain control, range [0, 2] (default and neutral 1) */
   reliefGain?: number;
+  /** Smooth-escape protrusion amount, range [0, 1] (default and neutral 0) */
+  protrusion?: number;
   /** @deprecated Input-only alias migrated to `reliefGain`; never emitted by normalized output. */
   directionalVolume?: number;
   /** Conductor F0 gain independent of its tint, range [0, 2] (default 1) */

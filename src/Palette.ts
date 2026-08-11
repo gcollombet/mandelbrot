@@ -17,7 +17,7 @@ const interpolators: Record<InterpolationMode, (a: string, b: string) => (t: num
 /** Width of the palette texture (one texel per iteration bucket). */
 const TEXTURE_WIDTH = 4096;
 
-/** Height of the palette texture (6 rows for RGB+effects+iridescence+orbit metrics). */
+/** Height of the palette texture (7 rows for RGB, effects, iridescence, and orbit metrics). */
 const TEXTURE_HEIGHT = 7;
 
 /** Effect-only texture rows (1, 2, 3, 5, 6) — fields grouped by row. */
@@ -147,7 +147,7 @@ export class Palette {
    *   Row 3: dielectric F0, metallic, roughness, anisotropy
    *   Row 4: iridescence R, G, B, strength
    *   Row 5: stripeAverage, rotationMean, stripeReliefTilt, directionCoherenceReliefTilt
-   *   Row 6: reliefGain, metalReflectance, metalEnvironmentTint, reserved
+   *   Row 6: reliefGain, metalReflectance, metalEnvironmentTint, protrusion
    */
   generateTexture(): { data: Float32Array; width: number; height: number } {
     const width = TEXTURE_WIDTH;

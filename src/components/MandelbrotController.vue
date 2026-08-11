@@ -42,6 +42,8 @@ const props = defineProps<{
   ambientOcclusionStrength?: number,
   microBumpStrength?: number,
   reliefDepth?: number,
+  protrusionPhase?: number,
+  protrusionSharpness?: number,
   localShadowStrength?: number,
   lightAngle?: number,
   varnishStrength?: number,
@@ -435,6 +437,8 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :microBumpStrength="props.microBumpStrength"
       :reliefDepth="props.reliefDepth"
+      :protrusionPhase="props.protrusionPhase"
+      :protrusionSharpness="props.protrusionSharpness"
       :localShadowStrength="props.localShadowStrength"
       :lightAngle="props.lightAngle"
       :varnishStrength="props.varnishStrength"

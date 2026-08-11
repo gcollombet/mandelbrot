@@ -14,7 +14,7 @@ describe('material relief gain shader contract', () => {
   it('reuses palette row 6 channel R with a positive exponential mapping', () => {
     expect(config).toContain("'reliefGain'");
     expect(config).toContain("reliefGain:          { label: 'Relief Gain',        defaultValue: 1.0, min: 0, max: 2");
-    expect(palette).toContain('Row 6: reliefGain, metalReflectance, metalEnvironmentTint, reserved');
+    expect(palette).toContain('Row 6: reliefGain, metalReflectance, metalEnvironmentTint, protrusion');
     expect(shader).toContain('(*e).reliefGain = clamp(row6.r, 0.0, 2.0);');
     expect(shader).toContain('let reliefGain = exp2(2.0 * (fx.reliefGain - 1.0));');
     expect(shader).toContain('let effectiveAnalyticRelief = relief * reliefGain;');
@@ -23,16 +23,16 @@ describe('material relief gain shader contract', () => {
   it('removes the opposing additive slope and preserves independent material bumps', () => {
     expect(shader).not.toContain('directionalVolumeGradient');
     expect(shader).not.toContain('fx.directionalVolume');
-    expect(shader).toContain('let heightGradient = grad * (0.34 * effectiveAnalyticRelief);');
+    expect(shader).toContain('let heightGradient = grad * (0.34 * styledAnalyticRelief);');
     expect(shader).toContain('let surfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;');
     expect(shader).toContain('anisotropy_tangent_from_dir(angleDir, surfaceNormalLocal)');
   });
 
   it('uses one effective analytic scale for every analytic lighting cue', () => {
-    expect(shader).toContain('curvature_ambient_occlusion(heightCurvature, effectiveAnalyticRelief, parameters.ambientOcclusionStrength)');
-    expect(shader).toContain('local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, effectiveAnalyticRelief, localShadowControl)');
-    expect(shader).toContain('slope * effectiveAnalyticRelief) * litSide');
-    expect(shader).toContain('let slopeShift = smoothstep(0.025, 1.15, slope * effectiveAnalyticRelief);');
+    expect(shader).toContain('curvature_ambient_occlusion(heightCurvature, styledAnalyticRelief, parameters.ambientOcclusionStrength)');
+    expect(shader).toContain('local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, styledAnalyticRelief, localShadowControl)');
+    expect(shader).toContain('slope * styledAnalyticRelief) * litSide');
+    expect(shader).toContain('let slopeShift = smoothstep(0.025, 1.15, slope * styledAnalyticRelief);');
     expect(shader).not.toContain('slope * max(relief, 0.18)');
   });
 
