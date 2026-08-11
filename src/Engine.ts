@@ -134,15 +134,7 @@ const GPU_TIME_EMA_ALPHA = 0.25
 const COUNTER_SAMPLE_INTERVAL_FRAMES = 1
 const COUNTER_READBACK_BUFFER_COUNT = 3
 const ITERATION_SAMPLE_PAIR_RETENTION = 64
-// A full convergence is a few hundred dispatches; this holds several of them
-// so a sweep point does not have to be read back between runs.
-const WEIGHT_CENSUS_SERIES_MAX = 4096
-// 4 scheduling counters + 12 weight-census words. The census lives here rather
-// than in workStats because this buffer is cleared before EVERY in-place
-// dispatch: the readback ring then yields a per-dispatch time series, which is
-// the only form in which the tail is visible. A generation total would average
-// it away under the first dense passes.
-const COUNTER_WORDS = 16
+const COUNTER_WORDS = 4
 const COUNTER_BYTES = COUNTER_WORDS * Uint32Array.BYTES_PER_ELEMENT
 const WORK_STATS_WORDS = 37
 const WORK_STATS_BYTES = WORK_STATS_WORDS * Uint32Array.BYTES_PER_ELEMENT
@@ -158,52 +150,6 @@ type CounterReadbackSlot = {
     pending: boolean
     sequence: number
     generation: number
-}
-
-/**
- * One dispatch's weight census (ENABLE_WEIGHT_CENSUS). Observation only: the
- * census pipeline renders bit-identically to production, it merely classifies
- * every active continuation from its entry state and reports the mix.
- * Class order is [eighth, quarter, full] — increasing budget deserved.
- */
-export type WeightCensusSample = {
-    /** Unfinished texels at the end of this dispatch (series context). */
-    unfinished: number
-    /** 32-lane halves holding at least one classified texel. */
-    waveActive: number
-    /** ...of which every classified texel agreed on the class. */
-    waveUniform: number
-    /** Active texels with nothing persisted to classify (fresh requests). */
-    fresh: number
-    classCount: [number, number, number]
-    /** Σ weighted work per class, rescaled past the counter shift. */
-    classWork: [number, number, number]
-    /** Texels of that class that terminated during this dispatch. */
-    classDone: [number, number, number]
-}
-
-/** The three numbers the census exists to produce. */
-export type WeightCensusVerdict = {
-    /**
-     * Fraction of active waves already class-uniform. This decides the
-     * architecture: below ~0.8, a per-lane weight buys nothing until the
-     * budget is first reduced to a wave-uniform one, because a wave costs the
-     * max over its lanes and not their sum.
-     */
-    waveUniformFraction: number
-    /**
-     * Fraction of classified active texels the eighth class would defer — the
-     * ceiling on what any weight scheme can possibly reallocate.
-     */
-    deferrableFraction: number
-    /**
-     * [eighth, quarter, full] weighted work per termination. Two classes whose
-     * figures are not separated are one population cut in an arbitrary place,
-     * and the staircase has one step too many.
-     */
-    workPerTermination: [number, number, number]
-    /** Samples the verdict was pooled over. */
-    sampleCount: number
 }
 
 type IterationBatchTimingContext = {
@@ -851,41 +797,6 @@ export class Engine {
     effectiveUnfinishedPixelCount = -1
     /** Unfinished pixels whose latest periodic score reduced their local batch. */
     periodicThrottledPixelCount = -1
-    /**
-     * Adaptive per-pixel scheduling weight (A/B switch, off by default).
-     * Scheduling-only, same contract as periodicSchedulingEnabled: it changes
-     * how much of a dispatch a texel receives, never its terminal
-     * classification, so the converged image is identical either way.
-     *
-     * Off by default pending a time-to-convergence benchmark. The census
-     * establishes that the classes are real (work per termination separates by
-     * ~2 / 10³ / 10⁵ weighted units) and that a per-lane weight is wave-coherent
-     * (98% agreement inside mixed dispatches), but not that deferring pays in
-     * wall time — a full convergence is only 6-10 dispatches, so there are few
-     * scheduling decisions to win.
-     */
-    adaptiveWeightEnabled = false
-    // ── Weight census (build-time observability; off by default) ──
-    private weightCensusEnabled = false
-    /**
-     * Census thresholds, runtime uniforms so a sweep costs no pipeline rebuild.
-     * Starting points only — picking them IS the experiment. borderLog2Margin
-     * is log2(DE/pixel) below which a texel counts as border-critical; the
-     * contraction test is log2|z'| < bias + slope·iter, whose SLOPE carries the
-     * discrimination (|z'| grows roughly linearly in log2 along an escaping
-     * orbit) while the bias only sets where the line starts.
-     */
-    weightCensusThresholds = {
-        borderLog2Margin: 2,
-        contractBias: 0,
-        contractSlope: 0.05,
-        contractBiasStrong: 0,
-        contractSlopeStrong: 0.0125,
-    }
-    /** Per-dispatch census samples, oldest first. Cleared when the census is
-     *  (re)enabled. The series is the deliverable: the tail is only visible as
-     *  a function of how many pixels remain. */
-    weightCensusSeries: WeightCensusSample[] = []
     // ── Work instrumentation (in-place compute path), latest sampled dispatch ──
     /** covered iterations ÷ real loop steps — the true on-GPU BLA/Padé compression
      *  (≈1 in perturbation mode; >1 with blocks). -1 = not yet known. */
@@ -2072,8 +1983,7 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            // 10 live fields + 3 weight-census thresholds + 3 pad = 64 bytes.
-            size: 4 * 16,
+            size: 4 * 12,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
@@ -2534,7 +2444,7 @@ export class Engine {
     // Lazily build + cache a specialized in-place kernel for the given override
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
-    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled, periodicScheduling = this.periodicSchedulingEnabled, weightCensus = this.weightCensusEnabled, adaptiveWeight = this.adaptiveWeightEnabled): GPUComputePipeline {
+    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled, periodicScheduling = this.periodicSchedulingEnabled): GPUComputePipeline {
         const dynamicValidity = this.dynamicBlockValidity && this.approximationMode === 'auto'
         const radialValidity = dynamicValidity
             && this.incrementalReferenceTable
@@ -2544,7 +2454,7 @@ export class Engine {
         // Work instrumentation is panel-only; keep it out of the production
         // kernel so ordinary rendering pays none of its workgroup atomics.
         const workStats = this.workStatsEnabled || dynamicStats
-        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}i${periodicScheduling ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}w${workStats ? 1 : 0}x${weightCensus ? 1 : 0}a${adaptiveWeight ? 1 : 0}`
+        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}i${periodicScheduling ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}w${workStats ? 1 : 0}`
         let pipeline = this.inplacePipelineCache.get(key)
         if (!pipeline) {
             pipeline = this.device.createComputePipeline({
@@ -2561,11 +2471,9 @@ export class Engine {
                         ENABLE_RADIAL_VALIDITY: radialValidity ? 1 : 0,
                         ENABLE_DYNAMIC_STATS: dynamicStats ? 1 : 0,
                         ENABLE_WORK_STATS: workStats ? 1 : 0,
-                        ENABLE_WEIGHT_CENSUS: weightCensus ? 1 : 0,
-                        ENABLE_ADAPTIVE_WEIGHT: adaptiveWeight ? 1 : 0,
                     },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, periodicScheduling=${periodicScheduling}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats}, weightCensus=${weightCensus}, adaptiveWeight=${adaptiveWeight})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, periodicScheduling=${periodicScheduling}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats})`,
             })
             this.inplacePipelineCache.set(key, pipeline)
         }
@@ -3522,25 +3430,6 @@ export class Engine {
                 const actualWeightedWork = data[1] * 2 ** workCounterShift
                 const effectiveUnfinished = data[2] / 8
                 const periodicThrottled = data[3]
-                // Weight census words 4..15; all zero unless the census
-                // pipeline variant is bound. classWork carries the same
-                // workCounterShift downscale weightedWork does.
-                const workScale = 2 ** workCounterShift
-                const weightCensus: WeightCensusSample | null = this.weightCensusEnabled
-                    ? {
-                        unfinished,
-                        waveActive: data[4],
-                        waveUniform: data[5],
-                        fresh: data[6],
-                        classCount: [data[7], data[8], data[9]],
-                        classWork: [
-                            data[10] * workScale,
-                            data[11] * workScale,
-                            data[12] * workScale,
-                        ],
-                        classDone: [data[13], data[14], data[15]],
-                    }
-                    : null
                 const workStats = data.subarray(COUNTER_WORDS)
                 // Work stats; 0 on non-in-place frames (buffer cleared).
                 const realMean = workStats[0]
@@ -3560,7 +3449,7 @@ export class Engine {
                     effectiveUnfinished,
                     periodicThrottled,
                 )
-                this.applyCounterReadback(sequence, generation, frame, unfinished, effectiveUnfinished, periodicThrottled, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm, dynamic, weightCensus)
+                this.applyCounterReadback(sequence, generation, frame, unfinished, effectiveUnfinished, periodicThrottled, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm, dynamic)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
             } finally {
@@ -3579,7 +3468,7 @@ export class Engine {
         candidateUses: 0,
         rejectionReasons: [0, 0, 0, 0, 0, 0, 0, 0],
         exactFallbacks: 0,
-    }, weightCensus: WeightCensusSample | null = null) {
+    }) {
         if (generation !== this.counterReadbackGeneration) {
             return
         }
@@ -3593,14 +3482,6 @@ export class Engine {
         this.effectiveUnfinishedPixelCount = effectiveUnfinished
         this.periodicThrottledPixelCount = periodicThrottled
         this.counterSampleFrame = frame
-        // Appended here rather than in the readback body so the series inherits
-        // the ordering guards above: no duplicate and no out-of-order sample.
-        if (weightCensus !== null && this.weightCensusEnabled) {
-            if (this.weightCensusSeries.length >= WEIGHT_CENSUS_SERIES_MAX) {
-                this.weightCensusSeries.shift()
-            }
-            this.weightCensusSeries.push(weightCensus)
-        }
 
         // Work instrumentation (in-place path). realMean/covMean/maxAccum are the
         // GPU buffer's RUNNING TOTALS over the whole render generation (accumulated
@@ -4406,80 +4287,6 @@ export class Engine {
         this.periodicSchedulingEnabled = on
         this.invalidateCounterReadback(true)
         this.needRender = true
-    }
-
-    /**
-     * A/B switch for the adaptive per-pixel weight. Existing raw state stays
-     * valid: the weight changes priority only, never a texel's verdict.
-     */
-    setAdaptiveWeightEnabled(on: boolean) {
-        if (on === this.adaptiveWeightEnabled) return
-        this.adaptiveWeightEnabled = on
-        this.invalidateCounterReadback(true)
-        this.needRender = true
-    }
-
-    getWeightCensusEnabled(): boolean {
-        return this.weightCensusEnabled
-    }
-
-    /**
-     * Enable the weight census: a build-time observability variant that
-     * classifies every active continuation from its ENTRY state into the three
-     * scheduling classes an adaptive per-pixel batch would use, without
-     * applying any of it. Rendering stays bit-identical — only the counter
-     * buffer's census words change.
-     *
-     * Enabling resets the series, so one run = one sweep point.
-     */
-    setWeightCensusEnabled(on: boolean) {
-        if (on === this.weightCensusEnabled) return
-        this.weightCensusEnabled = on
-        this.weightCensusSeries = []
-        this.invalidateCounterReadback()
-        this.needRender = true
-    }
-
-    /**
-     * Pool the recorded series into the three decisive numbers. `maxUnfinished`
-     * restricts the pool to samples at or below a given remaining-pixel count,
-     * which is how the TAIL is isolated — the whole question is what the class
-     * mix looks like once the easy majority is already gone, and a pool over
-     * the full run is dominated by the first dense passes.
-     */
-    weightCensusVerdict(maxUnfinished = Number.POSITIVE_INFINITY): WeightCensusVerdict {
-        const pooled = this.weightCensusSeries.filter(
-            (sample) => sample.unfinished <= maxUnfinished && sample.waveActive > 0,
-        )
-        const verdict: WeightCensusVerdict = {
-            waveUniformFraction: -1,
-            deferrableFraction: -1,
-            workPerTermination: [-1, -1, -1],
-            sampleCount: pooled.length,
-        }
-        if (pooled.length === 0) return verdict
-
-        let waveActive = 0
-        let waveUniform = 0
-        const count = [0, 0, 0]
-        const work = [0, 0, 0]
-        const done = [0, 0, 0]
-        for (const sample of pooled) {
-            waveActive += sample.waveActive
-            waveUniform += sample.waveUniform
-            for (let i = 0; i < 3; i++) {
-                count[i] += sample.classCount[i]
-                work[i] += sample.classWork[i]
-                done[i] += sample.classDone[i]
-            }
-        }
-        const classified = count[0] + count[1] + count[2]
-        if (waveActive > 0) verdict.waveUniformFraction = waveUniform / waveActive
-        if (classified > 0) verdict.deferrableFraction = count[0] / classified
-        verdict.workPerTermination = [0, 1, 2].map(
-            (i) => (done[i] > 0 ? work[i] / done[i] : -1),
-        ) as [number, number, number]
-        return verdict
     }
 
     /** Enable the panel-only work counters. Off by default: they cost seven
@@ -5516,11 +5323,7 @@ export class Engine {
             analyticRawPayloadNeeded ? RAW_LAYERS : RAW_BASE_LAYERS,
             this.previousMandelbrot.mu,
             workCounterShift,
-            this.weightCensusThresholds.borderLog2Margin,
-            this.weightCensusThresholds.contractBias,
-            this.weightCensusThresholds.contractSlope,
-            this.weightCensusThresholds.contractBiasStrong,
-            this.weightCensusThresholds.contractSlopeStrong,
+            0,
             0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)

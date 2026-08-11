@@ -120,35 +120,6 @@ override ENABLE_WORK_STATS: bool = false;
 // override so target-GPU A/B measurements can compile the whole branch away.
 override ENABLE_PERIODIC_SCHEDULING: bool = true;
 
-// Weight census: build-time observability for the per-pixel adaptive-batch
-// question. It classifies every ACTIVE continuation from its PERSISTED entry
-// state into the three scheduling classes a generalized weight would use, and
-// reports the class mix, the work each class consumes, the terminations it
-// yields, and how uniform the class is inside a 32-lane wave. It never touches
-// a budget: localWorkLimit and g_activeWeightEighths are untouched, so the
-// census pipeline renders bit-identically to production.
-//
-// Entry-time by construction: a wave-uniform budget must be decided BEFORE the
-// loop runs, so the classifier deliberately reads nothing the iteration
-// produces. Everything it needs is already persisted — iter (layer 0), z
-// (2/3, + exponent 7 deep) and the derivative (4/5, ln-scale in 8).
-override ENABLE_WEIGHT_CENSUS: bool = false;
-
-// Adaptive per-pixel scheduling weight: applies the same classes the census
-// measures, as a fraction of the dispatch's work budget. Scheduling-only, same
-// contract as ENABLE_PERIODIC_SCHEDULING — a deferred texel stays unfinished
-// and its terminal classification is untouched, so the converged image is
-// unchanged. It generalizes the periodic weight, which only moves where the
-// certificate half-succeeds, to any contracting orbit.
-//
-// Justified by the census, not by assumption: work per termination separates
-// the three classes by ~2 / 10³ / 10⁵ weighted units, and 98% of 32-lane waves
-// agree on the class even inside dispatches where classes coexist — so a
-// per-lane weight is already wave-coherent and needs no reduction (a wave
-// costs the max over its lanes, so a weight its lanes disagreed on would buy
-// nothing).
-override ENABLE_ADAPTIVE_WEIGHT: bool = false;
-
 struct BlaStep {
   // floatexp form: a = (ax,ay)·2^ab_exp, b = (bx,by)·2^ab_exp,
   // alpha = radius_alpha·2^alpha_exp, beta = radius_beta (O(1)).
@@ -198,25 +169,8 @@ struct BrushUniforms {
   copyLayerCount: f32, // reproject_cs only
   reprojectMu: f32,    // reproject_cs only
   workCounterShift: f32,
-  // ── weight-census thresholds (ENABLE_WEIGHT_CENSUS only) ────────────────
-  // Runtime uniforms rather than pipeline overrides on purpose: the census is
-  // a sweep instrument, and its thresholds are exactly what the sweep is meant
-  // to choose. Overrides would force a pipeline rebuild per sample point.
-  // log2(DE / pixel) below which a texel counts as border-critical.
-  censusBorderLog2Margin: f32,
-  // Contraction bound on log2|z'|, affine in the iteration count:
-  //     log2|z'| < bias + slope · iter
-  // Neither degenerate form works alone, and the census caught both. A pure
-  // slope of 0.15 demands |z'| past 2^3000 at 20k iterations and files the
-  // whole image as contracting; a pure bound of 8 is cleared by every pixel
-  // after the first pass. |z'| grows roughly linearly in log2 along an
-  // escaping orbit, so the discriminating quantity is the RATE — the bias only
-  // sets where the line starts. Useful slopes are ~0.005–0.05.
-  censusContractBias: f32,        // quarter
-  censusContractSlope: f32,
-  censusContractBiasStrong: f32,  // eighth
-  censusContractSlopeStrong: f32,
   _padding1: f32,
+  _padding2: f32,
 };
 
 struct CounterBuffer {
@@ -226,33 +180,6 @@ struct CounterBuffer {
   // texels contribute 8, medium likely-interior texels 2, strong ones 1.
   effectiveCountEighths: atomic<u32>,
   throttledCount: atomic<u32>,
-  // ── weight census (ENABLE_WEIGHT_CENSUS only; all zero otherwise) ────────
-  // Deliberately housed in the COUNTER buffer, not workStats: the counter is
-  // cleared before every in-place dispatch, so the readback ring yields a per
-  // dispatch TIME SERIES rather than a render-generation total. That is the
-  // whole point — the question is what the weight distribution looks like in
-  // the tail, once the easy 95% are already gone. A generation total would
-  // average the tail away under the first dense passes.
-  //
-  // Wave-uniformity of the proposed class, counted per 32-lane half of the
-  // workgroup. local_invocation_index is row-major, so each half spans an 8×4
-  // pixel block — the real lockstep footprint, and the granularity at which a
-  // uniform budget would actually have to be decided.
-  censusWaveActive: atomic<u32>,
-  censusWaveUniform: atomic<u32>,
-  // Active texels with no persisted state to classify (fresh -1 requests).
-  // Reported separately so early dense passes cannot masquerade as class 3.
-  censusFresh: atomic<u32>,
-  // Per class, index = class - 1 (1 = eighth, 2 = quarter, 3 = full rate).
-  censusClassCount: array<atomic<u32>, 3>,
-  // Σ weighted work per class, downscaled by brush.workCounterShift exactly
-  // like weightedWork, so census work and the batch controller's own figure
-  // share one scale.
-  censusClassWork: array<atomic<u32>, 3>,
-  // Texels of that class that TERMINATED during this dispatch. work/done is
-  // the class-separation metric: it decides how many steps the staircase
-  // actually supports.
-  censusClassDone: array<atomic<u32>, 3>,
 };
 
 // Per-dispatch work instrumentation (in-place path only). realMean/covMean are
@@ -770,10 +697,6 @@ const PERIODIC_WEIGHT_EIGHTH: u32 = 1u;
 // Scheduling weight predicted for this texel's NEXT continuation. Reset to
 // full in cs_main and lowered only by an aligned periodic-map observation.
 var<private> g_activeWeightEighths: u32 = PERIODIC_WEIGHT_FULL;
-// Weight census, packed per texel: bits 0..1 = class (0 = unclassified),
-// bit 2 = active but fresh (no persisted state), bit 3 = terminated this
-// dispatch. Observation only — nothing reads it back into a budget.
-var<private> g_census: u32 = 0u;
 // Per-texel tier application counts (auto mode), flushed with the work stats.
 var<private> g_tierApps: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
 var<private> g_dynamicTierAttempts: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
@@ -1613,16 +1536,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   let isBlockTable = isJet || isMobius || isUnified;
   let useBla = mandelbrot.approximationMode >= 0.5
             && mandelbrot.blaLevelCount >= 1.0;
-  // Entry-time scheduling weight. g_activeWeightEighths is FULL unless a
-  // weight source lowered it before the call, in which case this texel gets
-  // that fraction of the dispatch's work budget. At FULL the expression is
-  // exactly u32(max_iteration) — (x·8+7)/8 = x — so the unweighted path is
-  // bit-identical. The periodic verdict may still lower it further mid-loop.
-  var localWorkLimit = max(
-    1u,
-    (u32(max_iteration) * g_activeWeightEighths + PERIODIC_WEIGHT_FULL - 1u)
-      / PERIODIC_WEIGHT_FULL,
-  );
+  var localWorkLimit = max(1u, u32(max_iteration));
 
   if (useBla) {
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
@@ -3493,16 +3407,7 @@ fn try_apply_renorm(dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derSc
 
 fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32) -> TexelOut {
   let max_iteration = mandelbrot.maxIteration;
-  // Entry-time scheduling weight. g_activeWeightEighths is FULL unless a
-  // weight source lowered it before the call, in which case this texel gets
-  // that fraction of the dispatch's work budget. At FULL the expression is
-  // exactly u32(max_iteration) — (x·8+7)/8 = x — so the unweighted path is
-  // bit-identical. The periodic verdict may still lower it further mid-loop.
-  var localWorkLimit = max(
-    1u,
-    (u32(max_iteration) * g_activeWeightEighths + PERIODIC_WEIGHT_FULL - 1u)
-      / PERIODIC_WEIGHT_FULL,
-  );
+  var localWorkLimit = max(1u, u32(max_iteration));
   let muLimit = mandelbrot.mu;
   let logEpsilon = log(max(mandelbrot.epsilon, 1e-30));
   let globalMaxIterI = i32(mandelbrot.globalMaxIter);
@@ -3823,84 +3728,6 @@ fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
   return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
 }
 
-// ── weight census classifier (ENABLE_WEIGHT_CENSUS) ──────────────────────
-// Scheduling classes, ordered by how much budget the texel deserves. The
-// ordering is load-bearing: the wave reduction compares min against max, so
-// the codes must be monotone in "deserves budget".
-const SCHED_CLASS_EIGHTH: u32 = 1u;   // strongly contracting — interior-like
-const SCHED_CLASS_QUARTER: u32 = 2u;  // contracting
-const SCHED_CLASS_FULL: u32 = 3u;     // escaping soon, or border-critical
-
-/** Share of the dispatch's work budget a class receives, in eighths. */
-fn scheduling_weight_eighths(cls: u32) -> u32 {
-  if (cls == SCHED_CLASS_EIGHTH) { return PERIODIC_WEIGHT_EIGHTH; }
-  if (cls == SCHED_CLASS_QUARTER) { return PERIODIC_WEIGHT_QUARTER; }
-  return PERIODIC_WEIGHT_FULL;
-}
-
-// Class of an ACTIVE continuation, from persisted state only.
-//
-//   full    — |z|² > 4: escape is imminent and super-exponential (|z| squares
-//             every turn), so the texel terminates in a handful of turns. The
-//             cheapest termination available; never ration it.
-//   full    — DE within censusBorderLog2Margin of one pixel: the filaments the
-//             eye actually reads. Hard, but rationing them is precisely what
-//             would produce VISIBLE famine.
-//   quarter — |z'| has not grown at the rate an escaping orbit demands.
-//   eighth  — the same, far more strongly. Unlike the periodic certificate
-//             this needs no period, so it also covers non-periodic attraction
-//             and the pre-periodic transient — the coverage the certificate
-//             structurally misses.
-//
-// pixelLog2 is log2 of one texel's width in c-units, so the border test is
-// resolution-relative: what counts as "on the filament" follows the zoom.
-fn scheduling_class(coord: vec2<i32>, iter_val: f32, deep: bool, pixelLog2: f32) -> u32 {
-  let zx = loadLayer(coord, 2);
-  let zy = loadLayer(coord, 3);
-  let z2 = zx * zx + zy * zy;
-  // Deep continuations store the dz MANTISSA in 2/3, its exponent in 7. |z| ≈
-  // |dz| wherever this matters: at escape dz dominates Z_ref, and while dz
-  // stays small |z| is bounded by the reference — so the escape test below
-  // simply never fires there, which is the correct answer.
-  let zExp = select(0.0, loadLayer(coord, 7), deep);
-  let log2z = select(-3.0e38, 0.5 * log2(z2) + zExp, z2 > 0.0);
-
-  if (log2z > 1.0) {
-    return SCHED_CLASS_FULL;
-  }
-
-  // Raw derivative: mantissa in 4/5, NATURAL-log scale in 8 (der_scale_add
-  // accumulates f32(exp)·LN2).
-  let derx = loadLayer(coord, 4);
-  let dery = loadLayer(coord, 5);
-  let der2 = derx * derx + dery * dery;
-  let log2dz = select(
-    -3.0e38,
-    loadLayer(coord, 8) / LN2 + 0.5 * log2(der2),
-    der2 > 0.0,
-  );
-
-  // Distance estimate in log2: DE = |z|·ln|z| / |z'|, meaningful only once
-  // |z| > 1 (ln|z| > 0). Below that the texel is in the contracting regime the
-  // tests underneath own.
-  if (log2z > 0.25 && log2dz > -3.0e37) {
-    let log2DE = log2z + log2(log2z * LN2) - log2dz;
-    if (log2DE - pixelLog2 < brush.censusBorderLog2Margin) {
-      return SCHED_CLASS_FULL;
-    }
-  }
-
-  // A derivative that underflowed to exactly zero lands here as maximal
-  // contraction, which is the right verdict.
-  if (log2dz < brush.censusContractBiasStrong + brush.censusContractSlopeStrong * iter_val) {
-    return SCHED_CLASS_EIGHTH;
-  }
-  if (log2dz < brush.censusContractBias + brush.censusContractSlope * iter_val) {
-    return SCHED_CLASS_QUARTER;
-  }
-  return SCHED_CLASS_FULL;
-}
-
 fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
   let neutralExtent = sqrt(brush.aspect * brush.aspect + 1.0);
   let local_rot = xy_neutral * neutralExtent;
@@ -3922,9 +3749,6 @@ var<workgroup> wgCount: atomic<u32>;
 var<workgroup> wgWeightedWork: array<u32, 64>;
 var<workgroup> wgEffectiveCountEighths: array<u32, 64>;
 var<workgroup> wgThrottledCount: array<u32, 64>;
-// Weight census, one packed g_census per lane. Lane 0 reduces it in two
-// 32-lane halves so wave-uniformity is measured at the lockstep granularity.
-var<workgroup> wgCensus: array<u32, 64>;
 // Work-instrumentation partials (reduced once per workgroup, like the counters).
 var<workgroup> wgRealSum: atomic<u32>;  // Σ real loop steps over this workgroup's texels
 var<workgroup> wgRealMax: atomic<u32>;  // max real loop steps among them (straggler)
@@ -3990,7 +3814,6 @@ fn cs_main(
   var needs = false;
   var weightedWork = 0u;
   g_activeWeightEighths = PERIODIC_WEIGHT_FULL;
-  g_census = 0u;
 
   let dims = textureDimensions(raw);
   if (gid.x < dims.x && gid.y < dims.y) {
@@ -4056,35 +3879,6 @@ fn cs_main(
 
           var result: TexelOut;
           let scaleExp = i32(mandelbrot.scaleExp);
-
-          // Weight census, taken HERE — after the state is read, before a
-          // single turn runs. That ordering is the point: a wave-uniform
-          // budget has to be decided from entry state alone, so the census
-          // must only ever see what such a decision could see.
-          if (ENABLE_WEIGHT_CENSUS || ENABLE_ADAPTIVE_WEIGHT) {
-            if (is_compute_request) {
-              g_census = 4u; // fresh: nothing persisted to classify
-            } else {
-              let deepPath = ENABLE_DEEP && scaleExp <= DEEP_EXP;
-              // One texel's width in c-units, in log2. Deep views carry the
-              // magnitude in scaleExp, mandelbrot.scale being a mantissa.
-              let pixelLog2 = log2(
-                2.0 * neutralExtent * max(abs(mandelbrot.scale), 1.0e-30)
-                / f32(dims.x)
-              ) + select(0.0, f32(scaleExp), deepPath);
-              let cls = scheduling_class(coord, iter_val, deepPath, pixelLog2);
-              g_census = cls;
-              if (ENABLE_ADAPTIVE_WEIGHT) {
-                // min, not assignment: the periodic verdict stays authoritative
-                // where it concludes — it is a certificate, this is a heuristic.
-                g_activeWeightEighths = min(
-                  g_activeWeightEighths,
-                  scheduling_weight_eighths(cls),
-                );
-              }
-            }
-          }
-
           if (ENABLE_DEEP && scaleExp <= DEEP_EXP) {
             // Deep path: scale/cx/cy carry fe mantissas sharing exponent scaleExp;
             // dc = local·scaleMant + (cxMant, cyMant) is a single same-exponent add.
@@ -4268,13 +4062,6 @@ fn cs_main(
     1u,
     needs && g_activeWeightEighths < PERIODIC_WEIGHT_FULL,
   );
-  // bit 3 = classified at entry and finished at exit. Terminations per class
-  // are the payload: work ÷ done is what says whether two classes are really
-  // distinct populations or one population cut in an arbitrary place.
-  if (ENABLE_WEIGHT_CENSUS && g_census != 0u && !needs) {
-    g_census |= 8u;
-  }
-  wgCensus[lidx] = select(0u, g_census, ENABLE_WEIGHT_CENSUS);
   if (needs) {
     atomicAdd(&wgCount, 1u);
   }
@@ -4303,69 +4090,6 @@ fn cs_main(
     }
     if (throttledCount > 0u) {
       atomicAdd(&counter.throttledCount, throttledCount);
-    }
-    // ── weight-census reduction ────────────────────────────────────────────
-    // Two 32-lane halves, because that — not the 64-lane workgroup — is the
-    // lockstep unit, and local_invocation_index is row-major so each half is
-    // an 8×4 pixel block. A half counts as uniform when every classified lane
-    // in it agrees; that fraction is what decides whether a per-lane weight
-    // can be applied directly or has to be reduced to a wave-uniform budget
-    // first.
-    if (ENABLE_WEIGHT_CENSUS) {
-      var classCount = array<u32, 3>(0u, 0u, 0u);
-      var classWork = array<u32, 3>(0u, 0u, 0u);
-      var classDone = array<u32, 3>(0u, 0u, 0u);
-      var freshCount = 0u;
-      var waveActive = 0u;
-      var waveUniform = 0u;
-      for (var half = 0u; half < 2u; half++) {
-        var lo = 4u;
-        var hi = 0u;
-        for (var k = 0u; k < 32u; k++) {
-          let lane = half * 32u + k;
-          let packed = wgCensus[lane];
-          if ((packed & 4u) != 0u) {
-            freshCount += 1u;
-            continue;
-          }
-          let cls = packed & 3u;
-          if (cls == 0u) {
-            continue;
-          }
-          lo = min(lo, cls);
-          hi = max(hi, cls);
-          let slot = cls - 1u;
-          classCount[slot] += 1u;
-          // Summed at full precision first: a workgroup tops out at 64 lanes
-          // times one batch, far below u32. The shift lands once, at the
-          // global accumulator, exactly as weightedWork does.
-          classWork[slot] += wgWeightedWork[lane];
-          classDone[slot] += select(0u, 1u, (packed & 8u) != 0u);
-        }
-        if (hi > 0u) {
-          waveActive += 1u;
-          if (lo == hi) {
-            waveUniform += 1u;
-          }
-        }
-      }
-      if (waveActive > 0u) {
-        atomicAdd(&counter.censusWaveActive, waveActive);
-        atomicAdd(&counter.censusWaveUniform, waveUniform);
-      }
-      if (freshCount > 0u) {
-        atomicAdd(&counter.censusFresh, freshCount);
-      }
-      for (var slot = 0u; slot < 3u; slot++) {
-        if (classCount[slot] > 0u) {
-          atomicAdd(&counter.censusClassCount[slot], classCount[slot]);
-          atomicAdd(&counter.censusClassDone[slot], classDone[slot]);
-        }
-        let scaled = classWork[slot] >> workShift;
-        if (scaled > 0u) {
-          atomicAdd(&counter.censusClassWork[slot], scaled);
-        }
-      }
     }
     // Work-instrumentation reduction. Downscale the per-workgroup sums by 64
     // (via >>6, rounded) so the global u32 accumulators can't overflow; the
