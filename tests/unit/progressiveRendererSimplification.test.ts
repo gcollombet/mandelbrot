@@ -9,6 +9,8 @@ const colorShader = read('../../src/assets/color.wgsl');
 const mergeShader = read('../../src/assets/merge_frozen.wgsl');
 const engineSource = read('../../src/Engine.ts');
 const settingsSource = read('../../src/components/Settings.vue');
+const viewerSource = read('../../src/components/MandelbrotViewer.vue');
+const performancePanelSource = read('../../src/components/PerformancePanel.vue');
 
 describe('simplified progressive renderer contract', () => {
   it('creates only exact step-1 requests on clears and exposed pan texels', () => {
@@ -43,10 +45,7 @@ describe('simplified progressive renderer contract', () => {
     expect(engineSource).not.toContain('? this.tsReadbackFree');
     expect(engineSource).toContain('const fallbackFrameComplete = this.timestampsEnabled || !this.pendingGpuTiming');
     expect(engineSource).toContain('const pacing = advanceFramePacer(');
-    expect(engineSource).toContain('fallbackFrameComplete && !queueBlocked,');
-    expect(engineSource).toContain('this.framePacingInFlight >= MAX_FRAME_PACING_IN_FLIGHT');
-    expect(engineSource).toContain('private armFramePacingCompletionMarker()');
-    expect(engineSource).toContain('this.armFramePacingCompletionMarker()');
+    expect(engineSource).toContain('fallbackFrameComplete,');
     expect(engineSource).toContain('if (pacing.shouldDraw) {');
     const loopSource = engineSource.slice(
       engineSource.indexOf('private async _loop(now: number)'),
@@ -59,6 +58,16 @@ describe('simplified progressive renderer contract', () => {
     expect(engineSource).not.toContain('this._lastDrawMs = now');
     expect(engineSource).toContain('if (!this.timestampsEnabled) {\n            this.scheduleGpuTiming');
     expect(engineSource).not.toContain('&& counterReadbackSlot !== undefined');
+  });
+
+  it('unmounts and bounds performance-panel measurement work', () => {
+    expect(viewerSource).toContain('v-if="showPerfPanel"');
+    expect(viewerSource).not.toContain('v-show="showPerfPanel"');
+    expect(performancePanelSource).toContain('const POLL_INTERVAL_MS = 100');
+    expect(performancePanelSource).toContain('const MAX_HISTORY_SAMPLES');
+    expect(performancePanelSource).toContain('window.setInterval(tick, POLL_INTERVAL_MS)');
+    expect(performancePanelSource).not.toContain('requestAnimationFrame(tick)');
+    expect(performancePanelSource).not.toContain('setWorkStatsEnabled(true)');
   });
 
   it('selects the nearest min-step source before bilinear color gathers', () => {

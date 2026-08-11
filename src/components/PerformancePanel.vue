@@ -47,11 +47,6 @@ const stats = reactive({
   framePacingRafRawIntervalMs: 0,
   framePacingRafIntervalMs: 0,
   framePacingTargetIntervalMs: 0,
-  framePacingGpuUtilization: 0,
-  framePacingInFlight: 0,
-  framePacingMaxInFlight: 3,
-  framePacingQueueBlocked: false,
-  framePacingCompletionAgeMs: 0,
   gpuSubmitMs: 0, // engine.gpuFrameTimeMs (CPU-measured submit→done wall)
   gpuSpanMs: 0,   // authoritative GPU frame time (max end − min begin)
   gpuSumMs: 0,    // Σ of measured passes (breakdown; may overlap/exceed span)
@@ -497,11 +492,13 @@ interface Sample {
   passMs: Record<string, number>;
 }
 
-const HISTORY_MS = 30_000;   // rolling 30-second window (of RENDERED frames)
+const HISTORY_MS = 30_000;
+const POLL_INTERVAL_MS = 100;
+const MAX_HISTORY_SAMPLES = Math.ceil(HISTORY_MS / POLL_INTERVAL_MS) + 1;
 const history = ref<Sample[]>([]);
 const startedAt = Date.now();
 
-let rafId = 0;
+let pollTimer = 0;
 let lastSerial = -1;
 let lastLiveMs = 0;
 
@@ -518,11 +515,6 @@ function readLive(e: any) {
   stats.framePacingRafRawIntervalMs = e.framePacingRafRawIntervalMs ?? 0;
   stats.framePacingRafIntervalMs = e.framePacingRafIntervalMs ?? 0;
   stats.framePacingTargetIntervalMs = e.framePacingTargetIntervalMs ?? 0;
-  stats.framePacingGpuUtilization = e.framePacingGpuUtilization ?? 0;
-  stats.framePacingInFlight = e.framePacingInFlight ?? 0;
-  stats.framePacingMaxInFlight = e.framePacingMaxInFlight ?? 3;
-  stats.framePacingQueueBlocked = !!e.framePacingQueueBlocked;
-  stats.framePacingCompletionAgeMs = e.framePacingCompletionAgeMs ?? 0;
   stats.gpuSubmitMs = e.isRendering ? (e.gpuFrameTimeMs ?? 0) : 0;
   stats.gpuSpanMs = e.passGpuSpanMs ?? 0;
   stats.gpuSumMs = e.passGpuSumMs ?? 0;
@@ -638,12 +630,15 @@ function pushSample() {
   });
   const cutoff = t - HISTORY_MS;
   while (h.length > 1 && h[0].t < cutoff) h.shift();
+  if (h.length > MAX_HISTORY_SAMPLES) {
+    h.splice(0, h.length - MAX_HISTORY_SAMPLES);
+  }
   history.value = h.slice();
 }
 
-// Frame-driven sampling: poll at display rate but only record when the engine's
-// frameSerial advanced (a real frame was submitted). When idle, the serial stops
-// → no new samples → the histogram freezes. Cards still refresh (fps decays to 0).
+// Ten polls per second are enough for a 30-second diagnostic graph and bound
+// both history reconstruction and SVG/Vue reactivity independently of FPS.
+// When idle, frameSerial stops, so the history freezes while cards still update.
 function tick() {
   const e = props.engine;
   if (e) {
@@ -659,19 +654,14 @@ function tick() {
       lastLiveMs = now;
     }
   }
-  rafId = requestAnimationFrame(tick);
 }
 
-// The work counters (realMean/covMean/maxAccum, tier mix) are compiled out of
-// the iteration kernel unless something reads them — this panel is that
-// consumer, so it turns them on while mounted and off again on close.
 onMounted(() => {
-  props.engine?.setWorkStatsEnabled(true);
-  rafId = requestAnimationFrame(tick);
+  tick();
+  pollTimer = window.setInterval(tick, POLL_INTERVAL_MS);
 });
 onUnmounted(() => {
-  if (rafId) cancelAnimationFrame(rafId);
-  props.engine?.setWorkStatsEnabled(false);
+  if (pollTimer) window.clearInterval(pollTimer);
 });
 
 // Aggregate stats over the visible window.
@@ -925,13 +915,9 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       <span class="perf-stat-label">CPU détail</span>
       <span class="perf-stat-value">nav {{ fmt(stats.cpuNavigationMs) }} · vue {{ fmt(stats.cpuModelSyncMs) }} · update {{ fmt(stats.cpuUpdateMs) }} · submit {{ fmt(stats.cpuRenderMs) }}ms</span>
     </div>
-    <div class="perf-stat-row" title="Intervalle brut du dernier callback requestAnimationFrame, sa moyenne lissée et intervalle visé par le pacer après réserve de charge GPU.">
+    <div class="perf-stat-row" title="Intervalle brut du dernier callback requestAnimationFrame, sa moyenne lissée et intervalle visé par le cadenceur.">
       <span class="perf-stat-label">Cadence</span>
       <span class="perf-stat-value">rAF brut {{ fmt(stats.framePacingRafRawIntervalMs) }} · lissé {{ fmt(stats.framePacingRafIntervalMs) }} · cible {{ fmt(stats.framePacingTargetIntervalMs) }}ms</span>
-    </div>
-    <div class="perf-stat-row" title="Soumissions postérieures au dernier watermark GPU terminé. La limite évite que la file grandisse sans borne; l'âge indique depuis combien de temps le watermark courant attend sa notification.">
-      <span class="perf-stat-label">File GPU</span>
-      <span class="perf-stat-value" :class="{ 'perf-warn': stats.framePacingQueueBlocked }">{{ stats.framePacingInFlight }}/{{ stats.framePacingMaxInFlight }} · charge {{ (stats.framePacingGpuUtilization * 100).toFixed(0) }}% · âge {{ fmt(stats.framePacingCompletionAgeMs) }}ms</span>
     </div>
     <div v-if="stats.completionTotalApps >= 0" class="perf-stat-row">
       <span class="perf-stat-label">Total apps</span>
@@ -1428,11 +1414,6 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
   font-variant-numeric: tabular-nums;
   font-weight: 500;
   text-align: right;
-}
-
-.perf-warn {
-  color: #f59e0b;
-  font-weight: 700;
 }
 
 .perf-stat-value--pending {

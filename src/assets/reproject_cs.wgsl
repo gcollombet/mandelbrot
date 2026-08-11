@@ -20,6 +20,10 @@
 // Budget-exhausted pixels (iter > 0, |z|² < mu) pass through unchanged;
 // continuation is the fused iteration shader's job.
 
+// Prefix of the buffer mandelbrot_brush.wgsl declares: that one carries extra
+// trailing fields (work-counter shift, weight-census thresholds) this pass
+// never reads. A uniform binding only requires the bound range to be at least
+// the struct size, so the shorter declaration stays valid.
 struct BrushUniforms {
   aspect: f32,
   angle: f32,

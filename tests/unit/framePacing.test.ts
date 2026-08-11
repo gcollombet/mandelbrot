@@ -1,16 +1,7 @@
 import {describe, expect, it} from 'vitest'
 import {
-    FRAME_PACING_RECOVERY_FRAMES,
-    INITIAL_FRAME_PACING_GPU_UTILIZATION,
-    MAX_FRAME_PACING_GPU_UTILIZATION,
-    MAX_FRAME_PACING_IN_FLIGHT,
     MAX_FRAME_PACING_CREDIT_INTERVALS,
-    MIN_FRAME_PACING_GPU_UTILIZATION,
-    QUEUE_BLOCKED_MAX_CREDIT_INTERVALS,
-    advanceFramePacingLoad,
     advanceFramePacer,
-    countFramesInFlight,
-    framePacingIntervalForGpuSpan,
 } from '../../src/framePacing'
 
 function simulateFrames(
@@ -65,63 +56,4 @@ describe('GPU-aware frame pacer', () => {
         expect(completed.creditMs).toBe(20)
     })
 
-    it('reserves GPU headroom without quantizing the target interval', () => {
-        expect(framePacingIntervalForGpuSpan(10, 0.9)).toBeCloseTo(100 / 9)
-        expect(framePacingIntervalForGpuSpan(0, 0.9)).toBe(0)
-    })
-
-    it('keeps at most one interval of catch-up credit while the queue is full', () => {
-        const waiting = advanceFramePacer(
-            1000,
-            20,
-            10,
-            0,
-            false,
-            QUEUE_BLOCKED_MAX_CREDIT_INTERVALS,
-        )
-        expect(waiting.creditMs).toBe(20)
-
-        const completed = advanceFramePacer(
-            1010,
-            20,
-            waiting.lastTickMs,
-            waiting.creditMs,
-            true,
-        )
-        expect(completed.shouldDraw).toBe(true)
-        expect(completed.creditMs).toBe(10)
-    })
-
-    it('counts only submitted frames beyond the completion watermark', () => {
-        expect(countFramesInFlight(12, 10)).toBe(2)
-        expect(countFramesInFlight(10, 12)).toBe(0)
-        expect(countFramesInFlight(MAX_FRAME_PACING_IN_FLIGHT, 0))
-            .toBe(MAX_FRAME_PACING_IN_FLIGHT)
-    })
-
-    it('backs off immediately on congestion and recovers in bounded steps', () => {
-        const backedOff = advanceFramePacingLoad(
-            MAX_FRAME_PACING_GPU_UTILIZATION,
-            18,
-            'congested',
-        )
-        expect(backedOff.utilization).toBeLessThan(MAX_FRAME_PACING_GPU_UTILIZATION)
-        expect(backedOff.utilization).toBeGreaterThanOrEqual(MIN_FRAME_PACING_GPU_UTILIZATION)
-        expect(backedOff.healthyFrames).toBe(0)
-
-        let state = {
-            utilization: INITIAL_FRAME_PACING_GPU_UTILIZATION,
-            healthyFrames: 0,
-        }
-        for (let i = 0; i < FRAME_PACING_RECOVERY_FRAMES; i++) {
-            state = advanceFramePacingLoad(
-                state.utilization,
-                state.healthyFrames,
-                'submitted',
-            )
-        }
-        expect(state.utilization).toBeGreaterThan(INITIAL_FRAME_PACING_GPU_UTILIZATION)
-        expect(state.utilization).toBeLessThanOrEqual(MAX_FRAME_PACING_GPU_UTILIZATION)
-        expect(state.healthyFrames).toBe(0)
-    })
 })

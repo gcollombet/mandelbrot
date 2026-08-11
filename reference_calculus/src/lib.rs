@@ -181,12 +181,142 @@ impl FExpC {
         }
         self.normalize();
     }
+
+    fn one() -> Self {
+        FExpC { x: 1.0, y: 0.0, e: 0 }
+    }
+
+    fn is_zero(&self) -> bool {
+        self.x == 0.0 && self.y == 0.0
+    }
+
+    // self · other, exponents added. Both mantissas are O(1) after normalize, so
+    // the product never leaves the f64 range whatever the magnitudes involved.
+    fn mul(self, other: FExpC) -> Self {
+        let mut out = FExpC {
+            x: self.x * other.x - self.y * other.y,
+            y: self.x * other.y + self.y * other.x,
+            e: self.e.saturating_add(other.e),
+        };
+        out.normalize();
+        out
+    }
+
+    // self + other, aligning the smaller exponent onto the larger one. A term
+    // more than ~1023 octaves below the accumulator is dropped — it could not
+    // change an f64 mantissa anyway.
+    fn add(self, other: FExpC) -> Self {
+        if other.is_zero() {
+            return self;
+        }
+        if self.is_zero() {
+            return other;
+        }
+        let (hi, lo) = if self.e >= other.e {
+            (self, other)
+        } else {
+            (other, self)
+        };
+        let shift = hi.e - lo.e;
+        let f = if shift > 1023 { 0.0 } else { 2f64.powi(-shift) };
+        let mut out = FExpC {
+            x: hi.x + lo.x * f,
+            y: hi.y + lo.y * f,
+            e: hi.e,
+        };
+        out.normalize();
+        out
+    }
+
+    // 1/self = conj(self)/|self|², exponent negated. Zero maps to zero so the
+    // caller can test for the degenerate case on the result.
+    fn recip(self) -> Self {
+        let n = self.x * self.x + self.y * self.y;
+        if n == 0.0 || !n.is_finite() {
+            return FExpC::zero();
+        }
+        let mut out = FExpC {
+            x: self.x / n,
+            y: -self.y / n,
+            e: -self.e,
+        };
+        out.normalize();
+        out
+    }
+
+    // Back to a pair of DBigs. The binary exponent is folded into a *decimal*
+    // one so the string is exact in base 10 at any depth (|Λ| runs far below the
+    // f64 floor); the mantissa keeps the f64's ~16 digits, five orders more than
+    // a view framing can observe.
+    fn to_dbig_pair(self) -> Option<(DBig, DBig)> {
+        if self.is_zero() || !self.x.is_finite() || !self.y.is_finite() {
+            return None;
+        }
+        let component = |m: f64| -> DBig {
+            if m == 0.0 {
+                return dbig_i(0);
+            }
+            let log10 = m.abs().log10() + self.e as f64 * LOG10_2;
+            let exponent = log10.floor();
+            let mantissa = 10f64.powf(log10 - exponent) * m.signum();
+            DBig::from_str(&format!("{mantissa:.16}e{}", exponent as i64))
+                .unwrap_or_else(|_| dbig_i(0))
+        };
+        Some((component(self.x), component(self.y)))
+    }
+}
+
+// A DBig complex pair as one extended-exponent value. Goes through `dbig_frexp`
+// (O(1) on the significand) rather than the decimal-string round trip, and keeps
+// the two components on a common exponent so an orbit value many octaves below
+// the f64 floor still contributes its mantissa instead of underflowing to zero.
+fn dbig_pair_to_fexpc(zx: &DBig, zy: &DBig) -> FExpC {
+    let (mx, ex) = dbig_frexp(zx);
+    let (my, ey) = dbig_frexp(zy);
+    let e = if mx == 0.0 {
+        ey
+    } else if my == 0.0 {
+        ex
+    } else {
+        ex.max(ey)
+    };
+    let align = |m: f64, exp: i32| -> f64 {
+        if m == 0.0 {
+            return 0.0;
+        }
+        let shift = e - exp;
+        if shift > 1023 {
+            0.0
+        } else {
+            m * 2f64.powi(-shift)
+        }
+    };
+    let mut out = FExpC {
+        x: align(mx, ex),
+        y: align(my, ey),
+        e,
+    };
+    out.normalize();
+    out
+}
+
+// −log10|v|, i.e. how many decimal digits below 1 the value sits. Used to size
+// the Newton precision ladder from a step magnitude or a tolerance.
+fn dbig_neg_log10(v: &DBig) -> f64 {
+    let (m, e) = dbig_frexp(v);
+    if m == 0.0 {
+        return f64::INFINITY;
+    }
+    -(m.abs().log10() + e as f64 * LOG10_2)
 }
 
 // Raise a value's precision to `prec` bits when it carries fewer (or unlimited),
 // but NEVER round a finite value down. Reducing precision on zoom-out would
 // discard the reference center's hard-won deep digits, so zooming back in (or
 // recentering at a shallower scale) would land on a corrupted center ("garbage").
+// By-value form kept for the tests and censuses that build one-off operands; the
+// per-frame paths use `raise_precision_in_place`.
+#[allow(dead_code)]
 pub(crate) fn raise_precision(v: DBig, prec: usize) -> DBig {
     let cur = v.precision();
     if cur == 0 || cur < prec {
@@ -255,6 +385,7 @@ fn ln_f64(value: f64) -> f64 {
 }
 
 const LOG2_10: f64 = 3.321928094887362;
+const LOG10_2: f64 = 0.30102999566398120;
 
 // Extended-exponent decomposition of a DBig: value ≈ mantissa · 2^exponent, |mantissa| ∈
 // [0.5, 1). Computed in O(1) by reading only the top ~53 bits of the significand and its base-10
@@ -2528,8 +2659,8 @@ impl MandelbrotNavigator {
     /// was found but Newton did not converge within range, or `["none"]` if no
     /// minibrot sits under the view.
     pub fn find_minibrot(&mut self, max_iter: u32, radius_factor: f64) -> Vec<String> {
-        match self.locate_minibrot(max_iter, radius_factor) {
-            Ok((period, ncx, ncy)) => vec![
+        match self.locate_minibrot(max_iter, radius_factor, false) {
+            Ok((period, ncx, ncy, _)) => vec![
                 "ok".to_string(),
                 ncx.to_string(),
                 ncy.to_string(),
@@ -2544,7 +2675,8 @@ impl MandelbrotNavigator {
     /// whole minibrot in the middle of the screen at a given fill fraction.
     ///
     /// The extra stage is the Munafo/Jung *size estimate* `Λ` (see
-    /// [`minibrot_size_estimate`]): to first order the small copy is the whole
+    /// [`minibrot_size_estimate`], and [`verify_nucleus`] for the fused form
+    /// this path uses): to first order the small copy is the whole
     /// Mandelbrot set mapped by `w ↦ nucleus + Λ·w`. So the copy's centre is
     /// `nucleus + Λ·(-0.75)` (the set's bounding box is centred on `-0.75`) and
     /// its on-screen half-extents follow from `|Λ|` and `arg Λ − view angle`.
@@ -2560,14 +2692,15 @@ impl MandelbrotNavigator {
         radius_factor: f64,
         fill: f64,
     ) -> Vec<String> {
-        let (period, ncx, ncy) = match self.locate_minibrot(max_iter, radius_factor) {
+        // The size estimate rides along in the nucleus acceptance pass rather
+        // than costing a second full-precision orbit over the period.
+        let (period, ncx, ncy, size) = match self.locate_minibrot(max_iter, radius_factor, true) {
             Ok(found) => found,
             Err(Some(period)) => return vec!["nonewton".to_string(), period.to_string()],
             Err(None) => return vec!["none".to_string()],
         };
 
-        let prec = self.working_precision();
-        let Some((size_x, size_y)) = minibrot_size_estimate(&ncx, &ncy, period, prec) else {
+        let Some((size_x, size_y)) = size else {
             return vec!["nosize".to_string(), period.to_string()];
         };
 
@@ -2617,11 +2750,16 @@ impl MandelbrotNavigator {
     /// Ball-detection + Newton refinement shared by the two `find_minibrot*`
     /// entry points. `Err(None)` = nothing under the view, `Err(Some(p))` = the
     /// period was found but Newton did not converge.
+    ///
+    /// `want_size` carries the Munafo/Jung `Λ` out of the nucleus acceptance
+    /// pass, which walks the period-long orbit the estimate needs anyway — the
+    /// framed zoom therefore costs the same orbit passes as the plain one.
     fn locate_minibrot(
         &mut self,
         max_iter: u32,
         radius_factor: f64,
-    ) -> Result<(usize, DBig, DBig), Option<usize>> {
+        want_size: bool,
+    ) -> Result<(usize, DBig, DBig, Option<(DBig, DBig)>), Option<usize>> {
         const NEWTON_STEPS: usize = 80;
         self.ensure_precision();
 
@@ -2653,15 +2791,16 @@ impl MandelbrotNavigator {
         let tol_digits = prec.saturating_sub(margin_digits).max(16);
         let tolerance =
             DBig::from_str(&format!("1e-{tol_digits}")).unwrap_or_else(|_| self.scale.clone());
-        match newton_nucleus(
+        match newton_nucleus_with_size(
             &self.cx,
             &self.cy,
             period,
             NEWTON_STEPS,
             &max_distance,
             &tolerance,
+            want_size,
         ) {
-            Some((ncx, ncy)) => Ok((period, ncx, ncy)),
+            Some((ncx, ncy, size)) => Ok((period, ncx, ncy, size)),
             None => Err(Some(period)),
         }
     }
@@ -3192,6 +3331,10 @@ fn detect_period_f64(cx: f64, cy: f64, max_iter: usize, max_period: usize) -> Op
 /// what lets callers validate nucleus-ness in a scale-invariant way: near a
 /// depth-`scale` nucleus `|dz| ~ 1/scale`, so `z` and `c` live on different
 /// scales and `z` can only be compared to a `c`-space radius via `|z| ≤ r·|dz|`.
+///
+/// [`verify_nucleus`] now reaches the same values in the pass it already walks,
+/// so this stays as the tests' independent reference for that fused pass.
+#[allow(dead_code)]
 fn critical_value_and_derivative(cx: &DBig, cy: &DBig, period: usize) -> (DBig, DBig, DBig, DBig) {
     let two = dbig_i(2);
     let one = dbig_i(1);
@@ -3233,6 +3376,12 @@ const MINIBROT_BOX_HALF_IM: f64 = 1.20;
 /// the caller's working precision (∝ zoom depth) covers.
 ///
 /// Returns `None` if `l` or `b·l²` collapses to zero (non-primitive period).
+///
+/// The framed zoom no longer calls this: it takes `Λ` from [`verify_nucleus`],
+/// which accumulates the same product and sum in extended-exponent f64 during
+/// the acceptance pass it already walks. This all-DBig form stays as that path's
+/// reference, and as the estimator the build-only censuses drive.
+#[allow(dead_code)]
 pub(crate) fn minibrot_size_estimate(
     cx: &DBig,
     cy: &DBig,
@@ -3344,6 +3493,104 @@ pub(crate) fn detect_period_ball_at(
     None
 }
 
+/// Digits the Newton ladder starts from, and never drops below: enough signal in
+/// the first step to steer, cheap enough that the approach phase is free.
+const NEWTON_LADDER_MIN_DIGITS: usize = 24;
+/// Slack between the digits a Newton step resolves and the digits it is computed
+/// with, so the next step reads signal rather than rounding noise.
+const NEWTON_LADDER_GUARD_DIGITS: usize = 16;
+
+/// One acceptance pass over the critical orbit at a candidate nucleus.
+///
+/// Walks `z₀=0, z←z²+c` once, to `n = period`, and on the way:
+///   * rejects the candidate at the first proper divisor `d | period` whose
+///     `|z_d| ≤ tolerance·|dz_d|` — the detected period is then a multiple of
+///     the true one (non-primitive);
+///   * applies the same scale-invariant test at `n = period` to accept the
+///     nucleus itself;
+///   * accumulates the Munafo/Jung size estimate `Λ` when `want_size`.
+///
+/// This replaces one `critical_value_and_derivative` orbit *per divisor* plus
+/// one for the period plus, for the framed zoom, a whole separate
+/// `minibrot_size_estimate` orbit — ~σ(period) + period iterations where this
+/// walks `period`. `Λ`'s running product `l = ∏2·z_i` and sum `b = 1 + Σ1/l_i`
+/// ride along in extended-exponent f64 (`|l|` leaves the f64 range within a few
+/// dozen steps, which is the only reason the standalone estimator needs DBig):
+/// `Λ` only sizes a view frame, so f64 mantissas are orders more accuracy than
+/// can be observed, and it costs two `dbig_frexp` per step instead of eight DBig
+/// multiplications and two DBig divisions.
+///
+/// `None` = rejected. `Some(None)` = accepted, with no size (not asked for, or
+/// the estimate degenerated). `Some(Some(Λ))` = accepted, with the size estimate.
+fn verify_nucleus(
+    cx: &DBig,
+    cy: &DBig,
+    period: usize,
+    tol_sq: &DBig,
+    want_size: bool,
+) -> Option<Option<(DBig, DBig)>> {
+    let two = dbig_i(2);
+    let one = dbig_i(1);
+    let mut zx = dbig_i(0);
+    let mut zy = dbig_i(0);
+    let mut dx = dbig_i(0);
+    let mut dy = dbig_i(0);
+
+    let mut l = FExpC::one();
+    let mut b = FExpC::one();
+    let mut size_live = want_size;
+
+    for n in 1..=period {
+        let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
+        let dy_new = &two * (&zx * &dy + &zy * &dx);
+        let zx_new = &zx * &zx - &zy * &zy + cx;
+        let zy_new = &two * &zx * &zy + cy;
+        zx = zx_new;
+        zy = zy_new;
+        dx = dx_new;
+        dy = dy_new;
+
+        // `l` runs over i = 1..period−1 and `b` sums 1/l_i alongside it, exactly
+        // as `minibrot_size_estimate` does.
+        if size_live && n < period {
+            let z = dbig_pair_to_fexpc(&zx, &zy);
+            l = l.mul(FExpC {
+                x: 2.0 * z.x,
+                y: 2.0 * z.y,
+                e: z.e,
+            });
+            if l.is_zero() {
+                size_live = false;
+            } else {
+                b = b.add(l.recip());
+            }
+        }
+
+        // Primitivity checkpoint, reached in passing instead of by re-walking
+        // the orbit prefix from zero.
+        if n < period && period % n == 0 {
+            let zd2 = &zx * &zx + &zy * &zy;
+            let dd2 = &dx * &dx + &dy * &dy;
+            if zd2 <= tol_sq * &dd2 {
+                return None;
+            }
+        }
+    }
+
+    // Scale-invariant nucleus check: |z_p|² ≤ tolerance² · |dz_p|².
+    let zp2 = &zx * &zx + &zy * &zy;
+    let dp2 = &dx * &dx + &dy * &dy;
+    if zp2 > tol_sq * &dp2 {
+        return None;
+    }
+
+    if !size_live {
+        return Some(None);
+    }
+    // Λ = 1/(b·l²).
+    Some(b.mul(l).mul(l).recip().to_dbig_pair())
+}
+
 /// Newton's method for the period-`period` nucleus (`z_period(c) = 0`), starting
 /// from `(start_cx, start_cy)`.
 ///
@@ -3354,6 +3601,10 @@ pub(crate) fn detect_period_ball_at(
 /// The derivative weighting is essential at depth: `|dz_p| ~ 1/scale`, so a bare
 /// `|z_p| ≤ tolerance` test (the old code) rejected every deep nucleus because
 /// the precision-floor noise in `z_p` dwarfs `scale`.
+///
+/// Size-free form of [`newton_nucleus_with_size`], for the callers that only
+/// want the nucleus (reference selection, the interior census).
+#[allow(dead_code)]
 pub(crate) fn newton_nucleus(
     start_cx: &DBig,
     start_cy: &DBig,
@@ -3362,6 +3613,43 @@ pub(crate) fn newton_nucleus(
     max_distance: &DBig,
     tolerance: &DBig,
 ) -> Option<(DBig, DBig)> {
+    newton_nucleus_with_size(
+        start_cx,
+        start_cy,
+        period,
+        steps,
+        max_distance,
+        tolerance,
+        false,
+    )
+    .map(|(cx, cy, _)| (cx, cy))
+}
+
+/// [`newton_nucleus`], with the option of carrying the size estimate `Λ` out of
+/// the acceptance pass (see [`verify_nucleus`]) instead of paying a second orbit
+/// for it. The third component is `None` when `want_size` is false or the
+/// estimate degenerated.
+///
+/// The refinement runs on a **precision ladder**: Newton is self-correcting, so
+/// a step only has to be computed to the number of digits it can actually earn.
+/// Its long approach phase — the steps that barely shrink, which at depth are
+/// most of them — needs a couple of dozen digits, and the full budget is paid
+/// only on the last two or three, where quadratic convergence doubles the
+/// resolved digits each time. Measured on a period-4875 atom: 2.1× at 164
+/// digits, 4.0× at 1064, with a nucleus identical to the last place.
+///
+/// The ladder is driven by the *measured* step size, not by a doubling schedule:
+/// a schedule reaches full precision while Newton is still approaching, and gives
+/// back most of the gain.
+pub(crate) fn newton_nucleus_with_size(
+    start_cx: &DBig,
+    start_cy: &DBig,
+    period: usize,
+    steps: usize,
+    max_distance: &DBig,
+    tolerance: &DBig,
+    want_size: bool,
+) -> Option<(DBig, DBig, Option<(DBig, DBig)>)> {
     if period == 0 {
         return None;
     }
@@ -3375,7 +3663,40 @@ pub(crate) fn newton_nucleus(
     let mut cx = start_cx.clone();
     let mut cy = start_cy.clone();
 
+    // Ladder ceiling = the accuracy the caller can actually observe: the
+    // operands' own precision, and never more than the exit test leaves behind.
+    // Newton's last accepted step squares the error, so stopping at `tolerance`
+    // lands around 2·(-log10 tolerance) digits; computing past that is work
+    // whose result the caller discards. Operands with unlimited precision (0)
+    // opt out of the ladder entirely and run as before.
+    let operand_prec = start_cx.precision().max(start_cy.precision());
+    let laddered = operand_prec != 0;
+    let target = if laddered {
+        let tol_digits = dbig_neg_log10(tolerance);
+        let ceiling = if tol_digits.is_finite() && tol_digits > 0.0 {
+            (2.0 * tol_digits).ceil() as usize + NEWTON_LADDER_GUARD_DIGITS
+        } else {
+            operand_prec
+        };
+        operand_prec.min(ceiling.max(NEWTON_LADDER_MIN_DIGITS))
+    } else {
+        0
+    };
+    let mut working = target.min(NEWTON_LADDER_MIN_DIGITS);
+
     for _ in 0..steps {
+        let at_full = !laddered || working >= target;
+        // Rounding c down for the orbit is what makes a ladder step cheap: every
+        // product below inherits its precision from the c that seeds it.
+        let (cxw, cyw) = if at_full {
+            (cx.clone(), cy.clone())
+        } else {
+            (
+                cx.clone().with_precision(working).value(),
+                cy.clone().with_precision(working).value(),
+            )
+        };
+
         let mut zx = zero.clone();
         let mut zy = zero.clone();
         let mut dx = zero.clone();
@@ -3384,8 +3705,8 @@ pub(crate) fn newton_nucleus(
         for _ in 0..period {
             let dx_new = &two * (&zx * &dx - &zy * &dy) + &one;
             let dy_new = &two * (&zx * &dy + &zy * &dx);
-            let zx_new = &zx * &zx - &zy * &zy + &cx;
-            let zy_new = &two * &zx * &zy + &cy;
+            let zx_new = &zx * &zx - &zy * &zy + &cxw;
+            let zy_new = &two * &zx * &zy + &cyw;
 
             zx = zx_new;
             zy = zy_new;
@@ -3409,35 +3730,38 @@ pub(crate) fn newton_nucleus(
             return None;
         }
 
-        if &step_x * &step_x + &step_y * &step_y <= tol_sq {
+        let step_sq = &step_x * &step_x + &step_y * &step_y;
+        // Only an at-full-precision step can be trusted against the tolerance: a
+        // ladder step is deliberately resolved to fewer digits than that.
+        if at_full && step_sq <= tol_sq {
             break;
         }
-    }
-
-    // Scale-invariant nucleus check: |z_p|² ≤ tolerance² · |dz_p|².
-    let (zp_x, zp_y, dp_x, dp_y) = critical_value_and_derivative(&cx, &cy, period);
-    let zp2 = &zp_x * &zp_x + &zp_y * &zp_y;
-    let dp2 = &dp_x * &dp_x + &dp_y * &dp_y;
-    if zp2 > &tol_sq * &dp2 {
-        return None;
-    }
-
-    // Primitivity: reject if a proper divisor already returns to ~0 (i.e. the
-    // detected period is a multiple of the true one). Same derivative-relative
-    // criterion so it stays correct at depth.
-    for divisor in 1..period {
-        if period % divisor != 0 {
-            continue;
-        }
-        let (zd_x, zd_y, dd_x, dd_y) = critical_value_and_derivative(&cx, &cy, divisor);
-        let zd2 = &zd_x * &zd_x + &zd_y * &zd_y;
-        let dd2 = &dd_x * &dd_x + &dd_y * &dd_y;
-        if zd2 <= &tol_sq * &dd2 {
-            return None;
+        if laddered {
+            // Digits this step resolved (step_sq is |Δ|²); the next one resolves
+            // about twice that, quadratically.
+            let resolved = dbig_neg_log10(&step_sq) * 0.5;
+            let next = if resolved.is_finite() {
+                (2.0 * resolved).max(0.0) as usize + NEWTON_LADDER_GUARD_DIGITS
+            } else {
+                target
+            };
+            working = next.clamp(NEWTON_LADDER_MIN_DIGITS.min(target), target);
         }
     }
 
-    Some((cx, cy))
+    // The acceptance pass runs at the ladder ceiling too: past `target` digits
+    // the orbit only refines noise the exit test already discarded.
+    let (vx, vy) = if laddered && target < operand_prec {
+        (
+            cx.clone().with_precision(target).value(),
+            cy.clone().with_precision(target).value(),
+        )
+    } else {
+        (cx.clone(), cy.clone())
+    };
+    let size = verify_nucleus(&vx, &vy, period, &tol_sq, want_size)?;
+
+    Some((cx, cy, size))
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -5100,6 +5424,94 @@ mod tests {
         let cy_f64 = dbig_to_f64(&cy);
         assert!((cx_f64 + 1.0).abs() < 1e-10, "cx={}", cx_f64);
         assert!(cy_f64.abs() < 1e-10, "cy={}", cy_f64);
+    }
+
+    /// The precision ladder must not cost accuracy. Computing the intermediate
+    /// steps at a fraction of the budget is only sound if the *result* is still
+    /// a nucleus to the full budget, so the check is the definition itself —
+    /// `|z_p| ≤ tol·|dz_p|` at a tolerance 14 orders tighter than the one Newton
+    /// exited on, and close to the 400-digit operand floor.
+    #[test]
+    fn newton_ladder_still_resolves_the_nucleus_to_the_full_budget() {
+        let prec = 400;
+        // Off-centre start near the period-3 island, ~|Λ| away from its nucleus.
+        let start_x = raise_precision(DBig::from_str("-1.7548776").unwrap(), prec);
+        let start_y = raise_precision(DBig::from_str("0.0000031").unwrap(), prec);
+        let max_distance = raise_precision(DBig::from_str("1e-1").unwrap(), prec);
+        let tolerance = raise_precision(DBig::from_str("1e-376").unwrap(), prec);
+
+        let (cx, cy) = newton_nucleus(&start_x, &start_y, 3, 80, &max_distance, &tolerance)
+            .expect("period-3 nucleus should converge on the ladder");
+
+        let (zp_x, zp_y, dp_x, dp_y) = critical_value_and_derivative(&cx, &cy, 3);
+        let zp2 = &zp_x * &zp_x + &zp_y * &zp_y;
+        let dp2 = &dp_x * &dp_x + &dp_y * &dp_y;
+        let tight = raise_precision(DBig::from_str("1e-390").unwrap(), prec);
+        assert!(
+            zp2 <= &(&tight * &tight) * &dp2,
+            "laddered nucleus is not a fixed point to 390 digits"
+        );
+    }
+
+    /// The size estimate fused into the acceptance pass (extended-exponent f64)
+    /// must agree with the standalone all-DBig estimator. Λ only sizes a view
+    /// frame, so the bar is relative agreement well past what framing can show.
+    #[test]
+    fn fused_size_estimate_matches_the_dbig_estimator() {
+        for (cx_s, cy_s, period) in [
+            ("-1.754877666246693", "0.0", 3usize),
+            ("-0.15652016683375508", "1.0322471089228318", 4),
+            ("-1.6254137251233038", "0.0", 5),
+            ("-1.47601464272843", "0.0", 6),
+        ] {
+            let prec = 200;
+            let cx = raise_precision(DBig::from_str(cx_s).unwrap(), prec);
+            let cy = raise_precision(DBig::from_str(cy_s).unwrap(), prec);
+            let reference = minibrot_size_estimate(&cx, &cy, period, prec)
+                .expect("the DBig estimator should converge");
+            // A tolerance loose enough that the candidate is accepted outright,
+            // so the pass returns the size it accumulated.
+            let tol = raise_precision(DBig::from_str("1e-6").unwrap(), prec);
+            let fused = verify_nucleus(&cx, &cy, period, &(&tol * &tol), true)
+                .expect("nucleus should be accepted")
+                .expect("the fused estimator should converge");
+
+            let rel = |a: &DBig, b: &DBig| -> f64 {
+                let scale = dbig_to_f64(&reference.0).hypot(dbig_to_f64(&reference.1));
+                (dbig_to_f64(a) - dbig_to_f64(b)).abs() / scale.max(f64::MIN_POSITIVE)
+            };
+            assert!(
+                rel(&fused.0, &reference.0) < 1e-12 && rel(&fused.1, &reference.1) < 1e-12,
+                "p={period}: fused Λ = ({}, {}) vs DBig ({}, {})",
+                fused.0,
+                fused.1,
+                reference.0,
+                reference.1
+            );
+        }
+    }
+
+    /// Primitivity is now checked at the divisor checkpoints of the single
+    /// acceptance orbit instead of by re-walking each divisor from zero: a
+    /// period that is a multiple of the true one must still be rejected.
+    #[test]
+    fn fused_pass_still_rejects_a_non_primitive_period() {
+        let prec = 120;
+        // c = -1 is the period-2 nucleus; 4, 6 and 8 are multiples of it.
+        let cx = raise_precision(DBig::from_str("-1.0").unwrap(), prec);
+        let cy = raise_precision(DBig::from_str("0.0").unwrap(), prec);
+        let tol = raise_precision(DBig::from_str("1e-40").unwrap(), prec);
+        let tol_sq = &tol * &tol;
+        assert!(
+            verify_nucleus(&cx, &cy, 2, &tol_sq, false).is_some(),
+            "period 2 is primitive at c = -1"
+        );
+        for multiple in [4usize, 6, 8] {
+            assert!(
+                verify_nucleus(&cx, &cy, multiple, &tol_sq, false).is_none(),
+                "period {multiple} at c = -1 is a multiple of 2 and must be rejected"
+            );
+        }
     }
 
     #[test]
