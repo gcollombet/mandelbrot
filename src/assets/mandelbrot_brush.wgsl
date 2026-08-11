@@ -114,6 +114,12 @@ override ENABLE_DYNAMIC_STATS: bool = false;
 // workgroup per dispatch. Enabled on demand by the panel.
 override ENABLE_WORK_STATS: bool = false;
 
+// Scheduling-only periodic attraction heuristic. It never changes terminal
+// classification: a likely-interior texel stays unfinished and merely receives
+// a smaller share of THIS dispatch's weighted-work budget. Kept as a pipeline
+// override so target-GPU A/B measurements can compile the whole branch away.
+override ENABLE_PERIODIC_SCHEDULING: bool = true;
+
 struct BlaStep {
   // floatexp form: a = (ax,ay)·2^ab_exp, b = (bx,by)·2^ab_exp,
   // alpha = radius_alpha·2^alpha_exp, beta = radius_beta (O(1)).
@@ -170,8 +176,10 @@ struct BrushUniforms {
 struct CounterBuffer {
   count: atomic<u32>,
   weightedWork: atomic<u32>,
-  _padding0: u32,
-  _padding1: u32,
+  // Sum of unfinished scheduling weights in eighth-pixel units. Full-rate
+  // texels contribute 8, medium likely-interior texels 2, strong ones 1.
+  effectiveCountEighths: atomic<u32>,
+  throttledCount: atomic<u32>,
 };
 
 // Per-dispatch work instrumentation (in-place path only). realMean/covMean are
@@ -683,6 +691,12 @@ var<private> g_workSteps: u32 = 0u;
 // the adaptive batch controller stays stable across block/exact mix swings
 // while navigating. g_workSteps (1/turn) keeps the honest turn stats.
 var<private> g_workBudget: u32 = 0u;
+const PERIODIC_WEIGHT_FULL: u32 = 8u;
+const PERIODIC_WEIGHT_QUARTER: u32 = 2u;
+const PERIODIC_WEIGHT_EIGHTH: u32 = 1u;
+// Scheduling weight predicted for this texel's NEXT continuation. Reset to
+// full in cs_main and lowered only by an aligned periodic-map observation.
+var<private> g_activeWeightEighths: u32 = PERIODIC_WEIGHT_FULL;
 // Per-texel tier application counts (auto mode), flushed with the work stats.
 var<private> g_tierApps: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
 var<private> g_dynamicTierAttempts: array<u32, 4> = array<u32, 4>(0u, 0u, 0u, 0u);
@@ -1522,6 +1536,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   let isBlockTable = isJet || isMobius || isUnified;
   let useBla = mandelbrot.approximationMode >= 0.5
             && mandelbrot.blaLevelCount >= 1.0;
+  var localWorkLimit = max(1u, u32(max_iteration));
 
   if (useBla) {
     let dcMag = sqrt(max(0.0, dot(dc, dc)));
@@ -1642,16 +1657,28 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
         }
       }
     }
-    while (g_workBudget < u32(max_iteration) && ref_i < globalMaxIterI) {
+    while (g_workBudget < localWorkLimit && ref_i < globalMaxIterI) {
       g_workSteps += 1u;
       g_workBudget += 1u;
       if (perP > 0 && ref_i >= perNext) {
         let k = (ref_i - perStart + perP - 1) / perP;
         let aligned = perStart + k * perP;
         if (ref_i == aligned) {
-          if (try_periodic_interior(perHdr, fe_from_vec(dz, 0), dcFe, perR)) {
+          let periodicVerdict = try_periodic_interior(perHdr, fe_from_vec(dz, 0), dcFe, perR);
+          if (periodicVerdict.inside) {
             inside = true;
             break;
+          }
+          if (periodicVerdict.activeWeightEighths < PERIODIC_WEIGHT_FULL) {
+            g_activeWeightEighths = min(
+              g_activeWeightEighths,
+              periodicVerdict.activeWeightEighths,
+            );
+            let weightedLimit = max(
+              1u,
+              (u32(max_iteration) * g_activeWeightEighths + 7u) / PERIODIC_WEIGHT_FULL,
+            );
+            localWorkLimit = min(localWorkLimit, weightedLimit);
           }
           // Failed verdict: back off — retry stride doubles, capped well
           // below i32 overflow, always a multiple of p (phase-aligned).
@@ -1805,7 +1832,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       }
     }
   } else {
-    while (g_workBudget < u32(max_iteration) && ref_i < globalMaxIterI) {
+    while (g_workBudget < localWorkLimit && ref_i < globalMaxIterI) {
       g_workSteps += 1u;
       g_workBudget += 1u;
       let zPrev = refZ + dz;
@@ -2887,14 +2914,37 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
 // this binary interior verdict and no longer rejects a valid invariant disk.
 // A direct-majorant header (F.w == 1) has already proved exact invariance for
 // every |dc| in the view and needs only the entry-radius comparison here.
-fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
+//
+// If the exact disk proof does not close, the same local period map can still
+// provide a SCHEDULING hint. A small fixed-point residual together with a local
+// derivative below one lowers only the current dispatch budget. The pixel is
+// not classified as interior, globalMaxIter is untouched, and a false positive
+// can therefore escape normally in a later dispatch.
+struct PeriodicInteriorVerdict {
+  inside: bool,
+  activeWeightEighths: u32,
+};
+
+fn periodic_unknown() -> PeriodicInteriorVerdict {
+  return PeriodicInteriorVerdict(false, PERIODIC_WEIGHT_FULL);
+}
+
+fn periodic_log2_abs(v: fe) -> f32 {
+  return log2(max(length(v.m), 1e-30)) + f32(v.e);
+}
+
+fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> PeriodicInteriorVerdict {
   let log2_dz = log2(max(length(dz.m), 1e-30)) + f32(dz.e);
-  if (!(log2_dz < rLog2)) {
-    return false;
-  }
+  let entryCertified = log2_dz < rLog2;
+  // The heuristic may look at the same local model just outside the proved
+  // invariant disk, but never beyond 2r where the approximation stops being a
+  // useful attraction signal. This relaxed ring has no correctness authority.
+  let entryHeuristic = ENABLE_PERIODIC_SCHEDULING && log2_dz < rLog2 + 1.0;
+  if (!entryCertified && !entryHeuristic) { return periodic_unknown(); }
+
   let hF = mandelbrotJetRadii[hdrBase + 9].v;
-  if (hF.w > 0.5) {
-    return true;
+  if (entryCertified && hF.w > 0.5) {
+    return PeriodicInteriorVerdict(true, PERIODIC_WEIGHT_FULL);
   }
   let hA = mandelbrotJetRadii[hdrBase + 4].v;
   let hB = mandelbrotJetRadii[hdrBase + 5].v;
@@ -2913,24 +2963,56 @@ fn try_periodic_interior(hdrBase: i32, dz: fe, dc: fe, rLog2: f32) -> bool {
   let one = fe(vec2<f32>(1.0, 0.0), 0);
   let onePlusFc = fe_add(one, fe_cmul(cF, dc));
 
-  let l2K = log2(max(length(onePlusFc.m), 1e-30)) + f32(onePlusFc.e);
-  let l2De = log2(max(length(de.m), 1e-30)) + f32(de.e);
+  let l2K = periodic_log2_abs(onePlusFc);
+  let l2De = periodic_log2_abs(de);
   let deROverK = exp2(l2De + rLog2 - l2K);
-  if (!(deROverK < 0.98)) {
-    return false; // no safely positive denominator margin μ
-  }
-  let l2Mu = l2K + log2(1.0 - deROverK);
-
-  let l2Ae = log2(max(length(ae.m), 1e-30)) + f32(ae.e);
-  let l2Bc = log2(max(length(bc.m), 1e-30)) + f32(bc.e);
-  let imageOverR = exp2(l2Ae - l2Mu)
-                 + exp2(l2Bc - l2Mu - rLog2);
   let errOverR = exp2(hAp.w); // serialized ½·ε_int·(|A| + |B|·c_max/r)
-  if (!(imageOverR + errOverR < 0.98)) {
-    return false; // exact block does not map the disk strictly inside itself
+
+  if (entryCertified && deROverK < 0.98) {
+    let l2Mu = l2K + log2(1.0 - deROverK);
+    let l2Ae = periodic_log2_abs(ae);
+    let l2Bc = periodic_log2_abs(bc);
+    let imageOverR = exp2(l2Ae - l2Mu)
+                   + exp2(l2Bc - l2Mu - rLog2);
+    if (imageOverR + errOverR < 0.98) {
+      return PeriodicInteriorVerdict(true, PERIODIC_WEIGHT_FULL);
+    }
   }
 
-  return true;
+  if (!ENABLE_PERIODIC_SCHEDULING) { return periodic_unknown(); }
+
+  // Evaluate m(dz), its fixed-point residual and its derivative at the current
+  // aligned phase. The denominator guard is deliberately much stronger than
+  // numerical non-zero: a near-pole map is never treated as attractive.
+  let den = fe_add(fe_cmul(de, dz), onePlusFc);
+  let l2Den = periodic_log2_abs(den);
+  if (!(l2Den > l2K - 3.0)) { return periodic_unknown(); }
+  let invDen = fe_cinv(den);
+  let mapped = fe_cmul(fe_add(fe_cmul(ae, dz), bc), invDen);
+  let localDerivative = fe_cmul(
+    fe_add(ae, fe_neg(fe_cmul(mapped, de))),
+    invDen,
+  );
+  let residual = fe_add(mapped, fe_neg(dz));
+  let derivativeLog2 = periodic_log2_abs(localDerivative);
+  let residualOverR = exp2(min(32.0, periodic_log2_abs(residual) - rLog2))
+                    + min(errOverR, 1e9);
+  let entryLog2Ratio = log2_dz - rLog2;
+
+  // Keep the conservative confidence gates, but make a positive score much
+  // more visible in A/B: strong candidates receive 1/8 of the uniform budget
+  // and medium candidates 1/4. False positives remain scheduling-only.
+  if (entryLog2Ratio < 0.5849625       // |dz| < 1.5 r
+      && derivativeLog2 < -1.0        // |m'| < 0.5
+      && residualOverR < 0.25) {
+    return PeriodicInteriorVerdict(false, PERIODIC_WEIGHT_EIGHTH);
+  }
+  if (entryLog2Ratio < 1.0             // |dz| < 2 r
+      && derivativeLog2 < -0.3219281   // |m'| < 0.8
+      && residualOverR < 0.5) {
+    return PeriodicInteriorVerdict(false, PERIODIC_WEIGHT_QUARTER);
+  }
+  return periodic_unknown();
 }
 
 // ── §18 parabolic Fatou gates (gates.rs runtime, shallow f32 path) ────────────
@@ -3325,6 +3407,7 @@ fn try_apply_renorm(dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derSc
 
 fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32) -> TexelOut {
   let max_iteration = mandelbrot.maxIteration;
+  var localWorkLimit = max(1u, u32(max_iteration));
   let muLimit = mandelbrot.mu;
   let logEpsilon = log(max(mandelbrot.epsilon, 1e-30));
   let globalMaxIterI = i32(mandelbrot.globalMaxIter);
@@ -3421,16 +3504,28 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     }
   }
 
-  while (g_workBudget < u32(max_iteration) && ref_i < globalMaxIterI) {
+  while (g_workBudget < localWorkLimit && ref_i < globalMaxIterI) {
     g_workSteps += 1u;
     g_workBudget += 1u;
     if (perP > 0 && ref_i >= perNext) {
       let k = (ref_i - perStart + perP - 1) / perP;
       let aligned = perStart + k * perP;
       if (ref_i == aligned) {
-        if (try_periodic_interior(perHdr, dz, dc, perR)) {
+        let periodicVerdict = try_periodic_interior(perHdr, dz, dc, perR);
+        if (periodicVerdict.inside) {
           inside = true;
           break;
+        }
+        if (periodicVerdict.activeWeightEighths < PERIODIC_WEIGHT_FULL) {
+          g_activeWeightEighths = min(
+            g_activeWeightEighths,
+            periodicVerdict.activeWeightEighths,
+          );
+          let weightedLimit = max(
+            1u,
+            (u32(max_iteration) * g_activeWeightEighths + 7u) / PERIODIC_WEIGHT_FULL,
+          );
+          localWorkLimit = min(localWorkLimit, weightedLimit);
         }
         perNext = aligned + perStride;
         perStride = min(perStride * 2, 1 << 24);
@@ -3652,6 +3747,8 @@ var<workgroup> wgCount: atomic<u32>;
 // workgroup atomic in every active invocation; only one global atomic remains
 // per 8x8 workgroup.
 var<workgroup> wgWeightedWork: array<u32, 64>;
+var<workgroup> wgEffectiveCountEighths: array<u32, 64>;
+var<workgroup> wgThrottledCount: array<u32, 64>;
 // Work-instrumentation partials (reduced once per workgroup, like the counters).
 var<workgroup> wgRealSum: atomic<u32>;  // Σ real loop steps over this workgroup's texels
 var<workgroup> wgRealMax: atomic<u32>;  // max real loop steps among them (straggler)
@@ -3716,6 +3813,7 @@ fn cs_main(
   // Post-iteration classification of this texel (for the fused counter).
   var needs = false;
   var weightedWork = 0u;
+  g_activeWeightEighths = PERIODIC_WEIGHT_FULL;
 
   let dims = textureDimensions(raw);
   if (gid.x < dims.x && gid.y < dims.y) {
@@ -3958,6 +4056,12 @@ fn cs_main(
   }
 
   wgWeightedWork[lidx] = weightedWork;
+  wgEffectiveCountEighths[lidx] = select(0u, g_activeWeightEighths, needs);
+  wgThrottledCount[lidx] = select(
+    0u,
+    1u,
+    needs && g_activeWeightEighths < PERIODIC_WEIGHT_FULL,
+  );
   if (needs) {
     atomicAdd(&wgCount, 1u);
   }
@@ -3969,13 +4073,23 @@ fn cs_main(
       atomicAdd(&counter.count, c);
     }
     var workSum = 0u;
+    var effectiveCountEighths = 0u;
+    var throttledCount = 0u;
     for (var lane = 0u; lane < 64u; lane++) {
       workSum += wgWeightedWork[lane];
+      effectiveCountEighths += wgEffectiveCountEighths[lane];
+      throttledCount += wgThrottledCount[lane];
     }
     let workShift = min(u32(max(0.0, brush.workCounterShift)), 31u);
     let scaledWork = workSum >> workShift;
     if (scaledWork > 0u) {
       atomicAdd(&counter.weightedWork, scaledWork);
+    }
+    if (effectiveCountEighths > 0u) {
+      atomicAdd(&counter.effectiveCountEighths, effectiveCountEighths);
+    }
+    if (throttledCount > 0u) {
+      atomicAdd(&counter.throttledCount, throttledCount);
     }
     // Work-instrumentation reduction. Downscale the per-workgroup sums by 64
     // (via >>6, rounded) so the global u32 accumulators can't overflow; the

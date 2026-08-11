@@ -44,10 +44,20 @@ const stats = reactive({
   cpuModelSyncMs: 0,
   cpuUpdateMs: 0,
   cpuRenderMs: 0,
+  framePacingRafRawIntervalMs: 0,
+  framePacingRafIntervalMs: 0,
+  framePacingTargetIntervalMs: 0,
+  framePacingGpuUtilization: 0,
+  framePacingInFlight: 0,
+  framePacingMaxInFlight: 3,
+  framePacingQueueBlocked: false,
+  framePacingCompletionAgeMs: 0,
   gpuSubmitMs: 0, // engine.gpuFrameTimeMs (CPU-measured submit→done wall)
   gpuSpanMs: 0,   // authoritative GPU frame time (max end − min begin)
   gpuSumMs: 0,    // Σ of measured passes (breakdown; may overlap/exceed span)
   unfinished: -1,
+  effectiveUnfinished: -1,
+  periodicThrottled: -1,
   totalPixels: 0,
   passes: [] as PassRow[],
 
@@ -70,6 +80,7 @@ const stats = reactive({
   gateStats: [-1, -1] as [number, number],
   renormStats: [-1, -1] as [number, number],
   renormEnabled: false,
+  periodicSchedulingEnabled: true,
   realizedSkip: -1,
   workgroupWaste: -1,
   maxPixelSteps: -1,
@@ -394,6 +405,11 @@ function setRenorm(on: boolean) {
   stats.renormEnabled = on;
 }
 
+function setPeriodicScheduling(on: boolean) {
+  props.engine?.setPeriodicSchedulingEnabled(on);
+  stats.periodicSchedulingEnabled = on;
+}
+
 function setDynamicValidity(on: boolean) {
   props.engine?.setDynamicBlockValidity(on);
 }
@@ -468,7 +484,10 @@ function appsPerGpuMs(): number {
 
 function opsPerFrame(): number {
   if (stats.unfinished < 0 || stats.batchSize <= 0) return -1;
-  return stats.unfinished * stats.batchSize;
+  const population = stats.effectiveUnfinished >= 0
+    ? stats.effectiveUnfinished
+    : stats.unfinished;
+  return population * stats.batchSize;
 }
 
 interface Sample {
@@ -496,10 +515,20 @@ function readLive(e: any) {
   stats.cpuModelSyncMs = e.cpuModelSyncMs ?? 0;
   stats.cpuUpdateMs = e.cpuUpdateMs ?? 0;
   stats.cpuRenderMs = e.cpuRenderMs ?? 0;
+  stats.framePacingRafRawIntervalMs = e.framePacingRafRawIntervalMs ?? 0;
+  stats.framePacingRafIntervalMs = e.framePacingRafIntervalMs ?? 0;
+  stats.framePacingTargetIntervalMs = e.framePacingTargetIntervalMs ?? 0;
+  stats.framePacingGpuUtilization = e.framePacingGpuUtilization ?? 0;
+  stats.framePacingInFlight = e.framePacingInFlight ?? 0;
+  stats.framePacingMaxInFlight = e.framePacingMaxInFlight ?? 3;
+  stats.framePacingQueueBlocked = !!e.framePacingQueueBlocked;
+  stats.framePacingCompletionAgeMs = e.framePacingCompletionAgeMs ?? 0;
   stats.gpuSubmitMs = e.isRendering ? (e.gpuFrameTimeMs ?? 0) : 0;
   stats.gpuSpanMs = e.passGpuSpanMs ?? 0;
   stats.gpuSumMs = e.passGpuSumMs ?? 0;
   stats.unfinished = e.unfinishedPixelCount ?? -1;
+  stats.effectiveUnfinished = e.effectiveUnfinishedPixelCount ?? -1;
+  stats.periodicThrottled = e.periodicThrottledPixelCount ?? -1;
   const ns = e.neutralSize ?? 0;
   stats.totalPixels = ns * ns;
   const meta: { key: string; label: string; help: string }[] = e.passMeta ?? [];
@@ -530,6 +559,7 @@ function readLive(e: any) {
   stats.gateStats = e.gateStatsApprox ?? [-1, -1];
   stats.renormStats = e.renormStatsApprox ?? [-1, -1];
   stats.renormEnabled = e.renormEnabled ?? false;
+  stats.periodicSchedulingEnabled = e.periodicSchedulingEnabled ?? true;
   stats.realizedSkip = e.realizedSkip ?? -1;
   stats.workgroupWaste = e.workgroupWaste ?? -1;
   stats.maxPixelSteps = e.maxPixelSteps ?? -1;
@@ -895,6 +925,14 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       <span class="perf-stat-label">CPU détail</span>
       <span class="perf-stat-value">nav {{ fmt(stats.cpuNavigationMs) }} · vue {{ fmt(stats.cpuModelSyncMs) }} · update {{ fmt(stats.cpuUpdateMs) }} · submit {{ fmt(stats.cpuRenderMs) }}ms</span>
     </div>
+    <div class="perf-stat-row" title="Intervalle brut du dernier callback requestAnimationFrame, sa moyenne lissée et intervalle visé par le pacer après réserve de charge GPU.">
+      <span class="perf-stat-label">Cadence</span>
+      <span class="perf-stat-value">rAF brut {{ fmt(stats.framePacingRafRawIntervalMs) }} · lissé {{ fmt(stats.framePacingRafIntervalMs) }} · cible {{ fmt(stats.framePacingTargetIntervalMs) }}ms</span>
+    </div>
+    <div class="perf-stat-row" title="Soumissions postérieures au dernier watermark GPU terminé. La limite évite que la file grandisse sans borne; l'âge indique depuis combien de temps le watermark courant attend sa notification.">
+      <span class="perf-stat-label">File GPU</span>
+      <span class="perf-stat-value" :class="{ 'perf-warn': stats.framePacingQueueBlocked }">{{ stats.framePacingInFlight }}/{{ stats.framePacingMaxInFlight }} · charge {{ (stats.framePacingGpuUtilization * 100).toFixed(0) }}% · âge {{ fmt(stats.framePacingCompletionAgeMs) }}ms</span>
+    </div>
     <div v-if="stats.completionTotalApps >= 0" class="perf-stat-row">
       <span class="perf-stat-label">Total apps</span>
       <span class="perf-stat-value">{{ formatOps(stats.completionTotalApps) }}</span>
@@ -910,6 +948,10 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     <div class="perf-stat-row">
       <span class="perf-stat-label">Pixels restants</span>
       <span class="perf-stat-value">{{ formatPixelCount(stats.unfinished) }}</span>
+    </div>
+    <div v-if="stats.periodicThrottled > 0" class="perf-stat-row">
+      <span class="perf-stat-label">Intérieur probable ralenti</span>
+      <span class="perf-stat-value">{{ formatPixelCount(stats.periodicThrottled) }} · population effective {{ formatPixelCount(stats.effectiveUnfinished) }}</span>
     </div>
     <div class="perf-stat-row">
       <span class="perf-stat-label">Total pixels</span>
@@ -929,6 +971,15 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       <div class="perf-debug-switch-wrap">
         <label class="perf-debug-switch">
           <input type="checkbox" :checked="stats.renormEnabled" @change="setRenorm(($event.target as HTMLInputElement).checked)" />
+          <span class="perf-debug-switch-slider"></span>
+        </label>
+      </div>
+    </div>
+    <div class="perf-stat-row perf-debug-row">
+      <span class="perf-stat-label">Budget intérieur probable</span>
+      <div class="perf-debug-switch-wrap">
+        <label class="perf-debug-switch">
+          <input type="checkbox" :checked="stats.periodicSchedulingEnabled" @change="setPeriodicScheduling(($event.target as HTMLInputElement).checked)" />
           <span class="perf-debug-switch-slider"></span>
         </label>
       </div>
@@ -1377,6 +1428,11 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
   font-variant-numeric: tabular-nums;
   font-weight: 500;
   text-align: right;
+}
+
+.perf-warn {
+  color: #f59e0b;
+  font-weight: 700;
 }
 
 .perf-stat-value--pending {

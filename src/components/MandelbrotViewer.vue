@@ -1616,7 +1616,7 @@ function startTravelToPreset(preset: PresetRecord) {
 
     <!-- GPU performance panel (separate floating overlay, top-left) -->
     <div
-      v-show="showPerfPanel"
+      v-if="showPerfPanel"
       class="perf-panel-wrapper"
       @touchstart.stop
       @touchend.stop

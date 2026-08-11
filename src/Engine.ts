@@ -51,6 +51,15 @@ import {
     requestedIterationBudgetMs,
     updateIterationWorkRateEma,
 } from './iterationBatchController'
+import {
+    INITIAL_FRAME_PACING_GPU_UTILIZATION,
+    MAX_FRAME_PACING_IN_FLIGHT,
+    QUEUE_BLOCKED_MAX_CREDIT_INTERVALS,
+    advanceFramePacingLoad,
+    advanceFramePacer,
+    countFramesInFlight,
+    framePacingIntervalForGpuSpan,
+} from './framePacing'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
@@ -159,6 +168,8 @@ type IterationBatchTimingContext = {
     visiblePixelCount: number
     actualWeightedWork?: number
     remainingPixelCount?: number
+    effectiveRemainingPixelCount?: number
+    periodicThrottledPixelCount?: number
 }
 
 type DynamicValidityRuntimeStats = {
@@ -789,6 +800,11 @@ export class Engine {
     private lastCounterDispatchFrame = -COUNTER_SAMPLE_INTERVAL_FRAMES
     /** Number of pixels still needing work. -1 = not yet known, 0 = fully converged. */
     unfinishedPixelCount = -1
+    /** Scheduling-weighted unfinished population (full=1, medium=1/4,
+     * strong periodic attraction=1/8). Used only by batch prediction. */
+    effectiveUnfinishedPixelCount = -1
+    /** Unfinished pixels whose latest periodic score reduced their local batch. */
+    periodicThrottledPixelCount = -1
     // ── Work instrumentation (in-place compute path), latest sampled dispatch ──
     /** covered iterations ÷ real loop steps — the true on-GPU BLA/Padé compression
      *  (≈1 in perturbation mode; >1 with blocks). -1 = not yet known. */
@@ -815,6 +831,9 @@ export class Engine {
     /** Portfolio A/B switch: picks the ENABLE_PORTFOLIO pipeline variant at
      *  the next in-place dispatch (specialization cache, same as deep). */
     portfolioEnabled = true
+    /** Scheduling-only periodic attraction A/B switch. It never changes a
+     * texel's terminal classification. */
+    periodicSchedulingEnabled = true
     /** Renormalized Feigenbaum-return tier A/B switch: picks the ENABLE_RENORM
      *  pipeline variant. Off by default (the tier is only valid deep on the
      *  period-doubling cascade near c_∞); toggle for measurement. */
@@ -912,8 +931,30 @@ export class Engine {
     private _emaFrameMs = 0
     private _wasActive = false
     private _lastActiveRenderMs = 0
-    /** Wall-clock time of the last frame actually stepped + rendered. */
-    private _lastDrawMs = 0
+    /** rAF phase accumulator used to pace submissions without quantizing each
+     * GPU interval independently to the next display tick. */
+    private _pacingLastTickMs = -1
+    private _pacingCreditMs = 0
+    private _pacingCompletedSerial = 0
+    private _pacingCompletionMarkerPending = false
+    private _pacingCompletionMarkerStartedMs = 0
+    private _pacingHealthyFrames = 0
+    private _pacingWasQueueBlocked = false
+    private _lastRafTickMs = -1
+    private _drawInFlight = false
+    /** Latest interval between continuously armed requestAnimationFrame callbacks. */
+    framePacingRafRawIntervalMs = 0
+    /** Smoothed cadence of requestAnimationFrame callbacks, including skipped draws. */
+    framePacingRafIntervalMs = 0
+    /** Current GPU-load target after congestion backoff/recovery. */
+    framePacingGpuUtilization = INITIAL_FRAME_PACING_GPU_UTILIZATION
+    /** GPU-span-derived interval actually consumed by the phase accumulator. */
+    framePacingTargetIntervalMs = 0
+    /** Submitted frames beyond the latest non-blocking completion watermark. */
+    framePacingInFlight = 0
+    readonly framePacingMaxInFlight = MAX_FRAME_PACING_IN_FLIGHT
+    framePacingQueueBlocked = false
+    framePacingCompletionAgeMs = 0
 
     // tailles
     neutralSize = 0 // coté en pixels de la texture neutre (D)
@@ -978,6 +1019,8 @@ export class Engine {
         generation: number
         actualWeightedWork: number
         remainingPixelCount: number
+        effectiveRemainingPixelCount: number
+        periodicThrottledPixelCount: number
     }>()
     private lastRenderStartMs = 0
 
@@ -2421,7 +2464,7 @@ export class Engine {
     // Lazily build + cache a specialized in-place kernel for the given override
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
-    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled): GPUComputePipeline {
+    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled, periodicScheduling = this.periodicSchedulingEnabled): GPUComputePipeline {
         const dynamicValidity = this.dynamicBlockValidity && this.approximationMode === 'auto'
         const radialValidity = dynamicValidity
             && this.incrementalReferenceTable
@@ -2431,7 +2474,7 @@ export class Engine {
         // Work instrumentation is panel-only; keep it out of the production
         // kernel so ordinary rendering pays none of its workgroup atomics.
         const workStats = this.workStatsEnabled || dynamicStats
-        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}w${workStats ? 1 : 0}`
+        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}i${periodicScheduling ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}w${workStats ? 1 : 0}`
         let pipeline = this.inplacePipelineCache.get(key)
         if (!pipeline) {
             pipeline = this.device.createComputePipeline({
@@ -2443,13 +2486,14 @@ export class Engine {
                         ENABLE_DEEP: deep ? 1 : 0,
                         ENABLE_PORTFOLIO: portfolio ? 1 : 0,
                         ENABLE_RENORM: renorm ? 1 : 0,
+                        ENABLE_PERIODIC_SCHEDULING: periodicScheduling ? 1 : 0,
                         ENABLE_DYNAMIC_VALIDITY: dynamicValidity ? 1 : 0,
                         ENABLE_RADIAL_VALIDITY: radialValidity ? 1 : 0,
                         ENABLE_DYNAMIC_STATS: dynamicStats ? 1 : 0,
                         ENABLE_WORK_STATS: workStats ? 1 : 0,
                     },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, periodicScheduling=${periodicScheduling}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats})`,
             })
             this.inplacePipelineCache.set(key, pipeline)
         }
@@ -3340,6 +3384,8 @@ export class Engine {
     // post-table reconvergence ended before any sampled readback landed).
     private invalidateCounterReadback(preserveWorkStats = false) {
         this.unfinishedPixelCount = -1
+        this.effectiveUnfinishedPixelCount = -1
+        this.periodicThrottledPixelCount = -1
         this.realizedSkip = -1
         this.workgroupWaste = -1
         this.maxPixelSteps = -1
@@ -3402,6 +3448,8 @@ export class Engine {
                 const data = new Uint32Array(slot.buffer.getMappedRange())
                 const unfinished = data[0]
                 const actualWeightedWork = data[1] * 2 ** workCounterShift
+                const effectiveUnfinished = data[2] / 8
+                const periodicThrottled = data[3]
                 const workStats = data.subarray(COUNTER_WORDS)
                 // Work stats; 0 on non-in-place frames (buffer cleared).
                 const realMean = workStats[0]
@@ -3418,8 +3466,10 @@ export class Engine {
                     batchGeneration,
                     actualWeightedWork,
                     unfinished,
+                    effectiveUnfinished,
+                    periodicThrottled,
                 )
-                this.applyCounterReadback(sequence, generation, frame, unfinished, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm, dynamic)
+                this.applyCounterReadback(sequence, generation, frame, unfinished, effectiveUnfinished, periodicThrottled, realMean, covMean, maxAccum, maxSteps, tierApps, secours, appsF32, renorm, dynamic)
             } catch {
                 // Buffer destruction or device loss can reject an outstanding readback.
             } finally {
@@ -3431,7 +3481,7 @@ export class Engine {
         })()
     }
 
-    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0, renorm: [number, number] = [0, 0], dynamic: DynamicValidityRuntimeStats = {
+    private applyCounterReadback(sequence: number, generation: number, frame: number, unfinished: number, effectiveUnfinished: number, periodicThrottled: number, realMean = 0, covMean = 0, maxAccum = 0, maxSteps = 0, tierApps: [number, number, number, number] = [0, 0, 0, 0], secours: [number, number] = [0, 0], appsF32 = 0, renorm: [number, number] = [0, 0], dynamic: DynamicValidityRuntimeStats = {
         tierAttempts: [0, 0, 0, 0],
         tierAccepts: [0, 0, 0, 0],
         skipBuckets: [0, 0, 0, 0],
@@ -3449,6 +3499,8 @@ export class Engine {
 
         const prevUnfinished = this.unfinishedPixelCount
         this.unfinishedPixelCount = unfinished
+        this.effectiveUnfinishedPixelCount = effectiveUnfinished
+        this.periodicThrottledPixelCount = periodicThrottled
         this.counterSampleFrame = frame
 
         // Work instrumentation (in-place path). realMean/covMean/maxAccum are the
@@ -3518,6 +3570,67 @@ export class Engine {
             })
     }
 
+    /**
+     * Record one real queue submission for the timestamp-capable pacing path.
+     * Completion tracking is deliberately asynchronous: it bounds queue depth
+     * without serializing draw() on onSubmittedWorkDone().
+     */
+    private recordFramePacingSubmission() {
+        if (!this.timestampsEnabled) return
+
+        const load = advanceFramePacingLoad(
+            this.framePacingGpuUtilization,
+            this._pacingHealthyFrames,
+            'submitted',
+        )
+        this.framePacingGpuUtilization = load.utilization
+        this._pacingHealthyFrames = load.healthyFrames
+        this.framePacingInFlight = countFramesInFlight(
+            this.frameSerial,
+            this._pacingCompletedSerial,
+        )
+        this.armFramePacingCompletionMarker()
+    }
+
+    /** Keep at most one queue-completion promise pending; its serial is a coarse
+     * watermark, not a per-frame fence. If more work accumulated behind it, arm
+     * the next watermark immediately after resolution so a full queue cannot
+     * deadlock waiting for another render submission. */
+    private armFramePacingCompletionMarker() {
+        if (!this.timestampsEnabled
+            || this._pacingCompletionMarkerPending
+            || this.frameSerial <= this._pacingCompletedSerial) {
+            return
+        }
+
+        const markerSerial = this.frameSerial
+        this._pacingCompletionMarkerPending = true
+        this._pacingCompletionMarkerStartedMs = performance.now()
+        void this.device.queue.onSubmittedWorkDone()
+            .then(() => {
+                this._pacingCompletedSerial = Math.max(
+                    this._pacingCompletedSerial,
+                    markerSerial,
+                )
+                this._pacingCompletionMarkerPending = false
+                this._pacingCompletionMarkerStartedMs = 0
+                this.framePacingCompletionAgeMs = 0
+                this.framePacingInFlight = countFramesInFlight(
+                    this.frameSerial,
+                    this._pacingCompletedSerial,
+                )
+                this.armFramePacingCompletionMarker()
+            })
+            .catch(() => {
+                // Device loss must not leave the render loop permanently gated.
+                this._pacingCompletedSerial = this.frameSerial
+                this._pacingCompletionMarkerPending = false
+                this._pacingCompletionMarkerStartedMs = 0
+                this.framePacingCompletionAgeMs = 0
+                this.framePacingInFlight = 0
+            })
+    }
+
     private trimPendingIterationSamples() {
         while (this.pendingIterationTimings.size > ITERATION_SAMPLE_PAIR_RETENTION) {
             for (const frame of this.pendingIterationTimings.keys()) {
@@ -3548,11 +3661,15 @@ export class Engine {
         generation: number,
         actualWeightedWork: number,
         remainingPixelCount: number,
+        effectiveRemainingPixelCount: number,
+        periodicThrottledPixelCount: number,
     ) {
         this.pendingIterationCounters.set(frame, {
             generation,
             actualWeightedWork,
             remainingPixelCount,
+            effectiveRemainingPixelCount,
+            periodicThrottledPixelCount,
         })
         this.tryApplyPairedIterationSample(frame)
         this.trimPendingIterationSamples()
@@ -3571,6 +3688,8 @@ export class Engine {
                 ...timing.context,
                 actualWeightedWork: counter.actualWeightedWork,
                 remainingPixelCount: counter.remainingPixelCount,
+                effectiveRemainingPixelCount: counter.effectiveRemainingPixelCount,
+                periodicThrottledPixelCount: counter.periodicThrottledPixelCount,
             },
             timing.fixedPassesMs,
             true,
@@ -3644,6 +3763,8 @@ export class Engine {
         // the image can no longer masquerade as enormous throughput.
         const remainingPixelCount = sample.remainingPixelCount
             ?? sample.activePixelCount
+        const effectiveRemainingPixelCount = sample.effectiveRemainingPixelCount
+            ?? remainingPixelCount
         if (computePassOnly && isRepresentativeIterationPopulation(
             remainingPixelCount,
             sample.visiblePixelCount,
@@ -3690,11 +3811,11 @@ export class Engine {
             return
         }
 
-        if (this.iterationWorkRate > 0 && remainingPixelCount > 0) {
+        if (this.iterationWorkRate > 0 && effectiveRemainingPixelCount > 0) {
             this.iterationBatchSize = batchSizeForWorkRate(
                 this.iterationWorkRate,
                 targetIterationMs,
-                remainingPixelCount,
+                effectiveRemainingPixelCount,
                 MIN_BATCH_SIZE,
                 maxBatchSize,
             )
@@ -4238,6 +4359,15 @@ export class Engine {
 
     getWorkStatsEnabled(): boolean {
         return this.workStatsEnabled
+    }
+
+    /** A/B toggle for the scheduling-only periodic attraction score. Existing
+     * raw orbit state stays valid because the score changes priority only. */
+    setPeriodicSchedulingEnabled(on: boolean) {
+        if (on === this.periodicSchedulingEnabled) return
+        this.periodicSchedulingEnabled = on
+        this.invalidateCounterReadback(true)
+        this.needRender = true
     }
 
     /** Enable the panel-only work counters. Off by default: they cost seven
@@ -5799,6 +5929,7 @@ export class Engine {
         this.device.queue.submit([commandEncoder.finish()])
         this.cpuRenderMs = performance.now() - renderStartMs
         this.frameSerial++   // one actually-rendered frame → one measurement for the panel
+        this.recordFramePacingSubmission()
         if (tsResolvedThisFrame) this.readbackTimestamps()
         // Recompute debug overlay active: surface the GPU frame time. The pass strips
         // the derivative/f32-path/lockstep asymmetries for every mode, so this
@@ -6079,7 +6210,12 @@ export class Engine {
     startRenderLoop(drawFn: () => Promise<void>) {
         this._drawFn = drawFn
         if (this._rafId === null) {
-            this._rafId = requestAnimationFrame(async () => this._loop())
+            this._pacingLastTickMs = -1
+            this._pacingCreditMs = 0
+            this._lastRafTickMs = -1
+            this.framePacingRafRawIntervalMs = 0
+            this.framePacingRafIntervalMs = 0
+            this._rafId = requestAnimationFrame(now => { void this._loop(now) })
         }
     }
 
@@ -6090,13 +6226,38 @@ export class Engine {
             this._rafId = null
         }
         this._drawFn = null
+        this._pacingLastTickMs = -1
+        this._pacingCreditMs = 0
+        this._lastRafTickMs = -1
+        this.framePacingRafRawIntervalMs = 0
+        this.framePacingRafIntervalMs = 0
+        this.framePacingTargetIntervalMs = 0
     }
 
-    private async _loop() {
+    private async _loop(now: number) {
         if (!this._drawFn) {
             this._rafId = null
             return
         }
+
+        // Keep the browser callback chain continuously armed. Re-registering
+        // only after await draw() made the measured cadence include promise/Vue
+        // scheduling and could miss a presentation cycle even when CPU work was
+        // tiny. A second callback may arrive while draw() is suspended, but the
+        // in-flight guard below prevents overlapping navigation or submissions.
+        const previousRafTickMs = this._lastRafTickMs
+        this._lastRafTickMs = now
+        if (previousRafTickMs >= 0 && now >= previousRafTickMs) {
+            const rafIntervalMs = now - previousRafTickMs
+            if (rafIntervalMs > 0 && rafIntervalMs < 1000) {
+                this.framePacingRafRawIntervalMs = rafIntervalMs
+                this.framePacingRafIntervalMs = this.framePacingRafIntervalMs > 0
+                    ? this.framePacingRafIntervalMs * 0.9 + rafIntervalMs * 0.1
+                    : rafIntervalMs
+            }
+        }
+        this._rafId = requestAnimationFrame(nextNow => { void this._loop(nextNow) })
+        if (this._drawInFlight) return
 
         // Pace stepping + rendering to the *real* GPU frame time rather than the
         // raw rAF interval. Rendering is fire-and-forget (queue.submit returns
@@ -6109,39 +6270,74 @@ export class Engine {
         // has elapsed, navigator.step()'s own Date.now() delta_time becomes the
         // true render cadence → uniform, render-time-dependent zoom, and no
         // backlog of un-displayable frames piling up in the queue.
-        // smoothedGpuTimeMs == 0 until the first frame is timed (no gating then);
-        // cap at 500 ms so we stay responsive if a frame spikes.
-        const now = performance.now()
-        const minInterval = Math.min(this.smoothedGpuTimeMs, 500)
+        this.framePacingInFlight = this.timestampsEnabled
+            ? countFramesInFlight(this.frameSerial, this._pacingCompletedSerial)
+            : (this.pendingGpuTiming ? 1 : 0)
+        const queueBlocked = this.timestampsEnabled
+            && this.framePacingInFlight >= MAX_FRAME_PACING_IN_FLIGHT
+        if (queueBlocked && !this._pacingWasQueueBlocked) {
+            const load = advanceFramePacingLoad(
+                this.framePacingGpuUtilization,
+                this._pacingHealthyFrames,
+                'congested',
+            )
+            this.framePacingGpuUtilization = load.utilization
+            this._pacingHealthyFrames = load.healthyFrames
+        }
+        this._pacingWasQueueBlocked = queueBlocked
+        this.framePacingQueueBlocked = queueBlocked
+        this.framePacingCompletionAgeMs = this._pacingCompletionMarkerPending
+            ? Math.max(0, performance.now() - this._pacingCompletionMarkerStartedMs)
+            : 0
+
+        // The timestamp span covers the submitted passes but not every queue or
+        // presentation constraint. Reserve adaptive headroom instead of aiming
+        // at a structurally unstable 100% of that partial measurement.
+        const minInterval = framePacingIntervalForGpuSpan(
+            this.smoothedGpuTimeMs,
+            this.framePacingGpuUtilization,
+        )
+        this.framePacingTargetIntervalMs = minInterval
         // Timestamp mapAsync completion is telemetry, not a GPU frame fence:
         // its CPU notification can arrive tens of milliseconds after the timed
         // GPU work completed. Timestamp-capable adapters therefore pace from the
         // last smoothed query span even while its readback is mapped. Without
         // timestamp queries, retain the conservative onSubmittedWorkDone fence.
         const fallbackFrameComplete = this.timestampsEnabled || !this.pendingGpuTiming
-        if (fallbackFrameComplete && now - this._lastDrawMs >= minInterval) {
-            this._lastDrawMs = now
+        const pacing = advanceFramePacer(
+            now,
+            minInterval,
+            this._pacingLastTickMs,
+            this._pacingCreditMs,
+            fallbackFrameComplete && !queueBlocked,
+            queueBlocked ? QUEUE_BLOCKED_MAX_CREDIT_INTERVALS : undefined,
+        )
+        this._pacingLastTickMs = pacing.lastTickMs
+        this._pacingCreditMs = pacing.creditMs
+        if (pacing.shouldDraw) {
+            this._drawInFlight = true
+            try {
+                const active = this.needsMoreFrames()
+                // On idle→active resume, drop the stale interval so the first rendered
+                // frame after a pause isn't counted as one giant slow frame.
+                if (active && !this._wasActive) this.lastRenderStartMs = 0
+                this._wasActive = active
+                this.isRendering = active
 
-            const active = this.needsMoreFrames()
-            // On idle→active resume, drop the stale interval so the first rendered
-            // frame after a pause isn't counted as one giant slow frame.
-            if (active && !this._wasActive) this.lastRenderStartMs = 0
-            this._wasActive = active
-            this.isRendering = active
+                await this._drawFn()
 
-            await this._drawFn()
-
-            // FPS is updated inside render() from the frame interval (accurate).
-            // When idle, decay it to 0 after a short grace so the panel honestly
-            // shows "not rendering" instead of a stale rate.
-            if (!active && this._lastActiveRenderMs
-                && performance.now() - this._lastActiveRenderMs > 600) {
-                this.fps = 0
-                this._emaFrameMs = 0
+                // FPS is updated inside render() from the frame interval (accurate).
+                // When idle, decay it to 0 after a short grace so the panel honestly
+                // shows "not rendering" instead of a stale rate.
+                if (!active && this._lastActiveRenderMs
+                    && performance.now() - this._lastActiveRenderMs > 600) {
+                    this.fps = 0
+                    this._emaFrameMs = 0
+                }
+            } finally {
+                this._drawInFlight = false
             }
         }
-
-        this._rafId = requestAnimationFrame(async () => this._loop())
     }
 
     /**

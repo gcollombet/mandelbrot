@@ -107,6 +107,9 @@ describe('predictive iteration batch controller', () => {
     it('derives the target batch from throughput, budget, and active population', () => {
         expect(batchSizeForWorkRate(20_000_000, 10, 1_000_000, 1, 10_000)).toBe(200)
         expect(batchSizeForWorkRate(20_000_000, 10, 100_000, 1, 10_000)).toBe(2_000)
+        // 500k full-rate + 500k quarter-rate pixels = 625k effective pixels:
+        // freed work is reassigned to the unknown/full-rate population.
+        expect(batchSizeForWorkRate(20_000_000, 10, 625_000, 1, 10_000)).toBe(320)
         expect(batchSizeForWorkRate(0, 10, 100_000, 1, 10_000)).toBe(1)
     })
 

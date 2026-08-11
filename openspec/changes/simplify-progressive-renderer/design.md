@@ -59,9 +59,25 @@ The rate is shared by clears, ordinary convergence, zoom and translation wheneve
 
 Timestamp readback mapping is telemetry only, not a render fence. On timestamp-capable adapters, the render loop paces from the last smoothed GPU query span while a readback is pending; it does not fold CPU/WebKit `mapAsync` notification latency into frame cadence. On adapters without timestamp queries, the `onSubmittedWorkDone()` fallback remains a conservative completion fence because it is also the only source of whole-frame timing.
 
+The rAF pacer accumulates real elapsed display-tick time and consumes one smoothed GPU interval per submitted frame. It does not reset the pacing phase to `now` after every draw: doing so rounds a `16.9 ms` GPU span up to two `16.7 ms` display ticks on every frame and creates an artificial 30 fps plateau. Fractional credit carries across frames, while total credit is capped at two GPU intervals so a long main-thread/tab stall permits at most one extra catch-up frame rather than building a submission backlog. The no-timestamp completion fence remains an independent prerequisite and pending frames do not consume credit.
+
+The query span is not the complete service time of the canvas: queue and presentation constraints can remain outside the first/last pass timestamps. The pacer therefore divides the span by an adaptive utilization target (90% initially, bounded to 75–95%). Timestamp-capable adapters maintain a coarse submitted/completed serial watermark through at most one non-blocking `onSubmittedWorkDone()` promise at a time. Three frames beyond the completed watermark suspend submission, cap stored phase credit to one interval, and multiplicatively reduce utilization; thirty healthy submissions recover one percentage point. The promise is never awaited by `draw()`, and resolution immediately arms a newer watermark when queued work remains, so a full queue cannot deadlock. Timestamp-less adapters retain their existing one-frame conservative completion fence.
+
 Frame-interval diagnostics distinguish GPU pass time from the main-thread preparation that precedes command encoding. Navigation/precise-parameter extraction, Vue model propagation, `Engine.update()`, and `Engine.render()` encoding are reported separately; hot-path debug logging SHALL NOT run once per zoom frame. This makes a frame/pass mismatch actionable without attributing all unmeasured wall time to the GPU scheduler.
 
 Manual zoom velocity is dimensionless controller state and remains at f64/input precision. The per-frame factor is computed with f64 `powf`, converted once to `DBig`, and multiplied into the arbitrary-precision `scale`; Dashu retains the larger operand precision for that multiplication. `ensure_precision()` therefore raises coordinate, scale, and translation state but not `vscale`. This prevents the navigation CPU cost from growing with zoom depth or becoming pathological in an unoptimized WASM build without sacrificing deep coordinate precision.
+
+### Periodic attraction changes priority, never classification
+
+When the Unified optional periodic header is valid for a pixel, the runtime may evaluate the local period map at an aligned phase. The existing invariant-disk certificate remains the only periodic shortcut allowed to finalize the pixel as interior. If that certificate does not close, a heuristic score may nevertheless combine a small fixed-point residual with a local derivative magnitude below one and reduce the pixel's work allocation for the current dispatch.
+
+The heuristic SHALL NOT write `iter == 0`, lower `globalMaxIter`, or remove the texel from the remaining-work count. Its only output is a scheduling weight: full, one quarter, or one eighth of the uniform weighted-work batch. The first prototype is stateless across frames and uses only the already loaded periodic-map coefficients and current continuation state; this avoids allocating another raw layer and automatically forgets a stale score after reprojection.
+
+The fused counter reports both the raw unfinished population and the sum of scheduling weights in eighth-pixel units. Representative-EMA admission continues to use the raw unfinished ratio, while batch prediction divides the learned work rate by the effective weighted population. Thus work removed from likely-interior texels can be reassigned to unknown/boundary texels without teaching the controller an artificial throughput change.
+
+For the target-GPU confirmation pass, the confidence gates stay conservative (`1.5r`, `|m'| < 0.5`, residual below `0.25` for the strong tier; `2r`, `|m'| < 0.8`, residual below `0.5` for the medium tier). The divisor alone is amplified: strong candidates receive one eighth of the uniform batch and medium candidates one quarter. This makes the A/B effect measurable without broadening the likely-interior population.
+
+**Alternative considered:** terminate strongly attracting pixels at a smaller per-pixel maximum iteration. This could make a finite-time false positive alter the final image and is rejected.
 
 ### Bilinear resolve is temporary presentation, not convergence
 
@@ -99,6 +115,7 @@ The zoom brush step and sentinel seed step controls, defaults, validation, and p
 - **Removing f16 arithmetic could regress a particular GPU** → compare the legacy f16 and unified f32 variants before deletion on user-approved browser/GPU runs; keep 16-bit storage independent.
 - **Shared `z″` code may be mistaken for dead Super Pixel code** → classify each producer and layer by remaining AA/geometry consumers before removal.
 - **Two active OpenSpec changes touch the display pipeline** → implement and validate this simplification first, then rebase the packed-geometry work on the simplified contract.
+- **Completion notifications may lag actual GPU execution** → use the watermark only as a bounded-queue safety valve behind GPU-span headroom, allow three frames in flight, expose queue depth/marker age, and never serialize `draw()` on the notification.
 
 ## Migration Plan
 

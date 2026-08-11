@@ -144,6 +144,26 @@ Le moteur SHALL associer le timestamp de la passe d'itération au compteur de tr
 - **WHEN** le transfert `mapAsync` des timestamps vers le CPU reste en attente alors qu’une durée GPU valide est déjà connue
 - **THEN** le moteur cadence les nouvelles frames depuis la durée GPU lissée sans attendre le retour CPU et sans attribuer sa latence aux passes GPU
 
+#### Scenario: Durée GPU proche d'un quantum rAF
+- **WHEN** la durée GPU lissée dépasse légèrement un quantum d'affichage, par exemple `16,9 ms` pour un rAF à `60 Hz`
+- **THEN** le pacer conserve le reliquat temporel entre frames et ne transforme pas chaque léger dépassement en attente systématique de deux quantums
+
+#### Scenario: Longue interruption du pacer
+- **WHEN** l'onglet ou le thread principal reprend après une interruption très supérieure à la durée GPU lissée
+- **THEN** le crédit accumulé est borné afin de ne pas créer une rafale ni une file de frames GPU en retard
+
+#### Scenario: Charge continue stable
+- **WHEN** une animation ou une navigation soumet continuellement des frames dont les passes GPU restent stables
+- **THEN** le pacer vise une fraction inférieure à 100% du span GPU mesuré afin de réserver les contraintes de file et de présentation non couvertes par les timestamps
+
+#### Scenario: File GPU en croissance
+- **WHEN** trois frames soumises dépassent le dernier watermark de complétion GPU
+- **THEN** le moteur suspend les nouvelles soumissions sans bloquer `draw()` sur une promesse, borne le crédit de rattrapage à une frame et réduit immédiatement sa charge cible
+
+#### Scenario: Retour à un régime sain
+- **WHEN** les watermarks asynchrones libèrent durablement la file après une congestion
+- **THEN** le pacer remonte graduellement sa charge cible sans dépasser sa borne de sécurité
+
 #### Scenario: Adaptateur sans timestamps
 - **WHEN** les timestamp queries ne sont pas disponibles
 - **THEN** le moteur conserve `onSubmittedWorkDone()` comme barrière de fin conservative et comme source de durée globale
@@ -151,6 +171,22 @@ Le moteur SHALL associer le timestamp de la passe d'itération au compteur de tr
 #### Scenario: Temps de frame hors passes GPU
 - **WHEN** l’intervalle réel de frame dépasse nettement la somme et le span des passes GPU
 - **THEN** la télémétrie distingue navigation, propagation des modèles Vue, `Engine.update()` et encodage `Engine.render()` sans journalisation synchrone à chaque pas de zoom
+
+#### Scenario: Attraction périodique probable
+- **WHEN** le header périodique est valide, que le certificat intérieur ne se ferme pas, mais que l'application de période présente simultanément une contraction forte et un faible résidu
+- **THEN** le shader peut réduire à un quart ou un huitième le budget pondéré de ce texel pour la passe courante, tout en le conservant comme travail inachevé et sans réduire sa limite terminale globale
+
+#### Scenario: Population active pondérée
+- **WHEN** des texels inachevés reçoivent des poids de scheduling différents
+- **THEN** le compteur fournit à la fois leur nombre brut pour le critère représentatif de 10% et leur population effective pondérée pour prédire le batch suivant
+
+#### Scenario: Faux positif heuristique
+- **WHEN** un pixel extérieur reçoit temporairement un score d'attraction élevé
+- **THEN** il progresse moins vite pendant cette passe mais peut toujours s'échapper lors d'une passe ultérieure et n'est jamais écrit comme intérieur par le score
+
+#### Scenario: Calibration A/B agressive
+- **WHEN** le profil expérimental augmente le diviseur de budget afin d'amplifier le signal mesurable
+- **THEN** les seuils de confiance restent conservateurs et seuls les poids quart/huitième de la passe courante changent; les conditions de certificat intérieur, le compteur brut et la limite terminale globale restent identiques
 
 ### Requirement: Cinématique de zoom indépendante de la profondeur
 Le navigateur SHALL calculer le facteur cinématique sans évaluer de fonction transcendante à la précision arbitraire de la vue. Il SHALL conserver la précision profonde de l'échelle lors de l'application de ce facteur.

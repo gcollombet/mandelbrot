@@ -17,6 +17,10 @@
 - [x] 2.9 Stop using timestamp `mapAsync` completion as a frame fence; pace from the smoothed GPU span and retain the completion fence only for the no-timestamp fallback.
 - [x] 2.10 Remove hot-path zoom logging and expose navigation, Vue synchronization, update, and command-encoding CPU timings beside the GPU pass timings.
 - [x] 2.11 Compute manual zoom factors in f64, keep `vscale` outside the deep precision budget, and cover scale/velocity precision with focused Rust tests.
+- [x] 2.12 Add a conservative periodic-attraction scheduling score, cap likely-interior texels to half/quarter per-dispatch work, and drive batch prediction from the effective weighted unfinished population without changing terminal classification.
+- [x] 2.13 Increase likely-interior scheduling divisors to quarter/eighth for an aggressive A/B profile while retaining the conservative confidence gates and terminal limits.
+- [x] 2.14 Replace per-frame rAF ceiling quantization with capped fractional pacing credit while preserving the no-timestamp completion fence.
+- [x] 2.15 Add adaptive GPU-span headroom, a non-blocking completion watermark, a three-frame queue bound, and pacing telemetry for sustained animation/navigation.
 
 ## 3. Resolve and Super Pixel removal
 

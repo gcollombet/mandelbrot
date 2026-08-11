@@ -8,6 +8,9 @@ Super Pixel and dyadic spatial refinement add a second convergence strategy, fee
 - **BREAKING** Remove dyadic sentinel seeding/refinement and always seed the raw grid at step 1 so every texel is an exact compute request.
 - Retain temporal convergence through adaptive iteration batches and retain bilinear resolve as a temporary display fallback for budget-exhausted/incomplete orbits.
 - Replace the slow additive batch ramp and batch-1 full-frame resets with a persistent EMA of actual weighted iteration work, a fixed 10 ms minimum requested iteration budget, and immediate density-aware batch prediction.
+- Preserve fractional rAF pacing credit so a GPU span just above one display tick skips frames proportionally instead of being rounded to two ticks on every submission.
+- Reserve adaptive headroom around the measured GPU span and bound timestamp-capable queue submissions with a non-blocking completion watermark so sustained animation cannot accumulate an invisible frame backlog.
+- Let a conservative periodic-attraction score reduce only the per-frame work allocation of likely-interior pixels, while keeping them unfinished until an exact escape, certified interior verdict, or the ordinary global iteration limit resolves them; amplify the A/B experiment through stronger per-pixel divisors rather than looser confidence gates.
 - Keep manual zoom kinematics at f64 precision and reserve arbitrary precision for the view scale, avoiding a depth-dependent transcendental on the main thread.
 - Retain live/frozen reprojection and the distinct idle/on-demand adaptive AA path, including analytic AA where applicable.
 - Simplify unfinished-work accounting and remove spatial-refinement-only state from the engine and shaders.
