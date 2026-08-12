@@ -378,6 +378,8 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   reliefDepth: 1,
   protrusionPhase: 0,
   protrusionSharpness: 2,
+  protrusionGeometryMix: 0,
+  protrusionPeriod: 1,
   localShadowStrength: 0,
   varnishStrength: 0,
   gradeContrast: 1.18,
@@ -1485,6 +1487,8 @@ function tickTravelAnimation() {
     mandelbrotParams.value.reliefDepth = target.reliefDepth ?? 1;
     mandelbrotParams.value.protrusionPhase = target.protrusionPhase ?? 0;
     mandelbrotParams.value.protrusionSharpness = target.protrusionSharpness ?? 2;
+    mandelbrotParams.value.protrusionGeometryMix = target.protrusionGeometryMix ?? 0;
+    mandelbrotParams.value.protrusionPeriod = target.protrusionPeriod ?? 1;
     mandelbrotParams.value.localShadowStrength = target.localShadowStrength ?? 0;
     mandelbrotParams.value.varnishStrength = target.varnishStrength ?? 0;
     mandelbrotParams.value.gradeContrast = target.gradeContrast ?? 1.18;
@@ -1695,6 +1699,8 @@ function startTravelToPreset(preset: PresetRecord) {
       :reliefDepth="mandelbrotParams.reliefDepth"
       :protrusionPhase="mandelbrotParams.protrusionPhase"
       :protrusionSharpness="mandelbrotParams.protrusionSharpness"
+      :protrusionGeometryMix="mandelbrotParams.protrusionGeometryMix"
+      :protrusionPeriod="mandelbrotParams.protrusionPeriod"
       :localShadowStrength="mandelbrotParams.localShadowStrength"
       :lightAngle="mandelbrotParams.lightAngle"
       :varnishStrength="mandelbrotParams.varnishStrength"

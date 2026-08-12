@@ -10,6 +10,7 @@ The historical protrusions came from linearly interpolating complex orbit and de
 
 - Provide a per-stop protrusion amount that interpolates through the existing palette system.
 - Provide global phase and sharpness controls that are persisted with presets and palette looks.
+- Provide a continuous mix between the iteration-phase lobe and a scalar geometric height warp, with a controllable height period.
 - Preserve the current render exactly when the amount is omitted or zero.
 - Produce a rhythmic lobe around smooth escape-iteration crossings while preserving the analytic gradient direction.
 - Keep every analytic lighting cue on the same styled relief scale.
@@ -27,7 +28,7 @@ The historical protrusions came from linearly interpolating complex orbit and de
 
 Add `protrusion` in `[0, 1]`, defaulting to `0`, to the effect schema and `ColorStop`. Pack it into row 6 channel A. This channel is currently reserved and row 6 is already fetched lazily whenever material shading is active, so the effect adds neither palette memory nor sampling bandwidth. Existing effect interpolation and transfer curves apply automatically.
 
-Amount remains a per-material palette value. Phase and sharpness are global surface-shape controls because they define one common lobe geometry across all stops. They reuse color-uniform slots 68 and 69, which were padding, so the 72-float buffer size stays unchanged.
+Amount remains a per-material palette value. Phase and sharpness are global surface-shape controls because they define one common profile across all stops. Phase, sharpness, geometric mix, and geometric period reuse color-uniform slots 68 through 71, which were padding, so the 72-float buffer size stays unchanged.
 
 ### Modulate relief in the positive log-slope domain
 
@@ -45,6 +46,20 @@ Phase is wrapped to `[0, 1)`. Sharpness is clamped to `[0.25, 16]`; its default 
 
 Alternative: blend canonical and historical gradients. Rejected because the historical gradient is no longer present and transporting it would add storage and bandwidth.
 
+### Offer a scalar geometric profile without changing the cached field
+
+Let `H` be canonical distance height, `P` the bounded geometric period, `phi` the wrapped phase, `a` the per-stop protrusion amount, and `s` the bounded sharpness. Define
+
+```
+theta = 2*pi*(H/P - phi)
+q = sign(cos(theta)) * abs(cos(theta))^s
+geometricGain = max(1 + a*q, 0)
+```
+
+`q(theta + pi) = -q(theta)`, so its mean over a period is zero. Therefore `geometricGain(H) * grad(H)` is the exact gradient of a periodic scalar reparameterization of `H`; for `s = 1` this reduces to the familiar sinusoidal height warp. Since `a` is bounded to `[0, 1]`, the multiplier remains non-negative and does not reverse the canonical gradient. `protrusionGeometryMix` linearly blends this multiplier with the iteration-phase log-slope multiplier. Default mix `0` preserves the existing effect; default period is `1` distance-height unit.
+
+The geometric variant changes the material relief field, not cached height, Screen + Depth mapping, analytic AA, or the full-screen-quad render architecture. It adds scalar ALU only and no texture read, attachment, register payload from the iteration kernel, or field-cache invalidation.
+
 ### Keep analytic material cues coherent, but canonical geometry untouched
 
 Use `styledRelief` for the analytic height gradient, curvature AO, local height shadow, ridge accent, and slope-driven iridescence. Keep cached height/gradient/curvature, depth mapping, analytic AA, reprojection payloads, and debug views canonical. Material texture bumps, stripe relief, and direction-coherence relief remain independently combined with the analytic surface.
@@ -58,7 +73,7 @@ Use `styledRelief` for the analytic height gradient, curvature AO, local height 
 
 ## Migration Plan
 
-Existing presets require no migration because absent `protrusion` values resolve to zero, absent `protrusionPhase` resolves to `0`, and absent `protrusionSharpness` resolves to `2`. Normalized and newly saved stops may emit the explicit amount default using the existing effect normalization path. Rollback consists of removing the fields and shader multiplier; cached fractal data remains compatible.
+Existing presets require no migration because absent `protrusion` values resolve to zero, absent `protrusionPhase` resolves to `0`, absent `protrusionSharpness` resolves to `2`, absent `protrusionGeometryMix` resolves to `0`, and absent `protrusionPeriod` resolves to `1`. Normalized and newly saved stops may emit the explicit amount default using the existing effect normalization path. Rollback consists of removing the fields and shader multiplier; cached fractal data remains compatible.
 
 ## Open Questions
 

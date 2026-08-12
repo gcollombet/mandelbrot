@@ -73,8 +73,8 @@ struct Uniforms {
   reachReady: f32,       // 2 = z″ payload carried by every production path
   protrusionPhase: f32,     // wrapped global phase offset [0, 1)
   protrusionSharpness: f32, // global lobe exponent [0.25, 16], default 2
-  _pad70: f32,
-  _pad71: f32,
+  protrusionGeometryMix: f32, // 0 = iteration lobe, 1 = scalar height warp
+  protrusionPeriod: f32,      // distance-height period [0.1, 16], default 1
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // live values: iter, z.x, z.y
@@ -648,8 +648,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     let protrusionSharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
     let protrusionWave = 0.5 + 0.5 * cos(TWO_PI * fract(v_smooth - protrusionPhase));
     let protrusionLobe = pow(max(protrusionWave, 0.0), protrusionSharpness);
-    let protrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
-    let styledAnalyticRelief = effectiveAnalyticRelief * protrusionGain;
+    let iterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
     let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
     let stripeReliefStrength = fx.wStripeRelief * effShading;
     let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
@@ -658,7 +657,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     let mappingYId = i32(parameters.textureMappingYVariable + 0.5);
     let needsDepthGradient = bumpStrength > 0.001 &&
       (mappingXId == 0 || mappingXId == 1 || mappingYId == 0 || mappingYId == 1);
-    let needsFractalGradient = styledAnalyticRelief > 0.001;
+    let needsFractalGradient = effectiveAnalyticRelief > 0.001;
     var distanceHeight = 0.0;
     // Cached geometry stores the analytic derivative per source texel and the
     // branch-local analytic Laplacian. Historical relief gains are applied
@@ -680,6 +679,19 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
       grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
       slope = length(grad);
     }
+    // Geometric branch: q(theta + pi) = -q(theta), so q has zero mean over a
+    // period. Multiplying grad(H) by 1 + a*q(H) is therefore the gradient of a
+    // periodic scalar reparameterization of canonical distance height H.
+    let protrusionGeometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);
+    var protrusionGain = iterationProtrusionGain;
+    if (protrusionGeometryMix > 0.001 && needsFractalGradient) {
+      let protrusionPeriod = clamp(parameters.protrusionPeriod, 0.1, 16.0);
+      let geometricCarrier = cos(TWO_PI * (distanceHeight / protrusionPeriod - protrusionPhase));
+      let geometricProfile = sign(geometricCarrier) * pow(abs(geometricCarrier), protrusionSharpness);
+      let geometricProtrusionGain = max(1.0 + fx.protrusion * geometricProfile, 0.0);
+      protrusionGain = mix(iterationProtrusionGain, geometricProtrusionGain, protrusionGeometryMix);
+    }
+    let styledAnalyticRelief = effectiveAnalyticRelief * protrusionGain;
     var textureGradient = vec2<f32>(0.0);
     var textureMappingDx = vec2<f32>(1.0, 0.0);
     var textureMappingDy = vec2<f32>(0.0, 1.0);

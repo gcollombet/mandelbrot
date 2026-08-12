@@ -212,6 +212,8 @@ const model =  defineModel<MandelbrotParams>({
      reliefDepth: 1,
      protrusionPhase: 0,
      protrusionSharpness: 2,
+     protrusionGeometryMix: 0,
+     protrusionPeriod: 1,
      localShadowStrength: 0,
      varnishStrength: 0,
      gradeContrast: 1.18,
@@ -1111,6 +1113,8 @@ async function savePalette() {
     reliefDepth: model.value.reliefDepth,
     protrusionPhase: model.value.protrusionPhase,
     protrusionSharpness: model.value.protrusionSharpness,
+    protrusionGeometryMix: model.value.protrusionGeometryMix,
+    protrusionPeriod: model.value.protrusionPeriod,
     localShadowStrength: model.value.localShadowStrength,
     varnishStrength: model.value.varnishStrength,
     gradeContrast: model.value.gradeContrast,
@@ -1133,6 +1137,8 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.reliefDepth = source.reliefDepth ?? 1;
   model.value.protrusionPhase = source.protrusionPhase ?? 0;
   model.value.protrusionSharpness = source.protrusionSharpness ?? 2;
+  model.value.protrusionGeometryMix = source.protrusionGeometryMix ?? 0;
+  model.value.protrusionPeriod = source.protrusionPeriod ?? 1;
   model.value.localShadowStrength = source.localShadowStrength ?? 0;
   model.value.varnishStrength = source.varnishStrength ?? 0;
   model.value.gradeContrast = source.gradeContrast ?? 1.18;
@@ -2773,6 +2779,8 @@ async function importSkyboxTexture(event: Event) {
           :reliefDepth="model.reliefDepth"
           :protrusionPhase="model.protrusionPhase"
           :protrusionSharpness="model.protrusionSharpness"
+          :protrusionGeometryMix="model.protrusionGeometryMix"
+          :protrusionPeriod="model.protrusionPeriod"
           :localShadowStrength="model.localShadowStrength"
           :varnishStrength="model.varnishStrength"
           :gradeContrast="model.gradeContrast"
@@ -2861,6 +2869,10 @@ async function importSkyboxTexture(event: Event) {
             :model-value="model.protrusionPhase ?? 0" @update:model-value="(v: number) => model.protrusionPhase = v" />
           <DenseField label="Netteté protubérances" :min="0.25" :max="16" :step="0.05" f="p2"
             :model-value="model.protrusionSharpness ?? 2" @update:model-value="(v: number) => model.protrusionSharpness = v" />
+          <DenseField label="Protubérances géométriques" :min="0" :max="1" :step="0.01" f="p2"
+            :model-value="model.protrusionGeometryMix ?? 0" @update:model-value="(v: number) => model.protrusionGeometryMix = v" />
+          <DenseField label="Période géométrique" :min="0.1" :max="16" :step="0.05" f="p2"
+            :model-value="model.protrusionPeriod ?? 1" @update:model-value="(v: number) => model.protrusionPeriod = v" />
           <DenseField label="Occlusion relief" :min="0" :max="10" :step="0.01" f="p2"
             :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
           <DenseField label="Occlusion ambiante" :min="0" :max="2" :step="0.01" f="p2"

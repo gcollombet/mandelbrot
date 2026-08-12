@@ -605,6 +605,8 @@ export type RenderOptions = {
     reliefDepth: number,
     protrusionPhase: number,
     protrusionSharpness: number,
+    protrusionGeometryMix: number,
+    protrusionPeriod: number,
     localShadowStrength: number,
     lightAngle: number,
     varnishStrength: number,
@@ -5061,8 +5063,8 @@ export class Engine {
             2,                                    // 67: z″ is carried by every production path
             renderOptions.protrusionPhase ?? 0,   // 68: protrusionPhase [0, 1]
             renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
-            0,                                    // 70: uniform padding
-            0,                                    // 71: uniform padding
+            renderOptions.protrusionGeometryMix ?? 0, // 70: protrusionGeometryMix [0, 1]
+            renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod [0.1, 16]
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

@@ -19,3 +19,10 @@
 - [x] 4.2 Propagate both values through component props and the existing color and palette-preview uniform padding slots.
 - [x] 4.3 Parameterize the WGSL protrusion lobe with wrapped phase and bounded sharpness.
 - [x] 4.4 Extend unit contracts and rerun TypeScript, unit, WGSL, and OpenSpec validation.
+
+## 5. Geometric Height-Warp Variant
+
+- [x] 5.1 Add persisted geometric mix and period controls with legacy defaults and surface-panel fields.
+- [x] 5.2 Propagate both values through the component chain and color/preview uniform slots 70 and 71 without growing the buffers.
+- [x] 5.3 Implement the scalar height-gradient profile and continuous blend with the iteration-phase profile.
+- [x] 5.4 Extend contracts and rerun TypeScript, unit, WGSL, and OpenSpec validation.

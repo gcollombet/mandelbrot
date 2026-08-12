@@ -71,6 +71,8 @@ const props = defineProps<{
   reliefDepth?: number;
   protrusionPhase?: number;
   protrusionSharpness?: number;
+  protrusionGeometryMix?: number;
+  protrusionPeriod?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
   gradeContrast?: number;
@@ -485,8 +487,8 @@ async function init() {
     0, // reachReady
     props.protrusionPhase ?? 0, // protrusionPhase
     props.protrusionSharpness ?? 2, // protrusionSharpness
-    0, // uniform padding
-    0, // uniform padding
+    props.protrusionGeometryMix ?? 0, // protrusionGeometryMix
+    props.protrusionPeriod ?? 1, // protrusionPeriod
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -640,7 +642,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = PREVIEW_LIGHT_ANGLE;
@@ -684,6 +686,8 @@ watch(
     device.queue.writeBuffer(uniformBuffer, 68 * 4, new Float32Array([
       props.protrusionPhase ?? 0,
       props.protrusionSharpness ?? 2,
+      props.protrusionGeometryMix ?? 0,
+      props.protrusionPeriod ?? 1,
     ]).buffer as ArrayBuffer);
     render();
   },

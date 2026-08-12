@@ -38,15 +38,34 @@ The color shader SHALL derive a smooth non-negative lobe from the fractional smo
 - **THEN** the lobe broadens or concentrates respectively while remaining smooth and non-negative
 
 ### Requirement: Persisted global shape controls
-The renderer SHALL expose `protrusionPhase` and `protrusionSharpness` as global surface controls, SHALL persist them in Mandelbrot presets and palette looks, and SHALL use defaults `0` and `2` for legacy data.
+The renderer SHALL expose `protrusionPhase`, `protrusionSharpness`, `protrusionGeometryMix`, and `protrusionPeriod` as global surface controls, SHALL persist them in Mandelbrot presets and palette looks, and SHALL use defaults `0`, `2`, `0`, and `1` for legacy data.
 
 #### Scenario: Legacy preset is loaded
 - **WHEN** a preset or palette look omits either global protrusion shape control
-- **THEN** phase resolves to `0` and sharpness resolves to `2`
+- **THEN** phase resolves to `0`, sharpness to `2`, geometric mix to `0`, and geometric period to `1`
 
 #### Scenario: Palette preview is visible
-- **WHEN** either global protrusion shape control changes
+- **WHEN** any global protrusion shape control changes
 - **THEN** both the main renderer and the live palette preview receive the same values without changing the color-uniform buffer size
+
+### Requirement: Interpolable geometric height warp
+The renderer SHALL offer a geometric mix in `[0, 1]` between the iteration-phase protrusion profile and a periodic scalar reparameterization of canonical distance height, with a positive bounded height period.
+
+#### Scenario: Geometric mix is zero
+- **WHEN** `protrusionGeometryMix` is omitted or zero
+- **THEN** the existing iteration-phase protrusion profile is preserved
+
+#### Scenario: Geometric mix is one
+- **WHEN** `protrusionGeometryMix` is one and protrusion amount is active
+- **THEN** the analytic gradient is multiplied by a non-negative periodic function of canonical distance height whose signed profile has zero mean
+
+#### Scenario: Geometric mix is fractional
+- **WHEN** `protrusionGeometryMix` lies strictly between zero and one
+- **THEN** the material relief multiplier continuously interpolates between the iteration-phase and geometric profiles
+
+#### Scenario: Geometric period changes
+- **WHEN** `protrusionPeriod` changes
+- **THEN** the spacing of geometric height undulations changes without recalculating or invalidating the cached Mandelbrot field
 
 ### Requirement: Coherent material relief consumers
 The renderer SHALL use the styled analytic relief scale for the analytic normal, curvature AO, local height shadow, ridge accent, and slope-driven iridescence while leaving canonical geometry consumers unchanged.
