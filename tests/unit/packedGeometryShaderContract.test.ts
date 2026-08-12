@@ -94,7 +94,7 @@ describe('typed display consumers', () => {
   it('retains z.xy for escape, mappings, and raw only for analytic AA', () => {
     expect(color).toContain('z: vec2<f32>')
     expect(color).toContain('texture_mapping_value')
-    expect(color).toContain('let trapZ = z / escapeRadius;')
+    expect(color).toContain('let centered = z / escapeRadius')
     expect(color).toContain('@group(0) @binding(14) var rawTex')
     expect(engine).toContain('ordinary color values always come from the typed display set')
   })

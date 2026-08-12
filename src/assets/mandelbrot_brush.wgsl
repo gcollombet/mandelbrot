@@ -72,6 +72,22 @@ struct Mandelbrot {
   scaleExp: f32,        // floatexp deep path: shared base-2 exponent for scale & cx/cy
   aaOffsetX: f32,       // sub-pixel AA jitter, neutral-space units (0 = off)
   aaOffsetY: f32,
+  orbitTrapMode: f32,   // 0 off, 1 terminal, 2 sampled, 3 exact
+  orbitTrapCenterX: f32,
+  orbitTrapCenterY: f32,
+  orbitTrapScale: f32,
+  orbitTrapRotation: f32,
+  orbitTrapAnisotropyX: f32,
+  orbitTrapAnisotropyY: f32,
+  orbitTrapPetals: f32,
+  orbitTrapPetalDepth: f32,
+  orbitTrapTwist: f32,
+  orbitTrapPhase: f32,
+  orbitTrapStartIteration: f32,
+  orbitTrapEndIteration: f32,
+  _orbitTrapPad0: f32,
+  _orbitTrapPad1: f32,
+  _orbitTrapPad2: f32,
 };
 
 // floatexp deep-zoom threshold (base-2 exponent of scale). Below this the shader
@@ -1388,12 +1404,22 @@ struct TexelOut {
   // Layer 17 — deep continuations only; the shallow path parks the same value
   // in layer 7 and leaves this at 0 (which reads as "no metrics parked").
   deepAvgDirection: f32,
+  // Three adjacent layers, starting at 13 without orbit metrics and at 18
+  // with them. The tuple is updated atomically in registers: a new distance
+  // always carries the iteration and angle of that same orbit point.
+  trapBestDistance: f32,
+  trapHitIteration: f32,
+  trapHitAngle: f32,
 };
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
 
 fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
   return textureLoad(raw, coord, layer).r;
+}
+
+fn orbit_trap_layer_base() -> i32 {
+  return select(13, 18, mandelbrot.trackOrbitMetrics >= 0.5);
 }
 
 fn storeTexel(coord: vec2<i32>, out: TexelOut) {
@@ -1416,6 +1442,55 @@ fn storeTexel(coord: vec2<i32>, out: TexelOut) {
     textureStore(raw, coord, 15, pack(out.orbitGradCoherence.x));
     textureStore(raw, coord, 16, pack(out.orbitGradCoherence.y));
     textureStore(raw, coord, 17, pack(out.deepAvgDirection));
+  }
+  if (mandelbrot.orbitTrapMode >= 1.5) {
+    let base = orbit_trap_layer_base();
+    textureStore(raw, coord, base, pack(out.trapBestDistance));
+    textureStore(raw, coord, base + 1, pack(out.trapHitIteration));
+    textureStore(raw, coord, base + 2, pack(out.trapHitAngle));
+  }
+}
+
+struct OrbitTrapState {
+  bestDistance: f32,
+  hitIteration: f32,
+  hitAngle: f32,
+};
+
+fn orbit_trap_distance_angle(z: vec2<f32>) -> vec2<f32> {
+  let centered = z - vec2<f32>(mandelbrot.orbitTrapCenterX, mandelbrot.orbitTrapCenterY);
+  let rotation = mandelbrot.orbitTrapRotation;
+  let c = cos(rotation);
+  let s = sin(rotation);
+  let rotated = vec2<f32>(
+    c * centered.x + s * centered.y,
+    -s * centered.x + c * centered.y,
+  );
+  let trapScale = max(mandelbrot.orbitTrapScale, 1e-4);
+  let anisotropy = max(
+    vec2<f32>(mandelbrot.orbitTrapAnisotropyX, mandelbrot.orbitTrapAnisotropyY),
+    vec2<f32>(1e-4),
+  );
+  let q = rotated / (trapScale * anisotropy);
+  let radius = max(length(q), 1e-6);
+  let angle = atan2(q.y, q.x);
+  let logRadius = log(radius);
+  let petals = max(round(mandelbrot.orbitTrapPetals), 1.0);
+  let feature = logRadius - mandelbrot.orbitTrapPetalDepth * cos(
+    petals * angle + mandelbrot.orbitTrapTwist * logRadius + mandelbrot.orbitTrapPhase,
+  );
+  return vec2<f32>(abs(feature), angle);
+}
+
+fn update_orbit_trap(state: ptr<function, OrbitTrapState>, z: vec2<f32>, iteration: f32) {
+  if (mandelbrot.orbitTrapMode < 1.5) { return; }
+  if (iteration < mandelbrot.orbitTrapStartIteration) { return; }
+  if (mandelbrot.orbitTrapEndIteration > 0.0 && iteration > mandelbrot.orbitTrapEndIteration) { return; }
+  let hit = orbit_trap_distance_angle(z);
+  if (hit.x < (*state).bestDistance) {
+    (*state).bestDistance = hit.x;
+    (*state).hitIteration = iteration;
+    (*state).hitAngle = hit.y;
   }
 }
 
@@ -1585,7 +1660,7 @@ fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
 }
 
 // ── core computation (verbatim from mandelbrot.wgsl) ───────────────
-fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_ref_i: f32, prev_avg_direction: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32, prev_stripe_grad: vec2<f32>, prev_dir_grad: vec2<f32>) -> TexelOut {
+fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_ref_i: f32, prev_avg_direction: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32, prev_stripe_grad: vec2<f32>, prev_dir_grad: vec2<f32>, prev_trap_distance: f32, prev_trap_iteration: f32, prev_trap_angle: f32) -> TexelOut {
 
   let dc = vec2<f32>(x0, y0);
   let max_iteration = mandelbrot.maxIteration;
@@ -1640,6 +1715,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     previousMetrics = metrics;
     logTexelDelta = orbit_log_texel_delta(0);
   }
+  var trapState = OrbitTrapState(prev_trap_distance, prev_trap_iteration, prev_trap_angle);
+  update_orbit_trap(&trapState, z, prev_iter);
 
   var escaped = false;
   var inside = false;
@@ -1657,7 +1734,8 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   let isJet = mandelbrot.approximationMode >= 2.5 && !isMobius && !isUnified;
   let isBlockTable = isJet || isMobius || isUnified;
   let useBla = mandelbrot.approximationMode >= 0.5
-            && mandelbrot.blaLevelCount >= 1.0;
+            && mandelbrot.blaLevelCount >= 1.0
+            && mandelbrot.orbitTrapMode < 2.5;
   var localWorkLimit = max(1u, u32(max_iteration));
 
   if (useBla) {
@@ -1825,7 +1903,11 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           z = refZ + dz; // ref_i = 0, refZ = getOrbit(0) = 0 → z = dz
           g_renormApps += 1u;
           g_renormIters += u32(rskip);
-          if (prev_iter + i >= mandelbrot.globalMaxIter) { inside = true; break; }
+          if (prev_iter + i >= mandelbrot.globalMaxIter) {
+            update_orbit_trap(&trapState, z, prev_iter + i);
+            inside = true;
+            break;
+          }
         }
       }
       // §18 gate move: aligned in-span offsets only (integer modulo, in-span
@@ -1919,6 +2001,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
           advance_orbit_metrics(&metrics, &previousMetrics, z, derM, derS + derSLo, logTexelDelta, 1.0);
         }
       }
+      update_orbit_trap(&trapState, z, prev_iter + i);
 
       let derMM = dot(derM, derM);
       let dot_z = dot(z, z);
@@ -1960,6 +2043,7 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
       if (trackOrbitMetrics) {
         advance_orbit_metrics(&metrics, &previousMetrics, z, derM, derS + derSLo, logTexelDelta, 1.0);
       }
+      update_orbit_trap(&trapState, z, prev_iter + i);
 
       let derMM = dot(derM, derM);
       let dot_z = dot(z, z);
@@ -1990,6 +2074,9 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
   out.orbitGradStripe = vec2<f32>(0.0);
   out.orbitGradCoherence = vec2<f32>(0.0);
   out.deepAvgDirection = 0.0; // shallow parks the direction in layer 7
+  out.trapBestDistance = trapState.bestDistance;
+  out.trapHitIteration = trapState.hitIteration;
+  out.trapHitAngle = trapState.hitAngle;
 
   let derPolarOut = der_to_polar(derM, derS + derSLo);
   let avgDir = orbit_metrics_avg_dir(metrics);
@@ -3525,7 +3612,7 @@ fn try_apply_renorm(dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derSc
   return 0;
 }
 
-fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32, prev_ref_i_raw: f32, prev_avg_direction: f32, prev_stripe_grad: vec2<f32>, prev_dir_grad: vec2<f32>) -> TexelOut {
+fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz_e: i32, prev_ref_i_int: i32, prev_derx: f32, prev_dery: f32, prev_ders: f32, prev_sndx: f32, prev_sndy: f32, prev_snds: f32, prev_snd_valid: f32, prev_ref_i_raw: f32, prev_avg_direction: f32, prev_stripe_grad: vec2<f32>, prev_dir_grad: vec2<f32>, prev_trap_distance: f32, prev_trap_iteration: f32, prev_trap_angle: f32) -> TexelOut {
   let max_iteration = mandelbrot.maxIteration;
   var localWorkLimit = max(1u, u32(max_iteration));
   let muLimit = mandelbrot.mu;
@@ -3579,6 +3666,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     previousMetrics = metrics;
     logTexelDelta = orbit_log_texel_delta(scaleExp);
   }
+  var trapState = OrbitTrapState(prev_trap_distance, prev_trap_iteration, prev_trap_angle);
+  update_orbit_trap(&trapState, z, prev_iter);
 
   var escaped = false;
   var inside = false;
@@ -3591,7 +3680,8 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   let isMobiusDeep = mandelbrot.approximationMode >= 3.5 && !isUnifiedDeep;
   let isJetDeep = mandelbrot.approximationMode >= 2.5 && !isMobiusDeep && !isUnifiedDeep;
   let isBlockTableDeep = isJetDeep || isMobiusDeep || isUnifiedDeep;
-  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0;
+  let useBlaDeep = mandelbrot.blaLevelCount >= 1.0
+                && mandelbrot.orbitTrapMode < 2.5;
   var skip0Log = 0;
   if (useBlaDeep) {
     if (isBlockTableDeep) {
@@ -3679,7 +3769,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
       }
     }
     var skipped = 0;
-    if (ENABLE_RENORM && ref_i == 0) {
+    if (ENABLE_RENORM && mandelbrot.orbitTrapMode < 2.5 && ref_i == 0) {
       // fe_to_vec underflowing to 0 at extreme depth is correct here (tiny
       // |dc| passes every window gate).
       skipped = try_apply_renorm(&dz, &derM, derS + derSLo, &sndM, &sndS, &i, globalMaxIterI, length(fe_to_vec(dc)));
@@ -3707,6 +3797,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
         // verdict on its own. Without this the render stalls < 100% (interior
         // cascade pixels, non-hyperbolic near c_∞, never resolve).
         if (prev_iter + i >= mandelbrot.globalMaxIter) {
+          update_orbit_trap(&trapState, z, prev_iter + i);
           inside = true;
           break;
         }
@@ -3766,6 +3857,7 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     if (trackOrbitMetrics) {
       advance_orbit_metrics(&metrics, &previousMetrics, z, derM, derS + derSLo, logTexelDelta, f32(max(skipped, 1)));
     }
+    update_orbit_trap(&trapState, z, prev_iter + i);
 
     let derMM = dot(derM, derM);
     let dot_z = dot(z, z);
@@ -3796,6 +3888,9 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
   out.orbitGradStripe = vec2<f32>(0.0);
   out.orbitGradCoherence = vec2<f32>(0.0);
   out.deepAvgDirection = 0.0;
+  out.trapBestDistance = trapState.bestDistance;
+  out.trapHitIteration = trapState.hitIteration;
+  out.trapHitAngle = trapState.hitAngle;
   let derPolarOut = der_to_polar(derM, derS + derSLo);
   let avgDir = orbit_metrics_avg_dir(metrics);
 
@@ -4075,7 +4170,10 @@ fn cs_main(
               var saSndx = 0.0;
               var saSndy = 0.0;
               var saSnds = SCALED_ZERO_S;
-              if (mandelbrot.approximationMode >= 4.5 && mandelbrot.blaLevelCount >= 1.0 && mandelbrot.orbitComplete >= 0.5) {
+              if (mandelbrot.orbitTrapMode < 2.5
+                  && mandelbrot.approximationMode >= 4.5
+                  && mandelbrot.blaLevelCount >= 1.0
+                  && mandelbrot.orbitComplete >= 0.5) {
                 let lastLvl = mandelbrotJetLevels[i32(mandelbrot.blaLevelCount) - 1];
                 let saBase = i32(lastLvl.offset + lastLvl.count);
                 let h0 = mandelbrotJetRadii[saBase].v;
@@ -4116,7 +4214,7 @@ fn cs_main(
               // Series-approximation seed: prev_iter counts iterations no
               // metric ever saw, so the zero direction carrier tells the kernel
               // to start its running mean here rather than dilute it.
-              result = mandelbrot_compute_deep(dc, saIter, saDz, saDzE, saRef, saDerx, saDery, saDers, saSndx, saSndy, saSnds, 1.0, 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0));
+              result = mandelbrot_compute_deep(dc, saIter, saDz, saDzE, saRef, saDerx, saDery, saDers, saSndx, saSndy, saSnds, 1.0, 0.0, 0.0, vec2<f32>(0.0), vec2<f32>(0.0), 1e30, 0.0, 0.0);
             } else {
               // Deep continuation: layers 2/3 hold the dz mantissa, layer 7 its
               // exponent; layers 4/5/8 the raw derivative (derM.x, derM.y, derS).
@@ -4134,15 +4232,24 @@ fn cs_main(
                 deep_dir_grad = vec2<f32>(loadLayer(coord, 15), loadLayer(coord, 16));
                 deep_avg_direction = loadLayer(coord, 17);
               }
+              var prev_trap_distance = 1e30;
+              var prev_trap_iteration = 0.0;
+              var prev_trap_angle = 0.0;
+              if (mandelbrot.orbitTrapMode >= 1.5) {
+                let trapBase = orbit_trap_layer_base();
+                prev_trap_distance = loadLayer(coord, trapBase);
+                prev_trap_iteration = loadLayer(coord, trapBase + 1);
+                prev_trap_angle = loadLayer(coord, trapBase + 2);
+              }
               // Phase D: independent z″ state rides layers 9/10/11; layer
               // 12 remembers whether every applied jump propagated z″.
-              result = mandelbrot_compute_deep(dc, iter_val, vec2<f32>(zx, zy), dz_e, prev_ref_i, stored_derx, stored_dery, stored_ders, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12), prev_ref_i_raw, deep_avg_direction, deep_stripe_grad, deep_dir_grad);
+              result = mandelbrot_compute_deep(dc, iter_val, vec2<f32>(zx, zy), dz_e, prev_ref_i, stored_derx, stored_dery, stored_ders, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12), prev_ref_i_raw, deep_avg_direction, deep_stripe_grad, deep_dir_grad, prev_trap_distance, prev_trap_iteration, prev_trap_angle);
             }
           } else {
             let x0 = local_rot.x * mandelbrot.scale + mandelbrot.cx;
             let y0 = local_rot.y * mandelbrot.scale + mandelbrot.cy;
             if (is_compute_request) {
-              result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, SCALED_ZERO_S, 1.0, vec2<f32>(0.0), vec2<f32>(0.0));
+              result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, SCALED_ZERO_S, 1.0, vec2<f32>(0.0), vec2<f32>(0.0), 1e30, 0.0, 0.0);
             } else {
               // Continuation: layers 4/5/8 hold the raw derivative registers.
               let stored_derx = loadLayer(coord, 4);
@@ -4158,7 +4265,16 @@ fn cs_main(
                 prev_stripe_grad = vec2<f32>(loadLayer(coord, 13), loadLayer(coord, 14));
                 prev_dir_grad = vec2<f32>(loadLayer(coord, 15), loadLayer(coord, 16));
               }
-              result = mandelbrot_compute(x0, y0, iter_val, zx, zy, stored_derx, stored_dery, stored_ders, prev_ref_i, prev_avg_direction, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12), prev_stripe_grad, prev_dir_grad);
+              var prev_trap_distance = 1e30;
+              var prev_trap_iteration = 0.0;
+              var prev_trap_angle = 0.0;
+              if (mandelbrot.orbitTrapMode >= 1.5) {
+                let trapBase = orbit_trap_layer_base();
+                prev_trap_distance = loadLayer(coord, trapBase);
+                prev_trap_iteration = loadLayer(coord, trapBase + 1);
+                prev_trap_angle = loadLayer(coord, trapBase + 2);
+              }
+              result = mandelbrot_compute(x0, y0, iter_val, zx, zy, stored_derx, stored_dery, stored_ders, prev_ref_i, prev_avg_direction, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12), prev_stripe_grad, prev_dir_grad, prev_trap_distance, prev_trap_iteration, prev_trap_angle);
             }
           }
           storeTexel(coord, result);

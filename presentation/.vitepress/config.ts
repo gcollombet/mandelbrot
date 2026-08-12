@@ -49,6 +49,7 @@ export default defineConfig({
                     {text: "Tables d'approximation", link: '/tables-approximation'},
                     {text: 'Mathématiques et preuves Lean', link: '/mathematiques'},
                     {text: 'Dérivée, orbite, lambda', link: '/dynamique-orbite-derivee-lambda'},
+                    {text: 'Orbit traps paramétriques', link: '/orbit-traps'},
                 ]
             }
         ],

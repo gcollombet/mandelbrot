@@ -56,6 +56,7 @@ import {
     type ZoomRefreshCostModel,
 } from './iterationBatchController'
 import {advanceFramePacer} from './framePacing'
+import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapColorUniformValues, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
@@ -77,6 +78,10 @@ const RAW_LAYERS = 13
 // asks for stripe/direction coloring or relief: five more r32float layers over
 // the neutral square is not a cost to pay for the palettes that never ask.
 const RAW_ORBIT_GRADIENT_LAYERS = 18
+// Orbit-trap continuation tuple: distance, hit iteration and hit angle. It
+// starts at layer 13 when orbit metrics are absent, or after their five layers.
+const RAW_TRAP_LAYERS = 16
+const RAW_ORBIT_GRADIENT_TRAP_LAYERS = 21
 
 // Adaptive iteration batch sizing — only the fused iteration pass is controlled.
 // Leave part of the frame budget to reprojection, resolve and color, which do not
@@ -128,7 +133,7 @@ const MOBIUS_COEFF_FLOATS = 21
 // beyond this cap. 10M steps = an 80 MB storage buffer, within the WebGPU
 // default maxStorageBufferBindingSize (128 MiB) — no requiredLimits needed.
 const ORBIT_STEP_CAPACITY = 10_000_000
-const COLOR_UNIFORM_FLOAT_COUNT = 72
+const COLOR_UNIFORM_FLOAT_COUNT = 96
 const TAU = Math.PI * 2
 
 // Minimum number of unfinished pixels below which we consider the image
@@ -613,6 +618,7 @@ export type RenderOptions = {
     gradeContrast?: number,
     gradeSaturation?: number,
     orbitTrapStrength: number,
+    orbitTrap?: OrbitTrapConfig,
     phaseColoringStrength: number,
     stripeFrequency: number,
     textureMapping: TextureMappingConfig,
@@ -654,6 +660,9 @@ interface DisplaySet {
     /** Present only while orbit metrics are tracked (see orbitGradientAllocated). */
     orbitGradientTexture?: GPUTexture
     orbitGradientView?: GPUTextureView
+    /** Closest-hit tuple (distance, iteration, angle, validity), orbit modes only. */
+    trapPayloadTexture?: GPUTexture
+    trapPayloadView?: GPUTextureView
 }
 
 export class Engine {
@@ -692,10 +701,19 @@ export class Engine {
     private orbitGradientScratchView?: GPUTextureView
     /** 1x1 stand-in bound wherever an orbit-gradient texture is absent. */
     private orbitGradientDummyView?: GPUTextureView
+    /** Sampled and storage dummies must be distinct to avoid read/write aliasing. */
+    private trapPayloadDummyView?: GPUTextureView
+    private trapPayloadDummyStorageView?: GPUTextureView
+    private trapPayloadScratchTexture?: GPUTexture
+    private trapPayloadScratchView?: GPUTextureView
     /** Whether the CURRENT textures carry the orbit-gradient resources. */
     private orbitGradientAllocated = false
     /** Whether the CURRENT palette asks for them. */
     private orbitMetricsEnabled = false
+    /** Whether the CURRENT raw/display sets carry the true-orbit trap tuple. */
+    private trapPayloadAllocated = false
+    /** Whether the requested mode is sampled or exact for this update. */
+    private orbitTrapEnabled = false
 
     // merge pass (fuse resolved + frozen at zoom stop)
     pipelineMerge?: GPURenderPipeline
@@ -1091,6 +1109,8 @@ export class Engine {
     // Diagnostic: the mode flag (0/1/2) and block-level count last sent to the shader.
     lastShaderApproxFlag = 0
     lastShaderBlaLevelCount = 0
+    /** Diagnostic mirror of the policy actually sent to the iteration shader. */
+    lastOrbitTrapMode: OrbitTrapMode = 'off'
     private completionStartMs = 0
     private completionAccumulatedGpuMs = 0
     private completionTimerActive = false
@@ -2009,7 +2029,7 @@ export class Engine {
 
         // uniform buffers
         this.uniformBufferMandelbrot = this.device.createBuffer({
-            size: 4 * 20,
+            size: 4 * 36,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Mandelbrot',
         })
@@ -2138,6 +2158,7 @@ export class Engine {
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: 'write-only', format: 'rgba32float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout Resolve',
         })
@@ -2163,6 +2184,8 @@ export class Engine {
                 { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 15, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
                 { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 17, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 18, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
@@ -2299,6 +2322,9 @@ export class Engine {
                 { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'uint', viewDimension: '2d' } },
                 { binding: 7, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
                 { binding: 8, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 9, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 10, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 11, visibility: GPUShaderStage.FRAGMENT, storageTexture: { access: 'write-only', format: 'rgba32float', viewDimension: '2d' } },
             ],
             label: 'Engine BindGroupLayout Merge',
         })
@@ -3895,6 +3921,11 @@ export class Engine {
      *  terminal values, not continuation state, so they have to be inside this
      *  count whenever they exist — an escaped texel never revisits them. */
     private rawCopyLayerCount(analyticRawPayloadNeeded: boolean): number {
+        if (this.trapPayloadAllocated) {
+            return this.orbitGradientAllocated
+                ? RAW_ORBIT_GRADIENT_TRAP_LAYERS
+                : RAW_TRAP_LAYERS
+        }
         if (this.orbitGradientAllocated) return RAW_ORBIT_GRADIENT_LAYERS
         return analyticRawPayloadNeeded ? RAW_LAYERS : RAW_BASE_LAYERS
     }
@@ -3961,6 +3992,7 @@ export class Engine {
         this.geometryScratchTexture?.destroy?.()
         this.metadataScratchTexture?.destroy?.()
         this.orbitGradientScratchTexture?.destroy?.()
+        this.trapPayloadScratchTexture?.destroy?.()
         this.accumTexture?.destroy?.()
         this.aaTargetTexture?.destroy?.()
 
@@ -4002,6 +4034,22 @@ export class Engine {
                 label: 'Engine OrbitGradientDummy',
             }).createView({ label: 'Engine OrbitGradientDummy View' })
         }
+        if (!this.trapPayloadDummyView) {
+            this.trapPayloadDummyView = this.device.createTexture({
+                size: { width: 1, height: 1 },
+                format: 'rgba32float',
+                usage: GPUTextureUsage.TEXTURE_BINDING,
+                label: 'Engine TrapPayloadDummy',
+            }).createView({ label: 'Engine TrapPayloadDummy View' })
+        }
+        if (!this.trapPayloadDummyStorageView) {
+            this.trapPayloadDummyStorageView = this.device.createTexture({
+                size: { width: 1, height: 1 },
+                format: 'rgba32float',
+                usage: GPUTextureUsage.STORAGE_BINDING,
+                label: 'Engine TrapPayloadStorageDummy',
+            }).createView({ label: 'Engine TrapPayloadStorageDummy View' })
+        }
 
         // STORAGE_BINDING: the in-place compute path writes A as a read_write
         // storage texture (r32float is the only format allowing this).
@@ -4009,7 +4057,10 @@ export class Engine {
         // attachment and pipeline choice below depends on it, so it may only
         // change through a full re-creation (update() calls resize() on flip).
         this.orbitGradientAllocated = this.orbitMetricsEnabled
-        const rawLayers = this.orbitGradientAllocated ? RAW_ORBIT_GRADIENT_LAYERS : RAW_LAYERS
+        this.trapPayloadAllocated = this.orbitTrapEnabled
+        const rawLayers = this.trapPayloadAllocated
+            ? (this.orbitGradientAllocated ? RAW_ORBIT_GRADIENT_TRAP_LAYERS : RAW_TRAP_LAYERS)
+            : (this.orbitGradientAllocated ? RAW_ORBIT_GRADIENT_LAYERS : RAW_LAYERS)
         const rawResult = createLayeredTexture('Engine RawTexture (A)', rawLayers, GPUTextureUsage.STORAGE_BINDING)
         this.rawTexture = rawResult.texture
         this.rawArrayView = rawResult.arrayView
@@ -4064,6 +4115,15 @@ export class Engine {
                     label: label + ' OrbitGradient',
                 })
                 : undefined
+            const trapPayloadTexture = this.trapPayloadAllocated
+                ? this.device.createTexture({
+                    size: { width: textureSize, height: textureSize },
+                    format: 'rgba32float',
+                    usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
+                        | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                    label: label + ' TrapPayload',
+                })
+                : undefined
             return {
                 valuesTexture: values.texture,
                 valuesArrayView: values.arrayView,
@@ -4074,6 +4134,8 @@ export class Engine {
                 metadataView: metadataTexture.createView({ label: label + ' MetadataView' }),
                 orbitGradientTexture,
                 orbitGradientView: orbitGradientTexture?.createView({ label: label + ' OrbitGradientView' }),
+                trapPayloadTexture,
+                trapPayloadView: trapPayloadTexture?.createView({ label: label + ' TrapPayloadView' }),
             }
         }
 
@@ -4102,6 +4164,15 @@ export class Engine {
             })
             : undefined
         this.orbitGradientScratchView = this.orbitGradientScratchTexture?.createView({ label: 'Engine MergeOrbitGradientScratch View' })
+        this.trapPayloadScratchTexture = this.trapPayloadAllocated
+            ? this.device.createTexture({
+                size: { width: textureSize, height: textureSize },
+                format: 'rgba32float',
+                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
+                label: 'Engine MergeTrapPayloadScratch',
+            })
+            : undefined
+        this.trapPayloadScratchView = this.trapPayloadScratchTexture?.createView({ label: 'Engine MergeTrapPayloadScratch View' })
         this.resolvedDisplayVersion = -1
         this.frozenDisplayVersion = -1
 
@@ -4150,6 +4221,7 @@ export class Engine {
         display?.geometryTexture.destroy?.()
         display?.metadataTexture.destroy?.()
         display?.orbitGradientTexture?.destroy?.()
+        display?.trapPayloadTexture?.destroy?.()
     }
 
     /** Every bind group that names A or B. The reprojection swaps the two, so
@@ -4204,6 +4276,7 @@ export class Engine {
                 entries: [
                     { binding: 0, resource: { buffer: this.uniformBufferResolve! } },
                     { binding: 1, resource: this.rawArrayView! },
+                    { binding: 2, resource: this.resolvedDisplay?.trapPayloadView ?? this.trapPayloadDummyStorageView! },
                 ],
                 label: 'Engine BindGroup Resolve',
             })
@@ -4228,6 +4301,9 @@ export class Engine {
                     { binding: 6, resource: this.metadataScratchView },
                     { binding: 7, resource: this.resolvedDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
                     { binding: 8, resource: this.orbitGradientScratchView ?? this.orbitGradientDummyView! },
+                    { binding: 9, resource: this.resolvedDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
+                    { binding: 10, resource: this.trapPayloadScratchView ?? this.trapPayloadDummyView! },
+                    { binding: 11, resource: this.frozenDisplay?.trapPayloadView ?? this.trapPayloadDummyStorageView! },
                 ],
                 label: 'Engine BindGroup Merge',
             })
@@ -4652,6 +4728,21 @@ export class Engine {
     }
 
     async update(mandelbrot: Mandelbrot, renderOptions: RenderOptions) {
+        const orbitTrap = normalizeOrbitTrapConfig(renderOptions.orbitTrap, renderOptions.orbitTrapStrength)
+        const previousOrbitTrap = this.previousRenderOptions
+            ? normalizeOrbitTrapConfig(
+                this.previousRenderOptions.orbitTrap,
+                this.previousRenderOptions.orbitTrapStrength,
+            )
+            : undefined
+        this.orbitTrapEnabled = orbitTrapUsesOrbit(orbitTrap)
+        if (previousOrbitTrap
+            && (this.orbitTrapEnabled || orbitTrapUsesOrbit(previousOrbitTrap))
+            && orbitTrapAccumulatorSignature(orbitTrap)
+                !== orbitTrapAccumulatorSignature(previousOrbitTrap)) {
+            this.clearHistoryNextFrame = true
+            this.needRender = true
+        }
         // Calcul du temps écoulé depuis la dernière frame
         const now = performance.now()
         if (this.lastUpdateTime === 0) {
@@ -4686,7 +4777,8 @@ export class Engine {
         // any previous-state comparison: resize() clears the render anyway, which
         // is what the flip already forced through clearHistoryNextFrame.
         this.orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
-        if (this.orbitMetricsEnabled !== this.orbitGradientAllocated && this.rawTexture) {
+        if ((this.orbitMetricsEnabled !== this.orbitGradientAllocated
+            || this.orbitTrapEnabled !== this.trapPayloadAllocated) && this.rawTexture) {
             this.resize()
         }
 
@@ -4958,7 +5050,6 @@ export class Engine {
         const effectivePhaseColoringStrength = clamp(renderOptions.phaseColoringStrength + phaseColoringAnim, 0, 100)
         const lightDirLen = Math.hypot(Math.cos(effectiveLightAngle), Math.sin(effectiveLightAngle), 1.85)
         const textureMapping = normalizeTextureMappingConfig(renderOptions.textureMapping)
-
         const zoomActive = isZoomActive(this.zoomState)
         const zoomFactor = zoomActive
             ? getFrozenScale(this.zoomState) / mandelbrot.scale
@@ -5026,7 +5117,7 @@ export class Engine {
             renderOptions.paletteMirror ? 1 : 0, // 30: paletteMirror
             renderOptions.debugShading ? 1 : 0,  // 31: debugShading
             effectiveHeightPaletteShift,         // 32: heightPaletteShift [0, 100]
-            renderOptions.orbitTrapStrength,     // 33: orbitTrapStrength [0, 100]
+            orbitTrap.strength,                  // 33: legacy-compatible orbitTrapStrength [0, 100]
             effectivePhaseColoringStrength,      // 34: phaseColoringStrength [0, 100]
             textureMappingVariableId(textureMapping.xVariable), // 35: textureMappingXVariable
             textureMappingVariableId(textureMapping.yVariable), // 36: textureMappingYVariable
@@ -5065,6 +5156,8 @@ export class Engine {
             renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
             renderOptions.protrusionGeometryMix ?? 0, // 70: protrusionGeometryMix [0, 1]
             renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod [0.1, 16]
+            ...orbitTrapColorUniformValues(orbitTrap), // 72..92: structured orbit-trap configuration
+            0, 0, 0,                             // 93..95: alignment / future trap payload fields
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -5187,20 +5280,29 @@ export class Engine {
                 || (this.dynamicValidityReady
                     && this.dynamicValidityGeneration === this.tableGeneration))
             && tableCoversView
-        const approximationModeFlag = blocksReady
+        const tableApproximationModeFlag = blocksReady
             ? (this.approximationMode === 'auto'
                 ? (this.dynamicBlockValidity ? (this.dynamicValidityShadow ? 7 : 6) : 5)
                 : this.approximationMode === 'mobius' ? 4
                 : this.approximationMode === 'jet' ? 3
                 : this.approximationMode === 'pade' ? 2 : 1)
             : 0
-        const blaLevelCount = blocksReady ? this.currentBlaLevelCount : 0
+        // Exact orbit-trap evaluation deliberately unfolds every uncertified
+        // block. Reflect that choice in the CPU-side diagnostic as well as in
+        // the shader guard so performance traces never label it "Auto/BLA".
+        const approximationModeFlag = orbitTrap.mode === 'exact'
+            ? 0
+            : tableApproximationModeFlag
+        const blaLevelCount = orbitTrap.mode === 'exact'
+            ? 0
+            : (blocksReady ? this.currentBlaLevelCount : 0)
         // Diagnostic mirror of exactly what the shader receives this frame: the mode
         // flag (0=exact, 1=BLA, 2=Padé) and the block-level count. If, in Padé mode,
         // flag≠2 or levels=0, blocks are disabled before the GPU (Engine/worker side);
         // if flag=2 & levels>0 but no speedup, the issue is in the shader path.
         this.lastShaderApproxFlag = approximationModeFlag
         this.lastShaderBlaLevelCount = blaLevelCount
+        this.lastOrbitTrapMode = orbitTrap.mode
 
         // Re-write the mandelbrot uniform with the guarded globalMaxIter.
         // During zoom reprojection, override scale with liveScale so the GPU
@@ -5226,6 +5328,22 @@ export class Engine {
             expScale,  // 17: shared base-2 exponent for scale & cx/cy (fe deep path)
             this.aaOffsetX,  // 18: AA sub-pixel jitter X (neutral-space units)
             this.aaOffsetY,  // 19: AA sub-pixel jitter Y
+            orbitTrapModeId(orbitTrap.mode), // 20: orbit-trap evaluation policy
+            orbitTrap.centerX,
+            orbitTrap.centerY,
+            orbitTrap.scale,
+            orbitTrap.rotation,
+            orbitTrap.anisotropyX,
+            orbitTrap.anisotropyY,
+            orbitTrap.petals,
+            orbitTrap.petalDepth,
+            orbitTrap.twist,
+            orbitTrap.phase,
+            orbitTrap.startIteration,
+            orbitTrap.endIteration,
+            0,
+            0,
+            0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)
 
@@ -5541,7 +5659,7 @@ export class Engine {
             this.previousMandelbrot.mu,
             aspect,
             this.previousMandelbrot.angle,
-            0,
+            this.trapPayloadAllocated ? (this.orbitGradientAllocated ? 18 : 13) : -1,
         ])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
@@ -5613,6 +5731,13 @@ export class Engine {
                     { width: texSize, height: texSize },
                 )
             }
+            if (this.frozenDisplay.trapPayloadTexture && this.trapPayloadScratchTexture) {
+                commandEncoder.copyTextureToTexture(
+                    { texture: this.frozenDisplay.trapPayloadTexture },
+                    { texture: this.trapPayloadScratchTexture },
+                    { width: texSize, height: texSize },
+                )
+            }
             // 2) Write merge uniforms (captured at zoom stop before state reset)
             const mergeData = new Float32Array([
                 this.mergeUniforms.zf,
@@ -5674,6 +5799,13 @@ export class Engine {
                 commandEncoder.copyTextureToTexture(
                     { texture: this.resolvedDisplay.orbitGradientTexture },
                     { texture: this.frozenDisplay.orbitGradientTexture },
+                    { width: texSize, height: texSize },
+                )
+            }
+            if (this.resolvedDisplay.trapPayloadTexture && this.frozenDisplay.trapPayloadTexture) {
+                commandEncoder.copyTextureToTexture(
+                    { texture: this.resolvedDisplay.trapPayloadTexture },
+                    { texture: this.frozenDisplay.trapPayloadTexture },
                     { width: texSize, height: texSize },
                 )
             }
@@ -6250,6 +6382,8 @@ export class Engine {
         this.destroyDisplaySet(this.frozenDisplay)
         this.geometryScratchTexture?.destroy?.()
         this.metadataScratchTexture?.destroy?.()
+        this.orbitGradientScratchTexture?.destroy?.()
+        this.trapPayloadScratchTexture?.destroy?.()
         this.mandelbrotReferenceBuffer?.destroy?.()
         this.mandelbrotBlaBuffer?.destroy?.()
         this.mandelbrotBlaLevelBuffer?.destroy?.()
@@ -6520,6 +6654,8 @@ export class Engine {
                 { binding: 14, resource: this.rawArrayView },
                 { binding: 15, resource: this.resolvedDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
                 { binding: 16, resource: this.frozenDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
+                { binding: 17, resource: this.resolvedDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
+                { binding: 18, resource: this.frozenDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,

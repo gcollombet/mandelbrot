@@ -14,6 +14,7 @@ import {normalizeColorStops, type ColorStop} from './ColorStop';
 import type {InterpolationMode} from './Mandelbrot';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import type {TextureMappingConfig} from './TextureMapping';
+import type {OrbitTrapConfig} from './OrbitTrap';
 import {
   deletedCacheFields,
   isVisibleCacheRecord,
@@ -72,6 +73,7 @@ export interface PaletteRecord extends ScopedCacheFields {
   gradeContrast?: number;
   gradeSaturation?: number;
   orbitTrapStrength?: number;
+  orbitTrap?: OrbitTrapConfig;
   phaseColoringStrength?: number;
   stripeFrequency?: number;
   textureMapping?: TextureMappingConfig;

@@ -68,6 +68,7 @@ import {
   TEXTURE_MAPPING_VARIABLE_OPTIONS,
   textureMappingEquals,
 } from '../TextureMapping';
+import {cloneOrbitTrap, DEFAULT_ORBIT_TRAP, normalizeOrbitTrapFromLegacy} from '../OrbitTrap';
 import {
   cloneAnimationConfig,
   normalizeAnimationConfig,
@@ -219,6 +220,7 @@ const model =  defineModel<MandelbrotParams>({
      gradeContrast: 1.18,
      gradeSaturation: 1.12,
      orbitTrapStrength: 0,
+     orbitTrap: cloneOrbitTrap(DEFAULT_ORBIT_TRAP),
      phaseColoringStrength: 0,
      stripeFrequency: 8,
      textureName: 'Gold',
@@ -238,6 +240,48 @@ function ensureActiveTextureMapping() {
 }
 
 ensureActiveTextureMapping();
+
+function ensureActiveOrbitTrap() {
+  model.value.orbitTrap = normalizeOrbitTrapFromLegacy(model.value);
+  model.value.orbitTrapStrength = model.value.orbitTrap.strength;
+}
+
+ensureActiveOrbitTrap();
+
+const orbitTrapModeOptions = [
+  { label: 'Désactivé', value: 'off' },
+  { label: 'Terminal · Rosace', value: 'terminal' },
+  { label: 'Orbite · Échantillonné', value: 'sampled' },
+  { label: 'Orbite · Exact', value: 'exact' },
+];
+
+const orbitTrapConfig = computed(() => normalizeOrbitTrapFromLegacy(model.value));
+
+function setOrbitTrapMode(value: string | number) {
+  ensureActiveOrbitTrap();
+  const mode = value === 'terminal' || value === 'sampled' || value === 'exact'
+    ? value
+    : 'off';
+  const next = { ...model.value.orbitTrap!, mode };
+  if (mode !== 'off' && next.strength <= 0) next.strength = 70;
+  model.value.orbitTrap = normalizeOrbitTrapFromLegacy({ orbitTrap: next });
+  model.value.orbitTrapStrength = model.value.orbitTrap.strength;
+}
+
+function setOrbitTrapBoolean(field: 'includeInterior', value: boolean) {
+  ensureActiveOrbitTrap();
+  model.value.orbitTrap = normalizeOrbitTrapFromLegacy({
+    orbitTrap: { ...model.value.orbitTrap!, [field]: value },
+  });
+}
+
+function setOrbitTrapNumber(field: keyof typeof DEFAULT_ORBIT_TRAP, value: number) {
+  ensureActiveOrbitTrap();
+  const next = { ...model.value.orbitTrap } as unknown as Record<string, unknown>;
+  next[field] = value;
+  model.value.orbitTrap = normalizeOrbitTrapFromLegacy({ orbitTrap: next });
+  if (field === 'strength') model.value.orbitTrapStrength = model.value.orbitTrap.strength;
+}
 
 const textureMappingXScaleSlider = computed({
   get: () => Math.log10(normalizeTextureMappingFromLegacy(model.value).xScale),
@@ -960,6 +1004,8 @@ async function savePreset() {
   savedValue.skyboxName = selectedSkyboxTexture.value;
   savedValue.skyboxGuid = currentSkyboxObj.value?.guid;
   savedValue.textureMapping = normalizeTextureMappingFromLegacy(savedValue);
+  savedValue.orbitTrap = normalizeOrbitTrapFromLegacy(savedValue);
+  savedValue.orbitTrapStrength = savedValue.orbitTrap.strength;
   delete (savedValue as any).textureMappingMode;
   const name = presetName.value.trim();
   const id = await savePresetEntry(savedValue, thumbnail, name || undefined, now);
@@ -1007,6 +1053,8 @@ async function quickSnapshot() {
   savedValue.skyboxName = selectedSkyboxTexture.value;
   savedValue.skyboxGuid = currentSkyboxObj.value?.guid;
   savedValue.textureMapping = normalizeTextureMappingFromLegacy(savedValue);
+  savedValue.orbitTrap = normalizeOrbitTrapFromLegacy(savedValue);
+  savedValue.orbitTrapStrength = savedValue.orbitTrap.strength;
   delete (savedValue as any).textureMappingMode;
   const now = new Date().toISOString();
   const id = await savePresetEntry(savedValue, thumbnail, undefined, now);
@@ -1120,6 +1168,7 @@ async function savePalette() {
     gradeContrast: model.value.gradeContrast,
     gradeSaturation: model.value.gradeSaturation,
     orbitTrapStrength: model.value.orbitTrapStrength,
+    orbitTrap: normalizeOrbitTrapFromLegacy(model.value),
     phaseColoringStrength: model.value.phaseColoringStrength,
     stripeFrequency: model.value.stripeFrequency,
     textureMapping: normalizeTextureMappingFromLegacy(model.value),
@@ -1144,6 +1193,8 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.gradeContrast = source.gradeContrast ?? 1.18;
   model.value.gradeSaturation = source.gradeSaturation ?? 1.12;
   model.value.orbitTrapStrength = source.orbitTrapStrength ?? 0;
+  model.value.orbitTrap = normalizeOrbitTrapFromLegacy(source);
+  model.value.orbitTrapStrength = model.value.orbitTrap.strength;
   model.value.phaseColoringStrength = source.phaseColoringStrength ?? 0;
   model.value.stripeFrequency = source.stripeFrequency ?? 8;
   model.value.textureMapping = normalizeTextureMappingFromLegacy(source);
@@ -1412,12 +1463,15 @@ async function selectPreset(id: number) {
     const saved = structuredClone(toRaw(record.value));
     stripExplorationStateFields(saved);
     saved.textureMapping = normalizeTextureMappingFromLegacy(saved);
+    saved.orbitTrap = normalizeOrbitTrapFromLegacy(saved);
+    saved.orbitTrapStrength = saved.orbitTrap.strength;
     saved.animation = normalizeAnimationConfig(saved.animation, saved.animationSpeed);
     delete (saved as any).textureMappingMode;
     const current = model.value;
     saved.activateAnimate = current.activateAnimate;
     model.value = preserveSessionPerformanceFields(saved, current);
     ensureActiveTextureMapping();
+    ensureActiveOrbitTrap();
     // Restore texture if saved with the preset
     const texName = textureNameForReference(saved.textureGuid, saved.textureName);
     if (texName) {
@@ -2786,6 +2840,7 @@ async function importSkyboxTexture(event: Event) {
           :gradeContrast="model.gradeContrast"
           :gradeSaturation="model.gradeSaturation"
           :orbitTrapStrength="model.orbitTrapStrength"
+          :orbitTrap="model.orbitTrap"
           :phaseColoringStrength="model.phaseColoringStrength"
           :textureMapping="model.textureMapping"
         />
@@ -2850,6 +2905,7 @@ async function importSkyboxTexture(event: Event) {
         :grade-contrast="model.gradeContrast"
         :grade-saturation="model.gradeSaturation"
         :orbit-trap-strength="model.orbitTrapStrength"
+        :orbit-trap="model.orbitTrap"
         :phase-coloring-strength="model.phaseColoringStrength"
         :texture-mapping="model.textureMapping"
         :is-admin="isAdmin"
@@ -2859,10 +2915,65 @@ async function importSkyboxTexture(event: Event) {
         @refresh-stop-presets="refreshStopPresets"
       />
 
+      <DenseSection group="params" :hue="320" title="Orbit trap · Rosace" scope="Terminal instantané ou plus proche passage de l’orbite" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;4&quot;/><path d=&quot;M12 2c4 3 7 6 10 10-3 4-6 7-10 10-4-3-7-6-10-10 3-4 6-7 10-10z&quot;/>'>
+        <div class="fields">
+          <DenseSelect label="Mode"
+            :options="orbitTrapModeOptions"
+            :model-value="orbitTrapConfig.mode"
+            @update:model-value="setOrbitTrapMode" />
+          <DenseField label="Intensité" :min="0" :max="100" :step="0.1" f="p1"
+            :model-value="orbitTrapConfig.strength" @update:model-value="(v: number) => setOrbitTrapNumber('strength', v)" />
+          <DenseField label="Échelle" :min="0.05" :max="4" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.scale" @update:model-value="(v: number) => setOrbitTrapNumber('scale', v)" />
+          <DenseField label="Rotation" :min="-3.1416" :max="3.1416" :step="0.01" :f="radFmt"
+            :model-value="orbitTrapConfig.rotation" @update:model-value="(v: number) => setOrbitTrapNumber('rotation', v)" />
+          <DenseField label="Pétales" :min="1" :max="16" :step="1" f="p0"
+            :model-value="orbitTrapConfig.petals" @update:model-value="(v: number) => setOrbitTrapNumber('petals', v)" />
+          <DenseField label="Profondeur pétales" :min="0" :max="1" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.petalDepth" @update:model-value="(v: number) => setOrbitTrapNumber('petalDepth', v)" />
+          <DenseField label="Torsion" :min="-8" :max="8" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.twist" @update:model-value="(v: number) => setOrbitTrapNumber('twist', v)" />
+          <DenseField label="Largeur" :min="0.005" :max="0.5" :step="0.001" f="p3"
+            :model-value="orbitTrapConfig.width" @update:model-value="(v: number) => setOrbitTrapNumber('width', v)" />
+          <DenseField label="Dureté" :min="0.25" :max="8" :step="0.05" f="p2"
+            :model-value="orbitTrapConfig.hardness" @update:model-value="(v: number) => setOrbitTrapNumber('hardness', v)" />
+          <DenseField label="Centre X" :min="-2" :max="2" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.centerX" @update:model-value="(v: number) => setOrbitTrapNumber('centerX', v)" />
+          <DenseField label="Centre Y" :min="-2" :max="2" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.centerY" @update:model-value="(v: number) => setOrbitTrapNumber('centerY', v)" />
+          <DenseField label="Anisotropie X" :min="0.1" :max="4" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.anisotropyX" @update:model-value="(v: number) => setOrbitTrapNumber('anisotropyX', v)" />
+          <DenseField label="Anisotropie Y" :min="0.1" :max="4" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.anisotropyY" @update:model-value="(v: number) => setOrbitTrapNumber('anisotropyY', v)" />
+          <DenseField label="Phase forme" :min="-3.1416" :max="3.1416" :step="0.01" :f="radFmt"
+            :model-value="orbitTrapConfig.phase" @update:model-value="(v: number) => setOrbitTrapNumber('phase', v)" />
+          <DenseField label="Bandes distance" :min="0" :max="32" :step="0.1" f="p1"
+            :model-value="orbitTrapConfig.distanceFrequency" @update:model-value="(v: number) => setOrbitTrapNumber('distanceFrequency', v)" />
+          <DenseField label="Poids distance" :min="-4" :max="4" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.distanceWeight" @update:model-value="(v: number) => setOrbitTrapNumber('distanceWeight', v)" />
+          <DenseField label="Poids itération" :min="-4" :max="4" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.iterationWeight" @update:model-value="(v: number) => setOrbitTrapNumber('iterationWeight', v)" />
+          <DenseField label="Poids angle" :min="-4" :max="4" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.angleWeight" @update:model-value="(v: number) => setOrbitTrapNumber('angleWeight', v)" />
+          <DenseField label="Décalage couleur" :min="-4" :max="4" :step="0.01" f="p2"
+            :model-value="orbitTrapConfig.phaseOffset" @update:model-value="(v: number) => setOrbitTrapNumber('phaseOffset', v)" />
+          <template v-if="orbitTrapConfig.mode === 'sampled' || orbitTrapConfig.mode === 'exact'">
+            <DenseField label="Début orbite" :min="0" :max="10000" :step="1" f="p0"
+              :model-value="orbitTrapConfig.startIteration" @update:model-value="(v: number) => setOrbitTrapNumber('startIteration', v)" />
+            <DenseField label="Fin orbite (0 = budget)" :min="0" :max="1000000" :step="1" f="p0"
+              :model-value="orbitTrapConfig.endIteration" @update:model-value="(v: number) => setOrbitTrapNumber('endIteration', v)" />
+            <DenseToggle label="Colorer l’intérieur"
+              :model-value="orbitTrapConfig.includeInterior"
+              @update:model-value="(v: boolean) => setOrbitTrapBoolean('includeInterior', v)" />
+          </template>
+        </div>
+        <p v-if="orbitTrapConfig.mode === 'sampled' || orbitTrapConfig.mode === 'exact'" class="orbit-trap-note">
+          Le bandeau d’aperçu ne réitère pas l’orbite : évalue ce mode sur le canevas principal.
+        </p>
+      </DenseSection>
+
       <DenseSection group="params" :hue="25" title="Global · Surface & Matière" scope="Relief, ombrage et matériau partagés — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
         <div class="fields">
-          <DenseField label="Orbit trap" :min="0" :max="100" :step="0.1" f="p1"
-            :model-value="model.orbitTrapStrength ?? 0" @update:model-value="(v: number) => model.orbitTrapStrength = v" />
           <DenseField label="Profondeur relief" :min="0" :max="2" :step="0.01" f="p2"
             :model-value="model.reliefDepth ?? 1" @update:model-value="(v: number) => model.reliefDepth = v" />
           <DenseField label="Phase protubérances" :min="0" :max="1" :step="0.001" f="p3"
@@ -3254,6 +3365,13 @@ async function importSkyboxTexture(event: Event) {
 </template>
 
 <style scoped>
+.orbit-trap-note {
+  margin: 0.35rem 0 0;
+  color: color-mix(in srgb, currentColor 68%, transparent);
+  font-size: 0.72rem;
+  line-height: 1.35;
+}
+
 .mb-3 {
   margin-bottom: 1.2em;
 }

@@ -2,8 +2,10 @@
 
 # Cache géométrique compact
 
-Le calcul fractal conserve treize couches brutes : état de continuation,
-métriques d’orbite et payload interne de dérivées. La couleur ne lit pas cette
+Le calcul fractal conserve treize couches brutes de base : état de continuation
+et payload interne de dérivées. Cinq couches de métriques d’orbite et trois
+couches d’orbit trap sont ajoutées seulement quand leurs effets sont actifs.
+La couleur ne lit pas cette
 représentation comme image. Elle consomme un **display set** plus petit et
 cohérent, produit directement par le resolve.
 
@@ -22,6 +24,11 @@ sorties flottantes et 32 octets auparavant. Les trois premières sorties sont
 des vues d’une même texture tableau. Le live et le frozen possèdent chacun le
 même ensemble typé afin qu’une sélection ne mélange jamais valeur, géométrie
 et provenance de versions différentes.
+
+Quand un orbit trap d’orbite est actif, une texture `rgba32float` séparée
+transporte `(distance, itération, angle, validité)`. Elle est écrite comme
+storage texture par le resolve : elle n’ajoute donc pas de septième sortie MRT
+et ne dépasse pas la limite de 32 octets d’attachements couleur par échantillon.
 
 `z.xy` est volontairement conservé : il sert encore à l’itération lissée, aux
 orbit traps et aux mappings cartésiens fondés sur le point d’échappement.

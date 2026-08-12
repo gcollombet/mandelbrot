@@ -75,6 +75,30 @@ struct Uniforms {
   protrusionSharpness: f32, // global lobe exponent [0.25, 16], default 2
   protrusionGeometryMix: f32, // 0 = iteration lobe, 1 = scalar height warp
   protrusionPeriod: f32,      // distance-height period [0.1, 16], default 1
+  orbitTrapMode: f32,         // 0 off, 1 terminal, 2 sampled orbit, 3 exact orbit
+  orbitTrapCenterX: f32,      // center in bailout-normalized dynamic coordinates
+  orbitTrapCenterY: f32,
+  orbitTrapScale: f32,
+  orbitTrapRotation: f32,
+  orbitTrapAnisotropyX: f32,
+  orbitTrapAnisotropyY: f32,
+  orbitTrapPetals: f32,
+  orbitTrapPetalDepth: f32,
+  orbitTrapTwist: f32,
+  orbitTrapPhase: f32,
+  orbitTrapWidth: f32,
+  orbitTrapHardness: f32,
+  orbitTrapDistanceFrequency: f32,
+  orbitTrapDistanceWeight: f32,
+  orbitTrapIterationWeight: f32,
+  orbitTrapAngleWeight: f32,
+  orbitTrapPhaseOffset: f32,
+  orbitTrapStartIteration: f32,
+  orbitTrapEndIteration: f32,
+  orbitTrapIncludeInterior: f32,
+  _pad93: f32,
+  _pad94: f32,
+  _pad95: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // live values: iter, z.x, z.y
@@ -95,6 +119,8 @@ struct Uniforms {
 // bound when no stop asks for stripe/coherence relief.
 @group(0) @binding(15) var orbitGradientTex: texture_2d<f32>;
 @group(0) @binding(16) var frozenOrbitGradientTex: texture_2d<f32>;
+@group(0) @binding(17) var trapPayloadTex: texture_2d<f32>;
+@group(0) @binding(18) var frozenTrapPayloadTex: texture_2d<f32>;
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -548,7 +574,72 @@ fn smooth_escape_fraction(z_sq: f32) -> f32 {
   return 1.0 - log(max(log_z2 / logMu, 1e-12)) / log(2.0);
 }
 
-fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, cachedStripeGradient: vec2<f32>, cachedCoherenceGradient: vec2<f32>, dx: f32, dy: f32, uv_screen: vec2<f32>) -> vec3<f32> {
+// Logarithmic rosette in bailout-normalized dynamic coordinates. The returned
+// x component is the unsigned feature distance; y is the transformed hit angle.
+// petalDepth = 0 degenerates to the circle |q| = 1, while twist introduces a
+// handed logarithmic spiral without adding a second trap family.
+fn terminal_rosette_trap(z: vec2<f32>) -> vec2<f32> {
+  let escapeRadius = sqrt(max(parameters.mu, 1e-6));
+  let centered = z / escapeRadius - vec2<f32>(parameters.orbitTrapCenterX, parameters.orbitTrapCenterY);
+  let rotation = parameters.orbitTrapRotation;
+  let cs = cos(rotation);
+  let sn = sin(rotation);
+  let rotated = vec2<f32>(
+    cs * centered.x + sn * centered.y,
+    -sn * centered.x + cs * centered.y,
+  );
+  let trapScale = max(parameters.orbitTrapScale, 1e-4);
+  let anisotropy = max(
+    vec2<f32>(parameters.orbitTrapAnisotropyX, parameters.orbitTrapAnisotropyY),
+    vec2<f32>(0.05),
+  );
+  let q = rotated / (trapScale * anisotropy);
+  let radius = max(length(q), 1e-6);
+  let logRadius = log(radius);
+  let angle = atan2(q.y, q.x);
+  let petals = max(round(parameters.orbitTrapPetals), 1.0);
+  let rosette = parameters.orbitTrapPetalDepth * cos(
+    petals * angle + parameters.orbitTrapTwist * logRadius + parameters.orbitTrapPhase
+  );
+  return vec2<f32>(abs(logRadius - rosette), angle);
+}
+
+fn apply_orbit_trap_color(colorIn: vec3<f32>, iterRaw: f32, z: vec2<f32>, trapPayload: vec4<f32>) -> vec3<f32> {
+  let strength = clamp(parameters.orbitTrapStrength, 0.0, 100.0) / 100.0;
+  if (strength <= 0.001 || parameters.orbitTrapMode < 0.5) { return colorIn; }
+
+  var trapDistance = 1e30;
+  var trapIteration = iterRaw;
+  var trapAngle = 0.0;
+  if (parameters.orbitTrapMode < 1.5) {
+    let terminal = terminal_rosette_trap(z);
+    trapDistance = terminal.x;
+    trapAngle = terminal.y;
+  } else if (trapPayload.w > 0.5 && trapPayload.x < 1e29) {
+    trapDistance = trapPayload.x;
+    trapIteration = trapPayload.y;
+    trapAngle = trapPayload.z;
+  } else {
+    return colorIn;
+  }
+
+  let paletteRepeat = max(parameters.palettePeriod, 0.0001);
+  let distancePhase = -log2(max(trapDistance, 1e-6)) * parameters.orbitTrapDistanceFrequency;
+  let iterationPhase = trapIteration / paletteRepeat;
+  let anglePhase = trapAngle / (2.0 * 3.141592653589793);
+  let colorPhase = parameters.orbitTrapPhaseOffset
+    + parameters.orbitTrapDistanceWeight * distancePhase
+    + parameters.orbitTrapIterationWeight * iterationPhase
+    + parameters.orbitTrapAngleWeight * anglePhase;
+  let width = max(parameters.orbitTrapWidth, 1e-4);
+  let hardness = clamp(parameters.orbitTrapHardness, 0.25, 16.0);
+  let mask = exp(-pow(trapDistance / width, hardness));
+  let trapColor = samplePaletteColor(fract(colorPhase));
+  let accent = mix(colorIn, trapColor, 0.85);
+  return mix(colorIn, accent, clamp(mask * strength, 0.0, 1.0));
+}
+
+fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, cachedStripeGradient: vec2<f32>, cachedCoherenceGradient: vec2<f32>, dx: f32, dy: f32, uv_screen: vec2<f32>) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let deep = v * 2.0;
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
@@ -610,19 +701,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStor
     color = mix(color, samplePaletteColor(fract(directionCoherence)), fx.wRotationMean);
   }
 
-  let orbitTrapStrength = clamp(parameters.orbitTrapStrength, 0.0, 100.0) / 100.0;
-  if (orbitTrapStrength > 0.001) {
-    let escapeRadius = sqrt(max(parameters.mu, 1e-6));
-    let trapZ = z / escapeRadius;
-    let axisTrap = min(abs(trapZ.x), abs(trapZ.y));
-    let diagonalTrap = min(abs(trapZ.x - trapZ.y), abs(trapZ.x + trapZ.y)) * 0.70710678;
-    let circleTrap = abs(length(trapZ) - 1.0);
-    let trapDistance = min(axisTrap, min(diagonalTrap * 0.72, circleTrap * 0.85));
-    let trapWidth = mix(0.012, 0.16, orbitTrapStrength);
-    let trapMask = exp(-(trapDistance * trapDistance) / max(trapWidth * trapWidth, 1e-5));
-    let trapColor = samplePaletteColor(fract(palettePhase + 0.18));
-    color = mix(color, mix(color, trapColor, 0.72) + trapMask * 0.12, trapMask * orbitTrapStrength);
-  }
+  color = apply_orbit_trap_color(color, iterRaw, z, trapPayload);
 
   // ── Shading (always computed, applied proportionally to wShading) ──
   if (effShading > 0.001) {
@@ -1014,6 +1093,7 @@ fn colorize_pixel(
   sourceCoord: vec2<i32>,
   sourceTexSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
+  trapPayload: vec4<f32>,
   extras: PixelExtras,
   uv_screen: vec2<f32>,
   uv_neutral: vec2<f32>,
@@ -1029,11 +1109,17 @@ fn colorize_pixel(
   // these rather than reading a stale one.
   if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
     if (parameters.reachDebug > 0.5) { return vec4<f32>(0.10, 0.10, 0.12, 1.0); }
+    if (parameters.orbitTrapIncludeInterior > 0.5) {
+      return vec4<f32>(apply_orbit_trap_color(vec3<f32>(0.0), iter_val, vec2<f32>(zx_val, zy_val), trapPayload), 1.0);
+    }
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
   if (iter_val == 0.0) {
     if (parameters.reachDebug > 0.5) { return vec4<f32>(0.10, 0.10, 0.12, 1.0); }
+    if (parameters.orbitTrapIncludeInterior > 0.5) {
+      return vec4<f32>(apply_orbit_trap_color(vec3<f32>(0.0), 0.0, vec2<f32>(zx_val, zy_val), trapPayload), 1.0);
+    }
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);
   }
 
@@ -1202,7 +1288,7 @@ fn colorize_pixel(
   let v_smooth = nu_smooth;
   let stripePhase = extras.stripePhase;
   let directionCoherence = extras.directionCoherence;
-  var color = palette(iter_v, v, v_smooth, z, distanceHeightStored, extras.gradient, extras.curvature, geometryAngle, stripePhase, directionCoherence, extras.stripeGradient, extras.coherenceGradient, uv_neutral.x, uv_neutral.y, uv_screen);
+  var color = palette(iter_v, v, v_smooth, z, trapPayload, distanceHeightStored, extras.gradient, extras.curvature, geometryAngle, stripePhase, directionCoherence, extras.stripeGradient, extras.coherenceGradient, uv_neutral.x, uv_neutral.y, uv_screen);
 
   // Apply zebra after palette computation: darken even iterations
   color = color * (1.0 - wZebra * isEvenIter);
@@ -1361,6 +1447,7 @@ fn colorize_sampled(
   sourceGeometry: texture_2d<f32>,
   sourceMetadata: texture_2d<u32>,
   sourceOrbitGradient: texture_2d<f32>,
+  sourceTrapPayload: texture_2d<f32>,
   coord: vec2<i32>,
   texSize: vec2<i32>,
   iter_val: f32, zx_val: f32, zy_val: f32,
@@ -1374,6 +1461,7 @@ fn colorize_sampled(
   var zx = zx_val;
   var zy = zy_val;
   var extras = load_pixel_extras(sourceGeometry, sourceMetadata, sourceOrbitGradient, coord, zoomFactor);
+  let trapPayload = textureLoad(sourceTrapPayload, coord, 0);
   var analytic = analyticTag;
   if (interp.kind == 1) {
     it = interp.iter;
@@ -1384,7 +1472,7 @@ fn colorize_sampled(
     analytic = false;
   }
   return colorize_pixel(
-    coord, texSize, it, zx, zy, extras,
+    coord, texSize, it, zx, zy, trapPayload, extras,
     uv_screen, uv_neutral, analytic
   );
 }
@@ -1489,7 +1577,9 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   liveAnalyticTag = liveAnalyticTag || parameters.reachDebug > 0.5;
 
   let liveEscaped = live_iter > 0.0 && (live_zx * live_zx + live_zy * live_zy) >= parameters.mu;
-  let liveHasNearestData = liveEscaped && liveStep > 0.0;
+  let liveInterior = live_iter == 0.0;
+  let liveHasNearestData = (liveEscaped
+    || (parameters.orbitTrapIncludeInterior > 0.5 && liveInterior)) && liveStep > 0.0;
 
   // ── Sample frozen texture ──
   // The frozen texture is only usable when it is aligned with the live texture
@@ -1555,6 +1645,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       geometryTex,
       metadataTex,
       orbitGradientTex,
+      trapPayloadTex,
       liveCoord,
       texSize,
       live_iter,
@@ -1587,6 +1678,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       frozenGeometryTex,
       frozenMetadataTex,
       frozenOrbitGradientTex,
+      frozenTrapPayloadTex,
       frozenCoord,
       texSize,
       frozen_iter,
@@ -1622,7 +1714,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
       || liveInterp.step * max(lzf, 1e-30) <= frozenInterp.step * max(zf, 1e-30));
   if (selectLiveInterp) {
     let liveColor = colorize_sampled(
-      geometryTex, metadataTex, orbitGradientTex, liveCoord, texSize,
+      geometryTex, metadataTex, orbitGradientTex, trapPayloadTex, liveCoord, texSize,
       live_iter, live_zx, live_zy, liveInterp,
       uv_screen, uv_neutral, lzf, liveAnalyticTag
     );
@@ -1630,7 +1722,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   }
   if (frozenInterpHasData) {
     let frozenColor = colorize_sampled(
-      frozenGeometryTex, frozenMetadataTex, frozenOrbitGradientTex, frozenCoord, texSize,
+      frozenGeometryTex, frozenMetadataTex, frozenOrbitGradientTex, frozenTrapPayloadTex, frozenCoord, texSize,
       frozen_iter, frozen_zx, frozen_zy, frozenInterp,
       uv_screen, uv_neutral, zf, false
     );

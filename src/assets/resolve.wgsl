@@ -14,11 +14,12 @@ struct ResolveUniforms {
   mu: f32,
   aspect: f32,
   angle: f32,
-  _padding0: f32,
+  trapLayerBase: f32, // -1 when no true-orbit payload is allocated
 };
 
 @group(0) @binding(0) var<uniform> uni: ResolveUniforms;
 @group(0) @binding(1) var rawTex: texture_2d_array<f32>;
+@group(0) @binding(2) var trapOut: texture_storage_2d<rgba32float, write>;
 
 struct VSOut {
   @builtin(position) position: vec4<f32>,
@@ -57,6 +58,28 @@ fn finite_scalar(value: f32) -> bool {
 
 fn load_layer(coord: vec2<i32>, layer: i32) -> f32 {
   return textureLoad(rawTex, coord, layer, 0).r;
+}
+
+fn invalid_trap_payload() -> vec4<f32> {
+  return vec4<f32>(1e30, 0.0, 0.0, 0.0);
+}
+
+fn load_trap_payload(coord: vec2<i32>) -> vec4<f32> {
+  if (uni.trapLayerBase < 0.0) { return invalid_trap_payload(); }
+  let base = i32(uni.trapLayerBase);
+  let distance = load_layer(coord, base);
+  let valid = distance == distance && distance < 1e29;
+  return select(
+    invalid_trap_payload(),
+    vec4<f32>(distance, load_layer(coord, base + 1), load_layer(coord, base + 2), 1.0),
+    valid,
+  );
+}
+
+fn store_trap_payload(coord: vec2<i32>, payload: vec4<f32>) {
+  if (uni.trapLayerBase >= 0.0) {
+    textureStore(trapOut, coord, payload);
+  }
 }
 
 fn quantize_unit(value: f32) -> u32 {
@@ -144,7 +167,7 @@ fn is_finished(coord: vec2<i32>) -> bool {
   return dot(z, z) >= uni.mu;
 }
 
-fn load_finished(coord: vec2<i32>, step: u32) -> FragOut {
+fn load_finished(coord: vec2<i32>, outputCoord: vec2<i32>, step: u32) -> FragOut {
   var out: FragOut;
   out.iter = load_layer(coord, 0);
   out.zx = load_layer(coord, 2);
@@ -156,10 +179,11 @@ fn load_finished(coord: vec2<i32>, step: u32) -> FragOut {
   let stripe = select(0.0, decode_terminal_stripe(terminalMetrics), escaped);
   let coherence = select(0.0, decode_terminal_coherence(terminalMetrics), escaped);
   out.metadata = pack_metadata(step, stripe, coherence);
+  store_trap_payload(outputCoord, load_trap_payload(coord));
   return out;
 }
 
-fn no_data() -> FragOut {
+fn no_data(coord: vec2<i32>) -> FragOut {
   var out: FragOut;
   out.iter = -1.0;
   out.zx = 0.0;
@@ -167,27 +191,28 @@ fn no_data() -> FragOut {
   out.geometry = vec4<f32>(0.0);
   out.metadata = 0u;
   out.orbitGradient = vec4<f32>(0.0);
+  store_trap_payload(coord, invalid_trap_payload());
   return out;
 }
 
 @fragment
 fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
-  if (!is_inside_rotated_screen(uv * 2.0 - vec2<f32>(1.0))) {
-    return no_data();
-  }
   let dims = vec2<u32>(textureDimensions(rawTex));
   let x = u32(clamp(uv.x * f32(dims.x), 0.0, f32(dims.x - 1u)));
   let y = u32(clamp((1.0 - uv.y) * f32(dims.y), 0.0, f32(dims.y - 1u)));
   let coord = vec2<i32>(i32(x), i32(y));
+  if (!is_inside_rotated_screen(uv * 2.0 - vec2<f32>(1.0))) {
+    return no_data(coord);
+  }
 
   if (is_finished(coord)) {
-    return load_finished(coord, 1u);
+    return load_finished(coord, coord, 1u);
   }
 
   let logMu = log(max(uni.mu, 1.0001));
   var step = 2u;
   for (var level = 0u; level < 15u; level = level + 1u) {
-    if (step >= dims.x || step >= dims.y) { return no_data(); }
+    if (step >= dims.x || step >= dims.y) { return no_data(coord); }
     let stepI = i32(step);
     let base = vec2<i32>(i32(x) - i32(x) % stepI, i32(y) - i32(y) % stepI);
     let fraction = vec2<f32>(f32(i32(x) % stepI), f32(i32(y) % stepI)) / f32(stepI);
@@ -215,6 +240,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     var coherenceSum = 0.0;
     var bestInsideWeight = -1.0;
     var bestInsideCoord = vec2<i32>(0);
+    var bestEscapedWeight = -1.0;
+    var bestEscapedCoord = vec2<i32>(0);
     var firstFinishedCoord = vec2<i32>(0);
     var hasFinished = false;
 
@@ -244,6 +271,10 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       if (baseIter < 0.0) { baseIter = iter; }
       escapedCount = escapedCount + 1u;
       escapedWeight = escapedWeight + weight;
+      if (weight > bestEscapedWeight) {
+        bestEscapedWeight = weight;
+        bestEscapedCoord = candidate;
+      }
       nuSum = nuSum + weight * ((iter - baseIter) + smooth_frac(dot(z, z), logMu));
       geometrySum = geometrySum + weight * load_terminal_geometry(candidate);
       orbitGradientSum = orbitGradientSum + weight * load_terminal_orbit_gradient(candidate);
@@ -254,7 +285,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     }
 
     if (escapedCount + insideCount >= 3u) {
-      if (insideWeight > escapedWeight) { return load_finished(bestInsideCoord, step); }
+      if (insideWeight > escapedWeight) { return load_finished(bestInsideCoord, coord, step); }
       if (escapedWeight > 1e-6) {
         let inverseWeight = 1.0 / escapedWeight;
         let relativeNu = nuSum * inverseWeight;
@@ -285,11 +316,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
           vec4<f32>(-64.0),
           vec4<f32>(64.0),
         );
+        store_trap_payload(coord, load_trap_payload(bestEscapedCoord));
         return out;
       }
-      if (hasFinished) { return load_finished(firstFinishedCoord, step); }
+      if (hasFinished) { return load_finished(firstFinishedCoord, coord, step); }
     }
     step = step * 2u;
   }
-  return no_data();
+  return no_data(coord);
 }

@@ -7,6 +7,7 @@ import {
   normalizeTextureMappingFromLegacy,
   type TextureMappingConfig
 } from '../TextureMapping.ts';
+import {normalizeOrbitTrapFromLegacy, type OrbitTrapConfig} from '../OrbitTrap.ts';
 import {normalizeAnimationConfig, type AnimationConfig} from '../AnimationConfig.ts';
 import {log2FromDecimalString} from '../floatexp.ts';
 import type {KeyboardNavigationInput} from '../types/MandelbrotExposed.ts';
@@ -119,6 +120,7 @@ const props = withDefaults(defineProps<{
   gradeContrast?: number,
   gradeSaturation?: number,
   orbitTrapStrength?: number,
+  orbitTrap?: OrbitTrapConfig,
   phaseColoringStrength?: number,
   stripeFrequency?: number,
   textureMapping?: TextureMappingConfig,
@@ -189,6 +191,7 @@ const props = withDefaults(defineProps<{
         gradeContrast: 1.18,
         gradeSaturation: 1.12,
         orbitTrapStrength: 0,
+        orbitTrap: undefined,
         phaseColoringStrength: 0,
         stripeFrequency: 8,
         textureMapping: () => normalizeTextureMappingFromLegacy({ textureMappingMode: 0 }),
@@ -302,6 +305,7 @@ async function draw() {
         gradeContrast: props.gradeContrast,
         gradeSaturation: props.gradeSaturation,
         orbitTrapStrength: props.orbitTrapStrength,
+        orbitTrap: normalizeOrbitTrapFromLegacy(props),
         phaseColoringStrength: props.phaseColoringStrength,
         stripeFrequency: props.stripeFrequency,
         textureMapping: normalizeTextureMappingFromLegacy(props),
@@ -412,6 +416,7 @@ async function initWebGPU() {
     gradeContrast: props.gradeContrast,
     gradeSaturation: props.gradeSaturation,
     orbitTrapStrength: props.orbitTrapStrength,
+    orbitTrap: normalizeOrbitTrapFromLegacy(props),
     phaseColoringStrength: props.phaseColoringStrength,
     stripeFrequency: props.stripeFrequency,
     textureMapping: normalizeTextureMappingFromLegacy(props),

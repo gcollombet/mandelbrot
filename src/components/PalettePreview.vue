@@ -15,6 +15,7 @@ import {
   DISPLAY_VALUE_LAYERS,
   packDisplayMetadata,
 } from '../displayGeometry';
+import {normalizeOrbitTrapFromLegacy, orbitTrapColorUniformValues, type OrbitTrapConfig} from '../OrbitTrap';
 
 // ── Float32 → Float16 (copied from Engine.ts) ──
 const _f32 = new Float32Array(1);
@@ -45,7 +46,7 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 }
 
 const PREVIEW_MU = 1000000;
-const COLOR_UNIFORM_FLOAT_COUNT = 72;
+const COLOR_UNIFORM_FLOAT_COUNT = 96;
 /** Number of synthetic iterations to display. */
 const ITER_COUNT = 100;
 /**
@@ -78,6 +79,7 @@ const props = defineProps<{
   gradeContrast?: number;
   gradeSaturation?: number;
   orbitTrapStrength?: number;
+  orbitTrap?: OrbitTrapConfig;
   phaseColoringStrength?: number;
   textureMapping?: TextureMappingConfig;
 }>();
@@ -113,6 +115,8 @@ let syntheticMetadataTexture: GPUTexture | null = null;
 let syntheticMetadataView: GPUTextureView | null = null;
 let syntheticOrbitGradientTexture: GPUTexture | null = null;
 let syntheticOrbitGradientView: GPUTextureView | null = null;
+let syntheticTrapPayloadTexture: GPUTexture | null = null;
+let syntheticTrapPayloadView: GPUTextureView | null = null;
 let ctx: GPUCanvasContext | null = null;
 let format: GPUTextureFormat = 'bgra8unorm';
 // sRGB view format so the GPU applies linear→sRGB on write — matching the real
@@ -316,6 +320,7 @@ function render() {
 function rebuildBindGroup() {
   if (!device || !bindGroupLayout || !uniformBuffer || !syntheticValuesView
       || !syntheticGeometryView || !syntheticMetadataView || !syntheticOrbitGradientView
+      || !syntheticTrapPayloadView
       || !tileTextureGpu || !skyboxTextureGpu || !webcamTextureGpu
       || !paletteTextureView || !paletteSampler || !skyboxSampler
       || !aaTargetTextureGpu) return;
@@ -341,6 +346,10 @@ function rebuildBindGroup() {
       { binding: 14, resource: syntheticValuesView },
       { binding: 15, resource: syntheticOrbitGradientView },
       { binding: 16, resource: syntheticOrbitGradientView },
+      // The preview has no progressive orbit evaluator. Orbit modes therefore
+      // bind an explicitly invalid payload instead of inventing a fake hit.
+      { binding: 17, resource: syntheticTrapPayloadView },
+      { binding: 18, resource: syntheticTrapPayloadView },
     ],
     label: 'PalettePreview BindGroup',
   });
@@ -416,6 +425,7 @@ async function init() {
   const previewLightAngle = PREVIEW_LIGHT_ANGLE;
   const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
   const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
+  const orbitTrap = normalizeOrbitTrapFromLegacy(props);
   const uniforms = new Float32Array([
     ITER_COUNT * 2, // palettePeriod
     0,            // paletteOffset
@@ -450,7 +460,7 @@ async function init() {
     0, // paletteMirror
     0, // debugShading
     0, // heightPaletteShift
-    props.orbitTrapStrength ?? 0, // orbitTrapStrength
+    orbitTrap.strength, // legacy-compatible orbitTrapStrength
     props.phaseColoringStrength ?? 0, // phaseColoringStrength
     textureMappingVariableId(textureMapping.xVariable), // textureMappingXVariable
     textureMappingVariableId(textureMapping.yVariable), // textureMappingYVariable
@@ -489,6 +499,8 @@ async function init() {
     props.protrusionSharpness ?? 2, // protrusionSharpness
     props.protrusionGeometryMix ?? 0, // protrusionGeometryMix
     props.protrusionPeriod ?? 1, // protrusionPeriod
+    ...orbitTrapColorUniformValues(orbitTrap),
+    0, 0, 0,
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -512,6 +524,8 @@ async function init() {
       { binding: 14, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
       { binding: 15, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 17, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 18, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
     ],
     label: 'PalettePreview BindGroupLayout',
   });
@@ -555,6 +569,16 @@ function applySize() {
   currentH = h;
   canvas.width = w;
   canvas.height = h;
+
+  if (!syntheticTrapPayloadTexture) {
+    syntheticTrapPayloadTexture = device.createTexture({
+      size: { width: 1, height: 1 },
+      format: 'rgba32float',
+      usage: GPUTextureUsage.TEXTURE_BINDING,
+      label: 'PalettePreview InvalidTrapPayload',
+    });
+    syntheticTrapPayloadView = syntheticTrapPayloadTexture.createView();
+  }
 
   // Synthetic typed display set at the real size.
   const syntheticData = buildSyntheticData(w, h, PREVIEW_MU);
@@ -642,12 +666,13 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.phaseColoringStrength, () => props.textureMapping],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.orbitTrap, () => props.phaseColoringStrength, () => props.textureMapping],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = PREVIEW_LIGHT_ANGLE;
     const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
     const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
+    const orbitTrap = normalizeOrbitTrapFromLegacy(props);
     const patch = new Float32Array([
       props.tessellationLevel || PREVIEW_TESSELLATION_LEVEL,
       props.displacementAmount ?? 0,
@@ -669,7 +694,7 @@ watch(
       0,
       0,
       0,
-      props.orbitTrapStrength ?? 0,
+      orbitTrap.strength,
       props.phaseColoringStrength ?? 0,
       textureMappingVariableId(textureMapping.xVariable),
       textureMappingVariableId(textureMapping.yVariable),
@@ -688,6 +713,10 @@ watch(
       props.protrusionSharpness ?? 2,
       props.protrusionGeometryMix ?? 0,
       props.protrusionPeriod ?? 1,
+    ]).buffer as ArrayBuffer);
+    device.queue.writeBuffer(uniformBuffer, 72 * 4, new Float32Array([
+      ...orbitTrapColorUniformValues(orbitTrap),
+      0, 0, 0,
     ]).buffer as ArrayBuffer);
     render();
   },

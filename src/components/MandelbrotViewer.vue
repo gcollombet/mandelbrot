@@ -16,6 +16,7 @@ import type {PresetRecord} from '../presetStore';
 import {syncActiveLibrary} from '../activeLibrarySync';
 import {log10FromDecimalString} from '../floatexp';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
+import {cloneOrbitTrap, DEFAULT_ORBIT_TRAP, normalizeOrbitTrapFromLegacy} from '../OrbitTrap';
 import {getLatestRemotePreset} from '../remoteCatalog';
 import type {IterationData} from '../CursorCoordinate';
 import {computePalettePhase} from '../CursorCoordinate';
@@ -385,6 +386,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   gradeContrast: 1.18,
   gradeSaturation: 1.12,
   orbitTrapStrength: 0,
+  orbitTrap: cloneOrbitTrap(DEFAULT_ORBIT_TRAP),
   phaseColoringStrength: 0,
   stripeFrequency: 8,
   textureName: 'Gold',
@@ -402,6 +404,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   params.skyboxName ??= localStorage.getItem(SKYBOX_SELECTED_KEY) ?? 'Window';
   params.animation = normalizeAnimationConfig(params.animation, params.animationSpeed);
   params.textureMapping = normalizeTextureMappingFromLegacy(params);
+  params.orbitTrap = normalizeOrbitTrapFromLegacy(params);
   params.colorStops = normalizeColorStops(Array.isArray(params.colorStops) ? params.colorStops : DEFAULT_MANDELBROT_PARAMS.colorStops);
   stripExplorationStateFields(params);
   const stored = params as unknown as Record<string, unknown>;
@@ -591,6 +594,8 @@ onMounted(() => {
             if (!userHasNavigated) {
               const saved = structuredClone(record.value);
               stripExplorationStateFields(saved);
+              saved.orbitTrap = normalizeOrbitTrapFromLegacy(saved);
+              saved.orbitTrapStrength = saved.orbitTrap.strength;
               mandelbrotParams.value = preserveSessionPerformanceFields(saved, mandelbrotParams.value);
             }
           }
@@ -1493,7 +1498,8 @@ function tickTravelAnimation() {
     mandelbrotParams.value.varnishStrength = target.varnishStrength ?? 0;
     mandelbrotParams.value.gradeContrast = target.gradeContrast ?? 1.18;
     mandelbrotParams.value.gradeSaturation = target.gradeSaturation ?? 1.12;
-    mandelbrotParams.value.orbitTrapStrength = target.orbitTrapStrength ?? 0;
+    mandelbrotParams.value.orbitTrap = normalizeOrbitTrapFromLegacy(target);
+    mandelbrotParams.value.orbitTrapStrength = mandelbrotParams.value.orbitTrap.strength;
     mandelbrotParams.value.phaseColoringStrength = target.phaseColoringStrength ?? 0;
     mandelbrotParams.value.heightPaletteShift = target.heightPaletteShift ?? 0;
     mandelbrotParams.value.palettePeriod = target.palettePeriod ?? 256;
@@ -1707,6 +1713,7 @@ function startTravelToPreset(preset: PresetRecord) {
       :gradeContrast="mandelbrotParams.gradeContrast"
       :gradeSaturation="mandelbrotParams.gradeSaturation"
       :orbitTrapStrength="mandelbrotParams.orbitTrapStrength"
+      :orbitTrap="mandelbrotParams.orbitTrap"
       :phaseColoringStrength="mandelbrotParams.phaseColoringStrength"
       :stripeFrequency="mandelbrotParams.stripeFrequency"
       :textureMapping="mandelbrotParams.textureMapping"

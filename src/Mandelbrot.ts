@@ -1,6 +1,7 @@
 import type {ColorStop} from "./ColorStop.ts";
 import type {TextureMappingConfig} from "./TextureMapping.ts";
 import type {AnimationConfig} from "./AnimationConfig.ts";
+import type {OrbitTrapConfig} from "./OrbitTrap.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
 export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet' | 'mobius' | 'auto';
@@ -55,6 +56,7 @@ export interface MandelbrotParams {
     gradeContrast?: number;
     gradeSaturation?: number;
     orbitTrapStrength?: number;
+    orbitTrap?: OrbitTrapConfig;
     phaseColoringStrength?: number;
     textureName?: string;
     textureGuid?: string;

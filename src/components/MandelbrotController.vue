@@ -8,6 +8,7 @@ import type {ColorStop} from "../ColorStop.ts";
 import type {Engine} from '../Engine.ts';
 import type {TextureMappingConfig} from '../TextureMapping.ts';
 import type {AnimationConfig} from '../AnimationConfig.ts';
+import type {OrbitTrapConfig} from '../OrbitTrap.ts';
 
 const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
@@ -52,6 +53,7 @@ const props = defineProps<{
   gradeContrast?: number,
   gradeSaturation?: number,
   orbitTrapStrength?: number,
+  orbitTrap?: OrbitTrapConfig,
   phaseColoringStrength?: number,
   stripeFrequency?: number,
   textureMapping?: TextureMappingConfig,
@@ -449,6 +451,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :gradeContrast="props.gradeContrast"
       :gradeSaturation="props.gradeSaturation"
       :orbitTrapStrength="props.orbitTrapStrength"
+      :orbitTrap="props.orbitTrap"
       :phaseColoringStrength="props.phaseColoringStrength"
       :stripeFrequency="props.stripeFrequency"
       :textureMapping="props.textureMapping"

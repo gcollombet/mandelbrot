@@ -20,6 +20,9 @@ struct MergeUniforms {
 @group(0) @binding(5) var frozenGeometry: texture_2d<f32>;
 @group(0) @binding(6) var frozenMetadata: texture_2d<u32>;
 @group(0) @binding(8) var frozenOrbitGradient: texture_2d<f32>;
+@group(0) @binding(9) var liveTrapPayload: texture_2d<f32>;
+@group(0) @binding(10) var frozenTrapPayload: texture_2d<f32>;
+@group(0) @binding(11) var trapOut: texture_storage_2d<rgba32float, write>;
 
 struct VSOut {
   @builtin(position) position: vec4<f32>,
@@ -56,6 +59,7 @@ struct Candidate {
   geometry: vec4<f32>,
   metadata: u32,
   orbitGradient: vec4<f32>,
+  trapPayload: vec4<f32>,
   effectiveStep: f32,
 };
 
@@ -101,6 +105,7 @@ fn empty_candidate() -> Candidate {
   candidate.geometry = vec4<f32>(0.0);
   candidate.metadata = 0u;
   candidate.orbitGradient = vec4<f32>(0.0);
+  candidate.trapPayload = vec4<f32>(1e30, 0.0, 0.0, 0.0);
   candidate.effectiveStep = 1e30;
   return candidate;
 }
@@ -110,6 +115,7 @@ fn load_candidate(
   geometryTex: texture_2d<f32>,
   metadataTex: texture_2d<u32>,
   orbitGradientTex: texture_2d<f32>,
+  trapPayloadTex: texture_2d<f32>,
   coord: vec2<i32>,
   zoomFactor: f32
 ) -> Candidate {
@@ -129,12 +135,13 @@ fn load_candidate(
     vec4<f32>(-64.0),
     vec4<f32>(64.0),
   );
+  candidate.trapPayload = textureLoad(trapPayloadTex, coord, 0);
   candidate.metadata = metadata_with_step(metadata, effectiveStep);
   candidate.effectiveStep = effectiveStep;
   return candidate;
 }
 
-fn emit(candidate: Candidate) -> FragOut {
+fn emit(candidate: Candidate, coord: vec2<i32>) -> FragOut {
   var out: FragOut;
   out.iter = candidate.iter;
   out.zx = candidate.zx;
@@ -142,6 +149,7 @@ fn emit(candidate: Candidate) -> FragOut {
   out.geometry = candidate.geometry;
   out.metadata = candidate.metadata;
   out.orbitGradient = candidate.orbitGradient;
+  textureStore(trapOut, coord, candidate.trapPayload);
   return out;
 }
 
@@ -149,6 +157,10 @@ fn emit(candidate: Candidate) -> FragOut {
 fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let dims = vec2<i32>(textureDimensions(liveValues));
   let dimsF = vec2<f32>(dims);
+  let outputCoord = vec2<i32>(
+    i32(clamp(uv.x * dimsF.x, 0.0, dimsF.x - 1.0)),
+    i32(clamp((1.0 - uv.y) * dimsF.y, 0.0, dimsF.y - 1.0)),
+  );
   let neutralExtent = sqrt(uni.aspect * uni.aspect + 1.0);
 
   let liveUv = (uv - vec2<f32>(0.5)) / uni.liveZoomFactor + vec2<f32>(0.5);
@@ -163,7 +175,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       i32(clamp(liveUv.x * dimsF.x, 0.0, dimsF.x - 1.0)),
       i32(clamp((1.0 - liveUv.y) * dimsF.y, 0.0, dimsF.y - 1.0))
     );
-    live = load_candidate(liveValues, liveGeometry, liveMetadata, liveOrbitGradient, coord, uni.liveZoomFactor);
+    live = load_candidate(liveValues, liveGeometry, liveMetadata, liveOrbitGradient, liveTrapPayload, coord, uni.liveZoomFactor);
   }
 
   let frozenUv = (uv - vec2<f32>(0.5)) / uni.zoomFactor + vec2<f32>(0.5)
@@ -179,12 +191,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
       i32(clamp(frozenUv.x * dimsF.x, 0.0, dimsF.x - 1.0)),
       i32(clamp((1.0 - frozenUv.y) * dimsF.y, 0.0, dimsF.y - 1.0))
     );
-    frozen = load_candidate(frozenValues, frozenGeometry, frozenMetadata, frozenOrbitGradient, coord, uni.zoomFactor);
+    frozen = load_candidate(frozenValues, frozenGeometry, frozenMetadata, frozenOrbitGradient, frozenTrapPayload, coord, uni.zoomFactor);
   }
 
   if (live.valid && (!frozen.valid || live.effectiveStep <= frozen.effectiveStep)) {
-    return emit(live);
+    return emit(live, outputCoord);
   }
-  if (frozen.valid) { return emit(frozen); }
-  return emit(empty_candidate());
+  if (frozen.valid) { return emit(frozen, outputCoord); }
+  return emit(empty_candidate(), outputCoord);
 }

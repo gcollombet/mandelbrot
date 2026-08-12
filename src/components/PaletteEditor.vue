@@ -6,6 +6,7 @@ import type { EffectFieldName } from '../effectFieldConfig';
 import { DEFAULT_VALUES, EFFECT_FIELD_CONFIG, UI_GROUPS } from '../effectFieldConfig';
 import type {InterpolationMode} from "../Mandelbrot.ts";
 import type {TextureMappingConfig} from "../TextureMapping.ts";
+import type {OrbitTrapConfig} from '../OrbitTrap.ts';
 import {
   applyStopPresetValues,
   deleteStopPresetEntry,
@@ -40,6 +41,7 @@ const props = withDefaults(defineProps<{
   gradeContrast?: number;
   gradeSaturation?: number;
   orbitTrapStrength?: number;
+  orbitTrap?: OrbitTrapConfig;
   phaseColoringStrength?: number;
   textureMapping?: TextureMappingConfig;
   applyToAll?: boolean;
@@ -62,6 +64,7 @@ const props = withDefaults(defineProps<{
   gradeContrast: 1.18,
   gradeSaturation: 1.12,
   orbitTrapStrength: 0,
+  orbitTrap: undefined,
   phaseColoringStrength: 0,
   textureMapping: undefined,
   applyToAll: false,

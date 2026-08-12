@@ -140,11 +140,12 @@ describe('simplified progressive renderer contract', () => {
     expect(engineSource).toContain('render() invalidates at the actual clear boundary instead');
   });
 
-  it('keeps resolve presentation-only and begins incomplete support at step 2', () => {
+  it('keeps resolve free of orbit iteration and begins incomplete support at step 2', () => {
     expect(resolveShader).toContain('var step = 2u;');
-    expect(resolveShader).toContain('fn no_data() -> FragOut');
+    expect(resolveShader).toContain('fn no_data(coord: vec2<i32>) -> FragOut');
     expect(resolveShader).toContain('out.iter = -1.0;');
-    expect(resolveShader).not.toContain('textureStore');
+    expect(resolveShader).toContain('textureStore(trapOut, coord, payload);');
+    expect(resolveShader).not.toContain('mandelbrot_compute');
     expect(resolveShader).not.toContain('try_taylor_candidate');
     expect(resolveShader).not.toContain('TAYLOR_REJECT');
   });
