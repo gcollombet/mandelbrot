@@ -45,6 +45,7 @@ const props = defineProps<{
   reliefDepth?: number,
   protrusionPhase?: number,
   protrusionSharpness?: number,
+  protrusionStrength?: number,
   protrusionGeometryMix?: number,
   protrusionPeriod?: number,
   localShadowStrength?: number,
@@ -443,6 +444,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :reliefDepth="props.reliefDepth"
       :protrusionPhase="props.protrusionPhase"
       :protrusionSharpness="props.protrusionSharpness"
+      :protrusionStrength="props.protrusionStrength"
       :protrusionGeometryMix="props.protrusionGeometryMix"
       :protrusionPeriod="props.protrusionPeriod"
       :localShadowStrength="props.localShadowStrength"

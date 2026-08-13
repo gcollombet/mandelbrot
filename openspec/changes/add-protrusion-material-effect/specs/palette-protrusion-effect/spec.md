@@ -19,7 +19,7 @@ The renderer SHALL pack the protrusion amount into the reserved alpha channel of
 - **THEN** relief gain, conductor controls, and protrusion are decoded from the existing row-6 sample
 
 ### Requirement: Stable smooth-escape lobe
-The color shader SHALL derive a smooth non-negative lobe from the fractional smooth-escape phase, SHALL offset it with a global wrapped phase control, SHALL shape it with a bounded positive sharpness control, and SHALL apply protrusion as a strictly positive log-domain multiplier of analytic relief.
+The color shader SHALL derive a smooth non-negative lobe from the fractional smooth-escape phase, SHALL offset it with a global wrapped phase control, SHALL shape it with a bounded positive sharpness control, and SHALL apply protrusion as a strictly positive log-domain multiplier of analytic relief whose departure from neutral can be amplified from `1x` to `4x`.
 
 #### Scenario: Protrusion is disabled
 - **WHEN** the decoded protrusion amount is zero
@@ -37,19 +37,23 @@ The color shader SHALL derive a smooth non-negative lobe from the fractional smo
 - **WHEN** global protrusion sharpness is below or above its default of `2`
 - **THEN** the lobe broadens or concentrates respectively while remaining smooth and non-negative
 
+#### Scenario: Iteration profile is amplified
+- **WHEN** `protrusionStrength` changes from its default `1` up to `4`
+- **THEN** the iteration-profile multiplier's departure from neutral is scaled linearly by that factor without exponentiating the factor or reversing the gradient
+
 ### Requirement: Persisted global shape controls
-The renderer SHALL expose `protrusionPhase`, `protrusionSharpness`, `protrusionGeometryMix`, and `protrusionPeriod` as global surface controls, SHALL persist them in Mandelbrot presets and palette looks, and SHALL use defaults `0`, `2`, `0`, and `1` for legacy data.
+The renderer SHALL expose `protrusionPhase`, `protrusionSharpness`, `protrusionStrength`, `protrusionGeometryMix`, and `protrusionPeriod` as global surface controls, SHALL persist them in Mandelbrot presets and palette looks, and SHALL use defaults `0`, `2`, `1`, `0`, and `1` for legacy data.
 
 #### Scenario: Legacy preset is loaded
 - **WHEN** a preset or palette look omits either global protrusion shape control
-- **THEN** phase resolves to `0`, sharpness to `2`, geometric mix to `0`, and geometric period to `1`
+- **THEN** phase resolves to `0`, sharpness to `2`, iteration strength to `1`, geometric mix to `0`, and geometric period to `1`
 
 #### Scenario: Palette preview is visible
 - **WHEN** any global protrusion shape control changes
 - **THEN** both the main renderer and the live palette preview receive the same values without changing the color-uniform buffer size
 
 ### Requirement: Interpolable geometric height warp
-The renderer SHALL offer a geometric mix in `[0, 1]` between the iteration-phase protrusion profile and a periodic scalar reparameterization of canonical distance height, with a positive bounded height period.
+The renderer SHALL offer a geometric control in `[0, 1]` that mixes between the amplified iteration-phase protrusion profile and a periodic scalar reparameterization of canonical distance height. The height period SHALL remain positive and bounded.
 
 #### Scenario: Geometric mix is zero
 - **WHEN** `protrusionGeometryMix` is omitted or zero

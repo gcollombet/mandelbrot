@@ -610,6 +610,7 @@ export type RenderOptions = {
     reliefDepth: number,
     protrusionPhase: number,
     protrusionSharpness: number,
+    protrusionStrength: number,
     protrusionGeometryMix: number,
     protrusionPeriod: number,
     localShadowStrength: number,
@@ -5154,10 +5155,11 @@ export class Engine {
             2,                                    // 67: z″ is carried by every production path
             renderOptions.protrusionPhase ?? 0,   // 68: protrusionPhase [0, 1]
             renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
-            renderOptions.protrusionGeometryMix ?? 0, // 70: protrusionGeometryMix [0, 1]
+            renderOptions.protrusionGeometryMix ?? 0, // 70: iteration/geometric profile mix [0, 1]
             renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod [0.1, 16]
             ...orbitTrapColorUniformValues(orbitTrap), // 72..92: structured orbit-trap configuration
-            0, 0, 0,                             // 93..95: alignment / future trap payload fields
+            renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification [1, 4]
+            0, 0,                                // 94..95: alignment / future trap payload fields
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

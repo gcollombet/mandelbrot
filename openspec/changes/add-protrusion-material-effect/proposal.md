@@ -5,8 +5,8 @@ An abandoned interpolation bug produced visually compelling protrusions in the e
 ## What Changes
 
 - Add an optional per-palette-stop `protrusion` control with a strictly neutral default.
-- Add global `protrusionPhase` and `protrusionSharpness` controls to position and concentrate the smooth-escape lobe.
-- Add a global geometric mix and height period to interpolate toward a scalar height-warp profile derived from canonical distance height.
+- Add global `protrusionPhase`, `protrusionSharpness`, and `protrusionStrength` controls to position, concentrate, and amplify the smooth-escape lobe up to `4x`.
+- Add a global geometric mix and height period to optionally interpolate toward a scalar height-warp profile derived from canonical distance height.
 - Modulate the cached analytic relief in the color shader with the parameterized lobe tied to the fractional smooth-escape phase.
 - Apply the styled relief consistently to analytic normals, curvature AO, local shadows, ridge accents, and slope-driven iridescence without changing cached height, gradient, antialiasing, texture depth mapping, or fractal iteration.
 - Reuse the reserved alpha channel of palette texture row 6, avoiding a new texture, attachment, or palette fetch.
@@ -26,5 +26,5 @@ None.
 - Palette schema and effect metadata in `src/ColorStop.ts` and `src/effectFieldConfig.ts`.
 - Persisted Mandelbrot/palette look models and global surface controls.
 - Palette texture row-6 packing in `src/Palette.ts`.
-- Color and preview uniform packing, including reuse of all four former tail-padding slots, material parameter decoding, and analytic relief consumers.
+- Color and preview uniform packing, including reuse of reserved uniform slot 93, material parameter decoding, and analytic relief consumers.
 - Palette/effect tests and static shader validation; no Rust/WASM or compute-orbit changes.

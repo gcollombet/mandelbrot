@@ -2291,8 +2291,8 @@
                 else if (de & 2 && ve.class !== Ee.class && a(ce, "class", null, Ee.class, ae), de & 4 && a(ce, "style", ve.style, Ee.style, ae), de & 8) {
                     const H = B.dynamicProps;
                     for(let Ye = 0; Ye < H.length; Ye++){
-                        const Ve = H[Ye], At = ve[Ve], ct = Ee[Ve];
-                        (ct !== At || Ve === "value") && a(ce, Ve, At, ct, ae, q);
+                        const Ue = H[Ye], At = ve[Ue], ct = Ee[Ue];
+                        (ct !== At || Ue === "value") && a(ce, Ue, At, ct, ae, q);
                     }
                 }
                 de & 1 && E.children !== B.children && d(ce, B.children);
@@ -2351,14 +2351,14 @@
                             return;
                         }
                     }
-                    let Ve = ve, At;
+                    let Ue = ve, At;
                     Ws(E, !1), ve ? (ve.el = Ye.el, Ge(E, ve, ue)) : ve = Ye, Ee && Bd(Ee), (At = ve.props && ve.props.onVnodeBeforeUpdate) && Ci(At, H, ve, Ye), Ws(E, !0);
                     const ct = _v(E), dt = E.subTree;
-                    E.subTree = ct, R(dt, ct, _(dt.el), St(dt), E, ae, Y), ve.el = ct.el, Ve === null && XE(E, ct.el), ke && sr(ke, ae), (At = ve.props && ve.props.onVnodeUpdated) && sr(()=>Ci(At, H, ve, Ye), ae);
+                    E.subTree = ct, R(dt, ct, _(dt.el), St(dt), E, ae, Y), ve.el = ct.el, Ue === null && XE(E, ct.el), ke && sr(ke, ae), (At = ve.props && ve.props.onVnodeUpdated) && sr(()=>Ci(At, H, ve, Ye), ae);
                 } else {
                     let ve;
-                    const { el: Ee, props: ke } = B, { bm: H, m: Ye, parent: Ve, root: At, type: ct } = E, dt = ml(B);
-                    Ws(E, !1), H && Bd(H), !dt && (ve = ke && ke.onVnodeBeforeMount) && Ci(ve, Ve, B), Ws(E, !0);
+                    const { el: Ee, props: ke } = B, { bm: H, m: Ye, parent: Ue, root: At, type: ct } = E, dt = ml(B);
+                    Ws(E, !1), H && Bd(H), !dt && (ve = ke && ke.onVnodeBeforeMount) && Ci(ve, Ue, B), Ws(E, !0);
                     {
                         At.ce && At.ce._hasShadowRoot() && At.ce._injectChildStyle(ct);
                         const jt = E.subTree = _v(E);
@@ -2366,9 +2366,9 @@
                     }
                     if (Ye && sr(Ye, ae), !dt && (ve = ke && ke.onVnodeMounted)) {
                         const jt = B;
-                        sr(()=>Ci(ve, Ve, jt), ae);
+                        sr(()=>Ci(ve, Ue, jt), ae);
                     }
-                    (B.shapeFlag & 256 || Ve && ml(Ve.vnode) && Ve.vnode.shapeFlag & 256) && E.a && sr(E.a, ae), E.isMounted = !0, B = q = re = null;
+                    (B.shapeFlag & 256 || Ue && ml(Ue.vnode) && Ue.vnode.shapeFlag & 256) && E.a && sr(E.a, ae), E.isMounted = !0, B = q = re = null;
                 }
             };
             E.scope.on();
@@ -2429,7 +2429,7 @@
                     const Vt = B[ie] = de ? ha(B[ie]) : Ni(B[ie]);
                     Vt.key != null && Ye.set(Vt.key, ie);
                 }
-                let Ve, At = 0;
+                let Ue, At = 0;
                 const ct = Ee - H + 1;
                 let dt = !1, jt = 0;
                 const rn = new Array(ct);
@@ -2442,16 +2442,16 @@
                     }
                     let gt;
                     if (Vt.key != null) gt = Ye.get(Vt.key);
-                    else for(Ve = H; Ve <= Ee; Ve++)if (rn[Ve - H] === 0 && ro(Vt, B[Ve])) {
-                        gt = Ve;
+                    else for(Ue = H; Ue <= Ee; Ue++)if (rn[Ue - H] === 0 && ro(Vt, B[Ue])) {
+                        gt = Ue;
                         break;
                     }
                     gt === void 0 ? je(Vt, ae, Y, !0) : (rn[gt - H] = ie + 1, gt >= jt ? jt = gt : dt = !0, R(Vt, B[gt], q, null, ae, Y, ue, ce, de), At++);
                 }
                 const Dn = dt ? o3(rn) : fl;
-                for(Ve = Dn.length - 1, ie = ct - 1; ie >= 0; ie--){
+                for(Ue = Dn.length - 1, ie = ct - 1; ie >= 0; ie--){
                     const Vt = H + ie, gt = B[Vt], qt = B[Vt + 1], Ht = Vt + 1 < Ae ? qt.el || G2(qt) : re;
-                    rn[ie] === 0 ? R(null, gt, q, Ht, ae, Y, ue, ce, de) : dt && (Ve < 0 || ie !== Dn[Ve] ? Te(gt, q, Ht, 2) : Ve--);
+                    rn[ie] === 0 ? R(null, gt, q, Ht, ae, Y, ue, ce, de) : dt && (Ue < 0 || ie !== Dn[Ue] ? Te(gt, q, Ht, 2) : Ue--);
                 }
             }
         }, Te = (E, B, q, re, ae = null)=>{
@@ -2497,8 +2497,8 @@
                 return;
             }
             const H = Ae & 1 && Ee, Ye = !ml(E);
-            let Ve;
-            if (Ye && (Ve = ue && ue.onVnodeBeforeUnmount) && Ci(Ve, B, E), Ae & 6) Ot(E.component, q, re);
+            let Ue;
+            if (Ye && (Ue = ue && ue.onVnodeBeforeUnmount) && Ci(Ue, B, E), Ae & 6) Ot(E.component, q, re);
             else {
                 if (Ae & 128) {
                     E.suspense.unmount(q, re);
@@ -2506,8 +2506,8 @@
                 }
                 H && Hs(E, null, B, "beforeUnmount"), Ae & 64 ? E.type.remove(E, B, q, be, re) : ie && !ie.hasOnce && (Y !== Ce || ve > 0 && ve & 64) ? lt(ie, B, q, !1, !0) : (Y === Ce && ve & 384 || !ae && Ae & 16) && lt(de, B, q), re && zt(E);
             }
-            (Ye && (Ve = ue && ue.onVnodeUnmounted) || H) && sr(()=>{
-                Ve && Ci(Ve, B, E), H && Hs(E, null, B, "unmounted");
+            (Ye && (Ue = ue && ue.onVnodeUnmounted) || H) && sr(()=>{
+                Ue && Ci(Ue, B, E), H && Hs(E, null, B, "unmounted");
             }, q);
         }, zt = (E)=>{
             const { type: B, el: q, anchor: re, transition: ae } = E;
@@ -8837,7 +8837,7 @@ struct Uniforms {
   orbitTrapStartIteration: f32,
   orbitTrapEndIteration: f32,
   orbitTrapIncludeInterior: f32,
-  _pad93: f32,
+  protrusionStrength: f32,    // iteration-profile effect amplification [1, 4]
   _pad94: f32,
   _pad95: f32,
 };
@@ -9468,7 +9468,9 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
     let protrusionSharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
     let protrusionWave = 0.5 + 0.5 * cos(TWO_PI * fract(v_smooth - protrusionPhase));
     let protrusionLobe = pow(max(protrusionWave, 0.0), protrusionSharpness);
-    let iterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
+    let baseIterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
+    let protrusionStrength = clamp(parameters.protrusionStrength, 1.0, 4.0);
+    let iterationProtrusionGain = 1.0 + protrusionStrength * (baseIterationProtrusionGain - 1.0);
     let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
     let stripeReliefStrength = fx.wStripeRelief * effShading;
     let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
@@ -9500,8 +9502,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
       slope = length(grad);
     }
     // Geometric branch: q(theta + pi) = -q(theta), so q has zero mean over a
-    // period. Multiplying grad(H) by 1 + a*q(H) is therefore the gradient of a
-    // periodic scalar reparameterization of canonical distance height H.
+    // period. The multiplier remains a scalar function of canonical height H.
     let protrusionGeometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);
     var protrusionGain = iterationProtrusionGain;
     if (protrusionGeometryMix > 0.001 && needsFractalGradient) {
@@ -17973,24 +17974,24 @@ ${i}`;
                 n.protrusionGeometryMix ?? 0,
                 n.protrusionPeriod ?? 1,
                 ...bm(r),
-                0,
+                n.protrusionStrength ?? 1,
                 0,
                 0
             ]);
             if (this.device.queue.writeBuffer(this.uniformBufferColor, 0, Ee.buffer), !this.needsMoreFrames()) return;
             const ke = Math.ceil(e.maxIterations);
             this.currentMaxIterations = ke;
-            const H = $n(this.zoomState) && ns(this.zoomState) > 0 ? ns(this.zoomState) : e.scale, Ye = $n(this.zoomState) && ns(this.zoomState) > 0, Ve = e.viewFloatexp, At = Ye ? xd(H) : Ve ? {
-                mantissa: Ve[0],
-                exponent: Ve[1]
+            const H = $n(this.zoomState) && ns(this.zoomState) > 0 ? ns(this.zoomState) : e.scale, Ye = $n(this.zoomState) && ns(this.zoomState) > 0, Ue = e.viewFloatexp, At = Ye ? xd(H) : Ue ? {
+                mantissa: Ue[0],
+                exponent: Ue[1]
             } : e.scaleStr ? wh(e.scaleStr) : xd(H), ct = At.exponent, dt = ct <= dC;
             this.floatExpActive = dt;
-            const jt = Ve ? {
-                mantissa: Ve[2],
-                exponent: Ve[3]
-            } : e.dxStr ? wh(e.dxStr) : xd(e.dx), rn = Ve ? {
-                mantissa: Ve[4],
-                exponent: Ve[5]
+            const jt = Ue ? {
+                mantissa: Ue[2],
+                exponent: Ue[3]
+            } : e.dxStr ? wh(e.dxStr) : xd(e.dx), rn = Ue ? {
+                mantissa: Ue[4],
+                exponent: Ue[5]
             } : e.dyStr ? wh(e.dyStr) : xd(e.dy), Dn = jt.mantissa === 0 ? 0 : Math.fround(jt.mantissa * 2 ** (jt.exponent - ct)), Vt = rn.mantissa === 0 ? 0 : Math.fround(rn.mantissa * 2 ** (rn.exponent - ct)), gt = Ye ? H.toString() : e.scaleStr ?? H.toString();
             this.referenceViewKey || (console.log("[REF] update: reset branch (key empty) | deep", dt, "expScale", ct, "mode", this.approximationMode), this.resetReferenceJob(e, gt, ke)), this.syncReferenceWorkerView(e, gt, ke);
             const qt = Math.max(0, this.referenceAvailableOrbitLen - 1), Ht = Math.min(ke, qt);
@@ -18909,6 +18910,9 @@ ${i}`;
             protrusionSharpness: {
                 default: 2
             },
+            protrusionStrength: {
+                default: 1
+            },
             protrusionGeometryMix: {
                 default: 0
             },
@@ -19048,6 +19052,7 @@ ${i}`;
                     reliefDepth: g.reliefDepth,
                     protrusionPhase: g.protrusionPhase,
                     protrusionSharpness: g.protrusionSharpness,
+                    protrusionStrength: g.protrusionStrength,
                     protrusionGeometryMix: g.protrusionGeometryMix,
                     protrusionPeriod: g.protrusionPeriod,
                     localShadowStrength: g.localShadowStrength,
@@ -19103,6 +19108,7 @@ ${i}`;
                     reliefDepth: g.reliefDepth,
                     protrusionPhase: g.protrusionPhase,
                     protrusionSharpness: g.protrusionSharpness,
+                    protrusionStrength: g.protrusionStrength,
                     protrusionGeometryMix: g.protrusionGeometryMix,
                     protrusionPeriod: g.protrusionPeriod,
                     localShadowStrength: g.localShadowStrength,
@@ -19499,6 +19505,7 @@ ${i}`;
             reliefDepth: {},
             protrusionPhase: {},
             protrusionSharpness: {},
+            protrusionStrength: {},
             protrusionGeometryMix: {},
             protrusionPeriod: {},
             localShadowStrength: {},
@@ -19787,6 +19794,7 @@ ${i}`;
                         reliefDepth: c.reliefDepth,
                         protrusionPhase: c.protrusionPhase,
                         protrusionSharpness: c.protrusionSharpness,
+                        protrusionStrength: c.protrusionStrength,
                         protrusionGeometryMix: c.protrusionGeometryMix,
                         protrusionPeriod: c.protrusionPeriod,
                         localShadowStrength: c.localShadowStrength,
@@ -19831,6 +19839,7 @@ ${i}`;
                         "reliefDepth",
                         "protrusionPhase",
                         "protrusionSharpness",
+                        "protrusionStrength",
                         "protrusionGeometryMix",
                         "protrusionPeriod",
                         "localShadowStrength",
@@ -19863,7 +19872,7 @@ ${i}`;
     }), GD = Cr(UD, [
         [
             "__scopeId",
-            "data-v-7d9588e9"
+            "data-v-23fdf1cf"
         ]
     ]);
     function Sr() {
@@ -20232,7 +20241,7 @@ ${i}`;
     ], cL = {
         key: 2,
         class: "fld-val"
-    }, Ue = dn({
+    }, Ve = dn({
         __name: "DenseField",
         props: {
             modelValue: {},
@@ -22694,7 +22703,7 @@ ${i}`;
         }, ke.prototype.handleEvent = function() {
             throw Error("EventHandler.handleEvent not implemented");
         };
-        var Ve = s.JSON.stringify, At = s.JSON.parse, ct = class {
+        var Ue = s.JSON.stringify, At = s.JSON.parse, ct = class {
             stringify(l) {
                 return s.JSON.stringify(l, void 0);
             }
@@ -22812,7 +22821,7 @@ ${i}`;
                         }
                     }
                 }
-                return Ve(oe);
+                return Ue(oe);
             } catch  {
                 return h;
             }
@@ -23624,7 +23633,7 @@ ${i}`;
                                 var Re = Qn instanceof Map ? Qn : Object.entries(Qn);
                                 for (const [er, Or] of Re){
                                     let Mi = Or;
-                                    o(Or) && (Mi = Ve(Or)), Ft.push(oe + er + "=" + encodeURIComponent(Mi));
+                                    o(Or) && (Mi = Ue(Or)), Ft.push(oe + er + "=" + encodeURIComponent(Mi));
                                 }
                             } catch (er) {
                                 throw Ft.push(oe + "type=" + encodeURIComponent("_badmap")), er;
@@ -23771,7 +23780,7 @@ ${i}`;
             if (typeof l == "string") {
                 var b = {};
                 b.__data__ = l, l = b;
-            } else this.v && (b = {}, b.__data__ = Ve(l), l = b);
+            } else this.v && (b = {}, b.__data__ = Ue(l), l = b);
             h.i.push(new Hr(h.Ya++, l)), h.I == 3 && qo(h);
         }, En.prototype.N = function() {
             this.g.l = null, delete this.j, $o(this.g), delete this.g, En.Z.N.call(this);
@@ -36005,7 +36014,7 @@ Content-Type: ` + u.contentType + `\r
                                     }, [
                                         f("div", CG, j(S.title), 1),
                                         f("div", DG, [
-                                            (C(!0), z(Ce, null, tt(S.fields, (L)=>(C(), ri(ee(Ue), {
+                                            (C(!0), z(Ce, null, tt(S.fields, (L)=>(C(), ri(ee(Ve), {
                                                     key: L,
                                                     label: u[L],
                                                     desc: d[L],
@@ -36511,6 +36520,7 @@ Content-Type: ` + u.contentType + `\r
             reliefDepth: {},
             protrusionPhase: {},
             protrusionSharpness: {},
+            protrusionStrength: {},
             protrusionGeometryMix: {},
             protrusionPeriod: {},
             localShadowStrength: {},
@@ -36635,7 +36645,7 @@ Content-Type: ` + u.contentType + `\r
                 for(let ve = 0; ve < E; ve++){
                     const Ee = ve / Math.max(E - 1, 1);
                     for(let ke = 0; ke < le; ke++){
-                        const H = ve * le + ke, Ye = 1 + ke / Math.max(le - 1, 1) * (jh - 1), Ve = Ye * .3, At = ie * Math.cos(Ve), ct = ie * Math.sin(Ve), dt = 2 * Ee - 1, Dn = 4 + Math.sqrt(Math.max(0, 1 - dt * dt)) * 60;
+                        const H = ve * le + ke, Ye = 1 + ke / Math.max(le - 1, 1) * (jh - 1), Ue = Ye * .3, At = ie * Math.cos(Ue), ct = ie * Math.sin(Ue), dt = 2 * Ee - 1, Dn = 4 + Math.sqrt(Math.max(0, 1 - dt * dt)) * 60;
                         q[0][H] = Ye, q[1][H] = At, q[2][H] = ct, re[H] = Dn + .4 * Math.sin(Ye * .3);
                         const Vt = .5 + .5 * Math.sin(Ye * .2), gt = Ye * .065 + Ee * Math.PI, qt = Math.sin(gt), Ht = Math.abs(qt);
                         Y[H] = UC(1, Vt, Ht);
@@ -36645,8 +36655,8 @@ Content-Type: ` + u.contentType + `\r
                 }
                 const Ae = (ve, Ee, ke)=>ve < 0 || ve >= le || Ee < 0 || Ee >= E ? ke : re[Ee * le + ve];
                 for(let ve = 0; ve < E; ve++)for(let Ee = 0; Ee < le; Ee++){
-                    const ke = ve * le + Ee, H = re[ke], Ye = Ae(Ee - 1, ve, H), Ve = Ae(Ee + 1, ve, H), At = Ae(Ee, ve - 1, H), ct = Ae(Ee, ve + 1, H), dt = ke * 4;
-                    ae[dt] = (Ve - Ye) * .5, ae[dt + 1] = (At - ct) * .5, ae[dt + 2] = Ve + Ye + At + ct - 4 * H, ae[dt + 3] = H;
+                    const ke = ve * le + Ee, H = re[ke], Ye = Ae(Ee - 1, ve, H), Ue = Ae(Ee + 1, ve, H), At = Ae(Ee, ve - 1, H), ct = Ae(Ee, ve + 1, H), dt = ke * 4;
+                    ae[dt] = (Ue - Ye) * .5, ae[dt + 1] = (At - ct) * .5, ae[dt + 2] = Ue + Ye + At + ct - 4 * H, ae[dt + 3] = H;
                 }
                 return {
                     values: q,
@@ -36899,7 +36909,7 @@ Content-Type: ` + u.contentType + `\r
                     s.protrusionGeometryMix ?? 0,
                     s.protrusionPeriod ?? 1,
                     ...bm(Ae),
-                    0,
+                    s.protrusionStrength ?? 1,
                     0,
                     0
                 ]);
@@ -37183,6 +37193,7 @@ Content-Type: ` + u.contentType + `\r
                 ()=>s.reliefDepth,
                 ()=>s.protrusionPhase,
                 ()=>s.protrusionSharpness,
+                ()=>s.protrusionStrength,
                 ()=>s.protrusionGeometryMix,
                 ()=>s.protrusionPeriod,
                 ()=>s.localShadowStrength,
@@ -37239,7 +37250,7 @@ Content-Type: ` + u.contentType + `\r
                     s.protrusionPeriod ?? 1
                 ]).buffer), u.queue.writeBuffer(y, 288, new Float32Array([
                     ...bm(q),
-                    0,
+                    s.protrusionStrength ?? 1,
                     0,
                     0
                 ]).buffer), lt();
@@ -37284,7 +37295,7 @@ Content-Type: ` + u.contentType + `\r
     }), l6 = Cr(o6, [
         [
             "__scopeId",
-            "data-v-01683a39"
+            "data-v-2a92e7d2"
         ]
     ]), c6 = dn({
         __name: "GlissiereHandle",
@@ -37556,7 +37567,7 @@ Content-Type: ` + u.contentType + `\r
                     }, {
                         default: Kt(()=>[
                                 f("div", f6, [
-                                    fe(ee(Ue), {
+                                    fe(ee(Ve), {
                                         label: "Vitesse globale",
                                         min: 0,
                                         max: 5,
@@ -37616,7 +37627,7 @@ Content-Type: ` + u.contentType + `\r
                                                 ])
                                             ]),
                                             f("div", _6, [
-                                                fe(ee(Ue), {
+                                                fe(ee(Ve), {
                                                     label: "Vitesse",
                                                     min: 0,
                                                     max: 5,
@@ -37628,7 +37639,7 @@ Content-Type: ` + u.contentType + `\r
                                                     "model-value",
                                                     "onUpdate:modelValue"
                                                 ]),
-                                                fe(ee(Ue), {
+                                                fe(ee(Ve), {
                                                     label: "Amplitude",
                                                     min: Te.minAmplitude,
                                                     max: Te.maxAmplitude,
@@ -38467,6 +38478,7 @@ Content-Type: ` + u.contentType + `\r
                     reliefDepth: 1,
                     protrusionPhase: 0,
                     protrusionSharpness: 2,
+                    protrusionStrength: 1,
                     protrusionGeometryMix: 0,
                     protrusionPeriod: 1,
                     localShadowStrength: 0,
@@ -38848,7 +38860,7 @@ Content-Type: ` + u.contentType + `\r
             ], de = ()=>{
                 const v = g.value.approximationMode;
                 return v === "bla" || v === "pade" || v === "jet" || v === "mobius" ? v : "off";
-            }, ie = ()=>we(g.value.palettePeriod), Ae = (v)=>(v * 100).toFixed(1) + "%", ve = ()=>(g.value.phaseColoringStrength ?? 0).toFixed(1) + "×", Ee = (v)=>v + "°", ke = (v)=>v.toFixed(2) + " rad", H = (v)=>"×" + v.toFixed(3), Ye = ()=>"×" + Yt(g.value).xScale.toFixed(2), Ve = ()=>"×" + Yt(g.value).yScale.toFixed(2), At = Se(()=>er.value.map((v)=>({
+            }, ie = ()=>we(g.value.palettePeriod), Ae = (v)=>(v * 100).toFixed(1) + "%", ve = ()=>(g.value.phaseColoringStrength ?? 0).toFixed(1) + "×", Ee = (v)=>v + "°", ke = (v)=>v.toFixed(2) + " rad", H = (v)=>"×" + v.toFixed(3), Ye = ()=>"×" + Yt(g.value).xScale.toFixed(2), Ue = ()=>"×" + Yt(g.value).yScale.toFixed(2), At = Se(()=>er.value.map((v)=>({
                         label: v.name + (v.builtIn ? " (intégré)" : ""),
                         value: v.name
                     }))), ct = Se(()=>er.value.find((v)=>v.name === He.value));
@@ -39215,6 +39227,7 @@ Content-Type: ` + u.contentType + `\r
                     reliefDepth: g.value.reliefDepth,
                     protrusionPhase: g.value.protrusionPhase,
                     protrusionSharpness: g.value.protrusionSharpness,
+                    protrusionStrength: g.value.protrusionStrength,
                     protrusionGeometryMix: g.value.protrusionGeometryMix,
                     protrusionPeriod: g.value.protrusionPeriod,
                     localShadowStrength: g.value.localShadowStrength,
@@ -39230,7 +39243,7 @@ Content-Type: ` + u.contentType + `\r
                 await co(te), ft.value = await ma(), Le.value = "";
             }
             function Pt(v) {
-                g.value.tessellationLevel = v.tessellationLevel ?? 0, g.value.displacementAmount = v.displacementAmount ?? 0, g.value.ambientOcclusionStrength = v.ambientOcclusionStrength ?? 0, g.value.microBumpStrength = v.microBumpStrength ?? 0, g.value.reliefDepth = v.reliefDepth ?? 1, g.value.protrusionPhase = v.protrusionPhase ?? 0, g.value.protrusionSharpness = v.protrusionSharpness ?? 2, g.value.protrusionGeometryMix = v.protrusionGeometryMix ?? 0, g.value.protrusionPeriod = v.protrusionPeriod ?? 1, g.value.localShadowStrength = v.localShadowStrength ?? 0, g.value.varnishStrength = v.varnishStrength ?? 0, g.value.gradeContrast = v.gradeContrast ?? 1.18, g.value.gradeSaturation = v.gradeSaturation ?? 1.12, g.value.orbitTrapStrength = v.orbitTrapStrength ?? 0, g.value.orbitTrap = jn(v), g.value.orbitTrapStrength = g.value.orbitTrap.strength, g.value.phaseColoringStrength = v.phaseColoringStrength ?? 0, g.value.stripeFrequency = v.stripeFrequency ?? 8, g.value.textureMapping = Yt(v), delete g.value.textureMappingMode;
+                g.value.tessellationLevel = v.tessellationLevel ?? 0, g.value.displacementAmount = v.displacementAmount ?? 0, g.value.ambientOcclusionStrength = v.ambientOcclusionStrength ?? 0, g.value.microBumpStrength = v.microBumpStrength ?? 0, g.value.reliefDepth = v.reliefDepth ?? 1, g.value.protrusionPhase = v.protrusionPhase ?? 0, g.value.protrusionSharpness = v.protrusionSharpness ?? 2, g.value.protrusionStrength = v.protrusionStrength ?? 1, g.value.protrusionGeometryMix = v.protrusionGeometryMix ?? 0, g.value.protrusionPeriod = v.protrusionPeriod ?? 1, g.value.localShadowStrength = v.localShadowStrength ?? 0, g.value.varnishStrength = v.varnishStrength ?? 0, g.value.gradeContrast = v.gradeContrast ?? 1.18, g.value.gradeSaturation = v.gradeSaturation ?? 1.12, g.value.orbitTrapStrength = v.orbitTrapStrength ?? 0, g.value.orbitTrap = jn(v), g.value.orbitTrapStrength = g.value.orbitTrap.strength, g.value.phaseColoringStrength = v.phaseColoringStrength ?? 0, g.value.stripeFrequency = v.stripeFrequency ?? 8, g.value.textureMapping = Yt(v), delete g.value.textureMappingMode;
             }
             function et(v) {
                 const p = ft.value.find((m)=>m.name === v);
@@ -40008,7 +40021,7 @@ Content-Type: ` + u.contentType + `\r
                         }, {
                             default: Kt(()=>[
                                     f("div", Y6, [
-                                        p[100] || (p[100] = f("div", {
+                                        p[101] || (p[101] = f("div", {
                                             class: "lab"
                                         }, [
                                             f("div", {
@@ -40020,7 +40033,7 @@ Content-Type: ` + u.contentType + `\r
                                         ], -1)),
                                         f("div", K6, [
                                             f("div", X6, [
-                                                p[97] || (p[97] = f("span", {
+                                                p[98] || (p[98] = f("span", {
                                                     class: "ax"
                                                 }, "Cx", -1)),
                                                 f("input", {
@@ -40034,7 +40047,7 @@ Content-Type: ` + u.contentType + `\r
                                                 }, null, 40, Z6)
                                             ]),
                                             f("div", Q6, [
-                                                p[98] || (p[98] = f("span", {
+                                                p[99] || (p[99] = f("span", {
                                                     class: "ax"
                                                 }, "Cy", -1)),
                                                 f("input", {
@@ -40058,7 +40071,7 @@ Content-Type: ` + u.contentType + `\r
                                             title: "Copier les coordonnées",
                                             onClick: rn
                                         }, [
-                                            ...p[99] || (p[99] = [
+                                            ...p[100] || (p[100] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40083,7 +40096,7 @@ Content-Type: ` + u.contentType + `\r
                                             title: "Detect the minibrot under the view and center on its nucleus (works at any depth)",
                                             onClick: Un
                                         }, [
-                                            p[101] || (p[101] = f("svg", {
+                                            p[102] || (p[102] = f("svg", {
                                                 viewBox: "0 0 24 24"
                                             }, [
                                                 f("circle", {
@@ -40103,7 +40116,7 @@ Content-Type: ` + u.contentType + `\r
                                             title: "Same detection, then frame the whole minibrot at the centre of the screen (~50 % of it)",
                                             onClick: Nt
                                         }, [
-                                            p[102] || (p[102] = f("svg", {
+                                            p[103] || (p[103] = f("svg", {
                                                 viewBox: "0 0 24 24"
                                             }, [
                                                 f("circle", {
@@ -40123,7 +40136,7 @@ Content-Type: ` + u.contentType + `\r
                                         Ht.value ? (C(), z("span", i8, j(Ht.value), 1)) : he("", !0)
                                     ]),
                                     f("div", a8, [
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Zoom",
                                             min: 1,
                                             max: 1e3,
@@ -40134,7 +40147,7 @@ Content-Type: ` + u.contentType + `\r
                                         }, null, 8, [
                                             "model-value"
                                         ]),
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Rotation",
                                             min: 0,
                                             max: 359,
@@ -40157,7 +40170,7 @@ Content-Type: ` + u.contentType + `\r
                         }, {
                             default: Kt(()=>[
                                     f("div", s8, [
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Mu",
                                             min: .602,
                                             max: 5,
@@ -40175,7 +40188,7 @@ Content-Type: ` + u.contentType + `\r
                                         }, "4")
                                     ]),
                                     f("div", o8, [
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Fréquence rayures",
                                             min: 1,
                                             max: 32,
@@ -40208,7 +40221,7 @@ Content-Type: ` + u.contentType + `\r
                                             "aria-pressed": Tt.value,
                                             onClick: p[11] || (p[11] = (m)=>Tt.value = !Tt.value)
                                         }, [
-                                            ...p[103] || (p[103] = [
+                                            ...p[104] || (p[104] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40242,7 +40255,7 @@ Content-Type: ` + u.contentType + `\r
                                                         class: "cv-trigger-thumb"
                                                     }, null, 8, d8)) : he("", !0),
                                                     f("span", f8, j(Ls.value?.name || (Xn.value ? Wr(Ls.value?.date ?? "") : "Choose a preset…")), 1),
-                                                    p[104] || (p[104] = f("span", {
+                                                    p[105] || (p[105] = f("span", {
                                                         class: "cv-caret"
                                                     }, null, -1))
                                                 ])
@@ -40341,7 +40354,7 @@ Content-Type: ` + u.contentType + `\r
                                         onClick: p[13] || (p[13] = (m)=>Xn.value && Uo(Xn.value)),
                                         disabled: !Xn.value
                                     }, [
-                                        ...p[105] || (p[105] = [
+                                        ...p[106] || (p[106] = [
                                             f("svg", {
                                                 viewBox: "0 0 24 24"
                                             }, [
@@ -40355,7 +40368,7 @@ Content-Type: ` + u.contentType + `\r
                                             ze(" Load location ", -1)
                                         ])
                                     ], 8, E8),
-                                    p[109] || (p[109] = f("p", {
+                                    p[110] || (p[110] = f("p", {
                                         class: "load-note"
                                     }, "Applies Cx, Cy, zoom & angle from the selected preset.", -1)),
                                     a.value ? (C(), z("div", A8, [
@@ -40363,7 +40376,7 @@ Content-Type: ` + u.contentType + `\r
                                             class: "mini-btn primary",
                                             onClick: Ja
                                         }, [
-                                            ...p[106] || (p[106] = [
+                                            ...p[107] || (p[107] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40382,7 +40395,7 @@ Content-Type: ` + u.contentType + `\r
                                             onClick: qo,
                                             disabled: !Xn.value
                                         }, [
-                                            ...p[107] || (p[107] = [
+                                            ...p[108] || (p[108] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40401,7 +40414,7 @@ Content-Type: ` + u.contentType + `\r
                                             onClick: Qp,
                                             disabled: tn.value.length === 0
                                         }, [
-                                            ...p[108] || (p[108] = [
+                                            ...p[109] || (p[109] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40441,7 +40454,7 @@ Content-Type: ` + u.contentType + `\r
                                             class: "mini-btn primary",
                                             onClick: Lr
                                         }, [
-                                            ...p[110] || (p[110] = [
+                                            ...p[111] || (p[111] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40477,7 +40490,7 @@ Content-Type: ` + u.contentType + `\r
                                             "aria-pressed": Gn.value,
                                             onClick: p[17] || (p[17] = (m)=>Gn.value = !Gn.value)
                                         }, [
-                                            ...p[111] || (p[111] = [
+                                            ...p[112] || (p[112] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40509,7 +40522,7 @@ Content-Type: ` + u.contentType + `\r
                                                 ]),
                                                 onClick: (te)=>Vo(m)
                                             }, [
-                                                p[115] || (p[115] = f("span", {
+                                                p[116] || (p[116] = f("span", {
                                                     class: "sel-badge"
                                                 }, "Applied", -1)),
                                                 m.thumbnail ? (C(), z("img", {
@@ -40549,7 +40562,7 @@ Content-Type: ` + u.contentType + `\r
                                                             "prevent"
                                                         ])
                                                     }, [
-                                                        ...p[112] || (p[112] = [
+                                                        ...p[113] || (p[113] = [
                                                             f("svg", {
                                                                 viewBox: "0 0 24 24"
                                                             }, [
@@ -40568,7 +40581,7 @@ Content-Type: ` + u.contentType + `\r
                                                             "prevent"
                                                         ])
                                                     }, [
-                                                        ...p[113] || (p[113] = [
+                                                        ...p[114] || (p[114] = [
                                                             f("svg", {
                                                                 viewBox: "0 0 24 24"
                                                             }, [
@@ -40589,7 +40602,7 @@ Content-Type: ` + u.contentType + `\r
                                                             "prevent"
                                                         ])
                                                     }, [
-                                                        ...p[114] || (p[114] = [
+                                                        ...p[115] || (p[115] = [
                                                             f("svg", {
                                                                 viewBox: "0 0 24 24"
                                                             }, [
@@ -40625,7 +40638,7 @@ Content-Type: ` + u.contentType + `\r
                                             class: "mini-btn primary",
                                             onClick: Ja
                                         }, [
-                                            ...p[116] || (p[116] = [
+                                            ...p[117] || (p[117] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40644,7 +40657,7 @@ Content-Type: ` + u.contentType + `\r
                                             onClick: ia,
                                             disabled: M.value.length === 0
                                         }, [
-                                            ...p[117] || (p[117] = [
+                                            ...p[118] || (p[118] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40663,7 +40676,7 @@ Content-Type: ` + u.contentType + `\r
                                             onClick: jo,
                                             disabled: !Hr.value
                                         }, [
-                                            ...p[118] || (p[118] = [
+                                            ...p[119] || (p[119] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40682,7 +40695,7 @@ Content-Type: ` + u.contentType + `\r
                                             onClick: ld,
                                             disabled: tn.value.length === 0
                                         }, [
-                                            ...p[119] || (p[119] = [
+                                            ...p[120] || (p[120] = [
                                                 f("svg", {
                                                     viewBox: "0 0 24 24"
                                                 }, [
@@ -40766,7 +40779,7 @@ Content-Type: ` + u.contentType + `\r
                                         title: r.pickerMode ? "Exit pipette mode (Escape)" : "Pipette: click on the fractal",
                                         onClick: p[21] || (p[21] = (m)=>ne("toggle-picker"))
                                     }, [
-                                        ...p[120] || (p[120] = [
+                                        ...p[121] || (p[121] = [
                                             f("i", {
                                                 class: "fa-solid fa-eye-dropper fa-fw"
                                             }, null, -1)
@@ -40782,7 +40795,7 @@ Content-Type: ` + u.contentType + `\r
                                         onClick: b,
                                         title: "Reverse order"
                                     }, [
-                                        ...p[121] || (p[121] = [
+                                        ...p[122] || (p[122] = [
                                             f("i", {
                                                 class: "fa-solid fa-arrow-right-arrow-left fa-fw"
                                             }, null, -1),
@@ -40794,7 +40807,7 @@ Content-Type: ` + u.contentType + `\r
                                         onClick: I,
                                         title: "Duplicate 2x"
                                     }, [
-                                        ...p[122] || (p[122] = [
+                                        ...p[123] || (p[123] = [
                                             f("i", {
                                                 class: "fa-regular fa-copy fa-fw"
                                             }, null, -1),
@@ -40806,7 +40819,7 @@ Content-Type: ` + u.contentType + `\r
                                         onClick: X,
                                         title: "Mirror (palindrome)"
                                     }, [
-                                        ...p[123] || (p[123] = [
+                                        ...p[124] || (p[124] = [
                                             f("i", {
                                                 class: "fa-solid fa-arrows-left-right fa-fw"
                                             }, null, -1),
@@ -40818,7 +40831,7 @@ Content-Type: ` + u.contentType + `\r
                                         onClick: oe,
                                         title: "Distribute evenly"
                                     }, [
-                                        ...p[124] || (p[124] = [
+                                        ...p[125] || (p[125] = [
                                             f("i", {
                                                 class: "fa-solid fa-align-justify fa-fw"
                                             }, null, -1),
@@ -40830,7 +40843,7 @@ Content-Type: ` + u.contentType + `\r
                                         onClick: st,
                                         title: "Clear entire palette"
                                     }, [
-                                        ...p[125] || (p[125] = [
+                                        ...p[126] || (p[126] = [
                                             f("i", {
                                                 class: "fa-solid fa-trash-can fa-fw"
                                             }, null, -1),
@@ -40840,7 +40853,7 @@ Content-Type: ` + u.contentType + `\r
                                 ])
                             ]),
                             Wt.value ? (C(), z("div", l$, [
-                                p[127] || (p[127] = f("span", {
+                                p[128] || (p[128] = f("span", {
                                     class: "quickbar-lab"
                                 }, "Couleur", -1)),
                                 f("span", {
@@ -40857,7 +40870,7 @@ Content-Type: ` + u.contentType + `\r
                                     }, null, 40, c$)
                                 ], 4),
                                 f("span", u$, j(zn.value), 1),
-                                p[128] || (p[128] = f("span", {
+                                p[129] || (p[129] = f("span", {
                                     class: "quickbar-lab"
                                 }, "Iridescence", -1)),
                                 Wt.value.iridescenceColor ? (C(), z(Ce, {
@@ -40898,7 +40911,7 @@ Content-Type: ` + u.contentType + `\r
                                     value: ui.value,
                                     onChange: p[25] || (p[25] = (m)=>Qi(m.target.value))
                                 }, [
-                                    p[126] || (p[126] = f("option", {
+                                    p[127] || (p[127] = f("option", {
                                         value: "",
                                         disabled: ""
                                     }, "Choisir un preset…", -1)),
@@ -40931,6 +40944,7 @@ Content-Type: ` + u.contentType + `\r
                                     reliefDepth: g.value.reliefDepth,
                                     protrusionPhase: g.value.protrusionPhase,
                                     protrusionSharpness: g.value.protrusionSharpness,
+                                    protrusionStrength: g.value.protrusionStrength,
                                     protrusionGeometryMix: g.value.protrusionGeometryMix,
                                     protrusionPeriod: g.value.protrusionPeriod,
                                     localShadowStrength: g.value.localShadowStrength,
@@ -40953,6 +40967,7 @@ Content-Type: ` + u.contentType + `\r
                                     "reliefDepth",
                                     "protrusionPhase",
                                     "protrusionSharpness",
+                                    "protrusionStrength",
                                     "protrusionGeometryMix",
                                     "protrusionPeriod",
                                     "localShadowStrength",
@@ -40964,7 +40979,7 @@ Content-Type: ` + u.contentType + `\r
                                     "phaseColoringStrength",
                                     "textureMapping"
                                 ]),
-                                p[129] || (p[129] = f("div", {
+                                p[130] || (p[130] = f("div", {
                                     class: "canvas-shadow-overlay"
                                 }, null, -1)),
                                 f("div", h$, [
@@ -41001,7 +41016,7 @@ Content-Type: ` + u.contentType + `\r
                                 ])
                             ], 32),
                             f("div", m$, [
-                                fe(ee(Ue), {
+                                fe(ee(Ve), {
                                     label: "Période",
                                     min: 0,
                                     max: 1,
@@ -41012,7 +41027,7 @@ Content-Type: ` + u.contentType + `\r
                                 }, null, 8, [
                                     "model-value"
                                 ]),
-                                fe(ee(Ue), {
+                                fe(ee(Ve), {
                                     label: "Offset",
                                     min: 0,
                                     max: 1,
@@ -41023,7 +41038,7 @@ Content-Type: ` + u.contentType + `\r
                                 }, null, 8, [
                                     "model-value"
                                 ]),
-                                fe(ee(Ue), {
+                                fe(ee(Ve), {
                                     label: "Décalage hauteur",
                                     min: 0,
                                     max: 100,
@@ -41034,7 +41049,7 @@ Content-Type: ` + u.contentType + `\r
                                 }, null, 8, [
                                     "model-value"
                                 ]),
-                                fe(ee(Ue), {
+                                fe(ee(Ve), {
                                     label: "Phase couleur",
                                     min: 0,
                                     max: 1,
@@ -41126,7 +41141,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Intensité",
                                                 min: 0,
                                                 max: 100,
@@ -41137,7 +41152,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Échelle",
                                                 min: .05,
                                                 max: 4,
@@ -41148,7 +41163,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Rotation",
                                                 min: -3.1416,
                                                 max: 3.1416,
@@ -41159,7 +41174,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Pétales",
                                                 min: 1,
                                                 max: 16,
@@ -41170,7 +41185,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Profondeur pétales",
                                                 min: 0,
                                                 max: 1,
@@ -41181,7 +41196,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Torsion",
                                                 min: -8,
                                                 max: 8,
@@ -41192,7 +41207,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Largeur",
                                                 min: .005,
                                                 max: .5,
@@ -41203,7 +41218,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Dureté",
                                                 min: .25,
                                                 max: 8,
@@ -41214,7 +41229,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Centre X",
                                                 min: -2,
                                                 max: 2,
@@ -41225,7 +41240,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Centre Y",
                                                 min: -2,
                                                 max: 2,
@@ -41236,7 +41251,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Anisotropie X",
                                                 min: .1,
                                                 max: 4,
@@ -41247,7 +41262,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Anisotropie Y",
                                                 min: .1,
                                                 max: 4,
@@ -41258,7 +41273,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Phase forme",
                                                 min: -3.1416,
                                                 max: 3.1416,
@@ -41269,7 +41284,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Bandes distance",
                                                 min: 0,
                                                 max: 32,
@@ -41280,7 +41295,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Poids distance",
                                                 min: -4,
                                                 max: 4,
@@ -41291,7 +41306,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Poids itération",
                                                 min: -4,
                                                 max: 4,
@@ -41302,7 +41317,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Poids angle",
                                                 min: -4,
                                                 max: 4,
@@ -41313,7 +41328,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Décalage couleur",
                                                 min: -4,
                                                 max: 4,
@@ -41327,7 +41342,7 @@ Content-Type: ` + u.contentType + `\r
                                             W.value.mode === "sampled" || W.value.mode === "exact" ? (C(), z(Ce, {
                                                 key: 0
                                             }, [
-                                                fe(ee(Ue), {
+                                                fe(ee(Ve), {
                                                     label: "Début orbite",
                                                     min: 0,
                                                     max: 1e4,
@@ -41338,7 +41353,7 @@ Content-Type: ` + u.contentType + `\r
                                                 }, null, 8, [
                                                     "model-value"
                                                 ]),
-                                                fe(ee(Ue), {
+                                                fe(ee(Ve), {
                                                     label: "Fin orbite (0 = budget)",
                                                     min: 0,
                                                     max: 1e6,
@@ -41371,7 +41386,7 @@ Content-Type: ` + u.contentType + `\r
                             }, {
                                 default: Kt(()=>[
                                         f("div", b$, [
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Profondeur relief",
                                                 min: 0,
                                                 max: 2,
@@ -41382,7 +41397,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Phase protubérances",
                                                 min: 0,
                                                 max: 1,
@@ -41393,7 +41408,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Netteté protubérances",
                                                 min: .25,
                                                 max: 16,
@@ -41404,102 +41419,113 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
+                                                label: "Amplification protubérances",
+                                                min: 1,
+                                                max: 4,
+                                                step: .01,
+                                                f: "p2",
+                                                "model-value": g.value.protrusionStrength ?? 1,
+                                                "onUpdate:modelValue": p[58] || (p[58] = (m)=>g.value.protrusionStrength = m)
+                                            }, null, 8, [
+                                                "model-value"
+                                            ]),
+                                            fe(ee(Ve), {
                                                 label: "Protubérances géométriques",
                                                 min: 0,
                                                 max: 1,
                                                 step: .01,
                                                 f: "p2",
                                                 "model-value": g.value.protrusionGeometryMix ?? 0,
-                                                "onUpdate:modelValue": p[58] || (p[58] = (m)=>g.value.protrusionGeometryMix = m)
+                                                "onUpdate:modelValue": p[59] || (p[59] = (m)=>g.value.protrusionGeometryMix = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Période géométrique",
                                                 min: .1,
                                                 max: 16,
                                                 step: .05,
                                                 f: "p2",
                                                 "model-value": g.value.protrusionPeriod ?? 1,
-                                                "onUpdate:modelValue": p[59] || (p[59] = (m)=>g.value.protrusionPeriod = m)
+                                                "onUpdate:modelValue": p[60] || (p[60] = (m)=>g.value.protrusionPeriod = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Occlusion relief",
                                                 min: 0,
                                                 max: 10,
                                                 step: .01,
                                                 f: "p2",
                                                 "model-value": g.value.localShadowStrength ?? 0,
-                                                "onUpdate:modelValue": p[60] || (p[60] = (m)=>g.value.localShadowStrength = m)
+                                                "onUpdate:modelValue": p[61] || (p[61] = (m)=>g.value.localShadowStrength = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Occlusion ambiante",
                                                 min: 0,
                                                 max: 2,
                                                 step: .01,
                                                 f: "p2",
                                                 "model-value": g.value.ambientOcclusionStrength ?? 0,
-                                                "onUpdate:modelValue": p[61] || (p[61] = (m)=>g.value.ambientOcclusionStrength = m)
+                                                "onUpdate:modelValue": p[62] || (p[62] = (m)=>g.value.ambientOcclusionStrength = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Direction lumière",
                                                 min: 0,
                                                 max: 6.283,
                                                 step: .01,
                                                 f: ke,
                                                 "model-value": g.value.lightAngle ?? 3.927,
-                                                "onUpdate:modelValue": p[62] || (p[62] = (m)=>g.value.lightAngle = m)
+                                                "onUpdate:modelValue": p[63] || (p[63] = (m)=>g.value.lightAngle = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Bump fin",
                                                 min: 0,
                                                 max: 2,
                                                 step: .01,
                                                 f: "p2",
                                                 "model-value": g.value.microBumpStrength ?? 0,
-                                                "onUpdate:modelValue": p[63] || (p[63] = (m)=>g.value.microBumpStrength = m)
+                                                "onUpdate:modelValue": p[64] || (p[64] = (m)=>g.value.microBumpStrength = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Vernis",
                                                 min: 0,
                                                 max: 10,
                                                 step: .01,
                                                 f: "p2",
                                                 "model-value": g.value.varnishStrength ?? 1,
-                                                "onUpdate:modelValue": p[64] || (p[64] = (m)=>g.value.varnishStrength = m)
+                                                "onUpdate:modelValue": p[65] || (p[65] = (m)=>g.value.varnishStrength = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Contraste",
                                                 min: .5,
                                                 max: 2,
                                                 step: .01,
                                                 f: "p2",
                                                 "model-value": g.value.gradeContrast ?? 1.18,
-                                                "onUpdate:modelValue": p[65] || (p[65] = (m)=>g.value.gradeContrast = m)
+                                                "onUpdate:modelValue": p[66] || (p[66] = (m)=>g.value.gradeContrast = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Saturation",
                                                 min: 0,
                                                 max: 2,
                                                 step: .01,
                                                 f: "p2",
                                                 "model-value": g.value.gradeSaturation ?? 1.12,
-                                                "onUpdate:modelValue": p[66] || (p[66] = (m)=>g.value.gradeSaturation = m)
+                                                "onUpdate:modelValue": p[67] || (p[67] = (m)=>g.value.gradeSaturation = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ])
@@ -41522,7 +41548,7 @@ Content-Type: ` + u.contentType + `\r
                                                     value: m.key
                                                 })),
                                             "model-value": g.value.interpolationMode,
-                                            "onUpdate:modelValue": p[67] || (p[67] = (m)=>g.value.interpolationMode = m)
+                                            "onUpdate:modelValue": p[68] || (p[68] = (m)=>g.value.interpolationMode = m)
                                         }, null, 8, [
                                             "options",
                                             "model-value"
@@ -41535,7 +41561,7 @@ Content-Type: ` + u.contentType + `\r
                                                 onClick: Re,
                                                 title: "Negate RGB"
                                             }, [
-                                                ...p[130] || (p[130] = [
+                                                ...p[131] || (p[131] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -41555,7 +41581,7 @@ Content-Type: ` + u.contentType + `\r
                                             ])
                                         ]),
                                         f("div", y$, [
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Teinte",
                                                 min: -180,
                                                 max: 180,
@@ -41566,7 +41592,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Saturation",
                                                 min: -100,
                                                 max: 100,
@@ -41577,7 +41603,7 @@ Content-Type: ` + u.contentType + `\r
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Luminosité",
                                                 min: -100,
                                                 max: 100,
@@ -41600,7 +41626,7 @@ Content-Type: ` + u.contentType + `\r
                                 icon: '<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18 14 14 0 010-18z"/>'
                             }, {
                                 default: Kt(()=>[
-                                        p[136] || (p[136] = f("p", {
+                                        p[137] || (p[137] = f("p", {
                                             class: "section-help"
                                         }, "Select the image used for glossy and ambient environment reflections.", -1)),
                                         f("div", w$, [
@@ -41615,7 +41641,7 @@ Content-Type: ` + u.contentType + `\r
                                                     ]),
                                                     onClick: (te)=>gT(m)
                                                 }, [
-                                                    p[133] || (p[133] = f("span", {
+                                                    p[134] || (p[134] = f("span", {
                                                         class: "sel-badge"
                                                     }, "Applied", -1)),
                                                     m.thumbnail ? (C(), z("img", {
@@ -41658,7 +41684,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[131] || (p[131] = [
+                                                            ...p[132] || (p[132] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -41678,7 +41704,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[132] || (p[132] = [
+                                                            ...p[133] || (p[133] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -41703,7 +41729,7 @@ Content-Type: ` + u.contentType + `\r
                                                 class: "tbtn primary",
                                                 onClick: yT
                                             }, [
-                                                ...p[134] || (p[134] = [
+                                                ...p[135] || (p[135] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -41722,7 +41748,7 @@ Content-Type: ` + u.contentType + `\r
                                                 onClick: vT,
                                                 disabled: !vt.value || ee(Fr).has(vt.value)
                                             }, [
-                                                ...p[135] || (p[135] = [
+                                                ...p[136] || (p[136] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -41755,7 +41781,7 @@ Content-Type: ` + u.contentType + `\r
                                 icon: '<rect x="3" y="5" width="18" height="14" rx="2"/><circle cx="9" cy="10" r="2"/><path d="M21 15l-5-5-11 9"/>'
                             }, {
                                 default: Kt(()=>[
-                                        p[142] || (p[142] = f("p", {
+                                        p[143] || (p[143] = f("p", {
                                             class: "section-help"
                                         }, "Click a texture to use it as the image layer.", -1)),
                                         f("div", z$, [
@@ -41770,7 +41796,7 @@ Content-Type: ` + u.contentType + `\r
                                                     ]),
                                                     onClick: (te)=>mT(m)
                                                 }, [
-                                                    p[139] || (p[139] = f("span", {
+                                                    p[140] || (p[140] = f("span", {
                                                         class: "sel-badge"
                                                     }, "Applied", -1)),
                                                     m.thumbnail ? (C(), z("img", {
@@ -41813,7 +41839,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[137] || (p[137] = [
+                                                            ...p[138] || (p[138] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -41833,7 +41859,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[138] || (p[138] = [
+                                                            ...p[139] || (p[139] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -41858,7 +41884,7 @@ Content-Type: ` + u.contentType + `\r
                                                 class: "tbtn primary",
                                                 onClick: bT
                                             }, [
-                                                ...p[140] || (p[140] = [
+                                                ...p[141] || (p[141] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -41877,7 +41903,7 @@ Content-Type: ` + u.contentType + `\r
                                                 onClick: _T,
                                                 disabled: !Ft.value || ee(Fr).has(Ft.value)
                                             }, [
-                                                ...p[141] || (p[141] = [
+                                                ...p[142] || (p[142] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -41911,25 +41937,25 @@ Content-Type: ` + u.contentType + `\r
                             }, {
                                 default: Kt(()=>[
                                         f("div", Y$, [
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Échelle image",
                                                 min: .1,
                                                 max: 10,
                                                 step: .1,
                                                 f: "p1",
                                                 "model-value": g.value.tessellationLevel ?? 1,
-                                                "onUpdate:modelValue": p[68] || (p[68] = (m)=>g.value.tessellationLevel = m)
+                                                "onUpdate:modelValue": p[69] || (p[69] = (m)=>g.value.tessellationLevel = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Déplacement",
                                                 min: 0,
                                                 max: .1,
                                                 step: .001,
                                                 f: H,
                                                 "model-value": g.value.displacementAmount ?? 0,
-                                                "onUpdate:modelValue": p[69] || (p[69] = (m)=>g.value.displacementAmount = m)
+                                                "onUpdate:modelValue": p[70] || (p[70] = (m)=>g.value.displacementAmount = m)
                                             }, null, 8, [
                                                 "model-value"
                                             ])
@@ -41942,19 +41968,19 @@ Content-Type: ` + u.contentType + `\r
                                                         value: m.value
                                                     })),
                                                 "model-value": N.value,
-                                                "onUpdate:modelValue": p[70] || (p[70] = (m)=>N.value = m)
+                                                "onUpdate:modelValue": p[71] || (p[71] = (m)=>N.value = m)
                                             }, null, 8, [
                                                 "options",
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Échelle X",
                                                 min: Math.log10(ee(hm)),
                                                 max: Math.log10(ee(mm)),
                                                 step: .01,
                                                 f: Ye,
                                                 "model-value": L.value,
-                                                "onUpdate:modelValue": p[71] || (p[71] = (m)=>L.value = m)
+                                                "onUpdate:modelValue": p[72] || (p[72] = (m)=>L.value = m)
                                             }, null, 8, [
                                                 "min",
                                                 "max",
@@ -41967,19 +41993,19 @@ Content-Type: ` + u.contentType + `\r
                                                         value: m.value
                                                     })),
                                                 "model-value": x.value,
-                                                "onUpdate:modelValue": p[72] || (p[72] = (m)=>x.value = m)
+                                                "onUpdate:modelValue": p[73] || (p[73] = (m)=>x.value = m)
                                             }, null, 8, [
                                                 "options",
                                                 "model-value"
                                             ]),
-                                            fe(ee(Ue), {
+                                            fe(ee(Ve), {
                                                 label: "Échelle Y",
                                                 min: Math.log10(ee(hm)),
                                                 max: Math.log10(ee(mm)),
                                                 step: .01,
-                                                f: Ve,
+                                                f: Ue,
                                                 "model-value": D.value,
-                                                "onUpdate:modelValue": p[73] || (p[73] = (m)=>D.value = m)
+                                                "onUpdate:modelValue": p[74] || (p[74] = (m)=>D.value = m)
                                             }, null, 8, [
                                                 "min",
                                                 "max",
@@ -41989,7 +42015,7 @@ Content-Type: ` + u.contentType + `\r
                                         fe(ee(Ko), {
                                             label: "Texture miroir",
                                             "model-value": Ne.value,
-                                            "onUpdate:modelValue": p[74] || (p[74] = (m)=>Ne.value = m)
+                                            "onUpdate:modelValue": p[75] || (p[75] = (m)=>Ne.value = m)
                                         }, null, 8, [
                                             "model-value"
                                         ]),
@@ -42005,11 +42031,11 @@ Content-Type: ` + u.contentType + `\r
                                         f("div", X$, [
                                             or(f("input", {
                                                 class: "txt-in",
-                                                "onUpdate:modelValue": p[75] || (p[75] = (m)=>Qn.value = m),
+                                                "onUpdate:modelValue": p[76] || (p[76] = (m)=>Qn.value = m),
                                                 type: "text",
                                                 placeholder: "Nom du mapping…",
-                                                onFocus: p[76] || (p[76] = (m)=>r.suspendShortcuts && r.suspendShortcuts(!0)),
-                                                onBlur: p[77] || (p[77] = (m)=>r.suspendShortcuts && r.suspendShortcuts(!1)),
+                                                onFocus: p[77] || (p[77] = (m)=>r.suspendShortcuts && r.suspendShortcuts(!0)),
+                                                onBlur: p[78] || (p[78] = (m)=>r.suspendShortcuts && r.suspendShortcuts(!1)),
                                                 onKeyup: ti(H_, [
                                                     "enter"
                                                 ])
@@ -42023,7 +42049,7 @@ Content-Type: ` + u.contentType + `\r
                                                 class: "mini-btn primary",
                                                 onClick: H_
                                             }, [
-                                                ...p[143] || (p[143] = [
+                                                ...p[144] || (p[144] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42041,9 +42067,9 @@ Content-Type: ` + u.contentType + `\r
                                         ct.value && !ct.value.builtIn && ee(Vr)(i.value, ct.value.remote) ? (C(), z("div", Z$, [
                                             f("button", {
                                                 class: "mini-btn danger",
-                                                onClick: p[78] || (p[78] = (m)=>dT(ct.value))
+                                                onClick: p[79] || (p[79] = (m)=>dT(ct.value))
                                             }, [
-                                                ...p[144] || (p[144] = [
+                                                ...p[145] || (p[145] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42066,7 +42092,7 @@ Content-Type: ` + u.contentType + `\r
                                 icon: '<path d="M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z"/>'
                             }, {
                                 default: Kt(()=>[
-                                        p[151] || (p[151] = f("p", {
+                                        p[152] || (p[152] = f("p", {
                                             class: "section-help"
                                         }, "Colors only — applying a palette keeps your current material and mapping.", -1)),
                                         f("div", Q$, [
@@ -42079,9 +42105,9 @@ Content-Type: ` + u.contentType + `\r
                                                 ]),
                                                 type: "button",
                                                 "aria-pressed": Zn.value,
-                                                onClick: p[79] || (p[79] = (m)=>Zn.value = !Zn.value)
+                                                onClick: p[80] || (p[80] = (m)=>Zn.value = !Zn.value)
                                             }, [
-                                                ...p[145] || (p[145] = [
+                                                ...p[146] || (p[146] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42105,7 +42131,7 @@ Content-Type: ` + u.contentType + `\r
                                                     ]),
                                                     onClick: (te)=>Ze(m)
                                                 }, [
-                                                    p[149] || (p[149] = f("span", {
+                                                    p[150] || (p[150] = f("span", {
                                                         class: "sel-badge"
                                                     }, "Applied", -1)),
                                                     m.thumbnail ? (C(), z("img", {
@@ -42145,7 +42171,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[146] || (p[146] = [
+                                                            ...p[147] || (p[147] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -42164,7 +42190,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[147] || (p[147] = [
+                                                            ...p[148] || (p[148] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -42186,7 +42212,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[148] || (p[148] = [
+                                                            ...p[149] || (p[149] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -42209,11 +42235,11 @@ Content-Type: ` + u.contentType + `\r
                                         f("div", m9, [
                                             or(f("input", {
                                                 class: "txt-in",
-                                                "onUpdate:modelValue": p[80] || (p[80] = (m)=>Le.value = m),
+                                                "onUpdate:modelValue": p[81] || (p[81] = (m)=>Le.value = m),
                                                 type: "text",
                                                 placeholder: "Save current palette as...",
-                                                onFocus: p[81] || (p[81] = (m)=>r.suspendShortcuts && r.suspendShortcuts(!0)),
-                                                onBlur: p[82] || (p[82] = (m)=>r.suspendShortcuts && r.suspendShortcuts(!1)),
+                                                onFocus: p[82] || (p[82] = (m)=>r.suspendShortcuts && r.suspendShortcuts(!0)),
+                                                onBlur: p[83] || (p[83] = (m)=>r.suspendShortcuts && r.suspendShortcuts(!1)),
                                                 onKeyup: ti(xe, [
                                                     "enter"
                                                 ])
@@ -42227,7 +42253,7 @@ Content-Type: ` + u.contentType + `\r
                                                 class: "save-btn",
                                                 onClick: xe
                                             }, [
-                                                ...p[150] || (p[150] = [
+                                                ...p[151] || (p[151] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42253,7 +42279,7 @@ Content-Type: ` + u.contentType + `\r
                                 icon: '<rect x="4" y="4" width="16" height="16" rx="2"/><path d="M4 12h16M12 4v16"/>'
                             }, {
                                 default: Kt(()=>[
-                                        p[157] || (p[157] = f("p", {
+                                        p[158] || (p[158] = f("p", {
                                             class: "section-help"
                                         }, "A full look — colors, interpolation, cycle mapping and material. Click to apply everything.", -1)),
                                         f("div", g9, [
@@ -42266,9 +42292,9 @@ Content-Type: ` + u.contentType + `\r
                                                 ]),
                                                 type: "button",
                                                 "aria-pressed": mn.value,
-                                                onClick: p[83] || (p[83] = (m)=>mn.value = !mn.value)
+                                                onClick: p[84] || (p[84] = (m)=>mn.value = !mn.value)
                                             }, [
-                                                ...p[152] || (p[152] = [
+                                                ...p[153] || (p[153] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42300,7 +42326,7 @@ Content-Type: ` + u.contentType + `\r
                                                     ]),
                                                     onClick: (te)=>ht(m)
                                                 }, [
-                                                    p[156] || (p[156] = f("span", {
+                                                    p[157] || (p[157] = f("span", {
                                                         class: "sel-badge"
                                                     }, "Applied", -1)),
                                                     m.thumbnail ? (C(), z("img", {
@@ -42340,7 +42366,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[153] || (p[153] = [
+                                                            ...p[154] || (p[154] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -42359,7 +42385,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[154] || (p[154] = [
+                                                            ...p[155] || (p[155] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -42380,7 +42406,7 @@ Content-Type: ` + u.contentType + `\r
                                                                 "prevent"
                                                             ])
                                                         }, [
-                                                            ...p[155] || (p[155] = [
+                                                            ...p[156] || (p[156] = [
                                                                 f("svg", {
                                                                     viewBox: "0 0 24 24"
                                                                 }, [
@@ -42418,7 +42444,7 @@ Content-Type: ` + u.contentType + `\r
                                                 class: "tbtn primary",
                                                 onClick: dd
                                             }, [
-                                                ...p[158] || (p[158] = [
+                                                ...p[159] || (p[159] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42437,7 +42463,7 @@ Content-Type: ` + u.contentType + `\r
                                                 onClick: uc,
                                                 disabled: ft.value.length === 0
                                             }, [
-                                                ...p[159] || (p[159] = [
+                                                ...p[160] || (p[160] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42456,7 +42482,7 @@ Content-Type: ` + u.contentType + `\r
                                                 onClick: ud,
                                                 disabled: !cn.value
                                             }, [
-                                                ...p[160] || (p[160] = [
+                                                ...p[161] || (p[161] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42475,7 +42501,7 @@ Content-Type: ` + u.contentType + `\r
                                                 onClick: Ho,
                                                 disabled: Jr.value.length === 0
                                             }, [
-                                                ...p[161] || (p[161] = [
+                                                ...p[162] || (p[162] = [
                                                     f("svg", {
                                                         viewBox: "0 0 24 24"
                                                     }, [
@@ -42510,39 +42536,39 @@ Content-Type: ` + u.contentType + `\r
                         }, {
                             default: Kt(()=>[
                                     f("div", B9, [
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Epsilon",
                                             min: -30,
                                             max: 0,
                                             step: .01,
                                             f: lt,
                                             "model-value": Vs.value,
-                                            "onUpdate:modelValue": p[84] || (p[84] = (m)=>Vs.value = m)
+                                            "onUpdate:modelValue": p[85] || (p[85] = (m)=>Vs.value = m)
                                         }, null, 8, [
                                             "model-value"
                                         ]),
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Antialiasing",
                                             min: 1,
                                             max: 64,
                                             step: 1,
                                             f: St,
                                             "model-value": g.value.antialiasLevel ?? 1,
-                                            "onUpdate:modelValue": p[85] || (p[85] = (m)=>g.value.antialiasLevel = m)
+                                            "onUpdate:modelValue": p[86] || (p[86] = (m)=>g.value.antialiasLevel = m)
                                         }, null, 8, [
                                             "model-value"
                                         ]),
                                         fe(ee(Ko), {
                                             label: "Auto AA",
                                             "model-value": !!g.value.aaAuto,
-                                            "onUpdate:modelValue": p[86] || (p[86] = (m)=>g.value.aaAuto = m)
+                                            "onUpdate:modelValue": p[87] || (p[87] = (m)=>g.value.aaAuto = m)
                                         }, null, 8, [
                                             "model-value"
                                         ]),
                                         fe(ee(Ko), {
                                             label: "Adaptive AA",
                                             "model-value": g.value.aaAdaptive !== !1,
-                                            "onUpdate:modelValue": p[87] || (p[87] = (m)=>g.value.aaAdaptive = m)
+                                            "onUpdate:modelValue": p[88] || (p[88] = (m)=>g.value.aaAdaptive = m)
                                         }, null, 8, [
                                             "model-value"
                                         ])
@@ -42551,36 +42577,36 @@ Content-Type: ` + u.contentType + `\r
                                         label: "Approximation",
                                         options: ue,
                                         "model-value": de() !== "off" ? "auto" : g.value.approximationMode ?? "auto",
-                                        "onUpdate:modelValue": p[88] || (p[88] = (m)=>g.value.approximationMode = m)
+                                        "onUpdate:modelValue": p[89] || (p[89] = (m)=>g.value.approximationMode = m)
                                     }, null, 8, [
                                         "model-value"
                                     ]),
                                     f("div", F9, [
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Nav precision",
                                             min: 1,
                                             max: 1e3,
                                             step: 1,
                                             f: J,
                                             "model-value": $.value,
-                                            "onUpdate:modelValue": p[89] || (p[89] = (m)=>$.value = m)
+                                            "onUpdate:modelValue": p[90] || (p[90] = (m)=>$.value = m)
                                         }, null, 8, [
                                             "model-value"
                                         ])
                                     ]),
                                     g.value.approximationMode !== "perturbation" ? (C(), z("div", V9, [
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Radius ε",
                                             min: -12,
                                             max: 0,
                                             step: 1,
                                             f: pe,
                                             "model-value": R.value,
-                                            "onUpdate:modelValue": p[90] || (p[90] = (m)=>R.value = m)
+                                            "onUpdate:modelValue": p[91] || (p[91] = (m)=>R.value = m)
                                         }, null, 8, [
                                             "model-value"
                                         ]),
-                                        p[162] || (p[162] = f("div", {
+                                        p[163] || (p[163] = f("div", {
                                             class: "fld"
                                         }, [
                                             f("span", {
@@ -42596,7 +42622,7 @@ Content-Type: ` + u.contentType + `\r
                                             label: "Debug view",
                                             options: B,
                                             "model-value": g.value.debugView ?? 0,
-                                            "onUpdate:modelValue": p[91] || (p[91] = (m)=>g.value.debugView = Number(m))
+                                            "onUpdate:modelValue": p[92] || (p[92] = (m)=>g.value.debugView = Number(m))
                                         }, null, 8, [
                                             "model-value"
                                         ])
@@ -42646,41 +42672,41 @@ Content-Type: ` + u.contentType + `\r
                                         label: "Mode override",
                                         options: ce,
                                         "model-value": de(),
-                                        "onUpdate:modelValue": p[92] || (p[92] = (m)=>g.value.approximationMode = m === "off" ? "auto" : m)
+                                        "onUpdate:modelValue": p[93] || (p[93] = (m)=>g.value.approximationMode = m === "off" ? "auto" : m)
                                     }, null, 8, [
                                         "model-value"
                                     ]),
                                     f("div", W9, [
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Resolution",
                                             min: .125,
                                             max: 2,
                                             step: .125,
                                             f: be,
                                             "model-value": g.value.dprMultiplier ?? 1,
-                                            "onUpdate:modelValue": p[93] || (p[93] = (m)=>g.value.dprMultiplier = m)
+                                            "onUpdate:modelValue": p[94] || (p[94] = (m)=>g.value.dprMultiplier = m)
                                         }, null, 8, [
                                             "model-value"
                                         ]),
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Iterations",
                                             min: -2,
                                             max: 2,
                                             step: .01,
                                             f: le,
                                             "model-value": sc.value,
-                                            "onUpdate:modelValue": p[94] || (p[94] = (m)=>sc.value = m)
+                                            "onUpdate:modelValue": p[95] || (p[95] = (m)=>sc.value = m)
                                         }, null, 8, [
                                             "model-value"
                                         ]),
-                                        fe(ee(Ue), {
+                                        fe(ee(Ve), {
                                             label: "Target FPS",
                                             min: 10,
                                             max: 60,
                                             step: 1,
                                             f: E,
                                             "model-value": g.value.targetFps ?? 60,
-                                            "onUpdate:modelValue": p[95] || (p[95] = (m)=>g.value.targetFps = m)
+                                            "onUpdate:modelValue": p[96] || (p[96] = (m)=>g.value.targetFps = m)
                                         }, null, 8, [
                                             "model-value"
                                         ])
@@ -42697,7 +42723,7 @@ Content-Type: ` + u.contentType + `\r
                                     fe(ee(Ko), {
                                         label: "Debug Shading",
                                         "model-value": !!g.value.debugShading,
-                                        "onUpdate:modelValue": p[96] || (p[96] = (m)=>g.value.debugShading = m)
+                                        "onUpdate:modelValue": p[97] || (p[97] = (m)=>g.value.debugShading = m)
                                     }, null, 8, [
                                         "model-value"
                                     ])
@@ -42710,7 +42736,7 @@ Content-Type: ` + u.contentType + `\r
     }), k0 = Cr(X9, [
         [
             "__scopeId",
-            "data-v-bc1b9d2f"
+            "data-v-0c4371a4"
         ]
     ]), Z9 = {
         class: "render-stats"
@@ -43765,10 +43791,10 @@ Content-Type: ` + u.contentType + `\r
             }), Ye = Se(()=>{
                 const P = Y.value.map((M)=>M.frameMs).filter((M)=>M > 0);
                 return P.length ? P.reduce((M, se)=>M + se, 0) / P.length : 0;
-            }), Ve = Se(()=>s.passes.map((P)=>({
+            }), Ue = Se(()=>s.passes.map((P)=>({
                         ...P,
                         ms: H.value[P.key] ?? 0
-                    })).filter((P)=>P.ms > 1e-4).sort((P, M)=>M.ms - P.ms)), At = Se(()=>Ve.value.reduce((P, M)=>P + M.ms, 0)), ct = Se(()=>Math.max(Ye.value, At.value, .001)), dt = Se(()=>Math.max(0, ct.value - At.value));
+                    })).filter((P)=>P.ms > 1e-4).sort((P, M)=>M.ms - P.ms)), At = Se(()=>Ue.value.reduce((P, M)=>P + M.ms, 0)), ct = Se(()=>Math.max(Ye.value, At.value, .001)), dt = Se(()=>Math.max(0, ct.value - At.value));
             function jt(P) {
                 return P / ct.value * 100;
             }
@@ -43972,7 +43998,7 @@ Content-Type: ` + u.contentType + `\r
                             }, "(coût amorti par passe)")
                         ], -1)),
                         f("div", Lj, [
-                            (C(!0), z(Ce, null, tt(Ve.value, (se)=>(C(), z("div", {
+                            (C(!0), z(Ce, null, tt(Ue.value, (se)=>(C(), z("div", {
                                     key: "avg-" + se.key,
                                     class: "perf-seg",
                                     style: Ct({
@@ -45989,6 +46015,7 @@ Content-Type: ` + u.contentType + `\r
                 reliefDepth: 1,
                 protrusionPhase: 0,
                 protrusionSharpness: 2,
+                protrusionStrength: 1,
                 protrusionGeometryMix: 0,
                 protrusionPeriod: 1,
                 localShadowStrength: 0,
@@ -46024,7 +46051,7 @@ Content-Type: ` + u.contentType + `\r
                 return V;
             }
             const H = ge(ke());
-            let Ye = null, Ve = null, At = null, ct = 0;
+            let Ye = null, Ue = null, At = null, ct = 0;
             function dt(V) {
                 V?.startsWith("blob:") && URL.revokeObjectURL(V);
             }
@@ -46042,7 +46069,7 @@ Content-Type: ` + u.contentType + `\r
                         dt(et);
                         return;
                     }
-                    U === "tile" ? (dt(Ve), Ve = et, await V.updateTileTexture(et, xe)) : (dt(At), At = et, await V.updateSkyboxTexture(et, xe));
+                    U === "tile" ? (dt(Ue), Ue = et, await V.updateTileTexture(et, xe)) : (dt(At), At = et, await V.updateSkyboxTexture(et, xe));
                 }
             }
             async function Dn() {
@@ -46135,7 +46162,7 @@ Content-Type: ` + u.contentType + `\r
                     }
                 })();
             }), Yi(()=>{
-                T?.(), S?.(), C0(), w0(), window.removeEventListener("keydown", Rt), window.removeEventListener("pointerdown", sn), window.removeEventListener("keydown", re), window.removeEventListener("keyup", ae), window.removeEventListener("mousedown", Y), window.removeEventListener("mouseup", ue), window.removeEventListener("wheel", ce), window.removeEventListener("touchstart", de), window.removeEventListener("touchend", ie), window.removeEventListener("resize", le), dt(Ve), dt(At), J !== null && clearTimeout(J), i !== null && clearInterval(i);
+                T?.(), S?.(), C0(), w0(), window.removeEventListener("keydown", Rt), window.removeEventListener("pointerdown", sn), window.removeEventListener("keydown", re), window.removeEventListener("keyup", ae), window.removeEventListener("mousedown", Y), window.removeEventListener("mouseup", ue), window.removeEventListener("wheel", ce), window.removeEventListener("touchstart", de), window.removeEventListener("touchend", ie), window.removeEventListener("resize", le), dt(Ue), dt(At), J !== null && clearTimeout(J), i !== null && clearInterval(i);
             });
             function fn(V) {
                 return JSON.parse(JSON.stringify(V));
@@ -46617,7 +46644,7 @@ Content-Type: ` + u.contentType + `\r
                 if (H.value.colorStops = Uo(Yr, Nn.value.colorStops, G), U >= .5 && (Nn.value.textureName && (H.value.textureName = Nn.value.textureName, H.value.textureGuid = Nn.value.textureGuid), Nn.value.skyboxName && (H.value.skyboxName = Nn.value.skyboxName, H.value.skyboxGuid = Nn.value.skyboxGuid)), U < 1) mn = requestAnimationFrame(Go);
                 else {
                     const Q = Nn.value;
-                    H.value.mu = Q.mu ?? 4, H.value.stripeFrequency = Q.stripeFrequency ?? 8, H.value.colorStops = Q.colorStops, H.value.interpolationMode = Q.interpolationMode, H.value.approximationMode = Q.approximationMode, H.value.tessellationLevel = Q.tessellationLevel ?? 0, H.value.displacementAmount = Q.displacementAmount ?? 0, H.value.ambientOcclusionStrength = Q.ambientOcclusionStrength ?? 0, H.value.microBumpStrength = Q.microBumpStrength ?? 0, H.value.reliefDepth = Q.reliefDepth ?? 1, H.value.protrusionPhase = Q.protrusionPhase ?? 0, H.value.protrusionSharpness = Q.protrusionSharpness ?? 2, H.value.protrusionGeometryMix = Q.protrusionGeometryMix ?? 0, H.value.protrusionPeriod = Q.protrusionPeriod ?? 1, H.value.localShadowStrength = Q.localShadowStrength ?? 0, H.value.varnishStrength = Q.varnishStrength ?? 0, H.value.gradeContrast = Q.gradeContrast ?? 1.18, H.value.gradeSaturation = Q.gradeSaturation ?? 1.12, H.value.orbitTrap = jn(Q), H.value.orbitTrapStrength = H.value.orbitTrap.strength, H.value.phaseColoringStrength = Q.phaseColoringStrength ?? 0, H.value.heightPaletteShift = Q.heightPaletteShift ?? 0, H.value.palettePeriod = Q.palettePeriod ?? 256, H.value.paletteOffset = Q.paletteOffset ?? 0, H.value.paletteMirror = Q.paletteMirror ?? !1, H.value.textureMapping = Q.textureMapping, e.value?.resetReferenceTo(Q.cx, Q.cy, Q.scale, Q.angle ?? H.value.angle), Nn = null, mn = null, R.value = !1, y.value += 1, qa(0);
+                    H.value.mu = Q.mu ?? 4, H.value.stripeFrequency = Q.stripeFrequency ?? 8, H.value.colorStops = Q.colorStops, H.value.interpolationMode = Q.interpolationMode, H.value.approximationMode = Q.approximationMode, H.value.tessellationLevel = Q.tessellationLevel ?? 0, H.value.displacementAmount = Q.displacementAmount ?? 0, H.value.ambientOcclusionStrength = Q.ambientOcclusionStrength ?? 0, H.value.microBumpStrength = Q.microBumpStrength ?? 0, H.value.reliefDepth = Q.reliefDepth ?? 1, H.value.protrusionPhase = Q.protrusionPhase ?? 0, H.value.protrusionSharpness = Q.protrusionSharpness ?? 2, H.value.protrusionStrength = Q.protrusionStrength ?? 1, H.value.protrusionGeometryMix = Q.protrusionGeometryMix ?? 0, H.value.protrusionPeriod = Q.protrusionPeriod ?? 1, H.value.localShadowStrength = Q.localShadowStrength ?? 0, H.value.varnishStrength = Q.varnishStrength ?? 0, H.value.gradeContrast = Q.gradeContrast ?? 1.18, H.value.gradeSaturation = Q.gradeSaturation ?? 1.12, H.value.orbitTrap = jn(Q), H.value.orbitTrapStrength = H.value.orbitTrap.strength, H.value.phaseColoringStrength = Q.phaseColoringStrength ?? 0, H.value.heightPaletteShift = Q.heightPaletteShift ?? 0, H.value.palettePeriod = Q.palettePeriod ?? 256, H.value.paletteOffset = Q.paletteOffset ?? 0, H.value.paletteMirror = Q.paletteMirror ?? !1, H.value.textureMapping = Q.textureMapping, e.value?.resetReferenceTo(Q.cx, Q.cy, Q.scale, Q.angle ?? H.value.angle), Nn = null, mn = null, R.value = !1, y.value += 1, qa(0);
                 }
             }
             function gn(V) {
@@ -46863,6 +46890,7 @@ Content-Type: ` + u.contentType + `\r
                         reliefDepth: H.value.reliefDepth,
                         protrusionPhase: H.value.protrusionPhase,
                         protrusionSharpness: H.value.protrusionSharpness,
+                        protrusionStrength: H.value.protrusionStrength,
                         protrusionGeometryMix: H.value.protrusionGeometryMix,
                         protrusionPeriod: H.value.protrusionPeriod,
                         localShadowStrength: H.value.localShadowStrength,
@@ -46910,6 +46938,7 @@ Content-Type: ` + u.contentType + `\r
                         "reliefDepth",
                         "protrusionPhase",
                         "protrusionSharpness",
+                        "protrusionStrength",
                         "protrusionGeometryMix",
                         "protrusionPeriod",
                         "localShadowStrength",
@@ -47498,7 +47527,7 @@ Content-Type: ` + u.contentType + `\r
     }), XJ = Cr(KJ, [
         [
             "__scopeId",
-            "data-v-95fc0562"
+            "data-v-6eea3f50"
         ]
     ]), ZJ = {
         class: "shortcut-groups"

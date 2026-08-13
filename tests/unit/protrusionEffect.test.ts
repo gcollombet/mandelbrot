@@ -45,7 +45,9 @@ describe('palette protrusion effect', () => {
     expect(shader).toContain('let protrusionSharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);');
     expect(shader).toContain('let protrusionWave = 0.5 + 0.5 * cos(TWO_PI * fract(v_smooth - protrusionPhase));');
     expect(shader).toContain('let protrusionLobe = pow(max(protrusionWave, 0.0), protrusionSharpness);');
-    expect(shader).toContain('let iterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);');
+    expect(shader).toContain('let baseIterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);');
+    expect(shader).toContain('let protrusionStrength = clamp(parameters.protrusionStrength, 1.0, 4.0);');
+    expect(shader).toContain('let iterationProtrusionGain = 1.0 + protrusionStrength * (baseIterationProtrusionGain - 1.0);');
     expect(shader).toContain('let protrusionGeometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);');
     expect(shader).toContain('if (protrusionGeometryMix > 0.001 && needsFractalGradient)');
     expect(shader).toContain('let protrusionPeriod = clamp(parameters.protrusionPeriod, 0.1, 16.0);');
@@ -55,6 +57,11 @@ describe('palette protrusion effect', () => {
     expect(shader).toContain('let styledAnalyticRelief = effectiveAnalyticRelief * protrusionGain;');
     expect(shader).toContain('let heightGradient = grad * (0.34 * styledAnalyticRelief);');
     expect(editor).toContain("protrusion: 'Protubérances'");
+
+    const amplify = (baseGain: number, strength: number) => 1 + strength * (baseGain - 1);
+    expect(amplify(4, 1)).toBe(4);
+    expect(amplify(4, 4)).toBe(13);
+    expect(amplify(4, 4) - 1).toBe(4 * (amplify(4, 1) - 1));
   });
 
   it('persists global shape controls and reuses uniform padding in both renderers', () => {
@@ -67,38 +74,46 @@ describe('palette protrusion effect', () => {
 
     expect(params).toContain('protrusionPhase?: number;');
     expect(params).toContain('protrusionSharpness?: number;');
+    expect(params).toContain('protrusionStrength?: number;');
     expect(params).toContain('protrusionGeometryMix?: number;');
     expect(params).toContain('protrusionPeriod?: number;');
     expect(paletteStore).toContain('protrusionPhase?: number;');
     expect(paletteStore).toContain('protrusionSharpness?: number;');
+    expect(paletteStore).toContain('protrusionStrength?: number;');
     expect(paletteStore).toContain('protrusionGeometryMix?: number;');
     expect(paletteStore).toContain('protrusionPeriod?: number;');
     expect(settings).toContain('protrusionPhase: model.value.protrusionPhase');
     expect(settings).toContain('protrusionSharpness: model.value.protrusionSharpness');
+    expect(settings).toContain('protrusionStrength: model.value.protrusionStrength');
     expect(settings).toContain('protrusionGeometryMix: model.value.protrusionGeometryMix');
     expect(settings).toContain('protrusionPeriod: model.value.protrusionPeriod');
     expect(settings).toContain('model.value.protrusionPhase = source.protrusionPhase ?? 0;');
     expect(settings).toContain('model.value.protrusionSharpness = source.protrusionSharpness ?? 2;');
+    expect(settings).toContain('model.value.protrusionStrength = source.protrusionStrength ?? 1;');
     expect(settings).toContain('model.value.protrusionGeometryMix = source.protrusionGeometryMix ?? 0;');
     expect(settings).toContain('model.value.protrusionPeriod = source.protrusionPeriod ?? 1;');
     expect(settings).toContain('label="Phase protubérances"');
     expect(settings).toContain('label="Netteté protubérances"');
-    expect(settings).toContain('label="Protubérances géométriques"');
+    expect(settings).toContain('<DenseField label="Amplification protubérances" :min="1" :max="4"');
+    expect(settings).toContain('<DenseField label="Protubérances géométriques" :min="0" :max="1"');
     expect(settings).toContain('label="Période géométrique"');
 
     expect(engine).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 96');
     expect(engine).toContain('renderOptions.protrusionPhase ?? 0,   // 68: protrusionPhase');
     expect(engine).toContain('renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness');
-    expect(engine).toContain('renderOptions.protrusionGeometryMix ?? 0, // 70: protrusionGeometryMix');
+    expect(engine).toContain('renderOptions.protrusionGeometryMix ?? 0,');
     expect(engine).toContain('renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod');
+    expect(engine).toContain('renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification');
     expect(shader).toContain('protrusionPhase: f32');
     expect(shader).toContain('protrusionSharpness: f32');
+    expect(shader).toContain('protrusionStrength: f32');
     expect(shader).toContain('protrusionGeometryMix: f32');
     expect(shader).toContain('protrusionPeriod: f32');
     expect(preview).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 96;');
     expect(preview).toContain('device.queue.writeBuffer(uniformBuffer, 68 * 4');
     expect(preview).toContain('props.protrusionPhase ?? 0');
     expect(preview).toContain('props.protrusionSharpness ?? 2');
+    expect(preview).toContain('props.protrusionStrength ?? 1');
     expect(preview).toContain('props.protrusionGeometryMix ?? 0');
     expect(preview).toContain('props.protrusionPeriod ?? 1');
   });

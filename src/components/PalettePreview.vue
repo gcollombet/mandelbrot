@@ -72,6 +72,7 @@ const props = defineProps<{
   reliefDepth?: number;
   protrusionPhase?: number;
   protrusionSharpness?: number;
+  protrusionStrength?: number;
   protrusionGeometryMix?: number;
   protrusionPeriod?: number;
   localShadowStrength?: number;
@@ -500,7 +501,8 @@ async function init() {
     props.protrusionGeometryMix ?? 0, // protrusionGeometryMix
     props.protrusionPeriod ?? 1, // protrusionPeriod
     ...orbitTrapColorUniformValues(orbitTrap),
-    0, 0, 0,
+    props.protrusionStrength ?? 1, // protrusionStrength
+    0, 0,
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -666,7 +668,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.orbitTrap, () => props.phaseColoringStrength, () => props.textureMapping],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionStrength, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.orbitTrap, () => props.phaseColoringStrength, () => props.textureMapping],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = PREVIEW_LIGHT_ANGLE;
@@ -716,7 +718,8 @@ watch(
     ]).buffer as ArrayBuffer);
     device.queue.writeBuffer(uniformBuffer, 72 * 4, new Float32Array([
       ...orbitTrapColorUniformValues(orbitTrap),
-      0, 0, 0,
+      props.protrusionStrength ?? 1,
+      0, 0,
     ]).buffer as ArrayBuffer);
     render();
   },

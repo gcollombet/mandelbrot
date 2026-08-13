@@ -96,7 +96,7 @@ struct Uniforms {
   orbitTrapStartIteration: f32,
   orbitTrapEndIteration: f32,
   orbitTrapIncludeInterior: f32,
-  _pad93: f32,
+  protrusionStrength: f32,    // iteration-profile effect amplification [1, 4]
   _pad94: f32,
   _pad95: f32,
 };
@@ -727,7 +727,9 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
     let protrusionSharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
     let protrusionWave = 0.5 + 0.5 * cos(TWO_PI * fract(v_smooth - protrusionPhase));
     let protrusionLobe = pow(max(protrusionWave, 0.0), protrusionSharpness);
-    let iterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
+    let baseIterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
+    let protrusionStrength = clamp(parameters.protrusionStrength, 1.0, 4.0);
+    let iterationProtrusionGain = 1.0 + protrusionStrength * (baseIterationProtrusionGain - 1.0);
     let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
     let stripeReliefStrength = fx.wStripeRelief * effShading;
     let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
@@ -759,8 +761,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
       slope = length(grad);
     }
     // Geometric branch: q(theta + pi) = -q(theta), so q has zero mean over a
-    // period. Multiplying grad(H) by 1 + a*q(H) is therefore the gradient of a
-    // periodic scalar reparameterization of canonical distance height H.
+    // period. The multiplier remains a scalar function of canonical height H.
     let protrusionGeometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);
     var protrusionGain = iterationProtrusionGain;
     if (protrusionGeometryMix > 0.001 && needsFractalGradient) {

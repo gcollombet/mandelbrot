@@ -379,6 +379,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   reliefDepth: 1,
   protrusionPhase: 0,
   protrusionSharpness: 2,
+  protrusionStrength: 1,
   protrusionGeometryMix: 0,
   protrusionPeriod: 1,
   localShadowStrength: 0,
@@ -1492,6 +1493,7 @@ function tickTravelAnimation() {
     mandelbrotParams.value.reliefDepth = target.reliefDepth ?? 1;
     mandelbrotParams.value.protrusionPhase = target.protrusionPhase ?? 0;
     mandelbrotParams.value.protrusionSharpness = target.protrusionSharpness ?? 2;
+    mandelbrotParams.value.protrusionStrength = target.protrusionStrength ?? 1;
     mandelbrotParams.value.protrusionGeometryMix = target.protrusionGeometryMix ?? 0;
     mandelbrotParams.value.protrusionPeriod = target.protrusionPeriod ?? 1;
     mandelbrotParams.value.localShadowStrength = target.localShadowStrength ?? 0;
@@ -1705,6 +1707,7 @@ function startTravelToPreset(preset: PresetRecord) {
       :reliefDepth="mandelbrotParams.reliefDepth"
       :protrusionPhase="mandelbrotParams.protrusionPhase"
       :protrusionSharpness="mandelbrotParams.protrusionSharpness"
+      :protrusionStrength="mandelbrotParams.protrusionStrength"
       :protrusionGeometryMix="mandelbrotParams.protrusionGeometryMix"
       :protrusionPeriod="mandelbrotParams.protrusionPeriod"
       :localShadowStrength="mandelbrotParams.localShadowStrength"

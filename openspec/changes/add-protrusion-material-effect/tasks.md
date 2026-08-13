@@ -26,3 +26,9 @@
 - [x] 5.2 Propagate both values through the component chain and color/preview uniform slots 70 and 71 without growing the buffers.
 - [x] 5.3 Implement the scalar height-gradient profile and continuous blend with the iteration-phase profile.
 - [x] 5.4 Extend contracts and rerun TypeScript, unit, WGSL, and OpenSpec validation.
+
+## 6. Iteration-Profile Amplification
+
+- [x] 6.1 Restore geometric mix to `[0, 1]` and add a persisted iteration-profile strength control in `[1, 4]` using reserved uniform slot 93.
+- [x] 6.2 Amplify the iteration multiplier's departure from neutral, keeping strength `1` identical to the original effect and avoiding exponential over-amplification.
+- [x] 6.3 Extend regression contracts and rerun TypeScript, unit, WGSL, and strict OpenSpec validation.
