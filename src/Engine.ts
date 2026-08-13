@@ -32,6 +32,7 @@ import type {ColorStop} from './ColorStop.ts'
 import {resolveDirectionCoherenceReliefTilt, resolveStripeReliefTilt} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
 import {computeAaJitterOffset} from './Mandelbrot.ts'
+import {iterationPaletteCurveCode, type IterationPaletteCurve} from './IterationPaletteCurve.ts'
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
 import {DISPLAY_VALUE_LAYERS, float16ToFloat32, isDisplaySetCurrent} from './displayGeometry'
@@ -593,6 +594,7 @@ export type RenderOptions = {
     paletteOffset: number,
     heightPaletteShift: number,
     paletteMirror: boolean,
+    iterationPaletteCurve: IterationPaletteCurve,
     colorStops: ColorStop[],
     interpolationMode: InterpolationMode,
     activateAnimate: boolean,
@@ -2382,7 +2384,8 @@ export class Engine {
             this.uniformBufferAaTarget = this.device.createBuffer({
                 // 16 × f32 (shared bake/reseed): [antialiasLevel, aaSampleIndex,
                 // screenHeightPx, aaLogDelta, aaAnalytic, aspect, sceneSin,
-                // sceneCos, screenWidthPx, palettePeriod, mu, logMu, aaContrast, pads]
+                // sceneCos, screenWidthPx, palettePeriod, mu, logMu, aaContrast,
+                // aaFull, iterationPaletteCurve, pad]
                 size: 64,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
                 label: 'Engine UniformBuffer AaParams',
@@ -5159,7 +5162,8 @@ export class Engine {
             renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod [0.1, 16]
             ...orbitTrapColorUniformValues(orbitTrap), // 72..92: structured orbit-trap configuration
             renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification [1, 4]
-            0, 0,                                // 94..95: alignment / future trap payload fields
+            iterationPaletteCurveCode(renderOptions.iterationPaletteCurve), // 94: iterationPaletteCurve
+            0,                                   // 95: alignment / future payload field
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -6168,7 +6172,8 @@ export class Engine {
                     Math.log(Math.max(bakeMandelbrot.mu, 1e-6)),
                     this.aaContrastEnabled ? 1 : 0,
                     renderOptions.aaAdaptive === false ? 1 : 0, // aaFull: uniform budget (A/B vs adaptive)
-                    0, 0,
+                    iterationPaletteCurveCode(renderOptions.iterationPaletteCurve),
+                    0,
                 ]).buffer,
             )
             const bakePass = commandEncoder.beginComputePass()

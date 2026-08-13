@@ -2,6 +2,7 @@ import type {ColorStop} from "./ColorStop.ts";
 import type {TextureMappingConfig} from "./TextureMapping.ts";
 import type {AnimationConfig} from "./AnimationConfig.ts";
 import type {OrbitTrapConfig} from "./OrbitTrap.ts";
+import type {IterationPaletteCurve} from "./IterationPaletteCurve.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
 export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet' | 'mobius' | 'auto';
@@ -23,6 +24,7 @@ export interface MandelbrotParams {
     paletteOffset: number;
     heightPaletteShift: number;
     paletteMirror: boolean;
+    iterationPaletteCurve: IterationPaletteCurve;
     dprMultiplier: number;
     targetFps: number;
     stripeFrequency: number;

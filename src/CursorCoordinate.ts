@@ -1,3 +1,5 @@
+import {applyIterationPaletteCurve, type IterationPaletteCurve} from './IterationPaletteCurve';
+
 /**
  * CursorCoordinate — reusable helper that converts canvas pixel positions
  * to Mandelbrot complex-plane coordinates.
@@ -182,7 +184,7 @@ export interface PalettePhaseResult {
  *   nu = iter + mu_val
  *   v = nu (smoothness activé) ou iter (désactivé)
  *   deep = v * 2
- *   palettePhase = fract(deep / palettePeriod + paletteOffset)
+ *   palettePhase = fract(curve(deep / palettePeriod) + paletteOffset)
  *
  * @param data       – données d'itération lues depuis le GPU
  * @param mu         – rayon d'échappement (paramètre Mandelbrot)
@@ -190,6 +192,7 @@ export interface PalettePhaseResult {
  * @param paletteOffset  – décalage de la palette
  * @param smooth     – utiliser le lissage (activateSmoothness)
  * @param mirror     – alterner les cycles gauche-droite puis droite-gauche
+ * @param curve      – distribution de l'itération avant périodisation
  */
 export function computePalettePhase(
   data: IterationData,
@@ -198,6 +201,7 @@ export function computePalettePhase(
   paletteOffset: number,
   smooth = true,
   mirror = false,
+  curve: IterationPaletteCurve = 'linear',
 ): PalettePhaseResult {
   // Pixel dans l'ensemble : iter == 0
   if (data.iter === 0) {
@@ -222,7 +226,7 @@ export function computePalettePhase(
   const v = smooth ? nu : data.iter;
   const deep = v * 2;
   const paletteRepeat = Math.max(palettePeriod, 0.0001);
-  const rawPhase = deep / paletteRepeat + paletteOffset;
+  const rawPhase = applyIterationPaletteCurve(deep / paletteRepeat, curve) + paletteOffset;
   const phaseForward = ((rawPhase % 1) + 1) % 1; // fract() positif
   const cycle = Math.floor(rawPhase);
   const phase = mirror && Math.abs(cycle % 2) === 1 ? Math.min(1 - phaseForward, 0.99999994) : phaseForward;
@@ -235,15 +239,16 @@ export function computePalettePhase(
  * sur le pixel ayant la valeur nu donnée.
  *
  * Formule inverse :
- *   palettePhase = fract(nu * 2 / palettePeriod + paletteOffset)
- *   => paletteOffset = targetPhase - nu * 2 / palettePeriod   (mod 1)
+ *   palettePhase = fract(curve(nu * 2 / palettePeriod) + paletteOffset)
+ *   => paletteOffset = targetPhase - curve(nu * 2 / palettePeriod)   (mod 1)
  */
 export function computeOffsetForPhase(
   nu: number,
   palettePeriod: number,
   targetPhase = 0,
+  curve: IterationPaletteCurve = 'linear',
 ): number {
   const paletteRepeat = Math.max(palettePeriod, 0.0001);
-  const raw = targetPhase - (nu * 2) / paletteRepeat;
+  const raw = targetPhase - applyIterationPaletteCurve((nu * 2) / paletteRepeat, curve);
   return ((raw % 1) + 1) % 1; // fract() positif
 }

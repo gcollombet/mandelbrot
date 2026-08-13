@@ -35,7 +35,7 @@ struct AaParams {
   logMu: f32,           // ln(mu)
   aaContrast: f32,      // 1 = contrast + moiré predictors enabled
   aaFull: f32,          // 1 = FULL AA: every texel gets the whole budget (A/B vs adaptive)
-  _pad1: f32,
+  iterationPaletteCurve: f32, // 0 linear, 1 soft root, 2 logarithmic, 3 quadratic
   _pad2: f32,
 };
 
@@ -100,6 +100,21 @@ fn nu_at(coord: vec2<i32>, dim: vec2<i32>) -> f32 {
   let logMu = max(params.logMu, 1e-6);
   let frac = clamp(1.0 - log(max(log(max(z_sq, 1e-12)) / logMu, 1e-12)) / log(2.0), 0.0, 1.0);
   return iter + frac;
+}
+
+fn iteration_palette_curve_derivative(coordinate: f32) -> f32 {
+  let u = max(coordinate, 0.0);
+  let mode = i32(round(params.iterationPaletteCurve));
+  if (mode == 1) {
+    return 1.0 / (2.0 * 0.4142135623730951 * sqrt(1.0 + u));
+  }
+  if (mode == 2) {
+    return 1.0 / ((1.0 + u) * log(2.0));
+  }
+  if (mode == 3) {
+    return 2.0 * (1.0 + u) / 3.0;
+  }
+  return 1.0;
 }
 
 @compute @workgroup_size(16, 16)
@@ -172,8 +187,8 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       tgt = max(tgt, 1.0 + tc * (level - 1.0));
 
       // ── 3. Moiré saturation (palette phase frequency past Nyquist) ──
-      // color.wgsl: phase = ν·2 / palettePeriod → phase step per texel =
-      // |∇ν|·2 / period. Central differences on valid escaped neighbours;
+      // color.wgsl: phase = F(ν·2 / palettePeriod), so phase step per texel is
+      // |∇ν|·2/period·F′. Central differences on valid escaped neighbours;
       // the boundary-divergent ν band is already covered by the DE ramp.
       let nuC = nu_at(coord, dimI);
       if (nuC >= 0.0) {
@@ -183,7 +198,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let nD = nu_at(coord - vec2<i32>(0, 1), dimI);
         let gnx = 0.5 * (select(nuC, nR, nR >= 0.0) - select(nuC, nL, nL >= 0.0));
         let gny = 0.5 * (select(nuC, nU, nU >= 0.0) - select(nuC, nD, nD >= 0.0));
-        let phaseStep = sqrt(gnx * gnx + gny * gny) * 2.0 / max(params.palettePeriod, 1e-4);
+        let iterationScale = 2.0 / max(params.palettePeriod, 1e-4);
+        let normalizedIteration = max(nuC * iterationScale, 0.0);
+        let curveDerivative = iteration_palette_curve_derivative(normalizedIteration);
+        let phaseStep = sqrt(gnx * gnx + gny * gny) * iterationScale * curveDerivative;
         if (phaseStep > NYQUIST_PHASE_STEP) {
           tgt = level;
         }

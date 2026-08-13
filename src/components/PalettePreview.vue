@@ -16,6 +16,7 @@ import {
   packDisplayMetadata,
 } from '../displayGeometry';
 import {normalizeOrbitTrapFromLegacy, orbitTrapColorUniformValues, type OrbitTrapConfig} from '../OrbitTrap';
+import {iterationPaletteCurveCode, type IterationPaletteCurve} from '../IterationPaletteCurve';
 
 // ── Float32 → Float16 (copied from Engine.ts) ──
 const _f32 = new Float32Array(1);
@@ -63,6 +64,7 @@ const PREVIEW_LIGHT_ANGLE = 3.927;
 const props = defineProps<{
   colorStops: ColorStop[];
   interpolationMode?: InterpolationMode;
+  iterationPaletteCurve?: IterationPaletteCurve;
   tileTextureUrl?: string | null;
   skyboxTextureUrl?: string | null;
   tessellationLevel?: number;
@@ -421,8 +423,8 @@ async function init() {
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
     label: 'PalettePreview UniformBuffer',
   });
-  // palettePeriod = ITER_COUNT * 2 to compensate for the `* 2.0` in the shader's
-  // `deep = v * 2.0; palettePhase = fract(deep / palettePeriod)`, so we get exactly one cycle.
+  // All curves share F(0)=0 and F(1)=1, so ITER_COUNT * 2 displays exactly
+  // the first warped palette cycle for the synthetic iteration range.
   const previewLightAngle = PREVIEW_LIGHT_ANGLE;
   const previewLightLen = Math.hypot(Math.cos(previewLightAngle), Math.sin(previewLightAngle), 1.85);
   const textureMapping = normalizeTextureMappingFromLegacy({ textureMapping: props.textureMapping });
@@ -502,7 +504,8 @@ async function init() {
     props.protrusionPeriod ?? 1, // protrusionPeriod
     ...orbitTrapColorUniformValues(orbitTrap),
     props.protrusionStrength ?? 1, // protrusionStrength
-    0, 0,
+    iterationPaletteCurveCode(props.iterationPaletteCurve), // iterationPaletteCurve
+    0,
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -668,7 +671,7 @@ watch(
 
 // Re-render when material-shaping uniforms change
 watch(
-  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionStrength, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.orbitTrap, () => props.phaseColoringStrength, () => props.textureMapping],
+  [() => props.tessellationLevel, () => props.displacementAmount, () => props.ambientOcclusionStrength, () => props.microBumpStrength, () => props.reliefDepth, () => props.protrusionPhase, () => props.protrusionSharpness, () => props.protrusionStrength, () => props.protrusionGeometryMix, () => props.protrusionPeriod, () => props.localShadowStrength, () => props.varnishStrength, () => props.gradeContrast, () => props.gradeSaturation, () => props.orbitTrapStrength, () => props.orbitTrap, () => props.phaseColoringStrength, () => props.textureMapping, () => props.iterationPaletteCurve],
   () => {
     if (!device || !uniformBuffer) return;
     const previewLightAngle = PREVIEW_LIGHT_ANGLE;
@@ -719,7 +722,8 @@ watch(
     device.queue.writeBuffer(uniformBuffer, 72 * 4, new Float32Array([
       ...orbitTrapColorUniformValues(orbitTrap),
       props.protrusionStrength ?? 1,
-      0, 0,
+      iterationPaletteCurveCode(props.iterationPaletteCurve),
+      0,
     ]).buffer as ArrayBuffer);
     render();
   },

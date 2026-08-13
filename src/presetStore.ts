@@ -15,6 +15,7 @@ import type { MandelbrotParams } from './Mandelbrot';
 import {normalizeColorStops} from './ColorStop';
 import {createGuid, defaultPresetName, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import {log10FromDecimalString} from './floatexp';
+import {normalizeIterationPaletteCurve} from './IterationPaletteCurve';
 import {
   deletedCacheFields,
   isVisibleCacheRecord,
@@ -137,6 +138,7 @@ export function computeScaleExponent(scale: string | number): number {
 function normalizePresetValue(value: MandelbrotParams): MandelbrotParams {
   const normalized = JSON.parse(JSON.stringify(value)) as MandelbrotParams;
   normalized.colorStops = normalizeColorStops(Array.isArray(normalized.colorStops) ? normalized.colorStops : []);
+  normalized.iterationPaletteCurve = normalizeIterationPaletteCurve(normalized.iterationPaletteCurve);
   return normalized;
 }
 

@@ -74,6 +74,10 @@ import {
   cloneAnimationConfig,
   normalizeAnimationConfig,
 } from '../AnimationConfig';
+import {
+  normalizeIterationPaletteCurve,
+  type IterationPaletteCurve,
+} from '../IterationPaletteCurve';
 import type {AnimationPresetRecord} from '../animationPresetStore';
 import {
   saveAnimationPresetEntry,
@@ -204,6 +208,7 @@ const model =  defineModel<MandelbrotParams>({
      paletteOffset: 0,
      heightPaletteShift: 0,
     paletteMirror: false,
+    iterationPaletteCurve: 'linear',
     antialiasLevel: 1,
     aaAuto: false,
     aaAdaptive: true,
@@ -260,6 +265,13 @@ const orbitTrapModeOptions = [
   { label: 'Terminal · Rosace', value: 'terminal' },
   { label: 'Orbite · Échantillonné', value: 'sampled' },
   { label: 'Orbite · Exact', value: 'exact' },
+];
+
+const iterationPaletteCurveOptions: {label: string; value: IterationPaletteCurve}[] = [
+  { label: 'Linéaire', value: 'linear' },
+  { label: 'Racine douce', value: 'soft-root' },
+  { label: 'Logarithmique', value: 'logarithmic' },
+  { label: 'Quadratique', value: 'quadratic' },
 ];
 
 const orbitTrapConfig = computed(() => normalizeOrbitTrapFromLegacy(model.value));
@@ -1198,6 +1210,7 @@ async function savePalette() {
     paletteOffset: model.value.paletteOffset,
     heightPaletteShift: model.value.heightPaletteShift,
     paletteMirror: model.value.paletteMirror,
+    iterationPaletteCurve: normalizeIterationPaletteCurve(model.value.iterationPaletteCurve),
     tessellationLevel: model.value.tessellationLevel,
     displacementAmount: model.value.displacementAmount,
     ambientOcclusionStrength: model.value.ambientOcclusionStrength,
@@ -1224,6 +1237,7 @@ async function savePalette() {
 }
 
 function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
+  model.value.iterationPaletteCurve = normalizeIterationPaletteCurve(source.iterationPaletteCurve);
   model.value.tessellationLevel = source.tessellationLevel ?? 0;
   model.value.displacementAmount = source.displacementAmount ?? 0;
   model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
@@ -2886,6 +2900,7 @@ async function importSkyboxTexture(event: Event) {
           class="palette-strip-fill"
           :colorStops="model.colorStops"
           :interpolationMode="model.interpolationMode"
+          :iterationPaletteCurve="model.iterationPaletteCurve"
           :tileTextureUrl="activeBlobUrl"
           :skyboxTextureUrl="activeSkyboxBlobUrl"
           :tessellationLevel="model.tessellationLevel"
@@ -2937,6 +2952,10 @@ async function importSkyboxTexture(event: Event) {
       <div class="pins">
         <DenseField label="Période" :min="0" :max="1" :step="0.001" :f="palettePeriodFmt"
           :model-value="sliderPalettePeriod" @update:model-value="(v: number) => sliderPalettePeriod = v" />
+        <DenseSelect label="Distribution"
+          :options="iterationPaletteCurveOptions"
+          :model-value="normalizeIterationPaletteCurve(model.iterationPaletteCurve)"
+          @update:model-value="(v: string | number) => model.iterationPaletteCurve = normalizeIterationPaletteCurve(v)" />
         <DenseField label="Offset" :min="0" :max="1" :step="0.001" :f="pctFmt"
           :model-value="model.paletteOffset ?? 0" @update:model-value="(v: number) => model.paletteOffset = v" />
         <DenseField label="Décalage hauteur" :min="0" :max="100" :step="0.01" f="p2"

@@ -24,6 +24,7 @@ import type {IterationData} from '../CursorCoordinate';
 import {computePalettePhase} from '../CursorCoordinate';
 import {Palette} from '../Palette';
 import {normalizeAnimationConfig} from '../AnimationConfig';
+import {normalizeIterationPaletteCurve} from '../IterationPaletteCurve';
 import {createInterpolatedColorStop, getEffectValue, normalizeColorStops, type ColorStop} from '../ColorStop';
 import {EFFECT_FIELD_NAMES} from '../effectFieldConfig';
 import {interpolateRgb} from 'd3-interpolate';
@@ -238,7 +239,7 @@ function onPalettePick(data: IterationData, _clientX: number, _clientY: number) 
   // Always use smooth=true for picking — per-stop smoothness is baked in the texture
   const result = computePalettePhase(
     data, p.mu, p.palettePeriod, p.paletteOffset, true,
-    p.paletteMirror,
+    p.paletteMirror, p.iterationPaletteCurve,
   );
   if (result.isInSet) return; // pas de curseur pour les points dans l'ensemble
   const stops = p.colorStops;
@@ -352,6 +353,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   paletteOffset: 0.0,
   heightPaletteShift: 0,
   paletteMirror: false,
+  iterationPaletteCurve: 'linear',
   lightAngle: 0,
   antialiasLevel: 1,
   aaAuto: false,
@@ -419,6 +421,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
   params.animation = normalizeAnimationConfig(params.animation, params.animationSpeed);
   params.textureMapping = normalizeTextureMappingFromLegacy(params);
   params.orbitTrap = normalizeOrbitTrapFromLegacy(params);
+  params.iterationPaletteCurve = normalizeIterationPaletteCurve(params.iterationPaletteCurve);
   params.colorStops = normalizeColorStops(Array.isArray(params.colorStops) ? params.colorStops : DEFAULT_MANDELBROT_PARAMS.colorStops);
   stripExplorationStateFields(params);
   const stored = params as unknown as Record<string, unknown>;
@@ -443,6 +446,7 @@ function applyPresetRecord(record: PresetRecord): void {
   saved.textureMapping = normalizeTextureMappingFromLegacy(saved);
   saved.orbitTrap = normalizeOrbitTrapFromLegacy(saved);
   saved.orbitTrapStrength = saved.orbitTrap.strength;
+  saved.iterationPaletteCurve = normalizeIterationPaletteCurve(saved.iterationPaletteCurve);
   saved.animation = normalizeAnimationConfig(saved.animation, saved.animationSpeed);
   delete (saved as Partial<MandelbrotParams>).textureMappingMode;
   saved.activateAnimate = mandelbrotParams.value.activateAnimate;
@@ -927,11 +931,12 @@ function timestampForFilename(): string {
 async function downloadCanvasSnapshot() {
   const canvas = mandelbrotCtrlRef.value?.getCanvas?.() ?? null;
   if (!canvas) return;
+  const timestamp = timestampForFilename();
 
   const triggerDownload = (url: string, ext: 'webp' | 'png') => {
     const a = document.createElement('a');
     a.href = url;
-    a.download = `mandelbrot-${timestampForFilename()}.${ext}`;
+    a.download = `mandelbrot-${timestamp}.${ext}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
@@ -949,9 +954,9 @@ async function downloadCanvasSnapshot() {
         resolve();
       }, 'image/webp', 0.95);
     });
-    return;
   }
 
+  // PNG is always exported as the lossless counterpart to the compact WebP.
   await new Promise<void>((resolve) => {
     canvas.toBlob((blob) => {
       if (blob) {
@@ -1581,6 +1586,7 @@ function tickTravelAnimation() {
     mandelbrotParams.value.palettePeriod = target.palettePeriod ?? 256;
     mandelbrotParams.value.paletteOffset = target.paletteOffset ?? 0;
     mandelbrotParams.value.paletteMirror = target.paletteMirror ?? false;
+    mandelbrotParams.value.iterationPaletteCurve = normalizeIterationPaletteCurve(target.iterationPaletteCurve);
     mandelbrotParams.value.textureMapping = target.textureMapping;
 
     // The travel finalises cx/cy/scale through the navigator's transition in the
@@ -1764,6 +1770,7 @@ function startTravelToPreset(preset: PresetRecord) {
       :paletteOffset="mandelbrotParams.paletteOffset"
       :heightPaletteShift="mandelbrotParams.heightPaletteShift"
       :paletteMirror="mandelbrotParams.paletteMirror"
+      :iterationPaletteCurve="mandelbrotParams.iterationPaletteCurve"
       :colorStops="mandelbrotParams.colorStops"
       :activateAnimate="mandelbrotParams.activateAnimate"
       :debugShading="mandelbrotParams.debugShading"
@@ -1850,7 +1857,7 @@ function startTravelToPreset(preset: PresetRecord) {
         v-show="!discoveryRadarActive"
         class="fab-btn screenshot-button"
         type="button"
-        title="Screenshot — capturer le rendu (raccourci B)"
+        title="Screenshot — exporter en WebP et PNG sans perte (raccourci B)"
         @click="downloadCanvasSnapshot"
         @touchstart.stop
         @touchend.stop

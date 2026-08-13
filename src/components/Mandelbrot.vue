@@ -11,6 +11,7 @@ import {normalizeOrbitTrapFromLegacy, type OrbitTrapConfig} from '../OrbitTrap.t
 import {normalizeAnimationConfig, type AnimationConfig} from '../AnimationConfig.ts';
 import {log2FromDecimalString} from '../floatexp.ts';
 import type {KeyboardNavigationInput} from '../types/MandelbrotExposed.ts';
+import type {IterationPaletteCurve} from '../IterationPaletteCurve.ts';
 
 const canvasRef = ref<HTMLCanvasElement | null>(null);
 let canvas: HTMLCanvasElement | null = null;
@@ -93,6 +94,7 @@ const props = withDefaults(defineProps<{
   paletteOffset?: number,
   heightPaletteShift?: number,
   paletteMirror?: boolean,
+  iterationPaletteCurve?: IterationPaletteCurve,
   antialiasLevel?: number,
   aaAuto?: boolean,
   aaAdaptive?: boolean,
@@ -165,6 +167,7 @@ const props = withDefaults(defineProps<{
         paletteOffset: 0,
         heightPaletteShift: 0,
         paletteMirror: false,
+        iterationPaletteCurve: 'linear',
         antialiasLevel: 1,
         aaAuto: false,
         aaAdaptive: true,
@@ -285,6 +288,7 @@ async function draw() {
         paletteOffset: props.paletteOffset,
         heightPaletteShift: props.heightPaletteShift,
         paletteMirror: props.paletteMirror,
+        iterationPaletteCurve: props.iterationPaletteCurve,
         colorStops: toRaw(props.colorStops),
         interpolationMode: props.interpolationMode,
         activateAnimate: props.activateAnimate,
@@ -397,6 +401,7 @@ async function initWebGPU() {
     paletteOffset: props.paletteOffset,
     heightPaletteShift: props.heightPaletteShift,
     paletteMirror: props.paletteMirror,
+    iterationPaletteCurve: props.iterationPaletteCurve,
     colorStops: props.colorStops,
     interpolationMode: props.interpolationMode,
     activateAnimate: props.activateAnimate,

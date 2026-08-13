@@ -16,6 +16,10 @@ import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIden
 import type {TextureMappingConfig} from './TextureMapping';
 import type {OrbitTrapConfig} from './OrbitTrap';
 import {
+  normalizeIterationPaletteCurve,
+  type IterationPaletteCurve,
+} from './IterationPaletteCurve';
+import {
   deletedCacheFields,
   isVisibleCacheRecord,
   localCacheFields,
@@ -57,6 +61,7 @@ export interface PaletteRecord extends ScopedCacheFields {
   paletteOffset?: number;
   heightPaletteShift?: number;
   paletteMirror?: boolean;
+  iterationPaletteCurve?: IterationPaletteCurve;
   activateAnimate?: boolean;
   animationSpeed?: number;
   tessellationLevel?: number;
@@ -143,6 +148,7 @@ function reqToPromise<T>(req: IDBRequest<T>): Promise<T> {
 function clonePaletteRecord(record: PaletteRecord): PaletteRecord {
   const cloned = JSON.parse(JSON.stringify(record)) as PaletteRecord;
   cloned.colorStops = normalizeColorStops(Array.isArray(cloned.colorStops) ? cloned.colorStops : []);
+  cloned.iterationPaletteCurve = normalizeIterationPaletteCurve(cloned.iterationPaletteCurve);
   return cloned;
 }
 

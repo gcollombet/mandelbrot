@@ -97,7 +97,7 @@ struct Uniforms {
   orbitTrapEndIteration: f32,
   orbitTrapIncludeInterior: f32,
   protrusionStrength: f32,    // iteration-profile effect amplification [1, 4]
-  _pad94: f32,
+  iterationPaletteCurve: f32, // 0 linear, 1 soft root, 2 logarithmic, 3 quadratic
   _pad95: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
@@ -209,6 +209,25 @@ fn palettePhaseFromRaw(rawPhase: f32) -> f32 {
   }
   let reverse = (i32(floor(rawPhase)) % 2) != 0;
   return select(phase, min(1.0 - phase, 0.99999994), reverse);
+}
+
+fn apply_iteration_palette_curve(coordinate: f32) -> f32 {
+  let u = max(coordinate, 0.0);
+  let mode = i32(round(parameters.iterationPaletteCurve));
+  if (mode == 1) {
+    return (sqrt(1.0 + u) - 1.0) / 0.4142135623730951;
+  }
+  if (mode == 2) {
+    return log(1.0 + u) / log(2.0);
+  }
+  if (mode == 3) {
+    return u * (u + 2.0) / 3.0;
+  }
+  return u;
+}
+
+fn iteration_palette_coordinate(nu: f32, paletteRepeat: f32) -> f32 {
+  return apply_iteration_palette_curve(2.0 * nu / max(paletteRepeat, 0.0001));
 }
 
 fn sampleEffects(palettePhase: f32) -> EffectParams {
@@ -641,10 +660,10 @@ fn apply_orbit_trap_color(colorIn: vec3<f32>, iterRaw: f32, z: vec2<f32>, trapPa
 
 fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, cachedStripeGradient: vec2<f32>, cachedCoherenceGradient: vec2<f32>, dx: f32, dy: f32, uv_screen: vec2<f32>) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-  let deep = v * 2.0;
+  let iterationCoordinate = iteration_palette_coordinate(v, paletteRepeat);
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
   let phaseColoringShift = (1.0 - abs(fract(geometryAngle / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
-  let palettePhase = palettePhaseFromRaw(deep / paletteRepeat + animatedPaletteOffset() + heightPhaseShift + phaseColoringShift);
+  let palettePhase = palettePhaseFromRaw(iterationCoordinate + animatedPaletteOffset() + heightPhaseShift + phaseColoringShift);
 
   // ── Sample all effect channels from the palette texture ──
   var fx = sampleEffects(palettePhase);
@@ -1256,7 +1275,7 @@ fn colorize_pixel(
   // Compute a preliminary phase to sample the smoothness weight, then
   // apply it to select between iter_val and nu.
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-  let prelimPhase = palettePhaseFromRaw(nu * 2.0 / paletteRepeat + animatedPaletteOffset());
+  let prelimPhase = palettePhaseFromRaw(iteration_palette_coordinate(nu, paletteRepeat) + animatedPaletteOffset());
   let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, palette_row_y(2.0)), 0.0);
   let wSmoothness = row2.g;
   nu = mix(iter_v, nu, wSmoothness);

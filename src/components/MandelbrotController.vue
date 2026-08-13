@@ -9,6 +9,7 @@ import type {Engine} from '../Engine.ts';
 import type {TextureMappingConfig} from '../TextureMapping.ts';
 import type {AnimationConfig} from '../AnimationConfig.ts';
 import type {OrbitTrapConfig} from '../OrbitTrap.ts';
+import type {IterationPaletteCurve} from '../IterationPaletteCurve.ts';
 
 const cx = defineModel<string>('cx')
 const cy = defineModel<string>('cy')
@@ -28,6 +29,7 @@ const props = defineProps<{
   paletteOffset?: number,
   heightPaletteShift?: number,
   paletteMirror?: boolean,
+  iterationPaletteCurve?: IterationPaletteCurve,
   activateAnimate?: boolean,
   debugShading?: boolean,
   dprMultiplier?: number,
@@ -427,6 +429,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :palettePeriod="props.palettePeriod"
       :heightPaletteShift="props.heightPaletteShift"
       :paletteMirror="props.paletteMirror"
+      :iterationPaletteCurve="props.iterationPaletteCurve"
       :colorStops="props.colorStops"
       :activateAnimate="props.activateAnimate"
       :debugShading="props.debugShading"
