@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
+import {useRoute, useRouter} from 'vue-router';
 import MandelbrotController from './MandelbrotController.vue';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
@@ -11,8 +12,9 @@ import {
   stripExplorationStateFields,
   stripSessionPerformanceFields,
 } from "../Mandelbrot.ts";
-import {savePresetEntry, getAllPresetEntries, getPresetById, saveRemotePresetEntry, getAllPresetRecords} from '../presetStore';
+import {savePresetEntry, getAllPresetEntries, getPresetById, getPresetByGuid, saveRemotePresetEntry, getAllPresetRecords} from '../presetStore';
 import type {PresetRecord} from '../presetStore';
+import {PRESET_QUERY_PARAMETER, presetGuidFromRouteQuery} from '../presetDeepLink';
 import {syncActiveLibrary} from '../activeLibrarySync';
 import {log10FromDecimalString} from '../floatexp';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
@@ -57,6 +59,8 @@ import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
 const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
 const mandelbrotEngine = shallowRef<Engine | null>(null);
+const route = useRoute();
+const router = useRouter();
 
 // AA accumulation progress (polled from the engine for the on-screen indicator).
 const aaProgress = ref<{ active: boolean; done: number; total: number }>({ active: false, done: 0, total: 1 });
@@ -111,6 +115,9 @@ const guestImportCounts = computed(() => guestImportPlan.value ? guestPresetCoun
 }) : null);
 let authStateGeneration = 0;
 let authStateTransition: Promise<void> = Promise.resolve();
+let hydratedLibraryGeneration = 0;
+let presetRouteRequestGeneration = 0;
+const activePresetGuid = ref<string | null>(null);
 
 async function refreshOpenSettingsLibraries(): Promise<void> {
   await Promise.all(
@@ -124,6 +131,7 @@ async function applyAuthState(state: AuthState, generation: number): Promise<voi
     stopPersonalTextureSync(),
   ]);
   if (generation !== authStateGeneration) return;
+  hydratedLibraryGeneration = 0;
 
   guestImportPlan.value = null;
   guestImportError.value = '';
@@ -144,6 +152,11 @@ async function applyAuthState(state: AuthState, generation: number): Promise<voi
       textureSync: personalLibraryFeatureFlags.textureSync,
     },
   );
+  if (generation !== authStateGeneration) return;
+
+  hydratedLibraryGeneration = generation;
+  activePresetGuid.value = null;
+  await applyPresetFromRoute(generation);
   if (generation !== authStateGeneration) return;
 
   if (state.user && personalLibraryFeatureFlags.scopedCache) {
@@ -424,6 +437,67 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
 
 const mandelbrotParams = ref<MandelbrotParams>(loadInitialMandelbrotParams());
 
+function applyPresetRecord(record: PresetRecord): void {
+  const saved = structuredClone(record.value);
+  stripExplorationStateFields(saved);
+  saved.textureMapping = normalizeTextureMappingFromLegacy(saved);
+  saved.orbitTrap = normalizeOrbitTrapFromLegacy(saved);
+  saved.orbitTrapStrength = saved.orbitTrap.strength;
+  saved.animation = normalizeAnimationConfig(saved.animation, saved.animationSpeed);
+  delete (saved as Partial<MandelbrotParams>).textureMappingMode;
+  saved.activateAnimate = mandelbrotParams.value.activateAnimate;
+  mandelbrotParams.value = preserveSessionPerformanceFields(saved, mandelbrotParams.value);
+}
+
+async function applyPresetFromRoute(generation = authStateGeneration): Promise<void> {
+  const requestGeneration = ++presetRouteRequestGeneration;
+  if (hydratedLibraryGeneration !== generation) return;
+
+  const guid = presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER]);
+  if (!guid) {
+    activePresetGuid.value = null;
+    return;
+  }
+  if (guid === activePresetGuid.value) return;
+
+  const record = await getPresetByGuid(guid);
+  if (
+    requestGeneration !== presetRouteRequestGeneration
+    || generation !== authStateGeneration
+    || hydratedLibraryGeneration !== generation
+    || presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER]) !== guid
+  ) return;
+
+  if (!record) {
+    activePresetGuid.value = null;
+    console.warn(`[presetDeepLink] Catalogue preset not found: ${guid}`);
+    return;
+  }
+  applyPresetRecord(record);
+  activePresetGuid.value = guid;
+}
+
+async function onPresetSelected(guid: string, isCatalogPreset: boolean): Promise<void> {
+  // Settings has already applied the record. Mark it current before changing
+  // the route so the route watcher does not deserialize it a second time.
+  presetRouteRequestGeneration += 1;
+  activePresetGuid.value = isCatalogPreset ? guid : null;
+
+  const routedGuid = presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER]);
+  if (isCatalogPreset && routedGuid === guid) return;
+  if (!isCatalogPreset && !routedGuid) return;
+
+  const query = {...route.query};
+  if (isCatalogPreset) query[PRESET_QUERY_PARAMETER] = guid;
+  else delete query[PRESET_QUERY_PARAMETER];
+  await router.push({path: '/', query});
+}
+
+watch(
+  () => route.query[PRESET_QUERY_PARAMETER],
+  () => { void applyPresetFromRoute(); },
+);
+
 let textureEntriesPromise: Promise<TextureMetadata[]> | null = null;
 let activeTileTextureUrl: string | null = null;
 let activeSkyboxTextureUrl: string | null = null;
@@ -564,7 +638,7 @@ onMounted(() => {
   // If no navigation history is present (first-time visitor), load the latest
   // shared preset immediately. The auth-state transition hydrates the full
   // catalog for the selected guest/user cache.
-  if (isFirstLoad) {
+  if (isFirstLoad && !presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER])) {
     void (async () => {
       try {
         let list = await getAllPresetEntries();
@@ -1986,7 +2060,9 @@ function startTravelToPreset(preset: PresetRecord) {
             :active-tab="tab.key"
             :pickerMode="pickerMode"
             :user-role="userRole"
+            :active-preset-guid="activePresetGuid"
             @toggle-picker="togglePickerMode"
+            @preset-selected="onPresetSelected"
           />
         </div>
       </div>
@@ -2016,7 +2092,9 @@ function startTravelToPreset(preset: PresetRecord) {
             :active-tab="tab.key"
             :pickerMode="pickerMode"
             :user-role="userRole"
+            :active-preset-guid="activePresetGuid"
             @toggle-picker="togglePickerMode"
+            @preset-selected="onPresetSelected"
           />
         </div>
       </div>

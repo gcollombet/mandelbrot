@@ -2,6 +2,7 @@ import { createApp } from 'vue'
 import './style.css'
 import './dense.css'
 import App from './App.vue'
+import {router} from './router'
 // import the pkg
 
 if ('serviceWorker' in navigator) {
@@ -14,4 +15,4 @@ if ('serviceWorker' in navigator) {
   });
 }
 
-createApp(App).mount('#app')
+createApp(App).use(router).mount('#app')

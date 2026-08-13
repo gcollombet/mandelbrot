@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
+import {useRouter} from 'vue-router';
 import type {ApproximationMode, InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
   preserveSessionPerformanceFields,
@@ -93,6 +94,7 @@ import {
   buildPresetImportIdentitySet,
   hasPresetImportIdentity,
 } from '../presetImportIdentity';
+import {absolutePresetUrl, PRESET_QUERY_PARAMETER} from '../presetDeepLink';
 
 import type {Engine} from '../Engine.ts';
 const props = defineProps<{
@@ -101,7 +103,10 @@ const props = defineProps<{
   activeTab: string;
   pickerMode?: boolean;
   userRole?: UserRole;
+  activePresetGuid?: string | null;
 }>();
+
+const router = useRouter();
 
 const userRole = computed<UserRole>(() => props.userRole ?? 'guest');
 const isAdmin = computed(() => canShowAdminUpload(userRole.value));
@@ -184,6 +189,7 @@ const precisionBudgetExp = computed({
 
 const emit = defineEmits<{
   'toggle-picker': [];
+  'preset-selected': [guid: string, isCatalogPreset: boolean];
 }>();
 const model =  defineModel<MandelbrotParams>({
   default: {
@@ -884,6 +890,7 @@ const showPresetDropdown = ref(false);
 async function selectPresetFromDropdown(preset: PresetMetadata) {
   await selectPreset(preset.id);
   showPresetDropdown.value = false;
+  emit('preset-selected', preset.guid, !!preset.remote);
 }
 
 /** Format an ISO date string for display. */
@@ -922,6 +929,32 @@ const showNavPresetDropdown = ref(false);
 
 const currentNavPresetMeta = computed(() => presets.value.find(p => p.id === selectedNavPreset.value));
 const currentNavPresetThumbnail = computed(() => currentNavPresetMeta.value?.thumbnail);
+const presetLinkCopied = ref(false);
+let presetLinkCopiedTimer: ReturnType<typeof setTimeout> | null = null;
+
+async function copySelectedCatalogPresetLink(): Promise<void> {
+  const preset = currentNavPresetMeta.value;
+  if (!preset?.remote) return;
+
+  const resolved = router.resolve({
+    path: '/',
+    query: {[PRESET_QUERY_PARAMETER]: preset.guid},
+  });
+  const url = absolutePresetUrl(resolved.href, window.location.href);
+  try {
+    if (!navigator.clipboard) throw new Error('Clipboard API unavailable');
+    await navigator.clipboard.writeText(url);
+    presetLinkCopied.value = true;
+    if (presetLinkCopiedTimer) clearTimeout(presetLinkCopiedTimer);
+    presetLinkCopiedTimer = window.setTimeout(() => {
+      presetLinkCopied.value = false;
+      presetLinkCopiedTimer = null;
+    }, 1600);
+  } catch {
+    window.prompt('Copiez le lien du preset :', url);
+  }
+}
+
 const favoritePresets = computed(() => presets.value.filter(p => p.favorite));
 const favoritePalettes = computed(() => palettes.value.filter(p => p.favorite));
 const FAVORITE_FILTER_STORAGE_KEY = 'mandelbrot_favorite_filters';
@@ -1105,6 +1138,16 @@ defineExpose({
 async function loadPresets() {
   // Load metadata list
   presets.value = await getAllPresetEntries();
+  syncActivePresetSelection();
+}
+
+function syncActivePresetSelection(): void {
+  if (!props.activePresetGuid) return;
+  const active = presets.value.find(preset => preset.guid === props.activePresetGuid);
+  if (!active) return;
+  selectedPreset.value = active.id;
+  selectedNavPreset.value = active.id;
+  selectedPalettePreset.value = active.id;
 }
 
 async function loadPalettes() {
@@ -1532,7 +1575,10 @@ onMounted(async () => {
 onUnmounted(() => {
   uploadSuccessTimers.forEach(timer => clearTimeout(timer));
   uploadSuccessTimers.clear();
+  if (presetLinkCopiedTimer) clearTimeout(presetLinkCopiedTimer);
 });
+
+watch(() => props.activePresetGuid, syncActivePresetSelection);
 
 watch([() => props.activeTab, () => props.engine], async ([tab]) => {
   if (tab === 'navigation') {
@@ -2594,10 +2640,23 @@ async function importSkyboxTexture(event: Event) {
         </div>
       </div>
 
-      <button class="mini-btn primary load-btn" @click="selectedNavPreset && selectPresetLocation(selectedNavPreset)" :disabled="!selectedNavPreset">
-        <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
-        Load location
-      </button>
+      <div class="nav-preset-actions">
+        <button class="mini-btn primary load-btn" @click="selectedNavPreset && selectPresetLocation(selectedNavPreset)" :disabled="!selectedNavPreset">
+          <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
+          Load location
+        </button>
+        <button
+          class="mini-btn preset-link-btn"
+          :class="{ copied: presetLinkCopied }"
+          type="button"
+          :disabled="!currentNavPresetMeta?.remote"
+          :title="currentNavPresetMeta?.remote ? 'Copier le lien partageable de ce preset' : 'Disponible pour les presets publiés dans le catalogue'"
+          @click="copySelectedCatalogPresetLink"
+        >
+          <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+          {{ presetLinkCopied ? 'Lien copié' : 'Copier le lien' }}
+        </button>
+      </div>
       <p class="load-note">Applies Cx, Cy, zoom &amp; angle from the selected preset.</p>
 
       <div v-if="isAdmin" class="transfer">
@@ -4963,7 +5022,13 @@ async function importSkyboxTexture(event: Event) {
   border-radius: 12px;
 }
 
-/* load button */
+/* navigation preset actions */
+.cv-body .nav-preset-actions {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 4px;
+}
 .cv-body .load-btn {
   width: 100%;
   display: flex;
@@ -4980,7 +5045,7 @@ async function importSkyboxTexture(event: Event) {
   font-size: var(--font-lg);
   cursor: pointer;
   transition: 0.15s;
-  margin-bottom: 4px;
+  margin-bottom: 0;
 }
 .cv-body .load-btn:hover {
   background: oklch(0.7 0.17 245 / 0.28);
@@ -4994,6 +5059,20 @@ async function importSkyboxTexture(event: Event) {
 }
 .cv-body .load-btn:disabled {
   opacity: 0.45;
+  cursor: default;
+}
+.cv-body .preset-link-btn {
+  justify-content: center;
+  min-width: 138px;
+  padding: 0 14px;
+}
+.cv-body .preset-link-btn.copied {
+  color: oklch(0.8 0.17 155);
+  border-color: oklch(0.72 0.17 155 / 0.55);
+  background: oklch(0.72 0.17 155 / 0.12);
+}
+.cv-body .preset-link-btn:disabled {
+  opacity: 0.42;
   cursor: default;
 }
 .cv-body .load-note {
