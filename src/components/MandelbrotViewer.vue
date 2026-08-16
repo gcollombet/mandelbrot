@@ -775,7 +775,7 @@ const forceUINoGpu = !hasWebGPU
   && typeof window !== 'undefined'
   && new URLSearchParams(window.location.search).has('forceui');
 
-const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes', 'about']);
+const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes', 'about', 'video']);
 const denseView = useDenseView();
 function isDenseTab(tabKey: string): boolean {
   return densePortedTabs.has(tabKey);
@@ -1531,6 +1531,15 @@ function interpolateColorStops(
 
 function tickTravelAnimation() {
   if (!travelTargetPreset) return;
+  // A video export owns the clock: it places the camera at an absolute parcours
+  // time and holds the palette fixed. This loop is cadenced by Date.now() and
+  // mutates colorStops, so letting it run alongside an export would make the
+  // output depend on how long each frame took to converge — the exact thing the
+  // export exists to eliminate.
+  if (mandelbrotCtrlRef.value?.isExporting?.()) {
+    travelAnimationId = null;
+    return;
+  }
   const elapsed = (Date.now() - travelStartTime) / 1000;
   let progress = Math.min(1.0, elapsed / travelDuration);
   
@@ -1621,6 +1630,7 @@ function startTravelToPreset(preset: PresetRecord) {
   console.log('[REF] startTravelToPreset', String(preset.value.cx).slice(0, 14), 'scale', preset.value.scale);
   const ctrl = mandelbrotCtrlRef.value;
   if (!ctrl) return;
+  if (ctrl.isExporting?.()) return;
   const navigator = ctrl.getNavigator();
   if (!navigator) return;
   activeDiscoveryClusterId.value = null;
@@ -2063,6 +2073,7 @@ function startTravelToPreset(preset: PresetRecord) {
             :ref="(el: any) => { settingsRefs[tab.key] = el }"
             v-model="mandelbrotParams"
             :engine="mandelbrotEngine"
+            :mandelbrot-ctrl="mandelbrotCtrlRef"
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
             :active-tab="tab.key"
             :pickerMode="pickerMode"
@@ -2095,6 +2106,7 @@ function startTravelToPreset(preset: PresetRecord) {
             :ref="(el: any) => { settingsRefs[tab.key] = el }"
             v-model="mandelbrotParams"
             :engine="mandelbrotEngine"
+            :mandelbrot-ctrl="mandelbrotCtrlRef"
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
             :active-tab="tab.key"
             :pickerMode="pickerMode"

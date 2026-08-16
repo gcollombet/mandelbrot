@@ -28,10 +28,14 @@ import {
     reduceZoomState,
     resetZoomState
 } from './zoomState'
+import {
+    isFieldConverged as evaluateFieldConvergence,
+    UNFINISHED_PIXEL_DONE_THRESHOLD,
+} from './fieldConvergence'
 import type {ColorStop} from './ColorStop.ts'
 import {resolveDirectionCoherenceReliefTilt, resolveStripeReliefTilt} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
-import {computeAaJitterOffset} from './Mandelbrot.ts'
+import {computeAaJitterOffset, rotateAaJitterToScene} from './Mandelbrot.ts'
 import {iterationPaletteCurveCode, type IterationPaletteCurve} from './IterationPaletteCurve.ts'
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
@@ -132,16 +136,15 @@ const MOBIUS_COEFF_FLOATS = 21
 // mandelbrotReferenceBuffer below). Mirrors referenceWorker.ts, where the orbit
 // is computed to 2× the display maxIter (interactive zoom-in headroom) but never
 // beyond this cap. 10M steps = an 80 MB storage buffer, within the WebGPU
-// default maxStorageBufferBindingSize (128 MiB) — no requiredLimits needed.
+// default maxStorageBufferBindingSize (128 MiB); the device now also raises that
+// limit to the adapter's maximum, so this cap is comfortably inside it.
 const ORBIT_STEP_CAPACITY = 10_000_000
 const COLOR_UNIFORM_FLOAT_COUNT = 96
 const TAU = Math.PI * 2
 
 // Minimum number of unfinished pixels below which we consider the image
-// fully converged. A few stray pixels can linger indefinitely near numerically
-// ambiguous fractal boundaries — not worth spinning
-// the GPU for.
-const UNFINISHED_PIXEL_DONE_THRESHOLD = 10
+// fully converged — see fieldConvergence.ts, which owns the constant alongside
+// the gate that applies it.
 // EMA smoothing factor for GPU frame time (lower = smoother, slower to react).
 const GPU_TIME_EMA_ALPHA = 0.25
 
@@ -671,6 +674,35 @@ interface DisplaySet {
 export class Engine {
     private snapshotCallback?: (png: string) => void;
     private snapshotDestWidth?: number;
+
+    // ── Video export capture ──────────────────────────────────────────
+    /** Pending capture request, fulfilled at the end of the next render(). */
+    private exportCaptureRequest?: {
+        outputWidth: number
+        outputHeight: number
+        supersample: number
+        timestampMicros: number
+        durationMicros: number
+        resolve: (frame: VideoFrame) => void
+        reject: (error: unknown) => void
+    };
+    /** Supersampled LINEAR render target — never sRGB: the reduction happens
+     *  after this, and averaging encoded values is the gamma mistake. */
+    private exportLinearTexture?: GPUTexture;
+    private exportLinearView?: GPUTextureView;
+    /** Output-resolution sRGB target the present pass reduces into. */
+    private exportOutputTexture?: GPUTexture;
+    private exportOutputView?: GPUTextureView;
+    private exportReadbackBuffer?: GPUBuffer;
+    /** Present pipelines keyed by reduction factor — the DOWNSCALE override is
+     *  a pipeline-creation constant, so one pipeline per factor. */
+    private exportPresentPipelines = new Map<number, GPURenderPipeline>();
+    private exportPresentBindGroup?: GPUBindGroup;
+    /** Present pipeline at 1:1, used to mirror each exported frame on screen. */
+    private exportMirrorPipeline?: GPURenderPipeline;
+    private exportCaptureKey = '';
+    private modulePresent?: GPUShaderModule;
+    private layoutPresent?: GPUBindGroupLayout;
 
     canvas: HTMLCanvasElement
     device!: GPUDevice
@@ -1269,6 +1301,16 @@ export class Engine {
     // temps en secondes
     time = 0
     private lastUpdateTime = 0 // timestamp ms de la dernière update
+
+    /** Injected animation clock, in seconds. Null = accumulate wall-clock time
+     *  (real-time behaviour, unchanged). A video export sets it to
+     *  `frameIndex / fps` before each frame so track phase depends only on the
+     *  frame index, never on how long that frame took to converge.
+     *
+     *  Written into `this.time` rather than read alongside it: every consumer
+     *  (the animation mixer, the color uniform block) then sees one clock, and
+     *  no future read site can miss the override. */
+    animationTimeOverride: number | null = null
 
     // DPR multiplier (adjustable from UI, default 1.0)
     dprMultiplier = 1.0
@@ -1944,7 +1986,41 @@ export class Engine {
         this.timestampCapable = this.adapter.features.has('timestamp-query')
         const requiredFeatures: GPUFeatureName[] = []
         if (this.timestampCapable) requiredFeatures.push('timestamp-query')
-        this.device = await this.adapter.requestDevice({ requiredFeatures })
+
+        // Raise the limits that gate a large render surface to whatever the
+        // adapter actually supports. Left at the WebGPU defaults, a 1080p
+        // export at x2 supersampling asks Dawn for a ~310 MB staging buffer
+        // against a 256 MB default cap, the submit is rejected, and — because
+        // WebGPU reports this asynchronously instead of throwing — the whole
+        // pipeline renders BLACK at full speed with no error surfaced anywhere.
+        // The adapter here offers 4 GB; the default was simply never asked to
+        // move.
+        const LIMITS_TO_RAISE = [
+            'maxBufferSize',
+            'maxStorageBufferBindingSize',
+            'maxTextureDimension2D',
+        ] as const
+        const adapterLimits = this.adapter.limits as unknown as Record<string, number | undefined>
+        const requiredLimits: Record<string, number> = {}
+        for (const name of LIMITS_TO_RAISE) {
+            const supported = adapterLimits[name]
+            if (typeof supported === 'number' && Number.isFinite(supported)) {
+                requiredLimits[name] = supported
+            }
+        }
+        try {
+            this.device = await this.adapter.requestDevice({ requiredFeatures, requiredLimits })
+        } catch (error) {
+            // Never let a limit request cost us the device: fall back to the
+            // defaults and let the export-surface guard refuse what no longer
+            // fits, with a message.
+            console.warn('[Engine] requestDevice with raised limits failed, falling back to defaults', error)
+            this.device = await this.adapter.requestDevice({ requiredFeatures })
+        }
+        console.info('[Engine] limits: '
+            + `maxBufferSize=${this.device.limits.maxBufferSize} `
+            + `maxStorageBufferBindingSize=${this.device.limits.maxStorageBufferBindingSize} `
+            + `maxTextureDimension2D=${this.device.limits.maxTextureDimension2D}`)
         this.timestampsEnabled = this.timestampCapable
         console.info(`[Engine] timestamp-query: available=${this.timestampCapable} → per-pass timing ${this.timestampsEnabled ? 'ON' : 'OFF'}`)
         this.device.label = 'Engine Device'
@@ -2361,6 +2437,11 @@ export class Engine {
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Present',
         })
+        // Same module, same transfer function, different reduction factor: video
+        // export builds its pipelines from here so the film and the screen can
+        // never disagree about linear→sRGB.
+        this.modulePresent = modulePresent
+        this.layoutPresent = layoutPresent
 
         // ── AA target-map bake pipeline (DE ∪ contrast ∪ moiré → per-texel sample count) ──
         const moduleAaTarget = this.device.createShaderModule({ code: aaTargetShader, label: 'Engine ShaderModule AaTarget' })
@@ -3489,6 +3570,361 @@ export class Engine {
         )
     }
 
+    /**
+     * The field is converged and the evidence for it is fresh.
+     *
+     * The pixel count alone is not evidence: it arrives by asynchronous
+     * readback, so a small `unfinishedPixelCount` may predate the last mutation
+     * of the raw field. `hasPendingCounterReadbackForCurrentGeneration()` is
+     * therefore part of the predicate, not a detail — without it a caller can
+     * conclude "converged" from a stale counter and act on a half-computed
+     * image.
+     *
+     * The threshold is `UNFINISHED_PIXEL_DONE_THRESHOLD` rather than exactly 0:
+     * a few pixels can linger indefinitely near numerical limits, and the render
+     * loop stops driving frames at that same threshold — requiring 0 here would
+     * deadlock every consumer on such a view.
+     *
+     * @param ignoreZoomCycle Video export only. The export deliberately keeps
+     *   the frozen/live zoom cycle alive across the whole parcours (one raw
+     *   convergence serves many emitted frames), so `isZoomActive` would be
+     *   permanently true and the predicate permanently false. Every other term
+     *   is unchanged: this relaxes *which* frames qualify, never *how strong*
+     *   the convergence evidence must be.
+     */
+    private isFieldConverged(ignoreZoomCycle = false): boolean {
+        return evaluateFieldConvergence({
+            clearHistoryNextFrame: this.clearHistoryNextFrame,
+            needFreezeSnapshot: this.needFreezeSnapshot,
+            needMergeSnapshot: this.needMergeSnapshot,
+            zoomActive: isZoomActive(this.zoomState),
+            orbitIncomplete: this.orbitIncomplete,
+            unfinishedPixelCount: this.unfinishedPixelCount,
+            pendingCounterReadback: this.hasPendingCounterReadbackForCurrentGeneration(),
+        }, { ignoreZoomCycle })
+    }
+
+    /**
+     * Convergence gate for video export: identical to the real-time predicate
+     * except that a running frozen/live zoom cycle no longer disqualifies the
+     * frame. A true result means this frame is safe to capture and encode.
+     */
+    videoFrameReady(): boolean {
+        return this.isFieldConverged(true)
+    }
+
+    /**
+     * Real-time convergence gate, exposed for tests and diagnostics. Equivalent
+     * to what the AA trigger and AA composite consume inside `render()`.
+     */
+    isViewFullyConverged(): boolean {
+        return this.isFieldConverged()
+    }
+
+    // ── Video export session ──────────────────────────────────────────
+
+    /** Real-time values held for the duration of an export, restored on exit. */
+    private videoExportSavedSettings: {
+        zoomMagnificationThreshold: number
+        dprMultiplier: number
+        targetFps: number
+        aaAuto: boolean
+    } | null = null
+
+    private videoExportActive = false
+    /** Interactive draw callback parked for the duration of an export. */
+    private videoExportParkedDrawFn: (() => Promise<void>) | null = null
+    /** Pins the compute surface to an exact pixel size while set (export only). */
+    private forcedSurfaceSize: { width: number; height: number } | null = null
+
+    isVideoExportActive(): boolean {
+        return this.videoExportActive
+    }
+
+    /**
+     * Wait until the GPU has finished everything submitted so far.
+     *
+     * REQUIRED between export render pumps, and not merely as pacing. The
+     * unfinished-pixel counter arrives through `mapAsync`, whose callback is
+     * delivered on the task queue. A pump loop built only from `drawOnce()`
+     * awaits nothing but microtasks (Vue's nextTick, internal promises), so it
+     * starves that queue: the three readback slots fill up, no further counter
+     * is dispatched, `unfinishedPixelCount` freezes at whatever it held before
+     * the loop started, and every frame times out having "never converged".
+     *
+     * Chosen over `setTimeout(0)` because a hidden tab throttles timers to
+     * ~2.5 Hz while GPU-completion promises still resolve at ~12 kHz — yielding
+     * through the GPU keeps background exports at full speed.
+     */
+    /** True while an export owns the engine — used to keep interactive-only
+     *  telemetry (the fps meter) from reporting the export's pump rate. */
+    get isExportDriven(): boolean {
+        return this.videoExportActive
+    }
+
+    async waitForSubmittedWork(): Promise<void> {
+        await this.device?.queue.onSubmittedWorkDone()
+    }
+
+    /**
+     * Switch the engine into export mode.
+     *
+     * `magnificationThreshold` must not exceed the DPR multiplier: the frozen
+     * texture is magnified by up to the threshold between swaps, so a threshold
+     * above the supersampling factor shows visibly undersampled pixels in the
+     * outer ring. The caller is expected to have validated this, and the guard
+     * here is the last line of defence rather than the first.
+     *
+     * `targetFps` is driven to a floor rather than a ceiling: the adaptive batch
+     * controller sizes GPU batches to hit it, and an export has no latency
+     * budget to protect — bigger batches mean fewer dispatches per convergence.
+     */
+    /** Side of the square working texture a given render surface needs. */
+    static workingTextureSideFor(width: number, height: number): number {
+        return Math.ceil(Math.sqrt(width * width + height * height))
+    }
+
+    async beginVideoExportSession(settings: {
+        magnificationThreshold: number
+        /** Output frame size; the compute surface is pinned to this × supersample. */
+        outputWidth: number
+        outputHeight: number
+        supersample: number
+        batchTargetFps: number
+    }): Promise<void> {
+        if (this.videoExportActive) {
+            throw new Error('A video export session is already active on this engine.')
+        }
+        // Only the degenerate case is refused. The threshold is deliberately
+        // NOT tied to the supersampling factor: it governs how often a full
+        // reconvergence is paid, which is the main lever on export speed, while
+        // supersampling governs sampling density. A high threshold trades a
+        // softer mid-cycle periphery for a much faster export — the caller's
+        // decision, surfaced as a warning in the UI rather than forbidden here.
+        if (!(settings.magnificationThreshold > 1)) {
+            throw new Error('Video export magnification threshold must be greater than 1.')
+        }
+
+        // The interactive path clamps an oversized surface; an export must NOT,
+        // because silently shrinking would change the film's resolution behind
+        // the user's back. Refuse with the numbers instead.
+        const surfaceWidth = settings.outputWidth * settings.supersample
+        const surfaceHeight = settings.outputHeight * settings.supersample
+        const side = Engine.workingTextureSideFor(surfaceWidth, surfaceHeight)
+        const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
+        if (side > maxDim) {
+            throw new Error(
+                `${settings.outputWidth}×${settings.outputHeight} en ×${settings.supersample} exige une `
+                + `texture de travail ${side}², au-delà de la limite de cet appareil (${maxDim}). `
+                + 'Baisse la résolution ou le suréchantillonnage.',
+            )
+        }
+
+        this.videoExportSavedSettings = {
+            zoomMagnificationThreshold: this.zoomMagnificationThreshold,
+            dprMultiplier: this.dprMultiplier,
+            targetFps: this.targetFps,
+            aaAuto: this.aaAuto,
+        }
+        this.videoExportActive = true
+
+        // Park the interactive render loop. It calls the SAME draw() the export
+        // loop drives, so leaving it armed means two drivers rendering the same
+        // engine at once: duplicated GPU work per exported frame, an fps meter
+        // reporting the export's pump rate instead of anything meaningful, and
+        // interleaved update() calls racing the export's camera placement.
+        this.videoExportParkedDrawFn = this._drawFn
+        this.stopRenderLoop()
+
+        this.zoomMagnificationThreshold = settings.magnificationThreshold
+        this.forcedSurfaceSize = {
+            width: settings.outputWidth * settings.supersample,
+            height: settings.outputHeight * settings.supersample,
+        }
+        this.targetFps = settings.batchTargetFps
+        this.aaAuto = false
+        // The pinned size only takes effect through a reallocation, which also
+        // resets the zoom state — giving the session a clean, deterministic
+        // starting point rather than whatever the interactive view left behind.
+        //
+        // Scoped because WebGPU reports allocation failures asynchronously
+        // rather than throwing: without this, an oversized or unaffordable
+        // surface yields invalid textures and the export renders a black film
+        // at full speed, with nothing to tell the user why.
+        this.device.pushErrorScope('out-of-memory')
+        this.device.pushErrorScope('validation')
+        this.resize()
+        const validationError = await this.device.popErrorScope()
+        const memoryError = await this.device.popErrorScope()
+        if (validationError || memoryError) {
+            const reason = memoryError ? 'mémoire GPU insuffisante' : 'allocation refusée par le pilote'
+            this.endVideoExportSession()
+            throw new Error(
+                `Impossible d'allouer la surface de rendu ${surfaceWidth}×${surfaceHeight} `
+                + `(texture de travail ${side}²) : ${reason}. `
+                + 'Baisse la résolution ou le suréchantillonnage.',
+            )
+        }
+    }
+
+    /** Align a row stride to WebGPU's 256-byte copyTextureToBuffer requirement. */
+    private static alignRowBytes(bytes: number): number {
+        return (bytes + 255) & ~255
+    }
+
+    /**
+     * (Re)allocate the capture chain when the requested geometry changes.
+     *
+     * The supersampled target is `rgba16float` and holds LINEAR light: the
+     * reduction to output resolution happens in the present pass, before the
+     * sRGB encode. Capturing through the existing snapshot path instead would
+     * have used `fs_main_direct`, whose output is already sRGB — averaging that
+     * is the gamma mistake this chain exists to avoid.
+     */
+    private ensureExportCaptureResources(outputWidth: number, outputHeight: number, supersample: number): void {
+        const key = `${outputWidth}x${outputHeight}@${supersample}:${this.format}`
+        if (this.exportCaptureKey === key && this.exportPresentPipelines.has(supersample)) return
+
+        if (this.exportCaptureKey !== key) {
+            this.exportLinearTexture?.destroy?.()
+            this.exportOutputTexture?.destroy?.()
+            this.exportReadbackBuffer?.destroy?.()
+
+            this.exportLinearTexture = this.device.createTexture({
+                size: { width: outputWidth * supersample, height: outputHeight * supersample },
+                format: 'rgba16float',
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+                label: 'Engine ExportLinearTexture',
+            })
+            this.exportLinearView = this.exportLinearTexture.createView({ label: 'Engine ExportLinearView' })
+
+            this.exportOutputTexture = this.device.createTexture({
+                size: { width: outputWidth, height: outputHeight },
+                format: this.format,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+                label: 'Engine ExportOutputTexture',
+            })
+            this.exportOutputView = this.exportOutputTexture.createView({ label: 'Engine ExportOutputView' })
+
+            this.exportReadbackBuffer = this.device.createBuffer({
+                size: Engine.alignRowBytes(outputWidth * 4) * outputHeight,
+                usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
+                label: 'Engine ExportReadback',
+            })
+
+            this.exportPresentBindGroup = this.device.createBindGroup({
+                layout: this.layoutPresent!,
+                entries: [{ binding: 0, resource: this.exportLinearView }],
+                label: 'Engine BindGroup ExportPresent',
+            })
+            this.exportCaptureKey = key
+        }
+
+        if (!this.exportMirrorPipeline) {
+            // Mirrors the supersampled linear target onto the swapchain 1:1.
+            // The compute surface is pinned to output x supersample, which is
+            // exactly the linear target's size, so DOWNSCALE stays 1 here.
+            this.exportMirrorPipeline = this.device.createRenderPipeline({
+                layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layoutPresent!] }),
+                vertex: { module: this.modulePresent!, entryPoint: 'vs_main' },
+                fragment: {
+                    module: this.modulePresent!,
+                    entryPoint: 'fs_main',
+                    targets: [{ format: this.format }],
+                    constants: { DOWNSCALE: 1 },
+                },
+                primitive: { topology: 'triangle-list' },
+                label: 'Engine RenderPipeline ExportMirror',
+            })
+        }
+
+        if (!this.exportPresentPipelines.has(supersample)) {
+            this.exportPresentPipelines.set(supersample, this.device.createRenderPipeline({
+                layout: this.device.createPipelineLayout({ bindGroupLayouts: [this.layoutPresent!] }),
+                vertex: { module: this.modulePresent!, entryPoint: 'vs_main' },
+                fragment: {
+                    module: this.modulePresent!,
+                    entryPoint: 'fs_main',
+                    targets: [{ format: this.format }],
+                    constants: { DOWNSCALE: supersample },
+                },
+                primitive: { topology: 'triangle-list' },
+                label: `Engine RenderPipeline ExportPresent x${supersample}`,
+            }))
+        }
+    }
+
+    /**
+     * Request a capture of the current view as a `VideoFrame`, at an arbitrary
+     * output resolution independent of the canvas.
+     *
+     * Resolution independence is what makes an export reproducible: the colour
+     * pass derives its coordinates from normalized vertex UVs, so rendering into
+     * a target of any size only changes sampling density. Driving the output
+     * size from the window instead would make the same parcours produce a
+     * different film after a window resize.
+     *
+     * The frame is produced at the END of the next render(), reusing that
+     * frame's colour bind group — the same reason the PNG snapshot path lives
+     * there rather than rebuilding the pass from outside.
+     */
+    captureExportFrame(request: {
+        outputWidth: number
+        outputHeight: number
+        supersample: number
+        timestampMicros: number
+        durationMicros: number
+    }): Promise<VideoFrame> {
+        if (this.exportCaptureRequest) {
+            return Promise.reject(new Error('A capture is already pending for the next frame.'))
+        }
+        if (!Number.isInteger(request.supersample) || request.supersample < 1) {
+            return Promise.reject(new Error(
+                `Capture supersample must be a positive integer (got ${request.supersample}). `
+                + 'A fractional factor has no exact box filter.',
+            ))
+        }
+        const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
+        const superWidth = request.outputWidth * request.supersample
+        const superHeight = request.outputHeight * request.supersample
+        if (superWidth > maxDim || superHeight > maxDim) {
+            return Promise.reject(new Error(
+                `Capture target ${superWidth}x${superHeight} exceeds maxTextureDimension2D (${maxDim}).`,
+            ))
+        }
+        return new Promise<VideoFrame>((resolve, reject) => {
+            this.exportCaptureRequest = { ...request, resolve, reject }
+            this.needRender = true
+        })
+    }
+
+    /**
+     * Leave export mode and restore every real-time setting. Safe to call when
+     * no session is active, so it can sit in a `finally` without a guard.
+     */
+    endVideoExportSession(): void {
+        const saved = this.videoExportSavedSettings
+        this.videoExportActive = false
+        this.videoExportSavedSettings = null
+        if (!saved) return
+
+        const surfaceWasPinned = this.forcedSurfaceSize !== null
+        this.forcedSurfaceSize = null
+
+        // Hand the interactive loop back exactly as it was found.
+        const parkedDrawFn = this.videoExportParkedDrawFn
+        this.videoExportParkedDrawFn = null
+        if (parkedDrawFn) this.startRenderLoop(parkedDrawFn)
+
+        this.zoomMagnificationThreshold = saved.zoomMagnificationThreshold
+        this.dprMultiplier = saved.dprMultiplier
+        this.targetFps = saved.targetFps
+        this.aaAuto = saved.aaAuto
+        this.animationTimeOverride = null
+        if (surfaceWasPinned || this.dprMultiplier !== saved.dprMultiplier) this.resize()
+        this.needRender = true
+    }
+
     private acquireCounterReadbackSlot(): CounterReadbackSlot | undefined {
         const slotCount = this.counterReadbackSlots.length
         for (let i = 0; i < slotCount; i++) {
@@ -3967,13 +4403,36 @@ export class Engine {
         const parent = this.canvas.parentElement
         const widthCSS = parent?.clientWidth || 1
         const heightCSS = parent?.clientHeight || 1
-        this.width = Math.max(1, Math.round(widthCSS * dpr))
-        this.height = Math.max(1, Math.round(heightCSS * dpr))
+        if (this.forcedSurfaceSize) {
+            // Video export pins the compute surface to the film's geometry.
+            // Without this the working textures would follow the window, and the
+            // "threshold <= supersample" guarantee would be about the window
+            // rather than about the output — i.e. about nothing. It is also what
+            // makes the same parcours reproducible across window sizes.
+            this.width = Math.max(1, Math.round(this.forcedSurfaceSize.width))
+            this.height = Math.max(1, Math.round(this.forcedSurfaceSize.height))
+        } else {
+            this.width = Math.max(1, Math.round(widthCSS * dpr))
+            this.height = Math.max(1, Math.round(heightCSS * dpr))
+        }
 
         // Clamper aux limites GPU (maxTextureDimension2D, typiquement 8192 ou 16384)
         const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
         this.width = Math.min(this.width, maxDim)
         this.height = Math.min(this.height, maxDim)
+
+        // Every working texture is a SQUARE of the surface diagonal, so clamping
+        // width and height alone is not enough: a 3840x2160 surface needs a
+        // 4406² texture. Past the limit WebGPU does not throw — createTexture
+        // returns an invalid texture and reports asynchronously, so the whole
+        // pipeline reads garbage and renders BLACK, very fast, with no error
+        // anywhere. Shrink the surface instead, keeping its aspect ratio.
+        const diagonal = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height))
+        if (diagonal > maxDim) {
+            const shrink = maxDim / diagonal
+            this.width = Math.max(8, Math.floor(this.width * shrink))
+            this.height = Math.max(8, Math.floor(this.height * shrink))
+        }
 
         this.canvas.width = this.width
         this.canvas.height = this.height
@@ -4753,7 +5212,13 @@ export class Engine {
             this.lastUpdateTime = now
         }
         const delta = (now - this.lastUpdateTime) / 1000 // en secondes
-        this.time += delta
+        if (this.animationTimeOverride !== null) {
+            this.time = this.animationTimeOverride
+        } else {
+            this.time += delta
+        }
+        // Kept current in both modes: clearing the override must not charge the
+        // whole export duration to the first real-time frame that follows.
         this.lastUpdateTime = now
 
         // Time-to-completion tracking: wall-clock + accumulated GPU compute per
@@ -4868,7 +5333,13 @@ export class Engine {
         if (mandelbrotChanged || renderOptionsChanged) {
             this.resetAaState()
         }
-        this.aaAuto = renderOptions.aaAuto ?? false
+        // Suppressed for the whole export session, not once at its start: this
+        // line runs on every update() and would otherwise restore the UI's value
+        // on the next frame. Auto AA cannot fire during an export anyway (the
+        // zoom cycle stays active), and DPR supersampling replaces it for a
+        // fraction of the cost — but leaving it armed would let it trigger the
+        // instant the session ends, on a view the user never asked it for.
+        this.aaAuto = this.videoExportActive ? false : (renderOptions.aaAuto ?? false)
         // Continuous zoom is display-only between raw-field clear/swap
         // boundaries. Invalidating here every tick discarded the preceding
         // counter before its asynchronous map completed, so timestamp+work
@@ -4942,7 +5413,18 @@ export class Engine {
                 event = { type: 'referenceReset', muChanged, orbitWasReset }
             } else if (scaleChanged) {
                 event = { type: 'scaleChanged', scale: mandelbrot.scale, prevScale: this.prevFrameMandelbrot!.scale }
-            } else if (this.prevFrameMandelbrot) {
+            } else if (this.prevFrameMandelbrot && !this.videoExportActive) {
+                // Real time compares against the PREVIOUS PASS, and a pass with an
+                // unchanged scale genuinely means the user stopped zooming.
+                //
+                // An export pumps render() many times at a FIXED camera position —
+                // that idempotence is what lets a frame converge. Those repeat
+                // passes look identical to a stop, so `scaleStable` fired on the
+                // second pump of every frame: merge, clear history, back to idle,
+                // and the next frame rebuilt the cycle from scratch. The frozen/live
+                // cycle was torn down and recreated on EVERY frame, which is why the
+                // magnification threshold changed nothing and why real time — where
+                // the scale really does move every tick — stayed fast.
                 event = { type: 'scaleStable' }
             }
 
@@ -4964,7 +5446,11 @@ export class Engine {
             // to an integer pixel, making the delta non-integer → 1-frame sub-pixel
             // misalignment.  Force a history clear so shiftTexX is 0 for this frame
             // and the texture rebuilds from the snapped position.
-            if (!wasZoomActive && this._prevFrameScaleChanged && !scaleChanged) {
+            // Same reasoning: in an export a "scale that just stabilised" is a
+            // second pump on the same frame, not a stop, and forcing a history
+            // clear there would discard the field the pump is converging.
+            if (!wasZoomActive && this._prevFrameScaleChanged && !scaleChanged
+                && !this.videoExportActive) {
                 this.clearHistoryNextFrame = true
             }
             this._prevFrameScaleChanged = !!scaleChanged
@@ -5690,7 +6176,10 @@ export class Engine {
         // that actually renders — not only iteration frames. lastRenderStartMs is
         // reset to 0 in _loop on idle→active resume, so the stale gap is skipped
         // here (frameIntervalMs === 0). The <5000 guard drops any pathological gap.
-        if (this.frameIntervalMs > 0 && this.frameIntervalMs < 5000) {
+        // Suppressed during an export: its pumps are not displayed frames, and
+        // reporting their rate made the fps readout track something with no
+        // relation to the film being produced.
+        if (!this.videoExportActive && this.frameIntervalMs > 0 && this.frameIntervalMs < 5000) {
             this._emaFrameMs = this._emaFrameMs > 0
                 ? this._emaFrameMs * 0.85 + this.frameIntervalMs * 0.15
                 : this.frameIntervalMs
@@ -5958,21 +6447,7 @@ export class Engine {
             && this.counterSampleFrame >= this.lastRawMutationFrame
         const skipResolve = converged && isDisplaySetCurrent(this.rawFieldVersion, this.resolvedDisplayVersion)
 
-        // Fully converged: safe to capture an AA sample. No pending history clear,
-        // no freeze/merge, not zooming, orbit complete, pixel counts known and at
-        // (or below) the SAME idle threshold the render loop uses — requiring
-        // exactly 0 deadlocked AA on any view that idles with a few stuck pixels
-        // (needsMoreFrames stops driving frames at ≤ threshold, so the counters
-        // never reach 0 and the composite never fired: "AA ne se déclenche pas").
-        const fullyConverged =
-            !this.clearHistoryNextFrame
-            && !this.needFreezeSnapshot
-            && !this.needMergeSnapshot
-            && !isZoomActive(this.zoomState)
-            && !this.orbitIncomplete
-            && this.unfinishedPixelCount >= 0
-            && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD
-            && !this.hasPendingCounterReadbackForCurrentGeneration()
+        const fullyConverged = this.isFieldConverged()
 
         if (!skipResolve) {
             // Resolve only copies/interpolates terminal analytic geometry and
@@ -6268,16 +6743,17 @@ export class Engine {
         if (aaCompositeThisFrame) {
             this.aaAccumulatedSamples++
             if (this.aaAccumulatedSamples < antialiasLevel) {
-                // Queue the next jittered sample. j is in TEXEL units (tent
-                // support ±1 texel); one neutral texel spans 2·neutralExtent /
-                // neutralSize in local_rot units (xy_neutral ∈ [−1,1] covers
-                // neutralSize texels). The missing ×2 halved the reconstruction
-                // kernel — a half-width tent under-filters edges (field report:
-                // band edges stayed crunchier than a DPR×2 render).
+                // Queue the next box-filter sample. The sequence is expressed in
+                // SCREEN texel units, then rotated into the scene's local_rot
+                // frame: without that rotation the box footprint itself rotated
+                // on screen and reached ±√½ px at a 45° scene angle. One neutral
+                // texel spans 2·neutralExtent/neutralSize in local_rot units.
                 this.aaSampleIndex++
-                const j = computeAaJitterOffset(this.aaSampleIndex)
-                this.aaOffsetX = j.x * 2 * neutralExtentColor / Math.max(1, this.neutralSize)
-                this.aaOffsetY = j.y * 2 * neutralExtentColor / Math.max(1, this.neutralSize)
+                const screenJitter = computeAaJitterOffset(this.aaSampleIndex)
+                const sceneJitter = rotateAaJitterToScene(screenJitter, this.previousMandelbrot.angle)
+                const texelToNeutral = 2 * neutralExtentColor / Math.max(1, this.neutralSize)
+                this.aaOffsetX = sceneJitter.x * texelToNeutral
+                this.aaOffsetY = sceneJitter.y * texelToNeutral
                 // Stage B: reconverge only the boundary sliver via a selective reseed.
                 // Every raw request is already exact step 1.
                 const canSelectiveReseed = this.useAaSelectiveReseed
@@ -6298,6 +6774,102 @@ export class Engine {
             } else {
                 // Accumulation complete → go idle; the final average stays on screen.
                 this.aaActive = false
+            }
+        }
+
+        // ── Video export capture ─────────────────────────────────────
+        // Supersampled LINEAR colour pass → present-with-reduction → readback.
+        // Deliberately NOT the pipelineColor (fs_main_direct) path the PNG
+        // snapshot below uses: that one already emits sRGB, and reducing encoded
+        // values darkens every edge in the film.
+        if (this.exportCaptureRequest) {
+            const request = this.exportCaptureRequest
+            this.exportCaptureRequest = undefined
+            try {
+                const { outputWidth, outputHeight, supersample } = request
+                this.ensureExportCaptureResources(outputWidth, outputHeight, supersample)
+
+                const encoder = this.device.createCommandEncoder({ label: 'Engine ExportCapture' })
+
+                // Sample 0 of the accumulation path: linear RGB, alpha = 1, and
+                // the per-pixel AA gate cannot discard at sample index 0.
+                const rpassLinear = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: this.exportLinearView!,
+                        clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                    label: 'Engine ExportCapture Linear',
+                })
+                rpassLinear.setPipeline(this.pipelineColorAccumClear!)
+                rpassLinear.setBindGroup(0, colorBindGroup)
+                rpassLinear.draw(6, 1, 0, 0)
+                rpassLinear.end()
+
+                const rpassReduce = encoder.beginRenderPass({
+                    colorAttachments: [{
+                        view: this.exportOutputView!,
+                        clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                        loadOp: 'clear',
+                        storeOp: 'store',
+                    }],
+                    label: 'Engine ExportCapture Reduce',
+                })
+                rpassReduce.setPipeline(this.exportPresentPipelines.get(supersample)!)
+                rpassReduce.setBindGroup(0, this.exportPresentBindGroup!)
+                rpassReduce.draw(6, 1, 0, 0)
+                rpassReduce.end()
+
+                // Mirror the frame being exported onto the canvas. The
+                // interactive loop is parked for the session, so without this
+                // nothing repaints and the user watches a black screen for the
+                // whole render.
+                try {
+                    const rpassMirror = encoder.beginRenderPass({
+                        colorAttachments: [{
+                            view: this.ctx.getCurrentTexture().createView(),
+                            clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                        }],
+                        label: 'Engine ExportCapture Mirror',
+                    })
+                    rpassMirror.setPipeline(this.exportMirrorPipeline!)
+                    rpassMirror.setBindGroup(0, this.exportPresentBindGroup!)
+                    rpassMirror.draw(6, 1, 0, 0)
+                    rpassMirror.end()
+                } catch {
+                    // A missing swapchain texture must never fail the export.
+                }
+
+                const bytesPerRow = Engine.alignRowBytes(outputWidth * 4)
+                encoder.copyTextureToBuffer(
+                    { texture: this.exportOutputTexture! },
+                    { buffer: this.exportReadbackBuffer!, offset: 0, bytesPerRow },
+                    { width: outputWidth, height: outputHeight, depthOrArrayLayers: 1 },
+                )
+                this.device.queue.submit([encoder.finish()])
+
+                await this.exportReadbackBuffer!.mapAsync(GPUMapMode.READ)
+                // Copy out before unmapping: the mapped range is detached on
+                // unmap, and VideoFrame must own stable bytes.
+                const pixels = new Uint8Array(this.exportReadbackBuffer!.getMappedRange().slice(0))
+                this.exportReadbackBuffer!.unmap()
+
+                // The 256-byte row alignment is expressed as a stride rather
+                // than repacked row by row — no per-frame copy of the image.
+                request.resolve(new VideoFrame(pixels, {
+                    format: this.format === 'bgra8unorm' ? 'BGRA' : 'RGBA',
+                    codedWidth: outputWidth,
+                    codedHeight: outputHeight,
+                    timestamp: request.timestampMicros,
+                    duration: request.durationMicros,
+                    layout: [{ offset: 0, stride: bytesPerRow }],
+                    colorSpace: { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', fullRange: true },
+                }))
+            } catch (error) {
+                request.reject(error)
             }
         }
 
@@ -6408,6 +6980,11 @@ export class Engine {
         }
         this.counterReadbackSlots = []
         this.uniformBufferMerge?.destroy?.()
+        this.exportCaptureRequest?.reject(new Error('Engine destroyed while a capture was pending.'))
+        this.exportCaptureRequest = undefined
+        this.exportLinearTexture?.destroy?.()
+        this.exportOutputTexture?.destroy?.()
+        this.exportReadbackBuffer?.destroy?.()
         this.webcamTexture?.closeWebcam()
         this.webcamTileTexture?.destroy?.()
         this.paletteTexture?.destroy?.()
@@ -6431,6 +7008,7 @@ export class Engine {
         if (this.debugPipelineActive) {
             let r = ''
             if (this.needRender || this.debugViewDirty) r = 'debugDirty'
+            else if (this.exportCaptureRequest) r = 'exportCapture'
             else if (this.snapshotCallback) r = 'snapshot'
             else if (this.needFreezeSnapshot) r = 'freezeSnapshot'
             else if (this.needMergeSnapshot) r = 'mergeSnapshot'
@@ -6443,6 +7021,7 @@ export class Engine {
 
         let reason = ''
         if (this.needRender) reason = 'needRender'
+        else if (this.exportCaptureRequest) reason = 'exportCapture'
         else if (this.snapshotCallback) reason = 'snapshot'
         else if (isZoomActive(this.zoomState)) reason = 'zoomActive'
         else if (this.clearHistoryNextFrame) reason = 'clearHistory'
@@ -6467,6 +7046,16 @@ export class Engine {
         // yet. Keep the loop alive so render()'s auto-trigger (which needs the full
         // fullyConverged check incl. the async counter) gets a chance to fire,
         // instead of idling on the exact frame convergence completes.
+        //
+        // DELIBERATELY a weaker term set than isFieldConverged(): the counter
+        // freshness guard is omitted, and must stay omitted. A readback is
+        // scheduled on essentially every rendered frame
+        // (COUNTER_SAMPLE_INTERVAL_FRAMES = 1), so treating "readback in flight"
+        // as a reason to keep going would livelock the loop — each frame would
+        // schedule the readback that justifies drawing the next one, and the
+        // engine would never idle. This function answers "is there work to do?",
+        // which is not the same question as "is the field converged, on fresh
+        // evidence?"; only the latter is isFieldConverged().
         else if (this.aaAuto
             && !this.aaActive
             && this.aaAccumulatedSamples === 0

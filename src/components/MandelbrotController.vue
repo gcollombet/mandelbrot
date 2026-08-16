@@ -82,7 +82,12 @@ defineExpose({
   getNavigator: () => mandelbrotRef.value?.getNavigator() ?? null,
   resetReferenceTo: (cx: string, cy: string, scaleStr: string, angleVal: number) => {
     mandelbrotRef.value?.resetReferenceTo?.(cx, cy, scaleStr, angleVal);
-  }
+  },
+  drawOnce: () => mandelbrotRef.value?.drawOnce(),
+  setExportTime: (elapsedSeconds: number | null) => {
+    mandelbrotRef.value?.setExportTime?.(elapsedSeconds);
+  },
+  isExporting: () => mandelbrotRef.value?.isExporting?.() ?? false,
 });
 let isDragging = false;
 let isRotating = false;

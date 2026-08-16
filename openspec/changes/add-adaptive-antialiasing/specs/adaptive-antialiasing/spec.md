@@ -26,7 +26,7 @@ AA accumulation SHALL be started either by an explicit `Engine.triggerAaAccumula
 
 ### Requirement: Sub-pixel jitter sampling
 
-Each accumulated sample beyond the first SHALL offset the sampling grid by a sub-pixel jitter derived from an R2 low-discrepancy sequence warped through a tent filter, bounded to roughly ±1 texel. Sample 0 SHALL use zero offset. The jitter SHALL NOT mutate the float32 pan offset (`cx`/`cy`) that feeds reprojection delta-tracking, and SHALL NOT require recomputing the reference orbit or BLA table.
+Each accumulated sample beyond the first SHALL offset the sampling grid by a finite-prefix-balanced R2 low-discrepancy sequence, uniformly distributed over the box footprint `[-0.5, 0.5]²` of a screen pixel. For every selectable prefix from 4 through 64 samples, each component of the mean offset SHALL remain below 0.05 texel in magnitude. Sample 0 SHALL use zero offset. The jitter SHALL be rotated into scene coordinates so the reconstruction box remains aligned with the screen pixel at every scene angle. It SHALL NOT mutate the float32 pan offset (`cx`/`cy`) that feeds reprojection delta-tracking, and SHALL NOT require recomputing the reference orbit or BLA table.
 
 #### Scenario: First sample is unjittered
 
@@ -36,7 +36,7 @@ Each accumulated sample beyond the first SHALL offset the sampling grid by a sub
 #### Scenario: Subsequent samples are jittered
 
 - **WHEN** the engine advances to sample index `n >= 1`
-- **THEN** `x0`/`y0` are offset by the tent-warped R2 jitter for index `n`, while `cx`/`cy` and the reference orbit are unchanged
+- **THEN** `x0`/`y0` are offset by the screen-aligned box R2 jitter for index `n`, rotated into scene coordinates, while `cx`/`cy` and the reference orbit are unchanged
 
 ### Requirement: Gamma-correct linear accumulation
 

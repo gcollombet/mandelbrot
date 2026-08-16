@@ -1149,6 +1149,51 @@ impl MandelbrotNavigator {
         self.step_with_delta_time(canvas_width, canvas_height, delta_time)
     }
 
+    /// Place the running transition at an ABSOLUTE elapsed time and step once,
+    /// bypassing the wall clock entirely. This is the deterministic entry point
+    /// used by video export: frame `n` passes `n / fps`, so the camera depends
+    /// only on the frame index and never on how long a frame took to converge.
+    ///
+    /// Absolute rather than incremental on purpose. Accumulating `1/fps` per
+    /// frame does not reliably reach `duration`: at 30 fps over 0.5 s the sum of
+    /// fifteen steps is 0.49999999999999994, so the transition never completes
+    /// and the final frame stops short of B. Re-deriving the elapsed time from
+    /// the frame index each call removes the accumulation entirely, and the
+    /// clamp below makes the last frame land on `duration` exactly.
+    ///
+    /// Deliberately separate from `step_with_delta_time`: `step` and
+    /// `step_with_input` must keep passing their raw wall-clock delta through
+    /// unclamped, so the real-time feel is untouched.
+    ///
+    /// A non-finite elapsed time is treated as 0 rather than poisoning
+    /// `transition_elapsed` with a NaN that no later call could recover from.
+    pub fn step_at_transition_time(
+        &mut self,
+        canvas_width: Option<f64>,
+        canvas_height: Option<f64>,
+        elapsed_seconds: f64,
+    ) -> Vec<String> {
+        let elapsed = if elapsed_seconds.is_finite() && elapsed_seconds > 0.0 {
+            elapsed_seconds.min(self.transition_duration)
+        } else {
+            0.0
+        };
+        if self.is_in_transition() {
+            self.transition_elapsed = elapsed;
+        }
+        // Keep the wall-clock baseline out of the way, so a later `step()`
+        // (returning to real time) measures from its own next call rather than
+        // charging the whole export duration to its first frame.
+        self.reset_step_clock();
+        self.step_with_delta_time(canvas_width, canvas_height, 0.0)
+    }
+
+    /// Forget the last wall-clock sample so the next `step()` restarts its delta
+    /// measurement from the following call.
+    pub fn reset_step_clock(&mut self) {
+        self.last_step_time = None;
+    }
+
     /// Advance one rendered frame while treating held keyboard controls as a
     /// continuous input. Values are expressed in legacy 60 Hz frame units so
     /// the existing feel is preserved at 60 fps and normalized elsewhere.
@@ -5927,6 +5972,132 @@ mod tests {
         assert_eq!(nav.cy.to_string(), "2");
         assert_eq!(nav.scale.to_string(), "0.5");
         assert_eq!(nav.angle, 1.0);
+    }
+
+    // Video export drives the camera by exact 1/fps steps. A transition of
+    // `duration` seconds must therefore land exactly on its target after
+    // ceil(duration * fps) steps — no earlier (which would freeze the tail of
+    // the shot) and no later (which would leave the last frame short of B).
+    // Summing 1/fps in f64 need not reach `duration` exactly: whether it lands
+    // depends on the fps/duration pair, so a single case proves nothing. A
+    // shortfall of one ULP leaves the last frame short of B; an overshoot ends
+    // the shot early and freezes its tail. Cover the combinations v1 actually
+    // offers, including a full 30 s parcours at 900 frames.
+    #[test]
+    fn fixed_delta_transition_lands_exactly_on_target() {
+        for (fps, duration) in [
+            (30.0_f64, 2.0_f64),
+            (30.0, 30.0),
+            (30.0, 0.5),
+            (60.0, 1.5),
+            (60.0, 30.0),
+            (24.0, 5.0),
+            (25.0, 12.5),
+            (24.0, 1.0 / 3.0),
+        ] {
+            let total_frames = (duration * fps).ceil() as usize;
+
+            let mut nav = MandelbrotNavigator::new("0.0", "0.0", "2.0", 0.0);
+            nav.start_transition("1.0", "2.0", "0.5", 1.0, duration);
+
+            for frame in 0..total_frames {
+                assert!(
+                    nav.is_in_transition(),
+                    "{} fps / {} s: transition ended early at frame {} of {}",
+                    fps,
+                    duration,
+                    frame,
+                    total_frames
+                );
+                let _ = nav.step_at_transition_time(None, None, frame as f64 / fps);
+            }
+            // The final frame sits AT the target: elapsed = total_frames / fps,
+            // clamped to duration.
+            let _ = nav.step_at_transition_time(None, None, total_frames as f64 / fps);
+
+            assert!(
+                !nav.is_in_transition(),
+                "{} fps / {} s: still running after {} frames",
+                fps,
+                duration,
+                total_frames
+            );
+            assert_eq!(nav.cx.to_string(), "1", "{} fps / {} s", fps, duration);
+            assert_eq!(nav.cy.to_string(), "2", "{} fps / {} s", fps, duration);
+            assert_eq!(nav.scale.to_string(), "0.5", "{} fps / {} s", fps, duration);
+            assert_eq!(nav.angle, 1.0, "{} fps / {} s", fps, duration);
+        }
+    }
+
+    // The same parcours stepped twice must produce the same parameters on every
+    // frame — this is the property the whole export rests on.
+    #[test]
+    fn fixed_delta_stepping_is_reproducible() {
+        let run = || {
+            let mut nav = MandelbrotNavigator::new("-0.5", "0.6", "1.0", 0.0);
+            nav.start_transition("-0.743643887037151", "0.13182590420533", "1e-9", 0.7, 1.0);
+            let mut frames = Vec::new();
+            for frame in 0..30 {
+                let _ = nav.step_at_transition_time(None, None, frame as f64 / 30.0);
+                frames.push(nav.get_params());
+            }
+            frames
+        };
+        assert_eq!(run(), run());
+    }
+
+    // A NaN delta would poison transition_elapsed permanently: every later
+    // comparison against the duration would be false, so the transition could
+    // never complete and the export would hang on its first frame.
+    #[test]
+    fn fixed_delta_clamps_non_finite_and_negative() {
+        let mut nav = MandelbrotNavigator::new("0.0", "0.0", "2.0", 0.0);
+        nav.start_transition("1.0", "2.0", "0.5", 1.0, 1.0);
+
+        // One rule for every unusable input — NaN, either infinity, negative:
+        // treat it as 0, i.e. do not advance. Never poison transition_elapsed,
+        // and never jump the camera to a position the caller did not ask for.
+        for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY, -1.0] {
+            let _ = nav.step_at_transition_time(None, None, bad);
+            assert_eq!(nav.transition_elapsed, 0.0, "input {}", bad);
+            assert!(nav.is_in_transition(), "input {}", bad);
+        }
+
+        // A finite time beyond the duration clamps to the end rather than
+        // overshooting, so the transition completes exactly on B.
+        let _ = nav.step_at_transition_time(None, None, 99.0);
+        assert!(!nav.is_in_transition());
+        assert_eq!(nav.cx.to_string(), "1");
+    }
+
+    // Absolute placement means frames may be produced in any order and each one
+    // is reproducible on its own — the property that makes a resumed or
+    // re-rendered range identical to the original.
+    #[test]
+    fn fixed_delta_placement_is_order_independent() {
+        let at = |elapsed: f64| {
+            let mut nav = MandelbrotNavigator::new("-0.5", "0.6", "1.0", 0.0);
+            nav.start_transition("-0.743643887037151", "0.13182590420533", "1e-9", 0.7, 1.0);
+            let _ = nav.step_at_transition_time(None, None, elapsed);
+            nav.get_params()
+        };
+
+        let mut forward = Vec::new();
+        let mut nav = MandelbrotNavigator::new("-0.5", "0.6", "1.0", 0.0);
+        nav.start_transition("-0.743643887037151", "0.13182590420533", "1e-9", 0.7, 1.0);
+        for frame in 0..30 {
+            let _ = nav.step_at_transition_time(None, None, frame as f64 / 30.0);
+            forward.push(nav.get_params());
+        }
+
+        for frame in 0..30 {
+            assert_eq!(
+                forward[frame],
+                at(frame as f64 / 30.0),
+                "frame {} differs when rendered standalone",
+                frame
+            );
+        }
     }
 
     #[test]

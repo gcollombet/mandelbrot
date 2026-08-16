@@ -223,20 +223,34 @@ watch(
 );
 
 
+// Video export clock, in seconds along the parcours. Null = real time.
+// While set, draw() places the camera at this ABSOLUTE parcours time instead of
+// advancing it by a wall-clock delta and applying held keyboard input. Absolute
+// placement makes the call idempotent, which is what lets the export loop pump
+// draw() as many times as a frame needs to converge without the camera creeping
+// forward on every pump.
+let exportTimeSeconds: number | null = null;
+
 async function draw() {
   if (!engine || !navigator) return;
 
     const cpuFrameStartMs = performance.now();
 
     const canvas = canvasRef.value;
-    const step = navigator.step_with_input(
-      keyboardNavigation.translateX,
-      keyboardNavigation.translateY,
-      keyboardNavigation.rotation,
-      keyboardNavigation.zoom || 1,
-      canvas ? canvas.width : undefined,
-      canvas ? canvas.height : undefined,
-    );
+    const step = exportTimeSeconds !== null
+      ? navigator.step_at_transition_time(
+          canvas ? canvas.width : undefined,
+          canvas ? canvas.height : undefined,
+          exportTimeSeconds,
+        )
+      : navigator.step_with_input(
+          keyboardNavigation.translateX,
+          keyboardNavigation.translateY,
+          keyboardNavigation.rotation,
+          keyboardNavigation.zoom || 1,
+          canvas ? canvas.width : undefined,
+          canvas ? canvas.height : undefined,
+        );
     if (!step) return;
     const [dx, dy] = step as [string, string];
     const [cx_string, cy_string, scale_string, angle_string] = navigator.get_params() as [string, string, string, string];
@@ -516,6 +530,17 @@ defineExpose({
   },
   getParams: () => navigator?.get_params(),
   drawOnce: async () => draw(),
+  // ── Video export clock ──────────────────────────────────────────────
+  // Sets BOTH the camera clock and the engine's animation clock from one call,
+  // so the parcours position and every cosmetic track phase are derived from
+  // the same frame index and cannot drift apart. Pass null to hand both back to
+  // wall-clock time.
+  setExportTime: (elapsedSeconds: number | null) => {
+    exportTimeSeconds = elapsedSeconds;
+    if (engine) engine.animationTimeOverride = elapsedSeconds;
+    if (elapsedSeconds === null) navigator?.reset_step_clock();
+  },
+  isExporting: () => exportTimeSeconds !== null,
   resize: async () => handleResize(),
   initialize: async () => initWebGPU(),
   useBla: () => engine?.setApproximationMode('bla'),

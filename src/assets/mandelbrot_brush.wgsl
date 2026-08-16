@@ -4139,7 +4139,8 @@ fn cs_main(
           g_renormIters = 0u;
           let startIter = select(iter_val, 0.0, is_compute_request);
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
-          // AA sub-pixel jitter (neutral-space units); zero for sample 0 / AA off.
+          // Screen-aligned box-AA jitter, already rotated by the CPU into this
+          // local_rot frame and scaled to neutral-space units; zero for sample 0.
           let local_rot = xy_neutral * neutralExtent + vec2<f32>(mandelbrot.aaOffsetX, mandelbrot.aaOffsetY);
 
           var result: TexelOut;

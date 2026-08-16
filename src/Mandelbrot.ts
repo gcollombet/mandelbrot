@@ -110,37 +110,59 @@ export function stripExplorationStateFields<T extends object>(value: T): T {
     return value;
 }
 
+type AaJitterOffset = { x: number; y: number };
+
+// Plastic constant: real root of x³ = x + 1. (A long-standing bug had
+// 1.22074408460575947536 here — the root of x⁴ = x + 1, i.e. the R3
+// sequence's constant.)
+const AA_R2_PHI = 1.32471795724474602596;
+const AA_R2_PHI_1 = 1 / AA_R2_PHI;
+const AA_R2_PHI_2 = 1 / (AA_R2_PHI * AA_R2_PHI);
+// Cranley-Patterson phases chosen against the ACTUAL finite prefixes consumed
+// by the 4×..64× slider. They cap either prefix-centroid component below 0.05
+// texel over that whole range, versus peaks of 0.164/0.145 for the old 0.5
+// phase, while retaining the pure R2 distribution (unlike forced ± pairing,
+// which leaves half of a 4×4 stratification empty at 16×).
+const AA_R2_PHASE_X = 0.0535;
+const AA_R2_PHASE_Y = 0.354;
+
+function r2BoxPoint(index: number): AaJitterOffset {
+    return {
+        x: (AA_R2_PHASE_X + index * AA_R2_PHI_1) % 1 - 0.5,
+        y: (AA_R2_PHASE_Y + index * AA_R2_PHI_2) % 1 - 0.5,
+    };
+}
+
 /**
- * Sub-pixel AA jitter offset for a given sample index.
+ * Screen-pixel sub-pixel AA jitter for a given sample index.
  *
- * Uses the R2 low-discrepancy sequence (plastic constant) for even sample
- * placement, uniform over the pixel footprint — a BOX reconstruction kernel.
- * Box matches the sharpness reference of a DPR×N render downscaled to a
- * DPR-1 display (regular-grid box supersampling): the accumulated average
- * converges to the exact box integral of the pixel footprint. (The earlier
- * tent warp traded sharpness for smoother reconstruction; field round
- * 2026-07-07 chose the box.) Output components are in [-0.5, 0.5] texel
- * units. Sample 0 returns {0, 0} (the unjittered base sample).
+ * Uses a finite-prefix-balanced R2 low-discrepancy sequence, uniform over the
+ * pixel footprint — a BOX reconstruction kernel. Box matches the sharpness
+ * reference of a DPR×N render downscaled to DPR 1: the accumulated average
+ * converges to the box integral of the screen pixel. The earlier tent warp
+ * traded sharpness for smoother reconstruction; the 2026-07-07 field round
+ * chose box.
+ *
+ * The phase is selected for the finite 4×..64× prefixes the UI actually uses,
+ * avoiding the coherent ~0.1 px shift of the old 0.5 phase without sacrificing
+ * R2 stratification. Components remain in [-0.5, 0.5] screen-texel units.
+ * Sample 0 returns {0, 0} (the unjittered base sample).
  */
-export function computeAaJitterOffset(sampleIndex: number): { x: number; y: number } {
+export function computeAaJitterOffset(sampleIndex: number): AaJitterOffset {
     if (sampleIndex <= 0) {
         return { x: 0, y: 0 };
     }
-    // Plastic constant: real root of x³ = x + 1. (A long-standing bug had
-    // 1.22074408460575947536 here — the root of x⁴ = x + 1, i.e. the R3
-    // sequence's constant. The resulting 2D pair loses the low-discrepancy
-    // guarantee: at 4–16 samples the positions cluster in one corner of the
-    // pixel instead of stratifying it, which quantized band transitions
-    // unevenly regardless of the reconstruction kernel.)
-    const phi = 1.32471795724474602596;
-    const phi1 = 1 / phi;
-    const phi2 = 1 / (phi * phi);
-    // Seed 0.5 keeps sample 0 at exactly (0, 0) as a NATURAL member of the
-    // sequence, so small prefixes stay uniformly distributed (a hors-série
-    // center point biases low sample counts toward the pixel center).
-    const r2x = (0.5 + sampleIndex * phi1) % 1;
-    const r2y = (0.5 + sampleIndex * phi2) % 1;
-    return { x: r2x - 0.5, y: r2y - 0.5 };
+    return r2BoxPoint(sampleIndex);
+}
+
+/** Rotate a screen-aligned jitter into the scene/local_rot coordinate frame. */
+export function rotateAaJitterToScene(offset: AaJitterOffset, sceneAngle: number): AaJitterOffset {
+    const sin = Math.sin(sceneAngle);
+    const cos = Math.cos(sceneAngle);
+    return {
+        x: cos * offset.x - sin * offset.y,
+        y: sin * offset.x + cos * offset.y,
+    };
 }
 
 export function preserveSessionPerformanceFields<T extends Partial<MandelbrotParams>>(

@@ -21,6 +21,10 @@ export type MandelbrotExposed = {
   setPrecisionBudget?: (targetScale: string) => void,
   getPrecisionBudget?: () => string | undefined,
   resetReferenceTo?: (cx: string, cy: string, scaleStr: string, angleVal: number) => void,
+  /** Drive the camera and every animation track from an absolute parcours time
+   *  (seconds) instead of the wall clock. Null hands both back to real time. */
+  setExportTime?: (elapsedSeconds: number | null) => void,
+  isExporting?: () => boolean,
 };
 
 export type KeyboardNavigationInput = {

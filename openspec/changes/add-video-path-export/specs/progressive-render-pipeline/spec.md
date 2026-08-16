@@ -1,7 +1,9 @@
 ## ADDED Requirements
 
 ### Requirement: Prédicat de convergence réutilisable
-Le moteur SHALL exposer la condition de convergence complète sous forme d'un prédicat unique, comprenant les gardes de fraîcheur du compteur : `counterSampleFrame >= lastRawMutationFrame`, absence de readback en vol pour la génération courante, et cohérence de version entre le champ raw et le display résolu. `needsMoreFrames()` et le déclenchement de l'AA automatique SHALL consommer ce prédicat au lieu de réimplémenter ses termes.
+Le moteur SHALL exposer la condition « champ convergé sur preuve fraîche » sous forme d'un prédicat unique, incluant l'absence de readback de compteur en vol pour la génération courante. Le déclenchement de l'AA automatique et la capture d'un échantillon AA SHALL consommer ce prédicat au lieu de réimplémenter ses termes.
+
+`needsMoreFrames()` NE SHALL PAS consommer ce prédicat : elle répond à « reste-t-il du travail ? », question distincte, et inclure la garde de fraîcheur y provoquerait un livelock — un readback étant planifié à chaque frame rendue, chaque frame justifierait la suivante et le moteur n'atteindrait jamais l'idle.
 
 #### Scenario: Compteur périmé
 - **WHEN** le compteur `unfinished` rapporté est inférieur au seuil d'idle mais date d'avant la dernière mutation du champ raw
@@ -10,6 +12,10 @@ Le moteur SHALL exposer la condition de convergence complète sous forme d'un pr
 #### Scenario: Readback en vol
 - **WHEN** un readback de compteur est en vol pour la génération courante
 - **THEN** le prédicat est faux jusqu'à sa résolution
+
+#### Scenario: La boucle de rendu atteint l'idle
+- **WHEN** le champ est convergé et plus aucune source de travail n'est active
+- **THEN** `needsMoreFrames()` devient faux, sans être maintenue vraie par la présence d'un readback de compteur en vol
 
 #### Scenario: Comportement temps réel inchangé
 - **WHEN** le moteur tourne en mode temps réel après l'extraction du prédicat

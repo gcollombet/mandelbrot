@@ -35,7 +35,7 @@ Key existing facts that shape the design (verified against the code):
 
 Average N serial jittered full renders rather than one render at N× resolution.
 
-- **Why:** the 8-layer MRT raw texture makes SSAA's VRAM cost prohibitive (2× resolution ≈ 4× the footprint of the largest textures). Temporal reuses the existing pipeline almost entirely, degrades gracefully (any prefix of the R2 sequence is a valid low-discrepancy set → stop-anytime is free), and gets the tent reconstruction filter for free via jitter importance sampling.
+- **Why:** the 8-layer MRT raw texture makes SSAA's VRAM cost prohibitive (2× resolution ≈ 4× the footprint of the largest textures). Temporal reuses the existing pipeline almost entirely, degrades gracefully (any prefix of the R2 sequence is a valid low-discrepancy set → stop-anytime is free), and converges to the screen-pixel box integral through uniform jitter and equal-weight accumulation.
 - **Alternative considered:** SSAA — simpler conceptually, single converge, but quadratic VRAM and an all-or-nothing wait incompatible with deep-zoom convergence times.
 
 ### Accumulation alpha channel as per-pixel sample counter

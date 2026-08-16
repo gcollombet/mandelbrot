@@ -101,8 +101,12 @@ import {
 import {absolutePresetUrl, PRESET_QUERY_PARAMETER} from '../presetDeepLink';
 
 import type {Engine} from '../Engine.ts';
+import VideoExportPanel from './VideoExportPanel.vue';
+import {runVideoExportToWebm} from '../videoExportRunner';
+import type {VideoOutputSpec, VideoPathLocation} from '../videoPath';
 const props = defineProps<{
   engine: Engine | null;
+  mandelbrotCtrl?: any;
   suspendShortcuts?: (suspend: boolean) => void;
   activeTab: string;
   pickerMode?: boolean;
@@ -2474,6 +2478,104 @@ async function importSkyboxTexture(event: Event) {
   await importTextureFor(event, 'skybox');
 }
 
+// ── Video export tab ──────────────────────────────────────────────
+const videoExportRunning = ref(false);
+const videoFramesEmitted = ref(0);
+const videoTotalFrames = ref(0);
+const videoExportError = ref<string | null>(null);
+let videoAbortSignal: {aborted: boolean} | null = null;
+
+const videoMaxTextureDimension = computed(() =>
+  props.engine?.device?.limits?.maxTextureDimension2D ?? 8192);
+
+function cancelVideoExport() {
+  if (videoAbortSignal) videoAbortSignal.aborted = true;
+}
+
+async function startVideoExport(payload: {
+  durationSeconds: number;
+  output: VideoOutputSpec;
+  codec: 'av1' | 'avc' | 'hevc' | 'vp9';
+  startLocation: VideoPathLocation;
+  endLocation: VideoPathLocation;
+}) {
+  if (videoExportRunning.value || !props.engine || !props.mandelbrotCtrl) return;
+  videoExportError.value = null;
+  videoExportRunning.value = true;
+  videoFramesEmitted.value = 0;
+  videoTotalFrames.value = 0;
+  const signal = {aborted: false};
+  videoAbortSignal = signal;
+
+  // Ask for the destination file FIRST, while the click that started this is
+  // still the current user gesture — showSaveFilePicker refuses once any await
+  // has intervened. Streaming to disk is what keeps a long export from holding
+  // the whole film in memory ("array buffer allocation failed" at the end), and
+  // fragmented MP4 keeps the partial file playable if the run is interrupted.
+  const suggestedName = `mandelbrot-parcours-${Date.now()}.mp4`;
+  let writable: FileSystemWritableFileStream | null = null;
+  const picker = (window as any).showSaveFilePicker as
+    | ((options?: unknown) => Promise<FileSystemFileHandle>)
+    | undefined;
+  if (picker) {
+    try {
+      const handle = await picker({
+        suggestedName,
+        types: [{description: 'Vidéo MP4', accept: {'video/mp4': ['.mp4']}}],
+      });
+      writable = await handle.createWritable();
+    } catch (error) {
+      // A dismissed picker cancels the export; anything else falls back to
+      // buffering in memory, which still works for short films.
+      if ((error as DOMException)?.name === 'AbortError') {
+        videoExportRunning.value = false;
+        videoAbortSignal = null;
+        return;
+      }
+      writable = null;
+    }
+  }
+
+  try {
+    const outcome = await runVideoExportToWebm(
+      {engine: props.engine as any, controller: props.mandelbrotCtrl},
+      {
+        from: payload.startLocation,
+        to: payload.endLocation,
+        durationSeconds: payload.durationSeconds,
+        output: payload.output,
+        codec: payload.codec,
+        destination: writable
+          ? {kind: 'stream', writable: writable as unknown as WritableStream<Uint8Array>}
+          : {kind: 'buffer'},
+        maxTextureDimension: videoMaxTextureDimension.value,
+        signal,
+        onProgress: (p) => {
+          videoFramesEmitted.value = p.framesEmitted;
+          videoTotalFrames.value = p.totalFrames;
+        },
+      },
+    );
+    if (outcome.blob) {
+      const url = URL.createObjectURL(outcome.blob);
+      const link = document.createElement('a');
+      link.href = url;
+      link.download = suggestedName;
+      link.click();
+      // Revoke only after the browser has had a chance to start the download.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    }
+  } catch (error) {
+    videoExportError.value = error instanceof Error ? error.message : String(error);
+  } finally {
+    // Closing the handle is what makes the bytes on disk a finished file. Done
+    // on every path, so an interrupted or failed export still leaves something
+    // playable rather than a truncated handle.
+    if (writable) await writable.close().catch(() => undefined);
+    videoExportRunning.value = false;
+    videoAbortSignal = null;
+  }
+}
 </script>
 
 <template>
@@ -2802,6 +2904,20 @@ async function importSkyboxTexture(event: Event) {
         :upload-success-keys="uploadSuccessKeys"
         :suspend-shortcuts="props.suspendShortcuts"
         @upload-preset="uploadAnimationPreset"
+      />
+    </div>
+
+    <!-- Video export tab -->
+    <div v-else-if="activeTab === 'video'" class="cv-body sections">
+      <VideoExportPanel
+        :current="model as unknown as Record<string, unknown>"
+        :max-texture-dimension="videoMaxTextureDimension"
+        :running="videoExportRunning"
+        :frames-emitted="videoFramesEmitted"
+        :total-frames="videoTotalFrames"
+        :last-error="videoExportError"
+        @start="startVideoExport"
+        @cancel="cancelVideoExport"
       />
     </div>
 

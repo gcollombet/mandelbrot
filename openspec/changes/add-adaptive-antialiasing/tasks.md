@@ -7,7 +7,7 @@ Staged delivery: Sections 1–6 are **Stage A** (quality: per-pixel adaptive acc
 - [x] 1.1 Add `aaOffsetX`/`aaOffsetY` (`f32`) to `struct Mandelbrot` in `mandelbrot.wgsl` and `mandelbrot_brush.wgsl`, replacing `_padding2`/`_padding3` (indices **18/19** — NOT 17, which is `scaleExp`)
 - [x] 1.2 Update `x0`/`y0` in both shaders: jitter injected at the shared `local_rot` definition so it flows into both the deep `dc` and f32 `x0/y0`
 - [x] 1.3 In `Engine.ts` uniform write, set indices 18/19 to `this.aaOffsetX`/`this.aaOffsetY`
-- [x] 1.4 Add `computeAaJitterOffset(sampleIndex)` to `src/Mandelbrot.ts` (R2 sequence with `phi = 1.22074408460575947536`, tent warp), with a unit test for index 0 → {0,0} and bounded ±1 range
+- [x] 1.4 Add `computeAaJitterOffset(sampleIndex)` to `src/Mandelbrot.ts` (initial tent/R2 implementation; superseded by the box kernel and corrected plastic constant in 11.7–11.10), with a unit test for index 0 → {0,0}
 
 ## 2. Linear-space color path
 
