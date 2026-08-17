@@ -2496,6 +2496,7 @@ async function startVideoExport(payload: {
   durationSeconds: number;
   output: VideoOutputSpec;
   codec: 'av1' | 'avc' | 'hevc' | 'vp9';
+  aaSamplesPerFrame: number;
   startLocation: VideoPathLocation;
   endLocation: VideoPathLocation;
 }) {
@@ -2545,6 +2546,7 @@ async function startVideoExport(payload: {
         durationSeconds: payload.durationSeconds,
         output: payload.output,
         codec: payload.codec,
+        aaSamplesPerFrame: payload.aaSamplesPerFrame,
         destination: writable
           ? {kind: 'stream', writable: writable as unknown as WritableStream<Uint8Array>}
           : {kind: 'buffer'},

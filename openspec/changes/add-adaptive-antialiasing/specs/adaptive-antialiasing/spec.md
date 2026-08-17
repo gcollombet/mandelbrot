@@ -38,6 +38,25 @@ Each accumulated sample beyond the first SHALL offset the sampling grid by a fin
 - **WHEN** the engine advances to sample index `n >= 1`
 - **THEN** `x0`/`y0` are offset by the screen-aligned box R2 jitter for index `n`, rotated into scene coordinates, while `cx`/`cy` and the reference orbit are unchanged
 
+### Requirement: Uniform AA compensates the shifted raw lattice
+
+When adaptive AA is disabled, every accumulated color sample SHALL look up the
+live raw texel on the inverse-shifted lattice: a raw field evaluated at
+`baseLocal + jitter` is addressed with `screenLocal - jitter`. The correction
+SHALL operate in the rotated scene/neutral frame, SHALL preserve the unshifted
+screen/material coordinates used for shading, and SHALL NOT affect adaptive AA
+or the direct/snapshot color path.
+
+#### Scenario: Rotated uniform AA uses distinct shifted-lattice samples
+
+- **WHEN** uniform AA accumulates a jittered sample with a non-zero scene angle
+- **THEN** the live raw lookup subtracts that sample's rotated scene-space jitter before selecting the texel, preventing neighbouring screen pixels from repeatedly sharing the same raw texel solely because the neutral lattice is rotated
+
+#### Scenario: Adaptive and direct paths remain unchanged
+
+- **WHEN** adaptive AA is enabled, or the direct/snapshot color entry point is used
+- **THEN** the inverse lookup offset is zero and the existing lookup behaviour is preserved
+
 ### Requirement: Gamma-correct linear accumulation
 
 Accumulated samples SHALL be summed in linear RGB in an `rgba16float`

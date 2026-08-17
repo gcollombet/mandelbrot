@@ -22,6 +22,7 @@ import {
   type Mp4Codec,
 } from '../videoEncoderSink';
 import {
+  AA_SAMPLE_CHOICES,
   loadVideoExportPreferences,
   saveVideoExportPreferences,
 } from '../videoExportPreferences';
@@ -43,6 +44,7 @@ const emit = defineEmits<{
     durationSeconds: number;
     output: VideoOutputSpec;
     codec: Mp4Codec;
+    aaSamplesPerFrame: number;
     startLocation: VideoPathLocation;
     endLocation: VideoPathLocation;
   }): void;
@@ -82,9 +84,15 @@ const fps = ref(saved.fps);
 const supersample = ref(saved.supersample);
 const magnificationThreshold = ref(saved.magnificationThreshold);
 const codec = ref<Mp4Codec>(saved.codec);
+const aaSamplesPerFrame = ref<number>(saved.aaSamplesPerFrame);
+
+const AA_OPTIONS = AA_SAMPLE_CHOICES.map(n => ({
+  value: String(n),
+  label: n === 1 ? 'Aucun' : `×${n} échantillons`,
+}));
 
 watch(
-  [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold, codec],
+  [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold, codec, aaSamplesPerFrame],
   () => saveVideoExportPreferences({
     pinnedStart: pinnedStart.value,
     pinnedEnd: pinnedEnd.value,
@@ -94,6 +102,7 @@ watch(
     supersample: supersample.value,
     magnificationThreshold: magnificationThreshold.value,
     codec: codec.value,
+    aaSamplesPerFrame: aaSamplesPerFrame.value,
   }),
   { deep: true },
 );
@@ -182,6 +191,7 @@ function start() {
     durationSeconds: durationSeconds.value,
     output: output.value,
     codec: codec.value,
+    aaSamplesPerFrame: aaSamplesPerFrame.value,
     startLocation: effectiveStart.value,
     endLocation: effectiveEnd.value,
   });
@@ -255,6 +265,13 @@ function start() {
           />
         </label>
         <label class="ve-row">
+          <span class="ve-label">Anticrénelage</span>
+          <DenseSelect
+            :options="AA_OPTIONS" :model-value="String(aaSamplesPerFrame)" :disabled="running"
+            @update:model-value="(v: string) => aaSamplesPerFrame = Number(v)"
+          />
+        </label>
+        <label class="ve-row">
           <span class="ve-label">Codec</span>
           <DenseSelect
             :options="codecOptions" :model-value="codec" :disabled="running"
@@ -279,6 +296,7 @@ function start() {
           limite de l'appareil {{ maxTextureDimension }}.
           Une reconvergence complète par facteur de zoom égal au seuil : bas = plus propre et plus lent,
           haut = plus rapide et plus doux en périphérie.
+          L'anticrénelage n'ajoute que la fine bande de bord par échantillon, pas une image entière.
         </p>
       </div>
     </DenseSection>

@@ -32,9 +32,11 @@ export type VideoExportRunnerDeps = {
       outputHeight: number
       supersample: number
       batchTargetFps: number
+      aaSamplesPerFrame?: number
     }): Promise<void>
     endVideoExportSession(): void
     videoFrameReady(): boolean
+    beginExportFrameAa(): void
     waitForSubmittedWork(): Promise<void>
     captureExportFrame(request: {
       outputWidth: number
@@ -66,6 +68,8 @@ export type VideoExportRequest = {
   durationSeconds: number
   output: VideoOutputSpec
   codec: Mp4Codec
+  /** Jittered AA samples per emitted frame. 1 = off. */
+  aaSamplesPerFrame?: number
   /** Where the bytes go. Streaming avoids holding the whole film in memory. */
   destination: VideoDestination
   maxTextureDimension: number
@@ -120,6 +124,7 @@ export async function runVideoExportToWebm(
     outputHeight: output.height,
     supersample: output.supersample,
     batchTargetFps: EXPORT_BATCH_TARGET_FPS,
+    aaSamplesPerFrame: request.aaSamplesPerFrame,
   })
 
   let sink: Awaited<ReturnType<typeof createVideoSink>>
@@ -157,7 +162,12 @@ export async function runVideoExportToWebm(
 
     const result = await runVideoExport(
       {
-        setExportTime: (elapsedSeconds) => deps.controller.setExportTime(elapsedSeconds),
+        setExportTime: (elapsedSeconds) => {
+          deps.controller.setExportTime(elapsedSeconds)
+          // Each frame accumulates from scratch: carrying samples across frames
+          // would average two different camera positions together.
+          if (elapsedSeconds !== null) deps.engine.beginExportFrameAa()
+        },
         drawOnce: async () => {
           await deps.controller.drawOnce()
           // Do NOT remove: the counter readback that decides convergence is

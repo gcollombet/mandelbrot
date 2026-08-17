@@ -99,6 +99,13 @@
 - [x] 8.24 Repli mémoire + téléchargement quand l'API d'écriture est absente, et fermeture du handle dans un `finally` sur tous les chemins
 - [x] 8.25 Vérifié par `tests/video-stream-encode.spec.ts` : 90 images, **53 % des octets écrits avant même l'encodage de la dernière image**, aucun Blob rendu, fichier complet lisible, et **fichier coupé à 60 % toujours chargeable par le navigateur**
 
+## 8nonies. Anticrénelage par image
+
+- [x] 8.26 **AA jitteré par image, 1 / 2 / 4 / 8** — réutilise le reseed sélectif existant (`aa_reseed.wgsl` Stage B) et le tag analytique de la Phase D. Le gate de composition AA reçoit la même variante export que `videoFrameReady` (retrait du seul terme `isZoomActive`) ; `effectiveAntialiasLevel` fait primer le réglage de session sur celui du viewer
+- [x] 8.27 **Capture depuis l'accumulateur** — `present.wgsl` normalisant déjà par le compte d'échantillons en alpha, et le filtre box divisant par texel avant moyenne, la capture lit `accumTexture` sans qu'aucun shader change
+- [x] 8.28 **Branche `exportAaPending` dans `needsMoreFrames()`** — sans elle `render()` sortait par sa garde initiale avant d'atteindre le déclencheur, et l'image attendait indéfiniment des échantillons impossibles à prendre. Frappait surtout l'image 0, où le cycle de zoom est encore `idle`
+- [x] 8.29 **Mesuré** (`tests/video-aa.spec.ts`, 480×270, 4 échantillons) : **9,9 % de la surface réestampillée**, 12 793 texels sur 22 977 éligibles (donc **44 % de la bande traités analytiquement, sans réitération**), 8 pompes au total, **énergie de bord 47,4 → 38,3 (−19 %)** à luminosité inchangée (131,2 → 135,5)
+
 ## 9. Validation
 
 - [ ] 9.1 Test de reproductibilité : exporter deux fois un parcours court et comparer les sorties image par image

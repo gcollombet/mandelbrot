@@ -154,6 +154,25 @@ Le conteneur SHALL toujours être **MP4**. Le **codec** SHALL être choisi par l
 - **WHEN** le codec choisi ne peut pas être encodé par ce navigateur à la résolution demandée — par exemple H.264 sur une dimension impaire
 - **THEN** l'interface le signale, l'export ne peut pas démarrer, et aucun autre codec n'est substitué en silence
 
+### Requirement: Anticrénelage par image
+Le système SHALL proposer un nombre d'échantillons d'anticrénelage jitterés par image (1 = aucun). Chaque échantillon supplémentaire SHALL réutiliser le reseed sélectif du moteur : seuls les texels de la bande de bord sont recalculés, ceux dont la marge analytique est validée n'étant jamais réitérés. Le système NE SHALL PAS émettre une image dont l'accumulation est incomplète.
+
+#### Scenario: Accumulation avant émission
+- **WHEN** un export demande plusieurs échantillons par image
+- **THEN** aucune image n'est capturée avant que son accumulation n'ait atteint le nombre demandé
+
+#### Scenario: Accumulation repartant à chaque image
+- **WHEN** la caméra avance à l'image suivante
+- **THEN** l'accumulation repart de zéro, sans mélanger deux positions de caméra
+
+#### Scenario: Coût borné par la bande de bord
+- **WHEN** un échantillon supplémentaire est pris
+- **THEN** seule une fraction minoritaire de la surface est réestampillée, et non l'ensemble du champ
+
+#### Scenario: Effet mesurable sur les bords
+- **WHEN** une même vue est capturée avec 1 puis 4 échantillons
+- **THEN** l'énergie de bord de l'image diminue tandis que sa luminosité moyenne reste stable
+
 ### Requirement: Écriture en flux du fichier produit
 Quand le navigateur le permet, le système SHALL écrire le fichier au fil de l'encodage vers une destination choisie par l'utilisateur, sans conserver le film complet en mémoire. Le conteneur SHALL alors être un MP4 **fragmenté**, de sorte qu'un fichier interrompu reste lisible jusqu'à son dernier fragment complet. À défaut d'API d'écriture disponible, le système SHALL retomber sur un tampon mémoire et un téléchargement classique.
 

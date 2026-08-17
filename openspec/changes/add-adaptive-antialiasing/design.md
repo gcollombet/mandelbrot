@@ -80,6 +80,31 @@ Reuse `color.wgsl`'s planned `fs_main_direct` as the live default: when `aaActiv
 
 With selective reseed, frozen pixels keep their value and the present pass shows the stable running average during reconverge — there is no flicker to hide, so freeze/merge snapshot passes are suppressed while `aaActive`.
 
+### Uniform-AA inverse lookup for the shifted neutral lattice
+
+The compute pass evaluates raw texel `j` at `baseLocal(j) + jitter`, while the
+color pass historically kept selecting `floor(screenLocal)` for every sample.
+That happens to align at angle zero, but after rotating the square neutral
+lattice, neighbouring screen pixels periodically select the same raw texel for
+all samples. The accumulated result then exposes staircase-shaped macroblocks;
+raising the budget to 64 samples cannot repair a lookup that never changes.
+
+For uniform AA, every raw texel is reseeded and recomputed, so the correct
+inverse mapping is local and safe: select `floor(screenLocal - jitter)`, then
+read the value already evaluated at `baseLocal + jitter`. The color shader
+subtracts the current scene-space jitter only from the live raw-texture UV; it
+keeps the original `uv_neutral` for materials and other shading coordinates.
+The subtraction happens after live zoom rescaling so the offset stays expressed
+in the raw lattice's neutral units. Two existing padding floats in the color
+uniform carry X/Y, so the uniform ABI and buffer size remain unchanged.
+
+Adaptive AA deliberately writes zero compensation for now. Its selective
+reseed and target map are indexed on the unshifted texel; selecting a shifted
+neighbour safely requires coordinating that map (for example by dilating or
+shift-addressing the eligible frontier), not just changing the color lookup.
+The direct/snapshot entry point also selects zero in the shader, preserving its
+historical output.
+
 ### Staged delivery (A then B)
 
 - **Stage A (quality):** per-pixel alpha + DE-gated accumulation, but full reconverge every sample (no selective reseed). Validates the DE→target mapping and the linear/present plumbing. Small delta, no convergence-core changes.

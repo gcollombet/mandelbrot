@@ -698,6 +698,9 @@ export class Engine {
      *  a pipeline-creation constant, so one pipeline per factor. */
     private exportPresentPipelines = new Map<number, GPURenderPipeline>();
     private exportPresentBindGroup?: GPUBindGroup;
+    /** Reduce-pass binding onto the AA accumulator, rebuilt when it changes. */
+    private exportAccumBindGroup?: GPUBindGroup;
+    private exportAccumBindGroupSource?: GPUTextureView;
     /** Present pipeline at 1:1, used to mirror each exported frame on screen. */
     private exportMirrorPipeline?: GPURenderPipeline;
     private exportCaptureKey = '';
@@ -3610,7 +3613,12 @@ export class Engine {
      * frame. A true result means this frame is safe to capture and encode.
      */
     videoFrameReady(): boolean {
-        return this.isFieldConverged(true)
+        if (!this.isFieldConverged(true)) return false
+        if (this.videoExportAaSamples <= 1) return true
+        // With AA on, "ready" means the accumulation finished too: capturing
+        // mid-accumulation would emit a frame averaged over fewer samples than
+        // its neighbours, which reads as flicker in the film.
+        return !this.aaActive && this.aaAccumulatedSamples >= this.videoExportAaSamples
     }
 
     /**
@@ -3632,6 +3640,8 @@ export class Engine {
     } | null = null
 
     private videoExportActive = false
+    /** Jittered AA samples accumulated per exported frame. 1 = off. */
+    private videoExportAaSamples = 1
     /** Interactive draw callback parked for the duration of an export. */
     private videoExportParkedDrawFn: (() => Promise<void>) | null = null
     /** Pins the compute surface to an exact pixel size while set (export only). */
@@ -3639,6 +3649,21 @@ export class Engine {
 
     isVideoExportActive(): boolean {
         return this.videoExportActive
+    }
+
+    /**
+     * AA budget in force. An export overrides the interactive setting: its
+     * sample count is a property of the film being rendered, not of whatever
+     * the viewer happened to be set to.
+     */
+    private effectiveAntialiasLevel(requested: number | undefined): number {
+        if (this.videoExportActive) return this.videoExportAaSamples
+        return Math.max(1, Math.round(requested ?? 1))
+    }
+
+    /** Start a fresh accumulation for the next exported frame. */
+    beginExportFrameAa(): void {
+        if (this.videoExportActive && this.videoExportAaSamples > 1) this.resetAaState()
     }
 
     /**
@@ -3691,6 +3716,8 @@ export class Engine {
         outputHeight: number
         supersample: number
         batchTargetFps: number
+        /** Jittered AA samples per emitted frame. 1 = no accumulation. */
+        aaSamplesPerFrame?: number
     }): Promise<void> {
         if (this.videoExportActive) {
             throw new Error('A video export session is already active on this engine.')
@@ -3727,6 +3754,7 @@ export class Engine {
             aaAuto: this.aaAuto,
         }
         this.videoExportActive = true
+        this.videoExportAaSamples = Math.max(1, Math.round(settings.aaSamplesPerFrame ?? 1))
 
         // Park the interactive render loop. It calls the SAME draw() the export
         // loop drives, so leaving it armed means two drivers rendering the same
@@ -3905,6 +3933,7 @@ export class Engine {
     endVideoExportSession(): void {
         const saved = this.videoExportSavedSettings
         this.videoExportActive = false
+        this.videoExportAaSamples = 1
         this.videoExportSavedSettings = null
         if (!saved) return
 
@@ -5549,7 +5578,7 @@ export class Engine {
             : 1.0
         const frozenScale = getFrozenScale(this.zoomState)
         const liveScale = getLiveScale(this.zoomState)
-        const antialiasLevelColor = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
+        const antialiasLevelColor = this.effectiveAntialiasLevel(renderOptions.antialiasLevel)
 
         // Phase D analytic AA: current sample's jitter δc as unit direction +
         // ln|δc| (exponent-summed with the payload's S in the shader, so deep
@@ -5593,7 +5622,7 @@ export class Engine {
             mandelbrot.epsilon,             // 16: epsilon
             renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
             effectiveMicroBumpStrength,     // 18: microBumpStrength
-            0,                                // 19: reserved (was subsurfaceStrength)
+            renderOptions.aaAdaptive === false ? this.aaOffsetX : 0, // 19: uniform-AA inverse lookup X
             renderOptions.reliefDepth,       // 20: reliefDepth
             renderOptions.localShadowStrength, // 21: localShadowStrength
             effectiveLightAngle,              // 22: lightAngle
@@ -5649,7 +5678,7 @@ export class Engine {
             ...orbitTrapColorUniformValues(orbitTrap), // 72..92: structured orbit-trap configuration
             renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification [1, 4]
             iterationPaletteCurveCode(renderOptions.iterationPaletteCurve), // 94: iterationPaletteCurve
-            0,                                   // 95: alignment / future payload field
+            renderOptions.aaAdaptive === false ? this.aaOffsetY : 0, // 95: uniform-AA inverse lookup Y
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -5919,7 +5948,7 @@ export class Engine {
     }
 
     private analyticRawPayloadNeeded(renderOptions: RenderOptions, aspect: number): boolean {
-        const antialiasLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
+        const antialiasLevel = this.effectiveAntialiasLevel(renderOptions.antialiasLevel)
         return this.debugViewMode === DEBUG_VIEW_REACH
             || (antialiasLevel > 1 && this.aaAnalyticParams(aspect).enabled)
     }
@@ -6447,7 +6476,10 @@ export class Engine {
             && this.counterSampleFrame >= this.lastRawMutationFrame
         const skipResolve = converged && isDisplaySetCurrent(this.rawFieldVersion, this.resolvedDisplayVersion)
 
-        const fullyConverged = this.isFieldConverged()
+        // An export keeps the frozen/live zoom cycle alive on purpose, so the
+        // real-time predicate would never fire and no AA sample could ever be
+        // composited. Same relaxation as videoFrameReady(), and only that one.
+        const fullyConverged = this.isFieldConverged(this.videoExportActive)
 
         if (!skipResolve) {
             // Resolve only copies/interpolates terminal analytic geometry and
@@ -6486,7 +6518,7 @@ export class Engine {
         const colorBindGroup = this.bindGroupColor!
         const swapView = this.ctx.getCurrentTexture().createView()
 
-        const antialiasLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
+        const antialiasLevel = this.effectiveAntialiasLevel(renderOptions.antialiasLevel)
         const neutralExtentColor = Math.sqrt(aspect * aspect + 1.0)
 
         // AA with level <= 1 is a no-op: deactivate so the loop can idle.
@@ -6503,6 +6535,19 @@ export class Engine {
         if (this.aaAuto
             && antialiasLevel > 1
             && !renderOptions.activateAnimate
+            && !this.aaActive
+            && this.aaAccumulatedSamples === 0
+            && fullyConverged) {
+            this.triggerAaAccumulation()
+        }
+
+        // Export AA: start accumulating as soon as the frame's field converges.
+        // Each jittered sample re-stamps only the boundary sliver (aa_reseed
+        // Stage B) and skips analytically-tagged texels entirely, so a sample
+        // costs a thin band rather than a reconvergence — which is what makes
+        // per-frame AA affordable at all.
+        if (this.videoExportActive
+            && this.videoExportAaSamples > 1
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
             && fullyConverged) {
@@ -6793,19 +6838,41 @@ export class Engine {
 
                 // Sample 0 of the accumulation path: linear RGB, alpha = 1, and
                 // the per-pixel AA gate cannot discard at sample index 0.
-                const rpassLinear = encoder.beginRenderPass({
-                    colorAttachments: [{
-                        view: this.exportLinearView!,
-                        clearValue: { r: 0, g: 0, b: 0, a: 0 },
-                        loadOp: 'clear',
-                        storeOp: 'store',
-                    }],
-                    label: 'Engine ExportCapture Linear',
-                })
-                rpassLinear.setPipeline(this.pipelineColorAccumClear!)
-                rpassLinear.setBindGroup(0, colorBindGroup)
-                rpassLinear.draw(6, 1, 0, 0)
-                rpassLinear.end()
+                // With AA on, the frame already lives in the accumulator as a
+                // linear sum with the sample count in alpha — exactly what the
+                // reduce pass expects, since present.wgsl normalises by alpha.
+                // Re-rendering a single sample here would throw the whole
+                // accumulation away.
+                const useAccumulator = this.videoExportAaSamples > 1
+                    && this.aaAccumulatedSamples > 0
+                    && !!this.accumTextureView
+                if (useAccumulator) {
+                    if (this.exportAccumBindGroupSource !== this.accumTextureView) {
+                        this.exportAccumBindGroup = this.device.createBindGroup({
+                            layout: this.layoutPresent!,
+                            entries: [{ binding: 0, resource: this.accumTextureView! }],
+                            label: 'Engine BindGroup ExportAccum',
+                        })
+                        this.exportAccumBindGroupSource = this.accumTextureView
+                    }
+                } else {
+                    const rpassLinear = encoder.beginRenderPass({
+                        colorAttachments: [{
+                            view: this.exportLinearView!,
+                            clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                            loadOp: 'clear',
+                            storeOp: 'store',
+                        }],
+                        label: 'Engine ExportCapture Linear',
+                    })
+                    rpassLinear.setPipeline(this.pipelineColorAccumClear!)
+                    rpassLinear.setBindGroup(0, colorBindGroup)
+                    rpassLinear.draw(6, 1, 0, 0)
+                    rpassLinear.end()
+                }
+                const reduceSource = useAccumulator
+                    ? this.exportAccumBindGroup!
+                    : this.exportPresentBindGroup!
 
                 const rpassReduce = encoder.beginRenderPass({
                     colorAttachments: [{
@@ -6817,7 +6884,7 @@ export class Engine {
                     label: 'Engine ExportCapture Reduce',
                 })
                 rpassReduce.setPipeline(this.exportPresentPipelines.get(supersample)!)
-                rpassReduce.setBindGroup(0, this.exportPresentBindGroup!)
+                rpassReduce.setBindGroup(0, reduceSource)
                 rpassReduce.draw(6, 1, 0, 0)
                 rpassReduce.end()
 
@@ -6836,7 +6903,7 @@ export class Engine {
                         label: 'Engine ExportCapture Mirror',
                     })
                     rpassMirror.setPipeline(this.exportMirrorPipeline!)
-                    rpassMirror.setBindGroup(0, this.exportPresentBindGroup!)
+                    rpassMirror.setBindGroup(0, reduceSource)
                     rpassMirror.draw(6, 1, 0, 0)
                     rpassMirror.end()
                 } catch {
@@ -7042,6 +7109,25 @@ export class Engine {
             reason = `unfinished=${this.unfinishedPixelCount}`
         }
         else if (this.aaActive) reason = 'aaAccumulating'
+        // Export AA pending: the frame's field has converged but accumulation
+        // has not started. render() bails out early when this returns false, so
+        // without this branch the trigger inside it is never reached and the
+        // frame waits forever for samples that can never be taken. Bites
+        // whenever the zoom cycle happens to be idle — frame 0 above all.
+        // Deliberately omits the counter freshness guard, exactly like
+        // aaAutoPending below: including it would livelock the loop.
+        else if (this.videoExportActive
+            && this.videoExportAaSamples > 1
+            && !this.aaActive
+            && this.aaAccumulatedSamples === 0
+            && !this.clearHistoryNextFrame
+            && !this.needFreezeSnapshot
+            && !this.needMergeSnapshot
+            && !this.orbitIncomplete
+            && this.unfinishedPixelCount >= 0
+            && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD) {
+            reason = 'exportAaPending'
+        }
         // Auto AA pending: the view looks converged but accumulation hasn't started
         // yet. Keep the loop alive so render()'s auto-trigger (which needs the full
         // fullyConverged check incl. the async counter) gets a chance to fire,

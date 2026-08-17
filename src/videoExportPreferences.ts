@@ -9,6 +9,15 @@ import type { VideoPathLocation } from './videoPath'
 
 export const VIDEO_EXPORT_PREFERENCES_KEY = 'mandelbrot_video_export'
 
+/** Jittered AA samples offered per frame. 1 = off. */
+export const AA_SAMPLE_CHOICES = [1, 2, 4, 8] as const
+
+export type AaSampleChoice = (typeof AA_SAMPLE_CHOICES)[number]
+
+export function isAaSampleChoice(value: unknown): value is AaSampleChoice {
+  return AA_SAMPLE_CHOICES.includes(value as AaSampleChoice)
+}
+
 export type VideoExportPreferences = {
   pinnedStart: VideoPathLocation | null
   pinnedEnd: VideoPathLocation | null
@@ -18,6 +27,7 @@ export type VideoExportPreferences = {
   supersample: string
   magnificationThreshold: number
   codec: Mp4Codec
+  aaSamplesPerFrame: number
 }
 
 export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
@@ -29,6 +39,7 @@ export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
   supersample: '2',
   magnificationThreshold: 2,
   codec: DEFAULT_VIDEO_CODEC,
+  aaSamplesPerFrame: 1,
 }
 
 function normalizeLocation(value: unknown): VideoPathLocation | null {
@@ -66,6 +77,9 @@ export function normalizeVideoExportPreferences(value: unknown): VideoExportPref
     supersample: normalizeString(raw.supersample, d.supersample),
     magnificationThreshold: normalizeNumber(raw.magnificationThreshold, d.magnificationThreshold),
     codec: isMp4Codec(raw.codec) ? raw.codec : d.codec,
+    aaSamplesPerFrame: isAaSampleChoice(raw.aaSamplesPerFrame)
+      ? raw.aaSamplesPerFrame
+      : d.aaSamplesPerFrame,
   }
 }
 

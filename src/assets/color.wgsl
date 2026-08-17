@@ -22,7 +22,7 @@ struct Uniforms {
   epsilon: f32,           // interior detection threshold (|der|² < epsilon)
   ambientOcclusionStrength: f32,
   microBumpStrength: f32,
-  _pad19: f32,           // reserved (was subsurfaceStrength — effect removed)
+  aaLookupOffsetX: f32,  // inverse live-grid shift for uniform AA (neutral/local_rot units)
   reliefDepth: f32,
   localShadowStrength: f32,
   lightAngle: f32,
@@ -98,7 +98,7 @@ struct Uniforms {
   orbitTrapIncludeInterior: f32,
   protrusionStrength: f32,    // iteration-profile effect amplification [1, 4]
   iterationPaletteCurve: f32, // 0 linear, 1 soft root, 2 logarithmic, 3 quadratic
-  _pad95: f32,
+  aaLookupOffsetY: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // live values: iter, z.x, z.y
@@ -1552,7 +1552,24 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   // same logic works seamlessly for both zoom and non-zoom rendering.
 
   // ── Sample live texture ──
-  let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf + vec2<f32>(0.5, 0.5);
+  // Every AA sample evaluates the raw lattice at baseLocal + aaOffset. To
+  // reconstruct the screen pixel, the inverse lookup must therefore select
+  // floor(screenLocal - aaOffset), not keep selecting the same unshifted raw
+  // texel. Without this inverse shift a rotated screen grid repeatedly maps
+  // neighbouring pixels to the same raw texel, producing staircase-shaped
+  // macroblocks even with 64 uniform samples.
+  //
+  // Engine writes zero here for adaptive AA: its selective target/reseed map
+  // still needs a shifted-neighbour policy before it can use this correction.
+  // applyAaGate keeps the direct/snapshot path byte-identical even if an AA
+  // offset remains in the uniform buffer after the last accumulated sample.
+  let aaLookupUvOffset = select(
+    vec2<f32>(0.0),
+    vec2<f32>(parameters.aaLookupOffsetX, parameters.aaLookupOffsetY) / (2.0 * neutralExtent),
+    applyAaGate
+  );
+  let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf
+              + vec2<f32>(0.5, 0.5) - aaLookupUvOffset;
 
   var liveInBounds: bool;
   if (lzf < 1.0) {

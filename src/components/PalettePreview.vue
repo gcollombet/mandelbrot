@@ -449,7 +449,7 @@ async function init() {
     1e-10,        // epsilon (interior detection, not relevant for preview)
     props.ambientOcclusionStrength ?? 0, // ambientOcclusionStrength
     props.microBumpStrength ?? 0, // microBumpStrength
-    0, // reserved (was subsurfaceStrength)
+    0, // aaLookupOffsetX (preview never accumulates AA)
     props.reliefDepth ?? 0, // reliefDepth
     props.localShadowStrength ?? 0, // localShadowStrength
     previewLightAngle, // lightAngle
@@ -505,7 +505,7 @@ async function init() {
     ...orbitTrapColorUniformValues(orbitTrap),
     props.protrusionStrength ?? 1, // protrusionStrength
     iterationPaletteCurveCode(props.iterationPaletteCurve), // iterationPaletteCurve
-    0,
+    0, // aaLookupOffsetY
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
@@ -685,7 +685,7 @@ watch(
       1e-10,
       props.ambientOcclusionStrength ?? 0,
       props.microBumpStrength ?? 0,
-      0, // reserved (was subsurfaceStrength)
+      0, // aaLookupOffsetX (preview never accumulates AA)
       props.reliefDepth ?? 1,
       props.localShadowStrength ?? 0,
       previewLightAngle,

@@ -257,3 +257,16 @@ free), which widens analytic AA's useful zone beyond the DE band.
       Deep gate REMOVED. naga + vue-tsc + vite green. User validation owed:
       deep views fast AND correct; shallow non-regression
       (tests/analytic-aa.spec.ts run recommended).
+
+## 12. Rotation macroblocks — uniform AA lookup correction
+
+- [x] 12.1 Reuse color-uniform padding slots 19/95 for the current scene-space
+      AA lookup offset, writing the real X/Y only when `aaAdaptive === false`
+      and zero otherwise (no uniform-buffer resize or ABI shift).
+- [x] 12.2 In `color.wgsl`, subtract that offset from the live raw-texture UV
+      after live-zoom rescaling and only in the accumulation entry point. Keep
+      the unshifted neutral UV for materials; direct/snapshot and adaptive AA
+      remain unchanged.
+- [x] 12.3 Add a static regression contract covering the uniform-only engine
+      gate, inverse shader lookup, and zero-offset palette preview. Hardware
+      A/B at a non-zero angle remains the visual referee.
