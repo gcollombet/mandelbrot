@@ -7,6 +7,7 @@ import reprojectCsShader from './assets/reproject_cs.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
 import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import presentShader from './assets/present.wgsl?raw'
+import rotationPresentShader from './assets/rotation_present.wgsl?raw'
 import aaTargetShader from './assets/aa_target.wgsl?raw'
 import aaReseedShader from './assets/aa_reseed.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
@@ -62,6 +63,7 @@ import {
 } from './iterationBatchController'
 import {advanceFramePacer} from './framePacing'
 import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapColorUniformValues, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
+import {rotationNeedsColorResolve} from './rotationColorResolve'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
@@ -815,6 +817,21 @@ export class Engine {
     bindGroupResolve?: GPUBindGroup
     pipelineColor?: GPURenderPipeline
     bindGroupColor?: GPUBindGroup
+
+    // ── Settled non-AA rotation resolve ───────────────────────────────
+    /** Existing color shader rendered once into a scene-aligned linear cache. */
+    private pipelineRotationColorCache?: GPURenderPipeline
+    /** Cheap screen pass that bilinearly reconstructs the final cached color. */
+    private pipelineRotationPresent?: GPURenderPipeline
+    private bindGroupRotationPresent?: GPUBindGroup
+    private rotationColorTexture?: GPUTexture
+    private rotationColorTextureView?: GPUTextureView
+    private rotationPresentUniformBuffer?: GPUBuffer
+    private rotationColorSampler?: GPUSampler
+    private rotationColorCacheReady = false
+    private rotationColorResolvePending = true
+    /** Prevents rebuilding the full cache on every interactive rotation tick. */
+    private rotationColorResolveChangedThisUpdate = false
 
     // ── AA accumulation/present resources ─────────────────────────────
     /** Color pipeline writing linear RGB into accumTexture, replacing (sample 0). */
@@ -2130,6 +2147,18 @@ export class Engine {
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Resolve',
         })
+        this.rotationPresentUniformBuffer = this.device.createBuffer({
+            size: 4 * 4,
+            usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
+            label: 'Engine RotationPresent UniformBuffer',
+        })
+        this.rotationColorSampler = this.device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear',
+            addressModeU: 'clamp-to-edge',
+            addressModeV: 'clamp-to-edge',
+            label: 'Engine RotationColor Sampler',
+        })
         this.mandelbrotReferenceBuffer = this.device.createBuffer({
             size: 8 * ORBIT_STEP_CAPACITY, // CAPACITY steps × 2 floats (zx, zy) × 4 bytes; shader reads only zx/zy
             usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST,
@@ -2247,7 +2276,7 @@ export class Engine {
 
         const layoutColor = this.device.createBindGroupLayout({
             entries: [
-                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
                 { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
@@ -2313,6 +2342,16 @@ export class Engine {
             fragment: { module: moduleColor, entryPoint: 'fs_main_direct', targets: [{ format: this.format }] },
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline Color (direct)',
+        })
+
+        // Settled rotation cache: the authoritative material function writes
+        // final linear color in neutral space. No semantic field is filtered.
+        this.pipelineRotationColorCache = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
+            vertex: { module: moduleColor, entryPoint: 'vs_rotation_cache' },
+            fragment: { module: moduleColor, entryPoint: 'fs_rotation_cache', targets: [{ format: 'rgba16float' }] },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline RotationColorCache',
         })
 
         // AA accumulation paths: render linear RGB (fs_main) into the rgba16float
@@ -2446,6 +2485,29 @@ export class Engine {
         this.modulePresent = modulePresent
         this.layoutPresent = layoutPresent
 
+        // Rotation present is intentionally a separate terminal branch from AA:
+        // it samples only the final-color cache and can therefore never become
+        // sample zero (or any other sample) of the AA estimator.
+        const moduleRotationPresent = this.device.createShaderModule({
+            code: rotationPresentShader,
+            label: 'Engine ShaderModule RotationPresent',
+        })
+        const layoutRotationPresent = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
+            ],
+            label: 'Engine BindGroupLayout RotationPresent',
+        })
+        this.pipelineRotationPresent = this.device.createRenderPipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutRotationPresent] }),
+            vertex: { module: moduleRotationPresent, entryPoint: 'vs_main' },
+            fragment: { module: moduleRotationPresent, entryPoint: 'fs_main', targets: [{ format: this.format }] },
+            primitive: { topology: 'triangle-list' },
+            label: 'Engine RenderPipeline RotationPresent',
+        })
+
         // ── AA target-map bake pipeline (DE ∪ contrast ∪ moiré → per-texel sample count) ──
         const moduleAaTarget = this.device.createShaderModule({ code: aaTargetShader, label: 'Engine ShaderModule AaTarget' })
         const layoutAaTarget = this.device.createBindGroupLayout({
@@ -2514,6 +2576,7 @@ export class Engine {
         this.bindGroupInplace = undefined
         this.bindGroupReprojectCs = undefined
         this.bindGroupPresent = undefined
+        this.bindGroupRotationPresent = undefined
     }
 
     // Timestamp-write descriptor for an ordinary timed pass. Explicit copy or
@@ -3874,7 +3937,11 @@ export class Engine {
                     module: this.modulePresent!,
                     entryPoint: 'fs_main',
                     targets: [{ format: this.format }],
-                    constants: { DOWNSCALE: supersample },
+                    // Mitchell rather than a block average: the box reduction
+                    // folds ~7x more energy back across the output Nyquist, and
+                    // on a fractal that fold-back is what makes boundary detail
+                    // crawl between frames of the film. Set to 0 to A/B the box.
+                    constants: { DOWNSCALE: supersample, REDUCE_MITCHELL: 1 },
                 },
                 primitive: { topology: 'triangle-list' },
                 label: `Engine RenderPipeline ExportPresent x${supersample}`,
@@ -4487,6 +4554,7 @@ export class Engine {
         this.trapPayloadScratchTexture?.destroy?.()
         this.accumTexture?.destroy?.()
         this.aaTargetTexture?.destroy?.()
+        this.rotationColorTexture?.destroy?.()
 
         // Helper: create an r32float texture array + per-layer 2d views + full 2d-array view
         const createLayeredTexture = (label: string, layerCount: number, extraUsage: GPUTextureUsageFlags = 0): {
@@ -4684,6 +4752,29 @@ export class Engine {
                 label: 'Engine BindGroup Present',
             })
         }
+        // Final-color cache follows the neutral square, not the screen. It is
+        // rebuilt once after a stable oblique view and sampled only by the
+        // mutually-exclusive non-AA rotation presenter.
+        this.rotationColorTexture = this.device.createTexture({
+            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
+            format: 'rgba16float',
+            usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
+            label: 'Engine RotationColorTexture',
+        })
+        this.rotationColorTextureView = this.rotationColorTexture.createView({
+            label: 'Engine RotationColorTexture View',
+        })
+        if (this.pipelineRotationPresent && this.rotationPresentUniformBuffer && this.rotationColorSampler) {
+            this.bindGroupRotationPresent = this.device.createBindGroup({
+                layout: this.pipelineRotationPresent.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: this.rotationPresentUniformBuffer } },
+                    { binding: 1, resource: this.rotationColorTextureView },
+                    { binding: 2, resource: this.rotationColorSampler },
+                ],
+                label: 'Engine BindGroup RotationPresent',
+            })
+        }
         // AA target map: per-neutral-texel sample count, baked once from the DE.
         // STORAGE_BINDING (bake write) + TEXTURE_BINDING (color-pass read).
         this.aaTargetTexture = this.device.createTexture({
@@ -4697,6 +4788,7 @@ export class Engine {
 
         // Resetting textures invalidates any in-flight AA accumulation.
         this.resetAaState()
+        this.invalidateRotationColorResolve()
 
         // Reset zoom reprojection state on resize
         this.zoomState = resetZoomState()
@@ -4973,6 +5065,7 @@ export class Engine {
         this.debugViewMode = next
         // A persisted AA composite would otherwise cover the reach view.
         this.resetAaState()
+        this.invalidateRotationColorResolve()
         this.debugViewDirty = true
         this.needRender = true
     }
@@ -5220,6 +5313,7 @@ export class Engine {
     }
 
     async update(mandelbrot: Mandelbrot, renderOptions: RenderOptions) {
+        this.rotationColorResolveChangedThisUpdate = false
         const orbitTrap = normalizeOrbitTrapConfig(renderOptions.orbitTrap, renderOptions.orbitTrapStrength)
         const previousOrbitTrap = this.previousRenderOptions
             ? normalizeOrbitTrapConfig(
@@ -5351,6 +5445,7 @@ export class Engine {
         const orbitMetricsChanged = this.previousOrbitMetricsEnabled !== undefined
             && orbitMetricsEnabled !== this.previousOrbitMetricsEnabled
         const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
+        this.rotationColorResolveChangedThisUpdate = mandelbrotChanged || renderOptionsChanged
         this.needRender = this.needRender || mandelbrotChanged || renderOptionsChanged
         // Any view/param change invalidates the current debug snapshot (see
         // debugViewDirty) so it redraws once, then idles again.
@@ -5361,6 +5456,7 @@ export class Engine {
         // so auto AA can fire again on the next convergence.
         if (mandelbrotChanged || renderOptionsChanged) {
             this.resetAaState()
+            this.invalidateRotationColorResolve()
         }
         // Suppressed for the whole export session, not once at its start: this
         // line runs on every update() and would otherwise restore the UI's value
@@ -5901,6 +5997,55 @@ export class Engine {
         this.aaFrontierEligible = -1
     }
 
+    /** Mark the final-color cache stale and arm one rebuild after the view settles. */
+    private invalidateRotationColorResolve() {
+        this.rotationColorCacheReady = false
+        this.rotationColorResolvePending = true
+    }
+
+    /** AA owns terminal reconstruction; its samples must never read this cache. */
+    private suppressRotationColorResolve() {
+        this.rotationColorCacheReady = false
+        this.rotationColorResolvePending = false
+    }
+
+    /** Conditions shared by cache bake, cache presentation, and idle keepalive. */
+    private rotationColorResolveAllowed(renderOptions = this.previousRenderOptions): boolean {
+        if (!renderOptions || !this.previousMandelbrot) return false
+        const hasLiveWebcam = this.webcamEnabled
+            && renderOptions.colorStops.some(stop => (stop.webcam ?? 0) > 0)
+        return rotationNeedsColorResolve(this.previousMandelbrot.angle)
+            && !this.aaActive
+            && this.aaAccumulatedSamples === 0
+            && !renderOptions.activateAnimate
+            && !this.videoExportActive
+            && this.debugViewMode === 0
+            && !hasLiveWebcam
+            && !isZoomActive(this.zoomState)
+            && !this.clearHistoryNextFrame
+            && !this.needFreezeSnapshot
+            && !this.needMergeSnapshot
+            && !this.pendingTableClear
+            && !this.isReferenceValidating
+            && !this.orbitIncomplete
+            && !!this.pipelineRotationColorCache
+            && !!this.pipelineRotationPresent
+            && !!this.rotationColorTextureView
+            && !!this.bindGroupRotationPresent
+            && !!this.rotationPresentUniformBuffer
+    }
+
+    /** Full bake gate: fresh convergence evidence plus one quiet update. */
+    private rotationColorResolveEligible(
+        renderOptions: RenderOptions,
+        fullyConverged: boolean,
+    ): boolean {
+        return this.rotationColorResolvePending
+            && !this.rotationColorResolveChangedThisUpdate
+            && fullyConverged
+            && this.rotationColorResolveAllowed(renderOptions)
+    }
+
     /**
      * Phase D analytic-AA parameters: ln of the sub-pixel jitter half-extent δ
      * in c units (the margin test's denominator) and the master eligibility.
@@ -5978,6 +6123,7 @@ export class Engine {
      */
     triggerAaAccumulation() {
         this.resetAaState()
+        this.suppressRotationColorResolve()
         // A previous accumulation left the boundary band at its LAST sample's
         // jitter; recompute so sample 0 is the unjittered base again (unbiased
         // mean, deterministic A/B re-runs).
@@ -6373,6 +6519,7 @@ export class Engine {
         if (utilityNeeded || this.aaReseedPending || this.unfinishedPixelCount !== 0) {
             this.lastRawMutationFrame = frameSerial
             this.rawFieldVersion++
+            this.invalidateRotationColorResolve()
         }
 
         {
@@ -6514,7 +6661,7 @@ export class Engine {
             }
         }
 
-        // ── Pass 3 (color) + Pass 4 (AA present) ──────────────────────────
+        // ── Terminal color branches: direct, AA, or settled rotation ──────
         const colorBindGroup = this.bindGroupColor!
         const swapView = this.ctx.getCurrentTexture().createView()
 
@@ -6524,6 +6671,7 @@ export class Engine {
         // AA with level <= 1 is a no-op: deactivate so the loop can idle.
         if (this.aaActive && antialiasLevel <= 1) {
             this.resetAaState()
+            this.invalidateRotationColorResolve()
         }
 
         // Auto AA: start accumulation as soon as the view is fully converged.
@@ -6571,6 +6719,24 @@ export class Engine {
         // path and silently drop the accumulated AA ("rebascule sans AA"). Any
         // navigation/param change still reverts via resetAaState (samples → 0).
         const aaShowAccum = this.aaAccumulatedSamples >= 1 || aaCompositeThisFrame
+        const rotationBakeThisFrame = !aaShowAccum
+            && this.rotationColorResolveEligible(renderOptions, fullyConverged)
+        const rotationShowCache = !aaShowAccum
+            && this.rotationColorResolveAllowed(renderOptions)
+            && (this.rotationColorCacheReady || rotationBakeThisFrame)
+
+        if (rotationShowCache) {
+            this.device.queue.writeBuffer(
+                this.rotationPresentUniformBuffer!,
+                0,
+                new Float32Array([
+                    aspect,
+                    Math.sin(this.previousMandelbrot.angle),
+                    Math.cos(this.previousMandelbrot.angle),
+                    0,
+                ]).buffer,
+            )
+        }
 
         // Phase D: finalize the analytic-AA color flag — the expansion reads
         // payload layers 8..12, which exist only on the raw texture binding.
@@ -6600,7 +6766,26 @@ export class Engine {
             rpassAccum.setBindGroup(0, colorBindGroup)
             rpassAccum.draw(6, 1, 0, 0)
             rpassAccum.end()
-        } else if (!aaShowAccum) {
+        } else if (rotationBakeThisFrame) {
+            // Colorize each neutral texel once. The cache contains final linear
+            // color, so its later bilinear filtering cannot invent semantic
+            // iteration/geometry/orbit-trap states.
+            const rpassRotationCache = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: this.rotationColorTextureView!,
+                    clearValue: { r: 0, g: 0, b: 0, a: 0 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.color),
+            })
+            rpassRotationCache.setPipeline(this.pipelineRotationColorCache!)
+            rpassRotationCache.setBindGroup(0, colorBindGroup)
+            rpassRotationCache.draw(6, 1, 0, 0)
+            rpassRotationCache.end()
+            this.rotationColorCacheReady = true
+            this.rotationColorResolvePending = false
+        } else if (!aaShowAccum && !rotationShowCache) {
             // Direct path: color straight to the swapchain (AA off, or sample 0 not
             // yet converged). Byte-identical to the historical behaviour.
             const rpassColor = commandEncoder.beginRenderPass({
@@ -6618,7 +6803,8 @@ export class Engine {
             rpassColor.end()
         }
 
-        // Pass 4 (present): blit the accumulator's per-pixel average to the swapchain.
+        // Present exactly one derived terminal result: AA average or filtered
+        // rotation cache. Direct color already wrote the swapchain above.
         if (aaShowAccum && this.pipelinePresent && this.bindGroupPresent) {
             const rpassPresent = commandEncoder.beginRenderPass({
                 colorAttachments: [{
@@ -6633,6 +6819,20 @@ export class Engine {
             rpassPresent.setBindGroup(0, this.bindGroupPresent)
             rpassPresent.draw(6, 1, 0, 0)
             rpassPresent.end()
+        } else if (rotationShowCache && this.pipelineRotationPresent && this.bindGroupRotationPresent) {
+            const rpassRotationPresent = commandEncoder.beginRenderPass({
+                colorAttachments: [{
+                    view: swapView,
+                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
+                    loadOp: 'clear',
+                    storeOp: 'store',
+                }],
+                timestampWrites: this.tsWrites(PASS_SLOT_INDEX.present),
+            })
+            rpassRotationPresent.setPipeline(this.pipelineRotationPresent)
+            rpassRotationPresent.setBindGroup(0, this.bindGroupRotationPresent)
+            rpassRotationPresent.draw(6, 1, 0, 0)
+            rpassRotationPresent.end()
         }
 
         // ── Debug overlay: instrumented recompute straight onto the frame ──
@@ -6781,6 +6981,7 @@ export class Engine {
         // Parameters have been consumed — clear the flag so the engine can go idle
         // once all other conditions (orbit, unfinished pixels, etc.) are satisfied.
         this.needRender = false
+        this.rotationColorResolveChangedThisUpdate = false
 
         // ── Advance the AA state machine ──────────────────────────────────
         // Runs after the clear/needRender resets above so the flags it sets stick
@@ -7030,6 +7231,7 @@ export class Engine {
         this.metadataScratchTexture?.destroy?.()
         this.orbitGradientScratchTexture?.destroy?.()
         this.trapPayloadScratchTexture?.destroy?.()
+        this.rotationColorTexture?.destroy?.()
         this.mandelbrotReferenceBuffer?.destroy?.()
         this.mandelbrotBlaBuffer?.destroy?.()
         this.mandelbrotBlaLevelBuffer?.destroy?.()
@@ -7041,6 +7243,7 @@ export class Engine {
         this.uniformBufferColor?.destroy?.()
         this.uniformBufferBrush?.destroy?.()
         this.uniformBufferResolve?.destroy?.()
+        this.rotationPresentUniformBuffer?.destroy?.()
         this.counterBuffer?.destroy?.()
         for (const slot of this.counterReadbackSlots) {
             slot.buffer.destroy?.()
@@ -7153,6 +7356,15 @@ export class Engine {
             && !this.orbitIncomplete
             && !isZoomActive(this.zoomState)) {
             reason = 'aaAutoPending'
+        }
+        // Rotation-cache pending uses the same deliberately weak convergence
+        // keepalive as auto AA: omit async counter freshness here, then let the
+        // full gate inside render() decide whether this frame may bake.
+        else if (this.rotationColorResolvePending
+            && this.rotationColorResolveAllowed()
+            && this.unfinishedPixelCount >= 0
+            && this.unfinishedPixelCount <= UNFINISHED_PIXEL_DONE_THRESHOLD) {
+            reason = 'rotationColorResolvePending'
         }
         return reason !== ''
     }
@@ -7289,6 +7501,7 @@ export class Engine {
         this.tileTextureView = this.tileTexture.createView()
         this.tileTextureSourceKey = sourceKey
         this.rebuildColorBindGroup()
+        this.invalidateRotationColorResolve()
         this.needRender = true
     }
 
@@ -7308,6 +7521,7 @@ export class Engine {
         this.skyboxTextureView = this.skyboxTexture.createView()
         this.skyboxTextureSourceKey = sourceKey
         this.rebuildColorBindGroup()
+        this.invalidateRotationColorResolve()
         this.needRender = true
     }
 

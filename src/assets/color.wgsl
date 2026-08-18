@@ -313,6 +313,32 @@ fn rotate_inverse_sincos(v: vec2<f32>, s: f32, c: f32) -> vec2<f32> {
   return vec2<f32>(c * v.x + s * v.y, -s * v.x + c * v.y);
 }
 
+// Neutral-space color-cache pass. Each cache texel represents one point of the
+// scene-aligned neutral lattice, but shade_srgb remains the single authoritative
+// screen-space material implementation. Invert the screen→neutral transform so
+// the fragment shader can call it without ever interpolating semantic fields.
+@vertex
+fn vs_rotation_cache(@builtin(vertex_index) VertexIndex: u32) -> VertexOutput {
+  var pos = array<vec2<f32>, 6>(
+    vec2<f32>(-1.0, -1.0),
+    vec2<f32>( 1.0, -1.0),
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>(-1.0,  1.0),
+    vec2<f32>( 1.0, -1.0),
+    vec2<f32>( 1.0,  1.0)
+  );
+  let neutralPosition = pos[VertexIndex];
+  let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);
+  let localRot = neutralPosition * neutralExtent;
+  let local = rotate_inverse_sincos(localRot, parameters.sceneSin, parameters.sceneCos);
+  let screenPosition = vec2<f32>(local.x / parameters.aspect, local.y);
+
+  var out: VertexOutput;
+  out.position = vec4<f32>(neutralPosition, 0.0, 1.0);
+  out.fragCoord = screenPosition * 0.5 + vec2<f32>(0.5);
+  return out;
+}
+
 fn rotate_surface_vector_sincos(v: vec3<f32>, s: f32, c: f32) -> vec3<f32> {
   let xy = rotate_sincos(v.xy, s, c);
   return vec3<f32>(xy.x, xy.y, v.z);
@@ -908,7 +934,12 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
       let orientationPlane = normalize(rotate_sincos(angleDir, sceneSin, sceneCos) + vec2<f32>(1e-5));
       let facingPearl = dot(orientationPlane, lightPlane) * 0.5 + 0.5;
       let crossPearl = dot(orientationPlane, tangentPlane) * 0.5 + 0.5;
-      let orientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
+      let anisotropicOrientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
+      // An isotropic film has no preferred tangent-plane direction: keep the
+      // orientation contribution at its energy-neutral midpoint. Material
+      // anisotropy progressively restores the directional pearl response, with
+      // anisotropy = 1 preserving the previous appearance exactly.
+      let orientationShift = mix(0.5, anisotropicOrientationShift, anisotropy);
       let slopeShift = smoothstep(0.025, 1.15, slope * styledAnalyticRelief);
       let tiltShift = smoothstep(0.025, 0.55, length(normal.xy));
       let surfaceShift = max(slopeShift, tiltShift * 0.65);
@@ -1793,4 +1824,16 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
 fn fs_main_direct(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
   let c = shade_srgb(fragCoord, false);
   return vec4<f32>(clamp(c.rgb + vec3<f32>(dither_8bit(pos.xy)), vec3<f32>(0.0), vec3<f32>(1.0)), c.a);
+}
+
+// Settled-rotation cache: final color only, in linear light and without display
+// dither. Pixels of the neutral square that do not map onto the screen retain
+// the attachment's alpha-zero clear and become coverage samples at presentation.
+@fragment
+fn fs_rotation_cache(@location(0) screenUv: vec2<f32>) -> @location(0) vec4<f32> {
+  if (any(screenUv < vec2<f32>(0.0)) || any(screenUv > vec2<f32>(1.0))) {
+    discard;
+  }
+  let c = shade_srgb(screenUv, false);
+  return vec4<f32>(srgb_to_linear(c.rgb), c.a);
 }

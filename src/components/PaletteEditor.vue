@@ -142,7 +142,7 @@ const EFFECT_DESC_FR: Record<EffectFieldName, string> = {
   dielectricSpecular: 'Réflectance neutre à incidence normale (F0) pour pierre, verre, céramique ou plastique ; sans effet coloré métallique',
   metallic: 'À quel point ce point se comporte comme un métal',
   roughness: 'Contrôle la finesse des reflets : faible = fins et nets, élevée = larges et diffus',
-  anisotropy: 'Étire les reflets selon la direction de la surface',
+  anisotropy: 'Étire les reflets et oriente l’iridescence selon la direction de la surface',
   reliefGain: 'Multiplie le relief analytique pour ce matériau ; 1 est neutre, indépendamment de la Profondeur relief globale',
   protrusion: 'Accentue le relief près des passages entre itérations lissées ; 0 est neutre',
   metalReflectance: 'Multiplie la réflectance du métal sans modifier directement sa teinte',

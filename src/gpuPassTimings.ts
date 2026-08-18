@@ -73,14 +73,14 @@ export const PASS_SLOTS: readonly GpuPassSlot[] = [
   },
   {
     key: 'color',
-    label: 'Couleur',
-    help: 'Passe couleur directe : palette, relief, skybox, iridescence → écran.',
+    label: 'Couleur / cache rotation',
+    help: 'Passe couleur directe vers l’écran, ou bake linéaire du cache final quand une vue tournée vient de se stabiliser.',
     timing: 'end-gap',
   },
   {
     key: 'present',
-    label: 'Present (AA)',
-    help: 'Division de l\'accumulateur AA par le nombre d\'échantillons + sRGB → écran.',
+    label: 'Present (AA / rotation)',
+    help: 'Présentation de l’accumulateur AA, ou reconstruction bilinéaire du cache couleur tourné, puis conversion sRGB.',
     timing: 'end-gap',
   },
 ]

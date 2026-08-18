@@ -77,13 +77,41 @@ test("captures a VideoFrame at a resolution independent of the canvas", async ({
   expect(nonBlack).toBeGreaterThan(320 * 180 * 0.2);
 });
 
+/** Mitchell–Netravali B = C = 1/3, mirroring mitchell() in present.wgsl. */
+function mitchell(x: number): number {
+  const a = Math.abs(x);
+  if (a < 1) return ((7 * a - 12) * a * a + 16 / 3) / 6;
+  if (a < 2) return (((-7 / 3 * a + 12) * a - 20) * a + 32 / 3) / 6;
+  return 0;
+}
+
+/**
+ * The source texels the DOWNSCALE > 1 reduction reads along one axis, with
+ * their weights — the JS twin of the tap window in present.wgsl.
+ *
+ * Texel s spans [s, s+1) so its centre is s + 0.5; the output pixel covers
+ * [out*d, out*d + d) and is centred on out*d + d/2. Support is 2 output pixels
+ * either side. Coordinates are clamped, matching the shader's edge extension.
+ */
+function taps(out: number, d: number, limit: number): { index: number; weight: number }[] {
+  const centre = out * d + d / 2;
+  const result: { index: number; weight: number }[] = [];
+  for (let s = out * d - 2 * d; s <= out * d + 3 * d; s++) {
+    const w = mitchell((s + 0.5 - centre) / d);
+    if (w !== 0) result.push({ index: Math.max(0, Math.min(limit - 1, s)), weight: w });
+  }
+  return result;
+}
+
 test("reduces in linear light, not in sRGB", async ({ page }) => {
   test.setTimeout(120_000);
   await bootConverged(page);
 
   // Same view twice: once reduced 2x by the capture chain, once at the
-  // supersampled resolution with no reduction. Reducing the second in JS two
-  // ways tells us which space the shader averaged in.
+  // supersampled resolution with no reduction. Reconstructing the second in JS
+  // two ways tells us which space the shader filtered in. The reduction kernel
+  // is Mitchell, not a block average, so the reference has to be Mitchell too —
+  // a box reference would fail here for the wrong reason.
   const reduced = await capture(page, 160, 90, 2);
   const full = await capture(page, 320, 180, 1);
 
@@ -92,9 +120,13 @@ test("reduces in linear light, not in sRGB", async ({ page }) => {
     return c <= 0.04045 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
   };
   const linearToSrgb = (c: number) => {
-    const v = c <= 0.0031308 ? c * 12.92 : 1.055 * Math.pow(c, 1 / 2.4) - 0.055;
+    const cl = Math.max(0, c); // the shader clamps before the transfer too
+    const v = cl <= 0.0031308 ? cl * 12.92 : 1.055 * Math.pow(cl, 1 / 2.4) - 0.055;
     return Math.max(0, Math.min(255, v * 255));
   };
+
+  const tapsX = Array.from({ length: 160 }, (_, x) => taps(x, 2, 320));
+  const tapsY = Array.from({ length: 90 }, (_, y) => taps(y, 2, 180));
 
   let linearErr = 0;
   let srgbErr = 0;
@@ -103,22 +135,29 @@ test("reduces in linear light, not in sRGB", async ({ page }) => {
   for (let y = 0; y < 90; y++) {
     for (let x = 0; x < 160; x++) {
       for (let ch = 0; ch < 3; ch++) {
-        const quad: number[] = [];
-        for (let dy = 0; dy < 2; dy++) {
-          for (let dx = 0; dx < 2; dx++) {
-            quad.push(full.pixels[((2 * y + dy) * 320 + (2 * x + dx)) * 4 + ch]);
+        let linSum = 0;
+        let srgbSum = 0;
+        let wsum = 0;
+        let lo = 255;
+        let hi = 0;
+        for (const ty of tapsY[y]) {
+          for (const tx of tapsX[x]) {
+            const v = full.pixels[(ty.index * 320 + tx.index) * 4 + ch];
+            const w = tx.weight * ty.weight;
+            linSum += w * srgbToLinear(v);
+            srgbSum += w * v;
+            wsum += w;
+            lo = Math.min(lo, v);
+            hi = Math.max(hi, v);
           }
         }
         // Only high-contrast neighbourhoods separate the two hypotheses; flat
-        // areas average identically in either space.
-        if (Math.max(...quad) - Math.min(...quad) < 60) continue;
+        // areas filter identically in either space.
+        if (hi - lo < 60) continue;
 
         const actual = reduced.pixels[(y * 160 + x) * 4 + ch];
-        const linearMean = linearToSrgb(quad.reduce((s, v) => s + srgbToLinear(v), 0) / 4);
-        const srgbMean = quad.reduce((s, v) => s + v, 0) / 4;
-
-        linearErr += Math.abs(actual - linearMean);
-        srgbErr += Math.abs(actual - srgbMean);
+        linearErr += Math.abs(actual - linearToSrgb(linSum / wsum));
+        srgbErr += Math.abs(actual - srgbSum / wsum);
         samples++;
       }
     }
@@ -129,7 +168,7 @@ test("reduces in linear light, not in sRGB", async ({ page }) => {
   const srgbMae = srgbErr / samples;
   console.log(`linear MAE ${linearMae.toFixed(2)} vs sRGB MAE ${srgbMae.toFixed(2)} over ${samples} samples`);
 
-  // Averaging after the sRGB encode darkens edges; the linear hypothesis must
+  // Filtering after the sRGB encode darkens edges; the linear hypothesis must
   // fit clearly better. Tolerance covers dither, which is applied at each
   // target's own resolution and so differs between the two captures.
   expect(linearMae).toBeLessThan(srgbMae);

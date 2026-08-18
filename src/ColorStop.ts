@@ -97,7 +97,7 @@ export type ColorStop = {
   metallic?: number;
   /** Per-stop roughness, range [0.02, 1] (default 0) */
   roughness?: number;
-  /** Anisotropic highlight strength, range [0, 1] (default 0) */
+  /** Anisotropic material response for highlights and iridescence, range [0, 1] (default 0) */
   anisotropy?: number;
   /** Log-domain analytic relief gain control, range [0, 2] (default and neutral 1) */
   reliefGain?: number;
