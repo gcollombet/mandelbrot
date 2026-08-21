@@ -3,6 +3,7 @@ import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue
 import {useRouter} from 'vue-router';
 import type {ApproximationMode, InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
+  MAX_ANTIALIAS_LEVEL,
   preserveSessionPerformanceFields,
   stripExplorationStateFields,
   stripSessionPerformanceFields,
@@ -3439,7 +3440,7 @@ async function startVideoExport(payload: {
             @update:model-value="(v: number) => epsilonSlider = v"
           />
           <DenseField
-            label="Antialiasing" :min="1" :max="64" :step="1"
+            label="Antialiasing" :min="1" :max="MAX_ANTIALIAS_LEVEL" :step="1"
             :f="antialiasFmt"
             :model-value="model.antialiasLevel ?? 1"
             @update:model-value="(v: number) => model.antialiasLevel = v"

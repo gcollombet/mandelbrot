@@ -25,7 +25,7 @@ struct AaParams {
   screenHeightPx: f32,  // unused here; shared buffer with the target bake pass
   aaLogDelta: f32,      // ln δ — sub-pixel jitter half-extent in c units
   aaAnalytic: f32,      // 1 = analytic AA enabled (auto mode, payload live)
-  aspect: f32,          // unused here; shared buffer with the target bake pass
+  aspect: f32,          // visible rotated viewport in neutral-texture space
   sceneSin: f32,
   sceneCos: f32,
   screenWidthPx: f32,
@@ -39,8 +39,8 @@ struct AaParams {
 };
 
 struct FrontierStats {
-  stamped: atomic<u32>,   // texels re-iterated this sample (the frontier)
-  eligible: atomic<u32>,  // texels in the AA boundary band (target > sample idx)
+  stamped: atomic<u32>,   // visible texels re-iterated this sample
+  eligible: atomic<u32>,  // visible texels whose target exceeds this sample
 };
 
 // r32float read_write: the target map is read (gate + existing tag) and written
@@ -65,6 +65,25 @@ fn log_complex_length_floor(v: vec2<f32>, floorValue: f32) -> f32 {
   return log(scale) + 0.5 * log(dot(unit, unit));
 }
 
+// Match mandelbrot_brush.wgsl's is_inside_rotated_screen exactly.  The neutral
+// texture circumscribes the rotated viewport, so its corner texels are neither
+// rendered nor iterated and must not dilute the AA-frontier diagnostic.
+fn is_inside_visible_viewport(coord: vec2<i32>, dim: vec2<u32>) -> bool {
+  let dimF = vec2<f32>(f32(dim.x), f32(dim.y));
+  let uv = vec2<f32>(
+    (f32(coord.x) + 0.5) / dimF.x,
+    1.0 - (f32(coord.y) + 0.5) / dimF.y,
+  );
+  let xyNeutral = uv * 2.0 - vec2<f32>(1.0);
+  let neutralExtent = sqrt(params.aspect * params.aspect + 1.0);
+  let localRot = xyNeutral * neutralExtent;
+  let local = vec2<f32>(
+    params.sceneCos * localRot.x + params.sceneSin * localRot.y,
+    -params.sceneSin * localRot.x + params.sceneCos * localRot.y,
+  );
+  return abs(local.x) <= params.aspect && abs(local.y) <= 1.0;
+}
+
 @compute @workgroup_size(16, 16)
 fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let dim = textureDimensions(aaTargetTex);
@@ -72,6 +91,9 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
     return;
   }
   let coord = vec2<i32>(i32(gid.x), i32(gid.y));
+  if (!is_inside_visible_viewport(coord, dim)) {
+    return;
+  }
   let tgtRaw = textureLoad(aaTargetTex, coord).r;
   let tgt = floor(tgtRaw);
   // Active sliver: target > current sample index → recompute (fresh jittered).

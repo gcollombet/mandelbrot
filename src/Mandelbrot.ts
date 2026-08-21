@@ -7,6 +7,15 @@ import type {IterationPaletteCurve} from "./IterationPaletteCurve.ts";
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
 export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet' | 'mobius' | 'auto';
 
+/** Maximum interactive/export AA accumulation budget. */
+export const MAX_ANTIALIAS_LEVEL = 256;
+
+export function normalizeAntialiasLevel(value: number | undefined): number {
+    const rounded = Math.round(value ?? 1);
+    if (!Number.isFinite(rounded)) return 1;
+    return Math.min(MAX_ANTIALIAS_LEVEL, Math.max(1, rounded));
+}
+
 export interface MandelbrotParams {
     scale: string;
     cx: string;

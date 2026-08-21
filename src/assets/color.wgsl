@@ -858,13 +858,22 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
     let heightGradient = grad * (0.34 * styledAnalyticRelief);
     let stripeHeightGradient = stripeGrad * stripeProfileDerivative * (0.75 * clamp(stripeReliefStrength, 0.0, 1.0));
     let coherenceHeightGradient = directionCoherenceGrad * (0.75 * clamp(directionCoherenceStrength, 0.0, 100.0));
-    // Material bumps remain independent of the analytic relief multiplier.
-    let surfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;
+    // The anisotropic material flow follows the rendered macro relief after
+    // protrusions, stripes, and coherence. Texture micro-bumps still perturb the
+    // final normal, but do not make the material direction shimmer pixel by pixel.
+    let macroSurfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient;
+    let surfaceGradient = macroSurfaceGradient + textureGradient;
+    let macroSurfaceSlope = length(macroSurfaceGradient);
+    let anisotropyReliefDir = select(
+      angleDir,
+      macroSurfaceGradient / max(macroSurfaceSlope, 1e-5),
+      macroSurfaceSlope > 1e-5
+    );
     let anisotropy = clamp(fx.anisotropy, 0.0, 1.0);
     let surfaceNormalLocal = surface_normal_from_gradient(surfaceGradient);
     let geometricTangentLocal = normalize(vec3<f32>(1.0, 0.0, surfaceGradient.x));
     let geometricBitangentLocal = normalize(cross(surfaceNormalLocal, geometricTangentLocal));
-    let anisotropyTangentLocal = anisotropy_tangent_from_dir(angleDir, surfaceNormalLocal);
+    let anisotropyTangentLocal = anisotropy_tangent_from_dir(anisotropyReliefDir, surfaceNormalLocal);
     let sceneSin = parameters.sceneSin;
     let sceneCos = parameters.sceneCos;
     // uv_neutral = R(scene) * uv_screen, therefore vectors from the neutral
@@ -931,14 +940,14 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
       let lightShift = smoothstep(0.08, 0.82, 1.0 - nDotH);
       let lightPlane = normalize(lightDir.xy + vec2<f32>(1e-5));
       let tangentPlane = vec2<f32>(-lightPlane.y, lightPlane.x);
-      let orientationPlane = normalize(rotate_sincos(angleDir, sceneSin, sceneCos) + vec2<f32>(1e-5));
+      let orientationPlane = normalize(rotate_sincos(anisotropyReliefDir, sceneSin, sceneCos) + vec2<f32>(1e-5));
       let facingPearl = dot(orientationPlane, lightPlane) * 0.5 + 0.5;
       let crossPearl = dot(orientationPlane, tangentPlane) * 0.5 + 0.5;
       let anisotropicOrientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
       // An isotropic film has no preferred tangent-plane direction: keep the
       // orientation contribution at its energy-neutral midpoint. Material
-      // anisotropy progressively restores the directional pearl response, with
-      // anisotropy = 1 preserving the previous appearance exactly.
+      // anisotropy progressively restores the relief-following directional
+      // pearl response, reaching full strength at anisotropy = 1.
       let orientationShift = mix(0.5, anisotropicOrientationShift, anisotropy);
       let slopeShift = smoothstep(0.025, 1.15, slope * styledAnalyticRelief);
       let tiltShift = smoothstep(0.025, 0.55, length(normal.xy));
@@ -961,13 +970,14 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
 
     var envColor = vec3<f32>(0.0);
     if (fx.wSkybox > 0.001) {
-      // Keep analytic relief authoritative for geometry, but give the base
-      // environment reflection the derivative-angle flow that also orients
-      // the anisotropic direct lobe. At full anisotropy the magnitude-2 offset
-      // reproduces the historical flat-zone tilt; it never feeds AO, shadows,
-      // direct lighting, iridescence slope, or clearcoat. Roughness remains
-      // only an isotropic mip choice, so the base environment keeps one sample.
-      let environmentReflectionGradient = surfaceGradient - angleDir * (2.0 * anisotropy);
+      // Keep the full surface relief in the one-sample environment reflection,
+      // then reinforce its macro-relief direction with the anisotropic
+      // magnitude-2 tilt.
+      // This retains the steep flat-zone response without subtracting, cancelling,
+      // or reversing protrusion relief. It never feeds AO, shadows, direct
+      // lighting, iridescence slope, or clearcoat. Roughness remains only an
+      // isotropic mip choice, so the base environment still uses one sample.
+      let environmentReflectionGradient = surfaceGradient + anisotropyReliefDir * (2.0 * anisotropy);
       let environmentReflectionNormalLocal = surface_normal_from_gradient(environmentReflectionGradient);
       let environmentReflectionNormal = normalize(rotate_surface_vector_inverse_sincos(environmentReflectionNormalLocal, sceneSin, sceneCos));
       let environmentReflectDir = reflect(-viewDir, environmentReflectionNormal);

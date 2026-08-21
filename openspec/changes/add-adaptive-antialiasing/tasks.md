@@ -270,3 +270,10 @@ free), which widens analytic AA's useful zone beyond the DE band.
 - [x] 12.3 Add a static regression contract covering the uniform-only engine
       gate, inverse shader lookup, and zero-offset palette preview. Hardware
       A/B at a non-zero angle remains the visual referee.
+
+## 13. Visible AA-frontier diagnostics
+
+- [x] 13.1 Scope selective reseed and its `eligible`/`stamped` counters to the
+      rotated visible viewport using the same neutral-to-screen predicate as
+      the Mandelbrot kernel; pass the scene transform through the shared AA
+      uniform and add a focused static contract.

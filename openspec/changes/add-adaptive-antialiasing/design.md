@@ -80,6 +80,16 @@ Reuse `color.wgsl`'s planned `fs_main_direct` as the live default: when `aaActiv
 
 With selective reseed, frozen pixels keep their value and the present pass shows the stable running average during reconverge — there is no flicker to hide, so freeze/merge snapshot passes are suppressed while `aaActive`.
 
+### Frontier diagnostics are scoped to the visible viewport
+
+The neutral square texture circumscribes the rotated screen and therefore
+contains texels that the Mandelbrot kernel culls before iteration. The AA
+reseed applies the identical neutral-to-screen test before stamping or updating
+its `eligible`/`stamped` counters. Consequently `AA frontier` reports the ratio
+of re-iterated to target-active **visible** texels in both adaptive and uniform
+AA; off-screen neutral corners neither inflate the diagnostic nor receive
+pointless reseed writes.
+
 ### Uniform-AA inverse lookup for the shifted neutral lattice
 
 The compute pass evaluates raw texel `j` at `baseLocal(j) + jitter`, while the

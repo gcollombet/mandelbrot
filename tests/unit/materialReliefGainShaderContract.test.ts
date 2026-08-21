@@ -20,12 +20,14 @@ describe('material relief gain shader contract', () => {
     expect(shader).toContain('let effectiveAnalyticRelief = relief * reliefGain;');
   });
 
-  it('removes the opposing additive slope and preserves independent material bumps', () => {
+  it('derives anisotropic flow from macro relief while preserving independent material bumps', () => {
     expect(shader).not.toContain('directionalVolumeGradient');
     expect(shader).not.toContain('fx.directionalVolume');
     expect(shader).toContain('let heightGradient = grad * (0.34 * styledAnalyticRelief);');
-    expect(shader).toContain('let surfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;');
-    expect(shader).toContain('anisotropy_tangent_from_dir(angleDir, surfaceNormalLocal)');
+    expect(shader).toContain('let macroSurfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient;');
+    expect(shader).toContain('let surfaceGradient = macroSurfaceGradient + textureGradient;');
+    expect(shader).toContain('macroSurfaceGradient / max(macroSurfaceSlope, 1e-5)');
+    expect(shader).toContain('anisotropy_tangent_from_dir(anisotropyReliefDir, surfaceNormalLocal)');
   });
 
   it('uses one effective analytic scale for every analytic lighting cue', () => {
@@ -36,9 +38,9 @@ describe('material relief gain shader contract', () => {
     expect(shader).not.toContain('slope * max(relief, 0.18)');
   });
 
-  it('orients one-sample base environment reflection without changing geometry or clearcoat', () => {
+  it('reinforces relief in the one-sample base environment reflection without changing geometry or clearcoat', () => {
     const reflectionGradient = shader.match(/let environmentReflectionGradient = ([^;]+);/)?.[1];
-    expect(reflectionGradient).toBe('surfaceGradient - angleDir * (2.0 * anisotropy)');
+    expect(reflectionGradient).toBe('surfaceGradient + anisotropyReliefDir * (2.0 * anisotropy)');
     expect(reflectionGradient).not.toContain('roughness');
     expect(shader).toContain('let environmentReflectionNormalLocal = surface_normal_from_gradient(environmentReflectionGradient);');
     expect(shader).toContain('let environmentReflectDir = reflect(-viewDir, environmentReflectionNormal);');

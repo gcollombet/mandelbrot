@@ -36,7 +36,7 @@ import {
 import type {ColorStop} from './ColorStop.ts'
 import {resolveDirectionCoherenceReliefTilt, resolveStripeReliefTilt} from './ColorStop.ts'
 import type {InterpolationMode} from './Mandelbrot.ts'
-import {computeAaJitterOffset, rotateAaJitterToScene} from './Mandelbrot.ts'
+import {computeAaJitterOffset, normalizeAntialiasLevel, rotateAaJitterToScene} from './Mandelbrot.ts'
 import {iterationPaletteCurveCode, type IterationPaletteCurve} from './IterationPaletteCurve.ts'
 import {normalizeTextureMappingConfig, type TextureMappingConfig, textureMappingVariableId} from './TextureMapping.ts'
 import {type AnimationConfig, type AnimationTrackConfig, normalizeAnimationConfig,} from './AnimationConfig.ts'
@@ -3720,8 +3720,7 @@ export class Engine {
      * the viewer happened to be set to.
      */
     private effectiveAntialiasLevel(requested: number | undefined): number {
-        if (this.videoExportActive) return this.videoExportAaSamples
-        return Math.max(1, Math.round(requested ?? 1))
+        return normalizeAntialiasLevel(this.videoExportActive ? this.videoExportAaSamples : requested)
     }
 
     /** Start a fresh accumulation for the next exported frame. */
@@ -6137,7 +6136,7 @@ export class Engine {
 
     /** Readable AA progress for the UI ("AA: done/total"). */
     get aaProgress(): { active: boolean; done: number; total: number } {
-        const total = Math.max(1, Math.round(this.previousRenderOptions?.antialiasLevel ?? 1))
+        const total = this.effectiveAntialiasLevel(this.previousRenderOptions?.antialiasLevel)
         return { active: this.aaActive, done: this.aaAccumulatedSamples, total }
     }
 
@@ -6551,8 +6550,9 @@ export class Engine {
             // Margin-passing escaped texels are tagged analytic-OK instead of
             // stamped; the color pass expands their z″ payload per sample.
             if (this.aaReseedPending && this.pipelineAaReseed && this.bindGroupAaReseed && this.uniformBufferAaTarget) {
-                const aaLevel = Math.max(1, Math.round(renderOptions.antialiasLevel ?? 1))
+                const aaLevel = this.effectiveAntialiasLevel(renderOptions.antialiasLevel)
                 const aaAnalytic = this.aaAnalyticParams(aspect)
+                const aaSceneAngle = this.previousMandelbrot.angle
                 this.device.queue.writeBuffer(
                     this.uniformBufferAaTarget,
                     0,
@@ -6560,7 +6560,8 @@ export class Engine {
                         aaLevel, this.aaSampleIndex, this.height,
                         aaAnalytic.enabled ? aaAnalytic.logDelta : 0,
                         aaAnalytic.enabled ? 1 : 0,
-                        0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, // bake-only fields, unused by the reseed
+                        aspect, Math.sin(aaSceneAngle), Math.cos(aaSceneAngle),
+                        0, 0, 0, 0, 0, 0, 0, 0, // remaining bake-only fields
                     ]).buffer,
                 )
                 if (this.aaFrontierBuffer) {

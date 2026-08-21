@@ -1,11 +1,22 @@
 import {describe, expect, it} from 'vitest';
 import {
+  MAX_ANTIALIAS_LEVEL,
+  normalizeAntialiasLevel,
   preserveSessionPerformanceFields,
   stripExplorationStateFields,
   stripSessionPerformanceFields,
 } from '../../src/Mandelbrot';
 
 describe('performance settings helpers', () => {
+  it('supports AA accumulation up to 256 samples with one shared bound', () => {
+    expect(MAX_ANTIALIAS_LEVEL).toBe(256);
+    expect(normalizeAntialiasLevel(255.6)).toBe(256);
+    expect(normalizeAntialiasLevel(256)).toBe(256);
+    expect(normalizeAntialiasLevel(257)).toBe(256);
+    expect(normalizeAntialiasLevel(0)).toBe(1);
+    expect(normalizeAntialiasLevel(Number.NaN)).toBe(1);
+  });
+
   it('preserves session-scoped performance fields when applying a preset', () => {
     const current = {
       dprMultiplier: 1.5,

@@ -461,8 +461,8 @@ function periodicHeaderLine(): string {
   );
 }
 
-// Analytic AA frontier: re-iterated texels / boundary-band texels at the last
-// reseed — margin-passing texels expand their Taylor payload instead.
+// Analytic AA frontier: visible re-iterated texels / visible target-active
+// texels at the last reseed — margin-passing texels expand their Taylor payload.
 function aaFrontier(): string {
   const s = stats.aaFrontierStamped;
   const e = stats.aaFrontierEligible;

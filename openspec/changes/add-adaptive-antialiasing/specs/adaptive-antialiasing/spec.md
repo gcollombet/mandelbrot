@@ -135,6 +135,23 @@ The engine SHALL expose readable AA progress (active flag, samples done, total t
 - **WHEN** accumulation is in progress at sample `n` of `antialiasLevel`
 - **THEN** the engine reports active = true, done = `n`, total = `antialiasLevel`
 
+### Requirement: AA frontier diagnostics cover the visible viewport
+
+The selective-reseed diagnostic SHALL count as eligible or stamped only texels
+whose centers belong to the rotated visible viewport. Neutral-texture texels
+outside that viewport SHALL NOT be reseeded and SHALL NOT affect the displayed
+`AA frontier` ratio, including when adaptive AA is disabled.
+
+#### Scenario: Uniform AA on a rotated viewport
+
+- **WHEN** uniform AA assigns the full target to the neutral texture
+- **THEN** `eligible` counts only target-active texels inside the rotated visible viewport, and `stamped / eligible` measures the visible re-iteration ratio
+
+#### Scenario: Neutral corner outside the screen
+
+- **WHEN** a neutral-texture texel lies outside the rotated visible viewport
+- **THEN** reseed leaves it untouched and increments neither frontier counter
+
 ### Requirement: Contrast-driven target map fused with the DE ramp
 
 The AA target bake SHALL derive the per-texel sample count from the fusion of
