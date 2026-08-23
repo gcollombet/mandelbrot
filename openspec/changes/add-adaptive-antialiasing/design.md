@@ -90,6 +90,40 @@ of re-iterated to target-active **visible** texels in both adaptive and uniform
 AA; off-screen neutral corners neither inflate the diagnostic nor receive
 pointless reseed writes.
 
+### Analytic-AA eligibility uses the original Taylor-dominance certificate
+
+On the pristine sample-0 payload, the reseed accepts a center when
+`|z'| / (|z''| delta) > 5`, evaluated in log space. This intentionally restores
+the original conservative certificate after the palette-phase experiment did
+not improve the visible result and added substantial per-candidate work. The
+certificate is independent of the active palette period and iteration-palette
+curve; no smooth iteration, palette coordinate, or neighbouring texel is read
+to make the analytic decision.
+
+Two correctness protections added during the experiment remain. Every payload
+component is checked explicitly for finite range before logarithms can launder
+a NaN on Metal. The retained quadratic reconstruction must also already be
+beyond the configured bailout throughout the pixel footprint. Rather than
+reconstructing eight directions, the reseed uses the conservative disk bound
+
+`|z + z' dc + 1/2 z'' dc^2| >= |z| - |z'| delta - 1/2 |z''| delta^2`.
+
+If this lower bound is at least `sqrt(mu)`, every point of the box footprint is
+safe as well; otherwise the texel is honestly re-iterated. This is cheaper and
+stronger than probing selected directions, although conservatism can reject a
+payload that direction-aware reconstruction would have accepted.
+
+Analytic eligibility is mode-independent. The original implementation limited
+it to Auto because only the unified block kernel carried `z″` at that time.
+Exact perturbation, affine BLA, Padé, Jet, Möbius, and Unified now all propagate
+the resumable `sndM`/`sndS` state, so the engine preserves layers 8–12 and
+enables the same reseed/color reconstruction in every approximation mode.
+
+This remains a retained-term heuristic rather than a rigorous Taylor remainder
+certificate: without `z'''` it cannot bound the omitted cubic and higher terms.
+Orbit-trap and other fields not reconstructed from this payload remain outside
+this decision and will be handled separately.
+
 ### Uniform-AA inverse lookup for the shifted neutral lattice
 
 The compute pass evaluates raw texel `j` at `baseLocal(j) + jitter`, while the

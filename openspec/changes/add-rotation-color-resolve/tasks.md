@@ -20,3 +20,9 @@
 
 - [x] 4.1 Add focused unit and source-contract coverage for alignment, semantic-field isolation, filtered presentation, and AA exclusivity
 - [x] 4.2 Validate changed WGSL shaders, TypeScript, unit tests, OpenSpec strictness, and whitespace without running Playwright
+
+## 5. Settled convergence handoff
+
+- [x] 5.1 Treat a zero counter sampled after the last raw mutation as fresh
+      rotation-bake evidence even while redundant readbacks remain in flight,
+      and stop scheduling more counter copies in that settled state.

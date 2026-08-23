@@ -17,6 +17,14 @@ component-wise interpolate semantic Mandelbrot field values.
 - **THEN** the renderer resolves final color once into the neutral cache and
   marks the cache ready
 
+#### Scenario: Redundant counter readbacks remain in flight
+
+- **WHEN** the latest applied counter reports zero and was sampled at or after
+  the last raw-field mutation, while later readbacks of the unchanged field
+  remain in flight
+- **THEN** those redundant readbacks do not delay the rotation-cache bake and
+  no additional counter readback is scheduled for the settled field
+
 #### Scenario: Raw semantic data remains discrete
 
 - **WHEN** the rotation color cache is produced

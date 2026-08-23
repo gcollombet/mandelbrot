@@ -2,14 +2,15 @@
 // neutral texels whose distance-estimation target sample count exceeds the current
 // sample index — the thin boundary "sliver" — leaving every other texel frozen.
 //
-// Phase D (analytic AA): before stamping, escaped texels whose Taylor margin
-// |z′|/(|z″|·δ) passes the threshold are TAGGED analytic-OK instead (a +0.5
-// fraction added to the AA target map; the integer part stays the sample-count
-// target). Tagged texels are never re-iterated: the color pass expands their
-// sample-0 payload ẑ(δᵢ) = z + z′δᵢ + ½z″δᵢ² per AA sample. The margin is
-// evaluated ONCE, on the first reseed (pristine sample-0 payload), and the tag
-// carries the decision for the whole accumulation — re-evaluating on later
-// samples would race against margin-fail re-iterations (double-jitter).
+// Analytic AA: before stamping, escaped texels whose Taylor payload
+// passes the original |z′| / (|z″| δ) dominance certificate are TAGGED
+// analytic-OK instead (a +0.5 fraction added to the AA target map; the integer
+// part stays the sample-count target). Tagged texels are never re-iterated: the
+// color pass expands their sample-0 payload
+// ẑ(δᵢ) = z + z′δᵢ + ½z″δᵢ² per AA sample. The decision is evaluated
+// ONCE, on the first reseed (pristine sample-0 payload), and reused for the
+// whole accumulation. Non-finite payloads and reconstructions that fall below
+// bailout always fall back to exact re-iteration.
 //
 // The in-place fused path then reconverges only the stamped texels with the new
 // jitter, while frozen (escaped/interior/analytic) texels are skipped by its
@@ -24,7 +25,7 @@ struct AaParams {
   aaSampleIndex: f32,
   screenHeightPx: f32,  // unused here; shared buffer with the target bake pass
   aaLogDelta: f32,      // ln δ — sub-pixel jitter half-extent in c units
-  aaAnalytic: f32,      // 1 = analytic AA enabled (auto mode, payload live)
+  aaAnalytic: f32,      // 1 = analytic AA enabled (Taylor payload live)
   aspect: f32,          // visible rotated viewport in neutral-texture space
   sceneSin: f32,
   sceneCos: f32,
@@ -53,6 +54,9 @@ struct FrontierStats {
 // view above): 0 = S, 1/2 = z′ mantissa, 3 = ln|z″|, 4 = arg(z″).
 @group(0) @binding(3) var payloadTex: texture_2d_array<f32>;
 @group(0) @binding(4) var<storage, read_write> stats: FrontierStats;
+// Coherent sample-0 display values: layer 0 = iter, 1/2 = escape z. This is the
+// same center value source the color pass combines with the raw Taylor payload.
+@group(0) @binding(5) var valuesTex: texture_2d_array<f32>;
 
 const LN_MARGIN_THRESHOLD: f32 = 1.6094379; // ln 5
 
@@ -107,25 +111,45 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
       // First reseed only: decide from the pristine sample-0 payload.
       if (params.aaSampleIndex < 1.5) {
+        let iter = textureLoad(valuesTex, coord, 0, 0).r;
+        let z = vec2<f32>(textureLoad(valuesTex, coord, 1, 0).r,
+                          textureLoad(valuesTex, coord, 2, 0).r);
         let s = textureLoad(payloadTex, coord, 0, 0).r;
         let m1 = vec2<f32>(textureLoad(payloadTex, coord, 1, 0).r,
                            textureLoad(payloadTex, coord, 2, 0).r);
         let sndLog = textureLoad(payloadTex, coord, 3, 0).r;
         let sndAngle = textureLoad(payloadTex, coord, 4, 0).r;
-        // Margin in log space: ln|z′| − ln|z″| − ln δ > ln 5.
-        // z′ = m1·exp(s); z″ already stores its independent ln-magnitude.
         // Finite guard first: max() LAUNDERS NaN on Metal (max(NaN, x) = x),
-        // which once turned a NaN payload into an auto-passing margin. |x| < big is
-        // false for both NaN and inf without relying on x != x semantics.
-        let finiteOk = abs(s) < 1e6
+        // which once turned a NaN payload into an auto-passing margin. |x| <
+        // big is false for both NaN and inf without x != x semantics.
+        let finiteOk = iter > 0.0 && abs(iter) < 1e30
+          && abs(z.x) < 1e15 && abs(z.y) < 1e15
+          && abs(s) < 1e6
           && abs(m1.x) < 1e30 && abs(m1.y) < 1e30
           && abs(sndLog) < 1e30 && abs(sndAngle) < 1e30;
-        let marginLog = log_complex_length_floor(m1, 1e-38)
-                      + s - sndLog - params.aaLogDelta;
+        // Original conservative certificate in log space:
+        // ln|z′| − ln|z″| − ln δ > ln 5.
+        let logM1 = log_complex_length_floor(m1, 1e-38);
+        let marginLog = logM1 + s - sndLog - params.aaLogDelta;
         if (finiteOk && max(abs(m1.x), abs(m1.y)) > 0.0
             && marginLog > LN_MARGIN_THRESHOLD) {
-          textureStore(aaTargetTex, coord, vec4<f32>(tgt + 0.5, 0.0, 0.0, 0.0));
-          return;
+          // Cheap conservative bailout guard over the whole footprint disk:
+          // |ẑ| >= |z| - |z′|δ - 0.5|z″|δ². If this lower bound is
+          // beyond sqrt(mu), every box sample has already escaped at this iter.
+          let linearRadiusLog = logM1 + s + params.aaLogDelta;
+          let quadraticRadiusLog = log(0.5) + sndLog + 2.0 * params.aaLogDelta;
+          let radiiFinite = linearRadiusLog > -1e6 && linearRadiusLog < 80.0
+            && quadraticRadiusLog > -1e6 && quadraticRadiusLog < 80.0;
+          let minReconstructedAbs = length(z)
+            - exp(clamp(linearRadiusLog, -80.0, 80.0))
+            - exp(clamp(quadraticRadiusLog, -80.0, 80.0));
+          let bailoutOk = radiiFinite
+            && minReconstructedAbs > 0.0
+            && minReconstructedAbs * minReconstructedAbs >= params.mu;
+          if (bailoutOk) {
+            textureStore(aaTargetTex, coord, vec4<f32>(tgt + 0.5, 0.0, 0.0, 0.0));
+            return;
+          }
         }
       }
     }

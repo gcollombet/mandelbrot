@@ -66,7 +66,7 @@ struct Uniforms {
   aaJitterHatX: f32,     // unit direction of the current sample's jitter δc (c-space basis)
   aaJitterHatY: f32,
   aaJitterLogMag: f32,   // ln|δc| in c units (exponent-summed with the payload's S)
-  aaAnalytic: f32,       // 1 = analytic AA expansion enabled (auto mode, raw payload bound)
+  aaAnalytic: f32,       // 1 = analytic AA expansion enabled (raw payload bound)
   gradeSaturation: f32,  // display-grade saturation (1.0 = neutral)
   reachDebug: f32,       // 1 = analytic-AA reach heatmap (debug view 6)
   lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)

@@ -63,7 +63,7 @@ import {
 } from './iterationBatchController'
 import {advanceFramePacer} from './framePacing'
 import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapColorUniformValues, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
-import {rotationNeedsColorResolve} from './rotationColorResolve'
+import {rotationHasFreshZeroCounter, rotationNeedsColorResolve} from './rotationColorResolve'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
@@ -1261,7 +1261,7 @@ export class Engine {
     /** When true, AA accumulation auto-starts as soon as the view is fully converged. */
     aaAuto = false
     // ── Analytic AA (z″ expansion in the color pass) ──
-    /** Master switch (auto mode only — the payload's z″ is tracked by the unified kernel). */
+    /** Master switch for analytic AA; every production iteration path carries z″. */
     aaAnalyticEnabled = true
     /** False after a 9-layer pan: layers 9..12 then belong to the old scratch
      * texture role. Re-enabling analytic AA must clear/recompute before use. */
@@ -2547,6 +2547,8 @@ export class Engine {
                 { binding: 2, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
                 { binding: 3, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 4, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'storage' } },
+                // Coherent sample-0 center iter/z paired with raw Taylor layers 8..12.
+                { binding: 5, visibility: GPUShaderStage.COMPUTE, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
             ],
             label: 'Engine BindGroupLayout AaReseed',
         })
@@ -4824,7 +4826,7 @@ export class Engine {
             })
         }
         if (this.pipelineAaReseed && this.rawIterStorageView && this.rawPayloadView
-            && this.uniformBufferAaTarget && this.aaFrontierBuffer) {
+            && this.resolvedDisplay && this.uniformBufferAaTarget && this.aaFrontierBuffer) {
             this.bindGroupAaReseed = this.device.createBindGroup({
                 layout: this.pipelineAaReseed.getBindGroupLayout(0),
                 entries: [
@@ -4833,6 +4835,7 @@ export class Engine {
                     { binding: 2, resource: { buffer: this.uniformBufferAaTarget } },
                     { binding: 3, resource: this.rawPayloadView },
                     { binding: 4, resource: { buffer: this.aaFrontierBuffer } },
+                    { binding: 5, resource: this.resolvedDisplay.valuesArrayView },
                 ],
                 label: 'Engine BindGroup AaReseed',
             })
@@ -6039,17 +6042,29 @@ export class Engine {
         renderOptions: RenderOptions,
         fullyConverged: boolean,
     ): boolean {
+        // The generic convergence gate waits for the entire asynchronous
+        // readback ring to drain. Rotation's keepalive renders a frame every
+        // tick and used to refill that ring continuously, so a fresh displayed
+        // zero could sit at 100% for seconds before all slots happened to be
+        // idle together. Frame ordering is the stronger evidence: once the
+        // applied zero was sampled after the last raw mutation, later pending
+        // readbacks describe the same unchanged field and are redundant.
+        const hasFreshZero = rotationHasFreshZeroCounter(
+            this.unfinishedPixelCount,
+            this.counterSampleFrame,
+            this.lastRawMutationFrame,
+        )
         return this.rotationColorResolvePending
             && !this.rotationColorResolveChangedThisUpdate
-            && fullyConverged
+            && (fullyConverged || hasFreshZero)
             && this.rotationColorResolveAllowed(renderOptions)
     }
 
     /**
-     * Phase D analytic-AA parameters: ln of the sub-pixel jitter half-extent δ
-     * in c units (the margin test's denominator) and the master eligibility.
-     * Analytic AA needs the unified kernel's z″ payload, so it is auto-mode only;
-     * it also disables below f64 scale (the log turns −∞).
+     * Analytic-AA parameters: ln of the sub-pixel jitter half-extent δ
+     * in c units (the Taylor certificate's footprint radius) and master eligibility.
+     * Exact perturbation and every selectable block kernel carry the z″ payload,
+     * so eligibility is independent of the approximation mode.
      */
     /**
      * Full-precision ln(view scale) — from the same decimal/floatexp source the
@@ -6073,14 +6088,12 @@ export class Engine {
         const neutralExtent = Math.sqrt(aspect * aspect + 1)
         // δ = max jitter magnitude: box components |j| ≤ 0.5 → magnitude ≤ √2·0.5,
         // ×(2·extent/size) per texel (the same scale the state machine applies),
-        // × scale. Uses the full-precision ln(scale) so the reseed margin denom
-        // matches the actual deep δc (the raw-scale bug tagged deep pixels wrong).
+        // × scale. Uses the full-precision ln(scale) so the reseed certificate
+        // match the actual deep δc (the raw-scale bug tagged deep pixels wrong).
         const logDelta = Number.isFinite(ln)
             ? Math.log(Math.SQRT2 * neutralExtent / Math.max(1, this.neutralSize)) + ln
             : Number.NEGATIVE_INFINITY
-        const enabled = this.aaAnalyticEnabled
-            && this.approximationMode === 'auto'
-            && Number.isFinite(logDelta)
+        const enabled = this.aaAnalyticEnabled && Number.isFinite(logDelta)
         // Deep re-enabled (2026-07-07, third attempt — root cause found in the
         // KERNEL this time): try_apply_unified's z″ tier update computed at the
         // old derS scale overflowed on deep blocks (coefficient exponents ~±133
@@ -6314,7 +6327,15 @@ export class Engine {
 
         // Use the readback ring as intended: mapping one slot must not suppress
         // the next frame's sample while another slot remains available.
-        const shouldDispatchCounter = (
+        const hasFreshZeroCounter = !this.clearHistoryNextFrame
+            && !hasTranslationShift
+            && !this.aaReseedPending
+            && rotationHasFreshZeroCounter(
+                this.unfinishedPixelCount,
+                this.counterSampleFrame,
+                this.lastRawMutationFrame,
+            )
+        const shouldDispatchCounter = !hasFreshZeroCounter && (
             this.unfinishedPixelCount < 0
             || frameSerial - this.lastCounterDispatchFrame >= COUNTER_SAMPLE_INTERVAL_FRAMES
         )
@@ -6547,12 +6568,13 @@ export class Engine {
             // Stage B selective reseed: stamp the boundary sliver (target > sample
             // index) as compute requests so only it reconverges with the new jitter;
             // frozen texels are left as-is and skipped by the fused pass below.
-            // Margin-passing escaped texels are tagged analytic-OK instead of
-            // stamped; the color pass expands their z″ payload per sample.
+            // Certificate-passing escaped texels are tagged analytic-OK instead
+            // of stamped; the color pass expands their z″ payload per sample.
             if (this.aaReseedPending && this.pipelineAaReseed && this.bindGroupAaReseed && this.uniformBufferAaTarget) {
                 const aaLevel = this.effectiveAntialiasLevel(renderOptions.antialiasLevel)
                 const aaAnalytic = this.aaAnalyticParams(aspect)
                 const aaSceneAngle = this.previousMandelbrot.angle
+                const aaMandelbrot = this.previousMandelbrot
                 this.device.queue.writeBuffer(
                     this.uniformBufferAaTarget,
                     0,
@@ -6561,7 +6583,9 @@ export class Engine {
                         aaAnalytic.enabled ? aaAnalytic.logDelta : 0,
                         aaAnalytic.enabled ? 1 : 0,
                         aspect, Math.sin(aaSceneAngle), Math.cos(aaSceneAngle),
-                        0, 0, 0, 0, 0, 0, 0, 0, // remaining bake-only fields
+                        0, 0,
+                        aaMandelbrot.mu,
+                        0, 0, 0, 0, 0,
                     ]).buffer,
                 )
                 if (this.aaFrontierBuffer) {

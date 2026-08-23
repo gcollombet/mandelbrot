@@ -277,3 +277,30 @@ free), which widens analytic AA's useful zone beyond the DE band.
       rotated visible viewport using the same neutral-to-screen predicate as
       the Mandelbrot kernel; pass the scene transform through the shared AA
       uniform and add a focused static contract.
+
+## 14. Analytic-AA certificate field corrections
+
+- [x] 14.1 Replace the reseed's `|z'| / (|z''| rho)` dominance gate with a
+      first-vs-second-order smooth palette-phase estimate over the box
+      footprint, using the existing `z`, `z'`, and `z''` payload only. Keep
+      integer crossings and orbit-trap compatibility outside this decision.
+- [x] 14.2 Add focused static contracts and run WGSL, TypeScript, and unit
+      validation without Playwright.
+- [x] 14.3 Field-test the absolute palette-frequency guard; revert it after it
+      reduced speed without improving the coarse exterior aliasing.
+- [x] 14.4 Require every retained quadratic footprint probe to remain beyond
+      the configured bailout; otherwise re-iterate exactly so an exterior
+      sample can reach its later escape iteration. Validate without Playwright.
+- [x] 14.5 Field result: the palette-phase and neighbour checks remain visibly
+      aliased while adding cost. Restore the original
+      `|z′| / (|z″| delta) > 5` certificate, retain explicit finite-value
+      checks, and replace directional bailout probes with the cheap conservative
+      whole-footprint lower bound. Remove all phase and neighbour work from the
+      reseed certificate; validate without Playwright.
+
+## 15. Analytic-AA approximation-mode eligibility
+
+- [x] 15.1 Remove the obsolete Auto-only engine guard now that exact
+      perturbation, BLA, Padé, Jet, Möbius, and Unified all carry the resumable
+      `z″` payload. Preserve/copy the analytic raw layers and enable the same
+      reseed/color path in every approximation mode; validate without Playwright.

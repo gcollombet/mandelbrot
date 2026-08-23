@@ -79,6 +79,13 @@ screen. Once eligible, the renderer bakes the cache and may present it in the
 same command encoder. A pending resolve keeps the render loop alive only while
 the branch can eventually become eligible.
 
+Counter freshness is established by frame ordering, not by waiting for the
+whole asynchronous readback ring to become empty. A zero count sampled at or
+after `lastRawMutationFrame` proves the raw field is settled; later pending
+readbacks describe that same unchanged field and cannot delay the bake. Once
+this fresh zero exists, the engine also stops scheduling redundant counter
+copies so the resolve keepalive does not refill the ring it is waiting on.
+
 ### Treat the cache as derived, versioned state
 
 Any Mandelbrot, material/color, viewport, rotation, or raw-field mutation

@@ -2,6 +2,7 @@ import {readFileSync} from 'node:fs'
 import {describe, expect, it} from 'vitest'
 import {
   ROTATION_ALIGNMENT_EPSILON,
+  rotationHasFreshZeroCounter,
   rotationNeedsColorResolve,
 } from '../../src/rotationColorResolve'
 
@@ -21,6 +22,14 @@ describe('settled rotation color resolve', () => {
     expect(rotationNeedsColorResolve(Number.NaN)).toBe(false)
     expect(rotationNeedsColorResolve(Number.POSITIVE_INFINITY)).toBe(false)
     expect(rotationNeedsColorResolve(ROTATION_ALIGNMENT_EPSILON / 4)).toBe(false)
+  })
+
+  it('accepts only a zero counter sampled after the last raw mutation', () => {
+    expect(rotationHasFreshZeroCounter(0, 12, 12)).toBe(true)
+    expect(rotationHasFreshZeroCounter(0, 13, 12)).toBe(true)
+    expect(rotationHasFreshZeroCounter(0, 11, 12)).toBe(false)
+    expect(rotationHasFreshZeroCounter(1, 13, 12)).toBe(false)
+    expect(rotationHasFreshZeroCounter(-1, 13, 12)).toBe(false)
   })
 
   it('caches authoritative final color without generic field interpolation', () => {
@@ -53,10 +62,19 @@ describe('settled rotation color resolve', () => {
 
   it('waits for a stable eligible view and retains the direct fallback', () => {
     expect(engine).toContain('&& !this.rotationColorResolveChangedThisUpdate')
-    expect(engine).toContain('&& fullyConverged')
+    expect(engine).toContain('&& (fullyConverged || hasFreshZero)')
     expect(engine).toContain('&& !renderOptions.activateAnimate')
     expect(engine).toContain('&& !this.videoExportActive')
     expect(engine).toContain('&& this.debugViewMode === 0')
     expect(engine).toContain('} else if (!aaShowAccum && !rotationShowCache) {')
+  })
+
+  it('does not refill the counter ring after a fresh settled zero', () => {
+    expect(engine).toContain('const shouldDispatchCounter = !hasFreshZeroCounter && (')
+    expect(engine).toContain('const hasFreshZeroCounter = !this.clearHistoryNextFrame')
+    expect(engine).toContain('&& !hasTranslationShift')
+    expect(engine).toContain('&& !this.aaReseedPending')
+    expect(engine).toContain('this.counterSampleFrame,')
+    expect(engine).toContain('this.lastRawMutationFrame,')
   })
 })

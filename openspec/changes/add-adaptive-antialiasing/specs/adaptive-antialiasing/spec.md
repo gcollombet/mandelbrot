@@ -152,6 +152,52 @@ outside that viewport SHALL NOT be reseeded and SHALL NOT affect the displayed
 - **WHEN** a neutral-texture texel lies outside the rotated visible viewport
 - **THEN** reseed leaves it untouched and increments neither frontier counter
 
+### Requirement: Analytic AA uses a conservative Taylor certificate
+
+On the first reseed, an escaped texel SHALL be eligible for frozen Taylor
+reconstruction only when its finite analytic payload satisfies the original
+`|z'| / (|z''| delta) > 5` dominance threshold. Eligibility SHALL NOT depend on
+palette phase, palette period, iteration-palette curve, or neighbouring texels.
+The retained quadratic reconstruction SHALL additionally remain at or beyond
+the configured escape bailout over the complete box footprint, certified by
+the conservative lower bound
+`|z| - |z'| delta - 1/2 |z''| delta^2 >= sqrt(mu)`.
+Analytic eligibility SHALL NOT depend on the selected approximation mode:
+exact perturbation, BLA, Padé, Jet, Möbius, and Auto SHALL all use the payload
+they propagate through their production iteration path.
+
+#### Scenario: Analytic AA is available outside Auto
+
+- **WHEN** analytic AA is enabled with any selectable approximation mode and
+  the view has a finite analytic footprint
+- **THEN** the engine preserves the Taylor payload and applies the same
+  conservative Taylor certificate without requiring Auto mode
+
+#### Scenario: Dominant linear term is frozen analytically
+
+- **WHEN** the finite payload satisfies `|z'| / (|z''| delta) > 5` and the
+  whole-footprint bailout lower bound remains at or beyond `sqrt(mu)`
+- **THEN** the texel is tagged analytic and is not re-iterated for later AA
+  samples
+
+#### Scenario: Invalid or insufficiently dominant payload falls back
+
+- **WHEN** the payload is non-finite or the dominance ratio is at most 5
+- **THEN** the texel is stamped as a fresh exact compute request
+
+#### Scenario: Exterior sample needs a later escape iteration
+
+- **WHEN** the conservative footprint lower bound falls below the configured
+  bailout at the center pixel's escape iteration
+- **THEN** the texel is stamped as a fresh exact compute request so its orbit
+  continues to the correct later escape iteration
+
+#### Scenario: Palette configuration does not affect eligibility
+
+- **WHEN** palette period or iteration-palette curve changes while the same
+  analytic payload and footprint are evaluated
+- **THEN** the certificate result is unchanged
+
 ### Requirement: Contrast-driven target map fused with the DE ramp
 
 The AA target bake SHALL derive the per-texel sample count from the fusion of

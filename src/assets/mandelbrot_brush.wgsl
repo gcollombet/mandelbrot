@@ -1389,7 +1389,7 @@ struct TexelOut {
   ref_i:     vec4<f32>,
   avgDirection: vec4<f32>,
   derS:      vec4<f32>, // layer 8: raw derivative log scale (continuations)
-  // Phase D (analytic AA, auto mode) — layers 9..12.
+  // Phase D analytic AA — layers 9..12, carried by every production path.
   //   in-progress: 9/10 = sndM.x/y, 11 = sndS for z″=sndM·exp(sndS)
   //   escaped:     8 = S (derS at escape), 9/10 = derM.x/y (z′ mantissa),
   //                11 = ln|z″|, 12 = arg(z″) — the polar-log Taylor payload.
