@@ -64,6 +64,7 @@ import {
 import {advanceFramePacer} from './framePacing'
 import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapColorUniformValues, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
 import {rotationHasFreshZeroCounter, rotationNeedsColorResolve} from './rotationColorResolve'
+import {projectTileView, tileZoomPivot, type TileViewProjection} from './tiledVideoExport'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
@@ -141,7 +142,7 @@ const MOBIUS_COEFF_FLOATS = 21
 // default maxStorageBufferBindingSize (128 MiB); the device now also raises that
 // limit to the adapter's maximum, so this cap is comfortably inside it.
 const ORBIT_STEP_CAPACITY = 10_000_000
-const COLOR_UNIFORM_FLOAT_COUNT = 96
+const COLOR_UNIFORM_FLOAT_COUNT = 100
 const TAU = Math.PI * 2
 
 // Minimum number of unfinished pixels below which we consider the image
@@ -655,6 +656,25 @@ export type Mandelbrot = {
     // [scaleMantissa, scaleExp, dxMantissa, dxExp, dyMantissa, dyExp], value = mantissa·2^exp.
     // Preferred over re-parsing dxStr/scaleStr each frame; absent mid-zoom (uses liveScale).
     viewFloatexp?: Float64Array,
+}
+
+export type VideoExportTileProjection = {
+    fullWidth: number
+    fullHeight: number
+    /** Expanded output-pixel rectangle, using a top-left origin. */
+    x: number
+    y: number
+    width: number
+    height: number
+    /** Frozen/live ratio whose complete source envelope is inside this tile. */
+    reuseMagnificationThreshold?: number
+}
+
+export type VideoExportReferenceDiagnostics = {
+    tileSwitches: number
+    warmReuses: number
+    orbitExtensions: number
+    reconstructions: number
 }
 
 interface DisplaySet {
@@ -1286,7 +1306,16 @@ export class Engine {
     /** Set to true when we need to run the merge pass (resolved+frozen→frozen) at zoom stop. */
     private needMergeSnapshot = false
     /** Saved merge uniform values captured at zoom stop (before state is reset). */
-    private mergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0 }
+    private mergeUniforms = {
+        zf: 1.0,
+        lzf: 1.0,
+        frozenShiftU: 0,
+        frozenShiftV: 0,
+        aspect: 1.0,
+        angle: 0,
+        zoomPivotU: 0.5,
+        zoomPivotV: 0.5,
+    }
     /** Initial live-texel offset between a frozen snapshot and the display when zoom starts. */
     private frozenBaseShiftX = 0
     private frozenBaseShiftY = 0
@@ -1575,14 +1604,15 @@ export class Engine {
             maxIterations,
             precisionBudget: this.precisionBudget,
             tableGeneration: this.tableGeneration,
-            viewportAspect: this.width / Math.max(1, this.height),
+            viewportAspect: this.referenceViewportAspect(),
         })
     }
 
     private syncReferenceWorkerView(mandelbrot: Mandelbrot, scaleString: string, maxIterations: number) {
         // Aspect is part of the key: a resize alone moves the exact c_max bound,
         // and the worker must get a chance to re-solve/re-post the radii.
-        const aspectKey = (this.width / Math.max(1, this.height)).toFixed(6)
+        const referenceAspect = this.referenceViewportAspect()
+        const aspectKey = referenceAspect.toFixed(6)
         const nextKey = `${mandelbrot.cx}\n${mandelbrot.cy}\n${scaleString}\n${mandelbrot.angle}\n${maxIterations}\n${aspectKey}`
         if (nextKey === this.referenceViewKey) {
             return
@@ -1602,7 +1632,7 @@ export class Engine {
             scale: scaleString,
             angle: mandelbrot.angle,
             maxIterations,
-            viewportAspect: this.width / Math.max(1, this.height),
+            viewportAspect: referenceAspect,
         })
     }
 
@@ -1665,6 +1695,7 @@ export class Engine {
 
             if (active && message.refId === active.refId) {
                 // ── Progressive streaming of the shader's current reference ──
+                const previousOrbitLength = this.referenceAvailableOrbitLen
                 if (message.orbit.length > 0 && this.mandelbrotReferenceBuffer) {
                     this.device.queue.writeBuffer(
                         this.mandelbrotReferenceBuffer,
@@ -1676,6 +1707,12 @@ export class Engine {
                 }
                 active.orbitLen = message.count
                 this.referenceAvailableOrbitLen = message.count
+                if (this.videoExportActive && this.videoExportTileProjection
+                    && message.count > previousOrbitLength
+                    && !this.videoExportTileExtensionCounted) {
+                    this.videoExportReferenceDiagnostics.orbitExtensions++
+                    this.videoExportTileExtensionCounted = true
+                }
                 const availableIter = Math.max(0, message.count - 1)
                 this.currentReferenceAvailableIter = availableIter
                 this.currentReferenceRemainingIter = Math.max(0, this.currentMaxIterations - availableIter)
@@ -1714,6 +1751,9 @@ export class Engine {
                 // Supersedes any previous staging: the worker recentered again
                 // (or a fresh job started), so older accumulations are moot.
                 console.log('[REF] staging new reference refId=', message.refId, 'ref=', message.referenceCx.slice(0, 14))
+                if (this.videoExportActive && this.videoExportTileProjection) {
+                    this.videoExportReferenceDiagnostics.reconstructions++
+                }
                 this.stagingRef = {
                     refId: message.refId,
                     cx: message.referenceCx,
@@ -2128,7 +2168,7 @@ export class Engine {
 
         // uniform buffers
         this.uniformBufferMandelbrot = this.device.createBuffer({
-            size: 4 * 36,
+            size: 4 * 40,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Mandelbrot',
         })
@@ -3711,6 +3751,50 @@ export class Engine {
     private videoExportParkedDrawFn: (() => Promise<void>) | null = null
     /** Pins the compute surface to an exact pixel size while set (export only). */
     private forcedSurfaceSize: { width: number; height: number } | null = null
+    /** Full-frame placement of the local export surface. Null is monolithic. */
+    private videoExportTileProjection: VideoExportTileProjection | null = null
+    private videoExportSupersample = 1
+    private videoExportRequestedMagnificationThreshold = 2
+    private videoExportTileExtensionCounted = false
+    private videoExportReferenceDiagnostics: VideoExportReferenceDiagnostics = {
+        tileSwitches: 0,
+        warmReuses: 0,
+        orbitExtensions: 0,
+        reconstructions: 0,
+    }
+
+    getVideoExportReferenceDiagnostics(): VideoExportReferenceDiagnostics {
+        return {...this.videoExportReferenceDiagnostics}
+    }
+
+    private currentTileViewProjection(angle: number): TileViewProjection | null {
+        const projection = this.videoExportTileProjection
+        if (!projection) return null
+        return projectTileView(
+            {width: projection.fullWidth, height: projection.fullHeight},
+            {
+                x: projection.x,
+                y: projection.y,
+                width: projection.width,
+                height: projection.height,
+            },
+            angle,
+        )
+    }
+
+    private referenceViewportAspect(): number {
+        const projection = this.videoExportTileProjection
+        return projection
+            ? projection.fullWidth / Math.max(1, projection.fullHeight)
+            : this.width / Math.max(1, this.height)
+    }
+
+    /** Global camera centre expressed in this tile's scene-aligned neutral UV. */
+    private currentTileZoomPivot(angle: number): {u: number; v: number} {
+        const projection = this.currentTileViewProjection(angle)
+        if (!projection) return {u: 0.5, v: 0.5}
+        return tileZoomPivot(projection)
+    }
 
     isVideoExportActive(): boolean {
         return this.videoExportActive
@@ -3782,6 +3866,8 @@ export class Engine {
         batchTargetFps: number
         /** Jittered AA samples per emitted frame. 1 = no accumulation. */
         aaSamplesPerFrame?: number
+        /** Optional placement of this local output inside a larger final frame. */
+        tileProjection?: VideoExportTileProjection
     }): Promise<void> {
         if (this.videoExportActive) {
             throw new Error('A video export session is already active on this engine.')
@@ -3819,6 +3905,16 @@ export class Engine {
         }
         this.videoExportActive = true
         this.videoExportAaSamples = Math.max(1, Math.round(settings.aaSamplesPerFrame ?? 1))
+        this.videoExportSupersample = settings.supersample
+        this.videoExportTileProjection = settings.tileProjection ?? null
+        this.videoExportRequestedMagnificationThreshold = settings.magnificationThreshold
+        this.videoExportTileExtensionCounted = false
+        this.videoExportReferenceDiagnostics = {
+            tileSwitches: 0,
+            warmReuses: 0,
+            orbitExtensions: 0,
+            reconstructions: 0,
+        }
 
         // Park the interactive render loop. It calls the SAME draw() the export
         // loop drives, so leaving it armed means two drivers rendering the same
@@ -3855,6 +3951,53 @@ export class Engine {
                 `Impossible d'allouer la surface de rendu ${surfaceWidth}×${surfaceHeight} `
                 + `(texture de travail ${side}²) : ${reason}. `
                 + 'Baisse la résolution ou le suréchantillonnage.',
+            )
+        }
+    }
+
+    /**
+     * Reallocate only the spatial field for the next expanded tile. Reference
+     * orbit/table buffers and the worker remain alive and warm.
+     */
+    async beginVideoExportTile(projection: VideoExportTileProjection): Promise<void> {
+        if (!this.videoExportActive) {
+            throw new Error('A tiled surface requires an active video export session.')
+        }
+        // Validate the projection before mutating the current surface.
+        projectTileView(
+            {width: projection.fullWidth, height: projection.fullHeight},
+            {x: projection.x, y: projection.y, width: projection.width, height: projection.height},
+            0,
+        )
+        const surfaceWidth = projection.width * this.videoExportSupersample
+        const surfaceHeight = projection.height * this.videoExportSupersample
+        const side = Engine.workingTextureSideFor(surfaceWidth, surfaceHeight)
+        const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
+        if (side > maxDim) {
+            throw new Error(
+                `La tuile ${projection.width}×${projection.height} en ×${this.videoExportSupersample} `
+                + `exige une texture ${side}², au-delà de la limite ${maxDim}.`,
+            )
+        }
+
+        this.videoExportTileProjection = {...projection}
+        this.zoomMagnificationThreshold = Math.min(
+            this.videoExportRequestedMagnificationThreshold,
+            Math.max(1.000001, projection.reuseMagnificationThreshold ?? 1.000001),
+        )
+        this.videoExportReferenceDiagnostics.tileSwitches++
+        if (this.activeRef && !this.stagingRef) this.videoExportReferenceDiagnostics.warmReuses++
+        this.videoExportTileExtensionCounted = false
+        this.forcedSurfaceSize = {width: surfaceWidth, height: surfaceHeight}
+        this.device.pushErrorScope('out-of-memory')
+        this.device.pushErrorScope('validation')
+        this.resize()
+        const validationError = await this.device.popErrorScope()
+        const memoryError = await this.device.popErrorScope()
+        if (validationError || memoryError) {
+            throw new Error(
+                `Impossible d'allouer la tuile ${projection.width}×${projection.height} `
+                + `en ×${this.videoExportSupersample}.`,
             )
         }
     }
@@ -4002,6 +4145,9 @@ export class Engine {
         const saved = this.videoExportSavedSettings
         this.videoExportActive = false
         this.videoExportAaSamples = 1
+        this.videoExportSupersample = 1
+        this.videoExportTileProjection = null
+        this.videoExportRequestedMagnificationThreshold = 2
         this.videoExportSavedSettings = null
         if (!saved) return
 
@@ -5496,6 +5642,7 @@ export class Engine {
         }
 
         const aspect = (this.width / Math.max(1, this.height))
+        const tileViewProjection = this.currentTileViewProjection(mandelbrot.angle)
 
         let scaleFactor = this.previousMandelbrot?.scale || 1.0 / mandelbrot.scale
         if (scaleFactor < 1.0) {
@@ -5533,10 +5680,36 @@ export class Engine {
         {
             const scaleChanged = this.prevFrameMandelbrot
                 && this.prevFrameMandelbrot.scale !== mandelbrot.scale
+            const tiledCameraChanged = !!this.videoExportTileProjection
+                && !!this.prevFrameMandelbrot
+                && (this.prevFrameMandelbrot.cx !== mandelbrot.cx
+                    || this.prevFrameMandelbrot.cy !== mandelbrot.cy
+                    || this.prevFrameMandelbrot.angle !== mandelbrot.angle)
+            const scaleStepRatio = scaleChanged
+                ? Math.max(
+                    this.prevFrameMandelbrot!.scale / mandelbrot.scale,
+                    mandelbrot.scale / this.prevFrameMandelbrot!.scale,
+                )
+                : 1
+            const tiledScaleStepExceedsEnvelope = !!this.videoExportTileProjection
+                && scaleChanged
+                && (!Number.isFinite(scaleStepRatio)
+                    || scaleStepRatio >= this.zoomMagnificationThreshold)
+            const forceFreshTiledFrame = tiledCameraChanged || tiledScaleStepExceedsEnvelope
 
             let event: import('./zoomState').ZoomEvent | null = null
 
-            if (hardResetHistory || muChanged) {
+            // A fixed-centre tiled zoom keeps frozen/live reuse while the
+            // planner-provided temporal envelope covers the scale ratio. A
+            // travelling/rotation, or one unusually large frame jump, falls
+            // back to one exact spatial rebuild. The reference orbit and tables
+            // remain warm in both cases.
+            if (forceFreshTiledFrame) {
+                this.zoomState = resetZoomState()
+                this.clearHistoryNextFrame = true
+                this.needFreezeSnapshot = false
+                this.needMergeSnapshot = false
+            } else if (hardResetHistory || muChanged) {
                 event = { type: 'referenceReset', muChanged, orbitWasReset }
             } else if (scaleChanged) {
                 event = { type: 'scaleChanged', scale: mandelbrot.scale, prevScale: this.prevFrameMandelbrot!.scale }
@@ -5594,8 +5767,9 @@ export class Engine {
                                 const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
                                 const frozenScale = getFrozenScale(this.zoomState)
                                 if (frozenScale > 0) {
-                                    this.frozenBaseShiftX = Math.round(-(deltaDx * this.neutralSize) / (2 * frozenScale * neutralExtent))
-                                    this.frozenBaseShiftY = Math.round((deltaDy * this.neutralSize) / (2 * frozenScale * neutralExtent))
+                                    const tilePixelScale = tileViewProjection?.scaleFactor ?? 1
+                                    this.frozenBaseShiftX = Math.round(-(deltaDx * this.neutralSize) / (2 * frozenScale * tilePixelScale * neutralExtent))
+                                    this.frozenBaseShiftY = Math.round((deltaDy * this.neutralSize) / (2 * frozenScale * tilePixelScale * neutralExtent))
                                 }
                             } else {
                                 // Swap: the live texture already contains pan, no base shift
@@ -5609,6 +5783,7 @@ export class Engine {
                     case 'mergeResolvedAndFrozen':
                         this.needMergeSnapshot = !prevRefResetDuringZoom
                         if (wasZoomActive && prevFrozenScale > 0) {
+                            const zoomPivot = this.currentTileZoomPivot(mandelbrot.angle)
                             this.mergeUniforms = {
                                 zf: prevFrozenScale / mandelbrot.scale,
                                 lzf: prevLiveScale / mandelbrot.scale,
@@ -5616,6 +5791,8 @@ export class Engine {
                                 frozenShiftV: -(this.frozenBaseShiftY + this.frozenPanShiftY * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
                                 aspect,
                                 angle: mandelbrot.angle,
+                                zoomPivotU: zoomPivot.u,
+                                zoomPivotV: zoomPivot.v,
                             }
                         }
                         break
@@ -5690,6 +5867,7 @@ export class Engine {
         const lnScale = this.currentLnScale()
         const aaJitterLogMag = aaJitterMag > 0 && Number.isFinite(lnScale)
             ? Math.log(aaJitterMag) + lnScale
+                + Math.log(tileViewProjection?.uvScaleY ?? 1)
             : 0
 
         const colorShaderData = new Float32Array([
@@ -5777,6 +5955,10 @@ export class Engine {
             renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification [1, 4]
             iterationPaletteCurveCode(renderOptions.iterationPaletteCurve), // 94: iterationPaletteCurve
             renderOptions.aaAdaptive === false ? this.aaOffsetY : 0, // 95: uniform-AA inverse lookup Y
+            tileViewProjection?.uvOriginX ?? 0, // 96: local output UV -> full-frame UV origin X
+            tileViewProjection?.uvOriginY ?? 0, // 97: local output UV -> full-frame UV origin Y
+            tileViewProjection?.uvScaleX ?? 1,  // 98: local output UV -> full-frame UV scale X
+            tileViewProjection?.uvScaleY ?? 1,  // 99: local output UV -> full-frame UV scale Y
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -5834,9 +6016,12 @@ export class Engine {
         // and make every micro-pan rebuild the whole orbit. During an active zoom
         // the f64 live scale drives the cycle (the navigator scale lags the
         // animation) and is safely above the underflow floor.
+        // Camera, reference and zoom state remain global during a tiled export.
+        // Only the compute shader maps the local tile lattice into full-frame UV.
+        const workerComputeScale = computeScale
         const workerScaleString = zooming
-            ? computeScale.toString()
-            : (mandelbrot.scaleStr ?? computeScale.toString())
+            ? workerComputeScale.toString()
+            : (mandelbrot.scaleStr ?? workerComputeScale.toString())
         if (!this.referenceViewKey) {
             console.log('[REF] update: reset branch (key empty) | deep', deep, 'expScale', expScale, 'mode', this.approximationMode)
             this.resetReferenceJob(mandelbrot, workerScaleString, maxIterations)
@@ -5960,9 +6145,13 @@ export class Engine {
             orbitTrap.phase,
             orbitTrap.startIteration,
             orbitTrap.endIteration,
-            0,
-            0,
-            0,
+            tileViewProjection?.uvOriginX ?? 0, // 33: local compute UV -> full-frame UV origin X
+            tileViewProjection?.uvOriginY ?? 0, // 34: local compute UV -> full-frame UV origin Y
+            tileViewProjection?.uvScaleX ?? 1,  // 35: local compute UV -> full-frame UV scale X
+            tileViewProjection?.uvScaleY ?? 1,  // 36: local compute UV -> full-frame UV scale Y
+            this.referenceViewportAspect(),     // 37: full-frame aspect
+            tileViewProjection ? 1 : 0,         // 38: keep monolithic coordinate path bit-identical
+            0,                                  // 39: uniform-struct padding
         ])
         this.device.queue.writeBuffer(this.uniformBufferMandelbrot!, 0, mandelbrotShaderUniformDataGuarded.buffer)
 
@@ -6213,9 +6402,10 @@ export class Engine {
             // live texture is computed) instead of the display scale.
             const texSize = this.neutralSize
             const neutralExtent = Math.sqrt(aspect * aspect + 1.0)
-            const scaleForShift = (isZoomActive(this.zoomState) && getLiveScale(this.zoomState) > 0)
+            let scaleForShift = (isZoomActive(this.zoomState) && getLiveScale(this.zoomState) > 0)
                 ? getLiveScale(this.zoomState)
                 : this.previousMandelbrot.scale
+            scaleForShift *= this.currentTileViewProjection(this.previousMandelbrot.angle)?.scaleFactor ?? 1
             shiftTexX = -(deltaDx * texSize) / (2 * scaleForShift * neutralExtent)
             shiftTexY = (deltaDy * texSize) / (2 * scaleForShift * neutralExtent)
         }
@@ -6436,6 +6626,8 @@ export class Engine {
                 this.mergeUniforms.frozenShiftV,
                 this.mergeUniforms.aspect,
                 this.mergeUniforms.angle,
+                this.mergeUniforms.zoomPivotU,
+                this.mergeUniforms.zoomPivotV,
             ])
             this.device.queue.writeBuffer(this.uniformBufferMerge!, 0, mergeData.buffer)
             const mergeAttachments: GPURenderPassColorAttachment[] = [

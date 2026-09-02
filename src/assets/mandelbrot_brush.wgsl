@@ -85,9 +85,13 @@ struct Mandelbrot {
   orbitTrapPhase: f32,
   orbitTrapStartIteration: f32,
   orbitTrapEndIteration: f32,
-  _orbitTrapPad0: f32,
-  _orbitTrapPad1: f32,
-  _orbitTrapPad2: f32,
+  outputUvOriginX: f32,
+  outputUvOriginY: f32,
+  outputUvScaleX: f32,
+  outputUvScaleY: f32,
+  outputFullAspect: f32,
+  outputTileProjection: f32,
+  _padding0: f32,
 };
 
 // floatexp deep-zoom threshold (base-2 exponent of scale). Below this the shader
@@ -1020,6 +1024,7 @@ fn analytic_terminal_geometry(
   let dims = textureDimensions(raw);
   let logTexelDelta = log(max(mandelbrot.scale, 1e-30))
     + f32(deepScaleExp) * LN2
+    + log(max(output_texel_scale(), 1e-30))
     + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / f32(dims.x));
 
   let invDer = vec2<f32>(derM.x, -derM.y) / der2;
@@ -1651,6 +1656,7 @@ fn orbit_log_texel_delta(deepScaleExp: i32) -> f32 {
   let dims = textureDimensions(raw);
   return log(max(mandelbrot.scale, 1e-30))
     + f32(deepScaleExp) * LN2
+    + log(max(output_texel_scale(), 1e-30))
     + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / f32(dims.x));
 }
 
@@ -3993,6 +3999,32 @@ fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
   return vec2<f32>(c * v.x - s * v.y, s * v.x + c * v.y);
 }
 
+// Convert one point of the local expanded-tile lattice to the scene-aligned
+// coordinate of the full output frame. Camera/reference/zoom state therefore
+// stays global across every tile and every video frame. Keeping a dedicated
+// monolithic branch also preserves the historical non-tiled arithmetic exactly.
+fn project_local_rot_to_output(local_rot: vec2<f32>) -> vec2<f32> {
+  if (mandelbrot.outputTileProjection < 0.5) {
+    return local_rot;
+  }
+  let local_screen = rotate(local_rot, -mandelbrot.angle);
+  let local_uv = vec2<f32>(
+    local_screen.x / mandelbrot.aspect,
+    local_screen.y,
+  ) * 0.5 + vec2<f32>(0.5);
+  let output_uv = vec2<f32>(mandelbrot.outputUvOriginX, mandelbrot.outputUvOriginY)
+    + local_uv * vec2<f32>(mandelbrot.outputUvScaleX, mandelbrot.outputUvScaleY);
+  let output_screen = vec2<f32>(
+    (output_uv.x * 2.0 - 1.0) * mandelbrot.outputFullAspect,
+    output_uv.y * 2.0 - 1.0,
+  );
+  return rotate(output_screen, mandelbrot.angle);
+}
+
+fn output_texel_scale() -> f32 {
+  return select(1.0, mandelbrot.outputUvScaleY, mandelbrot.outputTileProjection >= 0.5);
+}
+
 fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
   let neutralExtent = sqrt(brush.aspect * brush.aspect + 1.0);
   let local_rot = xy_neutral * neutralExtent;
@@ -4142,13 +4174,14 @@ fn cs_main(
           // Screen-aligned box-AA jitter, already rotated by the CPU into this
           // local_rot frame and scaled to neutral-space units; zero for sample 0.
           let local_rot = xy_neutral * neutralExtent + vec2<f32>(mandelbrot.aaOffsetX, mandelbrot.aaOffsetY);
+          let output_rot = project_local_rot_to_output(local_rot);
 
           var result: TexelOut;
           let scaleExp = i32(mandelbrot.scaleExp);
           if (ENABLE_DEEP && scaleExp <= DEEP_EXP) {
             // Deep path: scale/cx/cy carry fe mantissas sharing exponent scaleExp;
             // dc = local·scaleMant + (cxMant, cyMant) is a single same-exponent add.
-            let dc = fe_renorm(fe(local_rot * mandelbrot.scale + vec2<f32>(mandelbrot.cx, mandelbrot.cy), scaleExp));
+            let dc = fe_renorm(fe(output_rot * mandelbrot.scale + vec2<f32>(mandelbrot.cx, mandelbrot.cy), scaleExp));
             if (is_compute_request) {
               // Certified SA prefix (Phase C, auto mode): the sidecar carries a
               // 10-entry header after the block records (base = last directory
@@ -4247,8 +4280,8 @@ fn cs_main(
               result = mandelbrot_compute_deep(dc, iter_val, vec2<f32>(zx, zy), dz_e, prev_ref_i, stored_derx, stored_dery, stored_ders, loadLayer(coord, 9), loadLayer(coord, 10), loadLayer(coord, 11), loadLayer(coord, 12), prev_ref_i_raw, deep_avg_direction, deep_stripe_grad, deep_dir_grad, prev_trap_distance, prev_trap_iteration, prev_trap_angle);
             }
           } else {
-            let x0 = local_rot.x * mandelbrot.scale + mandelbrot.cx;
-            let y0 = local_rot.y * mandelbrot.scale + mandelbrot.cy;
+            let x0 = output_rot.x * mandelbrot.scale + mandelbrot.cx;
+            let y0 = output_rot.y * mandelbrot.scale + mandelbrot.cy;
             if (is_compute_request) {
               result = mandelbrot_compute(x0, y0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, SCALED_ZERO_S, 1.0, vec2<f32>(0.0), vec2<f32>(0.0), 1e30, 0.0, 0.0);
             } else {

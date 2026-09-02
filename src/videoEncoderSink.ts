@@ -12,11 +12,11 @@ import {
   BufferTarget,
   Mp4OutputFormat,
   Output,
+  Quality,
   QUALITY_HIGH,
   VideoSample,
   VideoSampleSource,
   canEncodeVideo,
-  type Quality,
   type VideoCodec,
 } from 'mediabunny'
 
@@ -59,6 +59,12 @@ export type VideoEncodeSettings = {
   codec: Mp4Codec
   destination: VideoDestination
   quality?: Quality
+  /** Explicit rate control. Used by tiled mezzanines to keep a global budget. */
+  bitrate?: number
+  /** Keeps delivery and high-rate temporary encodes intentionally distinct. */
+  profile?: 'delivery' | 'mezzanine'
+  /** Exact GOP cadence in frames. Takes precedence over seconds. */
+  keyFrameIntervalFrames?: number
   /** Seconds between key frames. Frequent keyframes ease seeking, cost size. */
   keyFrameIntervalSeconds?: number
   /** Minimum fragment length when streaming. Shorter = less lost on an abort. */
@@ -122,6 +128,16 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
   }
 
   const streaming = settings.destination.kind === 'stream'
+  if (settings.bitrate !== undefined
+    && (!Number.isInteger(settings.bitrate) || settings.bitrate < 1)) {
+    throw new RangeError(`Video bitrate must be a positive integer (got ${settings.bitrate}).`)
+  }
+  if (settings.keyFrameIntervalFrames !== undefined
+    && (!Number.isInteger(settings.keyFrameIntervalFrames) || settings.keyFrameIntervalFrames < 1)) {
+    throw new RangeError(
+      `Keyframe interval must be a positive frame count (got ${settings.keyFrameIntervalFrames}).`,
+    )
+  }
 
   // Streaming demands a monotonic writer, and fragmented MP4 is the format that
   // provides it: each fragment is self-contained, so a file cut short mid-render
@@ -144,8 +160,12 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
 
   const source = new VideoSampleSource({
     codec,
-    quality: settings.quality ?? QUALITY_HIGH,
-    keyFrameInterval: settings.keyFrameIntervalSeconds ?? 2,
+    quality: settings.bitrate !== undefined
+      ? new Quality({bitrate: settings.bitrate, bitrateMode: 'variable'})
+      : (settings.quality ?? QUALITY_HIGH),
+    keyFrameInterval: settings.keyFrameIntervalFrames !== undefined
+      ? settings.keyFrameIntervalFrames / settings.fps
+      : (settings.keyFrameIntervalSeconds ?? 2),
     // Every frame comes from the same fixed-size capture target; a size change
     // would mean the capture chain was reallocated mid-export, which should
     // fail loudly rather than be silently stretched.
@@ -176,7 +196,9 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
       // n/fps so the file plays at its nominal rate.
       const sample = new VideoSample(frame)
       try {
-        await source.add(sample)
+        await source.add(sample, settings.keyFrameIntervalFrames !== undefined
+          ? {keyFrame: framesEncoded % settings.keyFrameIntervalFrames === 0}
+          : undefined)
         framesEncoded++
       } finally {
         sample.close()

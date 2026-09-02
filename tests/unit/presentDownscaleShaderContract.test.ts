@@ -13,17 +13,19 @@ describe('present pass downscale contract', () => {
   // sRGB encode darkens edges on every exported frame. Assert the ordering
   // structurally, since no unit test can observe the GPU output.
   it('reduces in linear light, before the sRGB encode', () => {
-    const reductionAt = present.indexOf('let lin = sum / f32(DOWNSCALE * DOWNSCALE);');
+    const reductionAt = present.indexOf('lin = sum / wsum;');
     const encodeAt = present.indexOf('linear_to_sRGB(lin)');
     expect(reductionAt).toBeGreaterThan(-1);
     expect(encodeAt).toBeGreaterThan(-1);
     expect(reductionAt).toBeLessThan(encodeAt);
   });
 
-  it('accumulates the block with an explicit box filter, not a bilinear sampler', () => {
+  it('keeps an explicit-load box fallback beside the Mitchell reduction', () => {
     expect(present).toContain('for (var dy = 0; dy < DOWNSCALE; dy = dy + 1)');
     expect(present).toContain('for (var dx = 0; dx < DOWNSCALE; dx = dx + 1)');
-    expect(present).toContain('textureLoad(accumTex, base + vec2<i32>(dx, dy), 0)');
+    expect(present).toContain('sum = sum + tap(base + vec2<i32>(dx, dy), dims);');
+    expect(present).toContain('override REDUCE_MITCHELL: i32 = 1;');
+    expect(present).toContain('fn mitchell(x: f32) -> f32');
     // A sampler at an exact 2:1 ratio only averages correctly at one precise
     // offset; an explicit load loop has no such trap.
     expect(present).not.toContain('textureSample');
@@ -34,7 +36,8 @@ describe('present pass downscale contract', () => {
   // each by its own count before averaging is a box filter over means; summing
   // rgb and alpha and dividing once weights texels by their sample count.
   it('normalises each source texel by its own sample count before averaging', () => {
-    expect(present).toContain('sum = sum + acc.rgb / max(acc.a, 1.0);');
+    expect(present).toContain('return acc.rgb / max(acc.a, 1.0);');
+    expect(present).toContain('sum = sum + w * tap(vec2<i32>(sx, sy), dims);');
   });
 
   it('dithers at output resolution as the final step', () => {
@@ -43,9 +46,10 @@ describe('present pass downscale contract', () => {
     expect(ditherAt).toBeGreaterThan(encodeAt);
   });
 
-  // With DOWNSCALE = 1 the loop runs once at base = coord, so the real-time
-  // path keeps exactly the arithmetic it had before the override existed.
+  // With DOWNSCALE = 1 the dedicated branch samples outCoord directly, so the
+  // real-time path never receives the non-identity Mitchell kernel.
   it('keeps the source coordinate unscaled at factor 1', () => {
-    expect(present).toContain('let base = vec2<i32>(i32(fragPos.x), i32(fragPos.y)) * DOWNSCALE;');
+    expect(present).toContain('let outCoord = vec2<i32>(i32(fragPos.x), i32(fragPos.y));');
+    expect(present).toContain('let acc = textureLoad(accumTex, outCoord, 0);');
   });
 });

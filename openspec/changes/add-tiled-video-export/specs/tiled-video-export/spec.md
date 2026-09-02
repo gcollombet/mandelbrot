@@ -82,6 +82,10 @@ Le système SHALL rendre toutes les frames temporelles d'une tuile avant de pass
 - **WHEN** plusieurs échantillons AA sont demandés par frame
 - **THEN** l'accumulation repart de zéro pour chaque nouvelle frame de chaque tuile et atteint le nombre demandé avant encodage
 
+#### Scenario: Zoom autour du centre global
+- **WHEN** une frame tuilée succède à une autre pendant un zoom et que le coeur est excentré
+- **THEN** la réutilisation frozen/live emploie un seuil dont les empreintes du coeur restent dans l'enveloppe temporelle planifiée ; une frame dépassant ce seuil est reconstruite exactement sans invalider la référence orbitale compatible
+
 ### Requirement: Réutilisation de la référence orbitale
 Le système SHALL conserver la session de référence, l'orbite disponible et les tables compatibles lors du passage d'une tuile à la suivante. Il SHALL réinitialiser l'historique spatial de la tuile sans réinitialiser automatiquement la référence.
 
@@ -194,4 +198,3 @@ Le système SHALL distinguer la progression du rendu des tuiles de celle de la c
 #### Scenario: Succès complet
 - **WHEN** le MP4 final est finalisé avec succès
 - **THEN** le système supprime les temporaires de la session, sauf demande explicite de conservation
-

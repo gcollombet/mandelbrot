@@ -91,6 +91,8 @@ Pour chaque tuile, le navigateur est replacé exactement sur A et la transition 
 
 Sur un zoom à centre fixe, la première tuile construit ou prolonge l'orbite jusqu'à la profondeur maximale. Les suivantes repartent depuis A avec cette référence déjà chaude. Le retour à une échelle moins profonde ne doit ni raccourcir l'orbite disponible ni invalider ses tables déjà compatibles.
 
+Une tuile excentrée subit localement une translation pendant un zoom autour du centre global. Le planificateur réserve donc, dans les limites GPU choisies, une enveloppe temporelle contenant les empreintes du coeur aux deux extrémités d'un cycle frozen/live. Il réduit d'abord modérément le coeur, puis abaisse le seuil de cycle si le seuil demandé ne tient toujours pas. Le moteur utilise ce seuil sûr par tuile ; seul un travelling, une rotation ou un saut de frame dépassant l'enveloppe force une reconstruction spatiale exacte. La référence orbitale et ses tables restent chaudes dans tous les cas.
+
 Sur un travelling, le worker conserve son comportement normal : il peut recenter et reconstruire la référence. Le rendu reste accepté et correct, mais ces reconstructions peuvent se répéter pour chaque tuile. Aucun chemin rapide ne doit être obtenu en utilisant une référence hors de son domaine certifié.
 
 ### 6. Le plan de tuiles est déterministe et piloté par les limites
@@ -189,4 +191,3 @@ Le rollback consiste à désactiver l'option tuilée : aucun format de preset ou
 - Quelle marge codec minimale autour du coeur élimine les coutures pour chacun des codecs supportés ?
 - Quel budget de composition par défaut offre le meilleur compromis entre mémoire, fréquence des keyframes et coût de réouverture des décodeurs ?
 - OPFS doit-il être le seul stockage temporaire pris en charge en première version, ou faut-il livrer immédiatement le repli vers un répertoire choisi ?
-

@@ -4,6 +4,7 @@
 
 import { createVideoSink, type Mp4Codec, type VideoDestination } from './videoEncoderSink'
 import { runVideoExport, elapsedForFrame, totalFramesFor } from './videoExportSession'
+import type {VideoExportResult} from './videoExportSession'
 import {
   formatVideoPathProblems,
   validateVideoOutput,
@@ -33,6 +34,14 @@ export type VideoExportRunnerDeps = {
       supersample: number
       batchTargetFps: number
       aaSamplesPerFrame?: number
+      tileProjection?: {
+        fullWidth: number
+        fullHeight: number
+        x: number
+        y: number
+        width: number
+        height: number
+      }
     }): Promise<void>
     endVideoExportSession(): void
     videoFrameReady(): boolean
@@ -57,6 +66,87 @@ export type VideoExportRunnerDeps = {
       start_transition(cx: string, cy: string, scale: string, angle: number, duration: number): void
     } | null
   }
+}
+
+export type VideoPathRenderToSinkRequest = {
+  from: VideoPathLocation
+  to: VideoPathLocation
+  durationSeconds: number
+  outputWidth: number
+  outputHeight: number
+  supersample: number
+  fps: number
+  sink: {addFrame(frame: VideoFrame): Promise<void>}
+  onProgress?: (progress: {framesEmitted: number; totalFrames: number}) => void
+  signal?: {aborted: boolean}
+  maxPumpsPerFrame?: number
+  /** Optional post-capture padding for a codec-aligned mezzanine frame. */
+  transformFrame?: (frame: VideoFrame) => VideoFrame | Promise<VideoFrame>
+}
+
+/**
+ * Render one complete A→B traversal into an already-open sink. It deliberately
+ * does not open or close the Engine session, allowing tiled export to reuse one
+ * reference worker across several complete traversals.
+ */
+export async function renderVideoPathToSink(
+  deps: VideoExportRunnerDeps,
+  request: VideoPathRenderToSinkRequest,
+): Promise<VideoExportResult> {
+  const navigator = deps.controller.getNavigator()
+  if (!navigator) throw new Error('Navigator unavailable.')
+  const frameDurationMicros = Math.round(1e6 / request.fps)
+
+  navigator.cancel_transition()
+  navigator.origin(request.from.cx, request.from.cy)
+  navigator.scale(request.from.scale)
+  navigator.angle(request.from.angle)
+  navigator.start_transition(
+    request.to.cx,
+    request.to.cy,
+    request.to.scale,
+    request.to.angle,
+    request.durationSeconds,
+  )
+
+  return runVideoExport(
+    {
+      setExportTime: (elapsedSeconds) => {
+        deps.controller.setExportTime(elapsedSeconds)
+        if (elapsedSeconds !== null) deps.engine.beginExportFrameAa()
+      },
+      drawOnce: async () => {
+        await deps.controller.drawOnce()
+        await deps.engine.waitForSubmittedWork()
+      },
+      isFrameReady: () => deps.engine.videoFrameReady(),
+      emitFrame: async (frame) => {
+        const pending = deps.engine.captureExportFrame({
+          outputWidth: request.outputWidth,
+          outputHeight: request.outputHeight,
+          supersample: request.supersample,
+          timestampMicros: Math.round((frame.index * 1e6) / request.fps),
+          durationMicros: frameDurationMicros,
+        })
+        let settled = false
+        const done = pending.then(value => { settled = true; return value })
+        for (let attempt = 0; attempt < CAPTURE_DRIVE_ATTEMPTS && !settled; attempt++) {
+          await deps.controller.drawOnce()
+          await deps.engine.waitForSubmittedWork()
+        }
+        const captured = await done
+        await request.sink.addFrame(request.transformFrame
+          ? await request.transformFrame(captured)
+          : captured)
+      },
+    },
+    {
+      fps: request.fps,
+      durationSeconds: request.durationSeconds,
+      maxPumpsPerFrame: request.maxPumpsPerFrame ?? DEFAULT_MAX_PUMPS_PER_FRAME,
+    },
+    {onProgress: request.onProgress, signal: request.signal},
+  )
 }
 
 export type VideoExportRequest = {

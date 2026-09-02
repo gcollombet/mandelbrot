@@ -99,6 +99,10 @@ struct Uniforms {
   protrusionStrength: f32,    // iteration-profile effect amplification [1, 4]
   iterationPaletteCurve: f32, // 0 linear, 1 soft root, 2 logarithmic, 3 quadratic
   aaLookupOffsetY: f32,
+  outputUvOriginX: f32,       // local output UV -> full-frame UV (tiled export)
+  outputUvOriginY: f32,
+  outputUvScaleX: f32,
+  outputUvScaleY: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // live values: iter, z.x, z.y
@@ -354,6 +358,27 @@ fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, sceneSin: f32,
   let local_rot  = xy_neutral * neutralExtent;
   let local      = rotate_inverse_sincos(local_rot, sceneSin, sceneCos);
   return abs(local.x) <= aspect && abs(local.y) <= 1.0;
+}
+
+// Position of the global full-frame centre in the local tile's neutral UV.
+// It is (0.5, 0.5) for monolithic rendering and generally lies outside an
+// off-centre tile. Zoom reuse must scale around this point, not each tile centre.
+fn output_center_neutral_uv() -> vec2<f32> {
+  let safeScale = max(
+    vec2<f32>(parameters.outputUvScaleX, parameters.outputUvScaleY),
+    vec2<f32>(1e-30),
+  );
+  let localUv = (vec2<f32>(0.5) - vec2<f32>(
+    parameters.outputUvOriginX,
+    parameters.outputUvOriginY,
+  )) / safeScale;
+  let localScreen = vec2<f32>(
+    (localUv.x * 2.0 - 1.0) * parameters.aspect,
+    localUv.y * 2.0 - 1.0,
+  );
+  let localRot = rotate_sincos(localScreen, parameters.sceneSin, parameters.sceneCos);
+  let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);
+  return localRot / (2.0 * neutralExtent) + vec2<f32>(0.5);
 }
 
 fn skybox_reflection_uv(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>) -> vec2<f32> {
@@ -1563,9 +1588,14 @@ fn linear_to_sRGB(c: vec3<f32>) -> vec3<f32> {
 // Entry points below wrap this: fs_main (linear, for AA accumulation) and
 // fs_main_direct (sRGB, for direct-to-swapchain and PNG export).
 fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
-  let uv_screen = fragCoord;
+  let uv_local = fragCoord;
+  // Raw/resolve textures are local to the expanded tile, while screen-space
+  // materials (skybox, webcam and animated mappings) must retain the same
+  // coordinates they would have in a monolithic full-frame render.
+  let uv_screen = vec2<f32>(parameters.outputUvOriginX, parameters.outputUvOriginY)
+    + uv_local * vec2<f32>(parameters.outputUvScaleX, parameters.outputUvScaleY);
 
-  let xy_screen = vec2<f32>(uv_screen.x * 2.0 - 1.0, uv_screen.y * 2.0 - 1.0);
+  let xy_screen = vec2<f32>(uv_local.x * 2.0 - 1.0, uv_local.y * 2.0 - 1.0);
   let local = vec2<f32>(xy_screen.x * parameters.aspect, xy_screen.y);
   let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);
   let local_rot = rotate_sincos(local, parameters.sceneSin, parameters.sceneCos);
@@ -1609,8 +1639,9 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     vec2<f32>(parameters.aaLookupOffsetX, parameters.aaLookupOffsetY) / (2.0 * neutralExtent),
     applyAaGate
   );
-  let uv_live = (uv_neutral - vec2<f32>(0.5, 0.5)) / lzf
-              + vec2<f32>(0.5, 0.5) - aaLookupUvOffset;
+  let zoomPivot = output_center_neutral_uv();
+  let uv_live = (uv_neutral - zoomPivot) / lzf
+              + zoomPivot - aaLookupUvOffset;
 
   var liveInBounds: bool;
   if (lzf < 1.0) {
@@ -1673,7 +1704,7 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
   var uv_frozen = vec2<f32>(0.0);
   var frozenInBounds = false;
   if (useFrozen) {
-    uv_frozen = (uv_neutral - vec2<f32>(0.5, 0.5)) / zf + vec2<f32>(0.5, 0.5)
+    uv_frozen = (uv_neutral - zoomPivot) / zf + zoomPivot
                 - vec2<f32>(parameters.frozenShiftU, parameters.frozenShiftV);
 
     if (zf < 1.0) {

@@ -104,6 +104,8 @@ import {absolutePresetUrl, PRESET_QUERY_PARAMETER} from '../presetDeepLink';
 import type {Engine} from '../Engine.ts';
 import VideoExportPanel from './VideoExportPanel.vue';
 import {runVideoExportToWebm} from '../videoExportRunner';
+import {runTiledVideoExport} from '../tiledVideoExportRunner';
+import {OpfsTemporaryVideoStore} from '../tiledVideoStore';
 import type {VideoOutputSpec, VideoPathLocation} from '../videoPath';
 const props = defineProps<{
   engine: Engine | null;
@@ -2484,7 +2486,31 @@ const videoExportRunning = ref(false);
 const videoFramesEmitted = ref(0);
 const videoTotalFrames = ref(0);
 const videoExportError = ref<string | null>(null);
+const videoExportPhase = ref<string | null>(null);
+const VIDEO_TILED_RESUME_KEY = 'mandelbrot_tiled_video_resume_available';
+const videoTiledResumeAvailable = ref(false);
+try { videoTiledResumeAvailable.value = localStorage.getItem(VIDEO_TILED_RESUME_KEY) === '1'; } catch { /* unavailable */ }
 let videoAbortSignal: {aborted: boolean} | null = null;
+
+function setTiledResumeAvailable(value: boolean) {
+  videoTiledResumeAvailable.value = value;
+  try {
+    if (value) localStorage.setItem(VIDEO_TILED_RESUME_KEY, '1');
+    else localStorage.removeItem(VIDEO_TILED_RESUME_KEY);
+  } catch { /* unavailable */ }
+}
+
+async function cleanupTiledVideoTemporaries() {
+  if (videoExportRunning.value) return;
+  try {
+    const store = new OpfsTemporaryVideoStore();
+    for (const sessionId of await store.listSessions()) await store.removeSession(sessionId);
+    setTiledResumeAvailable(false);
+    videoExportError.value = null;
+  } catch (error) {
+    videoExportError.value = error instanceof Error ? error.message : String(error);
+  }
+}
 
 const videoMaxTextureDimension = computed(() =>
   props.engine?.device?.limits?.maxTextureDimension2D ?? 8192);
@@ -2500,12 +2526,21 @@ async function startVideoExport(payload: {
   aaSamplesPerFrame: number;
   startLocation: VideoPathLocation;
   endLocation: VideoPathLocation;
+  useTiled: boolean;
+  tiled: {
+    gpuBudgetBytes: number;
+    codecHalo: number;
+    aggregateBitrate: number;
+    finalBitrate: number;
+    compositionBudgetBytes: number;
+  };
 }) {
   if (videoExportRunning.value || !props.engine || !props.mandelbrotCtrl) return;
   videoExportError.value = null;
   videoExportRunning.value = true;
   videoFramesEmitted.value = 0;
   videoTotalFrames.value = 0;
+  videoExportPhase.value = null;
   const signal = {aborted: false};
   videoAbortSignal = signal;
 
@@ -2539,26 +2574,61 @@ async function startVideoExport(payload: {
   }
 
   try {
-    const outcome = await runVideoExportToWebm(
-      {engine: props.engine as any, controller: props.mandelbrotCtrl},
-      {
+    const destination = writable
+      ? {kind: 'stream' as const, writable: writable as unknown as WritableStream<Uint8Array>}
+      : {kind: 'buffer' as const};
+    const commonRequest = {
         from: payload.startLocation,
         to: payload.endLocation,
         durationSeconds: payload.durationSeconds,
         output: payload.output,
         codec: payload.codec,
         aaSamplesPerFrame: payload.aaSamplesPerFrame,
-        destination: writable
-          ? {kind: 'stream', writable: writable as unknown as WritableStream<Uint8Array>}
-          : {kind: 'buffer'},
+        destination,
         maxTextureDimension: videoMaxTextureDimension.value,
         signal,
-        onProgress: (p) => {
-          videoFramesEmitted.value = p.framesEmitted;
-          videoTotalFrames.value = p.totalFrames;
+    };
+    const outcome = payload.useTiled
+      ? await runTiledVideoExport(
+        {engine: props.engine as any, controller: props.mandelbrotCtrl},
+        {
+          ...commonRequest,
+          renderFingerprint: (() => {
+            const value = JSON.parse(JSON.stringify(model.value));
+            delete value.cx; delete value.cy; delete value.scale; delete value.angle;
+            return value;
+          })(),
+          animationFingerprint: JSON.parse(JSON.stringify((model.value as any).animation ?? null)),
+          gpuBudgetBytes: payload.tiled.gpuBudgetBytes,
+          compositionBudgetBytes: payload.tiled.compositionBudgetBytes,
+          aggregateBitrate: payload.tiled.aggregateBitrate,
+          finalBitrate: payload.tiled.finalBitrate,
+          halo: {filter: 2, render: 2, codec: payload.tiled.codecHalo},
+          onProgress: (p) => {
+            if (p.phase === 'rendering-tiles') {
+              videoExportPhase.value = `Rendu tuile ${p.tileNumber}/${p.tileCount} — réf. chaude ${p.referenceStats.warmReuses}, reconstructions ${p.referenceStats.reconstructions}`;
+              videoFramesEmitted.value = p.equivalentFramesCompleted;
+              videoTotalFrames.value = p.equivalentFramesTotal;
+            } else {
+              videoExportPhase.value = 'Composition finale';
+              videoFramesEmitted.value = p.framesEncoded;
+              videoTotalFrames.value = p.totalFrames;
+            }
+          },
         },
-      },
-    );
+      )
+      : await runVideoExportToWebm(
+        {engine: props.engine as any, controller: props.mandelbrotCtrl},
+        {
+          ...commonRequest,
+          onProgress: (p) => {
+            videoExportPhase.value = 'Rendu image entière';
+            videoFramesEmitted.value = p.framesEmitted;
+            videoTotalFrames.value = p.totalFrames;
+          },
+        },
+      );
+    if ('sessionId' in outcome) setTiledResumeAvailable(outcome.cancelled);
     if (outcome.blob) {
       const url = URL.createObjectURL(outcome.blob);
       const link = document.createElement('a');
@@ -2576,6 +2646,7 @@ async function startVideoExport(payload: {
     // playable rather than a truncated handle.
     if (writable) await writable.close().catch(() => undefined);
     videoExportRunning.value = false;
+    videoExportPhase.value = null;
     videoAbortSignal = null;
   }
 }
@@ -2919,8 +2990,11 @@ async function startVideoExport(payload: {
         :frames-emitted="videoFramesEmitted"
         :total-frames="videoTotalFrames"
         :last-error="videoExportError"
+        :phase-label="videoExportPhase"
+        :resume-available="videoTiledResumeAvailable"
         @start="startVideoExport"
         @cancel="cancelVideoExport"
+        @cleanup-temporaries="cleanupTiledVideoTemporaries"
       />
     </div>
 

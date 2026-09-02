@@ -9,6 +9,8 @@ struct MergeUniforms {
   frozenShiftV: f32,
   aspect: f32,
   angle: f32,
+  zoomPivotU: f32,
+  zoomPivotV: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: MergeUniforms;
@@ -163,7 +165,8 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   );
   let neutralExtent = sqrt(uni.aspect * uni.aspect + 1.0);
 
-  let liveUv = (uv - vec2<f32>(0.5)) / uni.liveZoomFactor + vec2<f32>(0.5);
+  let zoomPivot = vec2<f32>(uni.zoomPivotU, uni.zoomPivotV);
+  let liveUv = (uv - zoomPivot) / uni.liveZoomFactor + zoomPivot;
   let liveInBounds = select(
     liveUv.x >= 0.0 && liveUv.x <= 1.0 && liveUv.y >= 0.0 && liveUv.y <= 1.0,
     is_inside_screen(liveUv, uni.aspect, neutralExtent, uni.angle),
@@ -178,7 +181,7 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
     live = load_candidate(liveValues, liveGeometry, liveMetadata, liveOrbitGradient, liveTrapPayload, coord, uni.liveZoomFactor);
   }
 
-  let frozenUv = (uv - vec2<f32>(0.5)) / uni.zoomFactor + vec2<f32>(0.5)
+  let frozenUv = (uv - zoomPivot) / uni.zoomFactor + zoomPivot
                  - vec2<f32>(uni.frozenShiftU, uni.frozenShiftV);
   let frozenInBounds = select(
     frozenUv.x >= 0.0 && frozenUv.x <= 1.0 && frozenUv.y >= 0.0 && frozenUv.y <= 1.0,

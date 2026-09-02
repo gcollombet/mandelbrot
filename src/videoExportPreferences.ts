@@ -8,11 +8,14 @@ import { DEFAULT_VIDEO_CODEC, isMp4Codec, type Mp4Codec } from './videoEncoderSi
 import type { VideoPathLocation } from './videoPath'
 
 export const VIDEO_EXPORT_PREFERENCES_KEY = 'mandelbrot_video_export'
+export const MIN_TILED_GPU_BUDGET_MIB = 128
+export const MAX_TILED_GPU_BUDGET_MIB = 16 * 1024
 
 /** Jittered AA samples offered per frame. 1 = off. */
 export const AA_SAMPLE_CHOICES = [1, 2, 4, 8] as const
 
 export type AaSampleChoice = (typeof AA_SAMPLE_CHOICES)[number]
+export type VideoExportMode = 'auto' | 'monolithic' | 'tiled'
 
 export function isAaSampleChoice(value: unknown): value is AaSampleChoice {
   return AA_SAMPLE_CHOICES.includes(value as AaSampleChoice)
@@ -28,6 +31,12 @@ export type VideoExportPreferences = {
   magnificationThreshold: number
   codec: Mp4Codec
   aaSamplesPerFrame: number
+  mode: VideoExportMode
+  tiledGpuBudgetMiB: number
+  tiledCodecHalo: number
+  tiledAggregateBitrateMbps: number
+  tiledFinalBitrateMbps: number
+  tiledCompositionBudgetMiB: number
 }
 
 export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
@@ -40,6 +49,16 @@ export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
   magnificationThreshold: 2,
   codec: DEFAULT_VIDEO_CODEC,
   aaSamplesPerFrame: 1,
+  mode: 'auto',
+  tiledGpuBudgetMiB: 1024,
+  tiledCodecHalo: 12,
+  tiledAggregateBitrateMbps: 400,
+  tiledFinalBitrateMbps: 80,
+  tiledCompositionBudgetMiB: 256,
+}
+
+function normalizeMode(value: unknown): VideoExportMode {
+  return value === 'monolithic' || value === 'tiled' || value === 'auto' ? value : 'auto'
 }
 
 function normalizeLocation(value: unknown): VideoPathLocation | null {
@@ -63,6 +82,10 @@ function normalizeNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
+function normalizeRange(value: unknown, fallback: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, normalizeNumber(value, fallback)))
+}
+
 /** Coerce anything into a usable preferences object, field by field. */
 export function normalizeVideoExportPreferences(value: unknown): VideoExportPreferences {
   const d = DEFAULT_VIDEO_EXPORT_PREFERENCES
@@ -80,6 +103,23 @@ export function normalizeVideoExportPreferences(value: unknown): VideoExportPref
     aaSamplesPerFrame: isAaSampleChoice(raw.aaSamplesPerFrame)
       ? raw.aaSamplesPerFrame
       : d.aaSamplesPerFrame,
+    mode: normalizeMode(raw.mode),
+    tiledGpuBudgetMiB: normalizeRange(
+      raw.tiledGpuBudgetMiB,
+      d.tiledGpuBudgetMiB,
+      MIN_TILED_GPU_BUDGET_MIB,
+      MAX_TILED_GPU_BUDGET_MIB,
+    ),
+    tiledCodecHalo: normalizeNumber(raw.tiledCodecHalo, d.tiledCodecHalo),
+    tiledAggregateBitrateMbps: normalizeNumber(
+      raw.tiledAggregateBitrateMbps,
+      d.tiledAggregateBitrateMbps,
+    ),
+    tiledFinalBitrateMbps: normalizeNumber(raw.tiledFinalBitrateMbps, d.tiledFinalBitrateMbps),
+    tiledCompositionBudgetMiB: normalizeNumber(
+      raw.tiledCompositionBudgetMiB,
+      d.tiledCompositionBudgetMiB,
+    ),
   }
 }
 

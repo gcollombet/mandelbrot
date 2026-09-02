@@ -1,6 +1,8 @@
 import {describe, expect, it, vi} from 'vitest'
 import {
     DEFAULT_VIDEO_EXPORT_PREFERENCES,
+    MAX_TILED_GPU_BUDGET_MIB,
+    MIN_TILED_GPU_BUDGET_MIB,
     VIDEO_EXPORT_PREFERENCES_KEY,
     loadVideoExportPreferences,
     normalizeVideoExportPreferences,
@@ -77,6 +79,16 @@ describe('normalizeVideoExportPreferences', () => {
         expect(result.pinnedStart).toEqual(LOCATION)
         expect(result.durationSeconds).toBe(DEFAULT_VIDEO_EXPORT_PREFERENCES.durationSeconds)
         expect(result.fps).toBe(DEFAULT_VIDEO_EXPORT_PREFERENCES.fps)
+    })
+
+    it('allows a GPU budget up to 16 GiB and clamps persisted outliers', () => {
+        expect(MAX_TILED_GPU_BUDGET_MIB).toBe(16_384)
+        expect(normalizeVideoExportPreferences({tiledGpuBudgetMiB: 16_384}).tiledGpuBudgetMiB)
+            .toBe(16_384)
+        expect(normalizeVideoExportPreferences({tiledGpuBudgetMiB: 32_768}).tiledGpuBudgetMiB)
+            .toBe(MAX_TILED_GPU_BUDGET_MIB)
+        expect(normalizeVideoExportPreferences({tiledGpuBudgetMiB: 1}).tiledGpuBudgetMiB)
+            .toBe(MIN_TILED_GPU_BUDGET_MIB)
     })
 })
 

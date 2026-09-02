@@ -4,6 +4,7 @@ import {
   describeOutputWarnings,
   describeParcoursWarnings,
   estimatedWorkingBytes,
+  WORKING_BYTES_PER_TEXEL,
   MAX_MAGNIFICATION_THRESHOLD,
   MIN_MAGNIFICATION_THRESHOLD,
   SUPERSAMPLE_FACTORS,
@@ -15,6 +16,7 @@ import {
   type VideoPathLocation,
   type VideoPathProblem,
 } from '../videoPath';
+import { estimateIntermediateSize, planVideoComposition, planVideoTiles } from '../tiledVideoExport';
 import { totalFramesFor } from '../videoExportSession';
 import {
   MP4_CODECS,
@@ -24,7 +26,10 @@ import {
 import {
   AA_SAMPLE_CHOICES,
   loadVideoExportPreferences,
+  MAX_TILED_GPU_BUDGET_MIB,
+  MIN_TILED_GPU_BUDGET_MIB,
   saveVideoExportPreferences,
+  type VideoExportMode,
 } from '../videoExportPreferences';
 import { DenseField, DenseSection, DenseSelect } from './dense';
 
@@ -37,6 +42,8 @@ const props = defineProps<{
   framesEmitted: number;
   totalFrames: number;
   lastError: string | null;
+  phaseLabel?: string | null;
+  resumeAvailable?: boolean;
 }>();
 
 const emit = defineEmits<{
@@ -47,8 +54,17 @@ const emit = defineEmits<{
     aaSamplesPerFrame: number;
     startLocation: VideoPathLocation;
     endLocation: VideoPathLocation;
+    useTiled: boolean;
+    tiled: {
+      gpuBudgetBytes: number;
+      codecHalo: number;
+      aggregateBitrate: number;
+      finalBitrate: number;
+      compositionBudgetBytes: number;
+    };
   }): void;
   (e: 'cancel'): void;
+  (e: 'cleanup-temporaries'): void;
 }>();
 
 const RESOLUTIONS = [
@@ -85,14 +101,31 @@ const supersample = ref(saved.supersample);
 const magnificationThreshold = ref(saved.magnificationThreshold);
 const codec = ref<Mp4Codec>(saved.codec);
 const aaSamplesPerFrame = ref<number>(saved.aaSamplesPerFrame);
+const mode = ref<VideoExportMode>(saved.mode);
+const tiledGpuBudgetMiB = ref(saved.tiledGpuBudgetMiB);
+const tiledCodecHalo = ref(saved.tiledCodecHalo);
+const tiledAggregateBitrateMbps = ref(saved.tiledAggregateBitrateMbps);
+const tiledFinalBitrateMbps = ref(saved.tiledFinalBitrateMbps);
+const tiledCompositionBudgetMiB = ref(saved.tiledCompositionBudgetMiB);
+
+const MODE_OPTIONS = [
+  {value: 'auto', label: 'Automatique'},
+  {value: 'monolithic', label: 'Image entière'},
+  {value: 'tiled', label: 'Tuilé'},
+];
 
 const AA_OPTIONS = AA_SAMPLE_CHOICES.map(n => ({
   value: String(n),
   label: n === 1 ? 'Aucun' : `×${n} échantillons`,
 }));
 
+function formatGpuBudget(mib: number): string {
+  return mib >= 1024 ? `${mib / 1024} Gio` : `${mib} Mio`;
+}
+
 watch(
-  [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold, codec, aaSamplesPerFrame],
+  [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold, codec, aaSamplesPerFrame,
+    mode, tiledGpuBudgetMiB, tiledCodecHalo, tiledAggregateBitrateMbps, tiledFinalBitrateMbps, tiledCompositionBudgetMiB],
   () => saveVideoExportPreferences({
     pinnedStart: pinnedStart.value,
     pinnedEnd: pinnedEnd.value,
@@ -103,6 +136,12 @@ watch(
     magnificationThreshold: magnificationThreshold.value,
     codec: codec.value,
     aaSamplesPerFrame: aaSamplesPerFrame.value,
+    mode: mode.value,
+    tiledGpuBudgetMiB: tiledGpuBudgetMiB.value,
+    tiledCodecHalo: tiledCodecHalo.value,
+    tiledAggregateBitrateMbps: tiledAggregateBitrateMbps.value,
+    tiledFinalBitrateMbps: tiledFinalBitrateMbps.value,
+    tiledCompositionBudgetMiB: tiledCompositionBudgetMiB.value,
   }),
   { deep: true },
 );
@@ -131,26 +170,105 @@ const codecOptions = computed(() => MP4_CODECS.map(({ value, label }) => ({
 
 const codecUnsupported = computed(() => codecSupport.value[codec.value] === false);
 
-const problems = computed<VideoPathProblem[]>(() => [
-  ...validateVideoOutput(output.value, props.maxTextureDimension),
-  ...validateVideoPath({
-    from: effectiveStart.value,
-    to: effectiveEnd.value,
-    durationSeconds: durationSeconds.value,
-  }),
-]);
-
-const warnings = computed<ParcoursWarning[]>(() => [
-  ...describeParcoursWarnings(effectiveStart.value, effectiveEnd.value),
-  ...describeOutputWarnings(output.value),
-]);
-
 const frameCount = computed(() =>
   totalFramesFor({ fps: Number(fps.value), durationSeconds: durationSeconds.value }));
 
 const workingTextureSide = computed(() =>
   neutralSizeFor(output.value.width * output.value.supersample,
                  output.value.height * output.value.supersample));
+
+const monolithicWorkingBytes = computed(() => estimatedWorkingBytes(output.value));
+const monolithicFits = computed(() =>
+  workingTextureSide.value <= props.maxTextureDimension
+  && monolithicWorkingBytes.value <= tiledGpuBudgetMiB.value * 1024 ** 2);
+const useTiled = computed(() => mode.value === 'tiled' || (mode.value === 'auto' && !monolithicFits.value));
+
+const tiledPlanResult = computed(() => {
+  if (!useTiled.value) return {plan: null, error: null as string | null};
+  try {
+    return {
+      plan: planVideoTiles({
+        fullFrame: {width: output.value.width, height: output.value.height},
+        supersample: output.value.supersample,
+        halo: {filter: 2, render: 2, codec: Math.max(0, Math.round(tiledCodecHalo.value))},
+        maxTextureDimension2D: props.maxTextureDimension,
+        gpuBudgetBytes: Math.max(1, tiledGpuBudgetMiB.value) * 1024 ** 2,
+        bytesPerWorkingTexel: WORKING_BYTES_PER_TEXEL,
+        temporalMagnificationTarget:
+          effectiveStart.value.cx === effectiveEnd.value.cx
+          && effectiveStart.value.cy === effectiveEnd.value.cy
+          && effectiveStart.value.angle === effectiveEnd.value.angle
+          && effectiveStart.value.scale !== effectiveEnd.value.scale
+            ? output.value.magnificationThreshold
+            : 1,
+      }),
+      error: null as string | null,
+    };
+  } catch (error) {
+    return {plan: null, error: error instanceof Error ? error.message : String(error)};
+  }
+});
+
+const compositionPlan = computed(() => {
+  try {
+    return planVideoComposition({
+      fullFrame: {width: output.value.width, height: output.value.height},
+      totalFrames: frameCount.value,
+      memoryBudgetBytes: Math.max(1, tiledCompositionBudgetMiB.value) * 1024 ** 2,
+      decoderPoolSize: 3,
+    });
+  } catch {
+    return null;
+  }
+});
+
+const intermediateEstimate = computed(() => estimateIntermediateSize(
+  Math.max(1, Math.round(tiledAggregateBitrateMbps.value * 1_000_000)),
+  durationSeconds.value,
+));
+const finalEstimate = computed(() => estimateIntermediateSize(
+  Math.max(1, Math.round(tiledFinalBitrateMbps.value * 1_000_000)),
+  durationSeconds.value,
+));
+const temporaryAvailableBytes = ref<number | null>(null);
+watch(useTiled, async (enabled) => {
+  if (!enabled) {
+    temporaryAvailableBytes.value = null;
+    return;
+  }
+  try {
+    const estimate = await navigator.storage?.estimate?.();
+    temporaryAvailableBytes.value = Number.isFinite(estimate?.quota) && Number.isFinite(estimate?.usage)
+      ? Math.max(0, estimate!.quota! - estimate!.usage!)
+      : null;
+  } catch {
+    temporaryAvailableBytes.value = null;
+  }
+}, {immediate: true});
+
+const problems = computed<VideoPathProblem[]>(() => [
+  ...validateVideoOutput(output.value, useTiled.value ? Number.MAX_SAFE_INTEGER : props.maxTextureDimension),
+  ...validateVideoPath({
+    from: effectiveStart.value,
+    to: effectiveEnd.value,
+    durationSeconds: durationSeconds.value,
+  }),
+  ...(tiledPlanResult.value.error
+    ? [{kind: 'output' as const, message: tiledPlanResult.value.error}]
+    : []),
+  ...(useTiled.value && temporaryAvailableBytes.value !== null
+      && Math.ceil(intermediateEstimate.value.totalBytes * 1.1) > temporaryAvailableBytes.value
+    ? [{
+        kind: 'output' as const,
+        message: `Stockage temporaire insuffisant : ${(intermediateEstimate.value.totalBytes * 1.1 / 1e9).toFixed(2)} Go requis avec marge, ${(temporaryAvailableBytes.value / 1e9).toFixed(2)} Go disponibles.`,
+      }]
+    : []),
+]);
+
+const warnings = computed<ParcoursWarning[]>(() => [
+  ...describeParcoursWarnings(effectiveStart.value, effectiveEnd.value),
+  ...describeOutputWarnings(output.value),
+]);
 
 const workingSetLabel = computed(() => {
   const gigabytes = estimatedWorkingBytes(output.value) / 1073741824;
@@ -194,6 +312,14 @@ function start() {
     aaSamplesPerFrame: aaSamplesPerFrame.value,
     startLocation: effectiveStart.value,
     endLocation: effectiveEnd.value,
+    useTiled: useTiled.value,
+    tiled: {
+      gpuBudgetBytes: Math.max(1, tiledGpuBudgetMiB.value) * 1024 ** 2,
+      codecHalo: Math.max(0, Math.round(tiledCodecHalo.value)),
+      aggregateBitrate: Math.max(1, Math.round(tiledAggregateBitrateMbps.value * 1_000_000)),
+      finalBitrate: Math.max(1, Math.round(tiledFinalBitrateMbps.value * 1_000_000)),
+      compositionBudgetBytes: Math.max(1, tiledCompositionBudgetMiB.value) * 1024 ** 2,
+    },
   });
 }
 </script>
@@ -251,6 +377,13 @@ function start() {
     <DenseSection title="Sortie" scope="MP4 — résolution, cadence, codec">
       <div class="fields">
         <label class="ve-row">
+          <span class="ve-label">Méthode</span>
+          <DenseSelect
+            :options="MODE_OPTIONS" :model-value="mode" :disabled="running"
+            @update:model-value="(v: string) => mode = v as VideoExportMode"
+          />
+        </label>
+        <label class="ve-row">
           <span class="ve-label">Résolution</span>
           <DenseSelect
             :options="RESOLUTIONS" :model-value="resolution" :disabled="running"
@@ -298,6 +431,49 @@ function start() {
           haut = plus rapide et plus doux en périphérie.
           L'anticrénelage n'ajoute que la fine bande de bord par échantillon, pas une image entière.
         </p>
+        <template v-if="useTiled">
+          <DenseField
+            label="Budget GPU"
+            :min="MIN_TILED_GPU_BUDGET_MIB" :max="MAX_TILED_GPU_BUDGET_MIB" :step="128" :f="formatGpuBudget"
+            :model-value="tiledGpuBudgetMiB"
+            @update:model-value="(v: number) => tiledGpuBudgetMiB = v"
+          />
+          <DenseField
+            label="Halo codec"
+            :min="0" :max="64" :step="1" unit="px"
+            :model-value="tiledCodecHalo"
+            @update:model-value="(v: number) => tiledCodecHalo = v"
+          />
+          <DenseField
+            label="Débit intermédiaire"
+            :min="50" :max="1200" :step="25" unit="Mbit/s"
+            :model-value="tiledAggregateBitrateMbps"
+            @update:model-value="(v: number) => tiledAggregateBitrateMbps = v"
+          />
+          <DenseField
+            label="Mémoire composition"
+            :min="64" :max="2048" :step="64" unit="Mio"
+            :model-value="tiledCompositionBudgetMiB"
+            @update:model-value="(v: number) => tiledCompositionBudgetMiB = v"
+          />
+          <DenseField
+            label="Débit MP4 final"
+            :min="10" :max="400" :step="10" unit="Mbit/s"
+            :model-value="tiledFinalBitrateMbps"
+            @update:model-value="(v: number) => tiledFinalBitrateMbps = v"
+          />
+          <p v-if="tiledPlanResult.plan" class="ve-note">
+            {{ mode === 'auto' ? 'Mode tuilé choisi automatiquement : la surface entière dépasse la limite sélectionnée.' : 'Mode tuilé forcé.' }}
+            {{ tiledPlanResult.plan.tiles.length }} tuiles,
+            coeur nominal {{ tiledPlanResult.plan.coreWidth }}×{{ tiledPlanResult.plan.coreHeight }},
+            surface de travail maximale {{ tiledPlanResult.plan.maxWorkingTextureSide }}²,
+            réutilisation temporelle jusqu’à ×{{ tiledPlanResult.plan.temporalMagnificationTarget.toFixed(2) }}.
+            Temporaires estimés : {{ (intermediateEstimate.totalBytes / 1_000_000_000).toFixed(2) }} Go ;
+            quota libre {{ temporaryAvailableBytes === null ? 'inconnu' : (temporaryAvailableBytes / 1_000_000_000).toFixed(2) + ' Go' }} ;
+            fichier final estimé séparément : {{ (finalEstimate.totalBytes / 1_000_000_000).toFixed(2) }} Go ;
+            composition par blocs de {{ compositionPlan?.framesPerBlock ?? 0 }} images.
+          </p>
+        </template>
       </div>
     </DenseSection>
 
@@ -320,15 +496,20 @@ function start() {
 
         <div v-if="running" class="ve-progress">
           <div class="ve-bar"><div class="ve-bar-fill" :style="{ width: progressPercent + '%' }" /></div>
-          <span class="ve-progress-text">{{ framesEmitted }} / {{ totalFrames }} images</span>
+          <span class="ve-progress-text">
+            {{ phaseLabel ? phaseLabel + ' — ' : '' }}{{ framesEmitted }} / {{ totalFrames }} images
+          </span>
         </div>
 
         <div class="ve-actions">
           <button type="button" class="ve-start" :disabled="!canStart" @click="start">
-            Exporter en MP4
+            {{ resumeAvailable && useTiled ? 'Reprendre l’export tuilé' : 'Exporter en MP4' }}
           </button>
           <button v-if="running" type="button" class="ve-cancel" @click="emit('cancel')">
-            Annuler
+            Annuler et conserver
+          </button>
+          <button v-if="!running && resumeAvailable" type="button" class="ve-cancel" @click="emit('cleanup-temporaries')">
+            Abandonner et nettoyer les temporaires
           </button>
         </div>
       </div>
