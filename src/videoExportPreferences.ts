@@ -6,6 +6,10 @@
 
 import { DEFAULT_VIDEO_CODEC, isMp4Codec, type Mp4Codec } from './videoEncoderSink'
 import type { VideoPathLocation } from './videoPath'
+import {
+  DEFAULT_TILED_EXPORT_BUDGET_MIB,
+  type VideoExportRenderMode,
+} from './tiledKeyframeExport'
 
 export const VIDEO_EXPORT_PREFERENCES_KEY = 'mandelbrot_video_export'
 
@@ -28,6 +32,8 @@ export type VideoExportPreferences = {
   magnificationThreshold: number
   codec: Mp4Codec
   aaSamplesPerFrame: number
+  renderMode: VideoExportRenderMode
+  tiledMemoryBudgetMiB: number
 }
 
 export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
@@ -40,6 +46,8 @@ export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
   magnificationThreshold: 2,
   codec: DEFAULT_VIDEO_CODEC,
   aaSamplesPerFrame: 1,
+  renderMode: 'monolithic',
+  tiledMemoryBudgetMiB: DEFAULT_TILED_EXPORT_BUDGET_MIB,
 }
 
 function normalizeLocation(value: unknown): VideoPathLocation | null {
@@ -80,6 +88,14 @@ export function normalizeVideoExportPreferences(value: unknown): VideoExportPref
     aaSamplesPerFrame: isAaSampleChoice(raw.aaSamplesPerFrame)
       ? raw.aaSamplesPerFrame
       : d.aaSamplesPerFrame,
+    renderMode: raw.renderMode === 'tiled-keyframe' || raw.renderMode === 'monolithic'
+      ? raw.renderMode
+      : d.renderMode,
+    tiledMemoryBudgetMiB: typeof raw.tiledMemoryBudgetMiB === 'number'
+        && Number.isFinite(raw.tiledMemoryBudgetMiB)
+        && raw.tiledMemoryBudgetMiB >= 64
+      ? Math.round(raw.tiledMemoryBudgetMiB)
+      : d.tiledMemoryBudgetMiB,
   }
 }
 

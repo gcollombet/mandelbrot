@@ -39,8 +39,10 @@ struct AaParams {
   _pad2: f32,
   rawOriginX: f32,      // toroidal origin of the raw texture (pan by offset)
   rawOriginY: f32,
-  _pad3: f32,
-  _pad4: f32,
+  tileOriginX: f32,
+  tileOriginY: f32,
+  neutralSide: f32,
+  rotationUnion: f32,
 };
 
 struct FrontierStats {
@@ -86,10 +88,10 @@ fn log_complex_length_floor(v: vec2<f32>, floorValue: f32) -> f32 {
 // texture circumscribes the rotated viewport, so its corner texels are neither
 // rendered nor iterated and must not dilute the AA-frontier diagnostic.
 fn is_inside_visible_viewport(coord: vec2<i32>, dim: vec2<u32>) -> bool {
-  let dimF = vec2<f32>(f32(dim.x), f32(dim.y));
+  let globalCoord = vec2<f32>(params.tileOriginX, params.tileOriginY) + vec2<f32>(coord);
   let uv = vec2<f32>(
-    (f32(coord.x) + 0.5) / dimF.x,
-    1.0 - (f32(coord.y) + 0.5) / dimF.y,
+    (globalCoord.x + 0.5) / params.neutralSide,
+    1.0 - (globalCoord.y + 0.5) / params.neutralSide,
   );
   let xyNeutral = uv * 2.0 - vec2<f32>(1.0);
   let neutralExtent = sqrt(params.aspect * params.aspect + 1.0);
@@ -98,6 +100,9 @@ fn is_inside_visible_viewport(coord: vec2<i32>, dim: vec2<u32>) -> bool {
     params.sceneCos * localRot.x + params.sceneSin * localRot.y,
     -params.sceneSin * localRot.x + params.sceneCos * localRot.y,
   );
+  if (params.rotationUnion > 0.5) {
+    return dot(xyNeutral, xyNeutral) <= 1.0;
+  }
   return abs(local.x) <= params.aspect && abs(local.y) <= 1.0;
 }
 

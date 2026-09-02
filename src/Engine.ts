@@ -73,6 +73,11 @@ import {
 } from './gpuCompatibility'
 import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapColorUniformValues, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
 import {rotationHasFreshZeroCounter, rotationNeedsColorResolve} from './rotationColorResolve'
+import type {
+    KeyframeTile,
+    KeyframeTilePlan,
+    TiledExportMemoryProfile,
+} from './tiledKeyframeExport'
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
@@ -719,6 +724,18 @@ export class Engine {
     private exportCaptureKey = '';
     private modulePresent?: GPUShaderModule;
     private layoutPresent?: GPUBindGroupLayout;
+    /** Full-size live keyframe. `resolvedDisplay` remains the tile-local resolve target. */
+    private tiledLiveDisplay?: DisplaySet
+    private tiledKeyframePlan: KeyframeTilePlan | null = null
+    private tiledKeyframeTileIndex = 0
+    private tiledKeyframeComplete = false
+    private tiledRotationUnion = false
+    private tiledKeyframeDiagnostics = {
+        keyframesBuilt: 0,
+        tilesConverted: 0,
+        pumpsPerTile: [] as number[],
+        freeFrames: 0,
+    }
 
     canvas: HTMLCanvasElement
     device!: GPUDevice
@@ -2213,12 +2230,12 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 12,
+            size: 4 * 16,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
         this.uniformBufferResolve = this.device.createBuffer({
-            size: 4 * 8,
+            size: 4 * 12,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Resolve',
         })
@@ -2634,7 +2651,7 @@ export class Engine {
                 // screenHeightPx, aaLogDelta, aaAnalytic, aspect, sceneSin,
                 // sceneCos, screenWidthPx, palettePeriod, mu, logMu, aaContrast,
                 // aaFull, iterationPaletteCurve, pad, rawOriginX, rawOriginY, pad, pad]
-                size: 80,
+                size: 96,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
                 label: 'Engine UniformBuffer AaParams',
             })
@@ -3765,8 +3782,8 @@ export class Engine {
     private isFieldConverged(ignoreZoomCycle = false): boolean {
         return evaluateFieldConvergence({
             clearHistoryNextFrame: this.clearHistoryNextFrame,
-            needFreezeSnapshot: this.needFreezeSnapshot,
-            needMergeSnapshot: this.needMergeSnapshot,
+            needFreezeSnapshot: this.tiledKeyframePlan ? false : this.needFreezeSnapshot,
+            needMergeSnapshot: this.tiledKeyframePlan ? false : this.needMergeSnapshot,
             zoomActive: isZoomActive(this.zoomState),
             orbitIncomplete: this.orbitIncomplete,
             unfinishedPixelCount: this.unfinishedPixelCount,
@@ -3780,12 +3797,108 @@ export class Engine {
      * frame. A true result means this frame is safe to capture and encode.
      */
     videoFrameReady(): boolean {
+        if (this.videoExportFrameEvaluationPending) return false
         if (!this.isFieldConverged(true)) return false
+        if (this.tiledKeyframePlan) {
+            if (!this.tiledKeyframeComplete) return this.finishCurrentTiledKeyframeTile()
+            this.tiledKeyframeDiagnostics.freeFrames++
+            return true
+        }
         if (this.videoExportAaSamples <= 1) return true
         // With AA on, "ready" means the accumulation finished too: capturing
         // mid-accumulation would emit a frame averaged over fewer samples than
         // its neighbours, which reads as flicker in the film.
         return !this.aaActive && this.aaAccumulatedSamples >= this.videoExportAaSamples
+    }
+
+    private beginNextTiledKeyframe(): void {
+        if (!this.tiledKeyframePlan || !this.tiledKeyframeComplete
+            || !this.tiledLiveDisplay || !this.frozenDisplay) return
+        const completedLive = this.tiledLiveDisplay
+        this.tiledLiveDisplay = this.frozenDisplay
+        this.frozenDisplay = completedLive
+        this.tiledKeyframeTileIndex = 0
+        this.tiledKeyframeComplete = false
+        this.frozenAligned = true
+        this.frozenDisplayVersion = this.resolvedDisplayVersion
+        this.needFreezeSnapshot = false
+        this.needMergeSnapshot = false
+        this.clearHistoryNextFrame = true
+        this.rawOriginX = 0
+        this.rawOriginY = 0
+        this.resolvedDisplayVersion = -1
+        this.resetAaState()
+        this.invalidateCounterReadback()
+        this.rebuildColorBindGroup()
+        this.needRender = true
+    }
+
+    private copyDisplayTile(
+        encoder: GPUCommandEncoder,
+        source: DisplaySet,
+        destination: DisplaySet,
+        tile: KeyframeTile,
+    ): void {
+        const destinationOrigin = { x: tile.originX, y: tile.originY }
+        const extent = { width: tile.width, height: tile.height }
+        encoder.copyTextureToTexture(
+            { texture: source.valuesTexture },
+            { texture: destination.valuesTexture, origin: destinationOrigin },
+            { ...extent, depthOrArrayLayers: DISPLAY_VALUE_LAYERS },
+        )
+        encoder.copyTextureToTexture(
+            { texture: source.geometryTexture },
+            { texture: destination.geometryTexture, origin: destinationOrigin },
+            extent,
+        )
+        encoder.copyTextureToTexture(
+            { texture: source.metadataTexture },
+            { texture: destination.metadataTexture, origin: destinationOrigin },
+            extent,
+        )
+        if (source.orbitGradientTexture && destination.orbitGradientTexture) {
+            encoder.copyTextureToTexture(
+                { texture: source.orbitGradientTexture },
+                { texture: destination.orbitGradientTexture, origin: destinationOrigin },
+                extent,
+            )
+        }
+        if (source.trapPayloadTexture && destination.trapPayloadTexture) {
+            encoder.copyTextureToTexture(
+                { texture: source.trapPayloadTexture },
+                { texture: destination.trapPayloadTexture, origin: destinationOrigin },
+                extent,
+            )
+        }
+    }
+
+    private finishCurrentTiledKeyframeTile(): boolean {
+        const tile = this.currentTiledKeyframeTile()
+        if (!tile || !this.resolvedDisplay || !this.tiledLiveDisplay) return false
+
+        const encoder = this.device.createCommandEncoder({ label: 'Engine Copy Tiled Keyframe Tile' })
+        this.copyDisplayTile(encoder, this.resolvedDisplay, this.tiledLiveDisplay, tile)
+        this.device.queue.submit([encoder.finish()])
+        this.tiledKeyframeDiagnostics.tilesConverted++
+
+        if (this.tiledKeyframeTileIndex + 1 >= this.tiledKeyframePlan!.tiles.length) {
+            this.tiledKeyframeComplete = true
+            this.tiledKeyframeDiagnostics.keyframesBuilt++
+            this.rebuildColorBindGroup()
+            return true
+        }
+
+        this.tiledKeyframeTileIndex++
+        this.clearHistoryNextFrame = true
+        this.needFreezeSnapshot = false
+        this.needMergeSnapshot = false
+        this.rawOriginX = 0
+        this.rawOriginY = 0
+        this.resolvedDisplayVersion = -1
+        this.resetAaState()
+        this.invalidateCounterReadback()
+        this.needRender = true
+        return false
     }
 
     /**
@@ -3809,6 +3922,8 @@ export class Engine {
     private videoExportActive = false
     /** Jittered AA samples accumulated per exported frame. 1 = off. */
     private videoExportAaSamples = 1
+    /** True until update()+render() has observed the newly selected path time. */
+    private videoExportFrameEvaluationPending = false
     /** Interactive draw callback parked for the duration of an export. */
     private videoExportParkedDrawFn: (() => Promise<void>) | null = null
     /** Pins the compute surface to an exact pixel size while set (export only). */
@@ -3830,6 +3945,12 @@ export class Engine {
     /** Start a fresh accumulation for the next exported frame. */
     beginExportFrameAa(): void {
         if (this.videoExportActive && this.videoExportAaSamples > 1) this.resetAaState()
+    }
+
+    beginVideoExportFrame(): void {
+        if (!this.videoExportActive) return
+        this.videoExportFrameEvaluationPending = true
+        this.needRender = true
     }
 
     /**
@@ -3875,6 +3996,41 @@ export class Engine {
         return Math.ceil(Math.sqrt(width * width + height * height))
     }
 
+    /** Allocation contract consumed by the pure planner and the export panel. */
+    static tiledExportMemoryProfileFor(options: {
+        orbitMetrics: boolean
+        orbitTrap: boolean
+    }): TiledExportMemoryProfile {
+        const optionalDisplayBytes = (options.orbitMetrics ? 8 : 0)
+            + (options.orbitTrap ? 16 : 0)
+        const rawLayers = options.orbitTrap
+            ? (options.orbitMetrics ? RAW_ORBIT_GRADIENT_TRAP_LAYERS : RAW_TRAP_LAYERS)
+            : (options.orbitMetrics ? RAW_ORBIT_GRADIENT_LAYERS : RAW_LAYERS)
+        return {
+            // Two complete display sets plus the rgba16float rotation/color target.
+            squareBytesPerTexel: 2 * (24 + optionalDisplayBytes) + 8,
+            // Raw A/B, tile resolve, merge scratch and r32float AA target.
+            tileBytesPerTexel: 2 * rawLayers * 4
+                + (24 + optionalDisplayBytes)
+                + (12 + optionalDisplayBytes)
+                + 4,
+        }
+    }
+
+    getTiledExportMemoryProfile(): TiledExportMemoryProfile {
+        return Engine.tiledExportMemoryProfileFor({
+            orbitMetrics: this.orbitMetricsEnabled,
+            orbitTrap: this.orbitTrapEnabled,
+        })
+    }
+
+    getVideoExportDiagnostics() {
+        return {
+            ...this.tiledKeyframeDiagnostics,
+            pumpsPerTile: [...this.tiledKeyframeDiagnostics.pumpsPerTile],
+        }
+    }
+
     async beginVideoExportSession(settings: {
         magnificationThreshold: number
         /** Output frame size; the compute surface is pinned to this × supersample. */
@@ -3884,6 +4040,10 @@ export class Engine {
         batchTargetFps: number
         /** Jittered AA samples per emitted frame. 1 = no accumulation. */
         aaSamplesPerFrame?: number
+        /** Optional fixed-centre keyframe plan. Absence preserves the monolithic path. */
+        tiledKeyframePlan?: KeyframeTilePlan
+        /** Full path interval; a varying angle conservatively builds the circumscribed disc. */
+        angleRange?: { from: number; to: number }
     }): Promise<void> {
         if (this.videoExportActive) {
             throw new Error('A video export session is already active on this engine.')
@@ -3912,13 +4072,28 @@ export class Engine {
                 + 'Baisse la résolution ou le suréchantillonnage.',
             )
         }
+        if (settings.tiledKeyframePlan) {
+            if ((settings.aaSamplesPerFrame ?? 1) !== 1) {
+                throw new Error(
+                    'Le mode keyframe tuilée n’accepte pas l’AA jitteré par image ; '
+                    + 'utilisez le suréchantillonnage.',
+                )
+            }
+            if (settings.tiledKeyframePlan.neutralSide !== side) {
+                throw new Error(
+                    `Le plan tuilé cible un carré ${settings.tiledKeyframePlan.neutralSide}² `
+                    + `mais la sortie exige ${side}².`,
+                )
+            }
+        }
         const exportMemoryOptions = {
             width: surfaceWidth,
             height: surfaceHeight,
             orbitMetrics: this.orbitMetricsEnabled,
             orbitTrap: this.orbitTrapEnabled,
         }
-        const estimatedExportBytes = estimateGpuWorkingSetBytes(exportMemoryOptions)
+        const estimatedExportBytes = settings.tiledKeyframePlan?.estimate.totalBytes
+            ?? estimateGpuWorkingSetBytes(exportMemoryOptions)
         if (estimatedExportBytes > this.gpuMemoryBudgetBytes) {
             throw new Error(
                 `${settings.outputWidth}×${settings.outputHeight} en ×${settings.supersample} `
@@ -3936,6 +4111,17 @@ export class Engine {
         }
         this.videoExportActive = true
         this.videoExportAaSamples = Math.max(1, Math.round(settings.aaSamplesPerFrame ?? 1))
+        this.tiledKeyframePlan = settings.tiledKeyframePlan ?? null
+        this.tiledKeyframeTileIndex = 0
+        this.tiledKeyframeComplete = !this.tiledKeyframePlan
+        this.tiledRotationUnion = !!settings.angleRange
+            && Math.abs(settings.angleRange.to - settings.angleRange.from) > 1e-12
+        this.tiledKeyframeDiagnostics = {
+            keyframesBuilt: 0,
+            tilesConverted: 0,
+            pumpsPerTile: this.tiledKeyframePlan?.tiles.map(() => 0) ?? [],
+            freeFrames: 0,
+        }
 
         // Park the interactive render loop. It calls the SAME draw() the export
         // loop drives, so leaving it armed means two drivers rendering the same
@@ -4119,7 +4305,12 @@ export class Engine {
         const saved = this.videoExportSavedSettings
         this.videoExportActive = false
         this.videoExportAaSamples = 1
+        this.videoExportFrameEvaluationPending = false
         this.videoExportSavedSettings = null
+        this.tiledKeyframePlan = null
+        this.tiledKeyframeTileIndex = 0
+        this.tiledKeyframeComplete = false
+        this.tiledRotationUnion = false
         if (!saved) return
 
         const surfaceWasPinned = this.forcedSurfaceSize !== null
@@ -4270,7 +4461,8 @@ export class Engine {
         if (prevUnfinished > UNFINISHED_PIXEL_DONE_THRESHOLD
             && unfinished <= UNFINISHED_PIXEL_DONE_THRESHOLD
             && !this.clearHistoryNextFrame
-&& !isZoomActive(this.zoomState)) {
+            && !isZoomActive(this.zoomState)
+            && !this.tiledKeyframePlan) {
             this.needFreezeSnapshot = true
         }
     }
@@ -4547,7 +4739,7 @@ export class Engine {
     /** Dispatch box padded by 8 texels each side and clamped to the neutral square. */
     private resolveScissorRect() {
         const pad = 8
-        const n = this.neutralSize
+        const n = this.tiledKeyframePlan?.tileSide ?? this.neutralSize
         const x = Math.max(0, this.dispatchBox.x - pad)
         const y = Math.max(0, this.dispatchBox.y - pad)
         const right = Math.min(n, this.dispatchBox.x + this.dispatchBox.width + pad)
@@ -4556,6 +4748,9 @@ export class Engine {
     }
 
     private computeIterationDispatchBox(aspect: number, angle: number) {
+        if (this.tiledKeyframePlan && this.tiledRotationUnion) {
+            return { x: 0, y: 0, width: this.neutralSize, height: this.neutralSize }
+        }
         // Bounding box of the rotated viewport, snapped outwards to the 8×8
         // iteration workgroup grid.
         const neutralExtent = Math.sqrt(aspect * aspect + 1)
@@ -4579,6 +4774,26 @@ export class Engine {
             y,
             width: Math.max(8, right - x),
             height: Math.max(8, bottom - y),
+        }
+    }
+
+    private currentTiledKeyframeTile(): KeyframeTile | null {
+        if (!this.tiledKeyframePlan || this.tiledKeyframeComplete) return null
+        return this.tiledKeyframePlan.tiles[this.tiledKeyframeTileIndex] ?? null
+    }
+
+    private tileLocalDispatchBox(globalBox: { x: number; y: number; width: number; height: number }) {
+        const tile = this.currentTiledKeyframeTile()
+        if (!tile) return globalBox
+        const left = Math.max(globalBox.x, tile.originX)
+        const top = Math.max(globalBox.y, tile.originY)
+        const right = Math.min(globalBox.x + globalBox.width, tile.originX + tile.width)
+        const bottom = Math.min(globalBox.y + globalBox.height, tile.originY + tile.height)
+        return {
+            x: Math.max(0, left - tile.originX),
+            y: Math.max(0, top - tile.originY),
+            width: Math.max(0, right - left),
+            height: Math.max(0, bottom - top),
         }
     }
 
@@ -4665,7 +4880,15 @@ export class Engine {
             orbitMetrics: this.orbitMetricsEnabled,
             orbitTrap: this.orbitTrapEnabled,
         }
-        const surfaceFit = fitSurfaceToGpuBudget(memoryOptions, this.gpuMemoryBudgetBytes)
+        const surfaceFit = this.tiledKeyframePlan
+            ? {
+                width: this.width,
+                height: this.height,
+                scale: 1,
+                reduced: false,
+                estimatedBytes: this.tiledKeyframePlan.estimate.totalBytes,
+            }
+            : fitSurfaceToGpuBudget(memoryOptions, this.gpuMemoryBudgetBytes)
         if (this.forcedSurfaceSize && surfaceFit.reduced) {
             throw new Error(
                 `La surface d'export ${this.width}×${this.height} nécessiterait environ `
@@ -4706,11 +4929,14 @@ export class Engine {
         // Fresh textures start at toroidal origin 0.
         this.rawOriginX = 0
         this.rawOriginY = 0
-        const textureSize = this.neutralSize
+        const fullTextureSize = this.neutralSize
+        const textureSize = this.tiledKeyframePlan?.tileSide ?? fullTextureSize
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
         this.destroyDisplaySet(this.resolvedDisplay)
         this.destroyDisplaySet(this.frozenDisplay)
+        this.destroyDisplaySet(this.tiledLiveDisplay)
+        this.tiledLiveDisplay = undefined
         this.geometryScratchTexture?.destroy?.()
         this.metadataScratchTexture?.destroy?.()
         this.orbitGradientScratchTexture?.destroy?.()
@@ -4720,13 +4946,13 @@ export class Engine {
         this.rotationColorTexture?.destroy?.()
 
         // Helper: create an r32float texture array + per-layer 2d views + full 2d-array view
-        const createLayeredTexture = (label: string, layerCount: number, extraUsage: GPUTextureUsageFlags = 0): {
+        const createLayeredTexture = (label: string, layerCount: number, extraUsage: GPUTextureUsageFlags = 0, side = textureSize): {
             texture: GPUTexture,
             arrayView: GPUTextureView,
             layerViews: GPUTextureView[],
         } => {
             const texture = this.device.createTexture({
-                size: { width: textureSize, height: textureSize, depthOrArrayLayers: layerCount },
+                size: { width: side, height: side, depthOrArrayLayers: layerCount },
                 format: 'r32float',
                 usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST | extraUsage,
                 label,
@@ -4813,17 +5039,17 @@ export class Engine {
             label: 'Engine RawBrushTexture (B) PayloadView',
         })
 
-        const createDisplaySet = (label: string): DisplaySet => {
-            const values = createLayeredTexture(label + ' Values', DISPLAY_VALUE_LAYERS)
+        const createDisplaySet = (label: string, side = textureSize): DisplaySet => {
+            const values = createLayeredTexture(label + ' Values', DISPLAY_VALUE_LAYERS, 0, side)
             const geometryTexture = this.device.createTexture({
-                size: { width: textureSize, height: textureSize },
+                size: { width: side, height: side },
                 format: 'rgba16float',
                 usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
                     | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
                 label: label + ' Geometry',
             })
             const metadataTexture = this.device.createTexture({
-                size: { width: textureSize, height: textureSize },
+                size: { width: side, height: side },
                 format: 'r32uint',
                 usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
                     | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
@@ -4831,7 +5057,7 @@ export class Engine {
             })
             const orbitGradientTexture = this.orbitGradientAllocated
                 ? this.device.createTexture({
-                    size: { width: textureSize, height: textureSize },
+                    size: { width: side, height: side },
                     format: 'rgba16float',
                     usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING
                         | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
@@ -4840,7 +5066,7 @@ export class Engine {
                 : undefined
             const trapPayloadTexture = this.trapPayloadAllocated
                 ? this.device.createTexture({
-                    size: { width: textureSize, height: textureSize },
+                    size: { width: side, height: side },
                     format: 'rgba32float',
                     usage: GPUTextureUsage.STORAGE_BINDING | GPUTextureUsage.TEXTURE_BINDING
                         | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
@@ -4863,7 +5089,13 @@ export class Engine {
         }
 
         this.resolvedDisplay = createDisplaySet('Engine ResolvedDisplay')
-        this.frozenDisplay = createDisplaySet('Engine FrozenDisplay')
+        this.frozenDisplay = createDisplaySet(
+            this.tiledKeyframePlan ? 'Engine TiledFrozenKeyframe' : 'Engine FrozenDisplay',
+            this.tiledKeyframePlan ? fullTextureSize : textureSize,
+        )
+        this.tiledLiveDisplay = this.tiledKeyframePlan
+            ? createDisplaySet('Engine TiledLiveKeyframe', fullTextureSize)
+            : undefined
         this.geometryScratchTexture = this.device.createTexture({
             size: { width: textureSize, height: textureSize },
             format: 'rgba16float',
@@ -4919,7 +5151,7 @@ export class Engine {
         // rebuilt once after a stable oblique view and sampled only by the
         // mutually-exclusive non-AA rotation presenter.
         this.rotationColorTexture = this.device.createTexture({
-            size: { width: textureSize, height: textureSize, depthOrArrayLayers: 1 },
+            size: { width: fullTextureSize, height: fullTextureSize, depthOrArrayLayers: 1 },
             format: 'rgba16float',
             usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.TEXTURE_BINDING,
             label: 'Engine RotationColorTexture',
@@ -5699,6 +5931,7 @@ export class Engine {
             this.needFreezeSnapshot = orbitWasReset && !preserveZoomFrozen && !muChanged
             this.needMergeSnapshot = false
         }
+        this.videoExportFrameEvaluationPending = false
 
         // ── Zoom reprojection state update (before uniform write) ─────
         // Use the state machine to handle scale changes and reprojection cycles.
@@ -5757,7 +5990,11 @@ export class Engine {
             for (const effect of effects) {
                 switch (effect.type) {
                     case 'copyResolvedToFrozen':
-                        this.needFreezeSnapshot = true
+                        if (this.tiledKeyframePlan) {
+                            this.beginNextTiledKeyframe()
+                        } else {
+                            this.needFreezeSnapshot = true
+                        }
                         if (isZoomActive(this.zoomState)) {
                             if (!wasZoomActive) {
                                 // New cycle start: capture the initial pan delta
@@ -5779,7 +6016,9 @@ export class Engine {
                         }
                         break
                     case 'mergeResolvedAndFrozen':
-                        this.needMergeSnapshot = !prevRefResetDuringZoom
+                        this.needMergeSnapshot = this.tiledKeyframePlan
+                            ? false
+                            : !prevRefResetDuringZoom
                         if (wasZoomActive && prevFrozenScale > 0) {
                             this.mergeUniforms = {
                                 zf: prevFrozenScale / mandelbrot.scale,
@@ -6360,6 +6599,12 @@ export class Engine {
         if (!renderOptions) {
             return
         }
+        if (this.tiledKeyframePlan) {
+            // Full-image snapshots are represented by binding-role swaps in this
+            // mode; no legacy copy/merge request may leak into a tile build.
+            this.needFreezeSnapshot = false
+            this.needMergeSnapshot = false
+        }
 
         const aspect = (this.width / Math.max(1, this.height))
         const analyticRawPayloadNeeded = this.analyticRawPayloadNeeded(renderOptions, aspect)
@@ -6376,6 +6621,11 @@ export class Engine {
             this.invalidateCounterReadback()
         }
         const frameSerial = ++this.renderFrameSerial
+        const tiledTile = this.currentTiledKeyframeTile()
+        if (tiledTile) {
+            this.tiledKeyframeDiagnostics.pumpsPerTile[tiledTile.index]
+                = (this.tiledKeyframeDiagnostics.pumpsPerTile[tiledTile.index] ?? 0) + 1
+        }
 
         let shiftTexX = 0
         let shiftTexY = 0
@@ -6404,7 +6654,10 @@ export class Engine {
             // generation so dense translations can contribute fresh samples.
             this.invalidateCounterReadback()
         }
-        const visiblePixelCount = Math.max(1, this.width * this.height)
+        const visiblePixelCount = Math.max(
+            1,
+            tiledTile ? tiledTile.width * tiledTile.height : this.width * this.height,
+        )
         const exposedX = Math.min(this.width, Math.abs(roundedShiftTexX))
         const exposedY = Math.min(this.height, Math.abs(roundedShiftTexY))
         const exposedPixelCount = Math.min(
@@ -6419,9 +6672,8 @@ export class Engine {
                     this.unfinishedPixelCount + exposedPixelCount,
                 )
                 : exposedPixelCount > 0 ? exposedPixelCount : -1
-        this.dispatchBox = this.computeIterationDispatchBox(
-            aspect,
-            this.previousMandelbrot.angle,
+        this.dispatchBox = this.tileLocalDispatchBox(
+            this.computeIterationDispatchBox(aspect, this.previousMandelbrot.angle),
         )
         const dispatchPixelCount = this.dispatchBox.width * this.dispatchBox.height
         const zoomRefreshRegimeKey = this.iterationBatchRegimeKey(
@@ -6492,7 +6744,7 @@ export class Engine {
             this.rawOriginX = 0
             this.rawOriginY = 0
         } else if (hasTranslationShift) {
-            const n = Math.max(1, this.neutralSize)
+            const n = Math.max(1, this.tiledKeyframePlan?.tileSide ?? this.neutralSize)
             this.rawOriginX = (((this.rawOriginX - roundedShiftTexX) % n) + n) % n
             this.rawOriginY = (((this.rawOriginY - roundedShiftTexY) % n) + n) % n
         }
@@ -6509,6 +6761,10 @@ export class Engine {
             workCounterShift,
             this.rawOriginX,
             this.rawOriginY,
+            tiledTile?.originX ?? 0,
+            tiledTile?.originY ?? 0,
+            this.neutralSize,
+            this.tiledRotationUnion ? 1 : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
         if (clearFlag !== 0 || hasTranslationShift) {
@@ -6545,8 +6801,10 @@ export class Engine {
             this.trapPayloadAllocated ? (this.orbitGradientAllocated ? 18 : 13) : -1,
             this.rawOriginX,
             this.rawOriginY,
-            0,
-            0,
+            tiledTile?.originX ?? 0,
+            tiledTile?.originY ?? 0,
+            this.neutralSize,
+            this.tiledRotationUnion ? 1 : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
@@ -6591,6 +6849,7 @@ export class Engine {
         // We copy frozen → rawBrushTexture first so the merge can read it while
         // writing to frozen. rawBrushTexture will be overwritten by the brush pass.
         if (this.needMergeSnapshot
+            && !this.tiledKeyframePlan
             && this.pipelineMerge && this.bindGroupMerge
             && this.resolvedDisplay && this.frozenDisplay && this.rawBrushTexture
             && this.geometryScratchTexture && this.metadataScratchTexture
@@ -6667,7 +6926,8 @@ export class Engine {
         }
 
         // ── Zoom reprojection: copy resolved → frozen snapshot ────────
-        if (this.needFreezeSnapshot && this.resolvedDisplay && this.frozenDisplay) {
+        if (this.needFreezeSnapshot && !this.tiledKeyframePlan
+            && this.resolvedDisplay && this.frozenDisplay) {
             const texSize = this.neutralSize
             this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.snapshot, 'start')
             commandEncoder.copyTextureToTexture(
@@ -6732,17 +6992,19 @@ export class Engine {
         // Pan and clear frames prepare B through the same utility kernel, then
         // swap it to the front before the in-place iteration dispatch.
         const utilityNeeded = this.clearHistoryNextFrame || hasTranslationShift
+        const shouldRunFieldPasses = !this.tiledKeyframePlan || !!tiledTile
 
         // Track frames that may mutate A: utility frames rewrite it wholesale;
         // in-place frames only write when work remains (unknown counts are
         // conservatively treated as a mutation).
-        if (utilityNeeded || this.aaReseedPending || this.unfinishedPixelCount !== 0) {
+        if (shouldRunFieldPasses
+            && (utilityNeeded || this.aaReseedPending || this.unfinishedPixelCount !== 0)) {
             this.lastRawMutationFrame = frameSerial
             this.rawFieldVersion++
             this.invalidateRotationColorResolve()
         }
 
-        {
+        if (shouldRunFieldPasses) {
             if (this.clearHistoryNextFrame) {
                 // Clear frames rewrite B wholesale, then the texture roles swap
                 // so iteration proceeds on the freshly prepared front texture.
@@ -6751,7 +7013,7 @@ export class Engine {
                 })
                 utilPass.setPipeline(this.pipelineReprojectCs!)
                 utilPass.setBindGroup(0, this.bindGroupReprojectCs!)
-                const uwg = Math.ceil(this.neutralSize / 16)
+                const uwg = Math.ceil((this.tiledKeyframePlan?.tileSide ?? this.neutralSize) / 16)
                 utilPass.dispatchWorkgroups(uwg, uwg)
                 utilPass.end()
                 // Ping-pong instead of copying B back over A: B now holds the
@@ -6771,7 +7033,7 @@ export class Engine {
                 })
                 panPass.setPipeline(this.pipelinePanClear!)
                 panPass.setBindGroup(0, this.bindGroupPanClear!)
-                const n = this.neutralSize
+                const n = this.tiledKeyframePlan?.tileSide ?? this.neutralSize
                 const stripX = Math.min(n, Math.abs(roundedShiftTexX))
                 const stripY = Math.min(n, Math.abs(roundedShiftTexY))
                 panPass.dispatchWorkgroups(
@@ -6801,7 +7063,9 @@ export class Engine {
                         0, 0,
                         aaMandelbrot.mu,
                         0, 0, 0, 0, 0,
-                        this.rawOriginX, this.rawOriginY, 0, 0,
+                        this.rawOriginX, this.rawOriginY,
+                        tiledTile?.originX ?? 0, tiledTile?.originY ?? 0,
+                        this.neutralSize, this.tiledRotationUnion ? 1 : 0,
                     ]).buffer,
                 )
                 if (this.aaFrontierBuffer) {
@@ -6812,7 +7076,7 @@ export class Engine {
                 })
                 reseedPass.setPipeline(this.pipelineAaReseed)
                 reseedPass.setBindGroup(0, this.bindGroupAaReseed)
-                const rwg = Math.ceil(this.neutralSize / 16)
+                const rwg = Math.ceil((this.tiledKeyframePlan?.tileSide ?? this.neutralSize) / 16)
                 reseedPass.dispatchWorkgroups(rwg, rwg)
                 reseedPass.end()
                 // The stamped band reconverges at this sample's (non-zero) jitter.
@@ -6862,7 +7126,9 @@ export class Engine {
             && !this.needMergeSnapshot
             && this.unfinishedPixelCount === 0
             && this.counterSampleFrame >= this.lastRawMutationFrame
-        const skipResolve = converged && isDisplaySetCurrent(this.rawFieldVersion, this.resolvedDisplayVersion)
+        const skipResolve = this.tiledKeyframePlan && this.tiledKeyframeComplete
+            ? true
+            : converged && isDisplaySetCurrent(this.rawFieldVersion, this.resolvedDisplayVersion)
 
         // An export keeps the frozen/live zoom cycle alive on purpose, so the
         // real-time predicate would never fire and no AA sample could ever be
@@ -7143,14 +7409,20 @@ export class Engine {
                     renderOptions.aaAdaptive === false ? 1 : 0, // aaFull: uniform budget (A/B vs adaptive)
                     iterationPaletteCurveCode(renderOptions.iterationPaletteCurve),
                     0,
+                    this.rawOriginX,
+                    this.rawOriginY,
+                    tiledTile?.originX ?? 0,
+                    tiledTile?.originY ?? 0,
+                    this.neutralSize,
+                    this.tiledRotationUnion ? 1 : 0,
                 ]).buffer,
             )
             const bakePass = commandEncoder.beginComputePass()
             bakePass.setPipeline(this.pipelineAaTarget!)
             bakePass.setBindGroup(0, this.bindGroupAaTarget!)
             bakePass.dispatchWorkgroups(
-                Math.ceil(this.neutralSize / 16),
-                Math.ceil(this.neutralSize / 16),
+                Math.ceil((this.tiledKeyframePlan?.tileSide ?? this.neutralSize) / 16),
+                Math.ceil((this.tiledKeyframePlan?.tileSide ?? this.neutralSize) / 16),
             )
             bakePass.end()
         }
@@ -7477,6 +7749,7 @@ export class Engine {
         this.rawBrushTexture?.destroy?.()
         this.destroyDisplaySet(this.resolvedDisplay)
         this.destroyDisplaySet(this.frozenDisplay)
+        this.destroyDisplaySet(this.tiledLiveDisplay)
         this.geometryScratchTexture?.destroy?.()
         this.metadataScratchTexture?.destroy?.()
         this.orbitGradientScratchTexture?.destroy?.()
@@ -7780,11 +8053,12 @@ export class Engine {
     }
 
     private rebuildColorBindGroup() {
-        if (this.pipelineColor && this.resolvedDisplay && this.frozenDisplay && this.rawArrayView) {
+        const liveDisplay = this.tiledKeyframePlan ? this.tiledLiveDisplay : this.resolvedDisplay
+        if (this.pipelineColor && liveDisplay && this.frozenDisplay && this.rawArrayView) {
             const layout = this.pipelineColor.getBindGroupLayout(0)
             const entries: GPUBindGroupEntry[] = [
                 { binding: 0, resource: { buffer: this.uniformBufferColor! } },
-                { binding: 1, resource: this.resolvedDisplay.valuesArrayView },
+                { binding: 1, resource: liveDisplay.valuesArrayView },
                 { binding: 2, resource: this.tileTextureView! },
                 { binding: 3, resource: this.skyboxTextureView! },
                 { binding: 4, resource: this.webcamTextureView! },
@@ -7793,14 +8067,14 @@ export class Engine {
                 { binding: 7, resource: this.paletteSampler! },
                 { binding: 8, resource: this.skyboxSampler! },
                 { binding: 9, resource: this.aaTargetTextureView! },
-                { binding: 10, resource: this.resolvedDisplay.geometryView },
+                { binding: 10, resource: liveDisplay.geometryView },
                 { binding: 11, resource: this.frozenDisplay.geometryView },
-                { binding: 12, resource: this.resolvedDisplay.metadataView },
+                { binding: 12, resource: liveDisplay.metadataView },
                 { binding: 13, resource: this.frozenDisplay.metadataView },
                 { binding: 14, resource: this.rawArrayView },
-                { binding: 15, resource: this.resolvedDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
+                { binding: 15, resource: liveDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
                 { binding: 16, resource: this.frozenDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
-                { binding: 17, resource: this.resolvedDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
+                { binding: 17, resource: liveDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
                 { binding: 18, resource: this.frozenDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
             ]
             this.bindGroupColor = this.device.createBindGroup({

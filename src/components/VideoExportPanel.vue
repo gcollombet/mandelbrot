@@ -26,12 +26,20 @@ import {
   loadVideoExportPreferences,
   saveVideoExportPreferences,
 } from '../videoExportPreferences';
+import {
+  evaluateTiledKeyframeEligibility,
+  planKeyframeTiles,
+  TILED_EXPORT_WORKGROUP_ALIGNMENT,
+  type TiledExportMemoryProfile,
+  type VideoExportRenderMode,
+} from '../tiledKeyframeExport';
 import { DenseField, DenseSection, DenseSelect } from './dense';
 
 const props = defineProps<{
   /** Live view parameters, the source both endpoints are captured from. */
   current: Record<string, unknown>;
   maxTextureDimension: number;
+  tiledMemoryProfile: TiledExportMemoryProfile;
   /** Live session state, owned by the parent. */
   running: boolean;
   framesEmitted: number;
@@ -45,6 +53,8 @@ const emit = defineEmits<{
     output: VideoOutputSpec;
     codec: Mp4Codec;
     aaSamplesPerFrame: number;
+    renderMode: VideoExportRenderMode;
+    tiledMemoryBudgetMiB: number;
     startLocation: VideoPathLocation;
     endLocation: VideoPathLocation;
   }): void;
@@ -85,14 +95,28 @@ const supersample = ref(saved.supersample);
 const magnificationThreshold = ref(saved.magnificationThreshold);
 const codec = ref<Mp4Codec>(saved.codec);
 const aaSamplesPerFrame = ref<number>(saved.aaSamplesPerFrame);
+const renderMode = ref<VideoExportRenderMode>(saved.renderMode);
+const tiledMemoryBudgetMiB = ref(saved.tiledMemoryBudgetMiB);
 
 const AA_OPTIONS = AA_SAMPLE_CHOICES.map(n => ({
   value: String(n),
   label: n === 1 ? 'Aucun' : `×${n} échantillons`,
 }));
+const selectableAaOptions = computed(() => renderMode.value === 'tiled-keyframe'
+  ? AA_OPTIONS.filter(option => option.value === '1')
+  : AA_OPTIONS);
+const RENDER_MODE_OPTIONS = [
+  { value: 'monolithic', label: 'Monolithique' },
+  { value: 'tiled-keyframe', label: 'Keyframes tuilées' },
+];
+
+watch(renderMode, (mode) => {
+  if (mode === 'tiled-keyframe') aaSamplesPerFrame.value = 1;
+}, { immediate: true });
 
 watch(
-  [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold, codec, aaSamplesPerFrame],
+  [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold,
+    codec, aaSamplesPerFrame, renderMode, tiledMemoryBudgetMiB],
   () => saveVideoExportPreferences({
     pinnedStart: pinnedStart.value,
     pinnedEnd: pinnedEnd.value,
@@ -103,6 +127,8 @@ watch(
     magnificationThreshold: magnificationThreshold.value,
     codec: codec.value,
     aaSamplesPerFrame: aaSamplesPerFrame.value,
+    renderMode: renderMode.value,
+    tiledMemoryBudgetMiB: tiledMemoryBudgetMiB.value,
   }),
   { deep: true },
 );
@@ -131,14 +157,46 @@ const codecOptions = computed(() => MP4_CODECS.map(({ value, label }) => ({
 
 const codecUnsupported = computed(() => codecSupport.value[codec.value] === false);
 
-const problems = computed<VideoPathProblem[]>(() => [
-  ...validateVideoOutput(output.value, props.maxTextureDimension),
-  ...validateVideoPath({
+const tiledEligibility = computed(() => evaluateTiledKeyframeEligibility({
+  from: effectiveStart.value,
+  to: effectiveEnd.value,
+  aaSamplesPerFrame: aaSamplesPerFrame.value,
+}));
+
+const tiledPlan = computed(() => {
+  if (renderMode.value !== 'tiled-keyframe') return null;
+  try {
+    return planKeyframeTiles({
+      neutralSide: neutralSizeFor(
+        output.value.width * output.value.supersample,
+        output.value.height * output.value.supersample,
+      ),
+      alignment: TILED_EXPORT_WORKGROUP_ALIGNMENT,
+      budgetBytes: tiledMemoryBudgetMiB.value * 1024 * 1024,
+      memory: props.tiledMemoryProfile,
+    });
+  } catch (error) {
+    return error instanceof Error ? error : new Error(String(error));
+  }
+});
+
+const problems = computed<VideoPathProblem[]>(() => {
+  const result: VideoPathProblem[] = [
+    ...validateVideoOutput(output.value, props.maxTextureDimension),
+    ...validateVideoPath({
     from: effectiveStart.value,
     to: effectiveEnd.value,
     durationSeconds: durationSeconds.value,
   }),
-]);
+  ];
+  if (renderMode.value === 'tiled-keyframe') {
+    result.push(...tiledEligibility.value.problems.map(message => ({kind: 'output' as const, message})));
+    if (tiledPlan.value instanceof Error) {
+      result.push({kind: 'output', field: 'budget mémoire', message: tiledPlan.value.message});
+    }
+  }
+  return result;
+});
 
 const warnings = computed<ParcoursWarning[]>(() => [
   ...describeParcoursWarnings(effectiveStart.value, effectiveEnd.value),
@@ -155,6 +213,20 @@ const workingTextureSide = computed(() =>
 const workingSetLabel = computed(() => {
   const gigabytes = estimatedWorkingBytes(output.value) / 1073741824;
   return gigabytes >= 1 ? `~${gigabytes.toFixed(1)} Go` : `~${Math.round(gigabytes * 1024)} Mo`;
+});
+
+function memoryLabel(bytes: number): string {
+  const mib = bytes / (1024 * 1024);
+  return mib >= 1024 ? `${(mib / 1024).toFixed(2)} Go` : `${Math.round(mib)} Mo`;
+}
+
+const tiledMemoryLabel = computed(() => {
+  const plan = tiledPlan.value;
+  if (!plan || plan instanceof Error) return '';
+  return `${plan.tiles.length} tuile${plan.tiles.length > 1 ? 's' : ''} — `
+    + `${memoryLabel(plan.estimate.squareBytes)} plein carré + `
+    + `${memoryLabel(plan.estimate.tileBytes)} tuile = `
+    + `${memoryLabel(plan.estimate.totalBytes)}`;
 });
 
 const canStart = computed(() =>
@@ -192,6 +264,8 @@ function start() {
     output: output.value,
     codec: codec.value,
     aaSamplesPerFrame: aaSamplesPerFrame.value,
+    renderMode: renderMode.value,
+    tiledMemoryBudgetMiB: tiledMemoryBudgetMiB.value,
     startLocation: effectiveStart.value,
     endLocation: effectiveEnd.value,
   });
@@ -265,9 +339,28 @@ function start() {
           />
         </label>
         <label class="ve-row">
+          <span class="ve-label">Mode mémoire</span>
+          <DenseSelect
+            :options="RENDER_MODE_OPTIONS" :model-value="renderMode" :disabled="running"
+            @update:model-value="(v: string) => renderMode = v as VideoExportRenderMode"
+          />
+        </label>
+        <DenseField
+          v-if="renderMode === 'tiled-keyframe'"
+          label="Budget mémoire"
+          :min="64" :max="32768" :step="128"
+          unit="Mio"
+          :model-value="tiledMemoryBudgetMiB"
+          @update:model-value="(v: number) => tiledMemoryBudgetMiB = v"
+        />
+        <p v-if="renderMode === 'tiled-keyframe' && tiledMemoryLabel" class="ve-note">
+          {{ tiledMemoryLabel }}. Le champ brut et le resolve restent bornés à une tuile;
+          les deux keyframes occupent le carré complet.
+        </p>
+        <label class="ve-row">
           <span class="ve-label">Anticrénelage</span>
           <DenseSelect
-            :options="AA_OPTIONS" :model-value="String(aaSamplesPerFrame)" :disabled="running"
+            :options="selectableAaOptions" :model-value="String(aaSamplesPerFrame)" :disabled="running"
             @update:model-value="(v: string) => aaSamplesPerFrame = Number(v)"
           />
         </label>

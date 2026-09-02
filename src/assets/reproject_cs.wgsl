@@ -36,6 +36,10 @@ struct BrushUniforms {
   workCounterShift: f32,
   rawOriginX: f32, // unused here: a clear resets the toroidal origin to 0
   rawOriginY: f32,
+  tileOriginX: f32,
+  tileOriginY: f32,
+  neutralSide: f32,
+  rotationUnion: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;
@@ -116,9 +120,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   // — it never computes outside the viewport — so this loses nothing, and it
   // costs two stores instead of the thirteen loads plus thirteen stores of a
   // full copy.
-  let centre = vec2<f32>(dims) * 0.5;
-  let offset = vec2<f32>(coord_out) + vec2<f32>(0.5) - centre;
-  let reach = centre.x + 2.0;
+  let centre = vec2<f32>(uni.neutralSide * 0.5);
+  let globalCoord = vec2<f32>(uni.tileOriginX, uni.tileOriginY) + vec2<f32>(coord_out);
+  let offset = globalCoord + vec2<f32>(0.5) - centre;
+  let reach = uni.neutralSide * 0.5 + 2.0;
   if (dot(offset, offset) > reach * reach) {
     store_cleared(coord_out);
     return;

@@ -105,6 +105,10 @@ import type {Engine} from '../Engine.ts';
 import VideoExportPanel from './VideoExportPanel.vue';
 import {runVideoExportToWebm} from '../videoExportRunner';
 import type {VideoOutputSpec, VideoPathLocation} from '../videoPath';
+import {
+  DEFAULT_TILED_EXPORT_MEMORY_PROFILE,
+  type VideoExportRenderMode,
+} from '../tiledKeyframeExport';
 const props = defineProps<{
   engine: Engine | null;
   mandelbrotCtrl?: any;
@@ -2488,6 +2492,8 @@ let videoAbortSignal: {aborted: boolean} | null = null;
 
 const videoMaxTextureDimension = computed(() =>
   props.engine?.device?.limits?.maxTextureDimension2D ?? 8192);
+const videoTiledMemoryProfile = computed(() =>
+  props.engine?.getTiledExportMemoryProfile() ?? DEFAULT_TILED_EXPORT_MEMORY_PROFILE);
 
 function cancelVideoExport() {
   if (videoAbortSignal) videoAbortSignal.aborted = true;
@@ -2498,6 +2504,8 @@ async function startVideoExport(payload: {
   output: VideoOutputSpec;
   codec: 'av1' | 'avc' | 'hevc' | 'vp9';
   aaSamplesPerFrame: number;
+  renderMode: VideoExportRenderMode;
+  tiledMemoryBudgetMiB: number;
   startLocation: VideoPathLocation;
   endLocation: VideoPathLocation;
 }) {
@@ -2548,6 +2556,8 @@ async function startVideoExport(payload: {
         output: payload.output,
         codec: payload.codec,
         aaSamplesPerFrame: payload.aaSamplesPerFrame,
+        renderMode: payload.renderMode,
+        tiledMemoryBudgetMiB: payload.tiledMemoryBudgetMiB,
         destination: writable
           ? {kind: 'stream', writable: writable as unknown as WritableStream<Uint8Array>}
           : {kind: 'buffer'},
@@ -2915,6 +2925,7 @@ async function startVideoExport(payload: {
       <VideoExportPanel
         :current="model as unknown as Record<string, unknown>"
         :max-texture-dimension="videoMaxTextureDimension"
+        :tiled-memory-profile="videoTiledMemoryProfile"
         :running="videoExportRunning"
         :frames-emitted="videoFramesEmitted"
         :total-frames="videoTotalFrames"

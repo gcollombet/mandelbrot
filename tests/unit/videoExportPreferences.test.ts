@@ -78,6 +78,25 @@ describe('normalizeVideoExportPreferences', () => {
         expect(result.durationSeconds).toBe(DEFAULT_VIDEO_EXPORT_PREFERENCES.durationSeconds)
         expect(result.fps).toBe(DEFAULT_VIDEO_EXPORT_PREFERENCES.fps)
     })
+
+    it('keeps valid tiled mode and budget preferences', () => {
+        const result = normalizeVideoExportPreferences({
+            renderMode: 'tiled-keyframe',
+            tiledMemoryBudgetMiB: 3072,
+        })
+        expect(result.renderMode).toBe('tiled-keyframe')
+        expect(result.tiledMemoryBudgetMiB).toBe(3072)
+    })
+
+    it.each([
+        ['unknown mode', {renderMode: 'tiles'}],
+        ['budget too small', {tiledMemoryBudgetMiB: 1}],
+        ['non-finite budget', {tiledMemoryBudgetMiB: Number.NaN}],
+    ])('normalizes %s', (_label, override) => {
+        const result = normalizeVideoExportPreferences(override)
+        expect(result.renderMode).toBe(DEFAULT_VIDEO_EXPORT_PREFERENCES.renderMode)
+        expect(result.tiledMemoryBudgetMiB).toBe(DEFAULT_VIDEO_EXPORT_PREFERENCES.tiledMemoryBudgetMiB)
+    })
 })
 
 describe('load / save round trip', () => {

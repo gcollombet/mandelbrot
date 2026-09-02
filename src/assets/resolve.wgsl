@@ -17,8 +17,10 @@ struct ResolveUniforms {
   trapLayerBase: f32, // -1 when no true-orbit payload is allocated
   rawOriginX: f32,    // toroidal origin of the raw texture (pan by offset)
   rawOriginY: f32,
-  _pad0: f32,
-  _pad1: f32,
+  tileOriginX: f32,
+  tileOriginY: f32,
+  neutralSide: f32,
+  rotationUnion: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: ResolveUniforms;
@@ -139,6 +141,9 @@ fn rotate_inverse(point: vec2<f32>, angle: f32) -> vec2<f32> {
 }
 
 fn is_inside_rotated_screen(xyNeutral: vec2<f32>) -> bool {
+  if (uni.rotationUnion > 0.5) {
+    return dot(xyNeutral, xyNeutral) <= 1.0;
+  }
   let neutralExtent = sqrt(uni.aspect * uni.aspect + 1.0);
   let local = rotate_inverse(xyNeutral * neutralExtent, uni.angle);
   return abs(local.x) <= uni.aspect && abs(local.y) <= 1.0;
@@ -211,7 +216,12 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
   let x = u32(clamp(uv.x * f32(dims.x), 0.0, f32(dims.x - 1u)));
   let y = u32(clamp((1.0 - uv.y) * f32(dims.y), 0.0, f32(dims.y - 1u)));
   let coord = vec2<i32>(i32(x), i32(y));
-  if (!is_inside_rotated_screen(uv * 2.0 - vec2<f32>(1.0))) {
+  let globalCoord = vec2<f32>(uni.tileOriginX, uni.tileOriginY) + vec2<f32>(coord);
+  let globalUv = vec2<f32>(
+    (globalCoord.x + 0.5) / uni.neutralSide,
+    1.0 - (globalCoord.y + 0.5) / uni.neutralSide,
+  );
+  if (!is_inside_rotated_screen(globalUv * 2.0 - vec2<f32>(1.0))) {
     return no_data(coord);
   }
 

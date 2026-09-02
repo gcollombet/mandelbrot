@@ -204,6 +204,12 @@ struct BrushUniforms {
   // access maps logical (viewport-aligned) coordinates through raw_coord().
   rawOriginX: f32,
   rawOriginY: f32,
+  // Logical tile position in the full neutral square. Monolithic rendering
+  // uses (0, 0, texture width), so both paths execute the same projection.
+  tileOriginX: f32,
+  tileOriginY: f32,
+  neutralSide: f32,
+  rotationUnion: f32,
 };
 
 struct CounterBuffer {
@@ -1021,10 +1027,9 @@ fn analytic_terminal_geometry(
   }
   let logZ = 0.5 * log(z2);
   if (!(logZ > 0.0)) { return vec3<f32>(0.0); }
-  let dims = textureDimensions(raw);
   let logTexelDelta = log(max(mandelbrot.scale, 1e-30))
     + f32(deepScaleExp) * LN2
-    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / f32(dims.x));
+    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / brush.neutralSide);
 
   let invDer = vec2<f32>(derM.x, -derM.y) / der2;
   let invZ = vec2<f32>(z.x, -z.y) / z2;
@@ -1660,10 +1665,9 @@ fn orbit_metrics_avg_dir(m: OrbitMetrics) -> vec2<f32> {
 // that makes every stored gradient a per-texel slope (analytic_terminal_geometry
 // builds the same quantity for the distance gradient).
 fn orbit_log_texel_delta(deepScaleExp: i32) -> f32 {
-  let dims = textureDimensions(raw);
   return log(max(mandelbrot.scale, 1e-30))
     + f32(deepScaleExp) * LN2
-    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / f32(dims.x));
+    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / brush.neutralSide);
 }
 
 fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
@@ -4006,6 +4010,11 @@ fn rotate(v: vec2<f32>, angle: f32) -> vec2<f32> {
 }
 
 fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
+  // A rotating tiled keyframe is conservatively built over the circumscribed
+  // disc, which contains the union of every viewport angle in its cycle.
+  if (brush.rotationUnion > 0.5) {
+    return dot(xy_neutral, xy_neutral) <= 1.0;
+  }
   let neutralExtent = sqrt(brush.aspect * brush.aspect + 1.0);
   let local_rot = xy_neutral * neutralExtent;
   let local = rotate(local_rot, -brush.angle);
@@ -4094,10 +4103,11 @@ fn cs_main(
 
   let dims = textureDimensions(raw);
   if (gid.x < dims.x && gid.y < dims.y) {
+    let globalCoord = vec2<f32>(brush.tileOriginX, brush.tileOriginY) + vec2<f32>(gid.xy);
     // Same uv convention as the fragment passes: uv.y=0 is the bottom row.
     let uv = vec2<f32>(
-      (f32(gid.x) + 0.5) / f32(dims.x),
-      1.0 - (f32(gid.y) + 0.5) / f32(dims.y),
+      (globalCoord.x + 0.5) / brush.neutralSide,
+      1.0 - (globalCoord.y + 0.5) / brush.neutralSide,
     );
     let xy_neutral = uv * 2.0 - vec2<f32>(1.0);
 

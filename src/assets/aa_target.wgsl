@@ -39,8 +39,10 @@ struct AaParams {
   _pad2: f32,
   rawOriginX: f32,      // unused here; shared buffer with the reseed pass
   rawOriginY: f32,
-  _pad3: f32,
-  _pad4: f32,
+  tileOriginX: f32,
+  tileOriginY: f32,
+  neutralSide: f32,
+  rotationUnion: f32,
 };
 
 // Boundary-distance ramp (device px): full sample count within R_FULL, tapering
@@ -151,10 +153,10 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
 
   if (params.aaContrast > 0.5) {
     // Neutral texel → screen texel (inverse of shade_srgb's screen→neutral).
-    let texSizeF = vec2<f32>(f32(dim.x), f32(dim.y));
+    let globalCoord = vec2<f32>(params.tileOriginX, params.tileOriginY) + vec2<f32>(coord);
     let uv_neutral = vec2<f32>(
-      (f32(coord.x) + 0.5) / texSizeF.x,
-      1.0 - (f32(coord.y) + 0.5) / texSizeF.y,
+      (globalCoord.x + 0.5) / params.neutralSide,
+      1.0 - (globalCoord.y + 0.5) / params.neutralSide,
     );
     let xy_neutral = uv_neutral * 2.0 - vec2<f32>(1.0);
     let neutralExtent = sqrt(params.aspect * params.aspect + 1.0);
@@ -164,7 +166,11 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       params.sceneCos * local_rot.x + params.sceneSin * local_rot.y,
       -params.sceneSin * local_rot.x + params.sceneCos * local_rot.y,
     );
-    let onScreen = abs(local.x) <= params.aspect && abs(local.y) <= 1.0;
+    let onScreen = select(
+      dot(xy_neutral, xy_neutral) <= 1.0,
+      abs(local.x) <= params.aspect && abs(local.y) <= 1.0,
+      params.rotationUnion <= 0.5,
+    );
     if (onScreen) {
       // ── 2. Contrast ramp (Sobel on the colorized sample 0) ──
       let uv_screen = vec2<f32>(local.x / max(params.aspect, 1e-6), local.y) * 0.5 + vec2<f32>(0.5);

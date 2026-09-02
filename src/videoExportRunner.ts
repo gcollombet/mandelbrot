@@ -6,11 +6,19 @@ import { createVideoSink, type Mp4Codec, type VideoDestination } from './videoEn
 import { runVideoExport, elapsedForFrame, totalFramesFor } from './videoExportSession'
 import {
   formatVideoPathProblems,
+  neutralSizeFor,
   validateVideoOutput,
   validateVideoPath,
   type VideoOutputSpec,
   type VideoPathLocation,
 } from './videoPath'
+import {
+  DEFAULT_TILED_EXPORT_BUDGET_MIB,
+  evaluateTiledKeyframeEligibility,
+  planKeyframeTiles,
+  TILED_EXPORT_WORKGROUP_ALIGNMENT,
+  type VideoExportRenderMode,
+} from './tiledKeyframeExport'
 
 /** Batch controller target during export: a floor, so batches grow as large as
  *  the GPU allows. An export has no latency budget to protect. */
@@ -33,9 +41,12 @@ export type VideoExportRunnerDeps = {
       supersample: number
       batchTargetFps: number
       aaSamplesPerFrame?: number
+      tiledKeyframePlan?: ReturnType<typeof planKeyframeTiles>
+      angleRange?: { from: number; to: number }
     }): Promise<void>
     endVideoExportSession(): void
     videoFrameReady(): boolean
+    beginVideoExportFrame(): void
     beginExportFrameAa(): void
     waitForSubmittedWork(): Promise<void>
     captureExportFrame(request: {
@@ -45,6 +56,16 @@ export type VideoExportRunnerDeps = {
       timestampMicros: number
       durationMicros: number
     }): Promise<VideoFrame>
+    getTiledExportMemoryProfile(): {
+      squareBytesPerTexel: number
+      tileBytesPerTexel: number
+    }
+    getVideoExportDiagnostics(): {
+      keyframesBuilt: number
+      tilesConverted: number
+      pumpsPerTile: number[]
+      freeFrames: number
+    }
   }
   controller: {
     setExportTime(elapsedSeconds: number | null): void
@@ -70,6 +91,8 @@ export type VideoExportRequest = {
   codec: Mp4Codec
   /** Jittered AA samples per emitted frame. 1 = off. */
   aaSamplesPerFrame?: number
+  renderMode?: VideoExportRenderMode
+  tiledMemoryBudgetMiB?: number
   /** Where the bytes go. Streaming avoids holding the whole film in memory. */
   destination: VideoDestination
   maxTextureDimension: number
@@ -91,6 +114,12 @@ export type VideoExportOutcome = {
   codec: Mp4Codec
   /** Extension of the produced file, for the download name. */
   fileExtension: string
+  tiledDiagnostics: {
+    keyframesBuilt: number
+    tilesConverted: number
+    pumpsPerTile: number[]
+    freeFrames: number
+  } | null
 }
 
 export async function runVideoExportToWebm(
@@ -108,11 +137,34 @@ export async function runVideoExportToWebm(
     throw new Error(`Cannot export this parcours:\n${formatVideoPathProblems(problems)}`)
   }
 
+  const renderMode = request.renderMode ?? 'monolithic'
+  if (renderMode === 'tiled-keyframe') {
+    const eligibility = evaluateTiledKeyframeEligibility({
+      from: request.from,
+      to: request.to,
+      aaSamplesPerFrame: request.aaSamplesPerFrame ?? 1,
+    })
+    if (!eligibility.eligible) {
+      throw new Error(`Cannot export this parcours:\n${eligibility.problems.join('\n')}`)
+    }
+  }
+
   const navigator = deps.controller.getNavigator()
   if (!navigator) throw new Error('Navigator unavailable.')
 
   const { output } = request
   const frameDurationMicros = Math.round(1e6 / output.fps)
+  const tiledKeyframePlan = renderMode === 'tiled-keyframe'
+    ? planKeyframeTiles({
+      neutralSide: neutralSizeFor(
+        output.width * output.supersample,
+        output.height * output.supersample,
+      ),
+      alignment: TILED_EXPORT_WORKGROUP_ALIGNMENT,
+      budgetBytes: (request.tiledMemoryBudgetMiB ?? DEFAULT_TILED_EXPORT_BUDGET_MIB) * 1024 * 1024,
+      memory: deps.engine.getTiledExportMemoryProfile(),
+    })
+    : undefined
 
   // Open the session FIRST: it is the step that can refuse (surface too large
   // for the device, codec unavailable comes later). Creating the encoder before
@@ -125,6 +177,10 @@ export async function runVideoExportToWebm(
     supersample: output.supersample,
     batchTargetFps: EXPORT_BATCH_TARGET_FPS,
     aaSamplesPerFrame: request.aaSamplesPerFrame,
+    tiledKeyframePlan,
+    angleRange: tiledKeyframePlan
+      ? { from: request.from.angle, to: request.to.angle }
+      : undefined,
   })
 
   let sink: Awaited<ReturnType<typeof createVideoSink>>
@@ -166,7 +222,10 @@ export async function runVideoExportToWebm(
           deps.controller.setExportTime(elapsedSeconds)
           // Each frame accumulates from scratch: carrying samples across frames
           // would average two different camera positions together.
-          if (elapsedSeconds !== null) deps.engine.beginExportFrameAa()
+          if (elapsedSeconds !== null) {
+            if (tiledKeyframePlan) deps.engine.beginVideoExportFrame()
+            deps.engine.beginExportFrameAa()
+          }
         },
         drawOnce: async () => {
           await deps.controller.drawOnce()
@@ -222,9 +281,12 @@ export async function runVideoExportToWebm(
         cancelled: true,
         framesEmitted: result.framesEmitted,
         totalPumps: result.totalPumps,
-        freeFrames: result.freeFrames,
+        freeFrames: tiledKeyframePlan
+          ? deps.engine.getVideoExportDiagnostics().freeFrames
+          : result.freeFrames,
         codec: sink.codec,
         fileExtension: sink.fileExtension,
+        tiledDiagnostics: tiledKeyframePlan ? deps.engine.getVideoExportDiagnostics() : null,
       }
     }
 
@@ -234,9 +296,12 @@ export async function runVideoExportToWebm(
       cancelled: false,
       framesEmitted: result.framesEmitted,
       totalPumps: result.totalPumps,
-      freeFrames: result.freeFrames,
+      freeFrames: tiledKeyframePlan
+        ? deps.engine.getVideoExportDiagnostics().freeFrames
+        : result.freeFrames,
       codec: sink.codec,
       fileExtension: sink.fileExtension,
+      tiledDiagnostics: tiledKeyframePlan ? deps.engine.getVideoExportDiagnostics() : null,
     }
   } catch (error) {
     await sink.cancel().catch(() => undefined)
