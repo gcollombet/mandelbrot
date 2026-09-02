@@ -21,7 +21,7 @@ describe('AA frontier visible scope', () => {
     const viewportGate = reseed.indexOf('if (!is_inside_visible_viewport(coord, dim))')
     const targetLoad = reseed.indexOf('let tgtRaw = textureLoad(aaTargetTex, coord).r;')
     const eligibleCount = reseed.indexOf('atomicAdd(&stats.eligible, 1u);')
-    const stamp = reseed.indexOf('textureStore(rawIterTex, coord')
+    const stamp = reseed.indexOf('textureStore(rawIterTex, raw_coord(coord)')
     expect(viewportGate).toBeGreaterThan(-1)
     expect(viewportGate).toBeLessThan(targetLoad)
     expect(viewportGate).toBeLessThan(eligibleCount)

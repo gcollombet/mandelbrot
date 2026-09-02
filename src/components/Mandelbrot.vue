@@ -18,6 +18,7 @@ let canvas: HTMLCanvasElement | null = null;
 let engine: Engine | null = null;
 let navigator: MandelbrotNavigator | undefined;
 let isUpdating = false;
+const gpuError = ref('');
 
 // Keyboard state is sampled by draw(), rather than in an independent timer.
 // Rust applies it with the same delta-time as navigation integration, so held
@@ -444,6 +445,8 @@ async function initWebGPU() {
     stripeFrequency: props.stripeFrequency,
     textureMapping: normalizeTextureMappingFromLegacy(props),
     textureMappingMode: props.textureMappingMode,
+  }, (message) => {
+    gpuError.value = message;
   });
   engine.dprMultiplier = props.dprMultiplier ?? 1.0;
   engine.targetFps = props.targetFps ?? 60;
@@ -462,12 +465,21 @@ async function handleResize() {
 }
 
 onMounted(async () => {
-  await initWebGPU();
+  try {
+    gpuError.value = '';
+    await initWebGPU();
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    gpuError.value = message || 'Initialisation WebGPU impossible.';
+    console.error('[Mandelbrot] Initialisation WebGPU impossible', error);
+    engine?.destroy();
+    engine = null;
+    return;
+  }
   window.addEventListener('resize', handleResize);
-  // First resize + draw — produces the initial image immediately.
-  await handleResize()
-  // Start the render loop for progressive refinement after the first
-  // frame is already on screen.
+  // Engine.initialize() has already sized the surface once. Repeating resize()
+  // here briefly doubles the largest GPU allocations on drivers that reclaim
+  // destroyed textures asynchronously.
   if (engine) {
     emit('ready', engine);
     engine.startRenderLoop(draw);
@@ -556,6 +568,11 @@ defineExpose({
 <template>
   <div class="mandelbrot-canvas-wrap">
     <canvas ref="canvasRef"></canvas>
+    <div v-if="gpuError" class="gpu-error" role="alert">
+      <strong>Le rendu WebGPU ne peut pas démarrer.</strong>
+      <span>{{ gpuError }}</span>
+      <small>Vérifie l’accélération matérielle, le navigateur et le pilote graphique.</small>
+    </div>
     <div v-if="props.debugShading" class="debug-legend" aria-hidden="true">
       <div class="debug-legend-item debug-legend-top-left">Distance au bord</div>
       <div class="debug-legend-item debug-legend-top-right">Palette / phase continue</div>
@@ -587,6 +604,25 @@ canvas {
   height: 100%;
   display: block;
 }
+
+.gpu-error {
+  position: absolute;
+  inset: 1rem;
+  z-index: 20;
+  display: grid;
+  place-content: center;
+  gap: 0.65rem;
+  padding: clamp(1rem, 4vw, 2rem);
+  border: 1px solid rgba(255, 120, 120, 0.55);
+  border-radius: 0.75rem;
+  background: rgba(18, 10, 16, 0.94);
+  color: #fff;
+  text-align: center;
+  overflow-wrap: anywhere;
+}
+
+.gpu-error strong { color: #ff9b9b; }
+.gpu-error small { color: rgba(255, 255, 255, 0.72); }
 
 .debug-legend {
   position: absolute;

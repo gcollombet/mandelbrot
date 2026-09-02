@@ -34,8 +34,8 @@ struct BrushUniforms {
   copyLayerCount: f32,
   mu: f32,
   workCounterShift: f32,
-  _padding1: f32,
-  _padding2: f32,
+  rawOriginX: f32, // unused here: a clear resets the toroidal origin to 0
+  rawOriginY: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: BrushUniforms;

@@ -198,8 +198,12 @@ struct BrushUniforms {
   copyLayerCount: f32, // reproject_cs only
   reprojectMu: f32,    // reproject_cs only
   workCounterShift: f32,
-  _padding1: f32,
-  _padding2: f32,
+  // Toroidal origin of the raw texture, in texels. A pan no longer copies the
+  // whole neutral square: the engine shifts this origin instead and only the
+  // exposed strip is stamped with sentinels (raw_pan_clear.wgsl). Every raw
+  // access maps logical (viewport-aligned) coordinates through raw_coord().
+  rawOriginX: f32,
+  rawOriginY: f32,
 };
 
 struct CounterBuffer {
@@ -1414,15 +1418,23 @@ struct TexelOut {
 
 fn pack(v: f32) -> vec4<f32> { return vec4<f32>(v, 0.0, 0.0, 0.0); }
 
+// Logical → physical raw texel (toroidal origin, see BrushUniforms.rawOrigin).
+fn raw_coord(coord: vec2<i32>) -> vec2<i32> {
+  let dims = vec2<i32>(textureDimensions(raw));
+  let origin = vec2<i32>(i32(brush.rawOriginX), i32(brush.rawOriginY));
+  return ((coord + origin) % dims + dims) % dims;
+}
+
 fn loadLayer(coord: vec2<i32>, layer: i32) -> f32 {
-  return textureLoad(raw, coord, layer).r;
+  return textureLoad(raw, raw_coord(coord), layer).r;
 }
 
 fn orbit_trap_layer_base() -> i32 {
   return select(13, 18, mandelbrot.trackOrbitMetrics >= 0.5);
 }
 
-fn storeTexel(coord: vec2<i32>, out: TexelOut) {
+fn storeTexel(logicalCoord: vec2<i32>, out: TexelOut) {
+  let coord = raw_coord(logicalCoord);
   textureStore(raw, coord, 0, out.iter);
   textureStore(raw, coord, 1, out.genuine);
   textureStore(raw, coord, 2, out.zx);

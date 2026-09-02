@@ -4,6 +4,7 @@ import inplaceComputeShader from './assets/mandelbrot_brush.wgsl?raw'
 import debugViewShader from './assets/mandelbrot_debug.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
 import reprojectCsShader from './assets/reproject_cs.wgsl?raw'
+import rawPanClearShader from './assets/raw_pan_clear.wgsl?raw'
 import resolveShader from './assets/resolve.wgsl?raw'
 import mergeFrozenShader from './assets/merge_frozen.wgsl?raw'
 import presentShader from './assets/present.wgsl?raw'
@@ -62,6 +63,14 @@ import {
     type ZoomRefreshCostModel,
 } from './iterationBatchController'
 import {advanceFramePacer} from './framePacing'
+import {
+    estimateGpuWorkingSetBytes,
+    fitSurfaceToGpuBudget,
+    formatGpuBytes,
+    isMobileLikeEnvironment,
+    READ_WRITE_STORAGE_TEXTURES_FEATURE,
+    recommendedGpuMemoryBudgetBytes,
+} from './gpuCompatibility'
 import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapColorUniformValues, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
 import {rotationHasFreshZeroCounter, rotationNeedsColorResolve} from './rotationColorResolve'
 
@@ -141,7 +150,9 @@ const MOBIUS_COEFF_FLOATS = 21
 // default maxStorageBufferBindingSize (128 MiB); the device now also raises that
 // limit to the adapter's maximum, so this cap is comfortably inside it.
 const ORBIT_STEP_CAPACITY = 10_000_000
-const COLOR_UNIFORM_FLOAT_COUNT = 96
+const COLOR_UNIFORM_FLOAT_COUNT = 100
+/** Slots 96/97: toroidal origin of the raw texture (analytic-AA payload reads). */
+const COLOR_UNIFORM_RAW_ORIGIN_SLOT = 96
 const TAU = Math.PI * 2
 
 // Minimum number of unfinished pixels below which we consider the image
@@ -716,6 +727,10 @@ export class Engine {
     ctx!: GPUCanvasContext
     format!: GPUTextureFormat
     mandelbrotNavigator!: MandelbrotNavigator
+    private gpuMemoryBudgetBytes = 0
+    private lastSurfaceReductionKey = ''
+    private destroyed = false
+    private readonly gpuErrorHandler?: (message: string) => void
 
     // resources
     rawTexture?: GPUTexture // texture "neutre" (A) — r32float array, written via textureStore only
@@ -877,6 +892,14 @@ export class Engine {
     // Utility compute pass (pan shift / clear stamp), ping-pong A→B.
     private pipelineReprojectCs?: GPUComputePipeline
     private bindGroupReprojectCs?: GPUBindGroup
+    /** Pan by origin shift: stamps the wrapped-in strip of A with sentinels. */
+    private pipelinePanClear?: GPUComputePipeline
+    private bindGroupPanClear?: GPUBindGroup
+    /** Toroidal origin of the front raw texture, in texels (see raw_pan_clear.wgsl). */
+    private rawOriginX = 0
+    private rawOriginY = 0
+    /** Runtime A/B switch: scissor the resolve pass to the padded dispatch box. */
+    resolveScissorEnabled = true
     private rawFieldVersion = 0
     private resolvedDisplayVersion = -1
     private frozenDisplayVersion = -1
@@ -1338,12 +1361,22 @@ export class Engine {
     // Target FPS for the adaptive batch controller (adjustable from UI, default 60)
     targetFps = 60
 
-    constructor(canvas: HTMLCanvasElement, options: RenderOptions) {
+    constructor(canvas: HTMLCanvasElement, options: RenderOptions, gpuErrorHandler?: (message: string) => void) {
         this.canvas = canvas
+        this.gpuErrorHandler = gpuErrorHandler
         this.shaderPassColor = colorShader
         this.antialiasLevel = options.antialiasLevel
         this.palettePeriod = options.palettePeriod
+        this.orbitMetricsEnabled = shouldTrackOrbitMetrics(options.colorStops)
+        this.orbitTrapEnabled = orbitTrapUsesOrbit(
+            normalizeOrbitTrapConfig(options.orbitTrap, options.orbitTrapStrength),
+        )
         this.time = 0
+    }
+
+    private reportGpuError(message: string): void {
+        console.error(`[Engine] ${message}`)
+        this.gpuErrorHandler?.(message)
     }
 
     private postReferenceWorker(message: ReferenceWorkerRequest): boolean {
@@ -2001,6 +2034,35 @@ export class Engine {
         if (!navigator.gpu) throw new Error('WebGPU non supporté')
         this.adapter = await navigator.gpu.requestAdapter()
         if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
+        if (!navigator.gpu.wgslLanguageFeatures?.has(READ_WRITE_STORAGE_TEXTURES_FEATURE)) {
+            throw new Error(
+                'Ce navigateur ne prend pas en charge les textures WebGPU lisibles/inscriptibles '
+                + `(${READ_WRITE_STORAGE_TEXTURES_FEATURE}), indispensables à ce moteur.`,
+            )
+        }
+        // `GPUAdapter.info` replaced requestAdapterInfo progressively; keep the
+        // capability preflight usable on early read-write-capable Chromium too.
+        const adapterInfo = this.adapter.info
+        const navigatorWithUaData = navigator as Navigator & {
+            userAgentData?: { mobile?: boolean }
+        }
+        const mobileLike = isMobileLikeEnvironment({
+            userAgent: navigator.userAgent,
+            userAgentDataMobile: navigatorWithUaData.userAgentData?.mobile,
+            maxTouchPoints: navigator.maxTouchPoints,
+            screenWidth: window.screen?.width,
+            screenHeight: window.screen?.height,
+        })
+        this.gpuMemoryBudgetBytes = recommendedGpuMemoryBudgetBytes({
+            mobileLike,
+            adapterVendor: adapterInfo?.vendor,
+            adapterArchitecture: adapterInfo?.architecture,
+            adapterDevice: adapterInfo?.device,
+        })
+        console.info(
+            `[Engine] conservative GPU working-set budget: ${formatGpuBytes(this.gpuMemoryBudgetBytes)}`
+            + ` (${mobileLike ? 'mobile' : 'desktop'})`,
+        )
         // Per-pass GPU timing needs the optional 'timestamp-query' feature. Often
         // absent on mobile (iOS/Safari) — the panel degrades to global metrics.
         this.timestampCapable = this.adapter.features.has('timestamp-query')
@@ -2046,9 +2108,22 @@ export class Engine {
         this.device.label = 'Engine Device'
         this.device.lost.then((info) => {
             console.warn(`GPU device lost: reason=${info.reason}, message=${info.message}`)
+            if (!this.destroyed) {
+                this.reportGpuError(
+                    `Le périphérique GPU a été perdu (${info.reason || 'raison inconnue'})`
+                    + `${info.message ? ` : ${info.message}` : '.'}`,
+                )
+            }
+        })
+        this.device.addEventListener('uncapturederror', (event) => {
+            event.preventDefault()
+            this.reportGpuError(`Erreur WebGPU : ${event.error.message}`)
         })
         this.queue = this.device.queue
         this.queue.label = 'Engine Queue'
+        this.device.pushErrorScope('out-of-memory')
+        this.device.pushErrorScope('validation')
+        this.device.pushErrorScope('internal')
         if (this.timestampsEnabled) {
             this.timestampQuerySet = this.device.createQuerySet({ type: 'timestamp', count: TS_COUNT, label: 'Engine PerfTimestamps' })
             this.tsResolveBuffer = this.device.createBuffer({ size: TS_COUNT * 8, usage: GPUBufferUsage.QUERY_RESOLVE | GPUBufferUsage.COPY_SRC, label: 'Engine TS Resolve' })
@@ -2143,7 +2218,7 @@ export class Engine {
             label: 'Engine UniformBuffer Brush',
         })
         this.uniformBufferResolve = this.device.createBuffer({
-            size: 4 * 4,
+            size: 4 * 8,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Resolve',
         })
@@ -2236,6 +2311,18 @@ export class Engine {
 
         await this._createPipelines()
         this.resize()
+        const internalError = await this.device.popErrorScope()
+        const validationError = await this.device.popErrorScope()
+        const memoryError = await this.device.popErrorScope()
+        const setupError = memoryError ?? validationError ?? internalError
+        if (setupError) {
+            const kind = memoryError
+                ? 'mémoire GPU insuffisante'
+                : validationError
+                    ? 'configuration ou shader WebGPU invalide'
+                    : 'erreur interne du pilote GPU'
+            throw new Error(`Initialisation WebGPU impossible (${kind}) : ${setupError.message}`)
+        }
     }
 
     private async _createPipelines() {
@@ -2430,6 +2517,21 @@ export class Engine {
             label: 'Engine ComputePipeline ReprojectCs',
         })
 
+        // ── Pan clear pass (toroidal origin shift, in place on A) ────────
+        const modulePanClear = this.device.createShaderModule({ code: rawPanClearShader, label: 'Engine ShaderModule PanClear' })
+        const layoutPanClear = this.device.createBindGroupLayout({
+            entries: [
+                { binding: 0, visibility: GPUShaderStage.COMPUTE, buffer: { type: 'uniform' } },
+                { binding: 1, visibility: GPUShaderStage.COMPUTE, storageTexture: { access: 'write-only', format: 'r32float', viewDimension: '2d-array' } },
+            ],
+            label: 'Engine BindGroupLayout PanClear',
+        })
+        this.pipelinePanClear = this.device.createComputePipeline({
+            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutPanClear] }),
+            compute: { module: modulePanClear, entryPoint: 'cs_main' },
+            label: 'Engine ComputePipeline PanClear',
+        })
+
         // ── Merge pipeline (resolved + frozen → frozen via MRT) ──────────
         const moduleMerge = this.device.createShaderModule({ code: mergeFrozenShader, label: 'Engine ShaderModule Merge' })
         const layoutMerge = this.device.createBindGroupLayout({
@@ -2531,8 +2633,8 @@ export class Engine {
                 // 16 × f32 (shared bake/reseed): [antialiasLevel, aaSampleIndex,
                 // screenHeightPx, aaLogDelta, aaAnalytic, aspect, sceneSin,
                 // sceneCos, screenWidthPx, palettePeriod, mu, logMu, aaContrast,
-                // aaFull, iterationPaletteCurve, pad]
-                size: 64,
+                // aaFull, iterationPaletteCurve, pad, rawOriginX, rawOriginY, pad, pad]
+                size: 80,
                 usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
                 label: 'Engine UniformBuffer AaParams',
             })
@@ -3810,6 +3912,21 @@ export class Engine {
                 + 'Baisse la résolution ou le suréchantillonnage.',
             )
         }
+        const exportMemoryOptions = {
+            width: surfaceWidth,
+            height: surfaceHeight,
+            orbitMetrics: this.orbitMetricsEnabled,
+            orbitTrap: this.orbitTrapEnabled,
+        }
+        const estimatedExportBytes = estimateGpuWorkingSetBytes(exportMemoryOptions)
+        if (estimatedExportBytes > this.gpuMemoryBudgetBytes) {
+            throw new Error(
+                `${settings.outputWidth}×${settings.outputHeight} en ×${settings.supersample} `
+                + `nécessiterait environ ${formatGpuBytes(estimatedExportBytes)}, au-delà du budget prudent `
+                + `${formatGpuBytes(this.gpuMemoryBudgetBytes)} de cet appareil. `
+                + 'Baisse la résolution ou le suréchantillonnage.',
+            )
+        }
 
         this.videoExportSavedSettings = {
             zoomMagnificationThreshold: this.zoomMagnificationThreshold,
@@ -4427,6 +4544,17 @@ export class Engine {
         })
     }
 
+    /** Dispatch box padded by 8 texels each side and clamped to the neutral square. */
+    private resolveScissorRect() {
+        const pad = 8
+        const n = this.neutralSize
+        const x = Math.max(0, this.dispatchBox.x - pad)
+        const y = Math.max(0, this.dispatchBox.y - pad)
+        const right = Math.min(n, this.dispatchBox.x + this.dispatchBox.width + pad)
+        const bottom = Math.min(n, this.dispatchBox.y + this.dispatchBox.height + pad)
+        return { x, y, width: Math.max(1, right - x), height: Math.max(1, bottom - y) }
+    }
+
     private computeIterationDispatchBox(aspect: number, angle: number) {
         // Bounding box of the rotated viewport, snapped outwards to the 8×8
         // iteration workgroup grid.
@@ -4531,6 +4659,37 @@ export class Engine {
             this.height = Math.max(8, Math.floor(this.height * shrink))
         }
 
+        const memoryOptions = {
+            width: this.width,
+            height: this.height,
+            orbitMetrics: this.orbitMetricsEnabled,
+            orbitTrap: this.orbitTrapEnabled,
+        }
+        const surfaceFit = fitSurfaceToGpuBudget(memoryOptions, this.gpuMemoryBudgetBytes)
+        if (this.forcedSurfaceSize && surfaceFit.reduced) {
+            throw new Error(
+                `La surface d'export ${this.width}×${this.height} nécessiterait environ `
+                + `${formatGpuBytes(estimateGpuWorkingSetBytes(memoryOptions))}, au-delà du budget prudent `
+                + `${formatGpuBytes(this.gpuMemoryBudgetBytes)} de cet appareil. `
+                + 'Baisse la résolution ou le suréchantillonnage.',
+            )
+        }
+        if (!this.forcedSurfaceSize && surfaceFit.reduced) {
+            this.width = surfaceFit.width
+            this.height = surfaceFit.height
+            const reductionKey = `${widthCSS}x${heightCSS}:${this.width}x${this.height}:${this.gpuMemoryBudgetBytes}`
+            if (reductionKey !== this.lastSurfaceReductionKey) {
+                console.warn(
+                    `[Engine] physical surface reduced to ${this.width}×${this.height} `
+                    + `(scale ${surfaceFit.scale.toFixed(3)}, estimated ${formatGpuBytes(surfaceFit.estimatedBytes)} `
+                    + `within ${formatGpuBytes(this.gpuMemoryBudgetBytes)} budget)`,
+                )
+                this.lastSurfaceReductionKey = reductionKey
+            }
+        } else {
+            this.lastSurfaceReductionKey = ''
+        }
+
         this.canvas.width = this.width
         this.canvas.height = this.height
         this.canvas.style.width = widthCSS + 'px'
@@ -4544,6 +4703,9 @@ export class Engine {
 
         // taille suffisante pour contenir la diagonale de l'écran après rotation
         this.neutralSize = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height))
+        // Fresh textures start at toroidal origin 0.
+        this.rawOriginX = 0
+        this.rawOriginY = 0
         const textureSize = this.neutralSize
         this.rawTexture?.destroy?.()
         this.rawBrushTexture?.destroy?.()
@@ -4852,6 +5014,16 @@ export class Engine {
                     { binding: 2, resource: this.rawBrushArrayView! },
                 ],
                 label: 'Engine BindGroup ReprojectCs',
+            })
+        }
+        if (this.pipelinePanClear) {
+            this.bindGroupPanClear = this.device.createBindGroup({
+                layout: this.pipelinePanClear.getBindGroupLayout(0),
+                entries: [
+                    { binding: 0, resource: { buffer: this.uniformBufferBrush! } },
+                    { binding: 1, resource: this.rawArrayView! },
+                ],
+                label: 'Engine BindGroup PanClear',
             })
         }
 
@@ -5777,6 +5949,10 @@ export class Engine {
             renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification [1, 4]
             iterationPaletteCurveCode(renderOptions.iterationPaletteCurve), // 94: iterationPaletteCurve
             renderOptions.aaAdaptive === false ? this.aaOffsetY : 0, // 95: uniform-AA inverse lookup Y
+            this.rawOriginX,                      // 96: raw toroidal origin X
+            this.rawOriginY,                      // 97: raw toroidal origin Y
+            0,                                    // 98: pad
+            0,                                    // 99: pad
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -6309,6 +6485,17 @@ export class Engine {
             dispatchPixelCount,
         )
 
+        // Toroidal raw origin. A clear rewrites B wholesale and swaps it to the
+        // front at origin 0; a pan shifts the origin so logical texel L now
+        // reads what L − shift held, and only the wrapped-in strip is stamped.
+        if (clearFlag !== 0) {
+            this.rawOriginX = 0
+            this.rawOriginY = 0
+        } else if (hasTranslationShift) {
+            const n = Math.max(1, this.neutralSize)
+            this.rawOriginX = (((this.rawOriginX - roundedShiftTexX) % n) + n) % n
+            this.rawOriginY = (((this.rawOriginY - roundedShiftTexY) % n) + n) % n
+        }
         const brushUniforms = new Float32Array([
             aspect,
             this.previousMandelbrot.angle,
@@ -6320,10 +6507,19 @@ export class Engine {
             this.rawCopyLayerCount(analyticRawPayloadNeeded),
             this.previousMandelbrot.mu,
             workCounterShift,
-            0,
-            0,
+            this.rawOriginX,
+            this.rawOriginY,
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
+        if (clearFlag !== 0 || hasTranslationShift) {
+            // Color reads the analytic-AA payload straight from raw: keep its
+            // origin slots current between full uniform rewrites.
+            this.device.queue.writeBuffer(
+                this.uniformBufferColor!,
+                COLOR_UNIFORM_RAW_ORIGIN_SLOT * 4,
+                new Float32Array([this.rawOriginX, this.rawOriginY]).buffer,
+            )
+        }
 
         // Use the readback ring as intended: mapping one slot must not suppress
         // the next frame's sample while another slot remains available.
@@ -6347,6 +6543,10 @@ export class Engine {
             aspect,
             this.previousMandelbrot.angle,
             this.trapPayloadAllocated ? (this.orbitGradientAllocated ? 18 : 13) : -1,
+            this.rawOriginX,
+            this.rawOriginY,
+            0,
+            0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
@@ -6543,12 +6743,11 @@ export class Engine {
         }
 
         {
-            if (utilityNeeded) {
-                // Utility pass writes B, then the texture roles swap so
-                // iteration proceeds on the freshly prepared front texture.
-                const utilityTimingKey = selectRawUtilityPassKey(this.clearHistoryNextFrame)
+            if (this.clearHistoryNextFrame) {
+                // Clear frames rewrite B wholesale, then the texture roles swap
+                // so iteration proceeds on the freshly prepared front texture.
                 const utilPass = commandEncoder.beginComputePass({
-                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX[utilityTimingKey]),
+                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX[selectRawUtilityPassKey(true)]),
                 })
                 utilPass.setPipeline(this.pipelineReprojectCs!)
                 utilPass.setBindGroup(0, this.bindGroupReprojectCs!)
@@ -6556,14 +6755,30 @@ export class Engine {
                 utilPass.dispatchWorkgroups(uwg, uwg)
                 utilPass.end()
                 // Ping-pong instead of copying B back over A: B now holds the
-                // reprojected or cleared state, so it becomes the front texture
-                // and A the next frame's scratch.
+                // cleared state, so it becomes the front texture and A the next
+                // frame's scratch. Its toroidal origin is 0 (set above).
                 this.swapRawTextures()
-                // Clears establish a fresh payload as the in-place pass fills
-                // requested texels. A 9-layer translation deliberately does not
-                // preserve the Taylor-only layers in the new front texture.
-                this.rawAnalyticPayloadAligned = this.clearHistoryNextFrame
-                    || analyticRawPayloadNeeded
+                // A clear establishes a fresh payload as the in-place pass fills
+                // requested texels.
+                this.rawAnalyticPayloadAligned = true
+            } else if (utilityNeeded) {
+                // Pan: the toroidal origin already moved every texel; stamp the
+                // wrapped-in strip (|shiftX| columns + |shiftY| rows) in place
+                // on A. Nothing else is touched, so the Taylor layers survive
+                // and the alignment flag is left as it was.
+                const panPass = commandEncoder.beginComputePass({
+                    timestampWrites: this.tsWrites(PASS_SLOT_INDEX[selectRawUtilityPassKey(false)]),
+                })
+                panPass.setPipeline(this.pipelinePanClear!)
+                panPass.setBindGroup(0, this.bindGroupPanClear!)
+                const n = this.neutralSize
+                const stripX = Math.min(n, Math.abs(roundedShiftTexX))
+                const stripY = Math.min(n, Math.abs(roundedShiftTexY))
+                panPass.dispatchWorkgroups(
+                    Math.max(1, Math.ceil(n / 16)),
+                    Math.max(1, Math.ceil(stripX / 16) + Math.ceil(stripY / 16)),
+                )
+                panPass.end()
             }
             // Stage B selective reseed: stamp the boundary sliver (target > sample
             // index) as compute requests so only it reconverges with the new jitter;
@@ -6586,6 +6801,7 @@ export class Engine {
                         0, 0,
                         aaMandelbrot.mu,
                         0, 0, 0, 0, 0,
+                        this.rawOriginX, this.rawOriginY, 0, 0,
                     ]).buffer,
                 )
                 if (this.aaFrontierBuffer) {
@@ -6664,6 +6880,14 @@ export class Engine {
                 this.orbitGradientAllocated ? this.pipelineResolveOrbit! : this.pipelineResolve!,
             )
             rpassResolve.setBindGroup(0, this.bindGroupResolve)
+            // Only the rotated viewport's bounding box is ever displayed or
+            // sampled (one texel of bilinear margin, covered by the 8-texel
+            // pad): at low angles more than half the neutral square is culled.
+            // loadOp 'clear' still resets the whole attachment.
+            if (this.resolveScissorEnabled) {
+                const scissor = this.resolveScissorRect()
+                rpassResolve.setScissorRect(scissor.x, scissor.y, scissor.width, scissor.height)
+            }
             rpassResolve.draw(6, 1, 0, 0)
             rpassResolve.end()
 
@@ -7244,6 +7468,7 @@ export class Engine {
     }
 
     destroy() {
+        this.destroyed = true
         this.stopRenderLoop()
         this.postReferenceWorker({ type: 'dispose' })
         this.referenceWorker?.terminate()

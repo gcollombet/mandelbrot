@@ -35,8 +35,12 @@ struct AaParams {
   logMu: f32,
   aaContrast: f32,
   aaFull: f32,
-  _pad1: f32,
+  iterationPaletteCurve: f32, // unused here; shared buffer with the target bake pass
   _pad2: f32,
+  rawOriginX: f32,      // toroidal origin of the raw texture (pan by offset)
+  rawOriginY: f32,
+  _pad3: f32,
+  _pad4: f32,
 };
 
 struct FrontierStats {
@@ -57,6 +61,15 @@ struct FrontierStats {
 // Coherent sample-0 display values: layer 0 = iter, 1/2 = escape z. This is the
 // same center value source the color pass combines with the raw Taylor payload.
 @group(0) @binding(5) var valuesTex: texture_2d_array<f32>;
+
+// Logical (viewport-aligned) → physical raw texel: the raw texture is toroidal.
+// Applies to the raw layer views only (rawIterTex, payloadTex); the target map
+// and the resolved display set stay in logical coordinates.
+fn raw_coord(coord: vec2<i32>) -> vec2<i32> {
+  let dims = vec2<i32>(textureDimensions(payloadTex));
+  let origin = vec2<i32>(i32(params.rawOriginX), i32(params.rawOriginY));
+  return ((coord + origin) % dims + dims) % dims;
+}
 
 const LN_MARGIN_THRESHOLD: f32 = 1.6094379; // ln 5
 
@@ -114,11 +127,12 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
         let iter = textureLoad(valuesTex, coord, 0, 0).r;
         let z = vec2<f32>(textureLoad(valuesTex, coord, 1, 0).r,
                           textureLoad(valuesTex, coord, 2, 0).r);
-        let s = textureLoad(payloadTex, coord, 0, 0).r;
-        let m1 = vec2<f32>(textureLoad(payloadTex, coord, 1, 0).r,
-                           textureLoad(payloadTex, coord, 2, 0).r);
-        let sndLog = textureLoad(payloadTex, coord, 3, 0).r;
-        let sndAngle = textureLoad(payloadTex, coord, 4, 0).r;
+        let rawCoord = raw_coord(coord);
+        let s = textureLoad(payloadTex, rawCoord, 0, 0).r;
+        let m1 = vec2<f32>(textureLoad(payloadTex, rawCoord, 1, 0).r,
+                           textureLoad(payloadTex, rawCoord, 2, 0).r);
+        let sndLog = textureLoad(payloadTex, rawCoord, 3, 0).r;
+        let sndAngle = textureLoad(payloadTex, rawCoord, 4, 0).r;
         // Finite guard first: max() LAUNDERS NaN on Metal (max(NaN, x) = x),
         // which once turned a NaN payload into an auto-passing margin. |x| <
         // big is false for both NaN and inf without x != x semantics.
@@ -154,6 +168,6 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
       }
     }
     atomicAdd(&stats.stamped, 1u);
-    textureStore(rawIterTex, coord, vec4<f32>(-1.0, 0.0, 0.0, 0.0));
+    textureStore(rawIterTex, raw_coord(coord), vec4<f32>(-1.0, 0.0, 0.0, 0.0));
   }
 }

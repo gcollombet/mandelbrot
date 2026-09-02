@@ -99,6 +99,10 @@ struct Uniforms {
   protrusionStrength: f32,    // iteration-profile effect amplification [1, 4]
   iterationPaletteCurve: f32, // 0 linear, 1 soft root, 2 logarithmic, 3 quadratic
   aaLookupOffsetY: f32,
+  rawOriginX: f32,       // 96: toroidal origin of the raw texture (pan by offset)
+  rawOriginY: f32,       // 97
+  _pad98: f32,
+  _pad99: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // live values: iter, z.x, z.y
@@ -115,6 +119,13 @@ struct Uniforms {
 @group(0) @binding(12) var metadataTex: texture_2d<u32>;
 @group(0) @binding(13) var frozenMetadataTex: texture_2d<u32>;
 @group(0) @binding(14) var rawTex: texture_2d_array<f32>; // analytic-AA payload only
+
+// Logical (viewport-aligned) → physical raw texel: the raw texture is toroidal.
+fn raw_coord(coord: vec2<i32>) -> vec2<i32> {
+  let dims = vec2<i32>(textureDimensions(rawTex));
+  let origin = vec2<i32>(i32(parameters.rawOriginX), i32(parameters.rawOriginY));
+  return ((coord + origin) % dims + dims) % dims;
+}
 // Analytic gradients of the two orbit metrics, per source texel. A 1x1 dummy is
 // bound when no stop asks for stripe/coherence relief.
 @group(0) @binding(15) var orbitGradientTex: texture_2d<f32>;
@@ -1213,9 +1224,9 @@ fn colorize_pixel(
     // The "no data" cases are given DISTINCT colors rather than one grey: with
     // three different causes (wrong texture bound / z″ never accumulated /
     // payload corrupt) a single grey turns a bug report into a guessing game.
-    let S = textureLoad(rawTex, sourceCoord, 8, 0).r;
-    let sndLog = textureLoad(rawTex, sourceCoord, 11, 0).r;
-    let sndAngle = textureLoad(rawTex, sourceCoord, 12, 0).r;
+    let S = textureLoad(rawTex, raw_coord(sourceCoord), 8, 0).r;
+    let sndLog = textureLoad(rawTex, raw_coord(sourceCoord), 11, 0).r;
+    let sndAngle = textureLoad(rawTex, raw_coord(sourceCoord), 12, 0).r;
     // +marker = z″ not tracked / payload invalid. Keep mode readiness visible
     // before calling a live-table invalid payload a numerical failure.
     if (!(sndLog < 1e30)) {
@@ -1265,11 +1276,11 @@ fn colorize_pixel(
   // the escape-z DIRECTION stays the center's (like the
   // bilinear path, no per-iteration angle doubling).
   if (analyticTag && parameters.aaAnalytic > 0.5) {
-    let S = textureLoad(rawTex, sourceCoord, 8, 0).r;
-    let m1 = vec2<f32>(textureLoad(rawTex, sourceCoord, 9, 0).r,
-                       textureLoad(rawTex, sourceCoord, 10, 0).r);
-    let sndLog = textureLoad(rawTex, sourceCoord, 11, 0).r;
-    let sndAngle = textureLoad(rawTex, sourceCoord, 12, 0).r;
+    let S = textureLoad(rawTex, raw_coord(sourceCoord), 8, 0).r;
+    let m1 = vec2<f32>(textureLoad(rawTex, raw_coord(sourceCoord), 9, 0).r,
+                       textureLoad(rawTex, raw_coord(sourceCoord), 10, 0).r);
+    let sndLog = textureLoad(rawTex, raw_coord(sourceCoord), 11, 0).r;
+    let sndAngle = textureLoad(rawTex, raw_coord(sourceCoord), 12, 0).r;
     // Finite guard (mirrors the reseed): a non-finite payload must fall back
     // to the center color, never feed the reconstruction.
     if (abs(S) < 1e6

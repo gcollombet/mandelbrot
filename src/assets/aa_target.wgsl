@@ -37,6 +37,10 @@ struct AaParams {
   aaFull: f32,          // 1 = FULL AA: every texel gets the whole budget (A/B vs adaptive)
   iterationPaletteCurve: f32, // 0 linear, 1 soft root, 2 logarithmic, 3 quadratic
   _pad2: f32,
+  rawOriginX: f32,      // unused here; shared buffer with the reseed pass
+  rawOriginY: f32,
+  _pad3: f32,
+  _pad4: f32,
 };
 
 // Boundary-distance ramp (device px): full sample count within R_FULL, tapering

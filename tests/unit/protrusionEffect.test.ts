@@ -98,7 +98,7 @@ describe('palette protrusion effect', () => {
     expect(settings).toContain('<DenseField label="Protubérances géométriques" :min="0" :max="1"');
     expect(settings).toContain('label="Période géométrique"');
 
-    expect(engine).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 96');
+    expect(engine).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 100');
     expect(engine).toContain('renderOptions.protrusionPhase ?? 0,   // 68: protrusionPhase');
     expect(engine).toContain('renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness');
     expect(engine).toContain('renderOptions.protrusionGeometryMix ?? 0,');
@@ -109,7 +109,7 @@ describe('palette protrusion effect', () => {
     expect(shader).toContain('protrusionStrength: f32');
     expect(shader).toContain('protrusionGeometryMix: f32');
     expect(shader).toContain('protrusionPeriod: f32');
-    expect(preview).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 96;');
+    expect(preview).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 100;');
     expect(preview).toContain('device.queue.writeBuffer(uniformBuffer, 68 * 4');
     expect(preview).toContain('props.protrusionPhase ?? 0');
     expect(preview).toContain('props.protrusionSharpness ?? 2');

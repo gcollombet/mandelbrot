@@ -15,6 +15,10 @@ struct ResolveUniforms {
   aspect: f32,
   angle: f32,
   trapLayerBase: f32, // -1 when no true-orbit payload is allocated
+  rawOriginX: f32,    // toroidal origin of the raw texture (pan by offset)
+  rawOriginY: f32,
+  _pad0: f32,
+  _pad1: f32,
 };
 
 @group(0) @binding(0) var<uniform> uni: ResolveUniforms;
@@ -56,8 +60,14 @@ fn finite_scalar(value: f32) -> bool {
   return value == value && abs(value) < 3.402823e38;
 }
 
+fn raw_coord(coord: vec2<i32>) -> vec2<i32> {
+  let dims = vec2<i32>(textureDimensions(rawTex));
+  let origin = vec2<i32>(i32(uni.rawOriginX), i32(uni.rawOriginY));
+  return ((coord + origin) % dims + dims) % dims;
+}
+
 fn load_layer(coord: vec2<i32>, layer: i32) -> f32 {
-  return textureLoad(rawTex, coord, layer, 0).r;
+  return textureLoad(rawTex, raw_coord(coord), layer, 0).r;
 }
 
 fn invalid_trap_payload() -> vec4<f32> {

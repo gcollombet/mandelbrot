@@ -47,7 +47,7 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 }
 
 const PREVIEW_MU = 1000000;
-const COLOR_UNIFORM_FLOAT_COUNT = 96;
+const COLOR_UNIFORM_FLOAT_COUNT = 100;
 /** Number of synthetic iterations to display. */
 const ITER_COUNT = 100;
 /**

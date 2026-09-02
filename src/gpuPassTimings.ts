@@ -38,7 +38,7 @@ export const PASS_SLOTS: readonly GpuPassSlot[] = [
   {
     key: 'reproject',
     label: 'Reprojection (pan)',
-    help: 'Décalage entier du cache brut lors d\'un pan afin de réutiliser le calcul.',
+    help: 'Pan par décalage d\'origine torique du cache brut : seule la bande exposée est stampée.',
     timing: 'end-gap',
   },
   {
