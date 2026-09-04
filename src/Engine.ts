@@ -155,6 +155,19 @@ const MOBIUS_COEFF_FLOATS = 21
 // default maxStorageBufferBindingSize (128 MiB); the device now also raises that
 // limit to the adapter's maximum, so this cap is comfortably inside it.
 const ORBIT_STEP_CAPACITY = 10_000_000
+
+interface GpuSetupProfile {
+    raiseLimits: boolean   // request the adapter's maxBufferSize & co. instead of WebGPU defaults
+    timestamps: boolean    // request 'timestamp-query' when the adapter offers it
+}
+
+class GpuDeviceLostDuringSetupError extends Error {
+    readonly info: GPUDeviceLostInfo
+    constructor(info: GPUDeviceLostInfo) {
+        super(`GPU device lost during setup: ${info.reason} ${info.message}`)
+        this.info = info
+    }
+}
 const COLOR_UNIFORM_FLOAT_COUNT = 100
 /** Slots 96/97: toroidal origin of the raw texture (analytic-AA payload reads). */
 const COLOR_UNIFORM_RAW_ORIGIN_SLOT = 96
@@ -747,6 +760,7 @@ export class Engine {
     private gpuMemoryBudgetBytes = 0
     private lastSurfaceReductionKey = ''
     private destroyed = false
+    private gpuSetupInProgress = false
     private readonly gpuErrorHandler?: (message: string) => void
 
     // resources
@@ -2080,9 +2094,57 @@ export class Engine {
             `[Engine] conservative GPU working-set budget: ${formatGpuBytes(this.gpuMemoryBudgetBytes)}`
             + ` (${mobileLike ? 'mobile' : 'desktop'})`,
         )
+        // First attempt: everything the adapter offers. Some Windows/D3D12
+        // setups (seen on an NVIDIA RTX 30xx, Edge) drop the device during
+        // setup with reason=unknown / "A valid external Instance reference no
+        // longer exists"; retry once on a fresh adapter with the safe profile
+        // (default limits, no timestamp queries) before giving up.
+        const profiles: GpuSetupProfile[] = [
+            { raiseLimits: true, timestamps: true },
+            { raiseLimits: false, timestamps: false },
+        ]
+        this.gpuSetupInProgress = true
+        try {
+            for (let attempt = 0; attempt < profiles.length; attempt++) {
+                try {
+                    await this.setupGpuDevice(profiles[attempt])
+                    break
+                } catch (error) {
+                    const isLastAttempt = attempt === profiles.length - 1
+                    if (!(error instanceof GpuDeviceLostDuringSetupError) || isLastAttempt || this.destroyed) {
+                        if (error instanceof GpuDeviceLostDuringSetupError) {
+                            throw new Error(
+                                `Initialisation WebGPU impossible : le périphérique GPU a été perdu pendant l'initialisation`
+                                + ` (${error.info.reason || 'raison inconnue'}${error.info.message ? ` : ${error.info.message}` : ''}).`
+                                + ' Mettez à jour le pilote graphique, ou essayez de désactiver Vulkan / d\'activer'
+                                + ' « Unsafe WebGPU Support » dans chrome://flags ou edge://flags.',
+                            )
+                        }
+                        throw error
+                    }
+                    console.warn(
+                        `[Engine] GPU device lost during setup (reason=${error.info.reason}, message=${error.info.message});`
+                        + ' retrying with the safe profile (default limits, timestamps OFF)',
+                    )
+                    this.inplacePipelineCache.clear()
+                    this.adapter = await navigator.gpu.requestAdapter()
+                    if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
+                }
+            }
+        } finally {
+            this.gpuSetupInProgress = false
+        }
+    }
+
+    /**
+     * Request a device with the given profile and build every GPU resource on
+     * it. Any device loss while this runs rejects with
+     * GpuDeviceLostDuringSetupError so initialize() can retry more conservatively.
+     */
+    private async setupGpuDevice(profile: GpuSetupProfile): Promise<void> {
         // Per-pass GPU timing needs the optional 'timestamp-query' feature. Often
         // absent on mobile (iOS/Safari) — the panel degrades to global metrics.
-        this.timestampCapable = this.adapter.features.has('timestamp-query')
+        this.timestampCapable = profile.timestamps && this.adapter.features.has('timestamp-query')
         const requiredFeatures: GPUFeatureName[] = []
         if (this.timestampCapable) requiredFeatures.push('timestamp-query')
 
@@ -2103,7 +2165,7 @@ export class Engine {
         const requiredLimits: Record<string, number> = {}
         for (const name of LIMITS_TO_RAISE) {
             const supported = adapterLimits[name]
-            if (typeof supported === 'number' && Number.isFinite(supported)) {
+            if (profile.raiseLimits && typeof supported === 'number' && Number.isFinite(supported)) {
                 requiredLimits[name] = supported
             }
         }
@@ -2123,9 +2185,15 @@ export class Engine {
         this.timestampsEnabled = this.timestampCapable
         console.info(`[Engine] timestamp-query: available=${this.timestampCapable} → per-pass timing ${this.timestampsEnabled ? 'ON' : 'OFF'}`)
         this.device.label = 'Engine Device'
-        this.device.lost.then((info) => {
+        const device = this.device
+        const lostDuringSetup = device.lost.then((info) => {
+            throw new GpuDeviceLostDuringSetupError(info)
+        })
+        device.lost.then((info) => {
             console.warn(`GPU device lost: reason=${info.reason}, message=${info.message}`)
-            if (!this.destroyed) {
+            // A device superseded by a retry, or lost while its own setup is
+            // still racing below, is reported by the setup path instead.
+            if (!this.destroyed && this.device === device && !this.gpuSetupInProgress) {
                 this.reportGpuError(
                     `Le périphérique GPU a été perdu (${info.reason || 'raison inconnue'})`
                     + `${info.message ? ` : ${info.message}` : '.'}`,
@@ -2326,11 +2394,12 @@ export class Engine {
             label: 'Engine UniformBuffer Merge',
         })
 
-        await this._createPipelines()
+        await Promise.race([this._createPipelines(), lostDuringSetup])
         this.resize()
-        const internalError = await this.device.popErrorScope()
-        const validationError = await this.device.popErrorScope()
-        const memoryError = await this.device.popErrorScope()
+        const [internalError, validationError, memoryError] = await Promise.race([
+            Promise.all([this.device.popErrorScope(), this.device.popErrorScope(), this.device.popErrorScope()]),
+            lostDuringSetup,
+        ])
         const setupError = memoryError ?? validationError ?? internalError
         if (setupError) {
             const kind = memoryError
@@ -2513,8 +2582,16 @@ export class Engine {
         // bindGroupInplace (built from inplaceBindGroupLayout) is compatible with
         // every one. pipelineInplace stays the deep-capable default (used as the
         // "ready" guard and for backward compatibility).
-        this.pipelineInplace = this.getInplacePipeline(true)
-        this.getInplacePipeline(false)
+        // Compiled asynchronously: the fused kernel is ~200 KB of WGSL and its
+        // two specialisations, compiled synchronously, held the GPU process
+        // long enough on Windows/D3D12 (DXC on NVIDIA) to trip Chromium's GPU
+        // watchdog — the device came back lost with reason=unknown and
+        // "A valid external Instance reference no longer exists".
+        const [pipelineDeep] = await Promise.all([
+            this.precompileInplacePipeline(true),
+            this.precompileInplacePipeline(false),
+        ])
+        this.pipelineInplace = pipelineDeep
 
         // ── Utility compute pass (pan/clear ping-pong A→B) ───────────────
         // Compute port of the fragment brush: reads A, rewrites B wholesale
@@ -2806,7 +2883,7 @@ export class Engine {
     // Lazily build + cache a specialized in-place kernel for the given override
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
-    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled, periodicScheduling = this.periodicSchedulingEnabled): GPUComputePipeline {
+    private inplacePipelineSpec(deep: boolean, portfolio: boolean, renorm: boolean, periodicScheduling: boolean): { key: string, descriptor: GPUComputePipelineDescriptor } {
         const dynamicValidity = this.dynamicBlockValidity && this.approximationMode === 'auto'
         const radialValidity = dynamicValidity
             && this.incrementalReferenceTable
@@ -2817,9 +2894,9 @@ export class Engine {
         // kernel so ordinary rendering pays none of its workgroup atomics.
         const workStats = this.workStatsEnabled || dynamicStats
         const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}i${periodicScheduling ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}w${workStats ? 1 : 0}`
-        let pipeline = this.inplacePipelineCache.get(key)
-        if (!pipeline) {
-            pipeline = this.device.createComputePipeline({
+        return {
+            key,
+            descriptor: {
                 layout: this.inplacePipelineLayout!,
                 compute: {
                     module: this.inplaceModule!,
@@ -2836,7 +2913,27 @@ export class Engine {
                     },
                 },
                 label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, periodicScheduling=${periodicScheduling}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats})`,
-            })
+            },
+        }
+    }
+
+    // Init-time variant: compiles off the GPU-process main thread so a slow
+    // driver compile cannot starve the browser's GPU watchdog.
+    private async precompileInplacePipeline(deep: boolean): Promise<GPUComputePipeline> {
+        const { key, descriptor } = this.inplacePipelineSpec(deep, this.portfolioEnabled, this.renormEnabled, this.periodicSchedulingEnabled)
+        let pipeline = this.inplacePipelineCache.get(key)
+        if (!pipeline) {
+            pipeline = await this.device.createComputePipelineAsync(descriptor)
+            this.inplacePipelineCache.set(key, pipeline)
+        }
+        return pipeline
+    }
+
+    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled, periodicScheduling = this.periodicSchedulingEnabled): GPUComputePipeline {
+        const { key, descriptor } = this.inplacePipelineSpec(deep, portfolio, renorm, periodicScheduling)
+        let pipeline = this.inplacePipelineCache.get(key)
+        if (!pipeline) {
+            pipeline = this.device.createComputePipeline(descriptor)
             this.inplacePipelineCache.set(key, pipeline)
         }
         return pipeline
