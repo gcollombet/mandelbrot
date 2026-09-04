@@ -7,8 +7,8 @@ export {
 
 export const RADIAL_REJECTION_LABELS = [
   'rayon affine',
-  'cap intrinsèque (dc/dz)',
-  'pôle rationnel',
+  'cap intrinsèque (dc/dz/pôle)',
+  'réservé v3',
   'réservé v2',
   'certificat mort / non fini',
   'réservé',

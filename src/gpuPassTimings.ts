@@ -26,7 +26,7 @@ export const PASS_SLOTS: readonly GpuPassSlot[] = [
   {
     key: 'merge',
     label: 'Merge (zoom)',
-    help: 'Copies de préparation puis fusion résolu+figé en fin de zoom. Ne tourne qu\'à l\'arrêt d\'un zoom.',
+    help: 'Fusion résolu+figé vers un troisième display puis permutation, sans copie préparatoire. Ne tourne qu\'à l\'arrêt d\'un zoom.',
     timing: 'explicit-span',
   },
   {

@@ -12,13 +12,13 @@ function methodSource(name: string, nextName: string): string {
 }
 
 describe('tiled keyframe engine contract', () => {
-  it('allocates raw/resolve/scratch at tile size and only both keyframes at full size', () => {
+  it('allocates raw/resolve at tile size, both keyframes at full size, and no merge display', () => {
     expect(engine).toContain('const textureSize = this.tiledKeyframePlan?.tileSide ?? fullTextureSize')
     expect(engine).toContain("this.resolvedDisplay = createDisplaySet('Engine ResolvedDisplay')")
     expect(engine).toContain("? createDisplaySet('Engine TiledLiveKeyframe', fullTextureSize)")
     expect(engine).toContain("this.tiledKeyframePlan ? 'Engine TiledFrozenKeyframe'")
     expect(engine).toContain("createLayeredTexture('Engine RawTexture (A)', rawLayers")
-    expect(engine).toContain("size: { width: textureSize, height: textureSize }")
+    expect(engine).toContain("this.mergeDisplay = this.tiledKeyframePlan ? undefined : createDisplaySet('Engine MergeDisplay')")
   })
 
   it('exposes allocation-derived bytes per texel for both scales', () => {

@@ -12,10 +12,10 @@ import {
 
 describe('GPU compatibility budget', () => {
     it('accounts for optional orbit payloads', () => {
-        expect(neutralTextureBytesPerPixel(false, false)).toBe(176)
-        expect(neutralTextureBytesPerPixel(true, false)).toBe(240)
-        expect(neutralTextureBytesPerPixel(false, true)).toBe(248)
-        expect(neutralTextureBytesPerPixel(true, true)).toBe(312)
+        expect(neutralTextureBytesPerPixel(false, false)).toBe(188)
+        expect(neutralTextureBytesPerPixel(true, false)).toBe(252)
+        expect(neutralTextureBytesPerPixel(false, true)).toBe(260)
+        expect(neutralTextureBytesPerPixel(true, true)).toBe(324)
     })
 
     it('keeps a surface that fits and reduces a high-DPR mobile surface', () => {

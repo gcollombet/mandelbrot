@@ -126,7 +126,7 @@ const ENABLE_SECOND_ORDER_GATE: bool = false;
 // carrying its control flow and private state in every block-mode invocation.
 override ENABLE_DYNAMIC_VALIDITY: bool = false;
 
-// Reference-owned intrinsic radial layout v3. When false, Auto keeps evaluating the
+// Reference-owned intrinsic radial layout v4. When false, Auto keeps evaluating the
 // packed-v1 envelopes used by the explicit rollback path.
 override ENABLE_RADIAL_VALIDITY: bool = false;
 
@@ -351,8 +351,8 @@ const VALIDITY_VERSION: u32 = 1u;
 const VALIDITY_WORDS_PER_BLOCK: u32 = 24u;
 const VALIDITY_WORDS_PER_TIER: u32 = 6u;
 const VALIDITY_SLOPES: array<f32, 4> = array<f32, 4>(0.0, -0.5, -1.0, -2.0);
-const RADIAL_VALIDITY_VERSION: u32 = 3u;
-const RADIAL_VALIDITY_WORDS_PER_BLOCK: u32 = 21u;
+const RADIAL_VALIDITY_VERSION: u32 = 4u;
+const RADIAL_VALIDITY_WORDS_PER_BLOCK: u32 = 19u;
 
 struct DynamicValidityEvaluation {
   log2Dc: f32,
@@ -571,14 +571,27 @@ fn radial_validity_float(blockIndex: u32, word: u32) -> f32 {
   return bitcast<f32>(radial_validity_word(blockIndex, word));
 }
 
-// Operation-for-operation mirror of RadialValidityV3::affine_radius_log2.
+// Sufficient dyadic accept, then the original affine-radius fallback.
 // alpha was rounded down and beta up by Rust before serialization.
-fn conservative_affine_radius_log2(alpha: f32, alphaExp: i32, beta: f32, log2Dc: f32) -> f32 {
+fn conservative_affine_radius_log2(alpha: f32, alphaExp: i32, beta: f32, log2Dc: f32, log2Dz: f32) -> f32 {
   let alphaBits = bitcast<u32>(alpha) & 0x7fffffffu;
   let betaBits = bitcast<u32>(beta) & 0x7fffffffu;
   if (!(alpha > 0.0) || alphaBits >= 0x7f800000u
       || !(beta >= 0.0) || betaBits >= 0x7f800000u) {
     return validity_neg_inf();
+  }
+  // Sufficient dyadic certificate, no transcendental operations:
+  // alpha >= 2^a; |dz| <= 2^(a-2), beta*|dc| <= 2^(a-2).
+  // Half the budget remains unused, including at the f32/log boundaries.
+  // Subnormal inputs and very large integer exponents use the full fallback.
+  let ae = (alphaBits >> 23u) & 255u;
+  let be = (betaBits >> 23u) & 255u;
+  if (ae > 0u && abs(f32(alphaExp)) < 1000000.0 && (beta == 0.0 || be > 0u)) {
+    let a = f32(i32(ae) - 127 + alphaExp) - 2.0;
+    let bUpper = f32(i32(be) - 126);
+    if (log2Dz <= a && (beta == 0.0 || validity_next_up(log2Dc + bUpper) <= a)) {
+      return a;
+    }
   }
   let log2Alpha = validity_next_down(
     validity_next_down(log2(alpha)) + f32(alphaExp),
@@ -601,21 +614,21 @@ fn conservative_affine_radius_log2(alpha: f32, alphaExp: i32, beta: f32, log2Dc:
   return validity_next_down(log2Alpha + validity_next_down(log2(remaining)));
 }
 
-fn radial_affine_radius_log2(blockIndex: u32, log2Dc: f32) -> f32 {
+fn radial_affine_radius_log2(blockIndex: u32, log2Dc: f32, log2Dz: f32) -> f32 {
   return conservative_affine_radius_log2(
     radial_validity_float(blockIndex, 0u),
     bitcast<i32>(radial_validity_word(blockIndex, 1u)),
     radial_validity_float(blockIndex, 2u),
-    log2Dc,
+    log2Dc, log2Dz,
   );
 }
 
-fn bla_affine_radius_log2(block: BlaStep, log2Dc: f32) -> f32 {
+fn bla_affine_radius_log2(block: BlaStep, log2Dc: f32, log2Dz: f32) -> f32 {
   return conservative_affine_radius_log2(
     block.radius_alpha,
     block.alpha_exp,
     block.radius_beta,
-    log2Dc,
+    log2Dc, log2Dz,
   );
 }
 
@@ -632,7 +645,7 @@ fn evaluate_radial_validity_logs(
     );
   }
   if (tier == 0u) {
-    let radius = radial_affine_radius_log2(blockIndex, log2Dc);
+    let radius = radial_affine_radius_log2(blockIndex, log2Dc, log2Dz);
     let accepts = !validity_is_neg_inf(radius) && log2Dz <= radius;
     return DynamicValidityEvaluation(
       log2Dc,
@@ -644,42 +657,32 @@ fn evaluate_radial_validity_logs(
     );
   }
 
-  let tierBase = 3u + (tier - 1u) * 6u;
+  // Tier 4 is the independent quadratic proof at words 15..18.
+  let tierBase = 3u + (tier - 1u) * 4u;
   var anyLive = false;
-  var anyDc = false;
-  var anyPole = false;
   var bestRadius = negativeInfinity;
   for (var candidate = 0u; candidate < 2u; candidate++) {
-    let base = tierBase + candidate * 3u;
+    let base = tierBase + candidate * 2u;
     let maxDz = radial_validity_float(blockIndex, base);
     let maxDc = radial_validity_float(blockIndex, base + 1u);
-    let pole = radial_validity_float(blockIndex, base + 2u);
     if (validity_is_neg_inf(maxDz) || validity_is_neg_inf(maxDc)
-        || maxDz != maxDz || maxDc != maxDc || pole != pole) {
+        || maxDz != maxDz || maxDc != maxDc) {
       continue;
     }
     anyLive = true;
-    let radius = min(maxDz, pole);
+    let radius = maxDz;
     bestRadius = max(bestRadius, radius);
     if (log2Dc > maxDc) {
       continue;
     }
-    anyDc = true;
-    if (log2Dz > pole) {
-      continue;
-    }
-    anyPole = true;
     if (log2Dz <= maxDz) {
       return DynamicValidityEvaluation(
         log2Dc, log2Dz, radius, true, VALIDITY_REJECT_NONE, candidate == 1u,
       );
     }
   }
-  let rejection = select(
-    select(VALIDITY_REJECT_DERIVATIVE, VALIDITY_REJECT_PURE_C, anyDc && !anyPole),
-    VALIDITY_REJECT_CAUCHY,
-    !anyLive,
-  );
+  // V4 combines geometric and pole caps; no separate pole attribution.
+  let rejection = select(VALIDITY_REJECT_DERIVATIVE, VALIDITY_REJECT_CAUCHY, !anyLive);
   return DynamicValidityEvaluation(
     log2Dc,
     log2Dz,
@@ -1236,7 +1239,7 @@ fn try_apply_bla(ref_i: ptr<function, i32>, dz: ptr<function, vec2<f32>>, derM: 
         // The serialized radius is outward-rounded (alpha down, beta up), and
         // every gate operation is directed toward rejection. This also makes a
         // dead/non-finite Rust bound unconditionally reject.
-        let radiusLog2 = bla_affine_radius_log2(bla, log2Dc);
+        let radiusLog2 = bla_affine_radius_log2(bla, log2Dc, log2Dz);
         if (!validity_is_neg_inf(radiusLog2) && log2Dz <= radiusLog2) {
           if (mandelbrot.approximationMode >= 1.5) {
             // ── Padé [1/1] (in-place compute path) ──
@@ -2217,7 +2220,7 @@ fn try_apply_bla_deep(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: pt
       let slot = shiftedRef >> u32(skip0Log + level);
       if (u32(slot) < levelInfo.count) {
         let bla = mandelbrotBlaSuite[i32(levelInfo.offset) + slot];
-        let radiusLog2 = bla_affine_radius_log2(bla, log2_dc);
+        let radiusLog2 = bla_affine_radius_log2(bla, log2_dc, log2_dz);
         if (!validity_is_neg_inf(radiusLog2) && log2_dz <= radiusLog2) {
           let a = fe(vec2<f32>(bla.ax, bla.ay), bla.ab_exp);
           let b = fe(vec2<f32>(bla.bx, bla.by), bla.ab_exp);
@@ -2707,6 +2710,17 @@ fn try_apply_mobius(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<
 // per-thread |dz|, exactly like the pre-existing radius test. Rational tags
 // (0-2) get the plain-f32 fast path; the jet tag always evaluates in fe (deep
 // is where it fires).
+// Initial relative cost priors, including derivative transport; not GPU timings.
+// Centralized so device measurements can replace them without changing proofs.
+fn auto_evaluation_cost(tag: i32, plainF32: bool) -> u32 {
+  var cost = 3u;
+  if (tag == 1) { cost = 10u; }
+  if (tag == 2) { cost = 18u; }
+  if (tag == 3) { cost = 24u; }
+  if (tag == 4) { cost = 12u; }
+  return select(2u * cost, cost, plainF32);
+}
+
 fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr<function, vec2<f32>>, derS: ptr<function, f32>, derSLo: ptr<function, f32>, derInvScale: ptr<function, f32>, epsThreshold: ptr<function, f32>, logEpsilon: f32, zOut: ptr<function, vec2<f32>>, dc: fe, dc2: fe, dc3: fe, dynamicLog2Dc: f32, dynamicLog2Dz: f32, bailout: f32, skip0Log: i32, maxIterI: i32, lvlR: ptr<function, array<f32, JET_MAX_LEVELS>>, dcF: vec2<f32>, dcF2: vec2<f32>, dcF3: vec2<f32>, f32Ok: bool, f32OkJet: bool, hint: ptr<function, i32>, snd: ptr<function, vec2<f32>>, sndScale: ptr<function, f32>) -> i32 {
   if (*ref_i <= 0) {
     return 0;
@@ -2724,7 +2738,7 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
   level = min(level, *hint + JET_LEVEL_HINT_UP);
   var shadowDecisionResolved = false;
   while (level >= 0) {
-    let skip = i32(1u << u32(skip0Log + level));
+    var skip = i32(1u << u32(skip0Log + level));
     let withinLevelRadius = select(
       log2_dz < (*lvlR)[level],
       dynamicLog2Dz <= (*lvlR)[level],
@@ -2736,7 +2750,7 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
       let levelInfo = mandelbrotJetLevels[level];
       let slot = shiftedRef >> u32(skip0Log + level);
       if (u32(slot) < levelInfo.count) {
-        let entry = i32(levelInfo.offset) + slot;
+        var entry = i32(levelInfo.offset) + slot;
         // The legacy vec4 remains bound for rollback/shadowing. Dynamic mode
         // uses only its orbit-static f32-safe bit; tier validity comes from the
         // packed proof before any coefficient prefix is fetched.
@@ -2749,7 +2763,7 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
           // Radial-v3 sidecar: y/w are per-block maxima across the intrinsic
           // Affine/Padé/c+/Jet certificates, and z is the coefficient f32-safe
           // bit. This is only a rejection prefilter; the accepting tier always
-          // comes from the 21-word two-candidate certificate.
+          // comes from the 19-word two-candidate certificate.
           sndTag = 0.0;
           safeFlag = radii.z;
           let intrinsicCapReject = dynamicLog2Dc > radii.y;
@@ -2760,7 +2774,7 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
             // The sidecar proves only that every intrinsic candidate rejects;
             // it does not identify which candidate/tier proof was limiting.
             // Keep the attribution honest and leave detailed causes to the
-            // full 21-word certificate evaluator.
+            // full 19-word certificate evaluator.
             g_dynamicRejects[VALIDITY_REJECT_SUMMARY] += 1u;
           }
         } else if (dynamicValidity && radii.z < 0.0) {
@@ -2874,6 +2888,52 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
         } else {
           tag = dynamicTag;
         }
+        if (dynamicValidity && ENABLE_RADIAL_VALIDITY && !dynamicShadow && !dynamicSummaryReject) {
+          // Target the expensive/failing choices only: no fifth probe on affine
+          // or plain Padé hits. Order 2 has its own value AND derivative proof.
+          let quadraticF32 = f32Ok && safeFlag > 0.5 && log2_dz > -100.0 && f32OkJet;
+          let currentF32 = f32Ok && safeFlag > 0.5 && log2_dz > -100.0 && (tag <= 2 || f32OkJet);
+          let quadraticCheaper = auto_evaluation_cost(4, quadraticF32) < auto_evaluation_cost(tag, currentF32);
+          if (tag < 0 || (tag >= 2 && quadraticCheaper)) {
+            let quadratic = evaluate_radial_validity_logs(u32(entry), 4u, dynamicLog2Dc, dynamicLog2Dz);
+            g_workBudget += 1u;
+            if (quadratic.accepts) { tag = 4; }
+            if (ENABLE_DYNAMIC_STATS) {
+              g_dynamicTierAttempts[3] += 1u;
+              g_dynamicTierAccepts[3] += select(0u, 1u, quadratic.accepts);
+            }
+          }
+          if (tag > 0) {
+            let parentF32 = f32Ok && safeFlag > 0.5 && log2_dz > -100.0 && (tag <= 2 || f32OkJet);
+            let parentCost = auto_evaluation_cost(tag, parentF32);
+            // One child lookahead, retaining the parent when it rejects.
+            // Compare cost per covered iteration with explicit probe overhead.
+            if (level > 0 && parentCost > 2u * (auto_evaluation_cost(0, parentF32) + 2u)) {
+              let childLevel = mandelbrotJetLevels[level - 1];
+              let childSlot = shiftedRef >> u32(skip0Log + level - 1);
+              if (u32(childSlot) < childLevel.count) {
+                let childEntry = i32(childLevel.offset) + childSlot;
+                let child = evaluate_radial_validity_logs(u32(childEntry), 0u, dynamicLog2Dc, dynamicLog2Dz);
+                g_workBudget += 2u;
+                if (child.accepts) {
+                  let childSafe = mandelbrotJetRadii[childEntry].v.z;
+                  let childF32 = f32Ok && childSafe > 0.5 && log2_dz > -100.0;
+                  if (2u * (auto_evaluation_cost(0, childF32) + 2u) < parentCost) {
+                    tag = 0;
+                    entry = childEntry;
+                    safeFlag = childSafe;
+                    skip /= 2;
+                    level -= 1;
+                  }
+                }
+              }
+            }
+            let chosenF32 = f32Ok && safeFlag > 0.5 && log2_dz > -100.0 && (tag <= 2 || f32OkJet);
+            // An ordinary perturbation step remains preferable to a tiny,
+            // expensive jump. This is a cost heuristic, never a validity test.
+            if (auto_evaluation_cost(tag, chosenF32) >= u32(skip)) { return 0; }
+          }
+        }
         if (tag >= 0) {
           let base = entry * UNIFIED_COEFF_STRIDE;
           var phi: fe;
@@ -2937,6 +2997,21 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                   0,
                 );
               }
+            } else if (tag == 4) {
+              let cd = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
+              let n2 = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
+              let ap = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
+              let cf = jet_coeff_f32(mandelbrotJetSuite[base + 6]);
+              let a20 = n2 - cmul(cd, ca);
+              let a11 = ap - cmul(cb, cd) - cmul(cf, ca);
+              let a02 = -cmul(cf, cb);
+              let p1 = ca + cmul(a11, dcF);
+              phi = fe_from_vec(cmul(cb, dcF) + cmul(a02, dcF2) + cmul(dzF, p1 + cmul(a20, dzF)), 0);
+              pdz = fe_from_vec(p1 + 2.0 * cmul(a20, dzF), 0);
+              pdc = fe_from_vec(cb + 2.0 * cmul(a02, dcF) + cmul(a11, dzF), 0);
+              mzz = fe_from_vec(2.0 * a20, 0);
+              mzc = fe_from_vec(a11, 0);
+              mcc = fe_from_vec(2.0 * a02, 0);
             } else {
               // Jet tier, plain-f32: the same identity reconstruction and
               // order-3 Horner rows as the fe branch below (a20 = N₂ − D·A,
@@ -3014,6 +3089,21 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                   fe_neg(fe_cmul(pdz, fe_cmul(dcden, invDen))),
                 );
               }
+            } else if (tag == 4) {
+              let cd = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
+              let n2 = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
+              let ap = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
+              let cf = jet_coeff_fe(mandelbrotJetSuite[base + 6]);
+              let a20 = fe_add(n2, fe_neg(fe_cmul(cd, ca)));
+              let a11 = fe_add3(ap, fe_neg(fe_cmul(cb, cd)), fe_neg(fe_cmul(cf, ca)));
+              let a02 = fe_neg(fe_cmul(cf, cb));
+              let p1 = fe_add(ca, fe_cmul(a11, dc));
+              phi = fe_add3(fe_cmul(cb, dc), fe_cmul(a02, dc2), fe_cmul(*dz, fe_add(p1, fe_cmul(a20, *dz))));
+              pdz = fe_add(p1, fe_scale(fe_cmul(a20, *dz), 2.0));
+              pdc = fe_add3(cb, fe_scale(fe_cmul(a02, dc), 2.0), fe_cmul(a11, *dz));
+              mzz = fe_scale(a20, 2.0);
+              mzc = a11;
+              mcc = fe_scale(a02, 2.0);
             } else {
               // Jet tier: full 108 B record, [2/1] F-form identity
               // reconstruction (a20 = N₂ − D·A, a11 = A′ − B·D − F·A,
@@ -3055,7 +3145,7 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               g_tierApps[0] += select(0u, 1u, tag == 0);
               g_tierApps[1] += select(0u, 1u, tag == 1);
               g_tierApps[2] += select(0u, 1u, tag == 2);
-              g_tierApps[3] += select(0u, 1u, tag == 3);
+              g_tierApps[3] += select(0u, 1u, tag >= 3);
               if (ENABLE_DYNAMIC_STATS && dynamicValidity && !dynamicShadow) {
                 g_dynamicSkipBuckets[0] += select(0u, 1u, skip < 16);
                 g_dynamicSkipBuckets[1] += select(0u, 1u, skip >= 16 && skip < 256);
@@ -3072,7 +3162,8 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
               var wx = select(0u, 1u, tag == 0)
                      + select(0u, 2u, tag == 1)
                      + select(0u, 3u, tag == 2)
-                     + select(0u, 4u, tag == 3);
+                     + select(0u, 4u, tag == 3)
+                     + select(0u, 2u, tag == 4);
               wx += select(0u, wx + 1u, !usedF32);
               g_workBudget += wx;
               // Phase D: keep z″ on its own logarithmic scale. A shared 2·S

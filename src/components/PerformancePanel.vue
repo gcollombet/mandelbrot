@@ -294,7 +294,7 @@ const TIER_META_BY_MODE: Record<number, TierMeta[]> = {
     { label: 'Affine (BLA)', color: '#7dd3a8' },
     { label: 'Padé [2/1]', color: '#e0b45c' },
     { label: 'Möbius-c⁺ [2/1]', color: '#6fb7e8' },
-    { label: 'Jet ordre 3', color: '#b58ae0' },
+    { label: 'Jet ordres 2–3', color: '#b58ae0' },
   ],
   5: [
     { label: 'Affine (BLA)', color: '#7dd3a8' },

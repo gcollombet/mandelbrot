@@ -1,4 +1,4 @@
-// Merge a live and frozen typed display set into the frozen destination.
+// Merge a live and frozen typed display set into a separate destination, then swapped into the frozen role.
 // The selected value, geometry, metadata and orbit gradient always travel
 // together — a candidate is picked whole, never channel by channel.
 

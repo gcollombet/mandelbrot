@@ -1501,7 +1501,7 @@ fn unified_radial_validity_v3_from_sources(
     let pure_c = unified_pure_c_derivations(blk, md, epsilon);
     let poles = unified_pole_line_derivations(blk);
     let contexts = unified_cauchy_contexts(blk, epsilon);
-    serialize_radial_validity_v3(
+    let mut out = serialize_radial_validity_v3(
         AffineCertificateSource {
             alpha: epsilon * affine.alpha_base,
             beta: affine.beta,
@@ -1511,7 +1511,28 @@ fn unified_radial_validity_v3_from_sources(
         &poles,
         &sources,
         &contexts,
-    )
+    );
+    // Same analytic tail (degrees > 6), but all cubic terms remain in REST.
+    // Preserve the c02 reconstruction fallback, exactly as for the cubic tier.
+    let mut q = unified_remainder_moduli(blk, md)[TIER_JET];
+    for (n, &(i, j)) in JET_MONOMIALS.iter().enumerate() {
+        if i + j == 3 {
+            q[n] = md.log2_a[n];
+        }
+    }
+    let la = contexts[TIER_JET].log2_a10;
+    let value = derive_value_radius_lines(&q, la, epsilon, 0.0);
+    let derivative = derive_derivative_radius_lines(&q, la, epsilon, None);
+    let quadratic_low = intersect_value_derivative_lines(value, derivative);
+    let quadratic_c = derive_pure_c_threshold(&q, contexts[TIER_JET].log2_b, epsilon, 0.0);
+    out.quadratic = crate::validity::compile_radial_tier(
+        &quadratic_low,
+        &quadratic_c,
+        &poles[TIER_JET],
+        &sources[TIER_JET],
+        contexts[TIER_JET],
+    );
+    out
 }
 
 /// Compile the active radial-v3 record directly from the block's reference
@@ -1758,6 +1779,27 @@ pub struct UnifiedCpuState {
 
 fn cfe_scale(value: CFe, scale: f64) -> CFe {
     value.mul(CFe::from_c(scale, 0.0))
+}
+
+/// Order-2 evaluator and all partials, mirroring the compact GPU branch.
+pub fn unified_quadratic_partials(block: &UnifiedBlock, z: CFe, c: CFe) -> UnifiedTierPartials {
+    let a20 = block.a20();
+    let a11 = block.a11();
+    let a02 = block.a02();
+    let p1 = block.m.a.add(a11.mul(c));
+    UnifiedTierPartials {
+        value: block
+            .m
+            .b
+            .mul(c)
+            .add(a02.mul(c.mul(c)))
+            .add(z.mul(p1.add(a20.mul(z)))),
+        dz: p1.add(cfe_scale(a20.mul(z), 2.0)),
+        dc: block.m.b.add(cfe_scale(a02.mul(c), 2.0)).add(a11.mul(z)),
+        dzz: cfe_scale(a20, 2.0),
+        dzc: a11,
+        dcc: cfe_scale(a02, 2.0),
+    }
 }
 
 /// CPU state-transition referee for the exact formulas implemented by the
@@ -2701,7 +2743,7 @@ pub fn unified_dynamic_block_sidecar(
 /// Minimal sidecar retained by the radial runtime for whole-block dc/dz
 /// rejection and the coefficient f32-fast-path bit. Both caps are maxima over
 /// intrinsic certificates; rejecting against them is sound, while accepting
-/// still requires opening the 21-word v3 record.
+/// still requires opening the 19-word v4 record.
 pub fn unified_radial_block_sidecar(
     block: &UnifiedBlock,
     moduli: &UnifiedModuli,
@@ -3050,6 +3092,44 @@ mod tests {
         RationalPoleEnvelope, SerializedValidityEnvelope, ShallowComplex32, ValidityEnvelope,
         ValidityTier, DEAD_LOG2,
     };
+
+    #[test]
+    fn quadratic_partials_match_two_step_polynomial() {
+        // Compose (a*z+z²+c), then (b*z+z²+c). Its quadratic part is
+        // ab*z + (b+1)*c + (b+a²)*z² + 2a*z*c + c².
+        let a = CFe::from_c(0.8, 0.4);
+        let b = CFe::from_c(-0.6, 0.2);
+        let jet = crate::jet::jet_compose(&jet_seed(0.4, 0.2), &jet_seed(-0.3, 0.1));
+        let block = UnifiedBlock::from_jet(&jet);
+        let aa = a.mul(b);
+        let bb = b.add(CFe::ONE);
+        let cc = b.add(a.mul(a));
+        let ee = cfe_scale(a, 2.0);
+        for (zx, zy, cx, cy) in [(0.01, -0.02, 0.003, 0.001), (0.2, 0.1, -0.04, 0.02)] {
+            let z = CFe::from_c(zx, zy);
+            let c = CFe::from_c(cx, cy);
+            let got = unified_quadratic_partials(&block, z, c);
+            let expected = [
+                aa.mul(z)
+                    .add(bb.mul(c))
+                    .add(cc.mul(z.mul(z)))
+                    .add(ee.mul(z.mul(c)))
+                    .add(c.mul(c)),
+                aa.add(cfe_scale(cc.mul(z), 2.0)).add(ee.mul(c)),
+                bb.add(ee.mul(z)).add(cfe_scale(c, 2.0)),
+                cfe_scale(cc, 2.0),
+                ee,
+                CFe::from_c(2.0, 0.0),
+            ];
+            for (actual, wanted) in [got.value, got.dz, got.dc, got.dzz, got.dzc, got.dcc]
+                .iter()
+                .zip(expected.iter())
+            {
+                let error = actual.sub(*wanted).to_f64();
+                assert!(error.0.hypot(error.1) < 1e-13);
+            }
+        }
+    }
 
     #[test]
     fn optional_headers_are_versioned_split_and_independently_bounded() {
@@ -4373,7 +4453,7 @@ mod tests {
             let (x, y) = value.to_f64();
             (x * x + y * y).sqrt()
         };
-        let mut checked_by_tier = [0usize; 4];
+        let mut checked_by_tier = [0usize; 5];
         for level in builder.levels() {
             if level.skip < MOBIUS_MIN_EMIT_SKIP {
                 continue;
@@ -4382,10 +4462,17 @@ mod tests {
                 let block = &level.blocks[slot];
                 let certificate = level.radial[slot];
                 let first = 1 + slot * level.skip;
-                for tier in 0..4usize {
+                for tier in 0..5usize {
+                    let mut tier_certificate = certificate;
+                    let validity_tier = if tier == 4 {
+                        tier_certificate.candidates[2] = certificate.quadratic;
+                        ValidityTier::Jet
+                    } else {
+                        ValidityTier::ALL[tier]
+                    };
                     for (sample_index, &log2_dc) in log2_dc_grid.iter().enumerate() {
-                        let at_zero = certificate.evaluate_logs(
-                            ValidityTier::ALL[tier],
+                        let at_zero = tier_certificate.evaluate_logs(
+                            validity_tier,
                             log2_dc,
                             f32::NEG_INFINITY,
                         );
@@ -4400,8 +4487,8 @@ mod tests {
                             continue;
                         }
                         assert!(
-                            certificate
-                                .evaluate_logs(ValidityTier::ALL[tier], log2_dc, log2_dz as f32,)
+                            tier_certificate
+                                .evaluate_logs(validity_tier, log2_dc, log2_dz as f32,)
                                 .accepts
                         );
 
@@ -4448,6 +4535,10 @@ mod tests {
                             TIER_CPLUS => {
                                 let applied = mobius_apply(&block.m, zfe, cfe);
                                 (applied.0, applied.1)
+                            }
+                            4 => {
+                                let partials = unified_quadratic_partials(block, zfe, cfe);
+                                (partials.value, partials.dz)
                             }
                             _ => (
                                 unified_eval_jet3(block, zfe, cfe),
@@ -4561,7 +4652,7 @@ mod tests {
             global.rejections,
         );
         assert!(global.block_applications > 0);
-        assert_eq!(core::mem::size_of::<RadialValidityV3>(), 84);
+        assert_eq!(crate::validity::RADIAL_VALIDITY_BYTES, 76);
     }
 
     #[test]

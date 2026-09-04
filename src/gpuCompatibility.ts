@@ -35,11 +35,10 @@ export function neutralTextureBytesPerPixel(orbitMetrics: boolean, orbitTrap: bo
     const rawLayers = orbitTrap
         ? (orbitMetrics ? 21 : 16)
         : (orbitMetrics ? 18 : 13)
-    // Raw A+B; resolved+frozen display sets; merge scratch; rotation cache;
-    // AA target. Optional display/scratch payloads accompany their raw layers.
+    // Raw A+B; resolved+frozen+merge display sets; rotation cache;
+    // AA target. Optional display payloads accompany their raw layers.
     return rawLayers * 2 * 4
-        + 2 * 24
-        + 12
+        + 3 * 24
         + 8
         + 4
         + (orbitMetrics ? 24 : 0)

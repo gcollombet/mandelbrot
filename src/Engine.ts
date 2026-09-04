@@ -15,6 +15,7 @@ import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
 import {generateMipmaps, mipLevelCountFor} from './mipmaps'
 import {Palette} from './Palette.ts'
+import {needsSurfaceColorPipeline} from './colorPipelineFeatures'
 import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString} from './floatexp'
 import {
     RADIAL_CERTIFICATE_LAYOUT_VERSION,
@@ -155,6 +156,13 @@ const MOBIUS_COEFF_FLOATS = 21
 // default maxStorageBufferBindingSize (128 MiB); the device now also raises that
 // limit to the adapter's maximum, so this cap is comfortably inside it.
 const ORBIT_STEP_CAPACITY = 10_000_000
+
+interface ColorPipelines {
+    direct: GPURenderPipeline
+    rotation: GPURenderPipeline
+    clear: GPURenderPipeline
+    accum: GPURenderPipeline
+}
 
 interface GpuSetupProfile {
     raiseLimits: boolean   // request the adapter's maxBufferSize & co. instead of WebGPU defaults
@@ -776,22 +784,13 @@ export class Engine {
     rawBrushPayloadView?: GPUTextureView // layers 8..12 sampled view (mirrors A)
     private resolvedDisplay?: DisplaySet
     private frozenDisplay?: DisplaySet
-    /** Format-compatible frozen-geometry read copy used only during merge. */
-    private geometryScratchTexture?: GPUTexture
-    private geometryScratchView?: GPUTextureView
-    /** Frozen metadata read copy used while merge writes the frozen set. */
-    private metadataScratchTexture?: GPUTexture
-    private metadataScratchView?: GPUTextureView
-    /** Frozen orbit-gradient read copy used while merge writes the frozen set. */
-    private orbitGradientScratchTexture?: GPUTexture
-    private orbitGradientScratchView?: GPUTextureView
+    /** Merge destination, swapped with frozenDisplay after each zoom-stop merge. */
+    private mergeDisplay?: DisplaySet
     /** 1x1 stand-in bound wherever an orbit-gradient texture is absent. */
     private orbitGradientDummyView?: GPUTextureView
     /** Sampled and storage dummies must be distinct to avoid read/write aliasing. */
     private trapPayloadDummyView?: GPUTextureView
     private trapPayloadDummyStorageView?: GPUTextureView
-    private trapPayloadScratchTexture?: GPUTexture
-    private trapPayloadScratchView?: GPUTextureView
     /** Whether the CURRENT textures carry the orbit-gradient resources. */
     private orbitGradientAllocated = false
     /** Whether the CURRENT palette asks for them. */
@@ -863,6 +862,7 @@ export class Engine {
     bindGroupResolve?: GPUBindGroup
     pipelineColor?: GPURenderPipeline
     bindGroupColor?: GPUBindGroup
+    private colorPipelines?: { full: ColorPipelines, simple: ColorPipelines }
 
     // ── Settled non-AA rotation resolve ───────────────────────────────
     /** Existing color shader rendered once into a scene-aligned linear cache. */
@@ -916,6 +916,7 @@ export class Engine {
     // subtree); ENABLE_AA is the next axis to add once the analytic-AA z″ path
     // can be gated and validated visually. Lazily built, hot combos precompiled.
     private inplacePipelineCache = new Map<string, GPUComputePipeline>()
+    private inplacePipelinePending = new Map<string, Promise<GPUComputePipeline>>()
     private inplaceModule?: GPUShaderModule
     private inplacePipelineLayout?: GPUPipelineLayout
     private inplaceBindGroupLayout?: GPUBindGroupLayout
@@ -2142,6 +2143,15 @@ export class Engine {
      * GpuDeviceLostDuringSetupError so initialize() can retry more conservatively.
      */
     private async setupGpuDevice(profile: GpuSetupProfile): Promise<void> {
+        this.inplacePipelineCache.clear()
+        this.inplacePipelinePending.clear()
+        // Dummy views belong to the previous device after a setup retry.
+        this.orbitGradientDummyView = undefined
+        this.trapPayloadDummyView = undefined
+        this.trapPayloadDummyStorageView = undefined
+        this.uniformBufferAaTarget = undefined
+        this.aaFrontierBuffer = undefined
+        this.aaFrontierReadback = undefined
         // Per-pass GPU timing needs the optional 'timestamp-query' feature. Often
         // absent on mobile (iOS/Safari) — the panel degrades to global metrics.
         this.timestampCapable = profile.timestamps && this.adapter.features.has('timestamp-query')
@@ -2412,6 +2422,7 @@ export class Engine {
     }
 
     private async _createPipelines() {
+        const device = this.device
         const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
         const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
         const moduleDebug = this.device.createShaderModule({ code: debugViewShader, label: 'Engine ShaderModule DebugView' })
@@ -2507,54 +2518,16 @@ export class Engine {
             label: 'Engine RenderPipeline Resolve (orbit gradient)',
         })
 
-        // Direct path: sRGB straight to the swapchain (fs_main_direct), byte-identical
-        // to the historical behaviour. Used when AA is inactive and for PNG export.
-        this.pipelineColor = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
-            vertex: { module: moduleColor, entryPoint: 'vs_main' },
-            fragment: { module: moduleColor, entryPoint: 'fs_main_direct', targets: [{ format: this.format }] },
-            primitive: { topology: 'triangle-list' },
-            label: 'Engine RenderPipeline Color (direct)',
-        })
-
-        // Settled rotation cache: the authoritative material function writes
-        // final linear color in neutral space. No semantic field is filtered.
-        this.pipelineRotationColorCache = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
-            vertex: { module: moduleColor, entryPoint: 'vs_rotation_cache' },
-            fragment: { module: moduleColor, entryPoint: 'fs_rotation_cache', targets: [{ format: 'rgba16float' }] },
-            primitive: { topology: 'triangle-list' },
-            label: 'Engine RenderPipeline RotationColorCache',
-        })
-
-        // AA accumulation paths: render linear RGB (fs_main) into the rgba16float
-        // accumulation texture. Clear variant replaces (sample 0); accum variant
-        // additively blends color AND alpha (sample >= 1), so alpha tracks the
-        // per-pixel sample count.
-        this.pipelineColorAccumClear = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
-            vertex: { module: moduleColor, entryPoint: 'vs_main' },
-            fragment: { module: moduleColor, entryPoint: 'fs_main', targets: [{ format: 'rgba16float' }] },
-            primitive: { topology: 'triangle-list' },
-            label: 'Engine RenderPipeline ColorAccumClear',
-        })
-        this.pipelineColorAccum = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutColor] }),
-            vertex: { module: moduleColor, entryPoint: 'vs_main' },
-            fragment: {
-                module: moduleColor,
-                entryPoint: 'fs_main',
-                targets: [{
-                    format: 'rgba16float',
-                    blend: {
-                        color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-                        alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
-                    },
-                }],
-            },
-            primitive: { topology: 'triangle-list' },
-            label: 'Engine RenderPipeline ColorAccum',
-        })
+        // All color variants share a layout and the same authoritative shader.
+        // Compile off the render path, including the simple palette family.
+        const colorLayout = device.createPipelineLayout({ bindGroupLayouts: [layoutColor] })
+        const [full, simple] = await Promise.all([
+            this.createColorPipelines(device, moduleColor, colorLayout, true),
+            this.createColorPipelines(device, moduleColor, colorLayout, false),
+        ])
+        if (this.device !== device || this.destroyed) return
+        this.colorPipelines = { full, simple }
+        this.selectColorPipelines(true)
 
         // ── In-place compute pipeline (fused brush+mandelbrot+count on A) ──
         const moduleInplace = this.device.createShaderModule({ code: inplaceComputeShader, label: 'Engine ShaderModule InplaceCompute' })
@@ -2591,6 +2564,7 @@ export class Engine {
             this.precompileInplacePipeline(true),
             this.precompileInplacePipeline(false),
         ])
+        if (this.device !== device || this.destroyed) return
         this.pipelineInplace = pipelineDeep
 
         // ── Utility compute pass (pan/clear ping-pong A→B) ───────────────
@@ -2917,26 +2891,59 @@ export class Engine {
         }
     }
 
-    // Init-time variant: compiles off the GPU-process main thread so a slow
-    // driver compile cannot starve the browser's GPU watchdog.
-    private async precompileInplacePipeline(deep: boolean): Promise<GPUComputePipeline> {
+    /** Deduplicate asynchronous compilation and never publish an old-device result. */
+    private precompileInplacePipeline(deep: boolean): Promise<GPUComputePipeline> {
         const { key, descriptor } = this.inplacePipelineSpec(deep, this.portfolioEnabled, this.renormEnabled, this.periodicSchedulingEnabled)
-        let pipeline = this.inplacePipelineCache.get(key)
-        if (!pipeline) {
-            pipeline = await this.device.createComputePipelineAsync(descriptor)
-            this.inplacePipelineCache.set(key, pipeline)
-        }
-        return pipeline
+        const cached = this.inplacePipelineCache.get(key)
+        if (cached) return Promise.resolve(cached)
+        const pending = this.inplacePipelinePending.get(key)
+        if (pending) return pending
+        const device = this.device
+        const compilation = device.createComputePipelineAsync(descriptor).then(pipeline => {
+            if (this.device === device && !this.destroyed) {
+                this.inplacePipelineCache.set(key, pipeline)
+            }
+            return pipeline
+        }).finally(() => {
+            if (this.inplacePipelinePending.get(key) === compilation) {
+                this.inplacePipelinePending.delete(key)
+            }
+        })
+        this.inplacePipelinePending.set(key, compilation)
+        return compilation
     }
 
-    private getInplacePipeline(deep: boolean, portfolio = this.portfolioEnabled, renorm = this.renormEnabled, periodicScheduling = this.periodicSchedulingEnabled): GPUComputePipeline {
-        const { key, descriptor } = this.inplacePipelineSpec(deep, portfolio, renorm, periodicScheduling)
-        let pipeline = this.inplacePipelineCache.get(key)
-        if (!pipeline) {
-            pipeline = this.device.createComputePipeline(descriptor)
-            this.inplacePipelineCache.set(key, pipeline)
-        }
-        return pipeline
+    private async createColorPipelines(device: GPUDevice, module: GPUShaderModule, layout: GPUPipelineLayout, surfaceEffects: boolean): Promise<ColorPipelines> {
+        const create = (entryPoint: string, target: GPUColorTargetState, rotation = false) =>
+            device.createRenderPipelineAsync({
+                layout,
+                vertex: { module, entryPoint: rotation ? 'vs_rotation_cache' : 'vs_main' },
+                fragment: { module, entryPoint, constants: { ENABLE_SURFACE_EFFECTS: surfaceEffects ? 1 : 0 }, targets: [target] },
+                primitive: { topology: 'triangle-list' },
+                label: `Engine Color (${surfaceEffects ? 'full' : 'simple'}, ${entryPoint}${target.blend ? ', accum' : ''})`,
+            })
+        const [direct, rotation, clear, accum] = await Promise.all([
+            create('fs_main_direct', { format: this.format }),
+            create('fs_rotation_cache', { format: 'rgba16float' }, true),
+            create('fs_main', { format: 'rgba16float' }),
+            create('fs_main', {
+                format: 'rgba16float',
+                blend: {
+                    color: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                    alpha: { srcFactor: 'one', dstFactor: 'one', operation: 'add' },
+                },
+            }),
+        ])
+        return { direct, rotation, clear, accum }
+    }
+
+    private selectColorPipelines(surfaceEffects: boolean): void {
+        const pipelines = surfaceEffects ? this.colorPipelines?.full : this.colorPipelines?.simple
+        if (!pipelines) return
+        this.pipelineColor = pipelines.direct
+        this.pipelineRotationColorCache = pipelines.rotation
+        this.pipelineColorAccumClear = pipelines.clear
+        this.pipelineColorAccum = pipelines.accum
     }
 
     private iterationAuxiliaryLevelBuffer(): GPUBuffer | undefined {
@@ -4106,10 +4113,9 @@ export class Engine {
         return {
             // Two complete display sets plus the rgba16float rotation/color target.
             squareBytesPerTexel: 2 * (24 + optionalDisplayBytes) + 8,
-            // Raw A/B, tile resolve, merge scratch and r32float AA target.
+            // Raw A/B, tile resolve and r32float AA target; tiled export has no merge.
             tileBytesPerTexel: 2 * rawLayers * 4
                 + (24 + optionalDisplayBytes)
-                + (12 + optionalDisplayBytes)
                 + 4,
         }
     }
@@ -5032,12 +5038,9 @@ export class Engine {
         this.rawBrushTexture?.destroy?.()
         this.destroyDisplaySet(this.resolvedDisplay)
         this.destroyDisplaySet(this.frozenDisplay)
+        this.destroyDisplaySet(this.mergeDisplay)
         this.destroyDisplaySet(this.tiledLiveDisplay)
         this.tiledLiveDisplay = undefined
-        this.geometryScratchTexture?.destroy?.()
-        this.metadataScratchTexture?.destroy?.()
-        this.orbitGradientScratchTexture?.destroy?.()
-        this.trapPayloadScratchTexture?.destroy?.()
         this.accumTexture?.destroy?.()
         this.aaTargetTexture?.destroy?.()
         this.rotationColorTexture?.destroy?.()
@@ -5193,38 +5196,8 @@ export class Engine {
         this.tiledLiveDisplay = this.tiledKeyframePlan
             ? createDisplaySet('Engine TiledLiveKeyframe', fullTextureSize)
             : undefined
-        this.geometryScratchTexture = this.device.createTexture({
-            size: { width: textureSize, height: textureSize },
-            format: 'rgba16float',
-            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-            label: 'Engine MergeGeometryScratch',
-        })
-        this.geometryScratchView = this.geometryScratchTexture.createView({ label: 'Engine MergeGeometryScratch View' })
-        this.metadataScratchTexture = this.device.createTexture({
-            size: { width: textureSize, height: textureSize },
-            format: 'r32uint',
-            usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-            label: 'Engine MetadataScratch',
-        })
-        this.metadataScratchView = this.metadataScratchTexture.createView({ label: 'Engine MetadataScratch View' })
-        this.orbitGradientScratchTexture = this.orbitGradientAllocated
-            ? this.device.createTexture({
-                size: { width: textureSize, height: textureSize },
-                format: 'rgba16float',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-                label: 'Engine MergeOrbitGradientScratch',
-            })
-            : undefined
-        this.orbitGradientScratchView = this.orbitGradientScratchTexture?.createView({ label: 'Engine MergeOrbitGradientScratch View' })
-        this.trapPayloadScratchTexture = this.trapPayloadAllocated
-            ? this.device.createTexture({
-                size: { width: textureSize, height: textureSize },
-                format: 'rgba32float',
-                usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_SRC | GPUTextureUsage.COPY_DST,
-                label: 'Engine MergeTrapPayloadScratch',
-            })
-            : undefined
-        this.trapPayloadScratchView = this.trapPayloadScratchTexture?.createView({ label: 'Engine MergeTrapPayloadScratch View' })
+        // Tiled keyframes exchange full display roles and never encode this merge.
+        this.mergeDisplay = this.tiledKeyframePlan ? undefined : createDisplaySet('Engine MergeDisplay')
         this.resolvedDisplayVersion = -1
         this.frozenDisplayVersion = -1
 
@@ -5371,30 +5344,42 @@ export class Engine {
 
         this.rebuildColorBindGroup()
 
-        // Merge reads the coherent live set plus temporary frozen copies while
-        // writing the frozen set. Raw B supplies the three value-copy layers.
-        if (this.pipelineMerge && this.uniformBufferMerge && this.resolvedDisplay
-            && this.rawBrushArrayView && this.geometryScratchView && this.metadataScratchView) {
-            const layout = this.pipelineMerge.getBindGroupLayout(0)
-            this.bindGroupMerge = this.device.createBindGroup({
-                layout,
-                entries: [
-                    { binding: 0, resource: { buffer: this.uniformBufferMerge } },
-                    { binding: 1, resource: this.resolvedDisplay.valuesArrayView },
-                    { binding: 2, resource: this.resolvedDisplay.geometryView },
-                    { binding: 3, resource: this.resolvedDisplay.metadataView },
-                    { binding: 4, resource: this.rawBrushArrayView },
-                    { binding: 5, resource: this.geometryScratchView },
-                    { binding: 6, resource: this.metadataScratchView },
-                    { binding: 7, resource: this.resolvedDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
-                    { binding: 8, resource: this.orbitGradientScratchView ?? this.orbitGradientDummyView! },
-                    { binding: 9, resource: this.resolvedDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
-                    { binding: 10, resource: this.trapPayloadScratchView ?? this.trapPayloadDummyView! },
-                    { binding: 11, resource: this.frozenDisplay?.trapPayloadView ?? this.trapPayloadDummyStorageView! },
-                ],
-                label: 'Engine BindGroup Merge',
-            })
-        }
+        this.rebuildMergeBindGroup()
+    }
+
+    private rebuildMergeBindGroup() {
+        const live = this.resolvedDisplay
+        const frozen = this.frozenDisplay
+        const destination = this.mergeDisplay
+        this.bindGroupMerge = undefined
+        if (!this.pipelineMerge || !this.uniformBufferMerge || !live || !frozen || !destination) return
+        this.bindGroupMerge = this.device.createBindGroup({
+            layout: this.pipelineMerge.getBindGroupLayout(0),
+            entries: [
+                { binding: 0, resource: { buffer: this.uniformBufferMerge } },
+                { binding: 1, resource: live.valuesArrayView },
+                { binding: 2, resource: live.geometryView },
+                { binding: 3, resource: live.metadataView },
+                { binding: 4, resource: frozen.valuesArrayView },
+                { binding: 5, resource: frozen.geometryView },
+                { binding: 6, resource: frozen.metadataView },
+                { binding: 7, resource: live.orbitGradientView ?? this.orbitGradientDummyView! },
+                { binding: 8, resource: frozen.orbitGradientView ?? this.orbitGradientDummyView! },
+                { binding: 9, resource: live.trapPayloadView ?? this.trapPayloadDummyView! },
+                { binding: 10, resource: frozen.trapPayloadView ?? this.trapPayloadDummyView! },
+                { binding: 11, resource: destination.trapPayloadView ?? this.trapPayloadDummyStorageView! },
+            ],
+            label: 'Engine BindGroup Merge',
+        })
+    }
+
+    /** Publish every field together; encoded commands retain the old bindings. */
+    private swapMergedDisplay() {
+        const previousFrozen = this.frozenDisplay
+        this.frozenDisplay = this.mergeDisplay
+        this.mergeDisplay = previousFrozen
+        this.rebuildMergeBindGroup()
+        this.rebuildColorBindGroup()
     }
 
     /** Ping-pong the neutral state textures. The reprojection pass reads A and
@@ -5816,6 +5801,7 @@ export class Engine {
     }
 
     async update(mandelbrot: Mandelbrot, renderOptions: RenderOptions) {
+        this.selectColorPipelines(needsSurfaceColorPipeline(renderOptions.colorStops))
         this.rotationColorResolveChangedThisUpdate = false
         const orbitTrap = normalizeOrbitTrapConfig(renderOptions.orbitTrap, renderOptions.orbitTrapStrength)
         const previousOrbitTrap = this.previousRenderOptions
@@ -6287,7 +6273,7 @@ export class Engine {
             renderOptions.aaAdaptive === false ? this.aaOffsetY : 0, // 95: uniform-AA inverse lookup Y
             this.rawOriginX,                      // 96: raw toroidal origin X
             this.rawOriginY,                      // 97: raw toroidal origin Y
-            0,                                    // 98: pad
+            this.orbitGradientAllocated ? 1 : 0,   // 98: orbit metric payload present
             0,                                    // 99: pad
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
@@ -6696,6 +6682,25 @@ export class Engine {
         if (!renderOptions) {
             return
         }
+        const device = this.device
+        const frameRawTexture = this.rawTexture
+        const { key: pipelineKey } = this.inplacePipelineSpec(
+            this.floatExpActive, this.portfolioEnabled, this.renormEnabled, this.periodicSchedulingEnabled,
+        )
+        let inplacePipeline = this.inplacePipelineCache.get(pipelineKey)
+        if (!inplacePipeline) {
+            // Keep the last presented image while preparing a newly selected mode.
+            // Await before touching frame state: a default kernel could interpret
+            // the selected approximation table with the wrong binary layout.
+            inplacePipeline = await this.precompileInplacePipeline(this.floatExpActive)
+            if (this.destroyed || this.device !== device
+                || this.rawTexture !== frameRawTexture
+                || this.previousRenderOptions !== renderOptions) return
+            const currentSpec = this.inplacePipelineSpec(
+                this.floatExpActive, this.portfolioEnabled, this.renormEnabled, this.periodicSchedulingEnabled,
+            )
+            if (currentSpec.key !== pipelineKey) return
+        }
         if (this.tiledKeyframePlan) {
             // Full-image snapshots are represented by binding-role swaps in this
             // mode; no legacy copy/merge request may leak into a tile build.
@@ -6943,48 +6948,15 @@ export class Engine {
         // The two textures live in different coordinate spaces (live at liveScale,
         // frozen at frozenScale). The merge shader reprojects both into display
         // space and keeps the finest-resolution pixel (min-step-wins).
-        // We copy frozen → rawBrushTexture first so the merge can read it while
-        // writing to frozen. rawBrushTexture will be overwritten by the brush pass.
+        // Read both input sets directly, render into the third set, then exchange
+        // destination/frozen roles. No full-surface preparation copies are needed.
         if (this.needMergeSnapshot
             && !this.tiledKeyframePlan
             && this.pipelineMerge && this.bindGroupMerge
-            && this.resolvedDisplay && this.frozenDisplay && this.rawBrushTexture
-            && this.geometryScratchTexture && this.metadataScratchTexture
+            && this.resolvedDisplay && this.frozenDisplay && this.mergeDisplay
             && this.frozenDisplayVersion >= 0) {
-            const texSize = this.neutralSize
             this.tsSpanBoundary(commandEncoder, PASS_SLOT_INDEX.merge, 'start')
-            // Copy the frozen set to format-compatible temporary resources so
-            // the merge may read it while writing the frozen destination.
-            commandEncoder.copyTextureToTexture(
-                { texture: this.frozenDisplay.valuesTexture },
-                { texture: this.rawBrushTexture },
-                { width: texSize, height: texSize, depthOrArrayLayers: DISPLAY_VALUE_LAYERS },
-            )
-            commandEncoder.copyTextureToTexture(
-                { texture: this.frozenDisplay.geometryTexture },
-                { texture: this.geometryScratchTexture },
-                { width: texSize, height: texSize },
-            )
-            commandEncoder.copyTextureToTexture(
-                { texture: this.frozenDisplay.metadataTexture },
-                { texture: this.metadataScratchTexture },
-                { width: texSize, height: texSize },
-            )
-            if (this.frozenDisplay.orbitGradientTexture && this.orbitGradientScratchTexture) {
-                commandEncoder.copyTextureToTexture(
-                    { texture: this.frozenDisplay.orbitGradientTexture },
-                    { texture: this.orbitGradientScratchTexture },
-                    { width: texSize, height: texSize },
-                )
-            }
-            if (this.frozenDisplay.trapPayloadTexture && this.trapPayloadScratchTexture) {
-                commandEncoder.copyTextureToTexture(
-                    { texture: this.frozenDisplay.trapPayloadTexture },
-                    { texture: this.trapPayloadScratchTexture },
-                    { width: texSize, height: texSize },
-                )
-            }
-            // 2) Write merge uniforms (captured at zoom stop before state reset)
+            // Write merge uniforms captured at zoom stop before state reset.
             const mergeData = new Float32Array([
                 this.mergeUniforms.zf,
                 this.mergeUniforms.lzf,
@@ -6995,10 +6967,10 @@ export class Engine {
             ])
             this.device.queue.writeBuffer(this.uniformBufferMerge!, 0, mergeData.buffer)
             const mergeAttachments: GPURenderPassColorAttachment[] = [
-                ...this.frozenDisplay.valueLayerViews,
-                this.frozenDisplay.geometryView,
-                this.frozenDisplay.metadataView,
-                ...(this.frozenDisplay.orbitGradientView ? [this.frozenDisplay.orbitGradientView] : []),
+                ...this.mergeDisplay.valueLayerViews,
+                this.mergeDisplay.geometryView,
+                this.mergeDisplay.metadataView,
+                ...(this.mergeDisplay.orbitGradientView ? [this.mergeDisplay.orbitGradientView] : []),
             ].map(view => ({
                 view,
                 clearValue: { r: 0, g: 0, b: 0, a: 0 },
@@ -7015,6 +6987,7 @@ export class Engine {
             rpassMerge.setBindGroup(0, this.bindGroupMerge)
             rpassMerge.draw(6, 1, 0, 0)
             rpassMerge.end()
+            this.swapMergedDisplay()
             this.frozenDisplayVersion = this.resolvedDisplayVersion
             this.needMergeSnapshot = false
             this.frozenAligned = true
@@ -7201,7 +7174,7 @@ export class Engine {
             // Shallow views (scaleExp > DEEP_EXP) never enter the floatexp deep
             // path, so run the DCE'd shallow kernel; floatExpActive is set from
             // expScale <= DEEP_EXP_THRESHOLD earlier this frame.
-            computePass.setPipeline(this.getInplacePipeline(this.floatExpActive))
+            computePass.setPipeline(inplacePipeline)
             computePass.setBindGroup(0, this.bindGroupInplace!)
             // cs_main is @workgroup_size(8,8) — smaller tiles reduce intra-workgroup
             // lockstep divergence waste (one deep straggler holds 64 lanes, not 256).
@@ -7846,11 +7819,8 @@ export class Engine {
         this.rawBrushTexture?.destroy?.()
         this.destroyDisplaySet(this.resolvedDisplay)
         this.destroyDisplaySet(this.frozenDisplay)
+        this.destroyDisplaySet(this.mergeDisplay)
         this.destroyDisplaySet(this.tiledLiveDisplay)
-        this.geometryScratchTexture?.destroy?.()
-        this.metadataScratchTexture?.destroy?.()
-        this.orbitGradientScratchTexture?.destroy?.()
-        this.trapPayloadScratchTexture?.destroy?.()
         this.rotationColorTexture?.destroy?.()
         this.mandelbrotReferenceBuffer?.destroy?.()
         this.mandelbrotBlaBuffer?.destroy?.()

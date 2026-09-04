@@ -1,6 +1,10 @@
-// All color arithmetic uses one f32 path. The alias keeps the bounded shading
-// expressions readable without creating a second shader variant.
+// Both pipeline families use identical f32 arithmetic. The alias keeps the
+// bounded shading expressions readable.
 alias hcol = f32;
+
+// Two families only: full material/texture/orbit effects, or palette coloring.
+// Global height/phase coloring, zebra, traps, grading and analytic AA work in both.
+override ENABLE_SURFACE_EFFECTS: bool = true;
 
 struct Uniforms {
   palettePeriod: f32,
@@ -101,7 +105,7 @@ struct Uniforms {
   aaLookupOffsetY: f32,
   rawOriginX: f32,       // 96: toroidal origin of the raw texture (pan by offset)
   rawOriginY: f32,       // 97
-  _pad98: f32,
+  orbitMetricsEnabled: f32, // 98: no orbit texture reads when the payload is absent
   _pad99: f32,
 };
 @group(0) @binding(0) var<uniform> parameters: Uniforms;
@@ -249,30 +253,32 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   e.paletteColor = row0.rgb;
   e.wPalette = row0.a;
 
-  // Row 1: zebra, tessellation, shading, skybox
-  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(1.0)), 0.0);
-  e.wTessellation = row1.g;
-  e.wShading = row1.b;
-  e.wSkybox = row1.a;
+  if (ENABLE_SURFACE_EFFECTS) {
+    // Row 1: zebra, tessellation, shading, skybox
+    let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(1.0)), 0.0);
+    e.wTessellation = row1.g;
+    e.wShading = row1.b;
+    e.wSkybox = row1.a;
 
-  // Row 2: webcam, smoothness, shadingLevel [0,3], specularPower [0,64]
-  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(2.0)), 0.0);
-  e.wWebcam = row2.r;
-  e.wSmoothness = row2.g;
-  e.shadingLevel = row2.b;       // direct: natural range [0, 3]
-  e.specularPower = clamp(row2.a, 0.0, 64.0); // intensity only; 0 disables the direct specular lobe
+    // Row 2: webcam, smoothness, shadingLevel [0,3], specularPower [0,64]
+    let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(2.0)), 0.0);
+    e.wWebcam = row2.r;
+    e.wSmoothness = row2.g;
+    e.shadingLevel = row2.b;       // direct: natural range [0, 3]
+    e.specularPower = clamp(row2.a, 0.0, 64.0); // intensity only; 0 disables the direct specular lobe
 
-  // Rows 3 (metallic/roughness/anisotropy) and 4 (iridescence) are only read
-  // inside the shading branch, so they are sampled lazily there via
-  // sampleShadingMaterial() rather than for every pixel.
+    // Rows 3 (metallic/roughness/anisotropy) and 4 (iridescence) are only read
+    // inside the shading branch, so they are sampled lazily there via
+    // sampleShadingMaterial() rather than for every pixel.
 
-  // Row 5: stripe color blend, direction coherence color blend, then the two
-  // relief tilt controls (decoded to slopes on read)
-  let row5 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(5.0)), 0.0);
-  e.wStripeAverage = clamp(row5.r, 0.0, 1.0);
-  e.wRotationMean = clamp(row5.g, 0.0, 1.0);
-  e.wStripeRelief = decode_relief_tilt(row5.b, STRIPE_RELIEF_TILT_MAX);
-  e.wDirectionCoherenceRelief = decode_relief_tilt(row5.a, COHERENCE_RELIEF_TILT_MAX);
+    // Row 5: stripe color blend, direction coherence color blend, then the two
+    // relief tilt controls (decoded to slopes on read)
+    let row5 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(5.0)), 0.0);
+    e.wStripeAverage = clamp(row5.r, 0.0, 1.0);
+    e.wRotationMean = clamp(row5.g, 0.0, 1.0);
+    e.wStripeRelief = decode_relief_tilt(row5.b, STRIPE_RELIEF_TILT_MAX);
+    e.wDirectionCoherenceRelief = decode_relief_tilt(row5.a, COHERENCE_RELIEF_TILT_MAX);
+  }
 
   return e;
 }
@@ -713,20 +719,19 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
     // Palette is always the base. Other sources overlay on top with their weight as opacity.
     var color = fx.paletteColor * fx.wPalette;
 
-  // Screen + Depth follows the same scalar height as the visible relief.
-  // Using smooth iteration here made the texture slide along iteration bands
-  // while the normal followed distance height, visually detaching both fields.
-  let tess_depth = clamp(
-    distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored),
-    -16.0,
-    16.0
-  );
   let disp = parameters.displacementAmount;
   var tess_u = 0.0;
   var tess_v = 0.0;
-
-  tess_u = texture_mapping_value(parameters.textureMappingXVariable, iterRaw, v_smooth, z, distanceHeightStored, geometryAngle, dx, dy, tess_depth, disp) * parameters.textureMappingXScale;
-  tess_v = texture_mapping_value(parameters.textureMappingYVariable, iterRaw, v_smooth, z, distanceHeightStored, geometryAngle, dx, dy, tess_depth, disp) * parameters.textureMappingYScale;
+  // Mapping is also consumed by texture bump, even below the overlay threshold.
+  if (ENABLE_SURFACE_EFFECTS && (effTess > 0.001 || effWebcam > 0.001 ||
+      (effShading > 0.001 && parameters.microBumpStrength * effTess > 0.001))) {
+    let tess_depth = clamp(
+      distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored),
+      -16.0, 16.0
+    );
+    tess_u = texture_mapping_value(parameters.textureMappingXVariable, iterRaw, v_smooth, z, distanceHeightStored, geometryAngle, dx, dy, tess_depth, disp) * parameters.textureMappingXScale;
+    tess_v = texture_mapping_value(parameters.textureMappingYVariable, iterRaw, v_smooth, z, distanceHeightStored, geometryAngle, dx, dy, tess_depth, disp) * parameters.textureMappingYScale;
+  }
 
   let tile_drift = vec2<f32>(parameters.textureDriftX, parameters.textureDriftY);
   let tessCoord = vec2<f32>(tess_u, tess_v) + tile_drift;
@@ -760,7 +765,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
   color = apply_orbit_trap_color(color, iterRaw, z, trapPayload);
 
   // ── Shading (always computed, applied proportionally to wShading) ──
-  if (effShading > 0.001) {
+  if (ENABLE_SURFACE_EFFECTS && effShading > 0.001) {
     // Material + iridescence rows are only needed here: sample them lazily.
     sampleShadingMaterial(palettePhase, &fx);
     // PBR runs in linear light: gamma-space products distort hues and harden
@@ -1120,19 +1125,28 @@ fn normalize_orbit_gradient(stored: vec4<f32>, zoomFactor: f32) -> vec4<f32> {
   return clamp(stored / max(zoomFactor, 1e-30), vec4<f32>(-64.0), vec4<f32>(64.0));
 }
 
+fn needs_cached_geometry() -> bool {
+  // Animated height/phase contributions are already included in these uniforms.
+  return ENABLE_SURFACE_EFFECTS || parameters.heightPaletteShift != 0.0 ||
+    parameters.phaseColoringStrength != 0.0 || parameters.debugShading >= 0.5;
+}
+
 fn load_pixel_extras(sourceGeometry: texture_2d<f32>, sourceMetadata: texture_2d<u32>, sourceOrbitGradient: texture_2d<f32>, coord: vec2<i32>, zoomFactor: f32) -> PixelExtras {
   var extras: PixelExtras;
+  if (!needs_cached_geometry()) { return extras; }
   let geometry = normalize_geometry(textureLoad(sourceGeometry, coord, 0), zoomFactor);
   extras.height = clamp(geometry.w, -64.0, 64.0);
   extras.gradient = geometry.xy;
   extras.curvature = geometry.z;
   extras.geometryAngle = select(0.0, atan2(geometry.y, geometry.x), dot(geometry.xy, geometry.xy) > 1e-12);
-  let metadata = textureLoad(sourceMetadata, coord, 0).r;
-  extras.stripePhase = decode_stripe_phase(metadata);
-  extras.directionCoherence = decode_direction_coherence(metadata);
-  let orbitGradient = normalize_orbit_gradient(textureLoad(sourceOrbitGradient, coord, 0), zoomFactor);
-  extras.stripeGradient = orbitGradient.xy;
-  extras.coherenceGradient = orbitGradient.zw;
+  if (ENABLE_SURFACE_EFFECTS && parameters.orbitMetricsEnabled > 0.5) {
+    let metadata = textureLoad(sourceMetadata, coord, 0).r;
+    extras.stripePhase = decode_stripe_phase(metadata);
+    extras.directionCoherence = decode_direction_coherence(metadata);
+    let orbitGradient = normalize_orbit_gradient(textureLoad(sourceOrbitGradient, coord, 0), zoomFactor);
+    extras.stripeGradient = orbitGradient.xy;
+    extras.coherenceGradient = orbitGradient.zw;
+  }
   return extras;
 }
 
@@ -1455,14 +1469,19 @@ fn sample_escaped_bilinear(sourceTex: texture_2d_array<f32>, sourceGeometry: tex
     }
     wEscaped = wEscaped + w;
     nuSum = nuSum + w * ((citer - baseIter) + clamp(smooth_escape_fraction(z_sq), 0.0, 1.0));
-    geometrySum = geometrySum + w * normalize_geometry(textureLoad(sourceGeometry, ccoord, 0), zoomFactor);
-    orbitGradientSum = orbitGradientSum + w * normalize_orbit_gradient(textureLoad(sourceOrbitGradient, ccoord, 0), zoomFactor);
+    if (needs_cached_geometry()) {
+      geometrySum = geometrySum + w * normalize_geometry(textureLoad(sourceGeometry, ccoord, 0), zoomFactor);
+    }
+
     let zLen = max(sqrt(z_sq), 1e-12);
     zDirSum = zDirSum + w * vec2<f32>(zx, zy) / zLen;
-    let stripePhase = decode_stripe_phase(metadata);
-    let stripeAngle = stripePhase * TWO_PI;
-    stripeDirSum = stripeDirSum + w * vec2<f32>(cos(stripeAngle), sin(stripeAngle));
-    coherenceSum = coherenceSum + w * decode_direction_coherence(metadata);
+    if (ENABLE_SURFACE_EFFECTS && parameters.orbitMetricsEnabled > 0.5) {
+      orbitGradientSum = orbitGradientSum + w * normalize_orbit_gradient(textureLoad(sourceOrbitGradient, ccoord, 0), zoomFactor);
+      let stripePhase = decode_stripe_phase(metadata);
+      let stripeAngle = stripePhase * TWO_PI;
+      stripeDirSum = stripeDirSum + w * vec2<f32>(cos(stripeAngle), sin(stripeAngle));
+      coherenceSum = coherenceSum + w * decode_direction_coherence(metadata);
+    }
   }
 
   // The interior keeps priority over escaped interpolation (no halo inside
@@ -1532,8 +1551,7 @@ fn colorize_sampled(
   var it = iter_val;
   var zx = zx_val;
   var zy = zy_val;
-  var extras = load_pixel_extras(sourceGeometry, sourceMetadata, sourceOrbitGradient, coord, zoomFactor);
-  let trapPayload = textureLoad(sourceTrapPayload, coord, 0);
+  var extras: PixelExtras;
   var analytic = analyticTag;
   if (interp.kind == 1) {
     it = interp.iter;
@@ -1542,6 +1560,12 @@ fn colorize_sampled(
     extras = interp.extras;
     // Bilinear-interpolated values are not payload-consistent: no expansion.
     analytic = false;
+  } else if (it > 0.0 && zx * zx + zy * zy >= parameters.mu && parameters.reachDebug <= 0.5) {
+    extras = load_pixel_extras(sourceGeometry, sourceMetadata, sourceOrbitGradient, coord, zoomFactor);
+  }
+  var trapPayload = vec4<f32>(0.0);
+  if (it >= 0.0 && parameters.orbitTrapMode >= 1.5 && parameters.orbitTrapStrength > 0.0) {
+    trapPayload = textureLoad(sourceTrapPayload, coord, 0);
   }
   return colorize_pixel(
     coord, texSize, it, zx, zy, trapPayload, extras,

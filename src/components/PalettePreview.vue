@@ -506,6 +506,8 @@ async function init() {
     props.protrusionStrength ?? 1, // protrusionStrength
     iterationPaletteCurveCode(props.iterationPaletteCurve), // iterationPaletteCurve
     0, // aaLookupOffsetY
+    0, 0, // raw toroidal origin
+    1, 0, // synthetic orbit metrics always present; padding
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 

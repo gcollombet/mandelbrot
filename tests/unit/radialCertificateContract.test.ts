@@ -18,25 +18,26 @@ describe('incremental radial transport contract', () => {
 
   it('validates matched coefficient, sidecar, and certificate ranges', () => {
     const valid = {
-      version: 3,
-      wordsPerBlock: 21,
+      version: 4,
+      wordsPerBlock: 19,
       rangesWords: 12,
       coefficientFloats: 54,
       sidecarFloats: 8,
-      certificateWords: 42,
+      certificateWords: 38,
       referenceLog2Dc: Number.NaN,
     }
     expect(validRadialRangePayloadShape(valid)).toBe(true)
-    expect(validRadialRangePayloadShape({ ...valid, certificateWords: 21 })).toBe(false)
+    expect(validRadialRangePayloadShape({ ...valid, certificateWords: 19 })).toBe(false)
     expect(validRadialRangePayloadShape({ ...valid, version: 2 })).toBe(false)
+    expect(validRadialRangePayloadShape({ ...valid, version: 3, wordsPerBlock: 21, certificateWords: 42 })).toBe(false)
     expect(validRadialRangePayloadShape({ ...valid, referenceLog2Dc: -120 })).toBe(true)
     expect(validRadialRangePayloadShape({
-      version: 3,
-      wordsPerBlock: 21,
+      version: 4,
+      wordsPerBlock: 19,
       rangesWords: 12,
       coefficientFloats: 54,
       sidecarFloats: 8,
-      certificateWords: 42,
+      certificateWords: 38,
     })).toBe(true)
   })
 

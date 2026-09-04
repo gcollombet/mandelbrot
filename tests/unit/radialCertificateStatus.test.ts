@@ -10,12 +10,12 @@ import {
 
 describe('reference-owned radial certificate status', () => {
   it('pins the compact layout and counter mapping', () => {
-    expect(RADIAL_CERTIFICATE_LAYOUT_VERSION).toBe(3)
-    expect(RADIAL_CERTIFICATE_WORDS_PER_BLOCK).toBe(21)
+    expect(RADIAL_CERTIFICATE_LAYOUT_VERSION).toBe(4)
+    expect(RADIAL_CERTIFICATE_WORDS_PER_BLOCK).toBe(19)
     expect(RADIAL_REJECTION_LABELS.slice(0, 5)).toEqual([
       'rayon affine',
-      'cap intrinsèque (dc/dz)',
-      'pôle rationnel',
+      'cap intrinsèque (dc/dz/pôle)',
+      'réservé v3',
       'réservé v2',
       'certificat mort / non fini',
     ])
