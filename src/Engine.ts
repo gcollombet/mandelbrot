@@ -769,6 +769,8 @@ export class Engine {
     private lastSurfaceReductionKey = ''
     private destroyed = false
     private gpuSetupInProgress = false
+    private inplaceDeepUnavailable = false   // driver refused the floatexp kernel; shallow-only
+    private deepUnavailableReported = false
     private readonly gpuErrorHandler?: (message: string) => void
 
     // resources
@@ -2128,6 +2130,8 @@ export class Engine {
                         + ' retrying with the safe profile (default limits, timestamps OFF)',
                     )
                     this.inplacePipelineCache.clear()
+                    this.inplaceDeepUnavailable = false
+                    this.deepUnavailableReported = false
                     this.adapter = await navigator.gpu.requestAdapter()
                     if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
                 }
@@ -2560,12 +2564,21 @@ export class Engine {
         // long enough on Windows/D3D12 (DXC on NVIDIA) to trip Chromium's GPU
         // watchdog — the device came back lost with reason=unknown and
         // "A valid external Instance reference no longer exists".
-        const [pipelineDeep] = await Promise.all([
-            this.precompileInplacePipeline(true),
+        // The shallow kernel is mandatory; the deep (floatexp) specialisation is
+        // the heaviest shader this engine builds and some mobile Vulkan drivers
+        // refuse it outright with VK_ERROR_INITIALIZATION_FAILED. Losing it
+        // costs deep zoom, not the app, so degrade instead of failing init.
+        const [pipelineDeep, pipelineShallow] = await Promise.all([
+            this.precompileInplacePipeline(true).catch((error: unknown) => {
+                console.warn('[Engine] deep (floatexp) compute pipeline unavailable on this device;'
+                    + ' deep zoom will fall back to the shallow f32 kernel', error)
+                this.inplaceDeepUnavailable = true
+                return undefined
+            }),
             this.precompileInplacePipeline(false),
         ])
         if (this.device !== device || this.destroyed) return
-        this.pipelineInplace = pipelineDeep
+        this.pipelineInplace = pipelineDeep ?? pipelineShallow
 
         // ── Utility compute pass (pan/clear ping-pong A→B) ───────────────
         // Compute port of the fragment brush: reads A, rewrites B wholesale
@@ -6312,7 +6325,22 @@ export class Engine {
             : (fe ? { mantissa: fe[0], exponent: fe[1] }
                   : (mandelbrot.scaleStr ? frexpFromDecimalString(mandelbrot.scaleStr) : frexpFloat32(computeScale)))
         const expScale = scaleParts.exponent
-        const deep = expScale <= DEEP_EXP_THRESHOLD
+        // A device whose driver refused the floatexp kernel must also stop
+        // *packing* uniforms for it: the shallow kernel reads dc as plain
+        // values, so feeding it mantissas would render noise instead of a
+        // merely imprecise image.
+        const wantsDeep = expScale <= DEEP_EXP_THRESHOLD
+        const deep = wantsDeep && !this.inplaceDeepUnavailable
+        // Tell the user once, when a view first reaches the depth the missing
+        // kernel was there to serve — not at load, where the shallow path is
+        // exact and the message would be noise.
+        if (wantsDeep && !deep && !this.deepUnavailableReported) {
+            this.deepUnavailableReported = true
+            this.reportGpuError(
+                'Le noyau de zoom profond (floatexp) n\'a pas pu être compilé par le pilote GPU de cet appareil : '
+                + 'au-delà de ce niveau de zoom, l\'image perd en précision.',
+            )
+        }
         this.floatExpActive = deep
         // cx/cy mantissas re-based onto the shared scale exponent. Decomposing
         // each component first (rather than dx * 2^-expScale) avoids ever forming
