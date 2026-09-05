@@ -777,6 +777,7 @@ const forceUINoGpu = !hasWebGPU
 
 const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes', 'about', 'video']);
 const denseView = useDenseView();
+const expandedPanel = ref(false);
 function isDenseTab(tabKey: string): boolean {
   return densePortedTabs.has(tabKey);
 }
@@ -786,8 +787,8 @@ function isDenseTab(tabKey: string): boolean {
 // has sections tagged with data-group; other tabs simply render no ptabs.
 const PTABS_BY_TAB: Record<string, { value: string; label: string }[]> = {
   palettes: [
-    { value: 'params', label: 'Paramètres' },
-    { value: 'library', label: 'Presets' },
+    { value: 'params', label: 'Éditer' },
+    { value: 'library', label: 'Bibliothèque' },
   ],
 };
 const primaryByTab = reactive<Record<string, string>>({});
@@ -796,6 +797,7 @@ function primaryFor(tabKey: string): string {
 }
 
 function toggleTab(tabKey: string) {
+  expandedPanel.value = false;
   if (openTabs.has(tabKey)) {
     openTabs.delete(tabKey);
     delete popupPositions[tabKey];
@@ -1051,36 +1053,14 @@ function stopDrag() {
 function popupStyle(tabKey: string) {
   const pos = popupPositions[tabKey] ?? { x: -1, y: -1 };
   const z = tabZOrder[tabKey] ?? 50;
-  // Palette popup is wider; presets/navigation wider to fit dropdown lists.
-  // Cap to the viewport so popups never overflow on small screens.
-  const w = tabKey === 'palettes' ? 'min(1080px, 96vw)'
-          : tabKey === 'animation' ? 'min(1080px, 96vw)'
-          : (tabKey === 'presets' || tabKey === 'navigation') ? 'min(720px, 96vw)'
-          : 'min(640px, 96vw)';
-  const mh = (tabKey === 'presets' || tabKey === 'navigation') ? '94vh' : '80vh';
-  if (pos.x < 0) {
-    // Stagger multiple popups so they don't overlap perfectly
-    const tabKeys = Array.from(openTabs);
-    const idx = tabKeys.indexOf(tabKey);
-    const offsetPx = idx * 30;
-    return {
-      position: 'fixed' as const,
-      top: `calc(50% + ${offsetPx}px)`,
-      left: `calc(50% + ${offsetPx}px)`,
-      transform: 'translate(-50%, -50%)',
-      zIndex: z,
-      width: w,
-      maxHeight: mh,
-    };
-  }
+  const w = tabKey === 'presets' || (tabKey === 'palettes' && primaryFor(tabKey) === 'library')
+    ? 'min(720px, 96vw)' : tabKey === 'video' ? 'min(480px, 96vw)' : 'min(420px, 96vw)';
   return {
     position: 'fixed' as const,
-    top: `${pos.y}px`,
-    left: `${pos.x}px`,
-    transform: 'none',
-    zIndex: z,
-    width: w,
-    maxHeight: mh,
+    top: pos.y < 0 ? '64px' : `clamp(8px, ${pos.y}px, calc(100dvh - 100px))`,
+    right: pos.x < 0 ? '12px' : 'auto',
+    left: pos.x < 0 ? 'auto' : `clamp(8px, ${pos.x}px, calc(100vw - ${w} - 8px))`,
+    zIndex: z, width: w, maxHeight: 'calc(100dvh - 80px)',
   };
 }
 
@@ -1771,6 +1751,7 @@ function startTravelToPreset(preset: PresetRecord) {
       @request-show-ui="showUI = true"
       :pickerMode="pickerMode"
       :uiHidden="!showUI"
+      :panel-open="openTabs.size > 0 || showPerfPanel"
       :mu="mandelbrotParams.mu"
       :antialiasLevel="mandelbrotParams.antialiasLevel"
       :aaAuto="mandelbrotParams.aaAuto"
@@ -2031,12 +2012,18 @@ function startTravelToPreset(preset: PresetRecord) {
         v-if="openTabs.has(tab.key) && !discoveryRadarActive && isDenseTab(tab.key)"
         :ref="(el: any) => setPopupRef(tab.key, el as HTMLElement)"
         class="dense dense-popup"
+        :class="{ 'sheet-expanded': expandedPanel }"
+        :data-panel="tab.key"
+        role="dialog"
+        :aria-label="tab.label"
         v-bind="denseAttrs(denseView)"
         :data-primary="primaryFor(tab.key)"
         :style="popupStyle(tab.key)"
         @mousedown="bringToFront(tab.key)"
       >
         <DenseTopbar
+          :expanded="expandedPanel"
+          @toggle-size="expandedPanel = !expandedPanel"
           :title="tab.label"
           :ptabs="PTABS_BY_TAB[tab.key]"
           :primary="primaryFor(tab.key)"
@@ -2062,7 +2049,7 @@ function startTravelToPreset(preset: PresetRecord) {
             >
               <svg v-if="mandelbrotParams.activateAnimate" viewBox="0 0 24 24"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>
               <svg v-else viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-              <span class="lbl">Animate</span>
+              <span class="lbl">{{ mandelbrotParams.activateAnimate ? 'Pause' : 'Lecture' }}</span>
             </button>
           </template>
         </DenseTopbar>
@@ -2076,6 +2063,7 @@ function startTravelToPreset(preset: PresetRecord) {
             :mandelbrot-ctrl="mandelbrotCtrlRef"
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
             :active-tab="tab.key"
+            :primary="primaryFor(tab.key)"
             :pickerMode="pickerMode"
             :user-role="userRole"
             :active-preset-guid="activePresetGuid"
@@ -2393,6 +2381,18 @@ function startTravelToPreset(preset: PresetRecord) {
   z-index: 40;
   pointer-events: auto;
   -webkit-overflow-scrolling: touch;
+}
+
+@media (max-width: 720px) and (orientation: portrait) {
+  .perf-panel-wrapper {
+    top: auto;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    max-height: 52dvh;
+    padding-bottom: env(safe-area-inset-bottom);
+    background: #11141c;
+  }
 }
 
 @media (max-width: 1023px) {
@@ -3102,4 +3102,15 @@ function startTravelToPreset(preset: PresetRecord) {
   }
 }
 
+</style>
+
+<style scoped>
+@media (max-width: 720px) and (orientation: portrait) {
+  .dense-popup { top: auto !important; bottom: 0; left: 0 !important; right: 0 !important; width: 100% !important; max-width: 100%; max-height: 52dvh !important; border-radius: 16px 16px 0 0; padding-bottom: env(safe-area-inset-bottom); }
+  .dense-popup.sheet-expanded { max-height: calc(100dvh - 64px) !important; }
+  .dense-popup .body { overscroll-behavior: contain; }
+}
+@media (max-height: 520px) and (orientation: landscape) {
+  .dense-popup { top: 6px !important; bottom: 6px; max-height: calc(100dvh - 12px) !important; width: min(420px, 52vw) !important; }
+}
 </style>

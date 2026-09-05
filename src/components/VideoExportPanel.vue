@@ -274,6 +274,7 @@ function start() {
 
 <template>
   <div class="video-export-panel sections">
+    <fieldset :disabled="running" class="ve-config">
     <DenseSection title="Parcours" scope="Deux positions capturées depuis la vue">
       <div class="fields">
         <div class="ve-row">
@@ -322,79 +323,66 @@ function start() {
       </div>
     </DenseSection>
 
-    <DenseSection title="Sortie" scope="MP4 — résolution, cadence, codec">
-      <div class="fields">
-        <label class="ve-row">
+    <DenseSection title="Sortie">
+      <div class="ve-form"><label class="ve-row">
           <span class="ve-label">Résolution</span>
           <DenseSelect
             :options="RESOLUTIONS" :model-value="resolution" :disabled="running"
             @update:model-value="(v: string) => resolution = v"
           />
-        </label>
-        <label class="ve-row">
+        </label><label class="ve-row">
           <span class="ve-label">Cadence</span>
           <DenseSelect
             :options="FPS_OPTIONS" :model-value="fps" :disabled="running"
             @update:model-value="(v: string) => fps = v"
           />
-        </label>
-        <label class="ve-row">
+        </label><label class="ve-row">
+          <span class="ve-label">Codec</span>
+          <DenseSelect
+            :options="codecOptions" :model-value="codec" :disabled="running"
+            @update:model-value="(v: string) => codec = v as Mp4Codec"
+          />
+        </label></div>
+    </DenseSection>
+    <DenseSection title="Qualité">
+      <div class="ve-form"><label class="ve-row">
+          <span class="ve-label">Anticrénelage</span>
+          <DenseSelect
+            :options="selectableAaOptions" :model-value="String(aaSamplesPerFrame)" :disabled="running"
+            @update:model-value="(v: string) => aaSamplesPerFrame = Number(v)"
+          />
+        </label><label class="ve-row">
+          <span class="ve-label">Suréchantillonnage</span>
+          <DenseSelect
+            :options="SUPERSAMPLE_OPTIONS" :model-value="supersample" :disabled="running"
+            @update:model-value="(v: string) => supersample = v"
+          />
+        </label></div>
+      <p class="ve-note">{{ renderMode === 'tiled-keyframe' ? tiledMemoryLabel : workingSetLabel }} · texture {{ workingTextureSide }}²</p>
+      <details class="ve-advanced"><summary>Réglages avancés</summary><div class="ve-form"><label class="ve-row">
           <span class="ve-label">Mode mémoire</span>
           <DenseSelect
             :options="RENDER_MODE_OPTIONS" :model-value="renderMode" :disabled="running"
             @update:model-value="(v: string) => renderMode = v as VideoExportRenderMode"
           />
-        </label>
-        <DenseField
+        </label><DenseField
           v-if="renderMode === 'tiled-keyframe'"
           label="Budget mémoire"
           :min="64" :max="32768" :step="128"
           unit="Mio"
           :model-value="tiledMemoryBudgetMiB"
           @update:model-value="(v: number) => tiledMemoryBudgetMiB = v"
-        />
-        <p v-if="renderMode === 'tiled-keyframe' && tiledMemoryLabel" class="ve-note">
-          {{ tiledMemoryLabel }}. Le champ brut et le resolve restent bornés à une tuile;
-          les deux keyframes occupent le carré complet.
-        </p>
-        <label class="ve-row">
-          <span class="ve-label">Anticrénelage</span>
-          <DenseSelect
-            :options="selectableAaOptions" :model-value="String(aaSamplesPerFrame)" :disabled="running"
-            @update:model-value="(v: string) => aaSamplesPerFrame = Number(v)"
-          />
-        </label>
-        <label class="ve-row">
-          <span class="ve-label">Codec</span>
-          <DenseSelect
-            :options="codecOptions" :model-value="codec" :disabled="running"
-            @update:model-value="(v: string) => codec = v as Mp4Codec"
-          />
-        </label>
-        <label class="ve-row">
-          <span class="ve-label">Suréchantillonnage</span>
-          <DenseSelect
-            :options="SUPERSAMPLE_OPTIONS" :model-value="supersample" :disabled="running"
-            @update:model-value="(v: string) => supersample = v"
-          />
-        </label>
-        <DenseField
+        /><DenseField
           label="Seuil de bascule"
           :min="MIN_MAGNIFICATION_THRESHOLD" :max="MAX_MAGNIFICATION_THRESHOLD" :step="1"
           :model-value="magnificationThreshold"
           @update:model-value="(v: number) => magnificationThreshold = v"
-        />
-        <p class="ve-note">
-          Texture de travail {{ workingTextureSide }}² ({{ workingSetLabel }} de mémoire GPU) —
-          limite de l'appareil {{ maxTextureDimension }}.
-          Une reconvergence complète par facteur de zoom égal au seuil : bas = plus propre et plus lent,
-          haut = plus rapide et plus doux en périphérie.
-          L'anticrénelage n'ajoute que la fine bande de bord par échantillon, pas une image entière.
-        </p>
-      </div>
+        /></div>
+        <p class="ve-note">Seuil de bascule : une valeur basse reconverge plus souvent ; une valeur haute privilégie la vitesse. Limite texture : {{ maxTextureDimension }}.</p>
+      </details>
     </DenseSection>
-
-    <DenseSection title="Rendu" scope="Chaque image est calculée jusqu'à convergence">
+    </fieldset>
+    <DenseSection class="ve-footer" title="Export" scope="Chaque image est calculée jusqu'à convergence">
       <div class="fields">
         <ul v-if="problems.length" class="ve-problems">
           <li v-for="(problem, index) in problems" :key="index">
@@ -469,4 +457,21 @@ function start() {
 }
 .ve-start:disabled { opacity: 0.4; cursor: not-allowed; }
 .ve-cancel { border-color: rgba(226, 96, 96, 0.4); }
+</style>
+
+<style scoped>
+.ve-config { display: flex; flex-direction: column; gap: 7px; margin: 0; padding: 0; border: 0; min-width: 0; }
+.ve-form { display: flex; flex-direction: column; gap: 6px; }
+.video-export-panel :deep(.fields) { display: flex !important; flex-direction: column; gap: 6px; }
+.ve-row { display: grid; grid-template-columns: minmax(90px, .8fr) minmax(0, 1.4fr); min-width: 0; }
+.ve-row :deep(.fld) { width: 100%; }
+.ve-row :deep(.selbox) { flex-basis: 0; }
+.ve-start-controls { flex-wrap: wrap; justify-content: flex-end; }
+.ve-mono { overflow-wrap: anywhere; padding-bottom: 6px; }
+.ve-footer { position: sticky; bottom: -8px; z-index: 2; background: var(--panel-2, #202532); }
+.ve-footer :deep(.sec-head) { display: none; }
+.ve-actions { margin: 0; }
+.ve-start { background: var(--accent); color: white; font-weight: 600; flex: 1; min-height: 34px; }
+.ve-note { opacity: 1; color: var(--ink-2); }
+.ve-advanced { margin-top: 7px; }
 </style>

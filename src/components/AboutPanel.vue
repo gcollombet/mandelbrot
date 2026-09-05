@@ -10,10 +10,16 @@ const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
   <div class="about-tab sections">
     <DenseSection
       title="Aide"
-      scope="Raccourcis clavier"
+      scope="Gestes et raccourcis"
       icon='<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 015 0c0 1.6-2.5 2.1-2.5 3.8M12 17h.01"/>'
     >
-      <div class="shortcut-groups">
+      <div class="touch-help">
+        <p><strong>Déplacer</strong> · glisser avec un doigt.</p>
+        <p><strong>Zoomer / tourner</strong> · pincer ou pivoter avec deux doigts.</p>
+        <p><strong>Commandes précises</strong> · ouvrir la boussole en bas de l’écran.</p>
+        <p><strong>Réglages</strong> · toucher une valeur pour la saisir. Agrandir le panneau avec ⌃.</p>
+      </div>
+      <div class="shortcut-groups desktop-help">
         <div v-for="group in shortcutGroups" :key="group.label" class="shortcut-group">
           <span class="shortcut-label">{{ group.label }}</span>
           <div class="shortcut-keys">
@@ -24,7 +30,7 @@ const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
     </DenseSection>
 
     <DenseSection
-      title="Crédits"
+      title="Crédits" initially-collapsed
       scope="Technologies & projet"
       icon='<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/>'
     >
@@ -163,4 +169,18 @@ const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
   color: #fff;
   transform: scale(1.02);
 }
+</style>
+
+<style scoped>
+.touch-help { display: none; font-size: 12px; line-height: 1.5; }
+.touch-help p { margin: 6px 0; }
+@media (pointer: coarse), (max-width: 720px) {
+  .touch-help { display: block; }
+  .desktop-help { display: none; }
+}
+</style>
+
+<style scoped>
+.touch-help strong { color: var(--ink); }
+.about-presentation-cta { color: var(--ink); border-color: var(--line); background: var(--row); }
 </style>

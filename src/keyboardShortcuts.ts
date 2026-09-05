@@ -25,7 +25,7 @@ export function getSettingsTabs(layout: KeyboardLayout): SettingsTabDef[] {
     { key: 'animation', label: 'Animation', icon: 'fa-solid fa-film', shortcut: 'c' },
     { key: 'video', label: 'Vidéo', icon: 'fa-solid fa-video', shortcut: 'k' },
     { key: 'performance', label: 'Performance', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
-    { key: 'about', label: 'About', icon: 'fa-solid fa-circle-info', shortcut: 'i' },
+    { key: 'about', label: 'Aide', icon: 'fa-solid fa-circle-info', shortcut: 'i' },
   ];
 }
 

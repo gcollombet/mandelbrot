@@ -6,6 +6,7 @@ interface PTab { value: string; label: string }
 
 defineProps<{
   title: string;
+  expanded?: boolean;
   /** Optional primary grouping tabs (sets data-primary on the panel root). */
   ptabs?: PTab[];
   /** Currently active ptab value. */
@@ -22,6 +23,7 @@ defineProps<{
 
 const emit = defineEmits<{
   (e: 'close'): void;
+  (e: 'toggle-size'): void;
   (e: 'update:primary', v: string): void;
   /** Forwarded pointerdown on the brand area, for the host to drive window drag. */
   (e: 'drag-start', ev: PointerEvent): void;
@@ -64,7 +66,7 @@ function onHeaderPointerDown(e: PointerEvent) {
       :aria-label="syncState === 'error' ? 'Erreur de synchronisation cloud' : syncState === 'syncing' ? 'Synchronisation cloud en cours' : 'Bibliothèque synchronisée'"
     ></span>
     <button
-      v-if="authConfigured"
+      v-if="authConfigured && title === 'Aide'"
       class="tb-btn auth-btn"
       type="button"
       :title="authUserEmail ? 'Logout (' + authUserEmail + ')' : 'Login'"
@@ -72,12 +74,13 @@ function onHeaderPointerDown(e: PointerEvent) {
     >
       <svg v-if="authUserEmail" viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M10 12H3m0 0l3-3m-3 3l3 3"/></svg>
       <svg v-else viewBox="0 0 24 24"><path d="M14 4h4a2 2 0 012 2v12a2 2 0 01-2 2h-4M3 12h11m0 0l-3-3m3 3l-3 3"/></svg>
-      <span class="lbl">{{ authUserEmail ? 'Logout' : 'Login' }}</span>
+      <span class="lbl">{{ authUserEmail ? 'Déconnexion' : 'Connexion' }}</span>
     </button>
-    <button v-if="isAdmin" class="tb-btn" @click="menuOpen = !menuOpen">
+    <button v-if="isAdmin && title === 'Aide'" class="tb-btn" aria-label="Préférences d’affichage" @click="menuOpen = !menuOpen">
       <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
       <span class="lbl">Affichage</span>
     </button>
+    <button class="tb-btn sheet-size" type="button" :aria-label="expanded ? 'Réduire le panneau' : 'Agrandir le panneau'" :aria-expanded="expanded" @click="emit('toggle-size')">{{ expanded ? '⌄' : '⌃' }}</button>
     <button class="close" aria-label="Fermer" @click="emit('close')">✕</button>
     <DenseViewMenu v-if="menuOpen && isAdmin" @close="menuOpen = false" />
   </header>

@@ -114,12 +114,19 @@ const props = defineProps<{
   mandelbrotCtrl?: any;
   suspendShortcuts?: (suspend: boolean) => void;
   activeTab: string;
+  primary?: string;
   pickerMode?: boolean;
   userRole?: UserRole;
   activePresetGuid?: string | null;
 }>();
 
 const router = useRouter();
+const settingsRoot = ref<HTMLElement | null>(null);
+watch(() => props.primary, async () => {
+  await nextTick();
+  const body = settingsRoot.value?.closest('.body');
+  if (body) body.scrollTop = 0;
+});
 
 const userRole = computed<UserRole>(() => props.userRole ?? 'guest');
 const isAdmin = computed(() => canShowAdminUpload(userRole.value));
@@ -435,7 +442,6 @@ const angleFmt = (v: number) => v.toFixed(1);
 const muFmt = (v: number) => Math.pow(10, v).toFixed(1);
 
 // ── Dense field formatters (Performance) ─────────────────────────────
-const epsilonFmt = (v: number) => Math.pow(10, v).toExponential(1);
 const antialiasFmt = (v: number) => (v > 1 ? v + '×' : 'Off');
 const radiusFmt = (v: number) => Math.pow(10, v).toExponential(0);
 // Slider value is the positive exponent; display as the target scale (e.g. 30 → "1e-30").
@@ -550,21 +556,14 @@ const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ??
 // Primary control (post 2.8 ship gate): Auto = unified per-block dispatch,
 // Exact = pure perturbation. Legacy single modes live in the debug section as
 // overrides (same model field, so presets carrying them keep working).
-const approximationOptions = [
-  { label: 'Auto', value: 'auto' },
-  { label: 'Exact', value: 'perturbation' },
+const calculationOptions = [
+  { label: 'Automatique', value: 'auto' },
+  { label: 'Sans sauts', value: 'perturbation' },
+  { label: 'Forcer BLA', value: 'bla' },
+  { label: 'Forcer Padé', value: 'pade' },
+  { label: 'Forcer Jet', value: 'jet' },
+  { label: 'Forcer Möbius+', value: 'mobius' },
 ];
-const legacyModeOptions = [
-  { label: 'Off', value: 'off' },
-  { label: 'BLA', value: 'bla' },
-  { label: 'Padé', value: 'pade' },
-  { label: 'Jet', value: 'jet' },
-  { label: 'Möbius+', value: 'mobius' },
-];
-const legacyOverride = () => {
-  const m = model.value.approximationMode;
-  return m === 'bla' || m === 'pade' || m === 'jet' || m === 'mobius' ? m : 'off';
-};
 
 // ── Dense field formatters (Palettes) ────────────────────────────────
 const palettePeriodFmt = () => formatPalettePeriod(model.value.palettePeriod);
@@ -737,6 +736,9 @@ const applyToAll = ref(false);
 const MAX_COLORS = 200;
 const previewRef = ref<InstanceType<typeof PalettePreview> | null>(null);
 const selectedIdx = ref<number | null>(0);
+const paletteTab = ref('color');
+const presetQuery = ref('');
+const presetSort = ref('recent');
 
 watch(() => model.value.colorStops.length, (newLen, oldLen) => {
   if (newLen > oldLen) {
@@ -867,6 +869,19 @@ function deleteSelectedStop() {
   }
 }
 
+function addPaletteStop() {
+  if (model.value.colorStops.length >= MAX_COLORS) return;
+  const current = quickSelectedStop.value?.position ?? 0;
+  const positions = model.value.colorStops.map(p => p.position).sort((a, b) => a - b);
+  const neighbor = current < 1
+    ? positions.find(p => p > current) ?? 1
+    : [...positions].reverse().find(p => p < current) ?? 0;
+  const t = (current + neighbor) / 2;
+  const pal = new Palette(model.value.colorStops, model.value.interpolationMode);
+  model.value.colorStops.push(createInterpolatedColorStop(model.value.colorStops, t, pal.getColorAt(t)));
+  selectedIdx.value = model.value.colorStops.length - 1;
+  applyToAll.value = false;
+}
 function onPreviewDblClick(event: MouseEvent) {
   if (model.value.colorStops.length >= MAX_COLORS) return;
   const canvas = previewRef.value?.canvasRef;
@@ -994,7 +1009,13 @@ const showOnlyFavoritePresets = ref(favoriteFilterState.presets ?? false);
 const showOnlyFavoritePalettePresets = ref(favoriteFilterState.palettePresets ?? false);
 const showOnlyFavoritePalettes = ref(favoriteFilterState.palettes ?? false);
 const visibleNavPresets = computed(() => showOnlyFavoriteNavigation.value ? favoritePresets.value : presets.value);
-const visiblePresets = computed(() => showOnlyFavoritePresets.value ? favoritePresets.value : presets.value);
+const visiblePresets = computed(() => {
+  const q = presetQuery.value.trim().toLocaleLowerCase();
+  const list = (showOnlyFavoritePresets.value ? favoritePresets.value : presets.value)
+    .filter(p => !q || `${p.name ?? ''} ${formatPresetDate(p.date)}`.toLocaleLowerCase().includes(q));
+  return [...list].sort((a, b) => presetSort.value === 'name'
+    ? (a.name ?? '').localeCompare(b.name ?? '') : String(b.date).localeCompare(String(a.date)));
+});
 const visiblePalettePresets = computed(() => showOnlyFavoritePalettePresets.value ? favoritePresets.value : presets.value);
 const visiblePalettes = computed(() => showOnlyFavoritePalettes.value ? favoritePalettes.value : palettes.value);
 
@@ -1571,12 +1592,6 @@ const muSlider = computed({
   get: () => Math.log10(model.value.mu ?? 4.0),
   set: (val: number) => {
     model.value.mu = Math.pow(10, Math.max(val, MU_MIN_LOG10));
-  }
-});
-const epsilonSlider = computed({
-  get: () => Math.log10(model.value.epsilon ?? 1e-8),
-  set: (val: number) => {
-    model.value.epsilon = Math.pow(10, val);
   }
 });
 // Slider max iteration multiplier : logarithmique, 0.1–10
@@ -2592,7 +2607,7 @@ async function startVideoExport(payload: {
 </script>
 
 <template>
-  <div class="settings-container">
+  <div class="settings-container" ref="settingsRoot">
     <!-- Navigation tab -->
     <div v-if="activeTab === 'navigation'" class="cv-body sections">
 
@@ -2604,8 +2619,8 @@ async function startVideoExport(payload: {
       >
         <div class="coords">
           <div class="lab">
-            <div class="l1">Center</div>
-            <div class="l2">Complex coordinates</div>
+            <div class="l1">Centre</div>
+            <div class="l2">Coordonnées complexes</div>
           </div>
           <div class="vals">
             <div class="cline">
@@ -2646,7 +2661,7 @@ async function startVideoExport(payload: {
             @click="findMinibrot"
           >
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            {{ findingMinibrot ? 'Searching…' : 'Find minibrot' }}
+            {{ findingMinibrot ? 'Recherche…' : 'Centrer minibrot' }}
           </button>
           <button
             class="mini-btn"
@@ -2655,7 +2670,7 @@ async function startVideoExport(payload: {
             @click="zoomToMinibrot"
           >
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>
-            {{ zoomingMinibrot ? 'Framing…' : 'Zoom on minibrot' }}
+            {{ zoomingMinibrot ? 'Cadrage…' : 'Cadrer minibrot' }}
           </button>
           <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
         </div>
@@ -2674,36 +2689,20 @@ async function startVideoExport(payload: {
             @update:model-value="(v: number) => angleSlider = v"
           />
         </div>
-      </DenseSection>
-
-      <!-- ============ 2. RENDER MAPPING ============ -->
-      <DenseSection
-        title="Mapping de rendu"
-        scope="Mappage des itérations avant coloration"
-        icon='<rect x=&quot;4&quot; y=&quot;4&quot; width=&quot;16&quot; height=&quot;16&quot; rx=&quot;2&quot;/><path d=&quot;M4 12h16M12 4v16&quot;/>'
-      >
         <div class="mu-row">
           <DenseField
-            label="Mu" :min="0.602" :max="5" :step="0.01"
+            label="Bailout" :min="0.602" :max="5" :step="0.01"
             :f="muFmt"
             :model-value="muSlider"
             @update:model-value="(v: number) => muSlider = v"
           />
-          <button class="mini-btn mu-quick" @click="model.mu = 4" title="Mu = 4">4</button>
-        </div>
-        <div class="fields">
-          <DenseField
-            label="Fréquence rayures" :min="1" :max="32" :step="1"
-            f="p0"
-            :model-value="model.stripeFrequency ?? 8"
-            @update:model-value="(v: number) => model.stripeFrequency = v"
-          />
+          <button class="mini-btn mu-quick" @click="model.mu = 4" title="Bailout = 4">4</button>
         </div>
       </DenseSection>
 
       <!-- ============ 3. LOCATIONS LIBRARY ============ -->
       <DenseSection
-        title="Bibliothèque de lieux"
+        title="Choisir un lieu…" initially-collapsed
         scope="Applique Cx, Cy, zoom & angle"
         icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
       >
@@ -2717,7 +2716,7 @@ async function startVideoExport(payload: {
           @click="showOnlyFavoriteNavigation = !showOnlyFavoriteNavigation"
         >
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-          Favorites
+          Favoris
         </button>
         <div class="dropdown cv-dropdown" :class="{ 'is-active': showNavPresetDropdown }">
           <div class="dropdown-trigger">
@@ -2772,7 +2771,7 @@ async function startVideoExport(payload: {
       <div class="nav-preset-actions">
         <button class="mini-btn primary load-btn" @click="selectedNavPreset && selectPresetLocation(selectedNavPreset)" :disabled="!selectedNavPreset">
           <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
-          Load location
+          Appliquer le lieu
         </button>
         <button
           class="mini-btn preset-link-btn"
@@ -2789,9 +2788,9 @@ async function startVideoExport(payload: {
       <p class="load-note">Applies Cx, Cy, zoom &amp; angle from the selected preset.</p>
 
       <div v-if="isAdmin" class="transfer">
-        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
-        <button class="mini-btn" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
-        <button class="mini-btn" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
+        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Importer</button>
+        <button class="mini-btn" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Exporter la sélection</button>
+        <button class="mini-btn" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Exporter les favoris</button>
       </div>
 
       </DenseSection>
@@ -2802,18 +2801,18 @@ async function startVideoExport(payload: {
 
       <!-- ============ 1. SAVE CURRENT VIEW ============ -->
       <DenseSection
-        title="Enregistrer la vue"
+        title="Enregistrer la vue" initially-collapsed
         scope="Capture lieu, palette et rendu"
         icon='<path d=&quot;M5 3h12l4 4v14H5z&quot;/><path d=&quot;M9 3v5h7V3M8 21v-7h8v7&quot;/>'
       >
       <div class="save-row">
-        <input class="txt-in" v-model="presetName" type="text" placeholder="Name (optional)…"
+        <input class="txt-in" v-model="presetName" type="text" placeholder="Nom facultatif…"
           @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
           @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
         />
         <button class="mini-btn primary" @click="savePreset">
           <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
-          Save
+          Enregistrer
         </button>
       </div>
       </DenseSection>
@@ -2821,11 +2820,13 @@ async function startVideoExport(payload: {
       <!-- ============ 2. LIBRARY ============ -->
       <DenseSection
         title="Bibliothèque"
-        scope="Cliquer pour appliquer — survol pour les actions"
+        scope="Cliquer pour appliquer"
         icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
       >
 
       <div class="lib-bar">
+        <input class="txt-in gallery-search" v-model="presetQuery" type="search" aria-label="Rechercher un preset" placeholder="Rechercher…" />
+        <select class="txt-in" v-model="presetSort" aria-label="Trier les presets"><option value="recent">Récents</option><option value="name">Nom</option></select>
         <button
           class="fav-filter"
           :class="{ on: showOnlyFavoritePresets }"
@@ -2834,7 +2835,7 @@ async function startVideoExport(payload: {
           @click="showOnlyFavoritePresets = !showOnlyFavoritePresets"
         >
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-          Favorites
+          Favoris
         </button>
         <span class="count">
           {{ visiblePresets.length }}<template v-if="showOnlyFavoritePresets"> / {{ presets.length }}</template>
@@ -2850,7 +2851,7 @@ async function startVideoExport(payload: {
           :class="{ sel: selectedPreset === preset.id }"
           @click="selectPresetFromDropdown(preset)"
         >
-          <span class="sel-badge">Applied</span>
+          <span class="sel-badge">Appliqué</span>
           <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
           <div class="acts">
@@ -2893,15 +2894,15 @@ async function startVideoExport(payload: {
       <!-- ============ 3. TRANSFER ============ -->
       <DenseSection
         v-if="isAdmin"
-        title="Transfert"
+        title="Transfert" initially-collapsed
         scope="Import / export"
         icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'
       >
       <div class="transfer">
-        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
-        <button class="mini-btn" @click="exportPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
-        <button class="mini-btn" @click="exportSelectedPreset" :disabled="!selectedPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
-        <button class="mini-btn" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
+        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Importer</button>
+        <button class="mini-btn" @click="exportPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Tout exporter</button>
+        <button class="mini-btn" @click="exportSelectedPreset" :disabled="!selectedPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Exporter la sélection</button>
+        <button class="mini-btn" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Exporter les favoris</button>
         <input ref="presetFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPresets" />
       </div>
       </DenseSection>
@@ -2936,33 +2937,14 @@ async function startVideoExport(payload: {
     </div>
 
     <!-- Palettes tab -->
-    <div v-else-if="activeTab === 'palettes'" class="cv-body palette-canvas-panel">
+    <div v-else-if="activeTab === 'palettes'" class="cv-body palette-canvas-panel" :class="{ 'palette-library': primary === 'library' }">
       <!-- ═══ Pipette + outils compact ═══ -->
       <div class="palette-strip-zone">
       <div class="top-bar palette-strip-bar mb-2 mt-2">
         <!-- Stop edit scope: apply edits to just the selected stop, or to all stops -->
-        <div class="stop-scope-toggle" role="group" aria-label="Stop edit scope">
-          <button
-            type="button"
-            class="button is-small scope-btn"
-            :class="{ 'is-active': !applyToAll }"
-            :aria-pressed="!applyToAll"
-            title="Apply edits only to this stop"
-            @click="applyToAll = false"
-          >
-            This Stop
-          </button>
-          <button
-            type="button"
-            class="button is-small scope-btn"
-            :class="{ 'is-active': applyToAll }"
-            :aria-pressed="applyToAll"
-            title="Apply edits to all stops"
-            @click="applyToAll = true"
-          >
-            All Stops
-          </button>
-        </div>
+        <select class="scope-select txt-in" aria-label="Portée des modifications" :value="applyToAll ? 'all' : 'point'" @change="applyToAll = ($event.target as HTMLSelectElement).value === 'all'">
+          <option value="point">Ce point</option><option value="all">Tous les points</option>
+        </select>
         <div class="color-picker-row">
           <button
             class="pipette-btn"
@@ -2974,7 +2956,7 @@ async function startVideoExport(payload: {
           </button>
           <span v-if="props.pickerMode" class="picker-hint">Click on the fractal&hellip;</span>
         </div>
-        <div class="outils-bar">
+        <details class="palette-transform"><summary class="mini-btn" aria-label="Transformer le dégradé" title="Transformer le dégradé">⋯</summary><div class="outils-bar">
           <button class="button is-small is-light outils-btn" @click="invertPalette" title="Reverse order">
             <i class="fa-solid fa-arrow-right-arrow-left fa-fw"></i> Inverser
           </button>
@@ -2990,7 +2972,8 @@ async function startVideoExport(payload: {
           <button class="button is-small is-danger is-light outils-btn" @click="clearPalette" title="Clear entire palette">
             <i class="fa-solid fa-trash-can fa-fw"></i> Effacer
           </button>
-        </div>
+        </div></details>
+        <button class="mini-btn" :disabled="model.colorStops.length >= MAX_COLORS" @click="addPaletteStop">+ Point</button>
       </div>
 
       <!-- Compact stop bar: color/iridescence/curve pickers + stop preset picker,
@@ -3013,14 +2996,7 @@ async function startVideoExport(payload: {
 
         <StopTransferCurveSelector v-model="quickSelectedTransferCurve" />
 
-        <select
-          class="quickbar-preset-select"
-          :value="selectedStopPresetName"
-          @change="applyQuickStopPreset(($event.target as HTMLSelectElement).value)"
-        >
-          <option value="" disabled>Choisir un preset…</option>
-          <option v-for="preset in stopPresets" :key="preset.guid || preset.name" :value="preset.name">{{ preset.name }}</option>
-        </select>
+
       </div>
 
       <!-- Live WebGPU material preview strip (mockup style) with handles overlaid -->
@@ -3079,7 +3055,7 @@ async function startVideoExport(payload: {
       </div>
 
       <!-- Pinned quick fields under the strip (mockup HUD .pins) -->
-      <div class="pins">
+      <details class="palette-distribution"><summary>Répartition du dégradé</summary><div class="pins">
         <DenseField label="Période" :min="0" :max="1" :step="0.001" :f="palettePeriodFmt"
           :model-value="sliderPalettePeriod" @update:model-value="(v: number) => sliderPalettePeriod = v" />
         <DenseSelect label="Distribution"
@@ -3094,13 +3070,18 @@ async function startVideoExport(payload: {
           :model-value="sliderPhaseColoring" @update:model-value="(v: number) => sliderPhaseColoring = v" />
         <DenseToggle label="Miroir"
           :model-value="!!model.paletteMirror" @update:model-value="(v: boolean) => model.paletteMirror = v" />
+      </div></details>
       </div>
-      </div>
-
+      <nav v-if="primary !== 'library'" class="panel-tabs" aria-label="Réglages de palette">
+        <button v-for="item in [{id:'color',label:'Couleur'}, {id:'material',label:'Matière'}, {id:'texture',label:'Texture'}]" :key="item.id" :aria-pressed="paletteTab === item.id" @click="paletteTab = item.id">{{ item.label }}</button>
+      </nav>
+      <p v-if="primary !== 'library'" class="panel-note">{{ applyToAll ? 'Édition groupée : tous les points' : `Point ${(selectedIdx ?? 0) + 1} / ${model.colorStops.length}` }}</p>
       <div class="sections">
+
 
       <PaletteEditor
         ref="paletteEditorRef"
+        :category="paletteTab"
         :color-stops="model.colorStops"
         :selected-idx="selectedIdx"
         :interpolation-mode="model.interpolationMode"
@@ -3125,14 +3106,24 @@ async function startVideoExport(payload: {
         :stop-presets="stopPresets"
         v-model:selected-stop-preset-name="selectedStopPresetName"
         @refresh-stop-presets="refreshStopPresets"
-      />
+      >
+        <template #preset-selector>        <select
+          class="quickbar-preset-select"
+          :value="selectedStopPresetName"
+          @change="applyQuickStopPreset(($event.target as HTMLSelectElement).value)"
+        >
+          <option value="" disabled>Choisir un preset…</option>
+          <option v-for="preset in stopPresets" :key="preset.guid || preset.name" :value="preset.name">{{ preset.name }}</option>
+        </select></template>
+      </PaletteEditor>
 
-      <DenseSection group="params" :hue="320" title="Orbit trap · Rosace" scope="Terminal instantané ou plus proche passage de l’orbite" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;4&quot;/><path d=&quot;M12 2c4 3 7 6 10 10-3 4-6 7-10 10-4-3-7-6-10-10 3-4 6-7 10-10z&quot;/>'>
+      <DenseSection group="params" :hue="320" v-show="paletteTab === 'material'" title="Orbit trap · Rosace" initially-collapsed scope="Terminal instantané ou plus proche passage de l’orbite" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;4&quot;/><path d=&quot;M12 2c4 3 7 6 10 10-3 4-6 7-10 10-4-3-7-6-10-10 3-4 6-7 10-10z&quot;/>'>
         <div class="fields">
           <DenseSelect label="Mode"
             :options="orbitTrapModeOptions"
             :model-value="orbitTrapConfig.mode"
             @update:model-value="setOrbitTrapMode" />
+          <template v-if="orbitTrapConfig.mode !== 'off'">
           <DenseField label="Intensité" :min="0" :max="100" :step="0.1" f="p1"
             :model-value="orbitTrapConfig.strength" @update:model-value="(v: number) => setOrbitTrapNumber('strength', v)" />
           <DenseField label="Échelle" :min="0.05" :max="4" :step="0.01" f="p2"
@@ -3178,13 +3169,14 @@ async function startVideoExport(payload: {
               :model-value="orbitTrapConfig.includeInterior"
               @update:model-value="(v: boolean) => setOrbitTrapBoolean('includeInterior', v)" />
           </template>
+          </template>
         </div>
         <p v-if="orbitTrapConfig.mode === 'sampled' || orbitTrapConfig.mode === 'exact'" class="orbit-trap-note">
           Le bandeau d’aperçu ne réitère pas l’orbite : évalue ce mode sur le canevas principal.
         </p>
       </DenseSection>
 
-      <DenseSection group="params" :hue="25" title="Global · Surface & Matière" scope="Relief, ombrage et matériau partagés — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
+      <DenseSection group="params" :hue="25" v-show="paletteTab === 'material'" title="Global · Surface & Matière" initially-collapsed scope="Relief, ombrage et matériau partagés — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
         <div class="fields">
           <DenseField label="Profondeur relief" :min="0" :max="2" :step="0.01" f="p2"
             :model-value="model.reliefDepth ?? 1" @update:model-value="(v: number) => model.reliefDepth = v" />
@@ -3215,7 +3207,7 @@ async function startVideoExport(payload: {
         </div>
       </DenseSection>
 
-      <DenseSection group="params" :hue="230" title="Espace couleur" scope="Ajustements globaux sur chaque palette" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'>
+      <DenseSection group="params" :hue="230" v-show="paletteTab === 'color'" title="Espace couleur" scope="Ajustements globaux sur chaque palette" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'>
         <DenseSeg
           label="Interpolation"
           :options="interpolationModes.map(m => ({ label: m.label, value: m.key }))"
@@ -3238,11 +3230,11 @@ async function startVideoExport(payload: {
         </div>
       </DenseSection>
 
-      <DenseSection group="params" :hue="175" title="Texture · Environnement" scope="Réflexions ambiantes" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M3 12h18M12 3a14 14 0 010 18 14 14 0 010-18z&quot;/>'>
-      <p class="section-help">Select the image used for glossy and ambient environment reflections.</p>
+      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" :preview="currentSkyboxObj?.thumbnail" title="Texture · Environnement" initially-collapsed scope="Réflexions ambiantes" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M3 12h18M12 3a14 14 0 010 18 14 14 0 010-18z&quot;/>'>
+      <p class="section-help">Choisir l’environnement des reflets.</p>
       <div class="grid texture-grid">
         <div v-for="tex in textures" :key="'skybox-card-' + tex.name" class="card texture-card" :class="{ sel: selectedSkyboxTexture === tex.name, unavailable: tex.unavailable }" @click="selectSkyboxFromDropdown(tex)">
-          <span class="sel-badge">Applied</span>
+          <span class="sel-badge">Appliqué</span>
           <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
           <div class="acts">
@@ -3267,11 +3259,11 @@ async function startVideoExport(payload: {
       </div>
       </DenseSection>
 
-      <DenseSection group="params" :hue="175" title="Texture · Images" scope="Images à mélanger dans la surface" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><circle cx=&quot;9&quot; cy=&quot;10&quot; r=&quot;2&quot;/><path d=&quot;M21 15l-5-5-11 9&quot;/>'>
-      <p class="section-help">Click a texture to use it as the image layer.</p>
+      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" :preview="currentTextureObj?.thumbnail" title="Texture · Images" initially-collapsed scope="Images à mélanger dans la surface" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><circle cx=&quot;9&quot; cy=&quot;10&quot; r=&quot;2&quot;/><path d=&quot;M21 15l-5-5-11 9&quot;/>'>
+      <p class="section-help">Choisir une image pour la surface.</p>
       <div class="grid texture-grid">
         <div v-for="tex in textures" :key="tex.name" class="card texture-card" :class="{ sel: selectedTexture === tex.name, unavailable: tex.unavailable }" @click="selectTextureFromDropdown(tex)">
-          <span class="sel-badge">Applied</span>
+          <span class="sel-badge">Appliqué</span>
           <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
           <div class="acts">
@@ -3296,7 +3288,7 @@ async function startVideoExport(payload: {
       </div>
       </DenseSection>
 
-      <DenseSection group="params" :hue="175" title="Texture" scope="Échelle, mapping et préréglages de la couche image" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><path d=&quot;M3 15l5-4 4 3 4-5 5 6&quot;/>'>
+      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" title="Texture" scope="Échelle, mapping et préréglages de la couche image" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><path d=&quot;M3 15l5-4 4 3 4-5 5 6&quot;/>'>
         <div class="fields">
           <DenseField label="Échelle image" :min="0.1" :max="10" :step="0.1" f="p1"
             :model-value="model.tessellationLevel ?? 1" @update:model-value="(v: number) => model.tessellationLevel = v" />
@@ -3339,18 +3331,35 @@ async function startVideoExport(payload: {
         </div>
       </DenseSection>
 
+      <!-- ============ 2. RENDER MAPPING ============ -->
+      <DenseSection
+        title="Répartition des itérations" group="params" v-show="paletteTab === 'color'" initially-collapsed
+        scope="Mappage des itérations avant coloration"
+        icon='<rect x=&quot;4&quot; y=&quot;4&quot; width=&quot;16&quot; height=&quot;16&quot; rx=&quot;2&quot;/><path d=&quot;M4 12h16M12 4v16&quot;/>'
+      >
+        <div class="fields">
+          <DenseField
+            label="Fréquence rayures" :min="1" :max="32" :step="1"
+            f="p0"
+            :model-value="model.stripeFrequency ?? 8"
+            @update:model-value="(v: number) => model.stripeFrequency = v"
+          />
+        </div>
+      </DenseSection>
+
+
       <DenseSection group="library" :hue="300" title="Palettes sauvegardées" scope="Couleurs seules — garde matière & mapping" icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'>
-      <p class="section-help">Colors only — applying a palette keeps your current material and mapping.</p>
+      <p class="section-help">Couleurs seules : conserve la matière et le mapping.</p>
       <div class="lib-bar">
         <button class="fav-filter" :class="{ on: showOnlyFavoritePalettes }" type="button" :aria-pressed="showOnlyFavoritePalettes" @click="showOnlyFavoritePalettes = !showOnlyFavoritePalettes">
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-          Favorites
+          Favoris
         </button>
         <span class="count">{{ visiblePalettes.length }} palette{{ visiblePalettes.length === 1 ? '' : 's' }}</span>
       </div>
-      <div class="grid palette-library-grid saved-palette-grid" style="max-height:228px;">
+      <div class="grid palette-library-grid saved-palette-grid">
         <div v-for="palette in visiblePalettes" :key="palette.name" class="card palette-card" :class="{ sel: selectedPalette === palette.name }" @click="selectPaletteFromDropdown(palette)">
-          <span class="sel-badge">Applied</span>
+          <span class="sel-badge">Appliqué</span>
           <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail" class="thumb palette-thumb" />
           <div v-else class="thumb thumb-empty palette-thumb"></div>
           <div class="acts">
@@ -3386,16 +3395,16 @@ async function startVideoExport(payload: {
       <div class="lib-bar">
         <button class="fav-filter" :class="{ on: showOnlyFavoritePalettePresets }" type="button" :aria-pressed="showOnlyFavoritePalettePresets" @click="showOnlyFavoritePalettePresets = !showOnlyFavoritePalettePresets">
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-          Favorites
+          Favoris
         </button>
         <span class="count">
           {{ visiblePalettePresets.length }}<template v-if="showOnlyFavoritePalettePresets"> / {{ presets.length }}</template>
           preset{{ visiblePalettePresets.length === 1 && !showOnlyFavoritePalettePresets ? '' : 's' }}
         </span>
       </div>
-      <div class="grid palette-library-grid full-preset-grid" style="max-height:264px;">
+      <div class="grid palette-library-grid full-preset-grid">
         <div v-for="preset in visiblePalettePresets" :key="preset.id" class="card" :class="{ sel: selectedPalettePreset === preset.id }" @click="selectPalettePresetFromDropdown(preset)">
-          <span class="sel-badge">Applied</span>
+          <span class="sel-badge">Appliqué</span>
           <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
           <div class="acts">
@@ -3421,12 +3430,12 @@ async function startVideoExport(payload: {
       </div>
       </DenseSection>
 
-      <DenseSection v-if="isAdmin" group="library" :hue="300" title="Transfert" scope="Import / export" icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'>
+      <DenseSection v-if="isAdmin" group="library" :hue="300" title="Transfert" initially-collapsed scope="Import / export" icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'>
       <div class="transfer">
-        <button class="tbtn primary" @click="triggerImportPalettes"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import</button>
-        <button class="tbtn" @click="exportPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export all</button>
-        <button class="tbtn" @click="exportSelectedPalette" :disabled="!selectedPalette"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Export selected</button>
-        <button class="tbtn" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Export favorites</button>
+        <button class="tbtn primary" @click="triggerImportPalettes"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Importer</button>
+        <button class="tbtn" @click="exportPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Tout exporter</button>
+        <button class="tbtn" @click="exportSelectedPalette" :disabled="!selectedPalette"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Exporter la sélection</button>
+        <button class="tbtn" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Exporter les favoris</button>
         <input ref="paletteFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPalettes" />
       </div>
       </DenseSection>
@@ -3434,85 +3443,69 @@ async function startVideoExport(payload: {
       </div>
     </div>
 
-    <!-- Performance/Graphics tab -->
     <div v-else-if="activeTab === 'performance'" class="graphics-tab sections">
-
-      <!-- ═══ PERFORMANCE ═══ -->
-      <DenseSection
-        title="Performance"
-        scope="Qualité & charge GPU"
-        icon='<path d=&quot;M12 2a10 10 0 100 20 10 10 0 000-20z&quot;/><path d=&quot;M12 12l5-3&quot;/>'
-      >
-        <div class="fields">
-          <DenseField
-            label="Epsilon" :min="-30" :max="0" :step="0.01"
-            :f="epsilonFmt"
-            :model-value="epsilonSlider"
-            @update:model-value="(v: number) => epsilonSlider = v"
+      <DenseSection title="Qualité et fluidité">
+        <div class="fields"><DenseField
+            label="Résolution" :min="0.125" :max="2" :step="0.125"
+            :f="resolutionFmt"
+            :model-value="model.dprMultiplier ?? 1"
+            @update:model-value="(v: number) => model.dprMultiplier = v"
           />
-          <DenseField
-            label="Antialiasing" :min="1" :max="MAX_ANTIALIAS_LEVEL" :step="1"
+<DenseField
+            label="Cadence cible" :min="10" :max="60" :step="1"
+            :f="fpsFmt"
+            :model-value="model.targetFps ?? 60"
+            @update:model-value="(v: number) => model.targetFps = v"
+          />
+<DenseField
+            label="Échantillons AA" :min="1" :max="MAX_ANTIALIAS_LEVEL" :step="1"
             :f="antialiasFmt"
             :model-value="model.antialiasLevel ?? 1"
             @update:model-value="(v: number) => model.antialiasLevel = v"
           />
-          <DenseToggle
-            label="Auto AA"
+<DenseToggle
+            label="AA automatique"
             :model-value="!!model.aaAuto"
             @update:model-value="(v: boolean) => model.aaAuto = v"
-          />
-          <DenseToggle
-            label="Adaptive AA"
-            :model-value="model.aaAdaptive !== false"
-            @update:model-value="(v: boolean) => model.aaAdaptive = v"
-          />
-        </div>
-
-        <DenseSeg
-          label="Approximation"
-          :options="approximationOptions"
-          :model-value="legacyOverride() !== 'off' ? 'auto' : (model.approximationMode ?? 'auto')"
-          @update:model-value="(v: string | number) => model.approximationMode = v as ApproximationMode"
-        />
-
-        <div class="fields">
-          <DenseField
-            label="Nav precision" :min="1" :max="1000" :step="1"
+          /></div>
+        <p v-if="model.activateAnimate && model.aaAuto" class="panel-note">AA automatique en pause pendant l’animation.</p>
+        <p v-else-if="(model.antialiasLevel ?? 1) <= 1" class="panel-note">Choisir au moins 2 échantillons pour lisser le rendu.</p>
+      </DenseSection>
+      <DenseSection title="Calcul avancé" initially-collapsed>
+        <div class="fields"><DenseField
+            label="Réserve de précision" :min="1" :max="1000" :step="1"
             :f="precisionBudgetFmt"
             :model-value="precisionBudgetExp"
             @update:model-value="(v: number) => precisionBudgetExp = v"
           />
-        </div>
-
-        <div class="fields" v-if="model.approximationMode !== 'perturbation'">
-          <DenseField
-            label="Radius ε" :min="-12" :max="0" :step="1"
+<DenseField
+            label="Budget d’itérations" :min="-2" :max="2" :step="0.01"
+            :f="iterationsFmt"
+            :model-value="maxIterMultSlider"
+            @update:model-value="(v: number) => maxIterMultSlider = v"
+          />
+<DenseToggle
+            label="AA adaptatif"
+            :model-value="model.aaAdaptive !== false"
+            @update:model-value="(v: boolean) => model.aaAdaptive = v"
+          /></div>
+        <DenseSelect label="Algorithme" :options="calculationOptions" :model-value="model.approximationMode ?? 'auto'" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
+        <p v-if="orbitTrapConfig.mode === 'exact'" class="panel-note">Orbit trap exact : les sauts sont désactivés pour parcourir toute l’orbite.</p>
+        <div v-else-if="model.approximationMode !== 'perturbation'" class="fields"><DenseField
+            label="Tolérance d’approximation" :min="-12" :max="0" :step="1"
             :f="radiusFmt"
             :model-value="blaEpsilonExp"
             @update:model-value="(v: number) => blaEpsilonExp = v"
-          />
-          <div class="fld">
-            <span class="fld-lab">Max skip</span>
-            <span class="fld-val">Auto</span>
-          </div>
-        </div>
-
-        <!-- Block-skipping diagnostic overlay (mandelbrot_debug.wgsl): renders an
-             instrumented recompute as colors. Cout = loop turns heat, Skip =
-             average applied block length, Mix = exact/low/high-order iteration
-             composition (RGB), Probes = table probes per turn, Tier = dominant
-             algorithm per pixel (flat swatch, most useful in Auto mode). The
-             legend below mirrors the shader's palettes (debugViewLegends). -->
-        <div class="fields" v-if="model.approximationMode !== 'perturbation'">
-          <DenseSelect
-            label="Debug view"
+          /></div>
+        <p class="panel-note">La réserve de précision prépare les zooms profonds. La modifier reconstruit la référence.</p>
+      </DenseSection>
+      <DenseSection title="Diagnostic" initially-collapsed>
+        <DenseSelect
+            label="Visualisation"
             :options="debugViewOptions"
             :model-value="model.debugView ?? 0"
             @update:model-value="(v: string | number) => model.debugView = Number(v)"
-          />
-        </div>
-
-        <div v-if="model.approximationMode !== 'perturbation' && debugViewLegend" class="dbgview-legend">
+          />        <div v-if="model.approximationMode !== 'perturbation' && debugViewLegend" class="dbgview-legend">
           <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-bar" :style="{ background: debugViewLegend.gradient }"></div>
           <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-ticks">
             <span v-for="tick in debugViewLegend.ticks" :key="tick">{{ tick }}</span>
@@ -3530,49 +3523,8 @@ async function startVideoExport(payload: {
           <p class="dbgview-legend-note">{{ debugViewLegend.note }}</p>
         </div>
 
-        <!-- Legacy single-mode override (debug): forces one tier's standalone
-             table instead of the unified dispatch. Off = follow the primary
-             Auto/Exact control. -->
-        <DenseSeg
-          label="Mode override"
-          :options="legacyModeOptions"
-          :model-value="legacyOverride()"
-          @update:model-value="(v: string | number) => model.approximationMode = (v === 'off' ? 'auto' : v) as ApproximationMode"
-        />
 
-        <div class="fields">
-          <DenseField
-            label="Resolution" :min="0.125" :max="2" :step="0.125"
-            :f="resolutionFmt"
-            :model-value="model.dprMultiplier ?? 1"
-            @update:model-value="(v: number) => model.dprMultiplier = v"
-          />
-          <DenseField
-            label="Iterations" :min="-2" :max="2" :step="0.01"
-            :f="iterationsFmt"
-            :model-value="maxIterMultSlider"
-            @update:model-value="(v: number) => maxIterMultSlider = v"
-          />
-          <DenseField
-            label="Target FPS" :min="10" :max="60" :step="1"
-            :f="fpsFmt"
-            :model-value="model.targetFps ?? 60"
-            @update:model-value="(v: number) => model.targetFps = v"
-          />
-        </div>
-      </DenseSection>
-
-      <!-- ═══ ADVANCED ═══ -->
-      <DenseSection
-        title="Advanced"
-        scope="Diagnostics"
-        icon='<path d=&quot;M12 2l2.4 7.4H22l-6 4.5 2.3 7.1-6.3-4.6L5.7 21l2.3-7.1-6-4.5h7.6z&quot;/>'
-      >
-        <DenseToggle
-          label="Debug Shading"
-          :model-value="!!model.debugShading"
-          @update:model-value="(v: boolean) => model.debugShading = v"
-        />
+        <p class="panel-note">Les mesures GPU et les commandes expérimentales sont accessibles depuis le compteur de rendu.</p>
       </DenseSection>
     </div>
   </div>
@@ -5679,4 +5631,56 @@ async function startVideoExport(payload: {
   line-height: 1.4;
   color: var(--ink-2);
 }
+</style>
+
+<style scoped>
+.palette-strip-zone { display: flex; flex-direction: column; gap: 6px; padding: 7px; margin: 0 0 7px; border-radius: 8px; }
+.palette-strip-zone .palette-strip { order: -1; height: 46px; min-height: 46px; margin: 4px 0 !important; }
+.palette-strip-bar { gap: 5px; margin: 0 !important; }
+.palette-strip-bar .color-picker-row { flex: 0 0 auto; }
+.palette-strip-bar .outils-bar { display: flex; flex-wrap: wrap; gap: 5px; }
+.palette-transform { position: relative; margin-left: auto; }
+.palette-transform[open] { flex-basis: 100%; order: 4; }
+.palette-transform summary { padding: 5px 7px; }
+.stop-quickbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 5px; min-width: 0; }
+.stop-quickbar .quickbar-preset-select { width: 100%; min-width: 0; }
+.palette-strip-zone .pins { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 5px; }
+.palette-library .palette-strip-zone > :not(.palette-strip) { display: none; }
+.palette-library .handles-overlay { display: none; }
+.palette-library .palette-strip-zone { padding: 3px; }
+.lib-bar { flex-wrap: wrap; gap: 6px; }
+.lib-bar .gallery-search { flex: 1 1 180px; }
+.lib-bar select { width: auto; }
+.coords { display: grid; grid-template-columns: minmax(0,1fr) auto; gap: 6px; }
+.coords .lab { display: none; }
+.coords .vals { min-width: 0; }
+.coord-input { width: 100%; min-width: 0; }
+.coord-input:focus { font-size: 13px; }
+.find-minibrot-row { flex-wrap: wrap; gap: 5px; margin: 6px 0; }
+.save-row { display: flex; flex-wrap: wrap; gap: 5px; }
+.save-row .txt-in { flex: 1 1 140px; min-width: 0; }
+</style>
+
+<style scoped>
+.scope-select { width: 130px; flex: 0 1 130px; height: 32px; padding: 4px 7px; }
+.palette-transform { margin-left: auto; }
+.palette-strip-bar { flex-wrap: nowrap; }
+.palette-transform[open] { position: absolute; z-index: 5; right: 12px; width: min(330px, calc(100% - 24px)); background: var(--panel-2); border: 1px solid var(--line); border-radius: 8px; padding: 8px; }
+.point-presets-disclosure { border-bottom: 1px solid var(--line-soft); }
+.point-presets-disclosure select { max-width: 100%; }
+.cv-body .grid { max-height: none; overflow: visible; }
+.cv-body .acts { position: static; opacity: 1; transform: none; pointer-events: auto; }
+</style>
+
+<style scoped>
+.cv-body .scope-select { padding: 0 8px; height: 32px; font-size: 12px; line-height: normal; min-width: 0; }
+.cv-body .lib-bar .txt-in { padding: 6px 9px; font-size: 12px; }
+</style>
+
+<style scoped>
+.cv-body .saved-palette-grid .palette-card { display: flex; flex-direction: column; height: auto; min-width: 0; border-radius: 8px; }
+.cv-body .saved-palette-grid .palette-card .palette-thumb { height: 36px; width: 100%; }
+.cv-body .saved-palette-grid .palette-card .acts { position: static; translate: none; transform: none; padding: 3px; }
+.cv-body .saved-palette-grid .palette-card .info { padding: 4px 6px; }
+.cv-body .saved-palette-grid .palette-card .sub { display: none; }
 </style>

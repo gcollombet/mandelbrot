@@ -23,6 +23,8 @@ export interface ScrubOptions {
 export function useDenseScrub(opts: ScrubOptions) {
   const scrubbing: Ref<boolean> = ref(false);
   let startX = 0;
+  let startY = 0;
+  let pending = false;
   let startVal = 0;
   let pointerId = -1;
 
@@ -41,25 +43,34 @@ export function useDenseScrub(opts: ScrubOptions) {
 
   function onPointerDown(e: PointerEvent) {
     // Ignore secondary buttons; let inline editors handle their own input.
-    if (e.button !== 0) return;
-    scrubbing.value = true;
+    if (e.button !== 0 || (e.currentTarget as HTMLElement).closest('fieldset:disabled')) return;
+    pending = true;
+    scrubbing.value = false;
+    startY = e.clientY;
     startX = e.clientX;
     startVal = opts.get();
     pointerId = e.pointerId;
     (e.currentTarget as HTMLElement).setPointerCapture?.(e.pointerId);
-    e.preventDefault();
+    if (e.pointerType === 'mouse') e.preventDefault();
   }
 
   function onPointerMove(e: PointerEvent) {
-    if (!scrubbing.value) return;
+    if (!pending && !scrubbing.value) return;
     const dx = e.clientX - startX;
+    if (pending) {
+      const dy = Math.abs(e.clientY - startY);
+      if (dy > Math.abs(dx) && dy > 6) { endScrub(e); return; }
+      if (Math.abs(dx) < 6) return;
+      pending = false;
+      scrubbing.value = true;
+    }
     const fine = e.shiftKey ? (opts.fineFactor ?? 0.2) : 1;
     const delta = (dx / travel()) * range() * fine;
     opts.set(clampStep(startVal + delta));
   }
 
   function endScrub(e: PointerEvent) {
-    if (!scrubbing.value) return;
+    pending = false;
     scrubbing.value = false;
     try {
       (e.currentTarget as HTMLElement).releasePointerCapture?.(pointerId);

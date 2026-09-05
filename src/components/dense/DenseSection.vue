@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import { computed, ref } from 'vue';
-import { useDenseView } from './useDenseView';
 import { showTip, hideTip } from './denseTip';
 
 const props = defineProps<{
   title: string;
+  initiallyCollapsed?: boolean;
+  preview?: string | null;
   /** SVG inner markup (paths) drawn in a 0..24 viewBox for the icon chip. */
   icon?: string;
   /** Right-aligned scope hint. */
@@ -19,8 +20,7 @@ const props = defineProps<{
   hue?: number;
 }>();
 
-const view = useDenseView();
-const collapsed = ref(false);
+const collapsed = ref(!!props.initiallyCollapsed);
 
 // Per-section accent: tints the icon chip (fields keep their own hue).
 const sectionStyle = computed(() =>
@@ -30,8 +30,6 @@ const sectionStyle = computed(() =>
 );
 
 function toggle() {
-  // Collapsing is only meaningful in inspector / tabs layouts.
-  if (view.layout === 'columns') return;
   collapsed.value = !collapsed.value;
 }
 </script>
@@ -43,8 +41,9 @@ function toggle() {
     :data-group="group"
     :style="sectionStyle"
   >
-    <header class="sec-head" @click="toggle">
+    <button type="button" class="sec-head" :aria-expanded="!collapsed" @click="toggle">
       <span v-if="icon" class="sec-ico"><svg viewBox="0 0 24 24" v-html="icon"></svg></span>
+      <img v-if="preview" :src="preview" alt="Sélection actuelle" class="section-preview" />
       <span class="sec-title">{{ title }}</span>
       <span
         v-if="scope"
@@ -55,7 +54,7 @@ function toggle() {
       <svg class="sec-caret" viewBox="0 0 24 24" stroke="currentColor" fill="none" stroke-width="2">
         <path d="M6 9l6 6 6-6" />
       </svg>
-    </header>
+    </button>
     <div class="sec-body">
       <slot />
     </div>

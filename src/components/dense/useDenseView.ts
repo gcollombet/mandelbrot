@@ -1,8 +1,7 @@
 import { reactive, watch } from 'vue';
 
-// GLOBAL dense view state — shared across every panel (per the change decision:
-// switching layout / theme / shape affects all panels at once). Persisted to
-// localStorage so it is restored on reload.
+// Shared appearance preferences. Layout is selected by panel content and CSS;
+// the legacy layout property remains readable for compatibility only.
 
 export type DenseLayout = 'columns' | 'inspector' | 'tabs';
 export type DenseStyle = 'glow' | 'sober' | 'clair';
@@ -21,7 +20,7 @@ export interface DenseViewState {
 const STORAGE_KEY = 'dense_view';
 
 const DEFAULTS: DenseViewState = {
-  layout: 'columns',
+  layout: 'inspector',
   style: 'clair',
   shape: 'rond',
   field: 'gauge',
@@ -31,7 +30,7 @@ const DEFAULTS: DenseViewState = {
 function load(): DenseViewState {
   try {
     const raw = localStorage.getItem(STORAGE_KEY);
-    if (raw) return { ...DEFAULTS, ...JSON.parse(raw) };
+    if (raw) return { ...DEFAULTS, ...JSON.parse(raw), layout: 'inspector' };
   } catch { /* ignore malformed/unavailable storage */ }
   return { ...DEFAULTS };
 }
@@ -43,16 +42,10 @@ watch(state, (s) => {
   try { localStorage.setItem(STORAGE_KEY, JSON.stringify(s)); } catch { /* ignore */ }
 }, { deep: true });
 
-/**
- * Access the global dense view state.
- * `defaultLayout` lets a panel request its preferred layout the first time the
- * app runs (e.g. Animation → 'inspector'); it only applies when nothing has been
- * persisted yet, so it never overrides a user's explicit choice.
- */
+/** Access shared appearance; the optional argument is retained for old callers. */
 export function useDenseView(defaultLayout?: DenseLayout) {
-  if (defaultLayout && !localStorage.getItem(STORAGE_KEY)) {
-    state.layout = defaultLayout;
-  }
+  // Ignore legacy per-panel preferences: container layouts are automatic.
+  void defaultLayout;
   return state;
 }
 
@@ -60,7 +53,7 @@ export function useDenseView(defaultLayout?: DenseLayout) {
 export function denseAttrs(s: DenseViewState = state) {
   return {
     'data-style': s.style,
-    'data-layout': s.layout,
+    'data-layout': 'inspector',
     'data-shape': s.shape,
     'data-field': s.field,
     'data-chroma': s.chroma,

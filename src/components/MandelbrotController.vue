@@ -38,6 +38,7 @@ const props = defineProps<{
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   pickerMode?: boolean,
   uiHidden?: boolean,
+  panelOpen?: boolean,
   tessellationLevel?: number,
   displacementAmount?: number,
   animation?: AnimationConfig,
@@ -470,7 +471,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
     />
     
     <!-- Contrôles de navigation mobile -->
-    <MobileNavigationControls v-show="!props.uiHidden" :mandelbrot-ref="mandelbrotRef" v-model:expanded="mobileNavExpanded" />
+    <MobileNavigationControls v-show="!props.uiHidden && !props.panelOpen" :mandelbrot-ref="mandelbrotRef" v-model:expanded="mobileNavExpanded" />
   </div>
 </template>
 

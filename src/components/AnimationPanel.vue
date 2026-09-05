@@ -202,6 +202,11 @@ function toggleTrack(id: AnimationTrackId) {
   triggerAnimationUpdate();
 }
 
+const trackLabels: Record<string, string> = {
+  paletteOffset: 'Décalage palette', heightPaletteShift: 'Hauteur palette', lightAngle: 'Lumière',
+  textureDrift: 'Dérive texture', skyReflectionDrift: 'Dérive reflets', phaseColoring: 'Phase couleur',
+  varnish: 'Vernis', microBump: 'Micro-relief', displacement: 'Déplacement', tessellation: 'Texture',
+};
 const visibleAnimationPresetCount = computed(() => visibleAnimationPresets.value.length);
 
 onMounted(() => {
@@ -248,21 +253,22 @@ watch(
                   class="tog"
                   :class="{ on: model.animation.tracks[track.id].enabled }"
                   role="switch"
+                  :aria-label="animationTrackLabel(track.id)"
                   :aria-checked="model.animation.tracks[track.id].enabled"
                   tabindex="0"
                   @click="toggleTrack(track.id)"
                   @keydown.space.prevent="toggleTrack(track.id)"
                   @keydown.enter.prevent="toggleTrack(track.id)"
                 ></span>
-                <span class="mc-name">{{ animationTrackLabel(track.id) }}</span>
+                <span class="mc-name">{{ trackLabels[track.id] ?? animationTrackLabel(track.id) }}</span>
                 <DenseSelect
-                  class="mc-wave"
+                  v-if="model.animation.tracks[track.id].enabled" class="mc-wave"
                   :options="waveOptions"
                   :model-value="model.animation.tracks[track.id].type"
                   @update:model-value="(v) => setTrackType(track.id, v)"
                 />
               </div>
-              <div class="mc-fields">
+              <div v-if="model.animation.tracks[track.id].enabled" class="mc-fields">
                 <DenseField
                   label="Vitesse"
                   :min="0" :max="5" :step="0.05"
@@ -285,7 +291,7 @@ watch(
 
         <!-- ═══ Préréglages ═══ -->
         <DenseSection
-          title="Préréglages"
+          title="Préréglages" initially-collapsed
           scope="Enregistrer & appliquer une animation"
           icon='<rect x=&quot;5&quot; y=&quot;3&quot; width=&quot;14&quot; height=&quot;18&quot; rx=&quot;2&quot;/><path d=&quot;M9 3v5h7V3M8 21v-7h8v7&quot;/>'
         >
@@ -458,4 +464,11 @@ watch(
 }
 .anim-preset-row .iconbtn.is-upload-success { color: oklch(.74 .16 150); border-color: oklch(.5 .13 150 / .5); }
 .anim-preset-row .iconbtn.is-remote { color: var(--accent); border-color: oklch(.6 .12 255 / .5); }
+</style>
+
+<style scoped>
+.mixgrid { grid-template-columns: 1fr; gap: 5px; }
+.mixcell { padding: 6px 8px; border-radius: 7px; }
+.mc-fields { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+.mc-name { white-space: normal; }
 </style>

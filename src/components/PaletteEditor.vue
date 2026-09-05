@@ -26,6 +26,7 @@ function effectFmt(field: EffectFieldName) {
 
 const props = withDefaults(defineProps<{
   colorStops: ColorStop[];
+  category?: string;
   selectedIdx: number | null;
   interpolationMode?: InterpolationMode;
   pickerMode?: boolean;
@@ -299,7 +300,7 @@ function importStopPresets(event: Event) {
       scope="Itérations, éclairage, matière et sources image pour ce point"
       icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;4&quot;/><path d=&quot;M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2&quot;/>'
     >
-      <template v-for="sec in POINT_SECTIONS" :key="sec.title">
+      <template v-for="sec in POINT_SECTIONS.filter(s => props.category === 'texture' ? s.title === 'Sources image' : props.category === 'material' ? s.title === 'Éclairage & Matière' : s.title === 'Couleur' || s.title === 'Itérations')" :key="sec.title">
         <div class="subhead">{{ sec.title }}</div>
         <div class="fields">
           <DenseField
@@ -323,10 +324,11 @@ function importStopPresets(event: Event) {
       key="point-presets"
       group="params"
       :hue="300"
-      title="Point · Presets"
+      title="Préréglages du point" initially-collapsed
       scope="Réglages réutilisables pour un point"
       icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
     >
+      <slot name="preset-selector" />
       <div class="transfer">
         <button class="mini-btn primary" :disabled="!selectedStopPresetRecord" @click="applySelectedStopPreset">Appliquer</button>
         <button class="mini-btn danger" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">Supprimer</button>

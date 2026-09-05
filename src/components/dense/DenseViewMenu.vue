@@ -1,14 +1,9 @@
 <script setup lang="ts">
-import { useDenseView, type DenseLayout, type DenseStyle, type DenseShape, type DenseFieldChar, type DenseChroma } from './useDenseView';
+import { useDenseView, type DenseStyle, type DenseShape, type DenseFieldChar, type DenseChroma } from './useDenseView';
 
 defineEmits<{ (e: 'close'): void }>();
 const view = useDenseView();
 
-// 'tabs' layout is intentionally omitted — it is buggy and not exposed.
-const LAYOUTS: { v: DenseLayout; l: string }[] = [
-  { v: 'columns', l: 'Colonnes' },
-  { v: 'inspector', l: 'Inspecteur' },
-];
 const STYLES: { v: DenseStyle; l: string }[] = [
   { v: 'clair', l: 'Clair' },
   { v: 'sober', l: 'Sobre' },
@@ -34,10 +29,6 @@ const CHROMAS: { v: DenseChroma; l: string }[] = [
 <template>
   <div class="scrim" @click="$emit('close')"></div>
   <div class="menu" @click.stop>
-    <h4>Disposition</h4>
-    <div class="opts">
-      <button v-for="o in LAYOUTS" :key="o.v" class="opt" :class="{ on: view.layout === o.v }" @click="view.layout = o.v">{{ o.l }}</button>
-    </div>
     <h4>Thème</h4>
     <div class="opts">
       <button v-for="o in STYLES" :key="o.v" class="opt" :class="{ on: view.style === o.v }" @click="view.style = o.v">{{ o.l }}</button>

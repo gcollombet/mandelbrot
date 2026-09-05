@@ -827,6 +827,8 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       </div>
     </div>
 
+    <p class="perf-state">{{ stats.fps === 0 ? 'Au repos — dernières mesures' : 'Rendu en cours' }}</p>
+    <details class="perf-details"><summary>Répartition GPU</summary>
     <!-- Per-pass breakdown (needs timestamp-query) -->
     <template v-if="stats.timestampCapable">
       <div class="perf-sub">Répartition GPU — instantané <span class="perf-hint">(à l'échelle du budget frame — gris = marge/idle)</span></div>
@@ -898,6 +900,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     </div>
 
     <!-- Render: completion, timing, applications, pixel counts -->
+    </details>
     <div class="perf-sub">Rendu</div>
     <div class="perf-stat-row">
       <span class="perf-stat-label">Completion</span>
@@ -945,6 +948,8 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     </div>
 
     <!-- Dispatch: which approximation tier/mode is actually feeding the shader -->
+    <details class="perf-details"><summary>Calcul et diagnostics expérimentaux</summary>
+    <p class="perf-state">Ces commandes modifient les chemins de calcul. Shadow désactive les tables incrémentales ; les compteurs ajoutent une charge GPU.</p>
     <div class="perf-sub">Dispatch</div>
     <div class="perf-stat-row">
       <span class="perf-stat-label">Shader mode</span>
@@ -1225,6 +1230,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       </div>
     </div>
 
+    </details>
     <div class="perf-export">
       <span class="pe-count">{{ history.length }} échant. / 30 s</span>
       <button class="pe-btn" type="button" :disabled="history.length < 2" @click="exportCsv">Export CSV</button>
@@ -1251,6 +1257,10 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
   font-family: ui-monospace, 'SF Mono', 'Roboto Mono', Menlo, monospace;
 }
 .perf-header {
+  position: sticky;
+  top: 0;
+  z-index: 1;
+  background: #11141c;
   display: flex;
   align-items: center;
   justify-content: space-between;
@@ -1536,4 +1546,12 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
   background-color: #ec3d7a;
   box-shadow: 0 0 6px #ec3d7a;
 }
+</style>
+
+<style scoped>
+.perf-state { font-size: 11px; color: var(--ink-2, #cbd5e1); margin: 0; }
+.perf-details summary { cursor: pointer; font-size: 12px; font-weight: 600; padding: 8px 0; }
+.perf-details > :not(summary) { margin-bottom: 6px; }
+.perf-stat-row { gap: 8px; }
+.perf-stat-value { overflow-wrap: anywhere; }
 </style>

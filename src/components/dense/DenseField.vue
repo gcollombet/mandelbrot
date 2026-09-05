@@ -55,7 +55,7 @@ function commitEdit() {
   if (!editing.value) return;
   editing.value = false;
   const parsed = Number(editText.value.replace(',', '.'));
-  if (!Number.isNaN(parsed)) emit('update:modelValue', clampStep(parsed));
+  if (editText.value.trim() && Number.isFinite(parsed)) emit('update:modelValue', clampStep(parsed));
 }
 
 function cancelEdit() {
@@ -72,6 +72,7 @@ function cancelEdit() {
     @pointerup="endScrub"
     @pointercancel="endScrub"
     @dblclick="beginEdit"
+    @keydown.stop
     @pointerenter="desc && showTip(desc, $event.clientX, $event.clientY)"
     @pointerleave="hideTip()"
   >
@@ -82,6 +83,8 @@ function cancelEdit() {
       v-if="editing"
       ref="editRef"
       class="fld-edit"
+      inputmode="decimal"
+      :aria-label="label"
       v-model="editText"
       @pointerdown.stop
       @dblclick.stop
@@ -89,6 +92,6 @@ function cancelEdit() {
       @keydown.esc.prevent="cancelEdit"
       @blur="commitEdit"
     />
-    <span v-else class="fld-val">{{ valText }}</span>
+    <button v-else type="button" class="fld-val value-edit" :aria-label="`Modifier ${label} : ${valText}`" @pointerdown.stop @click.stop="beginEdit">{{ valText }}</button>
   </div>
 </template>
