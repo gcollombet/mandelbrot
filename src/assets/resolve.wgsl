@@ -141,6 +141,7 @@ fn rotate_inverse(point: vec2<f32>, angle: f32) -> vec2<f32> {
 }
 
 fn is_inside_rotated_screen(xyNeutral: vec2<f32>) -> bool {
+  if (uni.rotationUnion > 1.5) { return true; }
   if (uni.rotationUnion > 0.5) {
     return dot(xyNeutral, xyNeutral) <= 1.0;
   }

@@ -1,5 +1,10 @@
 <script setup lang="ts">
+import RenderProgress from './RenderProgress.vue';
 import { computed, ref, watch } from 'vue';
+import type { MandelbrotExposed } from '../types/MandelbrotExposed';
+import type { Engine } from '../Engine';
+import ExpmapVideoPanel from './ExpmapVideoPanel.vue';
+import { expmapVideoSelected, expmapBusy } from '../expmap/runtime';
 import {
   describeOutputWarnings,
   describeParcoursWarnings,
@@ -36,6 +41,8 @@ import {
 import { DenseField, DenseSection, DenseSelect } from './dense';
 
 const props = defineProps<{
+  engine?: Engine | null;
+  controller?: MandelbrotExposed | null;
   /** Live view parameters, the source both endpoints are captured from. */
   current: Record<string, unknown>;
   maxTextureDimension: number;
@@ -232,8 +239,6 @@ const tiledMemoryLabel = computed(() => {
 const canStart = computed(() =>
   !props.running && problems.value.length === 0 && !codecUnsupported.value);
 
-const progressPercent = computed(() =>
-  props.totalFrames > 0 ? Math.round((props.framesEmitted / props.totalFrames) * 100) : 0);
 
 function currentLocation(): VideoPathLocation {
   return {
@@ -274,7 +279,9 @@ function start() {
 
 <template>
   <div class="video-export-panel sections">
-    <fieldset :disabled="running" class="ve-config">
+    <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect label="Source" :model-value="expmapVideoSelected ? 'expmap' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: 'Mandelbrot' }, { value: 'expmap', label: 'Document ExpMap' }]" @update:model-value="expmapVideoSelected = $event === 'expmap'"/></fieldset>
+    <ExpmapVideoPanel v-if="expmapVideoSelected" :engine="engine" :controller="controller"/>
+    <fieldset v-else :disabled="running || expmapBusy" class="ve-config">
     <DenseSection title="Parcours" scope="Deux positions capturées depuis la vue">
       <div class="fields">
         <div class="ve-row">
@@ -382,7 +389,7 @@ function start() {
       </details>
     </DenseSection>
     </fieldset>
-    <DenseSection class="ve-footer" title="Export" scope="Chaque image est calculée jusqu'à convergence">
+    <DenseSection v-if="!expmapVideoSelected" class="ve-footer" title="Export" scope="Chaque image est calculée jusqu'à convergence">
       <div class="fields">
         <ul v-if="problems.length" class="ve-problems">
           <li v-for="(problem, index) in problems" :key="index">
@@ -399,13 +406,10 @@ function start() {
 
         <p v-if="lastError" class="ve-error">{{ lastError }}</p>
 
-        <div v-if="running" class="ve-progress">
-          <div class="ve-bar"><div class="ve-bar-fill" :style="{ width: progressPercent + '%' }" /></div>
-          <span class="ve-progress-text">{{ framesEmitted }} / {{ totalFrames }} images</span>
-        </div>
+        <RenderProgress v-if="running || framesEmitted > 0" :label="running ? (totalFrames > 0 && framesEmitted >= totalFrames ? 'Finalisation du fichier MP4' : 'Calcul et encodage des images') : lastError ? 'Export arrêté' : framesEmitted >= totalFrames ? 'Export terminé' : 'Export interrompu'" :done="framesEmitted" :total="totalFrames" unit="images encodées" :active="running"/>
 
         <div class="ve-actions">
-          <button type="button" class="ve-start" :disabled="!canStart" @click="start">
+          <button type="button" class="ve-start" :disabled="!canStart || expmapBusy" @click="start">
             Exporter en MP4
           </button>
           <button v-if="running" type="button" class="ve-cancel" @click="emit('cancel')">
@@ -436,10 +440,6 @@ function start() {
   margin: 0.4rem 0 0; padding: 0.4rem 0.6rem; font-size: 0.7rem;
   border-left: 2px solid rgb(226, 96, 96); background: rgba(226, 96, 96, 0.1);
 }
-.ve-progress { display: flex; align-items: center; gap: 0.6rem; margin-top: 0.5rem; }
-.ve-bar { flex: 1; height: 4px; border-radius: 2px; background: rgba(255, 255, 255, 0.12); overflow: hidden; }
-.ve-bar-fill { height: 100%; background: rgb(96, 165, 250); transition: width 120ms linear; }
-.ve-progress-text { font-size: 0.7rem; opacity: 0.75; font-variant-numeric: tabular-nums; }
 .ve-start-controls { display: flex; gap: 0.35rem; }
 .ve-mono { font-family: ui-monospace, monospace; font-size: 0.65rem; }
 .ve-pin {

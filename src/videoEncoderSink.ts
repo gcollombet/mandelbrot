@@ -59,6 +59,7 @@ export type VideoEncodeSettings = {
   codec: Mp4Codec
   destination: VideoDestination
   quality?: Quality
+  hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software'
   /** Seconds between key frames. Frequent keyframes ease seeking, cost size. */
   keyFrameIntervalSeconds?: number
   /** Minimum fragment length when streaming. Shorter = less lost on an abort. */
@@ -112,7 +113,7 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
   if (!isMp4Codec(codec)) {
     throw new Error(`Codec inconnu pour un conteneur MP4 : ${String(codec)}`)
   }
-  if (!await canEncodeVideo(codec, { width: settings.width, height: settings.height })) {
+  if (!await canEncodeVideo(codec, { width: settings.width, height: settings.height, ...(settings.hardwareAcceleration ? { hardwareAcceleration: settings.hardwareAcceleration } : {}) })) {
     throw new Error(
       `Ce navigateur ne sait pas encoder ${settings.width}×${settings.height} en ${codec.toUpperCase()}. `
       + (codec === 'avc' && (settings.width % 2 || settings.height % 2)
@@ -145,6 +146,7 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
   const source = new VideoSampleSource({
     codec,
     quality: settings.quality ?? QUALITY_HIGH,
+    ...(settings.hardwareAcceleration ? { hardwareAcceleration: settings.hardwareAcceleration } : {}),
     keyFrameInterval: settings.keyFrameIntervalSeconds ?? 2,
     // Every frame comes from the same fixed-size capture target; a size change
     // would mean the capture chain was reallocated mid-export, which should

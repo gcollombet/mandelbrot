@@ -23,6 +23,7 @@ export function getSettingsTabs(layout: KeyboardLayout): SettingsTabDef[] {
     { key: 'navigation', label: 'Navigation', icon: 'fa-solid fa-arrows-up-down-left-right', shortcut: layout === 'azerty' ? 'w' : 'z' },
     { key: 'palettes', label: 'Palettes', icon: 'fa-solid fa-palette', shortcut: 'n' },
     { key: 'animation', label: 'Animation', icon: 'fa-solid fa-film', shortcut: 'c' },
+    { key: 'expmap', label: 'ExpMap', icon: 'fa-solid fa-database', shortcut: '' },
     { key: 'video', label: 'Vidéo', icon: 'fa-solid fa-video', shortcut: 'k' },
     { key: 'performance', label: 'Performance', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
     { key: 'about', label: 'Aide', icon: 'fa-solid fa-circle-info', shortcut: 'i' },
@@ -42,7 +43,7 @@ export function getShortcutGroups(layout: KeyboardLayout): ShortcutGroup[] {
     { label: 'Move', keys: ['Left clic', move.up, move.left, move.down, move.right] },
     { label: 'Rotate', keys: ['Right clic', move.rotateLeft, move.rotateRight] },
     { label: 'Zoom', keys: ['Wheel', 'R', 'F'] },
-    { label: 'Settings', keys: getSettingsTabs(layout).map(t => t.shortcut.toUpperCase()) },
+    { label: 'Settings', keys: getSettingsTabs(layout).filter(t => t.shortcut).map(t => t.shortcut.toUpperCase()) },
     { label: 'Snapshot', keys: ['P', 'B'] },
   ];
 }

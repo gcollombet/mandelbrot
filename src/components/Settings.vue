@@ -103,6 +103,8 @@ import {absolutePresetUrl, PRESET_QUERY_PARAMETER} from '../presetDeepLink';
 
 import type {Engine} from '../Engine.ts';
 import VideoExportPanel from './VideoExportPanel.vue';
+import ExpmapPanel from './ExpmapPanel.vue';
+import { expmapBusy, expmapOpenDocument } from '../expmap/runtime';
 import {runVideoExportToWebm} from '../videoExportRunner';
 import type {VideoOutputSpec, VideoPathLocation} from '../videoPath';
 import {
@@ -209,6 +211,7 @@ const precisionBudgetExp = computed({
 
 const emit = defineEmits<{
   'toggle-picker': [];
+  'open-video': [];
   'preset-selected': [guid: string, isCatalogPreset: boolean];
 }>();
 const model =  defineModel<MandelbrotParams>({
@@ -2524,7 +2527,9 @@ async function startVideoExport(payload: {
   startLocation: VideoPathLocation;
   endLocation: VideoPathLocation;
 }) {
-  if (videoExportRunning.value || !props.engine || !props.mandelbrotCtrl) return;
+  if (videoExportRunning.value || expmapBusy.value || !props.engine || !props.mandelbrotCtrl) return;
+  expmapOpenDocument.value = null;
+  expmapBusy.value = true;
   videoExportError.value = null;
   videoExportRunning.value = true;
   videoFramesEmitted.value = 0;
@@ -2554,6 +2559,7 @@ async function startVideoExport(payload: {
       // buffering in memory, which still works for short films.
       if ((error as DOMException)?.name === 'AbortError') {
         videoExportRunning.value = false;
+      expmapBusy.value = false;
         videoAbortSignal = null;
         return;
       }
@@ -2601,6 +2607,7 @@ async function startVideoExport(payload: {
     // playable rather than a truncated handle.
     if (writable) await writable.close().catch(() => undefined);
     videoExportRunning.value = false;
+      expmapBusy.value = false;
     videoAbortSignal = null;
   }
 }
@@ -2921,9 +2928,15 @@ async function startVideoExport(payload: {
       />
     </div>
 
+    <div v-else-if="activeTab === 'expmap'" class="cv-body sections">
+      <ExpmapPanel :current="model as unknown as Record<string, unknown>" :engine="props.engine ?? null" :controller="props.mandelbrotCtrl ?? null" @use-video="emit('open-video')"/>
+    </div>
+
     <!-- Video export tab -->
     <div v-else-if="activeTab === 'video'" class="cv-body sections">
       <VideoExportPanel
+        :engine="props.engine"
+        :controller="props.mandelbrotCtrl"
         :current="model as unknown as Record<string, unknown>"
         :max-texture-dimension="videoMaxTextureDimension"
         :tiled-memory-profile="videoTiledMemoryProfile"

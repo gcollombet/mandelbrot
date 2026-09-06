@@ -124,7 +124,7 @@ fn cs_main(@builtin(global_invocation_id) gid: vec3<u32>) {
   let globalCoord = vec2<f32>(uni.tileOriginX, uni.tileOriginY) + vec2<f32>(coord_out);
   let offset = globalCoord + vec2<f32>(0.5) - centre;
   let reach = uni.neutralSide * 0.5 + 2.0;
-  if (dot(offset, offset) > reach * reach) {
+  if (uni.rotationUnion < 1.5 && dot(offset, offset) > reach * reach) {
     store_cleared(coord_out);
     return;
   }

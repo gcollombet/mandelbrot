@@ -2,6 +2,8 @@
 import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
 import MandelbrotController from './MandelbrotController.vue';
+import ExpmapSurface from './ExpmapSurface.vue';
+import { expmapOpenDocument, expmapBusy } from '../expmap/runtime';
 import Settings from './Settings.vue';
 import RenderStats from './RenderStats.vue';
 import PerformancePanel from './PerformancePanel.vue';
@@ -775,7 +777,7 @@ const forceUINoGpu = !hasWebGPU
   && typeof window !== 'undefined'
   && new URLSearchParams(window.location.search).has('forceui');
 
-const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes', 'about', 'video']);
+const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes', 'about', 'video', 'expmap']);
 const denseView = useDenseView();
 const expandedPanel = ref(false);
 function isDenseTab(tabKey: string): boolean {
@@ -874,7 +876,7 @@ function handleGlobalKeydown(e: KeyboardEvent) {
     showUI.value = false;
     return;
   }
-  if (shortcutsSuspended.value) return;
+  if (shortcutsSuspended.value || expmapOpenDocument.value || expmapBusy.value) return;
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || (e.target as HTMLElement)?.isContentEditable) return;
   const key = e.key.toLowerCase();
@@ -1735,10 +1737,13 @@ function startTravelToPreset(preset: PresetRecord) {
       </div>
     </div>
 
+    <ExpmapSurface :engine="mandelbrotEngine" :controller="mandelbrotCtrlRef"/>
     <!-- Composant MandelbrotController avec tous les parametres -->
     <MandelbrotController
       v-if="hasWebGPU"
       ref="mandelbrotCtrlRef"
+      :navigation-locked="expmapBusy || !!expmapOpenDocument"
+      :inert="expmapBusy || !!expmapOpenDocument"
       style="width: 100%; height: 100%; display: block;"
       v-model:scale="mandelbrotParams.scale"
       v-model:angle="mandelbrotParams.angle"
@@ -2062,6 +2067,7 @@ function startTravelToPreset(preset: PresetRecord) {
             :engine="mandelbrotEngine"
             :mandelbrot-ctrl="mandelbrotCtrlRef"
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
+            :inert="expmapBusy && tab.key !== 'expmap' && tab.key !== 'video'"
             :active-tab="tab.key"
             :primary="primaryFor(tab.key)"
             :pickerMode="pickerMode"
@@ -2069,6 +2075,7 @@ function startTravelToPreset(preset: PresetRecord) {
             :active-preset-guid="activePresetGuid"
             @toggle-picker="togglePickerMode"
             @preset-selected="onPresetSelected"
+            @open-video="openTabs.has('video') || toggleTab('video')"
           />
         </div>
       </div>
@@ -2096,12 +2103,14 @@ function startTravelToPreset(preset: PresetRecord) {
             :engine="mandelbrotEngine"
             :mandelbrot-ctrl="mandelbrotCtrlRef"
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
+            :inert="expmapBusy && tab.key !== 'expmap' && tab.key !== 'video'"
             :active-tab="tab.key"
             :pickerMode="pickerMode"
             :user-role="userRole"
             :active-preset-guid="activePresetGuid"
             @toggle-picker="togglePickerMode"
             @preset-selected="onPresetSelected"
+            @open-video="openTabs.has('video') || toggleTab('video')"
           />
         </div>
       </div>

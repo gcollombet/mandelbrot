@@ -206,6 +206,9 @@ const trackLabels: Record<string, string> = {
   paletteOffset: 'Décalage palette', heightPaletteShift: 'Hauteur palette', lightAngle: 'Lumière',
   textureDrift: 'Dérive texture', skyReflectionDrift: 'Dérive reflets', phaseColoring: 'Phase couleur',
   varnish: 'Vernis', microBump: 'Micro-relief', displacement: 'Déplacement', tessellation: 'Texture',
+  protrusionPhase: 'Phase protubérances', reliefDepth: 'Profondeur relief',
+  orbitTrapPhaseOffset: 'Couleur piège orbite', orbitTrapStrength: 'Intensité piège orbite',
+  gradeSaturation: 'Saturation', gradeContrast: 'Contraste',
 };
 const visibleAnimationPresetCount = computed(() => visibleAnimationPresets.value.length);
 

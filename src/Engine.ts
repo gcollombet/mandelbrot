@@ -1,3 +1,4 @@
+import type { ExpmapKernelProjection } from './expmap/producerProjection'
 // Engine.ts: implémente une classe Engine pour gérer le pipeline WebGPU
 
 import inplaceComputeShader from './assets/mandelbrot_brush.wgsl?raw'
@@ -597,6 +598,10 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 
 function clamp(value: number, min: number, max: number): number {
     return Math.min(Math.max(value, min), max)
+}
+
+function wrapUnit(value: number): number {
+    return value - Math.floor(value)
 }
 
 function animationWave(track: AnimationTrackConfig, time: number, globalSpeed: number): number {
@@ -2308,7 +2313,7 @@ export class Engine {
             label: 'Engine UniformBuffer Color',
         })
         this.uniformBufferBrush = this.device.createBuffer({
-            size: 4 * 16,
+            size: 4 * 28,
             usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
             label: 'Engine UniformBuffer Brush',
         })
@@ -3903,6 +3908,7 @@ export class Engine {
     videoFrameReady(): boolean {
         if (this.videoExportFrameEvaluationPending) return false
         if (!this.isFieldConverged(true)) return false
+        if (this.expmapProjection && this.unfinishedPixelCount !== 0) return false
         if (this.tiledKeyframePlan) {
             if (!this.tiledKeyframeComplete) return this.finishCurrentTiledKeyframeTile()
             this.tiledKeyframeDiagnostics.freeFrames++
@@ -4031,7 +4037,66 @@ export class Engine {
     /** Interactive draw callback parked for the duration of an export. */
     private videoExportParkedDrawFn: (() => Promise<void>) | null = null
     /** Pins the compute surface to an exact pixel size while set (export only). */
+    private expmapProjection: ExpmapKernelProjection | null = null
+    private expmapCapturePipeline?: GPURenderPipeline
+    private expmapAppearance: RenderOptions | null = null
+    private expmapSavedNumerics: { mode: ApproximationMode; epsilon: number; skip: number; precision: string } | null = null
     private forcedSurfaceSize: { width: number; height: number } | null = null
+
+    /** Prepare an isolated direct-grid block. The caller places the navigator
+     * at projection.scale and the immutable document center before pumping.
+     * Reuse the session allocation and clear block-local history while retaining
+     * the orbit/table resources.
+     */
+    async prepareExpmapBlock(projection: ExpmapKernelProjection, appearance: RenderOptions): Promise<void> {
+        if (!this.videoExportActive || this.tiledKeyframePlan) throw new Error('ExpMap requires an exclusive monolithic export session')
+        if (projection.uniforms.length !== 12 || !Array.from(projection.uniforms).every(Number.isFinite)
+            || !Number.isInteger(projection.width) || !Number.isInteger(projection.height)
+            || projection.width < 1 || projection.height < 1
+            || projection.width > this.width || projection.height > this.height) {
+            throw new Error('Invalid ExpMap block or block exceeds the preallocated session size')
+        }
+        if (!this.expmapCapturePipeline) {
+            const device = this.device
+            const module = device.createShaderModule({ code: this.shaderPassColor, label: 'ExpMap Direct Color' })
+            const pipeline = await device.createRenderPipelineAsync({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [this.pipelineColor!.getBindGroupLayout(0)] }),
+                vertex: { module, entryPoint: 'vs_main' },
+                fragment: { module, entryPoint: 'fs_expmap', constants: { ENABLE_SURFACE_EFFECTS: 1 }, targets: [{ format: 'rgba16float' }] },
+                primitive: { topology: 'triangle-list' },
+            })
+            if (this.device !== device || this.destroyed) throw new Error('Device changed during ExpMap compilation')
+            this.expmapCapturePipeline = pipeline
+        }
+        if (!this.expmapSavedNumerics) {
+            this.expmapSavedNumerics = { mode: this.approximationMode, epsilon: this.blaEpsilon, skip: this.maxBlaSkip, precision: this.precisionBudget }
+            const recipe = appearance as RenderOptions & { approximationMode?: ApproximationMode; blaEpsilon?: number; maxBlaSkip?: number }
+            if (recipe.approximationMode) this.setApproximationMode(recipe.approximationMode)
+            if (recipe.blaEpsilon !== undefined) this.setBlaEpsilon(recipe.blaEpsilon)
+            if (recipe.maxBlaSkip !== undefined) this.setMaxBlaSkip(recipe.maxBlaSkip)
+            this.setPrecisionBudget(projection.precisionScale)
+        }
+        const firstBlock = this.expmapProjection === null
+        this.expmapAppearance = structuredClone(appearance)
+        this.expmapProjection = { ...projection, uniforms: new Float32Array(projection.uniforms) }
+        // The session pins one surface large enough for every block. Reallocating
+        // it for each thin tail strip adds canvas/texture setup to every row.
+        // Preserve allocations; clear the same unsafe local state as a tile change.
+        if (firstBlock) this.resize()
+        this.clearHistoryNextFrame = true
+        this.needFreezeSnapshot = false
+        this.needMergeSnapshot = false
+        this.rawOriginX = 0
+        this.rawOriginY = 0
+        this.prevFrameMandelbrot = undefined
+        this.resolvedDisplayVersion = -1
+        this.resetAaState()
+        this.invalidateCounterReadback()
+        this.needRender = true
+        this.videoExportFrameEvaluationPending = true
+    }
+
+    get isExpmapProductionActive(): boolean { return this.expmapProjection !== null }
 
     isVideoExportActive(): boolean {
         return this.videoExportActive
@@ -4405,11 +4470,24 @@ export class Engine {
      * no session is active, so it can sit in a `finally` without a guard.
      */
     endVideoExportSession(): void {
+        this.exportCaptureRequest?.reject(new Error('Export session ended before capture completed'))
+        this.exportCaptureRequest = undefined
         const saved = this.videoExportSavedSettings
         this.videoExportActive = false
         this.videoExportAaSamples = 1
         this.videoExportFrameEvaluationPending = false
         this.videoExportSavedSettings = null
+        this.expmapProjection = null
+        this.expmapAppearance = null
+        this.expmapCapturePipeline = undefined
+        const numerics = this.expmapSavedNumerics
+        this.expmapSavedNumerics = null
+        if (numerics) {
+            this.setApproximationMode(numerics.mode)
+            this.setBlaEpsilon(numerics.epsilon)
+            this.setMaxBlaSkip(numerics.skip)
+            this.setPrecisionBudget(numerics.precision)
+        }
         this.tiledKeyframePlan = null
         this.tiledKeyframeTileIndex = 0
         this.tiledKeyframeComplete = false
@@ -5801,6 +5879,16 @@ export class Engine {
     }
 
     async update(mandelbrot: Mandelbrot, renderOptions: RenderOptions) {
+        if (this.expmapAppearance) {
+            renderOptions = this.expmapAppearance
+            const recipe = this.expmapAppearance as RenderOptions & { mu?: number; epsilon?: number; maxIterationMultiplier?: number }
+            const mu = recipe.mu ?? mandelbrot.mu
+            const multiplier = recipe.maxIterationMultiplier
+            mandelbrot = { ...mandelbrot, mu, epsilon: recipe.epsilon ?? mandelbrot.epsilon,
+                maxIterations: multiplier === undefined ? mandelbrot.maxIterations : Math.min(
+                    Math.max(100, 1000 * multiplier * -log2FromDecimalString(this.expmapProjection!.iterationScale))
+                    + Math.max(0, Math.ceil(Math.log2(Math.log(Math.max(mu, 4)) / Math.log(4)))), 10_000_000) }
+        }
         this.selectColorPipelines(needsSurfaceColorPipeline(renderOptions.colorStops))
         this.rotationColorResolveChangedThisUpdate = false
         const orbitTrap = normalizeOrbitTrapConfig(renderOptions.orbitTrap, renderOptions.orbitTrapStrength)
@@ -6135,6 +6223,11 @@ export class Engine {
             this.needRender = true
         }
 
+        if (this.expmapProjection) {
+            this.zoomState = resetZoomState()
+            this.needFreezeSnapshot = false
+            this.needMergeSnapshot = false
+        }
         const sceneSin = Math.sin(mandelbrot.angle)
         const sceneCos = Math.cos(mandelbrot.angle)
         const animation = normalizeAnimationConfig(renderOptions.animation, renderOptions.animationSpeed)
@@ -6152,6 +6245,12 @@ export class Engine {
         const microBumpAnim = animationContribution(animation.tracks.microBump, animTime, animGlobalSpeed)
         const displacementAnim = animationContribution(animation.tracks.displacement, animTime, animGlobalSpeed)
         const tessellationAnim = animationContribution(animation.tracks.tessellation, animTime, animGlobalSpeed)
+        const protrusionPhaseAnim = animationContribution(animation.tracks.protrusionPhase, animTime, animGlobalSpeed)
+        const reliefDepthAnim = animationContribution(animation.tracks.reliefDepth, animTime, animGlobalSpeed)
+        const orbitTrapPhaseOffsetAnim = animationContribution(animation.tracks.orbitTrapPhaseOffset, animTime, animGlobalSpeed)
+        const orbitTrapStrengthAnim = animationContribution(animation.tracks.orbitTrapStrength, animTime, animGlobalSpeed)
+        const gradeSaturationAnim = animationContribution(animation.tracks.gradeSaturation, animTime, animGlobalSpeed)
+        const gradeContrastAnim = animationContribution(animation.tracks.gradeContrast, animTime, animGlobalSpeed)
         const effectiveLightAngle = renderOptions.lightAngle + lightAngleAnim
         const effectiveTessellationLevel = clamp(renderOptions.tessellationLevel + tessellationAnim, 0, 10)
         const effectiveDisplacementAmount = clamp(renderOptions.displacementAmount + displacementAnim, 0, 0.1)
@@ -6159,6 +6258,15 @@ export class Engine {
         const effectiveVarnishStrength = clamp(renderOptions.varnishStrength + varnishAnim, 0, 10)
         const effectiveHeightPaletteShift = clamp(renderOptions.heightPaletteShift + heightPaletteShiftAnim, 0, 100)
         const effectivePhaseColoringStrength = clamp(renderOptions.phaseColoringStrength + phaseColoringAnim, 0, 100)
+        const effectiveProtrusionPhase = wrapUnit((renderOptions.protrusionPhase ?? 0) + protrusionPhaseAnim)
+        const effectiveReliefDepth = clamp(renderOptions.reliefDepth + reliefDepthAnim, 0, 2)
+        const effectiveOrbitTrap = {
+            ...orbitTrap,
+            phaseOffset: wrapUnit(orbitTrap.phaseOffset + orbitTrapPhaseOffsetAnim),
+            strength: clamp(orbitTrap.strength + orbitTrapStrengthAnim, 0, 100),
+        }
+        const effectiveGradeSaturation = clamp((renderOptions.gradeSaturation ?? 1.12) + gradeSaturationAnim, 0, 2)
+        const effectiveGradeContrast = clamp((renderOptions.gradeContrast ?? 1.18) + gradeContrastAnim, 0.5, 2)
         const lightDirLen = Math.hypot(Math.cos(effectiveLightAngle), Math.sin(effectiveLightAngle), 1.85)
         const textureMapping = normalizeTextureMappingConfig(renderOptions.textureMapping)
         const zoomActive = isZoomActive(this.zoomState)
@@ -6215,7 +6323,7 @@ export class Engine {
             renderOptions.ambientOcclusionStrength, // 17: ambientOcclusionStrength
             effectiveMicroBumpStrength,     // 18: microBumpStrength
             renderOptions.aaAdaptive === false ? this.aaOffsetX : 0, // 19: uniform-AA inverse lookup X
-            renderOptions.reliefDepth,       // 20: reliefDepth
+            effectiveReliefDepth,            // 20: reliefDepth
             renderOptions.localShadowStrength, // 21: localShadowStrength
             effectiveLightAngle,              // 22: lightAngle
             effectiveVarnishStrength,         // 23: varnishStrength
@@ -6228,7 +6336,7 @@ export class Engine {
             renderOptions.paletteMirror ? 1 : 0, // 30: paletteMirror
             renderOptions.debugShading ? 1 : 0,  // 31: debugShading
             effectiveHeightPaletteShift,         // 32: heightPaletteShift [0, 100]
-            orbitTrap.strength,                  // 33: legacy-compatible orbitTrapStrength [0, 100]
+            effectiveOrbitTrap.strength,         // 33: legacy-compatible orbitTrapStrength [0, 100]
             effectivePhaseColoringStrength,      // 34: phaseColoringStrength [0, 100]
             textureMappingVariableId(textureMapping.xVariable), // 35: textureMappingXVariable
             textureMappingVariableId(textureMapping.yVariable), // 36: textureMappingYVariable
@@ -6238,7 +6346,7 @@ export class Engine {
             parseFloat(mandelbrot.cx),            // 40: centerX
             parseFloat(mandelbrot.cy),            // 41: centerY
             mandelbrot.scale,                     // 42: scale
-            renderOptions.gradeContrast ?? 1.18,  // 43: gradeContrast (display grade)
+            effectiveGradeContrast,              // 43: gradeContrast (display grade)
             0.03 * textureDriftAnimX,             // 44: textureDriftX
             0.03 * textureDriftAnimY,             // 45: textureDriftY
             0.02 * skyReflectionDriftAnimX,       // 46: skyDriftX
@@ -6259,15 +6367,15 @@ export class Engine {
             aaJitterMag > 0 ? this.aaOffsetY / aaJitterMag : 0, // 61: aaJitterHatY
             Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
             0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
-            renderOptions.gradeSaturation ?? 1.12, // 64: gradeSaturation (display grade)
+            effectiveGradeSaturation,            // 64: gradeSaturation (display grade)
             this.debugViewMode === DEBUG_VIEW_REACH ? 1 : 0, // 65: analytic-AA reach heatmap
             Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
             2,                                    // 67: z″ is carried by every production path
-            renderOptions.protrusionPhase ?? 0,   // 68: protrusionPhase [0, 1]
+            effectiveProtrusionPhase,             // 68: protrusionPhase [0, 1)
             renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
             renderOptions.protrusionGeometryMix ?? 0, // 70: iteration/geometric profile mix [0, 1]
             renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod [0.1, 16]
-            ...orbitTrapColorUniformValues(orbitTrap), // 72..92: structured orbit-trap configuration
+            ...orbitTrapColorUniformValues(effectiveOrbitTrap), // 72..92: structured orbit-trap configuration
             renderOptions.protrusionStrength ?? 1, // 93: iteration-profile effect amplification [1, 4]
             iterationPaletteCurveCode(renderOptions.iterationPaletteCurve), // 94: iterationPaletteCurve
             renderOptions.aaAdaptive === false ? this.aaOffsetY : 0, // 95: uniform-AA inverse lookup Y
@@ -6591,7 +6699,7 @@ export class Engine {
         const logDelta = Number.isFinite(ln)
             ? Math.log(Math.SQRT2 * neutralExtent / Math.max(1, this.neutralSize)) + ln
             : Number.NEGATIVE_INFINITY
-        const enabled = this.aaAnalyticEnabled && Number.isFinite(logDelta)
+        const enabled = !this.expmapProjection && this.aaAnalyticEnabled && Number.isFinite(logDelta)
         // Deep re-enabled (2026-07-07, third attempt — root cause found in the
         // KERNEL this time): try_apply_unified's z″ tier update computed at the
         // old derS scale overflowed on deep blocks (coefficient exponents ~±133
@@ -6731,7 +6839,7 @@ export class Engine {
 
         let shiftTexX = 0
         let shiftTexY = 0
-        if (!this.clearHistoryNextFrame && this.prevFrameMandelbrot) {
+        if (!this.expmapProjection && !this.clearHistoryNextFrame && this.prevFrameMandelbrot) {
             const deltaDx = this.previousMandelbrot.dx - this.prevFrameMandelbrot.dx
             const deltaDy = this.previousMandelbrot.dy - this.prevFrameMandelbrot.dy
 
@@ -6777,6 +6885,9 @@ export class Engine {
         this.dispatchBox = this.tileLocalDispatchBox(
             this.computeIterationDispatchBox(aspect, this.previousMandelbrot.angle),
         )
+        if (this.expmapProjection) this.dispatchBox = { x: 0, y: 0,
+            width: Math.ceil(this.expmapProjection.width / 16) * 16,
+            height: Math.ceil(this.expmapProjection.height / 16) * 16 }
         const dispatchPixelCount = this.dispatchBox.width * this.dispatchBox.height
         const zoomRefreshRegimeKey = this.iterationBatchRegimeKey(
             analyticRawPayloadNeeded,
@@ -6866,7 +6977,8 @@ export class Engine {
             tiledTile?.originX ?? 0,
             tiledTile?.originY ?? 0,
             this.neutralSize,
-            this.tiledRotationUnion ? 1 : 0,
+            this.expmapProjection ? 2 : this.tiledRotationUnion ? 1 : 0,
+            ...(this.expmapProjection?.uniforms ?? new Float32Array(12)),
         ])
         this.device.queue.writeBuffer(this.uniformBufferBrush!, 0, brushUniforms.buffer)
         if (clearFlag !== 0 || hasTranslationShift) {
@@ -6906,7 +7018,7 @@ export class Engine {
             tiledTile?.originX ?? 0,
             tiledTile?.originY ?? 0,
             this.neutralSize,
-            this.tiledRotationUnion ? 1 : 0,
+            this.expmapProjection ? 2 : this.tiledRotationUnion ? 1 : 0,
         ])
         this.device.queue.writeBuffer(this.uniformBufferResolve!, 0, resolveUniforms.buffer)
 
@@ -7657,7 +7769,7 @@ export class Engine {
                         }],
                         label: 'Engine ExportCapture Linear',
                     })
-                    rpassLinear.setPipeline(this.pipelineColorAccumClear!)
+                    rpassLinear.setPipeline(this.expmapProjection ? this.expmapCapturePipeline! : this.pipelineColorAccumClear!)
                     rpassLinear.setBindGroup(0, colorBindGroup)
                     rpassLinear.draw(6, 1, 0, 0)
                     rpassLinear.end()
@@ -7897,7 +8009,7 @@ export class Engine {
         else if (this.orbitIncomplete) reason = 'orbitIncomplete'
         else if (
             this.unfinishedPixelCount < 0
-            || this.unfinishedPixelCount > UNFINISHED_PIXEL_DONE_THRESHOLD
+            || this.unfinishedPixelCount > (this.expmapProjection ? 0 : UNFINISHED_PIXEL_DONE_THRESHOLD)
         ) {
             reason = `unfinished=${this.unfinishedPixelCount}`
         }
@@ -7969,7 +8081,29 @@ export class Engine {
      * called every animation frame; the engine's early-exit guards
      * skip GPU work when idle.
      */
+    private expmapPauseCount = 0
+    private expmapParkedDraw: (() => Promise<void>) | null = null
+
+    suspendForExpmapPlayback(): () => void {
+        if (this.expmapPauseCount++ === 0) {
+            this.expmapParkedDraw = this._drawFn
+            this.stopRenderLoop()
+        }
+        let released = false
+        return () => {
+            if (released) return
+            released = true
+            if (--this.expmapPauseCount === 0) {
+                if (this.lastUpdateTime > 0) this.lastUpdateTime = performance.now()
+                const draw = this.expmapParkedDraw
+                this.expmapParkedDraw = null
+                if (draw && !this.destroyed) this.startRenderLoop(draw)
+            }
+        }
+    }
+
     startRenderLoop(drawFn: () => Promise<void>) {
+        if (this.expmapPauseCount) { this.expmapParkedDraw = drawFn; return }
         this._drawFn = drawFn
         if (this._rafId === null) {
             this._pacingLastTickMs = -1

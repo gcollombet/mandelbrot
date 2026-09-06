@@ -1882,3 +1882,20 @@ fn fs_rotation_cache(@location(0) screenUv: vec2<f32>) -> @location(0) vec4<f32>
   let c = shade_srgb(screenUv, false);
   return vec4<f32>(srgb_to_linear(c.rgb), c.a);
 }
+
+// Direct RGB cache capture: exact raw-grid locations, no camera reprojection,
+// no bilinear payload interpolation, no dither or Cartesian analytic AA.
+@fragment
+fn fs_expmap(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  let coord = vec2<i32>(pos.xy);
+  let dims = vec2<i32>(textureDimensions(tex));
+  let pixel = load_pixel_sample(tex, metadataTex, coord);
+  let extras = load_pixel_extras(geometryTex, metadataTex, orbitGradientTex, coord, 1.0);
+  var trap = vec4<f32>(0.0);
+  if (parameters.orbitTrapMode >= 1.5 && parameters.orbitTrapStrength > 0.0) {
+    trap = textureLoad(trapPayloadTex, coord, 0);
+  }
+  let color = colorize_pixel(coord, dims, pixel.iter, pixel.zx, pixel.zy, trap, extras,
+    vec2<f32>(0.5), vec2<f32>(0.5), false);
+  return vec4<f32>(srgb_to_linear(color.rgb), 1.0);
+}

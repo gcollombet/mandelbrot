@@ -210,6 +210,19 @@ struct BrushUniforms {
   tileOriginY: f32,
   neutralSide: f32,
   rotationUnion: f32,
+  // Direct ExpMap producer. The first 16 fields keep the utility-pass ABI.
+  expmapMode: f32,
+  expmapWidth: f32,
+  expmapHeight: f32,
+  expmapX0: f32,
+  expmapY0: f32,
+  expmapAngularSamples: f32,
+  expmapRhoStep: f32,
+  expmapTailStep: f32,
+  expmapTailIntervals: f32,
+  expmapDensity: f32,
+  expmapCenterHalf: f32,
+  expmapPad: f32,
 };
 
 struct CounterBuffer {
@@ -4114,6 +4127,19 @@ fn is_inside_rotated_screen(xy_neutral: vec2<f32>) -> bool {
   return inside_x && inside_y;
 }
 
+// Direct non-Cartesian coordinates relative to the block's deep scale anchor.
+// Point samples deliberately bypass the Cartesian AA jitter/footprint.
+fn expmap_local(coord: vec2<f32>) -> vec2<f32> {
+  let grid = coord + vec2<f32>(brush.expmapX0, brush.expmapY0);
+  if (brush.expmapMode > 2.5) {
+    return (grid - vec2<f32>(brush.expmapCenterHalf)) / brush.expmapDensity;
+  }
+  let theta = 6.283185307179586 * (grid.x % brush.expmapAngularSamples) / brush.expmapAngularSamples;
+  let radius = exp(-coord.y * brush.expmapRhoStep);
+
+  return radius * vec2<f32>(cos(theta), sin(theta));
+}
+
 // ── fused compute entry ─────────────────────────────────────────────
 // Workgroup-local partial counters (pattern from count_unfinished.wgsl):
 // each 8×8 workgroup reduces locally and issues at most one global atomicAdd.
@@ -4203,7 +4229,8 @@ fn cs_main(
     let xy_neutral = uv * 2.0 - vec2<f32>(1.0);
 
     // Outside the rotated viewport: keep as-is, count nothing.
-    if (is_inside_rotated_screen(xy_neutral)) {
+    let expmapInside = f32(gid.x) < brush.expmapWidth && f32(gid.y) < brush.expmapHeight;
+    if (select(is_inside_rotated_screen(xy_neutral), expmapInside, brush.expmapMode > 0.5)) {
       let coord = vec2<i32>(i32(gid.x), i32(gid.y));
 
       // A negative value is always the single exact step-1 request.
@@ -4254,7 +4281,8 @@ fn cs_main(
           let neutralExtent = sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0);
           // Screen-aligned box-AA jitter, already rotated by the CPU into this
           // local_rot frame and scaled to neutral-space units; zero for sample 0.
-          let local_rot = xy_neutral * neutralExtent + vec2<f32>(mandelbrot.aaOffsetX, mandelbrot.aaOffsetY);
+          var local_rot = xy_neutral * neutralExtent + vec2<f32>(mandelbrot.aaOffsetX, mandelbrot.aaOffsetY);
+          if (brush.expmapMode > 0.5) { local_rot = expmap_local(vec2<f32>(gid.xy)); }
 
           var result: TexelOut;
           let scaleExp = i32(mandelbrot.scaleExp);

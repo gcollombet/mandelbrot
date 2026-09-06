@@ -19,6 +19,7 @@ const mobileNavExpanded = defineModel<boolean>('mobileNavExpanded', { default: f
 
 // Props pass-through pour initialiser Mandelbrot
 const props = defineProps<{
+  navigationLocked?: boolean,
   mu?: number,
   epsilon?: number,
   colorStops?: ColorStop[],
@@ -81,6 +82,7 @@ defineExpose({
   getCanvas,
   getEngine: () => mandelbrotRef.value?.getEngine() ?? null,
   getNavigator: () => mandelbrotRef.value?.getNavigator() ?? null,
+  getParams: () => mandelbrotRef.value?.getParams(),
   resetReferenceTo: (cx: string, cy: string, scaleStr: string, angleVal: number) => {
     mandelbrotRef.value?.resetReferenceTo?.(cx, cy, scaleStr, angleVal);
   },
@@ -89,7 +91,9 @@ defineExpose({
     mandelbrotRef.value?.setExportTime?.(elapsedSeconds);
   },
   isExporting: () => mandelbrotRef.value?.isExporting?.() ?? false,
-});
+} satisfies Pick<MandelbrotExposed,
+  'getCanvas' | 'getEngine' | 'getNavigator' | 'getParams' |
+  'resetReferenceTo' | 'drawOnce' | 'setExportTime' | 'isExporting'>);
 let isDragging = false;
 let isRotating = false;
 let prevX = 0;
@@ -140,6 +144,7 @@ function getCanvasCoords(e: MouseEvent) {
 }
 
 function handleKeydown(e: KeyboardEvent) {
+  if (props.navigationLocked) return;
   // Ne pas capturer les touches quand un champ de saisie est actif
   const tag = (e.target as HTMLElement)?.tagName?.toLowerCase();
   if (tag === 'input' || tag === 'textarea' || tag === 'select' || (e.target as HTMLElement)?.isContentEditable) return;
@@ -152,13 +157,15 @@ function handleKeyup(e: KeyboardEvent) {
   syncKeyboardNavigation();
 }
 
+watch(() => props.navigationLocked, () => { handleWindowBlur(); isDragging = false; isRotating = false; isPinching = false; });
+
 function handleWindowBlur() {
   for (const code in pressedKeys) pressedKeys[code] = false;
   syncKeyboardNavigation();
 }
 
 function syncKeyboardNavigation() {
-  if (props.pickerMode) {
+  if (props.pickerMode || props.navigationLocked) {
     mandelbrotRef.value?.setKeyboardNavigation?.({ translateX: 0, translateY: 0, rotation: 0, zoom: 0 });
     return;
   }
@@ -172,6 +179,7 @@ function syncKeyboardNavigation() {
 }
 
 function handleWheel(e: WheelEvent) {
+  if (props.navigationLocked) return;
   if (!isFromCanvas(e)) return;
   // En mode pipette, bloquer le zoom
   if (props.pickerMode) { e.preventDefault(); return; }
@@ -198,6 +206,7 @@ function centerOnCanvasPoint(clientX: number, clientY: number) {
 }
 
 function handleDblClick(e: MouseEvent) {
+  if (props.navigationLocked) return;
   if (!isFromCanvas(e)) return;
   // En mode pipette, bloquer le double-clic
   if (props.pickerMode) { e.preventDefault(); return; }
@@ -208,6 +217,7 @@ function handleDblClick(e: MouseEvent) {
 }
 
 function handleTouchEndForDoubleTap(e: TouchEvent) {
+  if (props.navigationLocked) return;
   if (!isFromCanvas(e)) return;
   if (props.pickerMode) return;
   if (e.touches.length !== 0) return;
@@ -238,6 +248,7 @@ function handleTouchEndForDoubleTap(e: TouchEvent) {
 }
 
 function handleMouseDown(e: MouseEvent) {
+  if (props.navigationLocked) return;
   if (!isFromCanvas(e)) return;
   // En mode pipette, bloquer drag/rotation et déclencher la lecture GPU
   if (props.pickerMode) {
@@ -274,6 +285,7 @@ async function handlePickerClick(e: MouseEvent) {
 }
 
 function handleMouseMove(e: MouseEvent) {
+  if (props.navigationLocked) return;
   // En mode pipette, pas de drag/rotation
   if (props.pickerMode) return;
 
@@ -308,6 +320,7 @@ function handleMouseUp(e: MouseEvent) {
 }
 
 function handleTouchStart(e: TouchEvent) {
+  if (props.navigationLocked) return;
   if (!isFromCanvas(e)) return;
   if (props.pickerMode) return;
   const canvas = getCanvas();
@@ -331,6 +344,7 @@ function handleTouchStart(e: TouchEvent) {
 }
 
 function handleTouchMove(e: TouchEvent) {
+  if (props.navigationLocked) return;
   if (props.pickerMode) return;
   const canvas = getCanvas();
   if (!canvas) return;

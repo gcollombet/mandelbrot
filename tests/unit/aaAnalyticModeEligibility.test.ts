@@ -12,7 +12,7 @@ describe('analytic AA approximation-mode eligibility', () => {
     )?.[0] ?? ''
 
     expect(params).toContain(
-      'const enabled = this.aaAnalyticEnabled && Number.isFinite(logDelta)',
+      'const enabled = !this.expmapProjection && this.aaAnalyticEnabled && Number.isFinite(logDelta)',
     )
     expect(params).not.toContain("this.approximationMode === 'auto'")
   })

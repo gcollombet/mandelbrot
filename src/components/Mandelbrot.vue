@@ -240,8 +240,10 @@ async function draw() {
     const canvas = canvasRef.value;
     const step = exportTimeSeconds !== null
       ? navigator.step_at_transition_time(
-          canvas ? canvas.width : undefined,
-          canvas ? canvas.height : undefined,
+          // ExpMap has its own sampling grid; do not snap its canonical center
+          // onto the Cartesian canvas grid in the navigator.
+          canvas && !engine.isExpmapProductionActive ? canvas.width : undefined,
+          canvas && !engine.isExpmapProductionActive ? canvas.height : undefined,
           exportTimeSeconds,
         )
       : navigator.step_with_input(

@@ -99,7 +99,7 @@ describe('palette protrusion effect', () => {
     expect(settings).toContain('label="Période géométrique"');
 
     expect(engine).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 100');
-    expect(engine).toContain('renderOptions.protrusionPhase ?? 0,   // 68: protrusionPhase');
+    expect(engine).toContain('effectiveProtrusionPhase,             // 68: protrusionPhase');
     expect(engine).toContain('renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness');
     expect(engine).toContain('renderOptions.protrusionGeometryMix ?? 0,');
     expect(engine).toContain('renderOptions.protrusionPeriod ?? 1,  // 71: protrusionPeriod');

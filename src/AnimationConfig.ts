@@ -12,7 +12,13 @@ export type AnimationTrackId =
   | 'varnish'
   | 'microBump'
   | 'displacement'
-  | 'tessellation';
+  | 'tessellation'
+  | 'protrusionPhase'
+  | 'reliefDepth'
+  | 'orbitTrapPhaseOffset'
+  | 'orbitTrapStrength'
+  | 'gradeSaturation'
+  | 'gradeContrast';
 
 export const ANIMATION_TRACK_IDS: readonly AnimationTrackId[] = [
   'paletteOffset',
@@ -25,6 +31,12 @@ export const ANIMATION_TRACK_IDS: readonly AnimationTrackId[] = [
   'microBump',
   'displacement',
   'tessellation',
+  'protrusionPhase',
+  'reliefDepth',
+  'orbitTrapPhaseOffset',
+  'orbitTrapStrength',
+  'gradeSaturation',
+  'gradeContrast',
 ];
 
 export interface AnimationTrackConfig {
@@ -65,6 +77,12 @@ export const ANIMATION_TRACK_DEFINITIONS: readonly AnimationTrackDefinition[] = 
   { id: 'microBump', label: 'Micro Bump', defaultType: 'pulse', defaultSpeed: 0.35, defaultAmplitude: 0.5, minAmplitude: 0, maxAmplitude: 2, amplitudeStep: 0.01, unit: '' },
   { id: 'displacement', label: 'Displacement', defaultType: 'sine', defaultSpeed: 0.2, defaultAmplitude: 0.02, minAmplitude: 0, maxAmplitude: 0.1, amplitudeStep: 0.001, unit: '' },
   { id: 'tessellation', label: 'Tessellation', defaultType: 'sine', defaultSpeed: 0.18, defaultAmplitude: 2, minAmplitude: 0, maxAmplitude: 10, amplitudeStep: 0.1, unit: '' },
+  { id: 'protrusionPhase', label: 'Protrusion Phase', defaultType: 'loop', defaultSpeed: 0.15, defaultAmplitude: 1, minAmplitude: 0, maxAmplitude: 1, amplitudeStep: 0.001, unit: 'cycle' },
+  { id: 'reliefDepth', label: 'Relief Depth', defaultType: 'sine', defaultSpeed: 0.2, defaultAmplitude: 0.35, minAmplitude: 0, maxAmplitude: 2, amplitudeStep: 0.01, unit: '' },
+  { id: 'orbitTrapPhaseOffset', label: 'Orbit Trap Color Phase', defaultType: 'loop', defaultSpeed: 0.2, defaultAmplitude: 1, minAmplitude: 0, maxAmplitude: 4, amplitudeStep: 0.01, unit: 'cycle' },
+  { id: 'orbitTrapStrength', label: 'Orbit Trap Strength', defaultType: 'pulse', defaultSpeed: 0.25, defaultAmplitude: 40, minAmplitude: 0, maxAmplitude: 100, amplitudeStep: 0.5, unit: '' },
+  { id: 'gradeSaturation', label: 'Saturation', defaultType: 'sine', defaultSpeed: 0.18, defaultAmplitude: 0.25, minAmplitude: 0, maxAmplitude: 2, amplitudeStep: 0.01, unit: '' },
+  { id: 'gradeContrast', label: 'Contrast', defaultType: 'sine', defaultSpeed: 0.16, defaultAmplitude: 0.15, minAmplitude: 0, maxAmplitude: 1.5, amplitudeStep: 0.01, unit: '' },
 ];
 
 const TRACK_DEFINITION_BY_ID = new Map(ANIMATION_TRACK_DEFINITIONS.map(definition => [definition.id, definition]));
