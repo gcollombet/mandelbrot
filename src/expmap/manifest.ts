@@ -7,7 +7,7 @@ export const EXPMAP_MANIFEST_VERSION = 4
 export const EXPMAP_COLOR_PROFILE = { storage:'tiled-tiff',codec:'deflate',bitDepth:8,chroma:'444',transfer:'iec61966-2-1',alpha:false } as const
 export type ExpmapResourceIdentity = { role:string;identity:string;bytes:number }
 export type ExpmapManifest = {
-  version:4;documentId:string;generation:number;state:'preparing'|'interrupted'|'complete';createdAt:string
+  version:4;forceRender:boolean;documentId:string;generation:number;state:'preparing'|'interrupted'|'complete';createdAt:string
   scaleConvention:'VideoPathLocation.scale';zoomReferenceScale:string;projection:ExpmapPlan
   appearance:{identity:string;json:string;resources:ExpmapResourceIdentity[]}
   color:typeof EXPMAP_COLOR_PROFILE
@@ -15,6 +15,7 @@ export type ExpmapManifest = {
 }
 export function validateExpmapManifest(m: ExpmapManifest) {
   if(m.version!==4)throw new Error('Ancien format ExpMap non pris en charge : recréer le rendu en TIFF.')
+  if(typeof m.forceRender !== 'boolean')throw new Error('Invalid experimental rendering flag')
   if(!m.documentId || !Number.isSafeInteger(m.generation)||m.generation<0)throw new Error('Invalid document identity')
   if(!['preparing','interrupted','complete'].includes(m.state))throw new Error('Invalid document state')
   if(m.scaleConvention!=='VideoPathLocation.scale')throw new Error('Invalid scale convention')

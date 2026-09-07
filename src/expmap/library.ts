@@ -6,7 +6,7 @@ import { ExpmapDirectoryStore } from './store'
 export type ExpmapLibraryEntry = {
   id: string; name: string; thumbnail: string; createdAt: string; updatedAt: string
   state: 'preparing' | 'ready' | 'interrupted' | 'missing' | 'incompatible'
-  manifestVersion: 4; startScale: string; endScale: string; cx: string; cy: string
+  manifestVersion: 4; forceRender: boolean; startScale: string; endScale: string; cx: string; cy: string
   width: number; height: number; density: number; bytes: number; appearanceIdentity: string
   handle: FileSystemDirectoryHandle
 }
@@ -52,7 +52,7 @@ export async function renameExpmapLibraryEntry(id: string, name: string) {
 export function entryFromManifest(manifest: ExpmapManifest, handle: FileSystemDirectoryHandle, name: string, thumbnail = ''): ExpmapLibraryEntry {
   const plan = manifest.projection
   return { id: manifest.documentId, name, thumbnail, createdAt: manifest.createdAt, updatedAt: new Date().toISOString(),
-    state: manifest.state === 'complete' ? 'ready' : manifest.state, manifestVersion: manifest.version,
+    state: manifest.state === 'complete' ? 'ready' : manifest.state, manifestVersion: manifest.version, forceRender: manifest.forceRender,
     ...plan.domain, width: plan.width, height: plan.height, density: plan.density,
     bytes: manifest.tiles.reduce((sum, tile) => sum + tile.length, 0) + manifest.tiles.reduce((sum, tile) => { const group = tiffFileGroup(manifest.octaves, tile.index); return sum + (tile.index === group.start ? group.headerBytes : 0) }, 0), appearanceIdentity: manifest.appearance.identity, handle }
 }

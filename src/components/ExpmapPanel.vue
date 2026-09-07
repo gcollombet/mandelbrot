@@ -1,8 +1,9 @@
 <script setup lang="ts">
-import { computed, nextTick, onMounted, onUnmounted, ref } from 'vue'
+import { computed, nextTick, onMounted, onUnmounted, ref, toRefs } from 'vue'
 import type { Engine, RenderOptions } from '../Engine'
 import type { MandelbrotExposed } from '../types/MandelbrotExposed'
 import { DenseField, DenseSection } from './dense'
+import { useExpmapDraft } from '../expmap/draft'
 import { expmapAppearanceProblems } from '../expmap/appearance'
 import { planExpmap } from '../expmap/plan'
 import RenderProgress from './RenderProgress.vue'
@@ -13,13 +14,13 @@ import { attachExpmapDocument, entryFromManifest, expmapLibraryEntries, openExpm
 import { expmapBusy, expmapOpenDocument, expmapVideoSelected } from '../expmap/runtime'
 const props = defineProps<{ current: Record<string, unknown>; engine: Engine | null; controller: MandelbrotExposed | null }>()
 const emit = defineEmits<{ 'use-video': [] }>()
-const name = ref('Document ExpMap'), start = ref(String(props.current.scale)), end = ref(String(props.current.scale))
-const cx = ref(String(props.current.cx)), cy = ref(String(props.current.cy))
-const width = ref(1280), height = ref(720), density = ref(1), error = ref(''), progress = ref<ExpmapProgress | null>(null), ownRunning = ref(false), stopping = ref(false)
+const { name, start, end, cx, cy, width, height, density, forceRender } = toRefs(useExpmapDraft(props.current))
+const error = ref(''), progress = ref<ExpmapProgress | null>(null), ownRunning = ref(false), stopping = ref(false)
 const progressUnit = ref('blocs calculés')
 let abort: AbortController | undefined
 const appearance = computed(() => JSON.parse(JSON.stringify(props.current)) as RenderOptions)
 const problems = computed(() => expmapAppearanceProblems(appearance.value))
+const hasBlockingProblems = computed(() => problems.value.some(p => !forceRender.value || p.kind === 'invalid'))
 const plan = computed(() => { try { return planExpmap({ domain: { cx: cx.value, cy: cy.value, startScale: start.value, endScale: end.value }, width: width.value, height: height.value, density: density.value }) } catch { return null } })
 const estimate = computed(() => plan.value ? octaveMemory(planExpmapOctaves(plan.value)) : null)
 async function guard(action: () => Promise<unknown>) { error.value = ''; try { await action() } catch (e) { error.value = String(e) } }
@@ -48,7 +49,7 @@ async function bake(entry?: ExpmapLibraryEntry) {
         if (source) { const target = document.createElement('canvas'); target.width = 160; target.height = 90; target.getContext('2d')!.drawImage(source, 0, 0, 160, 90); thumbnail = target.toDataURL('image/jpeg', 0.6) }
       }
       await createExpmapDocument({ engine, controller: { getNavigator: () => controller.getNavigator(), drawOnce: () => controller.drawOnce(), setExportTime: t => controller.setExportTime!(t) } }, {
-        store, documentId: entry?.id ?? crypto.randomUUID(), plan: selectedPlan,
+        store, forceRender: forceRender.value, documentId: entry?.id ?? crypto.randomUUID(), plan: selectedPlan,
         appearance: previous ? JSON.parse(previous.appearance.json) : appearance.value,
         restoreCamera: { cx: camera[0], cy: camera[1], scale: camera[2], angle: Number(camera[3]) }, resume: !!previous, signal: abort.signal,
         onProgress: value => { progress.value = value },
@@ -87,10 +88,12 @@ async function open(entry: ExpmapLibraryEntry, video = false) {
         <label>Échelle fin <input v-model="end" aria-label="Échelle fin ExpMap"></label><button @click="end = String(current.scale)">Définir l’arrivée depuis la vue</button>
         <DenseField v-model="width" label="Largeur" :min="16" :max="3840" :step="2"/><DenseField v-model="height" label="Hauteur" :min="16" :max="2160" :step="2"/><DenseField v-model="density" label="Détail (densité k)" :min="1" :max="8" :step="0.5"/>
         <details v-if="estimate"><summary>Mémoire GPU : {{ (estimate.gpuBytes / 1073741824).toFixed(2) }} GiB</summary><p>14 tuiles en mémoire GPU · {{ (estimate.decodeBytes / 1048576).toFixed(1) }} MiB pour une tuile décodée. Cache complet : {{ (estimate.rawDiskBytes / 1073741824).toFixed(2) }} GiB avant compression.</p></details>
-        <p class="problem" v-for="problem in problems" :key="`${problem.field}:${problem.stopIndex}`">{{ problem.field }} : {{ problem.message }}</p>
+        <p :class="forceRender && problem.kind === 'unsupported' ? 'hint' : 'problem'" v-for="problem in problems" :key="`${problem.field}:${problem.stopIndex}`">{{ problem.field }} : {{ problem.message }}</p>
         <p v-if="!plan" class="problem">Vérifie les coordonnées et les échelles : le départ doit être plus large que l’arrivée.</p>
         <p class="hint">La palette et les couleurs actuelles seront enregistrées dans le document.</p>
-        <button class="primary" :disabled="!engine || !controller || !plan || problems.length > 0 || !name.trim()" @click="bake()">Créer le rendu ExpMap…</button>
+        <label><input v-model="forceRender" type="checkbox"> Forcer le rendu — expérimental</label>
+        <p v-if="forceRender" class="hint">Cuit les effets tels quels. Des raccords ou différences après reprise peuvent apparaître.</p>
+        <button class="primary" :disabled="!engine || !controller || !plan || hasBlockingProblems || !name.trim()" @click="bake()">Créer le rendu ExpMap…</button>
       </fieldset>
       <p class="hint">Une tuile TIFF par doublement, regroupées automatiquement selon la capacité du fichier. Le lecteur conserve 14 tuiles et anticipe la suivante. Le calcul inclut 12 doublements supplémentaires pour couvrir le centre, sans masque.</p>
     </DenseSection>
@@ -100,7 +103,7 @@ async function open(entry: ExpmapLibraryEntry, video = false) {
       <article v-for="entry in expmapLibraryEntries" :key="entry.id">
         <img v-if="entry.thumbnail" :src="entry.thumbnail" alt="Aperçu du document" width="80" height="45">
         <input class="entry-name" title="Cliquer pour renommer" :value="entry.name" :aria-label="`Renommer ${entry.name}`" @change="guard(() => renameExpmapLibraryEntry(entry.id, ($event.target as HTMLInputElement).value))">
-        <small>{{ stateLabels[entry.state] }} · TIFF · {{ entry.width }}×{{ entry.height }} · k={{ entry.density }} · {{ (entry.bytes / 1048576).toFixed(1) }} MiB</small>
+        <small>{{ stateLabels[entry.state] }}{{ entry.forceRender ? ' · Expérimental' : '' }} · TIFF · {{ entry.width }}×{{ entry.height }} · k={{ entry.density }} · {{ (entry.bytes / 1048576).toFixed(1) }} MiB</small>
         <small>{{ entry.startScale }} → {{ entry.endScale }}</small>
         <div><button class="primary" :disabled="expmapBusy || entry.state !== 'ready'" @click="open(entry)">Ouvrir le lecteur</button><button :disabled="expmapBusy || entry.state !== 'ready'" @click="open(entry, true)">Utiliser en vidéo</button><button v-if="entry.state === 'interrupted' || entry.state === 'preparing'" :disabled="expmapBusy" @click="bake(entry)">Reprendre</button><button :disabled="expmapBusy" @click="guard(async () => attachExpmapDocument(await pickExpmapDirectory('read'), entry.id))">Rattacher</button><button class="secondary" :disabled="expmapBusy" title="Les fichiers restent sur le disque" @click="guard(() => removeExpmapLibraryEntry(entry.id))">Retirer du catalogue</button></div>
       </article>

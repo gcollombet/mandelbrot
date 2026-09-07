@@ -12,7 +12,7 @@ import type { VideoPathLocation } from '../videoPath'
 export type ExpmapProgress = { phase: string; done: number; total: number; saved: number }
 export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
   store: ExpmapDirectoryStore; documentId: string; plan: ExpmapPlan; appearance: RenderOptions
-  restoreCamera: VideoPathLocation; resume?: boolean; signal?: AbortSignal
+  restoreCamera: VideoPathLocation; resume?: boolean; forceRender?: boolean; signal?: AbortSignal
   onProgress?: (progress: ExpmapProgress) => void
   onCheckpoint?: (manifest: ExpmapManifest) => void | Promise<void>
 }): Promise<ExpmapManifest> {
@@ -29,9 +29,11 @@ export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
     const decoded = await decodeTiffTile(await encodeTiffTile(probe, request.signal), probe.length, request.signal)
     if (!probe.every((v,i) => decoded[i] === v)) throw new Error('Le codec Deflate natif ne conserve pas les couleurs.')
     if (!request.resume) await request.store.assertEmpty()
-    const frozen = await freezeExpmapAppearance(request.appearance)
-    let manifest: ExpmapManifest = request.resume ? await request.store.open(request.documentId) : {
-      version: 4, documentId: request.documentId, generation: 0, state: 'preparing', createdAt: new Date().toISOString(),
+    const previous = request.resume ? await request.store.open(request.documentId) : undefined
+    const forceRender = previous ? previous.forceRender : request.forceRender ?? false
+    const frozen = await freezeExpmapAppearance(request.appearance, forceRender)
+    let manifest: ExpmapManifest = previous ?? {
+      version: 4, forceRender, documentId: request.documentId, generation: 0, state: 'preparing', createdAt: new Date().toISOString(),
       scaleConvention: 'VideoPathLocation.scale', zoomReferenceScale: '1e0', projection: request.plan,
       appearance: { ...frozen, resources: [] }, color: EXPMAP_COLOR_PROFILE, octaves: layout, tiles: [],
     }
@@ -59,7 +61,7 @@ export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
     function* blocks() { if (!manifest.center) yield center; yield* octaveBlocks(request.plan, manifest.tiles.length) }
     const initialDone = done
     try {
-      await produceExpmapBlocks(deps, { plan: request.plan, appearance: JSON.parse(frozen.json), restoreCamera: request.restoreCamera,
+      await produceExpmapBlocks(deps, { forceRender, plan: request.plan, appearance: JSON.parse(frozen.json), restoreCamera: request.restoreCamera,
         blocks: blocks(), projectionForBlock: (plan, block) => block.id === 'center' ? expmapKernelProjection(plan, block) : octaveProjection(plan, block),
         signal: request.signal, onProgress: count => { done = initialDone + count; report('Calcul GPU des blocs') },
         consume: async ({block, rgba: pixels, stride, offset: sourceOffset}) => {

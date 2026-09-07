@@ -45,3 +45,17 @@ Tests numériques du mapping, limites de fenêtres, couverture des halos, lectur
 ### Regroupement selon la capacité TIFF
 
 Le nombre de tuiles par fichier est calculé à partir des dimensions, d’une borne conservatrice du payload Deflate et des offsets TIFF 32 bits. Il peut donc varier avec la résolution et la densité ; aucune dépendance aux quatorze couches GPU. L’index est dimensionné dynamiquement. Le writer IFD UTIF reçoit ce buffer dimensionné, sans passer par son encodeur de commodité limité à 20 Ko. Le dimensionnement conservateur peut produire des fichiers compressés nettement inférieurs à 4 Gio ; BigTIFF n’est pas introduit.
+
+### Assouplissement des apparences
+
+La phase couleur est autorisée avec le gradient existant, sans correction shader : le risque d’écarts aux raccords lié à son écrêtage n’est pas une interdiction du profil. Moyenne des rayures et cohérence de direction restent autorisées. Les paramètres de reflet/relief/protrusion et pistes matériau inactifs sont ignorés par l’éligibilité lorsque le shading est absent sur tous les stops. Les pistes de texture sans texture active sont également ignorées. Les contributions de couleur fixes (horloge arrêtée ou vitesse nulle) peuvent être cuites ; la hauteur dépendante de l’échelle reste exclue. Les textures restent exclues car leur identité/contenu n’est pas encore figé pour la reprise, même lorsque leur mapping orbital serait adapté.
+
+### Forçage expérimental
+
+Le contrôle classe les problèmes en données invalides et restrictions d’apparence. Le mode forceRender ignore uniquement ces dernières dans l’UI, le gel de recette et le producteur. Il est faux par défaut, enregistré explicitement dans le manifeste, repris depuis celui-ci et indiqué dans la bibliothèque. Le shader, l’horloge zéro, le chargement des ressources et le renderer restent inchangés. Les sources externes ne sont pas archivées ; un changement pendant le calcul ou après reprise peut donc introduire des différences. L’option affiche : « Cuit les effets tels quels. Des raccords ou différences après reprise peuvent apparaître. »
+
+### Transport et brouillon de création
+
+Le formulaire utilise un brouillon réactif partagé, sauvegardé sous expmap-creation-draft. Chaque panneau observe le même objet ; les coordonnées restent des chaînes, y compris les saisies temporairement incomplètes. L’état de calcul et l’apparence courante restent séparés du brouillon.
+
+Le lecteur est une surface téléportée au-dessus des fenêtres avec bandeau et sortie permanents. Timeline à deux doublements/s de référence, vitesse multiplicative, sens inverse, boucle et rotation manuelle. Un domaine stationnaire utilise une timeline de cinq secondes. La boucle requestAnimationFrame attend la publication GPU avant la demande suivante et utilise le temps écoulé pour avancer. Scrub et rotation mettent en pause ; une page masquée aussi. Échap et Quitter libèrent la session, le focus est restauré et les tabulations restent dans les contrôles du lecteur.

@@ -32,3 +32,14 @@ Le catalogue SHALL conserver un localisateur de données et vérifier identité,
 #### Scenario: Remove catalogue entry
 - **WHEN** l'utilisateur retire une entrée de la bibliothèque
 - **THEN** les fichiers du rendu ne sont pas supprimés implicitement
+
+### Requirement: Persistent creation draft
+Les bornes exactes, le centre, le nom, la résolution, la densité et le choix expérimental du formulaire SHALL être conservés indépendamment du montage des fenêtres. Ils SHALL être sauvegardés localement et restaurés au rechargement, sans conversion des coordonnées en nombre machine. Une modification de la caméra SHALL NOT remplacer un brouillon existant ; seuls les boutons de capture explicites SHALL mettre à jour les bornes depuis la vue.
+
+#### Scenario: Switch settings windows
+- **WHEN** le panneau ExpMap est détruit puis recréé après utilisation d’une autre fenêtre
+- **THEN** ses valeurs saisies restent identiques, même si la caméra a changé
+
+#### Scenario: Local storage unavailable
+- **WHEN** le navigateur refuse la sauvegarde locale
+- **THEN** le brouillon reste partagé en mémoire pendant la session

@@ -25,3 +25,9 @@
 - [ ] 4.4 Après confirmation explicite, mesurer qualité visuelle, scintillement, débits et pics mémoire sur GPU cible ; pas de Playwright ou benchmarks sans confirmation.
 
 - [x] 4.5 Supprimer le seuil de treize tuiles par fichier, dimensionner les index et tester un TIFF de plus de treize tuiles, un index supérieur à 20 Ko et la reprise entre fichiers.
+
+- [x] 4.6 Autoriser la phase couleur et les paramètres/pistes sans consommateur actif ; tester les couleurs fixes, données non finies et effets actifs sur d’autres stops.
+
+- [x] 4.7 Ajouter le forçage expérimental, la distinction invalidité/restriction, la persistance et reprise du choix, le badge bibliothèque et les tests des garde-fous.
+
+- [x] 4.8 Ajouter le transport de lecture, identité visuelle et sortie Échap ; préserver le brouillon de création entre fenêtres et rechargements ; vérifier transport, persistance et types.

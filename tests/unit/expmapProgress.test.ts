@@ -7,8 +7,9 @@ import { decodeTiffTile } from '../../src/expmap/tiff'
 import { createDefaultAnimationConfig } from '../../src/AnimationConfig'
 import type { RenderOptions } from '../../src/Engine'
 import type { ExpmapProducerDeps } from '../../src/expmap/producer'
-const control=vi.hoisted(()=>({stopAt:-1, produced:[] as string[]}))
+const control=vi.hoisted(()=>({stopAt:-1, modes:[] as boolean[], produced:[] as string[]}))
 vi.mock('../../src/expmap/producer',()=>({produceExpmapBlocks:async(_deps:unknown,r:any)=>{
+  control.modes.push(r.forceRender)
   let count=0
   for(const block of r.blocks){
     if(count===control.stopAt)throw new Error('Interrupted fixture')
@@ -18,7 +19,7 @@ vi.mock('../../src/expmap/producer',()=>({produceExpmapBlocks:async(_deps:unknow
     await r.consume({block,rgba,stride:block.codedWidth*4,offset:0});r.onProgress(++count)
   }
 }}))
-afterEach(()=>{vi.unstubAllGlobals();control.stopAt=-1;control.produced=[]})
+afterEach(()=>{vi.unstubAllGlobals();control.stopAt=-1;control.produced=[];control.modes=[]})
 function request(store:ExpmapDirectoryStore){
   vi.stubGlobal('navigator',{locks:{request:async(_id:unknown,_opts:unknown,fn:any)=>fn({})}})
   const animation=createDefaultAnimationConfig();Object.values(animation.tracks).forEach(t=>{t.enabled=false})
@@ -36,6 +37,17 @@ describe('TIFF production progress and resume',()=>{
     const rgba=await decodeTiffTile(await store.readTile(m.tiles[0]),m.octaves.tileWidth*m.octaves.tileHeight*4)
     expect(Array.from(rgba.slice((m.octaves.tileWidth+3)*4,(m.octaves.tileWidth+3)*4+4))).toEqual([3,1,73,255])
     expect(m.center).toEqual([0,0,73])
+  })
+  it('preserves experimental mode across resume despite the current checkbox',async()=>{
+    const store=new ExpmapDirectoryStore(new MemoryDirectory().handle()),r=request(store)
+    r.appearance.colorStops[0].shading=1
+    control.stopAt=4
+    await expect(createExpmapDocument({engine:{}} as ExpmapProducerDeps,{...r,forceRender:true})).rejects.toThrow('Interrupted')
+    const previous=await store.open();expect(previous.forceRender).toBe(true)
+    control.stopAt=-1
+    const m=await createExpmapDocument({engine:{}} as ExpmapProducerDeps,{...r,resume:true,forceRender:false})
+    expect(m.forceRender).toBe(true);expect(control.modes).toEqual([true,true])
+    expect(m.appearance).toEqual(previous.appearance)
   })
   it('restarts only the unfinished tile, preserving center and committed tiles',async()=>{
     const store=new ExpmapDirectoryStore(new MemoryDirectory().handle()),r=request(store)

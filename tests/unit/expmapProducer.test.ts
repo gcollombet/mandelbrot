@@ -23,16 +23,17 @@ describe('direct ExpMap producer', () => {
       }
     }
   })
-  it('restores the session and camera when convergence fails', async () => {
+  it.each([false, true])('restores the session and camera when convergence fails (forced=%s)', async forceRender => {
     const navigator = { origin: vi.fn(), scale: vi.fn(), angle: vi.fn(), cancel_transition: vi.fn(), start_transition: vi.fn() }
     const engine = { beginVideoExportSession: vi.fn(), endVideoExportSession: vi.fn(), prepareExpmapBlock: vi.fn(), beginVideoExportFrame: vi.fn(), waitForSubmittedWork: vi.fn(), videoFrameReady: () => false }
     const controller = { getNavigator: () => navigator, setExportTime: vi.fn(), drawOnce: vi.fn() }
     const animation = createDefaultAnimationConfig()
     Object.values(animation.tracks).forEach(track => { track.enabled = false })
     const appearance = { colorStops: [{ color: '#fff', position: 0 }], animation, heightPaletteShift: 0, phaseColoringStrength: 0 } as RenderOptions
+    if (forceRender) appearance.colorStops[0].shading = 1
     const restoreCamera = { cx: '1', cy: '2', scale: '1e-20', angle: 0.4 }
     const consume = vi.fn()
-    await expect(produceExpmapBlocks({ engine, controller } as unknown as ExpmapProducerDeps, { plan, appearance, restoreCamera, consume, maxPumpsPerBlock: 2 })).rejects.toThrow('did not converge')
+    await expect(produceExpmapBlocks({ engine, controller } as unknown as ExpmapProducerDeps, { plan, appearance, forceRender, restoreCamera, consume, maxPumpsPerBlock: 2 })).rejects.toThrow('did not converge')
     expect(consume).not.toHaveBeenCalled()
     expect(engine.endVideoExportSession).toHaveBeenCalledOnce()
     expect(navigator.origin).toHaveBeenLastCalledWith('1', '2')

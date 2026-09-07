@@ -5,7 +5,7 @@ import { planExpmap } from '../../src/expmap/plan'
 import { planExpmapOctaves } from '../../src/expmap/octaves'
 export async function fixtureManifest(): Promise<ExpmapManifest> {
   const projection = planExpmap({ domain: { cx: '0', cy: '0', startScale: '4e-1000', endScale: '1e-1000' }, width: 16, height: 12, density: 2, blockSize: 32 })
-  return { version: 4, documentId: 'fixture', generation: 0, state: 'preparing', createdAt: '2026-09-05', scaleConvention: 'VideoPathLocation.scale', zoomReferenceScale: '1e0',
+  return { version: 4, forceRender: false, documentId: 'fixture', generation: 0, state: 'preparing', createdAt: '2026-09-05', scaleConvention: 'VideoPathLocation.scale', zoomReferenceScale: '1e0',
     projection, octaves: planExpmapOctaves(projection), tiles: [], color: EXPMAP_COLOR_PROFILE,
     appearance: { json: '{}', identity: await contentIdentity(new TextEncoder().encode('{}')), resources: [] } }
 }

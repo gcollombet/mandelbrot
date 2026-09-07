@@ -31,3 +31,7 @@ Incomplete TIFFs are resumable checkpoints; standalone image viewing applies onc
 ## Removal of fixed TIFF grouping
 
 The thirteen-doubling file cap is removed. Grouping now depends on a conservative compressed-size bound and classic TIFF 32-bit offsets/dimensions. Header storage grows with the tile index. The decoder, prefetch and fourteen GPU slots are unchanged. Targeted validation: 91 ExpMap tests passed, including standard decoding of a fifteen-tile TIFF, metadata beyond 20 KB, and checkpoint recovery across the capacity-driven file boundary. Type checking and strict OpenSpec validation passed.
+
+## Player transport and persistent draft
+
+Added visible player chrome, play/pause, timeline, five-second seeks, restart, speed, reverse, repeat, rotation and fullscreen. Escape exits; hidden pages pause. Automatic playback waits for the current GPU image rather than repeatedly aborting it. Creation inputs now live in a shared reactive draft with localStorage persistence; panel remounts no longer replace exact endpoints with the current camera. Validation: 99 ExpMap tests passed and TypeScript passed; no browser visual validation, Playwright or GPU benchmark performed.

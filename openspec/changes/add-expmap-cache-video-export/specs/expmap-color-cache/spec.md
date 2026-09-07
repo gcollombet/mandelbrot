@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Static color eligibility
-Le créateur SHALL analyser tous les stops et les effets actifs. Il SHALL refuser les effets dépendants de la vue ou du temps sans les désactiver silencieusement. L'apparence et le domaine profond SHALL être figés dans le manifeste.
+Le créateur SHALL analyser tous les stops et les effets actifs. En mode normal, il SHALL refuser les effets dépendants de la vue ou du temps sans les désactiver silencieusement. L'apparence et le domaine profond SHALL être figés dans le manifeste.
 
 #### Scenario: Compatible static palette
 - **WHEN** les couleurs sont indépendantes de la vue et du temps
@@ -39,3 +39,29 @@ Le créateur SHALL afficher le coût des quatorze tuiles GPU, d'une tuile décod
 #### Scenario: 4K density one
 - **WHEN** la sortie est 3840×2160 avec une densité de un
 - **THEN** le budget des quatorze tuiles est affiché à environ 1,11 GiB, hors moteur et encodeur
+
+### Requirement: Eligibility follows active consumers
+La phase couleur statique, la moyenne des rayures et la cohérence de direction SHALL être autorisées. Les paramètres et pistes de matériau sans shading actif SHALL NOT bloquer la cuisson. Les pistes de texture sans source texture active SHALL NOT bloquer la cuisson. Une contribution de couleur fixe lorsque l’horloge ou la vitesse est nulle SHALL pouvoir être cuite. La hauteur dépendante de l’échelle, le shading actif et les sources image non figées SHALL rester refusés.
+
+#### Scenario: Phase coloring without shading
+- **WHEN** une phase couleur fixe et des paramètres de relief ou reflet sont présents sans shading actif
+- **THEN** le document peut être produit sans changer la recette ou le shader
+
+#### Scenario: Active effect on another stop
+- **WHEN** un autre stop active le consommateur d’une piste animée
+- **THEN** cette piste est examinée comme active sur l’ensemble de la palette
+
+### Requirement: Experimental forced rendering
+Une option « Forcer le rendu — expérimental », désactivée par défaut, SHALL permettre de contourner toutes les restrictions d’apparence, y compris shading, hauteur, animations, images externes et diagnostics. Les erreurs de données, capacités matérielles, codec, disque et convergence SHALL rester bloquantes. Le manifeste SHALL enregistrer un booléen forceRender explicite, restauré automatiquement à la reprise ; la bibliothèque SHALL identifier ces documents comme expérimentaux. Aucune migration des manifestes sans ce champ n’est prévue.
+
+#### Scenario: Force incompatible appearance
+- **WHEN** le mode expérimental est activé avec une apparence valide mais non compatible
+- **THEN** les restrictions deviennent des indications non bloquantes et le producteur utilise la recette intacte, avec l’horloge de cuisson existante fixée à zéro
+
+#### Scenario: Resume experimental cache
+- **WHEN** un document expérimental interrompu est repris alors que la case est décochée
+- **THEN** le mode forcé du manifeste est utilisé jusqu’au producteur
+
+#### Scenario: Invalid data in experimental mode
+- **WHEN** une palette invalide ou une valeur non finie est fournie
+- **THEN** la cuisson reste refusée

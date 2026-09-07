@@ -1,7 +1,7 @@
 import type { VideoExportRunnerDeps } from '../videoExportRunner'
 import type { VideoPathLocation } from '../videoPath'
 import type { RenderOptions } from '../Engine'
-import { expmapAppearanceProblems } from './appearance'
+import { expmapBlockingProblems } from './appearance'
 import type { ExpmapPlan, ExpmapBlock } from './plan'
 import { octaveBlocks, octaveProjection } from './octaves'
 import { type ExpmapKernelProjection } from './producerProjection'
@@ -18,6 +18,7 @@ export type ExpmapProducerDeps = VideoExportRunnerDeps & {
 export async function produceExpmapBlocks(deps: ExpmapProducerDeps, request: {
   plan: ExpmapPlan
   appearance: RenderOptions
+  forceRender?: boolean
   restoreCamera: VideoPathLocation
   blocks?: Iterable<ExpmapBlock>
   projectionForBlock?: (plan: ExpmapPlan, block: ExpmapBlock) => ExpmapKernelProjection
@@ -27,7 +28,7 @@ export async function produceExpmapBlocks(deps: ExpmapProducerDeps, request: {
   onProgress?: (blocksProduced: number) => void
   maxPumpsPerBlock?: number
 }) {
-  const problems = expmapAppearanceProblems(request.appearance)
+  const problems = expmapBlockingProblems(request.appearance, request.forceRender)
   if (problems.length) throw new Error(problems.map(p => p.message).join('\n'))
   const navigator = deps.controller.getNavigator()
   if (!navigator) throw new Error('Navigator unavailable')

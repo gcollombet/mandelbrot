@@ -3,12 +3,13 @@ import { getEffectValue } from '../ColorStop'
 import { EFFECT_FIELD_NAMES } from '../effectFieldConfig'
 import { normalizeAnimationConfig } from '../AnimationConfig'
 
-export type AppearanceProblem = { field: string; message: string; stopIndex?: number }
+export type AppearanceProblem = { field: string; message: string; stopIndex?: number; kind: 'invalid' | 'unsupported' }
 
-/** Conservative V1 eligibility; no effect is silently switched off. */
+/** Reject effects that affect the baked output and require a changing view/resource. */
 export function expmapAppearanceProblems(options: RenderOptions): AppearanceProblem[] {
   const problems: AppearanceProblem[] = []
-  const refuse = (field: string, message: string, stopIndex?: number) => problems.push({ field, message, stopIndex })
+  const refuse = (field: string, message: string, stopIndex?: number) => problems.push({ field, message, stopIndex, kind: 'invalid' })
+  const restrict = (field: string, message: string, stopIndex?: number) => problems.push({ field, message, stopIndex, kind: 'unsupported' })
   if (!options.colorStops?.length) refuse('colorStops', 'Une palette non vide est requise.')
   for (const [stopIndex, stop] of (options.colorStops ?? []).entries()) {
     for (const [field, value] of Object.entries(stop)) {
@@ -21,22 +22,31 @@ export function expmapAppearanceProblems(options: RenderOptions): AppearanceProb
       const value = getEffectValue(stop, field)
       if (!Number.isFinite(value)) refuse(field, 'Valeur non finie.', stopIndex)
     }
-    for (const field of ['shading', 'skybox', 'tessellation', 'webcam', 'stripeReliefTilt', 'directionCoherenceReliefTilt', 'protrusion'] as const) {
+    for (const field of ['shading', 'tessellation', 'webcam'] as const) {
       if (getEffectValue(stop, field) !== 0) {
-        refuse(field, 'Cet effet nécessite une vue ou une ressource non compatible avec la cuisson RGB.', stopIndex)
+        restrict(field, field === 'shading' ? 'Le shading actif dépend de la vue et de l’échelle.' : 'Cette image source n’est pas encore figée et vérifiée pour la reprise ExpMap.', stopIndex)
       }
     }
   }
   for (const field of ['heightPaletteShift', 'phaseColoringStrength'] as const) {
-    if (options[field] !== 0) refuse(field, 'Cette coloration dépend de la géométrie de la vue ; invariance non démontrée.')
+    if (!Number.isFinite(options[field])) refuse(field, 'Valeur non finie.')
   }
-  if (options.debugShading || options.debugView) refuse('debugView', 'Les vues de diagnostic ne sont pas des couleurs spatiales persistantes.')
-  // A disabled clock can still contribute a nonzero phase at t=0 in Engine.
-  // Reject nonzero tracks conservatively, even on a paused animation: baking
-  // must not make enabled appearance animation silently disappear on replay.
+  if (options.heightPaletteShift !== 0) restrict('heightPaletteShift', 'La hauteur utilisée pour décaler la palette dépend de l’échelle de vue.')
+  if (options.debugShading || options.debugView) restrict('debugView', 'Les vues de diagnostic ne sont pas des couleurs spatiales persistantes.')
+  // A paused track contributes its fixed phase; this can be baked for spatial
+  // colors. Height remains scale-dependent even when its contribution is fixed.
+  const hasShading = (options.colorStops ?? []).some(stop => getEffectValue(stop, 'shading') !== 0)
+  const hasTexture = (options.colorStops ?? []).some(stop => getEffectValue(stop, 'tessellation') !== 0 || getEffectValue(stop, 'webcam') !== 0)
+  // Animation tracks alter parameters, never the activation weights in stops.
+  const materialTracks = new Set(['lightAngle', 'skyReflectionDrift', 'varnish', 'microBump', 'protrusionPhase', 'reliefDepth'])
+  const textureTracks = new Set(['textureDrift', 'displacement', 'tessellation'])
   const animation = normalizeAnimationConfig(options.animation, options.animationSpeed)
   for (const [id, track] of Object.entries(animation.tracks)) {
-    if (track.enabled && track.amplitude !== 0) refuse(`animation.${id}`, 'Désactiver explicitement cette piste avant de cuire une apparence fixe.')
+    const inactive = (!hasShading && materialTracks.has(id)) || (!hasTexture && textureTracks.has(id))
+    const moving = options.activateAnimate !== false && track.speed !== 0 && animation.globalSpeed !== 0
+    if (!inactive && track.enabled && track.amplitude !== 0 && (moving || id === 'heightPaletteShift')) {
+      restrict(`animation.${id}`, id === 'heightPaletteShift' ? 'Cette piste modifie une hauteur dépendante de l’échelle de vue.' : 'Désactiver cette animation de couleur pour cuire une apparence fixe.')
+    }
   }
   for (const [id, track] of Object.entries(options.animation?.tracks ?? {})) {
     if (![track.speed, track.amplitude, track.phase ?? 0].every(Number.isFinite)) refuse(`animation.${id}`, 'Piste non finie.')
@@ -61,8 +71,12 @@ export async function contentIdentity(bytes: Uint8Array): Promise<string> {
   return 'sha256:' + Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('')
 }
 
-export async function freezeExpmapAppearance(options: RenderOptions) {
-  const problems = expmapAppearanceProblems(options)
+export function expmapBlockingProblems(options: RenderOptions, forceRender = false) {
+  return expmapAppearanceProblems(options).filter(problem => !forceRender || problem.kind === 'invalid')
+}
+
+export async function freezeExpmapAppearance(options: RenderOptions, forceRender = false) {
+  const problems = expmapBlockingProblems(options, forceRender)
   if (problems.length) throw new Error(problems.map(p => `${p.field}: ${p.message}`).join('\n'))
   const json = canonicalJson(options)
   return { json, identity: await contentIdentity(new TextEncoder().encode(json)) }
