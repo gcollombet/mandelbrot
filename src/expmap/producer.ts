@@ -26,6 +26,7 @@ export async function produceExpmapBlocks(deps: ExpmapProducerDeps, request: {
   consume: (value: ExpmapRgbaBlock) => Promise<void>
   signal?: AbortSignal
   onProgress?: (blocksProduced: number) => void
+  onTiming?: (milliseconds: number) => void
   maxPumpsPerBlock?: number
 }) {
   const problems = expmapBlockingProblems(request.appearance, request.forceRender)
@@ -48,6 +49,7 @@ export async function produceExpmapBlocks(deps: ExpmapProducerDeps, request: {
       check()
       if (request.completedBlockIds?.has(block.id)) continue
       request.onProgress?.(blocksProduced)
+      const blockStart=performance.now()
       const projection = (request.projectionForBlock ?? octaveProjection)(request.plan, block)
       navigator.scale(projection.scale)
       await deps.engine.prepareExpmapBlock(projection, request.appearance)
@@ -83,6 +85,7 @@ export async function produceExpmapBlocks(deps: ExpmapProducerDeps, request: {
         const rgba = new Uint8Array(frame.allocationSize(copyOptions))
         const [layout] = await frame.copyTo(rgba, copyOptions)
         check()
+        request.onTiming?.(performance.now()-blockStart)
         await request.consume({ block, rgba, stride: layout.stride, offset: layout.offset })
         blocksProduced++
         request.onProgress?.(blocksProduced)

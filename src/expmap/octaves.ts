@@ -8,7 +8,7 @@ export type ExpmapOctaves = {
   angularSamples: number; rowsPerOctave: number; tileWidth: number; tileHeight: number
   tileCount: number; halo: number
 }
-export type ExpmapTiffTile = { index: number; file: string; offset: number; length: number; sha256: string }
+export type ExpmapTile = { index: number; file: string; length: number; sha256: string }
 const align16 = (n: number) => Math.ceil(n / 16) * 16
 export function planExpmapOctaves(plan: ExpmapPlan): ExpmapOctaves {
   const angularSamples = plan.angularSamples, rowsPerOctave = Math.ceil(Math.LN2 * plan.density * plan.radius)

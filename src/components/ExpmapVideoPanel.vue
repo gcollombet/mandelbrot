@@ -8,6 +8,7 @@ import { DenseField, DenseSection, DenseSelect } from './dense'
 import { expmapLibraryEntries, openExpmapLibraryEntry, refreshExpmapLibrary, selectedExpmapDocumentId } from '../expmap/library'
 import { expmapBusy, expmapLastView, expmapOpenDocument } from '../expmap/runtime'
 import { changeExpmapDuration, changeExpmapSpeed, changeExpmapWindow, exportExpmapVideo, loadExpmapVideoWindow, saveExpmapVideoWindow, type ExpmapVideoWindow } from '../expmap/video'
+import { EXPMAP_SAMPLE_LIMITS } from '../expmap/renderer'
 import { ExpmapGpuRenderer } from '../expmap/gpuRenderer'
 import type { ExpmapManifest } from '../expmap/manifest'
 import { interpolateScale, scaleDoublements } from '../expmap/decimal'
@@ -15,6 +16,7 @@ import { MP4_CODECS, type Mp4Codec } from '../videoEncoderSink'
 const props = defineProps<{ engine?: Engine | null; controller?: MandelbrotExposed | null }>()
 const manifest = ref<ExpmapManifest | null>(null), windowSpec = ref<ExpmapVideoWindow | null>(null)
 const framesDone = ref(0), framesTotal = ref(0)
+const maxSamples = ref(16)
 const error = ref(''), progress = ref(''), ownRunning = ref(false), width = ref(1280), height = ref(720), fps = ref(30), codec = ref<Mp4Codec>('avc')
 let abort: AbortController | undefined, generation = 0
 onMounted(() => refreshExpmapLibrary().catch(e => { error.value = String(e) }))
@@ -76,7 +78,7 @@ async function start() {
     release = parkExpmapSession(props.engine, props.controller)
     gpu = await ExpmapGpuRenderer.create(opened.store, opened.manifest, props.engine?.device)
     persist()
-    const result = await exportExpmapVideo(opened, { window: { ...windowSpec.value }, width: width.value, height: height.value, fps: fps.value, codec: codec.value,
+    const result = await exportExpmapVideo(opened, { window: { ...windowSpec.value }, width: width.value, height: height.value, fps: fps.value, codec: codec.value, maxSamples: maxSamples.value,
       destination: { kind: 'stream', writable }, signal: abort.signal, gpuRenderer: gpu,
       onProgress: (frames, total) => { framesDone.value = frames; framesTotal.value = total; progress.value = frames === total ? 'Finalisation du fichier MP4' : 'Reconstruction et encodage des images' } })
     progress.value = result.cancelled ? 'Export interrompu' : 'Vidéo enregistrée'
@@ -104,6 +106,10 @@ async function start() {
         <DenseField :model-value="windowSpec.durationSeconds" label="Durée (s)" :min="0.01" :max="86400" :step="0.1" @update:model-value="update('duration', $event)"/>
         <DenseField v-model="windowSpec.fromAngle" label="Rotation début (rad)" :min="-100" :max="100" :step="0.01" @update:model-value="persist"/><DenseField v-model="windowSpec.toAngle" label="Rotation fin (rad)" :min="-100" :max="100" :step="0.01" @update:model-value="persist"/>
         <DenseField v-model="width" label="Largeur" :min="2" :max="manifest.projection.width" :step="2"/><DenseField v-model="height" label="Hauteur" :min="2" :max="manifest.projection.height" :step="2"/><DenseField v-model="fps" label="Images/s" :min="1" :max="60"/>
+        <label>Prélèvements par pixel (maximum)
+          <select v-model.number="maxSamples"><option v-for="limit in EXPMAP_SAMPLE_LIMITS" :key="limit" :value="limit">{{ limit }}{{ limit === 1 ? ' — bilinéaire' : '' }}</option></select>
+        </label>
+        <p>Adaptatif selon le détail disponible dans l’ExpMap. Grille fixe entre les images, moyenne en lumière linéaire. Aucun recalcul de la fractale.</p>
         <DenseSelect v-model="codec" label="Codec MP4" :options="[...MP4_CODECS]"/>
         <button @click="start">Exporter vers un fichier MP4</button>
       </template>
@@ -113,5 +119,5 @@ async function start() {
   </DenseSection>
 </template>
 <style scoped>
-fieldset{border:0;padding:0;min-width:0}label{display:flex;gap:5px;margin:5px 0}input{width:100%;min-width:0;background:#ffffff0b;color:inherit;border:1px solid #ffffff20}p{font-size:11px;overflow-wrap:anywhere}button{padding:5px;border:1px solid #ffffff30;margin:4px}
+fieldset{border:0;padding:0;min-width:0}label{display:flex;gap:5px;margin:5px 0}select{background:#172033;color:inherit;border:1px solid #ffffff30;padding:4px}input{width:100%;min-width:0;background:#ffffff0b;color:inherit;border:1px solid #ffffff20}p{font-size:11px;overflow-wrap:anywhere}button{padding:5px;border:1px solid #ffffff30;margin:4px}
 </style>

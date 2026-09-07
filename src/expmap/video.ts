@@ -56,13 +56,13 @@ export function loadExpmapVideoWindow(manifest: ExpmapManifest): { window: Expma
 
 /** Deterministic ordered loop. Interactive request dropping never enters here. */
 export async function exportExpmapVideo(source: { manifest: ExpmapManifest }, request: {
-  window: ExpmapVideoWindow; width: number; height: number; fps: number; codec: Mp4Codec
+  window: ExpmapVideoWindow; width: number; height: number; fps: number; codec: Mp4Codec; maxSamples?: number
   destination: VideoDestination; signal?: AbortSignal
   onProgress?: (frames: number, total: number) => void
   gpuRenderer: { render(view: ExpmapView, signal?: AbortSignal): Promise<OffscreenCanvas> }
 }) {
   validateExpmapVideoWindow(source.manifest, request.window)
-  validateExpmapView(source.manifest.projection, { width: request.width, height: request.height, scale: request.window.fromScale, angle: request.window.fromAngle })
+  validateExpmapView(source.manifest.projection, { width: request.width, height: request.height, scale: request.window.fromScale, angle: request.window.fromAngle, maxSamples: request.maxSamples ?? 16 })
   if (!Number.isFinite(request.fps) || request.fps <= 0 || request.fps > 240) throw new Error('Cadence invalide.')
   const settings = { fps: request.fps, durationSeconds: request.window.durationSeconds }
   const total = totalFramesFor(settings)
@@ -75,7 +75,7 @@ export async function exportExpmapVideo(source: { manifest: ExpmapManifest }, re
     for (let i = 0; i < total; i++) {
       request.signal?.throwIfAborted()
       const t = elapsedForFrame(i, total, request.window.durationSeconds) / request.window.durationSeconds
-      const view = { width: request.width, height: request.height,
+      const view = { width: request.width, height: request.height, maxSamples: request.maxSamples ?? 16,
         scale: interpolateScale(request.window.fromScale, request.window.toScale, t),
         angle: request.window.fromAngle + (request.window.toAngle - request.window.fromAngle) * t }
       const canvas = await request.gpuRenderer.render(view, request.signal)

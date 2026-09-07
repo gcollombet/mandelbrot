@@ -16,7 +16,7 @@ Le lecteur SHALL charger et décoder avec budgets RAM/GPU, files bornées et bac
 
 #### Scenario: Frame working set exceeds budget
 - **WHEN** les contributions d'une frame dépassent la mémoire disponible
-- **THEN** la reconstruction est partitionnée sans changer son filtre ni charger le cache entier
+- **THEN** la sortie est refusée explicitement sans charger le cache entier
 
 #### Scenario: Cache-only export
 - **WHEN** un cache complet est exporté
@@ -101,7 +101,7 @@ Projection, interpolation en lumière linéaire et composition SHALL utiliser le
 
 #### Scenario: GPU page residency exceeded
 - **WHEN** une vue requiert plus de pages que le budget VRAM
-- **THEN** elle est partitionnée et reconstruite sur GPU, sans readback des pixels de sortie
+- **THEN** elle est refusée explicitement sans allocation au-delà du budget
 
 #### Scenario: Video frame submission
 - **WHEN** une frame GPU est complète
@@ -113,3 +113,18 @@ L'export SHALL utiliser le même renderer à quatorze tuiles que le lecteur et S
 #### Scenario: Export from an open player
 - **WHEN** une vidéo démarre alors que le lecteur est ouvert
 - **THEN** son tampon est libéré avant l'allocation du tampon vidéo
+
+### Requirement: Adaptive spatial multisampling for video
+La vidéo SHALL proposer un plafond de 1, 4, 9, 16, 36, 64, 144 ou 256 prélèvements bilinéaires par pixel, avec 16 par défaut. Le shader SHALL choisir une grille carrée selon la densité de l’axe polaire le moins dense, évaluée conservativement au rayon maximal de l’empreinte du pixel. Il SHALL intégrer une grille régulière fixe dans le pixel, sans jitter temporel, en lumière linéaire avant encodage sRGB. La couleur centrale SHALL être convertie dans le même espace avant mélange. Aucun nouveau calcul fractal ni élargissement du tampon de quatorze tuiles ne SHALL être nécessaire.
+
+#### Scenario: Locally sparse map
+- **WHEN** la densité disponible ne permet pas deux prélèvements par axe
+- **THEN** le pixel conserve un seul prélèvement bilinéaire centré
+
+#### Scenario: Dense region with bounded cost
+- **WHEN** la densité permet une grille plus fine
+- **THEN** le nombre de prélèvements augmente jusqu’au plafond choisi, indépendamment de la frame et de la profondeur de zoom
+
+#### Scenario: Compare with previous reconstruction
+- **WHEN** le plafond est fixé à un
+- **THEN** la vidéo utilise le prélèvement bilinéaire centré existant

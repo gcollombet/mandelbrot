@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { ExpmapTileCache } from '../../src/expmap/tileCache'
 import { octaveMemory, octaveWindow, planExpmapOctaves } from '../../src/expmap/octaves'
 import { planExpmap } from '../../src/expmap/plan'
@@ -38,4 +38,15 @@ describe('14 tile circular cache',()=>{
     expect(plan.radius/4096).toBeLessThan(1)
     for(let depth=0;depth<=2;depth+=.1)expect(octaveWindow(depth,o.tileCount).needed.length).toBeLessThanOrEqual(13)
   })
+})
+
+it('releases a native image when stale prefetch finishes without upload',async()=>{
+  let finish!:(value:{close:()=>void})=>void
+  const upload=vi.fn(),close=vi.fn()
+  const cache=new ExpmapTileCache(()=>new Promise<{close:()=>void}>(resolve=>{finish=resolve}),upload,image=>image.close())
+  const pending=cache.prepare([0])
+  await Promise.resolve()
+  cache.dispose();finish({close})
+  await expect(pending).rejects.toThrow()
+  expect(upload).not.toHaveBeenCalled();expect(close).toHaveBeenCalledOnce()
 })

@@ -30,7 +30,7 @@ Projection, interpolation en lumière linéaire et composition SHALL utiliser le
 
 #### Scenario: GPU page residency exceeded
 - **WHEN** une vue requiert plus de pages que le budget VRAM
-- **THEN** elle est partitionnée et reconstruite sur GPU, sans readback des pixels de sortie
+- **THEN** elle est refusée explicitement sans allocation au-delà du budget
 
 #### Scenario: Video frame submission
 - **WHEN** une frame GPU est complète

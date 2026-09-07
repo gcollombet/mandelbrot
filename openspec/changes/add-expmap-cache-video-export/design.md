@@ -10,23 +10,25 @@ Créer un document réutilisable avec une navigation et un export bornés en mé
 
 ### Projection unique
 
-R=hypot(W,H)/2, Nθ=ceil(2πkR), Nρ=ceil(ln(2)kR). Chaque tuile couvre un doublement : angle en X, profondeur logarithmique en Y. Deux échantillons de halo autour de la tuile et une ligne de frontière permettent le filtrage matériel. Dimensions TIFF arrondies à des multiples de 16.
+R=hypot(W,H)/2, Nθ=ceil(2πkR), Nρ=ceil(ln(2)kR). Chaque tuile couvre un doublement : angle en X, profondeur logarithmique en Y. Deux échantillons de halo autour de la tuile et une ligne de frontière permettent le filtrage matériel. Dimensions de stockage arrondies à des multiples de 16.
 
 La vue consomme les douze doublements après son cercle extérieur. Une position fractionnaire utilise au plus treize tuiles. Le document contient floor(profondeur utilisateur)+13 tuiles, sans élargir les bornes navigables. Sous R/4096, utiliser la couleur exacte du centre calculée une fois ; en 4K, ce rayon vaut environ 0,54 pixel. Refuser R>4096, qui rendrait cette fermeture supérieure à un pixel. Aucun masque graphique central.
 
 Calcul direct des blocs avec convergence existante, apparence statique figée et budget d'itérations stable. La précision couvre aussi les douze doublements internes et les halos. Aucune réutilisation cartésienne ou empreinte AA cartésienne héritée. Les effets dépendants de la vue ou du temps restent explicitement inéligibles.
 
-### TIFF tuilé, un seul format
+### Document ZIP64, images WebP indépendantes
 
-Manifeste v4 uniquement. Fichiers zoom-N.tif contenant autant de tuiles verticales que le permet leur capacité, sans seuil fixe de doublements. RGBA8 opaque, couleurs sRGB, Deflate indépendant par tuile. UTIF écrit les métadonnées TIFF standard ; CompressionStream et DecompressionStream réalisent le codec natif. Pas de décodeur d'image JavaScript ni de conversion RGB dans le lecteur. Un index offset/longueur/SHA-256 permet de lire exactement une tuile.
+Manifeste v5 uniquement, avec nom, qualité WebP et miniature portable. Un fichier .expmap choisi par Enregistrer sous est un ZIP64 STORE : manifest.json et doubling-N.webp. zip.js gère l’index et les plages de lecture ; aucune compression ZIP supplémentaire. Les images sont WebP avec pertes, opaques sRGB, qualité 0,90 par défaut. Les anciens TIFF ne sont ni migrés ni lus.
 
-En-tête réservé dimensionné selon le nombre de tuiles, aligné sur 4096 octets. Écrire et fermer chaque tuile, vérifier son hash, puis publier un manifeste A/B. Après interruption, reprendre au dernier doublement publié ; la tuile partielle est recalculée. L'ouverture vérifie les métadonnées et tailles, les hashes de payload sont vérifiés au premier chargement de chaque tuile. Aucune lecture complète du document au démarrage. Un TIFF incomplet est un checkpoint, pas encore une image finale autonome.
+Le navigateur écrit chaque image complète dans un répertoire OPFS interne, vérifie son hash, puis ferme un manifeste A/B. Aucun dossier utilisateur à sélectionner. Un seul worker encode avec OffscreenCanvas.convertToBlob ; la tuile RGBA lui est transférée. Pendant l’encodage et l’écriture de cette tuile, le producteur assemble la suivante. La file ne conserve qu’une sauvegarde en cours ; la production attend si celle-ci n’a pas fini. Les erreurs remontent, la fin attend la file, une interruption conserve les tuiles publiées. Les temps calcul (préparation/capture incluses), encodage, écriture/vérification et attente sont affichés séparément ; ils se chevauchent.
 
-Le catalogue utilise un espace neuf. Aucune migration des entrées ou des fichiers historiques ; les fichiers existants sur disque sont laissés intacts.
+À l’arrêt ou à la fin, les images internes sont copiées séquentiellement dans le fichier choisi, sans Blob global et sans recopier un fichier grandissant à chaque doublement. L’archive est fermée puis son manifeste/index vérifié avant suppression des fichiers temporaires. Une erreur conserve les checkpoints internes et permet Enregistrer sous ou Reprendre. Après arrêt normal, la reprise depuis une archive incomplète copie les images déjà calculées vers OPFS avec progression et annulation. Un verrou inter-fenêtres couvre calcul, finalisation et nettoyage. La fermeture brutale de l’onglet peut empêcher la finalisation du fichier choisi ; la bibliothèque retrouve les checkpoints internes. Leur disponibilité reste soumise au stockage du navigateur.
+
+La lecture vérifie l’index et les tailles ; les hashes des images sont vérifiés à leur chargement. createImageBitmap décode une image WebP puis copyExternalImageToTexture l’importe dans la couche GPU. Le bitmap est fermé après upload ou abandon. Aucun décodeur WebP JavaScript, aucun readback RGBA pour la lecture.
 
 ### Tampon circulaire GPU
 
-Texture rgba8unorm-srgb à quatorze couches. Tuile i dans la couche i modulo 14. Treize couches couvrent la vue ; la couche restante anticipe le mouvement. Un seul décodage en cours, upload direct RGBA puis libération RAM. Une prélecture devenue obsolète ne peut pas écraser une tuile de la nouvelle fenêtre.
+Texture rgba8unorm-srgb à quatorze couches. Tuile i dans la couche i modulo 14. Treize couches couvrent la vue ; la couche restante anticipe le mouvement. Un seul décodage en cours, import natif ImageBitmap puis libération RAM. Une prélecture devenue obsolète ne peut pas écraser une tuile de la nouvelle fenêtre.
 
 Une frame entièrement résidente ne relit pas le disque, ne décode pas et ne réimporte pas les textures. Le CPU détermine la fenêtre à partir de l'échelle ; aucune liste de pages atomique ni lecture GPU de demandes. Un triangle plein écran réalise le mapping log-polaire et le filtrage bilinéaire en lumière linéaire. Le shader réencode une fois en sRGB pour le canvas. La profondeur entière et sa fraction sont séparées avant passage en float32.
 
@@ -40,11 +42,7 @@ Plafond d'une tuile brute : 128 MiB. Vérifier maxTextureDimension2D, maxTexture
 
 ## Validation
 
-Tests numériques du mapping, limites de fenêtres, couverture des halos, lecture TIFF indépendante, reprises après échec de publication, vérification des payloads, prélecture obsolète et frames résidentes sans nouvelle lecture. Tests de progression et reprise de production, vidéo ordonnée, annulation/restauration. Types et validation WGSL Naga. Qualité, scintillement et débit GPU réel restent à mesurer après confirmation explicite ; aucun résultat statique n'est présenté comme une mesure matérielle.
-
-### Regroupement selon la capacité TIFF
-
-Le nombre de tuiles par fichier est calculé à partir des dimensions, d’une borne conservatrice du payload Deflate et des offsets TIFF 32 bits. Il peut donc varier avec la résolution et la densité ; aucune dépendance aux quatorze couches GPU. L’index est dimensionné dynamiquement. Le writer IFD UTIF reçoit ce buffer dimensionné, sans passer par son encodeur de commodité limité à 20 Ko. Le dimensionnement conservateur peut produire des fichiers compressés nettement inférieurs à 4 Gio ; BigTIFF n’est pas introduit.
+Tests numériques du mapping, limites de fenêtres, couverture des halos, lecture ZIP64 indépendante, reprises après échec de publication, vérification des payloads, prélecture obsolète et frames résidentes sans nouvelle lecture. Tests de progression et reprise de production, vidéo ordonnée, annulation/restauration. Types et validation WGSL Naga. Qualité, scintillement et débit GPU réel restent à mesurer après confirmation explicite ; aucun résultat statique n'est présenté comme une mesure matérielle.
 
 ### Assouplissement des apparences
 
@@ -59,3 +57,21 @@ Le contrôle classe les problèmes en données invalides et restrictions d’app
 Le formulaire utilise un brouillon réactif partagé, sauvegardé sous expmap-creation-draft. Chaque panneau observe le même objet ; les coordonnées restent des chaînes, y compris les saisies temporairement incomplètes. L’état de calcul et l’apparence courante restent séparés du brouillon.
 
 Le lecteur est une surface téléportée au-dessus des fenêtres avec bandeau et sortie permanents. Timeline à deux doublements/s de référence, vitesse multiplicative, sens inverse, boucle et rotation manuelle. Un domaine stationnaire utilise une timeline de cinq secondes. La boucle requestAnimationFrame attend la publication GPU avant la demande suivante et utilise le temps écoulé pour avancer. Scrub et rotation mettent en pause ; une page masquée aussi. Échap et Quitter libèrent la session, le focus est restauré et les tabulations restent dans les contrôles du lecteur.
+
+### Échelle continue des matériaux précalculés
+
+L’ancre numérique de chaque bloc reste inchangée. En ExpMap, chaque invocation ajoute -y×rhoStep au logarithme d’échelle utilisé pour la hauteur. Le pas utilisé pour les gradients de distance, la courbure et les gradients orbitaux reçoit la même correction radiale ainsi qu’une normalisation vers un repère virtuel carré de 512 pixels. Ce repère conserve le gain du producteur habituel, indépendamment des dimensions physiques du bloc ; il ne change pas la grille d’échantillonnage. Les corrections précèdent les clamps et les accumulations orbitales, y compris lors des continuations shallow/deep. Hors ExpMap elles valent zéro. Le pixel central conserve une échelle finie.
+
+Les nouveaux documents enregistrent geometryConvention=continuous-radial-v1. Seuls les documents du manifeste v5 sont pris en charge. Un calcul incomplet sans cette convention ne peut pas être repris avec le nouveau producteur ; il faut créer un nouveau document, pour éviter un mélange de reliefs incompatibles. Aucune modification du shader de couleur, du lecteur ou du mapping GPU n’est nécessaire.
+
+### Miniatures et export image entière
+
+Une première miniature de la carte provient des pixels cuits dans le worker ; à la fin, une vue reconstruite du document la remplace lorsque le GPU est disponible. Elle est intégrée au manifeste et conservée à l’import. Aucune capture du canvas interactif potentiellement effacé.
+
+L’export image parcourt les doublements nécessaires à la résolution choisie et assemble la carte angle × profondeur, y compris la couverture interne, sans halos/padding dans l’image. Il utilise les codecs natifs PNG, JPEG ou WebP et ne recalcule aucune orbite. Largeur/hauteur et qualité sont sélectionnables ; 32 mégapixels maximum, côté WebP <=16383, autres côtés <=32767. Cette limite porte uniquement sur l’image exportée, pas sur le document. Une seule image source décodée est conservée. Les arrondis répartissent les centres des pixels de sortie sans trous ou double attribution. Chaque doublement est dessiné sur son rectangle de sortie entier, sans bord fractionnaire : sa hauteur varie de moins d’un pixel par rapport à la projection idéale, évitant les lignes noires aux jonctions lors des réductions. Le filtre est celui du canvas natif, distinct du filtre linéaire du lecteur vidéo. PNG n’ajoute pas de perte aux couleurs déjà compressées en WebP.
+
+### Multisampling spatial adaptatif de la vidéo
+
+Le plafond vidéo vaut 16 par défaut, sélectionnable parmi 1/4/9/16/36/64/144/256. Le lecteur interactif et les miniatures restent à un prélèvement par défaut. Le contrat de vue transporte ce plafond vers le renderer partagé ; il ne modifie pas le document.
+
+Soit s=hauteurRéférence/hauteurSortie et r le rayon au centre du pixel. La densité conservatrice vaut min(Nθ/(2π),Nρ/ln(2))×s/(r+s/√2). Le côté de grille vaut floor(densité), borné entre 1 et sqrt(plafond). Ce choix ne dépend ni du temps, ni du zoom, ni de la rotation : pour des dimensions vidéo fixes, il reste stable entre les frames. Les points sont les milieux de strates régulières dans le carré du pixel. Chaque point passe par le mapping polaire, le choix de tuile et les halos existants ; la fenêtre résidente reste inchangée. Les couleurs linéaires, centre inclus, sont moyennées avec un filtre boîte normalisé puis encodées en sRGB une seule fois. Chaque prélèvement bilinéaire utilise les voisins matériels habituels. Ce filtre borné ne garantit pas l’élimination de tout aliasing dans les zones extrêmement minifiées.

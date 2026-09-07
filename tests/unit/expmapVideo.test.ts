@@ -37,7 +37,7 @@ describe('ExpMap video timeline', () => {
     expect(() => validateExpmapVideoWindow(m, { ...w, toScale: '1e-1000001' })).toThrow('domaine')
   })
   it('awaits complete frames in deterministic order with inclusive endpoints', async () => {
-    const m = await manifest(), views: { scale: string; angle: number }[] = [], timestamps: number[] = []
+    const m = await manifest(), views: { scale: string; angle: number;maxSamples:number }[] = [], timestamps: number[] = []
     vi.stubGlobal('VideoFrame', class { constructor(_pixels: unknown, options: { timestamp: number }) { timestamps.push(options.timestamp) } close() {} })
     let active = false
     mock.render.mockImplementation(async (_source, view) => { expect(active).toBe(false); active = true; views.push(view); await Promise.resolve(); return new Uint8ClampedArray(16 * 12 * 4) })
@@ -45,7 +45,19 @@ describe('ExpMap video timeline', () => {
     const result = await exportExpmapVideo({ manifest: m }, { window: expmapVideoDefaults(m), width: 16, height: 12, fps: 2, codec: 'avc', destination: { kind: 'buffer' }, gpuRenderer: { render: view => mock.render({ manifest: m }, view) } })
     expect(result.framesEmitted).toBe(20); expect(mock.finalize).toHaveBeenCalledOnce()
     expect(views[0].scale).toBe(m.projection.domain.startScale); expect(views[19].scale).toBe(m.projection.domain.endScale)
+    expect(views.every(view=>view.maxSamples===16)).toBe(true)
     expect(timestamps).toEqual(Array.from({ length: 20 }, (_, i) => i * 500000))
+  })
+  it('forwards the selected sampling ceiling and rejects invalid values before rendering',async()=>{
+    const m=await manifest()
+    vi.stubGlobal('VideoFrame',class {close(){}})
+    mock.add.mockResolvedValue(undefined);mock.render.mockResolvedValue({})
+    const request={window:expmapVideoDefaults(m),width:16,height:12,fps:1,codec:'avc' as const,destination:{kind:'buffer' as const},gpuRenderer:{render:mock.render},maxSamples:256}
+    await exportExpmapVideo({manifest:m},request)
+    expect(mock.render.mock.calls.every(([view])=>view.maxSamples===256)).toBe(true)
+    mock.render.mockClear()
+    await expect(exportExpmapVideo({manifest:m},{...request,maxSamples:32})).rejects.toThrow('Prélèvements')
+    expect(mock.render).not.toHaveBeenCalled()
   })
   it('cancels after the last complete frame without altering its document', async () => {
     const m = await manifest(), original = JSON.stringify(m), abort = new AbortController()

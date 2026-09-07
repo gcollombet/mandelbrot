@@ -1,37 +1,35 @@
-# Implementation record — 2026-09-06
+# Implementation record — 2026-09-08
 
-The sole document format is v4 tiled TIFF. Historical PNG/WebM codecs, converters, atlas packing, CPU reconstruction, shrinking tail and GPU page-request/readback machinery have been removed. Existing disk files are untouched; the catalogue uses a fresh IndexedDB namespace.
+## Portable document and production
 
-## Execution path
+The sole format is manifest v5 in a ZIP64 STORE .expmap file: manifest.json (recipe, codec quality, thumbnail, domain, checksums) and doubling-N.webp. zip.js replaces UTIF; old TIFF/Deflate production and tests were removed. Existing files are untouched and no migration reader is included. The catalogue uses a fresh namespace.
 
-- `ExpmapPanel.vue` → `create.ts` → `producer.ts` → Engine direct ExpMap projection. Converged GPU RGBA blocks are copied by scanline into a single octave tile. Native Deflate compresses it; `store.ts` closes and verifies the TIFF tile before publishing an A/B checkpoint.
-- `plan.ts` and `octaves.ts`: constant angle/log-depth grid, two-sample halos, one doubling per tile, twelve inner doublings beyond each navigable view. A single computed center color covers the subpixel remainder. The user scale domain is unchanged.
-- `tiff.ts`: UTIF writes standard tiled-image metadata; browser CompressionStream/DecompressionStream perform Deflate. File grouping follows classic TIFF capacity rather than a fixed doubling count; index space scales with tile count. An independent UTIF decoder validates complete generated fixtures in tests; production does not use this image decoder.
-- `gpuRenderer.ts` → `tileCache.ts` → exact TIFF payload range → native decode → direct RGBA texture upload. Fourteen rgba8unorm-srgb layers, deterministic modulo addressing, at most one pending decode. Obsolete prefetch results cannot overwrite the new window.
-- `expmap_reconstruct.wgsl`: one fullscreen triangle, logarithmic projection and hardware linear-light bilinear interpolation. No atomics, request bitsets, GPU readback, CPU pixel reconstruction or intermediary output texture.
-- `gpuPlayer.ts`: latest-request/generation protection. `video.ts`: ordered complete canvas frames passed to VideoFrame and the streaming MP4 sink. `ExpmapVideoPanel.vue` releases the interactive cache before allocating the export cache.
+ExpmapPanel → ExpmapStore.working (internal OPFS checkpoints) → create → producer → Engine direct ExpMap projection. The producer assembles a complete doubling. Its byte buffer transfers to imageEncoder.worker, which uses a clamped ImageData view, an opaque OffscreenCanvas and native WebP encoding. Meanwhile, the GPU produces the next doubling. One encoder/write job and one assembly tile bound the queue; native canvas/codec buffers are additional. The writer closes and verifies each independent image before publishing A/B metadata. Compute (including preparation/readback), encode, write/verification and blocked-wait times are reported separately.
 
-## Memory and limitations
+At completion or controlled interruption, zip.js streams the internal image files into the chosen .expmap destination, without global Blob assembly or repeated copying of an ever-growing file. The closed archive index/manifest is checked before removing temporary files. A failed finalization retains OPFS checkpoints. Reopening an incomplete portable file stages its existing images with progress and cancellation, then resumes from the first unpublished doubling. File-operation locks cover calculation, finalization and cleanup across tabs. Abrupt tab termination may leave the chosen external file unfinished; checkpoints depend on browser storage remaining available.
 
-At 3840×2160, density one: 13856×1536 RGBA per tile; fourteen layers occupy about 1.11 GiB. This excludes the engine and encoder. Native decode uses one destination tile plus compressed input and transient browser buffers. Creation also holds one assembly tile. One raw tile is capped at 128 MiB; texture dimensions and GPU allocation errors are checked. No silent density reduction.
+## Reading, video, thumbnails and image export
 
-The cold first view must read/decode/upload its required tiles. Fully resident frames perform no new tile I/O. Sequential movement prefetches the next doubling. A seek may wait for the single in-flight decode and reload its new window. Native Deflate and filesystem I/O remain CPU/browser work, not GPU operations.
+ExpmapGpuRenderer → ExpmapTileCache → indexed ZIP entry → checksum → createImageBitmap → copyExternalImageToTexture. Fourteen rgba8unorm-srgb layers retain the existing modulo addressing and reconstruction shader. Native bitmaps close after upload or abandonment. Resident frames require no further reads or decoding. The video renderer uses this same path and ordered frames; the MP4 sink is unchanged.
 
-Incomplete TIFFs are resumable checkpoints; standalone image viewing applies once their tiles are complete. Hash verification is lazy per payload so opening a deep document does not scan all image bytes. Compression ratio and target-hardware throughput are not measured.
+The worker creates an initial preview from baked pixels. At completion the UI replaces it with a reconstructed baked-camera thumbnail when GPU reconstruction succeeds. Both are portable through manifest metadata. The interactive fractal canvas is no longer used as a thumbnail source.
+
+Whole-image export exposes width, height, PNG/JPEG/WebP and quality. It assembles the angle/log-depth map from independent native images, excluding halos and padding, including the stored inner coverage. One source image is decoded at a time. Output is explicitly capped at 32 megapixels, 16383 per WebP side or 32767 for other formats. It uses native canvas filtering, distinct from the video shader’s linear-light filter. Exported PNG adds no further loss to already lossy stored colors.
+
+## Numerical behavior and limits
+
+The direct sample grid, twelve inner doublings, precise user domain, subpixel center color and continuous-radial-v1 material correction are preserved. The compute shader applies continuous scale before material clipping/accumulation; no color shader correction was introduced here.
+
+4K density one remains 13856×1536 pixels per tile and about 1.11 GiB for fourteen GPU layers, excluding engine/output/codec resources. Production has two raw tile ownership slots (about 162.4 MiB at that resolution), plus codec surfaces and compressed data. Native WebP dimensions and a 128 MiB raw-tile cap are checked. Quality defaults to 0.90 and is restored from the manifest during resume. Lossy compression can alter fine detail and shared halos. No speed, compression ratio or visual-fidelity improvement is claimed measured on hardware.
 
 ## Validation
 
-- `npx vue-tsc -b`: passed.
-- `npx vitest run tests/unit`: 103 files, 702 tests passed.
-- Naga: direct production shader and reconstruction shader passed.
-- OpenSpec strict validation: passed.
-- No Rust changes in this revision, no WASM rebuild needed.
-- No Playwright, browser/GPU benchmark or target-hardware visual/performance claim. Task 4.4 remains pending explicit confirmation.
+Unit tests cover ZIP STORE read/write, portable metadata, lazy image hashes, failed checkpoint publication, failed final destination and retry, interrupted archive staging, asynchronous encoding overlap/backpressure/failure, quality/force preservation, native bitmap release, native encoder fallback/type contracts, export row coverage and limits, plus existing geometry/player/video tests. Native codec tests use API doubles; they do not measure actual browser WebP quality or speed.
 
-## Removal of fixed TIFF grouping
+Validation passed: 108 unit files / 726 tests, TypeScript, Vite worker bundling, both Naga shaders and strict OpenSpec. No Rust changes, Playwright or target-GPU benchmark. Hardware visual/performance validation remains task 4.4, pending explicit authorization.
 
-The thirteen-doubling file cap is removed. Grouping now depends on a conservative compressed-size bound and classic TIFF 32-bit offsets/dimensions. Header storage grows with the tile index. The decoder, prefetch and fourteen GPU slots are unchanged. Targeted validation: 91 ExpMap tests passed, including standard decoding of a fifteen-tile TIFF, metadata beyond 20 KB, and checkpoint recovery across the capacity-driven file boundary. Type checking and strict OpenSpec validation passed.
+## Adaptive video pixel integration
 
-## Player transport and persistent draft
+Video defaults to a 16-tap ceiling, selectable as 1/4/9/16. The view passes this ceiling through an 80-byte uniform block to the shared reconstruction shader. A conservative polar density determines a square midpoint grid within each output pixel; counts/positions are fixed across frames at fixed output dimensions. Texture samples and the decoded center color are integrated in linear light, then encoded once. Interactive views retain their one-tap default. No extra cache layers or field computation is introduced.
 
-Added visible player chrome, play/pause, timeline, five-second seeks, restart, speed, reverse, repeat, rotation and fullscreen. Escape exits; hidden pages pause. Automatic playback waits for the current GPU image rather than repeatedly aborting it. Creation inputs now live in a shared reactive draft with localStorage persistence; panel remounts no longer replace exact endpoints with the current camera. Validation: 99 ExpMap tests passed and TypeScript passed; no browser visual validation, Playwright or GPU benchmark performed.
+Validation: 15 ExpMap test files / 117 tests passed, TypeScript, Naga and strict OpenSpec passed. Tests cover the least-dense-axis uniform contract, ceilings/defaults and video forwarding/rejection. Actual GPU anti-aliasing quality and throughput remain unmeasured.

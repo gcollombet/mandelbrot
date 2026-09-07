@@ -1,7 +1,7 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { ExpmapGpuPlayer } from '../../src/expmap/gpuPlayer'
 import { fixtureManifest } from './expmapFixtures'
-import type { ExpmapDirectoryStore } from '../../src/expmap/store'
+import type { ExpmapStore } from '../../src/expmap/store'
 const mock = vi.hoisted(()=>({create:vi.fn()}))
 vi.mock('../../src/expmap/gpuRenderer',()=>({ExpmapGpuRenderer:{create:mock.create}}))
 afterEach(()=>{vi.unstubAllGlobals();mock.create.mockReset()})
@@ -12,7 +12,7 @@ it('retains the latest view while GPU source initialization is pending', async()
   const renderer={render:vi.fn(async()=>({})),dispose:vi.fn()}, publish=vi.fn(), error=vi.fn()
   vi.stubGlobal('createImageBitmap',vi.fn(async()=>({close:vi.fn()})))
   const player=new ExpmapGpuPlayer(publish,error)
-  const setup=player.setSource({} as ExpmapDirectoryStore,await fixtureManifest())
+  const setup=player.setSource({} as ExpmapStore,await fixtureManifest())
   player.request(view);player.request({...view,angle:1})
   ready(renderer);expect(await setup).toBe(true)
   await vi.waitFor(()=>expect(publish).toHaveBeenCalledOnce())
@@ -24,7 +24,7 @@ it('disposes an obsolete initializing document without publishing it', async()=>
   mock.create.mockReturnValue(new Promise(resolve=>{ready=resolve}))
   const renderer={render:vi.fn(),dispose:vi.fn()},publish=vi.fn()
   const player=new ExpmapGpuPlayer(publish,vi.fn())
-  const setup=player.setSource({} as ExpmapDirectoryStore,await fixtureManifest())
+  const setup=player.setSource({} as ExpmapStore,await fixtureManifest())
   player.dispose();ready(renderer)
   expect(await setup).toBe(false);expect(renderer.dispose).toHaveBeenCalledOnce();expect(publish).not.toHaveBeenCalled()
 })

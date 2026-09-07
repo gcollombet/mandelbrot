@@ -1,7 +1,7 @@
 import { ExpmapGpuRenderer } from './gpuRenderer'
 import type { ExpmapView } from './renderer'
 import type { ExpmapManifest } from './manifest'
-import type { ExpmapDirectoryStore } from './store'
+import type { ExpmapStore } from './store'
 /** Latest view wins; completed GPU images alone reach the visible canvas. */
 export class ExpmapGpuPlayer {
   private renderer: ExpmapGpuRenderer | null = null
@@ -13,7 +13,7 @@ export class ExpmapGpuPlayer {
   private publish: (image: ImageBitmap, view: ExpmapView) => void
   private failure: (error: unknown) => void
   constructor(publish: (image: ImageBitmap, view: ExpmapView) => void, failure: (error: unknown) => void) { this.publish=publish; this.failure=failure }
-  async setSource(store: ExpmapDirectoryStore, manifest: ExpmapManifest, device?: GPUDevice) {
+  async setSource(store: ExpmapStore, manifest: ExpmapManifest, device?: GPUDevice) {
     this.dispose(); const generation=this.generation
     const renderer=await ExpmapGpuRenderer.create(store,manifest,device)
     if (generation!==this.generation) { renderer.dispose(); return false }

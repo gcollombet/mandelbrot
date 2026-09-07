@@ -997,9 +997,22 @@ fn der_to_polar(m: vec2<f32>, s: f32) -> vec2<f32> {
 // The Mu slider is therefore floored at 4 in Settings.vue; the 1.000002 clamp
 // below only catches a preset that predates that floor, and it clamps rather
 // than fixes — a mu < 4 preset still gets a corrupt height field.
+// Private to a compute invocation: every continuation of this texel uses the
+// same radial appearance scale. Numerical orbit coordinates keep their anchor.
+var<private> expmapAppearanceLogScaleOffset: f32 = 0.0;
+
+fn appearance_log_texel_adjustment() -> f32 {
+  if (brush.expmapMode < 0.5) { return 0.0; }
+  // Preserve the relief gain of the usual 512-square producer, independently
+  // of the physical block dimensions. Only the radius now varies continuously.
+  let virtualTexel = 2.0 * sqrt(2.0) / 512.0;
+  let physicalTexel = 2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / brush.neutralSide;
+  return expmapAppearanceLogScaleOffset + log(virtualTexel / physicalTexel);
+}
+
 fn distance_height(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
   let logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
-  let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - log(max(mandelbrot.scale, 1e-30));
+  let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - log(max(mandelbrot.scale, 1e-30)) - expmapAppearanceLogScaleOffset;
   return clamp(-logScreenDistance, -64.0, 64.0);
 }
 
@@ -1007,7 +1020,7 @@ fn distance_height(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
 // recomposed from the shared exponent (log(mantissa) + scaleExp·ln2).
 fn distance_height_deep(z: vec2<f32>, derPolar: vec2<f32>, scaleExp: i32) -> f32 {
   let logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
-  let logScale = log(max(mandelbrot.scale, 1e-30)) + f32(scaleExp) * LN2;
+  let logScale = log(max(mandelbrot.scale, 1e-30)) + f32(scaleExp) * LN2 + expmapAppearanceLogScaleOffset;
   let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - logScale;
   return clamp(-logScreenDistance, -64.0, 64.0);
 }
@@ -1045,7 +1058,8 @@ fn analytic_terminal_geometry(
   if (!(logZ > 0.0)) { return vec3<f32>(0.0); }
   let logTexelDelta = log(max(mandelbrot.scale, 1e-30))
     + f32(deepScaleExp) * LN2
-    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / brush.neutralSide);
+    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / brush.neutralSide)
+    + appearance_log_texel_adjustment();
 
   let invDer = vec2<f32>(derM.x, -derM.y) / der2;
   let invZ = vec2<f32>(z.x, -z.y) / z2;
@@ -1683,7 +1697,8 @@ fn orbit_metrics_avg_dir(m: OrbitMetrics) -> vec2<f32> {
 fn orbit_log_texel_delta(deepScaleExp: i32) -> f32 {
   return log(max(mandelbrot.scale, 1e-30))
     + f32(deepScaleExp) * LN2
-    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / brush.neutralSide);
+    + log(2.0 * sqrt(mandelbrot.aspect * mandelbrot.aspect + 1.0) / brush.neutralSide)
+    + appearance_log_texel_adjustment();
 }
 
 fn escape_fraction(z: vec2<f32>, muLimit: f32) -> f32 {
@@ -4181,6 +4196,12 @@ fn cs_main(
     local_gid.y + u32(brush.dispatchOriginY),
     local_gid.z,
   );
+  // The block anchor already includes its global starting row. Adding the
+  // local row produces the same scale on both sides of block/octave halos.
+  expmapAppearanceLogScaleOffset = 0.0;
+  if (brush.expmapMode > 0.5 && brush.expmapMode < 1.5) {
+    expmapAppearanceLogScaleOffset = -f32(gid.y) * brush.expmapRhoStep;
+  }
   if (lidx == 0u) {
     atomicStore(&wgCount, 0u);
     if (ENABLE_WORK_STATS) {

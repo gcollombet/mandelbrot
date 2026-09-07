@@ -135,7 +135,7 @@ describe('ExpMap appearance eligibility', () => {
 function manifest(): ExpmapManifest {
   const projection = planExpmap({ domain: { cx: '-0.123456789012345678901', cy: '0', startScale: '1e-1000', endScale: '1e-1100' }, width: 64, height: 48, density: 1 })
   return {
-    version: 4, forceRender: false, documentId: 'fixture', generation: 0, state: 'preparing', createdAt: '2026-09-05T00:00:00Z',
+    version: 5, name: 'Fixture', quality:0.9, forceRender: false, documentId: 'fixture', generation: 0, state: 'preparing', createdAt: '2026-09-05T00:00:00Z',
     scaleConvention: 'VideoPathLocation.scale', zoomReferenceScale: '1e0',
     projection, octaves: planExpmapOctaves(projection),
     appearance: { identity: 'sha256:' + 'a'.repeat(64), json: '{}', resources: [] },
@@ -159,7 +159,7 @@ describe('ExpMap manifest contract', () => {
     expect(restored.projection.domain).toEqual(source.projection.domain)
   })
   it('refuses color substitution, altered projection, and empty completion', () => {
-    const a = manifest(); a.color = { ...a.color, chroma: '420' } as unknown as typeof a.color
+    const a = manifest(); a.color = { ...a.color, chroma: '444' } as unknown as typeof a.color
     expect(() => validateExpmapManifest(a)).toThrow('codec/colorimetry')
     const b = manifest(); b.projection.rhoStep *= 2
     expect(() => validateExpmapManifest(b)).toThrow('projection')

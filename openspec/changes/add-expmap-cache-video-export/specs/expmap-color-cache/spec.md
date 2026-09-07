@@ -11,20 +11,31 @@ Le créateur SHALL analyser tous les stops et les effets actifs. En mode normal,
 - **WHEN** un shading dépendant de la vue est actif
 - **THEN** une explication indique pourquoi la cuisson RGB est inéligible
 
-### Requirement: Single tiled TIFF format
-Le document SHALL utiliser uniquement le manifeste v4 et des TIFF RGBA8 opaques sRGB à tuiles Deflate indépendantes. Une tuile SHALL couvrir un doublement. Le regroupement SHALL être calculé selon les limites d’offset et de dimensions du TIFF classique, sans limite fixe de doublements. Le codec SHALL utiliser les flux Deflate natifs ; le lecteur SHALL charger une plage de fichier par tuile sans décompresser le TIFF entier. Les anciens formats SHALL être refusés sans conversion ni lecteur historique.
+### Requirement: Single portable image container
+Le document SHALL utiliser uniquement le manifeste v5 dans un fichier ZIP64 STORE .expmap, choisi via Enregistrer sous, avec métadonnées, miniature et une image WebP native par doublement. La qualité SHALL être réglable et enregistrée pour la reprise. Les images SHALL être indexées et vérifiées individuellement, sans chargement du document entier. Les anciens formats SHALL être refusés sans migration.
 
-#### Scenario: Individual tile read
-- **WHEN** le lecteur a besoin d'un doublement absent de son tampon
-- **THEN** il lit et vérifie seulement le payload indexé de cette tuile, le décompresse et le transfère en RGBA au GPU
+#### Scenario: Individual image read
+- **WHEN** le lecteur a besoin d'un doublement absent
+- **THEN** il lit cette entrée, vérifie son hash, la décode nativement et importe son bitmap au GPU
 
 #### Scenario: Interrupted production
-- **WHEN** l'écriture ou la publication est interrompue
-- **THEN** la reprise conserve les tuiles publiées et recalcule uniquement la tuile inachevée et la suite
+- **WHEN** le calcul est interrompu
+- **THEN** les images complètes sont conservées et le fichier est finalisé sans recommencer leurs calculs
 
-#### Scenario: Old cache selected
-- **WHEN** un manifeste d'un ancien format est attaché
-- **THEN** il est refusé et ses fichiers ne sont pas modifiés
+#### Scenario: Finalization failure
+- **WHEN** la copie finale échoue ou l'onglet se ferme
+- **THEN** les checkpoints internes déjà publiés restent récupérables depuis la bibliothèque, sous réserve de disponibilité du stockage du navigateur
+
+### Requirement: Bounded asynchronous encoding
+Le producteur SHALL transférer les pixels à un worker utilisant le codec WebP natif, puis calculer le doublement suivant pendant l'encodage et l'écriture du précédent. Il SHALL conserver au plus une sauvegarde en cours et une tuile d'assemblage, hors surfaces internes du codec. Les écritures/checkpoints SHALL rester ordonnés et les erreurs SHALL remonter avant publication complète.
+
+#### Scenario: Slow storage
+- **WHEN** le doublement suivant est rempli avant la sauvegarde précédente
+- **THEN** la production attend sans allonger la file ni perdre les données
+
+#### Scenario: Encoding failure
+- **WHEN** l'encodeur échoue
+- **THEN** le producteur interrompt la suite, conserve le dernier checkpoint et libère le worker
 
 ### Requirement: Regular twelve doubling coverage
 Toutes les tuiles SHALL partager une grille angle × profondeur logarithmique et des halos filtrables. Le document SHALL couvrir douze doublements internes après chaque position utilisateur, sans étendre le domaine navigable. Le reste central SHALL utiliser une couleur du centre précalculée, sans disque ou logo. Le rayon de fermeture SHALL rester inférieur ou égal à un pixel de référence.
@@ -65,3 +76,14 @@ Une option « Forcer le rendu — expérimental », désactivée par défaut, SH
 #### Scenario: Invalid data in experimental mode
 - **WHEN** une palette invalide ou une valeur non finie est fournie
 - **THEN** la cuisson reste refusée
+
+### Requirement: Continuous baked material scale
+Le producteur SHALL dissocier l’ancre de calcul numérique de l’échelle d’apparence. Pour un même point, la hauteur, les gradients et la courbure utilisés pour les matériaux SHALL employer une convention radiale continue indépendante du bloc ou doublement propriétaire. La correction SHALL précéder l’écrêtage et SHALL inclure les gradients orbitaux et les chemins shallow/deep.
+
+#### Scenario: Shared halo sample
+- **WHEN** deux blocs ou deux tuiles calculent un même échantillon dans leurs halos
+- **THEN** leurs échelles d’apparence concordent à la précision numérique près
+
+#### Scenario: Old interrupted material cache
+- **WHEN** un document incomplet produit sans la convention continue est repris
+- **THEN** la reprise est refusée avec une demande de nouveau calcul ; les documents d’anciennes versions sont refusés

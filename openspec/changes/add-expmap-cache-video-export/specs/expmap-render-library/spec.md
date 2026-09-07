@@ -21,8 +21,8 @@ Le manifeste SHALL conserver les échelles canoniques de début et de fin, centr
 ### Requirement: Shared selection and file recovery
 Le catalogue SHALL conserver un localisateur de données et vérifier identité, version et accès à l'ouverture. Il SHALL permettre rattachement d'un document déplacé. Les gros blocs SHALL rester hors du catalogue de métadonnées.
 
-#### Scenario: Missing or inaccessible folder
-- **WHEN** le dossier ne peut plus être lu
+#### Scenario: Missing or inaccessible file
+- **WHEN** le fichier ne peut plus être lu
 - **THEN** l'entrée reste visible avec son état et permet de renouveler l'accès ou rattacher le bon document, sans recalcul implicite
 
 #### Scenario: Use in video
@@ -34,7 +34,7 @@ Le catalogue SHALL conserver un localisateur de données et vérifier identité,
 - **THEN** les fichiers du rendu ne sont pas supprimés implicitement
 
 ### Requirement: Persistent creation draft
-Les bornes exactes, le centre, le nom, la résolution, la densité et le choix expérimental du formulaire SHALL être conservés indépendamment du montage des fenêtres. Ils SHALL être sauvegardés localement et restaurés au rechargement, sans conversion des coordonnées en nombre machine. Une modification de la caméra SHALL NOT remplacer un brouillon existant ; seuls les boutons de capture explicites SHALL mettre à jour les bornes depuis la vue.
+Les bornes exactes, le centre, le nom, la résolution, la densité, la qualité WebP et le choix expérimental du formulaire SHALL être conservés indépendamment du montage des fenêtres. Ils SHALL être sauvegardés localement et restaurés au rechargement, sans conversion des coordonnées en nombre machine. Une modification de la caméra SHALL NOT remplacer un brouillon existant ; seuls les boutons de capture explicites SHALL mettre à jour les bornes depuis la vue.
 
 #### Scenario: Switch settings windows
 - **WHEN** le panneau ExpMap est détruit puis recréé après utilisation d’une autre fenêtre
@@ -43,3 +43,14 @@ Les bornes exactes, le centre, le nom, la résolution, la densité et le choix e
 #### Scenario: Local storage unavailable
 - **WHEN** le navigateur refuse la sauvegarde locale
 - **THEN** le brouillon reste partagé en mémoire pendant la session
+
+### Requirement: Portable thumbnail and whole image export
+La miniature SHALL provenir des pixels cuits et être conservée dans le conteneur et à l'import. Le panneau SHALL distinguer lecture, vidéo et export image entière. L'export image SHALL proposer résolution et format PNG/JPEG/WebP sans recalcul, avec une limite explicite de 32 mégapixels et les limites du codec.
+
+#### Scenario: Import in another library
+- **WHEN** un fichier .expmap est importé dans une bibliothèque vide
+- **THEN** sa miniature intégrée et son nom sont affichés
+
+#### Scenario: Whole map image
+- **WHEN** une image entière est exportée
+- **THEN** elle couvre angle et profondeur des doublements stockés sans padding, à la résolution choisie, avec une seule image source décodée à la fois

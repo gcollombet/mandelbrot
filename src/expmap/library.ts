@@ -1,14 +1,13 @@
 import { ref } from 'vue'
-import { tiffFileGroup } from './tiff'
 import type { ExpmapManifest } from './manifest'
-import { ExpmapDirectoryStore } from './store'
+import { ExpmapStore } from './store'
 
 export type ExpmapLibraryEntry = {
   id: string; name: string; thumbnail: string; createdAt: string; updatedAt: string
   state: 'preparing' | 'ready' | 'interrupted' | 'missing' | 'incompatible'
-  manifestVersion: 4; forceRender: boolean; startScale: string; endScale: string; cx: string; cy: string
+  manifestVersion: 5; forceRender: boolean; startScale: string; endScale: string; cx: string; cy: string
   width: number; height: number; density: number; bytes: number; appearanceIdentity: string
-  handle: FileSystemDirectoryHandle
+  handle: FileSystemFileHandle
 }
 export const expmapLibraryEntries = ref<ExpmapLibraryEntry[]>([])
 export const selectedExpmapDocumentId = ref<string | null>(null)
@@ -16,7 +15,7 @@ export const selectedExpmapDocumentId = ref<string | null>(null)
 let database: Promise<IDBDatabase> | undefined
 function db(): Promise<IDBDatabase> {
   return database ??= new Promise((resolve, reject) => {
-    const request = indexedDB.open('mandelbrot-expmap-tiff-library', 1)
+    const request = indexedDB.open('mandelbrot-expmap-file-library', 1)
     request.onupgradeneeded = () => request.result.createObjectStore('documents', { keyPath: 'id' })
     request.onsuccess = () => resolve(request.result)
     request.onerror = () => { database = undefined; reject(request.error) }
@@ -35,7 +34,7 @@ export async function refreshExpmapLibrary() {
   expmapLibraryEntries.value = await transaction('readonly', store => store.getAll())
 }
 export async function saveExpmapLibraryEntry(entry: ExpmapLibraryEntry) {
-  if (!entry.id || !entry.name.trim() || entry.thumbnail.length > 128 * 1024) throw new Error('Invalid catalogue metadata')
+  if (!entry.id || !entry.name.trim() || entry.name.length > 200 || entry.thumbnail.length > 128 * 1024) throw new Error('Invalid catalogue metadata')
   await transaction('readwrite', store => store.put({ ...entry, name: entry.name.trim() }))
   await refreshExpmapLibrary()
 }
@@ -49,24 +48,32 @@ export async function renameExpmapLibraryEntry(id: string, name: string) {
   if (!entry) throw new Error('Document absent du catalogue')
   await saveExpmapLibraryEntry({ ...entry, name, updatedAt: new Date().toISOString() })
 }
-export function entryFromManifest(manifest: ExpmapManifest, handle: FileSystemDirectoryHandle, name: string, thumbnail = ''): ExpmapLibraryEntry {
+export function entryFromManifest(manifest: ExpmapManifest, handle: FileSystemFileHandle, name: string, thumbnail = ''): ExpmapLibraryEntry {
   const plan = manifest.projection
-  return { id: manifest.documentId, name, thumbnail, createdAt: manifest.createdAt, updatedAt: new Date().toISOString(),
+  return { id: manifest.documentId, name, thumbnail:manifest.thumbnail??thumbnail, createdAt: manifest.createdAt, updatedAt: new Date().toISOString(),
     state: manifest.state === 'complete' ? 'ready' : manifest.state, manifestVersion: manifest.version, forceRender: manifest.forceRender,
     ...plan.domain, width: plan.width, height: plan.height, density: plan.density,
-    bytes: manifest.tiles.reduce((sum, tile) => sum + tile.length, 0) + manifest.tiles.reduce((sum, tile) => { const group = tiffFileGroup(manifest.octaves, tile.index); return sum + (tile.index === group.start ? group.headerBytes : 0) }, 0), appearanceIdentity: manifest.appearance.identity, handle }
+    bytes: manifest.tiles.reduce((sum, tile) => sum + tile.length, 0), appearanceIdentity: manifest.appearance.identity, handle }
 }
 export async function openExpmapLibraryEntry(entry: ExpmapLibraryEntry) {
-  const permission = entry.handle as FileSystemDirectoryHandle & {
+  const permission = entry.handle as FileSystemFileHandle & {
     queryPermission(options: { mode: 'read' }): Promise<PermissionState>
     requestPermission(options: { mode: 'read' }): Promise<PermissionState>
   }
   try {
-    if (permission.queryPermission && await permission.queryPermission({ mode: 'read' }) !== 'granted') {
-      if (await permission.requestPermission({ mode: 'read' }) !== 'granted') throw new DOMException('Accès au dossier refusé ; rattacher le document ou renouveler sa permission.', 'NotAllowedError')
+    let store: ExpmapStore, manifest:ExpmapManifest
+    try {
+      const root=await navigator.storage.getDirectory(),parent=await root.getDirectoryHandle('expmap-work'),directory=await parent.getDirectoryHandle(entry.id)
+      store=new ExpmapStore(directory,entry.handle)
+      manifest=await store.open(entry.id)
+    } catch(error) {
+      if(!(error instanceof DOMException && error.name==='NotFoundError'))throw error
+      if (permission.queryPermission && await permission.queryPermission({ mode: 'read' }) !== 'granted') {
+        if (await permission.requestPermission({ mode: 'read' }) !== 'granted') throw new DOMException('Accès au fichier refusé ; rattacher le document ou renouveler sa permission.', 'NotAllowedError')
+      }
+      store=await ExpmapStore.fromFile(entry.handle)
+      manifest=await store.open(entry.id)
     }
-    const store = new ExpmapDirectoryStore(entry.handle)
-    const manifest = await store.open(entry.id)
     await saveExpmapLibraryEntry(entryFromManifest(manifest, entry.handle, entry.name, entry.thumbnail))
     return { store, manifest }
   } catch (error) {
@@ -75,15 +82,20 @@ export async function openExpmapLibraryEntry(entry: ExpmapLibraryEntry) {
     throw error
   }
 }
-export async function attachExpmapDocument(handle: FileSystemDirectoryHandle, expectedId?: string) {
-  const manifest = await new ExpmapDirectoryStore(handle).open(expectedId)
+export async function attachExpmapDocument(handle: FileSystemFileHandle, expectedId?: string) {
+  const manifest = await (await ExpmapStore.fromFile(handle)).open(expectedId)
   const previous = expmapLibraryEntries.value.find(entry => entry.id === manifest.documentId)
-  await saveExpmapLibraryEntry(entryFromManifest(manifest, handle, previous?.name ?? handle.name, previous?.thumbnail))
+  await saveExpmapLibraryEntry(entryFromManifest(manifest, handle, previous?.name ?? manifest.name, previous?.thumbnail))
   return manifest.documentId
 }
 
-export async function pickExpmapDirectory(mode: 'read' | 'readwrite'): Promise<FileSystemDirectoryHandle> {
-  const picker = (window as Window & { showDirectoryPicker?: (options: { mode: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle> }).showDirectoryPicker
-  if (!picker) throw new Error('Un navigateur prenant en charge les dossiers locaux est requis pour les documents ExpMap.')
-  return picker({ mode })
+export async function pickExpmapFile(mode:'read'|'readwrite',name='Document ExpMap'):Promise<FileSystemFileHandle> {
+  const api=window as Window & {showSaveFilePicker?:(options:unknown)=>Promise<FileSystemFileHandle>;showOpenFilePicker?:(options:unknown)=>Promise<FileSystemFileHandle[]>}
+  const types=[{description:'Document ExpMap',accept:{'application/zip':['.expmap']}}]
+  if(mode==='readwrite') {
+    if(!api.showSaveFilePicker)throw new Error('Enregistrement de fichiers locaux indisponible dans ce navigateur')
+    return api.showSaveFilePicker({suggestedName:`${name}.expmap`,types})
+  }
+  if(!api.showOpenFilePicker)throw new Error('Ouverture de fichiers locaux indisponible dans ce navigateur')
+  return (await api.showOpenFilePicker({types,multiple:false}))[0]
 }
