@@ -30,6 +30,18 @@ Validation passed: 108 unit files / 726 tests, TypeScript, Vite worker bundling,
 
 ## Adaptive video pixel integration
 
-Video defaults to a 16-tap ceiling, selectable as 1/4/9/16. The view passes this ceiling through an 80-byte uniform block to the shared reconstruction shader. A conservative polar density determines a square midpoint grid within each output pixel; counts/positions are fixed across frames at fixed output dimensions. Texture samples and the decoded center color are integrated in linear light, then encoded once. Interactive views retain their one-tap default. No extra cache layers or field computation is introduced.
+Video defaults to a 16-tap ceiling, selectable as 1/4/9/16. The view passes this ceiling through an 80-byte uniform block to the shared reconstruction shader. A conservative polar density determines a square midpoint grid within each output pixel; counts/positions are fixed across frames at fixed output dimensions. Texture samples and the decoded center color are integrated in linear light, then encoded once. The renderer defaults to one tap when no override is supplied; the interactive surface now explicitly selects 16 by default. No extra cache layers or field computation is introduced.
 
 Validation: 15 ExpMap test files / 117 tests passed, TypeScript, Naga and strict OpenSpec passed. Tests cover the least-dense-axis uniform contract, ceilings/defaults and video forwarding/rejection. Actual GPU anti-aliasing quality and throughput remain unmeasured.
+
+## Physical player resolution and AA controls
+
+The interactive surface now fits physical pixels (CSS dimensions × devicePixelRatio), capped by the document, and reacts to surface resize and display-density changes. Its header reports the dimensions and AA ceiling of the last published frame. The AA selector exposes 1 through 256 using the same allowed ceilings and renderer contract as video. Targeted tests cover Retina/fractional-DPR sizing, source caps and AA forwarding while a source is initializing; TypeScript and OpenSpec passed. No browser/GPU visual or performance measurements were made.
+
+## Worker loading and incremental prefetch uploads
+
+The shared GPU renderer now owns an ExpmapImageReader worker. ZIP/OPFS payload reads, CRC/SHA checks and native WebP decoding execute there. Only a transferable ImageBitmap crosses back; one request and one bitmap remain in flight. Worker disposal rejects pending work and stale replies close their bitmap.
+
+Uploads split into at most 4 MiB bands and wait for GPU completion between copies. Prefetch yields 16 ms before each band; required tiles skip these pacing delays. The circular cache invalidates a reused layer before its first copy and marks it resident only after the final band completes. Seeking outside the pending tile’s window aborts future bands without poisoning the new required load. No cache enlargement or per-frame profiling was added. Native per-region import performance is browser-dependent; stutter reduction has not been measured on hardware.
+
+Validation: 127 ExpMap tests, TypeScript, Vite (including both image workers), strict OpenSpec and diff whitespace checks passed. New tests cover band budgets/coverage, promotion and cancellation, partial residency, seek cancellation, worker protocol/ownership/errors. No Playwright or GPU benchmark.

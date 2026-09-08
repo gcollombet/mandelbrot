@@ -20,3 +20,12 @@ export function expmapFilterUniform(layout:ExpmapOctaves,maxSamples=1) {
   validateExpmapSamples(maxSamples)
   return [Math.sqrt(maxSamples),Math.min(layout.angularSamples/(2*Math.PI),layout.rowsPerOctave/Math.LN2),0,0]
 }
+
+/** Fit physical display pixels, retaining the document's resolution/coverage cap. */
+export function expmapPlayerResolution(plan:ExpmapPlan,cssWidth:number,cssHeight:number,devicePixelRatio:number) {
+  const ratio=Number.isFinite(devicePixelRatio)&&devicePixelRatio>0?devicePixelRatio:1
+  const factor=Math.min(1,Math.max(1,cssWidth)*ratio/plan.width,Math.max(1,cssHeight)*ratio/plan.height)
+  const height=Math.max(1,Math.floor(plan.height*factor))
+  const width=Math.max(1,Math.floor(height*plan.width/plan.height))
+  return {width,height}
+}

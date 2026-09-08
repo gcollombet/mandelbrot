@@ -1,5 +1,5 @@
 import {describe,it,vi,expect,afterEach} from 'vitest'
-import {decodeImageTile} from '../../src/expmap/imageCodec'
+import {decodeImageTile} from '../../src/expmap/imageDecode'
 afterEach(()=>vi.unstubAllGlobals())
 describe('native WebP image ownership',()=>{
   it('closes wrong-sized images instead of uploading them',async()=>{

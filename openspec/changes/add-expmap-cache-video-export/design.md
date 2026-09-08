@@ -72,6 +72,16 @@ L’export image parcourt les doublements nécessaires à la résolution choisie
 
 ### Multisampling spatial adaptatif de la vidéo
 
-Le plafond vidéo vaut 16 par défaut, sélectionnable parmi 1/4/9/16/36/64/144/256. Le lecteur interactif et les miniatures restent à un prélèvement par défaut. Le contrat de vue transporte ce plafond vers le renderer partagé ; il ne modifie pas le document.
+Le plafond vidéo vaut 16 par défaut, sélectionnable parmi 1/4/9/16/36/64/144/256. Le lecteur interactif expose le même réglage, à 16 par défaut ; les miniatures restent à un prélèvement. Le contrat de vue transporte ce plafond vers le renderer partagé ; il ne modifie pas le document.
 
 Soit s=hauteurRéférence/hauteurSortie et r le rayon au centre du pixel. La densité conservatrice vaut min(Nθ/(2π),Nρ/ln(2))×s/(r+s/√2). Le côté de grille vaut floor(densité), borné entre 1 et sqrt(plafond). Ce choix ne dépend ni du temps, ni du zoom, ni de la rotation : pour des dimensions vidéo fixes, il reste stable entre les frames. Les points sont les milieux de strates régulières dans le carré du pixel. Chaque point passe par le mapping polaire, le choix de tuile et les halos existants ; la fenêtre résidente reste inchangée. Les couleurs linéaires, centre inclus, sont moyennées avec un filtre boîte normalisé puis encodées en sRGB une seule fois. Chaque prélèvement bilinéaire utilise les voisins matériels habituels. Ce filtre borné ne garantit pas l’élimination de tout aliasing dans les zones extrêmement minifiées.
+
+### Résolution physique du lecteur
+
+La surface utilise ses dimensions CSS multipliées par devicePixelRatio, ajuste le ratio du document et borne la sortie à sa résolution native. Un ResizeObserver et une requête média de densité relancent le rendu lors des changements de taille ou d’écran. Le bandeau indique les dimensions effectivement publiées, ainsi que le plafond AA. Le sélecteur AA transmet le même contrat de vue que la vidéo, sans nouvelle allocation de tuiles.
+
+### Prélecture préparée en worker et import GPU fractionné
+
+ExpmapImageReader transmet une fois le localisateur du document au worker, puis uniquement les indices d’images. Le worker ouvre son propre index ZIP ou checkpoint OPFS, vérifie les payloads et décode avec createImageBitmap. Il transfère un ImageBitmap, sans faire transiter les octets décompressés par JavaScript sur le thread d’interface. Une seule demande de lecture/décodage peut être en cours. Les bitmaps tardifs sont fermés et la fermeture du renderer termine le worker.
+
+L’import découpe l’image horizontalement en bandes d’au plus 4 MiB (75 lignes pour une tuile 4K ×1). Chaque copie attend sa fin GPU avant la suivante. Une prélecture attend 16 ms avant chaque bande pour laisser des occasions de présentation ; il ne s’agit pas d’une garantie de cadence. Une tuile requise draine ses bandes sans ces délais. La disponibilité repose sur la fin de toutes les bandes, pas sur leur simple soumission. La couche précédente est invalidée dès le début du remplacement. Un changement de fenêtre annule les futures bandes d’une prélecture devenue inutile, attend le travail déjà soumis, puis réutilise la couche. Le tampon reste à quatorze tuiles et un seul bitmap décodé en cours de transfert. Le coût réel de copyExternalImageToTexture par région reste dépendant du navigateur ; aucune réduction mesurée des saccades n’est annoncée sans essai matériel.

@@ -1,6 +1,6 @@
 import type { ExpmapManifest } from './manifest'
 import type { ExpmapStore } from './store'
-import { decodeImageTile } from './imageCodec'
+import { decodeImageTile } from './imageDecode'
 export type ExpmapImageFormat='image/png'|'image/jpeg'|'image/webp'
 export function validateImageExport(width:number,height:number,format:ExpmapImageFormat,quality:number) {
   if(!['image/png','image/jpeg','image/webp'].includes(format))throw new Error('Format image non pris en charge')

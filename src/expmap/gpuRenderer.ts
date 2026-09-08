@@ -4,7 +4,9 @@ import { expmapFilterUniform, validateExpmapView, type ExpmapView } from './rend
 import type { ExpmapManifest } from './manifest'
 import type { ExpmapStore } from './store'
 import { EXPMAP_RESIDENT_TILES, octaveWindow } from './octaves'
-import { decodeImageTile, MAX_TILE_BYTES } from './imageCodec'
+import { MAX_TILE_BYTES } from './imageLimits'
+import { ExpmapImageReader } from './imageReader'
+import { uploadExpmapBands } from './tileUpload'
 import { ExpmapTileCache } from './tileCache'
 
 /** A single filtered draw; disk/decode/upload occurs only on a tile cache miss. */
@@ -18,6 +20,7 @@ export class ExpmapGpuRenderer {
   private uniform!: GPUBuffer
   private texture!: GPUTexture
   private bound!: GPUBindGroup
+  private reader?:ExpmapImageReader
   private cache!: ExpmapTileCache<ImageBitmap>
   private disposed=false
   private busy=false
@@ -48,8 +51,14 @@ export class ExpmapGpuRenderer {
     this.uniform=d.createBuffer({size:80,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST})
     this.bound=d.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:this.uniform}},
       {binding:1,resource:this.texture.createView({dimension:'2d-array'})},{binding:2,resource:d.createSampler({minFilter:'linear',magFilter:'linear'})}]})
-    this.cache=new ExpmapTileCache(async index=>decodeImageTile(await store.readTile(this.manifest.tiles[index]),o.tileWidth,o.tileHeight),
-      (slot,bitmap)=>d.queue.copyExternalImageToTexture({source:bitmap},{texture:this.texture,origin:[0,0,slot],colorSpace:'srgb'},[o.tileWidth,o.tileHeight,1]), bitmap=>bitmap.close())
+    this.reader=await ExpmapImageReader.create(store,this.manifest.documentId)
+    this.cache=new ExpmapTileCache(index=>this.reader!.read(index),
+      (slot,bitmap,context)=>uploadExpmapBands(o.tileWidth,o.tileHeight,context,async(y,rows)=>{
+        d.queue.copyExternalImageToTexture({source:bitmap,origin:[0,y]},
+          {texture:this.texture,origin:[0,y,slot],colorSpace:'srgb'},[o.tileWidth,rows,1])
+        // Bound queued transfers as well as CPU work. Only this band is in flight.
+        await d.queue.onSubmittedWorkDone()
+      }),bitmap=>bitmap.close())
     this.context.configure({device:d,format:'rgba8unorm',alphaMode:'opaque',colorSpace:'srgb'})
   }
   async render(view:ExpmapView, signal?:AbortSignal):Promise<OffscreenCanvas> {
@@ -76,5 +85,5 @@ export class ExpmapGpuRenderer {
       return this.canvas
     } finally { this.busy=false }
   }
-  dispose() { if(this.disposed)return; this.disposed=true; this.cache?.dispose(); this.texture?.destroy(); this.uniform?.destroy(); this.context?.unconfigure(); if(this.ownDevice)this.device.destroy() }
+  dispose() { if(this.disposed)return; this.disposed=true; this.cache?.dispose();this.reader?.dispose(); this.texture?.destroy(); this.uniform?.destroy(); this.context?.unconfigure(); if(this.ownDevice)this.device.destroy() }
 }

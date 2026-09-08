@@ -5,12 +5,14 @@ import { parkExpmapSession } from '../expmap/session'
 import type { Engine } from '../Engine'
 import { expmapLastView, expmapOpenDocument } from '../expmap/runtime'
 import { expmapLibraryEntries } from '../expmap/library'
+import { EXPMAP_SAMPLE_LIMITS, expmapPlayerResolution } from '../expmap/renderer'
 import { ExpmapGpuPlayer } from '../expmap/gpuPlayer'
 import { interpolateScale, scaleDoublements } from '../expmap/decimal'
 import { advanceExpmapPlayback, expmapTimeLabel } from '../expmap/playback'
 const props = defineProps<{ engine: Engine | null; controller: MandelbrotExposed | null }>()
 const surface = ref<HTMLElement | null>(null), canvas = ref<HTMLCanvasElement | null>(null)
 const position = ref(0), angle = ref(0), error = ref(''), loading = ref(false), ready = ref(false)
+const maxSamples=ref(16), renderedResolution=ref('')
 const playing = ref(false), rate = ref(1), direction = ref(1), loop = ref(false)
 const title = computed(() => expmapLibraryEntries.value.find(e => e.id === expmapOpenDocument.value?.manifest.documentId)?.name ?? 'ExpMap')
 const duration = computed(() => {
@@ -25,17 +27,17 @@ const player = new ExpmapGpuPlayer((image, view) => {
   target.getContext('bitmaprenderer')!.transferFromImageBitmap(image)
   const id = expmapOpenDocument.value?.manifest.documentId
   if (id) expmapLastView.value = { documentId: id, scale: view.scale, angle: view.angle }
+  renderedResolution.value=`${view.width} × ${view.height} px · AA ≤ ${view.maxSamples ?? 1}`
   loading.value = false
 }, failure => { error.value = String(failure); loading.value = false; playing.value = false })
 function request() {
   const doc = expmapOpenDocument.value
   if (!doc || !ready.value) return
   const p = doc.manifest.projection
-  const factor = Math.min(1, window.innerWidth / p.width, window.innerHeight / p.height)
-  const height = Math.max(1, Math.floor(p.height * factor))
-  const width = Math.max(1, Math.floor(height * p.width / p.height))
+  const {width,height}=expmapPlayerResolution(p,surface.value?.clientWidth || window.innerWidth,
+    surface.value?.clientHeight || window.innerHeight,window.devicePixelRatio)
   loading.value = true; error.value = ''
-  player.request({ width, height, scale: interpolateScale(p.domain.startScale, p.domain.endScale, position.value), angle: angle.value })
+  player.request({ width, height, maxSamples:maxSamples.value, scale: interpolateScale(p.domain.startScale, p.domain.endScale, position.value), angle: angle.value })
 }
 function seek(value: number) { playing.value = false; position.value = Math.max(0, Math.min(1, value)) }
 function togglePlay() {
@@ -90,7 +92,7 @@ watch([expmapOpenDocument, () => props.engine], async ([doc], _previous, onClean
   onCleanup(() => { current = false })
   playing.value = false; ready.value = false
   player.dispose(); release?.(); release = undefined
-  position.value = 0; angle.value = 0; error.value = ''
+  position.value = 0; angle.value = 0; error.value = ''; renderedResolution.value = ''
   if (!doc) { returnFocus?.focus(); returnFocus = null; return }
   if (!returnFocus) returnFocus = document.activeElement as HTMLElement | null
   release = parkExpmapSession(props.engine, props.controller)
@@ -100,9 +102,21 @@ watch([expmapOpenDocument, () => props.engine], async ([doc], _previous, onClean
   try { if (await player.setSource(doc.store, doc.manifest, props.engine?.device)) { ready.value = true; request() } }
   catch (e) { if (current) { error.value = String(e); loading.value = false } }
 }, { immediate: true })
-watch([position, angle], request)
-onMounted(() => { window.addEventListener('keydown', keyboard, true); window.addEventListener('resize', request); document.addEventListener('visibilitychange', visibility) })
+watch([position, angle, maxSamples], request)
+let sizeObserver:ResizeObserver|undefined, densityQuery:MediaQueryList|undefined
+function watchDensity() {
+  densityQuery?.removeEventListener('change',densityChanged)
+  densityQuery=window.matchMedia(`(resolution: ${window.devicePixelRatio}dppx)`)
+  densityQuery.addEventListener('change',densityChanged)
+}
+function densityChanged() {watchDensity();request()}
+watch(surface, element=>{
+  sizeObserver?.disconnect()
+  if(element) {sizeObserver=new ResizeObserver(request);sizeObserver.observe(element)}
+})
+onMounted(() => { watchDensity(); window.addEventListener('keydown', keyboard, true); window.addEventListener('resize', request); document.addEventListener('visibilitychange', visibility) })
 onUnmounted(() => {
+  sizeObserver?.disconnect();densityQuery?.removeEventListener('change',densityChanged)
   cancelAnimationFrame(raf); player.dispose(); release?.()
   window.removeEventListener('keydown', keyboard, true); window.removeEventListener('resize', request); document.removeEventListener('visibilitychange', visibility)
 })
@@ -111,7 +125,7 @@ onUnmounted(() => {
   <Teleport to="body">
     <div v-if="expmapOpenDocument" ref="surface" class="expmap-surface" role="dialog" aria-modal="true" aria-label="Lecteur ExpMap" tabindex="-1" @wheel.prevent="seek(position + $event.deltaY / 5000)" @pointerdown.stop @keydown.stop>
       <canvas ref="canvas" @click="togglePlay" aria-label="Rendu ExpMap" />
-      <header><div><strong>LECTEUR EXPMAP</strong><span>{{ title }}</span><small>Apparence cuite · {{ playing ? 'Lecture' : 'Pause' }}</small></div><button class="exit" @click="close">✕ Quitter <small>Échap</small></button></header>
+      <header><div><strong>LECTEUR EXPMAP</strong><span>{{ title }}</span><small>Apparence cuite · {{ playing ? 'Lecture' : 'Pause' }}</small><small class="resolution" aria-label="Résolution et AA du rendu">{{ renderedResolution }}</small></div><button class="exit" @click="close">✕ Quitter <small>Échap</small></button></header>
       <div class="expmap-controls" @wheel.stop>
         <div class="timeline"><span>{{ expmapTimeLabel(position * duration) }}</span><input :value="position" @input="seek(Number(($event.target as HTMLInputElement).value))" aria-label="Position de lecture" type="range" min="0" max="1" step="0.0001"><span>{{ expmapTimeLabel(duration) }}</span></div>
         <div class="transport">
@@ -122,6 +136,7 @@ onUnmounted(() => {
           <button :aria-pressed="direction === -1" @click="direction *= -1">{{ direction === 1 ? '→ Zoom' : '← Dézoom' }}</button>
           <button :aria-pressed="loop" @click="loop = !loop">↻ Boucle</button>
           <label>Rotation <input v-model.number="angle" aria-label="Rotation ExpMap" type="range" min="-6.283185" max="6.283185" step="0.01" @input="playing = false"></label>
+          <label title="Maximum de prélèvements par pixel, selon la densité disponible">AA <select v-model.number="maxSamples" aria-label="Prélèvements AA maximum"><option v-for="value in EXPMAP_SAMPLE_LIMITS" :key="value" :value="value">{{ value === 1 ? 'Non' : value }}</option></select></label>
           <button v-if="surface?.requestFullscreen" @click="fullscreen">Plein écran</button>
           <span class="status" role="status">{{ loading ? 'Chargement…' : '2 doublements/s à 1×' }}</span>
         </div>
@@ -131,5 +146,5 @@ onUnmounted(() => {
   </Teleport>
 </template>
 <style scoped>
-.expmap-surface{position:fixed;inset:0;z-index:10000;background:#050609;color:#eef2ff;display:flex;align-items:center;justify-content:center;font-size:12px;outline:none}.expmap-surface canvas{max-width:100%;max-height:100%;width:auto;height:100%;object-fit:contain}.expmap-surface header{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 18px;background:linear-gradient(#080b13ed,transparent)}header div{display:flex;gap:12px;align-items:center;flex-wrap:wrap}header strong{color:#9abaff;font-size:11px;letter-spacing:.12em}header small{color:#abb4c7}.expmap-controls{position:absolute;bottom:max(12px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(960px,calc(100% - 24px));padding:10px 12px;background:#121827f2;border:1px solid #35415c;border-radius:12px;box-shadow:0 8px 30px #0008}.timeline{display:flex;align-items:center;gap:10px;font-variant-numeric:tabular-nums;margin-bottom:8px}.timeline input{flex:1;min-width:40px}.transport{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.transport label{display:flex;align-items:center;gap:5px}.transport label input{width:85px}button,select{color:inherit;background:#263047;border:1px solid #455271;border-radius:6px;padding:6px 9px;cursor:pointer}button:hover{background:#364563}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #a8c5ff;outline-offset:2px}button[aria-pressed=true],.play{background:#334f7c}button:disabled{opacity:.5;cursor:default}.exit{white-space:nowrap}.exit small{margin-left:8px}.status{color:#b7c6df;margin-left:auto}.expmap-controls p{color:#ffc2b9;margin:8px 0 0}@media(max-width:600px){header small{display:none}.expmap-surface header{padding:10px}.transport{gap:6px}button,select{min-height:36px}.status{width:100%;margin:0}.expmap-controls{padding:8px}}
+.expmap-surface{position:fixed;inset:0;z-index:10000;background:#050609;color:#eef2ff;display:flex;align-items:center;justify-content:center;font-size:12px;outline:none}.expmap-surface canvas{max-width:100%;max-height:100%;width:auto;height:100%;object-fit:contain}.expmap-surface header{position:absolute;top:0;left:0;right:0;display:flex;justify-content:space-between;align-items:center;gap:12px;padding:14px 18px;background:linear-gradient(#080b13ed,transparent)}header div{display:flex;gap:12px;align-items:center;flex-wrap:wrap}header strong{color:#9abaff;font-size:11px;letter-spacing:.12em}header small{color:#abb4c7}.expmap-controls{position:absolute;bottom:max(12px,env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);width:min(960px,calc(100% - 24px));padding:10px 12px;background:#121827f2;border:1px solid #35415c;border-radius:12px;box-shadow:0 8px 30px #0008}.timeline{display:flex;align-items:center;gap:10px;font-variant-numeric:tabular-nums;margin-bottom:8px}.timeline input{flex:1;min-width:40px}.transport{display:flex;align-items:center;gap:7px;flex-wrap:wrap}.transport label{display:flex;align-items:center;gap:5px}.transport label input{width:85px}button,select{color:inherit;background:#263047;border:1px solid #455271;border-radius:6px;padding:6px 9px;cursor:pointer}button:hover{background:#364563}button:focus-visible,input:focus-visible,select:focus-visible{outline:2px solid #a8c5ff;outline-offset:2px}button[aria-pressed=true],.play{background:#334f7c}button:disabled{opacity:.5;cursor:default}.exit{white-space:nowrap}.exit small{margin-left:8px}.status{color:#b7c6df;margin-left:auto}.expmap-controls p{color:#ffc2b9;margin:8px 0 0}@media(max-width:600px){header small:not(.resolution){display:none}.expmap-surface header{padding:10px}.transport{gap:6px}button,select{min-height:36px}.status{width:100%;margin:0}.expmap-controls{padding:8px}}
 </style>

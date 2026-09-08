@@ -47,3 +47,11 @@
 - [x] 6.1 Ajouter un plafond de prélèvements vidéo 1/4/9/16 et transmettre le choix au shader partagé.
 - [x] 6.2 Intégrer les pixels sur une grille fixe adaptative à la densité, en lumière linéaire, avec le même tampon de tuiles.
 - [x] 6.3 Vérifier paramètres, transmission vidéo, types, shader Naga et OpenSpec ; laisser les mesures GPU à la validation autorisée séparément.
+
+- [x] 6.4 Corriger la résolution physique du lecteur (DPR), afficher ses dimensions et exposer l’AA jusqu’à 256 ; vérifier le dimensionnement et la transmission du choix.
+
+## 7. Prélecture sans transfert massif
+
+- [x] 7.1 Déplacer lecture ZIP/OPFS, vérification et décodage natif dans un worker borné à une image, avec transfert du bitmap.
+- [x] 7.2 Importer la tuile anticipée en bandes de 4 MiB maximum, espacées et annulables ; publication seulement après transfert complet.
+- [x] 7.3 Vérifier résidence partielle, changement de fenêtre, promotion d’une prélecture, annulation, worker et compilation.

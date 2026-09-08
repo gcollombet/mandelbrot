@@ -61,3 +61,29 @@ Le lecteur SHALL afficher une identité « LECTEUR EXPMAP », le nom du document
 #### Scenario: Exit the player
 - **WHEN** l’utilisateur clique Quitter ou appuie sur Échap
 - **THEN** la lecture s’arrête, les ressources sont libérées et la session Mandelbrot est restaurée
+
+### Requirement: Physical display resolution and selectable AA
+Le lecteur SHALL dimensionner le rendu selon la surface visible et devicePixelRatio, dans les limites de résolution et couverture du document. Il SHALL réagir aux redimensionnements et changements de densité de l’écran. Il SHALL afficher la résolution réellement publiée et proposer les plafonds AA 1/4/9/16/36/64/144/256, avec 16 par défaut, via le même shader adaptatif que la vidéo.
+
+#### Scenario: Retina viewport
+- **WHEN** un document 3840×2160 est affiché dans une surface 1920×1080 CSS avec un facteur de deux
+- **THEN** le lecteur demande une sortie 3840×2160
+
+#### Scenario: Change AA during reading
+- **WHEN** le plafond AA est modifié
+- **THEN** une nouvelle vue transmet ce choix au renderer sans recalcul de l’ExpMap
+
+### Requirement: Worker reads and paced GPU prefetch
+Le lecteur partagé SHALL effectuer les lectures de payload, vérifications et décodage WebP natif dans un worker, avec une seule demande en cours et transfert du bitmap. La prélecture SHALL importer le bitmap dans la couche libre par bandes de 4 MiB maximum, avec une pause entre bandes et au plus une copie GPU en cours. Une tuile SHALL être déclarée résidente uniquement après la dernière copie terminée. Les quatorze couches SHALL rester le seul tampon de tuiles GPU.
+
+#### Scenario: Resident frame during prefetch
+- **WHEN** une tuile future est partiellement importée
+- **THEN** une vue déjà résidente reste rendable sans attendre la fin de cette tuile
+
+#### Scenario: Prefetch becomes required
+- **WHEN** la vue réclame une tuile encore en cours de transfert
+- **THEN** son import se termine sans pauses artificielles supplémentaires et la vue attend ses pixels complets
+
+#### Scenario: Seek during partial upload
+- **WHEN** la nouvelle fenêtre exclut une prélecture en cours
+- **THEN** aucune nouvelle bande de celle-ci n’est soumise et sa couche n’est pas marquée résidente ; le bitmap est libéré

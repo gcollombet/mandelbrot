@@ -50,3 +50,28 @@ it('releases a native image when stale prefetch finishes without upload',async()
   await expect(pending).rejects.toThrow()
   expect(upload).not.toHaveBeenCalled();expect(close).toHaveBeenCalledOnce()
 })
+
+it('never publishes partial uploads and invalidates a reused layer before copying',async()=>{
+  let finish!:()=>void, started!:()=>void
+  const uploading=new Promise<void>(r=>{started=r})
+  const released:number[]=[]
+  const cache=new ExpmapTileCache(async i=>i,async(_slot,i,context)=>{
+    if(i===14) {started();await new Promise<void>(r=>{finish=r});expect(context.isRequired()).toBe(true)}
+  },i=>released.push(i))
+  await cache.prepare([0]);expect(cache.resident(0)).toBe(true)
+  const next=cache.prepare([14]);await uploading
+  expect(cache.resident(0)).toBe(false);expect(cache.resident(14)).toBe(false)
+  finish();await next;expect(cache.resident(14)).toBe(true);expect(released).toEqual([0,14])
+})
+
+it('aborts a partial prefetch on seek and lets the new window proceed',async()=>{
+  let started!:()=>void
+  const uploading=new Promise<void>(r=>{started=r}),release=vi.fn()
+  const cache=new ExpmapTileCache(async i=>i,async(_slot,i,context)=>{
+    if(i===13) {started();await new Promise<void>((_resolve,reject)=>context.signal.addEventListener('abort',()=>reject(context.signal.reason),{once:true}))}
+  },release)
+  await cache.prepare([0],13);cache.prefetch(13);await uploading
+  await cache.prepare([27])
+  expect(cache.resident(13)).toBe(false);expect(cache.resident(27)).toBe(true)
+  expect(release.mock.calls.filter(([i])=>i===13)).toHaveLength(1)
+})
