@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type {PalettePath} from '../palettePath';
 import {nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import {Engine} from '../Engine.ts';
 import {MandelbrotNavigator} from 'mandelbrot';
@@ -91,6 +92,8 @@ const props = withDefaults(defineProps<{
   mu?: number,
   epsilon?: number,
   colorStops?: ColorStop[],
+  palettePath?: PalettePath,
+  textureName?: string, textureGuid?: string, skyboxName?: string, skyboxGuid?: string,
   palettePeriod?: number,
   paletteOffset?: number,
   heightPaletteShift?: number,
@@ -306,6 +309,8 @@ async function draw() {
         heightPaletteShift: props.heightPaletteShift,
         paletteMirror: props.paletteMirror,
         iterationPaletteCurve: props.iterationPaletteCurve,
+        textureName: props.textureName, textureGuid: props.textureGuid, skyboxName: props.skyboxName, skyboxGuid: props.skyboxGuid,
+        palettePath: props.palettePath ? toRaw(props.palettePath) : undefined,
         colorStops: toRaw(props.colorStops),
         interpolationMode: props.interpolationMode,
         activateAnimate: props.activateAnimate,

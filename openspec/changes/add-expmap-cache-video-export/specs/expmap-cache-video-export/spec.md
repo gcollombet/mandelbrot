@@ -85,7 +85,7 @@ Le panneau SHALL exprimer la vitesse en doublements par seconde et synchroniser 
 - **THEN** la durée vaut 10 secondes et le zoom progresse uniformément en profondeur logarithmique
 
 #### Scenario: Edit range at chosen speed
-- **WHEN** l'utilisateur modifie la fenêtre
+- **WHEN** l'utilisateur modifie la fenêtre après avoir réglé explicitement la vitesse
 - **THEN** la vitesse choisie est conservée et la durée est recalculée
 
 #### Scenario: Stationary depth
@@ -128,3 +128,38 @@ La vidéo SHALL proposer un plafond de 1, 4, 9, 16, 36, 64, 144 ou 256 prélève
 #### Scenario: Compare with previous reconstruction
 - **WHEN** le plafond est fixé à un
 - **THEN** la vidéo utilise le prélèvement bilinéaire centré existant
+
+### Requirement: Independent easing and final hold
+Le montage SHALL proposer des courbes d’entrée et de sortie indépendantes avec durées en secondes et un palier final fixe ajouté à la durée du trajet. Le temps remappé SHALL être monotone, sans dépassement, identique pour le zoom et la rotation. Les bornes exactes SHALL être conservées. Les fenêtres enregistrées avant cette évolution SHALL conserver une interpolation linéaire sans palier.
+
+#### Scenario: Finish on a minibrot
+- **WHEN** une sortie prolongée et un palier de deux secondes sont choisis
+- **THEN** zoom et rotation ralentissent vers leur destination puis restent fixes pendant le palier
+- **AND** la durée totale est celle du trajet augmentée de deux secondes
+
+#### Scenario: Overlapping transitions
+- **WHEN** les durées actives d’entrée et de sortie dépassent le trajet
+- **THEN** l’export est désactivé avec une explication
+
+#### Scenario: Shorten an existing trajectory
+- **WHEN** une réduction explicite de durée rend les transitions trop longues
+- **THEN** leurs durées actives diminuent proportionnellement pour tenir dans le trajet et le palier reste inchangé
+
+### Requirement: Friendly trajectory and output controls
+Le panneau SHALL fournir une piste à deux poignées bornée au document, capture et aperçu exact des bornes, inversion du trajet, angle initial en degrés, sens et tours fractionnaires. La durée SHALL être prioritaire par défaut ; modifier la vitesse SHALL la rendre prioritaire. Les paramètres de sortie SHALL rester indépendants du document. Les résumés SHALL afficher des exposants et une magnitude entiers et les sélecteurs SHALL afficher le nom réel du fichier. Le nom vidéo suggéré SHALL remplacer son extension par .mp4.
+
+#### Scenario: Select a different document
+- **WHEN** l’utilisateur sélectionne un autre document
+- **THEN** résolution, cadence, codec et qualité de sortie restent identiques
+
+#### Scenario: Automatic encoding fallback
+- **WHEN** une configuration HEVC est indisponible et H.264 est disponible
+- **THEN** Auto sélectionne H.264 et affiche le codec effectif
+
+#### Scenario: New video settings
+- **WHEN** aucune préférence de sortie n’existe
+- **THEN** la résolution vaut 3840×2160, la cadence 60 fps et le codec Auto préfère HEVC
+
+#### Scenario: Explicit enlargement
+- **WHEN** le document est moins défini que la sortie demandée
+- **THEN** la reconstruction autorise l’agrandissement jusqu’à 4K, l’annonce, et conserve la contrainte de couverture du document

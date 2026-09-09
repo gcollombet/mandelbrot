@@ -1,3 +1,5 @@
+import {validatePalettePath, snapshotPathAppearance} from '../palettePath'
+import {resolvePalettePathImages} from '../palettePathResources'
 import type { RenderOptions } from '../Engine'
 import { getEffectValue } from '../ColorStop'
 import { EFFECT_FIELD_NAMES } from '../effectFieldConfig'
@@ -52,6 +54,18 @@ export function expmapAppearanceProblems(options: RenderOptions): AppearanceProb
     if (![track.speed, track.amplitude, track.phase ?? 0].every(Number.isFinite)) refuse(`animation.${id}`, 'Piste non finie.')
   }
   if (options.animation && !Number.isFinite(options.animation.globalSpeed)) refuse('animation.globalSpeed', 'Vitesse non finie.')
+  if (options.palettePath?.enabled) {
+    try {
+      const path = validatePalettePath(options.palettePath)
+      for (const [index, stop] of path.stops.entries()) {
+        const child = expmapAppearanceProblems({ ...options, ...stop.appearance, palettePath: undefined } as RenderOptions)
+        for (const p of child) problems.push({ ...p, field: `palettePath.stops.${index}.${p.field}` })
+      }
+      // These view-dependent effects are intentionally baked at each radius;
+      // textures are content-verified before the document is published.
+      return problems.filter(p => !(p.kind === 'unsupported' && /(^|\.)(shading|tessellation|heightPaletteShift)$/.test(p.field)))
+    } catch (e) { refuse('palettePath', String(e)) }
+  }
   return problems
 }
 
@@ -78,6 +92,16 @@ export function expmapBlockingProblems(options: RenderOptions, forceRender = fal
 export async function freezeExpmapAppearance(options: RenderOptions, forceRender = false) {
   const problems = expmapBlockingProblems(options, forceRender)
   if (problems.length) throw new Error(problems.map(p => `${p.field}: ${p.message}`).join('\n'))
-  const json = canonicalJson(options)
+  let recipe = options
+  if (options.palettePath?.enabled) {
+    const path = validatePalettePath(options.palettePath)
+    const resources = await resolvePalettePathImages(path, snapshotPathAppearance(options))
+    try {
+      path.mode = 'radial'
+      path.resourceHashes = Object.fromEntries(resources.images.map(i => [i.key, i.hash]))
+      recipe = JSON.parse(JSON.stringify({ ...options, palettePath: path }))
+    } finally { resources.dispose() }
+  }
+  const json = canonicalJson(recipe)
   return { json, identity: await contentIdentity(new TextEncoder().encode(json)) }
 }

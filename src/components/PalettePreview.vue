@@ -108,6 +108,7 @@ let pipeline: GPURenderPipeline | null = null;
 let bindGroup: GPUBindGroup | null = null;
 let uniformBuffer: GPUBuffer | null = null;
 let paletteTexture: GPUTexture | null = null;
+let pathDummy: GPUBuffer | undefined;
 let paletteTextureView: GPUTextureView | null = null;
 let paletteSampler: GPUSampler | null = null;
 let syntheticValuesTexture: GPUTexture | null = null;
@@ -332,9 +333,9 @@ function rebuildBindGroup() {
     entries: [
       { binding: 0, resource: { buffer: uniformBuffer } },
       { binding: 1, resource: syntheticValuesView },
-      { binding: 2, resource: tileTextureGpu.createView() },
-      { binding: 3, resource: skyboxTextureGpu.createView() },
-      { binding: 4, resource: webcamTextureGpu.createView() },
+      { binding: 2, resource: tileTextureGpu.createView({ dimension: '2d-array' }) },
+      { binding: 3, resource: skyboxTextureGpu.createView({ dimension: '2d-array' }) },
+      { binding: 4, resource: webcamTextureGpu.createView({ dimension: '2d-array' }) },
       { binding: 5, resource: paletteTextureView },
       { binding: 6, resource: syntheticValuesView },
       { binding: 7, resource: paletteSampler },
@@ -353,6 +354,7 @@ function rebuildBindGroup() {
       // bind an explicitly invalid payload instead of inventing a fake hit.
       { binding: 17, resource: syntheticTrapPayloadView },
       { binding: 18, resource: syntheticTrapPayloadView },
+      { binding: 19, resource: { buffer: pathDummy! } },
     ],
     label: 'PalettePreview BindGroup',
   });
@@ -401,7 +403,7 @@ async function init() {
     usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST,
     label: 'PalettePreview PaletteTexture',
   });
-  paletteTextureView = paletteTexture.createView();
+  paletteTextureView = paletteTexture.createView({ dimension: '2d-array' });
   paletteSampler = device.createSampler({
     magFilter: 'linear',
     minFilter: 'linear',
@@ -418,6 +420,7 @@ async function init() {
   uploadPalette();
 
   // ── Uniform buffer (padded to 16-byte alignment) ──
+  pathDummy = device.createBuffer({ size: 208, usage: GPUBufferUsage.STORAGE });
   uniformBuffer = device.createBuffer({
     size: 4 * COLOR_UNIFORM_FLOAT_COUNT,
     usage: GPUBufferUsage.UNIFORM | GPUBufferUsage.COPY_DST,
@@ -432,7 +435,7 @@ async function init() {
   const uniforms = new Float32Array([
     ITER_COUNT * 2, // palettePeriod
     0,            // paletteOffset
-    1,            // bloomStrength
+    0,            // skyboxTransitionLevels (no transition in preview)
     0,            // time
     1,            // aspect (real value written by applySize once the size is known)
     0,            // angle
@@ -516,10 +519,10 @@ async function init() {
     entries: [
       { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
       { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+      { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+      { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+      { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+      { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
       { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
       { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
       { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
@@ -533,6 +536,7 @@ async function init() {
       { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       { binding: 17, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       { binding: 18, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
+      { binding: 19, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
     ],
     label: 'PalettePreview BindGroupLayout',
   });

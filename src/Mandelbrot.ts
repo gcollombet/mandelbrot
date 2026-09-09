@@ -1,3 +1,4 @@
+import type {PalettePath} from './palettePath';
 import type {ColorStop} from "./ColorStop.ts";
 import type {TextureMappingConfig} from "./TextureMapping.ts";
 import type {AnimationConfig} from "./AnimationConfig.ts";
@@ -17,6 +18,7 @@ export function normalizeAntialiasLevel(value: number | undefined): number {
 }
 
 export interface MandelbrotParams {
+    palettePath?: PalettePath;
     scale: string;
     cx: string;
     cy: string;

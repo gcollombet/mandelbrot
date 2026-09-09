@@ -4,7 +4,8 @@
 // deep specifically to capture them. Persisted whole rather than points-only:
 // keeping the start but forgetting the duration would be its own surprise.
 
-import { DEFAULT_VIDEO_CODEC, isMp4Codec, type Mp4Codec } from './videoEncoderSink'
+import { isMp4Codec, type Mp4Codec } from './videoEncoderSink'
+import { DEFAULT_EXPMAP_MOTION, EXPMAP_EASES, type ExpmapMotion } from './expmap/motion'
 import type { VideoPathLocation } from './videoPath'
 import {
   DEFAULT_TILED_EXPORT_BUDGET_MIB,
@@ -30,7 +31,10 @@ export type VideoExportPreferences = {
   fps: string
   supersample: string
   magnificationThreshold: number
-  codec: Mp4Codec
+  codec: Mp4Codec | 'auto'
+  motion: ExpmapMotion
+  filename: string
+  timingAuthority: 'duration' | 'speed'
   aaSamplesPerFrame: number
   renderMode: VideoExportRenderMode
   tiledMemoryBudgetMiB: number
@@ -40,11 +44,14 @@ export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
   pinnedStart: null,
   pinnedEnd: null,
   durationSeconds: 20,
-  resolution: '1920x1080',
-  fps: '30',
+  resolution: '3840x2160',
+  fps: '60',
   supersample: '2',
   magnificationThreshold: 2,
-  codec: DEFAULT_VIDEO_CODEC,
+  codec: 'auto',
+  motion: { ...DEFAULT_EXPMAP_MOTION },
+  filename: 'Fractale',
+  timingAuthority: 'duration',
   aaSamplesPerFrame: 1,
   renderMode: 'monolithic',
   tiledMemoryBudgetMiB: DEFAULT_TILED_EXPORT_BUDGET_MIB,
@@ -71,6 +78,19 @@ function normalizeNumber(value: unknown, fallback: number): number {
   return typeof value === 'number' && Number.isFinite(value) ? value : fallback
 }
 
+function normalizeMotion(value: unknown): ExpmapMotion {
+  const result = { ...DEFAULT_EXPMAP_MOTION }
+  if (!value || typeof value !== 'object') return result
+  const raw = value as Record<string, unknown>
+  for (const key of ['easeIn','easeOut'] as const) {
+    if (EXPMAP_EASES.some(e => e.value === raw[key])) result[key] = raw[key] as ExpmapMotion[typeof key]
+  }
+  for (const key of ['easeInSeconds','easeOutSeconds','holdSeconds'] as const) {
+    if (typeof raw[key] === 'number' && Number.isFinite(raw[key]) && raw[key] >= 0 && raw[key] <= 86400) result[key] = raw[key]
+  }
+  return result
+}
+
 /** Coerce anything into a usable preferences object, field by field. */
 export function normalizeVideoExportPreferences(value: unknown): VideoExportPreferences {
   const d = DEFAULT_VIDEO_EXPORT_PREFERENCES
@@ -84,7 +104,10 @@ export function normalizeVideoExportPreferences(value: unknown): VideoExportPref
     fps: normalizeString(raw.fps, d.fps),
     supersample: normalizeString(raw.supersample, d.supersample),
     magnificationThreshold: normalizeNumber(raw.magnificationThreshold, d.magnificationThreshold),
-    codec: isMp4Codec(raw.codec) ? raw.codec : d.codec,
+    codec: raw.codec === 'auto' || isMp4Codec(raw.codec) ? raw.codec : d.codec,
+    motion: normalizeMotion(raw.motion),
+    filename: normalizeString(raw.filename, d.filename),
+    timingAuthority: raw.timingAuthority === 'speed' ? 'speed' : 'duration',
     aaSamplesPerFrame: isAaSampleChoice(raw.aaSamplesPerFrame)
       ? raw.aaSamplesPerFrame
       : d.aaSamplesPerFrame,

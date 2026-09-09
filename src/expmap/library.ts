@@ -12,6 +12,13 @@ export type ExpmapLibraryEntry = {
 export const expmapLibraryEntries = ref<ExpmapLibraryEntry[]>([])
 export const selectedExpmapDocumentId = ref<string | null>(null)
 
+export function expmapLibraryFilename(entry: Pick<ExpmapLibraryEntry, 'handle' | 'name'>) {
+  const filename = entry.handle?.name?.trim()
+  if (filename) return filename
+  const fallback = entry.name.trim() || 'Document ExpMap'
+  return /\.expmap$/i.test(fallback) ? fallback : `${fallback}.expmap`
+}
+
 let database: Promise<IDBDatabase> | undefined
 function db(): Promise<IDBDatabase> {
   return database ??= new Promise((resolve, reject) => {

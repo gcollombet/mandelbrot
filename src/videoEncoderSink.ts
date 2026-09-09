@@ -33,7 +33,7 @@ export const MP4_CODECS = [
 
 export type Mp4Codec = (typeof MP4_CODECS)[number]['value']
 
-export const DEFAULT_VIDEO_CODEC: Mp4Codec = 'av1'
+export const DEFAULT_VIDEO_CODEC: Mp4Codec = 'hevc'
 
 export function isMp4Codec(value: unknown): value is Mp4Codec {
   return MP4_CODECS.some(c => c.value === value)
@@ -101,9 +101,13 @@ export type VideoEncoderSink = {
 export async function probeMp4Codecs(
   width: number,
   height: number,
+  fps?: number,
 ): Promise<Record<Mp4Codec, boolean>> {
+  // Installed mediabunny forwards additional options into buildVideoEncoderConfigs,
+  // including framerate; match the sink's quality and hardware preference.
+  const options = { width, height, quality: QUALITY_HIGH, hardwareAcceleration: 'prefer-hardware' as const, framerate: fps }
   const entries = await Promise.all(
-    MP4_CODECS.map(async ({ value }) => [value, await canEncodeVideo(value, { width, height })] as const),
+    MP4_CODECS.map(async ({ value }) => [value, await canEncodeVideo(value, options).catch(() => false)] as const),
   )
   return Object.fromEntries(entries) as Record<Mp4Codec, boolean>
 }
@@ -113,7 +117,8 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
   if (!isMp4Codec(codec)) {
     throw new Error(`Codec inconnu pour un conteneur MP4 : ${String(codec)}`)
   }
-  if (!await canEncodeVideo(codec, { width: settings.width, height: settings.height, ...(settings.hardwareAcceleration ? { hardwareAcceleration: settings.hardwareAcceleration } : {}) })) {
+  const probeOptions = { width: settings.width, height: settings.height, quality: settings.quality ?? QUALITY_HIGH, framerate: settings.fps, ...(settings.hardwareAcceleration ? { hardwareAcceleration: settings.hardwareAcceleration } : {}) }
+  if (!await canEncodeVideo(codec, probeOptions)) {
     throw new Error(
       `Ce navigateur ne sait pas encoder ${settings.width}×${settings.height} en ${codec.toUpperCase()}. `
       + (codec === 'avc' && (settings.width % 2 || settings.height % 2)

@@ -2,6 +2,7 @@
 // The loop itself lives in videoExportSession.ts and knows nothing about GPUs
 // or codecs; this module supplies its driver.
 
+import { motionProgress, motionSettings, validateMotion, type ExpmapMotion } from './expmap/motion'
 import { createVideoSink, type Mp4Codec, type VideoDestination } from './videoEncoderSink'
 import { runVideoExport, elapsedForFrame, totalFramesFor } from './videoExportSession'
 import {
@@ -75,7 +76,7 @@ export type VideoExportRunnerDeps = {
       origin(cx: string, cy: string): void
       scale(value: string): void
       angle(value: number): void
-      start_transition(cx: string, cy: string, scale: string, angle: number, duration: number): void
+      start_export_transition(cx: string, cy: string, scale: string, angle: number, duration: number): void
     } | null
   }
 }
@@ -87,6 +88,7 @@ export type VideoExportRequest = {
    *  already on screen, so neither endpoint carries render parameters. */
   to: VideoPathLocation
   durationSeconds: number
+  motion?: Partial<ExpmapMotion>
   output: VideoOutputSpec
   codec: Mp4Codec
   /** Jittered AA samples per emitted frame. 1 = off. */
@@ -137,6 +139,7 @@ export async function runVideoExportToWebm(
     throw new Error(`Cannot export this parcours:\n${formatVideoPathProblems(problems)}`)
   }
 
+  validateMotion(request.motion ?? {}, request.durationSeconds)
   const renderMode = request.renderMode ?? 'monolithic'
   if (renderMode === 'tiled-keyframe') {
     const eligibility = evaluateTiledKeyframeEligibility({
@@ -191,6 +194,7 @@ export async function runVideoExportToWebm(
       fps: output.fps,
       codec: request.codec,
       destination: request.destination,
+      hardwareAcceleration: 'prefer-hardware',
     })
   } catch (error) {
     deps.engine.endVideoExportSession()
@@ -208,7 +212,7 @@ export async function runVideoExportToWebm(
     navigator.origin(request.from.cx, request.from.cy)
     navigator.scale(request.from.scale)
     navigator.angle(request.from.angle)
-    navigator.start_transition(
+    navigator.start_export_transition(
       request.to.cx,
       request.to.cy,
       request.to.scale,
@@ -219,7 +223,7 @@ export async function runVideoExportToWebm(
     const result = await runVideoExport(
       {
         setExportTime: (elapsedSeconds) => {
-          deps.controller.setExportTime(elapsedSeconds)
+          deps.controller.setExportTime(elapsedSeconds === null ? null : motionProgress({ ...request.motion, durationSeconds: request.durationSeconds }, elapsedSeconds) * request.durationSeconds)
           // Each frame accumulates from scratch: carrying samples across frames
           // would average two different camera positions together.
           if (elapsedSeconds !== null) {
@@ -264,7 +268,7 @@ export async function runVideoExportToWebm(
       },
       {
         fps: output.fps,
-        durationSeconds: request.durationSeconds,
+        durationSeconds: request.durationSeconds + motionSettings(request.motion ?? {}).holdSeconds,
         maxPumpsPerFrame: request.maxPumpsPerFrame ?? DEFAULT_MAX_PUMPS_PER_FRAME,
       },
       { onProgress: request.onProgress, signal: request.signal },

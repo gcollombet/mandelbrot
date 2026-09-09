@@ -1,3 +1,4 @@
+import { expmapEffectsUniform } from './effects'
 import shader from '../assets/expmap_reconstruct.wgsl?raw'
 import { scaleDoublements } from './decimal'
 import { expmapFilterUniform, validateExpmapView, type ExpmapView } from './renderer'
@@ -48,7 +49,7 @@ export class ExpmapGpuRenderer {
     this.texture=d.createTexture({size:[o.tileWidth,o.tileHeight,EXPMAP_RESIDENT_TILES],format:'rgba8unorm-srgb',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST|GPUTextureUsage.RENDER_ATTACHMENT})
     const validation=await d.popErrorScope(), memory=await d.popErrorScope()
     if(validation || memory) throw new Error(`Allocation ExpMap (${(bytes*14/1073741824).toFixed(2)} GiB) impossible : ${(validation??memory)!.message}`)
-    this.uniform=d.createBuffer({size:80,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST})
+    this.uniform=d.createBuffer({size:96,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST})
     this.bound=d.createBindGroup({layout:this.pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:this.uniform}},
       {binding:1,resource:this.texture.createView({dimension:'2d-array'})},{binding:2,resource:d.createSampler({minFilter:'linear',magFilter:'linear'})}]})
     this.reader=await ExpmapImageReader.create(store,this.manifest.documentId)
@@ -76,7 +77,7 @@ export class ExpmapGpuRenderer {
       this.device.queue.writeBuffer(this.uniform,0,new Float32Array([view.width,view.height,plan.height,plan.radius,
         depth-base,view.angle,o.angularSamples,o.rowsPerOctave,o.tileWidth,o.tileHeight,o.halo,base%14,
         center[0]/255,center[1]/255,center[2]/255,1,
-        ...expmapFilterUniform(o,view.maxSamples ?? 1)]))
+        ...expmapFilterUniform(o,view.maxSamples ?? 1), ...expmapEffectsUniform(view.effects,base)]))
       const commands=this.device.createCommandEncoder()
       const pass=commands.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store'}]})
       pass.setPipeline(this.pipeline); pass.setBindGroup(0,this.bound); pass.draw(3); pass.end()

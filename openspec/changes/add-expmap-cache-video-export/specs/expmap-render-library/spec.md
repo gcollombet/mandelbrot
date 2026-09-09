@@ -11,6 +11,11 @@ Le système SHALL proposer une bibliothèque locale de rendus ExpMap avec id sta
 - **WHEN** la préparation est interrompue
 - **THEN** son entrée reste identifiable et reprenable mais non sélectionnable comme source d'export complet
 
+#### Scenario: Compact document tile
+- **WHEN** le catalogue affiche un document ExpMap existant
+- **THEN** une tuile utilise le nom réel du fichier comme titre, sa miniature, son état, sa résolution et sa taille, sans afficher les coordonnées ou les valeurs décimales précises des bornes
+- **AND** lecture, vidéo et image ont une affordance directe tandis que les opérations de fichier secondaires restent regroupées
+
 ### Requirement: Canonical start and end zoom metadata
 Le manifeste SHALL conserver les échelles canoniques de début et de fin, centre, convention d'échelle et domaine utilisateur, sans conversion destructive en nombre machine. Le domaine lisible SHALL exclure les douze doublements de couverture interne et les halos.
 
@@ -54,3 +59,18 @@ La miniature SHALL provenir des pixels cuits et être conservée dans le contene
 #### Scenario: Whole map image
 - **WHEN** une image entière est exportée
 - **THEN** elle couvre angle et profondeur des doublements stockés sans padding, à la résolution choisie, avec une seule image source décodée à la fois
+
+### Requirement: Independent current-view captures and depth sliders
+La préparation SHALL proposer trois captures indépendantes : centre, échelle de départ et échelle d’arrivée. Les deux sliders SHALL parcourir +10 à -1000 en exposant décimal, avec saisie précise conservant les chaînes originales. Le contrôle de navigation SHALL également autoriser e+10. Les tuiles du catalogue SHALL afficher une plage d’exposants entière et sa magnitude sans les longues valeurs décimales.
+
+#### Scenario: Capture center only
+- **WHEN** l’utilisateur capture le centre courant
+- **THEN** seules les coordonnées changent ; aucune des deux échelles n’est remplacée
+
+#### Scenario: Capture one zoom only
+- **WHEN** l’utilisateur capture une borne depuis la vue courante
+- **THEN** seule cette borne change, sans modifier centre ni autre borne
+
+#### Scenario: Compact magnitude
+- **WHEN** le domaine s’étend de 1e+1 à 1e-26
+- **THEN** le résumé indique +1 vers -26 et magnitude 27

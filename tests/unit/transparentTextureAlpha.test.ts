@@ -44,7 +44,7 @@ describe('transparent texture alpha contract', () => {
   it('keeps the WGSL implementation wired to alpha-aware blending', () => {
     const shader = readFileSync(new URL('../../src/assets/color.wgsl', import.meta.url), 'utf8');
 
-    expect(shader).toContain('fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec4<f32>');
+    expect(shader).toContain('fn tile_tessellation(tex_: texture_2d_array<f32>, v: f32, dist: f32, repeat: f32) -> vec4<f32>');
     expect(shader).toContain('color = mix(color, tessSample.rgb, clamp(effTess * tessSample.a, 0.0, 1.0));');
     expect(shader).toContain('return tile.rgb * tile.a;');
   });

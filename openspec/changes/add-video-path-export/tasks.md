@@ -112,3 +112,10 @@
 - [ ] 9.2 Test de convergence : vérifier sur un parcours deep qu'aucune frame émise ne porte de pixels au-dessus du seuil d'idle
 - [ ] 9.3 Test d'indépendance au temps de calcul : forcer une frame lente et vérifier que la position caméra suivante et la durée du fichier sont inchangées
 - [ ] 9.4 Vérifier que la suite Playwright existante passe sans régression du comportement temps réel
+
+## 10. Contrôles communs de montage
+
+- [x] 10.1 Porter captures indépendantes, zooms +10 à -1000, aperçu, inversion, magnitude et noms parlants sur le panneau classique.
+- [x] 10.2 Partager les contrôles degrés/tours et les transitions entrée/sortie/palier avec ExpMap ; persister les nouveaux réglages.
+- [x] 10.3 Relier courbes et palier au runner classique (plein cadre et tuilé), respecter les tours et les très grandes plages de zoom dans WASM.
+- [x] 10.4 Vérifier contrats, runner, Rust, reconstruire WASM, types et compilation ; conserver la validation GPU distincte.

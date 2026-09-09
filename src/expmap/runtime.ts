@@ -6,3 +6,6 @@ export const expmapVideoSelected = ref(false)
 export const expmapBusy = ref(false)
 
 export const expmapLastView = shallowRef<{ documentId: string; scale: string; angle: number } | null>(null)
+
+/** One-shot camera requested by the video's endpoint preview buttons. */
+export const expmapPreviewView = shallowRef<{ documentId: string; scale: string; angle: number } | null>(null)

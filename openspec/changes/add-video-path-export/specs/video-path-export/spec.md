@@ -132,7 +132,7 @@ Le système SHALL réduire l'image suréchantillonnée à la résolution de sort
 ### Requirement: Encodage vidéo hors temps réel
 Le système SHALL encoder via WebCodecs en fournissant les timestamps dérivés de l'index de frame, et SHALL déclarer explicitement l'espace colorimétrique. Le système NE SHALL PAS utiliser `MediaRecorder` ni `captureStream`, dont la base de temps est l'horloge murale.
 
-Le conteneur SHALL toujours être **MP4**. Le **codec** SHALL être choisi par l'utilisateur parmi AV1, H.264/AVC, HEVC et VP9, avec **AV1** par défaut. Le système SHALL sonder ce que le navigateur sait réellement encoder à la résolution demandée, SHALL signaler les codecs indisponibles, et SHALL refuser de démarrer sur un codec indisponible plutôt que de basculer silencieusement sur un autre.
+Le conteneur SHALL toujours être **MP4**. Le **codec** SHALL être choisi par l'utilisateur parmi AV1, H.264/AVC, HEVC et VP9, avec **Auto : HEVC puis H.264** par défaut. Le système SHALL sonder ce que le navigateur sait réellement encoder à la résolution demandée, SHALL signaler les codecs indisponibles, et SHALL refuser de démarrer sur un codec explicite indisponible ; Auto SHALL annoncer le codec effectif après préférence HEVC puis H.264.
 
 #### Scenario: Frame lente à converger
 - **WHEN** une frame met plusieurs secondes à converger
@@ -144,7 +144,7 @@ Le conteneur SHALL toujours être **MP4**. Le **codec** SHALL être choisi par l
 
 #### Scenario: Codec par défaut
 - **WHEN** l'utilisateur ouvre le panneau sans réglage enregistré
-- **THEN** le codec sélectionné est AV1 et le conteneur est MP4
+- **THEN** le codec sélectionné est Auto (HEVC puis H.264), la résolution 4K, la cadence 60 fps et le conteneur MP4
 
 #### Scenario: Export dans le codec choisi
 - **WHEN** l'utilisateur choisit un codec disponible et lance l'export
@@ -210,3 +210,33 @@ Le système SHALL exposer l'état d'une session d'export : progression exprimée
 #### Scenario: Restitution après export
 - **WHEN** un export se termine normalement
 - **THEN** `zoomMagnificationThreshold`, `targetFps`, `aaAuto`, le DPR et la source de temps des animations retrouvent leurs valeurs d'avant la session
+
+### Requirement: Contrôles communs de montage
+Le panneau SHALL s’identifier comme « Vidéo depuis la fractale », face à « Vidéo depuis une ExpMap ». Il SHALL proposer des captures indépendantes du centre et des deux échelles, des sliders +10 à -1000, une saisie exacte, aperçu et inversion, magnitude entière, angle initial en degrés, sens et nombre de tours fractionnaires. Les réglages secondaires SHALL conserver le travelling entre deux centres. Le nom du fichier SHALL être modifiable et persisté.
+
+#### Scenario: Capture du centre
+- **WHEN** le centre courant est capturé
+- **THEN** les zooms et rotations des deux bornes restent inchangés
+
+#### Scenario: Capture d’un zoom
+- **WHEN** une échelle est capturée depuis la vue courante
+- **THEN** seul le zoom de la borne choisie change
+
+#### Scenario: Tours complets
+- **WHEN** l’utilisateur choisit deux tours et demi dans un sens
+- **THEN** la vidéo effectue ces tours sans réduire la rotation au chemin le plus court
+
+### Requirement: Transitions indépendantes et palier final
+Les deux modes de rendu classique SHALL appliquer la même progression monotone, avec courbes et durées d’entrée/sortie indépendantes. Le palier final SHALL s’ajouter à la durée du trajet et figer le temps caméra et animations à l’arrivée. Les timestamps d’encodage SHALL rester uniformes. Des transitions qui dépassent le trajet SHALL bloquer l’export ; raccourcir explicitement le trajet SHALL réduire proportionnellement leurs durées actives si nécessaire.
+
+#### Scenario: Fin sur minibrot
+- **WHEN** une sortie prolongée et un palier de deux secondes sont choisis
+- **THEN** zoom et rotation ralentissent ensemble puis restent fixes, pendant deux secondes supplémentaires
+
+#### Scenario: Rendu tuilé
+- **WHEN** le mode keyframes tuilées utilise les mêmes réglages de trajet
+- **THEN** il reçoit les mêmes temps caméra et timestamps que le rendu plein cadre
+
+#### Scenario: Zoom très profond
+- **WHEN** le trajet va de e+10 à e-1000 ou dans le sens inverse
+- **THEN** les échelles intermédiaires restent positives et finies dans la représentation arbitraire et l’arrivée est exacte

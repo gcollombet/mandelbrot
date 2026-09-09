@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import type {PalettePath} from '../palettePath';
 import {onMounted, onUnmounted, ref, watch} from 'vue';
 import Mandelbrot from './Mandelbrot.vue';
 import MobileNavigationControls from './MobileNavigationControls.vue';
@@ -23,6 +24,8 @@ const props = defineProps<{
   mu?: number,
   epsilon?: number,
   colorStops?: ColorStop[],
+  palettePath?: PalettePath,
+  textureName?: string, textureGuid?: string, skyboxName?: string, skyboxGuid?: string,
   antialiasLevel?: number,
   aaAuto?: boolean,
   aaAdaptive?: boolean,
@@ -441,6 +444,8 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       v-model:angle="angle"
       v-model:cx="cx"
       v-model:cy="cy"
+      :palette-path="props.palettePath"
+      :texture-name="props.textureName" :texture-guid="props.textureGuid" :skybox-name="props.skyboxName" :skybox-guid="props.skyboxGuid"
       :mu="props.mu"
       :epsilon="props.epsilon"
       :antialiasLevel="props.antialiasLevel"

@@ -1,20 +1,36 @@
 <script setup lang="ts">
+import ExpmapEffectsControls from './ExpmapEffectsControls.vue'
+import { documentEffects } from '../expmap/effects'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
 import type { MandelbrotExposed } from '../types/MandelbrotExposed'
 import { parkExpmapSession } from '../expmap/session'
 import type { Engine } from '../Engine'
-import { expmapLastView, expmapOpenDocument } from '../expmap/runtime'
-import { expmapLibraryEntries } from '../expmap/library'
+import { expmapLastView, expmapOpenDocument, expmapPreviewView } from '../expmap/runtime'
+import { expmapLibraryEntries, expmapLibraryFilename, openExpmapLibraryEntry, selectedExpmapDocumentId } from '../expmap/library'
 import { EXPMAP_SAMPLE_LIMITS, expmapPlayerResolution } from '../expmap/renderer'
 import { ExpmapGpuPlayer } from '../expmap/gpuPlayer'
 import { interpolateScale, scaleDoublements } from '../expmap/decimal'
+import { magnitudeSummary } from '../expmap/controls'
 import { advanceExpmapPlayback, expmapTimeLabel } from '../expmap/playback'
 const props = defineProps<{ engine: Engine | null; controller: MandelbrotExposed | null }>()
 const surface = ref<HTMLElement | null>(null), canvas = ref<HTMLCanvasElement | null>(null)
+let exactPreview: { position: number; scale: string } | null = null
 const position = ref(0), angle = ref(0), error = ref(''), loading = ref(false), ready = ref(false)
 const maxSamples=ref(16), renderedResolution=ref('')
 const playing = ref(false), rate = ref(1), direction = ref(1), loop = ref(false)
-const title = computed(() => expmapLibraryEntries.value.find(e => e.id === expmapOpenDocument.value?.manifest.documentId)?.name ?? 'ExpMap')
+const title = computed(() => { const entry = expmapLibraryEntries.value.find(e => e.id === expmapOpenDocument.value?.manifest.documentId); return entry ? expmapLibraryFilename(entry) : 'ExpMap' })
+const magnitude = computed(() => { const d = expmapOpenDocument.value?.manifest.projection.domain; return d ? magnitudeSummary(d.startScale, d.endScale) : '' })
+let selectionGeneration = 0
+async function selectDocument(id: string) {
+  const entry = expmapLibraryEntries.value.find(e => e.id === id), current = ++selectionGeneration
+  if (!entry) return
+  playing.value = false
+  try {
+    const opened = await openExpmapLibraryEntry(entry)
+    if (current !== selectionGeneration || !expmapOpenDocument.value) return
+    selectedExpmapDocumentId.value = id; expmapOpenDocument.value = opened
+  } catch (e) { if (current === selectionGeneration) error.value = String(e) }
+}
 const duration = computed(() => {
   const domain = expmapOpenDocument.value?.manifest.projection.domain
   return domain ? Math.max(0.001, scaleDoublements(domain.startScale, domain.endScale) / 2 || 5) : 5
@@ -37,7 +53,7 @@ function request() {
   const {width,height}=expmapPlayerResolution(p,surface.value?.clientWidth || window.innerWidth,
     surface.value?.clientHeight || window.innerHeight,window.devicePixelRatio)
   loading.value = true; error.value = ''
-  player.request({ width, height, maxSamples:maxSamples.value, scale: interpolateScale(p.domain.startScale, p.domain.endScale, position.value), angle: angle.value })
+  player.request({ effects: { ...documentEffects(doc.manifest.documentId) }, width, height, maxSamples:maxSamples.value, scale: exactPreview?.position === position.value ? exactPreview.scale : interpolateScale(p.domain.startScale, p.domain.endScale, position.value), angle: angle.value })
 }
 function seek(value: number) { playing.value = false; position.value = Math.max(0, Math.min(1, value)) }
 function togglePlay() {
@@ -63,6 +79,7 @@ async function fullscreen() {
   } catch (e) { error.value = String(e) }
 }
 function close() {
+  selectionGeneration++
   playing.value = false
   if (document.fullscreenElement === surface.value) void document.exitFullscreen().catch(() => {})
   expmapOpenDocument.value = null
@@ -72,14 +89,14 @@ function keyboard(event: KeyboardEvent) {
   const target = event.target as HTMLElement | null
   if (event.key === 'Escape') { event.preventDefault(); event.stopImmediatePropagation(); close(); return }
   if (event.key === 'Tab') {
-    const controls = Array.from(surface.value?.querySelectorAll<HTMLElement>('button:not(:disabled),input,select') ?? [])
+    const controls = Array.from(surface.value?.querySelectorAll<HTMLElement>('button:not(:disabled),input,select,summary') ?? [])
     const first = controls[0], last = controls[controls.length - 1]
     if (first && (event.shiftKey ? target === first || target === surface.value : target === last || target === surface.value)) {
       event.preventDefault(); (event.shiftKey ? last : first).focus()
     }
     return
   }
-  if (target?.matches('input,select,textarea,button') || target?.isContentEditable) return
+  if (target?.matches('input,select,textarea,button,summary') || target?.isContentEditable) return
   const actions: Record<string, () => void> = {
     ' ': togglePlay, ArrowLeft: () => seek(position.value - 5 / duration.value), ArrowRight: () => seek(position.value + 5 / duration.value),
     Home: () => seek(0), End: () => seek(1), f: () => { void fullscreen() },
@@ -92,8 +109,17 @@ watch([expmapOpenDocument, () => props.engine], async ([doc], _previous, onClean
   onCleanup(() => { current = false })
   playing.value = false; ready.value = false
   player.dispose(); release?.(); release = undefined
+  exactPreview = null
   position.value = 0; angle.value = 0; error.value = ''; renderedResolution.value = ''
   if (!doc) { returnFocus?.focus(); returnFocus = null; return }
+  const preview = expmapPreviewView.value
+  if (preview?.documentId === doc.manifest.documentId) {
+    const d = doc.manifest.projection.domain, distance = scaleDoublements(d.startScale, d.endScale)
+    position.value = distance ? Math.max(0, Math.min(1, scaleDoublements(d.startScale, preview.scale) / distance)) : 0
+    exactPreview = { position: position.value, scale: preview.scale }
+    angle.value = preview.angle
+    expmapPreviewView.value = null
+  }
   if (!returnFocus) returnFocus = document.activeElement as HTMLElement | null
   release = parkExpmapSession(props.engine, props.controller)
   loading.value = true
@@ -103,6 +129,7 @@ watch([expmapOpenDocument, () => props.engine], async ([doc], _previous, onClean
   catch (e) { if (current) { error.value = String(e); loading.value = false } }
 }, { immediate: true })
 watch([position, angle, maxSamples], request)
+watch(() => expmapOpenDocument.value ? documentEffects(expmapOpenDocument.value.manifest.documentId) : null, request, { deep: true })
 let sizeObserver:ResizeObserver|undefined, densityQuery:MediaQueryList|undefined
 function watchDensity() {
   densityQuery?.removeEventListener('change',densityChanged)
@@ -125,7 +152,7 @@ onUnmounted(() => {
   <Teleport to="body">
     <div v-if="expmapOpenDocument" ref="surface" class="expmap-surface" role="dialog" aria-modal="true" aria-label="Lecteur ExpMap" tabindex="-1" @wheel.prevent="seek(position + $event.deltaY / 5000)" @pointerdown.stop @keydown.stop>
       <canvas ref="canvas" @click="togglePlay" aria-label="Rendu ExpMap" />
-      <header><div><strong>LECTEUR EXPMAP</strong><span>{{ title }}</span><small>Apparence cuite · {{ playing ? 'Lecture' : 'Pause' }}</small><small class="resolution" aria-label="Résolution et AA du rendu">{{ renderedResolution }}</small></div><button class="exit" @click="close">✕ Quitter <small>Échap</small></button></header>
+      <header><div><strong>LECTEUR EXPMAP</strong><select aria-label="Fichier ExpMap du lecteur" :title="title" :value="expmapOpenDocument.manifest.documentId" @change="selectDocument(($event.target as HTMLSelectElement).value)"><option v-for="entry in expmapLibraryEntries.filter(e => e.state === 'ready')" :key="entry.id" :value="entry.id">{{ expmapLibraryFilename(entry) }}</option></select><small>{{ magnitude }}</small><small>Apparence cuite · {{ playing ? 'Lecture' : 'Pause' }}</small><small class="resolution" aria-label="Résolution et AA du rendu">{{ renderedResolution }}</small></div><button class="exit" @click="close">✕ Quitter <small>Échap</small></button></header>
       <div class="expmap-controls" @wheel.stop>
         <div class="timeline"><span>{{ expmapTimeLabel(position * duration) }}</span><input :value="position" @input="seek(Number(($event.target as HTMLInputElement).value))" aria-label="Position de lecture" type="range" min="0" max="1" step="0.0001"><span>{{ expmapTimeLabel(duration) }}</span></div>
         <div class="transport">
@@ -140,6 +167,7 @@ onUnmounted(() => {
           <button v-if="surface?.requestFullscreen" @click="fullscreen">Plein écran</button>
           <span class="status" role="status">{{ loading ? 'Chargement…' : '2 doublements/s à 1×' }}</span>
         </div>
+        <ExpmapEffectsControls :document-id="expmapOpenDocument.manifest.documentId"/>
         <p v-if="error" role="alert">{{ error }}</p>
       </div>
     </div>

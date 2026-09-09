@@ -1,3 +1,7 @@
+import {GpuPalettePath} from './gpuPalettePath'
+import {resolvePalettePathImages} from './palettePathResources'
+import {validatePalettePath, snapshotPathAppearance, PATH_GLOBAL_FIELDS, PALETTE_PATH_TEXTURE_BUDGET, type PalettePath} from './palettePath'
+import {GpuPaletteTransition} from './gpuPaletteTransition'
 import type { ExpmapKernelProjection } from './expmap/producerProjection'
 // Engine.ts: implémente une classe Engine pour gérer le pipeline WebGPU
 
@@ -14,10 +18,10 @@ import aaTargetShader from './assets/aa_target.wgsl?raw'
 import aaReseedShader from './assets/aa_reseed.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
-import {generateMipmaps, mipLevelCountFor} from './mipmaps'
+import {generateMipmaps, mipLevelCountFor, packTextureLayers} from './mipmaps'
 import {Palette} from './Palette.ts'
 import {needsSurfaceColorPipeline} from './colorPipelineFeatures'
-import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString} from './floatexp'
+import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString, log10FromDecimalString} from './floatexp'
 import {
     RADIAL_CERTIFICATE_LAYOUT_VERSION,
     RADIAL_CERTIFICATE_WORDS_PER_BLOCK,
@@ -633,6 +637,8 @@ function shiftedAnimationContribution(track: AnimationTrackConfig, time: number,
 }
 
 export type RenderOptions = {
+    palettePath?: PalettePath,
+    textureName?: string, textureGuid?: string, skyboxName?: string, skyboxGuid?: string,
     antialiasLevel: number,
     aaAuto?: boolean,
     /** false = FULL AA (every pixel gets the whole budget); true/undefined = adaptive target map. */
@@ -1369,6 +1375,24 @@ export class Engine {
     skyboxTextureView?: GPUTextureView
     private tileTextureSourceKey?: string
     private skyboxTextureSourceKey?: string
+    private palettePathGpu?: GpuPalettePath
+    private palettePathDummy?: GPUBuffer
+    private palettePathSignature = ''
+    private palettePathInput?: PalettePath
+    private palettePathBaseStops?: ColorStop[]
+    private palettePathBaseGlobals = ''
+    private palettePathGeneration = 0
+    palettePathStatus = ''
+    private presetTransition?: {
+        palette: GpuPaletteTransition; stops: ColorStop[]; progress: number;
+        tile: GPUTexture; sky: GPUTexture; tileKey: string; skyKey: string;
+        tileLayers?: GPUTexture; skyLayers?: GPUTexture;
+    }
+    private transitionGeneration = 0
+    private tileLoadGeneration = 0
+    private skyLoadGeneration = 0
+
+    get isPresetTransitionActive() { return !!this.presetTransition }
     paletteTexture?: GPUTexture
     paletteTextureView?: GPUTextureView
     paletteSampler?: GPUSampler
@@ -2254,7 +2278,7 @@ export class Engine {
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
             label: 'Engine TileTexture 1x1 Placeholder',
         })
-        this.tileTextureView = this.tileTexture.createView()
+        this.tileTextureView = this.tileTexture.createView({ dimension: '2d-array' })
 
         this.skyboxTexture = this.device.createTexture({
             size: [1, 1, 1],
@@ -2262,7 +2286,7 @@ export class Engine {
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
             label: 'Engine SkyboxTexture 1x1 Placeholder',
         })
-        this.skyboxTextureView = this.skyboxTexture.createView()
+        this.skyboxTextureView = this.skyboxTexture.createView({ dimension: '2d-array' })
 
         const palette = new Palette([])
         const paletteTex = palette.generateTexture()
@@ -2279,7 +2303,7 @@ export class Engine {
             { bytesPerRow: paletteTex.width * 8 },  // 4 channels × 2 bytes (float16)
             [paletteTex.width, paletteTex.height]
         )
-        this.paletteTextureView = this.paletteTexture.createView()
+        this.paletteTextureView = this.paletteTexture.createView({ dimension: '2d-array' })
         // Sampler linéaire pour interpolation douce de la palette
         this.paletteSampler = this.device.createSampler({
             magFilter: 'linear',
@@ -2303,7 +2327,9 @@ export class Engine {
             format: 'rgba8unorm',
             usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.COPY_DST | GPUTextureUsage.RENDER_ATTACHMENT,
         })
-        this.webcamTextureView = this.webcamTileTexture.createView()
+        this.webcamTextureView = this.webcamTileTexture.createView({ dimension: '2d-array' })
+
+        this.palettePathDummy = this.device.createBuffer({ size: 208, usage: GPUBufferUsage.STORAGE | GPUBufferUsage.COPY_DST, label: 'Inactive palette path' })
 
         // uniform buffers
         this.uniformBufferMandelbrot = this.device.createBuffer({
@@ -2471,10 +2497,10 @@ export class Engine {
             entries: [
                 { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
-                { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float' } },
+                { binding: 2, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+                { binding: 3, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+                { binding: 4, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
+                { binding: 5, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'float', viewDimension: '2d-array' } },
                 { binding: 6, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d-array' } },
                 { binding: 7, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
                 { binding: 8, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
@@ -2490,6 +2516,7 @@ export class Engine {
                 { binding: 16, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
                 { binding: 17, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
                 { binding: 18, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
+                { binding: 19, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
@@ -5902,7 +5929,10 @@ export class Engine {
                     Math.max(100, 1000 * multiplier * -log2FromDecimalString(this.expmapProjection!.iterationScale))
                     + Math.max(0, Math.ceil(Math.log2(Math.log(Math.max(mu, 4)) / Math.log(4)))), 10_000_000) }
         }
-        this.selectColorPipelines(needsSurfaceColorPipeline(renderOptions.colorStops))
+        await this.preparePalettePath(renderOptions)
+        this.palettePathGpu?.update(this.device, -(mandelbrot.scaleStr ? log10FromDecimalString(mandelbrot.scaleStr) : Math.log10(mandelbrot.scale)),
+            this.expmapProjection ?? undefined, this.expmapProjection ? -log10FromDecimalString(this.expmapProjection.scale) : undefined)
+        this.selectColorPipelines(needsSurfaceColorPipeline(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops))
         this.rotationColorResolveChangedThisUpdate = false
         const orbitTrap = normalizeOrbitTrapConfig(renderOptions.orbitTrap, renderOptions.orbitTrapStrength)
         const previousOrbitTrap = this.previousRenderOptions
@@ -5958,7 +5988,7 @@ export class Engine {
         // attachment, so a flip has to re-create the textures. Done here, before
         // any previous-state comparison: resize() clears the render anyway, which
         // is what the flip already forced through clearHistoryNextFrame.
-        this.orbitMetricsEnabled = shouldTrackOrbitMetrics(renderOptions.colorStops)
+        this.orbitMetricsEnabled = shouldTrackOrbitMetrics(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops)
         if ((this.orbitMetricsEnabled !== this.orbitGradientAllocated
             || this.orbitTrapEnabled !== this.trapPayloadAllocated) && this.rawTexture) {
             this.resize()
@@ -6029,7 +6059,7 @@ export class Engine {
             && this.isTranslationOnlyChange(mandelbrot, this.previousMandelbrot)
         const zoomReprojectionOnlyChange = mandelbrotChanged
             && this.isZoomReprojectionOnlyChange(mandelbrot, this.previousMandelbrot)
-        const renderOptionsChanged = !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
+        const renderOptionsChanged = !!this.presetTransition || !this.areObjectsEqual(renderOptions, this.previousRenderOptions)
         const stripeFrequencyChanged = renderOptions.stripeFrequency !== this.previousRenderOptions?.stripeFrequency
         const orbitMetricsEnabled = this.orbitMetricsEnabled
         const orbitMetricsChanged = this.previousOrbitMetricsEnabled !== undefined
@@ -6071,7 +6101,7 @@ export class Engine {
         this.previousOrbitMetricsEnabled = orbitMetricsEnabled
 
         // Check if any stop has webcam > 0 to decide whether to capture webcam frames
-        const hasWebcam = renderOptions.colorStops.some(s => (s.webcam ?? 0) > 0)
+        const hasWebcam = (this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops).some(s => (s.webcam ?? 0) > 0)
         if (hasWebcam) { // limite à ~30fps la mise à jour webcam
             await this.updateWebcamTexture()
             this.needRender = true
@@ -6084,12 +6114,6 @@ export class Engine {
         }
 
         const aspect = (this.width / Math.max(1, this.height))
-
-        let scaleFactor = this.previousMandelbrot?.scale || 1.0 / mandelbrot.scale
-        if (scaleFactor < 1.0) {
-            scaleFactor = 1.0 / scaleFactor
-        }
-        scaleFactor = Math.sqrt(scaleFactor) - 1.0
 
         // When the navigator re-anchors its reference orbit, `dx/dy` jump back to ~0.
         // Reprojecting history across that discontinuity would be nonsense, so we clear.
@@ -6222,8 +6246,8 @@ export class Engine {
         }
 
         // Si la palette a changé (stops ou mode d'interpolation), on la recalcule
-        if (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])
-            || renderOptions.interpolationMode !== this.previousRenderOptions?.interpolationMode) {
+        if (!this.palettePathGpu && !this.presetTransition && (!this.areColorStopsEqual(renderOptions.colorStops, this.previousRenderOptions?.colorStops || [])
+            || renderOptions.interpolationMode !== this.previousRenderOptions?.interpolationMode)) {
             const palette = new Palette(renderOptions.colorStops, renderOptions.interpolationMode)
             const paletteTex = palette.generateTexture()
             const paletteF16 = float32ArrayToFloat16(paletteTex.data)
@@ -6310,7 +6334,9 @@ export class Engine {
         const colorShaderData = new Float32Array([
             renderOptions.palettePeriod,    // 0: palettePeriod
             renderOptions.paletteOffset + paletteOffsetAnim, // 1: paletteOffset
-            scaleFactor,                    // 2: bloomStrength (scaleFactor)
+            this.presetTransition?.skyLayers
+                ? this.skyboxTexture!.mipLevelCount * 32 + this.presetTransition.sky.mipLevelCount
+                : 0,                             // 2: packed source mip counts (each <32)
             this.time,                      // 3: time
             aspect,                         // 4: aspect
             mandelbrot.angle,               // 5: angle
@@ -6395,7 +6421,7 @@ export class Engine {
             this.rawOriginX,                      // 96: raw toroidal origin X
             this.rawOriginY,                      // 97: raw toroidal origin Y
             this.orbitGradientAllocated ? 1 : 0,   // 98: orbit metric payload present
-            0,                                    // 99: pad
+            this.presetTransition?.progress ?? 0, // 99: texture transition blend
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -6647,9 +6673,10 @@ export class Engine {
 
     /** Conditions shared by cache bake, cache presentation, and idle keepalive. */
     private rotationColorResolveAllowed(renderOptions = this.previousRenderOptions): boolean {
+        if (this.palettePathGpu) return false
         if (!renderOptions || !this.previousMandelbrot) return false
         const hasLiveWebcam = this.webcamEnabled
-            && renderOptions.colorStops.some(stop => (stop.webcam ?? 0) > 0)
+            && (this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops).some(stop => (stop.webcam ?? 0) > 0)
         return rotationNeedsColorResolve(this.previousMandelbrot.angle)
             && !this.aaActive
             && this.aaAccumulatedSamples === 0
@@ -7950,6 +7977,10 @@ export class Engine {
     }
 
     destroy() {
+        this.cancelPresetTransition()
+        this.palettePathGeneration++
+        this.palettePathGpu?.destroy()
+        this.palettePathDummy?.destroy()
         this.destroyed = true
         this.stopRenderLoop()
         this.postReferenceWorker({ type: 'dispose' })
@@ -8240,6 +8271,140 @@ export class Engine {
         }
     }
 
+    private async preparePalettePath(options: RenderOptions) {
+        const input = options.palettePath
+        if (!input?.enabled || this.presetTransition) {
+            if (this.palettePathInput) { this.palettePathGeneration++; this.palettePathInput = undefined }
+            if (this.palettePathGpu) {
+                this.palettePathGpu.destroy(); this.palettePathGpu = undefined
+                this.palettePathSignature = ''; this.palettePathInput = undefined
+                this.previousRenderOptions = undefined; this.rebuildColorBindGroup()
+                this.resetAaState(); this.needRender = true
+            }
+            this.palettePathStatus = ''
+            return
+        }
+        const globals = JSON.stringify([options.interpolationMode, ...PATH_GLOBAL_FIELDS.map(f => options[f]),
+            options.textureName, options.textureGuid, options.skyboxName, options.skyboxGuid,
+            options.textureMapping, options.paletteMirror, options.iterationPaletteCurve])
+        if (input === this.palettePathInput && options.colorStops === this.palettePathBaseStops && globals === this.palettePathBaseGlobals) return
+        this.palettePathInput = input; this.palettePathBaseStops = options.colorStops; this.palettePathBaseGlobals = globals
+        const generation = ++this.palettePathGeneration
+        try {
+            const path = validatePalettePath(input), base = snapshotPathAppearance(options)
+            const signature = JSON.stringify([path, base])
+            if (signature === this.palettePathSignature) return
+            this.palettePathStatus = 'Préparation des palettes et images…'
+            const assets = await resolvePalettePathImages(path, base)
+            const textures: GPUTexture[] = []
+            let prepared: GpuPalettePath | undefined
+            try {
+                if (assets.images.length * path.textureSize ** 2 * 4 * 4 / 3 * 2 + (path.stops.length + 1) * 4096 * 7 * 8 > PALETTE_PATH_TEXTURE_BUDGET)
+                    throw new Error('Images du parcours : budget de 128 Mio dépassé. Choisir une résolution inférieure.')
+                for (const asset of assets.images) {
+                    textures.push(await this._loadTexture(asset.url, asset.role === 'sky', path.textureSize))
+                    if (generation !== this.palettePathGeneration || this.destroyed) return
+                }
+                const data = [base, ...path.stops.map(s => s.appearance)].map(p => float32ArrayToFloat16(new Palette(p.colorStops, p.interpolationMode).generateTexture().data))
+                prepared = new GpuPalettePath(this.device, path, base, data, textures, assets.indices)
+            } finally { assets.dispose(); textures.forEach(t => t.destroy()) }
+            this.palettePathGpu?.destroy(); this.palettePathGpu = prepared
+            this.palettePathSignature = signature
+            this.palettePathStatus = `${path.stops.length} palettes prêtes · ${path.textureSize} px maximum`
+            this.previousRenderOptions = undefined
+            this.rebuildColorBindGroup(); this.resetAaState(); this.invalidateRotationColorResolve(); this.needRender = true
+        } catch (error) {
+            this.palettePathGpu?.destroy(); this.palettePathGpu = undefined
+            this.palettePathSignature = ''; this.rebuildColorBindGroup(); this.previousRenderOptions = undefined
+            this.palettePathStatus = `Parcours non appliqué : ${String(error)}`
+            if (this.expmapAppearance) throw error
+        }
+    }
+
+    /** Prepare endpoints atomically; async stale completions never replace a newer travel. */
+    async preparePresetTransition(
+        start: { colorStops: ColorStop[]; interpolationMode: InterpolationMode },
+        end: { colorStops: ColorStop[]; interpolationMode: InterpolationMode },
+        tile: { url: string; key: string }, sky: { url: string; key: string },
+    ): Promise<boolean> {
+        this.cancelPresetTransition()
+        const generation = this.transitionGeneration
+        const results = await Promise.allSettled([
+            this.isTileTextureSourceCurrent(tile.key) ? Promise.resolve(this.tileTexture!) : this._loadTexture(tile.url),
+            this.isSkyboxTextureSourceCurrent(sky.key) ? Promise.resolve(this.skyboxTexture!) : this._loadTexture(sky.url, true),
+        ])
+        const release = () => {
+            const owned = new Set(results.flatMap(r => r.status === 'fulfilled'
+                && r.value !== this.tileTexture && r.value !== this.skyboxTexture ? [r.value] : []))
+            owned.forEach(texture => texture.destroy())
+        }
+        if (generation !== this.transitionGeneration || this.destroyed) { release(); return false }
+        const failed = results.find(r => r.status === 'rejected')
+        if (failed?.status === 'rejected') { release(); throw failed.reason }
+        const targetTile = (results[0] as PromiseFulfilledResult<GPUTexture>).value
+        const targetSky = (results[1] as PromiseFulfilledResult<GPUTexture>).value
+        let palette: GpuPaletteTransition | undefined
+        let tileLayers: GPUTexture | undefined
+        let skyLayers: GPUTexture | undefined
+        try {
+            palette = new GpuPaletteTransition(this.device, this.paletteTexture!, [start, end].map(p =>
+                float32ArrayToFloat16(new Palette(p.colorStops, p.interpolationMode).generateTexture().data)))
+            tileLayers = targetTile === this.tileTexture ? undefined : packTextureLayers(this.device, [this.tileTexture!, targetTile])
+            skyLayers = targetSky === this.skyboxTexture ? undefined : packTextureLayers(this.device, [this.skyboxTexture!, targetSky])
+            this.presetTransition = {
+                palette, progress: 0, stops: [...start.colorStops, ...end.colorStops],
+                tile: targetTile, sky: targetSky, tileKey: tile.key, skyKey: sky.key,
+                tileLayers, skyLayers,
+            }
+        } catch (error) {
+            palette?.destroy(); tileLayers?.destroy(); skyLayers?.destroy(); release()
+            throw error
+        }
+        this.setPresetTransitionProgress(0)
+        this.rebuildColorBindGroup()
+        return true
+    }
+
+    setPresetTransitionProgress(progress: number) {
+        if (!this.presetTransition) return
+        this.presetTransition.progress = Math.max(0, Math.min(1, progress))
+        this.presetTransition.palette.blend(this.presetTransition.progress)
+        this.invalidateRotationColorResolve()
+        this.needRender = true
+    }
+
+    finishPresetTransition() {
+        const transition = this.presetTransition
+        if (!transition) return
+        ++this.tileLoadGeneration
+        ++this.skyLoadGeneration
+        if (this.tileTexture !== transition.tile) this.tileTexture?.destroy()
+        if (this.skyboxTexture !== transition.sky) this.skyboxTexture?.destroy()
+        this.tileTexture = transition.tile
+        this.skyboxTexture = transition.sky
+        this.tileTextureSourceKey = transition.tileKey
+        this.skyboxTextureSourceKey = transition.skyKey
+        this.tileTextureView = this.tileTexture.createView({ dimension: '2d-array' })
+        this.skyboxTextureView = this.skyboxTexture.createView({ dimension: '2d-array' })
+        this.cancelPresetTransition()
+    }
+
+    cancelPresetTransition() {
+        ++this.transitionGeneration
+        const transition = this.presetTransition
+        this.presetTransition = undefined
+        if (!transition) return
+        transition.palette.destroy()
+        transition.tileLayers?.destroy()
+        transition.skyLayers?.destroy()
+        if (transition.tile !== this.tileTexture) transition.tile.destroy()
+        if (transition.sky !== this.skyboxTexture) transition.sky.destroy()
+        this.previousRenderOptions = undefined // restore the ordinary palette on the next update
+        this.rebuildColorBindGroup()
+        this.invalidateRotationColorResolve()
+        this.needRender = true
+    }
+
     /**
      * Replace the tile (tessellation) texture at runtime from a data URL or blob URL.
      * The new texture replaces the current one and the color bind group is rebuilt.
@@ -8247,10 +8412,14 @@ export class Engine {
      */
     async updateTileTexture(url: string, sourceKey = url): Promise<void> {
         if (this.tileTextureSourceKey === sourceKey) return
+        this.cancelPresetTransition()
+        const generation = ++this.tileLoadGeneration
         const newTexture = await this._loadTexture(url)
+        if (generation !== this.tileLoadGeneration || this.destroyed) { newTexture.destroy(); return }
+        this.cancelPresetTransition()
         this.tileTexture?.destroy?.()
         this.tileTexture = newTexture
-        this.tileTextureView = this.tileTexture.createView()
+        this.tileTextureView = this.tileTexture.createView({ dimension: '2d-array' })
         this.tileTextureSourceKey = sourceKey
         this.rebuildColorBindGroup()
         this.invalidateRotationColorResolve()
@@ -8266,11 +8435,15 @@ export class Engine {
      */
     async updateSkyboxTexture(url: string, sourceKey = url): Promise<void> {
         if (this.skyboxTextureSourceKey === sourceKey) return
+        this.cancelPresetTransition()
         // Mips : les reflets rugueux lisent un niveau préfiltré (color.wgsl).
+        const generation = ++this.skyLoadGeneration
         const newTexture = await this._loadTexture(url, true)
+        if (generation !== this.skyLoadGeneration || this.destroyed) { newTexture.destroy(); return }
+        this.cancelPresetTransition()
         this.skyboxTexture?.destroy?.()
         this.skyboxTexture = newTexture
-        this.skyboxTextureView = this.skyboxTexture.createView()
+        this.skyboxTextureView = this.skyboxTexture.createView({ dimension: '2d-array' })
         this.skyboxTextureSourceKey = sourceKey
         this.rebuildColorBindGroup()
         this.invalidateRotationColorResolve()
@@ -8288,10 +8461,10 @@ export class Engine {
             const entries: GPUBindGroupEntry[] = [
                 { binding: 0, resource: { buffer: this.uniformBufferColor! } },
                 { binding: 1, resource: liveDisplay.valuesArrayView },
-                { binding: 2, resource: this.tileTextureView! },
-                { binding: 3, resource: this.skyboxTextureView! },
+                { binding: 2, resource: this.palettePathGpu?.tile.createView({ dimension: '2d-array' }) ?? this.presetTransition?.tileLayers?.createView({ dimension: '2d-array' }) ?? this.tileTextureView! },
+                { binding: 3, resource: this.palettePathGpu?.sky.createView({ dimension: '2d-array' }) ?? this.presetTransition?.skyLayers?.createView({ dimension: '2d-array' }) ?? this.skyboxTextureView! },
                 { binding: 4, resource: this.webcamTextureView! },
-                { binding: 5, resource: this.paletteTextureView! },
+                { binding: 5, resource: this.palettePathGpu?.palettes.createView({ dimension: '2d-array' }) ?? this.paletteTextureView! },
                 { binding: 6, resource: this.frozenDisplay.valuesArrayView },
                 { binding: 7, resource: this.paletteSampler! },
                 { binding: 8, resource: this.skyboxSampler! },
@@ -8305,6 +8478,7 @@ export class Engine {
                 { binding: 16, resource: this.frozenDisplay.orbitGradientView ?? this.orbitGradientDummyView! },
                 { binding: 17, resource: liveDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
                 { binding: 18, resource: this.frozenDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
+                { binding: 19, resource: { buffer: this.palettePathGpu?.buffer ?? this.palettePathDummy! } },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,
@@ -8315,7 +8489,7 @@ export class Engine {
     }
 
     // Méthode utilitaire pour charger une image et la convertir en GPUTexture
-    private async _loadTexture(url: string, withMips = false): Promise<GPUTexture> {
+    private async _loadTexture(url: string, withMips = false, maxDimension = Infinity): Promise<GPUTexture> {
         const img = new Image()
         img.src = url
         try {
@@ -8324,7 +8498,8 @@ export class Engine {
             console.warn('Échec du chargement de la texture : ' + url, e)
             throw e
         }
-        const bitmap = await createImageBitmap(img, { premultiplyAlpha: 'none' })
+        const ratio = Math.min(1, maxDimension / Math.max(img.naturalWidth, img.naturalHeight))
+        const bitmap = await createImageBitmap(img, { premultiplyAlpha: 'none', resizeWidth: Math.max(1, Math.round(img.naturalWidth * ratio)), resizeHeight: Math.max(1, Math.round(img.naturalHeight * ratio)) })
         const texture = this.device.createTexture({
             size: [bitmap.width, bitmap.height, 1],
             format: 'rgba8unorm',
@@ -8337,6 +8512,7 @@ export class Engine {
             { texture: texture },
             [bitmap.width, bitmap.height]
         )
+        bitmap.close()
         if (withMips) generateMipmaps(this.device, texture)
         return texture
     }

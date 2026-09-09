@@ -185,7 +185,11 @@ impl FExpC {
     }
 
     fn one() -> Self {
-        FExpC { x: 1.0, y: 0.0, e: 0 }
+        FExpC {
+            x: 1.0,
+            y: 0.0,
+            e: 0,
+        }
     }
 
     fn is_zero(&self) -> bool {
@@ -667,6 +671,7 @@ pub struct MandelbrotNavigator {
     transition_target_angle: Option<f64>,
     transition_duration: f64,
     transition_elapsed: f64,
+    transition_export_linear: bool,
 }
 
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
@@ -783,6 +788,7 @@ impl MandelbrotNavigator {
             transition_target_angle: None,
             transition_duration: 0.0,
             transition_elapsed: 0.0,
+            transition_export_linear: false,
         };
         // A fresh navigator implies its construction scale as a depth floor (a deep preset
         // reset arrives here at its deep scale); default to at least the 1e-30 budget.
@@ -1296,14 +1302,28 @@ impl MandelbrotNavigator {
                 self.transition_target_angle = None;
             } else {
                 // Easing cubique ease-in-out : t * t * (3 - 2 * t)
-                let t_eased = t * t * (3.0 - 2.0 * t);
+                let t_eased = if self.transition_export_linear {
+                    t
+                } else {
+                    t * t * (3.0 - 2.0 * t)
+                };
 
                 // Interpolation exponentielle pour l'échelle (scale)
                 let ratio = target_scale / start_scale;
                 let ratio_f64 = dbig_to_f64(&ratio);
-                let factor = ratio_f64.powf(t_eased);
-                let factor_big = DBig::from_str(&factor.to_string())
-                    .unwrap_or_else(|_| DBig::try_from(1).unwrap());
+                let factor_big = if self.transition_export_linear
+                    && (!ratio_f64.is_finite() || ratio_f64 < f64::MIN_POSITIVE)
+                {
+                    // Split exponent from mantissa: e+10 -> e-1000 must never
+                    // become a zero/infinite f64 ratio between export frames.
+                    let log_factor = -dbig_neg_log10(&ratio) * t_eased;
+                    let exponent = log_factor.floor();
+                    let mantissa = 10f64.powf(log_factor - exponent);
+                    DBig::from_str(&format!("{}e{}", mantissa, exponent as i64))
+                        .unwrap_or(DBig::ONE)
+                } else {
+                    DBig::from_str(&ratio_f64.powf(t_eased).to_string()).unwrap_or(DBig::ONE)
+                };
                 self.scale = start_scale * &factor_big;
 
                 // Pour la position (cx, cy), afin d'avoir une vitesse visuelle de translation uniforme,
@@ -1344,8 +1364,8 @@ impl MandelbrotNavigator {
                     let velocity = dbig_to_f64(&self.vscale);
                     let factor = velocity.powf(delta_time * NAVIGATION_ZOOM_RATE);
                     if factor.is_finite() && factor > 0.0 {
-                        let factor_big = DBig::from_str(&factor.to_string())
-                            .unwrap_or_else(|_| one.clone());
+                        let factor_big =
+                            DBig::from_str(&factor.to_string()).unwrap_or_else(|_| one.clone());
                         self.scale = &self.scale * &factor_big;
                     }
                 }
@@ -3011,6 +3031,7 @@ impl MandelbrotNavigator {
         target_angle: f64,
         duration: f64,
     ) {
+        self.transition_export_linear = false;
         self.transition_start_cx = Some(self.cx.clone());
         self.transition_start_cy = Some(self.cy.clone());
         self.transition_start_scale = Some(self.scale.clone());
@@ -3039,6 +3060,24 @@ impl MandelbrotNavigator {
         self.vangle = 0.0;
         self.vtx = DBig::try_from(0).unwrap();
         self.vty = DBig::try_from(0).unwrap();
+    }
+
+    /// Export supplies an already eased absolute time. Preserve the requested
+    /// unwrapped angle so full turns are not reduced to the shortest arc.
+    pub fn start_export_transition(
+        &mut self,
+        target_cx: &str,
+        target_cy: &str,
+        target_scale: &str,
+        target_angle: f64,
+        duration: f64,
+    ) {
+        self.start_transition(target_cx, target_cy, target_scale, target_angle, duration);
+        self.transition_target_angle = Some(target_angle);
+        if duration.is_finite() && duration > 0.0 {
+            self.transition_duration = duration;
+        }
+        self.transition_export_linear = true;
     }
 
     pub fn cancel_transition(&mut self) {
@@ -5841,7 +5880,9 @@ mod tests {
 
     #[test]
     fn precision_budget_matches_the_f64_round_trip_it_replaced() {
-        for text in ["1", "0.5", "1e-5", "1e-28", "1e-100", "1e-300", "1e-320", "0"] {
+        for text in [
+            "1", "0.5", "1e-5", "1e-28", "1e-100", "1e-300", "1e-320", "0",
+        ] {
             let scale = DBig::from_str(text).unwrap();
             // The decimal-string round-trip this function used to perform.
             let legacy = {
@@ -6097,6 +6138,53 @@ mod tests {
                 "frame {} differs when rendered standalone",
                 frame
             );
+        }
+    }
+
+    #[test]
+    fn export_transition_preserves_turns_and_linear_progress() {
+        for turns in [-2.5, 2.5] {
+            let mut nav = MandelbrotNavigator::new("0", "0", "1", 0.0);
+            let target = turns * 2.0 * std::f64::consts::PI;
+            nav.start_export_transition("0", "0", "1e-8", target, 4.0);
+            nav.step_at_transition_time(None, None, 1.0);
+            assert!((dbig_to_f64(&nav.scale) / 0.01 - 1.0).abs() < 1e-10);
+            assert!((nav.angle - target * 0.25).abs() < 1e-12);
+            nav.step_at_transition_time(None, None, 4.0);
+            assert_eq!(nav.angle, target);
+            let fixed = nav.get_params();
+            nav.step_at_transition_time(None, None, 4.0);
+            assert_eq!(fixed, nav.get_params());
+        }
+    }
+
+    #[test]
+    fn export_transition_preserves_subframe_duration() {
+        let mut nav = MandelbrotNavigator::new("0", "0", "1", 0.0);
+        nav.start_export_transition("0", "0", "0.5", 1.0, 0.001);
+        nav.step_at_transition_time(None, None, 0.001);
+        assert_eq!(nav.scale, DBig::from_str("0.5").unwrap());
+        assert_eq!(nav.angle, 1.0);
+    }
+
+    #[test]
+    fn export_transition_avoids_subnormal_ratio_rounding() {
+        let mut nav = MandelbrotNavigator::new("0", "0", "1", 0.0);
+        nav.start_export_transition("0", "0", "1e-320", 0.0, 2.0);
+        nav.step_at_transition_time(None, None, 1.0);
+        assert!((dbig_neg_log10(&nav.scale) - 160.0).abs() < 1e-10);
+    }
+
+    #[test]
+    fn export_transition_crosses_a_thousand_decades_in_both_directions() {
+        for (from, to) in [("1e10", "1e-1000"), ("1e-1000", "1e10")] {
+            let mut nav = MandelbrotNavigator::new("0", "0", from, 0.0);
+            nav.start_export_transition("0", "0", to, 0.0, 4.0);
+            nav.step_at_transition_time(None, None, 2.0);
+            assert!((dbig_neg_log10(&nav.scale) - 495.0).abs() < 1e-8);
+            assert!(nav.scale > DBig::ZERO);
+            nav.step_at_transition_time(None, None, 4.0);
+            assert_eq!(nav.scale, DBig::from_str(to).unwrap());
         }
     }
 

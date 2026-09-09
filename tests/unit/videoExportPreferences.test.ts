@@ -41,8 +41,17 @@ describe('normalizeVideoExportPreferences', () => {
         expect(normalizeVideoExportPreferences({codec}).codec).toBe(codec)
     })
 
-    it('defaults to AV1', () => {
-        expect(DEFAULT_VIDEO_EXPORT_PREFERENCES.codec).toBe('av1')
+    it('defaults to 4K at 60 fps with automatic HEVC preference', () => {
+        expect(DEFAULT_VIDEO_EXPORT_PREFERENCES.codec).toBe('auto')
+        expect(DEFAULT_VIDEO_EXPORT_PREFERENCES.resolution).toBe('3840x2160')
+        expect(DEFAULT_VIDEO_EXPORT_PREFERENCES.fps).toBe('60')
+    })
+
+    it('preserves independent motion durations, hold and output filename', () => {
+        const value = {...DEFAULT_VIDEO_EXPORT_PREFERENCES, filename:'Minibrot', motion:{easeIn:'smooth' as const,easeOut:'linger' as const,easeInSeconds:2,easeOutSeconds:8,holdSeconds:3}}
+        expect(normalizeVideoExportPreferences(value)).toEqual(value)
+        expect(normalizeVideoExportPreferences({motion:{easeIn:'invalid',easeOutSeconds:NaN,holdSeconds:-1}}).motion).toEqual(DEFAULT_VIDEO_EXPORT_PREFERENCES.motion)
+        expect(normalizeVideoExportPreferences({pinnedStart:LOCATION}).motion.holdSeconds).toBe(0)
     })
 
     // A deep view sits far below what f64 can represent, so a location whose

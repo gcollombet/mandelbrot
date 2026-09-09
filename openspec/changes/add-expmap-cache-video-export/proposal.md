@@ -24,7 +24,7 @@ Précalculer une image ExpMap persistante pour explorer un deepzoom et exporter 
 
 ### Modified Capabilities
 
-Aucune ; les autres modes d'export conservent leur comportement.
+Contrôle de navigation élargi à e+10 et valeurs initiales de sortie vidéo 4K/60/HEVC avec repli AVC. Les autres modes conservent leurs parcours et leurs préférences enregistrées.
 
 ## Impact
 

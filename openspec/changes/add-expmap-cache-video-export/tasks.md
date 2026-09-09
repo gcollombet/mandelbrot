@@ -55,3 +55,12 @@
 - [x] 7.1 Déplacer lecture ZIP/OPFS, vérification et décodage natif dans un worker borné à une image, avec transfert du bitmap.
 - [x] 7.2 Importer la tuile anticipée en bandes de 4 MiB maximum, espacées et annulables ; publication seulement après transfert complet.
 - [x] 7.3 Vérifier résidence partielle, changement de fenêtre, promotion d’une prélecture, annulation, worker et compilation.
+- [x] 7.4 Remplacer la liste technique du catalogue par des tuiles compactes titrées avec le nom réel du fichier et hiérarchiser les actions.
+
+## 8. Contrôles de préparation et de montage
+
+- [x] 8.1 Séparer captures du centre et des zooms, sliders e+10 à e-1000, navigation et résumés de magnitude.
+- [x] 8.2 Ajouter sélection de plage, aperçu des bornes, inversion, rotations en degrés et tours, noms réels des fichiers.
+- [x] 8.3 Préférences 4K/60, HEVC avec repli H.264 détecté et agrandissement explicite des sources plus petites.
+- [x] 8.4 Ajouter courbes et durées indépendantes d’entrée/sortie, palier fixe, preset minibrot et persistance compatible.
+- [x] 8.5 Vérifier trajets monotones, endpoints exacts, paliers, préférences, couverture, types et compilation sans tests navigateur.

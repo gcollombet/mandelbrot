@@ -1,3 +1,5 @@
+import { canonicalDecimal, canonicalScale } from './expmap/decimal'
+
 // ── Parcours model and validation for video export ──
 // Pure logic, no GPU and no Vue, so every refusal path is testable.
 //
@@ -84,7 +86,9 @@ export function validateVideoPath(spec: VideoPathSpec): VideoPathProblem[] {
   for (const [label, endpoint] of [['départ', spec.from], ['arrivée', spec.to]] as const) {
     for (const field of ['cx', 'cy', 'scale'] as const) {
       const value = endpoint?.[field]
-      if (typeof value !== 'string' || value.trim() === '' || !Number.isFinite(Number(value))) {
+      let valid = true
+      try { if (field === 'scale') canonicalScale(value); else canonicalDecimal(value) } catch { valid = false }
+      if (!valid) {
         problems.push({
           kind: 'divergent-parameter',
           field,
@@ -92,6 +96,7 @@ export function validateVideoPath(spec: VideoPathSpec): VideoPathProblem[] {
         })
       }
     }
+    if (!Number.isFinite(endpoint?.angle)) problems.push({kind:'divergent-parameter',field:'angle',message:`L’angle de ${label} doit être fini.`})
   }
 
   return problems

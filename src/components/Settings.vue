@@ -102,6 +102,7 @@ import {
 import {absolutePresetUrl, PRESET_QUERY_PARAMETER} from '../presetDeepLink';
 
 import type {Engine} from '../Engine.ts';
+import type { ExpmapMotion } from '../expmap/motion';
 import VideoExportPanel from './VideoExportPanel.vue';
 import ExpmapPanel from './ExpmapPanel.vue';
 import { expmapBusy, expmapOpenDocument } from '../expmap/runtime';
@@ -424,23 +425,23 @@ function scaleLog10(scaleStr: string): number {
 const SCALE_SLIDER_MAX = 1000;
 
 // The slider maps to the decimal zoom depth: position v ⇒ scale 1e-v, so it
-// reads directly as a power of ten (1 → 10⁻¹ … 1000 → 10⁻¹⁰⁰⁰). The scale is set
+// reads directly as a power of ten (-10 → 10¹⁰ … 1000 → 10⁻¹⁰⁰⁰). The scale is set
 // as a `1e-v` STRING — never `2**-v`, which underflows past ~1e-324. The
 // arbitrary-precision navigator parses the string natively.
 const scaleSlider = computed({
   get: () => {
     const mag = -scaleLog10(model.value.scale);
-    if (!isFinite(mag)) return 1;
-    return Math.min(Math.max(Math.round(mag), 1), SCALE_SLIDER_MAX);
+    if (!isFinite(mag)) return -10;
+    return Math.min(Math.max(Math.round(mag), -10), SCALE_SLIDER_MAX);
   },
   set: (val: number) => {
-    const v = Math.min(Math.max(Math.round(val), 1), SCALE_SLIDER_MAX);
-    model.value.scale = `1e-${v}`;
+    const v = Math.min(Math.max(Math.round(val), -10), SCALE_SLIDER_MAX);
+    model.value.scale = `1e${-v}`;
   }
 });
 
 // ── Dense field formatters (Navigation) ──────────────────────────────
-const zoomFmt = (v: number) => `1e-${Math.round(v)}`;
+const zoomFmt = (v: number) => `1e${-Math.round(v)}`;
 const angleFmt = (v: number) => v.toFixed(1);
 const muFmt = (v: number) => Math.pow(10, v).toFixed(1);
 
@@ -2517,8 +2518,15 @@ function cancelVideoExport() {
   if (videoAbortSignal) videoAbortSignal.aborted = true;
 }
 
+function previewVideoLocation(location: VideoPathLocation) {
+  if (videoExportRunning.value || expmapBusy.value) return;
+  model.value = { ...model.value, ...location };
+}
+
 async function startVideoExport(payload: {
   durationSeconds: number;
+  motion: ExpmapMotion;
+  filename: string;
   output: VideoOutputSpec;
   codec: 'av1' | 'avc' | 'hevc' | 'vp9';
   aaSamplesPerFrame: number;
@@ -2542,7 +2550,7 @@ async function startVideoExport(payload: {
   // has intervened. Streaming to disk is what keeps a long export from holding
   // the whole film in memory ("array buffer allocation failed" at the end), and
   // fragmented MP4 keeps the partial file playable if the run is interrupted.
-  const suggestedName = `mandelbrot-parcours-${Date.now()}.mp4`;
+  const suggestedName = payload.filename;
   let writable: FileSystemWritableFileStream | null = null;
   const picker = (window as any).showSaveFilePicker as
     | ((options?: unknown) => Promise<FileSystemFileHandle>)
@@ -2574,6 +2582,7 @@ async function startVideoExport(payload: {
         from: payload.startLocation,
         to: payload.endLocation,
         durationSeconds: payload.durationSeconds,
+        motion: payload.motion,
         output: payload.output,
         codec: payload.codec,
         aaSamplesPerFrame: payload.aaSamplesPerFrame,
@@ -2684,7 +2693,7 @@ async function startVideoExport(payload: {
 
         <div class="fields">
           <DenseField
-            label="Zoom" :min="1" :max="1000" :step="1"
+            label="Zoom" :min="-10" :max="1000" :step="1"
             :f="zoomFmt"
             :model-value="scaleSlider"
             @update:model-value="(v: number) => scaleSlider = v"
@@ -2944,6 +2953,7 @@ async function startVideoExport(payload: {
         :frames-emitted="videoFramesEmitted"
         :total-frames="videoTotalFrames"
         :last-error="videoExportError"
+        @preview="previewVideoLocation"
         @start="startVideoExport"
         @cancel="cancelVideoExport"
       />

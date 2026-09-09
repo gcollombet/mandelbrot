@@ -98,3 +98,35 @@ export function generateMipmaps(device: GPUDevice, texture: GPUTexture): void {
     }
     device.queue.submit([encoder.finish()])
 }
+
+/** Prepare independent image layers once, including their mip chains.
+ * Original textures stay alive so committing the endpoint does not resample it.
+ */
+export function packTextureLayers(device: GPUDevice, sources: GPUTexture[], maxDimension = Infinity): GPUTexture {
+    const width = Math.min(maxDimension, Math.max(...sources.map(t => t.width)))
+    const height = Math.min(maxDimension, Math.max(...sources.map(t => t.height)))
+    const levels = Math.min(mipLevelCountFor(width, height), Math.max(...sources.map(t => t.mipLevelCount)))
+    const output = device.createTexture({
+        label: 'Transition image layers', size: [width, height, sources.length],
+        format: 'rgba8unorm', mipLevelCount: levels,
+        usage: GPUTextureUsage.TEXTURE_BINDING | GPUTextureUsage.RENDER_ATTACHMENT,
+    })
+    const { pipeline, sampler } = getBlit(device, output.format)
+    const encoder = device.createCommandEncoder({ label: 'Prepare transition image layers' })
+    sources.forEach((source, layer) => {
+        for (let level = 0; level < levels; level++) {
+            const sourceLevel = Math.min(level, source.mipLevelCount - 1)
+            const group = device.createBindGroup({ layout: pipeline.getBindGroupLayout(0), entries: [
+                { binding: 0, resource: source.createView({ dimension: '2d', baseArrayLayer: 0, arrayLayerCount: 1, baseMipLevel: sourceLevel, mipLevelCount: 1 }) },
+                { binding: 1, resource: sampler },
+            ] })
+            const pass = encoder.beginRenderPass({ colorAttachments: [{
+                view: output.createView({ dimension: '2d', baseArrayLayer: layer, arrayLayerCount: 1, baseMipLevel: level, mipLevelCount: 1 }),
+                loadOp: 'clear', storeOp: 'store', clearValue: [0, 0, 0, 0],
+            }] })
+            pass.setPipeline(pipeline); pass.setBindGroup(0, group); pass.draw(3); pass.end()
+        }
+    })
+    device.queue.submit([encoder.finish()])
+    return output
+}

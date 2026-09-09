@@ -7,6 +7,7 @@ import type { RenderOptions } from '../../src/Engine'
 import { EXPMAP_COLOR_PROFILE, validateExpmapManifest, type ExpmapManifest } from '../../src/expmap/manifest'
 import { planExpmapOctaves } from '../../src/expmap/octaves'
 import { planExpmap } from '../../src/expmap/plan'
+import { expmapLibraryFilename, type ExpmapLibraryEntry } from '../../src/expmap/library'
 
 function options(): RenderOptions {
   const animation = createDefaultAnimationConfig()
@@ -165,5 +166,16 @@ describe('ExpMap manifest contract', () => {
     expect(() => validateExpmapManifest(b)).toThrow('projection')
     const c = manifest(); c.state = 'complete'
     expect(() => validateExpmapManifest(c)).toThrow('missing tiles')
+  })
+})
+
+describe('ExpMap library labels', () => {
+  it('uses the actual file name instead of the editable catalogue name', () => {
+    const entry = { name: 'Ancien titre', handle: { name: 'spirale-bleue.expmap' } } as Pick<ExpmapLibraryEntry, 'name' | 'handle'>
+    expect(expmapLibraryFilename(entry)).toBe('spirale-bleue.expmap')
+  })
+  it('keeps a readable fallback for legacy handles without a name', () => {
+    const entry = { name: 'Document local', handle: {} } as Pick<ExpmapLibraryEntry, 'name' | 'handle'>
+    expect(expmapLibraryFilename(entry)).toBe('Document local.expmap')
   })
 })

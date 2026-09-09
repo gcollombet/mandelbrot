@@ -9,7 +9,7 @@ override ENABLE_SURFACE_EFFECTS: bool = true;
 struct Uniforms {
   palettePeriod: f32,
   paletteOffset: f32,
-  bloomStrength: f32,
+  skyboxTransitionLevels: f32,
   time: f32,
   aspect: f32,
   angle: f32,
@@ -106,14 +106,15 @@ struct Uniforms {
   rawOriginX: f32,       // 96: toroidal origin of the raw texture (pan by offset)
   rawOriginY: f32,       // 97
   orbitMetricsEnabled: f32, // 98: no orbit texture reads when the payload is absent
-  _pad99: f32,
+  presetTransition: f32,
 };
-@group(0) @binding(0) var<uniform> parameters: Uniforms;
+@group(0) @binding(0) var<uniform> baseParameters: Uniforms;
+var<private> parameters: Uniforms;
 @group(0) @binding(1) var tex: texture_2d_array<f32>; // live values: iter, z.x, z.y
-@group(0) @binding(2) var tileTex: texture_2d<f32>;
-@group(0) @binding(3) var skyboxTex: texture_2d<f32>;
-@group(0) @binding(4) var webcamTex: texture_2d<f32>;
-@group(0) @binding(5) var paletteTex: texture_2d<f32>;  // 4096 x 7 rgba16float
+@group(0) @binding(2) var tileTex: texture_2d_array<f32>;
+@group(0) @binding(3) var skyboxTex: texture_2d_array<f32>;
+@group(0) @binding(4) var webcamTex: texture_2d_array<f32>;
+@group(0) @binding(5) var paletteTex: texture_2d_array<f32>;  // 4096 x 7 rgba16float
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen values
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
 @group(0) @binding(8) var skyboxSampler: sampler;  // bilinear sampler for skybox
@@ -136,6 +137,85 @@ fn raw_coord(coord: vec2<i32>) -> vec2<i32> {
 @group(0) @binding(16) var frozenOrbitGradientTex: texture_2d<f32>;
 @group(0) @binding(17) var trapPayloadTex: texture_2d<f32>;
 @group(0) @binding(18) var frozenTrapPayloadTex: texture_2d<f32>;
+
+
+// A path can span many intervals on screen; each invocation reads two neighbors.
+struct PalettePathNode { values: array<vec4<f32>, 10> }
+struct PalettePathData { config: vec4<f32>, geometry: vec4<f32>, extra: vec4<f32>, nodes: array<PalettePathNode> }
+@group(0) @binding(19) var<storage, read> palettePath: PalettePathData;
+var<private> pathA: u32 = 0u;
+var<private> pathB: u32 = 0u;
+var<private> pathT: f32 = 0.0;
+fn path_value(node: u32, field: u32) -> f32 { return palettePath.nodes[node].values[field / 4u][field % 4u]; }
+fn path_mix(field: u32) -> f32 { return mix(path_value(pathA, field), path_value(pathB, field), pathT); }
+fn path_choice(field: u32) -> f32 { return select(path_value(pathA, field), path_value(pathB, field), pathT >= 0.5); }
+fn path_curve(curve: f32, t: f32) -> f32 {
+  let x = clamp(t, 0.0, 1.0);
+  switch i32(curve) {
+    case 1: { let u = clamp((x - 0.28) / 0.44, 0.0, 1.0); return u * u * (3.0 - 2.0 * u); }
+    case 2: { return select(1.0, 0.0, x <= 0.0); }
+    case 3: { return (exp(3.0 * x) - 1.0) / (exp(3.0) - 1.0); }
+    default: { return x; }
+  }
+}
+fn path_radial_depth(base: f32, radius: f32) -> f32 {
+  if (radius <= 0.0 && palettePath.config.x >= 2.0) { return path_value(u32(palettePath.config.x), 0u); }
+  return base - log(max(radius, 1e-30)) / log(10.0);
+}
+fn apply_palette_path(depth: f32) {
+  pathA = 0u; pathB = 0u; pathT = 0.0;
+  let count = u32(palettePath.config.x);
+  if (count < 2u) { return; }
+  let first = path_value(1u, 0u); let last = path_value(count, 0u);
+  if ((depth < first || depth > last) && palettePath.config.z > 0.5) { return; }
+  pathA = 1u; pathB = 1u;
+  if (depth >= last) { pathA = count; pathB = count; }
+  else if (depth > first) {
+    // Bounded by the validated 64-stop contract.
+    for (var i = 1u; i < count; i++) {
+      let end = path_value(i + 1u, 0u);
+      if (depth <= end) {
+        pathA = i; pathB = i + 1u;
+        pathT = path_curve(path_value(i, 1u), (depth - path_value(i, 0u)) / max(end - path_value(i, 0u), 1e-8));
+        break;
+      }
+    }
+  }
+  parameters.palettePeriod = path_mix(4u);
+  parameters.paletteOffset = path_mix(5u);
+  parameters.heightPaletteShift = path_mix(6u);
+  parameters.tessellationLevel = path_mix(7u);
+  parameters.displacementAmount = path_mix(8u);
+  parameters.ambientOcclusionStrength = path_mix(9u);
+  parameters.microBumpStrength = path_mix(10u);
+  parameters.reliefDepth = path_mix(11u);
+  parameters.protrusionPhase = path_mix(12u);
+  parameters.protrusionSharpness = path_mix(13u);
+  parameters.protrusionStrength = path_mix(14u);
+  parameters.protrusionGeometryMix = path_mix(15u);
+  parameters.protrusionPeriod = path_mix(16u);
+  parameters.localShadowStrength = path_mix(17u);
+  parameters.lightAngle = path_mix(18u);
+  parameters.varnishStrength = path_mix(19u);
+  parameters.gradeContrast = path_mix(20u);
+  parameters.gradeSaturation = path_mix(21u);
+  parameters.phaseColoringStrength = path_mix(22u);
+  parameters.paletteMirror = path_choice(23u);
+  parameters.iterationPaletteCurve = path_choice(24u);
+  parameters.textureMappingXVariable = path_choice(25u);
+  parameters.textureMappingYVariable = path_choice(26u);
+  parameters.textureMappingXScale = path_mix(27u);
+  parameters.textureMappingYScale = path_mix(28u);
+  parameters.textureMappingMirror = path_choice(29u);
+  let light = normalize(vec3<f32>(cos(parameters.lightAngle), sin(parameters.lightAngle), 1.85));
+  parameters.lightDirX = light.x; parameters.lightDirY = light.y; parameters.lightDirZ = light.z;
+}
+fn sample_palette(phase: f32, row: f32) -> vec4<f32> {
+  let uv = vec2<f32>(phase, palette_row_y(row));
+  let a = textureSampleLevel(paletteTex, paletteSampler, uv, i32(pathA), 0.0);
+  if (pathA == pathB) { return a; }
+  return mix(a, textureSampleLevel(paletteTex, paletteSampler, uv, i32(pathB), 0.0), pathT);
+}
 
 struct VertexOutput {
   @builtin(position) position: vec4<f32>,
@@ -210,7 +290,7 @@ fn palette_row_y(row: f32) -> f32 {
 }
 
 fn samplePaletteColor(palettePhase: f32) -> vec3<f32> {
-  return textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(0.0)), 0.0).rgb;
+  return sample_palette(palettePhase, 0.0).rgb;
 }
 
 fn animatedPaletteOffset() -> f32 {
@@ -249,19 +329,19 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
   var e: EffectParams;
 
   // Row 0: R, G, B, palette weight
-  let row0 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(0.0)), 0.0);
+  let row0 = sample_palette(palettePhase, 0.0);
   e.paletteColor = row0.rgb;
   e.wPalette = row0.a;
 
   if (ENABLE_SURFACE_EFFECTS) {
     // Row 1: zebra, tessellation, shading, skybox
-    let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(1.0)), 0.0);
+    let row1 = sample_palette(palettePhase, 1.0);
     e.wTessellation = row1.g;
     e.wShading = row1.b;
     e.wSkybox = row1.a;
 
     // Row 2: webcam, smoothness, shadingLevel [0,3], specularPower [0,64]
-    let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(2.0)), 0.0);
+    let row2 = sample_palette(palettePhase, 2.0);
     e.wWebcam = row2.r;
     e.wSmoothness = row2.g;
     e.shadingLevel = row2.b;       // direct: natural range [0, 3]
@@ -273,7 +353,7 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
 
     // Row 5: stripe color blend, direction coherence color blend, then the two
     // relief tilt controls (decoded to slopes on read)
-    let row5 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(5.0)), 0.0);
+    let row5 = sample_palette(palettePhase, 5.0);
     e.wStripeAverage = clamp(row5.r, 0.0, 1.0);
     e.wRotationMean = clamp(row5.g, 0.0, 1.0);
     e.wStripeRelief = decode_relief_tilt(row5.b, STRIPE_RELIEF_TILT_MAX);
@@ -287,19 +367,19 @@ fn sampleEffects(palettePhase: f32) -> EffectParams {
 // from inside the shading branch since no other code path reads these fields.
 fn sampleShadingMaterial(palettePhase: f32, e: ptr<function, EffectParams>) {
   // Row 3: dielectric F0, metallic, roughness, anisotropy
-  let row3 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(3.0)), 0.0);
+  let row3 = sample_palette(palettePhase, 3.0);
   (*e).dielectricSpecular = clamp(row3.r, 0.0, 1.0);
   (*e).metallic = clamp(row3.g, 0.0, 1.0);
   (*e).roughness = clamp(row3.b, 0.02, 1.0);
   (*e).anisotropy = clamp(row3.a, 0.0, 1.0);
 
   // Row 4: iridescence R, G, B, strength
-  let row4 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(4.0)), 0.0);
+  let row4 = sample_palette(palettePhase, 4.0);
   (*e).iridescenceColor = row4.rgb;
   (*e).wIridescence = clamp(row4.a, 0.0, 1.0);
 
   // Row 6: per-material analytic relief gain and conductor controls.
-  let row6 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(palettePhase, palette_row_y(6.0)), 0.0);
+  let row6 = sample_palette(palettePhase, 6.0);
   (*e).reliefGain = clamp(row6.r, 0.0, 2.0);
   (*e).metalReflectance = clamp(row6.g, 0.0, 2.0);
   (*e).metalEnvironmentTint = clamp(row6.b, 0.0, 1.0);
@@ -336,6 +416,7 @@ fn rotate_inverse_sincos(v: vec2<f32>, s: f32, c: f32) -> vec2<f32> {
 // the fragment shader can call it without ever interpolating semantic fields.
 @vertex
 fn vs_rotation_cache(@builtin(vertex_index) VertexIndex: u32) -> VertexOutput {
+  parameters = baseParameters;
   var pos = array<vec2<f32>, 6>(
     vec2<f32>(-1.0, -1.0),
     vec2<f32>( 1.0, -1.0),
@@ -502,19 +583,35 @@ fn luminance(color: vec3<f32>) -> f32 {
   return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
-fn sample_skybox(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>, lod: f32) -> vec3<f32> {
+fn sample_skybox(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>, roughness: f32) -> vec3<f32> {
   // The skybox texture is sRGB-encoded rgba8unorm; lighting runs in linear.
-  return srgb_to_linear(textureSampleLevel(skyboxTex, skyboxSampler, skybox_reflection_uv(screenUv, reflectionDir, drift), lod).rgb);
+  let uv = skybox_reflection_uv(screenUv, reflectionDir, drift);
+  var layerA = 0; var layerB = 1; var blend = parameters.presetTransition;
+  var levelsA = f32(textureNumLevels(skyboxTex));
+  var levelsB = levelsA;
+  if (textureNumLayers(skyboxTex) > 1u && palettePath.config.x < 2.0) {
+    levelsA = floor(parameters.skyboxTransitionLevels / 32.0);
+    levelsB = parameters.skyboxTransitionLevels - levelsA * 32.0;
+  }
+  if (palettePath.config.x >= 2.0) {
+    layerA = i32(path_value(pathA, 3u)); layerB = i32(path_value(pathB, 3u)); blend = pathT;
+    levelsA = path_value(pathA, 30u); levelsB = path_value(pathB, 30u);
+  }
+  let lodA = roughness * max(levelsA - 4.0, 0.0);
+  let lodB = roughness * max(levelsB - 4.0, 0.0);
+  let a = srgb_to_linear(textureSampleLevel(skyboxTex, skyboxSampler, uv, layerA, lodA).rgb);
+  if (textureNumLayers(skyboxTex) < 2u || blend <= 0.0 || layerA == layerB) { return a; }
+  let b = srgb_to_linear(textureSampleLevel(skyboxTex, skyboxSampler, uv, layerB, lodB).rgb);
+  return mix(a, b, blend);
 }
 
 fn rough_skybox_reflection(screenUv: vec2<f32>, reflectionDir: vec3<f32>, roughness: f32, drift: vec2<f32>) -> vec3<f32> {
   // Ordinary mips provide a stable decorative blur. Avoid the last flat levels,
   // which turn arbitrary reflection cards into a uniform milky veil.
-  let maxLod = max(f32(textureNumLevels(skyboxTex)) - 4.0, 0.0);
-  return sample_skybox(screenUv, reflectionDir, drift, roughness * maxLod);
+  return sample_skybox(screenUv, reflectionDir, drift, roughness);
 }
 
-fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> vec4<f32> {
+fn tile_tessellation(tex_: texture_2d_array<f32>, v: f32, dist: f32, repeat: f32) -> vec4<f32> {
   let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
   let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
 
@@ -530,7 +627,15 @@ fn tile_tessellation(tex_: texture_2d<f32>, v: f32, dist: f32, repeat: f32) -> v
     i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
     i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
   );
-  return textureLoad(tex_, coord, 0);
+  if (textureNumLayers(tex_) < 2u) { return textureLoad(tex_, coord, 0, 0); }
+  var layerA = 0; var layerB = 1; var blend = parameters.presetTransition;
+  if (palettePath.config.x >= 2.0) { layerA = i32(path_value(pathA, 2u)); layerB = i32(path_value(pathB, 2u)); blend = pathT; }
+  let a = textureLoad(tex_, coord, layerA, 0);
+  if (blend <= 0.0 || layerA == layerB) { return a; }
+  let b = textureLoad(tex_, coord, layerB, 0);
+  let alpha = mix(a.a, b.a, blend);
+  let premultiplied = mix(a.rgb * a.a, b.rgb * b.a, blend);
+  return vec4<f32>(premultiplied / max(alpha, 1e-8), alpha);
 }
 
 fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, geometryAngle: f32, dx: f32, dy: f32, tess_depth: f32, disp: f32) -> f32 {
@@ -570,7 +675,7 @@ fn visible_tile_rgb(tile: vec4<f32>) -> vec3<f32> {
 }
 
 fn texture_bump_gradient(
-  tex_: texture_2d<f32>,
+  tex_: texture_2d_array<f32>,
   v: f32,
   dist: f32,
   repeat: f32,
@@ -1342,12 +1447,12 @@ fn colorize_pixel(
   // apply it to select between iter_val and nu.
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let prelimPhase = palettePhaseFromRaw(iteration_palette_coordinate(nu, paletteRepeat) + animatedPaletteOffset());
-  let row2 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, palette_row_y(2.0)), 0.0);
+  let row2 = sample_palette(prelimPhase, 2.0);
   let wSmoothness = row2.g;
   nu = mix(iter_v, nu, wSmoothness);
 
   // ── Zebra: continuous application (darkens even iterations) ──
-  let row1 = textureSampleLevel(paletteTex, paletteSampler, vec2<f32>(prelimPhase, palette_row_y(1.0)), 0.0);
+  let row1 = sample_palette(prelimPhase, 1.0);
   let wZebra = row1.r;
   let isEvenIter = 1.0 - abs(floor(iter_v) % 2.0);
 
@@ -1598,6 +1703,11 @@ fn linear_to_sRGB(c: vec3<f32>) -> vec3<f32> {
 // Entry points below wrap this: fs_main (linear, for AA accumulation) and
 // fs_main_direct (sRGB, for direct-to-swapchain and PNG export).
 fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
+  parameters = baseParameters;
+  let screenLocal = vec2<f32>((fragCoord.x * 2.0 - 1.0) * parameters.aspect, fragCoord.y * 2.0 - 1.0);
+  var depth = palettePath.geometry.x;
+  if (palettePath.config.y > 1.5) { depth = path_radial_depth(depth, length(screenLocal)); }
+  apply_palette_path(depth);
   let uv_screen = fragCoord;
 
   let xy_screen = vec2<f32>(uv_screen.x * 2.0 - 1.0, uv_screen.y * 2.0 - 1.0);
@@ -1887,6 +1997,13 @@ fn fs_rotation_cache(@location(0) screenUv: vec2<f32>) -> @location(0) vec4<f32>
 // no bilinear payload interpolation, no dither or Cartesian analytic AA.
 @fragment
 fn fs_expmap(@builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
+  parameters = baseParameters;
+  var depth = palettePath.geometry.x + (pos.y - 0.5) * palettePath.geometry.y;
+  if (palettePath.config.y > 3.5) {
+    let grid = (pos.xy - vec2<f32>(0.5) + palettePath.geometry.zw - vec2<f32>(palettePath.extra.y)) / max(palettePath.extra.x, 1e-10);
+    depth = path_radial_depth(palettePath.geometry.x, length(grid));
+  }
+  apply_palette_path(depth);
   let coord = vec2<i32>(pos.xy);
   let dims = vec2<i32>(textureDimensions(tex));
   let pixel = load_pixel_sample(tex, metadataTex, coord);

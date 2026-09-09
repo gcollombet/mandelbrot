@@ -5,6 +5,7 @@ import MandelbrotController from './MandelbrotController.vue';
 import ExpmapSurface from './ExpmapSurface.vue';
 import { expmapOpenDocument, expmapBusy } from '../expmap/runtime';
 import Settings from './Settings.vue';
+import PalettePathPanel from './PalettePathPanel.vue';
 import RenderStats from './RenderStats.vue';
 import PerformancePanel from './PerformancePanel.vue';
 import { DenseTopbar, DenseTip, useDenseView, denseAttrs } from './dense';
@@ -27,9 +28,8 @@ import {computePalettePhase} from '../CursorCoordinate';
 import {Palette} from '../Palette';
 import {normalizeAnimationConfig} from '../AnimationConfig';
 import {normalizeIterationPaletteCurve} from '../IterationPaletteCurve';
-import {createInterpolatedColorStop, getEffectValue, normalizeColorStops, type ColorStop} from '../ColorStop';
-import {EFFECT_FIELD_NAMES} from '../effectFieldConfig';
-import {interpolateRgb} from 'd3-interpolate';
+import {createInterpolatedColorStop, normalizeColorStops} from '../ColorStop';
+import {interpolatePresetAppearance} from '../presetTransition';
 import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
 import {
@@ -285,9 +285,6 @@ function onNavigationEnd() {
 function handleNavKeydown(e: KeyboardEvent) {
   const navKeys = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'KeyQ', 'KeyE', 'KeyR', 'KeyF'];
   if (navKeys.includes(e.code)) {
-    if (discoveryRadarActive.value) {
-      deactivateDiscoveryRadar();
-    }
     onNavigationStart();
   }
 }
@@ -303,9 +300,6 @@ function handleNavMousedown(e: MouseEvent) {
   // Only treat canvas interactions as navigation (not menu clicks)
   const target = e.target as HTMLElement;
   if (target.tagName === 'CANVAS') {
-    if (discoveryRadarActive.value) {
-      deactivateDiscoveryRadar();
-    }
     onNavigationStart();
   }
 }
@@ -315,9 +309,6 @@ function handleNavMouseup() {
 }
 
 function handleNavWheel() {
-  if (discoveryRadarActive.value) {
-    deactivateDiscoveryRadar();
-  }
   onNavigationStart();
   onNavigationEnd();
 }
@@ -328,9 +319,6 @@ function handleNavTouchstart(e: TouchEvent) {
   // `hud-hidden` (pointer-events: none) mid-tap and the tap is lost on mobile.
   const target = e.target as HTMLElement;
   if (target.tagName === 'CANVAS') {
-    if (discoveryRadarActive.value) {
-      deactivateDiscoveryRadar();
-    }
     onNavigationStart();
   }
 }
@@ -443,6 +431,7 @@ function loadInitialMandelbrotParams(): MandelbrotParams {
 const mandelbrotParams = ref<MandelbrotParams>(loadInitialMandelbrotParams());
 
 function applyPresetRecord(record: PresetRecord): void {
+  cancelPresetTravel();
   const saved = structuredClone(record.value);
   stripExplorationStateFields(saved);
   saved.textureMapping = normalizeTextureMappingFromLegacy(saved);
@@ -688,6 +677,7 @@ onMounted(() => {
   }
 });
 onUnmounted(() => {
+  cancelPresetTravel();
   stopAuthObserver?.();
   stopSyncObserver?.();
   void stopPersonalPresetSync();
@@ -718,6 +708,7 @@ function clonePlain<T>(value: T): T {
 }
 
 watch(mandelbrotParams, (params) => {
+  if (isPresetTraveling.value) return;
   const saved = clonePlain(params);
   saved.colorStops = normalizeColorStops(saved.colorStops);
   stripExplorationStateFields(saved);
@@ -777,7 +768,7 @@ const forceUINoGpu = !hasWebGPU
   && typeof window !== 'undefined'
   && new URLSearchParams(window.location.search).has('forceui');
 
-const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes', 'about', 'video', 'expmap']);
+const densePortedTabs = new Set<string>(['animation', 'navigation', 'presets', 'performance', 'palettes', 'palettePath', 'about', 'video', 'expmap']);
 const denseView = useDenseView();
 const expandedPanel = ref(false);
 function isDenseTab(tabKey: string): boolean {
@@ -1410,147 +1401,57 @@ let travelAnimationId: number | null = null;
 let travelStartTime = 0;
 let travelDuration = 2.5; // seconds
 
-// Save start parameters for interpolation
-
-let travelStartColorStops: ColorStop[] = [];
-
-// Target parameters
+let travelStartParams: MandelbrotParams | null = null;
 let travelTargetPreset: PresetRecord | null = null;
+let travelGeneration = 0;
 
-function evaluatePaletteAt(stops: ColorStop[], position: number): { color: string; iridescenceColor?: string; effects: Record<string, number> } {
-  const defaultRes = {
-    color: '#000000',
-    effects: {} as Record<string, number>
-  };
-  
-  if (stops.length === 0) {
-    for (const field of EFFECT_FIELD_NAMES) {
-      defaultRes.effects[field] = 0;
-    }
-    return defaultRes;
-  }
-  
-  const sorted = [...stops].sort((a, b) => a.position - b.position);
-  let left = sorted[0];
-  let right = sorted[sorted.length - 1];
-  
-  const getEffects = (stop: ColorStop) => {
-    const eff: Record<string, number> = {};
-    for (const field of EFFECT_FIELD_NAMES) {
-      eff[field] = getEffectValue(stop, field);
-    }
-    return eff;
-  };
-  
-  if (position <= left.position) {
-    return { color: left.color, iridescenceColor: left.iridescenceColor, effects: getEffects(left) };
-  }
-  if (position >= right.position) {
-    return { color: right.color, iridescenceColor: right.iridescenceColor, effects: getEffects(right) };
-  }
-  
-  for (let i = 0; i < sorted.length - 1; i++) {
-    if (position >= sorted[i].position && position <= sorted[i+1].position) {
-      left = sorted[i];
-      right = sorted[i+1];
-      break;
-    }
-  }
-  
-  const span = right.position - left.position;
-  const t = span > 0 ? (position - left.position) / span : 0;
-  
-  const color = interpolateRgb(left.color, right.color)(t);
-  const effects: Record<string, number> = {};
-  for (const field of EFFECT_FIELD_NAMES) {
-    const lv = getEffectValue(left, field);
-    const rv = getEffectValue(right, field);
-    effects[field] = lv + (rv - lv) * t;
-  }
-  
-  let iridescenceColor: string | undefined = undefined;
-  if (left.iridescenceColor || right.iridescenceColor) {
-    iridescenceColor = interpolateRgb(left.iridescenceColor ?? left.color, right.iridescenceColor ?? right.color)(t);
-  }
-  
-  return { color, iridescenceColor, effects };
-}
-
-function interpolateColorStops(
-  stopsA: ColorStop[],
-  stopsB: ColorStop[],
-  t: number
-): ColorStop[] {
-  const N = 32;
-  const res: ColorStop[] = [];
-  
-  for (let i = 0; i < N; i++) {
-    const pos = i / (N - 1);
-    const valA = evaluatePaletteAt(stopsA, pos);
-    const valB = evaluatePaletteAt(stopsB, pos);
-    
-    const color = interpolateRgb(valA.color, valB.color)(t);
-    const stop: ColorStop = {
-      color,
-      position: pos,
-    };
-    
-    if (valA.iridescenceColor || valB.iridescenceColor) {
-      stop.iridescenceColor = interpolateRgb(valA.iridescenceColor ?? valA.color, valB.iridescenceColor ?? valB.color)(t);
-    }
-    
-    for (const field of EFFECT_FIELD_NAMES) {
-      const vA = valA.effects[field] ?? 0;
-      const vB = valB.effects[field] ?? 0;
-      stop[field] = vA + (vB - vA) * t;
-    }
-    
-    res.push(stop);
-  }
-  
-  return res;
+function cancelPresetTravel() {
+  ++travelGeneration;
+  if (travelAnimationId !== null) cancelAnimationFrame(travelAnimationId);
+  travelAnimationId = null;
+  travelTargetPreset = null;
+  travelStartParams = null;
+  isPresetTraveling.value = false;
+  mandelbrotCtrlRef.value?.getNavigator()?.cancel_transition();
+  mandelbrotEngine.value?.cancelPresetTransition();
 }
 
 function tickTravelAnimation() {
   if (!travelTargetPreset) return;
+  if (!mandelbrotEngine.value?.isPresetTransitionActive) { cancelPresetTravel(); return; }
   // A video export owns the clock: it places the camera at an absolute parcours
   // time and holds the palette fixed. This loop is cadenced by Date.now() and
-  // mutates colorStops, so letting it run alongside an export would make the
+  // changes appearance, so letting it run alongside an export would make the
   // output depend on how long each frame took to converge — the exact thing the
   // export exists to eliminate.
   if (mandelbrotCtrlRef.value?.isExporting?.()) {
-    travelAnimationId = null;
+    cancelPresetTravel();
     return;
   }
   const elapsed = (Date.now() - travelStartTime) / 1000;
-  let progress = Math.min(1.0, elapsed / travelDuration);
+  const progress = Math.min(1.0, elapsed / travelDuration);
   
   const tEased = progress * progress * (3.0 - 2.0 * progress);
   
 
   
-  mandelbrotParams.value.colorStops = interpolateColorStops(
-    travelStartColorStops,
-    travelTargetPreset.value.colorStops,
-    tEased
-  );
-  
-  if (progress >= 0.5) {
-    if (travelTargetPreset.value.textureName) {
-      mandelbrotParams.value.textureName = travelTargetPreset.value.textureName;
-      mandelbrotParams.value.textureGuid = travelTargetPreset.value.textureGuid;
-    }
-    if (travelTargetPreset.value.skyboxName) {
-      mandelbrotParams.value.skyboxName = travelTargetPreset.value.skyboxName;
-      mandelbrotParams.value.skyboxGuid = travelTargetPreset.value.skyboxGuid;
-    }
+  mandelbrotEngine.value?.setPresetTransitionProgress(tEased);
+  if (travelStartParams) {
+    Object.assign(mandelbrotParams.value, interpolatePresetAppearance(
+      travelStartParams, travelTargetPreset.value, tEased,
+    ));
   }
-  
+
   if (progress < 1.0) {
     travelAnimationId = requestAnimationFrame(tickTravelAnimation);
   } else {
     // Finaliser : s'assurer que tout est exactement aligné
     const target = travelTargetPreset.value;
+    mandelbrotEngine.value?.finishPresetTransition();
+    mandelbrotParams.value.textureName = target.textureName;
+    mandelbrotParams.value.textureGuid = target.textureGuid;
+    mandelbrotParams.value.skyboxName = target.skyboxName;
+    mandelbrotParams.value.skyboxGuid = target.skyboxGuid;
     mandelbrotParams.value.mu = target.mu ?? 4.0;
     mandelbrotParams.value.stripeFrequency = target.stripeFrequency ?? 8;
     mandelbrotParams.value.colorStops = target.colorStops;
@@ -1578,7 +1479,7 @@ function tickTravelAnimation() {
     mandelbrotParams.value.paletteOffset = target.paletteOffset ?? 0;
     mandelbrotParams.value.paletteMirror = target.paletteMirror ?? false;
     mandelbrotParams.value.iterationPaletteCurve = normalizeIterationPaletteCurve(target.iterationPaletteCurve);
-    mandelbrotParams.value.textureMapping = target.textureMapping;
+    mandelbrotParams.value.textureMapping = normalizeTextureMappingFromLegacy(target);
 
     // The travel finalises cx/cy/scale through the navigator's transition in the
     // draw loop (isUpdating), which the param watcher ignores — so the reference
@@ -1593,9 +1494,9 @@ function tickTravelAnimation() {
     );
 
     travelTargetPreset = null;
+    travelStartParams = null;
     travelAnimationId = null;
     isPresetTraveling.value = false;
-    radarPulseKey.value += 1;
     scheduleDiscoveryRecompute(0);
   }
 }
@@ -1608,13 +1509,18 @@ function getApproximateLog10(scaleStr: string): number {
   return Number.isFinite(log) ? log : 0;
 }
 
-function startTravelToPreset(preset: PresetRecord) {
+async function startTravelToPreset(preset: PresetRecord) {
   console.log('[REF] startTravelToPreset', String(preset.value.cx).slice(0, 14), 'scale', preset.value.scale);
   const ctrl = mandelbrotCtrlRef.value;
   if (!ctrl) return;
   if (ctrl.isExporting?.()) return;
   const navigator = ctrl.getNavigator();
   if (!navigator) return;
+  cancelPresetTravel();
+  if (mandelbrotParams.value.palettePath?.enabled) mandelbrotParams.value.palettePath = { ...mandelbrotParams.value.palettePath, enabled: false };
+  const generation = travelGeneration;
+  const engine = mandelbrotEngine.value;
+  if (!engine) return;
   activeDiscoveryClusterId.value = null;
   isPresetTraveling.value = true;
   visiblePins.value = [];
@@ -1623,11 +1529,39 @@ function startTravelToPreset(preset: PresetRecord) {
     discoveryRecomputeTimer = null;
   }
   
-  if (travelAnimationId) {
-    cancelAnimationFrame(travelAnimationId);
-    navigator.cancel_transition();
+  const start = clonePlain(mandelbrotParams.value);
+  const endpoint = clonePlain(preset);
+  const urls: string[] = [];
+  try {
+    await applySelectedTexturesToEngine();
+    const textures = await getTextureEntries();
+    if (generation !== travelGeneration) return;
+    const resolve = async (kind: 'tile' | 'skybox') => {
+      const name = nameForCatalogReference(textures,
+        kind === 'tile' ? endpoint.value.textureGuid : endpoint.value.skyboxGuid,
+        kind === 'tile' ? endpoint.value.textureName : endpoint.value.skyboxName);
+      const fallback = kind === 'tile' ? 'Gold' : 'Window';
+      const effective = name && textures.some(t => t.name === name) ? name : fallback;
+      const url = await storedTextureObjectUrl(effective);
+      if (!url) throw new Error(`Texture introuvable : ${effective}`);
+      urls.push(url);
+      return { url, key: textureSourceKey(effective, textures) };
+    };
+    const tile = await resolve('tile');
+    const sky = await resolve('skybox');
+    if (generation !== travelGeneration) return;
+    const prepared = await engine.preparePresetTransition(start, endpoint.value, tile, sky);
+    if (generation !== travelGeneration) return;
+    if (!prepared) { cancelPresetTravel(); return; }
+  } catch (error) {
+    if (generation === travelGeneration) cancelPresetTravel();
+    console.error('Impossible de préparer la transition de preset', error);
+    return;
+  } finally {
+    urls.forEach(revokeObjectUrl);
   }
-  
+  if (ctrl.isExporting?.()) { cancelPresetTravel(); return; }
+
   const startLog = getApproximateLog10(mandelbrotParams.value.scale);
   const targetLog = getApproximateLog10(preset.value.scale);
   const zoomDiff = Math.abs(startLog - targetLog);
@@ -1644,10 +1578,10 @@ function startTravelToPreset(preset: PresetRecord) {
   );
   
   travelStartTime = Date.now();
-  travelTargetPreset = preset;
+  travelTargetPreset = endpoint;
   
 
-  travelStartColorStops = clonePlain(mandelbrotParams.value.colorStops);
+  travelStartParams = start;
   
   travelAnimationId = requestAnimationFrame(tickTravelAnimation);
 }
@@ -1684,7 +1618,7 @@ function startTravelToPreset(preset: PresetRecord) {
           <i v-else :class="[tab.icon, 'fa-fw']" aria-hidden="true"></i>
 
           <span class="tab-label-text is-hidden-touch">{{ tab.label }}</span>
-          <span class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
+          <span v-if="tab.shortcut" class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
         </button>
       </div>
     </div>
@@ -1754,6 +1688,8 @@ function startTravelToPreset(preset: PresetRecord) {
       @picker-done="finishPickerMode"
       @engine-ready="onEngineReady"
       @request-show-ui="showUI = true"
+      :palette-path="mandelbrotParams.palettePath"
+      :texture-name="mandelbrotParams.textureName" :texture-guid="mandelbrotParams.textureGuid" :skybox-name="mandelbrotParams.skyboxName" :skybox-guid="mandelbrotParams.skyboxGuid"
       :pickerMode="pickerMode"
       :uiHidden="!showUI"
       :panel-open="openTabs.size > 0 || showPerfPanel"
@@ -1864,10 +1800,9 @@ function startTravelToPreset(preset: PresetRecord) {
     </div>
 
     <div
-      v-if="presetPinsVisible"
+      v-if="discoveryRadarActive"
       :key="radarPulseKey"
       class="discovery-radar-pulse"
-      :class="{ 'hud-hidden': isNavigating }"
       aria-hidden="true"
     ></div>
 
@@ -2060,6 +1995,7 @@ function startTravelToPreset(preset: PresetRecord) {
         </DenseTopbar>
         <div class="body">
           <AboutPanel v-if="tab.key === 'about'" />
+          <PalettePathPanel v-else-if="tab.key === 'palettePath'" :current="mandelbrotParams" :engine="mandelbrotEngine" :disabled="expmapBusy" @change="mandelbrotParams.palettePath = $event" />
           <Settings
             v-else
             :ref="(el: any) => { settingsRefs[tab.key] = el }"
