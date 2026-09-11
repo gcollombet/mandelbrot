@@ -10,7 +10,7 @@ export type ExpmapManifest = {
   version:5;name:string;quality:number;thumbnail?:string;forceRender:boolean;documentId:string;generation:number;state:'preparing'|'interrupted'|'complete';createdAt:string
   scaleConvention:'VideoPathLocation.scale';zoomReferenceScale:string;projection:ExpmapPlan
   appearance:{identity:string;json:string;resources:ExpmapResourceIdentity[]}
-  geometryConvention?: 'continuous-radial-v1'
+  geometryConvention?: 'continuous-radial-v1' | 'continuous-radial-v2'
   color:typeof EXPMAP_COLOR_PROFILE
   octaves:ExpmapOctaves;tiles:ExpmapTile[];center?:[number,number,number]
 }
@@ -27,7 +27,7 @@ export function validateExpmapManifest(m: ExpmapManifest) {
   if(canonicalJson(planExpmap(m.projection))!==canonicalJson(m.projection))throw new Error('Invalid projection contract')
   if(canonicalJson(planExpmapOctaves(m.projection))!==canonicalJson(m.octaves))throw new Error('Invalid octave layout')
   if(canonicalJson(m.color)!==canonicalJson(EXPMAP_COLOR_PROFILE))throw new Error('Unsupported codec/colorimetry')
-  if(m.geometryConvention !== undefined && m.geometryConvention !== 'continuous-radial-v1')throw new Error('Unsupported geometry convention')
+  if(m.geometryConvention !== undefined && m.geometryConvention !== 'continuous-radial-v1' && m.geometryConvention !== 'continuous-radial-v2')throw new Error('Unsupported geometry convention')
   const hash=/^sha256:[a-f0-9]{64}$/
   if(!hash.test(m.appearance.identity)||canonicalJson(JSON.parse(m.appearance.json))!==m.appearance.json)throw new Error('Invalid appearance identity')
   for(const r of m.appearance.resources)if(!r.role||!hash.test(r.identity)||!Number.isSafeInteger(r.bytes)||r.bytes<0)throw new Error('Invalid resource')

@@ -726,6 +726,8 @@ fn distance_height_from_values(iterVal: f32, zx: f32, zy: f32, storedHeight: f32
   return clamp(storedHeight, -64.0, 64.0);
 }
 
+// Apply the visual limit only after source-to-view scale conversion.
+// Display textures retain the wider finite float16 range for later zooms.
 fn normalize_geometry(stored: vec4<f32>, zoomFactor: f32) -> vec4<f32> {
   let ratio = 1.0 / max(zoomFactor, 1e-30);
   return vec4<f32>(

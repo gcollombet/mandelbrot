@@ -1013,7 +1013,7 @@ fn appearance_log_texel_adjustment() -> f32 {
 fn distance_height(z: vec2<f32>, derPolar: vec2<f32>) -> f32 {
   let logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
   let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - log(max(mandelbrot.scale, 1e-30)) - expmapAppearanceLogScaleOffset;
-  return clamp(-logScreenDistance, -64.0, 64.0);
+  return select(0.0, -logScreenDistance, finite_scalar(logScreenDistance));
 }
 
 // Deep path: mandelbrot.scale holds only the fe mantissa, so log(scale) is
@@ -1022,7 +1022,7 @@ fn distance_height_deep(z: vec2<f32>, derPolar: vec2<f32>, scaleExp: i32) -> f32
   let logZ = max(0.5 * log(max(dot(z, z), 1.000002)), 1e-6);
   let logScale = log(max(mandelbrot.scale, 1e-30)) + f32(scaleExp) * LN2 + expmapAppearanceLogScaleOffset;
   let logScreenDistance = logZ + log(logZ) - log(2.0) - derPolar.y - logScale;
-  return clamp(-logScreenDistance, -64.0, 64.0);
+  return select(0.0, -logScreenDistance, finite_scalar(logScreenDistance));
 }
 
 fn finite_scalar(value: f32) -> bool {
@@ -1071,14 +1071,12 @@ fn analytic_terminal_geometry(
 
   let derivativeLog = derS + 0.5 * log(der2);
   let laplacianLog = 2.0 * (derivativeLog - logZ - log(logZ) + logTexelDelta);
-  let laplacian = exp(clamp(laplacianLog, -80.0, log(64.0)));
+  // Keep numerical exponent protection; visual saturation belongs after view scaling.
+  let laplacian = exp(clamp(laplacianLog, -80.0, 80.0));
   if (!finite_vec2(gradient) || !finite_scalar(laplacian)) {
     return vec3<f32>(0.0);
   }
-  return vec3<f32>(
-    clamp(gradient, vec2<f32>(-64.0), vec2<f32>(64.0)),
-    clamp(laplacian, 0.0, 64.0),
-  );
+  return vec3<f32>(gradient, laplacian);
 }
 
 fn getOrbit(index: i32) -> vec2<f32> {
@@ -1620,7 +1618,7 @@ fn orbit_arg_gradient(z: vec2<f32>, derM: vec2<f32>, derS: f32, logTexelDelta: f
   if (!finite_vec2(w)) {
     return vec2<f32>(0.0);
   }
-  return clamp(vec2<f32>(w.y, -w.x), vec2<f32>(-64.0), vec2<f32>(64.0));
+  return vec2<f32>(w.y, -w.x);
 }
 
 // Running orbit-metric state. The two gradients obey the same recurrences as

@@ -1,3 +1,7 @@
+// Preserve geometry until view-scale adaptation. This is only the
+// finite rgba16float storage bound, not the artistic clamp (64) in color.wgsl.
+const DISPLAY_STORAGE_MAX: f32 = 65504.0;
+
 // Presentation-only resolve pass.
 //
 // Raw terminal texels are exact step-1 values. An incomplete texel may borrow
@@ -156,10 +160,10 @@ fn finite_or_zero(value: f32, minimum: f32, maximum: f32) -> f32 {
 
 fn load_terminal_geometry(coord: vec2<i32>) -> vec4<f32> {
   return vec4<f32>(
-    finite_or_zero(load_layer(coord, 1), -64.0, 64.0),
-    finite_or_zero(load_layer(coord, 5), -64.0, 64.0),
-    finite_or_zero(load_layer(coord, 7), 0.0, 64.0),
-    finite_or_zero(load_layer(coord, 4), -64.0, 64.0),
+    finite_or_zero(load_layer(coord, 1), -DISPLAY_STORAGE_MAX, DISPLAY_STORAGE_MAX),
+    finite_or_zero(load_layer(coord, 5), -DISPLAY_STORAGE_MAX, DISPLAY_STORAGE_MAX),
+    finite_or_zero(load_layer(coord, 7), 0.0, DISPLAY_STORAGE_MAX),
+    finite_or_zero(load_layer(coord, 4), -DISPLAY_STORAGE_MAX, DISPLAY_STORAGE_MAX),
   );
 }
 
@@ -168,10 +172,10 @@ fn load_terminal_geometry(coord: vec2<i32>) -> vec4<f32> {
 // rule below can average them the way it averages the cached geometry.
 fn load_terminal_orbit_gradient(coord: vec2<i32>) -> vec4<f32> {
   return vec4<f32>(
-    finite_or_zero(load_layer(coord, 13), -64.0, 64.0),
-    finite_or_zero(load_layer(coord, 14), -64.0, 64.0),
-    finite_or_zero(load_layer(coord, 15), -64.0, 64.0),
-    finite_or_zero(load_layer(coord, 16), -64.0, 64.0),
+    finite_or_zero(load_layer(coord, 13), -DISPLAY_STORAGE_MAX, DISPLAY_STORAGE_MAX),
+    finite_or_zero(load_layer(coord, 14), -DISPLAY_STORAGE_MAX, DISPLAY_STORAGE_MAX),
+    finite_or_zero(load_layer(coord, 15), -DISPLAY_STORAGE_MAX, DISPLAY_STORAGE_MAX),
+    finite_or_zero(load_layer(coord, 16), -DISPLAY_STORAGE_MAX, DISPLAY_STORAGE_MAX),
   );
 }
 
@@ -328,14 +332,14 @@ fn fs_main(@location(0) uv: vec2<f32>) -> FragOut {
         out.zy = direction.y * zLength;
         out.geometry = clamp(
           geometrySum * inverseWeight,
-          vec4<f32>(-64.0, -64.0, 0.0, -64.0),
-          vec4<f32>(64.0),
+          vec4<f32>(-DISPLAY_STORAGE_MAX, -DISPLAY_STORAGE_MAX, 0.0, -DISPLAY_STORAGE_MAX),
+          vec4<f32>(DISPLAY_STORAGE_MAX),
         );
         out.metadata = pack_metadata(step, stripe, coherenceSum * inverseWeight);
         out.orbitGradient = clamp(
           orbitGradientSum * inverseWeight,
-          vec4<f32>(-64.0),
-          vec4<f32>(64.0),
+          vec4<f32>(-DISPLAY_STORAGE_MAX),
+          vec4<f32>(DISPLAY_STORAGE_MAX),
         );
         store_trap_payload(coord, load_trap_payload(bestEscapedCoord));
         return out;

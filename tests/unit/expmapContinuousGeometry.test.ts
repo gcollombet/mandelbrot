@@ -47,7 +47,7 @@ describe('continuous ExpMap geometry convention', () => {
     expect(shader.match(/\+ appearance_log_texel_adjustment\(\)/g)).toHaveLength(2)
     for (const name of ['distance_height','distance_height_deep']) {
       const body=shader.slice(shader.indexOf(`fn ${name}(`)).split('\n}')[0]
-      expect(body.indexOf('expmapAppearanceLogScaleOffset')).toBeLessThan(body.indexOf('return clamp'))
+      expect(body.indexOf('expmapAppearanceLogScaleOffset')).toBeLessThan(body.indexOf('return select'))
     }
   })
 })

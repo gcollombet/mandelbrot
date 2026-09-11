@@ -63,14 +63,16 @@ describe('WebP production progress and resume',()=>{
     expect(Array.from(rgba.slice((m.octaves.tileWidth+3)*4,(m.octaves.tileWidth+3)*4+4))).toEqual([3,1,73,255])
     expect(m.center).toEqual([0,0,73])
   })
-  it('refuses to mix old block shading and continuous shading during resume',async()=>{
+  it.each([undefined, 'continuous-radial-v1'] as const)('refuses old geometry convention %s during resume',async(convention)=>{
     const store=new ExpmapStore(new MemoryDirectory().handle()),r=request(store)
     control.stopAt=4
     await expect(createExpmapDocument({engine:{}} as ExpmapProducerDeps,r)).rejects.toThrow('Interrupted')
-    const previous=await store.open(); delete previous.geometryConvention
+    const previous=await store.open()
+    if(convention === undefined) delete previous.geometryConvention
+    else previous.geometryConvention=convention
     await store.publish({...previous,generation:previous.generation+1})
     control.stopAt=-1;control.produced=[]
-    await expect(createExpmapDocument({engine:{}} as ExpmapProducerDeps,{...r,resume:true})).rejects.toThrow('ancienne échelle')
+    await expect(createExpmapDocument({engine:{}} as ExpmapProducerDeps,{...r,resume:true})).rejects.toThrow('ancienne convention')
     expect(control.produced).toEqual([])
   })
   it('preserves experimental mode across resume despite the current checkbox',async()=>{

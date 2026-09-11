@@ -1,3 +1,7 @@
+// Preserve geometry until view-scale adaptation. This is only the
+// finite rgba16float storage bound, not the artistic clamp (64) in color.wgsl.
+const DISPLAY_STORAGE_MAX: f32 = 65504.0;
+
 // Merge a live and frozen typed display set into a separate destination, then swapped into the frozen role.
 // The selected value, geometry, metadata and orbit gradient always travel
 // together — a candidate is picked whole, never channel by channel.
@@ -90,9 +94,9 @@ fn metadata_with_step(metadata: u32, step: f32) -> u32 {
 fn normalize_geometry(geometry: vec4<f32>, zoomFactor: f32) -> vec4<f32> {
   let ratio = 1.0 / max(zoomFactor, 1e-30);
   return vec4<f32>(
-    clamp(geometry.xy * ratio, vec2<f32>(-64.0), vec2<f32>(64.0)),
-    clamp(geometry.z * ratio * ratio, 0.0, 64.0),
-    clamp(geometry.w + log(ratio), -64.0, 64.0)
+    clamp(geometry.xy * ratio, vec2<f32>(-DISPLAY_STORAGE_MAX), vec2<f32>(DISPLAY_STORAGE_MAX)),
+    clamp(geometry.z * ratio * ratio, 0.0, DISPLAY_STORAGE_MAX),
+    clamp(geometry.w + log(ratio), -DISPLAY_STORAGE_MAX, DISPLAY_STORAGE_MAX)
   );
 }
 
@@ -132,8 +136,8 @@ fn load_candidate(
   // Both halves are per-texel slopes, so they rescale like gradient.xy above.
   candidate.orbitGradient = clamp(
     textureLoad(orbitGradientTex, coord, 0) / max(zoomFactor, 1e-30),
-    vec4<f32>(-64.0),
-    vec4<f32>(64.0),
+    vec4<f32>(-DISPLAY_STORAGE_MAX),
+    vec4<f32>(DISPLAY_STORAGE_MAX),
   );
   candidate.trapPayload = textureLoad(trapPayloadTex, coord, 0);
   candidate.metadata = metadata_with_step(metadata, effectiveStep);

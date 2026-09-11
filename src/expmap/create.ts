@@ -27,11 +27,11 @@ export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
     if (device && Math.max(layout.tileWidth, layout.tileHeight) > device.limits.maxTextureDimension2D) throw new Error('Cette densité dépasse la largeur de texture autorisée par le GPU.')
     if (!request.resume) await request.store.assertEmpty()
     const previous = request.resume ? await request.store.open(request.documentId) : undefined
-    if (previous && previous.state !== 'complete' && previous.geometryConvention !== 'continuous-radial-v1') throw new Error('Ce calcul utilise l’ancienne échelle de relief par blocs. Créer un nouveau rendu pour utiliser le relief continu.')
+    if (previous && previous.state !== 'complete' && previous.geometryConvention !== 'continuous-radial-v2') throw new Error('Ce calcul utilise l’ancienne convention géométrique. Créer un nouveau rendu pour utiliser le relief continu avec écrêtage différé.')
     const forceRender = previous ? previous.forceRender : request.forceRender ?? false
     const frozen = await freezeExpmapAppearance(request.appearance, forceRender)
     let manifest: ExpmapManifest = previous ?? {
-      version: 5, name: request.name ?? 'Document ExpMap', quality: request.quality ?? 0.9, geometryConvention: 'continuous-radial-v1', forceRender, documentId: request.documentId, generation: 0, state: 'preparing', createdAt: new Date().toISOString(),
+      version: 5, name: request.name ?? 'Document ExpMap', quality: request.quality ?? 0.9, geometryConvention: 'continuous-radial-v2', forceRender, documentId: request.documentId, generation: 0, state: 'preparing', createdAt: new Date().toISOString(),
       scaleConvention: 'VideoPathLocation.scale', zoomReferenceScale: '1e0', projection: request.plan,
       appearance: { ...frozen, resources: [] }, color: EXPMAP_COLOR_PROFILE, octaves: layout, tiles: [],
     }
