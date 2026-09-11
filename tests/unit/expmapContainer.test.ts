@@ -81,3 +81,24 @@ it('restores an interrupted archive to internal checkpoints and reuses them afte
   const fromCheckpoint=await ExpmapStore.working(unavailable,'fixture',true)
   expect(await fromCheckpoint.open()).toEqual(m)
 })
+
+it('opens complete playback metadata without scanning files, but checks bytes on demand',async()=>{
+  const dir=new MemoryDirectory(),store=new ExpmapStore(dir.handle())
+  let m=await fixtureManifest()
+  for(let i=0;i<m.octaves.tileCount;i++)m=await store.appendTile(m,new Uint8Array([i]))
+  m={...m,generation:m.generation+1,state:'complete',center:[1,2,3]};await store.publish(m)
+  const verify=vi.spyOn(store,'verifyTile')
+  expect(await store.open('fixture',true)).toEqual(m);expect(verify).not.toHaveBeenCalled()
+  dir.files.delete(m.tiles[14].file)
+  await expect(store.verifyTile(m.tiles[14])).rejects.toThrow()
+  await expect(store.readTile(m.tiles[14])).rejects.toThrow()
+  dir.files.get(m.tiles[0].file)![0]^=1
+  await expect(store.readTile(m.tiles[0])).rejects.toThrow('Corrupt')
+})
+
+it('retains full checkpoint verification for incomplete documents in progressive mode',async()=>{
+  const store=new ExpmapStore(new MemoryDirectory().handle())
+  await store.appendTile(await fixtureManifest(),new Uint8Array([1]))
+  const verify=vi.spyOn(store,'verifyTile')
+  await store.open('fixture',true);expect(verify).toHaveBeenCalled()
+})

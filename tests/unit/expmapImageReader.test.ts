@@ -32,3 +32,13 @@ describe('worker image reader ownership',()=>{
     await expect(creating).rejects.toThrow('Permission denied');expect(worker.terminate).toHaveBeenCalledOnce()
   })
 })
+
+it('cancels an obsolete request, accepts a new one and closes late output',async()=>{
+  const {worker,source}=setup(),creating=ExpmapImageReader.create(source,'fixture')
+  worker.onmessage({data:{id:1}});const reader=await creating,abort=new AbortController()
+  const old=reader.read(0,abort.signal);abort.abort()
+  await expect(old).rejects.toThrow();expect(worker.postMessage).toHaveBeenCalledWith({kind:'cancel',id:2})
+  const next=reader.read(20),late={close:vi.fn()},bitmap={close:vi.fn()}
+  worker.onmessage({data:{id:2,bitmap:late}});worker.onmessage({data:{id:3,bitmap}})
+  expect(late.close).toHaveBeenCalledOnce();expect(await next).toBe(bitmap);reader.dispose()
+})

@@ -12,7 +12,7 @@ describe('14 tile circular cache',()=>{
       for(const i of w.needed)expect(uploads.get(i%14)).toBe(i)
       expect(uploads.size).toBeLessThanOrEqual(14)
     }
-    expect(reads).toEqual(Array.from({length:15},(_,i)=>i))
+    expect(reads).toEqual(Array.from({length:16},(_,i)=>i))
   })
   it('never uploads a stale prefetch into a newly needed slot after a seek',async()=>{
     let release:()=>void=()=>{}; const gate=new Promise<void>(r=>{release=r})
@@ -74,4 +74,48 @@ it('aborts a partial prefetch on seek and lets the new window proceed',async()=>
   await cache.prepare([27])
   expect(cache.resident(13)).toBe(false);expect(cache.resident(27)).toBe(true)
   expect(release.mock.calls.filter(([i])=>i===13)).toHaveLength(1)
+})
+
+it('decodes the next octave while the previous upload is held',async()=>{
+  let finish!:()=>void,started!:()=>void
+  const uploading=new Promise<void>(r=>started=r),reads:number[]=[],released:number[]=[]
+  const cache=new ExpmapTileCache(async i=>{reads.push(i);return i},async(_slot,i)=>{
+    if(i===0){started();await new Promise<void>(r=>finish=r)}
+  },i=>released.push(i))
+  const preparing=cache.prepare([0,1]);await uploading
+  expect(reads).toEqual([0,1]);expect(cache.resident(0)).toBe(false)
+  finish();await preparing;cache.dispose();expect(released).toEqual([0,1])
+})
+
+it('reuses physical sources in other GPU layers without reading them again',async()=>{
+  const read=vi.fn(async i=>i),copy=vi.fn(async()=>{})
+  const cache=new ExpmapTileCache(read,()=>{},()=>{},{key:i=>i%2,copy})
+  await cache.prepare([0]);await cache.prepare([2]);await cache.prepare([14])
+  expect(read).toHaveBeenCalledTimes(1);expect(copy).toHaveBeenCalledWith(0,2)
+  expect(cache.resident(14)).toBe(true)
+})
+
+it('cancels a decoded lookahead when a seek supersedes it',async()=>{
+  const signals:AbortSignal[]=[],released:number[]=[]
+  const cache=new ExpmapTileCache(async(i,signal)=>{
+    if(i===1) {signals.push(signal!);await new Promise<void>((_,reject)=>signal!.addEventListener('abort',()=>reject(signal!.reason),{once:true}))}
+    return i
+  },()=>{},i=>released.push(i))
+  await cache.prepare([0],1)
+  await cache.prepare([28])
+  expect(signals[0].aborted).toBe(true);expect(cache.resident(28)).toBe(true)
+  cache.dispose();expect(released).toEqual([0,28])
+})
+
+it('updates priorities immediately while the old render is still loading',async()=>{
+  let started!:()=>void
+  const loading=new Promise<void>(r=>started=r)
+  const cache=new ExpmapTileCache(async(i,signal)=>{
+    if(i===0) {started();await new Promise<void>((_,reject)=>signal!.addEventListener('abort',()=>reject(signal!.reason),{once:true}))}
+    return i
+  },()=>{})
+  const old=cache.prepare([0]);await loading
+  const failed=expect(old).rejects.toThrow('Vue remplacée')
+  cache.setWindow([28]);await failed
+  await cache.prepare([28]);expect(cache.resident(28)).toBe(true)
 })

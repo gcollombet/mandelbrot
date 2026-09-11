@@ -11,42 +11,225 @@ service cloud.firestore {
         );
     }
 
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function isValidPersonalGuid(guid) {
+      return guid is string
+        && guid.size() > 0
+        && guid.size() <= 128
+        && guid.matches('^[A-Za-z0-9_-]+$');
+    }
+
+    function isPersonalPresetType(value) {
+      return value in [
+        'completePreset',
+        'palettePreset',
+        'stopPreset',
+        'textureMappingPreset',
+        'animationPreset'
+      ];
+    }
+
+    function isValidPersonalPreset(uid, guid, data) {
+      return data.keys().hasOnly([
+          'guid', 'type', 'payload', 'name', 'thumbnail', 'favorite',
+          'updatedAt', 'revision', 'ownerUid'
+        ])
+        && data.keys().hasAll(['guid', 'type', 'payload', 'name', 'favorite', 'updatedAt', 'revision', 'ownerUid'])
+        && isValidPersonalGuid(guid)
+        && data.guid == guid
+        && data.ownerUid == uid
+        && isPersonalPresetType(data.type)
+        && data.name is string
+        && data.favorite is bool
+        && (!data.keys().hasAny(['thumbnail']) || data.thumbnail is string)
+        && data.updatedAt is timestamp
+        && data.revision is int
+        && data.revision > 0;
+    }
+
+    function isValidPersonalManifest(data) {
+      return data.keys().hasOnly(['entries', 'revision', 'updatedAt', 'repairedAt'])
+        && data.keys().hasAll(['entries', 'revision', 'updatedAt'])
+        && data.entries is list
+        && data.entries.size() <= 400
+        && data.revision is int
+        && data.revision > 0
+        && data.updatedAt is timestamp
+        && (!data.keys().hasAny(['repairedAt']) || data.repairedAt is timestamp);
+    }
+
+    function isValidPersonalUsage(data) {
+      return data.keys().hasOnly(['presetCount', 'textureCount', 'revision', 'updatedAt', 'repairedAt'])
+        && data.keys().hasAll(['presetCount', 'textureCount', 'revision', 'updatedAt'])
+        && data.presetCount is int
+        && data.presetCount >= 0
+        && data.presetCount <= 400
+        && data.textureCount is int
+        && data.textureCount >= 0
+        && data.textureCount <= 10
+        && data.revision is int
+        && data.revision > 0
+        && data.updatedAt is timestamp
+        && (!data.keys().hasAny(['repairedAt']) || data.repairedAt is timestamp);
+    }
+
+    function isValidPersonalTexture(uid, guid, data) {
+      return data.keys().hasOnly([
+          'guid', 'name', 'kind', 'contentType', 'storagePath', 'width',
+          'height', 'byteSize', 'thumbnail', 'updatedAt', 'revision', 'ownerUid'
+        ])
+        && data.keys().hasAll([
+          'guid', 'name', 'kind', 'contentType', 'storagePath', 'width',
+          'height', 'byteSize', 'thumbnail', 'updatedAt', 'revision', 'ownerUid'
+        ])
+        && isValidPersonalGuid(guid)
+        && data.guid == guid
+        && data.ownerUid == uid
+        && data.name is string
+        && data.kind in ['texture', 'skybox']
+        && data.contentType == 'image/webp'
+        && data.storagePath == 'users/' + uid + '/textures/' + guid + '.webp'
+        && data.width is int
+        && data.width > 0
+        && data.width <= 1024
+        && data.height is int
+        && data.height > 0
+        && data.height <= 1024
+        && data.byteSize is int
+        && data.byteSize > 0
+        && data.byteSize <= 5 * 1024 * 1024
+        && data.thumbnail is string
+        && data.updatedAt is timestamp
+        && data.revision is int
+        && data.revision > 0;
+    }
+
+    function isValidTextureReservation(uid, fileName, data) {
+      return data.keys().hasOnly(['guid', 'ownerUid', 'fileName', 'counted', 'expiresAt', 'updatedAt'])
+        && data.keys().hasAll(['guid', 'ownerUid', 'fileName', 'counted', 'expiresAt', 'updatedAt'])
+        && isValidPersonalGuid(data.guid)
+        && fileName == data.guid + '.webp'
+        && data.fileName == fileName
+        && data.ownerUid == uid
+        && data.counted is bool
+        && data.expiresAt is timestamp
+        && data.updatedAt is timestamp;
+    }
+
+    function isValidImportBatch(uid, batchId, data) {
+      return data.keys().hasOnly([
+          'id', 'uid', 'ownerUid', 'status', 'presetGuids', 'textureGuids',
+          'completedPresetGuids', 'completedTextureGuids', 'updatedAt', 'lastError'
+        ])
+        && data.keys().hasAll([
+          'id', 'uid', 'ownerUid', 'status', 'presetGuids', 'textureGuids',
+          'completedPresetGuids', 'completedTextureGuids', 'updatedAt'
+        ])
+        && isValidPersonalGuid(batchId)
+        && data.id == batchId
+        && data.uid == uid
+        && data.ownerUid == uid
+        && data.status in ['pending', 'running', 'complete', 'error']
+        && data.presetGuids is list
+        && data.presetGuids.size() <= 400
+        && data.textureGuids is list
+        && data.textureGuids.size() <= 10
+        && data.completedPresetGuids is list
+        && data.completedPresetGuids.size() <= 400
+        && data.completedTextureGuids is list
+        && data.completedTextureGuids.size() <= 10
+        && data.updatedAt is timestamp
+        && (!data.keys().hasAny(['lastError']) || data.lastError == null || data.lastError is string);
+    }
+
     match /admins/{uid} {
       allow read: if request.auth != null && request.auth.uid == uid;
       allow write: if false;
     }
 
     match /catalog/{catalogType}/entries/{guid} {
-      allow read: if true;
-      allow create, update, delete: if isAdmin()
+      allow get: if true;
+      allow list: if isAdmin();
+      allow create, update: if isAdmin()
         && request.resource.data.guid == guid
         && request.resource.data.name is string
         && request.resource.data.name.size() > 0;
+      allow delete: if isAdmin();
+    }
+
+    match /catalogManifest/{manifestId} {
+      allow get: if manifestId == 'current';
+      allow list: if false;
+      allow create, update: if manifestId == 'current'
+        && isAdmin()
+        && request.resource.data.keys().hasOnly(['schemaVersion', 'entries', 'updatedAt'])
+        && request.resource.data.schemaVersion == 1
+        && request.resource.data.entries is list
+        && request.resource.data.updatedAt is timestamp;
+      allow delete: if manifestId == 'current' && isAdmin();
     }
 
     match /users/{uid}/presets/{guid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-      allow write: if false;
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && isValidPersonalPreset(uid, guid, request.resource.data)
+        && request.resource.data.revision == 1;
+      allow update: if isOwner(uid)
+        && isValidPersonalPreset(uid, guid, request.resource.data)
+        && request.resource.data.revision == resource.data.revision + 1;
+      allow delete: if isOwner(uid);
     }
 
     match /users/{uid}/textures/{guid} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-      allow write: if false;
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && isValidPersonalTexture(uid, guid, request.resource.data)
+        && request.resource.data.revision == 1;
+      allow update: if isOwner(uid)
+        && isValidPersonalTexture(uid, guid, request.resource.data)
+        && request.resource.data.revision == resource.data.revision + 1;
+      allow delete: if isOwner(uid);
+    }
+
+    match /users/{uid}/manifests/{manifestId} {
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && manifestId == 'presets'
+        && isValidPersonalManifest(request.resource.data);
+      allow update: if isOwner(uid)
+        && manifestId == 'presets'
+        && isValidPersonalManifest(request.resource.data)
+        && request.resource.data.revision == resource.data.revision + 1;
+      allow delete: if false;
     }
 
     match /users/{uid}/usage/{document} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-      allow write: if false;
+      allow read: if isOwner(uid);
+      allow create: if isOwner(uid)
+        && document == 'current'
+        && isValidPersonalUsage(request.resource.data);
+      allow update: if isOwner(uid)
+        && document == 'current'
+        && isValidPersonalUsage(request.resource.data)
+        && request.resource.data.revision == resource.data.revision + 1;
+      allow delete: if false;
     }
 
     match /users/{uid}/textureReservations/{fileName} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-      allow write: if false;
+      allow read: if isOwner(uid);
+      allow create, update: if isOwner(uid)
+        && isValidTextureReservation(uid, fileName, request.resource.data);
+      allow delete: if isOwner(uid);
     }
 
     match /users/{uid}/importBatches/{batchId} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-      allow write: if false;
+      allow read: if isOwner(uid);
+      allow create, update: if isOwner(uid)
+        && isValidImportBatch(uid, batchId, request.resource.data);
+      allow delete: if isOwner(uid);
     }
 
     match /{document=**} {

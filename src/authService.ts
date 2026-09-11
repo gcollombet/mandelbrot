@@ -10,10 +10,6 @@ export interface AuthState {
   role: UserRole;
 }
 
-function isUserRole(value: unknown): value is UserRole {
-  return value === 'guest' || value === 'user' || value === 'admin';
-}
-
 export function normalizeAuthenticatedRole(value: unknown): Exclude<UserRole, 'guest'> {
   return value === 'admin' ? 'admin' : 'user';
 }
@@ -44,21 +40,7 @@ export async function resolveUserRole(user: User | null): Promise<UserRole> {
   const services = getFirebaseServices();
   if (!services) return 'user';
 
-  if (!import.meta.env.VITE_FIREBASE_ROLE_ENDPOINT) {
-    return resolveFirestoreAdminRole(user.uid);
-  }
-
-  try {
-    const token = await user.getIdToken();
-    const response = await fetch(import.meta.env.VITE_FIREBASE_ROLE_ENDPOINT, {
-      headers: {Authorization: `Bearer ${token}`},
-    });
-    if (!response.ok) return resolveFirestoreAdminRole(user.uid);
-    const payload = await response.json() as {role?: unknown};
-    return isUserRole(payload.role) ? normalizeAuthenticatedRole(payload.role) : resolveFirestoreAdminRole(user.uid);
-  } catch {
-    return resolveFirestoreAdminRole(user.uid);
-  }
+  return resolveFirestoreAdminRole(user.uid);
 }
 
 async function resolveFirestoreAdminRole(uid: string): Promise<UserRole> {

@@ -3,8 +3,10 @@ struct Params {
   sampling: vec4<f32>, // fractional depth, angle, angular count, rows per doubling
   tileInfo: vec4<f32>, // tile width, tile height, halo, integer base modulo 14
   center: vec4<f32>, // encoded sRGB center
-  integration: vec4<f32>, // maximum grid side, minimum samples per log-radius unit
+  integration: vec4<f32>, // maximum grid side, minimum samples per log-radius unit, cyclic octaves
   effects: vec4<f32>, // Droste radians/doubling, base phase, sectors (0=off), orientation
+  radialReverse: array<vec4<f32>,4>, // virtual octave reversal flags
+  mirror: vec4<f32>, // enabled, screen log-radius, source offset
 }
 @group(0) @binding(0) var<uniform> p: Params;
 @group(0) @binding(1) var tiles: texture_2d_array<f32>;
@@ -22,9 +24,14 @@ fn decodeSRGB(v:vec3<f32>)->vec3<f32> {
 // Samples are linear RGB, including the baked center, before pixel integration.
 fn sampleMap(delta:vec2<f32>)->vec3<f32> {
   let radius=length(delta);
-  if(radius < p.output.w/4096.0) { return decodeSRGB(p.center.rgb); }
-  let depth=clamp(p.sampling.x+log2(p.output.w/radius),0.0,12.999999);
-  let octave=floor(depth);
+  if(radius < p.output.w/4096.0 && p.integration.z<0.5) { return decodeSRGB(p.center.rgb); }
+  let depth=clamp(p.sampling.x+log2(p.output.w/max(radius,p.output.w/4096.0)),0.0,12.999999);
+  var sourceDepth=depth;
+  if(p.mirror.x>0.5) {
+    let q=clamp(log2(p.output.w/max(radius,p.output.w/4096.0)),0.0,12.0);
+    sourceDepth=clamp(p.mirror.z+min(q,2.0*p.mirror.y-q),0.0,12.999999);
+  }
+  let octave=floor(sourceDepth);
   var theta=atan2(delta.y,delta.x)+p.sampling.y;
   theta+=p.effects.y+p.effects.x*depth;
   if(p.effects.z>=2.0) {
@@ -32,7 +39,9 @@ fn sampleMap(delta:vec2<f32>)->vec3<f32> {
     let relative=(theta-p.effects.w)/sector;
     theta=p.effects.w+abs(fract(relative)*sector-sector*0.5);
   }
-  let uv=(vec2<f32>(fract(theta/6.28318530718)*p.sampling.z,fract(depth)*p.sampling.w)+p.tileInfo.z+0.5)/p.tileInfo.xy;
+  let index=u32(octave);
+  let row=select(fract(sourceDepth),1.0-fract(sourceDepth),p.radialReverse[index/4u][index%4u]>0.5);
+  let uv=(vec2<f32>(fract(theta/6.28318530718)*p.sampling.z,row*p.sampling.w)+p.tileInfo.z+0.5)/p.tileInfo.xy;
   let slot=(i32(p.tileInfo.w)+i32(octave))%14;
   return textureSampleLevel(tiles,filtering,uv,slot,0.0).rgb;
 }

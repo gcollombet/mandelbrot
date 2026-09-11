@@ -118,3 +118,17 @@ it('snapshots effects for every exported frame and rejects invalid effects befor
   await expect(exportExpmapVideo({ manifest: m }, { ...request, effects: { ...effects, kaleidoscope: 1 } })).rejects.toThrow('Effets')
   expect(mock.render).not.toHaveBeenCalled()
 })
+
+it('uses the starting angle throughout octave rotation without adding legacy turns', async () => {
+  const m = await manifest()
+  vi.stubGlobal('VideoFrame', class { close() {} })
+  mock.render.mockResolvedValue({}); mock.add.mockResolvedValue(undefined)
+  await exportExpmapVideo({ manifest: m }, {
+    window: { ...expmapVideoDefaults(m), fromAngle: 0.4, toAngle: 20 },
+    width: 16, height: 12, fps: 1, codec: 'avc', destination: { kind: 'buffer' },
+    effects: { droste: 30, kaleidoscope: 0, orientation: 0, imageRotationMode: 'droste' },
+    gpuRenderer: { render: mock.render },
+  })
+  expect(mock.render.mock.calls.length).toBeGreaterThan(1)
+  expect(mock.render.mock.calls.every(([view]) => view.angle === 0.4 && view.effects.imageRotationMode === 'droste')).toBe(true)
+})

@@ -72,14 +72,14 @@ export async function openExpmapLibraryEntry(entry: ExpmapLibraryEntry) {
     try {
       const root=await navigator.storage.getDirectory(),parent=await root.getDirectoryHandle('expmap-work'),directory=await parent.getDirectoryHandle(entry.id)
       store=new ExpmapStore(directory,entry.handle)
-      manifest=await store.open(entry.id)
+      manifest=await store.open(entry.id,true)
     } catch(error) {
       if(!(error instanceof DOMException && error.name==='NotFoundError'))throw error
       if (permission.queryPermission && await permission.queryPermission({ mode: 'read' }) !== 'granted') {
         if (await permission.requestPermission({ mode: 'read' }) !== 'granted') throw new DOMException('Accès au fichier refusé ; rattacher le document ou renouveler sa permission.', 'NotAllowedError')
       }
       store=await ExpmapStore.fromFile(entry.handle)
-      manifest=await store.open(entry.id)
+      manifest=await store.open(entry.id,true)
     }
     await saveExpmapLibraryEntry(entryFromManifest(manifest, entry.handle, entry.name, entry.thumbnail))
     return { store, manifest }

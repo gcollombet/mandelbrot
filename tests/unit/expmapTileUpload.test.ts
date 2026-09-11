@@ -24,3 +24,9 @@ describe('bounded GPU image uploads',()=>{
     expect(copy).not.toHaveBeenCalled()
   })
 })
+
+it('groups two bands per fence and drains the final partial group',async()=>{
+  const copies:number[]=[],fences:number[]=[]
+  await uploadExpmapBands(1024,5120,{signal:new AbortController().signal,isRequired:()=>true},async y=>{copies.push(y)},undefined,async()=>{fences.push(copies.length)})
+  expect(copies).toEqual([0,1024,2048,3072,4096]);expect(fences).toEqual([2,4,5])
+})

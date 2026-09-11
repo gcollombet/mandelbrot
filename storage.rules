@@ -11,19 +11,28 @@ service firebase.storage {
         );
     }
 
+    function isOwner(uid) {
+      return request.auth != null && request.auth.uid == uid;
+    }
+
+    function isPersonalTextureFile(fileName) {
+      return fileName.matches('^[A-Za-z0-9_-]{1,128}[.]webp$');
+    }
+
     match /catalog/texture/{guid} {
       allow read: if true;
       allow write: if isAdmin();
     }
 
     match /users/{uid}/textures/{fileName} {
-      allow read: if request.auth != null && request.auth.uid == uid;
-      allow create, update: if request.auth != null
-        && request.auth.uid == uid
+      allow read: if isOwner(uid);
+      allow create, update: if isOwner(uid)
+        && isPersonalTextureFile(fileName)
         && request.resource.contentType == 'image/webp'
         && request.resource.size <= 5 * 1024 * 1024
-        && firestore.exists(/databases/(default)/documents/users/$(uid)/textureReservations/$(fileName));
-      allow delete: if false;
+        && firestore.exists(/databases/(default)/documents/users/$(uid)/textureReservations/$(fileName))
+        && firestore.get(/databases/(default)/documents/users/$(uid)/textureReservations/$(fileName)).data.expiresAt > request.time;
+      allow delete: if isOwner(uid) && isPersonalTextureFile(fileName);
     }
 
     match /{path=**} {

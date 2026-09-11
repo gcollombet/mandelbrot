@@ -1,3 +1,4 @@
+import { radialMode } from './radial'
 import { effectsSettings, type ExpmapEffects } from './effects'
 import { canonicalScale, compareScales, interpolateScale, scaleDoublements } from './decimal'
 import type { ExpmapManifest } from './manifest'
@@ -12,11 +13,11 @@ export function expmapVideoDefaults(manifest: ExpmapManifest): ExpmapVideoWindow
   const distance = Math.abs(scaleDoublements(startScale, endScale))
   return { fromScale: startScale, toScale: endScale, fromAngle: 0, toAngle: 0, speed: distance ? 2 : 0, durationSeconds: distance ? distance / 2 : 5, authority: 'duration', ...DEFAULT_EXPMAP_MOTION }
 }
-export function validateExpmapVideoWindow(manifest: ExpmapManifest, window: ExpmapVideoWindow) {
+export function validateExpmapVideoWindow(manifest: ExpmapManifest, window: ExpmapVideoWindow, effects?: Partial<ExpmapEffects>) {
   if (manifest.state !== 'complete') throw new Error('Le document est incomplet.')
   for (const scale of [window.fromScale, window.toScale]) {
     canonicalScale(scale)
-    if (compareScales(scale, manifest.projection.domain.startScale) > 0 || compareScales(scale, manifest.projection.domain.endScale) < 0) throw new Error('La fenêtre sort du domaine du document.')
+    if (compareScales(scale, manifest.projection.domain.startScale) > 0 || (radialMode(effects) === 'normal' && compareScales(scale, manifest.projection.domain.endScale) < 0)) throw new Error('La fenêtre sort du domaine du document.')
   }
   if (![window.fromAngle, window.toAngle, window.durationSeconds, window.speed].every(Number.isFinite) || window.durationSeconds <= 0) throw new Error('Durée ou rotation invalide.')
   validateMotion(window, window.durationSeconds)
@@ -46,13 +47,13 @@ export function changeExpmapWindow(window: ExpmapVideoWindow, fromScale: string,
 export function saveExpmapVideoWindow(id: string, window: ExpmapVideoWindow) {
   try { localStorage.setItem(`expmap-video-window:${id}`, JSON.stringify({ version: 1, window })) } catch { /* Keep the current in-memory edit. */ }
 }
-export function loadExpmapVideoWindow(manifest: ExpmapManifest): { window: ExpmapVideoWindow; reset: boolean } {
+export function loadExpmapVideoWindow(manifest: ExpmapManifest, effects?: Partial<ExpmapEffects>): { window: ExpmapVideoWindow; reset: boolean } {
   try {
     const text = localStorage.getItem(`expmap-video-window:${manifest.documentId}`)
     if (!text) return { window: expmapVideoDefaults(manifest), reset: false }
     const value = JSON.parse(text)
     if (value.version !== 1) throw new Error('Preferences version changed')
-    validateExpmapVideoWindow(manifest, value.window)
+    validateExpmapVideoWindow(manifest, value.window, effects)
     return { window: { ...DEFAULT_EXPMAP_MOTION, ...value.window }, reset: false }
   } catch { return { window: expmapVideoDefaults(manifest), reset: true } }
 }
@@ -65,8 +66,8 @@ export async function exportExpmapVideo(source: { manifest: ExpmapManifest }, re
   gpuRenderer: { render(view: ExpmapView, signal?: AbortSignal): Promise<OffscreenCanvas> }
 }) {
   const effects = effectsSettings(request.effects)
-  validateExpmapVideoWindow(source.manifest, request.window)
-  validateExpmapView(source.manifest.projection, { width: request.width, height: request.height, scale: request.window.fromScale, angle: request.window.fromAngle, maxSamples: request.maxSamples ?? 16, allowUpscale: true })
+  validateExpmapVideoWindow(source.manifest, request.window, effects)
+  validateExpmapView(source.manifest.projection, { width: request.width, height: request.height, scale: request.window.fromScale, angle: request.window.fromAngle, maxSamples: request.maxSamples ?? 16, allowUpscale: true, effects })
   if (!Number.isFinite(request.fps) || request.fps <= 0 || request.fps > 240) throw new Error('Cadence invalide.')
   const durationSeconds = request.window.durationSeconds + motionSettings(request.window).holdSeconds
   const settings = { fps: request.fps, durationSeconds }
@@ -80,9 +81,9 @@ export async function exportExpmapVideo(source: { manifest: ExpmapManifest }, re
     for (let i = 0; i < total; i++) {
       request.signal?.throwIfAborted()
       const t = motionProgress(request.window, elapsedForFrame(i, total, durationSeconds))
-      const view = { effects: { ...effects }, allowUpscale: true, width: request.width, height: request.height, maxSamples: request.maxSamples ?? 16,
+      const view = { effectTime: elapsedForFrame(i, total, durationSeconds), effects: { ...effects }, allowUpscale: true, width: request.width, height: request.height, maxSamples: request.maxSamples ?? 16,
         scale: interpolateScale(request.window.fromScale, request.window.toScale, t),
-        angle: t === 0 ? request.window.fromAngle : t === 1 ? request.window.toAngle : request.window.fromAngle + (request.window.toAngle - request.window.fromAngle) * t }
+        angle: effects.imageRotationMode === 'octave' || effects.imageRotationMode === 'droste' ? request.window.fromAngle : t === 0 ? request.window.fromAngle : t === 1 ? request.window.toAngle : request.window.fromAngle + (request.window.toAngle - request.window.fromAngle) * t }
       const canvas = await request.gpuRenderer.render(view, request.signal)
       request.signal?.throwIfAborted()
       const timing = { timestamp: Math.round(i * 1e6 / request.fps), duration: Math.round(1e6 / request.fps) }

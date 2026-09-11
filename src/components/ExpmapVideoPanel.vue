@@ -1,4 +1,7 @@
 <script setup lang="ts">
+import { radialMode } from '../expmap/radial'
+
+import { expmapLoopDomain } from '../expmap/loop'
 import ExpmapEffectsControls from './ExpmapEffectsControls.vue'
 import { documentEffects } from '../expmap/effects'
 import VideoMotionControls from './VideoMotionControls.vue'
@@ -41,8 +44,8 @@ const motion = computed(() => motionSettings(windowSpec.value ?? {}))
 const validationError = computed(() => {
   if (!manifest.value || !windowSpec.value) return ''
   try {
-    validateExpmapVideoWindow(manifest.value, windowSpec.value)
-    validateExpmapView(manifest.value.projection, { scale: windowSpec.value.fromScale, angle: windowSpec.value.fromAngle, width: width.value, height: height.value, allowUpscale: true })
+    validateExpmapVideoWindow(manifest.value, windowSpec.value, documentEffects(manifest.value.documentId))
+    validateExpmapView(manifest.value.projection, { scale: windowSpec.value.fromScale, angle: windowSpec.value.fromAngle, width: width.value, height: height.value, allowUpscale: true, effects: documentEffects(manifest.value.documentId) })
     return ''
   } catch (e) { return (e as Error).message }
 })
@@ -65,7 +68,7 @@ watch(selectedExpmapDocumentId, async id => {
     if (current !== generation) return
     if (opened.manifest.state !== 'complete') throw new Error('Document incomplet.')
     manifest.value = opened.manifest
-    const saved = loadExpmapVideoWindow(opened.manifest); windowSpec.value = saved.window
+    const saved = loadExpmapVideoWindow(opened.manifest, documentEffects(opened.manifest.documentId)); windowSpec.value = saved.window
     error.value = saved.reset ? 'Préférences hors domaine réinitialisées.' : ''
   } catch (e) { if (current === generation) error.value = String(e) }
 }, { immediate: true })
@@ -78,17 +81,17 @@ function trim(side: 'fromScale' | 'toScale', value: string) {
   if (!windowSpec.value || !manifest.value) return
   try {
     const next = changeExpmapWindow(windowSpec.value, side === 'fromScale' ? value : windowSpec.value.fromScale, side === 'toScale' ? value : windowSpec.value.toScale)
-    validateExpmapVideoWindow(manifest.value, next); windowSpec.value = next; error.value = ''; persist()
+    validateExpmapVideoWindow(manifest.value, next, documentEffects(manifest.value.documentId)); windowSpec.value = next; error.value = ''; persist()
   } catch (e) { error.value = String(e) }
 }
 function relative(scale: string) {
   if (!manifest.value) return 0
-  const d = manifest.value.projection.domain, depth = scaleDoublements(d.startScale, d.endScale)
+  const d = expmapLoopDomain(manifest.value, documentEffects(manifest.value.documentId)), depth = scaleDoublements(d.startScale, d.endScale)
   return depth ? Math.max(0, Math.min(1, scaleDoublements(d.startScale, scale) / depth)) : 0
 }
 function slide(side: 'fromScale' | 'toScale', event: Event) {
   if (!manifest.value) return
-  const d = manifest.value.projection.domain
+  const d = expmapLoopDomain(manifest.value, documentEffects(manifest.value.documentId))
   trim(side, interpolateScale(d.startScale, d.endScale, Number((event.target as HTMLInputElement).value)))
 }
 const selectionStyle = computed(() => {
@@ -102,9 +105,15 @@ async function preview(side: 'fromScale' | 'toScale') {
   if (!selectedEntry.value || !windowSpec.value || expmapBusy.value) return
   try {
     const opened = await openExpmapLibraryEntry(selectedEntry.value)
-    expmapPreviewView.value = { documentId: opened.manifest.documentId, scale: windowSpec.value[side], angle: side === 'fromScale' ? windowSpec.value.fromAngle : windowSpec.value.toAngle }
+    expmapPreviewView.value = { documentId: opened.manifest.documentId, scale: windowSpec.value[side], effectTime: side === 'fromScale' ? 0 : windowSpec.value.durationSeconds, angle: side === 'fromScale' || ['octave', 'droste'].includes(documentEffects(opened.manifest.documentId).imageRotationMode ?? 'fixed') ? windowSpec.value.fromAngle : windowSpec.value.toAngle }
     expmapOpenDocument.value = opened
   } catch (e) { error.value = String(e) }
+}
+function fullLoop() {
+  if (!manifest.value || !windowSpec.value) return
+  const d = expmapLoopDomain(manifest.value, documentEffects(manifest.value.documentId))
+  windowSpec.value = changeExpmapWindow(windowSpec.value, d.startScale, d.endScale)
+  persist()
 }
 function reverse() {
   if (!windowSpec.value) return
@@ -161,6 +170,7 @@ async function start() {
       </DenseSection>
       <template v-if="windowSpec && manifest">
         <DenseSection title="Trajet">
+          <button v-if="radialMode(documentEffects(manifest.documentId)) !== 'normal'" @click="fullLoop">Un cycle complet d’octaves</button>
           <ExpmapZoomControl :model-value="windowSpec.fromScale" label="Départ" :slider="false" capture-label="Depuis le lecteur" :capture-disabled="expmapLastView?.documentId !== manifest.documentId" @update:model-value="trim('fromScale', $event)" @capture="takeView('fromScale')"><button @click="preview('fromScale')">Voir</button></ExpmapZoomControl>
           <ExpmapZoomControl :model-value="windowSpec.toScale" label="Arrivée" :slider="false" capture-label="Depuis le lecteur" :capture-disabled="expmapLastView?.documentId !== manifest.documentId" @update:model-value="trim('toScale', $event)" @capture="takeView('toScale')"><button @click="preview('toScale')">Voir</button></ExpmapZoomControl>
           <div class="range-pair">
@@ -173,8 +183,8 @@ async function start() {
           <DenseField :model-value="windowSpec.durationSeconds" label="Durée du trajet" unit="s" :f="compactNumber" :min="0.1" :max="86400" :step="0.1" @update:model-value="update('duration', $event)"/>
           <details><summary>Vitesse moyenne</summary><DenseField v-if="windowSpec.speed > 0" :model-value="windowSpec.speed" label="Doublements/s" :f="compactNumber" :min="0.1" :max="100" :step="0.1" @update:model-value="update('speed', $event)"/><p>La dernière valeur modifiée (durée ou vitesse) est conservée lorsque la plage change. Les courbes modulent la vitesse autour de cette moyenne.</p></details>
         </DenseSection>
-        <VideoRotationControls :from-angle="windowSpec.fromAngle" :to-angle="windowSpec.toAngle" :current-angle="expmapLastView?.documentId === manifest.documentId ? expmapLastView.angle : undefined" capture-label="Angle du lecteur" @change="setRotation"/>
-        <ExpmapEffectsControls :document-id="manifest.documentId"/>
+        <VideoRotationControls :fixed-only="['octave', 'droste'].includes(documentEffects(manifest.documentId).imageRotationMode ?? 'fixed')" :from-angle="windowSpec.fromAngle" :to-angle="windowSpec.toAngle" :current-angle="expmapLastView?.documentId === manifest.documentId ? expmapLastView.angle : undefined" capture-label="Angle du lecteur" @change="setRotation"/>
+        <ExpmapEffectsControls :tile-count="manifest.octaves.tileCount" :document-id="manifest.documentId"/>
         <VideoMotionControls :model-value="motion" :duration-seconds="windowSpec.durationSeconds" @update:model-value="setMotion"/>
         <DenseSection title="Fichier vidéo">
           <div class="row"><DenseSelect v-model="outputResolution" label="Résolution" :options="resolutions"/><DenseSelect :model-value="fps" label="Cadence" :options="[24,25,30,60].map(n => ({value: n, label: `${n} fps`}))" @update:model-value="fps = Number($event)"/></div>

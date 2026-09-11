@@ -48,10 +48,10 @@ export function octaveProjection(plan: ExpmapPlan, block: ExpmapBlock) {
   return expmapKernelProjection(localPlan, { ...block, originX: block.originX-o.halo, originY:block.originY-o.halo })
 }
 /** Fractional windows span 13 tiles; the 14th slot anticipates movement. */
-export function octaveWindow(depth: number, count: number, direction = 1) {
-  const first = Math.max(0, Math.min(count-1, Math.floor(depth)))
-  const last = Math.min(count-1, first + EXPMAP_VISIBLE_OCTAVES)
+export function octaveWindow(depth: number, count: number, direction = 1, loop = false) {
+  const first = Math.max(0, loop ? Math.floor(depth) : Math.min(count-1, Math.floor(depth)))
+  const last = loop ? first + EXPMAP_VISIBLE_OCTAVES : Math.min(count-1, first + EXPMAP_VISIBLE_OCTAVES)
   const needed = Array.from({length:last-first+1},(_,i)=>first+i)
   const next = direction >= 0 ? last+1 : first-1
-  return { needed, prefetch: next>=0 && next<count ? next : undefined }
+  return { needed, prefetch: next>=0 && (loop || next<count) ? next : undefined }
 }

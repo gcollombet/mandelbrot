@@ -4,10 +4,8 @@ import {
   getDoc,
   getDocs,
   limit,
-  orderBy,
   query,
-  serverTimestamp,
-  setDoc,
+  runTransaction,
   Timestamp,
   where,
   type DocumentData,
@@ -20,10 +18,17 @@ import {getFirebaseServices} from './firebaseConfig';
 import type {StopPresetRecord} from './stopPresetStore';
 import type {TextureMappingPresetRecord} from './textureMappingPresetStore';
 import type {AnimationPresetRecord} from './animationPresetStore';
+import {
+  CATALOG_TYPES,
+  normalizePublicCatalogManifest,
+  PUBLIC_CATALOG_MANIFEST_SCHEMA_VERSION,
+  type CatalogType,
+  type PublicCatalogManifest,
+  type PublicCatalogManifestEntry,
+  upsertPublicCatalogManifestEntry,
+} from './publicCatalogManifest';
 
-export type CatalogType = 'completePreset' | 'palettePreset' | 'stopPreset' | 'texture' | 'textureMappingPreset' | 'animationPreset';
-
-export const CATALOG_TYPES: readonly CatalogType[] = ['completePreset', 'palettePreset', 'stopPreset', 'texture', 'textureMappingPreset', 'animationPreset'];
+export {CATALOG_TYPES, type CatalogType};
 
 export interface RemoteCatalogMetadata {
   guid: string;
@@ -95,6 +100,10 @@ function entryDoc(db: Firestore, type: CatalogType, guid: string) {
   return doc(db, 'catalog', type, 'entries', guid);
 }
 
+function manifestDoc(db: Firestore) {
+  return doc(db, 'catalogManifest', 'current');
+}
+
 function requireServices() {
   const services = getFirebaseServices();
   if (!services) throw new RemoteCatalogUnavailableError();
@@ -115,15 +124,23 @@ function metadataFromDoc(data: DocumentData, fallbackGuid: string): RemoteCatalo
   };
 }
 
-export async function listRemoteCatalogMetadata(type: CatalogType): Promise<RemoteCatalogMetadata[]> {
-  const {db} = requireServices();
-  const snapshot = await getDocs(entriesCollection(db, type));
-  return snapshot.docs.map(entry => metadataFromDoc(entry.data(), entry.id));
+function manifestForFirestore(manifest: PublicCatalogManifest): DocumentData {
+  return {
+    schemaVersion: PUBLIC_CATALOG_MANIFEST_SCHEMA_VERSION,
+    entries: manifest.entries.map(entry => ({
+      type: entry.type,
+      guid: entry.guid,
+      lastUpdated: Timestamp.fromDate(new Date(entry.lastUpdated)),
+    })),
+    updatedAt: Timestamp.fromDate(new Date(manifest.updatedAt)),
+  };
 }
 
-export async function listAllRemoteCatalogMetadata(): Promise<Record<CatalogType, RemoteCatalogMetadata[]>> {
-  const entries = await Promise.all(CATALOG_TYPES.map(async type => [type, await listRemoteCatalogMetadata(type)] as const));
-  return Object.fromEntries(entries) as Record<CatalogType, RemoteCatalogMetadata[]>;
+export async function getPublicCatalogManifest(): Promise<PublicCatalogManifest> {
+  const {db} = requireServices();
+  const snapshot = await getDoc(manifestDoc(db));
+  if (!snapshot.exists()) throw new Error('Public catalogue manifest has not been migrated.');
+  return normalizePublicCatalogManifest(snapshot.data());
 }
 
 export async function getRemoteCatalogEntry<T extends CatalogType>(type: T, guid: string): Promise<RemoteEntryByType<T> | null> {
@@ -152,11 +169,22 @@ async function assertNoRemoteNameConflict(type: CatalogType, guid: string, name:
 export async function uploadRemoteCatalogEntry<T extends CatalogType>(type: T, entry: RemoteEntryByType<T>): Promise<RemoteEntryByType<T>> {
   const {db} = requireServices();
   await assertNoRemoteNameConflict(type, entry.guid, entry.name);
-  await setDoc(entryDoc(db, type, entry.guid), {
-    ...entry,
-    guid: entry.guid,
-    lastUpdated: serverTimestamp(),
-  }, {merge: true});
+  await runTransaction(db, async transaction => {
+    const manifestReference = manifestDoc(db);
+    const manifestSnapshot = await transaction.get(manifestReference);
+    if (!manifestSnapshot.exists()) throw new Error('Public catalogue manifest has not been migrated.');
+    const manifest = normalizePublicCatalogManifest(manifestSnapshot.data());
+    const publishedAt = Timestamp.now();
+    const publishedAtIso = publishedAt.toDate().toISOString();
+    const manifestEntry: PublicCatalogManifestEntry = {type, guid: entry.guid, lastUpdated: publishedAtIso};
+    const nextManifest = upsertPublicCatalogManifestEntry(manifest, manifestEntry);
+    transaction.set(entryDoc(db, type, entry.guid), {
+      ...entry,
+      guid: entry.guid,
+      lastUpdated: publishedAt,
+    }, {merge: true});
+    transaction.set(manifestReference, manifestForFirestore(nextManifest));
+  });
   const uploaded = await getRemoteCatalogEntry(type, entry.guid);
   if (!uploaded) throw new Error(`Uploaded ${type} "${entry.guid}" could not be read back.`);
   return uploaded;
@@ -176,15 +204,11 @@ export async function uploadRemoteTextureEntry(entry: Omit<RemoteTextureEntry, '
 
 export async function getLatestRemotePreset(): Promise<RemoteCompletePresetEntry | null> {
   try {
-    const {db} = requireServices();
-    const snapshot = await getDocs(query(entriesCollection(db, 'completePreset'), orderBy('lastUpdated', 'desc'), limit(1)));
-    if (snapshot.empty) return null;
-    const doc = snapshot.docs[0];
-    const data = doc.data();
-    return {
-      ...data,
-      ...metadataFromDoc(data, doc.id),
-    } as RemoteCompletePresetEntry;
+    const manifest = await getPublicCatalogManifest();
+    const latest = manifest.entries
+      .filter(entry => entry.type === 'completePreset')
+      .sort((a, b) => b.lastUpdated.localeCompare(a.lastUpdated))[0];
+    return latest ? getRemoteCatalogEntry('completePreset', latest.guid) : null;
   } catch (error) {
     console.warn('[remoteCatalog] Failed to fetch latest remote preset:', error);
     return null;

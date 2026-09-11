@@ -13,13 +13,15 @@ export class ExpmapGpuPlayer {
   private publish: (image: ImageBitmap, view: ExpmapView) => void
   private failure: (error: unknown) => void
   constructor(publish: (image: ImageBitmap, view: ExpmapView) => void, failure: (error: unknown) => void) { this.publish=publish; this.failure=failure }
+  get loadingMetrics() {return this.renderer?.loadingMetrics}
   async setSource(store: ExpmapStore, manifest: ExpmapManifest, device?: GPUDevice) {
     this.dispose(); const generation=this.generation
     const renderer=await ExpmapGpuRenderer.create(store,manifest,device)
     if (generation!==this.generation) { renderer.dispose(); return false }
+    renderer.onVerificationError=error=>{if(generation===this.generation)this.failure(error)}
     this.renderer=renderer; void this.drain(); return true
   }
-  request(view: ExpmapView) { this.pending={...view}; this.sequence++; this.active?.abort(); void this.drain() }
+  request(view: ExpmapView) { this.pending={...view}; this.sequence++; this.active?.abort(); this.renderer?.prioritize(view); void this.drain() }
   private async drain() {
     if (this.running) return
     this.running=true

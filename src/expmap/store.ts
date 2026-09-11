@@ -1,4 +1,5 @@
 import { BlobReader, Uint8ArrayWriter, ZipReader, ZipWriter, TextReader, type Entry } from '@zip.js/zip.js'
+import type { ExpmapLoadingMetrics } from './loadingMetrics'
 import { canonicalJson, contentIdentity } from './appearance'
 import { validateExpmapManifest, type ExpmapManifest } from './manifest'
 import type { ExpmapTile } from './octaves'
@@ -64,7 +65,8 @@ export class ExpmapStore {
     if(entry.uncompressedSize>limit)throw new Error('Image or metadata exceeds budget')
     return entry.getData!(new Uint8ArrayWriter(),{checkSignature:true,useWebWorkers:false})
   }
-  async open(documentId?:string):Promise<ExpmapManifest> {
+  /** Playback may defer file enumeration; checkpoint recovery always verifies every tile. */
+  async open(documentId?:string, progressive=false):Promise<ExpmapManifest> {
     const candidates:ExpmapManifest[]=[];let failure:unknown
     for(const name of this.directory?['manifest-a.json','manifest-b.json']:['manifest.json'])try {
       const m=JSON.parse(new TextDecoder().decode(await this.read(name,MANIFEST_LIMIT)))
@@ -72,21 +74,30 @@ export class ExpmapStore {
     }catch(error){if(error instanceof DOMException && error.name==='NotAllowedError')throw error;failure=error}
     candidates.sort((a,b)=>b.generation-a.generation)
     if(documentId&&candidates.length&&candidates[0].documentId!==documentId)throw new Error('Fichier associé à un autre document')
-    for(const candidate of candidates)try {if(candidate.documentId!==candidates[0].documentId)continue;await this.verify(candidate);return candidate}catch(error){failure=error}
+    for(const candidate of candidates)try {if(candidate.documentId!==candidates[0].documentId)continue;await this.verify(candidate,progressive && candidate.state==='complete' ? [] : undefined);return candidate}catch(error){failure=error}
     throw failure??new Error('No valid ExpMap checkpoint')
   }
-  async readTile(tile:ExpmapTile) {
+  async readTile(tile:ExpmapTile, signal?:AbortSignal, metrics?:ExpmapLoadingMetrics) {
+    signal?.throwIfAborted()
+    let started=performance.now()
     const bytes=await this.read(tile.file,tile.length)
-    if(bytes.length!==tile.length || await contentIdentity(bytes)!==tile.sha256)throw new Error(`Corrupt image ${tile.index}`)
+    metrics?.record('read',performance.now()-started);signal?.throwIfAborted()
+    started=performance.now()
+    const identity=await contentIdentity(bytes)
+    metrics?.record('hash',performance.now()-started);signal?.throwIfAborted()
+    if(bytes.length!==tile.length || identity!==tile.sha256)throw new Error(`Corrupt image ${tile.index}`)
     return bytes
   }
-  async verify(m:ExpmapManifest) {
+  async verify(m:ExpmapManifest, tiles=m.tiles) {
     validateExpmapManifest(m)
     if(await contentIdentity(new TextEncoder().encode(m.appearance.json))!==m.appearance.identity)throw new Error('Appearance content identity mismatch')
-    for(const tile of m.tiles) {
-      const size=this.directory?(await(await this.directory.getFileHandle(tile.file)).getFile()).size:this.entries?.get(tile.file)?.uncompressedSize
-      if(size!==tile.length)throw new Error('Missing or truncated image')
+    for(const tile of tiles) {
+      await this.verifyTile(tile)
     }
+  }
+  async verifyTile(tile:ExpmapTile) {
+    const size=this.directory?(await(await this.directory.getFileHandle(tile.file)).getFile()).size:this.entries?.get(tile.file)?.uncompressedSize
+    if(size!==tile.length)throw new Error(`Missing or truncated image ${tile.index}`)
   }
   async publish(m:ExpmapManifest) {
     if(!this.directory)throw new Error('Read-only document')

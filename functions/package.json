@@ -1,16 +1,17 @@
 {
-  "name": "mandelbrot-firebase-functions",
+  "name": "mandelbrot-firebase-tools",
   "private": true,
   "main": "index.js",
   "engines": {
     "node": "22"
   },
   "scripts": {
+    "migrate:public-catalog-manifest": "node scripts/migrate-public-catalog-manifest.js",
+    "migrate:personal-library-direct": "node scripts/migrate-personal-library-direct.js",
     "set-admin": "node scripts/set-admin.js",
     "test": "node --test tests/*.test.js"
   },
   "dependencies": {
-    "firebase-admin": "^13.6.0",
-    "firebase-functions": "^7.0.1"
+    "firebase-admin": "^13.6.0"
   }
 }
