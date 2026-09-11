@@ -24,8 +24,8 @@ vi.mock('../../src/firebaseConfig', () => ({
 vi.mock('firebase/firestore', () => ({
   collection: vi.fn((_db, ...segments) => ({kind: 'collection', path: segments.join('/')})),
   doc: vi.fn((_db, ...segments) => ({kind: 'document', path: segments.join('/')})),
-  getDoc: mocks.getDoc,
-  getDocs: mocks.getDocs,
+  getDocFromServer: mocks.getDoc,
+  getDocsFromServer: mocks.getDocs,
   limit: vi.fn(value => ({kind: 'limit', value})),
   query: vi.fn((reference, ...constraints) => ({reference, constraints})),
   runTransaction: mocks.runTransaction,

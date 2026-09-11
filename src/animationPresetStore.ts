@@ -5,6 +5,7 @@ import {
 } from './AnimationConfig';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import {
+  matchesCacheSnapshot,
   deletedCacheFields,
   isVisibleCacheRecord,
   localCacheFields,
@@ -143,25 +144,26 @@ export async function deleteAnimationPresetEntry(name: string): Promise<void> {
   notifyPersonalCacheChanged(record);
 }
 
-export async function applyCloudAnimationPresetEntry(record: AnimationPresetRecord, revision: number): Promise<void> {
-  const existing = await getAnimationPresetByGuid(record.guid);
+export async function applyCloudAnimationPresetEntry(record: AnimationPresetRecord, revision: number, expected?: ScopedCacheFields | null): Promise<void> {
   const next = {...cloneRecord(record), ...syncedPersonalCacheFields(record, revision)};
   const {store, done} = await tx('readwrite');
+  const existing: AnimationPresetRecord | undefined = await reqToPromise(store.index('guid').get(record.guid));
+  if (!matchesCacheSnapshot(existing, expected)) { await done; return; }
   if (existing && existing.name !== next.name) store.delete(existing.name);
   store.put(next);
   await done;
 }
 
-export async function acknowledgeAnimationPresetEntry(guid: string, revision: number): Promise<void> {
+export async function acknowledgeAnimationPresetEntry(guid: string, revision: number, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: AnimationPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  if (record && matchesCacheSnapshot(record, expected)) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
   await done;
 }
 
-export async function purgeAnimationPresetEntryByGuid(guid: string): Promise<void> {
+export async function purgeAnimationPresetEntryByGuid(guid: string, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: AnimationPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.delete(record.name);
+  if (record && matchesCacheSnapshot(record, expected)) store.delete(record.name);
   await done;
 }

@@ -4,6 +4,7 @@ import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIden
 import type {EffectFieldName} from './effectFieldConfig';
 import {EFFECT_FIELD_NAMES} from './effectFieldConfig';
 import {
+  matchesCacheSnapshot,
   deletedCacheFields,
   isVisibleCacheRecord,
   localCacheFields,
@@ -173,30 +174,31 @@ export async function deleteStopPresetEntry(name: string): Promise<void> {
 export async function ensureDefaultStopPresetEntries(): Promise<void> {
 }
 
-export async function applyCloudStopPresetEntry(record: StopPresetRecord, revision: number): Promise<void> {
-  const existing = await getStopPresetByGuid(record.guid || '');
+export async function applyCloudStopPresetEntry(record: StopPresetRecord, revision: number, expected?: ScopedCacheFields | null): Promise<void> {
   const normalized = normalizeStopPresetRecord(record);
   const next = {...normalized, ...syncedPersonalCacheFields(normalized, revision)};
   const {store, done} = await tx('readwrite');
+  const existing: StopPresetRecord | undefined = await reqToPromise(store.index('guid').get(record.guid));
+  if (!matchesCacheSnapshot(existing, expected)) { await done; return; }
   if (existing && existing.name !== next.name) store.delete(existing.name);
   store.put(next);
   await done;
 }
 
-export async function acknowledgeStopPresetEntry(guid: string, revision: number): Promise<void> {
+export async function acknowledgeStopPresetEntry(guid: string, revision: number, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: StopPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) {
+  if (record && matchesCacheSnapshot(record, expected)) {
     const normalized = normalizeStopPresetRecord(record);
     store.put({...normalized, ...syncedPersonalCacheFields(normalized, revision)});
   }
   await done;
 }
 
-export async function purgeStopPresetEntryByGuid(guid: string): Promise<void> {
+export async function purgeStopPresetEntryByGuid(guid: string, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: StopPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.delete(record.name);
+  if (record && matchesCacheSnapshot(record, expected)) store.delete(record.name);
   await done;
 }
 

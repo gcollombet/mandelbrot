@@ -1,3 +1,4 @@
+import {createGuid} from './catalogIdentity';
 import {
   GUEST_SCOPE,
   originForScope,
@@ -12,6 +13,7 @@ export interface ScopedCacheFields {
   origin?: LibraryOrigin;
   syncState?: PersonalSyncState;
   revision?: number;
+  localChangeId?: string;
   tombstone?: boolean;
   lastSyncError?: string;
 }
@@ -39,6 +41,7 @@ function cacheFieldSnapshot(existing: ScopedCacheFields): ScopedCacheFields {
     origin: existing.origin,
     syncState: existing.syncState,
     revision: existing.revision,
+    localChangeId: existing.localChangeId,
     tombstone: existing.tombstone,
     lastSyncError: existing.lastSyncError,
   };
@@ -84,6 +87,7 @@ export function localCacheFields(existing: ScopedCacheFields = {}): ScopedCacheF
     ownerScopeKey: scopeKey(activeScope),
     origin,
     syncState,
+    localChangeId: createGuid(),
     revision: existing.revision ?? 0,
     tombstone: false,
     lastSyncError: undefined,
@@ -111,6 +115,7 @@ export function deletedCacheFields(existing: ScopedCacheFields): ScopedCacheFiel
     ...cacheFieldSnapshot(existing),
     ownerScopeKey: scopeKey(activeScope),
     syncState: 'deleting',
+    localChangeId: createGuid(),
     tombstone: true,
     lastSyncError: undefined,
   };
@@ -156,4 +161,18 @@ export function resolveLegacyCacheFields<T extends ScopedCacheFields & {remote?:
       ? publicCacheFields(record)
       : localCacheFields(record);
   return {...record, ...fields};
+}
+
+/** Compare inside the IndexedDB write transaction, never before awaiting a network call. */
+export function matchesCacheSnapshot(current: ScopedCacheFields | undefined, expected?: ScopedCacheFields | null): boolean {
+  if (expected === undefined) return true;
+  if (expected === null) return !current;
+  return !!current && current.localChangeId === expected.localChangeId
+    && current.revision === expected.revision && current.syncState === expected.syncState
+    && current.tombstone === expected.tombstone && current.origin === expected.origin;
+}
+
+export function hasPendingPersonalChange(record: ScopedCacheFields): boolean {
+  return record.origin === 'personal' && (record.syncState === 'pending'
+    || record.syncState === 'error' || record.syncState === 'deleting' || record.tombstone === true);
 }

@@ -1,8 +1,8 @@
 import {
   collection,
   doc,
-  getDoc,
-  getDocs,
+  getDocFromServer as getDoc,
+  getDocsFromServer as getDocs,
   limit,
   query,
   runTransaction,

@@ -79,7 +79,7 @@ service cloud.firestore {
     function isValidPersonalTexture(uid, guid, data) {
       return data.keys().hasOnly([
           'guid', 'name', 'kind', 'contentType', 'storagePath', 'width',
-          'height', 'byteSize', 'thumbnail', 'updatedAt', 'revision', 'ownerUid'
+          'height', 'byteSize', 'thumbnail', 'updatedAt', 'revision', 'ownerUid', 'favorite', 'blobHash'
         ])
         && data.keys().hasAll([
           'guid', 'name', 'kind', 'contentType', 'storagePath', 'width',
@@ -102,6 +102,8 @@ service cloud.firestore {
         && data.byteSize > 0
         && data.byteSize <= 5 * 1024 * 1024
         && data.thumbnail is string
+        && (!data.keys().hasAny(['favorite']) || data.favorite is bool)
+        && (!data.keys().hasAny(['blobHash']) || (data.blobHash is string && data.blobHash.matches('^[a-f0-9]{64}$')))
         && data.updatedAt is timestamp
         && data.revision is int
         && data.revision > 0;

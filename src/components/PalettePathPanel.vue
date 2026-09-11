@@ -10,14 +10,27 @@ import { getAllPresetEntries, getPresetById, type PresetMetadata } from '../pres
 import { newPalettePath, snapshotPathAppearance, validatePalettePath, pathSegment, type PalettePath } from '../palettePath'
 import { readPalettePaths, savePalettePath, deletePalettePath } from '../palettePathStore'
 import { log10FromDecimalString } from '../floatexp'
+import { savePalettePathSnapshot } from '../savePalettePathSnapshot'
 const props = defineProps<{ current: MandelbrotParams; engine: Engine | null; disabled?: boolean }>()
-const emit = defineEmits<{ change: [path: PalettePath] }>()
+const emit = defineEmits<{ change: [path: PalettePath]; 'palette-saved': [] }>()
 const depth = computed(() => -log10FromDecimalString(props.current.scale))
 const copy = <T,>(v: T): T => JSON.parse(JSON.stringify(v))
 const draft = ref<PalettePath>(props.current.palettePath ? copy(props.current.palettePath) : newPalettePath(props.current, Number.isFinite(depth.value) ? depth.value : 0))
 const selected = ref(draft.value.stops[0].id), savedId = ref('')
 const saved = ref<PalettePath[]>([]), palettes = ref<PaletteRecord[]>([]), error = ref(''), status = ref('')
 const presets = ref<PresetMetadata[]>([]), picker = ref<'palettes' | 'presets' | null>(null), query = ref(''), loadingPreset = ref(false)
+const savingSnapshot = ref(false), snapshotStatus = ref('')
+async function extractCurrentMix() {
+  if (props.disabled || savingSnapshot.value) return
+  savingSnapshot.value = true; error.value = ''; snapshotStatus.value = ''
+  try {
+    const palette = await savePalettePathSnapshot(props.current.palettePath ?? draft.value, depth.value, props.current)
+    snapshotStatus.value = `Palette « ${palette.name} » enregistrée dans la bibliothèque.`
+    emit('palette-saved')
+    palettes.value = await getAllPaletteEntries()
+  } catch (e) { error.value = String(e) }
+  finally { savingSnapshot.value = false }
+}
 const filteredPalettes = computed(() => palettes.value.filter(p => p.name.toLocaleLowerCase().includes(query.value.toLocaleLowerCase())))
 const filteredPresets = computed(() => presets.value.filter(p => p.name.toLocaleLowerCase().includes(query.value.toLocaleLowerCase())))
 function paletteGradient(p: PaletteRecord) {
@@ -133,6 +146,9 @@ onUnmounted(() => clearInterval(timer))
         <button v-for="s in draft.stops" :key="s.id" class="stop" :class="{ selected: s.id === selected }" :style="{ left: percent(s.magnitude) + '%' }" :aria-label="s.name + ' à ' + s.magnitude" :title="s.name + ' · ' + s.magnitude.toFixed(3)" @pointerdown="pointer($event, s.id)" @pointermove="drag" @pointerup="drop" @pointercancel="drop" @click="selected = s.id">◆</button>
       </div>
       <div class="row toolbar"><span>{{ draft.stops.length }} stops · {{ depth.toFixed(3) }}</span><button @click="addInGap" :disabled="draft.stops.length >= 64">+ Stop</button><button @click="removeStop" :disabled="draft.stops.length <= 2">Supprimer le stop</button></div>
+      <button :disabled="savingSnapshot || !Number.isFinite(depth)" @click="extractCurrentMix">{{ savingSnapshot ? 'Capture en cours…' : 'Extraire la palette au curseur' }}</button>
+      <p class="hint">Enregistre le mix à la magnitude actuelle, avec ses matériaux et images. Approximation éditable sur 200 points ; en mode cercles, capture au curseur uniquement.</p>
+      <p v-if="snapshotStatus" class="hint" role="status">{{ snapshotStatus }}</p>
       <div class="selected-stop">
         <strong>{{ stop.name }}</strong>
         <div class="row"><label>Magnitude<input type="number" step="0.01" :value="stop.magnitude" :disabled="stop.id === draft.stops[0].id || stop.id === draft.stops[draft.stops.length - 1].id" @change="moveStop(Number(($event.target as HTMLInputElement).value)); publish()"></label><label>Transition suivante<select v-model="stop.curve" @change="publish"><option value="linear">Linéaire</option><option value="gaussian">Gaussienne</option><option value="square">Carrée</option><option value="exponential">Exponentielle</option></select></label></div>

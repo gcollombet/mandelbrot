@@ -11,6 +11,8 @@ const mocks = vi.hoisted(() => {
     MockTimestamp,
     documents: new Map<string, unknown>(),
     transactionSet: vi.fn(),
+    transactionGet: vi.fn(),
+    transactionUpdate: vi.fn(),
     transactionDelete: vi.fn(),
     getDocs: vi.fn(),
     setDoc: vi.fn(),
@@ -43,11 +45,12 @@ vi.mock('../../src/firebaseConfig', () => ({
 vi.mock('firebase/firestore', () => ({
   collection: vi.fn((_db, ...segments) => ({kind: 'collection', path: segments.join('/')})),
   doc: vi.fn((_db, ...segments) => ({kind: 'document', path: segments.join('/')})),
-  getDoc: vi.fn(reference => Promise.resolve(snapshot(reference.path))),
-  getDocs: mocks.getDocs,
+  getDocFromServer: vi.fn(reference => Promise.resolve(snapshot(reference.path))),
+  getDocsFromServer: mocks.getDocs,
   query: vi.fn((reference, ...constraints) => ({reference, constraints})),
   runTransaction: vi.fn(async (_db, update) => update({
-    get: (reference: {path: string}) => Promise.resolve(snapshot(reference.path)),
+    get: mocks.transactionGet,
+    update: mocks.transactionUpdate,
     set: mocks.transactionSet,
     delete: mocks.transactionDelete,
   })),
@@ -72,12 +75,15 @@ import {
   repairExpiredPersonalTextureReservations,
   reservePersonalTexture,
   upsertPersonalPreset,
+  updatePersonalTextureDetails,
+  deletePersonalPreset,
 } from '../../src/personalLibraryRemote';
 
 describe('direct personal library persistence', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     mocks.documents.clear();
+    mocks.transactionGet.mockImplementation((reference: {path: string}) => Promise.resolve(snapshot(reference.path)));
     mocks.getDocs.mockResolvedValue({docs: [], size: 0});
     mocks.deleteObject.mockResolvedValue(undefined);
     mocks.getMetadata.mockResolvedValue({contentType: 'image/webp', size: 4});
@@ -164,4 +170,42 @@ describe('direct personal library persistence', () => {
     expect(mocks.transactionDelete).toHaveBeenCalledTimes(1);
     expect(mocks.deleteObject).not.toHaveBeenCalled();
   });
+  it('reads only the existing manifest, without opening a transaction or reading usage', async () => {
+    mocks.documents.set('users/alice/manifests/presets', {entries: [], revision: 4});
+    await expect(getPersonalPresetManifest()).resolves.toEqual({entries: [], revision: 4});
+    expect(mocks.transactionGet).not.toHaveBeenCalled();
+    expect(mocks.transactionSet).not.toHaveBeenCalled();
+  });
+
+  it('does not rewrite usage when changing an existing preset', async () => {
+    mocks.documents.set('users/alice/presets/preset-a', {revision: 2});
+    mocks.documents.set('users/alice/manifests/presets', {entries: [{guid: 'preset-a', type: 'completePreset', revision: 2}], revision: 2});
+    mocks.documents.set('users/alice/usage/current', {presetCount: 1, textureCount: 0, revision: 2});
+    await upsertPersonalPreset({guid: 'preset-a', type: 'completePreset', payload: {}, name: 'A', favorite: false, updatedAt: '', revision: 2});
+    expect(mocks.transactionSet).toHaveBeenCalledTimes(2);
+    expect(mocks.transactionSet.mock.calls.some(call => call[0].path.includes('/usage/'))).toBe(false);
+  });
+
+  it('does not write anything for a deletion already reflected in the cloud', async () => {
+    mocks.documents.set('users/alice/manifests/presets', {entries: [], revision: 2});
+    mocks.documents.set('users/alice/usage/current', {presetCount: 0, textureCount: 0, revision: 2});
+    await deletePersonalPreset('preset-a');
+    expect(mocks.transactionSet).not.toHaveBeenCalled();
+    expect(mocks.transactionDelete).not.toHaveBeenCalled();
+  });
+
+  it('updates texture favorites with one document read/write and no Storage request', async () => {
+    const blobHash = 'a'.repeat(64);
+    const storagePath = 'users/alice/textures/texture-a.webp';
+    mocks.documents.set('users/alice/textures/texture-a', {blobHash, storagePath, revision: 3});
+    await expect(updatePersonalTextureDetails({
+      guid: 'texture-a', name: 'Renamed', kind: 'texture', contentType: 'image/webp', storagePath,
+      width: 2, height: 2, byteSize: 4, thumbnail: '', updatedAt: '', revision: 3, favorite: true, blobHash,
+    })).resolves.toMatchObject({revision: 4});
+    expect(mocks.transactionGet).toHaveBeenCalledTimes(1);
+    expect(mocks.transactionUpdate.mock.calls[0][1]).toMatchObject({favorite: true, name: 'Renamed'});
+    expect(mocks.uploadBytes).not.toHaveBeenCalled();
+    expect(mocks.getMetadata).not.toHaveBeenCalled();
+  });
+
 });

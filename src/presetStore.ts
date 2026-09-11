@@ -17,6 +17,7 @@ import {createGuid, defaultPresetName, makeUniqueName, type CatalogRemoteState} 
 import {log10FromDecimalString} from './floatexp';
 import {normalizeIterationPaletteCurve} from './IterationPaletteCurve';
 import {
+  matchesCacheSnapshot,
   deletedCacheFields,
   isVisibleCacheRecord,
   localCacheFields,
@@ -294,35 +295,36 @@ export async function deletePresetEntry(id: number): Promise<void> {
   notifyPersonalCacheChanged(record);
 }
 
-export async function applyCloudPresetEntry(record: Omit<PresetRecord, 'id'> & {id?: number}, revision: number): Promise<void> {
-  const existing = await getPresetByGuid(record.guid);
+export async function applyCloudPresetEntry(record: Omit<PresetRecord, 'id'> & {id?: number}, revision: number, expected?: ScopedCacheFields | null): Promise<void> {
   const value = normalizePresetValue(record.value);
   const next = {
     ...record,
     value,
     scaleExponent: computeScaleExponent(value.scale),
-    id: existing?.id ?? record.id,
+    id: record.id,
     ...syncedPersonalCacheFields(record, revision),
   };
   const {store, done} = await tx('readwrite');
+  const existing: PresetRecord | undefined = await reqToPromise(store.index('guid').get(record.guid));
+  if (!matchesCacheSnapshot(existing, expected)) { await done; return; }
   if (existing) store.put({...next, id: existing.id});
   else store.add(next);
   await done;
 }
 
-export async function acknowledgePresetEntry(guid: string, revision: number): Promise<void> {
+export async function acknowledgePresetEntry(guid: string, revision: number, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: PresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) {
+  if (record && matchesCacheSnapshot(record, expected)) {
     const normalized = normalizePresetRecord(record);
     store.put({...normalized, ...syncedPersonalCacheFields(normalized, revision)});
   }
   await done;
 }
 
-export async function purgePresetEntryByGuid(guid: string): Promise<void> {
+export async function purgePresetEntryByGuid(guid: string, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: PresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.delete(record.id);
+  if (record && matchesCacheSnapshot(record, expected)) store.delete(record.id);
   await done;
 }

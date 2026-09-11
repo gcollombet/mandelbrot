@@ -128,6 +128,10 @@ async function refreshOpenSettingsLibraries(): Promise<void> {
   );
 }
 
+async function refreshOpenPaletteLibraries(): Promise<void> {
+  await Promise.all(Object.values(settingsRefs.value).map(settings => settings?.refreshPaletteLibrary?.()));
+}
+
 async function applyAuthState(state: AuthState, generation: number): Promise<void> {
   await Promise.all([
     stopPersonalPresetSync(),
@@ -1995,7 +1999,7 @@ async function startTravelToPreset(preset: PresetRecord) {
         </DenseTopbar>
         <div class="body">
           <AboutPanel v-if="tab.key === 'about'" />
-          <PalettePathPanel v-else-if="tab.key === 'palettePath'" :current="mandelbrotParams" :engine="mandelbrotEngine" :disabled="expmapBusy" @change="mandelbrotParams.palettePath = $event" />
+          <PalettePathPanel v-else-if="tab.key === 'palettePath'" :current="mandelbrotParams" :engine="mandelbrotEngine" :disabled="expmapBusy" @change="mandelbrotParams.palettePath = $event" @palette-saved="refreshOpenPaletteLibraries" />
           <Settings
             v-else
             :ref="(el: any) => { settingsRefs[tab.key] = el }"

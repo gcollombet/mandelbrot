@@ -38,6 +38,8 @@ export interface PersonalPresetManifest {
 }
 
 export interface PersonalTextureMetadata {
+  favorite?: boolean;
+  blobHash?: string;
   guid: string;
   name: string;
   kind: 'texture' | 'skybox';

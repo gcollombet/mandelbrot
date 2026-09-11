@@ -8,6 +8,7 @@
   "scripts": {
     "migrate:public-catalog-manifest": "node scripts/migrate-public-catalog-manifest.js",
     "migrate:personal-library-direct": "node scripts/migrate-personal-library-direct.js",
+    "optimize:public-catalog-textures": "node scripts/optimize-public-catalog-textures.js",
     "set-admin": "node scripts/set-admin.js",
     "test": "node --test tests/*.test.js"
   },

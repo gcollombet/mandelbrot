@@ -30,7 +30,10 @@ import type {
   PersonalPresetType,
   PersonalRecordEnvelope,
 } from './personalLibraryTypes';
-import type {ScopedCacheFields} from './scopedCache';
+import {hasPendingPersonalChange, type ScopedCacheFields} from './scopedCache';
+import {publishPersonalSyncStatus} from './personalSyncStatus';
+import {createPersonalSyncRunner} from './personalSyncRunner';
+export {observePersonalSyncStatus, type PersonalSyncStatus} from './personalSyncStatus';
 import {setPersonalSyncRequester} from './personalSyncTrigger';
 import {
   acknowledgeStopPresetEntry,
@@ -59,9 +62,9 @@ type CacheRecord = ScopedCacheFields & {
 interface SyncAdapter<T extends CacheRecord> {
   type: PersonalPresetType;
   list: () => Promise<T[]>;
-  apply: (record: T, revision: number) => Promise<void>;
-  acknowledge: (guid: string, revision: number) => Promise<void>;
-  purge: (guid: string) => Promise<void>;
+  apply: (record: T, revision: number, expected?: ScopedCacheFields | null) => Promise<void>;
+  acknowledge: (guid: string, revision: number, expected?: ScopedCacheFields) => Promise<void>;
+  purge: (guid: string, expected?: ScopedCacheFields) => Promise<void>;
 }
 
 const adapters: SyncAdapter<any>[] = [
@@ -72,34 +75,9 @@ const adapters: SyncAdapter<any>[] = [
   {type: 'animationPreset', list: getAllAnimationPresetCacheRecords, apply: applyCloudAnimationPresetEntry, acknowledge: acknowledgeAnimationPresetEntry, purge: purgeAnimationPresetEntryByGuid},
 ];
 
-export interface PersonalSyncStatus {
-  state: 'idle' | 'syncing' | 'synced' | 'error';
-  pending: number;
-  lastError?: string;
-  lastSyncedAt?: string;
-}
-
-let status: PersonalSyncStatus = {state: 'idle', pending: 0};
-const listeners = new Set<(status: PersonalSyncStatus) => void>();
-let activeUid: string | null = null;
-let retryTimer: ReturnType<typeof setTimeout> | null = null;
-let syncInFlight: Promise<void> | null = null;
-let syncAgain = false;
-
-function publish(next: PersonalSyncStatus) {
-  status = next;
-  for (const listener of listeners) listener({...status});
-}
-
-export function observePersonalSyncStatus(listener: (status: PersonalSyncStatus) => void): () => void {
-  listeners.add(listener);
-  listener({...status});
-  return () => listeners.delete(listener);
-}
-
 function stripCacheFields(record: CacheRecord): Record<string, unknown> {
   const payload = {...record} as Record<string, unknown>;
-  for (const key of ['id', 'ownerScopeKey', 'origin', 'syncState', 'revision', 'tombstone', 'lastSyncError']) delete payload[key];
+  for (const key of ['id', 'ownerScopeKey', 'origin', 'syncState', 'revision', 'tombstone', 'lastSyncError', 'localChangeId']) delete payload[key];
   return payload;
 }
 
@@ -155,117 +133,85 @@ async function fetchPresetPayloads(
   return records;
 }
 
-export async function syncPersonalPresets(uid: string): Promise<void> {
-  activeUid = uid;
-  publish({...status, state: 'syncing', lastError: undefined});
+async function pullPersonalPresets(uid: string): Promise<void> {
+  const [manifest, localByType] = await Promise.all([
+    getPersonalPresetManifest(), Promise.all(adapters.map(adapter => adapter.list())),
+  ]);
+  const adapterByType = new Map(adapters.map(adapter => [adapter.type, adapter]));
+  const localByGuidByType = new Map<PersonalPresetType, Map<string, CacheRecord>>();
+  for (let index = 0; index < adapters.length; index += 1) {
+    localByGuidByType.set(adapters[index].type,
+      new Map(localByType[index].filter(record => !!record.guid).map(record => [record.guid!, record])));
+  }
+  const manifestByGuid = new Map(manifest.entries.map(entry => [entry.guid, entry]));
+  const changedEntries = manifest.entries.filter(entry =>
+    planPersonalRecordSync(localByGuidByType.get(entry.type)?.get(entry.guid), entry.revision) === 'pull');
+  const payloads = await fetchPresetPayloads(uid, changedEntries);
+  const vanishedPayloadGuids = new Set<string>();
+  for (const entry of changedEntries) {
+    const cloud = payloads.get(entry.guid);
+    if (!cloud) {
+      vanishedPayloadGuids.add(entry.guid);
+      continue;
+    }
+    const adapter = adapterByType.get(entry.type);
+    if (!adapter) continue;
+    await adapter.apply({...cloud.payload as any, guid: cloud.guid}, cloud.revision,
+      localByGuidByType.get(entry.type)?.get(entry.guid) ?? null);
+  }
+  for (let index = 0; index < adapters.length; index += 1) {
+    const adapter = adapters[index];
+    for (const record of localByType[index]) {
+      if (!record.guid) continue;
+      const remoteEntry = vanishedPayloadGuids.has(record.guid) ? undefined : manifestByGuid.get(record.guid);
+      if (shouldPurgePersonalRecord(record, adapter.type, remoteEntry)) await adapter.purge(record.guid, record);
+    }
+  }
+}
+
+export async function syncPersonalPresets(uid: string, refresh = true): Promise<void> {
+  publishPersonalSyncStatus('presets', {state: 'syncing', pending: 0});
   try {
-    const [manifest, localByType] = await Promise.all([
-      getPersonalPresetManifest(),
-      Promise.all(adapters.map(adapter => adapter.list())),
-    ]);
-    const adapterByType = new Map(adapters.map(adapter => [adapter.type, adapter]));
-    const localByGuidByType = new Map<PersonalPresetType, Map<string, CacheRecord>>();
-    for (let index = 0; index < adapters.length; index += 1) {
-      localByGuidByType.set(
-        adapters[index].type,
-        new Map(localByType[index].filter(record => !!record.guid).map(record => [record.guid!, record])),
-      );
-    }
-    const manifestByGuid = new Map(manifest.entries.map(entry => [entry.guid, entry]));
-    const changedEntries = manifest.entries.filter(entry => {
-      const local = localByGuidByType.get(entry.type)?.get(entry.guid);
-      return planPersonalRecordSync(local, entry.revision) === 'pull';
-    });
-    const payloads = await fetchPresetPayloads(uid, changedEntries);
-    const vanishedPayloadGuids = new Set<string>();
-    for (const entry of changedEntries) {
-      const cloud = payloads.get(entry.guid);
-      if (!cloud) {
-        vanishedPayloadGuids.add(entry.guid);
-        continue;
-      }
-      const adapter = adapterByType.get(entry.type);
-      if (!adapter) continue;
-      await adapter.apply(cloud.payload as any, cloud.revision);
-    }
-
-    for (let index = 0; index < adapters.length; index += 1) {
-      const adapter = adapters[index];
-      for (const record of localByType[index]) {
-        if (!record.guid) continue;
-        const remoteEntry = vanishedPayloadGuids.has(record.guid)
-          ? undefined
-          : manifestByGuid.get(record.guid);
-        if (shouldPurgePersonalRecord(record, adapter.type, remoteEntry)) {
-          await adapter.purge(record.guid);
-        }
-      }
-    }
-
-    let pending = 0;
+    if (refresh) await pullPersonalPresets(uid);
     for (let index = 0; index < adapters.length; index += 1) {
       const adapter = adapters[index];
       const records = await adapter.list();
       for (const record of records) {
         if (record.origin !== 'personal' || !record.guid) continue;
         if (record.syncState === 'deleting' || record.tombstone) {
-          pending += 1;
           await deletePersonalPreset(record.guid);
-          await adapter.purge(record.guid);
+          await adapter.purge(record.guid, record);
         } else if (record.syncState === 'pending' || record.syncState === 'error') {
-          pending += 1;
           const result = await upsertPersonalPreset(personalEnvelope(adapter.type, record));
-          await adapter.acknowledge(record.guid, result.revision);
+          await adapter.acknowledge(record.guid, result.revision, record);
         }
       }
     }
-    publish({state: 'synced', pending: 0, lastSyncedAt: new Date().toISOString()});
+    const pending = (await Promise.all(adapters.map(adapter => adapter.list()))).flat().filter(hasPendingPersonalChange).length;
+    publishPersonalSyncStatus('presets', {state: pending ? 'syncing' : 'synced', pending, lastSyncedAt: new Date().toISOString()});
+    if (pending) void requestPersonalPresetSync();
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
-    publish({...status, state: 'error', lastError: message});
+    publishPersonalSyncStatus('presets', {state: 'error', pending: 0, lastError: message});
     throw error;
   }
 }
 
+const runner = createPersonalSyncRunner(syncPersonalPresets);
+
 export function startPersonalPresetSync(uid: string): Promise<void> {
-  activeUid = uid;
   setPersonalSyncRequester(requestPersonalPresetSync);
-  if (retryTimer) clearTimeout(retryTimer);
-  return requestPersonalPresetSync();
+  return runner.start(uid);
 }
 
 export function requestPersonalPresetSync(): Promise<void> {
-  const uid = activeUid;
-  if (!uid) return Promise.resolve();
-  if (syncInFlight) {
-    syncAgain = true;
-    return syncInFlight;
-  }
-  syncInFlight = syncPersonalPresets(uid)
-    .catch(() => {
-      if (activeUid === uid) retryTimer = setTimeout(requestPersonalPresetSync, 15_000);
-    })
-    .finally(() => {
-      syncInFlight = null;
-      if (syncAgain && activeUid) {
-        syncAgain = false;
-        requestPersonalPresetSync();
-      }
-    });
-  return syncInFlight;
+  return runner.request();
 }
 
-export function stopPersonalPresetSync(): Promise<void> {
-  const pending = syncInFlight;
-  activeUid = null;
-  if (retryTimer) clearTimeout(retryTimer);
-  retryTimer = null;
-  syncAgain = false;
+export async function stopPersonalPresetSync(): Promise<void> {
   setPersonalSyncRequester(null);
-  publish({state: 'idle', pending: 0});
-  return (pending ?? Promise.resolve()).finally(() => {
-    if (!activeUid) publish({state: 'idle', pending: 0});
-  });
+  await runner.stop();
+  publishPersonalSyncStatus('presets', {state: 'idle', pending: 0});
 }
 
 export type PersonalPresetCacheRecord =

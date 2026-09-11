@@ -7,6 +7,7 @@ import {
 } from './TextureMapping';
 import {
   builtInCacheFields,
+  matchesCacheSnapshot,
   deletedCacheFields,
   isVisibleCacheRecord,
   localCacheFields,
@@ -184,25 +185,26 @@ export async function deleteTextureMappingPresetEntry(name: string): Promise<voi
   notifyPersonalCacheChanged(stored);
 }
 
-export async function applyCloudTextureMappingPresetEntry(record: TextureMappingPresetRecord, revision: number): Promise<void> {
-  const existing = await getTextureMappingPresetByGuid(record.guid);
+export async function applyCloudTextureMappingPresetEntry(record: TextureMappingPresetRecord, revision: number, expected?: ScopedCacheFields | null): Promise<void> {
   const next = {...cloneRecord(record), builtIn: false, ...syncedPersonalCacheFields(record, revision)};
   const {store, done} = await tx('readwrite');
+  const existing: TextureMappingPresetRecord | undefined = await reqToPromise(store.index('guid').get(record.guid));
+  if (!matchesCacheSnapshot(existing, expected)) { await done; return; }
   if (existing && !existing.builtIn && existing.name !== next.name) store.delete(existing.name);
   store.put(next);
   await done;
 }
 
-export async function acknowledgeTextureMappingPresetEntry(guid: string, revision: number): Promise<void> {
+export async function acknowledgeTextureMappingPresetEntry(guid: string, revision: number, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: TextureMappingPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
+  if (record && matchesCacheSnapshot(record, expected)) store.put({...record, ...syncedPersonalCacheFields(record, revision)});
   await done;
 }
 
-export async function purgeTextureMappingPresetEntryByGuid(guid: string): Promise<void> {
+export async function purgeTextureMappingPresetEntryByGuid(guid: string, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: TextureMappingPresetRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.delete(record.name);
+  if (record && matchesCacheSnapshot(record, expected)) store.delete(record.name);
   await done;
 }

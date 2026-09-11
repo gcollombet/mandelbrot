@@ -20,6 +20,7 @@ import {
   type IterationPaletteCurve,
 } from './IterationPaletteCurve';
 import {
+  matchesCacheSnapshot,
   deletedCacheFields,
   isVisibleCacheRecord,
   localCacheFields,
@@ -75,6 +76,7 @@ export interface PaletteRecord extends ScopedCacheFields {
   protrusionGeometryMix?: number;
   protrusionPeriod?: number;
   localShadowStrength?: number;
+  lightAngle?: number;
   varnishStrength?: number;
   gradeContrast?: number;
   gradeSaturation?: number;
@@ -258,28 +260,29 @@ export async function getPaletteCount(): Promise<number> {
   return count;
 }
 
-export async function applyCloudPaletteEntry(record: PaletteRecord, revision: number): Promise<void> {
-  const existing = await getPaletteByGuid(record.guid || '');
+export async function applyCloudPaletteEntry(record: PaletteRecord, revision: number, expected?: ScopedCacheFields | null): Promise<void> {
   const next = {...clonePaletteRecord(record), ...syncedPersonalCacheFields(record, revision)};
   const {store, done} = await tx('readwrite');
+  const existing: PaletteRecord | undefined = await reqToPromise(store.index('guid').get(record.guid));
+  if (!matchesCacheSnapshot(existing, expected)) { await done; return; }
   if (existing && existing.name !== next.name) store.delete(existing.name);
   store.put(next);
   await done;
 }
 
-export async function acknowledgePaletteEntry(guid: string, revision: number): Promise<void> {
+export async function acknowledgePaletteEntry(guid: string, revision: number, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: PaletteRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) {
+  if (record && matchesCacheSnapshot(record, expected)) {
     const normalized = clonePaletteRecord(record);
     store.put({...normalized, ...syncedPersonalCacheFields(normalized, revision)});
   }
   await done;
 }
 
-export async function purgePaletteEntryByGuid(guid: string): Promise<void> {
+export async function purgePaletteEntryByGuid(guid: string, expected?: ScopedCacheFields): Promise<void> {
   const {store, done} = await tx('readwrite');
   const record: PaletteRecord | undefined = await reqToPromise(store.index('guid').get(guid));
-  if (record) store.delete(record.name);
+  if (record && matchesCacheSnapshot(record, expected)) store.delete(record.name);
   await done;
 }

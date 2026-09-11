@@ -1172,9 +1172,14 @@ async function refreshLibrary(): Promise<void> {
   ]);
 }
 
+async function refreshPaletteLibrary(): Promise<void> {
+  await Promise.all([loadPalettes(), loadTextures()]);
+}
+
 // Expose cache refresh helpers so the parent can update an already-open tab
 // after the active guest/user scope changes.
 defineExpose({
+  refreshPaletteLibrary,
   quickSnapshot,
   refreshPresets: loadPresets,
   refreshLibrary,
@@ -1256,6 +1261,7 @@ async function savePalette() {
     protrusionGeometryMix: model.value.protrusionGeometryMix,
     protrusionPeriod: model.value.protrusionPeriod,
     localShadowStrength: model.value.localShadowStrength,
+    lightAngle: model.value.lightAngle,
     varnishStrength: model.value.varnishStrength,
     gradeContrast: model.value.gradeContrast,
     gradeSaturation: model.value.gradeSaturation,
@@ -1283,6 +1289,7 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.protrusionGeometryMix = source.protrusionGeometryMix ?? 0;
   model.value.protrusionPeriod = source.protrusionPeriod ?? 1;
   model.value.localShadowStrength = source.localShadowStrength ?? 0;
+  if (source.lightAngle != null) model.value.lightAngle = source.lightAngle;
   model.value.varnishStrength = source.varnishStrength ?? 0;
   model.value.gradeContrast = source.gradeContrast ?? 1.18;
   model.value.gradeSaturation = source.gradeSaturation ?? 1.12;

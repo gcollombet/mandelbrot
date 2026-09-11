@@ -4303,11 +4303,11 @@ export class Engine {
         const estimatedExportBytes = settings.tiledKeyframePlan?.estimate.totalBytes
             ?? estimateGpuWorkingSetBytes(exportMemoryOptions)
         if (estimatedExportBytes > this.gpuMemoryBudgetBytes) {
-            throw new Error(
+            console.warn(
                 `${settings.outputWidth}×${settings.outputHeight} en ×${settings.supersample} `
                 + `nécessiterait environ ${formatGpuBytes(estimatedExportBytes)}, au-delà du budget prudent `
                 + `${formatGpuBytes(this.gpuMemoryBudgetBytes)} de cet appareil. `
-                + 'Baisse la résolution ou le suréchantillonnage.',
+                + 'Export autorisé : la capacité réelle sera vérifiée lors de l’allocation GPU.',
             )
         }
 
@@ -5101,13 +5101,16 @@ export class Engine {
             orbitMetrics: this.orbitMetricsEnabled,
             orbitTrap: this.orbitTrapEnabled,
         }
-        const surfaceFit = this.tiledKeyframePlan
+        // Video export keeps the requested resolution even above our heuristic
+        // budget. Actual texture limits and scoped allocation errors still apply.
+        const surfaceFit = this.tiledKeyframePlan || this.videoExportActive
             ? {
                 width: this.width,
                 height: this.height,
                 scale: 1,
                 reduced: false,
-                estimatedBytes: this.tiledKeyframePlan.estimate.totalBytes,
+                estimatedBytes: this.tiledKeyframePlan?.estimate.totalBytes
+                    ?? estimateGpuWorkingSetBytes(memoryOptions),
             }
             : fitSurfaceToGpuBudget(memoryOptions, this.gpuMemoryBudgetBytes)
         if (this.forcedSurfaceSize && surfaceFit.reduced) {

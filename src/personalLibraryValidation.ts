@@ -146,5 +146,11 @@ export function validatePersonalTextureMetadata(metadata: PersonalTextureMetadat
   if (!Number.isInteger(byteSize) || byteSize < 1 || byteSize > MAX_PERSONAL_TEXTURE_BYTES) {
     throw new PersonalLibraryValidationError('invalid-byte-size');
   }
+  if (metadata.blobHash !== undefined && !/^[a-f0-9]{64}$/.test(metadata.blobHash)) {
+    throw new PersonalLibraryValidationError('invalid-blob-hash');
+  }
+  if (metadata.favorite !== undefined && typeof metadata.favorite !== 'boolean') {
+    throw new PersonalLibraryValidationError('invalid-favorite');
+  }
   return {...metadata, guid, width, height, byteSize};
 }

@@ -1,64 +1,34 @@
 import {
-  deletePersonalTexture,
-  fetchPersonalTextureBlob,
-  finalizePersonalTexture,
-  listPersonalTextureMetadata,
-  reservePersonalTexture,
-  uploadPersonalTextureBlob,
+  deletePersonalTexture, fetchPersonalTextureBlob, finalizePersonalTexture,
+  listPersonalTextureMetadata, reservePersonalTexture, uploadPersonalTextureBlob, updatePersonalTextureDetails,
 } from './personalLibraryRemote';
 import type {PersonalTextureMetadata} from './personalLibraryTypes';
 import {setPersonalTextureSyncRequester} from './personalTextureSyncTrigger';
 import {normalizeTextureBlob} from './textureNormalization';
+import {hasPendingPersonalChange, matchesCacheSnapshot} from './scopedCache';
+import {publishPersonalSyncStatus} from './personalSyncStatus';
+import {createPersonalSyncRunner} from './personalSyncRunner';
 import {
-  acknowledgeTextureEntry,
-  applyCloudTextureEntry,
-  getAllTextureCacheRecords,
-  getTextureBlobByGuid,
-  markTextureUnavailable,
-  purgeTextureEntryByGuid,
-  saveTextureEntry,
-  type TextureMetadata,
+  acknowledgeTextureEntry, applyCloudTextureEntry, getAllTextureCacheRecords, getTextureBlobByGuid,
+  getTextureCacheSnapshot, markTextureUnavailable, purgeTextureEntryByGuid, type TextureMetadata,
 } from './textureStore';
 
-let activeUid: string | null = null;
-let retryTimer: ReturnType<typeof setTimeout> | null = null;
-let syncInFlight: Promise<void> | null = null;
-let syncAgain = false;
+// Retain successful uploads across transient finalization failures within this session.
+const uploaded = new Map<string, string>();
 
-function localMetadataForRemote(record: TextureMetadata, blob: Blob, storagePath: string): PersonalTextureMetadata {
-  if (!record.guid) throw new Error('Personal texture is missing a GUID.');
-  return {
-    guid: record.guid,
-    name: record.name,
-    kind: record.kind === 'skybox' ? 'skybox' : 'texture',
-    contentType: 'image/webp',
-    storagePath,
-    width: record.width || 0,
-    height: record.height || 0,
-    byteSize: blob.size,
-    thumbnail: record.thumbnail,
-    updatedAt: record.lastUpdated || record.date,
-    revision: record.revision || 0,
-  };
+export async function textureBlobHash(blob: Blob): Promise<string> {
+  const digest = await crypto.subtle.digest('SHA-256', await blob.arrayBuffer());
+  return Array.from(new Uint8Array(digest), byte => byte.toString(16).padStart(2, '0')).join('');
 }
 
-async function normalizedLocalTexture(record: TextureMetadata): Promise<{record: TextureMetadata; blob: Blob}> {
+function localMetadataForRemote(record: TextureMetadata, blob: Blob, storagePath: string, blobHash: string): PersonalTextureMetadata {
   if (!record.guid) throw new Error('Personal texture is missing a GUID.');
-  const source = await getTextureBlobByGuid(record.guid);
-  if (!source) throw new Error(`Texture blob "${record.name}" is missing.`);
-  if (source.type === 'image/webp' && record.width && record.height && record.width <= 1024 && record.height <= 1024) {
-    return {record, blob: source};
-  }
-  const normalized = await normalizeTextureBlob(source);
-  const details = {
-    kind: record.kind,
-    contentType: 'image/webp',
-    width: normalized.width,
-    height: normalized.height,
-    byteSize: normalized.blob.size,
-  } as const;
-  await saveTextureEntry(record.name, normalized.blob, record.thumbnail, record.date, record.guid, record.favorite ?? false, record.remote, details, record);
-  return {record: {...record, ...details}, blob: normalized.blob};
+  return {
+    guid: record.guid, name: record.name, kind: record.kind === 'skybox' ? 'skybox' : 'texture',
+    contentType: 'image/webp', storagePath, width: record.width || 0, height: record.height || 0,
+    byteSize: blob.size, thumbnail: record.thumbnail, favorite: record.favorite ?? false, blobHash,
+    updatedAt: record.lastUpdated || record.date, revision: record.revision || 0,
+  };
 }
 
 export async function ensurePersonalTextureCached(record: TextureMetadata): Promise<Blob | null> {
@@ -67,7 +37,7 @@ export async function ensurePersonalTextureCached(record: TextureMetadata): Prom
   if (cached) return cached;
   try {
     const blob = await fetchPersonalTextureBlob(record.storagePath);
-    await applyCloudTextureEntry(record, blob, record.revision || 0);
+    await applyCloudTextureEntry(record, blob, record.revision || 0, record);
     return blob;
   } catch (error) {
     await markTextureUnavailable(record.guid);
@@ -76,81 +46,107 @@ export async function ensurePersonalTextureCached(record: TextureMetadata): Prom
   }
 }
 
-export async function syncPersonalTextures(uid: string): Promise<void> {
-  activeUid = uid;
-  const [remote, local] = await Promise.all([listPersonalTextureMetadata(uid), getAllTextureCacheRecords()]);
-  for (const cloud of remote) {
-    const cached = local.find(entry => entry.guid === cloud.guid);
-    if (cached?.syncState === 'pending' || cached?.syncState === 'deleting') continue;
-    if (cached && (cached.revision || 0) >= cloud.revision && await getTextureBlobByGuid(cloud.guid)) continue;
-    try {
-      const blob = await fetchPersonalTextureBlob(cloud.storagePath);
-      await applyCloudTextureEntry({...cloud, date: cloud.updatedAt, lastUpdated: cloud.updatedAt, origin: 'personal'}, blob, cloud.revision);
-    } catch (error) {
-      if (cached) await markTextureUnavailable(cloud.guid);
-      console.warn(`[personalTextureSync] Failed to hydrate "${cloud.name}":`, error);
+export async function syncPersonalTextures(uid: string, refresh = true): Promise<void> {
+  publishPersonalSyncStatus('textures', {state: 'syncing', pending: 0});
+  try {
+    // Server-only metadata is authoritative for deletions; never infer deletion from an offline query.
+    const [remote, local] = await Promise.all([refresh ? listPersonalTextureMetadata(uid) : Promise.resolve([]), getAllTextureCacheRecords()]);
+    const remoteByGuid = new Map(remote.map(record => [record.guid, record]));
+    let hydrationError: unknown;
+    for (const cloud of remote) {
+      const cached = local.find(entry => entry.guid === cloud.guid);
+      if (cached && hasPendingPersonalChange(cached)) continue;
+      const cachedBlob = cached ? await getTextureBlobByGuid(cloud.guid) : null;
+      if (cached && (cached.revision || 0) >= cloud.revision && cachedBlob) continue;
+      try {
+        const sameContent = cachedBlob && cloud.blobHash && cached?.blobHash === cloud.blobHash;
+        const blob = sameContent ? cachedBlob : await fetchPersonalTextureBlob(cloud.storagePath);
+        if (!sameContent && cloud.blobHash && await textureBlobHash(blob) !== cloud.blobHash) {
+          throw Object.assign(new Error('Texture changed during download; retry synchronization.'), {code: 'aborted'});
+        }
+        await applyCloudTextureEntry({...cloud, date: cloud.updatedAt, lastUpdated: cloud.updatedAt, origin: 'personal'}, blob, cloud.revision, cached ?? null);
+      } catch (error) {
+        hydrationError ??= error;
+        if (cached) await markTextureUnavailable(cloud.guid);
+      }
     }
-  }
+    for (const cached of local) {
+      if (refresh && cached.guid && cached.origin === 'personal' && cached.syncState === 'synced'
+        && !cached.tombstone && !remoteByGuid.has(cached.guid)) {
+        await purgeTextureEntryByGuid(cached.guid, cached);
+      }
+    }
 
-  const pending = await getAllTextureCacheRecords();
-  for (const entry of pending) {
-    if (entry.origin !== 'personal' || !entry.guid) continue;
-    if (entry.syncState === 'deleting' || entry.tombstone) {
-      await deletePersonalTexture(entry.guid);
-      await purgeTextureEntryByGuid(entry.guid);
-      continue;
+    // Hydration failures do not prevent independent local changes from reaching GCP.
+    for (const entry of await getAllTextureCacheRecords()) {
+      if (!entry.guid || !hasPendingPersonalChange(entry)) continue;
+      if (entry.syncState === 'deleting' || entry.tombstone) {
+        await deletePersonalTexture(entry.guid);
+        await purgeTextureEntryByGuid(entry.guid, entry);
+        continue;
+      }
+      const snapshot = await getTextureCacheSnapshot(entry.guid);
+      if (!snapshot) throw new Error(`Texture blob "${entry.name}" is missing.`);
+      if (!matchesCacheSnapshot(snapshot.record, entry)) continue;
+      let {blob} = snapshot;
+      let record = entry;
+      if (blob.type !== 'image/webp' || !entry.width || !entry.height || entry.width > 1024 || entry.height > 1024) {
+        const normalized = await normalizeTextureBlob(blob);
+        blob = normalized.blob;
+        record = {...entry, width: normalized.width, height: normalized.height};
+      }
+      const hash = await textureBlobHash(blob);
+      const cloud = remoteByGuid.get(entry.guid) ?? (!refresh && entry.blobHash && entry.storagePath
+        ? {blobHash: entry.blobHash, storagePath: entry.storagePath} : undefined);
+      let finalized: {guid: string; revision: number; storagePath: string};
+      const uploadKey = `${uid}/${entry.guid}/${hash}`;
+      if (cloud?.blobHash === hash) {
+        finalized = await updatePersonalTextureDetails(localMetadataForRemote(record, blob, cloud.storagePath, hash));
+      } else {
+        let storagePath = uploaded.get(uploadKey);
+        if (!storagePath) {
+          const reservation = await reservePersonalTexture(entry.guid);
+          storagePath = reservation.storagePath;
+          await uploadPersonalTextureBlob(storagePath, blob, hash);
+          uploaded.set(uploadKey, storagePath);
+        }
+        try {
+          finalized = await finalizePersonalTexture(localMetadataForRemote(record, blob, storagePath, hash));
+        } catch (error) {
+          if ((error as {code?: string})?.code === 'aborted') uploaded.delete(uploadKey);
+          throw error;
+        }
+        uploaded.delete(uploadKey);
+      }
+      await acknowledgeTextureEntry(entry.guid, finalized.revision, {
+        storagePath: finalized.storagePath, contentType: 'image/webp',
+        width: record.width, height: record.height, byteSize: blob.size, blobHash: hash,
+      }, entry, blob);
     }
-    if (entry.syncState !== 'pending' && entry.syncState !== 'error') continue;
-    const normalized = await normalizedLocalTexture(entry);
-    const reservation = await reservePersonalTexture(entry.guid);
-    await uploadPersonalTextureBlob(reservation.storagePath, normalized.blob);
-    const metadata = localMetadataForRemote(normalized.record, normalized.blob, reservation.storagePath);
-    const finalized = await finalizePersonalTexture(metadata);
-    await acknowledgeTextureEntry(entry.guid, finalized.revision, {
-      storagePath: finalized.storagePath,
-      contentType: 'image/webp',
-      width: metadata.width,
-      height: metadata.height,
-      byteSize: metadata.byteSize,
-    });
+    if (hydrationError) throw hydrationError;
+    const pending = (await getAllTextureCacheRecords()).filter(hasPendingPersonalChange).length;
+    publishPersonalSyncStatus('textures', {state: pending ? 'syncing' : 'synced', pending, lastSyncedAt: new Date().toISOString()});
+    if (pending) void requestPersonalTextureSync();
+  } catch (error) {
+    publishPersonalSyncStatus('textures', {state: 'error', pending: 0, lastError: error instanceof Error ? error.message : String(error)});
+    throw error;
   }
 }
 
+const runner = createPersonalSyncRunner(syncPersonalTextures);
+
 export function startPersonalTextureSync(uid: string): Promise<void> {
-  activeUid = uid;
   setPersonalTextureSyncRequester(requestPersonalTextureSync);
-  if (retryTimer) clearTimeout(retryTimer);
-  return requestPersonalTextureSync();
+  return runner.start(uid);
 }
 
 export function requestPersonalTextureSync(): Promise<void> {
-  const uid = activeUid;
-  if (!uid) return Promise.resolve();
-  if (syncInFlight) {
-    syncAgain = true;
-    return syncInFlight;
-  }
-  syncInFlight = syncPersonalTextures(uid)
-    .catch(error => {
-      console.warn('[personalTextureSync] Synchronization failed:', error);
-      if (activeUid === uid) retryTimer = setTimeout(requestPersonalTextureSync, 15_000);
-    })
-    .finally(() => {
-      syncInFlight = null;
-      if (syncAgain && activeUid) {
-        syncAgain = false;
-        requestPersonalTextureSync();
-      }
-    });
-  return syncInFlight;
+  return runner.request();
 }
 
-export function stopPersonalTextureSync(): Promise<void> {
-  const pending = syncInFlight;
-  activeUid = null;
-  if (retryTimer) clearTimeout(retryTimer);
-  retryTimer = null;
-  syncAgain = false;
+export async function stopPersonalTextureSync(): Promise<void> {
   setPersonalTextureSyncRequester(null);
-  return pending ?? Promise.resolve();
+  await runner.stop();
+  uploaded.clear();
+  publishPersonalSyncStatus('textures', {state: 'idle', pending: 0});
 }

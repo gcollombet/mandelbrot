@@ -387,6 +387,7 @@ function start() {
           />
         </label></div>
       <p class="ve-note">{{ renderMode === 'tiled-keyframe' ? tiledMemoryLabel : workingSetLabel }} · texture {{ workingTextureSide }}²</p>
+      <p class="ve-note">Le budget mémoire prudent de l’appareil est indicatif : l’export peut le dépasser si le GPU accepte l’allocation.</p>
       <details class="ve-advanced"><summary>Réglages avancés</summary><div class="ve-form"><label class="ve-row">
           <span class="ve-label">Mode mémoire</span>
           <DenseSelect

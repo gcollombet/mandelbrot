@@ -1,8 +1,8 @@
 import {
   collection,
   doc,
-  getDoc,
-  getDocs,
+  getDocFromServer as getDoc,
+  getDocsFromServer as getDocs,
   query,
   runTransaction,
   serverTimestamp,
@@ -137,6 +137,8 @@ function assertMigratedManifest(manifestExists: boolean, usage: PersonalUsage): 
 
 export async function getPersonalPresetManifest(): Promise<PersonalPresetManifest> {
   const {db, uid} = requireOwnerServices();
+  const existing = await getDoc(presetManifestRef(db, uid));
+  if (existing.exists()) return normalizePersonalPresetManifest(existing.data());
   return runTransaction(db, async transaction => {
     const manifestTarget = presetManifestRef(db, uid);
     const usageTarget = usageRef(db, uid);
@@ -182,6 +184,8 @@ export async function listPersonalTextureMetadata(uid: string): Promise<Personal
       height: Number(data.height || 0),
       byteSize: Number(data.byteSize || 0),
       thumbnail: typeof data.thumbnail === 'string' ? data.thumbnail : '',
+      favorite: data.favorite === true,
+      ...(typeof data.blobHash === 'string' ? {blobHash: data.blobHash} : {}),
       updatedAt: timestampToIso(data.updatedAt),
       revision: normalizedRevision(data.revision),
     };
@@ -220,7 +224,9 @@ export async function upsertPersonalPreset(record: PersonalRecordEnvelope): Prom
       upsertPersonalPresetManifestEntry(manifest.entries, {guid, type, revision}),
       manifest.revision + 1,
     ));
-    transaction.set(usageTarget, usageForWrite(usage, {presetCount}), {merge: true});
+    if (!usageSnapshot.exists() || presetCount !== usage.presetCount) {
+      transaction.set(usageTarget, usageForWrite(usage, {presetCount}), {merge: true});
+    }
     return {guid, revision, presetCount};
   });
 }
@@ -241,12 +247,17 @@ export async function deletePersonalPreset(guid: string): Promise<{guid: string;
     assertMigratedManifest(manifestSnapshot.exists(), usage);
     const manifest = normalizePersonalPresetManifest(manifestSnapshot.data());
     const presetCount = personalQuotaCountAfter('preset', usage.presetCount, targetSnapshot.exists(), 'delete');
+    if (!targetSnapshot.exists() && !manifest.entries.some(entry => entry.guid === safeGuid)) {
+      return {guid: safeGuid, deleted: false, presetCount};
+    }
     if (targetSnapshot.exists()) transaction.delete(target);
     transaction.set(manifestTarget, manifestForWrite(
       removePersonalPresetManifestEntry(manifest.entries, safeGuid),
       manifest.revision + 1,
     ));
-    transaction.set(usageTarget, usageForWrite(usage, {presetCount}), {merge: true});
+    if (!usageSnapshot.exists() || presetCount !== usage.presetCount) {
+      transaction.set(usageTarget, usageForWrite(usage, {presetCount}), {merge: true});
+    }
     return {guid: safeGuid, deleted: targetSnapshot.exists(), presetCount};
   });
 }
@@ -279,15 +290,19 @@ export async function reservePersonalTexture(guid: string): Promise<{guid: strin
       expiresAt: Timestamp.fromMillis(Date.now() + 30 * 60 * 1000),
       updatedAt: serverTimestamp(),
     });
-    transaction.set(usageTarget, usageForWrite(usage, {textureCount}), {merge: true});
+    if (!usageSnapshot.exists() || textureCount !== usage.textureCount) {
+      transaction.set(usageTarget, usageForWrite(usage, {textureCount}), {merge: true});
+    }
     return {guid: safeGuid, fileName, storagePath, textureCount};
   });
 }
 
-export async function uploadPersonalTextureBlob(storagePath: string, blob: Blob): Promise<void> {
+export async function uploadPersonalTextureBlob(storagePath: string, blob: Blob, blobHash?: string): Promise<void> {
   const {storage, uid} = requireOwnerServices();
   if (!storagePath.startsWith(`users/${uid}/textures/`)) throw new PersonalLibraryAuthenticationError();
-  await uploadBytes(ref(storage, storagePath), blob, {contentType: 'image/webp'});
+  await uploadBytes(ref(storage, storagePath), blob, {contentType: 'image/webp',
+    ...(blobHash ? {customMetadata: {sha256: blobHash}} : {}),
+  });
 }
 
 export async function finalizePersonalTexture(metadata: PersonalTextureMetadata): Promise<{guid: string; revision: number; storagePath: string}> {
@@ -296,6 +311,9 @@ export async function finalizePersonalTexture(metadata: PersonalTextureMetadata)
   const storagePath = textureStoragePath(uid, validated.guid);
   if (validated.storagePath !== storagePath) throw new PersonalLibraryValidationError('invalid-storage-path');
   const object = await getMetadata(ref(storage, storagePath));
+  if (validated.blobHash && object.customMetadata?.sha256 !== validated.blobHash) {
+    throw Object.assign(new Error('Uploaded texture was replaced; retry synchronization.'), {code: 'aborted'});
+  }
   const actualSize = Number(object.size || 0);
   if (object.contentType !== 'image/webp' || actualSize !== validated.byteSize) {
     throw new PersonalLibraryValidationError('uploaded-texture-metadata-mismatch');
@@ -321,6 +339,24 @@ export async function finalizePersonalTexture(metadata: PersonalTextureMetadata)
     });
     if (reservationSnapshot.exists()) transaction.delete(reservation);
     return {guid: validated.guid, revision, storagePath};
+  });
+}
+
+export async function updatePersonalTextureDetails(metadata: PersonalTextureMetadata): Promise<{guid: string; revision: number; storagePath: string}> {
+  const {db, uid} = requireOwnerServices();
+  const validated = validatePersonalTextureMetadata(metadata);
+  return runTransaction(db, async transaction => {
+    const target = textureRef(db, uid, validated.guid);
+    const snapshot = await transaction.get(target);
+    if (!snapshot.exists() || !validated.blobHash || snapshot.data().blobHash !== validated.blobHash) {
+      throw Object.assign(new Error('Texture changed on the server; retry synchronization.'), {code: 'aborted'});
+    }
+    const revision = normalizedRevision(snapshot.data().revision) + 1;
+    transaction.update(target, {
+      name: validated.name, kind: validated.kind, thumbnail: validated.thumbnail,
+      favorite: validated.favorite ?? false, revision, updatedAt: serverTimestamp(),
+    });
+    return {guid: validated.guid, revision, storagePath: snapshot.data().storagePath};
   });
 }
 
