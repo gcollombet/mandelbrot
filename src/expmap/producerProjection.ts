@@ -2,6 +2,7 @@ import { scaleTimesExp } from './decimal'
 import type { ExpmapPlan, ExpmapBlock } from './plan'
 
 export type ExpmapKernelProjection = {
+  displaySet?: boolean
   scale: string
   iterationScale: string
   precisionScale: string
@@ -22,7 +23,7 @@ export function expmapKernelProjection(plan: ExpmapPlan, block: ExpmapBlock): Ex
     ? scaleTimesExp(plan.domain.startScale, Math.log(2 * plan.radius / plan.height) - y0 * plan.rhoStep)
     : scaleTimesExp(plan.domain.endScale, Math.log(2 / plan.height))
   return {
-    scale, iterationScale: plan.domain.endScale, precisionScale: scaleTimesExp(plan.domain.endScale, Math.log(2 / (plan.height * plan.density)) - 14 * Math.LN2), width: block.codedWidth, height: block.codedHeight,
+    scale, iterationScale: plan.domain.endScale, precisionScale: scaleTimesExp(plan.domain.endScale, Math.log(2 / (plan.height * Math.max(plan.density, plan.radialDensity ?? plan.density))) - ((plan.centerOctaves ?? 12) + 2) * Math.LN2), width: block.codedWidth, height: block.codedHeight,
     uniforms: new Float32Array([
       mode, block.codedWidth, block.codedHeight, x0,
       y0, block.gridWidth, plan.rhoStep, 0,

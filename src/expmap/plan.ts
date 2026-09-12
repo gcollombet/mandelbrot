@@ -6,6 +6,10 @@ export type ExpmapPlan = {
   width: number
   height: number
   density: number
+  /** Independent radial sampling; omitted in legacy documents. */
+  radialDensity?: number
+  /** Additional central coverage; legacy RGB uses twelve octaves. */
+  centerOctaves?: number
   radius: number
   depth: number
   angularSamples: number
@@ -37,11 +41,15 @@ export function canonicalDomain(domain: ExpmapDomain): ExpmapDomain {
 
 export function planExpmap(input: {
   domain: ExpmapDomain; width: number; height: number; density: number
-  halo?: number; blockSize?: number
+  radialDensity?: number; centerOctaves?: number; halo?: number; blockSize?: number
 }): ExpmapPlan {
   const { width, height, density } = input
   if (![width, height].every(n => Number.isInteger(n) && n > 0 && n <= 16384)) throw new Error('Invalid target dimensions')
   if (!Number.isFinite(density) || density < 1 || density > 8) throw new Error('Density must be in [1, 8]')
+  const radialDensity = input.radialDensity ?? density
+  if (!Number.isFinite(radialDensity) || radialDensity < 1 || radialDensity > 64) throw new Error('Radial density must be in [1, 64]')
+  const centerOctaves = input.centerOctaves ?? 12
+  if (!Number.isInteger(centerOctaves) || centerOctaves < 12 || centerOctaves > 24) throw new Error('Invalid center coverage')
   const halo = input.halo ?? 2, blockSize = input.blockSize ?? 512
   if (!Number.isInteger(halo) || halo < 1 || halo > 16) throw new Error('Invalid filter halo')
   if (!Number.isInteger(blockSize) || blockSize <= 2 * halo || blockSize > 512 || blockSize % 2) throw new Error('Invalid coded block size')
@@ -49,10 +57,10 @@ export function planExpmap(input: {
   const radius = Math.hypot(width, height) / 2
   const depth = scaleDoublements(domain.startScale, domain.endScale) * Math.LN2
   if (!Number.isFinite(depth) || depth / Math.LN2 > 999980) throw new Error('Document exceeds planner limit')
-  if (radius > 4096) throw new Error('Target exceeds the 12-doubling center coverage')
+  if (radius > 2**centerOctaves) throw new Error('Target exceeds the central coverage')
   return {
-    domain, width, height, density, radius, depth,
+    domain, width, height, density, ...(input.radialDensity === undefined ? {} : { radialDensity }), ...(input.centerOctaves === undefined ? {} : { centerOctaves }), radius, depth,
     angularSamples: Math.ceil(2 * Math.PI * density * radius),
-    rhoStep: Math.LN2 / Math.ceil(Math.LN2 * density * radius), halo, blockSize,
+    rhoStep: Math.LN2 / Math.ceil(Math.LN2 * radialDensity * radius), halo, blockSize,
   }
 }

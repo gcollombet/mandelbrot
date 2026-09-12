@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import ShaderExpmapPanel from './ShaderExpmapPanel.vue'
 import { readPalettePaths } from '../palettePathStore'
 import type { PalettePath } from '../palettePath'
 import { computed, nextTick, onMounted, onUnmounted, ref, toRefs } from 'vue'
@@ -165,6 +166,7 @@ async function saveImage() {
 </script>
 <template>
   <div class="expmap-panel">
+    <ShaderExpmapPanel :plan="plan" :name="name" :appearance="appearance" :engine="engine" :controller="controller"/>
     <p class="intro">Prépare un rendu une seule fois, puis explore son zoom ou utilise-le dans une vidéo.</p>
     <RenderProgress v-if="progress" :label="stopping && ownRunning ? 'Interruption en cours…' : progress.phase" :done="progress.done" :total="progress.total" :unit="progressUnit" :active="ownRunning"/>
     <p v-if="ownRunning && progress" class="hint">{{ progress.saved }} éléments sauvegardés. La reprise conserve les doublements sauvegardés. Le fichier est finalisé à l’arrêt. Garde ce panneau ouvert pendant le calcul.</p>

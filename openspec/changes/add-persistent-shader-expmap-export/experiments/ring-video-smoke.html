@@ -1,0 +1,85 @@
+<!doctype html><meta charset="utf-8"><title>Validation vidéo de couronnes</title>
+<button id="run">Tester 3 images synthétiques et leur reprise</button><pre id="result">Prêt. Test fonctionnel WebGPU/WebCodecs, sans benchmark.</pre>
+<script type="module">
+import { exportShaderRingVideo } from '/src/expmap/displayRingVideo.ts'
+import { ShaderExpmapRenderer, planShaderMemory } from '/src/expmap/displayRenderer.ts'
+import { shaderSourceEstimate } from '/src/expmap/displayFormat.ts'
+import { RingMediaStore } from '/src/expmap/displayRingMedia.ts'
+import { planExpmap } from '/src/expmap/plan.ts'
+import { ALL_FORMATS, Input, BlobSource, VideoSampleSink } from '/node_modules/.vite/deps/mediabunny.js'
+const out=document.querySelector('#result')
+document.querySelector('#run').onclick=async()=>{
+  document.querySelector('#run').disabled=true
+  let device,renderer,scratch,root
+  const log=text=>out.textContent+='\n'+text
+  try {
+    out.textContent='Démarrage'
+    device=await (await navigator.gpu.requestAdapter()).requestDevice()
+    const errors=[];device.addEventListener('uncapturederror',e=>errors.push(e.error.message))
+    const projection=planExpmap({domain:{cx:'0',cy:'0',startScale:'1',endScale:'.5'},width:32,height:18,density:1,blockSize:32})
+    const manifest={id:'synthetic-video',state:'complete',projection,appearanceJson:'{}'}
+    const width=128,height=72
+    const fixed=planShaderMemory(manifest,width,height,1e9,width*height*32).fixedBytes
+    const budget=fixed+6*shaderSourceEstimate(projection).octaveBytes
+    renderer=Object.create(ShaderExpmapRenderer.prototype)
+    Object.assign(renderer,{engine:{device},manifest,appearance:{},budgetBytes:budget,workingReserveBytes:0,cache:new Map(),cacheBytes:0,canvas:new OffscreenCanvas(width,height)})
+    renderer.context=renderer.canvas.getContext('webgpu');renderer.context.configure({device,format:'rgba8unorm',alphaMode:'opaque'})
+    let draws=0
+    const texture=device.createTexture({size:[width,height],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING})
+    renderer.renderRingTexture=async()=>{
+      draws++
+      const cmd=device.createCommandEncoder(),pass=cmd.beginRenderPass({colorAttachments:[{view:texture.createView(),loadOp:'clear',storeOp:'store',clearValue:[.08,.2,.35,.5]}]})
+      pass.end();device.queue.submit([cmd.finish()]);return texture
+    }
+    root=await navigator.storage.getDirectory();const name='ring-video-smoke-'+crypto.randomUUID();scratch=await root.getDirectoryHandle(name,{create:true})
+    const request={gpuRenderer:renderer,scratch,keepIntermediates:true,width,height,fps:30,codec:'hevc',intermediateBitrate:2e6,
+      window:{fromScale:'1',toScale:'.5',fromAngle:0,toAngle:0,durationSeconds:.1,speed:10,authority:'duration'},
+      destination:{kind:'buffer'},onPhase:(p,d,t)=>log(`${p} ${d}/${t}`)}
+    const source={manifest:{...manifest,documentId:manifest.id}}
+    const abort=new AbortController()
+    try {
+      await exportShaderRingVideo(source,{...request,signal:abort.signal,onPhase:(p,d,t)=>{request.onPhase(p,d,t);if(d===4&&p.startsWith('Encodage'))abort.abort()}})
+      throw new Error('Annulation ignorée')
+    }catch(error){if(!abort.signal.aborted)throw error}
+    if(draws!==4)throw new Error('Annulation tardive')
+    const first=await exportShaderRingVideo(source,request)
+    if(draws!==13)throw new Error('La reprise doit conserver la première couronne et recommencer la seconde')
+    for await(const dir of scratch.values())if(dir.kind==='directory'){
+      const alpha=await new RingMediaStore(dir).readMask(0,0,[0,0,width,height])
+      const words=new Uint16Array(alpha.buffer)
+      if(!words.every(n=>n===0x3800))throw new Error('Couverture GPU modifiée')
+    }
+    if(first.framesEmitted!==3||!first.blob?.size)throw new Error('Export incomplet '+JSON.stringify(first))
+    const count=draws
+    const second=await exportShaderRingVideo(source,request)
+    if(draws!==count||second.framesEmitted!==3)throw new Error('Reprise invalide')
+    const input=new Input({source:new BlobSource(first.blob),formats:ALL_FORMATS})
+    const track=await input.getPrimaryVideoTrack();const samples=new VideoSampleSink(track).samples();let decoded=0
+    for await(const sample of samples){
+      const canvas=new OffscreenCanvas(width,height),context=canvas.getContext('2d',{willReadFrequently:true})
+      sample.draw(context,0,0)
+      for(const [x,y] of [[0,0],[64,36],[34,8]]){
+        const pixel=context.getImageData(x,y,1,1).data
+        if([111,170,218].some((n,i)=>Math.abs(pixel[i]-n)>12))throw new Error('Couleur composée incorrecte '+Array.from(pixel))
+      }
+      decoded++;sample.close()
+    }
+    input.dispose()
+    if(decoded!==3)throw new Error('Décodage final incomplet')
+    let videos=0,masks=0,bytes=0
+    async function scan(dir){for await(const item of dir.values()){if(item.kind==='directory')await scan(item);else{const f=await item.getFile();bytes+=f.size;if(item.name.endsWith('.mp4'))videos++;if(item.name.endsWith('.gz'))masks++;if(item.name.endsWith('.bin'))throw new Error('Image brute persistée')}}}
+    await scan(scratch)
+    if(!videos||masks!==videos*3)throw new Error('Fichiers intermédiaires manquants')
+    await exportShaderRingVideo(source,{...request,keepIntermediates:false})
+    if(draws!==count)throw new Error('La reprise a recalculé une couronne')
+    if(errors.length)throw new Error(errors.join('\n'))
+    log(`PASS : ${videos} MP4, ${masks} masques gzip, ${bytes} octets, 3 images finales décodées ; couleur vérifiée, masque f16 exact, annulation, reprise et nettoyage réussis.`)
+    texture.destroy()
+  }catch(error){log('FAIL : '+(error.stack??error))}
+  finally{
+    if(scratch)await root.removeEntry(scratch.name,{recursive:true})
+    renderer?.linear?.destroy();renderer?.composeUniform?.destroy();renderer?.context?.unconfigure();device?.destroy()
+    document.querySelector('#run').disabled=false
+  }
+}
+</script>

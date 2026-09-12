@@ -30,8 +30,12 @@ All rings SHALL use the same frame schedule, camera and material time. Compositi
 - **THEN** each sample contributes exactly once with the same position and weight as the reference full-frame reconstruction
 
 ### Requirement: Bounded intermediate storage lifecycle
-The exporter SHALL store intermediates without lossy video recompression, bound in-memory queues and delete only session-owned consumed temporaries.
+The exporter SHALL encode intermediate ring colors as compressed videos with a configurable bitrate, preserve coverage weights with lossless compression, bound in-memory queues and delete only session-owned consumed temporaries. It SHALL disclose that color is encoded again in the final video.
 
 #### Scenario: Composition is cancelled
 - **WHEN** a user cancels composition
 - **THEN** resources are released, persistent source data remain intact and retained intermediates are identified for resume or explicit cleanup
+
+#### Scenario: A ring encode is interrupted
+- **WHEN** encoding an intermediate ring fails or is cancelled
+- **THEN** resume reuses finalized ring videos and restarts the unfinished ring, without persisting raw color frames

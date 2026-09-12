@@ -8,7 +8,7 @@ Les ExpMaps RGB figent la couleur et les effets dépendants de la vue. Un docume
 - Séparer densité angulaire et radiale, avec estimation des coûts avant production.
 - Relire les données avec les matériaux existants et les transformations ExpMap, puis effectuer le multisampling en lumière linéaire.
 - Planifier N octaves utiles par couronne selon le budget GPU, avec deux octaves supplémentaires pour le zoom classique, halos et ressources auxiliaires comptabilisés.
-- Rendre et composer des couronnes synchronisées, avec centre fini et intermédiaires sans perte à mémoire bornée.
+- Rendre et composer des couronnes synchronisées, avec centre fini, intermédiaires vidéo compressés et masques AA sans perte à mémoire bornée.
 - Valider la suffisance du format avant de figer son ABI : le display set actuel de 48 octets contient de la géométrie écrêtée. Le stockage brut de ce display set ne garantit pas le shading à une autre échelle.
 
 ## Capabilities

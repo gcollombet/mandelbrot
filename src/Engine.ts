@@ -4136,6 +4136,47 @@ export class Engine {
         this.videoExportFrameEvaluationPending = true
     }
 
+    /** Read one converged useful rectangle, preserving the 48-byte display ABI.
+     * Row-aligned staging is released per plane; no full octave allocation. */
+    async captureExpmapDisplay(rect: { x: number; y: number; width: number; height: number }): Promise<Uint8Array> {
+        if (!this.expmapProjection?.displaySet || !this.videoFrameReady() || !this.resolvedDisplay) {
+            throw new Error('A converged shader ExpMap block is required')
+        }
+        if (![rect.x, rect.y, rect.width, rect.height].every(Number.isSafeInteger)
+            || rect.x < 0 || rect.y < 0 || rect.width < 1 || rect.height < 1
+            || rect.x + rect.width > this.expmapProjection.width || rect.y + rect.height > this.expmapProjection.height) {
+            throw new Error('Invalid display capture rectangle')
+        }
+        const d = this.resolvedDisplay, output = new Uint8Array(rect.width * rect.height * 48)
+        const planes = [
+            { texture: d.valuesTexture, layer: 0, bytes: 4, offset: 0 },
+            { texture: d.valuesTexture, layer: 1, bytes: 4, offset: 4 },
+            { texture: d.valuesTexture, layer: 2, bytes: 4, offset: 8 },
+            { texture: d.geometryTexture, layer: 0, bytes: 8, offset: 12 },
+            { texture: d.metadataTexture, layer: 0, bytes: 4, offset: 20 },
+            { texture: d.orbitGradientTexture, layer: 0, bytes: 8, offset: 24 },
+            { texture: d.trapPayloadTexture, layer: 0, bytes: 16, offset: 32 },
+        ]
+        for (const plane of planes) {
+            if (!plane.texture) continue // absent trap payload is invalid (all zero)
+            const pitch = Math.ceil(rect.width * plane.bytes / 256) * 256
+            const buffer = this.device.createBuffer({ size: pitch * rect.height, usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ })
+            try {
+                const encoder = this.device.createCommandEncoder()
+                encoder.copyTextureToBuffer({ texture: plane.texture, origin: [rect.x, rect.y, plane.layer] },
+                    { buffer, bytesPerRow: pitch }, [rect.width, rect.height, 1])
+                this.device.queue.submit([encoder.finish()])
+                await buffer.mapAsync(GPUMapMode.READ)
+                const bytes = new Uint8Array(buffer.getMappedRange())
+                for (let y = 0; y < rect.height; y++) for (let x = 0; x < rect.width; x++) {
+                    const src = y * pitch + x * plane.bytes
+                    output.set(bytes.subarray(src, src + plane.bytes), (y * rect.width + x) * 48 + plane.offset)
+                }
+            } finally { buffer.unmap(); buffer.destroy() }
+        }
+        return output
+    }
+
     get isExpmapProductionActive(): boolean { return this.expmapProjection !== null }
 
     isVideoExportActive(): boolean {
@@ -5921,7 +5962,21 @@ export class Engine {
         }
     }
 
+    private shaderReplayContext?: Mandelbrot
+
+    async prepareShaderExpmapColor(options: RenderOptions, time: number, angle: number, sourceMu?: number) {
+        if (!this.shaderReplayContext || this.expmapProjection) throw new Error('Engine not ready for shader playback')
+        const saved = this.animationTimeOverride
+        this.animationTimeOverride = time
+        const context = this.shaderReplayContext
+        try { await this.update({ ...context, angle, mu: sourceMu ?? context.mu }, options) }
+        finally { this.animationTimeOverride = saved; this.shaderReplayContext = context }
+        if (!this.bindGroupColor || !this.pipelineColor) throw new Error('Color resources unavailable')
+        return { code: this.shaderPassColor, layout: this.pipelineColor.getBindGroupLayout(0), bindGroup: this.bindGroupColor }
+    }
+
     async update(mandelbrot: Mandelbrot, renderOptions: RenderOptions) {
+        if (!this.expmapProjection) this.shaderReplayContext = { ...mandelbrot }
         if (this.expmapAppearance) {
             renderOptions = this.expmapAppearance
             const recipe = this.expmapAppearance as RenderOptions & { mu?: number; epsilon?: number; maxIterationMultiplier?: number }
@@ -5991,7 +6046,7 @@ export class Engine {
         // attachment, so a flip has to re-create the textures. Done here, before
         // any previous-state comparison: resize() clears the render anyway, which
         // is what the flip already forced through clearHistoryNextFrame.
-        this.orbitMetricsEnabled = shouldTrackOrbitMetrics(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops)
+        this.orbitMetricsEnabled = !!this.expmapProjection?.displaySet || shouldTrackOrbitMetrics(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops)
         if ((this.orbitMetricsEnabled !== this.orbitGradientAllocated
             || this.orbitTrapEnabled !== this.trapPayloadAllocated) && this.rawTexture) {
             this.resize()

@@ -24,6 +24,8 @@ export async function produceExpmapBlocks(deps: ExpmapProducerDeps, request: {
   projectionForBlock?: (plan: ExpmapPlan, block: ExpmapBlock) => ExpmapKernelProjection
   completedBlockIds?: ReadonlySet<string>
   consume: (value: ExpmapRgbaBlock) => Promise<void>
+  /** Consume settled GPU data directly, without color capture or VideoFrame allocation. */
+  consumeDisplay?: (block: ExpmapBlock) => Promise<void>
   signal?: AbortSignal
   onProgress?: (blocksProduced: number) => void
   onTiming?: (milliseconds: number) => void
@@ -52,7 +54,7 @@ export async function produceExpmapBlocks(deps: ExpmapProducerDeps, request: {
       const blockStart=performance.now()
       const projection = (request.projectionForBlock ?? octaveProjection)(request.plan, block)
       navigator.scale(projection.scale)
-      await deps.engine.prepareExpmapBlock(projection, request.appearance)
+      await deps.engine.prepareExpmapBlock(request.consumeDisplay ? { ...projection, displaySet: true } : projection, request.appearance)
       deps.engine.beginVideoExportFrame()
       let ready = false
       for (let pump = 0; pump < pumpsLimit; pump++) {
@@ -63,6 +65,13 @@ export async function produceExpmapBlocks(deps: ExpmapProducerDeps, request: {
       }
       if (!ready) throw new Error(`ExpMap block ${block.id} did not converge within ${pumpsLimit} pumps`)
       check()
+      if (request.consumeDisplay) {
+        await request.consumeDisplay(block)
+        request.onTiming?.(performance.now()-blockStart)
+        blocksProduced++
+        request.onProgress?.(blocksProduced)
+        continue
+      }
       let settled = false
       let abandoned = false
       let captured: VideoFrame | undefined

@@ -12,7 +12,7 @@ Le producteur actuel calcule une grille polaire par blocs puis capture du RGB. L
 
 ### Validation préalable du format
 
-Avant toute publication d'un format persistant, examiner les pertes de la chaîne calcul → resolve → display set → couleur. Exécuter `node openspec/changes/add-persistent-shader-expmap-export/experiments/display-fidelity.mjs`. Un contre-exemple à l'adaptation du display set arrête l'implémentation de ce format ; une convention différente doit être choisie et validée avant la chaîne complète.
+Avant toute publication d'un format persistant, examiner les pertes de la chaîne calcul → resolve → display set → couleur. Exécuter `node openspec/changes/add-persistent-shader-expmap-export/experiments/display-fidelity.mjs`. Le déplacement du clamp à 64, accepté après essai visuel par l'utilisateur, autorise l'implémentation du profil expérimental à 48 octets. La borne f16 reste une limite du domaine ; l'équivalence universelle n'est pas promise.
 
 Ne pas présenter une simple conversion de rgba16float en rgba32float comme une correction : les clamps existent déjà dans le calcul des valeurs, avant l'écriture des textures.
 
@@ -32,7 +32,7 @@ Si N=1 ne tient pas, découper davantage les données en blocs angulaires/radiau
 
 Les passes de couronne partagent positions des échantillons AA, instants, caméra et état des matériaux. Rendre avec halos et contributions pondérées en lumière linéaire ; composer avant transfert sRGB et encodage final. Un framebuffer opaque par couronne sans poids de couverture n'est pas suffisant. La fermeture centrale reste un calcul explicite.
 
-Les intermédiaires sans perte sont propres à une recette vidéo ; seule la source géométrique est réutilisable avec une nouvelle vitesse ou palette. Prévoir reprise par segments et suppression des intermédiaires consommés appartenant à la session.
+Le mode initial compose immédiatement les couronnes de chaque image et reste disponible. Le mode par défaut suit désormais l'approche demandée : toutes les images d'une couronne sont calculées avant la couronne suivante, sur la durée entière du film. Aucun segment temporel n'est imposé. Le nombre d'octaves utiles par couronne est déterminé par le budget N+2, après réservation de la mémoire de travail, sans plafond arbitraire à quatre ; il couvre toute la fenêtre en une passe si le budget le permet ; une octave trop grande est divisée en portions de blocs, elles aussi traitées sur tout le film.
 
 ## Risks / Trade-offs
 
@@ -55,3 +55,24 @@ Déplacer la saturation visuelle à 64 après adaptation à la vue, en gardant l
 - Format géométrique avant écrêtage et précision suffisante : quels champs et quelle taille réelle par échantillon ?
 - Quelle tolérance visuelle est acceptable par rapport au rendu direct après transformation ?
 - La limite indicative de 400 Go pour 4K ×10^100 est-elle un objectif strict ou peut-elle augmenter si le format fidèle le requiert ?
+
+## Implémentation du 2026-09-12
+
+- Blocs utiles intercalés little-endian 48 octets, en-tête et SHA-256 ; sous-dossiers par 1000 blocs, deux manifestes alternés. Adressage arithmétique sans index global en RAM.
+- Budget manuel supplémentaire au moteur ouvert : cible linéaire, présentation, copies bornées des blocs et marge. Cache LRU évincé seulement après les soumissions GPU terminées. N+2 décrit une capacité, pas une prélecture asynchrone garantie.
+- Shading complet partagé par concaténation de color.wgsl ; clamp après adaptation locale. AA spatial jusqu'à 256, accumulation pondérée linéaire, transformations communes au lecteur RGB.
+- Les nouvelles sources réservent 17 octaves centrales : en 3840×2160 le rayon résiduel est inférieur à 1/32 pixel. Les anciennes sources de développement sans ce champ gardent leur couverture de 12 octaves. Le filtrage suit l'axe le plus dense pour les densités indépendantes.
+- Dossiers choisis ou OPFS, catalogue IndexedDB, reprise de production et copie vérifiée vers un autre dossier. MP4 en écriture directe, avec OPFS disponible pour les essais.
+- La mémoire du moteur déjà ouvert et les caches internes du pilote/encodeur restent extérieurs au budget annoncé. Aucun débit temps réel ni plafond exact de mémoire physique du pilote n'est certifié.
+
+## Couronnes successives sur toute la durée
+
+Les intermédiaires couleur sont désormais de véritables vidéos MP4, une par couronne sur toute la durée. Leur rectangle reste fixe pendant le film et enveloppe les positions radiales possibles ; les couronnes centrales ont des dimensions réduites, avec un minimum de 64 pixels par axe (borné par la sortie) pour les codecs matériels. Le miroir fixe conserve une enveloppe plein écran. Le codec suit le choix de l'export ; le débit de la couronne plein écran est réglable (60 Mbit/s par défaut), puis proportionnel à la surface avec un minimum de 100 kbit/s par flux.
+
+La capture GPU normalise la couleur par le poids AA et effectue le transfert sRGB avant l'encodeur. Les poids f16 sont conservés séparément en gzip sans perte, avec en-tête, taille et SHA-256. À la lecture, la couleur décodée repasse en linéaire et est multipliée par ces poids avant addition dans la cible commune. La compression couleur et la quantification 8 bits ne sont pas sans perte ; le MP4 final ajoute un encodage. Ce compromis disque/qualité est demandé par l'utilisateur. Aucune image couleur brute n'est persistée par ce chemin.
+
+Le dossier de recette `couronnes-video-*` inclut codec, débit et rectangles dans son identité v3. Le checkpoint est publié après finalisation de chaque MP4 : les vidéos terminées sont réutilisées, la couronne interrompue recommence. L'assemblage final recommence du début. Les anciens dossiers de contributions brutes sont distincts et ne sont pas effacés automatiquement.
+
+La capture réserve les ressources de travail ; le cache source est libéré avant composition. Les lecteurs séquentiels sont utilisés lorsque leur provision mémoire tient dans le budget. Les nombreuses subdivisions plein écran utilisent sinon une ouverture/décodage à la fois, avec davantage de recherches dans les vidéos. Les allocations internes des codecs restent dépendantes du navigateur. La couleur ne transite pas par un tableau RGBA côté CPU.
+
+Après succès, seuls les MP4, masques et checkpoint de cette recette sont supprimés, sauf conservation explicite. L'estimation disque utilise la somme des débits cibles multipliée par la durée ; elle exclut masques gzip et surcoûts de conteneur et ne garantit pas le débit effectivement produit. Pas de promesse de fidélité sans perte ou de gain de vitesse sur une grande source sans mesure.

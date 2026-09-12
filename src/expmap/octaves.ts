@@ -11,8 +11,8 @@ export type ExpmapOctaves = {
 export type ExpmapTile = { index: number; file: string; length: number; sha256: string }
 const align16 = (n: number) => Math.ceil(n / 16) * 16
 export function planExpmapOctaves(plan: ExpmapPlan): ExpmapOctaves {
-  const angularSamples = plan.angularSamples, rowsPerOctave = Math.ceil(Math.LN2 * plan.density * plan.radius)
-  const tileCount = Math.floor(scaleDoublements(plan.domain.startScale, plan.domain.endScale)) + EXPMAP_VISIBLE_OCTAVES + 1
+  const angularSamples = plan.angularSamples, rowsPerOctave = Math.ceil(Math.LN2 * (plan.radialDensity ?? plan.density) * plan.radius)
+  const tileCount = Math.floor(scaleDoublements(plan.domain.startScale, plan.domain.endScale)) + (plan.centerOctaves ?? EXPMAP_VISIBLE_OCTAVES) + 1
   const halo = 2
   if (!Number.isSafeInteger(tileCount) || tileCount > 1000000) throw new Error('Trop de doublements pour ce document')
   return { angularSamples, rowsPerOctave, tileWidth: align16(angularSamples + 2 * halo),
