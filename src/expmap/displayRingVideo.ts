@@ -14,12 +14,22 @@ import { RingVideoGpu } from './displayRingVideoGpu'
 type Request=Omit<Parameters<typeof exportExpmapVideo>[1],'gpuRenderer'>&{
   gpuRenderer:ShaderExpmapRenderer; scratch:FileSystemDirectoryHandle|(()=>Promise<FileSystemDirectoryHandle>); keepIntermediates?:boolean
   intermediateBitrate?:number
+  /**
+   * `signal` asks to stop gracefully: the ring being encoded is closed at the frame
+   * reached, the remaining rings are rendered up to that frame only, and the final
+   * video covers that playable prefix. `hardSignal` abandons without a file.
+   */
+  hardSignal?:AbortSignal
   onPhase?:(phase:string,done:number,total:number)=>void
 }
 
 export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},request:Request) {
   request={...request,window:{...request.window},effects:effectsSettings(request.effects)}
-  const {gpuRenderer:renderer,signal}=request,m=renderer.manifest
+  const {gpuRenderer:renderer,signal,hardSignal}=request,m=renderer.manifest
+  // Frames to keep once a graceful interruption happened; undefined while running normally.
+  let limit:number|undefined
+  const live=()=>limit===undefined?signal:hardSignal
+  const frames=()=>limit??total
   validateExpmapVideoWindow(source.manifest,request.window,request.effects)
   const duration=request.window.durationSeconds+motionSettings(request.window).holdSeconds
   const total=totalFramesFor({fps:request.fps,durationSeconds:duration})
@@ -40,7 +50,7 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
     }})
   }
   const rects=rings.map(ring=>ringVideoRect(m,viewAt(0),ring))
-  const bitrates=rects.map(rect=>ringVideoBitrate(rect,request.width,request.height,request.intermediateBitrate??60e6))
+  const bitrates=rects.map(rect=>ringVideoBitrate(rect,request.width,request.height,request.intermediateBitrate??100e6))
   const checked=new Set<string>()
   for(let ring=0;ring<rings.length;ring++) {
     const rect=rects[ring],key=`${rect[2]}:${rect[3]}`
@@ -50,7 +60,7 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
       !await canDecodeVideo(request.codec,{codedWidth:rect[2],codedHeight:rect[3]}))throw new Error(`Codec indisponible pour une couronne ${rect[2]}×${rect[3]}`)
   }
   // Version isolates compressed videos from previous raw-frame checkpoints.
-  const identity=await contentIdentity(new TextEncoder().encode(canonicalJson({version:5,reconstruction:'window-v1',source:m,
+  const identity=await contentIdentity(new TextEncoder().encode(canonicalJson({version:7,reconstruction:'window-v3',interpolation:renderer.interpolation??'bilinear',sampleDistribution:renderer.sampleDistribution??'grid',source:m,
     appearance:renderer.appearance,window:request.window,width:request.width,height:request.height,
     fps:request.fps,maxSamples:request.maxSamples??16,effects:request.effects,codec:request.codec,bitrates,rings,rects})))
   const name=`couronnes-video-${identity.slice(7)}`
@@ -75,25 +85,33 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
     try {
       if(next)request.onPhase?.('Reprise des vidéos de couronnes terminées',next*total,rings.length*total)
       for(let ring=next;ring<rings.length;ring++) {
-        signal?.throwIfAborted()
+        live()?.throwIfAborted()
         const rect=rects[ring],writer=await (await store.videoFile(ring,true)).createWritable()
         let sink:Awaited<ReturnType<typeof createVideoSink>>|undefined
         try {
           sink=await createVideoSink({width:rect[2],height:rect[3],fps:request.fps,codec:request.codec,
             quality:new Quality({bitrate:bitrates[ring]}),hardwareAcceleration:'prefer-hardware',
             destination:{kind:'stream',writable:writer as unknown as WritableStream<Uint8Array>}})
-          for(let frame=0;frame<total;frame++) {
-            signal?.throwIfAborted()
-            const texture=await renderer.renderRingTexture(viewAt(frame),rings[ring],rect,signal)
-            const captured=await gpu.capture(texture,rect,signal)
+          for(let frame=0;frame<frames();frame++) {
+            hardSignal?.throwIfAborted()
+            if(limit===undefined&&signal?.aborted) {
+              // Nothing playable yet: no frame has every ring.
+              if(frame===0)signal.throwIfAborted()
+              limit=frame
+              request.onPhase?.(`Interruption · finalisation des ${limit} premières images`,ring*limit,rings.length*limit)
+              continue
+            }
+            const texture=await renderer.renderRingTexture(viewAt(frame),rings[ring],rect,live())
+            const captured=await gpu.capture(texture,rect,live())
             // Construct before awaiting disk I/O: canvas contents belong to this frame.
             const videoFrame=new VideoFrame(captured.canvas,{timestamp:Math.round(frame*1e6/request.fps),duration:Math.round(1e6/request.fps)})
             try {await store.writeMask(ring,frame,rect,captured.alpha);await sink.addFrame(videoFrame)}
             finally{videoFrame.close()}
-            request.onPhase?.(`Encodage des couronnes · ${ring+1}/${rings.length}`,ring*total+frame+1,rings.length*total)
+            request.onPhase?.(limit===undefined?`Encodage des couronnes · ${ring+1}/${rings.length}`:`Interruption · couronnes restantes ${ring+1}/${rings.length}`,ring*frames()+frame+1,rings.length*frames())
           }
           await sink.finalize()
-          await store.checkpoint(identity,ring+1);next=ring+1
+          // A truncated ring must be re-rendered on resume: keep the checkpoint where it was.
+          if(limit===undefined){await store.checkpoint(identity,ring+1);next=ring+1}
         }catch(error){await sink?.cancel().catch(()=>{});await writer.abort().catch(()=>{});throw error}
       }
       // Source cache is no longer needed during video decoding and composition.
@@ -107,11 +125,11 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
         catch(error){await store.checkpoint(identity,ring);throw error}
       }
       let frame=0
-      const result=await exportExpmapVideo(source,{...request,gpuRenderer:{render:async view=>{
+      const result=await exportExpmapVideo(source,{...request,signal:live(),frameLimit:limit,gpuRenderer:{render:async view=>{
         const current=frame++
         async function* parts() {
           for(let ring=0;ring<rings.length;ring++) {
-            signal?.throwIfAborted()
+            live()?.throwIfAborted()
             let temporary:Awaited<ReturnType<typeof openReader>>|undefined
             try {
               const reader=readers[ring]??(temporary=await openReader(ring))
@@ -119,20 +137,20 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
               const sample=sequential?(await reader.samples.next()).value:await reader.sink.getSample(timestamp+0.0000001)
               if(!sample||Math.abs(sample.timestamp-timestamp)>0.00001)throw new Error('Frame de couronne manquante ou désynchronisée')
               try {
-                const alpha=await store.readMask(ring,current,rects[ring],signal),videoFrame=sample.toVideoFrame()
+                const alpha=await store.readMask(ring,current,rects[ring],live()),videoFrame=sample.toVideoFrame()
                 try {
                   const part=await gpu.restore(videoFrame,alpha,rects[ring])
                   try{yield part}finally{part.texture.destroy()}
                 }finally{videoFrame.close()}
               }finally{sample.close()}
             }catch(error){
-              if(!signal?.aborted)await store.checkpoint(identity,Math.min(next,ring))
+              if(!live()?.aborted)await store.checkpoint(identity,Math.min(next,ring))
               throw error
             }finally{if(temporary){await temporary.samples.return().catch(()=>{});temporary.input.dispose()}}
           }
         }
-        return renderer.composeRings(view,parts(),signal)
-      }},onProgress:(done,count)=>{request.onProgress?.(done,count);request.onPhase?.('Décodage, assemblage et encodage final',done,count)}})
+        return renderer.composeRings(view,parts(),live())
+      }},onProgress:(done,count)=>{request.onProgress?.(done,count);request.onPhase?.(limit===undefined?'Décodage, assemblage et encodage final':`Interruption · assemblage des ${limit} premières images`,done,count)}})
       for(const reader of readers){await reader.samples.return().catch(()=>{});reader.input.dispose()}
       readers.length=0
       if(!result.cancelled&&!request.keepIntermediates) {

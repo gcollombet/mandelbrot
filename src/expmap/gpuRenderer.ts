@@ -126,7 +126,7 @@ export class ExpmapGpuRenderer {
       this.device.queue.writeBuffer(this.uniform,0,new Float32Array([view.width,view.height,plan.height,plan.radius,
         depth-base,view.angle+expmapImageRotation(view.effects,depth),o.angularSamples,o.rowsPerOctave,o.tileWidth,o.tileHeight,o.halo,readBase%14,
         center[0]/255,center[1]/255,center[2]/255,1,
-        ...expmapFilterUniform(o,view.maxSamples ?? 1,active), ...expmapEffectsUniform(view.effects,base,depth,view.effectTime ?? 0),
+        ...expmapFilterUniform(o,view.maxSamples ?? 1,active,view.sampleDistribution), ...expmapEffectsUniform(view.effects,base,depth,view.effectTime ?? 0),
         ...Array.from({length:16},(_,i)=>radialOctave(readBase+i,radial).reverse ? 1 : 0),
         mirror ? 1 : 0,view.effects?.mirrorDepth??1,mirror?.offset??0,0]))
       const commands=this.device.createCommandEncoder()

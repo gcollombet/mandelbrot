@@ -1,0 +1,14 @@
+<!doctype html><meta charset="utf-8"><title>Diagnostic des bibliothèques ExpMap</title><button id="run">Lire les catalogues et fichiers existants</button><pre id="out">Lecture seule ; aucune suppression ni réinitialisation.</pre><script>
+run.onclick=async()=>{run.disabled=true;out.textContent='Origine : '+location.origin;const log=v=>out.textContent+='\n'+v;
+try{
+ const databases=await indexedDB.databases();log('Bases existantes : '+databases.map(d=>d.name).join(', '));
+ for(const name of ['mandelbrot-expmap-file-library','mandelbrot-shader-expmap-library']){
+  if(!databases.some(d=>d.name===name)){log(name+' : absente');continue}
+  const db=await new Promise((resolve,reject)=>{const r=indexedDB.open(name);r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});
+  try{for(const table of db.objectStoreNames){const rows=await new Promise((resolve,reject)=>{const r=db.transaction(table,'readonly').objectStore(table).getAll();r.onsuccess=()=>resolve(r.result);r.onerror=()=>reject(r.error)});log(name+'/'+table+' : '+rows.length+' entrées');for(const r of rows)log(JSON.stringify({name:r.name,state:r.state,file:r.handle?.name,archive:r.archive}));}}finally{db.close()}
+ }
+ const root=await navigator.storage.getDirectory();const dirs=[];for await(const [name,entry] of root.entries()){log('OPFS : '+name+' ('+entry.kind+')');if(['shader-archives','expmap-work'].includes(name)&&entry.kind==='directory')dirs.push(entry)}
+ for(const dir of dirs){let count=0;for await(const [name,entry] of dir.entries()){count++;if(entry.kind==='file'){const f=await entry.getFile();log(dir.name+'/'+name+' : '+f.size+' octets')}else log(dir.name+'/'+name+' (dossier)')}log(dir.name+' : '+count+' éléments')}
+ log('Lecture terminée. Aucune donnée modifiée.');
+}catch(e){log('ERREUR : '+e.message)}finally{run.disabled=false}}
+</script>

@@ -53,12 +53,26 @@ describe('ExpMap video timeline', () => {
     const m=await manifest()
     vi.stubGlobal('VideoFrame',class {close(){}})
     mock.add.mockResolvedValue(undefined);mock.render.mockResolvedValue({})
-    const request={window:expmapVideoDefaults(m),width:16,height:12,fps:1,codec:'avc' as const,destination:{kind:'buffer' as const},gpuRenderer:{render:mock.render},maxSamples:256}
+    const request={window:expmapVideoDefaults(m),width:16,height:12,fps:1,codec:'avc' as const,destination:{kind:'buffer' as const},gpuRenderer:{render:mock.render},maxSamples:256,sampleDistribution:'r2' as const}
     await exportExpmapVideo({manifest:m},request)
-    expect(mock.render.mock.calls.every(([view])=>view.maxSamples===256)).toBe(true)
+    expect(mock.render.mock.calls.every(([view])=>view.maxSamples===256&&view.sampleDistribution==='r2')).toBe(true)
     mock.render.mockClear()
     await expect(exportExpmapVideo({manifest:m},{...request,maxSamples:32})).rejects.toThrow('Prélèvements')
     expect(mock.render).not.toHaveBeenCalled()
+  })
+  it('honours a frame limit while keeping full-length camera timing, and reports it as cancelled', async () => {
+    const m = await manifest(), views: { scale: string }[] = [], progress: [number, number][] = []
+    vi.stubGlobal('VideoFrame', class { close() {} })
+    mock.render.mockImplementation(async (_source, view) => { views.push(view); return new Uint8ClampedArray(16 * 12 * 4) })
+    mock.add.mockResolvedValue(undefined)
+    const request = { window: expmapVideoDefaults(m), width: 16, height: 12, fps: 2, codec: 'avc' as const, destination: { kind: 'buffer' as const }, gpuRenderer: { render: (view: { scale: string }) => mock.render({ manifest: m }, view) } }
+    const result = await exportExpmapVideo({ manifest: m }, { ...request, frameLimit: 5, onProgress: (a, b) => progress.push([a, b]) })
+    expect(result.cancelled).toBe(true); expect(result.framesEmitted).toBe(5); expect(mock.finalize).toHaveBeenCalledOnce()
+    expect(progress[0]).toEqual([0, 5]); expect(progress.at(-1)).toEqual([5, 5])
+    // The fifth frame of a 20-frame path is the same camera position as without the limit.
+    const full: { scale: string }[] = []; mock.render.mockImplementation(async (_source, view) => { full.push(view); return new Uint8ClampedArray(16 * 12 * 4) })
+    await exportExpmapVideo({ manifest: m }, request)
+    expect(full.length).toBe(20); expect(views.map(v => v.scale)).toEqual(full.slice(0, 5).map(v => v.scale))
   })
   it('cancels after the last complete frame without altering its document', async () => {
     const m = await manifest(), original = JSON.stringify(m), abort = new AbortController()

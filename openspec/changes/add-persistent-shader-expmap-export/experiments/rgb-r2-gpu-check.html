@@ -1,0 +1,55 @@
+<!doctype html><meta charset="utf-8"><title>AA RGB Grille / R2</title>
+<button id="run">Vérifier R2 RGB</button><pre id="result">Test GPU synthétique, sans benchmark.</pre>
+<script type="module">
+import shader from '/src/assets/expmap_reconstruct.wgsl?raw'
+const out=document.querySelector('#result')
+run.onclick=async()=>{
+ run.disabled=true;out.textContent='Démarrage';let device;const resources=[]
+ try{
+  device=await (await navigator.gpu.requestAdapter()).requestDevice()
+  device.pushErrorScope('validation')
+  const errors=[];device.addEventListener('uncapturederror',e=>errors.push(e.error.message))
+  const module=device.createShaderModule({code:shader})
+  const pipeline=await device.createRenderPipelineAsync({layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'fs',targets:[{format:'rgba8unorm'}]},primitive:{topology:'triangle-list'}})
+  const texture=device.createTexture({size:[516,133,14],format:'rgba8unorm-srgb',usage:GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_DST});resources.push(texture)
+  const target=device.createTexture({size:[32,24],format:'rgba8unorm',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.COPY_SRC});resources.push(target)
+  const uniform=device.createBuffer({size:176,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST});resources.push(uniform)
+  const readback=device.createBuffer({size:256*24,usage:GPUBufferUsage.MAP_READ|GPUBufferUsage.COPY_DST});resources.push(readback)
+  const bind=device.createBindGroup({layout:pipeline.getBindGroupLayout(0),entries:[{binding:0,resource:{buffer:uniform}},{binding:1,resource:texture.createView()},{binding:2,resource:device.createSampler({minFilter:'linear',magFilter:'linear'})}]})
+  function upload(flat=false){
+   const bytes=new Uint8Array(516*133*4)
+   for(let y=0;y<133;y++)for(let x=0;x<516;x++){
+    const i=4*(y*516+x);bytes[i]=flat?128:(x*37+y*71)%256;bytes[i+1]=flat?128:(x*19+y*11)%256;bytes[i+2]=flat?128:((x^y)*17)%256;bytes[i+3]=255
+   }
+   for(let layer=0;layer<14;layer++)device.queue.writeTexture({texture,origin:[0,0,layer]},bytes,{bytesPerRow:516*4},[516,133])
+  }
+  async function draw(distribution,side,angle=.3){
+   const values=new Float32Array(44)
+   values.set([32,24,24,20,.37,angle,512,128,516,133,2,0,.5,.5,.5,1,side,512/(2*Math.PI),0,distribution])
+   device.queue.writeBuffer(uniform,0,values)
+   const cmd=device.createCommandEncoder(),pass=cmd.beginRenderPass({colorAttachments:[{view:target.createView(),loadOp:'clear',storeOp:'store'}]})
+   pass.setPipeline(pipeline);pass.setBindGroup(0,bind);pass.draw(3);pass.end()
+   cmd.copyTextureToBuffer({texture:target},{buffer:readback,bytesPerRow:256},[32,24]);device.queue.submit([cmd.finish()])
+   await readback.mapAsync(GPUMapMode.READ)
+   const data=new Uint8Array(readback.getMappedRange()).slice();readback.unmap();return data
+  }
+  const equal=(a,b)=>a.every((v,i)=>v===b[i])
+  upload()
+  if(!equal(await draw(0,1),await draw(1,1)))throw new Error('AA 1 diffère entre les distributions')
+  for(const side of [2,4,16]){
+   const grid=await draw(0,side),r2=await draw(1,side),repeat=await draw(1,side)
+   if(equal(grid,r2))throw new Error('Le choix R2 est sans effet')
+   if(!equal(r2,repeat))throw new Error('R2 non déterministe')
+   if(equal(r2,await draw(1,side,1.1)))throw new Error('Rotation sans effet')
+  }
+  upload(true)
+  for(const distribution of [0,1]){
+   const data=await draw(distribution,16)
+   for(let y=0;y<24;y++)for(let x=0;x<32;x++)for(let c=0;c<3;c++)if(Math.abs(data[y*256+x*4+c]-128)>1)throw new Error('Aplat non conservé')
+  }
+  const validation=await device.popErrorScope();if(validation)throw validation
+  if(errors.length)throw new Error(errors.join('\n'))
+  out.textContent='PASS : AA 1 identique ; Grille/R2 distincts à AA 4/16/256 ; R2 déterministe ; rotation et aplats conservés. Bilinéaire matériel conservé.'
+ }catch(e){out.textContent='FAIL : '+(e.stack??e)}finally{resources.forEach(r=>r.destroy());device?.destroy();run.disabled=false}
+}
+</script>

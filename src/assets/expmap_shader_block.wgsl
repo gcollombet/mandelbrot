@@ -32,6 +32,12 @@ fn shader_map_contribution(screen:vec2<f32>, extent:f32)->vec4<f32> {
   let r=max(radius/pixelStep,1e-6);
   let ratio=512.0/(2.828427124746*r);
   let neutral=vec2<f32>(0.5)+r*vec2<f32>(cos(theta),-sin(theta))/(2.0*extent);
+  if(sp.camera.z>0.5){
+    // Exclusive ownership after rounding, including at a block seam.
+    let coord=floor(uv+0.5)-sp.block.xy;
+    if(any(coord<vec2<f32>(0.0))||any(coord>=sp.block.zw)){return vec4<f32>(0.0);}
+    return vec4<f32>(shade_display_sample(u32(coord.y)*u32(sp.block.z)+u32(coord.x),screen,r,ratio,neutral),1.0);
+  }
   var result=vec4<f32>(0.0);
   for(var y=0u;y<2u;y++) {for(var x=0u;x<2u;x++) {
     let coord=base+vec2<f32>(f32(x),f32(y))-sp.block.xy;
@@ -76,7 +82,7 @@ fn shader_map_contribution(screen:vec2<f32>, extent:f32)->vec4<f32> {
   let side=u32(clamp(floor(density),1.0,sp.integration.x));
   var result=vec4<f32>(0.0);
   for(var y=0u;y<side;y++) {for(var x=0u;x<side;x++) {
-    result+=shader_map_contribution(position.xy+(vec2<f32>(f32(x),f32(y))+0.5)/f32(side)-0.5,extent);
+    result+=shader_map_contribution(shader_aa_position(position.xy,x,y,side),extent);
   }}
   return result/f32(side*side);
 }

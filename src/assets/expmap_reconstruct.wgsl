@@ -3,7 +3,7 @@ struct Params {
   sampling: vec4<f32>, // fractional depth, angle, angular count, rows per doubling
   tileInfo: vec4<f32>, // tile width, tile height, halo, integer base modulo 14
   center: vec4<f32>, // encoded sRGB center
-  integration: vec4<f32>, // maximum grid side, minimum samples per log-radius unit, cyclic octaves
+  integration: vec4<f32>, // maximum grid side, minimum samples per log-radius unit, cyclic octaves, R2 distribution
   effects: vec4<f32>, // Droste radians/doubling, base phase, sectors (0=off), orientation
   radialReverse: array<vec4<f32>,4>, // virtual octave reversal flags
   mirror: vec4<f32>, // enabled, screen log-radius, source offset
@@ -60,7 +60,13 @@ fn sampleMap(delta:vec2<f32>)->vec3<f32> {
   for(var y=0u;y<side;y++) {
     for(var x=0u;x<side;x++) {
       // Fixed stratified midpoint grid and normalized box filter; no jitter.
-      let offset=(vec2<f32>(f32(x),f32(y))+0.5)/f32(side)-0.5;
+      var offset=(vec2<f32>(f32(x),f32(y))+0.5)/f32(side)-0.5;
+      if(p.integration.w>0.5){
+        // Fixed R2 prefix, shared with shader ExpMap. No frame-dependent jitter.
+        offset=fract(vec2<f32>(0.5)+f32(y*side+x)*vec2<f32>(0.7548776662466927,0.5698402909980532))-0.5;
+        // delta.y points up; the shared R2 sequence is defined in screen coordinates.
+        offset.y=-offset.y;
+      }
       rgb+=sampleMap(delta+offset*pixelStep);
     }
   }

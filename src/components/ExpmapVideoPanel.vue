@@ -28,6 +28,7 @@ const props = defineProps<{ engine?: Engine | null; controller?: MandelbrotExpos
 const manifest = ref<ExpmapManifest | null>(null), windowSpec = ref<ExpmapVideoWindow | null>(null)
 const framesDone = ref(0), framesTotal = ref(0)
 const savedOutput = loadExpmapOutput()
+const sampleDistribution=ref(savedOutput.sampleDistribution)
 const maxSamples = ref(savedOutput.maxSamples), width = ref(savedOutput.width), height = ref(savedOutput.height), fps = ref(savedOutput.fps), codec = ref(savedOutput.codec)
 const error = ref(''), progress = ref(''), ownRunning = ref(false), probing = ref(true)
 const support = ref<Partial<Record<Mp4Codec, boolean>>>({})
@@ -58,7 +59,7 @@ watch([width, height, fps], async (_value, _previous, onCleanup) => {
   try { const result = await probeMp4Codecs(width.value, height.value, fps.value); if (current) support.value = result }
   finally { if (current) probing.value = false }
 }, { immediate: true })
-watch([width, height, fps, codec, maxSamples], () => saveExpmapOutput({ width: width.value, height: height.value, fps: fps.value, codec: codec.value, maxSamples: maxSamples.value }))
+watch([width, height, fps, codec, maxSamples, sampleDistribution], () => saveExpmapOutput({ width: width.value, height: height.value, fps: fps.value, codec: codec.value, maxSamples: maxSamples.value, sampleDistribution:sampleDistribution.value }))
 watch(selectedExpmapDocumentId, async id => {
   const current = ++generation; manifest.value = null; windowSpec.value = null
   const entry = expmapLibraryEntries.value.find(e => e.id === id)
@@ -105,7 +106,7 @@ async function preview(side: 'fromScale' | 'toScale') {
   if (!selectedEntry.value || !windowSpec.value || expmapBusy.value) return
   try {
     const opened = await openExpmapLibraryEntry(selectedEntry.value)
-    expmapPreviewView.value = { documentId: opened.manifest.documentId, scale: windowSpec.value[side], effectTime: side === 'fromScale' ? 0 : windowSpec.value.durationSeconds, angle: side === 'fromScale' || ['octave', 'droste'].includes(documentEffects(opened.manifest.documentId).imageRotationMode ?? 'fixed') ? windowSpec.value.fromAngle : windowSpec.value.toAngle }
+    expmapPreviewView.value = { documentId: opened.manifest.documentId, sampleDistribution:sampleDistribution.value, maxSamples:maxSamples.value, scale: windowSpec.value[side], effectTime: side === 'fromScale' ? 0 : windowSpec.value.durationSeconds, angle: side === 'fromScale' || ['octave', 'droste'].includes(documentEffects(opened.manifest.documentId).imageRotationMode ?? 'fixed') ? windowSpec.value.fromAngle : windowSpec.value.toAngle }
     expmapOpenDocument.value = opened
   } catch (e) { error.value = String(e) }
 }
@@ -148,7 +149,7 @@ async function start() {
     release = parkExpmapSession(props.engine, props.controller)
     gpu = await ExpmapGpuRenderer.create(opened.store, opened.manifest, props.engine?.device)
     persist()
-    const result = await exportExpmapVideo(opened, { effects: { ...documentEffects(manifest.value.documentId) }, window: { ...windowSpec.value }, width: width.value, height: height.value, fps: fps.value, codec: selectedCodec, maxSamples: maxSamples.value,
+    const result = await exportExpmapVideo(opened, { effects: { ...documentEffects(manifest.value.documentId) }, window: { ...windowSpec.value }, width: width.value, height: height.value, fps: fps.value, codec: selectedCodec, maxSamples: maxSamples.value, sampleDistribution:sampleDistribution.value,
       destination: { kind: 'stream', writable }, signal: abort.signal, gpuRenderer: gpu,
       onProgress: (frames, total) => { framesDone.value = frames; framesTotal.value = total; progress.value = frames === total ? 'Finalisation du fichier MP4' : 'Reconstruction et encodage des images' } })
     progress.value = result.cancelled ? 'Export interrompu' : 'Vidéo enregistrée'
@@ -193,6 +194,7 @@ async function start() {
           <p role="status">{{ codecLabel }}</p>
           <details><summary>Qualité et dimensions précises</summary>
             <div class="dims"><label>Largeur <input type="number" inputmode="numeric" :value="width" min="2" max="3840" step="2" @change="width = Math.min(3840, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || width"></label><span aria-hidden="true">×</span><label>Hauteur <input type="number" inputmode="numeric" :value="height" min="2" max="2160" step="2" @change="height = Math.min(2160, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || height"></label></div>
+            <label>Répartition AA <select v-model="sampleDistribution"><option value="grid">Grille</option><option value="r2">R2</option></select></label>
             <label>Prélèvements par pixel <select v-model.number="maxSamples"><option v-for="limit in EXPMAP_SAMPLE_LIMITS" :key="limit" :value="limit">{{ limit }}{{ limit === 1 ? ' — bilinéaire' : '' }}</option></select></label>
             <p>Adaptatif selon le détail disponible, sans recalcul de la fractale.</p>
           </details>

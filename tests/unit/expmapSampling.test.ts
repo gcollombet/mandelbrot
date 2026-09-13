@@ -13,6 +13,17 @@ describe('adaptive video sampling contract',()=>{
     expect(expmapFilterUniform({...octaves,rowsPerOctave:1})[1]).toBe(1/Math.LN2)
     expect(()=>expmapFilterUniform(octaves,NaN)).toThrow()
   })
+  it('encodes distribution independently of AA count and cyclic mode',async()=>{
+    const {octaves,projection}=await fixtureManifest()
+    for(const cap of [1,16,256])for(const cyclic of [false,true]){
+      const grid=expmapFilterUniform(octaves,cap,cyclic,'grid'),r2=expmapFilterUniform(octaves,cap,cyclic,'r2')
+      expect(r2.slice(0,3)).toEqual(grid.slice(0,3));expect(grid[3]).toBe(0);expect(r2[3]).toBe(1)
+    }
+    expect(()=>expmapFilterUniform(octaves,16,false,'invalid' as never)).toThrow('Répartition')
+    const view={width:projection.width,height:projection.height,scale:projection.domain.startScale,angle:0}
+    expect(()=>validateExpmapView(projection,{...view,sampleDistribution:'r2'})).not.toThrow()
+    expect(()=>validateExpmapView(projection,{...view,sampleDistribution:'invalid' as never})).toThrow('Répartition')
+  })
   it('preserves the one-tap default for interactive views and validates explicit overrides',async()=>{
     const {projection}=await fixtureManifest()
     const view={width:projection.width,height:projection.height,scale:projection.domain.startScale,angle:0}

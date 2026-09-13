@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { loadExpmapPlayerDistribution, saveExpmapPlayerDistribution } from '../expmap/outputPreferences'
 import { radialMode } from '../expmap/radial'
 
 import { expmapLoopDomain } from '../expmap/loop'
@@ -19,6 +20,8 @@ const props = defineProps<{ engine: Engine | null; controller: MandelbrotExposed
 const surface = ref<HTMLElement | null>(null), canvas = ref<HTMLCanvasElement | null>(null)
 let exactPreview: { position: number; scale: string; effectTime?: number } | null = null
 const position = ref(0), angle = ref(0), error = ref(''), loading = ref(false), ready = ref(false)
+const sampleDistribution=ref(loadExpmapPlayerDistribution())
+watch(sampleDistribution,saveExpmapPlayerDistribution)
 const maxSamples=ref(16), renderedResolution=ref('')
 const playing = ref(false), rate = ref(1), direction = ref(1), loop = ref(false)
 const title = computed(() => { const entry = expmapLibraryEntries.value.find(e => e.id === expmapOpenDocument.value?.manifest.documentId); return entry ? expmapLibraryFilename(entry) : 'ExpMap' })
@@ -60,7 +63,7 @@ function request() {
   const {width,height}=expmapPlayerResolution(p,surface.value?.clientWidth || window.innerWidth,
     surface.value?.clientHeight || window.innerHeight,window.devicePixelRatio)
   loading.value = true; error.value = ''
-  player.request({ effectTime: exactPreview?.position === position.value && exactPreview.effectTime !== undefined ? exactPreview.effectTime : position.value * duration.value, effects: { ...documentEffects(doc.manifest.documentId) }, width, height, maxSamples:maxSamples.value, scale: exactPreview?.position === position.value ? exactPreview.scale : interpolateScale(playbackDomain.value!.startScale, playbackDomain.value!.endScale, position.value), angle: angle.value })
+  player.request({ effectTime: exactPreview?.position === position.value && exactPreview.effectTime !== undefined ? exactPreview.effectTime : position.value * duration.value, effects: { ...documentEffects(doc.manifest.documentId) }, width, height, maxSamples:maxSamples.value, sampleDistribution:sampleDistribution.value, scale: exactPreview?.position === position.value ? exactPreview.scale : interpolateScale(playbackDomain.value!.startScale, playbackDomain.value!.endScale, position.value), angle: angle.value })
 }
 function seek(value: number) { playing.value = false; position.value = Math.max(0, Math.min(1, value)) }
 function togglePlay() {
@@ -125,6 +128,8 @@ watch([expmapOpenDocument, () => props.engine], async ([doc], _previous, onClean
     position.value = distance ? Math.max(0, Math.min(1, scaleDoublements(d.startScale, preview.scale) / distance)) : 0
     exactPreview = { position: position.value, scale: preview.scale, effectTime: preview.effectTime }
     angle.value = preview.angle
+    if(preview.sampleDistribution)sampleDistribution.value=preview.sampleDistribution
+    if(preview.maxSamples!==undefined)maxSamples.value=preview.maxSamples
     expmapPreviewView.value = null
   }
   if (!returnFocus) returnFocus = document.activeElement as HTMLElement | null
@@ -142,7 +147,7 @@ watch(playbackDomain, (next, previous) => {
   position.value=Math.max(0,Math.min(1,scaleDoublements(next.startScale,scale)/Math.max(distance,1e-12)))
   exactPreview=null
 })
-watch([position, angle, maxSamples], request)
+watch([position, angle, maxSamples, sampleDistribution], request)
 watch(() => expmapOpenDocument.value ? documentEffects(expmapOpenDocument.value.manifest.documentId) : null, request, { deep: true })
 let sizeObserver:ResizeObserver|undefined, densityQuery:MediaQueryList|undefined
 function watchDensity() {
@@ -178,6 +183,7 @@ onUnmounted(() => {
           <button :aria-pressed="loop" @click="loop = !loop">↻ Répéter le trajet</button>
           <label>Rotation <input v-model.number="angle" aria-label="Rotation ExpMap" type="range" min="-6.283185" max="6.283185" step="0.01" @input="playing = false"></label>
           <label title="Maximum de prélèvements par pixel, selon la densité disponible">AA <select v-model.number="maxSamples" aria-label="Prélèvements AA maximum"><option v-for="value in EXPMAP_SAMPLE_LIMITS" :key="value" :value="value">{{ value === 1 ? 'Non' : value }}</option></select></label>
+          <label>Répartition AA <select v-model="sampleDistribution" aria-label="Répartition AA"><option value="grid">Grille</option><option value="r2">R2</option></select></label>
           <button v-if="surface?.requestFullscreen" @click="fullscreen">Plein écran</button>
           <span class="status" role="status">{{ loading ? 'Chargement…' : '2 doublements/s à 1×' }}</span>
         </div>

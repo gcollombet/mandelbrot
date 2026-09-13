@@ -8,7 +8,7 @@ struct ShaderMapParams {
   effects: vec4<f32>,
   integration: vec4<f32>,
   mirror: vec4<f32>,
-  camera: vec4<f32>, // log scale, palette depth (base 10), reserved
+  camera: vec4<f32>, // log scale, palette depth (base 10), nearest, distribution R2
 }
 @group(1) @binding(0) var<uniform> sp: ShaderMapParams;
 
@@ -33,3 +33,12 @@ fn shade_display_sample(index:u32, screen:vec2<f32>, r:f32, ratio:f32, neutral:v
   return srgb_to_linear(c.rgb);
 }
 
+
+// R2 (plastic constant): a fixed prefix shared by every frame, block and ring.
+// Index zero is the pixel centre, including when the adaptive AA count is one.
+fn shader_aa_position(position:vec2<f32>,x:u32,y:u32,side:u32)->vec2<f32> {
+  if(sp.camera.w>0.5){
+    return position+(fract(vec2<f32>(0.5)+f32(y*side+x)*vec2<f32>(0.7548776662466927,0.5698402909980532))-0.5);
+  }
+  return position+(vec2<f32>(f32(x),f32(y))+0.5)/f32(side)-0.5;
+}

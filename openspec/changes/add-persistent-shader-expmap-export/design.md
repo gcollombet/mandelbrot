@@ -102,3 +102,23 @@ Un upload compute transpose chaque bloc dans ses coordonnées finales, à partir
 Le shader choisit l’emplacement d’octave une fois par sous-échantillon AA, puis lit les quatre voisins dans la grille. Chaque voisin charge trois uint4 et conserve sa colorisation complète. AA, transformations, centre et poids restent identiques ; l’accumulation groupée conserve les différences d’arrondi f16 déjà observées avec le gather. La recette des intermédiaires passe en v5/window-v1.
 
 L’aperçu partage ce chemin ; si toute sa couverture ne tient pas, plusieurs fenêtres sont composées dans la frame. L’export par couronnes conserve une fenêtre résidente sur tout le film d’une couronne. Une portion de blocs ou un device ne permettant pas trois octaves régulières utilise le chemin historique par blocs. Aucun plafond arbitraire de quatre octaves et aucune réduction d’AA. Le gain de débit 4K et la mémoire physique du pilote restent à mesurer sur la machine cible.
+
+## Filtrage au choix — bilinéaire ou nearest R2
+
+Le panneau shader propose un choix mémorisé, commun à l’aperçu et à la vidéo. Les anciennes préférences gardent le bilinéaire, qui conserve sa grille et son calcul existants. Le nouveau mode utilise les N premiers points R2, avec N égal au compte AA adaptatif existant (`side²`), puis arrondit chaque position source au texel le plus proche. Il ne choisit pas aléatoirement un voisin selon les poids bilinéaires et ne revient pas implicitement au bilinéaire. Le point zéro est au centre du pixel ; les autres suivent `fract(0.5 + i * (1/g,1/g²))`, g étant la constante plastique.
+
+La séquence est fixe dans le temps, indépendante du bloc et de la couronne ; aucune graine temporelle ni décalage par couronne. Fenêtre GPU et chemin par blocs utilisent le même helper et la même règle d’arrondi. L’appartenance au bloc est testée après arrondi afin que chaque prélèvement contribue une fois. Le shading reste évalué à la position AA cible, avec les données du texel sélectionné. Le centre et la moyenne linéaire restent communs.
+
+Le mode est figé sur le renderer créé pour l’opération ; changer le contrôle ne modifie pas une vidéo en cours. Le cache de display set ne dépend pas du filtre. L’identité des intermédiaires passe en v6/window-v2 et inclut explicitement le mode, évitant toute reprise mêlant les deux reconstructions. Aucun changement du format source ni de color.wgsl. Les deux filtres peuvent donner des images différentes ; l’absence de moiré/scintillement et le gain de débit ne sont pas garantis par les tests de cohérence.
+
+## Interpolation et répartition indépendantes
+
+Le sélecteur combiné est remplacé par deux contrôles mémorisés : Interpolation (bilinéaire / nearest) et Répartition AA (grille / R2). Les quatre combinaisons sont disponibles en aperçu et vidéo. Le renderer transmet deux indicateurs indépendants dans camera.z et camera.w ; les positions R2 ne dépendent plus du mode de lecture. Le compte AA adaptatif reste identique.
+
+Migration : l’ancien samplingMode=bilinear devient bilinéaire+grille ; nearest-r2 devient nearest+R2. Les nouveaux champs explicites priment. La recette des intermédiaires v7/window-v3 inclut interpolation et sampleDistribution. La source et les ressources couleur restent réutilisables ; aucun recalcul d’orbite ni chargement source supplémentaire n’est nécessaire pour changer de combinaison.
+
+## Répartition R2 sur le lecteur RGB
+
+Extension demandée au RGB : la vue et la requête vidéo portent sampleDistribution optionnel (grid par défaut, r2). Le quatrième scalaire de l’uniform integration, précédemment réservé, transmet ce choix au shader expmap_reconstruct.wgsl. Les couleurs restent lues par textureSampleLevel avec sampler linéaire, puis moyennées en lumière linéaire. R2 change uniquement les positions AA ; AA=1 conserve exactement le prélèvement central existant. La séquence est fixe et identique à celle du shader complet en coordonnées écran (axe Y compensé dans les coordonnées cartésiennes RGB).
+
+Le lecteur plein écran et le panneau vidéo ont chacun un choix mémorisé. L’aperçu d’une extrémité vidéo transmet son choix et son maximum AA au lecteur. Les anciens réglages sans champ restent en grille ; les valeurs invalides sont rejetées dans les vues et ramenées au défaut dans les préférences persistées. Aucun changement des documents RGB v5, des octaves WebP ni de l’interpolation matérielle.

@@ -1,3 +1,4 @@
+import { shaderSamplingFlags, type ShaderInterpolation, type ShaderSampleDistribution } from './displaySampling'
 import commonShader from '../assets/expmap_shader_common.wgsl?raw'
 import windowShader from '../assets/expmap_shader_window.wgsl?raw'
 import { planShaderWindow, ShaderWindow, windowOctaves, type WindowLimits } from './displayWindow'
@@ -55,6 +56,8 @@ export class ShaderExpmapRenderer {
   private window?:ShaderWindow
   /** Reference path remains available for GPU equivalence checks. */
   windowEnabled=true
+  interpolation:ShaderInterpolation='bilinear'
+  sampleDistribution:ShaderSampleDistribution='grid'
   lastRenderStats={path:'blocks' as 'blocks'|'window',passes:0,blocks:0}
   private present?:GPURenderPipeline
   private composePipeline?:GPURenderPipeline
@@ -109,6 +112,7 @@ export class ShaderExpmapRenderer {
   async render(view:ExpmapView,signal?:AbortSignal,ring?:ShaderRing,rect?:RingRect):Promise<OffscreenCanvas> {
     if(this.disposed||this.busy)throw new Error('Lecteur indisponible')
     assertShaderAppearanceCompatible(this.manifest,this.appearance)
+    const samplingFlags=shaderSamplingFlags(this.interpolation,this.sampleDistribution)
     validateExpmapView(this.manifest.projection,view);signal?.throwIfAborted();this.busy=true
     const device=this.engine.device
     device.pushErrorScope('out-of-memory');device.pushErrorScope('validation')
@@ -194,7 +198,7 @@ export class ShaderExpmapRenderer {
           virtual,reverse?1:0,o.halo,center?1:0,...effect,...filter,coverage,
           mirror?1:0,view.effects?.mirrorDepth??1,mirror?.offset??0,0,
           // log scale uses the decimal helper's relative log, avoiding underflow.
-          -scaleDoublements('1e0',view.scale)*Math.LN2,scaleDoublements('1e0',view.scale)*Math.LOG10E*Math.LN2,0,0])
+          -scaleDoublements('1e0',view.scale)*Math.LN2,scaleDoublements('1e0',view.scale)*Math.LOG10E*Math.LN2,...samplingFlags])
         await batch!.draw(values,(pass,offset)=>{
           const bound=d.createBindGroup({layout:this.pipeline!.getBindGroupLayout(1),entries:[{binding:0,resource:{buffer:this.uniform,offset,size:128}},{binding:1,resource:{buffer}}]})
           pass.setPipeline(this.pipeline!);pass.setBindGroup(0,resources.bindGroup);pass.setBindGroup(1,bound)
@@ -241,7 +245,7 @@ export class ShaderExpmapRenderer {
           const values=new Float32Array([view.width,view.height,plan.height,plan.radius,
             depth-base,angle,o.angularSamples,o.rowsPerOctave,first,first+count,0,coverage+1,
             0,0,o.halo,center?1:0,...effect,...filter,coverage,mirror?1:0,view.effects?.mirrorDepth??1,mirror?.offset??0,0,
-            -scaleDoublements('1e0',view.scale)*Math.LN2,scaleDoublements('1e0',view.scale)*Math.LOG10E*Math.LN2,0,0])
+            -scaleDoublements('1e0',view.scale)*Math.LN2,scaleDoublements('1e0',view.scale)*Math.LOG10E*Math.LN2,...samplingFlags])
           d.queue.writeBuffer(this.uniform,0,values)
           commands=d.createCommandEncoder();pass=commands.beginRenderPass({colorAttachments:[{view:this.linear.createView(),loadOp:'load',storeOp:'store'}]})
           pass.setPipeline(this.windowPipeline);pass.setBindGroup(0,resources.bindGroup);pass.setBindGroup(1,bound)

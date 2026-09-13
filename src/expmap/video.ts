@@ -2,7 +2,7 @@ import { radialMode } from './radial'
 import { effectsSettings, type ExpmapEffects } from './effects'
 import { canonicalScale, compareScales, interpolateScale, scaleDoublements } from './decimal'
 import type { ExpmapManifest } from './manifest'
-import { validateExpmapView, type ExpmapView } from './renderer'
+import { validateExpmapView, type ExpmapView, type ExpmapSampleDistribution } from './renderer'
 import { createVideoSink, type Mp4Codec, type VideoDestination } from '../videoEncoderSink'
 import { DEFAULT_EXPMAP_MOTION, fitMotion, motionProgress, motionSettings, validateMotion, type ExpmapMotion } from './motion'
 import { elapsedForFrame, totalFramesFor } from '../videoExportSession'
@@ -60,35 +60,38 @@ export function loadExpmapVideoWindow(manifest: ExpmapVideoSource, effects?: Par
 }
 
 /** Shared schedule for frame-first and ring-first exports. */
-export function expmapVideoFrameView(request:{window:ExpmapVideoWindow;width:number;height:number;maxSamples?:number;effects?:ExpmapEffects},i:number,total:number,durationSeconds:number):ExpmapView {
+export function expmapVideoFrameView(request:{window:ExpmapVideoWindow;width:number;height:number;maxSamples?:number;sampleDistribution?:ExpmapSampleDistribution;effects?:ExpmapEffects},i:number,total:number,durationSeconds:number):ExpmapView {
   const effects=effectsSettings(request.effects)
   const t=motionProgress(request.window,elapsedForFrame(i,total,durationSeconds))
-  return {effectTime:elapsedForFrame(i,total,durationSeconds),effects,allowUpscale:true,width:request.width,height:request.height,maxSamples:request.maxSamples??16,
+  return {effectTime:elapsedForFrame(i,total,durationSeconds),effects,allowUpscale:true,width:request.width,height:request.height,maxSamples:request.maxSamples??16,sampleDistribution:request.sampleDistribution,
     scale:interpolateScale(request.window.fromScale,request.window.toScale,t),
     angle:effects.imageRotationMode==='octave'||effects.imageRotationMode==='droste'?request.window.fromAngle:t===0?request.window.fromAngle:t===1?request.window.toAngle:request.window.fromAngle+(request.window.toAngle-request.window.fromAngle)*t}
 }
 
 /** Deterministic ordered loop. Interactive request dropping never enters here. */
 export async function exportExpmapVideo(source: { manifest: ExpmapVideoSource }, request: {
-  window: ExpmapVideoWindow; width: number; height: number; fps: number; codec: Mp4Codec; maxSamples?: number; effects?: ExpmapEffects
+  window: ExpmapVideoWindow; width: number; height: number; fps: number; codec: Mp4Codec; maxSamples?: number; sampleDistribution?: ExpmapSampleDistribution; effects?: ExpmapEffects
   destination: VideoDestination; signal?: AbortSignal
+  /** Encode only the first frames; the camera path keeps its full-length timing. Reported as cancelled. */
+  frameLimit?: number
   onProgress?: (frames: number, total: number) => void
   gpuRenderer: { render(view: ExpmapView, signal?: AbortSignal): Promise<OffscreenCanvas> }
 }) {
   const effects = effectsSettings(request.effects)
   validateExpmapVideoWindow(source.manifest, request.window, effects)
-  validateExpmapView(source.manifest.projection, { width: request.width, height: request.height, scale: request.window.fromScale, angle: request.window.fromAngle, maxSamples: request.maxSamples ?? 16, allowUpscale: true, effects })
+  validateExpmapView(source.manifest.projection, { width: request.width, height: request.height, scale: request.window.fromScale, angle: request.window.fromAngle, maxSamples: request.maxSamples ?? 16, sampleDistribution:request.sampleDistribution, allowUpscale: true, effects })
   if (!Number.isFinite(request.fps) || request.fps <= 0 || request.fps > 240) throw new Error('Cadence invalide.')
   const durationSeconds = request.window.durationSeconds + motionSettings(request.window).holdSeconds
   const settings = { fps: request.fps, durationSeconds }
   const total = totalFramesFor(settings)
   if (!Number.isSafeInteger(total) || total > 10_000_000) throw new Error('Trop d’images demandées.')
   request.signal?.throwIfAborted()
-  request.onProgress?.(0, total)
+  const limit = request.frameLimit === undefined ? total : Math.max(0, Math.min(total, Math.floor(request.frameLimit)))
+  request.onProgress?.(0, limit)
   const sink = await createVideoSink({ width: request.width, height: request.height, fps: request.fps, codec: request.codec, destination: request.destination, hardwareAcceleration: 'prefer-hardware' })
   let emitted = 0
   try {
-    for (let i = 0; i < total; i++) {
+    for (let i = 0; i < limit; i++) {
       request.signal?.throwIfAborted()
       const view = expmapVideoFrameView({...request,effects},i,total,durationSeconds)
       const canvas = await request.gpuRenderer.render(view, request.signal)
@@ -96,9 +99,9 @@ export async function exportExpmapVideo(source: { manifest: ExpmapVideoSource },
       const timing = { timestamp: Math.round(i * 1e6 / request.fps), duration: Math.round(1e6 / request.fps) }
       const frame = new VideoFrame(canvas, timing)
       await sink.addFrame(frame)
-      emitted++; request.onProgress?.(emitted, total)
+      emitted++; request.onProgress?.(emitted, limit)
     }
-    return { blob: await sink.finalize(), framesEmitted: emitted, cancelled: false }
+    return { blob: await sink.finalize(), framesEmitted: emitted, cancelled: limit < total }
   } catch (error) {
     if (request.signal?.aborted) return { blob: await sink.finalize().catch(() => null), framesEmitted: emitted, cancelled: true }
     await sink.cancel(); throw error

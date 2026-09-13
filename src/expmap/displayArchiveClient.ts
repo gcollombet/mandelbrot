@@ -82,6 +82,10 @@ export async function importShaderArchive(source:File,path:string[],signal?:Abor
   const writable=await handle.createWritable()
   try {await source.stream().pipeTo(writable,{signal})}catch(error){await writable.abort().catch(()=>{});throw error}
 }
+/** Bytes the archive occupies in browser storage; null when the file is missing. */
+export async function shaderArchiveSize(path:string[]) {
+  try {return (await (await archiveFileHandle(path,false)).getFile()).size}catch{return null}
+}
 export async function deleteShaderArchive(path:string[]) {
   let dir=await navigator.storage.getDirectory()
   for(const part of path.slice(0,-1))dir=await dir.getDirectoryHandle(part)

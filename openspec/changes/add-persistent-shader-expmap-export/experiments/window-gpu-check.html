@@ -51,8 +51,10 @@ run.onclick=async()=>{
     for(let i=0;i<av.length;i++){const delta=Math.abs(half(av[i])-half(bv[i]));if(!Number.isFinite(delta))throw new Error('Non fini');if(i%4===3)alpha=Math.max(alpha,delta);else rgb=Math.max(rgb,delta)}
     if(rgb>.008||alpha>.004)throw new Error(`Divergence RGB=${rgb}, alpha=${alpha}, vue=${JSON.stringify(view)}`)
     cases++;maxRgb=Math.max(maxRgb,rgb);maxAlpha=Math.max(maxAlpha,alpha)
-    log(`OK ${cases} : ${renderer.lastRenderStats.path}, ${renderer.lastRenderStats.passes} passes, ${renderer.lastRenderStats.blocks} blocs`)
+    log(`OK ${cases} (${renderer.interpolation}/${renderer.sampleDistribution}) : ${renderer.lastRenderStats.path}, ${renderer.lastRenderStats.passes} passes, ${renderer.lastRenderStats.blocks} blocs`)
   }
+  for(const interpolation of ['bilinear','nearest'])for(const distribution of ['grid','r2']){
+  renderer.interpolation=interpolation;renderer.sampleDistribution=distribution
   for(const scale of ['1','.50001','.5','.49999'])await compare({...base,scale,angle:1.1})
   await compare({...base,angle:Math.PI*2-1e-5,maxSamples:256})
   await compare({...base,effects:{droste:30,kaleidoscope:0,orientation:0}})
@@ -61,6 +63,17 @@ run.onclick=async()=>{
   await compare({...base,effects:{radialMode:'mirror',mirrorDepth:2,droste:0,kaleidoscope:0,orientation:0}})
   await compare(base,{...full,first:1,count:2,center:false})
   await compare(base,{...full,blockStart:3,blockCount:4})
+  await compare({...base,maxSamples:1})
+  await compare({...base,maxSamples:4})
+  }
+  // Changing the mode must affect sampling without reloading the resident source.
+  renderer.interpolation='bilinear';renderer.sampleDistribution='grid';const oldMode=await renderer.renderRing(base,full)
+  const modeReads=reads
+  renderer.interpolation='nearest';renderer.sampleDistribution='r2';const newMode=await renderer.renderRing(base,full)
+  if(reads!==modeReads)throw new Error('Changer de filtre recharge la source')
+  if(oldMode.data.every((v,i)=>v===newMode.data[i]))throw new Error('Le choix de filtre est sans effet')
+  const repeat=await renderer.renderRing(base,full)
+  if(!newMode.data.every((v,i)=>v===repeat.data[i]))throw new Error('R2 non déterministe')
   // A repeated complete view must consume only resident source slots.
   await renderer.renderRing(base,full);const before=reads;await renderer.renderRing(base,full)
   if(reads!==before)throw new Error('Relecture de blocs résidents')

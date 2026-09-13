@@ -63,3 +63,25 @@ Validation : 34 fichiers / 241 tests ciblés réussis, TypeScript, sept validati
 Le test manuel `window-gpu-check.html` dans le navigateur intégré utilise le renderer complet et une fonction de couleur synthétique partagée avec la référence. Douze comparaisons de pixels réussies : avant/à/après changement d’octave, wrap angulaire, AA 256, Droste, kaléidoscope, pingpong, miroir, couronne partielle, portion de blocs (repli historique), et limites artificiellement réduites pour forcer plusieurs couches et treize passes N=1. Deux passages complets après spécialisation de la lecture ont donné PASS. Écarts maximaux dus à l’ordre d’accumulation f16 : RGB linéaire 0.0048828125, alpha 0.0029296875 (tolérances 0.008/0.004). Aucune erreur GPU capturée.
 
 Le test vérifie aussi zéro relecture sur une vue répétée, puis exactement une octave de blocs chargée au zoom d’une octave, sans recréer la fenêtre. Il vérifie le repli au budget minimal. Les MP4/masques intermédiaires gardent leur encodage ; identité de recette v5/window-v1 pour éviter une reprise mélangeant des rendus différents. Aucun benchmark ni Playwright. Ces résultats ne prédisent pas le débit d’un vrai export 4K ni la fidélité de tous les matériaux. Le premier remplissage assemble des octaves complètes, réserves incluses ; son coût est distinct du rendu des frames suivantes. Recharger l’application pour obtenir la nouvelle limite de textures du device.
+
+## Choix bilinéaire / nearest R2 — 2026-09-13
+
+Ajout d’un sélecteur mémorisé pour aperçu et vidéo shader. Bilinéaire par défaut, règle arithmétique de position inchangée. Nearest R2 utilise un préfixe fixe de la séquence plastique avec premier point centré, puis arrondit aux texels source ; une colorisation par point AA. Source et color.wgsl inchangés. La recette v6/window-v2 inclut le mode.
+
+Validation : 35 fichiers / 245 tests ciblés, TypeScript, six variantes Naga (deux layouts de fenêtre et référence par blocs avec/sans effets), OpenSpec strict et whitespace réussis. Le test GPU manuel `window-gpu-check.html` passe 27 comparaisons entre fenêtre et référence par blocs, en bilinéaire puis nearest R2 : frontières, AA 1/4/16/256, rotation, Droste, kaléidoscope, pingpong, miroir, couronne et portion de blocs, couches multiples/passes N=1. Les différences maximales d’accumulation restent 0.0048828125 en RGB linéaire et 0.0029296875 en alpha. Il vérifie aussi qu’un changement de filtre change effectivement les pixels sans recharger la source, et que répéter R2 produit exactement les mêmes octets.
+
+Ces tests établissent la cohérence entre chemins et le déterminisme, pas l’équivalence visuelle entre bilinéaire et R2 ni l’absence de moiré en vidéo. Aucun benchmark ni Playwright. Les quatre tâches du mode de filtrage sont terminées ; les validations générales de fidélité et performance précédemment ouvertes restent ouvertes.
+
+## Interpolation et répartition indépendantes — 2026-09-13
+
+Les quatre combinaisons grille/R2 × bilinéaire/nearest sont accessibles, persistées et transmises par deux indicateurs indépendants. Migration des préférences combinées testée ; priorité des nouveaux champs et valeurs invalides couvertes. La recette v7/window-v3 inclut les deux choix.
+
+Validation : 245 tests ciblés dans 35 fichiers, TypeScript, WGSL et OpenSpec strict passent. Le test GPU manuel passe 53 comparaisons fenêtre/blocs couvrant les quatre combinaisons aux frontières, niveaux AA 1/4/16/256 et déformations ; vérifications supplémentaires du cache, du déterminisme R2 et des couches multiples. Écarts maximaux de l’accumulation f16 inchangés : RGB 0.0048828125, alpha 0.0029296875. Pas de benchmark ni Playwright, aucune promesse de débit ou de qualité perceptuelle tirée de ces tests. Les deux tâches de séparation sont terminées.
+
+## R2 sur le rendu RGB — 2026-09-13
+
+Le lecteur RGB et son export vidéo disposent de Grille/R2, avec persistance des choix, défaut grille, passage du réglage aux frames et aux aperçus des extrémités. L’interpolation bilinéaire matérielle reste inchangée.
+
+Validation : 35 fichiers / 247 tests ciblés, TypeScript, Naga du shader RGB et OpenSpec strict réussis. Tests des préférences anciennes/invalides, indépendance des préférences lecteur/vidéo, flag uniforme distinct du compte AA et du mode cyclique, validation de la vue et passage de R2 aux frames de l’exporteur réel avec sink simulé. Le test manuel `rgb-r2-gpu-check.html` exerce le vrai shader RGB sur une texture synthétique avec sampler linéaire : AA=1 identique entre Grille/R2, résultats distincts à AA 4/16/256, répétition R2 identique octet par octet, effet de rotation et conservation des aplats à un niveau 8 bits près. Résultat PASS, sans erreur GPU.
+
+Ce contrôle porte sur le shader, pas sur le décodage WebP ou un export vidéo complet. Aucun benchmark ni Playwright ; il ne démontre pas l’absence de moiré/scintillement dans un zoom réel. Les trois tâches de cette extension RGB sont terminées.

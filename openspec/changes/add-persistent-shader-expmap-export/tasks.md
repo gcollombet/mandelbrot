@@ -103,3 +103,21 @@ Validation de performance sur une grande source toujours à faire ; ne pas confo
 - [x] 12.2 Assembler les blocs par upload GPU, conserver les octaves communes, charger les deux réserves et recycler uniquement les emplacements sortants ; protéger les sorties sur erreur.
 - [x] 12.3 Lire directement quatre voisins depuis la grille régulière, préserver couleur/AA/effets, brancher aperçu et couronnes vidéo avec repli pour les portions de blocs.
 - [x] 12.4 Vérifier budgets, glissement, alias, frontières, annulation, WGSL et intégration GPU synthétique ; documenter les limites et versionner les intermédiaires.
+
+## 13. Choix bilinéaire / nearest R2
+
+- [x] 13.1 Ajouter le choix mémorisé au panneau shader, bilinéaire par défaut, pour aperçu et vidéo.
+- [x] 13.2 Partager une séquence R2 fixe entre fenêtres et blocs ; lecture nearest exclusive par point AA sans modification du shader couleur.
+- [x] 13.3 Inclure le mode dans l’identité de reprise des vidéos de couronnes.
+- [x] 13.4 Valider préférences, TypeScript, WGSL et comparaison des chemins GPU pour les deux modes.
+
+## 14. Séparer interpolation et répartition AA
+
+- [x] 14.1 Séparer les contrôles et préférences, migrer les anciens choix, transmettre les deux indicateurs indépendants au renderer et à la recette vidéo.
+- [x] 14.2 Valider les quatre combinaisons, la migration, TypeScript et WGSL, puis documenter les résultats GPU.
+
+## 15. Répartition R2 pour le rendu RGB
+
+- [x] 15.1 Ajouter Grille/R2 au contrat de vue, aux uniforms RGB et aux frames vidéo en conservant le bilinéaire matériel et le défaut grille.
+- [x] 15.2 Ajouter les choix mémorisés au lecteur et à l’export RGB ; transmettre répartition et AA aux aperçus des extrémités vidéo.
+- [x] 15.3 Valider préférences, contrat AA, transmission vidéo, TypeScript, WGSL et essai GPU RGB synthétique.
