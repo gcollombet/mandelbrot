@@ -20,7 +20,7 @@ import { EXPMAP_SAMPLE_LIMITS, validateExpmapView } from '../expmap/renderer'
 import { ExpmapGpuRenderer } from '../expmap/gpuRenderer'
 import type { ExpmapManifest } from '../expmap/manifest'
 import { interpolateScale, scaleDoublements } from '../expmap/decimal'
-import { MP4_CODECS, probeMp4Codecs, type Mp4Codec } from '../videoEncoderSink'
+import { MP4_CODECS, probeMp4Codecs, type EncoderPreference, type Mp4Codec } from '../videoEncoderSink'
 import { compactNumber, magnitudeSummary, videoFilename } from '../expmap/controls'
 import { motionSettings, type ExpmapMotion } from '../expmap/motion'
 import { loadExpmapOutput, preferredExpmapCodec, saveExpmapOutput } from '../expmap/outputPreferences'
@@ -32,7 +32,9 @@ const sampleDistribution=ref(savedOutput.sampleDistribution)
 const maxSamples = ref(savedOutput.maxSamples), width = ref(savedOutput.width), height = ref(savedOutput.height), fps = ref(savedOutput.fps), codec = ref(savedOutput.codec)
 const error = ref(''), progress = ref(''), ownRunning = ref(false), probing = ref(true)
 const support = ref<Partial<Record<Mp4Codec, boolean>>>({})
+const encoderPreferences = ref<Partial<Record<Mp4Codec, EncoderPreference>>>({})
 const effectiveCodec = computed(() => codec.value === 'auto' ? preferredExpmapCodec(support.value) : support.value[codec.value] ? codec.value : null)
+const encoderLabel = computed(() => probing.value || !effectiveCodec.value || !encoderPreferences.value[effectiveCodec.value] ? '' : encoderPreferences.value[effectiveCodec.value] === 'prefer-hardware' ? ' · Matériel préféré' : ' · Repli navigateur — logiciel possible')
 const codecLabel = computed(() => probing.value ? 'Vérification de l’encodeur…' : effectiveCodec.value ? `${effectiveCodec.value === 'hevc' ? 'HEVC' : effectiveCodec.value === 'avc' ? 'H.264' : effectiveCodec.value.toUpperCase()}${codec.value === 'auto' && effectiveCodec.value === 'avc' ? ' · compatibilité' : ''}` : 'Encodage indisponible : choisir un autre format ou codec.')
 const outputResolution = computed({ get: () => `${width.value}x${height.value}`, set: (value: string) => { [width.value, height.value] = value.split('x').map(Number) } })
 const resolutions = computed(() => {
@@ -55,8 +57,8 @@ onMounted(() => refreshExpmapLibrary().catch(e => { error.value = String(e) }))
 onUnmounted(() => { generation++; abort?.abort() })
 watch([width, height, fps], async (_value, _previous, onCleanup) => {
   let current = true; onCleanup(() => { current = false })
-  probing.value = true; support.value = {}
-  try { const result = await probeMp4Codecs(width.value, height.value, fps.value); if (current) support.value = result }
+  probing.value = true; support.value = {}; encoderPreferences.value = {}
+  try { const result = await probeMp4Codecs(width.value, height.value, fps.value, (codec, preference) => { if (current) encoderPreferences.value[codec] = preference }); if (current) support.value = result }
   finally { if (current) probing.value = false }
 }, { immediate: true })
 watch([width, height, fps, codec, maxSamples, sampleDistribution], () => saveExpmapOutput({ width: width.value, height: height.value, fps: fps.value, codec: codec.value, maxSamples: maxSamples.value, sampleDistribution:sampleDistribution.value }))
@@ -191,7 +193,7 @@ async function start() {
           <div class="row"><DenseSelect v-model="outputResolution" label="Résolution" :options="resolutions"/><DenseSelect :model-value="fps" label="Cadence" :options="[24,25,30,60].map(n => ({value: n, label: `${n} fps`}))" @update:model-value="fps = Number($event)"/></div>
           <p>{{ width }} × {{ height }}<template v-if="width > manifest.projection.width || height > manifest.projection.height"> · Agrandissement depuis {{ manifest.projection.width }} × {{ manifest.projection.height }}</template></p>
           <DenseSelect v-model="codec" label="Encodage" :options="[{value:'auto',label:'Auto · HEVC, sinon H.264'}, ...MP4_CODECS]"/>
-          <p role="status">{{ codecLabel }}</p>
+          <p role="status">{{ codecLabel }}{{ encoderLabel }}</p>
           <details><summary>Qualité et dimensions précises</summary>
             <div class="dims"><label>Largeur <input type="number" inputmode="numeric" :value="width" min="2" max="3840" step="2" @change="width = Math.min(3840, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || width"></label><span aria-hidden="true">×</span><label>Hauteur <input type="number" inputmode="numeric" :value="height" min="2" max="2160" step="2" @change="height = Math.min(2160, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || height"></label></div>
             <label>Répartition AA <select v-model="sampleDistribution"><option value="grid">Grille</option><option value="r2">R2</option></select></label>

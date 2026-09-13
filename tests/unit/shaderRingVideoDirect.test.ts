@@ -5,7 +5,7 @@ import { planShaderMemory, type ShaderExpmapRenderer } from '../../src/expmap/di
 import { exportShaderRingVideo } from '../../src/expmap/displayRingVideo'
 const mocks=vi.hoisted(()=>({export:vi.fn(),encode:vi.fn()}))
 vi.mock('../../src/expmap/video',async importOriginal=>({...await importOriginal<typeof import('../../src/expmap/video')>(),exportExpmapVideo:mocks.export}))
-vi.mock('../../src/videoEncoderSink',async importOriginal=>({...await importOriginal<typeof import('../../src/videoEncoderSink')>(),probeMp4Codecs:async()=>({hevc:true})}))
+vi.mock('../../src/videoEncoderSink',async importOriginal=>({...await importOriginal<typeof import('../../src/videoEncoderSink')>(),selectVideoEncoder:async(settings)=>{if(settings.quality)await mocks.encode(settings);return 'prefer-hardware' as const}}))
 vi.mock('mediabunny',async importOriginal=>({...await importOriginal<typeof import('mediabunny')>(),canEncodeVideo:mocks.encode}))
 afterEach(()=>vi.clearAllMocks())
 function fixture(){

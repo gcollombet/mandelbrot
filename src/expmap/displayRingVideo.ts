@@ -1,10 +1,10 @@
-import { ALL_FORMATS, BlobSource, Input, Quality, VideoSampleSink, canDecodeVideo, canEncodeVideo } from 'mediabunny'
+import { ALL_FORMATS, BlobSource, Input, Quality, VideoSampleSink, canDecodeVideo } from 'mediabunny'
 import { canonicalJson, contentIdentity } from './appearance'
 import { expmapVideoFrameView, exportExpmapVideo, validateExpmapVideoWindow, type ExpmapVideoSource } from './video'
 import { effectsSettings } from './effects'
 import { motionSettings } from './motion'
 import { totalFramesFor } from '../videoExportSession'
-import { createVideoSink, probeMp4Codecs } from '../videoEncoderSink'
+import { createVideoSink, selectVideoEncoder } from '../videoEncoderSink'
 import { validateExpmapView } from './renderer'
 import { ShaderExpmapRenderer, planShaderMemory } from './displayRenderer'
 import { planShaderRings } from './displayRings'
@@ -36,7 +36,7 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
   if(!Number.isFinite(request.fps)||request.fps<=0||request.fps>240||!Number.isSafeInteger(total)||total<1||total>10_000_000)throw new Error('Durée ou cadence hors limites')
   const viewAt=(frame:number)=>expmapVideoFrameView(request,frame,total,duration)
   validateExpmapView(m.projection,viewAt(0))
-  if(!(await probeMp4Codecs(request.width,request.height,request.fps))[request.codec])throw new Error('Codec indisponible pour cette résolution')
+  await selectVideoEncoder({codec:request.codec,width:request.width,height:request.height,fps:request.fps})
   // GPU capture + one compressed coverage plane, color encode and transfers.
   const reserve=request.width*request.height*32
   const memory=planShaderMemory(m,request.width,request.height,renderer.budgetBytes,reserve,renderer.gpuDevice?.limits)
@@ -53,11 +53,11 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
   const bitrates=rects.map(rect=>ringVideoBitrate(rect,request.width,request.height,request.intermediateBitrate??100e6))
   const checked=new Set<string>()
   for(let ring=0;ring<rings.length;ring++) {
-    const rect=rects[ring],key=`${rect[2]}:${rect[3]}`
+    const rect=rects[ring],key=`${rect[2]}:${rect[3]}:${bitrates[ring]}`
     if(checked.has(key))continue;checked.add(key);signal?.throwIfAborted()
-    const encoding={width:rect[2],height:rect[3],framerate:request.fps,quality:new Quality({bitrate:bitrates[ring]}),hardwareAcceleration:'prefer-hardware' as const}
-    if(!await canEncodeVideo(request.codec,encoding)||
-      !await canDecodeVideo(request.codec,{codedWidth:rect[2],codedHeight:rect[3]}))throw new Error(`Codec indisponible pour une couronne ${rect[2]}×${rect[3]}`)
+    const encoding={width:rect[2],height:rect[3],fps:request.fps,codec:request.codec,quality:new Quality({bitrate:bitrates[ring]}),hardwareAcceleration:'prefer-hardware' as const}
+    await selectVideoEncoder(encoding)
+    if(!await canDecodeVideo(request.codec,{codedWidth:rect[2],codedHeight:rect[3]}))throw new Error(`Décodage indisponible pour une couronne ${rect[2]}×${rect[3]}`)
   }
   // Version isolates compressed videos from previous raw-frame checkpoints.
   const identity=await contentIdentity(new TextEncoder().encode(canonicalJson({version:7,reconstruction:'window-v3',interpolation:renderer.interpolation??'bilinear',sampleDistribution:renderer.sampleDistribution??'grid',source:m,

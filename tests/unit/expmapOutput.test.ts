@@ -32,7 +32,7 @@ describe('ExpMap output preferences',()=>{
     vi.stubGlobal('VideoEncoder',{isConfigSupported:async(config:VideoEncoderConfig)=>{configs.push(config);return {supported:config.codec.startsWith('avc'),config}}})
     const support=await probeMp4Codecs(3840,2160,60)
     expect(configs.length).toBeGreaterThan(0)
-    expect(configs.every(c=>c.width===3840&&c.height===2160&&c.framerate===60&&c.hardwareAcceleration==='prefer-hardware')).toBe(true)
+    expect(configs.every(c=>c.width===3840&&c.height===2160&&c.framerate===60&&['prefer-hardware','no-preference'].includes(c.hardwareAcceleration!))).toBe(true)
     expect(preferredExpmapCodec(support)).toBe('avc')
     expect(preferredExpmapCodec({hevc:true,avc:true})).toBe('hevc')
     expect(preferredExpmapCodec({hevc:false,avc:false,av1:true})).toBeNull()

@@ -91,41 +91,56 @@ export type VideoEncoderSink = {
   readonly framesEncoded: number
 }
 
-/**
- * Which codecs this browser can actually encode at this size.
- *
- * Support varies by platform and build, and the answer is size-dependent: H.264
- * needs even width and height for 4:2:0 chroma, so an odd dimension silently
- * removes it. Probing lets the UI say so instead of failing at export time.
- */
+export type EncoderPreference = NonNullable<VideoEncodeSettings['hardwareAcceleration']>
+type EncoderProbeSettings = Pick<VideoEncodeSettings, 'width' | 'height' | 'codec' | 'quality' | 'hardwareAcceleration'> & { fps?: number }
+
+/** Prefer hardware, then allow the browser to choose another implementation. */
+export async function selectVideoEncoder(settings: EncoderProbeSettings): Promise<EncoderPreference> {
+  if (!isMp4Codec(settings.codec)) throw new Error(`Codec inconnu pour un conteneur MP4 : ${String(settings.codec)}`)
+  const first = settings.hardwareAcceleration ?? 'prefer-hardware'
+  const preferences: EncoderPreference[] = first === 'prefer-hardware' ? [first, 'no-preference'] : [first]
+  const failures: string[] = []
+  for (const hardwareAcceleration of preferences) {
+    try {
+      // Mediabunny forwards framerate at runtime, but omits it from the probe's public type.
+      const options = {
+        width: settings.width, height: settings.height, framerate: settings.fps,
+        quality: settings.quality ?? QUALITY_HIGH, hardwareAcceleration,
+      }
+      if (await canEncodeVideo(settings.codec, options)) return hardwareAcceleration
+      failures.push(`${hardwareAcceleration} : configuration refusée`)
+    } catch (error) {
+      failures.push(`${hardwareAcceleration} : ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+  throw new Error(
+    `Encodage ${settings.codec.toUpperCase()} indisponible pour ${settings.width}×${settings.height}`
+    + (settings.fps === undefined ? '' : ` à ${settings.fps} images/s`)
+    + `. ${settings.codec === 'avc' && (settings.width % 2 || settings.height % 2) ? 'H.264 exige des dimensions paires. ' : ''}`
+    + `Essais : ${failures.join(' ; ')}.`,
+  )
+}
+
+/** The same selection policy is used by the UI, preflight, and actual encoder. */
 export async function probeMp4Codecs(
   width: number,
   height: number,
   fps?: number,
+  onSelected?: (codec: Mp4Codec, preference: EncoderPreference) => void,
 ): Promise<Record<Mp4Codec, boolean>> {
-  // Installed mediabunny forwards additional options into buildVideoEncoderConfigs,
-  // including framerate; match the sink's quality and hardware preference.
-  const options = { width, height, quality: QUALITY_HIGH, hardwareAcceleration: 'prefer-hardware' as const, framerate: fps }
-  const entries = await Promise.all(
-    MP4_CODECS.map(async ({ value }) => [value, await canEncodeVideo(value, options).catch(() => false)] as const),
-  )
+  const entries = await Promise.all(MP4_CODECS.map(async ({ value }) => {
+    try {
+      const preference = await selectVideoEncoder({ codec: value, width, height, fps })
+      onSelected?.(value, preference)
+      return [value, true] as const
+    } catch { return [value, false] as const }
+  }))
   return Object.fromEntries(entries) as Record<Mp4Codec, boolean>
 }
 
 export async function createVideoSink(settings: VideoEncodeSettings): Promise<VideoEncoderSink> {
   const codec = settings.codec
-  if (!isMp4Codec(codec)) {
-    throw new Error(`Codec inconnu pour un conteneur MP4 : ${String(codec)}`)
-  }
-  const probeOptions = { width: settings.width, height: settings.height, quality: settings.quality ?? QUALITY_HIGH, framerate: settings.fps, ...(settings.hardwareAcceleration ? { hardwareAcceleration: settings.hardwareAcceleration } : {}) }
-  if (!await canEncodeVideo(codec, probeOptions)) {
-    throw new Error(
-      `Ce navigateur ne sait pas encoder ${settings.width}×${settings.height} en ${codec.toUpperCase()}. `
-      + (codec === 'avc' && (settings.width % 2 || settings.height % 2)
-        ? 'H.264 exige des dimensions paires.'
-        : 'Choisis un autre codec.'),
-    )
-  }
+  const hardwareAcceleration = await selectVideoEncoder(settings)
 
   const streaming = settings.destination.kind === 'stream'
 
@@ -151,7 +166,7 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
   const source = new VideoSampleSource({
     codec,
     quality: settings.quality ?? QUALITY_HIGH,
-    ...(settings.hardwareAcceleration ? { hardwareAcceleration: settings.hardwareAcceleration } : {}),
+    hardwareAcceleration,
     keyFrameInterval: settings.keyFrameIntervalSeconds ?? 2,
     // Every frame comes from the same fixed-size capture target; a size change
     // would mean the capture chain was reallocated mid-export, which should

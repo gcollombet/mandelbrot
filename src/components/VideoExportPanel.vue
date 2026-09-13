@@ -32,6 +32,7 @@ import { totalFramesFor } from '../videoExportSession';
 import {
   MP4_CODECS,
   probeMp4Codecs,
+  type EncoderPreference,
   type Mp4Codec,
 } from '../videoEncoderSink';
 import {
@@ -172,13 +173,15 @@ const output = computed<VideoOutputSpec>(() => {
 // dimensions), so the list is probed rather than assumed.
 const codecSupport = ref<Partial<Record<Mp4Codec, boolean>>>({});
 const probing = ref(true);
+const encoderPreferences = ref<Partial<Record<Mp4Codec, EncoderPreference>>>({})
 const effectiveCodec = computed(() => codec.value === 'auto' ? preferredExpmapCodec(codecSupport.value) : codecSupport.value[codec.value] ? codec.value : null);
+const encoderLabel = computed(() => probing.value || !effectiveCodec.value || !encoderPreferences.value[effectiveCodec.value] ? '' : encoderPreferences.value[effectiveCodec.value] === 'prefer-hardware' ? ' · Matériel préféré' : ' · Repli navigateur — logiciel possible')
 const codecLabel = computed(() => probing.value ? 'Vérification de l’encodeur…' : effectiveCodec.value === 'hevc' ? 'HEVC' : effectiveCodec.value === 'avc' ? 'H.264 · compatibilité' : effectiveCodec.value?.toUpperCase() ?? 'Encodage indisponible');
 watch(output, async (spec, _old, onCleanup) => {
   let current = true;
-  probing.value = true; codecSupport.value = {};
+  probing.value = true; codecSupport.value = {}; encoderPreferences.value = {};
   onCleanup(() => { current = false; });
-  const support = await probeMp4Codecs(spec.width, spec.height, spec.fps);
+  const support = await probeMp4Codecs(spec.width, spec.height, spec.fps, (codec, preference) => { if (current) encoderPreferences.value[codec] = preference });
   if (!current) return;
   codecSupport.value = support;
   probing.value = false;
@@ -368,7 +371,7 @@ function start() {
             @update:model-value="(v: string) => codec = v as Mp4Codec | 'auto'"
           />
         </label></div>
-      <p class="ve-note" role="status">{{ codecLabel }}</p>
+      <p class="ve-note" role="status">{{ codecLabel }}{{ encoderLabel }}</p>
       <label class="ve-capture">Nom du fichier <input v-model="filename" aria-label="Nom du fichier vidéo"/></label>
       <p class="ve-note">{{ fractalVideoFilename(filename) }}</p>
     </DenseSection>
