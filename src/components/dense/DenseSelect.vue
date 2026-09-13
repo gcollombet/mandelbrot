@@ -1,6 +1,6 @@
 <script setup lang="ts">
 interface SelOption { label: string; value: string | number }
-defineProps<{ modelValue: string | number; label?: string; disabled?: boolean; options: SelOption[] }>();
+defineProps<{ modelValue: string | number; label?: string; disabled?: boolean; options: readonly SelOption[] }>();
 const emit = defineEmits<{ (e: 'update:modelValue', v: string | number): void }>();
 
 function onChange(e: Event) {

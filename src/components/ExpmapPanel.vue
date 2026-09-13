@@ -6,6 +6,8 @@ import { computed, nextTick, onMounted, onUnmounted, ref, toRefs } from 'vue'
 import type { Engine, RenderOptions } from '../Engine'
 import type { MandelbrotExposed } from '../types/MandelbrotExposed'
 import { DenseField, DenseSection, DenseSelect } from './dense'
+import ResolutionSelect from './ResolutionSelect.vue'
+import { IMAGE_RESOLUTIONS } from './resolutionPresets'
 import { useExpmapDraft } from '../expmap/draft'
 import { expmapAppearanceProblems } from '../expmap/appearance'
 import { planExpmap } from '../expmap/plan'
@@ -166,13 +168,12 @@ async function saveImage() {
 </script>
 <template>
   <div class="expmap-panel">
-    <ShaderExpmapPanel :plan="plan" :name="name" :appearance="appearance" :engine="engine" :controller="controller"/>
-    <p class="intro">Prépare un rendu une seule fois, puis explore son zoom ou utilise-le dans une vidéo.</p>
+    <p class="intro">Prépare un rendu une seule fois, puis explore son zoom ou utilise-le dans une vidéo. Les paramètres de la section 1 servent aux deux formes de rendu : cuit (couleurs figées) ou recolorable (données avant couleur).</p>
     <RenderProgress v-if="progress" :label="stopping && ownRunning ? 'Interruption en cours…' : progress.phase" :done="progress.done" :total="progress.total" :unit="progressUnit" :active="ownRunning"/>
     <p v-if="ownRunning && progress" class="hint">{{ progress.saved }} éléments sauvegardés. La reprise conserve les doublements sauvegardés. Le fichier est finalisé à l’arrêt. Garde ce panneau ouvert pendant le calcul.</p>
     <p v-if="progress?.timings" class="hint">Calcul {{ (progress.timings.compute/1000).toFixed(1) }} s · WebP {{ (progress.timings.encode/1000).toFixed(1) }} s · Écriture {{ (progress.timings.write/1000).toFixed(1) }} s · Attente sauvegarde {{ (progress.timings.wait/1000).toFixed(1) }} s. Ces durées se chevauchent.</p>
     <button v-if="ownRunning" class="stop" :disabled="stopping" @click="stop">{{ stopping ? 'Interruption…' : 'Interrompre et conserver' }}</button>
-    <DenseSection title="1 · Préparer le rendu">
+    <DenseSection title="1 · Paramètres communs">
       <fieldset :disabled="expmapBusy">
         <label>Nom <input v-model="name" aria-label="Nom ExpMap"></label>
         <div class="library-toolbar"><span>Centre fixe</span><button @click="captureCenter">Utiliser le centre actuel</button></div>
@@ -180,23 +181,28 @@ async function saveImage() {
         <ExpmapZoomControl v-model="start" label="Départ" @capture="start = String(current.scale)"/>
         <ExpmapZoomControl v-model="end" label="Arrivée" @capture="end = String(current.scale)"/>
         <p class="hint">Vue large 10^+10 → zoom profond 10^-1000</p>
+        <p>{{ magnitudeSummary(start, end) }}</p>
+        <ResolutionSelect :width="width" :height="height" label="Résolution du document" :min="16" :max="3840" :step="2" @update:width="width = $event" @update:height="height = $event"/>
+        <DenseField v-model="density" label="Détail (densité k)" :min="1" :max="8" :step="0.5"/>
+        <p v-if="!plan" class="problem">Vérifie les coordonnées et les échelles : le départ doit être plus large que l’arrivée.</p>
+      </fieldset>
+    </DenseSection>
+    <DenseSection title="2 · Rendu cuit (.expmap)">
+      <fieldset :disabled="expmapBusy">
+        <p class="hint">Couleurs et matériaux actuels figés dans une image WebP par doublement. Explorable et utilisable en vidéo sans recalcul.</p>
         <label>Parcours de palettes<select v-model="pathChoice"><option value="">Palette fixe</option><option v-if="current.palettePath" value="current">Parcours actuel</option><option v-for="p in savedPaths" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
         <p v-if="pathChoice" class="hint">Couleurs et matériaux cuits par profondeur. Le parcours et l’identité de ses images sont conservés pour la reprise.</p>
-        <p>{{ magnitudeSummary(start, end) }}</p>
-        <details><summary>Qualité et résolution du document</summary>
-        <DenseField v-model="width" label="Largeur" :min="16" :max="3840" :step="2"/><DenseField v-model="height" label="Hauteur" :min="16" :max="2160" :step="2"/><DenseField v-model="quality" label="Qualité WebP" :min="0" :max="1" :step="0.01"/><p class="hint">WebP avec pertes · 0,90 conseillé. Les détails fins et les raccords peuvent varier avec la compression.</p><DenseField v-model="density" label="Détail (densité k)" :min="1" :max="8" :step="0.5"/>
-        </details>
+        <DenseField v-model="quality" label="Qualité WebP" :min="0" :max="1" :step="0.01"/><p class="hint">WebP avec pertes · 0,90 conseillé. Les détails fins et les raccords peuvent varier avec la compression.</p>
         <details v-if="estimate"><summary>Mémoire GPU : {{ (estimate.gpuBytes / 1073741824).toFixed(2) }} GiB</summary><p>14 tuiles en mémoire GPU · {{ (estimate.decodeBytes / 1048576).toFixed(1) }} MiB pour une tuile décodée. Deux tampons de calcul : {{ (2*estimate.decodeBytes / 1048576).toFixed(1) }} MiB, hors surfaces du codec. Cache complet : {{ (estimate.rawDiskBytes / 1073741824).toFixed(2) }} GiB avant compression.</p></details>
         <p :class="forceRender && problem.kind === 'unsupported' ? 'hint' : 'problem'" v-for="problem in problems" :key="`${problem.field}:${problem.stopIndex}`">{{ problem.field }} : {{ problem.message }}</p>
-        <p v-if="!plan" class="problem">Vérifie les coordonnées et les échelles : le départ doit être plus large que l’arrivée.</p>
-        <p class="hint">La palette et les couleurs actuelles seront enregistrées dans le document.</p>
         <label><input v-model="forceRender" type="checkbox"> Forcer le rendu — expérimental</label>
         <p v-if="forceRender" class="hint">Cuit les effets tels quels. Des raccords ou différences après reprise peuvent apparaître.</p>
         <button class="primary" :disabled="!engine || !controller || !plan || hasBlockingProblems || !name.trim()" @click="bake()">Créer et enregistrer…</button>
       </fieldset>
-      <p class="hint">Un fichier .expmap contient une image WebP par doublement. Le calcul et la sauvegarde avancent en parallèle. Le lecteur conserve 14 tuiles et anticipe la suivante. Le calcul inclut 12 doublements supplémentaires pour couvrir le centre, sans masque.</p>
+      <p class="hint">Le calcul et la sauvegarde avancent en parallèle. Le lecteur conserve 14 tuiles et anticipe la suivante. Le calcul inclut 12 doublements supplémentaires pour couvrir le centre, sans masque.</p>
     </DenseSection>
-    <DenseSection title="2 · Ouvrir ou exporter">
+    <ShaderExpmapPanel :plan="plan" :name="name" :appearance="appearance" :engine="engine" :controller="controller"/>
+    <DenseSection title="4 · Rendus cuits enregistrés">
       <div class="library-toolbar">
         <button class="library-import" :disabled="expmapBusy" @click="attach()">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7.5h6l2-2h9v13h-17zM12 9v6m-3-3h6"/></svg>
@@ -274,8 +280,7 @@ async function saveImage() {
       <fieldset v-if="imageEntry" :disabled="expmapBusy" class="image-export">
         <strong>Image entière · {{ imageEntry.name }}</strong>
         <p class="hint">Angle horizontal, profondeur verticale, sans les marges techniques. Inclut les doublements de couverture du centre. Jusqu’à 32 mégapixels.</p>
-        <DenseField v-model="imageWidth" label="Largeur (px)" :min="1" :max="32767" :step="1"/>
-        <DenseField v-model="imageHeight" label="Hauteur (px)" :min="1" :max="32767" :step="1"/>
+        <ResolutionSelect :width="imageWidth" :height="imageHeight" :presets="IMAGE_RESOLUTIONS" :min="1" :max="32767" :step="1" @update:width="imageWidth = $event" @update:height="imageHeight = $event"/>
         <DenseSelect v-model="imageFormat" label="Format" :options="[{value:'image/png',label:'PNG — sans perte supplémentaire'},{value:'image/jpeg',label:'JPEG'},{value:'image/webp',label:'WebP'}]"/>
         <DenseField v-if="imageFormat !== 'image/png'" v-model="imageQuality" label="Qualité" :min="0" :max="1" :step="0.01"/>
         <button class="primary" @click="saveImage">Exporter l’image…</button><button @click="imageEntry=null">Fermer</button>

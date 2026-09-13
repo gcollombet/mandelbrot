@@ -58,11 +58,13 @@ Déplacer la saturation visuelle à 64 après adaptation à la vue, en gardant l
 
 ## Implémentation du 2026-09-12
 
-- Blocs utiles intercalés little-endian 48 octets, en-tête et SHA-256 ; sous-dossiers par 1000 blocs, deux manifestes alternés. Adressage arithmétique sans index global en RAM.
+- Format de travail : une archive OPFS unique par source (`shader-archives/<uuid>.smexp`), écrite en place par `createSyncAccessHandle` dans un Worker. En-tête fixe 64 o (total, completed, état, génération, offsets), manifeste JSON, table fixe N×24 o adressée arithmétiquement, puis trames ajoutées dans l'ordre de production. `completed` est le point de validation, écrit après flush de la trame et de son entrée ; la reprise recule de 2 blocs et tronque les octets orphelins. Aucun index en RAM.
+- Trame de bloc : colonnes d'octets constantes stockées une fois (masque 48 bits), colonnes variables transposées par plan d'octets puis gzip via `CompressionStream`. Mesuré sur une source réelle : ≈5× contre 2× en entrelacé ; `trap` inactif et blocs intérieurs uniformes tombent à l'en-tête.
+- Ancien format conservé en lecture : dossiers de blocs `N.bin` (en-tête 16 o, suffixe SHA-256 ignoré), convertibles en archive par copie bloc à bloc. Export/import de l'archive vers un fichier utilisateur par flux ; les intermédiaires de couronnes vont dans `shader-scratch` en OPFS.
 - Budget manuel supplémentaire au moteur ouvert : cible linéaire, présentation, copies bornées des blocs et marge. Cache LRU évincé seulement après les soumissions GPU terminées. N+2 décrit une capacité, pas une prélecture asynchrone garantie.
 - Shading complet partagé par concaténation de color.wgsl ; clamp après adaptation locale. AA spatial jusqu'à 256, accumulation pondérée linéaire, transformations communes au lecteur RGB.
 - Les nouvelles sources réservent 17 octaves centrales : en 3840×2160 le rayon résiduel est inférieur à 1/32 pixel. Les anciennes sources de développement sans ce champ gardent leur couverture de 12 octaves. Le filtrage suit l'axe le plus dense pour les densités indépendantes.
-- Dossiers choisis ou OPFS, catalogue IndexedDB, reprise de production et copie vérifiée vers un autre dossier. MP4 en écriture directe, avec OPFS disponible pour les essais.
+- Archives OPFS par défaut, dossiers hérités en lecture, catalogue IndexedDB (chemin d'archive ou handle de dossier), reprise de production, conversion dossier → archive, export/import d'archive. MP4 en écriture directe, avec OPFS disponible pour les essais.
 - La mémoire du moteur déjà ouvert et les caches internes du pilote/encodeur restent extérieurs au budget annoncé. Aucun débit temps réel ni plafond exact de mémoire physique du pilote n'est certifié.
 
 ## Couronnes successives sur toute la durée
@@ -76,3 +78,27 @@ Le dossier de recette `couronnes-video-*` inclut codec, débit et rectangles dan
 La capture réserve les ressources de travail ; le cache source est libéré avant composition. Les lecteurs séquentiels sont utilisés lorsque leur provision mémoire tient dans le budget. Les nombreuses subdivisions plein écran utilisent sinon une ouverture/décodage à la fois, avec davantage de recherches dans les vidéos. Les allocations internes des codecs restent dépendantes du navigateur. La couleur ne transite pas par un tableau RGBA côté CPU.
 
 Après succès, seuls les MP4, masques et checkpoint de cette recette sont supprimés, sauf conservation explicite. L'estimation disque utilise la somme des débits cibles multipliée par la durée ; elle exclut masques gzip et surcoûts de conteneur et ne garantit pas le débit effectivement produit. Pas de promesse de fidélité sans perte ou de gain de vitesse sur une grande source sans mesure.
+
+Si le plan budgété ne comporte qu'une couronne et que la conservation des intermédiaires n'est pas demandée, l'export utilise directement le renderer complet et l'encodeur final existant. Le dossier de travail n'est pas ouvert, aucun masque ou MP4 intermédiaire n'est produit et leur débit ne s'applique pas. Les autres configurations gardent le chemin successif.
+
+## Adressage direct GPU des blocs résidents — version précédente
+
+La version précédente utilisait une table de pages par octave virtuelle et bloc local. Chaque page contient banque physique, offset en échantillons et dimensions utiles ; une section indique le sens radial de chaque octave. Les quatre voisins bilinéaires accèdent directement à leur page, même aux frontières de blocs. Le décodage et l'adaptation géométrique sont partagés dans expmap_shader_common.wgsl ; color.wgsl reste inchangé.
+
+Les banques stockent des emplacements fixes de maxBlockBytes. Leur nombre est borné par les limites WebGPU, avec au plus six banques (une liaison storage supplémentaire pour la table et une pour la palette). Padding et table sont soustraits du budget cache. Le cache évite les relectures des blocs résidents et protège l'ensemble du groupe en préparation. Les alias virtuels partagent un emplacement physique. Les écritures de réutilisation sont ordonnées après le submit précédent dans la même queue ; les banques ne sont détruites qu'après la barrière GPU.
+
+Une passe traite tous les blocs sélectionnés qui tiennent simultanément ; des groupes successifs partitionnent les contributions sans en perdre si les limites empêchent une seule passe. Le chemin par blocs reste disponible comme référence et comme repli si deux emplacements et la table ne tiennent pas. Le cache historique et l'atlas ne sont jamais conservés ensemble. Le préchargement conserve désormais un résultat prêt jusqu'à sa consommation, au lieu de le jeter dès résolution de la lecture.
+
+Les positions AA et les colorisations sont conservées, mais regrouper les contributions avant l'écriture RGBA16F change les arrondis par rapport aux additions f16 par bloc. La recette vidéo passe en v4/gather-v1 pour ne pas reprendre les anciennes contributions mélangées. Aucun débit GPU n'est garanti sans benchmark représentatif.
+
+## Fenêtre ExpMap régulière résidente — 2026-09-13
+
+Après le ralentissement d’un facteur deux signalé par l’utilisateur avec le gather, le chemin par défaut assemble les blocs en une grille GPU régulière par octave. Une texture `rgba32uint` en tableaux de couches conserve les douze mots de chaque échantillon dans trois plans, sans conversion ni compression avec perte. Le fichier source et `color.wgsl` restent identiques. Le stockage disque des couronnes reste MP4 + poids AA f16 gzip.
+
+Le plan choisit N à partir du budget disponible et des limites réellement accordées au device, avec N+2 emplacements. Il inclut le padding de texture et la table uniforme de 512 octets ; le staging d’un bloc et ses copies bornées sont couverts par la provision de travail existante. Les dimensions dépassant la limite 2D sont linéarisées sur plusieurs couches régulières. Dans le cas courant, une spécialisation WGSL lit directement les coordonnées 2D, sans divisions d’adressage ni recherche de bloc. Les limites de couches peuvent réduire N. Le moteur demande une dix-septième texture échantillonnée lorsque l’adaptateur la permet.
+
+Un upload compute transpose chaque bloc dans ses coordonnées finales, à partir d’un seul staging. Les écritures suivantes arrivent après la soumission précédente ; une barrière tous les quatre uploads borne les copies en attente. Une octave n’est publiée résidente qu’après préparation complète. Les octaves communes sont épinglées ; un curseur circulaire réutilise un emplacement sortant sans déplacer les autres. Deux octaves supplémentaires sont chargées en réserve. Une frame au même intervalle radial ne charge rien ; un zoom monotone d’une octave remplace une octave. Les sauts, retours et alias radiaux utilisent les mêmes règles. Un chargement interrompu n’est jamais marqué complet ; les erreurs GPU invalident le cache.
+
+Le shader choisit l’emplacement d’octave une fois par sous-échantillon AA, puis lit les quatre voisins dans la grille. Chaque voisin charge trois uint4 et conserve sa colorisation complète. AA, transformations, centre et poids restent identiques ; l’accumulation groupée conserve les différences d’arrondi f16 déjà observées avec le gather. La recette des intermédiaires passe en v5/window-v1.
+
+L’aperçu partage ce chemin ; si toute sa couverture ne tient pas, plusieurs fenêtres sont composées dans la frame. L’export par couronnes conserve une fenêtre résidente sur tout le film d’une couronne. Une portion de blocs ou un device ne permettant pas trois octaves régulières utilise le chemin historique par blocs. Aucun plafond arbitraire de quatre octaves et aucune réduction d’AA. Le gain de débit 4K et la mémoire physique du pilote restent à mesurer sur la machine cible.

@@ -2,7 +2,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { planExpmap } from '../../src/expmap/plan'
 import { planExpmapOctaves } from '../../src/expmap/octaves'
 import { shaderBlocks, shaderBlockAt, shaderBlockCount, shaderSourceEstimate, validateShaderManifest, type ShaderExpmapManifest } from '../../src/expmap/displayFormat'
-import { ShaderExpmapStore, copyShaderSource } from '../../src/expmap/displayStore'
+import { ShaderExpmapStore, copyShaderSource, resumeFrom, RESUME_BACKOFF_BLOCKS } from '../../src/expmap/displayStore'
 import { planShaderMemory, shaderFilterUniform } from '../../src/expmap/displayRenderer'
 import { shaderBlockScissor } from '../../src/expmap/displayScissor'
 import { MemoryDirectory } from './expmapFixtures'
@@ -55,15 +55,29 @@ describe('shader ExpMap layout',()=>{
   })
 })
 describe('shader source checkpoints',()=>{
-  it('roundtrips binary samples and detects corruption before returning data',async()=>{
+  it('roundtrips binary samples and rejects a foreign or truncated header',async()=>{
     const directory=new Directory(),store=new ShaderExpmapStore(directory.handle()),m=fixture()
     await store.assertEmpty();await store.publish(m)
     const payload=Uint8Array.from({length:48},(_,i)=>i)
     const next=await store.append(m,payload)
     expect(await store.open()).toEqual(next)
     expect(await store.read(next,0)).toEqual(payload)
-    directory.children.get('blocks-0')!.files.get('0.bin')![20]^=1
-    await expect(store.read(next,0)).rejects.toThrow('Intégrité')
+    const files=directory.children.get('blocks-0')!.files
+    expect(files.get('0.bin')!.length).toBe(16+48)
+    files.get('0.bin')![4]^=1
+    await expect(store.read(next,0)).rejects.toThrow('En-tête')
+    files.set('0.bin',files.get('0.bin')!.subarray(0,20))
+    await expect(store.read(next,0)).rejects.toThrow('tronqué')
+  })
+  it('resumes a few blocks before the checkpoint and reads legacy hashed files',async()=>{
+    const m=fixture()
+    expect(resumeFrom({...m,completed:5}).completed).toBe(5-RESUME_BACKOFF_BLOCKS)
+    expect(resumeFrom({...m,completed:1}).completed).toBe(0)
+    expect(resumeFrom({...m,state:'complete',completed:m.total}).completed).toBe(m.total)
+    const directory=new Directory(),store=new ShaderExpmapStore(directory.handle())
+    const next=await store.append(m,new Uint8Array(48).fill(7)),files=directory.children.get('blocks-0')!.files
+    const legacy=new Uint8Array(16+48+32);legacy.set(files.get('0.bin')!);files.set('0.bin',legacy)
+    expect(await store.read(next,0)).toEqual(new Uint8Array(48).fill(7))
   })
   it('keeps the preceding checkpoint after a failed publication',async()=>{
     const directory=new Directory(),store=new ShaderExpmapStore(directory.handle()),m=fixture()

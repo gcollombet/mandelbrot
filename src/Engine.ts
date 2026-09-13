@@ -2203,6 +2203,7 @@ export class Engine {
             'maxBufferSize',
             'maxStorageBufferBindingSize',
             'maxTextureDimension2D',
+            'maxTextureArrayLayers',
         ] as const
         const adapterLimits = this.adapter.limits as unknown as Record<string, number | undefined>
         const requiredLimits: Record<string, number> = {}
@@ -2211,6 +2212,11 @@ export class Engine {
             if (profile.raiseLimits && typeof supported === 'number' && Number.isFinite(supported)) {
                 requiredLimits[name] = supported
             }
+        }
+        // Full shader ExpMap adds one regular display-set texture to the
+        // sixteen material bindings. Older adapters keep the block fallback.
+        if (this.adapter.limits.maxSampledTexturesPerShaderStage >= 17) {
+            requiredLimits.maxSampledTexturesPerShaderStage = 17
         }
         try {
             this.device = await this.adapter.requestDevice({ requiredFeatures, requiredLimits })

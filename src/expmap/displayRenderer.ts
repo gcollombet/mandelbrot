@@ -1,3 +1,6 @@
+import commonShader from '../assets/expmap_shader_common.wgsl?raw'
+import windowShader from '../assets/expmap_shader_window.wgsl?raw'
+import { planShaderWindow, ShaderWindow, windowOctaves, type WindowLimits } from './displayWindow'
 import { shaderRingBounds, type ShaderRing, type RingPixels, type RingRect } from './displayRings'
 import { ShaderDrawBatch, SHADER_BATCH_BYTES } from './displayBatch'
 import { shaderBlockScissor } from './displayScissor'
@@ -5,20 +8,22 @@ import { assertShaderAppearanceCompatible } from './displayCompatibility'
 import type { Engine, RenderOptions } from '../Engine'
 import blockShader from '../assets/expmap_shader_block.wgsl?raw'
 import { shaderBlockAt, shaderSourceEstimate, type ShaderExpmapManifest } from './displayFormat'
-import { ShaderExpmapStore } from './displayStore'
+import type { ShaderExpmapSource } from './displayArchiveClient'
 import { planExpmapOctaves, type ExpmapOctaves } from './octaves'
 import { scaleDoublements } from './decimal'
 import { fixedMirrorWindow, radialConfig, radialOctave } from './radial'
 import { expmapEffectsUniform, expmapImageRotation } from './effects'
 import { expmapFilterUniform, validateExpmapView, type ExpmapView } from './renderer'
 
-export function planShaderMemory(manifest:ShaderExpmapManifest,width:number,height:number,budgetBytes:number,reserveBytes=0) {
+export function planShaderMemory(manifest:ShaderExpmapManifest,width:number,height:number,budgetBytes:number,reserveBytes=0,limits?:WindowLimits) {
   const estimate=shaderSourceEstimate(manifest.projection)
   // Linear attachment + presentation, bounded file/hash/upload copies and margin.
   const fixedBytes=reserveBytes+width*height*12+estimate.maxBlockBytes*8+16*1024*1024
   if(!Number.isSafeInteger(budgetBytes)||budgetBytes<fixedBytes+estimate.maxBlockBytes)throw new Error('Budget insuffisant pour les cibles et un bloc shader')
   const cacheBytes=budgetBytes-fixedBytes
-  const usefulOctaves=Math.min((manifest.projection.centerOctaves??12)+1,Math.max(1,Math.floor(cacheBytes/estimate.octaveBytes)-2))
+  let usefulOctaves=Math.min((manifest.projection.centerOctaves??12)+1,Math.max(1,Math.floor(cacheBytes/estimate.octaveBytes)-2))
+  const window=limits?planShaderWindow(manifest,cacheBytes,limits):null
+  if(window)usefulOctaves=Math.min(usefulOctaves,window.slots-2)
   return {budgetBytes,fixedBytes,cacheBytes,usefulOctaves,residentOctaves:usefulOctaves+2,
     subdivided:cacheBytes<3*estimate.octaveBytes,passes:Math.ceil(((manifest.projection.centerOctaves??12)+1)/usefulOctaves)}
 }
@@ -45,6 +50,12 @@ export class ShaderExpmapRenderer {
   private context:GPUCanvasContext
   private linear?:GPUTexture
   private pipeline?:GPURenderPipeline
+  private windowPipeline?:GPURenderPipeline
+  private windowRegular?:boolean
+  private window?:ShaderWindow
+  /** Reference path remains available for GPU equivalence checks. */
+  windowEnabled=true
+  lastRenderStats={path:'blocks' as 'blocks'|'window',passes:0,blocks:0}
   private present?:GPURenderPipeline
   private composePipeline?:GPURenderPipeline
   private composeUniform?:GPUBuffer
@@ -54,12 +65,15 @@ export class ShaderExpmapRenderer {
   private busy=false
   private release:()=>void
   private engine:Engine
-  private store:ShaderExpmapStore
+  private store:ShaderExpmapSource
+  /** Blocks read ahead of the GPU; bounded so memory stays at a few blocks. */
+  prefetchDepth=4
+  private inflight=new Map<number,Promise<Uint8Array>>()
   readonly manifest:ShaderExpmapManifest
   budgetBytes:number
   appearance:RenderOptions
   onProgress?:(done:number,total:number)=>void
-  constructor(engine:Engine,store:ShaderExpmapStore,manifest:ShaderExpmapManifest,appearance:RenderOptions,budgetBytes=512*1024*1024) {
+  constructor(engine:Engine,store:ShaderExpmapSource,manifest:ShaderExpmapManifest,appearance:RenderOptions,budgetBytes=512*1024*1024) {
     if(manifest.state!=='complete')throw new Error('Source shader incomplète')
     this.engine=engine;this.store=store;this.manifest=manifest;this.appearance=appearance;this.budgetBytes=budgetBytes
     this.context=this.canvas.getContext('webgpu')!;if(!this.context)throw new Error('WebGPU requis')
@@ -67,17 +81,29 @@ export class ShaderExpmapRenderer {
     this.uniform=engine.device.createBuffer({size:SHADER_BATCH_BYTES,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST})
     this.release=engine.suspendForExpmapPlayback()
   }
+  private fetch(index:number,signal:AbortSignal|undefined) {
+    let p=this.inflight.get(index)
+    if(!p) {p=this.store.read(this.manifest,index,signal);this.inflight.set(index,p);p.catch(()=>{if(this.inflight.get(index)===p)this.inflight.delete(index)})}
+    return p
+  }
+  /** Start reads for the next uncached blocks while the GPU consumes the current one. */
+  private prefetch(order:number[],position:number,signal:AbortSignal|undefined) {
+    for(let k=position+1,started=this.inflight.size;k<order.length&&started<this.prefetchDepth;k++) {
+      if(this.cache.has(order[k])||this.window?.has(order[k])||this.inflight.has(order[k]))continue
+      this.fetch(order[k],signal).catch(()=>{});started++
+    }
+  }
   private async load(index:number,limit:number,signal:AbortSignal|undefined,beforeEvict:()=>Promise<void>) {
     const existing=this.cache.get(index)
     if(existing) {this.cache.delete(index);this.cache.set(index,existing);return existing.buffer}
-    const bytes=await this.store.read(this.manifest,index,signal)
+    const bytes=await this.fetch(index,signal).finally(()=>this.inflight.delete(index))
     if(this.cacheBytes+bytes.length>limit)await beforeEvict()
     while(this.cacheBytes+bytes.length>limit&&this.cache.size) {
       const [key,value]=this.cache.entries().next().value!;value.buffer.destroy();this.cache.delete(key);this.cacheBytes-=value.bytes
     }
     if(bytes.length>limit||bytes.length>this.engine.device.limits.maxStorageBufferBindingSize)throw new Error('Bloc shader supérieur au budget GPU')
     const buffer=this.engine.device.createBuffer({size:bytes.length,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST})
-    this.engine.device.queue.writeBuffer(buffer,0,bytes)
+    this.engine.device.queue.writeBuffer(buffer,0,bytes as Uint8Array<ArrayBuffer>)
     this.cache.set(index,{buffer,bytes:bytes.length});this.cacheBytes+=bytes.length;return buffer
   }
   async render(view:ExpmapView,signal?:AbortSignal,ring?:ShaderRing,rect?:RingRect):Promise<OffscreenCanvas> {
@@ -91,7 +117,18 @@ export class ShaderExpmapRenderer {
     try {
       const engine=this.engine,d=engine.device,plan=this.manifest.projection,o=planExpmapOctaves(plan)
       if(Math.max(view.width,view.height)>d.limits.maxTextureDimension2D)throw new Error('Sortie supérieure aux limites GPU')
-      const memory=planShaderMemory(this.manifest,view.width,view.height,this.budgetBytes,this.workingReserveBytes)
+      const memory=planShaderMemory(this.manifest,view.width,view.height,this.budgetBytes,this.workingReserveBytes,d.limits)
+      const wp=this.windowEnabled?planShaderWindow(this.manifest,memory.cacheBytes,d.limits):null
+      const pstride=plan.blockSize-2*plan.halo
+      const pblocks=Math.ceil((o.angularSamples+2*o.halo)/pstride)*Math.ceil((o.rowsPerOctave+1+2*o.halo)/pstride)
+      const windowPlan=wp&&(!ring||(ring.blockStart===0&&ring.blockCount===pblocks))?wp:null
+      if(this.window&&(!windowPlan||JSON.stringify(this.window.plan)!==JSON.stringify(windowPlan))){await this.window.drain();this.window.destroy();this.window=undefined}
+      if(windowPlan){
+        for(const entry of this.cache.values())entry.buffer.destroy()
+        this.cache.clear();this.cacheBytes=0
+        this.window??=new ShaderWindow(d,windowPlan,this.manifest)
+      }
+      this.lastRenderStats={path:windowPlan?'window':'blocks',passes:0,blocks:0}
       while(this.cacheBytes>memory.cacheBytes&&this.cache.size) {
         const [key,value]=this.cache.entries().next().value!;value.buffer.destroy();this.cache.delete(key);this.cacheBytes-=value.bytes
       }
@@ -100,7 +137,7 @@ export class ShaderExpmapRenderer {
       const sourceRecipe=JSON.parse(this.manifest.appearanceJson) as {mu?:number}
       const resources=await engine.prepareShaderExpmapColor(this.appearance,view.effectTime??0,cameraAngle,sourceRecipe.mu)
       if(!this.pipeline) {
-        const module=d.createShaderModule({code:resources.code+'\n'+blockShader})
+        const module=d.createShaderModule({code:resources.code+'\n'+commonShader+'\n'+blockShader})
         const extra=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},{binding:1,visibility:GPUShaderStage.FRAGMENT,buffer:{type:'read-only-storage'}}]})
         this.pipeline=await d.createRenderPipelineAsync({layout:d.createPipelineLayout({bindGroupLayouts:[resources.layout,extra]}),
           vertex:{module,entryPoint:'vs_main'},fragment:{module,entryPoint:'fs_shader_block',constants:{ENABLE_SURFACE_EFFECTS:1},targets:[{format:'rgba16float',blend:{color:{srcFactor:'one',dstFactor:'one'},alpha:{srcFactor:'one',dstFactor:'one'}}}]},primitive:{topology:'triangle-list'}})
@@ -123,16 +160,34 @@ export class ShaderExpmapRenderer {
       const total=(coverage+1)*perTile+1;let done=0
       batch=new ShaderDrawBatch(d,this.uniform,this.linear.createView())
       const filter=shaderFilterUniform(o,view.maxSamples??16,radial.mode!=='normal').slice(0,3)
-      const draw=async(index:number,virtual:number,reverse:boolean,center=false)=>{
-        signal?.throwIfAborted()
-        const block=shaderBlockAt(plan,index)
-        let bounds=shaderBlockScissor(plan,view,block,virtual,depth-base,angle,reverse)
+      type Job={index:number;virtual:number;reverse:boolean;center:boolean}
+      const jobs:Job[]=[]
+      if(!this.window){
+      if(!ring||ring.center)jobs.push({index:0,virtual:0,reverse:false,center:true})
+      for(let group=ring?.first??0;group<(ring?ring.first+ring.count:coverage+1);group+=memory.usefulOctaves) {
+        for(let virtual=group;virtual<Math.min(ring?ring.first+ring.count:coverage+1,group+memory.usefulOctaves);virtual++) {
+          const mapped=radialOctave(readBase+virtual,radial)
+          for(let local=ring?.blockStart??0;local<(ring?ring.blockStart+ring.blockCount:perTile);local++)jobs.push({index:1+mapped.source*perTile+local,virtual,reverse:mapped.reverse,center:false})
+        }
+      }
+      }
+      const scissorOf=(j:Job)=>{
+        let bounds=shaderBlockScissor(plan,view,shaderBlockAt(plan,j.index),j.virtual,depth-base,angle,j.reverse)
         if(bounds&&ringClip){
           const x=Math.max(bounds[0],ringClip[0]),y=Math.max(bounds[1],ringClip[1])
           const right=Math.min(bounds[0]+bounds[2],ringClip[0]+ringClip[2]),bottom=Math.min(bounds[1]+bounds[3],ringClip[1]+ringClip[3])
           bounds=right>x&&bottom>y?[x,y,right-x,bottom-y]:null
         }
+        return bounds
+      }
+      // Only blocks that will actually draw are read ahead.
+      const visible=jobs.map(j=>({job:j,bounds:scissorOf(j)})),order=visible.filter(v=>v.bounds).map(v=>v.job.index)
+      let position=-1
+      const draw=async({index,virtual,reverse,center}:Job,bounds:ReturnType<typeof scissorOf>)=>{
+        signal?.throwIfAborted()
+        const block=shaderBlockAt(plan,index)
         if(!bounds) {this.onProgress?.(++done,total);return}
+        position++;this.prefetch(order,position,signal)
         const buffer=await this.load(index,memory.cacheBytes,signal,()=>batch!.flush())
         const values=new Float32Array([view.width,view.height,plan.height,plan.radius,
           depth-base,angle,o.angularSamples,o.rowsPerOctave,block.originX,block.originY,block.useful.width,block.useful.height,
@@ -147,14 +202,57 @@ export class ShaderExpmapRenderer {
         })
         this.onProgress?.(++done,total)
       }
-      if(!ring||ring.center)await draw(0,0,false,true)
-      for(let group=ring?.first??0;group<(ring?ring.first+ring.count:coverage+1);group+=memory.usefulOctaves) {
-        for(let virtual=group;virtual<Math.min(ring?ring.first+ring.count:coverage+1,group+memory.usefulOctaves);virtual++) {
-          const mapped=radialOctave(readBase+virtual,radial)
-          for(let local=ring?.blockStart??0;local<(ring?ring.blockStart+ring.blockCount:perTile);local++)await draw(1+mapped.source*perTile+local,virtual,mapped.reverse)
+      if(this.window) {
+        const window=this.window,wp=window.plan
+        const regular=wp.width===wp.logicalWidth&&wp.layersPerPlane===1
+        if(!this.windowPipeline||this.windowRegular!==regular){
+          const module=d.createShaderModule({code:resources.code+'\n'+commonShader+'\n'+windowShader})
+          const entries:GPUBindGroupLayoutEntry[]=[{binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
+            {binding:1,visibility:GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
+            {binding:2,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:'uint',viewDimension:'2d-array'}}]
+          this.windowPipeline=await d.createRenderPipelineAsync({layout:d.createPipelineLayout({bindGroupLayouts:[resources.layout,d.createBindGroupLayout({entries})]}),
+            vertex:{module,entryPoint:'vs_main'},fragment:{module,entryPoint:'fs_shader_window',constants:{ENABLE_SURFACE_EFFECTS:1,WINDOW_REGULAR:regular?1:0},
+              targets:[{format:'rgba16float',blend:{color:{srcFactor:'one',dstFactor:'one'},alpha:{srcFactor:'one',dstFactor:'one'}}}]},primitive:{topology:'triangle-list'}})
         }
+        this.windowRegular=regular
+        const bound=d.createBindGroup({layout:this.windowPipeline.getBindGroupLayout(1),entries:[
+          {binding:0,resource:{buffer:this.uniform,offset:0,size:128}},
+          {binding:1,resource:{buffer:window.table}},{binding:2,resource:window.texture.createView()}]})
+        const end=ring?ring.first+ring.count:coverage+1
+        for(let first=ring?.first??0;first<end;first+=wp.slots-2){
+          const count=Math.min(wp.slots-2,end-first),center=first===(ring?.first??0)&&(!ring||ring.center)
+          const part={first,count,center,blockStart:0,blockCount:perTile}
+          let bounds=shaderRingBounds(this.manifest,view,part)
+          if(ringClip){const x=Math.max(bounds[0],ringClip[0]),y=Math.max(bounds[1],ringClip[1])
+            bounds=[x,y,Math.max(0,Math.min(bounds[0]+bounds[2],ringClip[0]+ringClip[2])-x),Math.max(0,Math.min(bounds[1]+bounds[3],ringClip[1]+ringClip[3])-y)]}
+          if(!bounds[2]||!bounds[3])continue
+          const octaves=windowOctaves(first,count,readBase,radial),reserves=windowOctaves(first+count,2,readBase,radial)
+          const sources=[...new Set([...octaves,...reserves].map(o=>o.source))]
+          const loadOrder=center?[0]:[]
+          for(const source of sources)if(!window.slots.has(source))for(let local=0;local<perTile;local++)loadOrder.push(1+source*perTile+local)
+          const positions=new Map(loadOrder.map((index,i)=>[index,i]))
+          await window.prepare(octaves,center,async index=>{
+            this.prefetch(loadOrder,positions.get(index)??-1,signal)
+            const bytes=await this.fetch(index,signal).finally(()=>this.inflight.delete(index))
+            this.lastRenderStats.blocks++;this.onProgress?.(Math.min(++done,total),total)
+            return bytes
+          },signal,reserves)
+          signal?.throwIfAborted()
+          const values=new Float32Array([view.width,view.height,plan.height,plan.radius,
+            depth-base,angle,o.angularSamples,o.rowsPerOctave,first,first+count,0,coverage+1,
+            0,0,o.halo,center?1:0,...effect,...filter,coverage,mirror?1:0,view.effects?.mirrorDepth??1,mirror?.offset??0,0,
+            -scaleDoublements('1e0',view.scale)*Math.LN2,scaleDoublements('1e0',view.scale)*Math.LOG10E*Math.LN2,0,0])
+          d.queue.writeBuffer(this.uniform,0,values)
+          commands=d.createCommandEncoder();pass=commands.beginRenderPass({colorAttachments:[{view:this.linear.createView(),loadOp:'load',storeOp:'store'}]})
+          pass.setPipeline(this.windowPipeline);pass.setBindGroup(0,resources.bindGroup);pass.setBindGroup(1,bound)
+          pass.setScissorRect(...bounds);pass.draw(6);pass.end();d.queue.submit([commands.finish()]);window.submitted()
+          this.lastRenderStats.passes++
+        }
+        await window.drain();this.onProgress?.(total,total)
+      }else{
+        for(const {job,bounds} of visible){await draw(job,bounds);if(bounds){this.lastRenderStats.passes++;this.lastRenderStats.blocks++}}
+        await batch.flush()
       }
-      await batch.flush()
       signal?.throwIfAborted()
       if(ring)return this.canvas
       commands=d.createCommandEncoder();pass=commands.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store'}]})
@@ -163,12 +261,17 @@ export class ShaderExpmapRenderer {
     } catch(error) {
       failure=error
       // Cancellation/read failures must not leave source buffers in flight.
-      try {await batch?.flush()} catch { /* Preserve the original failure. */ }
+      try {await batch?.flush();await this.window?.drain()} catch { /* Preserve the original failure. */ }
       throw error
     } finally {
+      await Promise.allSettled(this.inflight.values());this.inflight.clear()
       const validation=await device.popErrorScope(),memoryError=await device.popErrorScope()
       this.busy=false
-      if(!failure&&(validation||memoryError))throw new Error((validation||memoryError)!.message)
+      if(validation||memoryError){
+        // Async validation/OOM may invalidate uploads already marked resident.
+        this.releaseSourceCache()
+        if(!failure)throw new Error((validation||memoryError)!.message)
+      }
     }
   }
   async renderRingTexture(view:ExpmapView,ring:ShaderRing,rect:RingRect,signal?:AbortSignal) {
@@ -178,6 +281,7 @@ export class ShaderExpmapRenderer {
   get gpuDevice(){return this.engine.device}
   releaseSourceCache(){
     if(this.busy)throw new Error('Rendu en cours')
+    this.window?.destroy();this.window=undefined
     for(const entry of this.cache.values())entry.buffer.destroy()
     this.cache.clear();this.cacheBytes=0
   }
@@ -242,6 +346,7 @@ export class ShaderExpmapRenderer {
   }
   dispose() {
     if(this.disposed)return;this.disposed=true
+    this.window?.destroy();this.window=undefined
     for(const entry of this.cache.values())entry.buffer.destroy()
     this.cache.clear();this.cacheBytes=0;this.linear?.destroy();this.uniform.destroy();this.composeUniform?.destroy();this.context.unconfigure();this.engine.previousRenderOptions=undefined;this.engine.needRender=true;this.release()
   }

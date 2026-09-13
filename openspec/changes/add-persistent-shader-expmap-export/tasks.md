@@ -72,3 +72,34 @@ Validation de performance sur une grande source toujours à faire ; ne pas confo
 - [x] 9.4 Reprendre aux couronnes finalisées, isoler les anciens intermédiaires et nettoyer uniquement les nouveaux fichiers de recette.
 - [x] 9.5 Afficher débit et estimation compressée, préciser la recompression couleur et la reprise par couronne.
 - [x] 9.6 Valider tests ciblés et petit cycle GPU/codec réel avec reprise et nettoyage.
+
+## 9. Archive OPFS compressée
+
+- [x] 9.1 Retirer le SHA-256 du chemin de lecture ; reprise avec recul de 2 blocs (`resumeFrom`).
+- [x] 9.2 Codec de trame : colonnes constantes + plans d'octets + gzip (`displayCodec.ts`), tests de roundtrip et de ratio.
+- [x] 9.3 Archive fichier unique avec table fixe et commit par en-tête (`displayArchive.ts`), backend mémoire pour les tests, Worker OPFS `createSyncAccessHandle` (`displayArchive.worker.ts`, `displayArchiveClient.ts`).
+- [x] 9.4 Interface `ShaderExpmapSource` partagée par dossier et archive ; producteur, copie et lecteur génériques ; préfetch borné de 4 blocs dans le lecteur.
+- [x] 9.5 Panneau : création en archive, import/export de fichier `.smexp`, conversion d'un dossier hérité, suppression, quota affiché ; intermédiaires de couronnes en OPFS.
+- [ ] 9.6 Mesurer sur le PC Windows le débit de remplissage du cache depuis l'archive (attendu : borné par gunzip ≈ 1 Go/s, plus par l'ouverture de fichiers).
+- [x] 9.7 Remplacer les buffers isolés par des banques de blocs résidents et une table d'adressage direct ; une liaison par trame et une passe par groupe sous budget (raffinement du buffer par octave).
+
+## 10. Encodage direct pour une seule couronne
+
+- [x] 10.1 Court-circuiter les vidéos et masques intermédiaires lorsque le plan tient en une couronne et que leur conservation n'est pas demandée.
+- [x] 10.2 Différer l'ouverture du dossier de travail, afficher le mode direct et masquer le débit intermédiaire inutilisé.
+- [x] 10.3 Tester sélection du chemin, progression, conservation explicite et annulation ; valider TypeScript.
+
+## 11. Adressage direct des blocs résidents
+
+- [x] 11.1 Planifier les banques et la table GPU sous budget, padding et limites de bindings compris.
+- [x] 11.2 Implémenter les emplacements réutilisables, alias radiaux, préparation complète et partitions en passes bornées.
+- [x] 11.3 Partager le décodage/adaptation display, ajouter la lecture directe des quatre voisins sans modifier color.wgsl ni le format source.
+- [x] 11.4 Activer le chemin direct dans aperçu/vidéo, conserver le repli par blocs et versionner les intermédiaires pour les arrondis différents.
+- [x] 11.5 Tester budgets, frontières, alias, cache, annulation et ordre GPU ; comparer les deux chemins sur GPU synthétique.
+
+## 12. Fenêtre régulière résidente (remplace le gather après régression de débit signalée)
+
+- [x] 12.1 Planifier une texture entière à 48 octets par échantillon sous budget, dimensions et couches GPU, avec N+2 emplacements.
+- [x] 12.2 Assembler les blocs par upload GPU, conserver les octaves communes, charger les deux réserves et recycler uniquement les emplacements sortants ; protéger les sorties sur erreur.
+- [x] 12.3 Lire directement quatre voisins depuis la grille régulière, préserver couleur/AA/effets, brancher aperçu et couronnes vidéo avec repli pour les portions de blocs.
+- [x] 12.4 Vérifier budgets, glissement, alias, frontières, annulation, WGSL et intégration GPU synthétique ; documenter les limites et versionner les intermédiaires.

@@ -67,6 +67,13 @@ const router = useRouter();
 
 // AA accumulation progress (polled from the engine for the on-screen indicator).
 const aaProgress = ref<{ active: boolean; done: number; total: number }>({ active: false, done: 0, total: 1 });
+const aaRun = reactive({ startedAt: 0, startDone: 0, rate: 0 });
+const aaProgressText = computed(() => {
+  const p = aaProgress.value, base = `AA ${p.done}/${p.total}`;
+  if (aaRun.rate <= 0) return base;
+  const remaining = Math.max(0, (p.total - p.done) / aaRun.rate);
+  return `${base} · ${aaRun.rate >= 10 ? Math.round(aaRun.rate) : aaRun.rate.toFixed(1)}/s · reste ${remaining >= 60 ? `${Math.floor(remaining / 60)} min ${String(Math.floor(remaining % 60)).padStart(2, '0')} s` : `${Math.ceil(remaining)} s`}`;
+});
 let aaProgressTimer: ReturnType<typeof setInterval> | null = null;
 const settingsRefs = ref<Record<string, InstanceType<typeof Settings> | null>>({});
 
@@ -630,7 +637,13 @@ onMounted(() => {
   // Poll AA accumulation progress for the on-screen indicator.
   aaProgressTimer = setInterval(() => {
     const p = mandelbrotEngine.value?.aaProgress;
-    if (p) aaProgress.value = p;
+    if (!p) return;
+    const now = performance.now();
+    // Rate over the current accumulation: reset when a new pass starts.
+    if (!p.active || p.done < aaProgress.value.done) { aaRun.startedAt = now; aaRun.startDone = p.done; }
+    const seconds = (now - aaRun.startedAt) / 1000;
+    aaRun.rate = seconds > 0.3 ? (p.done - aaRun.startDone) / seconds : 0;
+    aaProgress.value = p;
   }, 120);
   window.addEventListener('resize', invalidateDiscoveryLayout, { passive: true });
 
@@ -1665,7 +1678,7 @@ async function startTravelToPreset(preset: PresetRecord) {
       @touchend.stop
     >
       <div v-if="aaProgress.active" class="aa-progress">
-        <span class="aa-progress-label">AA {{ aaProgress.done }}/{{ aaProgress.total }}</span>
+        <span class="aa-progress-label">{{ aaProgressText }}</span>
         <div class="aa-progress-track">
           <div
             class="aa-progress-fill"

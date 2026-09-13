@@ -12,7 +12,7 @@ import { RingMediaStore, ringVideoBitrate, ringVideoRect } from './displayRingMe
 import { RingVideoGpu } from './displayRingVideoGpu'
 
 type Request=Omit<Parameters<typeof exportExpmapVideo>[1],'gpuRenderer'>&{
-  gpuRenderer:ShaderExpmapRenderer; scratch:FileSystemDirectoryHandle; keepIntermediates?:boolean
+  gpuRenderer:ShaderExpmapRenderer; scratch:FileSystemDirectoryHandle|(()=>Promise<FileSystemDirectoryHandle>); keepIntermediates?:boolean
   intermediateBitrate?:number
   onPhase?:(phase:string,done:number,total:number)=>void
 }
@@ -29,8 +29,16 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
   if(!(await probeMp4Codecs(request.width,request.height,request.fps))[request.codec])throw new Error('Codec indisponible pour cette résolution')
   // GPU capture + one compressed coverage plane, color encode and transfers.
   const reserve=request.width*request.height*32
-  const memory=planShaderMemory(m,request.width,request.height,renderer.budgetBytes,reserve)
+  const memory=planShaderMemory(m,request.width,request.height,renderer.budgetBytes,reserve,renderer.gpuDevice?.limits)
   const rings=planShaderRings(m,memory.cacheBytes,memory.usefulOctaves)
+  if(rings.length===1&&!request.keepIntermediates) {
+    signal?.throwIfAborted()
+    request.onPhase?.('Rendu et encodage direct · une couronne',0,total)
+    return exportExpmapVideo(source,{...request,gpuRenderer:renderer,onProgress:(done,count)=>{
+      request.onProgress?.(done,count)
+      request.onPhase?.('Rendu et encodage direct · une couronne',done,count)
+    }})
+  }
   const rects=rings.map(ring=>ringVideoRect(m,viewAt(0),ring))
   const bitrates=rects.map(rect=>ringVideoBitrate(rect,request.width,request.height,request.intermediateBitrate??60e6))
   const checked=new Set<string>()
@@ -42,13 +50,14 @@ export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},
       !await canDecodeVideo(request.codec,{codedWidth:rect[2],codedHeight:rect[3]}))throw new Error(`Codec indisponible pour une couronne ${rect[2]}×${rect[3]}`)
   }
   // Version isolates compressed videos from previous raw-frame checkpoints.
-  const identity=await contentIdentity(new TextEncoder().encode(canonicalJson({version:3,source:m,
+  const identity=await contentIdentity(new TextEncoder().encode(canonicalJson({version:5,reconstruction:'window-v1',source:m,
     appearance:renderer.appearance,window:request.window,width:request.width,height:request.height,
     fps:request.fps,maxSamples:request.maxSamples??16,effects:request.effects,codec:request.codec,bitrates,rings,rects})))
   const name=`couronnes-video-${identity.slice(7)}`
   return navigator.locks.request(name,{mode:'exclusive',ifAvailable:true},async lock=>{
     if(!lock)throw new Error('Cet export par couronnes est déjà en cours')
-    const store=new RingMediaStore(await request.scratch.getDirectoryHandle(name,{create:true}))
+    const scratch=typeof request.scratch==='function'?await request.scratch():request.scratch
+    const store=new RingMediaStore(await scratch.getDirectoryHandle(name,{create:true}))
     let next=await store.checkpoint(identity)
     if(next>rings.length)throw new Error('Checkpoint hors limites')
     const gpu=new RingVideoGpu(renderer.gpuDevice),previousReserve=renderer.workingReserveBytes

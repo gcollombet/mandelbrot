@@ -1,11 +1,19 @@
 import { canonicalJson } from './appearance'
 import { DISPLAY_SAMPLE_BYTES, shaderBlockAt, validateShaderManifest, type ShaderExpmapManifest } from './displayFormat'
+import type { ShaderExpmapSource } from './displayArchiveClient'
 
-/** One checked binary file per block, two alternating atomic manifest slots.
+const BLOCK_MAGIC=0x31504d53,BLOCK_HEADER_BYTES=16
+/** Blocks a resume recomputes before its checkpoint: a file whose close raced the manifest is rewritten. */
+export const RESUME_BACKOFF_BLOCKS=2
+export function resumeFrom(m:ShaderExpmapManifest):ShaderExpmapManifest {
+  return m.state==='complete'?m:{...m,completed:Math.max(0,m.completed-RESUME_BACKOFF_BLOCKS)}
+}
+/** One binary file per block, two alternating atomic manifest slots.
  * No in-memory index proportional to the depth of the source. */
-export class ShaderExpmapStore {
+export class ShaderExpmapStore implements ShaderExpmapSource {
   readonly directory:FileSystemDirectoryHandle
   constructor(directory:FileSystemDirectoryHandle) { this.directory=directory }
+  get key() {return `dir:${this.directory.name}`}
   private async write(name:string,data:Uint8Array|string,directory=this.directory) {
     const handle=await directory.getFileHandle(name,{create:true}),writer=await handle.createWritable()
     try { await writer.write(typeof data==='string'?data:{type:'write',position:0,data:new Uint8Array(data)});await writer.close() }
@@ -36,46 +44,46 @@ export class ShaderExpmapStore {
   async append(m:ShaderExpmapManifest,payload:Uint8Array):Promise<ShaderExpmapManifest> {
     const index=m.completed,block=shaderBlockAt(m.projection,index),expected=block.useful.width*block.useful.height*DISPLAY_SAMPLE_BYTES
     if(payload.length!==expected)throw new Error('Taille de bloc shader invalide')
-    // Header and payload are hashed together, so exchanging two files is detected.
-    const data=new Uint8Array(16+expected),view=new DataView(data.buffer)
-    view.setUint32(0,0x31504d53,true);view.setUint32(4,index,true);view.setUint32(8,expected,true);view.setUint32(12,DISPLAY_SAMPLE_BYTES,true)
-    data.set(payload,16)
-    const hash=new Uint8Array(await crypto.subtle.digest('SHA-256',data))
-    const file=new Uint8Array(data.length+hash.length);file.set(data);file.set(hash,data.length)
-    await this.write(`${index}.bin`,file,await this.blockDirectory(index,true))
+    // Header only: the writable is atomic on close, and a resume backs off a few
+    // blocks, so no per-block digest is paid on the read path.
+    const data=new Uint8Array(BLOCK_HEADER_BYTES+expected),view=new DataView(data.buffer)
+    view.setUint32(0,BLOCK_MAGIC,true);view.setUint32(4,index,true);view.setUint32(8,expected,true);view.setUint32(12,DISPLAY_SAMPLE_BYTES,true)
+    data.set(payload,BLOCK_HEADER_BYTES)
+    await this.write(`${index}.bin`,data,await this.blockDirectory(index,true))
     const next={...m,generation:m.generation+1,completed:index+1}
     await this.publish(next)
     return next
   }
-  async read(m:ShaderExpmapManifest,index:number,signal?:AbortSignal) {
+  async read(m:ShaderExpmapManifest,index:number,signal?:AbortSignal):Promise<Uint8Array<ArrayBuffer>> {
     signal?.throwIfAborted()
     if(!Number.isSafeInteger(index)||index<0||index>=m.completed)throw new Error('Bloc non publié')
     const block=shaderBlockAt(m.projection,index),expected=block.useful.width*block.useful.height*DISPLAY_SAMPLE_BYTES
     const f=await (await (await this.blockDirectory(index)).getFileHandle(`${index}.bin`)).getFile()
-    if(f.size!==expected+48)throw new Error(`Bloc ${index} tronqué`)
-    const bytes=new Uint8Array(await f.arrayBuffer()),view=new DataView(bytes.buffer)
-    if(view.getUint32(0,true)!==0x31504d53||view.getUint32(4,true)!==index||view.getUint32(8,true)!==expected||view.getUint32(12,true)!==48)throw new Error(`En-tête du bloc ${index} invalide`)
-    const hash=new Uint8Array(await crypto.subtle.digest('SHA-256',bytes.subarray(0,16+expected)))
-    if(!hash.every((b,i)=>b===bytes[16+expected+i]))throw new Error(`Intégrité du bloc ${index} invalide`)
+    // Legacy files carry a 32-byte SHA-256 trailer, which is ignored.
+    if(f.size!==expected+BLOCK_HEADER_BYTES&&f.size!==expected+BLOCK_HEADER_BYTES+32)throw new Error(`Bloc ${index} tronqué`)
+    const bytes=new Uint8Array(await f.slice(0,BLOCK_HEADER_BYTES+expected).arrayBuffer()),view=new DataView(bytes.buffer)
+    if(view.getUint32(0,true)!==BLOCK_MAGIC||view.getUint32(4,true)!==index||view.getUint32(8,true)!==expected||view.getUint32(12,true)!==DISPLAY_SAMPLE_BYTES)throw new Error(`En-tête du bloc ${index} invalide`)
     signal?.throwIfAborted()
-    return bytes.subarray(16,16+expected)
+    return bytes.subarray(BLOCK_HEADER_BYTES) as Uint8Array<ArrayBuffer>
   }
 }
 
-/** Copy a source without buffering the document; a failed copy remains resumable. */
-export async function copyShaderSource(source:ShaderExpmapStore,target:ShaderExpmapStore,
+/** Copy a source block by block between any two sources (directory or archive);
+ * a failed copy remains resumable. */
+export async function copyShaderSource(source:ShaderExpmapSource,target:ShaderExpmapSource,
   signal?:AbortSignal,onProgress?:(done:number,total:number)=>void) {
-  if(await source.directory.isSameEntry(target.directory))throw new Error('Choisir un autre dossier')
-  return navigator.locks.request(`shader-expmap:${target.directory.name}`,{mode:'exclusive',ifAvailable:true},async lock=>{
-    if(!lock)throw new Error('Dossier déjà utilisé')
+  const same=source instanceof ShaderExpmapStore&&target instanceof ShaderExpmapStore?await source.directory.isSameEntry(target.directory):source.key===target.key
+  if(same)throw new Error('Choisir une autre destination')
+  return navigator.locks.request(`shader-expmap:${target.key}`,{mode:'exclusive',ifAvailable:true},async lock=>{
+    if(!lock)throw new Error('Destination déjà utilisée')
     const original=await source.open()
     if(original.state!=='complete')throw new Error('Terminer la source avant de la copier')
     let checkpoint:ShaderExpmapManifest|undefined
     try {checkpoint=await target.open()}catch{await target.assertEmpty()}
-    if(checkpoint&&(checkpoint.id!==original.id||checkpoint.appearanceJson!==original.appearanceJson||canonicalJson(checkpoint.projection)!==canonicalJson(original.projection)))throw new Error('Le dossier contient une autre source')
-    let m:ShaderExpmapManifest=checkpoint??{...original,completed:0,generation:0,state:'preparing'}
+    if(checkpoint&&(checkpoint.id!==original.id||checkpoint.appearanceJson!==original.appearanceJson||canonicalJson(checkpoint.projection)!==canonicalJson(original.projection)))throw new Error('La destination contient une autre source')
+    let m:ShaderExpmapManifest=resumeFrom(checkpoint??{...original,completed:0,generation:0,state:'preparing'})
+    if(!checkpoint&&'createArchive' in target)m=await (target as {createArchive:(m:ShaderExpmapManifest)=>Promise<ShaderExpmapManifest>}).createArchive(m)
     if(m.state==='complete')return m
-    if(m.completed)await target.read(m,m.completed-1,signal)
     m={...m,state:'preparing',generation:m.generation+1};await target.publish(m)
     try {
       onProgress?.(m.completed,m.total)

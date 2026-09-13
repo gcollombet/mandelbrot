@@ -1,5 +1,6 @@
 import type { ShaderExpmapManifest } from './displayFormat'
-export type ShaderLibraryEntry={id:string;name:string;state:ShaderExpmapManifest['state'];handle:FileSystemDirectoryHandle}
+/** Either a legacy block directory or the OPFS path of a single-file archive. */
+export type ShaderLibraryEntry={id:string;name:string;state:ShaderExpmapManifest['state'];handle?:FileSystemDirectoryHandle;archive?:string[]}
 async function database() {
   return new Promise<IDBDatabase>((resolve,reject)=>{
     const r=indexedDB.open('mandelbrot-shader-expmap-library',1)
@@ -15,8 +16,10 @@ async function transaction<T>(mode:IDBTransactionMode,action:(store:IDBObjectSto
   })} finally {db.close()}
 }
 export async function shaderLibraryEntries():Promise<ShaderLibraryEntry[]> {return transaction('readonly',s=>s.getAll())}
-export async function rememberShaderSource(m:ShaderExpmapManifest,handle:FileSystemDirectoryHandle) {
-  await transaction('readwrite',s=>s.put({id:m.id,name:m.name,state:m.state,handle}))
+export async function rememberShaderSource(m:ShaderExpmapManifest,location:FileSystemDirectoryHandle|string[]) {
+  const entry:ShaderLibraryEntry={id:m.id,name:m.name,state:m.state}
+  if(Array.isArray(location))entry.archive=location;else entry.handle=location
+  await transaction('readwrite',s=>s.put(entry))
 }
 export async function forgetShaderSource(id:string) {await transaction('readwrite',s=>s.delete(id))}
 export async function authorizeShaderDirectory(handle:FileSystemDirectoryHandle) {
