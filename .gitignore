@@ -38,3 +38,11 @@ target
 /src/assets/*.webp
 /src/assets/thumbs/*.webp
 /docs
+/firebase.security-test.json
+/.npmrc
+/tests/screenshots
+/test-results
+/.claude
+/.agent
+/.github/prompts
+/.github/skills
