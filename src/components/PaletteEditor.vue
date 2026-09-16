@@ -15,7 +15,7 @@ import {
 } from '../stopPresetStore.ts';
 import type {StopPresetRecord} from '../stopPresetStore.ts';
 import {canDeleteCatalogEntry} from '../catalogPermissions.ts';
-import { DenseField, DenseSection } from './dense';
+import { DenseField, DenseSection, DenseLinkedChip, useLinkedRecord } from './dense';
 import {assertActivePresetImportCapacity, PersonalPresetQuotaError} from '../personalQuotaGuard';
 
 // Per-effect value formatter for dense fields (mirrors the old toFixed logic).
@@ -30,6 +30,7 @@ const props = withDefaults(defineProps<{
   selectedIdx: number | null;
   interpolationMode?: InterpolationMode;
   pickerMode?: boolean;
+  suspendShortcuts?: (suspended: boolean) => void;
   tileTextureUrl?: string | null;
   skyboxTextureUrl?: string | null;
   tessellationLevel?: number;
@@ -186,14 +187,71 @@ async function saveCurrentStopPreset() {
   const stop = selectedStop.value;
   const name = stopPresetName.value.trim();
   if (!stop || !name) return;
+  const existing = props.stopPresets.find(item => item.name === name);
   await saveStopPresetEntry({
+    ...(existing ?? {}),
     name,
     values: valuesFromStop(stop),
-    date: new Date().toISOString(),
+    date: existing?.date ?? new Date().toISOString(),
+    lastUpdated: new Date().toISOString(),
   });
   emit('update:selectedStopPresetName', name);
   stopPresetName.value = '';
   refreshStopPresets();
+  stopLink.link({ kind: 'stop', key: existing?.guid ?? name, name, remote: existing?.remote });
+}
+
+// ── Linked stop preset: the selected point was loaded from a preset ──
+const stopLink = useLinkedRecord('stop', () => selectedStop.value ? valuesFromStop(selectedStop.value) : null);
+const stopLinkBusy = ref(false);
+
+function linkedStopRecord(): StopPresetRecord | undefined {
+  const key = stopLink.origin.value?.key;
+  return props.stopPresets.find(item => (item.guid ?? item.name) === key);
+}
+
+async function updateLinkedStopPreset(): Promise<void> {
+  const existing = linkedStopRecord();
+  const stop = selectedStop.value;
+  if (!existing || !stop || stopLinkBusy.value) return;
+  stopLinkBusy.value = true;
+  try {
+    await saveStopPresetEntry({ ...existing, values: valuesFromStop(stop), lastUpdated: new Date().toISOString() });
+    refreshStopPresets();
+    stopLink.refresh();
+  } catch (error) {
+    console.warn('Failed to update linked stop preset:', error);
+  } finally {
+    stopLinkBusy.value = false;
+  }
+}
+
+async function renameLinkedStopPreset(name: string): Promise<void> {
+  const existing = linkedStopRecord();
+  if (!existing || stopLinkBusy.value) return;
+  stopLinkBusy.value = true;
+  try {
+    // Stop presets are keyed by name: write the renamed copy, then drop the old key.
+    await saveStopPresetEntry({ ...existing, name, lastUpdated: new Date().toISOString() });
+    if (existing.name !== name) await deleteStopPresetEntry(existing.name);
+    emit('update:selectedStopPresetName', name);
+    refreshStopPresets();
+    stopLink.refresh({ name, key: existing.guid ?? name });
+  } finally {
+    stopLinkBusy.value = false;
+  }
+}
+
+function detachStopPreset(): void {
+  stopLink.unlink();
+  emit('update:selectedStopPresetName', '');
+}
+
+async function saveStopPresetVariant(): Promise<void> {
+  const origin = stopLink.origin.value;
+  if (!origin) return;
+  stopPresetName.value = `${origin.name} · variante`;
+  await saveCurrentStopPreset();
 }
 
 function applySelectedStopPreset() {
@@ -215,6 +273,7 @@ function applySelectedStopPreset() {
   }
 
   emit('update:colorStops', props.colorStops);
+  stopLink.link({ kind: 'stop', key: preset.guid ?? preset.name, name: preset.name, remote: preset.remote });
 }
 
 async function deleteSelectedStopPreset() {
@@ -334,8 +393,10 @@ function importStopPresets(event: Event) {
         <button class="mini-btn danger" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">Supprimer</button>
         <button v-if="isAdmin" class="mini-btn" :disabled="!selectedStopPresetRecord" @click="exportSelectedStopPreset">Exporter</button>
       </div>
+      <DenseLinkedChip v-if="stopLink.origin.value" kind="Point" :name="stopLink.origin.value.name" :dirty="stopLink.dirty.value" :locked="stopLink.locked.value" :busy="stopLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+        @update="updateLinkedStopPreset" @rename="renameLinkedStopPreset" @detach="detachStopPreset" @variant="saveStopPresetVariant" />
       <div class="save-row">
-        <input class="txt-in" v-model="stopPresetName" type="text" placeholder="Nom du preset…" @keyup.enter="saveCurrentStopPreset" />
+        <input class="txt-in" v-model="stopPresetName" type="text" :placeholder="stopLink.origin.value ? 'Enregistrer une copie sous…' : 'Nom du preset…'" @keyup.enter="saveCurrentStopPreset" />
         <button class="mini-btn primary" :disabled="!stopPresetName.trim()" @click="saveCurrentStopPreset">Enregistrer</button>
       </div>
       <div v-if="isAdmin" class="transfer">

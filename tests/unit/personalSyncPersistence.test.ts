@@ -10,7 +10,7 @@ const remote = vi.hoisted(() => ({
 vi.mock('../../src/personalLibraryRemote', () => remote);
 
 import {setActiveLibraryScope} from '../../src/scopedCache';
-import {savePresetEntry, updatePresetEntry, getPresetByGuid, getAllPresetCacheRecords, deletePresetEntry, acknowledgePresetEntry, purgePresetEntryByGuid, applyCloudPresetEntry} from '../../src/presetStore';
+import {savePresetEntry, saveRemotePresetEntry, updatePresetEntry, getPresetByGuid, getAllPresetCacheRecords, deletePresetEntry, acknowledgePresetEntry, purgePresetEntryByGuid, applyCloudPresetEntry} from '../../src/presetStore';
 import {startPersonalPresetSync, stopPersonalPresetSync, syncPersonalPresets} from '../../src/personalPresetSync';
 import {startPersonalTextureSync, stopPersonalTextureSync, syncPersonalTextures, textureBlobHash} from '../../src/personalTextureSync';
 import {saveTextureEntry, getTextureMetadataByGuid, getTextureBlobByGuid, updateTextureMetadata, getAllTextureCacheRecords, renameTextureEntry} from '../../src/textureStore';
@@ -69,6 +69,27 @@ async function saveTexture(content = blob) {
 }
 
 describe('durable cache and GCP synchronization', () => {
+  it.each([undefined, null, 1])('downloads a cloud-only preset without reusing its remote id (%s)', async (remoteId) => {
+    const local = await savePreset();
+    remote.presets.set('cloud-only', {
+      guid: 'cloud-only', type: 'completePreset', revision: 3,
+      payload: {id: remoteId, name: 'Other device', value: {scale: '2'}, thumbnail: '', date: '2026-09-16'},
+    });
+    let latest: any;
+    const stop = observePersonalSyncStatus(value => { latest = value; });
+    try {
+      await syncPersonalPresets(uid);
+      const downloaded = await getPresetByGuid('cloud-only');
+      expect(downloaded).toMatchObject({name: 'Other device', revision: 3, syncState: 'synced'});
+      expect(typeof downloaded!.id).toBe('number');
+      expect(downloaded!.id).not.toBe(local.id);
+      expect(await getPresetByGuid(local.guid)).toMatchObject({id: local.id, name: 'A', syncState: 'synced'});
+      expect(latest.state).toBe('synced');
+      await syncPersonalPresets(uid);
+      expect((await getPresetByGuid('cloud-only'))!.id).toBe(downloaded!.id);
+    } finally { stop(); }
+  });
+
   it('sends a second edit made during the first upload, instead of falsely acknowledging it', async () => {
     const entry = await savePreset();
     const entered = deferred(), release = deferred();
@@ -100,6 +121,29 @@ describe('durable cache and GCP synchronization', () => {
     expect(remote.deletePersonalPreset).toHaveBeenCalledWith('preset-a');
     expect(remote.presets.has('preset-a')).toBe(false);
     expect(await getAllPresetCacheRecords()).toEqual([]);
+  });
+
+  it('reuses a hidden tombstone when the public catalog restores the same GUID', async () => {
+    const entry = await savePreset();
+    await deletePresetEntry(entry.id);
+
+    await expect(saveRemotePresetEntry({
+      guid: entry.guid,
+      name: 'Restored public preset',
+      value: entry.value,
+      thumbnail: '',
+      date: '2026-09-16',
+      lastUpdated: '2026-09-16',
+      scaleExponent: 0,
+      remote: {publishedName: 'Restored public preset', lastUpdated: '2026-09-16'},
+    })).resolves.toBe(entry.id);
+
+    expect(await getPresetByGuid(entry.guid)).toMatchObject({
+      id: entry.id,
+      origin: 'public',
+      syncState: 'synced',
+      tombstone: false,
+    });
   });
 
   it('guards acknowledgement, pull and purge against a newer local version inside IndexedDB', async () => {

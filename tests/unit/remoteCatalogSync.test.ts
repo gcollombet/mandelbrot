@@ -119,6 +119,20 @@ describe('remoteCatalogSync', () => {
     }));
   });
 
+  it('coalesces concurrent catalog synchronizations', async () => {
+    let releaseManifest!: (manifest: typeof emptyManifest) => void;
+    vi.mocked(getPublicCatalogManifest).mockImplementation(() => new Promise(resolve => {
+      releaseManifest = resolve;
+    }));
+
+    const first = syncRemoteCatalog();
+    const second = syncRemoteCatalog();
+    releaseManifest(emptyManifest);
+    await Promise.all([first, second]);
+
+    expect(getPublicCatalogManifest).toHaveBeenCalledTimes(1);
+  });
+
   it('imports changed palette, stop preset, and texture entries by GUID', async () => {
     vi.mocked(getPublicCatalogManifest).mockResolvedValue({
       ...emptyManifest,

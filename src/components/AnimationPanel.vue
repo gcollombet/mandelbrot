@@ -20,7 +20,7 @@ import {
   canDeleteCatalogEntry,
   canOverwriteCatalogPayload,
 } from '../catalogPermissions';
-import { DenseField, DenseSection, DenseSelect } from './dense';
+import { DenseField, DenseSection, DenseSelect, DenseLinkedChip, useLinkedRecord } from './dense';
 
 const props = defineProps<{
   userRole: UserRole;
@@ -98,8 +98,10 @@ async function saveAnimationPreset() {
     remote: existing?.remote,
   });
   animationPresets.value = await getAllAnimationPresetEntries();
-  selectedAnimationPreset.value = name;
+  const stored = animationPresets.value.find(p => existing ? p.guid === existing.guid : p.name === name) ?? animationPresets.value.find(p => p.name === name);
+  selectedAnimationPreset.value = stored?.name ?? name;
   animationPresetName.value = '';
+  if (stored) animationLink.link({ kind: 'animation', key: stored.guid ?? stored.name, name: stored.name, remote: stored.remote });
 }
 
 function selectAnimationPresetFromDropdown(preset: AnimationPresetRecord) {
@@ -109,6 +111,65 @@ function selectAnimationPresetFromDropdown(preset: AnimationPresetRecord) {
   model.value.animationSpeed = model.value.animation.globalSpeed;
   showAnimationPresetDropdown.value = false;
   triggerAnimationUpdate();
+  animationLink.link({ kind: 'animation', key: preset.guid ?? preset.name, name: preset.name, remote: preset.remote });
+}
+
+// ── Linked animation preset ──
+const animationLink = useLinkedRecord('animation', () => model.value.animation ? normalizeAnimationConfig(cloneAnimationConfig(model.value.animation)) : null);
+const animationLinkBusy = ref(false);
+
+function linkedAnimationRecord(): AnimationPresetRecord | undefined {
+  const key = animationLink.origin.value?.key;
+  return animationPresets.value.find(p => (p.guid ?? p.name) === key);
+}
+
+async function updateLinkedAnimationPreset(): Promise<void> {
+  const existing = linkedAnimationRecord();
+  if (!existing || animationLinkBusy.value) return;
+  animationLinkBusy.value = true;
+  try {
+    ensureAnimationConfig();
+    await saveAnimationPresetEntry({ ...existing, animation: cloneAnimationConfig(model.value.animation!), lastUpdated: new Date().toISOString() });
+    animationPresets.value = await getAllAnimationPresetEntries();
+    animationLink.refresh();
+  } catch (error) {
+    console.warn('Failed to update linked animation preset:', error);
+  } finally {
+    animationLinkBusy.value = false;
+  }
+}
+
+async function renameLinkedAnimationPreset(name: string): Promise<void> {
+  const existing = linkedAnimationRecord();
+  if (!existing || animationLinkBusy.value) return;
+  animationLinkBusy.value = true;
+  try {
+    // Animation presets are keyed by name: write the renamed copy, then drop the old key.
+    await saveAnimationPresetEntry({ ...existing, name, lastUpdated: new Date().toISOString() });
+    animationPresets.value = await getAllAnimationPresetEntries();
+    const stored = animationPresets.value.find(p => p.guid === existing.guid && p.name !== existing.name);
+    if (stored) await deleteAnimationPresetEntry(existing.name);
+    animationPresets.value = await getAllAnimationPresetEntries();
+    const finalName = stored?.name ?? existing.name;
+    selectedAnimationPreset.value = finalName;
+    animationPresetName.value = finalName;
+    animationLink.refresh({ name: finalName, key: stored?.guid ?? finalName });
+  } finally {
+    animationLinkBusy.value = false;
+  }
+}
+
+function detachAnimationPreset(): void {
+  animationLink.unlink();
+  selectedAnimationPreset.value = '';
+  animationPresetName.value = '';
+}
+
+async function saveAnimationPresetVariant(): Promise<void> {
+  const origin = animationLink.origin.value;
+  if (!origin) return;
+  animationPresetName.value = `${origin.name} · variante`;
+  await saveAnimationPreset();
 }
 
 async function toggleAnimationPresetFavorite(preset: AnimationPresetRecord): Promise<void> {
@@ -355,12 +416,14 @@ watch(
             </div>
           </div>
 
+          <DenseLinkedChip v-if="animationLink.origin.value" kind="Animation" :name="animationLink.origin.value.name" :dirty="animationLink.dirty.value" :locked="animationLink.locked.value" :busy="animationLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+            @update="updateLinkedAnimationPreset" @rename="renameLinkedAnimationPreset" @detach="detachAnimationPreset" @variant="saveAnimationPresetVariant" />
           <div class="save-row">
             <input
               class="txt-in"
               v-model="animationPresetName"
               type="text"
-              placeholder="Nom du préréglage…"
+              :placeholder="animationLink.origin.value ? 'Enregistrer une copie sous…' : 'Nom du préréglage…'"
               @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
               @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
               @keyup.enter="saveAnimationPreset"

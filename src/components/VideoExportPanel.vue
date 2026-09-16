@@ -12,7 +12,8 @@ import { computed, ref, watch } from 'vue';
 import type { MandelbrotExposed } from '../types/MandelbrotExposed';
 import type { Engine } from '../Engine';
 import ExpmapVideoPanel from './ExpmapVideoPanel.vue';
-import { expmapVideoSelected, expmapBusy } from '../expmap/runtime';
+import ShaderExpmapPanel from './ShaderExpmapPanel.vue';
+import { expmapVideoSelected, shaderExpmapVideoSelected, expmapBusy } from '../expmap/runtime';
 import {
   describeOutputWarnings,
   describeParcoursWarnings,
@@ -330,8 +331,9 @@ function start() {
 
 <template>
   <div class="video-export-panel sections">
-    <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect label="Source" :model-value="expmapVideoSelected ? 'expmap' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: 'Vidéo depuis la fractale' }, { value: 'expmap', label: 'Vidéo depuis une ExpMap' }]" @update:model-value="expmapVideoSelected = $event === 'expmap'"/></fieldset>
-    <ExpmapVideoPanel v-if="expmapVideoSelected" :engine="engine" :controller="controller"/>
+    <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect label="Source" :model-value="shaderExpmapVideoSelected ? 'shader' : expmapVideoSelected ? 'expmap' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: 'Vidéo depuis la fractale' }, { value: 'expmap', label: 'Vidéo depuis une ExpMap cuite' }, { value: 'shader', label: 'Vidéo depuis une ExpMap recolorable' }]" @update:model-value="expmapVideoSelected = $event === 'expmap'; shaderExpmapVideoSelected = $event === 'shader'"/></fieldset>
+    <ShaderExpmapPanel v-if="shaderExpmapVideoSelected" video-only :plan="null" name="" :appearance="current as unknown as import('../Engine').RenderOptions" :engine="engine ?? null" :controller="controller ?? null"/>
+    <ExpmapVideoPanel v-else-if="expmapVideoSelected" :engine="engine" :controller="controller"/>
     <fieldset v-else :disabled="running || expmapBusy" class="ve-config">
     <DenseSection title="Trajet" scope="Rendu de la fractale, image par image">
       <div class="ve-capture"><span>Centre fixe</span><button class="ve-pin" @click="centerCurrent()">Utiliser le centre actuel</button></div>
@@ -414,7 +416,7 @@ function start() {
       </details>
     </DenseSection>
     </fieldset>
-    <DenseSection v-if="!expmapVideoSelected" class="ve-footer" title="Export" scope="Chaque image est calculée jusqu'à convergence">
+    <DenseSection v-if="!expmapVideoSelected && !shaderExpmapVideoSelected" class="ve-footer" title="Export" scope="Chaque image est calculée jusqu'à convergence">
       <div class="fields">
         <ul v-if="problems.length" class="ve-problems">
           <li v-for="(problem, index) in problems" :key="index">

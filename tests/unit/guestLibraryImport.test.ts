@@ -32,9 +32,9 @@ describe('guest library import planning', () => {
   });
 
   it('blocks the whole import when either quota would be exceeded', () => {
-    const plan = buildGuestImportPlan('user-a', snapshot(2, 2), new Set(), new Set(), {presetCount: 399, textureCount: 9});
+    const plan = buildGuestImportPlan('user-a', snapshot(2, 2), new Set(), new Set(), {presetCount: 999, textureCount: 9});
     expect(plan.canImport).toBe(false);
-    expect(plan.blockingReason).toContain('400-preset limit');
+    expect(plan.blockingReason).toContain('1000-preset limit');
     expect(plan.blockingReason).toContain('10-texture limit');
   });
 

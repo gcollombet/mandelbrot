@@ -144,7 +144,7 @@ export async function getStopPresetByGuid(guid: string): Promise<StopPresetRecor
 export async function saveRemoteStopPresetEntry(record: StopPresetRecord): Promise<void> {
   Object.assign(record, publicCacheFields(record));
   if (!record.guid) record.guid = createGuid();
-  const existing = await getStopPresetByGuid(record.guid);
+  const existing = (await getAllStopPresetCacheRecords()).find(entry => entry.guid === record.guid) ?? null;
   if (existing) {
     await saveStopPresetEntry({
       ...record,

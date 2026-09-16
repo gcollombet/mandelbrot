@@ -12,9 +12,12 @@ export { default as DenseTopbar } from './DenseTopbar.vue';
 export { default as DenseViewMenu } from './DenseViewMenu.vue';
 export { default as DenseMobileNav } from './DenseMobileNav.vue';
 export { default as DenseTip } from './DenseTip.vue';
+export { default as DenseLinkedChip } from './DenseLinkedChip.vue';
 export { showTip, hideTip } from './denseTip';
 
 export { useDenseScrub } from './useDenseScrub';
+export { useLinkedRecord } from './useLinkedRecord';
+export type { LinkedOrigin } from './useLinkedRecord';
 export { useDenseView, denseAttrs } from './useDenseView';
 export { formatValue } from './denseFormat';
 export type { DenseFormatter } from './denseFormat';

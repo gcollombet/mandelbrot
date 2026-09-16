@@ -33,6 +33,8 @@ export interface MandelbrotParams {
     aaAdaptive?: boolean;
     palettePeriod: number;
     paletteOffset: number;
+    paletteScreenShiftX?: number;
+    paletteScreenShiftY?: number;
     heightPaletteShift: number;
     paletteMirror: boolean;
     iterationPaletteCurve: IterationPaletteCurve;

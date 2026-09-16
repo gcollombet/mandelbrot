@@ -37,7 +37,10 @@ export class GpuPalettePath {
         device.queue.writeBuffer(this.buffer, 0, new Float32Array([
             this.path.stops.length, mode, this.path.outside === 'manual' ? 1 : 0, 1,
             (u ? projectionDepth : depth) - this.path.stops[0].magnitude, u ? u[6] / Math.LN10 : 0, u ? u[3] : 0, u ? u[4] : 0,
-            u ? u[9] : 1, u ? u[10] : 0, 0, 0,
+            // extra.z: first stop's absolute magnitude. Node magnitudes are stored
+            // relative to it; the ExpMap display shaders receive the absolute camera
+            // depth and subtract this before walking the path.
+            u ? u[9] : 1, u ? u[10] : 0, this.path.stops[0].magnitude, 0,
         ]))
         // Center blocks currently use density=1 and zero centerHalf in the producer.
     }

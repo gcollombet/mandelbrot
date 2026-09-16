@@ -14,6 +14,7 @@ export const PATH_GLOBAL_FIELDS = [
     'protrusionPhase', 'protrusionSharpness', 'protrusionStrength', 'protrusionGeometryMix',
     'protrusionPeriod', 'localShadowStrength', 'lightAngle', 'varnishStrength',
     'gradeContrast', 'gradeSaturation', 'phaseColoringStrength',
+    'paletteScreenShiftX', 'paletteScreenShiftY',
 ] as const
 export type PathAppearance = Pick<MandelbrotParams, 'colorStops' | 'interpolationMode'> & Partial<MandelbrotParams>
 export type PalettePathStop = { id: string; magnitude: number; name: string; appearance: PathAppearance; curve: StopTransferCurve }

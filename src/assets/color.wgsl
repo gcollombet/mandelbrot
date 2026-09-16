@@ -107,6 +107,8 @@ struct Uniforms {
   rawOriginY: f32,       // 97
   orbitMetricsEnabled: f32, // 98: no orbit texture reads when the payload is absent
   presetTransition: f32,
+  paletteScreenShiftX: f32, // 100: palette cycles traversed across the screen width [0, 2]
+  paletteScreenShiftY: f32, // 101: same along the screen height
 };
 @group(0) @binding(0) var<uniform> baseParameters: Uniforms;
 var<private> parameters: Uniforms;
@@ -149,6 +151,19 @@ var<private> pathT: f32 = 0.0;
 fn path_value(node: u32, field: u32) -> f32 { return palettePath.nodes[node].values[field / 4u][field % 4u]; }
 fn path_mix(field: u32) -> f32 { return mix(path_value(pathA, field), path_value(pathB, field), pathT); }
 fn path_choice(field: u32) -> f32 { return select(path_value(pathA, field), path_value(pathB, field), pathT >= 0.5); }
+// Periodic control: shortest arc (mirrors presetTransition.ts mixTransitionValue).
+fn path_mix_wrap(field: u32, period: f32) -> f32 {
+  let a = path_value(pathA, field); let b = path_value(pathB, field);
+  var delta = (b - a) - period * floor((b - a) / period);
+  if (delta > period * 0.5) { delta -= period; }
+  let v = a + delta * pathT;
+  return v - period * floor(v / period);
+}
+// Log-perceived control (palette period): geometric interpolation.
+fn path_mix_log(field: u32) -> f32 {
+  let a = max(path_value(pathA, field), 1e-6); let b = max(path_value(pathB, field), 1e-6);
+  return exp(mix(log(a), log(b), pathT));
+}
 fn path_curve(curve: f32, t: f32) -> f32 {
   let x = clamp(t, 0.0, 1.0);
   switch i32(curve) {
@@ -181,32 +196,34 @@ fn apply_palette_path(depth: f32) {
       }
     }
   }
-  parameters.palettePeriod = path_mix(4u);
-  parameters.paletteOffset = path_mix(5u);
+  parameters.palettePeriod = path_mix_log(4u);
+  parameters.paletteOffset = path_mix_wrap(5u, 1.0);
   parameters.heightPaletteShift = path_mix(6u);
   parameters.tessellationLevel = path_mix(7u);
   parameters.displacementAmount = path_mix(8u);
   parameters.ambientOcclusionStrength = path_mix(9u);
   parameters.microBumpStrength = path_mix(10u);
   parameters.reliefDepth = path_mix(11u);
-  parameters.protrusionPhase = path_mix(12u);
+  parameters.protrusionPhase = path_mix_wrap(12u, 1.0);
   parameters.protrusionSharpness = path_mix(13u);
   parameters.protrusionStrength = path_mix(14u);
   parameters.protrusionGeometryMix = path_mix(15u);
   parameters.protrusionPeriod = path_mix(16u);
   parameters.localShadowStrength = path_mix(17u);
-  parameters.lightAngle = path_mix(18u);
+  parameters.lightAngle = path_mix_wrap(18u, 6.283185307179586);
   parameters.varnishStrength = path_mix(19u);
   parameters.gradeContrast = path_mix(20u);
   parameters.gradeSaturation = path_mix(21u);
   parameters.phaseColoringStrength = path_mix(22u);
-  parameters.paletteMirror = path_choice(23u);
-  parameters.iterationPaletteCurve = path_choice(24u);
-  parameters.textureMappingXVariable = path_choice(25u);
-  parameters.textureMappingYVariable = path_choice(26u);
-  parameters.textureMappingXScale = path_mix(27u);
-  parameters.textureMappingYScale = path_mix(28u);
-  parameters.textureMappingMirror = path_choice(29u);
+  parameters.paletteScreenShiftX = path_mix(23u);
+  parameters.paletteScreenShiftY = path_mix(24u);
+  parameters.paletteMirror = path_choice(25u);
+  parameters.iterationPaletteCurve = path_choice(26u);
+  parameters.textureMappingXVariable = path_choice(27u);
+  parameters.textureMappingYVariable = path_choice(28u);
+  parameters.textureMappingXScale = path_mix(29u);
+  parameters.textureMappingYScale = path_mix(30u);
+  parameters.textureMappingMirror = path_choice(31u);
   let light = normalize(vec3<f32>(cos(parameters.lightAngle), sin(parameters.lightAngle), 1.85));
   parameters.lightDirX = light.x; parameters.lightDirY = light.y; parameters.lightDirZ = light.z;
 }
@@ -295,6 +312,12 @@ fn samplePaletteColor(palettePhase: f32) -> vec3<f32> {
 
 fn animatedPaletteOffset() -> f32 {
   return fract(parameters.paletteOffset);
+}
+
+// Screen-position modulation of the palette index: N = N cycles of the
+// palette across the whole viewport along that axis.
+fn screenPaletteShift(uv_screen: vec2<f32>) -> f32 {
+  return uv_screen.x * parameters.paletteScreenShiftX + uv_screen.y * parameters.paletteScreenShiftY;
 }
 
 fn palettePhaseFromRaw(rawPhase: f32) -> f32 {
@@ -595,7 +618,7 @@ fn sample_skybox(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>
   }
   if (palettePath.config.x >= 2.0) {
     layerA = i32(path_value(pathA, 3u)); layerB = i32(path_value(pathB, 3u)); blend = pathT;
-    levelsA = path_value(pathA, 30u); levelsB = path_value(pathB, 30u);
+    levelsA = path_value(pathA, 32u); levelsB = path_value(pathB, 32u);
   }
   let lodA = roughness * max(levelsA - 4.0, 0.0);
   let lodB = roughness * max(levelsB - 4.0, 0.0);
@@ -813,7 +836,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
   let iterationCoordinate = iteration_palette_coordinate(v, paletteRepeat);
   let heightPhaseShift = clamp(distanceHeightStored, -16.0, 16.0) * (clamp(parameters.heightPaletteShift, 0.0, 100.0) / 16.0);
   let phaseColoringShift = (1.0 - abs(fract(geometryAngle / (2.0 * 3.141592653589793)) * 2.0 - 1.0)) * parameters.phaseColoringStrength;
-  let palettePhase = palettePhaseFromRaw(iterationCoordinate + animatedPaletteOffset() + heightPhaseShift + phaseColoringShift);
+  let palettePhase = palettePhaseFromRaw(iterationCoordinate + animatedPaletteOffset() + screenPaletteShift(uv_screen) + heightPhaseShift + phaseColoringShift);
 
   // ── Sample all effect channels from the palette texture ──
   var fx = sampleEffects(palettePhase);
@@ -1448,7 +1471,7 @@ fn colorize_pixel(
   // Compute a preliminary phase to sample the smoothness weight, then
   // apply it to select between iter_val and nu.
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
-  let prelimPhase = palettePhaseFromRaw(iteration_palette_coordinate(nu, paletteRepeat) + animatedPaletteOffset());
+  let prelimPhase = palettePhaseFromRaw(iteration_palette_coordinate(nu, paletteRepeat) + animatedPaletteOffset() + screenPaletteShift(uv_screen));
   let row2 = sample_palette(prelimPhase, 2.0);
   let wSmoothness = row2.g;
   nu = mix(iter_v, nu, wSmoothness);

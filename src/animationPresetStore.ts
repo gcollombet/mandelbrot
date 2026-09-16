@@ -122,7 +122,7 @@ export async function saveAnimationPresetEntry(record: AnimationPresetRecord): P
 
 export async function saveRemoteAnimationPresetEntry(record: AnimationPresetRecord): Promise<void> {
   Object.assign(record, publicCacheFields(record));
-  const existing = await getAnimationPresetByGuid(record.guid);
+  const existing = (await getAllAnimationPresetCacheRecords()).find(entry => entry.guid === record.guid) ?? null;
   await saveAnimationPresetEntry({
     ...record,
     name: existing?.name ?? record.name,

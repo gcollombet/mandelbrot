@@ -260,7 +260,7 @@ export async function saveTextureEntry(
 export async function saveRemoteTextureEntry(metadata: TextureMetadata, blob: Blob): Promise<void> {
   Object.assign(metadata, publicCacheFields(metadata));
   if (!metadata.guid) metadata.guid = createGuid();
-  const existing = await getTextureMetadataByGuid(metadata.guid);
+  const existing = (await getAllTextureCacheRecords()).find(entry => entry.guid === metadata.guid) ?? null;
   await saveTextureEntry(
     existing?.name ?? metadata.name,
     blob,

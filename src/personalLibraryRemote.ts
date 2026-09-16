@@ -14,6 +14,7 @@ import {
 } from 'firebase/firestore';
 import {deleteObject, getBlob, getMetadata, ref, uploadBytes} from 'firebase/storage';
 import {getFirebaseServices} from './firebaseConfig';
+import { PERSONAL_PRESET_LIMIT, PERSONAL_TEXTURE_LIMIT } from './personalLibraryTypes';
 import type {
   GuestImportBatch,
   PersonalPresetManifest,
@@ -498,7 +499,7 @@ export async function repairPersonalUsage(): Promise<PersonalUsage> {
     getDocs(collection(db, 'users', uid, 'presets')),
     getDocs(collection(db, 'users', uid, 'textures')),
   ]);
-  if (presets.size > 400 || textures.size > 10) {
+  if (presets.size > PERSONAL_PRESET_LIMIT || textures.size > PERSONAL_TEXTURE_LIMIT) {
     throw new PersonalLibraryValidationError('quota-exceeded', 'Existing personal data exceeds configured quota.');
   }
   const entries = presets.docs.map(entry => ({

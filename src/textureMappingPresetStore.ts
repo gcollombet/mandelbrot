@@ -152,7 +152,7 @@ export async function saveTextureMappingPresetEntry(record: TextureMappingPreset
 
 export async function saveRemoteTextureMappingPresetEntry(record: TextureMappingPresetRecord): Promise<void> {
   Object.assign(record, publicCacheFields(record));
-  const existing = await getTextureMappingPresetByGuid(record.guid);
+  const existing = (await getAllTextureMappingPresetCacheRecords()).find(entry => entry.guid === record.guid) ?? null;
   if (existing && !existing.builtIn) {
     await saveTextureMappingPresetEntry({
       ...record,

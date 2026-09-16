@@ -1,4 +1,4 @@
-export const PERSONAL_PRESET_LIMIT = 400;
+export const PERSONAL_PRESET_LIMIT = 1000;
 export const PERSONAL_TEXTURE_LIMIT = 10;
 
 export type PersonalPresetType =

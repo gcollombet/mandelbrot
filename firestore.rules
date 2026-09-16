@@ -54,7 +54,7 @@ service cloud.firestore {
       return data.keys().hasOnly(['entries', 'revision', 'updatedAt', 'repairedAt'])
         && data.keys().hasAll(['entries', 'revision', 'updatedAt'])
         && data.entries is list
-        && data.entries.size() <= 400
+        && data.entries.size() <= 1000
         && data.revision is int
         && data.revision > 0
         && data.updatedAt is timestamp
@@ -66,7 +66,7 @@ service cloud.firestore {
         && data.keys().hasAll(['presetCount', 'textureCount', 'revision', 'updatedAt'])
         && data.presetCount is int
         && data.presetCount >= 0
-        && data.presetCount <= 400
+        && data.presetCount <= 1000
         && data.textureCount is int
         && data.textureCount >= 0
         && data.textureCount <= 10
@@ -136,11 +136,11 @@ service cloud.firestore {
         && data.ownerUid == uid
         && data.status in ['pending', 'running', 'complete', 'error']
         && data.presetGuids is list
-        && data.presetGuids.size() <= 400
+        && data.presetGuids.size() <= 1000
         && data.textureGuids is list
         && data.textureGuids.size() <= 10
         && data.completedPresetGuids is list
-        && data.completedPresetGuids.size() <= 400
+        && data.completedPresetGuids.size() <= 1000
         && data.completedTextureGuids is list
         && data.completedTextureGuids.size() <= 10
         && data.updatedAt is timestamp

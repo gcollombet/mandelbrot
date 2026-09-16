@@ -35,9 +35,9 @@ describe('personal library direct validation', () => {
   });
 
   it('enforces normal-client preset and texture quota boundaries', () => {
-    expect(personalQuotaCountAfter('preset', 399, false, 'upsert')).toBe(400);
+    expect(personalQuotaCountAfter('preset', 999, false, 'upsert')).toBe(1000);
     expect(personalQuotaCountAfter('texture', 9, false, 'upsert')).toBe(10);
-    expect(() => personalQuotaCountAfter('preset', 400, false, 'upsert')).toThrow(PersonalLibraryQuotaError);
+    expect(() => personalQuotaCountAfter('preset', 1000, false, 'upsert')).toThrow(PersonalLibraryQuotaError);
     expect(() => personalQuotaCountAfter('texture', 10, false, 'upsert')).toThrow(PersonalLibraryQuotaError);
     expect(personalQuotaCountAfter('texture', 10, true, 'delete')).toBe(9);
   });

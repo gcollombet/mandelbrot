@@ -126,18 +126,18 @@ describe('Firestore data validation and compatibility', () => {
 
   it('bounds quota documents and manifests and prevents their deletion', async () => {
     const usage = owner().firestore().doc('users/alice/usage/current');
-    await assertFails(usage.set({presetCount: 401, textureCount: 0, revision: 1, updatedAt: now()}));
+    await assertFails(usage.set({presetCount: 1001, textureCount: 0, revision: 1, updatedAt: now()}));
     await assertFails(usage.set({presetCount: 0, textureCount: 11, revision: 1, updatedAt: now()}));
-    await assertSucceeds(usage.set({presetCount: 400, textureCount: 10, revision: 1, updatedAt: now()}));
+    await assertSucceeds(usage.set({presetCount: 1000, textureCount: 10, revision: 1, updatedAt: now()}));
     await assertFails(usage.delete());
     const manifest = owner().firestore().doc('users/alice/manifests/presets');
-    await assertFails(manifest.set({entries: Array(401).fill({guid: 'a', type: 'completePreset', revision: 1}), revision: 1, updatedAt: now()}));
+    await assertFails(manifest.set({entries: Array(1001).fill({guid: 'a', type: 'completePreset', revision: 1}), revision: 1, updatedAt: now()}));
     await assertSucceeds(manifest.set({entries: [], revision: 1, updatedAt: now()}));
     await assertFails(manifest.delete());
   });
 
   it('documents the existing limitation: client-maintained quotas do not stop direct owner writes', async () => {
-    await seed('users/alice/usage/current', {presetCount: 400, textureCount: 10, revision: 1, updatedAt: now()});
+    await seed('users/alice/usage/current', {presetCount: 1000, textureCount: 10, revision: 1, updatedAt: now()});
     // This is a known anti-abuse gap, not an assertion of quota enforcement.
     await assertSucceeds(owner().firestore().doc('users/alice/presets/a').set(preset()));
     await assertSucceeds(owner().firestore().doc('users/alice/textureReservations/a.webp').set(reservation()));

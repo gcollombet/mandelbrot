@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { nearestPaletteStop } from '../palettePicking';
 import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
 import MandelbrotController from './MandelbrotController.vue';
@@ -30,6 +31,7 @@ import {normalizeAnimationConfig} from '../AnimationConfig';
 import {normalizeIterationPaletteCurve} from '../IterationPaletteCurve';
 import {createInterpolatedColorStop, normalizeColorStops} from '../ColorStop';
 import {interpolatePresetAppearance} from '../presetTransition';
+import {snapshotPathAppearance, PATH_GLOBAL_FIELDS, type PathAppearance} from '../palettePath';
 import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
 import {
@@ -57,6 +59,7 @@ import {guestPresetCounts, importGuestLibrary, prepareGuestImport, snapshotGuest
 import {personalLibraryFeatureFlags} from '../personalLibraryFeatureFlags';
 import {getKeyboardLayout, getSettingsTabs} from '../keyboardShortcuts';
 import AboutPanel from './AboutPanel.vue';
+import CloudAccountControl from './CloudAccountControl.vue';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 
@@ -111,6 +114,8 @@ const isTouchDevice = typeof window !== 'undefined'
   && window.matchMedia?.('(hover: none) and (pointer: coarse)').matches;
 const authConfigured = isAuthConfigured();
 const authUserEmail = ref('');
+const authBusy = ref(false);
+const authError = ref('');
 const userRole = ref<UserRole>('guest');
 const isAdmin = computed(() => userRole.value === 'admin');
 let stopAuthObserver: (() => void) | null = null;
@@ -228,25 +233,43 @@ async function acceptGuestImport(): Promise<void> {
 }
 
 async function loginWithGoogle() {
-  await signInWithGoogle();
+  if (authBusy.value) return;
+  authBusy.value = true;
+  authError.value = '';
+  try { await signInWithGoogle(); }
+  catch (error) {
+    const code = (error as {code?: string})?.code;
+    if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
+      authError.value = code === 'auth/popup-blocked'
+        ? 'Autorisez la fenêtre de connexion Google dans votre navigateur, puis réessayez.'
+        : 'Connexion impossible pour le moment. Vérifiez votre connexion et réessayez.';
+    }
+  } finally { authBusy.value = false; }
 }
 
 async function logoutUser() {
-  await signOutCurrentUser();
+  if (authBusy.value) return;
+  authBusy.value = true;
+  authError.value = '';
+  try { await signOutCurrentUser(); }
+  catch { authError.value = 'La déconnexion a échoué. Réessayez.'; }
+  finally { authBusy.value = false; }
 }
 
 // --- Mode pipette palette ---
 const pickerMode = ref(false);
+const pickerAction = ref<'add' | 'select'>('add');
 
-function togglePickerMode() {
-  pickerMode.value = !pickerMode.value;
+function togglePickerMode(action: 'add' | 'select' = 'add') {
+  pickerMode.value = pickerAction.value === action ? !pickerMode.value : true;
+  pickerAction.value = action;
 }
 
 function finishPickerMode() {
   pickerMode.value = false;
 }
 
-/** Gère le clic en mode pipette : calcule la phase et ajoute directement le curseur. */
+/** Pick a palette position to add a stop or select its nearest existing stop. */
 function onPalettePick(data: IterationData, _clientX: number, _clientY: number) {
   const p = mandelbrotParams.value;
   // Always use smooth=true for picking — per-stop smoothness is baked in the texture
@@ -256,6 +279,11 @@ function onPalettePick(data: IterationData, _clientX: number, _clientY: number) 
   );
   if (result.isInSet) return; // pas de curseur pour les points dans l'ensemble
   const stops = p.colorStops;
+  if (pickerAction.value === 'select') {
+    const index = nearestPaletteStop(stops, result.phase);
+    if (index !== null) settingsRefs.value.palettes?.selectPaletteStop(index);
+    return;
+  }
   if (stops.length >= 200) return; // max 200 stops
   // Obtenir la couleur de la palette à cette phase
   const palette = new Palette(p.colorStops, p.interpolationMode);
@@ -352,6 +380,8 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   angle: 0.0,
   palettePeriod: 1886.72,
   paletteOffset: 0.0,
+  paletteScreenShiftX: 0,
+  paletteScreenShiftY: 0,
   heightPaletteShift: 0,
   paletteMirror: false,
   iterationPaletteCurve: 'linear',
@@ -1422,6 +1452,86 @@ let travelStartParams: MandelbrotParams | null = null;
 let travelTargetPreset: PresetRecord | null = null;
 let travelGeneration = 0;
 
+// ── Live editing of a palette-path stop ──────────────────────────────
+// Double-clicking a stop loads its appearance into the manual palette (the
+// one the Palettes tab edits). While linked, every palette edit is written
+// back into that stop, so the path re-bakes and the render follows. Disabling
+// the path (or losing the stop) restores the palette that was there before.
+const pathStopEdit = ref<{ stopId: string; backup: PathAppearance } | null>(null);
+
+function applyPathAppearance(source: PathAppearance): void {
+  // Plain copy: the stop lives inside the reactive params, and the engine
+  // structuredClones the render options every frame (Proxies are not clonable).
+  const appearance: PathAppearance = JSON.parse(JSON.stringify(source));
+  const p = mandelbrotParams.value;
+  p.colorStops = appearance.colorStops;
+  p.interpolationMode = appearance.interpolationMode;
+  p.paletteMirror = !!appearance.paletteMirror;
+  p.iterationPaletteCurve = normalizeIterationPaletteCurve(appearance.iterationPaletteCurve);
+  p.textureMapping = normalizeTextureMappingFromLegacy(appearance);
+  for (const field of PATH_GLOBAL_FIELDS) {
+    if (appearance[field] != null) (p as any)[field] = appearance[field];
+  }
+  for (const field of ['textureGuid', 'textureName', 'skyboxGuid', 'skyboxName'] as const) {
+    if (typeof appearance[field] === 'string') p[field] = appearance[field];
+  }
+}
+
+function editPathStop(stopId: string): void {
+  const path = mandelbrotParams.value.palettePath;
+  const stop = path?.stops.find(s => s.id === stopId);
+  if (!path || !stop) return;
+  if (!pathStopEdit.value) {
+    pathStopEdit.value = { stopId, backup: snapshotPathAppearance(mandelbrotParams.value) };
+  } else {
+    pathStopEdit.value = { ...pathStopEdit.value, stopId };
+  }
+  applyPathAppearance(stop.appearance);
+}
+
+function endPathStopEdit(restore: boolean): void {
+  const edit = pathStopEdit.value;
+  if (!edit) return;
+  pathStopEdit.value = null;
+  if (restore) applyPathAppearance(edit.backup);
+}
+
+let pathStopWriteTimer: ReturnType<typeof setTimeout> | undefined;
+watch(
+  () => {
+    if (!pathStopEdit.value) return '';
+    try { return JSON.stringify(snapshotPathAppearance(mandelbrotParams.value)); } catch { return ''; }
+  },
+  serialized => {
+    if (!serialized || !pathStopEdit.value) return;
+    clearTimeout(pathStopWriteTimer);
+    pathStopWriteTimer = setTimeout(() => {
+      const edit = pathStopEdit.value;
+      const path = mandelbrotParams.value.palettePath;
+      if (!edit || !path) return;
+      const index = path.stops.findIndex(s => s.id === edit.stopId);
+      if (index < 0) return;
+      if (JSON.stringify(path.stops[index].appearance) === serialized) return;
+      // Plain copy (no nested reactive Proxies): the engine structuredClones it.
+      const next = JSON.parse(JSON.stringify(path));
+      next.stops[index].appearance = JSON.parse(serialized);
+      mandelbrotParams.value.palettePath = next;
+    }, 100);
+  },
+);
+
+watch(
+  () => {
+    const path = mandelbrotParams.value.palettePath;
+    return { enabled: !!path?.enabled, hasStop: !!(pathStopEdit.value && path?.stops.some(s => s.id === pathStopEdit.value!.stopId)) };
+  },
+  (now, before) => {
+    if (!pathStopEdit.value) return;
+    if (!now.hasStop) { endPathStopEdit(true); return; }
+    if (before?.enabled && !now.enabled) endPathStopEdit(true);
+  },
+);
+
 function cancelPresetTravel() {
   ++travelGeneration;
   if (travelAnimationId !== null) cancelAnimationFrame(travelAnimationId);
@@ -1494,6 +1604,8 @@ function tickTravelAnimation() {
     mandelbrotParams.value.heightPaletteShift = target.heightPaletteShift ?? 0;
     mandelbrotParams.value.palettePeriod = target.palettePeriod ?? 256;
     mandelbrotParams.value.paletteOffset = target.paletteOffset ?? 0;
+    mandelbrotParams.value.paletteScreenShiftX = target.paletteScreenShiftX ?? 0;
+    mandelbrotParams.value.paletteScreenShiftY = target.paletteScreenShiftY ?? 0;
     mandelbrotParams.value.paletteMirror = target.paletteMirror ?? false;
     mandelbrotParams.value.iterationPaletteCurve = normalizeIterationPaletteCurve(target.iterationPaletteCurve);
     mandelbrotParams.value.textureMapping = normalizeTextureMappingFromLegacy(target);
@@ -1637,6 +1749,10 @@ async function startTravelToPreset(preset: PresetRecord) {
           <span class="tab-label-text is-hidden-touch">{{ tab.label }}</span>
           <span v-if="tab.shortcut" class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
         </button>
+      <CloudAccountControl compact v-if="authConfigured" :signed-in="userRole !== 'guest'" :email="authUserEmail"
+        :cloud-enabled="personalLibraryFeatureFlags.presetSync" :busy="authBusy" :error="authError"
+        :sync-state="personalSyncStatus.state"
+        @login="loginWithGoogle" @logout="logoutUser"/>
       </div>
     </div>
 
@@ -1717,6 +1833,8 @@ async function startTravelToPreset(preset: PresetRecord) {
       :epsilon="mandelbrotParams.epsilon"
       :palettePeriod="mandelbrotParams.palettePeriod"
       :paletteOffset="mandelbrotParams.paletteOffset"
+      :paletteScreenShiftX="mandelbrotParams.paletteScreenShiftX"
+      :paletteScreenShiftY="mandelbrotParams.paletteScreenShiftY"
       :heightPaletteShift="mandelbrotParams.heightPaletteShift"
       :paletteMirror="mandelbrotParams.paletteMirror"
       :iterationPaletteCurve="mandelbrotParams.iterationPaletteCurve"
@@ -1985,15 +2103,12 @@ async function startTravelToPreset(preset: PresetRecord) {
           :ptabs="PTABS_BY_TAB[tab.key]"
           :primary="primaryFor(tab.key)"
           :is-admin="isAdmin"
-          :auth-configured="authConfigured"
           :auth-user-email="authUserEmail"
           :sync-state="personalSyncStatus.state"
           :sync-error="personalSyncStatus.lastError"
           @update:primary="(v: string) => primaryByTab[tab.key] = v"
           @close="closeTab(tab.key)"
           @drag-start="startDrag(tab.key, $event)"
-          @login="loginWithGoogle"
-          @logout="logoutUser"
         >
           <template v-if="tab.key === 'animation'" #lead>
             <button
@@ -2011,8 +2126,11 @@ async function startTravelToPreset(preset: PresetRecord) {
           </template>
         </DenseTopbar>
         <div class="body">
+          <CloudAccountControl v-if="authConfigured && personalLibraryFeatureFlags.presetSync && userRole === 'guest' && (tab.key === 'presets' || tab.key === 'palettes')"
+            contextual :signed-in="false" :email="authUserEmail" :cloud-enabled="true" :busy="authBusy" :error="authError"
+            :sync-state="personalSyncStatus.state" @login="loginWithGoogle" @logout="logoutUser"/>
           <AboutPanel v-if="tab.key === 'about'" />
-          <PalettePathPanel v-else-if="tab.key === 'palettePath'" :current="mandelbrotParams" :engine="mandelbrotEngine" :disabled="expmapBusy" @change="mandelbrotParams.palettePath = $event" @palette-saved="refreshOpenPaletteLibraries" />
+          <PalettePathPanel v-else-if="tab.key === 'palettePath'" :current="mandelbrotParams" :engine="mandelbrotEngine" :disabled="expmapBusy" :editing-stop-id="pathStopEdit?.stopId" @change="mandelbrotParams.palettePath = $event" @palette-saved="refreshOpenPaletteLibraries" @edit-stop="editPathStop" />
           <Settings
             v-else
             :ref="(el: any) => { settingsRefs[tab.key] = el }"
@@ -2024,11 +2142,12 @@ async function startTravelToPreset(preset: PresetRecord) {
             :active-tab="tab.key"
             :primary="primaryFor(tab.key)"
             :pickerMode="pickerMode"
+            :picker-action="pickerAction"
             :user-role="userRole"
             :active-preset-guid="activePresetGuid"
             @toggle-picker="togglePickerMode"
             @preset-selected="onPresetSelected"
-            @open-video="openTabs.has('video') || toggleTab('video')"
+            @open-video="openTabs.has('video') || toggleTab('video'); bringToFront('video')"
           />
         </div>
       </div>
@@ -2059,11 +2178,12 @@ async function startTravelToPreset(preset: PresetRecord) {
             :inert="expmapBusy && tab.key !== 'expmap' && tab.key !== 'video'"
             :active-tab="tab.key"
             :pickerMode="pickerMode"
+            :picker-action="pickerAction"
             :user-role="userRole"
             :active-preset-guid="activePresetGuid"
             @toggle-picker="togglePickerMode"
             @preset-selected="onPresetSelected"
-            @open-video="openTabs.has('video') || toggleTab('video')"
+            @open-video="openTabs.has('video') || toggleTab('video'); bringToFront('video')"
           />
         </div>
       </div>
@@ -2071,26 +2191,26 @@ async function startTravelToPreset(preset: PresetRecord) {
 
     <div v-if="guestImportPlan" class="guest-import-backdrop" role="presentation">
       <section class="guest-import-dialog" role="dialog" aria-modal="true" aria-labelledby="guest-import-title">
-        <h2 id="guest-import-title">Import your guest library?</h2>
+        <h2 id="guest-import-title">Sauvegarder vos presets locaux dans le cloud ?</h2>
         <p>
-          This device has {{ guestImportPlan.missingPresets.length }} preset{{ guestImportPlan.missingPresets.length === 1 ? '' : 's' }}
-          and {{ guestImportPlan.missingTextures.length }} texture{{ guestImportPlan.missingTextures.length === 1 ? '' : 's' }} not yet in this account.
+          Ce navigateur contient {{ guestImportPlan.missingPresets.length }} preset{{ guestImportPlan.missingPresets.length === 1 ? '' : 's' }}
+          et {{ guestImportPlan.missingTextures.length }} texture{{ guestImportPlan.missingTextures.length === 1 ? '' : 's' }} qui ne sont pas encore dans votre compte.
         </p>
         <p v-if="guestImportCounts" class="guest-import-breakdown">
-          {{ guestImportCounts.completePreset }} complete · {{ guestImportCounts.palettePreset }} palette ·
-          {{ guestImportCounts.stopPreset }} stop · {{ guestImportCounts.textureMappingPreset }} mapping ·
-          {{ guestImportCounts.animationPreset }} animation
+          {{ guestImportCounts.completePreset }} complets · {{ guestImportCounts.palettePreset }} palettes ·
+          {{ guestImportCounts.stopPreset }} stops · {{ guestImportCounts.textureMappingPreset }} mappings ·
+          {{ guestImportCounts.animationPreset }} animations
         </p>
         <p v-if="guestImportPlan.blockingReason" class="guest-import-error">
-          Import all is unavailable: {{ guestImportPlan.blockingReason }}. Your guest library remains unchanged.
+          Sauvegarde indisponible : {{ guestImportPlan.blockingReason }}. Votre bibliothèque locale reste intacte.
         </p>
-        <p v-else>The import copies everything. The guest library stays on this device and will return unchanged when you sign out.</p>
+        <p v-else>Ces éléments seront copiés dans votre bibliothèque cloud personnelle. La copie locale restera dans ce navigateur et sera de nouveau accessible après déconnexion.</p>
         <p v-if="guestImportError" class="guest-import-error">{{ guestImportError }}</p>
         <div class="guest-import-actions">
           <button type="button" class="guest-import-primary" :disabled="!guestImportPlan.canImport || guestImportBusy" @click="acceptGuestImport">
-            {{ guestImportBusy ? 'Importing…' : 'Import all' }}
+            {{ guestImportBusy ? 'Sauvegarde en cours…' : 'Sauvegarder dans mon cloud' }}
           </button>
-          <button type="button" :disabled="guestImportBusy" @click="declineGuestImport">Not now</button>
+          <button type="button" :disabled="guestImportBusy" @click="declineGuestImport">Plus tard</button>
         </div>
       </section>
     </div>
@@ -2155,6 +2275,7 @@ async function startTravelToPreset(preset: PresetRecord) {
   right: 0;
   z-index: 30;
   display: flex;
+  align-items: center;
   justify-content: center;
   pointer-events: none;
   user-select: none;
@@ -2168,7 +2289,7 @@ async function startTravelToPreset(preset: PresetRecord) {
   backdrop-filter: blur(18px);
   border: 1px solid var(--line);
   border-radius: 11px;
-  overflow: hidden;
+  overflow: visible;
   pointer-events: auto;
   box-shadow: 0 24px 60px rgba(0, 0, 0, 0.5);
 }

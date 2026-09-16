@@ -222,7 +222,7 @@ export function buildRemotePresetMerge(existing: PresetRecord, record: Omit<Pres
 }
 
 export async function saveRemotePresetEntry(record: Omit<PresetRecord, 'id'> & { id?: number }): Promise<number> {
-  const existing = await getPresetByGuid(record.guid);
+  const existing = (await getAllPresetCacheRecords()).find(entry => entry.guid === record.guid) ?? null;
   if (existing) {
     const next = buildRemotePresetMerge(existing, record);
     await updatePresetEntry(next);
@@ -301,9 +301,10 @@ export async function applyCloudPresetEntry(record: Omit<PresetRecord, 'id'> & {
     ...record,
     value,
     scaleExponent: computeScaleExponent(value.scale),
-    id: record.id,
     ...syncedPersonalCacheFields(record, revision),
   };
+  // IDs belong to this browser. An explicit undefined key also prevents IndexedDB auto-generation.
+  delete next.id;
   const {store, done} = await tx('readwrite');
   const existing: PresetRecord | undefined = await reqToPromise(store.index('guid').get(record.guid));
   if (!matchesCacheSnapshot(existing, expected)) { await done; return; }

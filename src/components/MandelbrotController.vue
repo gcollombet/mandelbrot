@@ -31,6 +31,8 @@ const props = defineProps<{
   aaAdaptive?: boolean,
   palettePeriod?: number,
   paletteOffset?: number,
+  paletteScreenShiftX?: number,
+  paletteScreenShiftY?: number,
   heightPaletteShift?: number,
   paletteMirror?: boolean,
   iterationPaletteCurve?: IterationPaletteCurve,
@@ -459,6 +461,8 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :activateAnimate="props.activateAnimate"
       :debugShading="props.debugShading"
       :paletteOffset="props.paletteOffset"
+      :paletteScreenShiftX="props.paletteScreenShiftX"
+      :paletteScreenShiftY="props.paletteScreenShiftY"
       :dprMultiplier="props.dprMultiplier"
       :maxIterationMultiplier="props.maxIterationMultiplier"
       :targetFps="props.targetFps"

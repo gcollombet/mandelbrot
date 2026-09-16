@@ -21,7 +21,7 @@ import { parkExpmapSession } from '../expmap/session'
 import { exportExpmapImage, validateImageExport, type ExpmapImageFormat } from '../expmap/imageExport'
 import { ExpmapStore, withExpmapFileLock } from '../expmap/store'
 import { attachExpmapDocument, entryFromManifest, expmapLibraryEntries, expmapLibraryFilename, openExpmapLibraryEntry, pickExpmapFile, refreshExpmapLibrary, removeExpmapLibraryEntry, saveExpmapLibraryEntry, selectedExpmapDocumentId, type ExpmapLibraryEntry } from '../expmap/library'
-import { expmapBusy, expmapOpenDocument, expmapVideoSelected } from '../expmap/runtime'
+import { expmapBusy, expmapOpenDocument, expmapVideoSelected, shaderExpmapVideoSelected } from '../expmap/runtime'
 const props = defineProps<{ current: Record<string, unknown>; engine: Engine | null; controller: MandelbrotExposed | null }>()
 const emit = defineEmits<{ 'use-video': [] }>()
 const { name, start, end, cx, cy, width, height, density, forceRender, quality } = toRefs(useExpmapDraft(props.current))
@@ -121,7 +121,7 @@ async function open(entry: ExpmapLibraryEntry, video = false) {
     const doc = await openExpmapLibraryEntry(entry)
     if (doc.manifest.state !== 'complete') throw new Error('Reprendre la préparation pour compléter ce document.')
     selectedExpmapDocumentId.value = entry.id
-    if (video) { expmapVideoSelected.value = true; emit('use-video') }
+    if (video) { shaderExpmapVideoSelected.value = false; expmapVideoSelected.value = true; emit('use-video') }
     else expmapOpenDocument.value = doc
   })
 }
@@ -201,7 +201,7 @@ async function saveImage() {
       </fieldset>
       <p class="hint">Le calcul et la sauvegarde avancent en parallèle. Le lecteur conserve 14 tuiles et anticipe la suivante. Le calcul inclut 12 doublements supplémentaires pour couvrir le centre, sans masque.</p>
     </DenseSection>
-    <ShaderExpmapPanel :plan="plan" :name="name" :appearance="appearance" :engine="engine" :controller="controller"/>
+    <ShaderExpmapPanel :plan="plan" :name="name" :appearance="appearance" :engine="engine" :controller="controller" @use-video="emit('use-video')"/>
     <DenseSection title="4 · Rendus cuits enregistrés">
       <div class="library-toolbar">
         <button class="library-import" :disabled="expmapBusy" @click="attach()">

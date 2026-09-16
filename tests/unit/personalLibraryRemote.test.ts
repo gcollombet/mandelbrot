@@ -123,10 +123,10 @@ describe('direct personal library persistence', () => {
 
   it('rejects a new preset at quota before issuing writes', async () => {
     mocks.documents.set('users/alice/manifests/presets', {entries: [], revision: 2});
-    mocks.documents.set('users/alice/usage/current', {presetCount: 400, textureCount: 0, revision: 3});
+    mocks.documents.set('users/alice/usage/current', {presetCount: 1000, textureCount: 0, revision: 3});
     await expect(upsertPersonalPreset({
       guid: 'preset-a', type: 'completePreset', payload: {}, name: 'A', favorite: false, updatedAt: '', revision: 0,
-    })).rejects.toThrow(/400-preset/);
+    })).rejects.toThrow(/1000-preset/);
     expect(mocks.transactionSet).not.toHaveBeenCalled();
   });
 

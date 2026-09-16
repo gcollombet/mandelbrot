@@ -181,7 +181,7 @@ class GpuDeviceLostDuringSetupError extends Error {
         this.info = info
     }
 }
-const COLOR_UNIFORM_FLOAT_COUNT = 100
+const COLOR_UNIFORM_FLOAT_COUNT = 104
 /** Slots 96/97: toroidal origin of the raw texture (analytic-AA payload reads). */
 const COLOR_UNIFORM_RAW_ORIGIN_SLOT = 96
 const TAU = Math.PI * 2
@@ -645,6 +645,8 @@ export type RenderOptions = {
     aaAdaptive?: boolean,
     palettePeriod: number,
     paletteOffset: number,
+    paletteScreenShiftX?: number,
+    paletteScreenShiftY?: number,
     heightPaletteShift: number,
     paletteMirror: boolean,
     iterationPaletteCurve: IterationPaletteCurve,
@@ -6486,6 +6488,8 @@ export class Engine {
             this.rawOriginY,                      // 97: raw toroidal origin Y
             this.orbitGradientAllocated ? 1 : 0,   // 98: orbit metric payload present
             this.presetTransition?.progress ?? 0, // 99: texture transition blend
+            renderOptions.paletteScreenShiftX ?? 0, // 100: palette cycles across screen width
+            renderOptions.paletteScreenShiftY ?? 0, // 101: palette cycles across screen height
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 

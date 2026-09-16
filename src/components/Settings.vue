@@ -21,7 +21,7 @@ import PalettePreview from './PalettePreview.vue';
 import GlissiereHandle from './GlissiereHandle.vue';
 import AnimationPanel from './AnimationPanel.vue';
 import StopTransferCurveSelector from './StopTransferCurveSelector.vue';
-import { DenseField, DenseSection, DenseToggle, DenseSeg, DenseSelect } from './dense';
+import { DenseField, DenseSection, DenseToggle, DenseSeg, DenseSelect, DenseLinkedChip, useLinkedRecord } from './dense';
 import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
 import type {TextureMetadata} from '../textureStore';
@@ -86,6 +86,7 @@ import {
 import type {UserRole} from '../authService';
 import {canDeleteCatalogEntry, canOverwriteCatalogPayload, canShowAdminUpload} from '../catalogPermissions';
 import {createGuid, nameForCatalogReference} from '../catalogIdentity';
+import type {CatalogRemoteState} from '../catalogIdentity';
 import {MAX_IMPORTED_TEXTURE_SIDE, normalizeTextureBlob} from '../textureNormalization';
 import {
   assertActivePresetImportCapacity,
@@ -119,6 +120,7 @@ const props = defineProps<{
   activeTab: string;
   primary?: string;
   pickerMode?: boolean;
+  pickerAction?: 'add' | 'select';
   userRole?: UserRole;
   activePresetGuid?: string | null;
 }>();
@@ -211,7 +213,7 @@ const precisionBudgetExp = computed({
 });
 
 const emit = defineEmits<{
-  'toggle-picker': [];
+  'toggle-picker': [action?: 'add' | 'select'];
   'open-video': [];
   'preset-selected': [guid: string, isCatalogPreset: boolean];
 }>();
@@ -226,6 +228,8 @@ const model =  defineModel<MandelbrotParams>({
     colorStops: [],
      palettePeriod: 256,
      paletteOffset: 0,
+     paletteScreenShiftX: 0,
+     paletteScreenShiftY: 0,
      heightPaletteShift: 0,
     paletteMirror: false,
     iterationPaletteCurve: 'linear',
@@ -912,6 +916,7 @@ async function deletePresetById(id: number) {
   await deletePresetEntry(id);
   presetCache.delete(id);
   presets.value = await getAllPresetEntries();
+  if (sceneLink.origin.value?.key === String(id)) sceneLink.unlink();
   if (selectedPreset.value === id) {
     selectedPreset.value = null;
     presetName.value = '';
@@ -1060,15 +1065,8 @@ async function getCachedPreset(id: number): Promise<PresetRecord | null> {
   return record;
 }
 
-async function savePreset() {
-  let thumbnail = '';
-  const now = new Date().toISOString();
-  try {
-    if (props.engine) {
-      thumbnail = await props.engine.getSnapshotPng(256);
-    }
-  } catch { /* ignore errors, no thumbnail */ }
-  // Clone and strip performance fields before saving
+/** The scene payload exactly as `savePreset` stores it (no thumbnail, no name). */
+function buildScenePresetValue(): MandelbrotParams {
   // JSON clone (not structuredClone): after a whole-object model replacement the
   // params can carry nested Vue reactive Proxies that toRaw doesn't unwrap, and
   // structuredClone throws DataCloneError on a Proxy. The preset is JSON-saved anyway.
@@ -1087,6 +1085,88 @@ async function savePreset() {
   savedValue.orbitTrap = normalizeOrbitTrapFromLegacy(savedValue);
   savedValue.orbitTrapStrength = savedValue.orbitTrap.strength;
   delete (savedValue as any).textureMappingMode;
+  // Session-only diagnostic overlay, and fields older presets never carried:
+  // normalize so a freshly loaded preset compares equal to itself.
+  delete (savedValue as any).debugView;
+  savedValue.paletteScreenShiftX ??= 0;
+  savedValue.paletteScreenShiftY ??= 0;
+  return savedValue;
+}
+
+async function sceneThumbnail(): Promise<string> {
+  try {
+    if (props.engine) return await props.engine.getSnapshotPng(256);
+  } catch { /* ignore errors, no thumbnail */ }
+  return '';
+}
+
+// ── Linked scene preset: write back / rename / detach ──
+const sceneLink = useLinkedRecord('scene', () => buildScenePresetValue());
+const sceneLinkBusy = ref(false);
+
+function linkScenePreset(id: number, name: string, remote?: CatalogRemoteState): void {
+  sceneLink.link({ kind: 'scene', key: String(id), name, remote });
+}
+
+async function updateLinkedScenePreset(): Promise<void> {
+  const origin = sceneLink.origin.value;
+  if (!origin || sceneLinkBusy.value) return;
+  sceneLinkBusy.value = true;
+  try {
+    const record = await getCachedPreset(Number(origin.key));
+    if (!record) { sceneLink.unlink(); return; }
+    record.value = buildScenePresetValue();
+    record.thumbnail = (await sceneThumbnail()) || record.thumbnail;
+    record.lastUpdated = new Date().toISOString();
+    record.scaleExponent = computeScaleExponent(record.value.scale);
+    await updatePresetEntry(record);
+    presetCache.set(record.id, record);
+    presets.value = await getAllPresetEntries();
+    sceneLink.refresh();
+  } catch (error) {
+    console.warn('Failed to update linked preset:', error);
+  } finally {
+    sceneLinkBusy.value = false;
+  }
+}
+
+async function renameLinkedScenePresetById(id: number, name: string): Promise<void> {
+  const record = await getCachedPreset(id);
+  if (!record) return;
+  record.name = name;
+  record.lastUpdated = new Date().toISOString();
+  await updatePresetEntry(record);
+  presets.value = await getAllPresetEntries();
+  record.name = presets.value.find(p => p.id === id)?.name ?? name;
+  presetCache.set(id, record);
+  if (sceneLink.origin.value?.key === String(id)) { sceneLink.refresh({ name: record.name }); presetName.value = record.name; }
+}
+
+async function renameLinkedScenePreset(name: string): Promise<void> {
+  const origin = sceneLink.origin.value;
+  if (!origin || sceneLinkBusy.value) return;
+  sceneLinkBusy.value = true;
+  try { await renameLinkedScenePresetById(Number(origin.key), name); }
+  finally { sceneLinkBusy.value = false; }
+}
+
+function detachScenePreset(): void {
+  sceneLink.unlink();
+  selectedPreset.value = null;
+  presetName.value = '';
+}
+
+async function saveScenePresetVariant(): Promise<void> {
+  const origin = sceneLink.origin.value;
+  if (!origin) return;
+  presetName.value = presetName.value.trim() || `${origin.name} · variante`;
+  await savePreset();
+}
+
+async function savePreset() {
+  const now = new Date().toISOString();
+  const thumbnail = await sceneThumbnail();
+  const savedValue = buildScenePresetValue();
   const name = presetName.value.trim();
   const id = await savePresetEntry(savedValue, thumbnail, name || undefined, now);
   presets.value = await getAllPresetEntries();
@@ -1104,7 +1184,10 @@ async function savePreset() {
     favorite: false,
     remote: metadata?.remote,
   });
-  presetName.value = '';
+  // The freshly saved preset becomes the linked one.
+  selectedPreset.value = id;
+  presetName.value = metadata?.name ?? name;
+  linkScenePreset(id, metadata?.name ?? (name || now), metadata?.remote);
 }
 
 /**
@@ -1179,6 +1262,7 @@ async function refreshPaletteLibrary(): Promise<void> {
 // Expose cache refresh helpers so the parent can update an already-open tab
 // after the active guest/user scope changes.
 defineExpose({
+  selectPaletteStop: (index: number) => { selectedIdx.value = index; },
   refreshPaletteLibrary,
   quickSnapshot,
   refreshPresets: loadPresets,
@@ -1199,6 +1283,7 @@ function syncActivePresetSelection(): void {
   selectedPreset.value = active.id;
   selectedNavPreset.value = active.id;
   selectedPalettePreset.value = active.id;
+  if (sceneLink.origin.value?.key !== String(active.id)) linkScenePreset(active.id, active.name, active.remote);
 }
 
 async function loadPalettes() {
@@ -1234,12 +1319,29 @@ async function savePalette() {
   const palette: PaletteRecord = {
     guid: existingPalette?.guid,
     name: paletteName.value.trim(),
-    colorStops: structuredClone(toRaw(model.value.colorStops)),
     thumbnail,
     date: existingPalette?.date ?? now,
     lastUpdated: now,
     favorite: existingPalette?.favorite ?? false,
     remote: existingPalette?.remote,
+    ...buildPaletteFields(),
+  };
+  await savePaletteEntry(palette);
+  palettes.value = await getAllPaletteEntries();
+  const stored = palettes.value.find(item => palette.guid && item.guid === palette.guid) ?? palettes.value.find(item => item.name === palette.name);
+  paletteName.value = '';
+  if (stored) {
+    selectedPalette.value = stored.name;
+    paletteName.value = stored.name;
+    selectedPalettePreset.value = null;
+    paletteLink.link({ kind: 'palette', key: stored.guid ?? stored.name, name: stored.name, remote: stored.remote });
+  }
+}
+
+/** Every palette field `savePalette` persists (colours, distribution, look, textures). */
+function buildPaletteFields(): Omit<PaletteRecord, 'name' | 'guid' | 'thumbnail' | 'date' | 'lastUpdated' | 'favorite' | 'remote'> {
+  return {
+    colorStops: JSON.parse(JSON.stringify(model.value.colorStops)),
     textureName: selectedTexture.value,
     textureGuid: currentTextureObj.value?.guid,
     skyboxName: selectedSkyboxTexture.value,
@@ -1247,6 +1349,8 @@ async function savePalette() {
     interpolationMode: model.value.interpolationMode,
     palettePeriod: model.value.palettePeriod,
     paletteOffset: model.value.paletteOffset,
+    paletteScreenShiftX: model.value.paletteScreenShiftX,
+    paletteScreenShiftY: model.value.paletteScreenShiftY,
     heightPaletteShift: model.value.heightPaletteShift,
     paletteMirror: model.value.paletteMirror,
     iterationPaletteCurve: normalizeIterationPaletteCurve(model.value.iterationPaletteCurve),
@@ -1271,9 +1375,87 @@ async function savePalette() {
     stripeFrequency: model.value.stripeFrequency,
     textureMapping: normalizeTextureMappingFromLegacy(model.value),
   };
-  await savePaletteEntry(palette);
-  palettes.value = await getAllPaletteEntries();
+}
+
+function paletteThumbnail(): string | undefined {
+  try {
+    return previewRef.value?.getSnapshot?.() || generatePaletteThumbnail(model.value.colorStops, model.value.interpolationMode);
+  } catch { return undefined; }
+}
+
+// ── Linked palette (library palette, or the palette part of a scene preset) ──
+const paletteLink = useLinkedRecord('palette', () => buildPaletteFields());
+const paletteLinkBusy = ref(false);
+const paletteLinkKind = computed(() => paletteLink.origin.value?.kind === 'scenePalette' ? 'Palette de la scène' : 'Palette');
+
+async function updateLinkedPalette(): Promise<void> {
+  const origin = paletteLink.origin.value;
+  if (!origin || paletteLinkBusy.value) return;
+  paletteLinkBusy.value = true;
+  try {
+    const now = new Date().toISOString();
+    if (origin.kind === 'scenePalette') {
+      const record = await getCachedPreset(Number(origin.key));
+      if (!record) { paletteLink.unlink(); return; }
+      Object.assign(record.value, buildPaletteFields());
+      record.lastUpdated = now;
+      await updatePresetEntry(record);
+      presetCache.set(record.id, record);
+      presets.value = await getAllPresetEntries();
+      if (sceneLink.origin.value?.key === origin.key) sceneLink.refresh();
+    } else {
+      const existing = palettes.value.find(item => (item.guid ?? item.name) === origin.key);
+      if (!existing) { paletteLink.unlink(); return; }
+      await savePaletteEntry({ ...existing, ...buildPaletteFields(), thumbnail: paletteThumbnail() ?? existing.thumbnail, lastUpdated: now });
+      palettes.value = await getAllPaletteEntries();
+    }
+    paletteLink.refresh();
+  } catch (error) {
+    console.warn('Failed to update linked palette:', error);
+  } finally {
+    paletteLinkBusy.value = false;
+  }
+}
+
+async function renameLinkedPalette(name: string): Promise<void> {
+  const origin = paletteLink.origin.value;
+  if (!origin || paletteLinkBusy.value) return;
+  paletteLinkBusy.value = true;
+  try {
+    if (origin.kind === 'scenePalette') {
+      await renameLinkedScenePresetById(Number(origin.key), name);
+      paletteLink.refresh({ name: presets.value.find(p => p.id === Number(origin.key))?.name ?? name });
+    } else {
+      const existing = palettes.value.find(item => (item.guid ?? item.name) === origin.key);
+      if (!existing) { paletteLink.unlink(); return; }
+      // Palettes are keyed by name: write the renamed copy, then drop the old key.
+      await savePaletteEntry({ ...existing, name, lastUpdated: new Date().toISOString() });
+      palettes.value = await getAllPaletteEntries();
+      const stored = palettes.value.find(item => item.guid === existing.guid && item.name !== existing.name);
+      if (stored) await deletePaletteEntry(existing.name);
+      palettes.value = await getAllPaletteEntries();
+      const finalName = stored?.name ?? existing.name;
+      selectedPalette.value = finalName;
+      paletteName.value = finalName;
+      paletteLink.refresh({ name: finalName, key: stored?.guid ?? finalName });
+    }
+  } finally {
+    paletteLinkBusy.value = false;
+  }
+}
+
+function detachPalette(): void {
+  paletteLink.unlink();
+  selectedPalette.value = '';
+  selectedPalettePreset.value = null;
   paletteName.value = '';
+}
+
+async function savePaletteVariant(): Promise<void> {
+  const origin = paletteLink.origin.value;
+  if (!origin) return;
+  paletteName.value = `${origin.name} · variante`;
+  await savePalette();
 }
 
 function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
@@ -1312,6 +1494,8 @@ function selectPalette(name: string) {
     if (palette.interpolationMode) model.value.interpolationMode = palette.interpolationMode;
     if (palette.palettePeriod != null) model.value.palettePeriod = palette.palettePeriod;
     if (palette.paletteOffset != null) model.value.paletteOffset = palette.paletteOffset;
+    model.value.paletteScreenShiftX = palette.paletteScreenShiftX ?? 0;
+    model.value.paletteScreenShiftY = palette.paletteScreenShiftY ?? 0;
     model.value.heightPaletteShift = palette.heightPaletteShift ?? 0;
     model.value.paletteMirror = palette.paletteMirror ?? false;
     applyPaletteLookFields(palette);
@@ -1325,6 +1509,8 @@ function selectPalette(name: string) {
       selectSkyboxTexture(paletteSkybox);
     }
   }
+    selectedPalettePreset.value = null;
+    paletteLink.link({ kind: 'palette', key: palette.guid ?? palette.name, name: palette.name, remote: palette.remote });
 }
 
 function selectPaletteFromDropdown(palette: PaletteRecord) {
@@ -1344,6 +1530,8 @@ async function selectPaletteFromPreset(id: number) {
     model.value.interpolationMode = record.value.interpolationMode;
     model.value.palettePeriod = record.value.palettePeriod;
     model.value.paletteOffset = record.value.paletteOffset;
+    model.value.paletteScreenShiftX = record.value.paletteScreenShiftX ?? 0;
+    model.value.paletteScreenShiftY = record.value.paletteScreenShiftY ?? 0;
     model.value.heightPaletteShift = record.value.heightPaletteShift ?? model.value.heightPaletteShift;
     model.value.paletteMirror = record.value.paletteMirror ?? false;
     applyPaletteLookFields(record.value);
@@ -1357,6 +1545,8 @@ async function selectPaletteFromPreset(id: number) {
       selectSkyboxTexture(presetSkybox);
     }
   }
+    selectedPalette.value = '';
+    paletteLink.link({ kind: 'scenePalette', key: String(id), name: record.name, remote: record.remote });
 }
 
 async function selectPalettePresetFromDropdown(preset: PresetMetadata) {
@@ -1374,6 +1564,7 @@ async function deletePaletteByName(name: string) {
   if (!window.confirm(`Delete palette "${name}"? This cannot be undone.`)) return;
   await deletePaletteEntry(name);
   palettes.value = await getAllPaletteEntries();
+  if (paletteLink.origin.value?.key === (palette.guid ?? palette.name)) paletteLink.unlink();
   if (selectedPalette.value === name) selectedPalette.value = '';
   if (paletteName.value === name) paletteName.value = '';
 }
@@ -1582,6 +1773,7 @@ async function selectPreset(id: number) {
     if (skyName) {
       selectSkyboxTexture(skyName);
     }
+    linkScenePreset(id, record.name, record.remote);
   }
 }
 
@@ -2150,6 +2342,62 @@ function selectTextureMappingPresetFromDropdown(preset: TextureMappingPresetReco
   textureMappingPresetName.value = preset.builtIn ? '' : preset.name;
   applyTextureMapping(preset.mapping);
   showTextureMappingDropdown.value = false;
+  mappingLink.link({ kind: 'mapping', key: preset.guid ?? preset.name, name: preset.name, remote: preset.remote, builtIn: preset.builtIn });
+}
+
+// ── Linked texture mapping preset ──
+const mappingLink = useLinkedRecord('mapping', () => normalizeTextureMappingFromLegacy(model.value));
+const mappingLinkBusy = ref(false);
+
+function linkedMappingRecord(): TextureMappingPresetRecord | undefined {
+  const key = mappingLink.origin.value?.key;
+  return textureMappingPresets.value.find(p => (p.guid ?? p.name) === key);
+}
+
+async function updateLinkedMapping(): Promise<void> {
+  const existing = linkedMappingRecord();
+  if (!existing || mappingLinkBusy.value) return;
+  mappingLinkBusy.value = true;
+  try {
+    await saveTextureMappingPresetEntry({ ...existing, mapping: normalizeTextureMappingFromLegacy(model.value), lastUpdated: new Date().toISOString() });
+    textureMappingPresets.value = await getAllTextureMappingPresetEntries();
+    mappingLink.refresh();
+  } catch (error) {
+    console.warn('Failed to update linked mapping preset:', error);
+  } finally {
+    mappingLinkBusy.value = false;
+  }
+}
+
+async function renameLinkedMapping(name: string): Promise<void> {
+  const existing = linkedMappingRecord();
+  if (!existing || mappingLinkBusy.value) return;
+  mappingLinkBusy.value = true;
+  try {
+    await saveTextureMappingPresetEntry({ ...existing, name, lastUpdated: new Date().toISOString() });
+    textureMappingPresets.value = await getAllTextureMappingPresetEntries();
+    const stored = textureMappingPresets.value.find(p => p.guid === existing.guid && p.name !== existing.name);
+    if (stored) await deleteTextureMappingPresetEntry(existing.name);
+    textureMappingPresets.value = await getAllTextureMappingPresetEntries();
+    const finalName = stored?.name ?? existing.name;
+    selectedTextureMappingPreset.value = finalName;
+    textureMappingPresetName.value = finalName;
+    mappingLink.refresh({ name: finalName, key: stored?.guid ?? finalName });
+  } finally {
+    mappingLinkBusy.value = false;
+  }
+}
+
+function detachMapping(): void {
+  mappingLink.unlink();
+  textureMappingPresetName.value = '';
+}
+
+async function saveMappingVariant(): Promise<void> {
+  const origin = mappingLink.origin.value;
+  if (!origin) return;
+  textureMappingPresetName.value = `${origin.name} · variante`;
+  await saveTextureMappingPreset();
 }
 
 async function saveTextureMappingPreset() {
@@ -2171,8 +2419,10 @@ async function saveTextureMappingPreset() {
     remote: existing?.remote,
   });
   textureMappingPresets.value = await getAllTextureMappingPresetEntries();
-  selectedTextureMappingPreset.value = name;
-  textureMappingPresetName.value = '';
+  const stored = textureMappingPresets.value.find(p => existing ? p.guid === existing.guid : p.name === name) ?? textureMappingPresets.value.find(p => p.name === name);
+  selectedTextureMappingPreset.value = stored?.name ?? name;
+  textureMappingPresetName.value = stored?.name ?? name;
+  if (stored) mappingLink.link({ kind: 'mapping', key: stored.guid ?? stored.name, name: stored.name, remote: stored.remote });
 }
 
 async function deleteTextureMappingPreset(preset: TextureMappingPresetRecord): Promise<void> {
@@ -2828,8 +3078,10 @@ async function startVideoExport(payload: {
         scope="Capture lieu, palette et rendu"
         icon='<path d=&quot;M5 3h12l4 4v14H5z&quot;/><path d=&quot;M9 3v5h7V3M8 21v-7h8v7&quot;/>'
       >
+      <DenseLinkedChip v-if="sceneLink.origin.value" kind="Scène" :name="sceneLink.origin.value.name" :dirty="sceneLink.dirty.value" :locked="sceneLink.locked.value" :busy="sceneLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+        @update="updateLinkedScenePreset" @rename="renameLinkedScenePreset" @detach="detachScenePreset" @variant="saveScenePresetVariant" />
       <div class="save-row">
-        <input class="txt-in" v-model="presetName" type="text" placeholder="Nom facultatif…"
+        <input class="txt-in" v-model="presetName" type="text" :placeholder="sceneLink.origin.value ? 'Enregistrer une copie sous…' : 'Nom facultatif…'"
           @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
           @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
         />
@@ -2968,6 +3220,8 @@ async function startVideoExport(payload: {
 
     <!-- Palettes tab -->
     <div v-else-if="activeTab === 'palettes'" class="cv-body palette-canvas-panel" :class="{ 'palette-library': primary === 'library' }">
+      <DenseLinkedChip v-if="paletteLink.origin.value" :kind="paletteLinkKind" :name="paletteLink.origin.value.name" :dirty="paletteLink.dirty.value" :locked="paletteLink.locked.value" :busy="paletteLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+        @update="updateLinkedPalette" @rename="renameLinkedPalette" @detach="detachPalette" @variant="savePaletteVariant" />
       <!-- ═══ Pipette + outils compact ═══ -->
       <div class="palette-strip-zone">
       <div class="top-bar palette-strip-bar mb-2 mt-2">
@@ -2978,13 +3232,18 @@ async function startVideoExport(payload: {
         <div class="color-picker-row">
           <button
             class="pipette-btn"
-            :class="{ 'is-active': props.pickerMode }"
+            :class="{ 'is-active': props.pickerMode && props.pickerAction !== 'select' }"
             :title="props.pickerMode ? 'Exit pipette mode (Escape)' : 'Pipette: click on the fractal'"
             @click="emit('toggle-picker')"
           >
             <i class="fa-solid fa-eye-dropper fa-fw"></i>
           </button>
-          <span v-if="props.pickerMode" class="picker-hint">Click on the fractal&hellip;</span>
+          <button class="pipette-btn" :class="{ 'is-active': props.pickerMode && props.pickerAction === 'select' }"
+            title="Pipette : sélectionner le stop le plus proche" aria-label="Sélectionner le stop le plus proche"
+            :aria-pressed="props.pickerMode && props.pickerAction === 'select'" @click="emit('toggle-picker', 'select')">
+            <i class="fa-solid fa-arrow-pointer fa-fw"></i>
+          </button>
+          <span v-if="props.pickerMode" class="picker-hint">{{ props.pickerAction === 'select' ? 'Sélectionner un stop : cliquez sur la fractale…' : 'Ajouter un stop : cliquez sur la fractale…' }}</span>
         </div>
         <details class="palette-transform"><summary class="mini-btn" aria-label="Transformer le dégradé" title="Transformer le dégradé">⋯</summary><div class="outils-bar">
           <button class="button is-small is-light outils-btn" @click="invertPalette" title="Reverse order">
@@ -3094,6 +3353,10 @@ async function startVideoExport(payload: {
           @update:model-value="(v: string | number) => model.iterationPaletteCurve = normalizeIterationPaletteCurve(v)" />
         <DenseField label="Offset" :min="0" :max="1" :step="0.001" :f="pctFmt"
           :model-value="model.paletteOffset ?? 0" @update:model-value="(v: number) => model.paletteOffset = v" />
+        <DenseField label="Écran X" :min="0" :max="2" :step="0.01" f="p2"
+          :model-value="model.paletteScreenShiftX ?? 0" @update:model-value="(v: number) => model.paletteScreenShiftX = v" />
+        <DenseField label="Écran Y" :min="0" :max="2" :step="0.01" f="p2"
+          :model-value="model.paletteScreenShiftY ?? 0" @update:model-value="(v: number) => model.paletteScreenShiftY = v" />
         <DenseField label="Décalage hauteur" :min="0" :max="100" :step="0.01" f="p2"
           :model-value="model.heightPaletteShift ?? 0" @update:model-value="(v: number) => model.heightPaletteShift = v" />
         <DenseField label="Phase couleur" :min="0" :max="1" :step="0.001" :f="phaseColoringFmt"
@@ -3116,6 +3379,7 @@ async function startVideoExport(payload: {
         :selected-idx="selectedIdx"
         :interpolation-mode="model.interpolationMode"
         :picker-mode="props.pickerMode"
+        :suspend-shortcuts="props.suspendShortcuts"
         :tile-texture-url="activeBlobUrl"
         :skybox-texture-url="activeSkyboxBlobUrl"
         :tessellation-level="model.tessellationLevel"
@@ -3348,8 +3612,10 @@ async function startVideoExport(payload: {
           :model-value="activeTextureMappingLabel"
           @update:model-value="onSelectMappingPreset"
         />
+        <DenseLinkedChip v-if="mappingLink.origin.value" kind="Mapping" :name="mappingLink.origin.value.name" :dirty="mappingLink.dirty.value" :locked="mappingLink.locked.value" :busy="mappingLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+          @update="updateLinkedMapping" @rename="renameLinkedMapping" @detach="detachMapping" @variant="saveMappingVariant" />
         <div class="save-row">
-          <input class="txt-in" v-model="textureMappingPresetName" type="text" placeholder="Nom du mapping…"
+          <input class="txt-in" v-model="textureMappingPresetName" type="text" :placeholder="mappingLink.origin.value ? 'Enregistrer une copie sous…' : 'Nom du mapping…'"
             @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
             @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
             @keyup.enter="saveTextureMappingPreset"
@@ -3411,7 +3677,7 @@ async function startVideoExport(payload: {
         <div v-if="visiblePalettes.length === 0" class="empty">{{ showOnlyFavoritePalettes ? 'No favorite palettes yet.' : 'No saved palettes yet.' }}</div>
       </div>
       <div class="save-row palette-save-row">
-        <input class="txt-in" v-model="paletteName" type="text" placeholder="Save current palette as..."
+        <input class="txt-in" v-model="paletteName" type="text" :placeholder="paletteLink.origin.value ? 'Enregistrer une copie sous…' : 'Enregistrer la palette sous…'"
           @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
           @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
           @keyup.enter="savePalette"

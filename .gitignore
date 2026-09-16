@@ -37,3 +37,4 @@ target
 # Textures
 /src/assets/*.webp
 /src/assets/thumbs/*.webp
+/docs

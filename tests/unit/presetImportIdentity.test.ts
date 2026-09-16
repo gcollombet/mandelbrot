@@ -42,8 +42,8 @@ describe('preset JSON import identity', () => {
 
 describe('personal preset import budget', () => {
   it('uses the greater trusted or cached count and never returns a negative budget', () => {
-    expect(personalPresetRemainingCapacity(82, 100)).toBe(300);
-    expect(personalPresetRemainingCapacity(400, 82)).toBe(0);
-    expect(personalPresetRemainingCapacity(500, 82)).toBe(0);
+    expect(personalPresetRemainingCapacity(82, 100)).toBe(900);
+    expect(personalPresetRemainingCapacity(1000, 82)).toBe(0);
+    expect(personalPresetRemainingCapacity(1100, 82)).toBe(0);
   });
 });

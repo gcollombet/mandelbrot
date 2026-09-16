@@ -14,7 +14,7 @@ import { motionSettings } from '../expmap/motion'
 import { ringVideoRect, ringVideoBitrate } from '../expmap/displayRingMedia'
 import { SHADER_INTERPOLATIONS, SHADER_SAMPLE_DISTRIBUTIONS, type ShaderInterpolation, type ShaderSampleDistribution } from '../expmap/displaySampling'
 import { ShaderExpmapRenderer, planShaderMemory } from '../expmap/displayRenderer'
-import { expmapBusy, expmapOpenDocument } from '../expmap/runtime'
+import { expmapBusy, expmapOpenDocument, expmapVideoSelected, shaderExpmapVideoSelected, shaderExpmapVideoEntry, registerShaderPreviewReader, releaseShaderPreviewReaders } from '../expmap/runtime'
 import { expmapVideoDefaults, changeExpmapDuration, changeExpmapWindow, exportExpmapVideo, type ExpmapVideoWindow } from '../expmap/video'
 import { EXPMAP_EASES } from '../expmap/motion'
 import { documentEffects } from '../expmap/effects'
@@ -25,7 +25,8 @@ import { DenseField, DenseSection, DenseSelect } from './dense'
 import { loadShaderPreferences, saveShaderPreferences, SHADER_SAMPLE_CHOICES } from '../expmap/displayPreferences'
 import RenderProgress from './RenderProgress.vue'
 import ResolutionSelect from './ResolutionSelect.vue'
-const props=defineProps<{plan:ExpmapPlan|null;name:string;appearance:RenderOptions;engine:Engine|null;controller:MandelbrotExposed|null}>()
+const props=defineProps<{plan:ExpmapPlan|null;name:string;appearance:RenderOptions;engine:Engine|null;controller:MandelbrotExposed|null;videoOnly?:boolean}>()
+const emit=defineEmits<{ 'use-video': [] }>()
 const saved=loadShaderPreferences()
 const interpolation=ref<ShaderInterpolation>(saved.interpolation)
 const sampleDistribution=ref<ShaderSampleDistribution>(saved.sampleDistribution)
@@ -50,6 +51,8 @@ async function refreshQuota() {try{const e=await navigator.storage.estimate();qu
 /** Intermediate ring files live next to the archives, never in a user folder. */
 async function scratchDirectory() {return (await navigator.storage.getDirectory()).getDirectoryHandle('shader-scratch',{create:true})}
 async function releaseSource() {const s=source.value;source.value=null;if(s?.store instanceof OpfsShaderArchive)await s.store.close()}
+const unregisterPreview=props.videoOnly?()=>{}:registerShaderPreviewReader(releaseSource)
+onUnmounted(unregisterPreview)
 const previewScale=ref(saved.previewScale),angle=ref(saved.angle),window=ref<ExpmapVideoWindow|null>(null)
 const outputWidth=ref(saved.width),outputHeight=ref(saved.height),preview=ref<HTMLCanvasElement|null>(null)
 watch([interpolation,sampleDistribution,radialDensity,budgetMiB,samples,previewScale,angle,outputWidth,outputHeight,fps,codec,ringFirst,keepRings,ringBitrateMbps],()=>saveShaderPreferences({
@@ -84,6 +87,7 @@ async function selected(store:ShaderExpmapSource,manifest:ShaderExpmapManifest) 
   if(source.value&&source.value.store!==store)await releaseSource()
   const archive=store instanceof OpfsShaderArchive?store.path:undefined
   source.value={store,manifest,archive};if(!previewScale.value)previewScale.value=manifest.projection.domain.startScale
+  if(props.videoOnly)shaderExpmapVideoEntry.value={id:manifest.id,name:manifest.name,state:manifest.state,...(archive?{archive}:{handle:(store as ShaderExpmapStore).directory})}
   window.value=expmapVideoDefaults({documentId:manifest.id,state:manifest.state,projection:manifest.projection})
   try {await rememberShaderSource(manifest,archive??(store as ShaderExpmapStore).directory);await refreshRecent()} catch {/* Source files remain usable without a catalogue. */}
   await refreshQuota()
@@ -96,9 +100,27 @@ async function run(action:()=>Promise<void>) {
 }
 async function attach() {await run(async()=>{const store=new ShaderExpmapStore(await pickDirectory());await selected(store,await store.open());status.value='Source ouverte'})}
 async function openRecent(entry:ShaderLibraryEntry) {await run(async()=>{
+  if(source.value?.manifest.id===entry.id)return
+  if(!props.videoOnly && shaderExpmapVideoSelected.value && shaderExpmapVideoEntry.value?.id===entry.id) { emit('use-video'); return }
+  await releaseSource()
+  if(props.videoOnly)await releaseShaderPreviewReaders()
   if(entry.archive) {const store=new OpfsShaderArchive(entry.archive);try{await selected(store,await store.open())}catch(error){await store.close();throw error}}
   else if(entry.handle) {await authorizeShaderDirectory(entry.handle);const store=new ShaderExpmapStore(entry.handle);await selected(store,await store.open())}
 })}
+async function useVideo() {
+  const doc=source.value
+  if(!doc || doc.manifest.state!=='complete')return
+  const entry:ShaderLibraryEntry={id:doc.manifest.id,name:doc.manifest.name,state:doc.manifest.state,
+    ...(doc.archive?{archive:doc.archive}:{handle:(doc.store as ShaderExpmapStore).directory})}
+  await releaseSource()
+  shaderExpmapVideoEntry.value=entry
+  shaderExpmapVideoSelected.value=true
+  expmapVideoSelected.value=false
+  emit('use-video')
+}
+watch(()=>shaderExpmapVideoEntry.value,entry=>{
+  if(props.videoOnly && entry)void openRecent(entry)
+},{immediate:true})
 async function forget(id:string) {await forgetShaderSource(id);await refreshRecent()}
 async function removeArchive(entry:ShaderLibraryEntry) {
   await run(async()=>{
@@ -208,46 +230,50 @@ function updateWindow() {
 }
 </script>
 <template>
-  <DenseSection title="3 · Rendu recolorable (archive shader)" class="shader-panel">
+  <DenseSection :title="videoOnly ? 'Vidéo depuis une ExpMap recolorable' : '3 · Rendu recolorable (archive shader)'" class="shader-panel">
     <p class="hint">Conserve les données avant couleur dans une archive compressée du navigateur. Les palettes et matériaux du moment sont appliqués à la lecture et à chaque export vidéo : un seul calcul, autant de colorations que voulu.</p>
     <fieldset :disabled="expmapBusy">
-      <details open><summary>Créer depuis les paramètres de la section 1</summary>
+      <details v-if="!videoOnly" open><summary>Créer depuis les paramètres de la section 1</summary>
         <DenseField v-model="radialDensity" label="Densité radiale" :min="1" :max="64" :step="1"/>
         <p v-if="estimate" class="hint">Source brute : {{ (estimate.rawBytes/1e9).toFixed(2) }} Go · {{ estimate.blocks }} blocs · centre couvert sur 17 octaves. Compression mesurée ≈ 4 à 5× ; les champs constants et les blocs uniformes ne sont pas stockés.</p>
         <button class="primary" :disabled="!plan" @click="create()">Créer une archive</button>
       </details>
-      <details open><summary>Archives disponibles</summary>
+      <details :open="!videoOnly || !source"><summary>Archives disponibles</summary>
         <p v-if="quota" class="hint">Stockage navigateur : {{ (quota.usage/1e9).toFixed(2) }} Go utilisés sur {{ (quota.quota/1e9).toFixed(0) }} Go disponibles<template v-if="archivesBytes"> · archives shader : {{ gigabytes(archivesBytes) }}</template>.</p>
         <div class="toolbar"><button @click="importArchive">Importer une archive…</button><button @click="attach">Ouvrir un dossier shader (ancien format)</button></div>
         <p v-if="!recent.length" class="hint">Aucune archive. Crée-en une ci-dessus ou importe un fichier .smexp.</p>
         <div v-for="entry in recent" :key="entry.id" class="entry" :class="{selected:source?.manifest.id===entry.id}">
           <button class="entry-open" @click="openRecent(entry)">{{ entry.name }} · {{ entry.archive?'archive':'dossier' }} · {{ entry.state==='complete'?'Prêt':'À reprendre' }}<template v-if="sizes[entry.id]!=null"> · {{ gigabytes(sizes[entry.id]!) }}</template></button>
-          <button @click="forget(entry.id)">Retirer</button>
-          <button v-if="entry.archive" @click="removeArchive(entry)">Supprimer</button>
+          <button v-if="!videoOnly" @click="forget(entry.id)">Retirer</button>
+          <button v-if="!videoOnly && entry.archive" @click="removeArchive(entry)">Supprimer</button>
         </div>
       </details>
       <template v-if="source">
         <p><strong>{{ source.manifest.name }}</strong> · {{ source.manifest.completed }}/{{ source.manifest.total }} blocs</p>
-        <button v-if="source.manifest.state!=='complete'" class="primary" @click="create(true)">Reprendre le calcul</button>
-        <template v-else>
-          <div class="toolbar">
+        <p v-if="videoOnly && source.manifest.state!=='complete'" class="hint">Complétez cette archive dans le volet ExpMap avant de créer une vidéo.</p>
+        <button v-else-if="source.manifest.state!=='complete'" class="primary" @click="create(true)">Reprendre le calcul</button>
+        <template v-if="source.manifest.state==='complete'">
+          <div v-if="!videoOnly" class="toolbar">
+            <button class="primary" @click="useVideo">Vidéo</button>
             <button v-if="source.archive" @click="exportArchive">Exporter l’archive…</button>
             <button v-else @click="archiveDirectory">Convertir en archive du navigateur</button>
           </div>
-          <details open><summary>Lecture et aperçu</summary>
+          <details open><summary>{{ videoOnly ? 'Qualité du rendu et effets' : 'Lecture et aperçu' }}</summary>
             <DenseField v-model="budgetMiB" label="Budget du lecteur (Mio)" :min="64" :max="16384" :step="64"/>
             <small>Budget supplémentaire au moteur ouvert. Le cache se subdivise si les octaves entières ne tiennent pas.</small>
             <p v-if="memory" class="hint">{{ memory.usefulOctaves }} octave(s) utile(s) par couronne + 2 réserves · {{ memory.subdivided?'chargement par blocs':'cache par octaves' }}</p>
             <DenseSelect :model-value="interpolation" label="Interpolation" :options="SHADER_INTERPOLATIONS" @update:model-value="interpolation=$event==='nearest'?'nearest':'bilinear'"/>
             <DenseSelect :model-value="sampleDistribution" label="Répartition AA" :options="SHADER_SAMPLE_DISTRIBUTIONS" @update:model-value="sampleDistribution=$event==='r2'?'r2':'grid'"/>
             <DenseSelect :model-value="samples" label="Prélèvements par pixel (AA)" :options="SHADER_SAMPLE_CHOICES.map(n=>({value:n,label:String(n)}))" @update:model-value="samples=Number($event)"/>
+            <template v-if="!videoOnly">
             <label>Échelle d’aperçu <input v-model="previewScale"></label>
             <DenseField v-model="angle" label="Rotation aperçu (°)" :min="-36000" :max="36000" :step="1"/>
+            </template>
             <ExpmapEffectsControls :document-id="source.manifest.id" :tile-count="planExpmapOctaves(source.manifest.projection).tileCount"/>
-            <button @click="render()">Actualiser l’aperçu</button>
-            <canvas ref="preview" class="preview"/>
+            <button v-if="!videoOnly" @click="render()">Actualiser l’aperçu</button>
+            <canvas v-if="!videoOnly" ref="preview" class="preview"/>
           </details>
-          <details v-if="window" open><summary>Vidéo</summary>
+          <details v-if="videoOnly && window" open><summary>Vidéo</summary>
             <label>Départ <input v-model="window.fromScale" @change="updateWindow"></label>
             <label>Arrivée <input v-model="window.toScale" @change="updateWindow"></label>
             <DenseField v-model="window.durationSeconds" label="Durée (s)" :min="0.1" :max="86400" :step="1" @update:model-value="updateWindow"/>

@@ -56,7 +56,9 @@ async function fetchRemoteEntryBestEffort<T extends CatalogType>(type: T, guid: 
   }
 }
 
-export async function syncRemoteCatalog(): Promise<void> {
+let activeRemoteCatalogSync: Promise<void> | null = null;
+
+async function runRemoteCatalogSync(): Promise<void> {
   try {
     const manifest = await getPublicCatalogManifest();
     const metadata = groupPublicCatalogManifestEntries(manifest);
@@ -178,4 +180,12 @@ export async function syncRemoteCatalog(): Promise<void> {
     if (error instanceof RemoteCatalogUnavailableError) return;
     console.warn('[remoteCatalogSync] Remote catalog synchronization failed:', error);
   }
+}
+
+export function syncRemoteCatalog(): Promise<void> {
+  if (activeRemoteCatalogSync) return activeRemoteCatalogSync;
+  activeRemoteCatalogSync = runRemoteCatalogSync().finally(() => {
+    activeRemoteCatalogSync = null;
+  });
+  return activeRemoteCatalogSync;
 }

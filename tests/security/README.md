@@ -42,7 +42,7 @@ Méthode : [tests de règles recommandés par Firebase](https://firebase.google.
 
 ## Limite de sécurité confirmée
 
-Les quotas de **400 presets / 10 textures ne sont pas des plafonds anti-abus**.
+Les quotas de **1000 presets / 10 textures ne sont pas des plafonds anti-abus**.
 Un propriétaire peut créer directement un preset ou une réservation alors que
 son compteur est déjà à la limite : les règles ne lient pas atomiquement ces
 créations aux compteurs/manifestes. Un test explicite reproduit cette possibilité.

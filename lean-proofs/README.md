@@ -1,7 +1,7 @@
 # Preuves Lean des approximants Mandelbrot
 
 Ce projet Mathlib formalise les identités de difficulté facile à modérée
-issues de `COMPLETE_NOTES_pade_to_mobius_cplus.md` et de son correctif.
+issues de `docs/COMPLETE_NOTES_pade_to_mobius_cplus.md` et de son correctif.
 
 ```bash
 cd lean-proofs

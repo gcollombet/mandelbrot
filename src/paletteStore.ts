@@ -60,6 +60,8 @@ export interface PaletteRecord extends ScopedCacheFields {
   interpolationMode?: InterpolationMode;
   palettePeriod?: number;
   paletteOffset?: number;
+  paletteScreenShiftX?: number;
+  paletteScreenShiftY?: number;
   heightPaletteShift?: number;
   paletteMirror?: boolean;
   iterationPaletteCurve?: IterationPaletteCurve;
@@ -202,7 +204,7 @@ export async function getPaletteByGuid(guid: string): Promise<PaletteRecord | nu
 export async function saveRemotePaletteEntry(record: PaletteRecord): Promise<void> {
   Object.assign(record, publicCacheFields(record));
   if (!record.guid) record.guid = createGuid();
-  const existing = await getPaletteByGuid(record.guid);
+  const existing = (await getAllPaletteCacheRecords()).find(entry => entry.guid === record.guid) ?? null;
   if (existing) {
     await savePaletteEntry({
       ...record,

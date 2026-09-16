@@ -19,12 +19,12 @@ export interface SettingsTabDef {
 
 export function getSettingsTabs(layout: KeyboardLayout): SettingsTabDef[] {
   return [
-    { key: 'presets', label: 'Presets', icon: 'fa-solid fa-bookmark', shortcut: 'x' },
+    { key: 'presets', label: 'Scène', icon: 'fa-solid fa-bookmark', shortcut: 'x' },
     { key: 'navigation', label: 'Navigation', icon: 'fa-solid fa-arrows-up-down-left-right', shortcut: layout === 'azerty' ? 'w' : 'z' },
     { key: 'palettes', label: 'Palettes', icon: 'fa-solid fa-palette', shortcut: 'n' },
     { key: 'palettePath', label: 'Parcours palettes', icon: 'fa-solid fa-sliders', shortcut: '' },
     { key: 'animation', label: 'Animation', icon: 'fa-solid fa-film', shortcut: 'c' },
-    { key: 'expmap', label: 'ExpMap', icon: 'fa-solid fa-database', shortcut: '' },
+    { key: 'expmap', label: 'Rendu', icon: 'fa-solid fa-database', shortcut: '' },
     { key: 'video', label: 'Vidéo', icon: 'fa-solid fa-video', shortcut: 'k' },
     { key: 'performance', label: 'Performance', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },
     { key: 'about', label: 'Aide', icon: 'fa-solid fa-circle-info', shortcut: 'i' },

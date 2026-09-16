@@ -47,7 +47,7 @@ function float32ArrayToFloat16(src: Float32Array): Uint16Array {
 }
 
 const PREVIEW_MU = 1000000;
-const COLOR_UNIFORM_FLOAT_COUNT = 100;
+const COLOR_UNIFORM_FLOAT_COUNT = 104;
 /** Number of synthetic iterations to display. */
 const ITER_COUNT = 100;
 /**
@@ -511,6 +511,7 @@ async function init() {
     0, // aaLookupOffsetY
     0, 0, // raw toroidal origin
     1, 0, // synthetic orbit metrics always present; padding
+    0, 0, // paletteScreenShiftX/Y (preview strip is not screen-modulated)
   ]);
   device.queue.writeBuffer(uniformBuffer, 0, uniforms.buffer as ArrayBuffer);
 
