@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512" fill="none" role="img" aria-labelledby="title desc">
+  <title id="title">Möbius — Mandelbrot</title>
+  <desc id="desc">Un ruban infini à demi-torsion, en dégradé cyan, bleu et violet, sur fond transparent.</desc>
+  <defs>
+    <linearGradient id="back" x1="95" y1="330" x2="417" y2="172" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#087EA4"/>
+      <stop offset=".45" stop-color="#244AC8"/>
+      <stop offset="1" stop-color="#9475FF"/>
+    </linearGradient>
+    <linearGradient id="front" x1="114" y1="153" x2="395" y2="349" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#66F5ED"/>
+      <stop offset=".34" stop-color="#20CDE7"/>
+      <stop offset=".64" stop-color="#5685F5"/>
+      <stop offset="1" stop-color="#BC86FF"/>
+    </linearGradient>
+    <linearGradient id="edge" x1="155" y1="159" x2="352" y2="334" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#D4FFFA" stop-opacity=".8"/>
+      <stop offset=".5" stop-color="#D4FFFA" stop-opacity=".12"/>
+      <stop offset="1" stop-color="#F4DFFF" stop-opacity=".65"/>
+    </linearGradient>
+  </defs>
+  <!-- The rear face remains visible through both open loops. -->
+  <path fill="url(#back)" fill-rule="evenodd" d="M256 222C215 168 176 133 130 133C68 133 35 184 35 246C35 314 76 370 137 370C183 370 218 331 256 290C297 344 336 379 382 379C444 379 477 328 477 266C477 198 436 142 375 142C329 142 294 181 256 222ZM217 256C185 292 160 318 138 318C106 318 89 286 89 246C89 208 105 187 130 187C157 187 186 217 217 256ZM295 256C327 220 352 194 374 194C406 194 423 226 423 266C423 304 407 325 382 325C355 325 326 295 295 256Z"/>
+  <!-- A changing ribbon width at the crossing suggests the half twist. -->
+  <path fill="#122257" fill-opacity=".3" d="M201 212C221 231 241 254 259 270C276 286 292 308 308 326L327 300C302 274 282 254 263 239C244 224 226 200 212 184Z"/>
+  <path fill="url(#front)" d="M79 151C94 139 111 133 130 133C183 133 224 182 265 237C306 292 345 325 382 325C401 325 414 313 423 294C418 343 401 379 382 379C329 379 288 330 247 275C206 220 167 187 130 187C111 187 98 199 89 218C86 193 82 171 79 151Z"/>
+  <path stroke="url(#edge)" stroke-width="2.5" stroke-linecap="round" d="M81 151C95 140 112 135 130 135C182 135 223 184 263 238C305 294 345 327 382 327C400 327 413 316 421 300"/>
+</svg>
