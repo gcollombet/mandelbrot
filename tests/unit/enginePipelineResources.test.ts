@@ -165,3 +165,86 @@ describe('merge display ownership', () => {
         },
     )
 })
+
+describe('in-place kernel specialisation ladder', () => {
+    function refusing(refuse: (constants: Record<string, number>) => boolean) {
+        return vi.fn(async (descriptor: any) => {
+            const constants = descriptor.compute.constants
+            if (refuse(constants)) throw new Error('VK_ERROR_INITIALIZATION_FAILED')
+            return {constants}
+        })
+    }
+
+    it('keeps both full kernels when the driver accepts them', async () => {
+        const engine = makeEngine()
+        engine.device = {createComputePipelineAsync: refusing(() => false)}
+        const {deep, shallow} = await engine.compileInplacePipelines()
+        expect(deep.constants).toMatchObject({ENABLE_DEEP: 1, ENABLE_PORTFOLIO: 1, ENABLE_PERIODIC_SCHEDULING: 1})
+        expect(shallow.constants).toMatchObject({ENABLE_DEEP: 0, ENABLE_PORTFOLIO: 1, ENABLE_PERIODIC_SCHEDULING: 1})
+        expect(engine.inplacePortfolioUnavailable).toBe(false)
+        expect(engine.inplacePeriodicSchedulingUnavailable).toBe(false)
+        expect(engine.inplaceDeepUnavailable).toBe(false)
+    })
+
+    it('drops the deep kernel alone when only it is refused', async () => {
+        const engine = makeEngine()
+        engine.device = {createComputePipelineAsync: refusing(c => c.ENABLE_DEEP === 1)}
+        const {deep, shallow} = await engine.compileInplacePipelines()
+        expect(deep).toBeUndefined()
+        expect(shallow.constants).toMatchObject({ENABLE_PORTFOLIO: 1, ENABLE_PERIODIC_SCHEDULING: 1})
+        expect(engine.inplaceDeepUnavailable).toBe(true)
+        expect(engine.inplacePortfolioUnavailable).toBe(false)
+    })
+
+    it('compiles portfolio out when the driver refuses the shallow kernel with it', async () => {
+        const engine = makeEngine()
+        engine.device = {createComputePipelineAsync: refusing(c => c.ENABLE_PORTFOLIO === 1)}
+        const {deep, shallow} = await engine.compileInplacePipelines()
+        expect(shallow.constants).toMatchObject({ENABLE_DEEP: 0, ENABLE_PORTFOLIO: 0, ENABLE_PERIODIC_SCHEDULING: 1})
+        // The deep kernel is retried with the reduced tier set.
+        expect(deep.constants).toMatchObject({ENABLE_DEEP: 1, ENABLE_PORTFOLIO: 0})
+        expect(engine.inplaceDeepUnavailable).toBe(false)
+        expect(engine.inplacePortfolioUnavailable).toBe(true)
+        expect(engine.inplacePeriodicSchedulingUnavailable).toBe(false)
+        // Runtime lookups keep asking for portfolio and land on the reduced kernel.
+        engine.portfolioEnabled = true
+        const {key, descriptor} = engine.inplacePipelineSpec(false, true, false, true)
+        expect(descriptor.compute.constants.ENABLE_PORTFOLIO).toBe(0)
+        expect(engine.inplacePipelineCache.get(key)).toBe(shallow)
+    })
+
+    it('then compiles periodic scheduling out, and retries deep with the reduced set', async () => {
+        const engine = makeEngine()
+        engine.device = {createComputePipelineAsync: refusing(c =>
+            c.ENABLE_PORTFOLIO === 1 || c.ENABLE_PERIODIC_SCHEDULING === 1 || c.ENABLE_DEEP === 1)}
+        const {deep, shallow} = await engine.compileInplacePipelines()
+        expect(shallow.constants).toMatchObject({ENABLE_DEEP: 0, ENABLE_PORTFOLIO: 0, ENABLE_PERIODIC_SCHEDULING: 0})
+        expect(deep).toBeUndefined()
+        expect(engine.inplaceDeepUnavailable).toBe(true)
+        expect(engine.inplacePortfolioUnavailable).toBe(true)
+        expect(engine.inplacePeriodicSchedulingUnavailable).toBe(true)
+        // Full, portfolio-off, both-off for shallow; two deep attempts.
+        expect(engine.device.createComputePipelineAsync).toHaveBeenCalledTimes(5)
+    })
+
+    it('fails initialisation with the first driver error once the ladder is exhausted', async () => {
+        const engine = makeEngine()
+        engine.device = {createComputePipelineAsync: refusing(() => true)}
+        await expect(engine.compileInplacePipelines()).rejects.toThrow(/VK_ERROR_INITIALIZATION_FAILED/)
+        expect(engine.inplacePortfolioUnavailable).toBe(true)
+        expect(engine.inplacePeriodicSchedulingUnavailable).toBe(true)
+    })
+
+    it('does not pin tiers off for a device abandoned during compilation', async () => {
+        const engine = makeEngine()
+        const createComputePipelineAsync = vi.fn(async () => {
+            // A setup retry replaced the device while this compile was in flight.
+            engine.device = {createComputePipelineAsync}
+            throw new Error('lost')
+        })
+        engine.device = {createComputePipelineAsync}
+        await expect(engine.compileInplacePipelines()).rejects.toThrow('lost')
+        expect(engine.inplacePortfolioUnavailable).toBe(false)
+        expect(engine.inplaceDeepUnavailable).toBe(false)
+    })
+})

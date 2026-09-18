@@ -551,6 +551,14 @@ export type MinibrotResult = {
     scale: string | null
 }
 
+function describeGpuError(error: unknown): string {
+    if (error instanceof Error) return error.message
+    if (error && typeof error === 'object' && 'message' in error && typeof (error as { message: unknown }).message === 'string') {
+        return (error as { message: string }).message
+    }
+    return String(error)
+}
+
 function shouldTrackOrbitMetrics(colorStops: ColorStop[]): boolean {
     return colorStops.some(stop =>
         (stop.stripeAverage ?? 0) > ORBIT_METRIC_EPSILON
@@ -782,6 +790,12 @@ export class Engine {
     private destroyed = false
     private gpuSetupInProgress = false
     private inplaceDeepUnavailable = false   // driver refused the floatexp kernel; shallow-only
+    // Driver refused the kernel with these optional tiers compiled in (mobile
+    // Vulkan: VK_ERROR_INITIALIZATION_FAILED at CreateComputePipelines). The
+    // specialisation is then pinned off for every variant, whatever the panel
+    // toggles ask for, so cache keys and dispatch keys stay consistent.
+    private inplacePortfolioUnavailable = false
+    private inplacePeriodicSchedulingUnavailable = false
     private deepUnavailableReported = false
     private readonly gpuErrorHandler?: (message: string) => void
 
@@ -2202,6 +2216,8 @@ export class Engine {
                     )
                     this.inplacePipelineCache.clear()
                     this.inplaceDeepUnavailable = false
+                    this.inplacePortfolioUnavailable = false
+                    this.inplacePeriodicSchedulingUnavailable = false
                     this.deepUnavailableReported = false
                     this.adapter = await navigator.gpu.requestAdapter()
                     if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
@@ -2648,15 +2664,10 @@ export class Engine {
         // the heaviest shader this engine builds and some mobile Vulkan drivers
         // refuse it outright with VK_ERROR_INITIALIZATION_FAILED. Losing it
         // costs deep zoom, not the app, so degrade instead of failing init.
-        const [pipelineDeep, pipelineShallow] = await Promise.all([
-            this.precompileInplacePipeline(true).catch((error: unknown) => {
-                console.warn('[Engine] deep (floatexp) compute pipeline unavailable on this device;'
-                    + ' deep zoom will fall back to the shallow f32 kernel', error)
-                this.inplaceDeepUnavailable = true
-                return undefined
-            }),
-            this.precompileInplacePipeline(false),
-        ])
+        // Some mobile drivers also refuse the shallow kernel with every optional
+        // tier compiled in. compileInplacePipelines() walks the specialisation
+        // ladder (portfolio off, then periodic scheduling off) before giving up.
+        const { deep: pipelineDeep, shallow: pipelineShallow } = await this.compileInplacePipelines()
         if (this.device !== device || this.destroyed) return
         this.pipelineInplace = pipelineDeep ?? pipelineShallow
 
@@ -2950,7 +2961,11 @@ export class Engine {
     // Lazily build + cache a specialized in-place kernel for the given override
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
-    private inplacePipelineSpec(deep: boolean, portfolio: boolean, renorm: boolean, periodicScheduling: boolean): { key: string, descriptor: GPUComputePipelineDescriptor } {
+    private inplacePipelineSpec(deep: boolean, wantPortfolio: boolean, renorm: boolean, wantPeriodicScheduling: boolean): { key: string, descriptor: GPUComputePipelineDescriptor } {
+        // Tiers the driver refused stay off whatever the caller asks for, so
+        // every key derived from the same inputs names the same compiled kernel.
+        const portfolio = wantPortfolio && !this.inplacePortfolioUnavailable
+        const periodicScheduling = wantPeriodicScheduling && !this.inplacePeriodicSchedulingUnavailable
         const dynamicValidity = this.dynamicBlockValidity && this.approximationMode === 'auto'
         const radialValidity = dynamicValidity
             && this.incrementalReferenceTable
@@ -2982,6 +2997,70 @@ export class Engine {
                 label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, periodicScheduling=${periodicScheduling}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats})`,
             },
         }
+    }
+
+    /**
+     * Build the two hot in-place kernels. The shallow kernel is mandatory: when
+     * the driver refuses it, the optional tiers are switched off one at a time
+     * (portfolio, then periodic scheduling) and the compile retried, each
+     * refusal pinning that tier off for the lifetime of the device. The deep
+     * kernel is retried with the same reduced set, and dropped when even that
+     * fails (deep zoom then runs on the shallow f32 kernel).
+     */
+    private async compileInplacePipelines(): Promise<{ deep?: GPUComputePipeline, shallow: GPUComputePipeline }> {
+        const device = this.device
+        const compileDeep = () => this.precompileInplacePipeline(true).catch((error: unknown) => {
+            if (this.device !== device || this.destroyed) return undefined
+            console.warn('[Engine] deep (floatexp) compute pipeline unavailable on this device;'
+                + ' deep zoom will fall back to the shallow f32 kernel', error)
+            this.inplaceDeepUnavailable = true
+            return undefined
+        })
+        const ladder: Array<{ tier: string, disable: () => boolean }> = [
+            { tier: 'portfolio', disable: () => {
+                if (this.inplacePortfolioUnavailable) return false
+                this.inplacePortfolioUnavailable = true
+                return true
+            } },
+            { tier: 'periodic scheduling', disable: () => {
+                if (this.inplacePeriodicSchedulingUnavailable) return false
+                this.inplacePeriodicSchedulingUnavailable = true
+                return true
+            } },
+        ]
+        // Compile both in parallel on the happy path: each one is a large
+        // kernel and the deep one dominates wall time.
+        let deepRequest: Promise<GPUComputePipeline | undefined> = compileDeep()
+        let shallow: GPUComputePipeline | undefined
+        let firstError: unknown
+        let degraded = false
+        for (;;) {
+            try {
+                shallow = await this.precompileInplacePipeline(false)
+                break
+            } catch (error: unknown) {
+                if (this.device !== device || this.destroyed) throw error
+                firstError ??= error
+                const step = ladder.find(({ disable }) => disable())
+                if (!step) {
+                    throw new Error(
+                        'Initialisation WebGPU impossible : le pilote GPU de cet appareil refuse de compiler le noyau '
+                        + `de calcul principal, même dans sa variante la plus simple (${describeGpuError(firstError)}).`,
+                    )
+                }
+                degraded = true
+                console.warn(`[Engine] shallow compute pipeline refused by the driver; retrying with ${step.tier} compiled out`, error)
+            }
+        }
+        let deep = await deepRequest
+        if (degraded && !deep && (this.device === device && !this.destroyed)) {
+            // The first deep attempt carried the tiers the driver just refused;
+            // give the reduced deep kernel one chance before settling for shallow.
+            this.inplaceDeepUnavailable = false
+            deepRequest = compileDeep()
+            deep = await deepRequest
+        }
+        return { deep, shallow }
     }
 
     /** Deduplicate asynchronous compilation and never publish an old-device result. */
@@ -5143,9 +5222,9 @@ export class Engine {
             `d${this.floatExpActive ? 1 : 0}`,
             `a${this.lastShaderApproxFlag}`,
             `l${this.rawCopyLayerCount(analyticRawPayloadNeeded)}`,
-            `p${this.portfolioEnabled ? 1 : 0}`,
+            `p${this.portfolioEnabled && !this.inplacePortfolioUnavailable ? 1 : 0}`,
             `r${this.renormEnabled ? 1 : 0}`,
-            `i${this.periodicSchedulingEnabled ? 1 : 0}`,
+            `i${this.periodicSchedulingEnabled && !this.inplacePeriodicSchedulingUnavailable ? 1 : 0}`,
             `w${this.workStatsEnabled || dynamicStats ? 1 : 0}`,
             `s${zoomRefreshHasSnapshot ? 1 : 0}`,
             `x${dispatchAreaBucket}`,
