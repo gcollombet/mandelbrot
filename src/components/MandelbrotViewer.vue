@@ -62,6 +62,8 @@ import AboutPanel from './AboutPanel.vue';
 import CloudAccountControl from './CloudAccountControl.vue';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
+import {centredCropForRatio, renderStill, stillAspectRatio, stillPresetDimensions, STILL_PRESET_WIDTHS, type StillAspect, type StillSize} from '../stillExport';
+import {centerOnMinibrot, frameMinibrot} from '../minibrotActions';
 
 const mandelbrotCtrlRef = ref<MandelbrotExposed | null>(null);
 const mandelbrotEngine = shallowRef<Engine | null>(null);
@@ -78,6 +80,179 @@ const aaProgressText = computed(() => {
   return `${base} · ${aaRun.rate >= 10 ? Math.round(aaRun.rate) : aaRun.rate.toFixed(1)}/s · reste ${remaining >= 60 ? `${Math.floor(remaining / 60)} min ${String(Math.floor(remaining % 60)).padStart(2, '0')} s` : `${Math.ceil(remaining)} s`}`;
 });
 let aaProgressTimer: ReturnType<typeof setInterval> | null = null;
+
+/** Abort an idle-time AA refinement in progress (the × on the progress pill). */
+function cancelAaRefinement() {
+  mandelbrotEngine.value?.resetAaState();
+}
+
+// ── HUD status line (minibrot outcome, capture errors): auto-hides. ──
+const hudStatus = ref<string | null>(null);
+let hudStatusTimer: ReturnType<typeof setTimeout> | null = null;
+function showHudStatus(text: string, ms = 4000) {
+  hudStatus.value = text;
+  if (hudStatusTimer) clearTimeout(hudStatusTimer);
+  hudStatusTimer = setTimeout(() => { hudStatus.value = null; }, ms);
+}
+
+// ── Screenshot menu + high-resolution still export ──
+const screenshotMenuOpen = ref(false);
+const minibrotMenuOpen = ref(false);
+const stillExport = ref<{ active: boolean; label: string; tile: number; tiles: number }>({ active: false, label: '', tile: 0, tiles: 1 });
+let stillAbort: AbortController | null = null;
+const STILL_SIZES: readonly Exclude<StillSize, 'window'>[] = ['1k', '2k', '4k', '8k'];
+const STILL_ASPECTS: readonly { id: StillAspect; label: string }[] = [
+  { id: 'window', label: 'Fenêtre' },
+  { id: '1:1', label: '1:1' },
+  { id: '16:9', label: '16:9' },
+  { id: '4:3', label: '4:3' },
+];
+const STILL_ASPECT_KEY = 'mandelbrot_still_aspect';
+const stillAspect = ref<StillAspect>((() => {
+  try {
+    const v = localStorage.getItem(STILL_ASPECT_KEY);
+    return STILL_ASPECTS.some(a => a.id === v) ? (v as StillAspect) : 'window';
+  } catch { return 'window'; }
+})());
+function setStillAspect(aspect: StillAspect) {
+  stillAspect.value = aspect;
+  try { localStorage.setItem(STILL_ASPECT_KEY, aspect); } catch { /* ignore */ }
+}
+
+function closeFabMenus() {
+  screenshotMenuOpen.value = false;
+  minibrotMenuOpen.value = false;
+}
+function toggleScreenshotMenu() {
+  const open = !screenshotMenuOpen.value;
+  closeFabMenus();
+  screenshotMenuOpen.value = open;
+}
+function toggleMinibrotMenu() {
+  const open = !minibrotMenuOpen.value;
+  closeFabMenus();
+  minibrotMenuOpen.value = open;
+}
+
+/** Width / height ratio the still should have: the window's, or the chosen fixed one. */
+function stillRatio(): number {
+  const canvas = mandelbrotCtrlRef.value?.getCanvas?.() ?? null;
+  const cw = canvas?.width ?? window.innerWidth;
+  const ch = canvas?.height ?? window.innerHeight;
+  return stillAspectRatio(stillAspect.value, cw / Math.max(1, ch));
+}
+/** Output size of a preset at the selected aspect (height rounded so every
+ *  tile grid the planner may choose divides it exactly). */
+function stillDimensions(size: Exclude<StillSize, 'window'>): { width: number; height: number } {
+  return stillPresetDimensions(STILL_PRESET_WIDTHS[size], stillRatio());
+}
+/** Window capture: the full canvas, or its centred crop at the selected aspect. */
+function windowCropDimensions(): { width: number; height: number } | null {
+  const canvas = mandelbrotCtrlRef.value?.getCanvas?.() ?? null;
+  if (!canvas) return null;
+  if (stillAspect.value === 'window') return { width: canvas.width, height: canvas.height };
+  const crop = centredCropForRatio(canvas.width, canvas.height, stillRatio());
+  return { width: crop.width, height: crop.height };
+}
+function stillMenuLabel(size: StillSize): string {
+  if (size === 'window') {
+    const dims = windowCropDimensions();
+    return dims ? `Fenêtre · ${dims.width}×${dims.height}` : 'Fenêtre';
+  }
+  const { width, height } = stillDimensions(size);
+  const tiled = size === '8k' ? ' · tuiles' : '';
+  return `${size.toUpperCase()} · ${width}×${height}${tiled}`;
+}
+function cancelStillExport() {
+  stillAbort?.abort();
+}
+
+async function exportStill(size: StillSize) {
+  closeFabMenus();
+  if (size === 'window') { await downloadCanvasSnapshot(stillAspect.value); return; }
+  if (stillExport.value.active) return;
+  const ctrl = mandelbrotCtrlRef.value;
+  const engine = ctrl?.getEngine?.();
+  const nav = ctrl?.getNavigator?.();
+  if (!ctrl || !engine || !nav || ctrl.isExporting?.()) return;
+  const { width, height } = stillDimensions(size);
+  stillAbort = new AbortController();
+  stillExport.value = { active: true, label: `Capture ${size.toUpperCase()}`, tile: 0, tiles: 1 };
+  console.info(`[still] start ${size} ${width}×${height} t=${Math.round(performance.now())}`);
+  try {
+    const p = mandelbrotParams.value;
+    const result = await renderStill(
+      {
+        engine,
+        controller: {
+          drawOnce: () => ctrl.drawOnce(),
+          setExportTime: (t) => ctrl.setExportTime?.(t),
+        },
+        navigator: nav,
+      },
+      {
+        location: { cx: p.cx, cy: p.cy, scale: p.scale, angle: p.angle },
+        width,
+        height,
+        aaSamples: p.antialiasLevel ?? 1,
+        magnificationThreshold: p.zoomMagnificationThreshold ?? 16,
+        signal: stillAbort.signal,
+        onProgress: ({ tile, tiles }) => { stillExport.value = { ...stillExport.value, tile, tiles }; },
+      },
+    );
+    await downloadCanvas(result.canvas, `${width}x${height}`);
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      showHudStatus('Capture annulée');
+    } else {
+      console.error('Still export failed:', e);
+      showHudStatus(`Capture échouée : ${e instanceof Error ? e.message : String(e)}`, 8000);
+    }
+  } finally {
+    stillExport.value = { ...stillExport.value, active: false };
+    stillAbort = null;
+    console.info(`[still] end t=${Math.round(performance.now())}`);
+  }
+}
+
+// Dev-only hook: exercise the tiled still path from the console with a forced
+// texture limit (the real limit on desktop GPUs never triggers tiling below 8K).
+if (import.meta.env.DEV) {
+  (window as unknown as { __renderStill?: unknown }).__renderStill = async (opts: { width: number; height: number; maxTextureDimension?: number; aaSamples?: number }) => {
+    const ctrl = mandelbrotCtrlRef.value;
+    const engine = ctrl?.getEngine?.();
+    const nav = ctrl?.getNavigator?.();
+    if (!ctrl || !engine || !nav) throw new Error('viewer not ready');
+    const p = mandelbrotParams.value;
+    const engineProxy = opts.maxTextureDimension
+      ? new Proxy(engine, { get: (t, k) => k === 'maxTextureDimension' ? opts.maxTextureDimension : Reflect.get(t, k) })
+      : engine;
+    return renderStill(
+      { engine: engineProxy, controller: { drawOnce: () => ctrl.drawOnce(), setExportTime: (t) => ctrl.setExportTime?.(t) }, navigator: nav },
+      { location: { cx: p.cx, cy: p.cy, scale: p.scale, angle: p.angle }, width: opts.width, height: opts.height,
+        aaSamples: opts.aaSamples ?? 1, magnificationThreshold: p.zoomMagnificationThreshold ?? 16 },
+    );
+  };
+}
+
+// ── Minibrot shortcuts (same actions as the Navigation panel) ──
+const minibrotBusy = ref(false);
+async function runMinibrot(mode: 'center' | 'frame') {
+  closeFabMenus();
+  const engine = mandelbrotEngine.value;
+  if (!engine || minibrotBusy.value) return;
+  minibrotBusy.value = true;
+  try {
+    const { next, status } = mode === 'center'
+      ? await centerOnMinibrot(engine, mandelbrotParams.value)
+      : await frameMinibrot(engine, mandelbrotParams.value);
+    // Replacing the model teleports the view through the parent watcher.
+    if (next) mandelbrotParams.value = next;
+    showHudStatus(status);
+  } finally {
+    minibrotBusy.value = false;
+  }
+}
 const settingsRefs = ref<Record<string, InstanceType<typeof Settings> | null>>({});
 
 // Multi-window support: set of open tabs, each with its own popup position
@@ -417,6 +592,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   dprMultiplier: 1.0,
   maxIterationMultiplier: 0.1,
   targetFps: 30,
+  zoomMagnificationThreshold: 16,
   interpolationMode: 'lab',
   animation: normalizeAnimationConfig(null, 1.0),
   animationSpeed: 1.0,
@@ -970,21 +1146,40 @@ function timestampForFilename(): string {
   return `${yyyy}${mm}${dd}-${hh}${mi}${ss}`;
 }
 
-async function downloadCanvasSnapshot() {
+/** Save the live canvas; with a fixed aspect, its largest centred crop at that ratio. */
+async function downloadCanvasSnapshot(aspect: StillAspect = 'window') {
   const canvas = mandelbrotCtrlRef.value?.getCanvas?.() ?? null;
   if (!canvas) return;
+  if (aspect === 'window') { await downloadCanvas(canvas); return; }
+  const crop = centredCropForRatio(canvas.width, canvas.height, stillAspectRatio(aspect, canvas.width / Math.max(1, canvas.height)));
+  const out = document.createElement('canvas');
+  out.width = crop.width;
+  out.height = crop.height;
+  const ctx = out.getContext('2d');
+  if (!ctx) { await downloadCanvas(canvas); return; }
+  // Force a fresh present so the WebGPU canvas still holds its back buffer.
+  await mandelbrotCtrlRef.value?.drawOnce?.();
+  ctx.drawImage(canvas, crop.x, crop.y, crop.width, crop.height, 0, 0, crop.width, crop.height);
+  await downloadCanvas(out, `${crop.width}x${crop.height}`);
+}
+
+/** Save a canvas as WebP (compact) and PNG (lossless). WebP is skipped when the
+ *  browser cannot encode it or the canvas exceeds its 16383 px limit. */
+async function downloadCanvas(canvas: HTMLCanvasElement, suffix = '') {
   const timestamp = timestampForFilename();
+  const stem = `mandelbrot-${timestamp}${suffix ? `-${suffix}` : ''}`;
 
   const triggerDownload = (url: string, ext: 'webp' | 'png') => {
     const a = document.createElement('a');
     a.href = url;
-    a.download = `mandelbrot-${timestamp}.${ext}`;
+    a.download = `${stem}.${ext}`;
     document.body.appendChild(a);
     a.click();
     a.remove();
   };
 
-  const webpSupported = canvas.toDataURL('image/webp').startsWith('data:image/webp');
+  const webpSupported = canvas.width <= 16383 && canvas.height <= 16383
+    && canvas.toDataURL('image/webp').startsWith('data:image/webp');
   if (webpSupported) {
     await new Promise<void>((resolve) => {
       canvas.toBlob((blob) => {
@@ -1788,7 +1983,7 @@ async function startTravelToPreset(preset: PresetRecord) {
 
     <!-- Antialiasing control / progress (bottom-center) -->
     <div
-      v-show="showUI && !discoveryRadarActive && mandelbrotParams.antialiasLevel > 1"
+      v-show="showUI && !discoveryRadarActive && (mandelbrotParams.antialiasLevel > 1 || stillExport.active || hudStatus)"
       class="aa-control"
       @touchstart.stop
       @touchend.stop
@@ -1801,6 +1996,21 @@ async function startTravelToPreset(preset: PresetRecord) {
             :style="{ width: (100 * aaProgress.done / Math.max(1, aaProgress.total)) + '%' }"
           ></div>
         </div>
+        <button class="aa-cancel" type="button" title="Arrêter le raffinage AA" aria-label="Arrêter le raffinage AA" @click="cancelAaRefinement">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <div v-if="stillExport.active" class="aa-progress">
+        <span class="aa-progress-label">{{ stillExport.label }} · tuile {{ Math.min(stillExport.tile + 1, stillExport.tiles) }}/{{ stillExport.tiles }}</span>
+        <div class="aa-progress-track">
+          <div class="aa-progress-fill" :style="{ width: (100 * stillExport.tile / Math.max(1, stillExport.tiles)) + '%' }"></div>
+        </div>
+        <button class="aa-cancel" type="button" title="Annuler la capture" aria-label="Annuler la capture" @click="cancelStillExport">
+          <i class="fa-solid fa-xmark"></i>
+        </button>
+      </div>
+      <div v-if="hudStatus" class="aa-progress hud-status">
+        <span class="aa-progress-label">{{ hudStatus }}</span>
       </div>
     </div>
 
@@ -1843,6 +2053,7 @@ async function startTravelToPreset(preset: PresetRecord) {
       :debugShading="mandelbrotParams.debugShading"
       :debugView="mandelbrotParams.debugView ?? 0"
       :dprMultiplier="mandelbrotParams.dprMultiplier"
+      :zoomMagnificationThreshold="mandelbrotParams.zoomMagnificationThreshold"
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"
       :targetFps="mandelbrotParams.targetFps"
       :interpolationMode="mandelbrotParams.interpolationMode"
@@ -1920,18 +2131,69 @@ async function startTravelToPreset(preset: PresetRecord) {
         <span class="fab-label">{{ discoveryRadarActive ? 'Radar On' : 'Discover' }}</span>
       </button>
 
-      <button
-        v-show="!discoveryRadarActive"
-        class="fab-btn screenshot-button"
-        type="button"
-        title="Screenshot — exporter en WebP et PNG sans perte (raccourci B)"
-        @click="downloadCanvasSnapshot"
-        @touchstart.stop
-        @touchend.stop
-      >
-        <span class="fab-ico"><i class="fa-solid fa-camera"></i></span>
-        <span class="fab-label">Screenshot</span>
-      </button>
+      <div v-show="!discoveryRadarActive" class="fab-menu-host">
+        <div v-if="minibrotMenuOpen" class="fab-menu" role="menu">
+          <button class="fab-menu-item" type="button" role="menuitem" :disabled="minibrotBusy" @click="runMinibrot('center')">
+            <i class="fa-solid fa-crosshairs"></i> Centrer sur le minibrot
+          </button>
+          <button class="fab-menu-item" type="button" role="menuitem" :disabled="minibrotBusy" @click="runMinibrot('frame')">
+            <i class="fa-solid fa-magnifying-glass-plus"></i> Centrer et cadrer le minibrot
+          </button>
+        </div>
+        <button
+          class="fab-btn minibrot-button"
+          :class="{ 'is-open': minibrotMenuOpen }"
+          type="button"
+          :aria-expanded="minibrotMenuOpen"
+          title="Minibrot — centrer ou cadrer l'atome sous la vue"
+          @click="toggleMinibrotMenu"
+          @touchstart.stop
+          @touchend.stop
+        >
+          <span class="fab-ico"><i class="fa-solid" :class="minibrotBusy ? 'fa-spinner fa-spin' : 'fa-bullseye'"></i></span>
+          <span class="fab-label">Minibrot</span>
+        </button>
+      </div>
+
+      <div v-show="!discoveryRadarActive" class="fab-menu-host">
+        <div v-if="screenshotMenuOpen" class="fab-menu" role="menu">
+          <div class="fab-menu-seg" role="radiogroup" aria-label="Format de l'image">
+            <button
+              v-for="a in STILL_ASPECTS" :key="a.id"
+              type="button" role="radio"
+              class="fab-menu-seg-item"
+              :class="{ 'is-active': stillAspect === a.id }"
+              :aria-checked="stillAspect === a.id"
+              :title="a.id === 'window' ? 'Même format que la fenêtre' : `Format ${a.label}`"
+              @click="setStillAspect(a.id)"
+            >{{ a.label }}</button>
+          </div>
+          <button class="fab-menu-item" type="button" role="menuitem" @click="exportStill('window')">
+            <i class="fa-solid fa-display"></i> {{ stillMenuLabel('window') }}
+          </button>
+          <button
+            v-for="size in STILL_SIZES" :key="size"
+            class="fab-menu-item" type="button" role="menuitem"
+            :disabled="stillExport.active"
+            @click="exportStill(size)"
+          >
+            <i class="fa-solid fa-image"></i> {{ stillMenuLabel(size) }}
+          </button>
+        </div>
+        <button
+          class="fab-btn screenshot-button"
+          :class="{ 'is-open': screenshotMenuOpen }"
+          type="button"
+          :aria-expanded="screenshotMenuOpen"
+          title="Screenshot — format fenêtre, 1:1, 16:9 ou 4:3 ; fenêtre, 1K, 2K, 4K ou 8K (raccourci B : fenêtre)"
+          @click="toggleScreenshotMenu"
+          @touchstart.stop
+          @touchend.stop
+        >
+          <span class="fab-ico"><i class="fa-solid fa-camera"></i></span>
+          <span class="fab-label">Screenshot</span>
+        </button>
+      </div>
     </div>
 
     <div
@@ -2627,6 +2889,95 @@ async function startTravelToPreset(preset: PresetRecord) {
   border-radius: 999px;
   background: linear-gradient(90deg, #7c5cff, #4cc9f0);
   transition: width 0.2s ease;
+}
+.aa-cancel {
+  flex: none;
+  width: 20px;
+  height: 20px;
+  margin-left: 2px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  color: #fff;
+  font-size: 11px;
+  line-height: 1;
+  display: grid;
+  place-items: center;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+.aa-cancel:hover { background: rgba(255, 255, 255, 0.3); }
+.aa-control { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+.hud-status .aa-progress-label { font-weight: 500; }
+
+/* FAB popover menus (screenshot sizes, minibrot actions): open to the left of
+   the round button so they never cover the cluster. */
+.fab-menu-host { position: relative; display: flex; justify-content: flex-end; }
+.fab-menu {
+  position: absolute;
+  right: calc(100% + 10px);
+  top: 50%;
+  transform: translateY(-50%);
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 6px;
+  background: rgba(20, 20, 28, 0.86);
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  border-radius: 14px;
+  backdrop-filter: blur(12px);
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.4);
+  white-space: nowrap;
+}
+.fab-menu-item {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 7px 12px;
+  border: none;
+  border-radius: 9px;
+  background: transparent;
+  color: #fff;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.fab-menu-item i { width: 16px; text-align: center; opacity: 0.8; }
+.fab-menu-item:hover:not(:disabled) { background: rgba(255, 255, 255, 0.12); }
+.fab-menu-item:disabled { opacity: 0.45; cursor: default; }
+/* Segmented aspect selector at the top of the screenshot menu. */
+.fab-menu-seg {
+  display: flex;
+  gap: 2px;
+  padding: 3px;
+  margin-bottom: 4px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.08);
+}
+.fab-menu-seg-item {
+  flex: 1;
+  padding: 5px 9px;
+  border: none;
+  border-radius: 8px;
+  background: transparent;
+  color: rgba(255, 255, 255, 0.72);
+  font-size: 12px;
+  font-weight: 600;
+  cursor: pointer;
+  font-variant-numeric: tabular-nums;
+}
+.fab-menu-seg-item:hover { color: #fff; background: rgba(255, 255, 255, 0.1); }
+.fab-menu-seg-item.is-active { color: #0b1a26; background: #7ac9ff; }
+.fab-btn.is-open { width: auto; }
+.fab-btn.is-open .fab-label { max-width: 140px; opacity: 1; padding-right: 15px; }
+.minibrot-button .fab-ico { color: #9df2b0; }
+.minibrot-button:hover, .minibrot-button.is-open {
+  background: rgba(20, 44, 30, 0.82);
+  border-color: rgba(157, 242, 176, 0.55);
+  box-shadow: 0 12px 34px rgba(0, 0, 0, 0.4), 0 0 20px rgba(120, 230, 150, 0.25);
 }
 
 @media (max-width: 768px) {

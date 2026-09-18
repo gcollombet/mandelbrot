@@ -8,7 +8,6 @@ export type ZoomState =
       frozenScale: number
       liveScale: number
       zoomingIn: boolean
-      referenceResetDuringZoom: boolean
     }
 
 export type ZoomEvent =
@@ -17,6 +16,9 @@ export type ZoomEvent =
   | { type: 'scaleStable' }
 
 export type ZoomEffect =
+  /** Refresh the frozen texture from the resolved (live) one. The engine
+   *  implements this as a min-step merge whenever a usable frozen texture
+   *  exists, and as a raw copy only when it does not. */
   | { type: 'copyResolvedToFrozen' }
   | { type: 'mergeResolvedAndFrozen' }
   | { type: 'clearHistoryNextFrame' }
@@ -44,10 +46,6 @@ export function getLiveScale(state: ZoomState): number {
 
 export function getZoomingIn(state: ZoomState): boolean {
   return state.kind !== 'reprojecting' || state.zoomingIn
-}
-
-export function getReferenceResetDuringZoom(state: ZoomState): boolean {
-  return state.kind === 'reprojecting' && state.referenceResetDuringZoom
 }
 
 export function reduceZoomState(
@@ -95,7 +93,6 @@ function reduceIdle(
             frozenScale,
             liveScale,
             zoomingIn,
-            referenceResetDuringZoom: false,
           },
           effects,
         }
@@ -122,28 +119,24 @@ function reduceReprojecting(
           effects: [{ type: 'clearHistoryNextFrame' }],
         }
       }
+      // The frozen texture holds resolved display values, which do not depend
+      // on the reference orbit: it survives the reset untouched and the cycle
+      // continues. Only the live history is invalid (dx/dy jumped) and is
+      // cleared. Swaps and the final merge stay enabled because the engine
+      // refreshes the frozen texture by min-step merge, never by a raw copy,
+      // so a freshly cleared live can never degrade it.
       effects.push({ type: 'clearHistoryNextFrame' })
-      return {
-        state: { ...state, referenceResetDuringZoom: true },
-        effects,
-      }
+      return { state, effects }
 
     case 'scaleChanged': {
-      // Once the clear triggered by a reference reset has been consumed
-      // (one frame later), re-enable swap so the zoom cycle continues.
-      let nextState: ZoomState & { kind: 'reprojecting' } = state
-      if (state.referenceResetDuringZoom) {
-        nextState = { ...state, referenceResetDuringZoom: false }
-      }
-
-      const zoomFactor = nextState.frozenScale / event.scale
-      const shouldSwap = nextState.zoomingIn
+      const zoomFactor = state.frozenScale / event.scale
+      const shouldSwap = state.zoomingIn
         ? zoomFactor >= ctx.threshold
         : zoomFactor <= 1 / ctx.threshold
 
-      if (shouldSwap && !nextState.referenceResetDuringZoom) {
-        const nextFrozenScale = nextState.liveScale
-        const nextLiveScale = nextState.zoomingIn
+      if (shouldSwap) {
+        const nextFrozenScale = state.liveScale
+        const nextLiveScale = state.zoomingIn
           ? event.scale / ctx.threshold
           : event.scale * ctx.threshold
 
@@ -155,22 +148,17 @@ function reduceReprojecting(
             kind: 'reprojecting',
             frozenScale: nextFrozenScale,
             liveScale: nextLiveScale,
-            zoomingIn: nextState.zoomingIn,
-            referenceResetDuringZoom: false,
+            zoomingIn: state.zoomingIn,
           },
           effects,
         }
       }
 
-      return { state: nextState, effects }
+      return { state, effects }
     }
 
     case 'scaleStable': {
-      // If a reference reset occurred during this cycle, skip merge
-      // (the frozen data is from a different reference epoch).
-      if (!state.referenceResetDuringZoom) {
-        effects.push({ type: 'mergeResolvedAndFrozen' })
-      }
+      effects.push({ type: 'mergeResolvedAndFrozen' })
       effects.push({ type: 'clearHistoryNextFrame' })
 
       return {

@@ -21,5 +21,7 @@ const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void }>();
 </template>
 
 <style scoped>
-.fld-tog { width: 100%; text-align: left; font: inherit; }
+/* `font: inherit` alone re-inherits the panel's size and overrides the
+   dense field size (`--fs`), which made toggles read bigger than sliders. */
+.fld-tog { width: 100%; text-align: left; font: inherit; font-size: var(--fs); }
 </style>

@@ -23,7 +23,7 @@ export function getSettingsTabs(layout: KeyboardLayout): SettingsTabDef[] {
     { key: 'navigation', label: 'Navigation', icon: 'fa-solid fa-arrows-up-down-left-right', shortcut: layout === 'azerty' ? 'w' : 'z' },
     { key: 'palettes', label: 'Palettes', icon: 'fa-solid fa-palette', shortcut: 'n' },
     { key: 'palettePath', label: 'Parcours palettes', icon: 'fa-solid fa-sliders', shortcut: '' },
-    { key: 'animation', label: 'Animation', icon: 'fa-solid fa-film', shortcut: 'c' },
+    { key: 'animation', label: 'Animation', icon: 'fa-solid fa-wave-square', shortcut: 'c' },
     { key: 'expmap', label: 'Rendu', icon: 'fa-solid fa-database', shortcut: '' },
     { key: 'video', label: 'Vidéo', icon: 'fa-solid fa-video', shortcut: 'k' },
     { key: 'performance', label: 'Performance', icon: 'fa-solid fa-gauge-high', shortcut: 'v' },

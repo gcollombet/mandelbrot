@@ -18,7 +18,8 @@ export type AnimationTrackId =
   | 'orbitTrapPhaseOffset'
   | 'orbitTrapStrength'
   | 'gradeSaturation'
-  | 'gradeContrast';
+  | 'gradeContrast'
+  | 'palettePathOffset';
 
 export const ANIMATION_TRACK_IDS: readonly AnimationTrackId[] = [
   'paletteOffset',
@@ -37,6 +38,7 @@ export const ANIMATION_TRACK_IDS: readonly AnimationTrackId[] = [
   'orbitTrapStrength',
   'gradeSaturation',
   'gradeContrast',
+  'palettePathOffset',
 ];
 
 export interface AnimationTrackConfig {
@@ -83,6 +85,9 @@ export const ANIMATION_TRACK_DEFINITIONS: readonly AnimationTrackDefinition[] = 
   { id: 'orbitTrapStrength', label: 'Orbit Trap Strength', defaultType: 'pulse', defaultSpeed: 0.25, defaultAmplitude: 40, minAmplitude: 0, maxAmplitude: 100, amplitudeStep: 0.5, unit: '' },
   { id: 'gradeSaturation', label: 'Saturation', defaultType: 'sine', defaultSpeed: 0.18, defaultAmplitude: 0.25, minAmplitude: 0, maxAmplitude: 2, amplitudeStep: 0.01, unit: '' },
   { id: 'gradeContrast', label: 'Contrast', defaultType: 'sine', defaultSpeed: 0.16, defaultAmplitude: 0.15, minAmplitude: 0, maxAmplitude: 1.5, amplitudeStep: 0.01, unit: '' },
+  // Palette path only: slides the depth the path is read at, wrapped over the
+  // path's span. Amplitude 1 = one full traversal of the path per loop cycle.
+  { id: 'palettePathOffset', label: 'Palette Path Offset', defaultType: 'loop', defaultSpeed: 0.05, defaultAmplitude: 1, minAmplitude: 0, maxAmplitude: 4, amplitudeStep: 0.01, unit: 'parcours' },
 ];
 
 const TRACK_DEFINITION_BY_ID = new Map(ANIMATION_TRACK_DEFINITIONS.map(definition => [definition.id, definition]));

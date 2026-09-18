@@ -40,6 +40,8 @@ export interface MandelbrotParams {
     iterationPaletteCurve: IterationPaletteCurve;
     dprMultiplier: number;
     targetFps: number;
+    /** Frozen/live zoom cycle swap ratio (2…16). Higher = fewer full recomputes per zoom. */
+    zoomMagnificationThreshold?: number;
     stripeFrequency: number;
     activateAnimate: boolean;
     debugShading: boolean;
@@ -89,6 +91,7 @@ export const SESSION_PERFORMANCE_FIELDS = [
     'aaAuto',
     'aaAdaptive',
     'targetFps',
+    'zoomMagnificationThreshold',
 ] as const satisfies readonly (keyof MandelbrotParams)[];
 
 export const EXPLORATION_STATE_FIELDS = [
@@ -190,5 +193,6 @@ export function preserveSessionPerformanceFields<T extends Partial<MandelbrotPar
         aaAuto: current.aaAuto,
         aaAdaptive: current.aaAdaptive,
         targetFps: current.targetFps,
+        zoomMagnificationThreshold: current.zoomMagnificationThreshold,
     };
 }

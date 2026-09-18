@@ -31,16 +31,27 @@ export class GpuPalettePath {
             throw error
         }
     }
-    update(device: GPUDevice, depth: number, projection?: { scale: string; uniforms: Float32Array }, projectionDepth = depth) {
+    /** Depth span covered by the path, in decimal orders of magnitude. */
+    get span(): number {
+        const stops = this.path.stops
+        return stops[stops.length - 1].magnitude - stops[0].magnitude
+    }
+    /**
+     * @param wrapOffset When set, the depth the path is read at is shifted by
+     *   this many orders of magnitude and wrapped over the path's span (the
+     *   "Décalage parcours" animation track). Null keeps the static read.
+     */
+    update(device: GPUDevice, depth: number, projection?: { scale: string; uniforms: Float32Array }, projectionDepth = depth, wrapOffset: number | null = null) {
         const u = projection?.uniforms
         const mode = u ? (u[0] < 2 ? 3 : 4) : this.path.mode === 'global' ? 1 : 2
         device.queue.writeBuffer(this.buffer, 0, new Float32Array([
-            this.path.stops.length, mode, this.path.outside === 'manual' ? 1 : 0, 1,
+            // config.w: 1 = wrap the read depth over the span (extra.w = offset).
+            this.path.stops.length, mode, this.path.outside === 'manual' ? 1 : 0, wrapOffset === null ? 0 : 1,
             (u ? projectionDepth : depth) - this.path.stops[0].magnitude, u ? u[6] / Math.LN10 : 0, u ? u[3] : 0, u ? u[4] : 0,
             // extra.z: first stop's absolute magnitude. Node magnitudes are stored
             // relative to it; the ExpMap display shaders receive the absolute camera
             // depth and subtract this before walking the path.
-            u ? u[9] : 1, u ? u[10] : 0, this.path.stops[0].magnitude, 0,
+            u ? u[9] : 1, u ? u[10] : 0, this.path.stops[0].magnitude, wrapOffset ?? 0,
         ]))
         // Center blocks currently use density=1 and zero centerHalf in the producer.
     }

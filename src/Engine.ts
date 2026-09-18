@@ -31,7 +31,6 @@ import type {ZoomState} from './zoomState'
 import {
     getFrozenScale,
     getLiveScale,
-    getReferenceResetDuringZoom,
     isZoomActive,
     reduceZoomState,
     resetZoomState
@@ -1357,6 +1356,47 @@ export class Engine {
     private needMergeSnapshot = false
     /** Saved merge uniform values captured at zoom stop (before state is reset). */
     private mergeUniforms = { zf: 1.0, lzf: 1.0, frozenShiftU: 0, frozenShiftV: 0, aspect: 1.0, angle: 0 }
+
+    /**
+     * Refresh the frozen fallback from the resolved (live) texture before the
+     * live history is cleared.
+     *
+     * A raw copy discards every frozen pixel, including the ones finer than
+     * what the live texture has resolved so far. That is exactly what made a
+     * zoom resumed before convergence restart from a coarse image: the stop
+     * merge had just produced the best available picture, and the next cycle
+     * start overwrote it with a half-computed live. So whenever a usable
+     * frozen texture exists, the refresh is a min-step merge (finest pixel
+     * wins, per pixel) into the display space described by the uniforms; the
+     * raw copy remains only for the case where no frozen data exists.
+     *
+     * Idle callers pass no uniforms: both textures then share the current
+     * display space (zf = lzf = 1, no shift), which holds whenever
+     * `frozenAligned` is true.
+     */
+    private requestFrozenRefresh(uniforms?: {
+        zf: number
+        lzf: number
+        frozenShiftU: number
+        frozenShiftV: number
+        aspect: number
+        angle: number
+    }) {
+        if (this.tiledKeyframePlan) {
+            this.beginNextTiledKeyframe()
+            return
+        }
+        const frozenUsable = this.frozenDisplayVersion >= 0
+            && (uniforms !== undefined || this.frozenAligned)
+        if (frozenUsable) {
+            const aspect = this.width / Math.max(1, this.height)
+            this.mergeUniforms = uniforms ?? { zf: 1, lzf: 1, frozenShiftU: 0, frozenShiftV: 0, aspect, angle: 0 }
+            this.needMergeSnapshot = true
+            this.needFreezeSnapshot = false
+        } else {
+            this.needFreezeSnapshot = true
+        }
+    }
     /** Initial live-texel offset between a frozen snapshot and the display when zoom starts. */
     private frozenBaseShiftX = 0
     private frozenBaseShiftY = 0
@@ -1884,7 +1924,7 @@ export class Engine {
                     this.needRender = true
                     this.invalidateCounterReadback()
                 } else if (activatesFirstAutoTable) {
-                    if (this.unfinishedPixelCount >= 0) this.needFreezeSnapshot = true
+                    if (this.unfinishedPixelCount >= 0) this.requestFrozenRefresh()
                     this.clearHistoryNextFrame = true
                     this.needRender = true
                     this.invalidateCounterReadback()
@@ -2006,7 +2046,7 @@ export class Engine {
                 // the exact image as the frozen fallback when one has already
                 // been resolved, avoiding a visible blank during reconvergence.
                 if (this.unfinishedPixelCount >= 0) {
-                    this.needFreezeSnapshot = true
+                    this.requestFrozenRefresh()
                 }
                 this.clearHistoryNextFrame = true
                 this.needRender = true
@@ -3827,6 +3867,11 @@ export class Engine {
             if (readback.mapState === 'mapped') readback.unmap()
             readback.destroy()
         }
+    }
+
+    /** Largest 2D texture side this device allows (8192 when unknown). */
+    get maxTextureDimension(): number {
+        return this.device?.limits?.maxTextureDimension2D ?? 8192
     }
 
     /** Complete one-shot work snapshot for A/B benchmarks. Unlike the polled
@@ -5831,7 +5876,7 @@ export class Engine {
         }
         if (on === this.dynamicValidityShadow) return
         this.dynamicValidityShadow = on
-        if (this.unfinishedPixelCount >= 0) this.needFreezeSnapshot = true
+        if (this.unfinishedPixelCount >= 0) this.requestFrozenRefresh()
         this.clearHistoryNextFrame = true
         this.needRender = true
         this.invalidateCounterReadback()
@@ -5996,8 +6041,17 @@ export class Engine {
                     + Math.max(0, Math.ceil(Math.log2(Math.log(Math.max(mu, 4)) / Math.log(4)))), 10_000_000) }
         }
         await this.preparePalettePath(renderOptions)
-        this.palettePathGpu?.update(this.device, -(mandelbrot.scaleStr ? log10FromDecimalString(mandelbrot.scaleStr) : Math.log10(mandelbrot.scale)),
-            this.expmapProjection ?? undefined, this.expmapProjection ? -log10FromDecimalString(this.expmapProjection.scale) : undefined)
+        if (this.palettePathGpu) {
+            // "Décalage parcours" track: contribution in path spans → orders of
+            // magnitude. Null when the track is off so the static read is untouched.
+            const pathAnimation = normalizeAnimationConfig(renderOptions.animation, renderOptions.animationSpeed)
+            const pathOffsetTrack = pathAnimation.tracks.palettePathOffset
+            const pathWrapOffset = pathOffsetTrack.enabled
+                ? animationContribution(pathOffsetTrack, renderOptions.activateAnimate ? this.time : 0, clamp(pathAnimation.globalSpeed, 0, 10)) * this.palettePathGpu.span
+                : null
+            this.palettePathGpu.update(this.device, -(mandelbrot.scaleStr ? log10FromDecimalString(mandelbrot.scaleStr) : Math.log10(mandelbrot.scale)),
+                this.expmapProjection ?? undefined, this.expmapProjection ? -log10FromDecimalString(this.expmapProjection.scale) : undefined, pathWrapOffset)
+        }
         this.selectColorPipelines(needsSurfaceColorPipeline(this.palettePathGpu?.stops ?? this.presetTransition?.stops ?? renderOptions.colorStops))
         this.rotationColorResolveChangedThisUpdate = false
         const orbitTrap = normalizeOrbitTrapConfig(renderOptions.orbitTrap, renderOptions.orbitTrapStrength)
@@ -6202,7 +6256,9 @@ export class Engine {
             // recompute can be slow enough to expose a black frame unless we keep
             // the last resolved image as a temporary frozen fallback. The render
             // pass copies resolved -> frozen before executing the clear.
-            this.needFreezeSnapshot = orbitWasReset && !preserveZoomFrozen && !muChanged
+            // The reducer's `copyResolvedToFrozen` effect (idle reset, same mu)
+            // requests the frozen refresh below; nothing to arm here.
+            this.needFreezeSnapshot = false
             this.needMergeSnapshot = false
         }
         this.videoExportFrameEvaluationPending = false
@@ -6238,7 +6294,6 @@ export class Engine {
             const wasZoomActive = isZoomActive(this.zoomState)
             const prevFrozenScale = getFrozenScale(this.zoomState)
             const prevLiveScale = getLiveScale(this.zoomState)
-            const prevRefResetDuringZoom = getReferenceResetDuringZoom(this.zoomState)
 
             const {state, effects} = event
                 ? reduceZoomState(this.zoomState, event, { threshold: this.zoomMagnificationThreshold })
@@ -6264,10 +6319,23 @@ export class Engine {
             for (const effect of effects) {
                 switch (effect.type) {
                     case 'copyResolvedToFrozen':
-                        if (this.tiledKeyframePlan) {
-                            this.beginNextTiledKeyframe()
+                        if (wasZoomActive && prevFrozenScale > 0 && prevLiveScale > 0) {
+                            // Mid-zoom swap: the new frozen texture takes the live
+                            // texture's space (lzf = 1) and absorbs the old frozen
+                            // where it is still finer (zf = threshold, same shift
+                            // formula as the colour pass).
+                            this.requestFrozenRefresh({
+                                zf: prevFrozenScale / prevLiveScale,
+                                lzf: 1,
+                                frozenShiftU: (this.frozenBaseShiftX + this.frozenPanShiftX * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
+                                frozenShiftV: -(this.frozenBaseShiftY + this.frozenPanShiftY * (prevLiveScale / prevFrozenScale)) / this.neutralSize,
+                                aspect,
+                                angle: mandelbrot.angle,
+                            })
                         } else {
-                            this.needFreezeSnapshot = true
+                            // Cycle start or idle reset: frozen and live share the
+                            // previous frame's display space when aligned.
+                            this.requestFrozenRefresh()
                         }
                         if (isZoomActive(this.zoomState)) {
                             if (!wasZoomActive) {
@@ -6290,9 +6358,7 @@ export class Engine {
                         }
                         break
                     case 'mergeResolvedAndFrozen':
-                        this.needMergeSnapshot = this.tiledKeyframePlan
-                            ? false
-                            : !prevRefResetDuringZoom
+                        this.needMergeSnapshot = !this.tiledKeyframePlan
                         if (wasZoomActive && prevFrozenScale > 0) {
                             this.mergeUniforms = {
                                 zf: prevFrozenScale / mandelbrot.scale,
@@ -6706,7 +6772,7 @@ export class Engine {
             && !this.clearHistoryNextFrame
             && !this.aaActive
             && orbitComplete && this.prevGuardedMaxIter < maxIterations && this.prevGuardedMaxIter > 0) {
-            this.needFreezeSnapshot = true
+            this.requestFrozenRefresh()
             this.clearHistoryNextFrame = true
         }
         this.prevGuardedMaxIter = guardedMaxIter
@@ -7064,8 +7130,10 @@ export class Engine {
         if (hasTranslationShift && !isZoomActive(this.zoomState)) {
             // A pending non-zoom snapshot would copy the pre-translation
             // resolved texture, then incorrectly mark it aligned with the
-            // translated live texture.
+            // translated live texture. Same for a pending idle merge, whose
+            // uniforms assumed a shared display space.
             this.needFreezeSnapshot = false
+            this.needMergeSnapshot = false
         }
 
         const workCounterShift = iterationWorkCounterShift(

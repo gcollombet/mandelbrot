@@ -3,7 +3,6 @@ import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue
 import {useRouter} from 'vue-router';
 import type {ApproximationMode, InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {
-  MAX_ANTIALIAS_LEVEL,
   preserveSessionPerformanceFields,
   stripExplorationStateFields,
   stripSessionPerformanceFields,
@@ -22,6 +21,7 @@ import GlissiereHandle from './GlissiereHandle.vue';
 import AnimationPanel from './AnimationPanel.vue';
 import StopTransferCurveSelector from './StopTransferCurveSelector.vue';
 import { DenseField, DenseSection, DenseToggle, DenseSeg, DenseSelect, DenseLinkedChip, useLinkedRecord } from './dense';
+import CoordinateField from './dense/CoordinateField.vue';
 import {Palette} from '../Palette.ts';
 import {hsl as d3hsl, rgb as d3rgb} from 'd3-color';
 import type {TextureMetadata} from '../textureStore';
@@ -40,6 +40,7 @@ import {
   textureSourceKey,
 } from '../textureLibrary';
 import {log10FromDecimalString} from '../floatexp';
+import {centerOnMinibrot, frameMinibrot} from '../minibrotActions';
 import type {PresetMetadata, PresetRecord} from '../presetStore';
 import {
   computeScaleExponent,
@@ -436,7 +437,8 @@ const scaleSlider = computed({
   get: () => {
     const mag = -scaleLog10(model.value.scale);
     if (!isFinite(mag)) return -10;
-    return Math.min(Math.max(Math.round(mag), -10), SCALE_SLIDER_MAX);
+    // floor, not round: the decade shown is the one the fine slider is in.
+    return Math.min(Math.max(Math.floor(mag + 1e-9), -10), SCALE_SLIDER_MAX);
   },
   set: (val: number) => {
     const v = Math.min(Math.max(Math.round(val), -10), SCALE_SLIDER_MAX);
@@ -444,17 +446,85 @@ const scaleSlider = computed({
   }
 });
 
+// ── Two-stage zoom ───────────────────────────────────────────────────
+// The decade slider above moves one order of magnitude per step. The fine
+// slider covers the decade [fineDecade, fineDecade+1] of decimal depth
+// D = −log10(scale): its position is the fractional part of D. Releasing it
+// at either end re-parametrises onto the neighbouring decade (the scale is
+// unchanged at that instant), so a long fine zoom proceeds decade by decade.
+const depthLog = computed(() => -scaleLog10(model.value.scale));
+const fineDecade = ref(Math.floor(depthLog.value));
+watch(depthLog, (d) => {
+  // Follow external changes (wheel, coarse slider, presets) once D leaves
+  // the decade the fine slider is parked on.
+  if (d < fineDecade.value || d > fineDecade.value + 1) fineDecade.value = Math.floor(d);
+});
+/** Write scale = 10^-depth as mantissa·10^-(k+1), mantissa ∈ [1, 10]. */
+function setDepth(depth: number) {
+  const d = Math.min(Math.max(depth, -10), SCALE_SLIDER_MAX + 1);
+  const k = Math.floor(d + 1e-9);
+  const mantissa = 10 ** (1 - (d - k));
+  model.value.scale = `${mantissa.toPrecision(7)}e${-(k + 1)}`;
+}
+const fineSlider = computed({
+  get: () => Math.min(1, Math.max(0, depthLog.value - fineDecade.value)),
+  set: (f: number) => setDepth(fineDecade.value + Math.min(1, Math.max(0, f))),
+});
+/** ± one decade, keeping the fractional depth (the fine position). */
+function stepDecade(delta: number) { setDepth(depthLog.value + delta); }
+function stepQuarterTurn(delta: number) { model.value.angle = model.value.angle + delta * Math.PI / 2; }
+// Shown as decimal depth (13.861 = scale 10^-13.861) so the fine reading
+// continues the decade slider instead of introducing a mantissa.
+const fineFmt = (v: number) => (fineDecade.value + v).toFixed(3);
+function onFineRelease() {
+  const f = fineSlider.value;
+  if (f >= 0.999) fineDecade.value += 1;
+  else if (f <= 0.001 && fineDecade.value > -10) fineDecade.value -= 1;
+}
+/** Scientific rendering of the scale string with 6 significant digits. */
+function scaleSciFormat(value: string): string {
+  const m = /^\s*([+-]?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?\s*$/.exec(value);
+  if (!m) return value;
+  const digits = ((m[2] ?? '') + (m[3] ?? ''));
+  const lead = digits.search(/[1-9]/);
+  if (lead < 0) return '0';
+  const exponent = (m[4] ? parseInt(m[4], 10) : 0) + (m[2] ?? '').length - 1 - lead;
+  const mant = digits.slice(lead, lead + 7).padEnd(7, '0');
+  const rounded = Math.round(parseInt(mant, 10) / 10) / 1e5;
+  return `${m[1]}${rounded.toFixed(5)}e${exponent}`;
+}
+function parseScaleInput(text: string): string | null {
+  const normalized = text.replace(/\s+/g, '').replace('×10^', 'e').replace('^', 'e');
+  if (!/^\+?(\d+\.?\d*|\.\d+)(e[+-]?\d+)?$/i.test(normalized)) return null;
+  if (/^0*\.?0*(e|$)/i.test(normalized)) return null;
+  return normalized.toLowerCase();
+}
+
 // ── Dense field formatters (Navigation) ──────────────────────────────
 const zoomFmt = (v: number) => `1e${-Math.round(v)}`;
 const angleFmt = (v: number) => v.toFixed(1);
 const muFmt = (v: number) => Math.pow(10, v).toFixed(1);
 
 // ── Dense field formatters (Performance) ─────────────────────────────
-const antialiasFmt = (v: number) => (v > 1 ? v + '×' : 'Off');
 const radiusFmt = (v: number) => Math.pow(10, v).toExponential(0);
 // Slider value is the positive exponent; display as the target scale (e.g. 30 → "1e-30").
 const precisionBudgetFmt = (v: number) => `1e-${Math.round(v)}`;
-const resolutionFmt = (v: number) => 'DPR ×' + v.toFixed(2);
+// ── Quality presets (Performance tab) ────────────────────────────────
+// Discrete choices replace free sliders: every value here is one the render
+// path handles well (power-of-two AA budgets, DPR steps the surface fit can
+// honour, swap ratios the frozen/live cycle was measured at).
+const RESOLUTION_PRESETS = [0.125, 0.25, 0.5, 0.75, 1, 1.5, 2] as const;
+const resolutionOptions = RESOLUTION_PRESETS.map(v => ({ label: 'DPR ×' + String(v), value: v }));
+const AA_SAMPLE_PRESETS = [1, 2, 4, 8, 16, 32, 64, 128, 256] as const;
+const aaSampleOptions = AA_SAMPLE_PRESETS.map(v => ({ label: v === 1 ? 'Off' : `${v}×`, value: v }));
+const ZOOM_THRESHOLD_PRESETS = [2, 4, 6, 8, 16] as const;
+const zoomThresholdOptions = ZOOM_THRESHOLD_PRESETS.map(v => ({ label: `×${v}`, value: v }));
+/** Nearest preset, so a saved free value (e.g. DPR 0.625) still selects an option. */
+function nearestPreset(value: number, presets: readonly number[]): number {
+  let best = presets[0];
+  for (const p of presets) if (Math.abs(p - value) < Math.abs(best - value)) best = p;
+  return best;
+}
 const iterationsFmt = (v: number) => '×' + Math.pow(10, v).toPrecision(3);
 const fpsFmt = (v: number) => v + ' fps';
 const debugViewOptions = [
@@ -601,7 +671,7 @@ function onSelectMappingPreset(name: string | number) {
 
 const coordsCopied = ref(false);
 function copyCoordinates() {
-  const txt = `Cx ${model.value.cx}, Cy ${model.value.cy}`;
+  const txt = `${model.value.cx}, ${model.value.cy}`;
   navigator.clipboard?.writeText(txt);
   coordsCopied.value = true;
   window.setTimeout(() => { coordsCopied.value = false; }, 1200);
@@ -629,8 +699,6 @@ const zoomingMinibrot = ref(false);
 const findMinibrotStatus = ref<string | null>(null);
 let findMinibrotStatusTimer: ReturnType<typeof setTimeout> | null = null;
 
-// Fraction of the limiting screen axis the framed zoom gives the minibrot.
-const MINIBROT_FILL = 0.5;
 
 function setMinibrotStatus(text: string) {
   findMinibrotStatus.value = text;
@@ -643,58 +711,28 @@ async function findMinibrot() {
   findingMinibrot.value = true;
   findMinibrotStatus.value = null;
   try {
-    const res = await props.engine.findMinibrot(4);
-    if (res.status === 'ok' && res.cx && res.cy) {
-      // Setting the model centre teleports the view via the parent watcher
-      // (cancel transition → origin → resetReference), keeping the zoom.
-      model.value = { ...model.value, cx: res.cx, cy: res.cy };
-      setMinibrotStatus(`Centered on period-${res.period} minibrot`);
-    } else if (res.status === 'nonewton') {
-      setMinibrotStatus(`Period ${res.period} found, but the nucleus did not converge`);
-    } else {
-      setMinibrotStatus('No minibrot under this view — zoom onto one first');
-    }
-  } catch {
-    setMinibrotStatus('Find minibrot failed');
+    const { next, status } = await centerOnMinibrot(props.engine, model.value);
+    // Setting the model centre teleports the view via the parent watcher
+    // (cancel transition → origin → resetReference), keeping the zoom.
+    if (next) model.value = next;
+    setMinibrotStatus(status);
   } finally {
     findingMinibrot.value = false;
   }
 }
 
 // Neighbour of "Find minibrot": same detection, but the view is *framed* on the
-// copy instead of merely centred on its nucleus. The worker adds the Munafo/Jung
-// size estimate Λ, so it returns the copy's centre (the nucleus sits well off it
-// — the tail runs out to w = −2·Λ) and the view half-height that makes the copy
-// span MINIBROT_FILL of the limiting screen axis.
+// copy instead of merely centred on its nucleus (see minibrotActions.ts).
 async function zoomToMinibrot() {
   if (!props.engine || findingMinibrot.value || zoomingMinibrot.value) return;
   zoomingMinibrot.value = true;
   findMinibrotStatus.value = null;
   try {
-    const res = await props.engine.findMinibrot(4, MINIBROT_FILL);
-    if (res.status === 'ok' && res.cx && res.cy && res.scale) {
-      const next = { ...model.value, cx: res.cx, cy: res.cy, scale: res.scale };
-      // The framing can land far deeper than the current view. Past the
-      // navigation precision budget the worker rebuilds the reference with too
-      // few digits and the frame smears, so carry the budget along (same field
-      // the Performance "Nav precision" slider drives).
-      const depth = Math.ceil(-scaleLog10(res.scale)) + 5;
-      if (depth > precisionBudgetExp.value) {
-        next.precisionBudget = `1e-${Math.min(1000, depth)}`;
-      }
-      // One model replacement ⇒ the parent watcher applies centre + scale in the
-      // same sync pass (teleport, then the new zoom), instead of two teleports.
-      model.value = next;
-      setMinibrotStatus(`Framed period-${res.period} minibrot`);
-    } else if (res.status === 'nosize') {
-      setMinibrotStatus(`Period ${res.period} found, but its size estimate degenerated`);
-    } else if (res.status === 'nonewton') {
-      setMinibrotStatus(`Period ${res.period} found, but the nucleus did not converge`);
-    } else {
-      setMinibrotStatus('No minibrot under this view — zoom onto one first');
-    }
-  } catch {
-    setMinibrotStatus('Zoom to minibrot failed');
+    const { next, status } = await frameMinibrot(props.engine, model.value);
+    // One model replacement ⇒ the parent watcher applies centre + scale in the
+    // same sync pass (teleport, then the new zoom), instead of two teleports.
+    if (next) model.value = next;
+    setMinibrotStatus(status);
   } finally {
     zoomingMinibrot.value = false;
   }
@@ -2884,95 +2922,6 @@ async function startVideoExport(payload: {
     <!-- Navigation tab -->
     <div v-if="activeTab === 'navigation'" class="cv-body sections">
 
-      <!-- ============ 1. LOCATION ============ -->
-      <DenseSection
-        title="Localisation"
-        scope="Position dans le plan complexe"
-        icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;3.2&quot;/><path d=&quot;M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22&quot;/><circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/>'
-      >
-        <div class="coords">
-          <div class="lab">
-            <div class="l1">Centre</div>
-            <div class="l2">Coordonnées complexes</div>
-          </div>
-          <div class="vals">
-            <div class="cline">
-              <span class="ax">Cx</span>
-              <input
-                type="text"
-                class="coord-input"
-                :value="model.cx"
-                @input="updateCx(($event.target as HTMLInputElement).value)"
-                @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-                @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-                placeholder="0.0"
-              />
-            </div>
-            <div class="cline">
-              <span class="ax">Cy</span>
-              <input
-                type="text"
-                class="coord-input"
-                :value="model.cy"
-                @input="updateCy(($event.target as HTMLInputElement).value)"
-                @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
-                @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
-                placeholder="0.0"
-              />
-            </div>
-          </div>
-          <button class="copy" :class="{ ok: coordsCopied }" title="Copier les coordonnées" @click="copyCoordinates">
-            <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
-          </button>
-        </div>
-
-        <div class="find-minibrot-row">
-          <button
-            class="mini-btn"
-            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
-            title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
-            @click="findMinibrot"
-          >
-            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            {{ findingMinibrot ? 'Recherche…' : 'Centrer minibrot' }}
-          </button>
-          <button
-            class="mini-btn"
-            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
-            title="Same detection, then frame the whole minibrot at the centre of the screen (~50 % of it)"
-            @click="zoomToMinibrot"
-          >
-            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>
-            {{ zoomingMinibrot ? 'Cadrage…' : 'Cadrer minibrot' }}
-          </button>
-          <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
-        </div>
-
-        <div class="fields">
-          <DenseField
-            label="Zoom" :min="-10" :max="1000" :step="1"
-            :f="zoomFmt"
-            :model-value="scaleSlider"
-            @update:model-value="(v: number) => scaleSlider = v"
-          />
-          <DenseField
-            label="Rotation" :min="0" :max="359" :step="1"
-            :f="angleFmt" unit="°"
-            :model-value="angleSlider"
-            @update:model-value="(v: number) => angleSlider = v"
-          />
-        </div>
-        <div class="mu-row">
-          <DenseField
-            label="Bailout" :min="0.602" :max="5" :step="0.01"
-            :f="muFmt"
-            :model-value="muSlider"
-            @update:model-value="(v: number) => muSlider = v"
-          />
-          <button class="mini-btn mu-quick" @click="model.mu = 4" title="Bailout = 4">4</button>
-        </div>
-      </DenseSection>
-
       <!-- ============ 3. LOCATIONS LIBRARY ============ -->
       <DenseSection
         title="Choisir un lieu…" initially-collapsed
@@ -3067,6 +3016,96 @@ async function startVideoExport(payload: {
       </div>
 
       </DenseSection>
+
+      <!-- ============ 1. LOCATION ============ -->
+      <DenseSection
+        title="Localisation"
+        scope="Position dans le plan complexe"
+        icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;3.2&quot;/><path d=&quot;M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22&quot;/><circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/>'
+      >
+        <div class="coord-head">
+          <span class="coord-title">Centre</span>
+          <button class="mini-btn coord-copy-all" :class="{ ok: coordsCopied }" type="button" title="Copier Cx, Cy" @click="copyCoordinates">
+            <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
+            {{ coordsCopied ? 'Copié' : 'Copier les deux' }}
+          </button>
+        </div>
+        <div class="coord-lines">
+          <CoordinateField label="Cx" :model-value="model.cx" :suspend-shortcuts="props.suspendShortcuts" @update:model-value="updateCx" />
+          <CoordinateField label="Cy" :model-value="model.cy" :suspend-shortcuts="props.suspendShortcuts" @update:model-value="updateCy" />
+        </div>
+
+        <div class="find-minibrot-row">
+          <button
+            class="mini-btn"
+            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
+            title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
+            @click="findMinibrot"
+          >
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
+            {{ findingMinibrot ? 'Recherche…' : 'Centrer minibrot' }}
+          </button>
+          <button
+            class="mini-btn"
+            :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
+            title="Same detection, then frame the whole minibrot at the centre of the screen (~50 % of it)"
+            @click="zoomToMinibrot"
+          >
+            <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>
+            {{ zoomingMinibrot ? 'Cadrage…' : 'Cadrer minibrot' }}
+          </button>
+          <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
+        </div>
+
+        <div class="mu-row">
+          <DenseField
+            label="Décade" :min="-10" :max="1000" :step="1"
+            :f="zoomFmt"
+            :model-value="scaleSlider"
+            @update:model-value="(v: number) => scaleSlider = v"
+          />
+          <button class="mini-btn mu-quick" @click="stepDecade(-1)" title="Une décade en arrière (×10)">−</button>
+          <button class="mini-btn mu-quick" @click="scaleSlider = 0" title="Zoom initial (échelle 1)">1e0</button>
+          <button class="mini-btn mu-quick" @click="stepDecade(1)" title="Une décade en avant (÷10)">+</button>
+        </div>
+        <div class="mu-row fine-zoom" @pointerup="onFineRelease" @pointercancel="onFineRelease">
+          <DenseField
+            label="Fin" :min="0" :max="1" :step="0.001"
+            :f="fineFmt"
+            :model-value="fineSlider"
+            @update:model-value="(v: number) => fineSlider = v"
+          />
+          <span class="mini-btn mu-quick fine-decade" :title="`Décade 1e-${fineDecade} → 1e-${fineDecade + 1} ; relâcher en butée passe à la suivante`">→1e-{{ fineDecade + 1 }}</span>
+        </div>
+        <div class="coord-lines">
+          <CoordinateField
+            label="Éch." :model-value="model.scale" :format="scaleSciFormat" :parse="parseScaleInput"
+            :suspend-shortcuts="props.suspendShortcuts"
+            @update:model-value="(v: string) => model.scale = v"
+          />
+        </div>
+        <div class="mu-row">
+          <DenseField
+            label="Rotation" :min="0" :max="359" :step="1"
+            :f="angleFmt" unit="°"
+            :model-value="angleSlider"
+            @update:model-value="(v: number) => angleSlider = v"
+          />
+          <button class="mini-btn mu-quick" @click="stepQuarterTurn(-1)" title="Quart de tour antihoraire">−90°</button>
+          <button class="mini-btn mu-quick" @click="model.angle = 0" title="Rotation nulle">0°</button>
+          <button class="mini-btn mu-quick" @click="stepQuarterTurn(1)" title="Quart de tour horaire">+90°</button>
+        </div>
+        <div class="mu-row">
+          <DenseField
+            label="Bailout" :min="0.602" :max="5" :step="0.01"
+            :f="muFmt"
+            :model-value="muSlider"
+            @update:model-value="(v: number) => muSlider = v"
+          />
+          <button class="mini-btn mu-quick" @click="model.mu = 4" title="Bailout = 4">4</button>
+        </div>
+      </DenseSection>
+
     </div>
 
     <!-- Presets tab -->
@@ -3741,11 +3780,11 @@ async function startVideoExport(payload: {
 
     <div v-else-if="activeTab === 'performance'" class="graphics-tab sections">
       <DenseSection title="Qualité et fluidité">
-        <div class="fields"><DenseField
-            label="Résolution" :min="0.125" :max="2" :step="0.125"
-            :f="resolutionFmt"
-            :model-value="model.dprMultiplier ?? 1"
-            @update:model-value="(v: number) => model.dprMultiplier = v"
+        <div class="fields"><DenseSelect
+            label="DPR"
+            :options="resolutionOptions"
+            :model-value="nearestPreset(model.dprMultiplier ?? 1, RESOLUTION_PRESETS)"
+            @update:model-value="(v) => model.dprMultiplier = Number(v)"
           />
 <DenseField
             label="Cadence cible" :min="10" :max="60" :step="1"
@@ -3753,11 +3792,17 @@ async function startVideoExport(payload: {
             :model-value="model.targetFps ?? 60"
             @update:model-value="(v: number) => model.targetFps = v"
           />
-<DenseField
-            label="Échantillons AA" :min="1" :max="MAX_ANTIALIAS_LEVEL" :step="1"
-            :f="antialiasFmt"
-            :model-value="model.antialiasLevel ?? 1"
-            @update:model-value="(v: number) => model.antialiasLevel = v"
+<DenseSelect
+            label="AA"
+            :options="aaSampleOptions"
+            :model-value="nearestPreset(model.antialiasLevel ?? 1, AA_SAMPLE_PRESETS)"
+            @update:model-value="(v) => model.antialiasLevel = Number(v)"
+          />
+<DenseSelect
+            label="Bascule"
+            :options="zoomThresholdOptions"
+            :model-value="nearestPreset(model.zoomMagnificationThreshold ?? 16, ZOOM_THRESHOLD_PRESETS)"
+            @update:model-value="(v) => model.zoomMagnificationThreshold = Number(v)"
           />
 <DenseToggle
             label="AA automatique"
@@ -3766,6 +3811,7 @@ async function startVideoExport(payload: {
           /></div>
         <p v-if="model.activateAnimate && model.aaAuto" class="panel-note">AA automatique en pause pendant l’animation.</p>
         <p v-else-if="(model.antialiasLevel ?? 1) <= 1" class="panel-note">Choisir au moins 2 échantillons pour lisser le rendu.</p>
+        <p class="panel-note">Bascule : rapport d’agrandissement entre deux recalculs complets pendant un zoom continu. Plus bas = image nette plus souvent, plus de calcul.</p>
       </DenseSection>
       <DenseSection title="Calcul avancé" initially-collapsed>
         <div class="fields"><DenseField
@@ -4983,6 +5029,20 @@ async function startVideoExport(payload: {
   color: var(--ink-3);
   margin-left: 2px;
 }
+
+/* coordinates: one full-width line per value (CoordinateField) */
+.cv-body .coord-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin: 2px 0 var(--gap, 5px);
+}
+.cv-body .coord-title { font-size: var(--font-md); font-weight: 600; }
+.cv-body .coord-copy-all { display: inline-flex; align-items: center; gap: 6px; }
+.cv-body .coord-copy-all svg { width: 13px; height: 13px; fill: none; stroke: currentColor; stroke-width: 2; }
+.cv-body .coord-copy-all.ok { color: var(--accent-bright); }
+.cv-body .coord-lines { display: flex; flex-direction: column; gap: var(--gap, 5px); margin-bottom: var(--gap, 5px); }
+.cv-body .fine-decade { cursor: default; font-size: 11px; }
 
 /* coordinates card */
 .cv-body .coords {

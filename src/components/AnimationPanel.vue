@@ -270,6 +270,7 @@ const trackLabels: Record<string, string> = {
   protrusionPhase: 'Phase protubérances', reliefDepth: 'Profondeur relief',
   orbitTrapPhaseOffset: 'Couleur piège orbite', orbitTrapStrength: 'Intensité piège orbite',
   gradeSaturation: 'Saturation', gradeContrast: 'Contraste',
+  palettePathOffset: 'Décalage parcours',
 };
 const visibleAnimationPresetCount = computed(() => visibleAnimationPresets.value.length);
 

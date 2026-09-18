@@ -41,6 +41,7 @@ const props = defineProps<{
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
   targetFps?: number,
+  zoomMagnificationThreshold?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   pickerMode?: boolean,
   uiHidden?: boolean,
@@ -464,6 +465,7 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :paletteScreenShiftX="props.paletteScreenShiftX"
       :paletteScreenShiftY="props.paletteScreenShiftY"
       :dprMultiplier="props.dprMultiplier"
+      :zoomMagnificationThreshold="props.zoomMagnificationThreshold"
       :maxIterationMultiplier="props.maxIterationMultiplier"
       :targetFps="props.targetFps"
       :interpolationMode="props.interpolationMode"

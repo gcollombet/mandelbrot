@@ -177,11 +177,18 @@ fn path_radial_depth(base: f32, radius: f32) -> f32 {
   if (radius <= 0.0 && palettePath.config.x >= 2.0) { return path_value(u32(palettePath.config.x), 0u); }
   return base - log(max(radius, 1e-30)) / log(10.0);
 }
-fn apply_palette_path(depth: f32) {
+fn apply_palette_path(depthIn: f32) {
   pathA = 0u; pathB = 0u; pathT = 0.0;
   let count = u32(palettePath.config.x);
   if (count < 2u) { return; }
   let first = path_value(1u, 0u); let last = path_value(count, 0u);
+  var depth = depthIn;
+  if (palettePath.config.w > 0.5) {
+    // Animated path offset: read depth shifted by extra.w and wrapped over
+    // the span, so the whole path scrolls past the current depth.
+    let span = max(last - first, 1e-6);
+    depth = first + fract((depthIn - first + palettePath.extra.w) / span) * span;
+  }
   if ((depth < first || depth > last) && palettePath.config.z > 0.5) { return; }
   pathA = 1u; pathB = 1u;
   if (depth >= last) { pathA = count; pathB = count; }

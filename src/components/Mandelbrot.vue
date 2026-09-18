@@ -110,6 +110,7 @@ const props = withDefaults(defineProps<{
   dprMultiplier?: number,
   maxIterationMultiplier?: number,
   targetFps?: number,
+  zoomMagnificationThreshold?: number,
   interpolationMode?: 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix',
   tessellationLevel?: number,
   displacementAmount?: number,
@@ -227,6 +228,16 @@ watch(
   (val) => {
     if (!engine) return;
     engine.targetFps = val;
+  }
+);
+
+// Seuil de bascule frozen/live du zoom continu. Pris en compte au prochain
+// cycle ; un cycle en cours garde son seuil.
+watch(
+  () => props.zoomMagnificationThreshold,
+  (val) => {
+    if (!engine || !(val && val > 1)) return;
+    engine.zoomMagnificationThreshold = val;
   }
 );
 
@@ -465,6 +476,9 @@ async function initWebGPU() {
   });
   engine.dprMultiplier = props.dprMultiplier ?? 1.0;
   engine.targetFps = props.targetFps ?? 60;
+  if (props.zoomMagnificationThreshold && props.zoomMagnificationThreshold > 1) {
+    engine.zoomMagnificationThreshold = props.zoomMagnificationThreshold;
+  }
   return engine.initialize(navigator)
 }
 

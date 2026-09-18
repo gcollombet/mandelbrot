@@ -46,3 +46,4 @@ target
 /.agent
 /.github/prompts
 /.github/skills
+/.agents/
