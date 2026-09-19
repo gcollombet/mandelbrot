@@ -72,9 +72,9 @@ struct Uniforms {
   aaJitterLogMag: f32,   // ln|δc| in c units (exponent-summed with the payload's S)
   aaAnalytic: f32,       // 1 = analytic AA expansion enabled (raw payload bound)
   gradeSaturation: f32,  // display-grade saturation (1.0 = neutral)
-  reachDebug: f32,       // 1 = analytic-AA reach heatmap (debug view 6)
+  _reserved65: f32,      // was the analytic-AA reach heatmap flag
   lnScale: f32,          // ln(view scale) at full precision (deep-safe pixel size)
-  reachReady: f32,       // 2 = z″ payload carried by every production path
+  _reserved67: f32,
   protrusionPhase: f32,     // wrapped global phase offset [0, 1)
   protrusionSharpness: f32, // global lobe exponent [0.25, 16], default 2
   protrusionGeometryMix: f32, // 0 = iteration lobe, 1 = scalar height warp
@@ -245,23 +245,6 @@ struct VertexOutput {
   @builtin(position) position: vec4<f32>,
   @location(0) fragCoord: vec2<f32>,
 };
-
-// Relative tolerance on |ẑ − z| for the reach view. The color is driven by the
-// smooth iteration ν = n + 1 − log2(log|z|/log B); an error ε on z moves ν by
-// roughly ε/(|z|·ln|z|·ln2), so at the bailout |z| ≈ 2 a relative 1e-3 holds ν
-// inside ~1/500 of an iteration — well under a palette quantum.
-const REACH_TOL: f32 = 1e-3;
-const LOG2E_: f32 = 1.4426950408889634;
-
-// Blue → cyan → green → yellow → red, mirroring mandelbrot_debug.wgsl's
-// skip_ramp so the legend in Settings.vue serves both.
-fn reach_ramp(t: f32) -> vec3<f32> {
-  let x = clamp(t, 0.0, 1.0) * 4.0;
-  if (x < 1.0) { return mix(vec3<f32>(0.1, 0.15, 0.7), vec3<f32>(0.0, 0.7, 0.9), x); }
-  if (x < 2.0) { return mix(vec3<f32>(0.0, 0.7, 0.9), vec3<f32>(0.1, 0.8, 0.2), x - 1.0); }
-  if (x < 3.0) { return mix(vec3<f32>(0.1, 0.8, 0.2), vec3<f32>(1.0, 0.9, 0.1), x - 2.0); }
-  return mix(vec3<f32>(1.0, 0.9, 0.1), vec3<f32>(0.9, 0.1, 0.1), x - 3.0);
-}
 
 // ── Per-pixel effect weights & parameters, read from palette texture ──
 struct EffectParams {
@@ -1331,7 +1314,6 @@ fn colorize_pixel(
   // The Taylor payload is only written at escape, so the reach view marks
   // these rather than reading a stale one.
   if (iter_val > 0.0 && (zx_val * zx_val + zy_val * zy_val) < parameters.mu) {
-    if (parameters.reachDebug > 0.5) { return vec4<f32>(0.10, 0.10, 0.12, 1.0); }
     if (parameters.orbitTrapIncludeInterior > 0.5) {
       return vec4<f32>(apply_orbit_trap_color(vec3<f32>(0.0), iter_val, vec2<f32>(zx_val, zy_val), trapPayload), 1.0);
     }
@@ -1339,7 +1321,6 @@ fn colorize_pixel(
   }
 
   if (iter_val == 0.0) {
-    if (parameters.reachDebug > 0.5) { return vec4<f32>(0.10, 0.10, 0.12, 1.0); }
     if (parameters.orbitTrapIncludeInterior > 0.5) {
       return vec4<f32>(apply_orbit_trap_color(vec3<f32>(0.0), 0.0, vec2<f32>(zx_val, zy_val), trapPayload), 1.0);
     }
@@ -1351,66 +1332,6 @@ fn colorize_pixel(
   var z = vec2<f32>(zx_val, zy_val);
   var z_sq = dot(z, z);
   var mu_val = smooth_escape_fraction(z_sq);
-
-  // Debug view 6 — analytic-AA reach. How far, IN PIXELS, this pixel's own
-  // Taylor payload ẑ(δc) = z + z′·δc + ½·z″·δc² stays inside tolerance; i.e.
-  // how many neighbours one computed pixel could serve without iterating.
-  //
-  // It reads the payload the production path ALREADY stored (layers 8/11/12),
-  // so it costs one texture fetch, needs no re-iteration, and by construction
-  // shows the state of the very render on screen. An earlier attempt put this
-  // in the standalone debug pipeline, which recomputes every pixel in its own
-  // loop: slow, and free to disagree with the displayed frame.
-  //
-  // READ IT AS AN ESTIMATE, NOT A CERTIFICATE. ρ solves the last-RETAINED-term
-  // criterion ½|z″|ρ² = tol·|z|, which gauges the truncation by the last term
-  // kept rather than the first one dropped. A rigorous radius (via z‴ or a
-  // Cauchy tail) will be SMALLER. The point is the order of magnitude and the
-  // spatial distribution: if this view is blue everywhere, no amount of rigour
-  // rescues the idea.
-  if (parameters.reachDebug > 0.5) {
-    if (!analyticTag) {
-      return vec4<f32>(0.15, 0.2, 0.45, 1.0);
-    }
-    // The "no data" cases are given DISTINCT colors rather than one grey: with
-    // three different causes (wrong texture bound / z″ never accumulated /
-    // payload corrupt) a single grey turns a bug report into a guessing game.
-    let S = textureLoad(rawTex, raw_coord(sourceCoord), 8, 0).r;
-    let sndLog = textureLoad(rawTex, raw_coord(sourceCoord), 11, 0).r;
-    let sndAngle = textureLoad(rawTex, raw_coord(sourceCoord), 12, 0).r;
-    // +marker = z″ not tracked / payload invalid. Keep mode readiness visible
-    // before calling a live-table invalid payload a numerical failure.
-    if (!(sndLog < 1e30)) {
-      if (parameters.reachReady < 0.5) {
-        return vec4<f32>(0.95, 0.5, 0.1, 1.0);  // ORANGE — not in Auto: no data
-      }
-      if (parameters.reachReady < 1.5) {
-        return vec4<f32>(0.95, 0.85, 0.25, 1.0); // YELLOW — table still building
-      }
-      return vec4<f32>(0.15, 0.2, 0.45, 1.0); // DARK BLUE — unusable payload
-    }
-    // A tracked mathematical zero is distinct from an absent payload. z‴ then
-    // sets the first omitted term, so the current payload cannot measure reach.
-    if (sndLog < -1e30) {
-      return vec4<f32>(0.42, 0.16, 0.30, 1.0);   // PLUM — quadratic criterion
-                                                 // inoperative: reach NOT
-                                                 // measurable from this payload
-    }
-    if (!(abs(S) < 1e6) || !(abs(sndAngle) < 1e30)) {
-      return vec4<f32>(0.15, 0.2, 0.45, 1.0);
-    }
-    let log2Snd = sndLog * LOG2E_;
-    let log2Rho = 0.5 * (log2(2.0 * REACH_TOL * max(length(z), 1e-30)) - log2Snd);
-    // Match resolve.wgsl exactly: the raw source is the square neutral texture,
-    // whose texel spans 2·neutralExtent/neutralSize times the view half-height.
-    // Omitting neutralExtent made this debug view overstate reach on wide views.
-    let neutralExtent = sqrt(parameters.aspect * parameters.aspect + 1.0);
-    let log2Pix = (
-      log(2.0 * neutralExtent / max(f32(sourceTexSize.y), 1.0))
-      + parameters.lnScale
-    ) * LOG2E_;
-    return vec4<f32>(reach_ramp((log2Rho - log2Pix) / 6.0), 1.0);
-  }
 
   // Phase D analytic AA: pixels the reseed tagged analytic-OK were frozen at
   // their sample-0 state; reconstruct this sample's sub-pixel value
@@ -1697,7 +1618,7 @@ fn colorize_sampled(
     extras = interp.extras;
     // Bilinear-interpolated values are not payload-consistent: no expansion.
     analytic = false;
-  } else if (it > 0.0 && zx * zx + zy * zy >= parameters.mu && parameters.reachDebug <= 0.5) {
+  } else if (it > 0.0 && zx * zx + zy * zy >= parameters.mu ) {
     extras = load_pixel_extras(sourceGeometry, sourceMetadata, sourceOrbitGradient, coord, zoomFactor);
   }
   var trapPayload = vec4<f32>(0.0);
@@ -1828,8 +1749,6 @@ fn shade_srgb(fragCoord: vec2<f32>, applyAaGate: bool) -> vec4<f32> {
     live_zx = liveSample.zx;
     live_zy = liveSample.zy;
   }
-
-  liveAnalyticTag = liveAnalyticTag || parameters.reachDebug > 0.5;
 
   let liveEscaped = live_iter > 0.0 && (live_zx * live_zx + live_zy * live_zy) >= parameters.mu;
   let liveInterior = live_iter == 0.0;

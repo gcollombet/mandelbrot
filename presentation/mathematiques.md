@@ -3,11 +3,6 @@ import TaylorApproxDemo from '../src/components/TaylorApproxDemo.vue'
 import PerturbationOrbitDemo from '../src/components/PerturbationOrbitDemo.vue'
 import GeometricTailDemo from '../src/components/GeometricTailDemo.vue'
 import PolydiscDemo from '../src/components/PolydiscDemo.vue'
-import PadeVsJetDemo from '../src/components/PadeVsJetDemo.vue'
-import MobiusDemo from '../src/components/MobiusDemo.vue'
-import PeriodicCertificateDemo from '../src/components/PeriodicCertificateDemo.vue'
-import ParabolicShadowingDemo from '../src/components/ParabolicShadowingDemo.vue'
-import DynamicsGlossaryDemo from '../src/components/DynamicsGlossaryDemo.vue'
 </script>
 
 # Les mathématiques de la perturbation et des approximants
@@ -24,6 +19,14 @@ Möbius — et surtout la manière dont chaque formule utilisée par le moteur e
 Aucun prérequis au-delà du lycée n'est supposé : chaque notion (série de Taylor,
 polydisque, approximant de Padé, homographie...) est introduite avec des exemples
 et des démonstrations interactives.
+
+::: warning État du moteur
+Le moteur n'implémente plus que la perturbation exacte et les blocs affines (BLA).
+Les sections sur Padé, les jets, Möbius, les coordonnées de Fatou, le tier
+« matrix-C1 » et la renormalisation de Feigenbaum décrivent des accélérateurs qui
+ont été retirés du code ; elles restent ici comme référence mathématique et pour
+les preuves Lean qui les accompagnent.
+:::
 
 ## Préambule : certifier les formules avec Lean
 
@@ -208,19 +211,6 @@ cycle, calcule $|\lambda|$ et affiche la **classification**. Observez :
 - les **cusps/racines** ($c=0.25$, $c=-0.75$) : $|\lambda|=1$, *parabolique*, l'orbite met une éternité à se poser ;
 - la **pointe** ($c=-2$) : cycle *répulsif*, $|\lambda|=4$ ;
 - **Feigenbaum** ($c=-1.401155$) : l'orbite ne se stabilise jamais sur un cycle fini.
-
-::: info Démonstration — classer un point par son orbite critique
-
-<ClientOnly><DynamicsGlossaryDemo /></ClientOnly>
-
-:::
-
-::: tip Lien avec le reste de la page
-Cette carte n'est pas un gadget : chaque régime appelle une machinerie différente du
-moteur. **Attractif** → Padé/jet et métrique hyperbolique. **Parabolique** → flot
-$\dot z = z^2$, shadowing et coordonnées de Fatou. **Périodique** → birapport et
-fast-forward $\kappa^k$. **Feigenbaum** → sauts renormalisés de $2^n$ itérations.
-:::
 
 ## La perturbation : d'où vient l'équation
 
@@ -590,17 +580,6 @@ Géométriquement : tant que la perturbation $z$ reste « plus proche de 0 que d
 pôle $a$ », le Padé gagne. Le disque simple $2|z| \leq |a|$ est une sous-région
 commode pour un test rapide dans le shader.
 
-::: info Démonstration — Padé contre jet
-
-Mode « un pas » : les deux courbes d'erreur en échelle log, avec la frontière de
-dominance $z = a/2$ en rouge. En dessous, le Padé écrase le jet ; au-dessus, il
-devient pire (son pôle approche !). Mode « flot parabolique » : le cas extrême où
-le Padé est *infiniment* meilleur — voir la sous-section suivante.
-
-<ClientOnly><PadeVsJetDemo /></ClientOnly>
-
-:::
-
 ### Le sélecteur : ne jamais régresser
 
 Que faire hors de la région de dominance ? Le moteur n'a pas à choisir à l'aveugle :
@@ -693,16 +672,6 @@ Si l'écart est contrôlé, le moteur peut remplacer $n$ itérations par **une s
 évaluation** de $\varphi_n$. C'est ce qu'on appelle une borne de **shadowing**
 (l'orbite discrète « suit comme une ombre » le flot continu).
 
-::: info Démonstration — le shadowing du flot parabolique
-
-En haut : l'itération discrète (points orange) sur la courbe du flot exact (bleue) —
-les deux convergent vers le point fixe parabolique $0$ en $\sim -1/n$. En bas :
-l'écart entre les deux, qui reste minuscule quand $z_0$ est petit.
-
-<ClientOnly><ParabolicShadowingDemo /></ClientOnly>
-
-:::
-
 ### Le télescopage : transformer une comparaison en somme exacte
 
 La technique de preuve mérite d'être racontée, car elle revient partout. Pour comparer
@@ -780,18 +749,6 @@ $\begin{psmallmatrix} A & B \\ C & D \end{psmallmatrix}$, alors composer deux M�
 revient à multiplier leurs matrices. Composer mille pas = multiplier mille matrices
 $2 \times 2$, soit... une seule matrice $2 \times 2$ finale. **La famille est fermée
 par composition** : voilà le trésor.
-
-::: info Démonstration — une homographie en action
-
-À gauche le plan source (cercles concentriques et rayons), à droite leur image.
-Essayez le préréglage « pas Padé » : c'est la matrice
-$\begin{psmallmatrix} a^2 & ac \\ -1 & a \end{psmallmatrix}$ de la section précédente,
-avec $a=1$, $c=0{,}3$. Amenez le déterminant à zéro pour voir la dégénérescence :
-toute l'image se contracte en un point.
-
-<ClientOnly><MobiusDemo /></ClientOnly>
-
-:::
 
 Comparez avec le jet : composer deux polynômes quadratiques donne un degré 4, puis 8,
 16... il faut tronquer en permanence. Composer deux homographies redonne une
@@ -951,18 +908,6 @@ $|\delta z_k|\le\rho_k$ pour tout pixel de la vue
 ($|\delta c|\le c_{\max}$). Si, après une période,
 $\rho_p\le\rho_0=r$, le disque revient dans lui-même et le pixel est certifié intérieur.
 Le théorème Lean `scalar_majorant_return_le` formalise exactement cette implication.
-
-::: info Démonstration — le disque invariant du noyau period‑2
-
-La courbe $M(r)$ est le rayon majoré après un retour complet. Là où elle passe sous la
-diagonale $M(r)=r$, un disque invariant existe. Comparez les deux phases du même cycle
-$\{0,-1\}$ : commencer au point critique supprime le premier terme linéaire et agrandit
-fortement le rayon. Faites aussi tendre la marge $q$ vers $1$ pour voir la borne se
-rapprocher de l'optimum **dans la famille des disques radiaux**.
-
-<ClientOnly><PeriodicCertificateDemo /></ClientOnly>
-
-:::
 
 ### Conservateur, optimal… dans quel sens ?
 

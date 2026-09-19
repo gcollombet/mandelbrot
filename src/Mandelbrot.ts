@@ -46,7 +46,6 @@ export interface MandelbrotParams {
     activateAnimate: boolean;
     debugShading: boolean;
     // Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix, 4 probes.
-    debugView?: number;
     colorStops: ColorStop[];
     interpolationMode: InterpolationMode;
     approximationMode?: ApproximationMode;

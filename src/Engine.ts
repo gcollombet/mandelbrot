@@ -6,7 +6,6 @@ import type { ExpmapKernelProjection } from './expmap/producerProjection'
 // Engine.ts: implémente une classe Engine pour gérer le pipeline WebGPU
 
 import inplaceComputeShader from './assets/mandelbrot_brush.wgsl?raw'
-import debugViewShader from './assets/mandelbrot_debug.wgsl?raw'
 import colorShader from './assets/color.wgsl?raw'
 import reprojectCsShader from './assets/reproject_cs.wgsl?raw'
 import rawPanClearShader from './assets/raw_pan_clear.wgsl?raw'
@@ -81,7 +80,6 @@ import type {
 
 /** Debug view 6 visualizes the analytic-AA reach encoded by the shared z″
  * payload. Unlike views 1-5 it recolors the ordinary progressive render. */
-export const DEBUG_VIEW_REACH = 6
 // ── Constants ────────────────────────────────────────────────────────
 
 // Number of r32float layers per raw texture array.
@@ -456,10 +454,6 @@ export type RenderOptions = {
     interpolationMode: InterpolationMode,
     activateAnimate: boolean,
     debugShading: boolean,
-    // Diagnostic overlay (mandelbrot_debug.wgsl): 0 = off, 1 = cost heat,
-    // 2 = average applied block length, 3 = exact/low/high composition,
-    // 4 = table probes per loop turn.
-    debugView?: number,
     tessellationLevel: number,
     displacementAmount: number,
     animation: AnimationConfig,
@@ -941,20 +935,6 @@ export class Engine {
     referenceWorkerCy = ''
     floatExpActive = false
     debugShadingActive = false
-    debugViewMode = 0
-    // The debug overlay is a from-scratch full recompute that does NOT read the
-    // progressive textures, so it's "complete" on the single frame it draws. It
-    // only needs to be redrawn when its inputs change (view/params/mode, or a
-    // fresh block table). This flag gates the render loop in debug mode so the
-    // engine idles instead of endlessly re-running the (invisible) progressive
-    // machine and repaying the heavy recompute every frame. Starts true so the
-    // first frame after enabling a view draws.
-    debugViewDirty = true
-    // Console/devtools override: __mandelbrotEngine.debugViewOverride = 1..7
-    // wins over the Settings value (0 = follow Settings).
-    debugViewOverride = 0
-    private pipelineDebug?: GPURenderPipeline
-    private bindGroupDebug?: GPUBindGroup
     private referenceOrbitWasReset = false
 
     // ── Reference slots (deferred switch) ───────────────────────────
@@ -1240,9 +1220,6 @@ export class Engine {
             this.currentBlaLevelCount = 0
             this.referenceBlaReadyMaxIterations = 0
         }
-        // New reference/table promoted → the debug overlay must redraw once.
-        this.debugViewDirty = true
-
         // Switch the main-thread reference state
         this.activeRef = staging
         this.stagingRef = null
@@ -1532,9 +1509,6 @@ export class Engine {
             this.tableBuildActive = false
             this.tableBuildProgress = 1
             this.tableBuildStage = 'ready'
-            // A fresh block table changes what the debug overlay would draw
-            // (blocks now enabled / different skips) — redraw it once.
-            this.debugViewDirty = true
             this.isReferenceValidating = false
             if (this.pendingTableClear) {
                 // Deferred invalidation clear: the table for the new parameters
@@ -1916,27 +1890,6 @@ export class Engine {
         const device = this.device
         const moduleResolve = this.device.createShaderModule({ code: resolveShader, label: 'Engine ShaderModule Resolve' })
         const moduleColor = this.device.createShaderModule({ code: this.shaderPassColor, label: 'Engine ShaderModule Color' })
-        const moduleDebug = this.device.createShaderModule({ code: debugViewShader, label: 'Engine ShaderModule DebugView' })
-
-        // Diagnostic overlay pipeline (block-skipping debug views). Renders a
-        // fullscreen instrumented recompute straight to the swapchain.
-        const layoutDebug = this.device.createBindGroupLayout({
-            entries: [
-                { binding: 0, visibility: GPUShaderStage.VERTEX | GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
-                { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-            ],
-            label: 'Engine BindGroupLayout DebugView',
-        })
-        this.pipelineDebug = this.device.createRenderPipeline({
-            layout: this.device.createPipelineLayout({ bindGroupLayouts: [layoutDebug], label: 'Engine PipelineLayout DebugView' }),
-            vertex: { module: moduleDebug, entryPoint: 'vs_main' },
-            fragment: { module: moduleDebug, entryPoint: 'fs_main', targets: [{ format: this.format }] },
-            primitive: { topology: 'triangle-list' },
-            label: 'Engine Pipeline DebugView',
-        })
-
         const layoutResolve = this.device.createBindGroupLayout({
             entries: [
                 { binding: 0, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'uniform' } },
@@ -2462,25 +2415,12 @@ export class Engine {
         })
     }
 
-    // Rebuild the bind groups sharing the orbit/BLA buffers (debug overlay +
-    // in-place compute) — called whenever one of those buffers reallocates.
+    // Rebuild the bind group sharing the orbit/BLA buffers — called whenever
+    // one of those buffers reallocates.
     private rebuildIterationBindGroups() {
         if (!this.uniformBufferMandelbrot
             || !this.mandelbrotReferenceBuffer || !this.mandelbrotBlaBuffer || !this.mandelbrotBlaLevelBuffer) {
             return
-        }
-
-        if (this.pipelineDebug) {
-            this.bindGroupDebug = this.device.createBindGroup({
-                layout: this.pipelineDebug.getBindGroupLayout(0),
-                entries: [
-                    { binding: 0, resource: { buffer: this.uniformBufferMandelbrot } },
-                    { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
-                    { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
-                    { binding: 3, resource: { buffer: this.mandelbrotBlaLevelBuffer } },
-                ],
-                label: 'Engine BindGroup DebugView',
-            })
         }
 
         this.rebuildInplaceBindGroup()
@@ -3406,13 +3346,6 @@ export class Engine {
     ) {
         this.gpuFrameTimeMs = elapsed
 
-        // The debug overlay recomputes every pixel from scratch on top of the
-        // normal frame. Keep it out of completion timing and frame pacing; the
-        // per-pass batch controller is independently guarded as well.
-        if (this.debugPipelineActive) {
-            return
-        }
-
         if (this.completionTimerActive && elapsed > 0) {
             this.completionAccumulatedGpuMs += elapsed
         }
@@ -4259,31 +4192,6 @@ export class Engine {
         }
     }
 
-    /** True while a debug view uses the standalone recompute pipeline (1-5).
-     * Reach (6) is a color-pass readout of the ordinary progressive render. */
-    /** Reference orbit long enough for the current view (mirrors the uniform's
-     *  orbitComplete). The debug overlay must not draw before this. */
-    private debugOrbitReady = false
-
-    private get debugPipelineActive(): boolean {
-        return this.debugViewMode > 0
-            && this.debugViewMode !== DEBUG_VIEW_REACH
-    }
-
-    /** Block-skipping diagnostic overlay: 0 off, 1 cost, 2 skip, 3 mix,
-     * 4 probes, 5 tier, 6 analytic-AA reach. */
-    setDebugView(mode: number) {
-        const next = Math.max(0, Math.round(mode))
-        if (next === this.debugViewMode) {
-            return
-        }
-        this.debugViewMode = next
-        // A persisted AA composite would otherwise cover the reach view.
-        this.resetAaState()
-        this.invalidateRotationColorResolve()
-        this.debugViewDirty = true
-        this.needRender = true
-    }
 
     getApproximationMode(): ApproximationMode {
         return this.approximationMode
@@ -4490,9 +4398,6 @@ export class Engine {
         }
 
         this.debugShadingActive = renderOptions.debugShading
-        if (this.debugViewOverride > 0) {
-            this.debugViewMode = this.debugViewOverride
-        }
 
         if (this.stagingReady()) {
             this.promoteStagingReference()
@@ -4561,9 +4466,6 @@ export class Engine {
         const activeStripeFrequencyChanged = stripeFrequencyChanged && orbitMetricsEnabled
         this.rotationColorResolveChangedThisUpdate = mandelbrotChanged || renderOptionsChanged
         this.needRender = this.needRender || mandelbrotChanged || renderOptionsChanged
-        // Any view/param change invalidates the current debug snapshot (see
-        // debugViewDirty) so it redraws once, then idles again.
-        this.debugViewDirty = this.debugViewDirty || mandelbrotChanged || renderOptionsChanged
         // Any navigation/parameter change resets AA → instant single-sample fallback,
         // and re-arms auto AA. Not guarded by aaActive: after accumulation completes
         // (aaActive false, aaAccumulatedSamples > 0) a move must still clear the count
@@ -4913,9 +4815,9 @@ export class Engine {
             Number.isFinite(aaJitterLogMag) ? aaJitterLogMag : 0, // 62: aaJitterLogMag (ln|δc|, c units)
             0,                                    // 63: aaAnalytic (finalized in render() once skipResolve is known)
             effectiveGradeSaturation,            // 64: gradeSaturation (display grade)
-            this.debugViewMode === DEBUG_VIEW_REACH ? 1 : 0, // 65: analytic-AA reach heatmap
+            0,                                    // 65: reserved (was the analytic-AA reach heatmap)
             Number.isFinite(lnScale) ? lnScale : 0, // 66: lnScale (deep-safe pixel size in c units)
-            2,                                    // 67: z″ is carried by every production path
+            0,                                    // 67: reserved
             effectiveProtrusionPhase,             // 68: protrusionPhase [0, 1)
             renderOptions.protrusionSharpness ?? 2, // 69: protrusionSharpness [0.25, 16]
             renderOptions.protrusionGeometryMix ?? 0, // 70: iteration/geometric profile mix [0, 1]
@@ -5022,12 +4924,6 @@ export class Engine {
         // Track whether the orbit is still being built (used by needsMoreFrames).
         this.orbitIncomplete = !this.referenceWorkerFailed && availableIter < maxIterations
         const orbitComplete = availableIter >= maxIterations
-        // The debug overlay (views 1-5) recomputes from the orbit buffer while
-        // reading the CURRENT view uniform. During a reference rebuild those two
-        // disagree, and the recompute paints the previous position — the "vue
-        // figée sur une ancienne vue" report. Gate the overlay on the same
-        // readiness signal the block table uses.
-        this.debugOrbitReady = orbitComplete
         // BLA runs in the deep (floatexp) path too: a/b/radii are stored in fe
         // form and try_apply_bla_deep does its radius test in log space. The
         // uniform flag carries 1 = affine BLA, 0 = exact perturbation.
@@ -5065,7 +4961,7 @@ export class Engine {
             this.iterationBatchSize,
             mandelbrot.epsilon,
             renderOptions.antialiasLevel,
-            this.debugViewMode,  // iterationOffset slot — recycled as debugView
+            0,  // iterationOffset slot (unused)
             guardedMaxIter,
             orbitComplete ? 1 : 0,
             approximationModeFlag,
@@ -5151,7 +5047,6 @@ export class Engine {
             && this.aaAccumulatedSamples === 0
             && !renderOptions.activateAnimate
             && !this.videoExportActive
-            && this.debugViewMode === 0
             && !hasLiveWebcam
             && !isZoomActive(this.zoomState)
             && !this.clearHistoryNextFrame
@@ -5236,8 +5131,7 @@ export class Engine {
 
     private analyticRawPayloadNeeded(renderOptions: RenderOptions, aspect: number): boolean {
         const antialiasLevel = this.effectiveAntialiasLevel(renderOptions.antialiasLevel)
-        return this.debugViewMode === DEBUG_VIEW_REACH
-            || (antialiasLevel > 1 && this.aaAnalyticParams(aspect).enabled)
+        return antialiasLevel > 1 && this.aaAnalyticParams(aspect).enabled
     }
 
     /** Map the frontier stats readback (once per reseed; skipped while a map is in flight). */
@@ -6047,35 +5941,6 @@ export class Engine {
         }
 
         // ── Debug overlay: instrumented recompute straight onto the frame ──
-        // The overlay must not draw from an orbit that does not yet cover the
-        // current view (it would paint the previous position). But skipping is
-        // only half the job: needsMoreFrames()'s debug branch has no "the
-        // reference just became ready" trigger, so without re-arming the dirty
-        // flag the loop would stop and leave the last — wrong — overlay frozen
-        // on screen. Staying dirty keeps frames coming until it can draw truthfully.
-        if (this.debugPipelineActive && !this.debugOrbitReady) {
-            this.debugViewDirty = true
-        }
-        if (this.debugPipelineActive && this.debugOrbitReady
-            && this.pipelineDebug && this.bindGroupDebug) {
-            const rpassDebug = commandEncoder.beginRenderPass({
-                colorAttachments: [{
-                    view: swapView,
-                    clearValue: { r: 0, g: 0, b: 0, a: 1 },
-                    loadOp: 'clear',
-                    storeOp: 'store',
-                }],
-            })
-            rpassDebug.setPipeline(this.pipelineDebug)
-            rpassDebug.setBindGroup(0, this.bindGroupDebug)
-            rpassDebug.draw(6, 1, 0, 0)
-            rpassDebug.end()
-            // Snapshot drawn with the current inputs — consumed. needsMoreFrames()
-            // now idles until a param/mode/table change re-dirties it. (No early
-            // return sits between here and submit, so this always reaches the GPU.)
-            this.debugViewDirty = false
-        }
-
         // Bake the AA target map once, right after sample 0 has converged and been
         // composited (reads the converged typed values and cached height). Reused
         // by the color gate and selective reseed for all subsequent samples.
@@ -6151,17 +6016,6 @@ export class Engine {
         this.cpuRenderMs = performance.now() - renderStartMs
         this.frameSerial++   // one actually-rendered frame → one measurement for the panel
         if (tsResolvedThisFrame) this.readbackTimestamps()
-        // Recompute debug overlay active: surface the GPU frame time. The pass strips
-        // the derivative/f32-path/lockstep asymmetries for every mode, so this
-        // number compares the pure skipping algorithms wall-clock — switch modes
-        // and read the console.
-        if (this.debugPipelineActive) {
-            const dbgT0 = performance.now()
-            void this.device.queue.onSubmittedWorkDone().then(() => {
-                console.log(`[debug view] GPU frame ${(performance.now() - dbgT0).toFixed(1)}ms (mode ${this.approximationMode}, view ${this.debugViewMode})`)
-            })
-        }
-
         // Timestamp-capable adapters pace from the query span read above. The
         // submit-to-done wall clock is only a fallback: on Safari/WebKit it can
         // include notification latency far beyond the actual GPU frame.
@@ -6484,27 +6338,6 @@ export class Engine {
      * unfinished pixels, incomplete orbit, or continuous-render mode).
      */
     needsMoreFrames(): boolean {
-        // Debug overlay active: it's a from-scratch recompute that ignores the
-        // progressive textures, so the progressive machine's unfinished pixels
-        // and AA passes must NOT keep the loop alive — that made the debug view
-        // re-render endlessly and crawl. Redraw only for its real inputs: an
-        // explicit request / dirty snapshot, a live zoom, a pending capture, or
-        // a reference/table still being built. debugViewDirty is cleared once
-        // the debug pass has drawn (see render()).
-        if (this.debugPipelineActive) {
-            let r = ''
-            if (this.needRender || this.debugViewDirty) r = 'debugDirty'
-            else if (this.exportCaptureRequest) r = 'exportCapture'
-            else if (this.snapshotCallback) r = 'snapshot'
-            else if (this.needFreezeSnapshot) r = 'freezeSnapshot'
-            else if (this.needMergeSnapshot) r = 'mergeSnapshot'
-            else if (isZoomActive(this.zoomState)) r = 'zoomActive'
-            else if (this.isReferenceValidating) r = 'referenceValidating'
-            else if (this.orbitIncomplete) r = 'orbitIncomplete'
-            else if (this.pendingTableClear) r = 'tablePending'
-            return r !== ''
-        }
-
         let reason = ''
         if (this.needRender) reason = 'needRender'
         else if (this.exportCaptureRequest) reason = 'exportCapture'

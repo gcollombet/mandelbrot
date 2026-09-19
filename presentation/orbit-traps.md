@@ -39,7 +39,7 @@ sont fermés ; un $\tau$ non nul leur donne une chiralité.
 |---|---|---|
 | Terminal | Le seul point d’échappement, normalisé par le rayon de bailout | Instantané ; effet de surface, pas un minimum d’orbite |
 | Orbite échantillonnée | Chaque pas explicitement calculé et le point d’arrivée de chaque saut | Rapide, mais le minimum peut varier avec le mode d’approximation |
-| Orbite exacte | Tous les pas, sans saut BLA, Padé, Jet, Möbius, renormalisation ni préfixe de série non certifié | Minimum fidèle au chemin d’itération ; peut perdre une grande partie de l’accélération |
+| Orbite exacte | Tous les pas, sans aucun saut BLA | Minimum fidèle au chemin d’itération ; peut perdre une grande partie de l’accélération |
 
 Dans les deux modes d’orbite, le shader transporte le triplet
 

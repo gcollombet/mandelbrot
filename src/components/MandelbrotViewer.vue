@@ -585,7 +585,6 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   ],
   activateAnimate: false,
   debugShading: false,
-  debugView: 0,
   approximationMode: 'bla',
   blaEpsilon: 1e-3,
   maxBlaSkip: 65536,
@@ -953,14 +952,6 @@ watch(
 watch(
   () => mandelbrotParams.value.approximationMode,
   () => { applyApproximationToEngine(); },
-);
-
-// Debug overlay: driven straight into the engine (deliberately OUTSIDE the
-// renderOptions/persistence flow — the params normalizers rewrite the model
-// and would re-trigger in a loop).
-watch(
-  () => mandelbrotParams.value.debugView,
-  (v) => { mandelbrotEngine.value?.setDebugView(Number(v ?? 0)); },
 );
 
 watch(
@@ -2053,7 +2044,6 @@ async function startTravelToPreset(preset: PresetRecord) {
       :colorStops="mandelbrotParams.colorStops"
       :activateAnimate="mandelbrotParams.activateAnimate"
       :debugShading="mandelbrotParams.debugShading"
-      :debugView="mandelbrotParams.debugView ?? 0"
       :dprMultiplier="mandelbrotParams.dprMultiplier"
       :zoomMagnificationThreshold="mandelbrotParams.zoomMagnificationThreshold"
       :maxIterationMultiplier="mandelbrotParams.maxIterationMultiplier"

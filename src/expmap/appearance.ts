@@ -34,7 +34,7 @@ export function expmapAppearanceProblems(options: RenderOptions): AppearanceProb
     if (!Number.isFinite(options[field])) refuse(field, 'Valeur non finie.')
   }
   if (options.heightPaletteShift !== 0) restrict('heightPaletteShift', 'La hauteur utilisée pour décaler la palette dépend de l’échelle de vue.')
-  if (options.debugShading || options.debugView) restrict('debugView', 'Les vues de diagnostic ne sont pas des couleurs spatiales persistantes.')
+  if (options.debugShading) restrict('debugShading', 'Les vues de diagnostic ne sont pas des couleurs spatiales persistantes.')
   // A paused track contributes its fixed phase; this can be baked for spatial
   // colors. Height remains scale-dependent even when its contribution is fixed.
   const hasShading = (options.colorStops ?? []).some(stop => getEffectValue(stop, 'shading') !== 0)

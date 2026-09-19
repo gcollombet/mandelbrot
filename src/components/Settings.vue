@@ -527,106 +527,6 @@ function nearestPreset(value: number, presets: readonly number[]): number {
 }
 const iterationsFmt = (v: number) => '×' + Math.pow(10, v).toPrecision(3);
 const fpsFmt = (v: number) => v + ' fps';
-const debugViewOptions = [
-  { label: 'Off', value: 0 },
-  { label: 'Cout', value: 1 },
-  { label: 'Skip', value: 2 },
-  { label: 'Mix', value: 3 },
-  { label: 'Probes', value: 4 },
-  { label: 'Tier', value: 5 },
-  { label: 'Portee analytique', value: 6 },
-];
-
-// Color scales for the debug view legend — kept in sync by hand with
-// mandelbrot_debug.wgsl's heat()/skip_ramp()/TIER_COLOR_* and color.wgsl's
-// resolved-coverage colors (WGSL can't be imported here). Gradient stops sample
-// the same functions at fixed t; flat swatches copy the shader constants.
-function heatColor(t: number): string {
-  const x = Math.min(1, Math.max(0, t));
-  const r = Math.min(1, Math.max(0, 2.2 * x - 0.1));
-  const g = Math.min(1, Math.max(0, 2.0 * x - 0.75));
-  const b = x < 0.4
-    ? Math.min(1, Math.max(0, 0.4 + 1.2 * x))
-    : Math.min(1, Math.max(0, 2.2 - 3.2 * x));
-  return `rgb(${Math.round(r * 255)}, ${Math.round(g * 255)}, ${Math.round(b * 255)})`;
-}
-function heatGradient(steps = 10): string {
-  const stops = Array.from({ length: steps + 1 }, (_, i) => {
-    const t = i / steps;
-    return `${heatColor(t)} ${(t * 100).toFixed(1)}%`;
-  });
-  return `linear-gradient(90deg, ${stops.join(', ')})`;
-}
-const skipRampGradient = 'linear-gradient(90deg, '
-  + 'rgb(26, 38, 179) 0%, rgb(0, 179, 230) 25%, '
-  + 'rgb(26, 204, 51) 50%, rgb(255, 230, 26) 75%, rgb(230, 26, 26) 100%)';
-const debugViewLegends: Record<number, {
-  kind: 'gradient' | 'swatches';
-  gradient?: string;
-  ticks?: string[];
-  note?: string;
-  swatches?: { color: string; label: string }[];
-  /** Extra flat swatches shown UNDER a gradient legend — used by the reach
-   *  view to name each "no data" color, so a bug report identifies the cause. */
-  extraSwatches?: { color: string; label: string }[];
-}> = {
-  1: {
-    kind: 'gradient',
-    gradient: heatGradient(),
-    ticks: ['1 tour', '~316 tours', '100k+ tours (plafond)'],
-    note: 'Chaleur = nombre de tours de boucle par pixel (échelle log). Où part le temps GPU.',
-  },
-  2: {
-    kind: 'gradient',
-    gradient: skipRampGradient,
-    ticks: ['1 (aucun saut)', '32 px/tour', '1024+ px/tour'],
-    note: 'Longueur moyenne des blocs appliqués (itérations couvertes / tour), échelle log2.',
-  },
-  3: {
-    kind: 'swatches',
-    swatches: [
-      { color: 'rgb(255, 60, 60)', label: 'Exact (perturbation pure)' },
-      { color: 'rgb(60, 255, 60)', label: 'BLA (blocs affines)' },
-    ],
-    note: 'Composition RV : part des itérations couvertes par chaque chemin (mélange par pixel).',
-  },
-  4: {
-    kind: 'gradient',
-    gradient: heatGradient(),
-    ticks: ['0 probe/tour', '4 probes/tour', '8+ probes/tour'],
-    note: 'Chaleur = sondes de table par tour de boucle (surcoût de recherche). Élevé = table mal adaptée.',
-  },
-  5: {
-    kind: 'swatches',
-    swatches: [
-      { color: 'rgb(140, 140, 140)', label: 'Exact (perturbation pure)' },
-      { color: 'rgb(64, 140, 242)', label: 'BLA (blocs affines)' },
-    ],
-    note: 'Couleur plate = chemin dominant par pixel.',
-  },
-  6: {
-    kind: 'gradient',
-    gradient: skipRampGradient,
-    ticks: ['≤ 1 px (sans intérêt)', '8 px', '64+ px'],
-    // Diagnostic colors, mirrored from color.wgsl's reach branch: each "no
-    // data" cause has its own color so a report says WHY, not just "c'est gris".
-    extraSwatches: [
-      { color: 'rgb(242, 128, 26)', label: 'Orange = mode Exact → bascule en BLA' },
-      { color: 'rgb(242, 217, 64)', label: 'Jaune = BLA, mais table pas prête (attends la référence)' },
-      { color: 'rgb(107, 41, 77)', label: 'Prune = z″ mathématiquement nul : portée non mesurable sans z‴' },
-      { color: 'rgb(38, 51, 115)', label: 'Bleu sombre = payload absent ou non fini (anomalie si la table BLA est active)' },
-      { color: 'rgb(217, 26, 191)', label: 'Magenta = mauvaise texture liée (bug)' },
-      { color: 'rgb(26, 26, 31)', label: 'Presque noir = intérieur / pas encore calculé' },
-    ],
-    note: 'Portée du développement de Taylor du pixel (z + z′·δc + ½z″·δc²) en '
-      + 'PIXELS : jusqu\'où un pixel calculé pourrait servir ses voisins. Relit '
-      + 'le payload déjà stocké par le rendu courant (aucun recalcul), donc '
-      + 'toujours cohérent avec l\'image affichée. ESTIMATION (critère du '
-      + 'dernier terme retenu), pas un certificat — un rayon prouvé sera plus '
-      + 'petit. Gris = pixel intérieur ou sans payload.',
-  },
-};
-const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);
 // The engine implements exact perturbation and affine BLA only; presets
 // carrying a retired mode (auto / pade / jet / mobius) run BLA.
 const calculationOptions = [
@@ -3832,32 +3732,6 @@ async function startVideoExport(payload: {
           /></div>
         <p class="panel-note">La réserve de précision prépare les zooms profonds. La modifier reconstruit la référence.</p>
       </DenseSection>
-      <DenseSection title="Diagnostic" initially-collapsed>
-        <DenseSelect
-            label="Visualisation"
-            :options="debugViewOptions"
-            :model-value="model.debugView ?? 0"
-            @update:model-value="(v: string | number) => model.debugView = Number(v)"
-          />        <div v-if="model.approximationMode !== 'perturbation' && debugViewLegend" class="dbgview-legend">
-          <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-bar" :style="{ background: debugViewLegend.gradient }"></div>
-          <div v-if="debugViewLegend.kind === 'gradient'" class="dbgview-legend-ticks">
-            <span v-for="tick in debugViewLegend.ticks" :key="tick">{{ tick }}</span>
-          </div>
-          <div v-if="debugViewLegend.extraSwatches" class="dbgview-legend-swatches">
-            <span v-for="sw in debugViewLegend.extraSwatches" :key="sw.label" class="dbgview-legend-swatch">
-              <i :style="{ background: sw.color }"></i>{{ sw.label }}
-            </span>
-          </div>
-          <div v-if="debugViewLegend.kind === 'swatches'" class="dbgview-legend-swatches">
-            <span v-for="sw in debugViewLegend.swatches" :key="sw.label" class="dbgview-legend-swatch">
-              <i :style="{ background: sw.color }"></i>{{ sw.label }}
-            </span>
-          </div>
-          <p class="dbgview-legend-note">{{ debugViewLegend.note }}</p>
-        </div>
-
-
-        <p class="panel-note">Les mesures GPU et les commandes expérimentales sont accessibles depuis le compteur de rendu.</p>
       </DenseSection>
     </div>
   </div>
@@ -5933,50 +5807,6 @@ async function startVideoExport(payload: {
   .cv-body .transfer {
     flex-wrap: wrap;
   }
-}
-
-.dbgview-legend {
-  margin: -4px 0 2px;
-  padding: 8px 10px;
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  background: var(--panel-2);
-}
-.dbgview-legend-bar {
-  height: 10px;
-  border-radius: 5px;
-}
-.dbgview-legend-ticks {
-  display: flex;
-  justify-content: space-between;
-  margin-top: 4px;
-  font-family: var(--mono);
-  font-size: 10px;
-  color: var(--ink-2);
-}
-.dbgview-legend-swatches {
-  display: flex;
-  flex-wrap: wrap;
-  gap: 8px 14px;
-}
-.dbgview-legend-swatch {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 11px;
-  color: var(--ink);
-}
-.dbgview-legend-swatch i {
-  width: 11px;
-  height: 11px;
-  border-radius: 3px;
-  flex: none;
-}
-.dbgview-legend-note {
-  margin: 6px 0 0;
-  font-size: 10.5px;
-  line-height: 1.4;
-  color: var(--ink-2);
 }
 </style>
 

@@ -65,7 +65,7 @@ describe('settled rotation color resolve', () => {
     expect(engine).toContain('&& (fullyConverged || hasFreshZero)')
     expect(engine).toContain('&& !renderOptions.activateAnimate')
     expect(engine).toContain('&& !this.videoExportActive')
-    expect(engine).toContain('&& this.debugViewMode === 0')
+
     expect(engine).toContain('} else if (!aaShowAccum && !rotationShowCache) {')
   })
 
