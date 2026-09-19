@@ -90,7 +90,7 @@ describe('simplified progressive renderer contract', () => {
     expect(brushShader).toContain('throttledCount: atomic<u32>');
     expect(brushShader).toContain('wgWeightedWork[lidx] = weightedWork;');
     expect(brushShader).not.toContain('active_count');
-    expect(brushShader).toContain('wgEffectiveCountEighths[lidx]');
+    expect(brushShader).toContain('atomicAdd(&counter.effectiveCountEighths, c * PERIODIC_WEIGHT_FULL);');
     expect(brushShader).toContain('if (iter_val < 0.0) {\n        needs = true;');
     expect(engineSource).toContain('this.tsPendingBatchContext = batchTimingContext');
   });
@@ -119,19 +119,6 @@ describe('simplified progressive renderer contract', () => {
     expect(engineSource).not.toContain('ACTIVE_PIXEL_RESET_RATIO');
     expect(engineSource).not.toContain('this.iterationBatchSize = MIN_BATCH_SIZE');
     expect(engineSource).not.toContain('tsPendingRemainingPixelCount');
-  });
-
-  it('aggressively throttles only the dispatch budget for attracting periodic pixels', () => {
-    expect(brushShader).toContain('struct PeriodicInteriorVerdict');
-    expect(brushShader).toContain('let residual = fe_add(mapped, fe_neg(dz));');
-    expect(brushShader).toContain('derivativeLog2 < -1.0');
-    expect(brushShader).toContain('PeriodicInteriorVerdict(false, PERIODIC_WEIGHT_EIGHTH)');
-    expect(brushShader).toContain('PeriodicInteriorVerdict(false, PERIODIC_WEIGHT_QUARTER)');
-    expect(brushShader).toContain('localWorkLimit = min(localWorkLimit, weightedLimit);');
-    expect(brushShader).toContain('g_activeWeightEighths = PERIODIC_WEIGHT_FULL;');
-    expect(engineSource).toContain('effectiveRemainingPixelCount');
-    expect(engineSource).toContain('periodicThrottledPixelCount');
-    expect(engineSource).toContain('ENABLE_PERIODIC_SCHEDULING: periodicScheduling ? 1 : 0');
   });
 
   it('keeps asynchronous work samples alive during continuous zoom reprojection', () => {

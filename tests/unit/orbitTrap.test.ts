@@ -94,7 +94,6 @@ describe('terminal logarithmic-rosette shader contract', () => {
     expect(brush).toContain('(*state).hitIteration = iteration;');
     expect(brush).toContain('(*state).hitAngle = hit.y;');
     expect(brush).toContain('&& mandelbrot.orbitTrapMode < 2.5;');
-    expect(brush).toContain('ENABLE_RENORM && mandelbrot.orbitTrapMode < 2.5');
     expect(resolve).toContain('texture_storage_2d<rgba32float, write>');
     expect(resolve).toContain('store_trap_payload(coord, load_trap_payload(bestEscapedCoord));');
     expect(merge).toContain('candidate.trapPayload = textureLoad(trapPayloadTex, coord, 0);');

@@ -2,6 +2,7 @@
 import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import {useRouter} from 'vue-router';
 import type {ApproximationMode, InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
+import {kernelApproximationMode} from '../Engine.ts';
 import {
   preserveSessionPerformanceFields,
   stripExplorationStateFields,
@@ -266,7 +267,7 @@ const model =  defineModel<MandelbrotParams>({
     dprMultiplier: 1.0,
     maxIterationMultiplier: 1.0,
      interpolationMode: 'lab',
-     approximationMode: 'auto',
+     approximationMode: 'bla',
      targetFps: 60,
   }
 });
@@ -586,10 +587,9 @@ const debugViewLegends: Record<number, {
     kind: 'swatches',
     swatches: [
       { color: 'rgb(255, 60, 60)', label: 'Exact (perturbation pure)' },
-      { color: 'rgb(60, 255, 60)', label: 'Ordre 1 (affine / linéaire)' },
-      { color: 'rgb(60, 60, 255)', label: 'Ordre 2-3 (rationnel / jet)' },
+      { color: 'rgb(60, 255, 60)', label: 'BLA (blocs affines)' },
     ],
-    note: 'Composition RVB : part des itérations couvertes par chaque ordre (mélange par pixel).',
+    note: 'Composition RV : part des itérations couvertes par chaque chemin (mélange par pixel).',
   },
   4: {
     kind: 'gradient',
@@ -601,11 +601,9 @@ const debugViewLegends: Record<number, {
     kind: 'swatches',
     swatches: [
       { color: 'rgb(140, 140, 140)', label: 'Exact (perturbation pure)' },
-      { color: 'rgb(64, 140, 242)', label: 'Affine / Padé (ordre 1)' },
-      { color: 'rgb(64, 217, 89)', label: 'Möbius c+ (ordre 2)' },
-      { color: 'rgb(242, 153, 38)', label: 'Jet (ordre 3)' },
+      { color: 'rgb(64, 140, 242)', label: 'BLA (blocs affines)' },
     ],
-    note: 'Couleur plate = tier dominant par pixel (le plus utile en mode Auto).',
+    note: 'Couleur plate = chemin dominant par pixel.',
   },
   6: {
     kind: 'gradient',
@@ -614,10 +612,10 @@ const debugViewLegends: Record<number, {
     // Diagnostic colors, mirrored from color.wgsl's reach branch: each "no
     // data" cause has its own color so a report says WHY, not just "c'est gris".
     extraSwatches: [
-      { color: 'rgb(242, 128, 26)', label: 'Orange = mode Exact → bascule en Auto' },
-      { color: 'rgb(242, 217, 64)', label: 'Jaune = Auto, mais table pas prête (attends la référence)' },
+      { color: 'rgb(242, 128, 26)', label: 'Orange = mode Exact → bascule en BLA' },
+      { color: 'rgb(242, 217, 64)', label: 'Jaune = BLA, mais table pas prête (attends la référence)' },
       { color: 'rgb(107, 41, 77)', label: 'Prune = z″ mathématiquement nul : portée non mesurable sans z‴' },
-      { color: 'rgb(38, 51, 115)', label: 'Bleu sombre = payload absent ou non fini (anomalie si la table Auto est active)' },
+      { color: 'rgb(38, 51, 115)', label: 'Bleu sombre = payload absent ou non fini (anomalie si la table BLA est active)' },
       { color: 'rgb(217, 26, 191)', label: 'Magenta = mauvaise texture liée (bug)' },
       { color: 'rgb(26, 26, 31)', label: 'Presque noir = intérieur / pas encore calculé' },
     ],
@@ -626,21 +624,18 @@ const debugViewLegends: Record<number, {
       + 'le payload déjà stocké par le rendu courant (aucun recalcul), donc '
       + 'toujours cohérent avec l\'image affichée. ESTIMATION (critère du '
       + 'dernier terme retenu), pas un certificat — un rayon prouvé sera plus '
-      + 'petit. Gris = pixel intérieur ou sans payload (z″ n\'est accumulé '
-      + 'qu\'en mode Auto).',
+      + 'petit. Gris = pixel intérieur ou sans payload.',
   },
 };
 const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);
 // Primary control (post 2.8 ship gate): Auto = unified per-block dispatch,
 // Exact = pure perturbation. Legacy single modes live in the debug section as
 // overrides (same model field, so presets carrying them keep working).
+// The minimal in-place kernel implements exact perturbation and affine BLA
+// only; presets carrying a legacy mode (auto / pade / jet / mobius) run BLA.
 const calculationOptions = [
-  { label: 'Automatique', value: 'auto' },
+  { label: 'BLA', value: 'bla' },
   { label: 'Sans sauts', value: 'perturbation' },
-  { label: 'Forcer BLA', value: 'bla' },
-  { label: 'Forcer Padé', value: 'pade' },
-  { label: 'Forcer Jet', value: 'jet' },
-  { label: 'Forcer Möbius+', value: 'mobius' },
 ];
 
 // ── Dense field formatters (Palettes) ────────────────────────────────
@@ -3831,7 +3826,7 @@ async function startVideoExport(payload: {
             :model-value="model.aaAdaptive !== false"
             @update:model-value="(v: boolean) => model.aaAdaptive = v"
           /></div>
-        <DenseSelect label="Algorithme" :options="calculationOptions" :model-value="model.approximationMode ?? 'auto'" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
+        <DenseSelect label="Algorithme" :options="calculationOptions" :model-value="kernelApproximationMode(model.approximationMode ?? 'bla')" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
         <p v-if="orbitTrapConfig.mode === 'exact'" class="panel-note">Orbit trap exact : les sauts sont désactivés pour parcourir toute l’orbite.</p>
         <div v-else-if="model.approximationMode !== 'perturbation'" class="fields"><DenseField
             label="Tolérance d’approximation" :min="-12" :max="0" :step="1"

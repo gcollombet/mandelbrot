@@ -6,7 +6,7 @@ const shader = readFileSync(
   'utf8',
 );
 
-describe('classic BLA/Padé shader safety contract', () => {
+describe('affine BLA shader safety contract', () => {
   it('covers the live-radius/f32-overflow window at the c=-2 reference', () => {
     const coefficient = 4 ** 64;
     const radius = 2e-6 / 4 ** 63;
@@ -16,15 +16,17 @@ describe('classic BLA/Padé shader safety contract', () => {
     expect(Math.fround(coefficient) * 0).toBeNaN();
 
     expect(shader).toContain('const BLA_F32_EXP_LIMIT: i32 = 120;');
-    expect(shader).toContain('let useF32 = bla_coefficients_fit_f32(bla, false);');
+    expect(shader).toContain('let useF32 = bla_coefficients_fit_f32(bla);');
     expect(shader).toContain('bla_vec2_is_finite(candidate) && bla_vec2_is_finite(candidateZ)');
   });
 
-  it('keeps both Padé derivative paths on the full quotient derivative', () => {
-    expect(shader).toContain('qMantissaF32 = aMantissa - cmul(cmul(bMantissa, dc), d);');
-    expect(shader).toContain('let bdcD = fe_cmul(fe_cmul(b, dcFe), d);');
-    expect(shader).toContain('let bdcD = fe_cmul(fe_cmul(b, dc), d);');
-    expect(shader).not.toContain("D4 derivative der' = (A/M²)·der + B/M");
+  it('keeps the minimal kernel free of the block-table tiers', () => {
+    for (const removed of ['try_apply_unified', 'try_apply_jet', 'try_apply_mobius', 'try_periodic_interior',
+      'try_gate_jump', 'try_apply_renorm', 'evaluate_dynamic_validity', 'mandelbrotJetSuite', 'workStats']) {
+      expect(shader).not.toContain(removed);
+    }
+    expect(shader).toContain('override ENABLE_DEEP: bool = true;');
+    expect(shader.match(/^override /gm)).toHaveLength(1);
   });
 
   it('uses outward-rounded classic BLA radius evaluation in both kernels', () => {

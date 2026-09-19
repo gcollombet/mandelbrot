@@ -692,6 +692,23 @@ export type RenderOptions = {
 
 export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet' | 'mobius' | 'auto'
 
+/** Modes the minimal in-place kernel (mandelbrot_brush.wgsl) implements. The
+ *  Padé / jet / Möbius / Auto tiers live in mandelbrot_brush_full.wgsl only;
+ *  a preset or navigator asking for one of them runs affine BLA instead. */
+export function kernelApproximationMode(mode: ApproximationMode): ApproximationMode {
+    return mode === 'perturbation' ? 'perturbation' : 'bla'
+}
+
+function readNavigatorApproximationMode(navigator: { get_approximation_mode(): number, use_bla(): void }): ApproximationMode {
+    if (navigator.get_approximation_mode() > 1) {
+        // Block-table modes are not part of the minimal kernel (see
+        // kernelApproximationMode); fold the navigator back to affine BLA so
+        // it never builds a table the kernel cannot read.
+        navigator.use_bla()
+    }
+    return navigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation'
+}
+
 export type Mandelbrot = {
     maxIterations: number,
     cx: string,
@@ -790,12 +807,6 @@ export class Engine {
     private destroyed = false
     private gpuSetupInProgress = false
     private inplaceDeepUnavailable = false   // driver refused the floatexp kernel; shallow-only
-    // Driver refused the kernel with these optional tiers compiled in (mobile
-    // Vulkan: VK_ERROR_INITIALIZATION_FAILED at CreateComputePipelines). The
-    // specialisation is then pinned off for every variant, whatever the panel
-    // toggles ask for, so cache keys and dispatch keys stay consistent.
-    private inplacePortfolioUnavailable = false
-    private inplacePeriodicSchedulingUnavailable = false
     private deepUnavailableReported = false
     private readonly gpuErrorHandler?: (message: string) => void
 
@@ -2142,7 +2153,7 @@ export class Engine {
         // only feed per-frame shader uniforms and UI, and serializing them to decimal strings
         // every frame at the full budget made per-frame cost ∝ budget. The budget lives only on
         // the worker navigator (set via the reset message), which builds the reference orbit.
-        this.approximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 5 ? 'auto' : this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
+        this.approximationMode = readNavigatorApproximationMode(this.mandelbrotNavigator)
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         // Rollout defaults are owned by Engine. Mirror them into the front
         // navigator before the worker reset so UI/debug getters and the worker
@@ -2216,8 +2227,6 @@ export class Engine {
                     )
                     this.inplacePipelineCache.clear()
                     this.inplaceDeepUnavailable = false
-                    this.inplacePortfolioUnavailable = false
-                    this.inplacePeriodicSchedulingUnavailable = false
                     this.deepUnavailableReported = false
                     this.adapter = await navigator.gpu.requestAdapter()
                     if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
@@ -2534,9 +2543,6 @@ export class Engine {
                 { binding: 1, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
                 { binding: 2, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
                 { binding: 3, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 5, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 6, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
-                { binding: 7, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
             ],
             label: 'Engine BindGroupLayout DebugView',
         })
@@ -2655,18 +2661,12 @@ export class Engine {
         // bindGroupInplace (built from inplaceBindGroupLayout) is compatible with
         // every one. pipelineInplace stays the deep-capable default (used as the
         // "ready" guard and for backward compatibility).
-        // Compiled asynchronously: the fused kernel is ~200 KB of WGSL and its
-        // two specialisations, compiled synchronously, held the GPU process
-        // long enough on Windows/D3D12 (DXC on NVIDIA) to trip Chromium's GPU
-        // watchdog — the device came back lost with reason=unknown and
-        // "A valid external Instance reference no longer exists".
-        // The shallow kernel is mandatory; the deep (floatexp) specialisation is
-        // the heaviest shader this engine builds and some mobile Vulkan drivers
-        // refuse it outright with VK_ERROR_INITIALIZATION_FAILED. Losing it
+        // Compiled asynchronously: compiling the specialisations synchronously
+        // held the GPU process long enough on Windows/D3D12 (DXC on NVIDIA) to
+        // trip Chromium's GPU watchdog. The shallow kernel is mandatory; the
+        // deep (floatexp) specialisation is heavier and some mobile Vulkan
+        // drivers refuse it with VK_ERROR_INITIALIZATION_FAILED. Losing it
         // costs deep zoom, not the app, so degrade instead of failing init.
-        // Some mobile drivers also refuse the shallow kernel with every optional
-        // tier compiled in. compileInplacePipelines() walks the specialisation
-        // ladder (portfolio off, then periodic scheduling off) before giving up.
         const { deep: pipelineDeep, shallow: pipelineShallow } = await this.compileInplacePipelines()
         if (this.device !== device || this.destroyed) return
         this.pipelineInplace = pipelineDeep ?? pipelineShallow
@@ -2961,21 +2961,11 @@ export class Engine {
     // Lazily build + cache a specialized in-place kernel for the given override
     // combination. Adding an axis (e.g. AA) means extending the key and the
     // constants map here and precompiling the new hot combo at init.
-    private inplacePipelineSpec(deep: boolean, wantPortfolio: boolean, renorm: boolean, wantPeriodicScheduling: boolean): { key: string, descriptor: GPUComputePipelineDescriptor } {
-        // Tiers the driver refused stay off whatever the caller asks for, so
-        // every key derived from the same inputs names the same compiled kernel.
-        const portfolio = wantPortfolio && !this.inplacePortfolioUnavailable
-        const periodicScheduling = wantPeriodicScheduling && !this.inplacePeriodicSchedulingUnavailable
-        const dynamicValidity = this.dynamicBlockValidity && this.approximationMode === 'auto'
-        const radialValidity = dynamicValidity
-            && this.incrementalReferenceTable
-            && this.incrementalTableLayout !== null
-        const dynamicStats = dynamicValidity
-            && (this.dynamicValidityStatsEnabled || this.dynamicValidityShadow)
-        // Work instrumentation is panel-only; keep it out of the production
-        // kernel so ordinary rendering pays none of its workgroup atomics.
-        const workStats = this.workStatsEnabled || dynamicStats
-        const key = `d${deep ? 1 : 0}p${portfolio ? 1 : 0}r${renorm ? 1 : 0}i${periodicScheduling ? 1 : 0}v${dynamicValidity ? 1 : 0}c${radialValidity ? 1 : 0}s${dynamicStats ? 1 : 0}w${workStats ? 1 : 0}`
+    private inplacePipelineSpec(deep: boolean): { key: string, descriptor: GPUComputePipelineDescriptor } {
+        // ENABLE_DEEP is the only specialisation axis of the minimal kernel.
+        // The old portfolio / renorm / periodic / validity / stats overrides
+        // do not exist in it (an unknown constant would fail validation).
+        const key = `d${deep ? 1 : 0}`
         return {
             key,
             descriptor: {
@@ -2983,89 +2973,41 @@ export class Engine {
                 compute: {
                     module: this.inplaceModule!,
                     entryPoint: 'cs_main',
-                    constants: {
-                        ENABLE_DEEP: deep ? 1 : 0,
-                        ENABLE_PORTFOLIO: portfolio ? 1 : 0,
-                        ENABLE_RENORM: renorm ? 1 : 0,
-                        ENABLE_PERIODIC_SCHEDULING: periodicScheduling ? 1 : 0,
-                        ENABLE_DYNAMIC_VALIDITY: dynamicValidity ? 1 : 0,
-                        ENABLE_RADIAL_VALIDITY: radialValidity ? 1 : 0,
-                        ENABLE_DYNAMIC_STATS: dynamicStats ? 1 : 0,
-                        ENABLE_WORK_STATS: workStats ? 1 : 0,
-                    },
+                    constants: { ENABLE_DEEP: deep ? 1 : 0 },
                 },
-                label: `Engine ComputePipeline InplaceBrush (deep=${deep}, portfolio=${portfolio}, renorm=${renorm}, periodicScheduling=${periodicScheduling}, dynamic=${dynamicValidity}, radial=${radialValidity}, dynamicStats=${dynamicStats}, workStats=${workStats})`,
+                label: `Engine ComputePipeline InplaceBrush (deep=${deep})`,
             },
         }
     }
 
     /**
-     * Build the two hot in-place kernels. The shallow kernel is mandatory: when
-     * the driver refuses it, the optional tiers are switched off one at a time
-     * (portfolio, then periodic scheduling) and the compile retried, each
-     * refusal pinning that tier off for the lifetime of the device. The deep
-     * kernel is retried with the same reduced set, and dropped when even that
-     * fails (deep zoom then runs on the shallow f32 kernel).
+     * Build the two hot in-place kernels. The shallow kernel is mandatory; the
+     * deep (floatexp) one is dropped when the driver refuses it (deep zoom
+     * then runs on the shallow f32 kernel).
      */
     private async compileInplacePipelines(): Promise<{ deep?: GPUComputePipeline, shallow: GPUComputePipeline }> {
         const device = this.device
-        const compileDeep = () => this.precompileInplacePipeline(true).catch((error: unknown) => {
-            if (this.device !== device || this.destroyed) return undefined
-            console.warn('[Engine] deep (floatexp) compute pipeline unavailable on this device;'
-                + ' deep zoom will fall back to the shallow f32 kernel', error)
-            this.inplaceDeepUnavailable = true
-            return undefined
-        })
-        const ladder: Array<{ tier: string, disable: () => boolean }> = [
-            { tier: 'portfolio', disable: () => {
-                if (this.inplacePortfolioUnavailable) return false
-                this.inplacePortfolioUnavailable = true
-                return true
-            } },
-            { tier: 'periodic scheduling', disable: () => {
-                if (this.inplacePeriodicSchedulingUnavailable) return false
-                this.inplacePeriodicSchedulingUnavailable = true
-                return true
-            } },
-        ]
-        // Compile both in parallel on the happy path: each one is a large
-        // kernel and the deep one dominates wall time.
-        let deepRequest: Promise<GPUComputePipeline | undefined> = compileDeep()
-        let shallow: GPUComputePipeline | undefined
-        let firstError: unknown
-        let degraded = false
-        for (;;) {
-            try {
-                shallow = await this.precompileInplacePipeline(false)
-                break
-            } catch (error: unknown) {
-                if (this.device !== device || this.destroyed) throw error
-                firstError ??= error
-                const step = ladder.find(({ disable }) => disable())
-                if (!step) {
-                    throw new Error(
-                        'Initialisation WebGPU impossible : le pilote GPU de cet appareil refuse de compiler le noyau '
-                        + `de calcul principal, même dans sa variante la plus simple (${describeGpuError(firstError)}).`,
-                    )
-                }
-                degraded = true
-                console.warn(`[Engine] shallow compute pipeline refused by the driver; retrying with ${step.tier} compiled out`, error)
-            }
-        }
-        let deep = await deepRequest
-        if (degraded && !deep && (this.device === device && !this.destroyed)) {
-            // The first deep attempt carried the tiers the driver just refused;
-            // give the reduced deep kernel one chance before settling for shallow.
-            this.inplaceDeepUnavailable = false
-            deepRequest = compileDeep()
-            deep = await deepRequest
-        }
+        const [deep, shallow] = await Promise.all([
+            this.precompileInplacePipeline(true).catch((error: unknown) => {
+                if (this.device !== device || this.destroyed) return undefined
+                console.warn('[Engine] deep (floatexp) compute pipeline unavailable on this device;'
+                    + ' deep zoom will fall back to the shallow f32 kernel', error)
+                this.inplaceDeepUnavailable = true
+                return undefined
+            }),
+            this.precompileInplacePipeline(false).catch((error: unknown) => {
+                throw new Error(
+                    'Initialisation WebGPU impossible : le pilote GPU de cet appareil refuse de compiler le noyau '
+                    + `de calcul principal (${describeGpuError(error)}).`,
+                )
+            }),
+        ])
         return { deep, shallow }
     }
 
     /** Deduplicate asynchronous compilation and never publish an old-device result. */
     private precompileInplacePipeline(deep: boolean): Promise<GPUComputePipeline> {
-        const { key, descriptor } = this.inplacePipelineSpec(deep, this.portfolioEnabled, this.renormEnabled, this.periodicSchedulingEnabled)
+        const { key, descriptor } = this.inplacePipelineSpec(deep)
         const cached = this.inplacePipelineCache.get(key)
         if (cached) return Promise.resolve(cached)
         const pending = this.inplacePipelinePending.get(key)
@@ -3179,9 +3121,6 @@ export class Engine {
                     { binding: 1, resource: { buffer: this.mandelbrotReferenceBuffer } },
                     { binding: 2, resource: { buffer: this.mandelbrotBlaBuffer } },
                     { binding: 3, resource: { buffer: auxiliaryLevelBuffer } },
-                    { binding: 5, resource: { buffer: this.mandelbrotJetBuffer } },
-                    { binding: 6, resource: { buffer: this.mandelbrotJetLevelBuffer } },
-                    { binding: 7, resource: { buffer: this.mandelbrotJetRadiiBuffer } },
                 ],
                 label: 'Engine BindGroup DebugView',
             })
@@ -5216,16 +5155,10 @@ export class Engine {
             1,
             Math.round(4 * dispatchPixelCount / Math.max(1, visiblePixelCount)),
         )
-        const dynamicStats = this.dynamicValidityStatsEnabled
-            || this.dynamicValidityShadow
         return [
             `d${this.floatExpActive ? 1 : 0}`,
             `a${this.lastShaderApproxFlag}`,
             `l${this.rawCopyLayerCount(analyticRawPayloadNeeded)}`,
-            `p${this.portfolioEnabled && !this.inplacePortfolioUnavailable ? 1 : 0}`,
-            `r${this.renormEnabled ? 1 : 0}`,
-            `i${this.periodicSchedulingEnabled && !this.inplacePeriodicSchedulingUnavailable ? 1 : 0}`,
-            `w${this.workStatsEnabled || dynamicStats ? 1 : 0}`,
             `s${zoomRefreshHasSnapshot ? 1 : 0}`,
             `x${dispatchAreaBucket}`,
         ].join(':')
@@ -5761,21 +5694,17 @@ export class Engine {
         return true
     }
 
-    setApproximationMode(mode: ApproximationMode) {
+    setApproximationMode(requested: ApproximationMode) {
+        const mode = kernelApproximationMode(requested)
+        if (mode !== requested) {
+            console.info(`[Engine] approximation mode '${requested}' is not part of the minimal kernel; using '${mode}'`)
+        }
         if (mode === this.approximationMode) {
             return
         }
 
         if (mode === 'bla') {
             this.mandelbrotNavigator.use_bla()
-        } else if (mode === 'pade') {
-            this.mandelbrotNavigator.use_pade()
-        } else if (mode === 'jet') {
-            this.mandelbrotNavigator.use_jet()
-        } else if (mode === 'mobius') {
-            this.mandelbrotNavigator.use_mobius_cplus()
-        } else if (mode === 'auto') {
-            this.mandelbrotNavigator.use_unified()
         } else {
             this.mandelbrotNavigator.use_perturbation()
         }
@@ -6214,7 +6143,7 @@ export class Engine {
             this.needRender = true
         }
 
-        const navigatorApproximationMode: ApproximationMode = (this.mandelbrotNavigator.get_approximation_mode() === 5 ? 'auto' : this.mandelbrotNavigator.get_approximation_mode() === 4 ? 'mobius' : this.mandelbrotNavigator.get_approximation_mode() === 3 ? 'jet' : this.mandelbrotNavigator.get_approximation_mode() === 2 ? 'pade' : this.mandelbrotNavigator.get_approximation_mode() === 1 ? 'bla' : 'perturbation')
+        const navigatorApproximationMode = readNavigatorApproximationMode(this.mandelbrotNavigator)
         const navigatorBlaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         if (navigatorApproximationMode !== this.approximationMode || navigatorBlaEpsilon !== this.blaEpsilon) {
             this.approximationMode = navigatorApproximationMode
@@ -7060,9 +6989,7 @@ export class Engine {
         }
         const device = this.device
         const frameRawTexture = this.rawTexture
-        const { key: pipelineKey } = this.inplacePipelineSpec(
-            this.floatExpActive, this.portfolioEnabled, this.renormEnabled, this.periodicSchedulingEnabled,
-        )
+        const { key: pipelineKey } = this.inplacePipelineSpec(this.floatExpActive)
         let inplacePipeline = this.inplacePipelineCache.get(pipelineKey)
         if (!inplacePipeline) {
             // Keep the last presented image while preparing a newly selected mode.
@@ -7072,9 +6999,7 @@ export class Engine {
             if (this.destroyed || this.device !== device
                 || this.rawTexture !== frameRawTexture
                 || this.previousRenderOptions !== renderOptions) return
-            const currentSpec = this.inplacePipelineSpec(
-                this.floatExpActive, this.portfolioEnabled, this.renormEnabled, this.periodicSchedulingEnabled,
-            )
+            const currentSpec = this.inplacePipelineSpec(this.floatExpActive)
             if (currentSpec.key !== pipelineKey) return
         }
         if (this.tiledKeyframePlan) {

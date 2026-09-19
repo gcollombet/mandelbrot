@@ -585,7 +585,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   activateAnimate: false,
   debugShading: false,
   debugView: 0,
-  approximationMode: 'auto',
+  approximationMode: 'bla',
   blaEpsilon: 1e-3,
   maxBlaSkip: 65536,
   precisionBudget: '1e-30',

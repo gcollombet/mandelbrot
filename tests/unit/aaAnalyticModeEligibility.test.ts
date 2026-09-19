@@ -29,8 +29,8 @@ describe('analytic AA approximation-mode eligibility', () => {
   it('propagates z-second through exact and every accelerated kernel', () => {
     expect(brush).toContain('snd_exact_step(derM, derS + derSLo, zPrev, &sndM, &sndS)')
     expect(brush).toMatch(/try_apply_bla\([^;]+&sndM, &sndS\)/)
-    expect(brush).toMatch(/try_apply_jet\([^;]+&sndM, &sndS\)/)
-    expect(brush).toMatch(/try_apply_mobius\([^;]+&sndM, &sndS\)/)
-    expect(brush).toMatch(/try_apply_unified\([^;]+&sndM, &sndS\)/)
+    expect(brush).toMatch(/try_apply_bla_deep\([^;]+&sndM, &sndS\)/)
+    // z″ ← A·z″ through every accepted affine block, on both paths.
+    expect(brush.match(/apply_affine_derivatives\(/g)).toHaveLength(3)
   })
 })

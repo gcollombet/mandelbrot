@@ -34,10 +34,8 @@ describe('packed geometry display ABI', () => {
 
   it('publishes terminal analytic geometry for every derivative-complete path', () => {
     expect(brush).toContain('fn analytic_terminal_geometry(')
-    expect(brush).toContain('let taylorPayloadValid = sndValid;')
-    expect(brush).not.toContain('let taylorPayloadValid = isUnified && sndValid;')
-    expect(brush).not.toContain('let taylorPayloadValid = isUnifiedDeep && sndValid;')
-    expect(brush).toContain('const ENABLE_SECOND_ORDER_GATE: bool = false;')
+    expect(brush).toContain('scaled_complex_log_length(sndM, sndS), sndValid')
+    expect(brush).not.toContain('isUnified && sndValid')
     expect(brush).toContain('INVALID_TAYLOR_PAYLOAD')
   })
 
