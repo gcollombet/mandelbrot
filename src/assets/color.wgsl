@@ -1066,16 +1066,14 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
 
   var envColor = vec3<f32>(0.0);
   if (fx.wSkybox > 0.001) {
-    // Anisotropic environment lookup, the engine-standard bent normal: the
-    // lit normal is bent toward the axis along which the direct highlight is
-    // stretched (the bitangent here, see anisotropic_highlight), by an amount
-    // that grows with roughness. Same normal and same brushing flow as the
-    // direct lobe, so this is the material's response, not a second surface.
+    // Anisotropic environment lookup, historical form: the rendered height
+    // gradient is tilted along the brushing flow by a fixed slope of
+    // 2 × anisotropy, and the skybox is read through that tilted normal. It
+    // derives only from the surface normal, the flow and the palette
+    // material, so it is the material's response, not a second surface.
     // Roughness stays an isotropic mip choice: one sample.
-    let anisotropicTangent = cross(anisotropyTangent, viewDir);
-    let anisotropicNormal = cross(anisotropicTangent, anisotropyTangent);
-    let bendFactor = anisotropy * clamp(5.0 * roughness, 0.0, 1.0);
-    let bentNormal = normalize(mix(normal, anisotropicNormal, bendFactor));
+    let environmentGradient = heightGradient + s.flow * (2.0 * anisotropy);
+    let bentNormal = surface_normal_from_gradient(environmentGradient);
     let environmentReflectDir = reflect(-viewDir, bentNormal);
     let skyboxColor = rough_skybox_reflection(
       uv_screen,
