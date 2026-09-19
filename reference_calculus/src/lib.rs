@@ -4009,13 +4009,14 @@ mod gpu_bla_mirror {
     #[test]
     #[ignore]
     fn gpu_bla_mirror_map() {
-        let (cx, cy, scale, max_iter, eps) = (
-            "-0.74364388703715870475",
-            "0.13182590420531197",
-            "1e-11",
-            20000u32,
-            1e-8f32,
-        );
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let cx_s = env("MAP_CX", "-0.74364388703715870475");
+        let cy_s = env("MAP_CY", "0.13182590420531197");
+        let scale_s = env("MAP_SCALE", "1e-11");
+        let max_iter: u32 = env("MAP_ITER", "20000").parse().unwrap();
+        let eps: f32 = env("MAP_EPS", "1e-8").parse().unwrap();
+        let span: f32 = env("MAP_SPAN", "1").parse().unwrap();
+        let (cx, cy, scale) = (cx_s.as_str(), cy_s.as_str(), scale_s.as_str());
         let mut nav = MandelbrotNavigator::new(cx, cy, scale, 0.0);
         nav.use_bla();
         nav.set_bla_epsilon(eps);
@@ -4048,7 +4049,7 @@ mod gpu_bla_mirror {
             for gx in 0..w {
                 let tx = (gx as f32 / (w - 1) as f32) * 2.0 - 1.0;
                 let ty = (gy as f32 / (h - 1) as f32) * 2.0 - 1.0;
-                let dc = (tx * scale_f, ty * scale_f);
+                let dc = (tx * scale_f * span, ty * scale_f * span);
                 let (ie, _) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, false);
                 let (ib, _) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, true);
                 let truth =
