@@ -450,16 +450,6 @@ fn vs_rotation_cache(@builtin(vertex_index) VertexIndex: u32) -> VertexOutput {
   return out;
 }
 
-fn rotate_surface_vector_sincos(v: vec3<f32>, s: f32, c: f32) -> vec3<f32> {
-  let xy = rotate_sincos(v.xy, s, c);
-  return vec3<f32>(xy.x, xy.y, v.z);
-}
-
-fn rotate_surface_vector_inverse_sincos(v: vec3<f32>, s: f32, c: f32) -> vec3<f32> {
-  let xy = rotate_inverse_sincos(v.xy, s, c);
-  return vec3<f32>(xy.x, xy.y, v.z);
-}
-
 fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, sceneSin: f32, sceneCos: f32) -> bool {
   let xy_neutral = (uv - vec2<f32>(0.5, 0.5)) * 2.0;
   let local_rot  = xy_neutral * neutralExtent;
@@ -581,8 +571,8 @@ fn thin_film_tint(cosTheta: f32, cycles: f32) -> vec3<f32> {
   return 0.5 + 0.5 * cos(phi);
 }
 
-fn curvature_ambient_occlusion(curvature: f32, relief: f32, strength: f32) -> f32 {
-  let concavity = max(curvature * relief, 0.0);
+fn curvature_ambient_occlusion(curvature: f32, strength: f32) -> f32 {
+  let concavity = max(curvature, 0.0);
   let cavity = smoothstep(0.025, 1.35, concavity);
   let amount = 1.0 - exp(-max(strength, 0.0));
   return clamp(1.0 - cavity * amount * 0.72, 0.28, 1.0);
@@ -717,14 +707,16 @@ fn surface_normal_from_gradient(gradient: vec2<f32>) -> vec3<f32> {
   return normalize(vec3<f32>(-gradient.x, -gradient.y, 1.0));
 }
 
-fn local_height_shadow(grad: vec2<f32>, lightDir: vec3<f32>, tangent: vec3<f32>, bitangent: vec3<f32>, relief: f32, strength: f32) -> f32 {
-  let lightPlane = vec2<f32>(dot(lightDir, tangent), dot(lightDir, bitangent));
-  let lightPlaneLen = length(lightPlane);
-  if (lightPlaneLen < 1e-4 || strength <= 0.0 || relief <= 0.0) {
+fn local_height_shadow(heightGradient: vec2<f32>, lightDir: vec3<f32>, strength: f32) -> f32 {
+  // Horizon test in the screen plane: the rendered height gradient is what
+  // the normal encodes, so the uphill slope toward the light needs no
+  // tangent frame. A flat surface returns 1 by construction.
+  let lightPlaneLen = length(lightDir.xy);
+  if (lightPlaneLen < 1e-4 || strength <= 0.0) {
     return 1.0;
   }
-  let lightPlaneDir = lightPlane / lightPlaneLen;
-  let uphillSlope = max(dot(grad, lightPlaneDir), 0.0) * 0.34 * relief;
+  let lightPlaneDir = lightDir.xy / lightPlaneLen;
+  let uphillSlope = max(dot(heightGradient, lightPlaneDir), 0.0);
   let lightSlope = max(lightDir.z / lightPlaneLen, 0.0);
   let blocker = smoothstep(lightSlope * 0.35, lightSlope + 1.25, uphillSlope);
   let amount = 1.0 - exp(-0.35 * max(strength, 0.0));
@@ -821,6 +813,318 @@ fn apply_orbit_trap_color(colorIn: vec3<f32>, iterRaw: f32, z: vec2<f32>, trapPa
   return mix(colorIn, accent, clamp(mask * strength, 0.0, 1.0));
 }
 
+// ── Surface: the single geometric truth the lighting stage sees ─────────
+// Stage 1 (build_surface) knows the fractal: analytic relief, protrusion,
+// stripes, direction coherence, texture bump and the scene rotation. It folds
+// all of them into one rendered height field and hands over its normal.
+// Stage 2 (shade_surface) knows only this struct plus the global light, view
+// and sky uniforms: every slope, tilt, horizon or flow it needs is derived
+// from the normal, so all effects light the same surface.
+struct Surface {
+  normal: vec3<f32>,      // unit, screen/world space (z toward the viewer)
+  paletteIndex: f32,      // final palette phase: selects the material
+  albedo: vec3<f32>,      // sRGB base color after the palette overlays
+  curvature: f32,         // signed concavity of the rendered height field
+  flow: vec2<f32>,        // brushing direction in the screen plane (unit)
+};
+
+// The ridge, iridescence and shadow thresholds were tuned on
+// |analytic gradient| × relief; the rendered height gradient is 0.34× that.
+const SLOPE_METRIC_SCALE: f32 = 1.0 / 0.34;
+
+fn build_surface(
+  albedo: vec3<f32>,
+  palettePhase: f32,
+  fx: EffectParams,
+  iterRaw: f32,
+  v_smooth: f32,
+  z: vec2<f32>,
+  distanceHeightStored: f32,
+  cachedGradient: vec2<f32>,
+  cachedCurvature: f32,
+  geometryAngle: f32,
+  stripeAverage: f32,
+  cachedStripeGradient: vec2<f32>,
+  cachedCoherenceGradient: vec2<f32>,
+  tessCoord: vec2<f32>
+) -> Surface {
+  let effShading = fx.wShading;
+  let effTess = fx.wTessellation;
+  let disp = parameters.displacementAmount;
+  let reliefDepth = parameters.reliefDepth * effShading;
+  let relief = clamp(reliefDepth, 0.0, 2.0);
+  // Log-domain control: 0 -> 0.25x, 1 -> 1x, 2 -> 4x. The multiplier is
+  // strictly positive, so it can never reverse the cached analytic slope.
+  let reliefGain = exp2(2.0 * (fx.reliefGain - 1.0));
+  let effectiveAnalyticRelief = relief * reliefGain;
+  // Controlled descendant of the historical crossing-interpolation artefact:
+  // a broad lobe peaks where the smooth escape phase wraps, while a positive
+  // log-domain gain preserves the canonical analytic gradient direction.
+  let protrusionPhase = fract(parameters.protrusionPhase);
+  let protrusionSharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
+  let protrusionWave = 0.5 + 0.5 * cos(TWO_PI * fract(v_smooth - protrusionPhase));
+  let protrusionLobe = pow(max(protrusionWave, 0.0), protrusionSharpness);
+  let baseIterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
+  let protrusionStrength = clamp(parameters.protrusionStrength, 1.0, 4.0);
+  let iterationProtrusionGain = 1.0 + protrusionStrength * (baseIterationProtrusionGain - 1.0);
+  let stripeReliefStrength = fx.wStripeRelief * effShading;
+  let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
+  let bumpStrength = parameters.microBumpStrength * effTess;
+  let mappingXId = i32(parameters.textureMappingXVariable + 0.5);
+  let mappingYId = i32(parameters.textureMappingYVariable + 0.5);
+  let needsDepthGradient = bumpStrength > 0.001 &&
+    (mappingXId == 0 || mappingXId == 1 || mappingYId == 0 || mappingYId == 1);
+  let needsFractalGradient = effectiveAnalyticRelief > 0.001;
+  var distanceHeight = 0.0;
+  // Cached geometry stores the analytic derivative per source texel and the
+  // branch-local analytic Laplacian. Historical relief gains are applied
+  // here, after source-to-display normalization, without neighbor reads.
+  var grad = cachedGradient * 24.0;
+  // Both orbit slopes are cached per source texel and already normalized to
+  // display scale, exactly like cachedGradient. The historical display gains
+  // are what the neighbour differences used to carry (x8 central / x16
+  // forward, and dp = dS/2 for the stripe phase).
+  let stripeGrad = cachedStripeGradient * 8.0;
+  let directionCoherenceGrad = cachedCoherenceGradient * 16.0;
+  let depthGrad = cachedGradient * 16.0;
+  if (needsFractalGradient) {
+    distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
+    grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
+  }
+  // Geometric branch: q(theta + pi) = -q(theta), so q has zero mean over a
+  // period. The multiplier remains a scalar function of canonical height H.
+  let protrusionGeometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);
+  var protrusionGain = iterationProtrusionGain;
+  if (protrusionGeometryMix > 0.001 && needsFractalGradient) {
+    let protrusionPeriod = clamp(parameters.protrusionPeriod, 0.1, 16.0);
+    let geometricCarrier = cos(TWO_PI * (distanceHeight / protrusionPeriod - protrusionPhase));
+    let geometricProfile = sign(geometricCarrier) * pow(abs(geometricCarrier), protrusionSharpness);
+    let geometricProtrusionGain = max(1.0 + fx.protrusion * geometricProfile, 0.0);
+    protrusionGain = mix(iterationProtrusionGain, geometricProtrusionGain, protrusionGeometryMix);
+  }
+  let styledAnalyticRelief = effectiveAnalyticRelief * protrusionGain;
+  var textureGradient = vec2<f32>(0.0);
+  var textureMappingDx = vec2<f32>(1.0, 0.0);
+  var textureMappingDy = vec2<f32>(0.0, 1.0);
+  if (needsDepthGradient) {
+    let boundedDepthGrad = clamp(depthGrad, vec2<f32>(-8.0), vec2<f32>(8.0));
+    let depthWarpGrad = boundedDepthGrad * (4.0 * disp);
+    var uGrad = vec2<f32>(1.0, 0.0);
+    var vGrad = vec2<f32>(0.0, 1.0);
+    if (mappingXId == 0) {
+      uGrad = (vec2<f32>(1.0, 0.0) + depthWarpGrad) * parameters.textureMappingXScale;
+    } else if (mappingXId == 1) {
+      uGrad = (vec2<f32>(0.0, 1.0) + depthWarpGrad) * parameters.textureMappingXScale;
+    }
+    if (mappingYId == 0) {
+      vGrad = (vec2<f32>(1.0, 0.0) + depthWarpGrad) * parameters.textureMappingYScale;
+    } else if (mappingYId == 1) {
+      vGrad = (vec2<f32>(0.0, 1.0) + depthWarpGrad) * parameters.textureMappingYScale;
+    }
+    textureMappingDx = vec2<f32>(uGrad.x, vGrad.x);
+    textureMappingDy = vec2<f32>(uGrad.y, vGrad.y);
+  }
+  if (bumpStrength > 0.001) {
+    textureGradient = texture_bump_gradient(
+      tileTex,
+      tessCoord.x,
+      tessCoord.y,
+      parameters.tessellationLevel,
+      textureMappingDx,
+      textureMappingDy,
+      bumpStrength
+    );
+  }
+  // One scalar surface drives one normal. The stripe height keeps its
+  // Hstripe = 0.5 - 0.5*cos(2πp) profile, derivative π*sin(2πp): the cached
+  // gradient no longer has a wrap to survive, but the profile is what gives
+  // the relief its shape, so changing it would change every existing preset.
+  // Coherence and texture luminance are already scalar fields.
+  let stripeProfileDerivative = 3.141592653589793 * sin(TWO_PI * stripeAverage);
+  let heightGradient = grad * (0.34 * styledAnalyticRelief);
+  let stripeHeightGradient = stripeGrad * stripeProfileDerivative * (0.75 * clamp(stripeReliefStrength, 0.0, 1.0));
+  let coherenceHeightGradient = directionCoherenceGrad * (0.75 * clamp(directionCoherenceStrength, 0.0, 100.0));
+  let surfaceGradientLocal = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;
+  // uv_neutral = R(scene) * uv_screen, so a gradient on the neutral fractal
+  // plane enters screen/world space through R^-1. This one 2D rotation
+  // replaces the per-vector 3D rotations the lighting used to perform.
+  let sceneSin = parameters.sceneSin;
+  let sceneCos = parameters.sceneCos;
+  let surfaceGradient = rotate_inverse_sincos(surfaceGradientLocal, sceneSin, sceneCos);
+  let slope = length(surfaceGradient);
+  // Flat areas have no downhill direction: the brushing then follows the
+  // cached geometry angle, as before.
+  let fieldDir = rotate_inverse_sincos(vec2<f32>(cos(geometryAngle), sin(geometryAngle)), sceneSin, sceneCos);
+
+  var s: Surface;
+  s.normal = surface_normal_from_gradient(surfaceGradient);
+  s.paletteIndex = palettePhase;
+  s.albedo = albedo;
+  s.curvature = cachedCurvature * 6.0 * styledAnalyticRelief;
+  s.flow = select(fieldDir, surfaceGradient / max(slope, 1e-5), slope > 1e-5);
+  return s;
+}
+
+fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32> {
+  let effShading = fx.wShading;
+  // PBR runs in linear light: gamma-space products distort hues and harden
+  // falloffs. Only the shaded result converts back to sRGB (with a highlight
+  // roll-off) at the end — the unshaded palette compositing keeps its
+  // historical sRGB look.
+  let colorLin = srgb_to_linear(s.albedo);
+  let iridLin = srgb_to_linear(fx.iridescenceColor);
+  let normal = s.normal;
+  // Everything geometric derives from the one normal.
+  let heightGradient = -normal.xy / max(normal.z, 1e-4);
+  let slopeMetric = length(heightGradient) * SLOPE_METRIC_SCALE;
+  let tilt = length(normal.xy);
+  let anisotropy = clamp(fx.anisotropy, 0.0, 1.0);
+  let anisotropyTangent = anisotropy_tangent_from_dir(s.flow, normal);
+  let anisotropyBitangent = normalize(cross(normal, anisotropyTangent));
+  let lightDir = vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ);
+  let viewDir = vec3<f32>(0.0, 0.0, 1.0);
+  let halfDir = normalize(lightDir + viewDir);
+  let nDotL = max(dot(normal, lightDir), 0.0);
+  let nDotV = max(dot(normal, viewDir), 0.0);
+  let nDotH = max(dot(normal, halfDir), 0.0);
+  let vDotH = max(dot(viewDir, halfDir), 0.0);
+  // The magnified bilinear path has no extra curvature fetch: AO fades out
+  // during reprojection instead of adding four more texture reads per pixel.
+  let ao = curvature_ambient_occlusion(s.curvature, parameters.ambientOcclusionStrength);
+  let metallic = clamp(fx.metallic, 0.0, 1.0);
+  let roughness = clamp(fx.roughness, 0.02, 1.0);
+  // Gamma-era gain retuned down: in linear light the GGX peak already reads
+  // brighter once encoded to sRGB. Floor is 0 so Spéculaire = 0 truly
+  // disables the lobe.
+  let specularGain = clamp(fx.specularPower / 19.0, 0.0, 3.4);
+  // Dielectrics keep an achromatic Fresnel reflection; only conductors tint
+  // their reflection with the base color.
+  // Tint=0 is the legacy preset path: the historical shader used the sRGB
+  // palette value directly as conductor F0. Tint=1 selects linear-light F0.
+  let legacyMetalF0 = clamp(s.albedo * fx.metalReflectance, vec3<f32>(0.0), vec3<f32>(1.0));
+  let physicalMetalF0 = clamp(colorLin * fx.metalReflectance, vec3<f32>(0.0), vec3<f32>(1.0));
+  let metalResponse = clamp(fx.metalEnvironmentTint, 0.0, 1.0);
+  let metalF0 = mix(legacyMetalF0, physicalMetalF0, metalResponse);
+  let f0 = mix(vec3<f32>(fx.dielectricSpecular), metalF0, metallic);
+  // Cheap multiple-scattering compensation: single-scatter GGX otherwise
+  // loses too much energy as a conductor becomes rough.
+  let roughMetalEnergy = vec3<f32>(1.0) + (vec3<f32>(1.0) - f0) * (metallic * roughness * 0.75 * metalResponse);
+  let fresnelSpec = fresnel_schlick(vDotH, f0);
+  let distribution = ggx_distribution(nDotH, roughness);
+  let geometry = ggx_geometry_smith(nDotV, nDotL, roughness);
+  let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
+  let anisotropicTerm = anisotropic_highlight(normal, anisotropyTangent, anisotropyBitangent, halfDir, nDotL, nDotV, roughness);
+  let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
+  let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL * roughMetalEnergy;
+  let diffuseColor = colorLin * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
+  let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
+  let localShadow = local_height_shadow(heightGradient, lightDir, localShadowControl);
+  let shadowedNDotL = nDotL * localShadow;
+  let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
+  let reflectionSide = mix(0.08, 1.0, litSide);
+  let ambientDiffuse = diffuseColor * 0.14 * ao;
+  let directDiffuse = diffuseColor * 0.86 * shadowedNDotL;
+  let brightness = max(fx.shadingLevel, 0.0);
+  var materialColor = ambientDiffuse + directDiffuse + directSpecular * localShadow;
+  let reliefAccent = clamp((1.0 - exp(-0.35 * localShadowControl)) * effShading * 2.0, 0.0, 2.0);
+  let ridge = smoothstep(0.10, 1.55, slopeMetric) * litSide * reliefAccent;
+  materialColor += mix(colorLin, vec3<f32>(1.0), 0.38) * ridge * 0.10 * (1.0 - metallic * 0.45);
+  let varnish = clamp(parameters.varnishStrength, 0.0, 10.0) * 0.1;
+  // Clear coat is a true top layer: it is applied at the very end of this
+  // function, once the base material (iridescence, env… included) is fully
+  // assembled.
+
+  if (fx.wIridescence > 0.001) {
+    let viewShift = smoothstep(0.04, 0.86, 1.0 - nDotV);
+    let lightShift = smoothstep(0.08, 0.82, 1.0 - nDotH);
+    let lightPlane = normalize(lightDir.xy + vec2<f32>(1e-5));
+    let tangentPlane = vec2<f32>(-lightPlane.y, lightPlane.x);
+    let orientationPlane = normalize(s.flow + vec2<f32>(1e-5));
+    let facingPearl = dot(orientationPlane, lightPlane) * 0.5 + 0.5;
+    let crossPearl = dot(orientationPlane, tangentPlane) * 0.5 + 0.5;
+    let anisotropicOrientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
+    // An isotropic film has no preferred tangent-plane direction: keep the
+    // orientation contribution at its energy-neutral midpoint. Material
+    // anisotropy progressively restores the relief-following directional
+    // pearl response, reaching full strength at anisotropy = 1.
+    let orientationShift = mix(0.5, anisotropicOrientationShift, anisotropy);
+    let slopeShift = smoothstep(0.025, 1.15, slopeMetric);
+    let tiltShift = smoothstep(0.025, 0.55, tilt);
+    let surfaceShift = max(slopeShift, tiltShift * 0.65);
+    let pearlAngle = clamp(0.05 + viewShift * 0.12 + lightShift * 0.10 + orientationShift * 0.56 + surfaceShift * 0.32, 0.0, 1.0);
+    let pearlLighting = 0.18 * ao + 0.82 * shadowedNDotL;
+    let coatWeight = fx.wIridescence * pearlAngle * mix(0.45, 1.45, orientationShift) * mix(0.60, 1.25, surfaceShift) * pearlLighting * (1.0 - metallic * 0.35);
+    // Thin-film interference: optical thickness varies across the surface,
+    // the view/normal tilt slides the spectrum (soap-bubble hue drift).
+    // iridescenceColor acts as the filter the interference plays under.
+    let filmCycles = 1.3 + 2.2 * orientationShift + 1.1 * surfaceShift;
+    let filmColor = iridLin * (0.30 + 1.40 * thin_film_tint(nDotV, filmCycles));
+    let pearlTint = 0.18 + 0.74 * orientationShift + 0.18 * surfaceShift;
+    let pearlColor = mix(colorLin, filmColor, pearlTint) * (0.78 + 0.36 * max(luminance(colorLin), 0.25));
+    let pearlSheen = pow(nDotH, mix(2.5, 7.5, 1.0 - roughness)) * fx.wIridescence * pearlLighting * mix(0.45, 1.35, orientationShift);
+    materialColor = mix(materialColor, pearlColor, clamp(coatWeight, 0.0, 0.92));
+    // Sheen interferes at the half-vector angle (specular path through the film).
+    materialColor += iridLin * thin_film_tint(vDotH, filmCycles) * pearlSheen * (0.56 + 0.92 * (1.0 - roughness)) * (1.0 - metallic * 0.25);
+  }
+
+  var envColor = vec3<f32>(0.0);
+  if (fx.wSkybox > 0.001) {
+    // The environment mirrors the same normal as the direct lighting and the
+    // clear coat. Roughness is only an isotropic mip choice, so the base
+    // environment still uses one sample.
+    let environmentReflectDir = reflect(-viewDir, normal);
+    let skyboxColor = rough_skybox_reflection(
+      uv_screen,
+      environmentReflectDir,
+      roughness,
+      vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
+    );
+    let environmentFresnel = fresnel_schlick_roughness(nDotV, f0, roughness);
+    let neutralEnvironmentFresnel = vec3<f32>(luminance(environmentFresnel));
+    let environmentTint = clamp(metalResponse * metallic, 0.0, 1.0);
+    let reflectionStrength = fx.wSkybox * mix(neutralEnvironmentFresnel, environmentFresnel, environmentTint);
+    let envVisibility = specular_occlusion(nDotV, ao, roughness);
+    // Fresnel already carries the dielectric/metal energy difference. Do not
+    // suppress polished stone a second time with a dielectric-only factor.
+    envColor = skyboxColor * reflectionStrength * roughMetalEnergy * mix(1.0, 1.10, metallic) * envVisibility;
+  }
+
+  // Rim is a stylised Fresnel: same rule as the env term — matte kills it.
+  let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading * reflectionSide * mix(1.0, 0.25, roughness);
+  let rimBaseColor = mix(colorLin, vec3<f32>(1.0), 0.45);
+  let rimPearlColor = mix(rimBaseColor, iridLin, fx.wIridescence * 0.65);
+  let rimColor = rimPearlColor * rim * (0.04 + 0.12 * fx.wSkybox + 0.07 * fx.wIridescence);
+
+  var pbrColor = (materialColor + envColor + rimColor) * (0.55 + brightness * 0.45);
+  if (varnish > 0.001) {
+    // Clear coat: an achromatic dielectric film over whatever material lies
+    // underneath. It never tints the base — it deepens it (wet look),
+    // attenuates it by the coat Fresnel (energy conservation), and adds its
+    // own untinted highlight + glossy environment mirror on top. No metallic
+    // dependency: the coat is the same film regardless of the base.
+    // The coat's own smoothness is independent of the base roughness: a
+    // rough material under varnish still gets a glossy film on top.
+    let coatFresnel = fresnel_schlick(nDotV, vec3<f32>(0.025)).x;
+    let coatPower = mix(200.0, 320.0, varnish);
+    let coatSpec = pow(max(nDotH, 0.0), coatPower) * (0.20 + 0.80 * shadowedNDotL) * (0.30 + 0.85 * varnish);
+    var coatEnvironment = vec3<f32>(0.0);
+    if (fx.wSkybox > 0.001) {
+      let coatReflectDir = reflect(-viewDir, normal);
+      let coatSky = rough_skybox_reflection(
+        uv_screen,
+        coatReflectDir,
+        0.05,
+        vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
+      );
+      coatEnvironment = coatSky * fresnel_schlick_roughness(nDotV, vec3<f32>(0.025), 0.05) * fx.wSkybox * specular_occlusion(nDotV, ao, 0.05);
+    }
+    // Wet look: internal reflections darken and saturate, hue untouched.
+    pbrColor *= mix(vec3<f32>(1.0), clamp(pbrColor, vec3<f32>(0.0), vec3<f32>(1.0)), varnish * 0.30);
+    pbrColor = pbrColor * (1.0 - coatFresnel * varnish) + (coatEnvironment + vec3<f32>(coatSpec * coatFresnel)) * varnish;
+  }
+  return linear_to_sRGB(tonemap_highlights(display_grade(pbrColor)));
+}
+
 fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<f32>, distanceHeightStored: f32, cachedGradient: vec2<f32>, cachedCurvature: f32, geometryAngle: f32, stripeAverage: f32, directionCoherence: f32, cachedStripeGradient: vec2<f32>, cachedCoherenceGradient: vec2<f32>, dx: f32, dy: f32, uv_screen: vec2<f32>) -> vec3<f32> {
   let paletteRepeat = max(parameters.palettePeriod, 0.0001);
   let iterationCoordinate = iteration_palette_coordinate(v, paletteRepeat);
@@ -884,289 +1188,18 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
 
   color = apply_orbit_trap_color(color, iterRaw, z, trapPayload);
 
-  // ── Shading (always computed, applied proportionally to wShading) ──
+  // ── Shading: build one surface, then light it ──
   if (ENABLE_SURFACE_EFFECTS && effShading > 0.001) {
     // Material + iridescence rows are only needed here: sample them lazily.
     sampleShadingMaterial(palettePhase, &fx);
-    // PBR runs in linear light: gamma-space products distort hues and harden
-    // falloffs. Only the shaded result converts back to sRGB (with a highlight
-    // roll-off) at the end of the block — the unshaded palette compositing
-    // keeps its historical sRGB look.
-    let colorLin = srgb_to_linear(color);
-    let iridLin = srgb_to_linear(fx.iridescenceColor);
-    let angleDir = vec2<f32>(cos(geometryAngle), sin(geometryAngle));
-    let reliefDepth = parameters.reliefDepth * effShading;
-    let relief = clamp(reliefDepth, 0.0, 2.0);
-    // Log-domain control: 0 -> 0.25x, 1 -> 1x, 2 -> 4x. The multiplier is
-    // strictly positive, so it can never reverse the cached analytic slope.
-    let reliefGain = exp2(2.0 * (fx.reliefGain - 1.0));
-    let effectiveAnalyticRelief = relief * reliefGain;
-    // Controlled descendant of the historical crossing-interpolation artefact:
-    // a broad lobe peaks where the smooth escape phase wraps, while a positive
-    // log-domain gain preserves the canonical analytic gradient direction.
-    let protrusionPhase = fract(parameters.protrusionPhase);
-    let protrusionSharpness = clamp(parameters.protrusionSharpness, 0.25, 16.0);
-    let protrusionWave = 0.5 + 0.5 * cos(TWO_PI * fract(v_smooth - protrusionPhase));
-    let protrusionLobe = pow(max(protrusionWave, 0.0), protrusionSharpness);
-    let baseIterationProtrusionGain = exp2(2.0 * fx.protrusion * protrusionLobe);
-    let protrusionStrength = clamp(parameters.protrusionStrength, 1.0, 4.0);
-    let iterationProtrusionGain = 1.0 + protrusionStrength * (baseIterationProtrusionGain - 1.0);
-    let localShadowControl = clamp(parameters.localShadowStrength, 0.0, 10.0);
-    let stripeReliefStrength = fx.wStripeRelief * effShading;
-    let directionCoherenceStrength = fx.wDirectionCoherenceRelief * effShading;
-    let bumpStrength = parameters.microBumpStrength * effTess;
-    let mappingXId = i32(parameters.textureMappingXVariable + 0.5);
-    let mappingYId = i32(parameters.textureMappingYVariable + 0.5);
-    let needsDepthGradient = bumpStrength > 0.001 &&
-      (mappingXId == 0 || mappingXId == 1 || mappingYId == 0 || mappingYId == 1);
-    let needsFractalGradient = effectiveAnalyticRelief > 0.001;
-    var distanceHeight = 0.0;
-    // Cached geometry stores the analytic derivative per source texel and the
-    // branch-local analytic Laplacian. Historical relief gains are applied
-    // here, after source-to-display normalization, without neighbor reads.
-    var grad = cachedGradient * 24.0;
-    // Both orbit slopes are cached per source texel and already normalized to
-    // display scale, exactly like cachedGradient. The historical display gains
-    // are what the neighbour differences used to carry (x8 central / x16
-    // forward, and dp = dS/2 for the stripe phase).
-    let stripeGrad = cachedStripeGradient * 8.0;
-    let directionCoherenceGrad = cachedCoherenceGradient * 16.0;
-    var depthGrad = cachedGradient * 16.0;
-    var heightCurvature = cachedCurvature * 6.0;
-    var slope = 0.0;
-    if (needsFractalGradient) {
-      distanceHeight = distance_height_from_values(iterRaw, z.x, z.y, distanceHeightStored);
-    }
-    if (needsFractalGradient) {
-      grad = clamp(grad, vec2<f32>(-6.0), vec2<f32>(6.0));
-      slope = length(grad);
-    }
-    // Geometric branch: q(theta + pi) = -q(theta), so q has zero mean over a
-    // period. The multiplier remains a scalar function of canonical height H.
-    let protrusionGeometryMix = clamp(parameters.protrusionGeometryMix, 0.0, 1.0);
-    var protrusionGain = iterationProtrusionGain;
-    if (protrusionGeometryMix > 0.001 && needsFractalGradient) {
-      let protrusionPeriod = clamp(parameters.protrusionPeriod, 0.1, 16.0);
-      let geometricCarrier = cos(TWO_PI * (distanceHeight / protrusionPeriod - protrusionPhase));
-      let geometricProfile = sign(geometricCarrier) * pow(abs(geometricCarrier), protrusionSharpness);
-      let geometricProtrusionGain = max(1.0 + fx.protrusion * geometricProfile, 0.0);
-      protrusionGain = mix(iterationProtrusionGain, geometricProtrusionGain, protrusionGeometryMix);
-    }
-    let styledAnalyticRelief = effectiveAnalyticRelief * protrusionGain;
-    var textureGradient = vec2<f32>(0.0);
-    var textureMappingDx = vec2<f32>(1.0, 0.0);
-    var textureMappingDy = vec2<f32>(0.0, 1.0);
-    if (needsDepthGradient) {
-      let boundedDepthGrad = clamp(depthGrad, vec2<f32>(-8.0), vec2<f32>(8.0));
-      let depthWarpGrad = boundedDepthGrad * (4.0 * disp);
-      var uGrad = vec2<f32>(1.0, 0.0);
-      var vGrad = vec2<f32>(0.0, 1.0);
-      if (mappingXId == 0) {
-        uGrad = (vec2<f32>(1.0, 0.0) + depthWarpGrad) * parameters.textureMappingXScale;
-      } else if (mappingXId == 1) {
-        uGrad = (vec2<f32>(0.0, 1.0) + depthWarpGrad) * parameters.textureMappingXScale;
-      }
-      if (mappingYId == 0) {
-        vGrad = (vec2<f32>(1.0, 0.0) + depthWarpGrad) * parameters.textureMappingYScale;
-      } else if (mappingYId == 1) {
-        vGrad = (vec2<f32>(0.0, 1.0) + depthWarpGrad) * parameters.textureMappingYScale;
-      }
-      textureMappingDx = vec2<f32>(uGrad.x, vGrad.x);
-      textureMappingDy = vec2<f32>(uGrad.y, vGrad.y);
-    }
-    if (bumpStrength > 0.001) {
-      textureGradient = texture_bump_gradient(
-        tileTex,
-        tessCoord.x,
-        tessCoord.y,
-        parameters.tessellationLevel,
-        textureMappingDx,
-        textureMappingDy,
-        bumpStrength
-      );
-    }
-    // One scalar surface drives one normal. The stripe height keeps its
-    // Hstripe = 0.5 - 0.5*cos(2πp) profile, derivative π*sin(2πp): the cached
-    // gradient no longer has a wrap to survive, but the profile is what gives
-    // the relief its shape, so changing it would change every existing preset.
-    // Coherence and texture luminance are already scalar fields.
-    let stripeProfileDerivative = 3.141592653589793 * sin(TWO_PI * stripeAverage);
-    let heightGradient = grad * (0.34 * styledAnalyticRelief);
-    let stripeHeightGradient = stripeGrad * stripeProfileDerivative * (0.75 * clamp(stripeReliefStrength, 0.0, 1.0));
-    let coherenceHeightGradient = directionCoherenceGrad * (0.75 * clamp(directionCoherenceStrength, 0.0, 100.0));
-    // The anisotropic material flow follows the rendered macro relief after
-    // protrusions, stripes, and coherence. Texture micro-bumps still perturb the
-    // final normal, but do not make the material direction shimmer pixel by pixel.
-    let macroSurfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient;
-    let surfaceGradient = macroSurfaceGradient + textureGradient;
-    let macroSurfaceSlope = length(macroSurfaceGradient);
-    let anisotropyReliefDir = select(
-      angleDir,
-      macroSurfaceGradient / max(macroSurfaceSlope, 1e-5),
-      macroSurfaceSlope > 1e-5
+    let surface = build_surface(
+      color, palettePhase, fx,
+      iterRaw, v_smooth, z, distanceHeightStored,
+      cachedGradient, cachedCurvature, geometryAngle,
+      stripeAverage, cachedStripeGradient, cachedCoherenceGradient,
+      tessCoord
     );
-    let anisotropy = clamp(fx.anisotropy, 0.0, 1.0);
-    let surfaceNormalLocal = surface_normal_from_gradient(surfaceGradient);
-    let geometricTangentLocal = normalize(vec3<f32>(1.0, 0.0, surfaceGradient.x));
-    let geometricBitangentLocal = normalize(cross(surfaceNormalLocal, geometricTangentLocal));
-    let anisotropyTangentLocal = anisotropy_tangent_from_dir(anisotropyReliefDir, surfaceNormalLocal);
-    let sceneSin = parameters.sceneSin;
-    let sceneCos = parameters.sceneCos;
-    // uv_neutral = R(scene) * uv_screen, therefore vectors from the neutral
-    // fractal surface must use R^-1 to enter screen/world space.
-    let normal = normalize(rotate_surface_vector_inverse_sincos(surfaceNormalLocal, sceneSin, sceneCos));
-    let geometricTangentWorld = normalize(rotate_surface_vector_inverse_sincos(geometricTangentLocal, sceneSin, sceneCos));
-    let geometricBitangentWorld = normalize(rotate_surface_vector_inverse_sincos(geometricBitangentLocal, sceneSin, sceneCos));
-    let anisotropyTangent = normalize(rotate_surface_vector_inverse_sincos(anisotropyTangentLocal, sceneSin, sceneCos));
-    let lightDir = vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ);
-    // The magnified bilinear path has no extra curvature fetch: AO fades out
-    // during reprojection instead of adding four more texture reads per pixel.
-    let ao = curvature_ambient_occlusion(heightCurvature, styledAnalyticRelief, parameters.ambientOcclusionStrength);
-    let viewDir = vec3<f32>(0.0, 0.0, 1.0);
-    let halfDir = normalize(lightDir + viewDir);
-    let anisotropyBitangent = normalize(cross(normal, anisotropyTangent));
-    let nDotL = max(dot(normal, lightDir), 0.0);
-    let nDotV = max(dot(normal, viewDir), 0.0);
-    let nDotH = max(dot(normal, halfDir), 0.0);
-    let vDotH = max(dot(viewDir, halfDir), 0.0);
-    let metallic = clamp(fx.metallic, 0.0, 1.0);
-    let roughness = clamp(fx.roughness, 0.02, 1.0);
-    // Gamma-era gain retuned down: in linear light the GGX peak already reads
-    // brighter once encoded to sRGB. Floor is 0 so Spéculaire = 0 truly
-    // disables the lobe.
-    let specularGain = clamp(fx.specularPower / 19.0, 0.0, 3.4);
-    // Dielectrics keep an achromatic Fresnel reflection; only conductors tint
-    // their reflection with the base color.
-    // Tint=0 is the legacy preset path: the historical shader used the sRGB
-    // palette value directly as conductor F0. Tint=1 selects linear-light F0.
-    let legacyMetalF0 = clamp(color * fx.metalReflectance, vec3<f32>(0.0), vec3<f32>(1.0));
-    let physicalMetalF0 = clamp(colorLin * fx.metalReflectance, vec3<f32>(0.0), vec3<f32>(1.0));
-    let metalResponse = clamp(fx.metalEnvironmentTint, 0.0, 1.0);
-    let metalF0 = mix(legacyMetalF0, physicalMetalF0, metalResponse);
-    let f0 = mix(vec3<f32>(fx.dielectricSpecular), metalF0, metallic);
-    // Cheap multiple-scattering compensation: single-scatter GGX otherwise
-    // loses too much energy as a conductor becomes rough.
-    let roughMetalEnergy = vec3<f32>(1.0) + (vec3<f32>(1.0) - f0) * (metallic * roughness * 0.75 * metalResponse);
-    let fresnelSpec = fresnel_schlick(vDotH, f0);
-    let distribution = ggx_distribution(nDotH, roughness);
-    let geometry = ggx_geometry_smith(nDotV, nDotL, roughness);
-    let specularTerm = (distribution * geometry) / max(4.0 * nDotV * nDotL, 1e-5);
-    let anisotropicTerm = anisotropic_highlight(normal, anisotropyTangent, anisotropyBitangent, halfDir, nDotL, nDotV, roughness);
-    let specularLobe = mix(specularTerm, anisotropicTerm, anisotropy);
-    let directSpecular = fresnelSpec * specularLobe * specularGain * nDotL * roughMetalEnergy;
-    let diffuseColor = colorLin * (1.0 - metallic) * (1.0 - 0.35 * luminance(fresnelSpec));
-    let localShadow = local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, styledAnalyticRelief, localShadowControl);
-    let shadowedNDotL = nDotL * localShadow;
-    let litSide = smoothstep(0.02, 0.55, shadowedNDotL);
-    let reflectionSide = mix(0.08, 1.0, litSide);
-    let ambientDiffuse = diffuseColor * 0.14 * ao;
-    let directDiffuse = diffuseColor * 0.86 * shadowedNDotL;
-    let brightness = max(fx.shadingLevel, 0.0);
-    var materialColor = ambientDiffuse + directDiffuse + directSpecular * localShadow;
-    let reliefAccent = clamp((1.0 - exp(-0.35 * localShadowControl)) * effShading * 2.0, 0.0, 2.0);
-    let ridge = smoothstep(0.10, 1.55, slope * styledAnalyticRelief) * litSide * reliefAccent;
-    materialColor += mix(colorLin, vec3<f32>(1.0), 0.38) * ridge * 0.10 * (1.0 - metallic * 0.45);
-    let varnish = clamp(parameters.varnishStrength, 0.0, 10.0) * 0.1;
-    // Clear coat is a true top layer: it is applied at the very end of this
-    // block, once the base material (iridescence, SSS, wear, env… included)
-    // is fully assembled.
-
-    if (fx.wIridescence > 0.001) {
-      let viewShift = smoothstep(0.04, 0.86, 1.0 - nDotV);
-      let lightShift = smoothstep(0.08, 0.82, 1.0 - nDotH);
-      let lightPlane = normalize(lightDir.xy + vec2<f32>(1e-5));
-      let tangentPlane = vec2<f32>(-lightPlane.y, lightPlane.x);
-      let orientationPlane = normalize(rotate_sincos(anisotropyReliefDir, sceneSin, sceneCos) + vec2<f32>(1e-5));
-      let facingPearl = dot(orientationPlane, lightPlane) * 0.5 + 0.5;
-      let crossPearl = dot(orientationPlane, tangentPlane) * 0.5 + 0.5;
-      let anisotropicOrientationShift = mix(smoothstep(0.02, 0.98, facingPearl), smoothstep(0.02, 0.98, crossPearl), 0.42);
-      // An isotropic film has no preferred tangent-plane direction: keep the
-      // orientation contribution at its energy-neutral midpoint. Material
-      // anisotropy progressively restores the relief-following directional
-      // pearl response, reaching full strength at anisotropy = 1.
-      let orientationShift = mix(0.5, anisotropicOrientationShift, anisotropy);
-      let slopeShift = smoothstep(0.025, 1.15, slope * styledAnalyticRelief);
-      let tiltShift = smoothstep(0.025, 0.55, length(normal.xy));
-      let surfaceShift = max(slopeShift, tiltShift * 0.65);
-      let pearlAngle = clamp(0.05 + viewShift * 0.12 + lightShift * 0.10 + orientationShift * 0.56 + surfaceShift * 0.32, 0.0, 1.0);
-      let pearlLighting = 0.18 * ao + 0.82 * shadowedNDotL;
-      let coatWeight = fx.wIridescence * pearlAngle * mix(0.45, 1.45, orientationShift) * mix(0.60, 1.25, surfaceShift) * pearlLighting * (1.0 - metallic * 0.35);
-      // Thin-film interference: optical thickness varies across the surface,
-      // the view/normal tilt slides the spectrum (soap-bubble hue drift).
-      // iridescenceColor acts as the filter the interference plays under.
-      let filmCycles = 1.3 + 2.2 * orientationShift + 1.1 * surfaceShift;
-      let filmColor = iridLin * (0.30 + 1.40 * thin_film_tint(nDotV, filmCycles));
-      let pearlTint = 0.18 + 0.74 * orientationShift + 0.18 * surfaceShift;
-      let pearlColor = mix(colorLin, filmColor, pearlTint) * (0.78 + 0.36 * max(luminance(colorLin), 0.25));
-      let pearlSheen = pow(nDotH, mix(2.5, 7.5, 1.0 - roughness)) * fx.wIridescence * pearlLighting * mix(0.45, 1.35, orientationShift);
-      materialColor = mix(materialColor, pearlColor, clamp(coatWeight, 0.0, 0.92));
-      // Sheen interferes at the half-vector angle (specular path through the film).
-      materialColor += iridLin * thin_film_tint(vDotH, filmCycles) * pearlSheen * (0.56 + 0.92 * (1.0 - roughness)) * (1.0 - metallic * 0.25);
-    }
-
-    var envColor = vec3<f32>(0.0);
-    if (fx.wSkybox > 0.001) {
-      // Keep the full surface relief in the one-sample environment reflection,
-      // then reinforce its macro-relief direction with the anisotropic
-      // magnitude-2 tilt.
-      // This retains the steep flat-zone response without subtracting, cancelling,
-      // or reversing protrusion relief. It never feeds AO, shadows, direct
-      // lighting, iridescence slope, or clearcoat. Roughness remains only an
-      // isotropic mip choice, so the base environment still uses one sample.
-      let environmentReflectionGradient = surfaceGradient + anisotropyReliefDir * (2.0 * anisotropy);
-      let environmentReflectionNormalLocal = surface_normal_from_gradient(environmentReflectionGradient);
-      let environmentReflectionNormal = normalize(rotate_surface_vector_inverse_sincos(environmentReflectionNormalLocal, sceneSin, sceneCos));
-      let environmentReflectDir = reflect(-viewDir, environmentReflectionNormal);
-      let skyboxColor = rough_skybox_reflection(
-        uv_screen,
-        environmentReflectDir,
-        roughness,
-        vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
-      );
-      let environmentFresnel = fresnel_schlick_roughness(nDotV, f0, roughness);
-      let neutralEnvironmentFresnel = vec3<f32>(luminance(environmentFresnel));
-      let environmentTint = clamp(metalResponse * metallic, 0.0, 1.0);
-      let reflectionStrength = fx.wSkybox * mix(neutralEnvironmentFresnel, environmentFresnel, environmentTint);
-      let envVisibility = specular_occlusion(nDotV, ao, roughness);
-      // Fresnel already carries the dielectric/metal energy difference. Do not
-      // suppress polished stone a second time with a dielectric-only factor.
-      envColor = skyboxColor * reflectionStrength * roughMetalEnergy * mix(1.0, 1.10, metallic) * envVisibility;
-    }
-
-    // Rim is a stylised Fresnel: same rule as the env term — matte kills it.
-    let rim = pow(clamp(1.0 - nDotV, 0.0, 1.0), mix(3.5, 1.8, metallic)) * effShading * reflectionSide * mix(1.0, 0.25, roughness);
-    let rimBaseColor = mix(colorLin, vec3<f32>(1.0), 0.45);
-    let rimPearlColor = mix(rimBaseColor, iridLin, fx.wIridescence * 0.65);
-    let rimColor = rimPearlColor * rim * (0.04 + 0.12 * fx.wSkybox + 0.07 * fx.wIridescence);
-
-    var pbrColor = (materialColor + envColor + rimColor) * (0.55 + brightness * 0.45);
-    if (varnish > 0.001) {
-      // Clear coat: an achromatic dielectric film over whatever material lies
-      // underneath. It never tints the base — it deepens it (wet look),
-      // attenuates it by the coat Fresnel (energy conservation), and adds its
-      // own untinted highlight + glossy environment mirror on top. No metallic
-      // dependency: the coat is the same film regardless of the base.
-      // The coat's own smoothness is independent of the base roughness: a
-      // rough material under varnish still gets a glossy film on top.
-      let coatFresnel = fresnel_schlick(nDotV, vec3<f32>(0.025)).x;
-      let coatPower = mix(200.0, 320.0, varnish);
-      let coatSpec = pow(max(nDotH, 0.0), coatPower) * (0.20 + 0.80 * shadowedNDotL) * (0.30 + 0.85 * varnish);
-      var coatEnvironment = vec3<f32>(0.0);
-      if (fx.wSkybox > 0.001) {
-        let coatReflectDir = reflect(-viewDir, normal);
-        let coatSky = rough_skybox_reflection(
-          uv_screen,
-          coatReflectDir,
-          0.05,
-          vec2<f32>(parameters.skyDriftX, parameters.skyDriftY)
-        );
-        coatEnvironment = coatSky * fresnel_schlick_roughness(nDotV, vec3<f32>(0.025), 0.05) * fx.wSkybox * specular_occlusion(nDotV, ao, 0.05);
-      }
-      // Wet look: internal reflections darken and saturate, hue untouched.
-      pbrColor *= mix(vec3<f32>(1.0), clamp(pbrColor, vec3<f32>(0.0), vec3<f32>(1.0)), varnish * 0.30);
-      pbrColor = pbrColor * (1.0 - coatFresnel * varnish) + (coatEnvironment + vec3<f32>(coatSpec * coatFresnel)) * varnish;
-    }
-    color = mix(color, linear_to_sRGB(tonemap_highlights(display_grade(pbrColor))), effShading);
+    color = mix(color, shade_surface(surface, fx, uv_screen), effShading);
   }
 
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
