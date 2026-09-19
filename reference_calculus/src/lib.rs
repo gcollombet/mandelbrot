@@ -534,7 +534,7 @@ impl MandelbrotNavigator {
             last_der: FExpC::zero(),
             approximation_mode: ApproximationMode::Perturbation,
             budget_prec: DEFAULT_BUDGET_BITS,
-            bla_epsilon: 1e-3,
+            bla_epsilon: 1e-6,
             viewport_aspect: f64::NAN,
             max_bla_skip: 65536,
             bla_result: Box::new(Vec::with_capacity(20_000)),
@@ -3703,6 +3703,358 @@ mod tests {
             worst_naive_ulp > 10.0 * worst_comp_ulp.max(0.5),
             "naive drift ({:.2} ULP) unexpectedly small — harness shape no longer exercises the problem",
             worst_naive_ulp
+        );
+    }
+}
+
+#[cfg(test)]
+mod gpu_bla_mirror {
+    //! CPU mirror of the shader's shallow (f32) affine-BLA path, run against
+    //! exact f32 perturbation on the same orbit and table, to measure how the
+    //! serialized table behaves at several ε.
+    use super::*;
+
+    fn next_up(v: f32) -> f32 {
+        next_up_f32(v)
+    }
+    fn next_down(v: f32) -> f32 {
+        next_down_f32(v)
+    }
+    const NEG_INF: f32 = -3.4028234e38;
+    const POS_INF: f32 = 3.4028234e38;
+
+    fn log2_complex(x: f32, y: f32, exponent: i32) -> f32 {
+        if !x.is_finite() || !y.is_finite() {
+            return POS_INF;
+        }
+        let axis = x.abs().max(y.abs());
+        if axis == 0.0 {
+            return NEG_INF;
+        }
+        let sx = x / axis;
+        let sy = y / axis;
+        let norm2 = next_up(sx * sx + sy * sy);
+        let angular = next_up(0.5 * next_up(norm2.log2()));
+        let radial = next_up(axis.log2());
+        next_up(next_up(radial + angular) + exponent as f32)
+    }
+
+    fn radius_log2(b: &BlaStep, log2dc: f32, log2dz: f32) -> f32 {
+        let alpha = b.radius_alpha;
+        let beta = b.radius_beta;
+        if !(alpha > 0.0) || !alpha.is_finite() || !(beta >= 0.0) || !beta.is_finite() {
+            return NEG_INF;
+        }
+        let ae = (alpha.to_bits() >> 23) & 255;
+        let be = (beta.to_bits() >> 23) & 255;
+        if ae > 0 && (b.alpha_exp as f32).abs() < 1_000_000.0 && (beta == 0.0 || be > 0) {
+            let a = (ae as i32 - 127 + b.alpha_exp) as f32 - 2.0;
+            let b_upper = (be as i32 - 126) as f32;
+            if log2dz <= a && (beta == 0.0 || next_up(log2dc + b_upper) <= a) {
+                return a;
+            }
+        }
+        let log2_alpha = next_down(next_down(alpha.log2()) + b.alpha_exp as f32);
+        if log2dc == NEG_INF || beta == 0.0 {
+            return log2_alpha;
+        }
+        if log2dc.is_nan() || log2dc == POS_INF {
+            return NEG_INF;
+        }
+        let log2_beta_dc = next_up(next_up(beta.log2()) + log2dc);
+        let relative = next_up(log2_beta_dc - log2_alpha);
+        if relative >= 0.0 {
+            return NEG_INF;
+        }
+        let remaining = next_down(1.0 - next_up(relative.exp2()));
+        if !(remaining > 0.0) || remaining.is_nan() {
+            return NEG_INF;
+        }
+        next_down(log2_alpha + next_down(remaining.log2()))
+    }
+
+    fn cmul(a: (f32, f32), b: (f32, f32)) -> (f32, f32) {
+        (a.0 * b.0 - a.1 * b.1, a.0 * b.1 + a.1 * b.0)
+    }
+    fn ldexp(x: f32, e: i32) -> f32 {
+        x * 2f32.powi(e)
+    }
+
+    /// Returns (escape iteration or max_iter, loop turns, final |z|²).
+    fn run_pixel(
+        orbit: &[(f32, f32)],
+        steps: &[BlaStep],
+        levels: &[BlaLevel],
+        dc: (f32, f32),
+        max_iter: usize,
+        mu: f32,
+        use_bla: bool,
+    ) -> (usize, usize) {
+        let global_max = (orbit.len() - 1).min(max_iter) as i32;
+        let mut dz = (0.0f32, 0.0f32);
+        let mut ref_i: i32 = 0;
+        let mut i: usize = 0;
+        let mut turns = 0usize;
+        let skip0log = if use_bla && !levels.is_empty() {
+            (levels[0].skip.max(1)).trailing_zeros() as i32
+        } else {
+            0
+        };
+        let log_max_bla_r = if use_bla && !levels.is_empty() {
+            f32::from_bits(levels[0].max_radius_bits).max(1e-30).log2()
+        } else {
+            NEG_INF
+        };
+        let log2dc = log2_complex(dc.0, dc.1, 0);
+        while i < max_iter && ref_i < global_max {
+            turns += 1;
+            let mut skipped = 0i32;
+            if use_bla && ref_i > 0 {
+                let dz_mag = (dz.0 * dz.0 + dz.1 * dz.1).sqrt();
+                if dz_mag < 1.2e-38 || dz_mag.log2() <= log_max_bla_r {
+                    let log2dz = log2_complex(dz.0, dz.1, 0);
+                    let shifted = ref_i - 1;
+                    let mut level = ((levels.len() as i32) - 1)
+                        .min((shifted as u32).trailing_zeros() as i32 - skip0log);
+                    while level >= 0 {
+                        let lv = &levels[level as usize];
+                        let skip = lv.skip as i32;
+                        let lv_max = f32::from_bits(lv.max_radius_bits).max(1e-30).log2();
+                        if (dz_mag < 1.2e-38 || dz_mag.log2() <= lv_max)
+                            && ref_i + skip <= global_max
+                        {
+                            let slot = shifted >> (skip0log + level);
+                            if (slot as u32) < lv.count {
+                                let b = &steps[(lv.offset as i32 + slot) as usize];
+                                let r = radius_log2(b, log2dc, log2dz);
+                                if r != NEG_INF && log2dz <= r {
+                                    let a = (ldexp(b.ax, b.ab_exp), ldexp(b.ay, b.ab_exp));
+                                    let bb = (ldexp(b.bx, b.ab_exp), ldexp(b.by, b.ab_exp));
+                                    let m = cmul(a, dz);
+                                    let n = cmul(bb, dc);
+                                    let cand = (m.0 + n.0, m.1 + n.1);
+                                    let z = orbit[(ref_i + skip) as usize];
+                                    let cz = (z.0 + cand.0, z.1 + cand.1);
+                                    if cand.0.is_finite()
+                                        && cand.1.is_finite()
+                                        && !(skip > 1 && cz.0 * cz.0 + cz.1 * cz.1 > mu)
+                                    {
+                                        dz = cand;
+                                        ref_i += skip;
+                                        skipped = skip;
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                        level -= 1;
+                    }
+                }
+            }
+            if skipped > 0 {
+                i += skipped as usize;
+            } else {
+                let z = orbit[ref_i as usize];
+                let t = cmul(dz, z);
+                let s = cmul(dz, dz);
+                dz = (2.0 * t.0 + s.0 + dc.0, 2.0 * t.1 + s.1 + dc.1);
+                ref_i += 1;
+                i += 1;
+            }
+            let z = orbit[ref_i as usize];
+            let full = (z.0 + dz.0, z.1 + dz.1);
+            let z2 = full.0 * full.0 + full.1 * full.1;
+            if z2 > mu {
+                return (i, turns);
+            }
+            if z2 < dz.0 * dz.0 + dz.1 * dz.1 || ref_i == global_max {
+                dz = full;
+                ref_i = 0;
+            }
+        }
+        (max_iter, turns)
+    }
+
+    fn run_pixel_f64(orbit: &[(f64, f64)], dc: (f64, f64), max_iter: usize) -> usize {
+        let global_max = orbit.len() - 1;
+        let (mut dz, mut ref_i, mut i) = ((0.0f64, 0.0f64), 0usize, 0usize);
+        while i < max_iter && ref_i < global_max {
+            let z = orbit[ref_i];
+            let t = (dz.0 * z.0 - dz.1 * z.1, dz.0 * z.1 + dz.1 * z.0);
+            let s = (dz.0 * dz.0 - dz.1 * dz.1, 2.0 * dz.0 * dz.1);
+            dz = (2.0 * t.0 + s.0 + dc.0, 2.0 * t.1 + s.1 + dc.1);
+            ref_i += 1;
+            i += 1;
+            let z = orbit[ref_i];
+            let full = (z.0 + dz.0, z.1 + dz.1);
+            let z2 = full.0 * full.0 + full.1 * full.1;
+            if z2 > 4.0 {
+                return i;
+            }
+            if z2 < dz.0 * dz.0 + dz.1 * dz.1 || ref_i == global_max {
+                dz = full;
+                ref_i = 0;
+            }
+        }
+        max_iter
+    }
+
+    fn measure(name: &str, cx: &str, cy: &str, scale: &str, max_iter: u32, eps: f32) {
+        let mut nav = MandelbrotNavigator::new(cx, cy, scale, 0.0);
+        nav.use_bla();
+        nav.set_bla_epsilon(eps);
+        let _ = nav.compute_reference_orbit_ptr(max_iter);
+        let info = nav.compute_bla_reference_ptr(max_iter);
+        let orbit: Vec<(f32, f32)> = nav.result.iter().map(|s| (s.zx, s.zy)).collect();
+        let steps: Vec<BlaStep> = nav.bla_result.iter().copied().collect();
+        let levels: Vec<BlaLevel> = nav.bla_levels.iter().copied().collect();
+        let scale_f = dbig_to_f64(&nav.scale) as f32;
+        // f64 truth: same reference point iterated in f64 from the parsed decimal.
+        let (cxf, cyf) = (cx.parse::<f64>().unwrap(), cy.parse::<f64>().unwrap());
+        let mut orbit64 = Vec::with_capacity(orbit.len());
+        let (mut zx, mut zy) = (0.0f64, 0.0f64);
+        orbit64.push((zx, zy));
+        for _ in 1..orbit.len() {
+            let nx = zx * zx - zy * zy + cxf;
+            let ny = 2.0 * zx * zy + cyf;
+            zx = nx;
+            zy = ny;
+            orbit64.push((zx, zy));
+        }
+        let n = 48usize;
+        let (mut mism, mut max_d, mut turns_exact, mut turns_bla) = (0usize, 0i64, 0u64, 0u64);
+        let (mut mism_exact64, mut mism_bla64, mut sum_abs_exact, mut sum_abs_bla) =
+            (0usize, 0usize, 0i64, 0i64);
+        for gy in 0..n {
+            for gx in 0..n {
+                let tx = (gx as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                let ty = (gy as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                let dc = (tx * scale_f, ty * scale_f);
+                let (ie, te) =
+                    run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, false);
+                let (ib, tb) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, true);
+                let i64v = run_pixel_f64(&orbit64, (dc.0 as f64, dc.1 as f64), max_iter as usize);
+                turns_exact += te as u64;
+                turns_bla += tb as u64;
+                if ie != ib {
+                    mism += 1;
+                    max_d = max_d.max((ie as i64 - ib as i64).abs());
+                }
+                if ie != i64v {
+                    mism_exact64 += 1;
+                    sum_abs_exact += (ie as i64 - i64v as i64).abs();
+                }
+                if ib != i64v {
+                    mism_bla64 += 1;
+                    sum_abs_bla += (ib as i64 - i64v as i64).abs();
+                }
+            }
+        }
+        println!(
+            "[{name}] eps={eps:e} levels={} blocks={} | bla vs exact-f32: {mism}/{} max|Δ|={max_d} | vs f64 truth: exact-f32 {mism_exact64} (Σ|Δ|={sum_abs_exact}) bla {mism_bla64} (Σ|Δ|={sum_abs_bla}) | turns exact={turns_exact} bla={turns_bla} (x{:.1})",
+            info.level_count,
+            info.count,
+            n * n,
+            turns_exact as f64 / turns_bla.max(1) as f64
+        );
+    }
+
+    /// Census (minutes): how the affine BLA compares with exact f32 stepping
+    /// and with an f64 truth at several ε. The f64 truth parses the reference
+    /// point as f64, so it is only meaningful while the view scale stays well
+    /// above 1e-16. Measured 2026-09: at ε = 1e-3 the BLA disagrees with the
+    /// f64 truth on 40 % of the pixels (exact f32: 20 %); from ε = 1e-6 down
+    /// it matches exact f32 pixel for pixel while still skipping 2-7× fewer
+    /// loop turns at 1e-12..1e-20.
+    #[test]
+    #[ignore]
+    fn gpu_bla_mirror_census() {
+        for eps in [1e-3f32, 1e-4, 1e-5, 1e-6, 1e-7] {
+            measure(
+                "seahorse 1e-6",
+                "-0.7436438870371587",
+                "0.1318259042053119",
+                "1e-6",
+                4000,
+                eps,
+            );
+            measure(
+                "seahorse 1e-12",
+                "-0.74364388703715870475",
+                "0.13182590420531197",
+                "1e-12",
+                8000,
+                eps,
+            );
+            measure(
+                "seahorse 1e-20",
+                "-0.743643887037158704752191506114774",
+                "0.131825904205311970493870",
+                "1e-20",
+                20000,
+                eps,
+            );
+        }
+    }
+
+    /// Regression guard (seconds): at the default ε the BLA must be as close
+    /// to the f64 truth as exact f32 stepping is, on a shallow view where that
+    /// truth is valid.
+    #[test]
+    fn default_epsilon_keeps_bla_as_accurate_as_exact_f32() {
+        let (cx, cy, scale, max_iter) = (
+            "-0.74364388703715870475",
+            "0.13182590420531197",
+            "1e-12",
+            8000u32,
+        );
+        let mut nav = MandelbrotNavigator::new(cx, cy, scale, 0.0);
+        nav.use_bla();
+        let eps = nav.get_bla_epsilon();
+        let _ = nav.compute_reference_orbit_ptr(max_iter);
+        let _ = nav.compute_bla_reference_ptr(max_iter);
+        let orbit: Vec<(f32, f32)> = nav.result.iter().map(|s| (s.zx, s.zy)).collect();
+        let steps: Vec<BlaStep> = nav.bla_result.iter().copied().collect();
+        let levels: Vec<BlaLevel> = nav.bla_levels.iter().copied().collect();
+        let scale_f = dbig_to_f64(&nav.scale) as f32;
+        let (cxf, cyf) = (cx.parse::<f64>().unwrap(), cy.parse::<f64>().unwrap());
+        let mut orbit64 = vec![(0.0f64, 0.0f64)];
+        for _ in 1..orbit.len() {
+            let (zx, zy) = *orbit64.last().unwrap();
+            orbit64.push((zx * zx - zy * zy + cxf, 2.0 * zx * zy + cyf));
+        }
+        let n = 24usize;
+        let (mut exact_err, mut bla_err, mut turns_exact, mut turns_bla) = (0i64, 0i64, 0u64, 0u64);
+        for gy in 0..n {
+            for gx in 0..n {
+                let tx = (gx as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                let ty = (gy as f32 / (n - 1) as f32) * 2.0 - 1.0;
+                let dc = (tx * scale_f, ty * scale_f);
+                let (ie, te) =
+                    run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, false);
+                let (ib, tb) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, true);
+                let truth =
+                    run_pixel_f64(&orbit64, (dc.0 as f64, dc.1 as f64), max_iter as usize) as i64;
+                exact_err += (ie as i64 - truth).abs();
+                bla_err += (ib as i64 - truth).abs();
+                turns_exact += te as u64;
+                turns_bla += tb as u64;
+            }
+        }
+        // Escape iterations in a chaotic region differ by f32 rounding noise
+        // between any two correct evaluations; a 1.5× budget absorbs that
+        // sampling noise while a loose ε (1e-3 measured 2× here, 8× shallower)
+        // still trips it.
+        assert!(
+            bla_err * 2 <= exact_err * 3,
+            "ε={:e}: BLA Σ|Δiter| {} vs exact f32 {}",
+            eps,
+            bla_err,
+            exact_err
+        );
+        assert!(
+            turns_bla * 3 < turns_exact * 2,
+            "BLA no longer skips: {turns_bla} vs {turns_exact} turns"
         );
     }
 }

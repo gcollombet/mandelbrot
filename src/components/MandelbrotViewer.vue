@@ -586,7 +586,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   activateAnimate: false,
   debugShading: false,
   approximationMode: 'bla',
-  blaEpsilon: 1e-3,
+  blaEpsilon: 1e-6,
   maxBlaSkip: 65536,
   precisionBudget: '1e-30',
   dprMultiplier: 1.0,
@@ -801,11 +801,20 @@ function applyApproximationToEngine() {
 
 // BLA tuning: ε sets the validity radius (ε·|A|), maxBlaSkip
 // caps the largest block jump. Both rebuild the table and re-render in a block mode.
+// The affine BLA is only as accurate as exact stepping for ε ≤ 1e-4 (see
+// Engine.BLA_LINEARIZATION_EPSILON). Presets and stored settings from builds
+// whose default was 1e-3 are folded back into the safe band.
+export function clampBlaEpsilon(raw: unknown): number {
+  const eps = typeof raw === 'number' && isFinite(raw) && raw > 0 ? raw : 1e-6;
+  return Math.min(1e-4, Math.max(1e-12, eps));
+}
+
 function applyBlaTuningToEngine() {
   const engine = mandelbrotEngine.value;
   if (!engine) return;
-  const eps = mandelbrotParams.value.blaEpsilon;
-  if (typeof eps === 'number' && isFinite(eps) && eps > 0) engine.setBlaEpsilon(eps);
+  const eps = clampBlaEpsilon(mandelbrotParams.value.blaEpsilon);
+  if (eps !== mandelbrotParams.value.blaEpsilon) mandelbrotParams.value.blaEpsilon = eps;
+  engine.setBlaEpsilon(eps);
   const skip = mandelbrotParams.value.maxBlaSkip;
   if (typeof skip === 'number' && isFinite(skip) && skip >= 2) engine.setMaxBlaSkip(skip);
 }

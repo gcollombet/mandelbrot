@@ -186,15 +186,14 @@ function canUploadTexture(texture: TextureMetadata): boolean {
   return !!texture.guid;
 }
 
-// BLA radius ε on a log10 scale: slider value is the exponent (R = ε·|A|).
-// Bounded to the safe band [1e-8, 1e-4].
+// BLA radius ε on a log10 scale: slider value is the exponent (R = ε·|Z|).
+// Bounded to [1e-12, 1e-4]: the affine BLA has no other error control, and
+// above 1e-4 its blocks visibly diverge from exact stepping (1e-6 is the
+// default; see Engine.BLA_LINEARIZATION_EPSILON).
 const blaEpsilonExp = computed({
-  get: () => Math.round(Math.log10(model.value.blaEpsilon ?? 1e-3)),
+  get: () => Math.round(Math.log10(model.value.blaEpsilon ?? 1e-6)),
   set: (exp: number) => {
-    // (H2) bounds the c-truncation error at any ε, so the clamp can be wide:
-    // 1e-12 (ultra-clean) … 1e0 (maximal; radius √ε·|A| = |A| reaches the
-    // |z|=|2Z| pole, where the pole guard takes over and forces exact steps).
-    model.value.blaEpsilon = Math.pow(10, Math.min(0, Math.max(-12, Math.round(exp))));
+    model.value.blaEpsilon = Math.pow(10, Math.min(-4, Math.max(-12, Math.round(exp))));
   },
 });
 
@@ -3725,7 +3724,7 @@ async function startVideoExport(payload: {
         <DenseSelect label="Algorithme" :options="calculationOptions" :model-value="kernelApproximationMode(model.approximationMode ?? 'bla')" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
         <p v-if="orbitTrapConfig.mode === 'exact'" class="panel-note">Orbit trap exact : les sauts sont désactivés pour parcourir toute l’orbite.</p>
         <div v-else-if="model.approximationMode !== 'perturbation'" class="fields"><DenseField
-            label="Tolérance d’approximation" :min="-12" :max="0" :step="1"
+            label="Tolérance d’approximation" :min="-12" :max="-4" :step="1"
             :f="radiusFmt"
             :model-value="blaEpsilonExp"
             @update:model-value="(v: number) => blaEpsilonExp = v"
