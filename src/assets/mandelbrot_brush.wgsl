@@ -3023,7 +3023,12 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                   0,
                 );
               }
-            } else if (tag == 4) {
+            } else if (ENABLE_RADIAL_VALIDITY && tag == 4) {
+              // tag 4 is only ever assigned under ENABLE_RADIAL_VALIDITY above.
+              // Repeating the override here lets the driver fold this whole
+              // branch out of the non-radial kernels; without it, unreachable
+              // fe/f32 arithmetic still counts towards the compiler's limits
+              // (mobile Vulkan drivers refused the fused kernel once it was in).
               let cd = jet_coeff_f32(mandelbrotJetSuite[base + 2]);
               let n2 = jet_coeff_f32(mandelbrotJetSuite[base + 3]);
               let ap = jet_coeff_f32(mandelbrotJetSuite[base + 4]);
@@ -3115,7 +3120,12 @@ fn try_apply_unified(ref_i: ptr<function, i32>, dz: ptr<function, fe>, derM: ptr
                   fe_neg(fe_cmul(pdz, fe_cmul(dcden, invDen))),
                 );
               }
-            } else if (tag == 4) {
+            } else if (ENABLE_RADIAL_VALIDITY && tag == 4) {
+              // tag 4 is only ever assigned under ENABLE_RADIAL_VALIDITY above.
+              // Repeating the override here lets the driver fold this whole
+              // branch out of the non-radial kernels; without it, unreachable
+              // fe/f32 arithmetic still counts towards the compiler's limits
+              // (mobile Vulkan drivers refused the fused kernel once it was in).
               let cd = jet_coeff_fe(mandelbrotJetSuite[base + 2]);
               let n2 = jet_coeff_fe(mandelbrotJetSuite[base + 3]);
               let ap = jet_coeff_fe(mandelbrotJetSuite[base + 4]);
