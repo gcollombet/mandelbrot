@@ -21,6 +21,7 @@ import type {PresetRecord} from '../presetStore';
 import {PRESET_QUERY_PARAMETER, presetGuidFromRouteQuery} from '../presetDeepLink';
 import {syncActiveLibrary} from '../activeLibrarySync';
 import {log10FromDecimalString} from '../floatexp';
+import {clampBlaEpsilon} from '../blaEpsilon';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
 import {cloneOrbitTrap, DEFAULT_ORBIT_TRAP, normalizeOrbitTrapFromLegacy} from '../OrbitTrap';
 import {getLatestRemotePreset} from '../remoteCatalog';
@@ -801,14 +802,6 @@ function applyApproximationToEngine() {
 
 // BLA tuning: ε sets the validity radius (ε·|A|), maxBlaSkip
 // caps the largest block jump. Both rebuild the table and re-render in a block mode.
-// The affine BLA is only as accurate as exact stepping for ε ≤ 1e-4 (see
-// Engine.BLA_LINEARIZATION_EPSILON). Presets and stored settings from builds
-// whose default was 1e-3 are folded back into the safe band.
-export function clampBlaEpsilon(raw: unknown): number {
-  const eps = typeof raw === 'number' && isFinite(raw) && raw > 0 ? raw : 1e-6;
-  return Math.min(1e-4, Math.max(1e-12, eps));
-}
-
 function applyBlaTuningToEngine() {
   const engine = mandelbrotEngine.value;
   if (!engine) return;

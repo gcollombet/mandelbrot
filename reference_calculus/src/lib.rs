@@ -3828,11 +3828,18 @@ mod gpu_bla_mirror {
                                 let b = &steps[(lv.offset as i32 + slot) as usize];
                                 let r = radius_log2(b, log2dc, log2dz);
                                 if r != NEG_INF && log2dz <= r {
-                                    let a = (ldexp(b.ax, b.ab_exp), ldexp(b.ay, b.ab_exp));
-                                    let bb = (ldexp(b.bx, b.ab_exp), ldexp(b.by, b.ab_exp));
-                                    let m = cmul(a, dz);
-                                    let n = cmul(bb, dc);
-                                    let cand = (m.0 + n.0, m.1 + n.1);
+                                    let cand = if b.ab_exp.abs() <= 120 {
+                                        let a = (ldexp(b.ax, b.ab_exp), ldexp(b.ay, b.ab_exp));
+                                        let bb = (ldexp(b.bx, b.ab_exp), ldexp(b.by, b.ab_exp));
+                                        let m = cmul(a, dz);
+                                        let n = cmul(bb, dc);
+                                        (m.0 + n.0, m.1 + n.1)
+                                    } else {
+                                        // floatexp path: mantissa products, exponents summed.
+                                        let m = cmul((b.ax, b.ay), dz);
+                                        let n = cmul((b.bx, b.by), dc);
+                                        (ldexp(m.0 + n.0, b.ab_exp), ldexp(m.1 + n.1, b.ab_exp))
+                                    };
                                     let z = orbit[(ref_i + skip) as usize];
                                     let cz = (z.0 + cand.0, z.1 + cand.1);
                                     if cand.0.is_finite()
@@ -3995,6 +4002,83 @@ mod gpu_bla_mirror {
                 eps,
             );
         }
+    }
+
+    /// Prints an ASCII map of where the BLA deviates from the f64 truth by
+    /// more than 50 iterations (the reference sits at the centre).
+    #[test]
+    #[ignore]
+    fn gpu_bla_mirror_map() {
+        let (cx, cy, scale, max_iter, eps) = (
+            "-0.74364388703715870475",
+            "0.13182590420531197",
+            "1e-11",
+            20000u32,
+            1e-8f32,
+        );
+        let mut nav = MandelbrotNavigator::new(cx, cy, scale, 0.0);
+        nav.use_bla();
+        nav.set_bla_epsilon(eps);
+        let _ = nav.compute_reference_orbit_ptr(max_iter);
+        let info = nav.compute_bla_reference_ptr(max_iter);
+        let orbit: Vec<(f32, f32)> = nav.result.iter().map(|s| (s.zx, s.zy)).collect();
+        let steps: Vec<BlaStep> = nav.bla_result.iter().copied().collect();
+        let levels: Vec<BlaLevel> = nav.bla_levels.iter().copied().collect();
+        for (l, lv) in levels.iter().enumerate() {
+            println!(
+                "level {} skip {} count {} maxRadius {:e}",
+                l,
+                lv.skip,
+                lv.count,
+                f32::from_bits(lv.max_radius_bits)
+            );
+        }
+        println!("orbit len {} blocks {}", orbit.len(), info.count);
+        let scale_f = dbig_to_f64(&nav.scale) as f32;
+        let (cxf, cyf) = (cx.parse::<f64>().unwrap(), cy.parse::<f64>().unwrap());
+        let mut orbit64 = vec![(0.0f64, 0.0f64)];
+        for _ in 1..orbit.len() {
+            let (zx, zy) = *orbit64.last().unwrap();
+            orbit64.push((zx * zx - zy * zy + cxf, 2.0 * zx * zy + cyf));
+        }
+        let (w, h) = (72usize, 36usize);
+        let (mut bad_bla, mut bad_exact) = (0usize, 0usize);
+        for gy in 0..h {
+            let mut row = String::new();
+            for gx in 0..w {
+                let tx = (gx as f32 / (w - 1) as f32) * 2.0 - 1.0;
+                let ty = (gy as f32 / (h - 1) as f32) * 2.0 - 1.0;
+                let dc = (tx * scale_f, ty * scale_f);
+                let (ie, _) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, false);
+                let (ib, _) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, true);
+                let truth =
+                    run_pixel_f64(&orbit64, (dc.0 as f64, dc.1 as f64), max_iter as usize) as i64;
+                let db = (ib as i64 - truth).abs();
+                let de = (ie as i64 - truth).abs();
+                if db > 50 {
+                    bad_bla += 1;
+                }
+                if de > 50 {
+                    bad_exact += 1;
+                }
+                row.push(if db > 50 && de <= 50 {
+                    '#'
+                } else if db > 50 {
+                    'x'
+                } else if de > 50 {
+                    'e'
+                } else {
+                    '.'
+                });
+            }
+            println!("{}", row);
+        }
+        println!(
+            "bad pixels (|Δ|>50): bla {} exact-f32 {} of {}",
+            bad_bla,
+            bad_exact,
+            w * h
+        );
     }
 
     /// Regression guard (seconds): at the default ε the BLA must be as close
