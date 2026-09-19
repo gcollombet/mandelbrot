@@ -1026,9 +1026,6 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
   let directDiffuse = diffuseColor * 0.86 * shadowedNDotL;
   let brightness = max(fx.shadingLevel, 0.0);
   var materialColor = ambientDiffuse + directDiffuse + directSpecular * localShadow;
-  let reliefAccent = clamp((1.0 - exp(-0.35 * localShadowControl)) * effShading * 2.0, 0.0, 2.0);
-  let ridge = smoothstep(0.10, 1.55, slopeMetric) * litSide * reliefAccent;
-  materialColor += mix(colorLin, vec3<f32>(1.0), 0.38) * ridge * 0.10 * (1.0 - metallic * 0.45);
   let varnish = clamp(parameters.varnishStrength, 0.0, 10.0) * 0.1;
   // Clear coat is a true top layer: it is applied at the very end of this
   // function, once the base material (iridescence, env… included) is fully
