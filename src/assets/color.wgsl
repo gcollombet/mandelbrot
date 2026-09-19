@@ -1066,10 +1066,17 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
 
   var envColor = vec3<f32>(0.0);
   if (fx.wSkybox > 0.001) {
-    // The environment mirrors the same normal as the direct lighting and the
-    // clear coat. Roughness is only an isotropic mip choice, so the base
-    // environment still uses one sample.
-    let environmentReflectDir = reflect(-viewDir, normal);
+    // Anisotropic environment lookup, the engine-standard bent normal: the
+    // lit normal is bent toward the axis along which the direct highlight is
+    // stretched (the bitangent here, see anisotropic_highlight), by an amount
+    // that grows with roughness. Same normal and same brushing flow as the
+    // direct lobe, so this is the material's response, not a second surface.
+    // Roughness stays an isotropic mip choice: one sample.
+    let anisotropicTangent = cross(anisotropyTangent, viewDir);
+    let anisotropicNormal = cross(anisotropicTangent, anisotropyTangent);
+    let bendFactor = anisotropy * clamp(5.0 * roughness, 0.0, 1.0);
+    let bentNormal = normalize(mix(normal, anisotropicNormal, bendFactor));
+    let environmentReflectDir = reflect(-viewDir, bentNormal);
     let skyboxColor = rough_skybox_reflection(
       uv_screen,
       environmentReflectDir,
