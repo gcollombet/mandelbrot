@@ -3732,7 +3732,6 @@ async function startVideoExport(payload: {
           /></div>
         <p class="panel-note">La réserve de précision prépare les zooms profonds. La modifier reconstruit la référence.</p>
       </DenseSection>
-      </DenseSection>
     </div>
   </div>
 </template>
