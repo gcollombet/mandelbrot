@@ -34,6 +34,7 @@ import {interpolatePresetAppearance} from '../presetTransition';
 import {snapshotPathAppearance, PATH_GLOBAL_FIELDS, type PathAppearance} from '../palettePath';
 import {nameForCatalogReference} from '../catalogIdentity';
 import type {Engine} from '../Engine';
+import {kernelApproximationMode} from '../Engine';
 import {
   chevronCountForZoomDelta,
   edgeDistanceInScreens,
@@ -793,12 +794,13 @@ function onEngineReady(engine: Engine) {
 function applyApproximationToEngine() {
   const engine = mandelbrotEngine.value;
   if (!engine) return;
-  const raw = mandelbrotParams.value.approximationMode;
-  const mode: ApproximationMode = raw === 'bla' || raw === 'pade' || raw === 'jet' || raw === 'mobius' || raw === 'auto' ? raw : 'perturbation';
+  // Presets saved by earlier builds may carry retired modes (auto, pade, jet,
+  // mobius): they fold onto affine BLA.
+  const mode: ApproximationMode = kernelApproximationMode(mandelbrotParams.value.approximationMode);
   engine.setApproximationMode(mode);
 }
 
-// BLA/Padé tuning: ε sets the validity radius (ε·|A| affine, √ε·|A| Padé), maxBlaSkip
+// BLA tuning: ε sets the validity radius (ε·|A|), maxBlaSkip
 // caps the largest block jump. Both rebuild the table and re-render in a block mode.
 function applyBlaTuningToEngine() {
   const engine = mandelbrotEngine.value;

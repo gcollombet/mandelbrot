@@ -37,7 +37,6 @@ struct Mandelbrot {
 struct BlaStep {
   ax: f32, ay: f32, bx: f32, by: f32, ab_exp: i32,
   radius_alpha: f32, alpha_exp: i32, radius_beta: f32,
-  dx: f32, dy: f32, d_exp: i32, log2_min_a: f32,
 };
 struct BlaLevel { offset: u32, count: u32, skip: u32, maxRadius: f32 };
 

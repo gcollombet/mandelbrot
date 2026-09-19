@@ -3,20 +3,11 @@
 // SINGLE production iteration path. Pan/clear frames are prepared by the
 // reproject_cs utility pass (ping-pong A→B) in the same frame.
 //
-// MINIMAL KERNEL. This is the reduced production kernel: exact perturbation
-// and affine BLA only (shallow f32 and deep floatexp). The Padé / jet /
-// Möbius / unified-Auto tiers, dynamic and radial validity certificates,
-// periodic-interior detection, the parabolic gate, the renormalised
-// Feigenbaum tier and every work-instrumentation counter live in
-// mandelbrot_brush_full.wgsl. They were compiled into one kernel whose
-// register footprint mobile Vulkan drivers refuse outright
-// (VK_ERROR_INITIALIZATION_FAILED at CreateComputePipelines); this kernel
-// keeps only what the interactive render needs.
-//
-// The bind-group interface (bindings 0..6) and the raw layer layout are those
-// of the full kernel, so the engine, reproject_cs, resolve and color passes are
-// unchanged. Bindings 7..10 of the layout (work stats, jet tables) are simply
-// not declared here.
+// The kernel implements exact perturbation and affine BLA only (shallow f32
+// and deep floatexp). Earlier builds carried Padé / jet / Möbius / Auto tiers,
+// validity certificates, periodic-interior detection and work counters in one
+// kernel whose register footprint mobile Vulkan drivers refused outright
+// (VK_ERROR_INITIALIZATION_FAILED at CreateComputePipelines); they are gone.
 //
 // ⚠ STRICTLY RAW-TEXEL-LOCAL: each invocation may only read and write ITS OWN
 // raw texel, otherwise in-place execution races. Neighbour-dependent raw
@@ -112,12 +103,6 @@ struct BlaStep {
   radius_alpha: f32,
   alpha_exp: i32,
   radius_beta: f32,
-  // Padé D = (dx,dy)·2^d_exp and the near-critical guard. Present to match the
-  // shared BlaStep buffer layout; this kernel applies affine blocks only.
-  dx: f32,
-  dy: f32,
-  d_exp: i32,
-  log2_min_a: f32,
 };
 
 struct BlaLevel {

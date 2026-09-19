@@ -6,7 +6,7 @@ import type {OrbitTrapConfig} from "./OrbitTrap.ts";
 import type {IterationPaletteCurve} from "./IterationPaletteCurve.ts";
 
 export type InterpolationMode = 'lab' | 'rgb' | 'hcl' | 'hsl' | 'cubehelix';
-export type ApproximationMode = 'perturbation' | 'bla' | 'pade' | 'jet' | 'mobius' | 'auto';
+export type ApproximationMode = 'perturbation' | 'bla';
 
 /** Maximum interactive/export AA accumulation budget. */
 export const MAX_ANTIALIAS_LEVEL = 256;

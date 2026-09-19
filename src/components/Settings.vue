@@ -186,9 +186,8 @@ function canUploadTexture(texture: TextureMetadata): boolean {
   return !!texture.guid;
 }
 
-// BLA/Padé radius ε on a log10 scale: slider value is the exponent (R = ε·|A| for
-// affine, √ε·|A| for Padé). Bounded to the safe band [1e-8, 1e-4]: above 1e-4 the
-// Padé √ε radius admits blocks beyond the rational map's validity (slight distortion).
+// BLA radius ε on a log10 scale: slider value is the exponent (R = ε·|A|).
+// Bounded to the safe band [1e-8, 1e-4].
 const blaEpsilonExp = computed({
   get: () => Math.round(Math.log10(model.value.blaEpsilon ?? 1e-3)),
   set: (exp: number) => {
@@ -628,11 +627,8 @@ const debugViewLegends: Record<number, {
   },
 };
 const debugViewLegend = computed(() => debugViewLegends[model.value.debugView ?? 0]);
-// Primary control (post 2.8 ship gate): Auto = unified per-block dispatch,
-// Exact = pure perturbation. Legacy single modes live in the debug section as
-// overrides (same model field, so presets carrying them keep working).
-// The minimal in-place kernel implements exact perturbation and affine BLA
-// only; presets carrying a legacy mode (auto / pade / jet / mobius) run BLA.
+// The engine implements exact perturbation and affine BLA only; presets
+// carrying a retired mode (auto / pade / jet / mobius) run BLA.
 const calculationOptions = [
   { label: 'BLA', value: 'bla' },
   { label: 'Sans sauts', value: 'perturbation' },

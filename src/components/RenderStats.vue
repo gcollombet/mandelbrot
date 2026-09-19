@@ -17,8 +17,6 @@ const maxIterations = ref(0);
 const pendingRefActive = ref(false);
 const referenceResetActive = ref(false);
 const isBuildingRef = ref(false);
-const dynamicValidityActive = ref(false);
-const dynamicExactFallbacks = ref(-1);
 
 const currentScaleStr = ref('2.5');
 
@@ -90,8 +88,6 @@ function poll() {
   pendingRefActive.value = e.pendingRefActive ?? false;
   referenceResetActive.value = (e.referenceResetFlashUntil ?? 0) > performance.now();
   isBuildingRef.value = pendingRefActive.value || referenceResetActive.value;
-  dynamicValidityActive.value = e.lastShaderApproxFlag === 6;
-  dynamicExactFallbacks.value = e.dynamicExactFallbacksApprox ?? -1;
 
   if (e.mandelbrotNavigator) {
     const params = e.mandelbrotNavigator.get_params() as [string, string, string, string] | undefined;
@@ -129,11 +125,6 @@ onUnmounted(() => {
       </span>
 
       <span v-if="isBuildingRef" class="stats-reference-badge">ref</span>
-      <span
-        v-if="dynamicValidityActive"
-        class="stats-reference-badge stats-dynamic-badge"
-        :title="dynamicExactFallbacks >= 0 ? `${formatCondensedNumber(dynamicExactFallbacks)} pas exacts de repli` : 'Validité dynamique active'"
-      >dyn</span>
     </button>
   </div>
 </template>
