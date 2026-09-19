@@ -183,7 +183,7 @@ async function saveImage() {
         <p class="hint">Vue large 10^+10 → zoom profond 10^-1000</p>
         <p>{{ magnitudeSummary(start, end) }}</p>
         <ResolutionSelect :width="width" :height="height" label="Résolution du document" :min="16" :max="3840" :step="2" @update:width="width = $event" @update:height="height = $event"/>
-        <DenseField v-model="density" label="Détail (densité k)" :min="1" :max="8" :step="0.5"/>
+        <DenseField v-model="density" label="Détail (densité k)" :min="1" :max="8" :step="0.5" :default="1"/>
         <p v-if="!plan" class="problem">Vérifie les coordonnées et les échelles : le départ doit être plus large que l’arrivée.</p>
       </fieldset>
     </DenseSection>
@@ -192,7 +192,7 @@ async function saveImage() {
         <p class="hint">Couleurs et matériaux actuels figés dans une image WebP par doublement. Explorable et utilisable en vidéo sans recalcul.</p>
         <label>Parcours de palettes<select v-model="pathChoice"><option value="">Palette fixe</option><option v-if="current.palettePath" value="current">Parcours actuel</option><option v-for="p in savedPaths" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
         <p v-if="pathChoice" class="hint">Couleurs et matériaux cuits par profondeur. Le parcours et l’identité de ses images sont conservés pour la reprise.</p>
-        <DenseField v-model="quality" label="Qualité WebP" :min="0" :max="1" :step="0.01"/><p class="hint">WebP avec pertes · 0,90 conseillé. Les détails fins et les raccords peuvent varier avec la compression.</p>
+        <DenseField v-model="quality" label="Qualité WebP" :min="0" :max="1" :step="0.01" :default="0.9"/><p class="hint">WebP avec pertes · 0,90 conseillé. Les détails fins et les raccords peuvent varier avec la compression.</p>
         <details v-if="estimate"><summary>Mémoire GPU : {{ (estimate.gpuBytes / 1073741824).toFixed(2) }} GiB</summary><p>14 tuiles en mémoire GPU · {{ (estimate.decodeBytes / 1048576).toFixed(1) }} MiB pour une tuile décodée. Deux tampons de calcul : {{ (2*estimate.decodeBytes / 1048576).toFixed(1) }} MiB, hors surfaces du codec. Cache complet : {{ (estimate.rawDiskBytes / 1073741824).toFixed(2) }} GiB avant compression.</p></details>
         <p :class="forceRender && problem.kind === 'unsupported' ? 'hint' : 'problem'" v-for="problem in problems" :key="`${problem.field}:${problem.stopIndex}`">{{ problem.field }} : {{ problem.message }}</p>
         <label><input v-model="forceRender" type="checkbox"> Forcer le rendu — expérimental</label>
@@ -282,7 +282,7 @@ async function saveImage() {
         <p class="hint">Angle horizontal, profondeur verticale, sans les marges techniques. Inclut les doublements de couverture du centre. Jusqu’à 32 mégapixels.</p>
         <ResolutionSelect :width="imageWidth" :height="imageHeight" :presets="IMAGE_RESOLUTIONS" :min="1" :max="32767" :step="1" @update:width="imageWidth = $event" @update:height="imageHeight = $event"/>
         <DenseSelect v-model="imageFormat" label="Format" :options="[{value:'image/png',label:'PNG — sans perte supplémentaire'},{value:'image/jpeg',label:'JPEG'},{value:'image/webp',label:'WebP'}]"/>
-        <DenseField v-if="imageFormat !== 'image/png'" v-model="imageQuality" label="Qualité" :min="0" :max="1" :step="0.01"/>
+        <DenseField v-if="imageFormat !== 'image/png'" v-model="imageQuality" label="Qualité" :min="0" :max="1" :step="0.01" :default="0.9"/>
         <button class="primary" @click="saveImage">Exporter l’image…</button><button @click="imageEntry=null">Fermer</button>
       </fieldset>
     </DenseSection>

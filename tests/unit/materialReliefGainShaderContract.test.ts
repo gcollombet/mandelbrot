@@ -20,30 +20,31 @@ describe('material relief gain shader contract', () => {
     expect(shader).toContain('let effectiveAnalyticRelief = relief * reliefGain;');
   });
 
-  it('derives anisotropic flow from macro relief while preserving independent material bumps', () => {
+  it('derives the brushing flow from the full rendered height gradient', () => {
     expect(shader).not.toContain('directionalVolumeGradient');
     expect(shader).not.toContain('fx.directionalVolume');
     expect(shader).toContain('let heightGradient = grad * (0.34 * styledAnalyticRelief);');
-    expect(shader).toContain('let macroSurfaceGradient = heightGradient + stripeHeightGradient + coherenceHeightGradient;');
-    expect(shader).toContain('let surfaceGradient = macroSurfaceGradient + textureGradient;');
-    expect(shader).toContain('macroSurfaceGradient / max(macroSurfaceSlope, 1e-5)');
-    expect(shader).toContain('anisotropy_tangent_from_dir(anisotropyReliefDir, surfaceNormalLocal)');
+    expect(shader).toContain('let surfaceGradientLocal = heightGradient + stripeHeightGradient + coherenceHeightGradient + textureGradient;');
+    expect(shader).toContain('s.flow = select(fieldDir, surfaceGradient / max(slope, 1e-5), slope > 1e-5);');
+    expect(shader).toContain('anisotropy_tangent_from_dir(s.flow, normal)');
   });
 
   it('uses one effective analytic scale for every analytic lighting cue', () => {
-    expect(shader).toContain('curvature_ambient_occlusion(heightCurvature, styledAnalyticRelief, parameters.ambientOcclusionStrength)');
-    expect(shader).toContain('local_height_shadow(grad, lightDir, geometricTangentWorld, geometricBitangentWorld, styledAnalyticRelief, localShadowControl)');
-    expect(shader).toContain('slope * styledAnalyticRelief) * litSide');
-    expect(shader).toContain('let slopeShift = smoothstep(0.025, 1.15, slope * styledAnalyticRelief);');
+    expect(shader).toContain('s.curvature = cachedCurvature * 6.0 * styledAnalyticRelief;');
+    expect(shader).toContain('curvature_ambient_occlusion(s.curvature, parameters.ambientOcclusionStrength)');
+    expect(shader).toContain('local_height_shadow(heightGradient, lightDir, localShadowControl)');
+    expect(shader).toContain('let heightGradient = -normal.xy / max(normal.z, 1e-4);');
+    expect(shader).toContain('let slopeShift = smoothstep(0.025, 1.15, slopeMetric);');
     expect(shader).not.toContain('slope * max(relief, 0.18)');
+    expect(shader).not.toContain('geometricTangentWorld');
   });
 
   it('reinforces relief in the one-sample base environment reflection without changing geometry or clearcoat', () => {
-    const reflectionGradient = shader.match(/let environmentReflectionGradient = ([^;]+);/)?.[1];
-    expect(reflectionGradient).toBe('surfaceGradient + anisotropyReliefDir * (2.0 * anisotropy)');
+    const reflectionGradient = shader.match(/let environmentGradient = ([^;]+);/)?.[1];
+    expect(reflectionGradient).toBe('heightGradient + s.flow * (2.0 * anisotropy)');
     expect(reflectionGradient).not.toContain('roughness');
-    expect(shader).toContain('let environmentReflectionNormalLocal = surface_normal_from_gradient(environmentReflectionGradient);');
-    expect(shader).toContain('let environmentReflectDir = reflect(-viewDir, environmentReflectionNormal);');
+    expect(shader).toContain('let bentNormal = surface_normal_from_gradient(environmentGradient);');
+    expect(shader).toContain('let environmentReflectDir = reflect(-viewDir, bentNormal);');
 
     const baseEnvironment = shader.slice(shader.indexOf('var envColor'), shader.indexOf('// Rim is a stylised Fresnel'));
     expect(baseEnvironment.match(/rough_skybox_reflection\(/g)).toHaveLength(1);

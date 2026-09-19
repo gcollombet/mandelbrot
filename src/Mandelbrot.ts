@@ -60,7 +60,6 @@ export interface MandelbrotParams {
     displacementAmount?: number;
     animation?: AnimationConfig;
     animationSpeed?: number;
-    ambientOcclusionStrength?: number;
     microBumpStrength?: number;
     reliefDepth?: number;
     protrusionPhase?: number;
@@ -68,6 +67,7 @@ export interface MandelbrotParams {
     protrusionStrength?: number;
     protrusionGeometryMix?: number;
     protrusionPeriod?: number;
+    ambientOcclusionStrength?: number;
     localShadowStrength?: number;
     varnishStrength?: number;
     gradeContrast?: number;

@@ -2,6 +2,10 @@
 // successifs. Les cartes de réflexion décoratives lisent ces niveaux pour
 // obtenir un flou stable piloté par la rugosité.
 
+// Plafond matériel commun (Metal, Vulkan, D3D) : WebGPU ramène toute valeur
+// supérieure au maximum du GPU, donc demander plus ne change rien.
+export const TEXTURE_MAX_ANISOTROPY = 16
+
 export function mipLevelCountFor(width: number, height: number): number {
     return 1 + Math.floor(Math.log2(Math.max(width, height)))
 }

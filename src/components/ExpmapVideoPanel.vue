@@ -183,7 +183,7 @@ async function start() {
           </div>
           <div class="row spread"><small>Départ : poignée haute · arrivée : poignée basse</small><button @click="reverse">⇄ Inverser le trajet</button></div>
           <p>{{ magnitudeSummary(windowSpec.fromScale, windowSpec.toScale) }}</p>
-          <DenseField :model-value="windowSpec.durationSeconds" label="Durée du trajet" unit="s" :f="compactNumber" :min="0.1" :max="86400" :step="0.1" @update:model-value="update('duration', $event)"/>
+          <DenseField :model-value="windowSpec.durationSeconds" label="Durée du trajet" unit="s" :f="compactNumber" :min="0.1" :max="86400" :step="0.1" :default="20" @update:model-value="update('duration', $event)"/>
           <details><summary>Vitesse moyenne</summary><DenseField v-if="windowSpec.speed > 0" :model-value="windowSpec.speed" label="Doublements/s" :f="compactNumber" :min="0.1" :max="100" :step="0.1" @update:model-value="update('speed', $event)"/><p>La dernière valeur modifiée (durée ou vitesse) est conservée lorsque la plage change. Les courbes modulent la vitesse autour de cette moyenne.</p></details>
         </DenseSection>
         <VideoRotationControls :fixed-only="['octave', 'droste'].includes(documentEffects(manifest.documentId).imageRotationMode ?? 'fixed')" :from-angle="windowSpec.fromAngle" :to-angle="windowSpec.toAngle" :current-angle="expmapLastView?.documentId === manifest.documentId ? expmapLastView.angle : undefined" capture-label="Angle du lecteur" @change="setRotation"/>

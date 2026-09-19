@@ -1,3 +1,9 @@
+// Texture footprints come from dpdx/dpdy deep inside per-pixel branches
+// (live/frozen pick, interior, effect weights). Quads only diverge on the
+// seams between those branches; every consumer bounds the derivative, so a
+// stale lane there costs one blurrier sample instead of a compile error.
+diagnostic(off, derivative_uniformity);
+
 // Both pipeline families use identical f32 arithmetic. The alias keeps the
 // bounded shading expressions readable.
 alias hcol = f32;
@@ -28,8 +34,8 @@ struct Uniforms {
   microBumpStrength: f32,
   aaLookupOffsetX: f32,  // inverse live-grid shift for uniform AA (neutral/local_rot units)
   reliefDepth: f32,
-  localShadowStrength: f32,
   lightAngle: f32,
+  localShadowStrength: f32,
   varnishStrength: f32,
   logMu: f32,
   sceneSin: f32,
@@ -119,7 +125,7 @@ var<private> parameters: Uniforms;
 @group(0) @binding(5) var paletteTex: texture_2d_array<f32>;  // 4096 x 7 rgba16float
 @group(0) @binding(6) var texFrozen: texture_2d_array<f32>; // frozen values
 @group(0) @binding(7) var paletteSampler: sampler; // bilinear sampler for palette
-@group(0) @binding(8) var skyboxSampler: sampler;  // bilinear sampler for skybox
+@group(0) @binding(8) var mirrorSampler: sampler;  // anisotropic trilinear, mirror-repeat: skybox + mirrored tiles
 @group(0) @binding(9) var aaTargetTex: texture_2d<f32>; // per-neutral-texel AA target sample count (r32float)
 @group(0) @binding(10) var geometryTex: texture_2d<f32>;
 @group(0) @binding(11) var frozenGeometryTex: texture_2d<f32>;
@@ -145,6 +151,7 @@ fn raw_coord(coord: vec2<i32>) -> vec2<i32> {
 struct PalettePathNode { values: array<vec4<f32>, 10> }
 struct PalettePathData { config: vec4<f32>, geometry: vec4<f32>, extra: vec4<f32>, nodes: array<PalettePathNode> }
 @group(0) @binding(19) var<storage, read> palettePath: PalettePathData;
+@group(0) @binding(20) var tileSampler: sampler;  // anisotropic trilinear, repeat: tiles and webcam
 var<private> pathA: u32 = 0u;
 var<private> pathB: u32 = 0u;
 var<private> pathT: f32 = 0.0;
@@ -457,17 +464,15 @@ fn isInsideScreen(uv: vec2<f32>, aspect: f32, neutralExtent: f32, sceneSin: f32,
   return abs(local.x) <= aspect && abs(local.y) <= 1.0;
 }
 
-fn skybox_reflection_uv(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>) -> vec2<f32> {
+fn skybox_reflection_coord(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>) -> vec2<f32> {
   // The environment image is anchored to the viewport. The reflected direction
   // only distorts that fixed image, so translating the fractal does not carry
-  // the environment along like an albedo texture.
+  // the environment along like an albedo texture. Unfolded coordinate: the
+  // mirror-repeat sampler folds it, so its screen derivative stays continuous
+  // across the folds. Reduced to one period (2) for sub-texel precision.
   let d = normalize(reflectionDir);
   let shifted = screenUv + vec2<f32>(d.x, -d.y) * 0.32 + drift;
-  let mirrored = vec2<f32>(
-    1.0 - abs(fract(shifted.x * 0.5) * 2.0 - 1.0),
-    1.0 - abs(fract(shifted.y * 0.5) * 2.0 - 1.0)
-  );
-  return vec2<f32>(0.001) + mirrored * 0.998;
+  return shifted - 2.0 * floor(shifted * 0.5);
 }
 
 fn fresnel_schlick(cosTheta: f32, f0: vec3<f32>) -> vec3<f32> {
@@ -571,11 +576,18 @@ fn thin_film_tint(cosTheta: f32, cycles: f32) -> vec3<f32> {
   return 0.5 + 0.5 * cos(phi);
 }
 
+// strength ∈ [0, 10]. Up to 2 the historical curve is untouched (1 − e^{−s},
+// which saturates near 2). Beyond 2 the extra range widens the cavity response
+// (shallower concavities count) and lowers the floor, so 10 is genuinely darker
+// than 2 instead of a saturated plateau.
 fn curvature_ambient_occlusion(curvature: f32, strength: f32) -> f32 {
   let concavity = max(curvature, 0.0);
-  let cavity = smoothstep(0.025, 1.35, concavity);
+  let extra = clamp((strength - 2.0) / 8.0, 0.0, 1.0);
+  let cavity = smoothstep(0.025, mix(1.35, 0.3, extra), concavity);
   let amount = 1.0 - exp(-max(strength, 0.0));
-  return clamp(1.0 - cavity * amount * 0.72, 0.28, 1.0);
+  let depth = mix(0.72, 0.96, extra);
+  let floor = mix(0.28, 0.04, extra);
+  return clamp(1.0 - cavity * amount * depth, floor, 1.0);
 }
 
 fn specular_occlusion(nDotV: f32, ao: f32, roughness: f32) -> f32 {
@@ -586,9 +598,32 @@ fn luminance(color: vec3<f32>) -> f32 {
   return dot(color, vec3<f32>(0.2126, 0.7152, 0.0722));
 }
 
+// Screen-space footprint of a texture coordinate, bounded to one full
+// period per pixel (the coarsest useful footprint). A NaN or runaway
+// derivative from a divergent quad lands on that bound: maximal blur.
+fn bounded_footprint(g: vec2<f32>) -> vec2<f32> {
+  let len = length(g);
+  if (len <= 1.0) { return g; }
+  return select(vec2<f32>(1.0, 0.0), g / len, len > 1.0);
+}
+
+// Raises a footprint so its hardware LOD is at least `lod` on a texture of
+// `size` texels: the roughness blur becomes a floor under the screen-space
+// filter instead of replacing it.
+fn footprint_with_lod_floor(g: vec2<f32>, size: vec2<f32>, lod: f32) -> vec2<f32> {
+  let texels = length(g * size);
+  let floorTexels = exp2(lod);
+  if (texels >= floorTexels) { return g; }
+  if (texels < 1e-20) { return vec2<f32>(floorTexels / size.x, 0.0); }
+  return g * (floorTexels / texels);
+}
+
 fn sample_skybox(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>, roughness: f32) -> vec3<f32> {
   // The skybox texture is sRGB-encoded rgba8unorm; lighting runs in linear.
-  let uv = skybox_reflection_uv(screenUv, reflectionDir, drift);
+  let uv = skybox_reflection_coord(screenUv, reflectionDir, drift);
+  let ddx = bounded_footprint(dpdx(uv));
+  let ddy = bounded_footprint(dpdy(uv));
+  let size = vec2<f32>(textureDimensions(skyboxTex, 0));
   var layerA = 0; var layerB = 1; var blend = parameters.presetTransition;
   var levelsA = f32(textureNumLevels(skyboxTex));
   var levelsB = levelsA;
@@ -602,9 +637,11 @@ fn sample_skybox(screenUv: vec2<f32>, reflectionDir: vec3<f32>, drift: vec2<f32>
   }
   let lodA = roughness * max(levelsA - 4.0, 0.0);
   let lodB = roughness * max(levelsB - 4.0, 0.0);
-  let a = srgb_to_linear(textureSampleLevel(skyboxTex, skyboxSampler, uv, layerA, lodA).rgb);
+  let a = srgb_to_linear(textureSampleGrad(skyboxTex, mirrorSampler, uv, layerA,
+    footprint_with_lod_floor(ddx, size, lodA), footprint_with_lod_floor(ddy, size, lodA)).rgb);
   if (textureNumLayers(skyboxTex) < 2u || blend <= 0.0 || layerA == layerB) { return a; }
-  let b = srgb_to_linear(textureSampleLevel(skyboxTex, skyboxSampler, uv, layerB, lodB).rgb);
+  let b = srgb_to_linear(textureSampleGrad(skyboxTex, mirrorSampler, uv, layerB,
+    footprint_with_lod_floor(ddx, size, lodB), footprint_with_lod_floor(ddy, size, lodB)).rgb);
   return mix(a, b, blend);
 }
 
@@ -615,30 +652,31 @@ fn rough_skybox_reflection(screenUv: vec2<f32>, reflectionDir: vec3<f32>, roughn
 }
 
 fn tile_tessellation(tex_: texture_2d_array<f32>, v: f32, dist: f32, repeat: f32) -> vec4<f32> {
-  let tileUV = vec2<f32>(fract(v * repeat), fract(dist * repeat));
-  let tileIndex = vec2<i32>(i32(floor(v * repeat)), i32(floor(dist * repeat)));
-
-  let useMirror = parameters.textureMappingMirror > 0.5;
-  let mirrorX = useMirror && (abs(tileIndex.x) % 2 == 1);
-  let mirrorY = useMirror && (abs(tileIndex.y) % 2 == 1);
-  let uv = vec2<f32>(
-    select(tileUV.x, 1.0 - tileUV.x, mirrorX),
-    select(tileUV.y, 1.0 - tileUV.y, mirrorY)
-  );
-  let texSize = vec2<i32>(textureDimensions(tex_, 0));
-  let coord = vec2<i32>(
-    i32(clamp(uv.x * f32(texSize.x), 0.0, f32(texSize.x - 1))),
-    i32(clamp((1.0 - uv.y) * f32(texSize.y), 0.0, f32(texSize.y - 1)))
-  );
-  if (textureNumLayers(tex_) < 2u) { return textureLoad(tex_, coord, 0, 0); }
+  // Continuous tile coordinate; the sampler's address mode does the tiling
+  // (repeat) or the flip of every odd tile (mirror-repeat), so the screen
+  // derivative never sees a tile seam. Rows run top-down, hence 1 - y.
+  let t = vec2<f32>(v * repeat, 1.0 - dist * repeat);
+  let ddx = bounded_footprint(dpdx(t));
+  let ddy = bounded_footprint(dpdy(t));
+  // Both address modes have period 2: reducing keeps sub-texel precision on
+  // mappings that run to large values without moving the sample.
+  let local = t - 2.0 * floor(t * 0.5);
+  if (textureNumLayers(tex_) < 2u) { return sample_tile(tex_, local, 0, ddx, ddy); }
   var layerA = 0; var layerB = 1; var blend = parameters.presetTransition;
   if (palettePath.config.x >= 2.0) { layerA = i32(path_value(pathA, 2u)); layerB = i32(path_value(pathB, 2u)); blend = pathT; }
-  let a = textureLoad(tex_, coord, layerA, 0);
+  let a = sample_tile(tex_, local, layerA, ddx, ddy);
   if (blend <= 0.0 || layerA == layerB) { return a; }
-  let b = textureLoad(tex_, coord, layerB, 0);
+  let b = sample_tile(tex_, local, layerB, ddx, ddy);
   let alpha = mix(a.a, b.a, blend);
   let premultiplied = mix(a.rgb * a.a, b.rgb * b.a, blend);
   return vec4<f32>(premultiplied / max(alpha, 1e-8), alpha);
+}
+
+fn sample_tile(tex_: texture_2d_array<f32>, t: vec2<f32>, layer: i32, ddx: vec2<f32>, ddy: vec2<f32>) -> vec4<f32> {
+  if (parameters.textureMappingMirror > 0.5) {
+    return textureSampleGrad(tex_, mirrorSampler, t, layer, ddx, ddy);
+  }
+  return textureSampleGrad(tex_, tileSampler, t, layer, ddx, ddy);
 }
 
 fn texture_mapping_value(variableId: f32, iterRaw: f32, v_smooth: f32, z: vec2<f32>, distanceHeightStored: f32, geometryAngle: f32, dx: f32, dy: f32, tess_depth: f32, disp: f32) -> f32 {
@@ -718,7 +756,12 @@ fn local_height_shadow(heightGradient: vec2<f32>, lightDir: vec3<f32>, strength:
   let lightPlaneDir = lightDir.xy / lightPlaneLen;
   let uphillSlope = max(dot(heightGradient, lightPlaneDir), 0.0);
   let lightSlope = max(lightDir.z / lightPlaneLen, 0.0);
-  let blocker = smoothstep(lightSlope * 0.35, lightSlope + 1.25, uphillSlope);
+  // The control lowers the horizon: at 0 only slopes steeper than the light
+  // elevation (~33° onset) count, which the softened relief almost never
+  // reaches; at 2 the onset is ~20°, at 5 ~8°, so the shadow becomes visible
+  // on ordinary relief instead of only on the steepest ridges.
+  let reach = exp(-0.3 * max(strength, 0.0));
+  let blocker = smoothstep(lightSlope * 0.35 * reach, (lightSlope + 1.25) * reach, uphillSlope);
   let amount = 1.0 - exp(-0.35 * max(strength, 0.0));
   return mix(1.0, 1.0 - blocker * 0.78, amount);
 }
@@ -1026,7 +1069,12 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
   let directDiffuse = diffuseColor * 0.86 * shadowedNDotL;
   let brightness = max(fx.shadingLevel, 0.0);
   var materialColor = ambientDiffuse + directDiffuse + directSpecular * localShadow;
-  let varnish = clamp(parameters.varnishStrength, 0.0, 10.0) * 0.1;
+  // Vernis 0–10 : épaisseur du film (0 → 1, comportement historique).
+  // 10–100 : le film est complet ; le surplus amplifie la contribution propre
+  // du vernis (reflet miroir + brillance) jusqu'à ×10, sans toucher la base.
+  let varnishControl = clamp(parameters.varnishStrength, 0.0, 100.0) * 0.1;
+  let varnish = min(varnishControl, 1.0);
+  let varnishGain = max(varnishControl, 1.0);
   // Clear coat is a true top layer: it is applied at the very end of this
   // function, once the base material (iridescence, env… included) is fully
   // assembled.
@@ -1122,7 +1170,7 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
     }
     // Wet look: internal reflections darken and saturate, hue untouched.
     pbrColor *= mix(vec3<f32>(1.0), clamp(pbrColor, vec3<f32>(0.0), vec3<f32>(1.0)), varnish * 0.30);
-    pbrColor = pbrColor * (1.0 - coatFresnel * varnish) + (coatEnvironment + vec3<f32>(coatSpec * coatFresnel)) * varnish;
+    pbrColor = pbrColor * (1.0 - coatFresnel * varnish) + (coatEnvironment + vec3<f32>(coatSpec * coatFresnel)) * varnish * varnishGain;
   }
   return linear_to_sRGB(tonemap_highlights(display_grade(pbrColor)));
 }

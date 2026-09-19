@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 import { DenseField, DenseSection, DenseSelect } from './dense'
-import { EXPMAP_EASES, motionProgress, motionSettings, validateMotion, type ExpmapMotion } from '../expmap/motion'
+import { EXPMAP_EASES, DEFAULT_EXPMAP_MOTION, motionProgress, motionSettings, validateMotion, type ExpmapMotion } from '../expmap/motion'
 import { compactNumber } from '../expmap/controls'
 const props = defineProps<{ modelValue: Partial<ExpmapMotion>; durationSeconds: number }>()
 const emit = defineEmits<{ 'update:modelValue': [value: ExpmapMotion] }>()
@@ -16,10 +16,10 @@ const path = computed(() => problem.value ? '' : Array.from({length:101},(_,i)=>
   <DenseSection title="Entrée et fin progressives">
     <button class="motion-preset" @click="minibrot">Arrivée sur minibrot</button>
     <DenseSelect :model-value="motion.easeIn" label="Entrée" :options="[...EXPMAP_EASES]" @update:model-value="change('easeIn',String($event))"/>
-    <DenseField v-if="motion.easeIn !== 'none'" :model-value="motion.easeInSeconds" label="Durée d’entrée" unit="s" :f="compactNumber" :min="0" :max="86400" :step=".1" @update:model-value="change('easeInSeconds',$event)"/>
+    <DenseField v-if="motion.easeIn !== 'none'" :model-value="motion.easeInSeconds" label="Durée d’entrée" unit="s" :f="compactNumber" :min="0" :max="86400" :step=".1" :default="DEFAULT_EXPMAP_MOTION.easeInSeconds" @update:model-value="change('easeInSeconds',$event)"/>
     <DenseSelect :model-value="motion.easeOut" label="Sortie" :options="[...EXPMAP_EASES]" @update:model-value="change('easeOut',String($event))"/>
-    <DenseField v-if="motion.easeOut !== 'none'" :model-value="motion.easeOutSeconds" label="Durée de sortie" unit="s" :f="compactNumber" :min="0" :max="86400" :step=".1" @update:model-value="change('easeOutSeconds',$event)"/>
-    <DenseField :model-value="motion.holdSeconds" label="Palier final fixe" unit="s" :f="compactNumber" :min="0" :max="3600" :step=".5" @update:model-value="change('holdSeconds',$event)"/>
+    <DenseField v-if="motion.easeOut !== 'none'" :model-value="motion.easeOutSeconds" label="Durée de sortie" unit="s" :f="compactNumber" :min="0" :max="86400" :step=".1" :default="DEFAULT_EXPMAP_MOTION.easeOutSeconds" @update:model-value="change('easeOutSeconds',$event)"/>
+    <DenseField :model-value="motion.holdSeconds" label="Palier final fixe" unit="s" :f="compactNumber" :min="0" :max="3600" :step=".5" :default="DEFAULT_EXPMAP_MOTION.holdSeconds" @update:model-value="change('holdSeconds',$event)"/>
     <svg viewBox="0 0 300 52" role="img" aria-label="Progression du trajet dans le temps ; la partie horizontale correspond au palier fixe"><path d="M0 48H300" class="axis"/><path :d="path"/></svg>
     <p v-if="problem" role="alert">{{ problem }}</p>
     <p>Trajet {{ compactNumber(durationSeconds) }} s + palier {{ compactNumber(motion.holdSeconds) }} s = <strong>{{ compactNumber(total) }} s</strong>.</p>

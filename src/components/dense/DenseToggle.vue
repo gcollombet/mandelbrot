@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { showTip, hideTip } from './denseTip';
-defineProps<{ modelValue: boolean; label: string; desc?: string }>();
+const props = defineProps<{ modelValue: boolean; label: string; desc?: string;
+  /** Optional default: marks the row `.mod` when different and a double-click restores it. */
+  default?: boolean }>();
 const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void }>();
 </script>
 
@@ -11,7 +13,10 @@ const emit = defineEmits<{ (e: 'update:modelValue', v: boolean): void }>();
     :aria-checked="modelValue"
     :aria-label="label"
     class="fld fld-tog"
+    :class="{ mod: props.default !== undefined && modelValue !== props.default }"
+    :title="props.default !== undefined ? 'Double-clic : valeur par défaut' : undefined"
     @click="emit('update:modelValue', !modelValue)"
+    @dblclick="props.default !== undefined && emit('update:modelValue', props.default)"
     @pointerenter="desc && showTip(desc, $event.clientX, $event.clientY)"
     @pointerleave="hideTip()"
   >

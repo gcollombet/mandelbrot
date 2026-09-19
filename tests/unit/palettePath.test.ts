@@ -54,6 +54,6 @@ describe('palette path contracts', () => {
         expect(values).toHaveLength(40)
         expect(values.slice(0, 4)).toEqual([1, 0, 4, 7])
         expect(values[10]).toBe(0.8)
-        expect(values[30]).toBe(11)
+        expect(values[32]).toBe(11)
     })
 })

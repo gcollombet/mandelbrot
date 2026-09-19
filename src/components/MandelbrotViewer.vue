@@ -596,7 +596,6 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   interpolationMode: 'lab',
   animation: normalizeAnimationConfig(null, 1.0),
   animationSpeed: 1.0,
-  ambientOcclusionStrength: 0,
   microBumpStrength: 0,
   reliefDepth: 1,
   protrusionPhase: 0,
@@ -604,6 +603,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   protrusionStrength: 1,
   protrusionGeometryMix: 0,
   protrusionPeriod: 1,
+  ambientOcclusionStrength: 0,
   localShadowStrength: 0,
   varnishStrength: 0,
   gradeContrast: 1.18,
@@ -1774,7 +1774,6 @@ function tickTravelAnimation() {
     mandelbrotParams.value.approximationMode = target.approximationMode;
     mandelbrotParams.value.tessellationLevel = target.tessellationLevel ?? 0;
     mandelbrotParams.value.displacementAmount = target.displacementAmount ?? 0;
-    mandelbrotParams.value.ambientOcclusionStrength = target.ambientOcclusionStrength ?? 0;
     mandelbrotParams.value.microBumpStrength = target.microBumpStrength ?? 0;
     mandelbrotParams.value.reliefDepth = target.reliefDepth ?? 1;
     mandelbrotParams.value.protrusionPhase = target.protrusionPhase ?? 0;
@@ -1782,6 +1781,7 @@ function tickTravelAnimation() {
     mandelbrotParams.value.protrusionStrength = target.protrusionStrength ?? 1;
     mandelbrotParams.value.protrusionGeometryMix = target.protrusionGeometryMix ?? 0;
     mandelbrotParams.value.protrusionPeriod = target.protrusionPeriod ?? 1;
+    mandelbrotParams.value.ambientOcclusionStrength = target.ambientOcclusionStrength ?? 0;
     mandelbrotParams.value.localShadowStrength = target.localShadowStrength ?? 0;
     mandelbrotParams.value.varnishStrength = target.varnishStrength ?? 0;
     mandelbrotParams.value.gradeContrast = target.gradeContrast ?? 1.18;
@@ -2053,7 +2053,6 @@ async function startTravelToPreset(preset: PresetRecord) {
       :displacementAmount="mandelbrotParams.displacementAmount"
       :animation="mandelbrotParams.animation"
       :animationSpeed="mandelbrotParams.animationSpeed"
-      :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
       :microBumpStrength="mandelbrotParams.microBumpStrength"
       :reliefDepth="mandelbrotParams.reliefDepth"
       :protrusionPhase="mandelbrotParams.protrusionPhase"
@@ -2061,8 +2060,9 @@ async function startTravelToPreset(preset: PresetRecord) {
       :protrusionStrength="mandelbrotParams.protrusionStrength"
       :protrusionGeometryMix="mandelbrotParams.protrusionGeometryMix"
       :protrusionPeriod="mandelbrotParams.protrusionPeriod"
-      :localShadowStrength="mandelbrotParams.localShadowStrength"
       :lightAngle="mandelbrotParams.lightAngle"
+      :ambientOcclusionStrength="mandelbrotParams.ambientOcclusionStrength"
+      :localShadowStrength="mandelbrotParams.localShadowStrength"
       :varnishStrength="mandelbrotParams.varnishStrength"
       :gradeContrast="mandelbrotParams.gradeContrast"
       :gradeSaturation="mandelbrotParams.gradeSaturation"

@@ -13,7 +13,8 @@ const props = withDefaults(defineProps<{
   /** Formatter: 'p0'..'p3' or (v)=>string. */
   f?: DenseFormatter;
   unit?: string;
-  /** Optional default; when set, the row shows the `.mod` state when value ≠ default. */
+  /** Optional default; when set, the row shows the `.mod` state when value ≠
+   *  default and a double-click on the row restores it. */
   default?: number;
   /** Inline description (shown in data-desc="inline" mode). */
   desc?: string;
@@ -61,6 +62,17 @@ function commitEdit() {
 function cancelEdit() {
   editing.value = false;
 }
+
+// Double-click: restore the declared default; without one, open the editor
+// (historical behaviour) so a row without a meaningful default stays usable.
+function onDblClick() {
+  if (props.default !== undefined) { emit('update:modelValue', clampStep(props.default)); return; }
+  beginEdit();
+}
+
+const resetTitle = computed(() => props.default !== undefined
+  ? `Double-clic : valeur par défaut (${formatValue(props.default, props.f, props.unit)})`
+  : undefined);
 </script>
 
 <template>
@@ -71,7 +83,8 @@ function cancelEdit() {
     @pointermove="onPointerMove"
     @pointerup="endScrub"
     @pointercancel="endScrub"
-    @dblclick="beginEdit"
+    :title="resetTitle"
+    @dblclick="onDblClick"
     @keydown.stop
     @pointerenter="desc && showTip(desc, $event.clientX, $event.clientY)"
     @pointerleave="hideTip()"

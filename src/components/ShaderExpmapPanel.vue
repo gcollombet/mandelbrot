@@ -16,13 +16,13 @@ import { SHADER_INTERPOLATIONS, SHADER_SAMPLE_DISTRIBUTIONS, type ShaderInterpol
 import { ShaderExpmapRenderer, planShaderMemory } from '../expmap/displayRenderer'
 import { expmapBusy, expmapOpenDocument, expmapVideoSelected, shaderExpmapVideoSelected, shaderExpmapVideoEntry, registerShaderPreviewReader, releaseShaderPreviewReaders } from '../expmap/runtime'
 import { expmapVideoDefaults, changeExpmapDuration, changeExpmapWindow, exportExpmapVideo, type ExpmapVideoWindow } from '../expmap/video'
-import { EXPMAP_EASES } from '../expmap/motion'
+import { EXPMAP_EASES, DEFAULT_EXPMAP_MOTION } from '../expmap/motion'
 import { documentEffects } from '../expmap/effects'
 import { planExpmapOctaves } from '../expmap/octaves'
 import { MP4_CODECS, type Mp4Codec } from '../videoEncoderSink'
 import ExpmapEffectsControls from './ExpmapEffectsControls.vue'
 import { DenseField, DenseSection, DenseSelect } from './dense'
-import { loadShaderPreferences, saveShaderPreferences, SHADER_SAMPLE_CHOICES } from '../expmap/displayPreferences'
+import { loadShaderPreferences, saveShaderPreferences, SHADER_SAMPLE_CHOICES, DEFAULT_SHADER_PREFERENCES } from '../expmap/displayPreferences'
 import RenderProgress from './RenderProgress.vue'
 import ResolutionSelect from './ResolutionSelect.vue'
 const props=defineProps<{plan:ExpmapPlan|null;name:string;appearance:RenderOptions;engine:Engine|null;controller:MandelbrotExposed|null;videoOnly?:boolean}>()
@@ -234,7 +234,7 @@ function updateWindow() {
     <p class="hint">Conserve les données avant couleur dans une archive compressée du navigateur. Les palettes et matériaux du moment sont appliqués à la lecture et à chaque export vidéo : un seul calcul, autant de colorations que voulu.</p>
     <fieldset :disabled="expmapBusy">
       <details v-if="!videoOnly" open><summary>Créer depuis les paramètres de la section 1</summary>
-        <DenseField v-model="radialDensity" label="Densité radiale" :min="1" :max="64" :step="1"/>
+        <DenseField v-model="radialDensity" label="Densité radiale" :min="1" :max="64" :step="1" :default="DEFAULT_SHADER_PREFERENCES.radialDensity"/>
         <p v-if="estimate" class="hint">Source brute : {{ (estimate.rawBytes/1e9).toFixed(2) }} Go · {{ estimate.blocks }} blocs · centre couvert sur 17 octaves. Compression mesurée ≈ 4 à 5× ; les champs constants et les blocs uniformes ne sont pas stockés.</p>
         <button class="primary" :disabled="!plan" @click="create()">Créer une archive</button>
       </details>
@@ -259,7 +259,7 @@ function updateWindow() {
             <button v-else @click="archiveDirectory">Convertir en archive du navigateur</button>
           </div>
           <details open><summary>{{ videoOnly ? 'Qualité du rendu et effets' : 'Lecture et aperçu' }}</summary>
-            <DenseField v-model="budgetMiB" label="Budget du lecteur (Mio)" :min="64" :max="16384" :step="64"/>
+            <DenseField v-model="budgetMiB" label="Budget du lecteur (Mio)" :min="64" :max="16384" :step="64" :default="DEFAULT_SHADER_PREFERENCES.budgetMiB"/>
             <small>Budget supplémentaire au moteur ouvert. Le cache se subdivise si les octaves entières ne tiennent pas.</small>
             <p v-if="memory" class="hint">{{ memory.usefulOctaves }} octave(s) utile(s) par couronne + 2 réserves · {{ memory.subdivided?'chargement par blocs':'cache par octaves' }}</p>
             <DenseSelect :model-value="interpolation" label="Interpolation" :options="SHADER_INTERPOLATIONS" @update:model-value="interpolation=$event==='nearest'?'nearest':'bilinear'"/>
@@ -267,7 +267,7 @@ function updateWindow() {
             <DenseSelect :model-value="samples" label="Prélèvements par pixel (AA)" :options="SHADER_SAMPLE_CHOICES.map(n=>({value:n,label:String(n)}))" @update:model-value="samples=Number($event)"/>
             <template v-if="!videoOnly">
             <label>Échelle d’aperçu <input v-model="previewScale"></label>
-            <DenseField v-model="angle" label="Rotation aperçu (°)" :min="-36000" :max="36000" :step="1"/>
+            <DenseField v-model="angle" label="Rotation aperçu (°)" :min="-36000" :max="36000" :step="1" :default="0"/>
             </template>
             <ExpmapEffectsControls :document-id="source.manifest.id" :tile-count="planExpmapOctaves(source.manifest.projection).tileCount"/>
             <button v-if="!videoOnly" @click="render()">Actualiser l’aperçu</button>
@@ -276,20 +276,20 @@ function updateWindow() {
           <details v-if="videoOnly && window" open><summary>Vidéo</summary>
             <label>Départ <input v-model="window.fromScale" @change="updateWindow"></label>
             <label>Arrivée <input v-model="window.toScale" @change="updateWindow"></label>
-            <DenseField v-model="window.durationSeconds" label="Durée (s)" :min="0.1" :max="86400" :step="1" @update:model-value="updateWindow"/>
+            <DenseField v-model="window.durationSeconds" label="Durée (s)" :min="0.1" :max="86400" :step="1" :default="20" @update:model-value="updateWindow"/>
             <DenseSelect v-model="window.easeIn" label="Départ progressif" :options="EXPMAP_EASES" @update:model-value="updateWindow"/>
-            <DenseField v-if="window.easeIn!=='none'" v-model="window.easeInSeconds" label="Transition départ (s)" :min="0" :max="window.durationSeconds" :step="0.1" @update:model-value="updateWindow"/>
+            <DenseField v-if="window.easeIn!=='none'" v-model="window.easeInSeconds" label="Transition départ (s)" :min="0" :max="window.durationSeconds" :step="0.1" :default="DEFAULT_EXPMAP_MOTION.easeInSeconds" @update:model-value="updateWindow"/>
             <DenseSelect v-model="window.easeOut" label="Arrivée progressive" :options="EXPMAP_EASES" @update:model-value="updateWindow"/>
-            <DenseField v-if="window.easeOut!=='none'" v-model="window.easeOutSeconds" label="Transition arrivée (s)" :min="0" :max="window.durationSeconds" :step="0.1" @update:model-value="updateWindow"/>
-            <DenseField v-model="window.holdSeconds" label="Pause finale (s)" :min="0" :max="86400" :step="0.1"/>
-            <DenseField v-model="window.fromAngle" label="Angle départ (rad)" :min="-100000" :max="100000" :step="0.1"/>
-            <DenseField v-model="window.toAngle" label="Angle arrivée (rad)" :min="-100000" :max="100000" :step="0.1"/>
+            <DenseField v-if="window.easeOut!=='none'" v-model="window.easeOutSeconds" label="Transition arrivée (s)" :min="0" :max="window.durationSeconds" :step="0.1" :default="DEFAULT_EXPMAP_MOTION.easeOutSeconds" @update:model-value="updateWindow"/>
+            <DenseField v-model="window.holdSeconds" label="Pause finale (s)" :min="0" :max="86400" :step="0.1" :default="DEFAULT_EXPMAP_MOTION.holdSeconds"/>
+            <DenseField v-model="window.fromAngle" label="Angle départ (rad)" :min="-100000" :max="100000" :step="0.1" :default="0"/>
+            <DenseField v-model="window.toAngle" label="Angle arrivée (rad)" :min="-100000" :max="100000" :step="0.1" :default="0"/>
             <ResolutionSelect :width="outputWidth" :height="outputHeight" :min="16" :max="3840" :step="2" @update:width="outputWidth=$event" @update:height="outputHeight=$event"/>
             <DenseSelect :model-value="fps" label="Cadence" :options="[24,25,30,60].map(n=>({value:n,label:`${n} fps`}))" @update:model-value="fps=Number($event)"/>
             <DenseSelect v-model="codec" label="Codec" :options="MP4_CODECS"/>
             <DenseSelect :model-value="ringFirst?'ring':'frame'" label="Ordre du rendu" :options="[{value:'ring',label:'Couronne complète, puis la suivante'},{value:'frame',label:'Image complète, puis la suivante'}]" @update:model-value="ringFirst=$event==='ring'"/>
             <template v-if="ringFirst">
-              <DenseField v-if="!ringEstimate?.direct" v-model="ringBitrateMbps" label="Débit couronne plein écran (Mbit/s)" :min="1" :max="500" :step="1"/>
+              <DenseField v-if="!ringEstimate?.direct" v-model="ringBitrateMbps" label="Débit couronne plein écran (Mbit/s)" :min="1" :max="500" :step="1" :default="DEFAULT_SHADER_PREFERENCES.ringBitrateMbps"/>
               <p v-if="ringEstimate?.direct" class="hint">Une couronne tient dans le budget : encodage direct, sans fichier intermédiaire.</p>
               <p v-else-if="ringEstimate" class="hint">{{ ringEstimate.passes }} passes · jusqu’à {{ ringEstimate.octaves }} octave(s) utiles chacune, selon le budget (+2 réservées) · intermédiaires ≈ {{ (ringEstimate.bytes/1e9).toFixed(2) }} Go de vidéo au débit cible, hors masques compressés et conteneurs.</p>
               <p v-else role="alert">Budget insuffisant pour les intermédiaires et le cache.</p>

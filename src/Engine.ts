@@ -17,7 +17,7 @@ import aaTargetShader from './assets/aa_target.wgsl?raw'
 import aaReseedShader from './assets/aa_reseed.wgsl?raw'
 import {MandelbrotNavigator} from 'mandelbrot'
 import {WebcamTexture} from './WebcamTexture'
-import {generateMipmaps, mipLevelCountFor, packTextureLayers} from './mipmaps'
+import {generateMipmaps, mipLevelCountFor, packTextureLayers, TEXTURE_MAX_ANISOTROPY} from './mipmaps'
 import {Palette} from './Palette.ts'
 import {needsSurfaceColorPipeline} from './colorPipelineFeatures'
 import {DEEP_EXP_THRESHOLD, frexpFloat32, frexpFromDecimalString, log2FromDecimalString, log10FromDecimalString} from './floatexp'
@@ -91,6 +91,8 @@ import type {
 // 13 for unfinished pixels because z″ also feeds terminal cached geometry.
 const RAW_BASE_LAYERS = 9
 const RAW_LAYERS = 13
+/** Smallest bailout at which the analytic-AA band-crossing extrapolation is exact enough (see aaAnalyticParams). */
+const AA_ANALYTIC_MIN_MU = 64
 // Layers 13..16 carry the analytic gradients of the two orbit metrics, and 17
 // the deep path's average orbit direction (the shallow path keeps that one in
 // layer 7, which floatexp needs for dz's exponent). Allocated only while a stop
@@ -466,8 +468,8 @@ export type RenderOptions = {
     protrusionStrength: number,
     protrusionGeometryMix: number,
     protrusionPeriod: number,
-    localShadowStrength: number,
     lightAngle: number,
+    localShadowStrength: number,
     varnishStrength: number,
     gradeContrast?: number,
     gradeSaturation?: number,
@@ -1080,7 +1082,15 @@ export class Engine {
     private palettePathBaseStops?: ColorStop[]
     private palettePathBaseGlobals = ''
     private palettePathGeneration = 0
-    palettePathStatus = ''
+    private _palettePathStatus = ''
+    /** Observers of the palette path preparation status (UI binds a ref; no polling). */
+    readonly palettePathStatusListeners = new Set<(status: string) => void>()
+    get palettePathStatus(): string { return this._palettePathStatus }
+    set palettePathStatus(status: string) {
+        if (status === this._palettePathStatus) return
+        this._palettePathStatus = status
+        this.palettePathStatusListeners.forEach(listener => listener(status))
+    }
     private presetTransition?: {
         palette: GpuPaletteTransition; stops: ColorStop[]; progress: number;
         tile: GPUTexture; sky: GPUTexture; tileKey: string; skyKey: string;
@@ -1095,6 +1105,7 @@ export class Engine {
     paletteTextureView?: GPUTextureView
     paletteSampler?: GPUSampler
     skyboxSampler?: GPUSampler
+    tileSampler?: GPUSampler
 
     // Webcam
     webcamTexture?: WebcamTexture
@@ -1776,12 +1787,26 @@ export class Engine {
             addressModeU: 'repeat',
             addressModeV: 'repeat',
         })
+        // Image textures: trilinear + anisotropic, footprint from screen
+        // derivatives (color.wgsl textureSampleGrad). Mirror-repeat serves the
+        // skybox fold and mirrored tiles; repeat serves plain tiles and webcam.
         this.skyboxSampler = this.device.createSampler({
             magFilter: 'linear',
             minFilter: 'linear',
             mipmapFilter: 'linear',
+            addressModeU: 'mirror-repeat',
+            addressModeV: 'mirror-repeat',
+            maxAnisotropy: TEXTURE_MAX_ANISOTROPY,
+            label: 'Engine Mirror Sampler',
+        })
+        this.tileSampler = this.device.createSampler({
+            magFilter: 'linear',
+            minFilter: 'linear',
+            mipmapFilter: 'linear',
             addressModeU: 'repeat',
-            addressModeV: 'clamp-to-edge',
+            addressModeV: 'repeat',
+            maxAnisotropy: TEXTURE_MAX_ANISOTROPY,
+            label: 'Engine Tile Sampler',
         })
 
         // Webcam : initialisation (optionnel, activer webcamEnabled pour l'utiliser)
@@ -1923,6 +1948,7 @@ export class Engine {
                 { binding: 17, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
                 { binding: 18, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float', viewDimension: '2d' } },
                 { binding: 19, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+                { binding: 20, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
             ],
             label: 'Engine BindGroupLayout Color',
         })
@@ -4700,7 +4726,7 @@ export class Engine {
         const effectiveTessellationLevel = clamp(renderOptions.tessellationLevel + tessellationAnim, 0, 10)
         const effectiveDisplacementAmount = clamp(renderOptions.displacementAmount + displacementAnim, 0, 0.1)
         const effectiveMicroBumpStrength = clamp(renderOptions.microBumpStrength + microBumpAnim, 0, 10)
-        const effectiveVarnishStrength = clamp(renderOptions.varnishStrength + varnishAnim, 0, 10)
+        const effectiveVarnishStrength = clamp(renderOptions.varnishStrength + varnishAnim, 0, 100)
         const effectiveHeightPaletteShift = clamp(renderOptions.heightPaletteShift + heightPaletteShiftAnim, 0, 100)
         const effectivePhaseColoringStrength = clamp(renderOptions.phaseColoringStrength + phaseColoringAnim, 0, 100)
         const effectiveProtrusionPhase = wrapUnit((renderOptions.protrusionPhase ?? 0) + protrusionPhaseAnim)
@@ -4771,8 +4797,8 @@ export class Engine {
             effectiveMicroBumpStrength,     // 18: microBumpStrength
             renderOptions.aaAdaptive === false ? this.aaOffsetX : 0, // 19: uniform-AA inverse lookup X
             effectiveReliefDepth,            // 20: reliefDepth
-            renderOptions.localShadowStrength, // 21: localShadowStrength
-            effectiveLightAngle,              // 22: lightAngle
+            effectiveLightAngle,              // 21: lightAngle
+            renderOptions.localShadowStrength, // 22: localShadowStrength
             effectiveVarnishStrength,         // 23: varnishStrength
             Math.log(mandelbrot.mu),            // 24: logMu
             sceneSin,                           // 25: sceneSin
@@ -5118,7 +5144,19 @@ export class Engine {
         const logDelta = Number.isFinite(ln)
             ? Math.log(Math.SQRT2 * neutralExtent / Math.max(1, this.neutralSize)) + ln
             : Number.NEGATIVE_INFINITY
-        const enabled = !this.expmapProjection && this.aaAnalyticEnabled && Number.isFinite(logDelta)
+        // Low-bailout gate (2026-09-19): the color-pass expansion keeps the
+        // center's escape iteration n and reads the sub-sample's fraction from
+        // |ẑ_n|². A sub-sample that actually escaped at n−1 is only consistent
+        // with that when |z_n|² ≈ |z_{n−1}|⁴, i.e. when c is negligible against
+        // z_{n−1}² — true at mu = 1e6, false at mu = 4 where the error reaches
+        // 0.5 iteration (mean 0.18 over crossing samples, measured). The reseed
+        // certificate only guards the other side of each band edge (|ẑ_n| ≥
+        // √mu), so the bias was one-sided and every contour visibly shifted
+        // under AA. The bound is ≈ 2|c| / (mu · ln mu · ln 2): 0.011 at mu = 64,
+        // below the palette's resolution, so exact re-iteration takes over
+        // only under that.
+        const muOk = (this.previousMandelbrot?.mu ?? Number.POSITIVE_INFINITY) >= AA_ANALYTIC_MIN_MU
+        const enabled = !this.expmapProjection && this.aaAnalyticEnabled && Number.isFinite(logDelta) && muOk
         // Deep re-enabled (2026-07-07, third attempt — root cause found in the
         // KERNEL this time): the block z″ update computed at the
         // old derS scale overflowed on deep blocks (coefficient exponents ~±133
@@ -6590,7 +6628,7 @@ export class Engine {
                 if (assets.images.length * path.textureSize ** 2 * 4 * 4 / 3 * 2 + (path.stops.length + 1) * 4096 * 7 * 8 > PALETTE_PATH_TEXTURE_BUDGET)
                     throw new Error('Images du parcours : budget de 128 Mio dépassé. Choisir une résolution inférieure.')
                 for (const asset of assets.images) {
-                    textures.push(await this._loadTexture(asset.url, asset.role === 'sky', path.textureSize))
+                    textures.push(await this._loadTexture(asset.url, true, path.textureSize))
                     if (generation !== this.palettePathGeneration || this.destroyed) return
                 }
                 const data = [base, ...path.stops.map(s => s.appearance)].map(p => float32ArrayToFloat16(new Palette(p.colorStops, p.interpolationMode).generateTexture().data))
@@ -6618,7 +6656,7 @@ export class Engine {
         this.cancelPresetTransition()
         const generation = this.transitionGeneration
         const results = await Promise.allSettled([
-            this.isTileTextureSourceCurrent(tile.key) ? Promise.resolve(this.tileTexture!) : this._loadTexture(tile.url),
+            this.isTileTextureSourceCurrent(tile.key) ? Promise.resolve(this.tileTexture!) : this._loadTexture(tile.url, true),
             this.isSkyboxTextureSourceCurrent(sky.key) ? Promise.resolve(this.skyboxTexture!) : this._loadTexture(sky.url, true),
         ])
         const release = () => {
@@ -6702,7 +6740,7 @@ export class Engine {
         if (this.tileTextureSourceKey === sourceKey) return
         this.cancelPresetTransition()
         const generation = ++this.tileLoadGeneration
-        const newTexture = await this._loadTexture(url)
+        const newTexture = await this._loadTexture(url, true)
         if (generation !== this.tileLoadGeneration || this.destroyed) { newTexture.destroy(); return }
         this.cancelPresetTransition()
         this.tileTexture?.destroy?.()
@@ -6767,6 +6805,7 @@ export class Engine {
                 { binding: 17, resource: liveDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
                 { binding: 18, resource: this.frozenDisplay.trapPayloadView ?? this.trapPayloadDummyView! },
                 { binding: 19, resource: { buffer: this.palettePathGpu?.buffer ?? this.palettePathDummy! } },
+                { binding: 20, resource: this.tileSampler! },
             ]
             this.bindGroupColor = this.device.createBindGroup({
                 layout,

@@ -35,9 +35,9 @@ const props = withDefaults(defineProps<{
   skyboxTextureUrl?: string | null;
   tessellationLevel?: number;
   displacementAmount?: number;
-  ambientOcclusionStrength?: number;
   microBumpStrength?: number;
   reliefDepth?: number;
+  ambientOcclusionStrength?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
   gradeContrast?: number;
@@ -58,9 +58,9 @@ const props = withDefaults(defineProps<{
   skyboxTextureUrl: null,
   tessellationLevel: 0,
   displacementAmount: 0,
-  ambientOcclusionStrength: 0,
   microBumpStrength: 0,
   reliefDepth: 1,
+  ambientOcclusionStrength: 0,
   localShadowStrength: 0,
   varnishStrength: 0,
   gradeContrast: 1.18,
@@ -369,6 +369,7 @@ function importStopPresets(event: Event) {
             :min="EFFECT_FIELD_CONFIG[field].min"
             :max="EFFECT_FIELD_CONFIG[field].max"
             :step="EFFECT_FIELD_CONFIG[field].step"
+            :default="EFFECT_FIELD_CONFIG[field].defaultValue"
             :f="effectFmt(field)"
             :unit="EFFECT_FIELD_CONFIG[field].unit"
             :model-value="getStopEffect(field)"

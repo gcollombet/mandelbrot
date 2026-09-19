@@ -300,7 +300,7 @@ watch(
           <div class="fields">
             <DenseField
               label="Vitesse globale"
-              :min="0" :max="5" :step="0.05"
+              :min="0" :max="5" :step="0.05" :default="1"
               :f="speedFmt"
               :model-value="model.animation.globalSpeed"
               @update:model-value="setGlobalSpeed"
@@ -336,14 +336,14 @@ watch(
               <div v-if="model.animation.tracks[track.id].enabled" class="mc-fields">
                 <DenseField
                   label="Vitesse"
-                  :min="0" :max="5" :step="0.05"
+                  :min="0" :max="5" :step="0.05" :default="track.defaultSpeed"
                   :f="speedFmt"
                   :model-value="model.animation.tracks[track.id].speed"
                   @update:model-value="(v) => setTrackSpeed(track.id, v)"
                 />
                 <DenseField
                   label="Amplitude"
-                  :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep"
+                  :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep" :default="track.defaultAmplitude"
                   :f="amplitudeFmt(track.id)"
                   :unit="animationTrackAmplitudeUnit(track.id)"
                   :model-value="model.animation.tracks[track.id].amplitude"

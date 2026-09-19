@@ -75,7 +75,7 @@ export const ANIMATION_TRACK_DEFINITIONS: readonly AnimationTrackDefinition[] = 
   { id: 'textureDrift', label: 'Texture Drift', defaultType: 'sine', defaultSpeed: 1, defaultAmplitude: 1, minAmplitude: 0, maxAmplitude: 2, amplitudeStep: 0.01, unit: '' },
   { id: 'skyReflectionDrift', label: 'Sky Reflection Drift', defaultType: 'sine', defaultSpeed: 0.6, defaultAmplitude: 1, minAmplitude: 0, maxAmplitude: 2, amplitudeStep: 0.01, unit: '' },
   { id: 'phaseColoring', label: 'Phase Coloring', defaultType: 'pulse', defaultSpeed: 0.3, defaultAmplitude: 25, minAmplitude: 0, maxAmplitude: 100, amplitudeStep: 0.5, unit: '' },
-  { id: 'varnish', label: 'Varnish', defaultType: 'pulse', defaultSpeed: 0.22, defaultAmplitude: 2, minAmplitude: 0, maxAmplitude: 10, amplitudeStep: 0.05, unit: '' },
+  { id: 'varnish', label: 'Varnish', defaultType: 'pulse', defaultSpeed: 0.22, defaultAmplitude: 2, minAmplitude: 0, maxAmplitude: 100, amplitudeStep: 0.05, unit: '' },
   { id: 'microBump', label: 'Micro Bump', defaultType: 'pulse', defaultSpeed: 0.35, defaultAmplitude: 0.5, minAmplitude: 0, maxAmplitude: 2, amplitudeStep: 0.01, unit: '' },
   { id: 'displacement', label: 'Displacement', defaultType: 'sine', defaultSpeed: 0.2, defaultAmplitude: 0.02, minAmplitude: 0, maxAmplitude: 0.1, amplitudeStep: 0.001, unit: '' },
   { id: 'tessellation', label: 'Tessellation', defaultType: 'sine', defaultSpeed: 0.18, defaultAmplitude: 2, minAmplitude: 0, maxAmplitude: 10, amplitudeStep: 0.1, unit: '' },

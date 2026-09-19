@@ -5,7 +5,7 @@ import type {InterpolationMode} from '../Mandelbrot.ts';
 import {Palette} from '../Palette.ts';
 import colorShader from '../assets/color.wgsl?raw';
 import {getDefaultSkyboxTextureUrl, getDefaultTileTextureUrl} from '../textureLibrary';
-import {generateMipmaps, mipLevelCountFor} from '../mipmaps';
+import {generateMipmaps, mipLevelCountFor, TEXTURE_MAX_ANISOTROPY} from '../mipmaps';
 import {
   normalizeTextureMappingFromLegacy,
   type TextureMappingConfig,
@@ -69,7 +69,6 @@ const props = defineProps<{
   skyboxTextureUrl?: string | null;
   tessellationLevel?: number;
   displacementAmount?: number;
-  ambientOcclusionStrength?: number;
   microBumpStrength?: number;
   reliefDepth?: number;
   protrusionPhase?: number;
@@ -77,6 +76,7 @@ const props = defineProps<{
   protrusionStrength?: number;
   protrusionGeometryMix?: number;
   protrusionPeriod?: number;
+  ambientOcclusionStrength?: number;
   localShadowStrength?: number;
   varnishStrength?: number;
   gradeContrast?: number;
@@ -132,6 +132,7 @@ let bindGroupLayout: GPUBindGroupLayout | null = null;
 let tileTextureGpu: GPUTexture | null = null;
 let skyboxTextureGpu: GPUTexture | null = null;
 let skyboxSampler: GPUSampler | null = null;
+let tileSampler: GPUSampler | null = null;
 let webcamTextureGpu: GPUTexture | null = null;
 let aaTargetTextureGpu: GPUTexture | null = null;
 // Current backing size (physical px); applySize() rebuilds when it changes.
@@ -326,7 +327,7 @@ function rebuildBindGroup() {
       || !syntheticGeometryView || !syntheticMetadataView || !syntheticOrbitGradientView
       || !syntheticTrapPayloadView
       || !tileTextureGpu || !skyboxTextureGpu || !webcamTextureGpu
-      || !paletteTextureView || !paletteSampler || !skyboxSampler
+      || !paletteTextureView || !paletteSampler || !skyboxSampler || !tileSampler
       || !aaTargetTextureGpu) return;
   bindGroup = device.createBindGroup({
     layout: bindGroupLayout,
@@ -355,6 +356,7 @@ function rebuildBindGroup() {
       { binding: 17, resource: syntheticTrapPayloadView },
       { binding: 18, resource: syntheticTrapPayloadView },
       { binding: 19, resource: { buffer: pathDummy! } },
+      { binding: 20, resource: tileSampler },
     ],
     label: 'PalettePreview BindGroup',
   });
@@ -383,7 +385,7 @@ async function init() {
   const tileUrl = props.tileTextureUrl || getDefaultTileTextureUrl();
   const skyboxUrl = props.skyboxTextureUrl || getDefaultSkyboxTextureUrl();
   const [tileTexGpu, skyboxTexGpu] = await Promise.all([
-    tileUrl ? loadTexture(device, tileUrl) : Promise.resolve(create1x1Texture(device, 255, 255, 255, 255)),
+    tileUrl ? loadTexture(device, tileUrl, true) : Promise.resolve(create1x1Texture(device, 255, 255, 255, 255)),
     skyboxUrl ? loadTexture(device, skyboxUrl, true) : Promise.resolve(create1x1Texture(device, 255, 255, 255, 255)),
   ]);
   tileTextureGpu = tileTexGpu;
@@ -410,12 +412,23 @@ async function init() {
     addressModeU: 'repeat',
     addressModeV: 'repeat',
   });
+  // Same image samplers as the engine (see Engine.ts): mirror-repeat for the
+  // skybox fold and mirrored tiles, repeat for plain tiles and webcam.
   skyboxSampler = device.createSampler({
     magFilter: 'linear',
     minFilter: 'linear',
     mipmapFilter: 'linear',
+    addressModeU: 'mirror-repeat',
+    addressModeV: 'mirror-repeat',
+    maxAnisotropy: TEXTURE_MAX_ANISOTROPY,
+  });
+  tileSampler = device.createSampler({
+    magFilter: 'linear',
+    minFilter: 'linear',
+    mipmapFilter: 'linear',
     addressModeU: 'repeat',
-    addressModeV: 'clamp-to-edge',
+    addressModeV: 'repeat',
+    maxAnisotropy: TEXTURE_MAX_ANISOTROPY,
   });
   uploadPalette();
 
@@ -454,8 +467,8 @@ async function init() {
     props.microBumpStrength ?? 0, // microBumpStrength
     0, // aaLookupOffsetX (preview never accumulates AA)
     props.reliefDepth ?? 0, // reliefDepth
-    props.localShadowStrength ?? 0, // localShadowStrength
     previewLightAngle, // lightAngle
+    props.localShadowStrength ?? 0, // localShadowStrength
     props.varnishStrength ?? 0, // varnishStrength
     Math.log(mu),     // logMu
     0,                // sceneSin
@@ -538,6 +551,7 @@ async function init() {
       { binding: 17, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       { binding: 18, visibility: GPUShaderStage.FRAGMENT, texture: { sampleType: 'unfilterable-float' } },
       { binding: 19, visibility: GPUShaderStage.FRAGMENT, buffer: { type: 'read-only-storage' } },
+      { binding: 20, visibility: GPUShaderStage.FRAGMENT, sampler: { type: 'filtering' } },
     ],
     label: 'PalettePreview BindGroupLayout',
   });
@@ -690,12 +704,12 @@ watch(
       props.displacementAmount ?? 0,
       1.0,
       1e-10,
-      props.ambientOcclusionStrength ?? 0,
       props.microBumpStrength ?? 0,
       0, // aaLookupOffsetX (preview never accumulates AA)
       props.reliefDepth ?? 1,
-      props.localShadowStrength ?? 0,
       previewLightAngle,
+      props.ambientOcclusionStrength ?? 0,
+      props.localShadowStrength ?? 0,
       props.varnishStrength ?? 0,
       Math.log(PREVIEW_MU),
       0,
@@ -745,7 +759,7 @@ watch(
     try {
       const oldTile = tileTextureGpu;
       tileTextureGpu = resolvedUrl
-        ? await loadTexture(device, resolvedUrl)
+        ? await loadTexture(device, resolvedUrl, true)
         : create1x1Texture(device, 255, 255, 255, 255);
       oldTile?.destroy();
       rebuildBindGroup();

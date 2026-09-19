@@ -40,6 +40,7 @@ import {
   AA_SAMPLE_CHOICES,
   loadVideoExportPreferences,
   saveVideoExportPreferences,
+  DEFAULT_VIDEO_EXPORT_PREFERENCES,
 } from '../videoExportPreferences';
 import {
   evaluateTiledKeyframeEligibility,
@@ -346,7 +347,7 @@ function start() {
       <ExpmapZoomControl :model-value="effectiveEnd.scale" label="Arrivée" @update:model-value="setZoom('end',$event)" @capture="setZoom('end',currentLocation().scale)"><button class="ve-pin" @click="emit('preview',{...effectiveEnd})">Voir</button></ExpmapZoomControl>
       <div class="ve-capture"><small>Vue large 10^+10 → zoom profond 10^-1000</small><button class="ve-pin" @click="reverse">⇄ Inverser le trajet</button></div>
       <p class="ve-note">{{ magnitudeSummary(effectiveStart.scale,effectiveEnd.scale) }}</p>
-      <DenseField label="Durée du trajet" :min=".1" :max="86400" :step=".1" unit="s" :f="compactNumber" :model-value="durationSeconds" @update:model-value="duration"/>
+      <DenseField label="Durée du trajet" :min=".1" :max="86400" :step=".1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.durationSeconds" unit="s" :f="compactNumber" :model-value="durationSeconds" @update:model-value="duration"/>
       <details><summary>Vitesse moyenne</summary><DenseField v-if="zoomDistance > 0" label="Doublements/s" :model-value="meanSpeed" :min=".1" :max="100" :step=".1" :f="compactNumber" @update:model-value="speed"/><p class="ve-note">La dernière valeur modifiée (durée ou vitesse) reste prioritaire lorsque la plage change.</p></details>
       <p class="ve-note">{{ frameCount }} images · {{ compactNumber(totalDuration) }} s au total. L’apparence courante est utilisée sur tout le trajet.</p>
     </DenseSection>
@@ -402,13 +403,13 @@ function start() {
         </label><DenseField
           v-if="renderMode === 'tiled-keyframe'"
           label="Budget mémoire"
-          :min="64" :max="32768" :step="128"
+          :min="64" :max="32768" :step="128" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.tiledMemoryBudgetMiB"
           unit="Mio"
           :model-value="tiledMemoryBudgetMiB"
           @update:model-value="(v: number) => tiledMemoryBudgetMiB = v"
         /><DenseField
           label="Seuil de bascule"
-          :min="MIN_MAGNIFICATION_THRESHOLD" :max="MAX_MAGNIFICATION_THRESHOLD" :step="1"
+          :min="MIN_MAGNIFICATION_THRESHOLD" :max="MAX_MAGNIFICATION_THRESHOLD" :step="1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.magnificationThreshold"
           :model-value="magnificationThreshold"
           @update:model-value="(v: number) => magnificationThreshold = v"
         /></div>

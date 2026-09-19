@@ -59,7 +59,7 @@ describe('packed geometry display ABI', () => {
 describe('typed display consumers', () => {
   it('uses cached gradient/curvature for base shading without distance-neighbour reads', () => {
     expect(color).toContain('var grad = cachedGradient * 24.0;')
-    expect(color).toContain('var heightCurvature = cachedCurvature * 6.0;')
+    expect(color).toContain('s.curvature = cachedCurvature * 6.0 * styledAnalyticRelief;')
     expect(color).toContain('atan2(geometry.y, geometry.x)')
     expect(color).not.toContain('fn orbit_metric_gradients_at_coord(')
     expect(color).not.toContain('fn orbit_metric_gradients_bilinear(')

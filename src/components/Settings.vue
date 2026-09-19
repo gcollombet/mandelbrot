@@ -244,7 +244,6 @@ const model =  defineModel<MandelbrotParams>({
       activateAnimate: false,
       debugShading: false,
       animationSpeed: 1.0,
-     ambientOcclusionStrength: 0,
      microBumpStrength: 0,
      reliefDepth: 1,
      protrusionPhase: 0,
@@ -252,6 +251,7 @@ const model =  defineModel<MandelbrotParams>({
      protrusionStrength: 1,
      protrusionGeometryMix: 0,
      protrusionPeriod: 1,
+     ambientOcclusionStrength: 0,
      localShadowStrength: 0,
      varnishStrength: 0,
      gradeContrast: 1.18,
@@ -517,7 +517,7 @@ const RESOLUTION_PRESETS = [0.125, 0.25, 0.5, 0.75, 1, 1.5, 2] as const;
 const resolutionOptions = RESOLUTION_PRESETS.map(v => ({ label: 'DPR ×' + String(v), value: v }));
 const AA_SAMPLE_PRESETS = [1, 2, 4, 8, 16, 32, 64, 128, 256] as const;
 const aaSampleOptions = AA_SAMPLE_PRESETS.map(v => ({ label: v === 1 ? 'Off' : `${v}×`, value: v }));
-const ZOOM_THRESHOLD_PRESETS = [2, 4, 6, 8, 16] as const;
+const ZOOM_THRESHOLD_PRESETS = [2, 4, 6, 8, 16, 32, 64] as const;
 const zoomThresholdOptions = ZOOM_THRESHOLD_PRESETS.map(v => ({ label: `×${v}`, value: v }));
 /** Nearest preset, so a saved free value (e.g. DPR 0.625) still selects an option. */
 function nearestPreset(value: number, presets: readonly number[]): number {
@@ -1285,7 +1285,6 @@ function buildPaletteFields(): Omit<PaletteRecord, 'name' | 'guid' | 'thumbnail'
     iterationPaletteCurve: normalizeIterationPaletteCurve(model.value.iterationPaletteCurve),
     tessellationLevel: model.value.tessellationLevel,
     displacementAmount: model.value.displacementAmount,
-    ambientOcclusionStrength: model.value.ambientOcclusionStrength,
     microBumpStrength: model.value.microBumpStrength,
     reliefDepth: model.value.reliefDepth,
     protrusionPhase: model.value.protrusionPhase,
@@ -1293,8 +1292,9 @@ function buildPaletteFields(): Omit<PaletteRecord, 'name' | 'guid' | 'thumbnail'
     protrusionStrength: model.value.protrusionStrength,
     protrusionGeometryMix: model.value.protrusionGeometryMix,
     protrusionPeriod: model.value.protrusionPeriod,
-    localShadowStrength: model.value.localShadowStrength,
     lightAngle: model.value.lightAngle,
+    ambientOcclusionStrength: model.value.ambientOcclusionStrength,
+    localShadowStrength: model.value.localShadowStrength,
     varnishStrength: model.value.varnishStrength,
     gradeContrast: model.value.gradeContrast,
     gradeSaturation: model.value.gradeSaturation,
@@ -1391,7 +1391,6 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.iterationPaletteCurve = normalizeIterationPaletteCurve(source.iterationPaletteCurve);
   model.value.tessellationLevel = source.tessellationLevel ?? 0;
   model.value.displacementAmount = source.displacementAmount ?? 0;
-  model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
   model.value.microBumpStrength = source.microBumpStrength ?? 0;
   model.value.reliefDepth = source.reliefDepth ?? 1;
   model.value.protrusionPhase = source.protrusionPhase ?? 0;
@@ -1399,8 +1398,9 @@ function applyPaletteLookFields(source: Partial<PaletteRecord>): void {
   model.value.protrusionStrength = source.protrusionStrength ?? 1;
   model.value.protrusionGeometryMix = source.protrusionGeometryMix ?? 0;
   model.value.protrusionPeriod = source.protrusionPeriod ?? 1;
-  model.value.localShadowStrength = source.localShadowStrength ?? 0;
   if (source.lightAngle != null) model.value.lightAngle = source.lightAngle;
+  model.value.ambientOcclusionStrength = source.ambientOcclusionStrength ?? 0;
+  model.value.localShadowStrength = source.localShadowStrength ?? 0;
   model.value.varnishStrength = source.varnishStrength ?? 0;
   model.value.gradeContrast = source.gradeContrast ?? 1.18;
   model.value.gradeSaturation = source.gradeSaturation ?? 1.12;
@@ -2977,7 +2977,7 @@ async function startVideoExport(payload: {
         </div>
         <div class="mu-row">
           <DenseField
-            label="Rotation" :min="0" :max="359" :step="1"
+            label="Rotation" :min="0" :max="359" :step="1" :default="0"
             :f="angleFmt" unit="°"
             :model-value="angleSlider"
             @update:model-value="(v: number) => angleSlider = v"
@@ -2988,7 +2988,7 @@ async function startVideoExport(payload: {
         </div>
         <div class="mu-row">
           <DenseField
-            label="Bailout" :min="0.602" :max="5" :step="0.01"
+            label="Bailout" :min="0.602" :max="5" :step="0.01" :default="MU_MIN_LOG10"
             :f="muFmt"
             :model-value="muSlider"
             @update:model-value="(v: number) => muSlider = v"
@@ -3230,7 +3230,6 @@ async function startVideoExport(payload: {
           :skyboxTextureUrl="activeSkyboxBlobUrl"
           :tessellationLevel="model.tessellationLevel"
           :displacementAmount="model.displacementAmount"
-          :ambientOcclusionStrength="model.ambientOcclusionStrength"
           :microBumpStrength="model.microBumpStrength"
           :reliefDepth="model.reliefDepth"
           :protrusionPhase="model.protrusionPhase"
@@ -3238,6 +3237,7 @@ async function startVideoExport(payload: {
           :protrusionStrength="model.protrusionStrength"
           :protrusionGeometryMix="model.protrusionGeometryMix"
           :protrusionPeriod="model.protrusionPeriod"
+          :ambientOcclusionStrength="model.ambientOcclusionStrength"
           :localShadowStrength="model.localShadowStrength"
           :varnishStrength="model.varnishStrength"
           :gradeContrast="model.gradeContrast"
@@ -3275,21 +3275,21 @@ async function startVideoExport(payload: {
 
       <!-- Pinned quick fields under the strip (mockup HUD .pins) -->
       <details class="palette-distribution"><summary>Répartition du dégradé</summary><div class="pins">
-        <DenseField label="Période" :min="0" :max="1" :step="0.001" :f="palettePeriodFmt"
+        <DenseField label="Période" :min="0" :max="1" :step="0.001" :default="Math.log10(256) / 6" :f="palettePeriodFmt"
           :model-value="sliderPalettePeriod" @update:model-value="(v: number) => sliderPalettePeriod = v" />
         <DenseSelect label="Distribution"
           :options="iterationPaletteCurveOptions"
           :model-value="normalizeIterationPaletteCurve(model.iterationPaletteCurve)"
           @update:model-value="(v: string | number) => model.iterationPaletteCurve = normalizeIterationPaletteCurve(v)" />
-        <DenseField label="Offset" :min="0" :max="1" :step="0.001" :f="pctFmt"
+        <DenseField label="Offset" :min="0" :max="1" :step="0.001" :default="0" :f="pctFmt"
           :model-value="model.paletteOffset ?? 0" @update:model-value="(v: number) => model.paletteOffset = v" />
-        <DenseField label="Écran X" :min="0" :max="2" :step="0.01" f="p2"
+        <DenseField label="Écran X" :min="0" :max="2" :step="0.01" :default="0" f="p2"
           :model-value="model.paletteScreenShiftX ?? 0" @update:model-value="(v: number) => model.paletteScreenShiftX = v" />
-        <DenseField label="Écran Y" :min="0" :max="2" :step="0.01" f="p2"
+        <DenseField label="Écran Y" :min="0" :max="2" :step="0.01" :default="0" f="p2"
           :model-value="model.paletteScreenShiftY ?? 0" @update:model-value="(v: number) => model.paletteScreenShiftY = v" />
-        <DenseField label="Décalage hauteur" :min="0" :max="100" :step="0.01" f="p2"
+        <DenseField label="Décalage hauteur" :min="0" :max="100" :step="0.01" :default="0" f="p2"
           :model-value="model.heightPaletteShift ?? 0" @update:model-value="(v: number) => model.heightPaletteShift = v" />
-        <DenseField label="Phase couleur" :min="0" :max="1" :step="0.001" :f="phaseColoringFmt"
+        <DenseField label="Phase couleur" :min="0" :max="1" :step="0.001" :default="0" :f="phaseColoringFmt"
           :model-value="sliderPhaseColoring" @update:model-value="(v: number) => sliderPhaseColoring = v" />
         <DenseToggle label="Miroir"
           :model-value="!!model.paletteMirror" @update:model-value="(v: boolean) => model.paletteMirror = v" />
@@ -3314,9 +3314,9 @@ async function startVideoExport(payload: {
         :skybox-texture-url="activeSkyboxBlobUrl"
         :tessellation-level="model.tessellationLevel"
         :displacement-amount="model.displacementAmount"
-        :ambient-occlusion-strength="model.ambientOcclusionStrength"
         :micro-bump-strength="model.microBumpStrength"
         :relief-depth="model.reliefDepth"
+        :ambient-occlusion-strength="model.ambientOcclusionStrength"
         :local-shadow-strength="model.localShadowStrength"
         :varnish-strength="model.varnishStrength"
         :grade-contrast="model.gradeContrast"
@@ -3348,47 +3348,47 @@ async function startVideoExport(payload: {
             :model-value="orbitTrapConfig.mode"
             @update:model-value="setOrbitTrapMode" />
           <template v-if="orbitTrapConfig.mode !== 'off'">
-          <DenseField label="Intensité" :min="0" :max="100" :step="0.1" f="p1"
+          <DenseField label="Intensité" :min="0" :max="100" :step="0.1" :default="DEFAULT_ORBIT_TRAP.strength" f="p1"
             :model-value="orbitTrapConfig.strength" @update:model-value="(v: number) => setOrbitTrapNumber('strength', v)" />
-          <DenseField label="Échelle" :min="0.05" :max="4" :step="0.01" f="p2"
+          <DenseField label="Échelle" :min="0.05" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.scale" f="p2"
             :model-value="orbitTrapConfig.scale" @update:model-value="(v: number) => setOrbitTrapNumber('scale', v)" />
-          <DenseField label="Rotation" :min="-3.1416" :max="3.1416" :step="0.01" :f="radFmt"
+          <DenseField label="Rotation" :min="-3.1416" :max="3.1416" :step="0.01" :default="DEFAULT_ORBIT_TRAP.rotation" :f="radFmt"
             :model-value="orbitTrapConfig.rotation" @update:model-value="(v: number) => setOrbitTrapNumber('rotation', v)" />
-          <DenseField label="Pétales" :min="1" :max="16" :step="1" f="p0"
+          <DenseField label="Pétales" :min="1" :max="16" :step="1" :default="DEFAULT_ORBIT_TRAP.petals" f="p0"
             :model-value="orbitTrapConfig.petals" @update:model-value="(v: number) => setOrbitTrapNumber('petals', v)" />
-          <DenseField label="Profondeur pétales" :min="0" :max="1" :step="0.01" f="p2"
+          <DenseField label="Profondeur pétales" :min="0" :max="1" :step="0.01" :default="DEFAULT_ORBIT_TRAP.petalDepth" f="p2"
             :model-value="orbitTrapConfig.petalDepth" @update:model-value="(v: number) => setOrbitTrapNumber('petalDepth', v)" />
-          <DenseField label="Torsion" :min="-8" :max="8" :step="0.01" f="p2"
+          <DenseField label="Torsion" :min="-8" :max="8" :step="0.01" :default="DEFAULT_ORBIT_TRAP.twist" f="p2"
             :model-value="orbitTrapConfig.twist" @update:model-value="(v: number) => setOrbitTrapNumber('twist', v)" />
-          <DenseField label="Largeur" :min="0.005" :max="0.5" :step="0.001" f="p3"
+          <DenseField label="Largeur" :min="0.005" :max="0.5" :step="0.001" :default="DEFAULT_ORBIT_TRAP.width" f="p3"
             :model-value="orbitTrapConfig.width" @update:model-value="(v: number) => setOrbitTrapNumber('width', v)" />
-          <DenseField label="Dureté" :min="0.25" :max="8" :step="0.05" f="p2"
+          <DenseField label="Dureté" :min="0.25" :max="8" :step="0.05" :default="DEFAULT_ORBIT_TRAP.hardness" f="p2"
             :model-value="orbitTrapConfig.hardness" @update:model-value="(v: number) => setOrbitTrapNumber('hardness', v)" />
-          <DenseField label="Centre X" :min="-2" :max="2" :step="0.01" f="p2"
+          <DenseField label="Centre X" :min="-2" :max="2" :step="0.01" :default="DEFAULT_ORBIT_TRAP.centerX" f="p2"
             :model-value="orbitTrapConfig.centerX" @update:model-value="(v: number) => setOrbitTrapNumber('centerX', v)" />
-          <DenseField label="Centre Y" :min="-2" :max="2" :step="0.01" f="p2"
+          <DenseField label="Centre Y" :min="-2" :max="2" :step="0.01" :default="DEFAULT_ORBIT_TRAP.centerY" f="p2"
             :model-value="orbitTrapConfig.centerY" @update:model-value="(v: number) => setOrbitTrapNumber('centerY', v)" />
-          <DenseField label="Anisotropie X" :min="0.1" :max="4" :step="0.01" f="p2"
+          <DenseField label="Anisotropie X" :min="0.1" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.anisotropyX" f="p2"
             :model-value="orbitTrapConfig.anisotropyX" @update:model-value="(v: number) => setOrbitTrapNumber('anisotropyX', v)" />
-          <DenseField label="Anisotropie Y" :min="0.1" :max="4" :step="0.01" f="p2"
+          <DenseField label="Anisotropie Y" :min="0.1" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.anisotropyY" f="p2"
             :model-value="orbitTrapConfig.anisotropyY" @update:model-value="(v: number) => setOrbitTrapNumber('anisotropyY', v)" />
-          <DenseField label="Phase forme" :min="-3.1416" :max="3.1416" :step="0.01" :f="radFmt"
+          <DenseField label="Phase forme" :min="-3.1416" :max="3.1416" :step="0.01" :default="DEFAULT_ORBIT_TRAP.phase" :f="radFmt"
             :model-value="orbitTrapConfig.phase" @update:model-value="(v: number) => setOrbitTrapNumber('phase', v)" />
-          <DenseField label="Bandes distance" :min="0" :max="32" :step="0.1" f="p1"
+          <DenseField label="Bandes distance" :min="0" :max="32" :step="0.1" :default="DEFAULT_ORBIT_TRAP.distanceFrequency" f="p1"
             :model-value="orbitTrapConfig.distanceFrequency" @update:model-value="(v: number) => setOrbitTrapNumber('distanceFrequency', v)" />
-          <DenseField label="Poids distance" :min="-4" :max="4" :step="0.01" f="p2"
+          <DenseField label="Poids distance" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.distanceWeight" f="p2"
             :model-value="orbitTrapConfig.distanceWeight" @update:model-value="(v: number) => setOrbitTrapNumber('distanceWeight', v)" />
-          <DenseField label="Poids itération" :min="-4" :max="4" :step="0.01" f="p2"
+          <DenseField label="Poids itération" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.iterationWeight" f="p2"
             :model-value="orbitTrapConfig.iterationWeight" @update:model-value="(v: number) => setOrbitTrapNumber('iterationWeight', v)" />
-          <DenseField label="Poids angle" :min="-4" :max="4" :step="0.01" f="p2"
+          <DenseField label="Poids angle" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.angleWeight" f="p2"
             :model-value="orbitTrapConfig.angleWeight" @update:model-value="(v: number) => setOrbitTrapNumber('angleWeight', v)" />
-          <DenseField label="Décalage couleur" :min="-4" :max="4" :step="0.01" f="p2"
+          <DenseField label="Décalage couleur" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.phaseOffset" f="p2"
             :model-value="orbitTrapConfig.phaseOffset" @update:model-value="(v: number) => setOrbitTrapNumber('phaseOffset', v)" />
           <template v-if="orbitTrapConfig.mode === 'sampled' || orbitTrapConfig.mode === 'exact'">
-            <DenseField label="Début orbite" :min="0" :max="10000" :step="1" f="p0"
-              :model-value="orbitTrapConfig.startIteration" @update:model-value="(v: number) => setOrbitTrapNumber('startIteration', v)" />
-            <DenseField label="Fin orbite (0 = budget)" :min="0" :max="1000000" :step="1" f="p0"
-              :model-value="orbitTrapConfig.endIteration" @update:model-value="(v: number) => setOrbitTrapNumber('endIteration', v)" />
+            <DenseField label="Début orbite" :min="0" :max="10000" :step="1" :default="DEFAULT_ORBIT_TRAP.startIteration" f="p0"
+            :model-value="orbitTrapConfig.startIteration" @update:model-value="(v: number) => setOrbitTrapNumber('startIteration', v)" />
+            <DenseField label="Fin orbite (0 = budget)" :min="0" :max="1000000" :step="1" :default="DEFAULT_ORBIT_TRAP.endIteration" f="p0"
+            :model-value="orbitTrapConfig.endIteration" @update:model-value="(v: number) => setOrbitTrapNumber('endIteration', v)" />
             <DenseToggle label="Colorer l’intérieur"
               :model-value="orbitTrapConfig.includeInterior"
               @update:model-value="(v: boolean) => setOrbitTrapBoolean('includeInterior', v)" />
@@ -3402,31 +3402,31 @@ async function startVideoExport(payload: {
 
       <DenseSection group="params" :hue="25" v-show="paletteTab === 'material'" title="Global · Surface & Matière" initially-collapsed scope="Relief, ombrage et matériau partagés — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
         <div class="fields">
-          <DenseField label="Profondeur relief" :min="0" :max="2" :step="0.01" f="p2"
+          <DenseField label="Profondeur relief" :min="0" :max="2" :step="0.01" :default="1" f="p2"
             :model-value="model.reliefDepth ?? 1" @update:model-value="(v: number) => model.reliefDepth = v" />
-          <DenseField label="Phase protubérances" :min="0" :max="1" :step="0.001" f="p3"
+          <DenseField label="Phase protubérances" :min="0" :max="1" :step="0.001" :default="0" f="p3"
             :model-value="model.protrusionPhase ?? 0" @update:model-value="(v: number) => model.protrusionPhase = v" />
-          <DenseField label="Netteté protubérances" :min="0.25" :max="16" :step="0.05" f="p2"
+          <DenseField label="Netteté protubérances" :min="0.25" :max="16" :step="0.05" :default="2" f="p2"
             :model-value="model.protrusionSharpness ?? 2" @update:model-value="(v: number) => model.protrusionSharpness = v" />
-          <DenseField label="Amplification protubérances" :min="1" :max="4" :step="0.01" f="p2"
+          <DenseField label="Amplification protubérances" :min="1" :max="4" :step="0.01" :default="1" f="p2"
             :model-value="model.protrusionStrength ?? 1" @update:model-value="(v: number) => model.protrusionStrength = v" />
-          <DenseField label="Protubérances géométriques" :min="0" :max="1" :step="0.01" f="p2"
+          <DenseField label="Protubérances géométriques" :min="0" :max="1" :step="0.01" :default="0" f="p2"
             :model-value="model.protrusionGeometryMix ?? 0" @update:model-value="(v: number) => model.protrusionGeometryMix = v" />
-          <DenseField label="Période géométrique" :min="0.1" :max="16" :step="0.05" f="p2"
+          <DenseField label="Période géométrique" :min="0.1" :max="16" :step="0.05" :default="1" f="p2"
             :model-value="model.protrusionPeriod ?? 1" @update:model-value="(v: number) => model.protrusionPeriod = v" />
-          <DenseField label="Occlusion relief" :min="0" :max="10" :step="0.01" f="p2"
-            :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
-          <DenseField label="Occlusion ambiante" :min="0" :max="2" :step="0.01" f="p2"
-            :model-value="model.ambientOcclusionStrength ?? 0" @update:model-value="(v: number) => model.ambientOcclusionStrength = v" />
-          <DenseField label="Direction lumière" :min="0" :max="6.283" :step="0.01" :f="radFmt"
+          <DenseField label="Direction lumière" :min="0" :max="6.283" :step="0.01" :default="3.927" :f="radFmt"
             :model-value="model.lightAngle ?? 3.927" @update:model-value="(v: number) => model.lightAngle = v" />
-          <DenseField label="Bump fin" :min="0" :max="2" :step="0.01" f="p2"
+          <DenseField label="Bump fin" :min="0" :max="2" :step="0.01" :default="0" f="p2"
             :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
-          <DenseField label="Vernis" :min="0" :max="10" :step="0.01" f="p2"
+          <DenseField label="Ombres locales" :min="0" :max="10" :step="0.01" :default="0" f="p2"
+            :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
+          <DenseField label="Occlusion ambiante" :min="0" :max="10" :step="0.01" :default="0" f="p2"
+            :model-value="model.ambientOcclusionStrength ?? 0" @update:model-value="(v: number) => model.ambientOcclusionStrength = v" />
+          <DenseField label="Vernis" :min="0" :max="100" :step="0.05" :default="0" f="p2"
             :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
-          <DenseField label="Contraste" :min="0.5" :max="2" :step="0.01" f="p2"
+          <DenseField label="Contraste" :min="0.5" :max="2" :step="0.01" :default="1.18" f="p2"
             :model-value="model.gradeContrast ?? 1.18" @update:model-value="(v: number) => model.gradeContrast = v" />
-          <DenseField label="Saturation" :min="0" :max="2" :step="0.01" f="p2"
+          <DenseField label="Saturation" :min="0" :max="2" :step="0.01" :default="1.12" f="p2"
             :model-value="model.gradeSaturation ?? 1.12" @update:model-value="(v: number) => model.gradeSaturation = v" />
         </div>
       </DenseSection>
@@ -3445,11 +3445,11 @@ async function startVideoExport(payload: {
           </button>
         </div>
         <div class="fields">
-          <DenseField label="Teinte" :min="-180" :max="180" :step="1" :f="degFmt"
+          <DenseField label="Teinte" :min="-180" :max="180" :step="1" :default="0" :f="degFmt"
             :model-value="hslHueShift" @update:model-value="onHslHueInput" />
-          <DenseField label="Saturation" :min="-100" :max="100" :step="1" f="p0"
+          <DenseField label="Saturation" :min="-100" :max="100" :step="1" :default="0" f="p0"
             :model-value="satShift" @update:model-value="onSatInput" />
-          <DenseField label="Luminosité" :min="-100" :max="100" :step="1" f="p0"
+          <DenseField label="Luminosité" :min="-100" :max="100" :step="1" :default="0" f="p0"
             :model-value="lumShift" @update:model-value="onLumInput" />
         </div>
       </DenseSection>
@@ -3514,9 +3514,9 @@ async function startVideoExport(payload: {
 
       <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" title="Texture" scope="Échelle, mapping et préréglages de la couche image" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><path d=&quot;M3 15l5-4 4 3 4-5 5 6&quot;/>'>
         <div class="fields">
-          <DenseField label="Échelle image" :min="0.1" :max="10" :step="0.1" f="p1"
+          <DenseField label="Échelle image" :min="0.1" :max="10" :step="0.1" :default="1" f="p1"
             :model-value="model.tessellationLevel ?? 1" @update:model-value="(v: number) => model.tessellationLevel = v" />
-          <DenseField label="Déplacement" :min="0" :max="0.1" :step="0.001" :f="imgDispFmt"
+          <DenseField label="Déplacement" :min="0" :max="0.1" :step="0.001" :default="0" :f="imgDispFmt"
             :model-value="model.displacementAmount ?? 0" @update:model-value="(v: number) => model.displacementAmount = v" />
         </div>
 
@@ -3524,12 +3524,12 @@ async function startVideoExport(payload: {
           <DenseSelect label="Mapping X"
             :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
             :model-value="textureMappingXVariable" @update:model-value="(v: string | number) => textureMappingXVariable = v as typeof textureMappingXVariable" />
-          <DenseField label="Échelle X" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :f="xScaleFmt"
+          <DenseField label="Échelle X" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :default="0" :f="xScaleFmt"
             :model-value="textureMappingXScaleSlider" @update:model-value="(v: number) => textureMappingXScaleSlider = v" />
           <DenseSelect label="Mapping Y"
             :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
             :model-value="textureMappingYVariable" @update:model-value="(v: string | number) => textureMappingYVariable = v as typeof textureMappingYVariable" />
-          <DenseField label="Échelle Y" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :f="yScaleFmt"
+          <DenseField label="Échelle Y" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :default="0" :f="yScaleFmt"
             :model-value="textureMappingYScaleSlider" @update:model-value="(v: number) => textureMappingYScaleSlider = v" />
         </div>
 
@@ -3565,7 +3565,7 @@ async function startVideoExport(payload: {
       >
         <div class="fields">
           <DenseField
-            label="Fréquence rayures" :min="1" :max="32" :step="1"
+            label="Fréquence rayures" :min="1" :max="32" :step="1" :default="8"
             f="p0"
             :model-value="model.stripeFrequency ?? 8"
             @update:model-value="(v: number) => model.stripeFrequency = v"
@@ -3678,7 +3678,7 @@ async function startVideoExport(payload: {
             @update:model-value="(v) => model.dprMultiplier = Number(v)"
           />
 <DenseField
-            label="Cadence cible" :min="10" :max="60" :step="1"
+            label="Cadence cible" :min="10" :max="60" :step="1" :default="60"
             :f="fpsFmt"
             :model-value="model.targetFps ?? 60"
             @update:model-value="(v: number) => model.targetFps = v"
@@ -3706,26 +3706,26 @@ async function startVideoExport(payload: {
       </DenseSection>
       <DenseSection title="Calcul avancé" initially-collapsed>
         <div class="fields"><DenseField
-            label="Réserve de précision" :min="1" :max="1000" :step="1"
+            label="Réserve de précision" :min="1" :max="1000" :step="1" :default="30"
             :f="precisionBudgetFmt"
             :model-value="precisionBudgetExp"
             @update:model-value="(v: number) => precisionBudgetExp = v"
           />
 <DenseField
-            label="Budget d’itérations" :min="-2" :max="2" :step="0.01"
+            label="Budget d’itérations" :min="-2" :max="2" :step="0.01" :default="0"
             :f="iterationsFmt"
             :model-value="maxIterMultSlider"
             @update:model-value="(v: number) => maxIterMultSlider = v"
           />
 <DenseToggle
-            label="AA adaptatif"
+            label="AA adaptatif" :default="true"
             :model-value="model.aaAdaptive !== false"
             @update:model-value="(v: boolean) => model.aaAdaptive = v"
           /></div>
         <DenseSelect label="Algorithme" :options="calculationOptions" :model-value="kernelApproximationMode(model.approximationMode ?? 'bla')" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
         <p v-if="orbitTrapConfig.mode === 'exact'" class="panel-note">Orbit trap exact : les sauts sont désactivés pour parcourir toute l’orbite.</p>
         <div v-else-if="model.approximationMode !== 'perturbation'" class="fields"><DenseField
-            label="Tolérance d’approximation" :min="-12" :max="0" :step="1"
+            label="Tolérance d’approximation" :min="-12" :max="0" :step="1" :default="-3"
             :f="radiusFmt"
             :model-value="blaEpsilonExp"
             @update:model-value="(v: number) => blaEpsilonExp = v"

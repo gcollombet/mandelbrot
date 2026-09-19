@@ -17,6 +17,19 @@ describe('analytic AA approximation-mode eligibility', () => {
     expect(params).not.toContain("this.approximationMode === 'auto'")
   })
 
+  it('falls back to exact re-iteration below the low-bailout floor', () => {
+    // At mu = 4 the fixed-n extrapolation across a band edge is off by up to
+    // 0.5 iteration (c is not negligible against z²), which shifted every
+    // contour under AA. The gate lives in the shared predicate so the reseed
+    // tag, the color flag and the payload allocation all agree.
+    expect(engine).toContain('const AA_ANALYTIC_MIN_MU = 64')
+    const params = engine.match(
+      /private aaAnalyticParams[\s\S]*?return \{ logDelta, enabled \}/,
+    )?.[0] ?? ''
+    expect(params).toContain('>= AA_ANALYTIC_MIN_MU')
+    expect(params).toContain('Number.isFinite(logDelta) && muOk')
+  })
+
   it('keeps the analytic raw layers whenever analytic AA is enabled', () => {
     expect(engine).toContain(
       'return analyticRawPayloadNeeded ? RAW_LAYERS : RAW_BASE_LAYERS',

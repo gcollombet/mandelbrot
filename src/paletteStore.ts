@@ -69,7 +69,6 @@ export interface PaletteRecord extends ScopedCacheFields {
   animationSpeed?: number;
   tessellationLevel?: number;
   displacementAmount?: number;
-  ambientOcclusionStrength?: number;
   microBumpStrength?: number;
   reliefDepth?: number;
   protrusionPhase?: number;
@@ -77,8 +76,9 @@ export interface PaletteRecord extends ScopedCacheFields {
   protrusionStrength?: number;
   protrusionGeometryMix?: number;
   protrusionPeriod?: number;
-  localShadowStrength?: number;
   lightAngle?: number;
+  ambientOcclusionStrength?: number;
+  localShadowStrength?: number;
   varnishStrength?: number;
   gradeContrast?: number;
   gradeSaturation?: number;

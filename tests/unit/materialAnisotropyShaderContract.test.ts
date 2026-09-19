@@ -12,6 +12,6 @@ describe('material anisotropy shader contract', () => {
 
     expect(iridescence).toContain('let anisotropicOrientationShift =');
     expect(iridescence).toContain('let orientationShift = mix(0.5, anisotropicOrientationShift, anisotropy);');
-    expect(iridescence).toContain('rotate_sincos(anisotropyReliefDir, sceneSin, sceneCos)');
+    expect(iridescence).toContain('let orientationPlane = normalize(s.flow + vec2<f32>(1e-5));');
   });
 });

@@ -50,7 +50,6 @@ const props = defineProps<{
   displacementAmount?: number,
   animation?: AnimationConfig,
   animationSpeed?: number,
-  ambientOcclusionStrength?: number,
   microBumpStrength?: number,
   reliefDepth?: number,
   protrusionPhase?: number,
@@ -58,8 +57,9 @@ const props = defineProps<{
   protrusionStrength?: number,
   protrusionGeometryMix?: number,
   protrusionPeriod?: number,
-  localShadowStrength?: number,
   lightAngle?: number,
+  ambientOcclusionStrength?: number,
+  localShadowStrength?: number,
   varnishStrength?: number,
   gradeContrast?: number,
   gradeSaturation?: number,
@@ -473,7 +473,6 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :displacementAmount="props.displacementAmount"
       :animation="props.animation"
       :animationSpeed="props.animationSpeed"
-      :ambientOcclusionStrength="props.ambientOcclusionStrength"
       :microBumpStrength="props.microBumpStrength"
       :reliefDepth="props.reliefDepth"
       :protrusionPhase="props.protrusionPhase"
@@ -481,8 +480,9 @@ watch(() => props.pickerMode, syncKeyboardNavigation);
       :protrusionStrength="props.protrusionStrength"
       :protrusionGeometryMix="props.protrusionGeometryMix"
       :protrusionPeriod="props.protrusionPeriod"
-      :localShadowStrength="props.localShadowStrength"
       :lightAngle="props.lightAngle"
+      :ambientOcclusionStrength="props.ambientOcclusionStrength"
+      :localShadowStrength="props.localShadowStrength"
       :varnishStrength="props.varnishStrength"
       :gradeContrast="props.gradeContrast"
       :gradeSaturation="props.gradeSaturation"

@@ -7,19 +7,149 @@ import type { MandelbrotParams } from '../Mandelbrot'
 import type { Engine } from '../Engine'
 import { getAllPaletteEntries, type PaletteRecord } from '../paletteStore'
 import { getAllPresetEntries, getPresetById, type PresetMetadata } from '../presetStore'
-import { newPalettePath, snapshotPathAppearance, validatePalettePath, pathSegment, type PalettePath } from '../palettePath'
+import { newPalettePath, snapshotPathAppearance, validatePalettePath, pathSegment, type PalettePath, type PalettePathStop } from '../palettePath'
 import { readPalettePaths, savePalettePath, deletePalettePath } from '../palettePathStore'
 import { log10FromDecimalString } from '../floatexp'
 import { savePalettePathSnapshot } from '../savePalettePathSnapshot'
+import { DenseSection, DenseField, DenseSelect, DenseSeg, DenseToggle, DenseCard } from './dense'
+
 const props = defineProps<{ current: MandelbrotParams; engine: Engine | null; disabled?: boolean; editingStopId?: string | null }>()
 const emit = defineEmits<{ change: [path: PalettePath]; 'palette-saved': []; 'edit-stop': [stopId: string] }>()
+
+const MAGNITUDE_MIN = -10, MAGNITUDE_MAX = 1000, STOP_GAP = 0.0002
+const CURVE_OPTIONS = [
+  { value: 'linear', label: 'Linéaire' }, { value: 'gaussian', label: 'Gaussienne' },
+  { value: 'square', label: 'Carrée' }, { value: 'exponential', label: 'Exponentielle' },
+] as const
+const MODE_OPTIONS = [{ value: 'radial', label: 'Cercles concentriques' }, { value: 'global', label: 'Toute l’image' }]
+const OUTSIDE_OPTIONS = [{ value: 'hold', label: 'Palette de début / fin' }, { value: 'manual', label: 'Palette manuelle' }]
+const SIZE_OPTIONS = [{ value: 512, label: '512 px' }, { value: 1024, label: '1024 px' }, { value: 2048, label: '2048 px' }]
+
 const depth = computed(() => -log10FromDecimalString(props.current.scale))
+const depthOrZero = () => (Number.isFinite(depth.value) ? depth.value : 0)
 const copy = <T,>(v: T): T => JSON.parse(JSON.stringify(v))
-const draft = ref<PalettePath>(props.current.palettePath ? copy(props.current.palettePath) : newPalettePath(props.current, Number.isFinite(depth.value) ? depth.value : 0))
+const draft = ref<PalettePath>(props.current.palettePath ? copy(props.current.palettePath) : newPalettePath(props.current, depthOrZero()))
 const selected = ref(draft.value.stops[0].id), savedId = ref('')
 const saved = ref<PalettePath[]>([]), palettes = ref<PaletteRecord[]>([]), error = ref(''), status = ref('')
 const presets = ref<PresetMetadata[]>([]), picker = ref<'palettes' | 'presets' | null>(null), query = ref(''), loadingPreset = ref(false)
-const savingSnapshot = ref(false), snapshotStatus = ref('')
+const savingSnapshot = ref(false), snapshotStatus = ref(''), saveStatus = ref('')
+
+// ── Derived geometry ──
+const stops = computed(() => draft.value.stops)
+const stop = computed(() => stops.value.find(s => s.id === selected.value) ?? stops.value[0])
+const stopIndex = computed(() => stops.value.findIndex(s => s.id === stop.value.id))
+const isEndpoint = computed(() => stopIndex.value <= 0 || stopIndex.value >= stops.value.length - 1)
+const start = computed(() => stops.value[0].magnitude), end = computed(() => stops.value[stops.value.length - 1].magnitude)
+const percent = (m: number) => 100 * (m - start.value) / (end.value - start.value)
+const progress = computed(() => Math.max(0, Math.min(100, percent(depth.value))))
+const stopMin = computed(() => isEndpoint.value ? start.value : stops.value[stopIndex.value - 1].magnitude + STOP_GAP)
+const stopMax = computed(() => isEndpoint.value ? end.value : stops.value[stopIndex.value + 1].magnitude - STOP_GAP)
+const editingStop = computed(() => stops.value.find(s => s.id === props.editingStopId))
+const savedOptions = computed(() => [{ value: '', label: 'Nouveau / non enregistré' }, ...saved.value.map(p => ({ value: p.id, label: p.name }))])
+const fmt = (v: number) => v.toFixed(2)
+
+// ── Colour helpers: every stop shows the palette it carries ──
+const paletteCache = new Map<string, Palette>()
+function paletteOf(s: PalettePathStop): Palette {
+  const key = JSON.stringify([s.appearance.colorStops, s.appearance.interpolationMode])
+  let p = paletteCache.get(key)
+  if (!p) { p = new Palette(s.appearance.colorStops, s.appearance.interpolationMode); paletteCache.set(key, p) }
+  return p
+}
+const gradientOf = (p: Palette) => `linear-gradient(to right, ${Array.from({ length: 24 }, (_, i) => p.getColorAt(i / 23)).join(',')})`
+const stopColor = (s: PalettePathStop) => paletteOf(s).getColorAt(0.5)
+const stopGradient = (s: PalettePathStop) => gradientOf(paletteOf(s))
+function paletteGradient(p: PaletteRecord) { return gradientOf(new Palette(p.colorStops, p.interpolationMode)) }
+
+// ── Publishing: numeric scrubs are debounced so the GPU path is rebuilt once ──
+function guard(action: () => void) { error.value = ''; try { action() } catch (e) { error.value = String(e) } }
+function publish() { guard(() => { draft.value = validatePalettePath(draft.value); delete draft.value.resourceHashes; emit('change', copy(draft.value)) }) }
+let publishTimer: ReturnType<typeof setTimeout> | undefined
+function publishSoon() { clearTimeout(publishTimer); publishTimer = setTimeout(publish, 180) }
+
+// ── Range and stops ──
+function setRange(value: number, first: boolean) { guard(() => {
+  const a = first ? value : start.value, b = first ? end.value : value
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b - a < 0.001) throw new Error('La magnitude d’arrivée doit dépasser celle du départ.')
+  const oldA = start.value, span = end.value - oldA
+  stops.value.forEach(s => { s.magnitude = a + (s.magnitude - oldA) / span * (b - a) }); publishSoon()
+}) }
+function add(m = depth.value) {
+  if (stops.value.length >= 64) return
+  const magnitude = Math.max(start.value + STOP_GAP, Math.min(end.value - STOP_GAP, m))
+  if (stops.value.some(s => Math.abs(s.magnitude - magnitude) < 0.0001)) return
+  const s: PalettePathStop = { id: crypto.randomUUID(), magnitude, name: 'Palette actuelle', appearance: snapshotPathAppearance(props.current), curve: 'linear' }
+  stops.value.push(s); stops.value.sort((a, b) => a.magnitude - b.magnitude); selected.value = s.id; publish()
+}
+function addInGap() {
+  let index = stopIndex.value
+  if (index >= stops.value.length - 1 || stops.value[index + 1].magnitude - stops.value[index].magnitude < 2 * STOP_GAP) {
+    index = 0
+    for (let i = 1; i < stops.value.length - 1; i++) if (stops.value[i + 1].magnitude - stops.value[i].magnitude > stops.value[index + 1].magnitude - stops.value[index].magnitude) index = i
+  }
+  add((stops.value[index].magnitude + stops.value[index + 1].magnitude) / 2)
+}
+function removeStop() { if (stops.value.length <= 2) return; draft.value.stops = stops.value.filter(s => s.id !== selected.value); selected.value = stops.value[0].id; publish() }
+function moveStop(value: number) {
+  if (isEndpoint.value) return
+  stop.value.magnitude = Math.max(stopMin.value, Math.min(stopMax.value, value))
+}
+function onMagnitude(value: number) { moveStop(value); publishSoon() }
+
+// ── Timeline interaction ──
+const canvas = ref<HTMLCanvasElement>(), strip = ref<HTMLElement>(), dragging = ref(false)
+function pointer(event: PointerEvent, id: string) { selected.value = id; dragging.value = true; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId) }
+function drag(event: PointerEvent) {
+  if (!dragging.value || !strip.value) return
+  const box = strip.value.getBoundingClientRect(); moveStop(start.value + (event.clientX - box.left) / box.width * (end.value - start.value))
+}
+function drop() { if (!dragging.value) return; dragging.value = false; publish() }
+function addAt(event: MouseEvent) {
+  if (!strip.value) return
+  const box = strip.value.getBoundingClientRect(); add(start.value + (event.clientX - box.left) / box.width * (end.value - start.value))
+}
+function paint() {
+  const ctx = canvas.value?.getContext('2d'); if (!ctx) return
+  const w = 600, h = 44, img = ctx.createImageData(w, h)
+  const rows = stops.value.map(s => { const p = paletteOf(s); return Array.from({ length: h }, (_, y) => rgb(p.getColorAt(y / (h - 1)))) })
+  for (let x = 0; x < w; x++) {
+    const segment = pathSegment(draft.value, start.value + x / (w - 1) * (end.value - start.value))!
+    const t = applyStopTransferCurve(stops.value[segment.a].curve, segment.t)
+    for (let y = 0; y < h; y++) {
+      const a = rows[segment.a][y], b = rows[segment.b][y], i = (y * w + x) * 4
+      img.data[i] = a.r + (b.r - a.r) * t; img.data[i + 1] = a.g + (b.g - a.g) * t; img.data[i + 2] = a.b + (b.b - a.b) * t; img.data[i + 3] = 255
+    }
+  }
+  ctx.putImageData(img, 0, 0)
+}
+
+// ── Filling a stop: library palette, complete preset, or the manual palette ──
+const filteredPalettes = computed(() => palettes.value.filter(p => p.name.toLocaleLowerCase().includes(query.value.toLocaleLowerCase())))
+const filteredPresets = computed(() => presets.value.filter(p => p.name.toLocaleLowerCase().includes(query.value.toLocaleLowerCase())))
+async function openPicker(source: 'palettes' | 'presets') {
+  picker.value = picker.value === source ? null : source; query.value = ''; error.value = ''
+  try {
+    if (picker.value === 'presets') presets.value = await getAllPresetEntries()
+    else if (picker.value === 'palettes') palettes.value = await getAllPaletteEntries()
+  } catch (e) { error.value = String(e) }
+}
+function choosePalette(palette: PaletteRecord) {
+  stop.value.appearance = snapshotPathAppearance(palette); stop.value.name = palette.name; picker.value = null; publish()
+}
+async function extractPreset(preset: PresetMetadata) {
+  const stopId = stop.value.id
+  loadingPreset.value = true; error.value = ''
+  try {
+    const record = await getPresetById(preset.id)
+    if (!record) throw new Error('Ce preset n’est plus disponible.')
+    const target = stops.value.find(s => s.id === stopId)
+    if (!target || props.disabled) return
+    target.appearance = snapshotPathAppearance(record.value); target.name = preset.name || 'Preset sans nom'
+    picker.value = null; publish()
+  } catch (e) { error.value = String(e) }
+  finally { loadingPreset.value = false }
+}
+function capture() { picker.value = null; stop.value.appearance = snapshotPathAppearance(props.current); stop.value.name = 'Palette actuelle'; publish() }
 async function extractCurrentMix() {
   if (props.disabled || savingSnapshot.value) return
   savingSnapshot.value = true; error.value = ''; snapshotStatus.value = ''
@@ -31,167 +161,160 @@ async function extractCurrentMix() {
   } catch (e) { error.value = String(e) }
   finally { savingSnapshot.value = false }
 }
-const filteredPalettes = computed(() => palettes.value.filter(p => p.name.toLocaleLowerCase().includes(query.value.toLocaleLowerCase())))
-const filteredPresets = computed(() => presets.value.filter(p => p.name.toLocaleLowerCase().includes(query.value.toLocaleLowerCase())))
-function paletteGradient(p: PaletteRecord) {
-  const palette = new Palette(p.colorStops, p.interpolationMode)
-  return `linear-gradient(to right, ${Array.from({ length: 24 }, (_, i) => palette.getColorAt(i / 23)).join(',')})`
-}
-async function openPicker(source: 'palettes' | 'presets') {
-  picker.value = picker.value === source ? null : source; query.value = ''; error.value = ''
-  try {
-    if (picker.value === 'presets') presets.value = await getAllPresetEntries()
-    else if (picker.value === 'palettes') palettes.value = await getAllPaletteEntries()
-  } catch (e) { error.value = String(e) }
-}
-async function extractPreset(preset: PresetMetadata) {
-  const stopId = stop.value.id
-  loadingPreset.value = true; error.value = ''
-  try {
-    const record = await getPresetById(preset.id)
-    if (!record) throw new Error('Ce preset n’est plus disponible.')
-    const target = draft.value.stops.find(s => s.id === stopId)
-    if (!target || props.disabled) return
-    target.appearance = snapshotPathAppearance(record.value); target.name = preset.name || 'Preset sans nom'
-    picker.value = null; publish()
-  } catch (e) { error.value = String(e) }
-  finally { loadingPreset.value = false }
-}
-const canvas = ref<HTMLCanvasElement>(), dragging = ref(false)
-const stop = computed(() => draft.value.stops.find(s => s.id === selected.value) ?? draft.value.stops[0])
-const start = computed(() => draft.value.stops[0].magnitude), end = computed(() => draft.value.stops[draft.value.stops.length - 1].magnitude)
-const percent = (m: number) => 100 * (m - start.value) / (end.value - start.value)
-const progress = computed(() => Math.max(0, Math.min(100, percent(depth.value))))
-function guard(action: () => void) { error.value = ''; try { action() } catch (e) { error.value = String(e) } }
-function publish() { guard(() => { draft.value = validatePalettePath(draft.value); delete draft.value.resourceHashes; emit('change', copy(draft.value)) }) }
+
+// ── Saved paths (local to this browser) ──
 function refresh() { guard(() => { saved.value = readPalettePaths() }) }
-function chooseSaved() {
+function chooseSaved(id: string | number) {
+  savedId.value = String(id); saveStatus.value = ''
   const p = saved.value.find(p => p.id === savedId.value)
   if (p) { draft.value = copy(p); selected.value = p.stops[0].id; publish() }
 }
 function save(duplicate = false) { guard(() => {
   if (duplicate) { draft.value.id = crypto.randomUUID(); draft.value.name += ' · copie' }
   savePalettePath(draft.value); savedId.value = draft.value.id; refresh(); publish()
+  saveStatus.value = `Parcours « ${draft.value.name} » enregistré sur ce navigateur.`
 }) }
-function removeSaved() { guard(() => { deletePalettePath(savedId.value); savedId.value = ''; refresh() }) }
-function create() { draft.value = newPalettePath(props.current, Number.isFinite(depth.value) ? depth.value : 0); selected.value = draft.value.stops[0].id; savedId.value = ''; publish() }
-function setRange(value: string, first: boolean) { guard(() => {
-  const a = first ? Number(value) : start.value, b = first ? end.value : Number(value)
-  if (!Number.isFinite(a) || !Number.isFinite(b) || b - a < 0.001) throw new Error('La magnitude d’arrivée doit dépasser celle du départ.')
-  const oldA = start.value, span = end.value - oldA
-  draft.value.stops.forEach(s => { s.magnitude = a + (s.magnitude - oldA) / span * (b - a) }); publish()
-}) }
-function add(m = depth.value) {
-  if (draft.value.stops.length >= 64) return
-  const magnitude = Math.max(start.value + 0.0002, Math.min(end.value - 0.0002, m))
-  if (draft.value.stops.some(s => Math.abs(s.magnitude - magnitude) < 0.0001)) return
-  const s = { id: crypto.randomUUID(), magnitude, name: 'Palette actuelle', appearance: snapshotPathAppearance(props.current), curve: 'linear' as const }
-  draft.value.stops.push(s); draft.value.stops.sort((a, b) => a.magnitude - b.magnitude); selected.value = s.id; publish()
-}
-function addInGap() {
-  const stops = draft.value.stops
-  let index = stops.findIndex(s => s.id === selected.value)
-  if (index >= stops.length - 1 || stops[index + 1].magnitude - stops[index].magnitude < 0.0004) {
-    index = 0
-    for (let i = 1; i < stops.length - 1; i++) if (stops[i + 1].magnitude - stops[i].magnitude > stops[index + 1].magnitude - stops[index].magnitude) index = i
-  }
-  add((stops[index].magnitude + stops[index + 1].magnitude) / 2)
-}
-function removeStop() { if (draft.value.stops.length <= 2) return; draft.value.stops = draft.value.stops.filter(s => s.id !== selected.value); selected.value = draft.value.stops[0].id; publish() }
-function choosePalette(palette: PaletteRecord) {
-  stop.value.appearance = snapshotPathAppearance(palette); stop.value.name = palette.name; picker.value = null; publish()
-}
-function capture() { stop.value.appearance = snapshotPathAppearance(props.current); stop.value.name = 'Palette actuelle'; publish() }
-function moveStop(value: number) {
-  const i = draft.value.stops.findIndex(s => s.id === selected.value)
-  if (i <= 0 || i >= draft.value.stops.length - 1) return
-  stop.value.magnitude = Math.max(draft.value.stops[i - 1].magnitude + 0.0001, Math.min(draft.value.stops[i + 1].magnitude - 0.0001, value))
-}
-function pointer(event: PointerEvent, id: string) { selected.value = id; dragging.value = true; (event.currentTarget as HTMLElement).setPointerCapture(event.pointerId) }
-function drag(event: PointerEvent) {
-  if (!dragging.value || !canvas.value) return
-  const box = canvas.value.getBoundingClientRect(); moveStop(start.value + (event.clientX - box.left) / box.width * (end.value - start.value))
-}
-function drop() { if (!dragging.value) return; dragging.value = false; publish() }
-function paint() {
-  const ctx = canvas.value?.getContext('2d'); if (!ctx) return
-  const w = 600, h = 48, img = ctx.createImageData(w, h)
-  const rows = draft.value.stops.map(s => { const p = new Palette(s.appearance.colorStops, s.appearance.interpolationMode); return Array.from({ length: h }, (_, y) => rgb(p.getColorAt(y / (h - 1)))) })
-  for (let x = 0; x < w; x++) {
-    const segment = pathSegment(draft.value, start.value + x / (w - 1) * (end.value - start.value))!
-    const t = applyStopTransferCurve(draft.value.stops[segment.a].curve, segment.t)
-    for (let y = 0; y < h; y++) {
-      const a = rows[segment.a][y], b = rows[segment.b][y], i = (y * w + x) * 4
-      img.data[i] = a.r + (b.r - a.r) * t; img.data[i + 1] = a.g + (b.g - a.g) * t; img.data[i + 2] = a.b + (b.b - a.b) * t; img.data[i + 3] = 255
-    }
-  }
-  ctx.putImageData(img, 0, 0)
-}
+function removeSaved() { guard(() => { const name = draft.value.name; deletePalettePath(savedId.value); savedId.value = ''; refresh(); saveStatus.value = `Parcours « ${name} » supprimé.` }) }
+function create() { draft.value = newPalettePath(props.current, depthOrZero()); selected.value = draft.value.stops[0].id; savedId.value = ''; saveStatus.value = ''; publish() }
+
+// ── Lifecycle ──
 watch(() => props.current.palettePath, p => { if (p) { draft.value = copy(p); if (!p.stops.some(s => s.id === selected.value)) selected.value = p.stops[0].id } })
 watch(draft, () => { void nextTick(paint) }, { deep: true })
-let timer: ReturnType<typeof setInterval> | undefined
-onMounted(async () => { refresh(); try { palettes.value = await getAllPaletteEntries() } catch (e) { error.value = String(e) }; paint(); timer = setInterval(() => { status.value = props.engine?.palettePathStatus ?? '' }, 400) })
-onUnmounted(() => clearInterval(timer))
+const onStatus = (s: string) => { status.value = s }
+onMounted(async () => {
+  refresh(); paint()
+  status.value = props.engine?.palettePathStatus ?? ''
+  props.engine?.palettePathStatusListeners.add(onStatus)
+  try { palettes.value = await getAllPaletteEntries() } catch (e) { error.value = String(e) }
+})
+onUnmounted(() => { props.engine?.palettePathStatusListeners.delete(onStatus); clearTimeout(publishTimer) })
 </script>
+
 <template>
-  <div class="palette-path-panel">
-    <fieldset :disabled="disabled">
-      <label class="enable"><input v-model="draft.enabled" type="checkbox" @change="publish"> Activer le parcours</label>
-      <div class="row"><label>Application<select v-model="draft.mode" @change="publish"><option value="radial">Cercles concentriques</option><option value="global">Toute l’image</option></select></label><label>Hors plage<select v-model="draft.outside" @change="publish"><option value="hold">Palette de début / fin</option><option value="manual">Palette manuelle</option></select></label></div>
-      <p class="hint">La magnitude augmente en zoomant. En mode cercles, la profondeur varie avec la distance au centre de la vue.</p>
-      <div class="row"><label>Départ<input type="number" step="0.1" :value="start" @change="setRange(($event.target as HTMLInputElement).value, true)"></label><label>Arrivée<input type="number" step="0.1" :value="end" @change="setRange(($event.target as HTMLInputElement).value, false)"></label></div>
-      <div class="timeline">
-        <canvas ref="canvas" width="600" height="48" aria-label="Parcours de palettes" @dblclick="add(start + $event.offsetX / ($event.target as HTMLElement).clientWidth * (end - start))" />
-        <span class="cursor" :style="{ left: progress + '%' }" :title="'Magnitude actuelle : ' + depth.toFixed(3)"></span>
-        <button v-for="s in draft.stops" :key="s.id" class="stop" :class="{ selected: s.id === selected, editing: s.id === editingStopId }" :style="{ left: percent(s.magnitude) + '%' }" :aria-label="s.name + ' à ' + s.magnitude + (s.id === editingStopId ? ' (en édition)' : '')" :title="s.name + ' · ' + s.magnitude.toFixed(3) + ' · double-clic : éditer dans Palettes'" @pointerdown="pointer($event, s.id)" @pointermove="drag" @pointerup="drop" @pointercancel="drop" @click="selected = s.id" @dblclick.stop="emit('edit-stop', s.id)">◆</button>
-      </div>
-      <p v-if="editingStopId" class="hint" role="status">Le stop « {{ draft.stops.find(s => s.id === editingStopId)?.name }} » est chargé dans l’onglet Palettes : chaque modification s’applique au parcours. Décocher le parcours restaure la palette précédente.</p>
-      <div class="row toolbar"><span>{{ draft.stops.length }} stops · {{ depth.toFixed(3) }}</span><button @click="addInGap" :disabled="draft.stops.length >= 64">+ Stop</button><button @click="removeStop" :disabled="draft.stops.length <= 2">Supprimer le stop</button></div>
-      <button :disabled="savingSnapshot || !Number.isFinite(depth)" @click="extractCurrentMix">{{ savingSnapshot ? 'Capture en cours…' : 'Extraire la palette au curseur' }}</button>
-      <p class="hint">Enregistre le mix à la magnitude actuelle, avec ses matériaux et images. Approximation éditable sur 200 points ; en mode cercles, capture au curseur uniquement.</p>
-      <p v-if="snapshotStatus" class="hint" role="status">{{ snapshotStatus }}</p>
-      <div class="selected-stop">
-        <strong>{{ stop.name }}</strong>
-        <div class="row"><label>Magnitude<input type="number" step="0.01" :value="stop.magnitude" :disabled="stop.id === draft.stops[0].id || stop.id === draft.stops[draft.stops.length - 1].id" @change="moveStop(Number(($event.target as HTMLInputElement).value)); publish()"></label><label>Transition suivante<select v-model="stop.curve" @change="publish"><option value="linear">Linéaire</option><option value="gaussian">Gaussienne</option><option value="square">Carrée</option><option value="exponential">Exponentielle</option></select></label></div>
-        <div class="row toolbar">
-          <button :aria-expanded="picker === 'palettes'" @click="openPicker('palettes')">Choisir une palette…</button>
-          <button :aria-expanded="picker === 'presets'" @click="openPicker('presets')">Extraire d’un preset…</button>
+  <div class="palette-path-panel body">
+    <fieldset :disabled="disabled" class="sections">
+      <DenseSection title="Parcours" active :hue="285" scope="Une palette par profondeur, fondue entre les stops"
+        icon='<path d=&quot;M3 17c4 0 4-10 8-10s4 10 8 10&quot;/><circle cx=&quot;3&quot; cy=&quot;17&quot; r=&quot;1.5&quot;/><circle cx=&quot;11&quot; cy=&quot;7&quot; r=&quot;1.5&quot;/><circle cx=&quot;19&quot; cy=&quot;17&quot; r=&quot;1.5&quot;/>'>
+        <div class="fields">
+          <DenseToggle v-model="draft.enabled" label="Activer le parcours" :default="false" @update:model-value="publish" />
+          <DenseSelect v-model="draft.outside" label="Hors plage" :options="OUTSIDE_OPTIONS" default="hold" @update:model-value="publish" />
+          <DenseSeg v-model="draft.mode" label="Application" :options="MODE_OPTIONS" default="radial" class="span2" @update:model-value="publish" />
+          <DenseField label="Départ" :min="MAGNITUDE_MIN" :max="MAGNITUDE_MAX" :step="0.1" :f="fmt" :model-value="start" @update:model-value="setRange($event, true)" />
+          <DenseField label="Arrivée" :min="MAGNITUDE_MIN" :max="MAGNITUDE_MAX" :step="0.1" :f="fmt" :model-value="end" @update:model-value="setRange($event, false)" />
         </div>
-        <div v-if="picker" class="appearance-picker" :aria-busy="loadingPreset">
-          <label>Rechercher<input v-model="query" type="search" placeholder="Nom…"></label>
-          <div class="appearance-grid">
+        <p class="panel-note">La magnitude augmente en zoomant. En mode cercles, elle varie aussi avec la distance au centre de la vue.</p>
+        <div ref="strip" class="strip timeline" @dblclick="addAt">
+          <canvas ref="canvas" width="600" height="44" aria-label="Parcours de palettes"></canvas>
+          <span class="cursor" :style="{ left: progress + '%' }" :title="'Magnitude actuelle : ' + fmt(depth)"></span>
+          <button v-for="s in stops" :key="s.id" type="button" class="stop-marker" :class="{ sel: s.id === selected, editing: s.id === editingStopId }"
+            :style="{ left: percent(s.magnitude) + '%', background: stopColor(s) }"
+            :aria-label="s.name + ' à ' + fmt(s.magnitude) + (s.id === editingStopId ? ' (en édition)' : '')"
+            :title="s.name + ' · ' + fmt(s.magnitude)"
+            @pointerdown="pointer($event, s.id)" @pointermove="drag" @pointerup="drop" @pointercancel="drop" @click="selected = s.id" @dblclick.stop="emit('edit-stop', s.id)"></button>
+        </div>
+        <p class="panel-note">Clic : sélectionner · glisser : déplacer · double-clic sur la bande : ajouter un stop ici · double-clic sur un stop : l’éditer dans Palettes.</p>
+        <p v-if="editingStop" class="panel-note editing-note" role="status">« {{ editingStop.name }} » est chargé dans l’onglet Palettes : chaque modification s’applique au parcours. Désactiver le parcours restaure la palette précédente.</p>
+        <div class="transfer">
+          <span class="count">{{ stops.length }} stops · magnitude {{ fmt(depth) }}</span>
+          <button type="button" class="mini-btn" :disabled="stops.length >= 64" @click="addInGap">+ Stop</button>
+          <button type="button" class="mini-btn" :disabled="savingSnapshot || !Number.isFinite(depth)" title="Enregistre le mélange à la magnitude actuelle dans la bibliothèque, avec ses matériaux et images (approximation sur 200 points ; en mode cercles, au curseur uniquement)" @click="extractCurrentMix">{{ savingSnapshot ? 'Capture en cours…' : 'Extraire au curseur' }}</button>
+        </div>
+        <p v-if="snapshotStatus" class="panel-note" role="status">{{ snapshotStatus }}</p>
+      </DenseSection>
+
+      <DenseSection title="Stop sélectionné" active :hue="320" scope="Palette, position et transition du stop"
+        icon='<path d=&quot;M12 3l2.6 5.3 5.9.9-4.3 4.1 1 5.9L12 16.4 6.8 19.2l1-5.9L3.5 9.2l5.9-.9z&quot;/>'>
+        <div class="stop-head">
+          <span class="stop-swatch" :style="{ background: stopGradient(stop) }"></span>
+          <span class="stop-name">{{ stop.name }}</span>
+          <span class="stop-pos">{{ stopIndex + 1 }} / {{ stops.length }}</span>
+        </div>
+        <div class="fields">
+          <fieldset :disabled="isEndpoint" class="bare" :title="isEndpoint ? 'Les stops de départ et d’arrivée suivent la plage' : undefined">
+            <DenseField label="Magnitude" :min="stopMin" :max="stopMax" :step="0.01" :f="fmt" :model-value="stop.magnitude" @update:model-value="onMagnitude" />
+          </fieldset>
+          <DenseSelect v-model="stop.curve" label="Transition suivante" :options="CURVE_OPTIONS" default="linear" @update:model-value="publish" />
+        </div>
+        <div class="subhead">Remplir le stop</div>
+        <div class="seg fill-seg">
+          <button type="button" :class="{ on: picker === 'palettes' }" :aria-expanded="picker === 'palettes'" @click="openPicker('palettes')">Palette de la bibliothèque</button>
+          <button type="button" :class="{ on: picker === 'presets' }" :aria-expanded="picker === 'presets'" @click="openPicker('presets')">Preset complet</button>
+          <button type="button" title="Copie la palette manuelle et ses matériaux dans ce stop" @click="capture">Palette actuelle</button>
+        </div>
+        <div v-if="picker" class="picker" :aria-busy="loadingPreset">
+          <div class="save-row"><input v-model="query" class="txt-in" type="search" placeholder="Rechercher…" aria-label="Rechercher"></div>
+          <div class="grid">
             <template v-if="picker === 'palettes'">
-              <button v-for="p in filteredPalettes" :key="p.name" class="appearance-card" :title="p.name" @click="choosePalette(p)">
-                <img v-if="p.thumbnail" :src="p.thumbnail" alt="" loading="lazy">
-                <span v-else class="palette-swatch" :style="{ background: paletteGradient(p) }"></span>
-                <span>{{ p.name }}</span>
-              </button>
-              <p v-if="!filteredPalettes.length" class="hint">Aucune palette trouvée.</p>
+              <DenseCard v-for="p in filteredPalettes" :key="p.name" :name="p.name" :thumb="p.thumbnail || undefined" @select="choosePalette(p)">
+                <template #thumb><span class="card-gradient" :style="{ background: paletteGradient(p) }"></span></template>
+              </DenseCard>
+              <p v-if="!filteredPalettes.length" class="panel-note">Aucune palette trouvée.</p>
             </template>
             <template v-else>
-              <button v-for="p in filteredPresets" :key="p.id" class="appearance-card preset-card" :title="p.name || 'Preset sans nom'" :disabled="loadingPreset" @click="extractPreset(p)">
-                <img v-if="p.thumbnail" :src="p.thumbnail" alt="" loading="lazy">
-                <span v-else class="palette-swatch">Aperçu indisponible</span>
-                <span>{{ p.name || 'Preset sans nom' }}</span>
-              </button>
-              <p v-if="!filteredPresets.length" class="hint">Aucun preset trouvé.</p>
+              <DenseCard v-for="p in filteredPresets" :key="p.id" :name="p.name || 'Preset sans nom'" sub="Couleurs, matériaux et images" :thumb="p.thumbnail || undefined" @select="!loadingPreset && extractPreset(p)">
+                <template #thumb><span class="card-gradient muted">Aperçu indisponible</span></template>
+              </DenseCard>
+              <p v-if="!filteredPresets.length" class="panel-note">Aucun preset trouvé.</p>
             </template>
           </div>
-          <p v-if="picker === 'presets'" class="hint">Copie les couleurs, matériaux et images dans ce stop.</p>
         </div>
-        <button @click="capture">Copier la palette manuelle et ses matériaux</button>
-      </div>
-      <details><summary>Textures et calcul</summary><label>Résolution maximale des images<select v-model.number="draft.textureSize" @change="publish"><option :value="512">512 px</option><option :value="1024">1024 px</option><option :value="2048">2048 px</option></select></label><p class="hint">Images communes partagées, budget de 128 Mio. La fréquence orbitale et la géométrie des traps restent communes ; les poids des matériaux et effets varient entre les stops. L’ExpMap cuit toujours les cercles.</p></details>
-      <hr>
-      <label>Parcours enregistrés<select v-model="savedId" @change="chooseSaved"><option value="">Nouveau / non enregistré</option><option v-for="p in saved" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
-      <label>Nom<input v-model="draft.name" maxlength="100" @change="publish"></label>
-      <div class="row toolbar"><button @click="save()">Enregistrer</button><button @click="save(true)">Dupliquer</button><button @click="create">Nouveau</button><button :disabled="!savedId" @click="removeSaved">Supprimer</button></div>
-      <p class="hint">Sauvegarde locale sur ce navigateur. Chaque stop conserve une copie de sa palette.</p>
+        <div class="transfer">
+          <button type="button" class="mini-btn danger" :disabled="stops.length <= 2" @click="removeStop">Supprimer ce stop</button>
+        </div>
+      </DenseSection>
+
+      <DenseSection title="Parcours enregistrés" active :hue="300" scope="Sauvegarde locale sur ce navigateur"
+        icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'>
+        <div class="fields">
+          <DenseSelect label="Parcours" :options="savedOptions" :model-value="savedId" class="span2" @update:model-value="chooseSaved" />
+        </div>
+        <div class="save-row"><input v-model="draft.name" class="txt-in" maxlength="100" aria-label="Nom du parcours" placeholder="Nom du parcours" @change="publish"></div>
+        <div class="transfer">
+          <button type="button" class="mini-btn primary" @click="save()">Enregistrer</button>
+          <button type="button" class="mini-btn" @click="save(true)">Dupliquer</button>
+          <button type="button" class="mini-btn" @click="create">Nouveau</button>
+          <button type="button" class="mini-btn danger" :disabled="!savedId" @click="removeSaved">Supprimer</button>
+        </div>
+        <p class="panel-note">Sauvegarde locale sur ce navigateur : les parcours ne sont pas synchronisés avec le cloud. Chaque stop conserve une copie de sa palette.</p>
+        <p v-if="saveStatus" class="panel-note" role="status">{{ saveStatus }}</p>
+      </DenseSection>
+
+      <DenseSection title="Textures et calcul" active initially-collapsed :hue="175" scope="Résolution des images du parcours"
+        icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><circle cx=&quot;9&quot; cy=&quot;10&quot; r=&quot;2&quot;/><path d=&quot;M21 15l-5-5-11 9&quot;/>'>
+        <div class="fields">
+          <DenseSelect :model-value="draft.textureSize" label="Résolution maximale des images" :options="SIZE_OPTIONS" :default="1024" class="span2" @update:model-value="draft.textureSize = Number($event) as 512 | 1024 | 2048; publish()" />
+        </div>
+        <p class="panel-note">Images partagées entre les stops, budget de 128 Mio. La fréquence orbitale et la géométrie des traps restent communes ; les matériaux et effets varient d’un stop à l’autre. L’ExpMap cuit toujours les cercles.</p>
+      </DenseSection>
     </fieldset>
-    <p v-if="error" role="alert" class="error">{{ error }}</p><p v-if="status" class="hint" role="status">{{ status }}</p>
+    <p v-if="error" role="alert" class="panel-note error">{{ error }}</p>
+    <p v-if="status" class="panel-note" role="status">{{ status }}</p>
   </div>
 </template>
+
 <style scoped>
-.palette-path-panel{padding:10px;font-size:12px;max-width:620px;color:var(--ink,#e5e7eb)}fieldset{border:0;padding:0;margin:0;min-width:0}label{display:flex;flex-direction:column;gap:4px;margin:6px 0;flex:1;min-width:0}.enable{flex-direction:row;align-items:center;font-weight:600}.row{display:flex;gap:8px;align-items:center}.toolbar{flex-wrap:wrap;justify-content:space-between;margin:8px 0}input,select,button{font:inherit;color:var(--ink,#e5e7eb);background:var(--row,#252530);border:1px solid var(--line,#6665);border-radius:5px;padding:5px;min-width:0}button{cursor:pointer}button:disabled{opacity:.4}.hint{font-size:11px;opacity:.7;line-height:1.4}.timeline{position:relative;margin:12px 8px 20px;touch-action:none}canvas{display:block;width:100%;height:48px;border-radius:5px}.stop{position:absolute;bottom:-15px;transform:translateX(-50%);padding:0 3px;font-size:18px;background:var(--row,#20202c);color:var(--ink,#ccc);touch-action:none}.stop.selected{color:#e9beff;border-color:#db9aff;z-index:2}.stop.editing{color:#9be7ff;border-color:#5cc8ff;box-shadow:0 0 4px #5cc8ff}.cursor{position:absolute;top:0;bottom:0;width:2px;background:white;pointer-events:none;box-shadow:0 0 2px #000}.selected-stop strong{color:var(--ink,#e5e7eb)}.selected-stop{padding:8px;border:1px solid #8884;border-radius:6px}.error{color:#ff9999}hr{border:0;border-top:1px solid #8884;margin:12px 0}
-.appearance-picker{padding:6px;border:1px solid var(--line,#6665);border-radius:5px}.appearance-grid{display:grid;grid-template-columns:repeat(auto-fill,minmax(105px,1fr));gap:6px;max-height:260px;overflow:auto}.appearance-card{display:flex;flex-direction:column;gap:4px;text-align:left;overflow:hidden}.appearance-card img,.palette-swatch{display:block;width:100%;height:36px;object-fit:cover;border-radius:3px}.preset-card img,.preset-card .palette-swatch{height:72px}.appearance-card>span:last-child{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;width:100%}
+.palette-path-panel { display: flex; flex-direction: column; gap: 7px; }
+fieldset { border: 0; padding: 0; margin: 0; min-width: 0; }
+fieldset.sections { display: flex; flex-direction: column; gap: 7px; }
+fieldset.bare { display: contents; }
+fieldset.bare:disabled .fld { opacity: .55; cursor: default; }
+.timeline { margin: 8px 6px 18px; overflow: visible; touch-action: none; }
+.timeline canvas { display: block; width: 100%; height: 100%; border-radius: inherit; }
+.timeline .cursor { position: absolute; top: -3px; bottom: -3px; width: 2px; background: #fff; pointer-events: none; box-shadow: 0 0 3px #000; }
+.timeline .stop-marker { top: auto; bottom: -13px; height: 22px; width: 14px; margin-left: -7px; padding: 0; }
+.timeline .stop-marker.editing { border-color: #5cc8ff; box-shadow: 0 0 0 2px #5cc8ff, 0 3px 9px rgba(0,0,0,.6); }
+.transfer { align-items: center; }
+.transfer .count { font-size: 11.5px; color: var(--ink-3); margin-right: auto; }
+.editing-note { color: var(--ink); }
+.stop-head { display: flex; align-items: center; gap: 8px; margin: 2px 0 8px; }
+.stop-swatch { width: 44px; height: 20px; border-radius: 5px; border: 1px solid var(--line); flex: none; }
+.stop-name { font-weight: 600; font-size: 12.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.stop-pos { margin-left: auto; font-family: var(--mono); font-size: 11px; color: var(--ink-3); }
+.fill-seg { margin-bottom: 6px; }
+.picker { margin: 4px 0 8px; }
+.picker .save-row { margin: 0 0 8px; }
+.picker .grid { max-height: 280px; overflow: auto; }
+.card-gradient { display: block; width: 100%; height: 40px; }
+.card-gradient.muted { display: grid; place-items: center; font-size: 10px; color: var(--ink-3); background: var(--row); }
+.error { color: var(--red); }
 </style>
