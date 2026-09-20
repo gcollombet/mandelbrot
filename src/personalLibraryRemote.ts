@@ -164,6 +164,31 @@ export async function getPersonalPresetRecord(uid: string, guid: string): Promis
   return snapshot.exists() ? personalRecordFromDoc(snapshot.data(), snapshot.id) : null;
 }
 
+/** Direct reads by link never enumerate or hydrate another user's library. */
+export async function getSharedPresetRecord(uid: string, guid: string): Promise<PersonalRecordEnvelope | null> {
+  const {db} = requireServices();
+  if (!uid || uid.includes('/') || uid.length > 128) throw new Error('Lien de scène invalide.');
+  const snapshot = await getDoc(presetRef(db, uid, requirePersonalGuid(guid)));
+  return snapshot.exists() ? personalRecordFromDoc(snapshot.data(), snapshot.id) : null;
+}
+
+export async function getSharedTexture(uid: string, guid: string): Promise<{metadata: PersonalTextureMetadata; blob: Blob} | null> {
+  const {db, storage} = requireServices();
+  if (!uid || uid.includes('/') || uid.length > 128) throw new Error('Lien de scène invalide.');
+  const safeGuid = requirePersonalGuid(guid);
+  const snapshot = await getDoc(textureRef(db, uid, safeGuid));
+  if (!snapshot.exists()) return null;
+  const data = snapshot.data();
+  const storagePath = textureStoragePath(uid, safeGuid);
+  const metadata: PersonalTextureMetadata = {
+    guid: safeGuid, name: data.name, kind: data.kind === 'skybox' ? 'skybox' : 'texture',
+    contentType: 'image/webp', storagePath, width: data.width, height: data.height,
+    byteSize: data.byteSize, thumbnail: data.thumbnail || '',
+    updatedAt: timestampToIso(data.updatedAt), revision: normalizedRevision(data.revision),
+  };
+  return {metadata, blob: await getBlob(ref(storage, storagePath))};
+}
+
 export async function getPersonalUsage(uid: string): Promise<PersonalUsage> {
   const {db} = requireOwnerServices(uid);
   const snapshot = await getDoc(usageRef(db, uid));

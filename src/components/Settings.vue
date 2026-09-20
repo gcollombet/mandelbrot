@@ -17,6 +17,9 @@ import {
 } from '../stopPresetStore.ts';
 import type {StopPresetRecord} from '../stopPresetStore.ts';
 import PaletteEditor from './PaletteEditor.vue';
+import PresetActionsMenu from './PresetActionsMenu.vue';
+import {prepareSceneShare} from '../sceneSharing';
+import {registerSharedTexture} from '../sharedSceneTextures';
 import PalettePreview from './PalettePreview.vue';
 import GlissiereHandle from './GlissiereHandle.vue';
 import AnimationPanel from './AnimationPanel.vue';
@@ -102,7 +105,7 @@ import {
   buildPresetImportIdentitySet,
   hasPresetImportIdentity,
 } from '../presetImportIdentity';
-import {absolutePresetUrl, PRESET_QUERY_PARAMETER} from '../presetDeepLink';
+import {absolutePresetUrl} from '../presetDeepLink';
 
 import type {Engine} from '../Engine.ts';
 import type { ExpmapMotion } from '../expmap/motion';
@@ -127,6 +130,7 @@ const props = defineProps<{
   pickerAction?: 'add' | 'select';
   userRole?: UserRole;
   activePresetGuid?: string | null;
+  requestSignIn?: () => Promise<void>;
 }>();
 
 const router = useRouter();
@@ -909,27 +913,101 @@ const currentNavPresetThumbnail = computed(() => currentNavPresetMeta.value?.thu
 const presetLinkCopied = ref(false);
 let presetLinkCopiedTimer: ReturnType<typeof setTimeout> | null = null;
 
-async function copySelectedCatalogPresetLink(): Promise<void> {
-  const preset = currentNavPresetMeta.value;
-  if (!preset?.remote) return;
+const shareBusy = ref(false);
+const shareSaving = ref(false);
+const shareMessage = ref('');
+const shareError = ref(false);
+const shareLabel = computed(() => {
+  if (shareBusy.value || shareSaving.value) return 'Synchronisation…';
+  if (sceneLink.origin.value?.remote && !sceneLink.dirty.value) return 'Copier le lien';
+  if (userRole.value === 'guest') return 'Se connecter pour partager';
+  if (!sceneLink.origin.value || sceneLink.locked.value) return 'Enregistrer et copier le lien';
+  return sceneLink.dirty.value ? 'Enregistrer et copier le lien' : 'Copier le lien';
+});
 
-  const resolved = router.resolve({
-    path: '/',
-    query: {[PRESET_QUERY_PARAMETER]: preset.guid},
-  });
-  const url = absolutePresetUrl(resolved.href, window.location.href);
+async function copyPresetLink(id: number): Promise<void> {
+  if (shareBusy.value) return;
+  shareBusy.value = true;
+  shareMessage.value = '';
+  shareError.value = false;
   try {
-    if (!navigator.clipboard) throw new Error('Clipboard API unavailable');
-    await navigator.clipboard.writeText(url);
+    const query = await prepareSceneShare(id);
+    const url = absolutePresetUrl(router.resolve({path: '/', query}).href, window.location.href);
+    try { await navigator.clipboard.writeText(url); }
+    catch { window.prompt('Copiez le lien de la scène :', url); return; }
     presetLinkCopied.value = true;
+    shareMessage.value = 'Lien copié — toute personne disposant du lien peut ouvrir cette scène.';
     if (presetLinkCopiedTimer) clearTimeout(presetLinkCopiedTimer);
-    presetLinkCopiedTimer = window.setTimeout(() => {
-      presetLinkCopied.value = false;
-      presetLinkCopiedTimer = null;
-    }, 1600);
-  } catch {
-    window.prompt('Copiez le lien du preset :', url);
-  }
+    presetLinkCopiedTimer = setTimeout(() => { presetLinkCopied.value = false; }, 2500);
+  } catch (error) {
+    shareError.value = true;
+    shareMessage.value = error instanceof Error ? error.message : 'Impossible de partager la scène.';
+  } finally { shareBusy.value = false; }
+}
+
+async function shareCurrentScene(): Promise<void> {
+  if (shareBusy.value || shareSaving.value || sceneLinkBusy.value) return;
+  shareSaving.value = true;
+  shareError.value = false;
+  shareMessage.value = '';
+  try {
+    if (sceneLink.origin.value?.remote && !sceneLink.dirty.value) {
+      await copyPresetLink(Number(sceneLink.origin.value.key));
+      return;
+    }
+    if (userRole.value === 'guest') {
+      if (!props.requestSignIn) throw new Error('Connectez-vous pour partager cette scène.');
+      const pending = buildScenePresetValue();
+      for (const [guidKey, nameKey] of [['textureGuid', 'textureName'], ['skyboxGuid', 'skyboxName']] as const) {
+        const texture = textures.value.find(t => t.guid === pending[guidKey]);
+        if (!texture || texture.remote || texture.guid?.startsWith('shared:')) continue;
+        const blob = await getTextureBlob(texture.name);
+        if (!blob) throw new Error('Une texture de la scène est indisponible.');
+        const alias = `shared:guest:${texture.guid}`;
+        const name = `${texture.name} · partagé guest:${texture.guid}`;
+        registerSharedTexture({...texture, guid: alias, name}, blob);
+        pending[guidKey] = alias;
+        pending[nameKey] = name;
+      }
+      await props.requestSignIn();
+      model.value = preserveSessionPerformanceFields(pending, model.value);
+      await loadTextures();
+    }
+    const origin = sceneLink.origin.value;
+    let id: number;
+    if (origin && !sceneLink.locked.value) {
+      id = Number(origin.key);
+      if (sceneLink.dirty.value) {
+        const record = await getPresetById(id);
+        if (!record) throw new Error('Ce preset n’existe plus.');
+        await updatePresetEntry({...record, value: buildScenePresetValue(), thumbnail: await sceneThumbnail(), lastUpdated: new Date().toISOString()});
+        presetCache.delete(id);
+        sceneLink.refresh();
+      }
+    } else {
+      await savePreset();
+      id = selectedPreset.value!;
+    }
+    await copyPresetLink(id);
+    presets.value = await getAllPresetEntries();
+  } catch (error) {
+    shareError.value = true;
+    shareMessage.value = error instanceof Error ? error.message : 'Impossible de partager la scène.';
+  } finally { shareSaving.value = false; }
+}
+
+async function renameSceneCard(preset: PresetMetadata) {
+  const name = window.prompt('Nom de la scène :', preset.name);
+  try { if (name?.trim()) await renameLinkedScenePresetById(preset.id, name.trim()); }
+  catch (error) { shareError.value = true; shareMessage.value = error instanceof Error ? error.message : String(error); }
+}
+async function duplicateSceneCard(preset: PresetMetadata) {
+  try {
+    const record = await getPresetById(preset.id);
+    if (!record) return;
+    await savePresetEntry(record.value, record.thumbnail, `${record.name} · copie`);
+    presets.value = await getAllPresetEntries();
+  } catch (error) { shareError.value = true; shareMessage.value = String(error); }
 }
 
 const favoritePresets = computed(() => presets.value.filter(p => p.favorite));
@@ -1103,23 +1181,18 @@ async function savePreset() {
   const id = await savePresetEntry(savedValue, thumbnail, name || undefined, now);
   presets.value = await getAllPresetEntries();
   const metadata = presets.value.find(preset => preset.id === id);
-  // Cache the new record
-  presetCache.set(id, {
-    id,
-    guid: metadata?.guid ?? crypto.randomUUID(),
-    name: metadata?.name ?? (name || now),
-    value: savedValue,
-    thumbnail,
-    date: now,
-    lastUpdated: metadata?.lastUpdated ?? now,
-    scaleExponent: computeScaleExponent(savedValue.scale),
-    favorite: false,
-    remote: metadata?.remote,
-  });
+  const stored = await getPresetById(id);
+  if (stored) {
+    presetCache.set(id, stored);
+    for (const key of ['textureGuid', 'textureName', 'skyboxGuid', 'skyboxName'] as const) model.value[key] = stored.value[key];
+    await loadTextures();
+  }
   // The freshly saved preset becomes the linked one.
   selectedPreset.value = id;
   presetName.value = metadata?.name ?? name;
   linkScenePreset(id, metadata?.name ?? (name || now), metadata?.remote);
+  shareMessage.value = 'Scène enregistrée. Vous pouvez maintenant partager son lien.';
+  shareError.value = false;
 }
 
 /**
@@ -1171,6 +1244,7 @@ async function quickSnapshot() {
 
 async function refreshLibrary(): Promise<void> {
   presetCache.clear();
+  sceneLink.unlink();
   selectedPreset.value = null;
   selectedNavPreset.value = null;
   selectedPalettePreset.value = null;
@@ -1196,6 +1270,7 @@ async function refreshPaletteLibrary(): Promise<void> {
 defineExpose({
   selectPaletteStop: (index: number) => { selectedIdx.value = index; },
   refreshPaletteLibrary,
+  shareCurrentScene,
   quickSnapshot,
   refreshPresets: loadPresets,
   refreshLibrary,
@@ -2893,14 +2968,15 @@ async function startVideoExport(payload: {
           class="mini-btn preset-link-btn"
           :class="{ copied: presetLinkCopied }"
           type="button"
-          :disabled="!currentNavPresetMeta?.remote"
-          :title="currentNavPresetMeta?.remote ? 'Copier le lien partageable de ce preset' : 'Disponible pour les presets publiés dans le catalogue'"
-          @click="copySelectedCatalogPresetLink"
+          :disabled="!currentNavPresetMeta || shareBusy"
+          title="Copier le lien de la scène enregistrée"
+          @click="currentNavPresetMeta && copyPresetLink(currentNavPresetMeta.id)"
         >
           <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
           {{ presetLinkCopied ? 'Lien copié' : 'Copier le lien' }}
         </button>
       </div>
+      <p v-if="shareMessage" role="status" :class="{ 'share-error': shareError }">{{ shareMessage }}</p>
       <p class="load-note">Applies Cx, Cy, zoom &amp; angle from the selected preset.</p>
 
       <div v-if="isAdmin" class="transfer">
@@ -3005,6 +3081,11 @@ async function startVideoExport(payload: {
     <!-- Presets tab -->
     <div v-else-if="activeTab === 'presets'" class="cv-body sections">
 
+      <div class="scene-share-row">
+        <button type="button" class="mini-btn primary" :disabled="shareBusy || shareSaving || sceneLinkBusy" @click="shareCurrentScene">{{ shareLabel }}</button>
+        <p class="section-help">Les scènes synchronisées sont accessibles à toute personne disposant de leur lien.</p>
+        <p v-if="shareMessage" role="status" :class="{ 'share-error': shareError }">{{ shareMessage }}</p>
+      </div>
       <!-- ============ 1. SAVE CURRENT VIEW ============ -->
       <DenseSection
         title="Enregistrer la vue" initially-collapsed
@@ -3062,29 +3143,16 @@ async function startVideoExport(payload: {
           <span class="sel-badge">Appliqué</span>
           <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
-          <div class="acts">
-            <button
-              v-if="isAdmin"
-              class="abtn"
-              :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)"
-              type="button"
-              :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)"
-              @click.stop.prevent="uploadCompletePreset(preset.id)"
-            >
-              <i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i>
-            </button>
-            <button class="abtn heart" :class="{ faved: preset.favorite }" title="Favorite"
-              @click.stop.prevent="togglePresetFavorite(preset.id)">
-              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-            </button>
-            <button v-if="isAdmin" class="abtn" title="Export" @click.stop.prevent="exportPresetById(preset.id)">
-              <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
-            </button>
-            <button class="abtn del" title="Delete" @click.stop.prevent="deletePresetById(preset.id)">
-              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
-            </button>
-          </div>
-          <div class="info">
+          <div class="info"><PresetActionsMenu :label="preset.name">
+              <button type="button" :disabled="shareBusy" @click="copyPresetLink(preset.id)">Copier le lien</button>
+              <button type="button" @click="togglePresetFavorite(preset.id)">{{ preset.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
+              <button v-if="canOverwriteCatalogPayload(userRole, preset.remote)" type="button" @click="renameSceneCard(preset)">Renommer…</button>
+              <button type="button" @click="duplicateSceneCard(preset)">Dupliquer</button>
+              <button v-if="isAdmin" type="button" @click="exportPresetById(preset.id)">Exporter…</button>
+              <button v-if="isAdmin" type="button" @click="uploadCompletePreset(preset.id)">{{ isUploadSuccess(uploadSuccessKey('preset', preset.id)) ? 'Catalogue mis à jour' : 'Publier dans le catalogue' }}</button>
+              <button v-if="canDeleteCatalogEntry(userRole, preset.remote)" type="button" class="danger" @click="deletePresetById(preset.id)">Supprimer…</button>
+            </PresetActionsMenu>
+            <span v-if="preset.favorite" class="favorite-marker" aria-label="Favori">♥</span>
             <div v-if="displayName(preset.name)" class="nm">{{ displayName(preset.name) }}</div>
             <div class="sub">
               <span>{{ formatPresetDate(preset.date) }}</span>
@@ -3093,7 +3161,7 @@ async function startVideoExport(payload: {
           </div>
         </div>
         <div v-if="visiblePresets.length === 0" class="empty">
-          {{ showOnlyFavoritePresets ? 'No favorites yet — hover a card and tap the heart.' : 'No presets saved yet.' }}
+          {{ showOnlyFavoritePresets ? 'Aucun favori — utilisez le menu ⋯ d’une scène.' : 'Aucune scène enregistrée.' }}
         </div>
       </div>
 
@@ -3464,18 +3532,11 @@ async function startVideoExport(payload: {
           <span class="sel-badge">Appliqué</span>
           <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
-          <div class="acts">
-            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" type="button" :disabled="!canUploadTexture(tex)" :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" @click.stop.prevent="uploadTexture(tex)">
-              <i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i>
-            </button>
-            <button class="abtn heart" :class="{ faved: tex.favorite }" type="button" title="Favorite" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click.stop.prevent="toggleTextureFavorite(tex)">
-              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-            </button>
-            <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" class="abtn del" type="button" title="Delete" @click.stop.prevent="deleteTextureByName(tex.name)">
-              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
-            </button>
-          </div>
-          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? 'Unavailable — safe fallback active' : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in map' : 'Saved map' }}</span></div></div>
+          <div class="info"><PresetActionsMenu v-if="!tex.guid?.startsWith('shared:')" :label="tex.name">
+              <button type="button" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click="toggleTextureFavorite(tex)">{{ tex.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
+              <button v-if="isAdmin" type="button" :disabled="!canUploadTexture(tex)" @click="uploadTexture(tex)">Publier dans le catalogue</button>
+              <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" type="button" class="danger" @click="deleteTextureByName(tex.name)">Supprimer…</button>
+            </PresetActionsMenu><span v-if="tex.favorite" class="favorite-marker" aria-label="Favori">♥</span><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? 'Unavailable — safe fallback active' : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in map' : 'Saved map' }}</span></div></div>
         </div>
         <div v-if="textures.length === 0" class="empty">No environment maps available.</div>
       </div>
@@ -3493,18 +3554,11 @@ async function startVideoExport(payload: {
           <span class="sel-badge">Appliqué</span>
           <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
-          <div class="acts">
-            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" type="button" :disabled="!canUploadTexture(tex)" :title="uploadButtonTitle(uploadSuccessKey('texture', tex.guid || tex.name), tex.remote)" @click.stop.prevent="uploadTexture(tex)">
-              <i :class="uploadButtonIcon(uploadSuccessKey('texture', tex.guid || tex.name))"></i>
-            </button>
-            <button class="abtn heart" :class="{ faved: tex.favorite }" type="button" title="Favorite" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click.stop.prevent="toggleTextureFavorite(tex)">
-              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-            </button>
-            <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" class="abtn del" type="button" title="Delete" @click.stop.prevent="deleteTextureByName(tex.name)">
-              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
-            </button>
-          </div>
-          <div class="info"><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? 'Unavailable — safe fallback active' : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in texture' : 'Saved texture' }}</span></div></div>
+          <div class="info"><PresetActionsMenu v-if="!tex.guid?.startsWith('shared:')" :label="tex.name">
+              <button type="button" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click="toggleTextureFavorite(tex)">{{ tex.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
+              <button v-if="isAdmin" type="button" :disabled="!canUploadTexture(tex)" @click="uploadTexture(tex)">Publier dans le catalogue</button>
+              <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" type="button" class="danger" @click="deleteTextureByName(tex.name)">Supprimer…</button>
+            </PresetActionsMenu><span v-if="tex.favorite" class="favorite-marker" aria-label="Favori">♥</span><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? 'Unavailable — safe fallback active' : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in texture' : 'Saved texture' }}</span></div></div>
         </div>
         <div v-if="textures.length === 0" class="empty">No image textures available.</div>
       </div>
@@ -3591,21 +3645,12 @@ async function startVideoExport(payload: {
           <span class="sel-badge">Appliqué</span>
           <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail" class="thumb palette-thumb" />
           <div v-else class="thumb thumb-empty palette-thumb"></div>
-          <div class="acts">
-            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('palette', palette.name), palette.remote)" type="button" :title="uploadButtonTitle(uploadSuccessKey('palette', palette.name), palette.remote)" @click.stop.prevent="uploadPalettePreset(palette)">
-              <i :class="uploadButtonIcon(uploadSuccessKey('palette', palette.name))"></i>
-            </button>
-            <button class="abtn heart" :class="{ faved: palette.favorite }" title="Favorite" @click.stop.prevent="togglePaletteFavorite(palette.name)">
-              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-            </button>
-            <button v-if="isAdmin" class="abtn" title="Export" @click.stop.prevent="exportPaletteByName(palette.name)">
-              <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
-            </button>
-            <button v-if="canDeleteCatalogEntry(userRole, palette.remote)" class="abtn del" title="Delete" @click.stop.prevent="deletePaletteByName(palette.name)">
-              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
-            </button>
-          </div>
-          <div class="info"><div v-if="displayName(palette.name)" class="nm">{{ displayName(palette.name) }}</div><div class="sub"><span>{{ formatPresetDate(palette.date) }}</span></div></div>
+          <div class="info"><PresetActionsMenu :label="palette.name">
+              <button type="button" @click="togglePaletteFavorite(palette.name)">{{ palette.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
+              <button v-if="isAdmin" type="button" @click="exportPaletteByName(palette.name)">Exporter…</button>
+              <button v-if="isAdmin" type="button" @click="uploadPalettePreset(palette)">Publier dans le catalogue</button>
+              <button v-if="canDeleteCatalogEntry(userRole, palette.remote)" type="button" class="danger" @click="deletePaletteByName(palette.name)">Supprimer…</button>
+            </PresetActionsMenu><span v-if="palette.favorite" class="favorite-marker" aria-label="Favori">♥</span><div v-if="displayName(palette.name)" class="nm">{{ displayName(palette.name) }}</div><div class="sub"><span>{{ formatPresetDate(palette.date) }}</span></div></div>
         </div>
         <div v-if="visiblePalettes.length === 0" class="empty">{{ showOnlyFavoritePalettes ? 'No favorite palettes yet.' : 'No saved palettes yet.' }}</div>
       </div>
@@ -3636,21 +3681,16 @@ async function startVideoExport(payload: {
           <span class="sel-badge">Appliqué</span>
           <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
-          <div class="acts">
-            <button v-if="isAdmin" class="abtn" :class="uploadButtonClasses(uploadSuccessKey('preset', preset.id), preset.remote)" type="button" :title="uploadButtonTitle(uploadSuccessKey('preset', preset.id), preset.remote)" @click.stop.prevent="uploadCompletePreset(preset.id)">
-              <i :class="uploadButtonIcon(uploadSuccessKey('preset', preset.id))"></i>
-            </button>
-            <button class="abtn heart" :class="{ faved: preset.favorite }" title="Favorite" @click.stop.prevent="togglePresetFavorite(preset.id)">
-              <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-            </button>
-            <button v-if="isAdmin" class="abtn" title="Export" @click.stop.prevent="exportPresetById(preset.id)">
-              <svg viewBox="0 0 24 24"><path d="M12 15V3M7 8l5-5 5 5"/><path d="M5 21h14"/></svg>
-            </button>
-            <button class="abtn del" title="Delete" @click.stop.prevent="deletePresetById(preset.id)">
-              <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
-            </button>
-          </div>
-          <div class="info">
+          <div class="info"><PresetActionsMenu :label="preset.name">
+              <button type="button" :disabled="shareBusy" @click="copyPresetLink(preset.id)">Copier le lien</button>
+              <button type="button" @click="togglePresetFavorite(preset.id)">{{ preset.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
+              <button v-if="canOverwriteCatalogPayload(userRole, preset.remote)" type="button" @click="renameSceneCard(preset)">Renommer…</button>
+              <button type="button" @click="duplicateSceneCard(preset)">Dupliquer</button>
+              <button v-if="isAdmin" type="button" @click="exportPresetById(preset.id)">Exporter…</button>
+              <button v-if="isAdmin" type="button" @click="uploadCompletePreset(preset.id)">{{ isUploadSuccess(uploadSuccessKey('preset', preset.id)) ? 'Catalogue mis à jour' : 'Publier dans le catalogue' }}</button>
+              <button v-if="canDeleteCatalogEntry(userRole, preset.remote)" type="button" class="danger" @click="deletePresetById(preset.id)">Supprimer…</button>
+            </PresetActionsMenu>
+            <span v-if="preset.favorite" class="favorite-marker" aria-label="Favori">♥</span>
             <div v-if="displayName(preset.name)" class="nm">{{ displayName(preset.name) }}</div>
             <div class="sub"><span>{{ formatPresetDate(preset.date) }}</span><span v-if="preset.scaleExponent > 0" class="depth">{{ formatZoom(preset.scaleExponent) }}</span></div>
           </div>
@@ -5892,4 +5932,12 @@ async function startVideoExport(payload: {
 .display-diagnostics { margin-top: 6px; font-size: 11px; }
 .display-diagnostics summary { cursor: pointer; opacity: .8; }
 .display-diagnostics p { margin: 5px 0; overflow-wrap: anywhere; }
+</style>
+
+<style scoped>
+.scene-share-row { padding: 8px 0; }
+.scene-share-row p { margin: 6px 0 0; font-size: 12px; }
+.share-error { color: #e47979; }
+.favorite-marker { color: var(--accent, #e898a2); margin-right: 4px; font-size: 11px; }
+.cv-body .card .info { min-height: 38px; }
 </style>

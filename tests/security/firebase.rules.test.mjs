@@ -44,19 +44,33 @@ describe('Firestore authorization', () => {
     ['textureReservations/a.webp', () => reservation()],
     ['importBatches/a', () => ({id: 'a', uid: 'alice', ownerUid: 'alice', status: 'pending', presetGuids: [], textureGuids: [], completedPresetGuids: [], completedTextureGuids: [], updatedAt: now()})],
   ]) {
-    it(`isolates ${path} from guests and other accounts, including admins`, async () => {
+    it(`protects ${path} writes and enumeration from guests and other accounts, including admins`, async () => {
       const fullPath = `users/alice/${path}`;
       await assertSucceeds(owner().firestore().doc(fullPath).set(data()));
       await assertSucceeds(owner().firestore().doc(fullPath).get());
       await assertSucceeds(owner().firestore().collection(`users/alice/${path.split('/')[0]}`).get());
       for (const context of [guest(), other(), env.authenticatedContext('admin', {admin: true})]) {
-        await assertFails(context.firestore().doc(fullPath).get());
+        const directLinkReadable = path.startsWith('presets/') || path.startsWith('textures/');
+        await (directLinkReadable ? assertSucceeds : assertFails)(context.firestore().doc(fullPath).get());
         await assertFails(context.firestore().collection(`users/alice/${path.split('/')[0]}`).get());
         await assertFails(context.firestore().doc(fullPath).set(data()));
         await assertFails(context.firestore().doc(fullPath).delete());
       }
     });
   }
+
+
+  it('opens the latest scene by exact path without exposing its library', async () => {
+    const path = 'users/alice/presets/a';
+    await seed(path, preset());
+    assert.equal((await assertSucceeds(guest().firestore().doc(path).get())).data().name, 'A');
+    await assertSucceeds(owner().firestore().doc(path).update({name: 'Updated', revision: 2, updatedAt: now()}));
+    assert.equal((await assertSucceeds(guest().firestore().doc(path).get())).data().name, 'Updated');
+    await assertFails(guest().firestore().collection('users/alice/presets').where('guid', '==', 'a').get());
+    await assertFails(guest().firestore().collectionGroup('presets').get());
+    await assertSucceeds(owner().firestore().doc(path).delete());
+    assert.equal((await assertSucceeds(guest().firestore().doc(path).get())).exists, false);
+  });
 
   it('allows public catalog get, but denies enumeration and changes to non-admins', async () => {
     const path = 'catalog/completePreset/entries/a';
@@ -145,7 +159,7 @@ describe('Firestore data validation and compatibility', () => {
 });
 
 describe('Storage authorization and upload restrictions', () => {
-  it('requires a valid unexpired reservation for a private WebP upload', async () => {
+  it('allows direct texture reads but requires an owner reservation for uploads', async () => {
     const target = owner().storage().ref('users/alice/textures/a.webp');
     await assertFails(target.put(new Uint8Array(4), {contentType: 'image/webp'}));
     await seed('users/alice/textureReservations/a.webp', reservation({expiresAt: Timestamp.fromMillis(Date.now() - 60000)}));
@@ -155,7 +169,8 @@ describe('Storage authorization and upload restrictions', () => {
     await assertSucceeds(target.getMetadata());
     for (const context of [guest(), other(), env.authenticatedContext('admin', {admin: true})]) {
       const otherTarget = context.storage().ref('users/alice/textures/a.webp');
-      await assertFails(otherTarget.getMetadata());
+      await assertSucceeds(otherTarget.getMetadata());
+      await assertFails(context.storage().ref('users/alice/textures').listAll());
       await assertFails(otherTarget.put(new Uint8Array(4), {contentType: 'image/webp'}));
       await assertFails(otherTarget.delete());
     }

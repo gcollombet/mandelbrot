@@ -175,7 +175,8 @@ service cloud.firestore {
     }
 
     match /users/{uid}/presets/{guid} {
-      allow read: if isOwner(uid);
+      allow get: if true;
+      allow list: if isOwner(uid);
       allow create: if isOwner(uid)
         && isValidPersonalPreset(uid, guid, request.resource.data)
         && request.resource.data.revision == 1;
@@ -186,7 +187,8 @@ service cloud.firestore {
     }
 
     match /users/{uid}/textures/{guid} {
-      allow read: if isOwner(uid);
+      allow get: if true;
+      allow list: if isOwner(uid);
       allow create: if isOwner(uid)
         && isValidPersonalTexture(uid, guid, request.resource.data)
         && request.resource.data.revision == 1;

@@ -5,6 +5,7 @@ import {
   getTextureMetadataByName,
 } from './textureStore';
 import {ensurePersonalTextureCached} from './personalTextureSync';
+import {sharedTextureEntries, sharedTextureBlob} from './sharedSceneTextures';
 
 export const TEXTURE_SELECTED_KEY = 'mandelbrot_selected_texture';
 export const SKYBOX_SELECTED_KEY = 'mandelbrot_selected_skybox';
@@ -38,7 +39,7 @@ export async function ensureTextureLibrary(): Promise<TextureMetadata[]> {
       remote: stored?.remote,
     };
   });
-  return [...builtIns, ...customTextures];
+  return [...builtIns, ...customTextures, ...sharedTextureEntries()];
 }
 
 export function textureSourceKey(name: string, textures: TextureMetadata[]): string {
@@ -47,6 +48,8 @@ export function textureSourceKey(name: string, textures: TextureMetadata[]): str
 }
 
 export async function storedTextureObjectUrl(name: string): Promise<string | null> {
+  const shared = sharedTextureBlob(name);
+  if (shared) return URL.createObjectURL(shared);
   const builtInTexture = BUILT_IN_TEXTURES.find(texture => texture.name === name);
   if (builtInTexture) return builtInTexture.url;
   let blob = await getTextureBlob(name);

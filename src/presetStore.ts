@@ -12,6 +12,7 @@
  */
 
 import type { MandelbrotParams } from './Mandelbrot';
+import {materializeSharedTextures} from './sharedSceneTextures';
 import {normalizeColorStops} from './ColorStop';
 import {createGuid, defaultPresetName, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import {log10FromDecimalString} from './floatexp';
@@ -246,7 +247,7 @@ export async function savePresetEntry(
 ): Promise<number> {
   const now = date ?? new Date().toISOString();
   const resolvedName = await uniquePresetName((name || defaultPresetName(now)).trim(), guid);
-  const normalizedValue = normalizePresetValue(value);
+  const normalizedValue = normalizePresetValue(await materializeSharedTextures(value));
   const record: Omit<PresetRecord, 'id'> & { id?: number } = {
     guid,
     name: resolvedName,
@@ -270,7 +271,7 @@ export async function savePresetEntry(
  * Overwrite an existing preset (e.g. to rename it).
  */
 export async function updatePresetEntry(record: PresetRecord): Promise<void> {
-  const normalized = normalizePresetRecord(record);
+  const normalized = normalizePresetRecord({...record, value: await materializeSharedTextures(record.value)});
   normalized.name = await uniquePresetName(normalized.name || defaultPresetName(normalized.date), normalized.guid);
   normalized.lastUpdated = normalized.lastUpdated || normalized.date || new Date().toISOString();
   const { store, done } = await tx('readwrite');

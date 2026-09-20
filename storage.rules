@@ -25,7 +25,8 @@ service firebase.storage {
     }
 
     match /users/{uid}/textures/{fileName} {
-      allow read: if isOwner(uid);
+      allow get: if isPersonalTextureFile(fileName);
+      allow list: if isOwner(uid);
       allow create, update: if isOwner(uid)
         && isPersonalTextureFile(fileName)
         && request.resource.contentType == 'image/webp'

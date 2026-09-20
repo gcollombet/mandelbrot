@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { encodeHdrPng } from '../hdrPng';
 import { nearestPaletteStop } from '../palettePicking';
-import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
+import {computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
 import MandelbrotController from './MandelbrotController.vue';
 import ExpmapSurface from './ExpmapSurface.vue';
@@ -20,6 +20,7 @@ import {
 import {savePresetEntry, getAllPresetEntries, getPresetById, getPresetByGuid, saveRemotePresetEntry, getAllPresetRecords} from '../presetStore';
 import type {PresetRecord} from '../presetStore';
 import {PRESET_QUERY_PARAMETER, presetGuidFromRouteQuery} from '../presetDeepLink';
+import {loadSharedScene, SCENE_QUERY_PARAMETER, OWNER_QUERY_PARAMETER} from '../sceneSharing';
 import {syncActiveLibrary} from '../activeLibrarySync';
 import {log10FromDecimalString} from '../floatexp';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
@@ -54,7 +55,7 @@ import {
   textureSourceKey,
 } from '../textureLibrary';
 import {isAuthConfigured, libraryScopeForUser, observeAuthState, signInWithGoogle, signOutCurrentUser, type AuthState, type UserRole} from '../authService';
-import {setActiveLibraryScope} from '../scopedCache';
+import {getActiveLibraryScope, setActiveLibraryScope} from '../scopedCache';
 import {observePersonalSyncStatus, stopPersonalPresetSync, type PersonalSyncStatus} from '../personalPresetSync';
 import {stopPersonalTextureSync} from '../personalTextureSync';
 import {guestPresetCounts, importGuestLibrary, prepareGuestImport, snapshotGuestLibrary, type GuestImportPlan} from '../guestLibraryImport';
@@ -362,6 +363,29 @@ let authStateTransition: Promise<void> = Promise.resolve();
 let hydratedLibraryGeneration = 0;
 let presetRouteRequestGeneration = 0;
 const activePresetGuid = ref<string | null>(null);
+const sharedSceneName = ref('');
+const sharedSceneError = ref('');
+const sharedSceneLoading = ref(false);
+let activeSceneRouteKey = '';
+const sharedCopyBusy = ref(false);
+async function saveSharedSceneCopy() {
+  if (sharedCopyBusy.value) return;
+  sharedCopyBusy.value = true;
+  try { await triggerQuickSnapshot(); showHudStatus('Copie enregistrée'); }
+  catch (error) { showHudStatus(error instanceof Error ? error.message : String(error)); }
+  finally { sharedCopyBusy.value = false; }
+}
+async function openSceneSharing() {
+  if (!openTabs.has('presets')) toggleTab('presets');
+  bringToFront('presets');
+  await nextTick();
+}
+
+async function signInForSharing(): Promise<void> {
+  await loginWithGoogle();
+  await authStateTransition;
+  if (userRole.value === 'guest') throw new Error('Connexion nécessaire pour partager la scène.');
+}
 
 async function refreshOpenSettingsLibraries(): Promise<void> {
   await Promise.all(
@@ -404,6 +428,7 @@ async function applyAuthState(state: AuthState, generation: number): Promise<voi
 
   hydratedLibraryGeneration = generation;
   activePresetGuid.value = null;
+  activeSceneRouteKey = '';
   await applyPresetFromRoute(generation);
   if (generation !== authStateGeneration) return;
 
@@ -718,28 +743,35 @@ async function applyPresetFromRoute(generation = authStateGeneration): Promise<v
   const requestGeneration = ++presetRouteRequestGeneration;
   if (hydratedLibraryGeneration !== generation) return;
 
-  const guid = presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER]);
-  if (!guid) {
-    activePresetGuid.value = null;
-    return;
-  }
-  if (guid === activePresetGuid.value) return;
-
-  const record = await getPresetByGuid(guid);
-  if (
-    requestGeneration !== presetRouteRequestGeneration
-    || generation !== authStateGeneration
-    || hydratedLibraryGeneration !== generation
-    || presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER]) !== guid
-  ) return;
-
-  if (!record) {
-    activePresetGuid.value = null;
-    console.warn(`[presetDeepLink] Catalogue preset not found: ${guid}`);
-    return;
-  }
-  applyPresetRecord(record);
-  activePresetGuid.value = guid;
+  const owner = presetGuidFromRouteQuery(route.query[OWNER_QUERY_PARAMETER]);
+  const scene = presetGuidFromRouteQuery(route.query[SCENE_QUERY_PARAMETER]);
+  const guid = scene || presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER]);
+  const key = `${owner || ''}:${scene ? 'scene' : 'preset'}:${guid || ''}`;
+  if (activeSceneRouteKey === key) return;
+  sharedSceneName.value = '';
+  sharedSceneError.value = '';
+  sharedSceneLoading.value = !!guid;
+  const isCurrent = () => requestGeneration === presetRouteRequestGeneration && generation === authStateGeneration;
+  try {
+    if (!guid) { activePresetGuid.value = null; activeSceneRouteKey = ''; return; }
+    if (scene && !owner) throw new Error('Ce lien de scène est incomplet.');
+    const record = scene ? await loadSharedScene(owner!, scene) : await getPresetByGuid(guid);
+    if (!isCurrent()) return;
+    if (!record) throw new Error('Cette scène est introuvable ou a été supprimée.');
+    applyPresetRecord(record);
+    const scope = getActiveLibraryScope();
+    activePresetGuid.value = !scene || (scope.kind === 'user' && scope.uid === owner) ? guid : null;
+    activeSceneRouteKey = key;
+    sharedSceneName.value = scene ? record.name || 'Scène partagée' : '';
+    await refreshOpenSettingsLibraries();
+    await applySelectedTexturesToEngine();
+  } catch (error) {
+    if (isCurrent()) {
+      activeSceneRouteKey = '';
+      activePresetGuid.value = null;
+      sharedSceneError.value = error instanceof Error ? error.message : 'Impossible de charger cette scène.';
+    }
+  } finally { if (isCurrent()) sharedSceneLoading.value = false; }
 }
 
 async function onPresetSelected(guid: string, isCatalogPreset: boolean): Promise<void> {
@@ -748,18 +780,25 @@ async function onPresetSelected(guid: string, isCatalogPreset: boolean): Promise
   presetRouteRequestGeneration += 1;
   activePresetGuid.value = isCatalogPreset ? guid : null;
 
+  sharedSceneName.value = '';
+  sharedSceneError.value = '';
+  sharedSceneLoading.value = false;
+  activeSceneRouteKey = isCatalogPreset ? `:preset:${guid}` : '';
   const routedGuid = presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER]);
-  if (isCatalogPreset && routedGuid === guid) return;
-  if (!isCatalogPreset && !routedGuid) return;
+  const hadScene = !!route.query[SCENE_QUERY_PARAMETER];
+  if (!hadScene && isCatalogPreset && routedGuid === guid) return;
+  if (!hadScene && !isCatalogPreset && !routedGuid) return;
 
   const query = {...route.query};
+  delete query[SCENE_QUERY_PARAMETER];
+  delete query[OWNER_QUERY_PARAMETER];
   if (isCatalogPreset) query[PRESET_QUERY_PARAMETER] = guid;
   else delete query[PRESET_QUERY_PARAMETER];
   await router.push({path: '/', query});
 }
 
 watch(
-  () => route.query[PRESET_QUERY_PARAMETER],
+  () => [route.query[PRESET_QUERY_PARAMETER], route.query[SCENE_QUERY_PARAMETER], route.query[OWNER_QUERY_PARAMETER]],
   () => { void applyPresetFromRoute(); },
 );
 
@@ -911,7 +950,7 @@ onMounted(() => {
   // If no navigation history is present (first-time visitor), load the latest
   // shared preset immediately. The auth-state transition hydrates the full
   // catalog for the selected guest/user cache.
-  if (isFirstLoad && !presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER])) {
+  if (isFirstLoad && !presetGuidFromRouteQuery(route.query[PRESET_QUERY_PARAMETER]) && !route.query[SCENE_QUERY_PARAMETER]) {
     void (async () => {
       try {
         let list = await getAllPresetEntries();
@@ -1991,6 +2030,7 @@ async function startTravelToPreset(preset: PresetRecord) {
           <span class="tab-label-text is-hidden-touch">{{ tab.label }}</span>
           <span v-if="tab.shortcut" class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
         </button>
+        <button class="top-tab-btn" type="button" @click="openSceneSharing" title="Partager la scène enregistrée">Partager</button>
       <CloudAccountControl compact v-if="authConfigured" :signed-in="userRole !== 'guest'" :email="authUserEmail"
         :cloud-enabled="personalLibraryFeatureFlags.presetSync" :busy="authBusy" :error="authError"
         :sync-state="personalSyncStatus.state"
@@ -1998,6 +2038,12 @@ async function startTravelToPreset(preset: PresetRecord) {
       </div>
     </div>
 
+    <div v-if="sharedSceneLoading || sharedSceneError || sharedSceneName" class="shared-scene-notice" role="status" @pointerdown.stop>
+      <span>{{ sharedSceneLoading ? 'Chargement de la scène…' : sharedSceneError || sharedSceneName }}</span>
+      <button v-if="sharedSceneError" type="button" @click="applyPresetFromRoute()">Réessayer</button>
+      <button v-else-if="sharedSceneName" type="button" :disabled="sharedCopyBusy" @click="saveSharedSceneCopy">Enregistrer une copie</button>
+      <button v-if="!sharedSceneLoading" type="button" aria-label="Fermer" @click="sharedSceneName = ''; sharedSceneError = ''">×</button>
+    </div>
     <!-- Render status indicator (bottom-center) -->
     <div
       class="render-stats-wrapper"
@@ -2464,6 +2510,7 @@ async function startTravelToPreset(preset: PresetRecord) {
             :picker-action="pickerAction"
             :user-role="userRole"
             :active-preset-guid="activePresetGuid"
+            :request-sign-in="signInForSharing"
             @toggle-picker="togglePickerMode"
             @preset-selected="onPresetSelected"
             @open-video="openTabs.has('video') || toggleTab('video'); bringToFront('video')"
@@ -2503,6 +2550,7 @@ async function startTravelToPreset(preset: PresetRecord) {
             :picker-action="pickerAction"
             :user-role="userRole"
             :active-preset-guid="activePresetGuid"
+            :request-sign-in="signInForSharing"
             @toggle-picker="togglePickerMode"
             @preset-selected="onPresetSelected"
             @open-video="openTabs.has('video') || toggleTab('video'); bringToFront('video')"
@@ -3614,4 +3662,9 @@ async function startTravelToPreset(preset: PresetRecord) {
 .hdr-output-info { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; font-size: 11px; max-width: 290px; white-space: normal; }
 .hdr-output-info small { opacity: .7; line-height: 1.35; }
 .hdr-output-info input { width: 80px; padding: 3px 6px; color: inherit; background: #202631; border: 1px solid #586477; border-radius: 4px; }
+</style>
+
+<style scoped>
+.shared-scene-notice { position: absolute; z-index: 130; top: 68px; left: 50%; transform: translateX(-50%); display: flex; align-items: center; gap: 10px; max-width: 90vw; padding: 8px 12px; border-radius: 9px; background: #20242bef; color: white; font-size: 12px; }
+.shared-scene-notice button { background: #ffffff20; border: 0; border-radius: 5px; padding: 6px 9px; color: inherit; cursor: pointer; white-space: nowrap; }
 </style>

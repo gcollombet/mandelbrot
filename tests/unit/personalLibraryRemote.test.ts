@@ -8,6 +8,7 @@ const mocks = vi.hoisted(() => {
     static fromMillis(millis: number) { return new MockTimestamp(millis); }
   }
   return {
+    uid: 'alice',
     MockTimestamp,
     documents: new Map<string, unknown>(),
     transactionSet: vi.fn(),
@@ -36,7 +37,7 @@ function snapshot(path: string) {
 vi.mock('../../src/firebaseConfig', () => ({
   getFirebaseServices: () => ({
     app: {kind: 'app'},
-    auth: {currentUser: {uid: 'alice'}},
+    auth: {currentUser: mocks.uid ? {uid: mocks.uid} : null},
     db: {kind: 'db'},
     storage: {kind: 'storage'},
   }),
@@ -69,6 +70,8 @@ vi.mock('firebase/storage', () => ({
 }));
 
 import {
+  getSharedPresetRecord,
+  getSharedTexture,
   deletePersonalTexture,
   finalizePersonalTexture,
   getPersonalPresetManifest,
@@ -81,6 +84,7 @@ import {
 
 describe('direct personal library persistence', () => {
   beforeEach(() => {
+    mocks.uid = 'alice';
     vi.clearAllMocks();
     mocks.documents.clear();
     mocks.transactionGet.mockImplementation((reference: {path: string}) => Promise.resolve(snapshot(reference.path)));
@@ -208,4 +212,25 @@ describe('direct personal library persistence', () => {
     expect(mocks.getMetadata).not.toHaveBeenCalled();
   });
 
+});
+
+
+describe('shared direct reads', () => {
+  it('reads a personal preset without an authenticated account', async () => {
+    mocks.uid = '';
+    mocks.documents.set('users/alice/presets/scene-a', {type: 'completePreset', payload: {value: {cx: '0'}}, name: 'Scene', revision: 2});
+    expect(await getSharedPresetRecord('alice', 'scene-a')).toMatchObject({guid: 'scene-a', name: 'Scene', revision: 2});
+    expect(await getSharedPresetRecord('alice', 'deleted')).toBeNull();
+  });
+  it('rejects path injection before attempting a read', async () => {
+    await expect(getSharedPresetRecord('alice/presets/other', 'scene-a')).rejects.toThrow('invalide');
+    await expect(getSharedPresetRecord('alice', '../other')).rejects.toThrow();
+  });
+  it('derives the texture path from the owner and GUID, never from payload data', async () => {
+    mocks.uid = '';
+    mocks.documents.set('users/alice/textures/t', {name: 'Gold', storagePath: 'users/bob/textures/private.webp', width: 2, height: 2});
+    mocks.getBlob.mockResolvedValue(new Blob(['gold']));
+    expect(await getSharedTexture('alice', 't')).toMatchObject({metadata: {storagePath: 'users/alice/textures/t.webp'}});
+    expect(mocks.getBlob).toHaveBeenCalledWith({path: 'users/alice/textures/t.webp'});
+  });
 });
