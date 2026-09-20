@@ -2,9 +2,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { runVideoExportToWebm, type VideoExportRequest, type VideoExportRunnerDeps } from '../../src/videoExportRunner'
 import { motionProgress } from '../../src/expmap/motion'
 import { captureVideoCenter, captureVideoZoom, fractalVideoFilename } from '../../src/videoCameraControls'
+import { createVideoSink } from '../../src/videoEncoderSink'
 const sink=vi.hoisted(()=>({addFrame:vi.fn(),finalize:vi.fn(async()=>null),cancel:vi.fn(),streaming:false,codec:'hevc',fileExtension:'mp4'}))
 vi.mock('../../src/videoEncoderSink',()=>({createVideoSink:vi.fn(async()=>sink)}))
-afterEach(()=>vi.clearAllMocks())
+afterEach(()=>{vi.clearAllMocks();vi.unstubAllGlobals()})
 function fixture(mode: 'monolithic' | 'tiled-keyframe') {
   const clocks:(number|null)[]=[], timestamps:number[]=[]
   const navigator={cancel_transition:vi.fn(),origin:vi.fn(),scale:vi.fn(),angle:vi.fn(),start_export_transition:vi.fn()}
@@ -16,6 +17,42 @@ function fixture(mode: 'monolithic' | 'tiled-keyframe') {
   return {deps,request,clocks,timestamps,navigator}
 }
 describe('fractal video timeline wiring',()=>{
+  it('routes HDR through float capture and 10-bit frames with uniform timing, including supersampling',async()=>{
+    const {deps,request,timestamps}=fixture('monolithic')
+    request.durationSeconds=.2;request.motion={};request.output={...request.output,dynamicRange:'hdr',hdrExposure:1,supersample:2}
+    deps.engine.captureHdrFrame=vi.fn(async()=>new Uint16Array(32*24*4).fill(0x3c00))
+    vi.stubGlobal('VideoFrame',class {constructor(public data:Uint16Array,public init:Record<string,unknown>) {}})
+    const result=await runVideoExportToWebm(deps,request)
+    expect(result.framesEmitted).toBe(2)
+    expect(timestamps).toEqual([])
+    expect(deps.engine.beginVideoExportSession).toHaveBeenCalledWith(expect.objectContaining({hdr:true,supersample:2}))
+    expect(deps.engine.captureHdrFrame).toHaveBeenCalledWith(32,24,2)
+    expect(createVideoSink).toHaveBeenCalledWith(expect.objectContaining({dynamicRange:'hdr'}))
+    const [first,second]=sink.addFrame.mock.calls.map(c=>c[0])
+    expect(first.init).toMatchObject({format:'I420P10',timestamp:0,duration:100000,colorSpace:{primaries:'bt2020',transfer:'pq'}})
+    expect(second.init.timestamp).toBe(100000)
+    expect(first.data).toHaveLength(32*24*1.5)
+    // 406 nits is above the PQ code value of the 203 nit reference white (~573).
+    expect(first.data[0]).toBeGreaterThan(600)
+    expect(deps.engine.endVideoExportSession).toHaveBeenCalledOnce()
+  })
+  it('finalizes partial output when HDR conversion is interrupted',async()=>{
+    const {deps,request}=fixture('monolithic')
+    request.output.dynamicRange='hdr';request.signal={aborted:false}
+    deps.engine.captureHdrFrame=vi.fn(async()=>{request.signal!.aborted=true;return new Uint16Array(32*24*4)})
+    const result=await runVideoExportToWebm(deps,request)
+    expect(result.cancelled).toBe(true);expect(result.framesEmitted).toBe(0)
+    expect(sink.addFrame).not.toHaveBeenCalled();expect(sink.finalize).toHaveBeenCalledOnce()
+    expect(sink.cancel).not.toHaveBeenCalled();expect(deps.engine.endVideoExportSession).toHaveBeenCalledOnce()
+  })
+  it('restores the session if HDR encoding is unavailable',async()=>{
+    const {deps,request}=fixture('monolithic')
+    request.output.dynamicRange='hdr';deps.engine.captureHdrFrame=vi.fn()
+    vi.mocked(createVideoSink).mockRejectedValueOnce(new Error('HDR refusé'))
+    await expect(runVideoExportToWebm(deps,request)).rejects.toThrow('HDR refusé')
+    expect(deps.engine.endVideoExportSession).toHaveBeenCalledOnce()
+    expect(deps.engine.captureHdrFrame).not.toHaveBeenCalled()
+  })
   it.each(['monolithic','tiled-keyframe'] as const)('passes eased time and freezes the final clock in %s',async mode=>{
     const {deps,request,clocks,timestamps,navigator}=fixture(mode)
     const result=await runVideoExportToWebm(deps,request)

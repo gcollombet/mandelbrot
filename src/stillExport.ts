@@ -1,6 +1,7 @@
 // ── High-resolution still capture ──
 // Drives the engine's export session for a single camera position instead of
-// a parcours. The output is assembled on a 2D canvas: one tile when the
+// a parcours. SDR tiles assemble on a 2D canvas; HDR tiles retain RGBA half
+// floats until PNG encoding. One tile when the
 // working texture fits the device, a grid of tiles otherwise (8K).
 //
 // The driver knows nothing about Vue: the viewer injects the engine, the
@@ -145,6 +146,7 @@ export type StillExportDeps = {
       outputHeight: number
       supersample: number
       batchTargetFps: number
+      hdr?: boolean
       aaSamplesPerFrame?: number
     }): Promise<void>
     endVideoExportSession(): void
@@ -158,6 +160,7 @@ export type StillExportDeps = {
       timestampMicros: number
       durationMicros: number
     }): Promise<VideoFrame>
+    captureHdrFrame?(width: number, height: number): Promise<Uint16Array>
     readonly maxTextureDimension: number
   }
   controller: {
@@ -174,6 +177,7 @@ export type StillExportDeps = {
 }
 
 export type StillExportRequest = {
+  hdr?: boolean
   location: { cx: string; cy: string; scale: string; angle: number }
   width: number
   height: number
@@ -185,6 +189,7 @@ export type StillExportRequest = {
 }
 
 export type StillExportResult = {
+  hdrPixels?: Uint16Array
   canvas: HTMLCanvasElement
   plan: StillPlan
   totalPumps: number
@@ -202,8 +207,10 @@ const CAPTURE_DRIVE_ATTEMPTS = 8
 export async function renderStill(deps: StillExportDeps, request: StillExportRequest): Promise<StillExportResult> {
   const plan = planStillTiles(request.width, request.height, deps.engine.maxTextureDimension)
   const canvas = document.createElement('canvas')
-  canvas.width = plan.width
-  canvas.height = plan.height
+  canvas.width = request.hdr ? 1 : plan.width
+  canvas.height = request.hdr ? 1 : plan.height
+  if (request.hdr && !deps.engine.captureHdrFrame) throw new Error('Capture HDR indisponible.')
+  const hdrPixels = request.hdr ? new Uint16Array(plan.width * plan.height * 4) : undefined
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Canvas 2D indisponible pour assembler la capture.')
 
@@ -244,6 +251,7 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
     supersample: 1,
     batchTargetFps: 1,
     aaSamplesPerFrame: Math.max(1, request.aaSamples),
+    hdr: request.hdr,
   })
   try {
     for (const tile of plan.tiles) {
@@ -267,7 +275,7 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
       if (!ready) {
         throw new Error(`La tuile ${tile.index + 1}/${plan.tiles.length} n'a pas convergé en ${maxPumps} passes.`)
       }
-      const pending = deps.engine.captureExportFrame({
+      const pending = request.hdr ? deps.engine.captureHdrFrame!(surfaceW, surfaceH) : deps.engine.captureExportFrame({
         outputWidth: surfaceW,
         outputHeight: surfaceH,
         supersample: 1,
@@ -276,15 +284,21 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
       })
       let settled = false
       const done = pending.then((f) => { settled = true; return f })
+      // Session teardown may reject the capture if a draw fails first.
+      void done.catch(() => {})
       for (let attempt = 0; attempt < CAPTURE_DRIVE_ATTEMPTS && !settled; attempt++) {
+        throwIfAborted()
         await deps.controller.drawOnce()
         await deps.engine.waitForSubmittedWork()
       }
       const frame = await done
-      try {
-        ctx.drawImage(frame, tile.originX, tile.originY)
-      } finally {
-        frame.close()
+      if (frame instanceof Uint16Array) {
+        for (let y = 0; y < tile.height; y++) {
+          hdrPixels!.set(frame.subarray(y * tile.width * 4, (y + 1) * tile.width * 4), ((tile.originY + y) * plan.width + tile.originX) * 4)
+        }
+      } else {
+        try { ctx.drawImage(frame, tile.originX, tile.originY) }
+        finally { frame.close() }
       }
       request.onProgress?.({ tile: tile.index + 1, tiles: plan.tiles.length, pumps: totalPumps })
     }
@@ -297,5 +311,5 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
     deps.navigator.scale(scale)
     deps.navigator.angle(angle)
   }
-  return { canvas, plan, totalPumps }
+  return { canvas, hdrPixels, plan, totalPumps }
 }

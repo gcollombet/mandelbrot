@@ -16,6 +16,8 @@
 // A pipeline-overridable constant rather than a second shader: duplicating
 // linear_to_sRGB into a capture shader would let the exported film and the
 // screen drift apart the day one of the two transfer functions is touched.
+override HDR_OUTPUT: bool = false;
+override LINEAR_OUTPUT: bool = false;
 override DOWNSCALE: i32 = 1;
 
 // Reconstruction filter for the DOWNSCALE > 1 reduction. 0 = box (plain block
@@ -182,5 +184,7 @@ fn fs_main(@builtin(position) fragPos: vec4<f32>) -> @location(0) vec4<f32> {
 
   // Dither at OUTPUT resolution, after the encode — it exists to break banding
   // in the 8-bit quantization that follows, so it must be the last step.
+  if (LINEAR_OUTPUT) { return vec4<f32>(max(lin, vec3<f32>(0.0)), 1.0); }
+  if (HDR_OUTPUT) { return vec4<f32>(linear_to_sRGB(lin), 1.0); }
   return vec4<f32>(linear_to_sRGB(lin) + vec3<f32>(dither_8bit(fragPos.xy)), 1.0);
 }

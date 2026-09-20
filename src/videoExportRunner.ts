@@ -1,3 +1,4 @@
+import { hdrVideoPlanes, hdrInputFrame } from './hdrVideo'
 // ── Wiring: parcours + engine + capture + encoder → an encoded blob ──
 // The loop itself lives in videoExportSession.ts and knows nothing about GPUs
 // or codecs; this module supplies its driver.
@@ -41,6 +42,7 @@ export type VideoExportRunnerDeps = {
       outputHeight: number
       supersample: number
       batchTargetFps: number
+      hdr?: boolean
       aaSamplesPerFrame?: number
       tiledKeyframePlan?: ReturnType<typeof planKeyframeTiles>
       angleRange?: { from: number; to: number }
@@ -57,6 +59,7 @@ export type VideoExportRunnerDeps = {
       timestampMicros: number
       durationMicros: number
     }): Promise<VideoFrame>
+    captureHdrFrame?(width: number, height: number, supersample?: number): Promise<Uint16Array>
     getTiledExportMemoryProfile(): {
       squareBytesPerTexel: number
       tileBytesPerTexel: number
@@ -156,6 +159,8 @@ export async function runVideoExportToWebm(
   if (!navigator) throw new Error('Navigator unavailable.')
 
   const { output } = request
+  const hdr = output.dynamicRange === 'hdr'
+  if (hdr && !deps.engine.captureHdrFrame) throw new Error('Capture HDR vidéo indisponible.')
   const frameDurationMicros = Math.round(1e6 / output.fps)
   const tiledKeyframePlan = renderMode === 'tiled-keyframe'
     ? planKeyframeTiles({
@@ -179,6 +184,7 @@ export async function runVideoExportToWebm(
     outputHeight: output.height,
     supersample: output.supersample,
     batchTargetFps: EXPORT_BATCH_TARGET_FPS,
+    hdr,
     aaSamplesPerFrame: request.aaSamplesPerFrame,
     tiledKeyframePlan,
     angleRange: tiledKeyframePlan
@@ -193,6 +199,7 @@ export async function runVideoExportToWebm(
       height: output.height,
       fps: output.fps,
       codec: request.codec,
+      dynamicRange: output.dynamicRange,
       destination: request.destination,
       hardwareAcceleration: 'prefer-hardware',
     })
@@ -247,7 +254,7 @@ export async function runVideoExportToWebm(
           // frame wait for the next animation tick — already-converged frames
           // included — and hung outright in a background tab, where rAF never
           // fires at all.
-          const pending = deps.engine.captureExportFrame({
+          const pending = hdr ? deps.engine.captureHdrFrame!(output.width, output.height, output.supersample) : deps.engine.captureExportFrame({
             outputWidth: output.width,
             outputHeight: output.height,
             supersample: output.supersample,
@@ -259,11 +266,17 @@ export async function runVideoExportToWebm(
           })
           let settled = false
           const done = pending.then((f) => { settled = true; return f })
+          void done.catch(() => {})
           for (let attempt = 0; attempt < CAPTURE_DRIVE_ATTEMPTS && !settled; attempt++) {
             await deps.controller.drawOnce()
             await deps.engine.waitForSubmittedWork()
           }
-          await sink.addFrame(await done)
+          const captured = await done
+          if (captured instanceof Uint16Array) {
+            const planes = await hdrVideoPlanes(output.width,output.height,captured,output.hdrExposure ?? 0,request.signal)
+            await sink.addFrame(hdrInputFrame(planes,output.width,output.height,
+              Math.round((frame.index * 1e6) / output.fps),frameDurationMicros))
+          } else await sink.addFrame(captured)
         },
       },
       {

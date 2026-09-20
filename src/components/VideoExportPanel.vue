@@ -114,7 +114,10 @@ const resolution = ref(saved.resolution);
 const fps = ref(saved.fps);
 const supersample = ref(saved.supersample);
 const magnificationThreshold = ref(saved.magnificationThreshold);
+const dynamicRange = ref<'sdr' | 'hdr'>(saved.dynamicRange ?? 'sdr');
+const hdrExposure = ref(saved.hdrExposure ?? 0);
 const codec = ref<Mp4Codec | 'auto'>(saved.codec);
+watch(dynamicRange, mode => { if (mode === 'hdr' && codec.value === 'avc') codec.value = 'auto'; }, { immediate: true });
 const motion = ref({ ...saved.motion });
 const filename = ref(saved.filename);
 const timingAuthority = ref(saved.timingAuthority);
@@ -141,7 +144,7 @@ watch(renderMode, (mode) => {
 
 watch(
   [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold,
-    codec, motion, filename, timingAuthority, aaSamplesPerFrame, renderMode, tiledMemoryBudgetMiB],
+    codec, dynamicRange, hdrExposure, motion, filename, timingAuthority, aaSamplesPerFrame, renderMode, tiledMemoryBudgetMiB],
   () => saveVideoExportPreferences({
     pinnedStart: pinnedStart.value,
     pinnedEnd: pinnedEnd.value,
@@ -151,6 +154,8 @@ watch(
     supersample: supersample.value,
     magnificationThreshold: magnificationThreshold.value,
     codec: codec.value,
+    dynamicRange: dynamicRange.value,
+    hdrExposure: hdrExposure.value,
     motion: motion.value,
     filename: filename.value,
     timingAuthority: timingAuthority.value,
@@ -165,6 +170,8 @@ const output = computed<VideoOutputSpec>(() => {
   const [width, height] = resolution.value.split('x').map(Number);
   return {
     width, height,
+    dynamicRange: dynamicRange.value,
+    hdrExposure: hdrExposure.value,
     fps: Number(fps.value),
     supersample: Number(supersample.value),
     magnificationThreshold: magnificationThreshold.value,
@@ -176,20 +183,21 @@ const output = computed<VideoOutputSpec>(() => {
 const codecSupport = ref<Partial<Record<Mp4Codec, boolean>>>({});
 const probing = ref(true);
 const encoderPreferences = ref<Partial<Record<Mp4Codec, EncoderPreference>>>({})
-const effectiveCodec = computed(() => codec.value === 'auto' ? preferredExpmapCodec(codecSupport.value) : codecSupport.value[codec.value] ? codec.value : null);
+const effectiveCodec = computed(() => codec.value === 'auto' ? (dynamicRange.value === 'hdr' ? (['hevc','av1','vp9'] as const).find(c => codecSupport.value[c]) ?? null : preferredExpmapCodec(codecSupport.value)) : codecSupport.value[codec.value] ? codec.value : null);
 const encoderLabel = computed(() => probing.value || !effectiveCodec.value || !encoderPreferences.value[effectiveCodec.value] ? '' : encoderPreferences.value[effectiveCodec.value] === 'prefer-hardware' ? ' · Matériel préféré' : ' · Repli navigateur — logiciel possible')
 const codecLabel = computed(() => probing.value ? 'Vérification de l’encodeur…' : effectiveCodec.value === 'hevc' ? 'HEVC' : effectiveCodec.value === 'avc' ? 'H.264 · compatibilité' : effectiveCodec.value?.toUpperCase() ?? 'Encodage indisponible');
-watch(output, async (spec, _old, onCleanup) => {
+watch([resolution, fps, dynamicRange], async (_values, _old, onCleanup) => {
+  const spec = output.value;
   let current = true;
   probing.value = true; codecSupport.value = {}; encoderPreferences.value = {};
   onCleanup(() => { current = false; });
-  const support = await probeMp4Codecs(spec.width, spec.height, spec.fps, (codec, preference) => { if (current) encoderPreferences.value[codec] = preference });
+  const support = await probeMp4Codecs(spec.width, spec.height, spec.fps, (codec, preference) => { if (current) encoderPreferences.value[codec] = preference }, spec.dynamicRange);
   if (!current) return;
   codecSupport.value = support;
   probing.value = false;
 }, { immediate: true });
 
-const codecOptions = computed(() => [{value:'auto',label:'Auto · HEVC, sinon H.264'}, ...MP4_CODECS.map(({value,label}) => ({value,label:codecSupport.value[value] === false ? `${label} — indisponible ici` : label}))]);
+const codecOptions = computed(() => [{value:'auto',label:dynamicRange.value === 'hdr' ? 'Auto · HEVC, AV1, VP9 10 bits' : 'Auto · HEVC, sinon H.264'}, ...MP4_CODECS.filter(c => dynamicRange.value !== 'hdr' || c.value !== 'avc').map(({value,label}) => ({value,label:codecSupport.value[value] === false ? `${label} — indisponible ici` : label}))]);
 const codecUnsupported = computed(() => !probing.value && !effectiveCodec.value);
 
 const tiledEligibility = computed(() => evaluateTiledKeyframeEligibility({
@@ -333,6 +341,7 @@ function start() {
 <template>
   <div class="video-export-panel sections">
     <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect label="Source" :model-value="shaderExpmapVideoSelected ? 'shader' : expmapVideoSelected ? 'expmap' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: 'Vidéo depuis la fractale' }, { value: 'expmap', label: 'Vidéo depuis une ExpMap cuite' }, { value: 'shader', label: 'Vidéo depuis une ExpMap recolorable' }]" @update:model-value="expmapVideoSelected = $event === 'expmap'; shaderExpmapVideoSelected = $event === 'shader'"/></fieldset>
+    <p v-if="expmapVideoSelected || shaderExpmapVideoSelected" class="ve-note">Cette source exporte en SDR. Pour une vidéo HDR, choisir « Vidéo depuis la fractale », puis Sortie → Dynamique.</p>
     <ShaderExpmapPanel v-if="shaderExpmapVideoSelected" video-only :plan="null" name="" :appearance="current as unknown as import('../Engine').RenderOptions" :engine="engine ?? null" :controller="controller ?? null"/>
     <ExpmapVideoPanel v-else-if="expmapVideoSelected" :engine="engine" :controller="controller"/>
     <fieldset v-else :disabled="running || expmapBusy" class="ve-config">
@@ -355,6 +364,9 @@ function start() {
     <VideoMotionControls v-model="motion" :duration-seconds="durationSeconds"/>
 
     <DenseSection title="Sortie">
+      <DenseSelect label="Dynamique" v-model="dynamicRange" :options="[{value:'sdr',label:'SDR · 8 bits'},{value:'hdr',label:'HDR · 10 bits PQ'}]"/>
+      <label v-if="dynamicRange === 'hdr'" class="ve-row"><span class="ve-label">Exposition HDR (EV)</span><input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" aria-label="Exposition vidéo HDR"/></label>
+      <p v-if="dynamicRange === 'hdr'" class="ve-note">Rec.2020 / PQ · blanc de référence 203 nits. Indépendant de l’affichage HDR. Le profil 10 bits est vérifié au démarrage ; aucun repli SDR.</p>
       <div class="ve-form"><label class="ve-row">
           <span class="ve-label">Résolution</span>
           <DenseSelect
@@ -426,7 +438,7 @@ function start() {
           </li>
         </ul>
         <p v-if="codecUnsupported" class="ve-error">
-          Aucun encodeur disponible pour ce choix. Choisis un autre codec ou une autre résolution.
+          {{ dynamicRange === 'hdr' ? 'Aucun encodeur HDR 10 bits disponible pour ce choix dans ce navigateur.' : 'Aucun encodeur disponible pour ce choix.' }} Choisis un autre codec ou une autre résolution.
         </p>
         <ul v-if="warnings.length" class="ve-warnings">
           <li v-for="(warning, index) in warnings" :key="index">{{ warning.message }}</li>

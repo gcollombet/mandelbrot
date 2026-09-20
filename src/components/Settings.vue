@@ -117,6 +117,8 @@ import {
 } from '../tiledKeyframeExport';
 const props = defineProps<{
   engine: Engine | null;
+  outputDiagnostics?: Engine['outputDiagnostics'] | null;
+  hdrDisplayDisabled?: boolean;
   mandelbrotCtrl?: any;
   suspendShortcuts?: (suspend: boolean) => void;
   activeTab: string;
@@ -216,6 +218,7 @@ const precisionBudgetExp = computed({
 const emit = defineEmits<{
   'toggle-picker': [action?: 'add' | 'select'];
   'open-video': [];
+  'toggle-hdr-display': [];
   'preset-selected': [guid: string, isCatalogPreset: boolean];
 }>();
 const model =  defineModel<MandelbrotParams>({
@@ -3670,6 +3673,30 @@ async function startVideoExport(payload: {
     </div>
 
     <div v-else-if="activeTab === 'performance'" class="graphics-tab sections">
+      <DenseSection title="Affichage">
+        <DenseToggle
+          label="Affichage HDR"
+          :model-value="props.outputDiagnostics?.hdrRequested ?? false"
+          :disabled="!props.outputDiagnostics || props.hdrDisplayDisabled"
+          desc="Affiche les hautes lumières sur un écran compatible HDR. Indépendant du format des captures."
+          @update:model-value="emit('toggle-hdr-display')"
+        />
+        <template v-if="props.outputDiagnostics">
+          <p class="panel-note" role="status">
+            Surface {{ props.outputDiagnostics.toneMapping === 'extended' ? 'HDR' : 'SDR' }} ·
+            {{ props.outputDiagnostics.format === 'rgba16float' ? '16 bits flottants' : '8 bits' }}
+          </p>
+          <details class="display-diagnostics">
+            <summary>Diagnostic d’affichage</summary>
+            <p>Capacité HDR annoncée : {{ props.outputDiagnostics.hdrCapable ? 'oui' : 'non' }}</p>
+            <p>Surface : {{ props.outputDiagnostics.format }} · {{ props.outputDiagnostics.colorSpace }}</p>
+            <p>Présentation : {{ props.outputDiagnostics.toneMapping === 'extended' ? 'HDR étendue' : 'SDR standard' }}</p>
+            <p>Dithering : {{ props.outputDiagnostics.dithering }}</p>
+            <p class="panel-note">La capacité annoncée ne mesure ni la luminosité réelle ni la profondeur physique de l’écran.</p>
+          </details>
+        </template>
+        <p v-else class="panel-note">Préparation de l’affichage…</p>
+      </DenseSection>
       <DenseSection title="Qualité et fluidité">
         <div class="fields"><DenseSelect
             label="DPR"
@@ -5859,4 +5886,10 @@ async function startVideoExport(payload: {
 .cv-body .saved-palette-grid .palette-card .acts { position: static; translate: none; transform: none; padding: 3px; }
 .cv-body .saved-palette-grid .palette-card .info { padding: 4px 6px; }
 .cv-body .saved-palette-grid .palette-card .sub { display: none; }
+</style>
+
+<style scoped>
+.display-diagnostics { margin-top: 6px; font-size: 11px; }
+.display-diagnostics summary { cursor: pointer; opacity: .8; }
+.display-diagnostics p { margin: 5px 0; overflow-wrap: anywhere; }
 </style>

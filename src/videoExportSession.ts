@@ -178,7 +178,17 @@ export async function runVideoExport(
       totalPumps += pumps
       if (pumps === 0) freeFrames++
 
-      await driver.emitFrame({ index, elapsedSeconds, pumps })
+      try {
+        await driver.emitFrame({ index, elapsedSeconds, pumps })
+      } catch (error) {
+        // HDR conversion yields between rows and can be interrupted mid-frame.
+        // Keep previously encoded frames, without counting the unfinished one.
+        if (options.signal?.aborted && error instanceof Error && error.name === 'AbortError') {
+          cancelled = true
+          break
+        }
+        throw error
+      }
       framesEmitted++
       options.onProgress?.({ framesEmitted, totalFrames })
     }

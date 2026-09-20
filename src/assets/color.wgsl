@@ -11,6 +11,7 @@ alias hcol = f32;
 // Two families only: full material/texture/orbit effects, or palette coloring.
 // Global height/phase coloring, zebra, traps, grading and analytic AA work in both.
 override ENABLE_SURFACE_EFFECTS: bool = true;
+override HDR_OUTPUT: bool = false;
 
 struct Uniforms {
   palettePeriod: f32,
@@ -1172,6 +1173,7 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
     pbrColor *= mix(vec3<f32>(1.0), clamp(pbrColor, vec3<f32>(0.0), vec3<f32>(1.0)), varnish * 0.30);
     pbrColor = pbrColor * (1.0 - coatFresnel * varnish) + (coatEnvironment + vec3<f32>(coatSpec * coatFresnel)) * varnish * varnishGain;
   }
+  if (HDR_OUTPUT) { return linear_to_sRGB(display_grade(pbrColor)); }
   return linear_to_sRGB(tonemap_highlights(display_grade(pbrColor)));
 }
 
@@ -1252,6 +1254,7 @@ fn palette(iterRaw: f32, v: f32, v_smooth: f32, z: vec2<f32>, trapPayload: vec4<
     color = mix(color, shade_surface(surface, fx, uv_screen), effShading);
   }
 
+  if (HDR_OUTPUT) { return max(color, vec3<f32>(0.0)); }
   return clamp(color, vec3<f32>(0.0), vec3<f32>(1.0));
 }
 
@@ -2006,12 +2009,12 @@ fn fs_main(@location(0) fragCoord: vec2<f32>) -> @location(0) vec4<f32> {
   return vec4<f32>(srgb_to_linear(c.rgb), 1.0);
 }
 
-// Direct path: unmodified sRGB output (no linear roundtrip, no AA gate) for the
-// legacy direct-to-swapchain render and the PNG/snapshot export — both 8-bit,
-// hence the dither.
+// Direct path: extended sRGB without dither on the float HDR canvas.
+// The SDR variant also serves 8-bit PNG thumbnails and retains its dither.
 @fragment
 fn fs_main_direct(@location(0) fragCoord: vec2<f32>, @builtin(position) pos: vec4<f32>) -> @location(0) vec4<f32> {
   let c = shade_srgb(fragCoord, false);
+  if (HDR_OUTPUT) { return c; }
   return vec4<f32>(clamp(c.rgb + vec3<f32>(dither_8bit(pos.xy)), vec3<f32>(0.0), vec3<f32>(1.0)), c.a);
 }
 

@@ -1,3 +1,4 @@
+override HDR_OUTPUT: bool = false;
 // Settled non-AA rotation resolve. The cache contains final linear color in the
 // scene-aligned neutral square. Only this final color is filtered; Mandelbrot
 // iteration state and all analytic/metadata payloads remain discrete.
@@ -70,5 +71,6 @@ fn fs_main(
   let filtered = textureSampleLevel(rotationColorTex, rotationColorSampler, sampleUv, 0.0);
   let linearColor = filtered.rgb / max(filtered.a, 1e-6);
   let srgb = linear_to_sRGB(linearColor);
+  if (HDR_OUTPUT) { return vec4<f32>(srgb, 1.0); }
   return vec4<f32>(srgb + vec3<f32>(dither_8bit(fragPosition.xy)), 1.0);
 }

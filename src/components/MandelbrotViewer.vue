@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { encodeHdrPng } from '../hdrPng';
 import { nearestPaletteStop } from '../palettePicking';
 import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
@@ -98,6 +99,25 @@ function showHudStatus(text: string, ms = 4000) {
 
 // ── Screenshot menu + high-resolution still export ──
 const screenshotMenuOpen = ref(false);
+const stillHdr = ref(false);
+const hdrExposure = ref(0);
+const hdrSwitchBusy = ref(false);
+const outputDiagnostics = ref<ReturnType<typeof readOutputDiagnostics>>(null);
+function readOutputDiagnostics() { return mandelbrotEngine.value?.outputDiagnostics ?? null; }
+async function toggleHdrDisplay() {
+  const engine = mandelbrotEngine.value;
+  if (!engine || hdrSwitchBusy.value || stillExport.value.active) return;
+  hdrSwitchBusy.value = true;
+  try { await engine.setHdrDisplay(!engine.outputDiagnostics.hdrRequested); }
+  catch (error) { showHudStatus(error instanceof Error ? error.message : String(error), 8000); }
+  finally { outputDiagnostics.value = readOutputDiagnostics(); hdrSwitchBusy.value = false; }
+}
+function downloadHdrBlob(blob: Blob, width: number, height: number) {
+  const url = URL.createObjectURL(blob), a = document.createElement('a');
+  a.href = url; a.download = `mandelbrot-${timestampForFilename()}-${width}x${height}-HDR.png`;
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
 const minibrotMenuOpen = ref(false);
 const stillExport = ref<{ active: boolean; label: string; tile: number; tiles: number }>({ active: false, label: '', tile: 0, tiles: 1 });
 let stillAbort: AbortController | null = null;
@@ -170,13 +190,23 @@ function cancelStillExport() {
 
 async function exportStill(size: StillSize) {
   closeFabMenus();
-  if (size === 'window') { await downloadCanvasSnapshot(stillAspect.value); return; }
+  if (stillExport.value.active || hdrSwitchBusy.value) return;
+  if (size === 'window' && !stillHdr.value && !mandelbrotEngine.value?.outputDiagnostics.hdrRequested) { await downloadCanvasSnapshot(stillAspect.value); return; }
   if (stillExport.value.active) return;
   const ctrl = mandelbrotCtrlRef.value;
   const engine = ctrl?.getEngine?.();
   const nav = ctrl?.getNavigator?.();
   if (!ctrl || !engine || !nav || ctrl.isExporting?.()) return;
-  const { width, height } = stillDimensions(size);
+  const sourceCanvas = ctrl.getCanvas?.();
+  if (!sourceCanvas) return;
+  const { width, height } = size === 'window' ? windowCropDimensions()! : stillDimensions(size);
+  // Render the full window before cropping: changing the viewport aspect alone
+  // would zoom out vertically instead of reproducing the requested screenshot.
+  const captureWidth = size === 'window' ? sourceCanvas.width : width;
+  const captureHeight = size === 'window' ? sourceCanvas.height : height;
+  const cropX = Math.floor((captureWidth - width) / 2), cropY = Math.floor((captureHeight - height) / 2);
+  const hdr = stillHdr.value;
+  const exposure = hdrExposure.value;
   stillAbort = new AbortController();
   stillExport.value = { active: true, label: `Capture ${size.toUpperCase()}`, tile: 0, tiles: 1 };
   console.info(`[still] start ${size} ${width}×${height} t=${Math.round(performance.now())}`);
@@ -193,15 +223,35 @@ async function exportStill(size: StillSize) {
       },
       {
         location: { cx: p.cx, cy: p.cy, scale: p.scale, angle: p.angle },
-        width,
-        height,
+        width: captureWidth,
+        height: captureHeight,
+        hdr,
         aaSamples: p.antialiasLevel ?? 1,
         magnificationThreshold: p.zoomMagnificationThreshold ?? 16,
         signal: stillAbort.signal,
         onProgress: ({ tile, tiles }) => { stillExport.value = { ...stillExport.value, tile, tiles }; },
       },
     );
-    await downloadCanvas(result.canvas, `${width}x${height}`);
+    if (result.hdrPixels) {
+      stillExport.value = { ...stillExport.value, label: 'Encodage PNG HDR' };
+      let pixels = result.hdrPixels;
+      if (captureWidth !== width || captureHeight !== height) {
+        pixels = new Uint16Array(width * height * 4);
+        for (let y = 0; y < height; y++) {
+          const start = ((y + cropY) * captureWidth + cropX) * 4;
+          pixels.set(result.hdrPixels.subarray(start, start + width * 4), y * width * 4);
+        }
+      }
+      const blob = await encodeHdrPng(width, height, pixels, { exposure, signal: stillAbort.signal });
+      downloadHdrBlob(blob, width, height);
+    } else {
+      let output = result.canvas;
+      if (captureWidth !== width || captureHeight !== height) {
+        output = document.createElement('canvas'); output.width = width; output.height = height;
+        output.getContext('2d')!.drawImage(result.canvas, cropX, cropY, width, height, 0, 0, width, height);
+      }
+      await downloadCanvas(output, `${width}x${height}`);
+    }
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
       showHudStatus('Capture annulée');
@@ -258,6 +308,9 @@ const settingsRefs = ref<Record<string, InstanceType<typeof Settings> | null>>({
 
 // Multi-window support: set of open tabs, each with its own popup position
 const openTabs = reactive(new Set<string>());
+watch([() => openTabs.has('performance'), mandelbrotEngine], ([open]) => {
+  if (open) outputDiagnostics.value = readOutputDiagnostics();
+});
 const shortcutsSuspended = ref(false);
 
 // Per-tab popup positions and refs
@@ -843,6 +896,7 @@ onMounted(() => {
   window.addEventListener('touchend', handleNavTouchend, { passive: true });
   // Poll AA accumulation progress for the on-screen indicator.
   aaProgressTimer = setInterval(() => {
+    if (openTabs.has('performance')) outputDiagnostics.value = readOutputDiagnostics();
     const p = mandelbrotEngine.value?.aaProgress;
     if (!p) return;
     const now = performance.now();
@@ -1090,7 +1144,7 @@ function handleGlobalKeydown(e: KeyboardEvent) {
   // Download canvas screenshot (B)
   if (key === 'b' && !e.repeat) {
     e.preventDefault();
-    void downloadCanvasSnapshot();
+    void exportStill('window');
     return;
   }
   // Quick snapshot shortcut (P)
@@ -2148,7 +2202,15 @@ async function startTravelToPreset(preset: PresetRecord) {
       </div>
 
       <div v-show="!discoveryRadarActive" class="fab-menu-host">
-        <div v-if="screenshotMenuOpen" class="fab-menu" role="menu">
+        <div v-if="screenshotMenuOpen" class="fab-menu hdr-shot-menu" role="menu">
+          <div class="fab-menu-seg" role="radiogroup" aria-label="Encodage de la capture">
+            <button type="button" role="radio" class="fab-menu-seg-item" :aria-checked="!stillHdr" :class="{ 'is-active': !stillHdr }" @click="stillHdr = false">SDR · PNG/WebP</button>
+            <button type="button" role="radio" class="fab-menu-seg-item" :aria-checked="stillHdr" :class="{ 'is-active': stillHdr }" @click="stillHdr = true">HDR · PNG 16 bits</button>
+          </div>
+          <label v-if="stillHdr" class="hdr-output-info">Exposition export (EV)
+            <input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" aria-label="Exposition de l’export HDR" />
+            <small>PQ / Rec.2020 · blanc de référence 203 nits. Lecture dans un logiciel compatible HDR.</small>
+          </label>
           <div class="fab-menu-seg" role="radiogroup" aria-label="Format de l'image">
             <button
               v-for="a in STILL_ASPECTS" :key="a.id"
@@ -2160,13 +2222,13 @@ async function startTravelToPreset(preset: PresetRecord) {
               @click="setStillAspect(a.id)"
             >{{ a.label }}</button>
           </div>
-          <button class="fab-menu-item" type="button" role="menuitem" @click="exportStill('window')">
+          <button class="fab-menu-item" type="button" role="menuitem" :disabled="stillExport.active || hdrSwitchBusy" @click="exportStill('window')">
             <i class="fa-solid fa-display"></i> {{ stillMenuLabel('window') }}
           </button>
           <button
             v-for="size in STILL_SIZES" :key="size"
             class="fab-menu-item" type="button" role="menuitem"
-            :disabled="stillExport.active"
+            :disabled="stillExport.active || hdrSwitchBusy"
             @click="exportStill(size)"
           >
             <i class="fa-solid fa-image"></i> {{ stillMenuLabel(size) }}
@@ -2394,6 +2456,9 @@ async function startTravelToPreset(preset: PresetRecord) {
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
             :inert="expmapBusy && tab.key !== 'expmap' && tab.key !== 'video'"
             :active-tab="tab.key"
+            :output-diagnostics="outputDiagnostics"
+            :hdr-display-disabled="hdrSwitchBusy || stillExport.active || !!mandelbrotCtrlRef?.isExporting?.()"
+            @toggle-hdr-display="toggleHdrDisplay"
             :primary="primaryFor(tab.key)"
             :pickerMode="pickerMode"
             :picker-action="pickerAction"
@@ -2431,6 +2496,9 @@ async function startTravelToPreset(preset: PresetRecord) {
             :suspend-shortcuts="(val: boolean) => { shortcutsSuspended = val }"
             :inert="expmapBusy && tab.key !== 'expmap' && tab.key !== 'video'"
             :active-tab="tab.key"
+            :output-diagnostics="outputDiagnostics"
+            :hdr-display-disabled="hdrSwitchBusy || stillExport.active || !!mandelbrotCtrlRef?.isExporting?.()"
+            @toggle-hdr-display="toggleHdrDisplay"
             :pickerMode="pickerMode"
             :picker-action="pickerAction"
             :user-role="userRole"
@@ -3539,4 +3607,11 @@ async function startTravelToPreset(preset: PresetRecord) {
 @media (max-height: 520px) and (orientation: landscape) {
   .dense-popup { top: 6px !important; bottom: 6px; max-height: calc(100dvh - 12px) !important; width: min(420px, 52vw) !important; }
 }
+</style>
+
+<style scoped>
+.hdr-shot-menu { top: auto; bottom: 0; transform: none; max-height: calc(100dvh - 110px); max-width: calc(100vw - 90px); overflow-y: auto; }
+.hdr-output-info { display: flex; flex-direction: column; gap: 4px; padding: 8px 10px; font-size: 11px; max-width: 290px; white-space: normal; }
+.hdr-output-info small { opacity: .7; line-height: 1.35; }
+.hdr-output-info input { width: 80px; padding: 3px 6px; color: inherit; background: #202631; border: 1px solid #586477; border-radius: 4px; }
 </style>

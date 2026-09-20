@@ -551,6 +551,7 @@ export class Engine {
         timestampMicros: number
         durationMicros: number
         resolve: (frame: VideoFrame) => void
+        resolveHdr?: (pixels: Uint16Array) => void
         reject: (error: unknown) => void
     };
     /** Supersampled LINEAR render target — never sRGB: the reduction happens
@@ -591,7 +592,67 @@ export class Engine {
     queue!: GPUQueue
     adapter!: GPUAdapter | null
     ctx!: GPUCanvasContext
+    /** SDR file/capture format, independent of the canvas presentation format. */
     format!: GPUTextureFormat
+    private hdrDisplay = false
+    private hdrExport = false
+    private get hdrRendering() { return this.videoExportActive ? this.hdrExport : this.hdrDisplay }
+    private get canvasFormat(): GPUTextureFormat { return this.hdrRendering ? 'rgba16float' : this.format }
+    private hdrColorPipelines?: { full: ColorPipelines, simple: ColorPipelines }
+    private presentationPipelines?: {
+        sdr: GPURenderPipeline; hdr: GPURenderPipeline
+        rotationSdr: GPURenderPipeline; rotationHdr: GPURenderPipeline
+    }
+
+    get outputDiagnostics() {
+        const config = this.ctx?.getConfiguration?.()
+        return {
+            hdrRequested: this.hdrDisplay,
+            hdrCapable: typeof matchMedia === 'function' && matchMedia('(dynamic-range: high)').matches,
+            format: config?.format ?? this.canvasFormat,
+            colorSpace: config?.colorSpace ?? 'srgb',
+            toneMapping: config?.toneMapping?.mode ?? 'standard',
+            dithering: this.hdrRendering ? 'Aucun (surface flottante)' : '8 bits',
+        }
+    }
+
+    private configureOutput(): void {
+        this.ctx.configure({ device: this.device, format: this.canvasFormat, alphaMode: 'opaque',
+            colorSpace: 'srgb', toneMapping: { mode: this.hdrRendering && this.hdrDisplay ? 'extended' : 'standard' } })
+        const p = this.presentationPipelines
+        if (p) {
+            this.pipelinePresent = this.hdrRendering ? p.hdr : p.sdr
+            this.pipelineRotationPresent = this.hdrRendering ? p.rotationHdr : p.rotationSdr
+        }
+        this.selectColorPipelines(true)
+        this.resetAaState()
+        this.rotationColorCacheReady = false
+        this.rotationColorResolvePending = true
+        this.exportMirrorPipeline = undefined
+        this.needRender = true
+    }
+
+    async setHdrDisplay(enabled: boolean): Promise<void> {
+        if (this.videoExportActive) throw new Error('Attendre la fin de l’export pour changer l’affichage.')
+        if (!this.presentationPipelines) throw new Error('Le moteur est encore en cours de préparation.')
+        const previous = this.hdrDisplay
+        this.device.pushErrorScope('validation')
+        let failure: unknown
+        try {
+            this.hdrDisplay = enabled
+            this.configureOutput()
+            if (enabled && this.ctx.getConfiguration?.()?.toneMapping?.mode !== 'extended') {
+                throw new Error('Le navigateur ne confirme pas la présentation HDR étendue.')
+            }
+            this.ctx.getCurrentTexture()
+        } catch (error) { failure = error }
+        const error = await this.device.popErrorScope()
+        if (failure || error) {
+            this.hdrDisplay = previous
+            this.configureOutput()
+            throw failure ?? new Error(error!.message)
+        }
+    }
     mandelbrotNavigator!: MandelbrotNavigator
     private gpuMemoryBudgetBytes = 0
     private lastSurfaceReductionKey = ''
@@ -1744,9 +1805,12 @@ export class Engine {
                 },
             })
         }
+        this.presentationPipelines = undefined
+        this.colorPipelines = undefined
+        this.hdrColorPipelines = undefined
         this.ctx = this.canvas.getContext('webgpu') as GPUCanvasContext
         this.format = navigator.gpu.getPreferredCanvasFormat()
-        this.ctx.configure({ device: this.device, format: this.format, alphaMode: 'opaque' })
+        this.configureOutput()
         // Initialisation synchrone des textures factices 1x1 (tile + skybox)
         this.tileTexture = this.device.createTexture({
             size: [1, 1, 1],
@@ -1989,12 +2053,15 @@ export class Engine {
         // All color variants share a layout and the same authoritative shader.
         // Compile off the render path, including the simple palette family.
         const colorLayout = device.createPipelineLayout({ bindGroupLayouts: [layoutColor] })
-        const [full, simple] = await Promise.all([
+        const [full, simple, hdrFull, hdrSimple] = await Promise.all([
             this.createColorPipelines(device, moduleColor, colorLayout, true),
             this.createColorPipelines(device, moduleColor, colorLayout, false),
+            this.createColorPipelines(device, moduleColor, colorLayout, true, true),
+            this.createColorPipelines(device, moduleColor, colorLayout, false, true),
         ])
         if (this.device !== device || this.destroyed) return
         this.colorPipelines = { full, simple }
+        this.hdrColorPipelines = { full: hdrFull, simple: hdrSimple }
         this.selectColorPipelines(true)
 
         // ── In-place compute pipeline (fused brush+mandelbrot+count on A) ──
@@ -2139,6 +2206,23 @@ export class Engine {
             primitive: { topology: 'triangle-list' },
             label: 'Engine RenderPipeline RotationPresent',
         })
+
+        this.presentationPipelines = {
+            sdr: this.pipelinePresent, rotationSdr: this.pipelineRotationPresent,
+            hdr: device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [layoutPresent] }),
+                vertex: { module: modulePresent, entryPoint: 'vs_main' },
+                fragment: { module: modulePresent, entryPoint: 'fs_main', constants: { HDR_OUTPUT: 1 }, targets: [{ format: 'rgba16float' }] },
+                primitive: { topology: 'triangle-list' },
+            }),
+            rotationHdr: device.createRenderPipeline({
+                layout: device.createPipelineLayout({ bindGroupLayouts: [layoutRotationPresent] }),
+                vertex: { module: moduleRotationPresent, entryPoint: 'vs_main' },
+                fragment: { module: moduleRotationPresent, entryPoint: 'fs_main', constants: { HDR_OUTPUT: 1 }, targets: [{ format: 'rgba16float' }] },
+                primitive: { topology: 'triangle-list' },
+            }),
+        }
+        this.configureOutput()
 
         // ── AA target-map bake pipeline (DE ∪ contrast ∪ moiré → per-texel sample count) ──
         const moduleAaTarget = this.device.createShaderModule({ code: aaTargetShader, label: 'Engine ShaderModule AaTarget' })
@@ -2385,17 +2469,17 @@ export class Engine {
         return compilation
     }
 
-    private async createColorPipelines(device: GPUDevice, module: GPUShaderModule, layout: GPUPipelineLayout, surfaceEffects: boolean): Promise<ColorPipelines> {
+    private async createColorPipelines(device: GPUDevice, module: GPUShaderModule, layout: GPUPipelineLayout, surfaceEffects: boolean, hdr = false): Promise<ColorPipelines> {
         const create = (entryPoint: string, target: GPUColorTargetState, rotation = false) =>
             device.createRenderPipelineAsync({
                 layout,
                 vertex: { module, entryPoint: rotation ? 'vs_rotation_cache' : 'vs_main' },
-                fragment: { module, entryPoint, constants: { ENABLE_SURFACE_EFFECTS: surfaceEffects ? 1 : 0 }, targets: [target] },
+                fragment: { module, entryPoint, constants: { ENABLE_SURFACE_EFFECTS: surfaceEffects ? 1 : 0, HDR_OUTPUT: hdr ? 1 : 0 }, targets: [target] },
                 primitive: { topology: 'triangle-list' },
                 label: `Engine Color (${surfaceEffects ? 'full' : 'simple'}, ${entryPoint}${target.blend ? ', accum' : ''})`,
             })
         const [direct, rotation, clear, accum] = await Promise.all([
-            create('fs_main_direct', { format: this.format }),
+            create('fs_main_direct', { format: hdr ? 'rgba16float' : this.format }),
             create('fs_rotation_cache', { format: 'rgba16float' }, true),
             create('fs_main', { format: 'rgba16float' }),
             create('fs_main', {
@@ -2410,7 +2494,8 @@ export class Engine {
     }
 
     private selectColorPipelines(surfaceEffects: boolean): void {
-        const pipelines = surfaceEffects ? this.colorPipelines?.full : this.colorPipelines?.simple
+        const family = this.hdrRendering ? this.hdrColorPipelines : this.colorPipelines
+        const pipelines = surfaceEffects ? family?.full : family?.simple
         if (!pipelines) return
         this.pipelineColor = pipelines.direct
         this.pipelineRotationColorCache = pipelines.rotation
@@ -2898,6 +2983,7 @@ export class Engine {
         batchTargetFps: number
         /** Jittered AA samples per emitted frame. 1 = no accumulation. */
         aaSamplesPerFrame?: number
+        hdr?: boolean
         /** Optional fixed-centre keyframe plan. Absence preserves the monolithic path. */
         tiledKeyframePlan?: KeyframeTilePlan
         /** Full path interval; a varying angle conservatively builds the circumscribed disc. */
@@ -2968,6 +3054,7 @@ export class Engine {
             aaAuto: this.aaAuto,
         }
         this.videoExportActive = true
+        this.hdrExport = settings.hdr ?? false
         this.videoExportAaSamples = Math.max(1, Math.round(settings.aaSamplesPerFrame ?? 1))
         this.tiledKeyframePlan = settings.tiledKeyframePlan ?? null
         this.tiledKeyframeTileIndex = 0
@@ -3034,11 +3121,13 @@ export class Engine {
      * have used `fs_main_direct`, whose output is already sRGB — averaging that
      * is the gamma mistake this chain exists to avoid.
      */
-    private ensureExportCaptureResources(outputWidth: number, outputHeight: number, supersample: number): void {
-        const key = `${outputWidth}x${outputHeight}@${supersample}:${this.format}`
-        if (this.exportCaptureKey === key && this.exportPresentPipelines.has(supersample)) return
+    private ensureExportCaptureResources(outputWidth: number, outputHeight: number, supersample: number, hdr = false): void {
+        const key = `${outputWidth}x${outputHeight}@${supersample}:${this.format}:${hdr}`
+        if (this.exportCaptureKey === key && this.exportPresentPipelines.has(supersample) && this.exportMirrorPipeline) return
 
         if (this.exportCaptureKey !== key) {
+            this.exportPresentPipelines.clear()
+            this.exportMirrorPipeline = undefined
             this.exportLinearTexture?.destroy?.()
             this.exportOutputTexture?.destroy?.()
             this.exportReadbackBuffer?.destroy?.()
@@ -3053,14 +3142,14 @@ export class Engine {
 
             this.exportOutputTexture = this.device.createTexture({
                 size: { width: outputWidth, height: outputHeight },
-                format: this.format,
+                format: hdr ? 'rgba16float' : this.format,
                 usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
                 label: 'Engine ExportOutputTexture',
             })
             this.exportOutputView = this.exportOutputTexture.createView({ label: 'Engine ExportOutputView' })
 
             this.exportReadbackBuffer = this.device.createBuffer({
-                size: Engine.alignRowBytes(outputWidth * 4) * outputHeight,
+                size: Engine.alignRowBytes(outputWidth * (hdr ? 8 : 4)) * outputHeight,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: 'Engine ExportReadback',
             })
@@ -3083,8 +3172,8 @@ export class Engine {
                 fragment: {
                     module: this.modulePresent!,
                     entryPoint: 'fs_main',
-                    targets: [{ format: this.format }],
-                    constants: { DOWNSCALE: 1 },
+                    targets: [{ format: this.canvasFormat }],
+                    constants: { DOWNSCALE: 1, HDR_OUTPUT: this.hdrRendering ? 1 : 0 },
                 },
                 primitive: { topology: 'triangle-list' },
                 label: 'Engine RenderPipeline ExportMirror',
@@ -3098,12 +3187,12 @@ export class Engine {
                 fragment: {
                     module: this.modulePresent!,
                     entryPoint: 'fs_main',
-                    targets: [{ format: this.format }],
+                    targets: [{ format: hdr ? 'rgba16float' : this.format }],
                     // Mitchell rather than a block average: the box reduction
                     // folds ~7x more energy back across the output Nyquist, and
                     // on a fractal that fold-back is what makes boundary detail
                     // crawl between frames of the film. Set to 0 to A/B the box.
-                    constants: { DOWNSCALE: supersample, REDUCE_MITCHELL: 1 },
+                    constants: { DOWNSCALE: supersample, REDUCE_MITCHELL: 1, LINEAR_OUTPUT: hdr ? 1 : 0 },
                 },
                 primitive: { topology: 'triangle-list' },
                 label: `Engine RenderPipeline ExportPresent x${supersample}`,
@@ -3125,6 +3214,18 @@ export class Engine {
      * frame's colour bind group — the same reason the PNG snapshot path lives
      * there rather than rebuilding the pass from outside.
      */
+    captureHdrFrame(width: number, height: number, supersample = 1): Promise<Uint16Array> {
+        if (!this.videoExportActive || !this.hdrExport) return Promise.reject(new Error('Une session HDR est requise.'))
+        if (this.exportCaptureRequest) return Promise.reject(new Error('Une capture est déjà en attente.'))
+        const max = this.device.limits.maxTextureDimension2D
+        if (!Number.isSafeInteger(supersample) || supersample < 1 || ![width, height].every(n => Number.isSafeInteger(n) && n > 0 && n * supersample <= max)) return Promise.reject(new Error('Dimensions HDR invalides.'))
+        return new Promise((resolveHdr, reject) => {
+            this.exportCaptureRequest = { outputWidth: width, outputHeight: height, supersample,
+                timestampMicros: 0, durationMicros: 1, resolve: frame => frame.close(), resolveHdr, reject }
+            this.needRender = true
+        })
+    }
+
     captureExportFrame(request: {
         outputWidth: number
         outputHeight: number
@@ -3132,6 +3233,7 @@ export class Engine {
         timestampMicros: number
         durationMicros: number
     }): Promise<VideoFrame> {
+        if (this.hdrExport) return Promise.reject(new Error('Utiliser la capture flottante dans une session HDR.'))
         if (this.exportCaptureRequest) {
             return Promise.reject(new Error('A capture is already pending for the next frame.'))
         }
@@ -3164,6 +3266,7 @@ export class Engine {
         this.exportCaptureRequest = undefined
         const saved = this.videoExportSavedSettings
         this.videoExportActive = false
+        this.hdrExport = false
         this.videoExportAaSamples = 1
         this.videoExportFrameEvaluationPending = false
         this.videoExportSavedSettings = null
@@ -3722,11 +3825,7 @@ export class Engine {
         this.canvas.style.width = widthCSS + 'px'
         this.canvas.style.height = heightCSS + 'px'
 
-        this.ctx.configure({
-            device: this.device,
-            format: this.format,
-            alphaMode: 'opaque',
-        })
+        this.configureOutput()
 
         // taille suffisante pour contenir la diagonale de l'écran après rotation
         this.neutralSize = Math.ceil(Math.sqrt(this.width * this.width + this.height * this.height))
@@ -6142,7 +6241,7 @@ export class Engine {
             this.exportCaptureRequest = undefined
             try {
                 const { outputWidth, outputHeight, supersample } = request
-                this.ensureExportCaptureResources(outputWidth, outputHeight, supersample)
+                this.ensureExportCaptureResources(outputWidth, outputHeight, supersample, !!request.resolveHdr)
 
                 const encoder = this.device.createCommandEncoder({ label: 'Engine ExportCapture' })
 
@@ -6220,7 +6319,7 @@ export class Engine {
                     // A missing swapchain texture must never fail the export.
                 }
 
-                const bytesPerRow = Engine.alignRowBytes(outputWidth * 4)
+                const bytesPerRow = Engine.alignRowBytes(outputWidth * (request.resolveHdr ? 8 : 4))
                 encoder.copyTextureToBuffer(
                     { texture: this.exportOutputTexture! },
                     { buffer: this.exportReadbackBuffer!, offset: 0, bytesPerRow },
@@ -6236,7 +6335,12 @@ export class Engine {
 
                 // The 256-byte row alignment is expressed as a stride rather
                 // than repacked row by row — no per-frame copy of the image.
-                request.resolve(new VideoFrame(pixels, {
+                if (request.resolveHdr) {
+                    const packed = new Uint16Array(outputWidth * outputHeight * 4)
+                    const source = new Uint16Array(pixels.buffer)
+                    for (let y = 0; y < outputHeight; y++) packed.set(source.subarray(y * bytesPerRow / 2, y * bytesPerRow / 2 + outputWidth * 4), y * outputWidth * 4)
+                    request.resolveHdr(packed)
+                } else request.resolve(new VideoFrame(pixels, {
                     format: this.format === 'bgra8unorm' ? 'BGRA' : 'RGBA',
                     codedWidth: outputWidth,
                     codedHeight: outputHeight,
@@ -6271,7 +6375,7 @@ export class Engine {
                       storeOp: 'store',
                     }]
                   });
-                  renderPass.setPipeline(this.pipelineColor!);
+                  renderPass.setPipeline(this.colorPipelines!.full.direct);
                   renderPass.setBindGroup(0, colorBindGroup!);
                   renderPass.draw(6, 1, 0, 0);
                   renderPass.end();
@@ -6306,9 +6410,9 @@ export class Engine {
                     const srcIdx = y * bytesPerRow + x * 4;
                     const dstIdx = (y * targetWidth + x) * 4;
                     // BGRA -> RGBA
-                    pixelArray[dstIdx + 0] = src[srcIdx + 2]; // Rouge
+                    pixelArray[dstIdx + 0] = src[srcIdx + (this.format === 'bgra8unorm' ? 2 : 0)]; // Rouge
                     pixelArray[dstIdx + 1] = src[srcIdx + 1]; // Vert
-                    pixelArray[dstIdx + 2] = src[srcIdx + 0]; // Bleu
+                    pixelArray[dstIdx + 2] = src[srcIdx + (this.format === 'bgra8unorm' ? 0 : 2)]; // Bleu
                     pixelArray[dstIdx + 3] = src[srcIdx + 3]; // Alpha
                   }
                 }

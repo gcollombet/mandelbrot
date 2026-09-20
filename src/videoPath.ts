@@ -46,6 +46,8 @@ export const MIN_MAGNIFICATION_THRESHOLD = 2
 export const MAX_MAGNIFICATION_THRESHOLD = 32
 
 export type VideoOutputSpec = {
+  dynamicRange?: 'sdr' | 'hdr'
+  hdrExposure?: number
   width: number
   height: number
   fps: number
@@ -146,6 +148,13 @@ export function validateVideoOutput(
   maxTextureDimension: number,
 ): VideoPathProblem[] {
   const problems: VideoPathProblem[] = []
+  if (output.dynamicRange !== undefined && !['sdr','hdr'].includes(output.dynamicRange)) problems.push({kind:'output',message:'Dynamique vidéo invalide.'})
+  if (output.dynamicRange === 'hdr') {
+    if (output.width % 2 || output.height % 2) problems.push({kind:'output',message:'La vidéo HDR 4:2:0 exige des dimensions paires.'})
+    if (!Number.isFinite(output.hdrExposure ?? 0) || Math.abs(output.hdrExposure ?? 0) > 16) problems.push({kind:'output',message:'Exposition HDR invalide (−16 à +16 EV).'})
+    if (output.fps > 60) problems.push({kind:'output',message:'La sortie HDR prend en charge jusqu’à 60 images/s.'})
+  }
+
 
   for (const [label, value] of [['width', output.width], ['height', output.height]] as const) {
     if (!Number.isInteger(value) || value <= 0) {

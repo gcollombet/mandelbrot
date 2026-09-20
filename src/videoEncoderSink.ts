@@ -1,3 +1,4 @@
+import { supportsHdrEncoder, type VideoDynamicRange } from './hdrVideo'
 // ── Encoding sink for video export ──
 // Wraps mediabunny's muxer behind the frame sink the export loop expects, so
 // videoExportSession.ts stays free of encoder concerns and remains testable
@@ -53,6 +54,7 @@ export type VideoDestination =
   | { kind: 'buffer' }
 
 export type VideoEncodeSettings = {
+  dynamicRange?: VideoDynamicRange
   width: number
   height: number
   fps: number
@@ -92,7 +94,7 @@ export type VideoEncoderSink = {
 }
 
 export type EncoderPreference = NonNullable<VideoEncodeSettings['hardwareAcceleration']>
-type EncoderProbeSettings = Pick<VideoEncodeSettings, 'width' | 'height' | 'codec' | 'quality' | 'hardwareAcceleration'> & { fps?: number }
+type EncoderProbeSettings = Pick<VideoEncodeSettings, 'width' | 'height' | 'codec' | 'quality' | 'hardwareAcceleration' | 'dynamicRange'> & { fps?: number }
 
 /** Prefer hardware, then allow the browser to choose another implementation. */
 export async function selectVideoEncoder(settings: EncoderProbeSettings): Promise<EncoderPreference> {
@@ -107,7 +109,9 @@ export async function selectVideoEncoder(settings: EncoderProbeSettings): Promis
         width: settings.width, height: settings.height, framerate: settings.fps,
         quality: settings.quality ?? QUALITY_HIGH, hardwareAcceleration,
       }
-      if (await canEncodeVideo(settings.codec, options)) return hardwareAcceleration
+      if (settings.dynamicRange === 'hdr'
+        ? await supportsHdrEncoder(settings, hardwareAcceleration)
+        : await canEncodeVideo(settings.codec, options)) return hardwareAcceleration
       failures.push(`${hardwareAcceleration} : configuration refusée`)
     } catch (error) {
       failures.push(`${hardwareAcceleration} : ${error instanceof Error ? error.message : String(error)}`)
@@ -127,10 +131,11 @@ export async function probeMp4Codecs(
   height: number,
   fps?: number,
   onSelected?: (codec: Mp4Codec, preference: EncoderPreference) => void,
+  dynamicRange: VideoDynamicRange = 'sdr',
 ): Promise<Record<Mp4Codec, boolean>> {
   const entries = await Promise.all(MP4_CODECS.map(async ({ value }) => {
     try {
-      const preference = await selectVideoEncoder({ codec: value, width, height, fps })
+      const preference = await selectVideoEncoder({ codec: value, width, height, fps, dynamicRange })
       onSelected?.(value, preference)
       return [value, true] as const
     } catch { return [value, false] as const }
@@ -139,6 +144,10 @@ export async function probeMp4Codecs(
 }
 
 export async function createVideoSink(settings: VideoEncodeSettings): Promise<VideoEncoderSink> {
+  if (settings.dynamicRange === 'hdr') {
+    const { createHdrVideoSink } = await import('./hdrVideoSink')
+    return createHdrVideoSink(settings)
+  }
   const codec = settings.codec
   const hardwareAcceleration = await selectVideoEncoder(settings)
 

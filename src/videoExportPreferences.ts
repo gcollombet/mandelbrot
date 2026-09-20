@@ -31,6 +31,8 @@ export type VideoExportPreferences = {
   fps: string
   supersample: string
   magnificationThreshold: number
+  dynamicRange?: 'sdr' | 'hdr'
+  hdrExposure?: number
   codec: Mp4Codec | 'auto'
   motion: ExpmapMotion
   filename: string
@@ -49,6 +51,8 @@ export const DEFAULT_VIDEO_EXPORT_PREFERENCES: VideoExportPreferences = {
   supersample: '2',
   magnificationThreshold: 2,
   codec: 'auto',
+  dynamicRange: 'sdr',
+  hdrExposure: 0,
   motion: { ...DEFAULT_EXPMAP_MOTION },
   filename: 'Fractale',
   timingAuthority: 'duration',
@@ -104,6 +108,8 @@ export function normalizeVideoExportPreferences(value: unknown): VideoExportPref
     fps: normalizeString(raw.fps, d.fps),
     supersample: normalizeString(raw.supersample, d.supersample),
     magnificationThreshold: normalizeNumber(raw.magnificationThreshold, d.magnificationThreshold),
+    dynamicRange: raw.dynamicRange === 'hdr' ? 'hdr' : 'sdr',
+    hdrExposure: typeof raw.hdrExposure === 'number' && Number.isFinite(raw.hdrExposure) && Math.abs(raw.hdrExposure) <= 16 ? raw.hdrExposure : 0,
     codec: raw.codec === 'auto' || isMp4Codec(raw.codec) ? raw.codec : d.codec,
     motion: normalizeMotion(raw.motion),
     filename: normalizeString(raw.filename, d.filename),
