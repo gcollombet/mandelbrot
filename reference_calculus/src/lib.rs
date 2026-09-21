@@ -3976,7 +3976,10 @@ mod gpu_bla_mirror {
     #[test]
     #[ignore]
     fn gpu_bla_mirror_census() {
-        for eps in [1e-3f32, 1e-4, 1e-5, 1e-6, 1e-7] {
+        let eps_list: Vec<f32> = std::env::var("CENSUS_EPS")
+            .map(|v| v.split(',').map(|e| e.parse().unwrap()).collect())
+            .unwrap_or_else(|_| vec![1e-3, 1e-4, 1e-5, 1e-6, 1e-7]);
+        for eps in eps_list {
             measure(
                 "seahorse 1e-6",
                 "-0.7436438870371587",
