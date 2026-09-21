@@ -23,6 +23,8 @@ import {PRESET_QUERY_PARAMETER, presetGuidFromRouteQuery} from '../presetDeepLin
 import {loadSharedScene, SCENE_QUERY_PARAMETER, OWNER_QUERY_PARAMETER} from '../sceneSharing';
 import {syncActiveLibrary} from '../activeLibrarySync';
 import {log10FromDecimalString} from '../floatexp';
+import {clampBlaEpsilon} from '../blaEpsilon';
+import {createDevCapture} from '../devCapture';
 import {normalizeTextureMappingFromLegacy} from '../TextureMapping';
 import {cloneOrbitTrap, DEFAULT_ORBIT_TRAP, normalizeOrbitTrapFromLegacy} from '../OrbitTrap';
 import {getLatestRemotePreset} from '../remoteCatalog';
@@ -285,6 +287,30 @@ if (import.meta.env.DEV) {
         aaSamples: opts.aaSamples ?? 1, magnificationThreshold: p.zoomMagnificationThreshold ?? 16 },
     );
   };
+}
+
+// Dev-only console tooling: __capture / __compare (see src/devCapture.ts).
+if (import.meta.env.DEV) {
+  const dev = createDevCapture({
+    getEngine: () => mandelbrotCtrlRef.value?.getEngine?.() ?? null,
+    getStillDeps: () => {
+      const ctrl = mandelbrotCtrlRef.value;
+      const engine = ctrl?.getEngine?.();
+      const nav = ctrl?.getNavigator?.();
+      if (!ctrl || !engine || !nav) return null;
+      return { engine, controller: { drawOnce: () => ctrl.drawOnce(), setExportTime: (t) => ctrl.setExportTime?.(t) }, navigator: nav };
+    },
+    getLocation: () => { const p = mandelbrotParams.value; return { cx: p.cx, cy: p.cy, scale: p.scale, angle: p.angle }; },
+    getMode: () => kernelApproximationMode(mandelbrotParams.value.approximationMode),
+    getEps: () => clampBlaEpsilon(mandelbrotParams.value.blaEpsilon),
+    setMode: (mode) => { mandelbrotParams.value.approximationMode = mode; },
+    setEps: (eps) => { mandelbrotParams.value.blaEpsilon = eps; },
+    download: (canvas, suffix) => downloadCanvas(canvas, suffix),
+    magnificationThreshold: () => mandelbrotParams.value.zoomMagnificationThreshold ?? 16,
+  });
+  const w = window as unknown as { __capture?: unknown; __compare?: unknown };
+  w.__capture = dev.capture;
+  w.__compare = dev.compare;
 }
 
 // ── Minibrot shortcuts (same actions as the Navigation panel) ──
@@ -664,7 +690,7 @@ const DEFAULT_MANDELBROT_PARAMS: MandelbrotParams = {
   activateAnimate: false,
   debugShading: false,
   approximationMode: 'bla',
-  blaEpsilon: 1e-3,
+  blaEpsilon: 1e-6,
   maxBlaSkip: 65536,
   precisionBudget: '1e-30',
   dprMultiplier: 1.0,
@@ -896,8 +922,9 @@ function applyApproximationToEngine() {
 function applyBlaTuningToEngine() {
   const engine = mandelbrotEngine.value;
   if (!engine) return;
-  const eps = mandelbrotParams.value.blaEpsilon;
-  if (typeof eps === 'number' && isFinite(eps) && eps > 0) engine.setBlaEpsilon(eps);
+  const eps = clampBlaEpsilon(mandelbrotParams.value.blaEpsilon);
+  if (eps !== mandelbrotParams.value.blaEpsilon) mandelbrotParams.value.blaEpsilon = eps;
+  engine.setBlaEpsilon(eps);
   const skip = mandelbrotParams.value.maxBlaSkip;
   if (typeof skip === 'number' && isFinite(skip) && skip >= 2) engine.setMaxBlaSkip(skip);
 }

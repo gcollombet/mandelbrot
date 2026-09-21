@@ -114,10 +114,13 @@ const MANDELBROT_BATCH_UNIFORM_OFFSET = 6 * Float32Array.BYTES_PER_ELEMENT
 // modes. (Was a covered-iteration cap with a 10× BLA fudge — that throttled long
 // blocks in smooth regions; turn-budgeting lets them run, capped only by frame time.)
 const MAX_BATCH_SIZE = 100_000
-// Validity radii scale linearly with this epsilon; 1e-4 keeps the error well
-// below a pixel while letting high-skip BLA levels accept far more often than
-// the previous 1e-6 (which made BLA slower than plain perturbation).
-const BLA_LINEARIZATION_EPSILON = 1e-3
+// Validity radii scale linearly with this epsilon (α = ε·|Z| per step, so the
+// neglected δz² term is ε/2 of the linear one). The affine BLA has no other
+// error control, so ε must stay near f32 precision: measured on the CPU mirror
+// of the kernel (reference_calculus, gpu_bla_mirror_census), 1e-3 mismatches
+// the f64 truth on 40 % of the pixels while 1e-6 matches exact f32 stepping
+// pixel for pixel and still skips 2-7× fewer loop turns at 1e-12..1e-20.
+const BLA_LINEARIZATION_EPSILON = 1e-6
 
 // Floats per floatexp BlaStep uploaded to the GPU. Matches the Rust `BlaStep`
 // (#[repr(C)] of 8 × 4-byte fields): ax,ay,bx,by,ab_exp,radius_alpha,alpha_exp,

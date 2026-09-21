@@ -64,6 +64,33 @@ The crate lives at `reference_calculus/` and uses `dashu-float` for arbitrary pr
   `skip_ceiling_census` (`boxdim.rs`). Findings live in the root `*.md` notes.
 - No JS/TS unit test runner configured (no Vitest/Jest).
 
+### Testing the engine's output (mandatory method for agents)
+
+Any test that needs the **rendered output of the engine** (comparing kernels,
+approximation modes, ε values, palettes, a suspected rendering bug…) goes through
+the dev-only console capture tooling, never through screenshots of the live
+canvas or Playwright clicks on the UI. The live canvas is progressive: a
+screenshot taken at an arbitrary moment shows unfinished pixels, and the BLA table
+may not have landed yet. The capture path drives the engine's export session
+(`renderStill`) and returns only once every pixel has converged and, in BLA mode,
+once the block table of the current reference is in place.
+
+- From the browser console (dev build, `npm run dev`):
+  - `await __capture({ mode: 'bla' | 'perturbation', eps: 1e-8, width: 1024, height: 576, aa: 1, download: true })`
+    → `{ canvas, dataUrl, pumps, ms, shaderFlag, blaLevels }`
+  - `await __compare({ eps: 1e-8, width: 1024, height: 576 })` → renders exact then BLA at the
+    current view, downloads `exact`, `bla` and `diff` PNGs and returns
+    `{ differing, total, fraction }` (per-pixel colour difference > `threshold`, default 8).
+- Headless, from a shell (dev server must be running): `node scripts/engine-capture.mjs compare --cx=… --cy=… --scale=1e-11 --eps=1e-8 --out=/tmp/cap`
+  (or `capture --mode=bla`). It runs Playwright's Chromium on SwiftShader by default
+  (`--gpu=native` to use a real GPU), so it is slow but reproducible on machines
+  without a GPU. Default 1024×576; use `--width/--height` for quicker runs.
+- The implementation lives in `src/devCapture.ts`, wired in `MandelbrotViewer.vue`
+  under `import.meta.env.DEV` (also `window.__mandelbrotEngine` and `window.__renderStill`).
+- Limits: this cannot test the **real-time** mechanics (progressive passes,
+  reprojection during zoom, frame pacing, AA accumulation over frames). For those,
+  the Playwright E2E specs remain the tool.
+
 ## Architecture
 
 - `src/` — Vue 3 + TypeScript frontend. WebGPU compute/render pipeline in `Engine.ts` (~2300 lines). WGSL shaders in `src/assets/*.wgsl`.
