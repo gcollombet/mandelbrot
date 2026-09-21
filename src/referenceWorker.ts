@@ -1,4 +1,4 @@
-import {MandelbrotNavigator} from 'mandelbrot'
+import {MandelbrotNavigator, bla_step_floats} from 'mandelbrot'
 import {memory as wasmMemory} from 'mandelbrot/mandelbrot_bg.wasm'
 import type {ApproximationMode} from './Engine'
 
@@ -252,6 +252,21 @@ function copyOrbitSlice(ptr: number, offset: number, count: number): Float32Arra
     return copied
 }
 
+// The table is read from WASM memory with a fixed stride: a pkg/ build older
+// than the Rust BlaStep definition would silently shift every entry but the
+// first (seen 2026-09-21: 12-float steps read as 8 → garbage blocks, rings).
+let blaLayoutChecked = false
+function assertBlaStepLayout() {
+    if (blaLayoutChecked) return
+    blaLayoutChecked = true
+    const floats = typeof bla_step_floats === 'function' ? bla_step_floats() : undefined
+    if (floats !== BLA_STEP_FLOATS) {
+        throw new Error(`[reference] BlaStep = ${floats ?? 'inconnu (export absent)'} floats côté WASM, `
+            + `${BLA_STEP_FLOATS} attendus : le paquet reference_calculus/pkg est périmé — `
+            + 'relancer `wasm-pack build reference_calculus`.')
+    }
+}
+
 function postBlaIfReady(jobId: number, maxIterations: number, availableIter: number) {
     if (!navigator || jobId !== activeJobId || disposed) {
         return
@@ -278,6 +293,7 @@ function postBlaIfReady(jobId: number, maxIterations: number, availableIter: num
         })
     }
     postTableProgress(0, 'coefficients')
+    assertBlaStepLayout()
     const info = navigator.compute_bla_reference_ptr(tableMaxIterations)
     postTableProgress(0.9, 'transfer')
     const stepsSource = new Float32Array(wasmMemory.buffer, info.ptr, info.count * BLA_STEP_FLOATS)

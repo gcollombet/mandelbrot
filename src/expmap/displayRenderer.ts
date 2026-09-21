@@ -1,3 +1,6 @@
+import { readHdrGpuOutput, type HdrGpuOptions } from '../hdrGpuOutput'
+import { StereoVideoGpu } from '../stereoVideoGpu'
+import { normalizeStereoVideo, validateStereoDimensions, type StereoColorPass, type StereoVideoSettings } from '../stereoVideo'
 import { shaderSamplingFlags, type ShaderInterpolation, type ShaderSampleDistribution } from './displaySampling'
 import commonShader from '../assets/expmap_shader_common.wgsl?raw'
 import windowShader from '../assets/expmap_shader_window.wgsl?raw'
@@ -50,6 +53,8 @@ export class ShaderExpmapRenderer {
   private cacheBytes=0
   private context:GPUCanvasContext
   private linear?:GPUTexture
+  private hdrMode=false
+  private pipelineHdr=false
   private pipeline?:GPURenderPipeline
   private windowPipeline?:GPURenderPipeline
   private windowRegular?:boolean
@@ -64,6 +69,9 @@ export class ShaderExpmapRenderer {
   private composeUniform?:GPUBuffer
   workingReserveBytes=0
   private uniform:GPUBuffer
+  private stereo?:StereoVideoGpu
+  private stereoPass?:StereoColorPass
+  private stereoBusy=false
   private disposed=false
   private busy=false
   private release:()=>void
@@ -139,12 +147,14 @@ export class ShaderExpmapRenderer {
       const cameraDepth=scaleDoublements(plan.domain.startScale,view.scale)
       const cameraAngle=view.angle+expmapImageRotation(view.effects,cameraDepth)
       const sourceRecipe=JSON.parse(this.manifest.appearanceJson) as {mu?:number}
-      const resources=await engine.prepareShaderExpmapColor(this.appearance,view.effectTime??0,cameraAngle,sourceRecipe.mu)
+      const resources=await engine.prepareShaderExpmapColor(this.appearance,view.effectTime??0,cameraAngle,sourceRecipe.mu,this.stereoPass)
+      if(this.pipelineHdr!==this.hdrMode){this.pipeline=undefined;this.windowPipeline=undefined}
+      this.pipelineHdr=this.hdrMode
       if(!this.pipeline) {
         const module=d.createShaderModule({code:resources.code+'\n'+commonShader+'\n'+blockShader})
         const extra=d.createBindGroupLayout({entries:[{binding:0,visibility:GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},{binding:1,visibility:GPUShaderStage.FRAGMENT,buffer:{type:'read-only-storage'}}]})
         this.pipeline=await d.createRenderPipelineAsync({layout:d.createPipelineLayout({bindGroupLayouts:[resources.layout,extra]}),
-          vertex:{module,entryPoint:'vs_main'},fragment:{module,entryPoint:'fs_shader_block',constants:{ENABLE_SURFACE_EFFECTS:1},targets:[{format:'rgba16float',blend:{color:{srcFactor:'one',dstFactor:'one'},alpha:{srcFactor:'one',dstFactor:'one'}}}]},primitive:{topology:'triangle-list'}})
+          vertex:{module,entryPoint:'vs_main'},fragment:{module,entryPoint:'fs_shader_block',constants:{ENABLE_SURFACE_EFFECTS:1,HDR_OUTPUT:this.hdrMode?1:0},targets:[{format:'rgba16float',blend:{color:{srcFactor:'one',dstFactor:'one'},alpha:{srcFactor:'one',dstFactor:'one'}}}]},primitive:{topology:'triangle-list'}})
         const pm=d.createShaderModule({code:presentShader})
         this.present=await d.createRenderPipelineAsync({layout:'auto',vertex:{module:pm,entryPoint:'vs'},fragment:{module:pm,entryPoint:'fs',targets:[{format:'rgba8unorm'}]},primitive:{topology:'triangle-list'}})
       }
@@ -215,7 +225,7 @@ export class ShaderExpmapRenderer {
             {binding:1,visibility:GPUShaderStage.FRAGMENT,buffer:{type:'uniform'}},
             {binding:2,visibility:GPUShaderStage.FRAGMENT,texture:{sampleType:'uint',viewDimension:'2d-array'}}]
           this.windowPipeline=await d.createRenderPipelineAsync({layout:d.createPipelineLayout({bindGroupLayouts:[resources.layout,d.createBindGroupLayout({entries})]}),
-            vertex:{module,entryPoint:'vs_main'},fragment:{module,entryPoint:'fs_shader_window',constants:{ENABLE_SURFACE_EFFECTS:1,WINDOW_REGULAR:regular?1:0},
+            vertex:{module,entryPoint:'vs_main'},fragment:{module,entryPoint:'fs_shader_window',constants:{ENABLE_SURFACE_EFFECTS:1,HDR_OUTPUT:this.hdrMode?1:0,WINDOW_REGULAR:regular?1:0},
               targets:[{format:'rgba16float',blend:{color:{srcFactor:'one',dstFactor:'one'},alpha:{srcFactor:'one',dstFactor:'one'}}}]},primitive:{topology:'triangle-list'}})
         }
         this.windowRegular=regular
@@ -258,7 +268,7 @@ export class ShaderExpmapRenderer {
         await batch.flush()
       }
       signal?.throwIfAborted()
-      if(ring)return this.canvas
+      if(ring||this.stereoPass||this.hdrMode)return this.canvas
       commands=d.createCommandEncoder();pass=commands.beginRenderPass({colorAttachments:[{view:this.context.getCurrentTexture().createView(),loadOp:'clear',storeOp:'store'}]})
       pass.setPipeline(this.present!);pass.setBindGroup(0,d.createBindGroup({layout:this.present!.getBindGroupLayout(0),entries:[{binding:0,resource:this.linear.createView()}]}));pass.draw(3);pass.end();d.queue.submit([commands.finish()]);await d.queue.onSubmittedWorkDone()
       return this.canvas
@@ -274,6 +284,56 @@ export class ShaderExpmapRenderer {
       if(validation||memoryError){
         // Async validation/OOM may invalidate uploads already marked resident.
         this.releaseSourceCache()
+        if(!failure)throw new Error((validation||memoryError)!.message)
+      }
+    }
+  }
+  async renderHdr(view:ExpmapView,stereo?:StereoVideoSettings,signal?:AbortSignal,options:HdrGpuOptions={format:'video'}):Promise<Uint16Array> {
+    if(this.busy||this.stereoBusy||this.disposed)throw new Error('Lecteur indisponible')
+    const reserve=this.workingReserveBytes,device=this.engine.device
+    device.pushErrorScope('out-of-memory');device.pushErrorScope('validation')
+    let failure:unknown
+    this.hdrMode=true;this.workingReserveBytes=reserve+Math.ceil(view.width*8/256)*256*view.height+view.width*view.height*8
+    try {
+      const enabled=normalizeStereoVideo(stereo).enabled
+      if(enabled)await this.renderStereo(view,stereo!,signal)
+      else await this.render(view,signal)
+      return await readHdrGpuOutput(device,enabled?this.stereo!.outputTexture!:this.linear!,view.width,view.height,{...options,signal})
+    }catch(error){failure=error;throw error}finally{
+      this.hdrMode=false;this.workingReserveBytes=reserve
+      const validation=await device.popErrorScope(),memory=await device.popErrorScope()
+      if(!failure&&(validation||memory))throw new Error((validation||memory)!.message)
+    }
+  }
+  /** Each eye shares the camera/time and source data, with its own material view. */
+  async renderStereo(view:ExpmapView,settings:StereoVideoSettings,signal?:AbortSignal):Promise<OffscreenCanvas> {
+    if(this.busy||this.stereoBusy||this.disposed)throw new Error('Lecteur indisponible')
+    const config=normalizeStereoVideo(settings)
+    if(!config.enabled){this.stereo?.dispose();this.stereo=undefined;return this.render(view,signal)}
+    validateExpmapView(this.manifest.projection,view)
+    validateStereoDimensions(view.width,view.height,config.layout)
+    this.stereoBusy=true
+    const reserve=this.workingReserveBytes
+    const device=this.engine.device
+    device.pushErrorScope('out-of-memory');device.pushErrorScope('validation')
+    let failure:unknown
+    try {
+      // Three float source planes and the packed SDR output are budgeted.
+      this.workingReserveBytes=reserve+view.width*view.height*(this.hdrMode?36:28)
+      planShaderMemory(this.manifest,view.width,view.height,this.budgetBytes,this.workingReserveBytes,this.engine.device.limits)
+      if(this.stereo&&(this.stereo.width!==view.width||this.stereo.height!==view.height||this.stereo.hdr!==this.hdrMode)){this.stereo.dispose();this.stereo=undefined}
+      this.stereo??=new StereoVideoGpu(this.engine.device,view.width,view.height,this.hdrMode)
+      return await this.stereo.render(config.strength,async pass=>{
+        this.stereoPass=pass
+        await this.render(view,signal)
+        return this.linear!
+      },signal,config.layout)
+    } catch(error) {failure=error;throw error} finally {
+      this.stereoPass=undefined;this.workingReserveBytes=reserve
+      const validation=await device.popErrorScope(),memoryError=await device.popErrorScope()
+      this.stereoBusy=false
+      if(validation||memoryError){
+        this.stereo?.dispose();this.stereo=undefined
         if(!failure)throw new Error((validation||memoryError)!.message)
       }
     }
@@ -350,6 +410,7 @@ export class ShaderExpmapRenderer {
   }
   dispose() {
     if(this.disposed)return;this.disposed=true
+    this.stereo?.dispose();this.stereo=undefined
     this.window?.destroy();this.window=undefined
     for(const entry of this.cache.values())entry.buffer.destroy()
     this.cache.clear();this.cacheBytes=0;this.linear?.destroy();this.uniform.destroy();this.composeUniform?.destroy();this.context.unconfigure();this.engine.previousRenderOptions=undefined;this.engine.needRender=true;this.release()

@@ -72,7 +72,6 @@ fn shader_map_contribution(screen:vec2<f32>, extent:f32)->vec4<f32> {
   parameters.aspect=sp.output.x/sp.output.y;
   parameters.lnScale=sp.camera.x;
   parameters.orbitMetricsEnabled=1.0;
-  parameters.reachDebug=0.0;
   parameters.aaAnalytic=0.0;
   apply_palette_path(sp.camera.y-palettePath.extra.z);
   let extent=length(sp.output.xy)*0.5;

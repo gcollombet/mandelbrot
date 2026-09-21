@@ -2770,6 +2770,7 @@ const videoExportRunning = ref(false);
 const videoFramesEmitted = ref(0);
 const videoTotalFrames = ref(0);
 const videoExportError = ref<string | null>(null);
+const videoExportWarning = ref<string | null>(null);
 let videoAbortSignal: {aborted: boolean} | null = null;
 
 const videoMaxTextureDimension = computed(() =>
@@ -2802,6 +2803,7 @@ async function startVideoExport(payload: {
   expmapOpenDocument.value = null;
   expmapBusy.value = true;
   videoExportError.value = null;
+  videoExportWarning.value = null;
   videoExportRunning.value = true;
   videoFramesEmitted.value = 0;
   videoTotalFrames.value = 0;
@@ -2856,6 +2858,7 @@ async function startVideoExport(payload: {
           : {kind: 'buffer'},
         maxTextureDimension: videoMaxTextureDimension.value,
         signal,
+        onWarning: (message) => { videoExportWarning.value = message; },
         onProgress: (p) => {
           videoFramesEmitted.value = p.framesEmitted;
           videoTotalFrames.value = p.totalFrames;
@@ -3212,6 +3215,7 @@ async function startVideoExport(payload: {
         :frames-emitted="videoFramesEmitted"
         :total-frames="videoTotalFrames"
         :last-error="videoExportError"
+        :warning="videoExportWarning"
         @preview="previewVideoLocation"
         @start="startVideoExport"
         @cancel="cancelVideoExport"

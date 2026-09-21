@@ -116,6 +116,8 @@ struct Uniforms {
   presetTransition: f32,
   paletteScreenShiftX: f32, // 100: palette cycles traversed across the screen width [0, 2]
   paletteScreenShiftY: f32, // 101: same along the screen height
+  stereoEyeSlope: f32, // 102: orthographic eye direction X/Z, zero in mono
+  stereoHeightPass: f32, // 103: analytic height only, before material/color processing
 };
 @group(0) @binding(0) var<uniform> baseParameters: Uniforms;
 var<private> parameters: Uniforms;
@@ -1026,7 +1028,7 @@ fn shade_surface(s: Surface, fx: EffectParams, uv_screen: vec2<f32>) -> vec3<f32
   let anisotropyTangent = anisotropy_tangent_from_dir(s.flow, normal);
   let anisotropyBitangent = normalize(cross(normal, anisotropyTangent));
   let lightDir = vec3<f32>(parameters.lightDirX, parameters.lightDirY, parameters.lightDirZ);
-  let viewDir = vec3<f32>(0.0, 0.0, 1.0);
+  let viewDir = normalize(vec3<f32>(parameters.stereoEyeSlope, 0.0, 1.0));
   let halfDir = normalize(lightDir + viewDir);
   let nDotL = max(dot(normal, lightDir), 0.0);
   let nDotV = max(dot(normal, viewDir), 0.0);
@@ -1391,6 +1393,18 @@ fn colorize_pixel(
   uv_neutral: vec2<f32>,
   analyticTag: bool
 ) -> vec4<f32> {
+  // Stable bounded analytic relief, independent of palette and frame extrema.
+  // H is logarithmic inverse distance relative to view scale. Interior uses
+  // its limiting plateau instead of the historical -1e6 sentinel.
+  if (parameters.stereoHeightPass > 0.5) {
+    if (iter_val < 0.0) { return vec4<f32>(0.0); }
+    var height = 1.0;
+    if (iter_val > 0.0 && zx_val*zx_val + zy_val*zy_val >= parameters.mu) {
+      height = 0.5 + 0.5 * tanh(clamp(extras.height, -64.0, 64.0) / 8.0);
+    }
+    // The ExpMap accumulator converts back to linear, preserving float depth.
+    return vec4<f32>(linear_to_sRGB(vec3<f32>(height)), 1.0);
+  }
   // Sentinel: iter_val < 0 => uncomputed pixel.
   if (iter_val < 0.0) {
     return vec4<f32>(0.0, 0.0, 0.0, 0.0);

@@ -1,3 +1,5 @@
+import { readHdrGpuOutput, type HdrGpuOptions } from './hdrGpuOutput'
+import type { StereoColorPass } from './stereoVideo'
 import {GpuPalettePath} from './gpuPalettePath'
 import {resolvePalettePathImages} from './palettePathResources'
 import {validatePalettePath, snapshotPathAppearance, PATH_GLOBAL_FIELDS, PALETTE_PATH_TEXTURE_BUDGET, type PalettePath} from './palettePath'
@@ -555,6 +557,7 @@ export class Engine {
         durationMicros: number
         resolve: (frame: VideoFrame) => void
         resolveHdr?: (pixels: Uint16Array) => void
+        hdrOptions?: HdrGpuOptions
         reject: (error: unknown) => void
     };
     /** Supersampled LINEAR render target — never sRGB: the reduction happens
@@ -3146,13 +3149,13 @@ export class Engine {
             this.exportOutputTexture = this.device.createTexture({
                 size: { width: outputWidth, height: outputHeight },
                 format: hdr ? 'rgba16float' : this.format,
-                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC,
+                usage: GPUTextureUsage.RENDER_ATTACHMENT | GPUTextureUsage.COPY_SRC | GPUTextureUsage.TEXTURE_BINDING,
                 label: 'Engine ExportOutputTexture',
             })
             this.exportOutputView = this.exportOutputTexture.createView({ label: 'Engine ExportOutputView' })
 
-            this.exportReadbackBuffer = this.device.createBuffer({
-                size: Engine.alignRowBytes(outputWidth * (hdr ? 8 : 4)) * outputHeight,
+            this.exportReadbackBuffer = hdr ? undefined : this.device.createBuffer({
+                size: Engine.alignRowBytes(outputWidth * 4) * outputHeight,
                 usage: GPUBufferUsage.COPY_DST | GPUBufferUsage.MAP_READ,
                 label: 'Engine ExportReadback',
             })
@@ -3217,14 +3220,14 @@ export class Engine {
      * frame's colour bind group — the same reason the PNG snapshot path lives
      * there rather than rebuilding the pass from outside.
      */
-    captureHdrFrame(width: number, height: number, supersample = 1): Promise<Uint16Array> {
+    captureHdrFrame(width: number, height: number, supersample = 1, hdrOptions: HdrGpuOptions = {format:'video'}): Promise<Uint16Array> {
         if (!this.videoExportActive || !this.hdrExport) return Promise.reject(new Error('Une session HDR est requise.'))
         if (this.exportCaptureRequest) return Promise.reject(new Error('Une capture est déjà en attente.'))
         const max = this.device.limits.maxTextureDimension2D
         if (!Number.isSafeInteger(supersample) || supersample < 1 || ![width, height].every(n => Number.isSafeInteger(n) && n > 0 && n * supersample <= max)) return Promise.reject(new Error('Dimensions HDR invalides.'))
         return new Promise((resolveHdr, reject) => {
             this.exportCaptureRequest = { outputWidth: width, outputHeight: height, supersample,
-                timestampMicros: 0, durationMicros: 1, resolve: frame => frame.close(), resolveHdr, reject }
+                timestampMicros: 0, durationMicros: 1, resolve: frame => frame.close(), resolveHdr, hdrOptions, reject }
             this.needRender = true
         })
     }
@@ -4433,13 +4436,14 @@ export class Engine {
 
     private shaderReplayContext?: Mandelbrot
 
-    async prepareShaderExpmapColor(options: RenderOptions, time: number, angle: number, sourceMu?: number) {
+    async prepareShaderExpmapColor(options: RenderOptions, time: number, angle: number, sourceMu?: number, stereo?: StereoColorPass) {
         if (!this.shaderReplayContext || this.expmapProjection) throw new Error('Engine not ready for shader playback')
         const saved = this.animationTimeOverride
         this.animationTimeOverride = time
         const context = this.shaderReplayContext
         try { await this.update({ ...context, angle, mu: sourceMu ?? context.mu }, options) }
         finally { this.animationTimeOverride = saved; this.shaderReplayContext = context }
+        this.device.queue.writeBuffer(this.uniformBufferColor!, 102 * 4, new Float32Array([stereo?.eyeSlope ?? 0, stereo?.height ? 1 : 0]))
         if (!this.bindGroupColor || !this.pipelineColor) throw new Error('Color resources unavailable')
         return { code: this.shaderPassColor, layout: this.pipelineColor.getBindGroupLayout(0), bindGroup: this.bindGroupColor }
     }
@@ -4960,6 +4964,7 @@ export class Engine {
             this.presetTransition?.progress ?? 0, // 99: texture transition blend
             renderOptions.paletteScreenShiftX ?? 0, // 100: palette cycles across screen width
             renderOptions.paletteScreenShiftY ?? 0, // 101: palette cycles across screen height
+            0, 0, // 102..103: stereo replay overrides; interactive and classic exports stay mono
         ])
         this.device.queue.writeBuffer(this.uniformBufferColor!, 0, colorShaderData.buffer)
 
@@ -6322,36 +6327,28 @@ export class Engine {
                     // A missing swapchain texture must never fail the export.
                 }
 
-                const bytesPerRow = Engine.alignRowBytes(outputWidth * (request.resolveHdr ? 8 : 4))
-                encoder.copyTextureToBuffer(
-                    { texture: this.exportOutputTexture! },
-                    { buffer: this.exportReadbackBuffer!, offset: 0, bytesPerRow },
-                    { width: outputWidth, height: outputHeight, depthOrArrayLayers: 1 },
-                )
-                this.device.queue.submit([encoder.finish()])
-
-                await this.exportReadbackBuffer!.mapAsync(GPUMapMode.READ)
-                // Copy out before unmapping: the mapped range is detached on
-                // unmap, and VideoFrame must own stable bytes.
-                const pixels = new Uint8Array(this.exportReadbackBuffer!.getMappedRange().slice(0))
-                this.exportReadbackBuffer!.unmap()
-
-                // The 256-byte row alignment is expressed as a stride rather
-                // than repacked row by row — no per-frame copy of the image.
                 if (request.resolveHdr) {
-                    const packed = new Uint16Array(outputWidth * outputHeight * 4)
-                    const source = new Uint16Array(pixels.buffer)
-                    for (let y = 0; y < outputHeight; y++) packed.set(source.subarray(y * bytesPerRow / 2, y * bytesPerRow / 2 + outputWidth * 4), y * outputWidth * 4)
-                    request.resolveHdr(packed)
-                } else request.resolve(new VideoFrame(pixels, {
-                    format: this.format === 'bgra8unorm' ? 'BGRA' : 'RGBA',
-                    codedWidth: outputWidth,
-                    codedHeight: outputHeight,
-                    timestamp: request.timestampMicros,
-                    duration: request.durationMicros,
-                    layout: [{ offset: 0, stride: bytesPerRow }],
-                    colorSpace: { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', fullRange: true },
-                }))
+                    this.device.queue.submit([encoder.finish()])
+                    request.resolveHdr(await readHdrGpuOutput(this.device, this.exportOutputTexture!, outputWidth, outputHeight, request.hdrOptions!))
+                } else {
+                    const bytesPerRow = Engine.alignRowBytes(outputWidth * 4)
+                    encoder.copyTextureToBuffer(
+                        { texture: this.exportOutputTexture! },
+                        { buffer: this.exportReadbackBuffer!, offset: 0, bytesPerRow },
+                        { width: outputWidth, height: outputHeight, depthOrArrayLayers: 1 },
+                    )
+                    this.device.queue.submit([encoder.finish()])
+                    await this.exportReadbackBuffer!.mapAsync(GPUMapMode.READ)
+                    const pixels = new Uint8Array(this.exportReadbackBuffer!.getMappedRange().slice(0))
+                    this.exportReadbackBuffer!.unmap()
+                    request.resolve(new VideoFrame(pixels, {
+                        format: this.format === 'bgra8unorm' ? 'BGRA' : 'RGBA',
+                        codedWidth: outputWidth, codedHeight: outputHeight,
+                        timestamp: request.timestampMicros, duration: request.durationMicros,
+                        layout: [{ offset: 0, stride: bytesPerRow }],
+                        colorSpace: { primaries: 'bt709', transfer: 'iec61966-2-1', matrix: 'bt709', fullRange: true },
+                    }))
+                }
             } catch (error) {
                 request.reject(error)
             }

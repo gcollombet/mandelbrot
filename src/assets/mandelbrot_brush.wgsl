@@ -1057,7 +1057,12 @@ fn mandelbrot_compute(x0: f32, y0: f32, prev_iter: f32, prev_zx: f32, prev_zy: f
     logMaxBlaR = log2(max(mandelbrotBlaLevels[0].maxRadius, 1e-30));
   }
 
-  while (g_workBudget < localWorkLimit && ref_i < globalMaxIterI) {
+  // Bound on the pixel's TOTAL iteration count, not on ref_i: the end-of-orbit
+  // rebase resets ref_i to 0, so a ref_i bound let a pixel run on past
+  // globalMaxIter for the rest of the pass budget with dz = z of order 1 in
+  // f32 — dc (1e-14 at depth) is lost and the pixel follows the reference's
+  // dynamics from a shifted z, then escapes although it is inside.
+  while (g_workBudget < localWorkLimit && prev_iter + i < mandelbrot.globalMaxIter) {
     g_workBudget += 1u;
     var skipped = 0;
     if (useBla) {
@@ -1211,7 +1216,12 @@ fn mandelbrot_compute_deep(dc: fe, prev_iter: f32, prev_dz_m: vec2<f32>, prev_dz
     skip0Log = i32(countTrailingZeros(max(mandelbrotBlaLevels[0].skip, 1u)));
   }
 
-  while (g_workBudget < localWorkLimit && ref_i < globalMaxIterI) {
+  // Bound on the pixel's TOTAL iteration count, not on ref_i: the end-of-orbit
+  // rebase resets ref_i to 0, so a ref_i bound let a pixel run on past
+  // globalMaxIter for the rest of the pass budget with dz = z of order 1 in
+  // f32 — dc (1e-14 at depth) is lost and the pixel follows the reference's
+  // dynamics from a shifted z, then escapes although it is inside.
+  while (g_workBudget < localWorkLimit && prev_iter + i < mandelbrot.globalMaxIter) {
     g_workBudget += 1u;
     var skipped = 0;
     if (useBla) {

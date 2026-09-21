@@ -104,6 +104,7 @@ function showHudStatus(text: string, ms = 4000) {
 const screenshotMenuOpen = ref(false);
 const stillHdr = ref(false);
 const hdrExposure = ref(0);
+const stillHdrWarning = ref('');
 const hdrSwitchBusy = ref(false);
 const outputDiagnostics = ref<ReturnType<typeof readOutputDiagnostics>>(null);
 function readOutputDiagnostics() { return mandelbrotEngine.value?.outputDiagnostics ?? null; }
@@ -210,6 +211,7 @@ async function exportStill(size: StillSize) {
   const cropX = Math.floor((captureWidth - width) / 2), cropY = Math.floor((captureHeight - height) / 2);
   const hdr = stillHdr.value;
   const exposure = hdrExposure.value;
+  stillHdrWarning.value = '';
   stillAbort = new AbortController();
   stillExport.value = { active: true, label: `Capture ${size.toUpperCase()}`, tile: 0, tiles: 1 };
   console.info(`[still] start ${size} ${width}×${height} t=${Math.round(performance.now())}`);
@@ -229,9 +231,11 @@ async function exportStill(size: StillSize) {
         width: captureWidth,
         height: captureHeight,
         hdr,
+        hdrExposure: exposure,
         aaSamples: p.antialiasLevel ?? 1,
         magnificationThreshold: p.zoomMagnificationThreshold ?? 16,
         signal: stillAbort.signal,
+        onWarning: (message) => { stillHdrWarning.value = message; },
         onProgress: ({ tile, tiles }) => { stillExport.value = { ...stillExport.value, tile, tiles }; },
       },
     );
@@ -239,14 +243,15 @@ async function exportStill(size: StillSize) {
       stillExport.value = { ...stillExport.value, label: 'Encodage PNG HDR' };
       let pixels = result.hdrPixels;
       if (captureWidth !== width || captureHeight !== height) {
-        pixels = new Uint16Array(width * height * 4);
+        pixels = new Uint16Array(width * height * 3);
         for (let y = 0; y < height; y++) {
-          const start = ((y + cropY) * captureWidth + cropX) * 4;
-          pixels.set(result.hdrPixels.subarray(start, start + width * 4), y * width * 4);
+          const start = ((y + cropY) * captureWidth + cropX) * 3;
+          pixels.set(result.hdrPixels.subarray(start, start + width * 3), y * width * 3);
         }
       }
-      const blob = await encodeHdrPng(width, height, pixels, { exposure, signal: stillAbort.signal });
+      const blob = await encodeHdrPng(width, height, pixels, { signal: stillAbort.signal });
       downloadHdrBlob(blob, width, height);
+      if (stillHdrWarning.value) showHudStatus(stillHdrWarning.value, 10000);
     } else {
       let output = result.canvas;
       if (captureWidth !== width || captureHeight !== height) {
@@ -305,12 +310,24 @@ if (import.meta.env.DEV) {
     getEps: () => clampBlaEpsilon(mandelbrotParams.value.blaEpsilon),
     setMode: (mode) => { mandelbrotParams.value.approximationMode = mode; },
     setEps: (eps) => { mandelbrotParams.value.blaEpsilon = eps; },
+    // The Mandelbrot.vue param watcher teleports the navigator and forces a
+    // fresh reference at the new centre (same path as a manual entry).
+    setLocation: (location) => {
+      const p = mandelbrotParams.value;
+      if (location.cx !== undefined) p.cx = location.cx;
+      if (location.cy !== undefined) p.cy = location.cy;
+      if (location.scale !== undefined) p.scale = location.scale;
+      if (location.angle !== undefined) p.angle = location.angle;
+    },
+    patchParams: (params) => { Object.assign(mandelbrotParams.value, params); },
     download: (canvas, suffix) => downloadCanvas(canvas, suffix),
     magnificationThreshold: () => mandelbrotParams.value.zoomMagnificationThreshold ?? 16,
   });
-  const w = window as unknown as { __capture?: unknown; __compare?: unknown };
+  const w = window as unknown as { __capture?: unknown; __compare?: unknown; __params?: unknown };
   w.__capture = dev.capture;
   w.__compare = dev.compare;
+  // Live-path tests: patch viewer settings without touching localStorage.
+  w.__params = (patch: Record<string, unknown>) => { Object.assign(mandelbrotParams.value, patch); return { ...mandelbrotParams.value }; };
 }
 
 // ── Minibrot shortcuts (same actions as the Navigation panel) ──
@@ -401,12 +418,6 @@ async function saveSharedSceneCopy() {
   catch (error) { showHudStatus(error instanceof Error ? error.message : String(error)); }
   finally { sharedCopyBusy.value = false; }
 }
-async function openSceneSharing() {
-  if (!openTabs.has('presets')) toggleTab('presets');
-  bringToFront('presets');
-  await nextTick();
-}
-
 async function signInForSharing(): Promise<void> {
   await loginWithGoogle();
   await authStateTransition;
@@ -2057,7 +2068,6 @@ async function startTravelToPreset(preset: PresetRecord) {
           <span class="tab-label-text is-hidden-touch">{{ tab.label }}</span>
           <span v-if="tab.shortcut" class="tab-shortcut-hint is-hidden-touch">({{ tab.shortcut.toUpperCase() }})</span>
         </button>
-        <button class="top-tab-btn" type="button" @click="openSceneSharing" title="Partager la scène enregistrée">Partager</button>
       <CloudAccountControl compact v-if="authConfigured" :signed-in="userRole !== 'guest'" :email="authUserEmail"
         :cloud-enabled="personalLibraryFeatureFlags.presetSync" :busy="authBusy" :error="authError"
         :sync-state="personalSyncStatus.state"
@@ -2282,6 +2292,7 @@ async function startTravelToPreset(preset: PresetRecord) {
           </div>
           <label v-if="stillHdr" class="hdr-output-info">Exposition export (EV)
             <input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" aria-label="Exposition de l’export HDR" />
+            <span v-if="stillHdrWarning" role="status">{{ stillHdrWarning }}</span>
             <small>PQ / Rec.2020 · blanc de référence 203 nits. Lecture dans un logiciel compatible HDR.</small>
           </label>
           <div class="fab-menu-seg" role="radiogroup" aria-label="Format de l'image">

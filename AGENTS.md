@@ -16,6 +16,13 @@ npm run dev
 # Open http://localhost:5173
 ```
 
+**The dev server never rebuilds the WASM.** After any change under
+`reference_calculus/src`, rerun `wasm-pack build reference_calculus` (or
+`--dev`), otherwise the page keeps running the old `pkg/` and buffer layouts
+shared with the worker/GPU (`BlaStep`, `MandelbrotStep`) silently drift. The
+worker throws at the first BLA table build when the `BlaStep` stride does not
+match; a capture that reports `blaLevels: 0` with mode `bla` is the symptom.
+
 The app requires a **WebGPU-capable browser** (Chrome/Edge with `--enable-unsafe-webgpu` flag).
 
 ## Commands
@@ -71,25 +78,48 @@ approximation modes, ε values, palettes, a suspected rendering bug…) goes thr
 the dev-only console capture tooling, never through screenshots of the live
 canvas or Playwright clicks on the UI. The live canvas is progressive: a
 screenshot taken at an arbitrary moment shows unfinished pixels, and the BLA table
-may not have landed yet. The capture path drives the engine's export session
-(`renderStill`) and returns only once every pixel has converged and, in BLA mode,
-once the block table of the current reference is in place.
+may not have landed yet. `__capture` drives the engine's export session
+(`renderStill`, the same path as the camera button) and returns only once every
+pixel has converged and, in BLA mode, once the block table of the current
+reference is in place. The default 1024×576 / AA 1 still costs well under a
+second on a desktop GPU.
 
-- From the browser console (dev build, `npm run dev`):
-  - `await __capture({ mode: 'bla' | 'perturbation', eps: 1e-8, width: 1024, height: 576, aa: 1, download: true })`
-    → `{ canvas, dataUrl, pumps, ms, shaderFlag, blaLevels }`
-  - `await __compare({ eps: 1e-8, width: 1024, height: 576 })` → renders exact then BLA at the
-    current view, downloads `exact`, `bla` and `diff` PNGs and returns
-    `{ differing, total, fraction }` (per-pixel colour difference > `threshold`, default 8).
-- Headless, from a shell (dev server must be running): `node scripts/engine-capture.mjs compare --cx=… --cy=… --scale=1e-11 --eps=1e-8 --out=/tmp/cap`
-  (or `capture --mode=bla`). It runs Playwright's Chromium on SwiftShader by default
-  (`--gpu=native` to use a real GPU), so it is slow but reproducible on machines
-  without a GPU. Default 1024×576; use `--width/--height` for quicker runs.
-- The implementation lives in `src/devCapture.ts`, wired in `MandelbrotViewer.vue`
-  under `import.meta.env.DEV` (also `window.__mandelbrotEngine` and `window.__renderStill`).
-- Limits: this cannot test the **real-time** mechanics (progressive passes,
-  reprojection during zoom, frame pacing, AA accumulation over frames). For those,
-  the Playwright E2E specs remain the tool.
+**Procedure** (dev server running, `npm run dev`):
+
+1. Open `http://localhost:5173` in the built-in browser (`preview_start` with the
+   URL). Wait a few seconds for `window.__capture` to exist.
+2. Run the capture from the page's JavaScript console (`javascript_tool`):
+   ```js
+   await __capture({ save: 'seahorse-bla', mode: 'bla', eps: 1e-6,
+                     location: { cx: '-0.75', cy: '0.1', scale: '1e-11', angle: 0 } })
+   // → { file: 'captures/seahorse-bla.png', pumps, ms, shaderFlag, blaLevels, ... }
+   ```
+   `save` writes the PNG to `captures/<name>.png` at the repository root (via the
+   dev server's sink, `scripts/vite-capture-sink.ts`; the folder is gitignored).
+   Omit `location` to render the current view; any field left out keeps its
+   current value. `mode` / `eps` default to the current settings. `width` /
+   `height` / `aa` override the 1024×576 / 1 defaults.
+3. Read the PNG with the file reader. Check `shaderFlag` (0 exact, 1 BLA) and
+   `blaLevels` in the result to confirm which kernel actually ran.
+4. For a kernel A/B: `await __compare({ save: 'seahorse', eps: 1e-6 })` renders
+   exact then BLA at the current view (or at `location`), writes
+   `seahorse-exact.png`, `seahorse-bla.png`, `seahorse-diff.png` (red = differing
+   pixel, per-channel difference > `threshold`, default 8) and returns
+   `{ differing, total, fraction, exact, bla }`.
+
+Rules: one capture per question, keep the default size unless the detail under
+test needs more, and never leave a test hanging on the live canvas. The tooling
+lives in `src/devCapture.ts`, wired in `MandelbrotViewer.vue` under
+`import.meta.env.DEV` (also `window.__mandelbrotEngine` and `window.__renderStill`).
+
+Headless fallback without the built-in browser:
+`node scripts/engine-capture.mjs compare --cx=… --cy=… --scale=1e-11 --eps=1e-8 --out=/tmp/cap`
+(or `capture --mode=bla`) runs the same through Playwright's Chromium, on
+SwiftShader by default (`--gpu=native` for a real GPU); slow but reproducible.
+
+Limits: this cannot test the **real-time** mechanics (progressive passes,
+reprojection during zoom, frame pacing, AA accumulation over frames, reference
+hand-over while navigating). For those, the Playwright E2E specs remain the tool.
 
 ## Architecture
 

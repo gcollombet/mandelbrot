@@ -41,3 +41,11 @@ describe('single ring direct export',()=>{
     expect(mocks.export).not.toHaveBeenCalled();expect(request.scratch).not.toHaveBeenCalled()
   })
 })
+
+it('routes stereo through complete frames without opening ring intermediates',async()=>{
+  const {source,request}=fixture(),stereo={enabled:true,strength:1.5}
+  mocks.export.mockResolvedValue({framesEmitted:3,cancelled:false,blob:null})
+  await exportShaderRingVideo(source,{...request,stereo,keepIntermediates:true})
+  expect(mocks.export).toHaveBeenCalledWith(source,expect.objectContaining({stereo}))
+  expect(request.scratch).not.toHaveBeenCalled();expect(mocks.encode).not.toHaveBeenCalled()
+})

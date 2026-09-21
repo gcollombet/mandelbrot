@@ -36,3 +36,22 @@ describe('shader preferences', () => {
     expect(loadShaderPreferences()).toEqual(DEFAULT_SHADER_PREFERENCES)
   })
 })
+
+it('persists stereo independently of the preferred mono render order',()=>{
+  saveShaderPreferences({...DEFAULT_SHADER_PREFERENCES,stereo:{enabled:true,strength:1.4},ringFirst:true})
+  expect(loadShaderPreferences()).toMatchObject({stereo:{enabled:true,strength:1.4},ringFirst:true})
+  store.set('shader-expmap-preferences',JSON.stringify({stereo:{enabled:'yes',strength:'bad'}}))
+  expect(loadShaderPreferences().stereo).toEqual({enabled:false,strength:1,layout:'side-by-side'})
+})
+
+it('remembers top-bottom packing',()=>{
+  saveShaderPreferences({...DEFAULT_SHADER_PREFERENCES,stereo:{enabled:true,strength:1,layout:'top-bottom'}})
+  expect(loadShaderPreferences().stereo).toMatchObject({layout:'top-bottom'})
+})
+
+it('persists HDR exposure independently of stereo',()=>{
+  saveShaderPreferences({...DEFAULT_SHADER_PREFERENCES,dynamicRange:'hdr',hdrExposure:1.5,hdrQuantizer:20})
+  expect(loadShaderPreferences()).toMatchObject({dynamicRange:'hdr',hdrExposure:1.5,hdrQuantizer:20})
+  saveShaderPreferences({...DEFAULT_SHADER_PREFERENCES,hdrQuantizer:99})
+  expect(loadShaderPreferences().hdrQuantizer).toBe(10)
+})

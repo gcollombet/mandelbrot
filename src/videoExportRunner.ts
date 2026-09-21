@@ -1,4 +1,5 @@
-import { hdrVideoPlanes, hdrInputFrame } from './hdrVideo'
+import type { HdrGpuOptions } from './hdrGpuOutput'
+import { hdrInputFrame } from './hdrVideo'
 // ── Wiring: parcours + engine + capture + encoder → an encoded blob ──
 // The loop itself lives in videoExportSession.ts and knows nothing about GPUs
 // or codecs; this module supplies its driver.
@@ -59,7 +60,7 @@ export type VideoExportRunnerDeps = {
       timestampMicros: number
       durationMicros: number
     }): Promise<VideoFrame>
-    captureHdrFrame?(width: number, height: number, supersample?: number): Promise<Uint16Array>
+    captureHdrFrame?(width: number, height: number, supersample?: number, options?: HdrGpuOptions): Promise<Uint16Array>
     getTiledExportMemoryProfile(): {
       squareBytesPerTexel: number
       tileBytesPerTexel: number
@@ -101,6 +102,7 @@ export type VideoExportRequest = {
   /** Where the bytes go. Streaming avoids holding the whole film in memory. */
   destination: VideoDestination
   maxTextureDimension: number
+  onWarning?: (message: string) => void
   onProgress?: (progress: { framesEmitted: number; totalFrames: number }) => void
   signal?: { aborted: boolean }
   maxPumpsPerFrame?: number
@@ -158,6 +160,10 @@ export async function runVideoExportToWebm(
   const navigator = deps.controller.getNavigator()
   if (!navigator) throw new Error('Navigator unavailable.')
 
+  let hdrWarned = false
+  const onHdrWarning = (message: string) => {
+    if (!hdrWarned) { hdrWarned = true; request.onWarning?.(message) }
+  }
   const { output } = request
   const hdr = output.dynamicRange === 'hdr'
   if (hdr && !deps.engine.captureHdrFrame) throw new Error('Capture HDR vidéo indisponible.')
@@ -200,6 +206,7 @@ export async function runVideoExportToWebm(
       fps: output.fps,
       codec: request.codec,
       dynamicRange: output.dynamicRange,
+      hdrQuantizer: output.dynamicRange === 'hdr' ? output.hdrQuantizer : undefined,
       destination: request.destination,
       hardwareAcceleration: 'prefer-hardware',
     })
@@ -254,7 +261,7 @@ export async function runVideoExportToWebm(
           // frame wait for the next animation tick — already-converged frames
           // included — and hung outright in a background tab, where rAF never
           // fires at all.
-          const pending = hdr ? deps.engine.captureHdrFrame!(output.width, output.height, output.supersample) : deps.engine.captureExportFrame({
+          const pending = hdr ? deps.engine.captureHdrFrame!(output.width, output.height, output.supersample, {format:'video',exposure:output.hdrExposure ?? 0,signal:request.signal,onWarning:onHdrWarning}) : deps.engine.captureExportFrame({
             outputWidth: output.width,
             outputHeight: output.height,
             supersample: output.supersample,
@@ -273,7 +280,8 @@ export async function runVideoExportToWebm(
           }
           const captured = await done
           if (captured instanceof Uint16Array) {
-            const planes = await hdrVideoPlanes(output.width,output.height,captured,output.hdrExposure ?? 0,request.signal)
+            if (request.signal?.aborted) throw new DOMException('Export annulé', 'AbortError')
+            const planes = captured
             await sink.addFrame(hdrInputFrame(planes,output.width,output.height,
               Math.round((frame.index * 1e6) / output.fps),frameDurationMicros))
           } else await sink.addFrame(captured)

@@ -47,3 +47,6 @@ target
 /.github/prompts
 /.github/skills
 /.agents/
+
+# Console capture output (src/devCapture.ts, __capture({ save }))
+/captures

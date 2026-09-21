@@ -1,7 +1,8 @@
+import type { HdrGpuOptions } from './hdrGpuOutput'
 // ── High-resolution still capture ──
 // Drives the engine's export session for a single camera position instead of
-// a parcours. SDR tiles assemble on a 2D canvas; HDR tiles retain RGBA half
-// floats until PNG encoding. One tile when the
+// a parcours. SDR tiles assemble on a 2D canvas; HDR tiles contain GPU-converted RGB16 PQ bytes
+// ready for PNG compression. One tile when the
 // working texture fits the device, a grid of tiles otherwise (8K).
 //
 // The driver knows nothing about Vue: the viewer injects the engine, the
@@ -160,7 +161,7 @@ export type StillExportDeps = {
       timestampMicros: number
       durationMicros: number
     }): Promise<VideoFrame>
-    captureHdrFrame?(width: number, height: number): Promise<Uint16Array>
+    captureHdrFrame?(width: number, height: number, supersample?: number, options?: HdrGpuOptions): Promise<Uint16Array>
     readonly maxTextureDimension: number
   }
   controller: {
@@ -178,6 +179,7 @@ export type StillExportDeps = {
 
 export type StillExportRequest = {
   hdr?: boolean
+  hdrExposure?: number
   location: { cx: string; cy: string; scale: string; angle: number }
   width: number
   height: number
@@ -185,10 +187,12 @@ export type StillExportRequest = {
   magnificationThreshold: number
   maxPumpsPerTile?: number
   signal?: AbortSignal
+  onWarning?: (message: string) => void
   onProgress?: (progress: { tile: number; tiles: number; pumps: number }) => void
 }
 
 export type StillExportResult = {
+  /** Packed big-endian RGB16 PQ bytes from the GPU (three words per pixel). */
   hdrPixels?: Uint16Array
   canvas: HTMLCanvasElement
   plan: StillPlan
@@ -205,12 +209,16 @@ const CAPTURE_DRIVE_ATTEMPTS = 8
  * grid and its scale divided by the grid, so tiles abut without overlap.
  */
 export async function renderStill(deps: StillExportDeps, request: StillExportRequest): Promise<StillExportResult> {
+  let hdrWarned = false
+  const onHdrWarning = (message: string) => {
+    if (!hdrWarned) { hdrWarned = true; request.onWarning?.(message) }
+  }
   const plan = planStillTiles(request.width, request.height, deps.engine.maxTextureDimension)
   const canvas = document.createElement('canvas')
   canvas.width = request.hdr ? 1 : plan.width
   canvas.height = request.hdr ? 1 : plan.height
   if (request.hdr && !deps.engine.captureHdrFrame) throw new Error('Capture HDR indisponible.')
-  const hdrPixels = request.hdr ? new Uint16Array(plan.width * plan.height * 4) : undefined
+  const hdrPixels = request.hdr ? new Uint16Array(plan.width * plan.height * 3) : undefined
   const ctx = canvas.getContext('2d')
   if (!ctx) throw new Error('Canvas 2D indisponible pour assembler la capture.')
 
@@ -275,7 +283,7 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
       if (!ready) {
         throw new Error(`La tuile ${tile.index + 1}/${plan.tiles.length} n'a pas convergé en ${maxPumps} passes.`)
       }
-      const pending = request.hdr ? deps.engine.captureHdrFrame!(surfaceW, surfaceH) : deps.engine.captureExportFrame({
+      const pending = request.hdr ? deps.engine.captureHdrFrame!(surfaceW, surfaceH, 1, {format:'png',exposure:request.hdrExposure ?? 0,originX:tile.originX,originY:tile.originY,signal:request.signal,onWarning:onHdrWarning}) : deps.engine.captureExportFrame({
         outputWidth: surfaceW,
         outputHeight: surfaceH,
         supersample: 1,
@@ -294,7 +302,7 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
       const frame = await done
       if (frame instanceof Uint16Array) {
         for (let y = 0; y < tile.height; y++) {
-          hdrPixels!.set(frame.subarray(y * tile.width * 4, (y + 1) * tile.width * 4), ((tile.originY + y) * plan.width + tile.originX) * 4)
+          hdrPixels!.set(frame.subarray(y * tile.width * 3, (y + 1) * tile.width * 3), ((tile.originY + y) * plan.width + tile.originX) * 3)
         }
       } else {
         try { ctx.drawImage(frame, tile.originX, tile.originY) }

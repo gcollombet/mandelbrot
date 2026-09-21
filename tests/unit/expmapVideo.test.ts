@@ -4,8 +4,8 @@ import { changeExpmapDuration, changeExpmapSpeed, changeExpmapWindow, expmapVide
 import { planExpmap } from '../../src/expmap/plan'
 import { interpolateScale, scaleDoublements } from '../../src/expmap/decimal'
 
-const mock = vi.hoisted(() => ({ render: vi.fn(), add: vi.fn(), finalize: vi.fn(async () => null), cancel: vi.fn(async () => {}) }))
-vi.mock('../../src/videoEncoderSink', () => ({ createVideoSink: async () => ({ addFrame: mock.add, finalize: mock.finalize, cancel: mock.cancel }) }))
+const mock = vi.hoisted(() => ({ create: vi.fn(), render: vi.fn(), add: vi.fn(), finalize: vi.fn(async () => null), cancel: vi.fn(async () => {}) }))
+vi.mock('../../src/videoEncoderSink', () => ({ createVideoSink: async (spec:unknown) => {mock.create(spec);return { addFrame: mock.add, finalize: mock.finalize, cancel: mock.cancel }} }))
 afterEach(() => { vi.unstubAllGlobals(); vi.clearAllMocks() })
 async function manifest() {
   const m = await fixtureManifest(); m.state = 'complete'
@@ -145,4 +145,52 @@ it('uses the starting angle throughout octave rotation without adding legacy tur
   })
   expect(mock.render.mock.calls.length).toBeGreaterThan(1)
   expect(mock.render.mock.calls.every(([view]) => view.angle === 0.4 && view.effects.imageRotationMode === 'droste')).toBe(true)
+})
+
+it('routes stereo to the recolorable renderer with unchanged timing and a frozen setting',async()=>{
+  const m=await manifest(),timestamps:number[]=[]
+  vi.stubGlobal('VideoFrame',class {constructor(_pixels:unknown,options:{timestamp:number}){timestamps.push(options.timestamp)}close(){}})
+  mock.add.mockResolvedValue(undefined)
+  const stereo={enabled:true,strength:1.2}
+  const renderStereo=vi.fn(async(_view:import('../../src/expmap/renderer').ExpmapView,_settings:import('../../src/stereoVideo').StereoVideoSettings)=>{stereo.strength=3;return {} as OffscreenCanvas})
+  await exportExpmapVideo({manifest:m},{window:changeExpmapDuration(expmapVideoDefaults(m),1),width:16,height:12,fps:2,codec:'avc',destination:{kind:'buffer'},stereo,gpuRenderer:{render:mock.render,renderStereo}})
+  expect(mock.render).not.toHaveBeenCalled()
+  expect(renderStereo).toHaveBeenCalledTimes(2)
+  expect(renderStereo.mock.calls[0][0]).toMatchObject({scale:m.projection.domain.startScale,effectTime:0,width:16,height:12})
+  expect(renderStereo.mock.calls[1][0]).toMatchObject({scale:m.projection.domain.endScale,effectTime:1})
+  expect(renderStereo.mock.calls.every(call=>call[1].strength===1.2)).toBe(true)
+  expect(timestamps).toEqual([0,500000])
+})
+it('refuses stereo for an RGB source and stops without encoding a partial pair',async()=>{
+  const m=await manifest(),abort=new AbortController()
+  const request={window:expmapVideoDefaults(m),width:16,height:12,fps:2,codec:'avc' as const,destination:{kind:'buffer' as const},stereo:{enabled:true,strength:1},gpuRenderer:{render:mock.render}}
+  await expect(exportExpmapVideo({manifest:m},request)).rejects.toThrow('recolorable')
+  expect(mock.add).not.toHaveBeenCalled()
+  const renderStereo=vi.fn(async()=>{abort.abort();throw new DOMException('Cancelled','AbortError')})
+  const result=await exportExpmapVideo({manifest:m},{...request,signal:abort.signal,gpuRenderer:{...request.gpuRenderer,renderStereo}})
+  expect(result).toMatchObject({framesEmitted:0,cancelled:true})
+  expect(mock.add).not.toHaveBeenCalled()
+  expect(mock.finalize).toHaveBeenCalledOnce()
+})
+
+ it('exports recolorable HDR as PQ 10-bit from GPU-packed data, including top-bottom stereo',async()=>{
+  const m=await manifest(),frames:{data:Uint16Array;options:Record<string,unknown>}[]=[]
+  vi.stubGlobal('VideoFrame',class {constructor(data:Uint16Array,options:Record<string,unknown>){frames.push({data,options})}close(){}})
+  mock.add.mockResolvedValue(undefined)
+  const rgba=new Uint16Array(16*12*1.5).fill(650) // GPU output, already PQ/YUV
+  const renderHdr=vi.fn(async()=>rgba),renderStereo=vi.fn()
+  await exportExpmapVideo({manifest:m},{window:changeExpmapDuration(expmapVideoDefaults(m),1),width:16,height:12,fps:1,codec:'hevc',dynamicRange:'hdr',hdrExposure:0,destination:{kind:'buffer'},stereo:{enabled:true,strength:1,layout:'top-bottom'},gpuRenderer:{render:mock.render,renderStereo,renderHdr}})
+  expect(mock.render).not.toHaveBeenCalled();expect(renderStereo).not.toHaveBeenCalled()
+  expect(renderHdr).toHaveBeenCalledWith(expect.objectContaining({width:16,height:12}),expect.objectContaining({layout:'top-bottom'}),undefined,expect.objectContaining({format:'video',exposure:0}))
+  expect(mock.create).toHaveBeenCalledWith(expect.objectContaining({dynamicRange:'hdr',codec:'hevc'}))
+  expect(frames[0].options).toMatchObject({format:'I420P10',colorSpace:{primaries:'bt2020',transfer:'pq'}})
+  expect(frames[0].data).toBe(rgba) // No CPU conversion or copy.
+
+})
+it('refuses unsupported HDR requests before opening an encoder',async()=>{
+  const m=await manifest()
+  const request={window:expmapVideoDefaults(m),width:16,height:12,fps:1,codec:'hevc' as const,dynamicRange:'hdr' as const,destination:{kind:'buffer' as const},gpuRenderer:{render:mock.render}}
+  await expect(exportExpmapVideo({manifest:m},request)).rejects.toThrow('recolorable')
+  await expect(exportExpmapVideo({manifest:m},{...request,codec:'avc',gpuRenderer:{...request.gpuRenderer,renderHdr:vi.fn()}})).rejects.toThrow('H.264')
+  expect(mock.create).not.toHaveBeenCalled()
 })

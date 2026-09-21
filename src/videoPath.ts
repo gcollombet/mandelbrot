@@ -48,6 +48,8 @@ export const MAX_MAGNIFICATION_THRESHOLD = 32
 export type VideoOutputSpec = {
   dynamicRange?: 'sdr' | 'hdr'
   hdrExposure?: number
+  /** HDR constant-quality quantizer index; undefined = variable bitrate. */
+  hdrQuantizer?: number
   width: number
   height: number
   fps: number
@@ -153,6 +155,7 @@ export function validateVideoOutput(
     if (output.width % 2 || output.height % 2) problems.push({kind:'output',message:'La vidéo HDR 4:2:0 exige des dimensions paires.'})
     if (!Number.isFinite(output.hdrExposure ?? 0) || Math.abs(output.hdrExposure ?? 0) > 16) problems.push({kind:'output',message:'Exposition HDR invalide (−16 à +16 EV).'})
     if (output.fps > 60) problems.push({kind:'output',message:'La sortie HDR prend en charge jusqu’à 60 images/s.'})
+    if (output.hdrQuantizer !== undefined && (!Number.isInteger(output.hdrQuantizer) || output.hdrQuantizer < 0 || output.hdrQuantizer > 63)) problems.push({kind:'output',message:'Quantificateur HDR invalide (0 à 63).'})
   }
 
 

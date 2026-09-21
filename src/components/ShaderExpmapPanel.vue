@@ -1,4 +1,5 @@
 <script setup lang="ts">
+import { normalizeStereoVideo } from '../stereoVideo'
 import { computed, onMounted, onUnmounted, ref, shallowRef, watch } from 'vue'
 import type { Engine, RenderOptions } from '../Engine'
 import type { MandelbrotExposed } from '../types/MandelbrotExposed'
@@ -43,6 +44,7 @@ const archivesBytes=computed(()=>Object.values(sizes.value).reduce<number>((sum,
 const gigabytes=(bytes:number)=>bytes>=1e9?`${(bytes/1e9).toFixed(2)} Go`:`${(bytes/1e6).toFixed(0)} Mo`
 onMounted(async()=>{try{await refreshRecent()}catch{/* A directory can still be opened manually. */}await refreshQuota()})
 const videoUrl=ref(''),videoName=ref('')
+const hdrWarning=ref('')
 const error=ref(''),status=ref(''),done=ref(0),total=ref(0),unit=ref('éléments'),ownBusy=ref(false)
 type Source={store:ShaderExpmapSource;manifest:ShaderExpmapManifest;archive?:string[]}
 const source=shallowRef<Source|null>(null)
@@ -54,15 +56,19 @@ async function releaseSource() {const s=source.value;source.value=null;if(s?.sto
 const unregisterPreview=props.videoOnly?()=>{}:registerShaderPreviewReader(releaseSource)
 onUnmounted(unregisterPreview)
 const previewScale=ref(saved.previewScale),angle=ref(saved.angle),window=ref<ExpmapVideoWindow|null>(null)
+const stereo=ref(normalizeStereoVideo(saved.stereo))
+const dynamicRange=ref<'sdr'|'hdr'>(saved.dynamicRange??'sdr'),hdrExposure=ref(saved.hdrExposure??0),hdrQuantizer=ref(saved.hdrQuantizer??10)
+watch(dynamicRange,value=>{if(value==='hdr'&&codec.value==='avc')codec.value='hevc'},{immediate:true})
+const useRingFirst=computed(()=>ringFirst.value&&!stereo.value.enabled&&dynamicRange.value!=='hdr')
 const outputWidth=ref(saved.width),outputHeight=ref(saved.height),preview=ref<HTMLCanvasElement|null>(null)
-watch([interpolation,sampleDistribution,radialDensity,budgetMiB,samples,previewScale,angle,outputWidth,outputHeight,fps,codec,ringFirst,keepRings,ringBitrateMbps],()=>saveShaderPreferences({
+watch([dynamicRange,hdrExposure,hdrQuantizer,()=>stereo.value.enabled,()=>stereo.value.strength,()=>stereo.value.layout,interpolation,sampleDistribution,radialDensity,budgetMiB,samples,previewScale,angle,outputWidth,outputHeight,fps,codec,ringFirst,keepRings,ringBitrateMbps],()=>saveShaderPreferences({
   interpolation:interpolation.value,sampleDistribution:sampleDistribution.value,radialDensity:radialDensity.value,budgetMiB:budgetMiB.value,samples:samples.value,previewScale:previewScale.value,angle:angle.value,
-  width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,ringFirst:ringFirst.value,keepRings:keepRings.value,ringBitrateMbps:ringBitrateMbps.value}))
+  dynamicRange:dynamicRange.value,hdrExposure:hdrExposure.value,hdrQuantizer:hdrQuantizer.value,stereo:{...stereo.value},width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,ringFirst:ringFirst.value,keepRings:keepRings.value,ringBitrateMbps:ringBitrateMbps.value}))
 let abort:AbortController|undefined,hardAbort:AbortController|undefined
 const interrupting=ref(false)
 const plan=computed(()=>{try{return props.plan?planExpmap({...props.plan,radialDensity:radialDensity.value,centerOctaves:17}):null}catch{return null}})
 const estimate=computed(()=>{try{return plan.value?shaderSourceEstimate(plan.value):null}catch{return null}})
-const memory=computed(()=>{try{return source.value?planShaderMemory(source.value.manifest,outputWidth.value,outputHeight.value,budgetMiB.value*1048576,0,props.engine?.device?.limits):null}catch{return null}})
+const memory=computed(()=>{try{return source.value?planShaderMemory(source.value.manifest,outputWidth.value,outputHeight.value,budgetMiB.value*1048576,props.videoOnly?outputWidth.value*outputHeight.value*((stereo.value.enabled?(dynamicRange.value==='hdr'?36:28):0)+(dynamicRange.value==='hdr'?16:0)):0,props.engine?.device?.limits):null}catch{return null}})
 const ringEstimate=computed(()=>{
   try {
     if(!source.value||!window.value)return null
@@ -94,7 +100,7 @@ async function selected(store:ShaderExpmapSource,manifest:ShaderExpmapManifest) 
 }
 async function run(action:()=>Promise<void>) {
   if(expmapBusy.value)return
-  error.value='';done.value=0;total.value=0;expmapBusy.value=true;ownBusy.value=true;interrupting.value=false;abort=new AbortController();hardAbort=new AbortController()
+  hdrWarning.value='';error.value='';done.value=0;total.value=0;expmapBusy.value=true;ownBusy.value=true;interrupting.value=false;abort=new AbortController();hardAbort=new AbortController()
   try {await action()} catch(e) {if(abort.signal.aborted)status.value='Interrompu';else error.value=String(e)}
   finally {abort=undefined;hardAbort=undefined;interrupting.value=false;expmapBusy.value=false;ownBusy.value=false}
 }
@@ -201,23 +207,24 @@ async function render(video=false,browserStorage=false) {
       if(video) {
         const picker=(globalThis as typeof globalThis & {showSaveFilePicker?:(options:unknown)=>Promise<FileSystemFileHandle>}).showSaveFilePicker
         if(!picker&&!browserStorage)throw new Error('Enregistrement direct sur disque indisponible : utiliser le stockage du navigateur')
-        const file=browserStorage?await (await navigator.storage.getDirectory()).getFileHandle(`shader-video-${crypto.randomUUID()}.mp4`,{create:true}):await picker!({suggestedName:`${doc.manifest.name}-shader.mp4`,types:[{description:'Vidéo MP4',accept:{'video/mp4':['.mp4']}}]})
-        status.value='Export vidéo par couronnes';unit.value='images'
+        const file=browserStorage?await (await navigator.storage.getDirectory()).getFileHandle(`shader-video-${crypto.randomUUID()}.mp4`,{create:true}):await picker!({suggestedName:`${doc.manifest.name}-shader${stereo.value.enabled?(stereo.value.layout==='top-bottom'?'-half-ou':'-half-sbs'):''}.mp4`,types:[{description:'Vidéo MP4',accept:{'video/mp4':['.mp4']}}]})
+        status.value=stereo.value.enabled?'Export vidéo stéréo':useRingFirst.value?'Export vidéo par couronnes':'Export vidéo image par image';unit.value='images'
         const writable=await file.createWritable()
         let result
         try {
-          const request={window:{...window.value},width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,maxSamples:samples.value,effects,
-            destination:{kind:'stream' as const,writable:writable as unknown as WritableStream<Uint8Array>},signal:abort!.signal,gpuRenderer:renderer,onProgress:(a:number,b:number)=>{done.value=a;total.value=b}}
-          result=ringFirst.value?await exportShaderRingVideo({manifest:videoSource.value},{...request,hardSignal:hardAbort!.signal,scratch:scratchDirectory,keepIntermediates:keepRings.value,intermediateBitrate:ringBitrateMbps.value*1e6,
+          const request={dynamicRange:dynamicRange.value,hdrExposure:hdrExposure.value,hdrQuantizer:hdrQuantizer.value,stereo:{...stereo.value},window:{...window.value},width:outputWidth.value,height:outputHeight.value,fps:fps.value,codec:codec.value,maxSamples:samples.value,effects,
+            destination:{kind:'stream' as const,writable:writable as unknown as WritableStream<Uint8Array>},signal:abort!.signal,gpuRenderer:renderer,onWarning:(message:string)=>{hdrWarning.value=message},onProgress:(a:number,b:number)=>{done.value=a;total.value=b}}
+          result=useRingFirst.value?await exportShaderRingVideo({manifest:videoSource.value},{...request,hardSignal:hardAbort!.signal,scratch:scratchDirectory,keepIntermediates:keepRings.value,intermediateBitrate:ringBitrateMbps.value*1e6,
             onPhase:(phase,a,b)=>{status.value=phase;done.value=a;total.value=b}}):await exportExpmapVideo({manifest:videoSource.value},request)
         }catch(error){await writable.abort().catch(()=>{});throw error}
         status.value=result.cancelled?(result.framesEmitted>0?`Vidéo interrompue · ${result.framesEmitted} images enregistrées`:'Vidéo interrompue'):'Vidéo enregistrée'
-        if(browserStorage&&result.framesEmitted>0){if(videoUrl.value)URL.revokeObjectURL(videoUrl.value);videoUrl.value=URL.createObjectURL(await file.getFile());videoName.value=`${doc.manifest.name}-shader.mp4`}
+        if(browserStorage&&result.framesEmitted>0){if(videoUrl.value)URL.revokeObjectURL(videoUrl.value);videoUrl.value=URL.createObjectURL(await file.getFile());videoName.value=`${doc.manifest.name}-shader${stereo.value.enabled?(stereo.value.layout==='top-bottom'?'-half-ou':'-half-sbs'):''}.mp4`}
       } else {
         status.value='Reconstruction et shading';unit.value='blocs'
         renderer.onProgress=(a,b)=>{done.value=a;total.value=b}
         const w=Math.min(outputWidth.value,960),h=Math.max(1,Math.round(w*outputHeight.value/outputWidth.value))
-        const result=await renderer.render({width:w,height:h,scale:previewScale.value,angle:angle.value*Math.PI/180,allowUpscale:true,maxSamples:samples.value,effects},abort!.signal)
+        const view={width:w,height:h,scale:props.videoOnly?window.value.fromScale:previewScale.value,angle:props.videoOnly?window.value.fromAngle:angle.value*Math.PI/180,allowUpscale:true,maxSamples:samples.value,effectTime:0,effects}
+        const result=props.videoOnly&&stereo.value.enabled?await renderer.renderStereo(view,stereo.value,abort!.signal):await renderer.render(view,abort!.signal)
         if(preview.value) {preview.value.width=w;preview.value.height=h;preview.value.getContext('2d')!.drawImage(result,0,0)}
         status.value='Aperçu reconstruit'
       }
@@ -286,9 +293,26 @@ function updateWindow() {
             <DenseField v-model="window.toAngle" label="Angle arrivée (rad)" :min="-100000" :max="100000" :step="0.1" :default="0"/>
             <ResolutionSelect :width="outputWidth" :height="outputHeight" :min="16" :max="3840" :step="2" @update:width="outputWidth=$event" @update:height="outputHeight=$event"/>
             <DenseSelect :model-value="fps" label="Cadence" :options="[24,25,30,60].map(n=>({value:n,label:`${n} fps`}))" @update:model-value="fps=Number($event)"/>
-            <DenseSelect v-model="codec" label="Codec" :options="MP4_CODECS"/>
-            <DenseSelect :model-value="ringFirst?'ring':'frame'" label="Ordre du rendu" :options="[{value:'ring',label:'Couronne complète, puis la suivante'},{value:'frame',label:'Image complète, puis la suivante'}]" @update:model-value="ringFirst=$event==='ring'"/>
-            <template v-if="ringFirst">
+            <DenseSelect v-model="dynamicRange" label="Dynamique" :options="[{value:'sdr',label:'SDR · 8 bits'},{value:'hdr',label:'HDR · 10 bits PQ'}]"/>
+            <template v-if="dynamicRange==='hdr'">
+              <DenseField v-model="hdrExposure" label="Exposition HDR (EV)" :min="-16" :max="16" :step="0.5" :default="0"/>
+              <DenseField v-model="hdrQuantizer" label="Quantificateur" :min="0" :max="codec==='hevc'?51:63" :step="1" :default="10"/>
+              <p class="hint">Rec.2020 / PQ · rendu complet image par image, en mono ou stéréo. Encodeur 10 bits vérifié au démarrage, sans repli SDR. L’aperçu reste SDR. Qualité constante : 0 = maximale, 10 à 20 = propre ; repli en débit variable si l’encodeur refuse.</p>
+              <p v-if="!memory" role="alert">Budget insuffisant : réduire la résolution ou augmenter le budget du lecteur.</p>
+            </template>
+            <DenseSelect v-model="codec" label="Codec" :options="dynamicRange==='hdr'?MP4_CODECS.filter(c=>c.value!=='avc'):MP4_CODECS"/>
+            <label><input type="checkbox" v-model="stereo.enabled">Vidéo stéréoscopique</label>
+            <template v-if="stereo.enabled">
+              <DenseSelect v-model="stereo.layout" label="Disposition" :options="[{value:'side-by-side',label:'Côte à côte · Half SBS'},{value:'top-bottom',label:'Haut / bas · Half Over-Under'}]"/>
+              <DenseField v-model="stereo.strength" label="Profondeur stéréo (%)" :min="0" :max="3" :step="0.1" :default="1"/>
+              <p class="hint">{{ stereo.layout==='top-bottom'?'Œil gauche en haut, œil droit en bas.':'Œil gauche à gauche, œil droit à droite.' }} Le fichier conserve la résolution choisie ; sélectionner {{ stereo.layout==='top-bottom'?'Half Over-Under':'Half SBS' }} dans le lecteur pour retrouver les proportions. Hauteur analytique et reflets propres à chaque œil. Léger recadrage commun pour couvrir les bords.</p>
+              <p class="hint">Rendu image par image, plus lent et plus gourmand en mémoire. Les reliefs des matériaux restent des détails d’éclairage.</p>
+              <p v-if="!memory" role="alert">Budget insuffisant pour la stéréo : réduire la résolution ou augmenter le budget du lecteur.</p>
+              <button @click="render()">Aperçu stéréo du départ</button>
+              <canvas ref="preview" class="preview"/>
+            </template>
+            <DenseSelect v-if="!stereo.enabled&&dynamicRange!=='hdr'" :model-value="ringFirst?'ring':'frame'" label="Ordre du rendu" :options="[{value:'ring',label:'Couronne complète, puis la suivante'},{value:'frame',label:'Image complète, puis la suivante'}]" @update:model-value="ringFirst=$event==='ring'"/>
+            <template v-if="useRingFirst">
               <DenseField v-if="!ringEstimate?.direct" v-model="ringBitrateMbps" label="Débit couronne plein écran (Mbit/s)" :min="1" :max="500" :step="1" :default="DEFAULT_SHADER_PREFERENCES.ringBitrateMbps"/>
               <p v-if="ringEstimate?.direct" class="hint">Une couronne tient dans le budget : encodage direct, sans fichier intermédiaire.</p>
               <p v-else-if="ringEstimate" class="hint">{{ ringEstimate.passes }} passes · jusqu’à {{ ringEstimate.octaves }} octave(s) utiles chacune, selon le budget (+2 réservées) · intermédiaires ≈ {{ (ringEstimate.bytes/1e9).toFixed(2) }} Go de vidéo au débit cible, hors masques compressés et conteneurs.</p>
@@ -297,8 +321,8 @@ function updateWindow() {
               <label><input type="checkbox" v-model="keepRings">Conserver les intermédiaires après succès</label>
             </template>
             <div class="toolbar">
-              <button class="primary" :disabled="ringFirst&&!ringEstimate" @click="render(true)">Exporter la vidéo…</button>
-              <button :disabled="ringFirst&&!ringEstimate" @click="render(true,true)">Exporter dans le stockage du navigateur</button>
+              <button class="primary" :disabled="(useRingFirst&&!ringEstimate)||((stereo.enabled||dynamicRange==='hdr')&&!memory)" @click="render(true)">Exporter la vidéo…</button>
+              <button :disabled="(useRingFirst&&!ringEstimate)||((stereo.enabled||dynamicRange==='hdr')&&!memory)" @click="render(true,true)">Exporter dans le stockage du navigateur</button>
             </div>
           </details>
         </template>
@@ -307,8 +331,9 @@ function updateWindow() {
     <RenderProgress v-if="status" :label="status" :done="done" :total="total" :unit="unit" :active="ownBusy"/>
     <div v-if="ownBusy" class="toolbar">
       <button v-if="!interrupting" @click="interrupting=true;abort?.abort()">Interrompre et conserver</button>
-      <template v-else><small>La partie déjà rendue est finalisée.</small><button @click="hardAbort?.abort()">Abandonner sans enregistrer</button></template>
+      <template v-else><small>La partie déjà rendue est finalisée.</small><button v-if="useRingFirst" @click="hardAbort?.abort()">Abandonner sans enregistrer</button></template>
     </div>
+    <p v-if="hdrWarning" role="status">{{ hdrWarning }}</p>
     <p v-if="error" role="alert">{{ error }}</p>
     <a v-if="videoUrl" :href="videoUrl" :download="videoName">Télécharger {{ videoName }}</a>
   </DenseSection>

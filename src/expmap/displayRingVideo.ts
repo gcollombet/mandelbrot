@@ -24,6 +24,9 @@ type Request=Omit<Parameters<typeof exportExpmapVideo>[1],'gpuRenderer'>&{
 }
 
 export async function exportShaderRingVideo(source:{manifest:ExpmapVideoSource},request:Request) {
+  // Stereo visibility needs the complete height field, so do not cache mono
+  // colored rings or silently discard the requested eye-dependent shading.
+  if(request.stereo?.enabled||request.dynamicRange==='hdr')return exportExpmapVideo(source,request)
   request={...request,window:{...request.window},effects:effectsSettings(request.effects)}
   const {gpuRenderer:renderer,signal,hardSignal}=request,m=renderer.manifest
   // Frames to keep once a graceful interruption happened; undefined while running normally.

@@ -429,6 +429,15 @@ pub struct BlaStep {
     pub radius_beta: f32,
 }
 
+/// Floats per `BlaStep` as laid out in linear memory. The reference worker
+/// reads the table straight from WASM memory with a hard-coded stride, so it
+/// checks this against its own constant: a stale `pkg/` build (struct changed,
+/// `wasm-pack build` not rerun) would otherwise hand the GPU a shifted table.
+#[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
+pub fn bla_step_floats() -> u32 {
+    (std::mem::size_of::<BlaStep>() / std::mem::size_of::<f32>()) as u32
+}
+
 #[cfg_attr(target_arch = "wasm32", wasm_bindgen)]
 #[repr(C)]
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -4007,6 +4016,103 @@ mod gpu_bla_mirror {
         }
     }
 
+    /// Compares the stored f32 reference orbit under two precision budgets
+    /// (ORBIT_PREC_A, default "1e-30" like the viewer; ORBIT_PREC_B, default
+    /// "1e-300") at ORBIT_CX/CY/SCALE for ORBIT_ITER steps: first divergent
+    /// index and the orbit's closest passes to 0.
+    #[test]
+    #[ignore]
+    fn orbit_precision_budget_divergence() {
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let (cx, cy, scale) = (env("ORBIT_CX", "-0.75"), env("ORBIT_CY", "0.1"), env("ORBIT_SCALE", "1e-11"));
+        let iters: u32 = env("ORBIT_ITER", "20000").parse().unwrap();
+        let mut orbits = Vec::new();
+        for prec in [env("ORBIT_PREC_A", "1e-30"), env("ORBIT_PREC_B", "1e-300")] {
+            let mut nav = MandelbrotNavigator::new(&cx, &cy, &scale, 0.0);
+            nav.set_precision_budget(&prec);
+            let _ = nav.compute_reference_orbit_ptr(iters);
+            println!("budget {} -> {} bits, orbit len {}", prec, nav.budget_prec, nav.result.len());
+            orbits.push(nav.result.iter().map(|s| (s.zx as f64, s.zy as f64)).collect::<Vec<_>>());
+        }
+        let (a, b) = (&orbits[0], &orbits[1]);
+        if let Ok(list) = std::env::var("ORBIT_DUMP") {
+            for i in list.split(',').map(|v| v.parse::<usize>().unwrap()) {
+                println!("dump {} A=({:e},{:e}) B=({:e},{:e})", i, a[i].0, a[i].1, b[i].0, b[i].1);
+            }
+        }
+        let mut first: Option<usize> = None;
+        let mut worst = (0usize, 0.0f64);
+        for i in 0..a.len().min(b.len()) {
+            let d = ((a[i].0 - b[i].0).powi(2) + (a[i].1 - b[i].1).powi(2)).sqrt();
+            let m = (b[i].0 * b[i].0 + b[i].1 * b[i].1).sqrt().max(1.0);
+            if d / m > 1e-6 && first.is_none() { first = Some(i); }
+            if d / m > worst.1 { worst = (i, d / m); }
+        }
+        println!("first divergence (rel > 1e-6): {:?}; worst rel {:e} at {}", first, worst.1, worst.0);
+        let mut mins: Vec<(f64, usize)> = b.iter().enumerate().map(|(i, z)| ((z.0 * z.0 + z.1 * z.1).sqrt(), i)).collect();
+        mins.sort_by(|x, y| x.0.partial_cmp(&y.0).unwrap());
+        println!("closest passes to 0 (|Z|, index): {:?}", &mins[..8.min(mins.len())]);
+        if let Some(i) = first {
+            for k in i.saturating_sub(2)..(i + 3).min(a.len()) {
+                println!("  {} A=({:e},{:e}) B=({:e},{:e})", k, a[k].0, a[k].1, b[k].0, b[k].1);
+            }
+        }
+    }
+
+    /// For a few pixels along the screen's vertical axis, compares the f32
+    /// exact-perturbation kernel (CPU mirror, with rebasing) against an
+    /// arbitrary-precision truth (a navigator anchored at the pixel itself).
+    #[test]
+    #[ignore]
+    fn interior_false_escape_probe() {
+        let env = |k: &str, d: &str| std::env::var(k).unwrap_or_else(|_| d.to_string());
+        let (cx, cy, scale) = (env("ORBIT_CX", "-0.75"), env("ORBIT_CY", "0.1"), env("ORBIT_SCALE", "1e-11"));
+        let iters: u32 = env("ORBIT_ITER", "20000").parse().unwrap();
+        let mu: f32 = env("ORBIT_MU", "4").parse().unwrap();
+        let mut nav = MandelbrotNavigator::new(&cx, &cy, &scale, 0.0);
+        nav.set_precision_budget("1e-30");
+        let _ = nav.compute_reference_orbit_ptr(iters);
+        let orbit: Vec<(f32, f32)> = nav.result.iter().map(|s| (s.zx, s.zy)).collect();
+        let scale_d = DBig::from_str(&scale).unwrap();
+        let scale_f = dbig_to_f64(&nav.scale) as f32;
+        let (mut w, mut h) = (32usize, 14usize);
+        let aspect: f32 = env("ORBIT_ASPECT", "1.7778").parse().unwrap();
+        let truth_prec = env("ORBIT_TRUTH_PREC", "1e-30");
+        let mut grid: Vec<(f32, f32)> = Vec::new();
+        if let Ok(list) = std::env::var("ORBIT_POINTS") {
+            // "tx,ty;tx,ty" in half-height units (x already scaled by aspect).
+            for pt in list.split(';') {
+                let mut it = pt.split(',');
+                grid.push((it.next().unwrap().parse().unwrap(), it.next().unwrap().parse().unwrap()));
+            }
+            w = grid.len(); h = 1;
+        } else {
+            for gy in 0..h { for gx in 0..w {
+                grid.push(((gx as f32 / (w - 1) as f32 * 2.0 - 1.0) * aspect, gy as f32 / (h - 1) as f32 * 2.0 - 1.0));
+            } }
+        }
+        let mut rows: Vec<String> = vec![String::new(); h];
+        for (k, &(tx, ty)) in grid.iter().enumerate() {
+            let dc = (tx * scale_f, ty * scale_f);
+            let (ie, _) = run_pixel(&orbit, &[], &[], dc, iters as usize, mu, false);
+            // Truth: high-precision orbit of the pixel itself.
+            let px = &nav.cx + &scale_d * DBig::from_str(&format!("{}", tx)).unwrap();
+            let py = &nav.cy + &scale_d * DBig::from_str(&format!("{}", ty)).unwrap();
+            let mut truth = MandelbrotNavigator::new(&px.to_string(), &py.to_string(), &scale, 0.0);
+            truth.set_precision_budget(&truth_prec);
+            let _ = truth.compute_reference_orbit_ptr(iters);
+            let esc = truth.result.iter().position(|z| z.zx * z.zx + z.zy * z.zy > mu).unwrap_or(iters as usize);
+            if h == 1 { println!("point ({:+.3},{:+.3}) budget {} ({} bits): kernel {} truth {}", tx, ty, truth_prec, truth.budget_prec, ie, esc); }
+            let sym = if esc >= iters as usize && ie >= iters as usize { '#' }
+                else if esc >= iters as usize { 'K' }        // kernel escapes, truth inside
+                else if ie >= iters as usize { 'T' }         // truth escapes, kernel inside
+                else if (ie as i64 - esc as i64).abs() > 50 { 'x' } else { '.' };
+            rows[k / w].push(sym);
+        }
+        println!("# inside both  . escape both  K kernel-only escape  T truth-only escape  x count differs");
+        for r in rows { println!("{}", r); }
+    }
+
     /// Prints an ASCII map of where the BLA deviates from the f64 truth by
     /// more than 50 iterations (the reference sits at the centre).
     #[test]
@@ -4019,10 +4125,15 @@ mod gpu_bla_mirror {
         let max_iter: u32 = env("MAP_ITER", "20000").parse().unwrap();
         let eps: f32 = env("MAP_EPS", "1e-8").parse().unwrap();
         let span: f32 = env("MAP_SPAN", "1").parse().unwrap();
+        let mu: f32 = env("MAP_MU", "4").parse().unwrap();
         let (cx, cy, scale) = (cx_s.as_str(), cy_s.as_str(), scale_s.as_str());
         let mut nav = MandelbrotNavigator::new(cx, cy, scale, 0.0);
         nav.use_bla();
         nav.set_bla_epsilon(eps);
+        // MAP_PREC mirrors the viewer's precisionBudget setting (default "1e-30").
+        if let Ok(prec) = std::env::var("MAP_PREC") {
+            nav.set_precision_budget(&prec);
+        }
         let _ = nav.compute_reference_orbit_ptr(max_iter);
         let info = nav.compute_bla_reference_ptr(max_iter);
         let orbit: Vec<(f32, f32)> = nav.result.iter().map(|s| (s.zx, s.zy)).collect();
@@ -4053,8 +4164,8 @@ mod gpu_bla_mirror {
                 let tx = (gx as f32 / (w - 1) as f32) * 2.0 - 1.0;
                 let ty = (gy as f32 / (h - 1) as f32) * 2.0 - 1.0;
                 let dc = (tx * scale_f * span, ty * scale_f * span);
-                let (ie, _) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, false);
-                let (ib, _) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, 4.0, true);
+                let (ie, _) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, mu, false);
+                let (ib, _) = run_pixel(&orbit, &steps, &levels, dc, max_iter as usize, mu, true);
                 let truth =
                     run_pixel_f64(&orbit64, (dc.0 as f64, dc.1 as f64), max_iter as usize) as i64;
                 let db = (ib as i64 - truth).abs();

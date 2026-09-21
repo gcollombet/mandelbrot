@@ -1,5 +1,6 @@
+import { hdrVideoPlanes } from './hdrReference'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { assertHdrDecoderConfig, hdrEncoderConfig, hdrVideoPlanes, HDR_VIDEO_COLOR_SPACE, supportsHdrEncoder } from '../../src/hdrVideo'
+import { assertHdrDecoderConfig, hdrEncoderConfig, HDR_VIDEO_COLOR_SPACE, supportsHdrEncoder, hdrEncodeOptions, hdrQuantizerRange } from '../../src/hdrVideo'
 import { normalizeVideoExportPreferences } from '../../src/videoExportPreferences'
 import { validateVideoOutput } from '../../src/videoPath'
 
@@ -54,6 +55,22 @@ describe('10-bit encoder contract', () => {
     expect(hdrEncoderConfig({...spec,codec:'av1'},'no-preference').codec).toContain('M.10.')
     expect(hdrEncoderConfig({...spec,codec:'vp9'},'no-preference').codec).toContain('vp09.02.51.10.')
     expect(()=>hdrEncoderConfig({...spec,codec:'avc'},'prefer-hardware')).toThrow('SDR')
+  })
+  it('pins constant quality with a quantizer and otherwise keeps variable bitrate', () => {
+    const vbr = hdrEncoderConfig({...spec,codec:'vp9'},'no-preference')
+    expect(vbr).toMatchObject({bitrateMode:'variable',bitrate:expect.any(Number)})
+    const cq = hdrEncoderConfig({...spec,codec:'vp9',quantizer:10},'no-preference')
+    expect(cq.bitrateMode).toBe('quantizer')
+    expect(cq).not.toHaveProperty('bitrate')
+    expect(hdrEncodeOptions('vp9',10)).toEqual({vp9:{quantizer:10}})
+    expect(hdrEncodeOptions('av1',3)).toEqual({av1:{quantizer:3}})
+    expect(hdrEncodeOptions('hevc',20)).toEqual({hevc:{quantizer:20}})
+    expect(hdrEncodeOptions('vp9',undefined)).toEqual({})
+    expect(hdrQuantizerRange('vp9')).toEqual({min:0,max:63})
+    expect(hdrQuantizerRange('hevc')).toEqual({min:0,max:51})
+    expect(()=>hdrEncoderConfig({...spec,codec:'vp9',quantizer:64},'no-preference')).toThrow('Quantificateur')
+    expect(()=>hdrEncoderConfig({...spec,codec:'hevc',quantizer:52},'no-preference')).toThrow('0 à 51')
+    expect(()=>hdrEncoderConfig({...spec,codec:'vp9',quantizer:2.5},'no-preference')).toThrow('Quantificateur')
   })
   it('requires confirmed PQ/Rec2020 and 10-bit metadata, including HEVC bit depth', () => {
     const hvcc = new Uint8Array(23); hvcc[17]=0xfa;hvcc[18]=0xfa

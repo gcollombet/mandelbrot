@@ -13,31 +13,69 @@ class Chunk {
   constructor(frame:Frame) {this.timestamp=frame.timestamp;this.duration=frame.duration}
   copyTo(bytes:Uint8Array) { bytes[0]=0 }
 }
-let encoders: Encoder[] = [], hardwareRejected=false, badColor=false, missingMetadata=false, wrongDepth=false
-class Encoder {
-  static isConfigSupported=vi.fn(async()=>({supported:true}))
+let encoders: Encoder[] = [], hardwareRejected=false, badColor=false, missingMetadata=false, wrongDepth=false, quantizerRejected=false
+class Encoder extends EventTarget {
+  static isConfigSupported=vi.fn(async(config:VideoEncoderConfig)=>({supported:!(quantizerRejected&&config.bitrateMode==='quantizer')}))
   state='unconfigured'; config!:VideoEncoderConfig
-  constructor(private init:VideoEncoderInit) {encoders.push(this)}
+  encodeQueueSize=0; flushes=0; delayed=false
+  pending:Frame[]=[]; options:VideoEncoderEncodeOptions[]=[]
+  constructor(private init:VideoEncoderInit) {super();encoders.push(this)}
   configure(config:VideoEncoderConfig) {this.config=config;this.state='configured'}
-  encode(frame:Frame) {
+  encode(frame:Frame, options:VideoEncoderEncodeOptions={}) {
+    this.options.push(options)
     if (hardwareRejected && this.config.hardwareAcceleration === 'prefer-hardware') throw new Error('Hardware refused input')
+    if(this.delayed){this.pending.push(frame);return}
+    this.output(frame)
+  }
+  output(frame:Frame) {
     const config={codec:wrongDepth?'vp09.00.41.08':this.config.codec,codedWidth:this.config.width,codedHeight:this.config.height,
       colorSpace:badColor?{primaries:'bt709',transfer:'bt709',matrix:'bt709',fullRange:false}:HDR_VIDEO_COLOR_SPACE}
     this.init.output(new Chunk(frame) as unknown as EncodedVideoChunk,
       (missingMetadata?{}:{decoderConfig:config}) as EncodedVideoChunkMetadata)
   }
-  async flush() {}
+  async flush() {this.flushes++;for(const frame of this.pending.splice(0))this.output(frame)}
+  fail() {this.state='closed';this.init.error(new DOMException('Codec failure','EncodingError'))}
   close() {this.state='closed'}
 }
 const settings={codec:'vp9' as const,dynamicRange:'hdr' as const,width:2,height:2,fps:30,destination:{kind:'buffer' as const}}
 const frame=()=>hdrInputFrame(new Uint16Array([750,750,750,750,512,512]),2,2,0,33333)
 beforeEach(()=>{
-  encoders=[];hardwareRejected=false;badColor=false;missingMetadata=false;wrongDepth=false
+  encoders=[];hardwareRejected=false;badColor=false;missingMetadata=false;wrongDepth=false;quantizerRejected=false
   vi.stubGlobal('VideoFrame',Frame);vi.stubGlobal('VideoEncoder',Encoder);vi.stubGlobal('EncodedVideoChunk',Chunk)
 })
 afterEach(()=>vi.unstubAllGlobals())
 
 describe('native HDR video sink',()=>{
+  it('preserves codec lookahead until finalization and keeps the keyframe cadence',async()=>{
+    const sink=await createVideoSink(settings),encoder=encoders.at(-1)!
+    encoder.delayed=true
+    for(let i=0;i<65;i++)await sink.addFrame(hdrInputFrame(new Uint16Array(6),2,2,Math.round(i*1e6/30),33333))
+    expect(encoder.flushes).toBe(0)
+    expect(encoder.options.flatMap((o,i)=>o.keyFrame?[i]:[])).toEqual([0,60])
+    expect(sink.framesEncoded).toBe(65)
+    await sink.finalize()
+    expect(encoder.flushes).toBe(1)
+    expect(encoder.pending).toHaveLength(0)
+  })
+  it('waits for input queue capacity without flushing',async()=>{
+    const sink=await createVideoSink(settings),encoder=encoders.at(-1)!,f=frame()
+    encoder.encodeQueueSize=4
+    const added=sink.addFrame(f)
+    await new Promise(resolve=>setTimeout(resolve,0))
+    expect(encoder.options).toHaveLength(0);expect(f.close).not.toHaveBeenCalled()
+    encoder.encodeQueueSize=3;encoder.dispatchEvent(new Event('dequeue'))
+    await added
+    expect(encoder.options).toHaveLength(1);expect(encoder.flushes).toBe(0)
+    expect(f.close).toHaveBeenCalledOnce();await sink.finalize()
+  })
+  it('releases a frame waiting for queue capacity if the codec fails',async()=>{
+    const sink=await createVideoSink(settings),encoder=encoders.at(-1)!,f=frame()
+    encoder.encodeQueueSize=4
+    const added=sink.addFrame(f),rejection=expect(added).rejects.toThrow('Codec failure')
+    await new Promise(resolve=>setTimeout(resolve,0));encoder.fail()
+    await rejection
+    expect(f.close).toHaveBeenCalledOnce();await sink.cancel()
+  })
   it('writes 10-bit VP9 and the real Rec2020/PQ limited-range MP4 color box',async()=>{
     const sink=await createVideoSink(settings), f=frame()
     await sink.addFrame(f)
@@ -52,6 +90,24 @@ describe('native HDR video sink',()=>{
     expect(vpc).toBeGreaterThan(0)
     expect(bytes[vpc+10]>>4).toBe(10)
     expect(encoders.every(e=>e.state==='closed')).toBe(true)
+  })
+  it('encodes every frame at the requested constant quality',async()=>{
+    const sink=await createVideoSink({...settings,hdrQuantizer:12}),encoder=encoders.at(-1)!
+    expect(encoder.config.bitrateMode).toBe('quantizer');expect(encoder.config).not.toHaveProperty('bitrate')
+    expect(sink.quantizer).toBe(12)
+    for(let i=0;i<3;i++)await sink.addFrame(hdrInputFrame(new Uint16Array(6),2,2,Math.round(i*1e6/30),33333))
+    expect(encoder.options.map(o=>o.vp9?.quantizer)).toEqual([12,12,12])
+    expect(encoder.options[0].keyFrame).toBe(true)
+    await sink.finalize()
+  })
+  it('falls back to variable bitrate when the encoder refuses quantizer mode',async()=>{
+    quantizerRejected=true
+    const sink=await createVideoSink({...settings,hdrQuantizer:12}),encoder=encoders.at(-1)!
+    expect(encoder.config).toMatchObject({bitrateMode:'variable',bitrate:expect.any(Number)})
+    expect(sink.quantizer).toBeUndefined()
+    await sink.addFrame(frame())
+    expect(encoder.options[0]).not.toHaveProperty('vp9')
+    await sink.finalize()
   })
   it('tries a browser-selected encoder after real hardware input failure',async()=>{
     hardwareRejected=true

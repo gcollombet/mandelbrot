@@ -63,6 +63,7 @@ const props = defineProps<{
   framesEmitted: number;
   totalFrames: number;
   lastError: string | null;
+  warning?: string | null;
 }>();
 
 const emit = defineEmits<{
@@ -116,6 +117,7 @@ const supersample = ref(saved.supersample);
 const magnificationThreshold = ref(saved.magnificationThreshold);
 const dynamicRange = ref<'sdr' | 'hdr'>(saved.dynamicRange ?? 'sdr');
 const hdrExposure = ref(saved.hdrExposure ?? 0);
+const hdrQuantizer = ref(saved.hdrQuantizer ?? DEFAULT_VIDEO_EXPORT_PREFERENCES.hdrQuantizer!);
 const codec = ref<Mp4Codec | 'auto'>(saved.codec);
 watch(dynamicRange, mode => { if (mode === 'hdr' && codec.value === 'avc') codec.value = 'auto'; }, { immediate: true });
 const motion = ref({ ...saved.motion });
@@ -144,7 +146,7 @@ watch(renderMode, (mode) => {
 
 watch(
   [pinnedStart, pinnedEnd, durationSeconds, resolution, fps, supersample, magnificationThreshold,
-    codec, dynamicRange, hdrExposure, motion, filename, timingAuthority, aaSamplesPerFrame, renderMode, tiledMemoryBudgetMiB],
+    codec, dynamicRange, hdrExposure, hdrQuantizer, motion, filename, timingAuthority, aaSamplesPerFrame, renderMode, tiledMemoryBudgetMiB],
   () => saveVideoExportPreferences({
     pinnedStart: pinnedStart.value,
     pinnedEnd: pinnedEnd.value,
@@ -156,6 +158,7 @@ watch(
     codec: codec.value,
     dynamicRange: dynamicRange.value,
     hdrExposure: hdrExposure.value,
+    hdrQuantizer: hdrQuantizer.value,
     motion: motion.value,
     filename: filename.value,
     timingAuthority: timingAuthority.value,
@@ -172,6 +175,7 @@ const output = computed<VideoOutputSpec>(() => {
     width, height,
     dynamicRange: dynamicRange.value,
     hdrExposure: hdrExposure.value,
+    hdrQuantizer: hdrQuantizer.value,
     fps: Number(fps.value),
     supersample: Number(supersample.value),
     magnificationThreshold: magnificationThreshold.value,
@@ -197,6 +201,8 @@ watch([resolution, fps, dynamicRange], async (_values, _old, onCleanup) => {
   probing.value = false;
 }, { immediate: true });
 
+const hdrQuantizerMax = computed(() => effectiveCodec.value === 'hevc' ? 51 : 63);
+watch(hdrQuantizerMax, max => { if (hdrQuantizer.value > max) hdrQuantizer.value = max; });
 const codecOptions = computed(() => [{value:'auto',label:dynamicRange.value === 'hdr' ? 'Auto · HEVC, AV1, VP9 10 bits' : 'Auto · HEVC, sinon H.264'}, ...MP4_CODECS.filter(c => dynamicRange.value !== 'hdr' || c.value !== 'avc').map(({value,label}) => ({value,label:codecSupport.value[value] === false ? `${label} — indisponible ici` : label}))]);
 const codecUnsupported = computed(() => !probing.value && !effectiveCodec.value);
 
@@ -341,7 +347,7 @@ function start() {
 <template>
   <div class="video-export-panel sections">
     <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect label="Source" :model-value="shaderExpmapVideoSelected ? 'shader' : expmapVideoSelected ? 'expmap' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: 'Vidéo depuis la fractale' }, { value: 'expmap', label: 'Vidéo depuis une ExpMap cuite' }, { value: 'shader', label: 'Vidéo depuis une ExpMap recolorable' }]" @update:model-value="expmapVideoSelected = $event === 'expmap'; shaderExpmapVideoSelected = $event === 'shader'"/></fieldset>
-    <p v-if="expmapVideoSelected || shaderExpmapVideoSelected" class="ve-note">Cette source exporte en SDR. Pour une vidéo HDR, choisir « Vidéo depuis la fractale », puis Sortie → Dynamique.</p>
+    <p v-if="expmapVideoSelected" class="ve-note">Cette source RGB exporte en SDR. Pour une vidéo HDR, choisir « Vidéo depuis la fractale » ou une source recolorable, puis Dynamique → HDR.</p>
     <ShaderExpmapPanel v-if="shaderExpmapVideoSelected" video-only :plan="null" name="" :appearance="current as unknown as import('../Engine').RenderOptions" :engine="engine ?? null" :controller="controller ?? null"/>
     <ExpmapVideoPanel v-else-if="expmapVideoSelected" :engine="engine" :controller="controller"/>
     <fieldset v-else :disabled="running || expmapBusy" class="ve-config">
@@ -366,7 +372,8 @@ function start() {
     <DenseSection title="Sortie">
       <DenseSelect label="Dynamique" v-model="dynamicRange" :options="[{value:'sdr',label:'SDR · 8 bits'},{value:'hdr',label:'HDR · 10 bits PQ'}]"/>
       <label v-if="dynamicRange === 'hdr'" class="ve-row"><span class="ve-label">Exposition HDR (EV)</span><input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" aria-label="Exposition vidéo HDR"/></label>
-      <p v-if="dynamicRange === 'hdr'" class="ve-note">Rec.2020 / PQ · blanc de référence 203 nits. Indépendant de l’affichage HDR. Le profil 10 bits est vérifié au démarrage ; aucun repli SDR.</p>
+      <DenseField v-if="dynamicRange === 'hdr'" label="Quantificateur" v-model="hdrQuantizer" :min="0" :max="hdrQuantizerMax" :step="1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.hdrQuantizer"/>
+      <p v-if="dynamicRange === 'hdr'" class="ve-note">Rec.2020 / PQ · blanc de référence 203 nits. Indépendant de l’affichage HDR. Le profil 10 bits est vérifié au démarrage ; aucun repli SDR. Qualité constante : 0 = maximale et fichiers très lourds, 10 à 20 = visuellement propre ; le débit cible est ignoré, repli en débit variable si l’encodeur refuse ce mode.</p>
       <div class="ve-form"><label class="ve-row">
           <span class="ve-label">Résolution</span>
           <DenseSelect
@@ -444,6 +451,7 @@ function start() {
           <li v-for="(warning, index) in warnings" :key="index">{{ warning.message }}</li>
         </ul>
 
+        <p v-if="warning" class="ve-warnings" role="status">{{ warning }}</p>
         <p v-if="lastError" class="ve-error">{{ lastError }}</p>
 
         <RenderProgress v-if="running || framesEmitted > 0" :label="running ? (totalFrames > 0 && framesEmitted >= totalFrames ? 'Finalisation du fichier MP4' : 'Calcul et encodage des images') : lastError ? 'Export arrêté' : framesEmitted >= totalFrames ? 'Export terminé' : 'Export interrompu'" :done="framesEmitted" :total="totalFrames" unit="images encodées" :active="running"/>

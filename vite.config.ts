@@ -3,6 +3,7 @@ import vue from '@vitejs/plugin-vue'
 
 import wasm from "vite-plugin-wasm";
 import topLevelAwait from "vite-plugin-top-level-await";
+import {captureSink} from "./scripts/vite-capture-sink";
 
 // https://vite.dev/config/
 export default defineConfig({
@@ -17,7 +18,8 @@ export default defineConfig({
   plugins: [
       vue(),
       wasm(),
-      topLevelAwait()
+      topLevelAwait(),
+      captureSink()
   ],
   worker: {
     format: 'es',

@@ -1,18 +1,26 @@
 // Console tooling (dev builds only): deterministic still captures for A/B
 // tests between the exact perturbation and the BLA kernel paths.
 //
-//   __capture({ mode: 'bla', eps: 1e-8 })            → one still, returns { canvas, dataUrl, ... }
-//   __compare({ eps: 1e-8, width: 1024, height: 576 }) → exact vs BLA at the current view,
-//                                                        returns the diff statistics and
-//                                                        downloads exact / bla / diff PNGs
+//   __capture({ save: 'seahorse' })                   → one 1024×576 still of the current view,
+//                                                        written to captures/seahorse.png by the
+//                                                        dev server; returns { file, pumps, ... }
+//   __capture({ mode: 'bla', eps: 1e-8, location: { cx, cy, scale, angle } })
+//                                                      → moves the view first (fresh reference)
+//   __compare({ eps: 1e-8, save: 'seahorse' })        → exact vs BLA at the current view,
+//                                                        writes seahorse-exact / -bla / -diff.png
+//                                                        and returns the diff statistics
 //
 // A capture drives the engine's export session (renderStill), so it only
 // returns once every pixel has converged; in BLA mode it also waits for the
-// block table of the current reference before rendering.
+// block table of the current reference before rendering. `save` goes through
+// the dev server's capture sink (scripts/vite-capture-sink.ts); `download`
+// uses the browser's download dialog instead.
 
 import type { Engine } from './Engine'
 import type { ApproximationMode } from './Mandelbrot'
 import { renderStill, type StillExportDeps } from './stillExport'
+
+export type CaptureLocation = { cx?: string; cy?: string; scale?: string; angle?: number }
 
 export type CaptureOptions = {
     mode?: ApproximationMode
@@ -21,7 +29,13 @@ export type CaptureOptions = {
     height?: number
     aa?: number
     download?: boolean
-    /** Table wait limit in ms (BLA mode). */
+    /** File stem: the PNG is written to captures/<save>.png by the dev server. */
+    save?: string
+    /** View to render; any omitted field keeps the current one. */
+    location?: CaptureLocation
+    /** Viewer settings patched before rendering (e.g. { mu: 4, activateShading: false, debugView: 1 }); not restored. */
+    params?: Record<string, unknown>
+    /** Reference / table wait limit in ms. */
     timeoutMs?: number
 }
 
@@ -35,6 +49,8 @@ export type CaptureResult = {
     /** Mode flag the shader actually received on the last frame (0 exact, 1 BLA). */
     shaderFlag: number
     blaLevels: number
+    /** Path of the saved PNG, relative to the repository root (with `save`). */
+    file?: string
 }
 
 export type CompareOptions = Omit<CaptureOptions, 'mode'> & {
@@ -59,6 +75,8 @@ export type DevCaptureDeps = {
     getEps: () => number
     setMode: (mode: ApproximationMode) => void
     setEps: (eps: number) => void
+    setLocation: (location: CaptureLocation) => void
+    patchParams: (params: Record<string, unknown>) => void
     download: (canvas: HTMLCanvasElement, suffix: string) => Promise<void>
     magnificationThreshold: () => number
 }
@@ -70,6 +88,7 @@ type EngineState = {
     currentReferenceAvailableIter: number
     lastShaderApproxFlag: number
     pendingRefActive: boolean
+    clearHistoryNextFrame: boolean
 }
 
 function engineState(engine: Engine): EngineState {
@@ -77,6 +96,20 @@ function engineState(engine: Engine): EngineState {
 }
 
 const sleep = (ms: number) => new Promise<void>(resolve => setTimeout(resolve, ms))
+
+export const CAPTURE_SAVE_ROUTE = '/__capture/save'
+
+async function saveCapture(name: string, dataUrl: string): Promise<string> {
+    const response = await fetch(CAPTURE_SAVE_ROUTE, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ name, dataUrl }),
+    })
+    if (!response.ok) throw new Error(`[capture] enregistrement refusé (${response.status}): ${await response.text()}`)
+    const { file } = await response.json() as { file: string }
+    console.info(`[capture] saved ${file}`)
+    return file
+}
 
 async function waitForReference(engine: Engine, mode: ApproximationMode, timeoutMs: number): Promise<void> {
     const t0 = performance.now()
@@ -106,9 +139,16 @@ export function createDevCapture(deps: DevCaptureDeps) {
         const height = options.height ?? 576
         if (mode !== deps.getMode()) deps.setMode(mode)
         if (eps !== deps.getEps()) deps.setEps(eps)
-        // Let the watchers post the mode / ε to the worker before polling.
+        if (options.params) deps.patchParams(options.params)
+        if (options.location) deps.setLocation(options.location)
+        // Let the watchers post the mode / ε / location to the worker before polling.
         await sleep(50)
         await waitForReference(engine, mode, options.timeoutMs ?? 120_000)
+        // A view or parameter change can leave texels of the previous field in
+        // the raw texture when the export session starts (seen as blocky
+        // remnants inside the set on the first still after a teleport). Start
+        // every capture from a cleared field.
+        engineState(engine).clearHistoryNextFrame = true
         const t0 = performance.now()
         const result = await renderStill(stillDeps, {
             location: deps.getLocation(),
@@ -130,6 +170,7 @@ export function createDevCapture(deps: DevCaptureDeps) {
             blaLevels: s.currentBlaLevelCount,
         }
         console.info(`[capture] ${mode} ε=${eps} ${width}×${height} flag=${out.shaderFlag} levels=${out.blaLevels} pumps=${out.pumps} ${Math.round(ms)} ms`)
+        if (options.save) out.file = await saveCapture(options.save, out.dataUrl)
         if (options.download) await deps.download(result.canvas, `${mode}-${width}x${height}`)
         return out
     }
@@ -168,15 +209,17 @@ export function createDevCapture(deps: DevCaptureDeps) {
     }
 
     async function compare(options: CompareOptions = {}): Promise<CompareResult> {
-        const download = options.download ?? true
+        const download = options.download ?? !options.save
         const initialMode = deps.getMode()
         const initialEps = deps.getEps()
         try {
-            const exact = await capture({ ...options, mode: 'perturbation', download })
-            const bla = await capture({ ...options, mode: 'bla', download })
+            const exact = await capture({ ...options, mode: 'perturbation', download, save: options.save && `${options.save}-exact` })
+            // The location (if any) is applied once by the first capture.
+            const bla = await capture({ ...options, location: undefined, params: undefined, mode: 'bla', download, save: options.save && `${options.save}-bla` })
             const { diff, differing, total } = diffCanvases(exact.canvas, bla.canvas, options.threshold ?? 8)
             const fraction = differing / Math.max(1, total)
             console.info(`[compare] ε=${bla.eps} pixels différents: ${differing}/${total} (${(fraction * 100).toFixed(2)} %)`)
+            if (options.save) await saveCapture(`${options.save}-diff`, diff.toDataURL('image/png'))
             if (download) await deps.download(diff, `diff-${diff.width}x${diff.height}`)
             return { exact, bla, diff, differing, total, fraction }
         } finally {

@@ -61,6 +61,9 @@ export type VideoEncodeSettings = {
   codec: Mp4Codec
   destination: VideoDestination
   quality?: Quality
+  /** HDR only: constant-quality quantizer index (VP9/AV1 0–63, HEVC 0–51).
+   *  Undefined = variable bitrate. Ignored by the SDR path. */
+  hdrQuantizer?: number
   hardwareAcceleration?: 'no-preference' | 'prefer-hardware' | 'prefer-software'
   /** Seconds between key frames. Frequent keyframes ease seeking, cost size. */
   keyFrameIntervalSeconds?: number
@@ -91,6 +94,8 @@ export type VideoEncoderSink = {
   readonly codec: Mp4Codec
   readonly fileExtension: string
   readonly framesEncoded: number
+  /** Effective constant-quality quantizer, undefined when variable bitrate was used. */
+  readonly quantizer?: number
 }
 
 export type EncoderPreference = NonNullable<VideoEncodeSettings['hardwareAcceleration']>
