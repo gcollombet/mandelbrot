@@ -1,4 +1,5 @@
-export interface ResolutionPreset { width: number; height: number; label: string }
+/** `labelKey` (an i18n key taking `{width}`/`{height}`) wins over the plain `label` when present. */
+export interface ResolutionPreset { width: number; height: number; label: string; labelKey?: string }
 export const VIDEO_RESOLUTIONS: ResolutionPreset[] = [
   { width: 1280, height: 720, label: '720p — 1280×720' },
   { width: 1920, height: 1080, label: '1080p — 1920×1080' },
@@ -10,6 +11,6 @@ export const IMAGE_RESOLUTIONS: ResolutionPreset[] = [
   { width: 1024, height: 2048, label: '1024×2048 — 2 Mpx' },
   { width: 2048, height: 4096, label: '2048×4096 — 8 Mpx' },
   { width: 4096, height: 8192, label: '4096×8192 — 32 Mpx' },
-  { width: 2048, height: 2048, label: '2048×2048 — carré' },
-  { width: 4096, height: 4096, label: '4096×4096 — carré' },
+  { width: 2048, height: 2048, label: '2048×2048 — square', labelKey: 'videoControls.resolution.square' },
+  { width: 4096, height: 4096, label: '4096×4096 — square', labelKey: 'videoControls.resolution.square' },
 ]

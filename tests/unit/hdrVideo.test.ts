@@ -68,19 +68,19 @@ describe('10-bit encoder contract', () => {
     expect(hdrEncodeOptions('vp9',undefined)).toEqual({})
     expect(hdrQuantizerRange('vp9')).toEqual({min:0,max:63})
     expect(hdrQuantizerRange('hevc')).toEqual({min:0,max:51})
-    expect(()=>hdrEncoderConfig({...spec,codec:'vp9',quantizer:64},'no-preference')).toThrow('Quantificateur')
-    expect(()=>hdrEncoderConfig({...spec,codec:'hevc',quantizer:52},'no-preference')).toThrow('0 à 51')
-    expect(()=>hdrEncoderConfig({...spec,codec:'vp9',quantizer:2.5},'no-preference')).toThrow('Quantificateur')
+    expect(()=>hdrEncoderConfig({...spec,codec:'vp9',quantizer:64},'no-preference')).toThrow('quantizer')
+    expect(()=>hdrEncoderConfig({...spec,codec:'hevc',quantizer:52},'no-preference')).toThrow('0 to 51')
+    expect(()=>hdrEncoderConfig({...spec,codec:'vp9',quantizer:2.5},'no-preference')).toThrow('quantizer')
   })
   it('requires confirmed PQ/Rec2020 and 10-bit metadata, including HEVC bit depth', () => {
     const hvcc = new Uint8Array(23); hvcc[17]=0xfa;hvcc[18]=0xfa
     expect(()=>assertHdrDecoderConfig(hdrConfig('hvc1.2.4.L153.B0',hvcc),'hevc')).not.toThrow()
     hvcc[18]=0xf8
-    expect(()=>assertHdrDecoderConfig(hdrConfig('hvc1.2.4.L153.B0',hvcc),'hevc')).toThrow('10 bits')
+    expect(()=>assertHdrDecoderConfig(hdrConfig('hvc1.2.4.L153.B0',hvcc),'hevc')).toThrow('10-bit')
     expect(()=>assertHdrDecoderConfig(hdrConfig('vp09.02.51.10'),'vp9')).not.toThrow()
-    expect(()=>assertHdrDecoderConfig(hdrConfig('vp09.00.51.08'),'vp9')).toThrow('10 bits')
+    expect(()=>assertHdrDecoderConfig(hdrConfig('vp09.00.51.08'),'vp9')).toThrow('10-bit')
     expect(()=>assertHdrDecoderConfig(hdrConfig('av01.0.13M.10',new Uint8Array([0x81,0,0x40,0])),'av1')).not.toThrow()
-    expect(()=>assertHdrDecoderConfig(hdrConfig('av01.0.13M.10',new Uint8Array([0x81,0,0x60,0])),'av1')).toThrow('10 bits')
+    expect(()=>assertHdrDecoderConfig(hdrConfig('av01.0.13M.10',new Uint8Array([0x81,0,0x60,0])),'av1')).toThrow('10-bit')
     expect(()=>assertHdrDecoderConfig({codec:'av01.0.13M.10',colorSpace:{primaries:'bt709'}},'av1')).toThrow('Rec.2020/PQ')
   })
   it('checks the browser input format and releases the probe frame', async () => {
@@ -98,7 +98,7 @@ describe('10-bit encoder contract', () => {
     expect(normalizeVideoExportPreferences({dynamicRange:'unknown',hdrExposure:Infinity})).toMatchObject({dynamicRange:'sdr',hdrExposure:0})
     const output={width:1920,height:1080,fps:60,supersample:1,magnificationThreshold:2,dynamicRange:'hdr' as const}
     expect(validateVideoOutput(output,8192)).toEqual([])
-    expect(validateVideoOutput({...output,width:1919},8192).map(p=>p.message).join()).toContain('paires')
-    expect(validateVideoOutput({...output,hdrExposure:NaN},8192).map(p=>p.message).join()).toContain('Exposition')
+    expect(validateVideoOutput({...output,width:1919},8192).map(p=>p.message).join()).toContain('even')
+    expect(validateVideoOutput({...output,hdrExposure:NaN},8192).map(p=>p.message).join()).toContain('exposure')
   })
 })

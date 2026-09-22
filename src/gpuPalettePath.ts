@@ -1,3 +1,4 @@
+import { t } from './i18n'
 import { packTextureLayers } from './mipmaps'
 import { PALETTE_PATH_TEXTURE_BUDGET, PATH_NODE_FLOATS, pathNodeValues, type PalettePath, type PathAppearance } from './palettePath'
 
@@ -15,7 +16,7 @@ export class GpuPalettePath {
         const tileIds = [...new Set(indices.map(i => i.tile))], skyIds = [...new Set(indices.map(i => i.sky))]
         // Conservative bound including all mip levels and all endpoint palettes.
         const bytes = path.textureSize ** 2 * 4 * 4 / 3 * (tileIds.length + skyIds.length) + data.length * 4096 * 7 * 8
-        if (bytes > PALETTE_PATH_TEXTURE_BUDGET) throw new Error('Images du parcours : budget de 128 Mio dépassé. Réduire leur résolution.')
+        if (bytes > PALETTE_PATH_TEXTURE_BUDGET) throw new Error(t('palettes.budgetExceeded'))
         try {
         this.tile = packTextureLayers(device, tileIds.map(i => images[i]), path.textureSize)
         this.sky = packTextureLayers(device, skyIds.map(i => images[i]), path.textureSize)

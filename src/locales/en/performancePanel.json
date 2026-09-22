@@ -1,0 +1,111 @@
+{
+  "title": "GPU measurements",
+  "cards": {
+    "fpsTitle": "Frames per second actually rendered (derived from the real interval between rendered frames).",
+    "fps": "FPS",
+    "frameTitle": "Real time between two frames = the true per-frame budget. This is what the user feels.",
+    "frame": "Frame",
+    "gpuSpanTitle": "REAL GPU time of the frame = last marker − first marker on the GPU timeline. This is the authoritative total, including GPU work located between the measured categories.",
+    "gpuSpan": "GPU span",
+    "sumTitle": "Σ of per-category durations: gaps between ends of ordinary passes, explicit spans for Snapshot and Merge. The sum may differ slightly from the span because of smoothing and markers.",
+    "sum": "Σ passes"
+  },
+  "state": {
+    "idle": "Idle — last measurements",
+    "rendering": "Rendering"
+  },
+  "breakdown": {
+    "summary": "GPU breakdown",
+    "instantTitle": "GPU breakdown — instant",
+    "instantHint": "(scaled to the frame budget — grey = headroom/idle)",
+    "instantAria": "Instant breakdown of GPU time per pass",
+    "segTitle": "{label} — {ms} ms ({share}% of GPU)",
+    "idleTitle": "Headroom / idle — {ms} ms",
+    "avgTitle": "GPU breakdown — 30 s average",
+    "avgHint": "(amortised cost per pass)",
+    "avgAria": "30 s average breakdown of GPU time per pass",
+    "avgSegTitle": "{label} — {ms} ms (30 s avg)",
+    "colCurrent": "current",
+    "colAvg": "30 s avg",
+    "historyTitle": "Stacked history per pass",
+    "historyHint": "— peak {ms} ms · {span} s"
+  },
+  "notice": {
+    "title": "Per-pass timing unavailable",
+    "before": "— this device does not expose",
+    "after": "(common on mobile/Safari). The global metrics above remain valid. To isolate the cost of one pass without a barrier, use",
+    "amplification": "amplification",
+    "end": ": loop the pass N times and divide the GPU time delta by N."
+  },
+  "render": {
+    "title": "Render",
+    "completion": "Completion",
+    "lastRender": "Last render",
+    "cpuBeforeGpuTitle": "CPU time before engine.render(): precise navigation, Vue propagation then Engine.update() preparation.",
+    "cpuBeforeGpu": "CPU before GPU",
+    "cpuDetailTitle": "Breakdown of CPU time outside GPU passes: navigator / Vue models / Engine.update / WebGPU encoding and submission.",
+    "cpuDetail": "CPU detail",
+    "cadenceTitle": "Raw interval of the last requestAnimationFrame callback, its smoothed average and the interval targeted by the pacer.",
+    "cadence": "Cadence",
+    "cadenceValue": "raw rAF {raw} · smoothed {smooth} · target {target}ms",
+    "opsPerFrame": "Ops/frame",
+    "pixelsRemaining": "Pixels remaining",
+    "totalPixels": "Total pixels"
+  },
+  "compute": {
+    "summary": "Compute",
+    "dispatch": "Dispatch",
+    "shaderMode": "Shader mode",
+    "aaFrontier": "AA frontier",
+    "mode": "Compute mode",
+    "batchSize": "Batch size"
+  },
+  "reference": {
+    "title": "Reference",
+    "current": "Current ref.",
+    "reset": "ref reset",
+    "validating": "validation",
+    "pending": "New reference",
+    "blaTable": "BLA table",
+    "serial": "Reference",
+    "changing": "changing",
+    "orbitRemaining": "Orbit remaining"
+  },
+  "tableStage": {
+    "ready": "ready",
+    "coefficients": "coefficients",
+    "transfer": "GPU transfer"
+  },
+  "debug": {
+    "title": "Debug",
+    "visualization": "Debug visualization"
+  },
+  "export": {
+    "samples": "{count} samples / 30 s",
+    "csv": "Export CSV"
+  },
+  "passHelp": {
+    "merge": "Merge of resolved+frozen into a third display then swap, without a preparatory copy. Runs only when a zoom stops.",
+    "snapshot": "Copy of the resolved display into the frozen snapshot used during the zoom.",
+    "reproject": "Pan by toroidal origin shift of the raw cache: only the exposed band is stamped.",
+    "clear": "Reset of the raw cache with sentinels, distinct from the pan shift.",
+    "reseed": "Selective re-seeding of the frontier for one anti-aliasing sample. Active only during AA accumulation.",
+    "compute": "Fused brush+mandelbrot+counting kernel (perturbation/BLA/jet…). This is the core of the cost.",
+    "resolve": "Temporary bilinear presentation of the exact pixels still incomplete.",
+    "aaAccum": "Colour pass accumulated into the (linear) AA buffer during accumulation.",
+    "color": "Direct colour pass to the screen, or linear bake of the final cache when a rotated view has just settled.",
+    "present": "Presentation of the AA accumulator, or bilinear reconstruction of the rotated colour cache, then sRGB conversion."
+  },
+  "passLabel": {
+    "merge": "Merge (zoom)",
+    "snapshot": "Snapshot (zoom)",
+    "reproject": "Reprojection (pan)",
+    "clear": "Clear cache",
+    "reseed": "AA reseed",
+    "compute": "Iteration",
+    "resolve": "Resolve",
+    "aaAccum": "Colour (AA)",
+    "color": "Colour / rotation cache",
+    "present": "Present (AA / rotation)"
+  }
+}

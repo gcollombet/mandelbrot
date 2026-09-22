@@ -6,13 +6,17 @@ const read = (path: string) => readFileSync(new URL(path, import.meta.url), 'utf
 describe('expanded animation renderer wiring', () => {
   it('lists stable panel labels for the six color-pass tracks', () => {
     const panel = read('../../src/components/AnimationPanel.vue');
+    const labels = JSON.parse(read('../../src/locales/en/animationPanel.json')).tracks;
 
-    expect(panel).toContain("protrusionPhase: 'Phase protubérances'");
-    expect(panel).toContain("reliefDepth: 'Profondeur relief'");
-    expect(panel).toContain("orbitTrapPhaseOffset: 'Couleur piège orbite'");
-    expect(panel).toContain("orbitTrapStrength: 'Intensité piège orbite'");
-    expect(panel).toContain("gradeSaturation: 'Saturation'");
-    expect(panel).toContain("gradeContrast: 'Contraste'");
+    for (const id of ['protrusionPhase', 'reliefDepth', 'orbitTrapPhaseOffset', 'orbitTrapStrength', 'gradeSaturation', 'gradeContrast']) {
+      expect(panel).toContain(`'${id}'`);
+    }
+    expect(labels.protrusionPhase).toBe('Protrusion phase');
+    expect(labels.reliefDepth).toBe('Relief depth');
+    expect(labels.orbitTrapPhaseOffset).toBe('Orbit trap color');
+    expect(labels.orbitTrapStrength).toBe('Orbit trap strength');
+    expect(labels.gradeSaturation).toBe('Saturation');
+    expect(labels.gradeContrast).toBe('Contrast');
   });
 
   it('evaluates every contribution independently and bounds effective values', () => {

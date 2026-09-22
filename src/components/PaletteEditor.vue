@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {computed, ref} from 'vue';
+import { useI18n } from 'vue-i18n';
 import type {ColorStop} from "../ColorStop.ts";
 import {getEffectValue} from '../ColorStop.ts';
 import type { EffectFieldName } from '../effectFieldConfig';
@@ -17,6 +18,8 @@ import type {StopPresetRecord} from '../stopPresetStore.ts';
 import {canDeleteCatalogEntry} from '../catalogPermissions.ts';
 import { DenseField, DenseSection, DenseLinkedChip, useLinkedRecord } from './dense';
 import {assertActivePresetImportCapacity, PersonalPresetQuotaError} from '../personalQuotaGuard';
+
+const { t } = useI18n();
 
 // Per-effect value formatter for dense fields (mirrors the old toFixed logic).
 function effectFmt(field: EffectFieldName) {
@@ -99,65 +102,17 @@ function refreshStopPresets() {
   emit('refresh-stop-presets');
 }
 
-// French labels matching the canvas mockup.
-const EFFECT_LABEL_FR: Record<EffectFieldName, string> = {
-  palette: 'Mélange couleur',
-  iridescencePower: 'Force iridescence',
-  zebra: 'Bandes',
-  smoothness: 'Lissage',
-  stripeAverage: 'Moyenne rayures',
-  rotationMean: 'Cohérence dir.',
-  stripeReliefTilt: 'Relief rayures',
-  directionCoherenceReliefTilt: 'Relief direction',
-  shading: 'Mélange lumière',
-  skybox: 'Réflexion',
-  shadingLevel: 'Intensité lumière',
-  specularPower: 'Spéculaire',
-  dielectricSpecular: 'Réflexion diélectrique',
-  metallic: 'Métallicité',
-  roughness: 'Rugosité',
-  anisotropy: 'Anisotropie',
-  reliefGain: 'Gain de relief',
-  protrusion: 'Protubérances',
-  metalReflectance: 'Réflectance métal',
-  metalEnvironmentTint: 'Teinte environnement',
-  tessellation: 'Mélange image',
-  webcam: 'Mélange webcam',
-};
-
-// French tooltips for each effect field.
-const EFFECT_DESC_FR: Record<EffectFieldName, string> = {
-  palette: 'Force de la couleur de base de ce point dans le dégradé',
-  iridescencePower: 'Intensité de la teinte spectrale optionnelle',
-  zebra: 'Ajoute des bandes d’itérations discrètes autour de ce point',
-  tessellation: 'Mélange la texture image sélectionnée dans ce point',
-  shading: 'Mélange l’éclairage du relief avec la couleur du point',
-  skybox: 'Ajoute la réflexion d’environnement à la réponse matériau',
-  webcam: 'Mélange le flux caméra quand le mode webcam est disponible',
-  smoothness: 'Utilise des itérations continues plutôt que par paliers',
-  stripeAverage: 'Intègre les données d’orbite en rayures dans la couleur',
-  rotationMean: 'Utilise la cohérence de direction d’orbite comme signal',
-  stripeReliefTilt: 'Transforme les rayures en relief local',
-  directionCoherenceReliefTilt: 'Transforme la cohérence de direction en relief',
-  shadingLevel: 'Intensité de la lumière directe pour ce point',
-  specularPower: 'Intensité du reflet spéculaire direct ; zéro le désactive',
-  dielectricSpecular: 'Réflectance neutre à incidence normale (F0) pour pierre, verre, céramique ou plastique ; sans effet coloré métallique',
-  metallic: 'À quel point ce point se comporte comme un métal',
-  roughness: 'Contrôle la finesse des reflets : faible = fins et nets, élevée = larges et diffus',
-  anisotropy: 'Étire les reflets et oriente l’iridescence selon la direction de la surface',
-  reliefGain: 'Multiplie le relief analytique pour ce matériau ; 1 est neutre, indépendamment de la Profondeur relief globale',
-  protrusion: 'Accentue le relief près des passages entre itérations lissées ; 0 est neutre',
-  metalReflectance: 'Multiplie la réflectance du métal sans modifier directement sa teinte',
-  metalEnvironmentTint: 'Mélange entre la réponse métal historique et perceptuelle (0) et une réponse physique linéaire, colorée et compensée en rugosité (1)',
-};
+// Labels and tooltips per effect field (locale keys mirror EffectFieldName).
+const effectLabel = (field: EffectFieldName) => t(`paletteEditor.labels.${field}`);
+const effectDesc = (field: EffectFieldName) => t(`paletteEditor.descs.${field}`);
 
 // Point sections mirroring the mockup (fields keyed by their uiGroup), merged
 // into a single "Point · Effets" DenseSection with a subhead per group.
 const POINT_SECTIONS = [
-  { title: 'Couleur', fields: ['palette', 'iridescencePower'] as EffectFieldName[] },
-  { title: 'Éclairage & Matière', fields: UI_GROUPS['lighting'] ?? [] },
-  { title: 'Itérations', fields: UI_GROUPS['iteration'] ?? [] },
-  { title: 'Sources image', fields: UI_GROUPS['imageSources'] ?? [] },
+  { id: 'color', fields: ['palette', 'iridescencePower'] as EffectFieldName[] },
+  { id: 'lightingMaterial', fields: UI_GROUPS['lighting'] ?? [] },
+  { id: 'iterations', fields: UI_GROUPS['iteration'] ?? [] },
+  { id: 'imageSources', fields: UI_GROUPS['imageSources'] ?? [] },
 ];
 
 /** Get the effective value of a field on the selected stop. */
@@ -250,7 +205,7 @@ function detachStopPreset(): void {
 async function saveStopPresetVariant(): Promise<void> {
   const origin = stopLink.origin.value;
   if (!origin) return;
-  stopPresetName.value = `${origin.name} · variante`;
+  stopPresetName.value = `${origin.name} · ${t('paletteEditor.presets.variantSuffix')}`;
   await saveCurrentStopPreset();
 }
 
@@ -280,10 +235,10 @@ async function deleteSelectedStopPreset() {
   const preset = selectedStopPresetRecord.value;
   if (!preset) return;
   if (!canDeleteCatalogEntry(props.isAdmin ? 'admin' : 'guest', preset.remote)) {
-    window.alert('Shared catalog stop presets cannot be deleted locally.');
+    window.alert(t('paletteEditor.presets.sharedCannotDelete'));
     return;
   }
-  if (!window.confirm(`Delete stop preset "${preset.name}"? This cannot be undone.`)) return;
+  if (!window.confirm(t('paletteEditor.presets.confirmDelete', { name: preset.name }))) return;
   await deleteStopPresetEntry(preset.name);
   emit('update:selectedStopPresetName', '');
   refreshStopPresets();
@@ -337,7 +292,7 @@ function importStopPresets(event: Event) {
       }
       refreshStopPresets();
     } catch (error) {
-      window.alert(error instanceof PersonalPresetQuotaError ? error.message : 'Invalid stop preset file.');
+      window.alert(error instanceof PersonalPresetQuotaError ? error.message : t('paletteEditor.presets.invalidFile'));
     }
   };
   reader.readAsText(file);
@@ -355,17 +310,17 @@ function importStopPresets(event: Event) {
       key="point-effets"
       group="params"
       :hue="55"
-      title="Point · Effets"
-      scope="Itérations, éclairage, matière et sources image pour ce point"
+      :title="t('paletteEditor.effects.title')"
+      :scope="t('paletteEditor.effects.scope')"
       icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;4&quot;/><path d=&quot;M12 2v3M12 19v3M2 12h3M19 12h3M5 5l2 2M17 17l2 2M5 19l2-2M17 7l2-2&quot;/>'
     >
-      <template v-for="sec in POINT_SECTIONS.filter(s => props.category === 'texture' ? s.title === 'Sources image' : props.category === 'material' ? s.title === 'Éclairage & Matière' : s.title === 'Couleur' || s.title === 'Itérations')" :key="sec.title">
-        <div class="subhead">{{ sec.title }}</div>
+      <template v-for="sec in POINT_SECTIONS.filter(s => props.category === 'texture' ? s.id === 'imageSources' : props.category === 'material' ? s.id === 'lightingMaterial' : s.id === 'color' || s.id === 'iterations')" :key="sec.id">
+        <div class="subhead">{{ t(`paletteEditor.groups.${sec.id}`) }}</div>
         <div class="fields">
           <DenseField
             v-for="field in sec.fields" :key="field"
-            :label="EFFECT_LABEL_FR[field]"
-            :desc="EFFECT_DESC_FR[field]"
+            :label="effectLabel(field)"
+            :desc="effectDesc(field)"
             :min="EFFECT_FIELD_CONFIG[field].min"
             :max="EFFECT_FIELD_CONFIG[field].max"
             :step="EFFECT_FIELD_CONFIG[field].step"
@@ -384,25 +339,25 @@ function importStopPresets(event: Event) {
       key="point-presets"
       group="params"
       :hue="300"
-      title="Préréglages du point" initially-collapsed
-      scope="Réglages réutilisables pour un point"
+      :title="t('paletteEditor.presets.title')" initially-collapsed
+      :scope="t('paletteEditor.presets.scope')"
       icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
     >
       <slot name="preset-selector" />
       <div class="transfer">
-        <button class="mini-btn primary" :disabled="!selectedStopPresetRecord" @click="applySelectedStopPreset">Appliquer</button>
-        <button class="mini-btn danger" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">Supprimer</button>
-        <button v-if="isAdmin" class="mini-btn" :disabled="!selectedStopPresetRecord" @click="exportSelectedStopPreset">Exporter</button>
+        <button class="mini-btn primary" :disabled="!selectedStopPresetRecord" @click="applySelectedStopPreset">{{ t('paletteEditor.presets.apply') }}</button>
+        <button class="mini-btn danger" :disabled="!selectedStopPresetRecord" @click="deleteSelectedStopPreset">{{ t('paletteEditor.presets.delete') }}</button>
+        <button v-if="isAdmin" class="mini-btn" :disabled="!selectedStopPresetRecord" @click="exportSelectedStopPreset">{{ t('paletteEditor.presets.export') }}</button>
       </div>
-      <DenseLinkedChip v-if="stopLink.origin.value" kind="Point" :name="stopLink.origin.value.name" :dirty="stopLink.dirty.value" :locked="stopLink.locked.value" :busy="stopLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+      <DenseLinkedChip v-if="stopLink.origin.value" :kind="t('paletteEditor.presets.linkedKind')" :name="stopLink.origin.value.name" :dirty="stopLink.dirty.value" :locked="stopLink.locked.value" :busy="stopLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
         @update="updateLinkedStopPreset" @rename="renameLinkedStopPreset" @detach="detachStopPreset" @variant="saveStopPresetVariant" />
       <div class="save-row">
-        <input class="txt-in" v-model="stopPresetName" type="text" :placeholder="stopLink.origin.value ? 'Enregistrer une copie sous…' : 'Nom du preset…'" @keyup.enter="saveCurrentStopPreset" />
-        <button class="mini-btn primary" :disabled="!stopPresetName.trim()" @click="saveCurrentStopPreset">Enregistrer</button>
+        <input class="txt-in" v-model="stopPresetName" type="text" :placeholder="stopLink.origin.value ? t('paletteEditor.presets.saveCopyPlaceholder') : t('paletteEditor.presets.namePlaceholder')" @keyup.enter="saveCurrentStopPreset" />
+        <button class="mini-btn primary" :disabled="!stopPresetName.trim()" @click="saveCurrentStopPreset">{{ t('paletteEditor.presets.save') }}</button>
       </div>
       <div v-if="isAdmin" class="transfer">
-        <button class="mini-btn" :disabled="stopPresets.length === 0" @click="exportAllStopPresets">Exporter tout</button>
-        <button class="mini-btn" @click="triggerImportStopPresets">Importer</button>
+        <button class="mini-btn" :disabled="stopPresets.length === 0" @click="exportAllStopPresets">{{ t('paletteEditor.presets.exportAll') }}</button>
+        <button class="mini-btn" @click="triggerImportStopPresets">{{ t('paletteEditor.presets.import') }}</button>
         <input ref="stopPresetFileInput" type="file" accept=".json" style="display:none;" @change="importStopPresets" />
       </div>
     </DenseSection>

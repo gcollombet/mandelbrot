@@ -1,0 +1,11 @@
+{
+  "hours": "{h} h {m} min",
+  "minutes": "{m} min {s} s",
+  "seconds": "{s} s",
+  "perSecondTitle": "{unit} par seconde",
+  "remainingTitle": "Temps restant estimé",
+  "remaining": "reste",
+  "estimating": "estimation…",
+  "elapsedTitle": "Temps écoulé",
+  "elapsed": "écoulé"
+}

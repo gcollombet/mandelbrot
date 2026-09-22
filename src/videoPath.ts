@@ -1,4 +1,5 @@
 import { canonicalDecimal, canonicalScale } from './expmap/decimal'
+import { t } from './i18n'
 
 // ── Parcours model and validation for video export ──
 // Pure logic, no GPU and no Vue, so every refusal path is testable.
@@ -83,11 +84,12 @@ export function validateVideoPath(spec: VideoPathSpec): VideoPathProblem[] {
   if (!Number.isFinite(spec.durationSeconds) || spec.durationSeconds <= 0) {
     problems.push({
       kind: 'duration',
-      message: `La durée doit être un nombre de secondes fini et positif (reçu ${spec.durationSeconds}).`,
+      message: t('video.path.durationInvalid', { value: spec.durationSeconds }),
     })
   }
 
-  for (const [label, endpoint] of [['départ', spec.from], ['arrivée', spec.to]] as const) {
+  for (const [labelKey, endpoint] of [['video.path.endpointStart', spec.from], ['video.path.endpointEnd', spec.to]] as const) {
+    const label = t(labelKey)
     for (const field of ['cx', 'cy', 'scale'] as const) {
       const value = endpoint?.[field]
       let valid = true
@@ -96,11 +98,11 @@ export function validateVideoPath(spec: VideoPathSpec): VideoPathProblem[] {
         problems.push({
           kind: 'divergent-parameter',
           field,
-          message: `Le point de ${label} ne porte pas de "${field}" exploitable.`,
+          message: t('video.path.endpointField', { endpoint: label, field }),
         })
       }
     }
-    if (!Number.isFinite(endpoint?.angle)) problems.push({kind:'divergent-parameter',field:'angle',message:`L’angle de ${label} doit être fini.`})
+    if (!Number.isFinite(endpoint?.angle)) problems.push({kind:'divergent-parameter',field:'angle',message:t('video.path.endpointAngle', { endpoint: label })})
   }
 
   return problems
@@ -124,8 +126,7 @@ export function describeParcoursWarnings(
   if (!sameCamera) return []
   return [{
     kind: 'degenerate',
-    message: 'Le départ et l\u2019arrivée sont au même endroit : le film sera une image fixe répétée. '
-      + 'Navigue puis redéfinis l\u2019un des deux points.',
+    message: t('video.path.degenerate'),
   }]
 }
 
@@ -150,30 +151,29 @@ export function validateVideoOutput(
   maxTextureDimension: number,
 ): VideoPathProblem[] {
   const problems: VideoPathProblem[] = []
-  if (output.dynamicRange !== undefined && !['sdr','hdr'].includes(output.dynamicRange)) problems.push({kind:'output',message:'Dynamique vidéo invalide.'})
+  if (output.dynamicRange !== undefined && !['sdr','hdr'].includes(output.dynamicRange)) problems.push({kind:'output',message:t('video.path.dynamicRangeInvalid')})
   if (output.dynamicRange === 'hdr') {
-    if (output.width % 2 || output.height % 2) problems.push({kind:'output',message:'La vidéo HDR 4:2:0 exige des dimensions paires.'})
-    if (!Number.isFinite(output.hdrExposure ?? 0) || Math.abs(output.hdrExposure ?? 0) > 16) problems.push({kind:'output',message:'Exposition HDR invalide (−16 à +16 EV).'})
-    if (output.fps > 60) problems.push({kind:'output',message:'La sortie HDR prend en charge jusqu’à 60 images/s.'})
-    if (output.hdrQuantizer !== undefined && (!Number.isInteger(output.hdrQuantizer) || output.hdrQuantizer < 0 || output.hdrQuantizer > 63)) problems.push({kind:'output',message:'Quantificateur HDR invalide (0 à 63).'})
+    if (output.width % 2 || output.height % 2) problems.push({kind:'output',message:t('video.path.hdrEvenDimensions')})
+    if (!Number.isFinite(output.hdrExposure ?? 0) || Math.abs(output.hdrExposure ?? 0) > 16) problems.push({kind:'output',message:t('video.path.hdrExposureInvalid')})
+    if (output.fps > 60) problems.push({kind:'output',message:t('video.path.hdrFpsMax')})
+    if (output.hdrQuantizer !== undefined && (!Number.isInteger(output.hdrQuantizer) || output.hdrQuantizer < 0 || output.hdrQuantizer > 63)) problems.push({kind:'output',message:t('video.path.hdrQuantizerInvalid')})
   }
 
 
   for (const [label, value] of [['width', output.width], ['height', output.height]] as const) {
     if (!Number.isInteger(value) || value <= 0) {
-      problems.push({kind: 'output', field: label, message: `La ${label === 'width' ? 'largeur' : 'hauteur'} de sortie doit être un entier positif.`})
+      problems.push({kind: 'output', field: label, message: t(label === 'width' ? 'video.path.outputWidth' : 'video.path.outputHeight')})
     }
   }
   if (!Number.isFinite(output.fps) || output.fps <= 0) {
-    problems.push({kind: 'output', field: 'fps', message: 'La cadence doit être un nombre fini et positif.'})
+    problems.push({kind: 'output', field: 'fps', message: t('video.path.fpsInvalid')})
   }
   if (!Number.isInteger(output.supersample)
       || !SUPERSAMPLE_FACTORS.includes(output.supersample as (typeof SUPERSAMPLE_FACTORS)[number])) {
     problems.push({
       kind: 'output',
       field: 'supersample',
-      message: `Le suréchantillonnage doit être l\u2019un de ${SUPERSAMPLE_FACTORS.join(', ')} — `
-        + 'un facteur fractionnaire n\u2019a pas de filtre box exact.',
+      message: t('video.path.supersampleInvalid', { factors: SUPERSAMPLE_FACTORS.join(', ') }),
     })
   }
 
@@ -184,8 +184,7 @@ export function validateVideoOutput(
     problems.push({
       kind: 'threshold',
       field: 'magnificationThreshold',
-      message: `Le seuil de bascule doit être compris entre ${MIN_MAGNIFICATION_THRESHOLD} et `
-        + `${MAX_MAGNIFICATION_THRESHOLD} (reçu ${threshold}).`,
+      message: t('video.path.thresholdRange', { min: MIN_MAGNIFICATION_THRESHOLD, max: MAX_MAGNIFICATION_THRESHOLD, value: threshold }),
     })
   }
 
@@ -197,9 +196,7 @@ export function validateVideoOutput(
     if (neutral > maxTextureDimension) {
       problems.push({
         kind: 'output',
-        message: `${output.width}×${output.height} en ×${output.supersample} exige une texture de travail `
-          + `${neutral}², au-delà de la limite de cet appareil (${maxTextureDimension}). `
-          + 'Baisse la résolution ou le suréchantillonnage.',
+        message: t('video.path.textureTooLarge', { width: output.width, height: output.height, supersample: output.supersample, neutral, limit: maxTextureDimension }),
       })
     }
   }
@@ -217,9 +214,7 @@ export function describeOutputWarnings(output: VideoOutputSpec): ParcoursWarning
   if (output.magnificationThreshold <= output.supersample) return []
   return [{
     kind: 'softness',
-    message: `Seuil ${output.magnificationThreshold} au-delà du suréchantillonnage ×${output.supersample} : `
-      + 'la périphérie sera plus douce entre deux bascules, en échange d\u2019un export nettement plus rapide '
-      + '(une reconvergence complète par facteur de zoom égal au seuil).',
+    message: t('video.path.softness', { threshold: output.magnificationThreshold, supersample: output.supersample }),
   }]
 }
 

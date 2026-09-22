@@ -16,6 +16,9 @@
  * explains the amplification fallback for measuring a single pass.
  */
 import { onMounted, onUnmounted, reactive, ref, computed } from 'vue';
+import { useI18n } from 'vue-i18n';
+
+const { t } = useI18n();
 
 const props = withDefaults(defineProps<{ engine: any; isAdmin?: boolean }>(), {isAdmin: false});
 const emit = defineEmits<{ (e: 'close'): void }>();
@@ -25,7 +28,7 @@ const debugShading = defineModel<boolean>('debugShading', { default: false });
 // Fixed per-pass colors (indexed by engine PASS_SLOTS order).
 const PASS_COLORS = ['#8b5cf6', '#38bdf8', '#f472b6', '#f59e0b', '#34d399', '#22d3ee', '#eab308', '#a78bfa'];
 
-interface PassRow { key: string; label: string; help: string; ms: number; active: boolean; color: string }
+interface PassRow { key: string; label: string; labelKey: string; helpKey: string; ms: number; active: boolean; color: string }
 
 const stats = reactive({
   timestampCapable: false,
@@ -96,10 +99,10 @@ const tableBuildPercent = computed(() =>
 );
 
 const tableBuildLine = computed(() => {
-  if (!stats.tableBuildActive) return stats.tableBuildStage === 'ready' ? 'prête' : '';
+  if (!stats.tableBuildActive) return stats.tableBuildStage === 'ready' ? t('performancePanel.tableStage.ready') : '';
   const stages: Record<string, string> = {
-    coefficients: 'coefficients',
-    transfer: 'transfert GPU',
+    coefficients: t('performancePanel.tableStage.coefficients'),
+    transfer: t('performancePanel.tableStage.transfer'),
   };
   return `${tableBuildPercent.value} % · ${stages[stats.tableBuildStage] ?? stats.tableBuildStage}`;
 });
@@ -231,12 +234,12 @@ function readLive(e: any) {
   stats.periodicThrottled = e.periodicThrottledPixelCount ?? -1;
   const ns = e.neutralSize ?? 0;
   stats.totalPixels = ns * ns;
-  const meta: { key: string; label: string; help: string }[] = e.passMeta ?? [];
-  const t: Record<string, number> = e.passTimingsMs ?? {};
+  const meta: { key: string; label: string; labelKey: string; helpKey: string }[] = e.passMeta ?? [];
+  const tm: Record<string, number> = e.passTimingsMs ?? {};
   const a: Record<string, boolean> = e.passActive ?? {};
   stats.passes = meta.map((m, i) => ({
-    key: m.key, label: m.label, help: m.help,
-    ms: t[m.key] ?? 0, active: !!a[m.key],
+    key: m.key, label: m.label, labelKey: m.labelKey, helpKey: m.helpKey,
+    ms: tm[m.key] ?? 0, active: !!a[m.key],
     color: PASS_COLORS[i % PASS_COLORS.length],
   }));
 
@@ -458,71 +461,71 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 <template>
   <div class="perf-panel">
     <div class="perf-header">
-      <span class="perf-title">Mesures GPU</span>
-      <button class="perf-close" type="button" aria-label="Fermer" @click="emit('close')">✕</button>
+      <span class="perf-title">{{ t('performancePanel.title') }}</span>
+      <button class="perf-close" type="button" :aria-label="t('common.close')" @click="emit('close')">✕</button>
     </div>
 
     <!-- Global metric cards: FPS emphasized, the other three compact plain values -->
     <div class="perf-cards">
-      <div class="perf-card hero" title="Images par seconde effectivement rendues (dérivé de l'intervalle réel entre frames rendues).">
+      <div class="perf-card hero" :title="t('performancePanel.cards.fpsTitle')">
         <div class="pc-val pc-val--hero">{{ stats.fps }}</div>
-        <div class="pc-lbl">FPS</div>
+        <div class="pc-lbl">{{ t('performancePanel.cards.fps') }}</div>
       </div>
-      <div class="perf-card compact" title="Temps réel entre deux frames = le vrai budget par image. C'est ce que ressent l'utilisateur.">
+      <div class="perf-card compact" :title="t('performancePanel.cards.frameTitle')">
         <div class="pc-val">{{ fmt(stats.frameIntervalMs) }}<span class="pc-u">ms</span></div>
-        <div class="pc-lbl">Frame</div>
+        <div class="pc-lbl">{{ t('performancePanel.cards.frame') }}</div>
       </div>
-      <div class="perf-card compact" title="Temps GPU RÉEL de la frame = dernier marqueur − premier marqueur sur la timeline GPU. C'est le total autoritaire, incluant le travail GPU situé entre les catégories mesurées.">
+      <div class="perf-card compact" :title="t('performancePanel.cards.gpuSpanTitle')">
         <div class="pc-val">{{ fmt(stats.gpuSpanMs) }}<span class="pc-u">ms</span></div>
-        <div class="pc-lbl">GPU span</div>
+        <div class="pc-lbl">{{ t('performancePanel.cards.gpuSpan') }}</div>
       </div>
-      <div class="perf-card compact" title="Σ des durées par catégorie : écarts entre fins de passes ordinaires, spans explicites pour Snapshot et Merge. La somme peut différer légèrement du span à cause du lissage et des marqueurs.">
+      <div class="perf-card compact" :title="t('performancePanel.cards.sumTitle')">
         <div class="pc-val">{{ fmt(stats.gpuSumMs) }}<span class="pc-u">ms</span></div>
-        <div class="pc-lbl">Σ passes</div>
+        <div class="pc-lbl">{{ t('performancePanel.cards.sum') }}</div>
       </div>
     </div>
 
-    <p class="perf-state">{{ stats.fps === 0 ? 'Au repos — dernières mesures' : 'Rendu en cours' }}</p>
-    <details class="perf-details"><summary>Répartition GPU</summary>
+    <p class="perf-state">{{ stats.fps === 0 ? t('performancePanel.state.idle') : t('performancePanel.state.rendering') }}</p>
+    <details class="perf-details"><summary>{{ t('performancePanel.breakdown.summary') }}</summary>
     <!-- Per-pass breakdown (needs timestamp-query) -->
     <template v-if="stats.timestampCapable">
-      <div class="perf-sub">Répartition GPU — instantané <span class="perf-hint">(à l'échelle du budget frame — gris = marge/idle)</span></div>
-      <div class="perf-bar" role="img" aria-label="Répartition instantanée du temps GPU par passe">
+      <div class="perf-sub">{{ t('performancePanel.breakdown.instantTitle') }} <span class="perf-hint">{{ t('performancePanel.breakdown.instantHint') }}</span></div>
+      <div class="perf-bar" role="img" :aria-label="t('performancePanel.breakdown.instantAria')">
         <div
           v-for="p in shownPasses"
           :key="p.key"
           class="perf-seg"
           :style="{ width: pct(p.ms) + '%', background: p.color }"
-          :title="`${p.label} — ${fmt(p.ms)} ms (${share(p.ms).toFixed(0)}% du GPU)`"
+          :title="t('performancePanel.breakdown.segTitle', { label: t(p.labelKey), ms: fmt(p.ms), share: share(p.ms).toFixed(0) })"
         ></div>
         <div v-if="idleMs > 0" class="perf-seg idle" :style="{ width: pct(idleMs) + '%' }"
-             :title="`Marge / idle — ${fmt(idleMs)} ms`"></div>
+             :title="t('performancePanel.breakdown.idleTitle', { ms: fmt(idleMs) })"></div>
       </div>
       <div class="perf-scale"><span>0</span><span>{{ fmt(barMax) }} ms</span></div>
 
-      <div class="perf-sub">Répartition GPU — moyenne 30 s <span class="perf-hint">(coût amorti par passe)</span></div>
-      <div class="perf-bar" role="img" aria-label="Répartition moyenne 30 s du temps GPU par passe">
+      <div class="perf-sub">{{ t('performancePanel.breakdown.avgTitle') }} <span class="perf-hint">{{ t('performancePanel.breakdown.avgHint') }}</span></div>
+      <div class="perf-bar" role="img" :aria-label="t('performancePanel.breakdown.avgAria')">
         <div
           v-for="p in passesAvgSorted"
           :key="'avg-' + p.key"
           class="perf-seg"
           :style="{ width: pctAvg(p.ms) + '%', background: p.color }"
-          :title="`${p.label} — ${fmt(p.ms)} ms (moy 30 s)`"
+          :title="t('performancePanel.breakdown.avgSegTitle', { label: t(p.labelKey), ms: fmt(p.ms) })"
         ></div>
         <div v-if="idleMsAvg > 0" class="perf-seg idle" :style="{ width: pctAvg(idleMsAvg) + '%' }"
-             :title="`Marge / idle — ${fmt(idleMsAvg)} ms`"></div>
+             :title="t('performancePanel.breakdown.idleTitle', { ms: fmt(idleMsAvg) })"></div>
       </div>
       <div class="perf-scale"><span>0</span><span>{{ fmt(barMaxAvg) }} ms</span></div>
 
       <!-- Legend: exact values, instantané vs moyenne 30 s -->
       <table class="perf-legend">
         <thead>
-          <tr><th></th><th></th><th>actuel</th><th>moy 30 s</th></tr>
+          <tr><th></th><th></th><th>{{ t('performancePanel.breakdown.colCurrent') }}</th><th>{{ t('performancePanel.breakdown.colAvg') }}</th></tr>
         </thead>
         <tbody>
-          <tr v-for="p in stats.passes" :key="p.key" :class="{ inactive: !p.active }" :title="p.help">
+          <tr v-for="p in stats.passes" :key="p.key" :class="{ inactive: !p.active }" :title="t(p.helpKey)">
             <td class="pl-sw"><span :style="{ background: p.color }"></span></td>
-            <td class="pl-name">{{ p.label }}</td>
+            <td class="pl-name">{{ t(p.labelKey) }}</td>
             <td class="pl-ms">{{ p.active ? fmt(p.ms) + ' ms' : '—' }}</td>
             <td class="pl-ms">{{ fmt(passAvg[p.key] ?? 0) }} ms</td>
           </tr>
@@ -531,8 +534,8 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 
       <!-- Per-pass STACKED history over the 30 s frame window -->
       <div class="perf-sub">
-        Historique empilé par passe
-        <span class="perf-hint">— pic {{ fmt(stackedAreas.maxTotal) }} ms · {{ windowStats.span.toFixed(0) }} s</span>
+        {{ t('performancePanel.breakdown.historyTitle') }}
+        <span class="perf-hint">{{ t('performancePanel.breakdown.historyHint', { ms: fmt(stackedAreas.maxTotal), span: windowStats.span.toFixed(0) }) }}</span>
       </div>
       <svg class="perf-stack" viewBox="0 0 100 64" preserveAspectRatio="none">
         <path
@@ -547,80 +550,77 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
 
     <!-- Degraded mode: timestamp-query unavailable -->
     <div v-else class="perf-notice">
-      <strong>Timing par passe indisponible</strong> — cet appareil n'expose pas
-      <code>timestamp-query</code> (fréquent sur mobile/Safari). Les métriques globales
-      ci-dessus restent valides. Pour isoler le coût d'une passe sans barrière,
-      utilise l'<em>amplification</em> : boucler la passe N fois et diviser le delta
-      du temps GPU par N.
+      <strong>{{ t('performancePanel.notice.title') }}</strong> {{ t('performancePanel.notice.before') }}
+      <code>timestamp-query</code> {{ t('performancePanel.notice.after') }}<em>{{ t('performancePanel.notice.amplification') }}</em>{{ t('performancePanel.notice.end') }}
     </div>
 
     <!-- Render: completion, timing, applications, pixel counts -->
     </details>
-    <div class="perf-sub">Rendu</div>
+    <div class="perf-sub">{{ t('performancePanel.render.title') }}</div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Completion</span>
+      <span class="perf-stat-label">{{ t('performancePanel.render.completion') }}</span>
       <span class="perf-stat-value">{{ completionPercent() }}%</span>
     </div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Last render</span>
+      <span class="perf-stat-label">{{ t('performancePanel.render.lastRender') }}</span>
       <span class="perf-stat-value">{{ stats.completionWallMs.toFixed(0) }}ms · gpu {{ stats.completionGpuMs.toFixed(0) }}ms</span>
     </div>
-    <div class="perf-stat-row" title="Temps CPU avant engine.render(): navigation précise, propagation Vue puis préparation Engine.update().">
-      <span class="perf-stat-label">CPU avant GPU</span>
+    <div class="perf-stat-row" :title="t('performancePanel.render.cpuBeforeGpuTitle')">
+      <span class="perf-stat-label">{{ t('performancePanel.render.cpuBeforeGpu') }}</span>
       <span class="perf-stat-value">{{ fmt(stats.cpuFramePreparationMs) }}ms</span>
     </div>
-    <div class="perf-stat-row" title="Détail du temps CPU hors passes GPU : navigateur / modèles Vue / Engine.update / encodage et soumission WebGPU.">
-      <span class="perf-stat-label">CPU détail</span>
+    <div class="perf-stat-row" :title="t('performancePanel.render.cpuDetailTitle')">
+      <span class="perf-stat-label">{{ t('performancePanel.render.cpuDetail') }}</span>
       <span class="perf-stat-value">nav {{ fmt(stats.cpuNavigationMs) }} · vue {{ fmt(stats.cpuModelSyncMs) }} · update {{ fmt(stats.cpuUpdateMs) }} · submit {{ fmt(stats.cpuRenderMs) }}ms</span>
     </div>
-    <div class="perf-stat-row" title="Intervalle brut du dernier callback requestAnimationFrame, sa moyenne lissée et intervalle visé par le cadenceur.">
-      <span class="perf-stat-label">Cadence</span>
-      <span class="perf-stat-value">rAF brut {{ fmt(stats.framePacingRafRawIntervalMs) }} · lissé {{ fmt(stats.framePacingRafIntervalMs) }} · cible {{ fmt(stats.framePacingTargetIntervalMs) }}ms</span>
+    <div class="perf-stat-row" :title="t('performancePanel.render.cadenceTitle')">
+      <span class="perf-stat-label">{{ t('performancePanel.render.cadence') }}</span>
+      <span class="perf-stat-value">{{ t('performancePanel.render.cadenceValue', { raw: fmt(stats.framePacingRafRawIntervalMs), smooth: fmt(stats.framePacingRafIntervalMs), target: fmt(stats.framePacingTargetIntervalMs) }) }}</span>
     </div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Ops/frame</span>
+      <span class="perf-stat-label">{{ t('performancePanel.render.opsPerFrame') }}</span>
       <span class="perf-stat-value">{{ formatOps(opsPerFrame()) }}</span>
     </div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Pixels restants</span>
+      <span class="perf-stat-label">{{ t('performancePanel.render.pixelsRemaining') }}</span>
       <span class="perf-stat-value">{{ formatPixelCount(stats.unfinished) }}</span>
     </div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Total pixels</span>
+      <span class="perf-stat-label">{{ t('performancePanel.render.totalPixels') }}</span>
       <span class="perf-stat-value">{{ formatPixelCount(stats.totalPixels) }}</span>
     </div>
 
     <!-- Dispatch: which approximation tier/mode is actually feeding the shader -->
-    <details class="perf-details"><summary>Calcul</summary>
-    <div class="perf-sub">Dispatch</div>
+    <details class="perf-details"><summary>{{ t('performancePanel.compute.summary') }}</summary>
+    <div class="perf-sub">{{ t('performancePanel.compute.dispatch') }}</div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Shader mode</span>
+      <span class="perf-stat-label">{{ t('performancePanel.compute.shaderMode') }}</span>
       <span class="perf-stat-value">{{ shaderModeLabel }} · {{ stats.shaderBlaLevelCount }} lvl</span>
     </div>
     <div v-if="aaFrontier()" class="perf-stat-row">
-      <span class="perf-stat-label">AA frontier</span>
+      <span class="perf-stat-label">{{ t('performancePanel.compute.aaFrontier') }}</span>
       <span class="perf-stat-value">{{ aaFrontier() }}</span>
     </div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Mode de calcul</span>
+      <span class="perf-stat-label">{{ t('performancePanel.compute.mode') }}</span>
       <span class="perf-stat-value" :class="{ 'perf-stat-value--floatexp': stats.floatExpActive }">
         {{ stats.floatExpActive ? 'FloatExp' : 'F32' }}
       </span>
     </div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Batch size</span>
+      <span class="perf-stat-label">{{ t('performancePanel.compute.batchSize') }}</span>
       <span class="perf-stat-value">{{ stats.batchSize }}</span>
     </div>
 
     <!-- Reference: reference orbit build progress -->
-    <div class="perf-sub">Référence</div>
+    <div class="perf-sub">{{ t('performancePanel.reference.title') }}</div>
     <div class="perf-stat-row perf-stat-row--progress">
       <div class="perf-progress-header">
-        <span class="perf-stat-label">Réf. actuelle</span>
+        <span class="perf-stat-label">{{ t('performancePanel.reference.current') }}</span>
         <span class="perf-stat-value">
           {{ formatRefOrbit(stats.orbitCount, stats.maxIterations) }}
-          <span v-if="stats.referenceResetActive"> · reset réf</span>
-          <span v-else-if="stats.referenceValidating"> · validation</span>
+          <span v-if="stats.referenceResetActive"> · {{ t('performancePanel.reference.reset') }}</span>
+          <span v-else-if="stats.referenceValidating"> · {{ t('performancePanel.reference.validating') }}</span>
         </span>
       </div>
       <div class="perf-progress-track">
@@ -629,7 +629,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     </div>
     <div v-if="stats.pendingRefActive" class="perf-stat-row perf-stat-row--progress">
       <div class="perf-progress-header">
-        <span class="perf-stat-label perf-stat-label--pending">Nouv. référence</span>
+        <span class="perf-stat-label perf-stat-label--pending">{{ t('performancePanel.reference.pending') }}</span>
         <span class="perf-stat-value perf-stat-value--pending">
           {{ formatCondensedNumber(stats.pendingRefOrbitLen) }} / {{ formatCondensedNumber(stats.pendingRefMaxIterations) }}
         </span>
@@ -640,7 +640,7 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     </div>
     <div v-if="stats.tableBuildStage !== 'idle'" class="perf-stat-row perf-stat-row--progress">
       <div class="perf-progress-header">
-        <span class="perf-stat-label perf-stat-label--table">Table BLA</span>
+        <span class="perf-stat-label perf-stat-label--table">{{ t('performancePanel.reference.blaTable') }}</span>
         <span class="perf-stat-value perf-stat-value--table">{{ tableBuildLine }}</span>
       </div>
       <div class="perf-progress-track">
@@ -652,21 +652,21 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
       </div>
     </div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Référence</span>
+      <span class="perf-stat-label">{{ t('performancePanel.reference.serial') }}</span>
       <span class="perf-stat-value" :class="{ 'perf-stat-value--reference': stats.referenceResetActive }">
         #{{ stats.referenceResetSerial }}
-        <span v-if="stats.referenceResetActive"> · changement</span>
+        <span v-if="stats.referenceResetActive"> · {{ t('performancePanel.reference.changing') }}</span>
       </span>
     </div>
     <div class="perf-stat-row">
-      <span class="perf-stat-label">Orbite restante</span>
+      <span class="perf-stat-label">{{ t('performancePanel.reference.orbitRemaining') }}</span>
       <span class="perf-stat-value">{{ stats.orbitRemaining }}</span>
     </div>
 
     <!-- Debug -->
-    <div class="perf-sub">Debug</div>
+    <div class="perf-sub">{{ t('performancePanel.debug.title') }}</div>
     <div class="perf-stat-row perf-debug-row">
-      <span class="perf-stat-label">Visualisation débug</span>
+      <span class="perf-stat-label">{{ t('performancePanel.debug.visualization') }}</span>
       <div class="perf-debug-switch-wrap">
         <label class="perf-debug-switch">
           <input type="checkbox" v-model="debugShading" />
@@ -676,8 +676,8 @@ function fmt(ms: number): string { return ms >= 10 ? ms.toFixed(1) : ms.toFixed(
     </div>
     </details>
     <div class="perf-export">
-      <span class="pe-count">{{ history.length }} échant. / 30 s</span>
-      <button class="pe-btn" type="button" :disabled="history.length < 2" @click="exportCsv">Export CSV</button>
+      <span class="pe-count">{{ t('performancePanel.export.samples', { count: history.length }) }}</span>
+      <button class="pe-btn" type="button" :disabled="history.length < 2" @click="exportCsv">{{ t('performancePanel.export.csv') }}</button>
       <button v-if="props.isAdmin" class="pe-btn" type="button" :disabled="history.length < 2" @click="exportJson">JSON</button>
     </div>
   </div>

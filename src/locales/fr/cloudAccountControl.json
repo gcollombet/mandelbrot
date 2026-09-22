@@ -1,0 +1,24 @@
+{
+  "status": {
+    "signedIn": "Compte connecté",
+    "syncing": "Sauvegarde cloud en cours…",
+    "synced": "Presets synchronisés",
+    "error": "Sauvegarde cloud à vérifier",
+    "idle": "Presets · synchronisation cloud"
+  },
+  "explanation": "Vos presets personnels restent dans ce navigateur. Connectez-vous pour les sauvegarder dans le cloud et les retrouver sur vos autres appareils.",
+  "loginAria": "Connexion avec Google — sauvegarde des presets dans le cloud",
+  "loginTitleCloud": "Connexion avec Google pour sauvegarder vos presets dans votre bibliothèque cloud personnelle",
+  "loginTitle": "Connexion avec Google",
+  "connecting": "Connexion…",
+  "loginShort": "Connexion",
+  "loginFull": "Se connecter avec Google",
+  "loginSub": "Sauvegarder mes presets dans le cloud",
+  "myAccount": "Mon compte",
+  "myAccountAria": "Mon compte — {status}",
+  "googleAccount": "Compte Google connecté",
+  "syncedInfo": "Vos presets personnels sont synchronisés avec ce compte pour les retrouver sur vos appareils.",
+  "syncError": "La synchronisation avec le cloud a échoué. Vos modifications restent disponibles dans ce navigateur.",
+  "loggingOut": "Déconnexion…",
+  "logout": "Se déconnecter"
+}

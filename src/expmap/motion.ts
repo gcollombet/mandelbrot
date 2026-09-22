@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 /** Velocity ramps, integrated analytically: monotone travel with exact endpoints. */
 export const EXPMAP_EASES = [
   { value: 'none', label: 'Aucune' },
@@ -12,8 +13,8 @@ export function motionSettings(value: Partial<ExpmapMotion>): ExpmapMotion { ret
 export function validateMotion(value: Partial<ExpmapMotion>, duration: number) {
   const m = motionSettings(value)
   if (![m.easeIn, m.easeOut].every(v => EXPMAP_EASES.some(e => e.value === v)) ||
-    ![m.easeInSeconds, m.easeOutSeconds, m.holdSeconds].every(v => Number.isFinite(v) && v >= 0 && v <= 86400)) throw new Error('Courbe ou durée de transition invalide.')
-  if ((m.easeIn === 'none' ? 0 : m.easeInSeconds) + (m.easeOut === 'none' ? 0 : m.easeOutSeconds) > duration + 1e-9) throw new Error('Les transitions dépassent la durée du trajet.')
+    ![m.easeInSeconds, m.easeOutSeconds, m.holdSeconds].every(v => Number.isFinite(v) && v >= 0 && v <= 86400)) throw new Error(t('expmap.motion.invalidTransition'))
+  if ((m.easeIn === 'none' ? 0 : m.easeInSeconds) + (m.easeOut === 'none' ? 0 : m.easeOutSeconds) > duration + 1e-9) throw new Error(t('expmap.motion.transitionsExceed'))
 }
 /** Fit only on an explicit duration edit; never change a saved trajectory at render time. */
 export function fitMotion<T extends { durationSeconds: number } & Partial<ExpmapMotion>>(value: T): T {

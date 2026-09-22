@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import type { Engine, RenderOptions } from '../Engine'
 import type { VideoPathLocation } from '../videoPath'
 import { canonicalJson, contentIdentity } from './appearance'
@@ -14,9 +15,9 @@ export async function createShaderExpmap(deps:ExpmapProducerDeps & {engine:Pick<
   restoreCamera:VideoPathLocation; resume?:boolean; signal?:AbortSignal
   onProgress?:(done:number,total:number)=>void
 }):Promise<ShaderExpmapManifest> {
-  if(!navigator.locks)throw new Error('Verrouillage des fichiers requis')
+  if(!navigator.locks)throw new Error(t('expmap.shaderCreate.locksRequired'))
   return navigator.locks.request(`shader-expmap:${request.store.key}`,{mode:'exclusive',ifAvailable:true},async lock=>{
-    if(!lock)throw new Error('Source shader déjà utilisée')
+    if(!lock)throw new Error(t('expmap.shaderCreate.sourceInUse'))
     request.signal?.throwIfAborted()
     // Props arrive as reactive proxies; the manifest must be plain data.
     request={...request,plan:JSON.parse(JSON.stringify(request.plan)) as ExpmapPlan}

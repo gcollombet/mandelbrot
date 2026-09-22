@@ -1,0 +1,75 @@
+{
+  "curves": { "linear": "Linear", "gaussian": "Gaussian", "square": "Square", "exponential": "Exponential" },
+  "modes": { "radial": "Concentric circles", "global": "Whole image" },
+  "outside": { "hold": "Start / end palette", "manual": "Manual palette" },
+  "savedNew": "New / unsaved",
+  "errors": {
+    "endAfterStart": "The end magnitude must exceed the start magnitude.",
+    "presetUnavailable": "This preset is no longer available."
+  },
+  "currentPalette": "Current palette",
+  "unnamedPreset": "Unnamed preset",
+  "copySuffix": "copy",
+  "status": {
+    "snapshotSaved": "Palette “{name}” saved to the library.",
+    "pathSaved": "Path “{name}” saved on this browser.",
+    "pathDeleted": "Path “{name}” deleted."
+  },
+  "path": {
+    "title": "Path",
+    "scope": "One palette per depth, blended between stops",
+    "enable": "Enable the path",
+    "outside": "Out of range",
+    "mode": "Application",
+    "start": "Start",
+    "end": "End",
+    "note": "Magnitude increases while zooming. In circles mode, it also varies with the distance to the view center.",
+    "timelineLabel": "Palette path",
+    "currentMagnitude": "Current magnitude: {value}",
+    "stopAt": "{name} at {value}",
+    "editingSuffix": " (editing)",
+    "hints": "Click: select · drag: move · double-click the strip: add a stop here · double-click a stop: edit it in Palettes.",
+    "editingNote": "“{name}” is loaded in the Palettes tab: every change applies to the path. Disabling the path restores the previous palette.",
+    "count": "{count} stops · magnitude {value}",
+    "addStop": "+ Stop",
+    "extractTitle": "Saves the blend at the current magnitude to the library, with its materials and images (200-point approximation; in circles mode, at the cursor only)",
+    "extracting": "Capturing…",
+    "extract": "Extract at cursor"
+  },
+  "stop": {
+    "title": "Selected stop",
+    "scope": "Palette, position and transition of the stop",
+    "endpointLocked": "The start and end stops follow the range",
+    "magnitude": "Magnitude",
+    "nextTransition": "Next transition",
+    "fill": "Fill the stop",
+    "fromLibrary": "Library palette",
+    "fromPreset": "Full preset",
+    "captureTitle": "Copies the manual palette and its materials into this stop",
+    "capture": "Current palette",
+    "searchPlaceholder": "Search…",
+    "search": "Search",
+    "noPalette": "No palette found.",
+    "presetSub": "Colors, materials and images",
+    "noPreview": "Preview unavailable",
+    "noPreset": "No preset found.",
+    "remove": "Delete this stop"
+  },
+  "saved": {
+    "title": "Saved paths",
+    "scope": "Local save on this browser",
+    "select": "Path",
+    "name": "Path name",
+    "save": "Save",
+    "duplicate": "Duplicate",
+    "new": "New",
+    "delete": "Delete",
+    "note": "Local save on this browser: paths are not synced with the cloud. Each stop keeps a copy of its palette."
+  },
+  "textures": {
+    "title": "Textures and compute",
+    "scope": "Resolution of the path images",
+    "maxSize": "Maximum image resolution",
+    "note": "Images shared between stops, 128 MiB budget. Orbit frequency and trap geometry stay common; materials and effects vary from one stop to the next. ExpMap always bakes the circles."
+  }
+}

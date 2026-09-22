@@ -1,3 +1,4 @@
+import { t } from './i18n'
 import { normalizeColorStops, isStopTransferCurve, type StopTransferCurve } from './ColorStop'
 import type { MandelbrotParams } from './Mandelbrot'
 import { normalizeTextureMappingFromLegacy, TEXTURE_MAPPING_VARIABLE_IDS } from './TextureMapping'
@@ -36,7 +37,7 @@ export function snapshotPathAppearance(source: Partial<MandelbrotParams>): PathA
     }
     for (const field of PATH_GLOBAL_FIELDS) {
         const value = source[field] ?? TRANSITION_DEFAULTS[field]
-        if (!Number.isFinite(value)) throw new Error(`Paramètre de palette invalide : ${field}`)
+        if (!Number.isFinite(value)) throw new Error(t('palettes.invalidParam', { field }))
         out[field] = value
     }
     for (const field of ['textureGuid', 'textureName', 'skyboxGuid', 'skyboxName'] as const) {
@@ -50,15 +51,15 @@ export function validatePalettePath(value: unknown): PalettePath {
     if (!p || p.version !== 1 || typeof p.id !== 'string' || !p.id || typeof p.name !== 'string' || !p.name.trim()
         || !['global', 'radial'].includes(p.mode) || !['hold', 'manual'].includes(p.outside)
         || ![512, 1024, 2048].includes(p.textureSize) || typeof p.enabled !== 'boolean'
-        || !Array.isArray(p.stops) || p.stops.length < 2 || p.stops.length > PALETTE_PATH_MAX_STOPS) throw new Error('Parcours de palettes invalide.')
-    if (p.resourceHashes && (typeof p.resourceHashes !== 'object' || Object.values(p.resourceHashes).some(h => typeof h !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(h)))) throw new Error('Identités des images invalides.')
+        || !Array.isArray(p.stops) || p.stops.length < 2 || p.stops.length > PALETTE_PATH_MAX_STOPS) throw new Error(t('palettes.invalidPath'))
+    if (p.resourceHashes && (typeof p.resourceHashes !== 'object' || Object.values(p.resourceHashes).some(h => typeof h !== 'string' || !/^sha256:[a-f0-9]{64}$/.test(h)))) throw new Error(t('palettes.invalidImageIdentities'))
     const ids = new Set<string>()
     const stops = p.stops.map((s, i) => {
         if (!s || typeof s.id !== 'string' || ids.has(s.id) || !Number.isFinite(s.magnitude)
             || Math.abs(s.magnitude) > 100000 || (i && s.magnitude - p.stops[i - 1].magnitude < 0.0001)
             || (i && Math.fround(s.magnitude - p.stops[0].magnitude) <= Math.fround(p.stops[i - 1].magnitude - p.stops[0].magnitude))
             || !isStopTransferCurve(s.curve) || typeof s.name !== 'string'
-            || !s.appearance?.colorStops?.length || s.appearance.colorStops.length > 200) throw new Error('Stops invalides : profondeurs distinctes et croissantes requises.')
+            || !s.appearance?.colorStops?.length || s.appearance.colorStops.length > 200) throw new Error(t('palettes.invalidStops'))
         ids.add(s.id)
         return { id: s.id, magnitude: s.magnitude, name: s.name, curve: s.curve, appearance: snapshotPathAppearance(s.appearance) }
     })
@@ -69,8 +70,8 @@ export function validatePalettePath(value: unknown): PalettePath {
 }
 
 export function newPalettePath(source: Partial<MandelbrotParams>, magnitude: number): PalettePath {
-    return { version: 1, id: crypto.randomUUID(), name: 'Nouveau parcours', enabled: false, mode: 'radial', outside: 'hold', textureSize: 1024,
-        stops: [magnitude, magnitude + 1].map(depth => ({ id: crypto.randomUUID(), magnitude: depth, name: 'Palette actuelle',
+    return { version: 1, id: crypto.randomUUID(), name: t('palettes.newPathName'), enabled: false, mode: 'radial', outside: 'hold', textureSize: 1024,
+        stops: [magnitude, magnitude + 1].map(depth => ({ id: crypto.randomUUID(), magnitude: depth, name: t('palettes.currentPaletteStop'),
             appearance: snapshotPathAppearance(source), curve: 'linear' })),
     }
 }

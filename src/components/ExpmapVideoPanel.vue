@@ -9,6 +9,7 @@ import VideoRotationControls from './VideoRotationControls.vue'
 import RenderProgress from './RenderProgress.vue'
 import ExpmapZoomControl from './ExpmapZoomControl.vue'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { MandelbrotExposed } from '../types/MandelbrotExposed'
 import { parkExpmapSession } from '../expmap/session'
 import type { Engine } from '../Engine'
@@ -25,6 +26,7 @@ import { compactNumber, magnitudeSummary, videoFilename } from '../expmap/contro
 import { motionSettings, type ExpmapMotion } from '../expmap/motion'
 import { loadExpmapOutput, preferredExpmapCodec, saveExpmapOutput } from '../expmap/outputPreferences'
 const props = defineProps<{ engine?: Engine | null; controller?: MandelbrotExposed | null }>()
+const { t } = useI18n()
 const manifest = ref<ExpmapManifest | null>(null), windowSpec = ref<ExpmapVideoWindow | null>(null)
 const framesDone = ref(0), framesTotal = ref(0)
 const savedOutput = loadExpmapOutput()
@@ -34,8 +36,8 @@ const error = ref(''), progress = ref(''), ownRunning = ref(false), probing = re
 const support = ref<Partial<Record<Mp4Codec, boolean>>>({})
 const encoderPreferences = ref<Partial<Record<Mp4Codec, EncoderPreference>>>({})
 const effectiveCodec = computed(() => codec.value === 'auto' ? preferredExpmapCodec(support.value) : support.value[codec.value] ? codec.value : null)
-const encoderLabel = computed(() => probing.value || !effectiveCodec.value || !encoderPreferences.value[effectiveCodec.value] ? '' : encoderPreferences.value[effectiveCodec.value] === 'prefer-hardware' ? ' · Matériel préféré' : ' · Repli navigateur — logiciel possible')
-const codecLabel = computed(() => probing.value ? 'Vérification de l’encodeur…' : effectiveCodec.value ? `${effectiveCodec.value === 'hevc' ? 'HEVC' : effectiveCodec.value === 'avc' ? 'H.264' : effectiveCodec.value.toUpperCase()}${codec.value === 'auto' && effectiveCodec.value === 'avc' ? ' · compatibilité' : ''}` : 'Encodage indisponible : choisir un autre format ou codec.')
+const encoderLabel = computed(() => probing.value || !effectiveCodec.value || !encoderPreferences.value[effectiveCodec.value] ? '' : encoderPreferences.value[effectiveCodec.value] === 'prefer-hardware' ? t('expmapVideoPanel.encoder.hardwarePreferred') : t('expmapVideoPanel.encoder.browserFallback'))
+const codecLabel = computed(() => probing.value ? t('expmapVideoPanel.encoder.probing') : effectiveCodec.value ? `${effectiveCodec.value === 'hevc' ? 'HEVC' : effectiveCodec.value === 'avc' ? 'H.264' : effectiveCodec.value.toUpperCase()}${codec.value === 'auto' && effectiveCodec.value === 'avc' ? t('expmapVideoPanel.encoder.compatibility') : ''}` : t('expmapVideoPanel.encoder.unavailable'))
 const outputResolution = computed({ get: () => `${width.value}x${height.value}`, set: (value: string) => { [width.value, height.value] = value.split('x').map(Number) } })
 const resolutions = computed(() => {
   const choices = [{ value: '1280x720', label: '720p' }, { value: '1920x1080', label: '1080p' }, { value: '2560x1440', label: '1440p' }, { value: '3840x2160', label: '4K UHD' }]
@@ -69,10 +71,10 @@ watch(selectedExpmapDocumentId, async id => {
   try {
     const opened = await openExpmapLibraryEntry(entry)
     if (current !== generation) return
-    if (opened.manifest.state !== 'complete') throw new Error('Document incomplet.')
+    if (opened.manifest.state !== 'complete') throw new Error(t('expmapVideoPanel.errors.incomplete'))
     manifest.value = opened.manifest
     const saved = loadExpmapVideoWindow(opened.manifest, documentEffects(opened.manifest.documentId)); windowSpec.value = saved.window
-    error.value = saved.reset ? 'Préférences hors domaine réinitialisées.' : ''
+    error.value = saved.reset ? t('expmapVideoPanel.errors.preferencesReset') : ''
   } catch (e) { if (current === generation) error.value = String(e) }
 }, { immediate: true })
 function persist() { if (manifest.value && windowSpec.value) saveExpmapVideoWindow(manifest.value.documentId, windowSpec.value) }
@@ -135,15 +137,15 @@ async function start() {
   const entry = expmapLibraryEntries.value.find(e => e.id === manifest.value!.documentId)
   if (!entry) return
   const selectedCodec = effectiveCodec.value
-  error.value = ''; framesDone.value = 0; framesTotal.value = 0; progress.value = 'Choix du fichier de destination'; ownRunning.value = true; expmapBusy.value = true; abort = new AbortController()
+  error.value = ''; framesDone.value = 0; framesTotal.value = 0; progress.value = t('expmapVideoPanel.progress.pickDestination'); ownRunning.value = true; expmapBusy.value = true; abort = new AbortController()
   let gpu: ExpmapGpuRenderer | undefined
   let writable: FileSystemWritableFileStream | undefined, release: (() => void) | undefined
   try {
     const picker = (window as Window & { showSaveFilePicker?: (options: unknown) => Promise<FileSystemFileHandle> }).showSaveFilePicker
-    if (!picker) throw new Error('L’export ExpMap requiert une destination de fichier en streaming.')
-    const handle = await picker({ suggestedName: videoFilename(expmapLibraryFilename(entry)), types: [{ description: 'Vidéo MP4', accept: { 'video/mp4': ['.mp4'] } }] })
+    if (!picker) throw new Error(t('expmapVideoPanel.errors.streamingRequired'))
+    const handle = await picker({ suggestedName: videoFilename(expmapLibraryFilename(entry)), types: [{ description: t('expmapVideoPanel.videoTypeDescription'), accept: { 'video/mp4': ['.mp4'] } }] })
     writable = await handle.createWritable()
-    progress.value = 'Ouverture du document'
+    progress.value = t('expmapVideoPanel.progress.opening')
     const opened = await openExpmapLibraryEntry(entry)
     abort.signal.throwIfAborted()
     expmapOpenDocument.value = null
@@ -153,9 +155,9 @@ async function start() {
     persist()
     const result = await exportExpmapVideo(opened, { effects: { ...documentEffects(manifest.value.documentId) }, window: { ...windowSpec.value }, width: width.value, height: height.value, fps: fps.value, codec: selectedCodec, maxSamples: maxSamples.value, sampleDistribution:sampleDistribution.value,
       destination: { kind: 'stream', writable }, signal: abort.signal, gpuRenderer: gpu,
-      onProgress: (frames, total) => { framesDone.value = frames; framesTotal.value = total; progress.value = frames === total ? 'Finalisation du fichier MP4' : 'Reconstruction et encodage des images' } })
-    progress.value = result.cancelled ? 'Export interrompu' : 'Vidéo enregistrée'
-  } catch (e) { error.value = String(e); progress.value = 'Export arrêté' }
+      onProgress: (frames, total) => { framesDone.value = frames; framesTotal.value = total; progress.value = frames === total ? t('expmapVideoPanel.progress.finalizing') : t('expmapVideoPanel.progress.encoding') } })
+    progress.value = result.cancelled ? t('expmapVideoPanel.progress.interrupted') : t('expmapVideoPanel.progress.saved')
+  } catch (e) { error.value = String(e); progress.value = t('expmapVideoPanel.progress.stopped') }
   finally {
     gpu?.dispose()
     try { release?.() } catch (e) { error.value = String(e) }
@@ -167,48 +169,48 @@ async function start() {
 <template>
   <div class="expmap-video-panel">
     <fieldset :disabled="expmapBusy">
-      <DenseSection title="Source ExpMap">
-        <DenseSelect label="Fichier" :model-value="selectedExpmapDocumentId ?? ''" :options="expmapLibraryEntries.map(e => ({ value: e.id, label: `${expmapLibraryFilename(e)} · ${magnitudeSummary(e.startScale, e.endScale)}${e.state !== 'ready' ? ' · indisponible' : ''}` }))" @update:model-value="selectedExpmapDocumentId = String($event)"/>
+      <DenseSection :title="t('expmapVideoPanel.source.title')">
+        <DenseSelect :label="t('expmapVideoPanel.source.file')" :model-value="selectedExpmapDocumentId ?? ''" :options="expmapLibraryEntries.map(e => ({ value: e.id, label: `${expmapLibraryFilename(e)} · ${magnitudeSummary(e.startScale, e.endScale)}${e.state !== 'ready' ? t('expmapVideoPanel.source.unavailable') : ''}` }))" @update:model-value="selectedExpmapDocumentId = String($event)"/>
         <p v-if="manifest">{{ magnitudeSummary(manifest.projection.domain.startScale, manifest.projection.domain.endScale) }}</p>
       </DenseSection>
       <template v-if="windowSpec && manifest">
-        <DenseSection title="Trajet">
-          <button v-if="radialMode(documentEffects(manifest.documentId)) !== 'normal'" @click="fullLoop">Un cycle complet d’octaves</button>
-          <ExpmapZoomControl :model-value="windowSpec.fromScale" label="Départ" :slider="false" capture-label="Depuis le lecteur" :capture-disabled="expmapLastView?.documentId !== manifest.documentId" @update:model-value="trim('fromScale', $event)" @capture="takeView('fromScale')"><button @click="preview('fromScale')">Voir</button></ExpmapZoomControl>
-          <ExpmapZoomControl :model-value="windowSpec.toScale" label="Arrivée" :slider="false" capture-label="Depuis le lecteur" :capture-disabled="expmapLastView?.documentId !== manifest.documentId" @update:model-value="trim('toScale', $event)" @capture="takeView('toScale')"><button @click="preview('toScale')">Voir</button></ExpmapZoomControl>
+        <DenseSection :title="t('expmapVideoPanel.path.title')">
+          <button v-if="radialMode(documentEffects(manifest.documentId)) !== 'normal'" @click="fullLoop">{{ t('expmapVideoPanel.path.fullLoop') }}</button>
+          <ExpmapZoomControl :model-value="windowSpec.fromScale" :label="t('expmapVideoPanel.path.start')" :slider="false" :capture-label="t('expmapVideoPanel.path.fromPlayer')" :capture-disabled="expmapLastView?.documentId !== manifest.documentId" @update:model-value="trim('fromScale', $event)" @capture="takeView('fromScale')"><button @click="preview('fromScale')">Voir</button></ExpmapZoomControl>
+          <ExpmapZoomControl :model-value="windowSpec.toScale" :label="t('expmapVideoPanel.path.end')" :slider="false" :capture-label="t('expmapVideoPanel.path.fromPlayer')" :capture-disabled="expmapLastView?.documentId !== manifest.documentId" @update:model-value="trim('toScale', $event)" @capture="takeView('toScale')"><button @click="preview('toScale')">Voir</button></ExpmapZoomControl>
           <div class="range-pair">
             <div class="range-track"><span :style="selectionStyle"/></div>
-            <input aria-label="Départ dans le document" type="range" min="0" max="1" step="0.0001" :value="relative(windowSpec.fromScale)" @input="slide('fromScale', $event)">
-            <input aria-label="Arrivée dans le document" type="range" min="0" max="1" step="0.0001" :value="relative(windowSpec.toScale)" @input="slide('toScale', $event)">
+            <input :aria-label="t('expmapVideoPanel.path.startAria')" type="range" min="0" max="1" step="0.0001" :value="relative(windowSpec.fromScale)" @input="slide('fromScale', $event)">
+            <input :aria-label="t('expmapVideoPanel.path.endAria')" type="range" min="0" max="1" step="0.0001" :value="relative(windowSpec.toScale)" @input="slide('toScale', $event)">
           </div>
-          <div class="row spread"><small>Départ : poignée haute · arrivée : poignée basse</small><button @click="reverse">⇄ Inverser le trajet</button></div>
+          <div class="row spread"><small>{{ t('expmapVideoPanel.path.handles') }}</small><button @click="reverse">{{ t('expmapVideoPanel.path.reverse') }}</button></div>
           <p>{{ magnitudeSummary(windowSpec.fromScale, windowSpec.toScale) }}</p>
-          <DenseField :model-value="windowSpec.durationSeconds" label="Durée du trajet" unit="s" :f="compactNumber" :min="0.1" :max="86400" :step="0.1" :default="20" @update:model-value="update('duration', $event)"/>
-          <details><summary>Vitesse moyenne</summary><DenseField v-if="windowSpec.speed > 0" :model-value="windowSpec.speed" label="Doublements/s" :f="compactNumber" :min="0.1" :max="100" :step="0.1" @update:model-value="update('speed', $event)"/><p>La dernière valeur modifiée (durée ou vitesse) est conservée lorsque la plage change. Les courbes modulent la vitesse autour de cette moyenne.</p></details>
+          <DenseField :model-value="windowSpec.durationSeconds" :label="t('expmapVideoPanel.path.duration')" unit="s" :f="compactNumber" :min="0.1" :max="86400" :step="0.1" :default="20" @update:model-value="update('duration', $event)"/>
+          <details><summary>{{ t('expmapVideoPanel.path.averageSpeed') }}</summary><DenseField v-if="windowSpec.speed > 0" :model-value="windowSpec.speed" :label="t('expmapVideoPanel.path.doublingsPerSecond')" :f="compactNumber" :min="0.1" :max="100" :step="0.1" @update:model-value="update('speed', $event)"/><p>{{ t('expmapVideoPanel.path.speedHint') }}</p></details>
         </DenseSection>
-        <VideoRotationControls :fixed-only="['octave', 'droste'].includes(documentEffects(manifest.documentId).imageRotationMode ?? 'fixed')" :from-angle="windowSpec.fromAngle" :to-angle="windowSpec.toAngle" :current-angle="expmapLastView?.documentId === manifest.documentId ? expmapLastView.angle : undefined" capture-label="Angle du lecteur" @change="setRotation"/>
+        <VideoRotationControls :fixed-only="['octave', 'droste'].includes(documentEffects(manifest.documentId).imageRotationMode ?? 'fixed')" :from-angle="windowSpec.fromAngle" :to-angle="windowSpec.toAngle" :current-angle="expmapLastView?.documentId === manifest.documentId ? expmapLastView.angle : undefined" :capture-label="t('expmapVideoPanel.playerAngle')" @change="setRotation"/>
         <ExpmapEffectsControls :tile-count="manifest.octaves.tileCount" :document-id="manifest.documentId"/>
         <VideoMotionControls :model-value="motion" :duration-seconds="windowSpec.durationSeconds" @update:model-value="setMotion"/>
-        <DenseSection title="Fichier vidéo">
-          <div class="row"><DenseSelect v-model="outputResolution" label="Résolution" :options="resolutions"/><DenseSelect :model-value="fps" label="Cadence" :options="[24,25,30,60].map(n => ({value: n, label: `${n} fps`}))" @update:model-value="fps = Number($event)"/></div>
-          <p>{{ width }} × {{ height }}<template v-if="width > manifest.projection.width || height > manifest.projection.height"> · Agrandissement depuis {{ manifest.projection.width }} × {{ manifest.projection.height }}</template></p>
-          <DenseSelect v-model="codec" label="Encodage" :options="[{value:'auto',label:'Auto · HEVC, sinon H.264'}, ...MP4_CODECS]"/>
+        <DenseSection :title="t('expmapVideoPanel.output.title')">
+          <div class="row"><DenseSelect v-model="outputResolution" :label="t('expmapVideoPanel.output.resolution')" :options="resolutions"/><DenseSelect :model-value="fps" :label="t('expmapVideoPanel.output.fps')" :options="[24,25,30,60].map(n => ({value: n, label: `${n} fps`}))" @update:model-value="fps = Number($event)"/></div>
+          <p>{{ width }} × {{ height }}<template v-if="width > manifest.projection.width || height > manifest.projection.height">{{ t('expmapVideoPanel.output.upscale', { width: manifest.projection.width, height: manifest.projection.height }) }}</template></p>
+          <DenseSelect v-model="codec" :label="t('expmapVideoPanel.output.encoding')" :options="[{value:'auto',label:t('expmapVideoPanel.output.auto')}, ...MP4_CODECS.map(c => ({ value: c.value, label: t(c.labelKey) }))]"/>
           <p role="status">{{ codecLabel }}{{ encoderLabel }}</p>
-          <details><summary>Qualité et dimensions précises</summary>
-            <div class="dims"><label>Largeur <input type="number" inputmode="numeric" :value="width" min="2" max="3840" step="2" @change="width = Math.min(3840, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || width"></label><span aria-hidden="true">×</span><label>Hauteur <input type="number" inputmode="numeric" :value="height" min="2" max="2160" step="2" @change="height = Math.min(2160, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || height"></label></div>
-            <label>Répartition AA <select v-model="sampleDistribution"><option value="grid">Grille</option><option value="r2">R2</option></select></label>
-            <label>Prélèvements par pixel <select v-model.number="maxSamples"><option v-for="limit in EXPMAP_SAMPLE_LIMITS" :key="limit" :value="limit">{{ limit }}{{ limit === 1 ? ' — bilinéaire' : '' }}</option></select></label>
-            <p>Adaptatif selon le détail disponible, sans recalcul de la fractale.</p>
+          <details><summary>{{ t('expmapVideoPanel.output.qualityDetails') }}</summary>
+            <div class="dims"><label>{{ t('expmapVideoPanel.output.width') }} <input type="number" inputmode="numeric" :value="width" min="2" max="3840" step="2" @change="width = Math.min(3840, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || width"></label><span aria-hidden="true">×</span><label>{{ t('expmapVideoPanel.output.height') }} <input type="number" inputmode="numeric" :value="height" min="2" max="2160" step="2" @change="height = Math.min(2160, Math.max(2, Math.round(Number(($event.target as HTMLInputElement).value) / 2) * 2)) || height"></label></div>
+            <label>{{ t('expmapVideoPanel.output.distribution') }} <select v-model="sampleDistribution"><option value="grid">{{ t('expmapVideoPanel.output.grid') }}</option><option value="r2">{{ t('expmapVideoPanel.output.r2') }}</option></select></label>
+            <label>{{ t('expmapVideoPanel.output.samples') }} <select v-model.number="maxSamples"><option v-for="limit in EXPMAP_SAMPLE_LIMITS" :key="limit" :value="limit">{{ limit }}{{ limit === 1 ? t('expmapVideoPanel.output.bilinear') : '' }}</option></select></label>
+            <p>{{ t('expmapVideoPanel.output.adaptive') }}</p>
           </details>
           <p v-if="selectedEntry" class="filename">{{ videoFilename(expmapLibraryFilename(selectedEntry)) }}</p>
           <p v-if="validationError" role="alert" class="error">{{ validationError }}</p>
-          <button v-if="width / height > manifest.projection.width / manifest.projection.height" @click="width = Math.max(2, Math.floor(height * manifest.projection.width / manifest.projection.height / 2) * 2)">Adapter la largeur au document</button>
-          <button class="primary" :disabled="!effectiveCodec || probing || !!validationError" @click="start">Exporter la vidéo…</button>
+          <button v-if="width / height > manifest.projection.width / manifest.projection.height" @click="width = Math.max(2, Math.floor(height * manifest.projection.width / manifest.projection.height / 2) * 2)">{{ t('expmapVideoPanel.output.fitWidth') }}</button>
+          <button class="primary" :disabled="!effectiveCodec || probing || !!validationError" @click="start">{{ t('expmapVideoPanel.output.export') }}</button>
         </DenseSection>
       </template>
     </fieldset>
-    <RenderProgress v-if="progress" :label="progress" :done="framesDone" :total="framesTotal" unit="images encodées" :active="ownRunning"/>
-    <button v-if="ownRunning" @click="abort?.abort(); progress = 'Annulation en cours…'">Annuler l’export</button><p v-if="error" role="alert" class="error">{{ error }}</p>
+    <RenderProgress v-if="progress" :label="progress" :done="framesDone" :total="framesTotal" :unit="t('expmapVideoPanel.unitFrames')" :active="ownRunning"/>
+    <button v-if="ownRunning" @click="abort?.abort(); progress = t('expmapVideoPanel.progress.cancelling')">{{ t('expmapVideoPanel.output.cancel') }}</button><p v-if="error" role="alert" class="error">{{ error }}</p>
   </div>
 </template>
 <style scoped>

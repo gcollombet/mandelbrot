@@ -1,3 +1,4 @@
+import { t } from './i18n'
 /** Half-resolution packing: file dimensions stay unchanged, left eye first. */
 export type StereoVideoLayout = 'side-by-side' | 'top-bottom'
 export type StereoVideoSettings = { enabled: boolean; strength: number; layout?: StereoVideoLayout }
@@ -17,5 +18,5 @@ export function stereoProjection(width: number, height: number, strength: number
 
 export function validateStereoDimensions(width:number,height:number,layout:StereoVideoLayout='side-by-side') {
   const split=layout==='top-bottom'?height:width
-  if(split%2)throw new Error(layout==='top-bottom'?'La vidéo haut/bas exige une hauteur paire':'La vidéo côte à côte exige une largeur paire')
+  if(split%2)throw new Error(t(layout==='top-bottom'?'video.stereo.evenHeight':'video.stereo.evenWidth'))
 }

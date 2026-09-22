@@ -1,5 +1,9 @@
 <script setup lang="ts">
+import { computed } from 'vue';
+import { useI18n } from 'vue-i18n';
 import type {StopTransferCurve} from '../ColorStop.ts';
+
+const { t } = useI18n();
 
 const props = defineProps<{
   modelValue: StopTransferCurve;
@@ -9,16 +13,16 @@ const emit = defineEmits<{
   (e: 'update:modelValue', value: StopTransferCurve): void;
 }>();
 
-const curves: Array<{ value: StopTransferCurve; label: string; path: string }> = [
-  { value: 'linear', label: 'Linear transfer', path: 'M4 24 L44 4' },
-  { value: 'gaussian', label: 'Gaussian transfer', path: 'M4 24 L16 24 C21 24 27 20 32 12 C35 7 39 4 44 4' },
-  { value: 'square', label: 'Square transfer', path: 'M4 24 L8 24 L8 4 L44 4' },
-  { value: 'exponential', label: 'Exponential transfer', path: 'M4 24 C24 24 34 22 44 4' },
-];
+const curves = computed<Array<{ value: StopTransferCurve; label: string; path: string }>>(() => [
+  { value: 'linear', label: t('stopTransferCurveSelector.linear'), path: 'M4 24 L44 4' },
+  { value: 'gaussian', label: t('stopTransferCurveSelector.gaussian'), path: 'M4 24 L16 24 C21 24 27 20 32 12 C35 7 39 4 44 4' },
+  { value: 'square', label: t('stopTransferCurveSelector.square'), path: 'M4 24 L8 24 L8 4 L44 4' },
+  { value: 'exponential', label: t('stopTransferCurveSelector.exponential'), path: 'M4 24 C24 24 34 22 44 4' },
+]);
 </script>
 
 <template>
-  <div class="curve-selector" role="group" aria-label="Transfer curve">
+  <div class="curve-selector" role="group" :aria-label="t('stopTransferCurveSelector.group')">
     <button
       v-for="curve in curves"
       :key="curve.value"

@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import {ref} from 'vue';
+import {useI18n} from 'vue-i18n';
 import type {MandelbrotExposed} from '../types/MandelbrotExposed.ts';
 
 const props = defineProps<{
   mandelbrotRef: MandelbrotExposed | null;
 }>();
 
+const {t} = useI18n();
 const expanded = defineModel<boolean>('expanded', { default: false });
 const activeButton = ref<string | null>(null);
 
@@ -113,7 +115,7 @@ const handleTouchEnd = (e: TouchEvent) => {
       class="nav-button compass-button"
       @click="toggleExpanded"
       @touchend="handleCompassTouch"
-      aria-label="Toggle navigation"
+      :aria-label="t('mobileNavigationControls.toggle')"
     >
       <i class="fa-solid fa-compass fa-2x nav-icon"></i>
     </button>
@@ -129,7 +131,7 @@ const handleTouchEnd = (e: TouchEvent) => {
           @mousedown="startMoving('north')"
           @mouseup="stopAllActions"
           @mouseleave="stopAllActions"
-          aria-label="Move North"
+          :aria-label="t('mobileNavigationControls.moveNorth')"
         >
           <i class="fa-solid fa-arrow-up fa-3x nav-icon"></i>
         </button>
@@ -142,7 +144,7 @@ const handleTouchEnd = (e: TouchEvent) => {
           @mousedown="startMoving('south')"
           @mouseup="stopAllActions"
           @mouseleave="stopAllActions"
-          aria-label="Move South"
+          :aria-label="t('mobileNavigationControls.moveSouth')"
         >
           <i class="fa-solid fa-arrow-down fa-3x nav-icon"></i>
         </button>
@@ -155,7 +157,7 @@ const handleTouchEnd = (e: TouchEvent) => {
           @mousedown="startMoving('west')"
           @mouseup="stopAllActions"
           @mouseleave="stopAllActions"
-          aria-label="Move West"
+          :aria-label="t('mobileNavigationControls.moveWest')"
         >
           <i class="fa-solid fa-arrow-left fa-3x nav-icon"></i>
         </button>
@@ -168,7 +170,7 @@ const handleTouchEnd = (e: TouchEvent) => {
           @mousedown="startMoving('east')"
           @mouseup="stopAllActions"
           @mouseleave="stopAllActions"
-          aria-label="Move East"
+          :aria-label="t('mobileNavigationControls.moveEast')"
         >
           <i class="fa-solid fa-arrow-right fa-3x nav-icon"></i>
         </button>
@@ -181,7 +183,7 @@ const handleTouchEnd = (e: TouchEvent) => {
           @mousedown="startRotating('left')"
           @mouseup="stopAllActions"
           @mouseleave="stopAllActions"
-          aria-label="Rotate Left"
+          :aria-label="t('mobileNavigationControls.rotateLeft')"
         >
           <i class="fa-solid fa-rotate-left fa-2x nav-icon"></i>
         </button>
@@ -194,7 +196,7 @@ const handleTouchEnd = (e: TouchEvent) => {
           @mousedown="startRotating('right')"
           @mouseup="stopAllActions"
           @mouseleave="stopAllActions"
-          aria-label="Rotate Right"
+          :aria-label="t('mobileNavigationControls.rotateRight')"
         >
           <i class="fa-solid fa-rotate-right fa-2x nav-icon"></i>
         </button>
@@ -207,7 +209,7 @@ const handleTouchEnd = (e: TouchEvent) => {
           @mousedown="startZooming('out')"
           @mouseup="stopAllActions"
           @mouseleave="stopAllActions"
-          aria-label="Zoom Out"
+          :aria-label="t('mobileNavigationControls.zoomOut')"
         >
           <svg class="nav-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="11" cy="11" r="7"/>
@@ -223,7 +225,7 @@ const handleTouchEnd = (e: TouchEvent) => {
           @mousedown="startZooming('in')"
           @mouseup="stopAllActions"
           @mouseleave="stopAllActions"
-          aria-label="Zoom In"
+          :aria-label="t('mobileNavigationControls.zoomIn')"
         >
           <svg class="nav-icon" viewBox="0 0 24 24" width="28" height="28" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">
             <circle cx="11" cy="11" r="7"/>

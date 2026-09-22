@@ -9,6 +9,7 @@
  * reading the full images into memory.
  */
 
+import { t } from './i18n';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
 import {
   matchesCacheSnapshot,
@@ -226,7 +227,7 @@ export async function saveTextureEntry(
   details: TextureStorageDetails = {},
   cacheFields?: ScopedCacheFields,
 ): Promise<void> {
-  if (!name.trim()) throw new Error('Texture name is required.');
+  if (!name.trim()) throw new Error(t('palettes.textureNameRequired'));
   const resolvedDate = date ?? new Date().toISOString();
   const resolvedName = await uniqueTextureName(name.trim(), guid);
   const metadata: TextureMetadata = {
@@ -347,7 +348,7 @@ export async function getTextureCacheSnapshot(guid: string): Promise<{record: Te
 }
 
 export async function applyCloudTextureEntry(metadata: TextureMetadata, blob: Blob, revision: number, expected?: ScopedCacheFields | null): Promise<void> {
-  if (!metadata.guid) throw new Error('Cloud texture is missing a GUID.');
+  if (!metadata.guid) throw new Error(t('palettes.cloudTextureMissingGuid'));
   const next = {
     ...metadata, contentType: 'image/webp', byteSize: blob.size, unavailable: false,
     ...syncedPersonalCacheFields(metadata, revision),

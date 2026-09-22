@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import type { MandelbrotParams } from "../Mandelbrot.ts";
 import {
   ANIMATION_TRACK_DEFINITIONS,
@@ -28,6 +29,8 @@ const props = defineProps<{
   uploadSuccessKeys: Set<string>;
   suspendShortcuts?: (suspend: boolean) => void;
 }>();
+
+const { t } = useI18n();
 
 const model = defineModel<MandelbrotParams>({ required: true });
 
@@ -83,7 +86,7 @@ async function saveAnimationPreset() {
   if (!name) return;
   const existing = animationPresets.value.find(item => item.name === name);
   if (!canOverwriteCatalogPayload(props.userRole, existing?.remote)) {
-    window.alert('Shared catalog animation presets cannot be overwritten. Save a local variant with a new name.');
+    window.alert(t('animationPanel.alerts.cannotOverwriteShared'));
     return;
   }
   ensureAnimationConfig();
@@ -168,7 +171,7 @@ function detachAnimationPreset(): void {
 async function saveAnimationPresetVariant(): Promise<void> {
   const origin = animationLink.origin.value;
   if (!origin) return;
-  animationPresetName.value = `${origin.name} · variante`;
+  animationPresetName.value = t('animationPanel.variantName', { name: origin.name });
   await saveAnimationPreset();
 }
 
@@ -186,10 +189,10 @@ async function toggleAnimationPresetFavorite(preset: AnimationPresetRecord): Pro
 
 async function deleteAnimationPreset(preset: AnimationPresetRecord): Promise<void> {
   if (!canDeleteCatalogEntry(props.userRole, preset.remote)) {
-    window.alert('Shared catalog animation presets cannot be deleted locally.');
+    window.alert(t('animationPanel.alerts.cannotDeleteShared'));
     return;
   }
-  if (!window.confirm(`Delete animation preset "${preset.name}"? This cannot be undone.`)) return;
+  if (!window.confirm(t('animationPanel.alerts.confirmDelete', { name: preset.name }))) return;
   await deleteAnimationPresetEntry(preset.name);
   animationPresets.value = await getAllAnimationPresetEntries();
   if (selectedAnimationPreset.value === preset.name) {
@@ -214,9 +217,9 @@ function uploadButtonClasses(preset: AnimationPresetRecord) {
 
 function uploadButtonTitle(preset: AnimationPresetRecord): string {
   const key = `animation:${preset.guid}`;
-  if (props.uploadSuccessKeys.has(key)) return 'Uploaded successfully';
-  if (preset.remote) return 'Already in shared catalog. Upload again to update.';
-  return 'Upload to shared catalog';
+  if (props.uploadSuccessKeys.has(key)) return t('animationPanel.upload.success');
+  if (preset.remote) return t('animationPanel.upload.alreadyShared');
+  return t('animationPanel.upload.toCatalog');
 }
 
 function uploadButtonIcon(preset: AnimationPresetRecord): string {
@@ -263,15 +266,13 @@ function toggleTrack(id: AnimationTrackId) {
   triggerAnimationUpdate();
 }
 
-const trackLabels: Record<string, string> = {
-  paletteOffset: 'Décalage palette', heightPaletteShift: 'Hauteur palette', lightAngle: 'Lumière',
-  textureDrift: 'Dérive texture', skyReflectionDrift: 'Dérive reflets', phaseColoring: 'Phase couleur',
-  varnish: 'Vernis', microBump: 'Micro-relief', displacement: 'Déplacement', tessellation: 'Texture',
-  protrusionPhase: 'Phase protubérances', reliefDepth: 'Profondeur relief',
-  orbitTrapPhaseOffset: 'Couleur piège orbite', orbitTrapStrength: 'Intensité piège orbite',
-  gradeSaturation: 'Saturation', gradeContrast: 'Contraste',
-  palettePathOffset: 'Décalage parcours',
-};
+const TRACK_LABEL_IDS = [
+  'paletteOffset', 'heightPaletteShift', 'lightAngle', 'textureDrift', 'skyReflectionDrift', 'phaseColoring',
+  'varnish', 'microBump', 'displacement', 'tessellation', 'protrusionPhase', 'reliefDepth',
+  'orbitTrapPhaseOffset', 'orbitTrapStrength', 'gradeSaturation', 'gradeContrast', 'palettePathOffset',
+] as const;
+const trackLabels = computed<Record<string, string>>(() =>
+  Object.fromEntries(TRACK_LABEL_IDS.map(id => [id, t(`animationPanel.tracks.${id}`)])));
 const visibleAnimationPresetCount = computed(() => visibleAnimationPresets.value.length);
 
 onMounted(() => {
@@ -293,13 +294,13 @@ watch(
 
         <!-- ═══ Mixer ═══ -->
         <DenseSection
-          title="Mixer"
-          scope="Paramètres animés — onde, vitesse, amplitude"
+          :title="t('animationPanel.mixer.title')"
+          :scope="t('animationPanel.mixer.scope')"
           icon='<path d=&quot;M4 12q4-7 8 0t8 0&quot;/><path d=&quot;M4 17h16&quot;/>'
         >
           <div class="fields">
             <DenseField
-              label="Vitesse globale"
+              :label="t('animationPanel.mixer.globalSpeed')"
               :min="0" :max="5" :step="0.05" :default="1"
               :f="speedFmt"
               :model-value="model.animation.globalSpeed"
@@ -335,14 +336,14 @@ watch(
               </div>
               <div v-if="model.animation.tracks[track.id].enabled" class="mc-fields">
                 <DenseField
-                  label="Vitesse"
+                  :label="t('animationPanel.mixer.speed')"
                   :min="0" :max="5" :step="0.05" :default="track.defaultSpeed"
                   :f="speedFmt"
                   :model-value="model.animation.tracks[track.id].speed"
                   @update:model-value="(v) => setTrackSpeed(track.id, v)"
                 />
                 <DenseField
-                  label="Amplitude"
+                  :label="t('animationPanel.mixer.amplitude')"
                   :min="track.minAmplitude" :max="track.maxAmplitude" :step="track.amplitudeStep" :default="track.defaultAmplitude"
                   :f="amplitudeFmt(track.id)"
                   :unit="animationTrackAmplitudeUnit(track.id)"
@@ -356,8 +357,8 @@ watch(
 
         <!-- ═══ Préréglages ═══ -->
         <DenseSection
-          title="Préréglages" initially-collapsed
-          scope="Enregistrer & appliquer une animation"
+          :title="t('animationPanel.presets.title')" initially-collapsed
+          :scope="t('animationPanel.presets.scope')"
           icon='<rect x=&quot;5&quot; y=&quot;3&quot; width=&quot;14&quot; height=&quot;18&quot; rx=&quot;2&quot;/><path d=&quot;M9 3v5h7V3M8 21v-7h8v7&quot;/>'
         >
           <div class="lib-bar2">
@@ -369,9 +370,9 @@ watch(
               @click="showOnlyFavoriteAnimationPresets = !showOnlyFavoriteAnimationPresets"
             >
               <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-              Favoris
+              {{ t('common.favorites') }}
             </button>
-            <span class="lib-count">{{ visibleAnimationPresetCount }} préréglage{{ visibleAnimationPresetCount > 1 ? 's' : '' }}</span>
+            <span class="lib-count">{{ t('animationPanel.presets.count', { count: visibleAnimationPresetCount }, visibleAnimationPresetCount) }}</span>
           </div>
 
           <div class="anim-preset-list">
@@ -397,7 +398,7 @@ watch(
                 class="iconbtn favf"
                 :class="{ on: preset.favorite }"
                 type="button"
-                :title="preset.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris'"
+                :title="preset.favorite ? t('common.removeFromFavorites') : t('common.addToFavorites')"
                 :aria-pressed="!!preset.favorite"
                 @click.stop="toggleAnimationPresetFavorite(preset)"
               >
@@ -408,8 +409,8 @@ watch(
                 v-if="canDeleteCatalogEntry(props.userRole, preset.remote)"
                 class="iconbtn danger"
                 type="button"
-                title="Supprimer le préréglage"
-                aria-label="Supprimer le préréglage"
+                :title="t('animationPanel.presets.delete')"
+                :aria-label="t('animationPanel.presets.delete')"
                 @click.stop="deleteAnimationPreset(preset)"
               >
                 <svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>
@@ -417,21 +418,21 @@ watch(
             </div>
           </div>
 
-          <DenseLinkedChip v-if="animationLink.origin.value" kind="Animation" :name="animationLink.origin.value.name" :dirty="animationLink.dirty.value" :locked="animationLink.locked.value" :busy="animationLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+          <DenseLinkedChip v-if="animationLink.origin.value" :kind="t('animationPanel.presets.kind')" :name="animationLink.origin.value.name" :dirty="animationLink.dirty.value" :locked="animationLink.locked.value" :busy="animationLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
             @update="updateLinkedAnimationPreset" @rename="renameLinkedAnimationPreset" @detach="detachAnimationPreset" @variant="saveAnimationPresetVariant" />
           <div class="save-row">
             <input
               class="txt-in"
               v-model="animationPresetName"
               type="text"
-              :placeholder="animationLink.origin.value ? 'Enregistrer une copie sous…' : 'Nom du préréglage…'"
+              :placeholder="animationLink.origin.value ? t('animationPanel.presets.saveCopyAs') : t('animationPanel.presets.namePlaceholder')"
               @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
               @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
               @keyup.enter="saveAnimationPreset"
             />
             <button class="mini-btn primary" type="button" @click="saveAnimationPreset">
               <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
-              Enregistrer
+              {{ t('common.save') }}
             </button>
           </div>
         </DenseSection>

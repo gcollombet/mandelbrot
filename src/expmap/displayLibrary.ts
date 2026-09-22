@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import type { ShaderExpmapManifest } from './displayFormat'
 /** Either a legacy block directory or the OPFS path of a single-file archive. */
 export type ShaderLibraryEntry={id:string;name:string;state:ShaderExpmapManifest['state'];handle?:FileSystemDirectoryHandle;archive?:string[]}
@@ -24,5 +25,5 @@ export async function rememberShaderSource(m:ShaderExpmapManifest,location:FileS
 export async function forgetShaderSource(id:string) {await transaction('readwrite',s=>s.delete(id))}
 export async function authorizeShaderDirectory(handle:FileSystemDirectoryHandle) {
   const h=handle as FileSystemDirectoryHandle & {requestPermission?:(o:{mode:'readwrite'})=>Promise<PermissionState>}
-  if(h.requestPermission&&await h.requestPermission({mode:'readwrite'})!=='granted')throw new Error('Accès au dossier refusé ; le rouvrir depuis le panneau')
+  if(h.requestPermission&&await h.requestPermission({mode:'readwrite'})!=='granted')throw new Error(t('expmap.shaderLibrary.accessDenied'))
 }

@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { ShaderRingStore } from './displayRingStore'
 import type { RingRect, ShaderRing } from './displayRings'
 import type { ShaderExpmapManifest } from './displayFormat'
@@ -6,7 +7,7 @@ import type { ExpmapView } from './renderer'
 /** Stable even-sized envelope for the entire film, including fractional zoom. */
 export function ringVideoRect(m:ShaderExpmapManifest,view:ExpmapView,ring:ShaderRing):RingRect {
   const {width,height}=view
-  if(width%2||height%2)throw new Error('Les vidéos de couronnes exigent des dimensions paires')
+  if(width%2||height%2)throw new Error(t('expmap.ringMedia.evenDims'))
   if(view.effects?.radialMode==='mirror')return [0,0,width,height]
   // Keep tiny central streams compatible with hardware codec block sizes.
   const r=Math.max(32,m.projection.radius*height/m.projection.height*2**(1-ring.first)+2)
@@ -15,7 +16,7 @@ export function ringVideoRect(m:ShaderExpmapManifest,view:ExpmapView,ring:Shader
   return [x,y,right-x,bottom-y]
 }
 export function ringVideoBitrate(rect:RingRect,width:number,height:number,fullBitrate:number) {
-  if(!Number.isFinite(fullBitrate)||fullBitrate<100000||fullBitrate>1e9)throw new Error('Débit intermédiaire invalide')
+  if(!Number.isFinite(fullBitrate)||fullBitrate<100000||fullBitrate>1e9)throw new Error(t('expmap.ringMedia.bitrate'))
   return Math.max(100000,Math.round(fullBitrate*rect[2]*rect[3]/(width*height)))
 }
 

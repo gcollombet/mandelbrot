@@ -1,0 +1,103 @@
+{
+  "path": {
+    "durationInvalid": "La durée doit être un nombre de secondes fini et positif (reçu {value}).",
+    "endpointStart": "départ",
+    "endpointEnd": "arrivée",
+    "endpointField": "Le point de {endpoint} ne porte pas de \"{field}\" exploitable.",
+    "endpointAngle": "L’angle de {endpoint} doit être fini.",
+    "degenerate": "Le départ et l’arrivée sont au même endroit : le film sera une image fixe répétée. Navigue puis redéfinis l’un des deux points.",
+    "dynamicRangeInvalid": "Dynamique vidéo invalide.",
+    "hdrEvenDimensions": "La vidéo HDR 4:2:0 exige des dimensions paires.",
+    "hdrExposureInvalid": "Exposition HDR invalide (−16 à +16 EV).",
+    "hdrFpsMax": "La sortie HDR prend en charge jusqu’à 60 images/s.",
+    "hdrQuantizerInvalid": "Quantificateur HDR invalide (0 à 63).",
+    "outputWidth": "La largeur de sortie doit être un entier positif.",
+    "outputHeight": "La hauteur de sortie doit être un entier positif.",
+    "fpsInvalid": "La cadence doit être un nombre fini et positif.",
+    "supersampleInvalid": "Le suréchantillonnage doit être l’un de {factors} — un facteur fractionnaire n’a pas de filtre box exact.",
+    "thresholdRange": "Le seuil de bascule doit être compris entre {min} et {max} (reçu {value}).",
+    "textureTooLarge": "{width}×{height} en ×{supersample} exige une texture de travail {neutral}², au-delà de la limite de cet appareil ({limit}). Baisse la résolution ou le suréchantillonnage.",
+    "softness": "Seuil {threshold} au-delà du suréchantillonnage ×{supersample} : la périphérie sera plus douce entre deux bascules, en échange d’un export nettement plus rapide (une reconvergence complète par facteur de zoom égal au seuil)."
+  },
+  "runner": {
+    "cannotExport": "Impossible d’exporter ce trajet :\n{problems}",
+    "navigatorUnavailable": "Navigateur indisponible.",
+    "hdrCaptureUnavailable": "Capture HDR vidéo indisponible.",
+    "cancelled": "Export annulé",
+    "interrupted": "Export interrompu"
+  },
+  "session": {
+    "frameTimeout": "Export vidéo interrompu : l’image {frame} n’a pas convergé après {pumps} passes de rendu. Aucune image partiellement convergée n’a été émise.",
+    "fpsInvalid": "la cadence doit être un nombre fini positif",
+    "durationInvalid": "la durée doit être un nombre de secondes fini positif",
+    "maxPumpsInvalid": "maxPumpsPerFrame doit être un entier positif",
+    "invalidSettings": "Réglages d’export vidéo invalides : {problems}"
+  },
+  "encoder": {
+    "codecs": {
+      "av1": "AV1 — meilleure compression",
+      "avc": "H.264 / AVC — lecture universelle",
+      "hevc": "HEVC / H.265",
+      "vp9": "VP9"
+    },
+    "unknownCodec": "Codec inconnu pour un conteneur MP4 : {codec}",
+    "configRefused": "{preference} : configuration refusée",
+    "attemptFailed": "{preference} : {error}",
+    "unavailable": "Encodage {codec} indisponible pour {width}×{height}{fps}. {evenHint}Essais : {failures}.",
+    "atFps": " à {fps} images/s",
+    "avcEvenDimensions": "H.264 exige des dimensions paires. ",
+    "sinkClosed": "Impossible d’ajouter des images après la finalisation ou l’annulation du flux.",
+    "sinkFinalized": "Flux déjà finalisé.",
+    "noOutput": "L’encodeur n’a produit aucun tampon de sortie."
+  },
+  "hdr": {
+    "avcIsSdr": "Le H.264 proposé est SDR. Choisir HEVC, AV1 ou VP9 pour le HDR 10 bits.",
+    "quantizerInvalid": "Quantificateur {codec} invalide ({min} à {max}).",
+    "evenDimensionsAndFps": "Le HDR exige des dimensions paires et une cadence entre 1 et 60 images/s.",
+    "colorSpaceUnconfirmed": "L’encodeur ne confirme pas la colorimétrie HDR Rec.2020/PQ attendue.",
+    "tenBitUnconfirmed": "L’encodeur ne confirme pas une sortie 10 bits. Aucun repli SDR ne sera effectué.",
+    "webCodecsRequired": "WebCodecs requis pour la vidéo HDR.",
+    "tenBitProfileRefused": "Profil 10 bits refusé.",
+    "constantQualityRefused": "Mode qualité constante refusé.",
+    "outputMetadataMissing": "Métadonnées de sortie HDR absentes.",
+    "encoderNotResponding": "L’encodeur HDR ne répond pas.",
+    "encoderNoFrame": "L’encodeur HDR n’a produit aucune image.",
+    "probeFailed": "{preference}{mode} : {error}",
+    "encodingUnavailable": "Encodage HDR 10 bits {codec} indisponible : {errors}",
+    "metadataMissingAtStart": "Métadonnées HDR manquantes au début de la vidéo.",
+    "encoderClosed": "L’encodeur HDR est fermé.",
+    "frameIncompatible": "Image incompatible avec la sortie HDR 10 bits.",
+    "noVideoProduced": "Aucune vidéo HDR produite.",
+    "clippingWarning": "Certaines hautes lumières ont été écrêtées à 10 000 nits. L’export continue ; réduire l’exposition HDR pour conserver leurs détails.",
+    "dimensionsInvalid": "Dimensions HDR invalides.",
+    "exposureInvalid": "Exposition HDR invalide.",
+    "originInvalid": "Origine HDR invalide.",
+    "gpuLimit": "Limite GPU insuffisante pour la sortie HDR.",
+    "nonFiniteLuminance": "Luminance HDR non finie. Vérifier le rendu et les matériaux."
+  },
+  "still": {
+    "notDivisible": "{width}×{height} n'est pas divisible par la grille {grid}×{grid}.",
+    "hdrCaptureUnavailable": "Capture HDR indisponible.",
+    "canvasUnavailable": "Canvas 2D indisponible pour assembler la capture.",
+    "cancelled": "Capture annulée",
+    "tileNotConverged": "La tuile {tile}/{tiles} n'a pas convergé en {pumps} passes."
+  },
+  "tiled": {
+    "budgetInsufficient": "Le budget mémoire est insuffisant pour les deux keyframes et une tuile minimale. Il faut au moins {bytes} octets.",
+    "positiveInteger": "{name} doit être un entier strictement positif.",
+    "finiteNonNegative": "{name} doit être un nombre fini positif ou nul.",
+    "tileBytesPositive": "tileBytesPerTexel doit être strictement positif.",
+    "budgetPositive": "budgetBytes doit être un nombre fini strictement positif.",
+    "fixedCenterRequired": "Le mode keyframe tuilée exige un centre fixe. Un travelling utilise le chemin monolithique.",
+    "noJitteredAa": "Le mode keyframe tuilée n’accepte pas l’AA jitteré par image : ses frames intermédiaires sont de pures lectures. Utilisez le suréchantillonnage pour l’anticrénelage."
+  },
+  "stereo": {
+    "evenHeight": "La vidéo haut/bas exige une hauteur paire",
+    "evenWidth": "La vidéo côte à côte exige une largeur paire",
+    "gpuDimensions": "Dimensions stéréo incompatibles avec le GPU",
+    "webGpuRequired": "WebGPU requis pour la stéréo"
+  },
+  "animationPreset": {
+    "nameRequired": "Le nom du préréglage d’animation est obligatoire."
+  }
+}

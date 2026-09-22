@@ -17,6 +17,7 @@ import {
   type ScopedCacheFields,
 } from './scopedCache';
 import {notifyPersonalCacheChanged} from './personalSyncTrigger';
+import { t } from './i18n';
 
 const DB_NAME = 'mandelbrot-animation-presets';
 const DB_VERSION = 1;
@@ -101,7 +102,7 @@ export async function getAnimationPresetByGuid(guid: string): Promise<AnimationP
 }
 
 export async function saveAnimationPresetEntry(record: AnimationPresetRecord): Promise<void> {
-  if (!record.name.trim()) throw new Error('Animation preset name is required.');
+  if (!record.name.trim()) throw new Error(t('video.animationPreset.nameRequired'));
   const date = record.date || new Date().toISOString();
   const guid = record.guid || createGuid();
   const next: AnimationPresetRecord = {

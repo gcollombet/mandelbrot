@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { rgb } from 'd3-color'
 import { Palette } from '../Palette'
 import { applyStopTransferCurve } from '../ColorStop'
@@ -16,13 +17,14 @@ import { DenseSection, DenseField, DenseSelect, DenseSeg, DenseToggle, DenseCard
 const props = defineProps<{ current: MandelbrotParams; engine: Engine | null; disabled?: boolean; editingStopId?: string | null }>()
 const emit = defineEmits<{ change: [path: PalettePath]; 'palette-saved': []; 'edit-stop': [stopId: string] }>()
 
+const { t } = useI18n()
 const MAGNITUDE_MIN = -10, MAGNITUDE_MAX = 1000, STOP_GAP = 0.0002
-const CURVE_OPTIONS = [
-  { value: 'linear', label: 'Linéaire' }, { value: 'gaussian', label: 'Gaussienne' },
-  { value: 'square', label: 'Carrée' }, { value: 'exponential', label: 'Exponentielle' },
-] as const
-const MODE_OPTIONS = [{ value: 'radial', label: 'Cercles concentriques' }, { value: 'global', label: 'Toute l’image' }]
-const OUTSIDE_OPTIONS = [{ value: 'hold', label: 'Palette de début / fin' }, { value: 'manual', label: 'Palette manuelle' }]
+const CURVE_OPTIONS = computed(() => [
+  { value: 'linear', label: t('palettePathPanel.curves.linear') }, { value: 'gaussian', label: t('palettePathPanel.curves.gaussian') },
+  { value: 'square', label: t('palettePathPanel.curves.square') }, { value: 'exponential', label: t('palettePathPanel.curves.exponential') },
+] as const)
+const MODE_OPTIONS = computed(() => [{ value: 'radial', label: t('palettePathPanel.modes.radial') }, { value: 'global', label: t('palettePathPanel.modes.global') }])
+const OUTSIDE_OPTIONS = computed(() => [{ value: 'hold', label: t('palettePathPanel.outside.hold') }, { value: 'manual', label: t('palettePathPanel.outside.manual') }])
 const SIZE_OPTIONS = [{ value: 512, label: '512 px' }, { value: 1024, label: '1024 px' }, { value: 2048, label: '2048 px' }]
 
 const depth = computed(() => -log10FromDecimalString(props.current.scale))
@@ -45,7 +47,7 @@ const progress = computed(() => Math.max(0, Math.min(100, percent(depth.value)))
 const stopMin = computed(() => isEndpoint.value ? start.value : stops.value[stopIndex.value - 1].magnitude + STOP_GAP)
 const stopMax = computed(() => isEndpoint.value ? end.value : stops.value[stopIndex.value + 1].magnitude - STOP_GAP)
 const editingStop = computed(() => stops.value.find(s => s.id === props.editingStopId))
-const savedOptions = computed(() => [{ value: '', label: 'Nouveau / non enregistré' }, ...saved.value.map(p => ({ value: p.id, label: p.name }))])
+const savedOptions = computed(() => [{ value: '', label: t('palettePathPanel.savedNew') }, ...saved.value.map(p => ({ value: p.id, label: p.name }))])
 const fmt = (v: number) => v.toFixed(2)
 
 // ── Colour helpers: every stop shows the palette it carries ──
@@ -70,7 +72,7 @@ function publishSoon() { clearTimeout(publishTimer); publishTimer = setTimeout(p
 // ── Range and stops ──
 function setRange(value: number, first: boolean) { guard(() => {
   const a = first ? value : start.value, b = first ? end.value : value
-  if (!Number.isFinite(a) || !Number.isFinite(b) || b - a < 0.001) throw new Error('La magnitude d’arrivée doit dépasser celle du départ.')
+  if (!Number.isFinite(a) || !Number.isFinite(b) || b - a < 0.001) throw new Error(t('palettePathPanel.errors.endAfterStart'))
   const oldA = start.value, span = end.value - oldA
   stops.value.forEach(s => { s.magnitude = a + (s.magnitude - oldA) / span * (b - a) }); publishSoon()
 }) }
@@ -78,7 +80,7 @@ function add(m = depth.value) {
   if (stops.value.length >= 64) return
   const magnitude = Math.max(start.value + STOP_GAP, Math.min(end.value - STOP_GAP, m))
   if (stops.value.some(s => Math.abs(s.magnitude - magnitude) < 0.0001)) return
-  const s: PalettePathStop = { id: crypto.randomUUID(), magnitude, name: 'Palette actuelle', appearance: snapshotPathAppearance(props.current), curve: 'linear' }
+  const s: PalettePathStop = { id: crypto.randomUUID(), magnitude, name: t('palettePathPanel.currentPalette'), appearance: snapshotPathAppearance(props.current), curve: 'linear' }
   stops.value.push(s); stops.value.sort((a, b) => a.magnitude - b.magnitude); selected.value = s.id; publish()
 }
 function addInGap() {
@@ -141,21 +143,21 @@ async function extractPreset(preset: PresetMetadata) {
   loadingPreset.value = true; error.value = ''
   try {
     const record = await getPresetById(preset.id)
-    if (!record) throw new Error('Ce preset n’est plus disponible.')
+    if (!record) throw new Error(t('palettePathPanel.errors.presetUnavailable'))
     const target = stops.value.find(s => s.id === stopId)
     if (!target || props.disabled) return
-    target.appearance = snapshotPathAppearance(record.value); target.name = preset.name || 'Preset sans nom'
+    target.appearance = snapshotPathAppearance(record.value); target.name = preset.name || t('palettePathPanel.unnamedPreset')
     picker.value = null; publish()
   } catch (e) { error.value = String(e) }
   finally { loadingPreset.value = false }
 }
-function capture() { picker.value = null; stop.value.appearance = snapshotPathAppearance(props.current); stop.value.name = 'Palette actuelle'; publish() }
+function capture() { picker.value = null; stop.value.appearance = snapshotPathAppearance(props.current); stop.value.name = t('palettePathPanel.currentPalette'); publish() }
 async function extractCurrentMix() {
   if (props.disabled || savingSnapshot.value) return
   savingSnapshot.value = true; error.value = ''; snapshotStatus.value = ''
   try {
     const palette = await savePalettePathSnapshot(props.current.palettePath ?? draft.value, depth.value, props.current)
-    snapshotStatus.value = `Palette « ${palette.name} » enregistrée dans la bibliothèque.`
+    snapshotStatus.value = t('palettePathPanel.status.snapshotSaved', { name: palette.name })
     emit('palette-saved')
     palettes.value = await getAllPaletteEntries()
   } catch (e) { error.value = String(e) }
@@ -170,11 +172,11 @@ function chooseSaved(id: string | number) {
   if (p) { draft.value = copy(p); selected.value = p.stops[0].id; publish() }
 }
 function save(duplicate = false) { guard(() => {
-  if (duplicate) { draft.value.id = crypto.randomUUID(); draft.value.name += ' · copie' }
+  if (duplicate) { draft.value.id = crypto.randomUUID(); draft.value.name += ' · ' + t('palettePathPanel.copySuffix') }
   savePalettePath(draft.value); savedId.value = draft.value.id; refresh(); publish()
-  saveStatus.value = `Parcours « ${draft.value.name} » enregistré sur ce navigateur.`
+  saveStatus.value = t('palettePathPanel.status.pathSaved', { name: draft.value.name })
 }) }
-function removeSaved() { guard(() => { const name = draft.value.name; deletePalettePath(savedId.value); savedId.value = ''; refresh(); saveStatus.value = `Parcours « ${name} » supprimé.` }) }
+function removeSaved() { guard(() => { const name = draft.value.name; deletePalettePath(savedId.value); savedId.value = ''; refresh(); saveStatus.value = t('palettePathPanel.status.pathDeleted', { name }) }) }
 function create() { draft.value = newPalettePath(props.current, depthOrZero()); selected.value = draft.value.stops[0].id; savedId.value = ''; saveStatus.value = ''; publish() }
 
 // ── Lifecycle ──
@@ -193,36 +195,36 @@ onUnmounted(() => { props.engine?.palettePathStatusListeners.delete(onStatus); c
 <template>
   <div class="palette-path-panel body">
     <fieldset :disabled="disabled" class="sections">
-      <DenseSection title="Parcours" active :hue="285" scope="Une palette par profondeur, fondue entre les stops"
+      <DenseSection :title="t('palettePathPanel.path.title')" active :hue="285" :scope="t('palettePathPanel.path.scope')"
         icon='<path d=&quot;M3 17c4 0 4-10 8-10s4 10 8 10&quot;/><circle cx=&quot;3&quot; cy=&quot;17&quot; r=&quot;1.5&quot;/><circle cx=&quot;11&quot; cy=&quot;7&quot; r=&quot;1.5&quot;/><circle cx=&quot;19&quot; cy=&quot;17&quot; r=&quot;1.5&quot;/>'>
         <div class="fields">
-          <DenseToggle v-model="draft.enabled" label="Activer le parcours" :default="false" @update:model-value="publish" />
-          <DenseSelect v-model="draft.outside" label="Hors plage" :options="OUTSIDE_OPTIONS" default="hold" @update:model-value="publish" />
-          <DenseSeg v-model="draft.mode" label="Application" :options="MODE_OPTIONS" default="radial" class="span2" @update:model-value="publish" />
-          <DenseField label="Départ" :min="MAGNITUDE_MIN" :max="MAGNITUDE_MAX" :step="0.1" :f="fmt" :model-value="start" @update:model-value="setRange($event, true)" />
-          <DenseField label="Arrivée" :min="MAGNITUDE_MIN" :max="MAGNITUDE_MAX" :step="0.1" :f="fmt" :model-value="end" @update:model-value="setRange($event, false)" />
+          <DenseToggle v-model="draft.enabled" :label="t('palettePathPanel.path.enable')" :default="false" @update:model-value="publish" />
+          <DenseSelect v-model="draft.outside" :label="t('palettePathPanel.path.outside')" :options="OUTSIDE_OPTIONS" default="hold" @update:model-value="publish" />
+          <DenseSeg v-model="draft.mode" :label="t('palettePathPanel.path.mode')" :options="MODE_OPTIONS" default="radial" class="span2" @update:model-value="publish" />
+          <DenseField :label="t('palettePathPanel.path.start')" :min="MAGNITUDE_MIN" :max="MAGNITUDE_MAX" :step="0.1" :f="fmt" :model-value="start" @update:model-value="setRange($event, true)" />
+          <DenseField :label="t('palettePathPanel.path.end')" :min="MAGNITUDE_MIN" :max="MAGNITUDE_MAX" :step="0.1" :f="fmt" :model-value="end" @update:model-value="setRange($event, false)" />
         </div>
-        <p class="panel-note">La magnitude augmente en zoomant. En mode cercles, elle varie aussi avec la distance au centre de la vue.</p>
+        <p class="panel-note">{{ t('palettePathPanel.path.note') }}</p>
         <div ref="strip" class="strip timeline" @dblclick="addAt">
-          <canvas ref="canvas" width="600" height="44" aria-label="Parcours de palettes"></canvas>
-          <span class="cursor" :style="{ left: progress + '%' }" :title="'Magnitude actuelle : ' + fmt(depth)"></span>
+          <canvas ref="canvas" width="600" height="44" :aria-label="t('palettePathPanel.path.timelineLabel')"></canvas>
+          <span class="cursor" :style="{ left: progress + '%' }" :title="t('palettePathPanel.path.currentMagnitude', { value: fmt(depth) })"></span>
           <button v-for="s in stops" :key="s.id" type="button" class="stop-marker" :class="{ sel: s.id === selected, editing: s.id === editingStopId }"
             :style="{ left: percent(s.magnitude) + '%', background: stopColor(s) }"
-            :aria-label="s.name + ' à ' + fmt(s.magnitude) + (s.id === editingStopId ? ' (en édition)' : '')"
+            :aria-label="t('palettePathPanel.path.stopAt', { name: s.name, value: fmt(s.magnitude) }) + (s.id === editingStopId ? t('palettePathPanel.path.editingSuffix') : '')"
             :title="s.name + ' · ' + fmt(s.magnitude)"
             @pointerdown="pointer($event, s.id)" @pointermove="drag" @pointerup="drop" @pointercancel="drop" @click="selected = s.id" @dblclick.stop="emit('edit-stop', s.id)"></button>
         </div>
-        <p class="panel-note">Clic : sélectionner · glisser : déplacer · double-clic sur la bande : ajouter un stop ici · double-clic sur un stop : l’éditer dans Palettes.</p>
-        <p v-if="editingStop" class="panel-note editing-note" role="status">« {{ editingStop.name }} » est chargé dans l’onglet Palettes : chaque modification s’applique au parcours. Désactiver le parcours restaure la palette précédente.</p>
+        <p class="panel-note">{{ t('palettePathPanel.path.hints') }}</p>
+        <p v-if="editingStop" class="panel-note editing-note" role="status">{{ t('palettePathPanel.path.editingNote', { name: editingStop.name }) }}</p>
         <div class="transfer">
-          <span class="count">{{ stops.length }} stops · magnitude {{ fmt(depth) }}</span>
-          <button type="button" class="mini-btn" :disabled="stops.length >= 64" @click="addInGap">+ Stop</button>
-          <button type="button" class="mini-btn" :disabled="savingSnapshot || !Number.isFinite(depth)" title="Enregistre le mélange à la magnitude actuelle dans la bibliothèque, avec ses matériaux et images (approximation sur 200 points ; en mode cercles, au curseur uniquement)" @click="extractCurrentMix">{{ savingSnapshot ? 'Capture en cours…' : 'Extraire au curseur' }}</button>
+          <span class="count">{{ t('palettePathPanel.path.count', { count: stops.length, value: fmt(depth) }) }}</span>
+          <button type="button" class="mini-btn" :disabled="stops.length >= 64" @click="addInGap">{{ t('palettePathPanel.path.addStop') }}</button>
+          <button type="button" class="mini-btn" :disabled="savingSnapshot || !Number.isFinite(depth)" :title="t('palettePathPanel.path.extractTitle')" @click="extractCurrentMix">{{ savingSnapshot ? t('palettePathPanel.path.extracting') : t('palettePathPanel.path.extract') }}</button>
         </div>
         <p v-if="snapshotStatus" class="panel-note" role="status">{{ snapshotStatus }}</p>
       </DenseSection>
 
-      <DenseSection title="Stop sélectionné" active :hue="320" scope="Palette, position et transition du stop"
+      <DenseSection :title="t('palettePathPanel.stop.title')" active :hue="320" :scope="t('palettePathPanel.stop.scope')"
         icon='<path d=&quot;M12 3l2.6 5.3 5.9.9-4.3 4.1 1 5.9L12 16.4 6.8 19.2l1-5.9L3.5 9.2l5.9-.9z&quot;/>'>
         <div class="stop-head">
           <span class="stop-swatch" :style="{ background: stopGradient(stop) }"></span>
@@ -230,61 +232,61 @@ onUnmounted(() => { props.engine?.palettePathStatusListeners.delete(onStatus); c
           <span class="stop-pos">{{ stopIndex + 1 }} / {{ stops.length }}</span>
         </div>
         <div class="fields">
-          <fieldset :disabled="isEndpoint" class="bare" :title="isEndpoint ? 'Les stops de départ et d’arrivée suivent la plage' : undefined">
-            <DenseField label="Magnitude" :min="stopMin" :max="stopMax" :step="0.01" :f="fmt" :model-value="stop.magnitude" @update:model-value="onMagnitude" />
+          <fieldset :disabled="isEndpoint" class="bare" :title="isEndpoint ? t('palettePathPanel.stop.endpointLocked') : undefined">
+            <DenseField :label="t('palettePathPanel.stop.magnitude')" :min="stopMin" :max="stopMax" :step="0.01" :f="fmt" :model-value="stop.magnitude" @update:model-value="onMagnitude" />
           </fieldset>
-          <DenseSelect v-model="stop.curve" label="Transition suivante" :options="CURVE_OPTIONS" default="linear" @update:model-value="publish" />
+          <DenseSelect v-model="stop.curve" :label="t('palettePathPanel.stop.nextTransition')" :options="CURVE_OPTIONS" default="linear" @update:model-value="publish" />
         </div>
-        <div class="subhead">Remplir le stop</div>
+        <div class="subhead">{{ t('palettePathPanel.stop.fill') }}</div>
         <div class="seg fill-seg">
-          <button type="button" :class="{ on: picker === 'palettes' }" :aria-expanded="picker === 'palettes'" @click="openPicker('palettes')">Palette de la bibliothèque</button>
-          <button type="button" :class="{ on: picker === 'presets' }" :aria-expanded="picker === 'presets'" @click="openPicker('presets')">Preset complet</button>
-          <button type="button" title="Copie la palette manuelle et ses matériaux dans ce stop" @click="capture">Palette actuelle</button>
+          <button type="button" :class="{ on: picker === 'palettes' }" :aria-expanded="picker === 'palettes'" @click="openPicker('palettes')">{{ t('palettePathPanel.stop.fromLibrary') }}</button>
+          <button type="button" :class="{ on: picker === 'presets' }" :aria-expanded="picker === 'presets'" @click="openPicker('presets')">{{ t('palettePathPanel.stop.fromPreset') }}</button>
+          <button type="button" :title="t('palettePathPanel.stop.captureTitle')" @click="capture">{{ t('palettePathPanel.stop.capture') }}</button>
         </div>
         <div v-if="picker" class="picker" :aria-busy="loadingPreset">
-          <div class="save-row"><input v-model="query" class="txt-in" type="search" placeholder="Rechercher…" aria-label="Rechercher"></div>
+          <div class="save-row"><input v-model="query" class="txt-in" type="search" :placeholder="t('palettePathPanel.stop.searchPlaceholder')" :aria-label="t('palettePathPanel.stop.search')"></div>
           <div class="grid">
             <template v-if="picker === 'palettes'">
               <DenseCard v-for="p in filteredPalettes" :key="p.name" :name="p.name" :thumb="p.thumbnail || undefined" @select="choosePalette(p)">
                 <template #thumb><span class="card-gradient" :style="{ background: paletteGradient(p) }"></span></template>
               </DenseCard>
-              <p v-if="!filteredPalettes.length" class="panel-note">Aucune palette trouvée.</p>
+              <p v-if="!filteredPalettes.length" class="panel-note">{{ t('palettePathPanel.stop.noPalette') }}</p>
             </template>
             <template v-else>
-              <DenseCard v-for="p in filteredPresets" :key="p.id" :name="p.name || 'Preset sans nom'" sub="Couleurs, matériaux et images" :thumb="p.thumbnail || undefined" @select="!loadingPreset && extractPreset(p)">
-                <template #thumb><span class="card-gradient muted">Aperçu indisponible</span></template>
+              <DenseCard v-for="p in filteredPresets" :key="p.id" :name="p.name || t('palettePathPanel.unnamedPreset')" :sub="t('palettePathPanel.stop.presetSub')" :thumb="p.thumbnail || undefined" @select="!loadingPreset && extractPreset(p)">
+                <template #thumb><span class="card-gradient muted">{{ t('palettePathPanel.stop.noPreview') }}</span></template>
               </DenseCard>
-              <p v-if="!filteredPresets.length" class="panel-note">Aucun preset trouvé.</p>
+              <p v-if="!filteredPresets.length" class="panel-note">{{ t('palettePathPanel.stop.noPreset') }}</p>
             </template>
           </div>
         </div>
         <div class="transfer">
-          <button type="button" class="mini-btn danger" :disabled="stops.length <= 2" @click="removeStop">Supprimer ce stop</button>
+          <button type="button" class="mini-btn danger" :disabled="stops.length <= 2" @click="removeStop">{{ t('palettePathPanel.stop.remove') }}</button>
         </div>
       </DenseSection>
 
-      <DenseSection title="Parcours enregistrés" active :hue="300" scope="Sauvegarde locale sur ce navigateur"
+      <DenseSection :title="t('palettePathPanel.saved.title')" active :hue="300" :scope="t('palettePathPanel.saved.scope')"
         icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'>
         <div class="fields">
-          <DenseSelect label="Parcours" :options="savedOptions" :model-value="savedId" class="span2" @update:model-value="chooseSaved" />
+          <DenseSelect :label="t('palettePathPanel.saved.select')" :options="savedOptions" :model-value="savedId" class="span2" @update:model-value="chooseSaved" />
         </div>
-        <div class="save-row"><input v-model="draft.name" class="txt-in" maxlength="100" aria-label="Nom du parcours" placeholder="Nom du parcours" @change="publish"></div>
+        <div class="save-row"><input v-model="draft.name" class="txt-in" maxlength="100" :aria-label="t('palettePathPanel.saved.name')" :placeholder="t('palettePathPanel.saved.name')" @change="publish"></div>
         <div class="transfer">
-          <button type="button" class="mini-btn primary" @click="save()">Enregistrer</button>
-          <button type="button" class="mini-btn" @click="save(true)">Dupliquer</button>
-          <button type="button" class="mini-btn" @click="create">Nouveau</button>
-          <button type="button" class="mini-btn danger" :disabled="!savedId" @click="removeSaved">Supprimer</button>
+          <button type="button" class="mini-btn primary" @click="save()">{{ t('palettePathPanel.saved.save') }}</button>
+          <button type="button" class="mini-btn" @click="save(true)">{{ t('palettePathPanel.saved.duplicate') }}</button>
+          <button type="button" class="mini-btn" @click="create">{{ t('palettePathPanel.saved.new') }}</button>
+          <button type="button" class="mini-btn danger" :disabled="!savedId" @click="removeSaved">{{ t('palettePathPanel.saved.delete') }}</button>
         </div>
-        <p class="panel-note">Sauvegarde locale sur ce navigateur : les parcours ne sont pas synchronisés avec le cloud. Chaque stop conserve une copie de sa palette.</p>
+        <p class="panel-note">{{ t('palettePathPanel.saved.note') }}</p>
         <p v-if="saveStatus" class="panel-note" role="status">{{ saveStatus }}</p>
       </DenseSection>
 
-      <DenseSection title="Textures et calcul" active initially-collapsed :hue="175" scope="Résolution des images du parcours"
+      <DenseSection :title="t('palettePathPanel.textures.title')" active initially-collapsed :hue="175" :scope="t('palettePathPanel.textures.scope')"
         icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><circle cx=&quot;9&quot; cy=&quot;10&quot; r=&quot;2&quot;/><path d=&quot;M21 15l-5-5-11 9&quot;/>'>
         <div class="fields">
-          <DenseSelect :model-value="draft.textureSize" label="Résolution maximale des images" :options="SIZE_OPTIONS" :default="1024" class="span2" @update:model-value="draft.textureSize = Number($event) as 512 | 1024 | 2048; publish()" />
+          <DenseSelect :model-value="draft.textureSize" :label="t('palettePathPanel.textures.maxSize')" :options="SIZE_OPTIONS" :default="1024" class="span2" @update:model-value="draft.textureSize = Number($event) as 512 | 1024 | 2048; publish()" />
         </div>
-        <p class="panel-note">Images partagées entre les stops, budget de 128 Mio. La fréquence orbitale et la géométrie des traps restent communes ; les matériaux et effets varient d’un stop à l’autre. L’ExpMap cuit toujours les cercles.</p>
+        <p class="panel-note">{{ t('palettePathPanel.textures.note') }}</p>
       </DenseSection>
     </fieldset>
     <p v-if="error" role="alert" class="panel-note error">{{ error }}</p>

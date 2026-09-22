@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { radialMode } from './radial'
 import { effectsSettings, type ExpmapEffects } from './effects'
 import { compareScales } from './decimal'
@@ -5,22 +6,22 @@ import type { ExpmapOctaves } from './octaves'
 import type { ExpmapPlan } from './plan'
 export type ExpmapSampleDistribution = 'grid' | 'r2'
 export function validateExpmapDistribution(value:ExpmapSampleDistribution='grid') {
-  if(value!=='grid'&&value!=='r2')throw new Error('Répartition AA ExpMap invalide.')
+  if(value!=='grid'&&value!=='r2')throw new Error(t('expmap.renderer.distribution'))
 }
 export type ExpmapCamera = { scale: string; angle: number }
 export type ExpmapView = ExpmapCamera & { width: number; height: number; maxSamples?: number; sampleDistribution?: ExpmapSampleDistribution; allowUpscale?: boolean; effects?: ExpmapEffects; effectTime?: number }
 export const EXPMAP_SAMPLE_LIMITS = [1,4,9,16,36,64,144,256] as const
 export function validateExpmapSamples(maxSamples: number) {
-  if (!(EXPMAP_SAMPLE_LIMITS as readonly number[]).includes(maxSamples)) throw new Error(`Prélèvements ExpMap : choisir ${EXPMAP_SAMPLE_LIMITS.join(', ')}.`)
+  if (!(EXPMAP_SAMPLE_LIMITS as readonly number[]).includes(maxSamples)) throw new Error(t('expmap.renderer.samples',{list:EXPMAP_SAMPLE_LIMITS.join(', ')}))
 }
 export function validateExpmapView(plan: ExpmapPlan, view: ExpmapView) {
-  if (view.effectTime !== undefined && !Number.isFinite(view.effectTime)) throw new Error('Temps des effets invalide.')
+  if (view.effectTime !== undefined && !Number.isFinite(view.effectTime)) throw new Error(t('expmap.renderer.effectTime'))
   validateExpmapDistribution(view.sampleDistribution)
   effectsSettings(view.effects)
   validateExpmapSamples(view.maxSamples ?? 1)
   if (![view.width, view.height].every(n => Number.isInteger(n) && n > 0) || view.width > (view.allowUpscale ? 3840 : plan.width) || view.height > (view.allowUpscale ? 2160 : plan.height)
-    || view.width / view.height > plan.width / plan.height + 1e-12) throw new Error('La sortie dépasse la résolution ou la couverture du document.')
-  if (!Number.isFinite(view.angle) || compareScales(view.scale, plan.domain.startScale) > 0 || (radialMode(view.effects) === 'normal' && compareScales(view.scale, plan.domain.endScale) < 0)) throw new Error('Vue hors du domaine utilisateur ExpMap.')
+    || view.width / view.height > plan.width / plan.height + 1e-12) throw new Error(t('expmap.renderer.outputExceeds'))
+  if (!Number.isFinite(view.angle) || compareScales(view.scale, plan.domain.startScale) > 0 || (radialMode(view.effects) === 'normal' && compareScales(view.scale, plan.domain.endScale) < 0)) throw new Error(t('expmap.renderer.viewOutOfDomain'))
 }
 
 

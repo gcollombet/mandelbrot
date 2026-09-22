@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { DenseSelect } from './dense'
 import { VIDEO_RESOLUTIONS, type ResolutionPreset } from './resolutionPresets'
-const props = withDefaults(defineProps<{ width: number; height: number; label?: string; presets?: ResolutionPreset[]; min?: number; max?: number; step?: number }>(), { label: 'Résolution', presets: () => VIDEO_RESOLUTIONS, min: 2, max: 3840, step: 2 })
+const { t } = useI18n()
+const props = withDefaults(defineProps<{ width: number; height: number; label?: string; presets?: ResolutionPreset[]; min?: number; max?: number; step?: number }>(), { label: undefined, presets: () => VIDEO_RESOLUTIONS, min: 2, max: 3840, step: 2 })
+const selectLabel = computed(() => props.label ?? t('videoControls.resolution.label'))
 const emit = defineEmits<{ 'update:width': [number]; 'update:height': [number] }>()
 const key = (w: number, h: number) => `${w}x${h}`
 const selected = computed({
@@ -10,8 +13,8 @@ const selected = computed({
   set: (value: string | number) => { const [w, h] = String(value).split('x').map(Number); if (Number.isFinite(w) && Number.isFinite(h)) { emit('update:width', w); emit('update:height', h) } },
 })
 const options = computed(() => {
-  const list = props.presets.map(p => ({ value: key(p.width, p.height), label: p.label }))
-  if (!list.some(o => o.value === selected.value)) list.push({ value: selected.value, label: `Personnalisée — ${props.width}×${props.height}` })
+  const list = props.presets.map(p => ({ value: key(p.width, p.height), label: p.labelKey ? t(p.labelKey, { width: p.width, height: p.height }) : p.label }))
+  if (!list.some(o => o.value === selected.value)) list.push({ value: selected.value, label: t('videoControls.resolution.custom', { width: props.width, height: props.height }) })
   return list
 })
 function clamp(raw: string) {
@@ -23,12 +26,12 @@ function setHeight(e: Event) { const v = clamp((e.target as HTMLInputElement).va
 </script>
 <template>
   <div class="resolution">
-    <DenseSelect v-model="selected" :label="label" :options="options"/>
-    <details class="custom"><summary>Dimensions exactes</summary>
+    <DenseSelect v-model="selected" :label="selectLabel" :options="options"/>
+    <details class="custom"><summary>{{ t('videoControls.resolution.exactDimensions') }}</summary>
       <div class="dims">
-        <label>Largeur <input type="number" inputmode="numeric" :value="width" :min="min" :max="max" :step="step" @change="setWidth"></label>
+        <label>{{ t('videoControls.resolution.width') }} <input type="number" inputmode="numeric" :value="width" :min="min" :max="max" :step="step" @change="setWidth"></label>
         <span aria-hidden="true">×</span>
-        <label>Hauteur <input type="number" inputmode="numeric" :value="height" :min="min" :max="max" :step="step" @change="setHeight"></label>
+        <label>{{ t('videoControls.resolution.height') }} <input type="number" inputmode="numeric" :value="height" :min="min" :max="max" :step="step" @change="setHeight"></label>
       </div>
     </details>
   </div>

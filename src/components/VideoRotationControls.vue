@@ -1,7 +1,9 @@
 <script setup lang="ts">
 import { computed, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { DenseField, DenseSection } from './dense'
 import { compactNumber } from '../expmap/controls'
+const { t } = useI18n()
 const props=defineProps<{fromAngle:number;toAngle:number;currentAngle?:number;captureLabel?:string;fixedOnly?:boolean}>()
 const emit=defineEmits<{change:[value:{fromAngle:number;toAngle:number}]}>()
 const direction=ref(1)
@@ -13,11 +15,11 @@ function count(value:number){emit('change',{fromAngle:props.fromAngle,toAngle:pr
 function orient(value:number){direction.value=value;count(turns.value)}
 </script>
 <template>
-  <DenseSection title="Rotation">
-    <DenseField :model-value="degrees(fromAngle)" label="Angle de départ" unit="°" :f="compactNumber" :min="0" :max="360" :step="1" :default="0" @update:model-value="angle"/>
-    <div class="rotation-row"><button :disabled="currentAngle === undefined" @click="angle(currentAngle! * 180 / Math.PI)">{{ captureLabel ?? 'Angle actuel' }}</button><button v-if="!fixedOnly" :aria-pressed="direction===1" @click="orient(1)">↻ Horaire</button><button v-if="!fixedOnly" :aria-pressed="direction===-1" @click="orient(-1)">↺ Antihoraire</button></div>
-    <DenseField v-if="!fixedOnly" :model-value="turns" label="Nombre de tours" :f="v=>v.toLocaleString('fr-FR',{maximumFractionDigits:2})" :min="0" :max="1000" :step=".25" :default="0" @update:model-value="count"/>
-    <div v-if="!fixedOnly" class="rotation-row"><button v-for="(n,i) in [0,.25,.5,1,2]" :key="n" @click="count(n)">{{ ['0','¼','½','1','2'][i] }}</button><small>Arrivée : {{ compactNumber(degrees(toAngle)) }}°</small></div>
+  <DenseSection :title="t('videoControls.rotation.title')">
+    <DenseField :model-value="degrees(fromAngle)" :label="t('videoControls.rotation.startAngle')" unit="°" :f="compactNumber" :min="0" :max="360" :step="1" :default="0" @update:model-value="angle"/>
+    <div class="rotation-row"><button :disabled="currentAngle === undefined" @click="angle(currentAngle! * 180 / Math.PI)">{{ captureLabel ?? t('videoControls.rotation.currentAngle') }}</button><button v-if="!fixedOnly" :aria-pressed="direction===1" @click="orient(1)">{{ t('videoControls.rotation.clockwise') }}</button><button v-if="!fixedOnly" :aria-pressed="direction===-1" @click="orient(-1)">{{ t('videoControls.rotation.counterclockwise') }}</button></div>
+    <DenseField v-if="!fixedOnly" :model-value="turns" :label="t('videoControls.rotation.turns')" :f="v=>v.toLocaleString('fr-FR',{maximumFractionDigits:2})" :min="0" :max="1000" :step=".25" :default="0" @update:model-value="count"/>
+    <div v-if="!fixedOnly" class="rotation-row"><button v-for="(n,i) in [0,.25,.5,1,2]" :key="n" @click="count(n)">{{ ['0','¼','½','1','2'][i] }}</button><small>{{ t('videoControls.rotation.end', { angle: compactNumber(degrees(toAngle)) }) }}</small></div>
   </DenseSection>
 </template>
 <style scoped>

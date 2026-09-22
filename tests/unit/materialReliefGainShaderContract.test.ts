@@ -65,8 +65,12 @@ describe('material relief gain shader contract', () => {
   });
 
   it('exposes the renamed material control in the editor', () => {
-    expect(editor).toContain("reliefGain: 'Gain de relief'");
-    expect(editor).toContain('Profondeur relief globale');
-    expect(editor).not.toContain("directionalVolume: 'Volume directionnel'");
+    const fr = read('../../src/locales/fr/paletteEditor.json');
+    expect(editor).toContain('paletteEditor.labels.');
+    expect(read('../../src/effectFieldConfig.ts')).toContain('reliefGain:');
+    expect(fr).toContain('"reliefGain": "Gain de relief"');
+    expect(fr).toContain('Profondeur relief globale');
+    expect(fr).not.toContain('Volume directionnel');
+    expect(editor).not.toContain('directionalVolume');
   });
 });

@@ -2,6 +2,7 @@ import { readFileSync } from 'node:fs'
 import ts from 'typescript'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { estimateGpuWorkingSetBytes, fitSurfaceToGpuBudget, formatGpuBytes } from '../../src/gpuCompatibility'
+import { t } from '../../src/i18n'
 
 // Execute the production session/resize policy with an allocation stub, without
 // importing the browser engine's WASM, workers or WebGPU shaders into Node.
@@ -11,12 +12,12 @@ const end = source.indexOf('    /** Align a row stride', start)
 const compiled = ts.transpileModule(`class Session { ${source.slice(start, end)} }`, {
     compilerOptions: { target: ts.ScriptTarget.ES2022 },
 }).outputText
-const Session = new Function('Engine', 'estimateGpuWorkingSetBytes', 'formatGpuBytes', `${compiled}; return Session`)(
-    { workingTextureSideFor: (w: number, h: number) => Math.ceil(Math.hypot(w, h)) }, estimateGpuWorkingSetBytes, formatGpuBytes,
+const Session = new Function('Engine', 'estimateGpuWorkingSetBytes', 'formatGpuBytes', 't', `${compiled}; return Session`)(
+    { workingTextureSideFor: (w: number, h: number) => Math.ceil(Math.hypot(w, h)) }, estimateGpuWorkingSetBytes, formatGpuBytes, t,
 )
 const memoryStart = source.lastIndexOf('        const memoryOptions = {')
 const memoryEnd = source.indexOf('        this.canvas.width = this.width', memoryStart)
-const resizeMemory = new Function('fitSurfaceToGpuBudget', 'estimateGpuWorkingSetBytes', 'formatGpuBytes', 'widthCSS', 'heightCSS', source.slice(memoryStart, memoryEnd))
+const resizeMemory = new Function('fitSurfaceToGpuBudget', 'estimateGpuWorkingSetBytes', 'formatGpuBytes', 'widthCSS', 'heightCSS', 't', source.slice(memoryStart, memoryEnd))
 const settings = { outputWidth: 3840, outputHeight: 2160, supersample: 1, magnificationThreshold: 2, batchTargetFps: 1 }
 function engine() {
     return {
@@ -38,13 +39,13 @@ describe('video export memory policy', () => {
     })
     it('still refuses a texture exceeding the real device limit before allocation', async () => {
         const e = engine(); e.device.limits.maxTextureDimension2D = 4096
-        await expect(Session.prototype.beginVideoExportSession.call(e, settings)).rejects.toThrow('limite de cet appareil')
+        await expect(Session.prototype.beginVideoExportSession.call(e, settings)).rejects.toThrow("beyond this device's limit")
         expect(e.resize).not.toHaveBeenCalled()
     })
     it('reports actual GPU allocation failures and ends the session', async () => {
         const e = engine(); vi.spyOn(console, 'warn').mockImplementation(() => {})
         e.device.popErrorScope.mockResolvedValueOnce(null).mockResolvedValueOnce({ message: 'OOM' } as any)
-        await expect(Session.prototype.beginVideoExportSession.call(e, settings)).rejects.toThrow('mémoire GPU insuffisante')
+        await expect(Session.prototype.beginVideoExportSession.call(e, settings)).rejects.toThrow('insufficient GPU memory')
         expect(e.endVideoExportSession).toHaveBeenCalledOnce()
     })
     it('keeps export dimensions but still reduces the interactive surface', () => {

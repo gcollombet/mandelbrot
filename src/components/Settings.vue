@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {computed, nextTick, onMounted, onUnmounted, ref, toRaw, watch} from 'vue';
 import {useRouter} from 'vue-router';
+import {useI18n} from 'vue-i18n';
 import type {ApproximationMode, InterpolationMode, MandelbrotParams} from "../Mandelbrot.ts";
 import {kernelApproximationMode} from '../Engine.ts';
 import {
@@ -134,6 +135,8 @@ const props = defineProps<{
 }>();
 
 const router = useRouter();
+const { t, locale } = useI18n();
+const textureVariableOptions = computed(() => TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: t(`settings.textureVariables.${o.value}`), value: o.value })));
 const settingsRoot = ref<HTMLElement | null>(null);
 watch(() => props.primary, async () => {
   await nextTick();
@@ -179,9 +182,9 @@ function uploadButtonClasses(key: string, remote?: {publishedName?: string; last
 }
 
 function uploadButtonTitle(key: string, remote?: {publishedName?: string; lastUpdated?: string}): string {
-  if (isUploadSuccess(key)) return 'Uploaded successfully';
-  if (remote) return 'Already in shared catalog. Upload again to update.';
-  return 'Upload to shared catalog';
+  if (isUploadSuccess(key)) return t('settings.upload.success');
+  if (remote) return t('settings.upload.alreadyShared');
+  return t('settings.upload.upload');
 }
 
 function uploadButtonIcon(key: string): string {
@@ -291,19 +294,19 @@ function ensureActiveOrbitTrap() {
 
 ensureActiveOrbitTrap();
 
-const orbitTrapModeOptions = [
-  { label: 'Désactivé', value: 'off' },
-  { label: 'Terminal · Rosace', value: 'terminal' },
-  { label: 'Orbite · Échantillonné', value: 'sampled' },
-  { label: 'Orbite · Exact', value: 'exact' },
-];
+const orbitTrapModeOptions = computed(() => [
+  { label: t('settings.palettes.orbitTrap.modeOff'), value: 'off' },
+  { label: t('settings.palettes.orbitTrap.modeTerminal'), value: 'terminal' },
+  { label: t('settings.palettes.orbitTrap.modeSampled'), value: 'sampled' },
+  { label: t('settings.palettes.orbitTrap.modeExact'), value: 'exact' },
+]);
 
-const iterationPaletteCurveOptions: {label: string; value: IterationPaletteCurve}[] = [
-  { label: 'Linéaire', value: 'linear' },
-  { label: 'Racine douce', value: 'soft-root' },
-  { label: 'Logarithmique', value: 'logarithmic' },
-  { label: 'Quadratique', value: 'quadratic' },
-];
+const iterationPaletteCurveOptions = computed((): {label: string; value: IterationPaletteCurve}[] => [
+  { label: t('settings.palettes.curve.linear'), value: 'linear' },
+  { label: t('settings.palettes.curve.softRoot'), value: 'soft-root' },
+  { label: t('settings.palettes.curve.logarithmic'), value: 'logarithmic' },
+  { label: t('settings.palettes.curve.quadratic'), value: 'quadratic' },
+]);
 
 const orbitTrapConfig = computed(() => normalizeOrbitTrapFromLegacy(model.value));
 
@@ -522,7 +525,7 @@ const precisionBudgetFmt = (v: number) => `1e-${Math.round(v)}`;
 const RESOLUTION_PRESETS = [0.125, 0.25, 0.5, 0.75, 1, 1.5, 2] as const;
 const resolutionOptions = RESOLUTION_PRESETS.map(v => ({ label: 'DPR ×' + String(v), value: v }));
 const AA_SAMPLE_PRESETS = [1, 2, 4, 8, 16, 32, 64, 128, 256] as const;
-const aaSampleOptions = AA_SAMPLE_PRESETS.map(v => ({ label: v === 1 ? 'Off' : `${v}×`, value: v }));
+const aaSampleOptions = computed(() => AA_SAMPLE_PRESETS.map(v => ({ label: v === 1 ? t('common.off') : `${v}×`, value: v })));
 const ZOOM_THRESHOLD_PRESETS = [2, 4, 6, 8, 16, 32, 64] as const;
 const zoomThresholdOptions = ZOOM_THRESHOLD_PRESETS.map(v => ({ label: `×${v}`, value: v }));
 /** Nearest preset, so a saved free value (e.g. DPR 0.625) still selects an option. */
@@ -535,10 +538,10 @@ const iterationsFmt = (v: number) => '×' + Math.pow(10, v).toPrecision(3);
 const fpsFmt = (v: number) => v + ' fps';
 // The engine implements exact perturbation and affine BLA only; presets
 // carrying a retired mode (auto / pade / jet / mobius) run BLA.
-const calculationOptions = [
+const calculationOptions = computed(() => [
   { label: 'BLA', value: 'bla' },
-  { label: 'Sans sauts', value: 'perturbation' },
-];
+  { label: t('settings.performance.advanced.noSkips'), value: 'perturbation' },
+]);
 
 // ── Dense field formatters (Palettes) ────────────────────────────────
 const palettePeriodFmt = () => formatPalettePeriod(model.value.palettePeriod);
@@ -553,7 +556,7 @@ const yScaleFmt = () => '×' + normalizeTextureMappingFromLegacy(model.value).yS
 // Texture-mapping presets are shown as a simple select (no visual preview).
 const mappingSelectOptions = computed(() =>
   textureMappingPresets.value.map(p => ({
-    label: p.name + (p.builtIn ? ' (intégré)' : ''),
+    label: p.name + (p.builtIn ? t('settings.textures.mapping.builtInSuffix') : ''),
     value: p.name,
   })),
 );
@@ -843,11 +846,11 @@ function onPreviewDblClick(event: MouseEvent) {
 async function deletePresetById(id: number) {
   const meta = presets.value.find(p => p.id === id);
   if (!canDeleteCatalogEntry(userRole.value, meta?.remote)) {
-    window.alert('Shared catalog presets cannot be deleted locally.');
+    window.alert(t('settings.presets.sharedCannotDelete'));
     return;
   }
   const label = meta?.name || formatPresetDate(meta?.date ?? '');
-  if (!window.confirm(`Delete preset "${label}"? This cannot be undone.`)) return;
+  if (!window.confirm(t('settings.presets.deleteConfirm', { name: label }))) return;
   await deletePresetEntry(id);
   presetCache.delete(id);
   presets.value = await getAllPresetEntries();
@@ -878,8 +881,9 @@ function formatPresetDate(iso: string): string {
   if (!iso) return '';
   try {
     const d = new Date(iso);
-    return d.toLocaleDateString(undefined, { day: '2-digit', month: 'short', year: 'numeric' })
-      + ' ' + d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+    const loc = locale.value;
+    return d.toLocaleDateString(loc, { day: '2-digit', month: 'short', year: 'numeric' })
+      + ' ' + d.toLocaleTimeString(loc, { hour: '2-digit', minute: '2-digit' });
   } catch { return iso; }
 }
 
@@ -917,11 +921,11 @@ const shareSaving = ref(false);
 const shareMessage = ref('');
 const shareError = ref(false);
 const shareLabel = computed(() => {
-  if (shareBusy.value || shareSaving.value) return 'Synchronisation…';
-  if (sceneLink.origin.value?.remote && !sceneLink.dirty.value) return 'Copier le lien';
-  if (userRole.value === 'guest') return 'Se connecter pour partager';
-  if (!sceneLink.origin.value || sceneLink.locked.value) return 'Enregistrer et copier le lien';
-  return sceneLink.dirty.value ? 'Enregistrer et copier le lien' : 'Copier le lien';
+  if (shareBusy.value || shareSaving.value) return t('settings.presets.share.syncing');
+  if (sceneLink.origin.value?.remote && !sceneLink.dirty.value) return t('common.copyLink');
+  if (userRole.value === 'guest') return t('settings.presets.share.signInToShare');
+  if (!sceneLink.origin.value || sceneLink.locked.value) return t('settings.presets.share.saveAndCopyLink');
+  return sceneLink.dirty.value ? t('settings.presets.share.saveAndCopyLink') : t('common.copyLink');
 });
 
 async function copyPresetLink(id: number): Promise<void> {
@@ -933,14 +937,14 @@ async function copyPresetLink(id: number): Promise<void> {
     const query = await prepareSceneShare(id);
     const url = absolutePresetUrl(router.resolve({path: '/', query}).href, window.location.href);
     try { await navigator.clipboard.writeText(url); }
-    catch { window.prompt('Copiez le lien de la scène :', url); return; }
+    catch { window.prompt(t('settings.presets.share.copyPrompt'), url); return; }
     presetLinkCopied.value = true;
-    shareMessage.value = 'Lien copié — toute personne disposant du lien peut ouvrir cette scène.';
+    shareMessage.value = t('settings.presets.share.linkCopiedMessage');
     if (presetLinkCopiedTimer) clearTimeout(presetLinkCopiedTimer);
     presetLinkCopiedTimer = setTimeout(() => { presetLinkCopied.value = false; }, 2500);
   } catch (error) {
     shareError.value = true;
-    shareMessage.value = error instanceof Error ? error.message : 'Impossible de partager la scène.';
+    shareMessage.value = error instanceof Error ? error.message : t('settings.presets.share.failed');
   } finally { shareBusy.value = false; }
 }
 
@@ -955,13 +959,13 @@ async function shareCurrentScene(): Promise<void> {
       return;
     }
     if (userRole.value === 'guest') {
-      if (!props.requestSignIn) throw new Error('Connectez-vous pour partager cette scène.');
+      if (!props.requestSignIn) throw new Error(t('settings.presets.share.signInRequired'));
       const pending = buildScenePresetValue();
       for (const [guidKey, nameKey] of [['textureGuid', 'textureName'], ['skyboxGuid', 'skyboxName']] as const) {
         const texture = textures.value.find(t => t.guid === pending[guidKey]);
         if (!texture || texture.remote || texture.guid?.startsWith('shared:')) continue;
         const blob = await getTextureBlob(texture.name);
-        if (!blob) throw new Error('Une texture de la scène est indisponible.');
+        if (!blob) throw new Error(t('settings.presets.share.textureUnavailable'));
         const alias = `shared:guest:${texture.guid}`;
         const name = `${texture.name} · partagé guest:${texture.guid}`;
         registerSharedTexture({...texture, guid: alias, name}, blob);
@@ -978,7 +982,7 @@ async function shareCurrentScene(): Promise<void> {
       id = Number(origin.key);
       if (sceneLink.dirty.value) {
         const record = await getPresetById(id);
-        if (!record) throw new Error('Ce preset n’existe plus.');
+        if (!record) throw new Error(t('settings.presets.share.presetGone'));
         await updatePresetEntry({...record, value: buildScenePresetValue(), thumbnail: await sceneThumbnail(), lastUpdated: new Date().toISOString()});
         presetCache.delete(id);
         sceneLink.refresh();
@@ -991,12 +995,12 @@ async function shareCurrentScene(): Promise<void> {
     presets.value = await getAllPresetEntries();
   } catch (error) {
     shareError.value = true;
-    shareMessage.value = error instanceof Error ? error.message : 'Impossible de partager la scène.';
+    shareMessage.value = error instanceof Error ? error.message : t('settings.presets.share.failed');
   } finally { shareSaving.value = false; }
 }
 
 async function renameSceneCard(preset: PresetMetadata) {
-  const name = window.prompt('Nom de la scène :', preset.name);
+  const name = window.prompt(t('settings.presets.renamePrompt'), preset.name);
   try { if (name?.trim()) await renameLinkedScenePresetById(preset.id, name.trim()); }
   catch (error) { shareError.value = true; shareMessage.value = error instanceof Error ? error.message : String(error); }
 }
@@ -1004,7 +1008,7 @@ async function duplicateSceneCard(preset: PresetMetadata) {
   try {
     const record = await getPresetById(preset.id);
     if (!record) return;
-    await savePresetEntry(record.value, record.thumbnail, `${record.name} · copie`);
+    await savePresetEntry(record.value, record.thumbnail, t('settings.copyName', { name: record.name }));
     presets.value = await getAllPresetEntries();
   } catch (error) { shareError.value = true; shareMessage.value = String(error); }
 }
@@ -1168,7 +1172,7 @@ function detachScenePreset(): void {
 async function saveScenePresetVariant(): Promise<void> {
   const origin = sceneLink.origin.value;
   if (!origin) return;
-  presetName.value = presetName.value.trim() || `${origin.name} · variante`;
+  presetName.value = presetName.value.trim() || t('settings.variantName', { name: origin.name });
   await savePreset();
 }
 
@@ -1190,7 +1194,7 @@ async function savePreset() {
   selectedPreset.value = id;
   presetName.value = metadata?.name ?? name;
   linkScenePreset(id, metadata?.name ?? (name || now), metadata?.remote);
-  shareMessage.value = 'Scène enregistrée. Vous pouvez maintenant partager son lien.';
+  shareMessage.value = t('settings.presets.share.sceneSaved');
   shareError.value = false;
 }
 
@@ -1308,7 +1312,7 @@ async function savePalette() {
   if (!paletteName.value.trim()) return;
   const existingPalette = palettes.value.find(item => item.name === paletteName.value.trim());
   if (!canOverwriteCatalogPayload(userRole.value, existingPalette?.remote)) {
-    window.alert('Shared catalog palettes cannot be overwritten. Save a local variant with a new name.');
+    window.alert(t('settings.palettes.sharedCannotOverwrite'));
     return;
   }
   let thumbnail: string | undefined = undefined;
@@ -1392,7 +1396,7 @@ function paletteThumbnail(): string | undefined {
 // ── Linked palette (library palette, or the palette part of a scene preset) ──
 const paletteLink = useLinkedRecord('palette', () => buildPaletteFields());
 const paletteLinkBusy = ref(false);
-const paletteLinkKind = computed(() => paletteLink.origin.value?.kind === 'scenePalette' ? 'Palette de la scène' : 'Palette');
+const paletteLinkKind = computed(() => paletteLink.origin.value?.kind === 'scenePalette' ? t('settings.palettes.scenePaletteKind') : t('settings.palettes.paletteKind'));
 
 async function updateLinkedPalette(): Promise<void> {
   const origin = paletteLink.origin.value;
@@ -1460,7 +1464,7 @@ function detachPalette(): void {
 async function savePaletteVariant(): Promise<void> {
   const origin = paletteLink.origin.value;
   if (!origin) return;
-  paletteName.value = `${origin.name} · variante`;
+  paletteName.value = t('settings.variantName', { name: origin.name });
   await savePalette();
 }
 
@@ -1564,10 +1568,10 @@ async function deletePaletteByName(name: string) {
   const palette = palettes.value.find(item => item.name === name);
   if (!palette) return;
   if (!canDeleteCatalogEntry(userRole.value, palette.remote)) {
-    window.alert('Shared catalog palettes cannot be deleted locally.');
+    window.alert(t('settings.palettes.sharedCannotDelete'));
     return;
   }
-  if (!window.confirm(`Delete palette "${name}"? This cannot be undone.`)) return;
+  if (!window.confirm(t('settings.palettes.deleteConfirm', { name }))) return;
   await deletePaletteEntry(name);
   palettes.value = await getAllPaletteEntries();
   if (paletteLink.origin.value?.key === (palette.guid ?? palette.name)) paletteLink.unlink();
@@ -1614,11 +1618,11 @@ async function togglePaletteFavorite(name: string): Promise<void> {
 
 function handleUploadError(error: unknown) {
   if (error instanceof RemoteCatalogNameConflictError) {
-    window.alert(`A remote ${error.type} named "${error.conflictName}" already exists. Rename this item before uploading.`);
+    window.alert(t('settings.upload.nameConflict', { type: error.type, name: error.conflictName }));
     return;
   }
   console.warn('Remote catalog upload failed:', error);
-  window.alert('Remote catalog upload failed. Check the console for details.');
+  window.alert(t('settings.upload.failed'));
 }
 
 async function uploadCompletePreset(id: number): Promise<void> {
@@ -1978,7 +1982,7 @@ async function importPresets(event: Event) {
     budget = await createActivePresetImportBudget();
   } catch (error) {
     console.warn('[Settings] Unable to verify personal preset quota before import.', error);
-    window.alert('Unable to verify the personal preset quota. Check the Firebase Functions deployment and try again.');
+    window.alert(t('settings.presets.import.quotaCheckFailed'));
     input.value = '';
     return;
   }
@@ -2067,24 +2071,26 @@ async function importPresets(event: Event) {
   }
 
   const summary: string[] = [];
-  if (importedCount > 0) summary.push(`${importedCount} preset${importedCount === 1 ? '' : 's'} imported.`);
-  if (duplicateCount > 0) summary.push(`${duplicateCount} exact duplicate${duplicateCount === 1 ? '' : 's'} skipped.`);
+  if (importedCount > 0) summary.push(t('settings.presets.import.imported', { count: importedCount }, importedCount));
+  if (duplicateCount > 0) summary.push(t('settings.presets.import.duplicatesSkipped', { count: duplicateCount }, duplicateCount));
   if (failedCount > 0) {
-    summary.push(`${failedCount} entr${failedCount === 1 ? 'y' : 'ies'} failed${firstFailure ? `: ${firstFailure}` : '.'}`);
+    summary.push(firstFailure
+      ? t('settings.presets.import.failedWithReason', { count: failedCount, reason: firstFailure }, failedCount)
+      : t('settings.presets.import.failed', { count: failedCount }, failedCount));
   }
   if (quotaReached) {
-    summary.push(`The account has reached its ${PERSONAL_PRESET_LIMIT}-preset limit.`);
+    summary.push(t('settings.presets.import.quotaReached', { limit: PERSONAL_PRESET_LIMIT }));
   }
   if (showOnlyFavoritePresets.value && presets.value.length > visiblePresets.value.length) {
-    summary.push(`Favorites filter active: ${visiblePresets.value.length} of ${presets.value.length} presets are visible.`);
+    summary.push(t('settings.presets.import.favoritesFilterActive', { visible: visiblePresets.value.length, total: presets.value.length }));
   }
 
   if (summary.length > 0) {
     window.alert(summary.join('\n'));
   } else if (validCount === 0) {
-    window.alert('Invalid file format.');
+    window.alert(t('settings.presets.import.invalidFileFormat'));
   } else {
-    window.alert('No preset was imported.');
+    window.alert(t('settings.presets.import.noPresetImported'));
   }
 
   // Reset pour pouvoir réimporter les mêmes fichiers
@@ -2157,9 +2163,9 @@ async function importPalettes(event: Event) {
   if (importedCount > 0) {
     palettes.value = await getAllPaletteEntries();
   } else if (hadValid) {
-    window.alert('All palettes were already imported (same name + date).');
+    window.alert(t('settings.palettes.allAlreadyImported'));
   } else {
-    window.alert('Invalid file format.');
+    window.alert(t('settings.palettes.invalidFileFormat'));
   }
 
   input.value = '';
@@ -2402,7 +2408,7 @@ function detachMapping(): void {
 async function saveMappingVariant(): Promise<void> {
   const origin = mappingLink.origin.value;
   if (!origin) return;
-  textureMappingPresetName.value = `${origin.name} · variante`;
+  textureMappingPresetName.value = t('settings.variantName', { name: origin.name });
   await saveTextureMappingPreset();
 }
 
@@ -2411,7 +2417,7 @@ async function saveTextureMappingPreset() {
   if (!name) return;
   const existing = textureMappingPresets.value.find(item => item.name === name && !item.builtIn);
   if (!canOverwriteCatalogPayload(userRole.value, existing?.remote)) {
-    window.alert('Shared catalog texture mappings cannot be overwritten. Save a local variant with a new name.');
+    window.alert(t('settings.textures.mapping.sharedCannotOverwrite'));
     return;
   }
   const now = new Date().toISOString();
@@ -2434,10 +2440,10 @@ async function saveTextureMappingPreset() {
 async function deleteTextureMappingPreset(preset: TextureMappingPresetRecord): Promise<void> {
   if (preset.builtIn) return;
   if (!canDeleteCatalogEntry(userRole.value, preset.remote)) {
-    window.alert('Shared catalog texture mappings cannot be deleted locally.');
+    window.alert(t('settings.textures.mapping.sharedCannotDelete'));
     return;
   }
-  if (!window.confirm(`Delete texture mapping "${preset.name}"? This cannot be undone.`)) return;
+  if (!window.confirm(t('settings.textures.mapping.deleteConfirm', { name: preset.name }))) return;
   await deleteTextureMappingPresetEntry(preset.name);
   textureMappingPresets.value = await getAllTextureMappingPresetEntries();
   if (selectedTextureMappingPreset.value === preset.name) {
@@ -2605,15 +2611,15 @@ function selectTextureFromDropdown(tex: TextureMetadata) {
 
 async function deleteTextureByName(name: string) {
   if (BUILT_IN_TEXTURE_NAMES.has(name)) {
-    window.alert('Built-in textures cannot be deleted.');
+    window.alert(t('settings.textures.builtInCannotDelete'));
     return;
   }
   const texture = textures.value.find(item => item.name === name);
   if (!canDeleteCatalogEntry(userRole.value, texture?.remote)) {
-    window.alert('Shared catalog textures cannot be deleted locally.');
+    window.alert(t('settings.textures.sharedCannotDelete'));
     return;
   }
-  if (!window.confirm(`Delete texture "${name}"? This cannot be undone.`)) return;
+  if (!window.confirm(t('settings.textures.deleteConfirm', { name }))) return;
   await deleteTextureEntry(name);
   textures.value = await ensureTextureLibrary();
   if (selectedTexture.value === name) await selectTexture('Gold');
@@ -2649,14 +2655,14 @@ async function deleteTexture() {
   if (!name) return;
   const texture = textures.value.find(item => item.name === name);
   if (!canDeleteCatalogEntry(userRole.value, texture?.remote)) {
-    window.alert('Shared catalog textures cannot be deleted locally.');
+    window.alert(t('settings.textures.sharedCannotDelete'));
     return;
   }
   if (BUILT_IN_TEXTURE_NAMES.has(name)) {
-    window.alert('Built-in textures cannot be deleted.');
+    window.alert(t('settings.textures.builtInCannotDelete'));
     return;
   }
-   if (window.confirm(`Delete texture "${name}"? This cannot be undone.`)) {
+   if (window.confirm(t('settings.textures.deleteConfirm', { name }))) {
     const idx = textures.value.findIndex(t => t.name === name);
     if (idx >= 0) {
       textures.value.splice(idx, 1);
@@ -2674,14 +2680,14 @@ async function deleteSkyboxTexture() {
   if (!name) return;
   const texture = textures.value.find(item => item.name === name);
   if (!canDeleteCatalogEntry(userRole.value, texture?.remote)) {
-    window.alert('Shared catalog textures cannot be deleted locally.');
+    window.alert(t('settings.textures.sharedCannotDelete'));
     return;
   }
   if (BUILT_IN_TEXTURE_NAMES.has(name)) {
-    window.alert('Built-in textures cannot be deleted.');
+    window.alert(t('settings.textures.builtInCannotDelete'));
     return;
   }
-  if (window.confirm(`Delete skybox texture "${name}"? This cannot be undone.`)) {
+  if (window.confirm(t('settings.textures.deleteSkyboxConfirm', { name }))) {
     const idx = textures.value.findIndex(t => t.name === name);
     if (idx >= 0) {
       textures.value.splice(idx, 1);
@@ -2711,14 +2717,14 @@ async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
   if (!file) return;
   // Validate file type
   if (!file.type.startsWith('image/')) {
-    window.alert('Please select an image file (JPG, PNG, WebP, etc.).');
+    window.alert(t('settings.textures.selectImageFile'));
     input.value = '';
     return;
   }
   try {
     const normalized = await normalizeTextureBlob(file);
     // Use filename (without extension) as default name
-    const baseName = file.name.replace(/\.[^/.]+$/, '') || 'Texture';
+    const baseName = file.name.replace(/\.[^/.]+$/, '') || t('settings.textures.defaultName');
     let name = baseName;
     let counter = 1;
     while (textures.value.some(t => t.name === name)) {
@@ -2752,7 +2758,7 @@ async function importTextureFor(event: Event, target: 'tile' | 'skybox') {
     input.value = '';
   } catch (error) {
     console.warn('Failed to normalize imported texture:', error);
-    window.alert(`Failed to process image. Please choose a supported image that can be converted to WebP at ${MAX_IMPORTED_TEXTURE_SIDE}px maximum.`);
+    window.alert(t('settings.textures.processFailed', { max: MAX_IMPORTED_TEXTURE_SIDE }));
     input.value = '';
   }
 }
@@ -2824,7 +2830,7 @@ async function startVideoExport(payload: {
     try {
       const handle = await picker({
         suggestedName,
-        types: [{description: 'Vidéo MP4', accept: {'video/mp4': ['.mp4']}}],
+        types: [{description: t('settings.video.mp4Description'), accept: {'video/mp4': ['.mp4']}}],
       });
       writable = await handle.createWritable();
     } catch (error) {
@@ -2895,8 +2901,8 @@ async function startVideoExport(payload: {
 
       <!-- ============ 3. LOCATIONS LIBRARY ============ -->
       <DenseSection
-        title="Choisir un lieu…" initially-collapsed
-        scope="Applique Cx, Cy, zoom & angle"
+        :title="t('settings.navigation.library.title')" initially-collapsed
+        :scope="t('settings.navigation.library.scope')"
         icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
       >
 
@@ -2909,13 +2915,13 @@ async function startVideoExport(payload: {
           @click="showOnlyFavoriteNavigation = !showOnlyFavoriteNavigation"
         >
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-          Favoris
+          {{ t('common.favorites') }}
         </button>
         <div class="dropdown cv-dropdown" :class="{ 'is-active': showNavPresetDropdown }">
           <div class="dropdown-trigger">
             <button class="cv-select-trigger" @click="showNavPresetDropdown = !showNavPresetDropdown" aria-haspopup="true" aria-controls="dropdown-menu-nav-presets" type="button">
-              <img v-if="currentNavPresetThumbnail" :src="currentNavPresetThumbnail" alt="thumbnail" class="cv-trigger-thumb" />
-              <span class="cv-trigger-label">{{ currentNavPresetMeta?.name || (selectedNavPreset ? formatPresetDate(currentNavPresetMeta?.date ?? '') : 'Choose a preset…') }}</span>
+              <img v-if="currentNavPresetThumbnail" :src="currentNavPresetThumbnail" :alt="t('settings.thumbnailAlt')" class="cv-trigger-thumb" />
+              <span class="cv-trigger-label">{{ currentNavPresetMeta?.name || (selectedNavPreset ? formatPresetDate(currentNavPresetMeta?.date ?? '') : t('settings.navigation.choosePreset')) }}</span>
               <span class="cv-caret"></span>
             </button>
           </div>
@@ -2940,13 +2946,13 @@ async function startVideoExport(payload: {
                   class="favorite-button"
                   :class="{ 'is-favorite': preset.favorite }"
                   type="button"
-                  :title="preset.favorite ? 'Remove from favorites' : 'Add to favorites'"
+                  :title="preset.favorite ? t('common.removeFromFavorites') : t('common.addToFavorites')"
                   :aria-pressed="!!preset.favorite"
                   @click.stop.prevent="togglePresetFavorite(preset.id)"
                 >
                   <span class="favorite-heart" aria-hidden="true"><i class="fa-heart" :class="preset.favorite ? 'fa-solid' : 'fa-regular'"></i></span>
                 </button>
-                <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail"
+                <img v-if="preset.thumbnail" :src="preset.thumbnail" :alt="t('settings.thumbnailAlt')"
                   style="height:63px; width:112px; object-fit:cover; border-radius:4px; background:#aaa; flex-shrink:0; box-shadow:0 1px 6px rgba(0,0,0,0.16);"/>
                 <div style="flex:1; min-width:0; display:flex; flex-direction:column; gap:0.15em;">
                   <span v-if="preset.name" style="white-space:nowrap; overflow:hidden; text-overflow:ellipsis; font-size:1.05em; font-weight:500;">{{ preset.name }}</span>
@@ -2964,42 +2970,42 @@ async function startVideoExport(payload: {
       <div class="nav-preset-actions">
         <button class="mini-btn primary load-btn" @click="selectedNavPreset && selectPresetLocation(selectedNavPreset)" :disabled="!selectedNavPreset">
           <svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>
-          Appliquer le lieu
+          {{ t('settings.navigation.applyLocation') }}
         </button>
         <button
           class="mini-btn preset-link-btn"
           :class="{ copied: presetLinkCopied }"
           type="button"
           :disabled="!currentNavPresetMeta || shareBusy"
-          title="Copier le lien de la scène enregistrée"
+          :title="t('settings.navigation.copySceneLinkTitle')"
           @click="currentNavPresetMeta && copyPresetLink(currentNavPresetMeta.id)"
         >
           <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
-          {{ presetLinkCopied ? 'Lien copié' : 'Copier le lien' }}
+          {{ presetLinkCopied ? t('common.linkCopied') : t('common.copyLink') }}
         </button>
       </div>
       <p v-if="shareMessage" role="status" :class="{ 'share-error': shareError }">{{ shareMessage }}</p>
-      <p class="load-note">Applies Cx, Cy, zoom &amp; angle from the selected preset.</p>
+      <p class="load-note">{{ t('settings.navigation.loadNote') }}</p>
 
       <div v-if="isAdmin" class="transfer">
-        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Importer</button>
-        <button class="mini-btn" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Exporter la sélection</button>
-        <button class="mini-btn" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Exporter les favoris</button>
+        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>{{ t('common.import') }}</button>
+        <button class="mini-btn" @click="exportSelectedNavigationPreset" :disabled="!selectedNavPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>{{ t('settings.exportSelection') }}</button>
+        <button class="mini-btn" @click="exportFavoriteNavigationPresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>{{ t('settings.exportFavorites') }}</button>
       </div>
 
       </DenseSection>
 
       <!-- ============ 1. LOCATION ============ -->
       <DenseSection
-        title="Localisation"
-        scope="Position dans le plan complexe"
+        :title="t('settings.navigation.location.title')"
+        :scope="t('settings.navigation.location.scope')"
         icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;3.2&quot;/><path d=&quot;M12 2v3.5M12 18.5V22M2 12h3.5M18.5 12H22&quot;/><circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/>'
       >
         <div class="coord-head">
-          <span class="coord-title">Centre</span>
-          <button class="mini-btn coord-copy-all" :class="{ ok: coordsCopied }" type="button" title="Copier Cx, Cy" @click="copyCoordinates">
+          <span class="coord-title">{{ t('settings.navigation.center') }}</span>
+          <button class="mini-btn coord-copy-all" :class="{ ok: coordsCopied }" type="button" :title="t('settings.navigation.copyCxCy')" @click="copyCoordinates">
             <svg viewBox="0 0 24 24"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 012-2h10"/></svg>
-            {{ coordsCopied ? 'Copié' : 'Copier les deux' }}
+            {{ coordsCopied ? t('common.copied') : t('settings.navigation.copyBoth') }}
           </button>
         </div>
         <div class="coord-lines">
@@ -3011,70 +3017,70 @@ async function startVideoExport(payload: {
           <button
             class="mini-btn"
             :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
-            title="Detect the minibrot under the view and center on its nucleus (works at any depth)"
+            :title="t('settings.navigation.findMinibrotTitle')"
             @click="findMinibrot"
           >
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/></svg>
-            {{ findingMinibrot ? 'Recherche…' : 'Centrer minibrot' }}
+            {{ findingMinibrot ? t('settings.navigation.searching') : t('settings.navigation.findMinibrot') }}
           </button>
           <button
             class="mini-btn"
             :disabled="!props.engine || findingMinibrot || zoomingMinibrot"
-            title="Same detection, then frame the whole minibrot at the centre of the screen (~50 % of it)"
+            :title="t('settings.navigation.frameMinibrotTitle')"
             @click="zoomToMinibrot"
           >
             <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M21 21l-4.3-4.3"/><path d="M8 11h6M11 8v6"/></svg>
-            {{ zoomingMinibrot ? 'Cadrage…' : 'Cadrer minibrot' }}
+            {{ zoomingMinibrot ? t('settings.navigation.framing') : t('settings.navigation.frameMinibrot') }}
           </button>
           <span v-if="findMinibrotStatus" class="find-minibrot-status">{{ findMinibrotStatus }}</span>
         </div>
 
         <div class="mu-row">
           <DenseField
-            label="Décade" :min="-10" :max="1000" :step="1"
+            :label="t('settings.navigation.decade')" :min="-10" :max="1000" :step="1"
             :f="zoomFmt"
             :model-value="scaleSlider"
             @update:model-value="(v: number) => scaleSlider = v"
           />
-          <button class="mini-btn mu-quick" @click="stepDecade(-1)" title="Une décade en arrière (×10)">−</button>
-          <button class="mini-btn mu-quick" @click="scaleSlider = 0" title="Zoom initial (échelle 1)">1e0</button>
-          <button class="mini-btn mu-quick" @click="stepDecade(1)" title="Une décade en avant (÷10)">+</button>
+          <button class="mini-btn mu-quick" @click="stepDecade(-1)" :title="t('settings.navigation.decadeBack')">−</button>
+          <button class="mini-btn mu-quick" @click="scaleSlider = 0" :title="t('settings.navigation.initialZoom')">1e0</button>
+          <button class="mini-btn mu-quick" @click="stepDecade(1)" :title="t('settings.navigation.decadeForward')">+</button>
         </div>
         <div class="mu-row fine-zoom" @pointerup="onFineRelease" @pointercancel="onFineRelease">
           <DenseField
-            label="Fin" :min="0" :max="1" :step="0.001"
+            :label="t('settings.navigation.fine')" :min="0" :max="1" :step="0.001"
             :f="fineFmt"
             :model-value="fineSlider"
             @update:model-value="(v: number) => fineSlider = v"
           />
-          <span class="mini-btn mu-quick fine-decade" :title="`Décade 1e-${fineDecade} → 1e-${fineDecade + 1} ; relâcher en butée passe à la suivante`">→1e-{{ fineDecade + 1 }}</span>
+          <span class="mini-btn mu-quick fine-decade" :title="t('settings.navigation.fineDecadeTitle', { from: fineDecade, to: fineDecade + 1 })">→1e-{{ fineDecade + 1 }}</span>
         </div>
         <div class="coord-lines">
           <CoordinateField
-            label="Éch." :model-value="model.scale" :format="scaleSciFormat" :parse="parseScaleInput"
+            :label="t('settings.navigation.scale')" :model-value="model.scale" :format="scaleSciFormat" :parse="parseScaleInput"
             :suspend-shortcuts="props.suspendShortcuts"
             @update:model-value="(v: string) => model.scale = v"
           />
         </div>
         <div class="mu-row">
           <DenseField
-            label="Rotation" :min="0" :max="359" :step="1" :default="0"
+            :label="t('settings.navigation.rotation')" :min="0" :max="359" :step="1" :default="0"
             :f="angleFmt" unit="°"
             :model-value="angleSlider"
             @update:model-value="(v: number) => angleSlider = v"
           />
-          <button class="mini-btn mu-quick" @click="stepQuarterTurn(-1)" title="Quart de tour antihoraire">−90°</button>
-          <button class="mini-btn mu-quick" @click="model.angle = 0" title="Rotation nulle">0°</button>
-          <button class="mini-btn mu-quick" @click="stepQuarterTurn(1)" title="Quart de tour horaire">+90°</button>
+          <button class="mini-btn mu-quick" @click="stepQuarterTurn(-1)" :title="t('settings.navigation.quarterTurnCcw')">−90°</button>
+          <button class="mini-btn mu-quick" @click="model.angle = 0" :title="t('settings.navigation.zeroRotation')">0°</button>
+          <button class="mini-btn mu-quick" @click="stepQuarterTurn(1)" :title="t('settings.navigation.quarterTurnCw')">+90°</button>
         </div>
         <div class="mu-row">
           <DenseField
-            label="Bailout" :min="0.602" :max="5" :step="0.01" :default="MU_MIN_LOG10"
+            :label="t('settings.navigation.bailout')" :min="0.602" :max="5" :step="0.01" :default="MU_MIN_LOG10"
             :f="muFmt"
             :model-value="muSlider"
             @update:model-value="(v: number) => muSlider = v"
           />
-          <button class="mini-btn mu-quick" @click="model.mu = 4" title="Bailout = 4">4</button>
+          <button class="mini-btn mu-quick" @click="model.mu = 4" :title="t('settings.navigation.bailout4')">4</button>
         </div>
       </DenseSection>
 
@@ -3085,39 +3091,39 @@ async function startVideoExport(payload: {
 
       <div class="scene-share-row">
         <button type="button" class="mini-btn primary" :disabled="shareBusy || shareSaving || sceneLinkBusy" @click="shareCurrentScene">{{ shareLabel }}</button>
-        <p class="section-help">Les scènes synchronisées sont accessibles à toute personne disposant de leur lien.</p>
+        <p class="section-help">{{ t('settings.presets.shareHelp') }}</p>
         <p v-if="shareMessage" role="status" :class="{ 'share-error': shareError }">{{ shareMessage }}</p>
       </div>
       <!-- ============ 1. SAVE CURRENT VIEW ============ -->
       <DenseSection
-        title="Enregistrer la vue" initially-collapsed
-        scope="Capture lieu, palette et rendu"
+        :title="t('settings.presets.saveView.title')" initially-collapsed
+        :scope="t('settings.presets.saveView.scope')"
         icon='<path d=&quot;M5 3h12l4 4v14H5z&quot;/><path d=&quot;M9 3v5h7V3M8 21v-7h8v7&quot;/>'
       >
-      <DenseLinkedChip v-if="sceneLink.origin.value" kind="Scène" :name="sceneLink.origin.value.name" :dirty="sceneLink.dirty.value" :locked="sceneLink.locked.value" :busy="sceneLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+      <DenseLinkedChip v-if="sceneLink.origin.value" :kind="t('settings.presets.sceneKind')" :name="sceneLink.origin.value.name" :dirty="sceneLink.dirty.value" :locked="sceneLink.locked.value" :busy="sceneLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
         @update="updateLinkedScenePreset" @rename="renameLinkedScenePreset" @detach="detachScenePreset" @variant="saveScenePresetVariant" />
       <div class="save-row">
-        <input class="txt-in" v-model="presetName" type="text" :placeholder="sceneLink.origin.value ? 'Enregistrer une copie sous…' : 'Nom facultatif…'"
+        <input class="txt-in" v-model="presetName" type="text" :placeholder="sceneLink.origin.value ? t('settings.saveCopyAs') : t('settings.presets.optionalName')"
           @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
           @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
         />
         <button class="mini-btn primary" @click="savePreset">
           <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
-          Enregistrer
+          {{ t('common.save') }}
         </button>
       </div>
       </DenseSection>
 
       <!-- ============ 2. LIBRARY ============ -->
       <DenseSection
-        title="Bibliothèque"
-        scope="Cliquer pour appliquer"
+        :title="t('settings.presets.library.title')"
+        :scope="t('settings.presets.library.scope')"
         icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'
       >
 
       <div class="lib-bar">
-        <input class="txt-in gallery-search" v-model="presetQuery" type="search" aria-label="Rechercher un preset" placeholder="Rechercher…" />
-        <select class="txt-in" v-model="presetSort" aria-label="Trier les presets"><option value="recent">Récents</option><option value="name">Nom</option></select>
+        <input class="txt-in gallery-search" v-model="presetQuery" type="search" :aria-label="t('settings.presets.searchAria')" :placeholder="t('settings.presets.searchPlaceholder')" />
+        <select class="txt-in" v-model="presetSort" :aria-label="t('settings.presets.sortAria')"><option value="recent">{{ t('settings.presets.sortRecent') }}</option><option value="name">{{ t('settings.presets.sortName') }}</option></select>
         <button
           class="fav-filter"
           :class="{ on: showOnlyFavoritePresets }"
@@ -3126,11 +3132,11 @@ async function startVideoExport(payload: {
           @click="showOnlyFavoritePresets = !showOnlyFavoritePresets"
         >
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-          Favoris
+          {{ t('common.favorites') }}
         </button>
         <span class="count">
           {{ visiblePresets.length }}<template v-if="showOnlyFavoritePresets"> / {{ presets.length }}</template>
-          preset{{ visiblePresets.length === 1 && !showOnlyFavoritePresets ? '' : 's' }}
+          {{ t('settings.presets.presetUnit', visiblePresets.length === 1 && !showOnlyFavoritePresets ? 1 : 2) }}
         </span>
       </div>
 
@@ -3142,19 +3148,19 @@ async function startVideoExport(payload: {
           :class="{ sel: selectedPreset === preset.id }"
           @click="selectPresetFromDropdown(preset)"
         >
-          <span class="sel-badge">Appliqué</span>
-          <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail" class="thumb" />
+          <span class="sel-badge">{{ t('settings.applied') }}</span>
+          <img v-if="preset.thumbnail" :src="preset.thumbnail" :alt="t('settings.thumbnailAlt')" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
           <div class="info"><PresetActionsMenu :label="preset.name">
-              <button type="button" :disabled="shareBusy" @click="copyPresetLink(preset.id)">Copier le lien</button>
-              <button type="button" @click="togglePresetFavorite(preset.id)">{{ preset.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
-              <button v-if="canOverwriteCatalogPayload(userRole, preset.remote)" type="button" @click="renameSceneCard(preset)">Renommer…</button>
-              <button type="button" @click="duplicateSceneCard(preset)">Dupliquer</button>
-              <button v-if="isAdmin" type="button" @click="exportPresetById(preset.id)">Exporter…</button>
-              <button v-if="isAdmin" type="button" @click="uploadCompletePreset(preset.id)">{{ isUploadSuccess(uploadSuccessKey('preset', preset.id)) ? 'Catalogue mis à jour' : 'Publier dans le catalogue' }}</button>
-              <button v-if="canDeleteCatalogEntry(userRole, preset.remote)" type="button" class="danger" @click="deletePresetById(preset.id)">Supprimer…</button>
+              <button type="button" :disabled="shareBusy" @click="copyPresetLink(preset.id)">{{ t('common.copyLink') }}</button>
+              <button type="button" @click="togglePresetFavorite(preset.id)">{{ preset.favorite ? t('common.removeFromFavorites') : t('common.addToFavorites') }}</button>
+              <button v-if="canOverwriteCatalogPayload(userRole, preset.remote)" type="button" @click="renameSceneCard(preset)">{{ t('settings.renameEllipsis') }}</button>
+              <button type="button" @click="duplicateSceneCard(preset)">{{ t('common.duplicate') }}</button>
+              <button v-if="isAdmin" type="button" @click="exportPresetById(preset.id)">{{ t('settings.exportEllipsis') }}</button>
+              <button v-if="isAdmin" type="button" @click="uploadCompletePreset(preset.id)">{{ isUploadSuccess(uploadSuccessKey('preset', preset.id)) ? t('settings.catalogUpdated') : t('settings.publishToCatalog') }}</button>
+              <button v-if="canDeleteCatalogEntry(userRole, preset.remote)" type="button" class="danger" @click="deletePresetById(preset.id)">{{ t('settings.deleteEllipsis') }}</button>
             </PresetActionsMenu>
-            <span v-if="preset.favorite" class="favorite-marker" aria-label="Favori">♥</span>
+            <span v-if="preset.favorite" class="favorite-marker" :aria-label="t('settings.favoriteMarker')">♥</span>
             <div v-if="displayName(preset.name)" class="nm">{{ displayName(preset.name) }}</div>
             <div class="sub">
               <span>{{ formatPresetDate(preset.date) }}</span>
@@ -3163,7 +3169,7 @@ async function startVideoExport(payload: {
           </div>
         </div>
         <div v-if="visiblePresets.length === 0" class="empty">
-          {{ showOnlyFavoritePresets ? 'Aucun favori — utilisez le menu ⋯ d’une scène.' : 'Aucune scène enregistrée.' }}
+          {{ showOnlyFavoritePresets ? t('settings.presets.emptyFavorites') : t('settings.presets.emptyScenes') }}
         </div>
       </div>
 
@@ -3172,15 +3178,15 @@ async function startVideoExport(payload: {
       <!-- ============ 3. TRANSFER ============ -->
       <DenseSection
         v-if="isAdmin"
-        title="Transfert" initially-collapsed
-        scope="Import / export"
+        :title="t('settings.transfer.title')" initially-collapsed
+        :scope="t('settings.transfer.scope')"
         icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'
       >
       <div class="transfer">
-        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Importer</button>
-        <button class="mini-btn" @click="exportPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Tout exporter</button>
-        <button class="mini-btn" @click="exportSelectedPreset" :disabled="!selectedPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Exporter la sélection</button>
-        <button class="mini-btn" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Exporter les favoris</button>
+        <button class="mini-btn primary" @click="triggerImportPresets"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>{{ t('common.import') }}</button>
+        <button class="mini-btn" @click="exportPresets" :disabled="presets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>{{ t('settings.exportAll') }}</button>
+        <button class="mini-btn" @click="exportSelectedPreset" :disabled="!selectedPreset"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>{{ t('settings.exportSelection') }}</button>
+        <button class="mini-btn" @click="exportFavoritePresets" :disabled="favoritePresets.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>{{ t('settings.exportFavorites') }}</button>
         <input ref="presetFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPresets" />
       </div>
       </DenseSection>
@@ -3230,62 +3236,62 @@ async function startVideoExport(payload: {
       <div class="palette-strip-zone">
       <div class="top-bar palette-strip-bar mb-2 mt-2">
         <!-- Stop edit scope: apply edits to just the selected stop, or to all stops -->
-        <select class="scope-select txt-in" aria-label="Portée des modifications" :value="applyToAll ? 'all' : 'point'" @change="applyToAll = ($event.target as HTMLSelectElement).value === 'all'">
-          <option value="point">Ce point</option><option value="all">Tous les points</option>
+        <select class="scope-select txt-in" :aria-label="t('settings.palettes.scopeAria')" :value="applyToAll ? 'all' : 'point'" @change="applyToAll = ($event.target as HTMLSelectElement).value === 'all'">
+          <option value="point">{{ t('settings.palettes.scopePoint') }}</option><option value="all">{{ t('settings.palettes.scopeAll') }}</option>
         </select>
         <div class="color-picker-row">
           <button
             class="pipette-btn"
             :class="{ 'is-active': props.pickerMode && props.pickerAction !== 'select' }"
-            :title="props.pickerMode ? 'Exit pipette mode (Escape)' : 'Pipette: click on the fractal'"
+            :title="props.pickerMode ? t('settings.palettes.pipetteExit') : t('settings.palettes.pipetteAdd')"
             @click="emit('toggle-picker')"
           >
             <i class="fa-solid fa-eye-dropper fa-fw"></i>
           </button>
           <button class="pipette-btn" :class="{ 'is-active': props.pickerMode && props.pickerAction === 'select' }"
-            title="Pipette : sélectionner le stop le plus proche" aria-label="Sélectionner le stop le plus proche"
+            :title="t('settings.palettes.pipetteSelectTitle')" :aria-label="t('settings.palettes.pipetteSelectAria')"
             :aria-pressed="props.pickerMode && props.pickerAction === 'select'" @click="emit('toggle-picker', 'select')">
             <i class="fa-solid fa-arrow-pointer fa-fw"></i>
           </button>
-          <span v-if="props.pickerMode" class="picker-hint">{{ props.pickerAction === 'select' ? 'Sélectionner un stop : cliquez sur la fractale…' : 'Ajouter un stop : cliquez sur la fractale…' }}</span>
+          <span v-if="props.pickerMode" class="picker-hint">{{ props.pickerAction === 'select' ? t('settings.palettes.hintSelect') : t('settings.palettes.hintAdd') }}</span>
         </div>
-        <details class="palette-transform"><summary class="mini-btn" aria-label="Transformer le dégradé" title="Transformer le dégradé">⋯</summary><div class="outils-bar">
-          <button class="button is-small is-light outils-btn" @click="invertPalette" title="Reverse order">
-            <i class="fa-solid fa-arrow-right-arrow-left fa-fw"></i> Inverser
+        <details class="palette-transform"><summary class="mini-btn" :aria-label="t('settings.palettes.transformGradient')" :title="t('settings.palettes.transformGradient')">⋯</summary><div class="outils-bar">
+          <button class="button is-small is-light outils-btn" @click="invertPalette" :title="t('settings.palettes.invertTitle')">
+            <i class="fa-solid fa-arrow-right-arrow-left fa-fw"></i> {{ t('settings.palettes.invert') }}
           </button>
-          <button class="button is-small is-light outils-btn" @click="duplicatePalette" title="Duplicate 2x">
-            <i class="fa-regular fa-copy fa-fw"></i> Dupliquer
+          <button class="button is-small is-light outils-btn" @click="duplicatePalette" :title="t('settings.palettes.duplicateTitle')">
+            <i class="fa-regular fa-copy fa-fw"></i> {{ t('common.duplicate') }}
           </button>
-          <button class="button is-small is-light outils-btn" @click="mirrorPalette" title="Mirror (palindrome)">
-            <i class="fa-solid fa-arrows-left-right fa-fw"></i> Palindrome
+          <button class="button is-small is-light outils-btn" @click="mirrorPalette" :title="t('settings.palettes.palindromeTitle')">
+            <i class="fa-solid fa-arrows-left-right fa-fw"></i> {{ t('settings.palettes.palindrome') }}
           </button>
-          <button class="button is-small is-light outils-btn" @click="distributeEvenly" title="Distribute evenly">
-            <i class="fa-solid fa-align-justify fa-fw"></i> Répartir
+          <button class="button is-small is-light outils-btn" @click="distributeEvenly" :title="t('settings.palettes.distributeTitle')">
+            <i class="fa-solid fa-align-justify fa-fw"></i> {{ t('settings.palettes.distribute') }}
           </button>
-          <button class="button is-small is-danger is-light outils-btn" @click="clearPalette" title="Clear entire palette">
-            <i class="fa-solid fa-trash-can fa-fw"></i> Effacer
+          <button class="button is-small is-danger is-light outils-btn" @click="clearPalette" :title="t('settings.palettes.clearTitle')">
+            <i class="fa-solid fa-trash-can fa-fw"></i> {{ t('settings.palettes.clear') }}
           </button>
         </div></details>
-        <button class="mini-btn" :disabled="model.colorStops.length >= MAX_COLORS" @click="addPaletteStop">+ Point</button>
+        <button class="mini-btn" :disabled="model.colorStops.length >= MAX_COLORS" @click="addPaletteStop">{{ t('settings.palettes.addPoint') }}</button>
       </div>
 
       <!-- Compact stop bar: color/iridescence/curve pickers + stop preset picker,
            shown above the strip on a single line so they're visible without scrolling. -->
       <div v-if="quickSelectedStop" class="stop-quickbar">
-        <span class="quickbar-lab">Couleur</span>
-        <span class="swatch" :style="{ background: quickSelectedHex }" title="Couleur du point">
+        <span class="quickbar-lab">{{ t('settings.palettes.color') }}</span>
+        <span class="swatch" :style="{ background: quickSelectedHex }" :title="t('settings.palettes.pointColorTitle')">
           <input type="color" :value="quickSelectedHex" @input="quickSelectedHex = ($event.target as HTMLInputElement).value" />
         </span>
         <span class="quickbar-hex">{{ quickSelectedHex }}</span>
 
-        <span class="quickbar-lab">Iridescence</span>
+        <span class="quickbar-lab">{{ t('settings.palettes.iridescence') }}</span>
         <template v-if="quickSelectedStop.iridescenceColor">
-          <span class="swatch" :style="{ background: quickSelectedIridescenceHex }" title="Couleur d'iridescence">
+          <span class="swatch" :style="{ background: quickSelectedIridescenceHex }" :title="t('settings.palettes.iridescenceColorTitle')">
             <input type="color" :value="quickSelectedIridescenceHex" @input="quickSelectedIridescenceHex = ($event.target as HTMLInputElement).value" />
           </span>
-          <button class="col-clr" title="Retirer l'iridescence" @click="quickClearIridescenceColor">✕</button>
+          <button class="col-clr" :title="t('settings.palettes.removeIridescence')" @click="quickClearIridescenceColor">✕</button>
         </template>
-        <button v-else class="col-plus" title="Activer l'iridescence" @click="quickEnableIridescenceColor">+</button>
+        <button v-else class="col-plus" :title="t('settings.palettes.enableIridescence')" @click="quickEnableIridescenceColor">+</button>
 
         <StopTransferCurveSelector v-model="quickSelectedTransferCurve" />
 
@@ -3293,7 +3299,7 @@ async function startVideoExport(payload: {
       </div>
 
       <!-- Live WebGPU material preview strip (mockup style) with handles overlaid -->
-      <div class="canvas-row palette-strip mb-3" style="position:relative;" @dblclick="onPreviewDblClick" title="Double-click to add a color stop">
+      <div class="canvas-row palette-strip mb-3" style="position:relative;" @dblclick="onPreviewDblClick" :title="t('settings.palettes.dblclickAddStop')">
         <PalettePreview
           ref="previewRef"
           class="palette-strip-fill"
@@ -3338,7 +3344,7 @@ async function startVideoExport(payload: {
             v-if="!applyToAll && selectedIdx !== null && model.colorStops.length > 2"
             class="floating-delete-btn"
             :style="{ left: model.colorStops[selectedIdx]?.position * 100 + '%' }"
-            title="Delete this stop"
+            :title="t('settings.palettes.deleteStop')"
             @mousedown.stop
             @click.stop="deleteSelectedStop"
           >
@@ -3348,31 +3354,31 @@ async function startVideoExport(payload: {
       </div>
 
       <!-- Pinned quick fields under the strip (mockup HUD .pins) -->
-      <details class="palette-distribution"><summary>Répartition du dégradé</summary><div class="pins">
-        <DenseField label="Période" :min="0" :max="1" :step="0.001" :default="Math.log10(256) / 6" :f="palettePeriodFmt"
+      <details class="palette-distribution"><summary>{{ t('settings.palettes.distribution.title') }}</summary><div class="pins">
+        <DenseField :label="t('settings.palettes.distribution.period')" :min="0" :max="1" :step="0.001" :default="Math.log10(256) / 6" :f="palettePeriodFmt"
           :model-value="sliderPalettePeriod" @update:model-value="(v: number) => sliderPalettePeriod = v" />
-        <DenseSelect label="Distribution"
+        <DenseSelect :label="t('settings.palettes.distribution.distribution')"
           :options="iterationPaletteCurveOptions"
           :model-value="normalizeIterationPaletteCurve(model.iterationPaletteCurve)"
           @update:model-value="(v: string | number) => model.iterationPaletteCurve = normalizeIterationPaletteCurve(v)" />
-        <DenseField label="Offset" :min="0" :max="1" :step="0.001" :default="0" :f="pctFmt"
+        <DenseField :label="t('settings.palettes.distribution.offset')" :min="0" :max="1" :step="0.001" :default="0" :f="pctFmt"
           :model-value="model.paletteOffset ?? 0" @update:model-value="(v: number) => model.paletteOffset = v" />
-        <DenseField label="Écran X" :min="0" :max="2" :step="0.01" :default="0" f="p2"
+        <DenseField :label="t('settings.palettes.distribution.screenX')" :min="0" :max="2" :step="0.01" :default="0" f="p2"
           :model-value="model.paletteScreenShiftX ?? 0" @update:model-value="(v: number) => model.paletteScreenShiftX = v" />
-        <DenseField label="Écran Y" :min="0" :max="2" :step="0.01" :default="0" f="p2"
+        <DenseField :label="t('settings.palettes.distribution.screenY')" :min="0" :max="2" :step="0.01" :default="0" f="p2"
           :model-value="model.paletteScreenShiftY ?? 0" @update:model-value="(v: number) => model.paletteScreenShiftY = v" />
-        <DenseField label="Décalage hauteur" :min="0" :max="100" :step="0.01" :default="0" f="p2"
+        <DenseField :label="t('settings.palettes.distribution.heightShift')" :min="0" :max="100" :step="0.01" :default="0" f="p2"
           :model-value="model.heightPaletteShift ?? 0" @update:model-value="(v: number) => model.heightPaletteShift = v" />
-        <DenseField label="Phase couleur" :min="0" :max="1" :step="0.001" :default="0" :f="phaseColoringFmt"
+        <DenseField :label="t('settings.palettes.distribution.colorPhase')" :min="0" :max="1" :step="0.001" :default="0" :f="phaseColoringFmt"
           :model-value="sliderPhaseColoring" @update:model-value="(v: number) => sliderPhaseColoring = v" />
-        <DenseToggle label="Miroir"
+        <DenseToggle :label="t('settings.palettes.distribution.mirror')"
           :model-value="!!model.paletteMirror" @update:model-value="(v: boolean) => model.paletteMirror = v" />
       </div></details>
       </div>
-      <nav v-if="primary !== 'library'" class="panel-tabs" aria-label="Réglages de palette">
-        <button v-for="item in [{id:'color',label:'Couleur'}, {id:'material',label:'Matière'}, {id:'texture',label:'Texture'}]" :key="item.id" :aria-pressed="paletteTab === item.id" @click="paletteTab = item.id">{{ item.label }}</button>
+      <nav v-if="primary !== 'library'" class="panel-tabs" :aria-label="t('settings.palettes.tabsAria')">
+        <button v-for="item in [{id:'color',label:t('settings.palettes.tabs.color')}, {id:'material',label:t('settings.palettes.tabs.material')}, {id:'texture',label:t('settings.palettes.tabs.texture')}]" :key="item.id" :aria-pressed="paletteTab === item.id" @click="paletteTab = item.id">{{ item.label }}</button>
       </nav>
-      <p v-if="primary !== 'library'" class="panel-note">{{ applyToAll ? 'Édition groupée : tous les points' : `Point ${(selectedIdx ?? 0) + 1} / ${model.colorStops.length}` }}</p>
+      <p v-if="primary !== 'library'" class="panel-note">{{ applyToAll ? t('settings.palettes.groupEdit') : t('settings.palettes.pointOf', { index: (selectedIdx ?? 0) + 1, total: model.colorStops.length }) }}</p>
       <div class="sections">
 
 
@@ -3410,222 +3416,222 @@ async function startVideoExport(payload: {
           :value="selectedStopPresetName"
           @change="applyQuickStopPreset(($event.target as HTMLSelectElement).value)"
         >
-          <option value="" disabled>Choisir un preset…</option>
+          <option value="" disabled>{{ t('settings.palettes.choosePreset') }}</option>
           <option v-for="preset in stopPresets" :key="preset.guid || preset.name" :value="preset.name">{{ preset.name }}</option>
         </select></template>
       </PaletteEditor>
 
-      <DenseSection group="params" :hue="320" v-show="paletteTab === 'material'" title="Orbit trap · Rosace" initially-collapsed scope="Terminal instantané ou plus proche passage de l’orbite" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;4&quot;/><path d=&quot;M12 2c4 3 7 6 10 10-3 4-6 7-10 10-4-3-7-6-10-10 3-4 6-7 10-10z&quot;/>'>
+      <DenseSection group="params" :hue="320" v-show="paletteTab === 'material'" :title="t('settings.palettes.orbitTrap.title')" initially-collapsed :scope="t('settings.palettes.orbitTrap.scope')" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;4&quot;/><path d=&quot;M12 2c4 3 7 6 10 10-3 4-6 7-10 10-4-3-7-6-10-10 3-4 6-7 10-10z&quot;/>'>
         <div class="fields">
-          <DenseSelect label="Mode"
+          <DenseSelect :label="t('settings.palettes.orbitTrap.mode')"
             :options="orbitTrapModeOptions"
             :model-value="orbitTrapConfig.mode"
             @update:model-value="setOrbitTrapMode" />
           <template v-if="orbitTrapConfig.mode !== 'off'">
-          <DenseField label="Intensité" :min="0" :max="100" :step="0.1" :default="DEFAULT_ORBIT_TRAP.strength" f="p1"
+          <DenseField :label="t('settings.palettes.orbitTrap.strength')" :min="0" :max="100" :step="0.1" :default="DEFAULT_ORBIT_TRAP.strength" f="p1"
             :model-value="orbitTrapConfig.strength" @update:model-value="(v: number) => setOrbitTrapNumber('strength', v)" />
-          <DenseField label="Échelle" :min="0.05" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.scale" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.scale')" :min="0.05" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.scale" f="p2"
             :model-value="orbitTrapConfig.scale" @update:model-value="(v: number) => setOrbitTrapNumber('scale', v)" />
-          <DenseField label="Rotation" :min="-3.1416" :max="3.1416" :step="0.01" :default="DEFAULT_ORBIT_TRAP.rotation" :f="radFmt"
+          <DenseField :label="t('settings.palettes.orbitTrap.rotation')" :min="-3.1416" :max="3.1416" :step="0.01" :default="DEFAULT_ORBIT_TRAP.rotation" :f="radFmt"
             :model-value="orbitTrapConfig.rotation" @update:model-value="(v: number) => setOrbitTrapNumber('rotation', v)" />
-          <DenseField label="Pétales" :min="1" :max="16" :step="1" :default="DEFAULT_ORBIT_TRAP.petals" f="p0"
+          <DenseField :label="t('settings.palettes.orbitTrap.petals')" :min="1" :max="16" :step="1" :default="DEFAULT_ORBIT_TRAP.petals" f="p0"
             :model-value="orbitTrapConfig.petals" @update:model-value="(v: number) => setOrbitTrapNumber('petals', v)" />
-          <DenseField label="Profondeur pétales" :min="0" :max="1" :step="0.01" :default="DEFAULT_ORBIT_TRAP.petalDepth" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.petalDepth')" :min="0" :max="1" :step="0.01" :default="DEFAULT_ORBIT_TRAP.petalDepth" f="p2"
             :model-value="orbitTrapConfig.petalDepth" @update:model-value="(v: number) => setOrbitTrapNumber('petalDepth', v)" />
-          <DenseField label="Torsion" :min="-8" :max="8" :step="0.01" :default="DEFAULT_ORBIT_TRAP.twist" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.twist')" :min="-8" :max="8" :step="0.01" :default="DEFAULT_ORBIT_TRAP.twist" f="p2"
             :model-value="orbitTrapConfig.twist" @update:model-value="(v: number) => setOrbitTrapNumber('twist', v)" />
-          <DenseField label="Largeur" :min="0.005" :max="0.5" :step="0.001" :default="DEFAULT_ORBIT_TRAP.width" f="p3"
+          <DenseField :label="t('settings.palettes.orbitTrap.width')" :min="0.005" :max="0.5" :step="0.001" :default="DEFAULT_ORBIT_TRAP.width" f="p3"
             :model-value="orbitTrapConfig.width" @update:model-value="(v: number) => setOrbitTrapNumber('width', v)" />
-          <DenseField label="Dureté" :min="0.25" :max="8" :step="0.05" :default="DEFAULT_ORBIT_TRAP.hardness" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.hardness')" :min="0.25" :max="8" :step="0.05" :default="DEFAULT_ORBIT_TRAP.hardness" f="p2"
             :model-value="orbitTrapConfig.hardness" @update:model-value="(v: number) => setOrbitTrapNumber('hardness', v)" />
-          <DenseField label="Centre X" :min="-2" :max="2" :step="0.01" :default="DEFAULT_ORBIT_TRAP.centerX" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.centerX')" :min="-2" :max="2" :step="0.01" :default="DEFAULT_ORBIT_TRAP.centerX" f="p2"
             :model-value="orbitTrapConfig.centerX" @update:model-value="(v: number) => setOrbitTrapNumber('centerX', v)" />
-          <DenseField label="Centre Y" :min="-2" :max="2" :step="0.01" :default="DEFAULT_ORBIT_TRAP.centerY" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.centerY')" :min="-2" :max="2" :step="0.01" :default="DEFAULT_ORBIT_TRAP.centerY" f="p2"
             :model-value="orbitTrapConfig.centerY" @update:model-value="(v: number) => setOrbitTrapNumber('centerY', v)" />
-          <DenseField label="Anisotropie X" :min="0.1" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.anisotropyX" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.anisotropyX')" :min="0.1" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.anisotropyX" f="p2"
             :model-value="orbitTrapConfig.anisotropyX" @update:model-value="(v: number) => setOrbitTrapNumber('anisotropyX', v)" />
-          <DenseField label="Anisotropie Y" :min="0.1" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.anisotropyY" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.anisotropyY')" :min="0.1" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.anisotropyY" f="p2"
             :model-value="orbitTrapConfig.anisotropyY" @update:model-value="(v: number) => setOrbitTrapNumber('anisotropyY', v)" />
-          <DenseField label="Phase forme" :min="-3.1416" :max="3.1416" :step="0.01" :default="DEFAULT_ORBIT_TRAP.phase" :f="radFmt"
+          <DenseField :label="t('settings.palettes.orbitTrap.shapePhase')" :min="-3.1416" :max="3.1416" :step="0.01" :default="DEFAULT_ORBIT_TRAP.phase" :f="radFmt"
             :model-value="orbitTrapConfig.phase" @update:model-value="(v: number) => setOrbitTrapNumber('phase', v)" />
-          <DenseField label="Bandes distance" :min="0" :max="32" :step="0.1" :default="DEFAULT_ORBIT_TRAP.distanceFrequency" f="p1"
+          <DenseField :label="t('settings.palettes.orbitTrap.distanceBands')" :min="0" :max="32" :step="0.1" :default="DEFAULT_ORBIT_TRAP.distanceFrequency" f="p1"
             :model-value="orbitTrapConfig.distanceFrequency" @update:model-value="(v: number) => setOrbitTrapNumber('distanceFrequency', v)" />
-          <DenseField label="Poids distance" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.distanceWeight" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.distanceWeight')" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.distanceWeight" f="p2"
             :model-value="orbitTrapConfig.distanceWeight" @update:model-value="(v: number) => setOrbitTrapNumber('distanceWeight', v)" />
-          <DenseField label="Poids itération" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.iterationWeight" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.iterationWeight')" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.iterationWeight" f="p2"
             :model-value="orbitTrapConfig.iterationWeight" @update:model-value="(v: number) => setOrbitTrapNumber('iterationWeight', v)" />
-          <DenseField label="Poids angle" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.angleWeight" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.angleWeight')" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.angleWeight" f="p2"
             :model-value="orbitTrapConfig.angleWeight" @update:model-value="(v: number) => setOrbitTrapNumber('angleWeight', v)" />
-          <DenseField label="Décalage couleur" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.phaseOffset" f="p2"
+          <DenseField :label="t('settings.palettes.orbitTrap.colorOffset')" :min="-4" :max="4" :step="0.01" :default="DEFAULT_ORBIT_TRAP.phaseOffset" f="p2"
             :model-value="orbitTrapConfig.phaseOffset" @update:model-value="(v: number) => setOrbitTrapNumber('phaseOffset', v)" />
           <template v-if="orbitTrapConfig.mode === 'sampled' || orbitTrapConfig.mode === 'exact'">
-            <DenseField label="Début orbite" :min="0" :max="10000" :step="1" :default="DEFAULT_ORBIT_TRAP.startIteration" f="p0"
+            <DenseField :label="t('settings.palettes.orbitTrap.orbitStart')" :min="0" :max="10000" :step="1" :default="DEFAULT_ORBIT_TRAP.startIteration" f="p0"
             :model-value="orbitTrapConfig.startIteration" @update:model-value="(v: number) => setOrbitTrapNumber('startIteration', v)" />
-            <DenseField label="Fin orbite (0 = budget)" :min="0" :max="1000000" :step="1" :default="DEFAULT_ORBIT_TRAP.endIteration" f="p0"
+            <DenseField :label="t('settings.palettes.orbitTrap.orbitEnd')" :min="0" :max="1000000" :step="1" :default="DEFAULT_ORBIT_TRAP.endIteration" f="p0"
             :model-value="orbitTrapConfig.endIteration" @update:model-value="(v: number) => setOrbitTrapNumber('endIteration', v)" />
-            <DenseToggle label="Colorer l’intérieur"
+            <DenseToggle :label="t('settings.palettes.orbitTrap.colorInterior')"
               :model-value="orbitTrapConfig.includeInterior"
               @update:model-value="(v: boolean) => setOrbitTrapBoolean('includeInterior', v)" />
           </template>
           </template>
         </div>
         <p v-if="orbitTrapConfig.mode === 'sampled' || orbitTrapConfig.mode === 'exact'" class="orbit-trap-note">
-          Le bandeau d’aperçu ne réitère pas l’orbite : évalue ce mode sur le canevas principal.
+          {{ t('settings.palettes.orbitTrap.previewNote') }}
         </p>
       </DenseSection>
 
-      <DenseSection group="params" :hue="25" v-show="paletteTab === 'material'" title="Global · Surface & Matière" initially-collapsed scope="Relief, ombrage et matériau partagés — tout le rendu" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
+      <DenseSection group="params" :hue="25" v-show="paletteTab === 'material'" :title="t('settings.palettes.surface.title')" initially-collapsed :scope="t('settings.palettes.surface.scope')" icon='<path d=&quot;M3 17l5-6 4 4 5-7 4 5&quot;/><path d=&quot;M3 21h18&quot;/>'>
         <div class="fields">
-          <DenseField label="Profondeur relief" :min="0" :max="2" :step="0.01" :default="1" f="p2"
+          <DenseField :label="t('settings.palettes.surface.reliefDepth')" :min="0" :max="2" :step="0.01" :default="1" f="p2"
             :model-value="model.reliefDepth ?? 1" @update:model-value="(v: number) => model.reliefDepth = v" />
-          <DenseField label="Phase protubérances" :min="0" :max="1" :step="0.001" :default="0" f="p3"
+          <DenseField :label="t('settings.palettes.surface.protrusionPhase')" :min="0" :max="1" :step="0.001" :default="0" f="p3"
             :model-value="model.protrusionPhase ?? 0" @update:model-value="(v: number) => model.protrusionPhase = v" />
-          <DenseField label="Netteté protubérances" :min="0.25" :max="16" :step="0.05" :default="2" f="p2"
+          <DenseField :label="t('settings.palettes.surface.protrusionSharpness')" :min="0.25" :max="16" :step="0.05" :default="2" f="p2"
             :model-value="model.protrusionSharpness ?? 2" @update:model-value="(v: number) => model.protrusionSharpness = v" />
-          <DenseField label="Amplification protubérances" :min="1" :max="4" :step="0.01" :default="1" f="p2"
+          <DenseField :label="t('settings.palettes.surface.protrusionStrength')" :min="1" :max="4" :step="0.01" :default="1" f="p2"
             :model-value="model.protrusionStrength ?? 1" @update:model-value="(v: number) => model.protrusionStrength = v" />
-          <DenseField label="Protubérances géométriques" :min="0" :max="1" :step="0.01" :default="0" f="p2"
+          <DenseField :label="t('settings.palettes.surface.protrusionGeometry')" :min="0" :max="1" :step="0.01" :default="0" f="p2"
             :model-value="model.protrusionGeometryMix ?? 0" @update:model-value="(v: number) => model.protrusionGeometryMix = v" />
-          <DenseField label="Période géométrique" :min="0.1" :max="16" :step="0.05" :default="1" f="p2"
+          <DenseField :label="t('settings.palettes.surface.geometricPeriod')" :min="0.1" :max="16" :step="0.05" :default="1" f="p2"
             :model-value="model.protrusionPeriod ?? 1" @update:model-value="(v: number) => model.protrusionPeriod = v" />
-          <DenseField label="Direction lumière" :min="0" :max="6.283" :step="0.01" :default="3.927" :f="radFmt"
+          <DenseField :label="t('settings.palettes.surface.lightDirection')" :min="0" :max="6.283" :step="0.01" :default="3.927" :f="radFmt"
             :model-value="model.lightAngle ?? 3.927" @update:model-value="(v: number) => model.lightAngle = v" />
-          <DenseField label="Bump fin" :min="0" :max="2" :step="0.01" :default="0" f="p2"
+          <DenseField :label="t('settings.palettes.surface.microBump')" :min="0" :max="2" :step="0.01" :default="0" f="p2"
             :model-value="model.microBumpStrength ?? 0" @update:model-value="(v: number) => model.microBumpStrength = v" />
-          <DenseField label="Ombres locales" :min="0" :max="10" :step="0.01" :default="0" f="p2"
+          <DenseField :label="t('settings.palettes.surface.localShadows')" :min="0" :max="10" :step="0.01" :default="0" f="p2"
             :model-value="model.localShadowStrength ?? 0" @update:model-value="(v: number) => model.localShadowStrength = v" />
-          <DenseField label="Occlusion ambiante" :min="0" :max="10" :step="0.01" :default="0" f="p2"
+          <DenseField :label="t('settings.palettes.surface.ambientOcclusion')" :min="0" :max="10" :step="0.01" :default="0" f="p2"
             :model-value="model.ambientOcclusionStrength ?? 0" @update:model-value="(v: number) => model.ambientOcclusionStrength = v" />
-          <DenseField label="Vernis" :min="0" :max="100" :step="0.05" :default="0" f="p2"
+          <DenseField :label="t('settings.palettes.surface.varnish')" :min="0" :max="100" :step="0.05" :default="0" f="p2"
             :model-value="model.varnishStrength ?? 1" @update:model-value="(v: number) => model.varnishStrength = v" />
-          <DenseField label="Contraste" :min="0.5" :max="2" :step="0.01" :default="1.18" f="p2"
+          <DenseField :label="t('settings.palettes.surface.contrast')" :min="0.5" :max="2" :step="0.01" :default="1.18" f="p2"
             :model-value="model.gradeContrast ?? 1.18" @update:model-value="(v: number) => model.gradeContrast = v" />
-          <DenseField label="Saturation" :min="0" :max="2" :step="0.01" :default="1.12" f="p2"
+          <DenseField :label="t('settings.palettes.surface.saturation')" :min="0" :max="2" :step="0.01" :default="1.12" f="p2"
             :model-value="model.gradeSaturation ?? 1.12" @update:model-value="(v: number) => model.gradeSaturation = v" />
         </div>
       </DenseSection>
 
-      <DenseSection group="params" :hue="230" v-show="paletteTab === 'color'" title="Espace couleur" scope="Ajustements globaux sur chaque palette" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'>
+      <DenseSection group="params" :hue="230" v-show="paletteTab === 'color'" :title="t('settings.palettes.colorSpace.title')" :scope="t('settings.palettes.colorSpace.scope')" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M12 3a9 9 0 000 18&quot;/>'>
         <DenseSeg
-          label="Interpolation"
+          :label="t('settings.palettes.colorSpace.interpolation')"
           :options="interpolationModes.map(m => ({ label: m.label, value: m.key }))"
           :model-value="model.interpolationMode"
           @update:model-value="(v: string | number) => model.interpolationMode = v as InterpolationMode"
         />
         <div class="transfer">
-          <button class="mini-btn" @click="negatePalette" title="Negate RGB">
+          <button class="mini-btn" @click="negatePalette" :title="t('settings.palettes.colorSpace.negateRgb')">
             <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 3a9 9 0 000 18z" fill="currentColor" stroke="none"/></svg>
-            Négatif RGB
+            {{ t('settings.palettes.colorSpace.negateRgb') }}
           </button>
         </div>
         <div class="fields">
-          <DenseField label="Teinte" :min="-180" :max="180" :step="1" :default="0" :f="degFmt"
+          <DenseField :label="t('settings.palettes.colorSpace.hue')" :min="-180" :max="180" :step="1" :default="0" :f="degFmt"
             :model-value="hslHueShift" @update:model-value="onHslHueInput" />
-          <DenseField label="Saturation" :min="-100" :max="100" :step="1" :default="0" f="p0"
+          <DenseField :label="t('settings.palettes.colorSpace.saturation')" :min="-100" :max="100" :step="1" :default="0" f="p0"
             :model-value="satShift" @update:model-value="onSatInput" />
-          <DenseField label="Luminosité" :min="-100" :max="100" :step="1" :default="0" f="p0"
+          <DenseField :label="t('settings.palettes.colorSpace.lightness')" :min="-100" :max="100" :step="1" :default="0" f="p0"
             :model-value="lumShift" @update:model-value="onLumInput" />
         </div>
       </DenseSection>
 
-      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" :preview="currentSkyboxObj?.thumbnail" title="Texture · Environnement" initially-collapsed scope="Réflexions ambiantes" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M3 12h18M12 3a14 14 0 010 18 14 14 0 010-18z&quot;/>'>
-      <p class="section-help">Choisir l’environnement des reflets.</p>
+      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" :preview="currentSkyboxObj?.thumbnail" :title="t('settings.textures.environment.title')" initially-collapsed :scope="t('settings.textures.environment.scope')" icon='<circle cx=&quot;12&quot; cy=&quot;12&quot; r=&quot;9&quot;/><path d=&quot;M3 12h18M12 3a14 14 0 010 18 14 14 0 010-18z&quot;/>'>
+      <p class="section-help">{{ t('settings.textures.environment.help') }}</p>
       <div class="grid texture-grid">
         <div v-for="tex in textures" :key="'skybox-card-' + tex.name" class="card texture-card" :class="{ sel: selectedSkyboxTexture === tex.name, unavailable: tex.unavailable }" @click="selectSkyboxFromDropdown(tex)">
-          <span class="sel-badge">Appliqué</span>
-          <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
+          <span class="sel-badge">{{ t('settings.applied') }}</span>
+          <img v-if="tex.thumbnail" :src="tex.thumbnail" :alt="t('settings.thumbnailAlt')" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
           <div class="info"><PresetActionsMenu v-if="!tex.guid?.startsWith('shared:')" :label="tex.name">
-              <button type="button" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click="toggleTextureFavorite(tex)">{{ tex.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
-              <button v-if="isAdmin" type="button" :disabled="!canUploadTexture(tex)" @click="uploadTexture(tex)">Publier dans le catalogue</button>
-              <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" type="button" class="danger" @click="deleteTextureByName(tex.name)">Supprimer…</button>
-            </PresetActionsMenu><span v-if="tex.favorite" class="favorite-marker" aria-label="Favori">♥</span><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? 'Unavailable — safe fallback active' : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in map' : 'Saved map' }}</span></div></div>
+              <button type="button" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click="toggleTextureFavorite(tex)">{{ tex.favorite ? t('common.removeFromFavorites') : t('common.addToFavorites') }}</button>
+              <button v-if="isAdmin" type="button" :disabled="!canUploadTexture(tex)" @click="uploadTexture(tex)">{{ t('settings.publishToCatalog') }}</button>
+              <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" type="button" class="danger" @click="deleteTextureByName(tex.name)">{{ t('settings.deleteEllipsis') }}</button>
+            </PresetActionsMenu><span v-if="tex.favorite" class="favorite-marker" :aria-label="t('settings.favoriteMarker')">♥</span><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? t('settings.textures.unavailable') : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? t('settings.textures.environment.builtIn') : t('settings.textures.environment.saved') }}</span></div></div>
         </div>
-        <div v-if="textures.length === 0" class="empty">No environment maps available.</div>
+        <div v-if="textures.length === 0" class="empty">{{ t('settings.textures.environment.empty') }}</div>
       </div>
       <div class="transfer texture-transfer">
-        <button class="tbtn primary" @click="triggerImportSkybox"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import image</button>
-        <button class="tbtn danger" @click="deleteSkyboxTexture" :disabled="!skyboxName || BUILT_IN_TEXTURE_NAMES.has(skyboxName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete selected</button>
+        <button class="tbtn primary" @click="triggerImportSkybox"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>{{ t('settings.textures.importImage') }}</button>
+        <button class="tbtn danger" @click="deleteSkyboxTexture" :disabled="!skyboxName || BUILT_IN_TEXTURE_NAMES.has(skyboxName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>{{ t('settings.textures.deleteSelected') }}</button>
         <input ref="skyboxFileInput" type="file" accept="image/*" style="display:none;" @change="importSkyboxTexture" />
       </div>
       </DenseSection>
 
-      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" :preview="currentTextureObj?.thumbnail" title="Texture · Images" initially-collapsed scope="Images à mélanger dans la surface" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><circle cx=&quot;9&quot; cy=&quot;10&quot; r=&quot;2&quot;/><path d=&quot;M21 15l-5-5-11 9&quot;/>'>
-      <p class="section-help">Choisir une image pour la surface.</p>
+      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" :preview="currentTextureObj?.thumbnail" :title="t('settings.textures.images.title')" initially-collapsed :scope="t('settings.textures.images.scope')" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><circle cx=&quot;9&quot; cy=&quot;10&quot; r=&quot;2&quot;/><path d=&quot;M21 15l-5-5-11 9&quot;/>'>
+      <p class="section-help">{{ t('settings.textures.images.help') }}</p>
       <div class="grid texture-grid">
         <div v-for="tex in textures" :key="tex.name" class="card texture-card" :class="{ sel: selectedTexture === tex.name, unavailable: tex.unavailable }" @click="selectTextureFromDropdown(tex)">
-          <span class="sel-badge">Appliqué</span>
-          <img v-if="tex.thumbnail" :src="tex.thumbnail" alt="thumbnail" class="thumb" />
+          <span class="sel-badge">{{ t('settings.applied') }}</span>
+          <img v-if="tex.thumbnail" :src="tex.thumbnail" :alt="t('settings.thumbnailAlt')" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
           <div class="info"><PresetActionsMenu v-if="!tex.guid?.startsWith('shared:')" :label="tex.name">
-              <button type="button" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click="toggleTextureFavorite(tex)">{{ tex.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
-              <button v-if="isAdmin" type="button" :disabled="!canUploadTexture(tex)" @click="uploadTexture(tex)">Publier dans le catalogue</button>
-              <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" type="button" class="danger" @click="deleteTextureByName(tex.name)">Supprimer…</button>
-            </PresetActionsMenu><span v-if="tex.favorite" class="favorite-marker" aria-label="Favori">♥</span><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? 'Unavailable — safe fallback active' : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? 'Built-in texture' : 'Saved texture' }}</span></div></div>
+              <button type="button" :disabled="BUILT_IN_TEXTURE_NAMES.has(tex.name)" @click="toggleTextureFavorite(tex)">{{ tex.favorite ? t('common.removeFromFavorites') : t('common.addToFavorites') }}</button>
+              <button v-if="isAdmin" type="button" :disabled="!canUploadTexture(tex)" @click="uploadTexture(tex)">{{ t('settings.publishToCatalog') }}</button>
+              <button v-if="!BUILT_IN_TEXTURE_NAMES.has(tex.name) && canDeleteCatalogEntry(userRole, tex.remote)" type="button" class="danger" @click="deleteTextureByName(tex.name)">{{ t('settings.deleteEllipsis') }}</button>
+            </PresetActionsMenu><span v-if="tex.favorite" class="favorite-marker" :aria-label="t('settings.favoriteMarker')">♥</span><div class="nm">{{ tex.name }}</div><div class="sub"><span>{{ tex.unavailable ? t('settings.textures.unavailable') : BUILT_IN_TEXTURE_NAMES.has(tex.name) ? t('settings.textures.images.builtIn') : t('settings.textures.images.saved') }}</span></div></div>
         </div>
-        <div v-if="textures.length === 0" class="empty">No image textures available.</div>
+        <div v-if="textures.length === 0" class="empty">{{ t('settings.textures.images.empty') }}</div>
       </div>
       <div class="transfer texture-transfer">
-        <button class="tbtn primary" @click="triggerImportTexture"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Import image</button>
-        <button class="tbtn danger" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Delete selected</button>
+        <button class="tbtn primary" @click="triggerImportTexture"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>{{ t('settings.textures.importImage') }}</button>
+        <button class="tbtn danger" @click="deleteTexture" :disabled="!textureName || BUILT_IN_TEXTURE_NAMES.has(textureName)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>{{ t('settings.textures.deleteSelected') }}</button>
         <input ref="textureFileInput" type="file" accept="image/*" style="display:none;" @change="importTexture" />
       </div>
       </DenseSection>
 
-      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" title="Texture" scope="Échelle, mapping et préréglages de la couche image" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><path d=&quot;M3 15l5-4 4 3 4-5 5 6&quot;/>'>
+      <DenseSection group="params" :hue="175" v-show="paletteTab === 'texture'" :title="t('settings.textures.mapping.title')" :scope="t('settings.textures.mapping.scope')" icon='<rect x=&quot;3&quot; y=&quot;5&quot; width=&quot;18&quot; height=&quot;14&quot; rx=&quot;2&quot;/><path d=&quot;M3 15l5-4 4 3 4-5 5 6&quot;/>'>
         <div class="fields">
-          <DenseField label="Échelle image" :min="0.1" :max="10" :step="0.1" :default="1" f="p1"
+          <DenseField :label="t('settings.textures.mapping.imageScale')" :min="0.1" :max="10" :step="0.1" :default="1" f="p1"
             :model-value="model.tessellationLevel ?? 1" @update:model-value="(v: number) => model.tessellationLevel = v" />
-          <DenseField label="Déplacement" :min="0" :max="0.1" :step="0.001" :default="0" :f="imgDispFmt"
+          <DenseField :label="t('settings.textures.mapping.displacement')" :min="0" :max="0.1" :step="0.001" :default="0" :f="imgDispFmt"
             :model-value="model.displacementAmount ?? 0" @update:model-value="(v: number) => model.displacementAmount = v" />
         </div>
 
         <div class="fields">
-          <DenseSelect label="Mapping X"
-            :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
+          <DenseSelect :label="t('settings.textures.mapping.mappingX')"
+            :options="textureVariableOptions"
             :model-value="textureMappingXVariable" @update:model-value="(v: string | number) => textureMappingXVariable = v as typeof textureMappingXVariable" />
-          <DenseField label="Échelle X" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :default="0" :f="xScaleFmt"
+          <DenseField :label="t('settings.textures.mapping.scaleX')" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :default="0" :f="xScaleFmt"
             :model-value="textureMappingXScaleSlider" @update:model-value="(v: number) => textureMappingXScaleSlider = v" />
-          <DenseSelect label="Mapping Y"
-            :options="TEXTURE_MAPPING_VARIABLE_OPTIONS.map(o => ({ label: o.label, value: o.value }))"
+          <DenseSelect :label="t('settings.textures.mapping.mappingY')"
+            :options="textureVariableOptions"
             :model-value="textureMappingYVariable" @update:model-value="(v: string | number) => textureMappingYVariable = v as typeof textureMappingYVariable" />
-          <DenseField label="Échelle Y" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :default="0" :f="yScaleFmt"
+          <DenseField :label="t('settings.textures.mapping.scaleY')" :min="Math.log10(TEXTURE_MAPPING_SCALE_MIN)" :max="Math.log10(TEXTURE_MAPPING_SCALE_MAX)" :step="0.01" :default="0" :f="yScaleFmt"
             :model-value="textureMappingYScaleSlider" @update:model-value="(v: number) => textureMappingYScaleSlider = v" />
         </div>
 
-        <DenseToggle label="Texture miroir"
+        <DenseToggle :label="t('settings.textures.mapping.mirrorTexture')"
           :model-value="textureMappingMirror" @update:model-value="(v: boolean) => textureMappingMirror = v" />
 
         <DenseSelect
-          label="Préréglage mapping"
+          :label="t('settings.textures.mapping.mappingPreset')"
           :options="mappingSelectOptions"
           :model-value="activeTextureMappingLabel"
           @update:model-value="onSelectMappingPreset"
         />
-        <DenseLinkedChip v-if="mappingLink.origin.value" kind="Mapping" :name="mappingLink.origin.value.name" :dirty="mappingLink.dirty.value" :locked="mappingLink.locked.value" :busy="mappingLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
+        <DenseLinkedChip v-if="mappingLink.origin.value" :kind="t('settings.textures.mapping.kind')" :name="mappingLink.origin.value.name" :dirty="mappingLink.dirty.value" :locked="mappingLink.locked.value" :busy="mappingLinkBusy" :suspend-shortcuts="props.suspendShortcuts"
           @update="updateLinkedMapping" @rename="renameLinkedMapping" @detach="detachMapping" @variant="saveMappingVariant" />
         <div class="save-row">
-          <input class="txt-in" v-model="textureMappingPresetName" type="text" :placeholder="mappingLink.origin.value ? 'Enregistrer une copie sous…' : 'Nom du mapping…'"
+          <input class="txt-in" v-model="textureMappingPresetName" type="text" :placeholder="mappingLink.origin.value ? t('settings.saveCopyAs') : t('settings.textures.mapping.namePlaceholder')"
             @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
             @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
             @keyup.enter="saveTextureMappingPreset"
           />
-          <button class="mini-btn primary" @click="saveTextureMappingPreset"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>Enregistrer</button>
+          <button class="mini-btn primary" @click="saveTextureMappingPreset"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>{{ t('common.save') }}</button>
         </div>
         <div v-if="activeMappingPreset && !activeMappingPreset.builtIn && canDeleteCatalogEntry(userRole, activeMappingPreset.remote)" class="transfer">
-          <button class="mini-btn danger" @click="deleteTextureMappingPreset(activeMappingPreset)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>Supprimer</button>
+          <button class="mini-btn danger" @click="deleteTextureMappingPreset(activeMappingPreset)"><svg viewBox="0 0 24 24"><path d="M5 7h14M9 7V5h6v2M6 7l1 13h10l1-13"/></svg>{{ t('common.delete') }}</button>
         </div>
       </DenseSection>
 
       <!-- ============ 2. RENDER MAPPING ============ -->
       <DenseSection
-        title="Répartition des itérations" group="params" v-show="paletteTab === 'color'" initially-collapsed
-        scope="Mappage des itérations avant coloration"
+        :title="t('settings.palettes.iterations.title')" group="params" v-show="paletteTab === 'color'" initially-collapsed
+        :scope="t('settings.palettes.iterations.scope')"
         icon='<rect x=&quot;4&quot; y=&quot;4&quot; width=&quot;16&quot; height=&quot;16&quot; rx=&quot;2&quot;/><path d=&quot;M4 12h16M12 4v16&quot;/>'
       >
         <div class="fields">
           <DenseField
-            label="Fréquence rayures" :min="1" :max="32" :step="1" :default="8"
+            :label="t('settings.palettes.iterations.stripeFrequency')" :min="1" :max="32" :step="1" :default="8"
             f="p0"
             :model-value="model.stripeFrequency ?? 8"
             @update:model-value="(v: number) => model.stripeFrequency = v"
@@ -3634,80 +3640,80 @@ async function startVideoExport(payload: {
       </DenseSection>
 
 
-      <DenseSection group="library" :hue="300" title="Palettes sauvegardées" scope="Couleurs seules — garde matière & mapping" icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'>
-      <p class="section-help">Couleurs seules : conserve la matière et le mapping.</p>
+      <DenseSection group="library" :hue="300" :title="t('settings.palettes.saved.title')" :scope="t('settings.palettes.saved.scope')" icon='<path d=&quot;M4 19V5a2 2 0 012-2h3v18H6a2 2 0 01-2-2zM9 3h5v18H9zM17 4l4 16-3 1-4-16z&quot;/>'>
+      <p class="section-help">{{ t('settings.palettes.saved.help') }}</p>
       <div class="lib-bar">
         <button class="fav-filter" :class="{ on: showOnlyFavoritePalettes }" type="button" :aria-pressed="showOnlyFavoritePalettes" @click="showOnlyFavoritePalettes = !showOnlyFavoritePalettes">
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-          Favoris
+          {{ t('common.favorites') }}
         </button>
-        <span class="count">{{ visiblePalettes.length }} palette{{ visiblePalettes.length === 1 ? '' : 's' }}</span>
+        <span class="count">{{ visiblePalettes.length }} {{ t('settings.palettes.saved.paletteUnit', visiblePalettes.length) }}</span>
       </div>
       <div class="grid palette-library-grid saved-palette-grid">
         <div v-for="palette in visiblePalettes" :key="palette.name" class="card palette-card" :class="{ sel: selectedPalette === palette.name }" @click="selectPaletteFromDropdown(palette)">
-          <span class="sel-badge">Appliqué</span>
-          <img v-if="palette.thumbnail" :src="palette.thumbnail" alt="thumbnail" class="thumb palette-thumb" />
+          <span class="sel-badge">{{ t('settings.applied') }}</span>
+          <img v-if="palette.thumbnail" :src="palette.thumbnail" :alt="t('settings.thumbnailAlt')" class="thumb palette-thumb" />
           <div v-else class="thumb thumb-empty palette-thumb"></div>
           <div class="info"><PresetActionsMenu :label="palette.name">
-              <button type="button" @click="togglePaletteFavorite(palette.name)">{{ palette.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
-              <button v-if="isAdmin" type="button" @click="exportPaletteByName(palette.name)">Exporter…</button>
-              <button v-if="isAdmin" type="button" @click="uploadPalettePreset(palette)">Publier dans le catalogue</button>
-              <button v-if="canDeleteCatalogEntry(userRole, palette.remote)" type="button" class="danger" @click="deletePaletteByName(palette.name)">Supprimer…</button>
-            </PresetActionsMenu><span v-if="palette.favorite" class="favorite-marker" aria-label="Favori">♥</span><div v-if="displayName(palette.name)" class="nm">{{ displayName(palette.name) }}</div><div class="sub"><span>{{ formatPresetDate(palette.date) }}</span></div></div>
+              <button type="button" @click="togglePaletteFavorite(palette.name)">{{ palette.favorite ? t('common.removeFromFavorites') : t('common.addToFavorites') }}</button>
+              <button v-if="isAdmin" type="button" @click="exportPaletteByName(palette.name)">{{ t('settings.exportEllipsis') }}</button>
+              <button v-if="isAdmin" type="button" @click="uploadPalettePreset(palette)">{{ t('settings.publishToCatalog') }}</button>
+              <button v-if="canDeleteCatalogEntry(userRole, palette.remote)" type="button" class="danger" @click="deletePaletteByName(palette.name)">{{ t('settings.deleteEllipsis') }}</button>
+            </PresetActionsMenu><span v-if="palette.favorite" class="favorite-marker" :aria-label="t('settings.favoriteMarker')">♥</span><div v-if="displayName(palette.name)" class="nm">{{ displayName(palette.name) }}</div><div class="sub"><span>{{ formatPresetDate(palette.date) }}</span></div></div>
         </div>
-        <div v-if="visiblePalettes.length === 0" class="empty">{{ showOnlyFavoritePalettes ? 'No favorite palettes yet.' : 'No saved palettes yet.' }}</div>
+        <div v-if="visiblePalettes.length === 0" class="empty">{{ showOnlyFavoritePalettes ? t('settings.palettes.saved.emptyFavorites') : t('settings.palettes.saved.empty') }}</div>
       </div>
       <div class="save-row palette-save-row">
-        <input class="txt-in" v-model="paletteName" type="text" :placeholder="paletteLink.origin.value ? 'Enregistrer une copie sous…' : 'Enregistrer la palette sous…'"
+        <input class="txt-in" v-model="paletteName" type="text" :placeholder="paletteLink.origin.value ? t('settings.saveCopyAs') : t('settings.palettes.saved.savePaletteAs')"
           @focus="props.suspendShortcuts && props.suspendShortcuts(true)"
           @blur="props.suspendShortcuts && props.suspendShortcuts(false)"
           @keyup.enter="savePalette"
         />
-        <button class="save-btn" @click="savePalette"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>Save</button>
+        <button class="save-btn" @click="savePalette"><svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>{{ t('common.save') }}</button>
       </div>
       </DenseSection>
 
-      <DenseSection group="library" :hue="300" title="Presets complets" scope="Un look complet — couleurs, interpolation, mapping, matière" icon='<rect x=&quot;4&quot; y=&quot;4&quot; width=&quot;16&quot; height=&quot;16&quot; rx=&quot;2&quot;/><path d=&quot;M4 12h16M12 4v16&quot;/>'>
-      <p class="section-help">A full look — colors, interpolation, cycle mapping and material. Click to apply everything.</p>
+      <DenseSection group="library" :hue="300" :title="t('settings.palettes.full.title')" :scope="t('settings.palettes.full.scope')" icon='<rect x=&quot;4&quot; y=&quot;4&quot; width=&quot;16&quot; height=&quot;16&quot; rx=&quot;2&quot;/><path d=&quot;M4 12h16M12 4v16&quot;/>'>
+      <p class="section-help">{{ t('settings.palettes.full.help') }}</p>
       <div class="lib-bar">
         <button class="fav-filter" :class="{ on: showOnlyFavoritePalettePresets }" type="button" :aria-pressed="showOnlyFavoritePalettePresets" @click="showOnlyFavoritePalettePresets = !showOnlyFavoritePalettePresets">
           <svg viewBox="0 0 24 24"><path d="M12 20s-7-4.6-9-9c-1.2-2.7.6-6 3.8-6 2 0 3.4 1.2 5.2 3.4C13.8 6.2 15.2 5 17.2 5c3.2 0 5 3.3 3.8 6-2 4.4-9 9-9 9z"/></svg>
-          Favoris
+          {{ t('common.favorites') }}
         </button>
         <span class="count">
           {{ visiblePalettePresets.length }}<template v-if="showOnlyFavoritePalettePresets"> / {{ presets.length }}</template>
-          preset{{ visiblePalettePresets.length === 1 && !showOnlyFavoritePalettePresets ? '' : 's' }}
+          {{ t('settings.presets.presetUnit', visiblePalettePresets.length === 1 && !showOnlyFavoritePalettePresets ? 1 : 2) }}
         </span>
       </div>
       <div class="grid palette-library-grid full-preset-grid">
         <div v-for="preset in visiblePalettePresets" :key="preset.id" class="card" :class="{ sel: selectedPalettePreset === preset.id }" @click="selectPalettePresetFromDropdown(preset)">
-          <span class="sel-badge">Appliqué</span>
-          <img v-if="preset.thumbnail" :src="preset.thumbnail" alt="thumbnail" class="thumb" />
+          <span class="sel-badge">{{ t('settings.applied') }}</span>
+          <img v-if="preset.thumbnail" :src="preset.thumbnail" :alt="t('settings.thumbnailAlt')" class="thumb" />
           <div v-else class="thumb thumb-empty"></div>
           <div class="info"><PresetActionsMenu :label="preset.name">
-              <button type="button" :disabled="shareBusy" @click="copyPresetLink(preset.id)">Copier le lien</button>
-              <button type="button" @click="togglePresetFavorite(preset.id)">{{ preset.favorite ? 'Retirer des favoris' : 'Ajouter aux favoris' }}</button>
-              <button v-if="canOverwriteCatalogPayload(userRole, preset.remote)" type="button" @click="renameSceneCard(preset)">Renommer…</button>
-              <button type="button" @click="duplicateSceneCard(preset)">Dupliquer</button>
-              <button v-if="isAdmin" type="button" @click="exportPresetById(preset.id)">Exporter…</button>
-              <button v-if="isAdmin" type="button" @click="uploadCompletePreset(preset.id)">{{ isUploadSuccess(uploadSuccessKey('preset', preset.id)) ? 'Catalogue mis à jour' : 'Publier dans le catalogue' }}</button>
-              <button v-if="canDeleteCatalogEntry(userRole, preset.remote)" type="button" class="danger" @click="deletePresetById(preset.id)">Supprimer…</button>
+              <button type="button" :disabled="shareBusy" @click="copyPresetLink(preset.id)">{{ t('common.copyLink') }}</button>
+              <button type="button" @click="togglePresetFavorite(preset.id)">{{ preset.favorite ? t('common.removeFromFavorites') : t('common.addToFavorites') }}</button>
+              <button v-if="canOverwriteCatalogPayload(userRole, preset.remote)" type="button" @click="renameSceneCard(preset)">{{ t('settings.renameEllipsis') }}</button>
+              <button type="button" @click="duplicateSceneCard(preset)">{{ t('common.duplicate') }}</button>
+              <button v-if="isAdmin" type="button" @click="exportPresetById(preset.id)">{{ t('settings.exportEllipsis') }}</button>
+              <button v-if="isAdmin" type="button" @click="uploadCompletePreset(preset.id)">{{ isUploadSuccess(uploadSuccessKey('preset', preset.id)) ? t('settings.catalogUpdated') : t('settings.publishToCatalog') }}</button>
+              <button v-if="canDeleteCatalogEntry(userRole, preset.remote)" type="button" class="danger" @click="deletePresetById(preset.id)">{{ t('settings.deleteEllipsis') }}</button>
             </PresetActionsMenu>
-            <span v-if="preset.favorite" class="favorite-marker" aria-label="Favori">♥</span>
+            <span v-if="preset.favorite" class="favorite-marker" :aria-label="t('settings.favoriteMarker')">♥</span>
             <div v-if="displayName(preset.name)" class="nm">{{ displayName(preset.name) }}</div>
             <div class="sub"><span>{{ formatPresetDate(preset.date) }}</span><span v-if="preset.scaleExponent > 0" class="depth">{{ formatZoom(preset.scaleExponent) }}</span></div>
           </div>
         </div>
-        <div v-if="visiblePalettePresets.length === 0" class="empty">{{ showOnlyFavoritePalettePresets ? 'No favorite full presets yet.' : 'No full presets available.' }}</div>
+        <div v-if="visiblePalettePresets.length === 0" class="empty">{{ showOnlyFavoritePalettePresets ? t('settings.palettes.full.emptyFavorites') : t('settings.palettes.full.empty') }}</div>
       </div>
       </DenseSection>
 
-      <DenseSection v-if="isAdmin" group="library" :hue="300" title="Transfert" initially-collapsed scope="Import / export" icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'>
+      <DenseSection v-if="isAdmin" group="library" :hue="300" :title="t('settings.transfer.title')" initially-collapsed :scope="t('settings.transfer.scope')" icon='<path d=&quot;M12 3v12M7 10l5 5 5-5M5 21h14&quot;/>'>
       <div class="transfer">
-        <button class="tbtn primary" @click="triggerImportPalettes"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>Importer</button>
-        <button class="tbtn" @click="exportPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Tout exporter</button>
-        <button class="tbtn" @click="exportSelectedPalette" :disabled="!selectedPalette"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>Exporter la sélection</button>
-        <button class="tbtn" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>Exporter les favoris</button>
+        <button class="tbtn primary" @click="triggerImportPalettes"><svg viewBox="0 0 24 24"><path d="M12 21V9M7 14l5 5 5-5"/><path d="M5 3h14"/></svg>{{ t('common.import') }}</button>
+        <button class="tbtn" @click="exportPalettes" :disabled="palettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>{{ t('settings.exportAll') }}</button>
+        <button class="tbtn" @click="exportSelectedPalette" :disabled="!selectedPalette"><svg viewBox="0 0 24 24"><path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/></svg>{{ t('settings.exportSelection') }}</button>
+        <button class="tbtn" @click="exportFavoritePalettes" :disabled="favoritePalettes.length === 0"><svg viewBox="0 0 24 24"><path d="M12 3l2.7 5.6 6.3.9-4.5 4.3 1 6.2-5.5-3-5.5 3 1-6.2L3 9.5l6.3-.9z"/></svg>{{ t('settings.exportFavorites') }}</button>
         <input ref="paletteFileInput" type="file" accept=".json" multiple style="display:none;" @change="importPalettes" />
       </div>
       </DenseSection>
@@ -3716,91 +3722,91 @@ async function startVideoExport(payload: {
     </div>
 
     <div v-else-if="activeTab === 'performance'" class="graphics-tab sections">
-      <DenseSection title="Affichage">
+      <DenseSection :title="t('settings.performance.display.title')">
         <DenseToggle
-          label="Affichage HDR"
+          :label="t('settings.performance.display.hdr')"
           :model-value="props.outputDiagnostics?.hdrRequested ?? false"
           :disabled="!props.outputDiagnostics || props.hdrDisplayDisabled"
-          desc="Affiche les hautes lumières sur un écran compatible HDR. Indépendant du format des captures."
+          :desc="t('settings.performance.display.hdrDesc')"
           @update:model-value="emit('toggle-hdr-display')"
         />
         <template v-if="props.outputDiagnostics">
           <p class="panel-note" role="status">
-            Surface {{ props.outputDiagnostics.toneMapping === 'extended' ? 'HDR' : 'SDR' }} ·
-            {{ props.outputDiagnostics.format === 'rgba16float' ? '16 bits flottants' : '8 bits' }}
+            {{ t('settings.performance.display.surface') }} {{ props.outputDiagnostics.toneMapping === 'extended' ? 'HDR' : 'SDR' }} ·
+            {{ props.outputDiagnostics.format === 'rgba16float' ? t('settings.performance.display.float16') : t('settings.performance.display.bits8') }}
           </p>
           <details class="display-diagnostics">
-            <summary>Diagnostic d’affichage</summary>
-            <p>Capacité HDR annoncée : {{ props.outputDiagnostics.hdrCapable ? 'oui' : 'non' }}</p>
-            <p>Surface : {{ props.outputDiagnostics.format }} · {{ props.outputDiagnostics.colorSpace }}</p>
-            <p>Présentation : {{ props.outputDiagnostics.toneMapping === 'extended' ? 'HDR étendue' : 'SDR standard' }}</p>
-            <p>Dithering : {{ props.outputDiagnostics.dithering }}</p>
-            <p class="panel-note">La capacité annoncée ne mesure ni la luminosité réelle ni la profondeur physique de l’écran.</p>
+            <summary>{{ t('settings.performance.display.diagnostics') }}</summary>
+            <p>{{ t('settings.performance.display.hdrCapable', { value: props.outputDiagnostics.hdrCapable ? t('common.yes') : t('common.no') }) }}</p>
+            <p>{{ t('settings.performance.display.surfaceLine', { format: props.outputDiagnostics.format, colorSpace: props.outputDiagnostics.colorSpace }) }}</p>
+            <p>{{ t('settings.performance.display.presentation', { mode: props.outputDiagnostics.toneMapping === 'extended' ? t('settings.performance.display.hdrExtended') : t('settings.performance.display.sdrStandard') }) }}</p>
+            <p>{{ t('settings.performance.display.dithering', { value: props.outputDiagnostics.dithering }) }}</p>
+            <p class="panel-note">{{ t('settings.performance.display.capabilityNote') }}</p>
           </details>
         </template>
-        <p v-else class="panel-note">Préparation de l’affichage…</p>
+        <p v-else class="panel-note">{{ t('settings.performance.display.preparing') }}</p>
       </DenseSection>
-      <DenseSection title="Qualité et fluidité">
+      <DenseSection :title="t('settings.performance.quality.title')">
         <div class="fields"><DenseSelect
-            label="DPR"
+            :label="t('settings.performance.quality.dpr')"
             :options="resolutionOptions"
             :model-value="nearestPreset(model.dprMultiplier ?? 1, RESOLUTION_PRESETS)"
             @update:model-value="(v) => model.dprMultiplier = Number(v)"
           />
 <DenseField
-            label="Cadence cible" :min="10" :max="60" :step="1" :default="60"
+            :label="t('settings.performance.quality.targetFps')" :min="10" :max="60" :step="1" :default="60"
             :f="fpsFmt"
             :model-value="model.targetFps ?? 60"
             @update:model-value="(v: number) => model.targetFps = v"
           />
 <DenseSelect
-            label="AA"
+            :label="t('settings.performance.quality.aa')"
             :options="aaSampleOptions"
             :model-value="nearestPreset(model.antialiasLevel ?? 1, AA_SAMPLE_PRESETS)"
             @update:model-value="(v) => model.antialiasLevel = Number(v)"
           />
 <DenseSelect
-            label="Bascule"
+            :label="t('settings.performance.quality.swap')"
             :options="zoomThresholdOptions"
             :model-value="nearestPreset(model.zoomMagnificationThreshold ?? 16, ZOOM_THRESHOLD_PRESETS)"
             @update:model-value="(v) => model.zoomMagnificationThreshold = Number(v)"
           />
 <DenseToggle
-            label="AA automatique"
+            :label="t('settings.performance.quality.aaAuto')"
             :model-value="!!model.aaAuto"
             @update:model-value="(v: boolean) => model.aaAuto = v"
           /></div>
-        <p v-if="model.activateAnimate && model.aaAuto" class="panel-note">AA automatique en pause pendant l’animation.</p>
-        <p v-else-if="(model.antialiasLevel ?? 1) <= 1" class="panel-note">Choisir au moins 2 échantillons pour lisser le rendu.</p>
-        <p class="panel-note">Bascule : rapport d’agrandissement entre deux recalculs complets pendant un zoom continu. Plus bas = image nette plus souvent, plus de calcul.</p>
+        <p v-if="model.activateAnimate && model.aaAuto" class="panel-note">{{ t('settings.performance.quality.aaPaused') }}</p>
+        <p v-else-if="(model.antialiasLevel ?? 1) <= 1" class="panel-note">{{ t('settings.performance.quality.aaHint') }}</p>
+        <p class="panel-note">{{ t('settings.performance.quality.swapNote') }}</p>
       </DenseSection>
-      <DenseSection title="Calcul avancé" initially-collapsed>
+      <DenseSection :title="t('settings.performance.advanced.title')" initially-collapsed>
         <div class="fields"><DenseField
-            label="Réserve de précision" :min="1" :max="1000" :step="1" :default="30"
+            :label="t('settings.performance.advanced.precisionReserve')" :min="1" :max="1000" :step="1" :default="30"
             :f="precisionBudgetFmt"
             :model-value="precisionBudgetExp"
             @update:model-value="(v: number) => precisionBudgetExp = v"
           />
 <DenseField
-            label="Budget d’itérations" :min="-2" :max="2" :step="0.01" :default="0"
+            :label="t('settings.performance.advanced.iterationBudget')" :min="-2" :max="2" :step="0.01" :default="0"
             :f="iterationsFmt"
             :model-value="maxIterMultSlider"
             @update:model-value="(v: number) => maxIterMultSlider = v"
           />
 <DenseToggle
-            label="AA adaptatif" :default="true"
+            :label="t('settings.performance.advanced.aaAdaptive')" :default="true"
             :model-value="model.aaAdaptive !== false"
             @update:model-value="(v: boolean) => model.aaAdaptive = v"
           /></div>
-        <DenseSelect label="Algorithme" :options="calculationOptions" :model-value="kernelApproximationMode(model.approximationMode ?? 'bla')" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
-        <p v-if="orbitTrapConfig.mode === 'exact'" class="panel-note">Orbit trap exact : les sauts sont désactivés pour parcourir toute l’orbite.</p>
+        <DenseSelect :label="t('settings.performance.advanced.algorithm')" :options="calculationOptions" :model-value="kernelApproximationMode(model.approximationMode ?? 'bla')" @update:model-value="(v) => model.approximationMode = v as ApproximationMode" />
+        <p v-if="orbitTrapConfig.mode === 'exact'" class="panel-note">{{ t('settings.performance.advanced.orbitTrapExactNote') }}</p>
         <div v-else-if="model.approximationMode !== 'perturbation'" class="fields"><DenseField
-            label="Tolérance d’approximation" :min="-12" :max="-4" :step="1" :default="-3"
+            :label="t('settings.performance.advanced.approxTolerance')" :min="-12" :max="-4" :step="1" :default="-3"
             :f="radiusFmt"
             :model-value="blaEpsilonExp"
             @update:model-value="(v: number) => blaEpsilonExp = v"
           /></div>
-        <p class="panel-note">La réserve de précision prépare les zooms profonds. La modifier reconstruit la référence.</p>
+        <p class="panel-note">{{ t('settings.performance.advanced.precisionNote') }}</p>
       </DenseSection>
     </div>
   </div>

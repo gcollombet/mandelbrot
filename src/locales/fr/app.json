@@ -1,0 +1,8 @@
+{
+  "webgpu": {
+    "title": "WebGPU non supporté",
+    "body1": "Ce navigateur ne supporte pas WebGPU.",
+    "body2": "Veuillez utiliser un navigateur compatible WebGPU.",
+    "browserList": "Liste des navigateurs compatibles WebGPU"
+  }
+}

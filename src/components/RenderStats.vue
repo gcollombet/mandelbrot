@@ -1,6 +1,9 @@
 <script setup lang="ts">
 import {computed, onMounted, onUnmounted, ref} from 'vue';
 import {log10FromDecimalString} from '../floatexp';
+import {useI18n} from 'vue-i18n';
+
+const {t} = useI18n();
 
 const props = defineProps<{
   engine: any;
@@ -107,7 +110,7 @@ onUnmounted(() => {
 
 <template>
   <div class="render-stats">
-    <button class="stats-header" @click="emit('open-perf-panel')" title="Ouvrir le panel de performance (m)">
+    <button class="stats-header" @click="emit('open-perf-panel')" :title="t('renderStats.openPerfPanel')">
       <span
         class="status-dot"
         :class="isBuildingRef ? 'status-dot--reference' : (isRendering ? 'status-dot--active' : 'status-dot--idle')"
@@ -115,11 +118,11 @@ onUnmounted(() => {
       <span class="stats-fps">{{ fps }} fps</span>
 
       <!-- Brief indicators for zoom magnitude and max iterations -->
-      <span class="header-badge" title="Magnitude du zoom">
+      <span class="header-badge" :title="t('renderStats.zoomMagnitude')">
         <span class="header-badge-label">Z</span>
         <span class="header-badge-value">{{ zoomMagnitude }}</span>
       </span>
-      <span class="header-badge" title="Itérations maximales">
+      <span class="header-badge" :title="t('renderStats.maxIterations')">
         <span class="header-badge-label">I</span>
         <span class="header-badge-value">{{ maxIterationsCondensed }}</span>
       </span>

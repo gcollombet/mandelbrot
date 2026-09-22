@@ -1,0 +1,75 @@
+{
+  "curves": { "linear": "Linéaire", "gaussian": "Gaussienne", "square": "Carrée", "exponential": "Exponentielle" },
+  "modes": { "radial": "Cercles concentriques", "global": "Toute l’image" },
+  "outside": { "hold": "Palette de début / fin", "manual": "Palette manuelle" },
+  "savedNew": "Nouveau / non enregistré",
+  "errors": {
+    "endAfterStart": "La magnitude d’arrivée doit dépasser celle du départ.",
+    "presetUnavailable": "Ce preset n’est plus disponible."
+  },
+  "currentPalette": "Palette actuelle",
+  "unnamedPreset": "Preset sans nom",
+  "copySuffix": "copie",
+  "status": {
+    "snapshotSaved": "Palette « {name} » enregistrée dans la bibliothèque.",
+    "pathSaved": "Parcours « {name} » enregistré sur ce navigateur.",
+    "pathDeleted": "Parcours « {name} » supprimé."
+  },
+  "path": {
+    "title": "Parcours",
+    "scope": "Une palette par profondeur, fondue entre les stops",
+    "enable": "Activer le parcours",
+    "outside": "Hors plage",
+    "mode": "Application",
+    "start": "Départ",
+    "end": "Arrivée",
+    "note": "La magnitude augmente en zoomant. En mode cercles, elle varie aussi avec la distance au centre de la vue.",
+    "timelineLabel": "Parcours de palettes",
+    "currentMagnitude": "Magnitude actuelle : {value}",
+    "stopAt": "{name} à {value}",
+    "editingSuffix": " (en édition)",
+    "hints": "Clic : sélectionner · glisser : déplacer · double-clic sur la bande : ajouter un stop ici · double-clic sur un stop : l’éditer dans Palettes.",
+    "editingNote": "« {name} » est chargé dans l’onglet Palettes : chaque modification s’applique au parcours. Désactiver le parcours restaure la palette précédente.",
+    "count": "{count} stops · magnitude {value}",
+    "addStop": "+ Stop",
+    "extractTitle": "Enregistre le mélange à la magnitude actuelle dans la bibliothèque, avec ses matériaux et images (approximation sur 200 points ; en mode cercles, au curseur uniquement)",
+    "extracting": "Capture en cours…",
+    "extract": "Extraire au curseur"
+  },
+  "stop": {
+    "title": "Stop sélectionné",
+    "scope": "Palette, position et transition du stop",
+    "endpointLocked": "Les stops de départ et d’arrivée suivent la plage",
+    "magnitude": "Magnitude",
+    "nextTransition": "Transition suivante",
+    "fill": "Remplir le stop",
+    "fromLibrary": "Palette de la bibliothèque",
+    "fromPreset": "Preset complet",
+    "captureTitle": "Copie la palette manuelle et ses matériaux dans ce stop",
+    "capture": "Palette actuelle",
+    "searchPlaceholder": "Rechercher…",
+    "search": "Rechercher",
+    "noPalette": "Aucune palette trouvée.",
+    "presetSub": "Couleurs, matériaux et images",
+    "noPreview": "Aperçu indisponible",
+    "noPreset": "Aucun preset trouvé.",
+    "remove": "Supprimer ce stop"
+  },
+  "saved": {
+    "title": "Parcours enregistrés",
+    "scope": "Sauvegarde locale sur ce navigateur",
+    "select": "Parcours",
+    "name": "Nom du parcours",
+    "save": "Enregistrer",
+    "duplicate": "Dupliquer",
+    "new": "Nouveau",
+    "delete": "Supprimer",
+    "note": "Sauvegarde locale sur ce navigateur : les parcours ne sont pas synchronisés avec le cloud. Chaque stop conserve une copie de sa palette."
+  },
+  "textures": {
+    "title": "Textures et calcul",
+    "scope": "Résolution des images du parcours",
+    "maxSize": "Résolution maximale des images",
+    "note": "Images partagées entre les stops, budget de 128 Mio. La fréquence orbitale et la géométrie des traps restent communes ; les matériaux et effets varient d’un stop à l’autre. L’ExpMap cuit toujours les cercles."
+  }
+}

@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
+const { t } = useI18n();
 interface SelOption { label: string; value: string | number }
 const props = defineProps<{ modelValue: string | number; label?: string; disabled?: boolean; options: readonly SelOption[];
   /** Optional default: marks the row `.mod` when different and a double-click restores it. */
@@ -16,7 +18,7 @@ function onChange(e: Event) {
 
 <template>
   <div class="fld fld-sel" :class="{ mod: props.default !== undefined && modelValue !== props.default }"
-    :title="props.default !== undefined ? 'Double-clic : valeur par défaut' : undefined" @dblclick="reset">
+    :title="props.default !== undefined ? t('common.dblclickDefault') : undefined" @dblclick="reset">
     <span v-if="label" class="fld-lab">{{ label }}</span>
     <div class="selbox">
       <select :aria-label="label" :disabled="disabled" :value="modelValue" @change="onChange">

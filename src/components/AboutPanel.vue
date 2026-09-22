@@ -1,7 +1,10 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
 import { computed } from 'vue';
 import { DenseSection } from './dense';
+import LanguageSwitcher from './LanguageSwitcher.vue';
 import { getKeyboardLayout, getShortcutGroups } from '../keyboardShortcuts';
+const { t } = useI18n();
 
 const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
 </script>
@@ -9,15 +12,15 @@ const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
 <template>
   <div class="about-tab sections">
     <DenseSection
-      title="Aide"
-      scope="Gestes et raccourcis"
+      :title="t('aboutPanel.help.title')"
+      :scope="t('aboutPanel.help.scope')"
       icon='<circle cx="12" cy="12" r="9"/><path d="M9.5 9a2.5 2.5 0 015 0c0 1.6-2.5 2.1-2.5 3.8M12 17h.01"/>'
     >
       <div class="touch-help">
-        <p><strong>Déplacer</strong> · glisser avec un doigt.</p>
-        <p><strong>Zoomer / tourner</strong> · pincer ou pivoter avec deux doigts.</p>
-        <p><strong>Commandes précises</strong> · ouvrir la boussole en bas de l’écran.</p>
-        <p><strong>Réglages</strong> · toucher une valeur pour la saisir. Agrandir le panneau avec ⌃.</p>
+        <p><strong>{{ t('aboutPanel.help.moveTitle') }}</strong> · {{ t('aboutPanel.help.moveText') }}</p>
+        <p><strong>{{ t('aboutPanel.help.zoomTitle') }}</strong> · {{ t('aboutPanel.help.zoomText') }}</p>
+        <p><strong>{{ t('aboutPanel.help.preciseTitle') }}</strong> · {{ t('aboutPanel.help.preciseText') }}</p>
+        <p><strong>{{ t('aboutPanel.help.settingsTitle') }}</strong> · {{ t('aboutPanel.help.settingsText') }}</p>
       </div>
       <div class="shortcut-groups desktop-help">
         <div v-for="group in shortcutGroups" :key="group.label" class="shortcut-group">
@@ -30,13 +33,21 @@ const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
     </DenseSection>
 
     <DenseSection
-      title="Crédits" initially-collapsed
-      scope="Technologies & projet"
+      :title="t('aboutPanel.language.title')"
+      :scope="t('aboutPanel.language.scope')"
+      icon='<circle cx="12" cy="12" r="9"/><path d="M3 12h18M12 3a14 14 0 010 18M12 3a14 14 0 000 18"/>'
+    >
+      <LanguageSwitcher />
+    </DenseSection>
+
+    <DenseSection
+      :title="t('aboutPanel.credits.title')" initially-collapsed
+      :scope="t('aboutPanel.credits.scope')"
       icon='<path d="M12 3v12M7 10l5 5 5-5"/><path d="M5 21h14"/>'
     >
       <p class="about-credit-line">
         <a href="https://wgpu.rs/" target="_blank" rel="noopener" class="about-link" aria-label="wGPU">
-          Made with
+          {{ t('aboutPanel.credits.madeWith') }}
           <img
             src="https://raw.githubusercontent.com/gfx-rs/wgpu/refs/heads/trunk/logo.png"
             alt="wGPU logo"
@@ -53,15 +64,13 @@ const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
         </a>
       </p>
       <p class="about-blurb">
-        Ce moteur de rendu Mandelbrot en temps réel est développé par Guillaume Collombet.
-        Il s'appuie sur WebGPU pour le calcul GPU parallèle, Vue 3 pour l'interface,
-        et Rust/WebAssembly pour les calculs de référence en précision arbitraire.
+        {{ t('aboutPanel.credits.blurb') }}
       </p>
     </DenseSection>
 
     <a href="./presentation/" class="about-presentation-cta">
       <i class="fa-solid fa-display fa-fw"></i>
-      Découvrir la présentation complète
+      {{ t('aboutPanel.presentationCta') }}
     </a>
   </div>
 </template>

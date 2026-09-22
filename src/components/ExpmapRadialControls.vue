@@ -1,18 +1,14 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { documentEffects, saveDocumentEffects } from '../expmap/effects'
 import { radialConfig, radialMode, type RadialMode } from '../expmap/radial'
 const props=defineProps<{documentId:string;tileCount:number}>()
+const { t }=useI18n()
 const effects=computed(()=>documentEffects(props.documentId))
 const mode=computed(()=>radialMode(effects.value))
-const choices: {value:RadialMode;label:string;description:string}[]=[
-  {value:'mirror',label:'◉ Miroir fixe',description:'Anneau immobile : le contenu se déplace en sens opposés de part et d’autre. Les profondeurs hors bande sont répétées.'},
-  {value:'normal',label:'Normal',description:'Lecture originale, sans pli.'},
-  {value:'repeat',label:'↻ Répétition',description:'Dernière octave → première. Raccord direct, sans fondu.'},
-  {value:'pingpong',label:'↔ Ping-pong',description:'Toute la plage aller-retour, en continu. Le miroir agit dans l’image.'},
-  {value:'radial',label:'◎ Kaléidoscope radial',description:'Une plage répétée en miroir sur des cercles concentriques.'},
-  {value:'folds',label:'⇢ Plis progressifs',description:'Chaque plage est lue aller-retour-aller, puis la suivante.'},
-]
+const RADIAL_MODES:RadialMode[]=['mirror','normal','repeat','pingpong','radial','folds']
+const choices=computed<{value:RadialMode;label:string;description:string}[]>(()=>RADIAL_MODES.map(value=>({value,label:t(`expmapControls.radial.modes.${value}.label`),description:t(`expmapControls.radial.modes.${value}.description`)})))
 function select(value:RadialMode){saveDocumentEffects(props.documentId,{...effects.value,radialMode:value,loopOctaves:value!=='normal'})}
 const config=computed(()=>radialConfig(effects.value,props.tileCount))
 const start=computed(()=>config.value.start)
@@ -33,23 +29,23 @@ function setPeriod(value:number){
 }
 </script>
 <template>
-  <section class="radial" aria-label="Relecture radiale">
-    <strong>Relecture radiale</strong>
-    <div class="modes" role="group" aria-label="Mode de relecture radiale"><button v-for="choice in choices" :key="choice.value" type="button" :aria-pressed="mode===choice.value" :title="choice.description" @click="select(choice.value)">{{ choice.label }}</button></div>
+  <section class="radial" :aria-label="t('expmapControls.radial.title')">
+    <strong>{{ t('expmapControls.radial.title') }}</strong>
+    <div class="modes" role="group" :aria-label="t('expmapControls.radial.modeAria')"><button v-for="choice in choices" :key="choice.value" type="button" :aria-pressed="mode===choice.value" :title="choice.description" @click="select(choice.value)">{{ choice.label }}</button></div>
     <div v-if="['pingpong','radial'].includes(mode)" class="period">
-      <label>Départ dans la bande <input aria-label="Octave de départ de la relecture radiale" type="number" min="0" :max="tileCount-1" step="1" :value="start" @change="setStart(Number(($event.target as HTMLInputElement).value))"> octaves</label>
-      <input aria-label="Choisir le départ radial dans la bande" type="range" min="0" :max="tileCount-1" step="1" :value="start" @input="setStart(Number(($event.target as HTMLInputElement).value))">
-      <button type="button" @click="setStart(0)">Début de bande</button>
-      <small>Plage : {{ start }} → {{ start+period }} octaves</small>
+      <label>{{ t('expmapControls.radial.startInBand') }} <input :aria-label="t('expmapControls.radial.startAria')" type="number" min="0" :max="tileCount-1" step="1" :value="start" @change="setStart(Number(($event.target as HTMLInputElement).value))"> {{ t('expmapControls.radial.octaves') }}</label>
+      <input :aria-label="t('expmapControls.radial.startSliderAria')" type="range" min="0" :max="tileCount-1" step="1" :value="start" @input="setStart(Number(($event.target as HTMLInputElement).value))">
+      <button type="button" @click="setStart(0)">{{ t('expmapControls.radial.bandStart') }}</button>
+      <small>{{ t('expmapControls.radial.range', { from: start, to: start+period }) }}</small>
     </div>
     <div v-if="['pingpong','radial','folds'].includes(mode)" class="period">
-      <label>{{ mode==='pingpong'?'Étendue aller':'Largeur du pli' }} <input aria-label="Profondeur du pli en octaves" type="number" min="1" :max="available" step="1" :value="period" @change="setPeriod(Number(($event.target as HTMLInputElement).value))"> octaves</label>
-      <div role="group" aria-label="Préréglages de profondeur"><button v-for="n in [1,2,4,8].filter(n=>n<=available)" :key="n" type="button" :aria-pressed="period===n" @click="setPeriod(n)">{{ n }}</button><button type="button" :aria-pressed="period===available" @click="setPeriod(available)">Tout</button></div>
+      <label>{{ mode==='pingpong'?t('expmapControls.radial.forthExtent'):t('expmapControls.radial.foldWidth') }} <input :aria-label="t('expmapControls.radial.foldDepthAria')" type="number" min="1" :max="available" step="1" :value="period" @change="setPeriod(Number(($event.target as HTMLInputElement).value))"> {{ t('expmapControls.radial.octaves') }}</label>
+      <div role="group" :aria-label="t('expmapControls.radial.depthPresetsAria')"><button v-for="n in [1,2,4,8].filter(n=>n<=available)" :key="n" type="button" :aria-pressed="period===n" @click="setPeriod(n)">{{ n }}</button><button type="button" :aria-pressed="period===available" @click="setPeriod(available)">{{ t('expmapControls.radial.all') }}</button></div>
     </div>
     <div v-if="mode==='mirror'" class="period">
-      <label>Rayon du miroir <input aria-label="Rayon du miroir fixe" type="range" min="2" max="84" step="1" :value="mirrorRadius" @input="setMirrorRadius(Number(($event.target as HTMLInputElement).value))"><output>{{ mirrorRadius.toFixed(0) }} %</output></label>
-      <div role="group" aria-label="Rayons du miroir"><button v-for="r in [12.5,25,50,75]" :key="r" type="button" :aria-pressed="Math.abs(mirrorRadius-r)<.01" @click="setMirrorRadius(r)">{{ r }} %</button></div>
-      <small>Pourcentage du rayon de référence de l’image.</small>
+      <label>{{ t('expmapControls.radial.mirrorRadius') }} <input :aria-label="t('expmapControls.radial.mirrorRadiusAria')" type="range" min="2" max="84" step="1" :value="mirrorRadius" @input="setMirrorRadius(Number(($event.target as HTMLInputElement).value))"><output>{{ mirrorRadius.toFixed(0) }} %</output></label>
+      <div role="group" :aria-label="t('expmapControls.radial.mirrorRadiiAria')"><button v-for="r in [12.5,25,50,75]" :key="r" type="button" :aria-pressed="Math.abs(mirrorRadius-r)<.01" @click="setMirrorRadius(r)">{{ r }} %</button></div>
+      <small>{{ t('expmapControls.radial.mirrorHint') }}</small>
     </div>
     <small>{{ choices.find(c=>c.value===mode)?.description }}</small>
   </section>

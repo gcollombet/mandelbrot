@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import {validatePalettePath, snapshotPathAppearance} from '../palettePath'
 import {resolvePalettePathImages} from '../palettePathResources'
 import type { RenderOptions } from '../Engine'
@@ -12,29 +13,29 @@ export function expmapAppearanceProblems(options: RenderOptions): AppearanceProb
   const problems: AppearanceProblem[] = []
   const refuse = (field: string, message: string, stopIndex?: number) => problems.push({ field, message, stopIndex, kind: 'invalid' })
   const restrict = (field: string, message: string, stopIndex?: number) => problems.push({ field, message, stopIndex, kind: 'unsupported' })
-  if (!options.colorStops?.length) refuse('colorStops', 'Une palette non vide est requise.')
+  if (!options.colorStops?.length) refuse('colorStops', t('expmap.appearance.nonEmptyPalette'))
   for (const [stopIndex, stop] of (options.colorStops ?? []).entries()) {
     for (const [field, value] of Object.entries(stop)) {
-      if (typeof value === 'number' && !Number.isFinite(value)) refuse(field, 'Valeur non finie.', stopIndex)
+      if (typeof value === 'number' && !Number.isFinite(value)) refuse(field, t('expmap.appearance.nonFinite'), stopIndex)
     }
     if (!Number.isFinite(stop.position) || stop.position < 0 || stop.position > 1 || !stop.color) {
-      refuse('colorStops', 'Stop de palette invalide.', stopIndex)
+      refuse('colorStops', t('expmap.appearance.invalidStop'), stopIndex)
     }
     for (const field of EFFECT_FIELD_NAMES) {
       const value = getEffectValue(stop, field)
-      if (!Number.isFinite(value)) refuse(field, 'Valeur non finie.', stopIndex)
+      if (!Number.isFinite(value)) refuse(field, t('expmap.appearance.nonFinite'), stopIndex)
     }
     for (const field of ['shading', 'tessellation', 'webcam'] as const) {
       if (getEffectValue(stop, field) !== 0) {
-        restrict(field, field === 'shading' ? 'Le shading actif dépend de la vue et de l’échelle.' : 'Cette image source n’est pas encore figée et vérifiée pour la reprise ExpMap.', stopIndex)
+        restrict(field, field === 'shading' ? t('expmap.appearance.shadingViewDependent') : t('expmap.appearance.textureNotFrozen'), stopIndex)
       }
     }
   }
   for (const field of ['heightPaletteShift', 'phaseColoringStrength'] as const) {
-    if (!Number.isFinite(options[field])) refuse(field, 'Valeur non finie.')
+    if (!Number.isFinite(options[field])) refuse(field, t('expmap.appearance.nonFinite'))
   }
-  if (options.heightPaletteShift !== 0) restrict('heightPaletteShift', 'La hauteur utilisée pour décaler la palette dépend de l’échelle de vue.')
-  if (options.debugShading) restrict('debugShading', 'Les vues de diagnostic ne sont pas des couleurs spatiales persistantes.')
+  if (options.heightPaletteShift !== 0) restrict('heightPaletteShift', t('expmap.appearance.heightShift'))
+  if (options.debugShading) restrict('debugShading', t('expmap.appearance.debugViews'))
   // A paused track contributes its fixed phase; this can be baked for spatial
   // colors. Height remains scale-dependent even when its contribution is fixed.
   const hasShading = (options.colorStops ?? []).some(stop => getEffectValue(stop, 'shading') !== 0)
@@ -47,13 +48,13 @@ export function expmapAppearanceProblems(options: RenderOptions): AppearanceProb
     const inactive = (!hasShading && materialTracks.has(id)) || (!hasTexture && textureTracks.has(id))
     const moving = options.activateAnimate !== false && track.speed !== 0 && animation.globalSpeed !== 0
     if (!inactive && track.enabled && track.amplitude !== 0 && (moving || id === 'heightPaletteShift')) {
-      restrict(`animation.${id}`, id === 'heightPaletteShift' ? 'Cette piste modifie une hauteur dépendante de l’échelle de vue.' : 'Désactiver cette animation de couleur pour cuire une apparence fixe.')
+      restrict(`animation.${id}`, id === 'heightPaletteShift' ? t('expmap.appearance.heightTrack') : t('expmap.appearance.disableAnimation'))
     }
   }
   for (const [id, track] of Object.entries(options.animation?.tracks ?? {})) {
-    if (![track.speed, track.amplitude, track.phase ?? 0].every(Number.isFinite)) refuse(`animation.${id}`, 'Piste non finie.')
+    if (![track.speed, track.amplitude, track.phase ?? 0].every(Number.isFinite)) refuse(`animation.${id}`, t('expmap.appearance.trackNonFinite'))
   }
-  if (options.animation && !Number.isFinite(options.animation.globalSpeed)) refuse('animation.globalSpeed', 'Vitesse non finie.')
+  if (options.animation && !Number.isFinite(options.animation.globalSpeed)) refuse('animation.globalSpeed', t('expmap.appearance.speedNonFinite'))
   if (options.palettePath?.enabled) {
     try {
       const path = validatePalettePath(options.palettePath)

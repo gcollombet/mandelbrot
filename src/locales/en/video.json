@@ -1,0 +1,103 @@
+{
+  "path": {
+    "durationInvalid": "Duration must be a finite positive number of seconds (got {value}).",
+    "endpointStart": "start",
+    "endpointEnd": "end",
+    "endpointField": "The {endpoint} point has no usable \"{field}\".",
+    "endpointAngle": "The {endpoint} angle must be finite.",
+    "degenerate": "Start and end are at the same place: the film will be a repeated still frame. Navigate then redefine one of the two points.",
+    "dynamicRangeInvalid": "Invalid video dynamic range.",
+    "hdrEvenDimensions": "HDR 4:2:0 video requires even dimensions.",
+    "hdrExposureInvalid": "Invalid HDR exposure (−16 to +16 EV).",
+    "hdrFpsMax": "HDR output supports up to 60 fps.",
+    "hdrQuantizerInvalid": "Invalid HDR quantizer (0 to 63).",
+    "outputWidth": "Output width must be a positive integer.",
+    "outputHeight": "Output height must be a positive integer.",
+    "fpsInvalid": "Frame rate must be a finite positive number.",
+    "supersampleInvalid": "Supersampling must be one of {factors} — a fractional factor has no exact box filter.",
+    "thresholdRange": "The swap threshold must be between {min} and {max} (got {value}).",
+    "textureTooLarge": "{width}×{height} at ×{supersample} requires a {neutral}² working texture, beyond the limit of this device ({limit}). Lower the resolution or the supersampling.",
+    "softness": "Threshold {threshold} above supersampling ×{supersample}: the periphery will be softer between two swaps, in exchange for a much faster export (one full reconvergence per zoom factor equal to the threshold)."
+  },
+  "runner": {
+    "cannotExport": "Cannot export this path:\n{problems}",
+    "navigatorUnavailable": "Navigator unavailable.",
+    "hdrCaptureUnavailable": "HDR video capture unavailable.",
+    "cancelled": "Export cancelled",
+    "interrupted": "Export interrupted"
+  },
+  "session": {
+    "frameTimeout": "Video export aborted: frame {frame} did not converge after {pumps} render pumps. No partially converged frame was emitted.",
+    "fpsInvalid": "fps must be a positive finite number",
+    "durationInvalid": "duration must be a positive finite number of seconds",
+    "maxPumpsInvalid": "maxPumpsPerFrame must be a positive integer",
+    "invalidSettings": "Invalid video export settings: {problems}"
+  },
+  "encoder": {
+    "codecs": {
+      "av1": "AV1 — best compression",
+      "avc": "H.264 / AVC — universal playback",
+      "hevc": "HEVC / H.265",
+      "vp9": "VP9"
+    },
+    "unknownCodec": "Unknown codec for an MP4 container: {codec}",
+    "configRefused": "{preference}: configuration refused",
+    "attemptFailed": "{preference}: {error}",
+    "unavailable": "{codec} encoding unavailable for {width}×{height}{fps}. {evenHint}Attempts: {failures}.",
+    "atFps": " at {fps} fps",
+    "avcEvenDimensions": "H.264 requires even dimensions. ",
+    "sinkClosed": "Cannot add frames after the sink has been finalized or cancelled.",
+    "sinkFinalized": "Sink already finalized.",
+    "noOutput": "Encoder produced no output buffer."
+  },
+  "hdr": {
+    "avcIsSdr": "The offered H.264 is SDR. Pick HEVC, AV1 or VP9 for 10-bit HDR.",
+    "quantizerInvalid": "Invalid {codec} quantizer ({min} to {max}).",
+    "evenDimensionsAndFps": "HDR requires even dimensions and a frame rate between 1 and 60 fps.",
+    "colorSpaceUnconfirmed": "The encoder does not confirm the expected Rec.2020/PQ HDR colorimetry.",
+    "tenBitUnconfirmed": "The encoder does not confirm a 10-bit output. No SDR fallback will be performed.",
+    "webCodecsRequired": "WebCodecs is required for HDR video.",
+    "tenBitProfileRefused": "10-bit profile refused.",
+    "constantQualityRefused": "Constant-quality mode refused.",
+    "outputMetadataMissing": "HDR output metadata missing.",
+    "encoderNotResponding": "The HDR encoder is not responding.",
+    "encoderNoFrame": "The HDR encoder produced no frame.",
+    "probeFailed": "{preference}{mode}: {error}",
+    "encodingUnavailable": "10-bit HDR {codec} encoding unavailable: {errors}",
+    "metadataMissingAtStart": "HDR metadata missing at the start of the video.",
+    "encoderClosed": "The HDR encoder is closed.",
+    "frameIncompatible": "Frame incompatible with the 10-bit HDR output.",
+    "noVideoProduced": "No HDR video produced.",
+    "clippingWarning": "Some highlights were clipped at 10,000 nits. The export continues; lower the HDR exposure to keep their detail.",
+    "dimensionsInvalid": "Invalid HDR dimensions.",
+    "exposureInvalid": "Invalid HDR exposure.",
+    "originInvalid": "Invalid HDR origin.",
+    "gpuLimit": "GPU limit insufficient for the HDR output.",
+    "nonFiniteLuminance": "Non-finite HDR luminance. Check the rendering and the materials."
+  },
+  "still": {
+    "notDivisible": "{width}×{height} is not divisible by the {grid}×{grid} grid.",
+    "hdrCaptureUnavailable": "HDR capture unavailable.",
+    "canvasUnavailable": "Canvas 2D unavailable to assemble the capture.",
+    "cancelled": "Capture cancelled",
+    "tileNotConverged": "Tile {tile}/{tiles} did not converge in {pumps} passes."
+  },
+  "tiled": {
+    "budgetInsufficient": "The memory budget is insufficient for the two keyframes and a minimal tile. At least {bytes} bytes are needed.",
+    "positiveInteger": "{name} must be a strictly positive integer.",
+    "finiteNonNegative": "{name} must be a finite number, positive or zero.",
+    "tileBytesPositive": "tileBytesPerTexel must be strictly positive.",
+    "budgetPositive": "budgetBytes must be a finite, strictly positive number.",
+    "fixedCenterRequired": "Tiled keyframe mode requires a fixed center. A travelling shot uses the monolithic path.",
+    "noJitteredAa": "Tiled keyframe mode does not accept per-frame jittered AA: its intermediate frames are pure reads. Use supersampling for anti-aliasing."
+  },
+  "stereo": {
+    "evenHeight": "Top/bottom video requires an even height",
+    "evenWidth": "Side-by-side video requires an even width",
+    "gpuDimensions": "Stereo dimensions incompatible with the GPU",
+    "webGpuRequired": "WebGPU is required for stereo"
+  },
+  "animationPreset": {
+    "nameRequired": "Animation preset name is required."
+  }
+}

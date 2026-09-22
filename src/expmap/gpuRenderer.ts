@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { fixedMirrorWindow, radialConfig, radialOctave, type RadialConfig } from './radial'
 import { expmapEffectsUniform, expmapImageRotation } from './effects'
 import shader from '../assets/expmap_reconstruct.wgsl?raw'
@@ -37,20 +38,20 @@ export class ExpmapGpuRenderer {
   private constructor(device:GPUDevice, ownDevice:boolean, manifest:ExpmapManifest) {
     this.device=device; this.ownDevice=ownDevice; this.manifest=manifest; this.radial=radialConfig(undefined,manifest.octaves.tileCount)
     this.canvas=new OffscreenCanvas(1,1); this.context=this.canvas.getContext('webgpu')!
-    if(!this.context) throw new Error('Canvas WebGPU indisponible')
+    if(!this.context) throw new Error(t('expmap.gpu.canvasUnavailable'))
   }
   static async create(store:ExpmapStore, manifest:ExpmapManifest, existingDevice?:GPUDevice) {
-    if(manifest.state!=='complete') throw new Error('Un document complet est requis')
+    if(manifest.state!=='complete') throw new Error(t('expmap.gpu.completeRequired'))
     const adapter=existingDevice ? undefined : await navigator.gpu?.requestAdapter()
     const device=existingDevice ?? await adapter?.requestDevice({requiredLimits:{maxTextureDimension2D:adapter.limits.maxTextureDimension2D}})
-    if(!device) throw new Error('WebGPU requis pour ExpMap')
+    if(!device) throw new Error(t('expmap.gpu.webgpuRequired'))
     let renderer:ExpmapGpuRenderer|undefined
     try { renderer=new ExpmapGpuRenderer(device,!existingDevice,manifest); await renderer.initialize(store); return renderer }
     catch(error) { if(renderer) renderer.dispose(); else if(!existingDevice) device.destroy(); throw error }
   }
   private async initialize(store:ExpmapStore) {
     const d=this.device, o=this.manifest.octaves, bytes=o.tileWidth*o.tileHeight*4
-    if(bytes>MAX_TILE_BYTES || Math.max(o.tileWidth,o.tileHeight)>d.limits.maxTextureDimension2D || d.limits.maxTextureArrayLayers<EXPMAP_RESIDENT_TILES) throw new Error('Les 14 tuiles dépassent les capacités de ce GPU. Recréer le document avec une résolution ou densité inférieure.')
+    if(bytes>MAX_TILE_BYTES || Math.max(o.tileWidth,o.tileHeight)>d.limits.maxTextureDimension2D || d.limits.maxTextureArrayLayers<EXPMAP_RESIDENT_TILES) throw new Error(t('expmap.gpu.tilesExceed'))
     const module=d.createShaderModule({code:shader})
     this.pipeline=await d.createRenderPipelineAsync({layout:'auto',vertex:{module,entryPoint:'vs'},fragment:{module,entryPoint:'fs',targets:[{format:'rgba8unorm'}]},primitive:{topology:'triangle-list'}})
     d.pushErrorScope('out-of-memory'); d.pushErrorScope('validation')
@@ -93,12 +94,12 @@ export class ExpmapGpuRenderer {
     this.cache.setWindow(window.needed,window.prefetch)
   }
   async render(view:ExpmapView, signal?:AbortSignal):Promise<OffscreenCanvas> {
-    if(this.disposed || this.busy) throw new Error('Lecteur fermé ou déjà occupé')
+    if(this.disposed || this.busy) throw new Error(t('expmap.gpu.playerClosedOrBusy'))
     validateExpmapView(this.manifest.projection,view); signal?.throwIfAborted(); this.busy=true
     try {
       const plan=this.manifest.projection, o=this.manifest.octaves
       const depth=scaleDoublements(plan.domain.startScale,view.scale)
-      if (!Number.isFinite(depth) || depth < 0 || depth > Number.MAX_SAFE_INTEGER - 18) throw new Error('Profondeur de lecture hors limites.')
+      if (!Number.isFinite(depth) || depth < 0 || depth > Number.MAX_SAFE_INTEGER - 18) throw new Error(t('expmap.gpu.depthOutOfRange'))
       const radial=radialConfig(view.effects,o.tileCount), key=JSON.stringify(radial)
       if(key!==this.radialKey) { this.cache.invalidate(); this.radial=radial; this.radialKey=key }
       const active=radial.mode!=='normal'
@@ -119,7 +120,7 @@ export class ExpmapGpuRenderer {
       this.reader!.metrics.record('wait',performance.now()-started)
       const measured=this.reader!.metrics.snapshot()
       this.loadLatencyMs=['read','hash','decode','upload'].reduce((sum,k)=>sum+(measured[k]?.lastMs??0),0) || 100
-      signal?.throwIfAborted(); if(this.disposed) throw new Error('Lecteur fermé')
+      signal?.throwIfAborted(); if(this.disposed) throw new Error(t('expmap.gpu.playerClosed'))
       if(this.canvas.width!==view.width) this.canvas.width=view.width
       if(this.canvas.height!==view.height) this.canvas.height=view.height
       const base=Math.floor(depth), readBase=Math.floor(readDepth), center=this.manifest.center!

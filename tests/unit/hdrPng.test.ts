@@ -43,7 +43,7 @@ describe('HDR PNG encoding', () => {
   it('honors cancellation and checks dimensions', async () => {
     const abort = new AbortController(); abort.abort()
     await expect(encodeHdrPng(1,1,new Uint16Array(3),{signal:abort.signal})).rejects.toMatchObject({name:'AbortError'})
-    await expect(encodeHdrPng(2,1,new Uint16Array(4))).rejects.toThrow('Dimensions')
+    await expect(encodeHdrPng(2,1,new Uint16Array(4))).rejects.toThrow('dimensions')
   })
   it('uses ST2084 endpoints, float16 subnormals and the Rec.2020 color transform', () => {
     expect(pqEncode(10000)).toBe(1)

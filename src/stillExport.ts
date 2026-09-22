@@ -1,4 +1,5 @@
 import type { HdrGpuOptions } from './hdrGpuOutput'
+import { t } from './i18n'
 // ── High-resolution still capture ──
 // Drives the engine's export session for a single camera position instead of
 // a parcours. SDR tiles assemble on a 2D canvas; HDR tiles contain GPU-converted RGB16 PQ bytes
@@ -99,7 +100,7 @@ export function planStillTiles(
     grid *= 2
   }
   if (width % grid !== 0 || height % grid !== 0) {
-    throw new Error(`${width}×${height} n'est pas divisible par la grille ${grid}×${grid}.`)
+    throw new Error(t('video.still.notDivisible', { width, height, grid }))
   }
   const tileW = width / grid
   const tileH = height / grid
@@ -217,10 +218,10 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
   const canvas = document.createElement('canvas')
   canvas.width = request.hdr ? 1 : plan.width
   canvas.height = request.hdr ? 1 : plan.height
-  if (request.hdr && !deps.engine.captureHdrFrame) throw new Error('Capture HDR indisponible.')
+  if (request.hdr && !deps.engine.captureHdrFrame) throw new Error(t('video.still.hdrCaptureUnavailable'))
   const hdrPixels = request.hdr ? new Uint16Array(plan.width * plan.height * 3) : undefined
   const ctx = canvas.getContext('2d')
-  if (!ctx) throw new Error('Canvas 2D indisponible pour assembler la capture.')
+  if (!ctx) throw new Error(t('video.still.canvasUnavailable'))
 
   const aspect = plan.width / plan.height
   const tileScale = plan.grid === 1
@@ -231,7 +232,7 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
   const { cx, cy, scale, angle } = request.location
 
   const throwIfAborted = () => {
-    if (request.signal?.aborted) throw new DOMException('Capture annulée', 'AbortError')
+    if (request.signal?.aborted) throw new DOMException(t('video.still.cancelled'), 'AbortError')
   }
 
   const placeCamera = (tile: StillTile) => {
@@ -281,7 +282,7 @@ export async function renderStill(deps: StillExportDeps, request: StillExportReq
       }
       totalPumps += pumps
       if (!ready) {
-        throw new Error(`La tuile ${tile.index + 1}/${plan.tiles.length} n'a pas convergé en ${maxPumps} passes.`)
+        throw new Error(t('video.still.tileNotConverged', { tile: tile.index + 1, tiles: plan.tiles.length, pumps: maxPumps }))
       }
       const pending = request.hdr ? deps.engine.captureHdrFrame!(surfaceW, surfaceH, 1, {format:'png',exposure:request.hdrExposure ?? 0,originX:tile.originX,originY:tile.originY,signal:request.signal,onWarning:onHdrWarning}) : deps.engine.captureExportFrame({
         outputWidth: surfaceW,

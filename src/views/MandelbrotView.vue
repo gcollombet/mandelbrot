@@ -1,21 +1,19 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
 import {computed, onMounted, ref} from 'vue';
 import {useRoute} from 'vue-router';
 import MandelbrotViewer from '../components/MandelbrotViewer.vue';
 import SplashScreen from '../components/SplashScreen.vue';
+const { t } = useI18n();
 
 const route = useRoute();
 const isWebGPUSupported = ref(false);
-const isFrench = ref(true);
 // DEV FLAG: `?forceui` renders the UI even without WebGPU. Keeping this in the
 // route makes browser back/forward update the shell without reloading the page.
 const forceUI = computed(() => Object.prototype.hasOwnProperty.call(route.query, 'forceui'));
 
 onMounted(() => {
   isWebGPUSupported.value = typeof navigator !== 'undefined' && 'gpu' in navigator;
-  if (typeof navigator !== 'undefined') {
-    isFrench.value = navigator.language.startsWith('fr');
-  }
 });
 </script>
 
@@ -30,20 +28,14 @@ onMounted(() => {
         <i class="fas fa-exclamation-triangle fa-2x"></i>
       </span>
       <h1 class="title is-4 mt-3">
-        {{ isFrench ? 'WebGPU non supporté' : 'WebGPU not supported' }}
+        {{ t('app.webgpu.title') }}
       </h1>
       <p>
-        <span v-if="isFrench">
-          Ce navigateur ne supporte pas WebGPU.<br>
-          Veuillez utiliser un navigateur compatible WebGPU.
-        </span>
-        <span v-else>
-          This browser does not support WebGPU.<br>
-          Please use a WebGPU-compatible browser.
-        </span>
+        {{ t('app.webgpu.body1') }}<br>
+        {{ t('app.webgpu.body2') }}
       </p>
       <a class="button is-link mt-4" href="https://developer.mozilla.org/en-US/docs/Web/API/WebGPU_API#browser_compatibility" target="_blank">
-        {{ isFrench ? 'Liste des navigateurs compatibles WebGPU' : 'List of WebGPU-compatible browsers' }}
+        {{ t('app.webgpu.browserList') }}
       </a>
     </div>
   </div>

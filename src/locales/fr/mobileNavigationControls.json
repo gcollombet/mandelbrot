@@ -1,0 +1,11 @@
+{
+  "toggle": "Afficher / masquer la navigation",
+  "moveNorth": "Déplacer vers le nord",
+  "moveSouth": "Déplacer vers le sud",
+  "moveWest": "Déplacer vers l'ouest",
+  "moveEast": "Déplacer vers l'est",
+  "rotateLeft": "Pivoter à gauche",
+  "rotateRight": "Pivoter à droite",
+  "zoomOut": "Dézoomer",
+  "zoomIn": "Zoomer"
+}

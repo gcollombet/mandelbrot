@@ -1,0 +1,102 @@
+{
+  "supersample": {
+    "none": "×1 — aucun suréchantillonnage",
+    "recommended": "×2 — recommandé"
+  },
+  "aa": {
+    "samples": "×{n} échantillons"
+  },
+  "renderMode": {
+    "monolithic": "Monolithique",
+    "tiledKeyframe": "Keyframes tuilées"
+  },
+  "encoder": {
+    "hardwarePreferred": "Matériel préféré",
+    "browserFallback": "Repli navigateur — logiciel possible"
+  },
+  "codec": {
+    "probing": "Vérification de l’encodeur…",
+    "avcCompat": "H.264 · compatibilité",
+    "unavailable": "Encodage indisponible",
+    "autoHdr": "Auto · HEVC, AV1, VP9 10 bits",
+    "autoSdr": "Auto · HEVC, sinon H.264",
+    "unavailableHere": "{label} — indisponible ici"
+  },
+  "memory": {
+    "gb": "{value} Go",
+    "mb": "{value} Mo",
+    "budgetField": "budget mémoire",
+    "tiles": "{count} tuile | {count} tuiles",
+    "tiledSummary": "{tiles} — {square} plein carré + {tile} tuile = {total}",
+    "textureSide": "texture {side}²"
+  },
+  "source": {
+    "label": "Source",
+    "mandelbrot": "Vidéo depuis la fractale",
+    "expmap": "Vidéo depuis une ExpMap cuite",
+    "shader": "Vidéo depuis une ExpMap recolorable",
+    "sdrNote": "Cette source RGB exporte en SDR. Pour une vidéo HDR, choisir « Vidéo depuis la fractale » ou une source recolorable, puis Dynamique → HDR."
+  },
+  "path": {
+    "title": "Trajet",
+    "scope": "Rendu de la fractale, image par image",
+    "fixedCenter": "Centre fixe",
+    "useCurrentCenter": "Utiliser le centre actuel",
+    "distinctCenters": "Centres distincts · travelling",
+    "startCenter": "Centre de départ",
+    "endCenter": "Centre d’arrivée",
+    "currentCenter": "Centre actuel",
+    "sameCenter": "Centre identique sur tout le trajet.",
+    "movingCenter": "Le centre se déplace entre les deux positions.",
+    "start": "Départ",
+    "end": "Arrivée",
+    "view": "Voir",
+    "rangeHint": "Vue large 10^+10 → zoom profond 10^-1000",
+    "reverse": "⇄ Inverser le trajet",
+    "duration": "Durée du trajet",
+    "meanSpeed": "Vitesse moyenne",
+    "doublingsPerSecond": "Doublements/s",
+    "timingPriorityNote": "La dernière valeur modifiée (durée ou vitesse) reste prioritaire lorsque la plage change.",
+    "summary": "{frames} images · {seconds} s au total. L’apparence courante est utilisée sur tout le trajet."
+  },
+  "output": {
+    "title": "Sortie",
+    "dynamicRange": "Dynamique",
+    "sdr": "SDR · 8 bits",
+    "hdr": "HDR · 10 bits PQ",
+    "hdrExposure": "Exposition HDR (EV)",
+    "hdrExposureAria": "Exposition vidéo HDR",
+    "quantizer": "Quantificateur",
+    "hdrNote": "Rec.2020 / PQ · blanc de référence 203 nits. Indépendant de l’affichage HDR. Le profil 10 bits est vérifié au démarrage ; aucun repli SDR. Qualité constante : 0 = maximale et fichiers très lourds, 10 à 20 = visuellement propre ; le débit cible est ignoré, repli en débit variable si l’encodeur refuse ce mode.",
+    "resolution": "Résolution",
+    "frameRate": "Cadence",
+    "codec": "Codec",
+    "filename": "Nom du fichier",
+    "filenameAria": "Nom du fichier vidéo"
+  },
+  "quality": {
+    "title": "Qualité",
+    "antialiasing": "Anticrénelage",
+    "supersampling": "Suréchantillonnage",
+    "budgetNote": "Le budget mémoire prudent de l’appareil est indicatif : l’export peut le dépasser si le GPU accepte l’allocation.",
+    "advanced": "Réglages avancés",
+    "memoryMode": "Mode mémoire",
+    "memoryBudget": "Budget mémoire",
+    "swapThreshold": "Seuil de bascule",
+    "thresholdNote": "Seuil de bascule : une valeur basse reconverge plus souvent ; une valeur haute privilégie la vitesse. Limite texture : {limit}."
+  },
+  "export": {
+    "title": "Export",
+    "scope": "Chaque image est calculée jusqu'à convergence",
+    "noHdrEncoder": "Aucun encodeur HDR 10 bits disponible pour ce choix dans ce navigateur.",
+    "noEncoder": "Aucun encodeur disponible pour ce choix.",
+    "pickAnother": "Choisis un autre codec ou une autre résolution.",
+    "finalizing": "Finalisation du fichier MP4",
+    "encoding": "Calcul et encodage des images",
+    "stopped": "Export arrêté",
+    "done": "Export terminé",
+    "interrupted": "Export interrompu",
+    "framesUnit": "images encodées",
+    "start": "Exporter en MP4"
+  }
+}

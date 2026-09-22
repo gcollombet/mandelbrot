@@ -1,5 +1,7 @@
 <script setup lang="ts">
 import { computed } from 'vue';
+import { useI18n } from 'vue-i18n';
+const { t } = useI18n();
 const props = defineProps<{
   signedIn: boolean;
   email: string;
@@ -12,39 +14,39 @@ const props = defineProps<{
 }>();
 const emit = defineEmits<{ login: []; logout: [] }>();
 const status = computed(() => {
-  if (!props.cloudEnabled) return 'Compte connecté';
-  if (props.syncState === 'syncing') return 'Sauvegarde cloud en cours…';
-  if (props.syncState === 'synced') return 'Presets synchronisés';
-  if (props.syncState === 'error') return 'Sauvegarde cloud à vérifier';
-  return 'Presets · synchronisation cloud';
+  if (!props.cloudEnabled) return t('cloudAccountControl.status.signedIn');
+  if (props.syncState === 'syncing') return t('cloudAccountControl.status.syncing');
+  if (props.syncState === 'synced') return t('cloudAccountControl.status.synced');
+  if (props.syncState === 'error') return t('cloudAccountControl.status.error');
+  return t('cloudAccountControl.status.idle');
 });
 </script>
 
 <template>
   <div class="cloud-account" :class="{ contextual, compact }" @pointerdown.stop @touchstart.stop @touchend.stop @wheel.stop>
     <template v-if="!signedIn">
-      <p v-if="contextual && cloudEnabled" class="explanation">Vos presets personnels restent dans ce navigateur. Connectez-vous pour les sauvegarder dans le cloud et les retrouver sur vos autres appareils.</p>
-      <button class="account-trigger guest" type="button" aria-label="Connexion avec Google — sauvegarde des presets dans le cloud" :disabled="busy" @click="emit('login')"
-        :title="cloudEnabled ? 'Connexion avec Google pour sauvegarder vos presets dans votre bibliothèque cloud personnelle' : 'Connexion avec Google'">
+      <p v-if="contextual && cloudEnabled" class="explanation">{{ t('cloudAccountControl.explanation') }}</p>
+      <button class="account-trigger guest" type="button" :aria-label="t('cloudAccountControl.loginAria')" :disabled="busy" @click="emit('login')"
+        :title="cloudEnabled ? t('cloudAccountControl.loginTitleCloud') : t('cloudAccountControl.loginTitle')">
         <i class="fa-solid fa-cloud" aria-hidden="true"></i>
         <span class="account-copy">
-          <strong>{{ busy ? 'Connexion…' : compact ? 'Connexion' : 'Se connecter avec Google' }}</strong>
-          <small v-if="cloudEnabled && !compact">Sauvegarder mes presets dans le cloud</small>
+          <strong>{{ busy ? t('cloudAccountControl.connecting') : compact ? t('cloudAccountControl.loginShort') : t('cloudAccountControl.loginFull') }}</strong>
+          <small v-if="cloudEnabled && !compact">{{ t('cloudAccountControl.loginSub') }}</small>
         </span>
       </button>
     </template>
     <details v-else class="account-menu">
-      <summary class="account-trigger" :class="syncState" :title="status" :aria-label="`Mon compte — ${status}`">
+      <summary class="account-trigger" :class="syncState" :title="status" :aria-label="t('cloudAccountControl.myAccountAria', { status })">
         <i class="fa-solid fa-cloud" aria-hidden="true"></i>
-        <span class="account-copy"><strong>Mon compte</strong><small v-if="!compact" role="status">{{ status }}</small></span>
+        <span class="account-copy"><strong>{{ t('cloudAccountControl.myAccount') }}</strong><small v-if="!compact" role="status">{{ status }}</small></span>
         <span aria-hidden="true">⌄</span>
       </summary>
       <div class="account-details">
         <p v-if="compact" role="status">{{ status }}</p>
-        <strong class="email">{{ email || 'Compte Google connecté' }}</strong>
-        <p v-if="cloudEnabled">Vos presets personnels sont synchronisés avec ce compte pour les retrouver sur vos appareils.</p>
-        <p v-if="cloudEnabled && syncState === 'error'" role="alert">La synchronisation avec le cloud a échoué. Vos modifications restent disponibles dans ce navigateur.</p>
-        <button type="button" :disabled="busy" @click="emit('logout')">{{ busy ? 'Déconnexion…' : 'Se déconnecter' }}</button>
+        <strong class="email">{{ email || t('cloudAccountControl.googleAccount') }}</strong>
+        <p v-if="cloudEnabled">{{ t('cloudAccountControl.syncedInfo') }}</p>
+        <p v-if="cloudEnabled && syncState === 'error'" role="alert">{{ t('cloudAccountControl.syncError') }}</p>
+        <button type="button" :disabled="busy" @click="emit('logout')">{{ busy ? t('cloudAccountControl.loggingOut') : t('cloudAccountControl.logout') }}</button>
       </div>
     </details>
     <p v-if="error" class="account-error" role="alert">{{ error }}</p>

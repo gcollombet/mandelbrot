@@ -15,7 +15,9 @@ export type GpuPassKey =
 export interface GpuPassSlot {
   key: GpuPassKey
   label: string
-  help: string
+  /** i18n key of the display label (`label` stays the stable English/CSV identifier). */
+  labelKey: string
+  helpKey: string
   timing: GpuPassTimingMode
 }
 
@@ -26,61 +28,71 @@ export const PASS_SLOTS: readonly GpuPassSlot[] = [
   {
     key: 'merge',
     label: 'Merge (zoom)',
-    help: 'Fusion résolu+figé vers un troisième display puis permutation, sans copie préparatoire. Ne tourne qu\'à l\'arrêt d\'un zoom.',
+    labelKey: 'performancePanel.passLabel.merge',
+    helpKey: 'performancePanel.passHelp.merge',
     timing: 'explicit-span',
   },
   {
     key: 'snapshot',
     label: 'Snapshot (zoom)',
-    help: 'Copie du display résolu vers le snapshot figé utilisé pendant le zoom.',
+    labelKey: 'performancePanel.passLabel.snapshot',
+    helpKey: 'performancePanel.passHelp.snapshot',
     timing: 'explicit-span',
   },
   {
     key: 'reproject',
     label: 'Reprojection (pan)',
-    help: 'Pan par décalage d\'origine torique du cache brut : seule la bande exposée est stampée.',
+    labelKey: 'performancePanel.passLabel.reproject',
+    helpKey: 'performancePanel.passHelp.reproject',
     timing: 'end-gap',
   },
   {
     key: 'clear',
     label: 'Clear cache',
-    help: 'Réinitialisation du cache brut par sentinelles, distincte du déplacement de pan.',
+    labelKey: 'performancePanel.passLabel.clear',
+    helpKey: 'performancePanel.passHelp.clear',
     timing: 'end-gap',
   },
   {
     key: 'reseed',
     label: 'AA reseed',
-    help: 'Ré-amorçage sélectif de la frontière pour un échantillon d\'anti-aliasing. Actif seulement en accumulation AA.',
+    labelKey: 'performancePanel.passLabel.reseed',
+    helpKey: 'performancePanel.passHelp.reseed',
     timing: 'end-gap',
   },
   {
     key: 'compute',
     label: 'Itération',
-    help: 'Kernel fusionné brush+mandelbrot+comptage (perturbation/BLA/jet…). C\'est le cœur du coût.',
+    labelKey: 'performancePanel.passLabel.compute',
+    helpKey: 'performancePanel.passHelp.compute',
     timing: 'end-gap',
   },
   {
     key: 'resolve',
     label: 'Resolve',
-    help: 'Présentation bilinéaire temporaire des pixels exacts encore incomplets.',
+    labelKey: 'performancePanel.passLabel.resolve',
+    helpKey: 'performancePanel.passHelp.resolve',
     timing: 'end-gap',
   },
   {
     key: 'aaAccum',
     label: 'Couleur (AA)',
-    help: 'Passe couleur accumulée dans le buffer AA (linéaire) pendant l\'accumulation.',
+    labelKey: 'performancePanel.passLabel.aaAccum',
+    helpKey: 'performancePanel.passHelp.aaAccum',
     timing: 'end-gap',
   },
   {
     key: 'color',
     label: 'Couleur / cache rotation',
-    help: 'Passe couleur directe vers l’écran, ou bake linéaire du cache final quand une vue tournée vient de se stabiliser.',
+    labelKey: 'performancePanel.passLabel.color',
+    helpKey: 'performancePanel.passHelp.color',
     timing: 'end-gap',
   },
   {
     key: 'present',
     label: 'Present (AA / rotation)',
-    help: 'Présentation de l’accumulateur AA, ou reconstruction bilinéaire du cache couleur tourné, puis conversion sRGB.',
+    labelKey: 'performancePanel.passLabel.present',
+    helpKey: 'performancePanel.passHelp.present',
     timing: 'end-gap',
   },
 ]

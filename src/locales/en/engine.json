@@ -1,0 +1,43 @@
+{
+  "hdr": {
+    "waitForExport": "Wait for the export to finish before changing the display.",
+    "notReady": "The engine is still being prepared.",
+    "extendedNotConfirmed": "The browser does not confirm extended HDR presentation."
+  },
+  "webgpu": {
+    "unsupported": "WebGPU is not supported",
+    "adapterNotFound": "WebGPU adapter not found",
+    "readWriteTexturesMissing": "This browser does not support read/write WebGPU storage textures ({feature}), which this engine requires.",
+    "unknownReason": "unknown reason",
+    "deviceLostDuringSetup": "WebGPU initialisation failed: the GPU device was lost during initialisation ({detail}). Update the graphics driver, or try disabling Vulkan / enabling “Unsafe WebGPU Support” in chrome://flags or edge://flags.",
+    "deviceLost": "The GPU device was lost ({reason}){message}",
+    "setupFailed": "WebGPU initialisation failed ({kind}): {message}",
+    "kindMemory": "insufficient GPU memory",
+    "kindValidation": "invalid WebGPU configuration or shader",
+    "kindInternal": "internal GPU driver error",
+    "mainKernelCompileFailed": "WebGPU initialisation failed: this device's GPU driver refuses to compile the main compute kernel ({detail}).",
+    "deepKernelUnavailable": "The deep-zoom kernel (floatexp) could not be compiled by this device's GPU driver: beyond this zoom level, the image loses precision."
+  },
+  "export": {
+    "sessionActive": "A video export session is already active on this engine.",
+    "thresholdTooLow": "The video export magnification threshold must be greater than 1.",
+    "surfaceTooLarge": "{width}×{height} at ×{supersample} requires a {side}² working texture, beyond this device's limit ({maxDim}). Lower the resolution or the supersampling.",
+    "tiledNoJitterAa": "Tiled keyframe mode does not accept per-frame jittered AA; use supersampling instead.",
+    "tiledPlanMismatch": "The tiled plan targets a {planSide}² square but the output requires {side}².",
+    "allocationFailed": "Unable to allocate the {width}×{height} render surface ({side}² working texture): {reason}. Lower the resolution or the supersampling.",
+    "reasonMemory": "insufficient GPU memory",
+    "reasonRefused": "allocation refused by the driver",
+    "hdrSessionRequired": "An HDR session is required.",
+    "captureAlreadyPending": "A capture is already pending.",
+    "hdrDimensionsInvalid": "Invalid HDR dimensions.",
+    "useHdrCapture": "Use the floating-point capture in an HDR session.",
+    "captureTargetTooLarge": "Capture target {width}x{height} exceeds maxTextureDimension2D ({maxDim}).",
+    "surfaceOverBudget": "The {width}×{height} export surface would need about {estimate}, beyond this device's conservative budget of {budget}. Lower the resolution or the supersampling."
+  },
+  "palettePath": {
+    "preparing": "Preparing palettes and images…",
+    "budgetExceeded": "Path images: 128 MiB budget exceeded. Choose a lower resolution.",
+    "ready": "{count} palettes ready · {size} px maximum",
+    "notApplied": "Path not applied: {error}"
+  }
+}

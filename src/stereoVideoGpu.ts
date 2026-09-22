@@ -1,4 +1,5 @@
 import shader from './assets/stereo_video.wgsl?raw'
+import { t } from './i18n'
 import { stereoProjection, validateStereoDimensions, type StereoVideoLayout, type StereoColorPass } from './stereoVideo'
 
 /** Three deterministic source passes, then height-field projection for both eyes.
@@ -17,10 +18,10 @@ export class StereoVideoGpu {
   readonly height: number
   constructor(device: GPUDevice, width: number, height: number, hdr=false) {
     this.device=device;this.width=width;this.height=height;this.hdr=hdr
-    if (Math.max(width,height)>device.limits.maxTextureDimension2D) throw new Error('Dimensions stéréo incompatibles avec le GPU')
+    if (Math.max(width,height)>device.limits.maxTextureDimension2D) throw new Error(t('video.stereo.gpuDimensions'))
     this.canvas=new OffscreenCanvas(width,height)
     this.context=this.canvas.getContext('webgpu')!
-    if(!this.context)throw new Error('WebGPU requis pour la stéréo')
+    if(!this.context)throw new Error(t('video.stereo.webGpuRequired'))
     this.context.configure({device,format:'rgba8unorm',alphaMode:'opaque',colorSpace:'srgb'})
     if(hdr)this.outputTexture=device.createTexture({size:[width,height],format:'rgba16float',usage:GPUTextureUsage.RENDER_ATTACHMENT|GPUTextureUsage.TEXTURE_BINDING|GPUTextureUsage.COPY_SRC})
     const module=device.createShaderModule({code:shader})
@@ -38,13 +39,13 @@ export class StereoVideoGpu {
     const projection=stereoProjection(this.width,this.height,strength)
     const passes:StereoColorPass[]=[{eyeSlope:-projection.eyeSlope,height:false},{eyeSlope:projection.eyeSlope,height:false},{eyeSlope:0,height:true}]
     for(let i=0;i<passes.length;i++) {
-      if(signal?.aborted)throw new DOMException('Export interrompu','AbortError')
+      if(signal?.aborted)throw new DOMException(t('video.runner.interrupted'),'AbortError')
       const source=await renderSource(passes[i])
       const copy=this.device.createCommandEncoder()
       copy.copyTextureToTexture({texture:source},{texture:this.textures[i]},[this.width,this.height])
       this.device.queue.submit([copy.finish()]);await this.device.queue.onSubmittedWorkDone()
     }
-    if(signal?.aborted)throw new DOMException('Export interrompu','AbortError')
+    if(signal?.aborted)throw new DOMException(t('video.runner.interrupted'),'AbortError')
     this.device.queue.writeBuffer(this.uniform,0,new Float32Array([this.width,this.height,projection.shift,projection.crop,layout==='top-bottom'?1:0,0,0,0]))
     const command=this.device.createCommandEncoder(),pass=command.beginRenderPass({colorAttachments:[{view:(this.outputTexture??this.context.getCurrentTexture()).createView(),loadOp:'clear',storeOp:'store'}]})
     pass.setPipeline(this.pipeline);pass.setBindGroup(0,this.binding);pass.draw(3);pass.end()

@@ -1,0 +1,7 @@
+{
+  "group": "Courbe de transfert",
+  "linear": "Transfert linéaire",
+  "gaussian": "Transfert gaussien",
+  "square": "Transfert carré",
+  "exponential": "Transfert exponentiel"
+}

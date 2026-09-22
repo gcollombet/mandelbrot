@@ -26,7 +26,7 @@ describe('ExpMap ZIP64 image container',()=>{
     const opened=await ExpmapStore.fromFile(destination)
     expect(await opened.open('fixture')).toEqual(m)
     expect(await opened.readTile(m.tiles[9])).toEqual(new Uint8Array([9,12,255]))
-    await expect(opened.open('another')).rejects.toThrow('autre document')
+    await expect(opened.open('another')).rejects.toThrow('another document')
   })
   it('recovers the previous checkpoint and replaces only the unpublished image',async()=>{
     const dir=new MemoryDirectory(),store=new ExpmapStore(dir.handle())
@@ -45,7 +45,7 @@ describe('ExpMap ZIP64 image container',()=>{
     dir.files.get('doubling-0.webp')![0]^=1
     await expect(store.open()).resolves.toBeDefined()
     await expect(store.readTile(m.tiles[0])).rejects.toThrow('Corrupt')
-    expect(()=>validateExpmapManifest({...m,version:4} as never)).toThrow('Ancien format')
+    expect(()=>validateExpmapManifest({...m,version:4} as never)).toThrow('Old ExpMap format')
     dir.denied=true;await expect(store.open()).rejects.toThrow('Permission')
   })
   it('rejects compressed archive entries instead of accepting nested decompression',async()=>{

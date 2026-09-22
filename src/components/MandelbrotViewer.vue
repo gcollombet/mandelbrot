@@ -3,6 +3,7 @@ import { encodeHdrPng } from '../hdrPng';
 import { nearestPaletteStop } from '../palettePicking';
 import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
+import { useI18n } from 'vue-i18n';
 import MandelbrotController from './MandelbrotController.vue';
 import ExpmapSurface from './ExpmapSurface.vue';
 import { expmapOpenDocument, expmapBusy } from '../expmap/runtime';
@@ -65,6 +66,7 @@ import {personalLibraryFeatureFlags} from '../personalLibraryFeatureFlags';
 import {getKeyboardLayout, getSettingsTabs} from '../keyboardShortcuts';
 import AboutPanel from './AboutPanel.vue';
 import CloudAccountControl from './CloudAccountControl.vue';
+import LanguageSwitcher from './LanguageSwitcher.vue';
 
 import type {MandelbrotExposed} from '../types/MandelbrotExposed';
 import {centredCropForRatio, renderStill, stillAspectRatio, stillPresetDimensions, STILL_PRESET_WIDTHS, type StillAspect, type StillSize} from '../stillExport';
@@ -75,6 +77,8 @@ const mandelbrotEngine = shallowRef<Engine | null>(null);
 const route = useRoute();
 const router = useRouter();
 
+const { t } = useI18n();
+
 // AA accumulation progress (polled from the engine for the on-screen indicator).
 const aaProgress = ref<{ active: boolean; done: number; total: number }>({ active: false, done: 0, total: 1 });
 const aaRun = reactive({ startedAt: 0, startDone: 0, rate: 0 });
@@ -82,7 +86,10 @@ const aaProgressText = computed(() => {
   const p = aaProgress.value, base = `AA ${p.done}/${p.total}`;
   if (aaRun.rate <= 0) return base;
   const remaining = Math.max(0, (p.total - p.done) / aaRun.rate);
-  return `${base} · ${aaRun.rate >= 10 ? Math.round(aaRun.rate) : aaRun.rate.toFixed(1)}/s · reste ${remaining >= 60 ? `${Math.floor(remaining / 60)} min ${String(Math.floor(remaining % 60)).padStart(2, '0')} s` : `${Math.ceil(remaining)} s`}`;
+  const time = remaining >= 60
+    ? t('mandelbrotViewer.aa.minutesSeconds', { m: Math.floor(remaining / 60), s: String(Math.floor(remaining % 60)).padStart(2, '0') })
+    : t('mandelbrotViewer.aa.seconds', { s: Math.ceil(remaining) });
+  return `${base} · ${aaRun.rate >= 10 ? Math.round(aaRun.rate) : aaRun.rate.toFixed(1)}/s · ${t('mandelbrotViewer.aa.remaining', { time })}`;
 });
 let aaProgressTimer: ReturnType<typeof setInterval> | null = null;
 
@@ -126,17 +133,17 @@ const minibrotMenuOpen = ref(false);
 const stillExport = ref<{ active: boolean; label: string; tile: number; tiles: number }>({ active: false, label: '', tile: 0, tiles: 1 });
 let stillAbort: AbortController | null = null;
 const STILL_SIZES: readonly Exclude<StillSize, 'window'>[] = ['1k', '2k', '4k', '8k'];
-const STILL_ASPECTS: readonly { id: StillAspect; label: string }[] = [
-  { id: 'window', label: 'Fenêtre' },
+const STILL_ASPECTS = computed<readonly { id: StillAspect; label: string }[]>(() => [
+  { id: 'window', label: t('mandelbrotViewer.still.window') },
   { id: '1:1', label: '1:1' },
   { id: '16:9', label: '16:9' },
   { id: '4:3', label: '4:3' },
-];
+]);
 const STILL_ASPECT_KEY = 'mandelbrot_still_aspect';
 const stillAspect = ref<StillAspect>((() => {
   try {
     const v = localStorage.getItem(STILL_ASPECT_KEY);
-    return STILL_ASPECTS.some(a => a.id === v) ? (v as StillAspect) : 'window';
+    return STILL_ASPECTS.value.some(a => a.id === v) ? (v as StillAspect) : 'window';
   } catch { return 'window'; }
 })());
 function setStillAspect(aspect: StillAspect) {
@@ -182,10 +189,11 @@ function windowCropDimensions(): { width: number; height: number } | null {
 function stillMenuLabel(size: StillSize): string {
   if (size === 'window') {
     const dims = windowCropDimensions();
-    return dims ? `Fenêtre · ${dims.width}×${dims.height}` : 'Fenêtre';
+    const label = t('mandelbrotViewer.still.window');
+    return dims ? `${label} · ${dims.width}×${dims.height}` : label;
   }
   const { width, height } = stillDimensions(size);
-  const tiled = size === '8k' ? ' · tuiles' : '';
+  const tiled = size === '8k' ? ` · ${t('mandelbrotViewer.still.tiled')}` : '';
   return `${size.toUpperCase()} · ${width}×${height}${tiled}`;
 }
 function cancelStillExport() {
@@ -213,7 +221,7 @@ async function exportStill(size: StillSize) {
   const exposure = hdrExposure.value;
   stillHdrWarning.value = '';
   stillAbort = new AbortController();
-  stillExport.value = { active: true, label: `Capture ${size.toUpperCase()}`, tile: 0, tiles: 1 };
+  stillExport.value = { active: true, label: t('mandelbrotViewer.still.capture', { size: size.toUpperCase() }), tile: 0, tiles: 1 };
   console.info(`[still] start ${size} ${width}×${height} t=${Math.round(performance.now())}`);
   try {
     const p = mandelbrotParams.value;
@@ -240,7 +248,7 @@ async function exportStill(size: StillSize) {
       },
     );
     if (result.hdrPixels) {
-      stillExport.value = { ...stillExport.value, label: 'Encodage PNG HDR' };
+      stillExport.value = { ...stillExport.value, label: t('mandelbrotViewer.still.encodingHdr') };
       let pixels = result.hdrPixels;
       if (captureWidth !== width || captureHeight !== height) {
         pixels = new Uint16Array(width * height * 3);
@@ -262,10 +270,10 @@ async function exportStill(size: StillSize) {
     }
   } catch (e) {
     if (e instanceof DOMException && e.name === 'AbortError') {
-      showHudStatus('Capture annulée');
+      showHudStatus(t('mandelbrotViewer.still.cancelled'));
     } else {
       console.error('Still export failed:', e);
-      showHudStatus(`Capture échouée : ${e instanceof Error ? e.message : String(e)}`, 8000);
+      showHudStatus(t('mandelbrotViewer.still.failed', { error: e instanceof Error ? e.message : String(e) }), 8000);
     }
   } finally {
     stillExport.value = { ...stillExport.value, active: false };
@@ -414,14 +422,14 @@ const sharedCopyBusy = ref(false);
 async function saveSharedSceneCopy() {
   if (sharedCopyBusy.value) return;
   sharedCopyBusy.value = true;
-  try { await triggerQuickSnapshot(); showHudStatus('Copie enregistrée'); }
+  try { await triggerQuickSnapshot(); showHudStatus(t('mandelbrotViewer.sharedScene.copySaved')); }
   catch (error) { showHudStatus(error instanceof Error ? error.message : String(error)); }
   finally { sharedCopyBusy.value = false; }
 }
 async function signInForSharing(): Promise<void> {
   await loginWithGoogle();
   await authStateTransition;
-  if (userRole.value === 'guest') throw new Error('Connexion nécessaire pour partager la scène.');
+  if (userRole.value === 'guest') throw new Error(t('mandelbrotViewer.sharedScene.signInRequired'));
 }
 
 async function refreshOpenSettingsLibraries(): Promise<void> {
@@ -532,8 +540,8 @@ async function loginWithGoogle() {
     const code = (error as {code?: string})?.code;
     if (code !== 'auth/popup-closed-by-user' && code !== 'auth/cancelled-popup-request') {
       authError.value = code === 'auth/popup-blocked'
-        ? 'Autorisez la fenêtre de connexion Google dans votre navigateur, puis réessayez.'
-        : 'Connexion impossible pour le moment. Vérifiez votre connexion et réessayez.';
+        ? t('mandelbrotViewer.auth.popupBlocked')
+        : t('mandelbrotViewer.auth.loginFailed');
     }
   } finally { authBusy.value = false; }
 }
@@ -543,7 +551,7 @@ async function logoutUser() {
   authBusy.value = true;
   authError.value = '';
   try { await signOutCurrentUser(); }
-  catch { authError.value = 'La déconnexion a échoué. Réessayez.'; }
+  catch { authError.value = t('mandelbrotViewer.auth.logoutFailed'); }
   finally { authBusy.value = false; }
 }
 
@@ -791,22 +799,22 @@ async function applyPresetFromRoute(generation = authStateGeneration): Promise<v
   const isCurrent = () => requestGeneration === presetRouteRequestGeneration && generation === authStateGeneration;
   try {
     if (!guid) { activePresetGuid.value = null; activeSceneRouteKey = ''; return; }
-    if (scene && !owner) throw new Error('Ce lien de scène est incomplet.');
+    if (scene && !owner) throw new Error(t('mandelbrotViewer.sharedScene.linkIncomplete'));
     const record = scene ? await loadSharedScene(owner!, scene) : await getPresetByGuid(guid);
     if (!isCurrent()) return;
-    if (!record) throw new Error('Cette scène est introuvable ou a été supprimée.');
+    if (!record) throw new Error(t('mandelbrotViewer.sharedScene.notFound'));
     applyPresetRecord(record);
     const scope = getActiveLibraryScope();
     activePresetGuid.value = !scene || (scope.kind === 'user' && scope.uid === owner) ? guid : null;
     activeSceneRouteKey = key;
-    sharedSceneName.value = scene ? record.name || 'Scène partagée' : '';
+    sharedSceneName.value = scene ? record.name || t('mandelbrotViewer.sharedScene.defaultName') : '';
     await refreshOpenSettingsLibraries();
     await applySelectedTexturesToEngine();
   } catch (error) {
     if (isCurrent()) {
       activeSceneRouteKey = '';
       activePresetGuid.value = null;
-      sharedSceneError.value = error instanceof Error ? error.message : 'Impossible de charger cette scène.';
+      sharedSceneError.value = error instanceof Error ? error.message : t('mandelbrotViewer.sharedScene.loadFailed');
     }
   } finally { if (isCurrent()) sharedSceneLoading.value = false; }
 }
@@ -1125,12 +1133,12 @@ function isDenseTab(tabKey: string): boolean {
 // Primary ptabs grouping (topbar "Paramètres" / "Presets" switch), per the mockup's
 // data-primary/[data-group] mechanism (dense.css). Only the Palettes panel currently
 // has sections tagged with data-group; other tabs simply render no ptabs.
-const PTABS_BY_TAB: Record<string, { value: string; label: string }[]> = {
+const PTABS_BY_TAB = computed<Record<string, { value: string; label: string }[]>>(() => ({
   palettes: [
-    { value: 'params', label: 'Éditer' },
-    { value: 'library', label: 'Bibliothèque' },
+    { value: 'params', label: t('mandelbrotViewer.panel.ptabEdit') },
+    { value: 'library', label: t('mandelbrotViewer.panel.ptabLibrary') },
   ],
-};
+}));
 const primaryByTab = reactive<Record<string, string>>({});
 function primaryFor(tabKey: string): string {
   return primaryByTab[tabKey] ?? 'params';
@@ -2039,8 +2047,8 @@ async function startTravelToPreset(preset: PresetRecord) {
   <div ref="rootRef" style="position: relative; height: 100vh; width: 100vw;" :class="{ 'picker-cursor': pickerMode }">
     <!-- Indication affichée quand l'interface est masquée -->
     <div v-show="!showUI" class="ui-hidden-hint">
-      <template v-if="isTouchDevice">Double-tapez pour afficher l'interface</template>
-      <template v-else>Appuyez sur <kbd>Échap</kbd> pour afficher l'interface</template>
+      <template v-if="isTouchDevice">{{ t('mandelbrotViewer.uiHidden.touch') }}</template>
+      <template v-else>{{ t('mandelbrotViewer.uiHidden.pressBefore') }} <kbd>{{ t('mandelbrotViewer.uiHidden.escapeKey') }}</kbd> {{ t('mandelbrotViewer.uiHidden.pressAfter') }}</template>
     </div>
 
     <!-- Barre de navigation en haut, centree, 4 boutons on/off -->
@@ -2072,14 +2080,15 @@ async function startTravelToPreset(preset: PresetRecord) {
         :cloud-enabled="personalLibraryFeatureFlags.presetSync" :busy="authBusy" :error="authError"
         :sync-state="personalSyncStatus.state"
         @login="loginWithGoogle" @logout="logoutUser"/>
+      <LanguageSwitcher compact class="top-lang-switch" />
       </div>
     </div>
 
     <div v-if="sharedSceneLoading || sharedSceneError || sharedSceneName" class="shared-scene-notice" role="status" @pointerdown.stop>
-      <span>{{ sharedSceneLoading ? 'Chargement de la scène…' : sharedSceneError || sharedSceneName }}</span>
-      <button v-if="sharedSceneError" type="button" @click="applyPresetFromRoute()">Réessayer</button>
-      <button v-else-if="sharedSceneName" type="button" :disabled="sharedCopyBusy" @click="saveSharedSceneCopy">Enregistrer une copie</button>
-      <button v-if="!sharedSceneLoading" type="button" aria-label="Fermer" @click="sharedSceneName = ''; sharedSceneError = ''">×</button>
+      <span>{{ sharedSceneLoading ? t('mandelbrotViewer.sharedScene.loading') : sharedSceneError || sharedSceneName }}</span>
+      <button v-if="sharedSceneError" type="button" @click="applyPresetFromRoute()">{{ t('mandelbrotViewer.sharedScene.retry') }}</button>
+      <button v-else-if="sharedSceneName" type="button" :disabled="sharedCopyBusy" @click="saveSharedSceneCopy">{{ t('mandelbrotViewer.sharedScene.saveCopy') }}</button>
+      <button v-if="!sharedSceneLoading" type="button" :aria-label="t('common.close')" @click="sharedSceneName = ''; sharedSceneError = ''">×</button>
     </div>
     <!-- Render status indicator (bottom-center) -->
     <div
@@ -2126,16 +2135,16 @@ async function startTravelToPreset(preset: PresetRecord) {
             :style="{ width: (100 * aaProgress.done / Math.max(1, aaProgress.total)) + '%' }"
           ></div>
         </div>
-        <button class="aa-cancel" type="button" title="Arrêter le raffinage AA" aria-label="Arrêter le raffinage AA" @click="cancelAaRefinement">
+        <button class="aa-cancel" type="button" :title="t('mandelbrotViewer.aa.stop')" :aria-label="t('mandelbrotViewer.aa.stop')" @click="cancelAaRefinement">
           <i class="fa-solid fa-xmark"></i>
         </button>
       </div>
       <div v-if="stillExport.active" class="aa-progress">
-        <span class="aa-progress-label">{{ stillExport.label }} · tuile {{ Math.min(stillExport.tile + 1, stillExport.tiles) }}/{{ stillExport.tiles }}</span>
+        <span class="aa-progress-label">{{ t('mandelbrotViewer.still.progress', { label: stillExport.label, tile: Math.min(stillExport.tile + 1, stillExport.tiles), tiles: stillExport.tiles }) }}</span>
         <div class="aa-progress-track">
           <div class="aa-progress-fill" :style="{ width: (100 * stillExport.tile / Math.max(1, stillExport.tiles)) + '%' }"></div>
         </div>
-        <button class="aa-cancel" type="button" title="Annuler la capture" aria-label="Annuler la capture" @click="cancelStillExport">
+        <button class="aa-cancel" type="button" :title="t('mandelbrotViewer.still.cancel')" :aria-label="t('mandelbrotViewer.still.cancel')" @click="cancelStillExport">
           <i class="fa-solid fa-xmark"></i>
         </button>
       </div>
@@ -2221,26 +2230,26 @@ async function startTravelToPreset(preset: PresetRecord) {
       <button
         v-show="!discoveryRadarActive"
         class="fab-btn ui-hide-toggle"
-        title="Masquer l'interface (Échap pour réafficher)"
+        :title="t('mandelbrotViewer.fab.hideTitle')"
         @click="showUI = false"
         @touchstart.stop
         @touchend.stop
       >
         <span class="fab-ico"><i class="fa-solid fa-eye-slash"></i></span>
-        <span class="fab-label">Masquer</span>
+        <span class="fab-label">{{ t('mandelbrotViewer.fab.hide') }}</span>
       </button>
 
       <button
         v-show="!discoveryRadarActive"
         class="fab-btn render-aa-button"
         type="button"
-        title="Render AA — lisser le rendu (raccourci G)"
+        :title="t('mandelbrotViewer.fab.renderAaTitle')"
         @click="triggerRenderAa"
         @touchstart.stop
         @touchend.stop
       >
         <span class="fab-ico"><i class="fa-solid fa-wand-magic-sparkles"></i></span>
-        <span class="fab-label">Render AA</span>
+        <span class="fab-label">{{ t('mandelbrotViewer.fab.renderAa') }}</span>
       </button>
 
       <button
@@ -2248,7 +2257,7 @@ async function startTravelToPreset(preset: PresetRecord) {
         :class="{ 'is-active': discoveryRadarActive }"
         type="button"
         :aria-pressed="discoveryRadarActive"
-        title="Discover nearby presets"
+        :title="t('mandelbrotViewer.fab.discoverTitle')"
         @click="toggleDiscoveryRadar"
         @touchstart.stop
         @touchend.stop
@@ -2257,16 +2266,16 @@ async function startTravelToPreset(preset: PresetRecord) {
           <span class="radar-button-ring"></span>
           <span class="radar-button-core"></span>
         </span>
-        <span class="fab-label">{{ discoveryRadarActive ? 'Radar On' : 'Discover' }}</span>
+        <span class="fab-label">{{ discoveryRadarActive ? t('mandelbrotViewer.fab.radarOn') : t('mandelbrotViewer.fab.discover') }}</span>
       </button>
 
       <div v-show="!discoveryRadarActive" class="fab-menu-host">
         <div v-if="minibrotMenuOpen" class="fab-menu" role="menu">
           <button class="fab-menu-item" type="button" role="menuitem" :disabled="minibrotBusy" @click="runMinibrot('center')">
-            <i class="fa-solid fa-crosshairs"></i> Centrer sur le minibrot
+            <i class="fa-solid fa-crosshairs"></i> {{ t('mandelbrotViewer.fab.minibrotCenter') }}
           </button>
           <button class="fab-menu-item" type="button" role="menuitem" :disabled="minibrotBusy" @click="runMinibrot('frame')">
-            <i class="fa-solid fa-magnifying-glass-plus"></i> Centrer et cadrer le minibrot
+            <i class="fa-solid fa-magnifying-glass-plus"></i> {{ t('mandelbrotViewer.fab.minibrotFrame') }}
           </button>
         </div>
         <button
@@ -2274,35 +2283,35 @@ async function startTravelToPreset(preset: PresetRecord) {
           :class="{ 'is-open': minibrotMenuOpen }"
           type="button"
           :aria-expanded="minibrotMenuOpen"
-          title="Minibrot — centrer ou cadrer l'atome sous la vue"
+          :title="t('mandelbrotViewer.fab.minibrotTitle')"
           @click="toggleMinibrotMenu"
           @touchstart.stop
           @touchend.stop
         >
           <span class="fab-ico"><i class="fa-solid" :class="minibrotBusy ? 'fa-spinner fa-spin' : 'fa-bullseye'"></i></span>
-          <span class="fab-label">Minibrot</span>
+          <span class="fab-label">{{ t('mandelbrotViewer.fab.minibrot') }}</span>
         </button>
       </div>
 
       <div v-show="!discoveryRadarActive" class="fab-menu-host">
         <div v-if="screenshotMenuOpen" class="fab-menu hdr-shot-menu" role="menu">
-          <div class="fab-menu-seg" role="radiogroup" aria-label="Encodage de la capture">
-            <button type="button" role="radio" class="fab-menu-seg-item" :aria-checked="!stillHdr" :class="{ 'is-active': !stillHdr }" @click="stillHdr = false">SDR · PNG/WebP</button>
-            <button type="button" role="radio" class="fab-menu-seg-item" :aria-checked="stillHdr" :class="{ 'is-active': stillHdr }" @click="stillHdr = true">HDR · PNG 16 bits</button>
+          <div class="fab-menu-seg" role="radiogroup" :aria-label="t('mandelbrotViewer.still.encodingLabel')">
+            <button type="button" role="radio" class="fab-menu-seg-item" :aria-checked="!stillHdr" :class="{ 'is-active': !stillHdr }" @click="stillHdr = false">{{ t('mandelbrotViewer.still.sdr') }}</button>
+            <button type="button" role="radio" class="fab-menu-seg-item" :aria-checked="stillHdr" :class="{ 'is-active': stillHdr }" @click="stillHdr = true">{{ t('mandelbrotViewer.still.hdr') }}</button>
           </div>
-          <label v-if="stillHdr" class="hdr-output-info">Exposition export (EV)
-            <input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" aria-label="Exposition de l’export HDR" />
+          <label v-if="stillHdr" class="hdr-output-info">{{ t('mandelbrotViewer.still.exposure') }}
+            <input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" :aria-label="t('mandelbrotViewer.still.exposureAria')" />
             <span v-if="stillHdrWarning" role="status">{{ stillHdrWarning }}</span>
-            <small>PQ / Rec.2020 · blanc de référence 203 nits. Lecture dans un logiciel compatible HDR.</small>
+            <small>{{ t('mandelbrotViewer.still.hdrInfo') }}</small>
           </label>
-          <div class="fab-menu-seg" role="radiogroup" aria-label="Format de l'image">
+          <div class="fab-menu-seg" role="radiogroup" :aria-label="t('mandelbrotViewer.still.formatLabel')">
             <button
               v-for="a in STILL_ASPECTS" :key="a.id"
               type="button" role="radio"
               class="fab-menu-seg-item"
               :class="{ 'is-active': stillAspect === a.id }"
               :aria-checked="stillAspect === a.id"
-              :title="a.id === 'window' ? 'Même format que la fenêtre' : `Format ${a.label}`"
+              :title="a.id === 'window' ? t('mandelbrotViewer.still.sameAsWindow') : t('mandelbrotViewer.still.formatTitle', { label: a.label })"
               @click="setStillAspect(a.id)"
             >{{ a.label }}</button>
           </div>
@@ -2323,13 +2332,13 @@ async function startTravelToPreset(preset: PresetRecord) {
           :class="{ 'is-open': screenshotMenuOpen }"
           type="button"
           :aria-expanded="screenshotMenuOpen"
-          title="Screenshot — format fenêtre, 1:1, 16:9 ou 4:3 ; fenêtre, 1K, 2K, 4K ou 8K (raccourci B : fenêtre)"
+          :title="t('mandelbrotViewer.still.buttonTitle')"
           @click="toggleScreenshotMenu"
           @touchstart.stop
           @touchend.stop
         >
           <span class="fab-ico"><i class="fa-solid fa-camera"></i></span>
-          <span class="fab-label">Screenshot</span>
+          <span class="fab-label">{{ t('mandelbrotViewer.still.button') }}</span>
         </button>
       </div>
     </div>
@@ -2359,7 +2368,7 @@ async function startTravelToPreset(preset: PresetRecord) {
         <button
           class="preset-pin-btn"
           @click="startTravelToPreset(pin.preset)"
-          :aria-label="'Travel to ' + (pin.preset.name || 'preset')"
+          :aria-label="t('mandelbrotViewer.pins.travelTo', { name: pin.preset.name || t('mandelbrotViewer.pins.preset') })"
         >
           <span class="preset-pin-dot"></span>
           <span class="preset-pin-pulse"></span>
@@ -2370,7 +2379,7 @@ async function startTravelToPreset(preset: PresetRecord) {
         <!-- Hover circular preview card -->
         <div class="preset-pin-card">
           <div class="preset-pin-circle-thumb">
-            <img v-if="pin.preset.thumbnail" :src="pin.preset.thumbnail" alt="preset thumbnail" />
+            <img v-if="pin.preset.thumbnail" :src="pin.preset.thumbnail" :alt="t('mandelbrotViewer.pins.thumbnailAlt')" />
           </div>
           <span class="preset-pin-label">
             <template v-if="pin.validName">{{ pin.validName }}</template>
@@ -2391,8 +2400,8 @@ async function startTravelToPreset(preset: PresetRecord) {
         :style="{ left: cluster.x + 'px', top: cluster.y + 'px', '--pin-pulse-duration': cluster.representative.pulseDuration, '--pin-reveal-delay': cluster.representative.revealDelay }"
         role="button"
         tabindex="0"
-        :title="cluster.totalCount + ' presets nearby'"
-        :aria-label="cluster.totalCount + ' visible presets nearby'"
+        :title="t('mandelbrotViewer.pins.nearbyTitle', { count: cluster.totalCount })"
+        :aria-label="t('mandelbrotViewer.pins.nearbyAria', { count: cluster.totalCount })"
         @click.stop="toggleDiscoveryCluster(cluster.id)"
         @keydown.enter.prevent="toggleDiscoveryCluster(cluster.id)"
         @keydown.space.prevent="toggleDiscoveryCluster(cluster.id)"
@@ -2410,14 +2419,14 @@ async function startTravelToPreset(preset: PresetRecord) {
             :key="'screen-preview-' + pin.preset.id"
             class="edge-cluster-item"
             type="button"
-            :title="'Travel to ' + (pin.preset.name || 'preset')"
+            :title="t('mandelbrotViewer.pins.travelTo', { name: pin.preset.name || t('mandelbrotViewer.pins.preset') })"
             @click="startTravelToPreset(pin.preset)"
           >
             <span class="edge-cluster-thumb">
               <img v-if="pin.preset.thumbnail" :src="pin.preset.thumbnail" alt="" />
             </span>
             <span class="edge-cluster-meta">
-              <span class="edge-cluster-name">{{ pin.validName || 'Preset' }}</span>
+              <span class="edge-cluster-name">{{ pin.validName || t('mandelbrotViewer.pins.presetName') }}</span>
               <span class="edge-cluster-mag">
                 <i class="fa-solid fa-arrow-up" v-if="pin.altitudeDirection === 1"></i>
                 <i class="fa-solid fa-arrow-down" v-else-if="pin.altitudeDirection === -1"></i>
@@ -2426,7 +2435,7 @@ async function startTravelToPreset(preset: PresetRecord) {
               </span>
             </span>
           </button>
-          <span v-if="cluster.hiddenCount > 0" class="edge-cluster-more">+{{ cluster.hiddenCount }} more</span>
+          <span v-if="cluster.hiddenCount > 0" class="edge-cluster-more">{{ t('mandelbrotViewer.pins.more', { count: cluster.hiddenCount }) }}</span>
         </span>
       </div>
       <div
@@ -2437,8 +2446,8 @@ async function startTravelToPreset(preset: PresetRecord) {
         :style="{ left: cluster.x + 'px', top: cluster.y + 'px', '--pin-pulse-duration': cluster.representative.pulseDuration, '--pin-reveal-delay': cluster.representative.revealDelay }"
         role="button"
         tabindex="0"
-        :title="cluster.totalCount === 1 ? '1 preset off-screen' : cluster.totalCount + ' presets in this direction'"
-        :aria-label="cluster.totalCount === 1 ? '1 off-screen preset' : cluster.totalCount + ' off-screen presets in this direction'"
+        :title="t('mandelbrotViewer.pins.offScreenTitle', { count: cluster.totalCount }, cluster.totalCount)"
+        :aria-label="t('mandelbrotViewer.pins.offScreenAria', { count: cluster.totalCount }, cluster.totalCount)"
         @click.stop="toggleDiscoveryCluster(cluster.id)"
         @keydown.enter.prevent="toggleDiscoveryCluster(cluster.id)"
         @keydown.space.prevent="toggleDiscoveryCluster(cluster.id)"
@@ -2456,14 +2465,14 @@ async function startTravelToPreset(preset: PresetRecord) {
             :key="'edge-preview-' + pin.preset.id"
             class="edge-cluster-item"
             type="button"
-            :title="'Travel to ' + (pin.preset.name || 'preset')"
+            :title="t('mandelbrotViewer.pins.travelTo', { name: pin.preset.name || t('mandelbrotViewer.pins.preset') })"
             @click="startTravelToPreset(pin.preset)"
           >
             <span class="edge-cluster-thumb">
               <img v-if="pin.preset.thumbnail" :src="pin.preset.thumbnail" alt="" />
             </span>
             <span class="edge-cluster-meta">
-              <span class="edge-cluster-name">{{ pin.validName || 'Preset' }}</span>
+              <span class="edge-cluster-name">{{ pin.validName || t('mandelbrotViewer.pins.presetName') }}</span>
               <span class="edge-cluster-mag">
                 <i class="fa-solid fa-arrow-up" v-if="pin.altitudeDirection === 1"></i>
                 <i class="fa-solid fa-arrow-down" v-else-if="pin.altitudeDirection === -1"></i>
@@ -2472,7 +2481,7 @@ async function startTravelToPreset(preset: PresetRecord) {
               </span>
             </span>
           </button>
-          <span v-if="cluster.hiddenCount > 0" class="edge-cluster-more">+{{ cluster.hiddenCount }} more</span>
+          <span v-if="cluster.hiddenCount > 0" class="edge-cluster-more">{{ t('mandelbrotViewer.pins.more', { count: cluster.hiddenCount }) }}</span>
         </span>
       </div>
     </div>
@@ -2516,12 +2525,12 @@ async function startTravelToPreset(preset: PresetRecord) {
               :class="{ paused: !mandelbrotParams.activateAnimate }"
               type="button"
               :aria-pressed="mandelbrotParams.activateAnimate"
-              title="Lecture / pause de l'animation"
+              :title="t('mandelbrotViewer.panel.playPauseTitle')"
               @click="mandelbrotParams.activateAnimate = !mandelbrotParams.activateAnimate"
             >
               <svg v-if="mandelbrotParams.activateAnimate" viewBox="0 0 24 24"><path d="M7 5h3v14H7zM14 5h3v14h-3z"/></svg>
               <svg v-else viewBox="0 0 24 24"><path d="M8 5v14l11-7z"/></svg>
-              <span class="lbl">{{ mandelbrotParams.activateAnimate ? 'Pause' : 'Lecture' }}</span>
+              <span class="lbl">{{ mandelbrotParams.activateAnimate ? t('mandelbrotViewer.panel.pause') : t('mandelbrotViewer.panel.play') }}</span>
             </button>
           </template>
         </DenseTopbar>
@@ -2570,7 +2579,7 @@ async function startTravelToPreset(preset: PresetRecord) {
             <span class="dot"></span>
             <span class="settings-popup-title">{{ tab.label }}</span>
           </div>
-          <button class="close" aria-label="Fermer" style="z-index: 10; position: relative; pointer-events: auto;" @mousedown.stop @click="closeTab(tab.key)">✕</button>
+          <button class="close" :aria-label="t('common.close')" style="z-index: 10; position: relative; pointer-events: auto;" @mousedown.stop @click="closeTab(tab.key)">✕</button>
         </div>
         <div class="settings-popup-body">
           <Settings
@@ -2599,26 +2608,26 @@ async function startTravelToPreset(preset: PresetRecord) {
 
     <div v-if="guestImportPlan" class="guest-import-backdrop" role="presentation">
       <section class="guest-import-dialog" role="dialog" aria-modal="true" aria-labelledby="guest-import-title">
-        <h2 id="guest-import-title">Sauvegarder vos presets locaux dans le cloud ?</h2>
+        <h2 id="guest-import-title">{{ t('mandelbrotViewer.guestImport.title') }}</h2>
         <p>
-          Ce navigateur contient {{ guestImportPlan.missingPresets.length }} preset{{ guestImportPlan.missingPresets.length === 1 ? '' : 's' }}
-          et {{ guestImportPlan.missingTextures.length }} texture{{ guestImportPlan.missingTextures.length === 1 ? '' : 's' }} qui ne sont pas encore dans votre compte.
+          {{ t('mandelbrotViewer.guestImport.intro', {
+            presets: t('mandelbrotViewer.guestImport.presetCount', { n: guestImportPlan.missingPresets.length }, guestImportPlan.missingPresets.length),
+            textures: t('mandelbrotViewer.guestImport.textureCount', { n: guestImportPlan.missingTextures.length }, guestImportPlan.missingTextures.length),
+          }) }}
         </p>
         <p v-if="guestImportCounts" class="guest-import-breakdown">
-          {{ guestImportCounts.completePreset }} complets · {{ guestImportCounts.palettePreset }} palettes ·
-          {{ guestImportCounts.stopPreset }} stops · {{ guestImportCounts.textureMappingPreset }} mappings ·
-          {{ guestImportCounts.animationPreset }} animations
+          {{ t('mandelbrotViewer.guestImport.breakdown', { complete: guestImportCounts.completePreset, palettes: guestImportCounts.palettePreset, stops: guestImportCounts.stopPreset, mappings: guestImportCounts.textureMappingPreset, animations: guestImportCounts.animationPreset }) }}
         </p>
         <p v-if="guestImportPlan.blockingReason" class="guest-import-error">
-          Sauvegarde indisponible : {{ guestImportPlan.blockingReason }}. Votre bibliothèque locale reste intacte.
+          {{ t('mandelbrotViewer.guestImport.blocked', { reason: guestImportPlan.blockingReason }) }}
         </p>
-        <p v-else>Ces éléments seront copiés dans votre bibliothèque cloud personnelle. La copie locale restera dans ce navigateur et sera de nouveau accessible après déconnexion.</p>
+        <p v-else>{{ t('mandelbrotViewer.guestImport.explanation') }}</p>
         <p v-if="guestImportError" class="guest-import-error">{{ guestImportError }}</p>
         <div class="guest-import-actions">
           <button type="button" class="guest-import-primary" :disabled="!guestImportPlan.canImport || guestImportBusy" @click="acceptGuestImport">
-            {{ guestImportBusy ? 'Sauvegarde en cours…' : 'Sauvegarder dans mon cloud' }}
+            {{ guestImportBusy ? t('mandelbrotViewer.guestImport.saving') : t('mandelbrotViewer.guestImport.save') }}
           </button>
-          <button type="button" :disabled="guestImportBusy" @click="declineGuestImport">Plus tard</button>
+          <button type="button" :disabled="guestImportBusy" @click="declineGuestImport">{{ t('mandelbrotViewer.guestImport.later') }}</button>
         </div>
       </section>
     </div>
@@ -2693,6 +2702,7 @@ async function startTravelToPreset(preset: PresetRecord) {
   display: flex;
   gap: 2px;
   padding: 4px;
+  align-items: center;
   background: rgba(16, 18, 24, 0.72);
   backdrop-filter: blur(18px);
   border: 1px solid var(--line);
@@ -3682,6 +3692,12 @@ async function startTravelToPreset(preset: PresetRecord) {
   }
 }
 
+.top-lang-switch {
+  margin-left: 4px;
+  padding-left: 6px;
+  border-left: 1px solid var(--line);
+  color: var(--ink-2, #bbb);
+}
 </style>
 
 <style scoped>

@@ -1,0 +1,48 @@
+{
+  "alerts": {
+    "cannotOverwriteShared": "Shared catalog animation presets cannot be overwritten. Save a local variant with a new name.",
+    "cannotDeleteShared": "Shared catalog animation presets cannot be deleted locally.",
+    "confirmDelete": "Delete animation preset \"{name}\"? This cannot be undone."
+  },
+  "variantName": "{name} · variant",
+  "upload": {
+    "success": "Uploaded successfully",
+    "alreadyShared": "Already in shared catalog. Upload again to update.",
+    "toCatalog": "Upload to shared catalog"
+  },
+  "tracks": {
+    "paletteOffset": "Palette offset",
+    "heightPaletteShift": "Palette height",
+    "lightAngle": "Light",
+    "textureDrift": "Texture drift",
+    "skyReflectionDrift": "Reflection drift",
+    "phaseColoring": "Color phase",
+    "varnish": "Varnish",
+    "microBump": "Micro-relief",
+    "displacement": "Displacement",
+    "tessellation": "Texture",
+    "protrusionPhase": "Protrusion phase",
+    "reliefDepth": "Relief depth",
+    "orbitTrapPhaseOffset": "Orbit trap color",
+    "orbitTrapStrength": "Orbit trap strength",
+    "gradeSaturation": "Saturation",
+    "gradeContrast": "Contrast",
+    "palettePathOffset": "Path offset"
+  },
+  "mixer": {
+    "title": "Mixer",
+    "scope": "Animated parameters — wave, speed, amplitude",
+    "globalSpeed": "Global speed",
+    "speed": "Speed",
+    "amplitude": "Amplitude"
+  },
+  "presets": {
+    "title": "Presets",
+    "scope": "Save & apply an animation",
+    "count": "{count} preset | {count} presets",
+    "delete": "Delete preset",
+    "kind": "Animation",
+    "saveCopyAs": "Save a copy as…",
+    "namePlaceholder": "Preset name…"
+  }
+}

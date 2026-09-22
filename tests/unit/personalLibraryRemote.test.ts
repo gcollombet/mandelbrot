@@ -223,7 +223,7 @@ describe('shared direct reads', () => {
     expect(await getSharedPresetRecord('alice', 'deleted')).toBeNull();
   });
   it('rejects path injection before attempting a read', async () => {
-    await expect(getSharedPresetRecord('alice/presets/other', 'scene-a')).rejects.toThrow('invalide');
+    await expect(getSharedPresetRecord('alice/presets/other', 'scene-a')).rejects.toThrow('Invalid scene link');
     await expect(getSharedPresetRecord('alice', '../other')).rejects.toThrow();
   });
   it('derives the texture path from the owner and GUID, never from payload data', async () => {

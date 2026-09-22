@@ -1,9 +1,10 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
 import {computed, onBeforeUnmount, onMounted, ref} from 'vue';
 import {getKeyboardLayout, getShortcutGroups} from '../keyboardShortcuts';
+const { t } = useI18n();
 
 const visible = ref(true);
-const isFrench = ref(true);
 const shortcutGroups = computed(() => getShortcutGroups(getKeyboardLayout()));
 
 let autoDismissTimer: number | null = null;
@@ -17,9 +18,6 @@ function dismiss() {
 }
 
 onMounted(() => {
-  if (typeof navigator !== 'undefined') {
-    isFrench.value = navigator.language.startsWith('fr');
-  }
   autoDismissTimer = window.setTimeout(dismiss, 10000);
 });
 
@@ -55,7 +53,7 @@ onBeforeUnmount(() => {
         </div>
       </div>
     </div>
-    <p class="tap">{{ isFrench ? 'Toucher pour explorer' : 'Tap to explore' }}</p>
+    <p class="tap">{{ t('splashScreen.tapToExplore') }}</p>
   </div>
 </template>
 

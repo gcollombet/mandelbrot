@@ -74,6 +74,7 @@ import {
 } from './gpuCompatibility'
 import {normalizeOrbitTrapConfig, orbitTrapAccumulatorSignature, orbitTrapColorUniformValues, orbitTrapModeId, orbitTrapUsesOrbit, type OrbitTrapConfig, type OrbitTrapMode} from './OrbitTrap.ts'
 import {rotationHasFreshZeroCounter, rotationNeedsColorResolve} from './rotationColorResolve'
+import {t} from './i18n'
 import type {
     KeyframeTile,
     KeyframeTilePlan,
@@ -639,8 +640,8 @@ export class Engine {
     }
 
     async setHdrDisplay(enabled: boolean): Promise<void> {
-        if (this.videoExportActive) throw new Error('Attendre la fin de l’export pour changer l’affichage.')
-        if (!this.presentationPipelines) throw new Error('Le moteur est encore en cours de préparation.')
+        if (this.videoExportActive) throw new Error(t('engine.hdr.waitForExport'))
+        if (!this.presentationPipelines) throw new Error(t('engine.hdr.notReady'))
         const previous = this.hdrDisplay
         this.device.pushErrorScope('validation')
         let failure: unknown
@@ -648,7 +649,7 @@ export class Engine {
             this.hdrDisplay = enabled
             this.configureOutput()
             if (enabled && this.ctx.getConfiguration?.()?.toneMapping?.mode !== 'extended') {
-                throw new Error('Le navigateur ne confirme pas la présentation HDR étendue.')
+                throw new Error(t('engine.hdr.extendedNotConfirmed'))
             }
             this.ctx.getCurrentTexture()
         } catch (error) { failure = error }
@@ -1631,14 +1632,11 @@ export class Engine {
         this.approximationMode = readNavigatorApproximationMode(this.mandelbrotNavigator)
         this.blaEpsilon = this.mandelbrotNavigator.get_bla_epsilon()
         this.initializeReferenceWorker()
-        if (!navigator.gpu) throw new Error('WebGPU non supporté')
+        if (!navigator.gpu) throw new Error(t('engine.webgpu.unsupported'))
         this.adapter = await navigator.gpu.requestAdapter()
-        if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
+        if (!this.adapter) throw new Error(t('engine.webgpu.adapterNotFound'))
         if (!navigator.gpu.wgslLanguageFeatures?.has(READ_WRITE_STORAGE_TEXTURES_FEATURE)) {
-            throw new Error(
-                'Ce navigateur ne prend pas en charge les textures WebGPU lisibles/inscriptibles '
-                + `(${READ_WRITE_STORAGE_TEXTURES_FEATURE}), indispensables à ce moteur.`,
-            )
+            throw new Error(t('engine.webgpu.readWriteTexturesMissing', { feature: READ_WRITE_STORAGE_TEXTURES_FEATURE }))
         }
         // `GPUAdapter.info` replaced requestAdapterInfo progressively; keep the
         // capability preflight usable on early read-write-capable Chromium too.
@@ -1682,12 +1680,9 @@ export class Engine {
                     const isLastAttempt = attempt === profiles.length - 1
                     if (!(error instanceof GpuDeviceLostDuringSetupError) || isLastAttempt || this.destroyed) {
                         if (error instanceof GpuDeviceLostDuringSetupError) {
-                            throw new Error(
-                                `Initialisation WebGPU impossible : le périphérique GPU a été perdu pendant l'initialisation`
-                                + ` (${error.info.reason || 'raison inconnue'}${error.info.message ? ` : ${error.info.message}` : ''}).`
-                                + ' Mettez à jour le pilote graphique, ou essayez de désactiver Vulkan / d\'activer'
-                                + ' « Unsafe WebGPU Support » dans chrome://flags ou edge://flags.',
-                            )
+                            throw new Error(t('engine.webgpu.deviceLostDuringSetup', {
+                                detail: `${error.info.reason || t('engine.webgpu.unknownReason')}${error.info.message ? ` : ${error.info.message}` : ''}`,
+                            }))
                         }
                         throw error
                     }
@@ -1699,7 +1694,7 @@ export class Engine {
                     this.inplaceDeepUnavailable = false
                     this.deepUnavailableReported = false
                     this.adapter = await navigator.gpu.requestAdapter()
-                    if (!this.adapter) throw new Error('Adapter WebGPU introuvable')
+                    if (!this.adapter) throw new Error(t('engine.webgpu.adapterNotFound'))
                 }
             }
         } finally {
@@ -1780,10 +1775,10 @@ export class Engine {
             // A device superseded by a retry, or lost while its own setup is
             // still racing below, is reported by the setup path instead.
             if (!this.destroyed && this.device === device && !this.gpuSetupInProgress) {
-                this.reportGpuError(
-                    `Le périphérique GPU a été perdu (${info.reason || 'raison inconnue'})`
-                    + `${info.message ? ` : ${info.message}` : '.'}`,
-                )
+                this.reportGpuError(t('engine.webgpu.deviceLost', {
+                    reason: info.reason || t('engine.webgpu.unknownReason'),
+                    message: info.message ? ` : ${info.message}` : '.',
+                }))
             }
         })
         this.device.addEventListener('uncapturederror', (event) => {
@@ -1973,11 +1968,11 @@ export class Engine {
         const setupError = memoryError ?? validationError ?? internalError
         if (setupError) {
             const kind = memoryError
-                ? 'mémoire GPU insuffisante'
+                ? t('engine.webgpu.kindMemory')
                 : validationError
-                    ? 'configuration ou shader WebGPU invalide'
-                    : 'erreur interne du pilote GPU'
-            throw new Error(`Initialisation WebGPU impossible (${kind}) : ${setupError.message}`)
+                    ? t('engine.webgpu.kindValidation')
+                    : t('engine.webgpu.kindInternal')
+            throw new Error(t('engine.webgpu.setupFailed', { kind, message: setupError.message }))
         }
     }
 
@@ -2444,10 +2439,7 @@ export class Engine {
                 return undefined
             }),
             this.precompileInplacePipeline(false).catch((error: unknown) => {
-                throw new Error(
-                    'Initialisation WebGPU impossible : le pilote GPU de cet appareil refuse de compiler le noyau '
-                    + `de calcul principal (${describeGpuError(error)}).`,
-                )
+                throw new Error(t('engine.webgpu.mainKernelCompileFailed', { detail: describeGpuError(error) }))
             }),
         ])
         return { deep, shallow }
@@ -2996,7 +2988,7 @@ export class Engine {
         angleRange?: { from: number; to: number }
     }): Promise<void> {
         if (this.videoExportActive) {
-            throw new Error('A video export session is already active on this engine.')
+            throw new Error(t('engine.export.sessionActive'))
         }
         // Only the degenerate case is refused. The threshold is deliberately
         // NOT tied to the supersampling factor: it governs how often a full
@@ -3005,7 +2997,7 @@ export class Engine {
         // softer mid-cycle periphery for a much faster export — the caller's
         // decision, surfaced as a warning in the UI rather than forbidden here.
         if (!(settings.magnificationThreshold > 1)) {
-            throw new Error('Video export magnification threshold must be greater than 1.')
+            throw new Error(t('engine.export.thresholdTooLow'))
         }
 
         // The interactive path clamps an oversized surface; an export must NOT,
@@ -3016,24 +3008,16 @@ export class Engine {
         const side = Engine.workingTextureSideFor(surfaceWidth, surfaceHeight)
         const maxDim = this.device?.limits?.maxTextureDimension2D ?? 8192
         if (side > maxDim) {
-            throw new Error(
-                `${settings.outputWidth}×${settings.outputHeight} en ×${settings.supersample} exige une `
-                + `texture de travail ${side}², au-delà de la limite de cet appareil (${maxDim}). `
-                + 'Baisse la résolution ou le suréchantillonnage.',
-            )
+            throw new Error(t('engine.export.surfaceTooLarge', {
+                width: settings.outputWidth, height: settings.outputHeight, supersample: settings.supersample, side, maxDim,
+            }))
         }
         if (settings.tiledKeyframePlan) {
             if ((settings.aaSamplesPerFrame ?? 1) !== 1) {
-                throw new Error(
-                    'Le mode keyframe tuilée n’accepte pas l’AA jitteré par image ; '
-                    + 'utilisez le suréchantillonnage.',
-                )
+                throw new Error(t('engine.export.tiledNoJitterAa'))
             }
             if (settings.tiledKeyframePlan.neutralSide !== side) {
-                throw new Error(
-                    `Le plan tuilé cible un carré ${settings.tiledKeyframePlan.neutralSide}² `
-                    + `mais la sortie exige ${side}².`,
-                )
+                throw new Error(t('engine.export.tiledPlanMismatch', { planSide: settings.tiledKeyframePlan.neutralSide, side }))
             }
         }
         const exportMemoryOptions = {
@@ -3103,13 +3087,9 @@ export class Engine {
         const validationError = await this.device.popErrorScope()
         const memoryError = await this.device.popErrorScope()
         if (validationError || memoryError) {
-            const reason = memoryError ? 'mémoire GPU insuffisante' : 'allocation refusée par le pilote'
+            const reason = memoryError ? t('engine.export.reasonMemory') : t('engine.export.reasonRefused')
             this.endVideoExportSession()
-            throw new Error(
-                `Impossible d'allouer la surface de rendu ${surfaceWidth}×${surfaceHeight} `
-                + `(texture de travail ${side}²) : ${reason}. `
-                + 'Baisse la résolution ou le suréchantillonnage.',
-            )
+            throw new Error(t('engine.export.allocationFailed', { width: surfaceWidth, height: surfaceHeight, side, reason }))
         }
     }
 
@@ -3221,10 +3201,10 @@ export class Engine {
      * there rather than rebuilding the pass from outside.
      */
     captureHdrFrame(width: number, height: number, supersample = 1, hdrOptions: HdrGpuOptions = {format:'video'}): Promise<Uint16Array> {
-        if (!this.videoExportActive || !this.hdrExport) return Promise.reject(new Error('Une session HDR est requise.'))
-        if (this.exportCaptureRequest) return Promise.reject(new Error('Une capture est déjà en attente.'))
+        if (!this.videoExportActive || !this.hdrExport) return Promise.reject(new Error(t('engine.export.hdrSessionRequired')))
+        if (this.exportCaptureRequest) return Promise.reject(new Error(t('engine.export.captureAlreadyPending')))
         const max = this.device.limits.maxTextureDimension2D
-        if (!Number.isSafeInteger(supersample) || supersample < 1 || ![width, height].every(n => Number.isSafeInteger(n) && n > 0 && n * supersample <= max)) return Promise.reject(new Error('Dimensions HDR invalides.'))
+        if (!Number.isSafeInteger(supersample) || supersample < 1 || ![width, height].every(n => Number.isSafeInteger(n) && n > 0 && n * supersample <= max)) return Promise.reject(new Error(t('engine.export.hdrDimensionsInvalid')))
         return new Promise((resolveHdr, reject) => {
             this.exportCaptureRequest = { outputWidth: width, outputHeight: height, supersample,
                 timestampMicros: 0, durationMicros: 1, resolve: frame => frame.close(), resolveHdr, hdrOptions, reject }
@@ -3239,9 +3219,9 @@ export class Engine {
         timestampMicros: number
         durationMicros: number
     }): Promise<VideoFrame> {
-        if (this.hdrExport) return Promise.reject(new Error('Utiliser la capture flottante dans une session HDR.'))
+        if (this.hdrExport) return Promise.reject(new Error(t('engine.export.useHdrCapture')))
         if (this.exportCaptureRequest) {
-            return Promise.reject(new Error('A capture is already pending for the next frame.'))
+            return Promise.reject(new Error(t('engine.export.captureAlreadyPending')))
         }
         if (!Number.isInteger(request.supersample) || request.supersample < 1) {
             return Promise.reject(new Error(
@@ -3253,9 +3233,7 @@ export class Engine {
         const superWidth = request.outputWidth * request.supersample
         const superHeight = request.outputHeight * request.supersample
         if (superWidth > maxDim || superHeight > maxDim) {
-            return Promise.reject(new Error(
-                `Capture target ${superWidth}x${superHeight} exceeds maxTextureDimension2D (${maxDim}).`,
-            ))
+            return Promise.reject(new Error(t('engine.export.captureTargetTooLarge', { width: superWidth, height: superHeight, maxDim })))
         }
         return new Promise<VideoFrame>((resolve, reject) => {
             this.exportCaptureRequest = { ...request, resolve, reject }
@@ -3803,12 +3781,11 @@ export class Engine {
             }
             : fitSurfaceToGpuBudget(memoryOptions, this.gpuMemoryBudgetBytes)
         if (this.forcedSurfaceSize && surfaceFit.reduced) {
-            throw new Error(
-                `La surface d'export ${this.width}×${this.height} nécessiterait environ `
-                + `${formatGpuBytes(estimateGpuWorkingSetBytes(memoryOptions))}, au-delà du budget prudent `
-                + `${formatGpuBytes(this.gpuMemoryBudgetBytes)} de cet appareil. `
-                + 'Baisse la résolution ou le suréchantillonnage.',
-            )
+            throw new Error(t('engine.export.surfaceOverBudget', {
+                width: this.width, height: this.height,
+                estimate: formatGpuBytes(estimateGpuWorkingSetBytes(memoryOptions)),
+                budget: formatGpuBytes(this.gpuMemoryBudgetBytes),
+            }))
         }
         if (!this.forcedSurfaceSize && surfaceFit.reduced) {
             this.width = surfaceFit.width
@@ -5013,10 +4990,7 @@ export class Engine {
         // exact and the message would be noise.
         if (wantsDeep && !deep && !this.deepUnavailableReported) {
             this.deepUnavailableReported = true
-            this.reportGpuError(
-                'Le noyau de zoom profond (floatexp) n\'a pas pu être compilé par le pilote GPU de cet appareil : '
-                + 'au-delà de ce niveau de zoom, l\'image perd en précision.',
-            )
+            this.reportGpuError(t('engine.webgpu.deepKernelUnavailable'))
         }
         this.floatExpActive = deep
         // cx/cy mantissas re-based onto the shared scale exponent. Decomposing
@@ -6724,13 +6698,13 @@ export class Engine {
             const path = validatePalettePath(input), base = snapshotPathAppearance(options)
             const signature = JSON.stringify([path, base])
             if (signature === this.palettePathSignature) return
-            this.palettePathStatus = 'Préparation des palettes et images…'
+            this.palettePathStatus = t('engine.palettePath.preparing')
             const assets = await resolvePalettePathImages(path, base)
             const textures: GPUTexture[] = []
             let prepared: GpuPalettePath | undefined
             try {
                 if (assets.images.length * path.textureSize ** 2 * 4 * 4 / 3 * 2 + (path.stops.length + 1) * 4096 * 7 * 8 > PALETTE_PATH_TEXTURE_BUDGET)
-                    throw new Error('Images du parcours : budget de 128 Mio dépassé. Choisir une résolution inférieure.')
+                    throw new Error(t('engine.palettePath.budgetExceeded'))
                 for (const asset of assets.images) {
                     textures.push(await this._loadTexture(asset.url, true, path.textureSize))
                     if (generation !== this.palettePathGeneration || this.destroyed) return
@@ -6740,13 +6714,13 @@ export class Engine {
             } finally { assets.dispose(); textures.forEach(t => t.destroy()) }
             this.palettePathGpu?.destroy(); this.palettePathGpu = prepared
             this.palettePathSignature = signature
-            this.palettePathStatus = `${path.stops.length} palettes prêtes · ${path.textureSize} px maximum`
+            this.palettePathStatus = t('engine.palettePath.ready', { count: path.stops.length, size: path.textureSize })
             this.previousRenderOptions = undefined
             this.rebuildColorBindGroup(); this.resetAaState(); this.invalidateRotationColorResolve(); this.needRender = true
         } catch (error) {
             this.palettePathGpu?.destroy(); this.palettePathGpu = undefined
             this.palettePathSignature = ''; this.rebuildColorBindGroup(); this.previousRenderOptions = undefined
-            this.palettePathStatus = `Parcours non appliqué : ${String(error)}`
+            this.palettePathStatus = t('engine.palettePath.notApplied', { error: String(error) })
             if (this.expmapAppearance) throw error
         }
     }

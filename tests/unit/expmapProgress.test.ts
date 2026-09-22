@@ -72,7 +72,7 @@ describe('WebP production progress and resume',()=>{
     else previous.geometryConvention=convention
     await store.publish({...previous,generation:previous.generation+1})
     control.stopAt=-1;control.produced=[]
-    await expect(createExpmapDocument({engine:{}} as ExpmapProducerDeps,{...r,resume:true})).rejects.toThrow('ancienne convention')
+    await expect(createExpmapDocument({engine:{}} as ExpmapProducerDeps,{...r,resume:true})).rejects.toThrow('old geometry convention')
     expect(control.produced).toEqual([])
   })
   it('preserves experimental mode across resume despite the current checkbox',async()=>{

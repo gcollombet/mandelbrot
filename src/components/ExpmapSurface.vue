@@ -6,6 +6,7 @@ import { expmapLoopDomain } from '../expmap/loop'
 import ExpmapEffectsControls from './ExpmapEffectsControls.vue'
 import { documentEffects } from '../expmap/effects'
 import { computed, nextTick, onMounted, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { MandelbrotExposed } from '../types/MandelbrotExposed'
 import { parkExpmapSession } from '../expmap/session'
 import type { Engine } from '../Engine'
@@ -17,12 +18,14 @@ import { interpolateScale, scaleDoublements } from '../expmap/decimal'
 import { magnitudeSummary } from '../expmap/controls'
 import { advanceExpmapPlayback, expmapTimeLabel } from '../expmap/playback'
 const props = defineProps<{ engine: Engine | null; controller: MandelbrotExposed | null }>()
+const { t } = useI18n()
 const surface = ref<HTMLElement | null>(null), canvas = ref<HTMLCanvasElement | null>(null)
 let exactPreview: { position: number; scale: string; effectTime?: number } | null = null
 const position = ref(0), angle = ref(0), error = ref(''), loading = ref(false), ready = ref(false)
 const sampleDistribution=ref(loadExpmapPlayerDistribution())
 watch(sampleDistribution,saveExpmapPlayerDistribution)
-const maxSamples=ref(16), renderedResolution=ref('')
+const maxSamples=ref(16), renderedView=ref<{width:number;height:number;samples:number}|null>(null)
+const renderedResolution=computed(()=>renderedView.value?t('expmapSurface.resolution',renderedView.value):'')
 const playing = ref(false), rate = ref(1), direction = ref(1), loop = ref(false)
 const title = computed(() => { const entry = expmapLibraryEntries.value.find(e => e.id === expmapOpenDocument.value?.manifest.documentId); return entry ? expmapLibraryFilename(entry) : 'ExpMap' })
 const magnitude = computed(() => { const d = expmapOpenDocument.value?.manifest.projection.domain; return d ? magnitudeSummary(d.startScale, d.endScale) : '' })
@@ -53,7 +56,7 @@ const player = new ExpmapGpuPlayer((image, view) => {
   target.getContext('bitmaprenderer')!.transferFromImageBitmap(image)
   const id = expmapOpenDocument.value?.manifest.documentId
   if (id) expmapLastView.value = { documentId: id, scale: view.scale, angle: view.angle }
-  renderedResolution.value=`${view.width} × ${view.height} px · AA ≤ ${view.maxSamples ?? 1}`
+  renderedView.value={width:view.width,height:view.height,samples:view.maxSamples ?? 1}
   loading.value = false
 }, failure => { error.value = String(failure); loading.value = false; playing.value = false })
 function request() {
@@ -120,7 +123,7 @@ watch([expmapOpenDocument, () => props.engine], async ([doc], _previous, onClean
   playing.value = false; ready.value = false
   player.dispose(); release?.(); release = undefined
   exactPreview = null
-  position.value = 0; angle.value = 0; error.value = ''; renderedResolution.value = ''
+  position.value = 0; angle.value = 0; error.value = ''; renderedView.value = null
   if (!doc) { returnFocus?.focus(); returnFocus = null; return }
   const preview = expmapPreviewView.value
   if (preview?.documentId === doc.manifest.documentId) {
@@ -169,23 +172,23 @@ onUnmounted(() => {
 </script>
 <template>
   <Teleport to="body">
-    <div v-if="expmapOpenDocument" ref="surface" class="expmap-surface" role="dialog" aria-modal="true" aria-label="Lecteur ExpMap" tabindex="-1" @wheel.prevent="seek(position + $event.deltaY / 5000)" @pointerdown.stop @keydown.stop>
-      <canvas ref="canvas" @click="togglePlay" aria-label="Rendu ExpMap" />
-      <header><div><strong>LECTEUR EXPMAP</strong><select aria-label="Fichier ExpMap du lecteur" :title="title" :value="expmapOpenDocument.manifest.documentId" @change="selectDocument(($event.target as HTMLSelectElement).value)"><option v-for="entry in expmapLibraryEntries.filter(e => e.state === 'ready')" :key="entry.id" :value="entry.id">{{ expmapLibraryFilename(entry) }}</option></select><small>{{ magnitude }}</small><small>Apparence cuite · {{ playing ? 'Lecture' : 'Pause' }}</small><small class="resolution" aria-label="Résolution et AA du rendu">{{ renderedResolution }}</small></div><button class="exit" @click="close">✕ Quitter <small>Échap</small></button></header>
+    <div v-if="expmapOpenDocument" ref="surface" class="expmap-surface" role="dialog" aria-modal="true" :aria-label="t('expmapSurface.dialogAria')" tabindex="-1" @wheel.prevent="seek(position + $event.deltaY / 5000)" @pointerdown.stop @keydown.stop>
+      <canvas ref="canvas" @click="togglePlay" :aria-label="t('expmapSurface.canvasAria')" />
+      <header><div><strong>{{ t('expmapSurface.header') }}</strong><select :aria-label="t('expmapSurface.fileAria')" :title="title" :value="expmapOpenDocument.manifest.documentId" @change="selectDocument(($event.target as HTMLSelectElement).value)"><option v-for="entry in expmapLibraryEntries.filter(e => e.state === 'ready')" :key="entry.id" :value="entry.id">{{ expmapLibraryFilename(entry) }}</option></select><small>{{ magnitude }}</small><small>{{ t('expmapSurface.bakedAppearance') }} · {{ playing ? t('expmapSurface.playing') : t('expmapSurface.paused') }}</small><small class="resolution" :aria-label="t('expmapSurface.resolutionAria')">{{ renderedResolution }}</small></div><button class="exit" @click="close">{{ t('expmapSurface.exit') }} <small>{{ t('expmapSurface.escape') }}</small></button></header>
       <div class="expmap-controls" @wheel.stop>
-        <div class="timeline"><span>{{ expmapTimeLabel(position * duration) }}</span><input :value="position" @input="seek(Number(($event.target as HTMLInputElement).value))" aria-label="Position de lecture" type="range" min="0" max="1" step="0.0001"><span>{{ expmapTimeLabel(duration) }}</span></div>
+        <div class="timeline"><span>{{ expmapTimeLabel(position * duration) }}</span><input :value="position" @input="seek(Number(($event.target as HTMLInputElement).value))" :aria-label="t('expmapSurface.positionAria')" type="range" min="0" max="1" step="0.0001"><span>{{ expmapTimeLabel(duration) }}</span></div>
         <div class="transport">
-          <button title="Retour au début" @click="seek(0)">⏮</button>
-          <button class="play" :disabled="!ready" :aria-label="playing ? 'Pause' : 'Lecture'" @click="togglePlay">{{ playing ? '❚❚ Pause' : '▶ Lecture' }}</button>
-          <button title="Reculer de 5 secondes" @click="seek(position - 5 / duration)">−5 s</button><button title="Avancer de 5 secondes" @click="seek(position + 5 / duration)">+5 s</button>
-          <label>Vitesse <select v-model.number="rate"><option v-for="value in [0.25,0.5,1,2,4]" :key="value" :value="value">{{ value }}×</option></select></label>
-          <button :aria-pressed="direction === -1" @click="direction *= -1">{{ direction === 1 ? '→ Zoom' : '← Dézoom' }}</button>
-          <button :aria-pressed="loop" @click="loop = !loop">↻ Répéter le trajet</button>
-          <label>Rotation <input v-model.number="angle" aria-label="Rotation ExpMap" type="range" min="-6.283185" max="6.283185" step="0.01" @input="playing = false"></label>
-          <label title="Maximum de prélèvements par pixel, selon la densité disponible">AA <select v-model.number="maxSamples" aria-label="Prélèvements AA maximum"><option v-for="value in EXPMAP_SAMPLE_LIMITS" :key="value" :value="value">{{ value === 1 ? 'Non' : value }}</option></select></label>
-          <label>Répartition AA <select v-model="sampleDistribution" aria-label="Répartition AA"><option value="grid">Grille</option><option value="r2">R2</option></select></label>
-          <button v-if="surface?.requestFullscreen" @click="fullscreen">Plein écran</button>
-          <span class="status" role="status">{{ loading ? 'Chargement…' : '2 doublements/s à 1×' }}</span>
+          <button :title="t('expmapSurface.toStart')" @click="seek(0)">⏮</button>
+          <button class="play" :disabled="!ready" :aria-label="playing ? t('expmapSurface.pause') : t('expmapSurface.play')" @click="togglePlay">{{ playing ? t('expmapSurface.pauseButton') : t('expmapSurface.playButton') }}</button>
+          <button :title="t('expmapSurface.back5')" @click="seek(position - 5 / duration)">−5 s</button><button :title="t('expmapSurface.forward5')" @click="seek(position + 5 / duration)">+5 s</button>
+          <label>{{ t('expmapSurface.speed') }} <select v-model.number="rate"><option v-for="value in [0.25,0.5,1,2,4]" :key="value" :value="value">{{ value }}×</option></select></label>
+          <button :aria-pressed="direction === -1" @click="direction *= -1">{{ direction === 1 ? t('expmapSurface.zoomIn') : t('expmapSurface.zoomOut') }}</button>
+          <button :aria-pressed="loop" @click="loop = !loop">{{ t('expmapSurface.loop') }}</button>
+          <label>{{ t('expmapSurface.rotation') }} <input v-model.number="angle" :aria-label="t('expmapSurface.rotationAria')" type="range" min="-6.283185" max="6.283185" step="0.01" @input="playing = false"></label>
+          <label :title="t('expmapSurface.aaTitle')">{{ t('expmapSurface.aa') }} <select v-model.number="maxSamples" :aria-label="t('expmapSurface.aaAria')"><option v-for="value in EXPMAP_SAMPLE_LIMITS" :key="value" :value="value">{{ value === 1 ? t('expmapSurface.aaOff') : value }}</option></select></label>
+          <label>{{ t('expmapSurface.distribution') }} <select v-model="sampleDistribution" :aria-label="t('expmapSurface.distributionAria')"><option value="grid">{{ t('expmapSurface.grid') }}</option><option value="r2">{{ t('expmapSurface.r2') }}</option></select></label>
+          <button v-if="surface?.requestFullscreen" @click="fullscreen">{{ t('expmapSurface.fullscreen') }}</button>
+          <span class="status" role="status">{{ loading ? t('expmapSurface.loading') : t('expmapSurface.rate') }}</span>
         </div>
         <ExpmapEffectsControls :tile-count="expmapOpenDocument.manifest.octaves.tileCount" :document-id="expmapOpenDocument.manifest.documentId"/>
         <p v-if="error" role="alert">{{ error }}</p>

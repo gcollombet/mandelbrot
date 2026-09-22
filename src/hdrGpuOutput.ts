@@ -1,6 +1,6 @@
 import shader from './assets/hdr_output.wgsl?raw'
 
-export const HDR_CLIPPING_WARNING = 'Certaines hautes lumières ont été écrêtées à 10 000 nits. L’export continue ; réduire l’exposition HDR pour conserver leurs détails.'
+import { t } from './i18n'
 
 export type HdrGpuOptions = {
   format: 'video' | 'png'
@@ -12,7 +12,7 @@ export type HdrGpuOptions = {
 }
 const pipelines = new WeakMap<GPUDevice, Map<string, Promise<GPUComputePipeline>>>()
 const abort = (options: HdrGpuOptions) => {
-  if (options.signal?.aborted) throw new DOMException('Export annulé', 'AbortError')
+  if (options.signal?.aborted) throw new DOMException(t('video.runner.cancelled'), 'AbortError')
 }
 /** Packed output: I420P10 for video, big-endian RGB16 bytes for PNG.
  * Stripe the readback so 8K PNG works within maxStorageBufferBindingSize.
@@ -20,15 +20,15 @@ const abort = (options: HdrGpuOptions) => {
  */
 export async function readHdrGpuOutput(device: GPUDevice, source: GPUTexture, width: number, height: number, options: HdrGpuOptions): Promise<Uint16Array> {
   const video = options.format === 'video', exposure = options.exposure ?? 0
-  if (!['video','png'].includes(options.format) || ![width,height].every(n => Number.isSafeInteger(n) && n > 0) || (video && (width % 2 || height % 2))) throw new Error('Dimensions HDR invalides.')
-  if (!Number.isFinite(exposure) || Math.abs(exposure) > 16) throw new Error('Exposition HDR invalide.')
-  if (![options.originX ?? 0,options.originY ?? 0].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 0xffffffff)) throw new Error('Origine HDR invalide.')
+  if (!['video','png'].includes(options.format) || ![width,height].every(n => Number.isSafeInteger(n) && n > 0) || (video && (width % 2 || height % 2))) throw new Error(t('video.hdr.dimensionsInvalid'))
+  if (!Number.isFinite(exposure) || Math.abs(exposure) > 16) throw new Error(t('video.hdr.exposureInvalid'))
+  if (![options.originX ?? 0,options.originY ?? 0].every(n => Number.isSafeInteger(n) && n >= 0 && n <= 0xffffffff)) throw new Error(t('video.hdr.originInvalid'))
   abort(options)
   const rowBytes = width * (video ? 3 : 6)
   const limit = Math.min(32 * 1024 * 1024, device.limits.maxStorageBufferBindingSize, device.limits.maxBufferSize - 4)
   const multiple = video ? 2 : 1
   const rows = Math.min(height, Math.floor(limit / rowBytes / multiple) * multiple)
-  if (rows < multiple) throw new Error('Limite GPU insuffisante pour la sortie HDR.')
+  if (rows < multiple) throw new Error(t('video.hdr.gpuLimit'))
   const size = Math.ceil(rowBytes * rows / 4) * 4
   let formats = pipelines.get(device)
   if (!formats) { formats = new Map(); pipelines.set(device, formats) }
@@ -78,7 +78,7 @@ export async function readHdrGpuOutput(device: GPUDevice, source: GPUTexture, wi
         abort(options)
         const mapped = readback.getMappedRange()
         const flags = new Uint32Array(mapped,size,1)[0]
-        if (flags & 1) throw new Error('Luminance HDR non finie. Vérifier le rendu et les matériaux.')
+        if (flags & 1) throw new Error(t('video.hdr.nonFiniteLuminance'))
         clipped ||= !!(flags & 2)
         const data = new Uint16Array(mapped,0,shorts)
         if (video) {
@@ -89,7 +89,7 @@ export async function readHdrGpuOutput(device: GPUDevice, source: GPUTexture, wi
         } else result.set(data,y*width*3)
       } finally { readback.unmap() }
     }
-    if (clipped) options.onWarning?.(HDR_CLIPPING_WARNING)
+    if (clipped) options.onWarning?.(t('video.hdr.clippingWarning'))
     return result
   } catch (error) { failure = error; throw error }
   finally {

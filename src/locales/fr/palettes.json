@@ -1,0 +1,16 @@
+{
+  "invalidParam": "Paramètre de palette invalide : {field}",
+  "invalidPath": "Parcours de palettes invalide.",
+  "invalidImageIdentities": "Identités des images invalides.",
+  "invalidStops": "Stops invalides : profondeurs distinctes et croissantes requises.",
+  "unreadableLibrary": "Bibliothèque de parcours illisible.",
+  "imageNotFound": "Image du parcours introuvable : {name}",
+  "imageChanged": "L’image {name} a changé depuis la cuisson du parcours.",
+  "budgetExceeded": "Images du parcours : budget de 128 Mio dépassé. Réduire leur résolution.",
+  "newPathName": "Nouveau parcours",
+  "currentPaletteStop": "Palette actuelle",
+  "paletteNameRequired": "Le nom de la palette est obligatoire.",
+  "stopPresetNameRequired": "Le nom du préréglage de point est obligatoire.",
+  "textureNameRequired": "Le nom de la texture est obligatoire.",
+  "cloudTextureMissingGuid": "La texture cloud n’a pas de GUID."
+}

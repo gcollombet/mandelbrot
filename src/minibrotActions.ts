@@ -5,6 +5,7 @@
 
 import type { MandelbrotParams } from './Mandelbrot'
 import { log10FromDecimalString } from './floatexp'
+import { t } from './i18n'
 
 export type MinibrotEngine = {
   findMinibrot(radiusFactor?: number, fill?: number): Promise<{
@@ -37,14 +38,14 @@ export async function centerOnMinibrot(engine: MinibrotEngine, model: Mandelbrot
   try {
     const res = await engine.findMinibrot(RADIUS_FACTOR)
     if (res.status === 'ok' && res.cx && res.cy) {
-      return { next: { ...model, cx: res.cx, cy: res.cy }, status: `Centré sur le minibrot de période ${res.period}` }
+      return { next: { ...model, cx: res.cx, cy: res.cy }, status: t('minibrotActions.centered', { period: res.period }) }
     }
     if (res.status === 'nonewton') {
-      return { next: null, status: `Période ${res.period} trouvée, mais le nucléus n'a pas convergé` }
+      return { next: null, status: t('minibrotActions.nucleusNotConverged', { period: res.period }) }
     }
-    return { next: null, status: 'Aucun minibrot sous la vue : zoomer sur un d’abord' }
+    return { next: null, status: t('minibrotActions.noneUnderView') }
   } catch {
-    return { next: null, status: 'Recherche du minibrot échouée' }
+    return { next: null, status: t('minibrotActions.searchFailed') }
   }
 }
 
@@ -64,16 +65,16 @@ export async function frameMinibrot(engine: MinibrotEngine, model: MandelbrotPar
       if (depth > precisionBudgetExponent(model.precisionBudget)) {
         next.precisionBudget = `1e-${Math.min(1000, depth)}`
       }
-      return { next, status: `Minibrot de période ${res.period} cadré` }
+      return { next, status: t('minibrotActions.framed', { period: res.period }) }
     }
     if (res.status === 'nosize') {
-      return { next: null, status: `Période ${res.period} trouvée, mais l'estimation de taille a dégénéré` }
+      return { next: null, status: t('minibrotActions.sizeDegenerate', { period: res.period }) }
     }
     if (res.status === 'nonewton') {
-      return { next: null, status: `Période ${res.period} trouvée, mais le nucléus n'a pas convergé` }
+      return { next: null, status: t('minibrotActions.nucleusNotConverged', { period: res.period }) }
     }
-    return { next: null, status: 'Aucun minibrot sous la vue : zoomer sur un d’abord' }
+    return { next: null, status: t('minibrotActions.noneUnderView') }
   } catch {
-    return { next: null, status: 'Cadrage du minibrot échoué' }
+    return { next: null, status: t('minibrotActions.frameFailed') }
   }
 }

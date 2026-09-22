@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import { computed, onUnmounted, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 const props = defineProps<{ label: string; done: number; total: number; unit: string; active?: boolean }>()
+const { t, locale } = useI18n()
 const percent = computed(() => props.total > 0 ? Math.min(props.active ? 99 : 100, Math.floor(100 * props.done / props.total)) : 0)
 /** Timestamped samples of `done`, kept over a sliding window so the rate follows the current phase. */
 const WINDOW_MS = 15000
@@ -31,9 +33,9 @@ const remainingSeconds = computed(() => props.active && props.total > 0 && rate.
 function duration(s: number) {
   if (!Number.isFinite(s)) return '—'
   const h = Math.floor(s / 3600), m = Math.floor((s % 3600) / 60), sec = Math.floor(s % 60)
-  return h > 0 ? `${h} h ${String(m).padStart(2, '0')} min` : m > 0 ? `${m} min ${String(sec).padStart(2, '0')} s` : `${sec} s`
+  return h > 0 ? t('renderProgress.hours', { h, m: String(m).padStart(2, '0') }) : m > 0 ? t('renderProgress.minutes', { m, s: String(sec).padStart(2, '0') }) : t('renderProgress.seconds', { s: sec })
 }
-const rateText = computed(() => rate.value <= 0 ? null : rate.value >= 100 ? Math.round(rate.value).toLocaleString('fr-FR') : rate.value >= 1 ? rate.value.toFixed(1) : rate.value >= 0.01 ? rate.value.toFixed(2) : `1 / ${duration(1 / rate.value)}`)
+const rateText = computed(() => rate.value <= 0 ? null : rate.value >= 100 ? Math.round(rate.value).toLocaleString(locale.value) : rate.value >= 1 ? rate.value.toFixed(1) : rate.value >= 0.01 ? rate.value.toFixed(2) : `1 / ${duration(1 / rate.value)}`)
 const unitShort = computed(() => props.unit.split(' ')[0])
 </script>
 <template>
@@ -43,11 +45,11 @@ const unitShort = computed(() => props.unit.split(' ')[0])
       <strong v-if="total > 0" class="pct">{{ percent }} %</strong>
     </div>
     <div v-if="total > 0 || elapsedSeconds > 1" class="stats">
-      <span v-if="total > 0" class="stat"><b>{{ done.toLocaleString('fr-FR') }}</b> / {{ total.toLocaleString('fr-FR') }} <i>{{ unit }}</i></span>
-      <span v-if="rateText" class="stat" :title="`${unit} par seconde`"><b>{{ rateText }}</b> <i>{{ rateText.startsWith('1 /') ? unitShort : unitShort + '/s' }}</i></span>
-      <span v-if="remainingSeconds !== null" class="stat" title="Temps restant estimé"><i>reste</i> <b>{{ duration(remainingSeconds) }}</b></span>
-      <span v-else-if="active && total > 0" class="stat"><i>estimation…</i></span>
-      <span class="stat" title="Temps écoulé"><i>écoulé</i> <b>{{ duration(elapsedSeconds) }}</b></span>
+      <span v-if="total > 0" class="stat"><b>{{ done.toLocaleString(locale) }}</b> / {{ total.toLocaleString(locale) }} <i>{{ unit }}</i></span>
+      <span v-if="rateText" class="stat" :title="t('renderProgress.perSecondTitle', { unit })"><b>{{ rateText }}</b> <i>{{ rateText.startsWith('1 /') ? unitShort : unitShort + '/s' }}</i></span>
+      <span v-if="remainingSeconds !== null" class="stat" :title="t('renderProgress.remainingTitle')"><i>{{ t('renderProgress.remaining') }}</i> <b>{{ duration(remainingSeconds) }}</b></span>
+      <span v-else-if="active && total > 0" class="stat"><i>{{ t('renderProgress.estimating') }}</i></span>
+      <span class="stat" :title="t('renderProgress.elapsedTitle')"><i>{{ t('renderProgress.elapsed') }}</i> <b>{{ duration(elapsedSeconds) }}</b></span>
     </div>
   </div>
 </template>

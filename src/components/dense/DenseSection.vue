@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
 import { computed, ref } from 'vue';
 import { showTip, hideTip } from './denseTip';
+const { t } = useI18n();
 
 const props = defineProps<{
   title: string;
@@ -43,7 +45,7 @@ function toggle() {
   >
     <button type="button" class="sec-head" :aria-expanded="!collapsed" @click="toggle">
       <span v-if="icon" class="sec-ico"><svg viewBox="0 0 24 24" v-html="icon"></svg></span>
-      <img v-if="preview" :src="preview" alt="Sélection actuelle" class="section-preview" />
+      <img v-if="preview" :src="preview" :alt="t('dense.currentSelection')" class="section-preview" />
       <span class="sec-title">{{ title }}</span>
       <span
         v-if="scope"

@@ -1,3 +1,4 @@
+import { t } from './i18n'
 /** Package GPU-converted PNG 3 RGB16 PQ using native zlib compression. */
 const crcTable = Uint32Array.from({ length: 256 }, (_, i) => {
   let c = i
@@ -17,14 +18,14 @@ function chunk(type: string, data: Uint8Array): Uint8Array<ArrayBuffer> {
 
 /** Package GPU-converted, big-endian RGB16 PQ samples; no color math on the CPU. */
 export async function encodeHdrPng(width: number, height: number, rgbPq: Uint16Array, options: { signal?: AbortSignal } = {}): Promise<Blob> {
-  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || rgbPq.length !== width * height * 3) throw new Error('Dimensions HDR invalides.')
+  if (!Number.isSafeInteger(width) || !Number.isSafeInteger(height) || width < 1 || height < 1 || rgbPq.length !== width * height * 3) throw new Error(t('video.hdr.dimensionsInvalid'))
   const pixels = new Uint8Array(rgbPq.buffer, rgbPq.byteOffset, rgbPq.byteLength)
   let row = 0
   const stream = new ReadableStream<Uint8Array<ArrayBuffer>>({
     async pull(controller) {
       // Let input/cancellation run during large exports, not only microtasks.
       if (row && row % 16 === 0) await new Promise(resolve => setTimeout(resolve, 0))
-      if (options.signal?.aborted) { controller.error(new DOMException('Capture annulée', 'AbortError')); return }
+      if (options.signal?.aborted) { controller.error(new DOMException(t('video.still.cancelled'), 'AbortError')); return }
       if (row === height) { controller.close(); return }
       const bytes = new Uint8Array(1 + width * 6)
       // Filter 0 followed by the already packed scanline from the GPU.

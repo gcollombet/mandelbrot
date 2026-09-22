@@ -1,4 +1,5 @@
 import type { HdrGpuOptions } from './hdrGpuOutput'
+import { t } from './i18n'
 import { hdrInputFrame } from './hdrVideo'
 // ── Wiring: parcours + engine + capture + encoder → an encoded blob ──
 // The loop itself lives in videoExportSession.ts and knows nothing about GPUs
@@ -141,7 +142,7 @@ export async function runVideoExportToWebm(
     ...validateVideoPath({ from: request.from, to: request.to, durationSeconds: request.durationSeconds }),
   ]
   if (problems.length > 0) {
-    throw new Error(`Cannot export this parcours:\n${formatVideoPathProblems(problems)}`)
+    throw new Error(t('video.runner.cannotExport', { problems: formatVideoPathProblems(problems) }))
   }
 
   validateMotion(request.motion ?? {}, request.durationSeconds)
@@ -153,12 +154,12 @@ export async function runVideoExportToWebm(
       aaSamplesPerFrame: request.aaSamplesPerFrame ?? 1,
     })
     if (!eligibility.eligible) {
-      throw new Error(`Cannot export this parcours:\n${eligibility.problems.join('\n')}`)
+      throw new Error(t('video.runner.cannotExport', { problems: eligibility.problems.join('\n') }))
     }
   }
 
   const navigator = deps.controller.getNavigator()
-  if (!navigator) throw new Error('Navigator unavailable.')
+  if (!navigator) throw new Error(t('video.runner.navigatorUnavailable'))
 
   let hdrWarned = false
   const onHdrWarning = (message: string) => {
@@ -166,7 +167,7 @@ export async function runVideoExportToWebm(
   }
   const { output } = request
   const hdr = output.dynamicRange === 'hdr'
-  if (hdr && !deps.engine.captureHdrFrame) throw new Error('Capture HDR vidéo indisponible.')
+  if (hdr && !deps.engine.captureHdrFrame) throw new Error(t('video.runner.hdrCaptureUnavailable'))
   const frameDurationMicros = Math.round(1e6 / output.fps)
   const tiledKeyframePlan = renderMode === 'tiled-keyframe'
     ? planKeyframeTiles({
@@ -280,7 +281,7 @@ export async function runVideoExportToWebm(
           }
           const captured = await done
           if (captured instanceof Uint16Array) {
-            if (request.signal?.aborted) throw new DOMException('Export annulé', 'AbortError')
+            if (request.signal?.aborted) throw new DOMException(t('video.runner.cancelled'), 'AbortError')
             const planes = captured
             await sink.addFrame(hdrInputFrame(planes,output.width,output.height,
               Math.round((frame.index * 1e6) / output.fps),frameDurationMicros))

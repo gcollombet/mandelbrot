@@ -1,4 +1,5 @@
 import type { Mp4Codec, EncoderPreference } from './videoEncoderSink'
+import { t } from './i18n'
 
 export type VideoDynamicRange = 'sdr' | 'hdr'
 export const HDR_VIDEO_COLOR_SPACE = {
@@ -25,12 +26,12 @@ export function hdrEncodeOptions(codec: Mp4Codec, quantizer: number | undefined)
 
 export function hdrEncoderConfig(spec: HdrEncoderSpec, hardwareAcceleration: EncoderPreference): VideoEncoderConfig {
   const { width, height, codec, quantizer } = spec, fps = spec.fps ?? 30
-  if (codec === 'avc') throw new Error('Le H.264 proposé est SDR. Choisir HEVC, AV1 ou VP9 pour le HDR 10 bits.')
+  if (codec === 'avc') throw new Error(t('video.hdr.avcIsSdr'))
   if (quantizer !== undefined) {
     const { min, max } = hdrQuantizerRange(codec)
-    if (!Number.isInteger(quantizer) || quantizer < min || quantizer > max) throw new Error(`Quantificateur ${codec.toUpperCase()} invalide (${min} à ${max}).`)
+    if (!Number.isInteger(quantizer) || quantizer < min || quantizer > max) throw new Error(t('video.hdr.quantizerInvalid', { codec: codec.toUpperCase(), min, max }))
   }
-  if (![width, height].every(n => Number.isSafeInteger(n) && n > 0 && n % 2 === 0) || !Number.isFinite(fps) || fps <= 0 || fps > 60) throw new Error('Le HDR exige des dimensions paires et une cadence entre 1 et 60 images/s.')
+  if (![width, height].every(n => Number.isSafeInteger(n) && n > 0 && n % 2 === 0) || !Number.isFinite(fps) || fps <= 0 || fps > 60) throw new Error(t('video.hdr.evenDimensionsAndFps'))
   const large = width * height > 3840 * 2160, small = width * height <= 1920 * 1080
   const codecString = codec === 'hevc' ? `hvc1.2.4.L${large ? 183 : small ? 123 : 153}.B0`
     : codec === 'av1' ? `av01.0.${large ? '17' : small ? '09' : '13'}M.10.0.110.09.16.09.0`
@@ -52,7 +53,7 @@ export function hdrEncoderConfig(spec: HdrEncoderSpec, hardwareAcceleration: Enc
 export function assertHdrDecoderConfig(config: VideoDecoderConfig, codec: Mp4Codec): void {
   const c = config.colorSpace
   if (!hasHdrColorSpace(c)) {
-    throw new Error('L’encodeur ne confirme pas la colorimétrie HDR Rec.2020/PQ attendue.')
+    throw new Error(t('video.hdr.colorSpaceUnconfirmed'))
   }
   const parts = config.codec.split('.')
   const description = config.description
@@ -68,7 +69,7 @@ export function assertHdrDecoderConfig(config: VideoDecoderConfig, codec: Mp4Cod
     tenBit = parts[0] === 'av01' && parts[3] === '10'
     if (bytes) tenBit &&= bytes.length >= 4 && (bytes[2] & 0x60) === 0x40
   } else if (codec === 'vp9') tenBit = parts[0] === 'vp09' && parts[1] === '02' && parts[3] === '10'
-  if (!tenBit) throw new Error('L’encodeur ne confirme pas une sortie 10 bits. Aucun repli SDR ne sera effectué.')
+  if (!tenBit) throw new Error(t('video.hdr.tenBitUnconfirmed'))
 }
 
 export function hdrInputFrame(data: Uint16Array, width: number, height: number, timestamp: number, duration: number): VideoFrame {

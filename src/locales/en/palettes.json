@@ -1,0 +1,16 @@
+{
+  "invalidParam": "Invalid palette parameter: {field}",
+  "invalidPath": "Invalid palette path.",
+  "invalidImageIdentities": "Invalid image identities.",
+  "invalidStops": "Invalid stops: distinct, increasing depths required.",
+  "unreadableLibrary": "Palette path library is unreadable.",
+  "imageNotFound": "Palette path image not found: {name}",
+  "imageChanged": "Image {name} has changed since the path was baked.",
+  "budgetExceeded": "Palette path images: 128 MiB budget exceeded. Reduce their resolution.",
+  "newPathName": "New path",
+  "currentPaletteStop": "Current palette",
+  "paletteNameRequired": "Palette name is required.",
+  "stopPresetNameRequired": "Stop preset name is required.",
+  "textureNameRequired": "Texture name is required.",
+  "cloudTextureMissingGuid": "Cloud texture is missing a GUID."
+}

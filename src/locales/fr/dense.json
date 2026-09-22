@@ -1,0 +1,36 @@
+{
+  "dblclickDefaultValue": "Double-clic : valeur par défaut ({value})",
+  "currentSelection": "Sélection actuelle",
+  "linked": {
+    "group": "{kind} liée : {name}",
+    "newName": "Nouveau nom",
+    "sharedCatalogItem": "Élément du catalogue partagé",
+    "clickToRename": "Cliquer pour renommer",
+    "stateCatalog": "catalogue",
+    "stateModified": "modifiée",
+    "stateUpToDate": "à jour",
+    "saveVariant": "Enregistrer une variante",
+    "update": "Mettre à jour",
+    "detach": "Détacher",
+    "detachTitle": "Oublier le lien, garder les réglages"
+  },
+  "sync": {
+    "failed": "Synchronisation cloud échouée ; nouvel essai programmé",
+    "syncing": "Synchronisation cloud…",
+    "syncingLabel": "Synchronisation cloud en cours",
+    "synced": "Bibliothèque synchronisée",
+    "errorLabel": "Erreur de synchronisation cloud"
+  },
+  "viewMenu": {
+    "title": "Préférences d’affichage",
+    "display": "Affichage",
+    "theme": "Thème",
+    "shape": "Silhouette",
+    "fieldsTitle": "Champs",
+    "chroma": "Chromatisme",
+    "styles": { "clair": "Clair", "sober": "Sobre", "glow": "Glow" },
+    "shapes": { "net": "Net", "doux": "Doux", "rond": "Rond" },
+    "fields": { "gauge": "Jauge", "sober": "Sobre", "minimal": "Minimal" },
+    "chromas": { "mono": "Monochrome", "code": "Codé", "vif": "Vif" }
+  }
+}

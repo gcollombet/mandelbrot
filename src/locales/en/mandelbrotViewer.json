@@ -1,0 +1,94 @@
+{
+  "uiHidden": {
+    "touch": "Double-tap to show the interface",
+    "pressBefore": "Press",
+    "escapeKey": "Esc",
+    "pressAfter": "to show the interface"
+  },
+  "sharedScene": {
+    "loading": "Loading the scene…",
+    "retry": "Retry",
+    "saveCopy": "Save a copy",
+    "defaultName": "Shared scene",
+    "loadFailed": "This scene could not be loaded.",
+    "linkIncomplete": "This scene link is incomplete.",
+    "notFound": "This scene could not be found or has been deleted.",
+    "copySaved": "Copy saved",
+    "signInRequired": "Sign in to share the scene."
+  },
+  "aa": {
+    "stop": "Stop AA refinement",
+    "remaining": "{time} left",
+    "minutesSeconds": "{m} min {s} s",
+    "seconds": "{s} s"
+  },
+  "still": {
+    "progress": "{label} · tile {tile}/{tiles}",
+    "cancel": "Cancel the capture",
+    "capture": "Capture {size}",
+    "encodingHdr": "Encoding HDR PNG",
+    "cancelled": "Capture cancelled",
+    "failed": "Capture failed: {error}",
+    "window": "Window",
+    "tiled": "tiles",
+    "encodingLabel": "Capture encoding",
+    "sdr": "SDR · PNG/WebP",
+    "hdr": "HDR · 16-bit PNG",
+    "exposure": "Export exposure (EV)",
+    "exposureAria": "HDR export exposure",
+    "hdrInfo": "PQ / Rec.2020 · reference white 203 nits. View in HDR-capable software.",
+    "formatLabel": "Image format",
+    "sameAsWindow": "Same format as the window",
+    "formatTitle": "{label} format",
+    "buttonTitle": "Screenshot — window, 1:1, 16:9 or 4:3 format; window, 1K, 2K, 4K or 8K (shortcut B: window)",
+    "button": "Screenshot"
+  },
+  "fab": {
+    "hide": "Hide",
+    "hideTitle": "Hide the interface (Esc to show it again)",
+    "renderAa": "Render AA",
+    "renderAaTitle": "Render AA — smooth the render (shortcut G)",
+    "discover": "Discover",
+    "discoverTitle": "Discover nearby presets",
+    "radarOn": "Radar On",
+    "minibrot": "Minibrot",
+    "minibrotTitle": "Minibrot — centre on or frame the atom under the view",
+    "minibrotCenter": "Centre on the minibrot",
+    "minibrotFrame": "Centre and frame the minibrot"
+  },
+  "pins": {
+    "travelTo": "Travel to {name}",
+    "preset": "preset",
+    "presetName": "Preset",
+    "thumbnailAlt": "preset thumbnail",
+    "nearbyTitle": "{count} presets nearby",
+    "nearbyAria": "{count} visible presets nearby",
+    "offScreenTitle": "1 preset off-screen | {count} presets in this direction",
+    "offScreenAria": "1 off-screen preset | {count} off-screen presets in this direction",
+    "more": "+{count} more"
+  },
+  "panel": {
+    "playPauseTitle": "Play / pause the animation",
+    "pause": "Pause",
+    "play": "Play",
+    "ptabEdit": "Edit",
+    "ptabLibrary": "Library"
+  },
+  "guestImport": {
+    "title": "Save your local presets to the cloud?",
+    "intro": "This browser holds {presets} and {textures} that are not in your account yet.",
+    "presetCount": "{n} preset | {n} presets",
+    "textureCount": "{n} texture | {n} textures",
+    "breakdown": "{complete} complete · {palettes} palettes · {stops} stops · {mappings} mappings · {animations} animations",
+    "blocked": "Saving unavailable: {reason}. Your local library stays untouched.",
+    "explanation": "These items will be copied to your personal cloud library. The local copy stays in this browser and becomes available again after signing out.",
+    "saving": "Saving…",
+    "save": "Save to my cloud",
+    "later": "Later"
+  },
+  "auth": {
+    "popupBlocked": "Allow the Google sign-in window in your browser, then try again.",
+    "loginFailed": "Sign-in is not possible right now. Check your connection and try again.",
+    "logoutFailed": "Sign-out failed. Try again."
+  }
+}

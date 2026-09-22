@@ -1,16 +1,17 @@
 import { AppendOnlyStreamTarget, BufferTarget, EncodedPacket, EncodedVideoPacketSource, Mp4OutputFormat, Output } from 'mediabunny'
+import { t } from './i18n'
 import { assertHdrDecoderConfig, hdrEncodeOptions, hdrEncoderConfig, hdrInputFrame, hasHdrColorSpace } from './hdrVideo'
 import type { EncoderPreference, VideoEncodeSettings, VideoEncoderSink } from './videoEncoderSink'
 
 /** Encode a real 10-bit input before rendering frames or opening the muxer. */
 async function verifyEncoder(settings: VideoEncodeSettings, preference: EncoderPreference, quantizer: number | undefined): Promise<VideoEncoderConfig> {
-  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') throw new Error('WebCodecs requis pour la vidéo HDR.')
+  if (typeof VideoEncoder === 'undefined' || typeof VideoFrame === 'undefined') throw new Error(t('video.hdr.webCodecsRequired'))
   const config = hdrEncoderConfig({ ...settings, quantizer }, preference)
-  if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error(quantizer === undefined ? 'Profil 10 bits refusé.' : 'Mode qualité constante refusé.')
+  if (!(await VideoEncoder.isConfigSupported(config)).supported) throw new Error(t(quantizer === undefined ? 'video.hdr.tenBitProfileRefused' : 'video.hdr.constantQualityRefused'))
   let failure: unknown, received = false
   const encoder = new VideoEncoder({ error: error => { failure = error }, output: (_chunk, meta) => {
     try {
-      if (!meta.decoderConfig) throw new Error('Métadonnées de sortie HDR absentes.')
+      if (!meta.decoderConfig) throw new Error(t('video.hdr.outputMetadataMissing'))
       assertHdrDecoderConfig(meta.decoderConfig, settings.codec); received = true
     } catch (error) { failure = error }
   } })
@@ -24,11 +25,11 @@ async function verifyEncoder(settings: VideoEncodeSettings, preference: EncoderP
     let timer: ReturnType<typeof setTimeout> | undefined
     try {
       await Promise.race([encoder.flush(), new Promise<never>((_resolve, reject) => {
-        timer = setTimeout(() => reject(new Error('L’encodeur HDR ne répond pas.')), 15_000)
+        timer = setTimeout(() => reject(new Error(t('video.hdr.encoderNotResponding'))), 15_000)
       })])
     } finally { clearTimeout(timer) }
     if (failure) throw failure
-    if (!received) throw new Error('L’encodeur HDR n’a produit aucune image.')
+    if (!received) throw new Error(t('video.hdr.encoderNoFrame'))
     return config
   } finally { if (encoder.state !== 'closed') encoder.close() }
 }
@@ -43,9 +44,9 @@ export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise
   const errors: string[] = []
   search: for (const mode of modes) for (const preference of preferences) {
     try { config = await verifyEncoder(settings,preference,mode); quantizer = mode; break search }
-    catch (error) { errors.push(`${preference}${mode === undefined ? '' : ` Q${mode}`} : ${error instanceof Error ? error.message : String(error)}`) }
+    catch (error) { errors.push(t('video.hdr.probeFailed', { preference, mode: mode === undefined ? '' : ` Q${mode}`, error: error instanceof Error ? error.message : String(error) })) }
   }
-  if (!config) throw new Error(`Encodage HDR 10 bits ${settings.codec.toUpperCase()} indisponible : ${errors.join(' ; ')}`)
+  if (!config) throw new Error(t('video.hdr.encodingUnavailable', { codec: settings.codec.toUpperCase(), errors: errors.join(' ; ') }))
   const encodeOptions = hdrEncodeOptions(settings.codec, quantizer)
   const streaming = settings.destination.kind === 'stream'
   const output = new Output({ format: new Mp4OutputFormat(streaming
@@ -62,7 +63,7 @@ export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise
     if (failure) return
     try {
       if (meta.decoderConfig) { assertHdrDecoderConfig(meta.decoderConfig,settings.codec); validated = true }
-      if (!validated) throw new Error('Métadonnées HDR manquantes au début de la vidéo.')
+      if (!validated) throw new Error(t('video.hdr.metadataMissingAtStart'))
       const packet = EncodedPacket.fromEncodedChunk(chunk)
       writes = writes.then(async () => { if (!failure) await source.add(packet,meta) }).catch(fail)
     } catch (error) { fail(error) }
@@ -72,7 +73,7 @@ export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise
   catch (error) { close(); await output.cancel().catch(() => {}); throw error }
   const check = () => {
     if (failure) throw failure
-    if (finished || encoder.state === 'closed') throw new Error('L’encodeur HDR est fermé.')
+    if (finished || encoder.state === 'closed') throw new Error(t('video.hdr.encoderClosed'))
   }
   const waitForCapacity = async () => {
     // encodeQueueSize counts inputs awaiting processing, not delayed output.
@@ -96,10 +97,10 @@ export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise
     codec: settings.codec, streaming, fileExtension:'mp4', quantizer, get framesEncoded() { return frames },
     async addFrame(frame) {
       try {
-        if (finished) throw new Error('L’encodeur HDR est fermé.')
+        if (finished) throw new Error(t('video.hdr.encoderClosed'))
         check()
         if (String(frame.format) !== 'I420P10' || !hasHdrColorSpace(frame.colorSpace)
-          || frame.codedWidth !== settings.width || frame.codedHeight !== settings.height) throw new Error('Image incompatible avec la sortie HDR 10 bits.')
+          || frame.codedWidth !== settings.width || frame.codedHeight !== settings.height) throw new Error(t('video.hdr.frameIncompatible'))
         await writes; check()
         await waitForCapacity()
         encoder.encode(frame,{...encodeOptions,keyFrame:frames % Math.max(1,Math.round(settings.fps*(settings.keyFrameIntervalSeconds ?? 2))) === 0})
@@ -109,12 +110,12 @@ export async function createHdrVideoSink(settings: VideoEncodeSettings): Promise
       await writes; check(); frames++
     },
     async finalize() {
-      if (finished) throw new Error('L’encodeur HDR est fermé.')
+      if (finished) throw new Error(t('video.hdr.encoderClosed'))
       try {
         await encoder.flush(); await writes; check(); await output.finalize(); finished = true
         if (streaming) return null
         const buffer = (output.target as BufferTarget).buffer
-        if (!buffer) throw new Error('Aucune vidéo HDR produite.')
+        if (!buffer) throw new Error(t('video.hdr.noVideoProduced'))
         return new Blob([buffer],{type:'video/mp4'})
       } catch (error) {
         finished = true

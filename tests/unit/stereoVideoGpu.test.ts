@@ -32,7 +32,7 @@ it('shades both eyes independently, transfers float height and composes only a c
 })
 it('never publishes a partial stereo pair after cancellation or a source failure',async()=>{
   const {renderer,commands}=fixture(),abort=new AbortController()
-  await expect(renderer.render(1,async()=>{abort.abort();return {} as GPUTexture},abort.signal)).rejects.toThrow('interrompu')
+  await expect(renderer.render(1,async()=>{abort.abort();return {} as GPUTexture},abort.signal)).rejects.toThrow('interrupted')
   expect(commands.some(c=>c[0]==='compose')).toBe(false)
   await expect(renderer.render(1,async()=>{throw new Error('source unavailable')})).rejects.toThrow('source unavailable')
   expect(commands.some(c=>c[0]==='compose')).toBe(false)

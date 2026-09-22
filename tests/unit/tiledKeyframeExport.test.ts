@@ -103,7 +103,7 @@ describe('evaluateTiledKeyframeEligibility', () => {
       aaSamplesPerFrame: 4,
     })
     expect(result.eligible).toBe(false)
-    expect(result.problems.join(' ')).toContain('pures lectures')
+    expect(result.problems.join(' ')).toContain('pure reads')
   })
 
   it('refuses travelling', () => {

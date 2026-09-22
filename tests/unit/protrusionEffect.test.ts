@@ -56,7 +56,9 @@ describe('palette protrusion effect', () => {
     expect(shader).toContain('protrusionGain = mix(iterationProtrusionGain, geometricProtrusionGain, protrusionGeometryMix);');
     expect(shader).toContain('let styledAnalyticRelief = effectiveAnalyticRelief * protrusionGain;');
     expect(shader).toContain('let heightGradient = grad * (0.34 * styledAnalyticRelief);');
-    expect(editor).toContain("protrusion: 'Protubérances'");
+    expect(editor).toContain('paletteEditor.labels.');
+    expect(read('../../src/effectFieldConfig.ts')).toContain('protrusion:');
+    expect(read('../../src/locales/fr/paletteEditor.json')).toContain('"protrusion": "Protubérances"');
 
     const amplify = (baseGain: number, strength: number) => 1 + strength * (baseGain - 1);
     expect(amplify(4, 1)).toBe(4);
@@ -92,11 +94,11 @@ describe('palette protrusion effect', () => {
     expect(settings).toContain('model.value.protrusionStrength = source.protrusionStrength ?? 1;');
     expect(settings).toContain('model.value.protrusionGeometryMix = source.protrusionGeometryMix ?? 0;');
     expect(settings).toContain('model.value.protrusionPeriod = source.protrusionPeriod ?? 1;');
-    expect(settings).toContain('label="Phase protubérances"');
-    expect(settings).toContain('label="Netteté protubérances"');
-    expect(settings).toContain('<DenseField label="Amplification protubérances" :min="1" :max="4"');
-    expect(settings).toContain('<DenseField label="Protubérances géométriques" :min="0" :max="1"');
-    expect(settings).toContain('label="Période géométrique"');
+    expect(settings).toContain(`:label="t('settings.palettes.surface.protrusionPhase')"`);
+    expect(settings).toContain(`:label="t('settings.palettes.surface.protrusionSharpness')"`);
+    expect(settings).toContain(`<DenseField :label="t('settings.palettes.surface.protrusionStrength')" :min="1" :max="4"`);
+    expect(settings).toContain(`<DenseField :label="t('settings.palettes.surface.protrusionGeometry')" :min="0" :max="1"`);
+    expect(settings).toContain(`:label="t('settings.palettes.surface.geometricPeriod')"`);
 
     expect(engine).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 104');
     expect(engine).toContain('effectiveProtrusionPhase,             // 68: protrusionPhase');

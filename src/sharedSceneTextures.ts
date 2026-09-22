@@ -4,6 +4,7 @@ import {getAllTextureEntries, getTextureMetadataByGuid, saveTextureEntry} from '
 import {getActiveLibraryScope} from './scopedCache';
 import {PERSONAL_TEXTURE_LIMIT, scopeKey} from './personalLibraryTypes';
 import {createGuid} from './catalogIdentity';
+import {t} from './i18n';
 
 // Shared textures live only in this session until the visitor explicitly saves a copy.
 const textures = new Map<string, {metadata: TextureMetadata; blob: Blob}>();
@@ -28,7 +29,7 @@ export async function materializeSharedTextures(value: MandelbrotParams): Promis
     let saved = previous ? await getTextureMetadataByGuid(previous) : null;
     if (!saved) {
       if (scope.kind === 'user' && (await getAllTextureEntries()).filter(t => t.origin === 'personal').length >= PERSONAL_TEXTURE_LIMIT) {
-        throw new Error('La bibliothèque de textures est pleine. Libérez une place avant de copier cette scène.');
+        throw new Error(t('sharedSceneTextures.libraryFull'));
       }
       const guid = createGuid();
       const {kind, width, height, thumbnail} = entry.metadata;

@@ -93,7 +93,7 @@ describe('describeParcoursWarnings', () => {
     it('warns when both ends sit at the same place', () => {
         const [warning] = describeParcoursWarnings(location(), location())
         expect(warning.kind).toBe('degenerate')
-        expect(warning.message).toContain('image fixe')
+        expect(warning.message).toContain('still frame')
     })
 
     it('treats a differing angle alone as a real parcours', () => {
@@ -168,7 +168,7 @@ describe('validateVideoOutput', () => {
             const spec = {...OUTPUT, supersample: 2, magnificationThreshold: 16}
             const [warning] = describeOutputWarnings(spec)
             expect(warning.kind).toBe('softness')
-            expect(warning.message).toContain('périphérie')
+            expect(warning.message).toContain('periphery')
             expect(validateVideoOutput(spec, 8192)).toEqual([])
         })
     })

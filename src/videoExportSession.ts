@@ -1,3 +1,4 @@
+import { t } from './i18n'
 // ── Deterministic frame loop for video export ──
 // Separates the export's control flow from GPU and Vue wiring, in the same
 // spirit as zoomState.ts and fieldConvergence.ts, so the loop's exactness and
@@ -65,10 +66,7 @@ export class VideoExportFrameTimeout extends Error {
   pumps: number
 
   constructor(frameIndex: number, pumps: number) {
-    super(
-      `Video export aborted: frame ${frameIndex} did not converge after ${pumps} render pumps. `
-      + 'No partially converged frame was emitted.',
-    )
+    super(t('video.session.frameTimeout', { frame: frameIndex, pumps }))
     this.name = 'VideoExportFrameTimeout'
     this.frameIndex = frameIndex
     this.pumps = pumps
@@ -114,13 +112,13 @@ export function elapsedForFrame(
 export function validateVideoExportSettings(settings: VideoExportSettings): string[] {
   const problems: string[] = []
   if (!Number.isFinite(settings.fps) || settings.fps <= 0) {
-    problems.push('fps must be a positive finite number')
+    problems.push(t('video.session.fpsInvalid'))
   }
   if (!Number.isFinite(settings.durationSeconds) || settings.durationSeconds <= 0) {
-    problems.push('duration must be a positive finite number of seconds')
+    problems.push(t('video.session.durationInvalid'))
   }
   if (!Number.isInteger(settings.maxPumpsPerFrame) || settings.maxPumpsPerFrame < 1) {
-    problems.push('maxPumpsPerFrame must be a positive integer')
+    problems.push(t('video.session.maxPumpsInvalid'))
   }
   return problems
 }
@@ -142,7 +140,7 @@ export async function runVideoExport(
 ): Promise<VideoExportResult> {
   const problems = validateVideoExportSettings(settings)
   if (problems.length > 0) {
-    throw new Error(`Invalid video export settings: ${problems.join('; ')}`)
+    throw new Error(t('video.session.invalidSettings', { problems: problems.join('; ') }))
   }
 
   const totalFrames = totalFramesFor(settings)

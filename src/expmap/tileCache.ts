@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import type { ExpmapUploadContext } from './tileUpload'
 import { EXPMAP_RESIDENT_TILES } from './octaves'
 /** One uploading tile plus one decoded lookahead; only the current window can publish. */
@@ -39,7 +40,7 @@ export class ExpmapTileCache<T = Uint8Array> {
   private async ensure(index: number, signal?: AbortSignal) {
     while (!this.resident(index)) {
       signal?.throwIfAborted()
-      if (this.disposed) throw new Error('Cache fermé')
+      if (this.disposed) throw new Error(t('expmap.tileCache.closed'))
       if (!this.allowed.has(index)) throw new DOMException('Vue remplacée', 'AbortError')
       if (this.pending) { await this.pending; continue }
       const controller=new AbortController()
@@ -86,7 +87,7 @@ export class ExpmapTileCache<T = Uint8Array> {
   }
   setWindow(needed:number[],prefetch?:number) {
     const allowed = [...needed, ...(prefetch === undefined ? [] : [prefetch])]
-    if (new Set(allowed.map(i=>i % EXPMAP_RESIDENT_TILES)).size !== allowed.length) throw new Error('Fenêtre de tuiles trop grande')
+    if (new Set(allowed.map(i=>i % EXPMAP_RESIDENT_TILES)).size !== allowed.length) throw new Error(t('expmap.tileCache.windowTooLarge'))
     this.allowed=new Set(allowed);this.required=new Set(needed);this.order=allowed
     if(this.ahead && !this.allowed.has(this.ahead.index))this.discardAhead()
     if(this.pendingIndex!==undefined&&!this.allowed.has(this.pendingIndex))this.uploadAbort?.abort()

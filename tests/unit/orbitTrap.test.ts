@@ -115,7 +115,7 @@ describe('terminal logarithmic-rosette shader contract', () => {
     expect(preview).toContain('const COLOR_UNIFORM_FLOAT_COUNT = 104;');
     expect(preview).toContain('device.queue.writeBuffer(uniformBuffer, 72 * 4');
     expect(settings).toContain('orbitTrap: normalizeOrbitTrapFromLegacy(model.value)');
-    expect(settings).toContain('title="Orbit trap · Rosace"');
+    expect(settings).toContain(`:title="t('settings.palettes.orbitTrap.title')"`);
     expect(params).toContain('orbitTrap?: OrbitTrapConfig;');
     expect(paletteStore).toContain('orbitTrap?: OrbitTrapConfig;');
   });

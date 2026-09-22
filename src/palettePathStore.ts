@@ -1,3 +1,4 @@
+import { t } from './i18n'
 import { validatePalettePath, type PalettePath } from './palettePath'
 const KEY = 'mandelbrot.palette-paths.v1'
 /** Storage boundary deliberately independent of Vue and rendering; Firestore can replace it. */
@@ -5,7 +6,7 @@ export function readPalettePaths(storage: Pick<Storage, 'getItem'> = localStorag
     const raw = storage.getItem(KEY)
     if (!raw) return []
     const values = JSON.parse(raw)
-    if (!Array.isArray(values)) throw new Error('Bibliothèque de parcours illisible.')
+    if (!Array.isArray(values)) throw new Error(t('palettes.unreadableLibrary'))
     return values.map(validatePalettePath)
 }
 export function savePalettePath(path: PalettePath, storage: Pick<Storage, 'getItem' | 'setItem'> = localStorage) {

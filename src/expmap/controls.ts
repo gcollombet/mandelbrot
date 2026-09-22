@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { canonicalScale, scaleDoublements } from './decimal'
 export const ZOOM_DEPTH_MIN = -10
 export const ZOOM_DEPTH_MAX = 1000
@@ -10,7 +11,7 @@ export function magnitudeSummary(from: string, to: string): string {
     const exponent = (s: string) => BigInt(canonicalScale(s).split('e')[1])
     const a = exponent(from), b = exponent(to), magnitude = a > b ? a - b : b - a
     const signed = (n: bigint) => n >= 0n ? `+${n}` : String(n)
-    return `${signed(a)} → ${signed(b)} · Magnitude ${magnitude}`
-  } catch { return 'Plage à définir' }
+    return t('expmap.controls.magnitude',{from:signed(a),to:signed(b),magnitude:String(magnitude)})
+  } catch { return t('expmap.controls.rangeToDefine') }
 }
 export function videoFilename(filename: string): string { return `${filename.replace(/\.expmap$/i, '')}.mp4` }

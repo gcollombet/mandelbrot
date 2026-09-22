@@ -3,6 +3,7 @@ import ShaderExpmapPanel from './ShaderExpmapPanel.vue'
 import { readPalettePaths } from '../palettePathStore'
 import type { PalettePath } from '../palettePath'
 import { computed, nextTick, onMounted, onUnmounted, ref, toRefs } from 'vue'
+import { useI18n } from 'vue-i18n'
 import type { Engine, RenderOptions } from '../Engine'
 import type { MandelbrotExposed } from '../types/MandelbrotExposed'
 import { DenseField, DenseSection, DenseSelect } from './dense'
@@ -23,11 +24,14 @@ import { ExpmapStore, withExpmapFileLock } from '../expmap/store'
 import { attachExpmapDocument, entryFromManifest, expmapLibraryEntries, expmapLibraryFilename, openExpmapLibraryEntry, pickExpmapFile, refreshExpmapLibrary, removeExpmapLibraryEntry, saveExpmapLibraryEntry, selectedExpmapDocumentId, type ExpmapLibraryEntry } from '../expmap/library'
 import { expmapBusy, expmapOpenDocument, expmapVideoSelected, shaderExpmapVideoSelected } from '../expmap/runtime'
 const props = defineProps<{ current: Record<string, unknown>; engine: Engine | null; controller: MandelbrotExposed | null }>()
+const { t } = useI18n()
 const emit = defineEmits<{ 'use-video': [] }>()
 const { name, start, end, cx, cy, width, height, density, forceRender, quality } = toRefs(useExpmapDraft(props.current))
 const error = ref(''), progress = ref<ExpmapProgress | null>(null), ownRunning = ref(false), stopping = ref(false)
-const progressUnit = ref('blocs calculés')
+const progressUnitKey = ref('expmapPanel.units.blocksComputed')
+const progressUnit = computed(() => t(progressUnitKey.value))
 const imageEntry=ref<ExpmapLibraryEntry|null>(null), imageWidth=ref(2048), imageHeight=ref(4096), imageFormat=ref<ExpmapImageFormat>('image/png'), imageQuality=ref(0.9)
+const imageFormats=computed(()=>[{value:'image/png',label:t('expmapPanel.imageExport.png')},{value:'image/jpeg',label:t('expmapPanel.imageExport.jpeg')},{value:'image/webp',label:t('expmapPanel.imageExport.webp')}])
 let abort: AbortController | undefined
 const pathChoice = ref((props.current.palettePath as PalettePath | undefined)?.enabled ? 'current' : '')
 const savedPaths = ref<PalettePath[]>([])
@@ -50,21 +54,21 @@ async function bake(entry?: ExpmapLibraryEntry) {
   if (expmapBusy.value || !props.engine || !props.controller?.setExportTime) return
   await guard(async () => {
     expmapBusy.value = true; ownRunning.value = true; stopping.value = false; abort = new AbortController()
-    progressUnit.value = 'blocs calculés'
-    progress.value = { phase: 'Choix du fichier .expmap', done: 0, total: 0, saved: 0 }
+    progressUnitKey.value = 'expmapPanel.units.blocksComputed'
+    progress.value = { phase: t('expmapPanel.phases.pickFile'), done: 0, total: 0, saved: 0 }
     try {
       const handle = entry?.handle ?? await pickExpmapFile('readwrite',name.value)
       expmapOpenDocument.value = null; await nextTick()
       const id=entry?.id ?? crypto.randomUUID()
       await withExpmapFileLock(id,async()=>{
-        const store = await ExpmapStore.working(handle,id,!!entry,{signal:abort.signal,onProgress:(done,total)=>{progressUnit.value='doublements copiés';progress.value={phase:'Préparation de la reprise',done,total,saved:done}}})
-        progressUnit.value='blocs calculés'
+        const store = await ExpmapStore.working(handle,id,!!entry,{signal:abort.signal,onProgress:(done,total)=>{progressUnitKey.value='expmapPanel.units.doublingsCopied';progress.value={phase:t('expmapPanel.phases.prepareResume'),done,total,saved:done}}})
+        progressUnitKey.value='expmapPanel.units.blocksComputed'
         const previous = entry ? await store.open(entry.id) : null
         const selectedPlan = previous?.projection ?? plan.value
-        if (!selectedPlan) throw new Error('Domaine ou résolution invalide.')
+        if (!selectedPlan) throw new Error(t('expmapPanel.errors.invalidDomain'))
         const controller = props.controller!, engine = props.engine!
         const camera = controller.getParams()
-        if (!camera) throw new Error('Caméra indisponible.')
+        if (!camera) throw new Error(t('expmapPanel.errors.cameraUnavailable'))
         let result,checkpointPublished=!!previous
         try {
           result=await createExpmapDocument({ engine, controller: { getNavigator: () => controller.getNavigator(), drawOnce: () => controller.drawOnce(), setExportTime: t => controller.setExportTime!(t) } }, {
@@ -78,7 +82,7 @@ async function bake(entry?: ExpmapLibraryEntry) {
           // Render the thumbnail from baked colors after the producer has released its buffers.
           let gpu:ExpmapGpuRenderer|undefined,release:(()=>void)|undefined
           try {
-            progress.value!.phase='Miniature du rendu cuit'
+            progress.value!.phase=t('expmapPanel.phases.thumbnail')
             release=parkExpmapSession(engine,controller)
             gpu=await ExpmapGpuRenderer.create(store,result,engine.device)
             const h=Math.min(90,result.projection.height), w=Math.max(1,Math.min(160,Math.floor(h*result.projection.width/result.projection.height)))
@@ -87,29 +91,29 @@ async function bake(entry?: ExpmapLibraryEntry) {
             const bytes=new Uint8Array(await blob.arrayBuffer())
             result={...result,generation:result.generation+1,thumbnail:`data:${blob.type};base64,${btoa(String.fromCharCode(...bytes))}`}
             await store.publish(result)
-          } catch(e) { error.value=`Miniature de la carte conservée : ${String(e)}` }
+          } catch(e) { error.value=t('expmapPanel.errors.thumbnailKept',{error:String(e)}) }
           finally {gpu?.dispose();release?.()}
         } finally {
           // Finalize even on a requested stop. A failed final copy keeps OPFS checkpoints.
           if(checkpointPublished) {
           const checkpoint=await store.open(id)
-          progressUnit.value='doublements copiés'
-          await store.saveContainer(checkpoint,(done,total)=>{progress.value={...progress.value,phase:'Finalisation du fichier .expmap',done,total,saved:done}})
+          progressUnitKey.value='expmapPanel.units.doublingsCopied'
+          await store.saveContainer(checkpoint,(done,total)=>{progress.value={...progress.value,phase:t('expmapPanel.phases.finalize'),done,total,saved:done}})
           await saveExpmapLibraryEntry(entryFromManifest(checkpoint,handle,entry?.name??name.value))
           await store.discardWorking(id)
           }
         }
-        progress.value!.phase='Fichier .expmap enregistré'
+        progress.value!.phase=t('expmapPanel.phases.saved')
       })
       await refreshExpmapLibrary()
     } catch (e) {
-      if (progress.value) progress.value.phase = abort?.signal.aborted ? 'Préparation interrompue — reprise possible' : 'Préparation arrêtée'
+      if (progress.value) progress.value.phase = abort?.signal.aborted ? t('expmapPanel.phases.interruptedResumable') : t('expmapPanel.phases.stopped')
       if (!(e instanceof DOMException && e.name === 'AbortError')) throw e
     } finally { expmapBusy.value = false; ownRunning.value = false; abort = undefined }
   })
 }
 function stop() { stopping.value = true; abort?.abort() }
-const stateLabels = { preparing: 'Calcul en cours', ready: 'Prêt', interrupted: 'Interrompu', missing: 'Fichier inaccessible', incompatible: 'Incompatible' }
+const stateLabels = computed(() => ({ preparing: t('expmapPanel.states.preparing'), ready: t('expmapPanel.states.ready'), interrupted: t('expmapPanel.states.interrupted'), missing: t('expmapPanel.states.missing'), incompatible: t('expmapPanel.states.incompatible') }))
 function selectEntry(entry: ExpmapLibraryEntry) {
   if (!expmapBusy.value && entry.state === 'ready') selectedExpmapDocumentId.value = entry.id
 }
@@ -119,7 +123,7 @@ async function attach(entry?: ExpmapLibraryEntry) {
 async function open(entry: ExpmapLibraryEntry, video = false) {
   await guard(async () => {
     const doc = await openExpmapLibraryEntry(entry)
-    if (doc.manifest.state !== 'complete') throw new Error('Reprendre la préparation pour compléter ce document.')
+    if (doc.manifest.state !== 'complete') throw new Error(t('expmapPanel.errors.resumeToComplete'))
     selectedExpmapDocumentId.value = entry.id
     if (video) { shaderExpmapVideoSelected.value = false; expmapVideoSelected.value = true; emit('use-video') }
     else expmapOpenDocument.value = doc
@@ -132,15 +136,15 @@ async function saveAgain(entry:ExpmapLibraryEntry) {
   await guard(async()=>{
     if(expmapBusy.value)return
     const handle=await pickExpmapFile('readwrite',entry.name)
-    expmapBusy.value=true;ownRunning.value=true;stopping.value=false;abort=new AbortController();progressUnit.value='doublements copiés'
+    expmapBusy.value=true;ownRunning.value=true;stopping.value=false;abort=new AbortController();progressUnitKey.value='expmapPanel.units.doublingsCopied'
     try {
       await withExpmapFileLock(entry.id,async()=>{
       const {store,manifest:original}=await openExpmapLibraryEntry(entry)
       const manifest={...original,name:entry.name,generation:original.generation+1}
-      await store.saveContainer(manifest,(done,total)=>{progress.value={phase:'Enregistrement .expmap',done,total,saved:done}},abort.signal,handle)
+      await store.saveContainer(manifest,(done,total)=>{progress.value={phase:t('expmapPanel.phases.saving'),done,total,saved:done}},abort.signal,handle)
       await saveExpmapLibraryEntry(entryFromManifest(manifest,handle,entry.name))
       if(store.directory)await store.discardWorking(entry.id)
-      progress.value!.phase='Fichier enregistré'
+      progress.value!.phase=t('expmapPanel.phases.fileSaved')
       })
     } finally {expmapBusy.value=false;ownRunning.value=false;abort=undefined}
   })
@@ -151,66 +155,66 @@ async function saveImage() {
     validateImageExport(imageWidth.value,imageHeight.value,imageFormat.value,imageQuality.value)
     const extension=imageFormat.value.split('/')[1]
     const picker=(window as Window & {showSaveFilePicker?:(options:unknown)=>Promise<FileSystemFileHandle>}).showSaveFilePicker
-    if(!picker)throw new Error('Enregistrement de fichiers indisponible')
-    const handle=await picker({suggestedName:`${entry.name}.${extension}`,types:[{description:'Image ExpMap',accept:{[imageFormat.value]:[`.${extension}`]}}]})
-    expmapBusy.value=true;ownRunning.value=true;stopping.value=false;abort=new AbortController();progressUnit.value='doublements assemblés'
-    progress.value={phase:'Assemblage de l’image',done:0,total:0,saved:0}
+    if(!picker)throw new Error(t('expmapPanel.errors.savingUnavailable'))
+    const handle=await picker({suggestedName:`${entry.name}.${extension}`,types:[{description:t('expmapPanel.imageTypeDescription'),accept:{[imageFormat.value]:[`.${extension}`]}}]})
+    expmapBusy.value=true;ownRunning.value=true;stopping.value=false;abort=new AbortController();progressUnitKey.value='expmapPanel.units.doublingsAssembled'
+    progress.value={phase:t('expmapPanel.phases.assembling'),done:0,total:0,saved:0}
     try {
       const {store,manifest}=await openExpmapLibraryEntry(entry)
       const blob=await exportExpmapImage(store,manifest,{width:imageWidth.value,height:imageHeight.value,format:imageFormat.value,quality:imageQuality.value,signal:abort.signal,
-        onProgress:(done,total)=>{progress.value={phase:done===total?'Encodage de l’image':'Assemblage de l’image',done,total,saved:0}}})
+        onProgress:(done,total)=>{progress.value={phase:done===total?t('expmapPanel.phases.encoding'):t('expmapPanel.phases.assembling'),done,total,saved:0}}})
       const writable=await handle.createWritable()
       try {await writable.write(blob);await writable.close()}catch(e){await writable.abort().catch(()=>{});throw e}
-      progress.value!.phase='Image enregistrée'
+      progress.value!.phase=t('expmapPanel.phases.imageSaved')
     } finally {expmapBusy.value=false;ownRunning.value=false;abort=undefined}
   })
 }
 </script>
 <template>
   <div class="expmap-panel">
-    <p class="intro">Prépare un rendu une seule fois, puis explore son zoom ou utilise-le dans une vidéo. Les paramètres de la section 1 servent aux deux formes de rendu : cuit (couleurs figées) ou recolorable (données avant couleur).</p>
-    <RenderProgress v-if="progress" :label="stopping && ownRunning ? 'Interruption en cours…' : progress.phase" :done="progress.done" :total="progress.total" :unit="progressUnit" :active="ownRunning"/>
-    <p v-if="ownRunning && progress" class="hint">{{ progress.saved }} éléments sauvegardés. La reprise conserve les doublements sauvegardés. Le fichier est finalisé à l’arrêt. Garde ce panneau ouvert pendant le calcul.</p>
-    <p v-if="progress?.timings" class="hint">Calcul {{ (progress.timings.compute/1000).toFixed(1) }} s · WebP {{ (progress.timings.encode/1000).toFixed(1) }} s · Écriture {{ (progress.timings.write/1000).toFixed(1) }} s · Attente sauvegarde {{ (progress.timings.wait/1000).toFixed(1) }} s. Ces durées se chevauchent.</p>
-    <button v-if="ownRunning" class="stop" :disabled="stopping" @click="stop">{{ stopping ? 'Interruption…' : 'Interrompre et conserver' }}</button>
-    <DenseSection title="1 · Paramètres communs">
+    <p class="intro">{{ t('expmapPanel.intro') }}</p>
+    <RenderProgress v-if="progress" :label="stopping && ownRunning ? t('expmapPanel.interrupting') : progress.phase" :done="progress.done" :total="progress.total" :unit="progressUnit" :active="ownRunning"/>
+    <p v-if="ownRunning && progress" class="hint">{{ t('expmapPanel.savedHint', { count: progress.saved }) }}</p>
+    <p v-if="progress?.timings" class="hint">{{ t('expmapPanel.timings', { compute: (progress.timings.compute/1000).toFixed(1), encode: (progress.timings.encode/1000).toFixed(1), write: (progress.timings.write/1000).toFixed(1), wait: (progress.timings.wait/1000).toFixed(1) }) }}</p>
+    <button v-if="ownRunning" class="stop" :disabled="stopping" @click="stop">{{ stopping ? t('expmapPanel.interrupting') : t('expmapPanel.interruptKeep') }}</button>
+    <DenseSection :title="t('expmapPanel.common.title')">
       <fieldset :disabled="expmapBusy">
-        <label>Nom <input v-model="name" aria-label="Nom ExpMap"></label>
-        <div class="library-toolbar"><span>Centre fixe</span><button @click="captureCenter">Utiliser le centre actuel</button></div>
-        <details><summary>Coordonnées précises</summary><label>Centre X <input v-model="cx" aria-label="Centre X ExpMap"></label><label>Centre Y <input v-model="cy" aria-label="Centre Y ExpMap"></label></details>
-        <ExpmapZoomControl v-model="start" label="Départ" @capture="start = String(current.scale)"/>
-        <ExpmapZoomControl v-model="end" label="Arrivée" @capture="end = String(current.scale)"/>
-        <p class="hint">Vue large 10^+10 → zoom profond 10^-1000</p>
+        <label>{{ t('expmapPanel.common.name') }} <input v-model="name" :aria-label="t('expmapPanel.common.nameAria')"></label>
+        <div class="library-toolbar"><span>{{ t('expmapPanel.common.fixedCenter') }}</span><button @click="captureCenter">{{ t('expmapPanel.common.useCurrentCenter') }}</button></div>
+        <details><summary>{{ t('expmapPanel.common.preciseCoords') }}</summary><label>{{ t('expmapPanel.common.centerX') }} <input v-model="cx" :aria-label="t('expmapPanel.common.centerXAria')"></label><label>{{ t('expmapPanel.common.centerY') }} <input v-model="cy" :aria-label="t('expmapPanel.common.centerYAria')"></label></details>
+        <ExpmapZoomControl v-model="start" :label="t('expmapPanel.common.start')" @capture="start = String(current.scale)"/>
+        <ExpmapZoomControl v-model="end" :label="t('expmapPanel.common.end')" @capture="end = String(current.scale)"/>
+        <p class="hint">{{ t('expmapPanel.common.rangeHint') }}</p>
         <p>{{ magnitudeSummary(start, end) }}</p>
-        <ResolutionSelect :width="width" :height="height" label="Résolution du document" :min="16" :max="3840" :step="2" @update:width="width = $event" @update:height="height = $event"/>
-        <DenseField v-model="density" label="Détail (densité k)" :min="1" :max="8" :step="0.5" :default="1"/>
-        <p v-if="!plan" class="problem">Vérifie les coordonnées et les échelles : le départ doit être plus large que l’arrivée.</p>
+        <ResolutionSelect :width="width" :height="height" :label="t('expmapPanel.common.resolution')" :min="16" :max="3840" :step="2" @update:width="width = $event" @update:height="height = $event"/>
+        <DenseField v-model="density" :label="t('expmapPanel.common.density')" :min="1" :max="8" :step="0.5" :default="1"/>
+        <p v-if="!plan" class="problem">{{ t('expmapPanel.common.planProblem') }}</p>
       </fieldset>
     </DenseSection>
-    <DenseSection title="2 · Rendu cuit (.expmap)">
+    <DenseSection :title="t('expmapPanel.baked.title')">
       <fieldset :disabled="expmapBusy">
-        <p class="hint">Couleurs et matériaux actuels figés dans une image WebP par doublement. Explorable et utilisable en vidéo sans recalcul.</p>
-        <label>Parcours de palettes<select v-model="pathChoice"><option value="">Palette fixe</option><option v-if="current.palettePath" value="current">Parcours actuel</option><option v-for="p in savedPaths" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
-        <p v-if="pathChoice" class="hint">Couleurs et matériaux cuits par profondeur. Le parcours et l’identité de ses images sont conservés pour la reprise.</p>
-        <DenseField v-model="quality" label="Qualité WebP" :min="0" :max="1" :step="0.01" :default="0.9"/><p class="hint">WebP avec pertes · 0,90 conseillé. Les détails fins et les raccords peuvent varier avec la compression.</p>
-        <details v-if="estimate"><summary>Mémoire GPU : {{ (estimate.gpuBytes / 1073741824).toFixed(2) }} GiB</summary><p>14 tuiles en mémoire GPU · {{ (estimate.decodeBytes / 1048576).toFixed(1) }} MiB pour une tuile décodée. Deux tampons de calcul : {{ (2*estimate.decodeBytes / 1048576).toFixed(1) }} MiB, hors surfaces du codec. Cache complet : {{ (estimate.rawDiskBytes / 1073741824).toFixed(2) }} GiB avant compression.</p></details>
+        <p class="hint">{{ t('expmapPanel.baked.hint') }}</p>
+        <label>{{ t('expmapPanel.baked.palettePath') }}<select v-model="pathChoice"><option value="">{{ t('expmapPanel.baked.fixedPalette') }}</option><option v-if="current.palettePath" value="current">{{ t('expmapPanel.baked.currentPath') }}</option><option v-for="p in savedPaths" :key="p.id" :value="p.id">{{ p.name }}</option></select></label>
+        <p v-if="pathChoice" class="hint">{{ t('expmapPanel.baked.pathHint') }}</p>
+        <DenseField v-model="quality" :label="t('expmapPanel.baked.webpQuality')" :min="0" :max="1" :step="0.01" :default="0.9"/><p class="hint">{{ t('expmapPanel.baked.webpHint') }}</p>
+        <details v-if="estimate"><summary>{{ t('expmapPanel.baked.gpuMemory', { gib: (estimate.gpuBytes / 1073741824).toFixed(2) }) }}</summary><p>{{ t('expmapPanel.baked.memoryDetail', { decode: (estimate.decodeBytes / 1048576).toFixed(1), buffers: (2*estimate.decodeBytes / 1048576).toFixed(1), raw: (estimate.rawDiskBytes / 1073741824).toFixed(2) }) }}</p></details>
         <p :class="forceRender && problem.kind === 'unsupported' ? 'hint' : 'problem'" v-for="problem in problems" :key="`${problem.field}:${problem.stopIndex}`">{{ problem.field }} : {{ problem.message }}</p>
-        <label><input v-model="forceRender" type="checkbox"> Forcer le rendu — expérimental</label>
-        <p v-if="forceRender" class="hint">Cuit les effets tels quels. Des raccords ou différences après reprise peuvent apparaître.</p>
-        <button class="primary" :disabled="!engine || !controller || !plan || hasBlockingProblems || !name.trim()" @click="bake()">Créer et enregistrer…</button>
+        <label><input v-model="forceRender" type="checkbox"> {{ t('expmapPanel.baked.forceRender') }}</label>
+        <p v-if="forceRender" class="hint">{{ t('expmapPanel.baked.forceHint') }}</p>
+        <button class="primary" :disabled="!engine || !controller || !plan || hasBlockingProblems || !name.trim()" @click="bake()">{{ t('expmapPanel.baked.create') }}</button>
       </fieldset>
-      <p class="hint">Le calcul et la sauvegarde avancent en parallèle. Le lecteur conserve 14 tuiles et anticipe la suivante. Le calcul inclut 12 doublements supplémentaires pour couvrir le centre, sans masque.</p>
+      <p class="hint">{{ t('expmapPanel.baked.parallelHint') }}</p>
     </DenseSection>
     <ShaderExpmapPanel :plan="plan" :name="name" :appearance="appearance" :engine="engine" :controller="controller" @use-video="emit('use-video')"/>
-    <DenseSection title="4 · Rendus cuits enregistrés">
+    <DenseSection :title="t('expmapPanel.library.title')">
       <div class="library-toolbar">
         <button class="library-import" :disabled="expmapBusy" @click="attach()">
           <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M3.5 7.5h6l2-2h9v13h-17zM12 9v6m-3-3h6"/></svg>
-          Ouvrir un fichier…
+          {{ t('expmapPanel.library.openFile') }}
         </button>
       </div>
-      <p v-if="!expmapLibraryEntries.length" class="empty">Aucun rendu enregistré. Crée ton premier ExpMap ci-dessus ou ouvre son fichier .expmap.</p>
-      <div v-else class="expmap-library" role="list" aria-label="Rendus ExpMap enregistrés">
+      <p v-if="!expmapLibraryEntries.length" class="empty">{{ t('expmapPanel.library.empty') }}</p>
+      <div v-else class="expmap-library" role="list" :aria-label="t('expmapPanel.library.listAria')">
         <article
           v-for="entry in expmapLibraryEntries"
           :key="entry.id"
@@ -222,18 +226,18 @@ async function saveImage() {
           <button
             class="tile-overview"
             :disabled="expmapBusy || entry.state !== 'ready'"
-            :aria-label="`Sélectionner ${expmapLibraryFilename(entry)}`"
+            :aria-label="t('expmapPanel.library.select', { name: expmapLibraryFilename(entry) })"
             @click="selectEntry(entry)"
           >
             <span class="thumbnail-shell">
-              <img v-if="entry.thumbnail" :src="entry.thumbnail" :alt="`Aperçu de ${expmapLibraryFilename(entry)}`">
+              <img v-if="entry.thumbnail" :src="entry.thumbnail" :alt="t('expmapPanel.library.preview', { name: expmapLibraryFilename(entry) })">
               <span v-else class="thumbnail-placeholder" aria-hidden="true"><svg viewBox="0 0 24 24"><path d="M4 17c3-7 5-9 8-6s4 1 8-4M4 20h16V4H4z"/></svg></span>
             </span>
             <span class="tile-copy">
               <strong class="filename" :title="expmapLibraryFilename(entry)">{{ expmapLibraryFilename(entry) }}</strong>
               <span class="tile-state-row">
                 <span class="state-label" :class="entry.state">{{ stateLabels[entry.state] }}</span>
-                <span v-if="entry.forceRender" class="experimental">Expérimental</span>
+                <span v-if="entry.forceRender" class="experimental">{{ t('expmapPanel.library.experimental') }}</span>
               </span>
               <small>{{ magnitudeSummary(entry.startScale, entry.endScale) }}</small>
               <small>{{ entry.width }} × {{ entry.height }} · {{ (entry.bytes / 1048576).toFixed(1) }} MiB</small>
@@ -242,48 +246,48 @@ async function saveImage() {
 
           <div v-if="entry.state === 'ready'" class="tile-actions">
             <button class="primary tile-action" :disabled="expmapBusy" @click="open(entry)">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 8 6-8 6z"/></svg>Explorer
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="m9 6 8 6-8 6z"/></svg>{{ t('expmapPanel.library.explore') }}
             </button>
             <button class="tile-action" :disabled="expmapBusy" @click="open(entry, true)">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h12v12H4zM16 10l4-2v8l-4-2z"/></svg>Vidéo
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 6h12v12H4zM16 10l4-2v8l-4-2z"/></svg>{{ t('expmapPanel.library.video') }}
             </button>
             <button class="tile-action" :disabled="expmapBusy" @click="chooseImage(entry)">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM6 16l4-4 3 3 2-2 3 3M15 9h.01"/></svg>Image
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M4 5h16v14H4zM6 16l4-4 3 3 2-2 3 3M15 9h.01"/></svg>{{ t('expmapPanel.library.image') }}
             </button>
             <details class="tile-more">
-              <summary :aria-label="`Plus d’actions pour ${expmapLibraryFilename(entry)}`" title="Plus d’actions">•••</summary>
+              <summary :aria-label="t('expmapPanel.library.moreActionsFor', { name: expmapLibraryFilename(entry) })" :title="t('expmapPanel.library.moreActions')">•••</summary>
               <div class="tile-menu">
-                <button :disabled="expmapBusy" @click="saveAgain(entry)">Enregistrer sous…</button>
-                <button :disabled="expmapBusy" @click="attach(entry)">Rattacher le fichier…</button>
-                <button class="danger" :disabled="expmapBusy" title="Le fichier reste sur le disque" @click="guard(() => removeExpmapLibraryEntry(entry.id))">Retirer du catalogue</button>
+                <button :disabled="expmapBusy" @click="saveAgain(entry)">{{ t('expmapPanel.library.saveAs') }}</button>
+                <button :disabled="expmapBusy" @click="attach(entry)">{{ t('expmapPanel.library.reattach') }}</button>
+                <button class="danger" :disabled="expmapBusy" :title="t('expmapPanel.library.removeTitle')" @click="guard(() => removeExpmapLibraryEntry(entry.id))">{{ t('expmapPanel.library.remove') }}</button>
               </div>
             </details>
           </div>
 
           <div v-else class="tile-actions state-actions">
             <button v-if="entry.state === 'interrupted' || entry.state === 'preparing'" class="tile-action resume" :disabled="expmapBusy" @click="bake(entry)">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2-5.3M20 4v5h-5"/></svg>Reprendre la préparation
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M20 12a8 8 0 1 1-2-5.3M20 4v5h-5"/></svg>{{ t('expmapPanel.library.resume') }}
             </button>
             <button v-else class="tile-action reconnect" :disabled="expmapBusy" @click="attach(entry)">
-              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 12h6m-3-3v6M4 5h16v14H4z"/></svg>Rattacher le fichier
+              <svg aria-hidden="true" viewBox="0 0 24 24"><path d="M9 12h6m-3-3v6M4 5h16v14H4z"/></svg>{{ t('expmapPanel.library.reattachShort') }}
             </button>
             <details class="tile-more">
-              <summary :aria-label="`Plus d’actions pour ${expmapLibraryFilename(entry)}`" title="Plus d’actions">•••</summary>
+              <summary :aria-label="t('expmapPanel.library.moreActionsFor', { name: expmapLibraryFilename(entry) })" :title="t('expmapPanel.library.moreActions')">•••</summary>
               <div class="tile-menu">
-                <button :disabled="expmapBusy" @click="saveAgain(entry)">Enregistrer sous…</button>
-                <button class="danger" :disabled="expmapBusy" title="Le fichier reste sur le disque" @click="guard(() => removeExpmapLibraryEntry(entry.id))">Retirer du catalogue</button>
+                <button :disabled="expmapBusy" @click="saveAgain(entry)">{{ t('expmapPanel.library.saveAs') }}</button>
+                <button class="danger" :disabled="expmapBusy" :title="t('expmapPanel.library.removeTitle')" @click="guard(() => removeExpmapLibraryEntry(entry.id))">{{ t('expmapPanel.library.remove') }}</button>
               </div>
             </details>
           </div>
         </article>
       </div>
       <fieldset v-if="imageEntry" :disabled="expmapBusy" class="image-export">
-        <strong>Image entière · {{ imageEntry.name }}</strong>
-        <p class="hint">Angle horizontal, profondeur verticale, sans les marges techniques. Inclut les doublements de couverture du centre. Jusqu’à 32 mégapixels.</p>
+        <strong>{{ t('expmapPanel.imageExport.title', { name: imageEntry.name }) }}</strong>
+        <p class="hint">{{ t('expmapPanel.imageExport.hint') }}</p>
         <ResolutionSelect :width="imageWidth" :height="imageHeight" :presets="IMAGE_RESOLUTIONS" :min="1" :max="32767" :step="1" @update:width="imageWidth = $event" @update:height="imageHeight = $event"/>
-        <DenseSelect v-model="imageFormat" label="Format" :options="[{value:'image/png',label:'PNG — sans perte supplémentaire'},{value:'image/jpeg',label:'JPEG'},{value:'image/webp',label:'WebP'}]"/>
-        <DenseField v-if="imageFormat !== 'image/png'" v-model="imageQuality" label="Qualité" :min="0" :max="1" :step="0.01" :default="0.9"/>
-        <button class="primary" @click="saveImage">Exporter l’image…</button><button @click="imageEntry=null">Fermer</button>
+        <DenseSelect v-model="imageFormat" :label="t('expmapPanel.imageExport.format')" :options="imageFormats"/>
+        <DenseField v-if="imageFormat !== 'image/png'" v-model="imageQuality" :label="t('expmapPanel.imageExport.quality')" :min="0" :max="1" :step="0.01" :default="0.9"/>
+        <button class="primary" @click="saveImage">{{ t('expmapPanel.imageExport.export') }}</button><button @click="imageEntry=null">{{ t('common.close') }}</button>
       </fieldset>
     </DenseSection>
     <p v-if="error" class="problem" role="alert">{{ error }}</p>

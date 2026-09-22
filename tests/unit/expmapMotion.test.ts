@@ -42,7 +42,7 @@ describe('deep zoom controls', () => {
     expect(zoomDepth('1e-1000')).toBeCloseTo(1000)
     expect(magnitudeSummary('1e+1','1e-26')).toBe('+1 → −26 · Magnitude 27'.replace('−','-'))
     expect(magnitudeSummary('1e-1000000','1e-1000020')).toContain('Magnitude 20')
-    expect(magnitudeSummary('bad','1')).toBe('Plage à définir')
+    expect(magnitudeSummary('bad','1')).toBe('Range to define')
   })
   it('replaces only the real ExpMap extension', () => {
     expect(videoFilename('Spirale.expmap')).toBe('Spirale.mp4')

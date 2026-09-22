@@ -85,7 +85,7 @@ describe('successive polar videos',()=>{
       expect(actual[1]+actual[3]).toBeLessThanOrEqual(rect[1]+rect[3])
     }
     expect(ringVideoRect(manifest,{...view,effects:{radialMode:'mirror'}},rings[1])).toEqual([0,0,1920,1080])
-    expect(()=>ringVideoRect(manifest,{...view,width:1919},rings[1])).toThrow('paires')
+    expect(()=>ringVideoRect(manifest,{...view,width:1919},rings[1])).toThrow('even dimensions')
   })
   it('compresses coverage losslessly, detects corruption and keeps unrelated files',async()=>{
     const directory=new Directory(),store=new RingMediaStore(directory.handle())

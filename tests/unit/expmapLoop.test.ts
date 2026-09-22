@@ -27,11 +27,11 @@ it('uses every stored octave for one period and keeps ordinary domain validation
   const domain = expmapLoopDomain(m, { loopOctaves: true })
   expect(scaleDoublements(domain.startScale, domain.endScale)).toBeCloseTo(m.octaves.tileCount, 8)
   const view = { width: m.projection.width, height: m.projection.height, angle: 0, scale: domain.endScale }
-  expect(() => validateExpmapView(m.projection, view)).toThrow('domaine')
+  expect(() => validateExpmapView(m.projection, view)).toThrow('domain')
   const effects = { droste: 0, kaleidoscope: 0, orientation: 0, loopOctaves: true }
   expect(() => validateExpmapView(m.projection, { ...view, effects })).not.toThrow()
   const window = changeExpmapWindow(expmapVideoDefaults(m), domain.startScale, domain.endScale)
-  expect(() => validateExpmapVideoWindow(m, window)).toThrow('domaine')
+  expect(() => validateExpmapVideoWindow(m, window)).toThrow('domain')
   expect(() => validateExpmapVideoWindow(m, window, effects)).not.toThrow()
   expect(expmapLoopDomain(m)).toBe(m.projection.domain)
 })

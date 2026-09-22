@@ -25,7 +25,7 @@ describe('single ring direct export',()=>{
     expect(await exportShaderRingVideo(source,{...request,intermediateBitrate:NaN})).toBe(result)
     expect(request.scratch).not.toHaveBeenCalled();expect(mocks.encode).not.toHaveBeenCalled()
     expect(request.onProgress).toHaveBeenCalledWith(3,3)
-    expect(request.onPhase).toHaveBeenLastCalledWith('Rendu et encodage direct · une couronne',3,3)
+    expect(request.onPhase).toHaveBeenLastCalledWith('Direct render and encode · one ring',3,3)
   })
   it.each([true,false])('keeps intermediates when requested or when multiple rings are needed (%s)',async keep=>{
     const {source,request}=fixture()

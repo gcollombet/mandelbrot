@@ -1,0 +1,6 @@
+{
+  "presetsExceed": "{count} presets would exceed the {limit}-preset limit",
+  "texturesExceed": "{count} textures would exceed the {limit}-texture limit",
+  "and": " and ",
+  "doesNotFit": "The guest library does not fit in the account quota."
+}

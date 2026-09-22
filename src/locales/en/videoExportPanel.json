@@ -1,0 +1,102 @@
+{
+  "supersample": {
+    "none": "×1 — no supersampling",
+    "recommended": "×2 — recommended"
+  },
+  "aa": {
+    "samples": "×{n} samples"
+  },
+  "renderMode": {
+    "monolithic": "Monolithic",
+    "tiledKeyframe": "Tiled keyframes"
+  },
+  "encoder": {
+    "hardwarePreferred": "Hardware preferred",
+    "browserFallback": "Browser fallback — software possible"
+  },
+  "codec": {
+    "probing": "Checking encoder…",
+    "avcCompat": "H.264 · compatibility",
+    "unavailable": "Encoding unavailable",
+    "autoHdr": "Auto · HEVC, AV1, VP9 10-bit",
+    "autoSdr": "Auto · HEVC, else H.264",
+    "unavailableHere": "{label} — unavailable here"
+  },
+  "memory": {
+    "gb": "{value} GB",
+    "mb": "{value} MB",
+    "budgetField": "memory budget",
+    "tiles": "{count} tile | {count} tiles",
+    "tiledSummary": "{tiles} — {square} full square + {tile} tile = {total}",
+    "textureSide": "texture {side}²"
+  },
+  "source": {
+    "label": "Source",
+    "mandelbrot": "Video from the fractal",
+    "expmap": "Video from a baked ExpMap",
+    "shader": "Video from a recolorable ExpMap",
+    "sdrNote": "This RGB source exports in SDR. For an HDR video, pick “Video from the fractal” or a recolorable source, then Dynamic range → HDR."
+  },
+  "path": {
+    "title": "Path",
+    "scope": "Fractal rendering, frame by frame",
+    "fixedCenter": "Fixed center",
+    "useCurrentCenter": "Use current center",
+    "distinctCenters": "Distinct centers · travelling",
+    "startCenter": "Start center",
+    "endCenter": "End center",
+    "currentCenter": "Current center",
+    "sameCenter": "Same center along the whole path.",
+    "movingCenter": "The center moves between the two positions.",
+    "start": "Start",
+    "end": "End",
+    "view": "View",
+    "rangeHint": "Wide view 10^+10 → deep zoom 10^-1000",
+    "reverse": "⇄ Reverse path",
+    "duration": "Path duration",
+    "meanSpeed": "Mean speed",
+    "doublingsPerSecond": "Doublings/s",
+    "timingPriorityNote": "The last edited value (duration or speed) keeps priority when the range changes.",
+    "summary": "{frames} frames · {seconds} s total. The current appearance is used along the whole path."
+  },
+  "output": {
+    "title": "Output",
+    "dynamicRange": "Dynamic range",
+    "sdr": "SDR · 8-bit",
+    "hdr": "HDR · 10-bit PQ",
+    "hdrExposure": "HDR exposure (EV)",
+    "hdrExposureAria": "HDR video exposure",
+    "quantizer": "Quantizer",
+    "hdrNote": "Rec.2020 / PQ · reference white 203 nits. Independent of the HDR display. The 10-bit profile is checked at start; no SDR fallback. Constant quality: 0 = maximum and very large files, 10 to 20 = visually clean; the target bitrate is ignored, falling back to variable bitrate if the encoder refuses this mode.",
+    "resolution": "Resolution",
+    "frameRate": "Frame rate",
+    "codec": "Codec",
+    "filename": "File name",
+    "filenameAria": "Video file name"
+  },
+  "quality": {
+    "title": "Quality",
+    "antialiasing": "Anti-aliasing",
+    "supersampling": "Supersampling",
+    "budgetNote": "The device's conservative memory budget is indicative: the export may exceed it if the GPU accepts the allocation.",
+    "advanced": "Advanced settings",
+    "memoryMode": "Memory mode",
+    "memoryBudget": "Memory budget",
+    "swapThreshold": "Swap threshold",
+    "thresholdNote": "Swap threshold: a low value reconverges more often; a high value favors speed. Texture limit: {limit}."
+  },
+  "export": {
+    "title": "Export",
+    "scope": "Each frame is computed to convergence",
+    "noHdrEncoder": "No 10-bit HDR encoder available for this choice in this browser.",
+    "noEncoder": "No encoder available for this choice.",
+    "pickAnother": "Pick another codec or resolution.",
+    "finalizing": "Finalizing the MP4 file",
+    "encoding": "Computing and encoding frames",
+    "stopped": "Export stopped",
+    "done": "Export complete",
+    "interrupted": "Export interrupted",
+    "framesUnit": "frames encoded",
+    "start": "Export to MP4"
+  }
+}

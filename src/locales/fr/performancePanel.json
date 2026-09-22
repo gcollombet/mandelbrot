@@ -1,0 +1,111 @@
+{
+  "title": "Mesures GPU",
+  "cards": {
+    "fpsTitle": "Images par seconde effectivement rendues (dérivé de l'intervalle réel entre frames rendues).",
+    "fps": "FPS",
+    "frameTitle": "Temps réel entre deux frames = le vrai budget par image. C'est ce que ressent l'utilisateur.",
+    "frame": "Frame",
+    "gpuSpanTitle": "Temps GPU RÉEL de la frame = dernier marqueur − premier marqueur sur la timeline GPU. C'est le total autoritaire, incluant le travail GPU situé entre les catégories mesurées.",
+    "gpuSpan": "GPU span",
+    "sumTitle": "Σ des durées par catégorie : écarts entre fins de passes ordinaires, spans explicites pour Snapshot et Merge. La somme peut différer légèrement du span à cause du lissage et des marqueurs.",
+    "sum": "Σ passes"
+  },
+  "state": {
+    "idle": "Au repos — dernières mesures",
+    "rendering": "Rendu en cours"
+  },
+  "breakdown": {
+    "summary": "Répartition GPU",
+    "instantTitle": "Répartition GPU — instantané",
+    "instantHint": "(à l'échelle du budget frame — gris = marge/idle)",
+    "instantAria": "Répartition instantanée du temps GPU par passe",
+    "segTitle": "{label} — {ms} ms ({share}% du GPU)",
+    "idleTitle": "Marge / idle — {ms} ms",
+    "avgTitle": "Répartition GPU — moyenne 30 s",
+    "avgHint": "(coût amorti par passe)",
+    "avgAria": "Répartition moyenne 30 s du temps GPU par passe",
+    "avgSegTitle": "{label} — {ms} ms (moy 30 s)",
+    "colCurrent": "actuel",
+    "colAvg": "moy 30 s",
+    "historyTitle": "Historique empilé par passe",
+    "historyHint": "— pic {ms} ms · {span} s"
+  },
+  "notice": {
+    "title": "Timing par passe indisponible",
+    "before": "— cet appareil n'expose pas",
+    "after": "(fréquent sur mobile/Safari). Les métriques globales ci-dessus restent valides. Pour isoler le coût d'une passe sans barrière, utilise l'",
+    "amplification": "amplification",
+    "end": " : boucler la passe N fois et diviser le delta du temps GPU par N."
+  },
+  "render": {
+    "title": "Rendu",
+    "completion": "Complétion",
+    "lastRender": "Dernier rendu",
+    "cpuBeforeGpuTitle": "Temps CPU avant engine.render(): navigation précise, propagation Vue puis préparation Engine.update().",
+    "cpuBeforeGpu": "CPU avant GPU",
+    "cpuDetailTitle": "Détail du temps CPU hors passes GPU : navigateur / modèles Vue / Engine.update / encodage et soumission WebGPU.",
+    "cpuDetail": "CPU détail",
+    "cadenceTitle": "Intervalle brut du dernier callback requestAnimationFrame, sa moyenne lissée et intervalle visé par le cadenceur.",
+    "cadence": "Cadence",
+    "cadenceValue": "rAF brut {raw} · lissé {smooth} · cible {target}ms",
+    "opsPerFrame": "Ops/frame",
+    "pixelsRemaining": "Pixels restants",
+    "totalPixels": "Total pixels"
+  },
+  "compute": {
+    "summary": "Calcul",
+    "dispatch": "Dispatch",
+    "shaderMode": "Mode shader",
+    "aaFrontier": "Frontière AA",
+    "mode": "Mode de calcul",
+    "batchSize": "Taille de batch"
+  },
+  "reference": {
+    "title": "Référence",
+    "current": "Réf. actuelle",
+    "reset": "reset réf",
+    "validating": "validation",
+    "pending": "Nouv. référence",
+    "blaTable": "Table BLA",
+    "serial": "Référence",
+    "changing": "changement",
+    "orbitRemaining": "Orbite restante"
+  },
+  "tableStage": {
+    "ready": "prête",
+    "coefficients": "coefficients",
+    "transfer": "transfert GPU"
+  },
+  "debug": {
+    "title": "Débug",
+    "visualization": "Visualisation débug"
+  },
+  "export": {
+    "samples": "{count} échant. / 30 s",
+    "csv": "Exporter CSV"
+  },
+  "passHelp": {
+    "merge": "Fusion résolu+figé vers un troisième display puis permutation, sans copie préparatoire. Ne tourne qu'à l'arrêt d'un zoom.",
+    "snapshot": "Copie du display résolu vers le snapshot figé utilisé pendant le zoom.",
+    "reproject": "Pan par décalage d'origine torique du cache brut : seule la bande exposée est stampée.",
+    "clear": "Réinitialisation du cache brut par sentinelles, distincte du déplacement de pan.",
+    "reseed": "Ré-amorçage sélectif de la frontière pour un échantillon d'anti-aliasing. Actif seulement en accumulation AA.",
+    "compute": "Kernel fusionné brush+mandelbrot+comptage (perturbation/BLA/jet…). C'est le cœur du coût.",
+    "resolve": "Présentation bilinéaire temporaire des pixels exacts encore incomplets.",
+    "aaAccum": "Passe couleur accumulée dans le buffer AA (linéaire) pendant l'accumulation.",
+    "color": "Passe couleur directe vers l’écran, ou bake linéaire du cache final quand une vue tournée vient de se stabiliser.",
+    "present": "Présentation de l’accumulateur AA, ou reconstruction bilinéaire du cache couleur tourné, puis conversion sRGB."
+  },
+  "passLabel": {
+    "merge": "Fusion (zoom)",
+    "snapshot": "Instantané (zoom)",
+    "reproject": "Reprojection (pan)",
+    "clear": "Vidage du cache",
+    "reseed": "Réamorçage AA",
+    "compute": "Itération",
+    "resolve": "Résolution",
+    "aaAccum": "Couleur (AA)",
+    "color": "Couleur / cache rotation",
+    "present": "Présentation (AA / rotation)"
+  }
+}

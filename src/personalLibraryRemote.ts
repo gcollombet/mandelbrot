@@ -14,6 +14,7 @@ import {
 } from 'firebase/firestore';
 import {deleteObject, getBlob, getMetadata, ref, uploadBytes} from 'firebase/storage';
 import {getFirebaseServices} from './firebaseConfig';
+import {t} from './i18n';
 import { PERSONAL_PRESET_LIMIT, PERSONAL_TEXTURE_LIMIT } from './personalLibraryTypes';
 import type {
   GuestImportBatch,
@@ -167,14 +168,14 @@ export async function getPersonalPresetRecord(uid: string, guid: string): Promis
 /** Direct reads by link never enumerate or hydrate another user's library. */
 export async function getSharedPresetRecord(uid: string, guid: string): Promise<PersonalRecordEnvelope | null> {
   const {db} = requireServices();
-  if (!uid || uid.includes('/') || uid.length > 128) throw new Error('Lien de scène invalide.');
+  if (!uid || uid.includes('/') || uid.length > 128) throw new Error(t('personalLibraryRemote.invalidSceneLink'));
   const snapshot = await getDoc(presetRef(db, uid, requirePersonalGuid(guid)));
   return snapshot.exists() ? personalRecordFromDoc(snapshot.data(), snapshot.id) : null;
 }
 
 export async function getSharedTexture(uid: string, guid: string): Promise<{metadata: PersonalTextureMetadata; blob: Blob} | null> {
   const {db, storage} = requireServices();
-  if (!uid || uid.includes('/') || uid.length > 128) throw new Error('Lien de scène invalide.');
+  if (!uid || uid.includes('/') || uid.length > 128) throw new Error(t('personalLibraryRemote.invalidSceneLink'));
   const safeGuid = requirePersonalGuid(guid);
   const snapshot = await getDoc(textureRef(db, uid, safeGuid));
   if (!snapshot.exists()) return null;

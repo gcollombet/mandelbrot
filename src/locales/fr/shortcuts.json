@@ -1,0 +1,25 @@
+{
+  "tabs": {
+    "presets": "Scène",
+    "navigation": "Navigation",
+    "palettes": "Palettes",
+    "palettePath": "Parcours palettes",
+    "animation": "Animation",
+    "expmap": "Rendu",
+    "video": "Vidéo",
+    "performance": "Performance",
+    "about": "Aide"
+  },
+  "groups": {
+    "move": "Déplacer",
+    "rotate": "Tourner",
+    "zoom": "Zoom",
+    "settings": "Réglages",
+    "snapshot": "Capture"
+  },
+  "keys": {
+    "leftClick": "Clic gauche",
+    "rightClick": "Clic droit",
+    "wheel": "Molette"
+  }
+}

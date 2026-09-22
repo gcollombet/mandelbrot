@@ -29,7 +29,7 @@ describe('palette path image contracts', () => {
         path.resourceHashes = Object.fromEntries(resources.images.map(i => [i.key, i.hash]))
         resources.dispose()
         vi.stubGlobal('fetch', async () => new Response(new Uint8Array([9])))
-        await expect(resolvePalettePathImages(path, path.stops[0].appearance)).rejects.toThrow('a changé')
+        await expect(resolvePalettePathImages(path, path.stops[0].appearance)).rejects.toThrow('has changed')
     })
     it('freezes the radial recipe and preserves its identity on an unchanged resume', async () => {
         vi.stubGlobal('fetch', async () => new Response(new Uint8Array([1, 2, 3])))

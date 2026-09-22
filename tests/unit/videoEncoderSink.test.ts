@@ -47,7 +47,7 @@ describe('hardware-first encoder selection', () => {
 
   it('reports both failures and the actual requested format, before creating an output source', async () => {
     mocks.canEncode.mockRejectedValueOnce(new Error('Driver unavailable')).mockResolvedValueOnce(false)
-    await expect(createVideoSink({ ...settings, destination: { kind: 'buffer' } })).rejects.toThrow(/AVC.*3840×2160.*60 images\/s.*prefer-hardware.*Driver unavailable.*no-preference.*configuration refusée/)
+    await expect(createVideoSink({ ...settings, destination: { kind: 'buffer' } })).rejects.toThrow(/AVC.*3840×2160.*60 fps.*prefer-hardware.*Driver unavailable.*no-preference.*configuration refused/)
     expect(mocks.source).not.toHaveBeenCalled()
   })
 

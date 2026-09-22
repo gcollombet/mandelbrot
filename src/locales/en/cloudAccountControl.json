@@ -1,0 +1,24 @@
+{
+  "status": {
+    "signedIn": "Account connected",
+    "syncing": "Cloud save in progress…",
+    "synced": "Presets synchronized",
+    "error": "Cloud save needs attention",
+    "idle": "Presets · cloud sync"
+  },
+  "explanation": "Your personal presets stay in this browser. Sign in to save them to the cloud and find them on your other devices.",
+  "loginAria": "Sign in with Google — save presets to the cloud",
+  "loginTitleCloud": "Sign in with Google to save your presets to your personal cloud library",
+  "loginTitle": "Sign in with Google",
+  "connecting": "Signing in…",
+  "loginShort": "Sign in",
+  "loginFull": "Sign in with Google",
+  "loginSub": "Save my presets to the cloud",
+  "myAccount": "My account",
+  "myAccountAria": "My account — {status}",
+  "googleAccount": "Google account connected",
+  "syncedInfo": "Your personal presets are synchronized with this account so you can find them on your devices.",
+  "syncError": "Cloud synchronization failed. Your changes remain available in this browser.",
+  "loggingOut": "Signing out…",
+  "logout": "Sign out"
+}

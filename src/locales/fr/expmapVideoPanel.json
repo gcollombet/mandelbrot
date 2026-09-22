@@ -1,0 +1,68 @@
+{
+  "encoder": {
+    "hardwarePreferred": " · Matériel préféré",
+    "browserFallback": " · Repli navigateur — logiciel possible",
+    "probing": "Vérification de l’encodeur…",
+    "compatibility": " · compatibilité",
+    "unavailable": "Encodage indisponible : choisir un autre format ou codec."
+  },
+  "errors": {
+    "incomplete": "Document incomplet.",
+    "preferencesReset": "Préférences hors domaine réinitialisées.",
+    "streamingRequired": "L’export ExpMap requiert une destination de fichier en streaming."
+  },
+  "videoTypeDescription": "Vidéo MP4",
+  "progress": {
+    "pickDestination": "Choix du fichier de destination",
+    "opening": "Ouverture du document",
+    "finalizing": "Finalisation du fichier MP4",
+    "encoding": "Reconstruction et encodage des images",
+    "interrupted": "Export interrompu",
+    "saved": "Vidéo enregistrée",
+    "stopped": "Export arrêté",
+    "cancelling": "Annulation en cours…"
+  },
+  "unitFrames": "images encodées",
+  "source": {
+    "title": "Source ExpMap",
+    "file": "Fichier",
+    "unavailable": " · indisponible"
+  },
+  "path": {
+    "title": "Trajet",
+    "fullLoop": "Un cycle complet d’octaves",
+    "start": "Départ",
+    "end": "Arrivée",
+    "fromPlayer": "Depuis le lecteur",
+    "view": "Voir",
+    "startAria": "Départ dans le document",
+    "endAria": "Arrivée dans le document",
+    "handles": "Départ : poignée haute · arrivée : poignée basse",
+    "reverse": "⇄ Inverser le trajet",
+    "duration": "Durée du trajet",
+    "averageSpeed": "Vitesse moyenne",
+    "doublingsPerSecond": "Doublements/s",
+    "speedHint": "La dernière valeur modifiée (durée ou vitesse) est conservée lorsque la plage change. Les courbes modulent la vitesse autour de cette moyenne."
+  },
+  "playerAngle": "Angle du lecteur",
+  "output": {
+    "title": "Fichier vidéo",
+    "resolution": "Résolution",
+    "fps": "Cadence",
+    "upscale": " · Agrandissement depuis {width} × {height}",
+    "encoding": "Encodage",
+    "auto": "Auto · HEVC, sinon H.264",
+    "qualityDetails": "Qualité et dimensions précises",
+    "width": "Largeur",
+    "height": "Hauteur",
+    "distribution": "Répartition AA",
+    "grid": "Grille",
+    "r2": "R2",
+    "samples": "Prélèvements par pixel",
+    "bilinear": " — bilinéaire",
+    "adaptive": "Adaptatif selon le détail disponible, sans recalcul de la fractale.",
+    "fitWidth": "Adapter la largeur au document",
+    "export": "Exporter la vidéo…",
+    "cancel": "Annuler l’export"
+  }
+}

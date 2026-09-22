@@ -4,7 +4,7 @@ afterEach(() => vi.unstubAllGlobals())
 it('keeps legacy views neutral and rejects malformed effect settings', () => {
   expect(expmapEffectsUniform(undefined, 999999)).toEqual([0, 0, 0, 0])
   for (const value of [{ droste: NaN }, { droste: 181 }, { kaleidoscope: 1 }, { kaleidoscope: 2.5 }, { kaleidoscope: 25 }, { orientation: Infinity }]) {
-    expect(() => effectsSettings(value)).toThrow('Effets')
+    expect(() => effectsSettings(value)).toThrow('effects')
   }
 })
 it('preserves Droste phase across octave boundaries and bounds deep uniforms', () => {
@@ -52,5 +52,5 @@ it('rotates the whole image by radians per octave and exactly tracks Droste phas
     expect(Math.sin(phase)).toBeCloseTo(Math.sin(uniform[0] * localRadiusDepth), 9)
     expect(Math.cos(phase)).toBeCloseTo(Math.cos(uniform[0] * localRadiusDepth), 9)
   }
-  expect(() => effectsSettings({ imageRotationRate: NaN })).toThrow('Rotation globale')
+  expect(() => effectsSettings({ imageRotationRate: NaN })).toThrow('global rotation')
 })

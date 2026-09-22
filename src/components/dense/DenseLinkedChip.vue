@@ -1,5 +1,7 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
 import { nextTick, ref, watch } from 'vue';
+const { t } = useI18n();
 
 const props = defineProps<{
   /** Record name shown in the chip; click to rename. */
@@ -61,7 +63,7 @@ function onKey(event: KeyboardEvent) {
 </script>
 
 <template>
-  <div class="linked" :class="{ dirty, locked, busy }" role="group" :aria-label="`${kind} liée : ${name}`">
+  <div class="linked" :class="{ dirty, locked, busy }" role="group" :aria-label="t('dense.linked.group', { kind, name })">
     <span class="linked-dot" aria-hidden="true"></span>
     <div class="linked-body">
       <span class="linked-kind">{{ kind }}</span>
@@ -75,8 +77,8 @@ function onKey(event: KeyboardEvent) {
           :readonly="!editing"
           :disabled="locked || busy"
           :size="Math.max(4, Math.min(40, draft.length + 1))"
-          :aria-label="editing ? 'Nouveau nom' : 'Renommer'"
-          :title="locked ? 'Élément du catalogue partagé' : 'Cliquer pour renommer'"
+          :aria-label="editing ? t('dense.linked.newName') : t('common.rename')"
+          :title="locked ? t('dense.linked.sharedCatalogItem') : t('dense.linked.clickToRename')"
           @click="startRename"
           @focus="startRename"
           @keydown.stop
@@ -85,18 +87,18 @@ function onKey(event: KeyboardEvent) {
         />
         <svg v-if="!locked && !editing" viewBox="0 0 24 24" aria-hidden="true" @click="startRename"><path d="M4 20h4l10-10-4-4L4 16z"/><path d="M13 7l4 4"/></svg>
       </span>
-      <span class="linked-state" aria-live="polite">{{ locked ? 'catalogue' : dirty ? 'modifiée' : 'à jour' }}</span>
+      <span class="linked-state" aria-live="polite">{{ locked ? t('dense.linked.stateCatalog') : dirty ? t('dense.linked.stateModified') : t('dense.linked.stateUpToDate') }}</span>
     </div>
     <div class="linked-actions">
       <button v-if="locked" class="mini-btn primary" type="button" :disabled="busy" @click="emit('variant')">
         <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
-        Enregistrer une variante
+        {{ t('dense.linked.saveVariant') }}
       </button>
       <button v-else class="mini-btn primary" type="button" :disabled="!dirty || busy" @click="emit('update')">
         <svg viewBox="0 0 24 24"><path d="M5 3h12l4 4v14H5z"/><path d="M9 3v5h7V3M8 21v-7h8v7"/></svg>
-        Mettre à jour
+        {{ t('dense.linked.update') }}
       </button>
-      <button class="mini-btn" type="button" :disabled="busy" title="Oublier le lien, garder les réglages" @click="emit('detach')">Détacher</button>
+      <button class="mini-btn" type="button" :disabled="busy" :title="t('dense.linked.detachTitle')" @click="emit('detach')">{{ t('dense.linked.detach') }}</button>
     </div>
   </div>
 </template>

@@ -1,0 +1,7 @@
+{
+  "group": "Transfer curve",
+  "linear": "Linear transfer",
+  "gaussian": "Gaussian transfer",
+  "square": "Square transfer",
+  "exponential": "Exponential transfer"
+}

@@ -1,0 +1,6 @@
+{
+  "presetsExceed": "{count} presets dépasseraient la limite de {limit} presets",
+  "texturesExceed": "{count} textures dépasseraient la limite de {limit} textures",
+  "and": " et ",
+  "doesNotFit": "La bibliothèque invitée ne tient pas dans le quota du compte."
+}

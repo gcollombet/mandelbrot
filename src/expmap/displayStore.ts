@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { canonicalJson } from './appearance'
 import { DISPLAY_SAMPLE_BYTES, shaderBlockAt, validateShaderManifest, type ShaderExpmapManifest } from './displayFormat'
 import type { ShaderExpmapSource } from './displayArchiveClient'
@@ -27,12 +28,12 @@ export class ShaderExpmapStore implements ShaderExpmapSource {
       const m=JSON.parse(await f.text());validateShaderManifest(m);candidates.push(m)
     } catch { /* An incomplete slot does not invalidate the preceding checkpoint. */ }
     candidates.sort((a,b)=>b.generation-a.generation)
-    if(!candidates.length)throw new Error('Aucun manifeste shader ExpMap valide dans ce dossier')
+    if(!candidates.length)throw new Error(t('expmap.shaderStore.noManifest'))
     return candidates[0]
   }
   async assertEmpty() {
     const directory=this.directory as FileSystemDirectoryHandle & {values():AsyncIterable<FileSystemHandle>}
-    for await(const _ of directory.values()) { throw new Error('Choisir un dossier vide pour la nouvelle source shader') }
+    for await(const _ of directory.values()) { throw new Error(t('expmap.shaderStore.emptyFolder')) }
   }
   async publish(m:ShaderExpmapManifest) {
     validateShaderManifest(m)
@@ -73,11 +74,11 @@ export class ShaderExpmapStore implements ShaderExpmapSource {
 export async function copyShaderSource(source:ShaderExpmapSource,target:ShaderExpmapSource,
   signal?:AbortSignal,onProgress?:(done:number,total:number)=>void) {
   const same=source instanceof ShaderExpmapStore&&target instanceof ShaderExpmapStore?await source.directory.isSameEntry(target.directory):source.key===target.key
-  if(same)throw new Error('Choisir une autre destination')
+  if(same)throw new Error(t('expmap.shaderStore.otherDestination'))
   return navigator.locks.request(`shader-expmap:${target.key}`,{mode:'exclusive',ifAvailable:true},async lock=>{
-    if(!lock)throw new Error('Destination déjà utilisée')
+    if(!lock)throw new Error(t('expmap.shaderStore.destinationInUse'))
     const original=await source.open()
-    if(original.state!=='complete')throw new Error('Terminer la source avant de la copier')
+    if(original.state!=='complete')throw new Error(t('expmap.shaderStore.finishFirst'))
     let checkpoint:ShaderExpmapManifest|undefined
     try {checkpoint=await target.open()}catch{await target.assertEmpty()}
     if(checkpoint&&(checkpoint.id!==original.id||checkpoint.appearanceJson!==original.appearanceJson||canonicalJson(checkpoint.projection)!==canonicalJson(original.projection)))throw new Error('La destination contient une autre source')

@@ -1,0 +1,31 @@
+{
+  "motion": {
+    "title": "Entrée et fin progressives",
+    "minibrot": "Arrivée sur minibrot",
+    "easeIn": "Entrée",
+    "easeInDuration": "Durée d’entrée",
+    "easeOut": "Sortie",
+    "easeOutDuration": "Durée de sortie",
+    "hold": "Palier final fixe",
+    "chartAria": "Progression du trajet dans le temps ; la partie horizontale correspond au palier fixe",
+    "total": "Trajet {path} s + palier {hold} s =",
+    "note": "Les transitions sont incluses dans le trajet. Le zoom et la rotation ralentissent ensemble. Un trajet raccourci réduit proportionnellement les transitions trop longues."
+  },
+  "rotation": {
+    "title": "Rotation",
+    "startAngle": "Angle de départ",
+    "currentAngle": "Angle actuel",
+    "clockwise": "↻ Horaire",
+    "counterclockwise": "↺ Antihoraire",
+    "turns": "Nombre de tours",
+    "end": "Arrivée : {angle}°"
+  },
+  "resolution": {
+    "label": "Résolution",
+    "custom": "Personnalisée — {width}×{height}",
+    "square": "{width}×{height} — carré",
+    "exactDimensions": "Dimensions exactes",
+    "width": "Largeur",
+    "height": "Hauteur"
+  }
+}

@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { BlobReader, Uint8ArrayWriter, ZipReader, ZipWriter, TextReader, type Entry } from '@zip.js/zip.js'
 import type { ExpmapLoadingMetrics } from './loadingMetrics'
 import { canonicalJson, contentIdentity } from './appearance'
@@ -30,7 +31,7 @@ export class ExpmapStore {
   }
   static async working(handle:FileSystemFileHandle,id:string,resume=false,options:{signal?:AbortSignal;onProgress?:(done:number,total:number)=>void}={}) {
     if(!/^[a-zA-Z0-9-]{1,100}$/.test(id))throw new Error('Invalid working document identity')
-    if(!navigator.storage?.getDirectory)throw new Error('Le stockage de travail privé du navigateur est requis pour créer un ExpMap')
+    if(!navigator.storage?.getDirectory)throw new Error(t('expmap.store.opfsRequired'))
     const root=await navigator.storage.getDirectory()
     const parent=await root.getDirectoryHandle('expmap-work',{create:true})
     const directory=await parent.getDirectoryHandle(id,{create:true})
@@ -52,7 +53,7 @@ export class ExpmapStore {
   }
   async assertEmpty() {
     if(!this.directory)throw new Error('Read-only document')
-    for await(const _entry of (this.directory as FileSystemDirectoryHandle & {values():AsyncIterableIterator<FileSystemHandle>}).values())throw new Error('Document de travail déjà présent')
+    for await(const _entry of (this.directory as FileSystemDirectoryHandle & {values():AsyncIterableIterator<FileSystemHandle>}).values())throw new Error(t('expmap.store.workingExists'))
   }
   private async read(name:string,limit:number) {
     if(this.directory) {
@@ -73,7 +74,7 @@ export class ExpmapStore {
       validateExpmapManifest(m);candidates.push(m)
     }catch(error){if(error instanceof DOMException && error.name==='NotAllowedError')throw error;failure=error}
     candidates.sort((a,b)=>b.generation-a.generation)
-    if(documentId&&candidates.length&&candidates[0].documentId!==documentId)throw new Error('Fichier associé à un autre document')
+    if(documentId&&candidates.length&&candidates[0].documentId!==documentId)throw new Error(t('expmap.store.otherDocument'))
     for(const candidate of candidates)try {if(candidate.documentId!==candidates[0].documentId)continue;await this.verify(candidate,progressive && candidate.state==='complete' ? [] : undefined);return candidate}catch(error){failure=error}
     throw failure??new Error('No valid ExpMap checkpoint')
   }
@@ -117,7 +118,7 @@ export class ExpmapStore {
   }
   /** One sequential archive write, no growing-file rewrite or whole-document Blob. */
   async saveContainer(m:ExpmapManifest,onProgress?:(done:number,total:number)=>void,signal?:AbortSignal, destination=this.destination) {
-    if(!destination)throw new Error('Destination .expmap manquante')
+    if(!destination)throw new Error(t('expmap.store.destinationMissing'))
     validateExpmapManifest(m)
     onProgress?.(0,m.tiles.length)
     const writable=await destination.createWritable()
@@ -144,9 +145,9 @@ export class ExpmapStore {
 
 /** Covers preparation, final archive publication and checkpoint cleanup across tabs. */
 export async function withExpmapFileLock<T>(id:string,action:()=>Promise<T>):Promise<T> {
-  if(!navigator.locks)throw new Error('Verrouillage local indisponible')
+  if(!navigator.locks)throw new Error(t('expmap.store.locksUnavailable'))
   return navigator.locks.request(`expmap-file:${id}`,{mode:'exclusive',ifAvailable:true},async lock=>{
-    if(!lock)throw new Error('Ce document est déjà ouvert pour écriture dans une autre fenêtre')
+    if(!lock)throw new Error(t('expmap.store.openElsewhere'))
     return action()
   })
 }

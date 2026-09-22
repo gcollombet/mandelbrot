@@ -1,0 +1,43 @@
+{
+  "hdr": {
+    "waitForExport": "Attendre la fin de l’export pour changer l’affichage.",
+    "notReady": "Le moteur est encore en cours de préparation.",
+    "extendedNotConfirmed": "Le navigateur ne confirme pas la présentation HDR étendue."
+  },
+  "webgpu": {
+    "unsupported": "WebGPU non supporté",
+    "adapterNotFound": "Adapter WebGPU introuvable",
+    "readWriteTexturesMissing": "Ce navigateur ne prend pas en charge les textures WebGPU lisibles/inscriptibles ({feature}), indispensables à ce moteur.",
+    "unknownReason": "raison inconnue",
+    "deviceLostDuringSetup": "Initialisation WebGPU impossible : le périphérique GPU a été perdu pendant l'initialisation ({detail}). Mettez à jour le pilote graphique, ou essayez de désactiver Vulkan / d'activer « Unsafe WebGPU Support » dans chrome://flags ou edge://flags.",
+    "deviceLost": "Le périphérique GPU a été perdu ({reason}){message}",
+    "setupFailed": "Initialisation WebGPU impossible ({kind}) : {message}",
+    "kindMemory": "mémoire GPU insuffisante",
+    "kindValidation": "configuration ou shader WebGPU invalide",
+    "kindInternal": "erreur interne du pilote GPU",
+    "mainKernelCompileFailed": "Initialisation WebGPU impossible : le pilote GPU de cet appareil refuse de compiler le noyau de calcul principal ({detail}).",
+    "deepKernelUnavailable": "Le noyau de zoom profond (floatexp) n'a pas pu être compilé par le pilote GPU de cet appareil : au-delà de ce niveau de zoom, l'image perd en précision."
+  },
+  "export": {
+    "sessionActive": "Une session d’export vidéo est déjà active sur ce moteur.",
+    "thresholdTooLow": "Le seuil de grossissement de l’export vidéo doit être supérieur à 1.",
+    "surfaceTooLarge": "{width}×{height} en ×{supersample} exige une texture de travail {side}², au-delà de la limite de cet appareil ({maxDim}). Baisse la résolution ou le suréchantillonnage.",
+    "tiledNoJitterAa": "Le mode keyframe tuilée n’accepte pas l’AA jitteré par image ; utilisez le suréchantillonnage.",
+    "tiledPlanMismatch": "Le plan tuilé cible un carré {planSide}² mais la sortie exige {side}².",
+    "allocationFailed": "Impossible d'allouer la surface de rendu {width}×{height} (texture de travail {side}²) : {reason}. Baisse la résolution ou le suréchantillonnage.",
+    "reasonMemory": "mémoire GPU insuffisante",
+    "reasonRefused": "allocation refusée par le pilote",
+    "hdrSessionRequired": "Une session HDR est requise.",
+    "captureAlreadyPending": "Une capture est déjà en attente.",
+    "hdrDimensionsInvalid": "Dimensions HDR invalides.",
+    "useHdrCapture": "Utiliser la capture flottante dans une session HDR.",
+    "captureTargetTooLarge": "La cible de capture {width}x{height} dépasse maxTextureDimension2D ({maxDim}).",
+    "surfaceOverBudget": "La surface d'export {width}×{height} nécessiterait environ {estimate}, au-delà du budget prudent {budget} de cet appareil. Baisse la résolution ou le suréchantillonnage."
+  },
+  "palettePath": {
+    "preparing": "Préparation des palettes et images…",
+    "budgetExceeded": "Images du parcours : budget de 128 Mio dépassé. Choisir une résolution inférieure.",
+    "ready": "{count} palettes prêtes · {size} px maximum",
+    "notApplied": "Parcours non appliqué : {error}"
+  }
+}

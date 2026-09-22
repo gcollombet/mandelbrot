@@ -1,4 +1,5 @@
 import { supportsHdrEncoder, type VideoDynamicRange } from './hdrVideo'
+import { t } from './i18n'
 // ── Encoding sink for video export ──
 // Wraps mediabunny's muxer behind the frame sink the export loop expects, so
 // videoExportSession.ts stays free of encoder concerns and remains testable
@@ -26,11 +27,11 @@ export const VIDEO_FILE_EXTENSION = 'mp4'
 
 /** Codecs an MP4 container accepts, in the order the UI offers them. */
 export const MP4_CODECS = [
-  { value: 'av1', label: 'AV1 — meilleure compression' },
-  { value: 'avc', label: 'H.264 / AVC — lecture universelle' },
-  { value: 'hevc', label: 'HEVC / H.265' },
-  { value: 'vp9', label: 'VP9' },
-] as const satisfies readonly { value: VideoCodec; label: string }[]
+  { value: 'av1', label: 'AV1 — meilleure compression', labelKey: 'video.encoder.codecs.av1' },
+  { value: 'avc', label: 'H.264 / AVC — lecture universelle', labelKey: 'video.encoder.codecs.avc' },
+  { value: 'hevc', label: 'HEVC / H.265', labelKey: 'video.encoder.codecs.hevc' },
+  { value: 'vp9', label: 'VP9', labelKey: 'video.encoder.codecs.vp9' },
+] as const satisfies readonly { value: VideoCodec; label: string; labelKey: string }[]
 
 export type Mp4Codec = (typeof MP4_CODECS)[number]['value']
 
@@ -103,7 +104,7 @@ type EncoderProbeSettings = Pick<VideoEncodeSettings, 'width' | 'height' | 'code
 
 /** Prefer hardware, then allow the browser to choose another implementation. */
 export async function selectVideoEncoder(settings: EncoderProbeSettings): Promise<EncoderPreference> {
-  if (!isMp4Codec(settings.codec)) throw new Error(`Codec inconnu pour un conteneur MP4 : ${String(settings.codec)}`)
+  if (!isMp4Codec(settings.codec)) throw new Error(t('video.encoder.unknownCodec', { codec: String(settings.codec) }))
   const first = settings.hardwareAcceleration ?? 'prefer-hardware'
   const preferences: EncoderPreference[] = first === 'prefer-hardware' ? [first, 'no-preference'] : [first]
   const failures: string[] = []
@@ -117,17 +118,17 @@ export async function selectVideoEncoder(settings: EncoderProbeSettings): Promis
       if (settings.dynamicRange === 'hdr'
         ? await supportsHdrEncoder(settings, hardwareAcceleration)
         : await canEncodeVideo(settings.codec, options)) return hardwareAcceleration
-      failures.push(`${hardwareAcceleration} : configuration refusée`)
+      failures.push(t('video.encoder.configRefused', { preference: hardwareAcceleration }))
     } catch (error) {
-      failures.push(`${hardwareAcceleration} : ${error instanceof Error ? error.message : String(error)}`)
+      failures.push(t('video.encoder.attemptFailed', { preference: hardwareAcceleration, error: error instanceof Error ? error.message : String(error) }))
     }
   }
-  throw new Error(
-    `Encodage ${settings.codec.toUpperCase()} indisponible pour ${settings.width}×${settings.height}`
-    + (settings.fps === undefined ? '' : ` à ${settings.fps} images/s`)
-    + `. ${settings.codec === 'avc' && (settings.width % 2 || settings.height % 2) ? 'H.264 exige des dimensions paires. ' : ''}`
-    + `Essais : ${failures.join(' ; ')}.`,
-  )
+  throw new Error(t('video.encoder.unavailable', {
+    codec: settings.codec.toUpperCase(), width: settings.width, height: settings.height,
+    fps: settings.fps === undefined ? '' : t('video.encoder.atFps', { fps: settings.fps }),
+    evenHint: settings.codec === 'avc' && (settings.width % 2 || settings.height % 2) ? t('video.encoder.avcEvenDimensions') : '',
+    failures: failures.join(' ; '),
+  }))
 }
 
 /** The same selection policy is used by the UI, preflight, and actual encoder. */
@@ -203,7 +204,7 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
     async addFrame(frame: VideoFrame) {
       if (finished) {
         frame.close()
-        throw new Error('Cannot add frames after the sink has been finalized or cancelled.')
+        throw new Error(t('video.encoder.sinkClosed'))
       }
       // The frame already carries the presentation timestamp and duration set
       // by the capture — derived from the frame INDEX, not from the parcours
@@ -221,12 +222,12 @@ export async function createVideoSink(settings: VideoEncodeSettings): Promise<Vi
     },
 
     async finalize() {
-      if (finished) throw new Error('Sink already finalized.')
+      if (finished) throw new Error(t('video.encoder.sinkFinalized'))
       finished = true
       await output.finalize()
       if (streaming) return null
       const buffer = (output.target as BufferTarget).buffer
-      if (!buffer) throw new Error('Encoder produced no output buffer.')
+      if (!buffer) throw new Error(t('video.encoder.noOutput'))
       return new Blob([buffer], { type: VIDEO_MIME_TYPE })
     },
 

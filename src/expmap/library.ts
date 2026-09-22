@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { ref } from 'vue'
 import type { ExpmapManifest } from './manifest'
 import { ExpmapStore } from './store'
@@ -52,7 +53,7 @@ export async function removeExpmapLibraryEntry(id: string) {
 }
 export async function renameExpmapLibraryEntry(id: string, name: string) {
   const entry = expmapLibraryEntries.value.find(entry => entry.id === id)
-  if (!entry) throw new Error('Document absent du catalogue')
+  if (!entry) throw new Error(t('expmap.library.notInCatalog'))
   await saveExpmapLibraryEntry({ ...entry, name, updatedAt: new Date().toISOString() })
 }
 export function entryFromManifest(manifest: ExpmapManifest, handle: FileSystemFileHandle, name: string, thumbnail = ''): ExpmapLibraryEntry {
@@ -76,7 +77,7 @@ export async function openExpmapLibraryEntry(entry: ExpmapLibraryEntry) {
     } catch(error) {
       if(!(error instanceof DOMException && error.name==='NotFoundError'))throw error
       if (permission.queryPermission && await permission.queryPermission({ mode: 'read' }) !== 'granted') {
-        if (await permission.requestPermission({ mode: 'read' }) !== 'granted') throw new DOMException('Accès au fichier refusé ; rattacher le document ou renouveler sa permission.', 'NotAllowedError')
+        if (await permission.requestPermission({ mode: 'read' }) !== 'granted') throw new DOMException(t('expmap.library.accessDenied'), 'NotAllowedError')
       }
       store=await ExpmapStore.fromFile(entry.handle)
       manifest=await store.open(entry.id,true)
@@ -100,9 +101,9 @@ export async function pickExpmapFile(mode:'read'|'readwrite',name='Document ExpM
   const api=window as Window & {showSaveFilePicker?:(options:unknown)=>Promise<FileSystemFileHandle>;showOpenFilePicker?:(options:unknown)=>Promise<FileSystemFileHandle[]>}
   const types=[{description:'Document ExpMap',accept:{'application/zip':['.expmap']}}]
   if(mode==='readwrite') {
-    if(!api.showSaveFilePicker)throw new Error('Enregistrement de fichiers locaux indisponible dans ce navigateur')
+    if(!api.showSaveFilePicker)throw new Error(t('expmap.library.saveUnavailable'))
     return api.showSaveFilePicker({suggestedName:`${name}.expmap`,types})
   }
-  if(!api.showOpenFilePicker)throw new Error('Ouverture de fichiers locaux indisponible dans ce navigateur')
+  if(!api.showOpenFilePicker)throw new Error(t('expmap.library.openUnavailable'))
   return (await api.showOpenFilePicker({types,multiple:false}))[0]
 }

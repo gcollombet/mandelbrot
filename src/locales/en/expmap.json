@@ -1,0 +1,169 @@
+{
+  "controls": {
+    "rangeToDefine": "Range to define",
+    "magnitude": "{from} → {to} · Magnitude {magnitude}"
+  },
+  "eases": {
+    "none": "None",
+    "linear": "Progressive",
+    "smooth": "Smooth",
+    "linger": "Extended · near-pause"
+  },
+  "sampling": {
+    "bilinear": "Bilinear",
+    "nearest": "Nearest",
+    "grid": "Grid",
+    "r2": "R2"
+  },
+  "phases": {
+    "computeAndSave": "GPU compute + WebP save",
+    "computeBlocks": "GPU block compute",
+    "documentReady": "Document ready"
+  },
+  "ringPhases": {
+    "direct": "Direct render and encode · one ring",
+    "resume": "Resuming the finished ring videos",
+    "interruptFinalize": "Interruption · finalizing the first {count} frames",
+    "encoding": "Encoding the rings · {ring}/{total}",
+    "interruptRemaining": "Interruption · remaining rings {ring}/{total}",
+    "finalAssembly": "Decoding, assembling and final encoding",
+    "interruptAssembly": "Interruption · assembling the first {count} frames",
+    "cleanup": "Deleting the consumed intermediate videos"
+  },
+  "appearance": {
+    "nonEmptyPalette": "A non-empty palette is required.",
+    "nonFinite": "Non-finite value.",
+    "invalidStop": "Invalid palette stop.",
+    "shadingViewDependent": "Active shading depends on the view and the scale.",
+    "textureNotFrozen": "This source image is not yet frozen and verified for ExpMap resuming.",
+    "heightShift": "The height used to shift the palette depends on the view scale.",
+    "debugViews": "Diagnostic views are not persistent spatial colors.",
+    "heightTrack": "This track modifies a height that depends on the view scale.",
+    "disableAnimation": "Disable this color animation to bake a fixed appearance.",
+    "trackNonFinite": "Non-finite track.",
+    "speedNonFinite": "Non-finite speed."
+  },
+  "create": {
+    "locksRequired": "Local document locking is required.",
+    "alreadyPreparing": "This document is already being prepared.",
+    "resolutionTooHigh": "Resolution too high for the 14-tile ExpMap buffer.",
+    "densityExceedsTexture": "This density exceeds the texture width allowed by the GPU.",
+    "oldConvention": "This computation uses the old geometry convention. Create a new render to use the continuous relief with deferred clipping.",
+    "recipeMismatch": "The recipe does not match the document to resume."
+  },
+  "video": {
+    "incomplete": "The document is incomplete.",
+    "outOfDomain": "The window leaves the document domain.",
+    "invalidDurationRotation": "Invalid duration or rotation.",
+    "invalidSpeedWindow": "Invalid speed for this window.",
+    "speedDurationMismatch": "Speed and duration do not match.",
+    "speedPositive": "The speed must be positive.",
+    "durationOutOfRange": "Duration out of range.",
+    "durationPositive": "The duration must be positive.",
+    "speedOutOfRange": "Speed out of range.",
+    "hdrNeedsShader": "HDR requires a recolorable ExpMap source",
+    "hdrExposure": "Invalid HDR exposure",
+    "stereoNeedsShader": "Stereo requires a recolorable ExpMap source",
+    "invalidFps": "Invalid frame rate.",
+    "tooManyFrames": "Too many frames requested."
+  },
+  "motion": {
+    "invalidTransition": "Invalid transition curve or duration.",
+    "transitionsExceed": "The transitions exceed the path duration."
+  },
+  "effects": {
+    "radialStart": "Invalid radial start.",
+    "mirrorRadius": "Invalid mirror radius.",
+    "radialMode": "Invalid radial playback.",
+    "radialPeriod": "Invalid radial period.",
+    "loop": "Invalid ExpMap loop.",
+    "globalRotation": "Invalid ExpMap global rotation.",
+    "invalid": "Invalid ExpMap effects."
+  },
+  "renderer": {
+    "distribution": "Invalid ExpMap AA distribution.",
+    "samples": "ExpMap samples: choose {list}.",
+    "effectTime": "Invalid effect time.",
+    "outputExceeds": "The output exceeds the resolution or coverage of the document.",
+    "viewOutOfDomain": "View outside the ExpMap user domain."
+  },
+  "imageExport": {
+    "unsupportedFormat": "Unsupported image format",
+    "limit": "Export limited to 32 megapixels and to the format dimensions. Reduce the resolution.",
+    "quality": "Invalid quality",
+    "completeRequired": "Complete document required",
+    "canvasUnavailable": "Image canvas unavailable",
+    "cannotEncode": "This browser cannot encode this format"
+  },
+  "manifest": {
+    "oldFormat": "Old ExpMap format not supported: recreate the .expmap file."
+  },
+  "gpu": {
+    "canvasUnavailable": "WebGPU canvas unavailable",
+    "completeRequired": "A complete document is required",
+    "webgpuRequired": "WebGPU required for ExpMap",
+    "tilesExceed": "The 14 tiles exceed the capabilities of this GPU. Recreate the document with a lower resolution or density.",
+    "playerClosedOrBusy": "Player closed or already busy",
+    "depthOutOfRange": "Playback depth out of range.",
+    "playerClosed": "Player closed"
+  },
+  "store": {
+    "opfsRequired": "The browser private working storage is required to create an ExpMap",
+    "workingExists": "Working document already present",
+    "otherDocument": "File associated with another document",
+    "destinationMissing": "Missing .expmap destination",
+    "locksUnavailable": "Local locking unavailable",
+    "openElsewhere": "This document is already open for writing in another window"
+  },
+  "library": {
+    "notInCatalog": "Document missing from the catalog",
+    "accessDenied": "File access denied; reattach the document or renew its permission.",
+    "saveUnavailable": "Saving local files unavailable in this browser",
+    "openUnavailable": "Opening local files unavailable in this browser"
+  },
+  "imageLimits": {
+    "tile": "This tile exceeds the WebP limits or the 128 MiB budget. Reduce the resolution or the density."
+  },
+  "compat": {
+    "stripeFrequency": "The orbital frequency changes the computation: use the source frequency or recompute the source.",
+    "orbitTrap": "This orbit trap geometry requires a new source."
+  },
+  "shaderLibrary": {
+    "accessDenied": "Folder access denied; reopen it from the panel"
+  },
+  "shaderCreate": {
+    "locksRequired": "File locking required",
+    "sourceInUse": "Shader source already in use"
+  },
+  "shaderStore": {
+    "noManifest": "No valid ExpMap shader manifest in this folder",
+    "emptyFolder": "Choose an empty folder for the new shader source",
+    "otherDestination": "Choose another destination",
+    "destinationInUse": "Destination already in use",
+    "finishFirst": "Finish the source before copying it"
+  },
+  "shaderRenderer": {
+    "budgetInsufficient": "Insufficient budget for the targets and one shader block",
+    "incomplete": "Incomplete shader source",
+    "webgpuRequired": "WebGPU required",
+    "blockBudget": "Shader block larger than the GPU budget",
+    "unavailable": "Player unavailable",
+    "outputLimits": "Output larger than the GPU limits",
+    "rendering": "Render in progress"
+  },
+  "ringMedia": {
+    "evenDims": "Ring videos require even dimensions",
+    "bitrate": "Invalid intermediate bitrate"
+  },
+  "ringVideo": {
+    "limits": "Duration or frame rate out of range",
+    "decodeUnavailable": "Decoding unavailable for a {width}×{height} ring",
+    "inProgress": "This ring export is already in progress",
+    "checkpoint": "Checkpoint out of range",
+    "unreadable": "Unreadable ring video"
+  },
+  "tileCache": {
+    "closed": "Cache closed",
+    "windowTooLarge": "Tile window too large"
+  }
+}

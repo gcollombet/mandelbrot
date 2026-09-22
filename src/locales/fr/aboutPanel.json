@@ -1,0 +1,25 @@
+{
+  "help": {
+    "title": "Aide",
+    "scope": "Gestes et raccourcis",
+    "moveTitle": "Déplacer",
+    "moveText": "glisser avec un doigt.",
+    "zoomTitle": "Zoomer / tourner",
+    "zoomText": "pincer ou pivoter avec deux doigts.",
+    "preciseTitle": "Commandes précises",
+    "preciseText": "ouvrir la boussole en bas de l’écran.",
+    "settingsTitle": "Réglages",
+    "settingsText": "toucher une valeur pour la saisir. Agrandir le panneau avec ⌃."
+  },
+  "language": {
+    "title": "Langue",
+    "scope": "Langue de l’interface"
+  },
+  "credits": {
+    "title": "Crédits",
+    "scope": "Technologies & projet",
+    "madeWith": "Réalisé avec",
+    "blurb": "Ce moteur de rendu Mandelbrot en temps réel est développé par Guillaume Collombet. Il s'appuie sur WebGPU pour le calcul GPU parallèle, Vue 3 pour l'interface, et Rust/WebAssembly pour les calculs de référence en précision arbitraire."
+  },
+  "presentationCta": "Découvrir la présentation complète"
+}

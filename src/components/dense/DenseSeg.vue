@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
+const { t } = useI18n();
 interface SegOption { label: string; value: string | number }
 const props = defineProps<{ modelValue: string | number; label?: string; options: SegOption[];
   /** Optional default: marks the row `.mod` when different and a double-click restores it. */
@@ -8,7 +10,7 @@ const emit = defineEmits<{ (e: 'update:modelValue', v: string | number): void }>
 
 <template>
   <div class="fld fld-seg" :class="{ mod: props.default !== undefined && modelValue !== props.default }"
-    :title="props.default !== undefined ? 'Double-clic : valeur par défaut' : undefined"
+    :title="props.default !== undefined ? t('common.dblclickDefault') : undefined"
     @dblclick="props.default !== undefined && emit('update:modelValue', props.default)">
     <span v-if="label" class="fld-lab seg-lab">{{ label }}</span>
     <div class="seg">

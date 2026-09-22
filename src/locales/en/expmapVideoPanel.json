@@ -1,0 +1,68 @@
+{
+  "encoder": {
+    "hardwarePreferred": " · Hardware preferred",
+    "browserFallback": " · Browser fallback — software possible",
+    "probing": "Checking the encoder…",
+    "compatibility": " · compatibility",
+    "unavailable": "Encoding unavailable: choose another format or codec."
+  },
+  "errors": {
+    "incomplete": "Incomplete document.",
+    "preferencesReset": "Out-of-domain preferences reset.",
+    "streamingRequired": "The ExpMap export requires a streaming file destination."
+  },
+  "videoTypeDescription": "MP4 video",
+  "progress": {
+    "pickDestination": "Choosing the destination file",
+    "opening": "Opening the document",
+    "finalizing": "Finalizing the MP4 file",
+    "encoding": "Reconstructing and encoding the frames",
+    "interrupted": "Export interrupted",
+    "saved": "Video saved",
+    "stopped": "Export stopped",
+    "cancelling": "Cancelling…"
+  },
+  "unitFrames": "frames encoded",
+  "source": {
+    "title": "ExpMap source",
+    "file": "File",
+    "unavailable": " · unavailable"
+  },
+  "path": {
+    "title": "Path",
+    "fullLoop": "One full octave cycle",
+    "start": "Start",
+    "end": "End",
+    "fromPlayer": "From the player",
+    "view": "View",
+    "startAria": "Start in the document",
+    "endAria": "End in the document",
+    "handles": "Start: top handle · end: bottom handle",
+    "reverse": "⇄ Reverse the path",
+    "duration": "Path duration",
+    "averageSpeed": "Average speed",
+    "doublingsPerSecond": "Doublings/s",
+    "speedHint": "The last edited value (duration or speed) is kept when the range changes. The curves modulate the speed around this average."
+  },
+  "playerAngle": "Player angle",
+  "output": {
+    "title": "Video file",
+    "resolution": "Resolution",
+    "fps": "Frame rate",
+    "upscale": " · Upscaled from {width} × {height}",
+    "encoding": "Encoding",
+    "auto": "Auto · HEVC, otherwise H.264",
+    "qualityDetails": "Quality and precise dimensions",
+    "width": "Width",
+    "height": "Height",
+    "distribution": "AA distribution",
+    "grid": "Grid",
+    "r2": "R2",
+    "samples": "Samples per pixel",
+    "bilinear": " — bilinear",
+    "adaptive": "Adaptive to the available detail, without recomputing the fractal.",
+    "fitWidth": "Fit the width to the document",
+    "export": "Export the video…",
+    "cancel": "Cancel the export"
+  }
+}

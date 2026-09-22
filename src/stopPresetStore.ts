@@ -1,3 +1,4 @@
+import { t } from './i18n';
 import type {ColorStop} from './ColorStop';
 import {isStopTransferCurve, normalizeColorStop} from './ColorStop';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
@@ -111,7 +112,7 @@ export async function getAllStopPresetCacheRecords(): Promise<StopPresetRecord[]
 
 export async function saveStopPresetEntry(record: StopPresetRecord): Promise<void> {
   const normalizedRecord = normalizeStopPresetRecord(record);
-  if (!normalizedRecord.name.trim()) throw new Error('Stop preset name is required.');
+  if (!normalizedRecord.name.trim()) throw new Error(t('palettes.stopPresetNameRequired'));
   const date = normalizedRecord.date || new Date().toISOString();
   const guid = normalizedRecord.guid || createGuid();
   const next: StopPresetRecord = {

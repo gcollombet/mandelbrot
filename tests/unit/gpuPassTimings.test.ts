@@ -74,7 +74,7 @@ describe('GPU pass timing attribution', () => {
     expect(PASS_SLOTS[PASS_SLOT_INDEX.reproject]).toMatchObject({label: 'Reprojection (pan)', timing: 'end-gap'})
     expect(PASS_SLOTS[PASS_SLOT_INDEX.snapshot]).toMatchObject({label: 'Snapshot (zoom)', timing: 'explicit-span'})
     expect(PASS_SLOTS[PASS_SLOT_INDEX.merge]).toMatchObject({label: 'Merge (zoom)', timing: 'explicit-span'})
-    expect(PASS_SLOTS.every(slot => slot.help.length > 0)).toBe(true)
+    expect(PASS_SLOTS.every(slot => slot.helpKey.length > 0)).toBe(true)
   })
 
   it('omits timestamp boundary passes unless measurement is fully available', () => {

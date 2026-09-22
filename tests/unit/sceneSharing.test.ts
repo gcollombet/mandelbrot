@@ -44,14 +44,14 @@ describe('scene sharing', () => {
   });
   it('does not report success when the sync runner swallowed a failure', async () => {
     mocks.getPresetById.mockResolvedValue({...record, syncState: 'pending'});
-    await expect(prepareSceneShare(1)).rejects.toThrow('pas encore synchronisée');
+    await expect(prepareSceneShare(1)).rejects.toThrow('not synchronized yet');
   });
   it('rejects unsynchronized textures and account changes', async () => {
     mocks.getAllTextureEntries.mockResolvedValue([{guid: 'texture-a', origin: 'personal', syncState: 'pending'}]);
     await expect(prepareSceneShare(1)).rejects.toThrow('texture');
     mocks.getAllTextureEntries.mockResolvedValue([{guid: 'texture-a', origin: 'public'}]);
     mocks.requestPersonalPresetSync.mockImplementation(async () => { mocks.uid = 'bob'; });
-    await expect(prepareSceneShare(1)).rejects.toThrow('pas encore synchronisée');
+    await expect(prepareSceneShare(1)).rejects.toThrow('not synchronized yet');
   });
   it('opens a shared preset as a guest and isolates its textures from same-GUID local records', async () => {
     mocks.uid = ''; mocks.scope = {kind: 'guest'};
@@ -71,9 +71,9 @@ describe('scene sharing', () => {
   });
   it('reports deleted scenes, wrong preset types, and missing dependencies', async () => {
     mocks.getSharedPresetRecord.mockResolvedValueOnce(null);
-    await expect(loadSharedScene('alice', 'missing')).rejects.toThrow('supprimée');
+    await expect(loadSharedScene('alice', 'missing')).rejects.toThrow('deleted');
     mocks.getSharedPresetRecord.mockResolvedValueOnce({type: 'palettePreset'});
-    await expect(loadSharedScene('alice', 'palette')).rejects.toThrow('introuvable');
+    await expect(loadSharedScene('alice', 'palette')).rejects.toThrow('could not be found');
     mocks.scope = {kind: 'guest'};
     mocks.getSharedTexture.mockResolvedValue(null);
     await expect(loadSharedScene('alice', 'scene-a')).rejects.toThrow('texture');

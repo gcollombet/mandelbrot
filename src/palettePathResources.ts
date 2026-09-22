@@ -1,3 +1,4 @@
+import { t } from './i18n'
 import {getEffectValue} from './ColorStop'
 import { ensureTextureLibrary, storedTextureObjectUrl, textureSourceKey } from './textureLibrary'
 import { nameForCatalogReference } from './catalogIdentity'
@@ -24,17 +25,17 @@ export async function resolvePalettePathImages(path: PalettePath, base: PathAppe
                 const requestedName = role === 'tile' ? appearance.textureName : appearance.skyboxName
                 const fallback = role === 'tile' ? 'Gold' : 'Window'
                 const name = nameForCatalogReference(entries, guid, requestedName) ?? fallback
-                if (!entries.some(e => e.name === name)) throw new Error(`Image du parcours introuvable : ${name}`)
+                if (!entries.some(e => e.name === name)) throw new Error(t('palettes.imageNotFound', { name }))
                 const key = `${role}:${textureSourceKey(name, entries)}`
                 let index = images.findIndex(i => i.key === key)
                 if (index < 0) {
                     const url = await storedTextureObjectUrl(name)
-                    if (!url) throw new Error(`Image du parcours introuvable : ${name}`)
+                    if (!url) throw new Error(t('palettes.imageNotFound', { name }))
                     images.push({ key, url, hash: '', role }); index = images.length - 1
                     const bytes = await (await fetch(url)).arrayBuffer()
                     const hash = 'sha256:' + Array.from(new Uint8Array(await crypto.subtle.digest('SHA-256', bytes)), b => b.toString(16).padStart(2, '0')).join('')
                     images[index].hash = hash
-                    if (path.resourceHashes && path.resourceHashes[key] !== hash) throw new Error(`L’image ${name} a changé depuis la cuisson du parcours.`)
+                    if (path.resourceHashes && path.resourceHashes[key] !== hash) throw new Error(t('palettes.imageChanged', { name }))
                 }
                 pair[role] = index
             }

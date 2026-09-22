@@ -1,8 +1,11 @@
 <script setup lang="ts">
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { DenseField, DenseSection, DenseSelect } from './dense'
 import { EXPMAP_EASES, DEFAULT_EXPMAP_MOTION, motionProgress, motionSettings, validateMotion, type ExpmapMotion } from '../expmap/motion'
 import { compactNumber } from '../expmap/controls'
+const { t } = useI18n()
+const easeOptions = computed(() => EXPMAP_EASES.map(e => ({ value: e.value, label: t(`expmap.eases.${e.value}`) })))
 const props = defineProps<{ modelValue: Partial<ExpmapMotion>; durationSeconds: number }>()
 const emit = defineEmits<{ 'update:modelValue': [value: ExpmapMotion] }>()
 const motion = computed(() => motionSettings(props.modelValue))
@@ -13,17 +16,17 @@ function minibrot() { emit('update:modelValue', { easeIn: 'smooth', easeInSecond
 const path = computed(() => problem.value ? '' : Array.from({length:101},(_,i)=>`${i?'L':'M'}${i*3},${48-44*motionProgress({...motion.value,durationSeconds:props.durationSeconds},total.value*i/100)}`).join(' '))
 </script>
 <template>
-  <DenseSection title="Entrée et fin progressives">
-    <button class="motion-preset" @click="minibrot">Arrivée sur minibrot</button>
-    <DenseSelect :model-value="motion.easeIn" label="Entrée" :options="[...EXPMAP_EASES]" @update:model-value="change('easeIn',String($event))"/>
-    <DenseField v-if="motion.easeIn !== 'none'" :model-value="motion.easeInSeconds" label="Durée d’entrée" unit="s" :f="compactNumber" :min="0" :max="86400" :step=".1" :default="DEFAULT_EXPMAP_MOTION.easeInSeconds" @update:model-value="change('easeInSeconds',$event)"/>
-    <DenseSelect :model-value="motion.easeOut" label="Sortie" :options="[...EXPMAP_EASES]" @update:model-value="change('easeOut',String($event))"/>
-    <DenseField v-if="motion.easeOut !== 'none'" :model-value="motion.easeOutSeconds" label="Durée de sortie" unit="s" :f="compactNumber" :min="0" :max="86400" :step=".1" :default="DEFAULT_EXPMAP_MOTION.easeOutSeconds" @update:model-value="change('easeOutSeconds',$event)"/>
-    <DenseField :model-value="motion.holdSeconds" label="Palier final fixe" unit="s" :f="compactNumber" :min="0" :max="3600" :step=".5" :default="DEFAULT_EXPMAP_MOTION.holdSeconds" @update:model-value="change('holdSeconds',$event)"/>
-    <svg viewBox="0 0 300 52" role="img" aria-label="Progression du trajet dans le temps ; la partie horizontale correspond au palier fixe"><path d="M0 48H300" class="axis"/><path :d="path"/></svg>
+  <DenseSection :title="t('videoControls.motion.title')">
+    <button class="motion-preset" @click="minibrot">{{ t('videoControls.motion.minibrot') }}</button>
+    <DenseSelect :model-value="motion.easeIn" :label="t('videoControls.motion.easeIn')" :options="easeOptions" @update:model-value="change('easeIn',String($event))"/>
+    <DenseField v-if="motion.easeIn !== 'none'" :model-value="motion.easeInSeconds" :label="t('videoControls.motion.easeInDuration')" unit="s" :f="compactNumber" :min="0" :max="86400" :step=".1" :default="DEFAULT_EXPMAP_MOTION.easeInSeconds" @update:model-value="change('easeInSeconds',$event)"/>
+    <DenseSelect :model-value="motion.easeOut" :label="t('videoControls.motion.easeOut')" :options="easeOptions" @update:model-value="change('easeOut',String($event))"/>
+    <DenseField v-if="motion.easeOut !== 'none'" :model-value="motion.easeOutSeconds" :label="t('videoControls.motion.easeOutDuration')" unit="s" :f="compactNumber" :min="0" :max="86400" :step=".1" :default="DEFAULT_EXPMAP_MOTION.easeOutSeconds" @update:model-value="change('easeOutSeconds',$event)"/>
+    <DenseField :model-value="motion.holdSeconds" :label="t('videoControls.motion.hold')" unit="s" :f="compactNumber" :min="0" :max="3600" :step=".5" :default="DEFAULT_EXPMAP_MOTION.holdSeconds" @update:model-value="change('holdSeconds',$event)"/>
+    <svg viewBox="0 0 300 52" role="img" :aria-label="t('videoControls.motion.chartAria')"><path d="M0 48H300" class="axis"/><path :d="path"/></svg>
     <p v-if="problem" role="alert">{{ problem }}</p>
-    <p>Trajet {{ compactNumber(durationSeconds) }} s + palier {{ compactNumber(motion.holdSeconds) }} s = <strong>{{ compactNumber(total) }} s</strong>.</p>
-    <p>Les transitions sont incluses dans le trajet. Le zoom et la rotation ralentissent ensemble. Un trajet raccourci réduit proportionnellement les transitions trop longues.</p>
+    <p>{{ t('videoControls.motion.total', { path: compactNumber(durationSeconds), hold: compactNumber(motion.holdSeconds) }) }} <strong>{{ compactNumber(total) }} s</strong>.</p>
+    <p>{{ t('videoControls.motion.note') }}</p>
   </DenseSection>
 </template>
 <style scoped>

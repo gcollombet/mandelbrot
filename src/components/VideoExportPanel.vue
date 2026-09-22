@@ -9,6 +9,7 @@ import { preferredExpmapCodec } from '../expmap/outputPreferences';
 import { fitMotion, validateMotion, type ExpmapMotion } from '../expmap/motion';
 import RenderProgress from './RenderProgress.vue';
 import { computed, ref, watch } from 'vue';
+import { useI18n } from 'vue-i18n';
 import type { MandelbrotExposed } from '../types/MandelbrotExposed';
 import type { Engine } from '../Engine';
 import ExpmapVideoPanel from './ExpmapVideoPanel.vue';
@@ -50,6 +51,8 @@ import {
   type VideoExportRenderMode,
 } from '../tiledKeyframeExport';
 import { DenseField, DenseSection, DenseSelect } from './dense';
+
+const { t } = useI18n();
 
 const props = defineProps<{
   engine?: Engine | null;
@@ -95,12 +98,12 @@ const FPS_OPTIONS = [
   { value: '30', label: '30 fps' },
   { value: '60', label: '60 fps' },
 ];
-const SUPERSAMPLE_OPTIONS = SUPERSAMPLE_FACTORS.map(factor => ({
+const SUPERSAMPLE_OPTIONS = computed(() => SUPERSAMPLE_FACTORS.map(factor => ({
   value: String(factor),
-  label: factor === 1 ? '×1 — aucun suréchantillonnage'
-    : factor === 2 ? '×2 — recommandé'
+  label: factor === 1 ? t('videoExportPanel.supersample.none')
+    : factor === 2 ? t('videoExportPanel.supersample.recommended')
     : `×${factor}`,
-}));
+})));
 
 // Restored from storage: the panel is unmounted when its tab closes, and a
 // pinned endpoint often took real navigation to reach.
@@ -128,17 +131,17 @@ const aaSamplesPerFrame = ref<number>(saved.aaSamplesPerFrame);
 const renderMode = ref<VideoExportRenderMode>(saved.renderMode);
 const tiledMemoryBudgetMiB = ref(saved.tiledMemoryBudgetMiB);
 
-const AA_OPTIONS = AA_SAMPLE_CHOICES.map(n => ({
+const AA_OPTIONS = computed(() => AA_SAMPLE_CHOICES.map(n => ({
   value: String(n),
-  label: n === 1 ? 'Aucun' : `×${n} échantillons`,
-}));
+  label: n === 1 ? t('common.none') : t('videoExportPanel.aa.samples', { n }),
+})));
 const selectableAaOptions = computed(() => renderMode.value === 'tiled-keyframe'
-  ? AA_OPTIONS.filter(option => option.value === '1')
-  : AA_OPTIONS);
-const RENDER_MODE_OPTIONS = [
-  { value: 'monolithic', label: 'Monolithique' },
-  { value: 'tiled-keyframe', label: 'Keyframes tuilées' },
-];
+  ? AA_OPTIONS.value.filter(option => option.value === '1')
+  : AA_OPTIONS.value);
+const RENDER_MODE_OPTIONS = computed(() => [
+  { value: 'monolithic', label: t('videoExportPanel.renderMode.monolithic') },
+  { value: 'tiled-keyframe', label: t('videoExportPanel.renderMode.tiledKeyframe') },
+]);
 
 watch(renderMode, (mode) => {
   if (mode === 'tiled-keyframe') aaSamplesPerFrame.value = 1;
@@ -188,8 +191,8 @@ const codecSupport = ref<Partial<Record<Mp4Codec, boolean>>>({});
 const probing = ref(true);
 const encoderPreferences = ref<Partial<Record<Mp4Codec, EncoderPreference>>>({})
 const effectiveCodec = computed(() => codec.value === 'auto' ? (dynamicRange.value === 'hdr' ? (['hevc','av1','vp9'] as const).find(c => codecSupport.value[c]) ?? null : preferredExpmapCodec(codecSupport.value)) : codecSupport.value[codec.value] ? codec.value : null);
-const encoderLabel = computed(() => probing.value || !effectiveCodec.value || !encoderPreferences.value[effectiveCodec.value] ? '' : encoderPreferences.value[effectiveCodec.value] === 'prefer-hardware' ? ' · Matériel préféré' : ' · Repli navigateur — logiciel possible')
-const codecLabel = computed(() => probing.value ? 'Vérification de l’encodeur…' : effectiveCodec.value === 'hevc' ? 'HEVC' : effectiveCodec.value === 'avc' ? 'H.264 · compatibilité' : effectiveCodec.value?.toUpperCase() ?? 'Encodage indisponible');
+const encoderLabel = computed(() => probing.value || !effectiveCodec.value || !encoderPreferences.value[effectiveCodec.value] ? '' : encoderPreferences.value[effectiveCodec.value] === 'prefer-hardware' ? ' · ' + t('videoExportPanel.encoder.hardwarePreferred') : ' · ' + t('videoExportPanel.encoder.browserFallback'))
+const codecLabel = computed(() => probing.value ? t('videoExportPanel.codec.probing') : effectiveCodec.value === 'hevc' ? 'HEVC' : effectiveCodec.value === 'avc' ? t('videoExportPanel.codec.avcCompat') : effectiveCodec.value?.toUpperCase() ?? t('videoExportPanel.codec.unavailable'));
 watch([resolution, fps, dynamicRange], async (_values, _old, onCleanup) => {
   const spec = output.value;
   let current = true;
@@ -203,7 +206,7 @@ watch([resolution, fps, dynamicRange], async (_values, _old, onCleanup) => {
 
 const hdrQuantizerMax = computed(() => effectiveCodec.value === 'hevc' ? 51 : 63);
 watch(hdrQuantizerMax, max => { if (hdrQuantizer.value > max) hdrQuantizer.value = max; });
-const codecOptions = computed(() => [{value:'auto',label:dynamicRange.value === 'hdr' ? 'Auto · HEVC, AV1, VP9 10 bits' : 'Auto · HEVC, sinon H.264'}, ...MP4_CODECS.filter(c => dynamicRange.value !== 'hdr' || c.value !== 'avc').map(({value,label}) => ({value,label:codecSupport.value[value] === false ? `${label} — indisponible ici` : label}))]);
+const codecOptions = computed(() => [{value:'auto',label:dynamicRange.value === 'hdr' ? t('videoExportPanel.codec.autoHdr') : t('videoExportPanel.codec.autoSdr')}, ...MP4_CODECS.filter(c => dynamicRange.value !== 'hdr' || c.value !== 'avc').map(({value,labelKey}) => { const label = t(labelKey); return {value,label:codecSupport.value[value] === false ? t('videoExportPanel.codec.unavailableHere', { label }) : label}; })]);
 const codecUnsupported = computed(() => !probing.value && !effectiveCodec.value);
 
 const tiledEligibility = computed(() => evaluateTiledKeyframeEligibility({
@@ -242,7 +245,7 @@ const problems = computed<VideoPathProblem[]>(() => {
   if (renderMode.value === 'tiled-keyframe') {
     result.push(...tiledEligibility.value.problems.map(message => ({kind: 'output' as const, message})));
     if (tiledPlan.value instanceof Error) {
-      result.push({kind: 'output', field: 'budget mémoire', message: tiledPlan.value.message});
+      result.push({kind: 'output', field: t('videoExportPanel.memory.budgetField'), message: tiledPlan.value.message});
     }
   }
   return result;
@@ -262,21 +265,23 @@ const workingTextureSide = computed(() =>
 
 const workingSetLabel = computed(() => {
   const gigabytes = estimatedWorkingBytes(output.value) / 1073741824;
-  return gigabytes >= 1 ? `~${gigabytes.toFixed(1)} Go` : `~${Math.round(gigabytes * 1024)} Mo`;
+  return '~' + (gigabytes >= 1 ? t('videoExportPanel.memory.gb', { value: gigabytes.toFixed(1) }) : t('videoExportPanel.memory.mb', { value: Math.round(gigabytes * 1024) }));
 });
 
 function memoryLabel(bytes: number): string {
   const mib = bytes / (1024 * 1024);
-  return mib >= 1024 ? `${(mib / 1024).toFixed(2)} Go` : `${Math.round(mib)} Mo`;
+  return mib >= 1024 ? t('videoExportPanel.memory.gb', { value: (mib / 1024).toFixed(2) }) : t('videoExportPanel.memory.mb', { value: Math.round(mib) });
 }
 
 const tiledMemoryLabel = computed(() => {
   const plan = tiledPlan.value;
   if (!plan || plan instanceof Error) return '';
-  return `${plan.tiles.length} tuile${plan.tiles.length > 1 ? 's' : ''} — `
-    + `${memoryLabel(plan.estimate.squareBytes)} plein carré + `
-    + `${memoryLabel(plan.estimate.tileBytes)} tuile = `
-    + `${memoryLabel(plan.estimate.totalBytes)}`;
+  return t('videoExportPanel.memory.tiledSummary', {
+    tiles: t('videoExportPanel.memory.tiles', { count: plan.tiles.length }, plan.tiles.length),
+    square: memoryLabel(plan.estimate.squareBytes),
+    tile: memoryLabel(plan.estimate.tileBytes),
+    total: memoryLabel(plan.estimate.totalBytes),
+  });
 });
 
 const canStart = computed(() =>
@@ -346,97 +351,97 @@ function start() {
 
 <template>
   <div class="video-export-panel sections">
-    <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect label="Source" :model-value="shaderExpmapVideoSelected ? 'shader' : expmapVideoSelected ? 'expmap' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: 'Vidéo depuis la fractale' }, { value: 'expmap', label: 'Vidéo depuis une ExpMap cuite' }, { value: 'shader', label: 'Vidéo depuis une ExpMap recolorable' }]" @update:model-value="expmapVideoSelected = $event === 'expmap'; shaderExpmapVideoSelected = $event === 'shader'"/></fieldset>
-    <p v-if="expmapVideoSelected" class="ve-note">Cette source RGB exporte en SDR. Pour une vidéo HDR, choisir « Vidéo depuis la fractale » ou une source recolorable, puis Dynamique → HDR.</p>
+    <fieldset :disabled="running || expmapBusy" class="ve-config"><DenseSelect :label="t('videoExportPanel.source.label')" :model-value="shaderExpmapVideoSelected ? 'shader' : expmapVideoSelected ? 'expmap' : 'mandelbrot'" :options="[{ value: 'mandelbrot', label: t('videoExportPanel.source.mandelbrot') }, { value: 'expmap', label: t('videoExportPanel.source.expmap') }, { value: 'shader', label: t('videoExportPanel.source.shader') }]" @update:model-value="expmapVideoSelected = $event === 'expmap'; shaderExpmapVideoSelected = $event === 'shader'"/></fieldset>
+    <p v-if="expmapVideoSelected" class="ve-note">{{ t('videoExportPanel.source.sdrNote') }}</p>
     <ShaderExpmapPanel v-if="shaderExpmapVideoSelected" video-only :plan="null" name="" :appearance="current as unknown as import('../Engine').RenderOptions" :engine="engine ?? null" :controller="controller ?? null"/>
     <ExpmapVideoPanel v-else-if="expmapVideoSelected" :engine="engine" :controller="controller"/>
     <fieldset v-else :disabled="running || expmapBusy" class="ve-config">
-    <DenseSection title="Trajet" scope="Rendu de la fractale, image par image">
-      <div class="ve-capture"><span>Centre fixe</span><button class="ve-pin" @click="centerCurrent()">Utiliser le centre actuel</button></div>
-      <details><summary>Centres distincts · travelling</summary>
-        <div class="ve-capture"><span>Centre de départ</span><button class="ve-pin" @click="centerCurrent('start')">Centre actuel</button></div>
-        <div class="ve-capture"><span>Centre d’arrivée</span><button class="ve-pin" @click="centerCurrent('end')">Centre actuel</button></div>
-        <p class="ve-note">{{ effectiveStart.cx === effectiveEnd.cx && effectiveStart.cy === effectiveEnd.cy ? 'Centre identique sur tout le trajet.' : 'Le centre se déplace entre les deux positions.' }}</p>
+    <DenseSection :title="t('videoExportPanel.path.title')" :scope="t('videoExportPanel.path.scope')">
+      <div class="ve-capture"><span>{{ t('videoExportPanel.path.fixedCenter') }}</span><button class="ve-pin" @click="centerCurrent()">{{ t('videoExportPanel.path.useCurrentCenter') }}</button></div>
+      <details><summary>{{ t('videoExportPanel.path.distinctCenters') }}</summary>
+        <div class="ve-capture"><span>{{ t('videoExportPanel.path.startCenter') }}</span><button class="ve-pin" @click="centerCurrent('start')">{{ t('videoExportPanel.path.currentCenter') }}</button></div>
+        <div class="ve-capture"><span>{{ t('videoExportPanel.path.endCenter') }}</span><button class="ve-pin" @click="centerCurrent('end')">{{ t('videoExportPanel.path.currentCenter') }}</button></div>
+        <p class="ve-note">{{ effectiveStart.cx === effectiveEnd.cx && effectiveStart.cy === effectiveEnd.cy ? t('videoExportPanel.path.sameCenter') : t('videoExportPanel.path.movingCenter') }}</p>
       </details>
-      <ExpmapZoomControl :model-value="effectiveStart.scale" label="Départ" @update:model-value="setZoom('start',$event)" @capture="setZoom('start',currentLocation().scale)"><button class="ve-pin" @click="emit('preview',{...effectiveStart})">Voir</button></ExpmapZoomControl>
-      <ExpmapZoomControl :model-value="effectiveEnd.scale" label="Arrivée" @update:model-value="setZoom('end',$event)" @capture="setZoom('end',currentLocation().scale)"><button class="ve-pin" @click="emit('preview',{...effectiveEnd})">Voir</button></ExpmapZoomControl>
-      <div class="ve-capture"><small>Vue large 10^+10 → zoom profond 10^-1000</small><button class="ve-pin" @click="reverse">⇄ Inverser le trajet</button></div>
+      <ExpmapZoomControl :model-value="effectiveStart.scale" :label="t('videoExportPanel.path.start')" @update:model-value="setZoom('start',$event)" @capture="setZoom('start',currentLocation().scale)"><button class="ve-pin" @click="emit('preview',{...effectiveStart})">{{ t('videoExportPanel.path.view') }}</button></ExpmapZoomControl>
+      <ExpmapZoomControl :model-value="effectiveEnd.scale" :label="t('videoExportPanel.path.end')" @update:model-value="setZoom('end',$event)" @capture="setZoom('end',currentLocation().scale)"><button class="ve-pin" @click="emit('preview',{...effectiveEnd})">{{ t('videoExportPanel.path.view') }}</button></ExpmapZoomControl>
+      <div class="ve-capture"><small>{{ t('videoExportPanel.path.rangeHint') }}</small><button class="ve-pin" @click="reverse">{{ t('videoExportPanel.path.reverse') }}</button></div>
       <p class="ve-note">{{ magnitudeSummary(effectiveStart.scale,effectiveEnd.scale) }}</p>
-      <DenseField label="Durée du trajet" :min=".1" :max="86400" :step=".1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.durationSeconds" unit="s" :f="compactNumber" :model-value="durationSeconds" @update:model-value="duration"/>
-      <details><summary>Vitesse moyenne</summary><DenseField v-if="zoomDistance > 0" label="Doublements/s" :model-value="meanSpeed" :min=".1" :max="100" :step=".1" :f="compactNumber" @update:model-value="speed"/><p class="ve-note">La dernière valeur modifiée (durée ou vitesse) reste prioritaire lorsque la plage change.</p></details>
-      <p class="ve-note">{{ frameCount }} images · {{ compactNumber(totalDuration) }} s au total. L’apparence courante est utilisée sur tout le trajet.</p>
+      <DenseField :label="t('videoExportPanel.path.duration')" :min=".1" :max="86400" :step=".1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.durationSeconds" unit="s" :f="compactNumber" :model-value="durationSeconds" @update:model-value="duration"/>
+      <details><summary>{{ t('videoExportPanel.path.meanSpeed') }}</summary><DenseField v-if="zoomDistance > 0" :label="t('videoExportPanel.path.doublingsPerSecond')" :model-value="meanSpeed" :min=".1" :max="100" :step=".1" :f="compactNumber" @update:model-value="speed"/><p class="ve-note">{{ t('videoExportPanel.path.timingPriorityNote') }}</p></details>
+      <p class="ve-note">{{ t('videoExportPanel.path.summary', { frames: frameCount, seconds: compactNumber(totalDuration) }) }}</p>
     </DenseSection>
     <VideoRotationControls :from-angle="effectiveStart.angle" :to-angle="effectiveEnd.angle" :current-angle="currentLocation().angle" @change="setRotation"/>
     <VideoMotionControls v-model="motion" :duration-seconds="durationSeconds"/>
 
-    <DenseSection title="Sortie">
-      <DenseSelect label="Dynamique" v-model="dynamicRange" :options="[{value:'sdr',label:'SDR · 8 bits'},{value:'hdr',label:'HDR · 10 bits PQ'}]"/>
-      <label v-if="dynamicRange === 'hdr'" class="ve-row"><span class="ve-label">Exposition HDR (EV)</span><input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" aria-label="Exposition vidéo HDR"/></label>
-      <DenseField v-if="dynamicRange === 'hdr'" label="Quantificateur" v-model="hdrQuantizer" :min="0" :max="hdrQuantizerMax" :step="1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.hdrQuantizer"/>
-      <p v-if="dynamicRange === 'hdr'" class="ve-note">Rec.2020 / PQ · blanc de référence 203 nits. Indépendant de l’affichage HDR. Le profil 10 bits est vérifié au démarrage ; aucun repli SDR. Qualité constante : 0 = maximale et fichiers très lourds, 10 à 20 = visuellement propre ; le débit cible est ignoré, repli en débit variable si l’encodeur refuse ce mode.</p>
+    <DenseSection :title="t('videoExportPanel.output.title')">
+      <DenseSelect :label="t('videoExportPanel.output.dynamicRange')" v-model="dynamicRange" :options="[{value:'sdr',label:t('videoExportPanel.output.sdr')},{value:'hdr',label:t('videoExportPanel.output.hdr')}]"/>
+      <label v-if="dynamicRange === 'hdr'" class="ve-row"><span class="ve-label">{{ t('videoExportPanel.output.hdrExposure') }}</span><input type="number" v-model.number="hdrExposure" min="-16" max="16" step="0.5" :aria-label="t('videoExportPanel.output.hdrExposureAria')"/></label>
+      <DenseField v-if="dynamicRange === 'hdr'" :label="t('videoExportPanel.output.quantizer')" v-model="hdrQuantizer" :min="0" :max="hdrQuantizerMax" :step="1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.hdrQuantizer"/>
+      <p v-if="dynamicRange === 'hdr'" class="ve-note">{{ t('videoExportPanel.output.hdrNote') }}</p>
       <div class="ve-form"><label class="ve-row">
-          <span class="ve-label">Résolution</span>
+          <span class="ve-label">{{ t('videoExportPanel.output.resolution') }}</span>
           <DenseSelect
             :options="RESOLUTIONS" :model-value="resolution" :disabled="running"
             @update:model-value="(v: string) => resolution = v"
           />
         </label><label class="ve-row">
-          <span class="ve-label">Cadence</span>
+          <span class="ve-label">{{ t('videoExportPanel.output.frameRate') }}</span>
           <DenseSelect
             :options="FPS_OPTIONS" :model-value="fps" :disabled="running"
             @update:model-value="(v: string) => fps = v"
           />
         </label><label class="ve-row">
-          <span class="ve-label">Codec</span>
+          <span class="ve-label">{{ t('videoExportPanel.output.codec') }}</span>
           <DenseSelect
             :options="codecOptions" :model-value="codec" :disabled="running"
             @update:model-value="(v: string) => codec = v as Mp4Codec | 'auto'"
           />
         </label></div>
       <p class="ve-note" role="status">{{ codecLabel }}{{ encoderLabel }}</p>
-      <label class="ve-capture">Nom du fichier <input v-model="filename" aria-label="Nom du fichier vidéo"/></label>
+      <label class="ve-capture">{{ t('videoExportPanel.output.filename') }} <input v-model="filename" :aria-label="t('videoExportPanel.output.filenameAria')"/></label>
       <p class="ve-note">{{ fractalVideoFilename(filename) }}</p>
     </DenseSection>
-    <DenseSection title="Qualité">
+    <DenseSection :title="t('videoExportPanel.quality.title')">
       <div class="ve-form"><label class="ve-row">
-          <span class="ve-label">Anticrénelage</span>
+          <span class="ve-label">{{ t('videoExportPanel.quality.antialiasing') }}</span>
           <DenseSelect
             :options="selectableAaOptions" :model-value="String(aaSamplesPerFrame)" :disabled="running"
             @update:model-value="(v: string) => aaSamplesPerFrame = Number(v)"
           />
         </label><label class="ve-row">
-          <span class="ve-label">Suréchantillonnage</span>
+          <span class="ve-label">{{ t('videoExportPanel.quality.supersampling') }}</span>
           <DenseSelect
             :options="SUPERSAMPLE_OPTIONS" :model-value="supersample" :disabled="running"
             @update:model-value="(v: string) => supersample = v"
           />
         </label></div>
-      <p class="ve-note">{{ renderMode === 'tiled-keyframe' ? tiledMemoryLabel : workingSetLabel }} · texture {{ workingTextureSide }}²</p>
-      <p class="ve-note">Le budget mémoire prudent de l’appareil est indicatif : l’export peut le dépasser si le GPU accepte l’allocation.</p>
-      <details class="ve-advanced"><summary>Réglages avancés</summary><div class="ve-form"><label class="ve-row">
-          <span class="ve-label">Mode mémoire</span>
+      <p class="ve-note">{{ renderMode === 'tiled-keyframe' ? tiledMemoryLabel : workingSetLabel }} · {{ t('videoExportPanel.memory.textureSide', { side: workingTextureSide }) }}</p>
+      <p class="ve-note">{{ t('videoExportPanel.quality.budgetNote') }}</p>
+      <details class="ve-advanced"><summary>{{ t('videoExportPanel.quality.advanced') }}</summary><div class="ve-form"><label class="ve-row">
+          <span class="ve-label">{{ t('videoExportPanel.quality.memoryMode') }}</span>
           <DenseSelect
             :options="RENDER_MODE_OPTIONS" :model-value="renderMode" :disabled="running"
             @update:model-value="(v: string) => renderMode = v as VideoExportRenderMode"
           />
         </label><DenseField
           v-if="renderMode === 'tiled-keyframe'"
-          label="Budget mémoire"
+          :label="t('videoExportPanel.quality.memoryBudget')"
           :min="64" :max="32768" :step="128" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.tiledMemoryBudgetMiB"
           unit="Mio"
           :model-value="tiledMemoryBudgetMiB"
           @update:model-value="(v: number) => tiledMemoryBudgetMiB = v"
         /><DenseField
-          label="Seuil de bascule"
+          :label="t('videoExportPanel.quality.swapThreshold')"
           :min="MIN_MAGNIFICATION_THRESHOLD" :max="MAX_MAGNIFICATION_THRESHOLD" :step="1" :default="DEFAULT_VIDEO_EXPORT_PREFERENCES.magnificationThreshold"
           :model-value="magnificationThreshold"
           @update:model-value="(v: number) => magnificationThreshold = v"
         /></div>
-        <p class="ve-note">Seuil de bascule : une valeur basse reconverge plus souvent ; une valeur haute privilégie la vitesse. Limite texture : {{ maxTextureDimension }}.</p>
+        <p class="ve-note">{{ t('videoExportPanel.quality.thresholdNote', { limit: maxTextureDimension }) }}</p>
       </details>
     </DenseSection>
     </fieldset>
-    <DenseSection v-if="!expmapVideoSelected && !shaderExpmapVideoSelected" class="ve-footer" title="Export" scope="Chaque image est calculée jusqu'à convergence">
+    <DenseSection v-if="!expmapVideoSelected && !shaderExpmapVideoSelected" class="ve-footer" :title="t('videoExportPanel.export.title')" :scope="t('videoExportPanel.export.scope')">
       <div class="fields">
         <ul v-if="problems.length" class="ve-problems">
           <li v-for="(problem, index) in problems" :key="index">
@@ -445,7 +450,7 @@ function start() {
           </li>
         </ul>
         <p v-if="codecUnsupported" class="ve-error">
-          {{ dynamicRange === 'hdr' ? 'Aucun encodeur HDR 10 bits disponible pour ce choix dans ce navigateur.' : 'Aucun encodeur disponible pour ce choix.' }} Choisis un autre codec ou une autre résolution.
+          {{ dynamicRange === 'hdr' ? t('videoExportPanel.export.noHdrEncoder') : t('videoExportPanel.export.noEncoder') }} {{ t('videoExportPanel.export.pickAnother') }}
         </p>
         <ul v-if="warnings.length" class="ve-warnings">
           <li v-for="(warning, index) in warnings" :key="index">{{ warning.message }}</li>
@@ -454,14 +459,14 @@ function start() {
         <p v-if="warning" class="ve-warnings" role="status">{{ warning }}</p>
         <p v-if="lastError" class="ve-error">{{ lastError }}</p>
 
-        <RenderProgress v-if="running || framesEmitted > 0" :label="running ? (totalFrames > 0 && framesEmitted >= totalFrames ? 'Finalisation du fichier MP4' : 'Calcul et encodage des images') : lastError ? 'Export arrêté' : framesEmitted >= totalFrames ? 'Export terminé' : 'Export interrompu'" :done="framesEmitted" :total="totalFrames" unit="images encodées" :active="running"/>
+        <RenderProgress v-if="running || framesEmitted > 0" :label="running ? (totalFrames > 0 && framesEmitted >= totalFrames ? t('videoExportPanel.export.finalizing') : t('videoExportPanel.export.encoding')) : lastError ? t('videoExportPanel.export.stopped') : framesEmitted >= totalFrames ? t('videoExportPanel.export.done') : t('videoExportPanel.export.interrupted')" :done="framesEmitted" :total="totalFrames" :unit="t('videoExportPanel.export.framesUnit')" :active="running"/>
 
         <div class="ve-actions">
           <button type="button" class="ve-start" :disabled="!canStart || expmapBusy" @click="start">
-            Exporter en MP4
+            {{ t('videoExportPanel.export.start') }}
           </button>
           <button v-if="running" type="button" class="ve-cancel" @click="emit('cancel')">
-            Annuler
+            {{ t('common.cancel') }}
           </button>
         </div>
       </div>

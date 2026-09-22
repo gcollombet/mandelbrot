@@ -1,0 +1,36 @@
+{
+  "dblclickDefaultValue": "Double-click: default value ({value})",
+  "currentSelection": "Current selection",
+  "linked": {
+    "group": "Linked {kind}: {name}",
+    "newName": "New name",
+    "sharedCatalogItem": "Shared catalog item",
+    "clickToRename": "Click to rename",
+    "stateCatalog": "catalog",
+    "stateModified": "modified",
+    "stateUpToDate": "up to date",
+    "saveVariant": "Save a variant",
+    "update": "Update",
+    "detach": "Detach",
+    "detachTitle": "Forget the link, keep the settings"
+  },
+  "sync": {
+    "failed": "Cloud sync failed; retry scheduled",
+    "syncing": "Cloud sync…",
+    "syncingLabel": "Cloud sync in progress",
+    "synced": "Library synced",
+    "errorLabel": "Cloud sync error"
+  },
+  "viewMenu": {
+    "title": "Display preferences",
+    "display": "Display",
+    "theme": "Theme",
+    "shape": "Shape",
+    "fieldsTitle": "Fields",
+    "chroma": "Chroma",
+    "styles": { "clair": "Light", "sober": "Sober", "glow": "Glow" },
+    "shapes": { "net": "Sharp", "doux": "Soft", "rond": "Round" },
+    "fields": { "gauge": "Gauge", "sober": "Sober", "minimal": "Minimal" },
+    "chromas": { "mono": "Monochrome", "code": "Coded", "vif": "Vivid" }
+  }
+}

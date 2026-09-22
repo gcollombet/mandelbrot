@@ -1,8 +1,10 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
 import { computed, nextTick, ref } from 'vue';
 import { useDenseScrub } from './useDenseScrub';
 import { formatValue, type DenseFormatter } from './denseFormat';
 import { showTip, hideTip } from './denseTip';
+const { t } = useI18n();
 
 const props = withDefaults(defineProps<{
   modelValue: number;
@@ -71,7 +73,7 @@ function onDblClick() {
 }
 
 const resetTitle = computed(() => props.default !== undefined
-  ? `Double-clic : valeur par défaut (${formatValue(props.default, props.f, props.unit)})`
+  ? t('dense.dblclickDefaultValue', { value: formatValue(props.default, props.f, props.unit) })
   : undefined);
 </script>
 

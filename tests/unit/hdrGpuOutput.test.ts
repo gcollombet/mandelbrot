@@ -62,7 +62,7 @@ describe('GPU HDR output transfers',()=>{
   })
   it('rejects GPU-reported nonfinite values and releases all resources',async()=>{
     const f=fixture('png');f.setInvalid()
-    await expect(readHdrGpuOutput(f.device,f.source,2,2,{format:'png'})).rejects.toThrow('non finie')
+    await expect(readHdrGpuOutput(f.device,f.source,2,2,{format:'png'})).rejects.toThrow('Non-finite')
     expect(f.buffers[2].unmap).toHaveBeenCalledOnce()
     expect(f.buffers.every(b=>b.destroy.mock.calls.length===1)).toBe(true)
   })
@@ -72,11 +72,11 @@ describe('GPU HDR output transfers',()=>{
     expect(result.length).toBe(12*(format==='video'?1.5:3))
     expect(f.params.length).toBeGreaterThan(1)
     expect(onWarning).toHaveBeenCalledOnce()
-    expect(onWarning).toHaveBeenCalledWith(expect.stringContaining('écrêtées à 10 000 nits'))
+    expect(onWarning).toHaveBeenCalledWith(expect.stringContaining('clipped at 10,000 nits'))
   })
   it('still rejects invalid values when clipping is also reported',async()=>{
     const f=fixture('png'),onWarning=vi.fn();f.setInvalid(3)
-    await expect(readHdrGpuOutput(f.device,f.source,2,2,{format:'png',onWarning})).rejects.toThrow('non finie')
+    await expect(readHdrGpuOutput(f.device,f.source,2,2,{format:'png',onWarning})).rejects.toThrow('Non-finite')
     expect(onWarning).not.toHaveBeenCalled()
   })
   it('handles cancellation during GPU readback and mapping failures',async()=>{
@@ -89,8 +89,8 @@ describe('GPU HDR output transfers',()=>{
   })
   it('rejects invalid requests before allocation and propagates GPU validation errors',async()=>{
     const f=fixture('video')
-    await expect(readHdrGpuOutput(f.device,f.source,3,2,{format:'video'})).rejects.toThrow('Dimensions')
-    await expect(readHdrGpuOutput(f.device,f.source,2,2,{format:'video',exposure:Infinity})).rejects.toThrow('Exposition')
+    await expect(readHdrGpuOutput(f.device,f.source,3,2,{format:'video'})).rejects.toThrow('dimensions')
+    await expect(readHdrGpuOutput(f.device,f.source,2,2,{format:'video',exposure:Infinity})).rejects.toThrow('exposure')
     expect(f.buffers).toHaveLength(0)
     vi.mocked(f.device.popErrorScope).mockResolvedValueOnce({message:'GPU invalid'} as GPUError)
     await expect(readHdrGpuOutput(f.device,f.source,2,2,{format:'video'})).rejects.toThrow('GPU invalid')

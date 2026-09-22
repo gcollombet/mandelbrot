@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import type { HdrGpuOptions } from '../hdrGpuOutput'
 import { hdrEncoderConfig, hdrInputFrame, type VideoDynamicRange } from '../hdrVideo'
 import { normalizeStereoVideo, validateStereoDimensions, type StereoVideoSettings } from '../stereoVideo'
@@ -18,30 +19,30 @@ export function expmapVideoDefaults(manifest: ExpmapVideoSource): ExpmapVideoWin
   return { fromScale: startScale, toScale: endScale, fromAngle: 0, toAngle: 0, speed: distance ? 2 : 0, durationSeconds: distance ? distance / 2 : 5, authority: 'duration', ...DEFAULT_EXPMAP_MOTION }
 }
 export function validateExpmapVideoWindow(manifest: ExpmapVideoSource, window: ExpmapVideoWindow, effects?: Partial<ExpmapEffects>) {
-  if (manifest.state !== 'complete') throw new Error('Le document est incomplet.')
+  if (manifest.state !== 'complete') throw new Error(t('expmap.video.incomplete'))
   for (const scale of [window.fromScale, window.toScale]) {
     canonicalScale(scale)
-    if (compareScales(scale, manifest.projection.domain.startScale) > 0 || (radialMode(effects) === 'normal' && compareScales(scale, manifest.projection.domain.endScale) < 0)) throw new Error('La fenêtre sort du domaine du document.')
+    if (compareScales(scale, manifest.projection.domain.startScale) > 0 || (radialMode(effects) === 'normal' && compareScales(scale, manifest.projection.domain.endScale) < 0)) throw new Error(t('expmap.video.outOfDomain'))
   }
-  if (![window.fromAngle, window.toAngle, window.durationSeconds, window.speed].every(Number.isFinite) || window.durationSeconds <= 0) throw new Error('Durée ou rotation invalide.')
+  if (![window.fromAngle, window.toAngle, window.durationSeconds, window.speed].every(Number.isFinite) || window.durationSeconds <= 0) throw new Error(t('expmap.video.invalidDurationRotation'))
   validateMotion(window, window.durationSeconds)
   const distance = Math.abs(scaleDoublements(window.fromScale, window.toScale))
-  if (distance ? window.speed <= 0 : window.speed !== 0) throw new Error('Vitesse invalide pour cette fenêtre.')
-  if (distance && Math.abs(window.durationSeconds * window.speed - distance) > Math.max(1e-12, distance * 1e-10)) throw new Error('Vitesse et durée ne correspondent pas.')
+  if (distance ? window.speed <= 0 : window.speed !== 0) throw new Error(t('expmap.video.invalidSpeedWindow'))
+  if (distance && Math.abs(window.durationSeconds * window.speed - distance) > Math.max(1e-12, distance * 1e-10)) throw new Error(t('expmap.video.speedDurationMismatch'))
 }
 export function changeExpmapSpeed(window: ExpmapVideoWindow, speed: number): ExpmapVideoWindow {
   const distance = Math.abs(scaleDoublements(window.fromScale, window.toScale))
   if (!distance) return { ...window, speed: 0 }
-  if (!Number.isFinite(speed) || speed <= 0) throw new Error('La vitesse doit être positive.')
+  if (!Number.isFinite(speed) || speed <= 0) throw new Error(t('expmap.video.speedPositive'))
   const durationSeconds = distance / speed
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('Durée hors limites.')
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error(t('expmap.video.durationOutOfRange'))
   return fitMotion({ ...window, speed, durationSeconds, authority: 'speed' })
 }
 export function changeExpmapDuration(window: ExpmapVideoWindow, durationSeconds: number): ExpmapVideoWindow {
-  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error('La durée doit être positive.')
+  if (!Number.isFinite(durationSeconds) || durationSeconds <= 0) throw new Error(t('expmap.video.durationPositive'))
   const distance = Math.abs(scaleDoublements(window.fromScale, window.toScale))
   const speed = distance / durationSeconds
-  if (!Number.isFinite(speed) || (distance && speed <= 0)) throw new Error('Vitesse hors limites.')
+  if (!Number.isFinite(speed) || (distance && speed <= 0)) throw new Error(t('expmap.video.speedOutOfRange'))
   return fitMotion({ ...window, durationSeconds, speed, authority: 'duration' })
 }
 export function changeExpmapWindow(window: ExpmapVideoWindow, fromScale: string, toScale: string): ExpmapVideoWindow {
@@ -89,21 +90,21 @@ export async function exportExpmapVideo(source: { manifest: ExpmapVideoSource },
   }
   const hdr=request.dynamicRange==='hdr'
   if(hdr){
-    if(!request.gpuRenderer.renderHdr)throw new Error('Le HDR nécessite une source ExpMap recolorable')
+    if(!request.gpuRenderer.renderHdr)throw new Error(t('expmap.video.hdrNeedsShader'))
     hdrEncoderConfig({...request,quantizer:request.hdrQuantizer},'prefer-hardware')
-    if(!Number.isFinite(request.hdrExposure??0)||Math.abs(request.hdrExposure??0)>16)throw new Error('Exposition HDR invalide')
+    if(!Number.isFinite(request.hdrExposure??0)||Math.abs(request.hdrExposure??0)>16)throw new Error(t('expmap.video.hdrExposure'))
   }
   const stereo = normalizeStereoVideo(request.stereo)
-  if(stereo.enabled && !hdr && !request.gpuRenderer.renderStereo)throw new Error('La stéréo nécessite une source ExpMap recolorable')
+  if(stereo.enabled && !hdr && !request.gpuRenderer.renderStereo)throw new Error(t('expmap.video.stereoNeedsShader'))
   if(stereo.enabled)validateStereoDimensions(request.width,request.height,stereo.layout)
   const effects = effectsSettings(request.effects)
   validateExpmapVideoWindow(source.manifest, request.window, effects)
   validateExpmapView(source.manifest.projection, { width: request.width, height: request.height, scale: request.window.fromScale, angle: request.window.fromAngle, maxSamples: request.maxSamples ?? 16, sampleDistribution:request.sampleDistribution, allowUpscale: true, effects })
-  if (!Number.isFinite(request.fps) || request.fps <= 0 || request.fps > 240) throw new Error('Cadence invalide.')
+  if (!Number.isFinite(request.fps) || request.fps <= 0 || request.fps > 240) throw new Error(t('expmap.video.invalidFps'))
   const durationSeconds = request.window.durationSeconds + motionSettings(request.window).holdSeconds
   const settings = { fps: request.fps, durationSeconds }
   const total = totalFramesFor(settings)
-  if (!Number.isSafeInteger(total) || total > 10_000_000) throw new Error('Trop d’images demandées.')
+  if (!Number.isSafeInteger(total) || total > 10_000_000) throw new Error(t('expmap.video.tooManyFrames'))
   request.signal?.throwIfAborted()
   const limit = request.frameLimit === undefined ? total : Math.max(0, Math.min(total, Math.floor(request.frameLimit)))
   request.onProgress?.(0, limit)

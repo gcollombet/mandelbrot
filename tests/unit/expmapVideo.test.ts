@@ -35,7 +35,7 @@ describe('ExpMap video timeline', () => {
     expect(scaleDoublements(a, interpolateScale(a, b, 0.5))).toBeGreaterThan(0)
     expect(() => changeExpmapSpeed(w, 0)).toThrow()
     expect(() => changeExpmapDuration(w, NaN)).toThrow()
-    expect(() => validateExpmapVideoWindow(m, { ...w, toScale: '1e-1000001' })).toThrow('domaine')
+    expect(() => validateExpmapVideoWindow(m, { ...w, toScale: '1e-1000001' })).toThrow('domain')
   })
   it('awaits complete frames in deterministic order with inclusive endpoints', async () => {
     const m = await manifest(), views: { scale: string; angle: number;maxSamples:number }[] = [], timestamps: number[] = []
@@ -57,7 +57,7 @@ describe('ExpMap video timeline', () => {
     await exportExpmapVideo({manifest:m},request)
     expect(mock.render.mock.calls.every(([view])=>view.maxSamples===256&&view.sampleDistribution==='r2')).toBe(true)
     mock.render.mockClear()
-    await expect(exportExpmapVideo({manifest:m},{...request,maxSamples:32})).rejects.toThrow('Prélèvements')
+    await expect(exportExpmapVideo({manifest:m},{...request,maxSamples:32})).rejects.toThrow('samples')
     expect(mock.render).not.toHaveBeenCalled()
   })
   it('honours a frame limit while keeping full-length camera timing, and reports it as cancelled', async () => {
@@ -129,7 +129,7 @@ it('snapshots effects for every exported frame and rejects invalid effects befor
   expect(mock.render.mock.calls.length).toBeGreaterThan(1)
   expect(mock.render.mock.calls.every(([view]) => view.effects.droste === 30 && view.effects.kaleidoscope === 6 && view.effects.orientation === 15)).toBe(true)
   mock.render.mockClear()
-  await expect(exportExpmapVideo({ manifest: m }, { ...request, effects: { ...effects, kaleidoscope: 1 } })).rejects.toThrow('Effets')
+  await expect(exportExpmapVideo({ manifest: m }, { ...request, effects: { ...effects, kaleidoscope: 1 } })).rejects.toThrow('effects')
   expect(mock.render).not.toHaveBeenCalled()
 })
 

@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import type { RadialMode } from './radial'
 import { DEFAULT_EFFECT_ROTATION, effectRotationDegrees, validateEffectRotation, type ExpmapEffectRotation } from './effectRotation'
 import { reactive } from 'vue'
@@ -8,16 +9,16 @@ export const DEFAULT_EXPMAP_EFFECTS: Readonly<ExpmapEffects> = Object.freeze({ d
 export function effectsSettings(value?: Partial<ExpmapEffects>): ExpmapEffects {
   const e = { ...DEFAULT_EXPMAP_EFFECTS, ...DEFAULT_EFFECT_ROTATION, ...value }
   validateEffectRotation(e)
-  if (e.radialStart !== undefined && (!Number.isInteger(e.radialStart) || e.radialStart < 0 || e.radialStart > 999999)) throw new Error('Départ radial invalide.')
-  if (e.mirrorDepth !== undefined && (!Number.isFinite(e.mirrorDepth) || e.mirrorDepth < 0.25 || e.mirrorDepth > 6)) throw new Error('Rayon du miroir invalide.')
-  if (e.radialMode !== undefined && !['normal','repeat','pingpong','radial','folds','mirror'].includes(e.radialMode)) throw new Error('Relecture radiale invalide.')
-  for (const period of [e.radialPeriod, e.radialTurn]) if (period !== undefined && (!Number.isInteger(period) || period < 1 || period > 1000000)) throw new Error('Période radiale invalide.')
-  if (e.loopOctaves !== undefined && typeof e.loopOctaves !== 'boolean') throw new Error('Boucle ExpMap invalide.')
+  if (e.radialStart !== undefined && (!Number.isInteger(e.radialStart) || e.radialStart < 0 || e.radialStart > 999999)) throw new Error(t('expmap.effects.radialStart'))
+  if (e.mirrorDepth !== undefined && (!Number.isFinite(e.mirrorDepth) || e.mirrorDepth < 0.25 || e.mirrorDepth > 6)) throw new Error(t('expmap.effects.mirrorRadius'))
+  if (e.radialMode !== undefined && !['normal','repeat','pingpong','radial','folds','mirror'].includes(e.radialMode)) throw new Error(t('expmap.effects.radialMode'))
+  for (const period of [e.radialPeriod, e.radialTurn]) if (period !== undefined && (!Number.isInteger(period) || period < 1 || period > 1000000)) throw new Error(t('expmap.effects.radialPeriod'))
+  if (e.loopOctaves !== undefined && typeof e.loopOctaves !== 'boolean') throw new Error(t('expmap.effects.loop'))
   if (!['fixed', 'octave', 'droste'].includes(e.imageRotationMode ?? 'fixed') ||
-    !Number.isFinite(e.imageRotationRate ?? 0) || Math.abs(e.imageRotationRate ?? 0) > 2 * Math.PI) throw new Error('Rotation globale ExpMap invalide.')
+    !Number.isFinite(e.imageRotationRate ?? 0) || Math.abs(e.imageRotationRate ?? 0) > 2 * Math.PI) throw new Error(t('expmap.effects.globalRotation'))
   if (!Number.isFinite(e.droste) || Math.abs(e.droste) > 180 || !Number.isInteger(e.kaleidoscope) ||
     (e.kaleidoscope !== 0 && (e.kaleidoscope < 2 || e.kaleidoscope > 24)) ||
-    !Number.isFinite(e.orientation) || Math.abs(e.orientation) > 360) throw new Error('Effets ExpMap invalides.')
+    !Number.isFinite(e.orientation) || Math.abs(e.orientation) > 360) throw new Error(t('expmap.effects.invalid'))
   return e
 }
 /** Reduce the absolute phase on CPU so deep zoom never enters a float32 uniform. */

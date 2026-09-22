@@ -1,0 +1,94 @@
+{
+  "uiHidden": {
+    "touch": "Double-tapez pour afficher l'interface",
+    "pressBefore": "Appuyez sur",
+    "escapeKey": "Échap",
+    "pressAfter": "pour afficher l'interface"
+  },
+  "sharedScene": {
+    "loading": "Chargement de la scène…",
+    "retry": "Réessayer",
+    "saveCopy": "Enregistrer une copie",
+    "defaultName": "Scène partagée",
+    "loadFailed": "Impossible de charger cette scène.",
+    "linkIncomplete": "Ce lien de scène est incomplet.",
+    "notFound": "Cette scène est introuvable ou a été supprimée.",
+    "copySaved": "Copie enregistrée",
+    "signInRequired": "Connexion nécessaire pour partager la scène."
+  },
+  "aa": {
+    "stop": "Arrêter le raffinage AA",
+    "remaining": "reste {time}",
+    "minutesSeconds": "{m} min {s} s",
+    "seconds": "{s} s"
+  },
+  "still": {
+    "progress": "{label} · tuile {tile}/{tiles}",
+    "cancel": "Annuler la capture",
+    "capture": "Capture {size}",
+    "encodingHdr": "Encodage PNG HDR",
+    "cancelled": "Capture annulée",
+    "failed": "Capture échouée : {error}",
+    "window": "Fenêtre",
+    "tiled": "tuiles",
+    "encodingLabel": "Encodage de la capture",
+    "sdr": "SDR · PNG/WebP",
+    "hdr": "HDR · PNG 16 bits",
+    "exposure": "Exposition export (EV)",
+    "exposureAria": "Exposition de l’export HDR",
+    "hdrInfo": "PQ / Rec.2020 · blanc de référence 203 nits. Lecture dans un logiciel compatible HDR.",
+    "formatLabel": "Format de l'image",
+    "sameAsWindow": "Même format que la fenêtre",
+    "formatTitle": "Format {label}",
+    "buttonTitle": "Screenshot — format fenêtre, 1:1, 16:9 ou 4:3 ; fenêtre, 1K, 2K, 4K ou 8K (raccourci B : fenêtre)",
+    "button": "Screenshot"
+  },
+  "fab": {
+    "hide": "Masquer",
+    "hideTitle": "Masquer l'interface (Échap pour réafficher)",
+    "renderAa": "Render AA",
+    "renderAaTitle": "Render AA — lisser le rendu (raccourci G)",
+    "discover": "Découvrir",
+    "discoverTitle": "Découvrir les presets à proximité",
+    "radarOn": "Radar actif",
+    "minibrot": "Minibrot",
+    "minibrotTitle": "Minibrot — centrer ou cadrer l'atome sous la vue",
+    "minibrotCenter": "Centrer sur le minibrot",
+    "minibrotFrame": "Centrer et cadrer le minibrot"
+  },
+  "pins": {
+    "travelTo": "Voyager vers {name}",
+    "preset": "preset",
+    "presetName": "Preset",
+    "thumbnailAlt": "miniature du preset",
+    "nearbyTitle": "{count} presets à proximité",
+    "nearbyAria": "{count} presets visibles à proximité",
+    "offScreenTitle": "1 preset hors écran | {count} presets dans cette direction",
+    "offScreenAria": "1 preset hors écran | {count} presets hors écran dans cette direction",
+    "more": "+{count} de plus"
+  },
+  "panel": {
+    "playPauseTitle": "Lecture / pause de l'animation",
+    "pause": "Pause",
+    "play": "Lecture",
+    "ptabEdit": "Éditer",
+    "ptabLibrary": "Bibliothèque"
+  },
+  "guestImport": {
+    "title": "Sauvegarder vos presets locaux dans le cloud ?",
+    "intro": "Ce navigateur contient {presets} et {textures} qui ne sont pas encore dans votre compte.",
+    "presetCount": "{n} preset | {n} presets",
+    "textureCount": "{n} texture | {n} textures",
+    "breakdown": "{complete} complets · {palettes} palettes · {stops} stops · {mappings} mappings · {animations} animations",
+    "blocked": "Sauvegarde indisponible : {reason}. Votre bibliothèque locale reste intacte.",
+    "explanation": "Ces éléments seront copiés dans votre bibliothèque cloud personnelle. La copie locale restera dans ce navigateur et sera de nouveau accessible après déconnexion.",
+    "saving": "Sauvegarde en cours…",
+    "save": "Sauvegarder dans mon cloud",
+    "later": "Plus tard"
+  },
+  "auth": {
+    "popupBlocked": "Autorisez la fenêtre de connexion Google dans votre navigateur, puis réessayez.",
+    "loginFailed": "Connexion impossible pour le moment. Vérifiez votre connexion et réessayez.",
+    "logoutFailed": "La déconnexion a échoué. Réessayez."
+  }
+}

@@ -10,6 +10,7 @@
  * automatically on first access.
  */
 
+import { t } from './i18n';
 import {normalizeColorStops, type ColorStop} from './ColorStop';
 import type {InterpolationMode} from './Mandelbrot';
 import {createGuid, makeUniqueName, type CatalogRemoteState} from './catalogIdentity';
@@ -223,7 +224,7 @@ export async function saveRemotePaletteEntry(record: PaletteRecord): Promise<voi
  */
 export async function savePaletteEntry(record: PaletteRecord): Promise<void> {
   const storable = clonePaletteRecord(record);
-  if (!storable.name.trim()) throw new Error('Palette name is required.');
+  if (!storable.name.trim()) throw new Error(t('palettes.paletteNameRequired'));
   storable.guid = storable.guid || createGuid();
   storable.name = await uniquePaletteName(storable.name.trim(), storable.guid);
   storable.date = storable.date ?? new Date().toISOString();

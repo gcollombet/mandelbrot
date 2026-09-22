@@ -13,6 +13,7 @@ import {getAllPresetCacheRecords, savePresetEntry, type PresetRecord} from './pr
 import {getActiveLibraryScope, setActiveLibraryScope, type ScopedCacheFields} from './scopedCache';
 import {getAllStopPresetCacheRecords, saveStopPresetEntry, type StopPresetRecord} from './stopPresetStore';
 import {getAllTextureCacheRecords, getTextureBlob, saveTextureEntry, type TextureMetadata} from './textureStore';
+import {t} from './i18n';
 import {normalizeTextureBlob} from './textureNormalization';
 import {getAllTextureMappingPresetCacheRecords, saveTextureMappingPresetEntry, type TextureMappingPresetRecord} from './textureMappingPresetStore';
 
@@ -96,8 +97,8 @@ export function buildGuestImportPlan(
   const presetCount = usage.presetCount + missingPresets.length;
   const textureCount = usage.textureCount + missingTextures.length;
   const reasons: string[] = [];
-  if (presetCount > PERSONAL_PRESET_LIMIT) reasons.push(`${missingPresets.length} presets would exceed the ${PERSONAL_PRESET_LIMIT}-preset limit`);
-  if (textureCount > PERSONAL_TEXTURE_LIMIT) reasons.push(`${missingTextures.length} textures would exceed the ${PERSONAL_TEXTURE_LIMIT}-texture limit`);
+  if (presetCount > PERSONAL_PRESET_LIMIT) reasons.push(t('guestLibraryImport.presetsExceed', {count: missingPresets.length, limit: PERSONAL_PRESET_LIMIT}));
+  if (textureCount > PERSONAL_TEXTURE_LIMIT) reasons.push(t('guestLibraryImport.texturesExceed', {count: missingTextures.length, limit: PERSONAL_TEXTURE_LIMIT}));
   return {
     uid,
     snapshot,
@@ -106,7 +107,7 @@ export function buildGuestImportPlan(
     presetCount,
     textureCount,
     canImport: reasons.length === 0,
-    blockingReason: reasons.length ? reasons.join(' and ') : undefined,
+    blockingReason: reasons.length ? reasons.join(t('guestLibraryImport.and')) : undefined,
   };
 }
 
@@ -273,7 +274,7 @@ async function persistBatch(batch: GuestImportBatch): Promise<void> {
 }
 
 export async function importGuestLibrary(plan: GuestImportPlan): Promise<void> {
-  if (!plan.canImport) throw new Error(plan.blockingReason || 'The guest library does not fit in the account quota.');
+  if (!plan.canImport) throw new Error(plan.blockingReason || t('guestLibraryImport.doesNotFit'));
   const batch = batchFor(plan);
   setActiveLibraryScope({kind: 'user', uid: plan.uid});
   await persistBatch(batch);

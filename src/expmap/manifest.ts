@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { canonicalDomain, planExpmap, type ExpmapPlan } from './plan'
 import { canonicalJson } from './appearance'
 import { planExpmapOctaves, type ExpmapOctaves, type ExpmapTile } from './octaves'
@@ -15,7 +16,7 @@ export type ExpmapManifest = {
   octaves:ExpmapOctaves;tiles:ExpmapTile[];center?:[number,number,number]
 }
 export function validateExpmapManifest(m: ExpmapManifest) {
-  if(m.version!==5)throw new Error('Ancien format ExpMap non pris en charge : recréer le fichier .expmap.')
+  if(m.version!==5)throw new Error(t('expmap.manifest.oldFormat'))
   if(typeof m.name !== 'string' || !m.name.trim() || m.name.length > 200)throw new Error('Invalid document name')
   if(!Number.isFinite(m.quality) || m.quality < 0 || m.quality > 1)throw new Error('Invalid WebP quality')
   if(m.thumbnail !== undefined && (m.thumbnail.length > 128*1024 || !/^data:image\/(webp|jpeg|png);base64,[A-Za-z0-9+/=]+$/.test(m.thumbnail)))throw new Error('Invalid thumbnail')

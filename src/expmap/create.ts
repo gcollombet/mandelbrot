@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { canonicalJson, freezeExpmapAppearance } from './appearance'
 import { EXPMAP_COLOR_PROFILE, type ExpmapManifest } from './manifest'
 import { produceExpmapBlocks, type ExpmapProducerDeps } from './producer'
@@ -16,18 +17,18 @@ export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
   onProgress?: (progress: ExpmapProgress) => void
   onCheckpoint?: (manifest: ExpmapManifest) => void | Promise<void>
 }): Promise<ExpmapManifest> {
-  if (!navigator.locks) throw new Error('Le verrouillage des documents locaux est requis.')
+  if (!navigator.locks) throw new Error(t('expmap.create.locksRequired'))
   return navigator.locks.request(`expmap:${request.documentId}`, { mode: 'exclusive', ifAvailable: true }, async lock => {
-    if (!lock) throw new Error('Ce document est déjà en préparation.')
+    if (!lock) throw new Error(t('expmap.create.alreadyPreparing'))
     request.signal?.throwIfAborted()
     const layout = planExpmapOctaves(request.plan), memory = octaveMemory(layout)
     validateTileDimensions(layout.tileWidth,layout.tileHeight)
-    if (request.plan.radius > 4096) throw new Error('Résolution trop élevée pour le tampon ExpMap de 14 tuiles.')
+    if (request.plan.radius > 4096) throw new Error(t('expmap.create.resolutionTooHigh'))
     const device = (deps.engine as unknown as { device?: GPUDevice }).device
-    if (device && Math.max(layout.tileWidth, layout.tileHeight) > device.limits.maxTextureDimension2D) throw new Error('Cette densité dépasse la largeur de texture autorisée par le GPU.')
+    if (device && Math.max(layout.tileWidth, layout.tileHeight) > device.limits.maxTextureDimension2D) throw new Error(t('expmap.create.densityExceedsTexture'))
     if (!request.resume) await request.store.assertEmpty()
     const previous = request.resume ? await request.store.open(request.documentId) : undefined
-    if (previous && previous.state !== 'complete' && previous.geometryConvention !== 'continuous-radial-v2') throw new Error('Ce calcul utilise l’ancienne convention géométrique. Créer un nouveau rendu pour utiliser le relief continu avec écrêtage différé.')
+    if (previous && previous.state !== 'complete' && previous.geometryConvention !== 'continuous-radial-v2') throw new Error(t('expmap.create.oldConvention'))
     const forceRender = previous ? previous.forceRender : request.forceRender ?? false
     const frozen = await freezeExpmapAppearance(request.appearance, forceRender)
     let manifest: ExpmapManifest = previous ?? {
@@ -35,7 +36,7 @@ export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
       scaleConvention: 'VideoPathLocation.scale', zoomReferenceScale: '1e0', projection: request.plan,
       appearance: { ...frozen, resources: [] }, color: EXPMAP_COLOR_PROFILE, octaves: layout, tiles: [],
     }
-    if (manifest.appearance.identity !== frozen.identity || canonicalJson(manifest.projection) !== canonicalJson(request.plan)) throw new Error('La recette ne correspond pas au document à reprendre.')
+    if (manifest.appearance.identity !== frozen.identity || canonicalJson(manifest.projection) !== canonicalJson(request.plan)) throw new Error(t('expmap.create.recipeMismatch'))
     if (manifest.state === 'complete') return manifest
     const perTile = octaveBlockCount(request.plan) / layout.tileCount, total = perTile * layout.tileCount + 1
     let saved = manifest.tiles.length * perTile + Number(!!manifest.center), done = saved
@@ -64,7 +65,7 @@ export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
         manifest=await request.store.appendTile(manifest,encoded.bytes)
         timings.write+=performance.now()-start
         saved=manifest.tiles.length*perTile+Number(!!manifest.center)
-        await request.onCheckpoint?.(manifest);report('Calcul GPU + sauvegarde WebP')
+        await request.onCheckpoint?.(manifest);report(t('expmap.phases.computeAndSave'))
       })().catch(error=>{failure=error})
     }
     const center: ExpmapBlock = { id: 'center', region: 'center', originX: 0,
@@ -77,7 +78,7 @@ export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
       await encoder.probe()
       await produceExpmapBlocks(deps, { forceRender, plan: request.plan, appearance: JSON.parse(frozen.json), restoreCamera: request.restoreCamera,
         blocks: blocks(), projectionForBlock: (plan, block) => block.id === 'center' ? expmapKernelProjection(plan, block) : octaveProjection(plan, block),
-        signal: request.signal, onTiming: ms => { timings.compute+=ms }, onProgress: count => { done = initialDone + count; report('Calcul GPU des blocs') },
+        signal: request.signal, onTiming: ms => { timings.compute+=ms }, onProgress: count => { done = initialDone + count; report(t('expmap.phases.computeBlocks')) },
         consume: async ({block, rgba: pixels, stride, offset: sourceOffset}) => {
           if(failure)throw failure
           const u = block.useful
@@ -96,7 +97,7 @@ export async function createExpmapDocument(deps: ExpmapProducerDeps, request: {
         } })
       await flush(); await drain()
       manifest = { ...manifest, generation: manifest.generation+1, state: 'complete' }
-      await request.store.verify(manifest); await checkpoint(); report('Document prêt')
+      await request.store.verify(manifest); await checkpoint(); report(t('expmap.phases.documentReady'))
       return manifest
     } catch (error) {
       await pending

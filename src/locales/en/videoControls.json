@@ -1,0 +1,31 @@
+{
+  "motion": {
+    "title": "Ease in and out",
+    "minibrot": "Arrival on a minibrot",
+    "easeIn": "Ease in",
+    "easeInDuration": "Ease-in duration",
+    "easeOut": "Ease out",
+    "easeOutDuration": "Ease-out duration",
+    "hold": "Final fixed hold",
+    "chartAria": "Path progress over time; the horizontal part is the fixed hold",
+    "total": "Path {path} s + hold {hold} s =",
+    "note": "Transitions are included in the path. Zoom and rotation slow down together. A shortened path proportionally reduces transitions that are too long."
+  },
+  "rotation": {
+    "title": "Rotation",
+    "startAngle": "Start angle",
+    "currentAngle": "Current angle",
+    "clockwise": "↻ Clockwise",
+    "counterclockwise": "↺ Counterclockwise",
+    "turns": "Number of turns",
+    "end": "End: {angle}°"
+  },
+  "resolution": {
+    "label": "Resolution",
+    "custom": "Custom — {width}×{height}",
+    "square": "{width}×{height} — square",
+    "exactDimensions": "Exact dimensions",
+    "width": "Width",
+    "height": "Height"
+  }
+}

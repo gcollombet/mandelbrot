@@ -1,0 +1,25 @@
+{
+  "help": {
+    "title": "Help",
+    "scope": "Gestures and shortcuts",
+    "moveTitle": "Move",
+    "moveText": "drag with one finger.",
+    "zoomTitle": "Zoom / rotate",
+    "zoomText": "pinch or twist with two fingers.",
+    "preciseTitle": "Precise controls",
+    "preciseText": "open the compass at the bottom of the screen.",
+    "settingsTitle": "Settings",
+    "settingsText": "tap a value to type it. Expand the panel with ⌃."
+  },
+  "language": {
+    "title": "Language",
+    "scope": "Interface language"
+  },
+  "credits": {
+    "title": "Credits",
+    "scope": "Technologies & project",
+    "madeWith": "Made with",
+    "blurb": "This real-time Mandelbrot renderer is developed by Guillaume Collombet. It relies on WebGPU for parallel GPU computing, Vue 3 for the interface, and Rust/WebAssembly for arbitrary-precision reference computations."
+  },
+  "presentationCta": "Discover the full presentation"
+}

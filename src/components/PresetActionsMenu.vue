@@ -1,6 +1,8 @@
 <script setup lang="ts">
 import {nextTick, onMounted, onUnmounted, ref} from 'vue';
+import {useI18n} from 'vue-i18n';
 defineProps<{label: string}>();
+const {t} = useI18n();
 const open = ref(false);
 const trigger = ref<HTMLButtonElement | null>(null);
 const panel = ref<HTMLElement | null>(null);
@@ -28,9 +30,9 @@ onUnmounted(() => { document.removeEventListener('pointerdown', outside, true); 
 </script>
 <template>
   <span class="preset-actions" @click.stop @pointerdown.stop @keydown.stop>
-    <button ref="trigger" type="button" class="more" :aria-label="`Actions pour ${label}`" :aria-expanded="open" @click="toggle">⋯</button>
+    <button ref="trigger" type="button" class="more" :aria-label="t('presetActionsMenu.actionsFor', { label })" :aria-expanded="open" @click="toggle">⋯</button>
     <Teleport to="body">
-      <div v-if="open" ref="panel" class="preset-actions-panel" :style="position" :aria-label="`Actions pour ${label}`" role="group"
+      <div v-if="open" ref="panel" class="preset-actions-panel" :style="position" :aria-label="t('presetActionsMenu.actionsFor', { label })" role="group"
         @pointerdown.stop @click.stop="close(true)" @keydown.stop="keydown"><slot /></div>
     </Teleport>
   </span>

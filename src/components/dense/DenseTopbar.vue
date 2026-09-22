@@ -1,6 +1,8 @@
 <script setup lang="ts">
+import { useI18n } from 'vue-i18n';
 import { ref } from 'vue';
 import DenseViewMenu from './DenseViewMenu.vue';
+const { t } = useI18n();
 
 interface PTab { value: string; label: string }
 
@@ -58,15 +60,15 @@ function onHeaderPointerDown(e: PointerEvent) {
       v-if="authUserEmail && syncState && syncState !== 'idle'"
       class="sync-state"
       :class="syncState"
-      :title="syncState === 'error' ? (syncError || 'Cloud sync failed; retry scheduled') : syncState === 'syncing' ? 'Synchronisation cloud…' : 'Bibliothèque synchronisée'"
-      :aria-label="syncState === 'error' ? 'Erreur de synchronisation cloud' : syncState === 'syncing' ? 'Synchronisation cloud en cours' : 'Bibliothèque synchronisée'"
+      :title="syncState === 'error' ? (syncError || t('dense.sync.failed')) : syncState === 'syncing' ? t('dense.sync.syncing') : t('dense.sync.synced')"
+      :aria-label="syncState === 'error' ? t('dense.sync.errorLabel') : syncState === 'syncing' ? t('dense.sync.syncingLabel') : t('dense.sync.synced')"
     ></span>
-    <button v-if="isAdmin && title === 'Aide'" class="tb-btn" aria-label="Préférences d’affichage" @click="menuOpen = !menuOpen">
+    <button v-if="isAdmin && title === t('shortcuts.tabs.about')" class="tb-btn" :aria-label="t('dense.viewMenu.title')" @click="menuOpen = !menuOpen">
       <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/></svg>
-      <span class="lbl">Affichage</span>
+      <span class="lbl">{{ t('dense.viewMenu.display') }}</span>
     </button>
-    <button class="tb-btn sheet-size" type="button" :aria-label="expanded ? 'Réduire le panneau' : 'Agrandir le panneau'" :aria-expanded="expanded" @click="emit('toggle-size')">{{ expanded ? '⌄' : '⌃' }}</button>
-    <button class="close" aria-label="Fermer" @click="emit('close')">✕</button>
+    <button class="tb-btn sheet-size" type="button" :aria-label="expanded ? t('common.collapsePanel') : t('common.expandPanel')" :aria-expanded="expanded" @click="emit('toggle-size')">{{ expanded ? '⌄' : '⌃' }}</button>
+    <button class="close" :aria-label="t('common.close')" @click="emit('close')">✕</button>
     <DenseViewMenu v-if="menuOpen && isAdmin" @close="menuOpen = false" />
   </header>
 </template>

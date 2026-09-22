@@ -50,7 +50,7 @@ describe('saving a palette path snapshot', () => {
         expect(mocks.saveTexture).toHaveBeenCalledTimes(1)
         const imageGuid = mocks.saveTexture.mock.calls[0][4]
         expect(mocks.purgeTexture).toHaveBeenCalledWith(imageGuid)
-        expect(mocks.savePalette.mock.calls[0][0]).toMatchObject({ name: 'Nouveau parcours · 0.500', textureGuid: imageGuid })
+        expect(mocks.savePalette.mock.calls[0][0]).toMatchObject({ name: 'New path · 0.500', textureGuid: imageGuid })
         expect(mocks.savePalette.mock.calls[0][0].colorStops[0].color).toBe('#123456')
         expect(dispose).toHaveBeenCalledTimes(1)
     })

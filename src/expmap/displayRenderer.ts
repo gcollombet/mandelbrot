@@ -1,3 +1,4 @@
+import { t } from '../i18n'
 import { readHdrGpuOutput, type HdrGpuOptions } from '../hdrGpuOutput'
 import { StereoVideoGpu } from '../stereoVideoGpu'
 import { normalizeStereoVideo, validateStereoDimensions, type StereoColorPass, type StereoVideoSettings } from '../stereoVideo'
@@ -23,7 +24,7 @@ export function planShaderMemory(manifest:ShaderExpmapManifest,width:number,heig
   const estimate=shaderSourceEstimate(manifest.projection)
   // Linear attachment + presentation, bounded file/hash/upload copies and margin.
   const fixedBytes=reserveBytes+width*height*12+estimate.maxBlockBytes*8+16*1024*1024
-  if(!Number.isSafeInteger(budgetBytes)||budgetBytes<fixedBytes+estimate.maxBlockBytes)throw new Error('Budget insuffisant pour les cibles et un bloc shader')
+  if(!Number.isSafeInteger(budgetBytes)||budgetBytes<fixedBytes+estimate.maxBlockBytes)throw new Error(t('expmap.shaderRenderer.budgetInsufficient'))
   const cacheBytes=budgetBytes-fixedBytes
   let usefulOctaves=Math.min((manifest.projection.centerOctaves??12)+1,Math.max(1,Math.floor(cacheBytes/estimate.octaveBytes)-2))
   const window=limits?planShaderWindow(manifest,cacheBytes,limits):null
@@ -85,9 +86,9 @@ export class ShaderExpmapRenderer {
   appearance:RenderOptions
   onProgress?:(done:number,total:number)=>void
   constructor(engine:Engine,store:ShaderExpmapSource,manifest:ShaderExpmapManifest,appearance:RenderOptions,budgetBytes=512*1024*1024) {
-    if(manifest.state!=='complete')throw new Error('Source shader incomplète')
+    if(manifest.state!=='complete')throw new Error(t('expmap.shaderRenderer.incomplete'))
     this.engine=engine;this.store=store;this.manifest=manifest;this.appearance=appearance;this.budgetBytes=budgetBytes
-    this.context=this.canvas.getContext('webgpu')!;if(!this.context)throw new Error('WebGPU requis')
+    this.context=this.canvas.getContext('webgpu')!;if(!this.context)throw new Error(t('expmap.shaderRenderer.webgpuRequired'))
     this.context.configure({device:engine.device,format:'rgba8unorm',alphaMode:'opaque'})
     this.uniform=engine.device.createBuffer({size:SHADER_BATCH_BYTES,usage:GPUBufferUsage.UNIFORM|GPUBufferUsage.COPY_DST})
     this.release=engine.suspendForExpmapPlayback()
@@ -112,13 +113,13 @@ export class ShaderExpmapRenderer {
     while(this.cacheBytes+bytes.length>limit&&this.cache.size) {
       const [key,value]=this.cache.entries().next().value!;value.buffer.destroy();this.cache.delete(key);this.cacheBytes-=value.bytes
     }
-    if(bytes.length>limit||bytes.length>this.engine.device.limits.maxStorageBufferBindingSize)throw new Error('Bloc shader supérieur au budget GPU')
+    if(bytes.length>limit||bytes.length>this.engine.device.limits.maxStorageBufferBindingSize)throw new Error(t('expmap.shaderRenderer.blockBudget'))
     const buffer=this.engine.device.createBuffer({size:bytes.length,usage:GPUBufferUsage.STORAGE|GPUBufferUsage.COPY_DST})
     this.engine.device.queue.writeBuffer(buffer,0,bytes as Uint8Array<ArrayBuffer>)
     this.cache.set(index,{buffer,bytes:bytes.length});this.cacheBytes+=bytes.length;return buffer
   }
   async render(view:ExpmapView,signal?:AbortSignal,ring?:ShaderRing,rect?:RingRect):Promise<OffscreenCanvas> {
-    if(this.disposed||this.busy)throw new Error('Lecteur indisponible')
+    if(this.disposed||this.busy)throw new Error(t('expmap.shaderRenderer.unavailable'))
     assertShaderAppearanceCompatible(this.manifest,this.appearance)
     const samplingFlags=shaderSamplingFlags(this.interpolation,this.sampleDistribution)
     validateExpmapView(this.manifest.projection,view);signal?.throwIfAborted();this.busy=true
@@ -128,7 +129,7 @@ export class ShaderExpmapRenderer {
     let batch:ShaderDrawBatch|undefined
     try {
       const engine=this.engine,d=engine.device,plan=this.manifest.projection,o=planExpmapOctaves(plan)
-      if(Math.max(view.width,view.height)>d.limits.maxTextureDimension2D)throw new Error('Sortie supérieure aux limites GPU')
+      if(Math.max(view.width,view.height)>d.limits.maxTextureDimension2D)throw new Error(t('expmap.shaderRenderer.outputLimits'))
       const memory=planShaderMemory(this.manifest,view.width,view.height,this.budgetBytes,this.workingReserveBytes,d.limits)
       const wp=this.windowEnabled?planShaderWindow(this.manifest,memory.cacheBytes,d.limits):null
       const pstride=plan.blockSize-2*plan.halo
@@ -289,7 +290,7 @@ export class ShaderExpmapRenderer {
     }
   }
   async renderHdr(view:ExpmapView,stereo?:StereoVideoSettings,signal?:AbortSignal,options:HdrGpuOptions={format:'video'}):Promise<Uint16Array> {
-    if(this.busy||this.stereoBusy||this.disposed)throw new Error('Lecteur indisponible')
+    if(this.busy||this.stereoBusy||this.disposed)throw new Error(t('expmap.shaderRenderer.unavailable'))
     const reserve=this.workingReserveBytes,device=this.engine.device
     device.pushErrorScope('out-of-memory');device.pushErrorScope('validation')
     let failure:unknown
@@ -307,7 +308,7 @@ export class ShaderExpmapRenderer {
   }
   /** Each eye shares the camera/time and source data, with its own material view. */
   async renderStereo(view:ExpmapView,settings:StereoVideoSettings,signal?:AbortSignal):Promise<OffscreenCanvas> {
-    if(this.busy||this.stereoBusy||this.disposed)throw new Error('Lecteur indisponible')
+    if(this.busy||this.stereoBusy||this.disposed)throw new Error(t('expmap.shaderRenderer.unavailable'))
     const config=normalizeStereoVideo(settings)
     if(!config.enabled){this.stereo?.dispose();this.stereo=undefined;return this.render(view,signal)}
     validateExpmapView(this.manifest.projection,view)
@@ -344,7 +345,7 @@ export class ShaderExpmapRenderer {
   }
   get gpuDevice(){return this.engine.device}
   releaseSourceCache(){
-    if(this.busy)throw new Error('Rendu en cours')
+    if(this.busy)throw new Error(t('expmap.shaderRenderer.rendering'))
     this.window?.destroy();this.window=undefined
     for(const entry of this.cache.values())entry.buffer.destroy()
     this.cache.clear();this.cacheBytes=0
@@ -367,7 +368,7 @@ export class ShaderExpmapRenderer {
 
   /** Sum the stored linear RGBA contributions; color is never reevaluated here. */
   async composeRings(view:ExpmapView,parts:AsyncIterable<RingPixels|{rect:RingRect;texture:GPUTexture}>,signal?:AbortSignal):Promise<OffscreenCanvas> {
-    if(this.busy||this.disposed)throw new Error('Lecteur indisponible')
+    if(this.busy||this.disposed)throw new Error(t('expmap.shaderRenderer.unavailable'))
     this.busy=true
     const d=this.engine.device
     d.pushErrorScope('validation');d.pushErrorScope('out-of-memory')

@@ -1,0 +1,11 @@
+{
+  "toggle": "Toggle navigation",
+  "moveNorth": "Move North",
+  "moveSouth": "Move South",
+  "moveWest": "Move West",
+  "moveEast": "Move East",
+  "rotateLeft": "Rotate Left",
+  "rotateRight": "Rotate Right",
+  "zoomOut": "Zoom Out",
+  "zoomIn": "Zoom In"
+}

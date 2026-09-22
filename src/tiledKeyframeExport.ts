@@ -1,4 +1,5 @@
 import type { VideoPathLocation } from './videoPath'
+import { t } from './i18n'
 
 export type KeyframeTile = {
   index: number
@@ -58,10 +59,7 @@ export class TiledExportBudgetError extends RangeError {
   readonly minimumBudgetBytes: number
 
   constructor(minimumBudgetBytes: number) {
-    super(
-      `Le budget mémoire est insuffisant pour les deux keyframes et une tuile minimale. `
-      + `Il faut au moins ${minimumBudgetBytes} octets.`,
-    )
+    super(t('video.tiled.budgetInsufficient', { bytes: minimumBudgetBytes }))
     this.name = 'TiledExportBudgetError'
     this.minimumBudgetBytes = minimumBudgetBytes
   }
@@ -69,18 +67,18 @@ export class TiledExportBudgetError extends RangeError {
 
 function assertPositiveInteger(name: string, value: number): void {
   if (!Number.isSafeInteger(value) || value < 1) {
-    throw new RangeError(`${name} doit être un entier strictement positif.`)
+    throw new RangeError(t('video.tiled.positiveInteger', { name }))
   }
 }
 
 function assertMemoryProfile(profile: TiledExportMemoryProfile): void {
   for (const [name, value] of Object.entries(profile)) {
     if (!Number.isFinite(value) || value < 0) {
-      throw new RangeError(`${name} doit être un nombre fini positif ou nul.`)
+      throw new RangeError(t('video.tiled.finiteNonNegative', { name }))
     }
   }
   if (profile.tileBytesPerTexel === 0) {
-    throw new RangeError('tileBytesPerTexel doit être strictement positif.')
+    throw new RangeError(t('video.tiled.tileBytesPositive'))
   }
 }
 
@@ -117,7 +115,7 @@ export function planKeyframeTiles(settings: {
   assertPositiveInteger('neutralSide', neutralSide)
   assertPositiveInteger('alignment', alignment)
   if (!Number.isFinite(budgetBytes) || budgetBytes <= 0) {
-    throw new RangeError('budgetBytes doit être un nombre fini strictement positif.')
+    throw new RangeError(t('video.tiled.budgetPositive'))
   }
   assertMemoryProfile(memory)
 
@@ -162,15 +160,10 @@ export function evaluateTiledKeyframeEligibility(
 ): TiledKeyframeEligibility {
   const problems: string[] = []
   if (input.from.cx !== input.to.cx || input.from.cy !== input.to.cy) {
-    problems.push(
-      'Le mode keyframe tuilée exige un centre fixe. Un travelling utilise le chemin monolithique.',
-    )
+    problems.push(t('video.tiled.fixedCenterRequired'))
   }
   if (input.aaSamplesPerFrame !== 1) {
-    problems.push(
-      'Le mode keyframe tuilée n’accepte pas l’AA jitteré par image : ses frames intermédiaires '
-      + 'sont de pures lectures. Utilisez le suréchantillonnage pour l’anticrénelage.',
-    )
+    problems.push(t('video.tiled.noJitteredAa'))
   }
   return { eligible: problems.length === 0, problems }
 }

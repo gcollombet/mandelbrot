@@ -31,7 +31,7 @@ describe('HDR presentation and capture separation', () => {
   })
   it('rolls back when the browser ignores the extended tone mapping request', async () => {
     const engine = fixture(false)
-    await expect(engine.setHdrDisplay(true)).rejects.toThrow('ne confirme pas')
+    await expect(engine.setHdrDisplay(true)).rejects.toThrow('does not confirm')
     expect(engine.outputDiagnostics).toMatchObject({hdrRequested:false,format:'bgra8unorm',toneMapping:'standard'})
     expect(engine.pipelineColor).toBe('SDR')
   })

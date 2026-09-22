@@ -1,8 +1,10 @@
 <script setup lang="ts">
 import ExpmapRadialControls from './ExpmapRadialControls.vue'
 import { computed } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { DEFAULT_EXPMAP_EFFECTS, documentEffects, saveDocumentEffects, type ExpmapEffects } from '../expmap/effects'
 const props = defineProps<{ documentId: string; tileCount: number }>()
+const { t } = useI18n()
 const effects = computed(() => documentEffects(props.documentId))
 function update(key: keyof ExpmapEffects, event: Event) {
   const text = (event.target as HTMLInputElement).value
@@ -13,20 +15,20 @@ function update(key: keyof ExpmapEffects, event: Event) {
 <template>
   <ExpmapRadialControls :document-id="documentId" :tile-count="tileCount"/>
   <details class="effects">
-    <summary>Rotation, Droste et kaléidoscope angulaire <span v-if="effects.loopOctaves || effects.droste || effects.kaleidoscope || (effects.imageRotationMode && effects.imageRotationMode !== 'fixed')">· actifs</span></summary>
+    <summary>{{ t('expmapControls.effects.summary') }} <span v-if="effects.loopOctaves || effects.droste || effects.kaleidoscope || (effects.imageRotationMode && effects.imageRotationMode !== 'fixed')">{{ t('expmapControls.effects.active') }}</span></summary>
     <div class="fields">
-      <label>Rotation de l’image <select aria-label="Mode de rotation de l’image" :value="effects.imageRotationMode ?? 'fixed'" @change="update('imageRotationMode', $event)"><option value="fixed">Manuelle</option><option value="octave">Radians par octave</option><option value="droste">Suivre Droste exactement</option></select></label>
-      <label v-if="effects.imageRotationMode === 'octave'">Rotation <input aria-label="Rotation en radians par octave" type="number" :min="-2*Math.PI" :max="2*Math.PI" step="0.01" :value="effects.imageRotationRate ?? 0" @change="update('imageRotationRate', $event)">rad/octave</label>
-      <small v-if="effects.imageRotationMode === 'droste'">Compensation : {{ (-effects.droste * Math.PI / 180).toFixed(3) }} rad/octave. La torsion reste visible, sa rotation avec le zoom est suivie.</small>
-      <label title="Torsion par doublement de zoom">Droste <input aria-label="Droste en degrés par doublement" type="range" min="-180" max="180" step="1" :value="effects.droste" @input="update('droste', $event)"><output>{{ effects.droste }}°/×2</output></label>
-      <label>Kaléidoscope angulaire <select aria-label="Secteurs du kaléidoscope" :value="effects.kaleidoscope" @change="update('kaleidoscope', $event)"><option :value="0">Désactivé</option><option v-for="n in 23" :key="n" :value="n + 1">{{ n + 1 }} secteurs</option></select></label>
-      <label v-if="effects.kaleidoscope">Orientation <input aria-label="Orientation du kaléidoscope" type="range" min="-180" max="180" step="1" :value="effects.orientation" @input="update('orientation', $event)"><output>{{ effects.orientation }}°</output></label>
-      <label v-if="effects.kaleidoscope">Rotation du kaléidoscope <select aria-label="Mode de rotation du kaléidoscope" :value="effects.rotationMode ?? 'fixed'" @change="update('rotationMode', $event)"><option value="fixed">Fixe</option><option value="progressive">Progressive</option><option value="droste">Suit Droste</option></select></label>
-      <label v-if="effects.kaleidoscope && effects.rotationMode === 'progressive'">Vitesse <input aria-label="Vitesse de rotation du kaléidoscope" type="number" min="-360" max="360" step="1" :value="effects.rotationSpeed ?? 10" @change="update('rotationSpeed', $event)">°/s</label>
-      <small v-if="effects.kaleidoscope && effects.rotationMode === 'droste'">Les axes suivent la phase de Droste avec le zoom.</small>
-      <button type="button" @click="saveDocumentEffects(documentId, DEFAULT_EXPMAP_EFFECTS)">Réinitialiser</button>
+      <label>{{ t('expmapControls.effects.imageRotation') }} <select :aria-label="t('expmapControls.effects.imageRotationAria')" :value="effects.imageRotationMode ?? 'fixed'" @change="update('imageRotationMode', $event)"><option value="fixed">{{ t('expmapControls.effects.manual') }}</option><option value="octave">{{ t('expmapControls.effects.radiansPerOctave') }}</option><option value="droste">{{ t('expmapControls.effects.followDroste') }}</option></select></label>
+      <label v-if="effects.imageRotationMode === 'octave'">{{ t('expmapControls.effects.rotation') }} <input :aria-label="t('expmapControls.effects.rotationRateAria')" type="number" :min="-2*Math.PI" :max="2*Math.PI" step="0.01" :value="effects.imageRotationRate ?? 0" @change="update('imageRotationRate', $event)">{{ t('expmapControls.effects.radPerOctave') }}</label>
+      <small v-if="effects.imageRotationMode === 'droste'">{{ t('expmapControls.effects.compensation', { value: (-effects.droste * Math.PI / 180).toFixed(3) }) }}</small>
+      <label :title="t('expmapControls.effects.drosteTitle')">{{ t('expmapControls.effects.droste') }} <input :aria-label="t('expmapControls.effects.drosteAria')" type="range" min="-180" max="180" step="1" :value="effects.droste" @input="update('droste', $event)"><output>{{ effects.droste }}°/×2</output></label>
+      <label>{{ t('expmapControls.effects.kaleidoscope') }} <select :aria-label="t('expmapControls.effects.kaleidoscopeAria')" :value="effects.kaleidoscope" @change="update('kaleidoscope', $event)"><option :value="0">{{ t('expmapControls.effects.disabled') }}</option><option v-for="n in 23" :key="n" :value="n + 1">{{ t('expmapControls.effects.sectors', { count: n + 1 }) }}</option></select></label>
+      <label v-if="effects.kaleidoscope">{{ t('expmapControls.effects.orientation') }} <input :aria-label="t('expmapControls.effects.orientationAria')" type="range" min="-180" max="180" step="1" :value="effects.orientation" @input="update('orientation', $event)"><output>{{ effects.orientation }}°</output></label>
+      <label v-if="effects.kaleidoscope">{{ t('expmapControls.effects.kaleidoscopeRotation') }} <select :aria-label="t('expmapControls.effects.kaleidoscopeRotationAria')" :value="effects.rotationMode ?? 'fixed'" @change="update('rotationMode', $event)"><option value="fixed">{{ t('expmapControls.effects.fixed') }}</option><option value="progressive">{{ t('expmapControls.effects.progressive') }}</option><option value="droste">{{ t('expmapControls.effects.followsDroste') }}</option></select></label>
+      <label v-if="effects.kaleidoscope && effects.rotationMode === 'progressive'">{{ t('expmapControls.effects.speed') }} <input :aria-label="t('expmapControls.effects.speedAria')" type="number" min="-360" max="360" step="1" :value="effects.rotationSpeed ?? 10" @change="update('rotationSpeed', $event)">°/s</label>
+      <small v-if="effects.kaleidoscope && effects.rotationMode === 'droste'">{{ t('expmapControls.effects.axesFollow') }}</small>
+      <button type="button" @click="saveDocumentEffects(documentId, DEFAULT_EXPMAP_EFFECTS)">{{ t('expmapControls.effects.reset') }}</button>
     </div>
-    <small>Réglages communs au lecteur et à la vidéo, mémorisés pour ce document.</small>
+    <small>{{ t('expmapControls.effects.shared') }}</small>
   </details>
 </template>
 <style scoped>

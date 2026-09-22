@@ -1,0 +1,10 @@
+{
+  "presetGone": "Ce preset n’existe plus.",
+  "signInToShare": "Connectez-vous et enregistrez cette scène dans votre bibliothèque pour la partager.",
+  "accountChanged": "Le compte a changé pendant le partage. Réessayez.",
+  "textureNotSynced": "Une texture n’est pas encore synchronisée. Réessayez après la sauvegarde cloud.",
+  "sceneNotSynced": "La scène n’est pas encore synchronisée. Vérifiez la connexion puis réessayez.",
+  "sceneNotFound": "Cette scène est introuvable ou a été supprimée.",
+  "invalidPreset": "Cette scène ne contient pas un preset valide.",
+  "textureUnavailable": "Une texture de cette scène n’est plus disponible."
+}

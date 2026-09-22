@@ -1,18 +1,22 @@
 <script setup lang="ts">
 import { computed, nextTick, ref, watch } from 'vue'
+import { useI18n } from 'vue-i18n'
 import { canonicalScale } from '../expmap/decimal'
 import { zoomDepth, scaleFromDepth, ZOOM_DEPTH_MIN, ZOOM_DEPTH_MAX } from '../expmap/controls'
-const props = withDefaults(defineProps<{ modelValue: string; label: string; slider?: boolean; captureLabel?: string; captureDisabled?: boolean }>(), { slider: true, captureLabel: 'Zoom actuel' })
+const props = withDefaults(defineProps<{ modelValue: string; label: string; slider?: boolean; captureLabel?: string; captureDisabled?: boolean }>(), { slider: true })
+const { t } = useI18n()
+const captureText = computed(() => props.captureLabel ?? t('expmapControls.zoom.currentZoom'))
 const emit = defineEmits<{ 'update:modelValue': [value: string]; capture: [] }>()
 const input = ref<HTMLInputElement | null>(null)
-const editing = ref(false), text = ref(''), error = ref('')
+const editing = ref(false), text = ref(''), errorKey = ref('')
+const error = computed(() => errorKey.value ? t(errorKey.value) : '')
 const depth = computed(() => { try { return zoomDepth(props.modelValue) } catch { return 0 } })
-const labelValue = computed(() => { try { return `10^${canonicalScale(props.modelValue).split('e')[1]}` } catch { return 'Définir…' } })
-watch(() => props.modelValue, () => { error.value = '' })
+const labelValue = computed(() => { try { return `10^${canonicalScale(props.modelValue).split('e')[1]}` } catch { return t('expmapControls.zoom.define') } })
+watch(() => props.modelValue, () => { errorKey.value = '' })
 function edit() { text.value = props.modelValue; editing.value = true; nextTick(() => { input.value?.focus(); input.value?.select() }) }
 function commit() {
-  try { emit('update:modelValue', canonicalScale(text.value)); editing.value = false; error.value = '' }
-  catch { error.value = 'Échelle positive attendue, par exemple 1e-26.' }
+  try { emit('update:modelValue', canonicalScale(text.value)); editing.value = false; errorKey.value = '' }
+  catch { errorKey.value = 'expmapControls.zoom.scaleError' }
 }
 function nudge(delta: number) { emit('update:modelValue', scaleFromDepth(depth.value + delta)) }
 </script>
@@ -20,17 +24,17 @@ function nudge(delta: number) { emit('update:modelValue', scaleFromDepth(depth.v
   <div class="zoom-control">
     <div class="zoom-row">
       <span>{{ label }}</span>
-      <input v-if="editing" ref="input" v-model="text" :aria-label="`${label} : échelle précise`" @change="commit" @keydown.enter.prevent="commit" @keydown.esc="editing = false">
-      <button v-else class="scale-value" :title="`${modelValue} · cliquer pour saisir précisément`" @click="edit">{{ labelValue }}</button>
-      <button @click="emit('capture')" :disabled="captureDisabled">{{ captureLabel }}</button>
+      <input v-if="editing" ref="input" v-model="text" :aria-label="t('expmapControls.zoom.preciseAria', { label })" @change="commit" @keydown.enter.prevent="commit" @keydown.esc="editing = false">
+      <button v-else class="scale-value" :title="t('expmapControls.zoom.clickToEdit', { value: modelValue })" @click="edit">{{ labelValue }}</button>
+      <button @click="emit('capture')" :disabled="captureDisabled">{{ captureText }}</button>
       <slot />
     </div>
     <div v-if="slider" class="zoom-slider">
-      <button :aria-label="`${label} : dézoomer d’un ordre`" @click="nudge(-1)">−</button>
-      <input type="range" :aria-label="`${label} : profondeur`" :min="ZOOM_DEPTH_MIN" :max="ZOOM_DEPTH_MAX" step="1" :value="depth" @input="emit('update:modelValue', scaleFromDepth(Number(($event.target as HTMLInputElement).value)))">
-      <button :aria-label="`${label} : zoomer d’un ordre`" @click="nudge(1)">+</button>
+      <button :aria-label="t('expmapControls.zoom.zoomOutAria', { label })" @click="nudge(-1)">−</button>
+      <input type="range" :aria-label="t('expmapControls.zoom.depthAria', { label })" :min="ZOOM_DEPTH_MIN" :max="ZOOM_DEPTH_MAX" step="1" :value="depth" @input="emit('update:modelValue', scaleFromDepth(Number(($event.target as HTMLInputElement).value)))">
+      <button :aria-label="t('expmapControls.zoom.zoomInAria', { label })" @click="nudge(1)">+</button>
     </div>
-    <small v-if="slider && (depth < ZOOM_DEPTH_MIN || depth > ZOOM_DEPTH_MAX)">Valeur exacte conservée hors plage du slider.</small>
+    <small v-if="slider && (depth < ZOOM_DEPTH_MIN || depth > ZOOM_DEPTH_MAX)">{{ t('expmapControls.zoom.outOfRange') }}</small>
     <small v-if="error" role="alert">{{ error }}</small>
   </div>
 </template>

@@ -64,7 +64,7 @@ it('reads opposite radial directions on each side of the fixed ring',()=>{
   expect(fold(1.1)-fold(1)).toBeCloseTo(.1)
   expect(fold(3.1)-fold(3)).toBeCloseTo(-.1)
   expect(()=>effectsSettings({radialMode:'mirror',mirrorDepth:1})).not.toThrow()
-  for(const mirrorDepth of [0,7,NaN])expect(()=>effectsSettings({mirrorDepth})).toThrow('miroir')
+  for(const mirrorDepth of [0,7,NaN])expect(()=>effectsSettings({mirrorDepth})).toThrow('mirror')
 })
 
 it('starts ping-pong and radial mirrors at the selected source octave',()=>{
@@ -79,5 +79,5 @@ it('bounds the selected range to the document and leaves other modes unchanged',
   expect(c.period).toBe(1);expect(at(1,c)).toBe(20);expect(at(2,c)).toBe(19)
   expect(radialConfig({radialMode:'folds',radialStart:10},20).start).toBe(0)
   expect(radialConfig({radialMode:'radial'},20).start).toBe(0)
-  for(const radialStart of [-1,.5,NaN])expect(()=>effectsSettings({radialStart})).toThrow('Départ')
+  for(const radialStart of [-1,.5,NaN])expect(()=>effectsSettings({radialStart})).toThrow('radial start')
 })
