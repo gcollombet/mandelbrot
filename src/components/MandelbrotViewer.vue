@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { encodeHdrPng } from '../hdrPng';
 import { nearestPaletteStop } from '../palettePicking';
-import {computed, nextTick, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
+import {computed, onMounted, onUnmounted, reactive, ref, shallowRef, watch} from 'vue';
 import {useRoute, useRouter} from 'vue-router';
 import MandelbrotController from './MandelbrotController.vue';
 import ExpmapSurface from './ExpmapSurface.vue';
